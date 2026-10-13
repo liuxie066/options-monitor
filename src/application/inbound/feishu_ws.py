@@ -9,6 +9,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, cast
 
@@ -33,7 +34,7 @@ from src.application.channels.reply_decision import (
     permission_denied_message as _permission_denied_message,
     permission_denied_should_stay_silent as _permission_denied_should_stay_silent,
 )
-from src.application.bot.host_store import BotHostStore
+from src.application.bot.host_store import BotHostStore, REPLY_OUTCOME_UNKNOWN
 from src.application.inbound.feishu import prepare_feishu_ack_target, prepare_feishu_analysis_control
 from src.application.secret_resolver import (
     DEFAULT_FEISHU_BOT_APP_ID_ENV,
@@ -65,6 +66,7 @@ from src.application.file_locks import single_instance_lock
 
 DEFAULT_FEISHU_REPLY_MAX_CHARS = 3500
 DEFAULT_FEISHU_WS_QUEUE_SIZE = 100
+FEISHU_OUTBOX_RETRY_INTERVAL_SECONDS = 1.0
 
 ReplyFn = Callable[..., dict[str, Any]]
 ReactionFn = Callable[..., dict[str, Any]]
@@ -522,14 +524,26 @@ class _FeishuWsWorker:
         return "accepted"
 
     def _run(self) -> None:
-        while True:
+        next_outbox_retry = 0.0
+        while not self._stop_requested.is_set():
+            if time.monotonic() >= next_outbox_retry:
+                try:
+                    _retry_pending_feishu_reply(
+                        settings=self._settings,
+                        reply_fn=self._reply_fn,
+                        stop_requested=self._stop_requested,
+                    )
+                except Exception as exc:
+                    LOG.warning("failed to recover Feishu reply error_type=%s", type(exc).__name__)
+                finally:
+                    next_outbox_retry = time.monotonic() + FEISHU_OUTBOX_RETRY_INTERVAL_SECONDS
             try:
                 job = self._queue.get(timeout=0.1)
             except queue.Empty:
                 if self._stop_requested.is_set():
                     return
                 continue
-            if job is None:
+            if job is None or self._stop_requested.is_set():
                 return
             process_started = time.monotonic()
             status = "ok"
@@ -768,6 +782,7 @@ def _maybe_reply(
     )
     outbox: BotHostStore | None = None
     delivery_key: str | None = None
+    claimed: dict[str, Any] | None = None
     if command_id:
         outbox = BotHostStore(InboundAuditStore(settings.audit_db).path)
         delivery_key = f"feishu:{command_id}"
@@ -790,8 +805,9 @@ def _maybe_reply(
             status = str(record.get("status") or "")
             return {
                 "attempted": False,
-                "ok": status != "terminal_failed",
-                "reason": "reply_pending" if status != "terminal_failed" else "reply_terminal_failed",
+                "ok": status not in {"terminal_failed", "delivery_unknown"},
+                "reason": ("reply_delivery_unknown" if status == "delivery_unknown" else
+                           "reply_pending" if status != "terminal_failed" else "reply_terminal_failed"),
                 "delivery_key": delivery_key,
             }
         try:
@@ -801,6 +817,7 @@ def _maybe_reply(
                 delivery_key,
                 error=f"{type(exc).__name__}: {exc}",
                 retryable=False,
+                attempt_count=claimed["attempt_count"],
             )
             return {
                 "attempted": True,
@@ -815,6 +832,10 @@ def _maybe_reply(
             reply_fn=reply_fn,
             envelope=envelope,
             uuid=delivery_key or command_id,
+            before_send=_reply_send_guard(claimed) if claimed is not None else None,
+            allow_fallback=claimed is None or claimed.get("last_error") != REPLY_OUTCOME_UNKNOWN,
+            select_fallback=(lambda: outbox.select_reply_fallback(delivery_key, attempt_count=claimed["attempt_count"]))
+                            if outbox is not None else None,
         )
         api_response = delivery["api_response"]
     except Exception as exc:
@@ -823,6 +844,8 @@ def _maybe_reply(
                 delivery_key,
                 error=f"{type(exc).__name__}: {exc}",
                 retryable=_reply_exception_is_retryable(exc),
+                attempt_count=claimed["attempt_count"],
+                delivery_unknown=_reply_exception_outcome_unknown(exc),
             )
         return {
             "attempted": True,
@@ -842,6 +865,8 @@ def _maybe_reply(
                 delivery_key,
                 error="channel returned an unsuccessful response",
                 retryable=True,
+                attempt_count=claimed["attempt_count"],
+                delivery_unknown=_reply_response_outcome_unknown(api_response),
             )
         return {
             "attempted": True,
@@ -857,7 +882,8 @@ def _maybe_reply(
         }
     outbound_message_id = _reply_api_message_id(api_response)
     if outbox is not None and delivery_key:
-        outbox.mark_reply_delivered(delivery_key)
+        if not outbox.mark_reply_delivered(delivery_key, attempt_count=claimed["attempt_count"]):
+            return {"attempted": True, "ok": False, "reason": "claim_superseded", "delivery_key": delivery_key}
     return {
         "attempted": True,
         "ok": True,
@@ -874,7 +900,15 @@ def _maybe_reply(
     }
 
 
-def _retry_pending_feishu_reply(*, settings: FeishuWsSettings, reply_fn: ReplyFn) -> dict[str, Any]:
+def _retry_pending_feishu_reply(
+    *, settings: FeishuWsSettings, reply_fn: ReplyFn, stop_requested: threading.Event | None = None,
+) -> dict[str, Any]:
+    if not settings.reply_enabled:
+        return {"attempted": False, "reason": "reply_disabled"}
+    if not (settings.app_id and settings.app_secret):
+        return {"attempted": False, "reason": "missing_app_credentials"}
+    if stop_requested is not None and stop_requested.is_set():
+        return {"attempted": False, "reason": "stopped"}
     store = BotHostStore(InboundAuditStore(settings.audit_db).path)
     record = store.claim_reply(channel="feishu")
     if record is None:
@@ -882,11 +916,18 @@ def _retry_pending_feishu_reply(*, settings: FeishuWsSettings, reply_fn: ReplyFn
     delivery_key = str(record.get("delivery_key") or "")
     try:
         envelope = _reply_envelope_from_outbox_record(record)
+        if stop_requested is not None and stop_requested.is_set():
+            store.mark_reply_failed(delivery_key, error="worker stopped before send", retryable=True,
+                                    attempt_count=record["attempt_count"])
+            return {"attempted": False, "reason": "stopped", "delivery_key": delivery_key}
         delivery = _deliver_feishu_reply(
             settings=settings,
             reply_fn=reply_fn,
             envelope=envelope,
             uuid=delivery_key,
+            before_send=_reply_send_guard(record),
+            allow_fallback=record.get("last_error") != REPLY_OUTCOME_UNKNOWN,
+            select_fallback=lambda: store.select_reply_fallback(delivery_key, attempt_count=record["attempt_count"]),
         )
         api_response = delivery["api_response"]
     except Exception as exc:
@@ -894,6 +935,8 @@ def _retry_pending_feishu_reply(*, settings: FeishuWsSettings, reply_fn: ReplyFn
             delivery_key,
             error=f"{type(exc).__name__}: {exc}",
             retryable=_reply_exception_is_retryable(exc),
+            attempt_count=record["attempt_count"],
+            delivery_unknown=_reply_exception_outcome_unknown(exc),
         )
         return {"attempted": True, "ok": False, "reason": "reply_failed", "delivery_key": delivery_key}
     if not _reply_api_success(api_response):
@@ -901,9 +944,12 @@ def _retry_pending_feishu_reply(*, settings: FeishuWsSettings, reply_fn: ReplyFn
             delivery_key,
             error="channel returned an unsuccessful response",
             retryable=True,
+            attempt_count=record["attempt_count"],
+            delivery_unknown=_reply_response_outcome_unknown(api_response),
         )
         return {"attempted": True, "ok": False, "reason": "reply_failed", "delivery_key": delivery_key}
-    store.mark_reply_delivered(delivery_key)
+    if not store.mark_reply_delivered(delivery_key, attempt_count=record["attempt_count"]):
+        return {"attempted": True, "ok": False, "reason": "claim_superseded", "delivery_key": delivery_key}
     return {
         "attempted": True,
         "ok": True,
@@ -938,31 +984,40 @@ def _deliver_feishu_reply(
     reply_fn: ReplyFn,
     envelope: dict[str, Any],
     uuid: str | None,
+    before_send: Callable[[], None] | None = None,
+    allow_fallback: bool = True,
+    select_fallback: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    transport = _dict(envelope.get("transport"))
+    selected = bool(envelope.get("fallback_selected"))
+    transport = _dict(envelope.get("fallback") if selected else envelope.get("transport"))
     try:
         api_response = _call_feishu_reply_transport(
             settings=settings,
             reply_fn=reply_fn,
             envelope=envelope,
             transport=transport,
-            uuid=uuid,
+            uuid=f"{uuid}:fallback" if selected and uuid else uuid,
+            before_send=before_send,
         )
-        return {"api_response": api_response, "fallback_used": False}
+        return {"api_response": api_response, "fallback_used": selected}
     except FeishuPermanentError as exc:
         fallback = _dict(envelope.get("fallback"))
         if (
-            str(envelope.get("render_mode") or "") != "card_markdown_v2"
+            selected or not allow_fallback
+            or str(envelope.get("render_mode") or "") != "card_markdown_v2"
             or not fallback
             or not _card_permanent_failure_allows_fallback(exc)
         ):
             raise
+        if select_fallback is not None and not select_fallback():
+            raise FeishuTransientError("reply claim superseded before fallback")
         api_response = _call_feishu_reply_transport(
             settings=settings,
             reply_fn=reply_fn,
             envelope=envelope,
             transport=fallback,
             uuid=f"{uuid}:fallback" if uuid else None,
+            before_send=before_send,
         )
         return {"api_response": api_response, "fallback_used": True}
 
@@ -974,6 +1029,7 @@ def _call_feishu_reply_transport(
     envelope: dict[str, Any],
     transport: dict[str, Any],
     uuid: str | None,
+    before_send: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     message_id = str(envelope.get("message_id") or "").strip()
     msg_type = str(transport.get("msg_type") or "").strip()
@@ -989,12 +1045,40 @@ def _call_feishu_reply_transport(
         "uuid": uuid,
         "reply_in_thread": bool(envelope.get("reply_in_thread")),
     }
+    if before_send is not None:
+        before_send()
+        common["before_send"] = before_send
     if msg_type == "text":
         text = str(content.get("text") or "")
         if not text.strip():
             raise ValueError("Feishu text reply content is empty")
         return reply_fn(**common, text=text)
     return reply_fn(**common, msg_type=msg_type, content=content)
+
+
+def _reply_send_guard(record: dict[str, Any]) -> Callable[[], None]:
+    expires = datetime.fromisoformat(str(record["replay_until"]).replace("Z", "+00:00"))
+    deadline = time.monotonic() + (expires - datetime.now(timezone.utc)).total_seconds()
+    def check() -> None:
+        if datetime.now(timezone.utc) >= expires or time.monotonic() >= deadline:
+            raise FeishuPermanentError("reply replay window expired",
+                                      response={"local_error_code": "reply_replay_window_expired"})
+    return check
+
+
+def _reply_response_outcome_unknown(response: Any) -> bool:
+    code = _dict(response).get("code")
+    return not (type(code) is int and code != 0)
+
+
+def _reply_exception_outcome_unknown(exc: Exception) -> bool:
+    if isinstance(exc, (ValueError, FeishuAuthError, FeishuPermissionError, FeishuRateLimitError)):
+        return False
+    if isinstance(exc, FeishuPermanentError) and (
+        exc.code is not None or str(exc.response.get("local_error_code") or "")
+    ):
+        return False
+    return True
 
 
 def _reply_exception_is_retryable(exc: Exception) -> bool:
@@ -1120,29 +1204,14 @@ def _reply_receipt_payload(*, data: dict[str, Any], reply_status: dict[str, Any]
 
 
 def _reply_api_message_id(api_response: Any) -> str | None:
-    response = _dict(api_response)
-    data = _dict(response.get("data"))
-    result = _dict(response.get("result"))
-    return _first_text(
-        response.get("message_id"),
-        response.get("messageId"),
-        response.get("id"),
-        response.get("client_msg_id"),
-        data.get("message_id"),
-        data.get("messageId"),
-        data.get("id"),
-        data.get("client_msg_id"),
-        result.get("message_id"),
-        result.get("messageId"),
-        result.get("id"),
-        result.get("client_msg_id"),
-    )
+    message_id = _dict(_dict(api_response).get("data")).get("message_id")
+    return message_id.strip() if isinstance(message_id, str) and message_id.strip() else None
 
 
 def _reply_api_success(api_response: Any) -> bool:
     response = _dict(api_response)
     code = response.get("code")
-    return not isinstance(code, int) or code == 0
+    return type(code) is int and code == 0 and _reply_api_message_id(response) is not None
 
 
 def _reply_api_code(api_response: Any) -> int | None:
