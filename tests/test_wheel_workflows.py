@@ -1,4 +1,5 @@
 from __future__ import annotations
+from src.application.ledger import trade_attribution as ledger_attribution
 
 from tests.cash_evidence_helpers import cash_portfolio
 from src.application.trades.attribution import confirm_wheel_call_linkage
@@ -1417,7 +1418,7 @@ def test_manual_linkage_uses_shared_fresh_evidence(tmp_path, monkeypatch, broken
     elif broken == "generation":
         args["expected_batch_generation_hash"] = "stale"
     else:
-        monkeypatch.setattr(attribution, "trade_attribution_capacity_check",
+        monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check",
             lambda **_: {"status": "unavailable", "reason_codes": ["capacity_evidence_missing"]})
     with pytest.raises(ValueError):
         confirm_wheel_call_linkage(repo, **args, apply_changes=True)

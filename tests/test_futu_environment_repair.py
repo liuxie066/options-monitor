@@ -9,7 +9,7 @@ from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.ledger.api import preview_trade_event_repair, record_trade_event_repair, read_trade_attribution_snapshot
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_objects_atomically
-from src.application.trades.attribution import _branch_account_ref
+from src.application.ledger.trade_attribution import _branch_account_ref
 from src.application.trades.review import collect_futu_environment_evidence
 
 SOURCE_MS = int(datetime(2026, 8, 12, 6, 8, 10, 425000, tzinfo=timezone.utc).timestamp()*1000)

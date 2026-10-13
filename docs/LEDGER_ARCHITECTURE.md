@@ -1433,8 +1433,38 @@ CC 覆盖按实际平仓数量记录半开时间区间，平仓时点释放对�
 
 资金余量与指派情景经 `src/application/ledger/api.py::read_position_query_ledger` 读取既有 SQLite。事件、持仓 lot 和账户生命周期事实在同一只读事务冻结，复用既有投影及决策核验；查询不初始化账本、不取得应用写锁、不恢复投影。缺库、缺 schema、坏事件或投影不一致明确返回不可用；只有已验证的空账本表示零占用。账户现金仍独立评价，账本不可用时不计算扣占用后的余量。SQLite 的 WAL/SHM 协调与业务写入不同；该读取不使用会忽略活动 WAL 的 immutable 模式。主动恢复与写入仍由原受控流程负责。
 
+### 公共持仓查询的只读边界
+
+`option_positions_read` 的 list、events、history、inspect、assigned-stock，以及 `om option-positions` 的 list、events、history、inspect，经 `ledger.api.open_position_query_ledger_from_data_config` 使用 SQLite `mode=ro` / `query_only`。它们保留既有筛选、账户授权和事件分页，不创建数据库、补 schema 或自动恢复 `position_lots`。缺库、旧/不完整 lot 身份 schema 或所需表不可读时明确失败；events/history/inspect 可观察尚未恢复的事件与投影差异。`bootstrap.status=read_only` 表示本次没有执行启动恢复。
+
+该入口读取已存事实；资金余量/指派情景仍使用要求可信投影的 `read_position_query_ledger`。已有受控写入/恢复继续使用原工作流。assigned-stock 的报价刷新选项保持原合同，不表示生产账本写入授权；SQLite 活跃 WAL/SHM 协调也不等于业务写入。
+
 ### 持仓事实快照校验与耗时
 
 `decision_snapshot.py` 的持仓事实契约校验复用账本生命周期解析器，重算决策事实、仲裁和 token 的依赖案例及目标 lot 绑定；仅跳过比对时会丢弃的期望侧 generation-token 哈希。快照构建仍生成完整 token，校验仍检查提供的 resolution 自身哈希、token 格式和完整快照指纹；没有缩减原始证据或改变失败原因。
 
 真实持仓准备入口的 `prepared_context_phase` 增加共享的 `snapshot_build` 和逐账户的 `snapshot_contract`。前者位于 `projection` 内，后者覆盖校验调用；耗时是包含子阶段的墙钟时间，不可相加，也不代表数据可信。CPU 热点和优化收益应另做离线分析，再由正常运行样本验证生产收益。
+
+### 当前投影内容资格与历史全量证明
+
+`projection-migration status` 在同一只读 SQLite 快照中核验 schema、必要索引/触发器、
+规范化账户/标量、checkpoint 的内容摘要与实际事件前缀绑定，以及每个 head 对当前
+`position_lots` 的 canonical fingerprint 和数量。现有 execution-identity index 的
+fallback/gap 契约继续独立。缺失 head、损坏内容或失效绑定均阻断 readiness 和历史清理
+position gate；有 head 的合法零持仓账户仍可就绪。共享只读连接 helper 只管理连接生命周期；
+本模块 inventory/status/verify 在各自入口开启读取事务，其他消费者自行管理事务边界。
+status 不运行 full oracle，也不
+写库、修复或推进任何历史标记；这项内容证明需要读取持仓和事件前缀，不能视为常数成本。
+
+writer 的 duplicate/unchanged 与 checkpoint tail admission 使用同一仓储内容校验；
+检测到坏 head 时走合法 full fallback。publication 始终从 canonical rows 推导 head
+内容事实，不能仅凭 generation 复用存储的数量或 fingerprint。整次失败/取消仍回滚
+事件、持仓、head 和 checkpoint。此校验增加 O(持仓行数) 的读取和哈希成本。
+
+`last_full_verified_source_generation` 只记录真实 full publication 的历史事实，增量
+publication 继续使用 `full_verified=False`。合法增量后的当前资格不要求该历史值等于
+当前 source generation；`verify --shadow` 按当次实际 full parity、checkpoint/head/source
+绑定和 shadow 结果判定 pass，单独报告 `last_full_verified_source_generation` 与
+`last_full_verification_current`，不会持久更新它们。该历史字段继续属于 current-decision
+migration authority fingerprint；真实 full publication 推进它后，旧 inventory 必须失效。
+持仓 head 恢复不代替 decision owner 的独立 dirty/可信裁决，也不授权生产 activate。

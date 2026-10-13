@@ -121,12 +121,13 @@ def collect_storage_runtime_baseline(
     )
     resolved_history_reports = [_resolve_input_path(item, base=base) for item in (history_reports or ())]
     source_inventory = _collect_source_inventory(repo_root=base, manifest_path=inventory_path)
-    runtime_storage, research_file_rows = _collect_runtime_storage(root=root, observed_at=observed_at)
+    runtime_storage, runtime_file_rows = _collect_runtime_storage(root=root, observed_at=observed_at)
     sqlite_payload = _collect_sqlite_metadata(ledger_path)
     research_storage = _collect_research_storage(
         root=root,
         observed_at=observed_at,
-        file_rows=research_file_rows,
+        file_rows=runtime_file_rows,
+        symlinks=runtime_storage["symlinks_not_followed"],
         history_reports=resolved_history_reports,
     )
     disk = shutil.disk_usage(root)
@@ -298,6 +299,15 @@ def preview_scan_blob_gc(
                     unprotected_published_at[digest] = published_at
 
     for digest, ref in sorted(all_refs.items()):
+        # Expired-only references may outlive blobs reclaimed by an earlier plan.
+        blob_relpath = str(ref["blob_relpath"])
+        if (
+            digest not in protected_refs
+            and blob_relpath not in known_files
+            and not file_blockers
+            and not any(parent.as_posix() in known_files for parent in Path(blob_relpath).parents)
+        ):
+            continue
         try:
             load_required_data_scan_blob(runtime_root=root, blob_ref=ref)
         except (OSError, RequiredDataBlobError, TypeError, ValueError):
@@ -501,7 +511,11 @@ def _gc_file_inventory(
                 relpath,
                 retained_run_ids=retained_run_ids,
             )
-            if protected_manifest or relpath.startswith("output_shared/blobs/sha256/"):
+            if (
+                protected_manifest
+                or relpath in {"output_shared/blobs", "output_shared/blobs/sha256"}
+                or relpath.startswith("output_shared/blobs/sha256/")
+            ):
                 blockers.append(
                     _gc_blocker(
                         reason=(
@@ -1065,7 +1079,7 @@ def _query_sqlite_copy(path: Path) -> dict[str, Any]:
 
 def _collect_runtime_storage(*, root: Path, observed_at: datetime) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     aggregates = _RuntimeAggregates()
-    research_files: list[dict[str, Any]] = []
+    inventory_files: list[dict[str, Any]] = []
     symlinks: list[dict[str, Any]] = []
     roots: list[dict[str, Any]] = []
     account_count: int | None = None
@@ -1098,7 +1112,8 @@ def _collect_runtime_storage(*, root: Path, observed_at: datetime) -> tuple[dict
             root=root,
             observed_at=observed_at,
             aggregates=aggregates,
-            research_files=research_files,
+            research_files=[],
+            inventory_files=inventory_files,
             symlinks=symlinks,
         )
         roots.append(
@@ -1133,7 +1148,7 @@ def _collect_runtime_storage(*, root: Path, observed_at: datetime) -> tuple[dict
         ],
         "symlinks_not_followed": sorted(symlinks, key=lambda item: item["path"]),
     }
-    return payload, research_files
+    return payload, inventory_files
 
 
 def _count_immediate_directories(path: Path) -> int:
@@ -1243,6 +1258,8 @@ def _storage_class(relpath: str) -> str:
         return "operational_state"
     if parts[:2] == ("output_shared", "required_data"):
         return "immutable_shared_partition"
+    if parts[:3] == ("output_shared", "blobs", "sha256"):
+        return "immutable_shared_partition"
     if parts[:2] == ("output_shared", "research"):
         if "partitions" in parts and "sha256" in parts:
             return "immutable_shared_partition"
@@ -1261,6 +1278,7 @@ def _collect_research_storage(
     root: Path,
     observed_at: datetime,
     file_rows: list[dict[str, Any]],
+    symlinks: Sequence[Mapping[str, Any]],
     history_reports: Sequence[str | Path],
 ) -> dict[str, Any]:
     manifests = [row for row in file_rows if _is_manifest_relpath(str(row["path"]))]
@@ -1270,6 +1288,9 @@ def _collect_research_storage(
     references: list[dict[str, Any]] = []
     generations: set[str] = set()
     parse_failures: list[dict[str, str]] = []
+    unprotected_scan_blob_paths: set[tuple[str, str]] = set()
+    protected_scan_blob_paths: set[str] = set()
+    _run_count, retained_run_ids, retention_blockers = _gc_run_inventory(root=root, observed_at=observed_at)
     for row in manifests:
         relpath = str(row["path"])
         path = root / relpath
@@ -1287,12 +1308,22 @@ def _collect_research_storage(
         generation = _first_text(payload, ("generation_id", "dataset_id", "run_id"))
         if generation:
             generations.add(generation)
-        extracted = _extract_manifest_references(
-            payload,
-            manifest_path=path,
-            root=root,
-            known_files=known_files,
-        )
+        scan_blob_refs: dict[str, dict[str, Any]] = {}
+        try:
+            extracted = _extract_manifest_references(
+                payload,
+                manifest_path=path,
+                root=root,
+                known_files=known_files,
+                scan_blob_refs=scan_blob_refs,
+            )
+        except (RequiredDataBlobError, TypeError, ValueError) as exc:
+            parse_failures.append({"path": relpath, "reason": type(exc).__name__})
+            continue
+        if not retention_blockers and not _gc_manifest_is_protected(relpath, retained_run_ids=retained_run_ids):
+            unprotected_scan_blob_paths.update((relpath, str(ref["blob_relpath"])) for ref in scan_blob_refs.values())
+        else:
+            protected_scan_blob_paths.update(str(ref["blob_relpath"]) for ref in scan_blob_refs.values())
         references.extend(extracted)
         manifest_results.append(
             {
@@ -1305,6 +1336,7 @@ def _collect_research_storage(
 
     referenced_paths: set[str] = set()
     protected_failures: list[dict[str, Any]] = []
+    unprotected_failures: list[dict[str, Any]] = []
     hash_sizes: dict[str, int] = {}
     hash_physical: dict[str, dict[str, Any]] = {}
     logical_bytes = 0
@@ -1338,7 +1370,16 @@ def _collect_research_storage(
             referenced_paths.add(str(relpath))
             actual = file_index.get(str(relpath))
             if actual is None:
-                protected_failures.append(
+                expired_scan_blob = (
+                    (str(reference["manifest"]), str(relpath)) in unprotected_scan_blob_paths
+                    and str(relpath) not in protected_scan_blob_paths
+                )
+                unsafe_path = any(
+                    str(relpath) == item["path"] or str(relpath).startswith(str(item["path"]) + "/")
+                    for item in symlinks
+                ) or any(parent.as_posix() in file_index for parent in Path(str(relpath)).parents)
+                failures = unprotected_failures if expired_scan_blob and not unsafe_path else protected_failures
+                failures.append(
                     {"manifest": reference["manifest"], "reference": reference["display_path"], "reason": "missing"}
                 )
                 reference["presence_status"] = "missing"
@@ -1434,6 +1475,7 @@ def _collect_research_storage(
         "unmanifested_file_count": len(unmanifested),
         "unknown_unique_bytes": unknown_unique_bytes,
         "protected_reference_failures": protected_failures,
+        "unprotected_reference_failures": unprotected_failures,
         "same_size_content_status": "not_verified",
         "bytes_by_class": _byte_groups(bytes_by_class, "storage_class"),
         "bytes_by_market": _byte_groups(bytes_by_market, "market"),
@@ -1468,7 +1510,8 @@ def _extract_manifest_references(
     scan_blob_refs: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     archive_references: list[dict[str, Any]] = []
-    if payload.get("schema_version") == "research_archive.v2" and payload.get("action") == "verify":
+    archive_manifest = payload.get("schema_version") == "research_archive.v2" and payload.get("action") == "verify"
+    if archive_manifest:
         archive_references = _extract_research_archive_references(
             payload,
             manifest_path=manifest_path,
@@ -1510,7 +1553,7 @@ def _extract_manifest_references(
         if isinstance(value, dict):
             if value.get("schema_version") == REQUIRED_DATA_SCAN_BLOB_REF_SCHEMA:
                 record_scan_blob_ref(value)
-            reference = _reference_from_mapping(
+            reference = None if archive_manifest else _reference_from_mapping(
                 value,
                 manifest_path=manifest_path,
                 root=root,
@@ -1537,14 +1580,15 @@ def _extract_manifest_references(
 
     visit(dict(payload))
     out.extend(archive_references)
-    out.extend(
-        _extract_parallel_file_map_references(
-        payload,
-        manifest_path=manifest_path,
-        root=root,
-        known_files=known_files,
-    )
-    )
+    if not archive_manifest:
+        out.extend(
+            _extract_parallel_file_map_references(
+                payload,
+                manifest_path=manifest_path,
+                root=root,
+                known_files=known_files,
+            )
+        )
     unique: dict[tuple[str, str | None, int | None], dict[str, Any]] = {}
     for item in out:
         key = (

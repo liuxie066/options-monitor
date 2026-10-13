@@ -363,6 +363,7 @@ def assemble_daily_decision_brief(
     indexed_expected_families = {
         str(item.get("strategy_family") or "").strip().lower()
         for item in indexed_strategy_statuses
+        if item.get("status") != "not_applicable"
     }
     indexed_completed_families = {
         str(item.get("strategy_family") or "").strip().lower()
@@ -429,24 +430,11 @@ def assemble_daily_decision_brief(
         max_items_per_account=close_advice_max_items,
     )
     selected_close_row_ids = {id(row) for row in selected_close_rows}
-    strategy_failures = _load_strategy_step_failures(
-        failure_path=strategy_failure_path,
-        run_account_dir=run_account_dir,
-        account=account_norm,
-        run_id=run_id_norm,
-        market=market_norm,
-        data_gaps=data_gaps,
+    _load_strategy_step_failures(
+        failure_path=strategy_failure_path, run_account_dir=run_account_dir,
+        account=account_norm, run_id=run_id_norm, market=market_norm,
+        strategy_statuses=indexed_strategy_statuses, data_gaps=data_gaps,
     )
-    failed_families = {item["strategy_family"] for item in strategy_failures}
-    if "sell_put" in failed_families:
-        put_rows, put_available = [], False
-    if "covered_call" in failed_families:
-        call_rows, call_available = [], False
-    if "combo_yield" in failed_families:
-        combo_rows, combo_available = [], False
-    if "wheel" in failed_families:
-        wheel_rows, wheel_available = [], False
-
     selected_puts = put_rows[:max_candidates]
     selected_calls = call_rows[:max_candidates]
     ranked_combos = combo_rows
@@ -691,9 +679,7 @@ def assemble_daily_decision_brief(
     indexed_candidate_sources_failed = bool(
         indexed_expected_families and not indexed_completed_families
     )
-    if indexed_candidate_sources_failed or (
-        strategy_failures and not (put_rows or call_rows or combo_rows or wheel_rows)
-    ):
+    if indexed_candidate_sources_failed:
         blockers.append("candidate_strategy_execution_failed")
     if all_required_context_unavailable:
         blockers.append("all_required_account_capacity_sources_unavailable")
@@ -928,7 +914,10 @@ def _load_opening_candidate_families(
         partial_modes.add(mode)
         data_gaps.append(
             {
-                "scope": "strategy",
+                "scope": affected.get("scope", "strategy"),
+                "direction": mode,
+                "candidate_owner": "opening",
+                **{key: affected[key] for key in ("contract_symbol", "expiration") if affected.get(key)},
                 "strategy_family": family,
                 "symbol": str(affected.get("symbol") or ""),
                 "severity": "warning",
@@ -1175,17 +1164,21 @@ def _load_wheel_snapshot_family(
         symbol = canonical_symbol(batch.get("symbol"))
         if not symbol or symbol_market(symbol) != market:
             continue
+        lot_id = _text(batch.get("stock_lot_id"))
+        branch_id = _text(batch.get("wheel_branch_id")) or lot_id
+        direction = _text(batch.get("direction") or "call").lower()
+        gap_scope = {"scope": "strategy", "strategy_family": "wheel", "symbol": symbol,
+                     "candidate_owner": "wheel", "direction": direction, "wheel_branch_id": branch_id}
+        if batch.get("candidate_status") in {"failed", "unavailable", "incomplete"} or batch.get("reason_code") == "partial_data":
+            data_gaps.append({**gap_scope, "reason": batch.get("reason_code") or "wheel_scan_failed"})
         final = batch.get("final_candidate")
         final = dict(final) if isinstance(final, Mapping) else None
         price_available = bool(final and (_number(final.get("sell_limit")) or 0) > 0
             and _parse_datetime(final.get("quote_observed_at_utc")) is not None)
         if final is not None and not price_available:
             batch["reason_codes"] = sorted(set(batch.get("reason_codes") or []) | {"wheel_suggested_price_unavailable"})
-            data_gaps.append({"scope": "strategy", "strategy_family": "wheel", "symbol": symbol,
-                              "reason": "wheel_suggested_price_unavailable"})
-        lot_id = _text(batch.get("stock_lot_id"))
-        branch_id = _text(batch.get("wheel_branch_id")) or lot_id
-        direction = _text(batch.get("direction") or "call").lower()
+            data_gaps.append({**gap_scope, "reason": "wheel_suggested_price_unavailable",
+                              "contract_symbol": final.get("contract_symbol"), "expiration": final.get("expiration")})
         view = {
             "account": _text(batch.get("account")).lower(),
             "position_lot_id": lot_id,
@@ -1536,6 +1529,7 @@ def _load_strategy_step_failures(
     account: str,
     run_id: str,
     market: str,
+    strategy_statuses: list[dict[str, Any]],
     data_gaps: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     failures: list[dict[str, Any]] = []
@@ -1550,12 +1544,19 @@ def _load_strategy_step_failures(
             continue
         family = _strategy_family_from_failure(row)
         symbol = canonical_symbol(row.get("symbol")) or _text(row.get("symbol")).upper()
+        statuses = [item for item in strategy_statuses
+                    if item.get("symbol") == symbol and item.get("strategy_family") == family
+                    and item.get("status") == "failed"]
+        if len(statuses) != 1:
+            continue
+        status = statuses[0]
         identity = (family, symbol)
         if not family or identity in seen:
             continue
         seen.add(identity)
         failure = {
             "scope": "strategy",
+            **{key: status[key] for key in ("candidate_owner", "direction") if status.get(key)},
             "strategy_family": family,
             "symbol": symbol,
             "reason": STRATEGY_FAILURE_REASON,
@@ -1968,6 +1969,7 @@ def _candidate_action(
             "priority": _priority_from_row(row, default="P1"),
             "state": "active",
             "action_type": "open_combo_yield",
+            "candidate_owner": "sp_lc",
             "strategy_family": family,
             "account": account,
             "symbol": _text(row.get("symbol")).upper(),
@@ -2744,34 +2746,37 @@ def _append_strategy_status_gaps(
         if not symbol or not family:
             continue
         relevant.append(item)
+        scope = {
+            "scope": "strategy", "market": market, "symbol": symbol,
+            "strategy_family": family,
+            **{key: item[key] for key in ("direction", "candidate_owner") if item.get(key)},
+        }
+        if item.get("candidate_owner") == "opening":
+            scope["direction"] = item.get("strategy_mode")
         if status in {"completed", "not_applicable"}:
-            if _text(item.get("reason")) == "partial_data":
-                data_gaps.append(
-                    {
-                        "scope": "strategy",
-                        "market": market,
-                        "symbol": symbol,
-                        "strategy_family": family,
-                        "severity": "warning",
-                        "actionable": False,
-                        "reason": "opening_candidate_strategy_partial_data",
-                    }
-                )
+            if _text(item.get("reason")) != "partial_data":
+                continue
+            # Owner contract/branch gaps are narrower than the aggregate status.
+            if any(
+                gap.get("symbol") == symbol and gap.get("strategy_family") == family
+                and all(gap.get(key) == scope.get(key) for key in ("direction", "candidate_owner"))
+                for gap in data_gaps
+            ):
+                continue
+            data_gaps.append({**scope, "severity": "warning", "actionable": False,
+                              "reason": "opening_candidate_strategy_partial_data"})
             continue
-        data_gaps.append(
-            {
-                "scope": "strategy",
-                "market": market,
-                "symbol": symbol,
-                "strategy_family": family,
-                "reason": _text(
-                    item.get("reason") or "strategy_scan_status_invalid"
-                ),
-                "source_status_path": _text(
-                    item.get("source_status_path")
-                ),
-            }
-        )
+        if any(
+            gap.get("symbol") == symbol and gap.get("strategy_family") == family
+            and gap.get("wheel_branch_id")
+            and all(gap.get(key) == scope.get(key) for key in ("direction", "candidate_owner"))
+            for gap in data_gaps
+        ):
+            continue
+        data_gaps.append({
+            **scope, "reason": _text(item.get("reason") or "strategy_scan_status_invalid"),
+            "source_status_path": _text(item.get("source_status_path")),
+        })
     return relevant
 
 
@@ -2871,6 +2876,7 @@ def _dedupe_gaps(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             _text(safe.get("symbol")).upper(),
             _text(safe.get("strategy_family")).lower(),
             _text(safe.get("reason")).lower(),
+            *(_text(safe.get(key)) for key in ("scope", "direction", "candidate_owner", "variant", "contract_symbol", "expiration", "wheel_branch_id")),
         )
         key = (
             repr(correlation)

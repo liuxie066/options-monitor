@@ -1,4 +1,5 @@
 from __future__ import annotations
+from src.application.ledger import trade_attribution as ledger_attribution
 
 from datetime import datetime
 import time
@@ -108,7 +109,7 @@ def test_meituan_five_covered_branches_enter_pending_via_trade_ingress(tmp_path,
     assert "configured_physical_account_mismatch" in blocked_call["reason_codes"]
     # Complete scan and broker capacity are isolated here; their fail-closed contracts have separate tests.
     evidence = {"complete": True, "exposures": []}
-    monkeypatch.setattr(attribution, "trade_attribution_capacity_check",
+    monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check",
         lambda **_: {"status": "available", "reason_codes": [], "evidence_complete": True})
     rows = read_trade_attribution_snapshot(repo, account="lx", market="hk")
     view = build_trade_attribution_view(rows, config=config, account="lx", market="hk",
@@ -146,7 +147,7 @@ def test_meituan_five_covered_branches_enter_pending_via_trade_ingress(tmp_path,
     pending_after, read_error = _pending_attribution_for_brief(base=tmp_path, config=config, account="lx",
         market="HK", now_ms=int(time.time() * 1000) + 1000)
     assert read_error is None and pending_after == []
-    monkeypatch.setattr(attribution, "trade_attribution_capacity_check", lambda **kwargs: {
+    monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check", lambda **kwargs: {
         "status": "available" if kwargs["observation"].get("portfolio") else "unavailable",
         "reason_codes": [] if kwargs["observation"].get("portfolio") else ["capacity_authority_unavailable"],
         "evidence_complete": bool(kwargs["observation"].get("portfolio")),
@@ -161,7 +162,7 @@ def test_meituan_five_covered_branches_enter_pending_via_trade_ingress(tmp_path,
 
 
 def test_historical_futu_assignment_inherits_exact_source_account():
-    from src.application.trades.attribution import _branch_account_ref
+    from src.application.ledger.trade_attribution import _branch_account_ref
 
     source_id = "futu:lx:1001:put-deal"
     rows = {"trade_events": [
@@ -206,7 +207,7 @@ def test_manual_preview_reads_combo_evidence_for_target_date_only(tmp_path, monk
 def test_three_contract_fill_can_be_confirmed_across_three_stock_branches(tmp_path, monkeypatch):
     repo, config, intake = _meituan_repo(tmp_path, call_contracts=3)
     assert intake["status"] == "applied"
-    monkeypatch.setattr(attribution, "trade_attribution_capacity_check",
+    monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check",
                         lambda **_: {"status": "available", "reason_codes": [], "evidence_complete": True})
     evidence = {"complete": True, "exposures": []}
     rows = read_trade_attribution_snapshot(repo, account="lx", market="hk")
@@ -266,7 +267,7 @@ def test_three_contract_fill_can_be_confirmed_across_three_stock_branches(tmp_pa
 
 def test_linked_call_with_late_conflict_does_not_reserve_other_branches(tmp_path, monkeypatch):
     repo, config, _ = _meituan_repo(tmp_path)
-    monkeypatch.setattr(attribution, "trade_attribution_capacity_check",
+    monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check",
                         lambda **_: {"status": "available", "reason_codes": [], "evidence_complete": True})
     evidence = {"complete": True, "exposures": []}
     def view_now():
@@ -309,7 +310,7 @@ def test_linked_call_with_late_conflict_does_not_reserve_other_branches(tmp_path
 def test_multi_branch_terminal_keeps_stock_coverage_blocked_until_settlement_is_attributed(
         tmp_path, monkeypatch, terminal_event):
     repo, config, _intake = _meituan_repo(tmp_path, call_contracts=3)
-    monkeypatch.setattr(attribution, "trade_attribution_capacity_check",
+    monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check",
                         lambda **_: {"status": "available", "reason_codes": [], "evidence_complete": True})
     evidence = {"complete": True, "exposures": []}
     rows = read_trade_attribution_snapshot(repo, account="lx", market="hk")
@@ -349,7 +350,7 @@ def test_legacy_manual_wheel_confirmation_survives_other_branches(tmp_path, monk
     from src.application.daily_decision_brief_service import _pending_attribution_for_brief
 
     repo, config, _ = _meituan_repo(tmp_path)
-    monkeypatch.setattr(attribution, "trade_attribution_capacity_check",
+    monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check",
                         lambda **_: {"status": "available", "reason_codes": [], "evidence_complete": True})
     rows = read_trade_attribution_snapshot(repo, account="lx", market="hk")
     evidence = {"complete": True, "exposures": []}

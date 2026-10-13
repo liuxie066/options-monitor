@@ -66,6 +66,8 @@ from src.application.tick_notification_flow import (
 )
 from src.application.tick_run_context import (
     build_tick_idempotency_context,
+    tick_account_outcomes,
+    write_child_tick_completion,
     complete_tick_idempotency as _complete_tick_idempotency,
 )
 from src.application.tick_run_workspace import prepare_tick_run_workspace
@@ -91,7 +93,6 @@ from src.infrastructure.external_services import (
 )
 
 from domain.storage.repositories import state_repo
-from domain.storage.json_io import atomic_write_private_json
 
 
 _CURRENT_RUN_ID: str | None = None
@@ -400,6 +401,19 @@ def main(argv: list[str] | None = None) -> int:
         write_run_artifacts=False,
     )
 
+    tick_metrics: dict[str, Any] = {}
+
+    def publish_completion(account_outcomes, rc, *, inner_run_id, accounts):
+        wrapper_run_id = str(os.environ.get("OM_TICK_CRON_RUN_ID") or "").strip()
+        if (not wrapper_run_id or Path(wrapper_run_id).name != wrapper_run_id or wrapper_run_id in {".", ".."}
+            or trigger_kind != "scheduled" or no_send or symbols_arg or not accounts
+            or not isinstance(account_outcomes, list)
+            or any(not isinstance(row, dict) for row in account_outcomes)
+            or sorted(row.get("account", "") for row in account_outcomes) != sorted(accounts)):
+            return
+        write_child_tick_completion(base=base, wrapper_run_id=wrapper_run_id, inner_run_id=inner_run_id,
+            market=market_cfg, accounts=accounts, account_outcomes=account_outcomes, rc=rc)
+
     def complete_tick_idempotency(
         status: str = "completed",
         message: str | None = None,
@@ -419,25 +433,26 @@ def main(argv: list[str] | None = None) -> int:
                 message=message,
                 ok=ok,
                 error_code=error_code,
+                account_outcomes=tick_account_outcomes(tick_metrics),
             )
         except Exception as exc:
-            if not ok:
-                error = "TICK_IDEMPOTENCY_TERMINAL_WRITE_FAILED"
-                runlog.safe_event(
-                    "idempotency",
-                    "error",
-                    error_code=error,
-                    message=str(exc),
-                    data=_safe_runlog_data({"status": status, "terminal_error_code": error_code}),
-                )
-                audit_helper.audit(
-                    "idempotency",
-                    "complete_tick_execution_failed",
-                    status="error",
-                    message=str(exc),
-                    extra={"status": status, "error_code": error, "terminal_error_code": error_code},
-                )
-                raise
+            error = "TICK_IDEMPOTENCY_TERMINAL_WRITE_FAILED"
+            runlog.safe_event(
+                "idempotency",
+                "error",
+                error_code=error,
+                message=str(exc),
+                data=_safe_runlog_data({"status": status, "terminal_error_code": error_code}),
+            )
+            audit_helper.audit(
+                "idempotency",
+                "complete_tick_execution_failed",
+                status="error",
+                message=str(exc),
+                extra={"status": status, "error_code": error, "terminal_error_code": error_code},
+            )
+            audit_helper.guard_mark_failure(error, "idempotency")
+            raise
 
     for it in syms0:
         if not isinstance(it, dict):
@@ -469,8 +484,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     if not bool(dedupe.get('claimed')):
         record = dedupe.get('record') if isinstance(dedupe.get('record'), dict) else {}
-        if str(record.get('status') or '').strip().lower() == 'unsupported_failed':
-            error_code = str(record.get('error_code') or 'daily_brief_multi_market_delivery_unsupported')
+        if str(record.get('status') or '').strip().lower() in {'unsupported_failed', 'failed'}:
+            error_code = str(record.get('error_code') or 'TICK_EXEC_FAILED')
             audit_helper.audit(
                 'idempotency',
                 'replay_terminal_tick_failure',
@@ -479,7 +494,10 @@ def main(argv: list[str] | None = None) -> int:
                 extra={'bucket': execution_bucket, 'error_code': error_code},
             )
             runlog.safe_event('run_end', 'error', error_code=error_code, message=error_code)
-            return 2
+            replay_rc = 2 if record.get("status") == "unsupported_failed" else 1
+            publish_completion(record.get("account_outcomes"), replay_rc,
+                               inner_run_id=str(record.get("run_id") or ""), accounts=idempotency_accounts)
+            return replay_rc
         audit_helper.audit(
             'idempotency',
             'skip_duplicate_tick',
@@ -813,14 +831,14 @@ def main(argv: list[str] | None = None) -> int:
                 }
             ),
         )
-        if experience_ok:
-            audit_helper.guard_mark_success()
         complete_tick_idempotency(
             status=("completed" if experience_ok else "failed"),
             message=experience_reason,
             ok=experience_ok,
             error_code=(None if experience_ok else "EXPERIENCE_SCAN_FAILED"),
         )
+        if experience_ok:
+            audit_helper.guard_mark_success()
         return 0 if experience_ok else 2
 
     post_delivery_sidecars_finished = False
@@ -866,30 +884,12 @@ def main(argv: list[str] | None = None) -> int:
         notification_request=notification_request,
         post_delivery_sidecars_fn=publish_post_delivery_sidecars_once,
     )
-    wrapper_run_id = str(os.environ.get("OM_TICK_CRON_RUN_ID") or "").strip()
-    if (
-        rc == 0
-        and wrapper_run_id
-        and Path(wrapper_run_id).name == wrapper_run_id
-        and trigger_kind == "scheduled"
-        and not no_send
-        and not symbols_arg
-        and account_ids
-        and set(account_ids) == set(account_execution.ran_pipeline_accounts)
-        and all(result.ran_scan for result in results if result.account in account_ids)
-        and {result.account for result in results if result.ran_scan} >= set(account_ids)
-    ):
-        try:
-            atomic_write_private_json(
-                state_repo.run_state_dir(base, wrapper_run_id) / "child_tick_completion.json",
-                {"status": "ok", "wrapper_run_id": wrapper_run_id, "inner_run_id": run_id,
-                 "market": market_cfg, "accounts": sorted(set(account_ids)),
-                 "completed_at_utc": utc_now()},
-            )
-        except Exception as exc:
-            runlog.safe_event("completion_receipt", "error", error_code="TICK_COMPLETION_RECEIPT_FAILED",
-                              message=str(exc)[:240])
-            return 2
+    try:
+        publish_completion(tick_account_outcomes(tick_metrics), rc, inner_run_id=run_id, accounts=account_ids)
+    except Exception as exc:
+        audit_helper.guard_mark_failure("TICK_COMPLETION_RECEIPT_FAILED", "completion_receipt")
+        runlog.safe_event("completion_receipt", "error", error_code="TICK_COMPLETION_RECEIPT_FAILED", message=str(exc)[:240])
+        return 2
     return rc
 
 

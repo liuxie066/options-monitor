@@ -1,4 +1,5 @@
 from __future__ import annotations
+from src.application.ledger import trade_attribution as ledger_attribution
 
 import json
 from dataclasses import replace
@@ -142,7 +143,7 @@ def _adopt(
     context = {"config": config, "market": "us", "combo_evidence": {"complete": True, "exposures": []},
                "capacity_observation": {}, "combo_mode": "confirm"}
     # These tests exercise Combo membership/persistence; broker capacity has its own fixtures.
-    with patch("time.time", return_value=effective_now_ms / 1000), patch.object(attribution,
+    with patch("time.time", return_value=effective_now_ms / 1000), patch.object(ledger_attribution,
             "trade_attribution_capacity_check", return_value={"status": "available", "reason_codes": []}), patch.object(
             attribution, "read_trade_attribution_context", return_value=context):
         view = attribution.build_trade_attribution_view(read_trade_attribution_snapshot(repo, account="lx", market="us"),
@@ -197,7 +198,7 @@ def test_confirm_combo_cli_uses_shared_atomic_proofs(tmp_path, monkeypatch, caps
 
     monkeypatch.setattr(attribution, "read_trade_attribution_context", read_context)
     monkeypatch.delenv("OM_RUNTIME_ROOT", raising=False)
-    monkeypatch.setattr(attribution, "trade_attribution_capacity_check", lambda **k: {"status": "available", "reason_codes": []})
+    monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check", lambda **k: {"status": "available", "reason_codes": []})
     view = attribution.build_trade_attribution_view(read_trade_attribution_snapshot(repo, account="lx", market="us"),
         account="lx", now_ms=now, **context)
     fact = next(row for row in view["rows"] if row["lot_id"] == proposal["put_record_id"])
@@ -642,7 +643,7 @@ def test_complete_combo_transfer_proves_later_assignment(tmp_path, monkeypatch, 
     now = BASE_TIME_MS + 5000
     monkeypatch.setattr(time, "time", lambda: now / 1000)
     # Isolate the broker snapshot; use the real transfer, membership and proof owners.
-    monkeypatch.setattr(attribution, "trade_attribution_capacity_check",
+    monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check",
                         lambda **_: {"status": "available", "reason_codes": []})
 
     def view():

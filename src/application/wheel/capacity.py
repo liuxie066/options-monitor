@@ -24,10 +24,12 @@ from src.application.portfolio_context_service import (
     portfolio_position_snapshot_errors,
     load_account_portfolio_context, evaluate_account_cash_snapshot, cash_snapshot_is_usable, cash_snapshot_evidence,
 )
-from src.application.ledger.api import decision_state_snapshot_from_locked_rows, with_sqlite_repo_writer_lock
+from src.application.ledger.api import (decision_state_snapshot_from_locked_rows, with_sqlite_repo_writer_lock,
+    trade_attribution_capacity_check as trade_attribution_capacity_check)
 from src.application.positions.context_builder import build_context
 from src.application.wheel.read_model import build_wheel_read_model_from_rows
-from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates, rates_for_purpose, current_exchange_rate_snapshot, project_exchange_rate_snapshot
+from src.infrastructure.exchange_rates import (capacity_currency_converter as _frozen_fx_converter,
+    current_exchange_rate_snapshot, project_exchange_rate_snapshot)
 
 
 WHEEL_PUT_CASH_CAPACITY_FACT_SCHEMA = "wheel_put_cash_capacity_fact.v1"
@@ -94,153 +96,6 @@ def observe_trade_attribution_capacity(*, config: dict[str, Any], account: str, 
                 process.kill()
                 process.join(timeout=0.5)
             process.close()
-
-
-def trade_attribution_capacity_check(
-    *, fact: Mapping[str, Any], facts: Sequence[Mapping[str, Any]],
-    wheel_read_model: Mapping[str, Any], observation: Mapping[str, Any], now_ms: int,
-    config: Mapping[str, Any],
-    consumed_reservation: Mapping[str, Any] | None = None,
-    check_account_capacity: bool = True,
-) -> dict[str, Any]:
-    """Verify booked positions; Wheel additionally requires account coverage."""
-    from collections import defaultdict
-    from datetime import datetime, timezone
-    from decimal import Decimal
-    from domain.domain.position_snapshot import position_snapshot_scope_errors
-    from domain.domain.symbol_identity import symbol_market
-
-    reasons: set[str] = set()
-    portfolio = observation.get("portfolio") or {}
-    snapshot = portfolio.get("position_snapshot_input") or {}
-    ref = fact.get("broker_account_ref") or {}
-    market = str(symbol_market(fact["contract_key"]["underlying_symbol"]) or "").lower()
-    authority = portfolio.get("capacity_authority") or {}
-    if (observation.get("error") or authority.get("status") != "available"
-            or authority.get("logical_account") != fact["account"]
-            or authority.get("futu_account_id") != ref.get("external_account_id")
-            or authority.get("trd_env") != ref.get("environment") or authority.get("market") != market):
-        reasons.add("capacity_authority_unavailable")
-    pooled_cash = fact["contract_key"]["option_type"] == "put"
-    call_symbol = fact["contract_key"]["underlying_symbol"] if not pooled_cash else None
-    markets = {"us", "hk"} if pooled_cash else {market}
-    for required_market in markets:
-        for asset in (("stock", "option") if check_account_capacity else ("option",)):
-            reasons.update(position_snapshot_scope_errors(snapshot, account_label=fact["account"],
-                environment=str(ref.get("environment") or ""), market=required_market, asset_type=asset,
-                external_account_id=ref.get("external_account_id"),
-                now_utc=datetime.fromtimestamp(now_ms / 1000, timezone.utc), max_age_seconds=60))
-    if reasons:
-        return {"status": "unavailable", "reason_codes": sorted(reasons), "evidence_complete": False}
-
-    def key(contract: Mapping[str, Any], side: str, multiplier: Any, currency: Any) -> tuple[Any, ...]:
-        return (contract.get("underlying_symbol") or contract.get("symbol"), contract.get("option_type"),
-                Decimal(str(contract.get("strike"))), contract.get("expiration_ymd"), side,
-                Decimal(str(multiplier)), currency)
-
-    evidence_complete = False
-    try:
-        actual, recorded = defaultdict(int), defaultdict(int)
-        shares, call_claims, put_claims = defaultdict(Decimal), defaultdict(int), defaultdict(Decimal)
-        for row in snapshot.get("rows") or []:
-            instrument = row["instrument_ref"]
-            if not check_account_capacity and instrument["asset_type"] == "stock":
-                continue
-            if not pooled_cash and (str(instrument.get("market") or "").lower() != market
-                    or instrument.get("symbol") != call_symbol):
-                continue
-            quantity = Decimal(str(row["quantity"]))
-            if (not quantity.is_finite() or quantity < 0
-                    or instrument["asset_type"] == "option" and quantity != quantity.to_integral_value()):
-                raise ValueError("capacity_quantity_invalid")
-            if instrument["asset_type"] == "option":
-                actual[key(instrument, row["position_side"], instrument["multiplier"], instrument["currency"])] += int(quantity)
-            elif row["position_side"] == "long":
-                # Total observed inventory is the basis for existing obligations;
-                # can_sell_qty is not reduced by those obligations a second time.
-                shares[instrument["symbol"]] += quantity
-        for item in facts:
-            if item["contracts_open"] <= 0 or (not pooled_cash and item["contract_key"]["underlying_symbol"] != call_symbol):
-                continue
-            if item.get("broker_account_ref") != ref:
-                reasons.add("ledger_capacity_account_unproven")
-                continue
-            contract = item["contract_key"]
-            recorded[key(contract, item["position_side"], item["multiplier"], item["currency"])] += item["contracts_open"]
-            if item["position_side"] == "short":
-                quantity = contract_share_quantity(item["contracts_open"], item["multiplier"])
-                if contract["option_type"] == "call":
-                    call_claims[contract["underlying_symbol"]] += quantity
-                else:
-                    put_claims[item["currency"]] += Decimal(str(contract["strike"])) * quantity
-        if dict(actual) != dict(recorded):
-            reasons.add("broker_ledger_positions_mismatch")
-        if reasons or not check_account_capacity:
-            # Combo membership records existing fills, not permission to open more risk.
-            return {"status": "available" if not reasons else "unavailable", "reason_codes": sorted(reasons),
-                    "evidence_complete": not reasons}
-        for branch in wheel_read_model.get("wheel_branches") or []:
-            if branch.get("lifecycle_status") != "active":
-                continue
-            relevant = branch.get("direction") == "put" if pooled_cash else (
-                branch.get("direction") == "call" and branch.get("symbol") == fact["contract_key"]["underlying_symbol"])
-            if not relevant:
-                continue
-            if branch.get("integrity_status") != "trusted":
-                raise ValueError("active reservation integrity unavailable")
-            if branch.get("direction") == "call":
-                raw_reserved = branch.get("active_intent_reserved_shares", 0)
-                reserved = contract_share_quantity(raw_reserved, 1)
-                if (consumed_reservation and branch["wheel_branch_id"] == consumed_reservation["wheel_branch_id"]
-                        and consumed_reservation["intent_id"] in branch.get("active_intent_ids", [])):
-                    reserved -= contract_share_quantity(consumed_reservation["contracts"], fact["multiplier"])
-                    if reserved < 0:
-                        raise ValueError("reservation conversion exceeds remainder")
-                call_claims[branch["symbol"]] += reserved
-            else:
-                for reservation in branch.get("active_intent_reservations") or []:
-                    amount = Decimal(str(reservation["cash_reservation_amount"]))
-                    if not amount.is_finite() or amount < 0:
-                        raise ValueError("invalid cash reservation")
-                    if consumed_reservation and reservation["intent_id"] == consumed_reservation["intent_id"]:
-                        consumed = consumed_reservation["contracts"]
-                        if not 0 <= consumed <= reservation["remaining_contracts"]:
-                            raise ValueError("reservation conversion exceeds remainder")
-                        amount *= Decimal(reservation["remaining_contracts"] - consumed) / Decimal(reservation["remaining_contracts"])
-                    put_claims[reservation["currency"]] += amount
-        if fact["contract_key"]["option_type"] == "call":
-            symbol = fact["contract_key"]["underlying_symbol"]
-            evidence_complete = True
-            if call_claims[symbol] > shares[symbol]:
-                reasons.add("account_stock_capacity_exceeded")
-        else:
-            cash_snapshot = evaluate_account_cash_snapshot(
-                portfolio, config=config, account=fact["account"],
-                evaluated_at=datetime.fromtimestamp(now_ms / 1000, timezone.utc),
-            )
-            if not cash_snapshot_is_usable({"cash_snapshot": cash_snapshot}):
-                return {"status": "unavailable", "reason_codes": ["cash_capacity_unavailable"],
-                        "evidence_complete": False}
-            native = fact["currency"]
-            required = Decimal(str(fact["contract_key"]["strike"])) * contract_share_quantity(fact["contracts_open"], fact["multiplier"])
-            secured = {currency: float(amount) for currency, amount in put_claims.items()}
-            secured[native] = float(put_claims[native] - required)
-            fx_payload = portfolio.get("exchange_rates")
-            available = compute_sell_put_effective_cash(cash_by_currency=portfolio.get("cash_by_currency"),
-                cash_secured_by_currency=secured, native_currency=native, cash_required_native=float(required),
-                convert_currency=_frozen_fx_converter(fx_payload or {}),
-                fx_status=portfolio.get("exchange_rate_status"))
-            if not available.available or available.cash_free is None:
-                reasons.add("cash_capacity_unavailable")
-            else:
-                evidence_complete = True
-            if evidence_complete and Decimal(str(available.cash_free)) < required:
-                reasons.add("account_cash_capacity_exceeded")
-    except (KeyError, TypeError, ValueError, ArithmeticError):
-        reasons.add("capacity_basis_unavailable")
-        evidence_complete = False
-    return {"status": "available" if not reasons else "unavailable", "reason_codes": sorted(reasons),
-            "evidence_complete": evidence_complete}
 
 
 def _normalized_fx_snapshot(fx_snapshot: Mapping[str, Any]) -> dict[str, Any]:
@@ -461,19 +316,6 @@ def _ordinary_put_cash_claims(
             }
         )
     return claims
-
-
-def _frozen_fx_converter(fx_snapshot: Mapping[str, Any]) -> Any:
-    """Recheck the sealed quote on use; historical facts cannot fund new trades."""
-    def convert(amount: float, source: str, target: str) -> float | None:
-        rates = rates_for_purpose(fx_snapshot, purpose="capacity")
-        usdcny = rates.get("USDCNY")
-        converter = CurrencyConverter(ExchangeRates(
-            usd_per_cny=1 / usdcny if usdcny else None,
-            cny_per_hkd=rates.get("HKDCNY"),
-        ))
-        return converter.convert(amount, from_ccy=source, to_ccy=target)
-    return convert
 
 
 def _convert_currency_fn(
