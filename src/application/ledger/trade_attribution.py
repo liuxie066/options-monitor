@@ -808,6 +808,7 @@ def build_trade_attribution_view(
                     "wheel_evidence": sorted((event["event_id"], event["payload_hash"]) for event in wheel_events)}
         results.append({**fact, "status": resolution.status, "candidate_ids": list(resolution.candidate_ids),
             "candidates": proposals, "reason_codes": sorted(set(fact["reason_codes"]) | set(resolution.reason_codes)),
+            "ordinary_previewable": fact["ordinary_previewable"] and not fact["reason_codes"],
             "selected_candidate_id": resolution.selected_candidate_id if enabled else None, "rules_enabled": enabled,
             "input_hash": canonical_sha256(semantic), "evaluated_at_ms": now_ms, "evidence_complete": complete,
             "capacity_evidence": {
@@ -970,7 +971,8 @@ def apply_trade_attribution(
         for key, item in sorted(decisions.items()):
             fact, proposed = by_key[key], evaluated[key]
             target = item["candidate_id"]
-            if fact["reason_codes"] or not proposed["evidence_complete"]:
+            manual_ordinary = manual and target == "ordinary" and proposed["ordinary_previewable"]
+            if fact["reason_codes"] or not proposed["evidence_complete"] and not manual_ordinary:
                 raise ValueError("attribution member identity or dependencies changed")
             if not conflicts:
                 assert_trade_attribution_unclaimed(rows["trade_events"], [fact["lot_id"]])

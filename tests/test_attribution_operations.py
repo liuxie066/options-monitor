@@ -52,8 +52,11 @@ def attribution_context(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("channel", ["wechat", "feishu"])
-def test_attribution_control_preview_confirm_retry_and_wrong_conversation(attribution_context, channel):
+@pytest.mark.parametrize("history_complete", [True, False])
+def test_attribution_control_preview_confirm_retry_and_wrong_conversation(attribution_context, channel, history_complete, monkeypatch):
     repo, store, request, preview, _ = attribution_context
+    monkeypatch.setattr(operations, "read_attribution_combo_evidence",
+                        lambda *a, **k: {"complete": history_complete, "exposures": []})
     request = replace(request, channel=channel)
     result = execute_explicit_control(preview, request=request, command_id="in_preview", operation_store=store)
     assert result.ok and result.requires_confirmation
