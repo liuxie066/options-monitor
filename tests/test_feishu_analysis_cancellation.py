@@ -31,6 +31,14 @@ def _preflight(payload, settings):
         received_monotonic=time.monotonic(), bot_config_path=settings.bot_config_path)
 
 
+def _capture_reply(deliveries, **kwargs):
+    before_send = kwargs.pop("before_send", None)
+    if before_send is not None:
+        before_send()
+    deliveries.append(kwargs)
+    return {"code": 0, "data": {"message_id": "reply"}}
+
+
 def _contract(settings, *, sender="ou_1", conversation=None):
     key, path, authority = channel_facade.resolve_trusted_config_scope(config_key=None, config_path=settings.config_path)
     request = channel_facade._channel_request(user_message="调查运行状态", config_key=key, config_path=path,
@@ -176,7 +184,7 @@ def test_receiver_cancels_before_paused_model_and_queue_preserves_deadline(monke
 
     try:
         feishu_ws.serve_feishu_ws(settings, start_client_fn=client,
-            reply_fn=lambda **kwargs: deliveries.append(kwargs) or {"code": 0, "data": {"message_id": "reply"}},
+            reply_fn=lambda **kwargs: _capture_reply(deliveries, **kwargs),
             lock_path=tmp_path / "ws.lock")
     finally:
         release.set()
@@ -416,7 +424,7 @@ def test_control_redelivery_completes_request_once_after_dispatch_loss(
 
     try:
         feishu_ws.serve_feishu_ws(settings, start_client_fn=client,
-            reply_fn=lambda **kwargs: deliveries.append(kwargs) or {"code": 0, "data": {"message_id": "reply"}},
+            reply_fn=lambda **kwargs: _capture_reply(deliveries, **kwargs),
             lock_path=tmp_path / "ws.lock")
     finally:
         release.set()
