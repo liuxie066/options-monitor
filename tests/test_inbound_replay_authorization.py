@@ -26,7 +26,8 @@ def _request(tmp_path, text="/status", **changes):
 
 
 @pytest.fixture
-def business(monkeypatch):
+def business(monkeypatch, example_config_path):
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
     calls = []
 
     def tool(name, payload):

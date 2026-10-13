@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from math import isfinite
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from src.application.bot.contracts import (
     AppEvent,
@@ -320,7 +320,7 @@ class BotHostStore:
                     reply = reply_builder(result)
                 if reply:
                     self._enqueue_reply(conn, delivery_key=reply['delivery_key'], channel=reply['channel'],
-                        payload=reply['payload'], session_key=row['session_key'], run_id=result.run_id)
+                        payload=reply['payload'], authorization=reply.get('authorization'), session_key=row['session_key'], run_id=result.run_id)
                 if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
                     raise TimeoutError('answer persistence exceeded interaction deadline')
         return result
@@ -490,20 +490,24 @@ class BotHostStore:
         payload: dict[str, Any],
         session_key: str | None = None,
         run_id: str | None = None,
+        authorization: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._ensure_schema()
         with self._connect() as conn:
-            return self._enqueue_reply(conn, delivery_key=delivery_key, channel=channel, payload=payload, session_key=session_key, run_id=run_id)
+            return self._enqueue_reply(conn, delivery_key=delivery_key, channel=channel, payload=payload, authorization=authorization, session_key=session_key, run_id=run_id)
 
     @staticmethod
-    def _enqueue_reply(conn: sqlite3.Connection, *, delivery_key: str, channel: str, payload: dict[str, Any], session_key: str | None = None, run_id: str | None = None) -> dict[str, Any]:
+    def _enqueue_reply(conn: sqlite3.Connection, *, delivery_key: str, channel: str, payload: dict[str, Any], session_key: str | None = None, run_id: str | None = None, authorization: dict[str, Any] | None = None) -> dict[str, Any]:
+        from src.application.bot.config_scope import freeze_reply_authorization
+
+        frozen = freeze_reply_authorization(authorization, channel=channel, payload=payload)
         now = utc_now_iso()
-        conn.execute(
+        cursor = conn.execute(
             """
             INSERT INTO bot_reply_outbox (
                 delivery_key, channel, session_key, run_id, payload_json, status,
-                attempt_count, next_attempt_at, last_error, created_at, updated_at, delivered_at
-            ) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?, NULL)
+                attempt_count, next_attempt_at, last_error, created_at, updated_at, delivered_at, authorization_json
+            ) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?, NULL, ?)
             ON CONFLICT(delivery_key) DO NOTHING
             """,
             (
@@ -515,6 +519,7 @@ class BotHostStore:
                 now,
                 now,
                 now,
+                json.dumps(frozen, ensure_ascii=False, sort_keys=True) if frozen else None,
             ),
         )
         conn.row_factory = sqlite3.Row
@@ -522,7 +527,7 @@ class BotHostStore:
             "SELECT * FROM bot_reply_outbox WHERE delivery_key = ?",
             (str(delivery_key),),
         ).fetchone()
-        return dict(row) if row is not None else {}
+        return {**dict(row), "enqueued_new": bool(cursor.rowcount)} if row is not None else {}
 
     def reply_payload(self, delivery_key: str) -> dict[str, Any]:
         self._ensure_schema()
@@ -536,6 +541,7 @@ class BotHostStore:
         delivery_key: str | None = None,
         channel: str | None = None,
         before: str | None = None,
+        authorize: Callable[[dict[str, Any]], bool] | None = None,
     ) -> dict[str, Any] | None:
         self._ensure_schema()
         now = before or utc_now_iso()
@@ -620,6 +626,12 @@ class BotHostStore:
                 ).fetchone()
             if row is None:
                 return None
+            if authorize is not None and not authorize(dict(row)):
+                next_attempt = (datetime.fromisoformat(str(now).replace("Z", "+00:00"))
+                                + timedelta(seconds=30)).isoformat()
+                conn.execute("UPDATE bot_reply_outbox SET next_attempt_at=? WHERE delivery_key=?",
+                             (next_attempt, row["delivery_key"]))
+                return {"authorization_blocked": True, "delivery_key": row["delivery_key"]}
             conn.execute(
                 """
                 UPDATE bot_reply_outbox
@@ -821,6 +833,11 @@ class BotHostStore:
                 conn.execute("ALTER TABLE bot_sessions ADD COLUMN memory_json TEXT NOT NULL DEFAULT '{}'")
             run_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(bot_runs)")}
             reply_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(bot_reply_outbox)")}
+            if "authorization_json" not in reply_columns:
+                conn.execute("BEGIN IMMEDIATE")
+                if "authorization_json" not in {str(row[1]) for row in conn.execute("PRAGMA table_info(bot_reply_outbox)")}:
+                    conn.execute("ALTER TABLE bot_reply_outbox ADD COLUMN authorization_json TEXT")
+                conn.commit()
             if "replay_until" not in reply_columns:
                 conn.execute("BEGIN IMMEDIATE")
                 reply_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(bot_reply_outbox)")}

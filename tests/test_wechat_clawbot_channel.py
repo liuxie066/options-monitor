@@ -505,6 +505,7 @@ def test_wechat_clawbot_message_adapter_builds_bot_request(tmp_path: Path) -> No
         audit_db=str(tmp_path / "audit.sqlite3"),
         reply_context={
             "provider": "wechat_clawbot",
+            "reply_sender_identity": str((Path.cwd() / "output_shared" / "state" / "channels" / "wechat_clawbot" / "default").resolve()),
             "base": str(Path.cwd()),
             "label": "default",
             "state_dir": str((Path.cwd() / "output_shared" / "state" / "channels" / "wechat_clawbot" / "default").resolve()),
@@ -732,7 +733,10 @@ def test_wechat_clawbot_poll_once_persists_failed_reply_receipt(tmp_path: Path) 
 
 
 @pytest.mark.parametrize("explicit_db", [True, False])
-def test_wechat_reply_outbox_retries_with_stable_client_id(tmp_path: Path, explicit_db: bool) -> None:
+def test_wechat_reply_outbox_retries_with_stable_client_id(tmp_path: Path, explicit_db: bool, monkeypatch, example_config_path) -> None:
+    from src.application.bot.config_scope import resolve_replay_authorization
+    from src.application.bot.control.policy import check_reply_authorization
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
     database = tmp_path / ("audit.sqlite3" if explicit_db else "default-audit.sqlite3")
     audit_argument = str(database) if explicit_db else None
     message = {
@@ -741,11 +745,19 @@ def test_wechat_reply_outbox_retries_with_stable_client_id(tmp_path: Path, expli
         "context_token": "ctx_1",
         "message_id": "msg_1",
     }
-    store, delivery_key, state = _prepare_reply_outbox(
+    request = BotInboundRequest(text="", sender_id="user_1", channel="wechat",
+        conversation_id="wechat:group_1", message_id="msg_1", config_key="us")
+    InboundAuditStore(audit_argument).record_result({"command_id": "cmd_1", "channel": "wechat", "sender_id": "user_1",
+        "conversation_id": request.conversation_id, "message_id": "msg_1", "decision": "fixture",
+        "replay_authorization": resolve_replay_authorization(request)})
+    def authorize(record, live=False):
+        check_reply_authorization(record, channel="wechat", current_allowed_senders=lambda: "wechat:user_1",
+            config_key="us", config_path=None, bot_config_path=None)
+    store, delivery_key, state, claimed = _prepare_reply_outbox(
         audit_db=audit_argument,
         command_id="cmd_1",
         message=message,
-        text="结论：运行正常。",
+        text="结论：运行正常。", authorization_check=authorize,
     )
     assert store is not None
     assert delivery_key == "wechat:cmd_1"
@@ -764,8 +776,10 @@ def test_wechat_reply_outbox_retries_with_stable_client_id(tmp_path: Path, expli
             sends.append(dict(kwargs))
             return {"ret": 0, "data": {"message_id": "reply_1"}}
 
-    first_retry = _retry_pending_wechat_reply(audit_db=audit_argument, client=FakeClient())
-    second_retry = _retry_pending_wechat_reply(audit_db=audit_argument, client=FakeClient())
+    first_retry = _retry_pending_wechat_reply(audit_db=audit_argument, client=FakeClient(),
+        config_key="us", allowed_senders_fn=lambda: "wechat:user_1")
+    second_retry = _retry_pending_wechat_reply(audit_db=audit_argument, client=FakeClient(),
+        config_key="us", allowed_senders_fn=lambda: "wechat:user_1")
 
     assert first_retry["ok"] is True
     assert first_retry["delivery_key"] == delivery_key
@@ -926,23 +940,18 @@ def test_wechat_clawbot_poll_once_replies_to_non_silent_permission_denied(tmp_pa
             replies.append(dict(kwargs))
             return {"ret": 0, "data": {"message_id": "reply_1"}}
 
-    channel_service = SimpleNamespace(
-        handle_inbound=lambda *_args, **_kwargs: {
-            "ok": False,
-            "data": {
-                "kind": "message",
-                "response_text": "",
-                "inbound_result": {
-                    "ok": False,
-                    "error": {
-                        "code": "PERMISSION_DENIED",
-                        "message": "写入权限未开启",
-                        "hint": "请先确认。",
-                    },
-                },
-            },
-        }
-    )
+    def handle_inbound(channel, payload, **kwargs):
+        from dataclasses import replace
+        from src.application.bot.control.runtime import handle_bot_turn
+        from src.application.bot.control.settings import BotSettings
+        request = wechat_clawbot_message_to_bot_request(payload, base=kwargs["base"], state_dir=kwargs["state_dir"],
+            config_path=kwargs["config_path"], audit_db=kwargs["audit_db"], bot_reply_options=kwargs["bot_reply_options"])
+        turn = handle_bot_turn(replace(request, text="/status"), allowed_senders=kwargs["allowed_senders"],
+            settings=BotSettings(enabled=True), execute_tool_fn=lambda name, args: build_response(tool_name=name,
+                ok=False, error={"code": "PERMISSION_DENIED", "message": "写入权限未开启", "hint": "请先确认。"}))
+        return build_response(tool_name="inbound.wechat", ok=False, data={"kind": "message",
+            "request": request.public_payload(), "response_text": "", "inbound_result": turn.public_payload()})
+    channel_service = SimpleNamespace(handle_inbound=handle_inbound)
 
     out = poll_wechat_clawbot_once(
         base=tmp_path,
@@ -1608,7 +1617,8 @@ def test_channel_status_checks_secret_metadata_without_reading_value(tmp_path: P
 @pytest.mark.parametrize('explicit_db', [False, True])
 @pytest.mark.parametrize('access', ['allowed', 'unauthorized', 'disabled'])
 @pytest.mark.parametrize('text', ['调查账户问题', '/income sy ytd'])
-def test_expired_wechat_batch_terminal_reply_uses_existing_outbox(tmp_path, monkeypatch, explicit_db, access, text):
+def test_expired_wechat_batch_terminal_reply_uses_existing_outbox(tmp_path, monkeypatch, explicit_db, access, text, example_config_path):
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
     state_dir = tmp_path / 'wechat-state'
     state_dir.mkdir()
     (state_dir / 'state.json').write_text(json.dumps({'bot_token': 'fixture'}))

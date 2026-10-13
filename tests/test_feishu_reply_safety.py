@@ -226,7 +226,8 @@ else:
         if mode == "failed": raise f.FeishuTransientError("synthetic late failure")
         return {"code": 0, "data": {"message_id": "synthetic-" + name}}
     out = f._retry_pending_feishu_reply(settings=f.FeishuWsSettings(
-        audit_db=str(store.path), app_id="synthetic", app_secret="synthetic"), reply_fn=reply)
+        audit_db=str(store.path), config_key="us", allowed_senders="synthetic-user",
+        app_id="synthetic-app", app_secret="synthetic"), reply_fn=reply)
 (folder / (name + ".json")).write_text(json.dumps(out))
 '''
 
