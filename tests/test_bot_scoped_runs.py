@@ -1,3 +1,4 @@
+from src.application import query_cursor
 import json
 
 from src.application.bot import tools
@@ -6,7 +7,7 @@ from src.application.agent_tools import project_reader, runtime
 
 def test_bot_runtime_runs_uses_trusted_scope_and_safe_failure_record(tmp_path, monkeypatch, example_config_path):
     monkeypatch.setenv('OM_RUNTIME_ROOT', str(example_config_path.parent))
-    monkeypatch.setattr(project_reader, '_key', lambda: 'test-cursor-key')
+    monkeypatch.setattr(query_cursor, '_key', lambda: 'test-cursor-key')
     base = example_config_path.parent
     metrics = base / 'output_runs/20260912T000000Z/accounts/lx/state/account_metrics.json'
     metrics.parent.mkdir(parents=True)

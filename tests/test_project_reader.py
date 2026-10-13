@@ -1,3 +1,4 @@
+from src.application import query_cursor
 """Real filesystem contract checks for the project-only reader."""
 import hashlib
 import os
@@ -12,7 +13,7 @@ from src.application.research.redaction import redact_text
 
 @pytest.fixture(autouse=True)
 def signing(monkeypatch):
-    monkeypatch.setattr(reader, "_key", lambda: "test-only-cursor-key")
+    monkeypatch.setattr(query_cursor, "_key", lambda: "test-only-cursor-key")
 
 
 def _file(root, name, text="sample\n"):
@@ -140,7 +141,7 @@ def test_size_cancel_deadline_and_missing_key(tmp_path, monkeypatch):
         reader.read_bytes(tmp_path, "docs/huge.md", cancelled=lambda: True)
     with pytest.raises(reader.ProjectReaderError, match="time_deadline"):
         reader.list_names(tmp_path, deadline_monotonic=time.monotonic() - 1)
-    monkeypatch.setattr(reader, "_key", lambda: (_ for _ in ()).throw(reader.ProjectReaderError("continuation_unavailable")))
+    monkeypatch.setattr(query_cursor, "_key", lambda: (_ for _ in ()).throw(reader.ProjectReaderError("continuation_unavailable")))
     result = reader.page_text(b"a" * 10000, relative_name="docs/read.md", scope={})
     assert result["continuation_status"] == "continuation_unavailable"
     assert result["next_cursor"] is None and not result["body_complete"]
@@ -297,11 +298,11 @@ def test_navigation_cursor_rejects_old_traversal_and_other_queries(tmp_path, act
         with pytest.raises(reader.ProjectReaderError, match="cursor_invalidated"):
             reader.project_files(tmp_path, **{**args, **change, "cursor": cursor})
     info = tmp_path.stat()
-    old = reader.decode_evidence_cursor(cursor, reader._key())
+    old = query_cursor.decode_evidence_cursor(cursor, query_cursor._key())
     for previous in ({}, {"traversal_version": "project-navigation-v2"}):
         old["binding"] = reader.digest({"scope": {"root": [info.st_dev, info.st_ino]}, "action": action, "resource": "project", "name": "docs", "query": args["query"], **previous})
         with pytest.raises(reader.ProjectReaderError, match="cursor_invalidated"):
-            reader.project_files(tmp_path, **args, cursor=reader.encode_evidence_cursor(old, reader._key()))
+            reader.project_files(tmp_path, **args, cursor=query_cursor.encode_evidence_cursor(old, query_cursor._key()))
 
 
 def test_shallow_list_ignores_child_changes_and_hides_unsafe_entries(tmp_path):
@@ -327,7 +328,7 @@ def test_project_continuation_missing_key_and_cancel_remain_bounded(tmp_path, mo
     for extra, reason in (({"cancelled": lambda: True}, "cancelled"), ({"deadline_monotonic": time.monotonic() - 1}, "time_deadline")):
         with pytest.raises(reader.ProjectReaderError, match=reason):
             reader.project_files(tmp_path, **args, **extra)
-    monkeypatch.setattr(reader, "_key", lambda: (_ for _ in ()).throw(reader.ProjectReaderError("continuation_unavailable")))
+    monkeypatch.setattr(query_cursor, "_key", lambda: (_ for _ in ()).throw(reader.ProjectReaderError("continuation_unavailable")))
     page = reader.project_files(tmp_path, **args)
     assert page["continuation_status"] == "continuation_unavailable"
     assert page["next_cursor"] is None and page["coverage"]["has_more"]
@@ -348,7 +349,7 @@ def test_single_file_search_reads_only_target_and_needs_no_signer(tmp_path, monk
         pytest.fail("a single-file search neither lists siblings nor signs a continuation")
     monkeypatch.setattr(reader, "read_bytes", read_target)
     monkeypatch.setattr(reader, "list_names", forbidden)
-    monkeypatch.setattr(reader, "_key", forbidden)
+    monkeypatch.setattr(query_cursor, "_key", forbidden)
     for query, count in (("needle", 1), ("NEEDLE", 0), ("absent", 0)):
         page = reader.project_files(tmp_path, action="search", relative_name=name, query=query, scope={})
         assert len(page["entries"]) == count
