@@ -13,7 +13,7 @@ from src.application.trades import lifecycle_outbox as facade, receipt
 
 
 def test_outbox_state_operations_use_the_ledger_owner() -> None:
-    wrappers = {"mark_notification_send_started", "mark_notification_batch_send_started"}
+    wrappers = {"mark_notification_send_started", "mark_notification_batch_send_started", "plan_notification_batch"}
     for name in facade.__all__:
         if name not in wrappers | {"dispatch_notification_batch_once"}:
             assert getattr(facade, name) is getattr(api, name) is getattr(owner, name)
@@ -33,6 +33,20 @@ def test_outbox_state_operations_use_the_ledger_owner() -> None:
         if isinstance(node, ast.ImportFrom):
             assert not (node.module or "").startswith("src.application.trades")
             assert node.module not in {"src.application.ledger.api", "src.application.cash_conversion"}
+
+
+def test_planning_adapter_binds_canonical_validator_without_owning_outbox_state(monkeypatch):
+    calls = []
+    expected = {"status": "fixture-planned"}
+    monkeypatch.setattr(facade, "_ledger_plan_notification_batch",
+                        lambda *args, **kwargs: calls.append((args, kwargs)) or expected)
+    route = {"provider": "fixture"}
+    result = facade.plan_notification_batch(
+        "fixture-repo", route=route, now_ms=1000, allowed_accounts=("sy",), apply_changes=False)
+    assert result is expected
+    assert calls == [(("fixture-repo",), {"route": route, "now_ms": 1000,
+        "allowed_accounts": ("sy",), "apply_changes": False,
+        "validate_combo_pair": api.validate_combo_pair_success})]
 
 
 def _claimed(tmp_path: Path, *, batch: bool) -> tuple[SQLiteOptionPositionsRepository, dict, int]:
