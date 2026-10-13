@@ -102,6 +102,10 @@ def _request_with_default_market_scope(request: BotInboundRequest, settings: Bot
 
 
 def _update_audit_response(*, store: InboundAuditStore, response: dict[str, Any]) -> None:
+    error = response.get("error")
+    if isinstance(error, dict) and error.get("code") == "PERMISSION_DENIED":
+        # A current denial must not overwrite a prior authorized response.
+        return
     meta = response.get("meta")
     if isinstance(meta, dict) and bool(meta.get("idempotent_replay")):
         return

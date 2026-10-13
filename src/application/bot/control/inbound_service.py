@@ -58,12 +58,16 @@ def handle_bot_request(
         text=normalized_request.text,
     )
 
-    # Expired deliveries still authenticate before replaying a prior response.
-    if time.monotonic() >= normalized_request.received_monotonic + 180:
-        try:
-            enforce_sender_allowed(channel=normalized_request.channel,
-                                   sender_id=normalized_request.sender_id, allowed_senders=allowed_senders)
-        except AgentToolError as err:
+    sender_error: AgentToolError | None = None
+    try:
+        sender_decision = enforce_sender_allowed(
+            channel=normalized_request.channel,
+            sender_id=normalized_request.sender_id,
+            allowed_senders=allowed_senders,
+        )
+    except AgentToolError as err:
+        sender_error = err
+        if time.monotonic() >= normalized_request.received_monotonic + 180:
             return _error_response(command_id=command_id, request=normalized_request, err=err, audit_db=store.path)
 
     try:
@@ -73,7 +77,21 @@ def handle_bot_request(
             command_id=command_id,
         )
     except AgentToolError as err:
-        return _error_response(command_id=command_id, request=normalized_request, err=err, audit_db=store.path)
+        return _error_response(command_id=command_id, request=normalized_request, err=sender_error or err, audit_db=store.path)
+    if sender_error is not None:
+        response = _error_response(command_id=command_id, request=normalized_request, err=sender_error, audit_db=store.path)
+        if existing is not None:
+            store.mark_duplicate(
+                command_id=str(existing.get("command_id") or ""),
+                sender_id=normalized_request.sender_id,
+                decision="denied",
+            )
+            return response
+        return _record_and_return(
+            store=store, request=normalized_request, command_id=command_id,
+            created_at=utc_now_iso(), command=None, control=None, decision="denied",
+            response=response, error_code=sender_error.code,
+        )
     if existing is not None:
         if str(existing.get("sender_id") or "") != normalized_request.sender_id:
             store.mark_duplicate(
@@ -103,11 +121,6 @@ def handle_bot_request(
     error_code: str | None = None
 
     try:
-        sender_decision = enforce_sender_allowed(
-            channel=normalized_request.channel,
-            sender_id=normalized_request.sender_id,
-            allowed_senders=allowed_senders,
-        )
         _check_request_deadline(normalized_request)
         replacement = analysis_control_replacement(normalized_request.text) if normalized_request.channel == "feishu" else None
         if replacement is not None:
