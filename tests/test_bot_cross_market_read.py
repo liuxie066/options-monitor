@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import pytest
 
@@ -22,7 +22,7 @@ from src.application.agent_tool_contracts import AgentToolError
 from tests.bot_pi_test_support import _TEST_MODEL
 
 
-def _scope(tmp_path, monkeypatch, markets):
+def _scope(tmp_path, monkeypatch, markets, *, source=None):
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
@@ -33,7 +33,7 @@ def _scope(tmp_path, monkeypatch, markets):
         build_yaml_runtime_config_file(
             repo_root=root,
             market=market,
-            config_path=root / "configs/examples/config.yaml.example",
+            config_path=source or root / "configs/examples/config.yaml.example",
             output_config_path=path,
         )
         configs[market] = (path, json.loads(path.read_text()))
@@ -324,3 +324,138 @@ def test_attribution_symbol_filter_precedes_pagination(monkeypatch, tmp_path):
         attribution.trade_attribution_read({"account": "lx", "symbol": "not-a-symbol"})
     with pytest.raises(AgentToolError, match="标的与所选市场不一致"):
         attribution.trade_attribution_read({"account": "lx", "symbol": "NVDA"})
+
+
+@pytest.fixture
+def followup_scope(tmp_path, monkeypatch):
+    """Only synthetic config, built through the same supported owner as other tests."""
+    from pathlib import Path
+    import yaml
+
+    source = yaml.safe_load((Path(__file__).resolve().parents[1] / "configs/examples/config.yaml.example").read_text())
+    source["accounts"]["sy"] = source["accounts"].pop("lx")
+    for market in ("us", "hk"):
+        source["markets"][market]["accounts"] = ["sy"]
+    path = tmp_path / "source.yaml"
+    path.write_text(yaml.safe_dump(source))
+    return _scope(tmp_path, monkeypatch, ["us", "hk"], source=path)
+
+
+def test_channel_market_is_reference_without_changing_host_scope(followup_scope):
+    _configs, fixed = followup_scope
+    contract = _contract(fixed)
+    manifest = build_scene_manifest(contract, "scope")
+    context = json.loads(manifest.messages[1]["content"].splitlines()[-1])
+    assert context["reference"]["channel_config_key"] == "us"
+    assert "config_key" not in context["fixed_tool_scope"]
+    assert context["fixed_tool_scope"]["read_markets"] == ["hk", "us"]
+    for key, value in fixed.items():
+        assert manifest.fixed_tool_input[key] == value
+    assert fixed["config_path"] not in manifest.messages[1]["content"]
+    assert fixed["read_generation"] not in manifest.messages[1]["content"]
+    prompt = manifest.messages[0]["content"]
+    assert '"sy 查看成交归属" followed by "hk市场" or "港股"' in prompt
+    assert "history is a query reference, not authorization" in prompt
+
+    legacy = replace(contract, input={k: v for k, v in contract.input.items()
+                                     if k not in {"read_generation", "read_markets", "bot_config_path"}})
+    legacy_context = json.loads(build_scene_manifest(legacy, "legacy").messages[1]["content"].splitlines()[-1])
+    assert legacy_context["fixed_tool_scope"]["config_key"] == "us"
+    assert "channel_config_key" not in legacy_context["reference"]
+
+
+@pytest.mark.parametrize("question", ["hk市场", "港股", "查看 sy 的 hk 成交归属"])
+@pytest.mark.parametrize("available", [True, False])
+def test_market_correction_history_reaches_model_and_hk_read_stays_scoped(
+    monkeypatch, tmp_path, followup_scope, question, available,
+):
+    # Scripted model proves prompt/history/routing plumbing, not model semantic acceptance.
+    from tests.test_bot_python_runtime import answer, call, script
+
+    configs, fixed = followup_scope
+    first = _contract(fixed)
+    first = replace(first, input={**first.input, "user_message": "sy 查看成交归属"})
+    store = BotHostStore(tmp_path / "host.sqlite3")
+    session = session_key_for_contract(first)
+    run_contract(first, model_settings=_TEST_MODEL, host_store=store, session_key=session,
+                 model_request=script([answer("刚才查询的是 sy 的 US 归属，仍有未读页。")], []))
+    # Reopen the store, so continuity comes from persisted conversation rather than a local list.
+    current = _contract(fixed)
+    current = replace(current, input={**current.input, "user_message": question})
+    reads, captured = [], []
+    response = ({"ok": True, "data": {"account": "sy", "market": "hk", "rows": [],
+                 "returned_count": 0, "next_cursor": None, "evidence_complete": True}}
+                if available else {"ok": False, "error": {"code": "READ_ERROR", "message": "synthetic source unavailable"}})
+
+    def read(name, payload, **_kwargs):
+        reads.append((name, payload))
+        return response
+
+    monkeypatch.setattr(tools, "call_read_tool", read)
+    result = run_contract(current, model_settings=_TEST_MODEL,
+        host_store=BotHostStore(tmp_path / "host.sqlite3"), session_key=session,
+        model_request=script([call("trade_attribution_read", {"config_key": "hk", "account": "sy", "limit": 5}),
+                              answer("HK 已读页为空。" if available else "HK 来源不可用，尚不能判断。")], captured))
+    assert result.ok
+    user_messages = [m["content"] for m in captured[0]["messages"] if m["role"] == "user"]
+    assert user_messages == ["sy 查看成交归属", question]
+    assert len(reads) == 1
+    name, payload = reads[0]
+    assert name == "trade_attribution_read"
+    assert payload["account"] == "sy" and payload["config_key"] == "hk"
+    assert payload["config_path"] == str(configs["hk"][0].resolve())
+    assert not payload.get("cursor")
+    observations = [e.payload for e in result.events if e.type == "tool_result"]
+    assert observations[0]["host_scope"] == {"tool": name, "account": "sy", "market": "hk"}
+    assert observations[0]["ok"] is available
+    if available:
+        assert observations[0]["data"]["rows"] == []
+    else:
+        assert observations[0]["error"]["code"] == "READ_ERROR"
+
+
+@pytest.mark.parametrize("denial", ["market", "account"])
+def test_followup_cannot_expand_market_or_account_permission(monkeypatch, tmp_path, denial):
+    from tests.test_bot_python_runtime import answer, call, script
+
+    _configs, fixed = _scope(tmp_path, monkeypatch, ["us"] if denial == "market" else ["us", "hk"])
+    request = _contract(fixed)
+    request = replace(request, input={**request.input, "user_message": "hk市场", "messages": [
+        {"role": "user", "content": "sy 查看成交归属"},
+        {"role": "assistant", "content": "sy US 结果。"},
+        {"role": "user", "content": "hk市场"},
+    ]})
+    monkeypatch.setattr(tools, "call_read_tool", lambda *a, **kw: pytest.fail("denied reader executed"))
+    result = run_contract(request, model_settings=_TEST_MODEL, session_key=session_key_for_contract(request),
+        model_request=script([call("trade_attribution_read", {"config_key": "hk", "account": "sy"}),
+                              answer("当前查询范围未获授权。")], []))
+    observation = next(e.payload for e in result.events if e.type == "tool_result")
+    assert observation["ok"] is False and "host_scope" not in observation
+    assert ("read scope" if denial == "market" else "account is outside") in observation["error"]["message"]
+
+
+def test_missing_account_still_requires_schema_input(monkeypatch, tmp_path):
+    from pathlib import Path
+    import yaml
+    from tests.test_bot_python_runtime import answer, call, script
+
+    source = yaml.safe_load((Path(__file__).resolve().parents[1] / "configs/examples/config.yaml.example").read_text())
+    source["accounts"]["sy"] = {**source["accounts"]["lx"], "futu_account_id": "SYNTHETIC_SECOND_ACCOUNT"}
+    for index, account in enumerate(("lx", "sy")):
+        source["accounts"][account]["futu"] = {"trd_env": "REAL", "host": "127.0.0.1", "port": 11111 + index}
+    source["markets"]["hk"]["accounts"] = ["lx", "sy"]
+    path = tmp_path / "two-accounts.yaml"
+    path.write_text(yaml.safe_dump(source))
+    _configs, fixed = _scope(tmp_path, monkeypatch, ["us", "hk"], source=path)
+    request = _contract(fixed)
+    request = replace(request, input={**request.input, "user_message": "查看 HK 成交归属"})
+    monkeypatch.setattr(tools, "call_read_tool", lambda *a, **kw: pytest.fail("unscoped reader executed"))
+    result = run_contract(request, model_settings=_TEST_MODEL, session_key=session_key_for_contract(request),
+        model_request=script([call("trade_attribution_read", {"config_key": "hk"}),
+                              answer("请提供要查询的账户。")], []))
+    observation = next(e.payload for e in result.events if e.type == "tool_result")
+    assert observation["ok"] is False and observation["error"]["code"] == "TOOL_ERROR"
+    assert "host_scope" not in observation and "data" not in observation
+    description = next(t for t in build_scene_manifest(request, "missing-account").tool_descriptions
+                       if t["name"] == "trade_attribution_read")
+    assert "account" in description["input_schema"]["required"]
