@@ -293,7 +293,7 @@ def test_release_workflow_runs_required_control_plane_suites() -> None:
             assert suite in text, f"{workflow.name} is missing required suite {suite}"
 
 
-def test_required_pr_and_release_guardrail_discovers_full_suite_after_smoke() -> None:
+def test_required_pr_and_release_guardrail_verifies_complete_distributed_suite() -> None:
     root = Path(__file__).resolve().parents[1]
     text = (root / ".github" / "workflows" / "guardrails.yml").read_text(encoding="utf-8")
     requirements = (root / "requirements" / "dev.txt").read_text(encoding="utf-8").splitlines()
@@ -311,7 +311,7 @@ def test_required_pr_and_release_guardrail_discovers_full_suite_after_smoke() ->
     assert "actions/setup-node" not in text
     assert "npm ci" not in text
     assert "./om-agent spec > /tmp/om-agent-spec.json" in text
-    assert "if: ${{ github.event_name == 'pull_request' || steps.release.outputs.tag != '' }}" in text
+    assert "github.event_name == 'pull_request' || needs.plan.outputs.release_tag != ''" in text
     assert (
         text.index("--check-sensitive-artifacts")
         < text.index("- name: Public surface check")
@@ -333,12 +333,20 @@ def test_required_pr_and_release_guardrail_discovers_full_suite_after_smoke() ->
     assert "tests/test_" not in text
     assert "pytest-xdist" in requirements
     assert "pytest-xdist==3.8.0" in constraints
-    assert (
-        text.index("tests/run_smoke.py")
-        < text.index("./om-agent spec")
-        < text.index("Resolve VERSION release")
-        < text.index(full_command)
-    )
+    assert text.index("tests/run_smoke.py") < text.index("./om-agent spec")
+    assert "shard: [0, 1, 2, 3]" in text
+    assert "fail-fast: false" in text
+    assert '-p pytest_shard --ci-shard "$CI_SHARD" --ci-shard-count 4' in text
+    assert '--ci-revision "$GITHUB_SHA"' in text
+    gate = text.split("\n  guardrails:", 1)[1].split("\n  release:", 1)[0]
+    assert "needs: [plan, checks, regression]" in gate
+    assert "if: ${{ always() }}" in gate
+    assert 'test "$PLAN_RESULT" = success' in gate
+    assert 'test "$CHECKS_RESULT" = success' in gate
+    assert 'test "$REGRESSION_RESULT" = success' in gate
+    assert 'test "$REGRESSION_RESULT" = skipped' in gate
+    assert 'python .github/ci/regression_manifest.py' in gate
+    assert '--count 4 --revision "$GITHUB_SHA"' in gate
 
 
 def test_release_workflow_pins_and_gates_pi_runtime() -> None:
