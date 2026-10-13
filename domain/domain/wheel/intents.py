@@ -7,6 +7,8 @@ below stay thin wrappers around them.
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from domain.domain.assigned_stock import assigned_stock_lot_id_for_event
 
 from domain.domain.ledger.events import lot_id_for_open_event
@@ -944,3 +946,48 @@ def plan_wheel_put_intent_consume(
     return _plan_intent_consume(
         branch, intent, fill, cash_capacity_fact, direction="put", recorded_at_ms=recorded_at_ms,
     )
+
+
+def attribution_reservation_claims(
+    *, fact: Mapping[str, Any], wheel_read_model: Mapping[str, Any],
+    consumed_reservation: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, int], dict[str, Decimal]]:
+    """Remaining active intent claims after converting a booked fill's reservation.
+
+    Use projected intent integrity and native reservation amounts. Untrusted or
+    over-consumed relevant reservations cannot establish account capacity.
+    """
+    from collections import defaultdict
+
+    pooled_cash = fact["contract_key"]["option_type"] == "put"
+    call_claims, put_claims = defaultdict(int), defaultdict(Decimal)
+    for branch in wheel_read_model.get("wheel_branches") or []:
+        if branch.get("lifecycle_status") != "active":
+            continue
+        relevant = branch.get("direction") == "put" if pooled_cash else (
+            branch.get("direction") == "call" and branch.get("symbol") == fact["contract_key"]["underlying_symbol"])
+        if not relevant:
+            continue
+        if branch.get("integrity_status") != "trusted":
+            raise ValueError("active reservation integrity unavailable")
+        if branch.get("direction") == "call":
+            raw_reserved = branch.get("active_intent_reserved_shares", 0)
+            reserved = contract_share_quantity(raw_reserved, 1)
+            if (consumed_reservation and branch["wheel_branch_id"] == consumed_reservation["wheel_branch_id"]
+                    and consumed_reservation["intent_id"] in branch.get("active_intent_ids", [])):
+                reserved -= contract_share_quantity(consumed_reservation["contracts"], fact["multiplier"])
+                if reserved < 0:
+                    raise ValueError("reservation conversion exceeds remainder")
+            call_claims[branch["symbol"]] += reserved
+        else:
+            for reservation in branch.get("active_intent_reservations") or []:
+                amount = Decimal(str(reservation["cash_reservation_amount"]))
+                if not amount.is_finite() or amount < 0:
+                    raise ValueError("invalid cash reservation")
+                if consumed_reservation and reservation["intent_id"] == consumed_reservation["intent_id"]:
+                    consumed = consumed_reservation["contracts"]
+                    if not 0 <= consumed <= reservation["remaining_contracts"]:
+                        raise ValueError("reservation conversion exceeds remainder")
+                    amount *= Decimal(reservation["remaining_contracts"] - consumed) / Decimal(reservation["remaining_contracts"])
+                put_claims[reservation["currency"]] += amount
+    return dict(call_claims), dict(put_claims)

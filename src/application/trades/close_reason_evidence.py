@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
+from domain.domain.lifecycle_timing import (
+    TIMING_POLICY_SCHEMA, PAIRING_WINDOW_MS, canonical_hash, derive_effective_lifecycle_timing,
+)
 from domain.domain.option_lifecycle import (
     INSTRUMENT_POLICY_REGISTRY,
     MARKET_TIMEZONES,
@@ -19,9 +20,7 @@ from src.application.ledger.api import (
 )
 
 
-TIMING_POLICY_SCHEMA = "lifecycle_timing_policy.v1"
 SETTLEMENT_OBSERVATION_SCHEMA = "broker_settlement_observation.v2"
-PAIRING_WINDOW_MS = 15 * 60 * 1000
 REQUIRED_SETTLEMENT_SOURCES = (
     "anchor_option_close",
     "history_deals",
@@ -30,16 +29,6 @@ REQUIRED_SETTLEMENT_SOURCES = (
     "trading_calendar",
     "contract_metadata",
 )
-
-
-def canonical_hash(value: Any) -> str:
-    encoded = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def build_lifecycle_timing_policy(
@@ -112,50 +101,6 @@ def build_lifecycle_timing_policy(
         "calendar_source": str(calendar_source or "").strip(),
         "calendar_observed_at_ms": observed_at_ms,
         "calendar_hash": calendar_hash,
-    }
-
-
-def derive_effective_lifecycle_timing(
-    *,
-    policy: dict[str, Any],
-    option_close_evidence: Iterable[dict[str, Any]],
-) -> dict[str, Any]:
-    timing = dict(policy or {})
-    if str(timing.get("policy_schema") or "") != TIMING_POLICY_SCHEMA:
-        raise ValueError("lifecycle timing policy is unavailable")
-    accepted: list[int] = []
-    for item in option_close_evidence:
-        if (
-            not isinstance(item, dict)
-            or str(item.get("evidence_type") or "").strip().lower()
-            != "option_zero_price_close"
-        ):
-            continue
-        try:
-            received_at_ms = int(item.get("received_at_ms") or 0)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if received_at_ms > 0:
-            accepted.append(received_at_ms)
-    if not accepted:
-        raise ValueError("first accepted option close receipt is unavailable")
-    received_at_ms = min(accepted)
-    return {
-        "schema_version": "effective_lifecycle_timing.v1",
-        "case_id": str(timing.get("case_id") or "").strip(),
-        "last_trade_cutoff_ms": int(
-            timing.get("last_trade_cutoff_ms") or 0
-        ),
-        "pairing_until_ms": received_at_ms + PAIRING_WINDOW_MS,
-        "settlement_deadline_ms": int(
-            timing.get("settlement_deadline_ms") or 0
-        ),
-        "settlement_style": str(
-            timing.get("settlement_style") or ""
-        ).strip().lower(),
-        "timing_policy_hash": canonical_hash(timing),
-        "first_option_close_received_at_ms": received_at_ms,
-        "last_option_close_received_at_ms": max(accepted),
     }
 
 

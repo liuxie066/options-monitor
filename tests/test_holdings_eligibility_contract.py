@@ -9,6 +9,7 @@ import pytest
 from src.application import portfolio_context_service as service
 from src.application.prefilters import apply_prefilters
 from src.application.wheel import capacity
+from src.application.ledger import wheel_capacity
 from tests.cash_evidence_helpers import cash_config, cash_portfolio
 
 NOW = datetime(2026, 10, 11, tzinfo=timezone.utc)
@@ -145,7 +146,7 @@ def test_frozen_replay_stays_stable_but_new_confirmation_requalifies(monkeypatch
         @classmethod
         def now(cls, tz=None):
             return NOW + timedelta(seconds=301)
-    monkeypatch.setattr(capacity, "datetime", Clock)
+    monkeypatch.setattr(wheel_capacity, "datetime", Clock)
     assert coverage(ctx) == before
     assert not capacity.broker_capacity_observation_is_fresh(before, account="lx", market="us")
     ctx["position_snapshot_input"]["observed_at_utc"] = (NOW + timedelta(seconds=301)).isoformat()

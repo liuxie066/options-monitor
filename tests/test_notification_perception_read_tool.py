@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.application import query_cursor
+
 import json
 from pathlib import Path
 
@@ -115,7 +117,7 @@ def test_window_reports_budget_partial_without_loading_whole_file(tmp_path: Path
 def test_window_cursor_survives_append_but_rejects_replacement(tmp_path: Path, monkeypatch) -> None:
     from src.application.agent_tools import project_reader
 
-    monkeypatch.setattr(project_reader, "_key", lambda: "test-key")
+    monkeypatch.setattr(query_cursor, "_key", lambda: "test-key")
     audit = tmp_path / "output_shared" / "state" / "audit_events.jsonl"
     audit.parent.mkdir(parents=True)
     for name in ("a", "b"):

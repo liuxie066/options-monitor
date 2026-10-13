@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.application import query_cursor
+
 import hashlib
 import json
 import shutil
@@ -14,7 +16,7 @@ from tests.test_notification_perception_read_tool import _row
 
 @pytest.fixture(autouse=True)
 def signed_pages(monkeypatch):
-    monkeypatch.setattr(project_reader, "_key", lambda: "isolated-test-cursor-key")
+    monkeypatch.setattr(query_cursor, "_key", lambda: "isolated-test-cursor-key")
 
 
 def test_filter_rule_counts_match_filtered_page(tmp_path):
@@ -35,7 +37,7 @@ def test_notification_bounded_source_and_unavailable_signing(tmp_path, monkeypat
     path.write_text("".join(json.dumps(_row(f"run-{i}", "notification_prepared", "chat")) + "\n" for i in range(25)))
     def no_key():
         raise project_reader.ProjectReaderError("continuation_unavailable")
-    monkeypatch.setattr(project_reader, "_key", no_key)
+    monkeypatch.setattr(query_cursor, "_key", no_key)
     response = execute_tool("notification_perception_read", {"runtime_root": str(tmp_path), "limit": 1})
     assert response["ok"], response
     assert response["data"]["next_cursor"] is None
@@ -132,7 +134,7 @@ def test_candidate_pages_report_unavailable_signer(tool, monkeypatch, tmp_path):
         "rejected_rows" if tool == "candidate_filter_explain" else "accepted_rows": rows})
     def unavailable():
         raise project_reader.ProjectReaderError("continuation_unavailable")
-    monkeypatch.setattr(project_reader, "_key", unavailable)
+    monkeypatch.setattr(query_cursor, "_key", unavailable)
     response = execute_tool(tool, {"runtime_root": str(tmp_path), "account": "lx", "limit": 1,
         **({"symbol": "NVDA"} if tool == "candidate_filter_explain" else {})})
     assert response["ok"], response

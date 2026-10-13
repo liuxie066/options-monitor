@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from contextlib import closing, nullcontext
@@ -44,6 +45,45 @@ def open_trade_reconciliation_evidence_repo(
 ) -> Any:
     """Open the minimal ledger evidence surface in SQLite query-only mode."""
     return _ReadOnlyTradeReconciliationEvidenceRepository(Path(sqlite_path))
+
+
+def read_trade_intake_recovery_snapshot(
+    sqlite_path: str | Path, *, account: str,
+    inbox_observation: dict[str, Any], state_bytes: bytes,
+) -> dict[str, Any]:
+    """Bind supplied Inbox/state evidence to one read-only ledger snapshot.
+
+    Preserve the historical recovery hash byte stream, table order and row
+    ordering. Missing tables or unreadable sources raise; they are not empty
+    evidence. The caller retains source qualification and recovery authorization.
+    """
+    if not str(account or "").strip():
+        raise ValueError("trade recovery snapshot requires account")
+    digest = hashlib.sha256()
+    digest.update(json.dumps(inbox_observation, sort_keys=True, ensure_ascii=False, default=str).encode())
+    digest.update(state_bytes)
+    counts: dict[str, int] = {}
+    queries = {
+        "position_lots": "SELECT * FROM position_lots WHERE account=? ORDER BY lot_id",
+        "trade_events": "SELECT * FROM trade_events WHERE account=? ORDER BY event_id",
+        "assigned_stock_events": "SELECT * FROM assigned_stock_events WHERE account=? ORDER BY stock_event_id",
+        "trade_lifecycle_cases": "SELECT * FROM trade_lifecycle_cases WHERE account=? ORDER BY case_id",
+        "trade_lifecycle_evidence": "SELECT * FROM trade_lifecycle_evidence WHERE account=? ORDER BY evidence_id",
+        "trade_lifecycle_source_consumptions": "SELECT c.* FROM trade_lifecycle_source_consumptions c JOIN trade_lifecycle_cases t ON t.case_id=c.case_id WHERE t.account=? ORDER BY c.source_key",
+        "trade_lifecycle_allocations": "SELECT a.* FROM trade_lifecycle_allocations a JOIN trade_lifecycle_cases t ON t.case_id=a.case_id WHERE t.account=? ORDER BY a.allocation_id",
+        "trade_lifecycle_notification_outbox": "SELECT o.* FROM trade_lifecycle_notification_outbox o JOIN trade_lifecycle_cases t ON t.case_id=o.case_id WHERE t.account=? ORDER BY o.outbox_id",
+    }
+    reader = open_trade_reconciliation_evidence_repo(sqlite_path)
+    with closing(reader._connect()) as conn:
+        conn.execute("BEGIN")
+        for name, sql in queries.items():
+            rows = conn.execute(sql, (account,))
+            counts[name] = 0
+            digest.update(name.encode())
+            for row in rows:
+                digest.update(json.dumps(dict(row), sort_keys=True, ensure_ascii=False, default=str).encode())
+                counts[name] += 1
+    return {"ledger_row_counts": counts, "recovery_hash": digest.hexdigest()}
 
 
 class _ReadOnlyTradeReconciliationEvidenceRepository:

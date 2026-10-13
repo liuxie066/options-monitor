@@ -9,6 +9,7 @@ Note:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import uuid
@@ -180,3 +181,13 @@ def has_shared_required_data(symbol: str, shared_dir: Path) -> bool:
         return False
 
     return True
+
+
+def file_identity(path: Path, *, content: bool = False) -> dict[str, Any]:
+    stat = path.stat()
+    if not path.is_file():
+        raise ValueError("file identity requires regular files")
+    result = {"path": str(path.resolve()), "device": stat.st_dev, "inode": stat.st_ino}
+    if content:
+        result["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return result
