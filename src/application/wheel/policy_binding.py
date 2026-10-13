@@ -1,7 +1,6 @@
 """Explicitly accept a configured policy without reopening its activation window."""
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -17,28 +16,20 @@ from src.application.ledger.api import (
     read_wheel_activation_windows_read_only,
     resolve_position_data_config_path,
     resolve_position_ledger_sqlite_path,
-    with_sqlite_repo_transaction,
+    build_wheel_policy_binding_request,
+    record_wheel_policy_binding,
+    WheelPolicyBindingReplayError,
+    wheel_policy_file_identity as _file_identity,
 )
 from src.application.runtime_config_paths import authoritative_config_yaml_path
 from src.application.settings import build_effective_env
 from src.application.wheel.config import (
-    WHEEL_ACTIVATION_DESCRIPTOR_FIELDS,
     build_wheel_policy_hash,
     evaluate_wheel_activation_readiness,
     resolve_wheel_activation_descriptor,
     resolve_wheel_config,
 )
 from src.application.wheel.workflows import _activation_effective_config, _activation_owner_preflight
-
-
-def _file_identity(path: Path, *, content: bool = False) -> dict[str, Any]:
-    stat = path.stat()
-    if not path.is_file():
-        raise ValueError("Wheel policy binding requires regular files")
-    result = {"path": str(path.resolve()), "device": stat.st_dev, "inode": stat.st_ino}
-    if content:
-        result["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
-    return result
 
 
 def rebind_wheel_policy(
@@ -91,7 +82,7 @@ def rebind_wheel_policy(
             raise ValueError(f"Wheel activation storage is {value['source_status']}")
         return value
 
-    def prepare(observed: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    def read_configuration() -> dict[str, Any]:
         source_identity = _file_identity(source, content=True)
         runtime_identity = _file_identity(runtime_path, content=True)
         _, installed = load_runtime_config(config_path=runtime_path, expected_market=market)
@@ -104,29 +95,27 @@ def rebind_wheel_policy(
         account_configured = resolve_wheel_config(installed, account, market=market)["account_configured"]
         if account not in installed.get("accounts", {}) or not account_configured:
             raise ValueError("Wheel account is not configured")
-        windows = observed["windows"]
-        if not windows or windows[-1]["deactivated_at_ms"] is not None:
-            raise ValueError("Wheel policy binding requires the latest open window")
-        current = windows[-1]
         descriptor = resolve_wheel_activation_descriptor(installed, market=market, account=account)
-        if descriptor is None or any(descriptor[k] != current[k] for k in ("market", "account", *WHEEL_ACTIVATION_DESCRIPTOR_FIELDS)):
-            raise ValueError("Wheel activation descriptor boundary mismatch")
         target = build_wheel_policy_hash(authored, market=market, account=account)
         if target != build_wheel_policy_hash(installed, market=market, account=account):
             raise ValueError("Wheel source/runtime policy mismatch")
-        original = {k: v for k, v in current.items() if k not in {"effective_policy_hash", "policy_binding_revision"}}
-        request = {
-            "schema_version": "wheel_policy_rebind_request.v1", "market": market, "account": account,
-            "request_id": request_id, "actor": actor, "window": original,
-            "expected_revision": current.get("policy_binding_revision", 0),
-            "effective_policy_hash": current.get("effective_policy_hash", current["policy_hash"]),
-            "target_policy_hash": target, "source": source_identity, "runtime": runtime_identity,
-            "ledger": _file_identity(sqlite_path),
-        }
         if source_identity != _file_identity(source, content=True) or runtime_identity != _file_identity(runtime_path, content=True):
             raise ValueError("Wheel configuration changed while preparing policy binding")
+        return {
+            "source": source_identity, "runtime": runtime_identity,
+            "target_policy_hash": target, "descriptor": descriptor,
+            "account_configured": account_configured,
+        }
+
+    def prepare(observed: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        configuration = read_configuration()
+        request = build_wheel_policy_binding_request(
+            observed=observed, configuration=configuration, sqlite_path=sqlite_path,
+            market=market, account=account, request_id=request_id, actor=actor,
+        )
         return request, evaluate_wheel_activation_readiness(
-            descriptor, current, account_configured=account_configured,
+            configuration["descriptor"], observed["windows"][-1],
+            account_configured=configuration["account_configured"],
         )
 
     def replay(observed: dict[str, Any]) -> bool:
@@ -186,21 +175,14 @@ def rebind_wheel_policy(
             result["write_applied"] = None  # Writer initialization/commit can fail with effects.
             repo = open_wheel_activation_repository(sqlite_path)
 
-            def commit(sqlite_repo: Any, conn: Any) -> dict[str, Any]:
-                windows = sqlite_repo.list_wheel_activation_windows(market=market, account=account, conn=conn)
-                current = sqlite_repo.get_current_wheel_activation_window(market=market, account=account, conn=conn)
-                if current:
-                    windows[-1] = current
-                tx_observed = {"windows": windows, "policy_bindings": sqlite_repo.list_wheel_policy_bindings(market=market, account=account, conn=conn)}
-                if replay(tx_observed):
-                    return result["receipt"]
-                checked, _ = prepare(tx_observed)
-                if canonical_sha256(checked) != expected_preview_hash:
-                    raise ValueError("stale Wheel policy binding preview")
-                return sqlite_repo.append_wheel_policy_binding(request=checked, request_hash=expected_preview_hash, conn=conn)
-
-            receipt = with_sqlite_repo_transaction(repo, commit)
-            result.update(receipt=receipt, write_applied=result.get("status") != "idempotent")
+            recorded = record_wheel_policy_binding(
+                repo, request=checked, expected_preview_hash=expected_preview_hash,
+                read_configuration=read_configuration,
+            )
+            receipt = recorded["receipt"]
+            if recorded["idempotent"]:
+                result.update(status="idempotent", receipt=receipt, preview_hash=receipt["request_hash"])
+            result.update(receipt=receipt, write_applied=not recorded["idempotent"])
             phase = "readback"
             after_request, after_ready = prepare(observe())
             result.update(readiness=after_ready, ready=after_ready["ready"])
@@ -210,6 +192,8 @@ def rebind_wheel_policy(
             result["status"] = "applied"
         return result
     except Exception as exc:
+        if isinstance(exc, WheelPolicyBindingReplayError):
+            result["receipt"] = exc.receipt
         result.update(status="incomplete", failure_phase=phase)
         if isinstance(exc, AgentToolError):
             result["cause"] = exc.details

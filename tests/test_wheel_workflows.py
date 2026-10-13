@@ -1,4 +1,5 @@
 from __future__ import annotations
+from src.application.ledger import wheel_commands as ledger_wheel_commands
 from src.application.ledger import trade_attribution as ledger_attribution
 
 from tests.cash_evidence_helpers import cash_portfolio
@@ -116,15 +117,15 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
     }
     revalidations = []
     monkeypatch.setattr(
-        wheel_workflows,
+        ledger_wheel_commands,
         "with_sqlite_repo_transaction",
         lambda active_repo, call, **_kwargs: call(active_repo, object()),
     )
-    monkeypatch.setattr(wheel_workflows, "_wheel_branch", lambda *_args, **_kwargs: branch)
-    monkeypatch.setattr(wheel_workflows, "project_wheel_intents", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(ledger_wheel_commands, "_wheel_branch", lambda *_args, **_kwargs: branch)
+    monkeypatch.setattr(ledger_wheel_commands, "project_wheel_intents", lambda *_args, **_kwargs: [])
     trusted_snapshot = {"snapshot_status": "trusted", "decision_state_fingerprint": "decision-1"}
     monkeypatch.setattr(
-        wheel_workflows, "decision_state_snapshot_from_locked_rows",
+        ledger_wheel_commands, "decision_state_snapshot_from_locked_rows",
         lambda *_args, **_kwargs: trusted_snapshot,
     )
 
@@ -143,7 +144,7 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
         @classmethod
         def now(cls, tz=None):
             return cls.fromtimestamp(1, timezone.utc)
-    monkeypatch.setattr(wheel_workflows, "datetime", Clock)
+    monkeypatch.setattr(ledger_wheel_commands, "datetime", Clock)
     original_create = wheel_workflows.create_wheel_intent
     request = {}
     def capture_request(active, **kwargs):
@@ -214,15 +215,15 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
             @classmethod
             def now(cls, tz=None):
                 return cls.fromtimestamp(902, timezone.utc)
-        monkeypatch.setattr(wheel_workflows, "datetime", ExpiredClock)
+        monkeypatch.setattr(ledger_wheel_commands, "datetime", ExpiredClock)
         return call(active, object())
-    monkeypatch.setattr(wheel_workflows, "with_sqlite_repo_transaction", delayed_transaction)
+    monkeypatch.setattr(ledger_wheel_commands, "with_sqlite_repo_transaction", delayed_transaction)
     with pytest.raises(ValueError, match="repreview required"):
         original_create(repo, **{**request, "apply_changes": True})
     assert len(revalidations) == 1
 
-    monkeypatch.setattr(wheel_workflows, "datetime", Clock)
-    monkeypatch.setattr(wheel_workflows, "with_sqlite_repo_transaction",
+    monkeypatch.setattr(ledger_wheel_commands, "datetime", Clock)
+    monkeypatch.setattr(ledger_wheel_commands, "with_sqlite_repo_transaction",
         lambda active, call, **kwargs: call(active, object()))
     candidate.pop("capacity_identity_hash")
     with pytest.raises(ValueError, match="capacity identity"):
@@ -304,7 +305,7 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
             "final_candidate_id": "candidate-1", "snapshot_hash": "snapshot-1",
             "batch_generation_hash": "generation-1", "expires_at_ms": 2_000_000, "market": "us"},
     })
-    monkeypatch.setattr(wheel_workflows, "with_sqlite_repo_transaction", delayed_transaction)
+    monkeypatch.setattr(ledger_wheel_commands, "with_sqlite_repo_transaction", delayed_transaction)
     replay = wheel_workflows.create_wheel_intent(repo, **{**confirm, "as_of_ms": 3_000_000,
         "runtime_config": {}, "capacity_fact": {}, "new_intent_enabled": False})
     assert replay["status"] == "idempotent"
@@ -345,17 +346,17 @@ def test_put_linkage_rejection_preview_uses_canonical_branch(
         "batch_generation_hash": "generation-1",
     }
     monkeypatch.setattr(
-        wheel_workflows,
+        ledger_wheel_commands,
         "with_sqlite_repo_transaction",
         lambda active_repo, call, **_kwargs: call(active_repo, object()),
     )
     monkeypatch.setattr(
-        wheel_workflows,
+        ledger_wheel_commands,
         "build_wheel_read_model_from_rows",
         lambda *_args, **_kwargs: {"wheel_branches": [branch]},
     )
     monkeypatch.setattr(
-        wheel_workflows,
+        ledger_wheel_commands,
         "project_wheel_linkage_candidates",
         lambda *_args, **_kwargs: [candidate],
     )
@@ -647,7 +648,7 @@ def test_call_intent_rechecks_source_conflict_inside_transaction(
     repo, lot_id = _wheel_repo(tmp_path)
     before = repo.list_wheel_events(account="lx")
     monkeypatch.setattr(
-        wheel_workflows, "decision_state_snapshot_from_locked_rows",
+        ledger_wheel_commands, "decision_state_snapshot_from_locked_rows",
         lambda *_args, **_kwargs: {"snapshot_status": "source_untrusted"},
     )
     with pytest.raises(ValueError, match="coverage settlement decision is unavailable"):
@@ -1278,7 +1279,7 @@ def test_call_linkage_reject_skips_put_candidates(
     repo, lot_id = _wheel_repo(tmp_path)
     call_lot_id = _open_unlinked_call(repo)
     candidate = build_wheel_read_model(repo, "lx", 4_000)["linkage_candidates"][0]
-    build_model = wheel_workflows.build_wheel_read_model_from_rows
+    build_model = ledger_wheel_commands.build_wheel_read_model_from_rows
     put_candidate = {
         "direction": "put",
         "option_record_id": "unlinked-put-lot",
@@ -1296,7 +1297,7 @@ def test_call_linkage_reject_skips_put_candidates(
         ]
         return model
 
-    monkeypatch.setattr(wheel_workflows, "build_wheel_read_model_from_rows", mixed_model)
+    monkeypatch.setattr(ledger_wheel_commands, "build_wheel_read_model_from_rows", mixed_model)
     before = repo.list_wheel_events(account="lx")
     kwargs = {
         "account": "lx",
