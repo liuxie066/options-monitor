@@ -102,6 +102,134 @@ def apply(action, ctx):
     return service_lifecycle(action, **ctx, confirm=True, expected_preview_sha256=preview['preview_sha256'])
 
 
+def install_readback_probe(ctx, manager, mode):
+    reloaded = False
+
+    def probe(command, **kwargs):
+        nonlocal reloaded
+        if command[1] == 'daemon-reload':
+            reloaded = True
+        after = reloaded if ctx['target'] == 'systemd' else (ctx['runtime_root'] / 'service.profile.json').exists()
+        if after and mode == 'loaded' and command[1] == 'print':
+            manager.states[command[-1].split('/')[-1]] = ('inactive', False)
+        result = manager(command, **kwargs)
+        if not after or command[1] not in {'show', 'print', 'print-disabled'}:
+            return result
+        if mode == 'disabled-timeout' and command[1] == 'print-disabled':
+            raise subprocess.TimeoutExpired(command, 3)
+        if command[1] == 'print-disabled':
+            return result
+        if mode == 'timeout' or (mode == 'single-timeout' and command[2] == 'options-monitor-trade-intake.service'):
+            raise subprocess.TimeoutExpired(command, 3)
+        text = result.stdout
+        if mode in {'bad-setting', 'error', 'not-found'}:
+            text = text.replace('LoadState=loaded', 'LoadState=' + mode)
+        elif mode == 'foreign-path':
+            text = text.replace(str(ctx['unit_root']), str(ctx['unit_root'] / 'other-instance'))
+        elif mode == 'foreign-runtime':
+            text = text.replace(str(ctx['runtime_root']), str(ctx['runtime_root'] / 'other-instance'))
+        elif mode in {'active', 'activating', 'failed', 'deactivating'}:
+            text = text.replace('ActiveState=inactive', 'ActiveState=' + mode)
+        if ctx['target'] == 'launchd' and mode in {'foreign-path', 'foreign-runtime'}:
+            return subprocess.CompletedProcess(command, 0, text, '')
+        return subprocess.CompletedProcess(command, result.returncode, text, result.stderr)
+
+    return probe
+
+
+def cli_install(ctx):
+    from functools import partial
+    from src.interfaces.cli.main import parse_args
+    from src.interfaces.cli.service_ops import handle_service_update_command
+
+    lifecycle = partial(service_lifecycle, unit_root=ctx['unit_root'], system=ctx['system'],
+                        run_cmd=ctx['run_cmd'], credential_store_root=ctx['credential_store_root'])
+    command = ['service', 'install', '--runtime-root', str(ctx['runtime_root']), '--target', ctx['target']]
+    preview = handle_service_update_command(parse_args(command), service_lifecycle_fn=lifecycle, repo_base_fn=lambda: REPO)
+    assert preview['ok'] and preview['data']['status'] == 'preview'
+    return handle_service_update_command(
+        parse_args(command + ['--confirm', '--expected-preview-sha256', preview['data']['preview_sha256']]),
+        service_lifecycle_fn=lifecycle, repo_base_fn=lambda: REPO,
+    )
+
+
+@pytest.mark.parametrize('target,mode', [
+    ('systemd', 'bad-setting'), ('systemd', 'error'), ('systemd', 'not-found'),
+    ('systemd', 'timeout'), ('systemd', 'single-timeout'),
+    ('systemd', 'foreign-path'), ('systemd', 'foreign-runtime'),
+    ('launchd', 'timeout'), ('launchd', 'disabled-timeout'),
+    ('launchd', 'foreign-path'), ('launchd', 'foreign-runtime'),
+])
+def test_cli_install_rejects_unverified_after_without_hiding_writes(instance, tmp_path, target, mode, capsys):
+    from src.interfaces.cli.main import _print
+
+    ctx, manager = context(instance, tmp_path, target)
+    ctx['run_cmd'] = install_readback_probe(ctx, manager, mode)
+    result = cli_install(ctx)
+    data = result['data']
+    assert not result['ok'] and not data['ok'] and data['status'] == 'unverified'
+    assert data['changed'] and data['files_changed'] and data['write_applied']
+    assert data['after'] and data['audit_id'] and data['rollback_hint']
+    writes = [op for op in data['operations'] if op.get('operation') == 'write']
+    assert writes and all(op['readback'] == 'matched' and Path(op['path']).exists() for op in writes)
+    mutations = [call for call in manager.calls if call[1] not in {'show', 'print', 'print-disabled'}]
+    assert mutations == ([['systemctl', 'daemon-reload']] if target == 'systemd' else [])
+    if target == 'systemd':
+        assert data['operations'][-1]['ok'] and data['operations'][-1]['command'] == ['systemctl', 'daemon-reload']
+    assert _print(result) == 2
+    assert json.loads(capsys.readouterr().out)['data']['status'] == 'unverified'
+
+
+@pytest.mark.parametrize('target,mode', [
+    ('systemd', 'inactive'), ('systemd', 'active'), ('systemd', 'activating'),
+    ('systemd', 'failed'), ('systemd', 'deactivating'),
+    ('launchd', 'absent'), ('launchd', 'loaded'),
+])
+def test_cli_install_accepts_known_owned_definitions_without_activation(instance, tmp_path, target, mode):
+    ctx, manager = context(instance, tmp_path, target)
+    ctx['run_cmd'] = install_readback_probe(ctx, manager, mode)
+    result = cli_install(ctx)
+    assert result['ok'] and result['data']['status'] == 'installed'
+    if target == 'launchd' and mode == 'absent':
+        assert {row['state'] for row in result['data']['after'].values()} == {'absent'}
+    if target == 'launchd' and mode == 'loaded':
+        assert 'loaded-not-running' in {row['state'] for row in result['data']['after'].values()}
+    assert not any(call[1] in {'enable', 'start', 'bootstrap', 'kickstart'} for call in manager.calls)
+
+
+@pytest.mark.parametrize('timeout', [False, True])
+def test_install_failed_reload_keeps_original_outcome_with_bad_after(instance, tmp_path, timeout):
+    ctx, manager = context(instance, tmp_path, 'systemd')
+    manager.fail, manager.timeout = 'daemon-reload', timeout
+    ctx['run_cmd'] = install_readback_probe(ctx, manager, 'bad-setting')
+    result = cli_install(ctx)
+    data = result['data']
+    assert not result['ok'] and data['status'] == ('unknown' if timeout else 'failed')
+    assert data['changed'] and data['write_applied']
+    assert {row['state'] for row in data['after'].values()} == {'unknown'}
+    assert len([call for call in manager.calls if call[1] == 'daemon-reload']) == 1
+    assert not data['operations'][-1]['ok']
+
+
+def test_install_unverified_reinstall_preserves_backup_and_fresh_retry(instance, tmp_path):
+    ctx, manager, path, original = changed_definition(instance, tmp_path)
+    ctx['run_cmd'] = install_readback_probe(ctx, manager, 'timeout')
+    result = cli_install(ctx)
+    data = result['data']
+    assert not result['ok'] and data['status'] == 'unverified'
+    operation = next(op for op in data['operations'] if op.get('path') == str(path))
+    backup = Path(operation['backup_path'])
+    assert operation['readback'] == 'matched' and backup.read_bytes() == original
+    assert data['changed'] and data['files_changed'] and data['write_applied']
+    files = {p: p.read_bytes() for p in ctx['unit_root'].rglob('*') if p.is_file()}
+    ctx['run_cmd'] = manager
+    manager.calls.clear()
+    retry = cli_install(ctx)['data']
+    assert retry['ok'] and retry['status'] == 'installed' and not retry['files_changed']
+    assert {p: p.read_bytes() for p in files} == files and backup.read_bytes() == original
+    assert [call for call in manager.calls if call[1] != 'show'] == [['systemctl', 'daemon-reload']]
+
+
 @pytest.mark.parametrize('target', ['systemd', 'launchd'])
 def test_install_preview_cancel_and_apply_without_start(instance, tmp_path, target):
     ctx, manager = context(instance, tmp_path, target)

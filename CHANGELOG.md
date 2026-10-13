@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- 服务安装仅在管理器读回确认定义加载及归属后报告成功；未知或不匹配时保留已写文件与备份回执，避免 reload 成功掩盖未确认的安装结果，macOS 未加载的 LaunchAgent 保持合法。
+
 ## 4.3.1 - 2026-10-13
 
 ### Improvements
