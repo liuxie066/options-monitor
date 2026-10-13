@@ -64,6 +64,8 @@
 
 所有显式字段须在一次调用内一致。双市场 cursor 不单独作为授权或市场选择器，续页重复原 `market`/`config_key`；原工具的 cursor 签名和筛选校验仍有效。Host 的路由标签与工具自身来源分列，未注入目标配置的工具不得声明目标市场事实。
 
+有可信读取代际时，模型上下文将渠道主配置显示为 `reference.channel_config_key`，避免把渠道 US 误认成固定查询市场；Host 内部的 `config_key`、配置路径及授权输入保持不变，无读取代际的固定范围模式保持原语义。用户先说「sy 查看成交归属」、再纠正「hk市场」或「港股」时，保留已明确的账户和查询目标，使用 HK 工具重新核验，不能要求重复确认已有账户。上下文只提供查询条件，不授予跨市场或跨账户权限；真正缺失或冲突的范围仍需澄清。切换市场后重新查询，不沿用旧市场 cursor 或数据；空结果、数据不可用、账户拒绝与市场不支持必须区分。
+
 复用归属：可信配置身份/新鲜度由 `bot.config_scope.resolve_trusted_config_scope` 统一提供给渠道、工具和记忆，授权代际由 `bot.model_config` 提供；市场解析复用 `symbol_identity.symbol_market`；Tool 参数校验复用 `bot.tools.build_tool_payload`；账户集合复用 `account_config.accounts_from_config`；只读数据复用 `agent_tools.positions`、`agent_tools.receipts`、`trades.attribution`；会话/记忆分别复用 `bot.session` / `bot.memory`。唯一新增配置名为 `bot.read_markets`，因为现有 `default_market_scope` 没有授权含义；事件 `event_type` 与归属 `symbol` 是既有 owner 的读投影/过滤扩展。检索范围：上述 owner、`config_validator.py`、`config_yaml.py`、Scene、`agent_tools.project`、Bot/channel 测试；关键词 `config_key`, `config_path`, `market`, `account`, `authority_scope`, `read_markets`。未找到可复用的 Bot 多市场权限集合；未引入第二套账本、路由器或持久状态。
 
 拒绝方案：把固定 `us` 改为默认 `all`（扩大所有部署读取面）；让模型直接改 `config_path`（越过可信边界）；按用户问题中的 `.HK` 直接授予权限（标的身份不是授权）；在 bot.default_market_scope 上叠加 Bot ACL（混淆 Control 与只读权限）。

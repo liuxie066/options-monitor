@@ -259,6 +259,7 @@ from src.application.ledger.decision_snapshot import (
 )
 from src.application.ledger.combo_membership import (
     validate_combo_group_membership,
+    validate_combo_pair_success,
 )
 from src.application.ledger.combo_reconciliation import (
     combo_attribution_candidates_from_rows,
@@ -700,6 +701,7 @@ __all__ = [
     "valid_void_target_event_id",
     "validate_account_lifecycle_resolution",
     "validate_combo_group_membership",
+    "validate_combo_pair_success",
     "validate_current_decision_projection_payload",
     "update_assigned_stock_fact",
     "validate_lifecycle_attempt_run_seal",

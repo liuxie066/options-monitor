@@ -20,7 +20,7 @@ from .current_decision_projection import capture_trade_event_decision_projection
 from .writer import _finish_trade_event_decision_projection
 from .read_only_evidence import open_trade_reconciliation_evidence_repo
 from .repository_wheel_policy import effective_wheel_window
-from .combo_membership import resolve_combo_group_membership, publish_combo_pair_identity
+from .combo_membership import resolve_combo_group_membership, publish_combo_pair_identity, validate_combo_pair_success
 from .combo_reconciliation import combo_attribution_candidates_from_rows
 from src.application.account_config import combo_reconciliation_mode_for_account
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings, resolve_futu_account_ids
@@ -349,6 +349,7 @@ def write_trade_attribution_decision(
     branch_generations: Mapping[str, str], now_ms: int, manual: bool,
     wheel_events: Sequence[Mapping[str, Any]] = (),
     request_content: Mapping[str, Any] | None = None,
+    confirmation_receipt_route: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Publish every member and conflict proof together under the caller's lock."""
     if conn is None or not conn.in_transaction or not plans or conflicts and not manual:
@@ -417,11 +418,13 @@ def write_trade_attribution_decision(
     for event in [*wheel_events, *resolutions]:
         repo.append_wheel_event_once(event, conn=conn)
     runtime = run_position_projection_in_transaction(repo, events, conn=conn, mode="forced_full")
+    success_pairs = []
     for inference_id, pair in {plan["inference"]["inference_id"]: plan["inference"]
                                for plan in plans if plan.get("inference")}.items():
         pair = dict(pair)
         revalidated_expired = pair.pop("revalidated_expired", False) is True
         repo.upsert_combo_pair_inference(pair, conn=conn, reactivate_expired=manual and revalidated_expired)
+        existing_identity = repo.get_strategy_group_identity(pair["strategy_group_id"], conn=conn)
         identity, _membership = publish_combo_pair_identity(repo, conn=conn, inference=pair)
         existing_pair = repo.get_combo_pair_inference(inference_id, conn=conn)
         if existing_pair["status"] == "user_confirmed":
@@ -434,6 +437,8 @@ def write_trade_attribution_decision(
                 "strategy_group_id": pair["strategy_group_id"], "identity_hash": identity["identity_hash"],
                 "put_adoption_event_id": proof_by_lot[pair["put_record_id"]],
                 "call_adoption_event_id": proof_by_lot[pair["call_record_id"]]}, conn=conn)
+        if existing_identity is None:
+            success_pairs.append((identity, inference_id))
     for group in {member[side].get("strategy_group_id") for member in members for side in ("before", "after")} - {None, ""}:
         membership = resolve_combo_group_membership(group_id=group, account=account,
             trade_events=repo.list_trade_events(conn=conn), projected_position_lots=repo.list_position_lots(conn=conn))
@@ -458,6 +463,11 @@ def write_trade_attribution_decision(
         raise ValueError("attribution conflict resolution readback failed")
     if any(after_statuses.get(key) != value for key, value in prior_statuses.items() if key not in selected):
         raise ValueError("attribution decision changed another conflict")
+    from .notification_outbox import enqueue_combo_pair_success_in_transaction
+    for identity, inference_id in success_pairs:
+        enqueue_combo_pair_success_in_transaction(repo, conn=conn, identity=identity,
+            inference_id=inference_id, confirmed_at_ms=now_ms,
+            route=dict(confirmation_receipt_route or {}), validate_pair=validate_combo_pair_success)
     return {"decision": decision, "proof_event_ids": [event.event_id for event in events],
         "resolution_event_ids": [row["event_id"] for row in resolutions], "write_applied": any(runtime.created_flags)}
 
@@ -834,6 +844,7 @@ def apply_trade_attribution(
     member_decisions: tuple[Mapping[str, Any], ...] = (),
     before_commit: Any = None,
     reference: Mapping[str, Any] | None = None,
+    confirmation_receipt_route: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One arbitration and patch path for preview, single and complete decisions."""
 
@@ -1035,7 +1046,7 @@ def apply_trade_attribution(
         result = write_trade_attribution_decision(active, conn=conn, account=account, request_id=request_id,
             actor=actor, input_hash=expected_input_hash, plans=plans, conflicts=conflicts,
             branch_generations=generations, now_ms=instant, manual=manual, wheel_events=intent_events,
-            request_content=request_content)
+            request_content=request_content, confirmation_receipt_route=confirmation_receipt_route)
         after_rows = read_trade_attribution_snapshot(active, account=account, market=market, conn=conn)
         after_model = build_wheel_read_model_from_rows(after_rows, account=account, as_of_ms=instant)
         after_facts = trade_attribution_facts_from_events(after_rows["trade_events"], account=account)
