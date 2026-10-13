@@ -182,14 +182,17 @@ def _runtime_context(
         if value in (None, ""):
             continue
         context[slot["authority"]][name] = value
+    fixed_tool_input = {
+        **context["fixed_tool_scope"],
+        **context["host_only_tool_scope"],
+    }
+    if fixed_tool_input.get("read_generation") and "config_key" in context["fixed_tool_scope"]:
+        # The Host routes each read within its grant; the channel origin is not a fixed query market.
+        context["reference"]["channel_config_key"] = context["fixed_tool_scope"].pop("config_key")
     populated = {
         authority: values
         for authority, values in context.items()
         if values and authority != "host_only_tool_scope"
-    }
-    fixed_tool_input = {
-        **context["fixed_tool_scope"],
-        **context["host_only_tool_scope"],
     }
     if not populated:
         return "", fixed_tool_input
