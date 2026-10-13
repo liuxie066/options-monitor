@@ -358,7 +358,49 @@ from .trade_attribution import (
 )
 from .trade_attribution_migration import preview_trade_attribution_migration, apply_trade_attribution_migration
 
+from .wheel_commands import (
+    decide_wheel_branch,
+    end_wheel_lifecycle,
+    create_wheel_call_intent,
+    cancel_wheel_call_intent,
+    reject_wheel_call_linkage,
+    create_wheel_intent,
+    cancel_wheel_intent,
+    reject_wheel_linkage,
+    change_wheel_activation_window,
+    wheel_activation_request_hash,
+    validate_wheel_activation_request,
+    wheel_activation_result,
+    wheel_activation_descriptor,
+)
+
+from .wheel_policy_binding import (
+    WheelPolicyBindingReplayError,
+    build_wheel_policy_binding_request,
+    record_wheel_policy_binding,
+    wheel_policy_file_identity,
+)
+
 __all__ = [
+    "WheelPolicyBindingReplayError",
+    "build_wheel_policy_binding_request",
+    "record_wheel_policy_binding",
+    "wheel_policy_file_identity",
+
+    "decide_wheel_branch",
+    "end_wheel_lifecycle",
+    "create_wheel_call_intent",
+    "cancel_wheel_call_intent",
+    "reject_wheel_call_linkage",
+    "create_wheel_intent",
+    "cancel_wheel_intent",
+    "reject_wheel_linkage",
+    "change_wheel_activation_window",
+    "wheel_activation_request_hash",
+    "validate_wheel_activation_request",
+    "wheel_activation_result",
+    "wheel_activation_descriptor",
+
     "WHEEL_READ_MODEL_SCHEMA",
     "build_assigned_stock_projection_from_rows",
     "build_wheel_read_model_from_rows",

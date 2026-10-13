@@ -1,3 +1,4 @@
+from src.application.ledger import wheel_commands as ledger_wheel_commands
 """Current opening policy must agree with sealed evidence before any new intent."""
 import json
 from hashlib import sha256
@@ -88,7 +89,7 @@ def _environment(tmp_path, direction, monkeypatch):
             @classmethod
             def now(cls, tz=None):
                 return cls.fromtimestamp(5, timezone.utc)
-        monkeypatch.setattr(workflows, "datetime", Clock)
+        monkeypatch.setattr(ledger_wheel_commands, "datetime", Clock)
     repo, _, stock_id = _assign_short_put(tmp_path, wheel_start_enabled=direction == "call")
     if direction == "put":
         key = ContractKey.from_values(broker="富途", account="lx", underlying_symbol="NVDA",
@@ -393,20 +394,20 @@ def test_scoped_published_candidate_preserves_current_policy_checks(tmp_path, mo
         else:
             payload.update(apply=True, confirm=True)
         if direction == "put":
-            original_clock = workflows.datetime
+            original_clock = ledger_wheel_commands.datetime
             class ExpiredClock(datetime):
                 @classmethod
                 def now(cls, tz=None):
                     return cls.fromtimestamp(906, timezone.utc)
             # Both public facades still submit historical as_of_ms=5000.
-            monkeypatch.setattr(workflows, "datetime", ExpiredClock)
+            monkeypatch.setattr(ledger_wheel_commands, "datetime", ExpiredClock)
             with pytest.raises(error, match="repreview required"):
                 invoke()
             assert repo.list_wheel_events(account="lx") == before
-            monkeypatch.setattr(workflows, "datetime", original_clock)
+            monkeypatch.setattr(ledger_wheel_commands, "datetime", original_clock)
         assert invoke()["write_applied"] is True
         if direction == "put":
-            monkeypatch.setattr(workflows, "datetime", ExpiredClock)
+            monkeypatch.setattr(ledger_wheel_commands, "datetime", ExpiredClock)
         accepted_events = repo.list_wheel_events(account="lx")
         authority.state_path.unlink()
         config["wheel"]["call"]["min_dte"] = 7

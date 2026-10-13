@@ -426,3 +426,66 @@ def test_accept_policy_request_id_is_stable_and_discriminating():
         {**base, "target_policy_hash": "b" * 64},
     ]
     assert len({accept_policy_request_id(**item) for item in variants} | {request_id}) == 1 + len(variants)
+
+
+def test_same_request_committed_before_ledger_lock_returns_receipt(tmp_path, monkeypatch):
+    from src.application.ledger import wheel_policy_binding as command
+
+    root, preview = _stale_deployment(tmp_path, monkeypatch)
+    original = command.with_sqlite_repo_transaction
+    winner = {}
+
+    def commit_first(repo, callback):
+        winner.update(original(repo, callback))
+        return original(repo, callback)
+
+    monkeypatch.setattr(command, "with_sqlite_repo_transaction", commit_first)
+    result = _rebind(root, apply=True, preview=preview["preview_hash"])
+    assert result["status"] == "idempotent" and result["write_applied"] is False
+    assert result["receipt"] == winner["receipt"]
+    assert len(_read(root)["policy_bindings"]) == 1
+
+
+def test_config_change_before_ledger_lock_has_no_binding_effect(tmp_path, monkeypatch):
+    from src.application.ledger import wheel_policy_binding as command
+
+    root, preview = _stale_deployment(tmp_path, monkeypatch)
+    original = command.with_sqlite_repo_transaction
+
+    def change_before_lock(repo, callback):
+        _edit(root, policy={"min_dte": 7, "max_dte": 80})
+        return original(repo, callback)
+
+    monkeypatch.setattr(command, "with_sqlite_repo_transaction", change_before_lock)
+    with pytest.raises(AgentToolError, match="differs from canonical YAML") as error:
+        _rebind(root, apply=True, preview=preview["preview_hash"])
+    assert error.value.details["failure_phase"] == "ledger_commit"
+    assert _read(root)["policy_bindings"] == []
+
+
+def test_failed_ledger_lock_replay_preserves_committed_receipt(tmp_path, monkeypatch):
+    from src.application.ledger import wheel_policy_binding as command
+
+    root, preview = _stale_deployment(tmp_path, monkeypatch)
+    original = command.with_sqlite_repo_transaction
+    source = root / "config.yaml"
+    source_bytes = source.read_bytes()
+    winner = {}
+
+    def commit_then_change_config(repo, callback):
+        winner.update(original(repo, callback))
+        _edit(root, policy={"min_dte": 7, "max_dte": 80})
+        return original(repo, callback)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(command, "with_sqlite_repo_transaction", commit_then_change_config)
+        with pytest.raises(AgentToolError, match="differs from canonical YAML") as error:
+            _rebind(root, apply=True, preview=preview["preview_hash"])
+    assert error.value.details["failure_phase"] == "ledger_commit"
+    assert error.value.details["receipt"] == winner["receipt"]
+    assert error.value.details["write_applied"] is None
+    assert len(_read(root)["policy_bindings"]) == 1
+    source.write_bytes(source_bytes)
+    repeated = _rebind(root, apply=True, preview=preview["preview_hash"])
+    assert repeated["status"] == "idempotent" and repeated["write_applied"] is False
+    assert repeated["receipt"] == winner["receipt"]
