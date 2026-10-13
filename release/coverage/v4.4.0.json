@@ -1,0 +1,634 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.4.0",
+  "base": {
+    "tag": "v4.3.1",
+    "commit": "94ac0d1431b33c20248e66979ce8d4649d59267f"
+  },
+  "reviewed_head": "ec3913e21b7f2b2597917b7834fb3a91f0e226be",
+  "commits": [
+    {
+      "sha": "05c12ace96044ed623542cb1818dc8c9816c2df3",
+      "subject": "fix(inbound): recover due Feishu replies without new events"
+    },
+    {
+      "sha": "17e0e23019f38892f4872c22afedfcaf9821ad0e",
+      "subject": "fix(inbound): bound uncertain reply replay and fence settlement"
+    },
+    {
+      "sha": "4d79dc84c30e4fd951dee3749ddcd9bcab020f09",
+      "subject": "test(inbound): capture cancellation reply requests without guard callbacks"
+    },
+    {
+      "sha": "2cf254f93d628f9e9a26668d7f0c2a9ea8f3e34c",
+      "subject": "fix(tools): authorize canonical position inspect results"
+    },
+    {
+      "sha": "8a7239d355b6e4141ac2cf4b1267947485db5e3a",
+      "subject": "Merge pull request #583 from liuxie066/remaining-query-storage-20261013"
+    },
+    {
+      "sha": "9ec08a73574d4e9caf8da80fe3299d94818c9215",
+      "subject": "chore(gateflow): accept performance query presentation plan"
+    },
+    {
+      "sha": "074af4d269e60c9ceb343280d0164dd04db9fd6f",
+      "subject": "refactor(performance): separate query data from Tool presentation"
+    },
+    {
+      "sha": "3e581bd05f37edb20d1878cb251694095a5612ee",
+      "subject": "chore(gateflow): accept performance query presentation deepreview"
+    },
+    {
+      "sha": "4362f9011ad810b57b7bf004f14820b1f71774b3",
+      "subject": "chore(gateflow): accept Wheel ledger transaction plan"
+    },
+    {
+      "sha": "3427f037e4059916f8ae5ea379c5f690e9616534",
+      "subject": "chore(gateflow): accept wheel-ledger-transactions S1"
+    },
+    {
+      "sha": "3fc24980d23137b65abb95976afb757aeb8ad725",
+      "subject": "chore(gateflow): accept deepreview for wheel-ledger-transactions"
+    },
+    {
+      "sha": "7474a25258c56a32e282cdc610e25c31d631e17e",
+      "subject": "Merge pull request #585 from liuxie066/wheel-ledger-transactions-20261013"
+    },
+    {
+      "sha": "fcc6804faf1d08c67e57aaf224c98113c12a5cd7",
+      "subject": "chore(inbound): integrate main for reply recovery"
+    },
+    {
+      "sha": "26677f7e649a4ec47024a956aa8f61c7e25b1ddd",
+      "subject": "chore(inbound): accept latest-main reply recovery review"
+    },
+    {
+      "sha": "f89dabb097e4cee0a605a8f8c3291498ac98cdd4",
+      "subject": "Merge pull request #580 from liuxie066/codex/fix-feishu-reply-recovery"
+    },
+    {
+      "sha": "f6a56b2dd549c68fc487befe25508d01970c6dbb",
+      "subject": "chore(gateflow): accept HK query follow-up plan"
+    },
+    {
+      "sha": "34caf2ade5c8f6b024fce5aa1fff5ab900e22835",
+      "subject": "chore(performance): integrate main for query presentation"
+    },
+    {
+      "sha": "8691b14a553bdc406a838025e8494efca4fa58a8",
+      "subject": "fix(bot): preserve query scope across market corrections"
+    },
+    {
+      "sha": "177274249c8a3a6a2e712a8b4bbb1019ab073047",
+      "subject": "chore(gateflow): accept HK query aggregate review"
+    },
+    {
+      "sha": "2c42c0e01e1eaab699f5f41aabb4025906d135d2",
+      "subject": "Merge pull request #584 from liuxie066/performance-query-presentation-20261013"
+    },
+    {
+      "sha": "c814f65a7e28f2602375172ff8d86307138b4d1b",
+      "subject": "refactor(ledger): consolidate domain and transaction ownership"
+    },
+    {
+      "sha": "68f8265cfde01bfad536e7844baf36b3387d9786",
+      "subject": "chore(merge): integrate current main into owner consolidation"
+    },
+    {
+      "sha": "a49ddd26e6a1072f72e63101c33e86daaaceb5dc",
+      "subject": "style(ledger): trim trailing blank lines in owner modules"
+    },
+    {
+      "sha": "e9ea1379f71ab33c1faaae3e354522f23b6d406b",
+      "subject": "feat(trades): send a durable Combo pairing-success receipt once per group"
+    },
+    {
+      "sha": "df3687901cef8419f1ed576e93edceee74f117c9",
+      "subject": "Merge pull request #588 from liuxie066/codex/consolidate-ledger-domain-owners"
+    },
+    {
+      "sha": "9d37e66b9a6606d30d2582c8134f2bfd5f58a563",
+      "subject": "chore(trades): integrate current main for Combo receipt delivery"
+    },
+    {
+      "sha": "279fbbf58de1c2d0977ab8276bfe85079f102237",
+      "subject": "perf(ci): distribute full regression with verified shard coverage"
+    },
+    {
+      "sha": "04c18451c0575e321af0c35acfb8348aa5ff2cda",
+      "subject": "perf(ci): reduce regression tail with six file shards"
+    },
+    {
+      "sha": "cddc5b57905bdaf44834b30c8a20f7c4e894047e",
+      "subject": "perf(ci): start PR shards without release planning delay"
+    },
+    {
+      "sha": "3074b2bfbec6cb75fedfb033bf3da63230c16cf2",
+      "subject": "Merge pull request #589 from liuxie066/codex/combo-pair-success-receipt"
+    },
+    {
+      "sha": "d218bcd8aa39f6cab5514d3dafb868019a15bac5",
+      "subject": "chore(bot): integrate Combo receipt main for HK query"
+    },
+    {
+      "sha": "43c876c5743f1f8339e183707d092b734097dc8c",
+      "subject": "Merge pull request #587 from liuxie066/codex/bot-hk-query-followup"
+    },
+    {
+      "sha": "fae96b66256732898f623506579d3ad19054ce64",
+      "subject": "chore(ci): integrate current main for delivery speed validation"
+    },
+    {
+      "sha": "bf877be2208f2d3488981c921a8828105f0eae78",
+      "subject": "Merge pull request #593 from liuxie066/codex/delivery-speed-20261013"
+    },
+    {
+      "sha": "d849f134cdf9348b6a09a6d0a677eb9b4b6a6d2c",
+      "subject": "chore(gateflow): accept plan for repair expected hash #592"
+    },
+    {
+      "sha": "2560747b4f27033d55c1a18f76713721014d1ecf",
+      "subject": "fix(service): verify install manager readback (#527)"
+    },
+    {
+      "sha": "3db2ebc10fba4c007698b5b491c6e523effc69b9",
+      "subject": "chore(service): sync main for install verification"
+    },
+    {
+      "sha": "59685f815fd1d68cc58b3341a9079945a0c20b26",
+      "subject": "chore(gateflow): accept plan for inbound replay authorization #544"
+    },
+    {
+      "sha": "4a12e2d2385cbe436ecbb68e02979ef4b12d46c1",
+      "subject": "fix(ledger): reject unsupported repair hashes (#592)"
+    },
+    {
+      "sha": "1be04078dd07caf84c18ec88c980ec25c183449a",
+      "subject": "chore(gateflow): integrate latest main for repair hash #592"
+    },
+    {
+      "sha": "b8ec3e864edce9bdd52369fe28f2a5656e746454",
+      "subject": "chore(gateflow): accept aggregate review for repair hash #592"
+    },
+    {
+      "sha": "9b8c48a517a44c34c1a8e75f0cd5a2897d84917a",
+      "subject": "fix(bot): authenticate current sender before replaying inbound response"
+    },
+    {
+      "sha": "0786eb31e9718b1400e70b5795d7d8e43067714e",
+      "subject": "chore(bot): integrate current main for authorization validation"
+    },
+    {
+      "sha": "2d44729581e6a89d9f22e8eaf813bef589a51497",
+      "subject": "Merge pull request #594 from liuxie066/codex/fix-service-install-verification-527"
+    },
+    {
+      "sha": "4f580376d271856eca56d7acec1025caa0538283",
+      "subject": "chore(bot): sync merged service fix for authorization validation"
+    },
+    {
+      "sha": "349f9c7d418c903e3eb4d1953c2eeb80d7d89a65",
+      "subject": "chore(ledger): integrate current main for repair hash validation"
+    },
+    {
+      "sha": "f0dce2f5761cb7f91d393a0f1eb084f1e209270d",
+      "subject": "Merge pull request #596 from liuxie066/codex/fix-bot-replay-authorization-544"
+    },
+    {
+      "sha": "8adb03c42bb326c6264209e4eac63767ae2a1f25",
+      "subject": "chore(ledger): integrate final main for repair hash validation"
+    },
+    {
+      "sha": "ec3913e21b7f2b2597917b7834fb3a91f0e226be",
+      "subject": "Merge pull request #595 from liuxie066/codex/fix-repair-expected-hash-592"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "新确认的 Combo 组合新增独立的配对成功回执，展示账户、标的、两腿与确认时间；复用账本事务和持久化发送意图，原成交消息保持不变，不自动补发历史组合。",
+      "commits": [
+        "e9ea1379f71ab33c1faaae3e354522f23b6d406b",
+        "9d37e66b9a6606d30d2582c8134f2bfd5f58a563",
+        "3074b2bfbec6cb75fedfb033bf3da63230c16cf2"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "完整回归按测试文件分配到八个 CI 分片，并核验完整收集、提交身份及每项恰好执行一次；保留全部测试和门禁，减少 CI 等待，本地发布预检保持完整四进程回归。",
+      "commits": [
+        "279fbbf58de1c2d0977ab8276bfe85079f102237",
+        "04c18451c0575e321af0c35acfb8348aa5ff2cda",
+        "cddc5b57905bdaf44834b30c8a20f7c4e894047e",
+        "fae96b66256732898f623506579d3ad19054ce64",
+        "bf877be2208f2d3488981c921a8828105f0eae78"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Bot 重试回复前统一核验当前发送者权限，拒绝请求保留审计和原结果，合法重试保持幂等。",
+      "commits": [
+        "59685f815fd1d68cc58b3341a9079945a0c20b26",
+        "9b8c48a517a44c34c1a8e75f0cd5a2897d84917a",
+        "0786eb31e9718b1400e70b5795d7d8e43067714e",
+        "4f580376d271856eca56d7acec1025caa0538283",
+        "f0dce2f5761cb7f91d393a0f1eb084f1e209270d"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "服务安装仅在管理器读回确认定义加载及归属后报告成功；未知或不匹配时保留已写文件与备份回执，避免 reload 成功掩盖未确认的安装结果，macOS 未加载的 LaunchAgent 保持合法。",
+      "commits": [
+        "2560747b4f27033d55c1a18f76713721014d1ecf",
+        "3db2ebc10fba4c007698b5b491c6e523effc69b9",
+        "2d44729581e6a89d9f22e8eaf813bef589a51497"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "身份与 OpenD 时间修复在 apply 时明确拒绝显式传入的 expected_input_hash（包括空字符串与空白），避免静默忽略；不传 hash 的合法修复与重试保持原状。",
+      "commits": [
+        "d849f134cdf9348b6a09a6d0a677eb9b4b6a6d2c",
+        "4a12e2d2385cbe436ecbb68e02979ef4b12d46c1",
+        "1be04078dd07caf84c18ec88c980ec25c183449a",
+        "b8ec3e864edce9bdd52369fe28f2a5656e746454",
+        "349f9c7d418c903e3eb4d1953c2eeb80d7d89a65",
+        "8adb03c42bb326c6264209e4eac63767ae2a1f25",
+        "ec3913e21b7f2b2597917b7834fb3a91f0e226be"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "持仓 inspect 通过账本规范化身份核验账户授权，修复合法持仓被拒绝及冲突顶层字段覆盖真实身份的问题，查询保持只读。",
+      "commits": [
+        "2cf254f93d628f9e9a26668d7f0c2a9ea8f3e34c",
+        "8a7239d355b6e4141ac2cf4b1267947485db5e3a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "期权绩效查询返回完整业务分页与汇总组，仅在 Tool 展示层限制响应长度；CLI 与 HTTP 不再被展示预算截断，旧 Tool 文本游标需重新发起查询。",
+      "commits": [
+        "9ec08a73574d4e9caf8da80fe3299d94818c9215",
+        "074af4d269e60c9ceb343280d0164dd04db9fd6f",
+        "3e581bd05f37edb20d1878cb251694095a5612ee",
+        "34caf2ade5c8f6b024fce5aa1fff5ab900e22835",
+        "2c42c0e01e1eaab699f5f41aabb4025906d135d2"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Bot 仅纠正市场时沿用已明确的账户和查询目标，在所选市场重新核验权限与配置，避免要求重复确认账户。",
+      "commits": [
+        "f6a56b2dd549c68fc487befe25508d01970c6dbb",
+        "8691b14a553bdc406a838025e8494efca4fa58a8",
+        "177274249c8a3a6a2e712a8b4bbb1019ab073047",
+        "d218bcd8aa39f6cab5514d3dafb868019a15bac5",
+        "43c876c5743f1f8339e183707d092b734097dc8c"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Feishu 回复失败后可在启动及空闲时恢复到期重试，复用原正文与消息身份；租约、退避及重放窗口有界，不确定发送结果仍保守处理。",
+      "commits": [
+        "05c12ace96044ed623542cb1818dc8c9816c2df3",
+        "17e0e23019f38892f4872c22afedfcaf9821ad0e",
+        "4d79dc84c30e4fd951dee3749ddcd9bcab020f09",
+        "fcc6804faf1d08c67e57aaf224c98113c12a5cd7",
+        "26677f7e649a4ec47024a956aa8f61c7e25b1ddd",
+        "f89dabb097e4cee0a605a8f8c3291498ac98cdd4"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "4362f9011ad810b57b7bf004f14820b1f71774b3",
+      "reason": "内部领域与账本责任归属整理及其集成、格式和审阅记录；保留公开 facade、业务规则、配置锁、预览确认、幂等回执与事务回滚语义，没有新增用户能力或数据库迁移。设计及完整回归见关联 PR。"
+    },
+    {
+      "commit": "3427f037e4059916f8ae5ea379c5f690e9616534",
+      "reason": "内部领域与账本责任归属整理及其集成、格式和审阅记录；保留公开 facade、业务规则、配置锁、预览确认、幂等回执与事务回滚语义，没有新增用户能力或数据库迁移。设计及完整回归见关联 PR。"
+    },
+    {
+      "commit": "3fc24980d23137b65abb95976afb757aeb8ad725",
+      "reason": "内部领域与账本责任归属整理及其集成、格式和审阅记录；保留公开 facade、业务规则、配置锁、预览确认、幂等回执与事务回滚语义，没有新增用户能力或数据库迁移。设计及完整回归见关联 PR。"
+    },
+    {
+      "commit": "7474a25258c56a32e282cdc610e25c31d631e17e",
+      "reason": "内部领域与账本责任归属整理及其集成、格式和审阅记录；保留公开 facade、业务规则、配置锁、预览确认、幂等回执与事务回滚语义，没有新增用户能力或数据库迁移。设计及完整回归见关联 PR。"
+    },
+    {
+      "commit": "c814f65a7e28f2602375172ff8d86307138b4d1b",
+      "reason": "内部领域与账本责任归属整理及其集成、格式和审阅记录；保留公开 facade、业务规则、配置锁、预览确认、幂等回执与事务回滚语义，没有新增用户能力或数据库迁移。设计及完整回归见关联 PR。"
+    },
+    {
+      "commit": "68f8265cfde01bfad536e7844baf36b3387d9786",
+      "reason": "内部领域与账本责任归属整理及其集成、格式和审阅记录；保留公开 facade、业务规则、配置锁、预览确认、幂等回执与事务回滚语义，没有新增用户能力或数据库迁移。设计及完整回归见关联 PR。"
+    },
+    {
+      "commit": "a49ddd26e6a1072f72e63101c33e86daaaceb5dc",
+      "reason": "内部领域与账本责任归属整理及其集成、格式和审阅记录；保留公开 facade、业务规则、配置锁、预览确认、幂等回执与事务回滚语义，没有新增用户能力或数据库迁移。设计及完整回归见关联 PR。"
+    },
+    {
+      "commit": "df3687901cef8419f1ed576e93edceee74f117c9",
+      "reason": "内部领域与账本责任归属整理及其集成、格式和审阅记录；保留公开 facade、业务规则、配置锁、预览确认、幂等回执与事务回滚语义，没有新增用户能力或数据库迁移。设计及完整回归见关联 PR。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "05c12ace96044ed623542cb1818dc8c9816c2df3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/580"
+      ]
+    },
+    {
+      "commit": "17e0e23019f38892f4872c22afedfcaf9821ad0e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/580"
+      ]
+    },
+    {
+      "commit": "4d79dc84c30e4fd951dee3749ddcd9bcab020f09",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/580"
+      ]
+    },
+    {
+      "commit": "2cf254f93d628f9e9a26668d7f0c2a9ea8f3e34c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/583"
+      ]
+    },
+    {
+      "commit": "8a7239d355b6e4141ac2cf4b1267947485db5e3a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/583"
+      ]
+    },
+    {
+      "commit": "9ec08a73574d4e9caf8da80fe3299d94818c9215",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/584"
+      ]
+    },
+    {
+      "commit": "074af4d269e60c9ceb343280d0164dd04db9fd6f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/584"
+      ]
+    },
+    {
+      "commit": "3e581bd05f37edb20d1878cb251694095a5612ee",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/584"
+      ]
+    },
+    {
+      "commit": "4362f9011ad810b57b7bf004f14820b1f71774b3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/585"
+      ]
+    },
+    {
+      "commit": "3427f037e4059916f8ae5ea379c5f690e9616534",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/585"
+      ]
+    },
+    {
+      "commit": "3fc24980d23137b65abb95976afb757aeb8ad725",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/585"
+      ]
+    },
+    {
+      "commit": "7474a25258c56a32e282cdc610e25c31d631e17e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/585"
+      ]
+    },
+    {
+      "commit": "fcc6804faf1d08c67e57aaf224c98113c12a5cd7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/580"
+      ]
+    },
+    {
+      "commit": "26677f7e649a4ec47024a956aa8f61c7e25b1ddd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/580"
+      ]
+    },
+    {
+      "commit": "f89dabb097e4cee0a605a8f8c3291498ac98cdd4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/580"
+      ]
+    },
+    {
+      "commit": "f6a56b2dd549c68fc487befe25508d01970c6dbb",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/587"
+      ]
+    },
+    {
+      "commit": "34caf2ade5c8f6b024fce5aa1fff5ab900e22835",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/584"
+      ]
+    },
+    {
+      "commit": "8691b14a553bdc406a838025e8494efca4fa58a8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/587"
+      ]
+    },
+    {
+      "commit": "177274249c8a3a6a2e712a8b4bbb1019ab073047",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/587"
+      ]
+    },
+    {
+      "commit": "2c42c0e01e1eaab699f5f41aabb4025906d135d2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/584"
+      ]
+    },
+    {
+      "commit": "c814f65a7e28f2602375172ff8d86307138b4d1b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/588"
+      ]
+    },
+    {
+      "commit": "68f8265cfde01bfad536e7844baf36b3387d9786",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/588"
+      ]
+    },
+    {
+      "commit": "a49ddd26e6a1072f72e63101c33e86daaaceb5dc",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/588"
+      ]
+    },
+    {
+      "commit": "e9ea1379f71ab33c1faaae3e354522f23b6d406b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/589"
+      ]
+    },
+    {
+      "commit": "df3687901cef8419f1ed576e93edceee74f117c9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/588"
+      ]
+    },
+    {
+      "commit": "9d37e66b9a6606d30d2582c8134f2bfd5f58a563",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/589"
+      ]
+    },
+    {
+      "commit": "279fbbf58de1c2d0977ab8276bfe85079f102237",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/593"
+      ]
+    },
+    {
+      "commit": "04c18451c0575e321af0c35acfb8348aa5ff2cda",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/593"
+      ]
+    },
+    {
+      "commit": "cddc5b57905bdaf44834b30c8a20f7c4e894047e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/593"
+      ]
+    },
+    {
+      "commit": "3074b2bfbec6cb75fedfb033bf3da63230c16cf2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/589"
+      ]
+    },
+    {
+      "commit": "d218bcd8aa39f6cab5514d3dafb868019a15bac5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/587"
+      ]
+    },
+    {
+      "commit": "43c876c5743f1f8339e183707d092b734097dc8c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/587"
+      ]
+    },
+    {
+      "commit": "fae96b66256732898f623506579d3ad19054ce64",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/593"
+      ]
+    },
+    {
+      "commit": "bf877be2208f2d3488981c921a8828105f0eae78",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/593"
+      ]
+    },
+    {
+      "commit": "d849f134cdf9348b6a09a6d0a677eb9b4b6a6d2c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/595"
+      ]
+    },
+    {
+      "commit": "2560747b4f27033d55c1a18f76713721014d1ecf",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/594"
+      ]
+    },
+    {
+      "commit": "3db2ebc10fba4c007698b5b491c6e523effc69b9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/594"
+      ]
+    },
+    {
+      "commit": "59685f815fd1d68cc58b3341a9079945a0c20b26",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/596"
+      ]
+    },
+    {
+      "commit": "4a12e2d2385cbe436ecbb68e02979ef4b12d46c1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/595"
+      ]
+    },
+    {
+      "commit": "1be04078dd07caf84c18ec88c980ec25c183449a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/595"
+      ]
+    },
+    {
+      "commit": "b8ec3e864edce9bdd52369fe28f2a5656e746454",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/595"
+      ]
+    },
+    {
+      "commit": "9b8c48a517a44c34c1a8e75f0cd5a2897d84917a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/596"
+      ]
+    },
+    {
+      "commit": "0786eb31e9718b1400e70b5795d7d8e43067714e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/596"
+      ]
+    },
+    {
+      "commit": "2d44729581e6a89d9f22e8eaf813bef589a51497",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/594"
+      ]
+    },
+    {
+      "commit": "4f580376d271856eca56d7acec1025caa0538283",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/596"
+      ]
+    },
+    {
+      "commit": "349f9c7d418c903e3eb4d1953c2eeb80d7d89a65",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/595"
+      ]
+    },
+    {
+      "commit": "f0dce2f5761cb7f91d393a0f1eb084f1e209270d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/596"
+      ]
+    },
+    {
+      "commit": "8adb03c42bb326c6264209e4eac63767ae2a1f25",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/595"
+      ]
+    },
+    {
+      "commit": "ec3913e21b7f2b2597917b7834fb3a91f0e226be",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/595"
+      ]
+    }
+  ]
+}
