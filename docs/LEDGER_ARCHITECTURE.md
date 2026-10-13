@@ -1228,6 +1228,11 @@ om trade-events repair --futu-account-id ... --order-id ... --reason ...
   -> 现有 fees-sync 独立 dry-run/apply
 ```
 
+identity-only 和 OpenD time-only apply 不支持 `expected_input_hash`；在现有 ledger command
+分流处拒绝任何非 `None` 值（包括空串、空白），持久化前报错。不传 hash 的合法 apply 和 no-op 保持
+原语义。CLI dry-run 仍是 advisory preview，不返回 `expected_input_hash`，即使传入该参数也不绑定提交；
+replacement / environment repair 的已有 hash 合同不变。
+
 apply 不使用 dry-run 结果作为事实；preview 明确标记为 advisory。事务内验证从原始存储 JSON 做
 copy-on-write，只允许以下路径变化：
 

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- 身份与 OpenD 时间修复在 apply 时明确拒绝显式传入的 expected_input_hash（包括空值），避免静默忽略；不传 hash 的合法修复与重试保持原状。
+
 ## 4.3.1 - 2026-10-13
 
 ### Improvements
