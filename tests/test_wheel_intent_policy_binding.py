@@ -1,4 +1,3 @@
-from src.application.ledger import wheel_commands as ledger_wheel_commands
 """Current opening policy must agree with sealed evidence before any new intent."""
 import json
 from hashlib import sha256
@@ -11,6 +10,7 @@ import pytest
 
 import src.application.agent_tools.positions as agent
 import src.application.wheel.workflows as workflows
+from src.application.ledger import wheel_commands
 import src.interfaces.cli.wheel as cli
 from src.application.account_run import build_account_runtime_config
 from src.application.tick_run_workspace import publish_account_run_config
@@ -89,7 +89,7 @@ def _environment(tmp_path, direction, monkeypatch):
             @classmethod
             def now(cls, tz=None):
                 return cls.fromtimestamp(5, timezone.utc)
-        monkeypatch.setattr(ledger_wheel_commands, "datetime", Clock)
+        monkeypatch.setattr(wheel_commands, "datetime", Clock)
     repo, _, stock_id = _assign_short_put(tmp_path, wheel_start_enabled=direction == "call")
     if direction == "put":
         key = ContractKey.from_values(broker="富途", account="lx", underlying_symbol="NVDA",
@@ -113,7 +113,7 @@ def _environment(tmp_path, direction, monkeypatch):
                                "fee_provenance": {"basis": "actual", "source": "test"}}}),
         ]:
             persist_trade_event_objects_atomically(repo, [event])
-        monkeypatch.setattr(workflows, "revalidate_selected_wheel_put_candidate_from_rows",
+        monkeypatch.setattr(wheel_commands, "revalidate_selected_wheel_put_candidate_from_rows",
             lambda **_: {"account": "lx", "allocation_status": "allocated", "granted_contracts": 1,
                          "capacity_identity_hash": "capacity", "cash_reservation_amount": 10_000,
                          "cash_reservation_currency": "USD"})
@@ -330,7 +330,7 @@ def test_scoped_published_candidate_preserves_current_policy_checks(tmp_path, mo
     if direction == "put":
         candidate.update(capacity_identity_hash="c" * 64, allocation_input_hash="d" * 64,
                          cash_reservation_amount=10_000)
-        monkeypatch.setattr(workflows, "revalidate_selected_wheel_put_candidate_from_rows",
+        monkeypatch.setattr(wheel_commands, "revalidate_selected_wheel_put_candidate_from_rows",
             lambda **_: {"account": "lx", "allocation_status": "allocated", "granted_contracts": 1,
                          "capacity_identity_hash": "c" * 64, "cash_reservation_amount": 10_000,
                          "cash_reservation_currency": "USD"})
@@ -394,20 +394,20 @@ def test_scoped_published_candidate_preserves_current_policy_checks(tmp_path, mo
         else:
             payload.update(apply=True, confirm=True)
         if direction == "put":
-            original_clock = ledger_wheel_commands.datetime
+            original_clock = wheel_commands.datetime
             class ExpiredClock(datetime):
                 @classmethod
                 def now(cls, tz=None):
                     return cls.fromtimestamp(906, timezone.utc)
             # Both public facades still submit historical as_of_ms=5000.
-            monkeypatch.setattr(ledger_wheel_commands, "datetime", ExpiredClock)
+            monkeypatch.setattr(wheel_commands, "datetime", ExpiredClock)
             with pytest.raises(error, match="repreview required"):
                 invoke()
             assert repo.list_wheel_events(account="lx") == before
-            monkeypatch.setattr(ledger_wheel_commands, "datetime", original_clock)
+            monkeypatch.setattr(wheel_commands, "datetime", original_clock)
         assert invoke()["write_applied"] is True
         if direction == "put":
-            monkeypatch.setattr(ledger_wheel_commands, "datetime", ExpiredClock)
+            monkeypatch.setattr(wheel_commands, "datetime", ExpiredClock)
         accepted_events = repo.list_wheel_events(account="lx")
         authority.state_path.unlink()
         config["wheel"]["call"]["min_dte"] = 7

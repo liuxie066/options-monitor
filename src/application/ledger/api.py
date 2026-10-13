@@ -66,6 +66,8 @@ from src.application.ledger.event_codec import (
 )
 from src.application.ledger.assigned_stock_projection import (
     WHEEL_READ_MODEL_SCHEMA,
+    resolve_wheel_batch_from_rows,
+    resolve_wheel_branch_from_rows,
     build_assigned_stock_projection_from_rows,
     build_wheel_read_model_from_rows,
     build_wheel_read_model_with_capacity_from_rows,
@@ -81,6 +83,7 @@ from src.application.ledger.external_event_key import (
     read_execution_event_candidates,
 )
 from src.application.ledger.read_only_evidence import (
+    read_trade_intake_recovery_snapshot,
     open_option_execution_preview_repo,
     verify_trade_receipt_projection,
     open_trade_reconciliation_evidence_repo,
@@ -354,53 +357,92 @@ from .trade_attribution import (
     read_trade_attribution_snapshot,
     open_trade_attribution_snapshot_reader,
     record_trade_attribution_conflict,
+    record_trade_attribution_conflicts,
     trade_attribution_facts_from_events,
 )
 from .trade_attribution_migration import preview_trade_attribution_migration, apply_trade_attribution_migration
 
-from .wheel_commands import (
-    decide_wheel_branch,
-    end_wheel_lifecycle,
-    create_wheel_call_intent,
-    cancel_wheel_call_intent,
-    reject_wheel_call_linkage,
-    create_wheel_intent,
-    cancel_wheel_intent,
-    reject_wheel_linkage,
-    change_wheel_activation_window,
-    wheel_activation_request_hash,
-    validate_wheel_activation_request,
-    wheel_activation_result,
-    wheel_activation_descriptor,
+from src.application.ledger.wheel_commands import (
+    end_wheel_lifecycle, decide_wheel_branch, reject_wheel_call_linkage, reject_wheel_linkage,
+)
+
+
+from src.application.ledger.position_context import (
+    validate_option_positions_context_account,
+    build_position_risk_context,
+    build_shared_position_risk_context,
+    build_lifecycle_read_models_from_decision_snapshot,
+    slice_position_risk_context_for_account,
+    STRATEGY_FAMILY_SOURCE as OPTION_CONTEXT_STRATEGY_FAMILY_SOURCE,
+)
+
+from src.application.ledger.wheel_capacity import (
+    read_wheel_capacity_context,
+    broker_capacity_observation_is_fresh as broker_capacity_observation_is_fresh,
+    build_shared_cash_capacity_fact as build_shared_cash_capacity_fact,
+    revalidate_selected_wheel_put_candidate as revalidate_selected_wheel_put_candidate,
+    revalidate_selected_wheel_put_candidate_from_rows as revalidate_selected_wheel_put_candidate_from_rows,
+    _normalized_fx_snapshot as normalize_wheel_fx_snapshot,
+    _ordinary_put_cash_claims as wheel_ordinary_put_cash_claims,
+    _convert_currency_fn as wheel_capacity_currency_converter,
+    WHEEL_PUT_CASH_CAPACITY_FACT_SCHEMA as WHEEL_PUT_CASH_CAPACITY_FACT_SCHEMA,
+)
+
+from src.application.ledger.wheel_commands import (
+    create_wheel_call_intent as create_wheel_call_intent,
+    cancel_wheel_call_intent as cancel_wheel_call_intent,
+    create_wheel_intent as create_wheel_intent,
+    cancel_wheel_intent as cancel_wheel_intent,
+)
+
+from src.application.ledger.wheel_commands import (
+    change_wheel_activation_window, wheel_activation_result,
+    wheel_activation_request_hash, validate_wheel_activation_request, wheel_activation_descriptor,
 )
 
 from .wheel_policy_binding import (
-    WheelPolicyBindingReplayError,
-    build_wheel_policy_binding_request,
-    record_wheel_policy_binding,
-    wheel_policy_file_identity,
+    WheelPolicyBindingReplayError, build_wheel_policy_binding_request, record_wheel_policy_binding, wheel_policy_file_identity,
 )
 
 __all__ = [
-    "WheelPolicyBindingReplayError",
-    "build_wheel_policy_binding_request",
-    "record_wheel_policy_binding",
-    "wheel_policy_file_identity",
+    'WheelPolicyBindingReplayError',
+    'build_wheel_policy_binding_request',
+    'record_wheel_policy_binding',
+    'wheel_policy_file_identity',
+    'wheel_activation_request_hash',
+    'validate_wheel_activation_request',
+    'wheel_activation_descriptor',
 
-    "decide_wheel_branch",
-    "end_wheel_lifecycle",
+    "read_trade_intake_recovery_snapshot",
+    "read_wheel_capacity_context",
+    "change_wheel_activation_window",
+    "wheel_activation_result",
     "create_wheel_call_intent",
     "cancel_wheel_call_intent",
-    "reject_wheel_call_linkage",
     "create_wheel_intent",
     "cancel_wheel_intent",
-    "reject_wheel_linkage",
-    "change_wheel_activation_window",
-    "wheel_activation_request_hash",
-    "validate_wheel_activation_request",
-    "wheel_activation_result",
-    "wheel_activation_descriptor",
 
+    "broker_capacity_observation_is_fresh",
+    "build_shared_cash_capacity_fact",
+    "revalidate_selected_wheel_put_candidate",
+    "revalidate_selected_wheel_put_candidate_from_rows",
+    "normalize_wheel_fx_snapshot",
+    "wheel_ordinary_put_cash_claims",
+    "wheel_capacity_currency_converter",
+    "WHEEL_PUT_CASH_CAPACITY_FACT_SCHEMA",
+
+    "validate_option_positions_context_account",
+    "build_position_risk_context",
+    "build_shared_position_risk_context",
+    "build_lifecycle_read_models_from_decision_snapshot",
+    "slice_position_risk_context_for_account",
+    "OPTION_CONTEXT_STRATEGY_FAMILY_SOURCE",
+    "end_wheel_lifecycle",
+    "decide_wheel_branch",
+    "resolve_wheel_branch_from_rows",
+    "reject_wheel_call_linkage",
+    "reject_wheel_linkage",
+    "resolve_wheel_batch_from_rows",
     "WHEEL_READ_MODEL_SCHEMA",
     "build_assigned_stock_projection_from_rows",
     "build_wheel_read_model_from_rows",
@@ -424,6 +466,7 @@ __all__ = [
     "read_trade_attribution_policy",
     "preview_trade_attribution_migration", "apply_trade_attribution_migration",
     "trade_attribution_facts_from_events", "record_trade_attribution_conflict",
+    "record_trade_attribution_conflicts",
     "contract_key_from_lot_fields",
     "lot_contract_value",
     "recover_wheel_assignment",

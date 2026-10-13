@@ -134,3 +134,20 @@ def fake_runlog_factory() -> Callable[[list[dict[str, Any]] | None], FakeRunLogg
         return logger
 
     return _factory
+
+
+@pytest.fixture
+def storage_disk_capacity(monkeypatch):
+    """Opt-in disk observations for storage tests, independent of the host disk."""
+    from types import SimpleNamespace
+    from src.application.research import storage_baseline
+
+    def set_capacity(*, total_gib=100, free_gib=80):
+        gib = 1024 ** 3
+        observation = SimpleNamespace(total=total_gib * gib, free=free_gib * gib,
+                                      used=(total_gib - free_gib) * gib)
+        monkeypatch.setattr(storage_baseline.shutil, "disk_usage", lambda _path: observation)
+        return observation
+
+    set_capacity()
+    return set_capacity

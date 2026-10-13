@@ -2,24 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.application.ledger.api import (
-    decide_wheel_branch as decide_wheel_branch,
-    end_wheel_lifecycle as end_wheel_lifecycle,
-    cancel_wheel_call_intent as cancel_wheel_call_intent,
-    reject_wheel_call_linkage as reject_wheel_call_linkage,
-    cancel_wheel_intent as cancel_wheel_intent,
-    reject_wheel_linkage as reject_wheel_linkage,
-    create_wheel_call_intent as ledger_create_wheel_call_intent,
-    create_wheel_intent as ledger_create_wheel_intent,
-    change_wheel_activation_window as _change_wheel_activation_window,
-    wheel_activation_request_hash as _activation_request_hash,
-    validate_wheel_activation_request as _activation_request_window,
-    wheel_activation_result as _activation_result,
-    wheel_activation_descriptor as _activation_descriptor,
-)
-
 
 from copy import deepcopy
+from datetime import datetime, timezone
 import hashlib
 import json
 import tempfile
@@ -31,22 +16,39 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.runtime_config_paths import authoritative_config_yaml_path
 from src.application.settings import build_effective_env
 from src.application.ledger.api import (
+    change_wheel_activation_window as _change_wheel_activation_window,
+    wheel_activation_result as _activation_result,
+    end_wheel_lifecycle,
+    decide_wheel_branch,
+    reject_wheel_call_linkage,
+    reject_wheel_linkage,
     read_wheel_activation_windows_read_only,
     ledger_store_write_guard,
     open_wheel_activation_repository,
     resolve_position_data_config_path,
     resolve_position_ledger_sqlite_path,
 )
+from domain.domain.wheel.config import (
+    wheel_activation_request_hash as _activation_request_hash,
+    resolve_wheel_activation_request as _activation_request_window,
+    wheel_activation_window_descriptor as _activation_descriptor,
+)
 from src.application.wheel.config import (
     WHEEL_ACTIVATION_DESCRIPTOR_FIELDS, build_wheel_policy_hash, evaluate_wheel_activation_readiness,
     resolve_wheel_activation_descriptor, materialize_wheel_config, normalize_wheel_accounts,
 )
-from src.application.positions.context_builder import build_context as build_option_positions_context
-from src.application.wheel.capacity import (
-    revalidate_selected_wheel_put_candidate_from_rows,
-    broker_capacity_observation_is_fresh,
-)
 from src.application.wheel.remediation import policy_remediation
+
+
+def _now_ms() -> int:
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
+def _require_market(value: str) -> str:
+    market = str(value or "").strip().lower()
+    if market not in {"us", "hk"}:
+        raise ValueError("Wheel workflow market must be us or hk")
+    return market
 
 
 def _activation_status(
@@ -305,8 +307,6 @@ def change_wheel_activation(
         replay = _activation_request_window(windows, action=action, request_id=request_id, request_hash=request_hash,
                                             policy_sha256=policy_sha, expected_generation=expected_current_generation)
         if replay:
-            if action == "enable" and int(latest.get("policy_binding_revision", 0)) > 0:
-                raise ValueError("wheel activation request superseded by policy binding")
             receipt = _activation_result(action=action, status="idempotent", market=market, account=account,
                                          request_id=request_id, actor=actor, request_hash=request_hash, window=replay,
                                          dry_run=not apply_changes, write_applied=False, idempotent=True)
@@ -414,109 +414,6 @@ def change_wheel_activation(
                              details={**details, **result}) from exc
 
 
-def create_wheel_call_intent(
-    repo: Any,
-    *,
-    candidate_snapshot: Mapping[str, Any],
-    current_strategy_policy_sha256: str,
-    account: str,
-    lot_id: str,
-    final_candidate_id: str,
-    expected_snapshot_hash: str,
-    expected_batch_generation_hash: str,
-    expires_at_ms: int,
-    request_id: str,
-    actor: str,
-    coverage_fact: Mapping[str, Any],
-    new_intent_enabled: bool,
-    account_configured: bool,
-    market: str,
-    activation_descriptor: Mapping[str, Any] | None,
-    policy_sha256: str,
-    broker_order_id: str | None = None,
-    apply_changes: bool = False,
-    as_of_ms: int | None = None,
-) -> dict[str, Any]:
-    return ledger_create_wheel_call_intent(
-        repo,
-        candidate_snapshot=candidate_snapshot,
-        current_strategy_policy_sha256=current_strategy_policy_sha256,
-        account=account,
-        lot_id=lot_id,
-        final_candidate_id=final_candidate_id,
-        expected_snapshot_hash=expected_snapshot_hash,
-        expected_batch_generation_hash=expected_batch_generation_hash,
-        expires_at_ms=expires_at_ms,
-        request_id=request_id,
-        actor=actor,
-        coverage_fact=coverage_fact,
-        new_intent_enabled=new_intent_enabled,
-        account_configured=account_configured,
-        market=market,
-        activation_descriptor=activation_descriptor,
-        policy_sha256=policy_sha256,
-        broker_order_id=broker_order_id,
-        apply_changes=apply_changes,
-        as_of_ms=as_of_ms,
-        position_context_builder=build_option_positions_context,
-        observation_is_fresh=broker_capacity_observation_is_fresh,
-    )
-
-
-def create_wheel_intent(
-    repo: Any,
-    *,
-    candidate_snapshot: Mapping[str, Any],
-    current_strategy_policy_sha256: str,
-    account: str,
-    wheel_branch_id: str,
-    direction: str,
-    final_candidate_id: str,
-    expected_snapshot_hash: str,
-    expected_batch_generation_hash: str,
-    expires_at_ms: int,
-    request_id: str,
-    actor: str,
-    capacity_fact: Mapping[str, Any],
-    new_intent_enabled: bool,
-    account_configured: bool,
-    market: str,
-    activation_descriptor: Mapping[str, Any] | None,
-    policy_sha256: str,
-    runtime_config: Mapping[str, Any] | None = None,
-    broker_order_id: str | None = None,
-    apply_changes: bool = False,
-    as_of_ms: int | None = None,
-) -> dict[str, Any]:
-    return ledger_create_wheel_intent(
-        repo,
-        candidate_snapshot=candidate_snapshot,
-        current_strategy_policy_sha256=current_strategy_policy_sha256,
-        account=account,
-        wheel_branch_id=wheel_branch_id,
-        direction=direction,
-        final_candidate_id=final_candidate_id,
-        expected_snapshot_hash=expected_snapshot_hash,
-        expected_batch_generation_hash=expected_batch_generation_hash,
-        expires_at_ms=expires_at_ms,
-        request_id=request_id,
-        actor=actor,
-        capacity_fact=capacity_fact,
-        new_intent_enabled=new_intent_enabled,
-        account_configured=account_configured,
-        market=market,
-        activation_descriptor=activation_descriptor,
-        policy_sha256=policy_sha256,
-        runtime_config=runtime_config,
-        broker_order_id=broker_order_id,
-        apply_changes=apply_changes,
-        as_of_ms=as_of_ms,
-        position_context_builder=build_option_positions_context,
-        observation_is_fresh=broker_capacity_observation_is_fresh,
-        put_capacity_revalidator=revalidate_selected_wheel_put_candidate_from_rows,
-    )
-
-
 __all__ = [
     "cancel_wheel_intent",
     "cancel_wheel_call_intent",
@@ -528,3 +425,10 @@ __all__ = [
     "reject_wheel_linkage",
     "reject_wheel_call_linkage",
 ]
+
+from src.application.ledger.api import (
+    create_wheel_call_intent as create_wheel_call_intent,
+    cancel_wheel_call_intent as cancel_wheel_call_intent,
+    create_wheel_intent as create_wheel_intent,
+    cancel_wheel_intent as cancel_wheel_intent,
+)

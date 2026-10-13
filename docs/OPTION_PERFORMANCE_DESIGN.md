@@ -756,11 +756,33 @@ unknown fields, duplicate JSON fields and nonfinite JSON values. `year` accepts 
 integer or string form. `config_key` remains a config selector, not an extra market filter.
 Authorization and configured-account validation precede ledger reads. Server time determines the
 report instant; client-controlled `now_ms` is unsupported. Cursor binding, fixed report time,
-source hashes and `READ_ERROR/source_changed` are canonical. Existing cursors continue only when
-their normalized query binding and source still match; a cursor bound to a local custom path
-cannot be reused remotely and must be replaced by a fresh query. Signing uses the existing
-`inbound.operation_hmac_key` secret owner; absent signing credentials preserve explicit partial
-coverage / `continuation_unavailable`, never manufacture a cursor.
+source hashes and `READ_ERROR/source_changed` are canonical. The query owner returns complete
+structured rows up to the requested business `limit` and all summary breakdown groups. CLI and
+HTTP responses do not apply Bot display budgets or replace financial rows with text. Row/breakdown
+pagination exposes the business-page `offset`, signed `page_cursor` for replaying that page, and
+`next_cursor` for the next business page. Existing structured query cursors may continue with an
+omitted or null `body_cursor`; old text-fragment cursors are rejected with
+`INPUT_ERROR/cursor_invalidated` and require a fresh query. Query bindings and source must still
+match; a cursor bound to a local custom path cannot be reused remotely.
+
+`agent_tools/performance_presentation.py` owns Tool/Bot display budgets: 6000 UTF-8 JSON bytes
+for summary data, 5000 for row/breakdown data, including metadata, duplicated breakdown rows and
+both returned cursor copies. Summary display retains whole groups when they fit and offers a
+`detail_query`. Large rows use the existing redacted `page_text` reader; text fragments are display
+evidence, not a replacement structured financial API. Necessary quality metadata is never
+truncated; an irreducible response or unsupported body size returns an explicit read failure.
+The display cursor wraps a canonical page cursor and a within-page position; replay revalidates
+source, frozen report time and current local account authority before displaying more data.
+`page_cursor` is internal to this adapter and is omitted from Tool responses. Old unwrapped Tool
+cursors require a fresh query. Tool calls with no pagination/view selectors retain the existing
+full structured contract; public Bot input normalization selects summary by default.
+
+Signing uses the existing `inbound.operation_hmac_key` secret owner and shared `query_cursor`
+primitives over the ledger cursor codec; its namespace and 30-minute expiry remain unchanged.
+Absent signing credentials keep a complete finite page complete; a response needing continuation
+has explicit partial coverage / `continuation_unavailable`, never a manufactured cursor.
+Performance query/transport failures use `PerformanceQueryError`; CLI and Tool boundaries translate
+the same code, message, hint and details into the established operator/Agent error contract.
 
 The transport envelope uses `schema_version=option_performance.api.v1`, `ok`, `data`, `warnings`,
 `meta`, and `error` with the existing `code`/`message`/optional `hint`/`details` contract. The financial

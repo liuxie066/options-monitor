@@ -1,5 +1,4 @@
 from __future__ import annotations
-from src.application.ledger import wheel_commands as ledger_wheel_commands
 from src.application.ledger import trade_attribution as ledger_attribution
 
 from tests.cash_evidence_helpers import cash_portfolio
@@ -16,6 +15,7 @@ import pytest
 
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.wheel.workflows as wheel_workflows
+from src.application.ledger import wheel_commands as ledger_wheel_commands
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.portfolio_scope import portfolio_scope_id
 from src.application.ledger.api import decision_state_snapshot
@@ -135,7 +135,7 @@ def test_put_intent_preview_revalidates_capacity_inside_transaction(
         return allocation
 
     monkeypatch.setattr(
-        wheel_workflows,
+        ledger_wheel_commands,
         "revalidate_selected_wheel_put_candidate_from_rows",
         _revalidate,
     )
@@ -384,6 +384,7 @@ def test_put_linkage_rejection_preview_uses_canonical_branch(
     assert result["option_record_id"] == "put-lot-1"
     assert result["status"] == "planned"
     assert result["dry_run"] is True
+
 
 
 
@@ -1338,6 +1339,7 @@ def test_call_linkage_reject_skips_put_candidates(
         assert len(repo.list_wheel_events(account="lx")) == len(before) + 1
 
 
+
 @pytest.mark.parametrize("entry", ["cli", "tool_call", "tool_neutral"])
 @pytest.mark.parametrize("runtime_source", ["argument", "environment"])
 def test_public_linkage_entry_uses_complete_shared_decision(tmp_path, monkeypatch, entry, runtime_source):
@@ -1668,3 +1670,93 @@ def test_wheel_start_failure_rolls_back_assignment(
 
     assert [item["event_type"] for item in repo.list_trade_events()] == ["open"]
     assert repo.get_position_lot_fields(put_lot_id)["status"] == "open"
+
+
+@pytest.mark.parametrize("failure", ["append", "readback"])
+def test_ledger_manual_end_rolls_back_provisional_event_and_can_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    from src.application.ledger import api, wheel_commands
+
+    repo, lot_id = _wheel_repo(tmp_path)
+    batch = build_wheel_read_model(repo, "lx", 3_000)["batches"][0]
+    before = repo.read_lifecycle_account_rows(account="lx")
+    arguments = dict(
+        account="lx", lot_id=lot_id,
+        expected_batch_generation_hash=batch["batch_generation_hash"],
+        request_id="atomic-manual-end", actor="tester", market="us", as_of_ms=4_000,
+    )
+    assert end_wheel_lifecycle is api.end_wheel_lifecycle is wheel_commands.end_wheel_lifecycle
+    assert ledger_wheel_commands._wheel_batch is api.resolve_wheel_batch_from_rows
+
+    def no_application_transaction(*args, **kwargs):
+        raise AssertionError("application must not own manual-end transaction")
+
+    monkeypatch.setattr(wheel_workflows, "with_sqlite_repo_transaction", no_application_transaction, raising=False)
+    preview = api.end_wheel_lifecycle(repo, **arguments)
+    assert preview["dry_run"] is True
+    assert repo.read_lifecycle_account_rows(account="lx") == before
+
+    append = repo.append_wheel_event_once
+    appended = []
+
+    def append_then_fail(event, *, conn=None):
+        assert conn is not None and conn.in_transaction
+        created = append(event, conn=conn)
+        assert created
+        assert any(row["event_id"] == event["event_id"] for row in
+                   repo.read_lifecycle_account_rows(account="lx", conn=conn)["account_wheel_events"])
+        appended.append(event["event_id"])
+        if failure == "append":
+            raise RuntimeError("injected append failure")
+        return created
+
+    resolve = wheel_commands.resolve_wheel_batch_from_rows
+
+    def fail_terminal_projection(rows, **kwargs):
+        batch = resolve(rows, **kwargs)
+        if batch["lifecycle_status"] == "manual_ended":
+            return {**batch, "terminal_event_id": "wrong-terminal-event"}
+        return batch
+
+    with monkeypatch.context() as faults:
+        faults.setattr(repo, "append_wheel_event_once", append_then_fail)
+        faults.setattr(wheel_commands, "resolve_wheel_batch_from_rows", fail_terminal_projection)
+        with pytest.raises((RuntimeError, ValueError), match="injected append failure|projection verification failed"):
+            api.end_wheel_lifecycle(repo, **arguments, apply_changes=True)
+    assert len(appended) == 1
+    assert repo.read_lifecycle_account_rows(account="lx") == before
+
+    applied = api.end_wheel_lifecycle(repo, **arguments, apply_changes=True)
+    replay = api.end_wheel_lifecycle(repo, **arguments, apply_changes=True)
+    assert applied["write_applied"] is True
+    assert replay["idempotent"] is True and replay["write_applied"] is False
+    assert applied["event_id"] == replay["event_id"] == appended[0]
+    assert len(repo.list_wheel_events(account="lx")) == len(before["account_wheel_events"]) + 1
+
+
+@pytest.mark.parametrize("invalid", ["generation", "account", "request_identity"])
+def test_ledger_manual_end_rejects_changed_identity_without_effects(
+    tmp_path: Path, invalid: str,
+) -> None:
+    from src.application.ledger.api import end_wheel_lifecycle as command
+
+    repo, lot_id = _wheel_repo(tmp_path)
+    batch = build_wheel_read_model(repo, "lx", 3_000)["batches"][0]
+    arguments = dict(
+        account="lx", lot_id=lot_id,
+        expected_batch_generation_hash=batch["batch_generation_hash"],
+        request_id="identity-manual-end", actor="tester", market="us", as_of_ms=4_000,
+        apply_changes=True,
+    )
+    if invalid == "request_identity":
+        command(repo, **arguments)
+        arguments["actor"] = "another-actor"
+    elif invalid == "generation":
+        arguments["expected_batch_generation_hash"] = "stale-generation"
+    else:
+        arguments["account"] = "sy"
+    before = repo.read_lifecycle_account_rows(account="lx")
+    with pytest.raises(ValueError, match="generation changed|resolve uniquely|identity conflicts"):
+        command(repo, **arguments)
+    assert repo.read_lifecycle_account_rows(account="lx") == before

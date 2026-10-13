@@ -10,7 +10,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from src.application.agent_tool_contracts import AgentToolError
+from src.application.performance.query_contracts import PerformanceQueryError
 
 API_VERSION = "option_performance.api.v1"
 QUERY_PATH = "/api/v1/option-performance/query"
@@ -58,7 +58,7 @@ def validate_service_origin(url: str) -> str:
         ):
             raise ValueError
     except ValueError as exc:
-        raise AgentToolError(
+        raise PerformanceQueryError(
             "INPUT_ERROR", "Performance service URL must be an http loopback origin with a port."
         ) from exc
     return url
@@ -66,7 +66,7 @@ def validate_service_origin(url: str) -> str:
 
 def validate_service_token(token: str) -> None:
     if not token or any(ord(char) < 33 or ord(char) > 126 for char in token):
-        raise AgentToolError("INPUT_ERROR", "OM_PERFORMANCE_SERVICE_TOKEN must be a nonempty printable bearer token.")
+        raise PerformanceQueryError("INPUT_ERROR", "OM_PERFORMANCE_SERVICE_TOKEN must be a nonempty printable bearer token.")
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -78,13 +78,13 @@ def query_option_performance(payload: dict, *, url: str, token: str) -> tuple[di
     origin = validate_service_origin(url)
     validate_service_token(token)
     if any(payload.get(name) not in (None, "") for name in ("config_path", "data_config")):
-        raise AgentToolError("INPUT_ERROR", "Service mode does not accept config_path or data_config overrides.")
+        raise PerformanceQueryError("INPUT_ERROR", "Service mode does not accept config_path or data_config overrides.")
     try:
         body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
     except (TypeError, ValueError) as exc:
-        raise AgentToolError("INPUT_ERROR", "Performance query must be valid JSON.") from exc
+        raise PerformanceQueryError("INPUT_ERROR", "Performance query must be valid JSON.") from exc
     if len(body) > MAX_REQUEST_BYTES:
-        raise AgentToolError("INPUT_ERROR", "Performance query is too large.")
+        raise PerformanceQueryError("INPUT_ERROR", "Performance query is too large.")
     request = Request(
         origin + QUERY_PATH,
         data=body,
@@ -101,7 +101,7 @@ def query_option_performance(payload: dict, *, url: str, token: str) -> tuple[di
             status = response.code
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except (URLError, OSError, HTTPException) as exc:
-        raise AgentToolError(
+        raise PerformanceQueryError(
             "SERVICE_ERROR",
             "Performance query service is unavailable.",
             details={"reason_codes": ["service_unavailable"]},
@@ -139,9 +139,9 @@ def query_option_performance(payload: dict, *, url: str, token: str) -> tuple[di
         ):
             raise ValueError
     except (ValueError, TypeError, KeyError, RecursionError) as exc:
-        raise AgentToolError(
+        raise PerformanceQueryError(
             "SERVICE_ERROR",
             "Performance query service returned an invalid response.",
             details={"reason_codes": ["service_protocol_invalid"]},
         ) from exc
-    raise AgentToolError(error["code"], error["message"], hint=error.get("hint"), details=error.get("details"))
+    raise PerformanceQueryError(error["code"], error["message"], hint=error.get("hint"), details=error.get("details"))
