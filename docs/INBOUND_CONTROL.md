@@ -19,6 +19,11 @@ Control owns:
 - write previews, confirm/cancel, apply, and readback receipts;
 - `control_json` audit records and operation timelines.
 
+Every delivery checks the current sender allowlist before consuming an audited
+response, including duplicates and expired deliveries. A denied duplicate records
+the current denial without replaying or replacing the original response; an
+authorized retry continues to reuse that response without rerunning the command.
+
 Control does not infer business intent from free text, select tools for natural
 language questions, or synthesize analytical conclusions.
 
