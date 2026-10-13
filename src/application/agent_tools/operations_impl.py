@@ -20,6 +20,7 @@ from src.application.ledger.api import (
     TradeEventPaginationError,
     assigned_stock_event_log,
     ledger_store_payload,
+    normalize_position_lot_snapshot,
     trade_event_page,
 )
 from src.application.positions.assigned_stock_view import build_assigned_stock_view
@@ -1130,7 +1131,7 @@ def option_positions_read_tool(
             **{key: value for key, value in selectors.items() if key != "record_id"},
         )
         allowed_accounts = {account} if account else set(resolve_configured_accounts(cfg))
-        scope_rows = [(row.get("fields") or {}) for row in inspected.get("current_lots") or []]
+        scope_rows = [normalize_position_lot_snapshot(row)["fields"] for row in inspected.get("current_lots") or []]
         scope_rows.extend(inspected.get("projected_lots") or [])
         scope_rows.extend(inspected.get("related_events") or [])
         if any(str(row.get("account") or "").lower() not in allowed_accounts for row in scope_rows):

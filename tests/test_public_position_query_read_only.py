@@ -277,3 +277,56 @@ def test_public_assigned_stock_preserves_wheel_and_sale_snapshot(query_store, mo
         assert result["data"]["rows"][0]["shares_remaining"] == 60
         assert result["data"]["rows"][0]["wheel"] == expected_wheel["batches"][0]
         assert list(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("explicit_account", [True, False])
+def test_public_inspect_authorizes_canonical_current_lot(query_store, monkeypatch, explicit_account):
+    path, _, config = query_store
+    writer = SQLiteOptionPositionsRepository(path)
+    writer.upsert_trade_event(_event("open", event_time_ms=1_780_000_000_000))
+    api.refresh_position_lot_projection(writer)
+    payload = _payload(config, "inspect")
+    payload["record_id"] = "lot_open"
+    if not explicit_account:
+        payload.pop("account")
+    with sqlite3.connect(path) as conn:
+        before = list(conn.iterdump())
+        monkeypatch.setattr(SQLiteOptionPositionsRepository, "__init__", _forbid)
+        monkeypatch.setattr(SQLiteOptionPositionsRepository, "_connect", _forbid)
+        monkeypatch.setattr("src.application.ledger.bootstrap.load_option_positions_repo", _forbid)
+        result = execute_tool("option_positions_read", payload)
+        assert result["ok"] is True, result
+        fields = result["data"]["current_lots"][0]["fields"]
+        assert fields["contract_key"]["account"] == "lx"
+        assert "account" not in fields
+        assert list(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("stored_account", ["sy", ""])
+def test_public_inspect_denies_foreign_or_unknown_current_account(query_store, monkeypatch, stored_account):
+    path, _, config = query_store
+    writer = SQLiteOptionPositionsRepository(path)
+    writer.upsert_trade_event(_event("open", event_time_ms=1_780_000_000_000))
+    api.refresh_position_lot_projection(writer)
+    payload = {"config_path": str(config), "action": "inspect", "record_id": "lot_open"}
+    from src.application.agent_tools import positions
+    inspect = positions.inspect_projection_state
+
+    def inspect_with_invalid_account(*args, **kwargs):
+        result = inspect(*args, **kwargs)
+        fields = result["current_lots"][0]["fields"]
+        fields["contract_key"]["account"] = stored_account
+        if stored_account:
+            fields["account"] = "lx"
+        return result
+
+    monkeypatch.setattr(positions, "inspect_projection_state", inspect_with_invalid_account)
+    with sqlite3.connect(path) as conn:
+        before = list(conn.iterdump())
+        monkeypatch.setattr(SQLiteOptionPositionsRepository, "__init__", _forbid)
+        monkeypatch.setattr(SQLiteOptionPositionsRepository, "_connect", _forbid)
+        monkeypatch.setattr("src.application.ledger.bootstrap.load_option_positions_repo", _forbid)
+        result = execute_tool("option_positions_read", payload)
+        assert result["ok"] is False, result
+        assert result["error"]["code"] == "PERMISSION_DENIED"
+        assert list(conn.iterdump()) == before
