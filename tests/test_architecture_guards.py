@@ -555,13 +555,18 @@ def _assert_feishu_transport_policy_boundary(source: str) -> None:
         if isinstance(node, ast.Import):
             assert all(alias.name != policy and not alias.name.startswith(policy + ".") for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            if module == policy:
+            modules = {node.module or ""}
+            if node.level:
+                # Resolve this transport's src.application.inbound package only.
+                assert node.level <= 3
+                modules.add(".".join("src.application.inbound".split(".")[:4 - node.level]
+                                     + ([node.module] if node.module else [])))
+            if policy in modules:
                 assert node.level == 0
                 assert all(alias.name in reply_api and alias.asname is None for alias in node.names)
             else:
-                assert not module.startswith(policy + ".")
-                assert all(f"{module}.{alias.name}" != policy for alias in node.names)
+                assert all(not module.startswith(policy + ".") for module in modules)
+                assert all(f"{module}.{alias.name}" != policy for module in modules for alias in node.names)
         elif isinstance(node, ast.alias):
             assert node.name.split(".")[-1] not in forbidden and node.asname not in forbidden
         elif isinstance(node, ast.Name):
@@ -584,6 +589,11 @@ def _assert_feishu_transport_policy_boundary(source: str) -> None:
     "from src.application.bot.control.policy import enforce_sender_allowed",
     "from src.application.bot.control.policy import _parse_allowed_entries",
     "from .src.application.bot.control.policy import check_reply_authorization",
+    "from ..bot.control import policy",
+    "from ..bot.control import policy as p",
+    "from ..bot.control.policy import check_reply_authorization",
+    "from ..bot.control.policy import check_reply_authorization as authorize",
+    "from ...application.bot.control import policy",
     "from src.application.bot.control.policy.other import check_reply_authorization",
     "from other import check_sender_allowed",
     "from other import decision as enforce_sender_allowed",
