@@ -148,6 +148,10 @@ OpenD 订单后先预览；`reason` 必须写明 OpenD 核对证据：
 
 ### 场景 E：历史 Futu 开仓时间与 OpenD 证据不一致
 
+场景 D 的身份绑定和本场景的时间修正在 apply 时不支持 `--expected-input-hash`；显式传入任何值
+（包括空串或空白）均失败且零写入，确认时应省略该参数。两条路径的 dry-run 仍是 advisory preview，
+不会返回 `expected_input_hash`，传入该参数也不会使预览成为提交凭证；apply 保留事务内重查与原有 CAS。
+
 只适用于未 void 的 canonical Futu open 事件，包括已有下游 close 的已平仓 lot。事件必须已经保存
 `opend_order_evidence.v1`；修正时间只能等于证据中最早一笔订单的 `trade_time_ms`，不能人工指定
 其他时间。先核对目标、时间、订单 ID 和写前哈希：
