@@ -606,4 +606,3 @@ def wheel_activation_window_descriptor(window: Mapping[str, Any] | None, *, incl
             window.get("policy_sha256") or window.get("policy_hash") or ""
         ).strip().lower(),
     }
-

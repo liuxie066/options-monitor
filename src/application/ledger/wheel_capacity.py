@@ -320,4 +320,3 @@ def revalidate_selected_wheel_put_candidate_from_rows(
         opening_put_candidates=opening_put_candidates,
         exchange_rate_converter=exchange_rate_converter,
     )
-
