@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1176 (`src`: 560, `domain`: 90, `scripts`: 15, `tests`: 511)
-- Internal import edges: 9273 total, 3761 production/script edges excluding tests
+- Python files scanned: 1179 (`src`: 562, `domain`: 90, `scripts`: 15, `tests`: 512)
+- Internal import edges: 9297 total, 3770 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|623| domain
+  application -->|624| domain
   application -->|4| domain_services
   application -->|186| infrastructure
   application -->|57| storage
@@ -46,7 +46,7 @@ flowchart LR
   scripts -->|5| domain
   scripts -->|4| infrastructure
   storage -->|1| domain
-  tests -->|4177| application
+  tests -->|4191| application
   tests -->|520| domain
   tests -->|2| domain_services
   tests -->|283| infrastructure
@@ -59,7 +59,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 623 |
+| application | domain | 624 |
 | interfaces | application | 195 |
 | application | infrastructure | 186 |
 | application | storage | 57 |
@@ -79,7 +79,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 4177 |
+| tests | application | 4191 |
 | tests | domain | 520 |
 | tests | interfaces | 327 |
 | tests | infrastructure | 283 |
@@ -93,23 +93,23 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 255 |
+| src.application | domain.domain | 250 |
+| src.application.ledger | domain.domain | 157 |
 | src.interfaces | src.application | 157 |
-| src.application.ledger | domain.domain | 151 |
 | src.application | src.infrastructure | 132 |
 | src.application.ledger | domain.domain.ledger | 72 |
 | src.application.trades | domain.domain | 62 |
 | src.application | domain.storage | 45 |
 | src.application.trades | src.application | 43 |
-| src.application | src.application.ledger | 38 |
+| src.application | src.application.ledger | 39 |
 | scripts | src.application | 36 |
 | src.application.trades | src.application.ledger | 34 |
 | src.application.research | src.application | 32 |
+| src.application.ledger | src.application | 28 |
 | src.application | domain.domain.engine | 27 |
 | src.application.inbound | src.application | 27 |
 | domain.domain.ledger | domain.domain | 27 |
 | src.application.positions | src.application | 26 |
-| src.application.ledger | src.application | 23 |
 | src.application.multi_tick | src.application | 23 |
 | domain.domain | domain.domain.ledger | 23 |
 | src.application | src.application.settings | 22 |
@@ -181,26 +181,26 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 |---|---|
 | src.application.agent_tool_contracts | 123 |
 | src.application.payload_helpers | 98 |
-| src.application.ledger.api | 89 |
+| src.application.ledger.api | 90 |
 | domain.domain.symbol_identity | 85 |
 | src.application.agent_tool_config | 75 |
 | domain.domain.trade_contract_identity | 71 |
 | src.application.account_config | 57 |
 | src.infrastructure.io_utils | 55 |
-| domain.domain.decision_state_fingerprint | 53 |
+| domain.domain.decision_state_fingerprint | 54 |
 | domain.domain.ledger.position_fields | 52 |
 | domain.domain.option_position_identity | 51 |
 | src.application.runtime_paths | 42 |
 | domain.domain.trade_execution | 35 |
 | domain.domain.ledger.events | 32 |
-| src.application.settings | 29 |
+| src.application.ledger.repository | 30 |
 
 ### Highest Fan-Out Production Modules
 
 | module | outgoing imports |
 |---|---|
 | src.application.trades.auto_intake | 50 |
-| src.application.ledger.api | 47 |
+| src.application.ledger.api | 49 |
 | src.application.ledger.trade_attribution | 38 |
 | src.application.multi_tick.required_data_prefetch | 34 |
 | src.application.ledger.queries | 32 |
