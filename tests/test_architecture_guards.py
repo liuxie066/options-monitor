@@ -547,6 +547,76 @@ def test_bot_tool_names_are_registry_or_inbound_surfaces() -> None:
     assert unknown == []
 
 
+def _assert_feishu_transport_policy_boundary(source: str) -> None:
+    policy = "src.application.bot.control.policy"
+    reply_api = {"ReplyAuthorizationError", "check_reply_authorization", "reply_authorization_predicate"}
+    forbidden = {"check_sender_allowed", "enforce_sender_allowed", "_parse_allowed_entries"}
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            assert all(alias.name != policy and not alias.name.startswith(policy + ".") for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            modules = {node.module or ""}
+            if node.level:
+                # Resolve this transport's src.application.inbound package only.
+                assert node.level <= 3
+                modules.add(".".join("src.application.inbound".split(".")[:4 - node.level]
+                                     + ([node.module] if node.module else [])))
+            if policy in modules:
+                assert node.level == 0
+                assert all(alias.name in reply_api and alias.asname is None for alias in node.names)
+            else:
+                assert all(not module.startswith(policy + ".") for module in modules)
+                assert all(f"{module}.{alias.name}" != policy for module in modules for alias in node.names)
+        elif isinstance(node, ast.alias):
+            assert node.name.split(".")[-1] not in forbidden and node.asname not in forbidden
+        elif isinstance(node, ast.Name):
+            assert node.id not in forbidden
+        elif isinstance(node, ast.Attribute):
+            assert node.attr not in forbidden
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            assert node.name not in forbidden
+
+
+@pytest.mark.parametrize("source", [
+    "import src.application.bot.control.policy",
+    "import src.application.bot.control.policy as policy",
+    "from src.application.bot.control import policy",
+    "from src.application.bot.control import policy as p",
+    "from src.application.bot.control.policy import check_reply_authorization as authorize",
+    "from src.application.bot.control.policy import check_reply_authorization as check_reply_authorization",
+    "from src.application.bot.control.policy import *",
+    "from src.application.bot.control.policy import check_sender_allowed",
+    "from src.application.bot.control.policy import enforce_sender_allowed",
+    "from src.application.bot.control.policy import _parse_allowed_entries",
+    "from .src.application.bot.control.policy import check_reply_authorization",
+    "from ..bot.control import policy",
+    "from ..bot.control import policy as p",
+    "from ..bot.control.policy import check_reply_authorization",
+    "from ..bot.control.policy import check_reply_authorization as authorize",
+    "from ...application.bot.control import policy",
+    "from src.application.bot.control.policy.other import check_reply_authorization",
+    "from other import check_sender_allowed",
+    "from other import decision as enforce_sender_allowed",
+    "def check_sender_allowed(): pass",
+    "async def enforce_sender_allowed(): pass",
+    "def _parse_allowed_entries(): pass",
+    "policy._parse_allowed_entries('sender')",
+    "check_sender_allowed(sender_id='sender')",
+    "enforce_sender_allowed(sender_id='sender')",
+])
+def test_feishu_transport_policy_guard_rejects_bypasses(source: str) -> None:
+    with pytest.raises(AssertionError):
+        _assert_feishu_transport_policy_boundary(source)
+
+
+def test_feishu_transport_policy_guard_accepts_canonical_reply_delegation() -> None:
+    _assert_feishu_transport_policy_boundary(
+        "from src.application.bot.control.policy import (ReplyAuthorizationError, "
+        "check_reply_authorization, reply_authorization_predicate)\n"
+        "check_reply_authorization(record, channel='feishu')"
+    )
+
+
 def test_feishu_ws_transport_does_not_own_allowlist_policy() -> None:
     ws_path = ROOT / "src" / "application" / "inbound" / "feishu_ws.py"
     adapter_path = ROOT / "src" / "application" / "inbound" / "feishu.py"
@@ -560,6 +630,10 @@ def test_feishu_ws_transport_does_not_own_allowlist_policy() -> None:
     assert "OM_FEISHU_BOT_ALLOWED_OPEN_IDS" not in adapter_text
     assert "OM_FEISHU_BOT_USER_OPEN_ID" not in adapter_text
 
-    assert "src.application.bot.control.policy" not in ws_imports
+    _assert_feishu_transport_policy_boundary(ws_text)
+    assert {name.removeprefix("src.application.bot.control.policy.") for name in ws_imports
+            if name.startswith("src.application.bot.control.policy.")} == {
+        "ReplyAuthorizationError", "check_reply_authorization", "reply_authorization_predicate",
+    }
     assert "src.application.bot.control.policy.check_sender_allowed" in adapter_imports
     assert "check_sender_allowed(" in adapter_text

@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping, cast
 
 from src.application.bot.control.config_loader import load_bot_config
 from src.application.bot.control.audit import InboundAuditStore
+from src.application.bot.control.policy import (ReplyAuthorizationError, check_reply_authorization, reply_authorization_predicate)
 from src.application.bot.control.settings import DEFAULT_CONTEXT_WINDOW_MESSAGES, BotSettings, BotLlmSettings
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER
@@ -84,6 +85,7 @@ class FeishuWsSettings:
     bot_config_path: str | None = None
     audit_db: str | None = None
     allowed_senders: str | None = None
+    allowed_senders_fn: Callable[[], str | None] | None = field(default=None, repr=False, compare=False)
     app_id: str = ""
     app_secret: str = ""
     reply_enabled: bool = True
@@ -96,6 +98,10 @@ class FeishuWsSettings:
     bot_default_market_scope: str = ""
     bot_llm: BotLlmSettings = field(default_factory=BotLlmSettings)
     metadata_only: bool = False
+
+    def current_allowed_senders(self) -> str | None:
+        # Explicit constructor injection is fixed; the production builder binds a live source.
+        return self.allowed_senders_fn() if self.allowed_senders_fn else self.allowed_senders
 
     def validate_for_serve(self) -> None:
         if not (self.config_path or self.config_key):
@@ -165,11 +171,29 @@ def build_feishu_ws_settings(
     metadata_only: bool = False,
 ) -> FeishuWsSettings:
     effective_env = build_effective_env(environ=environ, env_file=env_file)
+    acl_keys = {"OM_FEISHU_BOT_ALLOWED_OPEN_IDS", "OM_FEISHU_BOT_USER_OPEN_ID"}
+    file_owned = {key for key in acl_keys if effective_env.source_of(key) and effective_env.source_of(key).source == "env_file"}
+    bound_env_file = effective_env.env_file
     if credential_env_file is not None and str(credential_env_file).strip():
         effective_env = build_effective_env(
             environ=effective_env.values,
             env_file=credential_env_file,
         )
+    file_owned.update(key for key in acl_keys if effective_env.source_of(key) and effective_env.source_of(key).source == "env_file")
+
+    def current_allowlist() -> str:
+        base = dict(os.environ if environ is None else environ)
+        for key in file_owned:
+            base.pop(key, None)
+        for bound_file in (bound_env_file, credential_env_file):
+            if bound_file is None or not str(bound_file).strip():
+                continue
+            loaded = build_effective_env(environ=base, env_file=bound_file)
+            if not loaded.env_file_loaded or loaded.warnings:
+                raise ReplyAuthorizationError("sender authorization source unavailable")
+            base = loaded.values
+        return resolve_feishu_bot_config(environ=base, metadata_only=True).default_allowed_senders()
+
     env = effective_env.values
     channel_credentials = resolve_feishu_bot_config(environ=env, metadata_only=metadata_only)
     bot_cfg = _load_bot_behavior_config(config_path=bot_config_path)
@@ -187,6 +211,7 @@ def build_feishu_ws_settings(
         bot_config_path=_first_text(bot_config_path),
         audit_db=_first_text(audit_db, env.get("OM_INBOUND_AUDIT_DB")),
         allowed_senders=channel_credentials.default_allowed_senders(),
+        allowed_senders_fn=current_allowlist,
         app_id=channel_credentials.app_id,
         app_secret=channel_credentials.app_secret,
         reply_enabled=_config_bool(reply_enabled, behavior_cfg.get("reply_enabled"), default=True),
@@ -260,10 +285,11 @@ def handle_feishu_ws_event(
                     _retry_pending_feishu_reply(settings=settings, reply_fn=reply_fn))
     outbox_retry_ms = _duration_ms(stage_started, time.monotonic())
 
-    inbound_kwargs: dict[str, Any] = {"allowed_senders": settings.allowed_senders,
+    inbound_kwargs: dict[str, Any] = {"allowed_senders": settings.current_allowed_senders(),
                                       "received_monotonic": received_monotonic}
     inbound_kwargs['bot_reply_options'] = {'bot_reply_enabled': settings.reply_enabled,
-        'reply_in_thread': settings.reply_in_thread, 'max_reply_chars': settings.max_reply_chars}
+        'reply_in_thread': settings.reply_in_thread, 'max_reply_chars': settings.max_reply_chars,
+        'reply_sender_identity': settings.app_id}
     if execute_tool_fn is not None:
         inbound_kwargs["execute_tool_fn"] = execute_tool_fn
     service = channel_service or build_feishu_inbound_channel_service()
@@ -790,9 +816,8 @@ def _maybe_reply(
             delivery_key=delivery_key,
             channel="feishu",
             payload=envelope,
+            authorization=InboundAuditStore(settings.audit_db).replay_authorization(command_id),
         )
-        if record.get("payload_json") and record.get("run_id"):
-            envelope = json.loads(record["payload_json"])
         if str(record.get("status") or "") == "delivered":
             return {
                 "attempted": False,
@@ -800,7 +825,10 @@ def _maybe_reply(
                 "reason": "idempotent_replay",
                 "delivery_key": delivery_key,
             }
-        claimed = outbox.claim_reply(delivery_key=delivery_key)
+        authorize = _feishu_reply_authorizer(settings, allow_unscoped=bool(record.get("enqueued_new")))
+        claimed = outbox.claim_reply(delivery_key=delivery_key, authorize=reply_authorization_predicate(authorize))
+        if claimed is not None and claimed.get("authorization_blocked"):
+            return {"attempted": False, "ok": False, "reason": "authorization_blocked", "delivery_key": delivery_key}
         if claimed is None:
             status = str(record.get("status") or "")
             return {
@@ -832,12 +860,17 @@ def _maybe_reply(
             reply_fn=reply_fn,
             envelope=envelope,
             uuid=delivery_key or command_id,
-            before_send=_reply_send_guard(claimed) if claimed is not None else None,
+            before_send=_reply_send_guard(claimed, authorize=authorize) if claimed is not None else None,
             allow_fallback=claimed is None or claimed.get("last_error") != REPLY_OUTCOME_UNKNOWN,
             select_fallback=(lambda: outbox.select_reply_fallback(delivery_key, attempt_count=claimed["attempt_count"]))
                             if outbox is not None else None,
         )
         api_response = delivery["api_response"]
+    except ReplyAuthorizationError as blocked:
+        if outbox is not None and delivery_key:
+            outbox.mark_reply_failed(delivery_key, error="authorization_blocked", retryable=True,
+                                    attempt_count=claimed["attempt_count"])
+        return {"attempted": blocked.provider_attempted, "ok": False, "reason": "authorization_blocked", "delivery_key": delivery_key}
     except Exception as exc:
         if outbox is not None and delivery_key:
             outbox.mark_reply_failed(
@@ -910,10 +943,13 @@ def _retry_pending_feishu_reply(
     if stop_requested is not None and stop_requested.is_set():
         return {"attempted": False, "reason": "stopped"}
     store = BotHostStore(InboundAuditStore(settings.audit_db).path)
-    record = store.claim_reply(channel="feishu")
+    authorize = _feishu_reply_authorizer(settings)
+    record = store.claim_reply(channel="feishu", authorize=reply_authorization_predicate(authorize))
     if record is None:
         return {"attempted": False, "reason": "outbox_empty"}
     delivery_key = str(record.get("delivery_key") or "")
+    if record.get("authorization_blocked"):
+        return {"attempted": False, "ok": False, "reason": "authorization_blocked", "delivery_key": delivery_key}
     try:
         envelope = _reply_envelope_from_outbox_record(record)
         if stop_requested is not None and stop_requested.is_set():
@@ -925,11 +961,15 @@ def _retry_pending_feishu_reply(
             reply_fn=reply_fn,
             envelope=envelope,
             uuid=delivery_key,
-            before_send=_reply_send_guard(record),
+            before_send=_reply_send_guard(record, authorize=authorize),
             allow_fallback=record.get("last_error") != REPLY_OUTCOME_UNKNOWN,
             select_fallback=lambda: store.select_reply_fallback(delivery_key, attempt_count=record["attempt_count"]),
         )
         api_response = delivery["api_response"]
+    except ReplyAuthorizationError as blocked:
+        store.mark_reply_failed(delivery_key, error="authorization_blocked", retryable=True,
+                                attempt_count=record["attempt_count"])
+        return {"attempted": blocked.provider_attempted, "ok": False, "reason": "authorization_blocked", "delivery_key": delivery_key}
     except Exception as exc:
         store.mark_reply_failed(
             delivery_key,
@@ -1011,14 +1051,17 @@ def _deliver_feishu_reply(
             raise
         if select_fallback is not None and not select_fallback():
             raise FeishuTransientError("reply claim superseded before fallback")
-        api_response = _call_feishu_reply_transport(
-            settings=settings,
-            reply_fn=reply_fn,
-            envelope=envelope,
-            transport=fallback,
-            uuid=f"{uuid}:fallback" if uuid else None,
-            before_send=before_send,
-        )
+        try:
+            api_response = _call_feishu_reply_transport(
+                settings=settings,
+                reply_fn=reply_fn,
+                envelope=envelope,
+                transport=fallback,
+                uuid=f"{uuid}:fallback" if uuid else None,
+                before_send=before_send,
+            )
+        except ReplyAuthorizationError as blocked:
+            raise ReplyAuthorizationError(str(blocked), provider_attempted=True) from blocked
         return {"api_response": api_response, "fallback_used": True}
 
 
@@ -1056,13 +1099,23 @@ def _call_feishu_reply_transport(
     return reply_fn(**common, msg_type=msg_type, content=content)
 
 
-def _reply_send_guard(record: dict[str, Any]) -> Callable[[], None]:
+def _feishu_reply_authorizer(settings: FeishuWsSettings, *, allow_unscoped: bool = False):
+    def check(record: dict[str, Any]) -> None:
+        check_reply_authorization(record, channel="feishu", current_allowed_senders=settings.current_allowed_senders,
+            config_key=settings.config_key, config_path=settings.config_path,
+            bot_config_path=settings.bot_config_path, transport_identity=settings.app_id, allow_unscoped=allow_unscoped)
+    return check
+
+
+def _reply_send_guard(record: dict[str, Any], *, authorize: Callable[[dict[str, Any]], None] | None = None) -> Callable[[], None]:
     expires = datetime.fromisoformat(str(record["replay_until"]).replace("Z", "+00:00"))
     deadline = time.monotonic() + (expires - datetime.now(timezone.utc)).total_seconds()
     def check() -> None:
         if datetime.now(timezone.utc) >= expires or time.monotonic() >= deadline:
             raise FeishuPermanentError("reply replay window expired",
                                       response={"local_error_code": "reply_replay_window_expired"})
+        if authorize is not None:
+            authorize(record)
     return check
 
 

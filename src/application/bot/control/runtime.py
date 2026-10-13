@@ -5,7 +5,7 @@ from dataclasses import replace
 import time
 from typing import Any, Callable
 
-from src.application.bot.control.settings import BotSettings
+from src.application.bot.control.settings import BotSettings, request_with_default_market_scope as _request_with_default_market_scope
 from src.application.bot.control.contracts import BotInboundRequest, BotTurnResult
 from src.application.bot.control.audit import InboundAuditStore
 from src.application.bot.control.inbound_service import ExecuteToolFn, handle_bot_request
@@ -69,6 +69,7 @@ def _run_bot_turn_response(
         allowed_senders=allowed_senders,
         now_fn=now_fn,
     )
+    recorded_response = response
     route = _response_route(response)
     response = _with_bot_meta(
         response,
@@ -76,32 +77,11 @@ def _run_bot_turn_response(
         settings=runtime_settings,
     )
     response = with_bot_turn_result(response, route=route)
-    _update_audit_response(store=store, response=response)
+    _update_audit_response(store=store, response=response, expected_response=recorded_response)
     return response
 
 
-def _request_with_default_market_scope(request: BotInboundRequest, settings: BotSettings) -> BotInboundRequest:
-    if request.config_path or request.config_key:
-        return request
-    scope = str(settings.default_market_scope or "").strip().lower()
-    if scope not in {"us", "hk"}:
-        return request
-    return BotInboundRequest(
-        text=request.text,
-        sender_id=request.sender_id,
-        channel=request.channel,
-        message_id=request.message_id,
-        conversation_id=request.conversation_id,
-        config_key=scope,
-        config_path=request.config_path,
-        audit_db=request.audit_db,
-        bot_config_path=request.bot_config_path,
-        reply_context=dict(request.reply_context) if isinstance(request.reply_context, dict) else None,
-        received_monotonic=request.received_monotonic,
-    )
-
-
-def _update_audit_response(*, store: InboundAuditStore, response: dict[str, Any]) -> None:
+def _update_audit_response(*, store: InboundAuditStore, response: dict[str, Any], expected_response: dict[str, Any]) -> None:
     error = response.get("error")
     if isinstance(error, dict) and error.get("code") == "PERMISSION_DENIED":
         # A current denial must not overwrite a prior authorized response.
@@ -113,7 +93,7 @@ def _update_audit_response(*, store: InboundAuditStore, response: dict[str, Any]
     command_id = data.get("command_id") if isinstance(data, dict) else None
     if not command_id:
         return
-    store.update_response(command_id=str(command_id), response=response)
+    store.update_response(command_id=str(command_id), response=response, expected_response=expected_response)
 
 
 def _with_bot_meta(

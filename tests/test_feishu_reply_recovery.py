@@ -16,16 +16,25 @@ from src.application.inbound.feishu_ws import FeishuWsSettings
 
 
 @pytest.fixture
-def recovery(tmp_path, monkeypatch):
+def recovery(tmp_path, monkeypatch, example_config_path):
+    from src.application.bot.config_scope import resolve_replay_authorization
+    from src.application.bot.control.contracts import BotInboundRequest
+
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
     # Explicit store and synthetic credentials; no SDK, model, or real transport.
     settings = FeishuWsSettings(audit_db=str(tmp_path / "host.sqlite3"),
+                               config_key="us", allowed_senders="synthetic-user",
                                app_id="synthetic-app", app_secret="synthetic-secret")
     store = BotHostStore(settings.audit_db)
     envelope = render_feishu_conversation_reply(
         message_id="synthetic-inbound", text="合成恢复回复", reply_in_thread=False,
         max_chars=3500, render_route="bot",
     )
-    store.enqueue_reply(delivery_key="feishu:synthetic", channel="feishu", payload=envelope)
+    authorization = resolve_replay_authorization(BotInboundRequest(text="", channel="feishu",
+        sender_id="synthetic-user", message_id="synthetic-inbound", config_key="us",
+        reply_context={"reply_sender_identity": settings.app_id}))
+    store.enqueue_reply(delivery_key="feishu:synthetic", channel="feishu", payload=envelope,
+                        authorization=authorization)
     monkeypatch.setattr(feishu_ws, "FEISHU_OUTBOX_RETRY_INTERVAL_SECONDS", 0.02, raising=False)
     return settings, store, envelope
 
@@ -275,7 +284,8 @@ def test_restart_recovers_crashed_lease_with_original_identity(recovery):
 @pytest.mark.parametrize("outcome", ["confirmed", "transient", "unknown"])
 def test_stop_during_transport_settles_current_but_does_not_claim_next(recovery, monkeypatch, outcome):
     settings, store, envelope = recovery
-    store.enqueue_reply(delivery_key="feishu:second", channel="feishu", payload=envelope)
+    store.enqueue_reply(delivery_key="feishu:second", channel="feishu", payload=envelope,
+        authorization=json.loads(store.list_replies()[0]["authorization_json"]))
     active, release = threading.Event(), threading.Event()
     calls = []
     def reply(**kw):

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from pathlib import Path
+from typing import Any
 
 from src.application.agent_tool_config import (
     DEFAULT_CONFIGS,
@@ -24,11 +27,11 @@ class BotConfigScopeError(ValueError):
         super().__init__(reason)
 
 
-def resolve_trusted_config_scope(
+def _resolve_trusted_config(
     *,
     config_key: str | None,
     config_path: str | None,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, dict[str, Any]]:
     key = str(config_key or "").strip().lower()
     raw_path = str(config_path or "").strip()
     if bool(key) == bool(raw_path):
@@ -84,10 +87,50 @@ def resolve_trusted_config_scope(
         raise BotConfigScopeError("config_unreadable") from exc
 
     if key:
-        return actual_market, canonical_path, f"key:{key}"
+        return actual_market, canonical_path, f"key:{key}", cfg
     path_digest = hashlib.sha256(canonical_path.encode("utf-8")).hexdigest()
-    return actual_market, canonical_path, f"path:{path_digest}"
+    return actual_market, canonical_path, f"path:{path_digest}", cfg
 
+
+
+def resolve_trusted_config_scope(*, config_key: str | None, config_path: str | None) -> tuple[str, str, str]:
+    return _resolve_trusted_config(config_key=config_key, config_path=config_path)[:3]
+
+
+def resolve_replay_authorization(request: Any) -> dict[str, Any]:
+    """Freeze channel authority from validated owners, never cached response content."""
+    from src.application.bot.model_config import load_bot_read_scope
+    from src.application.conversation_scope import derive_session_id
+
+    identity = {
+        "channel": request.channel, "sender_id": request.sender_id,
+        "conversation_id": request.conversation_id or f"{request.channel}:{request.sender_id}",
+        "message_id": request.message_id, "config_key": request.config_key,
+        "config_path": request.config_path, "bot_config_path": request.bot_config_path,
+    }
+    identity["transport_identity"] = (request.reply_context or {}).get("reply_sender_identity")
+    if not (request.config_key or request.config_path):
+        if request.channel != "local":
+            raise BotConfigScopeError("channel_identity_or_scope_invalid")
+        authority = "local"
+    else:
+        market, path, authority, cfg = _resolve_trusted_config(
+            config_key=request.config_key, config_path=request.config_path)
+        identity["config_path"] = path if request.config_path else None
+        identity["bot_config_path"] = str(Path(request.bot_config_path).resolve()) if request.bot_config_path else None
+        configs = {market: {**cfg, "config_source_path": path}}
+        generation = ""
+        if request.bot_config_path:
+            markets, generation = load_bot_read_scope(config_path=request.bot_config_path, primary_market=market)
+            for secondary in sorted(markets - {market}):
+                _, secondary_path, _, secondary_cfg = _resolve_trusted_config(config_key=secondary, config_path=None)
+                configs[secondary] = {**secondary_cfg, "config_source_path": secondary_path}
+        digest = hashlib.sha256(json.dumps(configs, sort_keys=True, ensure_ascii=False,
+                                          allow_nan=False).encode()).hexdigest()
+        authority = f"{authority}|{path}|{digest}|{generation}"
+    identity["scope"] = derive_session_id(identity["channel"], identity["sender_id"],
+                                         identity["conversation_id"], authority)
+    return identity
 
 def config_scope_error_message(reason: str) -> str:
     return {
@@ -96,3 +139,16 @@ def config_scope_error_message(reason: str) -> str:
         "config_unreadable": "已授权市场的运行配置当前无法读取",
         "config_identity_mismatch": "运行配置与已授权市场身份不一致",
     }.get(reason, "渠道身份或数据作用域不可用")
+
+
+def reply_destination(channel: str, payload: dict[str, Any]) -> str:
+    fields = ("message_id", "reply_in_thread") if channel == "feishu" else ("to_user_id", "context_token", "group_id")
+    return hashlib.sha256(json.dumps([payload.get(field) for field in fields],
+                                    sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def freeze_reply_authorization(authorization: dict[str, Any] | None, *, channel: str,
+                               payload: dict[str, Any]) -> dict[str, Any] | None:
+    if not authorization:
+        return None
+    return {**authorization, "destination": reply_destination(channel, payload)}

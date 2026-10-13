@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
+from src.application.bot.control.contracts import BotInboundRequest
 from src.application.llm_provider_registry import provider_spec
 from src.application.payload_helpers import as_dict as _dict
 
@@ -153,3 +154,10 @@ def _int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
     except Exception:
         return int(default)
     return max(int(minimum), min(parsed, int(maximum)))
+
+
+def request_with_default_market_scope(request: BotInboundRequest, settings: BotSettings) -> BotInboundRequest:
+    if request.config_path or request.config_key:
+        return request
+    scope = str(settings.default_market_scope or "").strip().lower()
+    return replace(request, config_key=scope) if scope in {"us", "hk"} else request
