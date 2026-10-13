@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.performance.query_contracts import PerformanceQueryError
 from domain.domain.ledger.position_fields import normalize_account
 from domain.domain.performance.period import (
     normalize_performance_period,
@@ -160,11 +161,12 @@ def capture_option_performance_evidence(
         "period": "mtd",
         "include_rows": False,
     }
-    request, window = normalize_option_performance_request(
-        report_payload,
-        normalize_broker=normalize_broker,
-        now_ms=now_ms,
-    )
+    try:
+        request, window = normalize_option_performance_request(
+            report_payload, normalize_broker=normalize_broker, now_ms=now_ms,
+        )
+    except PerformanceQueryError as exc:
+        raise AgentToolError(exc.code, exc.message, hint=exc.hint, details=exc.details) from exc
     if window.status != "partial_current":
         raise AgentToolError("INVALID_ARGUMENT", "evidence capture only supports the current period")
     config_path, cfg = load_runtime_config(
