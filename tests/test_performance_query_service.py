@@ -1,3 +1,4 @@
+from src.application import query_cursor
 from argparse import Namespace
 from contextlib import contextmanager
 from dataclasses import replace
@@ -11,6 +12,7 @@ from threading import Thread
 import pytest
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.performance.query_contracts import PerformanceQueryError
 from src.application.agent_tools import materialization_impl, positions
 from src.application.bot import tools as bot_tools
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
@@ -194,7 +196,7 @@ def test_read_failures_and_unhandled_errors_are_distinct_and_sanitized(service, 
 def test_missing_ledger_returns_read_error_and_does_not_create(service):
     url, _, path, _ = service
     path.unlink()
-    with pytest.raises(AgentToolError) as exc:
+    with pytest.raises(PerformanceQueryError) as exc:
         _remote(url)
     assert exc.value.code == "READ_ERROR" and exc.value.details["reason_codes"] == ["ledger_read_failed"]
     assert not path.exists()
@@ -216,7 +218,7 @@ def test_cursor_keeps_server_time_and_detects_source_change(service, monkeypatch
     monkeypatch.setattr(query, "datetime", Clock)
     from src.application.agent_tools import project_reader
 
-    monkeypatch.setattr(project_reader, "_key", lambda: "isolated-cursor-key")
+    monkeypatch.setattr(query_cursor, "_key", lambda: "isolated-cursor-key")
     request = {**QUERY, "view": "rows", "limit": 1}
     first = _remote(url, request)[0]
     assert first["pagination"]["has_more"] and first["next_cursor"]
@@ -225,7 +227,7 @@ def test_cursor_keeps_server_time_and_detects_source_change(service, monkeypatch
     assert first["period"] == second["period"]
     assert first["rows"][0]["fact_id"] != second["rows"][0]["fact_id"]
     writer.upsert_trade_event(replace(_event("new", "open", "2026-09-02T10:00:00"), lot_id="lot-new"))
-    with pytest.raises(AgentToolError) as exc:
+    with pytest.raises(PerformanceQueryError) as exc:
         _remote(url, {**request, "cursor": second["next_cursor"]})
     assert exc.value.code == "READ_ERROR" and exc.value.message == "source_changed"
 
@@ -243,7 +245,7 @@ def test_cursor_keeps_server_time_and_detects_source_change(service, monkeypatch
     ],
 )
 def test_client_rejects_non_loopback_or_ambiguous_origins(url):
-    with pytest.raises(AgentToolError) as exc:
+    with pytest.raises(PerformanceQueryError) as exc:
         _remote(url)
     assert exc.value.code == "INPUT_ERROR"
 
@@ -266,7 +268,7 @@ def test_unavailable_service_never_falls_back(monkeypatch):
             "mask_path",
         )
     }
-    with pytest.raises(AgentToolError) as exc:
+    with pytest.raises(PerformanceQueryError) as exc:
         materialization_impl.option_performance_report_tool(QUERY, **deps)
     assert exc.value.code == "SERVICE_ERROR"
     assert exc.value.details["reason_codes"] == ["service_unavailable"]
@@ -310,7 +312,7 @@ def test_client_rejects_bad_envelopes_and_redirects(body, status):
             pass
 
     with _running(HTTPServer(("127.0.0.1", 0), Handler)) as url:
-        with pytest.raises(AgentToolError) as exc:
+        with pytest.raises(PerformanceQueryError) as exc:
             _remote(url)
         assert exc.value.details["reason_codes"] == ["service_protocol_invalid"]
 
@@ -326,20 +328,20 @@ def test_client_timeout_is_explicit(service, monkeypatch):
         return original(*args, **kw)
 
     monkeypatch.setattr(query_http, "build_option_period_performance", slow)
-    with pytest.raises(AgentToolError) as exc:
+    with pytest.raises(PerformanceQueryError) as exc:
         _remote(service[0])
     assert exc.value.details["reason_codes"] == ["service_unavailable"]
 
 
 def test_missing_token_prevents_listen(monkeypatch):
     monkeypatch.setattr(query_http, "load_runtime_config", _forbid)
-    with pytest.raises(AgentToolError, match="TOKEN"):
+    with pytest.raises(PerformanceQueryError, match="TOKEN"):
         query_http.create_performance_query_server(config_key="us", config_path=Path("/never"), token="", port=0)
 
 
 def test_integer_year_and_client_path_rejection(service):
     assert _remote(service[0], {"period": "year", "year": 2025})[0]["period"]["kind"] == "year"
-    with pytest.raises(AgentToolError) as exc:
+    with pytest.raises(PerformanceQueryError) as exc:
         _remote(service[0], {**QUERY, "data_config": "/private/server-path"})
     assert exc.value.code == "INPUT_ERROR"
 
@@ -355,7 +357,7 @@ def test_corrupt_service_ledger_is_read_error(service):
     url, writer, _, _ = service
     with writer._connect() as conn:
         conn.execute("DROP TABLE trade_events")
-    with pytest.raises(AgentToolError) as exc:
+    with pytest.raises(PerformanceQueryError) as exc:
         _remote(url)
     assert exc.value.code == "READ_ERROR"
 
@@ -439,7 +441,7 @@ def test_serve_public_entry_binds_operator_config_and_closes(monkeypatch):
 
 def test_response_limit_is_a_read_failure(service, monkeypatch):
     monkeypatch.setattr(query_http, "MAX_RESPONSE_BYTES", 1000)
-    with pytest.raises(AgentToolError) as exc:
+    with pytest.raises(PerformanceQueryError) as exc:
         _remote(service[0])
     assert exc.value.code == "READ_ERROR" and "paged" in exc.value.message
 
@@ -450,7 +452,7 @@ def test_existing_generated_config_startup_is_read_only(example_config_path, mon
         config_key="us", config_path=example_config_path, token=TOKEN, port=0
     )
     with _running(server) as url:
-        with pytest.raises(AgentToolError) as exc:
+        with pytest.raises(PerformanceQueryError) as exc:
             _remote(url)
         assert exc.value.code == "READ_ERROR"
     assert not (example_config_path.parent / "output_shared/state/option_positions.sqlite3").exists()

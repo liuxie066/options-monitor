@@ -413,6 +413,19 @@ Ledger 提交后、普通回执记录前崩溃时，先读回既有成交结果�
 经济事实已经存在，也不能授予新的回执资格；恢复资格须在同一 writer 锁下核对并持久保存。
 所有路径只保留一个发送 owner，不引入通用通知平台。
 
+Combo 首次配对成功的独立回执复用现有通知 outbox。canonical attribution transaction
+同时提交两腿归属证明、不可变组合身份、confirmed inference 和一条
+`combo_pair_confirmed` 意图；事务失败或 preview 回滚时均无成功意图。
+账户与稳定组合 ID 决定唯一逻辑 transition，通知路由不改变原经济归属请求身份。
+已有组合和经济重放不补建意图；禁用通知/来源回执或无法证明发送身份时记录 suppressed，
+以后启用不自动回灌。原 Inbox 成交回执及其送达证据保持冻结。
+
+Combo membership owner 经 ledger facade 提供 `validate_combo_pair_success`，由现有
+batch dispatcher 在规划与 send-start 的账本事务里复验当前成员和 confirmed inference。
+outbox 接受此验证回调，不自行重建归属计算。新 kind 仅可走批次管线，每组一批，
+旧单条 claim 不得领取；账户 allowlist 和冻结 sender/recipient 绑定同时生效。
+明确发送前失败重试同一冻结批次，unknown/accepted 不自动重发；provider 接收并不证明人已读。
+
 实时 push、断线补查与显式历史文件导入的交付资格在持久接收时固定，随处理结果
 传到实际创建通知意图的 owner。历史导入首次平仓也不得创建可投递 outbox，不能只
 关闭上层 callback；抑制决定须可读回。用途不参与经济唯一身份，重导入不得改写既有

@@ -188,7 +188,7 @@ def _write_scan_blob_manifest(path: Path, *refs: dict[str, Any]) -> None:
 
 @pytest.mark.parametrize("fault", ["present", "missing", "symlink"])
 def test_baseline_and_gc_agree_on_protected_scan_blob_presence(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fault: str,
+    storage_disk_capacity, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fault: str,
 ) -> None:
     root = _make_runtime(tmp_path)
     ref = _publish_scan_blob(root, "NVDA")
@@ -301,7 +301,7 @@ def test_gc_inventory_read_failure_never_proves_missing(monkeypatch: pytest.Monk
 
 
 def test_expired_scan_blob_relocation_keeps_repeated_previews_usable(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    storage_disk_capacity, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     root = _make_runtime(tmp_path)
     ref = _publish_scan_blob(root, "NVDA")
@@ -1474,3 +1474,15 @@ def test_scan_blob_gc_preview_blocks_all_candidates_on_protected_root_failure(
     assert result["candidates"] == []
     assert reason in {item["reason"] for item in result["blockers"]}
     assert result["safety"]["mutation_operations"] == 0
+
+
+@pytest.mark.parametrize("free_gib, critical", [(80, False), (4, True)])
+def test_storage_baseline_qualifies_observed_disk_capacity(
+    monkeypatch, tmp_path, storage_disk_capacity, free_gib, critical,
+):
+    observation = storage_disk_capacity(free_gib=free_gib)
+    baseline = _collect(monkeypatch, tmp_path)
+    thresholds = baseline["thresholds"]
+    assert thresholds["current_free_bytes"] == observation.free
+    assert ("current_free_space_below_critical_floor" in thresholds["critical_reasons"]) is critical
+    assert thresholds["automatic_actions"] == []

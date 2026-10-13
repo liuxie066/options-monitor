@@ -1028,7 +1028,7 @@ def test_wheel_call_blocks_unknown_overlap_between_broker_sellable_and_ledger_lo
 
 def test_wheel_put_transaction_rejects_untrusted_source_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "src.application.wheel.capacity.build_wheel_read_model_from_rows",
+        "src.application.ledger.wheel_capacity.build_wheel_read_model_from_rows",
         lambda *_args, **_kwargs: {"wheel_branches": []},
     )
     with pytest.raises(ValueError, match="no longer has cash capacity"):

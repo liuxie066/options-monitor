@@ -5,6 +5,7 @@ import pytest
 
 from domain.domain.strategy_membership import resolve_trade_attribution
 from src.application.ledger.api import read_trade_attribution_snapshot
+from src.application.ledger import trade_attribution as ledger_attribution
 from src.application.trades import attribution
 from test_trade_attribution_full_branches import (
     EVIDENCE, NOW, _ingest, _observation, _occupied_scope, _view,
@@ -174,6 +175,7 @@ def test_cancel_after_transaction_recheck_does_not_publish_conflict(tmp_path, mo
         return result
 
     monkeypatch.setattr(attribution, "build_trade_attribution_view", cancel_after_recheck)
+    monkeypatch.setattr(ledger_attribution, "build_trade_attribution_view", cancel_after_recheck)
     monkeypatch.setattr(attribution, "read_attribution_combo_evidence", lambda *a, **k: EVIDENCE)
     monkeypatch.setattr("src.application.wheel.capacity.observe_trade_attribution_capacity", lambda **k: observation)
     result = attribution.reconcile_trade_attribution_account(repo, config=config, account="lx", market="hk",
@@ -188,13 +190,13 @@ def test_capacity_expiring_at_conflict_transaction_cannot_publish(tmp_path, monk
     observation = _observation(repo)
     observation["portfolio"]["position_snapshot_input"]["rows"][0]["quantity"] = "0"
     before = read_trade_attribution_snapshot(repo, account="lx", market="hk")
-    original = attribution.with_sqlite_repo_transaction
+    original = ledger_attribution.with_sqlite_repo_transaction
 
     def expire_before_recheck(*args, **kwargs):
         monkeypatch.setattr(attribution.time, "time", lambda: (NOW + 61001) / 1000)
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(attribution, "with_sqlite_repo_transaction", expire_before_recheck)
+    monkeypatch.setattr(ledger_attribution, "with_sqlite_repo_transaction", expire_before_recheck)
     result = _recover(repo, config, tmp_path, monkeypatch, observation)
     assert result["conflicts"] == 0 and result["errors"]
     assert read_trade_attribution_snapshot(repo, account="lx", market="hk") == before
@@ -209,7 +211,7 @@ def test_conflict_write_rolls_back_if_cancelled_or_expired_before_commit(tmp_pat
     observation["portfolio"]["position_snapshot_input"]["rows"][0]["quantity"] = "0"
     before = read_trade_attribution_snapshot(repo, account="lx", market="hk")
     stop = Event()
-    original = attribution.record_trade_attribution_conflict
+    original = ledger_attribution.record_trade_attribution_conflict
     writes = []
 
     def fail_after_write(*args, **kwargs):
@@ -221,7 +223,7 @@ def test_conflict_write_rolls_back_if_cancelled_or_expired_before_commit(tmp_pat
             monkeypatch.setattr(attribution.time, "time", lambda: (NOW + 61001) / 1000)
         return result
 
-    monkeypatch.setattr(attribution, "record_trade_attribution_conflict", fail_after_write)
+    monkeypatch.setattr(ledger_attribution, "record_trade_attribution_conflict", fail_after_write)
     monkeypatch.setattr(attribution, "read_attribution_combo_evidence", lambda *a, **k: EVIDENCE)
     monkeypatch.setattr("src.application.wheel.capacity.observe_trade_attribution_capacity", lambda **k: observation)
     result = attribution.reconcile_trade_attribution_account(repo, config=config, account="lx", market="hk",

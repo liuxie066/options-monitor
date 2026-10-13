@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.application import query_cursor
+
 import hashlib
 from pathlib import Path
 
@@ -30,7 +32,7 @@ def test_same_bytes_formal_bundle_and_facade(tmp_path, monkeypatch):
     assert len(bundle["resources"]) == 2
     assert all("manifest" not in name for name in bundle["resources"])
     assert all(isinstance(raw, bytes) for raw in bundle["resources"].values())
-    monkeypatch.setattr(project_reader, "resolve_secret", lambda *_: "fixture-key")
+    monkeypatch.setattr(query_cursor, "resolve_secret", lambda *_: "fixture-key")
     scope = {"market": "us", "accounts": ["lx", "sy"], "config_revision": "abc"}
     kwargs = {"scope": scope, "run_id": "run-1", "account": "lx"}
     root = _kwargs(tmp_path)["runtime_root"]
@@ -104,7 +106,7 @@ def test_discovery_orders_entire_directory_and_continues(tmp_path):
 
 def test_account_cursor_cannot_cross_scope(tmp_path, monkeypatch):
     _seal_combo_bundle(tmp_path)
-    monkeypatch.setattr(project_reader, "resolve_secret", lambda *_: "fixture-key")
+    monkeypatch.setattr(query_cursor, "resolve_secret", lambda *_: "fixture-key")
     root = RuntimeRootResolution(tmp_path, "argument")
     scope = {"market": "us", "accounts": ["lx", "sy"], "config_revision": "abc"}
     listed = project_run_files(root, scope=scope, account="lx", run_id="run-1")

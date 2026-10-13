@@ -1105,3 +1105,23 @@ def publish_combo_pair_identity(sqlite_repo: Any, *, conn: Any, inference: Mappi
         raise ValueError("post-trade Combo adoption membership is not exact")
     sqlite_repo.insert_strategy_group_identity(identity, conn=conn)
     return identity, membership
+
+
+def validate_combo_pair_success(repo: Any, payload: dict[str, Any], *, conn: Any) -> bool:
+    """Validate a frozen confirmation against current canonical member ownership."""
+    identity = payload["identity"]
+    if repo.get_strategy_group_identity(identity["group_id"], conn=conn) != identity:
+        return False
+    pair = repo.get_combo_pair_inference(payload["inference_id"], conn=conn)
+    if (not pair or pair["status"] != "user_confirmed"
+            or pair["account"] != payload["account"]
+            or pair["strategy_group_id"] != identity["group_id"]
+            or pair.get("identity_hash") != identity["identity_hash"]):
+        return False
+    membership = resolve_combo_group_membership(
+        group_id=identity["group_id"], account=payload["account"], expected_symbol=payload["symbol"],
+        trade_events=repo.list_trade_events(conn=conn), projected_position_lots=repo.list_position_lots(conn=conn),
+    )
+    return (membership.fact["status"] == "exact"
+            and set(membership.fact["current_account_member_record_ids"]) == {
+                identity["funding_put_record_id"], identity["participation_call_record_id"]})

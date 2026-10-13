@@ -1,12 +1,12 @@
 """Atomic policy-binding CAS; configuration observations expose no ledger handle."""
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256 as request_fingerprint
 from .repository import with_sqlite_repo_transaction
+from src.infrastructure.io_utils import file_identity as wheel_policy_file_identity
 
 
 class WheelPolicyBindingReplayError(ValueError):
@@ -17,21 +17,11 @@ class WheelPolicyBindingReplayError(ValueError):
         self.receipt = receipt
 
 
-def wheel_policy_file_identity(path: Path, *, content: bool = False) -> dict[str, Any]:
-    stat = path.stat()
-    if not path.is_file():
-        raise ValueError("Wheel policy binding requires regular files")
-    result = {"path": str(path.resolve()), "device": stat.st_dev, "inode": stat.st_ino}
-    if content:
-        result["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
-    return result
-
-
 def build_wheel_policy_binding_request(
     *, observed: Mapping[str, Any], configuration: Mapping[str, Any],
     sqlite_path: str | Path, market: str, account: str, request_id: str, actor: str,
 ) -> dict[str, Any]:
-    from src.application.wheel.config import WHEEL_ACTIVATION_DESCRIPTOR_FIELDS
+    from domain.domain.wheel.config import WHEEL_ACTIVATION_DESCRIPTOR_FIELDS
 
     windows = observed["windows"]
     if not windows or windows[-1]["deactivated_at_ms"] is not None:
@@ -56,6 +46,13 @@ def build_wheel_policy_binding_request(
         "source": configuration["source"], "runtime": configuration["runtime"],
         "ledger": wheel_policy_file_identity(Path(sqlite_path)),
     }
+
+
+def _verify_wheel_policy_binding_files(request: Mapping[str, Any]) -> None:
+    for key in ("source", "runtime", "ledger"):
+        expected = request[key]
+        if wheel_policy_file_identity(Path(expected["path"]), content=key != "ledger") != expected:
+            raise ValueError(f"Wheel policy binding {key} identity changed")
 
 
 def record_wheel_policy_binding(
@@ -110,9 +107,21 @@ def record_wheel_policy_binding(
         )
         if request_fingerprint(checked) != expected_preview_hash:
             raise ValueError("stale Wheel policy binding preview")
+        _verify_wheel_policy_binding_files(checked)
         receipt = sqlite_repo.append_wheel_policy_binding(
             request=checked, request_hash=expected_preview_hash, conn=conn,
         )
+        persisted = [item for item in sqlite_repo.list_wheel_policy_bindings(
+            market=market, account=account, conn=conn,
+        ) if item["request_id"] == request_id]
+        current = sqlite_repo.get_current_wheel_activation_window(market=market, account=account, conn=conn)
+        if (len(persisted) != 1 or persisted[0] != receipt
+                or receipt["request"] != checked or receipt["request_hash"] != expected_preview_hash
+                or not current or current["generation"] != receipt["generation"]
+                or current["policy_binding_revision"] != receipt["revision"]
+                or current["effective_policy_hash"] != receipt["policy_hash"]):
+            raise ValueError("Wheel policy binding readback verification failed")
+        _verify_wheel_policy_binding_files(checked)
         return {"receipt": receipt, "idempotent": False}
 
     return with_sqlite_repo_transaction(repo, commit)
