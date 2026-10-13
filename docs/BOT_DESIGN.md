@@ -87,7 +87,7 @@
 
 普通入站缓存由 `bot.config_scope` 和 inbound audit owner 绑定可信渠道、用户、会话、有效运行配置内容（包含账户集合）、规范配置路径与 Bot 读取代际；双市场还包含获准的另一市场配置。规范路径别名保持同一身份，运行配置内容或 Bot 配置代际改变则不能沿用旧结果。重放先核验当前 sender，再核验 scope，之后才能解析原回答；作用域缺失、不可读取或不匹配时返回 `CHANNEL_NOT_READY`，保留原成功响应并要求发送新消息，不重新执行原业务。旧无绑定记录保留但不猜测补绑。合法请求的审计查找失败明确报错，runtime 注释只以原响应 CAS 更新已录入结果，不覆盖原成功缓存；新合法失败仍正常保存。
 
-Feishu 和 Wechat reply outbox 冻结上述权限、原接收上下文与发送配置路由。每次 claim 前和实际发送前重新核验当前权限与 scope；拒绝或缺证据返回 `authorization_blocked`，不当作空队列或 provider 成功。claim 前只延后现有下次尝试时间，不增加 attempt、延长 provider 窗口或改写冻结正文；claim 后本地阻塞保留已有 attempt fence、UUID、窗口及 UNKNOWN，不把未调用 provider 说成未知送达。已拒绝的队首延期，使其他合法回复可以继续。原 no-reply、stop、过期、取消及可靠 fallback 合同保留。
+Feishu 和 Wechat reply outbox 冻结上述权限、原接收上下文与发送配置路由。每次 claim 前和实际发送前重新核验当前权限与 scope；拒绝或缺证据返回 `authorization_blocked`，不当作空队列或 provider 成功。claim 前只延后现有下次尝试时间，不增加 attempt、延长 provider 窗口或改写冻结正文；claim 后本地阻塞保留已有 attempt fence、UUID、窗口及 UNKNOWN，不把未调用 provider 说成未知送达。已拒绝的队首延期，使其他合法回复可以继续。Feishu 的 no-reply 门禁保持；Wechat public poll 在禁回复时仍可能重试已有待发，是本次未修的既有调用入口缺口，另待范围批准。stop、过期、取消及可靠 fallback 沿原 owner 处理。
 
 生产 Feishu reader 重读最初绑定的 env/credential env 来源，文件缺失、不可读、异常或删除名单键不会复用它原先写入进程的旧名单；Wechat 配置来源每次从已验证 Bot 配置读取。显式 CLI 或进程名单仍按该明确来源生效，其值变化或重启才改变授权。即时公开的工具权限引导与 sender 拒绝保持原区别：未授权 sender 仍静默；合法 sender 的新结果在 scope 暂不可用时可沿同一原路由即时回复一次，仅限新录入且新入队的正文。该例外不会使旧 cache、outbox 冲突或待发重试取得权限证明。历史未绑定待发消息不自动补送或迁移；恢复合法同 scope 后，原已绑定回复才可按既有窗口重试。
 
