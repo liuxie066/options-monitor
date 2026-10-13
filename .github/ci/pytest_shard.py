@@ -13,7 +13,7 @@ from regression_manifest import shard_for
 def pytest_addoption(parser):
     group = parser.getgroup("ci sharding")
     group.addoption("--ci-shard", type=int)
-    group.addoption("--ci-shard-count", type=int, default=4)
+    group.addoption("--ci-shard-count", type=int, default=6)
     group.addoption("--ci-manifest")
     group.addoption("--ci-revision")
 

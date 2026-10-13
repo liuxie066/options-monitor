@@ -105,7 +105,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5]
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -133,7 +133,7 @@ jobs:
           CI_SHARD: ${{ matrix.shard }}
         run: |
           ./.venv/bin/python -m pytest -vv -n 4 --dist loadfile --max-worker-restart=0 --durations=25 \
-            -p pytest_shard --ci-shard "$CI_SHARD" --ci-shard-count 4 \
+            -p pytest_shard --ci-shard "$CI_SHARD" --ci-shard-count 6 \
             --ci-manifest "$RUNNER_TEMP/regression/manifest.json" --ci-revision "$GITHUB_SHA" \
             -o tmp_path_retention_policy=failed \
             -o faulthandler_timeout=60 2>&1 | tee "$RUNNER_TEMP/full-regression.log"
@@ -184,7 +184,7 @@ jobs:
         if: ${{ github.event_name == 'pull_request' || needs.plan.outputs.release_tag != '' }}
         run: |
           python .github/ci/regression_manifest.py "$RUNNER_TEMP/regression-receipts" \
-            --count 4 --revision "$GITHUB_SHA"
+            --count 6 --revision "$GITHUB_SHA"
 
   release:
     needs: guardrails
