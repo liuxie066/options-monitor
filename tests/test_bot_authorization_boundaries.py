@@ -405,3 +405,45 @@ def test_live_default_market_without_runtime_scope_is_not_retry_proof(scoped, tm
     result = feishu_ws._maybe_reply(inbound=inbound, settings=settings,
         reply_fn=lambda **kwargs: calls.append(kwargs) or {"code": 0, "data": {"message_id": "new-receipt"}})
     assert result["ok"] and len(calls) == 1
+
+
+@pytest.mark.parametrize("channel", ["feishu", "wechat"])
+@pytest.mark.parametrize("blocked_count", [1, 2])
+def test_slow_retry_interval_progresses_past_blocked_senders(scoped, monkeypatch, channel, blocked_count):
+    from datetime import datetime, timedelta, timezone
+    from src.application.bot import host_store
+
+    clock = {"now": datetime.now(timezone.utc)}
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock["now"] if tz else clock["now"].replace(tzinfo=None)
+    monkeypatch.setattr(host_store, "datetime", Clock)
+    monkeypatch.setattr(host_store, "utc_now_iso", lambda: clock["now"].isoformat())
+    for index in range(blocked_count):
+        _, store, key = _pending(scoped, channel, sender=f"blocked-{index}", message=f"a-blocked-{index}")
+    request, store, allowed_key = _pending(scoped, channel, sender="allowed-sender", message="z-allowed")
+    before = {row["delivery_key"]: row for row in store.list_replies()}
+    sends = []
+    for index in range(blocked_count):
+        result = _retry(request, channel, f"{channel}:allowed-sender", sends)
+        assert result["reason"] == "authorization_blocked" and not sends
+        clock["now"] += timedelta(seconds=60)
+    assert _retry(request, channel, f"{channel}:allowed-sender", sends)["ok"]
+    assert len(sends) == 1 and _reply_row(store, allowed_key)["status"] == "delivered"
+    for row in store.list_replies():
+        if row["delivery_key"] == allowed_key:
+            continue
+        assert row["attempt_count"] == 0 and row["status"] == "pending"
+        for field in ("payload_json", "authorization_json", "last_error", "replay_until"):
+            assert row[field] == before[row["delivery_key"]][field]
+
+
+def test_unfiltered_claim_also_prioritizes_original_due_time(scoped):
+    request, store, blocked = _pending(scoped, "wechat", message="a-blocked")
+    _, _, allowed = _pending(scoped, "wechat", sender="allowed-sender", message="z-allowed")
+    assert store.claim_reply(authorize=lambda row: row["delivery_key"] != blocked)["authorization_blocked"]
+    # Both are due at a later legal poll interval; postponed head must not win again.
+    from datetime import datetime, timedelta, timezone
+    later = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+    assert store.claim_reply(before=later, authorize=lambda row: row["delivery_key"] != blocked)["delivery_key"] == allowed

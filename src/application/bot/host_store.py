@@ -611,7 +611,7 @@ class BotHostStore:
                     WHERE channel = ?
                       AND status IN ('pending', 'retryable_failed')
                       AND next_attempt_at <= ?
-                    ORDER BY created_at, delivery_key LIMIT 1
+                    ORDER BY next_attempt_at, created_at, delivery_key LIMIT 1
                     """,
                     (str(channel), now),
                 ).fetchone()
@@ -620,7 +620,7 @@ class BotHostStore:
                     """
                     SELECT * FROM bot_reply_outbox
                     WHERE status IN ('pending', 'retryable_failed') AND next_attempt_at <= ?
-                    ORDER BY created_at, delivery_key LIMIT 1
+                    ORDER BY next_attempt_at, created_at, delivery_key LIMIT 1
                     """,
                     (now,),
                 ).fetchone()
