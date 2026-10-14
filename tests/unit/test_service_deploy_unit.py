@@ -373,6 +373,16 @@ def test_render_rejects_unknown_secret_credential_delivery(tmp_path: Path) -> No
             "deploy user",
         ),
         (
+            "liuxie\rExecStartPre=+/tmp/injected",
+            "/etc/credstore.encrypted",
+            "deploy user",
+        ),
+        (
+            "liuxie\r\nExecStartPre=+/tmp/injected",
+            "/etc/credstore.encrypted",
+            "deploy user",
+        ),
+        (
             "liuxie",
             "/etc/credstore.encrypted\nExecStartPre=+/tmp/injected",
             "control characters",
@@ -959,8 +969,24 @@ def test_service_render_line_boundary_rejects_effective_values(tmp_path, newline
     if field.startswith("opend_"):
         options.update(include_opend=True, opend_root=tmp_path / "opend")
     options[field] = str(tmp_path / "before") + newline + "X-OM-Renderer-Probe=present"
-    with pytest.raises(ValueError, match="systemd unit values must not contain CR or LF"):
+    message_field = "deploy user" if field == "deploy_user" else "unit values"
+    with pytest.raises(ValueError) as error:
         render_service_bundle(**options)
+    assert str(error.value) == f"systemd {message_field} must not contain CR or LF"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_service_render_line_boundary_keeps_credential_user_policy_scoped(tmp_path):
+    options = dict(accounts=["fixture"], markets=["us"], deploy_user="fixture@realm",
+                   deploy_home=tmp_path / "home", use_default_deploy_user=False)
+    bundle = _render_bundle(tmp_path / "repo", tmp_path / "runtime", **options)
+    tick = next(item["content"] for item in bundle["files"]
+                if item["relative_path"] == "systemd/options-monitor-tick-us.service")
+    assert "User=fixture@realm\n" in tick
+    with pytest.raises(ValueError, match="runtime credential deploy user is not a safe system account name"):
+        _render_bundle(tmp_path / "repo", tmp_path / "runtime", **options,
+                       include_secret_credentials=True, secret_credential_delivery="runtime-files",
+                       secret_credential_store_root=tmp_path / "credstore")
     assert list(tmp_path.iterdir()) == []
 
 
