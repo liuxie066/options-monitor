@@ -200,8 +200,7 @@ def test_retry_requires_current_authority_without_claiming(scoped, channel, prob
 def test_blocked_head_does_not_starve_other_sender_and_same_scope_recovers(scoped, channel):
     request, store, key = _pending(scoped, channel)
     _, _, other = _pending(scoped, channel, sender="other-sender", message="other-message")
-    with sqlite3.connect(store.path) as conn:
-        conn.execute("UPDATE bot_reply_outbox SET created_at='2026-10-13T00:00:00+00:00' WHERE delivery_key=?", (key,))
+    _due(store, key)  # Queue order uses next_attempt_at before created_at.
     sends = []
     assert _retry(request, channel, f"{channel}:other-sender", sends)["reason"] == "authorization_blocked"
     assert _retry(request, channel, f"{channel}:other-sender", sends)["ok"]
