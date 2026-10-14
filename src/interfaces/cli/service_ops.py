@@ -348,7 +348,8 @@ def handle_service_update_command(
             options.update({key: getattr(args, key) for key in ("accounts", "markets", "include_opend", "include_feishu_ws", "include_wechat_clawbot", "channel_market")})
         data = service_lifecycle_fn(args.service_command, repo_root=repo, runtime_root=runtime,
                                     confirm=args.confirm, expected_preview_sha256=args.expected_preview_sha256, **options)
-        return build_response(tool_name=f"service.{args.service_command}", ok=bool(data.get("ok")), data=data)
+        return build_response(tool_name=f"service.{args.service_command}", ok=bool(data.get("ok")), data=data,
+                              error=data.get("error"))
 
     if args.command == "service" and args.service_command == "render":
         bundle = render_service_bundle_fn(

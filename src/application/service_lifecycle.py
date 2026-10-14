@@ -21,7 +21,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
-from src.application.agent_tool_contracts import AgentToolError
+from src.application.agent_tool_contracts import AgentToolError, build_error_payload
 from src.application.config_primitives import configured_markets
 from src.application.config_yaml import load_yaml_config_file, resolve_yaml_bot_config
 from src.application.runtime_config_freshness import check_runtime_config_freshness, check_runtime_config_identity
@@ -760,7 +760,12 @@ def service_lifecycle(
     except (OSError, KeyboardInterrupt, AgentToolError) as exc:
         if isinstance(exc, AgentToolError) and not out["operations"]:
             raise
-        out.update(ok=False, status="cancelled" if isinstance(exc, KeyboardInterrupt) else "failed", error=str(exc))
+        interrupted = isinstance(exc, KeyboardInterrupt)
+        error = exc if isinstance(exc, AgentToolError) else AgentToolError(
+            code="SERVICE_OPERATION_CANCELLED" if interrupted else "SERVICE_OPERATION_FAILED",
+            message=(str(exc) or "Service operation cancelled.") if interrupted else (str(exc) or type(exc).__name__),
+        )
+        out.update(ok=False, status="cancelled" if interrupted else "failed", error=build_error_payload(error))
     finally:
         os.close(descriptor)
     return attach_write_contract(out, dry_run=False, write_applied=out["changed"], rollback_hint="Use the reported backups only after a fresh preview; re-read service state before retrying.")
