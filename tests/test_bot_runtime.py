@@ -95,7 +95,9 @@ def test_slash_command_keeps_deterministic_control_path(tmp_path: Path) -> None:
     assert calls
 
 
-def test_duplicate_freeform_message_reuses_audited_response(monkeypatch, tmp_path: Path) -> None:
+def test_duplicate_freeform_message_reuses_audited_response(monkeypatch, tmp_path: Path, example_config_path) -> None:
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
+    (tmp_path / "config.bot.json").write_text('{"bot":{"enabled":false}}')
     from src.application.bot.control import inbound_service
 
     calls = 0

@@ -1,0 +1,115 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.4.1",
+  "base": {
+    "tag": "v4.4.0",
+    "commit": "b9c6d73391a319642ce769b5ed1951bffec2c779"
+  },
+  "reviewed_head": "3f9b8aa451482c1bd9181db80974933996df4c12",
+  "commits": [
+    {
+      "sha": "c39290655ee585de40203191896b43f2922b43d7",
+      "subject": "fix(bot): bind cached results and reply retries to current authority"
+    },
+    {
+      "sha": "cf8e75e3b3ec00ce9528077514a9dfc8d29aa1d9",
+      "subject": "docs(bot): clarify existing Wechat no-reply retry limitation"
+    },
+    {
+      "sha": "c375d17a104fbfdc62a41bb8e2ba249992c5de10",
+      "subject": "fix(bot): select due replies before deferred authorization blocks"
+    },
+    {
+      "sha": "8292c6136fceb592f8133f5278a680b24b4f1f7d",
+      "subject": "chore(bot): merge current main for scope retry verification"
+    },
+    {
+      "sha": "a8fa7168ad93e6d81f1eba169692a2bf0a80f90b",
+      "subject": "test(bot): enforce precise canonical reply authorization boundary"
+    },
+    {
+      "sha": "af5082e39efd151355e8eb4f3ad74fc8eca21b3d",
+      "subject": "test(bot): reject relative policy import bypasses"
+    },
+    {
+      "sha": "3f9b8aa451482c1bd9181db80974933996df4c12",
+      "subject": "Merge pull request #598 from liuxie066/codex/fix-bot-scope-retry-544"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "Bot 原消息缓存绑定配置、账户和会话，待发回复在领取及发送前重验当前权限；查找故障保留原成功缓存，历史无绑定结果保留但不能自动重放或补送。",
+      "commits": [
+        "c39290655ee585de40203191896b43f2922b43d7",
+        "c375d17a104fbfdc62a41bb8e2ba249992c5de10"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "cf8e75e3b3ec00ce9528077514a9dfc8d29aa1d9",
+      "reason": "文档纠正既有Wechat禁回复缺口；没有修复该独立缺口或新增运行行为"
+    },
+    {
+      "commit": "8292c6136fceb592f8133f5278a680b24b4f1f7d",
+      "reason": "普通合入已发布v4.4.0元数据基线；不重复发布基线内容"
+    },
+    {
+      "commit": "a8fa7168ad93e6d81f1eba169692a2bf0a80f90b",
+      "reason": "仅架构测试允许canonical委托并拒绝已知策略拥有；无运行源码变化"
+    },
+    {
+      "commit": "af5082e39efd151355e8eb4f3ad74fc8eca21b3d",
+      "reason": "仅补相对导入守卫及反例测试；无运行源码变化"
+    },
+    {
+      "commit": "3f9b8aa451482c1bd9181db80974933996df4c12",
+      "reason": "GitHub正常合并已验收PR598，实际树等于冻结源树，没有额外运行变化"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "c39290655ee585de40203191896b43f2922b43d7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/598"
+      ]
+    },
+    {
+      "commit": "cf8e75e3b3ec00ce9528077514a9dfc8d29aa1d9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/598"
+      ]
+    },
+    {
+      "commit": "c375d17a104fbfdc62a41bb8e2ba249992c5de10",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/598"
+      ]
+    },
+    {
+      "commit": "8292c6136fceb592f8133f5278a680b24b4f1f7d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/598"
+      ]
+    },
+    {
+      "commit": "a8fa7168ad93e6d81f1eba169692a2bf0a80f90b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/598"
+      ]
+    },
+    {
+      "commit": "af5082e39efd151355e8eb4f3ad74fc8eca21b3d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/598"
+      ]
+    },
+    {
+      "commit": "3f9b8aa451482c1bd9181db80974933996df4c12",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/598"
+      ]
+    }
+  ]
+}

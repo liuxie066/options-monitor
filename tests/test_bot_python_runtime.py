@@ -1,3 +1,4 @@
+from src.application import query_cursor
 """Python Bot facade: tools, grounded input, continuity, bounded completion and cancellation."""
 import json
 import time
@@ -123,7 +124,7 @@ def test_project_source_through_public_tool_owner(tmp_path, monkeypatch):
     from src.application.agent_tools import project, project_reader
     (tmp_path/'README.md').write_text('Covered call requires owned shares.\n')
     monkeypatch.setattr(project, 'repo_base', lambda: tmp_path)
-    monkeypatch.setattr(project_reader, '_key', lambda: 'isolated-test-key')
+    monkeypatch.setattr(query_cursor, '_key', lambda: 'isolated-test-key')
     captured=[]
     result=run_contract(contract('解释策略'), model_settings=MODEL,
         model_request=script([call('project_files', {'action':'read','relative_name':'README.md','start_line':1,'max_lines':1}), answer('策略要求持有股票。')], captured))
@@ -208,7 +209,7 @@ def test_recorded_filter_reason_through_host(tmp_path, example_config_path, monk
     from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
     from src.application.agent_tools import project_reader
     monkeypatch.setenv('OM_RUNTIME_ROOT', str(tmp_path))
-    monkeypatch.setattr(project_reader, '_key', lambda: 'isolated-filter-cursor')
+    monkeypatch.setattr(query_cursor, '_key', lambda: 'isolated-filter-cursor')
     seal_opening_candidate_fixture(tmp_path, run_id='test-run', rejected_rows=[
         {'symbol':'NVDA','contract_symbol':'NVDA-test','rule':'risk_spread'}])
     c=prepare_contract(BotRequest(request_id='filter',source_entry='test',user_message='NVDA 为什么被过滤',
@@ -229,7 +230,7 @@ def test_actual_error_writer_to_host_answer(tmp_path, example_config_path, monke
     from src.application.agent_tools import project_reader
     fixture=build_runtime_diagnostic_fixture(tmp_path/'runtime')
     monkeypatch.setenv('OM_RUNTIME_ROOT',str(fixture['root']))
-    monkeypatch.setattr(project_reader,'_key',lambda:'isolated-error-cursor')
+    monkeypatch.setattr(query_cursor,'_key',lambda:'isolated-error-cursor')
     c=prepare_contract(BotRequest(request_id='error',source_entry='test',user_message='这次扫描为什么失败',
                                   explicit_scope=BotScope(config_path=str(example_config_path))))
     captured=[]

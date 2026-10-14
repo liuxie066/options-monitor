@@ -29,13 +29,19 @@ Workflow: `.github/workflows/guardrails.yml`
 - Lint: run `python -m ruff check .`
 - Standalone smoke: run `tests/run_smoke.py`
 - Launcher spec smoke: render `./om-agent spec` through the public wrapper
-- Full regression: run automatic pytest discovery for pull requests and VERSION-changing pushes; ordinary pushes to `main` reuse the required pull-request result. The same full collection runs on four local worker processes, grouped by test file, and a worker crash fails the gate instead of restarting tests silently.
+- Full regression: run automatic pytest discovery for pull requests and VERSION-changing pushes; ordinary pushes to `main` reuse the required pull-request result. The complete collection is partitioned by test file across eight CI runners, each using four local worker processes. A worker crash fails the gate instead of restarting tests silently; the required `guardrails` check verifies that the shard union executed every collected test exactly once.
 
 Trigger: `push` and `pull_request` to `main`. The merge policy requires pull requests and a passing, up-to-date `guardrails` result; the effective GitHub ruleset must be checked when verifying remote protection.
 
 ### Full regression
 
-The workflow uses pinned `pytest-xdist` and `pytest -n 4 --dist loadfile --max-worker-restart=0 --durations=25 -o tmp_path_retention_policy=failed`. Automatic collection covers the complete suite; do not add test selectors, deselections, or a serial carve-out to conceal shared-resource failures. Isolate conflicting resources with temporary paths, dynamic ports, worker-unique paths, or cross-process locks.
+The workflow uses pinned `pytest-xdist` and `pytest -n 4 --dist loadfile --max-worker-restart=0 --durations=25 -o tmp_path_retention_policy=failed`. Each of eight runners automatically collects the complete suite, then the opt-in plugin `.github/ci/pytest_shard.py` assigns whole files by a stable SHA-256 partition. New files join automatically; no hand-maintained test allowlist or historical duration file controls coverage. Do not add test selectors, exclusions, or a serial carve-out to conceal shared-resource failures. Isolate conflicting resources with temporary paths, dynamic ports, worker-unique paths, or cross-process locks.
+
+Every runner records the full collected IDs, assigned IDs, completed test protocols, revision, and failure state. `.github/ci/regression_manifest.py` requires all eight receipts for the same tested revision, identical full collections, the expected file assignment, and an exact union with no missing or duplicate execution. Ordinary pytest skips still complete a test protocol and retain their normal reporting. Failed tests, incomplete collection, worker crashes, cancellation, or missing receipts cannot satisfy the required gate. Matrix fail-fast is disabled so another shard's failure does not erase diagnostics.
+
+Lightweight checks run alongside regression runners. PR regression starts without a VERSION-resolution job; that job runs only on main pushes. The required check name stays `guardrails` and succeeds only after the existing lint, documentation, sensitive-artifact, public-surface and smoke checks plus the verified full regression have passed. VERSION-changing pushes use the same aggregate result before release; ordinary main pushes retain their existing PR-result reuse policy. Pip download caching is keyed by the requirements and constraints, while every runner still installs dependencies into a fresh virtual environment.
+
+This trades more concurrent runner capacity and repeated setup/collection for lower wall-clock latency. Queue time and runner variability can offset the benefit; measure the complete delivery interval separately from job duration. Local `scripts/release_preflight.sh --full` continues to run the unpartitioned suite on four workers.
 
 Four workers overlap independent test files, `loadfile` keeps each test module in one process, and zero worker restarts makes crashes visible. Both CI and `scripts/release_preflight.sh --full` use pytest's built-in `tmp_path_retention_policy=failed` to remove passed tests' temporary directories as they finish, limiting disk use while retaining failed test-call directories and diagnostic logs. Scope OS-level mocks to the tested calls so fixture cleanup sees the real filesystem APIs. The serial command remains available for diagnosis. Collected counts and hosted-runner timings vary with the revision and environment; past optimization measurements are not fixed merge thresholds.
 
@@ -82,6 +88,31 @@ Run it locally:
 
 Any drift — a statement added, repointed, or removed — fails `tests/quality/test_retired_column_sql_registry.py`; an intended change regenerates the registry and reviews the diff. New non-exempt retired-column SQL and unreviewed dynamic SQL fail the quality gate. The R1 statement exceptions, window switch, dual-shape write path, and destructive lot-identity `apply` were retired in R2. Ordinary repository open requires the final shape; `inventory` and `verify` remain read-only diagnostics for older stores.
 
-### 成交归属原子命令边界
+### 账本原子命令边界
 
-成交归属 preview/apply 通过 `ledger.api.apply_trade_attribution` 进入账本 owner。应用负责授权和外部观察；命令在锁内重读、复验、写入、投影和读回，preview 回滚业务效果。`trades.attribution` 保留同一函数的旧入口。`tests/test_trade_attribution_ledger_command.py` 验证公共命令的预览、取消/失败回滚、幂等与真实入口冷导入；归属冲突、Combo/Wheel 和 Bot 操作保留各自集成回归。自动冲突记录及其它事务消费者不属于本切片。
+成交归属 preview/apply 通过 `ledger.api.apply_trade_attribution` 进入账本 owner。应用负责授权和外部观察；命令在锁内重读、复验、写入、投影和读回，preview 回滚业务效果。`trades.attribution` 保留同一函数的旧入口。`tests/test_trade_attribution_ledger_command.py` 验证公共命令的预览、取消/失败回滚、幂等与真实入口冷导入；归属冲突、Combo/Wheel 和 Bot 操作保留各自集成回归。自动冲突记录通过 `ledger.api.record_trade_attribution_conflicts` 进入同一账本 owner，外部不再组织事务或逐分支写入；公共命令测试覆盖多分支实际写入、stale retry 与中途失败的全体回滚。Wheel 手动结束通过 `ledger.api.end_wheel_lifecycle` 复用账本命令；`tests/test_wheel_workflows.py` 验证旧入口与新 owner 同一性、预览无效果、真实事件写入后的异常/投影失败回滚，以及安全重试、账户/generation/request 身份拒绝。Call/Put 关联拒绝也由同一账本命令模块持有事务，旧工作流入口直接导出；`tests/test_wheel_ledger_commands.py` 覆盖锁内目标绑定、预览、幂等、首次写入与重试身份隔离，以及实际追加后的失败/投影异常全体回滚。分支 start/end 同样由 `ledger.api.decide_wheel_branch` 持有原子边界；行为测试覆盖预览后关闭窗口的拒绝、关闭后的 end、真实写入后回滚和重试。意图创建与取消由 `ledger.api.create_wheel_intent` / `cancel_wheel_intent` 及兼容 Call 命令持有同一事务，测试覆盖创建/取消的预览、原请求重试、身份隔离、实际事件追加后投影失败回滚及安全重试；通用 Call 分支绑定须在事务内完成。启用窗口和 policy binding 分别经 `ledger.api.change_wheel_activation_window`、`ledger.api.record_wheel_policy_binding` 提交；共享启用规则拒绝已被绑定替代的重试，绑定复用仓储 CAS 并在事务内核对配置文件身份与持久收据。新增命令测试覆盖写入后异常/读回失败/文件变化的回滚、同内容文件替换拒绝及并发重试唯一效果；配置发布、恢复与最终 readiness 保留原编排和集成测试。其它账本事务消费者仍须逐个核验。
+
+账本外部依赖由 `tests/test_option_positions_legacy_retirement.py` 的 AST 门禁检查：直接、别名、相对导入及静态模块别名访问都必须经 `ledger.api`。已迁移的自动归属、Wheel 工作流、policy binding 与容量取数编排另禁止通过 facade 别名取得锁/事务、直接写业务事件/窗口/绑定及操作业务 SQL。该检查不执行生产模块，也不声称覆盖动态反射或证明 facade 的每个操作没有副作用；事务和只读保证仍由对应公共入口行为测试证明。
+
+剩余协调锁经过逐调用点分类，保留范围如下；它们不允许应用自行开启账本 SQL 事务，也不证明跨库提交原子性。
+
+| 应用 owner | 保留理由 | 行为证据 |
+| --- | --- | --- |
+| `trades.inbox` 的 enqueue、claim、review、commit scope 和两个 resume 入口 | 收件箱独立存储；原 ledger 锁约束 claim、payload version、身份冲突与经济提交的竞争。commit scope 在进入账本命令前关闭 Inbox 连接，继续持锁。 | `test_trade_intake_recovery.py`：claim 被撤销/抢占、其他入口冲突、进程崩溃后恢复、提交期间 review 竞争 |
+| `trades.resolver.resolve_trade_deal` | apply 时绑定成交身份、幂等判断与后续账本命令选择；实际事件事务由已有 ledger 命令负责。 | `test_trades_resolver_close.py`、`test_trade_intake_recovery.py` |
+| `trades.auto_intake` 的 receipt recovery、skipped recovery 主入口和 source completion | 绑定账本收据读取、Inbox CAS 与来源状态更新；恢复快照查询已归账本 owner，恢复授权和跨库补偿仍归应用。 | `test_trade_receipt_recovery.py`、`test_trades_auto_intake_cli.py` |
+| `positions.workflows.execute_broker_assigned_stock_sale` | 锁内匹配股票批次并调用现有账本卖出命令；事件写入、余额复验与投影仍由 ledger 事务负责。 | `test_assigned_stock_sale_intake.py`：真实事件/投影、幂等及失败回滚 |
+| `bot.control.attribution_operations._finish_attribution_operation` | 将签名操作状态、取消/恢复与完整账本收据绑定，防止迟到 worker 重获写入资格；归属命令继续持有经济事务。 | `test_attribution_operations.py`：取消后迟到 worker、提交后收据恢复和读回失败 |
+
+`test_remaining_ledger_coordination_locks_have_reviewed_owners` 固定上述 5 个模块、12 个函数的调用范围，并禁止非 ledger 运行代码重新导入/访问低层事务函数。该静态门禁识别相对导入、别名和新增/嵌套调用点；动态反射不在其证明范围。Inbox 自有 SQL、quality/research 独立物理诊断仍遵守各自 owner 和现有 SQL 门禁，不因共享账本查询而删除必要的独立验证。
+
+
+成交容量入口只适配证据资格与配置，数量对账和容量计算复用 `domain.domain.risk_capacity.evaluate_booked_option_capacity`，Wheel 预留转换复用领域 intents owner。`tests/test_booked_option_capacity.py` 覆盖账本/券商错配、未知与真实零、跨账户、原币占用和预留转换；`tests/test_trade_attribution_ledger_command.py` 验证 ledger 与 Wheel 兼容入口实际委托同一领域判定，过期证据在委托前拒绝。
+
+Wheel 纯配置、策略 hash 和启用窗口匹配由 `domain/domain/wheel/config.py` 统一实现；`src/application/wheel/config.py` 仅兼容导出。`tests/test_wheel_config.py` 验证导出与领域 owner 同一性，以及账户、标的市场、policy、缺失窗口的拒绝语义；分支决定和意图创建复用同一个纯启用校验，统一由账本命令在自身写事务内读取窗口。
+
+持仓风险上下文由 `ledger.api.build_position_risk_context` 等入口组装，旧 `positions.context_builder` 直接导出同一实现；账本内部不反向依赖持仓或交易编排。生命周期纯读模型与回执时间计算由领域层持有，原交易入口保留同一函数。`tests/test_position_context_owner.py` 验证入口同一性、真实快照的无数据库/取数组装、输入与账本不变，以及既有回执 hash 语义；原上下文与生命周期测试继续验证业务结果。
+
+Wheel 容量查询由 `ledger.api.read_wheel_capacity_context` 持有快照边界，复用既有只读仓储、决策快照和风险上下文 owner；不会初始化或修复账本。既有 writer lock 仍用于绑定账本与独立收件箱的证据，属于协调锁，不代表查询可以写业务数据。`tests/test_position_context_owner.py` 验证 SQLite query-only、跨进程锁实际持有、单次账本读取、账户隔离、缺失与真实空账户的区别，以及券商取数期间写入不会拼接进已冻结的两个上下文。
+
+历史成交恢复快照的八表 SQL 和恢复 hash 由 `ledger.api.read_trade_intake_recovery_snapshot` 统一持有；`auto_intake` 仅提供已校验的账户与 Inbox/state 观察，不自行访问业务 SQL。`tests/test_trade_recovery_snapshot_owner.py` 以迁移前协议的固定 hash 验证兼容，并覆盖八表账户隔离、WAL 并发提交下的一致快照、缺失证据拒绝和无初始化/修复。AST 门禁同时约束恢复编排重新开 SQLite 连接或执行 SQL，以及 outbox 经 facade 别名取得锁/事务或直接 CAS 的绕行；既有跨库 claim/恢复协调仍按各自 owner 保留，不能由这项读取测试推导其原子性。

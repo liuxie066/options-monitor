@@ -376,7 +376,7 @@ PM 的持仓同步合同，不建设下单系统，也不自动变更生产账�
 | 策略关系及生命周期 | Combo reconciliation、Wheel intent/companion 和 lifecycle 各自拥有判断；正式采用由 Ledger 写入边界最终验证 | 关系具有明确证据及数量，采用时仍满足对应条件；普通 CSP/CC 不依赖组合匹配成功 |
 | 通知与其他交付 | 既有普通平仓和生命周期 outbox 仍由 Ledger 与其 dispatcher 持有；其余普通回执由 trades 的持久结果和发送路径负责；PM 刷新保留一次性提示合同 | 成交提交、费用补证、策略采用与通知确认分别可查询；发送失败不重做成交；历史导入不生成可投递的新意图 |
 
-人工明确确认尚未关联策略的普通 CSP/CC 时，推荐历史缺失不阻止归属证明；成交身份、账户和环境绑定、完整未平仓数量及持久投影仍须有效。视图保留历史缺口，自动采用、Combo/Wheel 关系及已有关系的转移继续遵循各自完整证据和成员校验。
+人工明确确认尚未关联策略的普通 CSP/CC 时，推荐历史缺失不阻止归属证明；成交身份、账户和环境绑定、完整未平仓数量及持久投影仍须有效。人工处理完整已登记冲突、全体成员均保持最后有效人工 Wheel Call 分配时，可依原证明核验归属，无需补造推荐历史；原股票批次、分支及每批数量须完全一致，多批分配须显式提交完整 allocation。只识别经 replay 接受的现代证明与既有严格旧确认格式，已作废或被后续关系调整覆盖的证明不适用。当前新鲜完整持仓、真实容量、意图、成员闭包、后继成交、事务和幂等复验继续执行。视图保留历史缺口；自动采用、新建或转移关系、Wheel Put 和 Combo 继续遵循各自完整证据合同。
 
 `auto_intake.py` 保留启动、来源协调和已有周期调度。SDK 回调不执行整单费用查询、
 策略扫描、生命周期 provider 初始化或通知网络调用。外部查询先取得有版本的证据，
@@ -414,6 +414,19 @@ Ledger 提交后、普通回执记录前崩溃时，先读回既有成交结果�
 已有无法证明是否送达的历史普通回执不能仅因状态缺失而补发。首次创建 Inbox 时若
 经济事实已经存在，也不能授予新的回执资格；恢复资格须在同一 writer 锁下核对并持久保存。
 所有路径只保留一个发送 owner，不引入通用通知平台。
+
+Combo 首次配对成功的独立回执复用现有通知 outbox。canonical attribution transaction
+同时提交两腿归属证明、不可变组合身份、confirmed inference 和一条
+`combo_pair_confirmed` 意图；事务失败或 preview 回滚时均无成功意图。
+账户与稳定组合 ID 决定唯一逻辑 transition，通知路由不改变原经济归属请求身份。
+已有组合和经济重放不补建意图；禁用通知/来源回执或无法证明发送身份时记录 suppressed，
+以后启用不自动回灌。原 Inbox 成交回执及其送达证据保持冻结。
+
+Combo membership owner 经 ledger facade 提供 `validate_combo_pair_success`，由现有
+batch dispatcher 在规划与 send-start 的账本事务里复验当前成员和 confirmed inference。
+outbox 接受此验证回调，不自行重建归属计算。新 kind 仅可走批次管线，每组一批，
+旧单条 claim 不得领取；账户 allowlist 和冻结 sender/recipient 绑定同时生效。
+明确发送前失败重试同一冻结批次，unknown/accepted 不自动重发；provider 接收并不证明人已读。
 
 实时 push、断线补查与显式历史文件导入的交付资格在持久接收时固定，随处理结果
 传到实际创建通知意图的 owner。历史导入首次平仓也不得创建可投递 outbox，不能只
@@ -1216,6 +1229,11 @@ om trade-events repair --futu-account-id ... --order-id ... --reason ...
             -> finalize current-decision projection -> commit
   -> 现有 fees-sync 独立 dry-run/apply
 ```
+
+identity-only 和 OpenD time-only apply 不支持 `expected_input_hash`；在现有 ledger command
+分流处拒绝任何非 `None` 值（包括空串、空白），持久化前报错。不传 hash 的合法 apply 和 no-op 保持
+原语义。CLI dry-run 仍是 advisory preview，不返回 `expected_input_hash`，即使传入该参数也不绑定提交；
+replacement / environment repair 的已有 hash 合同不变。
 
 apply 不使用 dry-run 结果作为事实；preview 明确标记为 advisory。事务内验证从原始存储 JSON 做
 copy-on-write，只允许以下路径变化：

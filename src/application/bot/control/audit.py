@@ -143,9 +143,10 @@ class InboundAuditStore:
                     error_code,
                     response_json,
                     created_at,
-                    finished_at
+                    finished_at,
+                    replay_authorization_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(record.get("command_id") or ""),
@@ -165,6 +166,7 @@ class InboundAuditStore:
                     _json(record.get("response")),
                     str(record.get("created_at") or utc_now_iso()),
                     str(record.get("finished_at") or utc_now_iso()),
+                    _json(record["replay_authorization"]) if record.get("replay_authorization") else None,
                 ),
             )
 
@@ -207,7 +209,7 @@ class InboundAuditStore:
                 raise AgentToolError(code="BUDGET_EXHAUSTED", message="analysis control deadline exceeded")
             return {**result, "duplicate": False}
 
-    def update_response(self, *, command_id: str, response: dict[str, Any]) -> None:
+    def update_response(self, *, command_id: str, response: dict[str, Any], expected_response: dict[str, Any]) -> None:
         normalized_command_id = str(command_id or "").strip()
         if not normalized_command_id:
             return
@@ -218,10 +220,17 @@ class InboundAuditStore:
                 UPDATE inbound_command_audit
                 SET response_json = ?,
                     finished_at = ?
-                WHERE command_id = ?
+                WHERE command_id = ? AND response_json = ?
                 """,
-                (_json(response), utc_now_iso(), normalized_command_id),
+                (_json(response), utc_now_iso(), normalized_command_id, _json(expected_response)),
             )
+
+    def replay_authorization(self, command_id: str) -> dict[str, Any] | None:
+        self._ensure_schema()
+        with self._connect() as conn:
+            row = conn.execute("SELECT replay_authorization_json FROM inbound_command_audit WHERE command_id=?",
+                               (command_id,)).fetchone()
+        return _loads_object(row[0]) if row and row[0] else None
 
     def merge_response_data(self, *, command_id: str, data: dict[str, Any]) -> bool:
         normalized_command_id = str(command_id or "").strip()
@@ -319,6 +328,7 @@ class InboundAuditStore:
                 _ensure_column(conn, "last_duplicate_decision", "TEXT")
                 _ensure_column(conn, "conversation_id", "TEXT")
                 _ensure_column(conn, "control_json", "TEXT")
+                _ensure_column(conn, "replay_authorization_json", "TEXT")
         except sqlite3.Error as exc:
             raise inbound_sqlite_error(self.path, exc) from exc
 

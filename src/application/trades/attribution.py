@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.strategy_membership import trade_attribution_conflict_execution_keys as _conflict_execution_keys
 from src.application.agent_tool_config import DEFAULT_CONFIGS, load_runtime_config, repo_base
 from src.application.runtime_config_freshness import RUNTIME_MARKETS, ensure_runtime_config_freshness
 from src.application.agent_tool_contracts import AgentToolError
@@ -21,7 +22,7 @@ from src.application.ledger.api import (
     read_trade_attribution_snapshot, open_trade_attribution_snapshot_reader, trade_attribution_facts_from_events,
     encode_evidence_cursor, decode_evidence_cursor, TradeEventPaginationError,
     combo_attribution_candidates_from_rows, ATTRIBUTION_POLICY_VERSION,
-    with_sqlite_repo_transaction, record_trade_attribution_conflict,
+    record_trade_attribution_conflicts,
 )
 from src.application.futu_quote_routing import runtime_config_market
 from src.application.write_contract import write_control
@@ -91,6 +92,25 @@ def read_trade_attribution_context(repo: Any, *, config: Mapping[str, Any], acco
         "capacity_observation": observation, "combo_mode": combo_reconciliation_mode_for_account(config, account=account)}
 
 
+def observe_combo_confirmation_receipt_route(
+    *, config: Mapping[str, Any], account: str, runtime_root: Path,
+) -> dict[str, Any]:
+    from src.application.trades.lifecycle_batch_dispatcher import resolve_lifecycle_receipt_dispatch_scope
+    from src.application.trades.receipt import resolve_trade_lifecycle_notification_batch_route
+
+    scope = resolve_lifecycle_receipt_dispatch_scope(dict(config.get("trade_intake") or {}))
+    if account not in scope["allowed_accounts"]:
+        return {"route_available": False, "reason": "account_receipt_disabled"}
+    try:
+        route = resolve_trade_lifecycle_notification_batch_route(config=dict(config), base=runtime_root)
+        return {key: route.get(key) for key in (
+            "route_available", "provider", "channel", "target_fingerprint",
+            "route_fingerprint", "attribution_route_key",
+        )}
+    except Exception as exc:
+        return {"route_available": False, "reason": "receipt_route_unavailable:" + type(exc).__name__}
+
+
 def apply_referenced_trade_attribution(repo: Any, *, account: str, config: Mapping[str, Any],
     runtime_root: Path, expected_input_hash: str, request_id: str, actor: str, apply_changes: bool,
     option_lot_id: str | None = None, wheel_branch_id: str | None = None, stock_lot_id: str | None = None,
@@ -133,7 +153,9 @@ def apply_referenced_trade_attribution(repo: Any, *, account: str, config: Mappi
         context = read_trade_attribution_context(repo, config=config, account=account, runtime_root=runtime_root)
     result = apply_trade_attribution(repo, account=account, execution_key=facts[0]["execution_key"],
         candidate_id=candidate_id, expected_input_hash=expected_input_hash, request_id=request_id,
-        actor=actor, apply_changes=apply_changes, manual=True, reference=reference, **context)
+        actor=actor, apply_changes=apply_changes, manual=True, reference=reference,
+        confirmation_receipt_route=(observe_combo_confirmation_receipt_route(
+            config=config, account=account, runtime_root=runtime_root) if inference_id else None), **context)
     return {**result, "attribution_status": result["status"], "dry_run": not apply_changes,
         "request_id": request_id, "option_record_id": option_lot_id,
         "event_id": result["proof_event_ids"][0],
@@ -209,7 +231,10 @@ def _reconcile_trade_attribution_batch(
                 applied = apply_trade_attribution(repo, account=account, market=market, config=config,
                     execution_key=current["execution_key"], candidate_id=current["selected_candidate_id"],
                     expected_input_hash=current["input_hash"], request_id=request_id, actor="trade_intake:attribution_rule",
-                    combo_evidence=evidence, capacity_observation=observation, combo_mode=combo_mode, stop_event=stop_event)
+                    combo_evidence=evidence, capacity_observation=observation, combo_mode=combo_mode, stop_event=stop_event,
+                    confirmation_receipt_route=(observe_combo_confirmation_receipt_route(
+                        config=config, account=account, runtime_root=runtime_root)
+                        if current["selected_candidate_id"].startswith("combo:") else None))
                 committed = read_trade_attribution_snapshot(repo, account=account, market=market)
                 after_view = build_trade_attribution_view(committed, config=config, account=account, market=market,
                     now_ms=int(time.time() * 1000), combo_evidence=evidence, capacity_observation=observation, combo_mode=combo_mode)
@@ -218,45 +243,12 @@ def _reconcile_trade_attribution_batch(
             elif (current["status"] == "conflict" and current["rules_enabled"]
                     and "unresolved_attribution_conflict" not in current["reason_codes"]):
                 action_attempted = True
-                def record_conflicts(active: Any, conn: Any) -> list[str]:
-                    fresh = read_trade_attribution_snapshot(active, account=account, market=market, conn=conn)
-                    check = build_trade_attribution_view(fresh, config=config, account=account, market=market,
-                        now_ms=int(time.time() * 1000), combo_evidence=evidence, capacity_observation=observation, combo_mode=combo_mode)
-                    fact = next(row for row in check["rows"] if row["execution_key"] == current["execution_key"])
-                    if fact["input_hash"] != current["input_hash"] or fact["status"] != "conflict":
-                        raise ValueError("conflict evidence changed")
-                    ids = list(fact["candidate_ids"])
-                    if fact["wheel_branch_id"]:
-                        ids.append("wheel:" + fact["wheel_branch_id"])
-                    if fact["strategy_group_id"]:
-                        ids.append("combo:" + fact["strategy_group_id"])
-                    claimed_branches = {allocation["wheel_branch_id"] for allocation in fact.get("wheel_call_allocations") or []}
-                    if fact["wheel_branch_id"]:
-                        claimed_branches.add(fact["wheel_branch_id"])
-                    affected_branches = (claimed_branches if "late_capacity_conflict" in fact["reason_codes"] else
-                        {item["wheel_branch_id"] for item in fact["candidates"] if item["strategy"] == "wheel"} | claimed_branches)
-                    if stop_event is not None and stop_event.is_set():
-                        raise InterruptedError("attribution conflict recording cancelled")
-                    events = [record_trade_attribution_conflict(active, account=account, execution_key=fact["execution_key"],
-                        branch=branch, candidate_ids=ids, input_hash=fact["input_hash"], now_ms=int(time.time() * 1000), conn=conn,
-                        execution_keys=_conflict_execution_keys(check["rows"], branch["wheel_branch_id"], fact,
-                            account_facts=trade_attribution_facts_from_events(fresh["trade_events"], account=account)),
-                        diagnostic={"reason_codes": fact["reason_codes"], "evaluated_at_ms": fact["evaluated_at_ms"],
-                            "candidate_reason_codes": {item["candidate_id"]: item["reason_codes"]
-                                for item in fact["candidates"]}, "capacity_evidence": fact["capacity_evidence"]})
-                        for branch in check["wheel_model"]["wheel_branches"] if branch["wheel_branch_id"] in affected_branches]
-                    # Validate the source snapshot again, excluding our provisional
-                    # conflict events; cancellation/expiry rolls back the whole write.
-                    final_view = build_trade_attribution_view(fresh, config=config, account=account, market=market,
-                        now_ms=int(time.time() * 1000), combo_evidence=evidence,
-                        capacity_observation=observation, combo_mode=combo_mode)
-                    final_fact = next(row for row in final_view["rows"] if row["execution_key"] == fact["execution_key"])
-                    if final_fact["input_hash"] != fact["input_hash"] or final_fact["status"] != "conflict":
-                        raise ValueError("conflict evidence changed before commit")
-                    if stop_event is not None and stop_event.is_set():
-                        raise InterruptedError("attribution conflict recording cancelled")
-                    return events
-                events = with_sqlite_repo_transaction(repo, record_conflicts)
+                events = record_trade_attribution_conflicts(
+                    repo, account=account, market=market, config=config,
+                    execution_key=current["execution_key"], expected_input_hash=current["input_hash"],
+                    combo_evidence=evidence, capacity_observation=observation,
+                    combo_mode=combo_mode, stop_event=stop_event,
+                )
                 current["ledger_event_ids"] = sorted(set(current["ledger_event_ids"]) | set(events))
                 result["conflicts"] += 1
             result["cache_updates"] += cache_trade_attribution_result(inbox_path,
@@ -274,49 +266,6 @@ def _reconcile_trade_attribution_batch(
     if len(selected) < 100 and result["checked"] == len(selected):
         result["next_cursor"] = ""
     return result
-
-
-def _conflict_execution_keys(rows: Sequence[Mapping[str, Any]], branch_id: str,
-                             trigger: Mapping[str, Any], *,
-                             account_facts: Sequence[Mapping[str, Any]] = ()) -> list[str]:
-    """Include proven shared shortages, never merely possible unrelated owners."""
-    candidate_id = "wheel:" + branch_id
-    shared_shortages = {code for item in trigger["candidates"]
-        if item.get("capacity_evidence_complete") is True for code in item["reason_codes"]
-        if code in {"account_stock_capacity_exceeded", "account_cash_capacity_exceeded"}}
-    keys = []
-    for row in rows:
-        if not row["execution_key"] or row["contracts_open"] <= 0:
-            continue
-        claimed = row["wheel_branch_id"] == branch_id or any(
-            allocation["wheel_branch_id"] == branch_id for allocation in row.get("wheel_call_allocations") or [])
-        competing = (row["status"] == "pending" and not row["wheel_branch_id"]
-            and not row.get("wheel_call_allocations") and not row["strategy_group_id"]
-            and any(item["candidate_id"] == candidate_id and (
-                "competing_fills_exceed_intent_remainder" in item["reason_codes"]
-                or item.get("capacity_evidence_complete") is True
-                and "competing_fills_exceed_capacity" in item["reason_codes"])
-                for item in row["candidates"]))
-        same_resource = (row["account"] == trigger["account"]
-            and row["broker_account_ref"] == trigger["broker_account_ref"]
-            and row["contract_key"]["option_type"] == trigger["contract_key"]["option_type"]
-            and ("account_cash_capacity_exceeded" in shared_shortages
-                or row["contract_key"]["underlying_symbol"] == trigger["contract_key"]["underlying_symbol"]))
-        shared = (same_resource and row["status"] != "ordinary" and any(
-            item.get("capacity_evidence_complete") is True and shared_shortages.intersection(item["reason_codes"])
-            for item in row["candidates"]))
-        if claimed or competing or shared:
-            keys.append(row["execution_key"])
-    if "account_cash_capacity_exceeded" in shared_shortages:
-        # The proven pool already includes both markets; preserve its actual
-        # Wheel Put claimants without reclassifying them through another config.
-        keys.extend(row["execution_key"] for row in account_facts
-            if row["execution_key"] and row["contracts_open"] > 0 and row["wheel_branch_id"]
-            and row["strategy"] == "wheel"
-            and row["position_side"] == "short" and row["contract_key"]["option_type"] == "put"
-            and row["account"] == trigger["account"]
-            and row["broker_account_ref"] == trigger["broker_account_ref"])
-    return sorted(set(keys))
 
 
 def bind_attribution_market_config(

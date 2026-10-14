@@ -20,11 +20,12 @@ from .current_decision_projection import capture_trade_event_decision_projection
 from .writer import _finish_trade_event_decision_projection
 from .read_only_evidence import open_trade_reconciliation_evidence_repo
 from .repository_wheel_policy import effective_wheel_window
-from .combo_membership import resolve_combo_group_membership, publish_combo_pair_identity
+from .combo_membership import resolve_combo_group_membership, publish_combo_pair_identity, validate_combo_pair_success
 from .combo_reconciliation import combo_attribution_candidates_from_rows
 from src.application.account_config import combo_reconciliation_mode_for_account
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings, resolve_futu_account_ids
-from domain.domain.strategy_membership import resolve_trade_attribution, resolve_option_strategy_membership
+from domain.domain.strategy_membership import (resolve_trade_attribution, resolve_option_strategy_membership,
+    trade_attribution_conflict_execution_keys)
 from domain.domain.combo_reconciliation import delivered_combo_exposures_for_lot
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.wheel.intents import resolve_wheel_fill_intent, plan_wheel_call_intent_consume, plan_wheel_put_intent_consume
@@ -32,7 +33,7 @@ from domain.domain.wheel import project_wheel_linkage_candidates
 from domain.domain.ledger.position_fields import build_open_adjustment_patch_contract
 from domain.domain.wheel_call_allocation import parse_wheel_call_allocations
 from domain.domain.trade_contract_identity import contract_share_quantity
-from domain.domain.risk_capacity import compute_sell_put_effective_cash
+from domain.domain import risk_capacity
 from src.application.portfolio_context_service import evaluate_account_cash_snapshot, cash_snapshot_is_usable
 from src.infrastructure.exchange_rates import capacity_currency_converter
 from .assigned_stock_projection import build_wheel_read_model_from_rows, build_wheel_read_model_with_capacity_from_rows
@@ -174,27 +175,90 @@ def _legacy_manual_wheel_call_confirmation(
         return False
     raw = latest.get("raw_payload") or {}
     patch = raw.get("patch") or {}
-    branch = patch.get("source_wheel_branch_id")
     if (latest.get("source") != "wheel_linkage"
-            or raw.get("schema_version") != "wheel_call_linkage_confirmed.v1"
             or "attribution_decision" in raw
-            or not all(raw.get(key) for key in ("actor", "wheel_linkage_request_id",
-                "input_snapshot_hash", "batch_generation_hash", "linkage_candidate_id"))
+            or not all(raw.get(key) for key in ("actor", "wheel_linkage_request_id", "input_snapshot_hash"))
             or latest.get("target_lot_id") != lot_id or raw.get("target_lot_id") != lot_id
             or raw.get("adjust_target_source_event_id") != opening.get("event_id")
-            or not branch or patch.get("source_stock_lot_id") != branch
-            or raw.get("source_wheel_branch_id") != branch or raw.get("source_stock_lot_id") != branch
             or patch.get("strategy") != "wheel" or patch.get("leg_role") != "wheel_call"
+            or set(patch) - {*POSITION_LOT_STRATEGY_PATCH_FIELDS, "last_action_at"}
             or any(membership.get(key) != patch.get(key) for key in POSITION_LOT_STRATEGY_PATCH_FIELDS)
             or latest.get("event_time_ms", 0) < opening.get("event_time_ms", 0)):
         return False
     try:
+        if raw.get("schema_version") == "wheel_call_linkage_confirmed.v1":
+            branch = patch.get("source_wheel_branch_id")
+            if (not branch or patch.get("source_stock_lot_id") != branch
+                    or raw.get("source_wheel_branch_id") != branch or raw.get("source_stock_lot_id") != branch
+                    or not raw.get("batch_generation_hash") or not raw.get("linkage_candidate_id")):
+                return False
+        elif raw.get("schema_version") == "wheel_call_allocations_confirmed.v1":
+            allocations = parse_wheel_call_allocations(patch.get("wheel_call_allocations"))
+            branches = sorted(branch for _stock, branch, count in allocations for _ in range(count))
+            if (raw.get("attribution_origin") != "manual"
+                    or raw.get("attribution_request_id") != raw["wheel_linkage_request_id"]
+                    or raw.get("attribution_policy_version") != ATTRIBUTION_POLICY_VERSION
+                    or raw.get("attribution_candidate_id") != "wheel-multi:" + canonical_sha256(branches)[:24]
+                    or len(branches) != opening.get("contracts")):
+                return False
+        else:
+            return False
         proof, fill = TradeEvent.from_dict(latest), TradeEvent.from_dict(opening)
         return (proof.contract_key == fill.contract_key and proof.currency == fill.currency
             and proof.multiplier == fill.multiplier and proof.contracts == 0
             and proof.price == 0 and proof.fees == 0)
     except (TypeError, ValueError, KeyError):
         return False
+
+
+def _preserved_manual_wheel_call(
+    *, fact: Mapping[str, Any], proposed: Mapping[str, Any], decision: Mapping[str, Any],
+    events: Sequence[Mapping[str, Any]], metadata: Mapping[str, Any], accepted: set[str],
+    branches: Mapping[str, Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    """Qualify the exact last confirmed relationship, not a historical manual flag."""
+    if (fact["status"] != "linked" or fact["origin"] != "manual" or fact["strategy"] != "wheel"
+            or fact["position_side"] != "short" or fact["contract_key"]["option_type"] != "call"
+            or fact["reason_codes"] or fact["strategy_group_id"] or fact["contracts_open"] != fact["contracts"]
+            or proposed["status"] != "linked"
+            or set(proposed["reason_codes"]) - {"existing_attribution_preserved"}):
+        return None
+    related = [row for row in events if row["event_id"] == fact["open_event_id"]
+               or row.get("target_lot_id") == fact["lot_id"]]
+    opening = next((row for row in related if row["event_id"] == fact["open_event_id"]), None)
+    latest = next((row for row in reversed(related) if row.get("event_type") == "adjust"
+        and any(key in ((row.get("raw_payload") or {}).get("patch") or {})
+                for key in POSITION_LOT_STRATEGY_PATCH_FIELDS)), None)
+    if opening is None or latest is None:
+        return None
+    raw = latest.get("raw_payload") or {}
+    patch = raw.get("patch") or {}
+    membership = metadata.get(fact["lot_id"], {})
+    if any(membership.get(key) != patch.get(key) for key in POSITION_LOT_STRATEGY_PATCH_FIELDS):
+        return None
+    if "attribution_decision" in raw:
+        if (latest["event_id"] not in accepted or raw.get("attribution_origin") != "manual"
+                or raw["attribution_decision"].get("manual") is not True):
+            return None
+    elif not _legacy_manual_wheel_call_confirmation(related, opening=opening,
+            lot_id=fact["lot_id"], membership=membership):
+        return None
+    if membership.get("wheel_call_allocations"):
+        original = parse_wheel_call_allocations(membership["wheel_call_allocations"])
+        if "wheel_call_allocations" not in decision or parse_wheel_call_allocations(decision["wheel_call_allocations"]) != original:
+            return None
+        wanted = sorted(branch for _stock, branch, count in original for _ in range(count))
+        if (decision["wheel_branch_ids"] != wanted
+                or decision["candidate_id"] != "wheel-multi:" + canonical_sha256(wanted)[:24]
+                or any(branches.get(branch, {}).get("stock_lot_id") != stock for stock, branch, _count in original)):
+            return None
+    else:
+        branch = membership.get("source_wheel_branch_id")
+        if (not branch or decision["candidate_id"] != "wheel:" + branch or decision["wheel_branch_ids"]
+                or "wheel_call_allocations" in decision
+                or branches.get(branch, {}).get("stock_lot_id") != membership.get("source_stock_lot_id")):
+            return None
+    return membership
 
 
 def trade_attribution_facts_from_events(events: Sequence[Mapping[str, Any]], *, account: str) -> list[dict[str, Any]]:
@@ -348,6 +412,7 @@ def write_trade_attribution_decision(
     branch_generations: Mapping[str, str], now_ms: int, manual: bool,
     wheel_events: Sequence[Mapping[str, Any]] = (),
     request_content: Mapping[str, Any] | None = None,
+    confirmation_receipt_route: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Publish every member and conflict proof together under the caller's lock."""
     if conn is None or not conn.in_transaction or not plans or conflicts and not manual:
@@ -416,11 +481,13 @@ def write_trade_attribution_decision(
     for event in [*wheel_events, *resolutions]:
         repo.append_wheel_event_once(event, conn=conn)
     runtime = run_position_projection_in_transaction(repo, events, conn=conn, mode="forced_full")
+    success_pairs = []
     for inference_id, pair in {plan["inference"]["inference_id"]: plan["inference"]
                                for plan in plans if plan.get("inference")}.items():
         pair = dict(pair)
         revalidated_expired = pair.pop("revalidated_expired", False) is True
         repo.upsert_combo_pair_inference(pair, conn=conn, reactivate_expired=manual and revalidated_expired)
+        existing_identity = repo.get_strategy_group_identity(pair["strategy_group_id"], conn=conn)
         identity, _membership = publish_combo_pair_identity(repo, conn=conn, inference=pair)
         existing_pair = repo.get_combo_pair_inference(inference_id, conn=conn)
         if existing_pair["status"] == "user_confirmed":
@@ -433,6 +500,8 @@ def write_trade_attribution_decision(
                 "strategy_group_id": pair["strategy_group_id"], "identity_hash": identity["identity_hash"],
                 "put_adoption_event_id": proof_by_lot[pair["put_record_id"]],
                 "call_adoption_event_id": proof_by_lot[pair["call_record_id"]]}, conn=conn)
+        if existing_identity is None:
+            success_pairs.append((identity, inference_id))
     for group in {member[side].get("strategy_group_id") for member in members for side in ("before", "after")} - {None, ""}:
         membership = resolve_combo_group_membership(group_id=group, account=account,
             trade_events=repo.list_trade_events(conn=conn), projected_position_lots=repo.list_position_lots(conn=conn))
@@ -457,6 +526,11 @@ def write_trade_attribution_decision(
         raise ValueError("attribution conflict resolution readback failed")
     if any(after_statuses.get(key) != value for key, value in prior_statuses.items() if key not in selected):
         raise ValueError("attribution decision changed another conflict")
+    from .notification_outbox import enqueue_combo_pair_success_in_transaction
+    for identity, inference_id in success_pairs:
+        enqueue_combo_pair_success_in_transaction(repo, conn=conn, identity=identity,
+            inference_id=inference_id, confirmed_at_ms=now_ms,
+            route=dict(confirmation_receipt_route or {}), validate_pair=validate_combo_pair_success)
     return {"decision": decision, "proof_event_ids": [event.event_id for event in events],
         "resolution_event_ids": [row["event_id"] for row in resolutions], "write_applied": any(runtime.created_flags)}
 
@@ -464,9 +538,12 @@ def write_trade_attribution_decision(
 def _multi_wheel_call_attribution(
     *, view: Mapping[str, Any], current: Mapping[str, Any], branch_ids: tuple[str, ...],
     decided_execution_keys: set[str],
+    preserved_allocations: tuple[tuple[str, str, int], ...] = (),
 ) -> dict[str, Any]:
+    preserved = bool(preserved_allocations and current.get("wheel_call_allocations")
+        and parse_wheel_call_allocations(current["wheel_call_allocations"]) == preserved_allocations)
     if (current["status"] not in {"pending", "conflict"} or current["position_side"] != "short"
-            or current["contract_key"]["option_type"] != "call" or not current["evidence_complete"]
+            or current["contract_key"]["option_type"] != "call" or not current["evidence_complete"] and not preserved
             or current["reason_codes"] and set(current["reason_codes"]) != {"multiple_strategy_candidates"}):
         raise ValueError("Wheel Call allocation requires one complete, unclaimed short Call fill")
     if len(branch_ids) != current["contracts"] or not branch_ids:
@@ -504,6 +581,8 @@ def _multi_wheel_call_attribution(
     normalized = parse_wheel_call_allocations(allocations)
     if sum(row[2] for row in normalized) != current["contracts"]:
         raise ValueError("Wheel Call allocation quantity does not match the fill")
+    if preserved_allocations and normalized != preserved_allocations:
+        raise ValueError("Wheel Call allocation differs from the original confirmed stock identity")
     candidate_id = "wheel-multi:" + canonical_sha256(sorted(branch_ids))[:24]
     preview = {**current, "candidate_id": candidate_id, "wheel_call_allocations": allocations,
                "write_applied": False}
@@ -834,6 +913,7 @@ def apply_trade_attribution(
     member_decisions: tuple[Mapping[str, Any], ...] = (),
     before_commit: Any = None,
     reference: Mapping[str, Any] | None = None,
+    confirmation_receipt_route: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One arbitration and patch path for preview, single and complete decisions."""
 
@@ -968,11 +1048,20 @@ def apply_trade_attribution(
             raise ValueError("attribution requires an explicit complete member decision: " + str(sorted(required)))
         plans, intent_events = [], []
         branches = {row["wheel_branch_id"]: row for row in view["wheel_model"]["wheel_branches"]}
+        restorations = {}
+        if manual and conflicts:
+            effective = _effective_events([row for row in rows["trade_events"] if row["event_time_ms"] <= instant])
+            accepted: set[str] = set()
+            metadata = lot_strategy_metadata_from_trade_events(effective, accepted_proof_event_ids=accepted)
+            restorations = {key: _preserved_manual_wheel_call(fact=by_key[key], proposed=evaluated[key],
+                decision=item, events=effective, metadata=metadata, accepted=accepted, branches=branches)
+                for key, item in decisions.items()}
+        preserving_wheel_batch = bool(restorations) and all(restorations.values())
         for key, item in sorted(decisions.items()):
             fact, proposed = by_key[key], evaluated[key]
             target = item["candidate_id"]
             manual_ordinary = manual and target == "ordinary" and proposed["ordinary_previewable"]
-            if fact["reason_codes"] or not proposed["evidence_complete"] and not manual_ordinary:
+            if fact["reason_codes"] or not proposed["evidence_complete"] and not (manual_ordinary or preserving_wheel_batch):
                 raise ValueError("attribution member identity or dependencies changed")
             if not conflicts:
                 assert_trade_attribution_unclaimed(rows["trade_events"], [fact["lot_id"]])
@@ -989,7 +1078,9 @@ def apply_trade_attribution(
                     raise ValueError("Wheel Call allocation identity is invalid")
                 multi = _multi_wheel_call_attribution(view=view,
                     current={**proposed, "status": "pending", "reason_codes": []}, branch_ids=tuple(allocations),
-                    decided_execution_keys=set(decisions))
+                    decided_execution_keys=set(decisions),
+                    preserved_allocations=(parse_wheel_call_allocations(restorations[key]["wheel_call_allocations"])
+                        if preserving_wheel_batch else ()))
                 if "wheel_call_allocations" in item and parse_wheel_call_allocations(item["wheel_call_allocations"]) != parse_wheel_call_allocations(multi["wheel_call_allocations"]):
                     raise ValueError("Wheel allocation stock identity differs from the decision")
                 kwargs = {"strategy": "wheel", "leg_role": "wheel_call", "wheel_call_allocations": multi["wheel_call_allocations"]}
@@ -1036,7 +1127,7 @@ def apply_trade_attribution(
         result = write_trade_attribution_decision(active, conn=conn, account=account, request_id=request_id,
             actor=actor, input_hash=expected_input_hash, plans=plans, conflicts=conflicts,
             branch_generations=generations, now_ms=instant, manual=manual, wheel_events=intent_events,
-            request_content=request_content)
+            request_content=request_content, confirmation_receipt_route=confirmation_receipt_route)
         after_rows = read_trade_attribution_snapshot(active, account=account, market=market, conn=conn)
         after_model = build_wheel_read_model_from_rows(after_rows, account=account, as_of_ms=instant)
         after_facts = trade_attribution_facts_from_events(after_rows["trade_events"], account=account)
@@ -1086,9 +1177,7 @@ def trade_attribution_capacity_check(
     check_account_capacity: bool = True,
 ) -> dict[str, Any]:
     """Verify booked positions; Wheel additionally requires account coverage."""
-    from collections import defaultdict
     from datetime import datetime, timezone
-    from decimal import Decimal
     from domain.domain.position_snapshot import position_snapshot_scope_errors
     from domain.domain.symbol_identity import symbol_market
 
@@ -1104,7 +1193,6 @@ def trade_attribution_capacity_check(
             or authority.get("trd_env") != ref.get("environment") or authority.get("market") != market):
         reasons.add("capacity_authority_unavailable")
     pooled_cash = fact["contract_key"]["option_type"] == "put"
-    call_symbol = fact["contract_key"]["underlying_symbol"] if not pooled_cash else None
     markets = {"us", "hk"} if pooled_cash else {market}
     for required_market in markets:
         for asset in (("stock", "option") if check_account_capacity else ("option",)):
@@ -1115,111 +1203,75 @@ def trade_attribution_capacity_check(
     if reasons:
         return {"status": "unavailable", "reason_codes": sorted(reasons), "evidence_complete": False}
 
-    def key(contract: Mapping[str, Any], side: str, multiplier: Any, currency: Any) -> tuple[Any, ...]:
-        return (contract.get("underlying_symbol") or contract.get("symbol"), contract.get("option_type"),
-                Decimal(str(contract.get("strike"))), contract.get("expiration_ymd"), side,
-                Decimal(str(multiplier)), currency)
-
-    evidence_complete = False
-    try:
-        actual, recorded = defaultdict(int), defaultdict(int)
-        shares, call_claims, put_claims = defaultdict(Decimal), defaultdict(int), defaultdict(Decimal)
-        for row in snapshot.get("rows") or []:
-            instrument = row["instrument_ref"]
-            if not check_account_capacity and instrument["asset_type"] == "stock":
-                continue
-            if not pooled_cash and (str(instrument.get("market") or "").lower() != market
-                    or instrument.get("symbol") != call_symbol):
-                continue
-            quantity = Decimal(str(row["quantity"]))
-            if (not quantity.is_finite() or quantity < 0
-                    or instrument["asset_type"] == "option" and quantity != quantity.to_integral_value()):
-                raise ValueError("capacity_quantity_invalid")
-            if instrument["asset_type"] == "option":
-                actual[key(instrument, row["position_side"], instrument["multiplier"], instrument["currency"])] += int(quantity)
-            elif row["position_side"] == "long":
-                # Total observed inventory is the basis for existing obligations;
-                # can_sell_qty is not reduced by those obligations a second time.
-                shares[instrument["symbol"]] += quantity
-        for item in facts:
-            if item["contracts_open"] <= 0 or (not pooled_cash and item["contract_key"]["underlying_symbol"] != call_symbol):
-                continue
-            if item.get("broker_account_ref") != ref:
-                reasons.add("ledger_capacity_account_unproven")
-                continue
-            contract = item["contract_key"]
-            recorded[key(contract, item["position_side"], item["multiplier"], item["currency"])] += item["contracts_open"]
-            if item["position_side"] == "short":
-                quantity = contract_share_quantity(item["contracts_open"], item["multiplier"])
-                if contract["option_type"] == "call":
-                    call_claims[contract["underlying_symbol"]] += quantity
-                else:
-                    put_claims[item["currency"]] += Decimal(str(contract["strike"])) * quantity
-        if dict(actual) != dict(recorded):
-            reasons.add("broker_ledger_positions_mismatch")
-        if reasons or not check_account_capacity:
-            # Combo membership records existing fills, not permission to open more risk.
-            return {"status": "available" if not reasons else "unavailable", "reason_codes": sorted(reasons),
-                    "evidence_complete": not reasons}
-        for branch in wheel_read_model.get("wheel_branches") or []:
-            if branch.get("lifecycle_status") != "active":
-                continue
-            relevant = branch.get("direction") == "put" if pooled_cash else (
-                branch.get("direction") == "call" and branch.get("symbol") == fact["contract_key"]["underlying_symbol"])
-            if not relevant:
-                continue
-            if branch.get("integrity_status") != "trusted":
-                raise ValueError("active reservation integrity unavailable")
-            if branch.get("direction") == "call":
-                raw_reserved = branch.get("active_intent_reserved_shares", 0)
-                reserved = contract_share_quantity(raw_reserved, 1)
-                if (consumed_reservation and branch["wheel_branch_id"] == consumed_reservation["wheel_branch_id"]
-                        and consumed_reservation["intent_id"] in branch.get("active_intent_ids", [])):
-                    reserved -= contract_share_quantity(consumed_reservation["contracts"], fact["multiplier"])
-                    if reserved < 0:
-                        raise ValueError("reservation conversion exceeds remainder")
-                call_claims[branch["symbol"]] += reserved
-            else:
-                for reservation in branch.get("active_intent_reservations") or []:
-                    amount = Decimal(str(reservation["cash_reservation_amount"]))
-                    if not amount.is_finite() or amount < 0:
-                        raise ValueError("invalid cash reservation")
-                    if consumed_reservation and reservation["intent_id"] == consumed_reservation["intent_id"]:
-                        consumed = consumed_reservation["contracts"]
-                        if not 0 <= consumed <= reservation["remaining_contracts"]:
-                            raise ValueError("reservation conversion exceeds remainder")
-                        amount *= Decimal(reservation["remaining_contracts"] - consumed) / Decimal(reservation["remaining_contracts"])
-                    put_claims[reservation["currency"]] += amount
-        if fact["contract_key"]["option_type"] == "call":
-            symbol = fact["contract_key"]["underlying_symbol"]
-            evidence_complete = True
-            if call_claims[symbol] > shares[symbol]:
-                reasons.add("account_stock_capacity_exceeded")
-        else:
+    cash_usable = False
+    if pooled_cash and check_account_capacity:
+        try:
             cash_snapshot = evaluate_account_cash_snapshot(
                 portfolio, config=config, account=fact["account"],
                 evaluated_at=datetime.fromtimestamp(now_ms / 1000, timezone.utc),
             )
-            if not cash_snapshot_is_usable({"cash_snapshot": cash_snapshot}):
-                return {"status": "unavailable", "reason_codes": ["cash_capacity_unavailable"],
-                        "evidence_complete": False}
-            native = fact["currency"]
-            required = Decimal(str(fact["contract_key"]["strike"])) * contract_share_quantity(fact["contracts_open"], fact["multiplier"])
-            secured = {currency: float(amount) for currency, amount in put_claims.items()}
-            secured[native] = float(put_claims[native] - required)
-            fx_payload = portfolio.get("exchange_rates")
-            available = compute_sell_put_effective_cash(cash_by_currency=portfolio.get("cash_by_currency"),
-                cash_secured_by_currency=secured, native_currency=native, cash_required_native=float(required),
-                convert_currency=capacity_currency_converter(fx_payload or {}),
-                fx_status=portfolio.get("exchange_rate_status"))
-            if not available.available or available.cash_free is None:
-                reasons.add("cash_capacity_unavailable")
-            else:
-                evidence_complete = True
-            if evidence_complete and Decimal(str(available.cash_free)) < required:
-                reasons.add("account_cash_capacity_exceeded")
-    except (KeyError, TypeError, ValueError, ArithmeticError):
-        reasons.add("capacity_basis_unavailable")
-        evidence_complete = False
-    return {"status": "available" if not reasons else "unavailable", "reason_codes": sorted(reasons),
-            "evidence_complete": evidence_complete}
+            cash_usable = cash_snapshot_is_usable({"cash_snapshot": cash_snapshot})
+        except (KeyError, TypeError, ValueError, ArithmeticError):
+            # Preserve reconciliation/reservation failures ahead of cash errors.
+            cash_usable = None
+    return risk_capacity.evaluate_booked_option_capacity(
+        fact=fact, facts=facts, snapshot=snapshot, wheel_read_model=wheel_read_model,
+        cash_usable=cash_usable, cash_by_currency=portfolio.get("cash_by_currency"),
+        convert_currency=capacity_currency_converter(portfolio.get("exchange_rates") or {}),
+        fx_status=portfolio.get("exchange_rate_status"),
+        consumed_reservation=consumed_reservation, check_account_capacity=check_account_capacity,
+    )
+
+
+def record_trade_attribution_conflicts(
+    repo: Any, *, account: str, market: str, config: Mapping[str, Any],
+    execution_key: str, expected_input_hash: str, combo_evidence: Mapping[str, Any],
+    capacity_observation: Mapping[str, Any], combo_mode: str, stop_event: Any = None,
+) -> list[str]:
+    """Revalidate and record all affected conflicts in one ledger transaction.
+
+    The application supplies authorized, frozen external observations. Ledger
+    facts, member selection, idempotent writes and final expiry/cancellation
+    checks stay under this owner; callers never receive a connection callback.
+    """
+    def record_conflicts(active: Any, conn: Any) -> list[str]:
+        fresh = read_trade_attribution_snapshot(active, account=account, market=market, conn=conn)
+        check = build_trade_attribution_view(fresh, config=config, account=account, market=market,
+            now_ms=int(time.time() * 1000), combo_evidence=combo_evidence, capacity_observation=capacity_observation, combo_mode=combo_mode)
+        fact = next(row for row in check["rows"] if row["execution_key"] == execution_key)
+        if (fact["input_hash"] != expected_input_hash or fact["status"] != "conflict"
+                or not fact["rules_enabled"] or "unresolved_attribution_conflict" in fact["reason_codes"]):
+            raise ValueError("conflict evidence changed")
+        ids = list(fact["candidate_ids"])
+        if fact["wheel_branch_id"]:
+            ids.append("wheel:" + fact["wheel_branch_id"])
+        if fact["strategy_group_id"]:
+            ids.append("combo:" + fact["strategy_group_id"])
+        claimed_branches = {allocation["wheel_branch_id"] for allocation in fact.get("wheel_call_allocations") or []}
+        if fact["wheel_branch_id"]:
+            claimed_branches.add(fact["wheel_branch_id"])
+        affected_branches = (claimed_branches if "late_capacity_conflict" in fact["reason_codes"] else
+            {item["wheel_branch_id"] for item in fact["candidates"] if item["strategy"] == "wheel"} | claimed_branches)
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError("attribution conflict recording cancelled")
+        events = [record_trade_attribution_conflict(active, account=account, execution_key=fact["execution_key"],
+            branch=branch, candidate_ids=ids, input_hash=fact["input_hash"], now_ms=int(time.time() * 1000), conn=conn,
+            execution_keys=trade_attribution_conflict_execution_keys(check["rows"], branch["wheel_branch_id"], fact,
+                account_facts=trade_attribution_facts_from_events(fresh["trade_events"], account=account)),
+            diagnostic={"reason_codes": fact["reason_codes"], "evaluated_at_ms": fact["evaluated_at_ms"],
+                "candidate_reason_codes": {item["candidate_id"]: item["reason_codes"]
+                    for item in fact["candidates"]}, "capacity_evidence": fact["capacity_evidence"]})
+            for branch in check["wheel_model"]["wheel_branches"] if branch["wheel_branch_id"] in affected_branches]
+        # Validate the source snapshot again, excluding our provisional
+        # conflict events; cancellation/expiry rolls back the whole write.
+        final_view = build_trade_attribution_view(fresh, config=config, account=account, market=market,
+            now_ms=int(time.time() * 1000), combo_evidence=combo_evidence,
+            capacity_observation=capacity_observation, combo_mode=combo_mode)
+        final_fact = next(row for row in final_view["rows"] if row["execution_key"] == fact["execution_key"])
+        if final_fact["input_hash"] != fact["input_hash"] or final_fact["status"] != "conflict":
+            raise ValueError("conflict evidence changed before commit")
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError("attribution conflict recording cancelled")
+        return events
+
+    return with_sqlite_repo_transaction(repo, record_conflicts)

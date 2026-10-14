@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import errno
 import hashlib
-import hmac
 import json
 import os
 import stat
@@ -15,9 +14,8 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
-from src.application.ledger.api import decode_evidence_cursor, encode_evidence_cursor
 from src.application.research.redaction import redact_text
-from src.application.secret_store import INBOUND_OPERATION_HMAC_KEY, SecretError, resolve_secret
+from src.application.query_cursor import CursorError as ProjectReaderError, decode_cursor, digest, encode_cursor
 
 MAX_FILE_BYTES = 1024 * 1024
 MAX_QUERY_BYTES = 8 * MAX_FILE_BYTES
@@ -54,12 +52,6 @@ def _query(fn):
         with reader_query_context():
             return fn(*args, **kwargs)
     return wrapped
-
-
-class ProjectReaderError(ValueError):
-    def __init__(self, code: str):
-        self.code = code
-        super().__init__(code)
 
 
 def _check(deadline_monotonic: float | None, cancelled: Callable[[], bool] | None) -> None:
@@ -219,42 +211,12 @@ def list_names(root: Path, relative_name: str = "", *, deadline_monotonic: float
         os.close(descriptor)
 
 
-def digest(value: Any) -> str:
-    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-
-def _key() -> str:
-    try:
-        secret = resolve_secret(INBOUND_OPERATION_HMAC_KEY)
-    except SecretError:
-        raise ProjectReaderError("continuation_unavailable") from None
-    if not secret:
-        raise ProjectReaderError("continuation_unavailable")
-    return hmac.new(secret.encode(), b"options-monitor/project-files/v1", hashlib.sha256).hexdigest()
-
-
-def decode_cursor(cursor: str | None, binding: str) -> dict[str, Any] | None:
-    if not cursor:
-        return None
-    if not isinstance(cursor, str) or len(cursor) > 8192:
-        raise ProjectReaderError("cursor_invalidated")
-    try:
-        state = decode_evidence_cursor(cursor, _key())
-    except ProjectReaderError:
-        raise
-    except ValueError:
-        raise ProjectReaderError("cursor_invalidated") from None
-    if state.get("binding") != binding:
-        raise ProjectReaderError("cursor_invalidated")
-    return state
-
-
 def set_continuation(result: dict[str, Any], state: dict[str, Any] | None) -> None:
     result["next_cursor"] = None
     if state is None:
         return
     try:
-        cursor = encode_evidence_cursor(state, _key())
+        cursor = encode_cursor(state)
         if len(cursor) > 8192:
             raise ProjectReaderError("scope_too_broad")
         result["next_cursor"] = cursor
@@ -284,10 +246,12 @@ def redacted_text(raw: bytes) -> str:
 @_query
 def page_text(raw: bytes, *, relative_name: str, scope: dict[str, Any], cursor: str | None = None,
               start_line: int = 1, max_lines: int = 80, resource: str = "project",
-              project_token_limit: int = 2800,
+              project_token_limit: int = 2800, max_chars: int | None = None,
               deadline_monotonic: float | None = None, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
     _check(deadline_monotonic, cancelled)
     if type(start_line) is not int or start_line < 1 or type(max_lines) is not int or not 1 <= max_lines <= 300:
+        raise ProjectReaderError("INPUT_ERROR")
+    if max_chars is not None and (type(max_chars) is not int or not 1 <= max_chars <= MAX_FILE_BYTES):
         raise ProjectReaderError("INPUT_ERROR")
     binding = digest({"resource": resource, "action": "read", "name": relative_name, "scope": scope})
     state = decode_cursor(cursor, binding)
@@ -308,7 +272,7 @@ def page_text(raw: bytes, *, relative_name: str, scope: dict[str, Any], cursor: 
         end = len(text) if boundary < 0 else boundary + 1
         if end == len(text):
             break
-    end = min(end, offset + (MAX_PROJECT_OUTPUT_BYTES if resource == "project" else 4000))
+    end = min(end, offset + (max_chars if max_chars is not None else MAX_PROJECT_OUTPUT_BYTES if resource == "project" else 4000))
     lower, upper, best = offset, end, None
     while True:
         _check(deadline_monotonic, cancelled)

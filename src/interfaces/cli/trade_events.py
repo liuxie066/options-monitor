@@ -101,7 +101,10 @@ def main(argv: list[str] | None = None) -> int:
     p_repair.add_argument("--runtime-root", default=None, help="runtime root for active ledger store")
     p_repair.add_argument("event_id")
     p_repair.add_argument("--reason", default="manual_repair")
-    p_repair.add_argument("--expected-input-hash", default=None)
+    p_repair.add_argument(
+        "--expected-input-hash", default=None,
+        help="apply hash for replacement/environment repair; identity/time apply rejects any supplied value",
+    )
     p_repair.add_argument("--broker", default=None)
     p_repair.add_argument("--account", default=None)
     p_repair.add_argument("--symbol", default=None)

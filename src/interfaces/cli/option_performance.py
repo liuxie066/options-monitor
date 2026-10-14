@@ -26,6 +26,7 @@ from src.application.ledger.api import (
     open_performance_query_ledger_from_data_config,
 )
 from src.application.performance.service import build_option_period_performance
+from src.application.performance.query_contracts import PerformanceQueryError
 from src.interfaces.cli.ledger_write_safety import (
     add_write_flags,
     guard_ledger_write,
@@ -317,11 +318,14 @@ def handle_option_performance_command(args: argparse.Namespace) -> dict[str, Any
     if args.option_performance_command == "serve":
         from src.application.performance.query_http import create_performance_query_server
 
-        server = create_performance_query_server(
-            config_key=args.config_key, config_path=args.config_path,
-            data_config=args.data_config, port=args.port,
-            token=os.environ.get("OM_PERFORMANCE_SERVICE_TOKEN", ""),
-        )
+        try:
+            server = create_performance_query_server(
+                config_key=args.config_key, config_path=args.config_path,
+                data_config=args.data_config, port=args.port,
+                token=os.environ.get("OM_PERFORMANCE_SERVICE_TOKEN", ""),
+            )
+        except PerformanceQueryError as exc:
+            raise AgentToolError(exc.code, exc.message, hint=exc.hint, details=exc.details) from exc
         with server:
             try:
                 server.serve_forever()
@@ -330,16 +334,19 @@ def handle_option_performance_command(args: argparse.Namespace) -> dict[str, Any
         return {"status": "stopped"}
 
     if args.option_performance_command == "report":
-        data, _warnings, _meta = option_performance_report_tool(
-            _report_payload(args),
-            load_runtime_config=load_runtime_config,
-            resolve_public_data_config_path=resolve_public_data_config_path,
-            normalize_broker=normalize_broker,
-            resolve_option_positions_repo=open_performance_query_ledger_from_data_config,
-            build_option_period_performance=build_option_period_performance,
-            repo_base=repo_base,
-            mask_path=mask_path,
-        )
+        try:
+            data, _warnings, _meta = option_performance_report_tool(
+                _report_payload(args),
+                load_runtime_config=load_runtime_config,
+                resolve_public_data_config_path=resolve_public_data_config_path,
+                normalize_broker=normalize_broker,
+                resolve_option_positions_repo=open_performance_query_ledger_from_data_config,
+                build_option_period_performance=build_option_period_performance,
+                repo_base=repo_base,
+                mask_path=mask_path,
+            )
+        except PerformanceQueryError as exc:
+            raise AgentToolError(exc.code, exc.message, hint=exc.hint, details=exc.details) from exc
         return data
 
     if args.option_performance_command == "evidence" and args.evidence_command == "import":

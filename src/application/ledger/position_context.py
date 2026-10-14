@@ -1,0 +1,742 @@
+"""Assemble option risk context from qualified ledger facts without fetching or writing."""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any, Iterable, Mapping
+
+from domain.domain.expiration_dates import expiration_market_date
+from domain.domain.combo_yield_lifecycle import build_option_group_inventory
+from domain.domain.lifecycle_allocation import resolve_allocations
+from domain.domain.ledger.position_fields import normalize_account, normalize_broker
+from domain.domain.option_lifecycle import (
+    derive_lifecycle_read_model, build_lifecycle_read_models_from_resolved_account,
+)
+from domain.domain.option_position_identity import normalize_currency
+from domain.domain.symbol_identity import symbol_market
+from domain.domain.risk_capacity import compute_short_call_locked_shares, compute_short_put_cash_secured
+from domain.domain.wheel.projection import STRATEGY_METADATA_KEYS
+from src.application.ledger.queries import (
+    attach_event_strategy_metadata, RiskPositionView, position_lot_risk_view,
+    position_lot_snapshot, summarize_position_lot_shadow_status,
+)
+from src.application.ledger.lifecycle_overlay import (
+    lifecycle_evidence_facts, validate_account_lifecycle_resolution,
+)
+
+JsonDict = dict[str, Any]
+
+# Strategy identity is supplied by event metadata, not cached position fields.
+STRATEGY_FAMILY_SOURCE = "event_layer"
+
+
+def validate_option_positions_context_account(
+    context: Mapping[str, Any],
+    *,
+    account: str | None,
+    broker: str | None = None,
+) -> None:
+    """Validate raw account identity before adapters can supply defaults."""
+
+    expected_account = normalize_account(account) if account else None
+    if not expected_account:
+        return
+    filters = context.get("filters")
+    if not isinstance(filters, Mapping):
+        raise ValueError("option context filters are missing")
+    actual_account = normalize_account(filters.get("account"))
+    if actual_account != expected_account:
+        raise ValueError(
+            "option context filters.account mismatch: "
+            f"expected={expected_account} actual={actual_account or 'missing'}"
+        )
+    expected_broker = normalize_broker(broker) if broker else None
+    if expected_broker:
+        actual_broker = normalize_broker(filters.get("broker"))
+        if actual_broker != expected_broker:
+            raise ValueError(
+                "option context filters.broker mismatch: "
+                f"expected={expected_broker} actual={actual_broker or 'missing'}"
+            )
+    rows = context.get("open_positions_min")
+    if not isinstance(rows, list):
+        raise ValueError("option context open_positions_min is invalid")
+    for index, item in enumerate(rows):
+        if not isinstance(item, Mapping):
+            raise ValueError(
+                f"option context open_positions_min[{index}] is invalid"
+            )
+        fields = item.get("fields")
+        raw_payload = item.get("raw_payload")
+        raw_fields = (
+            raw_payload.get("fields")
+            if isinstance(raw_payload, Mapping)
+            else None
+        )
+        row_account = normalize_account(
+            item.get("account")
+            or (
+                fields.get("account")
+                if isinstance(fields, Mapping)
+                else None
+            )
+            or (
+                raw_payload.get("account")
+                if isinstance(raw_payload, Mapping)
+                else None
+            )
+            or (
+                raw_fields.get("account")
+                if isinstance(raw_fields, Mapping)
+                else None
+            )
+        )
+        if row_account != expected_account:
+            raise ValueError(
+                "option context open_positions_min account mismatch: "
+                f"expected={expected_account} actual={row_account or 'missing'}"
+            )
+
+
+def _empty_context(
+    *,
+    broker_norm: str,
+    account: str | None,
+    account_norm: str | None,
+    rates: JsonDict | None,
+    raw_selected_count: int,
+    ledger_status: JsonDict | None = None,
+    as_of_utc: str | None = None,
+) -> JsonDict:
+    out = {
+        "context_status": "unavailable",
+        "as_of_utc": as_of_utc or datetime.now(timezone.utc).isoformat(),
+        "filters": {"broker": broker_norm, "account": account_norm or account},
+        "locked_shares_status": "unavailable",
+        "locked_shares_unavailable_reason": "option_position_ledger_unavailable",
+        "locked_shares_by_symbol": {},
+        "locked_shares_unavailable_by_symbol": {},
+        "cash_secured_by_symbol_by_ccy": {},
+        "cash_secured_total_by_ccy": {},
+        "cash_secured_unavailable_by_symbol": {},
+        "cash_secured_total_cny": 0.0,
+        "exchange_rates": (rates or {}),
+        "raw_selected_count": raw_selected_count,
+        "open_positions_min": [],
+        "combo_yield_groups": [],
+        "position_lifecycle_by_lot": {},
+        "assigned_stock_events": [],
+        "strategy_group_identities": [],
+        "decision_state_fingerprint": None,
+        "decision_snapshot_status": "snapshot_unavailable",
+        "strategy_family_source": STRATEGY_FAMILY_SOURCE,
+    }
+    if ledger_status is not None:
+        out["ledger"] = ledger_status
+    return out
+
+
+def _position_records_from_views(items: list[RiskPositionView]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        record = item.as_shadow_record()
+        if record is not None:
+            rows.append(record)
+    return rows
+
+
+def _rate_value(rates_map: JsonDict, key: str) -> float | None:
+    raw = rates_map.get(key)
+    try:
+        return float(raw) if raw else None
+    except Exception:
+        return None
+
+
+def build_position_risk_context(
+    records: list[JsonDict],
+    broker: str,
+    account: str | None = None,
+    rates: JsonDict | None = None,
+    decision_snapshot: JsonDict | None = None,
+    lifecycle_now_ms: int | None = None,
+    observed_at: datetime | None = None,
+) -> JsonDict:
+    """Build risk context from projected position-lot records.
+
+    Important: keep record_id for downstream actions (auto-close expired positions)
+    without adding extra list calls.
+    """
+
+    observed_at_dt = observed_at or datetime.now(timezone.utc)
+    if observed_at_dt.tzinfo is None:
+        observed_at_dt = observed_at_dt.replace(tzinfo=timezone.utc)
+    observed_at_utc = observed_at_dt.astimezone(timezone.utc).isoformat()
+    broker_norm = normalize_broker(broker)
+    account_norm = normalize_account(account) if account else None
+    if decision_snapshot is not None:
+        if (
+            decision_snapshot.get("snapshot_status") != "trusted"
+            or normalize_account(decision_snapshot.get("normalized_account")) != account_norm
+        ):
+            return _empty_context(
+                broker_norm=broker_norm,
+                account=account,
+                account_norm=account_norm,
+                rates=rates,
+                raw_selected_count=len(records),
+                as_of_utc=observed_at_utc,
+            )
+        records = attach_event_strategy_metadata(
+            decision_snapshot.get("account_position_lots") or [],
+            decision_snapshot.get("trade_events"),
+        )
+    selected_items: list[RiskPositionView] = []
+    for rec in records:
+        view = position_lot_risk_view(rec)
+        if not view.fields:
+            continue
+        if broker_norm and view.broker != broker_norm:
+            continue
+        if account_norm and view.account != account_norm:
+            continue
+        selected_items.append(view)
+
+    ledger_status = summarize_position_lot_shadow_status(_position_records_from_views(selected_items))
+    if ledger_status.get("fail_closed"):
+        return _empty_context(
+            broker_norm=broker_norm,
+            account=account,
+            account_norm=account_norm,
+            rates=rates,
+            raw_selected_count=len(selected_items),
+            ledger_status=ledger_status,
+            as_of_utc=observed_at_utc,
+        )
+
+    # Aggregate open short positions for constraints
+    locked_shares_by_symbol: dict[str, int] = {}
+    locked_shares_unavailable_by_symbol: dict[str, str] = {}
+
+    # cash_secured_amount is stored on projected position lots with an explicit currency field (USD/CNY/HKD).
+    # We aggregate:
+    # - by_symbol: in original currency buckets
+    # - total_base_cny: unified base currency (CNY) using exchange rates when available
+    cash_secured_by_symbol_by_ccy: dict[str, dict[str, float]] = {}
+    cash_secured_total_by_ccy: dict[str, float] = {}
+    cash_secured_unavailable_by_symbol: dict[str, str] = {}
+
+    cash_secured_total_cny: float | None = 0.0
+
+    usdcny_exchange_rate = None
+    cny_per_hkd_exchange_rate = None
+    if rates:
+        # rates may be either the full cache object {rates:{...}, timestamp, cached_at} or already the dict of rates
+        nested_rates = rates.get("rates")
+        rates_map = nested_rates if isinstance(nested_rates, dict) else rates
+        usdcny_exchange_rate = _rate_value(rates_map, "USDCNY")
+        cny_per_hkd_exchange_rate = _rate_value(rates_map, "HKDCNY")
+
+    # Minimal open positions list for downstream (auto-close), keeps record_id.
+    open_positions_min: list[JsonDict] = []
+    lifecycle_by_lot = build_lifecycle_read_models_from_decision_snapshot(
+        decision_snapshot,
+        now_ms=lifecycle_now_ms,
+    )
+    snapshot_lots_by_id: dict[str, RiskPositionView] = {}
+    if (
+        account_norm
+        and (decision_snapshot or {}).get("snapshot_status") == "trusted"
+        and normalize_account((decision_snapshot or {}).get("normalized_account")) == account_norm
+    ):
+        snapshot_lots_by_id = {
+            view.lot_id: view
+            for raw in (decision_snapshot or {}).get("account_position_lots") or []
+            if isinstance(raw, dict)
+            if (view := position_lot_risk_view(raw)).lot_id
+        }
+
+    for it in selected_items:
+        lifecycle = lifecycle_by_lot.get(it.lot_id)
+        snapshot_lot = snapshot_lots_by_id.get(it.lot_id)
+        if (
+            lifecycle
+            and lifecycle.get("lifecycle_state") != "conflict"
+            and lifecycle.get("reason_state") != "conflict"
+            and snapshot_lot is not None
+            and snapshot_lot.fields == {
+                key: value for key, value in it.fields.items()
+                if key not in STRATEGY_METADATA_KEYS
+            }
+            and (
+                (lifecycle.get("pending_close_contracts_by_lot") or {}).get(it.lot_id, 0) > 0
+                or (lifecycle.get("reserved_contracts_by_lot") or {}).get(it.lot_id, 0) > 0
+            )
+        ):
+            symbol = it.canonical_underlying_symbol
+            if symbol and it.side == "short" and it.option_type == "put":
+                cash_secured_unavailable_by_symbol[symbol] = "option_close_settlement_pending"
+            elif symbol and it.side == "short" and it.option_type == "call":
+                locked_shares_unavailable_by_symbol[symbol] = "option_close_settlement_pending"
+        if not it.is_open:
+            continue
+        contracts_total = int(it.contracts or 0)
+        contracts_open = int(it.contracts_open or 0)
+        if contracts_open <= 0:
+            continue
+
+        symbol = it.canonical_underlying_symbol
+
+        position_row = it.as_open_position_min(
+            as_of_date=expiration_market_date(observed_at_dt, symbol_market(symbol))
+        )
+        if lifecycle is not None:
+            position_row.update(lifecycle)
+        open_positions_min.append(position_row)
+        effective_contracts_open = contracts_open
+        if (
+            lifecycle
+            and lifecycle.get("lifecycle_state") != "conflict"
+            and lifecycle.get("reason_state") != "conflict"
+            and lifecycle.get("closure_fact") in {"option_leg_closed", "partial_close_observed"}
+            and (snapshot_lot := snapshot_lots_by_id.get(it.lot_id)) is not None
+            and snapshot_lot.fields == {
+                key: value for key, value in it.fields.items()
+                if key not in STRATEGY_METADATA_KEYS
+            }
+        ):
+            reserved = (lifecycle.get("reserved_contracts_by_lot") or {}).get(it.lot_id)
+            if type(reserved) is int and 0 <= reserved <= contracts_open:
+                effective_contracts_open -= reserved
+                if reserved and symbol:
+                    if it.side == "short" and it.option_type == "put":
+                        cash_secured_unavailable_by_symbol[symbol] = "option_close_settlement_pending"
+                    elif it.side == "short" and it.option_type == "call":
+                        locked_shares_unavailable_by_symbol[symbol] = "option_close_settlement_pending"
+        if effective_contracts_open <= 0:
+            continue
+        if not symbol:
+            continue
+
+        option_type = it.option_type
+        side = it.side
+        currency = normalize_currency(it.currency)
+
+        if side == "short" and option_type == "call":
+            locked = compute_short_call_locked_shares(
+                contracts_open=effective_contracts_open,
+                contracts_total=contracts_total,
+                multiplier=it.multiplier,
+                underlying_share_locked=it.underlying_share_locked,
+            )
+            if locked is None:
+                locked_shares_unavailable_by_symbol[symbol] = "short_call_locked_shares_basis_missing"
+                continue
+            locked_shares_by_symbol[symbol] = locked_shares_by_symbol.get(symbol, 0) + int(locked)
+
+        if side == "short" and option_type == "put":
+            cash_secured = compute_short_put_cash_secured(
+                contracts_open=effective_contracts_open,
+                contracts_total=contracts_total,
+                cash_secured_amount=it.cash_secured_amount,
+                strike=it.strike,
+                multiplier=it.multiplier,
+            )
+            if cash_secured is None:
+                cash_secured_unavailable_by_symbol[symbol] = "short_put_cash_secured_basis_missing"
+                cash_secured_total_cny = None
+                continue
+            if not currency:
+                cash_secured_unavailable_by_symbol[symbol] = "short_put_cash_secured_currency_missing"
+                cash_secured_total_cny = None
+                continue
+            if currency not in {"CNY", "USD", "HKD"}:
+                cash_secured_unavailable_by_symbol[symbol] = f"short_put_cash_secured_currency_unsupported:{currency}"
+                cash_secured_total_cny = None
+                continue
+
+            # bucket per symbol per currency
+            m = cash_secured_by_symbol_by_ccy.get(symbol) or {}
+            m[currency] = m.get(currency, 0.0) + float(cash_secured)
+            cash_secured_by_symbol_by_ccy[symbol] = m
+
+            cash_secured_total_by_ccy[currency] = cash_secured_total_by_ccy.get(currency, 0.0) + float(cash_secured)
+
+            # unify to CNY if possible
+            if cash_secured_total_cny is not None:
+                if currency == 'CNY':
+                    cash_secured_total_cny += float(cash_secured)
+                elif currency == 'USD':
+                    if usdcny_exchange_rate:
+                        cash_secured_total_cny += float(cash_secured) * float(usdcny_exchange_rate)
+                    else:
+                        cash_secured_total_cny = None
+                elif currency == 'HKD':
+                    if cny_per_hkd_exchange_rate:
+                        cash_secured_total_cny += float(cash_secured) * float(cny_per_hkd_exchange_rate)
+                    else:
+                        cash_secured_total_cny = None
+                else:
+                    cash_secured_total_cny = None
+
+    out = {
+        "context_status": "available",
+        "as_of_utc": observed_at_utc,
+        "filters": {"broker": broker_norm, "account": account_norm or account},
+        "locked_shares_status": "available",
+        "locked_shares_unavailable_reason": None,
+        "locked_shares_by_symbol": locked_shares_by_symbol,
+        "locked_shares_unavailable_by_symbol": locked_shares_unavailable_by_symbol,
+        "cash_secured_by_symbol_by_ccy": cash_secured_by_symbol_by_ccy,
+        "cash_secured_total_by_ccy": cash_secured_total_by_ccy,
+        "cash_secured_unavailable_by_symbol": cash_secured_unavailable_by_symbol,
+        "cash_secured_total_cny": cash_secured_total_cny,
+        "exchange_rates": (rates or {}),
+        "raw_selected_count": len(selected_items),
+        "open_positions_min": open_positions_min,
+        "assignment_positions": [
+            {**view.as_open_position_min(as_of_date=expiration_market_date(observed_at_dt, symbol_market(view.canonical_underlying_symbol))),
+             **dict(lifecycle_by_lot.get(view.lot_id) or {})}
+            for raw in records
+            if (view := position_lot_risk_view(raw)).is_open
+            and normalize_account(view.account) == account_norm
+            and view.side == "short" and view.option_type in {"put", "call"}
+        ],
+        "combo_yield_groups": build_option_group_inventory(
+            [
+                {
+                    "record_id": item.lot_id,
+                    "account": item.account,
+                    "symbol": item.canonical_underlying_symbol,
+                    "option_type": item.option_type,
+                    "side": item.side,
+                    "contracts": item.contracts,
+                    "contracts_open": item.contracts_open,
+                    "contracts_closed": item.contracts_closed,
+                    "expiration_ymd": item.expiration_ymd,
+                    "strategy": item.fields.get("strategy"),
+                    "leg_role": item.fields.get("leg_role"),
+                    "strategy_group_id": item.fields.get("strategy_group_id"),
+                    "strategy_snapshot": item.fields.get("strategy_snapshot"),
+                    **dict(lifecycle_by_lot.get(item.lot_id) or {}),
+                }
+                for item in selected_items
+            ]
+        ),
+        "position_lifecycle_by_lot": lifecycle_by_lot,
+        "assigned_stock_events": [
+            dict(item)
+            for item in list(
+                (decision_snapshot or {}).get("account_assigned_stock_events")
+                or []
+            )
+            if isinstance(item, dict)
+        ],
+        "strategy_group_identities": [
+            dict(item)
+            for item in list(
+                (decision_snapshot or {}).get("account_combo_identities") or []
+            )
+            if isinstance(item, dict)
+        ],
+        "decision_state_fingerprint": (
+            (decision_snapshot or {}).get("decision_state_fingerprint")
+        ),
+        "decision_snapshot_status": str(
+            (decision_snapshot or {}).get("snapshot_status")
+            or "snapshot_unavailable"
+        ),
+        "strategy_family_source": STRATEGY_FAMILY_SOURCE,
+    }
+    out["ledger"] = ledger_status
+    return out
+
+
+def build_shared_position_risk_context(
+    records: list[JsonDict],
+    broker: str,
+    rates: JsonDict | None = None,
+    *,
+    decision_snapshots_by_account: dict[str, JsonDict] | None = None,
+    lifecycle_now_ms: int | None = None,
+    accounts: Iterable[str] | None = None,
+    observed_at: datetime | None = None,
+) -> JsonDict:
+    broker_norm = normalize_broker(broker)
+    account_labels = set(decision_snapshots_by_account or {}) | {
+        normalized
+        for raw in (accounts or [])
+        if (normalized := normalize_account(raw))
+    }
+    for rec in records:
+        fields = position_lot_snapshot(rec).fields
+        if not fields:
+            continue
+        if broker_norm and fields.get("broker") != broker_norm:
+            continue
+        acct = fields.get("account")
+        if acct:
+            account_labels.add(acct)
+    snapshots = decision_snapshots_by_account or {}
+    aggregate_records = records
+    aggregate_unavailable = False
+    if decision_snapshots_by_account is not None:
+        aggregate_records = []
+        aggregate_unavailable = not account_labels
+        for acct in sorted(account_labels):
+            snapshot = snapshots.get(acct) or {}
+            if (
+                snapshot.get("snapshot_status") != "trusted"
+                or normalize_account(snapshot.get("normalized_account")) != acct
+            ):
+                aggregate_unavailable = True
+                continue
+            aggregate_records.extend(attach_event_strategy_metadata(
+                snapshot.get("account_position_lots") or [], snapshot.get("trade_events"),
+            ))
+    by_account = {
+        acct: build_position_risk_context(
+            records,
+            broker=broker_norm,
+            account=acct,
+            rates=rates,
+            decision_snapshot=(snapshots.get(acct) or {}) if decision_snapshots_by_account is not None else None,
+            lifecycle_now_ms=lifecycle_now_ms,
+            observed_at=observed_at,
+        )
+        for acct in sorted(account_labels)
+    }
+    observed_at_dt = observed_at or datetime.now(timezone.utc)
+    if observed_at_dt.tzinfo is None:
+        observed_at_dt = observed_at_dt.replace(tzinfo=timezone.utc)
+    return {
+        "as_of_utc": observed_at_dt.astimezone(timezone.utc).isoformat(),
+        "filters": {"broker": broker_norm},
+        "all_accounts": build_position_risk_context(
+            aggregate_records,
+            broker=broker_norm,
+            account=None,
+            rates=rates,
+            decision_snapshot={} if aggregate_unavailable else None,
+            observed_at=observed_at_dt,
+        ),
+        "by_account": by_account,
+    }
+
+
+def build_lifecycle_read_models_from_decision_snapshot(
+    decision_snapshot: JsonDict | None,
+    *,
+    now_ms: int | None = None,
+) -> dict[str, JsonDict]:
+    snapshot = dict(decision_snapshot or {})
+    if str(snapshot.get("snapshot_status") or "") != "trusted":
+        return {}
+    resolved = snapshot.get("account_lifecycle_resolution")
+    if isinstance(resolved, Mapping):
+        validation_reasons = validate_account_lifecycle_resolution(
+            resolved
+        )
+        if validation_reasons:
+            raise ValueError(
+                "invalid account lifecycle resolution: "
+                + ",".join(validation_reasons)
+            )
+        return build_lifecycle_read_models_from_resolved_account(
+            cases=[
+                dict(item)
+                for item in snapshot.get("account_lifecycle_cases") or []
+                if isinstance(item, dict)
+            ],
+            trade_events=list(snapshot.get("trade_events") or []),
+            allocations=[
+                dict(item)
+                for item in snapshot.get("account_lifecycle_allocations")
+                or []
+                if isinstance(item, dict)
+            ],
+            timing_policies=[
+                dict(item)
+                for item in snapshot.get(
+                    "account_lifecycle_timing_policies"
+                )
+                or []
+                if isinstance(item, dict)
+            ],
+            position_lots=[
+                dict(item)
+                for item in snapshot.get("account_position_lots") or []
+                if isinstance(item, dict)
+            ],
+            account_resolution=resolved,
+            void_event_ids=list(
+                snapshot.get("effective_void_event_ids") or []
+            ),
+            now_ms=now_ms,
+        )
+    cases = [
+        dict(item)
+        for item in list(snapshot.get("account_lifecycle_cases") or [])
+        if isinstance(item, dict)
+        and str(item.get("schema_version") or "").strip() == "lifecycle_case.v2"
+    ]
+    evidence = [
+        dict(item)
+        for item in list(snapshot.get("account_lifecycle_evidence") or [])
+        if isinstance(item, dict)
+    ]
+    allocations = [
+        dict(item)
+        for item in list(snapshot.get("account_lifecycle_allocations") or [])
+        if isinstance(item, dict)
+    ]
+    void_event_ids = tuple(snapshot.get("effective_void_event_ids") or ())
+    lots_by_id = {
+        str(item.get("record_id") or "").strip(): dict(item.get("fields") or {})
+        for item in list(snapshot.get("account_position_lots") or [])
+        if isinstance(item, dict) and str(item.get("record_id") or "").strip()
+    }
+    evidence_by_case: dict[str, list[JsonDict]] = {}
+    for item in evidence:
+        case_id = str(item.get("case_id") or "").strip()
+        if case_id:
+            evidence_by_case.setdefault(case_id, []).append(item)
+    allocations_by_case: dict[str, list[JsonDict]] = {}
+    for item in allocations:
+        case_id = str(item.get("case_id") or "").strip()
+        if case_id:
+            allocations_by_case.setdefault(case_id, []).append(item)
+
+    output: dict[str, JsonDict] = {}
+    for lifecycle_case in sorted(cases, key=lambda item: str(item.get("case_id") or "")):
+        case_id = str(lifecycle_case.get("case_id") or "").strip()
+        case_allocations = allocations_by_case.get(case_id, [])
+        case_evidence = evidence_by_case.get(case_id, [])
+        evidence_facts = lifecycle_evidence_facts(
+            evidence=case_evidence,
+            allocations=case_allocations,
+            void_event_ids=void_event_ids,
+        )
+        resolution = resolve_allocations(
+            dict(lifecycle_case.get("target_contracts_by_lot") or {}),
+            case_allocations,
+            void_event_ids=void_event_ids,
+        )
+        orphan_evidence_ids = list(evidence_facts.orphan_evidence_ids)
+        quantity_drift = any(
+            lot_id not in lots_by_id
+            or int(lots_by_id[lot_id].get("contracts_open") or 0)
+            != expected_remaining
+            for lot_id, expected_remaining in resolution.remaining_contracts_by_lot.items()
+        )
+        persisted_status = str(lifecycle_case.get("status") or "").strip().lower()
+        summary = dict(lifecycle_case.get("derived_summary") or {})
+        conflict_reasons = (
+            tuple(
+                str(item)
+                for item in summary.get("lifecycle_reason_codes") or []
+                if str(item)
+            )
+            if persisted_status == "conflict"
+            else ()
+        )
+        read_model = derive_lifecycle_read_model(
+            expiration_ymd=str(lifecycle_case.get("expiration_ymd") or ""),
+            market=str(
+                lifecycle_case.get("market")
+                or symbol_market(lifecycle_case.get("symbol"))
+                or ""
+            ),
+            target_contracts_by_lot=dict(
+                lifecycle_case.get("target_contracts_by_lot") or {}
+            ),
+            allocations=case_allocations,
+            void_event_ids=void_event_ids,
+            accepted_option_close_contracts_by_lot=(
+                evidence_facts.reservation_contracts_by_lot
+            ),
+            now_ms=now_ms,
+            conflict_reason_codes=conflict_reasons,
+            orphan_evidence=bool(orphan_evidence_ids),
+            quantity_drift=quantity_drift,
+        )
+        model = {
+            "lifecycle_state": read_model.lifecycle_state,
+            "lifecycle_case_id": case_id,
+            "lifecycle_evidence_status": (
+                "conflict"
+                if read_model.lifecycle_state == "conflict"
+                else "evidence_without_allocation"
+                if orphan_evidence_ids
+                else "missing"
+                if not case_evidence
+                else "closure_observed_cause_pending"
+                if evidence_facts.reservation_evidence_ids
+                else "partial"
+                if any(read_model.remaining_contracts_by_lot.values())
+                else "complete"
+            ),
+            "lifecycle_reason_codes": list(read_model.lifecycle_reason_codes),
+            "pending_until_ms": read_model.pending_until_ms,
+            "terminal_event_ids": sorted(
+                str(item.get("canonical_terminal_event_id") or "").strip()
+                for item in evidence_facts.effective_allocations
+                if str(item.get("canonical_terminal_event_id") or "").strip()
+            ),
+            "target_contracts_by_lot": dict(
+                lifecycle_case.get("target_contracts_by_lot") or {}
+            ),
+            "resolved_contracts_by_lot": read_model.resolved_contracts_by_lot,
+            "remaining_contracts_by_lot": read_model.remaining_contracts_by_lot,
+            "resolved_contracts_by_terminal_type": (
+                read_model.resolved_contracts_by_terminal_type
+            ),
+            "reserved_contracts_by_lot": read_model.reserved_contracts_by_lot,
+            "closure_fact": read_model.closure_fact,
+            "reason_state": read_model.reason_state,
+            "close_reason": read_model.close_reason,
+            "allocation_ids": sorted(
+                str(item.get("allocation_id") or "").strip()
+                for item in evidence_facts.effective_allocations
+                if str(item.get("allocation_id") or "").strip()
+            ),
+            "voided_terminal_event_ids": sorted(
+                {
+                    str(item.get("canonical_terminal_event_id") or "").strip()
+                    for item in case_allocations
+                    if str(
+                        item.get("canonical_terminal_event_id") or ""
+                    ).strip()
+                    in set(void_event_ids)
+                }
+            ),
+            "reservation_evidence_ids": list(
+                evidence_facts.reservation_evidence_ids
+            ),
+            "actionable": False,
+        }
+        for lot_id in sorted(
+            dict(lifecycle_case.get("target_contracts_by_lot") or {})
+        ):
+            if lot_id in output:
+                output[lot_id] = {
+                    **model,
+                    "lifecycle_state": "conflict",
+                    "lifecycle_reason_codes": ["lifecycle_case_target_overlap"],
+                    "actionable": False,
+                }
+            else:
+                output[lot_id] = dict(model)
+    return output
+
+
+def slice_position_risk_context_for_account(shared_ctx: JsonDict, account: str | None) -> JsonDict | None:
+    if not isinstance(shared_ctx, dict):
+        return None
+    if not account:
+        all_accounts = shared_ctx.get("all_accounts")
+        return (dict(all_accounts) if isinstance(all_accounts, dict) else None)
+    by_account = shared_ctx.get("by_account")
+    if not isinstance(by_account, dict):
+        return None
+    out = by_account.get(str(account))
+    return (dict(out) if isinstance(out, dict) else None)

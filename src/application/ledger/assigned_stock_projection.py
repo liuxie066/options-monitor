@@ -496,3 +496,57 @@ def build_assigned_stock_projection_from_rows(
         quote_snapshots=[],
         account=str(account or "").strip().lower(),
     )
+
+
+def resolve_wheel_batch_from_rows(
+    rows: Mapping[str, Any],
+    *,
+    account: str,
+    lot_id: str,
+    as_of_ms: int,
+    market: str,
+) -> dict[str, Any]:
+    matches = [
+        batch
+        for batch in build_wheel_read_model_from_rows(
+            rows,
+            account=account,
+            as_of_ms=as_of_ms,
+            market=market,
+        )["batches"]
+        if batch["stock_lot_id"] == lot_id
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"Wheel batch must resolve uniquely: stock_lot_id={lot_id}"
+        )
+    return matches[0]
+
+
+def resolve_wheel_branch_from_rows(
+    rows: Mapping[str, Any],
+    *,
+    account: str,
+    wheel_branch_id: str,
+    as_of_ms: int,
+    market: str | None = None,
+) -> dict[str, Any]:
+    matches = [
+        branch
+        for branch in build_wheel_read_model_from_rows(
+            rows,
+            account=account,
+            as_of_ms=as_of_ms,
+        )["wheel_branches"]
+        if branch["wheel_branch_id"] == wheel_branch_id
+        and (
+            not str(market or "").strip()
+            or symbol_market(branch.get("symbol"))
+            == str(market or "").strip().upper()
+        )
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"Wheel branch must resolve uniquely: wheel_branch_id={wheel_branch_id}"
+        )
+    return matches[0]

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.application import query_cursor
+
 import hashlib
 import json
 from dataclasses import replace
@@ -71,7 +73,7 @@ def build_runtime_diagnostic_fixture(
 def diagnostic_scope(tmp_path, example_config_path, monkeypatch):
     fixture = build_runtime_diagnostic_fixture(tmp_path / "diagnostic")
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(fixture["root"]))
-    monkeypatch.setattr(project_reader, "_key", lambda: "isolated-diagnostic-cursor-key")
+    monkeypatch.setattr(query_cursor, "_key", lambda: "isolated-diagnostic-cursor-key")
     payload, error = tools.build_tool_payload("runtime_logs", {"account": "lx", "run_id": fixture["run_id"]},
         fixed_input={"config_path": str(example_config_path)})
     assert error is None
@@ -207,7 +209,7 @@ def test_oversize_unavailable_signer_and_budget_recovery(diagnostic_scope, monke
     fixture, payload = diagnostic_scope
     def unavailable():
         raise project_reader.ProjectReaderError("continuation_unavailable")
-    monkeypatch.setattr(project_reader, "_key", unavailable)
+    monkeypatch.setattr(query_cursor, "_key", unavailable)
     data, _ = _read({**payload, "limit": 1})
     assert data["next_cursor"] is None and data["continuation_status"] == "continuation_unavailable"
     assert data["coverage"]["status"] == "partial"

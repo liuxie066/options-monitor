@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from typing import Callable
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
@@ -136,3 +138,72 @@ def _truthy_env(name: str, explicit: bool | None) -> bool:
         return bool(explicit)
     value = str(build_effective_env().get(name) or "").strip().lower()
     return value in {"1", "true", "yes", "y", "on"}
+
+
+class ReplyAuthorizationError(ValueError):
+    """A local authorization block is not an ambiguous provider outcome."""
+
+    def __init__(self, message: str, *, provider_attempted: bool = False):
+        super().__init__(message)
+        self.provider_attempted = provider_attempted
+
+
+def check_reply_authorization(record: dict[str, Any], *, channel: str,
+                              current_allowed_senders: Callable[[], str | None],
+                              config_key: str | None, config_path: str | None,
+                              bot_config_path: str | None, transport_identity: str | None = None,
+                              allow_unscoped: bool = False) -> None:
+    from src.application.bot.config_scope import resolve_replay_authorization, reply_destination
+    from src.application.bot.control.contracts import BotInboundRequest
+
+    try:
+        frozen = json.loads(record.get("authorization_json") or "null")
+        if not isinstance(frozen, dict) or frozen.get("channel") != channel:
+            raise ValueError("reply identity unavailable")
+        if frozen.get("transport_identity") != transport_identity:
+            raise ValueError("reply sender identity changed")
+        enforce_sender_allowed(channel=channel, sender_id=str(frozen.get("sender_id") or ""),
+                               allowed_senders=current_allowed_senders())
+        payload = json.loads(record.get("payload_json") or "null")
+        if not isinstance(payload, dict):
+            raise ValueError("reply payload unavailable")
+        if frozen.get("destination") != reply_destination(channel, payload):
+            raise ValueError("reply destination changed")
+        if channel == "feishu" and payload.get("message_id") != frozen.get("message_id"):
+            raise ValueError("reply message identity changed")
+        if channel == "wechat" and payload.get("to_user_id") != frozen.get("sender_id"):
+            raise ValueError("reply recipient identity changed")
+        request = BotInboundRequest(
+            text="", channel=channel, sender_id=frozen["sender_id"],
+            conversation_id=frozen.get("conversation_id"), message_id=frozen.get("message_id"),
+            config_key=config_key, config_path=config_path, bot_config_path=bot_config_path,
+            reply_context={"reply_sender_identity": transport_identity})
+        if not (config_key or config_path):
+            from src.application.bot.control.config_loader import load_bot_config
+            from src.application.bot.control.settings import BotSettings, request_with_default_market_scope
+
+            _, cfg = load_bot_config(config_path=bot_config_path, missing_ok=not bool(bot_config_path))
+            request = request_with_default_market_scope(request, BotSettings.from_runtime_config(cfg))
+        if frozen.get("scope") is None and allow_unscoped:
+            # This exception sends only the new live result through its original explicit route.
+            from pathlib import Path
+            def same_path(a, b):
+                return (str(Path(a).expanduser().resolve()) if a else None) == (str(Path(b).expanduser().resolve()) if b else None)
+            if frozen.get("config_key") != request.config_key or not same_path(frozen.get("config_path"), request.config_path) or not same_path(frozen.get("bot_config_path"), bot_config_path):
+                raise ValueError("live reply route changed")
+            return
+        current = resolve_replay_authorization(request)
+        if not frozen.get("scope") or any(frozen.get(key) != value for key, value in current.items()):
+            raise ValueError("reply authority changed")
+    except (AgentToolError, OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+        raise ReplyAuthorizationError("reply authorization unavailable") from exc
+
+
+def reply_authorization_predicate(check: Callable[[dict[str, Any]], None]) -> Callable[[dict[str, Any]], bool]:
+    def allowed(record: dict[str, Any]) -> bool:
+        try:
+            check(record)
+        except ReplyAuthorizationError:
+            return False
+        return True
+    return allowed

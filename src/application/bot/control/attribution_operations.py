@@ -14,7 +14,8 @@ from src.application.bot.control.operation_store import InboundOperationStore, o
 from src.application.ledger.api import (ledger_resource_identity, open_wheel_activation_repository,
     read_trade_attribution_facts, read_trade_attribution_decision, with_sqlite_repo_writer_lock)
 from src.application.trades.attribution import (attribution_runtime, build_trade_attribution_view,
-    read_attribution_combo_evidence, apply_trade_attribution, read_trade_attribution_snapshot)
+    read_attribution_combo_evidence, apply_trade_attribution, read_trade_attribution_snapshot,
+    observe_combo_confirmation_receipt_route)
 from src.application.trades.account_mapping import combo_reconciliation_mode_for_account
 from src.application.futu_quote_routing import runtime_config_market, resolve_futu_quote_route
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings, resolve_futu_account_ids
@@ -86,7 +87,9 @@ def _strategy_context(repo: Any, *, config: dict[str, Any], authority: dict[str,
     view = build_trade_attribution_view(rows, config=config, account=account, market=market, now_ms=int(time.time() * 1000),
         combo_evidence=evidence, capacity_observation=observation, combo_mode=mode, revalidate_expired=True)
     return {"config": config, "market": market, "combo_evidence": evidence, "capacity_observation": observation,
-            "combo_mode": mode, "view": view}
+            "combo_mode": mode, "view": view,
+            "confirmation_receipt_route": observe_combo_confirmation_receipt_route(
+                config=config, account=account, runtime_root=Path(authority["runtime_root"]))}
 
 
 def _member_decision(member: dict[str, Any], *, contracts: int) -> dict[str, Any]:

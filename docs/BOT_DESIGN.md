@@ -64,6 +64,8 @@
 
 所有显式字段须在一次调用内一致。双市场 cursor 不单独作为授权或市场选择器，续页重复原 `market`/`config_key`；原工具的 cursor 签名和筛选校验仍有效。Host 的路由标签与工具自身来源分列，未注入目标配置的工具不得声明目标市场事实。
 
+有可信读取代际时，模型上下文将渠道主配置显示为 `reference.channel_config_key`，避免把渠道 US 误认成固定查询市场；Host 内部的 `config_key`、配置路径及授权输入保持不变，无读取代际的固定范围模式保持原语义。用户先说「sy 查看成交归属」、再纠正「hk市场」或「港股」时，保留已明确的账户和查询目标，使用 HK 工具重新核验，不能要求重复确认已有账户。上下文只提供查询条件，不授予跨市场或跨账户权限；真正缺失或冲突的范围仍需澄清。切换市场后重新查询，不沿用旧市场 cursor 或数据；空结果、数据不可用、账户拒绝与市场不支持必须区分。
+
 复用归属：可信配置身份/新鲜度由 `bot.config_scope.resolve_trusted_config_scope` 统一提供给渠道、工具和记忆，授权代际由 `bot.model_config` 提供；市场解析复用 `symbol_identity.symbol_market`；Tool 参数校验复用 `bot.tools.build_tool_payload`；账户集合复用 `account_config.accounts_from_config`；只读数据复用 `agent_tools.positions`、`agent_tools.receipts`、`trades.attribution`；会话/记忆分别复用 `bot.session` / `bot.memory`。唯一新增配置名为 `bot.read_markets`，因为现有 `default_market_scope` 没有授权含义；事件 `event_type` 与归属 `symbol` 是既有 owner 的读投影/过滤扩展。检索范围：上述 owner、`config_validator.py`、`config_yaml.py`、Scene、`agent_tools.project`、Bot/channel 测试；关键词 `config_key`, `config_path`, `market`, `account`, `authority_scope`, `read_markets`。未找到可复用的 Bot 多市场权限集合；未引入第二套账本、路由器或持久状态。
 
 拒绝方案：把固定 `us` 改为默认 `all`（扩大所有部署读取面）；让模型直接改 `config_path`（越过可信边界）；按用户问题中的 `.HK` 直接授予权限（标的身份不是授权）；在 bot.default_market_scope 上叠加 Bot ACL（混淆 Control 与只读权限）。
@@ -80,6 +82,16 @@
 交易、账本、配置、通知与服务操作仍由原有业务模块和 deterministic Control 管理。模型没有修改这些状态的工具。既有渠道权限、去重、取消、Host 租约、outbox 和真实数据保持独立。
 
 普通安装与新版升级仅需要 Python。回滚到旧发布仍要核验旧 Pi 存储和旧运行时；历史迁移说明见 [Pi legacy storage](PI_AGENT_CORE_INTEGRATION.md)。
+
+## 原消息重放与待发回复权限
+
+普通入站缓存由 `bot.config_scope` 和 inbound audit owner 绑定可信渠道、用户、会话、有效运行配置内容（包含账户集合）、规范配置路径与 Bot 读取代际；双市场还包含获准的另一市场配置。规范路径别名保持同一身份，运行配置内容或 Bot 配置代际改变则不能沿用旧结果。重放先核验当前 sender，再核验 scope，之后才能解析原回答；作用域缺失、不可读取或不匹配时返回 `CHANNEL_NOT_READY`，保留原成功响应并要求发送新消息，不重新执行原业务。旧无绑定记录保留但不猜测补绑。合法请求的审计查找失败明确报错，runtime 注释只以原响应 CAS 更新已录入结果，不覆盖原成功缓存；新合法失败仍正常保存。
+
+Feishu 和 Wechat reply outbox 冻结上述权限、原接收上下文与发送配置路由。每次 claim 前和实际发送前重新核验当前权限与 scope；拒绝或缺证据返回 `authorization_blocked`，不当作空队列或 provider 成功。claim 前只延后现有下次尝试时间，不增加 attempt、延长 provider 窗口或改写冻结正文；claim 后本地阻塞保留已有 attempt fence、UUID、窗口及 UNKNOWN，不把未调用 provider 说成未知送达。已拒绝的队首延期，使其他合法回复可以继续。Feishu 的 no-reply 门禁保持；Wechat public poll 在禁回复时仍可能重试已有待发，是本次未修的既有调用入口缺口，另待范围批准。stop、过期、取消及可靠 fallback 沿原 owner 处理。
+
+生产 Feishu reader 重读最初绑定的 env/credential env 来源，文件缺失、不可读、异常或删除名单键不会复用它原先写入进程的旧名单；Wechat 配置来源每次从已验证 Bot 配置读取。显式 CLI 或进程名单仍按该明确来源生效，其值变化或重启才改变授权。即时公开的工具权限引导与 sender 拒绝保持原区别：未授权 sender 仍静默；合法 sender 的新结果在 scope 暂不可用时可沿同一原路由即时回复一次，仅限新录入且新入队的正文。该例外不会使旧 cache、outbox 冲突或待发重试取得权限证明。历史未绑定待发消息不自动补送或迁移；恢复合法同 scope 后，原已绑定回复才可按既有窗口重试。
+
+Feishu 绑定配置 app_id；Wechat 绑定规范连接 profile 目录。目录不证明同路径重连后的实际 provider Bot 身份，本轮不新增凭据或账户归属规则，也未读取真实待发队列。授权检查与外部实际发送不能原子锁住配置变更；已发送消息不可回滚。新增可空绑定列不删旧数据，回滚旧代码会失去这些保护，发布/重启/补送需另行批准。
 
 ## 验证
 
