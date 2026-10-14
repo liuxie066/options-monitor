@@ -175,27 +175,90 @@ def _legacy_manual_wheel_call_confirmation(
         return False
     raw = latest.get("raw_payload") or {}
     patch = raw.get("patch") or {}
-    branch = patch.get("source_wheel_branch_id")
     if (latest.get("source") != "wheel_linkage"
-            or raw.get("schema_version") != "wheel_call_linkage_confirmed.v1"
             or "attribution_decision" in raw
-            or not all(raw.get(key) for key in ("actor", "wheel_linkage_request_id",
-                "input_snapshot_hash", "batch_generation_hash", "linkage_candidate_id"))
+            or not all(raw.get(key) for key in ("actor", "wheel_linkage_request_id", "input_snapshot_hash"))
             or latest.get("target_lot_id") != lot_id or raw.get("target_lot_id") != lot_id
             or raw.get("adjust_target_source_event_id") != opening.get("event_id")
-            or not branch or patch.get("source_stock_lot_id") != branch
-            or raw.get("source_wheel_branch_id") != branch or raw.get("source_stock_lot_id") != branch
             or patch.get("strategy") != "wheel" or patch.get("leg_role") != "wheel_call"
+            or set(patch) - {*POSITION_LOT_STRATEGY_PATCH_FIELDS, "last_action_at"}
             or any(membership.get(key) != patch.get(key) for key in POSITION_LOT_STRATEGY_PATCH_FIELDS)
             or latest.get("event_time_ms", 0) < opening.get("event_time_ms", 0)):
         return False
     try:
+        if raw.get("schema_version") == "wheel_call_linkage_confirmed.v1":
+            branch = patch.get("source_wheel_branch_id")
+            if (not branch or patch.get("source_stock_lot_id") != branch
+                    or raw.get("source_wheel_branch_id") != branch or raw.get("source_stock_lot_id") != branch
+                    or not raw.get("batch_generation_hash") or not raw.get("linkage_candidate_id")):
+                return False
+        elif raw.get("schema_version") == "wheel_call_allocations_confirmed.v1":
+            allocations = parse_wheel_call_allocations(patch.get("wheel_call_allocations"))
+            branches = sorted(branch for _stock, branch, count in allocations for _ in range(count))
+            if (raw.get("attribution_origin") != "manual"
+                    or raw.get("attribution_request_id") != raw["wheel_linkage_request_id"]
+                    or raw.get("attribution_policy_version") != ATTRIBUTION_POLICY_VERSION
+                    or raw.get("attribution_candidate_id") != "wheel-multi:" + canonical_sha256(branches)[:24]
+                    or len(branches) != opening.get("contracts")):
+                return False
+        else:
+            return False
         proof, fill = TradeEvent.from_dict(latest), TradeEvent.from_dict(opening)
         return (proof.contract_key == fill.contract_key and proof.currency == fill.currency
             and proof.multiplier == fill.multiplier and proof.contracts == 0
             and proof.price == 0 and proof.fees == 0)
     except (TypeError, ValueError, KeyError):
         return False
+
+
+def _preserved_manual_wheel_call(
+    *, fact: Mapping[str, Any], proposed: Mapping[str, Any], decision: Mapping[str, Any],
+    events: Sequence[Mapping[str, Any]], metadata: Mapping[str, Any], accepted: set[str],
+    branches: Mapping[str, Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    """Qualify the exact last confirmed relationship, not a historical manual flag."""
+    if (fact["status"] != "linked" or fact["origin"] != "manual" or fact["strategy"] != "wheel"
+            or fact["position_side"] != "short" or fact["contract_key"]["option_type"] != "call"
+            or fact["reason_codes"] or fact["strategy_group_id"] or fact["contracts_open"] != fact["contracts"]
+            or proposed["status"] != "linked"
+            or set(proposed["reason_codes"]) - {"existing_attribution_preserved"}):
+        return None
+    related = [row for row in events if row["event_id"] == fact["open_event_id"]
+               or row.get("target_lot_id") == fact["lot_id"]]
+    opening = next((row for row in related if row["event_id"] == fact["open_event_id"]), None)
+    latest = next((row for row in reversed(related) if row.get("event_type") == "adjust"
+        and any(key in ((row.get("raw_payload") or {}).get("patch") or {})
+                for key in POSITION_LOT_STRATEGY_PATCH_FIELDS)), None)
+    if opening is None or latest is None:
+        return None
+    raw = latest.get("raw_payload") or {}
+    patch = raw.get("patch") or {}
+    membership = metadata.get(fact["lot_id"], {})
+    if any(membership.get(key) != patch.get(key) for key in POSITION_LOT_STRATEGY_PATCH_FIELDS):
+        return None
+    if "attribution_decision" in raw:
+        if (latest["event_id"] not in accepted or raw.get("attribution_origin") != "manual"
+                or raw["attribution_decision"].get("manual") is not True):
+            return None
+    elif not _legacy_manual_wheel_call_confirmation(related, opening=opening,
+            lot_id=fact["lot_id"], membership=membership):
+        return None
+    if membership.get("wheel_call_allocations"):
+        original = parse_wheel_call_allocations(membership["wheel_call_allocations"])
+        if "wheel_call_allocations" not in decision or parse_wheel_call_allocations(decision["wheel_call_allocations"]) != original:
+            return None
+        wanted = sorted(branch for _stock, branch, count in original for _ in range(count))
+        if (decision["wheel_branch_ids"] != wanted
+                or decision["candidate_id"] != "wheel-multi:" + canonical_sha256(wanted)[:24]
+                or any(branches.get(branch, {}).get("stock_lot_id") != stock for stock, branch, _count in original)):
+            return None
+    else:
+        branch = membership.get("source_wheel_branch_id")
+        if (not branch or decision["candidate_id"] != "wheel:" + branch or decision["wheel_branch_ids"]
+                or "wheel_call_allocations" in decision
+                or branches.get(branch, {}).get("stock_lot_id") != membership.get("source_stock_lot_id")):
+            return None
+    return membership
 
 
 def trade_attribution_facts_from_events(events: Sequence[Mapping[str, Any]], *, account: str) -> list[dict[str, Any]]:
@@ -475,9 +538,12 @@ def write_trade_attribution_decision(
 def _multi_wheel_call_attribution(
     *, view: Mapping[str, Any], current: Mapping[str, Any], branch_ids: tuple[str, ...],
     decided_execution_keys: set[str],
+    preserved_allocations: tuple[tuple[str, str, int], ...] = (),
 ) -> dict[str, Any]:
+    preserved = bool(preserved_allocations and current.get("wheel_call_allocations")
+        and parse_wheel_call_allocations(current["wheel_call_allocations"]) == preserved_allocations)
     if (current["status"] not in {"pending", "conflict"} or current["position_side"] != "short"
-            or current["contract_key"]["option_type"] != "call" or not current["evidence_complete"]
+            or current["contract_key"]["option_type"] != "call" or not current["evidence_complete"] and not preserved
             or current["reason_codes"] and set(current["reason_codes"]) != {"multiple_strategy_candidates"}):
         raise ValueError("Wheel Call allocation requires one complete, unclaimed short Call fill")
     if len(branch_ids) != current["contracts"] or not branch_ids:
@@ -515,6 +581,8 @@ def _multi_wheel_call_attribution(
     normalized = parse_wheel_call_allocations(allocations)
     if sum(row[2] for row in normalized) != current["contracts"]:
         raise ValueError("Wheel Call allocation quantity does not match the fill")
+    if preserved_allocations and normalized != preserved_allocations:
+        raise ValueError("Wheel Call allocation differs from the original confirmed stock identity")
     candidate_id = "wheel-multi:" + canonical_sha256(sorted(branch_ids))[:24]
     preview = {**current, "candidate_id": candidate_id, "wheel_call_allocations": allocations,
                "write_applied": False}
@@ -819,6 +887,7 @@ def build_trade_attribution_view(
                     "wheel_evidence": sorted((event["event_id"], event["payload_hash"]) for event in wheel_events)}
         results.append({**fact, "status": resolution.status, "candidate_ids": list(resolution.candidate_ids),
             "candidates": proposals, "reason_codes": sorted(set(fact["reason_codes"]) | set(resolution.reason_codes)),
+            "ordinary_previewable": fact["ordinary_previewable"] and not fact["reason_codes"],
             "selected_candidate_id": resolution.selected_candidate_id if enabled else None, "rules_enabled": enabled,
             "input_hash": canonical_sha256(semantic), "evaluated_at_ms": now_ms, "evidence_complete": complete,
             "capacity_evidence": {
@@ -979,10 +1048,20 @@ def apply_trade_attribution(
             raise ValueError("attribution requires an explicit complete member decision: " + str(sorted(required)))
         plans, intent_events = [], []
         branches = {row["wheel_branch_id"]: row for row in view["wheel_model"]["wheel_branches"]}
+        restorations = {}
+        if manual and conflicts:
+            effective = _effective_events([row for row in rows["trade_events"] if row["event_time_ms"] <= instant])
+            accepted: set[str] = set()
+            metadata = lot_strategy_metadata_from_trade_events(effective, accepted_proof_event_ids=accepted)
+            restorations = {key: _preserved_manual_wheel_call(fact=by_key[key], proposed=evaluated[key],
+                decision=item, events=effective, metadata=metadata, accepted=accepted, branches=branches)
+                for key, item in decisions.items()}
+        preserving_wheel_batch = bool(restorations) and all(restorations.values())
         for key, item in sorted(decisions.items()):
             fact, proposed = by_key[key], evaluated[key]
             target = item["candidate_id"]
-            if fact["reason_codes"] or not proposed["evidence_complete"]:
+            manual_ordinary = manual and target == "ordinary" and proposed["ordinary_previewable"]
+            if fact["reason_codes"] or not proposed["evidence_complete"] and not (manual_ordinary or preserving_wheel_batch):
                 raise ValueError("attribution member identity or dependencies changed")
             if not conflicts:
                 assert_trade_attribution_unclaimed(rows["trade_events"], [fact["lot_id"]])
@@ -999,7 +1078,9 @@ def apply_trade_attribution(
                     raise ValueError("Wheel Call allocation identity is invalid")
                 multi = _multi_wheel_call_attribution(view=view,
                     current={**proposed, "status": "pending", "reason_codes": []}, branch_ids=tuple(allocations),
-                    decided_execution_keys=set(decisions))
+                    decided_execution_keys=set(decisions),
+                    preserved_allocations=(parse_wheel_call_allocations(restorations[key]["wheel_call_allocations"])
+                        if preserving_wheel_batch else ()))
                 if "wheel_call_allocations" in item and parse_wheel_call_allocations(item["wheel_call_allocations"]) != parse_wheel_call_allocations(multi["wheel_call_allocations"]):
                     raise ValueError("Wheel allocation stock identity differs from the decision")
                 kwargs = {"strategy": "wheel", "leg_role": "wheel_call", "wheel_call_allocations": multi["wheel_call_allocations"]}
