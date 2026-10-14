@@ -36,6 +36,8 @@ def test_single_account_sizing_survives_real_decision_seal_and_brief(tmp_path, m
     from src.application.futu_portfolio_context import build_futu_portfolio_context
 
     context = _account_nvda_context()
+    recovery_proof = {"source_snapshot_id": "prepared-old", "run_id": "run-1", "quotes": [{"code": "NVDA", "price_native": "70"}]}
+    context["position_sizing_evidence"]["quote_recovery"] = recovery_proof
     source = build_futu_portfolio_context(
         balance_rows=[{"cn_cash": 800000, "jp_cash": 0, "sg_cash": 0, "au_cash": 0, "ca_cash": 0, "my_cash": 0}],
         position_rows=[], account="lx",
@@ -77,6 +79,7 @@ def test_single_account_sizing_survives_real_decision_seal_and_brief(tmp_path, m
         expected[2] = round(50000 / (850000 - 50000 + 10000 / .14 + 1400), 6)
     assert [enriched.iloc[0][key] for key in SIZING_KEYS] == expected
     assert [decisions[0]["normalized_input"][key] for key in SIZING_KEYS] == expected
+    assert decisions[0]["normalized_input"]["position_sizing_quote_recovery"] == recovery_proof
     summary = normalize_processor_row(summary_fn(enriched, "NVDA"))
     assert [summary[key] for key in SIZING_KEYS] == expected
     seal_opening_candidate_snapshot(
@@ -110,6 +113,8 @@ def test_single_account_sizing_survives_real_decision_seal_and_brief(tmp_path, m
         run_mode={"scan_mode": "standard", "executable": True},
         sealed_at="2026-07-17T13:59:59Z",
     )
+    sealed = json.loads((tmp_path / "output_runs/run-1/accounts/lx/state/opening_candidate_snapshot.json").read_text())
+    assert sealed["candidate_decisions"][0]["normalized_input"]["position_sizing_quote_recovery"] == recovery_proof
     _materialize_candidate_bundle_fixture(tmp_path)
     brief = _assemble(tmp_path)
     assert brief["actionability"] != "blocked", [action.get("metrics") for action in brief["actions"]]

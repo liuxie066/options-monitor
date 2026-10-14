@@ -67,6 +67,7 @@ from src.application.required_data_snapshot import (
     FrozenRequiredDataBatch,
     resolve_frozen_required_data_csv_bytes_batch,
 )
+from src.application.portfolio_assignment_scenario import recover_position_sizing_quotes
 from src.application.exchange_rate_loader import build_converter
 from src.application.prepared_option_positions_context import (
     exchange_rate_scalars_from_option_context,
@@ -453,6 +454,12 @@ def run_watchlist_pipeline(
     portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = build_pipeline_context_fn(
         **context_kwargs,
     )
+    if not experience and isinstance(portfolio_ctx, dict) and required_data_snapshot_batch is not None:
+        portfolio_ctx = recover_position_sizing_quotes(
+            context=portfolio_ctx, runtime_config=cfg,
+            account=str((cfg.get("portfolio") or {}).get("account") or ""),
+            run_id=str(source_producer_run_id or ""), quotes=required_data_snapshot_batch,
+        )
     if opening_runtime_context_sink_fn is not None:
         opening_runtime_context_sink_fn(portfolio_ctx, option_ctx)
 
