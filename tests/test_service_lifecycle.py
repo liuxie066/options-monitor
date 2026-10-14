@@ -154,7 +154,7 @@ def cli_install(ctx):
 
 
 @pytest.fixture
-def load_state_context(tmp_path, monkeypatch):
+def load_state_context(tmp_path, monkeypatch, request):
     """Retain synthetic files; never invoke config-init or atomic-writer cleanup."""
     from src.application import service_lifecycle as lifecycle
     from src.application.config_yaml import resolve_yaml_runtime_config
@@ -162,10 +162,12 @@ def load_state_context(tmp_path, monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail('LoadState tests must not delete files or execute host processes')
 
+    guard = pytest.MonkeyPatch()
+    request.addfinalizer(guard.undo)  # Restore before tmp_path's own finalizer, including on setup failure.
     for owner, name in ((Path, 'unlink'), (os, 'unlink'), (os, 'remove'), (os, 'rmdir'),
                         (subprocess, 'Popen'), (lifecycle, '_atomic_file')):
-        monkeypatch.setattr(owner, name, forbidden)
-    monkeypatch.setattr('shutil.rmtree', forbidden)
+        guard.setattr(owner, name, forbidden)
+    guard.setattr('shutil.rmtree', forbidden)
     monkeypatch.delenv('OM_ENV_FILE', raising=False)
     monkeypatch.delenv('OM_RUNTIME_ROOT', raising=False)
     runtime = tmp_path.resolve() / 'runtime'
