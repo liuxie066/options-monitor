@@ -911,6 +911,77 @@ def test_render_systemd_feishu_ws_sudoers_cover_all_long_running_services(tmp_pa
     assert "ops ALL=(root) NOPASSWD: /bin/systemctl restart options-monitor-trade-intake.service" in profile["restart"]["sudoers"]
     assert "ops ALL=(root) NOPASSWD: /bin/systemctl restart options-monitor-feishu-ws.service" in profile["restart"]["sudoers"]
 
+@pytest.mark.parametrize("newline", ["\n", "\r", "\r\n"], ids=["lf", "cr", "crlf"])
+@pytest.mark.parametrize("prefix,suffix", [("", "after"), ("before", "after"), ("before", "")])
+@pytest.mark.parametrize("field", ["argument", "environment_name", "environment_value"])
+def test_systemd_line_boundary_helpers(newline, prefix, suffix, field):
+    from src.application.service_deploy import _systemd_environment_assignment, _systemd_quote_arg
+
+    value = prefix + newline + suffix
+    with pytest.raises(ValueError) as error:
+        if field == "argument":
+            _systemd_quote_arg(value)
+        elif field == "environment_name":
+            _systemd_environment_assignment(value, "fixture")
+        else:
+            _systemd_environment_assignment("FIXTURE", value)
+    assert str(error.value) == "systemd unit values must not contain CR or LF"
+
+
+@pytest.mark.parametrize("value,argument,environment", [
+    ("", '""', 'Environment="FIXTURE="'),
+    ("/tmp/plain", "/tmp/plain", 'Environment="FIXTURE=/tmp/plain"'),
+    ("/tmp/with space", '"/tmp/with space"', 'Environment="FIXTURE=/tmp/with space"'),
+    ('/tmp/with"quote', '"/tmp/with\\"quote"', 'Environment="FIXTURE=/tmp/with\\"quote"'),
+    ("/tmp/with'quote", '"/tmp/with\'quote"', 'Environment="FIXTURE=/tmp/with\'quote"'),
+    (r"/tmp/with\slash", '"/tmp/with\\\\slash"', 'Environment="FIXTURE=/tmp/with\\\\slash"'),
+    ("/tmp/with;semicolon", '"/tmp/with;semicolon"', 'Environment="FIXTURE=/tmp/with;semicolon"'),
+    (Path("/tmp/路径"), "/tmp/路径", 'Environment="FIXTURE=/tmp/路径"'),
+])
+def test_service_render_single_line_compatibility_helpers(value, argument, environment):
+    from src.application.service_deploy import _systemd_environment_assignment, _systemd_quote_arg
+
+    assert _systemd_quote_arg(value) == argument
+    assert _systemd_environment_assignment("FIXTURE", value) == environment
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r", "\r\n"], ids=["lf", "cr", "crlf"])
+@pytest.mark.parametrize("field", [
+    "repo_root", "runtime_root", "env_file", "deploy_home", "deploy_user",
+    "opend_root", "opend_executable",
+])
+def test_service_render_line_boundary_rejects_effective_values(tmp_path, newline, field):
+    from src.application.service_deploy import render_service_bundle
+
+    options = dict(target="systemd", repo_root=tmp_path / "repo", runtime_root=tmp_path / "runtime",
+                   accounts=["fixture"], markets=["us"], use_default_deploy_user=False,
+                   deploy_home=tmp_path / "home")
+    if field.startswith("opend_"):
+        options.update(include_opend=True, opend_root=tmp_path / "opend")
+    options[field] = str(tmp_path / "before") + newline + "X-OM-Renderer-Probe=present"
+    with pytest.raises(ValueError, match="systemd unit values must not contain CR or LF"):
+        render_service_bundle(**options)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r", "\r\n"], ids=["lf", "cr", "crlf"])
+def test_service_render_line_boundary_preserves_existing_normalization(tmp_path, newline):
+    runtime = tmp_path / "runtime"
+    bundle = _render_bundle(tmp_path / "repo", newline + str(runtime) + newline,
+                            accounts=["fixture"], markets=["us"], use_default_deploy_user=False)
+    assert bundle["runtime_root"] == str(runtime)
+
+    runtime_with_newline = str(runtime) + newline + "tail"
+    launchd = _render_bundle(tmp_path / "repo", runtime_with_newline, target="launchd",
+                            accounts=["fixture"], markets=["us"], use_default_deploy_user=False)
+    assert launchd["runtime_root"] == runtime_with_newline
+    tick = next(item for item in launchd["files"]
+                if item["relative_path"] == "launchd/com.options-monitor.tick-us.plist")
+    # Existing XML parsing normalizes CR and CRLF; systemd validation must not change launchd.
+    parsed = plistlib.loads(tick["content"].encode())
+    assert parsed["EnvironmentVariables"]["OM_RUNTIME_ROOT"] == str(runtime) + "\n" + "tail"
+
+
 def test_render_systemd_bundle_quotes_paths_with_spaces(tmp_path: Path) -> None:
     repo = tmp_path / "repo with space"
     runtime = tmp_path / "runtime with space"
