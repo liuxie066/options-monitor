@@ -895,14 +895,125 @@ def test_backup_survives_definition_write_failure_and_retry(instance, tmp_path, 
     assert backup.read_bytes() == original
 
 
-def test_conflicting_backup_is_not_overwritten(instance, tmp_path):
-    ctx, _, path, original = changed_definition(instance, tmp_path)
+@pytest.mark.parametrize('target', ['systemd', 'launchd'])
+def test_conflicting_backup_is_not_overwritten(instance, tmp_path, target):
+    ctx, _, path, original = changed_definition(instance, tmp_path, target)
     preview = service_lifecycle('install', **ctx)
     backup = Path(next(item['backup_path'] for item in preview['files'] if item['path'] == str(path)))
     backup.parent.mkdir(mode=0o700); backup.write_bytes(b'preserve conflicting backup'); backup.chmod(0o600)
     result = apply('install', ctx)
     assert not result['ok'] and result['status'] == 'failed'
+    assert result['error'] == {
+        'code': 'SERVICE_OPERATION_FAILED',
+        'message': 'existing service backup content does not match',
+    }
+    assert not result['operations'] and not result['write_applied']
     assert backup.read_bytes() == b'preserve conflicting backup' and path.read_bytes() == original
+
+
+@pytest.mark.parametrize('target', ['systemd', 'launchd'])
+@pytest.mark.parametrize('failure_kind', ['structured', 'oserror', 'empty-oserror', 'interrupt'])
+def test_main_partial_install_preserves_error_receipts_and_retry(
+    instance, tmp_path, monkeypatch, capsys, target, failure_kind,
+):
+    import src.application.service_lifecycle as module
+    import src.interfaces.cli.main as cli
+
+    ctx, manager, completed_path, old_definition = changed_definition(instance, tmp_path, target)
+    failed_path = instance / 'service.profile.json'
+    profile = json.loads(failed_path.read_text())
+    profile['old_note'] = 'synthetic previous profile'
+    failed_path.write_text(json.dumps(profile))
+    old_profile = failed_path.read_bytes()
+    expected_error = {
+        'code': 'SERVICE_PATH_UNSAFE', 'message': 'synthetic write rejected',
+        'hint': 'Inspect the attempted path before retrying.',
+        'details': {'path': str(failed_path), 'reason': 'synthetic fixture'},
+    }
+    if failure_kind == 'structured':
+        failure = AgentToolError(**expected_error)
+    elif failure_kind == 'interrupt':
+        failure = KeyboardInterrupt()
+        expected_error = {'code': 'SERVICE_OPERATION_CANCELLED', 'message': 'Service operation cancelled.'}
+    else:
+        message = 'synthetic disk failure' if failure_kind == 'oserror' else ''
+        failure = OSError(message)
+        expected_error = {'code': 'SERVICE_OPERATION_FAILED', 'message': message or 'OSError'}
+    writer = module._atomic_file
+
+    def fail_profile(path, *args, **kwargs):
+        if path == failed_path:
+            raise failure
+        return writer(path, *args, **kwargs)
+
+    handler = cli.handle_service_update_command
+    monkeypatch.setattr(cli, 'handle_service_update_command', lambda args, **kwargs: handler(args,
+        service_lifecycle_fn=lambda action, **options: service_lifecycle(action, **options,
+            unit_root=ctx['unit_root'], system=ctx['system'], run_cmd=manager,
+            credential_store_root=ctx['credential_store_root']), **kwargs))
+    command = ['service', 'install', '--repo-root', str(REPO), '--runtime-root', str(instance), '--target', target]
+    assert cli.main(command) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview['error'] is None and not preview['data']['write_applied']
+    manager.calls.clear()
+    monkeypatch.setattr(module, '_atomic_file', fail_profile)
+    assert cli.main(command + ['--confirm', '--expected-preview-sha256', preview['data']['preview_sha256']]) == 2
+    result = json.loads(capsys.readouterr().out)
+    data = result['data']
+    assert not result['ok'] and not data['ok']
+    assert data['status'] == ('cancelled' if failure_kind == 'interrupt' else 'failed')
+    assert data['changed'] and data['files_changed'] and data['write_applied']
+    assert data['audit_id'] and data['rollback_hint']
+    completed, attempted = data['operations']
+    assert completed['path'] == str(completed_path) and completed['readback'] == 'matched'
+    assert attempted['path'] == str(failed_path) and attempted['readback'] == 'unverified'
+    backups = {Path(completed['backup_path']): old_definition, Path(attempted['backup_path']): old_profile}
+    assert all(path.read_bytes() == content for path, content in backups.items())
+    assert failed_path.read_bytes() == old_profile
+    assert completed_path.read_bytes() != old_definition
+    assert all(call[1] in {'show', 'print', 'print-disabled'} for call in manager.calls)
+    assert result['error'] == data['error'] == expected_error
+
+    completed_bytes = completed_path.read_bytes()
+    retry_writes = []
+
+    def record_write(path, *args, **kwargs):
+        retry_writes.append(path)
+        return writer(path, *args, **kwargs)
+
+    monkeypatch.setattr(module, '_atomic_file', record_write)
+    assert cli.main(command) == 0
+    retry_preview = json.loads(capsys.readouterr().out)['data']
+    assert retry_preview['preview_sha256'] != preview['data']['preview_sha256']
+    assert cli.main(command + ['--confirm', '--expected-preview-sha256', retry_preview['preview_sha256']]) == 0
+    retry = json.loads(capsys.readouterr().out)
+    assert retry['ok'] and retry['error'] is None
+    assert retry_writes == [failed_path]
+    assert completed_path.read_bytes() == completed_bytes
+    assert all(path.read_bytes() == content for path, content in backups.items())
+
+
+@pytest.mark.parametrize('target', ['systemd', 'launchd'])
+def test_pre_operation_structured_error_is_still_raised(instance, tmp_path, monkeypatch, target):
+    import src.application.service_lifecycle as module
+
+    ctx, manager = context(instance, tmp_path, target)
+    preview = service_lifecycle('install', **ctx)
+    failure = AgentToolError('SERVICE_PATH_UNSAFE', 'synthetic directory rejection',
+                             hint='Inspect directory.', details={'path': str(instance / 'logs')})
+    mkdir = module._mkdir
+
+    def reject_directory(path, **kwargs):
+        if path == instance / 'logs':
+            raise failure
+        return mkdir(path, **kwargs)
+
+    monkeypatch.setattr(module, '_mkdir', reject_directory)
+    with pytest.raises(AgentToolError) as caught:
+        service_lifecycle('install', **ctx, confirm=True, expected_preview_sha256=preview['preview_sha256'])
+    assert caught.value is failure
+    assert not (instance / 'service.profile.json').exists()
+    assert all(call[1] in {'show', 'print', 'print-disabled'} for call in manager.calls)
 
 
 def test_cli_reinstall_exposes_relocated_backup_receipt(instance, tmp_path):

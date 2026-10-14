@@ -36,6 +36,15 @@
 运行时 profile 和普通 env 文件仍使用原来的同级备份位置。历史 `.om-backup-*` 文件保持原样，
 不会自动迁移或清理；drift 不将它们作为服务单元扫描或退役。
 
+`om service install/start/stop` 在执行中捕获异常后，JSON 的 `data.error` 返回结构化
+`code`、`message`，并保留已有的 `hint`、`details`；顶层 `error` 同步该对象，退出码为 2。
+普通文件系统异常使用 `SERVICE_OPERATION_FAILED`，捕获的键盘中断使用
+`SERVICE_OPERATION_CANCELLED`。失败响应仍保留已完成的 `operations`、备份路径和写入回执；
+`readback: matched` 表示该操作已确认，`unverified` 表示尝试的操作尚未确认。
+不要把整次失败当成零写入：先核对这些回执和服务状态，再生成新预览确认重试；已有备份不会被覆盖。
+执行前的结构化拒绝仍由 CLI 返回顶层错误；管理器返回的失败或未知状态应结合 `data.status`
+和 `operations` 判断，不保证带有捕获异常的 `data.error`。
+
 ## 2. 安装依赖
 
 最小运行依赖：
