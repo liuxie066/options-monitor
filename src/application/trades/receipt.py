@@ -848,7 +848,6 @@ def build_trade_intake_receipt_message(
     deal_id = _deal_id(deal, result, payload) or "-"
     ledger_store_raw = result.get("ledger_store")
     ledger_store = cast(dict[str, Any], ledger_store_raw) if isinstance(ledger_store_raw, dict) else {}
-    projection_status = str(result.get("projection_status") or "").strip()
     verification_raw = diagnostics.get("post_write_projection_verification")
     verification = cast(dict[str, Any], verification_raw) if isinstance(verification_raw, dict) else {}
     checks_raw = verification.get("checks")
@@ -873,8 +872,6 @@ def build_trade_intake_receipt_message(
         fields.append(("资金", funds))
     if trade_time:
         fields.append(("时间", trade_time))
-    if projection_status:
-        fields.append(("投影", projection_status))
     if first_check:
         fields.append(
             (
@@ -894,23 +891,19 @@ def build_trade_intake_receipt_message(
     attribution = result.get("attribution_result") or {}
     if attribution.get("status"):
         status = attribution["status"]
+        candidates = list(attribution.get("candidate_ids") or [])
         origin = {"rule": "按规则", "intent": "按已登记意图", "manual": "经人工确认", "inherited": "沿用已记录关系"}.get(attribution.get("origin"), "已记录")
         text = {"linked": f"{origin}关联 {str(attribution.get('strategy') or '策略').title()}",
                 "ordinary": "普通单腿" + ("（经人工确认）" if attribution.get("origin") == "manual" else "；当前没有策略匹配"),
                 "pending": "成交已入账，" + attribution_pending_text(attribution),
                 "conflict": "成交已入账，" + attribution_pending_text(attribution) + "；暂停相关 Wheel 新增建议", "not_applicable": "本次无需新增策略归属"}.get(status, "尚未评估")
+        if status in {"pending", "conflict"} and len(candidates) > 1:
+            text += f"（{len(candidates)} 个候选）"
         fields.append(("策略", text))
         if status in {"pending", "conflict"}:
-            candidates = list(attribution.get("candidate_ids") or [])
-            if candidates:
-                fields.append(("候选", "、".join(f"`{item}`" for item in candidates[:8])
-                               + (f" 等 {len(candidates)} 个" if len(candidates) > 8 else "")))
             if not attribution.get("rules_enabled"):
                 fields.append(("自动归属", "该成交发生时尚未完成当前规则切换；需人工核对。"))
-            if attribution.get("reason_codes"):
-                fields.append(("待核对", "、".join(str(item) for item in attribution["reason_codes"][:5])))
-            if attribution.get("execution_key"):
-                fields.append(("查询入口", f"OM Bot：查看成交归属，成交 `{attribution['execution_key']}`"))
+            fields.append(("查询入口", "OM Bot：查看成交归属"))
         coverage = attribution.get("coverage") or {}
         if coverage:
             put = attribution.get("direction") == "put"
@@ -938,8 +931,8 @@ def build_trade_intake_receipt_message(
         }.get(reason, reason))
         policy = result.get("retry_policy") or {}
         if kind == "recorded":
-            cause = "自动恢复后已确认记录成功" if diagnostics.get("recovered_from_ledger") or int(policy.get("attempt_count", 0)) > 1 else "已确认记录成功"
-            fields.append(("处理", "无需重复录入"))
+            cause = ("自动恢复后已确认记录成功"
+                     if diagnostics.get("recovered_from_ledger") or int(policy.get("attempt_count", 0)) > 1 else "")
         elif kind == "verification_pending":
             cause = "暂时无法确认账本记录状态"
             fields.append(("重试", "每 60 秒自动核对；核对前不会重复录入"))
@@ -951,9 +944,11 @@ def build_trade_intake_receipt_message(
             exhausted = int(policy.get("attempt_count", 0)) >= int(policy.get("max_attempts", 20))
             fields.append(("重试", f"记录尝试已达 {policy['max_attempts']} 次，不会自动重试" if exhausted else "不会自动重试"))
             fields.append(("处理", "请检查上述原因，修复后由操作员恢复处理"))
-        fields.append(("诊断", cause))
+        if cause:
+            fields.append(("诊断", cause))
     else:
-        fields.append(("诊断", reason))
+        if not applied:
+            fields.append(("诊断", reason))
     sections: list[tuple[str, list[str]]] = []
     if needs_lot_confirmation:
         candidate_lines = _assigned_stock_candidate_lines(diagnostics)
