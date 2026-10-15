@@ -134,6 +134,14 @@ OM 测试不代替 PM 服务端验收或目标环境的接口支持证据。
 
 prepared portfolio context 在封存前一次收集报价、资产与来源证据；ledger 的可信账户快照提供全券商已有期权。
 富途基线与 `portfolio.holdings.enabled` 控制的 PM 非富途补充沿用原 owner，PM 富途副本排除。
+扫描在账户上下文准备后取得同轮行情时，`recover_position_sizing_quotes` 可用已经过 receipt/hash 校验的
+`FrozenRequiredDataBatch` 恢复仅因富途报价过期而不完整的仓位估值。恢复要求同一 run、账户、行情端点，
+所有过期报价均有较新的、当前 300 秒内且正常交易的报价，股票/现金证据仍合格，冻结 FX 可用。
+任一条件失败保留原不可用结果；PM 或其他来源异常不能被清除，已验证的休市报价规则保持。
+恢复不访问外部服务、不改写原始 prepared 文件；由现有 owner 重估富途持仓，并将来源 snapshot、
+替换报价、评价时间及 receipt/hash 引用放入候选决策 normalized input 的 `position_sizing_quote_recovery`，
+随候选封存用于回读。手动或模拟扫描没有同轮可信 batch 时不执行此恢复。
+
 普通股票统一按现价重估，不用平均成本。非富途交割必须有对应券商现金基线；缺失资产、报价或 FX 显式不可用。
 负现金和负股数保留；净资产非正不出比例。候选开仓资金与 CC 覆盖仍保留富途执行账户约束。
 
