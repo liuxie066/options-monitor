@@ -895,20 +895,206 @@ def test_backup_survives_definition_write_failure_and_retry(instance, tmp_path, 
     assert backup.read_bytes() == original
 
 
-@pytest.mark.parametrize('target', ['systemd', 'launchd'])
-def test_conflicting_backup_is_not_overwritten(instance, tmp_path, target):
-    ctx, _, path, original = changed_definition(instance, tmp_path, target)
+@pytest.fixture
+def backup_conflict_context(tmp_path, monkeypatch, request):
+    from src.application import service_lifecycle as lifecycle
+    from src.application.config_yaml import resolve_yaml_runtime_config
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('backup diagnostic fixtures must retain files and use the fake manager')
+
+    guard = pytest.MonkeyPatch()
+    request.addfinalizer(guard.undo)
+    for owner, name in ((Path, 'unlink'), (os, 'unlink'), (os, 'remove'), (os, 'rmdir'),
+                        (subprocess, 'Popen'), (lifecycle, '_atomic_file')):
+        guard.setattr(owner, name, forbidden)
+    guard.setattr('shutil.rmtree', forbidden)
+    monkeypatch.delenv('OM_ENV_FILE', raising=False)
+    monkeypatch.delenv('OM_RUNTIME_ROOT', raising=False)
+
+    def create(target):
+        base = tmp_path.resolve() / 'fixture 空间 "quoted"'
+        runtime = base / 'runtime'
+        runtime.mkdir(parents=True)
+        source = runtime / 'config.yaml'
+        source.write_text(yaml.safe_dump({
+            'accounts': {'test': {'type': 'futu', 'futu_account_id': '123456'}},
+            'markets': {'us': {'accounts': ['test'], 'symbols': ['AAPL'],
+                               'overrides': {'AAPL': {'sell_put': {'enabled': True, 'max_strike': 100},
+                                                      'covered_call': {'enabled': False}}}}},
+            'notifications': {'enabled': False}, 'bot': {'enabled': False},
+        }))
+        config, _ = resolve_yaml_runtime_config(repo_root=REPO, market='us', config_path=source)
+        (runtime / 'config.us.json').write_text(json.dumps(config))
+        (runtime / 'options-monitor.env').write_text('')
+        ctx, manager = context(runtime, base, target)
+        rows = []
+        original = lifecycle._managed_files
+
+        def capture(*args, **kwargs):
+            files = original(*args, **kwargs)
+            rows.extend(files)
+            return files
+
+        with monkeypatch.context() as patch:
+            patch.setattr(lifecycle, '_managed_files', capture)
+            service_lifecycle('install', **ctx)
+        for item in rows:
+            path = Path(item['path'])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(item['content'])
+        path = Path(next(row['path'] for row in rows if row['kind'] in {'systemd_service', 'launchd_plist'}))
+        if target == 'systemd':
+            path.write_bytes(path.read_bytes() + b'\n# private-old-definition-marker\n')
+        else:
+            payload = plistlib.loads(path.read_bytes())
+            payload['LegacyNote'] = 'private-old-definition-marker'
+            path.write_bytes(plistlib.dumps(payload))
+        return ctx, manager, path, path.read_bytes()
+
+    return create
+
+
+def seed_conflict_backup(ctx, path, content):
     preview = service_lifecycle('install', **ctx)
     backup = Path(next(item['backup_path'] for item in preview['files'] if item['path'] == str(path)))
-    backup.parent.mkdir(mode=0o700); backup.write_bytes(b'preserve conflicting backup'); backup.chmod(0o600)
-    result = apply('install', ctx)
-    assert not result['ok'] and result['status'] == 'failed'
-    assert result['error'] == {
+    backup.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    backup.write_bytes(content)
+    backup.chmod(0o600)
+    return backup
+
+
+def backup_install_cli(ctx, monkeypatch, capsys, token=None):
+    from functools import partial
+    from src.interfaces.cli import main as cli
+    from src.interfaces.cli.service_ops import handle_service_update_command
+
+    lifecycle = partial(service_lifecycle, unit_root=ctx['unit_root'], system=ctx['system'],
+                        run_cmd=ctx['run_cmd'], credential_store_root=ctx['credential_store_root'])
+    monkeypatch.setattr(cli, 'handle_service_update_command',
+                        partial(handle_service_update_command, service_lifecycle_fn=lifecycle))
+    command = ['service', 'install', '--repo-root', str(REPO), '--runtime-root', str(ctx['runtime_root']),
+               '--config-yaml', str(ctx['config_yaml']), '--env-file', str(ctx['env_file']), '--target', ctx['target']]
+    if token is not None:
+        command += ['--confirm', '--expected-preview-sha256', token]
+    code = cli.main(command)
+    return code, json.loads(capsys.readouterr().out)
+
+
+def assert_backup_conflict(result, backup, path):
+    assert not result['ok'] and not result['data']['ok'] and result['data']['status'] == 'failed'
+    assert result['error'] == result['data']['error'] == {
         'code': 'SERVICE_OPERATION_FAILED',
-        'message': 'existing service backup content does not match',
+        'message': f'existing service backup content does not match: backup={backup}; managed={path}. '
+                   'Preserve both files and compare their contents; obtain approval before resolving the conflict, '
+                   'then generate a fresh preview before retrying.',
     }
-    assert not result['operations'] and not result['write_applied']
-    assert backup.read_bytes() == b'preserve conflicting backup' and path.read_bytes() == original
+    assert 'private-old-definition-marker' not in result['error']['message']
+    assert 'preserve conflicting backup' not in result['error']['message']
+
+
+@pytest.mark.parametrize('target', ['systemd', 'launchd'])
+def test_conflicting_backup_is_not_overwritten(backup_conflict_context, monkeypatch, capsys, target):
+    ctx, manager, path, original = backup_conflict_context(target)
+    backup = seed_conflict_backup(ctx, path, b'preserve conflicting backup')
+    for _ in range(2):
+        code, preview = backup_install_cli(ctx, monkeypatch, capsys)
+        assert code == 0 and preview['ok']
+        code, result = backup_install_cli(ctx, monkeypatch, capsys, preview['data']['preview_sha256'])
+        assert code == 2
+        assert_backup_conflict(result, backup, path)
+        assert not result['data']['operations'] and not result['data']['write_applied']
+        assert not result['data']['files_changed']
+        assert backup.read_bytes() == b'preserve conflicting backup' and path.read_bytes() == original
+        assert all(call[1] in {'show', 'print', 'print-disabled'} for call in manager.calls)
+
+
+@pytest.mark.parametrize('target', ['systemd', 'launchd'])
+def test_backup_conflict_preserves_prior_receipt(backup_conflict_context, monkeypatch, capsys, target):
+    from src.application import service_lifecycle as lifecycle
+
+    ctx, manager, completed, original = backup_conflict_context(target)
+    first_backup = seed_conflict_backup(ctx, completed, original)
+    failed = ctx['runtime_root'] / 'service.profile.json'
+    profile = json.loads(failed.read_text())
+    profile['old_note'] = 'private-old-profile-marker'
+    failed.write_text(json.dumps(profile))
+    old_profile = failed.read_bytes()
+    conflicting = seed_conflict_backup(ctx, failed, b'preserve conflicting backup')
+    writes = []
+
+    def retained_writer(path, data, *, mode, uid, gid):
+        assert path == completed and mode == 0o644
+        assert (uid, gid) == (path.stat().st_uid, path.stat().st_gid)
+        writes.append(path)
+        path.write_bytes(data)
+
+    code, preview = backup_install_cli(ctx, monkeypatch, capsys)
+    assert code == 0
+    with monkeypatch.context() as patch:
+        patch.setattr(lifecycle, '_atomic_file', retained_writer)
+        code, result = backup_install_cli(ctx, monkeypatch, capsys, preview['data']['preview_sha256'])
+    assert code == 2
+    assert_backup_conflict(result, conflicting, failed)
+    data = result['data']
+    assert data['changed'] and data['files_changed'] and data['write_applied']
+    assert len(data['operations']) == 1 and writes == [completed]
+    assert data['operations'][0] == {'operation': 'write', 'path': str(completed),
+                                     'backup_path': str(first_backup), 'readback': 'matched'}
+    assert first_backup.read_bytes() == original and completed.read_bytes() != original
+    assert conflicting.read_bytes() == b'preserve conflicting backup' and failed.read_bytes() == old_profile
+    assert 'private-old-profile-marker' not in result['error']['message']
+    assert all(call[1] in {'show', 'print', 'print-disabled'} for call in manager.calls)
+
+
+@pytest.mark.parametrize('target', ['systemd', 'launchd'])
+def test_backup_conflict_matching_backup_is_reused(backup_conflict_context, monkeypatch, capsys, target):
+    from src.application import service_lifecycle as lifecycle
+
+    ctx, _, path, original = backup_conflict_context(target)
+    backup = seed_conflict_backup(ctx, path, original)
+    before = backup.stat()
+    writes = []
+
+    def retained_writer(destination, content, *, mode, uid, gid):
+        assert destination == path and mode == 0o644
+        assert (uid, gid) == (path.stat().st_uid, path.stat().st_gid)
+        writes.append(destination)
+        destination.write_bytes(content)
+
+    code, preview = backup_install_cli(ctx, monkeypatch, capsys)
+    assert code == 0
+    with monkeypatch.context() as patch:
+        patch.setattr(lifecycle, '_atomic_file', retained_writer)
+        code, result = backup_install_cli(ctx, monkeypatch, capsys, preview['data']['preview_sha256'])
+    assert code == 0 and result['ok'] and result['error'] is None
+    assert result['data']['status'] == 'installed' and writes == [path]
+    assert result['data']['operations'][0]['readback'] == 'matched'
+    assert backup.read_bytes() == original and path.read_bytes() != original
+    assert (backup.stat().st_ino, backup.stat().st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+
+
+@pytest.mark.parametrize('target', ['systemd', 'launchd'])
+@pytest.mark.parametrize('gate', ['cancelled', 'stale'])
+def test_backup_conflict_preserves_pre_apply_gates(backup_conflict_context, target, gate):
+    ctx, manager, path, original = backup_conflict_context(target)
+    backup = seed_conflict_backup(ctx, path, b'preserve conflicting backup')
+    preview = service_lifecycle('install', **ctx)
+    if gate == 'cancelled':
+        result = service_lifecycle('install', **ctx, confirm=True,
+                                   expected_preview_sha256=preview['preview_sha256'], cancelled=lambda: True)
+        assert not result['ok'] and result['status'] == 'cancelled'
+        assert not result['operations'] and not result['write_applied'] and 'error' not in result
+        assert backup.read_bytes() == b'preserve conflicting backup'
+    else:
+        backup.write_bytes(b'changed backup after preview')
+        with pytest.raises(AgentToolError) as caught:
+            service_lifecycle('install', **ctx, confirm=True, expected_preview_sha256=preview['preview_sha256'])
+        assert caught.value.code == 'STALE_PREVIEW'
+        assert 'existing service backup content does not match' not in caught.value.message
+        assert backup.read_bytes() == b'changed backup after preview'
+    assert path.read_bytes() == original
+    assert all(call[1] in {'show', 'print', 'print-disabled'} for call in manager.calls)
 
 
 @pytest.mark.parametrize('target', ['systemd', 'launchd'])
