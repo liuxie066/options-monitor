@@ -25,8 +25,6 @@ from domain.domain.trade_contract_identity import normalize_trade_side, contract
 from domain.domain.money import to_decimal
 from src.application.ledger.external_event_key import broker_deal_completion_payload
 from src.application.ledger.interventions import (
-    build_manual_repair_preview,
-    build_manual_void_preview,
     is_opend_trade_time_repair_request,
     is_order_identity_repair_request,
     is_futu_environment_repair_request,
@@ -78,8 +76,6 @@ from src.application.ledger.preflight import (
     preflight_manual_adjust,
     preflight_manual_close,
     preflight_manual_open,
-    preflight_manual_repair,
-    preflight_manual_void,
 )
 from src.application.ledger.repository import (
     require_option_positions_read_repo,
@@ -2498,16 +2494,18 @@ def advance_lifecycle_case_state(
 def preview_trade_event_void(repo: Any, *, event_id: str, reason: str) -> dict[str, Any]:
     from src.application.ledger.queries import trade_event_log, trade_event_projection_preview
 
-    preview = build_manual_void_preview(repo, target_event_id=event_id, void_reason=reason)
+    payload = _preflight_manual_void_payload(
+        repo, target_event_id=event_id, void_reason=reason, as_of_ms=None,
+    )
+    preview = payload["preview"]
     events = trade_event_log(repo) + [preview.void_event]
-    ledger_preflight = preflight_manual_void(repo, target_event_id=event_id, void_reason=reason)
     preview_payload = preview.to_payload()
     return {
         "mode": "dry_run",
         "target_event_id": str(event_id),
         "void_reason": str(reason or ""),
         **preview_payload,
-        "ledger_preflight": ledger_preflight.to_dict(),
+        "ledger_preflight": payload["ledger_preflight"].to_dict(),
         "projection_preview": trade_event_projection_preview(events),
     }
 
@@ -2546,24 +2544,20 @@ def preview_trade_event_repair(
         )
     from src.application.ledger.queries import trade_event_log, trade_event_projection_preview
 
-    preview = build_manual_repair_preview(
+    payload = _preflight_manual_repair_payload(
         repo,
         target_event_id=event_id,
         overrides=overrides,
         repair_reason=reason,
+        as_of_ms=None,
     )
+    preview = payload["preview"]
     events = trade_event_log(repo) + [preview.void_event, preview.repair_event]
-    ledger_preflight = preflight_manual_repair(
-        repo,
-        target_event_id=event_id,
-        overrides=overrides,
-        repair_reason=reason,
-    )
     preview_payload = preview.to_payload()
     return {
         "mode": "dry_run",
         **preview_payload,
-        "ledger_preflight": ledger_preflight.to_dict(),
+        "ledger_preflight": payload["ledger_preflight"].to_dict(),
         "projection_preview": trade_event_projection_preview(events),
     }
 
