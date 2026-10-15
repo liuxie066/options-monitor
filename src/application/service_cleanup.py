@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from functools import cmp_to_key
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
@@ -54,28 +55,34 @@ def _default_releases_root(repo_root: Path) -> Path:
 
 
 def _path_size(path: Path) -> int:
-    if not path.exists() and not path.is_symlink():
+    try:
+        info = path.lstat()
+    except OSError:
         return 0
-    if path.is_file() or path.is_symlink():
-        try:
-            return int(path.lstat().st_size)
-        except OSError:
-            return 0
+    if stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        return int(info.st_size)
+    if not stat.S_ISDIR(info.st_mode):
+        return 0
     total = 0
-    for root, dirs, files in os.walk(path, followlinks=False):
-        root_path = Path(root)
-        for name in files:
-            try:
-                total += int((root_path / name).lstat().st_size)
-            except OSError:
-                pass
-        for name in dirs:
-            item = root_path / name
-            if item.is_symlink():
-                try:
-                    total += int(item.lstat().st_size)
-                except OSError:
-                    pass
+    pending = [str(path)]
+    while pending:
+        directory = pending.pop()
+        try:
+            # A queued directory may have become a symlink since enumeration.
+            if os.path.islink(directory):
+                total += os.lstat(directory).st_size
+                continue
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(entry.path)
+                        else:
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        pass
+        except OSError:
+            pass
     return total
 
 
@@ -90,15 +97,15 @@ def _release_version(path: Path) -> str:
     return version
 
 
-def _compare_release_dirs_desc(left: Path, right: Path) -> int:
-    left_version = _release_version(left)
-    right_version = _release_version(right)
+def _compare_release_dirs_desc(left: tuple[Path, str], right: tuple[Path, str]) -> int:
+    left_path, left_version = left
+    right_path, right_version = right
     try:
         return -compare_versions(left_version, right_version)
     except Exception:
-        if left.name == right.name:
+        if left_path.name == right_path.name:
             return 0
-        return -1 if left.name > right.name else 1
+        return -1 if left_path.name > right_path.name else 1
 
 
 def _release_dirs(releases_root: Path) -> list[Path]:
@@ -109,7 +116,10 @@ def _release_dirs(releases_root: Path) -> list[Path]:
         for path in releases_root.iterdir()
         if path.is_dir() and not path.is_symlink() and (path / "VERSION").is_file()
     ]
-    return sorted(dirs, key=cmp_to_key(_compare_release_dirs_desc))
+    if len(dirs) < 2:
+        return dirs
+    versioned = [(path, _release_version(path)) for path in dirs]
+    return [path for path, _version in sorted(versioned, key=cmp_to_key(_compare_release_dirs_desc))]
 
 
 def _pi_retained_releases(
