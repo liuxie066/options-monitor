@@ -1599,13 +1599,14 @@ def test_converged_recorded_receipt_projects_success_and_known_auxiliary_failure
     assert not [item for item in audit if item["phase"] == "failed"]
     assert len(repo.list_trade_events()) == len(repo.list_position_lots()) == len(calls) == 1
     message = calls[0]["message"]
-    assert "✅ 已记录" in message and "无需重复录入" in message
+    assert "✅ 已记录" in message
     if failure == "combo":
         assert result["combo_reconciliation"]["status"] == "failed"
         assert "组合核对未完成" in message and "请检查组合核对服务" in message
         assert "private diagnostic" not in message and "/secret/path" not in message
     else:
         assert state["processed_deal_ids"][key]["diagnostics"]["recovered_from_ledger"]
+        assert "自动恢复后已确认记录成功" in message
     stored = read_trade_payload(resolve_execution_inbox_path(repo, tmp_path / "unused"), inbox_id=result["inbox_id"])
     assert stored["receipt"]["message"] == message and stored["receipt"]["status"] == "sent"
 

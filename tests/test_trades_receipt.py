@@ -842,6 +842,23 @@ def test_receipt_distinguishes_recording_attribution_and_coverage():
     assert "归属待核对" in message and "按规则关联" not in message and "状态｜✅ 已完成" in message
 
 
+def test_recorded_receipt_omits_machine_fields_and_counts_candidates():
+    result = {"status":"applied","reason":"applied_open","receipt_kind":"recorded","account":"lx","action":"open",
+        "deal_id":"deal-x","projection_status":"recorded_and_projected",
+        "attribution_result":{"status":"pending","reason_codes":["multiple_strategy_candidates"],
+            "candidate_ids":["combo-exposure:" + digit * 64 for digit in "012"],
+            "execution_key":"execution:v1:" + "9" * 96}}
+    message = build_trade_intake_receipt_message(deal=None, result=result, payload={
+        "symbol":"0700.HK","option_type":"put","expiration_ymd":"2026-12-30","strike":410.0,
+        "qty":1,"price":16.4,"side":"sell","multiplier":100,"currency":"HKD"})
+    assert "策略｜成交已入账，归属待确认，OM Bot 查看（3 个候选）" in message
+    assert "查询入口｜OM Bot：查看成交归属" in message
+    assert "combo-exposure:" not in message and "execution:v1:" not in message
+    assert "待核对｜" not in message and "投影｜" not in message
+    assert "处理｜" not in message and "诊断｜" not in message
+    assert "编号｜`deal-x`" in message
+
+
 def test_lifecycle_receipt_renders_status_once():
     payload = _lifecycle_batch_member(1)["payload"]
     for transition in ("needs_review", "resolution_confirmed", "option_leg_closed"):
