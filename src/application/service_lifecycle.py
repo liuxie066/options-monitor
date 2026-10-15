@@ -692,7 +692,11 @@ def service_lifecycle(
                     _mkdir(backup.parent, uid=owner_uid, gid=owner_gid)
                     _no_links(backup)
                     if backup.exists() and backup.read_bytes() != path.read_bytes():
-                        raise OSError("existing service backup content does not match")
+                        raise OSError(
+                            f"existing service backup content does not match: backup={backup}; managed={path}. "
+                            "Preserve both files and compare their contents; obtain approval before resolving the conflict, "
+                            "then generate a fresh preview before retrying."
+                        )
                     if not backup.exists():
                         _atomic_file(backup, path.read_bytes(), mode=0o600, uid=owner_uid, gid=owner_gid)
                 operation = {"operation": "remove" if item.get("remove") else "write", "path": str(path), "backup_path": str(backup) if backup else None, "readback": "unverified"}
