@@ -204,6 +204,8 @@ cd "$REPO"
 
 `service render --timeout` 使用正整数秒数，默认 600，并将该值保存到 `service.profile.json` 的 `timeout_seconds`。后续 drift 和升级 reconcile 会复用记录值；systemd tick 的 `TimeoutStartSec` 比该值多 300 秒，launchd tick 使用同一 `--timeout` 参数。旧 profile 缺少该字段时按 600 秒处理；已丢失的历史自定义值无法自动恢复，需用原始 `--timeout` 参数重新渲染并通过受控服务流程应用。字段存在但不是正整数时会报错，不会静默回退。
 
+`service render --target systemd` 要求写入 unit 的生效参数、环境变量和部署用户为单行值；其中包含 CR 或 LF 时会返回 `CONFIG_ERROR`，并在写入 `--output-dir` 前停止。既有路径规范化、空格、引号、反斜杠及 Unicode 的渲染方式保持不变；此限制不改变 launchd 的 plist 渲染行为。
+
 升级切换 release 后还会做一次 service drift reconcile：以当前 release 的 `service render` 结果为期望状态，对比 `$RUNTIME/service.profile.json`、systemd unit 和 profile 显式声明的 helper/drop-in。缺失 unit 会被写入 `/etc/systemd/system/`，缺失 timer 和 credential oneshot 会执行 `systemctl enable --now`；credential helper 还会校验内容、`0755` 权限和 oneshot `Result=success`。随后升级流程会用 reconcile 后的 profile 重启长期运行的 trade-intake / Feishu WS，并执行服务 active/enabled 检查；Feishu WS 还会运行 `./om inbound feishu-ws --check`，避免长驻进程继续使用旧 release、旧 config 或不可用 env。
 
 `--no-restart-services` 只控制长期 service restart。若升级前已为维护显式暂停 systemd timer，同时传 `--preserve-activation-state`；控制面会在 release 切换前记录既有 timer 状态，并让 inactive、disabled 或 masked timer 在升级、失败补偿和 rollback 中保持暂停。定义文件仍会更新和 `daemon-reload`，但保留的 timer 不会被 `enable --now` 或 `restart`，避免 Persistent timer 在升级过程中补跑。
