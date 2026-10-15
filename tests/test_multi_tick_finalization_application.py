@@ -185,3 +185,24 @@ def test_finalize_no_account_notification_supports_terminal_error_outcome(
         and event.get("error_code") == "daily_brief_multi_market_delivery_unsupported"
         for event in events
     )
+
+
+def test_history_failure_preserves_no_notification_outcome(fake_runlog_factory, tmp_path):
+    from src.application.multi_tick_finalization import finalize_no_account_notification
+    from domain.storage.repositories import state_repo
+    events = []
+    history = tmp_path / "output_shared/state/tick_metrics_history.json"
+    history.parent.mkdir(parents=True)
+    history.write_bytes(b"broken")
+    metrics = {}
+    rc = finalize_no_account_notification(
+        base=tmp_path, run_id="history-degraded", runlog=fake_runlog_factory(events), on_success=lambda: None,
+        results=[], tick_metrics=metrics, no_send=True, state_repo=state_repo,
+        utc_now_fn=lambda: "2026-01-01T00:00:00Z", audit_fn=lambda *a, **kw: None,
+        safe_data_fn=lambda payload: payload,
+    )
+    assert rc == 0 and metrics["sent"] is False
+    assert history.read_bytes() == b"broken"
+    assert any(e.get("data", {}).get("action") == "append_tick_metrics_history"
+               and e["status"] == "degraded" for e in events)
+    assert any(e["step"] == "run_end" and e["status"] == "ok" for e in events)

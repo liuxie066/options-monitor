@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -10,7 +11,7 @@ from typing import Any
 from domain.storage import paths
 from domain.storage.no_follow import atomic_replace_bytes, safe_component
 from domain.storage.json_io import append_private_text
-from domain.storage.json_io import rotating_private_jsonl_lock
+from domain.storage.json_io import private_json_file_lock, rotating_private_jsonl_lock
 from domain.storage.json_io import atomic_write_private_json as write_json
 from domain.storage.json_io import atomic_write_private_text
 from domain.storage.json_io import read_json
@@ -62,21 +63,47 @@ def write_tick_metrics(base: Path, run_id: str, payload: dict[str, Any]) -> dict
 
 
 def append_tick_metrics_history(base: Path, run_id: str, payload: dict[str, Any]) -> dict[str, Path]:
-    sdir = shared_state_dir(base)
-    rdir = run_state_dir(base, run_id)
-    p_shared = (sdir / "tick_metrics_history.json").resolve()
-    p_run = (rdir / "tick_metrics_history.json").resolve()
-
     def _append(path: Path) -> None:
-        cur = read_json(path, [])
-        if not isinstance(cur, list):
-            cur = []
-        cur.append(payload)
-        write_json(path, cur)
+        with private_json_file_lock(path):
+            try:
+                info = path.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise OSError("history is not a private regular file")
+            except FileNotFoundError:
+                current = []
+            else:
+                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                    info = os.fstat(handle.fileno())
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        raise OSError("history is not a private regular file")
+                    try:
+                        current = json.load(handle)
+                    except (UnicodeError, json.JSONDecodeError):
+                        raise OSError("corrupt history") from None
+                if not isinstance(current, list):
+                    raise OSError("history root is not a list")
+            current.append(payload)
+            write_json(path, current)
 
-    _append(p_shared)
-    _append(p_run)
-    return {"shared": p_shared, "run": p_run}
+    destinations: dict[str, Path] = {}
+    failures: list[str] = []
+    for scope, directory in (("run", lambda: run_state_dir(base, run_id)),
+                             ("shared", lambda: shared_state_dir(base))):
+        try:
+            path = directory() / "tick_metrics_history.json"
+            _append(path)
+            destinations[scope] = path
+        except Exception as exc:
+            # Exception type identifies IO/serialization failures without exposing history bytes.
+            reason = str(exc) if str(exc) in {
+                "corrupt history", "history root is not a list",
+                "history is not a private regular file", "lock is not a private regular file",
+            } else type(exc).__name__
+            failures.append(f"{scope}: {reason}")
+    if failures:
+        raise OSError("tick metrics history append failed; " + "; ".join(failures)) from None
+    return {"shared": destinations["shared"], "run": destinations["run"]}
 
 
 def write_shared_last_run(base: Path, payload: dict[str, Any]) -> Path:
