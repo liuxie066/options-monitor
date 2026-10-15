@@ -55,6 +55,8 @@
 
 ## 技术架构与核心合同
 
+- [Business Fetch Baseline](BUSINESS_FETCH_BASELINE.md)：指定源码的业务入口取数复用审计与离线耗时；生产测量选择和未覆盖边界。
+
 - [Shared API Index](API_INDEX.md)：按业务能力查共享数据、计算和工作流入口、事实归属、契约、测试及兼容/退役状态；Tool schema 使用 `./om-agent spec`。
 - [Architecture](ARCHITECTURE.md)：技术分层、入口和真实调用链。
 - [Compatibility Freeze](COMPATIBILITY_FREEZE.md)：只修不增的兼容入口、canonical owner 和退出证据。

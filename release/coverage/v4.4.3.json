@@ -1,0 +1,535 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.4.3",
+  "base": {
+    "tag": "v4.4.2",
+    "commit": "de07a96840088ac60ac2a102f3fbf5fd86bf47b0"
+  },
+  "reviewed_head": "10f8afbfc2079e624ff66c9d049ba550f51ff4ed",
+  "commits": [
+    {
+      "sha": "d00279a05ba5892a3fd38116442c929632f6b32b",
+      "subject": "chore(gateflow): accept plan for tick-metrics-history"
+    },
+    {
+      "sha": "cbcb0f648d2d8455f7a8ba88649dbc752fc91b7a",
+      "subject": "fix(gateflow): accept tick-metrics-history S1"
+    },
+    {
+      "sha": "968c073d5e0afd93de469b9c20f64176fa5cf8a6",
+      "subject": "chore(gateflow): accept deepreview for tick-metrics-history"
+    },
+    {
+      "sha": "0aa921b88d4a8988083938c48d0060973662727c",
+      "subject": "chore(gateflow): accept plan for business-fetch-baseline"
+    },
+    {
+      "sha": "0151b3c6d0e33ae3a665df4425a361dba276ea65",
+      "subject": "chore(gateflow): accept business-fetch-baseline S1"
+    },
+    {
+      "sha": "7cbc56604a8fb3ee003711a44f9aaae47c3d9bc2",
+      "subject": "chore(gateflow): accept deepreview for business-fetch-baseline"
+    },
+    {
+      "sha": "e9a21f2c0f085e476ab55f9c96e69b08a9dca28c",
+      "subject": "fix(baseline): integrate main and refresh dependency graph"
+    },
+    {
+      "sha": "e9535d19e7dc624b21017c46c339307239a7d418",
+      "subject": "chore(service): accept renderer boundary plan"
+    },
+    {
+      "sha": "c2cf6e1a5dee06184e03219173ee8dca23374842",
+      "subject": "fix(service): reject multiline systemd unit values"
+    },
+    {
+      "sha": "f90b6a36623749f1f680dfa0296f7989a5fc5c13",
+      "subject": "chore(service): accept renderer aggregate review"
+    },
+    {
+      "sha": "da7818e740eb9c536f02153a0e2b3c88bb984c5c",
+      "subject": "fix(service): retain deploy user error context"
+    },
+    {
+      "sha": "9ab6fa9c796d14d0a64f93b036935db670e599bc",
+      "subject": "chore(gateflow): accept plan for position-sizing-quotes"
+    },
+    {
+      "sha": "fcd37dd5af24d3744dfa09f084968e627c38227e",
+      "subject": "fix(sizing): recover stale valuation from same-run quotes"
+    },
+    {
+      "sha": "7fa848004cf65f834f6f721ca8fca2cf0eba3fce",
+      "subject": "chore(gateflow): accept deepreview for position-sizing-quotes"
+    },
+    {
+      "sha": "21f5ddecc5ce53e076395bab2dab515531da2354",
+      "subject": "chore(service): accept issue 527 load-state diagnostic plan"
+    },
+    {
+      "sha": "d66c9726eb6a9d852af915156681a03d7ec27573",
+      "subject": "fix(service): preserve observed systemd load-state diagnostics"
+    },
+    {
+      "sha": "d285341daa6fc5b33e9b8d1e334f5bf27e775896",
+      "subject": "chore(service): accept load-state aggregate review"
+    },
+    {
+      "sha": "f2894d5d635661b0ff364d82eaa7aa6aecd7ec34",
+      "subject": "test(service): scope load-state guards to their fixture"
+    },
+    {
+      "sha": "abc68bc61cc5cd2823d41ba04ae2a95367c65af7",
+      "subject": "Merge pull request #604 from liuxie066/codex/position-sizing-quotes"
+    },
+    {
+      "sha": "f36732f9efa791aa02ef5cb474ce33fdbcc9bb82",
+      "subject": "chore(service): integrate current main for renderer review"
+    },
+    {
+      "sha": "8e8676a95bf6e1fc092846b8e220f7da5ea02e8d",
+      "subject": "chore(service): integrate current main for load-state review"
+    },
+    {
+      "sha": "d1f528f5f6ed14825ba43002890b242cea122861",
+      "subject": "chore(gateflow): accept issue 530 diagnostic plan"
+    },
+    {
+      "sha": "2fc09184c51cc74f2e3eed7218708af0c899ae0c",
+      "subject": "fix(service): identify conflicting backup paths"
+    },
+    {
+      "sha": "584757d237435dd742cc12cf70f49d239095f605",
+      "subject": "chore(gateflow): accept issue 530 diagnostic deepreview"
+    },
+    {
+      "sha": "05d1e1f00b2a3c27b747095afd798540a638b20c",
+      "subject": "chore(gateflow): accept PR 563 refresh plan"
+    },
+    {
+      "sha": "ac4fa72c400da281743e238fb7b5eddd13281bf4",
+      "subject": "chore(gateflow): accept PR 548 refresh plan"
+    },
+    {
+      "sha": "be5fbf1f29cc55bdc366a381af733a12146a53d0",
+      "subject": "fix(baseline): refresh canonical ledger fixture on main"
+    },
+    {
+      "sha": "f9e744007149306c74936b50d630e1a3eab30990",
+      "subject": "chore(metrics): integrate current main into history fix"
+    },
+    {
+      "sha": "8bbe12e67d2c61aa430e7cc3b15a8dcf96984e06",
+      "subject": "Merge pull request #603 from liuxie066/codex/fix-systemd-line-boundary-527"
+    },
+    {
+      "sha": "4bb2bab9ba38bb53dfb9957237774a09f1d43088",
+      "subject": "chore(service): integrate reviewed renderer base"
+    },
+    {
+      "sha": "8bc8252e78ff56e0bb6137492a13748e669ea7bd",
+      "subject": "Merge pull request #605 from liuxie066/codex/fix-service-load-state-527"
+    },
+    {
+      "sha": "31d33ebaf4dd7a9a42c91fce1b9d004c026d479c",
+      "subject": "test(service): bind backup fixtures to deployment ownership"
+    },
+    {
+      "sha": "b427306bf29de1a80de35ce4610958702244a255",
+      "subject": "Merge pull request #606 from liuxie066/codex/fix-backup-conflict-diagnostic-530"
+    },
+    {
+      "sha": "6523cc9a8aee58b2026523db0d58f5ce6bdacbb7",
+      "subject": "chore(metrics): integrate reviewed service fixes"
+    },
+    {
+      "sha": "45054a0cb085d441b36a6719d70b951eaa68af0d",
+      "subject": "Merge pull request #548 from liuxie066/codex/fix-tick-metrics-history"
+    },
+    {
+      "sha": "8ebef3db363dca0c8bec75d91cc5216d22a7b87e",
+      "subject": "chore(baseline): integrate reviewed storage and service fixes"
+    },
+    {
+      "sha": "10f8afbfc2079e624ff66c9d049ba550f51ff4ed",
+      "subject": "Merge pull request #563 from liuxie066/codex/business-fetch-baseline"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "增加合成离线取数基准，覆盖共享上下文、prepared、CLI/Tool 适配器与失败场景；数据来源、测量边界和历史结果明确记录，不代表生产性能结论（#563）。",
+      "commits": [
+        "0151b3c6d0e33ae3a665df4425a361dba276ea65",
+        "e9a21f2c0f085e476ab55f9c96e69b08a9dca28c",
+        "be5fbf1f29cc55bdc366a381af733a12146a53d0"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Position Sizing 可用同次扫描、同账户且路由匹配的新报价恢复原先仅因报价陈旧而不完整的证据，保留来源与时效校验；不写入持仓或资金状态，不修改策略资格规则（#604）。",
+      "commits": [
+        "fcd37dd5af24d3744dfa09f084968e627c38227e"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "systemd 渲染在输出前拒绝参数、环境赋值和部署用户中的回车或换行，保留合法单行路径及 launchd 行为（#603）。",
+      "commits": [
+        "c2cf6e1a5dee06184e03219173ee8dca23374842",
+        "da7818e740eb9c536f02153a0e2b3c88bb984c5c"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "systemd 服务操作返回管理器实际报告的 LoadState，区分未取得、空值及具体加载错误，保留已有安装验证和权限门禁（#605）。",
+      "commits": [
+        "d66c9726eb6a9d852af915156681a03d7ec27573",
+        "f2894d5d635661b0ff364d82eaa7aa6aecd7ec34"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "服务备份冲突诊断列明备份与受管路径，并提示保留比对、授权处置后重新预览；继续拒绝覆盖冲突备份（#606）。",
+      "commits": [
+        "2fc09184c51cc74f2e3eed7218708af0c899ae0c",
+        "31d33ebaf4dd7a9a42c91fce1b9d004c026d479c"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "tick metrics 历史追加由稳定锁保护，避免遵守同一锁协议的并发追加丢失；损坏内容保留并明确报告失败，run/shared 独立写入及错误归属保持可核验（#548）。",
+      "commits": [
+        "cbcb0f648d2d8455f7a8ba88649dbc752fc91b7a",
+        "f9e744007149306c74936b50d630e1a3eab30990"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "d00279a05ba5892a3fd38116442c929632f6b32b",
+      "reason": "PR #548 的计划或独立审阅验收检查点；与父提交 tree 相同，没有代码、配置、运行或运营行为变化。"
+    },
+    {
+      "commit": "968c073d5e0afd93de469b9c20f64176fa5cf8a6",
+      "reason": "PR #548 的计划或独立审阅验收检查点；与父提交 tree 相同，没有代码、配置、运行或运营行为变化。"
+    },
+    {
+      "commit": "0aa921b88d4a8988083938c48d0060973662727c",
+      "reason": "PR #563 的计划或独立审阅验收检查点；与父提交 tree 相同，没有代码、配置、运行或运营行为变化。"
+    },
+    {
+      "commit": "7cbc56604a8fb3ee003711a44f9aaae47c3d9bc2",
+      "reason": "PR #563 的计划或独立审阅验收检查点；与父提交 tree 相同，没有代码、配置、运行或运营行为变化。"
+    },
+    {
+      "commit": "e9535d19e7dc624b21017c46c339307239a7d418",
+      "reason": "PR #603 的计划或独立审阅验收检查点；与父提交 tree 相同，没有代码、配置、运行或运营行为变化。"
+    },
+    {
+      "commit": "f90b6a36623749f1f680dfa0296f7989a5fc5c13",
+      "reason": "PR #603 的计划或独立审阅验收检查点；与父提交 tree 相同，没有代码、配置、运行或运营行为变化。"
+    },
+    {
+      "commit": "9ab6fa9c796d14d0a64f93b036935db670e599bc",
+      "reason": "PR #604 的计划或独立审阅验收检查点；与父提交 tree 相同，没有代码、配置、运行或运营行为变化。"
+    },
+    {
+      "commit": "7fa848004cf65f834f6f721ca8fca2cf0eba3fce",
+      "reason": "PR #604 的计划或独立审阅验收检查点；与父提交 tree 相同，没有代码、配置、运行或运营行为变化。"
+    },
+    {
+      "commit": "21f5ddecc5ce53e076395bab2dab515531da2354",
+      "reason": "PR #605 的计划或独立审阅验收检查点；与父提交 tree 相同，没有代码、配置、运行或运营行为变化。"
+    },
+    {
+      "commit": "d285341daa6fc5b33e9b8d1e334f5bf27e775896",
+      "reason": "PR #605 的计划或独立审阅验收检查点；与父提交 tree 相同，没有代码、配置、运行或运营行为变化。"
+    },
+    {
+      "commit": "abc68bc61cc5cd2823d41ba04ae2a95367c65af7",
+      "reason": "将已验收 PR #604 合入 main，tree 与 PR head 一致；实际变化已由该 PR 的发布说明覆盖，没有额外变更。"
+    },
+    {
+      "commit": "f36732f9efa791aa02ef5cb474ce33fdbcc9bb82",
+      "reason": "PR #603 整合已单独覆盖的 main 变更并重生成依赖图；无独立的用户、配置或运行行为变化。"
+    },
+    {
+      "commit": "8e8676a95bf6e1fc092846b8e220f7da5ea02e8d",
+      "reason": "PR #605 整合已单独覆盖的 main 变更并重生成依赖图；无独立的用户、配置或运行行为变化。"
+    },
+    {
+      "commit": "d1f528f5f6ed14825ba43002890b242cea122861",
+      "reason": "PR #606 的计划或独立审阅验收检查点；与父提交 tree 相同，没有代码、配置、运行或运营行为变化。"
+    },
+    {
+      "commit": "584757d237435dd742cc12cf70f49d239095f605",
+      "reason": "PR #606 的计划或独立审阅验收检查点；与父提交 tree 相同，没有代码、配置、运行或运营行为变化。"
+    },
+    {
+      "commit": "05d1e1f00b2a3c27b747095afd798540a638b20c",
+      "reason": "PR #563 的计划或独立审阅验收检查点；与父提交 tree 相同，没有代码、配置、运行或运营行为变化。"
+    },
+    {
+      "commit": "ac4fa72c400da281743e238fb7b5eddd13281bf4",
+      "reason": "PR #548 的计划或独立审阅验收检查点；与父提交 tree 相同，没有代码、配置、运行或运营行为变化。"
+    },
+    {
+      "commit": "8bbe12e67d2c61aa430e7cc3b15a8dcf96984e06",
+      "reason": "将已验收 PR #603 合入 main，tree 与 PR head 一致；实际变化已由该 PR 的发布说明覆盖，没有额外变更。"
+    },
+    {
+      "commit": "4bb2bab9ba38bb53dfb9957237774a09f1d43088",
+      "reason": "PR #605 整合已单独覆盖的 main 变更并重生成依赖图；无独立的用户、配置或运行行为变化。"
+    },
+    {
+      "commit": "8bc8252e78ff56e0bb6137492a13748e669ea7bd",
+      "reason": "将已验收 PR #605 合入 main，tree 与 PR head 一致；实际变化已由该 PR 的发布说明覆盖，没有额外变更。"
+    },
+    {
+      "commit": "b427306bf29de1a80de35ce4610958702244a255",
+      "reason": "将已验收 PR #606 合入 main，tree 与 PR head 一致；实际变化已由该 PR 的发布说明覆盖，没有额外变更。"
+    },
+    {
+      "commit": "6523cc9a8aee58b2026523db0d58f5ce6bdacbb7",
+      "reason": "PR #548 整合已单独覆盖的 main 变更并重生成依赖图；无独立的用户、配置或运行行为变化。"
+    },
+    {
+      "commit": "45054a0cb085d441b36a6719d70b951eaa68af0d",
+      "reason": "将已验收 PR #548 合入 main，tree 与 PR head 一致；实际变化已由该 PR 的发布说明覆盖，没有额外变更。"
+    },
+    {
+      "commit": "8ebef3db363dca0c8bec75d91cc5216d22a7b87e",
+      "reason": "PR #563 整合已单独覆盖的 main 变更并重生成依赖图；无独立的用户、配置或运行行为变化。"
+    },
+    {
+      "commit": "10f8afbfc2079e624ff66c9d049ba550f51ff4ed",
+      "reason": "将已验收 PR #563 合入 main，tree 与 PR head 一致；实际变化已由该 PR 的发布说明覆盖，没有额外变更。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "d00279a05ba5892a3fd38116442c929632f6b32b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/548"
+      ]
+    },
+    {
+      "commit": "cbcb0f648d2d8455f7a8ba88649dbc752fc91b7a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/548"
+      ]
+    },
+    {
+      "commit": "968c073d5e0afd93de469b9c20f64176fa5cf8a6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/548"
+      ]
+    },
+    {
+      "commit": "0aa921b88d4a8988083938c48d0060973662727c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/563"
+      ]
+    },
+    {
+      "commit": "0151b3c6d0e33ae3a665df4425a361dba276ea65",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/563"
+      ]
+    },
+    {
+      "commit": "7cbc56604a8fb3ee003711a44f9aaae47c3d9bc2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/563"
+      ]
+    },
+    {
+      "commit": "e9a21f2c0f085e476ab55f9c96e69b08a9dca28c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/563"
+      ]
+    },
+    {
+      "commit": "e9535d19e7dc624b21017c46c339307239a7d418",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/603"
+      ]
+    },
+    {
+      "commit": "c2cf6e1a5dee06184e03219173ee8dca23374842",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/603"
+      ]
+    },
+    {
+      "commit": "f90b6a36623749f1f680dfa0296f7989a5fc5c13",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/603"
+      ]
+    },
+    {
+      "commit": "da7818e740eb9c536f02153a0e2b3c88bb984c5c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/603"
+      ]
+    },
+    {
+      "commit": "9ab6fa9c796d14d0a64f93b036935db670e599bc",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/604"
+      ]
+    },
+    {
+      "commit": "fcd37dd5af24d3744dfa09f084968e627c38227e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/604"
+      ]
+    },
+    {
+      "commit": "7fa848004cf65f834f6f721ca8fca2cf0eba3fce",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/604"
+      ]
+    },
+    {
+      "commit": "21f5ddecc5ce53e076395bab2dab515531da2354",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/605"
+      ]
+    },
+    {
+      "commit": "d66c9726eb6a9d852af915156681a03d7ec27573",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/605"
+      ]
+    },
+    {
+      "commit": "d285341daa6fc5b33e9b8d1e334f5bf27e775896",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/605"
+      ]
+    },
+    {
+      "commit": "f2894d5d635661b0ff364d82eaa7aa6aecd7ec34",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/605"
+      ]
+    },
+    {
+      "commit": "abc68bc61cc5cd2823d41ba04ae2a95367c65af7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/604"
+      ]
+    },
+    {
+      "commit": "f36732f9efa791aa02ef5cb474ce33fdbcc9bb82",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/603"
+      ]
+    },
+    {
+      "commit": "8e8676a95bf6e1fc092846b8e220f7da5ea02e8d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/605"
+      ]
+    },
+    {
+      "commit": "d1f528f5f6ed14825ba43002890b242cea122861",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/606"
+      ]
+    },
+    {
+      "commit": "2fc09184c51cc74f2e3eed7218708af0c899ae0c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/606"
+      ]
+    },
+    {
+      "commit": "584757d237435dd742cc12cf70f49d239095f605",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/606"
+      ]
+    },
+    {
+      "commit": "05d1e1f00b2a3c27b747095afd798540a638b20c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/563"
+      ]
+    },
+    {
+      "commit": "ac4fa72c400da281743e238fb7b5eddd13281bf4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/548"
+      ]
+    },
+    {
+      "commit": "be5fbf1f29cc55bdc366a381af733a12146a53d0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/563"
+      ]
+    },
+    {
+      "commit": "f9e744007149306c74936b50d630e1a3eab30990",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/548"
+      ]
+    },
+    {
+      "commit": "8bbe12e67d2c61aa430e7cc3b15a8dcf96984e06",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/603"
+      ]
+    },
+    {
+      "commit": "4bb2bab9ba38bb53dfb9957237774a09f1d43088",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/605"
+      ]
+    },
+    {
+      "commit": "8bc8252e78ff56e0bb6137492a13748e669ea7bd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/605"
+      ]
+    },
+    {
+      "commit": "31d33ebaf4dd7a9a42c91fce1b9d004c026d479c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/606"
+      ]
+    },
+    {
+      "commit": "b427306bf29de1a80de35ce4610958702244a255",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/606"
+      ]
+    },
+    {
+      "commit": "6523cc9a8aee58b2026523db0d58f5ce6bdacbb7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/548"
+      ]
+    },
+    {
+      "commit": "45054a0cb085d441b36a6719d70b951eaa68af0d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/548"
+      ]
+    },
+    {
+      "commit": "8ebef3db363dca0c8bec75d91cc5216d22a7b87e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/563"
+      ]
+    },
+    {
+      "commit": "10f8afbfc2079e624ff66c9d049ba550f51ff4ed",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/563"
+      ]
+    }
+  ]
+}

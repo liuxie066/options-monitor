@@ -283,7 +283,7 @@ def _query(name: str, *, target: str, uid: int, content: str, run_cmd: Callable[
                     runtime = assignment.split("=", 1)[1]
         except ValueError:
             pass
-        return {"name": name, "state": state, "enabled": enabled, "definition_path": values.get("FragmentPath"),
+        return {"name": name, "state": state, "load_state": load, "enabled": enabled, "definition_path": values.get("FragmentPath"),
                 "runtime_root": runtime, "probe": {key: value for key, value in result.items() if key not in {"stdout", "stderr"}}}
     result = _run(["launchctl", "print", f"gui/{uid}/{name}"], run_cmd)
     keep_alive = bool(plistlib.loads(content.encode()).get("KeepAlive"))
@@ -575,7 +575,8 @@ def service_lifecycle(
     for unit in units:
         state = before[unit["name"]]
         if state["state"] == "unknown":
-            _error("SERVICE_STATE_UNKNOWN", "cannot establish service ownership while the manager is unavailable", service=unit["name"])
+            details = {"load_state": state["load_state"]} if provider == "systemd" else {}
+            _error("SERVICE_STATE_UNKNOWN", "cannot establish service ownership while the manager is unavailable", service=unit["name"], **details)
         if state["state"] == "absent":
             continue
         if state["definition_path"] and state["definition_path"] != unit["path"]:
@@ -691,7 +692,11 @@ def service_lifecycle(
                     _mkdir(backup.parent, uid=owner_uid, gid=owner_gid)
                     _no_links(backup)
                     if backup.exists() and backup.read_bytes() != path.read_bytes():
-                        raise OSError("existing service backup content does not match")
+                        raise OSError(
+                            f"existing service backup content does not match: backup={backup}; managed={path}. "
+                            "Preserve both files and compare their contents; obtain approval before resolving the conflict, "
+                            "then generate a fresh preview before retrying."
+                        )
                     if not backup.exists():
                         _atomic_file(backup, path.read_bytes(), mode=0o600, uid=owner_uid, gid=owner_gid)
                 operation = {"operation": "remove" if item.get("remove") else "write", "path": str(path), "backup_path": str(backup) if backup else None, "readback": "unverified"}
