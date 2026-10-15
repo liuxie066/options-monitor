@@ -218,6 +218,8 @@ def resolve_trade_attribution(
             return TradeAttributionResolution("ordinary", ids, reason_codes=("manual_ordinary_preserved",))
         if existing.get("status") == "linked":
             target = _text(existing.get("candidate_id"))
+            targets = {target} | {"wheel:" + item["wheel_branch_id"]
+                for item in existing.get("wheel_call_allocations") or []}
             # Missing evidence cannot disprove a durable relationship.
             acknowledged = set(existing.get("acknowledged_candidate_ids") or []) if existing.get("origin") == "manual" else set()
             # A manual Wheel assignment already chooses among stock branches.
@@ -232,7 +234,9 @@ def resolve_trade_attribution(
                 return TradeAttributionResolution("conflict", ids, reason_codes=("late_competing_evidence",))
             capacity_conflicts = {"competing_fills_exceed_capacity", "competing_fills_exceed_intent_remainder",
                                   "account_stock_capacity_exceeded", "account_cash_capacity_exceeded"}
-            if target in by_id and capacity_conflicts.intersection(by_id[target].get("reason_codes") or []):
+            if any("competing_fills_exceed_intent_remainder" in (by_id.get(key, {}).get("reason_codes") or [])
+                    or by_id.get(key, {}).get("capacity_evidence_complete") is True
+                    and capacity_conflicts.intersection(by_id[key].get("reason_codes") or []) for key in targets):
                 return TradeAttributionResolution("conflict", ids, reason_codes=("late_capacity_conflict",))
             return TradeAttributionResolution("linked", ids, reason_codes=("existing_attribution_preserved",))
     if not applicable:
@@ -442,11 +446,56 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def trade_attribution_conflict_execution_keys(rows: Sequence[Mapping[str, Any]], branch_id: str,
+                             trigger: Mapping[str, Any], *,
+                             account_facts: Sequence[Mapping[str, Any]] = ()) -> list[str]:
+    """Include proven shared shortages, never merely possible unrelated owners."""
+    candidate_id = "wheel:" + branch_id
+    shared_shortages = {code for item in trigger["candidates"]
+        if item.get("capacity_evidence_complete") is True for code in item["reason_codes"]
+        if code in {"account_stock_capacity_exceeded", "account_cash_capacity_exceeded"}}
+    keys = []
+    for row in rows:
+        if not row["execution_key"] or row["contracts_open"] <= 0:
+            continue
+        claimed = row["wheel_branch_id"] == branch_id or any(
+            allocation["wheel_branch_id"] == branch_id for allocation in row.get("wheel_call_allocations") or [])
+        competing = (row["status"] == "pending" and not row["wheel_branch_id"]
+            and not row.get("wheel_call_allocations") and not row["strategy_group_id"]
+            and any(item["candidate_id"] == candidate_id and (
+                "competing_fills_exceed_intent_remainder" in item["reason_codes"]
+                or item.get("capacity_evidence_complete") is True
+                and "competing_fills_exceed_capacity" in item["reason_codes"])
+                for item in row["candidates"]))
+        same_resource = (row["account"] == trigger["account"]
+            and row["broker_account_ref"] == trigger["broker_account_ref"]
+            and row["contract_key"]["option_type"] == trigger["contract_key"]["option_type"]
+            and ("account_cash_capacity_exceeded" in shared_shortages
+                or row["contract_key"]["underlying_symbol"] == trigger["contract_key"]["underlying_symbol"]))
+        shared = (same_resource and row["status"] != "ordinary" and any(
+            item.get("capacity_evidence_complete") is True and shared_shortages.intersection(item["reason_codes"])
+            for item in row["candidates"]))
+        if claimed or competing or shared:
+            keys.append(row["execution_key"])
+    if "account_cash_capacity_exceeded" in shared_shortages:
+        # The proven pool already includes both markets; preserve its actual
+        # Wheel Put claimants without reclassifying them through another config.
+        keys.extend(row["execution_key"] for row in account_facts
+            if row["execution_key"] and row["contracts_open"] > 0 and row["wheel_branch_id"]
+            and row["strategy"] == "wheel"
+            and row["position_side"] == "short" and row["contract_key"]["option_type"] == "put"
+            and row["account"] == trigger["account"]
+            and row["broker_account_ref"] == trigger["broker_account_ref"])
+    return sorted(set(keys))
+
+
+
 __all__ = [
     "OptionStrategyMembership",
     "StrategyMetadata",
     "TradeAttributionResolution",
     "resolve_trade_attribution",
+    "trade_attribution_conflict_execution_keys",
     "StrategyMetadataResolution",
     "resolve_expiry_structure",
     "resolve_option_strategy_membership",

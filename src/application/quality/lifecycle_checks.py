@@ -16,14 +16,6 @@ LIFECYCLE_SUMMARY_DATASET_ID = "om.lifecycle_evidence_summary"
 _LIFECYCLE_CONSUMERS = {"lifecycle_report", "close_advice", "option_performance"}
 
 
-def _parse_date(value: Any) -> date | None:
-    raw = str(value or "").strip()
-    try:
-        return date.fromisoformat(raw[:10]) if raw else None
-    except ValueError:
-        return None
-
-
 def next_trading_day(expiration: date, trading_days: list[date]) -> date | None:
     return next((day for day in sorted(set(trading_days)) if day > expiration), None)
 

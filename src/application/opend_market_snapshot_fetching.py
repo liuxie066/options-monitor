@@ -20,6 +20,7 @@ from src.application.opend_fetch_config import (
 from src.application.opend_utils import normalize_underlier
 from src.application.option_chain_fetching import classify_option_chain_error
 from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway, retry_futu_gateway_call
+from src.infrastructure.futu_dataframe import futu_dataframe_records
 
 
 def trading_calendar_dates(receipt: Any, *, start: date, end: date) -> list[str]:
@@ -384,7 +385,7 @@ def _provider_rows_by_code(
         rows = [dict(item) for item in value if isinstance(item, dict)]
     elif hasattr(value, "to_dict"):
         try:
-            raw_rows = value.to_dict(orient="records")
+            raw_rows = futu_dataframe_records(value)
         except TypeError:
             raw_rows = value.to_dict("records")
         if isinstance(raw_rows, list):
@@ -676,7 +677,7 @@ def keep_snapshot_record_columns(snap: Any, keep_columns: list[str]) -> tuple[li
     try:
         records = [
             dict(rec)
-            for rec in snap[keep].to_dict(orient="records")
+            for rec in futu_dataframe_records(snap[keep])
             if isinstance(rec, dict)
         ]
     except Exception:

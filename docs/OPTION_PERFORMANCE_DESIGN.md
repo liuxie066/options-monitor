@@ -722,6 +722,99 @@ Tool Gateway, CLI, Control, Bot, and `/income` preserve that error code instead 
 `INTERNAL_ERROR`, `TOOL_EXCEPTION`, or a successful unavailable metric. Their presentation text may
 differ, but a failed framework envelope has `ok=false`, empty business `data`, and no report payload.
 
+### Explicit loopback query service
+
+`src.application.performance.query.option_performance_report_tool` is the canonical complete query:
+request/period normalization, report time, scope, error translation and pagination. The existing
+`agent_tools.materialization_impl` entry reexports the shared time context and routes consumers.
+The reducer and event-time cash conversion remain unchanged. Local reports use
+`ledger.api.open_performance_query_ledger_from_data_config`: `mode=ro`, `query_only=ON`, one
+transaction for strict ordered events and the existing lot-identity schema guard. Reports never
+initialize a database, migrate schema, recover projections or query providers. An existing initialized
+empty ledger is valid; absent/incompatible tables and invalid event JSON are read failures.
+SQLite may use/create WAL/SHM sidecars in a writable runtime directory; query-only is a business-state
+guarantee, not a promise that arbitrary readonly filesystems can open active WAL databases.
+
+The optional pilot serves one operator-bound generated runtime config and its configured accounts:
+
+```bash
+# Set OM_PERFORMANCE_SERVICE_TOKEN privately in both processes before these commands.
+./om option-performance serve --config-key us --config-path /runtime/config.us.json --port 8766
+# In a separate consumer process:
+OM_PERFORMANCE_SERVICE_URL=http://127.0.0.1:8766 ./om option-performance report --config-key us --period mtd
+```
+
+The server binds only `127.0.0.1`; `--data-config` is an optional operator startup selector.
+The token must be nonempty printable ASCII without whitespace. Startup validates config identity
+and account authority using the existing config owner. Config, account authority and ledger path
+are fixed at startup: restart explicitly after changing that binding. A token grants the full
+bound configured-account scope; it is not a per-sender or tenant credential.
+
+`POST /api/v1/option-performance/query` accepts the existing business query fields and pagination.
+It rejects nonempty `config_path`/`data_config`, out-of-scope account or config_key, invalid types,
+unknown fields, duplicate JSON fields and nonfinite JSON values. `year` accepts the established
+integer or string form. `config_key` remains a config selector, not an extra market filter.
+Authorization and configured-account validation precede ledger reads. Server time determines the
+report instant; client-controlled `now_ms` is unsupported. Cursor binding, fixed report time,
+source hashes and `READ_ERROR/source_changed` are canonical. The query owner returns complete
+structured rows up to the requested business `limit` and all summary breakdown groups. CLI and
+HTTP responses do not apply Bot display budgets or replace financial rows with text. Row/breakdown
+pagination exposes the business-page `offset`, signed `page_cursor` for replaying that page, and
+`next_cursor` for the next business page. Existing structured query cursors may continue with an
+omitted or null `body_cursor`; old text-fragment cursors are rejected with
+`INPUT_ERROR/cursor_invalidated` and require a fresh query. Query bindings and source must still
+match; a cursor bound to a local custom path cannot be reused remotely.
+
+`agent_tools/performance_presentation.py` owns Tool/Bot display budgets: 6000 UTF-8 JSON bytes
+for summary data, 5000 for row/breakdown data, including metadata, duplicated breakdown rows and
+both returned cursor copies. Summary display retains whole groups when they fit and offers a
+`detail_query`. Large rows use the existing redacted `page_text` reader; text fragments are display
+evidence, not a replacement structured financial API. Necessary quality metadata is never
+truncated; an irreducible response or unsupported body size returns an explicit read failure.
+The display cursor wraps a canonical page cursor and a within-page position; replay revalidates
+source, frozen report time and current local account authority before displaying more data.
+`page_cursor` is internal to this adapter and is omitted from Tool responses. Old unwrapped Tool
+cursors require a fresh query. Tool calls with no pagination/view selectors retain the existing
+full structured contract; public Bot input normalization selects summary by default.
+
+Signing uses the existing `inbound.operation_hmac_key` secret owner and shared `query_cursor`
+primitives over the ledger cursor codec; its namespace and 30-minute expiry remain unchanged.
+Absent signing credentials keep a complete finite page complete; a response needing continuation
+has explicit partial coverage / `continuation_unavailable`, never a manufactured cursor.
+Performance query/transport failures use `PerformanceQueryError`; CLI and Tool boundaries translate
+the same code, message, hint and details into the established operator/Agent error contract.
+
+The transport envelope uses `schema_version=option_performance.api.v1`, `ok`, `data`, `warnings`,
+`meta`, and `error` with the existing `code`/`message`/optional `hint`/`details` contract. The financial
+business payload has no new version or formulas. Bound paths are masked in metadata; raw exceptions,
+request bodies and bearer tokens are not logged or returned. Status mapping is 400 input, 401 auth,
+403 scope, 503 read failure and sanitized 500 internal failure; route/method errors are 404/405.
+
+`OM_PERFORMANCE_SERVICE_URL` explicitly enables the CLI / Tool Gateway / Bot transport path; absent
+URL retains the canonical local path, including meaningful custom paths. Service-mode overrides
+fail explicitly. Bot retains Host sender/tool/market/account fences; after checking its trusted
+scope it omits Host-injected filesystem selectors for this tool. Explicit Bot path inputs remain
+forbidden. The `/income` Control adapter resolves its trusted runtime path through the existing
+Bot config identity/freshness owner, then sends the proved config_key instead of that local path. Bot's local config validation does not grant additional server authority. Local and
+server config scopes must be bound consistently by the operator.
+
+The one client accepts an `http` loopback origin with explicit port and no path, credentials, query
+or fragment. It disables proxies, redirects and retries, validates response types/version/status,
+and never falls back to local ledger access or recalculation. Unavailability/timeouts become
+`SERVICE_ERROR` with `service_unavailable`; malformed/version-mismatched responses become
+`service_protocol_invalid`. Local canonical `READ_ERROR` reason codes remain unchanged.
+
+The stdlib server processes one request at a time, with a 5-second connection inactivity timeout,
+64-KiB request and 8-MiB response limits; clients use a 10-second network timeout. These are inactivity
+limits, not a guaranteed total execution deadline. Requests returning oversized results fail
+explicitly and advise pagination. Client cancellation ends delivery; an already-started readonly
+calculation finishes. This local pilot adds no daemon installation, production configuration,
+independent database, strong OS identity isolation or high-availability deployment. Other
+capabilities and stronger isolation remain separate work units.
+
+Owning evidence: `test_performance_query_read_only.py`, `test_performance_query_service.py`, existing
+performance, Tool, CLI, Bot, schema and paging tests.
+
 Minimal result shape:
 
 ```text

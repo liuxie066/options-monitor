@@ -179,7 +179,10 @@ def _record_failure(
     message: str,
     stderr: Any,
     cwd: str | Path | None,
+    failed_accounts: list[str] | None = None,
+    notified_accounts: list[str] | None = None,
 ) -> None:
+    accounts = plan.accounts if failed_accounts is None else failed_accounts
     now = datetime.now(timezone.utc).isoformat()
     pending = read_json(base / "output_shared" / "state" / "opend_phone_verify_pending.json", {})
     login_state = "phone_verify_pending" if isinstance(pending, dict) and pending.get("pending") else "unknown"
@@ -193,14 +196,15 @@ def _record_failure(
         "event_at_utc": now,
         "extra": {
             "market": plan.market,
-            "accounts": plan.accounts,
-            "account": plan.accounts[0] if len(plan.accounts) == 1 else None,
+            "accounts": accounts,
+            "account": accounts[0] if len(accounts) == 1 else None,
             "failure_code": code,
             "stage": stage,
             "trigger_source": plan.trigger_env["OM_TRIGGER_SOURCE"],
             "rc": rc,
             "first_error_at": now,
             "opend_login_state": login_state,
+            "failure_notification_confirmed_accounts": list(notified_accounts or []),
         },
     })
     incomplete: list[str] = []
@@ -217,16 +221,20 @@ def _record_failure(
             base,
             f"tick_cron_last_result.{plan.market}.current.json",
             {"status": "evidence_incomplete" if incomplete else "failed", "run_id": run_id,
-             "market": plan.market, "accounts": plan.accounts, "error_code": code,
+             "market": plan.market, "accounts": accounts, "error_code": code,
              "stage": stage, "rc": rc, "event_at_utc": now, "incomplete": incomplete},
         )
     except Exception:
         incomplete.append("latest")
     if incomplete:
         _write_line(stderr, "<3>FAILURE_RECORD_WRITE_FAILED stages=" + ",".join(incomplete))
+    if "--no-send" in plan.tick_argv:
+        return
     config = read_json(_resolve_config_for_preflight(plan, cwd=cwd), {})
     if isinstance(config, dict):
-        for account in plan.accounts or ["-"]:
+        for account in accounts or ["-"]:
+            if account in (notified_accounts or []):
+                continue
             try:
                 report_system_failure(
                     base=base, config=config, unit=f"options-monitor-tick-{plan.market}.service",
@@ -237,23 +245,43 @@ def _record_failure(
                 _write_line(stderr, f"<3>ALERT_RECORD_FAILED {type(exc).__name__}")
 
 
-def _completed_receipt(base: Path, run_id: str, plan: TickCronPlan) -> dict[str, Any] | None:
+def _completed_receipt(base: Path, run_id: str, plan: TickCronPlan, *, rc: int = 0) -> dict[str, Any] | None:
     path = base / "output_runs" / run_id / "state" / "child_tick_completion.json"
     try:
         receipt = read_json(path, {})
-    except Exception:
+        if not isinstance(receipt, dict):
+            return None
+        accounts = receipt.get("accounts")
+        if (receipt.get("status") != ("ok" if rc == 0 else "failed")
+            or receipt.get("wrapper_run_id") != run_id or receipt.get("market") != plan.market
+            or not isinstance(accounts, list) or any(not isinstance(a, str) for a in accounts)
+            or len(accounts) != len(set(accounts)) or sorted(accounts) != sorted(plan.accounts)
+            or not isinstance(receipt.get("inner_run_id"), str) or not receipt["inner_run_id"].strip()
+            or Path(receipt["inner_run_id"]).name != receipt["inner_run_id"]
+            or receipt["inner_run_id"] in {".", ".."} or "\\" in receipt["inner_run_id"]):
+            return None
+        if "rc" in receipt and (type(receipt["rc"]) is not int or receipt["rc"] != rc):
+            return None
+        outcomes = receipt.get("account_outcomes")
+        if outcomes is None:
+            return receipt if rc == 0 else None  # Existing success receipts remain readable.
+        if type(receipt.get("rc")) is not int or receipt["rc"] != rc or not isinstance(outcomes, list):
+            return None
+        if len(outcomes) != len(accounts) or any(not isinstance(row, dict) for row in outcomes):
+            return None
+        if sorted(row.get("account", "") for row in outcomes) != sorted(accounts):
+            return None
+        for row in outcomes:
+            if any(type(row.get(key)) is not bool for key in ("scan_ok", "notify_failed", "failure_notification_confirmed")):
+                return None
+            if row["failure_notification_confirmed"] and (row["scan_ok"] or row["notify_failed"]):
+                return None
+        has_failure = any(not row["scan_ok"] or row["notify_failed"] for row in outcomes)
+        if has_failure != (rc != 0):
+            return None
+        return receipt
+    except (OSError, ValueError, TypeError):
         return None
-    if not isinstance(receipt, dict):
-        return None
-    if (
-        receipt.get("status") != "ok"
-        or receipt.get("wrapper_run_id") != run_id
-        or receipt.get("market") != plan.market
-        or sorted(receipt.get("accounts") or []) != sorted(plan.accounts)
-        or not receipt.get("inner_run_id")
-    ):
-        return None
-    return receipt
 
 
 def _full_account_scope(plan: TickCronPlan, *, cwd: str | Path | None) -> bool:
@@ -433,9 +461,14 @@ def run_tick_cron(
             return 1
         rc = int(getattr(proc, "returncode", 1))
         if rc != 0:
+            receipt = _completed_receipt(base, run_id, plan, rc=rc)
+            outcomes = receipt.get("account_outcomes") if receipt else None
+            failed_accounts = [row["account"] for row in outcomes if not row["scan_ok"] or row["notify_failed"]] if outcomes else None
+            notified_accounts = [row["account"] for row in outcomes if row["failure_notification_confirmed"]] if outcomes else None
             _record_failure(base=base, run_id=run_id, plan=plan,
                             code="TICK_EXEC_FAILED", stage="child_exit", rc=rc,
-                            message=f"tick child exited with rc={rc}", stderr=stderr, cwd=cwd)
+                            message=f"tick child exited with rc={rc}", stderr=stderr, cwd=cwd,
+                            failed_accounts=failed_accounts, notified_accounts=notified_accounts)
             _write_line(stderr, f"<3>EXEC_FAILED_RC_{rc}")
         elif _full_account_scope(plan, cwd=cwd) and not plan.symbols and not no_send and _completed_receipt(base, run_id, plan):
             config = read_json(_resolve_config_for_preflight(plan, cwd=cwd), {})

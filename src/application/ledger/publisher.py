@@ -16,7 +16,7 @@ from domain.domain.ledger.events import LedgerDiagnostic
 from domain.domain.ledger.lots import PositionLot
 from src.application.ledger.event_codec import (
     effective_import_diagnostics,
-    iter_import_stored_trade_events,
+    import_stored_trade_events as _collect_projection_inputs,
 )
 from src.application.ledger.position_records import PositionLotRecord
 
@@ -305,21 +305,6 @@ def project_stored_trade_events_to_resumable_position_lots(
         projection=projection,
         publication_state=publication_state,
     )
-
-
-def _collect_projection_inputs(
-    events: list[Any],
-) -> tuple[
-    list[TradeEvent],
-    list[LedgerDiagnostic],
-]:
-    ledger_events: list[TradeEvent] = []
-    diagnostics: list[LedgerDiagnostic] = []
-    for _payload, event, item_diagnostics in iter_import_stored_trade_events(events):
-        diagnostics.extend(item_diagnostics)
-        if event is not None:
-            ledger_events.append(event)
-    return ledger_events, diagnostics
 
 
 def _fold_resumable_publication(

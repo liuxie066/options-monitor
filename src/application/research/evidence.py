@@ -35,7 +35,7 @@ from src.application.opening_candidate_snapshot import (
 from src.application.research.redaction import redact_value
 from src.application.runtime_logs_cli import collect_runtime_logs
 from src.application.runtime_runs_cli import collect_runtime_runs
-from src.application.payload_helpers import text as _text
+from src.application.payload_helpers import nested as _nested, text as _text
 
 
 def collect_evidence(
@@ -1376,15 +1376,6 @@ def _safe_rel(path: Path, *, base: Path) -> str:
         return path.resolve().relative_to(base.resolve()).as_posix()
     except ValueError:
         return f".../{path.name}" if path.name else "..."
-
-
-def _nested(payload: dict[str, Any], *keys: str) -> Any:
-    cur: Any = payload
-    for key in keys:
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(key)
-    return cur
 
 
 def _as_int(value: Any, *, default: int, low: int, high: int) -> int:

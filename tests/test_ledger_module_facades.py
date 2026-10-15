@@ -4,6 +4,8 @@ import ast
 from importlib import import_module
 from pathlib import Path
 
+import pytest
+
 
 PUBLIC_SYMBOLS = {
     "src.application.ledger.repository": {
@@ -219,6 +221,54 @@ def test_ledger_writer_lock_does_not_open_an_outer_transaction(tmp_path) -> None
             conn.execute("INSERT INTO intake_lock_probe VALUES (1)")
     with repo._connect() as conn:
         assert conn.execute("SELECT value FROM intake_lock_probe").fetchone()[0] == 1
+
+
+def test_execution_candidates_share_and_close_one_ledger_connection(tmp_path, monkeypatch) -> None:
+    import sqlite3
+    from src.application.ledger.api import read_execution_event_candidates
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    opened, selected = [], []
+    connect = repo._connect
+
+    def tracked_connect():
+        conn = connect()
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(repo, "_connect", tracked_connect)
+    for name in ("list_trade_events_for_execution", "list_assigned_stock_events_for_execution"):
+        read = getattr(repo, name)
+
+        def tracked_read(execution_id, *, conn, read=read):
+            selected.append(conn)
+            return read(execution_id, conn=conn)
+
+        monkeypatch.setattr(repo, name, tracked_read)
+    assert read_execution_event_candidates(repo, "execution:v1:test") == ([], [])
+    assert len(opened) == 1 and selected == [opened[0], opened[0]]
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        opened[0].execute("SELECT 1")
+
+
+def test_execution_candidates_close_connection_on_read_failure(tmp_path, monkeypatch) -> None:
+    import sqlite3
+    from src.application.ledger.api import read_execution_event_candidates
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    selected = []
+
+    def fail(_execution_id, *, conn):
+        selected.append(conn)
+        raise RuntimeError("unavailable event source")
+
+    monkeypatch.setattr(repo, "list_assigned_stock_events_for_execution", fail)
+    with pytest.raises(RuntimeError, match="unavailable event source"):
+        read_execution_event_candidates(repo, "execution:v1:test")
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        selected[0].execute("SELECT 1")
 
 
 def test_giant_modules_are_thin_compatibility_facades() -> None:

@@ -327,28 +327,6 @@ def _read_json_config(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _first_existing_config(config_by_market: dict[str, Path], market_values: list[str]) -> dict[str, Any]:
-    for market in market_values:
-        path = config_by_market.get(market)
-        if path is not None and path.exists():
-            cfg = _read_json_config(path)
-            if cfg:
-                return cfg
-    return {}
-
-
-def _first_yaml_runtime_config(*, repo_root: Path, config_yaml_path: Path, market_values: list[str]) -> dict[str, Any]:
-    for market in market_values:
-        cfg, _meta = resolve_yaml_runtime_config(
-            repo_root=repo_root,
-            market=market,
-            config_path=config_yaml_path,
-        )
-        if cfg:
-            return cfg
-    return {}
-
-
 def _opend_service_plans_from_authoring_config(
     *,
     repo_root: Path,
@@ -358,13 +336,14 @@ def _opend_service_plans_from_authoring_config(
     accounts: list[str],
     executable: str | Path,
 ) -> list[OpendServicePlan]:
-    config = (
-        _first_yaml_runtime_config(repo_root=repo_root, config_yaml_path=config_yaml_path, market_values=market_values)
-        if config_yaml_path is not None
-        else _first_existing_config(config_by_market, market_values)
+    configs = _runtime_configs_by_market(
+        repo_root=repo_root,
+        config_yaml_path=config_yaml_path,
+        config_by_market=config_by_market,
+        market_values=market_values,
     )
-    return _opend_service_plans_from_config(
-        config=config,
+    return _opend_service_plans_from_configs(
+        configs_by_market=configs,
         repo_root=repo_root,
         accounts=accounts,
         executable=executable,
@@ -376,25 +355,37 @@ def _opend_executable_path(root: Path, executable: str | Path) -> Path:
     return raw if raw.is_absolute() else root / raw
 
 
-def _opend_service_plans_from_config(
+def _opend_service_plans_from_configs(
     *,
-    config: dict[str, Any],
+    configs_by_market: dict[str, dict[str, Any]],
     repo_root: Path,
     accounts: list[str],
     executable: str | Path,
 ) -> list[OpendServicePlan]:
     candidates: list[tuple[str, Path, str | None, int | None]] = []
     for account in accounts:
-        runtime_plan = build_account_runtime_plan(config, account=account)
-        if runtime_plan.account_type != "futu":
+        runtime_plans = [
+            build_account_runtime_plan(config, account=account)
+            for config in configs_by_market.values()
+            if account in accounts_from_config(config, fallback=())
+        ]
+        if not runtime_plans:
+            raise ValueError(f"OpenD account config is missing for selected account: {account}")
+        facts = {
+            (plan.account_type,
+             _absolute_path_preserve_symlink(plan.futu_opend_root, base=repo_root) if plan.futu_opend_root else None,
+             plan.futu_host, plan.futu_port)
+            for plan in runtime_plans
+        }
+        if len(facts) != 1:
+            raise ValueError(f"conflicting OpenD settings across markets for account: {account}")
+        account_type, root, host, port = next(iter(facts))
+        if account_type != "futu" or root is None:
             continue
-        if not runtime_plan.futu_opend_root:
-            continue
-        candidates.append((runtime_plan.account, _absolute_path_preserve_symlink(runtime_plan.futu_opend_root, base=repo_root),
-                           runtime_plan.futu_host, runtime_plan.futu_port))
+        candidates.append((account, root, host, port))
 
     if not candidates:
-        return []
+        raise ValueError("no configured OpenD roots for selected accounts; provide --opend-root for an explicit single instance")
 
     multi = len(candidates) > 1
     plans: list[OpendServicePlan] = []
@@ -916,6 +907,7 @@ def build_service_profile(
     markets: list[str],
     service_names: list[str],
     config_paths: dict[str, Path],
+    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     bot_config_path: Path | None = None,
     config_authoring: dict[str, Any] | None = None,
     env_file: Path | None = None,
@@ -951,6 +943,7 @@ def build_service_profile(
         "runtime_root": str(runtime_root),
         "accounts": accounts,
         "markets": markets,
+        "timeout_seconds": timeout_seconds,
         "paths": {
             "report_dir": str(runtime_root / "output_shared" / "reports"),
             "state_dir": str(runtime_root / "output_shared" / "state"),
@@ -1047,6 +1040,8 @@ def render_service_bundle(
     feishu_agent_credential_env_file: str | Path | None = None,
     include_content: bool = True,
 ) -> dict[str, Any]:
+    if type(timeout_seconds) is not int or timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be a positive integer")
     target_key = normalize_target(target)
     secret_delivery = normalize_secret_credential_delivery(secret_credential_delivery)
     if include_quality_monitoring and target_key != "systemd":
@@ -1150,7 +1145,7 @@ def render_service_bundle(
             accounts=account_values,
             executable=opend_executable_value,
         )
-    if include_opend and not opend_service_plans:
+    if include_opend and explicit_opend_root:
         opend_root_path = _resolve_path(
             opend_root,
             base=repo,
@@ -2145,6 +2140,7 @@ def render_service_bundle(
         markets=market_values,
         service_names=service_names,
         config_paths=config_by_market,
+        timeout_seconds=timeout_seconds,
         bot_config_path=bot_config_path,
         config_authoring=config_authoring,
         env_file=env_file_path,
@@ -2264,10 +2260,15 @@ def _install_commands(target: ServiceTarget, *, files: list[RenderedServiceFile]
                 or Path(item.install_path).name == FEISHU_AGENT_CREDENTIAL_SERVICE
             )
         ]
+        installable_services = {
+            Path(item.install_path).name
+            for item in files
+            if item.kind == "systemd_service" and "[Install]" in item.content.splitlines()
+        }
         return {
             "prepare": mkdirs,
             "reload": ["systemctl daemon-reload"],
-            "enable": [*(f"systemctl enable --now {name}" for name in timer_names), *(f"systemctl enable --now {name}" for name in service_names)],
+            "enable": [*(f"systemctl enable --now {name}" for name in timer_names), *(f"systemctl enable --now {name}" for name in service_names if name in installable_services)],
             "status": [*(f"systemctl status {name}" for name in service_names), "systemctl list-timers 'options-monitor*'"],
         }
     labels = [

@@ -121,3 +121,14 @@ def test_complete_tick_idempotency_records_terminal_failure(tmp_path) -> None:
     assert payload["status"] == "unsupported_failed"
     assert payload["trigger_kind"] == "scheduled"
     assert payload["error_code"] == "daily_brief_multi_market_delivery_unsupported"
+
+
+def test_failed_tick_record_retains_account_outcomes_for_replay(tmp_path):
+    from src.application.tick_run_context import complete_tick_idempotency, tick_account_outcomes
+    outcomes = tick_account_outcomes({"scan_outcomes": {"lx": True, "sy": False}, "scan_failure_notified_accounts": ["sy"]})
+    saved = []
+    complete_tick_idempotency(base=tmp_path, key="key", run_id="child", market_config="us", accounts=["lx", "sy"],
+        status="failed", ok=False, error_code="SCAN_FAILED", account_outcomes=outcomes,
+        write_record_fn=lambda *args, **kwargs: saved.append(kwargs["payload"]))
+    assert saved[0]["account_outcomes"] == outcomes
+    assert outcomes[1] == {"account": "sy", "scan_ok": False, "notify_failed": False, "failure_notification_confirmed": True}

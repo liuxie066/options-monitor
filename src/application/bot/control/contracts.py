@@ -24,6 +24,7 @@ class BotInboundRequest:
     bot_config_path: str | None = None
     reply_context: dict[str, Any] | None = None
     received_monotonic: float | None = None
+    replay_authorization: dict[str, Any] | None = None
 
     def public_payload(self) -> dict[str, Any]:
         return {

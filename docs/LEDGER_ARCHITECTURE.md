@@ -42,10 +42,13 @@ trade_events -> deterministic projection -> position_lots
 | 当前决策投影 | `src/application/ledger/current_decision_projection.py` 公共 facade；事实域、migration 与 runtime 分别由 `current_decision_*.py` 持有 |
 | lot 目标解析与 preflight | `src/application/ledger/lot_resolver.py`、`preflight.py` |
 | 人工持仓工作流 | `src/application/positions/` |
+| 生命周期通知状态操作 | `src/application/ledger/notification_outbox.py`；公共入口经 `ledger/api.py` 导出 |
 | broker trade intake | `src/application/trades/` |
 | 人工 CLI | `src/interfaces/cli/option_positions.py`、`trade_events.py` |
 
 `positions`、`trades`、Agent tools、CLI 和 pipeline 不应绕过 `ledger.api` 导入内部写入原语。领域层不得反向导入 `src/`。
+
+生命周期 outbox 的领取、过期恢复、CAS、结算和人工核对由现有 ledger owner 持有；批次与成员的更新保持原有事务边界。`trades/lifecycle_outbox.py` 保留兼容接口、消息 renderer 注入及发送编排，provider 发送在账本事务之外。发送开始前冻结正文并校验摘要，重试复用原正文；结果不明保持 `unknown`，仅经既有人工核对流程决定补发。renderer 只读取冻结 payload 并返回正文，不执行 I/O 或修改 payload。
 
 ## 多源输入与历史留存
 
@@ -373,6 +376,8 @@ PM 的持仓同步合同，不建设下单系统，也不自动变更生产账�
 | 策略关系及生命周期 | Combo reconciliation、Wheel intent/companion 和 lifecycle 各自拥有判断；正式采用由 Ledger 写入边界最终验证 | 关系具有明确证据及数量，采用时仍满足对应条件；普通 CSP/CC 不依赖组合匹配成功 |
 | 通知与其他交付 | 既有普通平仓和生命周期 outbox 仍由 Ledger 与其 dispatcher 持有；其余普通回执由 trades 的持久结果和发送路径负责；PM 刷新保留一次性提示合同 | 成交提交、费用补证、策略采用与通知确认分别可查询；发送失败不重做成交；历史导入不生成可投递的新意图 |
 
+人工明确确认尚未关联策略的普通 CSP/CC 时，推荐历史缺失不阻止归属证明；成交身份、账户和环境绑定、完整未平仓数量及持久投影仍须有效。人工处理完整已登记冲突、全体成员均保持最后有效人工 Wheel Call 分配时，可依原证明核验归属，无需补造推荐历史；原股票批次、分支及每批数量须完全一致，多批分配须显式提交完整 allocation。只识别经 replay 接受的现代证明与既有严格旧确认格式，已作废或被后续关系调整覆盖的证明不适用。当前新鲜完整持仓、真实容量、意图、成员闭包、后继成交、事务和幂等复验继续执行。视图保留历史缺口；自动采用、新建或转移关系、Wheel Put 和 Combo 继续遵循各自完整证据合同。
+
 `auto_intake.py` 保留启动、来源协调和已有周期调度。SDK 回调不执行整单费用查询、
 策略扫描、生命周期 provider 初始化或通知网络调用。外部查询先取得有版本的证据，
 写入前由领域与 Ledger owner 验证；不能为了缩小共享锁而取消必要的事务内校验。
@@ -409,6 +414,19 @@ Ledger 提交后、普通回执记录前崩溃时，先读回既有成交结果�
 已有无法证明是否送达的历史普通回执不能仅因状态缺失而补发。首次创建 Inbox 时若
 经济事实已经存在，也不能授予新的回执资格；恢复资格须在同一 writer 锁下核对并持久保存。
 所有路径只保留一个发送 owner，不引入通用通知平台。
+
+Combo 首次配对成功的独立回执复用现有通知 outbox。canonical attribution transaction
+同时提交两腿归属证明、不可变组合身份、confirmed inference 和一条
+`combo_pair_confirmed` 意图；事务失败或 preview 回滚时均无成功意图。
+账户与稳定组合 ID 决定唯一逻辑 transition，通知路由不改变原经济归属请求身份。
+已有组合和经济重放不补建意图；禁用通知/来源回执或无法证明发送身份时记录 suppressed，
+以后启用不自动回灌。原 Inbox 成交回执及其送达证据保持冻结。
+
+Combo membership owner 经 ledger facade 提供 `validate_combo_pair_success`，由现有
+batch dispatcher 在规划与 send-start 的账本事务里复验当前成员和 confirmed inference。
+outbox 接受此验证回调，不自行重建归属计算。新 kind 仅可走批次管线，每组一批，
+旧单条 claim 不得领取；账户 allowlist 和冻结 sender/recipient 绑定同时生效。
+明确发送前失败重试同一冻结批次，unknown/accepted 不自动重发；provider 接收并不证明人已读。
 
 实时 push、断线补查与显式历史文件导入的交付资格在持久接收时固定，随处理结果
 传到实际创建通知意图的 owner。历史导入首次平仓也不得创建可投递 outbox，不能只
@@ -1212,6 +1230,11 @@ om trade-events repair --futu-account-id ... --order-id ... --reason ...
   -> 现有 fees-sync 独立 dry-run/apply
 ```
 
+identity-only 和 OpenD time-only apply 不支持 `expected_input_hash`；在现有 ledger command
+分流处拒绝任何非 `None` 值（包括空串、空白），持久化前报错。不传 hash 的合法 apply 和 no-op 保持
+原语义。CLI dry-run 仍是 advisory preview，不返回 `expected_input_hash`，即使传入该参数也不绑定提交；
+replacement / environment repair 的已有 hash 合同不变。
+
 apply 不使用 dry-run 结果作为事实；preview 明确标记为 advisory。事务内验证从原始存储 JSON 做
 copy-on-write，只允许以下路径变化：
 
@@ -1425,3 +1448,43 @@ CC 覆盖按实际平仓数量记录半开时间区间，平仓时点释放对�
 同时更新 inbox 当前摘要和投影。原始收据、生命周期/期限与原币事实保持，未入选行严格不变。
 无 canonical key/hash 且无标准时间字段的旧原始收据不新增身份或摘要。提交后独立回读；同批重试 no_op，
 结果未知时保留原请求/hash复核，不能新建批次重放。完整操作与恢复边界见修复手册场景 E2。
+
+### 资金与指派查询的只读边界
+
+资金余量与指派情景经 `src/application/ledger/api.py::read_position_query_ledger` 读取既有 SQLite。事件、持仓 lot 和账户生命周期事实在同一只读事务冻结，复用既有投影及决策核验；查询不初始化账本、不取得应用写锁、不恢复投影。缺库、缺 schema、坏事件或投影不一致明确返回不可用；只有已验证的空账本表示零占用。账户现金仍独立评价，账本不可用时不计算扣占用后的余量。SQLite 的 WAL/SHM 协调与业务写入不同；该读取不使用会忽略活动 WAL 的 immutable 模式。主动恢复与写入仍由原受控流程负责。
+
+### 公共持仓查询的只读边界
+
+`option_positions_read` 的 list、events、history、inspect、assigned-stock，以及 `om option-positions` 的 list、events、history、inspect，经 `ledger.api.open_position_query_ledger_from_data_config` 使用 SQLite `mode=ro` / `query_only`。它们保留既有筛选、账户授权和事件分页，不创建数据库、补 schema 或自动恢复 `position_lots`。缺库、旧/不完整 lot 身份 schema 或所需表不可读时明确失败；events/history/inspect 可观察尚未恢复的事件与投影差异。`bootstrap.status=read_only` 表示本次没有执行启动恢复。
+
+该入口读取已存事实；资金余量/指派情景仍使用要求可信投影的 `read_position_query_ledger`。已有受控写入/恢复继续使用原工作流。assigned-stock 的报价刷新选项保持原合同，不表示生产账本写入授权；SQLite 活跃 WAL/SHM 协调也不等于业务写入。
+
+### 持仓事实快照校验与耗时
+
+`decision_snapshot.py` 的持仓事实契约校验复用账本生命周期解析器，重算决策事实、仲裁和 token 的依赖案例及目标 lot 绑定；仅跳过比对时会丢弃的期望侧 generation-token 哈希。快照构建仍生成完整 token，校验仍检查提供的 resolution 自身哈希、token 格式和完整快照指纹；没有缩减原始证据或改变失败原因。
+
+真实持仓准备入口的 `prepared_context_phase` 增加共享的 `snapshot_build` 和逐账户的 `snapshot_contract`。前者位于 `projection` 内，后者覆盖校验调用；耗时是包含子阶段的墙钟时间，不可相加，也不代表数据可信。CPU 热点和优化收益应另做离线分析，再由正常运行样本验证生产收益。
+
+### 当前投影内容资格与历史全量证明
+
+`projection-migration status` 在同一只读 SQLite 快照中核验 schema、必要索引/触发器、
+规范化账户/标量、checkpoint 的内容摘要与实际事件前缀绑定，以及每个 head 对当前
+`position_lots` 的 canonical fingerprint 和数量。现有 execution-identity index 的
+fallback/gap 契约继续独立。缺失 head、损坏内容或失效绑定均阻断 readiness 和历史清理
+position gate；有 head 的合法零持仓账户仍可就绪。共享只读连接 helper 只管理连接生命周期；
+本模块 inventory/status/verify 在各自入口开启读取事务，其他消费者自行管理事务边界。
+status 不运行 full oracle，也不
+写库、修复或推进任何历史标记；这项内容证明需要读取持仓和事件前缀，不能视为常数成本。
+
+writer 的 duplicate/unchanged 与 checkpoint tail admission 使用同一仓储内容校验；
+检测到坏 head 时走合法 full fallback。publication 始终从 canonical rows 推导 head
+内容事实，不能仅凭 generation 复用存储的数量或 fingerprint。整次失败/取消仍回滚
+事件、持仓、head 和 checkpoint。此校验增加 O(持仓行数) 的读取和哈希成本。
+
+`last_full_verified_source_generation` 只记录真实 full publication 的历史事实，增量
+publication 继续使用 `full_verified=False`。合法增量后的当前资格不要求该历史值等于
+当前 source generation；`verify --shadow` 按当次实际 full parity、checkpoint/head/source
+绑定和 shadow 结果判定 pass，单独报告 `last_full_verified_source_generation` 与
+`last_full_verification_current`，不会持久更新它们。该历史字段继续属于 current-decision
+migration authority fingerprint；真实 full publication 推进它后，旧 inventory 必须失效。
+持仓 head 恢复不代替 decision owner 的独立 dirty/可信裁决，也不授权生产 activate。

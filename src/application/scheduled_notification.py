@@ -211,16 +211,6 @@ def _notify_error_code(send_tool_dto: dict[str, Any]) -> str:
     return "SEND_UNCONFIRMED" if bool(send_tool_dto.get("command_ok")) else "SEND_FAILED"
 
 
-def _tail_text(value: Any, *, limit: int = 500) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        text = value.decode("utf-8", errors="replace")
-    else:
-        text = str(value)
-    return text[-int(limit):]
-
-
 def _coerce_returncode(value: Any, *, default: int) -> int:
     try:
         return int(value)
@@ -424,6 +414,7 @@ def send_account_message_with_retry(
                 "error_code": error_code,
                 "provider_response_code": provider_response_code,
                 "idempotency_key": send_tool_dto.get("idempotency_key") or idempotency_key,
+                "attribution_route_key": send_tool_dto.get("attribution_route_key"),
                 "effective_idempotency_key": send_tool_dto.get("effective_idempotency_key"),
                 "local_receipt_id": send_tool_dto.get("local_receipt_id"),
                 "http_attempts": send_tool_dto.get("http_attempts") if isinstance(send_tool_dto.get("http_attempts"), list) else [],
@@ -534,6 +525,7 @@ def send_account_message_with_retry(
                 "delivery_confirmed": bool(record.get("delivery_confirmed")),
                 "provider_response_code": record.get("provider_response_code"),
                 "idempotency_key": record.get("idempotency_key") or idempotency_key,
+                "attribution_route_key": record.get("attribution_route_key"),
                 "effective_idempotency_key": record.get("effective_idempotency_key"),
                 "local_receipt_id": record.get("local_receipt_id"),
                 **retry_metrics,
@@ -592,6 +584,7 @@ def send_account_message_with_retry(
         "delivery_confirmed": bool(final.get("delivery_confirmed")),
         "provider_response_code": final.get("provider_response_code"),
         "idempotency_key": final.get("idempotency_key") or idempotency_key,
+        "attribution_route_key": final.get("attribution_route_key"),
         "effective_idempotency_key": final.get("effective_idempotency_key"),
         "local_receipt_id": final.get("local_receipt_id"),
         **retry_metrics,

@@ -7,7 +7,7 @@ import os
 import shlex
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, cast
@@ -17,7 +17,8 @@ from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from src.application.bot.control.audit import InboundAuditStore
 from src.application.bot.control.contracts import BotInboundRequest
-from src.application.bot.control.policy import check_sender_allowed
+from src.application.bot.control.policy import (check_sender_allowed, check_reply_authorization,
+                                              ReplyAuthorizationError, reply_authorization_predicate)
 from src.application.channels.reply_decision import (
     decide_inbound_reply,
     inbound_command_id as _inbound_command_id,
@@ -77,6 +78,7 @@ class WechatClawbotServeSettings:
     bot_config_path: str | None = None
     audit_db: str | None = None
     allowed_senders: str | None = None
+    allowed_senders_fn: Callable[[], str | None] | None = field(default=None, repr=False, compare=False)
     reply_enabled: bool = True
     max_reply_chars: int = DEFAULT_WECHAT_REPLY_MAX_CHARS
     poll_interval_sec: float = DEFAULT_WECHAT_POLL_INTERVAL_SEC
@@ -176,6 +178,8 @@ def build_wechat_clawbot_serve_settings(
         bot_config_path=_first_text(bot_config_path),
         audit_db=_first_text(audit_db),
         allowed_senders=_first_text(allowed_senders, behavior_cfg.get("allowed_senders")),
+        allowed_senders_fn=(lambda: allowed_senders) if allowed_senders is not None else
+            lambda: _first_text(_dict(_dict(_load_bot_behavior_config(config_path=bot_config_path).get("inbound")).get("wechat_clawbot")).get("allowed_senders")),
         reply_enabled=_config_bool(reply_enabled, behavior_cfg.get("reply_enabled"), default=True),
         max_reply_chars=_config_positive_int(
             max_reply_chars,
@@ -310,6 +314,7 @@ def wechat_clawbot_message_to_bot_request(
     reply_context = {
         **(bot_reply_options or {}),
         "provider": WECHAT_CLAWBOT_NOTIFICATION_PROVIDER,
+        "reply_sender_identity": str(store.state_dir.resolve()),
         "base": str(base_path),
         "label": resolved_label,
         "state_dir": str(store.state_dir),
@@ -346,6 +351,7 @@ def poll_wechat_clawbot_once(
     bot_config_path: str | None = None,
     audit_db: str | None = None,
     allowed_senders: str | None = None,
+    allowed_senders_fn: Callable[[], str | None] | None = None,
     reply_enabled: bool = True,
     max_reply_chars: int = DEFAULT_WECHAT_REPLY_MAX_CHARS,
     keepalive_interval_sec: float = 0.0,
@@ -362,7 +368,12 @@ def poll_wechat_clawbot_once(
     base_url = str(state.get("base_url") or DEFAULT_ILINK_BASE_URL).strip() or DEFAULT_ILINK_BASE_URL
     cursor_before = str(state.get("get_updates_buf") or "")
     client = client_factory(bot_token=bot_token, base_url=base_url, timeout=timeout_sec)
-    outbox_retry = _retry_pending_wechat_reply(audit_db=audit_db, client=client)
+    current_allowlist = allowed_senders_fn or (lambda: allowed_senders)
+    sender_identity = str(store.state_dir.resolve())
+    outbox_retry = _retry_pending_wechat_reply(audit_db=audit_db, client=client,
+        allowed_senders_fn=current_allowlist, config_key=config_key, config_path=config_path,
+        bot_config_path=bot_config_path, transport_identity=sender_identity)
+    allowed_senders = current_allowlist()
     response = client.get_updates(get_updates_buf=cursor_before)
     received_monotonic = time.monotonic()
     cursor_after = extract_first_string(response, ("get_updates_buf", "getUpdatesBuf"))
@@ -412,6 +423,8 @@ def poll_wechat_clawbot_once(
                 reply_enabled=reply_enabled,
                 max_reply_chars=max_reply_chars,
                 audit_db=audit_db,
+                allowed_senders_fn=current_allowlist, config_key=config_key, config_path=config_path,
+                bot_config_path=bot_config_path, transport_identity=sender_identity,
             )
             _record_reply_receipt(inbound=inbound, audit_db=audit_db, reply_status=reply_status)
             reply_binding_refresh = _refresh_bound_context_from_reply(
@@ -637,6 +650,7 @@ def serve_wechat_clawbot(
                     bot_config_path=settings.bot_config_path,
                     audit_db=settings.audit_db,
                     allowed_senders=settings.allowed_senders,
+                    allowed_senders_fn=settings.allowed_senders_fn,
                     reply_enabled=settings.reply_enabled,
                     max_reply_chars=settings.max_reply_chars,
                     keepalive_interval_sec=settings.keepalive_interval_sec,
@@ -884,6 +898,9 @@ def _maybe_reply(
     reply_enabled: bool,
     max_reply_chars: int,
     audit_db: str | None = None,
+    allowed_senders_fn: Callable[[], str | None] | None = None,
+    config_key: str | None = None, config_path: str | None = None,
+    bot_config_path: str | None = None, transport_identity: str | None = None,
 ) -> dict[str, Any]:
     decision = decide_inbound_reply(
         inbound,
@@ -897,16 +914,26 @@ def _maybe_reply(
     context_token = message_context_token(message)
     if not to_user_id or not context_token:
         return {"attempted": True, "ok": False, "reason": "missing_reply_context"}
-    outbox, delivery_key, outbox_state = _prepare_reply_outbox(
+    outbox, delivery_key, outbox_state, claimed = _prepare_reply_outbox(
         audit_db=audit_db,
         command_id=_inbound_command_id(decision.inbound_result),
         message=message,
         text=decision.text,
+        authorization_check=lambda record, live: check_reply_authorization(record, channel="wechat",
+            current_allowed_senders=allowed_senders_fn or (lambda: None), config_key=config_key,
+            config_path=config_path, bot_config_path=bot_config_path, transport_identity=transport_identity,
+            allow_unscoped=live),
     )
     if outbox_state is not None:
         return outbox_state
-    frozen = outbox.reply_payload(delivery_key) if outbox is not None and delivery_key else {}
+    frozen = json.loads(claimed["payload_json"]) if claimed is not None else {}
     try:
+        if outbox is not None and delivery_key:
+            record = claimed or {}
+            check_reply_authorization(record, channel="wechat",
+                current_allowed_senders=allowed_senders_fn or (lambda: None), config_key=config_key,
+                config_path=config_path, bot_config_path=bot_config_path, transport_identity=transport_identity,
+                allow_unscoped=bool(record.get("live_unscoped")))
         api_response = client.send_text_message(
             to_user_id=frozen.get("to_user_id", to_user_id),
             context_token=frozen.get("context_token", context_token),
@@ -914,6 +941,10 @@ def _maybe_reply(
             group_id=frozen.get("group_id", message_group_id(message) or None),
             client_id=_outbox_client_id(delivery_key),
         )
+    except ReplyAuthorizationError:
+        if outbox is not None and delivery_key:
+            outbox.mark_reply_failed(delivery_key, error="authorization_blocked", retryable=True)
+        return {"attempted": False, "ok": False, "reason": "authorization_blocked", "delivery_key": delivery_key}
     except Exception as exc:
         if outbox is not None and delivery_key:
             outbox.mark_reply_failed(delivery_key, error=type(exc).__name__, retryable=True)
@@ -947,15 +978,17 @@ def _prepare_reply_outbox(
     command_id: str | None,
     message: dict[str, Any],
     text: str,
-) -> tuple[BotHostStore | None, str | None, dict[str, Any] | None]:
+    authorization_check: Callable[[dict[str, Any], bool], None],
+) -> tuple[BotHostStore | None, str | None, dict[str, Any] | None, dict[str, Any] | None]:
     key_source = str(command_id or message_id(message) or "").strip()
     if not key_source:
-        return None, None, None
+        return None, None, None, None
     delivery_key = f"wechat:{key_source}"
     store = BotHostStore(InboundAuditStore(audit_db).path)
     record = store.enqueue_reply(
         delivery_key=delivery_key,
         channel="wechat",
+        authorization=InboundAuditStore(audit_db).replay_authorization(command_id) if command_id else None,
         payload={
             "to_user_id": message_user_id(message),
             "context_token": message_context_token(message),
@@ -970,30 +1003,46 @@ def _prepare_reply_outbox(
             "ok": True,
             "reason": "idempotent_replay",
             "delivery_key": delivery_key,
-        }
-    claimed = store.claim_reply(delivery_key=delivery_key)
+        }, None
+    live = bool(record.get("enqueued_new"))
+    claimed = store.claim_reply(delivery_key=delivery_key,
+        authorize=reply_authorization_predicate(lambda row: authorization_check(row, live)))
+    if claimed is not None and claimed.get("authorization_blocked"):
+        return store, delivery_key, {"attempted": False, "ok": False, "reason": "authorization_blocked",
+                                     "delivery_key": delivery_key}, None
     if claimed is None:
         return store, delivery_key, {
             "attempted": False,
             "ok": status not in {"terminal_failed"},
             "reason": "reply_pending" if status != "terminal_failed" else "reply_terminal_failed",
             "delivery_key": delivery_key,
-        }
-    return store, delivery_key, None
+        }, None
+    return store, delivery_key, None, {**claimed, "live_unscoped": live}
 
 
 def _retry_pending_wechat_reply(
     *,
     audit_db: str | None,
     client: WechatClawbotClient,
+    allowed_senders_fn: Callable[[], str | None] | None = None,
+    config_key: str | None = None, config_path: str | None = None,
+    bot_config_path: str | None = None, transport_identity: str | None = None,
 ) -> dict[str, Any]:
+    def authorize(record: dict[str, Any]) -> None:
+        check_reply_authorization(record, channel="wechat", current_allowed_senders=allowed_senders_fn or (lambda: None),
+            config_key=config_key, config_path=config_path, bot_config_path=bot_config_path,
+            transport_identity=transport_identity)
+
     store = BotHostStore(InboundAuditStore(audit_db).path)
-    record = store.claim_reply(channel="wechat")
+    record = store.claim_reply(channel="wechat", authorize=reply_authorization_predicate(authorize))
     if record is None:
         return {"attempted": False, "reason": "outbox_empty"}
     delivery_key = str(record.get("delivery_key") or "")
+    if record.get("authorization_blocked"):
+        return {"attempted": False, "ok": False, "reason": "authorization_blocked", "delivery_key": delivery_key}
     try:
         payload = json.loads(str(record.get("payload_json") or "{}"))
+        authorize(record)
         api_response = client.send_text_message(
             to_user_id=str(payload.get("to_user_id") or ""),
             context_token=str(payload.get("context_token") or ""),
@@ -1002,6 +1051,9 @@ def _retry_pending_wechat_reply(
             client_id=_outbox_client_id(delivery_key),
         )
         ok = response_success(api_response)
+    except ReplyAuthorizationError:
+        store.mark_reply_failed(delivery_key, error="authorization_blocked", retryable=True)
+        return {"attempted": False, "ok": False, "reason": "authorization_blocked", "delivery_key": delivery_key}
     except Exception as exc:
         store.mark_reply_failed(delivery_key, error=type(exc).__name__, retryable=True)
         return {"attempted": True, "ok": False, "reason": "reply_failed", "delivery_key": delivery_key}

@@ -115,7 +115,7 @@ def test_real_action_rechecks_transaction_and_is_idempotent_next_batch(tmp_path,
 def test_time_expiry_between_batch_and_action_cannot_write(tmp_path, monkeypatch):
     from src.application.wheel.capacity import trade_attribution_capacity_check
     repo, args, *_ = _setup(tmp_path, monkeypatch, actions=True)
-    monkeypatch.setattr(mod, 'trade_attribution_capacity_check', trade_attribution_capacity_check)
+    monkeypatch.setattr(ledger_attribution, 'trade_attribution_capacity_check', trade_attribution_capacity_check)
     monkeypatch.setattr('src.application.wheel.capacity.observe_trade_attribution_capacity',
                         lambda **_: _call_capacity_observation())
     original = mod.apply_trade_attribution

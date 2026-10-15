@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.cash_evidence_helpers import cash_portfolio
+
 import json
 from pathlib import Path
 
@@ -736,7 +738,7 @@ def test_load_portfolio_context_futu_cache_reuses_matching_account_label(tmp_pat
         def _load_cached(path: Path):  # type: ignore[no-untyped-def]
             if path.name == "portfolio_context.json":
                 from datetime import datetime, timezone
-                return {
+                return cash_portfolio({
                     "cash_source_observed_at": datetime.now(timezone.utc).isoformat(),
                     "cash_balance_reliable": True,
                     "cash_balance_unavailable_by_row": {},
@@ -759,7 +761,7 @@ def test_load_portfolio_context_futu_cache_reuses_matching_account_label(tmp_pat
                     },
                     "raw_selected_count": 1,
                     "portfolio_source_name": "futu",
-                }
+                }, account="user1")
             return None
 
         pc.load_cached_json = _load_cached  # type: ignore[assignment]

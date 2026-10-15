@@ -182,7 +182,7 @@
   },
   "tests": {
     "by_kind": {
-      "ddl": 16,
+      "ddl": 20,
       "read": 8,
       "write": 13
     },
@@ -193,13 +193,16 @@
       "tests/test_ledger_sqlite_workflows.py": 2,
       "tests/test_lot_identity_migration.py": 13,
       "tests/test_lot_parity_probe.py": 10,
+      "tests/test_performance_query_read_only.py": 1,
       "tests/test_position_lot_payload_shape.py": 1,
       "tests/test_position_projection_publication.py": 1,
+      "tests/test_position_query_read_only.py": 1,
+      "tests/test_public_position_query_read_only.py": 2,
       "tests/test_research_storage_baseline.py": 1,
       "tests/test_trade_receipt_readback.py": 1,
       "tests/test_wheel_strategy.py": 3
     },
-    "digest": "sha256:0096b8a737c4574d",
-    "statements": 34
+    "digest": "sha256:5e0f5bc1d32dbb76",
+    "statements": 38
   }
 }

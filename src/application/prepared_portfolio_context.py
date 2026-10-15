@@ -732,6 +732,7 @@ def run_worker(request_path: Path) -> int:
             runtime_config=cfg,
             portfolio_source=str(source),
             fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
+            required_position_asset_types=("stock",),
             exchange_rate_cache_path=base / "output_shared" / "state" / "rate_cache.json",
             **({"exchange_rate_observation": fx_observation} if fx_hash is not None else {}),
             load_json_fn=load_cached_json,

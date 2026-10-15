@@ -1,0 +1,232 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.2.16",
+  "base": {
+    "tag": "v4.2.15",
+    "commit": "dcb94b51589d7bc7fc570a3841da332add151479"
+  },
+  "reviewed_head": "28fb558a2abd3de69b9049444cb4292e0f6982ba",
+  "commits": [
+    {
+      "sha": "2258021c2b53e777dbc266af2b4510f62a197304",
+      "subject": "chore(gateflow): accept plan for issue 493"
+    },
+    {
+      "sha": "ac60f1abcbe7f6e267ef6c0e5dd440c9cd3c955a",
+      "subject": "fix(service): bound automatic retirement to managed units"
+    },
+    {
+      "sha": "5d0105a8c772af6b04c1c829dbec262f60c1126d",
+      "subject": "fix(service): preserve declared retirement accounts"
+    },
+    {
+      "sha": "5612a5dd3c4c5b172804ff2c25e2a434c15ca2d5",
+      "subject": "chore(gateflow): accept deepreview for issue 493"
+    },
+    {
+      "sha": "94e83d62d369a61ecdc1171bb9b9c30b3e02c111",
+      "subject": "chore(gateflow): accept PR review for issue 493"
+    },
+    {
+      "sha": "fd2a8fd0cfd7b697c35146f2a6e6b3ac8fc36555",
+      "subject": "Merge pull request #542 from liuxie066/codex/issue493-retirement"
+    },
+    {
+      "sha": "b55aba3db6989b6b841726f342e77fb8b0cd1d8f",
+      "subject": "chore(docs): refresh contracts and index shared APIs"
+    },
+    {
+      "sha": "6ec807a7029015d01c8f1ad1625d087b7a11761b",
+      "subject": "Merge pull request #543 from liuxie066/codex/docs-hygiene-api-index"
+    },
+    {
+      "sha": "b7d97dc9b047a3700580f01f7662273d0054ba1e",
+      "subject": "chore(gateflow): accept plan for runtime-history-query"
+    },
+    {
+      "sha": "5b482b35ddc4dad027305ab5b98de51b679101d3",
+      "subject": "fix(gateflow): accept runtime-history-query S1"
+    },
+    {
+      "sha": "d79121a941ba42834b121442c07704a87fc4eefb",
+      "subject": "chore(gateflow): accept deepreview for runtime-history-query"
+    },
+    {
+      "sha": "f0d76ac111bba2cc8d73784b25b3ce3edebbea90",
+      "subject": "Merge pull request #549 from liuxie066/codex/fix-runtime-history-query"
+    },
+    {
+      "sha": "1471a29e13098bd25bc523ba9b3479973709dec0",
+      "subject": "chore(gateflow): accept plan for ponytail-reduction"
+    },
+    {
+      "sha": "7859721e265d7e5dd723d51669fb20b38e5d1d19",
+      "subject": "refactor(gateflow): accept ponytail-reduction S1"
+    },
+    {
+      "sha": "ec13ccb2753b4e51581bde6dcb20ce7db29b05e9",
+      "subject": "chore(gateflow): accept deepreview for ponytail-reduction"
+    },
+    {
+      "sha": "28fb558a2abd3de69b9049444cb4292e0f6982ba",
+      "subject": "Merge pull request #550 from liuxie066/codex/ponytail-reduction"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "简化交易、持仓、行情和配置链路中的重复代码，复用已有实现；保留公开接口、账本校验、账户与市场隔离及原有业务规则。",
+      "commits": [
+        "7859721e265d7e5dd723d51669fb20b38e5d1d19",
+        "28fb558a2abd3de69b9049444cb4292e0f6982ba"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "运行状态历史查询在同一次请求内共享目录遍历和筛选文件，只为选中的运行读取完整详情；保持历史选择、搜索计数与公开输出一致。",
+      "commits": [
+        "b7d97dc9b047a3700580f01f7662273d0054ba1e",
+        "5b482b35ddc4dad027305ab5b98de51b679101d3",
+        "f0d76ac111bba2cc8d73784b25b3ce3edebbea90"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "更新 CLI、Tool Gateway、订单、行情存储及运营文档，使能力说明和责任边界与当前实现一致；文档门禁同时核验源码符号和本地文档引用。",
+      "commits": [
+        "b55aba3db6989b6b841726f342e77fb8b0cd1d8f",
+        "6ec807a7029015d01c8f1ad1625d087b7a11761b"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "服务漂移对账仅自动停用和删除产品明确拥有的 service/timer；保留备份与自定义单元，账户专属 OpenD 单元要求原部署配置明确声明账户，重试不扩大删除权限。",
+      "commits": [
+        "ac60f1abcbe7f6e267ef6c0e5dd440c9cd3c955a",
+        "5d0105a8c772af6b04c1c829dbec262f60c1126d",
+        "94e83d62d369a61ecdc1171bb9b9c30b3e02c111",
+        "fd2a8fd0cfd7b697c35146f2a6e6b3ac8fc36555"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "2258021c2b53e777dbc266af2b4510f62a197304",
+      "reason": "仅保存已确认计划或评审的摘要检查点；提交树无文件变化，不产生用户、配置、运行时或运营行为变化。"
+    },
+    {
+      "commit": "5612a5dd3c4c5b172804ff2c25e2a434c15ca2d5",
+      "reason": "仅保存已确认计划或评审的摘要检查点；提交树无文件变化，不产生用户、配置、运行时或运营行为变化。"
+    },
+    {
+      "commit": "d79121a941ba42834b121442c07704a87fc4eefb",
+      "reason": "仅保存已确认计划或评审的摘要检查点；提交树无文件变化，不产生用户、配置、运行时或运营行为变化。"
+    },
+    {
+      "commit": "1471a29e13098bd25bc523ba9b3479973709dec0",
+      "reason": "仅保存已确认计划或评审的摘要检查点；提交树无文件变化，不产生用户、配置、运行时或运营行为变化。"
+    },
+    {
+      "commit": "ec13ccb2753b4e51581bde6dcb20ce7db29b05e9",
+      "reason": "仅保存已确认计划或评审的摘要检查点；提交树无文件变化，不产生用户、配置、运行时或运营行为变化。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "2258021c2b53e777dbc266af2b4510f62a197304",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/542"
+      ]
+    },
+    {
+      "commit": "ac60f1abcbe7f6e267ef6c0e5dd440c9cd3c955a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/542"
+      ]
+    },
+    {
+      "commit": "5d0105a8c772af6b04c1c829dbec262f60c1126d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/542"
+      ]
+    },
+    {
+      "commit": "5612a5dd3c4c5b172804ff2c25e2a434c15ca2d5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/542"
+      ]
+    },
+    {
+      "commit": "94e83d62d369a61ecdc1171bb9b9c30b3e02c111",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/542"
+      ]
+    },
+    {
+      "commit": "fd2a8fd0cfd7b697c35146f2a6e6b3ac8fc36555",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/542"
+      ]
+    },
+    {
+      "commit": "b55aba3db6989b6b841726f342e77fb8b0cd1d8f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/543"
+      ]
+    },
+    {
+      "commit": "6ec807a7029015d01c8f1ad1625d087b7a11761b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/543"
+      ]
+    },
+    {
+      "commit": "b7d97dc9b047a3700580f01f7662273d0054ba1e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/549"
+      ]
+    },
+    {
+      "commit": "5b482b35ddc4dad027305ab5b98de51b679101d3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/549"
+      ]
+    },
+    {
+      "commit": "d79121a941ba42834b121442c07704a87fc4eefb",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/549"
+      ]
+    },
+    {
+      "commit": "f0d76ac111bba2cc8d73784b25b3ce3edebbea90",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/549"
+      ]
+    },
+    {
+      "commit": "1471a29e13098bd25bc523ba9b3479973709dec0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/550"
+      ]
+    },
+    {
+      "commit": "7859721e265d7e5dd723d51669fb20b38e5d1d19",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/550"
+      ]
+    },
+    {
+      "commit": "ec13ccb2753b4e51581bde6dcb20ce7db29b05e9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/550"
+      ]
+    },
+    {
+      "commit": "28fb558a2abd3de69b9049444cb4292e0f6982ba",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/550"
+      ]
+    }
+  ]
+}

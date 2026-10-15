@@ -1167,17 +1167,6 @@ def _csv(value: Any) -> str:
     return _value(value)
 
 
-def _unique(values: list[str]) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        if value in seen:
-            continue
-        out.append(value)
-        seen.add(value)
-    return out
-
-
 def _yes_no(value: Any) -> str:
     if value is True:
         return "yes"

@@ -148,10 +148,6 @@ def _empty_summary_row(symbol: str, strategy: str, *, extra_fields: dict[str, An
     }
 
 
-def _option_ccy(symbol: str) -> str | None:
-    return symbol_currency(symbol)
-
-
 def _safe_int(value: Any) -> int | None:
     parsed = _safe_float(value)
     if parsed is None:
@@ -251,7 +247,7 @@ def _build_ranked_row(
         'mid': _safe_float(top.get('mid')) if 'mid' in top else None,
         'bid': _safe_float(top.get('bid')) if 'bid' in top else None,
         'ask': _safe_float(top.get('ask')) if 'ask' in top else None,
-        'option_ccy': _option_ccy(symbol),
+        'option_ccy': symbol_currency(symbol),
         'symbol_concentration_current': _safe_float(top.get('symbol_concentration_current')),
         'position_sizing_basis': _safe_text(top.get('position_sizing_basis')),
         'symbol_concentration_after_existing_assignments': _safe_float(top.get('symbol_concentration_after_existing_assignments')),
@@ -391,7 +387,7 @@ def summarize_combo_yield(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | N
         'mid': _safe_float(top.get('mid')),
         'bid': _safe_float(top.get('put_bid')),
         'ask': _safe_float(top.get('call_ask')),
-        'option_ccy': top.get('option_ccy') or top.get('currency') or _option_ccy(symbol),
+        'option_ccy': top.get('option_ccy') or top.get('currency') or symbol_currency(symbol),
         'note': '已按组合收益筛出推荐Call',
     })
     for key in COMBO_YIELD_EMPTY_FIELDS:

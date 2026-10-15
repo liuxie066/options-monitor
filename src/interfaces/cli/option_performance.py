@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -22,8 +23,10 @@ from src.application.ledger.api import (
     correct_superseded_cash_conversions,
     open_performance_evidence_repository,
     open_position_ledger_from_data_config,
+    open_performance_query_ledger_from_data_config,
 )
 from src.application.performance.service import build_option_period_performance
+from src.application.performance.query_contracts import PerformanceQueryError
 from src.interfaces.cli.ledger_write_safety import (
     add_write_flags,
     guard_ledger_write,
@@ -74,6 +77,10 @@ def add_option_performance_commands(subparsers: argparse._SubParsersAction) -> N
     report.add_argument("--month", default=None, help="Natural month YYYY-MM")
     report.add_argument("--year", default=None, help="Natural year YYYY")
     report.add_argument("--include-rows", action="store_true")
+
+    serve = sub.add_parser("serve", help="serve the canonical read-only query on authenticated loopback HTTP")
+    _add_config_args(serve)
+    serve.add_argument("--port", type=int, default=8766)
 
     evidence = sub.add_parser("evidence", help="validate, import, or capture performance evidence")
     evidence_sub = evidence.add_subparsers(dest="evidence_command", required=True)
@@ -308,17 +315,38 @@ def _correct_cash_conversion(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def handle_option_performance_command(args: argparse.Namespace) -> dict[str, Any]:
+    if args.option_performance_command == "serve":
+        from src.application.performance.query_http import create_performance_query_server
+
+        try:
+            server = create_performance_query_server(
+                config_key=args.config_key, config_path=args.config_path,
+                data_config=args.data_config, port=args.port,
+                token=os.environ.get("OM_PERFORMANCE_SERVICE_TOKEN", ""),
+            )
+        except PerformanceQueryError as exc:
+            raise AgentToolError(exc.code, exc.message, hint=exc.hint, details=exc.details) from exc
+        with server:
+            try:
+                server.serve_forever()
+            except KeyboardInterrupt:
+                pass
+        return {"status": "stopped"}
+
     if args.option_performance_command == "report":
-        data, _warnings, _meta = option_performance_report_tool(
-            _report_payload(args),
-            load_runtime_config=load_runtime_config,
-            resolve_public_data_config_path=resolve_public_data_config_path,
-            normalize_broker=normalize_broker,
-            resolve_option_positions_repo=open_position_ledger_from_data_config,
-            build_option_period_performance=build_option_period_performance,
-            repo_base=repo_base,
-            mask_path=mask_path,
-        )
+        try:
+            data, _warnings, _meta = option_performance_report_tool(
+                _report_payload(args),
+                load_runtime_config=load_runtime_config,
+                resolve_public_data_config_path=resolve_public_data_config_path,
+                normalize_broker=normalize_broker,
+                resolve_option_positions_repo=open_performance_query_ledger_from_data_config,
+                build_option_period_performance=build_option_period_performance,
+                repo_base=repo_base,
+                mask_path=mask_path,
+            )
+        except PerformanceQueryError as exc:
+            raise AgentToolError(exc.code, exc.message, hint=exc.hint, details=exc.details) from exc
         return data
 
     if args.option_performance_command == "evidence" and args.evidence_command == "import":

@@ -162,6 +162,17 @@ manifest hashes and sizes are capacity metadata, while current content remains
 non-symlink directories under `output_accounts`; missing or unsafe roots remain
 explicitly unavailable instead of being inferred from file counts.
 
+Canonical scan blobs under `output_shared/blobs/sha256` are inventoried as
+`immutable_shared_partition`, so manifests resolve against their actual
+no-follow file metadata. Reference resolution uses the complete inventory of
+the fixed runtime subroots; their manifests participate in validation without
+making mutable account/state/log payloads research-storage bytes.
+Validated scan-blob references from expired runs may outlive reclaimed blobs;
+the baseline records these absent objects in `unprotected_reference_failures`
+instead of treating them as protected capacity failures. Retained/shared roots,
+unsafe paths, invalid references and other missing manifest objects retain the
+existing fail-closed treatment. This does not verify blob content.
+
 Pass prior reports in chronological order to obtain a measured growth and
 90-day forecast; one observation remains `insufficient_history`:
 
@@ -187,9 +198,15 @@ Canonical scan-blob garbage collection has a separate read-only preview:
 
 It keeps runs within 14 days or among the latest 200, verifies every blob
 reachable from protected manifests, and reports only unreachable blobs older
-than the 24-hour orphan grace period. Any invalid protected manifest or
-missing/corrupt referenced blob suppresses all candidates. There is no confirm
-or delete mode.
+than the 24-hour orphan grace period. Missing blobs referenced only by expired
+runs do not block later previews. Present referenced blobs (including expired
+ones) are still verified; corruption, conflicting refs, invalid required-data
+manifests, unsafe paths or missing protected blobs suppress all candidates.
+`deletion_allowed` reports preview eligibility, not authorization to perform
+deletion. Blob-store ancestors (`blobs`, `blobs/sha256`, and shard directories)
+must remain real directories: symlinks or file ancestors cannot be treated as
+reclaimed blobs. An unreadable inventory is an error, never proof of absence.
+There is no confirm or delete mode.
 
 Historical cleanup has a separate gated preview:
 
@@ -861,6 +878,33 @@ scripts/              -> operational wrappers only; delegate to src/ or domain/
 3. Inspect `tick_metrics` through `runtime_status`.
 4. Use `research` `candidate` or `full` scope for candidate/filter trace evidence.
 5. Separate expected account constraints from state contamination.
+
+### Prepared Context Timing Evidence
+
+Existing `audit/run_logs/` emits `prepared_context_phase` for real tick preparation.
+`post_portfolio_prepare` spans the return from portfolio preparation through option
+manifest checks and the existing `prepared_option_positions_context` completion
+summary; it ends before FX evidence summary logging and prefetch. This starts after
+the preparation call returns, so promotion-to-return overhead remains outside it.
+Each executed phase has `start` and `ok`/`error` events under the logger's `run_id`.
+Terminal `duration_ms` is monotonic and inclusive: do not sum parent and child times.
+An absent duration is unknown; start without terminal is incomplete. `ok`/`outcome`
+describes execution completion, not data readiness. Read `ready_accounts`, existing
+unavailable reasons and FX evidence status alongside the timings.
+
+The tick records `portfolio_authority` (with `portfolio_config`/`portfolio_context`)
+and `prepared_option_authority` per account, plus shared `option_prepare`. The
+option owner records reuse checks, path resolution, ledger fences A/B, current
+projections, FX observation/evidence, projection and shared context building, and
+account context/Wheel/ready or unavailable publication. Account boundaries include
+`account`; shared ledger/FX/broker work does not. Repeated shared phase names are
+actual operations on separate ledgers/brokers, not copies for each account, and
+are not SQL/network call counts. Replay only records work it executes; disabled FX
+persistence, experience and scheduler skips do not synthesize phase durations.
+Scopes reset on exit and cover synchronous work only. Timing/clock/log failures
+preserve business results and exceptions; new events include no payloads, paths,
+amounts or raw exception text. Historical logs without these events cannot be
+retroactively attributed; source delivery alone does not prove production latency.
 
 ### Ledger Or Trade Intake Looks Wrong
 

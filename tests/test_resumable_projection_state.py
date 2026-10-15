@@ -200,6 +200,21 @@ def test_resumable_state_round_trip_is_canonical_active_only_and_bounded() -> No
     )
     assert ResumableProjectionState.from_json_bytes(payload) == result.state
 
+    final_close = _event(
+        "close-final", "close", 3_000, key=key, contracts=25, target_lot_id="lot-a"
+    )
+    finalized_full = project_resumable_trade_events([*events, final_close], entry_mode="full")
+    finalized_tail = project_resumable_trade_events(
+        [final_close],
+        initial_state=ResumableProjectionState.from_json_bytes(payload),
+        entry_mode="tail",
+    )
+    assert finalized_full.eligible is finalized_tail.eligible is True
+    assert finalized_tail.active_lots == ()
+    assert finalized_tail.retained_lots[0].close_event_ids == (*expected_close_event_ids, "close-final")
+    assert _lots_payload(finalized_tail.retained_lots) == _lots_payload(finalized_full.retained_lots)
+    assert finalized_tail.state == finalized_full.state
+
     noncanonical = json.dumps(result.state.to_dict()).encode()
     assert noncanonical != payload
     with pytest.raises(ValueError, match="not canonical"):

@@ -432,12 +432,10 @@ def _resolve_sell_call_strike_window(
     sell_call_cfg: dict,
     spot_reference: float | None,
     source_prefix: str = "sell_call",
-    fallback_min_pct: float = DEFAULT_SELL_CALL_SPOT_FALLBACK_MIN_PCT,
     fallback_max_pct: float = DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT,
     strike_buffer_pct: float = 0.0,
     unbounded_max: bool = False,
 ) -> tuple[StrikeWindowPlan, str, list[str]]:
-    del fallback_min_pct
     min_strike = _safe_float(sell_call_cfg.get("min_strike"))
     max_strike = _safe_float(sell_call_cfg.get("max_strike"))
     has_spot = spot_reference is not None and spot_reference > 0
@@ -518,7 +516,6 @@ def _resolve_call_side_plan(
     defaults: CandidateWindowDefaults = DEFAULT_SELL_CALL_WINDOW,
     source_prefix: str = "sell_call",
     dte_source_prefix: str | None = None,
-    fallback_min_pct: float = DEFAULT_SELL_CALL_SPOT_FALLBACK_MIN_PCT,
     fallback_max_pct: float = DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT,
     strike_buffer_pct: float = 0.0,
     unbounded_max: bool = False,
@@ -536,7 +533,6 @@ def _resolve_call_side_plan(
         sell_call_cfg=sell_call_cfg,
         spot_reference=spot_reference,
         source_prefix=source_prefix,
-        fallback_min_pct=fallback_min_pct,
         fallback_max_pct=fallback_max_pct,
         strike_buffer_pct=strike_buffer_pct,
         unbounded_max=unbounded_max,
@@ -588,7 +584,6 @@ def _resolve_combo_yield_call_plan(
         defaults=call_window,
         source_prefix="combo_yield.call",
         dte_source_prefix=dte_source_prefix,
-        fallback_min_pct=0.0,
         fallback_max_pct=DEFAULT_COMBO_YIELD_CALL_FETCH_MAX_PCT,
         strike_buffer_pct=DEFAULT_COMBO_YIELD_CALL_STRIKE_BUFFER_PCT,
     )
@@ -624,23 +619,6 @@ def _expiration_discovery_cache_key(
         _physical_host(host),
         int(port),
         trading_date,
-    )
-
-
-def _spot_observation_cache_key(
-    *,
-    symbol: str,
-    source: str,
-    host: str,
-    port: int,
-    trading_date: str,
-) -> SpotObservationCacheKey:
-    return _expiration_discovery_cache_key(
-        symbol=symbol,
-        source=source,
-        host=host,
-        port=port,
-        trading_date=trading_date,
     )
 
 
@@ -1247,7 +1225,7 @@ def build_required_data_fetch_plan(
         spot_cache_key = (
             planning_identity.cache_key
             if planning_identity is not None
-            else _spot_observation_cache_key(
+            else _expiration_discovery_cache_key(
                 symbol=symbol,
                 source=fetch_source,
                 host=fetch_host,
@@ -1397,7 +1375,6 @@ def build_required_data_fetch_plan(
                 trading_date=trading_date,
                 spot_reference=spot_reference,
                 source_prefix="wheel.call",
-                fallback_min_pct=0.0,
                 fallback_max_pct=0.0,
                 unbounded_max=True,
             )

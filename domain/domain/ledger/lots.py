@@ -378,13 +378,6 @@ def _patch_int(patch: PositionLotPatch, key: str, fallback: int) -> int:
     return int(float(value))
 
 
-def _patch_float(patch: PositionLotPatch, key: str, fallback: float) -> float:
-    value = _patch_value(patch, key, fallback)
-    if value in (None, ""):
-        return float(fallback)
-    return float(value)
-
-
 def _patch_decimal(patch: PositionLotPatch, key: str, fallback: Decimal) -> Decimal:
     return to_decimal(_patch_value(patch, key, fallback), field_name=key)
 

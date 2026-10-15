@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import stat
 import sys
@@ -15,7 +14,7 @@ from src.application.runtime_cli_format import display_value as _value
 from src.application.runtime_cli_format import resolve_runtime_cli_path as _resolve_path
 from src.application.runtime_cli_format import yes_no as _yes_no
 from src.application.runtime_paths import resolve_runtime_root
-from src.application.runtime_runs_cli import resolve_runtime_runs_root
+from src.application.runtime_runs_cli import _load_profile, resolve_runtime_runs_root
 
 
 SCHEMA_VERSION = "runtime_logs.v1"
@@ -142,21 +141,6 @@ def _resolve_logs_root(*, base: Path, logs_root: str | Path | None, profile_path
     if runtime_root:
         return (_resolve_path(runtime_root, base=base) / "logs").resolve()
     return (resolve_runtime_root(repo_root=base).runtime_root / "logs").resolve()
-
-
-def _load_profile(profile_path: str | Path | None, *, base: Path) -> dict[str, Any]:
-    if not profile_path:
-        return {}
-    path = _resolve_path(profile_path, base=base)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise AgentToolError(code="CONFIG_ERROR", message=f"profile not found: {path}") from exc
-    except json.JSONDecodeError as exc:
-        raise AgentToolError(code="CONFIG_ERROR", message=f"profile is not valid JSON: {path}") from exc
-    if not isinstance(payload, dict):
-        raise AgentToolError(code="CONFIG_ERROR", message=f"profile must be a JSON object: {path}")
-    return payload
 
 
 def _latest_run_dir(root: Path) -> Path | None:

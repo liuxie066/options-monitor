@@ -49,8 +49,6 @@ def _sources(*, base: Path, cfg: dict[str, Any], config_path: Path, accounts: li
     def read(source: str, reader: Any) -> None:
         try:
             rows.extend(reader())
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            missing.append({"source": source, "reason": str(exc) if re.fullmatch(r"[a-z][a-z_]{1,80}", str(exc)) else type(exc).__name__})
         except Exception as exc:
             # Source diagnostics are data; never expose raw paths, SQL, routes, or credentials.
             missing.append({"source": source, "reason": str(exc) if re.fullmatch(r"[a-z][a-z_]{1,80}", str(exc)) else type(exc).__name__})

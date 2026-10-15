@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.cash_evidence_helpers import cash_portfolio
+
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
@@ -475,7 +477,7 @@ def test_build_context_derives_missing_cash_secured_then_scales_partial_close() 
 
 def test_closed_option_leg_keeps_settlement_constraints_while_reason_pending(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "src.application.positions.context_builder.build_lifecycle_read_models_from_decision_snapshot",
+        "src.application.ledger.position_context.build_lifecycle_read_models_from_decision_snapshot",
         lambda *_args, **_kwargs: {
             "closed": {
                 "lifecycle_state": "settlement_pending",
@@ -540,10 +542,10 @@ def test_closed_option_leg_keeps_settlement_constraints_while_reason_pending(mon
     from src.application.wheel.capacity import build_shared_coverage_facts
     coverage = build_shared_coverage_facts(
         account="lx",
-        portfolio_context={"stocks_by_symbol": {
+        portfolio_context=cash_portfolio({"stocks_by_symbol": {
             "0700.HK": {"shares": 500, "can_sell_qty": 500},
             "AAPL": {"shares": 500, "can_sell_qty": 500},
-        }},
+        }}),
         option_context=ctx,
         wheel_read_model={"batches": []},
     )
@@ -555,7 +557,7 @@ def test_closed_option_leg_keeps_settlement_constraints_while_reason_pending(mon
 
 def test_fully_closed_pending_put_still_blocks_cash_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "src.application.positions.context_builder.build_lifecycle_read_models_from_decision_snapshot",
+        "src.application.ledger.position_context.build_lifecycle_read_models_from_decision_snapshot",
         lambda *_args, **_kwargs: {
             "closed": {
                 "lifecycle_state": "settlement_pending",
@@ -589,7 +591,7 @@ def test_closed_option_leg_uses_bound_snapshot_and_preserves_conflict(
     monkeypatch: pytest.MonkeyPatch, mismatch: bool,
 ) -> None:
     monkeypatch.setattr(
-        "src.application.positions.context_builder.build_lifecycle_read_models_from_decision_snapshot",
+        "src.application.ledger.position_context.build_lifecycle_read_models_from_decision_snapshot",
         lambda *_args, **_kwargs: {
             "lot": {
                 "lifecycle_state": "settlement_pending" if mismatch else "conflict",

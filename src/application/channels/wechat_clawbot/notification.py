@@ -7,12 +7,17 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 from domain.domain.tool_boundary import normalize_subprocess_adapter_payload
+from domain.domain.multi_tick import WECHAT_CLAWBOT_NOTIFICATION_PROVIDER, notification_route_identity_hash
 from src.application.channels.wechat_clawbot.ilink_client import WechatClawbotClient
 from src.application.channels.wechat_clawbot.message import response_code, response_message_id, response_success
 from src.application.channels.wechat_clawbot.state import (
     load_wechat_clawbot_binding,
     load_wechat_clawbot_state,
+    resolve_wechat_clawbot_state_dir,
+    resolve_wechat_clawbot_target,
 )
+
+from src.application.channels.wechat_clawbot.state_store import WechatClawbotStateStore
 
 
 ClientFactory = Callable[..., WechatClawbotClient]
@@ -68,8 +73,16 @@ def send_wechat_clawbot_message(
     text = str(message or "")
     if not text.strip():
         raise ValueError("message is required")
-    binding = load_wechat_clawbot_binding(base=base, target=target, notifications=notifications)
-    state = load_wechat_clawbot_state(base=base, label=binding.label, notifications=notifications)
+    resolved = resolve_wechat_clawbot_target(target, notifications=notifications)
+    state_dir = resolve_wechat_clawbot_state_dir(base=base, label=resolved.label, notifications=notifications)
+    with WechatClawbotStateStore(state_dir).read_directory() as store:
+        binding = load_wechat_clawbot_binding(base=base, target=target, notifications=notifications, store=store)
+        state = load_wechat_clawbot_state(base=base, label=binding.label, notifications=notifications, store=store)
+        sender_scope = store.sender_directory_scope()
+    attribution_route_key = (notification_route_identity_hash(
+        provider=WECHAT_CLAWBOT_NOTIFICATION_PROVIDER, channel=WECHAT_CLAWBOT_NOTIFICATION_PROVIDER,
+        sender=[state.label, *sender_scope],
+        recipient=[binding.to_user_id, binding.group_id, binding.chat_key]) if sender_scope else None)
     timeout_sec = int((notifications or {}).get("send_timeout_sec") or 60)
     client = client_factory(bot_token=state.bot_token, base_url=state.base_url, timeout=timeout_sec)
     client_id = _client_id_from_idempotency_key(idempotency_key)
@@ -110,6 +123,7 @@ def send_wechat_clawbot_message(
         "binding_label": binding.label,
         "binding_name": binding.name,
         "target": binding.target,
+        "attribution_route_key": attribution_route_key,
     }
 
 
@@ -117,7 +131,9 @@ def normalize_wechat_clawbot_send_output(*, send_result: dict[str, Any]) -> dict
     result = send_result if isinstance(send_result, dict) else {}
     response_json = result.get("response_json") if isinstance(result.get("response_json"), dict) else {}
     command_ok = bool(result.get("http_status") == 200)
-    business_ok = bool(result.get("ok") or response_success(response_json))
+    # An explicit sender failure or absent response cannot prove delivery.
+    business_ok = (result.get("ok") is True if "ok" in result else
+                   isinstance(result.get("response_json"), dict) and response_success(response_json))
     upstream_message_id = response_message_id(response_json) or result.get("message_id")
     local_receipt_id = result.get("local_receipt_id")
     message_id = upstream_message_id or local_receipt_id
@@ -157,6 +173,7 @@ def normalize_wechat_clawbot_send_output(*, send_result: dict[str, Any]) -> dict
             "local_receipt_id": local_receipt_id,
             "binding_label": result.get("binding_label"),
             "binding_name": result.get("binding_name"),
+            "attribution_route_key": result.get("attribution_route_key"),
             "context_token_fallback_attempted": bool(result.get("context_token_fallback_attempted")),
             "context_token_fallback_response_code": result.get("context_token_fallback_response_code"),
         },

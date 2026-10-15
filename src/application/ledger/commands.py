@@ -2580,6 +2580,8 @@ def record_trade_event_repair(
         return persist_manual_futu_environment_binding(repo, target_event_id=event_id,
             overrides=overrides, repair_reason=reason, expected_input_hash=expected_input_hash)
     if is_order_identity_repair_request(overrides):
+        if expected_input_hash is not None:
+            raise ValueError("expected_input_hash is not supported for Futu order identity repair")
         return persist_manual_order_identity_binding(
             repo,
             target_event_id=event_id,
@@ -2587,6 +2589,8 @@ def record_trade_event_repair(
             repair_reason=reason,
         )
     if is_opend_trade_time_repair_request(overrides):
+        if expected_input_hash is not None:
+            raise ValueError("expected_input_hash is not supported for OpenD trade-time repair")
         return persist_manual_opend_trade_time_correction(
             repo,
             target_event_id=event_id,

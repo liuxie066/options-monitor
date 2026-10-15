@@ -2272,3 +2272,32 @@ markets:
     assert policy.config[leg] == {"min_delta": 0.2, "max_delta": 0.35}
     other = "put" if leg == "call" else "call"
     assert policy.config[other] == {"min_delta": 0.15, "max_delta": 0.35}
+
+
+@pytest.mark.parametrize("runtime_defaults", [{}, {"bot": None}, {"bot": "invalid"}])
+def test_runtime_bot_fallback_is_detached(runtime_defaults: dict) -> None:
+    from src.application.config_yaml import _bot_config_from_runtime_defaults
+
+    first = _bot_config_from_runtime_defaults(runtime_defaults)
+    second = _bot_config_from_runtime_defaults(runtime_defaults)
+    assert first == second == DEFAULT_CONFIG["defaults"]["bot"]
+    first["llm"]["model"] = "changed"
+    assert second["llm"]["model"] == DEFAULT_CONFIG["defaults"]["bot"]["llm"]["model"] == ""
+
+
+def test_runtime_bot_explicit_defaults_are_detached() -> None:
+    from src.application.config_yaml import _bot_config_from_runtime_defaults
+
+    supplied = {"enabled": True, "llm": {"model": "custom"}}
+    result = _bot_config_from_runtime_defaults({"bot": supplied})
+    assert result == supplied
+    result["llm"]["model"] = "changed"
+    assert supplied["llm"]["model"] == "custom"
+
+
+def test_runtime_bot_defaults_reject_legacy_assistant_before_bot() -> None:
+    from src.application.config_yaml import _bot_config_from_runtime_defaults
+
+    with pytest.raises(AgentToolError, match="legacy assistant defaults require migration to bot") as exc:
+        _bot_config_from_runtime_defaults({"assistant": {}, "bot": {"enabled": True}})
+    assert exc.value.code == "CONFIG_ERROR"

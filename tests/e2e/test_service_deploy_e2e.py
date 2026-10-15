@@ -55,6 +55,10 @@ def test_cli_service_render_returns_json(capsys, tmp_path: Path) -> None:
     assert payload["ok"] is True
     assert payload["data"]["summary"]["service_provider"] == "systemd"
     assert payload["data"]["env_file"] == str(tmp_path / "options-monitor.env")
+    enable = payload["data"]["commands"]["enable"]
+    assert "systemctl enable --now options-monitor-trade-intake-heartbeat.service" not in enable
+    assert "systemctl enable --now options-monitor-trade-intake-heartbeat.timer" in enable
+    assert "systemctl enable --now options-monitor-trade-intake.service" in enable
     profile = next(item for item in payload["data"]["files"] if item["relative_path"] == "service.profile.json")
     assert profile.get("content") is None
     assert payload["data"]["files"][0].get("content") is None

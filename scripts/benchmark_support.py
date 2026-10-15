@@ -47,6 +47,7 @@ from src.application.ledger.api import (
     open_position_ledger,
     trade_event_application_payload,
 )
+from src.application.payload_helpers import canonical_json_bytes as _canonical_json_bytes
 
 
 FIXTURE_SCHEMA = "data_storage_projection_fixture.v1"
@@ -401,16 +402,6 @@ def _events_sha256(events: Sequence[dict[str, Any]]) -> str:
 
 def _sha256_json(value: Any) -> str:
     return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
-
-
-def _canonical_json_bytes(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
 
 
 def _host_profile() -> dict[str, Any]:

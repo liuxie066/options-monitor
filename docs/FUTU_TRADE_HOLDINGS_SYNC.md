@@ -1331,7 +1331,7 @@ Wheel 产品规则由 [Wheel PRD](WHEEL_STRATEGY_PRD.md) 维护，不从本节�
 | F2 | 功能缺口，非旧契约 bug | `auto_intake.py::_resolve_with_wheel_intent` 仅向显式 open / sell / call 注入 Wheel intent writer；当前 §4.4 要求成交前 intent，用户普通券商操作不携带该信息，Put 也不走该入口。 | 统一成交后归属，支持双方向 active 分支；取消新 listener 对预先 intent 的依赖。 |
 | F3 | 扩展风险：两套决策顺序不同 | Wheel 在经济写入时决定，`_attach_combo_reconciliation_after_open` 在 applied open 后决定；Combo 排除带 leg_role/group 的 lot。若直接给旧 Wheel 路径加入宽匹配，先到的一腿会被抢占。尚无“当前无 intent 自动抢占”的事实，因为当前该功能不存在。 | 同一候选集合统一裁决，再进入互斥写入。 |
 | F4 | 语义风险，非投影缺陷 | `domain/domain/strategy_membership.py::resolve_option_strategy_membership` 将 short Put / short Call 默认分类为 csp / cc；字段本身不能证明已关联 Wheel，也不能证明资金或股票覆盖。 | 保留兼容分类；新增归属结果明确来源与关联对象，不用默认 strategy 判断已关联。 |
-| F5 | 自动复用边界 | `wheel/workflows.py::_validate_linkage_coverage` 仅核对 account/symbol/hash；现有 `test_manual_wheel_call_linkage_confirm_uses_narrow_adjust` 明确允许 status=insufficient、available=0 的人工归属。它是已成交归属修复，不是新开仓风控，不能据此声称人工路径有 bug，也不能直接用它证明自动关联安全。 | 自动路径单独完成全量容量验证；复用其窄 adjust 写入，不改变人工修复语义。 |
+| F5 | 自动复用边界 | `test_manual_wheel_call_linkage_confirm_uses_narrow_adjust` 明确允许 status=insufficient、available=0 的人工归属。它是已成交归属修复，不是新开仓风控，不能据此声称人工路径有 bug，也不能直接用它证明自动关联安全。 | 自动路径单独完成全量容量验证；复用其窄 adjust 写入，不改变人工修复语义。 |
 | F6 | 用户可见功能缺口 | Wheel projection 有 active option 即 phase=option_open；`wheel/scanning.py::run_wheel_call_scan` / Put scan 仅接纳 phase=ready，因此部分覆盖的剩余额度不会继续产生候选。 | 将扫描资格改为剩余可用容量判定，保留生命周期与完整性门槛。 |
 | F7 | 用户可见功能缺口 | `daily_decision_brief_service.py::_load_wheel_snapshot_family` 未透传 sell_limit 和报价信息；renderer 展示数量、合约、净权利金，无三态覆盖和建议价。共享 candidate_engine 已计算 sell_limit。 | 透传同一候选快照字段，不在 renderer 再算价格。 |
 | F8 | 回执语义缺口 | `trades/receipt.py::build_trade_intake_receipt_message` 的 Combo pair_intent 缺失提示不能回答 Wheel 归属；recorded_and_projected 仅说明经济投影，不能说明策略关联成功。 | 分开显示入账与归属；无 Combo 证据时不默认提示缺 pair_intent。 |
@@ -1582,8 +1582,19 @@ Daily Brief 透传同一 final candidate 中 `sell_limit`、`price_tick`、`bid`
 > 成交：已记录；策略：按规则关联 Wheel；CC 覆盖：100 / 300 股，部分覆盖；分支剩余 200 股；可开数量以账户容量检查为准。
 > 候选：卖出某到期日某行权价 Call；建议限价：取该候选 sell_limit；报价时间：取原快照；预计净权利金与上述价格同口径。
 
-初次回执可显示“成交已记录，策略关联待核实”；后续归属恢复不重发原成交回执，由下一次 Daily Brief 展示最新状态。
-已经 confirmed/accepted/unknown 的发送保持原规则；只对明确允许重试的发送失败走原恢复，不把归属重算当作补发授权。
+初次回执可显示“成交已记录，策略关联待核实”，原成交消息及其发送证据保持冻结。
+新规则生效后，自动归属、CLI 或 OM Bot 首次确认新 Combo 身份时，在同一账本事务内记录一条独立的
+“Combo 配对成功”回执意图，显示账户、标的、两腿方向/到期/行权价/数量和确认时间。
+每账户、稳定组合身份只有一个逻辑成功回执；复用现有通知 outbox、领取与批次发送，每组单独展示，
+不与平仓回执合并。只有两腿及归属证明完整入账才有资格，缓存 linked、提案和单腿成交均不能触发。
+发送前再次核验当前有效归属及冻结的账户、发送方和接收方身份；归属撤销或改变时抑制未发送回执。
+
+只为新确认建意图，不枚举或补发已有 confirmed 组合，不因重启、重复恢复或部署回灌历史成功组。
+通知或来源成交回执禁用、账户不在发送范围、路由身份不可证明时，确认仍可完成，但意图为 suppressed，
+后续启用通知不自动补发；旧 identity repair/adoption 不充当新配对确认。历史补发仍须另行批准。
+明确发送前失败沿既有有界退避重试并复用冻结批次身份；accepted/unknown 及发送开始后崩溃保持冻结，
+不盲目重发，也不声称网络无条件 exactly-once。实际 provider 回执的发送身份缺失或与冻结绑定不符时，
+不能声称这条成功回执已确认送达。Daily Brief 和归属查询继续展示最新账本状态。
 
 ### OM Bot 统一确认入口（拟实施，不绑定渠道）
 
@@ -1893,3 +1904,11 @@ Combo 归属记录已成交两腿的策略关系。确认时保留账户与成�
 若存在 Wheel 候选竞争，继续保留其账户覆盖与分支、意图占用校验及对应确认指纹。成交、配对、账户或相关占用变化仍须重新预览；两腿原子写入和重复请求幂等不变。券商期权证据不完整、过期或与账本不一致时继续阻止归属。
 
 Daily Brief 的归属待办保留原因与自动规则选择信息，区分系统处理中、需要选择、证据不足和归属冲突；成交回执复用相同提示。技术阻塞不会一律显示为用户尚未确认。修复上线前的生产归属恢复须单独按既有预览、授权和回读流程执行。
+
+### 归属容量未知与持久冲突
+
+`trade_attribution_capacity_check` 的 `evidence_complete` 区分容量已证明和证据不可用。完整且同账户、环境、市场的持仓与账本一致后，才可把股票或现金不足判为超限；缺失、陈旧、部分持仓、身份/账本不一致、不可用现金或汇率不按零处理。Wheel 候选传递 `capacity_evidence_complete`，账户/分支容量竞争的迟到冲突只消费已证明的容量；已验证意图剩余额度的矛盾仍可由账本独立证明。不可用证据继续阻止新归属/风险操作，保留已有人工单分支或多分支分摊。
+
+新持久归属冲突只包含触发成交、实际分支占用及已证明的未归属竞争；已归属其他分支的成交不能仅因可能候选被纳入。事务内复查后保存 `diagnostic`（裁决/候选原因、评估时间、容量语义摘要和快照来源标识），不把诊断字段作为授权或幂等身份。旧事件无该字段仍可读。已未解决的冲突不重复写入，也不因证据恢复自动解除；历史恢复仍须受控预览、明确授权及回读。
+
+已证明账户共享现金池不足时，冲突集合从同一锁定账本快照纳入 US/HK 实际已有 Wheel short Put 归属占用，保持 logical account、broker physical account 与 environment 一致。单市场归属视图不截断跨市场现金占用；不重新计算另一个现金池，不改市场授权，也不纳入仅存在可能候选的其他成交。

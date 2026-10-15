@@ -9,6 +9,15 @@ from functools import partial
 _first_text = partial(first_text, default="")
 
 
+def derive_session_id(channel: str, sender: str, conversation: str, authority_scope: str) -> str:
+    parts = (channel, sender, conversation, authority_scope)
+    if any(not isinstance(part, str) or not part.strip() or "\0" in part for part in parts):
+        raise ValueError("session identity parts must be nonempty and contain no NUL")
+    # Existing Host leases and cancellations use this digest; no Pi database is opened.
+    material = "om-pi-session-v1\0" + "\0".join(parts)
+    return "om_" + hashlib.sha256(material.encode()).hexdigest()
+
+
 def normalize_conversation_scope(
     *,
     channel: str | None,
@@ -77,6 +86,7 @@ def _route_target_key(target: str) -> str:
 
 __all__ = [
     "conversation_scope_from_notification_route",
+    "derive_session_id",
     "conversation_reference",
     "normalize_conversation_scope",
     "wechat_window_conversation_id",

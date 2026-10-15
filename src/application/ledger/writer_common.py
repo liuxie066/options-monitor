@@ -115,7 +115,7 @@ from src.application.ledger.event_codec import (
 from src.application.ledger.external_event_key import broker_external_event_key
 
 from src.application.ledger.position_projection_runtime import (
-    projection_diagnostics_summary as _projection_diagnostics_summary,
+    projection_diagnostics_summary,
     projection_refresh_result_from_runtime,
     run_position_projection_in_transaction,
 )
@@ -183,9 +183,6 @@ _ACTUAL_FEE_RAW_SOURCE_KEYS = (
     "broker_payload",
     "deal",
 )
-
-def projection_diagnostics_summary(diagnostics: Sequence[Any]) -> dict[str, Any]:
-    return _projection_diagnostics_summary(diagnostics)
 
 def safe_int_count(value: Any) -> int:
     try:

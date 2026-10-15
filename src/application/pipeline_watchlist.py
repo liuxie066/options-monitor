@@ -19,7 +19,7 @@ from src.infrastructure.exchange_rates import shared_exchange_rate_cache_path
 import signal
 from threading import Lock, current_thread, main_thread
 import time
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.config_profiles import ConfigProfileError, deep_merge
@@ -42,6 +42,9 @@ from src.application.prefilters import apply_prefilters
 from src.application.strategy_scan_status import (
     load_strategy_scan_status_index,
     publish_strategy_scan_status,
+    candidate_scope_reason,
+    strategy_status_path,
+    StrategyScanStatusError,
     publish_strategy_scan_status_index,
 )
 from src.application.candidate_snapshot_contract import candidate_run_mode_fields
@@ -64,6 +67,7 @@ from src.application.required_data_snapshot import (
     FrozenRequiredDataBatch,
     resolve_frozen_required_data_csv_bytes_batch,
 )
+from src.application.portfolio_assignment_scenario import recover_position_sizing_quotes
 from src.application.exchange_rate_loader import build_converter
 from src.application.prepared_option_positions_context import (
     exchange_rate_scalars_from_option_context,
@@ -77,20 +81,14 @@ from src.application.wheel.capacity import (
 )
 from src.application.wheel.config import resolve_wheel_config
 from src.application.wheel.scanning import run_wheel_call_scan, run_wheel_put_scan
+from src.application.symbol_monitoring import SymbolProcessingTimeout
 
 LIQUIDITY_COMMON_FIELDS = (
     'min_open_interest',
     'min_volume',
     'max_spread_ratio',
 )
-_CAPTURE_STATUSES = frozenset(
-    {"completed", "not_applicable", "failed", "incomplete", "unavailable"}
-)
 _COMBO_CAPTURE_VARIANTS = frozenset({"sp_lc", "cc_lp"})
-
-
-class SymbolProcessingTimeout(TimeoutError):
-    pass
 
 
 @contextmanager
@@ -101,7 +99,7 @@ def _enforce_symbol_timeout(
 ):
     timeout = float(timeout_sec or 0)
     if timeout <= 0:
-        yield
+        yield None
         return
 
     message = f"{symbol} symbol processing exceeded {timeout:g}s deadline"
@@ -112,8 +110,9 @@ def _enforce_symbol_timeout(
         and hasattr(signal, "ITIMER_REAL")
     )
     started = time.monotonic()
+    deadline = started + timeout
     if not can_interrupt:
-        yield
+        yield deadline
         if time.monotonic() - started > timeout:
             raise SymbolProcessingTimeout(message)
         return
@@ -127,7 +126,7 @@ def _enforce_symbol_timeout(
     signal.signal(signal.SIGALRM, _raise_timeout)
     signal.setitimer(signal.ITIMER_REAL, timeout)
     try:
-        yield
+        yield deadline
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_handler)
@@ -148,61 +147,6 @@ def _parse_symbols_whitelist(symbols_arg: str | None) -> set[str] | None:
     return items or None
 
 
-def _normalize_candidate_capture_status(
-    raw: dict[str, Any],
-) -> dict[str, Any]:
-    symbol = normalize_symbol_read(raw.get("symbol"))
-    if not symbol:
-        raise ValueError("candidate capture status symbol is missing")
-    mode = str(raw.get("strategy_mode") or "").strip().lower()
-    status = str(raw.get("status") or "").strip().lower()
-    if status not in _CAPTURE_STATUSES:
-        raise ValueError(
-            f"invalid candidate capture status: {symbol}:{mode or 'missing'}:{status or 'missing'}"
-        )
-    variant = str(raw.get("variant") or "").strip().lower()
-    if mode in {"put", "call"}:
-        if variant:
-            raise ValueError(
-                f"unexpected opening scan variant: {symbol}:{mode}:{variant}"
-            )
-        owner = "opening"
-        variant_value: str | None = None
-    elif mode == "combo_yield":
-        if variant not in _COMBO_CAPTURE_VARIANTS:
-            raise ValueError(
-                f"invalid combo yield scan variant: {symbol}:{variant or 'missing'}"
-            )
-        owner = variant
-        variant_value = variant
-    elif mode == "wheel":
-        if variant:
-            raise ValueError(f"unexpected Wheel scan variant: {symbol}:{variant}")
-        owner = "wheel"
-        variant_value = None
-    else:
-        raise ValueError(
-            f"unexpected candidate capture mode: {symbol}:{mode or 'missing'}"
-        )
-    return {
-        "symbol": symbol,
-        "strategy_mode": mode,
-        "direction": (
-            str(raw.get("direction") or "").strip().lower()
-            if owner == "wheel"
-            else ""
-        ),
-        "status": status,
-        "reason": str(raw.get("reason") or "").strip(),
-        "quote_snapshot_id": (
-            str(raw.get("quote_snapshot_id") or "").strip() or None
-        ),
-        "quote_receipt_relpath": (
-            str(raw.get("quote_receipt_relpath") or "").strip() or None
-        ),
-        "variant": variant_value,
-        "owner": owner,
-    }
 
 
 def _capture_scope_error_label(owner: str) -> str:
@@ -234,9 +178,7 @@ def _index_owner_statuses(
                 "strategy_mode": str(item.get("strategy_mode") or "").strip().lower(),
                 "direction": str(item.get("direction") or "").strip().lower(),
                 "status": str(item.get("status") or "").strip().lower(),
-                "reason": str(
-                    item.get("reason_code") or item.get("reason") or ""
-                ).strip(),
+                "reason": candidate_scope_reason(item) or "",
                 "quote_snapshot_id": (
                     str(item.get("snapshot_id") or "").strip() or None
                 ),
@@ -259,67 +201,6 @@ def _index_owner_statuses(
     return statuses_by_owner
 
 
-def _validate_captured_statuses(
-    *,
-    captured: list[dict[str, Any]],
-    statuses_by_owner: dict[str, list[dict[str, Any]]],
-) -> None:
-    expected = {
-        (
-            owner,
-            str(item["symbol"]),
-            str(item["strategy_mode"]),
-            str(item.get("direction") or ""),
-        ): item
-        for owner, rows in statuses_by_owner.items()
-        for item in rows
-    }
-    seen: set[tuple[str, str, str, str]] = set()
-    for raw in captured:
-        item = _normalize_candidate_capture_status(raw)
-        key = (
-            str(item["owner"]),
-            str(item["symbol"]),
-            str(item["strategy_mode"]),
-            str(item.get("direction") or ""),
-        )
-        if key not in expected:
-            raise ValueError(
-                f"unexpected {_capture_scope_error_label(str(item['owner']))} scan scope: "
-                f"{item['symbol']}:{item['strategy_mode']}:{item.get('direction') or '-'}"
-            )
-        if key in seen:
-            raise ValueError(
-                f"duplicate {_capture_scope_error_label(str(item['owner']))} scan scope: "
-                f"{item['symbol']}:{item['strategy_mode']}:{item.get('direction') or '-'}"
-            )
-        seen.add(key)
-        bound = expected[key]
-        for field in (
-            "status",
-            "reason",
-            "quote_snapshot_id",
-            "quote_receipt_relpath",
-        ):
-            if item.get(field) != bound.get(field):
-                raise ValueError(
-                    "candidate capture status does not match v2 status index: "
-                    f"{item['symbol']}:{item['strategy_mode']}:{field}"
-                )
-    required_completed = {
-        key
-        for key, item in expected.items()
-        if str(item.get("status") or "").strip().lower() == "completed"
-    }
-    missing = sorted(required_completed - seen)
-    if missing:
-        raise ValueError(
-            "completed candidate capture status is missing: "
-            + ", ".join(
-                f"{owner}:{symbol}:{mode}:{direction or '-'}"
-                for owner, symbol, mode, direction in missing
-            )
-        )
 
 
 def _validate_status_quote_bindings(
@@ -358,28 +239,6 @@ def _validate_status_quote_bindings(
         )
 
 
-def _yield_snapshot_status(
-    statuses: list[dict[str, Any]],
-) -> str | None:
-    if not statuses:
-        raise ValueError("combo yield capture statuses are missing")
-    observed = [
-        item for item in statuses if item["status"] != "not_applicable"
-    ]
-    if observed and all(item["reason"] == "market_closed" for item in observed):
-        return "market_closed"
-    states = {str(item["status"]) for item in statuses}
-    if states == {"completed"}:
-        return (
-            "partial_data"
-            if any(str(item.get("reason") or "") == "partial_data" for item in statuses)
-            else None
-        )
-    if states == {"not_applicable"}:
-        return "not_applicable"
-    if "completed" in states:
-        return "partial_data"
-    return "data_unavailable"
 
 
 def _partition_combo_evidence(
@@ -426,10 +285,6 @@ def _partition_combo_evidence(
             + ", ".join(f"{owner}:{symbol}" for owner, symbol in missing)
         )
     return out
-
-
-def _iter_watchlist(cfg: dict) -> Iterable[dict]:
-    return resolve_watchlist_config(cfg)
 
 
 def _resolve_profile_cfg(item: dict, profiles: dict) -> dict:
@@ -530,9 +385,6 @@ def run_watchlist_pipeline(
     build_symbols_digest_fn: Callable[[list[dict], int], object],
     quote_snapshot_ids: dict[str, str] | None = None,
     source_producer_run_id: str | None = None,
-    candidate_capture_status_sink_fn: (
-        Callable[[dict[str, Any]], None] | None
-    ) = None,
     opening_final_candidates_sink_fn: (
         Callable[[str, list[dict[str, Any]]], None] | None
     ) = None,
@@ -602,11 +454,17 @@ def run_watchlist_pipeline(
     portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = build_pipeline_context_fn(
         **context_kwargs,
     )
+    if not experience and isinstance(portfolio_ctx, dict) and required_data_snapshot_batch is not None:
+        portfolio_ctx = recover_position_sizing_quotes(
+            context=portfolio_ctx, runtime_config=cfg,
+            account=str((cfg.get("portfolio") or {}).get("account") or ""),
+            run_id=str(source_producer_run_id or ""), quotes=required_data_snapshot_batch,
+        )
     if opening_runtime_context_sink_fn is not None:
         opening_runtime_context_sink_fn(portfolio_ctx, option_ctx)
 
     watchlist_items = []
-    for item0 in _iter_watchlist(cfg):
+    for item0 in resolve_watchlist_config(cfg):
         if sym_whitelist is not None:
             s0 = normalize_symbol_read(item0.get('symbol'))
             if s0 and s0 not in sym_whitelist:
@@ -740,7 +598,7 @@ def run_watchlist_pipeline(
             )
         return rows
 
-    def _process_item(item0: dict) -> list[dict]:
+    def _process_item(item0: dict, deadline_monotonic: float | None = None) -> list[dict]:
         try:
             item = resolve_watchlist_item_runtime_config(
                 item=item0,
@@ -754,17 +612,13 @@ def run_watchlist_pipeline(
                 if symbol_key
                 else None
             )
-            advice_scan_kwargs: dict[str, Any] = {}
-            if (
-                candidate_capture_status_sink_fn is not None
-            ):
+            advice_scan_kwargs: dict[str, Any] = {"deadline_monotonic": deadline_monotonic}
+            if source_producer_run_id:
                 advice_scan_kwargs = {
                     "source_producer_run_id": (
                         source_producer_run_id
                     ),
-                    "candidate_capture_status_sink_fn": (
-                        candidate_capture_status_sink_fn
-                    ),
+                    "deadline_monotonic": deadline_monotonic,
                     "final_candidates_sink_fn": (
                         opening_final_candidates_sink_fn
                     ),
@@ -804,6 +658,7 @@ def run_watchlist_pipeline(
                     is_scheduled=is_scheduled,
                     runtime_config=cfg,
                     fetch_only=True,
+                    deadline_monotonic=deadline_monotonic,
                     experience=experience,
                 )
                 return []
@@ -824,7 +679,11 @@ def run_watchlist_pipeline(
             )
             validated_rows = normalize_processor_rows(processor_rows)
             return list(validated_rows)
+        except (SymbolProcessingTimeout, StrategyScanStatusError):
+            raise
         except Exception as e:
+            if required_data_snapshot_manifest is not None:
+                raise
             return _failure_rows(item0, e)
 
     def _process_item_with_timeout(item0: dict) -> list[dict]:
@@ -833,9 +692,19 @@ def run_watchlist_pipeline(
             with _enforce_symbol_timeout(
                 symbol=symbol,
                 timeout_sec=symbol_timeout_sec,
-            ):
-                return _process_item(item0)
-        except Exception as exc:
+            ) as deadline:
+                return _process_item(item0, deadline)
+        except SymbolProcessingTimeout as exc:
+            account = str((cfg.get("portfolio") or {}).get("account") or "").lower()
+            for scope in expected_strategy_statuses:
+                if scope["symbol"] != normalize_symbol_read(symbol):
+                    continue
+                path = strategy_status_path(report_dir=report_dir, symbol=scope["symbol"],
+                                            strategy_family=scope["strategy_family"])
+                if not path.exists():
+                    publish_strategy_scan_status(report_dir=report_dir, run_id=str(source_producer_run_id),
+                        account=account, market=scope["market"], symbol=scope["symbol"],
+                        strategy_family=scope["strategy_family"], status="failed", reason="symbol_processing_timeout")
             return _failure_rows(item0, exc)
 
     summary_rows: list[dict] = []
@@ -908,7 +777,6 @@ def run_watchlist_pipeline_default(
     from src.application.report_builders import build_symbols_digest, build_symbols_summary
 
     account_run_id = str(source_account_run_id or "").strip()
-    capture_statuses: list[dict[str, Any]] = []
     captured_final_candidates: dict[str, list[dict[str, Any]]] = {
         "put": [],
         "call": [],
@@ -921,9 +789,6 @@ def run_watchlist_pipeline_default(
     captured_runtime_context: dict[str, Any] = {}
     capture_lock = Lock()
 
-    def _capture_status(status: dict[str, Any]) -> None:
-        with capture_lock:
-            capture_statuses.append(dict(status))
 
     def _capture_final_candidates(
         mode: str,
@@ -1009,9 +874,6 @@ def run_watchlist_pipeline_default(
         ),
         source_producer_run_id=(
             account_run_id if candidate_capture_enabled else None
-        ),
-        candidate_capture_status_sink_fn=(
-            _capture_status if candidate_capture_enabled else None
         ),
         opening_final_candidates_sink_fn=(
             _capture_final_candidates if candidate_capture_enabled else None
@@ -1357,15 +1219,6 @@ def run_watchlist_pipeline_default(
                 candidate_count=(int(scope["candidate_count"]) if status == "completed" else None),
                 reason=(reason or None),
             )
-            capture_statuses.append(
-                {
-                    "symbol": scope["symbol"],
-                    "strategy_mode": "wheel",
-                    "direction": scope["direction"],
-                    "status": status,
-                    "reason": reason,
-                }
-            )
             wheel_expected.append(
                 {
                     "market": market,
@@ -1417,10 +1270,6 @@ def run_watchlist_pipeline_default(
         )
 
     statuses_by_owner = _index_owner_statuses(status_index)
-    _validate_captured_statuses(
-        captured=capture_statuses,
-        statuses_by_owner=statuses_by_owner,
-    )
     _validate_status_quote_bindings(statuses_by_owner)
     combo_evidence_by_owner = _partition_combo_evidence(
         captured_combo_evidence,
@@ -1668,9 +1517,6 @@ def run_watchlist_pipeline_default(
                 for evidence in sp_lc_evidence
                 for item in evidence.get("ranked_pairs") or []
             ),
-            opening_status=_yield_snapshot_status(
-                statuses_by_owner["sp_lc"]
-            ),
             run_mode=run_mode,
             sealed_at=captured_at,
         )
@@ -1689,9 +1535,6 @@ def run_watchlist_pipeline_default(
                 item
                 for evidence in cc_lp_evidence
                 for item in evidence.get("ranked_pairs") or []
-            ),
-            opening_status=_yield_snapshot_status(
-                statuses_by_owner["cc_lp"]
             ),
             run_mode=run_mode,
             sealed_at=captured_at,

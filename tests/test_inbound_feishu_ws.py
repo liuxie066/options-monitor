@@ -68,12 +68,30 @@ def _settings(**overrides: Any) -> FeishuWsSettings:
     return FeishuWsSettings(**base)
 
 
+def _record_reply_fixture(command_id: str, message_id: str, kwargs: dict[str, Any]) -> None:
+    from src.application.bot.config_scope import resolve_replay_authorization, BotConfigScopeError
+    from src.application.bot.control.contracts import BotInboundRequest
+    request = BotInboundRequest(text="fixture", channel="feishu", sender_id="ou_1", message_id=message_id,
+        conversation_id="feishu:ou_1", config_key=kwargs.get("config_key"), config_path=kwargs.get("config_path"),
+        bot_config_path=kwargs.get("bot_config_path"), reply_context=kwargs.get("bot_reply_options"))
+    try:
+        authorization = resolve_replay_authorization(request)
+    except (BotConfigScopeError, ValueError):
+        authorization = {**request.public_payload(), "bot_config_path": request.bot_config_path, "scope": None,
+                         "transport_identity": (request.reply_context or {}).get("reply_sender_identity")}
+        authorization.pop("schema_version", None)
+    InboundAuditStore(kwargs.get("audit_db")).record_result({"command_id": command_id, "channel": "feishu",
+        "sender_id": request.sender_id, "conversation_id": request.conversation_id, "message_id": message_id,
+        "raw_text": "fixture", "decision": "bot", "result_ok": True, "replay_authorization": authorization})
+
+
 def _bot_channel_service(*, message_id: str, command_id: str, markdown: str) -> Any:
     """A channel service whose handler returns one rendered bot reply."""
 
     class _BotChannelService:
         def handle_inbound(self, channel: str, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-            del channel, payload, kwargs
+            del channel, payload
+            _record_reply_fixture(command_id, message_id, kwargs)
             return build_response(
                 tool_name="inbound.feishu",
                 ok=True,
@@ -231,7 +249,8 @@ def test_feishu_ws_failed_business_response_remains_retryable(tmp_path: Path) ->
 
     class FakeChannelService:
         def handle_inbound(self, channel: str, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-            del channel, payload, kwargs
+            del channel, payload
+            _record_reply_fixture("cmd_failed", "msg_1", kwargs)
             return build_response(
                 tool_name="inbound.feishu",
                 ok=True,
@@ -363,9 +382,16 @@ def test_feishu_ws_ambiguous_card_response_retries_original_without_fallback(tmp
 
 
 @pytest.mark.parametrize("explicit_db", [True, False])
-def test_pending_feishu_reply_retries_stored_card_and_legacy_text(tmp_path: Path, explicit_db: bool) -> None:
+def test_pending_feishu_reply_retries_stored_card_and_legacy_text(tmp_path: Path, explicit_db: bool, monkeypatch, example_config_path) -> None:
     from src.application.channels.feishu_reply_renderer import render_feishu_conversation_reply
     from src.application.bot.host_store import BotHostStore
+
+    from src.application.bot.config_scope import resolve_replay_authorization
+    from src.application.bot.control.contracts import BotInboundRequest
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
+    def authorization(message_id):
+        return resolve_replay_authorization(BotInboundRequest(text="", channel="feishu", sender_id="ou_1",
+            config_key="us", message_id=message_id, reply_context={"reply_sender_identity": "app_1"}))
 
     database = tmp_path / ("audit.sqlite3" if explicit_db else "default-audit.sqlite3")
     audit_argument = str(database) if explicit_db else None
@@ -377,16 +403,17 @@ def test_pending_feishu_reply_retries_stored_card_and_legacy_text(tmp_path: Path
         max_chars=3500,
         render_route="bot",
     )
-    store.enqueue_reply(delivery_key="feishu:card", channel="feishu", payload=envelope)
+    store.enqueue_reply(delivery_key="feishu:card", channel="feishu", payload=envelope, authorization=authorization("msg_card"))
     card_calls: list[dict[str, Any]] = []
 
     card_retry = feishu_ws._retry_pending_feishu_reply(
         settings=FeishuWsSettings(
+            config_key="us", allowed_senders="feishu:ou_1",
             app_id="app_1",
             app_secret="secret_1",
             audit_db=audit_argument,
         ),
-        reply_fn=lambda **kwargs: card_calls.append(dict(kwargs)) or {"code": 0},
+        reply_fn=lambda **kwargs: card_calls.append(dict(kwargs)) or {"code": 0, "data": {"message_id": "card-receipt"}},
     )
 
     assert card_retry["ok"] is True
@@ -397,18 +424,21 @@ def test_pending_feishu_reply_retries_stored_card_and_legacy_text(tmp_path: Path
         delivery_key="feishu:legacy",
         channel="feishu",
         payload={"message_id": "msg_legacy", "text": "旧版文本", "reply_in_thread": False},
+        authorization=authorization("msg_legacy"),
     )
     legacy_calls: list[dict[str, Any]] = []
     legacy_retry = feishu_ws._retry_pending_feishu_reply(
         settings=FeishuWsSettings(
+            config_key="us", allowed_senders="feishu:ou_1",
             app_id="app_1",
             app_secret="secret_1",
             audit_db=audit_argument,
         ),
-        reply_fn=lambda **kwargs: legacy_calls.append(dict(kwargs)) or {"code": 0},
+        reply_fn=lambda **kwargs: legacy_calls.append(dict(kwargs)) or {"code": 0, "data": {"message_id": "text-receipt"}},
     )
 
     assert legacy_retry["ok"] is True
+    assert callable(legacy_calls[0].pop("before_send"))
     assert legacy_calls == [
         {
             "app_id": "app_1",
@@ -428,6 +458,7 @@ def test_feishu_ws_routes_inbound_through_channel_service() -> None:
     class FakeChannelService:
         def handle_inbound(self, channel: str, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
             inbound_calls.append({"channel": channel, "payload": payload, "kwargs": kwargs})
+            _record_reply_fixture("cmd_1", "msg_1", kwargs)
             return build_response(
                 tool_name="inbound.feishu",
                 ok=True,
@@ -483,7 +514,7 @@ def test_feishu_ws_can_route_through_assistant(tmp_path: Path) -> None:
             audit_db=str(tmp_path / "audit.sqlite3"),
             bot_enabled=True,
         ),
-        reply_fn=lambda **_kwargs: {"code": 0},
+        reply_fn=lambda **_kwargs: {"code": 0, "data": {"message_id": "reply-assistant"}},
         execute_tool_fn=_execute,
     )
 
@@ -673,7 +704,7 @@ def test_feishu_ws_replies_when_allowed_sender_hits_write_gate(monkeypatch, tmp_
 
     def _reply(**kwargs: Any) -> dict[str, Any]:
         replies.append(dict(kwargs))
-        return {"code": 0}
+        return {"code": 0, "data": {"message_id": "write-gate-receipt"}}
 
     out = handle_feishu_ws_event(
         _message_payload(
@@ -877,13 +908,15 @@ def test_feishu_ws_check_requires_config_scope() -> None:
 def test_feishu_ws_serve_uses_background_worker(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
     reactions: list[dict[str, Any]] = []
+    replied = threading.Event()
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         calls.append((tool_name, payload))
         return build_response(tool_name=tool_name, ok=True, data={"status": "ok"})
 
     def _reply(**_kwargs: Any) -> dict[str, Any]:
-        return {"code": 0}
+        replied.set()
+        return {"code": 0, "data": {"message_id": "worker-receipt"}}
 
     def _reaction(**kwargs: Any) -> dict[str, Any]:
         reactions.append(dict(kwargs))
@@ -891,6 +924,7 @@ def test_feishu_ws_serve_uses_background_worker(tmp_path: Path) -> None:
 
     def _start_client(**kwargs: Any) -> None:
         kwargs["on_event"](_message_payload(text="/status"))
+        assert replied.wait(2)
 
     serve_feishu_ws(
         _settings(audit_db=str(tmp_path / "audit.sqlite3")),
@@ -1458,7 +1492,8 @@ def test_feishu_ws_client_converts_sdk_event_model() -> None:
 @pytest.mark.parametrize('explicit_db', [False, True])
 @pytest.mark.parametrize('access', ['allowed', 'unauthorized', 'disabled'])
 @pytest.mark.parametrize('text', ['调查账户问题', '/income sy ytd'])
-def test_queued_feishu_budget_terminal_reply_is_authorized_and_idempotent(tmp_path, monkeypatch, explicit_db, access, text):
+def test_queued_feishu_budget_terminal_reply_is_authorized_and_idempotent(tmp_path, monkeypatch, explicit_db, access, text, example_config_path):
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
     from src.application.bot.control.audit import InboundAuditStore
     from src.application.bot.host_store import BotHostStore
     def forbidden(*args, **kwargs):
@@ -1468,9 +1503,10 @@ def test_queued_feishu_budget_terminal_reply_is_authorized_and_idempotent(tmp_pa
     monkeypatch.setattr('src.application.bot.control.inbound_service._run_bot', forbidden)
     replies = []
     def reply(**kwargs):
+        kwargs.pop('before_send', None)
         replies.append(kwargs)
         return {'code': 0, 'data': {'message_id': 'terminal-reply'}}
-    settings = FeishuWsSettings(app_id='test', app_secret='test',
+    settings = FeishuWsSettings(config_key="us", app_id='test', app_secret='test',
         audit_db=str(tmp_path / 'explicit.sqlite3') if explicit_db else None,
         allowed_senders='feishu:ou_1' if access != 'unauthorized' else 'feishu:other',
         reply_enabled=access != 'disabled')

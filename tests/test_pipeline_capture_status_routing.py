@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.cash_evidence_helpers import cash_portfolio
+
 from pathlib import Path
 from typing import Any
 
@@ -200,8 +202,6 @@ def _run_default_capture(
         }
         published: set[tuple[str, str]] = set()
         for item in statuses:
-            if emit_status_capture:
-                kwargs["candidate_capture_status_sink_fn"](item)
             mode = str(item.get("strategy_mode") or "").strip().lower()
             family = {
                 "put": "sell_put",
@@ -441,7 +441,7 @@ def _run_wheel_scan_failure_capture(
         path.write_text("{}\n", encoding="utf-8")
 
     symbols = sorted(reserved_by_symbol)
-    portfolio_context = {
+    portfolio_context = cash_portfolio({
         "capacity_authority": {
             "status": "available",
             "logical_account": "lx",
@@ -459,7 +459,7 @@ def _run_wheel_scan_failure_capture(
             for symbol in symbols
         },
         "exchange_rates": {},
-    }
+    }, account='lx', account_id='10001')
     option_context = {
         "decision_snapshot_status": "trusted",
         "locked_shares_status": "available",
@@ -501,16 +501,6 @@ def _run_wheel_scan_failure_capture(
                 candidate_count=1,
                 snapshot_id="quote-r16",
                 receipt_relpath="quotes/quote-r16/receipt.json",
-            )
-            kwargs["candidate_capture_status_sink_fn"](
-                {
-                    "symbol": symbol,
-                    "strategy_mode": "call",
-                    "status": "completed",
-                    "reason": None,
-                    "quote_snapshot_id": "quote-r16",
-                    "quote_receipt_relpath": "quotes/quote-r16/receipt.json",
-                }
             )
             expected.append(
                 {
@@ -800,7 +790,7 @@ def _run_full_symbol_capture(
         "opening_scans": [],
         "combo_scans": [],
     }
-    portfolio_ctx = {
+    portfolio_ctx = cash_portfolio({
         "portfolio_source_name": "futu",
         "capacity_authority": {
             "status": "available",
@@ -823,7 +813,7 @@ def _run_full_symbol_capture(
             else {}
         ),
         "exchange_rates": {},
-    }
+    }, account='lx', account_id='10001')
     option_ctx = {
         "context_status": "available",
         "locked_shares_status": "available",
@@ -908,6 +898,10 @@ def _run_full_symbol_capture(
             opening_calls = observed["opening_scans"]
             assert isinstance(opening_calls, list)
             opening_calls.append(mode)
+            if scenario == "success_empty" and mode == "put":
+                from src.application.sell_put_steps import run_sell_put_scan_and_summarize
+
+                return run_sell_put_scan_and_summarize(**kwargs)
             if scenario == "failure":
                 raise RuntimeError(f"{mode} scan failed for test")
             final_sink = kwargs.get("final_candidates_sink_fn")
@@ -922,7 +916,7 @@ def _run_full_symbol_capture(
                 "candidate_count": 0,
                 "_strategy_status": "completed",
             }
-            if scenario == "empty":
+            if scenario in {"empty", "success_empty"}:
                 summary["_strategy_reason"] = "no_candidate"
             return [summary] if mode == "put" else summary
 
@@ -1591,27 +1585,22 @@ def test_default_pipeline_preserves_completed_partial_combo_reason(
     ("statuses", "pairs", "error"),
     [
         (
-            [_status("0700.HK", "combo", "completed")],
-            [],
-            "unexpected candidate capture mode",
-        ),
-        (
             [
                 _status("0700.HK", "combo_yield", "completed", variant="sp_lc"),
                 _status("0700.HK", "combo_yield", "completed", variant="sp_lc"),
             ],
             [],
-            "duplicate combo yield scan scope",
+            "duplicate combo yield evidence scope",
         ),
         (
             [_status("9992.HK", "combo_yield", "completed", variant="sp_lc")],
             [],
-            "unexpected combo yield scan scope",
+            "unexpected combo yield evidence scope",
         ),
         (
             [_status("0700.HK", "combo_yield", "completed", variant="other")],
             [],
-            "invalid combo yield scan variant",
+            "invalid combo yield evidence variant",
         ),
         (
             [_status("0700.HK", "combo_yield", "completed", variant="sp_lc")],
@@ -1688,15 +1677,15 @@ def test_default_pipeline_rejects_invalid_capture_contracts(
                 _status("0700.HK", "put", "completed"),
                 _status("0700.HK", "combo_yield", "failed", variant="sp_lc"),
             ],
-            "completed candidate capture status is missing",
             None,
+            "data_unavailable",
         ),
     ],
     ids=[
         "rejects_cross_owner_quote_binding_conflict",
         "rejects_completed_combo_without_typed_evidence",
         "allows_failed_combo_without_typed_evidence",
-        "rejects_completed_scope_without_status_capture",
+        "accepts_owner_status_without_duplicate_callback",
     ],
 )
 def test_default_pipeline_enforces_combo_capture_contract(
@@ -1739,3 +1728,25 @@ def test_default_pipeline_enforces_combo_capture_contract(
         account="lx",
     )
     assert snapshot["opening_status"] == opening_status
+
+
+def test_real_success_empty_reason_is_projected_once_into_sealed_bundle(monkeypatch, tmp_path):
+    from src.application.candidate_snapshot_manifest import load_candidate_snapshot_bundle
+    _run_full_symbol_capture(monkeypatch, tmp_path, market="US", symbol="TOST", variant="sp_lc",
+                             scenario="success_empty", opening_mode="put", combo_enabled=False)
+    bundle = load_candidate_snapshot_bundle(base=tmp_path, run_id=RUN_ID, account="lx")
+    status = bundle["status_index"]["items"][0]
+    assert status["reason"] == "no_candidate"
+    assert status["reason_code"] == "no_contract_rows"
+    assert bundle["owners"]["opening"]["scope_results"][0]["reason_code"] == "no_contract_rows"
+
+
+def test_cc_lp_owner_aggregates_not_applicable_and_failed_without_caller_override(monkeypatch, tmp_path):
+    from src.application.cc_lp_candidate_snapshot import load_cc_lp_candidate_snapshot
+    _run_default_capture(monkeypatch, tmp_path,
+        symbols=[_symbol_config("0700.HK", variant="cc_lp"), _symbol_config("9992.HK", variant="cc_lp")],
+        statuses=[_status("0700.HK", "put", "completed"), _status("9992.HK", "put", "completed"),
+                  _status("0700.HK", "combo_yield", "not_applicable", variant="cc_lp", reason="no_covered_stock"),
+                  _status("9992.HK", "combo_yield", "failed", variant="cc_lp", reason="combo_yield_scan_failed")])
+    snapshot = load_cc_lp_candidate_snapshot(base=tmp_path, run_id=RUN_ID, account="lx")
+    assert snapshot["opening_status"] == "partial_data"

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Iterable
@@ -153,28 +152,6 @@ def _finite_decimal(
         numeric = to_decimal(value, field_name=field_name)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{field_name} must be numeric") from exc
-    if positive and numeric <= 0:
-        raise ValueError(f"{field_name} must be > 0")
-    if nonnegative and numeric < 0:
-        raise ValueError(f"{field_name} must be >= 0")
-    return numeric
-
-
-def _finite_float(
-    value: Any,
-    *,
-    field_name: str,
-    positive: bool = False,
-    nonnegative: bool = False,
-) -> float:
-    if isinstance(value, bool):
-        raise ValueError(f"{field_name} must be numeric")
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(f"{field_name} must be numeric") from exc
-    if not math.isfinite(numeric):
-        raise ValueError(f"{field_name} must be finite")
     if positive and numeric <= 0:
         raise ValueError(f"{field_name} must be > 0")
     if nonnegative and numeric < 0:

@@ -3,7 +3,6 @@ from __future__ import annotations
 from domain.domain.ledger.position_fields import _UNSET
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
 import json
@@ -15,7 +14,6 @@ from domain.domain.fee_calc import (
     calc_futu_stock_fee,
 )
 from domain.domain.ledger.position_fields import (
-    effective_expiration_ymd,
     normalize_account,
     normalize_broker,
     norm_symbol,
@@ -61,12 +59,6 @@ from src.application.positions.context_cache import (
 from src.application.wheel.config import resolve_wheel_config
 
 
-def _ms_to_iso(value: int | None) -> str:
-    if value is None:
-        return datetime.now(timezone.utc).isoformat()
-    return datetime.fromtimestamp(int(value) / 1000, tz=timezone.utc).isoformat()
-
-
 def _lot_contract_value(fields: Mapping[str, Any], nested_key: str, *flat_keys: str) -> Any:
     """One lot-payload contract value: the nested ``contract_key`` key first, flat after.
 
@@ -93,9 +85,8 @@ def _apply_result_payload(
     lot_id: str,
     result: dict[str, Any],
     payload: dict[str, Any],
-    native_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    del lot_id, native_event
+    del lot_id
     idempotent_duplicate = result.get("created") is False
     account = payload.get("account")
     if not account:
@@ -814,31 +805,12 @@ def execute_manual_open(
         request_id=request_id_value,
     ).to_payload()
     result = payload["result"]
-    fields = payload["fields"]
     lot_id = _manual_open_lot_id(result)
     return _apply_result_payload(
         repo,
         lot_id=lot_id,
         result=result,
         payload=payload,
-        native_event={
-            "event_id": result.get("event_id"),
-            "event_kind": "open_trade",
-            "event_at_utc": _ms_to_iso(fields.get("opened_at")),
-            "source_name": "cli_manual_open",
-            "source_type": "manual_trade_event",
-            "broker": broker,
-            "account": account,
-            "symbol": symbol,
-            "option_type": option_type,
-            "side": side,
-            "strike": fields.get("strike"),
-            "expiration_ymd": effective_expiration_ymd(fields) or expiration_ymd,
-            "currency": fields.get("currency"),
-            "multiplier": fields.get("multiplier"),
-            "contracts": int(contracts),
-            "snapshot_lot_id": lot_id or None,
-        },
     )
 
 
@@ -901,31 +873,11 @@ def execute_manual_close(
     if "close_target_resolution" in close_payload and "close_target_resolution" not in match_info:
         match_info["close_target_resolution"] = close_payload["close_target_resolution"]
     payload = close_payload | {"match": match_info}
-    ledger_preflight = close_payload["ledger_preflight"]
-    is_duplicate = result.get("created") is False
     return _apply_result_payload(
         repo,
         lot_id=resolved_lot_id,
         result=result,
         payload=payload,
-        native_event=None if is_duplicate else {
-            "event_id": result.get("event_id"),
-            "event_kind": "close_trade",
-            "event_at_utc": _ms_to_iso(int(ledger_preflight["event_time_ms"])),
-            "source_name": "cli_manual_close",
-            "source_type": "manual_trade_event",
-            "broker": close_payload["fields"].get("broker"),
-            "account": close_payload["fields"].get("account"),
-            "symbol": close_payload["fields"].get("symbol"),
-            "option_type": close_payload["fields"].get("option_type"),
-            "side": close_payload["fields"].get("side"),
-            "strike": close_payload["fields"].get("strike"),
-            "expiration_ymd": effective_expiration_ymd(close_payload["fields"]),
-            "currency": close_payload["fields"].get("currency"),
-            "multiplier": close_payload["fields"].get("multiplier"),
-            "contracts": int(contracts_to_close),
-            "snapshot_lot_id": resolved_lot_id,
-        },
     )
 
 
@@ -1008,7 +960,6 @@ def execute_manual_assignment(
         lot_id=lot_id or "",
         result=result,
         payload=out,
-        native_event=None,
     )
 
 
@@ -1059,7 +1010,6 @@ def execute_manual_exercise(
         lot_id=lot_id or "",
         result=result,
         payload=out,
-        native_event=None,
     )
 
 
@@ -1274,7 +1224,6 @@ def _execute_assigned_stock_sale(
         lot_id=lot_id,
         result=result,
         payload=applied,
-        native_event=None,
     )
 
 
@@ -1430,7 +1379,6 @@ def _execute_broker_assigned_stock_sale_locked(
         lot_id=str(result["sale_event"].get("target_stock_lot_id") or ""),
         result=result,
         payload=applied,
-        native_event=None,
     )
 
 
@@ -1483,32 +1431,9 @@ def execute_manual_adjust(
         strategy_snapshot=strategy_snapshot,
     ).to_payload()
     result = adjust_payload["result"]
-    fields = adjust_payload["fields"]
-    patch = adjust_payload["patch"]
-    raw_target_contracts = patch.get("contracts_open")
-    if raw_target_contracts is None:
-        raw_target_contracts = fields.get("contracts_open") or fields.get("contracts") or 0
     return _apply_result_payload(
         repo,
         lot_id=lot_id,
         result=result,
         payload=adjust_payload,
-        native_event={
-            "event_id": result.get("event_id"),
-            "event_kind": "manual_adjustment",
-            "event_at_utc": _ms_to_iso(int(adjust_payload["ledger_preflight"]["event_time_ms"])),
-            "source_name": "cli_manual_adjust",
-            "source_type": "manual_trade_event",
-            "broker": fields.get("broker"),
-            "account": fields.get("account"),
-            "symbol": fields.get("symbol"),
-            "option_type": fields.get("option_type"),
-            "side": fields.get("side"),
-            "strike": patch.get("strike", fields.get("strike")),
-            "expiration_ymd": expiration_ymd or effective_expiration_ymd(fields),
-            "currency": fields.get("currency"),
-            "multiplier": patch.get("multiplier", fields.get("multiplier")),
-            "target_contracts": int(raw_target_contracts or 0),
-            "snapshot_lot_id": lot_id,
-        },
     )

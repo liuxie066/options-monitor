@@ -25,9 +25,12 @@ from typing import Any, Iterable, Mapping
 from domain.domain.symbol_identity import OPTION_CODE_RE
 from src.infrastructure.opend_retcodes import OpenDRetCode, classify_opend_error
 from src.infrastructure.net_port import port_open
+from src.infrastructure.futu_dataframe import futu_dataframe_records
 
 
 LOG = logging.getLogger(__name__)
+
+FUTU_QUERY_CONNECT_TIMEOUT_SEC = 8.0
 
 FUTU_EARNINGS_CALENDAR_MIN_VERSION = "10.9.6908"
 FUTU_EARNINGS_CALENDAR_CAPABILITY = "get_earnings_calendar"
@@ -266,6 +269,59 @@ def _ensure_futu_api_importable() -> None:
         raise ModuleNotFoundError("No module named 'futu'") from exc
 
 
+def _wait_for_futu_context(context: Any, *, host: str, port: int) -> Any:
+    try:
+        context.set_sync_query_connect_timeout(FUTU_QUERY_CONNECT_TIMEOUT_SEC)
+        deadline = time.monotonic() + FUTU_QUERY_CONNECT_TIMEOUT_SEC
+        while not context.get_sync_conn_id():
+            if time.monotonic() >= deadline:
+                raise FutuGatewayTransientError(f"OpenD connect timeout: {host}:{port}")
+            time.sleep(0.05)
+        return context
+    except BaseException:
+        try:
+            context.close()
+        except Exception:
+            pass
+        raise
+
+
+def build_futu_quote_context(*, host: str, port: int) -> Any:
+    """Create a quote context with bounded handshake and reconnect waits."""
+
+    _ensure_futu_api_importable()
+    import futu
+
+    if not port_open(host, port):
+        raise FutuGatewayUnreachableError(f"OpenD unreachable: {host}:{port}")
+    context = futu.OpenQuoteContext(host=host, port=port, is_async_connect=True)
+    return _wait_for_futu_context(context, host=host, port=port)
+
+
+def build_futu_trade_context(*, host: str, port: int, is_encrypt: bool | None = None) -> Any:
+    _ensure_futu_api_importable()
+    import futu
+
+    if not port_open(host, port):
+        raise FutuGatewayUnreachableError(f"OpenD unreachable: {host}:{port}")
+
+    class AsyncOpenSecTradeContext(futu.OpenSecTradeContext):
+        def _init_connect_sync(self):
+            # shortcut: trade SDK lacks async construction; verify these hooks on SDK upgrades.
+            if getattr(self, "_om_initial_connect", True):
+                self._om_initial_connect = False
+                self.set_sync_query_connect_timeout(FUTU_QUERY_CONNECT_TIMEOUT_SEC)
+                self._wait_reconnect(0)
+                return futu.RET_OK
+            return super()._init_connect_sync()
+
+    kwargs = {"host": host, "port": port}
+    if is_encrypt is not None:
+        kwargs["is_encrypt"] = is_encrypt
+    context = AsyncOpenSecTradeContext(**kwargs)
+    return _wait_for_futu_context(context, host=host, port=port)
+
+
 class _FutuAPIBackend:
     def __init__(self, *, host: str, port: int) -> None:
         self.host = str(host)
@@ -275,17 +331,7 @@ class _FutuAPIBackend:
 
     def _ensure_quote_client(self) -> Any:
         if self._quote_client is None:
-            _ensure_futu_api_importable()
-            import futu
-
-            # ponytail: port pre-check leaves a <1s race window before connect;
-            # if OpenD dies inside it we still enter the SDK reconnect loop.
-            # Revisit with is_async_connect only if that window is ever hit.
-            if not port_open(self.host, self.port):
-                raise FutuGatewayUnreachableError(
-                    f"OpenD unreachable: {self.host}:{self.port}"
-                )
-            self._quote_client = futu.OpenQuoteContext(host=self.host, port=self.port)
+            self._quote_client = build_futu_quote_context(host=self.host, port=self.port)
             LOG.info(
                 "futu_sdk_client_created event=client_created capability=quote host=%s port=%s",
                 self.host,
@@ -295,14 +341,7 @@ class _FutuAPIBackend:
 
     def _ensure_trade_client(self) -> Any:
         if self._trade_client is None:
-            _ensure_futu_api_importable()
-            import futu
-
-            if not port_open(self.host, self.port):
-                raise FutuGatewayUnreachableError(
-                    f"OpenD unreachable: {self.host}:{self.port}"
-                )
-            self._trade_client = futu.OpenSecTradeContext(host=self.host, port=self.port)
+            self._trade_client = build_futu_trade_context(host=self.host, port=self.port)
             LOG.info(
                 "futu_sdk_client_created event=client_created capability=broker host=%s port=%s",
                 self.host,
@@ -382,7 +421,7 @@ class _FutuAPIClient:
         to_dict = getattr(value, "to_dict", None)
         if callable(to_dict):
             try:
-                rows = to_dict(orient="records")
+                rows = futu_dataframe_records(value)
             except TypeError:
                 rows = to_dict()
             if isinstance(rows, list):
@@ -431,9 +470,10 @@ class _FutuAPIClient:
         rows: list[dict[str, Any]] = []
         pages = 0
         page_req_key = query.pop("page_req_key", None)
+        seen_page_keys = [] if page_req_key in (None, "", b"") else [page_req_key]
         while True:
             call_kwargs = dict(query)
-            if page_req_key not in (None, ""):
+            if page_req_key not in (None, "", b""):
                 call_kwargs["page_req_key"] = page_req_key
             result = method(**call_kwargs)
             pages += 1
@@ -446,8 +486,11 @@ class _FutuAPIClient:
             else:
                 rows.extend(self._rows(result))
                 next_key = None
-            if not paginated or next_key in (None, ""):
+            if not paginated or next_key in (None, "", b""):
                 break
+            if next_key in seen_page_keys:
+                raise RuntimeError("Futu query pagination repeated a page key")
+            seen_page_keys.append(next_key)
             if pages >= 100:
                 raise RuntimeError(
                     "Futu query pagination exceeded 100 pages"
@@ -1094,7 +1137,7 @@ def build_ready_futu_gateway(
     try:
         gateway.ensure_quote_ready()
         return gateway
-    except Exception:
+    except BaseException:
         gateway.close()
         raise
 
@@ -1143,7 +1186,7 @@ def build_ready_futu_broker_gateway(
             trd_env=trd_env,
         )
         return gateway
-    except Exception:
+    except BaseException:
         gateway.close()
         raise
 
@@ -1210,34 +1253,27 @@ def retry_futu_gateway_call(
     delay = float(retry_base_delay_sec or 0.5)
     max_delay = float(retry_max_delay_sec or 6.0)
     budget = float(retry_time_budget_sec or 0.0)
-    last_err = None
 
     while True:
         attempt += 1
         try:
             return fn()
         except Exception as exc:
-            last_err = exc
+            code = classify_opend_error(exc)
+            if attempt >= int(retry_max_attempts) or not code.is_retryable:
+                raise
 
-        if attempt >= int(retry_max_attempts):
-            raise RuntimeError(f"{what} failed after {attempt} attempts: {last_err}")
+            sleep_s = min(max_delay, max(0.0, delay))
+            if code.is_rate_limit:
+                sleep_s = max(sleep_s, 2.0)
+            sleep_s += random.uniform(0.0, 0.2)
+            if budget > 0 and time.monotonic() - t0 + sleep_s >= budget:
+                raise
 
-        if isinstance(last_err, FutuGatewayAuthExpiredError):
-            raise RuntimeError(f"{what} failed (auth expired): {last_err}")
-        if isinstance(last_err, FutuGatewayNeed2FAError):
-            raise RuntimeError(f"{what} failed (non-transient): {last_err}")
-        if (not isinstance(last_err, FutuGatewayTransientError)) and (not isinstance(last_err, FutuGatewayRateLimitError)):
-            raise RuntimeError(f"{what} failed (non-transient): {last_err}")
-
-        sleep_s = min(max_delay, max(0.0, delay))
-        if isinstance(last_err, FutuGatewayRateLimitError):
-            sleep_s = max(sleep_s, 2.0)
-
-        if (budget > 0) and ((time.monotonic() - t0) + sleep_s > budget):
-            raise RuntimeError(f"{what} failed (retry budget {budget}s exceeded): {last_err}")
-
-        if not quiet:
-            print(f"[WARN] {what} failed (attempt {attempt}/{retry_max_attempts}): {last_err}; sleep {sleep_s:.1f}s")
-
-        time.sleep(sleep_s + random.uniform(0.0, 0.2))
-        delay = min(max_delay, delay * 2.0)
+            if not quiet:
+                print(f"[WARN] {what} failed (attempt {attempt}/{retry_max_attempts}): {exc}; sleep {sleep_s:.1f}s")
+            time.sleep(sleep_s)
+            # Scheduler delays must not start another request after the budget.
+            if budget > 0 and time.monotonic() - t0 >= budget:
+                raise
+            delay = min(max_delay, delay * 2.0)

@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from math import isfinite
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from src.application.bot.contracts import (
     AppEvent,
@@ -22,6 +22,8 @@ from src.infrastructure.private_storage import connect_private_sqlite, private_p
 
 REPLY_DELIVERY_LEASE_SECONDS = 300
 REPLY_CAPABILITY_TTL_SECONDS = 24 * 60 * 60
+FEISHU_REPLY_REPLAY_SECONDS = 60 * 60
+REPLY_OUTCOME_UNKNOWN = "delivery_outcome_unknown"
 
 
 class BotHostStore:
@@ -318,7 +320,7 @@ class BotHostStore:
                     reply = reply_builder(result)
                 if reply:
                     self._enqueue_reply(conn, delivery_key=reply['delivery_key'], channel=reply['channel'],
-                        payload=reply['payload'], session_key=row['session_key'], run_id=result.run_id)
+                        payload=reply['payload'], authorization=reply.get('authorization'), session_key=row['session_key'], run_id=result.run_id)
                 if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
                     raise TimeoutError('answer persistence exceeded interaction deadline')
         return result
@@ -488,20 +490,24 @@ class BotHostStore:
         payload: dict[str, Any],
         session_key: str | None = None,
         run_id: str | None = None,
+        authorization: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._ensure_schema()
         with self._connect() as conn:
-            return self._enqueue_reply(conn, delivery_key=delivery_key, channel=channel, payload=payload, session_key=session_key, run_id=run_id)
+            return self._enqueue_reply(conn, delivery_key=delivery_key, channel=channel, payload=payload, authorization=authorization, session_key=session_key, run_id=run_id)
 
     @staticmethod
-    def _enqueue_reply(conn: sqlite3.Connection, *, delivery_key: str, channel: str, payload: dict[str, Any], session_key: str | None = None, run_id: str | None = None) -> dict[str, Any]:
+    def _enqueue_reply(conn: sqlite3.Connection, *, delivery_key: str, channel: str, payload: dict[str, Any], session_key: str | None = None, run_id: str | None = None, authorization: dict[str, Any] | None = None) -> dict[str, Any]:
+        from src.application.bot.config_scope import freeze_reply_authorization
+
+        frozen = freeze_reply_authorization(authorization, channel=channel, payload=payload)
         now = utc_now_iso()
-        conn.execute(
+        cursor = conn.execute(
             """
             INSERT INTO bot_reply_outbox (
                 delivery_key, channel, session_key, run_id, payload_json, status,
-                attempt_count, next_attempt_at, last_error, created_at, updated_at, delivered_at
-            ) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?, NULL)
+                attempt_count, next_attempt_at, last_error, created_at, updated_at, delivered_at, authorization_json
+            ) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, NULL, ?, ?, NULL, ?)
             ON CONFLICT(delivery_key) DO NOTHING
             """,
             (
@@ -513,6 +519,7 @@ class BotHostStore:
                 now,
                 now,
                 now,
+                json.dumps(frozen, ensure_ascii=False, sort_keys=True) if frozen else None,
             ),
         )
         conn.row_factory = sqlite3.Row
@@ -520,7 +527,7 @@ class BotHostStore:
             "SELECT * FROM bot_reply_outbox WHERE delivery_key = ?",
             (str(delivery_key),),
         ).fetchone()
-        return dict(row) if row is not None else {}
+        return {**dict(row), "enqueued_new": bool(cursor.rowcount)} if row is not None else {}
 
     def reply_payload(self, delivery_key: str) -> dict[str, Any]:
         self._ensure_schema()
@@ -534,23 +541,22 @@ class BotHostStore:
         delivery_key: str | None = None,
         channel: str | None = None,
         before: str | None = None,
+        authorize: Callable[[dict[str, Any]], bool] | None = None,
     ) -> dict[str, Any] | None:
         self._ensure_schema()
         now = before or utc_now_iso()
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """UPDATE bot_reply_outbox SET last_error = 'delivery_outcome_unknown',
+                   status = CASE WHEN status = 'delivering' THEN status ELSE 'delivery_unknown' END
+                   WHERE channel = 'feishu' AND attempt_count > 0 AND replay_until IS NULL
+                     AND status IN ('pending', 'retryable_failed', 'delivering')"""
+            )
             capability_cutoff = (
                 datetime.now(timezone.utc) - timedelta(seconds=REPLY_CAPABILITY_TTL_SECONDS)
             ).isoformat()
-            conn.execute(
-                """
-                UPDATE bot_reply_outbox
-                SET status = 'expired', payload_json = '{}', last_error = NULL, updated_at = ?
-                WHERE status IN ('pending', 'retryable_failed') AND created_at <= ?
-                """,
-                (utc_now_iso(), capability_cutoff),
-            )
             delivery_cutoff = (
                 datetime.fromisoformat(str(now).replace("Z", "+00:00"))
                 - timedelta(seconds=REPLY_DELIVERY_LEASE_SECONDS)
@@ -559,10 +565,34 @@ class BotHostStore:
                 """
                 UPDATE bot_reply_outbox
                 SET status = 'retryable_failed', next_attempt_at = ?,
-                    last_error = 'delivery lease expired', updated_at = ?
+                    last_error = CASE WHEN channel = 'feishu' THEN 'delivery_outcome_unknown'
+                                      ELSE 'delivery lease expired' END, updated_at = ?
                 WHERE status = 'delivering' AND updated_at <= ?
                 """,
                 (now, now, delivery_cutoff),
+            )
+            conn.execute(
+                """
+                UPDATE bot_reply_outbox SET status = 'delivery_unknown', updated_at = ?
+                WHERE channel = 'feishu' AND status IN ('pending', 'retryable_failed')
+                  AND last_error = 'delivery_outcome_unknown'
+                  AND (julianday(replay_until) IS NULL OR julianday(replay_until) <= julianday(?))
+                """,
+                (now, now),
+            )
+            # Recovered leases must pass the same capability TTL as pending replies.
+            conn.execute(
+                """
+                UPDATE bot_reply_outbox
+                SET status = CASE WHEN channel = 'feishu' AND last_error = 'delivery_outcome_unknown'
+                                  THEN 'delivery_unknown' ELSE 'expired' END,
+                    payload_json = CASE WHEN channel = 'feishu' AND last_error = 'delivery_outcome_unknown'
+                                        THEN payload_json ELSE '{}' END,
+                    last_error = CASE WHEN channel = 'feishu' AND last_error = 'delivery_outcome_unknown'
+                                      THEN last_error ELSE NULL END, updated_at = ?
+                WHERE status IN ('pending', 'retryable_failed') AND created_at <= ?
+                """,
+                (utc_now_iso(), capability_cutoff),
             )
             if delivery_key:
                 row = conn.execute(
@@ -581,7 +611,7 @@ class BotHostStore:
                     WHERE channel = ?
                       AND status IN ('pending', 'retryable_failed')
                       AND next_attempt_at <= ?
-                    ORDER BY created_at, delivery_key LIMIT 1
+                    ORDER BY next_attempt_at, created_at, delivery_key LIMIT 1
                     """,
                     (str(channel), now),
                 ).fetchone()
@@ -590,26 +620,34 @@ class BotHostStore:
                     """
                     SELECT * FROM bot_reply_outbox
                     WHERE status IN ('pending', 'retryable_failed') AND next_attempt_at <= ?
-                    ORDER BY created_at, delivery_key LIMIT 1
+                    ORDER BY next_attempt_at, created_at, delivery_key LIMIT 1
                     """,
                     (now,),
                 ).fetchone()
             if row is None:
                 return None
+            if authorize is not None and not authorize(dict(row)):
+                next_attempt = (datetime.fromisoformat(str(now).replace("Z", "+00:00"))
+                                + timedelta(seconds=30)).isoformat()
+                conn.execute("UPDATE bot_reply_outbox SET next_attempt_at=? WHERE delivery_key=?",
+                             (next_attempt, row["delivery_key"]))
+                return {"authorization_blocked": True, "delivery_key": row["delivery_key"]}
             conn.execute(
                 """
                 UPDATE bot_reply_outbox
-                SET status = 'delivering', attempt_count = attempt_count + 1, updated_at = ?
+                SET status = 'delivering', attempt_count = attempt_count + 1, updated_at = ?,
+                    replay_until = CASE WHEN channel = 'feishu' AND
+                                             last_error IS NOT 'delivery_outcome_unknown'
+                                        THEN ? ELSE replay_until END
                 WHERE delivery_key = ?
                 """,
-                (utc_now_iso(), row["delivery_key"]),
+                (utc_now_iso(), (datetime.fromisoformat(str(now).replace("Z", "+00:00"))
+                                + timedelta(seconds=FEISHU_REPLY_REPLAY_SECONDS)).isoformat(), row["delivery_key"]),
             )
-            claimed = dict(row)
-            claimed["status"] = "delivering"
-            claimed["attempt_count"] = int(row["attempt_count"] or 0) + 1
-            return claimed
+            return dict(conn.execute("SELECT * FROM bot_reply_outbox WHERE delivery_key = ?",
+                                     (row["delivery_key"],)).fetchone())
 
-    def mark_reply_delivered(self, delivery_key: str) -> bool:
+    def mark_reply_delivered(self, delivery_key: str, *, attempt_count: int | None = None) -> bool:
         self._ensure_schema()
         now = utc_now_iso()
         with self._connect() as conn:
@@ -618,8 +656,21 @@ class BotHostStore:
                 UPDATE bot_reply_outbox
                 SET status = 'delivered', payload_json = '{}', delivered_at = ?, updated_at = ?, last_error = NULL
                 WHERE delivery_key = ? AND status = 'delivering'
+                  AND (channel != 'feishu' OR attempt_count = ?)
                 """,
-                (now, now, str(delivery_key)),
+                (now, now, str(delivery_key), attempt_count),
+            )
+        return bool(cursor.rowcount)
+
+    def select_reply_fallback(self, delivery_key: str, *, attempt_count: int) -> bool:
+        self._ensure_schema()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """UPDATE bot_reply_outbox
+                   SET payload_json = json_set(payload_json, '$.fallback_selected', json('true'))
+                   WHERE delivery_key = ? AND channel = 'feishu' AND status = 'delivering'
+                     AND attempt_count = ? AND last_error IS NOT 'delivery_outcome_unknown'""",
+                (delivery_key, attempt_count),
             )
         return bool(cursor.rowcount)
 
@@ -630,6 +681,8 @@ class BotHostStore:
         error: str,
         retryable: bool,
         retry_after_seconds: int = 30,
+        attempt_count: int | None = None,
+        delivery_unknown: bool = False,
     ) -> bool:
         self._ensure_schema()
         now = datetime.now(timezone.utc)
@@ -638,18 +691,33 @@ class BotHostStore:
             cursor = conn.execute(
                 """
                 UPDATE bot_reply_outbox
-                SET status = ?, next_attempt_at = ?,
-                    payload_json = CASE WHEN ? THEN payload_json ELSE '{}' END,
-                    last_error = ?, updated_at = ?
+                SET status = CASE
+                      WHEN channel = 'feishu' AND (? OR last_error = 'delivery_outcome_unknown')
+                      THEN CASE WHEN NOT ? OR julianday(replay_until) IS NULL
+                                          OR julianday(replay_until) <= julianday(?)
+                                THEN 'delivery_unknown' ELSE 'retryable_failed' END
+                      ELSE ? END,
+                    next_attempt_at = ?,
+                    payload_json = CASE WHEN ? OR (channel = 'feishu' AND
+                                      (? OR last_error = 'delivery_outcome_unknown'))
+                                        THEN payload_json ELSE '{}' END,
+                    last_error = CASE WHEN channel = 'feishu' AND
+                                          (? OR last_error = 'delivery_outcome_unknown')
+                                      THEN 'delivery_outcome_unknown' ELSE ? END,
+                    updated_at = ?
                 WHERE delivery_key = ? AND status = 'delivering'
+                  AND (channel != 'feishu' OR attempt_count = ?)
                 """,
                 (
+                    delivery_unknown, retryable, now.isoformat(),
                     "retryable_failed" if retryable else "terminal_failed",
                     next_attempt.isoformat(),
                     1 if retryable else 0,
+                    delivery_unknown, delivery_unknown,
                     "retryable_delivery_error" if retryable else "terminal_delivery_error",
                     now.isoformat(),
                     str(delivery_key),
+                    attempt_count,
                 ),
             )
         return bool(cursor.rowcount)
@@ -764,6 +832,24 @@ class BotHostStore:
             if "memory_json" not in columns:
                 conn.execute("ALTER TABLE bot_sessions ADD COLUMN memory_json TEXT NOT NULL DEFAULT '{}'")
             run_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(bot_runs)")}
+            reply_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(bot_reply_outbox)")}
+            if "authorization_json" not in reply_columns:
+                conn.execute("BEGIN IMMEDIATE")
+                if "authorization_json" not in {str(row[1]) for row in conn.execute("PRAGMA table_info(bot_reply_outbox)")}:
+                    conn.execute("ALTER TABLE bot_reply_outbox ADD COLUMN authorization_json TEXT")
+                conn.commit()
+            if "replay_until" not in reply_columns:
+                conn.execute("BEGIN IMMEDIATE")
+                reply_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(bot_reply_outbox)")}
+                if "replay_until" not in reply_columns:
+                    conn.execute("ALTER TABLE bot_reply_outbox ADD COLUMN replay_until TEXT")
+                    # Legacy attempts have no proven provider replay window; keep their evidence.
+                    conn.execute(
+                        """UPDATE bot_reply_outbox SET last_error = 'delivery_outcome_unknown',
+                           status = CASE WHEN status = 'delivering' THEN status ELSE 'delivery_unknown' END
+                           WHERE channel = 'feishu' AND attempt_count > 0 AND replay_until IS NULL
+                             AND status IN ('pending', 'retryable_failed', 'delivering')"""
+                    )
             for column, definition in (("lease_id", "TEXT"), ("deadline_at", "TEXT"), ("progress_json", "TEXT NOT NULL DEFAULT '{}'")):
                 if column not in run_columns:
                     conn.execute(f"ALTER TABLE bot_runs ADD COLUMN {column} {definition}")

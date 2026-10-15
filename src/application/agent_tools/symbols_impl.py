@@ -44,15 +44,12 @@ def find_symbol_entry(cfg: dict[str, Any], symbol: str, *, resolve_watchlist_con
 
 
 def set_path(obj: dict[str, Any], path: str, value: Any) -> None:
-    try:
-        _shared_set_path(
-            obj,
-            path,
-            value,
-            error_factory=lambda message: AgentToolError(code="INPUT_ERROR", message=message),
-        )
-    except AgentToolError:
-        raise
+    _shared_set_path(
+        obj,
+        path,
+        value,
+        error_factory=lambda message: AgentToolError(code="INPUT_ERROR", message=message),
+    )
 
 
 def require_int(payload: dict[str, Any], key: str) -> int:

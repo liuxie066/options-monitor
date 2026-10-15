@@ -15,7 +15,7 @@ from src.infrastructure.futu_trade_push import OpenDTradePushListener
 def _open_port(monkeypatch):
     """Tests mock the futu SDK; keep the port pre-check passing."""
 
-    from src.infrastructure import futu_trade_push as mod
+    from src.infrastructure import futu_gateway as mod
 
     monkeypatch.setattr(mod, "port_open", lambda host, port: True)
     yield
@@ -40,10 +40,13 @@ def _health_context(get_global_state):
         instances = 0
 
         def __init__(self, **_kwargs):
-            type(self).instances += 1
+            _Context.instances += 1
+
+        def get_sync_conn_id(self):
+            return 1
 
         def set_sync_query_connect_timeout(self, timeout):
-            assert timeout == 2
+            assert timeout in (8, 2)
             self.connect_timeout = timeout
 
         def set_handler(self, _handler):
@@ -77,6 +80,15 @@ def _blocking_context(release: threading.Event, *, log_phone_verification: bool 
                 )
             release.wait(5)
 
+        def set_sync_query_connect_timeout(self, _timeout):
+            pass
+
+        def get_sync_conn_id(self):
+            return 1
+
+        def close(self):
+            pass
+
     return _BlockingContext
 
 
@@ -94,8 +106,11 @@ def test_trade_push_listener_isolates_callback_exception(monkeypatch) -> None:
         def __init__(self, **_kwargs):
             self.handler = None
 
+        def get_sync_conn_id(self):
+            return 1
+
         def set_sync_query_connect_timeout(self, timeout):
-            assert timeout == 2
+            assert timeout in (8, 2)
             self.connect_timeout = timeout
 
         def set_handler(self, handler):
@@ -166,6 +181,77 @@ def test_trade_push_listener_health_keeps_disconnect_retryable(monkeypatch) -> N
     assert "OPEND_API_ERROR" in str(exc)
 
 
+
+@pytest.mark.parametrize("state", [
+    {}, {"program_status_type": "READY"}, {"trd_logined": True},
+    {"program_status_type": "READY", "trd_logined": "false"},
+    {"program_status_type": "READY", "trd_logined": 1},
+    {"program_status_type": "START", "trd_logined": True},
+])
+def test_trade_push_health_requires_explicit_ready_and_login(monkeypatch, state):
+    _install_fake_sdk(monkeypatch, _health_context(lambda: (0, state)))
+    listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=lambda _row: None)
+    listener.start()
+    with pytest.raises(RuntimeError):
+        listener.check_health()
+    listener.close()
+
+
+
+@pytest.mark.parametrize("reason", ["cancel", "auth", "wait_error"])
+def test_abandoned_initialization_closes_late_context(monkeypatch, reason):
+    from src.infrastructure.futu_trade_push import TradeIntakeAuthRequired, TradeIntakeStartCancelled
+
+    entered, release, closed, stop = (threading.Event() for _ in range(4))
+
+    class Context:
+        def close(self):
+            closed.set()
+
+    listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=lambda _row: None)
+
+    def construct():
+        entered.set()
+        if reason == "auth":
+            logging.getLogger("FTConsoleLog").warning(
+                "init connect fail: 需要手机验证码 context=OpenSecTradeContext")
+        assert release.wait(3)
+        return Context(), object()
+
+    def on_wait():
+        assert entered.wait(1)
+        if reason == "wait_error":
+            raise ValueError("wait hook failed")
+        stop.set()
+
+    monkeypatch.setattr(listener, "_build_default_context", construct)
+    expected = TradeIntakeAuthRequired if reason == "auth" else ValueError if reason == "wait_error" else TradeIntakeStartCancelled
+    try:
+        with pytest.raises(expected):
+            listener.start(cancel_event=stop, on_wait=on_wait)
+    finally:
+        release.set()
+    assert closed.wait(1)
+    assert listener._ctx is None
+
+
+
+@pytest.mark.parametrize("failure", ["handler", "start"])
+def test_initialization_failure_closes_owned_context(monkeypatch, failure):
+    context = SimpleNamespace(
+        close_calls=0,
+        set_handler=lambda _handler: -1 if failure == "handler" else 0,
+        start=lambda: (_ for _ in ()).throw(RuntimeError("start failed")),
+    )
+    context.close = lambda: setattr(context, "close_calls", context.close_calls + 1)
+    listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=lambda _row: None)
+    monkeypatch.setattr(listener, "_build_default_context", lambda: (context, object()))
+    with pytest.raises(RuntimeError):
+        listener.start()
+    listener.close()
+    assert context.close_calls == 1
+
+
 def test_trade_push_listener_detects_auth_while_constructor_blocks(monkeypatch) -> None:
     from src.infrastructure.futu_trade_push import TradeIntakeAuthRequired
 
@@ -231,7 +317,7 @@ def test_trade_push_listener_constructor_error_removes_handler(monkeypatch) -> N
 
 
 def test_listener_raises_typed_unreachable_when_port_closed(monkeypatch) -> None:
-    from src.infrastructure import futu_trade_push as mod
+    from src.infrastructure import futu_gateway as mod
     from src.infrastructure.futu_gateway import FutuGatewayUnreachableError
 
     monkeypatch.setattr(mod, "port_open", lambda host, port: False)
@@ -268,8 +354,11 @@ def _mock_sdk_rows(monkeypatch, *, rows, accounts, stop=None, response=None, han
             self.account_reads += 1
             return (0, Frame(accounts)) if accounts is not None else (-1, "unavailable")
 
+        def get_sync_conn_id(self):
+            return 1
+
         def set_sync_query_connect_timeout(self, timeout):
-            assert timeout == 2
+            assert timeout in (8, 2)
             self.connect_timeout = timeout
 
         def set_handler(self, handler):
@@ -617,6 +706,9 @@ def test_order_push_on_same_context_only_emits_bound_refresh_hint(monkeypatch) -
 
         def get_acc_list(self):
             return 0, Frame([{"acc_id": "123", "trd_env": "REAL"}])
+
+        def get_sync_conn_id(self):
+            return 1
 
         def set_sync_query_connect_timeout(self, _timeout):
             pass

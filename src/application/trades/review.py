@@ -4,11 +4,11 @@ from typing import Any
 
 from domain.domain.ledger.position_fields import normalize_account, normalize_broker
 from src.application.ledger.api import (
-    preview_trade_event_repair,
-    preview_trade_event_void,
+    preview_trade_event_repair as preview_repair_trade_event,
+    preview_trade_event_void as preview_void_trade_event,
     project_trade_event_log,
-    record_trade_event_repair,
-    record_trade_event_void,
+    record_trade_event_repair as apply_repair_trade_event,
+    record_trade_event_void as apply_void_trade_event,
     refresh_position_lot_projection,
     trade_event_log,
     valid_void_target_event_id,
@@ -130,38 +130,6 @@ def replay_trade_events(repo: Any, *, apply: bool) -> dict[str, Any]:
         "projection_diagnostic_count": int(len(projection.diagnostics)),
         "projection_diagnostics": [item.to_dict() for item in projection.diagnostics],
     }
-
-
-def preview_void_trade_event(repo: Any, *, event_id: str, reason: str) -> dict[str, Any]:
-    return preview_trade_event_void(repo, event_id=event_id, reason=reason)
-
-
-def apply_void_trade_event(repo: Any, *, event_id: str, reason: str) -> dict[str, Any]:
-    return record_trade_event_void(repo, event_id=event_id, reason=reason)
-
-
-def preview_repair_trade_event(
-    repo: Any,
-    *,
-    event_id: str,
-    overrides: dict[str, Any],
-    reason: str,
-) -> dict[str, Any]:
-    return preview_trade_event_repair(repo, event_id=event_id, overrides=overrides, reason=reason)
-
-
-def apply_repair_trade_event(
-    repo: Any,
-    *,
-    event_id: str,
-    overrides: dict[str, Any],
-    reason: str,
-    expected_input_hash: str | None = None,
-) -> dict[str, Any]:
-    return record_trade_event_repair(
-        repo, event_id=event_id, overrides=overrides, reason=reason,
-        expected_input_hash=expected_input_hash,
-    )
 
 
 def preview_futu_time_repair(repo: Any, *, request: dict[str, Any]) -> dict[str, Any]:

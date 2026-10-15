@@ -5,6 +5,7 @@ import pytest
 import src.application.agent_tools.operations_impl as operations_impl
 import src.application.agent_tools.positions as position_tools
 import src.application.config_authoring_transaction as config_transaction
+import src.application.ledger.assigned_stock_projection as assigned_stock_projection
 import src.application.wheel.read_model as wheel_read_model
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.tool_execution import execute_tool
@@ -104,6 +105,28 @@ def test_wheel_end_agent_tool_previews_through_application_workflow(
     assert warnings == []
     assert calls[0][0] is repo
     assert calls[0][1]["apply_changes"] is False
+
+
+@pytest.mark.parametrize("confirm", [None, False])
+def test_wheel_end_agent_tool_requires_confirmation_before_workflow(monkeypatch, confirm) -> None:
+    def unexpected_workflow(*_args, **_kwargs):
+        pytest.fail("unconfirmed wheel end reached the application workflow")
+
+    monkeypatch.setattr(position_tools, "end_wheel_lifecycle", unexpected_workflow)
+    payload = {
+        "config_key": "us",
+        "account": "lx",
+        "stock_lot_id": "assigned-stock-1",
+        "expected_batch_generation_hash": "generation-1",
+        "request_id": "request-1",
+        "actor": "agent",
+        "apply": True,
+    }
+    if confirm is not None:
+        payload["confirm"] = confirm
+    with pytest.raises(AgentToolError) as exc:
+        position_tools.WHEEL_END_TOOL.call(payload)
+    assert exc.value.code == "CONFIRMATION_REQUIRED"
 
 
 def test_wheel_agent_writes_are_requested_only_by_apply() -> None:
@@ -741,7 +764,7 @@ def test_wheel_read_model_v2_preserves_legacy_batches_and_adds_branches(
         "projection_hash": "branch-hash",
     }
     monkeypatch.setattr(
-        wheel_read_model,
+        assigned_stock_projection,
         "project_wheel_branches",
         lambda *_args, **_kwargs: [
             {
@@ -755,7 +778,7 @@ def test_wheel_read_model_v2_preserves_legacy_batches_and_adds_branches(
         ],
     )
     monkeypatch.setattr(
-        wheel_read_model,
+        assigned_stock_projection,
         "project_wheel_linkage_candidates",
         lambda *_args, **_kwargs: [],
     )

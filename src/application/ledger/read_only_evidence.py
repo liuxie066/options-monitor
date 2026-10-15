@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
-from contextlib import closing
+from contextlib import closing, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,11 @@ from src.application.ledger.event_codec import (
     stored_trade_event_to_ledger_event,
     trade_event_application_payload,
 )
+from src.application.ledger.repository_assigned_stock import AssignedStockRepositoryMixin
+from src.application.ledger.repository_decision_reads import DecisionReadRepositoryMixin
+from src.application.ledger.repository_strategy_groups import StrategyGroupRepositoryMixin
+from src.application.ledger.repository_projection_tail import PositionProjectionTailRepositoryMixin
+from src.application.ledger.repository_trade_events import TradeEventRepositoryMixin
 from src.application.ledger.sqlite_row_codec import (
     read_current_decision_projection_inputs_from_conn,
 )
@@ -39,6 +45,45 @@ def open_trade_reconciliation_evidence_repo(
 ) -> Any:
     """Open the minimal ledger evidence surface in SQLite query-only mode."""
     return _ReadOnlyTradeReconciliationEvidenceRepository(Path(sqlite_path))
+
+
+def read_trade_intake_recovery_snapshot(
+    sqlite_path: str | Path, *, account: str,
+    inbox_observation: dict[str, Any], state_bytes: bytes,
+) -> dict[str, Any]:
+    """Bind supplied Inbox/state evidence to one read-only ledger snapshot.
+
+    Preserve the historical recovery hash byte stream, table order and row
+    ordering. Missing tables or unreadable sources raise; they are not empty
+    evidence. The caller retains source qualification and recovery authorization.
+    """
+    if not str(account or "").strip():
+        raise ValueError("trade recovery snapshot requires account")
+    digest = hashlib.sha256()
+    digest.update(json.dumps(inbox_observation, sort_keys=True, ensure_ascii=False, default=str).encode())
+    digest.update(state_bytes)
+    counts: dict[str, int] = {}
+    queries = {
+        "position_lots": "SELECT * FROM position_lots WHERE account=? ORDER BY lot_id",
+        "trade_events": "SELECT * FROM trade_events WHERE account=? ORDER BY event_id",
+        "assigned_stock_events": "SELECT * FROM assigned_stock_events WHERE account=? ORDER BY stock_event_id",
+        "trade_lifecycle_cases": "SELECT * FROM trade_lifecycle_cases WHERE account=? ORDER BY case_id",
+        "trade_lifecycle_evidence": "SELECT * FROM trade_lifecycle_evidence WHERE account=? ORDER BY evidence_id",
+        "trade_lifecycle_source_consumptions": "SELECT c.* FROM trade_lifecycle_source_consumptions c JOIN trade_lifecycle_cases t ON t.case_id=c.case_id WHERE t.account=? ORDER BY c.source_key",
+        "trade_lifecycle_allocations": "SELECT a.* FROM trade_lifecycle_allocations a JOIN trade_lifecycle_cases t ON t.case_id=a.case_id WHERE t.account=? ORDER BY a.allocation_id",
+        "trade_lifecycle_notification_outbox": "SELECT o.* FROM trade_lifecycle_notification_outbox o JOIN trade_lifecycle_cases t ON t.case_id=o.case_id WHERE t.account=? ORDER BY o.outbox_id",
+    }
+    reader = open_trade_reconciliation_evidence_repo(sqlite_path)
+    with closing(reader._connect()) as conn:
+        conn.execute("BEGIN")
+        for name, sql in queries.items():
+            rows = conn.execute(sql, (account,))
+            counts[name] = 0
+            digest.update(name.encode())
+            for row in rows:
+                digest.update(json.dumps(dict(row), sort_keys=True, ensure_ascii=False, default=str).encode())
+                counts[name] += 1
+    return {"ledger_row_counts": counts, "recovery_hash": digest.hexdigest()}
 
 
 class _ReadOnlyTradeReconciliationEvidenceRepository:
@@ -96,10 +141,11 @@ class _ReadOnlyTradeReconciliationEvidenceRepository:
             rows = self._read_position_lots(conn)
         return rows
 
-    def read_trade_receipt_evidence(self) -> dict[str, list[dict[str, Any]]]:
+    def read_trade_receipt_evidence(self, *, conn: sqlite3.Connection | None = None) -> dict[str, list[dict[str, Any]]]:
         """Read required execution and projection evidence from one read-only snapshot."""
-        with closing(self._connect()) as conn:
-            conn.execute("BEGIN")
+        with (nullcontext(conn) if conn is not None else closing(self._connect())) as conn:
+            if not conn.in_transaction:
+                conn.execute("BEGIN")
             if not self._tables_exist(conn, "trade_events", "position_lots"):
                 raise sqlite3.DatabaseError("trade receipt evidence requires trade_events and position_lots tables")
             events = self._read_trade_events(conn, strict=True)
@@ -565,3 +611,63 @@ def verify_trade_receipt_projection(evidence: dict[str, Any]) -> None:
         current_lots=evidence["position_lots"], diagnostics=projected.diagnostics)
     if _blocking_count(comparison["summary"]):
         raise ValueError("recorded execution projection unavailable")
+
+
+def open_position_query_repo(sqlite_path: str | Path) -> Any:
+    """Read stored positions and diagnostics without initializing or repairing SQLite."""
+    return _ReadOnlyPositionQueryRepository(Path(sqlite_path))
+
+
+class _ReadOnlyPositionQueryRepository(_ReadOnlyTradeReconciliationEvidenceRepository):
+    bootstrap_status = "read_only"
+    bootstrap_message = "query does not initialize or recover the ledger"
+
+    # Reuse the store's read codecs and paging contract without its writer lifecycle.
+    list_position_lots = PositionProjectionTailRepositoryMixin.list_position_lots
+    list_trade_events = TradeEventRepositoryMixin.list_trade_events
+    list_trade_events_page = TradeEventRepositoryMixin.list_trade_events_page
+    list_wheel_events = AssignedStockRepositoryMixin.list_wheel_events
+    list_strategy_group_identities = StrategyGroupRepositoryMixin.list_strategy_group_identities
+    _read_account_decision_state_rows = DecisionReadRepositoryMixin._read_account_decision_state_rows
+    read_lifecycle_account_rows = DecisionReadRepositoryMixin.read_lifecycle_account_rows
+
+    def _connect(self) -> sqlite3.Connection:
+        from src.application.ledger.repository_core import assert_final_lot_identity_shape
+
+        conn = super()._connect()
+        try:
+            assert_final_lot_identity_shape(conn)
+        except BaseException:
+            conn.close()
+            raise
+        return conn
+
+    def _optional_conn(self, conn: sqlite3.Connection | None):
+        return nullcontext(conn) if conn is not None else closing(self._connect())
+
+    def list_assigned_stock_events(self) -> list[dict[str, Any]]:
+        with closing(self._connect()) as conn:
+            return self._read_json_query_from_conn(
+                conn,
+                "SELECT event_json FROM assigned_stock_events ORDER BY trade_time_ms ASC, stock_event_id ASC",
+                (),
+                column="event_json",
+                strict=True,
+            )
+
+
+def open_performance_query_repo(sqlite_path: str | Path) -> Any:
+    """Read strict performance source events without initializing or repairing a store."""
+    return _ReadOnlyPerformanceQueryRepository(Path(sqlite_path))
+
+
+class _ReadOnlyPerformanceQueryRepository(_ReadOnlyTradeReconciliationEvidenceRepository):
+    def list_trade_events(self) -> list[dict[str, Any]]:
+        from src.application.ledger.repository_core import assert_final_lot_identity_shape
+
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            if not self._tables_exist(conn, "trade_events", "position_lots"):
+                raise sqlite3.DatabaseError("performance query requires an existing ledger schema")
+            assert_final_lot_identity_shape(conn)
+            return self._read_trade_events(conn, strict=True)

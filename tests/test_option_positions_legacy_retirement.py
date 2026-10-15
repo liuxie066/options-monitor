@@ -471,10 +471,31 @@ def test_bootstrap_flow_lives_under_ledger_bootstrap() -> None:
 
 
 def test_event_write_projection_lives_under_ledger_writer() -> None:
+    from domain.domain.ledger.events import LedgerDiagnostic
+    from src.application.ledger import position_projection_runtime, writer
+
+    assert writer.projection_diagnostics_summary is position_projection_runtime.projection_diagnostics_summary
+    assert writer.projection_diagnostics_summary([]) == {
+        "projection_diagnostic_count": 0,
+        "unmatched_explicit_close_count": 0,
+        "unmatched_heuristic_close_count": 0,
+        "projection_diagnostics": [],
+    }
+    diagnostics = [
+        LedgerDiagnostic("explicit", "error", "target_lot_not_found", "missing lot"),
+        LedgerDiagnostic("heuristic", "warning", "close_unmatched_contracts", "unmatched close"),
+        LedgerDiagnostic("other", "error", "invalid_event", "invalid event"),
+    ]
+    assert writer.projection_diagnostics_summary(diagnostics) == {
+        "projection_diagnostic_count": 3,
+        "unmatched_explicit_close_count": 1,
+        "unmatched_heuristic_close_count": 1,
+        "projection_diagnostics": [item.to_dict() for item in diagnostics],
+    }
+
     results_text = (REPO_ROOT / "src" / "application" / "ledger" / "results.py").read_text(encoding="utf-8")
     writer_text = _ledger_text("writer_common.py", "writer_trade_events.py")
     moved_defs = (
-        "def projection_diagnostics_summary(",
         "def rebuild_position_lots_from_trade_events(",
         "def persist_trade_event_object(",
         "def persist_trade_event(",
@@ -636,28 +657,105 @@ def test_position_and_trade_modules_depend_on_ledger_public_api_only() -> None:
     assert offenders == []
 
 
+def _ledger_source_references(source: str, *, package: str, accesses_by_line: dict[int, set[str]] | None = None) -> tuple[set[str], set[str]]:
+    """Resolve static imports/aliases without importing production modules."""
+    from importlib.util import resolve_name
+
+    tree = ast.parse(source)
+    bindings: dict[str, str] = {}
+    references: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                references.add(alias.name)
+                bindings[alias.asname or alias.name.split(".")[0]] = (
+                    alias.name if alias.asname else alias.name.split(".")[0]
+                )
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level:
+                module = resolve_name("." * node.level + module, package)
+            references.add(module)
+            for alias in node.names:
+                target = f"{module}.{alias.name}"
+                references.add(target)
+                bindings[alias.asname or alias.name] = target
+
+    def resolved(node):
+        if isinstance(node, ast.Name):
+            return bindings.get(node.id)
+        if isinstance(node, ast.Attribute):
+            base = resolved(node.value)
+            return f"{base}.{node.attr}" if base else None
+        return None
+
+    assignments = [node for node in ast.walk(tree) if isinstance(node, ast.Assign)]
+    for _ in range(len(assignments) + 1):
+        changed = False
+        for node in assignments:
+            target = resolved(node.value)
+            if target:
+                for name in node.targets:
+                    if isinstance(name, ast.Name) and name.id not in bindings:
+                        bindings[name.id] = target
+                        changed = True
+        if not changed:
+            break
+    accesses = set()
+    for node in ast.walk(tree):
+        value = resolved(node)
+        if value:
+            accesses.add(value)
+            if accesses_by_line is not None and hasattr(node, "lineno"):
+                accesses_by_line.setdefault(node.lineno, set()).add(value)
+    return references, accesses
+
+
+def _private_ledger_accesses(source: str, *, package: str) -> list[str]:
+    imports, accesses = _ledger_source_references(source, package=package)
+    references = imports | accesses
+    prefix = "src.application.ledger."
+    return sorted(value for value in references if value.startswith(prefix)
+                  and value != prefix + "api" and not value.startswith(prefix + "api."))
+
+
+def test_ledger_import_guard_rejects_alias_and_relative_bypasses() -> None:
+    examples = (
+        "from src.application.ledger.repository import SQLiteOptionPositionsRepository as Repo",
+        "from src.application.ledger import repository as storage",
+        "import src.application.ledger.repository as storage",
+        "from src.application import ledger as store; store.repository.open()",
+        "import src.application as app; app.ledger.repository.open()",
+        "from ..ledger import repository as storage",
+        "from .. import ledger as store; store.repository.open()",
+        "from src.application import ledger as store; alias = store; alias.writer.write()",
+        "from src.application.ledger import *",
+    )
+    for source in examples:
+        assert _private_ledger_accesses(source, package="src.application.trades"), source
+    for source in (
+        "from src.application.ledger.api import apply_trade_attribution as apply",
+        "from src.application.ledger import api as ledger; ledger.apply_trade_attribution()",
+        "import src.application.ledger.api as ledger; ledger.apply_trade_attribution()",
+        "from ..ledger.api import read_trade_attribution_snapshot",
+        "from src.application import ledger as store; store.api.trade_event_log()",
+        "repo = fixture(); repo.repository.read()",
+    ):
+        assert not _private_ledger_accesses(source, package="src.application.trades"), source
+
+
 def test_non_ledger_runtime_depends_on_ledger_public_api_only() -> None:
-    roots = [
-        REPO_ROOT / "src" / "application",
-        REPO_ROOT / "src" / "interfaces",
-        REPO_ROOT / "scripts",
-    ]
+    roots = [REPO_ROOT / "src" / "application", REPO_ROOT / "src" / "interfaces", REPO_ROOT / "scripts"]
     offenders: list[str] = []
     for root in roots:
         for path in root.rglob("*.py"):
             if REPO_ROOT / "src" / "application" / "ledger" in path.parents:
                 continue
-            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-                stripped = line.strip()
-                if not (
-                    stripped.startswith("from src.application.ledger.")
-                    or stripped.startswith("import src.application.ledger.")
-                ):
-                    continue
-                if "src.application.ledger.api" in stripped:
-                    continue
-                offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno}:{stripped}")
-
+            relative = path.relative_to(REPO_ROOT)
+            package = ".".join(relative.parent.parts)
+            offenders.extend(f"{relative}:{name}" for name in _private_ledger_accesses(
+                path.read_text(encoding="utf-8"), package=package,
+            ))
     assert offenders == []
 
 
@@ -692,7 +790,7 @@ def test_ledger_public_api_is_thin_command_query_facade() -> None:
 
 
 def test_position_risk_context_uses_typed_ledger_view() -> None:
-    context_text = _read("src", "application", "positions", "context_builder.py")
+    context_text = _read("src", "application", "ledger", "position_context.py")
 
     assert "RiskPositionView" in context_text
     assert "position_lot_risk_view" in context_text
@@ -821,3 +919,158 @@ def test_option_lifecycle_layer_does_not_mutate_position_lots_directly() -> None
     ledger_lifecycle_text = _ledger_text("lifecycle.py")
     assert "persist_trade_event_objects_atomically(" in ledger_lifecycle_text
     assert offenders == []
+
+
+def _business_sql_bypasses(source: str) -> list[str]:
+    imports, accesses = _ledger_source_references(source, package="src.application.trades")
+    violations = {value for value in imports | accesses if value in {"sqlite3.connect", "sqlite3.Connection"}}
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Attribute) and node.attr in {
+            "execute", "executemany", "executescript", "cursor", "_connect", "_writer_connection",
+        }:
+            violations.add(node.attr)
+    return sorted(violations)
+
+
+def _ledger_transaction_bypasses(source: str, *, package: str = "src.application.trades") -> list[str]:
+    imports, accesses = _ledger_source_references(source, package=package)
+    low_level = {
+        "with_sqlite_repo_transaction", "with_sqlite_repo_writer_lock", "record_trade_attribution_conflict",
+        "decision_state_snapshot_from_locked_rows",
+    }
+    violations = {value for value in imports | accesses if value.startswith("src.application.ledger.api.")
+                  and value.rsplit(".", 1)[-1] in low_level}
+    violations.update(_business_sql_bypasses(source))
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Attribute) and (node.attr.startswith("compare_and_set_") or node.attr in {
+            "append_wheel_event_once", "read_lifecycle_account_rows",
+            "open_wheel_activation_window", "close_wheel_activation_window", "append_wheel_policy_binding",
+        }):
+            violations.add(node.attr)
+    return sorted(violations)
+
+
+def test_attribution_orchestration_cannot_own_ledger_transactions() -> None:
+    assert not _ledger_transaction_bypasses(_read("src", "application", "trades", "attribution.py"))
+    for source in (
+        "from src.application.ledger.api import with_sqlite_repo_transaction as tx; tx(repo, callback)",
+        "from src.application.ledger.api import with_sqlite_repo_transaction as tx",
+        "from ..ledger.api import record_trade_attribution_conflict",
+        "from src.application.ledger import api as owner; owner.with_sqlite_repo_writer_lock(repo)",
+        "import src.application.ledger.api as ledger; tx = ledger.with_sqlite_repo_transaction; tx(repo, run)",
+        "from ..ledger import api as ledger; ledger.record_trade_attribution_conflict(repo, conn=conn)",
+        "conn.execute('INSERT INTO trade_events VALUES (?)', args)",
+        "writer = repo.append_wheel_event_once; writer(event)",
+    ):
+        assert _ledger_transaction_bypasses(source), source
+    assert not _ledger_transaction_bypasses(
+        "from src.application.ledger.api import record_trade_attribution_conflicts as record; record(repo, **args)"
+    )
+
+
+def test_migrated_wheel_commands_remain_ledger_owned() -> None:
+    from src.application.ledger import api, wheel_commands
+    from src.application.wheel import workflows
+
+    for name in ("end_wheel_lifecycle", "decide_wheel_branch", "reject_wheel_call_linkage", "reject_wheel_linkage",
+                 "create_wheel_call_intent", "cancel_wheel_call_intent", "create_wheel_intent", "cancel_wheel_intent"):
+        assert getattr(workflows, name) is getattr(api, name) is getattr(wheel_commands, name)
+        assert getattr(api, name).__module__ == "src.application.ledger.wheel_commands"
+
+
+def test_wheel_workflows_cannot_own_ledger_transactions():
+    for module in ("workflows.py", "policy_binding.py", "capacity.py"):
+        assert not _ledger_transaction_bypasses(
+            _read("src", "application", "wheel", module), package="src.application.wheel",
+        )
+    for source in (
+        "from ..ledger.api import with_sqlite_repo_transaction as write; write(repo, callback)",
+        "import src.application.ledger.api as owner; tx = owner.with_sqlite_repo_transaction; tx(repo, callback)",
+        "repo.append_wheel_policy_binding(conn=conn, **args)",
+        "repo.open_wheel_activation_window(conn=conn, **args)",
+        "close = repo.close_wheel_activation_window; close(conn=conn, **args)",
+    ):
+        assert _ledger_transaction_bypasses(source, package="src.application.wheel")
+    assert not _ledger_transaction_bypasses(
+        "from ..ledger.api import change_wheel_activation_window; change_wheel_activation_window(repo, **args)",
+        package="src.application.wheel",
+    )
+
+
+def test_recovery_and_outbox_consumers_cannot_recreate_business_sql():
+    source = _read("src", "application", "trades", "auto_intake.py")
+    assert not _business_sql_bypasses(source)
+    assert not _ledger_transaction_bypasses(_read("src", "application", "trades", "lifecycle_outbox.py"))
+    for source in (
+        "from sqlite3 import connect as open_db; open_db(path)",
+        "import sqlite3 as db; open_db = db.connect; open_db(path)",
+        "read = repo._connect; conn = read()",
+        "execute = conn.execute; execute('SELECT * FROM trade_events')",
+        "writer = repo.compare_and_set_trade_lifecycle_notification; writer(**args)",
+        "from ..ledger.api import with_sqlite_repo_transaction as transaction; transaction(repo, callback)",
+    ):
+        assert _ledger_transaction_bypasses(source), source
+    assert not _ledger_transaction_bypasses(
+        "from ..ledger.api import read_trade_intake_recovery_snapshot as snapshot; snapshot(path, **scope)",
+    )
+
+
+def _ledger_lock_owners(source: str, *, package: str) -> set[str]:
+    accesses: dict[int, set[str]] = {}
+    _ledger_source_references(source, package=package, accesses_by_line=accesses)
+    owners: dict[int, str] = {}
+
+    def visit(node: ast.AST, scope: str = "<module>") -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            scope = node.name if scope == "<module>" else scope + "." + node.name
+        if hasattr(node, "lineno"):
+            owners[node.lineno] = scope
+        for child in ast.iter_child_nodes(node):
+            visit(child, scope)
+
+    visit(ast.parse(source))
+    return {owners[line] for line, names in accesses.items()
+            if "src.application.ledger.api.with_sqlite_repo_writer_lock" in names}
+
+
+def test_remaining_ledger_coordination_locks_have_reviewed_owners():
+    # These coordinate separate stores or operation selection, not SQL transactions.
+    # Changing this inventory requires updating the rationale in GUARDRAILS.md.
+    allowed = {
+        "src/application/trades/inbox.py": {
+            "enqueue_trade_payload", "claim_trade_payload", "mark_trade_payload_review",
+            "trade_payload_commit_scope", "resume_trade_payload", "resume_skipped_trade_payload",
+        },
+        "src/application/trades/resolver.py": {"resolve_trade_deal"},
+        "src/application/trades/auto_intake.py": {
+            "recover_trade_intake_receipts", "main", "_reconcile_source_completion",
+        },
+        "src/application/positions/workflows.py": {"execute_broker_assigned_stock_sale"},
+        "src/application/bot/control/attribution_operations.py": {"_finish_attribution_operation"},
+    }
+    actual = {}
+    for root in ("src/application", "src/interfaces", "scripts"):
+        for path in (REPO_ROOT / root).rglob("*.py"):
+            if REPO_ROOT / "src/application/ledger" in path.parents:
+                continue
+            relative = path.relative_to(REPO_ROOT)
+            package = ".".join(relative.parent.parts)
+            source = path.read_text(encoding="utf-8")
+            imports, accesses = _ledger_source_references(source, package=package)
+            assert "src.application.ledger.api.with_sqlite_repo_transaction" not in imports | accesses, str(relative)
+            if "src.application.ledger.api.with_sqlite_repo_writer_lock" in imports | accesses:
+                actual[str(relative)] = _ledger_lock_owners(source, package=package)
+    assert actual == allowed
+
+
+def test_coordination_inventory_tracks_aliases_and_nested_or_new_owners():
+    for prefix, call in (
+        ("from ..ledger.api import with_sqlite_repo_writer_lock as lock", "lock"),
+        ("from src.application.ledger import api as owner", "owner.with_sqlite_repo_writer_lock"),
+        ("import src.application.ledger.api as owner", "owner.with_sqlite_repo_writer_lock"),
+    ):
+        source = prefix + "\ndef coordinator(repo):\n    with " + call + "(repo):\n        pass\n"
+        assert _ledger_lock_owners(source, package="src.application.trades") == {"coordinator"}
+        nested = prefix + "\ndef coordinator(repo):\n    def new_writer():\n        alias = " + call + "\n        return alias(repo)\n"
+        assert _ledger_lock_owners(nested, package="src.application.trades") == {"coordinator.new_writer"}
+        assert _ledger_lock_owners(prefix + "\n" + call + "(repo)", package="src.application.trades") == {"<module>"}

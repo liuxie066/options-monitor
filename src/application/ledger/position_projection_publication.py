@@ -162,14 +162,9 @@ def read_current_position_projection(repo: Any, *, account: str) -> dict[str, An
             include_records=True,
             conn=conn,
         )
-        if int(head.get("lot_count") or 0) != int(snapshot.lot_count):
-            return _unavailable(account_value, "data_unavailable", "lot_count_mismatch")
-        if str(head.get("projection_fingerprint") or "") != snapshot.fingerprint:
-            return _unavailable(
-                account_value,
-                "data_unavailable",
-                "projection_fingerprint_mismatch",
-            )
+        content_problem = candidate.position_projection_head_content_problem(head, snapshot)
+        if content_problem is not None:
+            return _unavailable(account_value, "data_unavailable", content_problem)
         return {
             "schema_version": CURRENT_POSITION_PROJECTION_SCHEMA,
             "status": "trusted",

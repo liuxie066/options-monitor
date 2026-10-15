@@ -260,6 +260,61 @@ def test_storage_gc_preview_cli_has_only_runtime_root(monkeypatch, tmp_path: Pat
             )
 
 
+def test_storage_cli_real_owners_after_expired_candidate_relocation(storage_disk_capacity, monkeypatch, tmp_path: Path, capsys) -> None:
+    from src.application.research import storage_baseline
+    from src.interfaces.cli.main import main
+    from tests.test_research_storage_baseline import (
+        _history_report, _make_runtime, _publish_scan_blob, _tree_identity, _write_scan_blob_manifest,
+    )
+
+    root = _make_runtime(tmp_path)
+    ref = _publish_scan_blob(root, "NVDA")
+    observed_at = datetime(2030, 2, 1, tzinfo=timezone.utc)
+    timestamp = observed_at.timestamp() - 30 * 86400
+    for index in range(201):
+        run = root / "output_runs" / f"run-{index:03d}"
+        run.mkdir()
+        if index == 0:
+            _write_scan_blob_manifest(run / "state/manifest.json", ref)
+        os.utime(run, (timestamp + index, timestamp + index))
+    monkeypatch.setattr(storage_baseline, "_utc_now", lambda _fn: observed_at)
+    history = tmp_path / "prior-baseline.json"
+    _history_report(history, root=root, observed_at="2030-01-01T00:00:00+00:00", unique_bytes=0)
+
+    def cli(command: str, *options: str) -> dict[str, Any]:
+        assert main(["research", command, "--runtime-root", str(root), *options]) == 0
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["ok"] is True
+        return envelope["data"]
+
+    before = _tree_identity(root)
+    first = cli("storage-gc-preview")
+    baseline = cli("storage-baseline", "--history-report", str(history))
+    assert _tree_identity(root) == before
+    assert first["deletion_allowed"] is True
+    assert first["candidates"][0]["blob_relpath"] == ref["blob_relpath"]
+    assert baseline["research_storage"]["protected_reference_failures"] == []
+    (root / ref["blob_relpath"]).rename(tmp_path / "preserved-candidate.gz")
+    after = _tree_identity(root)
+    second = cli("storage-gc-preview")
+    repeated = cli("storage-gc-preview")
+    baseline = cli("storage-baseline", "--history-report", str(history))
+    inventory = tmp_path / "lifecycle.json"
+    inventory.write_text("{}")
+    cleanup = cli("storage-cleanup-preview", "--lifecycle-inventory", str(inventory), "--history-report", str(history))
+    assert _tree_identity(root) == after
+    assert second == repeated
+    assert second["deletion_allowed"] is True
+    assert second["candidates"] == []
+    assert baseline["research_storage"]["unprotected_reference_failures"][0]["reason"] == "missing"
+    assert baseline["thresholds"]["critical_reasons"] == []
+    assert cleanup["gates"]["scan_blob_integrity"]["status"] == "pass"
+    assert cleanup["gates"]["space_forecast"]["status"] == "pass"
+    # Other independently required cleanup authorizations remain blocked.
+    assert cleanup["status"] == "not_ready"
+    assert cleanup["candidates"] == []
+
+
 def test_storage_cleanup_preview_cli_is_read_only(monkeypatch, tmp_path: Path) -> None:
     from src.application.research import historical_cleanup
     from src.interfaces.cli.main import parse_args

@@ -19,6 +19,7 @@ from src.application.service_deploy import (
     DEFAULT_SECRET_CREDENTIAL_STORE_ROOT,
     DEFAULT_ACCOUNTS,
     DEFAULT_MARKETS,
+    DEFAULT_TIMEOUT_SECONDS,
     FEISHU_AGENT_CREDENTIAL_DROPIN,
     FEISHU_AGENT_CREDENTIAL_SERVICE,
     SECRET_CREDENTIAL_DROPIN,
@@ -842,7 +843,7 @@ def _backup_service_profile(profile_path: Path) -> Path:
 def _service_drift_apply_failed(result: dict[str, Any]) -> bool:
     return bool(
         result.get("apply_errors")
-        or not result.get("summary", {}).get("ok", False)
+        or result.get("summary", {}).get("ok") is not True
     )
 
 
@@ -1305,6 +1306,13 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
     extra_profile_units = sorted(set(profile_services) - set(expected_services))
     missing_installed_units = sorted(set(expected_files) - set(installed_units))
     extra_installed_units = sorted(set(installed_units) - set(expected_files))
+    accounts = profile.get("accounts")
+    extra_managed_units = (
+        sorted(set(extra_installed_units) & managed_systemd_unit_names(
+            accounts=accounts if isinstance(accounts, list) else [],
+        ))
+        if provider == "systemd" else extra_installed_units
+    )
     extra_managed_files = sorted(
         set(installed_managed_files) - set(expected_managed_files)
     )
@@ -1368,6 +1376,7 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
     profile_content_changed = _profile_content_changed(persisted_profile, bundle)
     manual_actions = _manual_actions(
         provider=provider,
+        expected_files=expected_files,
         missing_installed_units=missing_installed_units,
         mismatched_units=mismatched_units,
         activation_drift_units=activation_drift_units,
@@ -1387,6 +1396,7 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         missing_installed_units=missing_installed_units,
         extra_profile_units=extra_profile_units,
         extra_installed_units=extra_installed_units,
+        extra_managed_units=extra_managed_units,
         extra_managed_files=extra_managed_files,
         mismatched_units=mismatched_units,
         missing_managed_files=missing_managed_files,
@@ -1527,6 +1537,7 @@ def _expected_bundle_from_profile(
         "deploy_user": profile.get("deploy_user"),
         "deploy_home": profile.get("deploy_home"),
         "use_default_deploy_user": False,
+        "timeout_seconds": profile.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS),
         "include_auto_upgrade": include_auto_upgrade,
         "include_opend": include_opend,
         "opend_root": opend_root,
@@ -1568,9 +1579,26 @@ def _expected_bundle_from_profile(
         "include_content": True,
     }
     bundle = render_service_bundle(**render_kwargs)
+    expected_profile = _bundle_profile(bundle)
+    if include_opend:
+        previous_services_raw = opend.get("services")
+        previous_services = previous_services_raw if isinstance(previous_services_raw, list) else []
+        previous_accounts = {
+            str(item.get("account") or "").strip()
+            for item in previous_services if isinstance(item, dict)
+        }
+        rendered_accounts = {
+            str(item.get("account") or "").strip()
+            for item in (expected_profile.get("opend") or {}).get("services", [])
+        }
+        missing_accounts = (previous_accounts & set(accounts)) - rendered_accounts
+        if missing_accounts:
+            raise ValueError(
+                "OpenD root is missing for previously managed accounts: "
+                + ", ".join(sorted(missing_accounts))
+            )
     if provider == "systemd":
         # Rendering defaults must not become persisted retirement ownership.
-        expected_profile = _bundle_profile(bundle)
         if "accounts" in profile:
             expected_profile["accounts"] = profile["accounts"]
         else:
@@ -1958,6 +1986,7 @@ def _profile_content_changed(profile: dict[str, Any], bundle: dict[str, Any]) ->
         "runtime_root",
         "accounts",
         "markets",
+        "timeout_seconds",
         "config_paths",
         "services",
         "env_file",
@@ -1997,6 +2026,7 @@ def _drift_summary(
     missing_installed_units: list[str],
     extra_profile_units: list[str],
     extra_installed_units: list[str],
+    extra_managed_units: list[str],
     extra_managed_files: list[str],
     mismatched_units: list[str],
     missing_managed_files: list[str],
@@ -2031,6 +2061,12 @@ def _drift_summary(
     warning_count += max(0, int(compatibility_warning_count))
     error_count = (
         int(bool(missing_required_units))
+        + int(bool(missing_profile_units))
+        + int(bool(missing_installed_units))
+        + int(bool(extra_profile_units))
+        + int(bool(extra_managed_units))
+        + int(bool(mismatched_units))
+        + int(bool(profile_content_changed))
         + int(bool(activation_drift_units))
         + int(bool(activation_preservation_conflicts))
         + int(bool(missing_managed_files))
@@ -2041,7 +2077,7 @@ def _drift_summary(
     )
     status = "error" if error_count else ("warn" if warning_count else "ok")
     return {
-        "ok": status == "ok",
+        "ok": error_count == 0,
         "status": status,
         "error_count": error_count,
         "warning_count": warning_count,
@@ -2083,6 +2119,7 @@ def _summary_with_apply_errors(summary: dict[str, Any], errors: list[str]) -> di
 def _manual_actions(
     *,
     provider: str,
+    expected_files: dict[str, dict[str, Any]],
     missing_installed_units: list[str],
     mismatched_units: list[str],
     activation_drift_units: list[str],
@@ -2115,6 +2152,7 @@ def _manual_actions(
             for name in missing_installed_units
             if name.endswith(".service")
             and ("trade-intake" in name or "feishu-ws" in name or "wechat-clawbot" in name)
+            and "[Install]" in expected_files[name]["content"].splitlines()
         ]
         actions.extend(f"manual_enable_long_running_service: sudo systemctl enable --now {name}" for name in long_running)
         actions.extend(f"manual_review_unit_content: sudo systemctl cat {name}" for name in mismatched_units)

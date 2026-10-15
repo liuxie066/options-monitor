@@ -143,6 +143,72 @@ def test_build_portfolio_risk_context_uses_account_holdings_and_option_context()
     assert risk.unavailable_reasons == ()
 
 
+@pytest.mark.parametrize("usd_per_cny,expected", [(0.125, 56000), (None, None)])
+def test_risk_collateral_does_not_mix_cached_cny_with_current_fx(usd_per_cny, expected):
+    from src.application.short_vol_risk_context import build_portfolio_risk_context
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    context = _account_nvda_context()
+    context["option_ctx"]["cash_secured_total_by_ccy"] = {"USD": 7000}
+    risk = build_portfolio_risk_context(
+        portfolio_ctx=context,
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=usd_per_cny)),
+    )
+    assert risk.short_put_assignment_total_cny == expected
+    if expected is not None:
+        assert risk.short_put_assignment_cny_by_symbol["NVDA"] == expected
+    else:
+        assert "NVDA" not in risk.short_put_assignment_cny_by_symbol
+
+
+def test_risk_missing_currency_cannot_promote_known_symbol_subtotal():
+    from src.application.short_vol_risk_context import build_portfolio_risk_context
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    context = _account_nvda_context()
+    context["option_ctx"].update(
+        cash_secured_total_cny=None,
+        cash_secured_total_by_ccy={"USD": 7000, "HKD": 1000},
+        cash_secured_by_symbol_by_ccy={"NVDA": {"USD": 7000}, "0700.HK": {"HKD": 1000}},
+    )
+    risk = build_portfolio_risk_context(
+        portfolio_ctx=context,
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=.14)),
+    )
+    assert risk.short_put_assignment_total_cny is None
+    assert risk.short_put_assignment_cny_by_symbol == {"NVDA": pytest.approx(50000)}
+
+
+def test_risk_distinguishes_unknown_collateral_from_verified_empty():
+    from src.application.short_vol_risk_context import build_portfolio_risk_context
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    context = _account_nvda_context()
+    context["option_ctx"].update(
+        cash_secured_total_by_ccy={}, cash_secured_by_symbol_by_ccy={}, cash_secured_total_cny=0,
+    )
+    for missing in (False, True):
+        context["option_ctx"]["decision_snapshot_status"] = "snapshot_unavailable" if missing else "trusted"
+        risk = build_portfolio_risk_context(
+            portfolio_ctx=context, exchange_rate_converter=CurrencyConverter(ExchangeRates()),
+        )
+        assert risk.short_put_assignment_total_cny == (None if missing else 0)
+
+
+def test_unresolved_collateral_cannot_publish_its_symbol_or_total():
+    from src.application.short_vol_risk_context import build_portfolio_risk_context
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    context = _account_nvda_context()
+    context["option_ctx"]["cash_secured_unavailable_by_symbol"] = {"NVDA": "option_close_settlement_pending"}
+    risk = build_portfolio_risk_context(
+        portfolio_ctx=context, exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=.14)),
+    )
+    assert risk.short_put_assignment_total_cny is None
+    assert risk.short_put_assignment_cny_by_symbol == {}
+    assert "NVDA:option_close_settlement_pending" in risk.unavailable_reasons
+
+
 def test_build_portfolio_risk_context_does_not_relabel_cost_price_as_avg_cost() -> None:
     from src.application.short_vol_risk_context import build_portfolio_risk_context
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates

@@ -29,18 +29,7 @@ SCHEDULED_CONFIG_VALIDATOR_VERSION = 'runtime-config-v3'
 
 def data_config_candidates(*, base: Path) -> list[Path]:
     base = Path(base).resolve()
-    candidates = [
-        (base / "portfolio.runtime.json").resolve(),
-    ]
-    seen: set[str] = set()
-    out: list[Path] = []
-    for item in candidates:
-        key = str(item)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(item)
-    return out
+    return [(base / "portfolio.runtime.json").resolve()]
 
 
 def default_data_config_path(*, base: Path) -> Path:

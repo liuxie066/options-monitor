@@ -285,6 +285,42 @@ def test_projection_applies_adjust_patch_to_target_lot_state() -> None:
     assert result.views[0].cash_secured_amount == 21000.0
 
 
+def test_close_event_history_excludes_rejected_and_voided_events_and_survives_reopen() -> None:
+    key = _key()
+    first_close = _event(
+        event_id="close-first", event_type="close", contract_key=key,
+        contracts=1, event_time_ms=2_000, target_lot_id="lot-a",
+    )
+    events = [
+        _event(event_id="open-a", event_type="open", contract_key=key,
+               contracts=2, event_time_ms=1_000, lot_id="lot-a"),
+        first_close,
+        first_close,
+        _event(event_id="close-oversized", event_type="close", contract_key=key,
+               contracts=3, event_time_ms=3_000, target_lot_id="lot-a"),
+        _event(event_id="close-voided", event_type="close", contract_key=key,
+               contracts=1, event_time_ms=4_000, target_lot_id="lot-a"),
+        _event(event_id="void-close", event_type="void", contract_key=key,
+               contracts=0, event_time_ms=5_000, target_event_id="close-voided"),
+        _event(event_id="close-final", event_type="close", contract_key=key,
+               contracts=1, event_time_ms=6_000, target_lot_id="lot-a"),
+        _adjust_event(event_id="reopen", contract_key=key, target_lot_id="lot-a",
+                      event_time_ms=7_000,
+                      patch={"contracts": 3, "contracts_open": 1, "contracts_closed": 2}),
+        _event(event_id="close-after-reopen", event_type="close", contract_key=key,
+               contracts=1, event_time_ms=8_000, target_lot_id="lot-a"),
+    ]
+    result = project_trade_events(events)
+    assert {item.code for item in result.diagnostics} == {
+        "duplicate_event_id", "close_contracts_exceed_open",
+    }
+    lot = result.lots[0]
+    assert lot.close_event_ids == ("close-first", "close-final", "close-after-reopen")
+    assert lot.last_event_id == "close-after-reopen"
+    assert lot.contracts_closed == 3
+    assert lot.contracts_open == 0
+
+
 def test_projection_rejects_adjust_patch_with_unsupported_field() -> None:
     key = _key(option_type="put", strike=450.0, expiration_ymd="2026-05-28")
 
@@ -453,6 +489,7 @@ def test_fractional_stock_full_and_serialized_tail_replay_agree() -> None:
     assert lot.shares_open == Decimal("1.75")
     assert lot.shares_closed == Decimal("0.75")
     assert lot.realized_pnl == Decimal("1.5")
+    assert lot.close_event_ids == ("fraction-close",)
 
 
 def test_projection_stock_full_close_finalizes_and_realizes_pnl() -> None:

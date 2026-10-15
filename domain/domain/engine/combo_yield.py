@@ -644,8 +644,7 @@ def select_best_combo_yield_per_symbol(
 
 
 def rank_combo_yield_calls_for_put(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    copied = [dict(row) for row in rows]
-    return rank_combo_yield_rows(copied)
+    return rank_combo_yield_rows(rows)
 
 
 def combo_yield_call_lottery_rank_key(row: dict[str, Any]) -> tuple[Any, ...]:

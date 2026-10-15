@@ -213,7 +213,6 @@ def project_resumable_trade_events(
     retained_by_id: dict[str, PositionLot] = {}
     retained_order: list[str] = []
     retained_open_events: dict[str, TradeEvent] = {}
-    historical_close_event_ids: dict[str, list[str]] = {}
     for event, event_diagnostics in validated_events:
         if event.event_type == "void":
             diagnostics.extend(event_diagnostics)
@@ -258,10 +257,6 @@ def project_resumable_trade_events(
             retained_by_id[lot_id] = transition.lot_after
             if transition.finalized and tail_open_event is not None:
                 retained_open_events[lot_id] = tail_open_event
-            if mode == "full" and event.event_type in CLOSE_EVENT_TYPES:
-                historical_close_event_ids.setdefault(lot_id, []).append(
-                    event.event_id
-                )
         if transition.allocation is not None:
             allocations.append(transition.allocation)
 
@@ -320,15 +315,7 @@ def project_resumable_trade_events(
         if lot_open_quantity(accumulator.lots_by_id[lot_id]) > 0
     )
     retained_lots = (
-        tuple(
-            replace(
-                retained_by_id[lot_id],
-                close_event_ids=tuple(
-                    historical_close_event_ids.get(lot_id, ())
-                ),
-            )
-            for lot_id in retained_order
-        )
+        tuple(retained_by_id[lot_id] for lot_id in retained_order)
         if mode == "full"
         else active_lots
         + tuple(retained_by_id[lot_id] for lot_id in finalized_lot_ids)
@@ -1356,11 +1343,7 @@ def _apply_close_event(
         if lot_fee.basis.value == "actual" and lot_fee.amount is not None
         else (None if lot_is_stock(lot) else Decimal("0"))
     )
-    # The close ids are retained so ``close_event_ids`` is a real pointer to the
-    # events that closed this lot, produced by the same transition for every
-    # entry mode. The full-mode post pass that re-applies the retained ids then
-    # only restates what the fold path already carries, instead of the published
-    # value flipping with the presence of an unrelated diagnostic (I-1).
+    # Keep the lot's closing-event pointers identical in full and tail replay.
     lots_by_id[target_lot_id] = lot.apply_close(
         event,
         actual_fee_amount=actual_fee_amount,

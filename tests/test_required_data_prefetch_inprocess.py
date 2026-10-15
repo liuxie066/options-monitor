@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.cash_evidence_helpers import cash_portfolio
+
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
@@ -1697,11 +1699,11 @@ def test_inprocess_multi_spec_executes_each_exact_request_and_finalizes_once(
         base_config=base_cfg,
         account_configs=account_configs,
         prepared_portfolio_contexts={
-            "lx": {
+            "lx": cash_portfolio({
                 "portfolio_source_name": "futu",
                 "capacity_authority": {"status": "available"},
                 "stocks_by_symbol": {"0700.HK": {"avg_cost": 500.0}},
-            },
+            }, account='lx', account_id='123'),
             "sy": None,
         },
     )

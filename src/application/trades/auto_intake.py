@@ -115,12 +115,12 @@ from src.application.trades.inbox import (
     trade_inbox_revision,
     trade_inbox_summary,
 )
-from src.application.ledger.api import with_sqlite_repo_writer_lock
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.ledger.api import (
     open_position_ledger_from_runtime_config,
     open_trade_reconciliation_evidence_repo,
+    read_trade_intake_recovery_snapshot,
     broker_external_event_key,
     with_sqlite_repo_writer_lock,
     resolve_position_ledger_sqlite_path,
@@ -280,34 +280,13 @@ def _skipped_recovery_snapshot(
         for item in entries.values()
     ):
         raise ValueError("original unresolved stock deal differs from Inbox source")
-    digest = hashlib.sha256()
-    digest.update(json.dumps(saved, sort_keys=True, ensure_ascii=False, default=str).encode())
-    digest.update(state_bytes)
-    counts: dict[str, int] = {}
-    queries = {
-        "position_lots": "SELECT * FROM position_lots WHERE account=? ORDER BY lot_id",
-        "trade_events": "SELECT * FROM trade_events WHERE account=? ORDER BY event_id",
-        "assigned_stock_events": "SELECT * FROM assigned_stock_events WHERE account=? ORDER BY stock_event_id",
-        "trade_lifecycle_cases": "SELECT * FROM trade_lifecycle_cases WHERE account=? ORDER BY case_id",
-        "trade_lifecycle_evidence": "SELECT * FROM trade_lifecycle_evidence WHERE account=? ORDER BY evidence_id",
-        "trade_lifecycle_source_consumptions": "SELECT c.* FROM trade_lifecycle_source_consumptions c JOIN trade_lifecycle_cases t ON t.case_id=c.case_id WHERE t.account=? ORDER BY c.source_key",
-        "trade_lifecycle_allocations": "SELECT a.* FROM trade_lifecycle_allocations a JOIN trade_lifecycle_cases t ON t.case_id=a.case_id WHERE t.account=? ORDER BY a.allocation_id",
-        "trade_lifecycle_notification_outbox": "SELECT o.* FROM trade_lifecycle_notification_outbox o JOIN trade_lifecycle_cases t ON t.case_id=o.case_id WHERE t.account=? ORDER BY o.outbox_id",
-    }
-    with contextlib.closing(sqlite3.connect(f"{ledger_path.resolve().as_uri()}?mode=ro", uri=True)) as conn:
-        conn.row_factory = sqlite3.Row
-        conn.execute("BEGIN")
-        for name, sql in queries.items():
-            rows = conn.execute(sql, (account,))
-            counts[name] = 0
-            digest.update(name.encode())
-            for row in rows:
-                digest.update(json.dumps(dict(row), sort_keys=True, ensure_ascii=False, default=str).encode())
-                counts[name] += 1
+    ledger_snapshot = read_trade_intake_recovery_snapshot(
+        ledger_path, account=account, inbox_observation=saved, state_bytes=state_bytes,
+    )
     return {
         "inbox_id": inbox_id, "broker_deal_key": key, "account": account,
         "economic_payload_hash": economic_hash, "state_entries": entries,
-        "ledger_row_counts": counts, "recovery_hash": digest.hexdigest(),
+        **ledger_snapshot,
         "receipt_suppressed": True, "portfolio_refresh_suppressed": True,
         "prior_portfolio_refresh_attempted": bool(saved.get("portfolio_refresh_attempted_at_ms")),
         "lifecycle_outbox_status": "suppressed", "dry_run": True,
@@ -1801,6 +1780,7 @@ def _build_lifecycle_receipt_batch_dispatcher(
 
     route = resolve_trade_lifecycle_notification_batch_route(
         config=cfg,
+        base=base,
     )
     if not bool(route.get("route_available")):
         status = lifecycle_receipt_dispatcher_status(

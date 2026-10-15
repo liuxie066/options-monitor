@@ -22,6 +22,7 @@ from src.application.bot.control.policy import enforce_sender_allowed
 from src.application.bot.control.renderer import render_inbound_text
 from src.application.bot.channel_facade import analysis_control_replacement, cancel_channel_analysis, run_channel_request
 from src.application.bot.contracts import AppResult
+from src.application.bot.config_scope import BotConfigScopeError, resolve_replay_authorization
 from src.application.tool_execution import execute_tool
 
 
@@ -58,12 +59,16 @@ def handle_bot_request(
         text=normalized_request.text,
     )
 
-    # Expired deliveries still authenticate before replaying a prior response.
-    if time.monotonic() >= normalized_request.received_monotonic + 180:
-        try:
-            enforce_sender_allowed(channel=normalized_request.channel,
-                                   sender_id=normalized_request.sender_id, allowed_senders=allowed_senders)
-        except AgentToolError as err:
+    sender_error: AgentToolError | None = None
+    try:
+        sender_decision = enforce_sender_allowed(
+            channel=normalized_request.channel,
+            sender_id=normalized_request.sender_id,
+            allowed_senders=allowed_senders,
+        )
+    except AgentToolError as err:
+        sender_error = err
+        if time.monotonic() >= normalized_request.received_monotonic + 180:
             return _error_response(command_id=command_id, request=normalized_request, err=err, audit_db=store.path)
 
     try:
@@ -73,7 +78,21 @@ def handle_bot_request(
             command_id=command_id,
         )
     except AgentToolError as err:
-        return _error_response(command_id=command_id, request=normalized_request, err=err, audit_db=store.path)
+        return _error_response(command_id=command_id, request=normalized_request, err=sender_error or err, audit_db=store.path)
+    if sender_error is not None:
+        response = _error_response(command_id=command_id, request=normalized_request, err=sender_error, audit_db=store.path)
+        if existing is not None:
+            store.mark_duplicate(
+                command_id=str(existing.get("command_id") or ""),
+                sender_id=normalized_request.sender_id,
+                decision="denied",
+            )
+            return response
+        return _record_and_return(
+            store=store, request=normalized_request, command_id=command_id,
+            created_at=utc_now_iso(), command=None, control=None, decision="denied",
+            response=response, error_code=sender_error.code,
+        )
     if existing is not None:
         if str(existing.get("sender_id") or "") != normalized_request.sender_id:
             store.mark_duplicate(
@@ -89,11 +108,30 @@ def handle_bot_request(
                     message="message_id was already used by a different sender",
                 ),
             )
+        try:
+            current = resolve_replay_authorization(normalized_request)
+            frozen = json.loads(existing.get("replay_authorization_json") or "null")
+        except (AgentToolError, BotConfigScopeError, OSError, ValueError):
+            current, frozen = None, None
+        if not current or not isinstance(frozen, dict) or not frozen.get("scope") or frozen != current:
+            store.mark_duplicate(command_id=str(existing.get("command_id") or ""),
+                                 sender_id=normalized_request.sender_id, decision="scope_conflict")
+            return _error_response(command_id=command_id, request=normalized_request,
+                err=AgentToolError(code="CHANNEL_NOT_READY", message="原消息的作用域无法验证；请发送新消息。"), audit_db=store.path)
         store.mark_duplicate(
             command_id=str(existing.get("command_id") or ""),
             sender_id=normalized_request.sender_id,
         )
         return _duplicate_response(existing)
+
+    try:
+        authorization = resolve_replay_authorization(normalized_request)
+    except (AgentToolError, BotConfigScopeError, OSError, ValueError):
+        # Deterministic first requests remain usable, but have no replay/retry proof.
+        authorization = {**normalized_request.public_payload(), "bot_config_path": normalized_request.bot_config_path,
+                         "scope": None, "transport_identity": (normalized_request.reply_context or {}).get("reply_sender_identity")}
+        authorization.pop("schema_version", None)
+    normalized_request = replace(normalized_request, replay_authorization=authorization)
 
     created_at = utc_now_iso()
     command: ControlCommand | None = None
@@ -103,11 +141,6 @@ def handle_bot_request(
     error_code: str | None = None
 
     try:
-        sender_decision = enforce_sender_allowed(
-            channel=normalized_request.channel,
-            sender_id=normalized_request.sender_id,
-            allowed_senders=allowed_senders,
-        )
         _check_request_deadline(normalized_request)
         replacement = analysis_control_replacement(normalized_request.text) if normalized_request.channel == "feishu" else None
         if replacement is not None:
@@ -265,14 +298,14 @@ def _bot_reply_builder(request: BotInboundRequest, command_id: str):
     if request.channel == 'feishu' and request.message_id:
         from src.application.channels.feishu_reply_renderer import render_feishu_conversation_reply
         def build(result: AppResult) -> dict[str, Any]:
-            return {'delivery_key': f'feishu:{command_id}', 'channel': 'feishu', 'payload': render_feishu_conversation_reply(
+            return {'delivery_key': f'feishu:{command_id}', 'channel': 'feishu', 'authorization': request.replay_authorization, 'payload': render_feishu_conversation_reply(
                 message_id=request.message_id, text=result.user_response, reply_in_thread=bool(context.get('reply_in_thread')),
                 max_chars=int(context.get('max_reply_chars') or 0), render_route='bot')}
         return build
     if request.channel == 'wechat' and context.get('to_user_id') and context.get('context_token'):
         from src.application.channels.reply_decision import trim_reply
         def build(result: AppResult) -> dict[str, Any]:
-            return {'delivery_key': f'wechat:{command_id}', 'channel': 'wechat', 'payload': {
+            return {'delivery_key': f'wechat:{command_id}', 'channel': 'wechat', 'authorization': request.replay_authorization, 'payload': {
                 'to_user_id': context['to_user_id'], 'context_token': context['context_token'],
                 'group_id': context.get('group_id'), 'text': trim_reply(result.user_response, max_chars=int(context.get('max_reply_chars') or 0))}}
         return build
@@ -434,6 +467,7 @@ def _record_and_return(
             "result_ok": bool(response.get("ok", False)),
             "error_code": error_code or _response_error_code(response),
             "response": response,
+            "replay_authorization": request.replay_authorization,
             "created_at": created_at,
             "finished_at": utc_now_iso(),
         }

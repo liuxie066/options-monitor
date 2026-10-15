@@ -657,26 +657,14 @@ def project_wheel_call_intents(
     account_value = _required_text(account, "account").lower()
     stock_lot_value = _required_text(lot_id, "stock_lot_id")
     instant = _positive_int(as_of_ms, "as_of_ms")
-    events, _invalid = effective_wheel_events(
-        [
-            event
-            for event in wheel_events
-            if str(event.get("account") or "").strip().lower() == account_value
-            and str(
-                event.get("wheel_branch_id")
-                or event.get("stock_lot_id")
-                or ""
-            ).strip()
-            == stock_lot_value
-        ],
+    return project_wheel_intents(
+        wheel_events,
+        account=account_value,
+        wheel_branch_id=stock_lot_value,
+        direction="call",
         as_of_ms=instant,
+        known_trade_event_ids=known_trade_event_ids,
     )
-    _active, _reasons, summaries = _intent_state(
-        events,
-        as_of_ms=instant,
-        known_trade_event_ids=set(known_trade_event_ids or ()),
-    )
-    return summaries
 
 
 def project_wheel_call_linkage_candidates(

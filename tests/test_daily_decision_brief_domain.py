@@ -959,3 +959,30 @@ def test_combined_persisted_normalization_derives_exact_legacy_digest_once(monke
     assert normalized == expected_brief
     assert digests == expected
     assert calls == [raw]
+
+
+@pytest.mark.parametrize("gap_scope", ["direction", "branch", "contract"])
+def test_candidate_history_holds_only_the_affected_wheel_scope(gap_scope):
+    put = {**_action(), "strategy_family": "wheel", "wheel_branch_id": "branch-put"}
+    call = {**_action(contract_symbol="NVDA260821C00100000"), "strategy_family": "wheel",
+            "option_type": "call", "wheel_branch_id": "branch-call"}
+    previous = normalize_daily_decision_brief(_brief(revision=0, actions=[put, call]))
+    gap = {"scope": "strategy", "symbol": "NVDA", "strategy_family": "wheel", "reason": "wheel_scan_failed"}
+    gap.update({"direction": "put"} if gap_scope == "direction" else
+               {"wheel_branch_id": "branch-put"} if gap_scope == "branch" else
+               {"scope": "contract", "contract_symbol": put["contract_symbol"], "expiration": put["expiration"]})
+    current = {**_brief(revision=1), "data_gaps": [gap]}
+    reconciled = reconcile_daily_decision_brief_evidence(previous, current)
+    assert [row["option_type"] for row in reconciled["actions"]] == ["put"]
+    assert reconciled["actions"][0]["evidence_state"] == "unavailable"
+    changes = diff_daily_decision_briefs(previous, reconciled)["changes"]
+    assert sorted(row["change_type"] for row in changes) == ["candidate_evidence_unavailable", "candidate_invalidated"]
+
+
+def test_cc_lp_gap_does_not_hold_historical_sp_lc_candidate():
+    previous = normalize_daily_decision_brief(_combo_brief(revision=0, actions=[_combo_action()]))
+    current = _combo_brief(revision=1, actions=[], data_gaps=[{"scope": "strategy", "symbol": "NVDA",
+        "strategy_family": "combo_yield", "variant": "cc_lp", "reason": "combo_scan_failed"}])
+    assert reconcile_daily_decision_brief_evidence(previous, current)["actions"] == []
+    current["data_gaps"][0]["variant"] = "sp_lc"
+    assert len(reconcile_daily_decision_brief_evidence(previous, current)["actions"]) == 1

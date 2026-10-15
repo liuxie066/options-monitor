@@ -28,6 +28,7 @@ from src.application.scan_sell_call import run_sell_call_scan
 from src.application.candidate_scanning import (
     evidence_summary_from_decisions,
     project_evidence_scan_status,
+    project_evidence_scan_status as _evidence_scan_status,
 )
 from domain.domain.sell_call_config import (
     resolve_effective_sell_call_min_strike,
@@ -269,17 +270,6 @@ def run_sell_call_scan_and_summarize(
     summary["_strategy_status"] = status
     summary["_strategy_reason"] = reason
     return summary
-
-
-def _evidence_scan_status(
-    *,
-    evidence: dict[str, Any],
-    candidate_count: int,
-) -> tuple[str, str | None]:
-    return project_evidence_scan_status(
-        evidence=evidence,
-        candidate_count=candidate_count,
-    )
 
 
 def empty_sell_call_summary(symbol: str, *, symbol_cfg: dict[str, Any]) -> dict[str, Any]:

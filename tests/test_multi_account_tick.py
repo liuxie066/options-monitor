@@ -1245,7 +1245,8 @@ def test_duplicate_unsupported_tick_failure_returns_nonzero_without_rerun(monkey
     )
 
 
-def test_terminal_idempotency_write_failure_is_not_silently_swallowed(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("terminal_ok", [True, False])
+def test_terminal_idempotency_write_failure_is_not_silently_swallowed(monkeypatch, tmp_path, terminal_ok) -> None:
     import json
 
     import pytest
@@ -1265,9 +1266,9 @@ def test_terminal_idempotency_write_failure_is_not_silently_swallowed(monkeypatc
 
     def _guard(request):
         request.complete_tick_idempotency_fn(
-            status="unsupported_failed",
+            status="completed" if terminal_ok else "unsupported_failed",
             message="daily_brief_multi_market_delivery_unsupported",
-            ok=False,
+            ok=terminal_ok,
             error_code="daily_brief_multi_market_delivery_unsupported",
         )
         raise AssertionError("terminal completion failure must escape")
@@ -1335,3 +1336,61 @@ def test_experience_history_failure_keeps_scan_outcome(monkeypatch, tmp_path, co
     assert any(e["step"] == "finalize" and e["status"] == "degraded"
                and e["data"]["action"] == "append_tick_metrics_history" for e in events)
     assert any(e["step"] == "run_end" and e["status"] == ("ok" if completed else "error") for e in events)
+
+
+def test_duplicate_failed_scan_replays_original_scope_without_rerun(monkeypatch, tmp_path) -> None:
+    import json
+
+    from src.application import multi_account_tick as mod
+
+    cfg = tmp_path / "config.us.json"
+    _write_market_config(cfg, "us", [])
+    runtime_root = tmp_path / "runtime"
+    events: list[dict] = []
+
+    class _RunLogger:
+        def __init__(self, _base):
+            self.run_id = "run-duplicate"
+
+        def safe_event(self, step, status, **kwargs):
+            events.append({"step": step, "status": status, **kwargs})
+
+    monkeypatch.setenv("OM_TICK_CRON_RUN_ID", "wrapper-replay")
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.setenv("OM_TRIGGER_SOURCE", "cron")
+    monkeypatch.setattr(mod, "RunLogger", _RunLogger)
+    monkeypatch.setattr(mod, "resolve_config_contract", lambda *args, **kwargs: {})
+    monkeypatch.setattr(mod, "ensure_runtime_canonical_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "ensure_runtime_schedule_matches_market", lambda *args, **kwargs: {"market": ""})
+    monkeypatch.setattr(
+        mod.state_repo,
+        "claim_idempotency_record",
+        lambda *args, **kwargs: {
+            "claimed": False,
+            "record": {
+                "status": "failed",
+                "run_id": "original-run",
+                "account_outcomes": [{"account": "lx", "scan_ok": False, "notify_failed": False, "failure_notification_confirmed": True}],
+                "error_code": "SCAN_FAILED",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "run_tick_guard_flow",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("terminal duplicate must not rerun")),
+    )
+
+    assert mod.main(["--config", str(cfg), "--accounts", "lx", "--market-config", "us"]) == 1
+    assert any(
+        event.get("step") == "run_end"
+        and event.get("status") == "error"
+        and event.get("error_code") == "SCAN_FAILED"
+        for event in events
+    )
+
+
+    receipt = json.loads((runtime_root / "output_runs/wrapper-replay/state/child_tick_completion.json").read_text())
+    assert receipt["inner_run_id"] == "original-run"
+    assert receipt["status"] == "failed" and receipt["rc"] == 1
+    assert receipt["account_outcomes"][0]["failure_notification_confirmed"] is True

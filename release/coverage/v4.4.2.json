@@ -1,0 +1,48 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.4.2",
+  "base": {
+    "tag": "v4.4.1",
+    "commit": "d7832b5c9a5d33f8341477b70a50597b4f0293bc"
+  },
+  "reviewed_head": "1755adcca0672d914b5d248ae2323761b5ca3699",
+  "commits": [
+    {
+      "sha": "5c440ab06fa5c04ed0a42dd3b74de766ca7e5c10",
+      "subject": "fix(service): preserve structured errors and partial write receipts"
+    },
+    {
+      "sha": "1755adcca0672d914b5d248ae2323761b5ca3699",
+      "subject": "Merge pull request #601 from liuxie066/codex/fix-service-errors-529"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "服务操作部分写入后保留结构化错误及已完成操作、备份回执，CLI 同步返回错误原因；重新预览后重试保持已有写入与备份（#529）。",
+      "commits": [
+        "5c440ab06fa5c04ed0a42dd3b74de766ca7e5c10"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "1755adcca0672d914b5d248ae2323761b5ca3699",
+      "reason": "合并已验收 PR #601；实际行为变化由服务部分写入错误与收据修复说明覆盖。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "5c440ab06fa5c04ed0a42dd3b74de766ca7e5c10",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/601"
+      ]
+    },
+    {
+      "commit": "1755adcca0672d914b5d248ae2323761b5ca3699",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/601"
+      ]
+    }
+  ]
+}

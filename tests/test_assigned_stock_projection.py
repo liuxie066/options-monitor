@@ -64,6 +64,7 @@ def _base_projection(
     extra_allocations: list[dict[str, Any]] | None = None,
     assignment_payload: dict[str, Any] | None = None,
     stock_contracts: int = 1,
+    month: str | None = None,
 ) -> dict[str, Any]:
     opened_at = _ms("2026-04-03T10:00:00")
     assigned_at = _ms("2026-05-01T10:00:00")
@@ -148,7 +149,7 @@ def _base_projection(
         stock_holdings=stock_holdings,
         account_norm="lx",
         broker_norm="富途",
-        month=None,
+        month=month,
         as_of_ms=_ms("2026-06-30T16:00:00"),
     )
 
@@ -227,6 +228,26 @@ def test_projection_tracks_partial_sale_principal_basis_and_missing_quote() -> N
     assert sale_row["assigned_stock_realized_pnl"] == 398
     assert missing["assigned_stock_lots"][0]["assigned_stock_unrealized_pnl_gross"] is None
     assert missing["assigned_stock_review_rows"][0]["status"] == "missing_quote"
+
+
+@pytest.mark.parametrize("month, expected_count", [(None, 1), ("2026-05", 1), ("2026-07", 0)])
+def test_assigned_stock_list_mutation_preserves_lifecycle_lists(month, expected_count) -> None:
+    result = _base_projection(month=month)
+    assigned = result["assigned_stock_lots"]
+    lifecycle = result["assignment_lifecycle_rows"]
+    efficiency = result["lifecycle_efficiency_rows"]
+    assert assigned == lifecycle == efficiency
+    assert len(assigned) == expected_count
+    assert assigned is not lifecycle
+    assert lifecycle is efficiency
+    if assigned:
+        assert assigned[0] is lifecycle[0]
+        assigned[0]["mutation_probe"] = True
+        assert lifecycle[0]["mutation_probe"] is True
+    assigned.clear()
+    assert len(lifecycle) == len(efficiency) == expected_count
+    assigned.append({"mutation_probe": "list-only"})
+    assert len(lifecycle) == len(efficiency) == expected_count
 
 
 def test_projection_emits_stock_position_lots_as_first_class() -> None:
