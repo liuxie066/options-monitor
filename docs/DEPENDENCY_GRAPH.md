@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1197 (`src`: 567, `domain`: 92, `scripts`: 15, `tests`: 523)
-- Internal import edges: 9565 total, 3817 production/script edges excluding tests
+- Internal import edges: 9573 total, 3820 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -46,10 +46,10 @@ flowchart LR
   scripts -->|5| domain
   scripts -->|4| infrastructure
   storage -->|1| domain
-  tests -->|4369| application
-  tests -->|543| domain
+  tests -->|4371| application
+  tests -->|544| domain
   tests -->|2| domain_services
-  tests -->|284| infrastructure
+  tests -->|285| infrastructure
   tests -->|336| interfaces
   tests -->|28| scripts
   tests -->|39| storage
@@ -79,10 +79,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 4369 |
-| tests | domain | 543 |
+| tests | application | 4371 |
+| tests | domain | 544 |
 | tests | interfaces | 336 |
-| tests | infrastructure | 284 |
+| tests | infrastructure | 285 |
 | tests | storage | 39 |
 | tests | scripts | 28 |
 | tests | domain_services | 2 |
@@ -203,8 +203,8 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.trades.auto_intake | 49 |
 | src.application.ledger.trade_attribution | 40 |
 | src.application.multi_tick.required_data_prefetch | 34 |
+| src.application.pipeline_watchlist | 33 |
 | src.application.ledger.queries | 32 |
-| src.application.pipeline_watchlist | 32 |
 | src.interfaces.cli.main | 32 |
 | src.application.daily_decision_brief_service | 31 |
 | src.interfaces.cli.option_positions | 31 |

@@ -80,6 +80,7 @@ def portfolio_concentration_fields(
     covered = _first_float(row, "covered_notional_cny", "underlying_notional_cny")
     nav = _float(baseline.get("net_assets_cny"))
     return {
+        **({"position_sizing_quote_recovery": evidence["quote_recovery"]} if evidence.get("quote_recovery") else {}),
         "position_sizing_basis": POSITION_SIZING_BASIS,
         "symbol_concentration_current": current,
         "symbol_concentration_after_existing_assignments": existing_weight,
