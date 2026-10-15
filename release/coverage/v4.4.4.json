@@ -5,61 +5,240 @@
     "tag": "v4.4.3",
     "commit": "2b9d1d1e70c70b9e76a18093640700780ffaed22"
   },
-  "reviewed_head": "f55415944b03d03608ace32561096c2754892227",
+  "reviewed_head": "07c394eaaa2edcd19b98386e27c15bd41add4d9d",
   "commits": [
-    {"sha": "966d3dabebe9eab229f4a60914d16f72500c6684", "subject": "chore(gateflow): accept plan for receipt-copy-slim"},
-    {"sha": "a932eba08f9624f21d6a4294a5ee047f80727de2", "subject": "perf(cleanup): reduce filesystem reads during cleanup planning"},
-    {"sha": "b8d00fa4cbbcba5bdbbf3d28ef1392b1317631af", "subject": "fix(receipt): slim intake receipt copy to human-readable fields"},
-    {"sha": "3dc438d0c899523554e339803ea2fea600e7c531", "subject": "Merge pull request #608 from liuxie066/codex/cleanup-efficiency"},
-    {"sha": "526b2961f2bde36d2ac8e8931f6ad61978d943b7", "subject": "chore(gateflow): accept deepreview for receipt-copy-slim"},
-    {"sha": "1b5ffaecf2d20920b55f973184c0df995169facf", "subject": "chore(gateflow): accept plan for issue525 diagnostic"},
-    {"sha": "328358a0987807a9d7da99e058e4a2bc793497d1", "subject": "fix(service): distinguish reported unknown state from failed probe"},
-    {"sha": "a900b2a88f9bb24ce9a2455cba3c1e4862b75c98", "subject": "chore(gateflow): accept deepreview for issue525 diagnostic"},
-    {"sha": "340efdcb27512871430ee419c2d8832c3d9a7fbe", "subject": "chore(gateflow): accept PR review for receipt-copy-slim"},
-    {"sha": "bf79b7d706613afb5da42f70d6d983e6885940d7", "subject": "Merge branch 'main' into codex/receipt-copy-slim"},
-    {"sha": "13ad0fa296d92bccba0a4d0cede62158306cfe94", "subject": "fix(receipt): slim intake receipt copy to human-readable fields (#609)"},
-    {"sha": "2abfbe5f4ff7269a5db16dae2ff10a339d06eb26", "subject": "Merge branch 'main' into codex/fix-service-probe-message-525"},
-    {"sha": "f55415944b03d03608ace32561096c2754892227", "subject": "Merge pull request #610 from liuxie066/codex/fix-service-probe-message-525"}
+    {
+      "sha": "966d3dabebe9eab229f4a60914d16f72500c6684",
+      "subject": "chore(gateflow): accept plan for receipt-copy-slim"
+    },
+    {
+      "sha": "a932eba08f9624f21d6a4294a5ee047f80727de2",
+      "subject": "perf(cleanup): reduce filesystem reads during cleanup planning"
+    },
+    {
+      "sha": "b8d00fa4cbbcba5bdbbf3d28ef1392b1317631af",
+      "subject": "fix(receipt): slim intake receipt copy to human-readable fields"
+    },
+    {
+      "sha": "3dc438d0c899523554e339803ea2fea600e7c531",
+      "subject": "Merge pull request #608 from liuxie066/codex/cleanup-efficiency"
+    },
+    {
+      "sha": "526b2961f2bde36d2ac8e8931f6ad61978d943b7",
+      "subject": "chore(gateflow): accept deepreview for receipt-copy-slim"
+    },
+    {
+      "sha": "1b5ffaecf2d20920b55f973184c0df995169facf",
+      "subject": "chore(gateflow): accept plan for issue525 diagnostic"
+    },
+    {
+      "sha": "328358a0987807a9d7da99e058e4a2bc793497d1",
+      "subject": "fix(service): distinguish reported unknown state from failed probe"
+    },
+    {
+      "sha": "a900b2a88f9bb24ce9a2455cba3c1e4862b75c98",
+      "subject": "chore(gateflow): accept deepreview for issue525 diagnostic"
+    },
+    {
+      "sha": "340efdcb27512871430ee419c2d8832c3d9a7fbe",
+      "subject": "chore(gateflow): accept PR review for receipt-copy-slim"
+    },
+    {
+      "sha": "37386d0b17d8519578e054bc608a60c5944a3df8",
+      "subject": "chore(gateflow): accept plan for issue591 preview reuse"
+    },
+    {
+      "sha": "7e536873de8cf6eb5d74b2d4b00bbc8d1977e080",
+      "subject": "perf(ledger): reuse validated intervention previews"
+    },
+    {
+      "sha": "779cb7c2d2e4dba51db4c0912585154517de702e",
+      "subject": "chore(gateflow): accept deepreview for issue591 preview reuse"
+    },
+    {
+      "sha": "bf79b7d706613afb5da42f70d6d983e6885940d7",
+      "subject": "Merge branch 'main' into codex/receipt-copy-slim"
+    },
+    {
+      "sha": "13ad0fa296d92bccba0a4d0cede62158306cfe94",
+      "subject": "fix(receipt): slim intake receipt copy to human-readable fields (#609)"
+    },
+    {
+      "sha": "2abfbe5f4ff7269a5db16dae2ff10a339d06eb26",
+      "subject": "Merge branch 'main' into codex/fix-service-probe-message-525"
+    },
+    {
+      "sha": "f55415944b03d03608ace32561096c2754892227",
+      "subject": "Merge pull request #610 from liuxie066/codex/fix-service-probe-message-525"
+    },
+    {
+      "sha": "78e192e068797105e127f95ab9de7f36fc438519",
+      "subject": "Merge branch 'main' into codex/reuse-ledger-preview-591"
+    },
+    {
+      "sha": "1437c68a1115bbc2b214d882993e987384e109d3",
+      "subject": "Merge pull request #611 from liuxie066/codex/reuse-ledger-preview-591"
+    },
+    {
+      "sha": "cc6477adf869d1bbe6a460cc070c83dcbacc863a",
+      "subject": "chore: release 4.4.4"
+    },
+    {
+      "sha": "07c394eaaa2edcd19b98386e27c15bd41add4d9d",
+      "subject": "chore(release): integrate approved preview change for 4.4.4"
+    }
   ],
   "release_notes": [
     {
       "category": "Improvements",
       "text": "精简成交回执中的机器标识符和重复成功说明，多候选改为数量提示；保留成交编号、自动恢复说明及异常重试、处理和诊断信息（#609）。",
-      "commits": ["b8d00fa4cbbcba5bdbbf3d28ef1392b1317631af", "13ad0fa296d92bccba0a4d0cede62158306cfe94"]
+      "commits": [
+        "b8d00fa4cbbcba5bdbbf3d28ef1392b1317631af",
+        "13ad0fa296d92bccba0a4d0cede62158306cfe94"
+      ]
     },
     {
       "category": "Improvements",
       "text": "清理预览复用文件清单和版本读取，减少目录遍历开销；保留原有保留策略、符号链接处理及删除前复验（#608）。",
-      "commits": ["a932eba08f9624f21d6a4294a5ee047f80727de2", "3dc438d0c899523554e339803ea2fea600e7c531"]
+      "commits": [
+        "a932eba08f9624f21d6a4294a5ee047f80727de2",
+        "3dc438d0c899523554e339803ea2fea600e7c531"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "账本撤销和修复预览复用已核验事件，减少重复构建及历史读取，并确保返回事件经过同一预检；保留实际写入、事务内复验和幂等读回（#611）。",
+      "commits": ["7e536873de8cf6eb5d74b2d4b00bbc8d1977e080", "1437c68a1115bbc2b214d882993e987384e109d3"]
     },
     {
       "category": "Bug Fixes",
       "text": "服务归属核验区分 systemd 已返回但无法识别的状态与查询失败，避免将前者误报为管理器不可用；保留原有操作门禁（#610）。",
-      "commits": ["328358a0987807a9d7da99e058e4a2bc793497d1", "f55415944b03d03608ace32561096c2754892227"]
+      "commits": [
+        "328358a0987807a9d7da99e058e4a2bc793497d1",
+        "f55415944b03d03608ace32561096c2754892227"
+      ]
     }
   ],
   "no_release_note": [
-    {"commit": "966d3dabebe9eab229f4a60914d16f72500c6684", "reason": "Empty plan-acceptance checkpoint; no source, configuration, runtime or user-visible change."},
-    {"commit": "526b2961f2bde36d2ac8e8931f6ad61978d943b7", "reason": "Empty aggregate-review checkpoint; receipt behavior is covered by the PR 609 release note."},
-    {"commit": "1b5ffaecf2d20920b55f973184c0df995169facf", "reason": "Empty diagnostic-plan checkpoint; no source, configuration, runtime or user-visible change."},
-    {"commit": "a900b2a88f9bb24ce9a2455cba3c1e4862b75c98", "reason": "Empty diagnostic-review checkpoint; service behavior is covered by the PR 610 release note."},
-    {"commit": "340efdcb27512871430ee419c2d8832c3d9a7fbe", "reason": "Empty PR-review checkpoint; evidence corrections do not change tracked source or runtime behavior."},
-    {"commit": "bf79b7d706613afb5da42f70d6d983e6885940d7", "reason": "Integration of reviewed main into receipt branch; adds no independent behavior beyond the separately covered PR 608 and PR 609 changes."},
-    {"commit": "2abfbe5f4ff7269a5db16dae2ff10a339d06eb26", "reason": "Integration of reviewed main into diagnostic branch; adds no independent behavior beyond the separately covered PR 608, PR 609 and PR 610 changes."}
+    {
+      "commit": "966d3dabebe9eab229f4a60914d16f72500c6684",
+      "reason": "Empty plan-acceptance checkpoint; no source, configuration, runtime or user-visible change."
+    },
+    {
+      "commit": "526b2961f2bde36d2ac8e8931f6ad61978d943b7",
+      "reason": "Empty aggregate-review checkpoint; receipt behavior is covered by the PR 609 release note."
+    },
+    {
+      "commit": "1b5ffaecf2d20920b55f973184c0df995169facf",
+      "reason": "Empty diagnostic-plan checkpoint; no source, configuration, runtime or user-visible change."
+    },
+    {
+      "commit": "a900b2a88f9bb24ce9a2455cba3c1e4862b75c98",
+      "reason": "Empty diagnostic-review checkpoint; service behavior is covered by the PR 610 release note."
+    },
+    {
+      "commit": "340efdcb27512871430ee419c2d8832c3d9a7fbe",
+      "reason": "Empty PR-review checkpoint; evidence corrections do not change tracked source or runtime behavior."
+    },
+    {
+      "commit": "bf79b7d706613afb5da42f70d6d983e6885940d7",
+      "reason": "Integration of reviewed main into receipt branch; adds no independent behavior beyond the separately covered PR 608 and PR 609 changes."
+    },
+    {
+      "commit": "2abfbe5f4ff7269a5db16dae2ff10a339d06eb26",
+      "reason": "Integration of reviewed main into diagnostic branch; adds no independent behavior beyond the separately covered PR 608, PR 609 and PR 610 changes."
+    },
+    {"commit": "37386d0b17d8519578e054bc608a60c5944a3df8", "reason": "Empty preview-reuse plan checkpoint; no independent source or runtime change."},
+    {"commit": "779cb7c2d2e4dba51db4c0912585154517de702e", "reason": "Empty preview-reuse review checkpoint; actual behavior is covered by the PR 611 release note."},
+    {"commit": "78e192e068797105e127f95ab9de7f36fc438519", "reason": "Integration of existing reviewed main into the preview-reuse branch; no separate user-visible behavior beyond covered changes."},
+    {"commit": "cc6477adf869d1bbe6a460cc070c83dcbacc863a", "reason": "Earlier metadata-only preparation of the same unpublished 4.4.4 target, superseded after explicit user authorization to include PR 611; no independent runtime change."},
+    {"commit": "07c394eaaa2edcd19b98386e27c15bd41add4d9d", "reason": "Integration of user-authorized PR 611 into the existing release branch; all source behavior is separately covered by the four release notes."}
   ],
   "design_evidence": [
-    {"commit": "966d3dabebe9eab229f4a60914d16f72500c6684", "references": ["https://github.com/liuxie066/options-monitor/pull/609"]},
-    {"commit": "a932eba08f9624f21d6a4294a5ee047f80727de2", "references": ["https://github.com/liuxie066/options-monitor/pull/608"]},
-    {"commit": "b8d00fa4cbbcba5bdbbf3d28ef1392b1317631af", "references": ["https://github.com/liuxie066/options-monitor/pull/609"]},
-    {"commit": "3dc438d0c899523554e339803ea2fea600e7c531", "references": ["https://github.com/liuxie066/options-monitor/pull/608"]},
-    {"commit": "526b2961f2bde36d2ac8e8931f6ad61978d943b7", "references": ["https://github.com/liuxie066/options-monitor/pull/609"]},
-    {"commit": "1b5ffaecf2d20920b55f973184c0df995169facf", "references": ["https://github.com/liuxie066/options-monitor/pull/610"]},
-    {"commit": "328358a0987807a9d7da99e058e4a2bc793497d1", "references": ["https://github.com/liuxie066/options-monitor/pull/610"]},
-    {"commit": "a900b2a88f9bb24ce9a2455cba3c1e4862b75c98", "references": ["https://github.com/liuxie066/options-monitor/pull/610"]},
-    {"commit": "340efdcb27512871430ee419c2d8832c3d9a7fbe", "references": ["https://github.com/liuxie066/options-monitor/pull/609"]},
-    {"commit": "bf79b7d706613afb5da42f70d6d983e6885940d7", "references": ["https://github.com/liuxie066/options-monitor/pull/609"]},
-    {"commit": "13ad0fa296d92bccba0a4d0cede62158306cfe94", "references": ["https://github.com/liuxie066/options-monitor/pull/609"]},
-    {"commit": "2abfbe5f4ff7269a5db16dae2ff10a339d06eb26", "references": ["https://github.com/liuxie066/options-monitor/pull/610"]},
-    {"commit": "f55415944b03d03608ace32561096c2754892227", "references": ["https://github.com/liuxie066/options-monitor/pull/610"]}
+    {
+      "commit": "966d3dabebe9eab229f4a60914d16f72500c6684",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/609"
+      ]
+    },
+    {
+      "commit": "a932eba08f9624f21d6a4294a5ee047f80727de2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/608"
+      ]
+    },
+    {
+      "commit": "b8d00fa4cbbcba5bdbbf3d28ef1392b1317631af",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/609"
+      ]
+    },
+    {
+      "commit": "3dc438d0c899523554e339803ea2fea600e7c531",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/608"
+      ]
+    },
+    {
+      "commit": "526b2961f2bde36d2ac8e8931f6ad61978d943b7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/609"
+      ]
+    },
+    {
+      "commit": "1b5ffaecf2d20920b55f973184c0df995169facf",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/610"
+      ]
+    },
+    {
+      "commit": "328358a0987807a9d7da99e058e4a2bc793497d1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/610"
+      ]
+    },
+    {
+      "commit": "a900b2a88f9bb24ce9a2455cba3c1e4862b75c98",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/610"
+      ]
+    },
+    {
+      "commit": "340efdcb27512871430ee419c2d8832c3d9a7fbe",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/609"
+      ]
+    },
+    {
+      "commit": "bf79b7d706613afb5da42f70d6d983e6885940d7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/609"
+      ]
+    },
+    {
+      "commit": "13ad0fa296d92bccba0a4d0cede62158306cfe94",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/609"
+      ]
+    },
+    {
+      "commit": "2abfbe5f4ff7269a5db16dae2ff10a339d06eb26",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/610"
+      ]
+    },
+    {
+      "commit": "f55415944b03d03608ace32561096c2754892227",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/610"
+      ]
+    },
+    {"commit": "37386d0b17d8519578e054bc608a60c5944a3df8", "references": ["https://github.com/liuxie066/options-monitor/pull/611"]},
+    {"commit": "7e536873de8cf6eb5d74b2d4b00bbc8d1977e080", "references": ["https://github.com/liuxie066/options-monitor/pull/611"]},
+    {"commit": "779cb7c2d2e4dba51db4c0912585154517de702e", "references": ["https://github.com/liuxie066/options-monitor/pull/611"]},
+    {"commit": "78e192e068797105e127f95ab9de7f36fc438519", "references": ["https://github.com/liuxie066/options-monitor/pull/611"]},
+    {"commit": "1437c68a1115bbc2b214d882993e987384e109d3", "references": ["https://github.com/liuxie066/options-monitor/pull/611"]},
+    {"commit": "cc6477adf869d1bbe6a460cc070c83dcbacc863a", "references": ["https://github.com/liuxie066/options-monitor/pull/612"]},
+    {"commit": "07c394eaaa2edcd19b98386e27c15bd41add4d9d", "references": ["https://github.com/liuxie066/options-monitor/pull/612"]}
   ]
 }
