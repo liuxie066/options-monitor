@@ -153,6 +153,222 @@ def cli_install(ctx):
     )
 
 
+@pytest.fixture
+def load_state_context(tmp_path, monkeypatch, request):
+    """Retain synthetic files; never invoke config-init or atomic-writer cleanup."""
+    from src.application import service_lifecycle as lifecycle
+    from src.application.config_yaml import resolve_yaml_runtime_config
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('LoadState tests must not delete files or execute host processes')
+
+    guard = pytest.MonkeyPatch()
+    request.addfinalizer(guard.undo)  # Restore before tmp_path's own finalizer, including on setup failure.
+    for owner, name in ((Path, 'unlink'), (os, 'unlink'), (os, 'remove'), (os, 'rmdir'),
+                        (subprocess, 'Popen'), (lifecycle, '_atomic_file')):
+        guard.setattr(owner, name, forbidden)
+    guard.setattr('shutil.rmtree', forbidden)
+    monkeypatch.delenv('OM_ENV_FILE', raising=False)
+    monkeypatch.delenv('OM_RUNTIME_ROOT', raising=False)
+    runtime = tmp_path.resolve() / 'runtime'
+    runtime.mkdir()
+    source = runtime / 'config.yaml'
+    source.write_text(yaml.safe_dump({
+        'accounts': {'test': {'type': 'futu', 'futu_account_id': '123456'}},
+        'markets': {'us': {'accounts': ['test'], 'symbols': ['AAPL'],
+                           'overrides': {'AAPL': {'sell_put': {'enabled': True, 'max_strike': 100},
+                                                  'covered_call': {'enabled': False}}}}},
+        'notifications': {'enabled': False}, 'bot': {'enabled': False},
+    }))
+    config, _ = resolve_yaml_runtime_config(repo_root=REPO, market='us', config_path=source)
+    (runtime / 'config.us.json').write_text(json.dumps(config))
+    (runtime / 'options-monitor.env').write_text('')
+
+    def create(target='systemd', *, seed=False):
+        ctx, manager = context(runtime, tmp_path.resolve(), target)
+        if seed:
+            managed = []
+            original = lifecycle._managed_files
+
+            def capture(*args, **kwargs):
+                files = original(*args, **kwargs)
+                managed.extend(files)
+                return files
+
+            with monkeypatch.context() as patch:
+                patch.setattr(lifecycle, '_managed_files', capture)
+                service_lifecycle('install', **ctx)
+            for item in managed:
+                assert not item.get('remove')
+                path = Path(item['path'])
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(item['content'])
+            assert managed
+        return ctx, manager
+
+    return create
+
+
+def load_state_probe(manager, value, *, failure=None, after_only=False):
+    mutated = False
+
+    def probe(command, **kwargs):
+        nonlocal mutated
+        if command[1] not in {'show', 'print', 'print-disabled'}:
+            mutated = True
+        result = manager(command, **kwargs)
+        if command[1] != 'show' or (after_only and not mutated):
+            return result
+        if failure == 'timeout':
+            raise subprocess.TimeoutExpired(command, 3, output='LoadState=loaded\nsecret-timeout')
+        if failure == 'oserror':
+            raise OSError('secret-oserror')
+        lines = [line for line in result.stdout.splitlines() if not line.startswith('LoadState=')]
+        if value is not None:
+            lines.insert(0, 'LoadState=' + value)
+        lines = [line + ' SECRET=secret-environment' if line.startswith('Environment=') else line for line in lines]
+        return subprocess.CompletedProcess(command, 1 if failure == 'nonzero' else 0,
+                                           '\n'.join(lines) + '\nUnexpected=secret-stdout\n', 'secret-stderr')
+
+    return probe
+
+
+@pytest.mark.parametrize('value,failure,state', [
+    ('loaded', None, 'loaded-idle'), ('not-found', None, 'absent'),
+    ('bad-setting', None, 'unknown'), ('error', None, 'unknown'),
+    (' future=value ', None, 'unknown'), ('', None, 'unknown'), (None, None, 'unknown'),
+    ('loaded', 'nonzero', 'unknown'), (None, 'timeout', 'unknown'), (None, 'oserror', 'unknown'),
+])
+def test_load_state_query_preserves_observation(load_state_context, value, failure, state):
+    from src.application.service_lifecycle import _query
+
+    ctx, manager = load_state_context()
+    row = _query('example.service', target='systemd', uid=os.getuid(), content='',
+                 run_cmd=load_state_probe(manager, value, failure=failure))
+    assert row['load_state'] == value
+    assert row['state'] == state
+    assert set(row) == {'name', 'state', 'enabled', 'definition_path', 'runtime_root', 'probe', 'load_state'}
+    assert manager.calls == [['systemctl', 'show', 'example.service',
+                              '--property=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,Environment', '--no-pager']]
+    assert 'secret-' not in json.dumps(row)
+
+
+def load_state_cli(ctx, monkeypatch, capsys, action, *, preview_sha256=None):
+    from functools import partial
+    from src.interfaces.cli import main as cli
+    from src.interfaces.cli.service_ops import handle_service_update_command
+
+    lifecycle = partial(service_lifecycle, unit_root=ctx['unit_root'], system=ctx['system'],
+                        run_cmd=ctx['run_cmd'], credential_store_root=ctx['credential_store_root'])
+    monkeypatch.setattr(cli, 'handle_service_update_command',
+                        partial(handle_service_update_command, service_lifecycle_fn=lifecycle))
+    command = ['service', action, '--runtime-root', str(ctx['runtime_root']), '--target', ctx['target'],
+               '--config-yaml', str(ctx['config_yaml']), '--env-file', str(ctx['env_file'])]
+    if preview_sha256 is not None:
+        command += ['--confirm', '--expected-preview-sha256', preview_sha256]
+    code = cli.main(command)
+    return code, json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize('value,failure', [
+    ('bad-setting', None), ('error', None), ('future', None), ('', None), (None, None),
+    ('loaded', 'nonzero'), (None, 'timeout'), (None, 'oserror'),
+])
+def test_load_state_cli_before_error_preserves_diagnostic_without_writes(
+    load_state_context, monkeypatch, capsys, value, failure,
+):
+    ctx, manager = load_state_context()
+    ctx['run_cmd'] = load_state_probe(manager, value, failure=failure)
+    original = {path: path.read_bytes() for path in ctx['runtime_root'].iterdir()}
+    code, result = load_state_cli(ctx, monkeypatch, capsys, 'install')
+    assert code == 2 and not result['ok']
+    assert result['error']['code'] == 'SERVICE_STATE_UNKNOWN'
+    assert result['error']['message'] == 'cannot establish service ownership while the manager is unavailable'
+    assert result['error']['details'] == {'service': manager.calls[0][2], 'load_state': value}
+    assert 'secret-' not in json.dumps(result)
+    assert not ctx['unit_root'].exists()
+    assert {path: path.read_bytes() for path in ctx['runtime_root'].iterdir()} == original
+    assert all(call[1] == 'show' for call in manager.calls)
+
+
+@pytest.mark.parametrize('action', ['install', 'start', 'stop'])
+@pytest.mark.parametrize('value,failure', [
+    ('loaded', None), ('bad-setting', None), ('error', None), (None, None),
+    ('loaded', 'nonzero'), (None, 'timeout'),
+])
+def test_load_state_cli_after_preserves_gates_and_redaction(
+    load_state_context, monkeypatch, capsys, action, value, failure,
+):
+    ctx, manager = load_state_context(seed=True)
+    if action == 'stop':
+        manager.states = {path.name: ('active', 'enabled') for path in ctx['unit_root'].glob('*.service')}
+    ctx['run_cmd'] = load_state_probe(manager, value, failure=failure, after_only=True)
+    original = {path: path.read_bytes() for path in ctx['unit_root'].iterdir()}
+    code, preview = load_state_cli(ctx, monkeypatch, capsys, action)
+    assert code == 0 and preview['ok']
+    assert {row['load_state'] for row in preview['data']['before'].values()} == {'loaded'}
+    assert not any(isinstance(op, dict) and ('write' in op or 'remove' in op)
+                   for op in preview['data']['planned_operations'])
+    code, result = load_state_cli(ctx, monkeypatch, capsys, action,
+                                  preview_sha256=preview['data']['preview_sha256'])
+    data = result['data']
+    success = value == 'loaded' and failure is None
+    assert code == (0 if success else 2) and result['ok'] == success
+    assert data['status'] == ({'install': 'installed', 'start': 'started', 'stop': 'stopped'}[action] if success else 'unverified')
+    assert {row['load_state'] for row in data['after'].values()} == {value}
+    assert {row['state'] for row in data['after'].values()} == (
+        {'running', 'loaded-idle'} if success and action == 'start' else {'loaded-idle'} if success else {'unknown'}
+    )
+    assert not data['files_changed']
+    assert data['operations'] and all(op['ok'] for op in data['operations'])
+    assert 'secret-' not in json.dumps(result)
+    assert all(path.read_bytes() == content for path, content in original.items())
+
+
+def test_load_state_preview_hash_excludes_diagnostic_but_retains_state_gate(load_state_context, monkeypatch):
+    from src.application import service_lifecycle as lifecycle
+
+    ctx, manager = load_state_context(seed=True)
+    preview = service_lifecycle('install', **ctx)
+    original = lifecycle._query
+
+    def without_diagnostic(*args, **kwargs):
+        return {key: value for key, value in original(*args, **kwargs).items() if key != 'load_state'}
+
+    with monkeypatch.context() as patch:
+        patch.setattr(lifecycle, '_query', without_diagnostic)
+        baseline = service_lifecycle('install', **ctx)
+    assert preview['preview_sha256'] == baseline['preview_sha256']
+    assert preview['planned_operations'] == baseline['planned_operations']
+    assert {name: {key: value for key, value in row.items() if key != 'load_state'}
+            for name, row in preview['before'].items()} == baseline['before']
+    manager.states[next(iter(preview['before']))] = ('active', 'enabled')
+    with pytest.raises(AgentToolError) as caught:
+        service_lifecycle('install', **ctx, confirm=True, expected_preview_sha256=preview['preview_sha256'])
+    assert caught.value.code == 'STALE_PREVIEW'
+    assert all(call[1] == 'show' for call in manager.calls)
+
+
+def test_load_state_launchd_keeps_original_preview_and_error_shape(load_state_context, monkeypatch, capsys):
+    ctx, manager = load_state_context('launchd')
+    code, result = load_state_cli(ctx, monkeypatch, capsys, 'install')
+    assert code == 0 and result['ok']
+    first_service = next(iter(result['data']['before']))
+    for row in result['data']['before'].values():
+        assert set(row) == {'name', 'state', 'enabled', 'definition_path', 'runtime_root', 'probe'}
+        assert row['state'] == 'absent'
+
+    def unavailable(command, **kwargs):
+        manager.calls.append(command)
+        raise subprocess.TimeoutExpired(command, 3)
+
+    ctx['run_cmd'] = unavailable
+    code, result = load_state_cli(ctx, monkeypatch, capsys, 'install')
+    assert code == 2 and result['error']['code'] == 'SERVICE_STATE_UNKNOWN'
+    assert result['error']['details'] == {'service': first_service}
+    assert not ctx['unit_root'].exists()
+
+
 @pytest.mark.parametrize('target,mode', [
     ('systemd', 'bad-setting'), ('systemd', 'error'), ('systemd', 'not-found'),
     ('systemd', 'timeout'), ('systemd', 'single-timeout'),

@@ -45,6 +45,12 @@
 执行前的结构化拒绝仍由 CLI 返回顶层错误；管理器返回的失败或未知状态应结合 `data.status`
 和 `operations` 判断，不保证带有捕获异常的 `data.error`。
 
+systemd 的 `data.before[unit].load_state` 和 `data.after[unit].load_state` 保留管理器实际返回的
+`LoadState`；属性缺失或查询不可用时为 `null`，不从本地文件或其他状态推断。执行前因状态未知而
+拒绝时，顶层 `SERVICE_STATE_UNKNOWN` 的 `error.details.load_state` 也保留这项观测。
+该诊断字段不改变状态判断、确认哈希或成功条件；应结合 `state`、`status` 和操作回执判断。
+launchd 没有这个字段。
+
 ## 2. 安装依赖
 
 最小运行依赖：
