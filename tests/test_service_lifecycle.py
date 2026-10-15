@@ -209,7 +209,7 @@ def load_state_context(tmp_path, monkeypatch, request):
     return create
 
 
-def load_state_probe(manager, value, *, failure=None, after_only=False):
+def load_state_probe(manager, value, *, failure=None, after_only=False, active_state=None):
     mutated = False
 
     def probe(command, **kwargs):
@@ -226,6 +226,8 @@ def load_state_probe(manager, value, *, failure=None, after_only=False):
         lines = [line for line in result.stdout.splitlines() if not line.startswith('LoadState=')]
         if value is not None:
             lines.insert(0, 'LoadState=' + value)
+        if active_state is not None:
+            lines = ['ActiveState=' + active_state if line.startswith('ActiveState=') else line for line in lines]
         lines = [line + ' SECRET=secret-environment' if line.startswith('Environment=') else line for line in lines]
         return subprocess.CompletedProcess(command, 1 if failure == 'nonzero' else 0,
                                            '\n'.join(lines) + '\nUnexpected=secret-stdout\n', 'secret-stderr')
@@ -270,24 +272,37 @@ def load_state_cli(ctx, monkeypatch, capsys, action, *, preview_sha256=None):
     return code, json.loads(capsys.readouterr().out)
 
 
-@pytest.mark.parametrize('value,failure', [
-    ('bad-setting', None), ('error', None), ('future', None), ('', None), (None, None),
-    ('loaded', 'nonzero'), (None, 'timeout'), (None, 'oserror'),
+@pytest.mark.parametrize('action', ['install', 'start', 'stop'])
+@pytest.mark.parametrize('confirm', [False, True])
+@pytest.mark.parametrize('value,failure,active_state', [
+    ('masked', None, None), ('masked-runtime', None, None), ('bad-setting', None, None),
+    ('error', None, None), ('merged', None, None), ('future', None, None),
+    ('', None, None), (None, None, None), ('loaded', None, 'future-active'),
+    ('loaded', 'nonzero', None), (None, 'timeout', None), (None, 'oserror', None),
 ])
 def test_load_state_cli_before_error_preserves_diagnostic_without_writes(
-    load_state_context, monkeypatch, capsys, value, failure,
+    load_state_context, monkeypatch, capsys, value, failure, active_state, action, confirm,
 ):
-    ctx, manager = load_state_context()
-    ctx['run_cmd'] = load_state_probe(manager, value, failure=failure)
-    original = {path: path.read_bytes() for path in ctx['runtime_root'].iterdir()}
-    code, result = load_state_cli(ctx, monkeypatch, capsys, 'install')
+    ctx, manager = load_state_context(seed=True)
+    preview_sha256 = None
+    if confirm:
+        code, preview = load_state_cli(ctx, monkeypatch, capsys, action)
+        assert code == 0 and preview['ok']
+        preview_sha256 = preview['data']['preview_sha256']
+    ctx['run_cmd'] = load_state_probe(manager, value, failure=failure, active_state=active_state)
+    manager.calls.clear()
+    fixture_root = ctx['runtime_root'].parent
+    original = {path: path.read_bytes() if path.is_file() else None for path in fixture_root.rglob('*')}
+    code, result = load_state_cli(ctx, monkeypatch, capsys, action, preview_sha256=preview_sha256)
     assert code == 2 and not result['ok']
     assert result['error']['code'] == 'SERVICE_STATE_UNKNOWN'
-    assert result['error']['message'] == 'cannot establish service ownership while the manager is unavailable'
+    assert result['error']['message'] == (
+        'cannot establish service ownership while the manager is unavailable' if failure
+        else 'cannot establish service ownership from the reported systemd state'
+    )
     assert result['error']['details'] == {'service': manager.calls[0][2], 'load_state': value}
     assert 'secret-' not in json.dumps(result)
-    assert not ctx['unit_root'].exists()
-    assert {path: path.read_bytes() for path in ctx['runtime_root'].iterdir()} == original
+    assert {path: path.read_bytes() if path.is_file() else None for path in fixture_root.rglob('*')} == original
     assert all(call[1] == 'show' for call in manager.calls)
 
 
@@ -349,7 +364,8 @@ def test_load_state_preview_hash_excludes_diagnostic_but_retains_state_gate(load
     assert all(call[1] == 'show' for call in manager.calls)
 
 
-def test_load_state_launchd_keeps_original_preview_and_error_shape(load_state_context, monkeypatch, capsys):
+@pytest.mark.parametrize('failed_query', ['print', 'print-disabled'])
+def test_load_state_launchd_keeps_original_preview_and_error_shape(load_state_context, monkeypatch, capsys, failed_query):
     ctx, manager = load_state_context('launchd')
     code, result = load_state_cli(ctx, monkeypatch, capsys, 'install')
     assert code == 0 and result['ok']
@@ -360,11 +376,14 @@ def test_load_state_launchd_keeps_original_preview_and_error_shape(load_state_co
 
     def unavailable(command, **kwargs):
         manager.calls.append(command)
+        if command[1] == 'print' and failed_query == 'print-disabled':
+            return subprocess.CompletedProcess(command, 0, 'pid = 12', '')
         raise subprocess.TimeoutExpired(command, 3)
 
     ctx['run_cmd'] = unavailable
     code, result = load_state_cli(ctx, monkeypatch, capsys, 'install')
     assert code == 2 and result['error']['code'] == 'SERVICE_STATE_UNKNOWN'
+    assert result['error']['message'] == 'cannot establish service ownership while the manager is unavailable'
     assert result['error']['details'] == {'service': first_service}
     assert not ctx['unit_root'].exists()
 

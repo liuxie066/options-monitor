@@ -576,7 +576,10 @@ def service_lifecycle(
         state = before[unit["name"]]
         if state["state"] == "unknown":
             details = {"load_state": state["load_state"]} if provider == "systemd" else {}
-            _error("SERVICE_STATE_UNKNOWN", "cannot establish service ownership while the manager is unavailable", service=unit["name"], **details)
+            message = ("cannot establish service ownership from the reported systemd state"
+                       if provider == "systemd" and state["probe"]["ok"]
+                       else "cannot establish service ownership while the manager is unavailable")
+            _error("SERVICE_STATE_UNKNOWN", message, service=unit["name"], **details)
         if state["state"] == "absent":
             continue
         if state["definition_path"] and state["definition_path"] != unit["path"]:
