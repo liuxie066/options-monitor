@@ -448,21 +448,30 @@ def test_trade_events_repair_dry_run_does_not_mutate(monkeypatch, tmp_path: Path
 @pytest.mark.parametrize("kind", ["void", "repair"])
 def test_trade_event_preview_reuses_validated_events(monkeypatch, tmp_path: Path, kind: str) -> None:
     from unittest.mock import Mock
-    from src.application.ledger import api, interventions
+    from src.application.ledger import api, interventions, preflight, queries
 
     repo, event_id = _repo_with_open_event(tmp_path)
     before = _durable_ledger_state(repo)
     monkeypatch.setattr(interventions, "now_ms", lambda: 3000)
     reads = Mock(wraps=repo.list_trade_events)
     contexts = Mock(wraps=interventions._intervention_context)
+    imports = Mock(wraps=preflight.import_stored_trade_events)
+    projections = Mock(wraps=preflight.project_trade_events)
+    summary_projection = Mock(wraps=queries.project_trade_event_log)
     monkeypatch.setattr(repo, "list_trade_events", reads)
     monkeypatch.setattr(interventions, "_intervention_context", contexts)
+    monkeypatch.setattr(preflight, "import_stored_trade_events", imports)
+    monkeypatch.setattr(preflight, "project_trade_events", projections)
+    monkeypatch.setattr(queries, "project_trade_event_log", summary_projection)
     kwargs = {"overrides": {"strike": 500}} if kind == "repair" else {}
 
     preview = getattr(api, f"preview_trade_event_{kind}")(repo, event_id=event_id, reason="test", **kwargs)
 
-    assert reads.call_count == 3
+    assert reads.call_count == 1
     assert contexts.call_count == 1
+    assert [len(call.args[0]) for call in imports.call_args_list] == [1, 2 if kind == "repair" else 1]
+    assert projections.call_count == 2
+    assert summary_projection.call_count == 0
     assert preview["mode"] == "dry_run"
     assert preview["target_event"] == before["trade_events"][0]
     assert preview["void_event"]["event_time_ms"] == 3000
@@ -484,6 +493,165 @@ def test_trade_event_preview_reuses_validated_events(monkeypatch, tmp_path: Path
         "projection_diagnostics": [],
     }
     assert _durable_ledger_state(repo) == before
+
+
+@pytest.mark.parametrize("target_kind", ["open", "assignment", "exercise"])
+@pytest.mark.parametrize("kind", ["void", "repair"])
+def test_trade_event_intervention_read_budgets(monkeypatch, tmp_path: Path, target_kind: str, kind: str) -> None:
+    from unittest.mock import Mock
+    from domain.domain.ledger import ContractKey, TradeEvent
+    from src.application.ledger import api, interventions
+
+    if target_kind == "open":
+        repo, event_id = _repo_with_open_event(tmp_path)
+    else:
+        repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "lifecycle.sqlite3")
+        key = ContractKey.from_values(broker="futu", account="lx", underlying_symbol="NVDA",
+            option_type="put" if target_kind == "assignment" else "call", strike=100, expiration_ymd="2026-11-20")
+        opening = TradeEvent(event_id="opening", event_type="open", event_time_ms=1000,
+            contract_key=key, contracts=1, price=2, currency="USD", source="synthetic", multiplier=100,
+            lot_id="lot", raw_payload={"side": "sell" if target_kind == "assignment" else "buy"})
+        settlement = TradeEvent(event_id=target_kind, event_type=target_kind, event_time_ms=2000,
+            contract_key=key, contracts=1, price=0, currency="USD", source="synthetic", multiplier=100,
+            target_lot_id="lot", raw_payload={"side": "buy" if target_kind == "assignment" else "sell",
+                "record_id": "lot", "stock_settlement": {"side": "buy", "shares": 100, "price": 100,
+                    "fees": 0, "fee_provenance": {"basis": "actual", "source": "synthetic"}}})
+        with repo._writer_connection(begin_immediate=True) as conn:
+            repo.upsert_trade_event(opening, conn=conn)
+            repo.upsert_trade_event(settlement, conn=conn)
+        api.refresh_position_lot_projection(repo)
+        event_id = target_kind
+    monkeypatch.setattr(interventions, "now_ms", lambda: 3000)
+    before = _durable_ledger_state(repo)
+    reads = Mock(wraps=repo.list_trade_events)
+    forced_reads = Mock(wraps=repo.list_position_projection_event_rows)
+    contexts = Mock(wraps=interventions._intervention_context)
+    monkeypatch.setattr(repo, "list_trade_events", reads)
+    monkeypatch.setattr(repo, "list_position_projection_event_rows", forced_reads)
+    monkeypatch.setattr(interventions, "_intervention_context", contexts)
+    kwargs = {"overrides": {"price": 0.1}} if kind == "repair" else {}
+    preview = getattr(api, f"preview_trade_event_{kind}")(repo, event_id=event_id, reason="budget", **kwargs)
+    assert reads.call_count == 1
+    assert forced_reads.call_count == 0
+    assert contexts.call_count == 1
+    assert _durable_ledger_state(repo) == before
+    reads.reset_mock()
+    contexts.reset_mock()
+    if kind == "repair":
+        kwargs["expected_input_hash"] = preview["expected_input_hash"]
+    result = getattr(api, f"record_trade_event_{kind}")(repo, event_id=event_id, reason="budget", **kwargs)
+    assert result["mode"] == "applied"
+    assert reads.call_count == (4 if kind == "repair" else 2)
+    assert forced_reads.call_count == 1  # Actual postappend SQL must remain a separate full read.
+    assert contexts.call_count == (3 if kind == "repair" else 2)
+    if kind == "repair":
+        reads.reset_mock()
+        assert api.record_trade_event_repair(repo, event_id=event_id, reason="budget", **kwargs)["mode"] == "no_op"
+        assert reads.call_count == 1
+        assert forced_reads.call_count == 1
+
+
+@pytest.mark.parametrize("hint", [None, {}, {"event_id": "other", "event_type": "assignment", "account": "lx"},
+    {"event_id": "target", "event_type": "assignment", "account": ""}])
+def test_intervention_hint_preserves_full_history_error_priority(monkeypatch, hint) -> None:
+    from unittest.mock import Mock
+    from src.application.ledger import interventions
+
+    error = json.JSONDecodeError("bad earlier history", "{", 0)
+    repo = SimpleNamespace(list_trade_events=Mock(side_effect=error), read_lifecycle_account_rows=Mock())
+    if hint is not None:
+        repo.get_trade_events_by_ids = Mock(return_value=[hint])
+    with pytest.raises(json.JSONDecodeError, match="bad earlier history"):
+        interventions._intervention_context(repo, target_event_id="target")
+    repo.read_lifecycle_account_rows.assert_not_called()
+
+
+def test_intervention_hint_snapshot_mismatch_uses_authoritative_history(monkeypatch) -> None:
+    from unittest.mock import Mock
+    from src.application.ledger import interventions
+
+    hint = {"event_id": "target", "event_type": "assignment", "account": "lx"}
+    changed = {**hint, "account": "sy"}
+    final = {"event_id": "target", "event_type": "open", "account": "sy"}
+    repo = SimpleNamespace(get_trade_events_by_ids=Mock(return_value=[hint]),
+        read_lifecycle_account_rows=Mock(return_value={"trade_events": [changed]}),
+        list_trade_events=Mock(return_value=[final]))
+    dependencies = Mock()
+    monkeypatch.setattr(interventions, "_stock_dependencies", dependencies)
+    assert interventions._intervention_context(repo, target_event_id="target") == ([final], final, [])
+    repo.list_trade_events.assert_called_once_with()
+    dependencies.assert_not_called()
+
+
+@pytest.mark.parametrize("case", ["closed", "warning", "voided_bad_history"])
+def test_intervention_preflight_preserves_summary_and_decoded_inputs(monkeypatch, case: str) -> None:
+    from dataclasses import replace
+    from unittest.mock import Mock
+    from domain.domain.ledger import ContractKey, TradeEvent
+    from src.application.ledger import preflight, queries
+
+    key = ContractKey.from_values(broker="futu", account="lx", underlying_symbol="NVDA",
+        option_type="put", strike=100, expiration_ymd="2026-11-20")
+    opening = TradeEvent(event_id="open", event_type="open", event_time_ms=1000, contract_key=key,
+        contracts=2, price=2, currency="USD", source="synthetic", multiplier=100,
+        lot_id="lot", raw_payload={"side": "sell"})
+    close = replace(opening, event_id="close", event_type="close", event_time_ms=2000,
+        price=0.2, lot_id=None, target_lot_id="lot", raw_payload={"side": "buy"})
+    before, appended = [opening], [close]
+    if case == "warning":
+        before = [opening, close]
+        appended = [replace(opening, event_id="adjust", event_type="adjust", event_time_ms=3000,
+            contracts=0, price=0, lot_id=None, target_lot_id="lot",
+            raw_payload={"patch": {"opened_at": 2500}, "adjust_target_source_event_id": "open"})]
+    elif case == "voided_bad_history":
+        before = [opening, replace(close, event_time_ms=0)]
+        appended = [replace(opening, event_id="void", event_type="void", event_time_ms=4000,
+            contracts=0, price=0, lot_id=None, target_event_id="close", raw_payload={}),
+            replace(close, event_id="replacement", event_time_ms=5000)]
+    before_rows, appended_rows = [item.to_dict() for item in before], [item.to_dict() for item in appended]
+    expected = queries.trade_event_projection_preview([*before_rows, *appended_rows])
+    original_projection = preflight.project_trade_events
+
+    def project_without_mutating(events):
+        snapshot = deepcopy([item.to_dict() for item in events])
+        result = original_projection(events)
+        assert [item.to_dict() for item in events] == snapshot
+        return result
+
+    imports = Mock(wraps=preflight.import_stored_trade_events)
+    monkeypatch.setattr(preflight, "import_stored_trade_events", imports)
+    monkeypatch.setattr(preflight, "project_trade_events", project_without_mutating)
+    result, summary = preflight._preflight_trade_event_append(before_rows,
+        appended_events=appended_rows, target_event_id="open", event_type="repair",
+        source="test", operation_label="test")
+    assert result.status == "ok"
+    assert summary == expected
+    assert [call.args[0] for call in imports.call_args_list] == [before_rows, appended_rows]
+    if case == "warning":
+        assert [item["code"] for item in summary["projection_diagnostics"]] == ["economic_adjust_invalid"]
+    else:
+        assert summary["projection_diagnostics"] == []
+    assert summary["position_lot_count"] == 1  # Includes the retained closed lot.
+
+
+def test_repair_apply_keeps_second_build_observation_times(monkeypatch, tmp_path: Path) -> None:
+    from src.application.ledger import api, interventions
+
+    repo, event_id = _repo_with_open_event(tmp_path)
+    kwargs = {"event_id": event_id, "overrides": {"strike": 500}, "reason": "clock"}
+    monkeypatch.setattr(interventions, "now_ms", lambda: 2000)
+    preview = api.preview_trade_event_repair(repo, **kwargs)
+    ticks = iter([3000, 4000, 5000, 6000])
+    monkeypatch.setattr(interventions, "now_ms", lambda: next(ticks))
+    result = api.record_trade_event_repair(repo, **kwargs, expected_input_hash=preview["expected_input_hash"])
+    stored = {row["event_id"]: row for row in repo.list_trade_events()}
+    applied_preview = result["preview"]
+    assert applied_preview["void_event"]["event_time_ms"] == 6000
+    assert stored[result["void_event_id"]]["event_time_ms"] == 6000
+    conversions = stored[result["repair_event_id"]]["raw_payload"]["cash_conversions"]
+    assert conversions
+    assert {item["observed_at_ms"] for item in conversions.values()} == {5000}
+    assert applied_preview["repair_event"]["raw_payload"]["cash_conversions"] == conversions
 
 
 @pytest.mark.parametrize("kind", ["void", "repair"])

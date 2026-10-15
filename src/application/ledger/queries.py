@@ -1203,11 +1203,22 @@ def trade_event_economic_allocations(repo: Any) -> list[Any]:
 
 def trade_event_projection_preview(events: list[dict[str, Any]]) -> dict[str, Any]:
     projection = project_trade_event_log(events)
+    return _trade_event_projection_summary(
+        trade_event_count=len(events),
+        position_lot_count=len(projection.lots),
+        diagnostics=projection.diagnostics,
+    )
+
+
+def _trade_event_projection_summary(
+    *, trade_event_count: int, position_lot_count: int, diagnostics: Iterable[Any],
+) -> dict[str, Any]:
+    diagnostic_payloads = [item.to_dict() for item in diagnostics]
     return {
-        "trade_event_count": int(len(events)),
-        "position_lot_count": int(len(projection.lots)),
-        "projection_diagnostic_count": int(len(projection.diagnostics)),
-        "projection_diagnostics": [item.to_dict() for item in projection.diagnostics],
+        "trade_event_count": int(trade_event_count),
+        "position_lot_count": int(position_lot_count),
+        "projection_diagnostic_count": len(diagnostic_payloads),
+        "projection_diagnostics": diagnostic_payloads,
     }
 
 

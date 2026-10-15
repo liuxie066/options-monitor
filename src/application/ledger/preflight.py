@@ -249,23 +249,23 @@ def _preflight_manual_void_payload(
     void_reason: str,
     as_of_ms: int | None,
 ) -> dict[str, Any]:
-    from src.application.ledger.interventions import build_manual_void_preview
+    from src.application.ledger.interventions import _build_manual_void_preview_payload
 
-    preview = build_manual_void_preview(
+    preview, current_events = _build_manual_void_preview_payload(
         repo,
         target_event_id=target_event_id,
         void_reason=void_reason,
         as_of_ms=as_of_ms,
     )
-    ledger_preflight = _preflight_trade_event_append(
-        repo,
+    ledger_preflight, projection_preview = _preflight_trade_event_append(
+        current_events,
         appended_events=[preview.void_event],
         target_event_id=target_event_id,
         event_type="void",
         source="manual_void_preflight",
         operation_label="manual void",
     )
-    return {"preview": preview, "ledger_preflight": ledger_preflight}
+    return {"preview": preview, "ledger_preflight": ledger_preflight, "projection_preview": projection_preview}
 
 
 def _preflight_manual_repair_payload(
@@ -276,48 +276,51 @@ def _preflight_manual_repair_payload(
     repair_reason: str,
     as_of_ms: int | None,
 ) -> dict[str, Any]:
-    from src.application.ledger.interventions import build_manual_repair_preview
+    from src.application.ledger.interventions import _build_manual_repair_preview_payload
 
-    preview = build_manual_repair_preview(
+    preview, current_events = _build_manual_repair_preview_payload(
         repo,
         target_event_id=target_event_id,
         overrides=overrides,
         repair_reason=repair_reason,
         as_of_ms=as_of_ms,
     )
-    ledger_preflight = _preflight_trade_event_append(
-        repo,
+    ledger_preflight, projection_preview = _preflight_trade_event_append(
+        current_events,
         appended_events=[preview.void_event, preview.repair_event],
         target_event_id=target_event_id,
         event_type="repair",
         source="manual_repair_preflight",
         operation_label="manual repair",
     )
-    return {"preview": preview, "ledger_preflight": ledger_preflight}
+    return {"preview": preview, "ledger_preflight": ledger_preflight, "projection_preview": projection_preview}
 
 
 def _preflight_trade_event_append(
-    repo: Any,
+    current_events: list[dict[str, Any]],
     *,
     appended_events: list[dict[str, Any]],
     target_event_id: str,
     event_type: str,
     source: str,
     operation_label: str,
-) -> LedgerPreflightResult:
-    current_events = _list_trade_events(repo)
+) -> tuple[LedgerPreflightResult, dict[str, Any]]:
+    from src.application.ledger.queries import _trade_event_projection_summary
+
     before_imported_events, before_import_diagnostics = import_stored_trade_events(current_events)
     before_projection = project_trade_events(before_imported_events)
-    combined_events = [*current_events, *appended_events]
-    imported_events, import_diagnostics = import_stored_trade_events(combined_events)
+    appended_imported_events, appended_import_diagnostics = import_stored_trade_events(appended_events)
+    imported_events = [*before_imported_events, *appended_imported_events]
+    import_diagnostics = [*before_import_diagnostics, *appended_import_diagnostics]
     projection = project_trade_events(imported_events)
+    effective_diagnostics = effective_import_diagnostics(
+        ledger_events=imported_events,
+        import_diagnostics=import_diagnostics,
+        projection_diagnostics=projection.diagnostics,
+    )
     import_errors = [
         item.to_dict()
-        for item in effective_import_diagnostics(
-            ledger_events=imported_events,
-            import_diagnostics=import_diagnostics,
-            projection_diagnostics=projection.diagnostics,
-        )
+        for item in effective_diagnostics
         if item.severity == "error"
     ]
     projection_errors = [item.to_dict() for item in projection.diagnostics if item.severity == "error"]
@@ -331,7 +334,7 @@ def _preflight_trade_event_append(
                 "projection_errors": projection_errors,
             },
         )
-    return LedgerPreflightResult(
+    result = LedgerPreflightResult(
         status="ok",
         read_model="ledger_shadow",
         fail_closed=False,
@@ -352,6 +355,11 @@ def _preflight_trade_event_append(
             "after_open_lot_count": sum(1 for lot in projection.lots if lot.contracts_open > 0),
             "source": source,
         },
+    )
+    return result, _trade_event_projection_summary(
+        trade_event_count=len(current_events) + len(appended_events),
+        position_lot_count=len(projection.lots),
+        diagnostics=[*effective_diagnostics, *projection.diagnostics],
     )
 
 
