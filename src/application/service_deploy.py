@@ -531,8 +531,15 @@ def _config_path_for_market(
     return _absolute_path_preserve_symlink(configured, base=repo_root)
 
 
-def _systemd_quote_arg(value: str | Path) -> str:
+def _systemd_single_line(value: str | Path, *, field: str = "unit values") -> str:
     text = str(value)
+    if "\r" in text or "\n" in text:
+        raise ValueError(f"systemd {field} must not contain CR or LF")
+    return text
+
+
+def _systemd_quote_arg(value: str | Path) -> str:
+    text = _systemd_single_line(value)
     if not text:
         return '""'
     if any(ch.isspace() for ch in text) or any(ch in text for ch in ('"', "'", "\\", ";")):
@@ -545,7 +552,7 @@ def _systemd_join_args(args: list[str]) -> str:
 
 
 def _systemd_environment_assignment(name: str, value: str | Path) -> str:
-    escaped = f"{name}={value}".replace("\\", "\\\\").replace('"', '\\"')
+    escaped = _systemd_single_line(f"{name}={value}").replace("\\", "\\\\").replace('"', '\\"')
     return f'Environment="{escaped}"'
 
 
@@ -768,7 +775,7 @@ def _systemd_unit(
         f"WorkingDirectory={_systemd_quote_arg(working_directory or repo_root)}",
     ])
     if deploy_user:
-        lines.append(f"User={deploy_user}")
+        lines.append(f"User={_systemd_single_line(deploy_user, field='deploy user')}")
     if deploy_home is not None:
         lines.append(_systemd_environment_assignment("HOME", deploy_home))
     lines.extend(

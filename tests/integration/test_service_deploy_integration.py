@@ -4446,6 +4446,94 @@ def test_service_timeout_public_wrapper(tmp_path, target, timeout_seconds):
     assert not (runtime / "service.profile.json").exists()
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r", "\r\n"], ids=["lf", "cr", "crlf"])
+@pytest.mark.parametrize("field", ["runtime-root", "opend-executable"])
+def test_service_render_line_boundary_public_wrapper_has_no_effects(tmp_path, newline, field):
+    repo = Path(__file__).resolve().parents[2]
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    source = runtime / "config.yaml"
+    source.write_text("accounts: [fixture]\n", encoding="utf-8")
+    env_file = tmp_path / "fixture.env"
+    env_file.write_text("", encoding="utf-8")
+    output = tmp_path / "rendered"
+    command = [str(repo / "om"), "service", "render", "--target", "systemd",
+               "--repo-root", str(tmp_path / "repo"), "--config-yaml", str(source),
+               "--env-file", str(env_file), "--accounts", "fixture", "--markets", "us",
+               "--output-dir", str(output), "--no-content"]
+    if field == "opend-executable":
+        command.extend(["--runtime-root", str(runtime), "--include-opend",
+                        "--opend-root", str(tmp_path / "opend")])
+    environment = {"PATH": os.environ["PATH"], "OM_PYTHON": CURRENT_PYTHON,
+                   "OM_RUNTIME_ROOT": str(runtime), "OM_ENV_FILE": str(env_file)}
+    bad_value = str(runtime) + newline + "X-OM-Renderer-Probe=present"
+    for existing_output in (False, True):
+        if existing_output:
+            output.mkdir()
+            (output / "sentinel").write_bytes(b"preserve existing output\r\n")
+        result = subprocess.run(command + ["--" + field, bad_value], cwd=tmp_path,
+                                env=environment, capture_output=True, text=True, timeout=30)
+        payload = json.loads(result.stdout)
+        assert result.returncode == 2, result.stderr + result.stdout
+        assert payload["ok"] is False
+        assert payload["error"]["code"] == "CONFIG_ERROR"
+        assert payload["error"]["message"] == "systemd unit values must not contain CR or LF"
+        assert not (runtime / "service.profile.json").exists()
+        if existing_output:
+            assert list(output.iterdir()) == [output / "sentinel"]
+            assert (output / "sentinel").read_bytes() == b"preserve existing output\r\n"
+        else:
+            assert not output.exists()
+
+    good_value = str(runtime) if field == "runtime-root" else str(tmp_path / "opend" / "FutuOpenD")
+    result = subprocess.run(command + ["--" + field, good_value], cwd=tmp_path,
+                            env=environment, capture_output=True, text=True, timeout=30)
+    payload = json.loads(result.stdout)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert payload["ok"] is True
+    assert (output / "sentinel").read_bytes() == b"preserve existing output\r\n"
+    assert str(output / "service.profile.json") in payload["data"]["written_files"]
+    assert all("content" not in item for item in payload["data"]["files"])
+    assert not (runtime / "service.profile.json").exists()
+
+
+def test_service_render_single_line_compatibility_public_wrapper(tmp_path):
+    from src.application.service_deploy import render_service_bundle
+
+    repo = Path(__file__).resolve().parents[2]
+    special = "空 格\"quote'back\\slash;end"
+    rendering_repo = tmp_path / ("repo " + special)
+    runtime = tmp_path / ("runtime " + special)
+    runtime.mkdir()
+    source = runtime / "config.yaml"
+    source.write_text("accounts: [fixture]\n", encoding="utf-8")
+    env_file = tmp_path / (special + ".env")
+    env_file.write_text("", encoding="utf-8")
+    output = tmp_path / "rendered"
+    result = subprocess.run([
+        str(repo / "om"), "service", "render", "--target", "systemd",
+        "--repo-root", str(rendering_repo), "--runtime-root", str(runtime),
+        "--config-yaml", str(source), "--env-file", str(env_file),
+        "--accounts", "fixture", "--markets", "us", "--timeout", "1800",
+        "--output-dir", str(output), "--no-content",
+    ], cwd=tmp_path, env={"PATH": os.environ["PATH"], "OM_PYTHON": CURRENT_PYTHON,
+                         "OM_RUNTIME_ROOT": str(runtime), "OM_ENV_FILE": str(env_file)},
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr + result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    expected = render_service_bundle(target="systemd", repo_root=rendering_repo, runtime_root=runtime,
+                                     config_yaml=source, env_file=env_file, accounts=["fixture"],
+                                     markets=["us"], timeout_seconds=1800, use_default_deploy_user=False)
+    expected_paths = []
+    for item in expected["files"]:
+        path = output / item["relative_path"]
+        expected_paths.append(str(path))
+        assert path.read_bytes() == item.pop("content").encode("utf-8")
+    assert payload["data"] == {**expected, "written_files": expected_paths}
+    assert not (runtime / "service.profile.json").exists()
+
+
 def test_service_drift_timeout_override_persists_before_next_reconcile(tmp_path):
     repo, runtime, units = _drift_roots(tmp_path)
     bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"],
