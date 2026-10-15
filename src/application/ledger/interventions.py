@@ -455,6 +455,26 @@ def _stock_dependencies(
     ]
 
 
+def _lifecycle_intervention_context(
+    sqlite_repo: Any,
+    *,
+    target_event_id: str,
+    account: str,
+    conn: sqlite3.Connection | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    rows = (
+        sqlite_repo.read_lifecycle_account_rows(account=account, conn=conn)
+        if conn is not None
+        else sqlite_repo.read_lifecycle_account_rows(account=account)
+    )
+    events = [dict(row) for row in rows.get("trade_events") or [] if isinstance(row, Mapping)]
+    target_id = str(target_event_id or "").strip()
+    target = next((row for row in events if str(row.get("event_id") or "").strip() == target_id), None)
+    if target is None:
+        raise ValueError(f"trade event not found: {target_event_id}")
+    return events, target, rows
+
+
 def _intervention_context(
     sqlite_repo: Any,
     *,
@@ -462,6 +482,30 @@ def _intervention_context(
     conn: sqlite3.Connection | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, str]]]:
     target_id = str(target_event_id or "").strip()
+    lookup = getattr(sqlite_repo, "get_trade_events_by_ids", None)
+    if callable(lookup):
+        try:
+            hints = lookup([target_id], conn=conn) if conn is not None else lookup([target_id])
+        except json.JSONDecodeError:
+            # Preserve full-history decoding order for malformed stored JSON.
+            hints = []
+        for hint in hints if isinstance(hints, (list, tuple)) else ():
+            if not isinstance(hint, Mapping) or str(hint.get("event_id") or "").strip() != target_id:
+                continue
+            event_type = str(hint.get("event_type") or "").strip().lower()
+            account = normalize_account(hint.get("account"))
+            if event_type not in {"assignment", "exercise"} or not account:
+                break
+            events, target, rows = _lifecycle_intervention_context(
+                sqlite_repo, target_event_id=target_event_id, account=account, conn=conn,
+            )
+            if (
+                normalize_account(target.get("account")) == account
+                and str(target.get("event_type") or "").strip().lower() == event_type
+            ):
+                return events, target, _stock_dependencies(rows, target)
+            # A dispatch hint is not authoritative across snapshot boundaries.
+            break
     stored_events = (
         sqlite_repo.list_trade_events(conn=conn)
         if conn is not None
@@ -476,19 +520,10 @@ def _intervention_context(
         raise ValueError(f"trade event not found: {target_event_id}")
     if str(target.get("event_type") or "").strip().lower() not in {"assignment", "exercise"}:
         return events, target, []
-    account = normalize_account(target.get("account"))
-    rows = (
-        sqlite_repo.read_lifecycle_account_rows(account=account, conn=conn)
-        if conn is not None
-        else sqlite_repo.read_lifecycle_account_rows(account=account)
+    events, target, rows = _lifecycle_intervention_context(
+        sqlite_repo, target_event_id=target_event_id,
+        account=normalize_account(target.get("account")), conn=conn,
     )
-    events = [dict(row) for row in rows.get("trade_events") or [] if isinstance(row, Mapping)]
-    target = next(
-        (row for row in events if str(row.get("event_id") or "").strip() == target_id),
-        None,
-    )
-    if target is None:
-        raise ValueError(f"trade event not found: {target_event_id}")
     return events, target, _stock_dependencies(rows, target)
 
 
@@ -580,6 +615,19 @@ def build_manual_void_preview(
     void_reason: str,
     as_of_ms: int | None = None,
 ) -> TradeEventInterventionPreview:
+    preview, _events = _build_manual_void_preview_payload(
+        repo, target_event_id=target_event_id, void_reason=void_reason, as_of_ms=as_of_ms,
+    )
+    return preview
+
+
+def _build_manual_void_preview_payload(
+    repo: Any,
+    *,
+    target_event_id: str,
+    void_reason: str,
+    as_of_ms: int | None = None,
+) -> tuple[TradeEventInterventionPreview, list[dict[str, Any]]]:
     sqlite_repo = require_option_positions_event_write_repo(repo)
     events, target, stock_dependencies = _intervention_context(
         sqlite_repo,
@@ -609,7 +657,7 @@ def build_manual_void_preview(
         source="om trade-events",
         as_of_ms=as_of_ms,
     )
-    return TradeEventInterventionPreview(target_event=dict(target), void_event=event.to_dict())
+    return TradeEventInterventionPreview(target_event=dict(target), void_event=event.to_dict()), events
 
 
 def _repair_override_payload(overrides: dict[str, Any]) -> dict[str, Any]:
@@ -1702,6 +1750,21 @@ def build_manual_repair_preview(
     repair_reason: str,
     as_of_ms: int | None = None,
 ) -> TradeEventInterventionPreview:
+    preview, _events = _build_manual_repair_preview_payload(
+        repo, target_event_id=target_event_id, overrides=overrides,
+        repair_reason=repair_reason, as_of_ms=as_of_ms,
+    )
+    return preview
+
+
+def _build_manual_repair_preview_payload(
+    repo: Any,
+    *,
+    target_event_id: str,
+    overrides: dict[str, Any],
+    repair_reason: str,
+    as_of_ms: int | None = None,
+) -> tuple[TradeEventInterventionPreview, list[dict[str, Any]]]:
     sqlite_repo = require_option_positions_event_write_repo(repo)
     with with_sqlite_repo_writer_lock(sqlite_repo):
         events, target, stock_dependencies = _intervention_context(
@@ -1777,7 +1840,7 @@ def build_manual_repair_preview(
         void_event=void_event.to_dict(),
         repair_event=repair_event.to_dict(),
         expected_input_hash=expected_input_hash,
-    )
+    ), events
 
 
 def readback_manual_repair_event(

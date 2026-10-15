@@ -2492,13 +2492,10 @@ def advance_lifecycle_case_state(
 
 
 def preview_trade_event_void(repo: Any, *, event_id: str, reason: str) -> dict[str, Any]:
-    from src.application.ledger.queries import trade_event_log, trade_event_projection_preview
-
     payload = _preflight_manual_void_payload(
         repo, target_event_id=event_id, void_reason=reason, as_of_ms=None,
     )
     preview = payload["preview"]
-    events = trade_event_log(repo) + [preview.void_event]
     preview_payload = preview.to_payload()
     return {
         "mode": "dry_run",
@@ -2506,7 +2503,7 @@ def preview_trade_event_void(repo: Any, *, event_id: str, reason: str) -> dict[s
         "void_reason": str(reason or ""),
         **preview_payload,
         "ledger_preflight": payload["ledger_preflight"].to_dict(),
-        "projection_preview": trade_event_projection_preview(events),
+        "projection_preview": payload["projection_preview"],
     }
 
 
@@ -2542,8 +2539,6 @@ def preview_trade_event_repair(
             overrides=overrides,
             repair_reason=reason,
         )
-    from src.application.ledger.queries import trade_event_log, trade_event_projection_preview
-
     payload = _preflight_manual_repair_payload(
         repo,
         target_event_id=event_id,
@@ -2552,13 +2547,12 @@ def preview_trade_event_repair(
         as_of_ms=None,
     )
     preview = payload["preview"]
-    events = trade_event_log(repo) + [preview.void_event, preview.repair_event]
     preview_payload = preview.to_payload()
     return {
         "mode": "dry_run",
         **preview_payload,
         "ledger_preflight": payload["ledger_preflight"].to_dict(),
-        "projection_preview": trade_event_projection_preview(events),
+        "projection_preview": payload["projection_preview"],
     }
 
 
