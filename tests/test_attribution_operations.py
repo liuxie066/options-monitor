@@ -1,3 +1,4 @@
+from src.application.ledger import trade_attribution as ledger_attribution
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -41,7 +42,7 @@ def attribution_context(tmp_path, monkeypatch):
     monkeypatch.setattr(operations, "attribution_runtime", lambda **_: (repo, config, authority.copy(), mapping.copy()))
     monkeypatch.setattr(operations, "observe_trade_attribution_capacity", lambda **_: {})
     monkeypatch.setattr(operations, "read_attribution_combo_evidence", lambda *a, **k: {"complete": True, "exposures": []})
-    monkeypatch.setattr("src.application.trades.attribution.trade_attribution_capacity_check",
+    monkeypatch.setattr("src.application.ledger.trade_attribution.trade_attribution_capacity_check",
                         lambda **_: {"status": "available", "reason_codes": []})
     store = InboundOperationStore(tmp_path / "audit.sqlite3")
     request = BotInboundRequest(text="归属", sender_id="user", channel="wechat", conversation_id="room",
@@ -51,8 +52,11 @@ def attribution_context(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("channel", ["wechat", "feishu"])
-def test_attribution_control_preview_confirm_retry_and_wrong_conversation(attribution_context, channel):
+@pytest.mark.parametrize("history_complete", [True, False])
+def test_attribution_control_preview_confirm_retry_and_wrong_conversation(attribution_context, channel, history_complete, monkeypatch):
     repo, store, request, preview, _ = attribution_context
+    monkeypatch.setattr(operations, "read_attribution_combo_evidence",
+                        lambda *a, **k: {"complete": history_complete, "exposures": []})
     request = replace(request, channel=channel)
     result = execute_explicit_control(preview, request=request, command_id="in_preview", operation_store=store)
     assert result.ok and result.requires_confirmation
@@ -211,7 +215,7 @@ def test_bot_confirms_three_contracts_to_three_wheel_branches(tmp_path, monkeypa
     monkeypatch.setattr(operations, "observe_trade_attribution_capacity", lambda **_: {})
     monkeypatch.setattr(operations, "read_attribution_combo_evidence",
                         lambda *a, **k: {"complete": True, "exposures": []})
-    monkeypatch.setattr("src.application.trades.attribution.trade_attribution_capacity_check",
+    monkeypatch.setattr("src.application.ledger.trade_attribution.trade_attribution_capacity_check",
                         lambda **_: {"status": "available", "reason_codes": []})
     fact = next(row for row in read_trade_attribution_facts(repo, account="lx")
                 if row["contract_key"]["option_type"] == "call")
@@ -255,7 +259,7 @@ def test_bot_combo_freezes_both_members_and_confirms_atomic_pair(tmp_path, monke
                        "OM_INBOUND_ADMIN_OPEN_IDS": "wechat:user", "OM_INBOUND_OPERATION_HMAC_KEY": "isolated-key"}.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setattr("time.time", lambda: (BASE_TIME_MS + 3000) / 1000)
-    monkeypatch.setattr("src.application.trades.attribution.trade_attribution_capacity_check", lambda **_: {"status": "available", "reason_codes": []})
+    monkeypatch.setattr("src.application.ledger.trade_attribution.trade_attribution_capacity_check", lambda **_: {"status": "available", "reason_codes": []})
     authority = {"config_path": str(tmp_path / "config.us.json"), "runtime_root": str(tmp_path),
                  "ledger": ledger_resource_identity(repo), "account_mapping_hash": "fixture"}
     monkeypatch.setattr(operations, "attribution_runtime", lambda **_: (repo, config, authority,
@@ -536,7 +540,7 @@ def test_control_rechecks_authority_after_writer_and_rolls_back(attribution_cont
     from src.application.trades import attribution
     repo, store, request, preview, authority = attribution_context
     operations.handle_attribution_operation(preview, request, command_id="in_preview", store=store)
-    writer = attribution.write_trade_attribution_decision
+    writer = ledger_attribution.write_trade_attribution_decision
     before = repo.list_trade_events()
     def changed(*args, **kwargs):
         result = writer(*args, **kwargs)
@@ -551,7 +555,7 @@ def test_control_rechecks_authority_after_writer_and_rolls_back(attribution_cont
             store.mark_cancelled("in_preview", result={"status": "cancelled"}, expected_payload_hash=operation["payload_hash"],
                 expected_statuses=("previewed", "confirmed", "running"))
         return result
-    monkeypatch.setattr(attribution, "write_trade_attribution_decision", changed)
+    monkeypatch.setattr(ledger_attribution, "write_trade_attribution_decision", changed)
     result = operations.handle_attribution_operation(parse_bot_control_command("/confirm attribution in_preview"),
         request, command_id="in_confirm", store=store)
     assert result["data"]["status"] == ("cancelled" if change == "cancel" else "failed") and repo.list_trade_events() == before
@@ -668,13 +672,13 @@ def test_control_rechecks_business_admission_with_same_authority(tmp_path, monke
             updated["notifications"] = {"display_note": "irrelevant"}
             updated["wheel"]["accounts"].append("sy")
         active_config[0] = updated
-    writer = attribution.write_trade_attribution_decision
+    writer = ledger_attribution.write_trade_attribution_decision
     def changed(*args, **kwargs):
         result = writer(*args, **kwargs)
         if change != "after_commit":
             change_config()
         return result
-    monkeypatch.setattr(attribution, "write_trade_attribution_decision", changed)
+    monkeypatch.setattr(ledger_attribution, "write_trade_attribution_decision", changed)
     result = operations.handle_attribution_operation(parse_bot_control_command("/confirm attribution in_preview"),
         request, command_id="confirm", store=store)
     if change in {"unrelated", "after_commit"}:

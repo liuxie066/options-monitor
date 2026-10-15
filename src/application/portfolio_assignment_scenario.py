@@ -20,6 +20,8 @@ from domain.domain.symbol_identity import canonical_symbol
 from domain.domain.expiration_dates import MARKET_TIMEZONES
 from domain.domain.option_position_identity import normalize_broker, normalize_currency
 from src.application.agent_tool_config import load_runtime_config, repo_base
+from src.application.required_data_snapshot import FrozenRequiredDataBatch, FrozenRequiredDataUnavailable
+from src.application.opening_quote_evidence import normalize_underlier_observation, OPENING_UNDERLIER_OBSERVATION_SCHEMA
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.portfolio_management import (
     PORTFOLIO_MANAGEMENT_DISABLED,
@@ -37,7 +39,7 @@ from src.infrastructure.portfolio_management_client import (
     PortfolioManagementHTTPError,
 )
 from src.application.payload_helpers import parse_utc as _iso_datetime
-from src.application.portfolio_context_service import load_account_portfolio_context, cash_snapshot_is_usable
+from src.application.portfolio_context_service import load_account_portfolio_context, cash_snapshot_is_usable, portfolio_position_snapshot_errors
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context, infer_futu_portfolio_settings
 from src.application.futu_quote_routing import resolve_futu_quote_route
 from src.application.opend_fetch_config import DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT, resolve_opend_fetch_limits
@@ -408,38 +410,175 @@ def _read_futu_quotes(
         )
         is_stale = (observed.status not in {"ready", "market_closed"} or age > 300) and not closure_verified
         if is_stale:
-            warnings.append(f"{code}: Futu quote is dated ({observed_at})")
+            warnings.append(_dated_quote_warning(code, observed_at))
         rate = rates.get(underlier.currency)
         if rate is None:
             warnings.append(f"{code}: Futu quote FX evidence missing")
-        quotes.append(
-            {
-                "code": code,
-                "currency": underlier.currency,
-                "price_native": str(price),
-                "price_cny": str(price * rate) if rate is not None else None,
-                "exchange_rate_to_cny": str(rate) if rate is not None else None,
-                "source": "futu_opend_market_snapshot",
-                "observed_at": observed_at,
-                "is_stale": is_stale,
-                "market": underlier.market,
-                "valuation_quality": "closed_market_carried" if closure_verified else "stale" if is_stale else "fresh",
-                "trading_calendar": calendar if closure_verified else None,
-            }
-        )
+        quotes.append(_valuation_quote(
+            code, underlier.currency, price, rate, observed_at, underlier.market,
+            is_stale=is_stale, calendar=calendar if closure_verified else None,
+        ))
     return quotes, warnings
 
 
-def _futu_evidence(accounts: Sequence[str], contexts: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
-    observed = {account: (context.get("position_snapshot_input") or {}).get("observed_at_utc") for account, context in contexts.items()}
+def _dated_quote_warning(code: str, observed_at: str) -> str:
+    return f"{code}: Futu quote is dated ({observed_at})"
+
+
+def _valuation_quote(code, currency, price, rate, observed_at, market, *, is_stale=False, calendar=None):
+    return {
+        "code": code,
+        "currency": currency,
+        "price_native": str(price),
+        "price_cny": str(price * rate) if rate is not None else None,
+        "exchange_rate_to_cny": str(rate) if rate is not None else None,
+        "source": "futu_opend_market_snapshot",
+        "observed_at": observed_at,
+        "is_stale": is_stale,
+        "market": market,
+        "valuation_quality": "closed_market_carried" if calendar else "stale" if is_stale else "fresh",
+        "trading_calendar": calendar,
+    }
+
+
+def recover_position_sizing_quotes(
+    *,
+    context: dict[str, Any],
+    runtime_config: dict[str, Any],
+    account: str,
+    run_id: str,
+    quotes: FrozenRequiredDataBatch,
+) -> dict[str, Any]:
+    """Revalue a stale-only prepared input from the same run's verified quotes, without provider I/O."""
+    evidence = context.get("position_sizing_evidence")
+    if not isinstance(evidence, dict) or evidence.get("scope", {}).get("accounts") != [account]:
+        return context
+    freshness = evidence.get("freshness") or {}
+    if (evidence.get("status"), freshness.get("status"), freshness.get("trust_status")) != (
+        "partial",
+        "stale",
+        "partial",
+    ):
+        return context
+    stale = [q for q in evidence.get("quotes", []) if q.get("is_stale") is True]
+    dated = {_dated_quote_warning(q["code"], q["observed_at"]) for q in stale}
+    # Only the owner-generated quote failure can be recovered; other source failures remain closed.
+    if (
+        not dated
+        or set(evidence.get("warnings") or []) != dated
+        or set(freshness.get("reason_codes") or []) != dated | {"SCENARIO_SOURCE_PARTIAL"}
+    ):
+        return context
+    if not run_id or quotes.manifest.get("run_id") != run_id or not quotes.require_fresh:
+        return context
     now = datetime.now(timezone.utc)
-    stale_accounts = [
-        account
-        for account, raw_time in observed.items()
-        if (source_time := _iso_datetime(raw_time)) is None
-        or not 0 <= (now - source_time).total_seconds() <= 300
-    ]
-    stale_accounts = sorted(set(stale_accounts) | {account for account, context in contexts.items() if not cash_snapshot_is_usable(context)})
+    if _futu_context_error(account, context, now_utc=now):
+        return context
+    route = resolve_futu_quote_route(runtime_config)
+    if not route.ok:
+        return context
+    replacements = {}
+    refs = {}
+    for old in stale:
+        if old.get("source") != "futu_opend_market_snapshot":
+            return context
+        code = old["code"]
+        try:
+            entry, _ = quotes.resolve(code, now=now)
+        except FrozenRequiredDataUnavailable:
+            return context
+        contract = entry["expected_fetch_contract"]
+        binding = contract.get("fetch_binding") or {}
+        if (binding.get("source"), binding.get("host"), binding.get("port")) != ("opend", route.host, route.port):
+            return context
+        raw = contract.get("fetch_plan", {}).get("underlier_observation") or {}
+        underlier = normalize_underlier(code, base_dir=repo_base())
+        if (
+            raw.get("schema_version") != OPENING_UNDERLIER_OBSERVATION_SCHEMA
+            or raw.get("market") != underlier.market
+            or raw.get("status") != "ready"
+        ):
+            return context
+        observed = normalize_underlier_observation(
+            code=underlier.code,
+            market=underlier.market,
+            snapshot_row=raw,
+            market_state_row=raw,
+            now_utc=now,
+        )
+        old_time = _iso_datetime(old.get("observed_at"))
+        source_time = _iso_datetime(observed.observed_at_utc)
+        rate = _amount((evidence.get("fx_rates_to_cny") or {}).get(f"{underlier.currency}CNY"))
+        if (
+            observed.status != "ready"
+            or observed.suspension is not False
+            or old_time is None
+            or source_time is None
+            or source_time <= old_time
+            or old.get("currency") != underlier.currency
+            or rate is None
+            or rate <= 0
+        ):
+            return context
+        replacements[code] = _valuation_quote(
+            code,
+            underlier.currency,
+            _amount(observed.last_price),
+            rate,
+            observed.observed_at_utc,
+            underlier.market,
+        )
+        refs[code] = {key: entry[key] for key in ("snapshot_id", "receipt_relpath", "receipt_hash", "payload_sha256")}
+    for quote in evidence["quotes"]:
+        if quote["code"] in replacements or quote.get("source") != "futu_opend_market_snapshot":
+            continue
+        observed_at = _iso_datetime(quote.get("observed_at"))
+        if quote.get("valuation_quality") != "closed_market_carried" and (
+            observed_at is None or not 0 <= (now - observed_at).total_seconds() <= 300
+        ):
+            return context
+    updated_quotes = [replacements.get(q["code"], q) for q in evidence["quotes"]]
+    holdings, issues = _futu_holdings(account, context, {q["code"]: q for q in updated_quotes}, now_utc=now)
+    if issues:
+        return context
+    proof = {
+        "run_id": run_id,
+        "account": account,
+        "evaluated_at_utc": now.isoformat(),
+        "source_snapshot_id": evidence["snapshot"]["snapshot_id"],
+        "quotes": list(replacements.values()),
+        "source_receipts": refs,
+    }
+    recovered = {
+        **evidence,
+        "status": "complete",
+        "warnings": [],
+        "quotes": updated_quotes,
+        "holdings": holdings + [h for h in evidence["holdings"] if normalize_broker(h.get("broker")) != "富途"],
+        "freshness": {**freshness, "status": "fresh", "trust_status": "trusted", "reason_codes": []},
+        "snapshot": {**evidence["snapshot"], "snapshot_id": f"sizing-{canonical_sha256(proof)}"},
+        "quote_recovery": proof,
+    }
+    return {**context, "position_sizing_evidence": recovered}
+
+
+def _futu_evidence(
+    accounts: Sequence[str],
+    contexts: Mapping[str, Mapping[str, Any]],
+    *,
+    now_utc: datetime | None = None,
+) -> dict[str, Any]:
+    observed = {
+        account: (context.get("position_snapshot_input") or {}).get("observed_at_utc")
+        for account, context in contexts.items()
+    }
+    now = now_utc or datetime.now(timezone.utc)
+    errors = {
+        account: portfolio_position_snapshot_errors(context, account=account, now_utc=now)
+        + ([] if cash_snapshot_is_usable(context) else ["FUTU_CASH_SNAPSHOT_UNAVAILABLE"])
+        for account, context in contexts.items()
+    }
+    invalid_accounts = sorted(account for account, reasons in errors.items() if reasons)
     snapshot_ids = {
         account: (context.get("position_snapshot_input") or {}).get("snapshot_id")
         for account, context in contexts.items()
@@ -451,36 +590,44 @@ def _futu_evidence(accounts: Sequence[str], contexts: Mapping[str, Mapping[str, 
     return {
         "schema_version": PORTFOLIO_EVIDENCE_VERSION,
         "success": True,
-        "status": "partial" if stale_accounts else "complete",
+        "status": "partial" if invalid_accounts else "complete",
         "freshness": {
-            "status": "stale" if stale_accounts else "fresh",
-            "trust_status": "partial" if stale_accounts else "trusted",
+            "status": "unknown" if invalid_accounts else "fresh",
+            "trust_status": "partial" if invalid_accounts else "trusted",
             "observed_at_utc": observed_at,
             "dataset_ids": ["futu.positions", "futu.cash", "futu.market_snapshot"],
-            "reason_codes": ["FUTU_SNAPSHOT_TIME_INVALID"] if stale_accounts else [],
+            "reason_codes": sorted({reason for reasons in errors.values() for reason in reasons}),
         },
-        "retrieved_at_utc": datetime.now(timezone.utc).isoformat(),
+        "retrieved_at_utc": now.isoformat(),
         "scope": {"accounts": list(accounts), "reporting_currency": "CNY"},
         "snapshot": {"snapshot_id": f"futu-{snapshot_id}", "observed_at": observed_at},
         "holdings": [],
         "quotes": [],
-        "account_status": [{"account": account, "status": "partial" if account in stale_accounts else "complete"} for account in accounts],
-        "warnings": [f"{account}: Futu snapshot time is missing or stale" for account in stale_accounts],
+        "account_status": [
+            {"account": account, "status": "partial" if account in invalid_accounts else "complete"}
+            for account in accounts
+        ],
+        "warnings": [
+            f"{account}: Futu portfolio evidence unavailable ({', '.join(errors[account])})"
+            for account in invalid_accounts
+        ],
     }
 
 
-def _futu_context_error(account: str, context: Mapping[str, Any]) -> str | None:
+def _futu_context_error(
+    account: str, context: Mapping[str, Any], *, now_utc: datetime | None = None,
+) -> str | None:
     cash = context.get("cash_by_currency")
     snapshot = context.get("position_snapshot_input")
     if not isinstance(cash, Mapping) or not isinstance(snapshot, Mapping) or not isinstance(snapshot.get("rows"), list):
         return f"{account}: Futu cash or stock snapshot is missing"
     if not cash_snapshot_is_usable(context):
         return f"{account}: Futu cash snapshot is incomplete"
-    if snapshot.get("errors") or snapshot.get("completeness") != "complete" or (snapshot.get("quality") or {}).get("status") != "ready":
-        return f"{account}: Futu stock snapshot has scope errors"
-    filters = context.get("filters")
-    if isinstance(filters, Mapping) and filters.get("account") != account:
-        return f"{account}: Futu account identity mismatch"
+    errors = portfolio_position_snapshot_errors(
+        context, account=account, now_utc=now_utc or datetime.now(timezone.utc),
+    )
+    if errors:
+        return f"{account}: Futu stock snapshot unavailable ({', '.join(errors)})"
     return None
 
 
@@ -488,8 +635,9 @@ def _futu_holdings(
     account: str,
     context: Mapping[str, Any],
     quotes: Mapping[str, Mapping[str, Any]],
+    *, now_utc: datetime | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    if issue := _futu_context_error(account, context):
+    if issue := _futu_context_error(account, context, now_utc=now_utc):
         raise ValueError(issue)
     cash = context["cash_by_currency"]
     snapshot = context["position_snapshot_input"]
@@ -649,9 +797,10 @@ def collect_assignment_portfolio_evidence(
 ) -> dict[str, Any]:
     """Collect valuation once at the account preparation boundary, without cache writes."""
     normalized_accounts = normalize_assignment_accounts(accounts)
+    evaluated_at = datetime.now(timezone.utc)
     if not futu_error:
         for account, context in futu_contexts.items():
-            if issue := _futu_context_error(account, context):
+            if issue := _futu_context_error(account, context, now_utc=evaluated_at):
                 futu_error = issue
                 break
     codes = {
@@ -682,7 +831,7 @@ def collect_assignment_portfolio_evidence(
             and isinstance(runtime_config["portfolio"].get("holdings"), Mapping)
             and runtime_config["portfolio"]["holdings"].get("enabled") is True
         )
-        evidence = _futu_evidence(normalized_accounts, futu_contexts)
+        evidence = _futu_evidence(normalized_accounts, futu_contexts, now_utc=evaluated_at)
         observed_rates = fx_observation.get("rates") if isinstance(fx_observation, Mapping) else None
         evidence["fx_rates_to_cny"] = dict(observed_rates) if isinstance(observed_rates, Mapping) else {}
         capacity_rates = capacity_fx.get("rates") if isinstance(capacity_fx, Mapping) else None
@@ -750,9 +899,10 @@ def collect_assignment_portfolio_evidence(
                     quotes.setdefault(code, row)
             holdings: list[dict[str, Any]] = []
             warnings = list(evidence.get("warnings") or []) + pm_issues + quote_issues
+            evaluated_at = datetime.now(timezone.utc)
             for account, context in futu_contexts.items():
                 try:
-                    rows, issues = _futu_holdings(account, context, quotes)
+                    rows, issues = _futu_holdings(account, context, quotes, now_utc=evaluated_at)
                 except ValueError as exc:
                     evidence = _unavailable_evidence(
                         str(exc),

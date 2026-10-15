@@ -585,3 +585,16 @@ def get_usd_per_cny_exchange_rate(base_dir: Path) -> float | None:
         return 1.0 / usdcny
     except Exception:
         return None
+
+
+def capacity_currency_converter(fx_snapshot: Mapping[str, Any]) -> Any:
+    """Recheck the sealed quote on use; historical facts cannot fund new trades."""
+    def convert(amount: float, source: str, target: str) -> float | None:
+        rates = rates_for_purpose(fx_snapshot, purpose="capacity")
+        usdcny = rates.get("USDCNY")
+        converter = CurrencyConverter(ExchangeRates(
+            usd_per_cny=1 / usdcny if usdcny else None,
+            cny_per_hkd=rates.get("HKDCNY"),
+        ))
+        return converter.convert(amount, from_ccy=source, to_ccy=target)
+    return convert

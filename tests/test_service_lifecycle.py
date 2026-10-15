@@ -13,7 +13,7 @@ import yaml
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_yaml_init import init_yaml_config
-from src.application.service_lifecycle import service_lifecycle
+from src.application.service_lifecycle import _definition_preview, service_lifecycle
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -100,6 +100,134 @@ def context(instance, tmp_path, target):
 def apply(action, ctx):
     preview = service_lifecycle(action, **ctx)
     return service_lifecycle(action, **ctx, confirm=True, expected_preview_sha256=preview['preview_sha256'])
+
+
+def install_readback_probe(ctx, manager, mode):
+    reloaded = False
+
+    def probe(command, **kwargs):
+        nonlocal reloaded
+        if command[1] == 'daemon-reload':
+            reloaded = True
+        after = reloaded if ctx['target'] == 'systemd' else (ctx['runtime_root'] / 'service.profile.json').exists()
+        if after and mode == 'loaded' and command[1] == 'print':
+            manager.states[command[-1].split('/')[-1]] = ('inactive', False)
+        result = manager(command, **kwargs)
+        if not after or command[1] not in {'show', 'print', 'print-disabled'}:
+            return result
+        if mode == 'disabled-timeout' and command[1] == 'print-disabled':
+            raise subprocess.TimeoutExpired(command, 3)
+        if command[1] == 'print-disabled':
+            return result
+        if mode == 'timeout' or (mode == 'single-timeout' and command[2] == 'options-monitor-trade-intake.service'):
+            raise subprocess.TimeoutExpired(command, 3)
+        text = result.stdout
+        if mode in {'bad-setting', 'error', 'not-found'}:
+            text = text.replace('LoadState=loaded', 'LoadState=' + mode)
+        elif mode == 'foreign-path':
+            text = text.replace(str(ctx['unit_root']), str(ctx['unit_root'] / 'other-instance'))
+        elif mode == 'foreign-runtime':
+            text = text.replace(str(ctx['runtime_root']), str(ctx['runtime_root'] / 'other-instance'))
+        elif mode in {'active', 'activating', 'failed', 'deactivating'}:
+            text = text.replace('ActiveState=inactive', 'ActiveState=' + mode)
+        if ctx['target'] == 'launchd' and mode in {'foreign-path', 'foreign-runtime'}:
+            return subprocess.CompletedProcess(command, 0, text, '')
+        return subprocess.CompletedProcess(command, result.returncode, text, result.stderr)
+
+    return probe
+
+
+def cli_install(ctx):
+    from functools import partial
+    from src.interfaces.cli.main import parse_args
+    from src.interfaces.cli.service_ops import handle_service_update_command
+
+    lifecycle = partial(service_lifecycle, unit_root=ctx['unit_root'], system=ctx['system'],
+                        run_cmd=ctx['run_cmd'], credential_store_root=ctx['credential_store_root'])
+    command = ['service', 'install', '--runtime-root', str(ctx['runtime_root']), '--target', ctx['target']]
+    preview = handle_service_update_command(parse_args(command), service_lifecycle_fn=lifecycle, repo_base_fn=lambda: REPO)
+    assert preview['ok'] and preview['data']['status'] == 'preview'
+    return handle_service_update_command(
+        parse_args(command + ['--confirm', '--expected-preview-sha256', preview['data']['preview_sha256']]),
+        service_lifecycle_fn=lifecycle, repo_base_fn=lambda: REPO,
+    )
+
+
+@pytest.mark.parametrize('target,mode', [
+    ('systemd', 'bad-setting'), ('systemd', 'error'), ('systemd', 'not-found'),
+    ('systemd', 'timeout'), ('systemd', 'single-timeout'),
+    ('systemd', 'foreign-path'), ('systemd', 'foreign-runtime'),
+    ('launchd', 'timeout'), ('launchd', 'disabled-timeout'),
+    ('launchd', 'foreign-path'), ('launchd', 'foreign-runtime'),
+])
+def test_cli_install_rejects_unverified_after_without_hiding_writes(instance, tmp_path, target, mode, capsys):
+    from src.interfaces.cli.main import _print
+
+    ctx, manager = context(instance, tmp_path, target)
+    ctx['run_cmd'] = install_readback_probe(ctx, manager, mode)
+    result = cli_install(ctx)
+    data = result['data']
+    assert not result['ok'] and not data['ok'] and data['status'] == 'unverified'
+    assert data['changed'] and data['files_changed'] and data['write_applied']
+    assert data['after'] and data['audit_id'] and data['rollback_hint']
+    writes = [op for op in data['operations'] if op.get('operation') == 'write']
+    assert writes and all(op['readback'] == 'matched' and Path(op['path']).exists() for op in writes)
+    mutations = [call for call in manager.calls if call[1] not in {'show', 'print', 'print-disabled'}]
+    assert mutations == ([['systemctl', 'daemon-reload']] if target == 'systemd' else [])
+    if target == 'systemd':
+        assert data['operations'][-1]['ok'] and data['operations'][-1]['command'] == ['systemctl', 'daemon-reload']
+    assert _print(result) == 2
+    assert json.loads(capsys.readouterr().out)['data']['status'] == 'unverified'
+
+
+@pytest.mark.parametrize('target,mode', [
+    ('systemd', 'inactive'), ('systemd', 'active'), ('systemd', 'activating'),
+    ('systemd', 'failed'), ('systemd', 'deactivating'),
+    ('launchd', 'absent'), ('launchd', 'loaded'),
+])
+def test_cli_install_accepts_known_owned_definitions_without_activation(instance, tmp_path, target, mode):
+    ctx, manager = context(instance, tmp_path, target)
+    ctx['run_cmd'] = install_readback_probe(ctx, manager, mode)
+    result = cli_install(ctx)
+    assert result['ok'] and result['data']['status'] == 'installed'
+    if target == 'launchd' and mode == 'absent':
+        assert {row['state'] for row in result['data']['after'].values()} == {'absent'}
+    if target == 'launchd' and mode == 'loaded':
+        assert 'loaded-not-running' in {row['state'] for row in result['data']['after'].values()}
+    assert not any(call[1] in {'enable', 'start', 'bootstrap', 'kickstart'} for call in manager.calls)
+
+
+@pytest.mark.parametrize('timeout', [False, True])
+def test_install_failed_reload_keeps_original_outcome_with_bad_after(instance, tmp_path, timeout):
+    ctx, manager = context(instance, tmp_path, 'systemd')
+    manager.fail, manager.timeout = 'daemon-reload', timeout
+    ctx['run_cmd'] = install_readback_probe(ctx, manager, 'bad-setting')
+    result = cli_install(ctx)
+    data = result['data']
+    assert not result['ok'] and data['status'] == ('unknown' if timeout else 'failed')
+    assert data['changed'] and data['write_applied']
+    assert {row['state'] for row in data['after'].values()} == {'unknown'}
+    assert len([call for call in manager.calls if call[1] == 'daemon-reload']) == 1
+    assert not data['operations'][-1]['ok']
+
+
+def test_install_unverified_reinstall_preserves_backup_and_fresh_retry(instance, tmp_path):
+    ctx, manager, path, original = changed_definition(instance, tmp_path)
+    ctx['run_cmd'] = install_readback_probe(ctx, manager, 'timeout')
+    result = cli_install(ctx)
+    data = result['data']
+    assert not result['ok'] and data['status'] == 'unverified'
+    operation = next(op for op in data['operations'] if op.get('path') == str(path))
+    backup = Path(operation['backup_path'])
+    assert operation['readback'] == 'matched' and backup.read_bytes() == original
+    assert data['changed'] and data['files_changed'] and data['write_applied']
+    files = {p: p.read_bytes() for p in ctx['unit_root'].rglob('*') if p.is_file()}
+    ctx['run_cmd'] = manager
+    manager.calls.clear()
+    retry = cli_install(ctx)['data']
+    assert retry['ok'] and retry['status'] == 'installed' and not retry['files_changed']
+    assert {p: p.read_bytes() for p in files} == files and backup.read_bytes() == original
+    assert [call for call in manager.calls if call[1] != 'show'] == [['systemctl', 'daemon-reload']]
 
 
 @pytest.mark.parametrize('target', ['systemd', 'launchd'])
@@ -256,6 +384,7 @@ def test_feature_bindings_retire_disabled_dropins_with_backup(instance, tmp_path
     assert 'feishu.bot.app_secret' in install['required_credentials']
     dropin = ctx['unit_root'] / 'options-monitor-tick-us.service.d/zzzz-secret-credentials.conf'
     old_content = dropin.read_bytes()
+    original_dropins = {path: path.read_bytes() for path in ctx['unit_root'].glob('*.service.d/zzzz-secret-credentials.conf')}
     with pytest.raises(AgentToolError, match='SERVICE_CREDENTIALS_MISSING'):
         apply('start', ctx)
     rewrite_notifications(instance, False)
@@ -266,7 +395,13 @@ def test_feature_bindings_retire_disabled_dropins_with_backup(instance, tmp_path
     assert result['ok'] and not dropin.exists()
     operation = next(item for item in result['operations'] if item.get('path') == str(dropin))
     assert Path(operation['backup_path']).read_bytes() == old_content
+    assert Path(operation['backup_path']).parent == ctx['unit_root'] / '.om-service-backups' / dropin.parent.name
     assert operation['readback'] == 'matched'
+    backups = {Path(item['path']): Path(item['backup_path']) for item in result['operations'] if item.get('operation') == 'remove'}
+    assert len(original_dropins) > 1 and set(backups) == set(original_dropins)
+    assert len(set(backups.values())) == len(backups)
+    for path, content in original_dropins.items():
+        assert backups[path].read_bytes() == content
     assert apply('start', ctx)['ok']
 
 
@@ -416,18 +551,88 @@ def test_loaded_runtime_scope_requires_untruncated_evidence(instance, tmp_path, 
             service_lifecycle('start', **{**ctx, 'run_cmd': probe})
 
 
-def test_preview_hides_existing_env_values_and_live_probe_environment(instance, tmp_path):
+_PREVIEW_ENV_LINES = [
+    'Environment="DEEPSEEK_API_KEY={secret}"',
+    '  Environment="API_KEY={secret}"',
+    '\tEnvironment \t= "API_KEY={secret}"',
+    'Environment="HOME=/fictional" \\\n  "API_KEY={secret}"',
+    'Environment="HOME=/fictional" \\\n # ignored \\\n ; ignored too\n "API_KEY={secret}"',
+    'Environment="API_KEY=first-{secret}" \\\n "OTHER_KEY=second-{secret}" \\\n "HOME=/fictional"',
+    'Environment="API_KEY=first-\\\n{secret}"',
+    'Environment="API_KEY={secret}',
+    'Environment={secret}',
+    'Environment="{secret}=value"',
+    'Environment="HOME=/fictional"API_KEY={secret}',
+    'Environment="API_KEY={secret}\\x21"',
+    'Environment="HOME=/fictional"\v"API_KEY={secret}"',
+    '\ufeffEnvironment="API_KEY={secret}"',
+    'Environment = "HOME=/fictional" \\\r\n\t"API_KEY={secret}"',
+    'ExecStartPost=/bin/true \\\n\u00a0# ordinary\nEnvironment=API_KEY={secret}',
+    'ExecStartPost=/bin/true \\\n\v# ordinary\nEnvironment=API_KEY={secret}',
+    'ExecStartPost=/bin/true \\\n\f# ordinary\nEnvironment=API_KEY={secret}',
+    'Description=ordinary\0Environment=API_KEY={secret}',
+    'Environment="HOME=/fictional" \\\n\r "API_KEY={secret}"',
+]
+
+
+def _preview_probe(ctx, manager, secret):
+    # A real show response contains parsed environment, not the unit's physical lines.
+    def probe(command, **kwargs):
+        result = manager(command, **kwargs)
+        environment = shlex.join(['OM_RUNTIME_ROOT=' + str(ctx['runtime_root']), 'API_KEY=' + secret])
+        stdout = '\n'.join('Environment=' + environment if line.startswith('Environment=') else line
+                           for line in result.stdout.splitlines())
+        return subprocess.CompletedProcess(command, result.returncode, stdout, result.stderr)
+    return probe
+
+
+@pytest.mark.parametrize('env_line', _PREVIEW_ENV_LINES)
+def test_preview_hides_existing_env_values_and_live_probe_environment(instance, tmp_path, env_line):
     ctx, manager = context(instance, tmp_path, 'systemd')
     sentinel = 'test-only-secret-must-not-be-printed'
     env = instance / 'options-monitor.env'
     env.write_text('DEEPSEEK_API_KEY=' + sentinel + '\n')
     apply('install', ctx)
     unit = ctx['unit_root'] / 'options-monitor-tick-us.service'
-    unit.write_text(unit.read_text().replace('[Service]', '[Service]\nEnvironment="DEEPSEEK_API_KEY=' + sentinel + '"'))
-    result = service_lifecycle('install', **ctx)
+    unit.write_text(unit.read_text().replace('[Service]', '[Service]\n' + env_line.format(secret=sentinel)))
+    before = {path: path.read_bytes() for path in tmp_path.rglob('*') if path.is_file()}
+    manager.calls.clear()
+    result = service_lifecycle('install', **{**ctx, 'run_cmd': _preview_probe(ctx, manager, sentinel)})
     assert sentinel not in json.dumps(result)
     assert '<redacted>' in str(result['files'])
+    assert result['ok'] and not result['confirmed'] and not result['files_changed']
+    assert before == {path: path.read_bytes() for path in tmp_path.rglob('*') if path.is_file()}
+    assert manager.calls and all(call[1] == 'show' for call in manager.calls)
     assert env.read_text() == 'DEEPSEEK_API_KEY=' + sentinel + '\n'
+
+
+def test_systemd_definition_preview_preserves_safe_values_and_other_directives():
+    source = ('# comment with trailing slash \\\n'
+              'Environment=\n'
+              ' Environment = "HOME=/safe home" OM_RUNTIME_ROOT=/safe OM_ENV_FILE=/safe.env PYTHONUNBUFFERED=1\n'
+              'Environment=API_KEY=fake-secret\n'
+              'EnvironmentFile=/safe.env\n'
+              'ExecStart=/bin/echo \\\n  ordinary-argument\n')
+    preview = _definition_preview(source, 'systemd_service')
+    assert 'fake-secret' not in preview
+    assert 'API_KEY=<redacted>' in preview
+    for value in ('HOME=/safe home', 'OM_RUNTIME_ROOT=/safe', 'OM_ENV_FILE=/safe.env', 'PYTHONUNBUFFERED=1'):
+        assert value in preview
+    assert preview.startswith('# comment with trailing slash \\\nEnvironment=\n')
+    assert preview.endswith('EnvironmentFile=/safe.env\nExecStart=/bin/echo \\\n  ordinary-argument\n')
+
+
+def test_systemd_definition_preview_does_not_continue_even_backslashes():
+    preview = _definition_preview('Environment="API_KEY=fake-secret" \\\\\nDescription=still-visible\n', 'systemd_service')
+    assert 'fake-secret' not in preview
+    assert 'Description=still-visible\n' in preview
+
+
+def test_launchd_definition_preview_preserves_safe_environment():
+    payload = {'EnvironmentVariables': {'HOME': '/safe', 'API_KEY': 'fake-secret'}, 'Label': 'example'}
+    preview = _definition_preview(plistlib.dumps(payload).decode(), 'launchd_plist')
+    assert plistlib.loads(preview.encode()) == {
+        'EnvironmentVariables': {'HOME': '/safe', 'API_KEY': '<redacted>'}, 'Label': 'example'}
 
 
 def test_inbound_install_requires_current_selected_bot_snapshot(instance, tmp_path):
@@ -593,3 +798,262 @@ def test_protected_service_directory_returns_actionable_error_before_any_change(
     assert '--deploy-user' in failure.value.message
     assert not manager.calls
     assert protected.read_bytes() == before
+
+
+def changed_definition(instance, tmp_path, target='systemd'):
+    ctx, manager = context(instance, tmp_path, target)
+    installed = apply('install', ctx)
+    item = next(item for item in installed['files'] if item['kind'] in {'systemd_service', 'launchd_plist'})
+    path = Path(item['path'])
+    if target == 'systemd':
+        path.write_bytes(path.read_bytes() + b'\n# previously installed definition\n')
+    else:
+        payload = plistlib.loads(path.read_bytes())
+        payload['LegacyNote'] = 'previously installed definition'
+        path.write_bytes(plistlib.dumps(payload))
+    return ctx, manager, path, path.read_bytes()
+
+
+@pytest.mark.parametrize('target', ['systemd', 'launchd'])
+def test_changed_unit_reinstall_uses_private_backup_and_same_preview_path(instance, tmp_path, target):
+    ctx, manager, path, original = changed_definition(instance, tmp_path, target)
+    preview = service_lifecycle('install', **ctx)
+    item = next(item for item in preview['files'] if item['path'] == str(path))
+    backup = Path(item['backup_path'])
+    assert backup.parent == ctx['unit_root'] / '.om-service-backups'
+    assert not backup.parent.exists()
+    assert path.read_bytes() == original
+    result = service_lifecycle('install', **ctx, confirm=True, expected_preview_sha256=preview['preview_sha256'])
+    operation = next(item for item in result['operations'] if item.get('path') == str(path))
+    assert result['ok'] and operation['readback'] == 'matched'
+    assert operation['backup_path'] == str(backup)
+    assert backup.read_bytes() == original
+    assert backup.stat().st_mode & 0o777 == 0o600
+    assert backup.parent.stat().st_mode & 0o777 == 0o700
+    assert backup.stat().st_uid == path.stat().st_uid
+    assert not list(ctx['unit_root'].glob('*.om-backup-*'))
+    before = {p: p.read_bytes() for p in backup.parent.rglob('*') if p.is_file()}
+    assert apply('install', ctx)['ok']
+    assert {p: p.read_bytes() for p in backup.parent.rglob('*') if p.is_file()} == before
+    assert not any(call[1] in {'enable', 'bootstrap', 'kickstart'} for call in manager.calls)
+
+
+@pytest.mark.parametrize('hazard', ['symlink_parent', 'writable_parent', 'directory_leaf', 'public_leaf', 'symlink_leaf'])
+def test_unsafe_relocated_backup_is_rejected_without_definition_write(instance, tmp_path, hazard):
+    ctx, _, path, original = changed_definition(instance, tmp_path)
+    preview = service_lifecycle('install', **ctx)
+    backup = Path(next(item['backup_path'] for item in preview['files'] if item['path'] == str(path)))
+    if hazard == 'symlink_parent':
+        victim = tmp_path / 'victim'; victim.mkdir()
+        backup.parent.symlink_to(victim, target_is_directory=True)
+    else:
+        backup.parent.mkdir(mode=0o700)
+        if hazard == 'writable_parent':
+            backup.parent.chmod(0o777)
+        elif hazard == 'directory_leaf':
+            backup.mkdir()
+        elif hazard == 'symlink_leaf':
+            victim = tmp_path / 'victim'; victim.write_bytes(original)
+            backup.symlink_to(victim)
+        else:
+            backup.write_bytes(original); backup.chmod(0o644)
+    with pytest.raises(AgentToolError, match='SERVICE_PATH_UNSAFE|SERVICE_IDENTITY_MISMATCH'):
+        service_lifecycle('install', **ctx)
+    assert path.read_bytes() == original
+
+
+def test_backup_change_after_preview_invalidates_confirmation(instance, tmp_path):
+    ctx, manager, path, original = changed_definition(instance, tmp_path)
+    preview = service_lifecycle('install', **ctx)
+    backup = Path(next(item['backup_path'] for item in preview['files'] if item['path'] == str(path)))
+    backup.parent.mkdir(mode=0o700); backup.write_bytes(original); backup.chmod(0o600)
+    with pytest.raises(AgentToolError, match='STALE_PREVIEW'):
+        service_lifecycle('install', **ctx, confirm=True, expected_preview_sha256=preview['preview_sha256'])
+    assert path.read_bytes() == original and backup.read_bytes() == original
+    manager.calls.clear()
+    result = apply('install', ctx)
+    assert result['ok'] and backup.read_bytes() == original
+
+
+def test_backup_survives_definition_write_failure_and_retry(instance, tmp_path, monkeypatch):
+    import src.application.service_lifecycle as module
+    ctx, _, path, original = changed_definition(instance, tmp_path)
+    preview = service_lifecycle('install', **ctx)
+    backup = Path(next(item['backup_path'] for item in preview['files'] if item['path'] == str(path)))
+    writer = module._atomic_file
+    def fail_definition(destination, *args, **kwargs):
+        if destination == path:
+            raise OSError('injected definition write failure')
+        return writer(destination, *args, **kwargs)
+    monkeypatch.setattr(module, '_atomic_file', fail_definition)
+    result = apply('install', ctx)
+    assert not result['ok'] and result['status'] == 'failed'
+    assert backup.read_bytes() == original and path.read_bytes() == original
+    assert result['operations'][-1]['readback'] == 'unverified'
+    monkeypatch.setattr(module, '_atomic_file', writer)
+    assert apply('install', ctx)['ok']
+    assert backup.read_bytes() == original
+
+
+@pytest.mark.parametrize('target', ['systemd', 'launchd'])
+def test_conflicting_backup_is_not_overwritten(instance, tmp_path, target):
+    ctx, _, path, original = changed_definition(instance, tmp_path, target)
+    preview = service_lifecycle('install', **ctx)
+    backup = Path(next(item['backup_path'] for item in preview['files'] if item['path'] == str(path)))
+    backup.parent.mkdir(mode=0o700); backup.write_bytes(b'preserve conflicting backup'); backup.chmod(0o600)
+    result = apply('install', ctx)
+    assert not result['ok'] and result['status'] == 'failed'
+    assert result['error'] == {
+        'code': 'SERVICE_OPERATION_FAILED',
+        'message': 'existing service backup content does not match',
+    }
+    assert not result['operations'] and not result['write_applied']
+    assert backup.read_bytes() == b'preserve conflicting backup' and path.read_bytes() == original
+
+
+@pytest.mark.parametrize('target', ['systemd', 'launchd'])
+@pytest.mark.parametrize('failure_kind', ['structured', 'oserror', 'empty-oserror', 'interrupt'])
+def test_main_partial_install_preserves_error_receipts_and_retry(
+    instance, tmp_path, monkeypatch, capsys, target, failure_kind,
+):
+    import src.application.service_lifecycle as module
+    import src.interfaces.cli.main as cli
+
+    ctx, manager, completed_path, old_definition = changed_definition(instance, tmp_path, target)
+    failed_path = instance / 'service.profile.json'
+    profile = json.loads(failed_path.read_text())
+    profile['old_note'] = 'synthetic previous profile'
+    failed_path.write_text(json.dumps(profile))
+    old_profile = failed_path.read_bytes()
+    expected_error = {
+        'code': 'SERVICE_PATH_UNSAFE', 'message': 'synthetic write rejected',
+        'hint': 'Inspect the attempted path before retrying.',
+        'details': {'path': str(failed_path), 'reason': 'synthetic fixture'},
+    }
+    if failure_kind == 'structured':
+        failure = AgentToolError(**expected_error)
+    elif failure_kind == 'interrupt':
+        failure = KeyboardInterrupt()
+        expected_error = {'code': 'SERVICE_OPERATION_CANCELLED', 'message': 'Service operation cancelled.'}
+    else:
+        message = 'synthetic disk failure' if failure_kind == 'oserror' else ''
+        failure = OSError(message)
+        expected_error = {'code': 'SERVICE_OPERATION_FAILED', 'message': message or 'OSError'}
+    writer = module._atomic_file
+
+    def fail_profile(path, *args, **kwargs):
+        if path == failed_path:
+            raise failure
+        return writer(path, *args, **kwargs)
+
+    handler = cli.handle_service_update_command
+    monkeypatch.setattr(cli, 'handle_service_update_command', lambda args, **kwargs: handler(args,
+        service_lifecycle_fn=lambda action, **options: service_lifecycle(action, **options,
+            unit_root=ctx['unit_root'], system=ctx['system'], run_cmd=manager,
+            credential_store_root=ctx['credential_store_root']), **kwargs))
+    command = ['service', 'install', '--repo-root', str(REPO), '--runtime-root', str(instance), '--target', target]
+    assert cli.main(command) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview['error'] is None and not preview['data']['write_applied']
+    manager.calls.clear()
+    monkeypatch.setattr(module, '_atomic_file', fail_profile)
+    assert cli.main(command + ['--confirm', '--expected-preview-sha256', preview['data']['preview_sha256']]) == 2
+    result = json.loads(capsys.readouterr().out)
+    data = result['data']
+    assert not result['ok'] and not data['ok']
+    assert data['status'] == ('cancelled' if failure_kind == 'interrupt' else 'failed')
+    assert data['changed'] and data['files_changed'] and data['write_applied']
+    assert data['audit_id'] and data['rollback_hint']
+    completed, attempted = data['operations']
+    assert completed['path'] == str(completed_path) and completed['readback'] == 'matched'
+    assert attempted['path'] == str(failed_path) and attempted['readback'] == 'unverified'
+    backups = {Path(completed['backup_path']): old_definition, Path(attempted['backup_path']): old_profile}
+    assert all(path.read_bytes() == content for path, content in backups.items())
+    assert failed_path.read_bytes() == old_profile
+    assert completed_path.read_bytes() != old_definition
+    assert all(call[1] in {'show', 'print', 'print-disabled'} for call in manager.calls)
+    assert result['error'] == data['error'] == expected_error
+
+    completed_bytes = completed_path.read_bytes()
+    retry_writes = []
+
+    def record_write(path, *args, **kwargs):
+        retry_writes.append(path)
+        return writer(path, *args, **kwargs)
+
+    monkeypatch.setattr(module, '_atomic_file', record_write)
+    assert cli.main(command) == 0
+    retry_preview = json.loads(capsys.readouterr().out)['data']
+    assert retry_preview['preview_sha256'] != preview['data']['preview_sha256']
+    assert cli.main(command + ['--confirm', '--expected-preview-sha256', retry_preview['preview_sha256']]) == 0
+    retry = json.loads(capsys.readouterr().out)
+    assert retry['ok'] and retry['error'] is None
+    assert retry_writes == [failed_path]
+    assert completed_path.read_bytes() == completed_bytes
+    assert all(path.read_bytes() == content for path, content in backups.items())
+
+
+@pytest.mark.parametrize('target', ['systemd', 'launchd'])
+def test_pre_operation_structured_error_is_still_raised(instance, tmp_path, monkeypatch, target):
+    import src.application.service_lifecycle as module
+
+    ctx, manager = context(instance, tmp_path, target)
+    preview = service_lifecycle('install', **ctx)
+    failure = AgentToolError('SERVICE_PATH_UNSAFE', 'synthetic directory rejection',
+                             hint='Inspect directory.', details={'path': str(instance / 'logs')})
+    mkdir = module._mkdir
+
+    def reject_directory(path, **kwargs):
+        if path == instance / 'logs':
+            raise failure
+        return mkdir(path, **kwargs)
+
+    monkeypatch.setattr(module, '_mkdir', reject_directory)
+    with pytest.raises(AgentToolError) as caught:
+        service_lifecycle('install', **ctx, confirm=True, expected_preview_sha256=preview['preview_sha256'])
+    assert caught.value is failure
+    assert not (instance / 'service.profile.json').exists()
+    assert all(call[1] in {'show', 'print', 'print-disabled'} for call in manager.calls)
+
+
+def test_cli_reinstall_exposes_relocated_backup_receipt(instance, tmp_path):
+    from functools import partial
+    from src.interfaces.cli.main import parse_args
+    from src.interfaces.cli.service_ops import handle_service_update_command
+    ctx, _, path, original = changed_definition(instance, tmp_path)
+    lifecycle = partial(service_lifecycle, unit_root=ctx['unit_root'], system=ctx['system'], run_cmd=ctx['run_cmd'], credential_store_root=ctx['credential_store_root'])
+    command = ['service', 'install', '--runtime-root', str(instance), '--target', 'systemd']
+    preview = handle_service_update_command(parse_args(command), service_lifecycle_fn=lifecycle, repo_base_fn=lambda: REPO)
+    data = preview['data']
+    backup = next(item['backup_path'] for item in data['files'] if item['path'] == str(path))
+    result = handle_service_update_command(parse_args(command + ['--confirm', '--expected-preview-sha256', data['preview_sha256']]), service_lifecycle_fn=lifecycle, repo_base_fn=lambda: REPO)
+    assert result['ok']
+    operation = next(item for item in result['data']['operations'] if item.get('path') == str(path))
+    assert operation['backup_path'] == backup and Path(backup).read_bytes() == original
+
+
+def test_reinstall_preserves_old_adjacent_backup_and_profile_location(instance, tmp_path):
+    ctx, _, path, original = changed_definition(instance, tmp_path)
+    profile = instance / 'service.profile.json'
+    payload = json.loads(profile.read_text()); payload['old_note'] = 'retain original profile'
+    profile.write_text(json.dumps(payload))
+    original_profile = profile.read_bytes()
+    preview = service_lifecycle('install', **ctx)
+    new_backup = Path(next(item['backup_path'] for item in preview['files'] if item['path'] == str(path)))
+    legacy = ctx['unit_root'] / new_backup.name
+    legacy.write_bytes(b'preserve historic recovery bytes')
+    result = apply('install', ctx)
+    assert result['ok'] and legacy.read_bytes() == b'preserve historic recovery bytes'
+    assert new_backup.read_bytes() == original
+    operation = next(item for item in result['operations'] if item.get('path') == str(profile))
+    assert Path(operation['backup_path']).parent == instance
+    assert Path(operation['backup_path']).read_bytes() == original_profile
+
+
+def test_cancelled_reinstall_leaves_definition_and_no_backup_directory(instance, tmp_path):
+    ctx, _, path, original = changed_definition(instance, tmp_path)
+    preview = service_lifecycle('install', **ctx)
+    result = service_lifecycle('install', **ctx, confirm=True, expected_preview_sha256=preview['preview_sha256'], cancelled=lambda: True)
+    assert result['status'] == 'cancelled' and not result['changed']
+    assert path.read_bytes() == original
+    assert not (ctx['unit_root'] / '.om-service-backups').exists()

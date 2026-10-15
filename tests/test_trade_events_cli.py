@@ -626,6 +626,71 @@ def test_trade_events_repair_rejects_open_event_with_downstream_close(monkeypatc
     assert repo.list_position_lots()[0]["fields"]["contracts_open"] == 0
 
 
+@pytest.mark.parametrize("family", ["identity", "time"])
+@pytest.mark.parametrize("expected_hash", ["entirely-wrong-synthetic-hash", "", " "])
+@pytest.mark.parametrize("entry", ["api", "cli"])
+def test_metadata_repair_rejects_explicit_hash_without_writing(
+    monkeypatch, tmp_path: Path, capsys, family: str, expected_hash: str, entry: str,
+) -> None:
+    import src.interfaces.cli.trade_events as cli
+    from src.application.ledger.api import preview_trade_event_repair, record_trade_event_repair
+
+    repo, event_id = _repo_with_open_event(tmp_path)
+    if family == "time":
+        _attach_opend_time_evidence(repo, event_id=event_id)
+        overrides = {"trade_time_ms": 900}
+        flags = ["--trade-time-ms", "900"]
+    else:
+        overrides = {"futu_account_id": "123", "order_id": "order-1"}
+        flags = ["--futu-account-id", "123", "--order-id", "order-1"]
+    reason = "OpenD stored synthetic evidence: order-1"
+    with repo._connect() as conn:  # noqa: SLF001 - exact durable-state fixture
+        before = list(conn.iterdump())
+    if entry == "cli":
+        _bind_cli_repo(monkeypatch, cli, repo, tmp_path / "data.json")
+        args = ["repair", event_id, *flags, "--reason", reason, "--expected-input-hash", expected_hash]
+        assert cli.main([*args, "--dry-run", "--format", "json"]) == 0
+        preview = json.loads(capsys.readouterr().out)
+    else:
+        preview = preview_trade_event_repair(repo, event_id=event_id, overrides=overrides, reason=reason)
+    assert preview["advisory"] is True
+    assert "expected_input_hash" not in preview
+    with repo._connect() as conn:  # noqa: SLF001 - preview must preserve every table
+        assert list(conn.iterdump()) == before
+    if entry == "cli":
+        assert cli.main([*args, "--confirm"]) == 2
+        assert "expected_input_hash is not supported" in capsys.readouterr().out
+    else:
+        with pytest.raises(ValueError, match="expected_input_hash is not supported"):
+            record_trade_event_repair(
+                repo, event_id=event_id, overrides=overrides, reason=reason, expected_input_hash=expected_hash,
+            )
+    with repo._connect() as conn:  # noqa: SLF001 - rejection must preserve every table
+        assert list(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("family", ["identity", "time"])
+def test_metadata_repair_api_accepts_none_hash_and_idempotent_retry(tmp_path: Path, family: str) -> None:
+    from src.application.ledger.api import record_trade_event_repair
+
+    repo, event_id = _repo_with_open_event(tmp_path)
+    if family == "time":
+        _attach_opend_time_evidence(repo, event_id=event_id)
+        overrides = {"trade_time_ms": 900}
+    else:
+        overrides = {"futu_account_id": "123", "order_id": "order-1"}
+    kwargs = {
+        "event_id": event_id, "overrides": overrides,
+        "reason": "OpenD stored synthetic evidence: order-1", "expected_input_hash": None,
+    }
+    assert record_trade_event_repair(repo, **kwargs)["mode"] == "applied"
+    with repo._connect() as conn:  # noqa: SLF001 - idempotent durable-state fixture
+        after = list(conn.iterdump())
+    assert record_trade_event_repair(repo, **kwargs)["mode"] == "no_op"
+    with repo._connect() as conn:  # noqa: SLF001 - retry must preserve every table
+        assert list(conn.iterdump()) == after
+
+
 def test_trade_events_identity_repair_binds_in_place_with_downstream_and_is_idempotent(
     monkeypatch,
     tmp_path: Path,

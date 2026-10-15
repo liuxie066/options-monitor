@@ -4,9 +4,21 @@
 
 ## 版本、复现与证据范围
 
-交付时整合并发 main 更新至 `e3756a5cc938e6a3caed76121325087cd8557092`，变动为 service deploy、CI 门禁和既有测试；本基线涉及的取数 owner、脚本、fixture 与依赖未变化。下述测量仍绑定原审计源码和脚本摘要；最终集成门禁单独针对更新后的 base 验证。
+2026-10-15 兼容刷新整合 main `abc68bc61cc5cd2823d41ba04ae2a95367c65af7`，延续原 PR head `e9a21f2c0f085e476ab55f9c96e69b08a9dca28c`。验证时 HEAD 为计划检查点 `05d1e1f00b2a3c27b747095afd798540a638b20c`，main 整合与修复尚未提交；验证绑定工作树文件摘要，不能把检查点 tree 当作修复后的源码。
 
-审计基线：`1bd339cc96f77564d7879024a36f5d384da337fb`。测量 checkout 的 HEAD 是 accepted-plan checkpoint `0aa921b88d4a8988083938c48d0060973662727c`，当时脚本与测试待提交；脚本内容摘要见下方。最终 PR 中的脚本和测试是可复现来源，checkpoint 的 Git tree 本身不包含新脚本。
+当前脚本 SHA256：`72ab169b8d8d1b53a0e82c158daad70d1e0b7f5b0aaeffbb586368fa0b3f0f65`；测试 SHA256：`b12ab7026570f9aca3e54d0395f0a39a5c50b38d67b737472ff3620304bcda99`。
+
+原脚本在整合后的 main 上构造即失败，因为 Wheel capacity 已退役旧锁、决策快照和 option builder 属性。当前脚本只在消费侧替换 canonical `ledger.api.read_wheel_capacity_context` 边界：通过既有纯投影 `build_wheel_read_model_from_rows` 构造空合成 Wheel 模型，并提供合成 option 风险事实。`wheel_capacity_context_fixture` 记录该边界的真实调用次数；不再伪造旧内部 ledger/decision 计数。真实 query-only 账本读取、intake lock 和决策快照内部仍未测，portfolio 读取与下游资格判断保持真实。
+
+本次保留现场的验证直接执行 `Harness.execute` 的 19 个非 prepared 案例，原调用数、现金/持仓资格、隔离和失败断言全部通过；另覆盖 Wheel CLI/Tool 的合成账本边界与不可信事实拒绝。合计 76 项检查、0 次审计越界。15 次真实缓存原子替换在限定的新 fixture 内执行，每次新字节及存在时的旧字节均独立持久保存并验证文件身份和读回；没有替换 writer 或降低资格规则。该结果不测耗时，也不证明 `sample` 资源生命周期。
+
+全部 23 case 与原断言仍保留；`prepared`、`prepared_new_run`、`prepared_bad_hash`、`prepared_bad_account` 本次未执行。它们的临时目录和配置发布路径会清理文件，与本轮保留现场约束冲突；完整 suite/CI 仍需单独核定，不能拿下方历史结果补成当前通过。
+
+### 历史七轮测量
+
+下方耗时、prepared 阶段和原内部 trace 仅属于历史测量。历史交付曾整合 main `e3756a5cc938e6a3caed76121325087cd8557092`；这些数字未在当前 main 重新采样。
+
+审计基线：`1bd339cc96f77564d7879024a36f5d384da337fb`。测量 checkout 的 HEAD 是 accepted-plan checkpoint `0aa921b88d4a8988083938c48d0060973662727c`，当时脚本与测试待提交；脚本内容摘要见下方。历史脚本和测试可从原 PR head `e9a21f2c0f085e476ab55f9c96e69b08a9dca28c` 获取，checkpoint 的 Git tree 本身不包含新脚本。当前兼容脚本已变化，不重现旧内部 trace。
 
 ```sh
 ./.venv/bin/python scripts/benchmark_business_fetch.py --samples 7
@@ -14,7 +26,9 @@
 
 默认七次，接受 1–50 次；只输出 JSON，不接收生产配置或 runtime 路径。每个案例、每轮都使用新的临时目录；fixture 预写、配置发布、模块导入不计时，业务调用内缓存与 prepared 文件读写计时。业务时钟固定，耗时用真实 `perf_counter`。不注入网络延迟、不设性能门槛。测试用例、逐轮 trace/count/outcome 和 min/median/max 均由脚本输出；不同路径或结果的样本不混合汇总。
 
-证据分级：
+该命令会自动清理临时目录，要求保留全部 fixture 的验证任务不能直接执行。当前兼容刷新未运行这个完整命令。
+
+历史证据分级：
 
 - **实测 owner/adapter**：真实 shared reader、Futu provider 归一化、真实 gateway/client 参数与响应映射、现金应用及 Tool adapter、pipeline context、prepared worker/promotion/load、Wheel CLI/Tool capacity adapter、assignment collect/project。
 - **替身边界计数**：ready factory、SDK context 的 `accinfo_query` / `position_list_query`、FX、PM、quote、账本读取、决策快照、option context、source persistence、position sizing。它们的次数属于调用边界证据，耗时包含轻量替身开销，真实 I/O 耗时未测。
@@ -24,7 +38,7 @@ socket connect/connect_ex、create_connection、urllib 入口有网络阻断；�
 
 ## 真实入口与所有者审计
 
-| 入口 | 实际调用链与复用边界 | 本次证据 |
+| 入口 | 实际调用链与复用边界 | 历史测量证据 |
 |---|---|---|
 | 公开 scan / Tool scan | CLI `scan` → operator handler → `run_scan` → `scan_opportunities` → materialization adapter → watchlist pipeline → `build_pipeline_context` → shared reader → Futu；默认 Tool 输出根下的 state，允许写缓存 | context 装配实测，显式账户 state；公开/Tool 外壳和完整扫描静态 |
 | scan-pipeline 入口 | CLI `scan-pipeline` → pipeline runtime → 同一 watchlist pipeline/context；state 由该入口提供，不另写 portfolio 资格规则 | 静态；context owner 已测 |
@@ -42,7 +56,7 @@ socket connect/connect_ex、create_connection、urllib 入口有网络阻断；�
 
 shared reader 按逻辑账户、物理账户、环境、市场/asset scope、完整性、时间与 cash authority 决定资格。普通 stock 窗口 300 秒，stock+option 严格窗口 60 秒；持仓刷新失败时仅保留独立合格现金。跨账户或降低资格标准来消除调用违反共享契约。
 
-## 实测结果
+## 历史实测结果
 
 每行是一个案例的完整调用序列，不是一次线上请求。SDK 列是替身查询次数，不包含连接、握手、账户列表、序列化、协议、retry 内部、option enrichment。单条 NVDA long stock，零 option，空可信账本；没有代表真实账户规模。
 
@@ -118,6 +132,6 @@ prepared 消费阶段还各触达一次 FX fixture，因为本例没有 prepared
 
 ## 验证与限制
 
-离线基线回归测试检查所有案例调用数、现金与持仓资格、prepared 拒绝后无 fallback、PM partial、网络阻断及替身恢复；相关 cash/pipeline/prepared/holdings/assignment/Wheel 消费者也做定向回归。完整 pytest、Ruff、Guardrails、dependency graph 的具体结果绑定到本次 PR 的交付记录与 CI。
+测试矩阵保留所有案例调用数、现金与持仓资格、prepared 拒绝后无 fallback、PM partial、网络阻断及替身恢复的断言。当前刷新仅执行前述保留现场的 19-case 子集及边界检查，Ruff 与 dependency graph 检查通过；prepared、sample 生命周期与完整 pytest/CI 的当前证据仍有缺口。历史定向回归和旧 CI 不代表当前源码通过；后续完整门禁结果须绑定精确提交单独记录。
 
 未覆盖：真实 OpenD/PM/FX/报价、网络/握手与 retry、SDK 编码、真实账户/option 数量、完整 scan/通知、真实账本与 writer 锁、并发/队列/子进程启动、prepared option 与封存 FX 的端到端测量、完整 Wheel mutation/receipt 重放。以上归属后续测量 work unit，不作为本基线的已验证结论。脚本不修改任何生产 owner、业务策略、资格、TTL、配置或服务。

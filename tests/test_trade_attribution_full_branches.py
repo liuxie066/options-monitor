@@ -1,3 +1,4 @@
+from src.application.ledger import trade_attribution as ledger_attribution
 """Full Wheel branches must not compete with the only unclaimed Call target."""
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -57,11 +58,11 @@ def _observation(repo, *, now_ms=NOW):
         "futu_account_id": "1001", "trd_env": "REAL", "market": "hk"}, "position_snapshot_input": snapshot}}
 
 
-def _occupied_scope(tmp_path, monkeypatch, *, covered=4):
+def _occupied_scope(tmp_path, monkeypatch, *, covered=4, policy_effective_from_ms=None):
     # Reuse real ingress, five Put assignments and the existing multi-allocation writer.
     monkeypatch.setattr(attribution.time, "time", lambda: _ms("2026-09-28T00:00:00Z") / 1000)
     repo, config, _ = _meituan_repo(tmp_path, call_contracts=3)
-    monkeypatch.setattr(attribution, "trade_attribution_capacity_check",
+    monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check",
         lambda **_: {"status": "available", "reason_codes": []})
     view = _view(repo, config, now_ms=_ms("2026-09-28T00:00:00Z"))
     call = next(row for row in view["rows"] if row["contracts_open"] == 3)
@@ -83,14 +84,14 @@ def _occupied_scope(tmp_path, monkeypatch, *, covered=4):
             request_id="fixture:single", actor="fixture:operator", combo_evidence=EVIDENCE,
             capacity_observation={}, combo_mode="confirm", manual=True)
     with repo._writer_connection(begin_immediate=True) as conn:
+        enabled_at = policy_effective_from_ms if policy_effective_from_ms is not None else _ms("2026-10-01T00:00:00Z")
         conn.execute("""INSERT INTO trade_attribution_policy_enablings
             (broker, physical_account_id, environment, account, market, policy_version,
              effective_from_ms, created_at_ms, actor, request_id, request_hash)
             VALUES ('futu', '1001', 'REAL', 'lx', 'hk', 'trade_attribution.v2', ?, ?,
-                    'fixture', 'fixture:cutover', ?)""", (_ms("2026-10-01T00:00:00Z"),
-                    _ms("2026-10-01T00:00:00Z"), "a" * 64))
+                    'fixture', 'fixture:cutover', ?)""", (enabled_at, enabled_at, "a" * 64))
     monkeypatch.setattr(attribution.time, "time", lambda: NOW / 1000)
-    monkeypatch.setattr(attribution, "trade_attribution_capacity_check", trade_attribution_capacity_check)
+    monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check", trade_attribution_capacity_check)
     execution, receipt = _ingest(repo, config, tmp_path, deal_id="new-call",
         occurred_at="2026-10-06T07:34:03Z")
     return repo, config, branches, execution, receipt
@@ -171,9 +172,9 @@ def test_two_pending_calls_against_last_branch_remain_blocked(tmp_path, monkeypa
 def test_full_branch_exclusion_requires_unambiguous_owner_evidence(tmp_path, monkeypatch, uncertainty):
     repo, config, branches, execution, _ = _occupied_scope(tmp_path, monkeypatch)
     branch_id = branches[0]
-    current_owner = attribution.build_wheel_read_model_with_capacity_from_rows
-    historical_owner = attribution.build_wheel_read_model_from_rows
-    intent_owner = attribution.resolve_wheel_fill_intent
+    current_owner = ledger_attribution.build_wheel_read_model_with_capacity_from_rows
+    historical_owner = ledger_attribution.build_wheel_read_model_from_rows
+    intent_owner = ledger_attribution.resolve_wheel_fill_intent
 
     def change(model, *, historical):
         model = deepcopy(model)
@@ -218,9 +219,9 @@ def test_full_branch_exclusion_requires_unambiguous_owner_evidence(tmp_path, mon
                         "reserved_contracts_to_consume": 1, "reason_codes": []}
         return intent_owner(branch, fill, *args, **kwargs)
 
-    monkeypatch.setattr(attribution, "build_wheel_read_model_with_capacity_from_rows", current)
-    monkeypatch.setattr(attribution, "build_wheel_read_model_from_rows", historical)
-    monkeypatch.setattr(attribution, "resolve_wheel_fill_intent", intent)
+    monkeypatch.setattr(ledger_attribution, "build_wheel_read_model_with_capacity_from_rows", current)
+    monkeypatch.setattr(ledger_attribution, "build_wheel_read_model_from_rows", historical)
+    monkeypatch.setattr(ledger_attribution, "resolve_wheel_fill_intent", intent)
     target = next(row for row in _view(repo, config, observation=_observation(repo))["rows"]
                   if row["execution_key"] == execution)
     assert "wheel:" + branch_id in target["candidate_ids"]

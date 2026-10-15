@@ -21,7 +21,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
-from src.application.agent_tool_contracts import AgentToolError
+from src.application.agent_tool_contracts import AgentToolError, build_error_payload
 from src.application.config_primitives import configured_markets
 from src.application.config_yaml import load_yaml_config_file, resolve_yaml_bot_config
 from src.application.runtime_config_freshness import check_runtime_config_freshness, check_runtime_config_identity
@@ -75,6 +75,23 @@ def _file_fact(path: Path) -> dict[str, Any]:
                 "uid": info.st_uid, "gid": info.st_gid, "mode": stat.S_IMODE(info.st_mode)}
     except PermissionError as exc:
         _permission_error(path, exc)
+
+
+def _backup_path(item: dict[str, Any], *, unit_root: Path, owner_uid: int) -> Path:
+    path = Path(item["path"])
+    if item["kind"] in {"systemd_service", "systemd_timer", "systemd_secret_dropin", "launchd_plist"}:
+        path = unit_root / ".om-service-backups" / path.relative_to(unit_root)
+        directory = path.parent
+        while directory != unit_root:
+            _no_links(directory)
+            if directory.exists():
+                info = directory.stat()
+                if not stat.S_ISDIR(info.st_mode):
+                    _error("SERVICE_PATH_UNSAFE", "service backup parent must be a directory", path=str(directory))
+                if info.st_uid != owner_uid or info.st_mode & 0o022:
+                    _error("SERVICE_IDENTITY_MISMATCH", "service backup directory must be controlled by its deployment owner", path=str(directory))
+            directory = directory.parent
+    return path.with_name(path.name + ".om-backup-" + item["before"]["sha256"][:16])
 
 
 def _identity(target: str, deploy_user: str | None, euid: int) -> Any:
@@ -162,15 +179,42 @@ def _definition_preview(content: str, kind: str) -> str:
                 env[key] = "<redacted>"
         return plistlib.dumps(payload, sort_keys=False).decode()
     lines = []
-    for line in content.splitlines(keepends=True):
-        if line.startswith("Environment="):
+    # Consume physical continuations before redacting; comments do not end them.
+    physical_lines = iter(re.findall(r"[^\r\n\0]*(?:\r\n|\n\r|\r|\n)\0?|[^\r\n\0]*\0|[^\r\n\0]+$", content))
+    for raw in physical_lines:
+        if raw.lstrip(" \t\r\n").startswith(("#", ";")):
+            lines.append(raw)
+            continue
+        logical = raw.rstrip("\r\n\0").removeprefix("\ufeff")
+        incomplete = False
+        while (len(logical) - len(logical.rstrip("\\"))) % 2:
+            logical = logical[:-1] + " "
+            for continuation in physical_lines:
+                raw += continuation
+                if not continuation.lstrip(" \t\r\n").startswith(("#", ";")):
+                    logical += continuation.rstrip("\r\n\0")
+                    break
+            else:
+                incomplete = True
+                break
+        key, separator, value = logical.partition("=")
+        if separator and key.strip() == "Environment":
             try:
-                assignments = shlex.split(line.split("=", 1)[1])
-                safe = [item if item.split("=", 1)[0] in safe_env else item.split("=", 1)[0] + "=<redacted>" for item in assignments]
-                line = "Environment=" + shlex.join(safe) + "\n"
+                # Only simple whole-item quoting is shared with shlex; C escapes fail closed.
+                if incomplete or "\\" in value or "\v" in value or "\f" in value or not re.fullmatch(
+                    r'''\s*(?:(?:"[^"\\]*"|'[^'\\]*'|[^\s"'\\]+)(?:\s+|$))*''', value,
+                ):
+                    raise ValueError("ambiguous environment syntax")
+                safe = []
+                for item in shlex.split(value):
+                    name, equals, _ = item.partition("=")
+                    if not equals or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name):
+                        raise ValueError("invalid environment assignment")
+                    safe.append(item if name in safe_env else name + "=<redacted>")
+                raw = "Environment=" + shlex.join(safe) + "\n"
             except ValueError:
-                line = "Environment=<unparseable, redacted>\n"
-        lines.append(line)
+                raw = "Environment=<redacted>\n"
+        lines.append(raw)
     return "".join(lines)
 
 
@@ -543,16 +587,24 @@ def service_lifecycle(
             _error("SERVICE_INSTANCE_UNVERIFIED", "cannot establish the loaded service's ownership", service=unit["name"])
     commands = _activation_commands(action, units, before, target=provider, uid=user.pw_uid) if action != "install" else []
     changed_files = [item for item in files if item["before"].get("sha256") != item["sha256"]]
+    if action == "install":
+        for item in changed_files:
+            if item["before"]["exists"]:
+                owner_uid = user.pw_uid if item["kind"] in {"service_profile", "service_env"} else expected_unit_uid
+                backup = _backup_path(item, unit_root=root, owner_uid=owner_uid)
+                fact = _file_fact(backup)
+                if fact["exists"] and (fact["uid"] != owner_uid or fact["mode"] & 0o077):
+                    _error("SERVICE_IDENTITY_MISMATCH", "service backup must be private and controlled by its deployment owner", path=str(backup))
+                item["backup_path"] = str(backup)
+                inputs.append(fact)
     public_files = []
     for item in files:
         public = {key: value for key, value in item.items() if key != "content"}
         if item in changed_files:
-            if item["before"]["exists"]:
-                public["backup_path"] = item["path"] + ".om-backup-" + item["before"]["sha256"][:16]
-            # Unit definitions contain credential names/paths, never values.
-            # Include the actual definition difference for informed confirmation.
+            # Installed definitions may contain operator-added credential values.
+            # Preserve systemd line delimiters and redact both sides before the diff.
             public["diff"] = "".join(difflib.unified_diff(
-                _definition_preview(Path(item["path"]).read_text(), item["kind"]).splitlines(keepends=True) if item["before"]["exists"] else [],
+                _definition_preview(Path(item["path"]).read_bytes().decode(), item["kind"]).splitlines(keepends=True) if item["before"]["exists"] else [],
                 _definition_preview(item["content"] or "", item["kind"]).splitlines(keepends=True), fromfile="installed", tofile="requested"))
         public_files.append(public)
     scope = {"provider": provider, "repo_root": str(repo), "runtime_root": str(runtime), "config_yaml": str(source),
@@ -635,7 +687,8 @@ def service_lifecycle(
                 _mkdir(path.parent, uid=owner_uid, gid=owner_gid, mode=0o755 if public_systemd_path else 0o700)
                 backup = None
                 if item["before"]["exists"]:
-                    backup = path.with_name(path.name + ".om-backup-" + item["before"]["sha256"][:16])
+                    backup = _backup_path(item, unit_root=root, owner_uid=owner_uid)
+                    _mkdir(backup.parent, uid=owner_uid, gid=owner_gid)
                     _no_links(backup)
                     if backup.exists() and backup.read_bytes() != path.read_bytes():
                         raise OSError("existing service backup content does not match")
@@ -661,6 +714,16 @@ def service_lifecycle(
                     if not result["ok"]:
                         out.update(ok=False, status="unknown" if result.get("outcome") == "unknown" else "failed")
             out["after"] = {unit["name"]: _query(unit["name"], target=provider, uid=user.pw_uid, content=unit["content"], run_cmd=run_cmd) for unit in units}
+            loaded_states = {"running", "loaded-idle", "loaded-not-running"} if provider == "launchd" else {"running", "loaded-idle", "activating", "failed", "deactivating"}
+            if out["ok"] and not all(
+                (provider == "launchd" and row["state"] == "absent") or (
+                    row["state"] in loaded_states and
+                    row["definition_path"] == unit["path"] and
+                    (unit["name"].endswith(".timer") or row["runtime_root"] == str(runtime))
+                )
+                for unit in units for row in (out["after"][unit["name"]],)
+            ):
+                out.update(ok=False, status="unverified")
         else:
             for command in commands:
                 if cancelled and cancelled():
@@ -697,7 +760,12 @@ def service_lifecycle(
     except (OSError, KeyboardInterrupt, AgentToolError) as exc:
         if isinstance(exc, AgentToolError) and not out["operations"]:
             raise
-        out.update(ok=False, status="cancelled" if isinstance(exc, KeyboardInterrupt) else "failed", error=str(exc))
+        interrupted = isinstance(exc, KeyboardInterrupt)
+        error = exc if isinstance(exc, AgentToolError) else AgentToolError(
+            code="SERVICE_OPERATION_CANCELLED" if interrupted else "SERVICE_OPERATION_FAILED",
+            message=(str(exc) or "Service operation cancelled.") if interrupted else (str(exc) or type(exc).__name__),
+        )
+        out.update(ok=False, status="cancelled" if interrupted else "failed", error=build_error_payload(error))
     finally:
         os.close(descriptor)
     return attach_write_contract(out, dry_run=False, write_applied=out["changed"], rollback_hint="Use the reported backups only after a fresh preview; re-read service state before retrying.")

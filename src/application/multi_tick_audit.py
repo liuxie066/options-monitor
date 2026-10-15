@@ -97,6 +97,64 @@ def daily_brief_timing_scope(*, runlog: Any, account: str, market: str) -> Itera
         _daily_brief_timing.reset(token)
 
 
+_prepared_context_timing: ContextVar[Any] = ContextVar(
+    "prepared_context_timing", default=None,
+)
+
+
+@contextmanager
+def prepared_context_phase(phase: str, *, account: str | None = None) -> Iterator[None]:
+    """Inclusive execution timing; completion does not imply business readiness."""
+    runlog = _prepared_context_timing.get()
+    if runlog is None:
+        yield
+        return
+    data = {"phase": phase}
+    if account is not None:
+        data["account"] = account
+
+    def emit(status: str, duration_ms: int | None = None) -> None:
+        try:
+            runlog.safe_event(
+                "prepared_context_phase", status, data=dict(data), duration_ms=duration_ms,
+            )
+        except Exception:
+            pass
+
+    try:
+        started = monotonic()
+    except Exception:
+        started = None
+    emit("start")
+    outcome = "ok"
+    try:
+        yield
+    except BaseException as exc:
+        outcome = "error"
+        data["error_type"] = type(exc).__name__
+        raise
+    finally:
+        duration_ms = None
+        if started is not None:
+            try:
+                duration_ms = max(0, int((monotonic() - started) * 1000))
+            except Exception:
+                pass
+        data["outcome"] = outcome
+        emit(outcome, duration_ms)
+
+
+@contextmanager
+def prepared_context_timing_scope(*, runlog: Any) -> Iterator[None]:
+    """Bind only the synchronous post-portfolio region; None disables diagnostics."""
+    token = _prepared_context_timing.set(runlog)
+    try:
+        with prepared_context_phase("post_portfolio_prepare"):
+            yield
+    finally:
+        _prepared_context_timing.reset(token)
+
+
 @dataclass
 class MultiTickAuditHelper:
     base: Path

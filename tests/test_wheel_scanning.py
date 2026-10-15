@@ -1028,7 +1028,7 @@ def test_wheel_call_blocks_unknown_overlap_between_broker_sellable_and_ledger_lo
 
 def test_wheel_put_transaction_rejects_untrusted_source_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "src.application.wheel.capacity.build_wheel_read_model_from_rows",
+        "src.application.ledger.wheel_capacity.build_wheel_read_model_from_rows",
         lambda *_args, **_kwargs: {"wheel_branches": []},
     )
     with pytest.raises(ValueError, match="no longer has cash capacity"):
@@ -1094,3 +1094,60 @@ def test_covered_wheel_contracts_reach_sealed_snapshot_and_brief(tmp_path: Path)
     message = render_fixed_report({"account":"lx", "market":"US", "wheel_batches":views})
     assert "2026-05-06 110 Call" in message
     assert "建议：卖出" not in message
+
+
+@pytest.mark.parametrize("failure_at", ["symbol", "branch"])
+@pytest.mark.parametrize("direction", ["put", "call"])
+def test_wheel_internal_failure_preserves_healthy_sibling(monkeypatch, direction, failure_at):
+    from copy import deepcopy
+    from src.application.wheel import scanning
+    model = _read_model()
+    first = model["batches"][0]
+    first.update(direction=direction, wheel_branch_id="branch-1", remaining_contracts=1,
+                 principal_anchor=10010, realized_put_net_pnl_in_current_stage=0, currency="USD")
+    second = {**deepcopy(first), "stock_lot_id": "stock-2", "wheel_branch_id": "branch-2"}
+    if failure_at == "symbol":
+        first["symbol"] = "AMD"
+    model["wheel_branches"] = [first, second]
+    stock = model["assigned_stock_projection"]["_all_assigned_stock_lots"][0]
+    stock["symbol"] = first["symbol"]
+    model["assigned_stock_projection"]["_all_assigned_stock_lots"].append({**deepcopy(stock), "stock_lot_id": "stock-2", "symbol": "NVDA"})
+    frames = {symbol: pd.DataFrame([phase2_opening_row(_call_row(symbol=symbol,
+              option_type=direction, strike=99 if direction == "put" else 110,
+              delta=-0.3 if direction == "put" else 0.3))]) for symbol in {first["symbol"], "NVDA"}}
+    if failure_at == "symbol":
+        real = scanning._candidate_universe
+        def failing(**kwargs):
+            if kwargs["symbols"] == ["NVDA"]:
+                raise RuntimeError("one symbol computation failed")
+            return real(**kwargs)
+        monkeypatch.setattr(scanning, "_candidate_universe", failing)
+    else:
+        name = f"evaluate_wheel_{direction}_candidate"
+        real = getattr(scanning, name)
+        def failing(branch, *args):
+            if branch["wheel_branch_id"] == "branch-2":
+                raise RuntimeError("one branch evaluation failed")
+            return real(branch, *args)
+        monkeypatch.setattr(scanning, name, failing)
+    extra = [{}] if direction == "call" else []
+    result = getattr(scanning, f"run_wheel_{direction}_scan")(model, _policy(), {"frames": frames}, *extra,
+        {"exchange_rate_converter": _converter(),
+         "stock_assignment_fee_fact_fn": lambda *_args: {"basis": "estimated", "amount": 10}},
+        decision_time_ms=int(AS_OF.timestamp() * 1000))
+    scopes = {row["wheel_branch_id"]: row for row in result["scope_results"]}
+    assert scopes["branch-1"]["status"] == "completed"
+    assert scopes["branch-1"]["candidate_count"] == 1
+    assert scopes["branch-2"]["status"] == "failed"
+    assert [row["wheel_branch_id"] for row in result["capacity_claims"]] == ["branch-1"]
+    assert not result["raw_candidates"].get("stock-2" if direction == "call" else "branch-2")
+
+
+def test_frozen_missing_symbol_never_reads_live_csv(tmp_path):
+    from src.application.candidate_scanning import _load_required_data_rows
+    from src.application.required_data_snapshot import FrozenRequiredDataUnavailable
+    path = tmp_path / "parsed/NVDA_required_data.csv"
+    path.parent.mkdir()
+    path.write_text("symbol,option_type\nNVDA,call\n")
+    with pytest.raises(FrozenRequiredDataUnavailable, match="symbol_entry_missing"):
+        _load_required_data_rows(input_root=tmp_path, symbol="NVDA", mode="call", frames={})

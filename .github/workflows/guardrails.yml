@@ -10,10 +10,43 @@ permissions:
   contents: read
 
 jobs:
-  guardrails:
+  plan:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       release_tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Resolve VERSION release
+        id: release
+        if: github.event_name == 'push'
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [[ -z "${BEFORE_SHA}" || "${BEFORE_SHA}" =~ ^0+$ ]]; then
+            echo "::notice::Skipping automatic release for an initial push without a comparison base"
+            exit 0
+          fi
+          if ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "${BEFORE_SHA}"
+          fi
+          if git diff --quiet "${BEFORE_SHA}" "${GITHUB_SHA}" -- VERSION; then
+            exit 0
+          else
+            DIFF_STATUS=$?
+          fi
+          if [[ "${DIFF_STATUS}" -ne 1 ]]; then
+            echo "::error::Unable to compare VERSION across the pushed commit range"
+            exit "${DIFF_STATUS}"
+          fi
+          VERSION="$(tr -d '\n' < VERSION)"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+  checks:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -26,6 +59,10 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements/*.txt
+            constraints/*.txt
 
       - name: Install dependencies
         run: |
@@ -62,48 +99,98 @@ jobs:
           chmod +x ./om-agent
           ./om-agent spec > /tmp/om-agent-spec.json
 
-      - name: Resolve VERSION release
-        id: release
-        if: github.event_name == 'push'
-        env:
-          BEFORE_SHA: ${{ github.event.before }}
+  regression:
+    needs: plan
+    if: ${{ always() && !cancelled() && (github.event_name == 'pull_request' || needs.plan.outputs.release_tag != '') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements/*.txt
+            constraints/*.txt
+      - name: Install dependencies
         run: |
-          if [[ -z "${BEFORE_SHA}" || "${BEFORE_SHA}" =~ ^0+$ ]]; then
-            echo "::notice::Skipping automatic release for an initial push without a comparison base"
-            exit 0
-          fi
-          if ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
-            git fetch --no-tags --depth=1 origin "${BEFORE_SHA}"
-          fi
-          if git diff --quiet "${BEFORE_SHA}" "${GITHUB_SHA}" -- VERSION; then
-            exit 0
-          else
-            DIFF_STATUS=$?
-          fi
-          if [[ "${DIFF_STATUS}" -ne 1 ]]; then
-            echo "::error::Unable to compare VERSION across the pushed commit range"
-            exit "${DIFF_STATUS}"
-          fi
-          VERSION="$(tr -d '\n' < VERSION)"
-          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
-
+          python -m venv .venv
+          ./.venv/bin/pip install --upgrade pip
+          ./.venv/bin/pip install -r requirements/dev.txt -c constraints/dev.txt
       - name: Full regression
         id: regression
-        if: ${{ github.event_name == 'pull_request' || steps.release.outputs.tag != '' }}
         timeout-minutes: 15
         shell: bash
+        env:
+          PYTHONPATH: .github/ci
+          CI_SHARD: ${{ matrix.shard }}
         run: |
-          ./.venv/bin/python -m pytest -vv -n 2 --dist loadfile --max-worker-restart=0 --durations=25 \
+          ./.venv/bin/python -m pytest -vv -n 4 --dist loadfile --max-worker-restart=0 --durations=25 \
+            -p pytest_shard --ci-shard "$CI_SHARD" --ci-shard-count 8 \
+            --ci-manifest "$RUNNER_TEMP/regression/manifest.json" --ci-revision "$GITHUB_SHA" \
+            -o tmp_path_retention_policy=failed \
             -o faulthandler_timeout=60 2>&1 | tee "$RUNNER_TEMP/full-regression.log"
-
       - name: Preserve regression diagnostics
-        if: ${{ always() && steps.regression.outcome != 'skipped' && steps.regression.outcome != '' }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: full-regression-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/full-regression.log
-          if-no-files-found: warn
+          name: full-regression-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/full-regression.log
+            ${{ runner.temp }}/regression/manifest.json
+          if-no-files-found: error
           retention-days: 7
+
+  guardrails:
+    # Keep the existing required check name. A failed/cancelled dependency or
+    # an incomplete union must never become a successful (or skipped) gate.
+    needs: [plan, checks, regression]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ needs.plan.outputs.release_tag }}
+    steps:
+      - name: Require successful checks and regression
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          REGRESSION_RESULT: ${{ needs.regression.result }}
+          REGRESSION_REQUIRED: ${{ github.event_name == 'pull_request' || needs.plan.outputs.release_tag != '' }}
+        run: |
+          if [ "$EVENT_NAME" = pull_request ]; then
+            test "$PLAN_RESULT" = skipped
+          else
+            test "$PLAN_RESULT" = success
+          fi
+          test "$CHECKS_RESULT" = success
+          if [ "$REGRESSION_REQUIRED" = true ]; then
+            test "$REGRESSION_RESULT" = success
+          else
+            test "$REGRESSION_RESULT" = skipped
+          fi
+      - name: Checkout
+        if: ${{ github.event_name == 'pull_request' || needs.plan.outputs.release_tag != '' }}
+        uses: actions/checkout@v5
+      - name: Download regression receipts
+        if: ${{ github.event_name == 'pull_request' || needs.plan.outputs.release_tag != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: full-regression-${{ github.run_id }}-${{ github.run_attempt }}-*
+          path: ${{ runner.temp }}/regression-receipts
+      - name: Verify complete regression coverage
+        if: ${{ github.event_name == 'pull_request' || needs.plan.outputs.release_tag != '' }}
+        run: |
+          python .github/ci/regression_manifest.py "$RUNNER_TEMP/regression-receipts" \
+            --count 8 --revision "$GITHUB_SHA"
 
   release:
     needs: guardrails

@@ -29,6 +29,22 @@
 
 不要再用 `option_positions.sqlite_path` 作为 active DB 配置。运行时忽略该旧字段；如发现旧库，只能先离线修复为 canonical `trade_events`，再写入 active DB。
 
+`om service install` 覆盖或移除已有服务定义前，将原文保存在服务目录的
+`.om-service-backups/` 子目录中，保留原相对路径并以内容哈希命名。Linux 的服务备份由 root
+管理，macOS 的 LaunchAgent 备份由当前用户管理；新备份目录权限为 0700，文件为 0600。
+预览的 `files[].backup_path` 与执行后的 `operations[].backup_path` 指向同一文件。
+运行时 profile 和普通 env 文件仍使用原来的同级备份位置。历史 `.om-backup-*` 文件保持原样，
+不会自动迁移或清理；drift 不将它们作为服务单元扫描或退役。
+
+`om service install/start/stop` 在执行中捕获异常后，JSON 的 `data.error` 返回结构化
+`code`、`message`，并保留已有的 `hint`、`details`；顶层 `error` 同步该对象，退出码为 2。
+普通文件系统异常使用 `SERVICE_OPERATION_FAILED`，捕获的键盘中断使用
+`SERVICE_OPERATION_CANCELLED`。失败响应仍保留已完成的 `operations`、备份路径和写入回执；
+`readback: matched` 表示该操作已确认，`unverified` 表示尝试的操作尚未确认。
+不要把整次失败当成零写入：先核对这些回执和服务状态，再生成新预览确认重试；已有备份不会被覆盖。
+执行前的结构化拒绝仍由 CLI 返回顶层错误；管理器返回的失败或未知状态应结合 `data.status`
+和 `operations` 判断，不保证带有捕获异常的 `data.error`。
+
 ## 2. 安装依赖
 
 最小运行依赖：
@@ -180,9 +196,13 @@ cd "$REPO"
 
 启用 `--include-auto-upgrade` 时，渲染器会保留 `--repo-root` 传入的 symlink 字面路径，并默认把 tick / trade-intake / Feishu WS / maintenance config 指到 runtime root 下的 `config.us.json` / `config.hk.json`。这样 release 切换只移动代码，不绑定 release 目录内的生产配置。必须同时传 `--config-yaml "$RUNTIME/config.yaml"`；profile 会记录 YAML source，`update apply` 会用 `config build --source yaml` 重建 runtime config，并用 `config build-bot --source yaml` 重建 `$RUNTIME/resolved/config.bot.json`。缺少可用 YAML authoring source 时升级会 fail closed，不再从 legacy JSON profile 恢复。
 
+`service render --timeout` 使用正整数秒数，默认 600，并将该值保存到 `service.profile.json` 的 `timeout_seconds`。后续 drift 和升级 reconcile 会复用记录值；systemd tick 的 `TimeoutStartSec` 比该值多 300 秒，launchd tick 使用同一 `--timeout` 参数。旧 profile 缺少该字段时按 600 秒处理；已丢失的历史自定义值无法自动恢复，需用原始 `--timeout` 参数重新渲染并通过受控服务流程应用。字段存在但不是正整数时会报错，不会静默回退。
+
 升级切换 release 后还会做一次 service drift reconcile：以当前 release 的 `service render` 结果为期望状态，对比 `$RUNTIME/service.profile.json`、systemd unit 和 profile 显式声明的 helper/drop-in。缺失 unit 会被写入 `/etc/systemd/system/`，缺失 timer 和 credential oneshot 会执行 `systemctl enable --now`；credential helper 还会校验内容、`0755` 权限和 oneshot `Result=success`。随后升级流程会用 reconcile 后的 profile 重启长期运行的 trade-intake / Feishu WS，并执行服务 active/enabled 检查；Feishu WS 还会运行 `./om inbound feishu-ws --check`，避免长驻进程继续使用旧 release、旧 config 或不可用 env。
 
 `--no-restart-services` 只控制长期 service restart。若升级前已为维护显式暂停 systemd timer，同时传 `--preserve-activation-state`；控制面会在 release 切换前记录既有 timer 状态，并让 inactive、disabled 或 masked timer 在升级、失败补偿和 rollback 中保持暂停。定义文件仍会更新和 `daemon-reload`，但保留的 timer 不会被 `enable --now` 或 `restart`，避免 Persistent timer 在升级过程中补跑。
+
+Drift 的 `status=warn` 可以与 `summary.ok=true` 同时成立：兼容提示和需人工审阅的自定义额外 unit 不阻断成功，自定义 unit 也不会被自动删除。真实漂移仍会失败，完整判据见 [Release Process](RELEASE_PROCESS.md)。
 
 ### 已退役 AI Advice 的生产清理
 

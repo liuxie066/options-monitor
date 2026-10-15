@@ -622,7 +622,8 @@ def test_service_drift_detects_mismatched_timer_content(tmp_path: Path) -> None:
 
     out = _drift_at(repo, runtime, systemd_root)
 
-    assert out["summary"]["status"] == "warn"
+    assert out["summary"]["status"] == "error"
+    assert out["summary"]["ok"] is False
     assert out["summary"]["mismatched_count"] == 2
     assert out["mismatched_units"] == [
         "options-monitor-auto-close-us.timer",
@@ -811,7 +812,9 @@ def test_service_drift_retires_installed_feishu_ws_when_profile_no_longer_declar
     assert ["systemctl", "disable", "--now", "options-monitor-feishu-ws.service"] in calls
 
 
-def test_service_drift_preserves_backups_nonunits_and_custom_units(tmp_path: Path) -> None:
+def test_service_drift_preserves_backups_nonunits_and_custom_units(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
     from src.interfaces.cli.service_ops import add_service_update_commands, handle_service_update_command
 
     repo, runtime, systemd_root = _drift_roots(tmp_path)
@@ -833,6 +836,7 @@ def test_service_drift_preserves_backups_nonunits_and_custom_units(tmp_path: Pat
     }
     nonunits = {
         f"{retired}.bak",
+        "options-monitor-tick-us.service.om-backup-0123456789abcdef",
         "options-monitor-tick-us.service.disabled",
         "options-monitor-tick-us.timer~",
         "options-monitor-notes.txt",
@@ -858,8 +862,9 @@ def test_service_drift_preserves_backups_nonunits_and_custom_units(tmp_path: Pat
     assert before["operations"] == []
     assert before["extra_installed_units"] == sorted(custom | {retired})
     assert set(before["installed_units"]) == set(original_units) - nonunits
-    assert before["summary"]["status"] == "warn"
-    assert before["summary"]["error_count"] == 0
+    assert before["summary"]["status"] == "error"
+    assert before["summary"]["ok"] is False
+    assert before["summary"]["error_count"] > 0
     assert profile_path.read_bytes() == original_profile
     assert {path.name: path.read_bytes() for path in systemd_root.iterdir() if path.is_file()} == original_units
     assert not any("disable" in command for command in calls)
@@ -876,8 +881,16 @@ def test_service_drift_preserves_backups_nonunits_and_custom_units(tmp_path: Pat
     add_service_update_commands(parser.add_subparsers(dest="command"))
     args = parser.parse_args(["service", "drift", "--runtime-root", str(runtime), "--confirm"])
     response = handle_service_update_command(args, service_drift_fn=lambda **_kwargs: applied)
-    # Existing warning-envelope rejection remains tracked by issue 510.
-    assert response["ok"] is False
+    assert response["ok"] is True
+    from src.interfaces.cli import main as cli
+
+    for result, expected_code in ((before, 2), (applied, 0)):
+        monkeypatch.setattr(cli, "service_drift", lambda **_kwargs: result)
+        assert cli.main(["service", "drift", "--runtime-root", str(runtime)]) == expected_code
+        stdout = capsys.readouterr().out
+        payload = json.loads(stdout)
+        assert payload["ok"] is (expected_code == 0)
+
     assert applied["extra_installed_units"] == sorted(custom)
     assert set(applied["installed_units"]) == set(original_units) - nonunits - {retired}
     assert not (systemd_root / retired).exists()
@@ -1518,7 +1531,8 @@ def test_service_drift_preserves_quality_monitoring_opt_in_and_detects_metadata_
 
     drifted = _drift_at(repo, runtime, systemd_root)
 
-    assert drifted["summary"]["status"] == "warn"
+    assert drifted["summary"]["status"] == "error"
+    assert drifted["summary"]["ok"] is False
     assert drifted["profile_content_changed"] is True
     assert drifted["mismatched_units"] == []
 
@@ -3370,7 +3384,7 @@ def test_service_rollback_preserves_paused_timer_snapshot(
                 "active_states": {target: "inactive"},
             }
         return {
-            "summary": {"status": "warn"},
+            "summary": {"status": "warn", "ok": True},
             "preserved_activation_units": [target],
         }
 
@@ -3410,7 +3424,7 @@ def test_service_rollback_preserves_paused_timer_snapshot(
             }), stderr="unknown option --preserve-activation-state")
         return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
             "tool_name": "service.drift", "ok": True,
-            "data": {"summary": {"status": "ok"}, "preserved_activation_states": child_snapshot},
+            "data": {"summary": {"status": "ok", "ok": True}, "preserved_activation_states": child_snapshot},
         }), stderr="")
 
     if child_error:
@@ -3550,7 +3564,7 @@ def test_service_rollback_rebuilds_and_commits_target_runtime_config_bundle(tmp_
             drift_commands.append(list(command))
             return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
                 "tool_name": "service.drift", "ok": True,
-                "data": {"summary": {"status": "ok"}},
+                "data": {"summary": {"status": "ok", "ok": True}},
             }), stderr="")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
@@ -4329,3 +4343,130 @@ def test_preserved_drift_returns_success_through_public_cli(monkeypatch, capsys,
     assert payload["data"]["activation_states"][target] == "disabled"
     assert not any(target in cmd and any(action in cmd for action in ("enable", "start", "restart", "unmask"))
                    for cmd in commands)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_service_drift_preserves_timeout_while_repairing_and_retrying(tmp_path, legacy):
+    repo, runtime, units = _drift_roots(tmp_path)
+    timeout = 600 if legacy else 1800
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us", "hk"],
+                           timeout_seconds=timeout, use_default_deploy_user=False)
+    profile = json.loads(next(item["content"] for item in bundle["files"]
+                              if item["kind"] == "service_profile"))
+    if legacy:
+        profile.pop("timeout_seconds", None)
+    profile_path = runtime / "service.profile.json"
+    profile_path.write_text(json.dumps(profile))
+    _write_systemd_units_from_bundle(bundle, units)
+    original = {name: (units / name).read_bytes() for name in
+                ("options-monitor-tick-us.service", "options-monitor-tick-hk.service")}
+    damaged = units / "options-monitor-projection-verify.timer"
+    expected = damaged.read_bytes()
+    damaged.write_text("[Timer]\nOnCalendar=daily\n")
+    runner = _fake_systemd_query_runner()
+    before = _drift_at(repo, runtime, units, run_cmd=runner)
+    assert before["mismatched_units"] == [damaged.name]
+    after = _drift_at(repo, runtime, units, confirm=True, run_cmd=runner)
+    assert after["apply_errors"] == []
+    assert after["summary"]["ok"] is True
+    assert damaged.read_bytes() == expected
+    assert json.loads(profile_path.read_text())["timeout_seconds"] == timeout
+    for name, content in original.items():
+        assert (units / name).read_bytes() == content
+        assert f"--timeout {timeout}" in content.decode()
+        assert f"TimeoutStartSec={timeout + 300}" in content.decode()
+    repeat = _drift_at(repo, runtime, units, confirm=True, run_cmd=runner)
+    assert repeat["summary"]["ok"] is True
+    assert repeat["changed"] is False
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+@pytest.mark.parametrize("timeout_seconds", [None, True, False, "1800", 1800.5, 0, -1, [], {}])
+def test_service_drift_invalid_timeout_has_no_effects(tmp_path, confirm, timeout_seconds):
+    repo, runtime, units = _drift_roots(tmp_path)
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"],
+                           use_default_deploy_user=False)
+    profile = json.loads(next(item["content"] for item in bundle["files"]
+                              if item["kind"] == "service_profile"))
+    profile["timeout_seconds"] = timeout_seconds
+    profile_path = runtime / "service.profile.json"
+    profile_path.write_text(json.dumps(profile))
+    _write_systemd_units_from_bundle(bundle, units)
+    profile_before = profile_path.read_bytes()
+    units_before = {item.name: item.read_bytes() for item in units.iterdir()}
+    calls = []
+    runner = _fake_systemd_query_runner(record=lambda command, kwargs: calls.append(command))
+    with pytest.raises(ValueError, match="timeout_seconds must be a positive integer"):
+        _drift_at(repo, runtime, units, confirm=confirm, run_cmd=runner)
+    assert profile_path.read_bytes() == profile_before
+    assert {item.name: item.read_bytes() for item in units.iterdir()} == units_before
+    assert calls == []
+
+
+@pytest.mark.parametrize("target", ["systemd", "launchd"])
+@pytest.mark.parametrize("timeout_seconds", [1800, 0])
+def test_service_timeout_public_wrapper(tmp_path, target, timeout_seconds):
+    import sys
+
+    repo = Path(__file__).resolve().parents[2]
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    source = runtime / "config.yaml"
+    source.write_text("accounts: [lx]\n")
+    output = tmp_path / "rendered"
+    result = subprocess.run([
+        str(repo / "om"), "service", "render", "--target", target,
+        "--runtime-root", str(runtime), "--config-yaml", str(source),
+        "--accounts", "lx", "--markets", "us", "--timeout", str(timeout_seconds),
+        "--output-dir", str(output),
+    ], cwd=tmp_path, env={"PATH": os.environ["PATH"], "OM_PYTHON": sys.executable,
+                         "OM_RUNTIME_ROOT": str(runtime)},
+        capture_output=True, text=True, timeout=30)
+    payload = json.loads(result.stdout)
+    if timeout_seconds == 0:
+        assert result.returncode != 0
+        assert payload["ok"] is False
+        assert payload["error"]["code"] == "CONFIG_ERROR"
+        assert "timeout_seconds" in payload["error"]["message"]
+        assert not output.exists()
+        return
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert payload["ok"] is True
+    profile = json.loads((output / "service.profile.json").read_text())
+    assert profile["timeout_seconds"] == timeout_seconds
+    if target == "systemd":
+        tick = (output / "systemd/options-monitor-tick-us.service").read_text()
+        assert "--timeout 1800" in tick
+        assert "TimeoutStartSec=2100" in tick
+    else:
+        import plistlib
+
+        args = plistlib.loads((output / "launchd/com.options-monitor.tick-us.plist").read_bytes())["ProgramArguments"]
+        assert args[args.index("--timeout") + 1] == "1800"
+    assert not (runtime / "service.profile.json").exists()
+
+
+def test_service_drift_timeout_override_persists_before_next_reconcile(tmp_path):
+    repo, runtime, units = _drift_roots(tmp_path)
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"],
+                           timeout_seconds=600, use_default_deploy_user=False)
+    profile = json.loads(next(item["content"] for item in bundle["files"]
+                              if item["kind"] == "service_profile"))
+    profile_path = runtime / "service.profile.json"
+    profile_path.write_text(json.dumps(profile))
+    _write_systemd_units_from_bundle(bundle, units)
+    desired = {**profile, "timeout_seconds": 1800}
+    runner = _fake_systemd_query_runner()
+    before = _drift_at(repo, runtime, units, profile=desired, run_cmd=runner)
+    assert before["profile_content_changed"] is True
+    after = _drift_at(repo, runtime, units, profile=desired, confirm=True, run_cmd=runner)
+    assert after["summary"]["ok"] is True
+    assert after["apply_errors"] == []
+    assert json.loads(profile_path.read_text())["timeout_seconds"] == 1800
+    tick = (units / "options-monitor-tick-us.service").read_text()
+    assert "--timeout 1800" in tick
+    assert "TimeoutStartSec=2100" in tick
+    retry = _drift_at(repo, runtime, units, confirm=True, run_cmd=runner)
+    assert retry["summary"]["ok"] is True
+    assert retry["changed"] is False
+    assert (units / "options-monitor-tick-us.service").read_text() == tick

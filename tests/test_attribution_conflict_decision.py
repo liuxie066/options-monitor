@@ -1,3 +1,4 @@
+from src.application.ledger import trade_attribution as ledger_attribution
 from copy import deepcopy
 import time
 
@@ -11,7 +12,7 @@ from test_trade_attribution_meituan import _meituan_repo
 
 def _scope(tmp_path, monkeypatch):
     repo, config, _ = _meituan_repo(tmp_path)
-    monkeypatch.setattr(attribution, "trade_attribution_capacity_check", lambda **_: {"status": "available", "reason_codes": []})
+    monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check", lambda **_: {"status": "available", "reason_codes": []})
     return repo, config
 
 
@@ -134,12 +135,12 @@ def test_cancel_before_commit_rolls_back_the_entire_decision(tmp_path, monkeypat
     call = _call(_view(repo, config))
     stop = Event()
     if cancel_after_write:
-        writer = attribution.write_trade_attribution_decision
+        writer = ledger_attribution.write_trade_attribution_decision
         def cancel(*args, **kwargs):
             result = writer(*args, **kwargs)
             stop.set()
             return result
-        monkeypatch.setattr(attribution, "write_trade_attribution_decision", cancel)
+        monkeypatch.setattr(ledger_attribution, "write_trade_attribution_decision", cancel)
     else:
         stop.set()
     before = (repo.list_trade_events(), repo.list_wheel_events(account="lx"), repo.list_position_lots())
@@ -167,12 +168,12 @@ def test_final_capacity_failure_rolls_back_proof_resolution_and_projection(tmp_p
     call = _call(_view(repo, config))
     args = _args(config, call, call["candidate_ids"][0], "rollback", (conflict,))
     before = (repo.list_trade_events(), repo.list_wheel_events(account="lx"), repo.list_position_lots())
-    original = attribution.write_trade_attribution_decision
+    original = ledger_attribution.write_trade_attribution_decision
     def fail_after_write(*args, **kwargs):
         result = original(*args, **kwargs)
-        monkeypatch.setattr(attribution, "trade_attribution_capacity_check", lambda **_: {"status": "unavailable", "reason_codes": ["stale"]})
+        monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check", lambda **_: {"status": "unavailable", "reason_codes": ["stale"]})
         return result
-    monkeypatch.setattr(attribution, "write_trade_attribution_decision", fail_after_write)
+    monkeypatch.setattr(ledger_attribution, "write_trade_attribution_decision", fail_after_write)
     with pytest.raises(ValueError, match="capacity changed"):
         attribution.apply_trade_attribution(repo, **args)
     assert (repo.list_trade_events(), repo.list_wheel_events(account="lx"), repo.list_position_lots()) == before
@@ -260,7 +261,7 @@ def test_batch_allocation_checks_final_capacity_after_other_member_is_decided(tm
     from domain.domain.trade_execution import execution_identity_from_input
     from src.application.ledger.writer import persist_trade_event_object
     repo, config, _ = _meituan_repo(tmp_path, call_contracts=3)
-    monkeypatch.setattr(attribution, "trade_attribution_capacity_check", lambda **_: {"status": "available", "reason_codes": []})
+    monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check", lambda **_: {"status": "available", "reason_codes": []})
     source = next(row for row in repo.list_trade_events() if row["event_type"] == "open" and row["option_type"] == "call")
     raw = {"side": "sell", "execution_input": deepcopy(source["raw_payload"]["execution_input"])}
     raw["execution_input"].update(external_execution_id="other-fill", quantity="1")
@@ -325,7 +326,7 @@ def test_combo_can_only_be_released_as_a_complete_decision(tmp_path, monkeypatch
         assigned_stock_after=assigned, all_quality_case_facts=[])))
     config = {"market": "us", "accounts": ["lx"], "account_settings": {"lx": {"futu": {"account_id": "1001", "trd_env": "REAL"}}},
         "trade_intake": {"combo_reconciliation": {"accounts": {"lx": "confirm"}}}}
-    monkeypatch.setattr(attribution, "trade_attribution_capacity_check", lambda **_: {"status": "available", "reason_codes": []})
+    monkeypatch.setattr(ledger_attribution, "trade_attribution_capacity_check", lambda **_: {"status": "available", "reason_codes": []})
     monkeypatch.setattr(time, "time", lambda: (BASE_TIME_MS + 5000) / 1000)
     def view():
         return attribution.build_trade_attribution_view(read_trade_attribution_snapshot(repo, account="lx", market="us"),

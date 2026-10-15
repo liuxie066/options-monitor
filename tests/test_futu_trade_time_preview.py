@@ -92,6 +92,9 @@ def test_cli_raw_preview_and_apply_rejection_preserve_all_stored_state(tmp_path,
     assert "不支持 apply" in capsys.readouterr().out
     # A repeat preview remains deterministic; even a supplied hash never enables apply.
     assert cli.main([*args, "--confirm", "--expected-input-hash", result["expected_before_sha256"]]) == 2
+    assert "expected_input_hash is not supported" in capsys.readouterr().out
+    assert _dump(repo) == before
+    assert cli.main([*args, "--confirm"]) == 2
     assert "preview-only; apply is not supported" in capsys.readouterr().out
     assert _dump(repo) == before
 

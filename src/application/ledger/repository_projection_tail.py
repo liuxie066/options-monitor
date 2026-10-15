@@ -282,6 +282,24 @@ class PositionProjectionTailRepositoryMixin:
             records=tuple(retained),
         )
 
+    def position_projection_heads_cover_lots(self, *, conn: sqlite3.Connection) -> bool:
+        return conn.execute(
+            "SELECT 1 FROM position_lots AS lot "
+            "LEFT JOIN position_projection_heads AS head ON head.account=lot.account "
+            "WHERE head.account IS NULL LIMIT 1"
+        ).fetchone() is None
+
+    @staticmethod
+    def position_projection_head_content_problem(
+        head: Any,
+        snapshot: PositionProjectionAccountSnapshot,
+    ) -> str | None:
+        if head["lot_count"] != snapshot.lot_count:
+            return "lot_count_mismatch"
+        if head["projection_fingerprint"] != snapshot.fingerprint:
+            return "projection_fingerprint_mismatch"
+        return None
+
     def publish_full_position_projection_heads(
         self,
         *,
@@ -329,38 +347,19 @@ class PositionProjectionTailRepositoryMixin:
             accounts = {account for account in accounts if account and account == account.lower()}
             ts = int(now_ms())
             total = 0
-            changed = {str(item or "").strip() for item in changed_accounts}
             for account in sorted(accounts):
                 head = active_conn.execute(
                     """
-                    SELECT lots_generation, built_lots_generation,
-                           projection_fingerprint, lot_count, status,
-                           projector_schema, projector_implementation_fingerprint
+                    SELECT lots_generation
                     FROM position_projection_heads
                     WHERE account = ?
                     """,
                     (account,),
                 ).fetchone()
-                can_reuse = (
-                    account not in changed
-                    and head is not None
-                    and str(head["status"] or "") == "trusted"
-                    and str(head["projector_schema"] or "") == POSITION_PROJECTION_SCHEMA
-                    and str(head["projector_implementation_fingerprint"] or "") == fingerprint
-                    and head["built_lots_generation"] is not None
-                    and int(head["lots_generation"]) == int(head["built_lots_generation"])
-                    and bool(str(head["projection_fingerprint"] or ""))
-                )
-                if can_reuse:
-                    account_fingerprint = str(head["projection_fingerprint"])
-                    lot_count = int(head["lot_count"])
-                else:
-                    snapshot = self.position_projection_account_snapshot(
-                        account,
-                        conn=active_conn,
-                    )
-                    account_fingerprint = snapshot.fingerprint
-                    lot_count = snapshot.lot_count
+                # Publication derives content facts; metadata alone cannot prove them.
+                snapshot = self.position_projection_account_snapshot(account, conn=active_conn)
+                account_fingerprint = snapshot.fingerprint
+                lot_count = snapshot.lot_count
                 total += lot_count
                 lots_generation = int(head["lots_generation"] or 0) if head else 0
                 active_conn.execute(

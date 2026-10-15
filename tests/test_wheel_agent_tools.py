@@ -5,6 +5,7 @@ import pytest
 import src.application.agent_tools.operations_impl as operations_impl
 import src.application.agent_tools.positions as position_tools
 import src.application.config_authoring_transaction as config_transaction
+import src.application.ledger.assigned_stock_projection as assigned_stock_projection
 import src.application.wheel.read_model as wheel_read_model
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.tool_execution import execute_tool
@@ -763,7 +764,7 @@ def test_wheel_read_model_v2_preserves_legacy_batches_and_adds_branches(
         "projection_hash": "branch-hash",
     }
     monkeypatch.setattr(
-        wheel_read_model,
+        assigned_stock_projection,
         "project_wheel_branches",
         lambda *_args, **_kwargs: [
             {
@@ -777,7 +778,7 @@ def test_wheel_read_model_v2_preserves_legacy_batches_and_adds_branches(
         ],
     )
     monkeypatch.setattr(
-        wheel_read_model,
+        assigned_stock_projection,
         "project_wheel_linkage_candidates",
         lambda *_args, **_kwargs: [],
     )

@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any, Callable, cast
 
 from domain.domain.multi_tick import resolve_notification_route_from_config
-from src.application.notification_delivery_route import notifications_enabled, resolve_notification_delivery_route
+from src.application.notification_delivery_route import (
+    notifications_enabled, resolve_notification_delivery_route, notification_reminder_route_key,
+)
 from src.application.trade_time_format import format_trade_time_beijing
 from src.application.notification_delivery_adapter import (
     build_notification_transport_key,
@@ -18,42 +20,15 @@ from src.application.notification_shells import render_receipt
 from src.application.report_formatting import attribution_pending_text
 from src.application.trades.deal_identity import broker_deal_key
 from src.application.trades.inbox import TradePayloadClaimLost
-from src.application.ledger.api import canonical_payload_hash
+from src.application.ledger.api import (
+    BATCH_RENDERER_VERSION,
+    build_notification_batch_route,
+    canonical_payload_hash,
+)
 from src.application.system_alerts import report_system_meta_signal
 
 
-BATCH_RENDERER_VERSION = "trade_lifecycle_batch.v1"
 MAX_LIFECYCLE_BATCH_DISPLAY_ITEMS = 12
-
-
-def build_notification_batch_route(
-    *,
-    provider: str,
-    channel: str,
-    target: str,
-) -> dict[str, str]:
-    provider_value = str(provider or "").strip().lower()
-    channel_value = str(channel or "").strip().lower()
-    target_value = str(target or "").strip()
-    if not provider_value or not channel_value or not target_value:
-        raise ValueError("notification batch route is incomplete")
-    target_fingerprint = canonical_payload_hash(
-        {"target": target_value}
-    )
-    route_fingerprint = canonical_payload_hash(
-        {
-            "provider": provider_value,
-            "channel": channel_value,
-            "target_fingerprint": target_fingerprint,
-        }
-    )
-    return {
-        "provider": provider_value,
-        "channel": channel_value,
-        "target": target_value,
-        "target_fingerprint": target_fingerprint,
-        "route_fingerprint": route_fingerprint,
-    }
 
 
 def send_trade_intake_receipt(
@@ -248,6 +223,23 @@ def build_trade_lifecycle_notification_message(
     transition = str(
         frozen.get("transition_type") or ""
     ).strip().lower()
+    if transition == "combo_pair_confirmed":
+        identity = frozen["identity"]
+        fields: list[tuple[str, object]] = [("标的", identity["symbol"])]
+        for role, label, direction, option in (
+            ("funding_put", "Put 腿", "卖出", "Put"),
+            ("participation_call", "Call 腿", "买入", "Call"),
+        ):
+            contract = identity[role + "_contract_key"]
+            fields.append((label, f"{direction} {contract['expiration_ymd']} {contract['strike']} {option}"
+                           f" · {identity['original_contracts']} 张"))
+        fields.extend([
+            ("确认时间", format_trade_time_beijing(frozen["confirmed_at_ms"])),
+            ("组合", f"`{identity['group_id']}`"),
+            ("处理", "两腿已关联同一 Combo；无需重复确认或录入"),
+        ])
+        return render_receipt(account=identity["account"], receipt_type="Combo 配对",
+                              status="✅ 配对成功", fields=fields)
     reason = str(frozen.get("close_reason") or "").strip().lower()
     reason_text = {
         "trade_close": "主动交易平仓",
@@ -484,6 +476,7 @@ def build_trade_lifecycle_notification_batch_message(
 def resolve_trade_lifecycle_notification_batch_route(
     *,
     config: dict[str, Any] | None,
+    base: Path | None = None,
     route_resolver: Callable[..., dict[str, Any]] = (
         resolve_notification_route_from_config
     ),
@@ -505,6 +498,8 @@ def resolve_trade_lifecycle_notification_batch_route(
             target=target,
         ),
         "route_available": True,
+        **({"attribution_route_key": notification_reminder_route_key(config=config or {}, base=base)}
+           if base is not None else {}),
     }
 
 
@@ -617,6 +612,7 @@ def send_trade_lifecycle_outbox_payload(
     route = resolve_trade_lifecycle_notification_batch_route(
         config=config or {},
         route_resolver=route_resolver,
+        base=base,
     )
     target = route.get("target")
     if not bool(route.get("route_available")):
@@ -634,6 +630,18 @@ def send_trade_lifecycle_outbox_payload(
         and isinstance(payload.get("members"), list)
     )
     batch_id = str(payload.get("batch_id") or "").strip()
+    combo_payloads = [member["payload"] for member in payload.get("members", [])
+                      if member.get("transition_type") == "combo_pair_confirmed"] if is_batch else (
+        [payload] if payload.get("transition_type") == "combo_pair_confirmed" else [])
+    if combo_payloads and (not is_batch or any(
+        any(not item.get("receipt_route", {}).get(key)
+            or item["receipt_route"][key] != route.get(key) for key in (
+                "provider", "channel", "target_fingerprint", "route_fingerprint", "attribution_route_key"))
+        for item in combo_payloads
+    )):
+        return {"status": "explicit_failed", "explicit_pre_acceptance_failure": True,
+                "delivery_confirmed": False, "error": "Combo receipt route binding changed",
+                "classification_evidence": {"preflight": "combo_receipt_route_mismatch"}}
     if is_batch:
         frozen_route = (
             dict(payload.get("route") or {})
@@ -718,12 +726,15 @@ def send_trade_lifecycle_outbox_payload(
     delivery_confirmed = bool(classification["delivery_confirmed"])
     command_ok = bool(classification["command_ok"])
     outcome = str(classification["outcome"])
+    actual_route_key = normalized.get("attribution_route_key")
+    if combo_payloads and actual_route_key != route.get("attribution_route_key"):
+        delivery_confirmed, outcome = False, "unknown"
     return {
         "status": outcome,
         "delivery_confirmed": delivery_confirmed,
         "explicit_pre_acceptance_failure": bool(
             classification["explicit_pre_acceptance_failure"]
-        ),
+        ) and outcome == "explicit_failed",
         "message_id": message_id,
         "command_ok": command_ok,
         "error_code": normalized.get("error_code"),
@@ -736,6 +747,7 @@ def send_trade_lifecycle_outbox_payload(
         "classification_evidence": classification[
             "classification_evidence"
         ],
+        "attribution_route_key": actual_route_key,
     }
 
 

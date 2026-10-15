@@ -694,6 +694,8 @@ def _unchanged_runtime_result_if_trusted(
         != repo.position_projection_schema_cookie(conn=conn)
     ):
         return None
+    if not repo.position_projection_heads_cover_lots(conn=conn):
+        return None
     lot_count = 0
     accounts = repo.list_position_projection_accounts(conn=conn)
     if not accounts:
@@ -712,7 +714,10 @@ def _unchanged_runtime_result_if_trusted(
             != int(head.get("lots_generation") or 0)
         ):
             return None
-        lot_count += int((head or {}).get("lot_count") or 0)
+        snapshot = repo.position_projection_account_snapshot(account, conn=conn)
+        if repo.position_projection_head_content_problem(head, snapshot) is not None:
+            return None
+        lot_count += snapshot.lot_count
     return ProjectionRuntimeResult(
         mode_requested=mode_requested,
         mode_used="unchanged",
@@ -1064,6 +1069,8 @@ def _head_invariant_problem(
         return "column_contract_open"
     if not repo.position_projection_indexes_ready(conn=conn):
         return "normalized_indexes_missing"
+    if not repo.position_projection_heads_cover_lots(conn=conn):
+        return "projection_head_missing"
     checkpoint_accounts = set(checkpoint.domain_state.accounts)
     if any(account != account.lower() for account in tail_accounts):
         return "normalized_columns_incomplete"
@@ -1071,12 +1078,14 @@ def _head_invariant_problem(
         head = repo.read_position_projection_account_metadata(account, conn=conn)["head"]
         if head is None:
             return "projection_head_missing"
+        snapshot = repo.position_projection_account_snapshot(account, conn=conn)
         if str(head.get("status") or "") == "uninitialized":
             if (
                 account in tail_accounts
                 and account not in checkpoint_accounts
                 and int(head.get("lots_generation") or 0) == 0
                 and int(head.get("lot_count") or 0) == 0
+                and snapshot.lot_count == 0
             ):
                 continue
             return "projection_head_stale"
@@ -1093,6 +1102,9 @@ def _head_invariant_problem(
         )
         if not all(checks):
             return "projection_head_stale"
+        content_problem = repo.position_projection_head_content_problem(head, snapshot)
+        if content_problem is not None:
+            return content_problem
     return None
 
 

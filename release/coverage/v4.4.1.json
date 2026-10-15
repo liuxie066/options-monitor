@@ -1,0 +1,205 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.4.1",
+  "base": {
+    "tag": "v4.4.0",
+    "commit": "b9c6d73391a319642ce769b5ed1951bffec2c779"
+  },
+  "reviewed_head": "63e46fe0ed7f013b76b49156b78d889a18c7d4a7",
+  "commits": [
+    {
+      "sha": "eb410c3bcc8d66b128333d13b58664da5c6bccc8",
+      "subject": "fix(ledger): allow explicit ordinary attribution without recommendation history"
+    },
+    {
+      "sha": "c39290655ee585de40203191896b43f2922b43d7",
+      "subject": "fix(bot): bind cached results and reply retries to current authority"
+    },
+    {
+      "sha": "cf8e75e3b3ec00ce9528077514a9dfc8d29aa1d9",
+      "subject": "docs(bot): clarify existing Wechat no-reply retry limitation"
+    },
+    {
+      "sha": "c375d17a104fbfdc62a41bb8e2ba249992c5de10",
+      "subject": "fix(bot): select due replies before deferred authorization blocks"
+    },
+    {
+      "sha": "8292c6136fceb592f8133f5278a680b24b4f1f7d",
+      "subject": "chore(bot): merge current main for scope retry verification"
+    },
+    {
+      "sha": "a8fa7168ad93e6d81f1eba169692a2bf0a80f90b",
+      "subject": "test(bot): enforce precise canonical reply authorization boundary"
+    },
+    {
+      "sha": "af5082e39efd151355e8eb4f3ad74fc8eca21b3d",
+      "subject": "test(bot): reject relative policy import bypasses"
+    },
+    {
+      "sha": "3f9b8aa451482c1bd9181db80974933996df4c12",
+      "subject": "Merge pull request #598 from liuxie066/codex/fix-bot-scope-retry-544"
+    },
+    {
+      "sha": "071cb10f428ef593d56d68042a09dc4b3c6ef61a",
+      "subject": "chore: release 4.4.1"
+    },
+    {
+      "sha": "41f65ed38e9e9fad3b9de6f4246c2df86438b8d3",
+      "subject": "Merge pull request #599 from liuxie066/codex/release-4.4.1-20261014"
+    },
+    {
+      "sha": "27ca7efa916e282ca4987468bd080ce2e71a99ef",
+      "subject": "fix(ledger): restore original manual Wheel allocations"
+    },
+    {
+      "sha": "cc64a79c1a41618233f03cc53761c3c99b38a0a7",
+      "subject": "test(bot): keep blocked reply fixture within capability lifetime"
+    },
+    {
+      "sha": "63e46fe0ed7f013b76b49156b78d889a18c7d4a7",
+      "subject": "Merge pull request #586 from liuxie066/codex/manual-csp-attribution"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "普通手工 CSP/CC 成交确认不再误要求历史推荐；仍核验账户、成交身份、完整未平仓数量与幂等证明。",
+      "commits": [
+        "eb410c3bcc8d66b128333d13b58664da5c6bccc8"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "完整冲突批次可恢复最后有效人工 Wheel Call 的原股票、分支和数量分配，包括三张分别对应三批各一张；保留当前完整容量、成员复验与事务回滚，不改原经济成交。",
+      "commits": [
+        "27ca7efa916e282ca4987468bd080ce2e71a99ef"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Bot 原消息缓存绑定配置、账户和会话，待发回复在领取及发送前重验当前权限；查找故障保留原成功缓存，历史无绑定结果保留但不能自动重放或补送。",
+      "commits": [
+        "c39290655ee585de40203191896b43f2922b43d7",
+        "c375d17a104fbfdc62a41bb8e2ba249992c5de10"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "cf8e75e3b3ec00ce9528077514a9dfc8d29aa1d9",
+      "reason": "文档纠正既有Wechat禁回复缺口；没有修复该独立缺口或新增运行行为"
+    },
+    {
+      "commit": "8292c6136fceb592f8133f5278a680b24b4f1f7d",
+      "reason": "普通合入已发布v4.4.0元数据基线；不重复发布基线内容"
+    },
+    {
+      "commit": "a8fa7168ad93e6d81f1eba169692a2bf0a80f90b",
+      "reason": "仅架构测试允许canonical委托并拒绝已知策略拥有；无运行源码变化"
+    },
+    {
+      "commit": "af5082e39efd151355e8eb4f3ad74fc8eca21b3d",
+      "reason": "仅补相对导入守卫及反例测试；无运行源码变化"
+    },
+    {
+      "commit": "3f9b8aa451482c1bd9181db80974933996df4c12",
+      "reason": "GitHub正常合并已验收PR598，实际树等于冻结源树，没有额外运行变化"
+    },
+    {
+      "commit": "071cb10f428ef593d56d68042a09dc4b3c6ef61a",
+      "reason": "此前仅Bot主题的4.4.1发布元数据；版本尚未发布，本次补齐同版完整范围，无运行代码变化。"
+    },
+    {
+      "commit": "41f65ed38e9e9fad3b9de6f4246c2df86438b8d3",
+      "reason": "合并此前4.4.1发布元数据PR599，没有额外运行变化。"
+    },
+    {
+      "commit": "cc64a79c1a41618233f03cc53761c3c99b38a0a7",
+      "reason": "仅修复两渠道测试排队时间，不修改生产TTL、授权逻辑或断言。"
+    },
+    {
+      "commit": "63e46fe0ed7f013b76b49156b78d889a18c7d4a7",
+      "reason": "合并已验收PR586，实际运行变化由两条归属修复说明覆盖。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "c39290655ee585de40203191896b43f2922b43d7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/598"
+      ]
+    },
+    {
+      "commit": "cf8e75e3b3ec00ce9528077514a9dfc8d29aa1d9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/598"
+      ]
+    },
+    {
+      "commit": "c375d17a104fbfdc62a41bb8e2ba249992c5de10",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/598"
+      ]
+    },
+    {
+      "commit": "8292c6136fceb592f8133f5278a680b24b4f1f7d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/598"
+      ]
+    },
+    {
+      "commit": "a8fa7168ad93e6d81f1eba169692a2bf0a80f90b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/598"
+      ]
+    },
+    {
+      "commit": "af5082e39efd151355e8eb4f3ad74fc8eca21b3d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/598"
+      ]
+    },
+    {
+      "commit": "3f9b8aa451482c1bd9181db80974933996df4c12",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/598"
+      ]
+    },
+    {
+      "commit": "eb410c3bcc8d66b128333d13b58664da5c6bccc8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/586"
+      ]
+    },
+    {
+      "commit": "071cb10f428ef593d56d68042a09dc4b3c6ef61a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/599"
+      ]
+    },
+    {
+      "commit": "41f65ed38e9e9fad3b9de6f4246c2df86438b8d3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/599"
+      ]
+    },
+    {
+      "commit": "27ca7efa916e282ca4987468bd080ce2e71a99ef",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/586"
+      ]
+    },
+    {
+      "commit": "cc64a79c1a41618233f03cc53761c3c99b38a0a7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/586"
+      ]
+    },
+    {
+      "commit": "63e46fe0ed7f013b76b49156b78d889a18c7d4a7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/586"
+      ]
+    }
+  ]
+}

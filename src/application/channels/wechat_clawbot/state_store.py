@@ -4,8 +4,11 @@ import base64
 import html
 import json
 import mimetypes
+import os
+import stat
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from src.infrastructure.private_storage import (
     atomic_write_private_bytes,
@@ -18,10 +21,36 @@ from src.infrastructure.private_storage import (
 class WechatClawbotStateStore:
     def __init__(self, state_dir: Path) -> None:
         self.state_dir = private_path(state_dir)
+        self._read_directory_fd: int | None = None
         self.state_path = self.state_dir / "state.json"
         self.pending_login_path = self.state_dir / "pending_login.json"
         self.bindings_path = self.state_dir / "bindings.json"
         self.outbound_receipts_path = self.state_dir / "outbound_receipts.json"
+
+    @contextmanager
+    def read_directory(self) -> Iterator[WechatClawbotStateStore]:
+        # Pin both reads to one directory even if its configured alias is replaced.
+        pinned = WechatClawbotStateStore(self.state_dir.resolve(strict=True))
+        descriptor = os.open(pinned.state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        pinned._read_directory_fd = descriptor
+        try:
+            yield pinned
+        finally:
+            pinned._read_directory_fd = None
+            os.close(descriptor)
+
+    def sender_directory_scope(self) -> list[str | int] | None:
+        if self._read_directory_fd is None:
+            return None
+        source = os.fstat(self._read_directory_fd)
+        try:
+            current = self.state_dir.stat()
+            if (self.state_dir.resolve(strict=True) != self.state_dir
+                    or (source.st_dev, source.st_ino) != (current.st_dev, current.st_ino)):
+                return None
+        except OSError:
+            return None
+        return [str(self.state_dir), source.st_dev, source.st_ino]
 
     def load_state(self, default: dict[str, Any] | None = None) -> dict[str, Any]:
         return self._read_json_object(self.state_path, default=default)
@@ -97,7 +126,18 @@ class WechatClawbotStateStore:
 
     def _read_json_object(self, path: Path, *, default: dict[str, Any] | None = None) -> dict[str, Any]:
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            if self._read_directory_fd is None:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            else:
+                descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                     dir_fd=self._read_directory_fd)
+                try:
+                    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                        raise ValueError(f"{path.name} must be a regular file")
+                    with os.fdopen(descriptor, "r", encoding="utf-8", closefd=False) as stream:
+                        payload = json.load(stream)
+                finally:
+                    os.close(descriptor)
         except FileNotFoundError:
             return dict(default or {})
         except Exception as exc:

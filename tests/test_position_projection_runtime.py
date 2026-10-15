@@ -1381,3 +1381,73 @@ def test_new_multiplier_rules_reject_old_checkpoint_and_never_publish_bad_histor
     assert snapshot["snapshot_status"] != "trusted"
     context = build_context(old_lots, broker="futu", account="lx", decision_snapshot=snapshot)
     assert cash_secured_unavailable_for_cash_snapshot(context, {}) == "option_decision_snapshot_unavailable"
+
+
+@pytest.mark.parametrize("drift", ["projection_fingerprint", "lot_count"])
+@pytest.mark.parametrize("path", ["duplicate", "full", "tail"])
+def test_bad_unrelated_head_content_is_repaired_before_trusted_publication(
+    tmp_path: Path, drift: str, path: str,
+) -> None:
+    repo = _repo(tmp_path)
+    initial = [
+        _event("open-lx", "open", 1000, account="lx", lot_id="lot-lx"),
+        _event("open-sy", "open", 2000, account="sy", lot_id="lot-sy"),
+    ]
+    _seed(repo, initial)
+    if path != "full":
+        _enable(repo)
+    with repo._connect() as conn:
+        conn.execute(
+            f"UPDATE position_projection_heads SET {drift}=? WHERE account='sy'",
+            (999 if drift == "lot_count" else "0" * 64,),
+        )
+        conn.commit()
+    assert read_current_position_projection(repo, account="sy")["status"] == "data_unavailable"
+    result = _fast(repo, [initial[0]] if path == "duplicate" else [
+        _event("open-next", "open", 3000, account="lx", lot_id="lot-next"),
+    ])
+    assert result.mode_used == "full"
+    assert result.publication.heads_trusted is True
+    assert result.position_lot_count == (2 if path == "duplicate" else 3)
+    for account in ("lx", "sy"):
+        assert read_current_position_projection(repo, account=account)["status"] == "trusted"
+    assert read_current_position_projection(repo, account="sy")["lot_count"] == 1
+
+
+@pytest.mark.parametrize("path", ["duplicate", "tail"])
+def test_missing_unrelated_head_falls_back_to_full(tmp_path: Path, path: str) -> None:
+    repo = _repo(tmp_path)
+    initial = [_event("lx-open", "open", 1000, account="lx", lot_id="lx-lot"),
+               _event("sy-open", "open", 2000, account="sy", lot_id="sy-lot")]
+    _seed(repo, initial)
+    _enable(repo)
+    with repo._connect() as conn:
+        conn.execute("DELETE FROM position_projection_heads WHERE account='sy'")
+        conn.commit()
+    result = _fast(repo, [initial[0]] if path == "duplicate" else [
+        _event("next", "open", 3000, account="lx", lot_id="next-lot")])
+    assert result.mode_used == "full"
+    assert result.publication.heads_trusted is True
+    assert read_current_position_projection(repo, account="sy")["status"] == "trusted"
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt])
+def test_content_recovery_failure_and_cancellation_roll_back_all_rows(tmp_path: Path, error_type: type) -> None:
+    repo = _repo(tmp_path)
+    _seed(repo, [_event("lx-open", "open", 1000, lot_id="lx-lot"),
+                 _event("sy-open", "open", 2000, account="sy", lot_id="sy-lot")])
+    _enable(repo)
+    with repo._connect() as conn:
+        conn.execute("UPDATE position_projection_heads SET lot_count=999 WHERE account='sy'")
+        conn.commit()
+        before = list(conn.iterdump())
+
+    def fail(stage: str) -> None:
+        if stage == "after_head_publication":
+            raise error_type("cancel recovery")
+
+    with pytest.raises(error_type, match="cancel recovery"):
+        run_position_projection_fast_if_safe(repo, [
+            _event("next", "open", 3000, lot_id="next-lot")], failure_hook=fail)
+    with repo._connect() as conn:
+        assert list(conn.iterdump()) == before

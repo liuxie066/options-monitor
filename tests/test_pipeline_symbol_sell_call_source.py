@@ -88,6 +88,7 @@ def test_process_symbol_passes_futu_portfolio_stock_to_sell_call_chain(monkeypat
 )
 def test_process_symbol_reports_covered_call_prefilter_skip(
     monkeypatch,
+    tmp_path,
     portfolio_ctx: dict | None,
     reason: str,
 ) -> None:
@@ -101,7 +102,6 @@ def test_process_symbol_reports_covered_call_prefilter_skip(
         lambda **_kwargs: None,
     )
     monkeypatch.setattr(sm, 'build_required_data_fetch_plan', lambda **_kwargs: None)
-    captured_statuses: list[dict] = []
 
     ps.process_symbol(
         py='python',
@@ -118,19 +118,16 @@ def test_process_symbol_reports_covered_call_prefilter_skip(
         cny_per_hkd_exchange_rate=0.92,
         timeout_sec=10,
         required_data_dir=BASE / 'output',
-        report_dir=BASE / 'output' / 'reports',
+        report_dir=tmp_path / 'reports',
         state_dir=BASE / 'output' / 'state',
         is_scheduled=True,
-        candidate_capture_status_sink_fn=captured_statuses.append,
+        source_producer_run_id="run-1",
+        required_data_snapshot_manifest=tmp_path / "manifest.json",
+        runtime_config={"portfolio": {"account": "lx"}},
     )
 
-    assert captured_statuses == [
-        {
-            'symbol': 'NVDA',
-            'strategy_mode': 'call',
-            'status': 'not_applicable',
-            'reason': reason,
-            'quote_snapshot_id': None,
-            'quote_receipt_relpath': None,
-        }
-    ]
+    import json
+    status = json.loads((tmp_path / "reports/nvda_covered_call_scan_status.v3.json").read_text())
+    assert status["status"] == "not_applicable"
+    assert status["reason"] == reason
+    assert "snapshot_id" not in status

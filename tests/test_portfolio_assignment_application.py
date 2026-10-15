@@ -696,6 +696,7 @@ def test_futu_cash_uses_observed_currency_rate():
     rows, warnings = application._futu_holdings(
         "lx",
         cash_portfolio({
+            "source_observed_at": application.datetime.now(timezone.utc).isoformat(),
             "cash_by_currency": {"HKD": 100},
             "cash_balance_reliable": True,
             "stocks_by_symbol": {},
@@ -885,3 +886,382 @@ def test_closed_market_recent_quote_does_not_need_calendar(monkeypatch):
     quotes, warnings = application._read_futu_quotes(
         ["TSLA"], runtime_config={}, contexts={"lx": {}}, fx_observation={"rates": {"USDCNY": 7.2}})
     assert not quotes[0]["is_stale"] and not warnings
+
+
+def _consumer_stock_evidence(monkeypatch, entry, context, *, quote_reader=None):
+    from copy import deepcopy
+    _patch_positions(monkeypatch, [], futu_context=context)
+    if quote_reader is not None:
+        monkeypatch.setattr(application, "_read_futu_quotes", quote_reader)
+    monkeypatch.setattr(application, "load_account_portfolio_context", lambda **kw: deepcopy(context))
+    if entry == "prepared":
+        return application.prepare_position_sizing_evidence(
+            context=context, runtime_config=cash_config(), account="lx", fx_observation=None,
+        )["position_sizing_evidence"]
+    observed = []
+    project = application.project_assignment_scenario
+    def capture(**kwargs):
+        observed.append(kwargs["portfolio_evidence"])
+        return project(**kwargs)
+    monkeypatch.setattr(application, "project_assignment_scenario", capture)
+    application.query_portfolio_assignment_scenario(["lx"])
+    return observed[0]
+
+
+@pytest.mark.parametrize("entry", ["query", "prepared"])
+@pytest.mark.parametrize("change,reason", [
+    ("physical", "snapshot_physical_account_mismatch"),
+    ("logical", "snapshot_account_mismatch"),
+    ("environment", "snapshot_environment_mismatch"),
+    ("market", "snapshot_scope_mismatch"),
+    ("asset", "snapshot_scope_mismatch"),
+    ("source", "snapshot_source_as_of_utc_stale_or_future"),
+    ("refresh", "position_snapshot_refresh_unavailable"),
+    ("partial", "snapshot_scope_incomplete"),
+    ("future", "snapshot_observed_at_utc_stale_or_future"),
+])
+def test_assignment_consumers_reject_canonical_stock_scope(monkeypatch, entry, change, reason):
+    from datetime import timedelta
+    from src.application.portfolio_context_service import portfolio_position_snapshot_errors
+    now = application.datetime.now(timezone.utc)
+    context = cash_portfolio({"source_observed_at": now.isoformat(), "cash_by_currency": {"CNY": 0}}, evaluated_at=now)
+    snapshot = context["position_snapshot_input"]
+    if change == "physical":
+        snapshot["broker_account_ref"]["external_account_id"] = "456"
+    elif change == "logical":
+        snapshot["broker_account_ref"]["account_label"] = "sy"
+    elif change == "environment":
+        snapshot["broker_account_ref"]["environment"] = "SIMULATE"
+    elif change == "market":
+        snapshot["scope"]["markets"] = ["HK"]
+    elif change == "asset":
+        snapshot["scope"]["asset_types"] = ["option"]
+    elif change == "source":
+        snapshot["source_as_of_utc"] = (now - timedelta(seconds=301)).isoformat()
+    elif change == "refresh":
+        context["position_refresh_error"] = "provider timeout"
+    elif change == "partial":
+        snapshot["completeness"] = "partial"
+    else:
+        snapshot["observed_at_utc"] = (now + timedelta(seconds=1)).isoformat()
+    assert reason in portfolio_position_snapshot_errors(context, account="lx", now_utc=now)
+    evidence = _consumer_stock_evidence(monkeypatch, entry, context,
+        quote_reader=lambda *a, **kw: pytest.fail("invalid stock evidence reached valuation"))
+    assert evidence["status"] == "unavailable", evidence
+    assert evidence["holdings"] == []
+    assert any(reason in warning for warning in evidence["warnings"])
+    diagnostic = application._futu_evidence(["lx"], {"lx": context}, now_utc=now)
+    assert reason in diagnostic["freshness"]["reason_codes"]
+    assert diagnostic["freshness"]["status"] == "unknown"
+
+
+@pytest.mark.parametrize("entry", ["query", "prepared"])
+@pytest.mark.parametrize("elapsed", [0, 300])
+def test_assignment_consumers_accept_verified_empty_stock_scope(monkeypatch, entry, elapsed):
+    from datetime import timedelta
+    now = application.datetime.now(timezone.utc)
+    context = cash_portfolio({"source_observed_at": now.isoformat(), "cash_by_currency": {"CNY": 0}}, evaluated_at=now)
+    snapshot = context["position_snapshot_input"]
+    snapshot["observed_at_utc"] = snapshot["source_as_of_utc"] = (now - timedelta(seconds=elapsed)).isoformat()
+    evidence = _consumer_stock_evidence(monkeypatch, entry, context)
+    assert evidence["status"] == "complete", evidence
+    assert evidence["freshness"]["status"] == "fresh"
+    assert evidence["holdings"] == [{"account": "lx", "broker": "富途", "code": "CNY-CASH", "asset_type": "cash",
+        "currency": "CNY", "quantity": "0", "market_value_cny": "0", "source": "futu_cash_including_mmf"}]
+
+
+@pytest.mark.parametrize("entry", ["query", "prepared"])
+def test_assignment_consumers_revalidate_stocks_after_quote_io(monkeypatch, entry):
+    from datetime import timedelta
+    now = application.datetime.now(timezone.utc)
+    clock = [now]
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+    monkeypatch.setattr(application, "datetime", Clock)
+    context = cash_portfolio({"source_observed_at": now.isoformat(), "cash_by_currency": {"CNY": 0}}, evaluated_at=now)
+    context["position_snapshot_input"]["observed_at_utc"] = context["position_snapshot_input"]["source_as_of_utc"] = (now - timedelta(seconds=300)).isoformat()
+    calls = []
+    def delayed(*a, **kw):
+        calls.append("quote")
+        clock[0] += timedelta(seconds=1)
+        return [], []
+    evidence = _consumer_stock_evidence(monkeypatch, entry, context, quote_reader=delayed)
+    assert calls == ["quote"]
+    assert evidence["status"] == "unavailable", evidence
+    assert any("snapshot_source_as_of_utc_stale_or_future" in warning for warning in evidence["warnings"])
+
+
+@pytest.fixture
+def sizing_recovery_inputs(monkeypatch):
+    from datetime import timedelta
+    from src.application.required_data_snapshot import FrozenRequiredDataBatch
+
+    now = application.datetime.now(timezone.utc)
+    cfg = cash_config()
+    cfg["portfolio"].update(account="lx", holdings={"enabled": False})
+    cfg["symbols"] = [
+        {
+            "symbol": "TIGR",
+            "fetch": {"source": "opend", "host": "127.0.0.1", "port": 11111},
+            "sell_put": {"enabled": True},
+        }
+    ]
+    fx = {"rates": {"USDCNY": 7.2}, "timestamp": now.isoformat(), "source": "tencent_quote"}
+    context = cash_portfolio(
+        {
+            "source_observed_at": now.isoformat(),
+            "cash_by_currency": {"USD": 1000},
+            "exchange_rates": fx,
+            "position_snapshot_input": {
+                "rows": [
+                    {
+                        "instrument_ref": {"asset_type": "stock", "symbol": "TIGR", "currency": "USD", "market": "US"},
+                        "quantity": "100",
+                        "position_side": "long",
+                    }
+                ]
+            },
+        },
+        evaluated_at=now,
+    )
+    old = {
+        **_futu_quote("TIGR", 4.261),
+        "is_stale": True,
+        "valuation_quality": "stale",
+        "observed_at": (now - timedelta(seconds=332)).isoformat(),
+        "market": "US",
+        "trading_calendar": None,
+    }
+    warning = f"TIGR: Futu quote is dated ({old['observed_at']})"
+    monkeypatch.setattr(application, "_read_futu_quotes", lambda *a, **kw: ([old], [warning]))
+    context["position_sizing_evidence"] = application.collect_assignment_portfolio_evidence(
+        accounts=["lx"], runtime_config=cfg, futu_contexts={"lx": context}, option_positions=[], fx_observation=fx
+    )
+    assert context["position_sizing_evidence"]["status"] == "partial", context["position_sizing_evidence"]["warnings"]
+    context["option_ctx"] = {
+        "context_status": "available",
+        "decision_snapshot_status": "trusted",
+        "assignment_positions": [],
+        "cash_secured_total_by_ccy": {},
+    }
+    raw = {
+        "schema_version": "opening_underlier_observation.v1",
+        "code": "US.TIGR",
+        "market": "US",
+        "last_price": 4.2606,
+        "update_time": (now - timedelta(seconds=9)).isoformat(),
+        "observed_at_utc": (now - timedelta(seconds=9)).isoformat(),
+        "age_seconds": 9,
+        "market_state": "AFTERNOON",
+        "sec_status": "NORMAL",
+        "suspension": False,
+        "status": "ready",
+        "reason_code": None,
+    }
+    entry = {
+        "source_observed_at": now.isoformat(),
+        "expires_at": (now + timedelta(seconds=1800)).isoformat(),
+        "snapshot_id": "quote-1",
+        "receipt_hash": "a" * 64,
+        "payload_sha256": "b" * 64,
+        "receipt_relpath": "source_receipts/tigr.json",
+        "expected_fetch_contract": {
+            "fetch_binding": {"source": "opend", "host": "127.0.0.1", "port": 11111},
+            "fetch_plan": {"underlier_observation": raw},
+        },
+    }
+    batch = FrozenRequiredDataBatch(
+        manifest={"run_id": "run-1"}, manifest_bytes=b"", entries={"TIGR": (entry, b"")}, unavailable={}
+    )
+    return context, cfg, batch
+
+
+def test_same_run_quote_recovery_revalues_sizing_without_mutating_inputs(sizing_recovery_inputs):
+    from copy import deepcopy
+    from src.application.short_vol_risk_context import build_portfolio_risk_context
+    from domain.domain.short_vol_assessment import portfolio_concentration_fields
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    context, cfg, batch = sizing_recovery_inputs
+    before = deepcopy(context)
+    updated = application.recover_position_sizing_quotes(
+        context=context, runtime_config=cfg, account="lx", run_id="run-1", quotes=batch
+    )
+    assert context == before
+    assert updated is not context
+    evidence = updated["position_sizing_evidence"]
+    assert evidence["status"] == "complete"
+    assert evidence["warnings"] == []
+    assert evidence["quotes"][0]["price_native"] == "4.2606"
+    assert float(evidence["holdings"][1]["market_value_cny"]) == pytest.approx(100 * 4.2606 * 7.2)
+    converter = CurrencyConverter(ExchangeRates(usd_per_cny=1 / 7.2))
+    row = {"symbol": "TIGR", "currency": "USD", "multiplier": 100, "strike": 4, "net_income_cny": 15.18 * 7.2}
+    original = portfolio_concentration_fields(
+        row, mode="put", risk_ctx=build_portfolio_risk_context(portfolio_ctx=context, exchange_rate_converter=converter)
+    )
+    assert original["symbol_concentration_current"] is None
+    result = portfolio_concentration_fields(
+        row, mode="put", risk_ctx=build_portfolio_risk_context(portfolio_ctx=updated, exchange_rate_converter=converter)
+    )
+    assert result["symbol_concentration_current"] == round(426.06 / 1426.06, 6)
+    assert result["symbol_concentration_after_existing_assignments"] == result["symbol_concentration_current"]
+    assert result["symbol_concentration_after"] == round(852.12 / (1426.06 + 426.06 - 400 + 15.18), 6)
+    assert result["position_sizing_quote_recovery"]["source_receipts"]["TIGR"]["snapshot_id"] == "quote-1"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "stale",
+        "future",
+        "missing",
+        "wrong_code",
+        "wrong_market",
+        "halt",
+        "suspended",
+        "bad_price",
+        "wrong_route",
+        "wrong_run",
+        "wrong_account",
+        "pm",
+        "missing_fx",
+        "stock_stale",
+        "cash",
+        "receipt_stale",
+        "unknown_reason",
+        "second_stale",
+        "other_quote_aged",
+    ],
+)
+def test_quote_recovery_keeps_incomplete_or_untrusted_inputs_closed(sizing_recovery_inputs, failure):
+    from datetime import timedelta
+
+    context, cfg, batch = sizing_recovery_inputs
+    entry = batch.entries["TIGR"][0]
+    raw = entry["expected_fetch_contract"]["fetch_plan"]["underlier_observation"]
+    evidence = context["position_sizing_evidence"]
+    now = application.datetime.now(timezone.utc)
+    account, run_id = "lx", "run-1"
+    if failure in {"stale", "future"}:
+        raw["update_time"] = (now + timedelta(seconds=-301 if failure == "stale" else 1)).isoformat()
+    elif failure == "missing":
+        batch.entries.clear()
+    elif failure == "wrong_code":
+        raw["code"] = "US.NVDA"
+    elif failure == "wrong_market":
+        raw["market"] = "HK"
+    elif failure == "halt":
+        raw["sec_status"] = "HALT"
+    elif failure == "suspended":
+        raw["suspension"] = True
+    elif failure == "bad_price":
+        raw["last_price"] = float("nan")
+    elif failure == "wrong_route":
+        entry["expected_fetch_contract"]["fetch_binding"]["port"] = 22222
+    elif failure == "wrong_run":
+        run_id = "run-2"
+    elif failure == "wrong_account":
+        account = "sy"
+    elif failure == "pm":
+        evidence["warnings"].append("PM non-Futu valuation evidence is partial")
+    elif failure == "missing_fx":
+        evidence["fx_rates_to_cny"] = {}
+    elif failure == "stock_stale":
+        context["position_snapshot_input"]["source_as_of_utc"] = (now - timedelta(seconds=301)).isoformat()
+    elif failure == "cash":
+        context["cash_snapshot"]["status"] = "unavailable"
+    elif failure == "receipt_stale":
+        entry["expires_at"] = now.isoformat()
+    elif failure == "unknown_reason":
+        evidence["freshness"]["reason_codes"].append("UNKNOWN")
+    elif failure == "second_stale":
+        other = {**evidence["quotes"][0], "code": "NVDA"}
+        warning = f"NVDA: Futu quote is dated ({other['observed_at']})"
+        evidence["quotes"].append(other)
+        evidence["warnings"].append(warning)
+        evidence["freshness"]["reason_codes"].append(warning)
+    elif failure == "other_quote_aged":
+        evidence["quotes"].append(
+            {**evidence["quotes"][0], "code": "NVDA", "is_stale": False, "valuation_quality": "fresh"}
+        )
+    result = application.recover_position_sizing_quotes(
+        context=context, runtime_config=cfg, account=account, run_id=run_id, quotes=batch
+    )
+    assert result is context
+    assert result["position_sizing_evidence"]["status"] == "partial"
+
+
+def test_watchlist_recovers_before_capture_and_strategy(sizing_recovery_inputs, tmp_path):
+    from tests.test_pipeline_watchlist_whitelist import _pipeline
+
+    context, cfg, batch = sizing_recovery_inputs
+    seen = []
+
+    def scan(*args, **kwargs):
+        seen.append(kwargs["portfolio_ctx"]["position_sizing_evidence"])
+        return []
+
+    _pipeline(
+        cfg,
+        process_symbol_fn=scan,
+        base=tmp_path,
+        report_dir=tmp_path,
+        build_pipeline_context_fn=lambda **kw: (context, None, 1 / 7.2, None),
+        required_data_snapshot_batch=batch,
+        source_producer_run_id="run-1",
+        opening_runtime_context_sink_fn=lambda p, o: seen.append(p["position_sizing_evidence"]),
+    )
+    assert len(seen) == 2
+    assert all(e["status"] == "complete" for e in seen)
+    assert seen[0] == seen[1]
+
+
+@pytest.mark.parametrize("age, recovered", [(0, True), (300, True), (301, False)])
+def test_quote_recovery_preserves_300_second_boundary(sizing_recovery_inputs, age, recovered):
+    from datetime import timedelta
+
+    context, cfg, batch = sizing_recovery_inputs
+    raw = batch.entries["TIGR"][0]["expected_fetch_contract"]["fetch_plan"]["underlier_observation"]
+    raw["update_time"] = (application.datetime.now(timezone.utc) - timedelta(seconds=age)).isoformat()
+    result = application.recover_position_sizing_quotes(
+        context=context, runtime_config=cfg, account="lx", run_id="run-1", quotes=batch
+    )
+    assert (result is not context) is recovered
+
+
+def test_quote_recovery_preserves_non_futu_holdings_and_closed_market_quotes(sizing_recovery_inputs):
+    from copy import deepcopy
+
+    context, cfg, batch = sizing_recovery_inputs
+    evidence = context["position_sizing_evidence"]
+    holding = {
+        "account": "lx",
+        "broker": "other-broker",
+        "code": "CNY-CASH",
+        "asset_type": "cash",
+        "currency": "CNY",
+        "quantity": "50",
+        "market_value_cny": "50",
+    }
+    quote = {
+        "code": "0700.HK",
+        "source": "futu_opend_market_snapshot",
+        "currency": "HKD",
+        "is_stale": False,
+        "valuation_quality": "closed_market_carried",
+        "observed_at": "2026-07-23T08:08:00Z",
+        "trading_calendar": {"latest_trading_date": "2026-07-23"},
+    }
+    evidence["holdings"].append(holding)
+    evidence["quotes"].append(quote)
+    before = deepcopy(evidence)
+    updated = application.recover_position_sizing_quotes(
+        context=context, runtime_config=cfg, account="lx", run_id="run-1", quotes=batch
+    )
+    assert updated is not context
+    result = updated["position_sizing_evidence"]
+    assert result["holdings"][-1] == holding
+    assert result["quotes"][-1] == quote
+    assert evidence == before

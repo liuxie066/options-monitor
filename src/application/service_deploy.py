@@ -907,6 +907,7 @@ def build_service_profile(
     markets: list[str],
     service_names: list[str],
     config_paths: dict[str, Path],
+    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     bot_config_path: Path | None = None,
     config_authoring: dict[str, Any] | None = None,
     env_file: Path | None = None,
@@ -942,6 +943,7 @@ def build_service_profile(
         "runtime_root": str(runtime_root),
         "accounts": accounts,
         "markets": markets,
+        "timeout_seconds": timeout_seconds,
         "paths": {
             "report_dir": str(runtime_root / "output_shared" / "reports"),
             "state_dir": str(runtime_root / "output_shared" / "state"),
@@ -1038,6 +1040,8 @@ def render_service_bundle(
     feishu_agent_credential_env_file: str | Path | None = None,
     include_content: bool = True,
 ) -> dict[str, Any]:
+    if type(timeout_seconds) is not int or timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be a positive integer")
     target_key = normalize_target(target)
     secret_delivery = normalize_secret_credential_delivery(secret_credential_delivery)
     if include_quality_monitoring and target_key != "systemd":
@@ -2136,6 +2140,7 @@ def render_service_bundle(
         markets=market_values,
         service_names=service_names,
         config_paths=config_by_market,
+        timeout_seconds=timeout_seconds,
         bot_config_path=bot_config_path,
         config_authoring=config_authoring,
         env_file=env_file_path,

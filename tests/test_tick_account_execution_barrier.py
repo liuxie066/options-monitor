@@ -18,7 +18,7 @@ class _RunLog:
         self.events = []
 
     def safe_event(self, *_args, **kwargs):
-        self.events.append(kwargs)
+        self.events.append({"step": _args[0] if _args else None, "status": _args[1] if len(_args) > 1 else None, **kwargs})
         return None
 
 
@@ -354,10 +354,16 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
         return _fake_prepare(**kwargs)
 
     def fake_options_with_fx(**kwargs):
+        from src.application.multi_tick_audit import prepared_context_phase
         assert kwargs["fx_snapshot_sha256"] == fx_hash
-        return _fake_prepare_options(**kwargs)
+        with prepared_context_phase("ledger_read_a"):
+            return _fake_prepare_options(**kwargs)
 
     def fake_prefetch(**kwargs):
+        from src.application.multi_tick_audit import prepared_context_phase
+        assert any(e.get("step") == "prepared_context_phase" and e.get("status") == "ok" and e["data"]["phase"] == "post_portfolio_prepare" for e in request.runlog.events)
+        with prepared_context_phase("outside_scope"):
+            pass
         prefetch_calls.append(kwargs)
         return prefetch_payload
 
@@ -397,9 +403,16 @@ def test_barrier_prefetches_once_and_seals_before_account_submission(
     )
     monkeypatch.setattr(mod, "run_one_account", fake_run_one_account)
 
-    outcome = mod.run_tick_account_execution(
-        _request(tmp_path, accounts=accounts, workers=workers, force=force)
-    )
+    request = _request(tmp_path, accounts=accounts, workers=workers, force=force)
+    outcome = mod.run_tick_account_execution(request)
+    phases = [e for e in request.runlog.events if e.get("step") == "prepared_context_phase"]
+    completed = [e for e in phases if e["status"] == "ok"]
+    assert phases[0]["data"]["phase"] == phases[-1]["data"]["phase"] == "post_portfolio_prepare"
+    assert len([e for e in completed if e["data"]["phase"] == "ledger_read_a"]) == 1
+    assert "outside_scope" not in {e["data"]["phase"] for e in phases}
+    for phase in ("portfolio_authority", "portfolio_config", "portfolio_context", "prepared_option_authority"):
+        assert {e["data"]["account"] for e in completed if e["data"]["phase"] == phase} == set(accounts)
+    assert next(i for i, e in enumerate(request.runlog.events) if e.get("step") == "prepared_option_positions_context") < max(i for i, e in enumerate(request.runlog.events) if e.get("step") == "prepared_context_phase")
 
     assert len(prefetch_calls) == 1
     assert fx_calls == ["run-1"]
@@ -536,6 +549,7 @@ def test_experience_barrier_skips_account_authority_wheel_and_runtime_shadow(
 
     outcome = mod.run_tick_account_execution(request)
 
+    assert not any(e.get("step") == "prepared_context_phase" for e in request.runlog.events)
     assert outcome.ran_pipeline_accounts == ["paper"]
     assert len(captured) == 1
     child = captured[0]
@@ -1686,3 +1700,70 @@ def test_runtime_snapshot_shadow_is_account_scoped_and_current_only(
     )
     assert [event["data"]["account"] for event in runlog.events] == ["lx", "sy"]
     assert runlog.events[1]["data"]["error_code"] == "ACCOUNT_RUN_STATE_CONFLICT"
+
+
+def test_scheduler_skip_does_not_emit_preparation_timings(monkeypatch, tmp_path):
+    from src.application import tick_account_execution as mod
+    request = _lx_request(tmp_path)
+    monkeypatch.setattr(mod, "_account_pipeline_is_required", lambda **_kwargs: False)
+    monkeypatch.setattr(mod, "run_one_account", lambda **_kwargs: replace(_outcome("lx", "skipped"), ran_pipeline=False))
+    prepare = Mock(side_effect=AssertionError("must not prepare"))
+    monkeypatch.setattr(mod, "prepare_portfolio_contexts", prepare)
+    outcome = mod.run_tick_account_execution(request)
+    prepare.assert_not_called()
+    assert outcome.ran_pipeline_accounts == []
+    assert not any(e.get("step") == "prepared_context_phase" for e in request.runlog.events)
+
+
+@pytest.mark.parametrize("failed_phase", ["portfolio_config", "portfolio_context", "option_prepare", "logger"])
+def test_preparation_timing_failure_keeps_tick_account_outcomes(monkeypatch, tmp_path, failed_phase):
+    from src.application import tick_account_execution as mod
+    request = _request(tmp_path, accounts=["lx", "sy"], workers=1, force=False)
+    promoted = False
+    original_config = mod.load_account_run_config
+    original_portfolio = mod.load_prepared_portfolio_context
+    def _prepare(**kwargs):
+        nonlocal promoted
+        result = _fake_prepare(**kwargs)
+        promoted = True
+        return result
+    def _config(**kwargs):
+        if failed_phase == "portfolio_config" and promoted and kwargs["account"] == "lx":
+            raise mod.AccountRunConfigError("ACCOUNT_CONFIG_READ_FAILED", "private detail")
+        return original_config(**kwargs)
+    def _portfolio(**kwargs):
+        if failed_phase == "portfolio_context" and kwargs["expected_account"] == "lx":
+            raise mod.PreparedPortfolioContextError("private detail")
+        return original_portfolio(**kwargs)
+    if failed_phase == "logger":
+        original_event = request.runlog.safe_event
+        def _event(*args, **kwargs):
+            if args[0] == "prepared_context_phase":
+                raise OSError("log failure")
+            return original_event(*args, **kwargs)
+        request.runlog.safe_event = _event
+    monkeypatch.setattr(mod, "seal_run_fx_snapshot", lambda **_kwargs: ({}, "f" * 64))
+    monkeypatch.setattr(mod, "prepare_portfolio_contexts", _prepare)
+    monkeypatch.setattr(mod, "load_account_run_config", _config)
+    monkeypatch.setattr(mod, "load_prepared_portfolio_context", _portfolio)
+    if failed_phase == "option_prepare":
+        monkeypatch.setattr(mod, "prepare_option_positions_contexts", Mock(side_effect=OSError("private detail")))
+    monkeypatch.setattr(mod, "_build_close_advice_barrier_plan", lambda **kwargs: (kwargs["candidate_config"], None))
+    monkeypatch.setattr(mod, "prefetch_required_data", lambda **_kwargs: {
+        "global_required_data_plan": {"plan_id": "a" * 64, "symbols": []}, "symbols": [], "results": {},
+    })
+    monkeypatch.setattr(mod, "seal_required_data_snapshot", _seal_stub())
+    children = []
+    def _run(*, request, **_kwargs):
+        children.append(request.acct)
+        return _outcome(request.acct)
+    monkeypatch.setattr(mod, "run_one_account", _run)
+    outcome = mod.run_tick_account_execution(request)
+    expected = ["lx", "sy"] if failed_phase == "logger" else [] if failed_phase == "option_prepare" else ["sy"]
+    assert children == outcome.ran_pipeline_accounts == expected
+    phases = [e for e in request.runlog.events if e.get("step") == "prepared_context_phase"]
+    if failed_phase == "logger":
+        assert phases == []
+    else:
+        assert any(e["status"] == "error" and e["data"]["phase"] == failed_phase for e in phases)
+        assert "private detail" not in str(phases)

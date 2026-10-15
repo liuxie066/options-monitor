@@ -612,6 +612,7 @@ def prepare_daily_decision_brief_delivery(
         "first_prepared_at_utc": prepared_at,
         "last_attempt_at_utc": None,
         "confirmed_at_utc": None,
+        "confirmed_attribution_route_key": None,
     }
 
     state_dir = paths.account_state_dir(base_path, account_norm)
@@ -735,6 +736,32 @@ def read_daily_decision_brief_delivery_state(
     except DailyDecisionBriefStateError as exc:
         return {"available": False, "reason": "state_invalid", "error": str(exc), "state": None, "path": path}
     return {"available": True, "reason": "ok", "state": state, "path": path}
+
+
+def read_confirmed_attribution_render_context(
+    *, base: Path, account: str, market: str,
+    read_scope: DailyBriefReadScope | None = None,
+) -> dict[str, Any]:
+    """Return the latest successful confirmed envelope's frozen render context."""
+    result = read_daily_decision_brief_delivery_state(
+        base=base, account=account, market=market, read_scope=read_scope,
+    )
+    confirmed = []
+    for day in (result.get("state") or {}).get("days", {}).values():
+        envelopes = [*(day.get("fixed_reports") or {}).values(),
+                     *(day.get("candidate_delivery_history") or [])]
+        if day.get("candidate_delivery"):
+            envelopes.append(day["candidate_delivery"])
+        confirmed.extend(item for item in envelopes
+                         if item["status"] == "confirmed" and item["source_kind"] == "successful_brief")
+    if not confirmed:
+        return {}
+    latest = max(confirmed, key=lambda item: (item["confirmed_at_utc"], item["delivery_key"]))
+    context = dict(latest.get("render_context") or {})
+    if (not context.get("attribution_route_key")
+            or context["attribution_route_key"] != latest.get("confirmed_attribution_route_key")):
+        return {}
+    return context
 
 
 def read_retryable_daily_decision_brief_delivery(
@@ -915,10 +942,13 @@ def confirm_daily_decision_brief_delivery_v2(
     message_sha256: str,
     transport_idempotency_key: str,
     confirmed_at_utc: datetime | str | None = None,
+    attribution_route_key: str | None = None,
 ) -> dict[str, Any]:
     """Confirm one exact v2 envelope and advance candidate delivery state."""
 
     confirmed_at = _coerce_utc_iso(confirmed_at_utc)
+    route_key = (_normalize_sha256(attribution_route_key, field="attribution_route_key")
+                 if attribution_route_key is not None else None)
     with _locked_delivery_envelope(
         base=base,
         account=account,
@@ -943,6 +973,7 @@ def confirm_daily_decision_brief_delivery_v2(
             envelope=envelope,
             confirmed_at=confirmed_at,
         )
+        envelope["confirmed_attribution_route_key"] = route_key
         _persist_json(delivery_path, state)
         return {
             "advanced": True,
@@ -1802,6 +1833,9 @@ def _normalize_delivery_envelope(
             envelope.get("confirmed_at_utc"),
             field="confirmed_at_utc",
         )
+        confirmed_route_raw = envelope.get("confirmed_attribution_route_key")
+        confirmed_route_key = (_normalize_sha256(confirmed_route_raw, field="confirmed_attribution_route_key")
+                               if confirmed_route_raw is not None else None)
     except ValueError as exc:
         raise DailyDecisionBriefStateError(f"daily brief delivery envelope is invalid: {path}: {exc}") from exc
     rendered_message = str(envelope.get("rendered_message") or "")
@@ -1926,6 +1960,7 @@ def _normalize_delivery_envelope(
         "first_prepared_at_utc": first_prepared,
         "last_attempt_at_utc": last_attempt,
         "confirmed_at_utc": confirmed_at,
+        "confirmed_attribution_route_key": confirmed_route_key,
     }
 
 
@@ -2402,6 +2437,7 @@ __all__ = [
     "reconcile_daily_decision_brief_delivery_resolution",
     "read_daily_decision_brief",
     "read_daily_decision_brief_delivery_state",
+    "read_confirmed_attribution_render_context",
     "read_daily_decision_brief_fixed_recovery",
     "read_combo_candidate_exposures",
     "read_latest_daily_decision_brief",

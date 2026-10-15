@@ -8,6 +8,36 @@ from pathlib import Path
 import pytest
 
 
+def _published_scopes(report_dir):
+    from src.application.strategy_scan_status import candidate_scope_reason
+    result = []
+    modes = {"sell_put": "put", "covered_call": "call", "combo_yield": "combo_yield"}
+    for path in report_dir.glob("*_scan_status.v3.json"):
+        item = json.loads(path.read_text())
+        result.append({"symbol": item["symbol"], "strategy_mode": modes[item["strategy_family"]],
+                       "status": item["status"], "reason": candidate_scope_reason(item),
+                       "quote_snapshot_id": item.get("snapshot_id"),
+                       "quote_receipt_relpath": item.get("receipt_relpath")})
+    return sorted(result, key=lambda item: (item["symbol"], item["strategy_mode"]))
+
+
+def _scan_fixture(runner, family):
+    def run(**kwargs):
+        result = runner(**kwargs)
+        if result is None:
+            return None
+        result = dict(result)
+        count = result.setdefault("candidate_count", result.get("count", 0))
+        result.setdefault("_strategy_status", "completed")
+        result.setdefault("_strategy_reason", "no_candidate" if not count else None)
+        if family == "combo_yield":
+            kwargs["combo_evidence_sink_fn"]({"ranked_pairs": [{} for _ in range(count)]})
+        else:
+            kwargs["final_candidates_sink_fn"]("put" if family == "sell_put" else "call", [{} for _ in range(count)])
+        return result
+    return run
+
+
 def _prefilters_fn(**kwargs):
     """The plain prefilter result used by most cases here."""
     return type(
@@ -39,6 +69,8 @@ def _deps(**overrides):
         "empty_combo_yield_summary_fn": lambda symbol, symbol_cfg: {"strategy": "combo_yield", "count": 0},
     }
     kwargs.update(overrides)
+    for name, family in (("run_sell_put_scan_fn", "sell_put"), ("run_sell_call_scan_fn", "covered_call"), ("run_combo_yield_scan_fn", "combo_yield")):
+        kwargs[name] = _scan_fixture(kwargs[name], family)
     return mod.SymbolMonitoringDependencies(**kwargs)
 
 
@@ -310,7 +342,6 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
             runtime_config={"portfolio": {"account": "lx"}},
             final_candidates_sink_fn=lambda _mode, _rows: None,
             source_producer_run_id="run-1",
-            candidate_capture_status_sink_fn=capture_statuses.append,
             required_data_snapshot_manifest=tmp_path / "manifest.json",
             required_data_snapshot_run_id="run-1",
         ),
@@ -336,33 +367,8 @@ def test_frozen_symbol_failure_emits_typed_artifacts_and_capture_status(
             "candidate_count": 0,
         },
     ]
-    assert capture_statuses == [
-        {
-            "symbol": "NVDA",
-            "strategy_mode": "call",
-            "status": "not_applicable",
-            "reason": "covered_call_underlying_not_held",
-            "quote_snapshot_id": None,
-            "quote_receipt_relpath": None,
-        },
-        {
-            "symbol": "NVDA",
-            "strategy_mode": "put",
-            "status": "unavailable",
-            "reason": "required_data_snapshot_unavailable",
-            "quote_snapshot_id": "snapshot-failed",
-            "quote_receipt_relpath": "quotes/receipt.json",
-        },
-        {
-            "symbol": "NVDA",
-            "strategy_mode": "combo_yield",
-            "status": "unavailable",
-            "reason": "required_data_snapshot_unavailable",
-            "quote_snapshot_id": "snapshot-failed",
-            "quote_receipt_relpath": "quotes/receipt.json",
-            "variant": "sp_lc",
-        },
-    ]
+    capture_statuses = _published_scopes(tmp_path / "reports")
+    assert capture_statuses == [{'symbol': 'NVDA', 'strategy_mode': 'call', 'status': 'not_applicable', 'reason': 'covered_call_underlying_not_held', 'quote_snapshot_id': None, 'quote_receipt_relpath': None}, {'symbol': 'NVDA', 'strategy_mode': 'combo_yield', 'status': 'unavailable', 'reason': 'required_data_snapshot_unavailable', 'quote_snapshot_id': 'snapshot-failed', 'quote_receipt_relpath': 'quotes/receipt.json'}, {'symbol': 'NVDA', 'strategy_mode': 'put', 'status': 'unavailable', 'reason': 'required_data_snapshot_unavailable', 'quote_snapshot_id': 'snapshot-failed', 'quote_receipt_relpath': 'quotes/receipt.json'}]
     status = json.loads(
         (report_dir / "nvda_sell_put_scan_status.v3.json").read_text(
             encoding="utf-8"
@@ -405,6 +411,8 @@ def test_frozen_success_empty_publishes_explicit_zero_status_evidence(
             "symbol": "NVDA",
             "strategy": "sell_put",
             "candidate_count": 0,
+            "_strategy_status": "unavailable" if reason_code == "market_closed" else "completed",
+            "_strategy_reason": "market_closed" if reason_code == "market_closed" else "no_candidate",
         }
 
     deps = _deps(
@@ -438,7 +446,6 @@ def test_frozen_success_empty_publishes_explicit_zero_status_evidence(
             runtime_config={"portfolio": {"account": "lx"}},
             final_candidates_sink_fn=lambda _mode, _rows: None,
             source_producer_run_id="run-1",
-            candidate_capture_status_sink_fn=capture_statuses.append,
             required_data_snapshot_manifest=tmp_path / "manifest.json",
             required_data_snapshot_run_id="run-1",
         ),
@@ -464,6 +471,7 @@ def test_frozen_success_empty_publishes_explicit_zero_status_evidence(
         assert status["reason"] == "market_closed"
     assert status["snapshot_id"] == "snapshot-empty"
     assert status["receipt_relpath"] == "quotes/empty/receipt.json"
+    capture_statuses = _published_scopes(tmp_path / "reports")
     assert capture_statuses == [
         {
             "symbol": "NVDA",
@@ -774,7 +782,7 @@ def test_run_symbol_monitoring_keeps_combo_yield_market_put_scope_after_account_
 @pytest.mark.parametrize(
     ("combo_summary", "expected_status", "expected_reason"),
     [
-        ({"strategy": "combo_yield"}, "completed", None),
+        ({"strategy": "combo_yield"}, "completed", "no_candidate"),
         (
             {
                 "strategy": "combo_yield",
@@ -852,14 +860,15 @@ def test_symbol_monitoring_reports_combo_capture_status(
             },
             portfolio_ctx={"cash_by_currency": {"USD": 0}},
             source_producer_run_id="run-1",
-            candidate_capture_status_sink_fn=captured_statuses.append,
+            required_data_snapshot_manifest=tmp_path / "manifest.json",
+            runtime_config={"portfolio": {"account": "lx"}},
         ),
         deps=deps,
     )
 
     combo_statuses = [
         item
-        for item in captured_statuses
+        for item in _published_scopes(tmp_path / "reports")
         if str(item.get("strategy_mode") or "") == "combo_yield"
     ]
     assert combo_statuses
@@ -981,17 +990,18 @@ def test_combo_yield_capture_preserves_cc_lp_not_applicable(monkeypatch, tmp_pat
                 "combo_yield": {"enabled": True, "variant": "cc_lp"},
                 "sell_call": {"enabled": False},
             },
-            candidate_capture_status_sink_fn=capture_statuses.append,
+            source_producer_run_id="run-1",
+            required_data_snapshot_manifest=tmp_path / "manifest.json",
+            runtime_config={"portfolio": {"account": "lx"}},
         ),
         deps=deps,
     )
     combo_statuses = [
         item
-        for item in capture_statuses
+        for item in _published_scopes(tmp_path / "reports")
         if item.get("strategy_mode") == "combo_yield"
     ]
     assert len(combo_statuses) == 1
-    assert combo_statuses[0]["variant"] == "cc_lp"
     assert combo_statuses[0]["status"] == "not_applicable"
     assert combo_statuses[0]["reason"] == "no_covered_stock"
 
@@ -1161,18 +1171,116 @@ def test_sell_call_shared_symbol_without_holding_preserves_not_applicable_scope(
                     }
                 },
             }, account='lx', account_id='123'),
-            candidate_capture_status_sink_fn=capture_statuses.append,
+            source_producer_run_id="run-1",
+            required_data_snapshot_manifest=tmp_path / "manifest.json",
+            runtime_config={"portfolio": {"account": "lx"}},
         ),
         deps=deps,
     )
 
-    assert capture_statuses == [
-        {
-            "symbol": "3690.HK",
-            "strategy_mode": "call",
-            "status": "not_applicable",
-            "reason": "covered_call_underlying_not_held",
-            "quote_snapshot_id": None,
-            "quote_receipt_relpath": None,
-        }
-    ]
+    capture_statuses = _published_scopes(tmp_path / "reports")
+    assert capture_statuses == [{'symbol': '3690.HK', 'strategy_mode': 'call', 'status': 'not_applicable', 'reason': 'covered_call_underlying_not_held', 'quote_snapshot_id': None, 'quote_receipt_relpath': None}]
+
+
+@pytest.mark.parametrize("result", [None, [], {}, {"candidate_count": -1}, {"candidate_count": True}, {"candidate_count": "0"}, {"candidate_count": 0}, {"candidate_count": 1, "_strategy_status": "completed"}])
+def test_invalid_strategy_result_discards_buffer_and_preserves_sibling(monkeypatch, tmp_path, result):
+    from dataclasses import replace
+    from src.application import symbol_monitoring as mod
+    committed = []
+    def broken(**kwargs):
+        kwargs["candidate_decisions_sink_fn"]("put", [{"partial": True}])
+        return result
+    deps = replace(_deps(), run_sell_put_scan_fn=broken)
+    mod.run_symbol_monitoring(inputs=_inputs(tmp_path,
+        symbol_cfg={"symbol": "NVDA", "sell_put": {"enabled": True}, "sell_call": {"enabled": True}},
+        required_data_snapshot_manifest=tmp_path / "manifest.json", source_producer_run_id="run-1",
+        runtime_config={"portfolio": {"account": "lx"}},
+        candidate_decisions_sink_fn=lambda mode, rows: committed.extend(rows)), deps=deps)
+    statuses = {item["strategy_mode"]: item for item in _published_scopes(tmp_path / "reports")}
+    assert statuses["put"]["status"] == "failed"
+    assert statuses["call"]["status"] == "completed"
+    assert committed == []
+
+
+def test_strategy_publication_error_escapes_without_rewriting_terminal(monkeypatch, tmp_path):
+    from src.application import symbol_monitoring as mod
+    calls = []
+    def fail_publish(**kwargs):
+        calls.append(kwargs["status"])
+        raise OSError("disk full")
+    monkeypatch.setattr(mod, "publish_strategy_scan_status", fail_publish)
+    with pytest.raises(mod.StrategyScanStatusError, match="publication failed"):
+        mod.run_symbol_monitoring(inputs=_inputs(tmp_path,
+            symbol_cfg={"symbol": "NVDA", "sell_put": {"enabled": True}},
+            source_producer_run_id="run-1", required_data_snapshot_manifest=tmp_path / "manifest.json",
+            runtime_config={"portfolio": {"account": "lx"}}), deps=_deps())
+    assert calls == ["completed"]
+    assert not (tmp_path / "reports/strategy_scan_failures.jsonl").exists()
+
+
+@pytest.mark.parametrize("worker_thread", [False, True])
+def test_real_symbol_deadline_preserves_completed_step_and_blocks_later_work(monkeypatch, tmp_path, worker_thread):
+    from dataclasses import replace
+    from threading import Thread
+    from src.application import symbol_monitoring as mod
+    from tests.test_pipeline_watchlist_whitelist import _pipeline
+    clock = [10.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    after_deadline = []
+    def combo(**kwargs):
+        clock[0] += 5
+        kwargs["combo_evidence_sink_fn"]({"ranked_pairs": []})
+        return {"candidate_count": 0, "_strategy_status": "completed", "_strategy_reason": "no_candidate"}
+    deps = replace(_deps(), run_combo_yield_scan_fn=combo,
+                   run_sell_call_scan_fn=lambda **kwargs: after_deadline.append(True))
+    def process(*args, **kwargs):
+        return mod.run_symbol_monitoring(inputs=_inputs(tmp_path, symbol_cfg=args[2],
+            source_producer_run_id="run-1", required_data_snapshot_manifest=tmp_path / "manifest.json",
+            runtime_config={"portfolio": {"account": "lx"}}, report_dir=tmp_path / "reports",
+            deadline_monotonic=kwargs["deadline_monotonic"]), deps=deps)
+    errors = []
+    def run():
+        try:
+            _pipeline({"portfolio": {"account": "lx"}, "symbols": [{"symbol": "NVDA",
+                "sell_put": {"enabled": True}, "combo_yield": {"enabled": True}, "sell_call": {"enabled": True}}]},
+                process_symbol_fn=process, base=tmp_path, report_dir=tmp_path / "reports",
+                source_producer_run_id="run-1", required_data_snapshot_manifest=tmp_path / "manifest.json",
+                account_config_sha256="a" * 64)
+        except Exception as exc:
+            errors.append(exc)
+    if worker_thread:
+        worker = Thread(target=run)
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+    else:
+        run()
+    assert errors == []
+    statuses = {item["strategy_mode"]: item for item in _published_scopes(tmp_path / "reports")}
+    assert statuses["put"]["status"] == "completed"
+    assert statuses["combo_yield"]["reason"] == "symbol_processing_timeout"
+    assert statuses["call"]["reason"] == "symbol_processing_timeout"
+    assert after_deadline == []
+
+
+def test_candidate_commit_error_is_account_integrity_failure(monkeypatch, tmp_path):
+    from src.application import symbol_monitoring as mod
+    def fail_commit(*_args):
+        raise OSError("candidate sink unavailable")
+    with pytest.raises(mod.StrategyScanStatusError, match="candidate commit failed"):
+        mod.run_symbol_monitoring(inputs=_inputs(tmp_path,
+            symbol_cfg={"symbol": "NVDA", "sell_put": {"enabled": True}},
+            source_producer_run_id="run-1", required_data_snapshot_manifest=tmp_path / "manifest.json",
+            runtime_config={"portfolio": {"account": "lx"}}, final_candidates_sink_fn=fail_commit), deps=_deps())
+    assert _published_scopes(tmp_path / "reports")[0]["status"] == "completed"
+    assert not (tmp_path / "reports/strategy_scan_failures.jsonl").exists()
+
+
+def test_frozen_malformed_csv_is_symbol_unavailable(tmp_path):
+    from src.application import symbol_monitoring as mod
+    batch = mod.FrozenRequiredDataBatch(manifest={}, manifest_bytes=b"{}", entries={"NVDA": ({}, b'"bad')}, unavailable={}, require_fresh=False)
+    mod.run_symbol_monitoring(inputs=_inputs(tmp_path,
+        symbol_cfg={"symbol": "NVDA", "sell_put": {"enabled": True}},
+        source_producer_run_id="run-1", required_data_snapshot_manifest=tmp_path / "manifest.json",
+        required_data_snapshot_batch=batch, runtime_config={"portfolio": {"account": "lx"}}), deps=_deps())
+    assert _published_scopes(tmp_path / "reports")[0]["status"] == "unavailable"

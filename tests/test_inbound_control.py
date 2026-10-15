@@ -3077,7 +3077,11 @@ def test_inbound_write_operations_are_disabled_by_default(tmp_path: Path) -> Non
     assert monitor_run_out["error"]["code"] == "PERMISSION_DENIED"
 
 
-def test_inbound_handle_executes_read_only_tool_and_replays_duplicate_message(tmp_path: Path) -> None:
+def test_inbound_handle_executes_read_only_tool_and_replays_duplicate_message(tmp_path: Path, monkeypatch, example_config_path) -> None:
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
+    cfg = json.loads(example_config_path.read_text())
+    cfg["accounts"] = ["lx", "sy"]
+    example_config_path.write_text(json.dumps(cfg))
     audit_db = tmp_path / "inbound.sqlite3"
     calls: list[tuple[str, dict]] = []
 

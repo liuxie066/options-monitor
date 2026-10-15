@@ -1136,11 +1136,21 @@ def test_service_drift_privileged_executable_uses_root_owned_install(
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         command = list(command)
         calls.append(command)
+        installed_path = Path(command[-1])
         if command[:4] == ["sudo", "-n", "install", "-d"]:
-            Path(command[-1]).mkdir(parents=True, exist_ok=True)
+            assert installed_path == target.parent
+            installed_path.mkdir(parents=True, exist_ok=True)
         elif command[:3] == ["sudo", "-n", "install"] and "/dev/stdin" in command:
-            target.write_text(str(kwargs.get("input") or ""), encoding="utf-8")
-            target.chmod(int(command[command.index("-m") + 1], 8))
+            assert installed_path == target
+            installed_path.write_text(str(kwargs.get("input") or ""), encoding="utf-8")
+        else:
+            raise AssertionError(f"unexpected install command: {command}")
+        os.chown(
+            installed_path,
+            int(command[command.index("-o") + 1]),
+            int(command[command.index("-g") + 1]),
+        )
+        installed_path.chmod(int(command[command.index("-m") + 1], 8))
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     out = _write_text_with_sudo_fallback(
@@ -1157,6 +1167,9 @@ def test_service_drift_privileged_executable_uses_root_owned_install(
     assert out["sudo_fallback"] is True
     assert target.read_text(encoding="utf-8") == "#!/usr/bin/python3\n"
     assert target.stat().st_mode & 0o777 == 0o755
+    assert (target.stat().st_uid, target.stat().st_gid) == (expected_uid, expected_gid)
+    assert (target.parent.stat().st_uid, target.parent.stat().st_gid) == (expected_uid, expected_gid)
+    assert target.parent.stat().st_mode & 0o777 == 0o755
     assert [
         "sudo",
         "-n",
@@ -1170,6 +1183,53 @@ def test_service_drift_privileged_executable_uses_root_owned_install(
         "/dev/stdin",
         str(target),
     ] in calls
+
+
+@pytest.mark.parametrize("wrong_owner", ["uid", "gid"])
+def test_service_drift_privileged_executable_rejects_wrong_ownership(
+    monkeypatch,
+    tmp_path: Path,
+    wrong_owner: str,
+) -> None:
+    import src.application.service_drift as service_drift_module
+    from src.application.service_drift import _write_text_with_sudo_fallback
+
+    target = tmp_path / "protected" / "credential-helper"
+    target.parent.mkdir(parents=True)
+    target.touch()
+    initial_owner = target.stat()
+    expected_uid = initial_owner.st_uid + (1 if wrong_owner == "uid" else 0)
+    expected_gid = initial_owner.st_gid + (1 if wrong_owner == "gid" else 0)
+    monkeypatch.setattr(service_drift_module.os, "geteuid", lambda: expected_uid + 1)
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        if list(command)[:4] == ["sudo", "-n", "install", "-d"]:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            target.write_text(str(kwargs.get("input") or ""), encoding="utf-8")
+            target.chmod(0o755)
+        # Simulate a successful command that did not apply its requested owner.
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = _write_text_with_sudo_fallback(
+        target,
+        "#!/usr/bin/python3\n",
+        ctx={"provider": "systemd"},
+        run_cmd=_run_cmd,
+        mode=0o755,
+        owner_uid=expected_uid,
+        owner_gid=expected_gid,
+    )
+
+    assert target.is_file()
+    assert target.stat().st_mode & 0o777 == 0o755
+    observed = target.stat().st_uid if wrong_owner == "uid" else target.stat().st_gid
+    assert observed != (expected_uid if wrong_owner == "uid" else expected_gid)
+    assert out["ok"] is False
+    assert out["sudo_fallback"] is True
+    assert out["returncode"] == 1
+    assert "ownership verification failed" in out["error"]
+
 
 def test_service_drift_privileged_executable_rejects_symlink_target(
     tmp_path: Path,
@@ -2259,7 +2319,7 @@ def test_upgrade_reconcile_delegates_to_the_new_release_cli(tmp_path: Path) -> N
         return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
             "tool_name": "service.drift",
             "ok": True,
-            "data": {"summary": {"status": "ok"}, "written_units": ["options-monitor-tick-us.timer"]},
+            "data": {"summary": {"status": "ok", "ok": True}, "written_units": ["options-monitor-tick-us.timer"]},
         }), stderr="")
 
     reconcile = _reconcile_services_from_current_release(
@@ -2277,7 +2337,7 @@ def test_upgrade_reconcile_delegates_to_the_new_release_cli(tmp_path: Path) -> N
         "--profile-path", str(runtime / "service.profile.json"),
         "--confirm", "--preserve-activation-state",
     ]]
-    assert reconcile == {"summary": {"status": "ok"}, "written_units": ["options-monitor-tick-us.timer"]}
+    assert reconcile == {"summary": {"status": "ok", "ok": True}, "written_units": ["options-monitor-tick-us.timer"]}
 
 
 def test_upgrade_reconcile_keeps_ensure_active_without_preserving(tmp_path: Path) -> None:
@@ -2289,7 +2349,7 @@ def test_upgrade_reconcile_keeps_ensure_active_without_preserving(tmp_path: Path
         calls.append(list(command))
         return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
             "tool_name": "service.drift", "ok": True,
-            "data": {"summary": {"status": "ok"}},
+            "data": {"summary": {"status": "ok", "ok": True}},
         }), stderr="")
 
     _reconcile_services_from_current_release(
@@ -2316,11 +2376,11 @@ def test_upgrade_reconcile_keeps_ensure_active_without_preserving(tmp_path: Path
             },
         }), "target release rejected --preserve-activation-state", "systemctl is-enabled"),
         (0, json.dumps({
-            "tool_name": "om", "ok": True, "data": {"summary": {"status": "ok"}},
+            "tool_name": "om", "ok": True, "data": {"summary": {"status": "ok", "ok": True}},
         }), "", "unreadable child response"),
         (2, json.dumps({
             "tool_name": "service.drift", "ok": True,
-            "data": {"summary": {"status": "ok"}},
+            "data": {"summary": {"status": "ok", "ok": True}},
         }), "child exited with status 2", "child exited with status 2"),
     ],
 )
@@ -2356,3 +2416,53 @@ def test_upgrade_reconcile_fails_closed_on_bad_child_result(
     )
     if returncode:
         assert any(f"returncode: {returncode}" in item for item in excinfo.value.remediation)
+
+
+@pytest.mark.parametrize("target", ["systemd", "launchd"])
+@pytest.mark.parametrize("timeout_seconds", [1, 600, 1800])
+def test_service_timeout_profile_roundtrip(tmp_path, target, timeout_seconds):
+    from src.application.service_drift import _expected_bundle_from_profile
+
+    repo, runtime = tmp_path / "repo", tmp_path / "runtime"
+    bundle = _render_bundle(repo, runtime, target=target, accounts=["lx"],
+                           markets=["us", "hk"], timeout_seconds=timeout_seconds,
+                           use_default_deploy_user=False)
+    profile = json.loads(next(item["content"] for item in bundle["files"]
+                              if item["kind"] == "service_profile"))
+    assert profile["timeout_seconds"] == timeout_seconds
+    rebuilt = _expected_bundle_from_profile(profile, provider=target,
+                                            repo_root=repo, runtime_root=runtime)
+    assert {item["relative_path"]: item["content"] for item in rebuilt["files"]} == {
+        item["relative_path"]: item["content"] for item in bundle["files"]
+    }
+
+
+@pytest.mark.parametrize("target", ["systemd", "launchd"])
+def test_service_timeout_legacy_profile_uses_default(tmp_path, target):
+    from src.application.service_deploy import DEFAULT_TIMEOUT_SECONDS
+    from src.application.service_drift import _expected_bundle_from_profile
+
+    repo, runtime = tmp_path / "repo", tmp_path / "runtime"
+    bundle = _render_bundle(repo, runtime, target=target, accounts=["lx"],
+                           markets=["us", "hk"], use_default_deploy_user=False)
+    profile = json.loads(next(item["content"] for item in bundle["files"]
+                              if item["kind"] == "service_profile"))
+    profile.pop("timeout_seconds", None)
+    rebuilt = _expected_bundle_from_profile(profile, provider=target,
+                                            repo_root=repo, runtime_root=runtime)
+    assert {item["relative_path"]: item["content"] for item in rebuilt["files"]
+            if item["kind"] != "service_profile"} == {
+        item["relative_path"]: item["content"] for item in bundle["files"]
+        if item["kind"] != "service_profile"
+    }
+    restored = json.loads(next(item["content"] for item in rebuilt["files"]
+                               if item["kind"] == "service_profile"))
+    assert restored["timeout_seconds"] == DEFAULT_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize("target", ["systemd", "launchd"])
+@pytest.mark.parametrize("timeout_seconds", [None, True, False, "1800", 1800.5, 0, -1, [], {}])
+def test_service_render_rejects_invalid_timeout(tmp_path, target, timeout_seconds):
+    with pytest.raises(ValueError, match="timeout_seconds must be a positive integer"):
+        _render_bundle(tmp_path / "repo", tmp_path / "runtime", target=target,
+                       accounts=["lx"], markets=["us"], timeout_seconds=timeout_seconds)

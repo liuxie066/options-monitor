@@ -628,3 +628,55 @@ def build_account_runtime_config(
     except Exception:
         pass
     return cfg
+
+
+def resolve_combo_reconciliation_config(
+    cfg: dict[str, Any] | None,
+) -> dict[str, Any]:
+    src = cfg if isinstance(cfg, dict) else {}
+    trade_intake = src.get("trade_intake")
+    trade_intake = trade_intake if isinstance(trade_intake, dict) else {}
+    raw = trade_intake.get("combo_reconciliation")
+    if raw is None:
+        section: dict[str, Any] = {}
+    elif isinstance(raw, dict):
+        section = raw
+    else:
+        raise ValueError("trade_intake.combo_reconciliation must be an object")
+    if "default_mode" in section:
+        raise ValueError("trade_intake.combo_reconciliation.default_mode is retired; run om config migrate-switches")
+    account_modes_raw = section.get("accounts")
+    if account_modes_raw is None:
+        account_modes_raw = {}
+    if not isinstance(account_modes_raw, dict):
+        raise ValueError("trade_intake.combo_reconciliation.accounts must be an object")
+    known_accounts = set(accounts_from_config(src))
+    account_modes: dict[str, str] = {}
+    for raw_account, raw_mode in account_modes_raw.items():
+        account = str(raw_account or "").strip().lower()
+        mode = str(raw_mode or "").strip().lower()
+        if not account or account != str(raw_account or "").strip():
+            raise ValueError("trade_intake.combo_reconciliation account labels must be lowercase")
+        if account not in known_accounts:
+            raise ValueError(
+                f"trade_intake.combo_reconciliation.accounts.{account} is not a configured account"
+            )
+        if mode not in {"off", "observe", "confirm", "auto"}:
+            raise ValueError(
+                f"trade_intake.combo_reconciliation.accounts.{account} must be off, observe, confirm, or auto"
+            )
+        account_modes[account] = mode
+    return {
+        "accounts": account_modes,
+    }
+
+
+
+def combo_reconciliation_mode_for_account(
+    config: dict[str, Any] | None,
+    *,
+    account: str,
+) -> str:
+    resolved = resolve_combo_reconciliation_config(config)
+    account_value = str(account or "").strip().lower()
+    return str(resolved["accounts"].get(account_value) or "off")

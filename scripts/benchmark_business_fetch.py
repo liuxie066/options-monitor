@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from concurrent.futures import CancelledError
-from contextlib import ExitStack, nullcontext, redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import io
@@ -80,6 +80,7 @@ class Harness:
         from src.application import portfolio_context_service as reader
         from src.application import prepared_portfolio_context as prepared
         from src.application.agent_tools import materialization_impl, positions
+        from src.application.ledger.api import build_wheel_read_model_from_rows
         from src.application.wheel import capacity
         from src.infrastructure import exchange_rates as fx
         from src.infrastructure.futu_gateway import FutuGateway, _FutuAPIClient
@@ -95,7 +96,7 @@ class Harness:
         self.cfg["accounts"] = ["lx", "sy"]
         self.cfg["account_settings"]["sy"] = {"futu": {"account_id": "456", "trd_env": "REAL"}}
         self.state = root / "output_accounts/lx/state"
-        self.repo = SimpleNamespace(read_lifecycle_account_rows=self.ledger_rows)
+        self.repo = SimpleNamespace()
         self.fx_snapshot = {"calendar": fx.CALENDAR_EVIDENCE, "pairs": {
             pair: {"rate": rate, "source": "tencent_quote", "quote_at_utc": NOW.isoformat(),
                    "observed_at_utc": NOW.isoformat()}
@@ -151,9 +152,13 @@ class Harness:
         stack.enter_context(patch.object(prepared.state_repo, "append_source_snapshot_event", self.source_snapshot))
         for module in (pipeline, prepared):
             stack.enter_context(patch.object(module, "prepare_position_sizing_evidence", self.sizing))
-        stack.enter_context(patch.object(capacity, "with_sqlite_repo_writer_lock", lambda _: nullcontext()))
-        stack.enter_context(patch.object(capacity, "decision_state_snapshot_from_locked_rows", self.decision))
-        stack.enter_context(patch.object(capacity, "build_context", self.option))
+        def wheel_context(_repo, *, account, broker, as_of_ms):
+            self.hit("wheel_capacity_context_fixture", account)
+            rows = {"stored_position_lots": [], "trade_events": [], "account_wheel_events": []}
+            model = build_wheel_read_model_from_rows(rows, account=account, as_of_ms=as_of_ms)
+            return model, deepcopy(OPTION)
+
+        stack.enter_context(patch.object(capacity, "read_wheel_capacity_context", wheel_context))
         stack.enter_context(patch.object(assignment, "_load_runtime_and_positions", self.assignment_ledger))
         stack.enter_context(patch.object(assignment, "_read_futu_quotes", self.quotes))
         stack.enter_context(patch.object(assignment, "read_portfolio_valuation_evidence", self.pm))
@@ -202,14 +207,6 @@ class Harness:
     def cash_ledger(self, *_args, **_kwargs):
         self.hit("ledger_fixture")
         return [], {"snapshot_status": "trusted"}
-
-    def ledger_rows(self, **_kwargs):
-        self.hit("ledger_fixture")
-        return {"stored_position_lots": [], "trade_events": [], "account_wheel_events": []}
-
-    def decision(self, *_args, **_kwargs):
-        self.hit("decision_fixture")
-        return {"snapshot_status": "trusted"}
 
     def source_snapshot(self, *_args, **_kwargs):
         self.hit("source_persistence_substitute")

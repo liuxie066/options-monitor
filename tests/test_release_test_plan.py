@@ -293,13 +293,13 @@ def test_release_workflow_runs_required_control_plane_suites() -> None:
             assert suite in text, f"{workflow.name} is missing required suite {suite}"
 
 
-def test_required_pr_and_release_guardrail_discovers_full_suite_after_smoke() -> None:
+def test_required_pr_and_release_guardrail_verifies_complete_distributed_suite() -> None:
     root = Path(__file__).resolve().parents[1]
     text = (root / ".github" / "workflows" / "guardrails.yml").read_text(encoding="utf-8")
     requirements = (root / "requirements" / "dev.txt").read_text(encoding="utf-8").splitlines()
     constraints = (root / "constraints" / "dev.txt").read_text(encoding="utf-8").splitlines()
     full_command = (
-        "./.venv/bin/python -m pytest -vv -n 2 --dist loadfile "
+        "./.venv/bin/python -m pytest -vv -n 4 --dist loadfile "
         "--max-worker-restart=0 --durations=25"
     )
     pytest_commands = [
@@ -311,7 +311,7 @@ def test_required_pr_and_release_guardrail_discovers_full_suite_after_smoke() ->
     assert "actions/setup-node" not in text
     assert "npm ci" not in text
     assert "./om-agent spec > /tmp/om-agent-spec.json" in text
-    assert "if: ${{ github.event_name == 'pull_request' || steps.release.outputs.tag != '' }}" in text
+    assert "github.event_name == 'pull_request' || needs.plan.outputs.release_tag != ''" in text
     assert (
         text.index("--check-sensitive-artifacts")
         < text.index("- name: Public surface check")
@@ -328,16 +328,29 @@ def test_required_pr_and_release_guardrail_discovers_full_suite_after_smoke() ->
     checkout_step = text.split("- name: Checkout", 1)[1].split("- name: Set up Python", 1)[0]
     assert "fetch-depth: 0" in checkout_step
     assert pytest_commands == [full_command]
+    assert "-o tmp_path_retention_policy=failed" in text
     assert not any(selector in full_command for selector in (" -k ", "--ignore", "--deselect", "tests/test_"))
     assert "tests/test_" not in text
     assert "pytest-xdist" in requirements
     assert "pytest-xdist==3.8.0" in constraints
-    assert (
-        text.index("tests/run_smoke.py")
-        < text.index("./om-agent spec")
-        < text.index("Resolve VERSION release")
-        < text.index(full_command)
-    )
+    assert text.index("tests/run_smoke.py") < text.index("./om-agent spec")
+    assert "shard: [0, 1, 2, 3, 4, 5, 6, 7]" in text
+    assert "fail-fast: false" in text
+    assert '-p pytest_shard --ci-shard "$CI_SHARD" --ci-shard-count 8' in text
+    assert '--ci-revision "$GITHUB_SHA"' in text
+    gate = text.split("\n  guardrails:", 1)[1].split("\n  release:", 1)[0]
+    assert "needs: [plan, checks, regression]" in gate
+    assert "if: ${{ always() }}" in gate
+    assert 'test "$PLAN_RESULT" = success' in gate
+    assert 'test "$PLAN_RESULT" = skipped' in gate
+    assert 'if [ "$EVENT_NAME" = pull_request ]; then' in gate
+    plan_job = text.split("\n  plan:", 1)[1].split("\n  checks:", 1)[0]
+    assert "if: github.event_name == 'push'" in plan_job
+    assert 'test "$CHECKS_RESULT" = success' in gate
+    assert 'test "$REGRESSION_RESULT" = success' in gate
+    assert 'test "$REGRESSION_RESULT" = skipped' in gate
+    assert 'python .github/ci/regression_manifest.py' in gate
+    assert '--count 8 --revision "$GITHUB_SHA"' in gate
 
 
 def test_release_workflow_pins_and_gates_pi_runtime() -> None:
@@ -488,7 +501,9 @@ def test_release_preflight_full_mode_runs_pytest_once(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr or proc.stdout
     assert "[PREFLIGHT_OK] loopback bind available (127.0.0.1)" in proc.stdout
     pytest_commands = [command for command in commands if command.startswith("-m pytest")]
-    assert pytest_commands == ["-m pytest -n 2 --dist loadfile --max-worker-restart=0"]
+    assert pytest_commands == [
+        "-m pytest -n 4 --dist loadfile --max-worker-restart=0 -o tmp_path_retention_policy=failed"
+    ]
     assert commands.count("npm ci --omit=dev --ignore-scripts --prefix agent-runtime") == 0
 
 

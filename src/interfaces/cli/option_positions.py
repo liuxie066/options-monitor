@@ -42,6 +42,7 @@ from src.application.ledger.api import (
     list_position_rows,
     list_combo_pair_inferences,
     open_position_ledger_from_runtime_config,
+    open_position_query_ledger_from_data_config,
     open_trade_reconciliation_evidence_repo,
     position_projection_migration_status,
     record_trade_event_void,
@@ -316,9 +317,10 @@ def _add_runtime_root_arg(
     parser.add_argument("--runtime-root", default=default, help=help_text)
 
 
-def resolve_option_positions_repo(**kwargs: Any) -> tuple[Path, Any]:
-    """Compatibility wrapper kept for tests and older call sites."""
-
+def resolve_option_positions_repo(*, read_only: bool = False, **kwargs: Any) -> tuple[Path, Any]:
+    """Resolve the query or controlled-write ledger for the selected command."""
+    if read_only:
+        return open_position_query_ledger_from_data_config(**kwargs)
     return open_position_ledger_from_runtime_config(**kwargs)
 
 
@@ -526,7 +528,7 @@ def _register_projection_parsers(sub: Any) -> None:
     )
     for command_name, help_text in (
         ('inventory', 'emit an exact read-only migration inventory'),
-        ('status', 'read bounded checkpoint/head readiness status'),
+        ('status', 'read current content/checkpoint readiness (read-only)'),
     ):
         command = projection_migration_sub.add_parser(command_name, help=help_text)
         _add_runtime_root_arg(command)
@@ -1339,6 +1341,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg=None,
         data_config=args.data_config,
         runtime_root=_runtime_root_arg(args),
+        read_only=args.cmd in {"list", "events", "history", "inspect"},
     )
     state_base = Path(str(_data_config)).resolve().parent
     ledger_store = ledger_store_payload(_data_config, repo)

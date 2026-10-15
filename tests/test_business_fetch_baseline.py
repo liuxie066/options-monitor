@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 import socket
 import sys
+from unittest.mock import patch
 
 import pytest
 
@@ -25,6 +26,10 @@ EXPECTED = {"scan_cold": 1, "scan_warm": 0, "cash_cli_cold": 1, "cash_tool_cold"
 @pytest.mark.parametrize("case", baseline.CASES)
 def test_real_entry_counts_and_failure_status(case):
     row = baseline.sample(case)
+    assert_entry_result(case, row)
+
+
+def assert_entry_result(case, row):
     expected = EXPECTED[case]
     assert row["counts"].get("portfolio_fetch", 0) == expected
     sdk_count = 0 if case in {"timeout", "cancel"} else expected
@@ -58,6 +63,32 @@ def test_real_entry_counts_and_failure_status(case):
         assert row["counts"]["pm_fixture"] == row["counts"]["quotes_fixture"] == 1
     if case.startswith("wheel_"):
         assert row["outcome"]["coverage"] == row["outcome"]["cash"] == "available"
+
+
+@pytest.mark.parametrize("tool", [False, True])
+def test_wheel_uses_canonical_ledger_fixture(tmp_path, tool):
+    with ExitStack() as stack:
+        harness = baseline.Harness(tmp_path, stack)
+        assert not harness.counts
+        result = harness.wheel_facts(tool)
+        assert result["coverage"] == result["cash"] == "available"
+        assert harness.counts["wheel_capacity_context_fixture"] == 2
+        assert harness.counts["shared_reader"] == harness.counts["portfolio_fetch"] == 2
+        assert harness.counts["ledger_fixture"] == harness.counts["decision_fixture"] == 0
+        assert harness.counts["option_context_fixture"] == 0
+        assert [detail for name, detail in harness.trace if name == "wheel_capacity_context_fixture"] == ["lx", "lx"]
+
+
+@pytest.mark.parametrize("tool", [False, True])
+def test_wheel_rejects_untrusted_ledger_fixture(tmp_path, tool):
+    with ExitStack() as stack, patch.dict(baseline.OPTION, decision_snapshot_status="untrusted"):
+        harness = baseline.Harness(tmp_path, stack)
+        result = harness.wheel_facts(tool)
+        assert result["coverage"] == result["cash"] == "unavailable"
+        assert result["coverage_reason"] == "short_call_coverage_unavailable"
+        assert result["cash_reason"] == "option_decision_snapshot_unavailable"
+        assert harness.counts["wheel_capacity_context_fixture"] == 2
+        assert harness.counts["shared_reader"] == harness.counts["portfolio_fetch"] == 2
 
 
 def test_aggregation_rejects_mixed_paths_and_accepts_timing_variance():
