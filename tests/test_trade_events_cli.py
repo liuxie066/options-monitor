@@ -445,6 +445,90 @@ def test_trade_events_repair_dry_run_does_not_mutate(monkeypatch, tmp_path: Path
     assert repo.list_position_lots()[0]["fields"]["contract_key"]["strike"] == "480"
 
 
+@pytest.mark.parametrize("kind", ["void", "repair"])
+def test_trade_event_preview_reuses_validated_events(monkeypatch, tmp_path: Path, kind: str) -> None:
+    from unittest.mock import Mock
+    from src.application.ledger import api, interventions
+
+    repo, event_id = _repo_with_open_event(tmp_path)
+    before = _durable_ledger_state(repo)
+    monkeypatch.setattr(interventions, "now_ms", lambda: 3000)
+    reads = Mock(wraps=repo.list_trade_events)
+    contexts = Mock(wraps=interventions._intervention_context)
+    monkeypatch.setattr(repo, "list_trade_events", reads)
+    monkeypatch.setattr(interventions, "_intervention_context", contexts)
+    kwargs = {"overrides": {"strike": 500}} if kind == "repair" else {}
+
+    preview = getattr(api, f"preview_trade_event_{kind}")(repo, event_id=event_id, reason="test", **kwargs)
+
+    assert reads.call_count == 3
+    assert contexts.call_count == 1
+    assert preview["mode"] == "dry_run"
+    assert preview["target_event"] == before["trade_events"][0]
+    assert preview["void_event"]["event_time_ms"] == 3000
+    assert preview["void_event"]["target_event_id"] == event_id
+    appended_ids = [preview["void_event"]["event_id"]]
+    if kind == "repair":
+        appended_ids.append(preview["repair_event"]["event_id"])
+        assert preview["repair_event"]["contract_key"]["strike"] == "500"
+        assert preview["repair_event"]["raw_payload"]["repair_expected_input_hash"] == preview["expected_input_hash"]
+    else:
+        assert preview["target_event_id"] == event_id
+        assert preview["void_reason"] == "test"
+    assert preview["ledger_preflight"]["status"] == "ok"
+    assert preview["ledger_preflight"]["appended_event_ids"] == appended_ids
+    assert preview["projection_preview"] == {
+        "trade_event_count": 1 + len(appended_ids),
+        "position_lot_count": int(kind == "repair"),
+        "projection_diagnostic_count": 0,
+        "projection_diagnostics": [],
+    }
+    assert _durable_ledger_state(repo) == before
+
+
+@pytest.mark.parametrize("kind", ["void", "repair"])
+def test_trade_event_preview_validates_returned_time_before_later_retry(monkeypatch, tmp_path: Path, kind: str) -> None:
+    from src.application.ledger import api, interventions
+    from src.application.ledger.errors import LedgerPreflightError
+
+    repo, event_id = _repo_with_open_event(tmp_path)
+    before = _durable_ledger_state(repo)
+    ticks = iter([500, 1500] if kind == "void" else [500, 750, 1250, 1500])
+    monkeypatch.setattr(interventions, "now_ms", lambda: next(ticks))
+    kwargs = {"overrides": {"strike": 500}} if kind == "repair" else {}
+    preview = getattr(api, f"preview_trade_event_{kind}")
+
+    with pytest.raises(LedgerPreflightError, match="rejected projected trade-event intervention"):
+        preview(repo, event_id=event_id, reason="test", **kwargs)
+    assert _durable_ledger_state(repo) == before
+
+    monkeypatch.setattr(interventions, "now_ms", lambda: 3000)
+    later = preview(repo, event_id=event_id, reason="test", **kwargs)
+    assert later["ledger_preflight"]["status"] == "ok"
+    assert later["projection_preview"]["projection_diagnostics"] == []
+    assert _durable_ledger_state(repo) == before
+
+
+def test_trade_event_repair_preview_hash_allows_later_apply(monkeypatch, tmp_path: Path) -> None:
+    from src.application.ledger import api, interventions
+
+    repo, event_id = _repo_with_open_event(tmp_path)
+    kwargs = {"event_id": event_id, "overrides": {"strike": 500}, "reason": "test"}
+    monkeypatch.setattr(interventions, "now_ms", lambda: 3000)
+    preview = api.preview_trade_event_repair(repo, **kwargs)
+
+    monkeypatch.setattr(interventions, "now_ms", lambda: 9000)
+    later = api.preview_trade_event_repair(repo, **kwargs)
+    assert later["expected_input_hash"] == preview["expected_input_hash"]
+    result = api.record_trade_event_repair(repo, **kwargs, expected_input_hash=preview["expected_input_hash"])
+    assert result["mode"] == "applied"
+    assert result["repair_event_id"] == preview["repair_event"]["event_id"]
+    assert len(repo.list_trade_events()) == 3
+    retry = api.record_trade_event_repair(repo, **kwargs, expected_input_hash=preview["expected_input_hash"])
+    assert retry["mode"] == "no_op"
+    assert len(repo.list_trade_events()) == 3
+
+
 def test_trade_events_repair_apply_voids_and_replaces_event(monkeypatch, tmp_path: Path, capsys) -> None:
     cli, repo, event_id = _open_event_cli(monkeypatch, tmp_path)
 
