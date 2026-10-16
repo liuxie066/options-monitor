@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+import pytest
+
 from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
 
 
@@ -126,6 +128,37 @@ def _fixed_now() -> datetime:
     return datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc)
 
 
+def _write_minimal_run(root: Path, run_id: str = "run-1") -> Path:
+    run = root / "output_runs" / run_id
+    (run / "state").mkdir(parents=True)
+    (run / "state" / "last_run.json").write_text(
+        json.dumps({"run_id": run_id, "status": "ok"}), encoding="utf-8",
+    )
+    return run
+
+
+def _synthetic_archive_transfer(
+    source: Path, inventory: dict[str, Any],
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    import shutil
+
+    def run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if command[0] == "ssh":
+            assert "python3 -c" in command[-1]
+            selected_raw = shlex.split(command[-1])[-1]
+            selected = None if not selected_raw else json.loads(selected_raw)
+            runs = [row for row in inventory["runs"] if selected is None or row["run_id"] in selected]
+            return _completed(command, json.dumps({**inventory, "runs": runs}))
+        assert command[0] == "rsync"
+        path = Path(command[-2].split(":", 1)[1])
+        assert path.is_relative_to(source)
+        if path.is_dir():
+            shutil.copytree(path, Path(command[-1]), dirs_exist_ok=True)
+        return _completed(command)
+
+    return run
+
+
 def _verify_remote_archive(repo_root: Path, archive_root: Path) -> None:
     from src.application.research.archive import _run_inventory, archive_verify
 
@@ -183,11 +216,11 @@ def _prune_run_cmd(
     return _run_cmd
 
 
-def test_archive_verify_writes_latest_inventory(tmp_path: Path) -> None:
+def test_archive_verify_without_source_is_read_only(tmp_path: Path) -> None:
     from src.application.research.archive import archive_verify
 
     archive_root = tmp_path / "archive"
-    _write_run(archive_root)
+    _write_minimal_run(archive_root)
 
     data = archive_verify(repo_root=tmp_path, archive_root=archive_root, now_fn=_fixed_now)
 
@@ -196,8 +229,329 @@ def test_archive_verify_writes_latest_inventory(tmp_path: Path) -> None:
     assert data["summary"]["verified_run_count"] == 1
     assert data["runs"][0]["run_id"] == "run-1"
     assert data["runs"][0]["verified"] is True
-    assert latest_path.exists()
-    assert json.loads(latest_path.read_text(encoding="utf-8"))["verified_at_utc"] == "2026-06-04T12:00:00Z"
+    assert data["source_identity"] == {}
+    assert data["runs"][0]["source_content_verified"] is False
+    assert data["runs"][0]["deletion_verified"] is False
+    assert data["verified_at_utc"] == "2026-06-04T12:00:00Z"
+    assert not latest_path.parent.exists()
+
+
+def test_archive_verify_missing_archive_does_not_create_evidence(tmp_path: Path) -> None:
+    from src.application.research.archive import archive_prune_remote, archive_verify
+
+    root = tmp_path / "absent"
+    data = archive_verify(repo_root=tmp_path, archive_root=root)
+    assert data["ok"] is False
+    assert data["runs"] == []
+    assert not root.exists()
+
+    def unexpected_command(*_args: Any, **_kwargs: Any) -> None:
+        pytest.fail("missing evidence must not start a remote command")
+
+    prune = archive_prune_remote(
+        repo_root=tmp_path, archive_root=root, ssh_target="deploy@example",
+        run_cmd=unexpected_command,
+    )
+    assert prune["status"] == "missing_verified_inventory"
+    assert "pull --write" in prune["reason"]
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("explicit", [
+    {"source_identity": {}},
+    {"source_run_inventory": []},
+    {"source_identity": {}, "source_run_inventory": []},
+])
+def test_archive_verify_explicit_empty_evidence_replaces_prior_proof(
+    tmp_path: Path, explicit: dict[str, Any],
+) -> None:
+    from src.application.research.archive import archive_verify
+
+    root = tmp_path / "archive"
+    _write_minimal_run(root)
+    _verify_remote_archive(tmp_path, root)
+    latest = root / "manifests" / "inventory.latest.json"
+    before = json.loads(latest.read_text(encoding="utf-8"))
+    assert before["runs"][0]["deletion_verified"] is True
+
+    result = archive_verify(repo_root=tmp_path, archive_root=root, **explicit)
+
+    assert json.loads(latest.read_text(encoding="utf-8")) == result
+    assert result["source_identity"] == {}
+    assert result["runs"][0]["deletion_verified"] is False
+
+
+def test_archive_cli_verify_preserves_pull_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import argparse
+    import shutil
+
+    from src.application.research import archive
+    from src.interfaces.cli.research import add_research_commands, handle_research_command
+
+    source = tmp_path / "source"
+    root = tmp_path / "archive"
+    _write_minimal_run(source)
+    retained_cleanup: list[Path] = []
+    monkeypatch.setattr(archive.shutil, "rmtree", lambda path: retained_cleanup.append(Path(path)))
+
+    def synthetic_transfer(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if command[0] == "ssh":
+            return _completed(command, json.dumps(_remote_inventory_payload(tmp_path, source)))
+        assert command[0] == "rsync"
+        relative = command[-2].split("/var/lib/options-monitor/", 1)[1]
+        path = source / relative
+        if path.is_dir():
+            shutil.copytree(path, Path(command[-1]), dirs_exist_ok=True)
+        return _completed(command)
+
+    pulled = archive.archive_pull(
+        repo_root=tmp_path, archive_root=root, ssh_target="deploy@example",
+        include_logs=False, write=True, run_cmd=synthetic_transfer, now_fn=_fixed_now,
+    )
+    assert pulled["ok"] is True
+    latest = root / "manifests" / "inventory.latest.json"
+    before_bytes, before_mtime = latest.read_bytes(), latest.stat().st_mtime_ns
+    before = json.loads(before_bytes)
+    assert before["runs"][0]["deletion_verified"] is True
+
+    parser = argparse.ArgumentParser()
+    add_research_commands(parser.add_subparsers(dest="command", required=True))
+    args = parser.parse_args(["research", "archive", "verify", "--archive-root", str(root)])
+    result = handle_research_command(args, repo_base_fn=lambda: tmp_path)
+
+    assert result["ok"] is True
+    assert result["data"]["runs"][0]["verified"] is True
+    assert result["data"]["source_identity"] == {}
+    assert result["data"]["runs"][0]["deletion_verified"] is False
+    assert latest.read_bytes() == before_bytes
+    assert latest.stat().st_mtime_ns == before_mtime
+    calls: list[list[str]] = []
+    guard = archive.archive_prune_remote(
+        repo_root=tmp_path, archive_root=root, ssh_target="deploy@example",
+        run_cmd=_prune_run_cmd(calls, _cleanup_payload(), tmp_path, source),
+    )["deletion_guard"]
+    assert guard["confirmable"] is True
+    assert len(calls) == 2
+    assert retained_cleanup and all(path.exists() for path in retained_cleanup)
+
+
+def test_archive_verify_does_not_overwrite_concurrent_source_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.application.research import archive
+
+    root = tmp_path / "archive"
+    _write_minimal_run(root)
+    _verify_remote_archive(tmp_path, root)
+    latest = root / "manifests" / "inventory.latest.json"
+    prior = latest.read_bytes()
+    original_inventory = archive._run_inventory
+    published: list[bytes] = []
+
+    def concurrent_inventory(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        runs = original_inventory(*args, **kwargs)
+        with monkeypatch.context() as context:
+            context.setattr(archive, "_run_inventory", original_inventory)
+            archive.archive_verify(
+                repo_root=tmp_path, archive_root=root,
+                source_identity={"kind": "local", "runtime_root": str(tmp_path / "new-source")},
+                source_run_inventory=runs,
+            )
+        published.append(latest.read_bytes())
+        return runs
+
+    monkeypatch.setattr(archive, "_run_inventory", concurrent_inventory)
+    result = archive.archive_verify(repo_root=tmp_path, archive_root=root)
+
+    assert result["source_identity"] == {}
+    assert published[0] != prior
+    assert latest.read_bytes() == published[0]
+
+
+@pytest.mark.parametrize("change", ["same_size_and_mtime", "missing", "partial"])
+def test_archive_verify_does_not_refresh_changed_local_proof(
+    tmp_path: Path, change: str,
+) -> None:
+    import os
+
+    from src.application.research.archive import archive_prune_remote, archive_verify
+
+    root = tmp_path / "archive"
+    run = _write_minimal_run(root)
+    _verify_remote_archive(tmp_path, root)
+    latest = root / "manifests" / "inventory.latest.json"
+    before = latest.read_bytes()
+    remote = _remote_inventory_payload(tmp_path, root)
+    if change == "same_size_and_mtime":
+        path = run / "state" / "last_run.json"
+        stat = path.stat()
+        path.write_bytes(path.read_bytes().replace(b'"ok"', b'"no"'))
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    elif change == "missing":
+        run.rename(root / "retained-run-1")
+    else:
+        (run / ".partial-fact").write_text("incomplete", encoding="utf-8")
+
+    local = archive_verify(repo_root=tmp_path, archive_root=root)
+    assert latest.read_bytes() == before
+    assert local["summary"]["deletion_verified_run_count"] == 0
+    calls: list[list[str]] = []
+
+    def run_cmd(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        assert "--confirm" not in command[-1]
+        payload = remote if "python3 -c" in command[-1] else _cleanup_payload()
+        return _completed(command, json.dumps(payload))
+
+    result = archive_prune_remote(
+        repo_root=tmp_path, archive_root=root, ssh_target="deploy@example",
+        confirm=True, run_cmd=run_cmd,
+    )
+    assert result["status"] == "remote_prune_guard_failed"
+    assert result["deletion_guard"]["confirmable"] is False
+    assert result["deletion_guard"]["unverified_delete_run_ids"] == ["run-1"]
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("count", [1, 3, 6])
+def test_archive_repeat_pull_hashes_only_current_comparison(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, count: int,
+) -> None:
+    from collections import Counter
+    from src.application.research import archive
+
+    source, root = tmp_path / "source", tmp_path / "archive"
+    run_ids = [f"run-{index}" for index in range(count)]
+    for run_id in run_ids:
+        _write_minimal_run(source, run_id)
+    remote = _remote_inventory_payload(tmp_path, source)
+    transfer = _synthetic_archive_transfer(source, remote)
+    retained: list[Path] = []
+    monkeypatch.setattr(archive.shutil, "rmtree", lambda path: retained.append(Path(path)))
+    original_manifest = archive._file_manifest
+    hashed: list[Path] = []
+
+    def record_hash(path: Path) -> list[dict[str, Any]]:
+        hashed.append(path)
+        return original_manifest(path)
+
+    monkeypatch.setattr(archive, "_file_manifest", record_hash)
+    arguments = dict(
+        repo_root=tmp_path, archive_root=root, ssh_target="deploy@example",
+        remote_runtime_root=source, write=True, run_cmd=transfer, include_logs=False,
+    )
+    assert archive.archive_pull(**arguments)["ok"] is True
+    assert len(hashed) == 2 * count
+    hashed.clear()
+    assert archive.archive_pull(**arguments)["ok"] is True
+    assert len(hashed) == 3 * count
+    assert Counter(path.name for path in hashed if path.parent == root / "output_runs") == {
+        run_id: 2 for run_id in run_ids
+    }
+
+    hashed.clear()
+    assert archive.archive_pull(**arguments, run_ids=[run_ids[0]])["ok"] is True
+    # Selected staging + selected comparison + one final full verification.
+    assert len(hashed) == count + 2
+    live_counts = Counter(path.name for path in hashed if path.parent == root / "output_runs")
+    assert live_counts == {run_id: 2 if run_id == run_ids[0] else 1 for run_id in run_ids}
+    assert retained and all(path.exists() for path in retained)
+
+
+def test_archive_repeat_pull_detects_change_after_prior_comparison(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.application.research import archive
+
+    source, root = tmp_path / "source", tmp_path / "archive"
+    for run_id in ("run-1", "run-2"):
+        _write_minimal_run(source, run_id)
+    remote = _remote_inventory_payload(tmp_path, source)
+    remote["runs"].sort(key=lambda row: row["run_id"])
+    transfer = _synthetic_archive_transfer(source, remote)
+    retained: list[Path] = []
+    monkeypatch.setattr(archive.shutil, "rmtree", lambda path: retained.append(Path(path)))
+    arguments = dict(
+        repo_root=tmp_path, archive_root=root, ssh_target="deploy@example",
+        remote_runtime_root=source, write=True, run_cmd=transfer, include_logs=False,
+    )
+    assert archive.archive_pull(**arguments)["ok"] is True
+    original_inventory = archive._run_inventory
+    changed: list[Path] = []
+
+    def mutate_after_first_comparison(runs_root: Path, **kwargs: Any) -> list[dict[str, Any]]:
+        rows = original_inventory(runs_root, **kwargs)
+        if runs_root == root / "output_runs" and not changed:
+            path = runs_root / "run-2" / "state" / "last_run.json"
+            path.write_text("changed during publication", encoding="utf-8")
+            changed.append(path)
+        return rows
+
+    monkeypatch.setattr(archive, "_run_inventory", mutate_after_first_comparison)
+    result = archive.archive_pull(**arguments)
+    assert result["ok"] is False
+    assert result["manifest"] is None
+    assert changed and changed[0].read_text(encoding="utf-8") == "changed during publication"
+    assert any(
+        operation.get("reason") == "archive_run_conflict" and operation.get("run_id") == "run-2"
+        for operation in result["operations"]
+    )
+
+
+@pytest.mark.parametrize("filename", ["ascii.txt", "证据-é-🙂.txt", 'space \\"quoted\\" \\\\ evidence.txt'])
+def test_remote_archive_digest_matches_local_for_valid_filenames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, filename: str,
+) -> None:
+    from contextlib import redirect_stdout
+    import hashlib
+    import io
+    import os
+    import socket
+    from src.application.research import archive
+
+    source, root = tmp_path / "source", tmp_path / "archive"
+    run = _write_minimal_run(source)
+    evidence = run / filename
+    evidence.write_text("before", encoding="utf-8")
+
+    def inventory_from_actual_script() -> dict[str, Any]:
+        output = io.StringIO()
+        with monkeypatch.context() as context, redirect_stdout(output):
+            context.setattr(sys, "argv", ["inventory", str(source), "", ""])
+            context.setattr(socket, "getfqdn", lambda: "prod.example")
+            exec(compile(archive.REMOTE_INVENTORY_SCRIPT, "remote_inventory", "exec"), {})
+        return json.loads(output.getvalue())
+
+    remote = inventory_from_actual_script()
+    local = archive._run_inventory(source / "output_runs", base=tmp_path)[0]
+    assert remote["runs"][0]["file_manifest"] == local["file_manifest"]
+    assert remote["runs"][0]["content_digest"] == local["content_digest"]
+    if filename.isascii():
+        assert local["content_digest"] == hashlib.sha256(
+            json.dumps(local["file_manifest"], sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    retained: list[Path] = []
+    monkeypatch.setattr(archive.shutil, "rmtree", lambda path: retained.append(Path(path)))
+    result = archive.archive_pull(
+        repo_root=tmp_path, archive_root=root, ssh_target="deploy@example",
+        remote_runtime_root=source, write=True, include_logs=False,
+        run_cmd=_synthetic_archive_transfer(source, remote),
+    )
+    assert result["ok"] is True
+    latest = json.loads((root / "manifests" / "inventory.latest.json").read_text(encoding="utf-8"))
+    assert latest["runs"][0]["deletion_verified"] is True
+
+    stat = evidence.stat()
+    evidence.write_text("after!", encoding="utf-8")
+    os.utime(evidence, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    changed_remote = inventory_from_actual_script()["runs"][0]
+    changed_local = archive._run_inventory(source / "output_runs", base=tmp_path)[0]
+    assert evidence.stat().st_size == stat.st_size
+    assert evidence.stat().st_mtime_ns == stat.st_mtime_ns
+    assert changed_remote["content_digest"] == changed_local["content_digest"]
+    assert changed_remote["content_digest"] != local["content_digest"]
 
 
 def test_archive_pull_defaults_to_rsync_dry_run_and_filters_local_runs(tmp_path: Path) -> None:
