@@ -238,6 +238,7 @@ def test_periodic_reconciliation_writes_one_ordinary_decision(tmp_path, monkeypa
     assert second["ordinary"] == second["linked"] == 0 and not second["errors"]
     assert len(repo.list_trade_events())==2
     assert observations[0]["ordinary_history_start_ms"] <= FILL
+    assert "ordinary_history_start_ms" not in observations[1]
 
 
 def _add_window_execution(repo, context, execution, *, snapshot_quantity=None):

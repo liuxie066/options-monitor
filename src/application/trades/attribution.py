@@ -195,7 +195,7 @@ def _reconcile_trade_attribution_batch(
         return result
     now_ms = int(time.time() * 1000)
     history_starts = [ordinary_attribution_window(fact)[0] for fact in selected
-        if fact["position_side"] == "short" and fact["status"] != "linked" and fact["origin"] != "manual"
+        if fact["position_side"] == "short" and fact["status"] == "pending" and fact["origin"] != "manual"
         and fact["contracts_open"] > 0 and not fact["reason_codes"] and ordinary_attribution_window(fact)[1] <= now_ms]
     observation = observe_trade_attribution_capacity(config=dict(config), account=account, runtime_root=runtime_root,
         stop_event=stop_event, **({"ordinary_history_start_ms": min(history_starts)} if history_starts else {}))
