@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import pytest
+from conftest import phase2_opening_row
 
 from domain.domain.engine import (
     EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
@@ -21,6 +23,9 @@ from src.application.combo_yield_config import (
     resolve_combo_yield_cfg,
 )
 from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+
+DECISION_NOW = datetime(2026, 8, 8, 15, 0, tzinfo=timezone.utc)
 
 
 def _write_required_data(tmp_path: Path, *, call_rows: list[dict], put_rows: list[dict]) -> Path:
@@ -67,6 +72,8 @@ def _call_row(**overrides) -> dict:
 def _put_row(**overrides) -> dict:
     row = {
         "symbol": "NVDA",
+        "option_type": "put",
+        "snapshot_received_at_utc": DECISION_NOW.isoformat(),
         "expiration": "2026-08-28",
         "dte": 20,
         "contract_symbol": "NVDA260828P90000",
@@ -85,7 +92,7 @@ def _put_row(**overrides) -> dict:
         "spread_ratio": 0.10,
     }
     row.update(overrides)
-    return row
+    return phase2_opening_row(row)
 
 
 def _scan_call_row(**overrides) -> dict:
@@ -175,6 +182,7 @@ def _cc_lp_scan_kwargs(required_data: Path, **overrides: Any) -> dict[str, Any]:
         "sell_call_cfg": {"enabled": True},
         "exchange_rate_converter": _converter(),
         "portfolio_ctx": None,
+        "now_utc_fn": lambda: DECISION_NOW,
     }
     kwargs.update(overrides)
     return kwargs
@@ -461,6 +469,7 @@ def test_variant_long_put_delta_reaches_scan_and_metrics(tmp_path: Path, delta, 
         stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0},
         run_cc_lp_scan_fn=lambda **kwargs: run_cc_lp_scan(
             **kwargs, run_sell_call_scan_fn=lambda **kw: pd.DataFrame([_scan_call_row()]),
+            now_utc_fn=lambda: DECISION_NOW,
         ),
     ))
     assert summary is not None
