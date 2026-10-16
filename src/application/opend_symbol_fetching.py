@@ -727,8 +727,8 @@ def fetch_symbol_request(
                 chain_row=chain_record,
                 snapshot_row=srow,
                 underlier_observation=underlier_observation,
-                snapshot_requested_at_utc=snapshot_result.requested_at_utc,
-                snapshot_received_at_utc=snapshot_result.received_at_utc,
+                snapshot_requested_at_utc=(srow or {}).get("snapshot_requested_at_utc"),
+                snapshot_received_at_utc=(srow or {}).get("snapshot_received_at_utc"),
             )
             last_price = option_observation.last_price
             bid = option_observation.bid
