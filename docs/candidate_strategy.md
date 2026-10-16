@@ -60,6 +60,11 @@
   它只作为最新价活跃度诊断，不再作为候选可用性门槛。
 - 期权候选的 5 分钟窗口约束的是 OM 取得 OpenD snapshot 到完成候选决策的时间
   （`snapshot_age_seconds <= 300`），用每批请求的 request/receive receipt 证明。
+- 统一开仓证据入口在同一决策时钟下分别复核 `spot_observed_at_utc` 的源报价年龄和
+  `snapshot_received_at_utc` 的取得年龄；显式回放时钟同样适用。源报价时间必须带时区，
+  缺失、非法、未来或超过 300 秒均为 `evidence_unavailable`，恰好 300 秒仍可继续校验。
+  不以 fetch 时的 `ready`、冻结年龄或期权 receipt 代替标的源时间；期权的
+  `max_snapshot_age_seconds` 参数不改变标的独立的 300 秒门槛。
 - 期权 bid/ask 的可用性由本次 snapshot 的盘口合法性（`bid > 0`、`ask >= bid`、
   tick、spread、合约身份与状态）判定，不由 `update_time` 判定。
 - OpenD 明确返回 `bid=0` 且其余身份/盘口/状态证据完整时，视为当前无有效
