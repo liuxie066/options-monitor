@@ -37,6 +37,7 @@ from domain.domain import risk_capacity
 from src.application.portfolio_context_service import evaluate_account_cash_snapshot, cash_snapshot_is_usable
 from src.infrastructure.exchange_rates import capacity_currency_converter
 from .assigned_stock_projection import build_wheel_read_model_from_rows, build_wheel_read_model_with_capacity_from_rows
+from .ordinary_attribution import ordinary_attribution_basis
 
 
 ATTRIBUTION_POLICY_VERSION = "trade_attribution.v2"
@@ -138,12 +139,12 @@ def assert_trade_attribution_unclaimed(events: Sequence[Mapping[str, Any]], lot_
         current = metadata.get(lot_id) or {}
         if strategy_metadata_has_owner(current):
             raise ValueError("trade attribution already claimed: " + lot_id)
-        if _manual_ordinary_decision(effective, lot_id, metadata=metadata, accepted=accepted):
+        if _ordinary_decision(effective, lot_id, metadata=metadata, accepted=accepted):
             raise ValueError("trade attribution manually excluded: " + lot_id)
 
 
-def _manual_ordinary_decision(events: Sequence[Mapping[str, Any]], lot_id: str, *,
-    metadata: Mapping[str, Mapping[str, Any]], accepted: set[str],
+def _ordinary_decision(events: Sequence[Mapping[str, Any]], lot_id: str, *,
+    metadata: Mapping[str, Mapping[str, Any]], accepted: set[str], allow_rule: bool = False,
 ) -> dict[str, Any] | None:
     for event in reversed(events):
         raw = event.get("raw_payload") or {}
@@ -152,7 +153,10 @@ def _manual_ordinary_decision(events: Sequence[Mapping[str, Any]], lot_id: str, 
             if "attribution_decision" in raw and event["event_id"] not in accepted:
                 continue
             if (event.get("source") == "trade_attribution"
-                and raw.get("attribution_origin") == "manual" and raw.get("attribution_action") == "ordinary"
+                and (raw.get("attribution_origin") == "manual" or allow_rule
+                     and raw.get("attribution_origin") == "rule" and event["event_id"] in accepted
+                     and (raw.get("attribution_decision") or {}).get("manual") is False)
+                and raw.get("attribution_action") == "ordinary"
                 and raw.get("actor") and raw.get("attribution_request_id")):
                 if raw.get("attribution_decision"):
                     current = metadata.get(lot_id, {})
@@ -289,7 +293,7 @@ def trade_attribution_facts_from_events(events: Sequence[Mapping[str, Any]], *, 
         ref = execution.get("broker_account_ref") or {}
         fields = lots[lot_id]
         membership = metadata.get(lot_id) or {}
-        ordinary = _manual_ordinary_decision(effective, lot_id, metadata=metadata, accepted=accepted)
+        ordinary = _ordinary_decision(effective, lot_id, metadata=metadata, accepted=accepted, allow_rule=True)
         related = [row for row in effective if row.get("event_id") == event["event_id"]
                    or row.get("lot_id") == lot_id or row.get("target_lot_id") == lot_id]
         allocations = membership.get("wheel_call_allocations") or []
@@ -324,7 +328,7 @@ def trade_attribution_facts_from_events(events: Sequence[Mapping[str, Any]], *, 
             "strategy": membership.get("strategy") if linked else None,
             "wheel_branch_id": membership.get("source_wheel_branch_id") or membership.get("source_stock_lot_id"),
             "strategy_group_id": membership.get("strategy_group_id"),
-            "origin": "manual" if ordinary else origin,
+            "origin": ordinary["raw_payload"]["attribution_origin"] if ordinary else origin,
             "acknowledged_candidate_ids": list((decisions[-1]["raw_payload"].get("attribution_candidate_ids") or [])) if decisions and origin == "manual" else [],
             "reason_codes": reasons, "candidate_ids": [],
             "input_hash": canonical_sha256(related), "policy_version": ATTRIBUTION_POLICY_VERSION,
@@ -451,6 +455,7 @@ def write_trade_attribution_decision(
                 "attribution_candidate_ids": sorted(set(plan.get("candidate_ids", [])) |
                     {candidate for conflict in conflicts for candidate in conflict["payload"]["candidate_ids"]}),
                 "attribution_decision": decision,
+                **({"ordinary_basis": plan["ordinary_basis"]} if plan.get("ordinary_basis") else {}),
             })
         events.append(event)
     active = _effective_events([*before_events, *(event.to_dict() for event in events)])
@@ -860,15 +865,26 @@ def build_trade_attribution_view(
                             (lot_scope.get("market"), lot_scope.get("market_date"))]
             complete = len(scoped_reads) == 1 and scoped_reads[0].get("complete") is True
         complete = complete and not fact["reason_codes"]
-        resolution = resolve_trade_attribution(candidates=tuple(proposals), evidence_complete=complete,
+        ordinary_basis = None
+        if complete and existing["status"] != "conflict":
+            ordinary_basis = ordinary_attribution_basis(fact=fact, facts=account_facts,
+                events=_effective_events(rows["trade_events"]), proposals=proposals, exposures=exposures,
+                exposure_ids=delivered_combo_exposures_for_lot(combo_lots.get(fact["lot_id"]) or {}, exposures),
+                observation=capacity_observation or {}, now_ms=now_ms)
+            if ordinary_basis is not None and trade_attribution_capacity_check(config=config, fact=fact,
+                    facts=account_facts, wheel_read_model=capacity_model, observation=capacity_observation or {},
+                    now_ms=now_ms)["status"] != "available":
+                ordinary_basis = None
+        resolution = resolve_trade_attribution(candidates=tuple([] if ordinary_basis else proposals), evidence_complete=complete,
             existing=existing, applicable=fact["contracts_open"] > 0)
+        selecting_ordinary = ordinary_basis is not None and fact["status"] != "ordinary"
         ref = fact["broker_account_ref"]
         enabled = any(row["broker"] == ref.get("broker_id") and row["physical_account_id"] == ref.get("external_account_id")
             and row["environment"] == ref.get("environment") and row["account"] == account and row["market"] == market
             and row["policy_version"] == ATTRIBUTION_POLICY_VERSION and row["effective_from_ms"] <= fact["event_time_ms"]
             for row in rows.get("attribution_policy_enablings") or [])
         capacity_evidence = capacity_semantic
-        if not any(proposal["strategy"] == "wheel" for proposal in proposals):
+        if ordinary_basis is None and not any(proposal["strategy"] == "wheel" for proposal in proposals):
             # Only position evidence can change an existing Combo membership decision.
             capacity_evidence = {key: capacity_semantic[key] for key in (
                 "authority", "scope", "completeness", "errors")}
@@ -878,17 +894,19 @@ def build_trade_attribution_view(
                 "asset_types": [asset for asset in (snapshot.get("scope") or {}).get("asset_types", [])
                                 if asset == "option"]}
         semantic = {"fact_hash": fact["input_hash"], "candidates": proposals, "policy": wheel_config.get("policy_hash"),
-                    "complete": complete, "enabled": enabled, "capacity": capacity_evidence,
+                    "complete": complete, "enabled": enabled, "capacity": capacity_evidence, "ordinary_basis": ordinary_basis,
                     "account_facts": sorted((item["open_event_id"], item["input_hash"]) for item in account_facts),
                     "combo_inferences": sorted(({key: pair.get(key) for key in (
                         "inference_id", "status", "input_snapshot_hash", "put_lot_snapshot", "call_lot_snapshot",
                         "proposal_expires_at_ms", "strategy_group_id")} for pair in rows.get("account_combo_inferences") or []),
                         key=lambda pair: pair["inference_id"]),
                     "wheel_evidence": sorted((event["event_id"], event["payload_hash"]) for event in wheel_events)}
-        results.append({**fact, "status": resolution.status, "candidate_ids": list(resolution.candidate_ids),
-            "candidates": proposals, "reason_codes": sorted(set(fact["reason_codes"]) | set(resolution.reason_codes)),
+        results.append({**fact, "status": "pending" if selecting_ordinary else resolution.status,
+            "candidate_ids": [item["candidate_id"] for item in proposals] if ordinary_basis else list(resolution.candidate_ids),
+            "candidates": proposals, "ordinary_basis": ordinary_basis,
+            "reason_codes": sorted(set(fact["reason_codes"]) | ({"awaiting_ledger_commit"} if selecting_ordinary else set(resolution.reason_codes))),
             "ordinary_previewable": fact["ordinary_previewable"] and not fact["reason_codes"],
-            "selected_candidate_id": resolution.selected_candidate_id if enabled else None, "rules_enabled": enabled,
+            "selected_candidate_id": ("ordinary" if selecting_ordinary else resolution.selected_candidate_id) if enabled else None, "rules_enabled": enabled,
             "input_hash": canonical_sha256(semantic), "evaluated_at_ms": now_ms, "evidence_complete": complete,
             "capacity_evidence": {
                 "semantic_sha256": canonical_sha256(capacity_evidence),
@@ -1069,8 +1087,8 @@ def apply_trade_attribution(
             choice = next((value for value in proposed["candidates"] if value["candidate_id"] == target), None)
             allocations = item.get("wheel_branch_ids") or []
             if target == "ordinary":
-                if not manual:
-                    raise ValueError("ordinary attribution requires a manual decision")
+                if not manual and (proposed["selected_candidate_id"] != "ordinary" or not proposed["ordinary_basis"]):
+                    raise ValueError("ordinary attribution requires complete automatic evidence or a manual decision")
                 kwargs = {"strategy": resolve_option_strategy_membership(fact["contract_key"], fact["position_side"], {}).strategy}
                 action = "ordinary"
             elif allocations:
@@ -1119,7 +1137,8 @@ def apply_trade_attribution(
             patch = build_open_adjustment_patch_contract(fields, as_of_ms=instant, **kwargs).to_dict()
             plans.append({"fact": fact, "patch": patch, "action": action, "candidate_id": target,
                 "candidate_ids": proposed["candidate_ids"], "origin": "intent" if choice and choice.get("intent_id") else "rule",
-                "inference": choice.get("inference") if choice else None})
+                "inference": choice.get("inference") if choice else None,
+                "ordinary_basis": proposed.get("ordinary_basis") if not manual and action == "ordinary" else None})
         if before_commit is not None:
             before_commit()
         if not apply_changes:
@@ -1154,6 +1173,16 @@ def apply_trade_attribution(
             raise ValueError("attribution cancelled before commit")
         if before_commit is not None:
             before_commit()
+        if not manual and any(plan["action"] == "ordinary" for plan in plans):
+            final = build_trade_attribution_view(after_rows, config=config, account=account, market=market,
+                now_ms=int(time.time() * 1000), combo_evidence=combo_evidence,
+                capacity_observation=capacity_observation, combo_mode=combo_mode)
+            for plan in plans:
+                member = next(row for row in final["rows"] if row["execution_key"] == plan["fact"]["execution_key"])
+                if not plan["ordinary_basis"] or member["ordinary_basis"] != plan["ordinary_basis"]:
+                    raise ValueError("ordinary attribution evidence changed before commit")
+            if stop_event is not None and stop_event.is_set():
+                raise ValueError("attribution cancelled before commit")
         after = next(row for row in after_facts
                      if row["execution_key"] == execution_key)
         if not apply_changes:

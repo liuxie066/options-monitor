@@ -133,6 +133,39 @@ class OpenDHistoryDealClient:
         if callable(close):
             close()
 
+    def fetch_attribution_evidence(self, *, futu_account_id: str, start_ms: int) -> dict[str, Any]:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        lookback = (now.timestamp() * 1000 - start_ms) / 3_600_000
+        if lookback <= 0:
+            raise ValueError("attribution history window is invalid")
+        deals, history = self.fetch(futu_account_ids=[futu_account_id], lookback_hours=lookback, now=now)
+        gateway = self._gateway_client()
+        kwargs = {"trd_env": "REAL", "acc_id": _numeric_account_id(futu_account_id)}
+        current = gateway.get_order_list_with_receipt(**kwargs, refresh_cache=True)
+        historical = gateway.get_history_orders(**kwargs, start=history["start_date"], end=history["end_date"])
+        receipts = []
+        for receipt in (current, historical):
+            if (not isinstance(receipt, dict) or not isinstance(receipt.get("rows"), list)
+                    or any(not isinstance(row, dict) for row in receipt["rows"])):
+                raise ValueError("order receipt is unavailable")
+            orders = []
+            for row in receipt["rows"]:
+                if (any(value != futu_account_id for value in extract_visible_account_fields(row).values())
+                        or row.get("trd_env") not in (None, "REAL")):
+                    raise ValueError("order receipt account differs")
+                from domain.domain.trade_execution import futu_execution_time, execution_instant_milliseconds
+                created = futu_execution_time({"create_time": row.get("create_time")})
+                orders.append({"order_id": str(row.get("order_id") or "").strip(),
+                    "status": _normalize_order_status(row.get("order_status")),
+                    "dealt_qty": _decimal_text(row.get("dealt_qty"), nonnegative=True),
+                    "created_at_ms": execution_instant_milliseconds(created["occurred_at_utc"])})
+            receipts.append({key: receipt.get(key) for key in (
+                "retcode", "coverage_complete", "pagination_complete", "truncated", "error")} | {"rows": orders})
+        return {"deals": deals, "history": history, "current_orders": receipts[0],
+                "history_orders": receipts[1], "window_start_ms": start_ms,
+                "window_end_ms": int(now.timestamp() * 1000),
+                "observed_at_ms": int(datetime.now(timezone.utc).timestamp() * 1000)}
+
     def probe_order_hint(self, *, futu_account_id: str, order_id: str) -> dict[str, Any]:
         """Corroborate an order hint; execution rows still come from the deal query."""
         requested = str(order_id).strip()
@@ -337,7 +370,7 @@ def _query_history_deals(
                 trd_env="REAL",
                 acc_id=acc_id,
             )
-            account_rows = _gateway_rows(result)
+            account_rows = _gateway_rows(result, strict=True)
         except Exception as exc:
             if isinstance(exc, FutuGatewayUnreachableError) and not account_results:
                 raise
@@ -503,17 +536,19 @@ def _numeric_account_id(value: str) -> int:
         raise ValueError("futu_account_id must be numeric") from exc
 
 
-def _plain_records(value: Any) -> list[dict[str, Any]]:
+def _plain_records(value: Any, *, strict: bool = False) -> list[dict[str, Any]]:
     from src.infrastructure.futu_dataframe import futu_dataframe_records
 
     rows = futu_dataframe_records(value) if hasattr(value, "to_dict") else value
+    if strict and (not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows)):
+        raise ValueError("history query rows are incomplete or malformed")
     return [dict(row) for row in rows] if isinstance(rows, list) else []
 
 
-def _gateway_rows(value: Any) -> list[dict[str, Any]]:
+def _gateway_rows(value: Any, *, strict: bool = False) -> list[dict[str, Any]]:
     if isinstance(value, dict) and "rows" in value:
         value = value.get("rows")
-    return _plain_records(value)
+    return _plain_records(value, strict=strict)
 
 
 def _decimal_text(value: Any, *, nonnegative: bool) -> str:

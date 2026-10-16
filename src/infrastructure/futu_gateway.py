@@ -544,6 +544,9 @@ class _FutuAPIClient:
             )
         raise AttributeError("order_list_query unavailable")
 
+    def get_order_list_with_receipt(self, **kwargs: Any) -> Any:
+        return self._query_with_coverage(self._trade().order_list_query, paginated=False, kwargs=kwargs)
+
     def get_deal_list(self, **kwargs: Any) -> Any:
         trade = self._trade()
         if hasattr(trade, "deal_list_query"):
@@ -955,6 +958,13 @@ class FutuGateway:
             return self.client.get_order_list(**kwargs)
         except Exception as exc:
             self._raise_mapped(exc, action="get_order_list")
+        raise AssertionError("unreachable")
+
+    def get_order_list_with_receipt(self, **kwargs: Any) -> Any:
+        try:
+            return self.client.get_order_list_with_receipt(**kwargs)
+        except Exception as exc:
+            self._raise_mapped(exc, action="get_order_list_with_receipt")
         raise AssertionError("unreachable")
 
     def get_deal_list(self, **kwargs: Any) -> Any:
