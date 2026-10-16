@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1204 (`src`: 568, `domain`: 92, `scripts`: 16, `tests`: 528)
-- Internal import edges: 9681 total, 3852 production/script edges excluding tests
+- Python files scanned: 1205 (`src`: 568, `domain`: 92, `scripts`: 16, `tests`: 529)
+- Internal import edges: 9688 total, 3853 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|636| domain
+  application -->|637| domain
   application -->|4| domain_services
   application -->|189| infrastructure
   application -->|57| storage
@@ -48,7 +48,7 @@ flowchart LR
   scripts -->|2| interfaces
   scripts -->|1| tests
   storage -->|1| domain
-  tests -->|4427| application
+  tests -->|4433| application
   tests -->|549| domain
   tests -->|2| domain_services
   tests -->|287| infrastructure
@@ -61,7 +61,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 636 |
+| application | domain | 637 |
 | interfaces | application | 196 |
 | application | infrastructure | 189 |
 | scripts | application | 67 |
@@ -83,7 +83,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 4427 |
+| tests | application | 4433 |
 | tests | domain | 549 |
 | tests | interfaces | 342 |
 | tests | infrastructure | 287 |
@@ -109,8 +109,8 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | src.application.ledger | 40 |
 | src.application.trades | src.application.ledger | 33 |
 | src.application.research | src.application | 32 |
+| src.application | domain.domain.engine | 28 |
 | src.application.inbound | src.application | 28 |
-| src.application | domain.domain.engine | 27 |
 | src.application.ledger | src.application | 27 |
 | domain.domain.ledger | domain.domain | 27 |
 | src.application.positions | src.application | 26 |
