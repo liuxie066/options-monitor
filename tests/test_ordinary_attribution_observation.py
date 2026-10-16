@@ -90,30 +90,33 @@ def test_application_observer_binds_configured_account_and_closes_client(tmp_pat
 @pytest.mark.parametrize("failed", [False, True])
 def test_optional_history_failure_retains_portfolio_and_success_forces_fresh_snapshot(tmp_path, monkeypatch, failed):
     import src.application.wheel.capacity as capacity
-    repo, context = _scope(tmp_path, monkeypatch)
     calls = []
     def history(**kwargs):
         calls.append("history")
         if failed: raise RuntimeError("provider partial")
-        return context["capacity_observation"]["ordinary_evidence"]
+        return {"observed_at_ms": NOW}
     def portfolio(**kwargs):
         calls.append("portfolio")
+        fresh = calls.count("portfolio") == 2
         assert kwargs["write_cache"] is False
-        assert ("load_json_fn" in kwargs) is (not failed)
-        if not failed: assert kwargs["load_json_fn"](None) is None
-        return context["capacity_observation"]["portfolio"]
+        assert ("load_json_fn" in kwargs) is fresh
+        if fresh: assert kwargs["load_json_fn"](None) is None
+        return {"snapshot": "fresh" if fresh else "base"}
     monkeypatch.setattr(capacity, "_read_ordinary_attribution_broker_evidence", history)
     monkeypatch.setattr(capacity, "load_account_portfolio_context", portfolio)
     monkeypatch.setattr(capacity, "current_exchange_rate_snapshot", lambda **kwargs: None)
     monkeypatch.setattr(capacity, "project_exchange_rate_snapshot", lambda *a,**kw: None)
     class Connection:
-        def send(self, value): self.result=value
+        def __init__(self): self.results=[]
+        def send(self, value): self.results.append(deepcopy(value))
         def close(self): self.closed=True
     connection = Connection()
-    capacity._attribution_capacity_worker(connection, context["config"], "lx", tmp_path, FILL)
-    assert calls==["history", "portfolio"] and connection.closed
-    assert connection.result["portfolio"]
-    assert bool(connection.result["ordinary_evidence"].get("error")) is failed
+    capacity._attribution_capacity_worker(connection, {}, "lx", tmp_path, FILL)
+    assert calls==(["portfolio", "history"] if failed else ["portfolio", "history", "portfolio"])
+    assert connection.closed and len(connection.results)==2
+    assert connection.results[0]=={"portfolio": {"snapshot": "base"}}
+    assert connection.results[1]["portfolio"]=={"snapshot": "base" if failed else "fresh"}
+    assert bool(connection.results[1]["ordinary_evidence"].get("error")) is failed
 
 
 @pytest.mark.parametrize("method", ["get_order_list_with_receipt", "get_history_deals"])
