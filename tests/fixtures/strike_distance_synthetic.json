@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "source_kind": "synthetic",
+  "as_of": "2026-10-16T14:00:00Z",
+  "rows": [
+    {
+      "candidate_id": "synthetic-csp-1", "strategy": "csp", "rank": 1, "contracts": 2,
+      "symbol": "NVDA", "contract_symbol": "US.NVDA261120P99000", "option_type": "put",
+      "market": "US", "currency": "USD", "spot": 100, "strike": 99, "expiration": "2026-11-20",
+      "spot_observed_at_utc": "2026-10-16T13:59:00Z", "snapshot_received_at_utc": "2026-10-16T13:59:00Z",
+      "option_standard_type": "STANDARD", "multiplier": 100, "chain_multiplier": 100, "snapshot_multiplier": 100,
+      "net_income": 300, "fee_basis": "synthetic_after_full_sell_fees", "fee_schedule_version": "synthetic.v1"
+    },
+    {
+      "candidate_id": "synthetic-cc-1", "strategy": "cc", "rank": 1, "contracts": 1,
+      "symbol": "NVDA", "contract_symbol": "US.NVDA261120C105000", "option_type": "call",
+      "market": "US", "currency": "USD", "spot": 100, "strike": 105, "expiration": "2026-11-20", "avg_cost": 60,
+      "spot_observed_at_utc": "2026-10-16T13:59:00Z", "snapshot_received_at_utc": "2026-10-16T13:59:00Z",
+      "option_standard_type": "STANDARD", "multiplier": 100, "chain_multiplier": 100, "snapshot_multiplier": 100,
+      "net_income": 200, "fee_basis": "synthetic_after_full_sell_fees", "fee_schedule_version": "synthetic.v1"
+    },
+    {
+      "candidate_id": "synthetic-wheel-put-1", "strategy": "wheel_put", "rank": 1, "contracts": 1,
+      "symbol": "0700.HK", "contract_symbol": "HK.00700261120P990000", "option_type": "put",
+      "market": "HK", "currency": "HKD", "spot": 1000, "strike": 990, "expiration": "2026-11-20",
+      "spot_observed_at_utc": "2026-10-16T13:59:00Z", "snapshot_received_at_utc": "2026-10-16T13:59:00Z",
+      "option_standard_type": "STANDARD", "multiplier": 500, "chain_multiplier": 500, "snapshot_multiplier": 500,
+      "net_income": 1500, "fee_basis": "synthetic_after_full_sell_fees", "fee_schedule_version": "synthetic.v1"
+    },
+    {
+      "candidate_id": "synthetic-wheel-call-1", "strategy": "wheel_call", "rank": 1, "contracts": 1,
+      "symbol": "NVDA", "contract_symbol": "US.NVDA261120C101000", "option_type": "call",
+      "market": "US", "currency": "USD", "spot": 100, "strike": 101, "expiration": "2026-11-20",
+      "spot_observed_at_utc": "2026-10-16T13:59:00Z", "snapshot_received_at_utc": "2026-10-16T13:59:00Z",
+      "option_standard_type": "STANDARD", "multiplier": 100, "chain_multiplier": 100, "snapshot_multiplier": 100,
+      "net_income": -5, "fee_basis": "synthetic_after_full_sell_fees", "fee_schedule_version": "synthetic.v1"
+    }
+  ]
+}

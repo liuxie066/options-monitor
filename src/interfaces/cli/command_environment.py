@@ -26,6 +26,10 @@ def command_environment(
     argv: list[str], *, repo_root: Path, discover_local: bool = False,
     user_home: Path | None = None,
 ) -> Iterator[None]:
+    # Offline research must not discover runtime roots, env files or credentials.
+    if argv[:2] == ["research", "strike-distance"]:
+        yield
+        return
     # Menus and help must not retain settings while dispatching another command.
     if (not argv or argv[:2] == ["setup", "init"] or argv[0] == "help"
             or any(arg in {"--help", "-h"} for arg in argv)):

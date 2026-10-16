@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from domain.domain.fee_calc import estimate_futu_option_sell_fee
 from domain.domain.trade_contract_identity import contract_share_quantity, require_option_multiplier
@@ -540,6 +541,104 @@ def validate_opening_contract_evidence(
     }
 
 
+def _strike_distance_pct(spot: float, strike: float, mode: str) -> float:
+    return (spot - strike) / spot if mode == "put" else (strike - spot) / spot
+
+
+def _short_option_breakeven(strike: float, net_per_share: float, mode: str) -> float:
+    return strike - net_per_share if mode == "put" else strike + net_per_share
+
+
+def inspect_opening_candidate_distances(
+    raw: Mapping[str, Any], *, mode: StrategyMode | str, now_utc: Any,
+) -> dict[str, Any]:
+    """Describe supplied offline evidence; never certify candidate eligibility.
+
+    Call breakeven describes the short option leg, not the covered stock P/L.
+    RV deliberately has no role in this descriptive calculation.
+    """
+    mode = normalize_strategy_mode(mode)
+    result: dict[str, Any] = {
+        "status": "unavailable", "reason": None, "strike_distance_pct": None,
+        "net_status": "unavailable", "net_reason": "distance_unavailable",
+        "short_option_breakeven": None, "net_breakeven_distance_pct": None,
+        "net_income": None, "dte": None,
+        "spot_observed_at_utc": raw.get("spot_observed_at_utc"),
+        "net_basis": "put_assignment" if mode == "put" else "short_call_leg_not_covered_stock",
+        "volatility_buffer": {"status": "unavailable", "value": None,
+                              "reason": "rv_quality_dependencies_629_630_631"},
+    }
+    try:
+        now = _parse_decision_time(now_utc)
+        observed = _parse_decision_time(raw.get("spot_observed_at_utc"))
+    except (ValueError, OverflowError):
+        result["reason"] = "market_or_replay_time_invalid"
+        return result
+    market = raw.get("market")
+    if market not in ("US", "HK") or now is None:
+        result["reason"] = "market_or_replay_time_invalid"
+        return result
+    try:
+        expiration = date.fromisoformat(str(raw.get("expiration")))
+        local_date = now.astimezone(ZoneInfo("America/New_York" if market == "US" else "Asia/Hong_Kong")).date()
+    except (ValueError, OverflowError):
+        result["reason"] = "expiration_invalid"
+        return result
+    result["dte"] = (expiration - local_date).days
+    if result["dte"] <= 0:
+        result["reason"] = "expired_or_expiration_day"
+        return result
+    if observed is None or not 0 <= (now - observed).total_seconds() <= 300:
+        result["reason"] = "spot_time_missing_future_or_stale"
+        return result
+    if "underlier_observation_status" in raw and raw["underlier_observation_status"] != "ready":
+        result["reason"] = "underlier_observation_unavailable"
+        result["source_reason"] = raw.get("underlier_observation_reason_code")
+        return result
+    spot, strike = _coerce_float(raw.get("spot")), _coerce_float(raw.get("strike"))
+    if spot is None or strike is None or spot <= 0 or strike <= 0:
+        result["reason"] = "spot_or_strike_invalid"
+        return result
+    distance = _strike_distance_pct(spot, strike, mode)
+    if not math.isfinite(distance):
+        result["reason"] = "distance_nonfinite"
+        return result
+    result.update(status="ok", strike_distance_pct=round(distance, 10))
+    result["net_reason"] = "net_premium_or_contract_evidence_unavailable"
+    net = _coerce_float(raw.get("net_income"))
+    try:
+        received = _parse_decision_time(raw.get("snapshot_received_at_utc"))
+    except (ValueError, OverflowError):
+        received = None
+    if received is None or not 0 <= (now - received).total_seconds() <= 300:
+        result["net_reason"] = "premium_receipt_missing_future_or_stale"
+        return result
+    try:
+        multiplier = require_option_multiplier(raw.get("multiplier"))
+        matching = all(require_option_multiplier(raw.get(field)) == multiplier
+                       for field in ("chain_multiplier", "snapshot_multiplier"))
+    except (ValueError, TypeError, OverflowError):
+        return result
+    if (not matching or raw.get("option_standard_type") != "STANDARD" or net is None
+            or raw.get("currency") != ("USD" if market == "US" else "HKD")
+            or not all(isinstance(raw.get(field), str) and _first_text(dict(raw), field)
+                       for field in ("fee_basis", "fee_schedule_version"))):
+        return result
+    try:
+        breakeven = _short_option_breakeven(strike, net / multiplier, mode)
+        net_distance = _strike_distance_pct(spot, breakeven, mode)
+    except OverflowError:
+        result["net_reason"] = "net_distance_nonfinite"
+        return result
+    if not math.isfinite(breakeven) or not math.isfinite(net_distance):
+        result["net_reason"] = "net_distance_nonfinite"
+        return result
+    result.update(net_status="ok", net_reason=None, net_income=round(net, 6),
+                  short_option_breakeven=round(breakeven, 6),
+                  net_breakeven_distance_pct=round(net_distance, 10))
+    return result
+
+
 def calculate_opening_candidate_metrics(
     raw: dict[str, Any] | Any,
     *,
@@ -653,7 +752,7 @@ def calculate_opening_candidate_metrics(
                 threshold=0,
             )
         period_return = net_premium / net_cash_basis
-        breakeven = strike - (net_premium / multiplier)
+        breakeven = _short_option_breakeven(strike, net_premium / multiplier, mode_norm)
         out.update(
             {
                 "assignment_notional": round(assignment_notional, 6),
@@ -665,8 +764,8 @@ def calculate_opening_candidate_metrics(
                 "annualized_net_return": round(period_return * 365.0 / dte, 10),
                 "annualized_net_return_on_cash_basis": round(period_return * 365.0 / dte, 10),
                 "breakeven": round(breakeven, 6),
-                "net_assignment_discount_pct": round((spot - breakeven) / spot, 10),
-                "otm_pct": round((spot - strike) / spot, 10),
+                "net_assignment_discount_pct": round(_strike_distance_pct(spot, breakeven, mode_norm), 10),
+                "otm_pct": round(_strike_distance_pct(spot, strike, mode_norm), 10),
             }
         )
         return out
@@ -679,8 +778,8 @@ def calculate_opening_candidate_metrics(
             "period_net_premium_return": round(period_return, 10),
             "period_net_return": round(period_return, 10),
             "annualized_net_premium_return": round(period_return * 365.0 / dte, 10),
-            "strike_above_spot_pct": round((strike - spot) / spot, 10),
-            "strike_upside_margin_pct": round((strike - spot) / spot, 10),
+            "strike_above_spot_pct": round(_strike_distance_pct(spot, strike, mode_norm), 10),
+            "strike_upside_margin_pct": round(_strike_distance_pct(spot, strike, mode_norm), 10),
         }
     )
     avg_cost_value = _coerce_float(avg_cost)

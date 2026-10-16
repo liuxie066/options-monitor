@@ -14,6 +14,10 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     research = subparsers.add_parser("research", help="collect and archive Research evidence")
     commands = research.add_subparsers(dest="research_command", required=True)
 
+    distance = commands.add_parser("strike-distance", help="inspect explicit offline strike distances; never change decisions")
+    distance.add_argument("--input", required=True, help="synthetic or redacted offline JSON; no runtime discovery")
+    distance.add_argument("--threshold", action="append", default=[], help="experimental strategy=fraction; repeat per strategy")
+
     collect = commands.add_parser("collect", help="collect redacted evidence bundle")
     collect.add_argument("--scope", default="full", choices=("ledger", "candidate", "quality", "full"))
     collect.add_argument("--config-key", default=None, choices=("us", "hk"))
@@ -158,6 +162,17 @@ def handle_research_command(
     repo_base_fn: Callable[[], Path] = repo_base,
     research_collect_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    if args.research_command == "strike-distance":
+        from src.application.research.strike_distance import analyze_strike_distances, parse_distance_thresholds
+
+        try:
+            bundle = json.loads(Path(args.input).read_text(encoding="utf-8"))
+            # Python accepts NaN/Infinity, but the public JSON envelope must not.
+            json.dumps(bundle, allow_nan=False)
+            data = analyze_strike_distances(bundle, parse_distance_thresholds(args.threshold))
+        except (OSError, UnicodeError, ValueError, TypeError) as exc:
+            raise AgentToolError(code="INPUT_ERROR", message=f"invalid offline distance input: {exc}") from None
+        return build_response(tool_name="research.strike-distance", ok=True, data=data)
     if args.research_command == "storage-cleanup-preview":
         from src.application.research.historical_cleanup import build_historical_cleanup_preview
 

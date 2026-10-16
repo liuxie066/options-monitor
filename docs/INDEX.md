@@ -46,6 +46,7 @@
 - [Strategy Architecture](STRATEGY_ARCHITECTURE.md)：Cash-Secured Put (CSP)、Covered Call (CC)、Combo Yield 的开仓边界。
 - [Strategy Terminology](STRATEGY_TERMINOLOGY.md)：OM 内部策略命名与金融专业术语（Bullish Risk Reversal、Collar、Wheel 等）的对照。
 - [Candidate Strategy](candidate_strategy.md)：当前候选筛选、排序和 trace。
+- [Strike Distance Research](STRIKE_DISTANCE_RESEARCH.md)：显式离线距离展示、实验阈值对照及评估边界。
 - [CLI Product Contract](CLI_REFACTOR_PRD.md)：首次安装、日常管理和命令归属的已确认产品要求；操作说明以 README / Getting Started 为准。
 - [Futu Simulate Account Experience Scan PRD](FUTU_SIMULATE_ACCOUNT_EXPERIENCE_PRD.md)：
   面向富途模拟账户用户的 CSP、CC、Combo Yield 手动体验模式合同。
