@@ -56,6 +56,7 @@ def _opening_row(*, mode: str = "put", currency: str = "USD", **overrides):  # t
         "covered_contracts_available": 1,
     }
     row.update(overrides)
+    row.setdefault("spot_observed_at_utc", row["snapshot_received_at_utc"])
     return row
 
 

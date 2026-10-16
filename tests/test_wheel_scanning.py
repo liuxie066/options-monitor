@@ -531,6 +531,45 @@ def test_wheel_scan_preserves_partial_data_when_another_candidate_is_valid() -> 
     assert result["scope_results"][0]["reason_code"] == "partial_data"
 
 
+@pytest.mark.parametrize("direction", ["put", "call"])
+@pytest.mark.parametrize("ages,status,reason,count", [
+    ([300], "completed", "candidates_found", 1),
+    ([301], "unavailable", "data_unavailable", 0),
+    ([300, 301], "completed", "partial_data", 1),
+    ([None], "unavailable", "data_unavailable", 0),
+])
+def test_wheel_rechecks_underlier_source_age_at_decision(direction, ages, status, reason, count):
+    rows = [phase2_opening_row(_call_row(
+        option_type=direction, contract_symbol=f"NVDA-{direction}-{index}",
+        strike=99 if direction == "put" else 110, delta=-0.3 if direction == "put" else 0.3,
+        snapshot_received_at_utc=AS_OF.isoformat(), spot_age_seconds=0,
+        spot_observed_at_utc=None if age is None else (AS_OF - timedelta(seconds=age)).isoformat(),
+    )) for index, age in enumerate(ages)]
+    model = _read_model()
+    fee_context = {"exchange_rate_converter": _converter(),
+                   "stock_assignment_fee_fact_fn": lambda *_: {"basis": "estimated", "amount": 10}}
+    if direction == "put":
+        model["wheel_branches"] = [{
+            **model["batches"][0], "direction": "put", "wheel_branch_id": "stock-1",
+            "remaining_contracts": 1, "multiplier": 100, "principal_anchor": 10_010,
+            "realized_put_net_pnl_in_current_stage": 0, "currency": "USD",
+        }]
+        result = run_wheel_put_scan(
+            model, _policy(), {"frames": {"NVDA": pd.DataFrame(rows)}}, fee_context,
+            decision_time_ms=int(AS_OF.timestamp() * 1000),
+        )
+    else:
+        result = run_wheel_call_scan(
+            model, _policy(), {"frames": {"NVDA": pd.DataFrame(rows)}}, {}, fee_context,
+            decision_time_ms=int(AS_OF.timestamp() * 1000),
+        )
+    scope = result["scope_results"][0]
+    assert (scope["status"], scope["reason_code"]) == (status, reason)
+    assert len(result["raw_candidates"]["stock-1"]) == len(result["capacity_claims"]) == count
+    for record in result["calculation_decisions"]:
+        assert record["opening_decision"]["rejects"][0]["reason"] == "evidence_unavailable"
+
+
 def test_partial_capacity_grant_recomputes_final_candidate_economics() -> None:
     model = _read_model()
     model["batches"][0]["shares_remaining"] = 200

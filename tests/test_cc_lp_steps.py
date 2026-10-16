@@ -74,6 +74,7 @@ def _put_row(**overrides) -> dict:
         "symbol": "NVDA",
         "option_type": "put",
         "snapshot_received_at_utc": DECISION_NOW.isoformat(),
+        "spot_observed_at_utc": DECISION_NOW.isoformat(),
         "expiration": "2026-08-28",
         "dte": 20,
         "contract_symbol": "NVDA260828P90000",

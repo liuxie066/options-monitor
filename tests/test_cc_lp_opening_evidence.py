@@ -101,7 +101,8 @@ def _normalized_put(*, chain_changes=None, snapshot_changes=None):
         "snapshot_received_at_utc", "option_standard_type", "stock_owner",
     )})
     row.update(opening_contract_status=observation.status,
-               opening_contract_reason_codes=list(observation.reason_codes))
+               opening_contract_reason_codes=list(observation.reason_codes),
+               spot_observed_at_utc=underlier.observed_at_utc)
     return row
 
 
