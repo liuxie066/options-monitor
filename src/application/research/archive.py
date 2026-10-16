@@ -186,7 +186,7 @@ if runs_root.exists() and runs_root.is_dir():
             "scheduler": scheduler_summary(item),
             "critical_files": critical,
             "file_manifest": files,
-            "content_digest": hashlib.sha256(json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
+            "content_digest": hashlib.sha256(json.dumps(files, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
             "scan_blob_refs": blob_refs,
             "scan_blob_reference_status": blob_status,
             "scan_blob_reference_error": blob_error,
@@ -368,7 +368,7 @@ def archive_pull(
                     live_item = next(
                         (
                             item
-                            for item in _run_inventory(root / "output_runs", base=base)
+                            for item in _run_inventory(root / "output_runs", base=base, run_ids=[run_id])
                             if item.get("run_id") == run_id
                         ),
                         {},
