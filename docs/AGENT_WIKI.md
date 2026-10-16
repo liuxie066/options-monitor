@@ -444,6 +444,10 @@ When remote storage is constrained, use the shared Research archive surfaces:
 The default local archive is `output_shared/research/remote_archive/prod/`.
 `pull` is a dry run unless `--write` is passed; inventory and verify do not
 authorize a remote cleanup.
+Verify reports current local structure without rewriting or refreshing the
+source-bound `inventory.latest.json` from `pull --write`. If that evidence is
+missing, repeat `pull --write` from the intended SSH source. Pruning still checks
+the current source identity, local and remote contents, and cleanup plan.
 
 ### Tick Runtime
 

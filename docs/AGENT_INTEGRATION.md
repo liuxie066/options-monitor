@@ -241,6 +241,11 @@ inspection. This workflow must not call online AI providers, mutate runtime conf
 write trade state, or send notifications. Archive pull is a dry run unless
 `--write` is supplied.
 
+Archive verify reports current local structure without rewriting the source-bound
+`inventory.latest.json` saved by `pull --write`. It does not refresh source evidence
+or authorize cleanup. Missing evidence requires another `pull --write` from the
+intended SSH source; pruning still rechecks current source identity and both copies.
+
 ## Inbound Remote Messages
 
 Human-facing names are `om bot` and `om channel feishu`. Legacy `assistant` / `inbound` aliases remain compatible; internal configuration keys are unchanged.

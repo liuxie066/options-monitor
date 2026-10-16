@@ -494,9 +494,10 @@ def archive_verify(
         "runs": runs,
         "shared": shared,
     }
-    manifests = root / "manifests"
-    manifests.mkdir(parents=True, exist_ok=True)
-    _write_json(manifests / "inventory.latest.json", data)
+    if source_identity is not None or source_run_inventory is not None:
+        manifests = root / "manifests"
+        manifests.mkdir(parents=True, exist_ok=True)
+        _write_json(manifests / "inventory.latest.json", data)
     return data
 
 
@@ -527,7 +528,7 @@ def archive_prune_remote(
             "remote": _safe_label(remote or DEFAULT_REMOTE),
             "archive_root": str(root),
             "status": "missing_verified_inventory",
-            "reason": "run archive verify before remote pruning",
+            "reason": "run archive pull --write with the intended SSH source before remote pruning",
         }
     source_identity = latest.get("source_identity")
     source_identity = source_identity if isinstance(source_identity, dict) else {}
