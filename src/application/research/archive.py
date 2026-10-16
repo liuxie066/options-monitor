@@ -186,7 +186,7 @@ if runs_root.exists() and runs_root.is_dir():
             "scheduler": scheduler_summary(item),
             "critical_files": critical,
             "file_manifest": files,
-            "content_digest": hashlib.sha256(json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
+            "content_digest": hashlib.sha256(json.dumps(files, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
             "scan_blob_refs": blob_refs,
             "scan_blob_reference_status": blob_status,
             "scan_blob_reference_error": blob_error,
@@ -368,7 +368,7 @@ def archive_pull(
                     live_item = next(
                         (
                             item
-                            for item in _run_inventory(root / "output_runs", base=base)
+                            for item in _run_inventory(root / "output_runs", base=base, run_ids=[run_id])
                             if item.get("run_id") == run_id
                         ),
                         {},
@@ -494,9 +494,10 @@ def archive_verify(
         "runs": runs,
         "shared": shared,
     }
-    manifests = root / "manifests"
-    manifests.mkdir(parents=True, exist_ok=True)
-    _write_json(manifests / "inventory.latest.json", data)
+    if source_identity is not None or source_run_inventory is not None:
+        manifests = root / "manifests"
+        manifests.mkdir(parents=True, exist_ok=True)
+        _write_json(manifests / "inventory.latest.json", data)
     return data
 
 
@@ -527,7 +528,7 @@ def archive_prune_remote(
             "remote": _safe_label(remote or DEFAULT_REMOTE),
             "archive_root": str(root),
             "status": "missing_verified_inventory",
-            "reason": "run archive verify before remote pruning",
+            "reason": "run archive pull --write with the intended SSH source before remote pruning",
         }
     source_identity = latest.get("source_identity")
     source_identity = source_identity if isinstance(source_identity, dict) else {}

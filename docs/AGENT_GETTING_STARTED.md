@@ -119,6 +119,8 @@ healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap
 
 Research 不属于 `./om-agent` manifest，也不能修改 runtime config、交易状态或通知，但它不是统一的“零写入”命令组：`collect --no-write-outputs`、archive inventory 和 archive verify 是只读；archive pull 只有显式 `--write` 才拉取并写入本地归档。执行前应查看具体子命令的 `--help` 和输出参数。线上调度系统的状态需要通过 `scheduler_evidence` 或 `--scheduler-evidence-json` 传入。
 
+`archive verify` 只报告当前本地结构，不刷新或覆盖 `pull --write` 保存的来源校验证据。远端清理仍需匹配该来源证据，并重新检查当前两端内容；缺少证据时，应针对预期 SSH 来源重新执行 `archive pull --write`。
+
 ---
 
 ## 7. 常见环境变量
