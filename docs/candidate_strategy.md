@@ -60,6 +60,10 @@
   它只作为最新价活跃度诊断，不再作为候选可用性门槛。
 - 期权候选的 5 分钟窗口约束的是 OM 取得 OpenD snapshot 到完成候选决策的时间
   （`snapshot_age_seconds <= 300`），用每批请求的 request/receive receipt 证明。
+- 每行保留产生该记录的成功批次 receipt：request 包含该批等待和重试的窗口，receive
+  在返回后、记录转换前取得。后续批次或 fallback 不刷新已取得记录的时间；fallback
+  只为新返回记录赋值。整次 fetch 的最早 request / 最晚 receive 仅作汇总诊断，
+  不填补行级缺失时间；候选与估值适配器均逐字段使用对应记录的 receipt。
 - 统一开仓证据入口在同一决策时钟下分别复核 `spot_observed_at_utc` 的源报价年龄和
   `snapshot_received_at_utc` 的取得年龄；显式回放时钟同样适用。源报价时间必须带时区，
   缺失、非法、未来或超过 300 秒均为 `evidence_unavailable`，恰好 300 秒仍可继续校验。

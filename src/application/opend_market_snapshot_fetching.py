@@ -507,6 +507,7 @@ def fetch_option_snapshots(
     rate_limited_call: Callable[..., Any] = rate_limited_opend_call,
     classify_error: Callable[[Any], str] = classify_option_chain_error,
 ) -> MarketSnapshotFetchResult:
+    """Keep each option's batch receipt; result receipt bounds summarize all attempts."""
     snap_map: dict[str, dict[str, Any]] = {}
     snapshot_errors: list[dict[str, Any]] = []
     batch_requested_at: list[datetime] = []
@@ -526,7 +527,8 @@ def fetch_option_snapshots(
 
     for start in range(0, len(requested_code_order), batch_size):
         batch = list(requested_code_order[start : start + batch_size])
-        batch_requested_at.append(datetime.now(timezone.utc))
+        requested_at = datetime.now(timezone.utc)
+        batch_requested_at.append(requested_at)
         try:
             def _call_snapshot(batch0: list[str] = batch) -> Any:
                 def _gateway_snapshot_call() -> Any:
@@ -562,7 +564,8 @@ def fetch_option_snapshots(
                 }
             )
             snap = None
-        batch_received_at.append(datetime.now(timezone.utc))
+        received_at = datetime.now(timezone.utc)
+        batch_received_at.append(received_at)
         if snap is None or snap.empty:
             continue
 
@@ -570,6 +573,9 @@ def fetch_option_snapshots(
         if not keep:
             continue
 
+        for record in records:
+            record["snapshot_requested_at_utc"] = requested_at.isoformat()
+            record["snapshot_received_at_utc"] = received_at.isoformat()
         _merge_snapshot_records(
             records=records,
             requested_codes=requested_codes,
@@ -759,7 +765,8 @@ def _fallback_fetch_missing_snapshots(
     batch_size = max(1, int(fallback_batch_size))
     for start in range(0, len(allowed), batch_size):
         batch = allowed[start : start + batch_size]
-        fallback_requested_at.append(datetime.now(timezone.utc))
+        requested_at = datetime.now(timezone.utc)
+        fallback_requested_at.append(requested_at)
         try:
             def _call_fallback_snapshot(batch0: list[str] = batch) -> Any:
                 def _gateway_fallback_snapshot_call() -> Any:
@@ -798,6 +805,8 @@ def _fallback_fetch_missing_snapshots(
             fallback_received_at.append(datetime.now(timezone.utc))
             continue
 
+        received_at = datetime.now(timezone.utc)
+        fallback_received_at.append(received_at)
         if snap is None or snap.empty:
             snapshot_errors.append(
                 {
@@ -809,7 +818,6 @@ def _fallback_fetch_missing_snapshots(
                 }
             )
             failed_count += len(batch)
-            fallback_received_at.append(datetime.now(timezone.utc))
             continue
 
         records, keep = keep_snapshot_record_columns(snap, keep_columns)
@@ -824,10 +832,11 @@ def _fallback_fetch_missing_snapshots(
                 }
             )
             failed_count += len(batch)
-            fallback_received_at.append(datetime.now(timezone.utc))
             continue
-        fallback_received_at.append(datetime.now(timezone.utc))
 
+        for record in records:
+            record["snapshot_requested_at_utc"] = requested_at.isoformat()
+            record["snapshot_received_at_utc"] = received_at.isoformat()
         batch_codes = set(batch)
         filled_before = len(batch_codes.intersection(snap_map))
         _merge_snapshot_records(

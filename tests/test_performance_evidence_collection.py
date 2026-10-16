@@ -284,8 +284,13 @@ def test_default_option_collection_is_one_nonblocking_exact_code_batch(monkeypat
         calls["snapshot_kwargs"] = kwargs
         return SimpleNamespace(
             snap_map={
-                "US.STORED": {"code": "US.STORED", "last_price": 1.1},
-                "US.DISCOVERED": {"code": "US.DISCOVERED", "last_price": 1.2},
+                code: {
+                    "code": code,
+                    "last_price": price,
+                    "snapshot_requested_at_utc": "2026-08-24T08:00:00+00:00",
+                    "snapshot_received_at_utc": "2026-08-24T08:00:00.100000+00:00",
+                }
+                for code, price in (("US.STORED", 1.1), ("US.DISCOVERED", 1.2))
             },
             requested_at_utc="2026-08-24T08:00:00+00:00",
             received_at_utc="2026-08-24T08:00:00.100000+00:00",
@@ -297,6 +302,7 @@ def test_default_option_collection_is_one_nonblocking_exact_code_batch(monkeypat
     )
     monkeypatch.setattr("src.application.option_chain_fetching.fetch_option_chains", fake_chain)
     monkeypatch.setattr("src.application.opend_market_snapshot_fetching.fetch_option_snapshots", fake_snapshots)
+    monkeypatch.setattr("src.application.opend_utils.load_runtime_symbol_aliases", lambda *_: {})
 
     rows = _default_option_snapshot_rows([stored, unresolved], cfg={}, base_dir=tmp_path)
 
