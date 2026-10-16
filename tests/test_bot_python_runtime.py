@@ -364,13 +364,20 @@ def test_source_lines_are_numbered_without_mutating_original():
 
 
 def test_opening_policy_fits_one_host_observation():
+    import inspect
+
+    from domain.domain.engine import evaluate_opening_candidate_policy
     from src.application.bot.tools import call_read_tool, conservative_json_tokens, model_observation
+
+    source, start_line = inspect.getsourcelines(evaluate_opening_candidate_policy)
+    earnings_rule = 'known earnings event falls within six calendar days'
+    earnings_line = start_line + next(index for index, line in enumerate(source) if earnings_rule in line)
     payload={'action':'read','resource':'project',
              'relative_name':'domain/domain/engine/candidate_engine.py',
-             'start_line':661,'max_lines':300}
+             'start_line':start_line,'max_lines':300}
     response=call_read_tool('project_files',payload,allowed_tools=('project_files',))
     observation=model_observation('project_files',response)
     assert observation['ok'], observation
-    assert 'known earnings event falls within six calendar days' in observation['data']['text']
-    assert observation['data']['body_range']['end_line'] >= 928
+    assert earnings_rule in observation['data']['text']
+    assert observation['data']['body_range']['end_line'] >= earnings_line
     assert conservative_json_tokens(observation) <= 8000
