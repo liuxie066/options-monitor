@@ -415,7 +415,13 @@ class _FutuAPIClient:
         return result
 
     @staticmethod
-    def _rows(value: Any) -> list[dict[str, Any]]:
+    def _rows(value: Any, *, strict: bool = False) -> list[dict[str, Any]]:
+        if strict:
+            records = futu_dataframe_records(value) if callable(getattr(value, "to_dict", None)) else value
+            if (not isinstance(records, (list, tuple))
+                    or any(not isinstance(item, dict) for item in records)):
+                raise ValueError("Futu complete query rows are incomplete or malformed")
+            return [dict(item) for item in records]
         if value is None:
             return []
         to_dict = getattr(value, "to_dict", None)
@@ -477,15 +483,15 @@ class _FutuAPIClient:
                 call_kwargs["page_req_key"] = page_req_key
             result = method(**call_kwargs)
             pages += 1
-            if isinstance(result, tuple) and len(result) >= 2:
-                ret, data = result[0], result[1]
-                if ret not in (ret_ok, 0, None):
-                    raise RuntimeError(data)
-                rows.extend(self._rows(data))
-                next_key = result[2] if len(result) >= 3 else None
-            else:
-                rows.extend(self._rows(result))
-                next_key = None
+            if not isinstance(result, tuple) or len(result) < 2:
+                raise ValueError("Futu complete query lacks a success receipt")
+            ret, data = result[0], result[1]
+            if ret not in (ret_ok, 0):
+                raise RuntimeError(data)
+            rows.extend(self._rows(data, strict=True))
+            next_key = result[2] if len(result) >= 3 else None
+            if not paginated and next_key not in (None, "", b""):
+                raise ValueError("Futu complete query has unconsumed pagination")
             if not paginated or next_key in (None, "", b""):
                 break
             if next_key in seen_page_keys:
@@ -543,6 +549,9 @@ class _FutuAPIClient:
                 trade.order_list_query(**self._trade_kwargs(kwargs))
             )
         raise AttributeError("order_list_query unavailable")
+
+    def get_order_list_with_receipt(self, **kwargs: Any) -> Any:
+        return self._query_with_coverage(self._trade().order_list_query, paginated=False, kwargs=kwargs)
 
     def get_deal_list(self, **kwargs: Any) -> Any:
         trade = self._trade()
@@ -955,6 +964,13 @@ class FutuGateway:
             return self.client.get_order_list(**kwargs)
         except Exception as exc:
             self._raise_mapped(exc, action="get_order_list")
+        raise AssertionError("unreachable")
+
+    def get_order_list_with_receipt(self, **kwargs: Any) -> Any:
+        try:
+            return self.client.get_order_list_with_receipt(**kwargs)
+        except Exception as exc:
+            self._raise_mapped(exc, action="get_order_list_with_receipt")
         raise AssertionError("unreachable")
 
     def get_deal_list(self, **kwargs: Any) -> Any:

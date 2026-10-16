@@ -22,7 +22,7 @@ from src.application.ledger.api import (
     read_trade_attribution_snapshot, open_trade_attribution_snapshot_reader, trade_attribution_facts_from_events,
     encode_evidence_cursor, decode_evidence_cursor, TradeEventPaginationError,
     combo_attribution_candidates_from_rows, ATTRIBUTION_POLICY_VERSION,
-    record_trade_attribution_conflicts,
+    record_trade_attribution_conflicts, ordinary_attribution_window,
 )
 from src.application.futu_quote_routing import runtime_config_market
 from src.application.write_contract import write_control
@@ -189,11 +189,16 @@ def _reconcile_trade_attribution_batch(
         key=lambda row: row["execution_key"])[:100]
     if not selected or stop_event is not None and stop_event.is_set():
         return {"status": "idle", "checked": 0, "next_cursor": ""}
-    result = {"checked": 0, "linked": 0, "conflicts": 0, "cache_updates": 0, "errors": [], "next_cursor": cursor}
+    result = {"checked": 0, "linked": 0, "ordinary": 0, "conflicts": 0, "cache_updates": 0, "errors": [], "next_cursor": cursor}
     evidence = read_attribution_combo_evidence(rows, account=account, runtime_root=runtime_root, now_ms=int(time.time() * 1000))
     if stop_event is not None and stop_event.is_set():
         return result
-    observation = observe_trade_attribution_capacity(config=dict(config), account=account, runtime_root=runtime_root, stop_event=stop_event)
+    now_ms = int(time.time() * 1000)
+    history_starts = [ordinary_attribution_window(fact)[0] for fact in selected
+        if fact["position_side"] == "short" and fact["status"] == "pending" and fact["origin"] != "manual"
+        and fact["contracts_open"] > 0 and not fact["reason_codes"] and ordinary_attribution_window(fact)[1] <= now_ms]
+    observation = observe_trade_attribution_capacity(config=dict(config), account=account, runtime_root=runtime_root,
+        stop_event=stop_event, **({"ordinary_history_start_ms": min(history_starts)} if history_starts else {}))
     if stop_event is not None and stop_event.is_set():
         return result
     view = None
@@ -239,7 +244,7 @@ def _reconcile_trade_attribution_batch(
                 after_view = build_trade_attribution_view(committed, config=config, account=account, market=market,
                     now_ms=int(time.time() * 1000), combo_evidence=evidence, capacity_observation=observation, combo_mode=combo_mode)
                 current = next(row for row in after_view["rows"] if row["execution_key"] == current["execution_key"])
-                result["linked"] += int(applied["write_applied"])
+                result["ordinary" if current["status"] == "ordinary" else "linked"] += int(applied["write_applied"])
             elif (current["status"] == "conflict" and current["rules_enabled"]
                     and "unresolved_attribution_conflict" not in current["reason_codes"]):
                 action_attempted = True

@@ -405,7 +405,10 @@ from .wheel_policy_binding import (
     WheelPolicyBindingReplayError, build_wheel_policy_binding_request, record_wheel_policy_binding, wheel_policy_file_identity,
 )
 
+from .ordinary_attribution import ordinary_attribution_window as ordinary_attribution_window
+
 __all__ = [
+    "ordinary_attribution_window",
     'WheelPolicyBindingReplayError',
     'build_wheel_policy_binding_request',
     'record_wheel_policy_binding',

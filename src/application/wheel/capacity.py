@@ -14,7 +14,9 @@ from domain.domain.risk_capacity import (
     allocate_wheel_put_cash_capacity,
     withdraw_opening_share_capacity_grants,
 )
-from src.application.futu_portfolio_context import fetch_futu_portfolio_context
+from src.application.futu_portfolio_context import (
+    fetch_futu_portfolio_context, infer_futu_portfolio_settings, resolve_futu_account_ids,
+)
 from src.application.portfolio_context_service import (
     portfolio_position_snapshot_errors,
     load_account_portfolio_context,
@@ -36,8 +38,42 @@ from src.application.ledger.api import (
 )
 
 
-def _attribution_capacity_worker(connection: Any, config: dict[str, Any], account: str, runtime_root: Path) -> None:
+def _read_ordinary_attribution_broker_evidence(*, config: Mapping[str, Any], account: str,
+                                               runtime_root: Path, start_ms: int) -> dict[str, Any]:
+    from src.infrastructure.futu_history_deals import OpenDHistoryDealClient
+    from src.application.trades.normalizer import normalize_trade_deal
+
+    ids = resolve_futu_account_ids(config, account=account)
+    settings = infer_futu_portfolio_settings(config, account=account)
+    if len(ids) != 1 or str(settings.get("trd_env") or "").upper() != "REAL":
+        raise ValueError("ordinary attribution requires one REAL physical account")
+    physical = next(iter(ids))
+    scope = {"broker_id": "futu", "external_account_id": physical, "environment": "REAL", "account": account}
+    client = OpenDHistoryDealClient(host=str(settings.get("host") or "127.0.0.1"),
+                                   port=int(settings.get("port") or 11111))
     try:
+        evidence = client.fetch_attribution_evidence(futu_account_id=physical, start_ms=start_ms)
+        evidence["executions"] = [normalize_trade_deal(payload,
+            futu_account_mapping={physical: account}, repo_base=runtime_root, runtime_root=runtime_root,
+            config=dict(config), allow_opend_refresh=False).execution_input for payload in evidence.pop("deals")]
+        evidence["scope"] = scope
+        for name in ("current_orders", "history_orders"):
+            evidence[name]["scope"] = scope
+        return evidence
+    finally:
+        client.close()
+
+
+def _attribution_capacity_worker(connection: Any, config: dict[str, Any], account: str, runtime_root: Path,
+                                 ordinary_history_start_ms: int | None = None) -> None:
+    try:
+        ordinary = None
+        if ordinary_history_start_ms is not None:
+            try:
+                ordinary = _read_ordinary_attribution_broker_evidence(config=config, account=account,
+                    runtime_root=runtime_root, start_ms=ordinary_history_start_ms)
+            except Exception as exc:
+                ordinary = {"error": type(exc).__name__}
         cache_path = runtime_root / "output_shared" / "state" / "rate_cache.json"
         try:
             fx = project_exchange_rate_snapshot(current_exchange_rate_snapshot(cache_path=cache_path, write_cache=False), purpose="capacity")
@@ -51,15 +87,17 @@ def _attribution_capacity_worker(connection: Any, config: dict[str, Any], accoun
             fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
             include_options=True, write_cache=False, exchange_rate_observation=fx,
             exchange_rate_cache_path=cache_path,
+            **({"load_json_fn": lambda _: None} if ordinary and not ordinary.get("error") else {}),
         )
-        connection.send({"portfolio": portfolio})
+        connection.send({"portfolio": portfolio, **({"ordinary_evidence": ordinary} if ordinary else {})})
     except Exception as exc:
         connection.send({"error": type(exc).__name__})
     finally:
         connection.close()
 
 
-def observe_trade_attribution_capacity(*, config: dict[str, Any], account: str, runtime_root: Path, stop_event: Any = None) -> dict[str, Any]:
+def observe_trade_attribution_capacity(*, config: dict[str, Any], account: str, runtime_root: Path,
+                                       stop_event: Any = None, ordinary_history_start_ms: int | None = None) -> dict[str, Any]:
     """One physical-account observation, with a cancellable ten-second I/O budget."""
     import multiprocessing
     import time
@@ -68,7 +106,10 @@ def observe_trade_attribution_capacity(*, config: dict[str, Any], account: str, 
         return {"error": "cancelled"}
     context = multiprocessing.get_context("spawn")
     receiver, sender = context.Pipe(duplex=False)
-    process = context.Process(target=_attribution_capacity_worker, args=(sender, config, account, Path(runtime_root).resolve()), daemon=True)
+    args = (sender, config, account, Path(runtime_root).resolve())
+    if ordinary_history_start_ms is not None:
+        args += (ordinary_history_start_ms,)
+    process = context.Process(target=_attribution_capacity_worker, args=args, daemon=True)
     deadline = time.monotonic() + 10
     try:
         process.start()
