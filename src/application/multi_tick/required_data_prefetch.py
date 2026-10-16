@@ -802,6 +802,9 @@ def _fetch_symbol_for_required_data_request(
         expiration_max_wait_sec=request.expiration_max_wait_sec,
         expiration_window_sec=request.expiration_window_sec,
         expiration_max_calls=request.expiration_max_calls,
+        history_kline_max_wait_sec=request.history_kline_max_wait_sec,
+        history_kline_window_sec=request.history_kline_window_sec,
+        history_kline_max_calls=request.history_kline_max_calls,
         include_realized_volatility=request.include_realized_volatility,
     )
 
