@@ -114,3 +114,27 @@ def test_optional_history_failure_retains_portfolio_and_success_forces_fresh_sna
     assert calls==["history", "portfolio"] and connection.closed
     assert connection.result["portfolio"]
     assert bool(connection.result["ordinary_evidence"].get("error")) is failed
+
+
+@pytest.mark.parametrize("method", ["get_order_list_with_receipt", "get_history_deals"])
+@pytest.mark.parametrize("rows", [None, {"error":"unavailable"}, [{"order_id":"1"}, "malformed"]])
+def test_native_coverage_receipts_reject_unknown_or_dropped_rows(monkeypatch, method, rows):
+    client = _FutuAPIClient(SimpleNamespace(), is_option_chain_cache_enabled=False)
+    query = lambda **kwargs: (0, rows)
+    monkeypatch.setattr(client, "_trade", lambda: SimpleNamespace(order_list_query=query, history_deal_list_query=query))
+    with pytest.raises(ValueError, match="incomplete or malformed"):
+        getattr(client, method)(acc_id="1001")
+
+
+@pytest.mark.parametrize("response,paginated", [([], False), ((None, []), False), ((0, [], b"next"), False)])
+def test_native_coverage_requires_explicit_success_and_complete_pagination(response, paginated):
+    client = _FutuAPIClient(SimpleNamespace(), is_option_chain_cache_enabled=False)
+    with pytest.raises((ValueError, RuntimeError)):
+        client._query_with_coverage(lambda **kwargs: response, paginated=paginated, kwargs={})
+
+
+def test_native_history_preserves_sdk_two_item_complete_response():
+    client = _FutuAPIClient(SimpleNamespace(), is_option_chain_cache_enabled=False)
+    receipt = client._query_with_coverage(lambda **kwargs: (0, []), paginated=True, kwargs={})
+    assert receipt["coverage_complete"] is receipt["pagination_complete"] is True
+    assert receipt["rows"]==[]

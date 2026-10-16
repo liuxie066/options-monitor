@@ -24,6 +24,24 @@ def ordinary_attribution_window(fact: Mapping[str, Any]) -> tuple[int, int]:
     return int(start.timestamp() * 1000), int((start + timedelta(days=1)).timestamp() * 1000)
 
 
+
+def ordinary_attribution_is_unopposed(*, fact: Mapping[str, Any], facts: Sequence[Mapping[str, Any]],
+                                      proposals: Sequence[Mapping[str, Any]]) -> bool:
+    if any(not item["candidate_id"].startswith("combo-exposure:") for item in proposals):
+        return False
+    if fact["contract_key"]["option_type"] != "put":
+        return True
+    start, _ = ordinary_attribution_window(fact)
+    # Inspect all openings: asymmetric, closed and already claimed counterparts still count.
+    return not any(
+        other["position_side"] == "long" and other["contract_key"]["option_type"] == "call"
+        and other["broker_account_ref"] == fact["broker_account_ref"]
+        and other["contract_key"]["underlying_symbol"] == fact["contract_key"]["underlying_symbol"]
+        and other["contract_key"]["expiration_ymd"] == fact["contract_key"]["expiration_ymd"]
+        and ordinary_attribution_window(other)[0] == start for other in facts
+    )
+
+
 def ordinary_attribution_basis(
     *, fact: Mapping[str, Any], facts: Sequence[Mapping[str, Any]], events: Sequence[Mapping[str, Any]],
     proposals: Sequence[Mapping[str, Any]], exposures: Sequence[Mapping[str, Any]],
@@ -32,7 +50,7 @@ def ordinary_attribution_basis(
     """Absence needs complete source facts, never an empty candidate list alone."""
     if (fact["position_side"] != "short" or fact["reason_codes"] or fact["status"] == "linked"
             or fact["origin"] == "manual" or fact["contracts_open"] <= 0
-            or any(not item["candidate_id"].startswith("combo-exposure:") for item in proposals)):
+            or not ordinary_attribution_is_unopposed(fact=fact, facts=facts, proposals=proposals)):
         return None
     try:
         start, cutoff = ordinary_attribution_window(fact)
@@ -41,15 +59,6 @@ def ordinary_attribution_basis(
             return None
         cutoff = max([cutoff, *[int(item["valid_until_ms"]) for item in matched]])
         if now_ms < cutoff:
-            return None
-        # Inspect all openings: asymmetric, closed and already claimed counterparts still count.
-        if fact["contract_key"]["option_type"] == "put" and any(
-            other["position_side"] == "long" and other["contract_key"]["option_type"] == "call"
-            and other["broker_account_ref"] == fact["broker_account_ref"]
-            and other["contract_key"]["underlying_symbol"] == fact["contract_key"]["underlying_symbol"]
-            and other["contract_key"]["expiration_ymd"] == fact["contract_key"]["expiration_ymd"]
-            and ordinary_attribution_window(other)[0] == start for other in facts
-        ):
             return None
         evidence = observation.get("ordinary_evidence") or {}
         ref = fact["broker_account_ref"]

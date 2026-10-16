@@ -319,3 +319,27 @@ def test_uncovered_short_call_and_long_call_cannot_auto_become_cc(tmp_path, monk
     _persist(repo, _execution(key="long-call", option="call", side="buy"))
     long = next(row for row in _view(repo, context)["rows"] if row["open_event_id"]=="long-call")
     assert long["selected_candidate_id"] is None and long["ordinary_basis"] is None
+
+
+@pytest.mark.parametrize("history_complete", [False, True])
+def test_durable_rule_ordinary_stays_ordinary_in_read_only_views(tmp_path, monkeypatch, history_complete):
+    repo, context = _scope(tmp_path, monkeypatch)
+    apply_trade_attribution(repo, **_args(repo, context))
+    read_context = {**context, "capacity_observation": None,
+        "combo_evidence":{**context["combo_evidence"], "complete":history_complete}}
+    before = repo.list_trade_events()
+    row, = _view(repo, read_context)["rows"]
+    assert row["status"]=="ordinary" and row["origin"]=="rule"
+    assert row["selected_candidate_id"] is None
+    assert "existing_ordinary_preserved" in row["reason_codes"]
+    from src.application import daily_decision_brief_service as brief
+    monkeypatch.setattr(brief, "resolve_position_ledger_sqlite_path", lambda **kwargs: repo.db_path)
+    monkeypatch.setattr(attribution, "read_attribution_combo_evidence", lambda *args, **kwargs: read_context["combo_evidence"])
+    pending, error = brief._pending_attribution_for_brief(base=tmp_path, config=context["config"],
+        account="lx", market="us", now_ms=NOW)
+    assert error is None and pending==[]
+    assert repo.list_trade_events()==before
+    _persist(repo, _execution(key="late-unmatched", option="call", side="buy", quantity=2, strike=110))
+    read_context["combo_evidence"]={"complete":False, "exposures":[]}
+    row = next(row for row in _view(repo, read_context)["rows"] if row["open_event_id"]=="fill")
+    assert row["status"]=="pending" and row["selected_candidate_id"] is None

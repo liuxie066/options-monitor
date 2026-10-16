@@ -37,7 +37,7 @@ from domain.domain import risk_capacity
 from src.application.portfolio_context_service import evaluate_account_cash_snapshot, cash_snapshot_is_usable
 from src.infrastructure.exchange_rates import capacity_currency_converter
 from .assigned_stock_projection import build_wheel_read_model_from_rows, build_wheel_read_model_with_capacity_from_rows
-from .ordinary_attribution import ordinary_attribution_basis
+from .ordinary_attribution import ordinary_attribution_basis, ordinary_attribution_is_unopposed
 
 
 ATTRIBUTION_POLICY_VERSION = "trade_attribution.v2"
@@ -865,6 +865,9 @@ def build_trade_attribution_view(
                             (lot_scope.get("market"), lot_scope.get("market_date"))]
             complete = len(scoped_reads) == 1 and scoped_reads[0].get("complete") is True
         complete = complete and not fact["reason_codes"]
+        preserving_ordinary = (fact["status"] == "ordinary" and fact["origin"] == "rule"
+            and existing["status"] != "conflict" and not fact["reason_codes"]
+            and ordinary_attribution_is_unopposed(fact=fact, facts=account_facts, proposals=proposals))
         ordinary_basis = None
         if complete and existing["status"] != "conflict":
             ordinary_basis = ordinary_attribution_basis(fact=fact, facts=account_facts,
@@ -901,12 +904,12 @@ def build_trade_attribution_view(
                         "proposal_expires_at_ms", "strategy_group_id")} for pair in rows.get("account_combo_inferences") or []),
                         key=lambda pair: pair["inference_id"]),
                     "wheel_evidence": sorted((event["event_id"], event["payload_hash"]) for event in wheel_events)}
-        results.append({**fact, "status": "pending" if selecting_ordinary else resolution.status,
+        results.append({**fact, "status": "ordinary" if preserving_ordinary else "pending" if selecting_ordinary else resolution.status,
             "candidate_ids": [item["candidate_id"] for item in proposals] if ordinary_basis else list(resolution.candidate_ids),
             "candidates": proposals, "ordinary_basis": ordinary_basis,
-            "reason_codes": sorted(set(fact["reason_codes"]) | ({"awaiting_ledger_commit"} if selecting_ordinary else set(resolution.reason_codes))),
+            "reason_codes": sorted(set(fact["reason_codes"]) | ({"existing_ordinary_preserved"} if preserving_ordinary else {"awaiting_ledger_commit"} if selecting_ordinary else set(resolution.reason_codes))),
             "ordinary_previewable": fact["ordinary_previewable"] and not fact["reason_codes"],
-            "selected_candidate_id": ("ordinary" if selecting_ordinary else resolution.selected_candidate_id) if enabled else None, "rules_enabled": enabled,
+            "selected_candidate_id": ("ordinary" if selecting_ordinary else resolution.selected_candidate_id) if enabled and not preserving_ordinary else None, "rules_enabled": enabled,
             "input_hash": canonical_sha256(semantic), "evaluated_at_ms": now_ms, "evidence_complete": complete,
             "capacity_evidence": {
                 "semantic_sha256": canonical_sha256(capacity_evidence),
