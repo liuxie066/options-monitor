@@ -7,8 +7,6 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime
-import hashlib
-import json
 import math
 from typing import Any
 
@@ -16,7 +14,7 @@ from domain.domain.candidate_defaults import DEFAULT_SELL_CALL_WINDOW, DEFAULT_S
 from domain.domain.currency_conversion import (
     CurrencyConverter, ExchangeRates, covered_notional_cny, enrich_short_vol_contract_cny_fields,
 )
-from domain.domain.engine.candidate_engine import calculate_opening_candidate_metrics, rank_candidate_rows
+from domain.domain.engine.candidate_engine import CandidateCalculationError, calculate_opening_candidate_metrics, rank_candidate_rows
 from domain.domain.insurance_underwriting import (
     INSURANCE_UNDERWRITING_PROFILE, InsuranceUnderwritingConfig, evaluate_underwriting_candidate,
 )
@@ -27,6 +25,9 @@ from domain.domain.risk_capacity import (
 from domain.domain.sell_call_config import resolve_effective_sell_call_min_strike
 from domain.domain.short_vol_assessment import ShortVolPortfolioContext, _float, portfolio_concentration_fields
 from domain.domain.trade_contract_identity import require_option_multiplier
+from domain.domain.strategy_identity import (
+    strategy_policy_hash, validate_strategy_identity as _validated_strategy_identity,
+)
 
 __version__ = "0.1.0"
 
@@ -68,7 +69,7 @@ class ResolvedStrategy:
                 continue
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                 raise ValueError(f"{name} must be finite numeric policy")
-            if value < 0 or (name in ("min_strike", "max_strike") and value == 0):
+            if value < 0 or (name in ("min_strike", "max_strike", "min_strike_cost_multiplier") and value == 0):
                 raise ValueError(f"{name} is out of range")
             if name in ("min_dte", "max_dte") and not isinstance(value, int):
                 raise ValueError(f"{name} must be an integer")
@@ -87,10 +88,6 @@ class ResolvedStrategy:
         baseline_parameters = asdict(baseline)
         for key in strike_inputs:
             baseline_parameters.pop(key)
-        policy_json = json.dumps(
-            {"parameters": parameters, "ranking_profile": self.ranking_profile},
-            sort_keys=True, separators=(",", ":"), allow_nan=False,
-        )
         return {
             "core_version": __version__,
             "template": f"{'csp' if self.mode == 'put' else 'cc'}_baseline",
@@ -100,7 +97,8 @@ class ResolvedStrategy:
                 else "custom"
             ),
             "strike_inputs": strike_inputs,
-            "effective_policy_hash": hashlib.sha256(policy_json.encode()).hexdigest(),
+            "effective_parameters": parameters,
+            "effective_policy_hash": strategy_policy_hash(parameters, self.ranking_profile),
             "ranking_profile": self.ranking_profile,
             "scope": {"account": self.account, "market": self.market, "mode": self.mode},
         }
@@ -114,6 +112,27 @@ def resolve_strategy(
     return ResolvedStrategy(mode, config, ranking_profile, account, market)
 
 
+def validate_strategy_identity(
+    row: dict[str, Any], *, mode: str, account: str | None = None, market: str | None = None,
+) -> ResolvedStrategy | None:
+    """Restore a validated resolution at the evaluation/application boundary."""
+    identity = _validated_strategy_identity(row, mode=mode, account=account, market=market)
+    if identity is None:
+        return None
+    try:
+        scope = identity["scope"]
+        strategy = resolve_strategy(
+            mode=scope["mode"], account=scope["account"], market=scope["market"],
+            config=InsuranceUnderwritingConfig(**identity["effective_parameters"], **identity["strike_inputs"]),
+            ranking_profile=identity["ranking_profile"],
+        )
+    except (KeyError, TypeError) as exc:
+        raise ValueError("invalid strategy policy identity") from exc
+    if {key: identity[key] for key in strategy.identity} != strategy.identity:
+        raise ValueError("strategy identity does not match effective policy")
+    return strategy
+
+
 def calculate_metrics(
     row: dict[str, Any], *, mode: str, now_utc: datetime,
     avg_cost: float | None = None, exchange_rates: ExchangeRates | None = None,
@@ -122,12 +141,12 @@ def calculate_metrics(
     _mode(mode)
     if not isinstance(now_utc, datetime) or now_utc.tzinfo is None or now_utc.utcoffset() is None:
         raise ValueError("now_utc must be a timezone-aware datetime")
+    metrics = calculate_opening_candidate_metrics(row, mode=mode, avg_cost=avg_cost, now_utc=now_utc)
     if mode == "call" and (
         isinstance(avg_cost, bool) or not isinstance(avg_cost, (int, float))
         or not math.isfinite(avg_cost) or avg_cost <= 0
     ):
-        raise ValueError("CC requires explicit positive finite avg_cost")
-    metrics = calculate_opening_candidate_metrics(row, mode=mode, avg_cost=avg_cost, now_utc=now_utc)
+        raise CandidateCalculationError("avg_cost_invalid", "CC requires explicit positive finite avg_cost")
     metrics.update(enrich_short_vol_contract_cny_fields(
         {**row, **metrics}, exchange_rate_converter=CurrencyConverter(exchange_rates or ExchangeRates()),
     ))
@@ -216,6 +235,9 @@ def evaluate_candidates(rows: list[dict[str, Any]], *, strategy: ResolvedStrateg
     decisions = []
     accepted = []
     for row in rows:
+        transported = validate_strategy_identity(row, mode=strategy.mode)
+        if transported is not None and transported != strategy:
+            raise ValueError("candidate identity conflicts with evaluated strategy")
         for field, expected in (("account", strategy.account), ("market", strategy.market), ("option_type", strategy.mode)):
             actual = row.get(field)
             if expected is not None and actual is not None and str(actual).lower() != expected:

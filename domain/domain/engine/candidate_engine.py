@@ -8,6 +8,7 @@ from decimal import Decimal, ROUND_CEILING
 from typing import Any, Literal
 
 from domain.domain.fee_calc import estimate_futu_option_sell_fee
+from domain.domain.strategy_identity import candidate_ranking_profile
 from domain.domain.trade_contract_identity import contract_share_quantity, require_option_multiplier
 
 
@@ -1400,13 +1401,14 @@ def explain_candidate_rank(
 ) -> dict[str, Any]:
     mode_norm = normalize_strategy_mode(mode)
     src = row if isinstance(row, dict) else {}
+    profile = candidate_ranking_profile([src], mode=mode_norm)
     rank_key = build_candidate_rank_key(src, mode=mode_norm)
     primary_drivers = [
         "period_net_return_on_cash_basis"
         if mode_norm == "put"
         else "period_net_premium_return"
     ]
-    return {
+    result = {
         "mode": mode_norm,
         "ranking_policy": "candidate_engine",
         "symbol": str(src.get("symbol") or "").strip().upper() or None,
@@ -1435,6 +1437,18 @@ def explain_candidate_rank(
             )
         ),
     }
+
+    if "strategy_core" in src:
+        result["strategy_core"] = src["strategy_core"]
+        result["ranking_profile"] = profile
+    if profile == "concentration_first":
+        result["primary_drivers"] = ["symbol_concentration_after", *primary_drivers]
+        result["primary_driver_labels"] = ["接货后集中度", *result["primary_driver_labels"]]
+        result["rank_reason"] = (
+            "同标的仍按持有期净收益分带选代表合约；跨标的先按接货后集中度从低到高分组，"
+            "未知集中度排后；同集中度组内按收益分带，再比较净接货折价、价差、OI 和净收入"
+        )
+    return result
 
 
 def _reject(
@@ -1594,10 +1608,13 @@ def rank_candidate_rows(
     rows: list[dict[str, Any]],
     *,
     mode: StrategyMode | str,
-    sell_put_ranking_profile: str = "current_tie_break",
+    sell_put_ranking_profile: str | None = None,
     near_return_threshold: float = OPENING_CANDIDATE_NEAR_RETURN_THRESHOLD,
 ) -> list[dict[str, Any]]:
     mode_norm = normalize_strategy_mode(mode)
+    sell_put_ranking_profile = candidate_ranking_profile(
+        rows, mode=mode_norm, explicit_profile=sell_put_ranking_profile,
+    )
     if sell_put_ranking_profile not in SELL_PUT_RANKING_PROFILES:
         raise ValueError(
             f"unsupported CSP ranking profile: {sell_put_ranking_profile}"

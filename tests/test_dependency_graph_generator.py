@@ -35,3 +35,16 @@ def test_dependency_graph_resolves_relative_imports_from_package_init() -> None:
     assert resolve_internal_imports("domain.services", node, modules) == [
         "domain.services.tool_execution_service"
     ]
+
+def test_strategy_core_facade_is_included_and_cannot_import_runtime(tmp_path):
+    from scripts.generate_dependency_graph import analyze_repo
+    facade = tmp_path / "om_strategy_core"
+    facade.mkdir()
+    (facade / "__init__.py").write_text("from src.application.owner import compute\n")
+    application = tmp_path / "src/application"
+    application.mkdir(parents=True)
+    (application / "owner.py").write_text("compute = None\n")
+    graph = analyze_repo(tmp_path)
+    assert "om_strategy_core" in graph.modules
+    assert len(graph.boundary_violations) == 1
+    assert graph.boundary_violations[0].importer == "om_strategy_core"

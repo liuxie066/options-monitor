@@ -75,6 +75,9 @@ README 不复制完整规则：[候选策略合同](docs/candidate_strategy.md) 
 [策略架构](docs/STRATEGY_ARCHITECTURE.md) 定义模块责任；目标是否已经上线必须以当前代码和测试验证，
 不能只凭文档判断。
 
+普通 CSP / CC 的纯计算可通过本地包 `om-strategy-core` 复用，接口、安装身份和验收边界见
+[可复用策略核心](docs/candidate_strategy.md#21-可复用-csp--cc-核心)。回测与外部策略模板发布不在该包当前范围内。
+
 ### 策略术语对照
 
 | OM 内部 key | 项目内名称 | 金融专业术语 |

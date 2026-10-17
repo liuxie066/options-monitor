@@ -2,6 +2,7 @@ from copy import deepcopy
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -93,6 +94,45 @@ def test_cc_requires_resolved_cost(cost):
 def test_invalid_policy_fails_before_hashing(changes):
     with pytest.raises(ValueError):
         resolve_strategy(mode="put", config=replace(InsuranceUnderwritingConfig(), **changes))
+
+
+@pytest.mark.parametrize("value", [None, True, False, 0, -1, "1.20", "bad", float("nan"), float("inf")])
+def test_cost_multiplier_rejected_at_resolution_and_transport(value):
+    from domain.domain.engine import rank_candidate_rows
+    from domain.domain.strategy_core import validate_strategy_identity
+    from domain.domain.strategy_identity import strategy_policy_hash
+
+    cfg = InsuranceUnderwritingConfig(min_dte=7, max_dte=60)
+    with pytest.raises(ValueError, match="min_strike_cost_multiplier"):
+        resolve_strategy(mode="call", config=replace(cfg, min_strike_cost_multiplier=value))
+    identity = resolve_strategy(mode="call", config=cfg).identity
+    identity["effective_parameters"]["min_strike_cost_multiplier"] = value
+    if not isinstance(value, float) or math.isfinite(value):
+        identity["effective_policy_hash"] = strategy_policy_hash(identity["effective_parameters"], identity["ranking_profile"])
+    for consume in (validate_strategy_identity, lambda row, **kw: rank_candidate_rows([row], **kw)):
+        with pytest.raises(ValueError):
+            consume({"strategy_core": identity}, mode="call")
+
+
+def test_cc_cost_multiplier_identity_is_frozen_custom_and_restorable():
+    from domain.domain.strategy_core import validate_strategy_identity
+    from domain.domain.strategy_identity import strategy_policy_hash
+
+    baseline = resolve_strategy(mode="call", config=InsuranceUnderwritingConfig(min_dte=7, max_dte=60))
+    custom = replace(baseline, config=replace(baseline.config, min_strike_cost_multiplier=1.20))
+    assert baseline.config.min_strike_cost_multiplier == 1.02
+    assert baseline.identity["policy_kind"] == "baseline"
+    assert custom.identity["policy_kind"] == "custom"
+    assert custom.identity["effective_policy_hash"] != baseline.identity["effective_policy_hash"]
+    with pytest.raises(FrozenInstanceError):
+        custom.config.min_strike_cost_multiplier = 1.02
+    for strategy in (baseline, custom):
+        assert validate_strategy_identity({"strategy_core": strategy.identity}, mode="call") == strategy
+    incomplete = baseline.identity
+    incomplete["effective_parameters"].pop("min_strike_cost_multiplier")
+    incomplete["effective_policy_hash"] = strategy_policy_hash(incomplete["effective_parameters"], incomplete["ranking_profile"])
+    with pytest.raises(ValueError):
+        validate_strategy_identity({"strategy_core": incomplete}, mode="call")
 
 
 def test_policy_identity_and_immutability():

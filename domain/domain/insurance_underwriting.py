@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 
@@ -19,6 +19,7 @@ class InsuranceUnderwritingConfig:
     min_dte: int | None = None
     max_dte: int | None = None
     max_spread_ratio: float = 0.40
+    min_strike_cost_multiplier: float = 1.02
 
     @property
     def enabled(self) -> bool:
@@ -125,6 +126,11 @@ def rank_underwriting_candidates(
     for row in rows:
         payload = dict(row)
         if cfg is not None:
+            from domain.domain.strategy_identity import validate_strategy_identity
+
+            identity = validate_strategy_identity(payload, mode=mode_norm)
+            if identity is not None and {**identity["effective_parameters"], **identity["strike_inputs"]} != asdict(cfg):
+                raise ValueError("underwriting config conflicts with strategy identity")
             payload.update(underwriting_fields(payload, mode=mode_norm, cfg=cfg))
         enriched.append(payload)
 

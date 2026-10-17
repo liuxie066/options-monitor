@@ -4,7 +4,7 @@
 >
 > 权威范围：CSP / CC 的召回、数据、筛选、容量、排序和候选快照
 >
-> 实施状态：已实现并发布；具体部署状态以目标环境的运行证据为准
+> 实施状态：以当前源码与测试为准；发布及部署状态分别以版本记录和目标环境运行证据为准
 
 本文是 CSP / CC 开仓候选策略的唯一细则真源。产品域和依赖方向见
 [STRATEGY_ARCHITECTURE.md](STRATEGY_ARCHITECTURE.md)；Combo Yield 保持独立策略，
@@ -47,6 +47,55 @@
 
 应用层不得再实现第二套评分、排序或候选裁剪。Combo Yield 可以共享标准化证据，
 但必须使用 `strategy=combo_yield` 的独立策略结果，不能修改 CSP / CC 决策。
+
+### 2.1 可复用 CSP / CC 核心
+
+`om-strategy-core` 是 Python ≥3.12、仅依赖标准库的本地安装包，公共导出为
+`om_strategy_core`。实现仍只有一份 `domain.domain`；费用、容量、集中度及排序
+继续委托各自现有 owner。发行包不包含 OM 应用层、行情服务、存储适配器或运行配置。
+
+| 入口 | 输入与结果 |
+| --- | --- |
+| `resolve_strategy` | 接收已合并的有效政策、策略方向及可用的账户/市场范围，返回不可变政策。 |
+| `calculate_metrics` | 接收合约、显式带时区的决策时间及 CC 成本；可传原始 FX，返回费用收益等指标。 |
+| `calculate_constraints` | 接收冻结组合事实和已有资格的 FX，可传现金/持股容量输入，返回补充约束后的新行。 |
+| `evaluate_candidates` | 只评价到达 underwriting 阶段的候选，分别返回所有决策、完整合格集合及每标的代表。 |
+
+应用层继续负责配置合并、账户事实和行情资格检查。前置拒绝不会重新进入评价，
+四项能力不合并或改变现有扫描、现金及 underwriting 阶段顺序。
+每个标的的愿买卖行权价单独绑定为输入；政策参数偏离基线时标记 `custom`。
+CC 成本底价倍数 `min_strike_cost_multiplier` 在已有配置合并后冻结到 resolved
+配置（默认 `1.02`），参与有效参数哈希和 `custom` 判定。扫描与 underwriting
+消费同一冻结值；注入策略优先于旧 CC 配置。身份传输、恢复及重排均校验该参数，
+缺失或非正有限数值的 resolved 身份拒绝消费；不影响无策略身份的 legacy 快照。
+CSP 默认 `current_tie_break`，内部实验可注入 `concentration_first`；
+实验仅调整跨标的代表顺序，不改变标的内代表选择，CC 保持原排序。
+本期没有生产切换配置或外部模板加载器。
+策略身份保存在候选及 decision 的 `normalized_input.strategy_core` 中，
+进入现有输入、决策和快照哈希链；下游重排先验证身份和账户/市场/方向/排序范围。
+摘要与解释使用同一身份，Brief 和通知保留已封存顺序。旧快照仍按原合同校验，
+只在读取投影中标记 `legacy`，不改写历史文件或哈希。
+
+FX 保持原始 `usd_per_cny`、`cny_per_hkd` 的运算顺序和舍入位置。
+收入及 point value 的缺失补算与 CC `covered_notional_cny` 的 `setdefault`
+语义分别保留。不能用派生倒数替换原始汇率来证明数值等价。
+
+运行身份由 `om_strategy_core.runtime_identity` 在计算外读取：
+源码及 editable 运行返回 `mode=source`、核心版本和空构建摘要；
+隔离 wheel 运行须显式调用 `runtime_identity(mode="installed")`，
+校验发行清单、代码内容及实际模块来源后才返回构建摘要。
+源码模式不能证明正在执行某个已验证 wheel。
+核心版本独立于 OM 的 `VERSION`，内置模板版本引用同一核心版本。
+可用 `python -m pip wheel --no-deps . -w <临时构建目录>` 构建本地包；
+安装验证应在仓库外的干净虚拟环境执行。
+
+包验证和合成回归不等于真实历史验收。阶段最终验收仍需 CSP、CC 的完整归档输入，
+在固定旧提交、相同参数与时钟下逐字段精确比较。缺少合格归档时不能宣称阶段验收完成。
+该源码变更也不构成发布或生产升级证据。
+
+后续回测项目可引用同一核心；特征准备、历史数据质量与收益评估由该项目另行验证。
+未来 Combo 保留独立多腿入口，Funding Put 使用完整合格集合，Long Call 不套用卖出
+CC 的持股覆盖或成本底价。组合资金、风险和排序由组合 owner 决定，本期不扩展 Combo。
 
 ## 3. 共同报价与合约合同
 

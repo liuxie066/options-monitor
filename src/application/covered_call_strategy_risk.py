@@ -13,16 +13,14 @@ from domain.domain.candidate_defaults import (
 from domain.domain.insurance_underwriting import (
     INSURANCE_UNDERWRITING_PROFILE,
     InsuranceUnderwritingConfig,
-    evaluate_underwriting_candidate,
     normalize_underwriting_strategy,
     rank_underwriting_candidates,
 )
-from domain.domain.sell_call_config import resolve_effective_sell_call_min_strike
-from domain.domain.currency_conversion import covered_notional_cny as _covered_notional_cny
-from src.application.short_vol_risk_context import enrich_short_vol_contract_cny_fields, build_portfolio_risk_context
-from domain.domain.short_vol_assessment import portfolio_concentration_fields
+from domain.domain.sell_call_config import validate_min_strike_cost_multiplier
+from src.application.short_vol_risk_context import build_portfolio_risk_context
+from domain.domain.strategy_core import ResolvedStrategy, calculate_constraints, evaluate_candidates, resolve_strategy
+from src.application.candidate_scanning import attach_strategy_identity, resolve_scan_strategy
 from src.infrastructure.exchange_rates import CurrencyConverter
-from src.application.numeric_helpers import float_or_none as _float
 from src.application.payload_helpers import config_float_from_sources as _float_setting_from_sources
 from src.application.payload_helpers import config_optional_float as _optional_float_setting
 
@@ -59,6 +57,11 @@ def resolve_covered_call_underwriting_config(raw: dict[str, Any] | None) -> Insu
             pricing,
             cfg,
         ),
+        min_strike_cost_multiplier=(
+            validate_min_strike_cost_multiplier(
+                cfg.get("min_strike_cost_multiplier", 1.02), source="sell_call.min_strike_cost_multiplier",
+            ) if strategy == INSURANCE_UNDERWRITING_PROFILE else 1.02
+        ),
     )
 
 
@@ -70,43 +73,46 @@ def enrich_and_filter_covered_call_underwriting(
     portfolio_ctx: dict[str, Any] | None,
     exchange_rate_converter: CurrencyConverter,
     decision_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
+    resolved_strategy: ResolvedStrategy | None = None,
 ) -> pd.DataFrame:
     if df_labeled is None or df_labeled.empty:
+        if resolved_strategy is not None:
+            resolve_scan_strategy(
+                mode="call", cfg=resolved_strategy.config, symbol=symbol,
+                portfolio_ctx=portfolio_ctx, resolved_strategy=resolved_strategy,
+            )
         return df_labeled
 
-    cfg = resolve_covered_call_underwriting_config(sell_call_cfg)
+    cfg = (resolved_strategy.config if resolved_strategy is not None
+           else resolve_covered_call_underwriting_config(sell_call_cfg))
+    strategy = resolve_scan_strategy(
+        mode="call", cfg=cfg, symbol=symbol, portfolio_ctx=portfolio_ctx, resolved_strategy=resolved_strategy,
+    )
+    if strategy is not None:
+        cfg = strategy.config
 
     risk_ctx = build_portfolio_risk_context(portfolio_ctx=portfolio_ctx, exchange_rate_converter=exchange_rate_converter)
     out = df_labeled.copy()
+    if strategy is not None:
+        out["strategy_core"] = pd.Series([None] * len(out), index=out.index, dtype=object)
     keep_mask: list[bool] = []
     decision_records: list[dict[str, Any]] = []
 
-    for idx, row in out.iterrows():
-        row_payload = row.to_dict()
-        effective_min_strike = resolve_effective_sell_call_min_strike(
-            min_strike=sell_call_cfg.get("min_strike"),
-            avg_cost=row_payload.get("avg_cost"),
-            cost_multiplier=sell_call_cfg.get("min_strike_cost_multiplier", 1.02),
+    for idx, row in df_labeled.iterrows():
+        row_payload = calculate_constraints(
+            row.to_dict(), mode="call", risk_ctx=risk_ctx,
+            exchange_rate_converter=exchange_rate_converter,
+            min_strike=cfg.min_strike,
+            min_strike_cost_multiplier=(
+                cfg.min_strike_cost_multiplier if strategy is not None
+                else sell_call_cfg.get("min_strike_cost_multiplier", 1.02)
+            ),
         )
-        spot = _float(row_payload.get("spot"))
-        if spot is not None:
-            effective_min_strike = spot if effective_min_strike is None else max(effective_min_strike, spot)
-        if effective_min_strike is not None:
-            row_payload["effective_min_strike"] = effective_min_strike
-            out.loc[idx, "effective_min_strike"] = effective_min_strike
-        row_payload.setdefault(
-            "covered_notional_cny",
-            _covered_notional_cny(row_payload, exchange_rate_converter=exchange_rate_converter),
-        )
-        row_payload.update(
-            enrich_short_vol_contract_cny_fields(
-                row_payload,
-                exchange_rate_converter=exchange_rate_converter,
-            )
-        )
-        row_payload.update(portfolio_concentration_fields(row_payload, mode="call", risk_ctx=risk_ctx))
+        if strategy is not None:
+            row_payload = attach_strategy_identity(row_payload, strategy)
+            out.at[idx, "strategy_core"] = row_payload["strategy_core"]
         for key in (
-            "covered_notional_cny", "net_income_cny", "option_contract_point_value_cny",
+            "effective_min_strike", "covered_notional_cny", "net_income_cny", "option_contract_point_value_cny",
             "position_sizing_basis", "symbol_concentration_current",
             "symbol_concentration_after_existing_assignments", "symbol_concentration_after",
             "portfolio_nav_cny", "portfolio_nav_after_existing_assignments_cny",
@@ -118,7 +124,7 @@ def enrich_and_filter_covered_call_underwriting(
         if not cfg.enabled:
             keep_mask.append(True)
             continue
-        decision = evaluate_covered_call_underwriting_row(row_payload, cfg=cfg)
+        decision = evaluate_covered_call_underwriting_row(row_payload, cfg=cfg, resolved_strategy=strategy)
         for key, value in decision.get("fields", {}).items():
             out.loc[idx, key] = value
         opening_decision = dict(decision.get("opening_decision") or {})
@@ -148,5 +154,13 @@ def evaluate_covered_call_underwriting_row(
     row: dict[str, Any],
     *,
     cfg: InsuranceUnderwritingConfig,
+    resolved_strategy: ResolvedStrategy | None = None,
 ) -> dict[str, Any]:
-    return evaluate_underwriting_candidate(row, mode="call", cfg=cfg)
+    if resolved_strategy is None and not cfg.enabled:
+        from domain.domain.insurance_underwriting import evaluate_underwriting_candidate
+
+        return evaluate_underwriting_candidate(row, mode="call", cfg=cfg)
+    strategy = resolved_strategy or resolve_strategy(mode="call", config=cfg)
+    if strategy.mode != "call":
+        raise ValueError("resolved strategy mode conflicts with underwriting")
+    return evaluate_candidates([row], strategy=strategy)["decisions"][0]

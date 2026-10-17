@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DEFAULT_INCLUDE_ROOTS = ("src", "domain", "scripts", "tests")
-PRODUCTION_ROOTS = ("src", "domain", "scripts")
+DEFAULT_INCLUDE_ROOTS = ("src", "domain", "om_strategy_core", "scripts", "tests")
+PRODUCTION_ROOTS = ("src", "domain", "om_strategy_core", "scripts")
 APPLICATION_SUBPACKAGES = {
     "research",
     "inbound",
@@ -201,6 +201,8 @@ def boundary_violations(edges: list[DependencyEdge]) -> list[BoundaryViolation]:
         dependency = edge.dependency
         if importer.startswith("domain.domain") and (dependency.startswith("src.") or dependency.startswith("scripts.")):
             violations.append(BoundaryViolation(importer, dependency, "domain.domain imports src/scripts"))
+        if importer.startswith("om_strategy_core") and dependency.startswith(("src.", "scripts.", "domain.storage", "domain.services")):
+            violations.append(BoundaryViolation(importer, dependency, "strategy core facade imports application/runtime adapters"))
         if importer.startswith("src.application") and dependency.startswith("scripts."):
             violations.append(BoundaryViolation(importer, dependency, "src.application imports scripts"))
     return violations

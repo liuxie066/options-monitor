@@ -234,6 +234,8 @@ def _build_ranked_row(
 ) -> dict[str, Any]:
     row = _empty_summary_row(symbol, strategy, extra_fields=extra_fields)
     row['candidate_count'] = len(df)
+    if isinstance(top.get("strategy_core"), dict):
+        row["strategy_core"] = top["strategy_core"]
     row.update({
         'top_contract': _format_top_contract(top, contract_suffix),
         'expiration': _safe_text(top.get('expiration')),

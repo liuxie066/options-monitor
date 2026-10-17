@@ -13,15 +13,14 @@ from domain.domain.candidate_defaults import (
 from domain.domain.insurance_underwriting import (
     INSURANCE_UNDERWRITING_PROFILE,
     InsuranceUnderwritingConfig,
-    evaluate_underwriting_candidate,
     normalize_underwriting_strategy,
     rank_underwriting_candidates,
 )
-from domain.domain.short_vol_assessment import portfolio_concentration_fields
 from src.application.short_vol_risk_context import (
     build_portfolio_risk_context,
-    enrich_short_vol_contract_cny_fields,
 )
+from domain.domain.strategy_core import ResolvedStrategy, calculate_constraints, evaluate_candidates, resolve_strategy
+from src.application.candidate_scanning import attach_strategy_identity, resolve_scan_strategy
 from src.infrastructure.exchange_rates import CurrencyConverter
 from src.application.payload_helpers import config_float_from_sources as _float_setting_from_sources
 from src.application.payload_helpers import config_optional_float as _optional_float_setting
@@ -65,29 +64,41 @@ def enrich_and_filter_sell_put_underwriting(
     portfolio_ctx: dict[str, Any] | None,
     exchange_rate_converter: CurrencyConverter,
     decision_sink_fn: Callable[[list[dict[str, Any]]], None] | None = None,
+    resolved_strategy: ResolvedStrategy | None = None,
 ) -> pd.DataFrame:
     if df_labeled is None or df_labeled.empty:
+        if resolved_strategy is not None:
+            resolve_scan_strategy(
+                mode="put", cfg=resolved_strategy.config, symbol=symbol,
+                portfolio_ctx=portfolio_ctx, resolved_strategy=resolved_strategy,
+            )
         return df_labeled
 
     cfg = resolve_sell_put_underwriting_config(sell_put_cfg)
+    strategy = resolve_scan_strategy(
+        mode="put", cfg=cfg, symbol=symbol, portfolio_ctx=portfolio_ctx, resolved_strategy=resolved_strategy,
+    )
+    if strategy is not None:
+        cfg = strategy.config
 
     risk_ctx = build_portfolio_risk_context(
         portfolio_ctx=portfolio_ctx,
         exchange_rate_converter=exchange_rate_converter,
     )
     out = df_labeled.copy()
+    if strategy is not None:
+        out["strategy_core"] = pd.Series([None] * len(out), index=out.index, dtype=object)
     keep_mask: list[bool] = []
     decision_records: list[dict[str, Any]] = []
 
-    for idx, row in out.iterrows():
-        row_payload = row.to_dict()
-        row_payload.update(
-            enrich_short_vol_contract_cny_fields(
-                row_payload,
-                exchange_rate_converter=exchange_rate_converter,
-            )
+    for idx, row in df_labeled.iterrows():
+        row_payload = calculate_constraints(
+            row.to_dict(), mode="put", risk_ctx=risk_ctx,
+            exchange_rate_converter=exchange_rate_converter,
         )
-        row_payload.update(portfolio_concentration_fields(row_payload, mode="put", risk_ctx=risk_ctx))
+        if strategy is not None:
+            row_payload = attach_strategy_identity(row_payload, strategy)
+            out.at[idx, "strategy_core"] = row_payload["strategy_core"]
         for key in (
             "net_income_cny",
             "option_contract_point_value_cny",
@@ -114,7 +125,7 @@ def enrich_and_filter_sell_put_underwriting(
         if not cfg.enabled:
             keep_mask.append(True)
             continue
-        decision = evaluate_sell_put_underwriting_row(row_payload, cfg=cfg)
+        decision = evaluate_sell_put_underwriting_row(row_payload, cfg=cfg, resolved_strategy=strategy)
         for key, value in decision.get("fields", {}).items():
             out.loc[idx, key] = value
         opening_decision = dict(decision.get("opening_decision") or {})
@@ -144,5 +155,13 @@ def evaluate_sell_put_underwriting_row(
     row: dict[str, Any],
     *,
     cfg: InsuranceUnderwritingConfig,
+    resolved_strategy: ResolvedStrategy | None = None,
 ) -> dict[str, Any]:
-    return evaluate_underwriting_candidate(row, mode="put", cfg=cfg)
+    if resolved_strategy is None and not cfg.enabled:
+        from domain.domain.insurance_underwriting import evaluate_underwriting_candidate
+
+        return evaluate_underwriting_candidate(row, mode="put", cfg=cfg)
+    strategy = resolved_strategy or resolve_strategy(mode="put", config=cfg)
+    if strategy.mode != "put":
+        raise ValueError("resolved strategy mode conflicts with underwriting")
+    return evaluate_candidates([row], strategy=strategy)["decisions"][0]
