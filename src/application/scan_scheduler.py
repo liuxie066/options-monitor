@@ -766,7 +766,8 @@ def run_scheduler(
         print(json.dumps(payload, ensure_ascii=False, indent=2))
 
     if not schedule_enabled and not force:
-        print('[INFO] schedule disabled in config; no scheduling enforcement applied.')
+        if not jsonl:
+            print('[INFO] schedule disabled in config; no scheduling enforcement applied.')
         return payload
 
     if mark_notified:
