@@ -15,6 +15,16 @@ def strategy_policy_hash(parameters: dict[str, Any], ranking_profile: str) -> st
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+IDENTITY_FORMAT = "strategy_identity.v2"
+
+
+def implementation_policy_hash(identity: dict[str, Any]) -> str:
+    payload = {key: identity[key] for key in (
+        "identity_format", "template", "template_version", "effective_parameters", "strike_inputs", "ranking_profile",
+    )}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
 def validate_strategy_identity(
     row: dict[str, Any], *, mode: str, account: str | None = None, market: str | None = None,
 ) -> dict[str, Any] | None:
@@ -43,11 +53,21 @@ def validate_strategy_identity(
         profile = identity["ranking_profile"]
         if profile not in ("current_tie_break", "concentration_first") or (mode == "call" and profile != "current_tie_break"):
             raise ValueError("invalid strategy ranking profile")
-        if identity["effective_policy_hash"] != strategy_policy_hash(identity["effective_parameters"], profile):
+        new_format = identity.get("identity_format")
+        if new_format is not None and new_format != IDENTITY_FORMAT:
+            raise ValueError("unsupported strategy identity format")
+        expected_hash = (implementation_policy_hash(identity) if new_format else
+                         strategy_policy_hash(identity["effective_parameters"], profile))
+        if identity["effective_policy_hash"] != expected_hash:
             raise ValueError("strategy identity does not match effective policy")
-        if (not identity["core_version"] or identity["template_version"] != identity["core_version"]
-                or identity["template"] != f"{'csp' if mode == 'put' else 'cc'}_baseline"
+        if (not identity["core_version"]
+                or not isinstance(identity["template"], str) or not identity["template"]
+                or not isinstance(identity["template_version"], str) or not identity["template_version"]
+                or (not new_format and (identity["template_version"] != identity["core_version"]
+                    or identity["template"] != f"{'csp' if mode == 'put' else 'cc'}_baseline"))
                 or identity["policy_kind"] not in ("baseline", "custom")
+                or (identity["policy_kind"] == "baseline"
+                    and identity["template"] != f"{'csp' if mode == 'put' else 'cc'}_baseline")
                 or (profile != "current_tie_break" and identity["policy_kind"] != "custom")
                 or set(identity["strike_inputs"]) != {"min_strike", "max_strike"}):
             raise ValueError("invalid strategy template identity")
@@ -87,7 +107,7 @@ def candidate_ranking_profile(
     if len(bound) != len(identities):
         raise ValueError("mixed legacy and resolved strategy identities")
     scopes = {tuple(identity["scope"][key] for key in ("account", "market", "mode"))
-              + (identity["ranking_profile"],) for identity in bound}
+              + (identity["ranking_profile"], identity.get("identity_format"), identity["template"], identity["template_version"]) for identity in bound}
     if len(scopes) != 1:
         raise ValueError("mixed strategy account/market/mode/ranking scope")
     profile = bound[0]["ranking_profile"]

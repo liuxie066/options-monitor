@@ -14,12 +14,11 @@ from domain.domain.insurance_underwriting import (
     INSURANCE_UNDERWRITING_PROFILE,
     InsuranceUnderwritingConfig,
     normalize_underwriting_strategy,
-    rank_underwriting_candidates,
 )
 from src.application.short_vol_risk_context import (
     build_portfolio_risk_context,
 )
-from domain.domain.strategy_core import ResolvedStrategy, calculate_constraints, evaluate_candidates, resolve_strategy
+from domain.domain.strategy_core import ResolvedStrategy, calculate_constraints, evaluate_candidates, resolve_strategy, rank_candidates
 from src.application.candidate_scanning import attach_strategy_identity, resolve_scan_strategy
 from src.infrastructure.exchange_rates import CurrencyConverter
 from src.application.payload_helpers import config_float_from_sources as _float_setting_from_sources
@@ -74,7 +73,8 @@ def enrich_and_filter_sell_put_underwriting(
             )
         return df_labeled
 
-    cfg = resolve_sell_put_underwriting_config(sell_put_cfg)
+    cfg = (resolved_strategy.config if resolved_strategy is not None
+           else resolve_sell_put_underwriting_config(sell_put_cfg))
     strategy = resolve_scan_strategy(
         mode="put", cfg=cfg, symbol=symbol, portfolio_ctx=portfolio_ctx, resolved_strategy=resolved_strategy,
     )
@@ -94,7 +94,7 @@ def enrich_and_filter_sell_put_underwriting(
     for idx, row in df_labeled.iterrows():
         row_payload = calculate_constraints(
             row.to_dict(), mode="put", risk_ctx=risk_ctx,
-            exchange_rate_converter=exchange_rate_converter,
+            exchange_rate_converter=exchange_rate_converter, strategy=strategy,
         )
         if strategy is not None:
             row_payload = attach_strategy_identity(row_payload, strategy)
@@ -122,6 +122,9 @@ def enrich_and_filter_sell_put_underwriting(
         ):
             if key in row_payload:
                 out.loc[idx, key] = row_payload.get(key)
+        for key, value in row_payload.items():
+            if key.startswith("policy_") or key == "effective_min_strike":
+                out.loc[idx, key] = value
         if not cfg.enabled:
             keep_mask.append(True)
             continue
@@ -145,7 +148,7 @@ def enrich_and_filter_sell_put_underwriting(
 
     filtered = out.loc[keep_mask].copy()
     if not filtered.empty and cfg.enabled:
-        filtered = pd.DataFrame(rank_underwriting_candidates(filtered.to_dict("records"), mode="put", cfg=cfg))
+        filtered = pd.DataFrame(rank_candidates(filtered.to_dict("records"), mode="put", strategy=strategy))
     if decision_sink_fn is not None and cfg.enabled:
         decision_sink_fn(decision_records)
     return filtered

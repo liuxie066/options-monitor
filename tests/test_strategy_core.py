@@ -243,7 +243,8 @@ def test_zero_dte_and_per_symbol_willingness_are_compatible():
     baseline = resolve_strategy(mode="put", config=replace(config, min_dte=7))
     bounded = replace(baseline, config=replace(baseline.config, max_strike=100))
     assert bounded.identity["policy_kind"] == "baseline"
-    assert bounded.identity["effective_policy_hash"] == baseline.identity["effective_policy_hash"]
+    assert bounded.identity["identity_format"] == "strategy_identity.v2"
+    assert bounded.identity["effective_policy_hash"] != baseline.identity["effective_policy_hash"]
     assert bounded.identity["strike_inputs"] == {"min_strike": None, "max_strike": 100}
     experiment = replace(baseline, ranking_profile="concentration_first")
     assert experiment.identity["policy_kind"] == "custom"

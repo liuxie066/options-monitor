@@ -14,11 +14,10 @@ from domain.domain.insurance_underwriting import (
     INSURANCE_UNDERWRITING_PROFILE,
     InsuranceUnderwritingConfig,
     normalize_underwriting_strategy,
-    rank_underwriting_candidates,
 )
 from domain.domain.sell_call_config import validate_min_strike_cost_multiplier
 from src.application.short_vol_risk_context import build_portfolio_risk_context
-from domain.domain.strategy_core import ResolvedStrategy, calculate_constraints, evaluate_candidates, resolve_strategy
+from domain.domain.strategy_core import ResolvedStrategy, calculate_constraints, evaluate_candidates, resolve_strategy, rank_candidates
 from src.application.candidate_scanning import attach_strategy_identity, resolve_scan_strategy
 from src.infrastructure.exchange_rates import CurrencyConverter
 from src.application.payload_helpers import config_float_from_sources as _float_setting_from_sources
@@ -102,7 +101,7 @@ def enrich_and_filter_covered_call_underwriting(
         row_payload = calculate_constraints(
             row.to_dict(), mode="call", risk_ctx=risk_ctx,
             exchange_rate_converter=exchange_rate_converter,
-            min_strike=cfg.min_strike,
+            strategy=strategy, min_strike=cfg.min_strike,
             min_strike_cost_multiplier=(
                 cfg.min_strike_cost_multiplier if strategy is not None
                 else sell_call_cfg.get("min_strike_cost_multiplier", 1.02)
@@ -121,6 +120,9 @@ def enrich_and_filter_covered_call_underwriting(
         ):
             if key in row_payload:
                 out.loc[idx, key] = row_payload.get(key)
+        for key, value in row_payload.items():
+            if key.startswith("policy_") or key == "effective_min_strike":
+                out.loc[idx, key] = value
         if not cfg.enabled:
             keep_mask.append(True)
             continue
@@ -144,7 +146,7 @@ def enrich_and_filter_covered_call_underwriting(
 
     filtered = out.loc[keep_mask].copy()
     if not filtered.empty and cfg.enabled:
-        filtered = pd.DataFrame(rank_underwriting_candidates(filtered.to_dict("records"), mode="call", cfg=cfg))
+        filtered = pd.DataFrame(rank_candidates(filtered.to_dict("records"), mode="call", strategy=strategy))
     if decision_sink_fn is not None and cfg.enabled:
         decision_sink_fn(decision_records)
     return filtered

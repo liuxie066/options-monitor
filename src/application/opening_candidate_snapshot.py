@@ -9,8 +9,6 @@ from typing import Any, Iterable, Mapping
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.engine import (
     evaluate_opening_candidate_policy,
-    explain_candidate_rank,
-    rank_candidate_rows,
     validate_candidate_decision_payload,
 )
 from domain.domain.engine.candidate_engine import (
@@ -21,8 +19,8 @@ from domain.domain.engine.candidate_engine import (
     REJECT_INPUT_MISSING,
     REJECT_RISK_EARNINGS_UNAVAILABLE,
 )
-from domain.domain.strategy_core import evaluate_candidates, validate_strategy_identity
-from domain.domain.strategy_identity import candidate_ranking_profile
+from domain.domain.strategy_core import evaluate_candidates, validate_strategy_identity, rank_candidates, explain_rank
+from domain.domain.strategy_identity import candidate_ranking_profile, validate_strategy_identity as validate_stored_identity
 from domain.domain.symbol_identity import symbol_market
 from src.application.candidate_snapshot_contract import (
     CandidateSnapshotContractError,
@@ -854,7 +852,7 @@ def dependency_from_hash(*, kind: str, sha256: str) -> dict[str, Any]:
 def _validate_core_scope(rows: list[dict[str, Any]], *, mode: str, account: str, market: str) -> None:
     try:
         for row in rows:
-            strategy = validate_strategy_identity(row, mode=mode, account=account, market=market.lower())
+            strategy = validate_stored_identity(row, mode=mode, account=account, market=market.lower())
             if strategy is not None and not row["strategy_core"].get("runtime"):
                 raise ValueError("strategy runtime identity is missing")
         candidate_ranking_profile(rows, mode=mode)
@@ -933,6 +931,7 @@ def _snapshot_decisions(
         )
         for record in rows:
             normalized = dict(record.get("normalized_input") or {})
+            validate_strategy_identity(normalized, mode=mode, account=account, market=market.lower())
             decision_scope = (
                 _required_text(normalized.get("symbol"), "candidate symbol").upper(),
                 mode,
@@ -1030,7 +1029,7 @@ def _ranked_candidates(
             source_rows.append(normalized)
         _validate_core_scope(source_rows, mode=mode, account=account, market=market)
         for mode_rank, ranked_row in enumerate(
-            rank_candidate_rows(source_rows, mode=mode),
+            rank_candidates(source_rows, mode=mode),
             start=1,
         ):
             key = _contract_key(mode, ranked_row)
@@ -1059,7 +1058,7 @@ def _ranked_candidates(
                     "strategy_mode": mode,
                     "rank": mode_rank,
                     "facts": ranked_row,
-                    "ranking": explain_candidate_rank(ranked_row, mode=mode),
+                    "ranking": explain_rank(ranked_row, mode=mode),
                     "decision_hash": decision.get("decision_hash"),
                     "risk_policy_hash": decision.get("risk_policy_hash"),
                     "quote_snapshot_id": decision.get("quote_snapshot_id"),

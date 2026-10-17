@@ -60,6 +60,11 @@ def evaluate_underwriting_candidate(
         require_earnings_evidence=True,
         reject_known_earnings=True,
     )
+    return build_underwriting_result(fields, decision)
+
+
+def build_underwriting_result(fields: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
+    """Project the canonical opening decision into the existing underwriting API."""
     if bool(decision.get("accepted")):
         return {
             "accepted": True,
@@ -125,10 +130,12 @@ def rank_underwriting_candidates(
     enriched: list[dict[str, Any]] = []
     for row in rows:
         payload = dict(row)
-        if cfg is not None:
-            from domain.domain.strategy_identity import validate_strategy_identity
+        from domain.domain.strategy_identity import validate_strategy_identity
 
-            identity = validate_strategy_identity(payload, mode=mode_norm)
+        identity = validate_strategy_identity(payload, mode=mode_norm)
+        if identity is not None and identity["template"] != f"{'csp' if mode_norm == 'put' else 'cc'}_baseline":
+            raise ValueError("underwriting compatibility ranking requires a baseline template")
+        if cfg is not None:
             if identity is not None and {**identity["effective_parameters"], **identity["strike_inputs"]} != asdict(cfg):
                 raise ValueError("underwriting config conflicts with strategy identity")
             payload.update(underwriting_fields(payload, mode=mode_norm, cfg=cfg))

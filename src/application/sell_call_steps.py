@@ -204,7 +204,10 @@ def run_sell_call_scan_and_summarize(
     candidate_decisions: list[dict[str, Any]] = []
 
     liquidity = resolve_candidate_liquidity(global_sell_call_liquidity)
-    window = resolve_candidate_window(cc, defaults=DEFAULT_SELL_CALL_WINDOW)
+    window = resolve_candidate_window(
+        {"min_dte": resolved_strategy.config.min_dte, "max_dte": resolved_strategy.config.max_dte}
+        if resolved_strategy is not None else cc, defaults=DEFAULT_SELL_CALL_WINDOW,
+    )
     strategy = resolve_scan_strategy(
         mode="call",
         cfg=(resolved_strategy.config if resolved_strategy is not None else resolve_covered_call_underwriting_config(
@@ -237,7 +240,7 @@ def run_sell_call_scan_and_summarize(
             avg_cost=avg_cost,
             cost_multiplier=cost_multiplier,
         )),
-        max_strike=_optional_float(cc, 'max_strike'),
+        max_strike=strategy.config.max_strike if strategy is not None else _optional_float(cc, 'max_strike'),
         # Underwriting applies return/income thresholds once, after CNY enrichment.
         min_annualized_net_return=0.0,
         min_strike_cost_multiplier=cost_multiplier,

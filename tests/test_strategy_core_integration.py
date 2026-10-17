@@ -183,7 +183,8 @@ def test_real_put_steps_multi_symbol_rank_complete_passes_and_reversion(frozen_s
     restored, _, _ = _run_puts(frozen_scan, injected=False, context=context)
     pd.testing.assert_frame_equal(pd.DataFrame(baseline), pd.DataFrame(restored), check_exact=True)
     assert all(row["strategy_core"]["policy_kind"] == "baseline" for row in baseline)
-    assert baseline[0]["strategy_core"]["effective_policy_hash"] == baseline[2]["strategy_core"]["effective_policy_hash"]
+    assert baseline[0]["strategy_core"]["identity_format"] == "strategy_identity.v2"
+    assert baseline[0]["strategy_core"]["effective_policy_hash"] != baseline[2]["strategy_core"]["effective_policy_hash"]
     assert baseline[0]["strategy_core"]["strike_inputs"] != baseline[2]["strategy_core"]["strike_inputs"]
 
 

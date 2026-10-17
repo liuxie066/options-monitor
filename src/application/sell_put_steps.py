@@ -84,9 +84,13 @@ def run_sell_put_scan_and_summarize(
     sell_put_semantics = strategy_semantics_for_side_config(family=SELL_PUT_FAMILY, side_cfg=sp)
 
     liquidity = resolve_candidate_liquidity(global_sell_put_liquidity)
-    window = resolve_candidate_window(sp, defaults=DEFAULT_SELL_PUT_WINDOW)
+    window = resolve_candidate_window(
+        {"min_dte": resolved_strategy.config.min_dte, "max_dte": resolved_strategy.config.max_dte}
+        if resolved_strategy is not None else sp, defaults=DEFAULT_SELL_PUT_WINDOW,
+    )
     strategy = resolve_scan_strategy(
-        mode="put", cfg=resolve_sell_put_underwriting_config({**sp, "max_spread_ratio": liquidity.max_spread_ratio}),
+        mode="put", cfg=(resolved_strategy.config if resolved_strategy is not None else
+                         resolve_sell_put_underwriting_config({**sp, "max_spread_ratio": liquidity.max_spread_ratio})),
         symbol=symbol, portfolio_ctx=portfolio_ctx, resolved_strategy=resolved_strategy,
     )
     candidate_decisions: list[dict[str, Any]] = []
@@ -99,8 +103,8 @@ def run_sell_put_scan_and_summarize(
         # Underwriting applies return/income thresholds once, after CNY enrichment.
         min_annualized_net_return=0.0,
         min_net_income=0.0,
-        min_strike=_optional_float(sp, 'min_strike'),
-        max_strike=_optional_float(sp, 'max_strike'),
+        min_strike=strategy.config.min_strike if strategy is not None else _optional_float(sp, 'min_strike'),
+        max_strike=strategy.config.max_strike if strategy is not None else _optional_float(sp, 'max_strike'),
         min_open_interest=None,
         min_volume=None,
         max_spread_ratio=liquidity.max_spread_ratio,

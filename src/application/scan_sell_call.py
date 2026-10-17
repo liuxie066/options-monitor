@@ -27,7 +27,8 @@ from domain.domain.sell_call_config import (
     validate_min_strike_cost_multiplier,
 )
 from domain.domain.strategy_vocab import STRATEGY_COVERED_CALL, strategy_display_name
-from domain.domain.risk_capacity import compute_sell_call_share_capacity
+from domain.domain import strategy_core
+from domain.domain.currency_conversion import CurrencyConverter, ExchangeRates
 from src.application.candidate_scanning import (
     CandidateScanConfig,
     CandidateScanDependencies,
@@ -124,16 +125,15 @@ def _resolve_sell_call_contract_capacity(
     shares_can_sell: int,
     shares_locked: int,
 ) -> tuple[int, int, bool]:
-    capacity = compute_sell_call_share_capacity(
-        shares_total=shares,
-        shares_can_sell=shares_can_sell,
-        shares_locked=shares_locked,
-        multiplier=multiplier,
+    capacity = strategy_core.calculate_capacity(
+        {"multiplier": multiplier}, mode="call",
+        capacity_inputs=strategy_core.CallCapacityInputs(shares, shares_can_sell, shares_locked),
+        exchange_rate_converter=CurrencyConverter(ExchangeRates()),
     )
     return (
-        int(capacity.shares_available_for_cover),
-        int(capacity.covered_contracts_available),
-        bool(capacity.is_fully_covered_available),
+        int(capacity["shares_available_for_cover"]),
+        int(capacity["covered_contracts_available"]),
+        bool(capacity["is_fully_covered_available"]),
     )
 
 
