@@ -38,6 +38,12 @@ Combo group/role 时回退完整历史投影。已终结成员不在活动续算
 仍须通过完整事件比较。省略的 writer 冻结字段可以恢复；保留的费用/成交事实变化或
 显式矛盾的冻结字段仍拒绝。重放不补证或更正已存费用，也不产生第二份经济效果。
 
+旧 DTO 经 `record_normalized_trade_event` 直接写入的无 target 普通期权平仓，重试先验证并恢复
+完整历史分配，再沿原费用、汇率及完整事件比较路径确认重复，不重新消耗当前 FIFO 仓位。
+历史组缺失或事实矛盾在同一事务中拒绝；完整历史组包含后来已 void 的成员，相同请求返回
+`created=False`，保留 void 及其有效持仓结果。显式 target、canonical 子事件和标准 execution
+的既有重试规则不变；此恢复不跨越 `record_broker_trade_close` 的预拆分 source 家族。
+
 ## 模块所有权
 
 | 边界 | 当前 owner |
