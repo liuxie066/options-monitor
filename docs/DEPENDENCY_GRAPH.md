@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1231 (`src`: 568, `domain`: 95, `scripts`: 16, `tests`: 549)
-- Internal import edges: 9961 total, 3891 production/script edges excluding tests
+- Python files scanned: 1232 (`src`: 568, `domain`: 95, `scripts`: 16, `tests`: 550)
+- Internal import edges: 9971 total, 3893 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -50,11 +50,11 @@ flowchart LR
   scripts -->|2| interfaces
   scripts -->|1| tests
   storage -->|1| domain
-  tests -->|4609| application
+  tests -->|4616| application
   tests -->|594| domain
   tests -->|2| domain_services
   tests -->|293| infrastructure
-  tests -->|345| interfaces
+  tests -->|346| interfaces
   tests -->|3| om_strategy_core
   tests -->|29| scripts
   tests -->|46| storage
@@ -88,9 +88,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 4609 |
+| tests | application | 4616 |
 | tests | domain | 594 |
-| tests | interfaces | 345 |
+| tests | interfaces | 346 |
 | tests | infrastructure | 293 |
 | tests | storage | 46 |
 | tests | scripts | 29 |
@@ -189,7 +189,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 122 |
+| src.application.agent_tool_contracts | 123 |
 | src.application.payload_helpers | 98 |
 | src.application.ledger.api | 92 |
 | domain.domain.symbol_identity | 89 |

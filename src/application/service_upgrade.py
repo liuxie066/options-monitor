@@ -12,11 +12,14 @@ import sys
 import sysconfig
 import tempfile
 import time
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from src.application.agent_tool_contracts import AgentToolError
 from src.application.bot.pi_migration import assert_pi_storage_ready
+from src.application.file_locks import single_instance_lock
 from src.application.release_target import compare_versions, parse_version, resolve_upgrade_target
 from src.application.runtime_config_freshness import (
     GENERATED_KEY,
@@ -99,11 +102,32 @@ class _UpgradeLock:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.fd: int | None = None
+        self._guard: ExitStack | None = None
 
     def __enter__(self) -> "_UpgradeLock":
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.fd = self._open_lock()
-        os.write(self.fd, str(os.getpid()).encode("utf-8"))
+        # Keep the advisory inode stable while preserving the transient PID file.
+        with ExitStack() as guard:
+            try:
+                guard.enter_context(single_instance_lock(
+                    self.path.with_name(self.path.name + ".guard"),
+                    busy_message=f"upgrade lock already exists: {self.path}",
+                ))
+            except AgentToolError as exc:
+                if exc.code == "RESOURCE_BUSY":
+                    raise RuntimeError(f"upgrade lock already exists: {self.path}") from exc
+                raise
+            try:
+                self.fd = self._open_lock()
+                remaining = str(os.getpid()).encode("utf-8")
+                while remaining:
+                    written = os.write(self.fd, remaining)
+                    if written <= 0:
+                        raise OSError(f"failed to write upgrade lock PID: {self.path}")
+                    remaining = remaining[written:]
+                self._guard = guard.pop_all()
+            except BaseException:
+                self._release_pid()
+                raise
         return self
 
     def _open_lock(self) -> int:
@@ -124,13 +148,27 @@ class _UpgradeLock:
                 raise RuntimeError(f"upgrade lock already exists: {self.path}") from retry_exc
 
     def __exit__(self, *_exc: object) -> None:
-        if self.fd is not None:
-            os.close(self.fd)
-            self.fd = None
+        guard, self._guard = self._guard, None
         try:
-            self.path.unlink()
-        except FileNotFoundError:
-            pass
+            self._release_pid()
+        finally:
+            if guard is not None:
+                guard.close()
+
+    def _release_pid(self) -> None:
+        fd, self.fd = self.fd, None
+        if fd is None:
+            return
+        try:
+            owned = os.fstat(fd)
+            try:
+                current = self.path.lstat()
+                if (current.st_dev, current.st_ino) == (owned.st_dev, owned.st_ino):
+                    self.path.unlink()
+            except FileNotFoundError:
+                pass
+        finally:
+            os.close(fd)
 
 
 def _upgrade_lock_pid(path: Path) -> int | None:

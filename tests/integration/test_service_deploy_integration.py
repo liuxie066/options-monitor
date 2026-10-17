@@ -4558,3 +4558,127 @@ def test_service_drift_timeout_override_persists_before_next_reconcile(tmp_path)
     assert retry["summary"]["ok"] is True
     assert retry["changed"] is False
     assert (units / "options-monitor-tick-us.service").read_text() == tick
+
+
+@pytest.mark.parametrize("holding_operation", ["apply", "rollback"])
+@pytest.mark.parametrize("operation", ["apply", "rollback"])
+def test_update_handler_contends_with_real_application_owner(
+    monkeypatch, tmp_path, holding_operation, operation,
+):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from src.application import service_upgrade as upgrade
+    from src.interfaces.cli.service_ops import add_service_update_commands, handle_service_update_command
+
+    releases = tmp_path / "releases"
+    for version in ("1.0.0", "1.0.1", "1.0.2"):
+        _write_upgrade_release_skeleton(releases / version, version)
+    current = tmp_path / "current"
+    current.symlink_to(releases / "1.0.1", target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    config_paths = [runtime / "config.yaml", runtime / "config.us.json", runtime / "config.hk.json"]
+    for config in config_paths:
+        config.write_text(f"unchanged fixture {config.name}\n")
+    before_configs = {config: config.read_bytes() for config in config_paths}
+    before_releases = {path: path.read_bytes() for path in releases.rglob("*") if path.is_file()}
+    monkeypatch.setattr(upgrade, "service_upgrade_check", lambda **kwargs: {"latest_version": "1.0.2"})
+    holding = threading.Event()
+    release = threading.Event()
+    protected_calls = []
+    main_thread = threading.get_ident()
+    first_effect = (
+        "_materialize_release_from_git_cache" if holding_operation == "apply"
+        else "_prepare_runtime_configs_for_release"
+    )
+
+    def stop_protected_effect(*args, **kwargs):
+        pytest.fail("contender must not perform protected transition work")
+
+    def pause_holder(*args, **kwargs):
+        assert threading.get_ident() != main_thread, "contender reached transition work"
+        protected_calls.append(first_effect)
+        holding.set()
+        assert release.wait(10)
+        raise RuntimeError("fixture stops holder before transition")
+
+    for name in (
+        "capture_preserved_timer_activation_states", "_resolve_upgrade_remote_url",
+        "_materialize_release_from_git_cache", "_ensure_release_runtime", "_run_required",
+        "_run_command", "_prepare_runtime_configs_for_release", "_pi_storage_readiness",
+        "_switch_current_symlink", "_commit_prepared_runtime_configs",
+        "_validate_committed_runtime_configs", "_reconcile_services_from_current_release",
+        "_restart_services_from_loaded_profile", "_post_upgrade_service_health",
+        "_compensate_service_transition",
+    ):
+        monkeypatch.setattr(upgrade, name, pause_holder if name == first_effect else stop_protected_effect)
+
+    parser = argparse.ArgumentParser()
+    add_service_update_commands(parser.add_subparsers(dest="command"))
+
+    def request(selected):
+        target_flag, target = ("--target-version", "1.0.2") if selected == "apply" else ("--to-version", "1.0.0")
+        argv = [
+            "update", selected, "--repo-root", str(current), "--runtime-root", str(runtime),
+            "--releases-root", str(releases), target_flag, target, "--confirm",
+        ]
+        if selected == "apply":
+            argv += ["--cache-root", str(tmp_path / "cache")]
+        return parser.parse_args(argv)
+
+    holding_request, contender_request = request(holding_operation), request(operation)
+    lock_path = runtime / "locks" / "upgrade.lock"
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(handle_service_update_command, holding_request)
+        try:
+            assert holding.wait(10)
+            identity = (lock_path.stat().st_dev, lock_path.stat().st_ino)
+            content = lock_path.read_bytes()
+            out = handle_service_update_command(contender_request)
+            assert out["tool_name"] == f"update.{operation}"
+            assert out["ok"] is False
+            data = out["data"]
+            expected_status = "failed" if operation == "apply" else "rollback_failed"
+            compensation_flag = "rolled_back" if operation == "apply" else "restored_original"
+            expected = {
+                "status": expected_status,
+                "failure_status": expected_status,
+                "operation": "upgrade" if operation == "apply" else "rollback",
+                "confirmed": True,
+                "ok": False,
+                "changed": False,
+                "write_applied": False,
+                "dry_run": False,
+                "operations": [],
+                "symlink_switched": False,
+                compensation_flag: False,
+                "compensation": {},
+                "runtime_config_prepare": {},
+                "runtime_config_commit": {},
+                "post_switch_runtime_config_validate": [],
+                "service_reconcile": {},
+                "service_health": {},
+                "pi_storage_readiness": {},
+                "error": f"RuntimeError: upgrade lock already exists: {lock_path}",
+            }
+            assert {key: data[key] for key in expected} == expected
+            assert data["audit_id"]
+            assert protected_calls == [first_effect]
+            assert current.resolve() == (releases / "1.0.1").resolve()
+            assert {config: config.read_bytes() for config in config_paths} == before_configs
+            assert {path: path.read_bytes() for path in releases.rglob("*") if path.is_file()} == before_releases
+            assert (lock_path.stat().st_dev, lock_path.stat().st_ino) == identity
+            assert lock_path.read_bytes() == content
+            receipt = json.loads((runtime / "upgrade_status.json").read_text())
+            assert receipt["status"] == expected_status
+            assert receipt["error"] == expected["error"]
+            assert receipt["changed"] is False
+        finally:
+            release.set()
+        holder_result = future.result(timeout=10)
+    assert holder_result["ok"] is False
+    assert holder_result["data"]["error"] == "RuntimeError: fixture stops holder before transition"
+    assert not lock_path.exists()
+    with upgrade._UpgradeLock(lock_path):
+        pass
