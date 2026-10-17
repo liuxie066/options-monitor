@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 
-from domain.domain.ledger import ContractKey, TradeEvent, fee_fact_for_event, project_trade_events
+from domain.domain.ledger import (
+    ContractKey,
+    PositionLot,
+    ResumableProjectionState,
+    TradeEvent,
+    fee_fact_for_event,
+    project_resumable_trade_events,
+    project_trade_events,
+)
 from domain.domain.trade_contract_identity import derive_trade_side
 
 
@@ -322,3 +331,238 @@ def test_currency_or_multiplier_mismatch_closes_lot_but_emits_no_economic_alloca
         assert result.lots[0].contracts_open == 0
         assert result.allocations == []
         assert [item.code for item in result.diagnostics] == ["target_economic_units_mismatch"]
+
+
+def _premium_adjustment(
+    *, premium: object = 3, time_ms: int = 3, event_id: str = "adjust", **patch: object,
+) -> TradeEvent:
+    return _event(
+        event_id, "adjust", contracts=0, price=0, time_ms=time_ms,
+        target_lot_id="lot-1", raw={"patch": {"premium": premium, **patch}},
+    )
+
+
+def _assert_partial_restatement(result, *, expected: Decimal, case: str) -> None:
+    assert result.diagnostics == ()
+    assert len(result.allocations) == 1
+    allocation = result.allocations[0]
+    assert allocation.realized_pnl_net == expected
+    lot = result.retained_lots[0]
+    # This structured assertion identifies the original mismatch without
+    # accepting an unrelated import, diagnostic or fixture failure as evidence.
+    assert lot.realized_pnl == expected, {
+        "case": case, "lot": format(lot.realized_pnl.normalize(), "f"),
+        "expected": format(expected.normalize(), "f"),
+        "allocation_net": format(allocation.realized_pnl_net.normalize(), "f"),
+    }
+    assert result.active_lots == (lot,)
+    assert (lot.contracts_opened, lot.contracts_open, lot.contracts_closed) == (2, 1, 1)
+    assert lot.close_event_ids == ("close",)
+    assert result.transitions[-1].lot_after == lot
+    assert result.state is not None and result.eligible
+    assert result.state.active_lots[0].realized_pnl == expected
+
+
+def test_late_premium_adjustment_restates_lot_realized_pnl() -> None:
+    result = project_resumable_trade_events([
+        _event("open", "open", contracts=2, price=2, basis="actual"),
+        _event("close", "close", price=1, time_ms=2, basis="actual", target_lot_id="lot-1"),
+        _premium_adjustment(),
+    ])
+    _assert_partial_restatement(result, expected=Decimal("200"), case="late-premium")
+    assert result.retained_lots[0].last_event_id == "adjust"
+
+
+def test_premium_adjustment_before_close_matches_effective_history() -> None:
+    result = project_resumable_trade_events([
+        _event("open", "open", contracts=2, price=2, basis="actual"),
+        _premium_adjustment(time_ms=2),
+        _event("close", "close", price=1, time_ms=3, basis="actual", target_lot_id="lot-1"),
+    ])
+    _assert_partial_restatement(result, expected=Decimal("200"), case="before-close")
+    assert result.retained_lots[0].last_event_id == "close"
+
+
+def test_same_premium_adjustment_preserves_lot_realized_pnl() -> None:
+    result = project_resumable_trade_events([
+        _event("open", "open", contracts=2, price=2, basis="actual"),
+        _event("close", "close", price=1, time_ms=2, basis="actual", target_lot_id="lot-1"),
+        _premium_adjustment(premium=2),
+    ])
+    _assert_partial_restatement(result, expected=Decimal("100"), case="same-premium")
+    assert result.retained_lots[0].last_event_id == "adjust"
+
+
+def test_premium_restatement_preserves_lot_fee_contract() -> None:
+    for side, basis, expected_lot, expected_net in (
+        ("short", "actual", Decimal("198"), Decimal("196.5")),
+        ("long", "actual", Decimal("-202"), Decimal("-203.5")),
+        ("short", None, Decimal("200"), None),
+        ("short", "estimated", Decimal("200"), None),
+    ):
+        result = project_resumable_trade_events([
+            _event("open", "open", side=side, contracts=2, price=2, fees=3, basis="actual"),
+            _event(
+                "close", "close", side=side, price=1, time_ms=2,
+                fees=0 if basis is None else 2, basis=basis, target_lot_id="lot-1",
+            ),
+            _premium_adjustment(),
+        ])
+        assert result.eligible
+        assert result.retained_lots[0].realized_pnl == expected_lot, (side, basis)
+        assert result.allocations[0].realized_pnl_net == expected_net, (side, basis)
+        assert result.allocations[0].allocated_open_fee.amount == Decimal("1.5")
+        assert result.state.active_lots[0].allocated_open_fee == Decimal("1.5")
+    no_close = project_resumable_trade_events([
+        _event("open", "open", contracts=2, price=2, fees=3, basis="actual"),
+        _premium_adjustment(),
+    ])
+    assert no_close.eligible and no_close.allocations == ()
+    assert no_close.retained_lots[0].realized_pnl == Decimal("0")
+
+
+def test_premium_restatement_updates_every_transition_prefix() -> None:
+    events = [
+        _event("open", "open", contracts=3, price=2, basis="actual"),
+        _event("close-1", "close", price=1, time_ms=2, basis="actual", target_lot_id="lot-1"),
+        _premium_adjustment(event_id="adjust-1"),
+        _event("close-2", "close", price=0.5, time_ms=4, basis="actual", target_lot_id="lot-1"),
+        _premium_adjustment(event_id="adjust-2", premium=4, time_ms=5),
+    ]
+    other = replace(
+        _event("other-open", "open", price=8, basis="actual"),
+        lot_id="lot-other", contract_key=replace(_key(), account="sy"),
+    )
+    result = project_resumable_trade_events([*events, other])
+    assert result.eligible
+    transitions = [item for item in result.transitions if item.lot_after.lot_id == "lot-1"]
+    expected_prefixes = ((None, 0), (0, 300), (300, 300), (300, 650), (650, 650))
+    chronological = None
+    for event, transition, (before_pnl, after_pnl) in zip(events, transitions, expected_prefixes, strict=True):
+        if chronological is None:
+            assert transition.lot_before is None
+            chronological = PositionLot.from_open_event(event, lot_id="lot-1")
+        else:
+            assert transition.lot_before == replace(chronological, realized_pnl=Decimal(before_pnl))
+            chronological = (
+                chronological.apply_close(event, actual_fee_amount=Decimal("0"))
+                if event.event_type == "close" else chronological.apply_adjust(event)
+            )
+        assert transition.lot_after == replace(chronological, realized_pnl=Decimal(after_pnl))
+        assert transition.event == event
+    expected_other = PositionLot.from_open_event(other, lot_id="lot-other")
+    assert next(lot for lot in result.retained_lots if lot.lot_id == "lot-other") == expected_other
+    final = next(lot for lot in result.active_lots if lot.lot_id == "lot-1")
+    assert final == transitions[-1].lot_after
+    assert final.close_event_ids == ("close-1", "close-2")
+    assert final.last_event_id == "adjust-2"
+
+
+def test_premium_restatement_full_then_serialized_tail_matches_full() -> None:
+    events = [
+        _event("open", "open", contracts=4, price=2, fees=3, basis="actual"),
+        _event("close-1", "close", price=1, time_ms=2, fees=2, basis="actual", target_lot_id="lot-1"),
+        _premium_adjustment(premium=Decimal("3.123456789")),
+        _event("close-2", "close", price=0.5, time_ms=4, fees=0.25, basis="actual", target_lot_id="lot-1"),
+        _event("close-3", "close", contracts=2, price=0.25, time_ms=5, fees=0.5, basis="actual", target_lot_id="lot-1"),
+    ]
+    prefix = project_resumable_trade_events(events[:3])
+    assert prefix.eligible
+    assert prefix.retained_lots[0].realized_pnl == Decimal("210.3456789")
+    state = ResumableProjectionState.from_json_bytes(prefix.state.to_json_bytes())
+    assert state == prefix.state
+    assert state.active_lots[0].allocated_open_fee == Decimal("0.75")
+    empty = project_resumable_trade_events([], initial_state=state, entry_mode="tail")
+    assert empty.state == state and empty.active_lots == prefix.active_lots
+    control = project_resumable_trade_events([events[2]], initial_state=state, entry_mode="tail")
+    assert control.requires_full_replay and control.full_replay_reason == "tail_control_event"
+    for end, expected in ((4, Decimal("472.4413578")), (5, Decimal("1046.6327156"))):
+        resumed = project_resumable_trade_events([events[end - 1]], initial_state=state, entry_mode="tail")
+        full = project_resumable_trade_events(events[:end])
+        assert resumed.eligible and full.eligible
+        assert resumed.retained_lots == full.retained_lots
+        assert resumed.active_lots == full.active_lots
+        assert resumed.state == full.state
+        assert resumed.retained_lots[0].realized_pnl == expected
+        assert resumed.retained_lots[0].last_event_id == events[end - 1].event_id
+        assert resumed.retained_lots[0].close_event_ids == tuple(f"close-{i}" for i in range(1, end - 1))
+        state = ResumableProjectionState.from_json_bytes(resumed.state.to_json_bytes())
+    assert resumed.active_lots == () and state.active_lots == ()
+    assert resumed.retained_lots[0].status == "close"
+    assert resumed.allocations[0].allocated_open_fee.amount == Decimal("1.5")
+
+
+def test_premium_restatement_preserves_invalid_history_diagnostics() -> None:
+    opened = _event("open", "open", contracts=2, price=2, basis="actual")
+    closed = _event("close", "close", price=1, time_ms=2, basis="actual", target_lot_id="lot-1")
+    adjusted = _premium_adjustment()
+    for target, expected, close_ids in (("adjust", Decimal("100"), ("close",)), ("close", Decimal("0"), ())):
+        void = replace(_void("void", key=_key(), target_event_id=target), event_time_ms=4)
+        result = project_resumable_trade_events([opened, closed, adjusted, void])
+        assert result.eligible
+        assert result.retained_lots[0].realized_pnl == expected
+        assert result.retained_lots[0].close_event_ids == close_ids
+        assert target not in [item.event.event_id for item in result.transitions]
+    rejected = replace(closed, event_id="rejected", event_time_ms=4, contracts=3)
+    result = project_resumable_trade_events([opened, closed, adjusted, rejected])
+    assert result.retained_lots[0].realized_pnl == Decimal("200")
+    assert result.retained_lots[0].close_event_ids == ("close",)
+    assert [item.code for item in result.diagnostics] == ["close_contracts_exceed_open"]
+    assert result.state is None and not result.eligible
+    invalid = project_resumable_trade_events([opened, closed, _premium_adjustment(opened_at=4)])
+    assert invalid.retained_lots[0].realized_pnl == Decimal("100")
+    assert invalid.allocations == () and invalid.effective_open_events == ()
+    assert [item.code for item in invalid.diagnostics] == ["economic_adjust_invalid"]
+    assert invalid.state is None and not invalid.eligible
+    for mismatch in (replace(closed, currency="HKD"), replace(closed, multiplier=10)):
+        result = project_resumable_trade_events([opened, mismatch, adjusted])
+        assert result.allocations == ()
+        assert result.retained_lots[0].realized_pnl == Decimal("200")
+        assert result.retained_lots[0].close_event_ids == ("close",)
+        assert result.transitions[1].lot_after.realized_pnl == Decimal("200")
+        assert [item.code for item in result.diagnostics] == ["target_economic_units_mismatch"]
+        assert result.state is None and not result.eligible
+    stock_key = ContractKey.from_values(
+        broker="futu", account="sy", underlying_symbol="NVDA", asset_type="stock",
+        option_type="", strike=0, expiration_ymd="",
+    )
+    stock_open = TradeEvent(
+        event_id="stock-open", event_type="open", event_time_ms=1, contract_key=stock_key,
+        contracts=Decimal("1.25"), price=10, currency="USD", source="test", lot_id="stock-lot",
+        raw_payload={"side": "buy"}, asset_type="stock",
+    )
+    stock_close = replace(
+        stock_open, event_id="stock-close", event_type="close", event_time_ms=2,
+        contracts=Decimal("0.5"), price=12, lot_id=None, target_lot_id="stock-lot", raw_payload={"side": "sell"},
+    )
+    mixed = project_resumable_trade_events([opened, closed, adjusted, stock_open, stock_close])
+    assert mixed.eligible
+    stock = next(lot for lot in mixed.retained_lots if lot.asset_type == "stock")
+    assert (stock.shares_opened, stock.shares_open, stock.shares_closed) == (
+        Decimal("1.25"), Decimal("0.75"), Decimal("0.5"),
+    )
+    assert stock.realized_pnl is None and stock.cost_basis_total is None
+    assert stock.close_event_ids == ("stock-close",)
+
+
+def test_premium_restatement_missing_close_prefix_preserves_final_structure() -> None:
+    opened = _event("open", "open", contracts=2, price=2, basis="actual")
+    closed = _event("close", "close", price=1, time_ms=2, basis="actual", target_lot_id="lot-1")
+    adjusted = _premium_adjustment(strike=105)
+    result = project_resumable_trade_events([opened, closed, adjusted])
+    original_open = PositionLot.from_open_event(opened, lot_id="lot-1")
+    original_closed = original_open.apply_close(closed, actual_fee_amount=Decimal("0"))
+    original_adjusted = original_closed.apply_adjust(adjusted)
+    assert result.retained_lots == result.active_lots == (original_adjusted,)
+    assert (original_adjusted.contracts_opened, original_adjusted.contracts_open, original_adjusted.contracts_closed) == (2, 1, 1)
+    assert original_adjusted.contract_key.strike == Decimal("105")
+    assert original_adjusted.premium_open == Decimal("3")
+    assert original_adjusted.status == "open" and original_adjusted.realized_pnl == Decimal("100")
+    assert original_adjusted.last_event_id == "adjust" and original_adjusted.close_event_ids == ("close",)
+    assert result.transitions[1].lot_before == original_open
+    assert result.transitions[1].lot_after == result.transitions[2].lot_before == original_closed
+    assert result.transitions[2].lot_after == original_adjusted
+    assert result.allocations == ()
+    assert [item.code for item in result.diagnostics] == ["target_contract_mismatch"]
+    assert result.diagnostics[0].severity == "error"
+    assert result.state is None and not result.eligible
