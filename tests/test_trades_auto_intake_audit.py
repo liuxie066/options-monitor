@@ -2,15 +2,44 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from src.application.ledger.api import BrokerTradeOperation
 from src.application.ledger.store_resolution import LedgerStoreResolution
 from src.application.trades.normalizer import NormalizedTradeDeal
-from src.application.trades.state import upsert_deal_state
+from src.application.trades.state import load_trade_intake_state, upsert_deal_state
 from src.application.trades.intake import (
     _attach_receipt_state,
     build_trade_intake_audit_event,
     process_trade_payload,
 )
+
+
+@pytest.mark.parametrize("apply_changes", [False, True])
+def test_invalid_state_stops_apply_before_callbacks_but_dry_run_does_not_read_it(tmp_path, apply_changes):
+    state_path = tmp_path / "state.json"
+    original = b'{"failed_deal_ids":'
+    state_path.write_bytes(original)
+    calls = []
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("state failure reached a downstream callback")
+    def enrich(_payload):
+        calls.append("enrich")
+        raise RuntimeError("dry-run reached enrichment")
+    error_type, message = ((ValueError, "invalid trade intake state") if apply_changes
+                           else (RuntimeError, "dry-run reached enrichment"))
+    with pytest.raises(error_type, match=message):
+        process_trade_payload(
+            {}, repo=object(), state_path=state_path, audit_path=tmp_path / "audit.jsonl",
+            account_mapping={}, apply_changes=apply_changes,
+            load_trade_intake_state_fn=load_trade_intake_state,
+            write_trade_intake_state_fn=unexpected, upsert_deal_state_fn=unexpected,
+            append_trade_intake_audit_fn=lambda *_args: calls.append("audit"),
+            enrich_trade_payload_fn=enrich, normalize_trade_deal_fn=unexpected,
+            resolve_trade_deal_fn=unexpected, before_receipt_fn=unexpected, on_result_fn=unexpected,
+        )
+    assert calls == ([] if apply_changes else ["audit", "enrich"])
+    assert state_path.read_bytes() == original
 
 
 def _deal(**overrides: object) -> NormalizedTradeDeal:

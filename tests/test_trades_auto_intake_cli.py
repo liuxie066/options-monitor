@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 import tempfile
 import threading
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -67,6 +68,69 @@ def _run_auto_intake(*args: str, env: dict[str, str] | None = None) -> subproces
         check=False,
         timeout=AUTO_INTAKE_CLI_TIMEOUT_SEC,
     )
+
+
+@pytest.mark.parametrize("late_corruption", [False, True])
+def test_state_corruption_reaches_real_main_and_child_error_boundary(tmp_path, monkeypatch, capsys, late_corruption):
+    from src.application.trades import intake, process_supervisor
+
+    state_path = tmp_path / "state.json"
+    corrupt = b'{"unresolved_deal_ids":'
+    state_path.write_bytes(b"{}" if late_corruption else corrupt)
+    deal_path = tmp_path / "deal.json"
+    deal_path.write_text(json.dumps({"deal_id": "new", "futu_account_id": "REAL_LX"}), encoding="utf-8")
+    source = _listener_source(tmp_path, "lx", 11111)
+    source.update(state_path=state_path, audit_path=tmp_path / "audit.jsonl")
+    cfg = {"enabled": True, "mode": "apply", "state_path": state_path,
+           "audit_path": source["audit_path"], "status_path": tmp_path / "status.json",
+           "receipt": {"enabled": False}, "backfill": {"enabled": False},
+           "account_mapping": {"REAL_LX": "lx"}, "futu_account_ids": ["REAL_LX"], "sources": [source]}
+    claim = {"inbox_id": "fixture-claim", "broker_deal_key": "futu:lx:REAL_LX:new", "delivery_purpose": "live"}
+    retries, exits, audits = [], [], []
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("state corruption reached resolver, receipt, settlement or success status")
+    def normalize(*_args, **_kwargs):
+        assert late_corruption
+        state_path.write_bytes(corrupt)
+        raise ValueError("fixture normalization failure")
+    def enrich(payload, **_kwargs):
+        assert late_corruption
+        return payload
+    monkeypatch.setattr(auto_intake, "load_config", lambda **_: {})
+    monkeypatch.setattr(auto_intake, "resolve_trade_intake_config", lambda *_, **__: cfg)
+    monkeypatch.setattr(auto_intake, "open_position_ledger_from_runtime_config", lambda **_: (None, object()))
+    monkeypatch.setattr(auto_intake, "_build_receipt_callback", lambda **_: unexpected)
+    monkeypatch.setattr(auto_intake, "enqueue_trade_payload", lambda *_, **__: claim["inbox_id"])
+    monkeypatch.setattr(auto_intake, "read_trade_payload", lambda *_, **__: {})
+    monkeypatch.setattr(auto_intake, "claim_trade_payload", lambda *_, **__: claim)
+    monkeypatch.setattr(auto_intake, "broker_deal_key_from_payload", lambda *_, **__: claim["broker_deal_key"])
+    monkeypatch.setattr(intake, "broker_deal_key_from_payload", lambda *_, **__: claim["broker_deal_key"])
+    monkeypatch.setattr(auto_intake, "opend_fetch_kwargs", lambda *_: None)
+    monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda *_: False)
+    monkeypatch.setattr(auto_intake, "normalize_trade_deal", normalize)
+    monkeypatch.setattr(auto_intake, "enrich_trade_push_payload_with_account_id", enrich)
+    monkeypatch.setattr(auto_intake, "resolve_trade_deal", unexpected)
+    monkeypatch.setattr(auto_intake, "append_trade_intake_audit", lambda _path, event: audits.append(event))
+    monkeypatch.setattr(auto_intake, "trade_payload_commit_scope", lambda *_, **__: nullcontext())
+    monkeypatch.setattr(auto_intake, "_receipt_preparation_scope", lambda **kwargs: nullcontext(kwargs["result"]))
+    monkeypatch.setattr(auto_intake, "save_trade_payload_result", lambda *_, **kwargs: kwargs["result"])
+    monkeypatch.setattr(auto_intake, "mark_trade_payload_retryable", lambda path, **kwargs: retries.append((path, kwargs)))
+    monkeypatch.setattr(auto_intake, "settle_trade_payload_result", unexpected)
+    monkeypatch.setattr(auto_intake, "_write_listener_status", unexpected)
+    monkeypatch.setattr(process_supervisor, "hard_exit", lambda code: exits.append(code))
+
+    process_supervisor._trade_intake_child([
+        "--config", str(tmp_path / "unused-config.json"), "--runtime-root", str(tmp_path),
+        "--mode", "apply", "--confirm", "--deal-json", str(deal_path),
+    ])
+
+    captured = capsys.readouterr()
+    assert exits == [1] and len(retries) == 1
+    assert retries[0][1]["inbox_id"] == "fixture-claim" and retries[0][1]["claim"] is claim
+    assert "invalid trade intake state" in retries[0][1]["error"]
+    assert str(state_path) in captured.err and "invalid trade intake state" in captured.err
+    assert captured.out == "" and state_path.read_bytes() == corrupt
+    assert bool(audits) is late_corruption
 
 
 def test_skipped_stock_recovery_requires_exact_snapshot_and_does_not_send(
