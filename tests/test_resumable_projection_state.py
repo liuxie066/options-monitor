@@ -824,6 +824,66 @@ def test_full_publisher_retains_finalized_row_for_later_full_only_adjust() -> No
         assert retired not in fields, retired
 
 
+def test_premium_restatement_publishes_corrected_state_and_serialized_final_tail() -> None:
+    key = _key()
+    events = [
+        _event("open", "open", 1, key=key, contracts=2, price=2, fees=3, lot_id="lot-a"),
+        _event("partial", "close", 2, key=key, price=1, fees=2, target_lot_id="lot-a"),
+        _event("adjust", "adjust", 3, key=key, contracts=0, price=0,
+               target_lot_id="lot-a", patch={"premium": 3}),
+    ]
+    oracle = project_stored_trade_events_to_position_lots(events)
+    prefix = project_stored_trade_events_to_resumable_position_lots(events)
+    assert oracle.diagnostics == [] and prefix.eligible
+    assert _records_by_id(prefix.touched_lots) == _records_by_id(oracle.lots)
+    assert prefix.active_lots == prefix.touched_lots
+    fields = prefix.touched_lots[0].fields
+    assert fields["realized_pnl"] == "198"
+    assert fields["close_event_ids"] == ["partial"]
+    assert fields["last_event_id"] == "adjust"
+    assert oracle.ledger_projection.allocations[0].realized_pnl_net == Decimal("196.5")
+    domain_state = ResumableProjectionState.from_json_bytes(prefix.domain_state.to_json_bytes())
+    publication_state = ResumablePublicationState.from_json_bytes(prefix.publication_state.to_json_bytes())
+    assert domain_state.active_lots[0].realized_pnl == Decimal("198")
+    assert domain_state.active_lots[0].allocated_open_fee == Decimal("1.5")
+    assert publication_state.fields_by_lot_id["lot-a"] == fields
+
+    final_close = _event("final", "close", 4, key=key, price=0.5, fees=0.5, target_lot_id="lot-a")
+    resumed = project_stored_trade_events_to_resumable_position_lots(
+        [final_close], domain_state=domain_state, publication_state=publication_state, entry_mode="tail",
+    )
+    full = project_stored_trade_events_to_position_lots([*events, final_close])
+    assert resumed.eligible and full.diagnostics == []
+    assert resumed.touched_lots[0].to_dict() == full.lots[0].to_dict()
+    final_fields = resumed.touched_lots[0].fields
+    assert final_fields["realized_pnl"] == "447.5"
+    assert final_fields["status"] == "close" and final_fields["contracts_open"] == 0
+    assert final_fields["last_event_id"] == "final"
+    assert final_fields["close_event_ids"] == ["partial", "final"]
+    assert resumed.active_lots == () and resumed.domain_state.active_lots == ()
+    assert resumed.publication_state.fields_by_lot_id == {}
+
+
+def test_historical_closed_lot_premium_restatement_is_retained_by_both_publishers() -> None:
+    key = _key()
+    events = [
+        _event("open", "open", 1, key=key, price=2, lot_id="lot-a"),
+        _event("close", "close", 2, key=key, price=1, target_lot_id="lot-a"),
+        _event("adjust", "adjust", 3, key=key, contracts=0, price=0,
+               target_lot_id="lot-a", patch={"premium": 3}),
+    ]
+    ordinary = project_stored_trade_events_to_position_lots(events)
+    resumable = project_stored_trade_events_to_resumable_position_lots(events)
+    assert ordinary.diagnostics == [] and resumable.eligible
+    assert _records_by_id(resumable.touched_lots) == _records_by_id(ordinary.lots)
+    fields = ordinary.lots[0].fields
+    assert fields["realized_pnl"] == "200"
+    assert fields["status"] == "close" and fields["contracts_open"] == 0
+    assert fields["last_event_id"] == "adjust" and fields["close_event_ids"] == ["close"]
+    assert resumable.active_lots == () and resumable.domain_state.active_lots == ()
+    assert resumable.publication_state.fields_by_lot_id == {}
+
+
 def test_final_close_emits_exact_row_then_evicts_and_later_target_forces_full() -> None:
     key = _key()
     prefix_events = [

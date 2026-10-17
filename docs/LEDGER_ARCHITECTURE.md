@@ -174,6 +174,11 @@ PM 的持仓同步与通知边界仍由
 adjust 的 `contracts`、`contracts_open`、`contracts_closed` 同样要求精确整数，拒绝小数、
 bool 和非有限值，不经 float 截断或舍入；零、整数字符串及省略/null/空串的既有继承语义保留，
 数量非负与开平仓总数守恒继续校验。`opened_at` 解析和股票 Decimal 股数路径不变。
+晚于部分平仓的权利金 adjust，由 `domain/domain/ledger/projection.py` 复用有效历史重放所得的
+累计 lot `realized_pnl`，同步各 close 前后及 adjust transition、保留行和续算状态，发布与数据库
+快照沿用同一结果。lot PnL 保留既有方向损益减实际平仓费用的定义；不以另扣开仓分摊费用的
+allocation net 替代，不改变数量、事件身份或已平仓状态。缺失有效前缀保留原值和诊断，不补零；
+公开人工调整仍只接受未完全平仓的目标，历史 closed-lot adjust 的完整重放不扩大公开写入权限。
 历史非法数量保留原始事件，完整重放报告 `adjust_patch_invalid` 并阻止投影发布；真实 writer
 失败时整笔事务回滚。adjust 仍是续算 control event：启用可信 checkpoint 时先返回
 `tail_control_event` 再完整重放，未启用时直接完整重放，不支持直接 tail adjust。

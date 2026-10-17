@@ -1124,6 +1124,185 @@ def _adjustment_facts(db_path: Path) -> tuple[list[dict], dict]:
         conn.close()
 
 
+def _assert_premium_readback(db_path: Path, *, expected: Decimal, premium: int, closed: bool) -> dict:
+    from src.application.ledger.api import list_canonical_position_lot_snapshots
+
+    # A new repository and a separate SQL connection read the durable result.
+    fresh = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    events, stored = _adjustment_facts(db_path)
+    projection = ledger_writer.project_stored_trade_events_to_position_lots(fresh.list_trade_events())
+    assert projection.diagnostics == []
+    assert projection.ledger_projection.lots[0].realized_pnl == expected
+    assert projection.lots[0].fields == stored == fresh.get_position_lot_fields("lot-aapl")
+    canonical = list_canonical_position_lot_snapshots(fresh)
+    assert len(canonical) == 1 and canonical[0]["lot_id"] == "lot-aapl"
+    for fields in (stored, canonical[0]["fields"]):
+        assert Decimal(str(fields["realized_pnl"])) == expected
+        assert fields["premium_open"] == str(premium)
+        assert (fields["contracts_opened"], fields["contracts_open"], fields["contracts_closed"]) == (
+            2, 0 if closed else 1, 2 if closed else 1,
+        )
+        assert fields["status"] == ("close" if closed else "open")
+        assert fields["open_event_id"] == "open-aapl"
+        assert fields["close_event_ids"] == (["partial", "final"] if closed else ["partial"])
+    assert len([event for event in events if event["event_type"] == "adjust"]) == 1
+    return stored
+
+
+@pytest.mark.parametrize("checkpoint_enabled", [False, True])
+@pytest.mark.parametrize("timing,premium,open_fee,close_fee,expected", [
+    pytest.param("late", 3, 0, 0, Decimal("200"), id="late-zero-fees"),
+    pytest.param("before", 3, 0, 0, Decimal("200"), id="before-close"),
+    pytest.param("late", 2, 0, 0, Decimal("100"), id="unchanged-premium"),
+    pytest.param("late", 3, 3, 2, Decimal("198"), id="actual-fees"),
+])
+def test_public_batch_premium_adjustment_restates_durable_pnl_and_runtime_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpoint_enabled: bool, timing: str, premium: int,
+    open_fee: int, close_fee: int, expected: Decimal,
+) -> None:
+    from src.application.ledger.api import record_manual_position_adjustments
+    from src.application.ledger import writer_trade_events
+    from src.application.ledger.position_projection_runtime import run_position_projection_forced_full
+
+    db_path = tmp_path / "ledger.sqlite3"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+
+    def assert_actual_fees(expected_fees: dict[str, Decimal]) -> None:
+        fresh = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+        stored = {row["event_id"]: TradeEvent.from_dict(row) for row in fresh.list_trade_events()}
+        for event_id, amount in expected_fees.items():
+            event = stored[event_id]
+            fact = fee_fact_for_event(event)
+            assert fact.basis.value == "actual" and fact.amount == amount
+            assert fact.source == "opend.trade_event" and fact.reason == "broker_receipt_fee"
+            assert event.fees == amount
+            assert event.raw_payload["fee_provenance"]["frozen_at_ms"] > 0
+
+    # Synthetic broker receipts satisfy the real writer's actual-fee admission;
+    # merely labelling an untrusted test/manual event "actual" is insufficient.
+    ledger_writer.persist_trade_event_object(repo, _trade_event(
+        contracts=2, price=2, fees=open_fee, source="opend_push",
+        raw_payload={
+            "side": "sell", "source_type": "broker_trade_event",
+            "futu_account_id": "issue650-fixture-account",
+            "order_id": "issue650-open-order", "source_deal_id": "issue650-open-deal",
+            "fee_provenance": {"basis": "actual", "amount": open_fee, "source": "opend.trade_event"},
+        },
+    ))
+    if checkpoint_enabled:
+        assert run_position_projection_forced_full(repo, seed_checkpoint=True).checkpoint_written
+        repo.set_position_projection_checkpoint_mode("enabled")
+    partial = _trade_event(
+        event_id="partial", event_type="close", event_time_ms=4000 if timing == "before" else 2000,
+        price=1, fees=close_fee, lot_id=None, target_lot_id="lot-aapl", source="opend_push",
+        raw_payload={
+            "side": "buy", "source_type": "broker_trade_event",
+            "futu_account_id": "issue650-fixture-account",
+            "order_id": "issue650-partial-order", "source_deal_id": "issue650-partial-deal",
+            "fee_provenance": {"basis": "actual", "amount": close_fee, "source": "opend.trade_event"},
+        },
+    )
+    if timing == "late":
+        ledger_writer.persist_trade_event_object(repo, partial)
+    request = {"record_id": "lot-aapl", "premium_per_share": premium, "as_of_ms": 3000}
+    result, = record_manual_position_adjustments(repo, [request])
+    assert result.result.created is True
+    if timing == "before":
+        assert repo.get_position_lot_fields("lot-aapl")["realized_pnl"] == "0"
+        ledger_writer.persist_trade_event_object(repo, partial)
+    assert_actual_fees({"open-aapl": Decimal(open_fee), "partial": Decimal(close_fee)})
+    fields = _assert_premium_readback(db_path, expected=expected, premium=premium, closed=False)
+    assert fields["last_event_id"] == ("partial" if timing == "before" else result.result.event_id)
+    projection = ledger_writer.project_stored_trade_events_to_position_lots(repo.list_trade_events())
+    assert projection.ledger_projection.allocations[0].realized_pnl_net == expected - Decimal(open_fee) / 2
+
+    # Existing batch retry advances event time while retaining event identity;
+    # that conflict must not introduce another event or any partial durable row.
+    before_retry = _all_ledger_tables(db_path)
+    with pytest.raises(ValueError, match="trade event conflict"):
+        record_manual_position_adjustments(repo, [request])
+    assert _all_ledger_tables(db_path) == before_retry
+    assert request == {"record_id": "lot-aapl", "premium_per_share": premium, "as_of_ms": 3000}
+
+    seeded = run_position_projection_forced_full(repo, seed_checkpoint=checkpoint_enabled)
+    assert seeded.mode_used == "full"
+    assert seeded.checkpoint_written is checkpoint_enabled
+    assert repo.get_position_lot_fields("lot-aapl") == fields
+    final = _trade_event(
+        event_id="final", event_type="close", event_time_ms=6000, price=0.5,
+        fees=0.5, lot_id=None, target_lot_id="lot-aapl", source="opend_push",
+        raw_payload={
+            "side": "buy", "source_type": "broker_trade_event",
+            "futu_account_id": "issue650-fixture-account",
+            "order_id": "issue650-final-order", "source_deal_id": "issue650-final-deal",
+            "fee_provenance": {"basis": "actual", "amount": 0.5, "source": "opend.trade_event"},
+        },
+    )
+    runtime_results = []
+    original_runtime = writer_trade_events.run_position_projection_in_transaction
+
+    def capture_runtime(*args: Any, **kwargs: Any) -> Any:
+        result = original_runtime(*args, **kwargs)
+        runtime_results.append(result)
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(writer_trade_events, "run_position_projection_in_transaction", capture_runtime)
+        final_write = ledger_writer.persist_trade_event_object(repo, final)
+    assert final_write.created is True
+    assert len(runtime_results) == 1
+    assert runtime_results[0].mode_used == ("fast_tail" if checkpoint_enabled else "full")
+    assert_actual_fees({"open-aapl": Decimal(open_fee), "partial": Decimal(close_fee), "final": Decimal("0.5")})
+    final_expected = expected + (Decimal(premium) - Decimal("0.5")) * 100 - Decimal("0.5")
+    closed_fields = _assert_premium_readback(db_path, expected=final_expected, premium=premium, closed=True)
+    assert closed_fields["last_event_id"] == "final"
+    run_position_projection_forced_full(repo)
+    assert repo.get_position_lot_fields("lot-aapl") == closed_fields
+    before_closed_adjust = _all_ledger_tables(db_path)
+    with pytest.raises(ValueError, match="target lot is not open"):
+        record_manual_position_adjustments(repo, [{**request, "premium_per_share": 4, "as_of_ms": 7000}])
+    assert _all_ledger_tables(db_path) == before_closed_adjust
+
+
+@pytest.mark.parametrize("checkpoint_enabled", [False, True])
+def test_public_batch_premium_adjustment_failure_rolls_back_then_valid_retry_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpoint_enabled: bool,
+) -> None:
+    from src.application.ledger.api import record_manual_position_adjustments
+    from src.application.ledger.position_projection_runtime import run_position_projection_forced_full
+
+    db_path = tmp_path / "ledger.sqlite3"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    ledger_writer.persist_trade_event_object(repo, _trade_event(contracts=2, price=2))
+    ledger_writer.persist_trade_event_object(repo, _trade_event(
+        event_id="partial", event_type="close", event_time_ms=2000, price=1,
+        lot_id=None, target_lot_id="lot-aapl", raw_payload={"side": "buy"},
+    ))
+    if checkpoint_enabled:
+        assert run_position_projection_forced_full(repo, seed_checkpoint=True).checkpoint_written
+        repo.set_position_projection_checkpoint_mode("enabled")
+    request = {"record_id": "lot-aapl", "premium_per_share": 3, "as_of_ms": 3000}
+    before = _all_ledger_tables(db_path)
+    with pytest.raises(ValueError, match="missing-lot"):
+        record_manual_position_adjustments(repo, [request, {**request, "record_id": "missing-lot"}])
+    assert _all_ledger_tables(db_path) == before
+
+    def fail_finalization(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("synthetic late finalization failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger_manual_trades, "_finish_trade_event_decision_projection", fail_finalization)
+        with pytest.raises(RuntimeError, match="synthetic late finalization failure"):
+            record_manual_position_adjustments(repo, [request])
+    assert _all_ledger_tables(db_path) == before
+    assert repo.get_position_lot_fields("lot-aapl")["realized_pnl"] == "100"
+    result, = record_manual_position_adjustments(repo, [request])
+    assert result.result.created is True
+    fields = _assert_premium_readback(db_path, expected=Decimal("200"), premium=3, closed=False)
+    assert fields["last_event_id"] == result.result.event_id
+    assert len(repo.list_trade_events()) == 3
+
+
 def _write_quantity_adjustment(repo: Any, route: str, patch: dict) -> Any:
     if route == "normalized":
         from src.application.ledger.api import record_normalized_trade_event
