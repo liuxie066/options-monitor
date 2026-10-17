@@ -521,6 +521,7 @@ def test_run_symbol_monitoring_uses_runtime_opend_fetch_config(monkeypatch, tmp_
                     "opend_rate_limits": {
                         "market_snapshot": {"max_calls": 23, "window_sec": 22, "max_wait_sec": 21},
                         "option_expiration": {"max_calls": 33, "window_sec": 32, "max_wait_sec": 31},
+                        "history_kline": {"max_calls": 43, "window_sec": 42, "max_wait_sec": 41},
                     },
                 }
             },
@@ -544,6 +545,9 @@ def test_run_symbol_monitoring_uses_runtime_opend_fetch_config(monkeypatch, tmp_
         "expiration_max_wait_sec": 31,
         "expiration_window_sec": 32,
         "expiration_max_calls": 33,
+        "history_kline_max_wait_sec": 41,
+        "history_kline_window_sec": 42,
+        "history_kline_max_calls": 43,
     }
 
 

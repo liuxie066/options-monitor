@@ -22,7 +22,7 @@ RV_DTE_WEIGHTS: tuple[tuple[int, tuple[tuple[int, float], ...]], ...] = (
     (90, ((20, 0.20), (60, 0.40), (120, 0.40))),
 )
 TERM_MATCHED_RV_SCHEMA = "term_matched_rv.v1"
-QFQ_HISTORY_CACHE_SCHEMA = "opend_qfq_history_cache.v1"
+QFQ_HISTORY_CACHE_SCHEMA = "opend_qfq_history_cache.v2"
 QFQ_HISTORY_AUTYPE = "QFQ"
 QFQ_RECHECK_SESSIONS = 5
 
@@ -205,7 +205,24 @@ def fetch_realized_volatility_snapshot(
         (max(20, max_remaining_calendar_days) * 2) + 30,
     )
     history_start = trading_day - timedelta(days=history_calendar_days)
-    calendar_end = max(expiration_dates.values())
+    requested_calendar_end = max(expiration_dates.values())
+    # OpenD provides future trading dates only through the current market year.
+    # A final returned session cannot prove coverage: the boundary may be a holiday.
+    calendar_end = min(requested_calendar_end, date(trading_day.year, 12, 31))
+    calendar_evidence = {
+        "status": "ok",
+        "market": market_code,
+        "start": history_start.isoformat(),
+        "end": calendar_end.isoformat(),
+        "requested_end": requested_calendar_end.isoformat(),
+        "coverage_end": calendar_end.isoformat(),
+    }
+    if all(expiration > calendar_end for expiration in expiration_dates.values()):
+        return _unavailable_term_snapshot(
+            expiration_dates,
+            reason="calendar_coverage_incomplete",
+            calendar_evidence={**calendar_evidence, "status": "unavailable"},
+        )
 
     try:
         calendar_rows = gateway.get_trading_days(
@@ -219,19 +236,14 @@ def fetch_realized_volatility_snapshot(
             expiration_dates,
             reason=f"trading_calendar_error:{type(exc).__name__}",
             calendar_evidence={
+                **calendar_evidence,
                 "status": "error",
                 "reason": f"{type(exc).__name__}: {exc}",
-                "market": market_code,
-                "start": history_start.isoformat(),
-                "end": calendar_end.isoformat(),
             },
         )
 
     calendar_evidence = {
-        "status": "ok",
-        "market": market_code,
-        "start": history_start.isoformat(),
-        "end": calendar_end.isoformat(),
+        **calendar_evidence,
         "session_count": len(calendar_dates),
         "input_hash": _hash_values([item.isoformat() for item in calendar_dates]),
     }
@@ -273,6 +285,7 @@ def fetch_realized_volatility_snapshot(
         expiration_dates=expiration_dates,
         trading_day=trading_day,
         calendar_dates=calendar_dates,
+        calendar_coverage_end=calendar_end,
         history_rows=history_rows,
         diagnostic=diagnostic,
     )
@@ -393,9 +406,12 @@ def _trading_calendar_dates(value: Any) -> list[date]:
             or row.get("trade_date")
             or ""
         ).strip()[:10]
-        kind = str(row.get("trade_date_type") or "").strip().upper()
-        if kind and kind not in {"WHOLE", "MORNING", "AFTERNOON", "TRADING"}:
+        raw_kind = row.get("trade_date_type")
+        kind = "" if raw_kind is None else str(raw_kind).strip().upper()
+        if kind == "NON_TRADING":
             continue
+        if kind not in {"", "WHOLE", "MORNING", "AFTERNOON", "TRADING"}:
+            raise ValueError("unknown trading calendar date type")
         try:
             dates.add(date.fromisoformat(raw))
         except ValueError:
@@ -440,7 +456,21 @@ def _fetch_qfq_history_rows(
             else call()
         )
         chunk = result.get("data") if isinstance(result, dict) else result
-        raw_rows.extend(_rows(chunk))
+        if isinstance(chunk, dict) and isinstance(chunk.get("rows"), list):
+            chunk = chunk["rows"]
+        if hasattr(chunk, "to_dict"):
+            chunk = chunk.to_dict("records")
+        if chunk is None:
+            chunk = []
+        if not isinstance(chunk, list) or any(
+            not isinstance(row, dict)
+            or not isinstance(row.get("code"), str)
+            or not row["code"]
+            or row["code"] != underlier_code
+            for row in chunk
+        ):
+            raise ValueError("QFQ history security identity invalid")
+        raw_rows.extend(chunk)
         next_key = result.get("page_req_key") if isinstance(result, dict) else None
         if next_key in (None, ""):
             break
@@ -706,6 +736,7 @@ def _compute_term_matched_observations(
     expiration_dates: dict[str, date],
     trading_day: date,
     calendar_dates: list[date],
+    calendar_coverage_end: date,
     history_rows: list[dict[str, Any]],
     diagnostic: RealizedVolatilitySnapshot,
 ) -> dict[str, TermMatchedRVObservation]:
@@ -716,6 +747,14 @@ def _compute_term_matched_observations(
     completed_sessions = [item for item in calendar_dates if item < trading_day]
     observations: dict[str, TermMatchedRVObservation] = {}
     for expiration, expiration_date in expiration_dates.items():
+        if expiration_date > calendar_coverage_end:
+            observations[expiration] = _missing_term_observation(
+                expiration=expiration,
+                reason="calendar_coverage_incomplete",
+                remaining_sessions=None,
+                lookback_sessions=None,
+            )
+            continue
         remaining = [
             item
             for item in calendar_dates
