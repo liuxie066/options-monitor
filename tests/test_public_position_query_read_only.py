@@ -1,4 +1,6 @@
 from contextlib import closing
+from dataclasses import replace
+from datetime import datetime, timezone
 import json
 import sqlite3
 
@@ -83,6 +85,128 @@ def test_public_tool_missing_store_never_creates_database(query_store, action):
     result = execute_tool("option_positions_read", _payload(config, action))
     assert result["ok"] is False
     assert not path.parent.exists()
+
+
+@pytest.mark.parametrize(
+    "window_payload,expected_window,expected_error",
+    [
+        pytest.param({"query": {"expiration": {"within_days": 0}}}, 0, None, id="nested-zero"),
+        pytest.param({"exp_within_days": 0}, 0, None, id="flat-zero"),
+        pytest.param({"expiration_within_days": 0}, 0, None, id="last-zero"),
+        pytest.param(
+            {"query": {"expiration": {"within_days": 0}}, "exp_within_days": 1, "expiration_within_days": 7},
+            0, None, id="nested-zero-precedence",
+        ),
+        pytest.param({"exp_within_days": 0, "expiration_within_days": 7}, 0, None, id="flat-zero-precedence"),
+        pytest.param(
+            {"query": {"expiration": {"within_days": 1}}, "exp_within_days": 0, "expiration_within_days": 7},
+            1, None, id="nested-positive-precedence",
+        ),
+        pytest.param({"exp_within_days": 1, "expiration_within_days": 0}, 1, None, id="flat-positive-precedence"),
+        pytest.param({"expiration_within_days": 1}, 1, None, id="last-positive"),
+        pytest.param({}, None, None, id="omitted"),
+        pytest.param(
+            {"query": {"expiration": {"within_days": None}}, "exp_within_days": 0, "expiration_within_days": 7},
+            0, None, id="nested-null-fallback-zero",
+        ),
+        pytest.param(
+            {"query": {"expiration": {"within_days": ""}}, "exp_within_days": 1, "expiration_within_days": 7},
+            1, None, id="nested-empty-fallback-positive",
+        ),
+        pytest.param(
+            {"query": {"expiration": {"within_days": None}}, "expiration_within_days": 0},
+            0, None, id="nested-null-fallback-last",
+        ),
+        pytest.param({"expiration_within_days": None}, None, None, id="last-null"),
+        pytest.param(
+            {"query": {"expiration": {"within_days": False}}, "exp_within_days": 1},
+            1, None, id="nested-false-fallback",
+        ),
+        pytest.param(
+            {"query": {"expiration": {"within_days": []}}, "exp_within_days": 1},
+            1, None, id="nested-array-fallback",
+        ),
+        pytest.param(
+            {"query": {"expiration": {"within_days": {}}}, "exp_within_days": 1},
+            1, None, id="nested-object-fallback",
+        ),
+        pytest.param(
+            {"query": {"expiration": {"within_days": 0.0}}, "exp_within_days": 1},
+            1, None, id="nested-float-zero-fallback",
+        ),
+        pytest.param(
+            {"query": {"expiration": {"within_days": "0"}}, "exp_within_days": 1},
+            0, None, id="nested-string-zero",
+        ),
+        pytest.param({"expiration_within_days": False}, 0, None, id="last-false-parsed"),
+        pytest.param({"expiration_within_days": ""}, None, None, id="last-empty-parsed"),
+        pytest.param({"exp_within_days": None}, None, "INPUT_ERROR", id="declared-null-rejected"),
+        pytest.param({"exp_within_days": ""}, None, "INPUT_ERROR", id="declared-empty-rejected"),
+        pytest.param({"expiration_within_days": []}, None, "INPUT_ERROR", id="last-array-parser-error"),
+        pytest.param(
+            {"query": {"expiration": {"within_days": "invalid"}}, "exp_within_days": 1},
+            None, "INPUT_ERROR", id="truthy-invalid-no-fallback",
+        ),
+    ],
+)
+def test_public_position_list_preserves_expiration_window(
+    query_store, monkeypatch, window_payload, expected_window, expected_error,
+):
+    path, _, config = query_store
+    writer = SQLiteOptionPositionsRepository(path)
+    for event_id, symbol, expiration_ymd in (
+        ("us_past", "NVDA", "2026-10-08"),
+        ("us_today", "NVDA", "2026-10-09"),
+        ("us_next", "NVDA", "2026-10-10"),
+        ("us_far", "NVDA", "2026-10-16"),
+        ("hk_past", "0700.HK", "2026-10-09"),
+        ("hk_today", "0700.HK", "2026-10-10"),
+        ("hk_next", "0700.HK", "2026-10-11"),
+        ("hk_far", "0700.HK", "2026-10-17"),
+    ):
+        event = _event(event_id, event_time_ms=1_780_000_000_000, symbol=symbol)
+        writer.upsert_trade_event(replace(
+            event, contract_key=replace(event.contract_key, expiration_ymd=expiration_ymd),
+        ))
+    api.refresh_position_lot_projection(writer)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 9, 17, tzinfo=timezone.utc)
+
+    monkeypatch.setattr("src.application.ledger.read_model.datetime", Clock)
+    monkeypatch.setattr(SQLiteOptionPositionsRepository, "__init__", _forbid)
+    monkeypatch.setattr(SQLiteOptionPositionsRepository, "_connect", _forbid)
+    monkeypatch.setattr("src.application.ledger.bootstrap.load_option_positions_repo", _forbid)
+    with closing(sqlite3.connect(path)) as conn:
+        before = list(conn.iterdump())
+        result = execute_tool("option_positions_read", {**_payload(config, "list"), **window_payload})
+        assert list(conn.iterdump()) == before
+
+    if expected_error:
+        assert result["ok"] is False, result
+        assert result["error"]["code"] == expected_error
+    else:
+        assert result["ok"] is True, result
+        data = result["data"]
+        expected_lot_ids = {
+            0: {"lot_us_today", "lot_hk_today"},
+            1: {"lot_us_today", "lot_us_next", "lot_hk_today", "lot_hk_next"},
+            None: {
+                "lot_us_past", "lot_us_today", "lot_us_next", "lot_us_far",
+                "lot_hk_past", "lot_hk_today", "lot_hk_next", "lot_hk_far",
+            },
+        }[expected_window]
+        assert {row["lot_id"] for row in data["rows"]} == expected_lot_ids
+        assert data["row_count"] == len(data["rows"]) == len(expected_lot_ids)
+        assert data["bootstrap"]["status"] == "read_only"
+        filters = data["filters"]
+        assert filters["query"]["expiration"]["within_days"] == expected_window
+        assert filters["expiration_within_days"] == expected_window
+        if expected_window is not None:
+            assert type(filters["query"]["expiration"]["within_days"]) is int
+            assert type(filters["expiration_within_days"]) is int
 
 
 @pytest.mark.parametrize("action", ["list", "events", "history", "inspect", "assigned-stock"])

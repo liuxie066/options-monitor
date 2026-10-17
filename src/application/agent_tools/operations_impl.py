@@ -985,9 +985,17 @@ def option_positions_read_tool(
             raise AgentToolError(code="INPUT_ERROR", message="status must be one of: open, close, all")
         limit = _as_int(query.get("limit") if "limit" in query else payload.get("limit"), default=50)
         expiration_within_days = _optional_int(
-            expiration_query.get("within_days")
-            or payload.get("exp_within_days")
-            or payload.get("expiration_within_days")
+            next(
+                (
+                    value
+                    for value in (
+                        expiration_query.get("within_days"),
+                        payload.get("exp_within_days"),
+                    )
+                    if value or type(value) is int
+                ),
+                payload.get("expiration_within_days"),
+            )
         )
         symbol = _optional_text(query.get("symbol") if "symbol" in query else payload.get("symbol"))
         option_type = _optional_text(query.get("option_type") if "option_type" in query else payload.get("option_type"))
