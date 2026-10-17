@@ -273,6 +273,7 @@ def project_resumable_trade_events(
             effective_open_events,
             effective_cash_events,
             economic_accumulator,
+            realized_pnl_by_event,
         ) = _project_effective_economic_allocations(
             validated_events,
             voided_event_ids=voided_event_ids,
@@ -290,6 +291,30 @@ def project_resumable_trade_events(
                         Decimal(0),
                     )
                 )
+        for index, transition in enumerate(transitions):
+            if not transition.applied or transition.lot_after is None:
+                continue
+            before_key = transition.previous_close_event_id or transition.lot_after.open_event_id
+            after_key = (
+                transition.event.event_id
+                if transition.event.event_type in CLOSE_EVENT_TYPES
+                else before_key
+            )
+            if before_key in realized_pnl_by_event and after_key in realized_pnl_by_event:
+                transition = replace(
+                    transition,
+                    lot_before=(
+                        replace(transition.lot_before, realized_pnl=realized_pnl_by_event[before_key])
+                        if transition.lot_before is not None else None
+                    ),
+                    lot_after=replace(transition.lot_after, realized_pnl=realized_pnl_by_event[after_key]),
+                )
+                transitions[index] = transition
+            # Missing effective prefixes retain the chronological structure too:
+            # a later uncorrected close/adjust must replace any earlier snapshot.
+            lot_after = transition.lot_after
+            accumulator.lots_by_id[lot_after.lot_id] = lot_after
+            retained_by_id[lot_after.lot_id] = lot_after
     else:
         finalized_lot_ids = tuple(
             lot_id
@@ -735,6 +760,7 @@ def _project_effective_economic_allocations(
     tuple[TradeEvent, ...],
     tuple[TradeEvent, ...],
     _ProjectionAccumulator,
+    dict[str, Decimal],
 ]:
     """Fold effective opening facts first, then replay terminal economics once."""
 
@@ -856,6 +882,9 @@ def _project_effective_economic_allocations(
             lot_id: None for lot_id in effective_lots
         },
     )
+    realized_pnl_by_event = {
+        lot.open_event_id: lot.realized_pnl for lot in effective_lots.values()
+    }
     allocations: list[OptionEconomicAllocation] = []
     for event in surviving:
         if event.event_type not in CLOSE_EVENT_TYPES:
@@ -863,6 +892,7 @@ def _project_effective_economic_allocations(
         target_lot_id = str(event.target_lot_id or "")
         if target_lot_id not in replay.lots_by_id:
             continue
+        lot_before = replay.lots_by_id[target_lot_id]
         allocation = _apply_close_event(
             event,
             lots_by_id=replay.lots_by_id,
@@ -876,6 +906,11 @@ def _project_effective_economic_allocations(
             diagnostics=diagnostics,
             allocate_economics=True,
         )
+        lot_after = replay.lots_by_id[target_lot_id]
+        # Economic diagnostics can suppress an allocation while still accepting
+        # the close. Reuse the lot owner's exact PnL, including its fee contract.
+        if lot_after != lot_before:
+            realized_pnl_by_event[event.event_id] = lot_after.realized_pnl
         if allocation is not None:
             allocations.append(allocation)
             replay.last_close_event_id_by_lot_id[target_lot_id] = event.event_id
@@ -910,6 +945,7 @@ def _project_effective_economic_allocations(
             )
         ),
         replay,
+        realized_pnl_by_event,
     )
 
 
