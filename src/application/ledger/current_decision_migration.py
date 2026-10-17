@@ -791,6 +791,8 @@ def current_decision_projection_migration_status(
         status = "dirty"
     elif mismatch or missing:
         status = "mismatch"
+    elif not _migration_state_clean(repair):
+        status = "dirty"
     else:
         status = "clean"
     return _position_migration._manifest(
