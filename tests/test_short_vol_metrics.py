@@ -72,7 +72,7 @@ class _Gateway:
         end = date.fromisoformat(kwargs["end"])
         return {
             "data": [
-                {"time_key": session.isoformat(), "close": close}
+                {"code": kwargs["code"], "time_key": session.isoformat(), "close": close}
                 for session, close in sorted(self.prices.items())
                 if start <= session <= end
             ],
@@ -143,6 +143,7 @@ def test_fetch_realized_volatility_snapshot_reads_history_pages() -> None:
                 price *= 1.0 + (0.01 if idx % 2 == 0 else -0.006)
                 rows.append(
                     {
+                        "code": kwargs["code"],
                         "time_key": (
                             date(2025, 10, 1)
                             + timedelta(days=start_idx + idx)
@@ -342,8 +343,10 @@ def test_shorter_followup_request_preserves_earlier_cached_history(tmp_path) -> 
 
     from src.application.short_vol_metrics import qfq_history_cache_path
 
-    trading_day = date(2026, 8, 6)
+    # Keep the long expiry inside OpenD's supported calendar year.
+    trading_day = date(2026, 1, 8)
     past, future = _sessions_around(trading_day, before=360, after=180)
+    assert future[159].year == trading_day.year
     prices = _prices(past)
     cache_path = qfq_history_cache_path(
         tmp_path,

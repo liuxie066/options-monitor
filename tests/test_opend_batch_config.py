@@ -86,7 +86,10 @@ def test_resolve_opend_fetch_config_uses_code_default_when_option_chain_absent()
     assert cfg["market_snapshot"] == {"max_calls": 60, "window_sec": 30.0, "max_wait_sec": 30.0}
     assert cfg["option_expiration"] == {"max_calls": 60, "window_sec": 30.0, "max_wait_sec": 30.0}
     assert cfg["history_kline"] == {"max_calls": 60, "window_sec": 30.0, "max_wait_sec": 30.0}
-    assert not any(key.startswith("history") for key in opend_fetch_kwargs(None))
+    kwargs = opend_fetch_kwargs(None)
+    assert kwargs["history_kline_max_calls"] == 60
+    assert kwargs["history_kline_window_sec"] == 30.0
+    assert kwargs["history_kline_max_wait_sec"] == 30.0
 
 
 def test_resolve_opend_fetch_config_reads_history_kline_limit() -> None:
