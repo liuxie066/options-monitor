@@ -108,6 +108,7 @@ def candidate_rank_explain_tool(
                 {
                     "mode": mode,
                     "candidate_id": item.get("candidate_id"),
+                    "strategy_core_status": item.get("strategy_core_status"),
                     "rank": item.get("rank"),
                     "symbol": facts.get("symbol"),
                     "contract_symbol": facts.get("contract_symbol"),

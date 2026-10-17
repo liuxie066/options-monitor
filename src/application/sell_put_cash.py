@@ -20,10 +20,7 @@ from domain.domain.cash_secured_utils import (
 )
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import require_option_multiplier
-from domain.domain.risk_capacity import (
-    SellPutEffectiveCash,
-    compute_sell_put_effective_cash,
-)
+from domain.domain import strategy_core
 from src.infrastructure.exchange_rates import CurrencyConverter
 from src.application.portfolio_context_service import cash_snapshot_is_usable
 from src.application.cash_totals import sum_by_currency_to_cny
@@ -65,30 +62,19 @@ def _cash_secured_context_unavailable_reason(
     return ""
 
 
-def _effective_cash_in_native_currency(
-    *,
-    cash_by_ccy: dict[str, Any] | None,
-    cash_secured_by_ccy: dict[str, Any] | None,
-    native_currency: str,
-    exchange_rate_converter: CurrencyConverter,
-    cash_required_native: Any = None,
-    fx_status: str | None = None,
-) -> SellPutEffectiveCash:
-    return compute_sell_put_effective_cash(
-        cash_by_currency=cash_by_ccy,
-        cash_secured_by_currency=cash_secured_by_ccy,
-        native_currency=native_currency,
-        convert_currency=lambda amount, source, target: exchange_rate_converter.convert(
-            amount,
-            from_ccy=source,
-            to_ccy=target,
-        ),
-        cash_required_native=cash_required_native,
-        fx_status=fx_status,
-    )
-
-
 def sell_put_opening_capacity_inputs(
+    *, symbol: str, strike: Any, multiplier: Any, currency: Any,
+    portfolio_ctx: dict[str, Any] | None, exchange_rate_converter: CurrencyConverter,
+) -> dict[str, Any]:
+    """Compatibility projection of the core capacity result."""
+    capacity = _sell_put_opening_capacity(
+        symbol=symbol, strike=strike, multiplier=multiplier, currency=currency,
+        portfolio_ctx=portfolio_ctx, exchange_rate_converter=exchange_rate_converter,
+    )
+    return {key: value for key, value in capacity.items() if key.startswith("put_cash_")}
+
+
+def _sell_put_opening_capacity(
     *,
     symbol: str,
     strike: Any,
@@ -138,13 +124,12 @@ def sell_put_opening_capacity_inputs(
                 "put_cash_capacity_reason": "cash_by_currency_missing",
             }
         native_currency = normalize_currency(currency)
-        cash_headroom = _effective_cash_in_native_currency(
-            cash_by_ccy=cash_by_ccy,
-            cash_secured_by_ccy=total_by_ccy,
-            native_currency=native_currency,
-            exchange_rate_converter=exchange_rate_converter,
-            cash_required_native=strike_value * multiplier_value,
-            fx_status=portfolio_ctx.get("_sell_put_fx_status"),
+        return strategy_core.calculate_capacity(
+            {"strike": strike_value, "multiplier": multiplier_value, "currency": native_currency},
+            mode="put", exchange_rate_converter=exchange_rate_converter,
+            capacity_inputs=strategy_core.PutCapacityInputs(
+                tuple(cash_by_ccy.items()), tuple(total_by_ccy.items()), portfolio_ctx.get("_sell_put_fx_status"),
+            ),
         )
     except (TypeError, ValueError):
         return {
@@ -152,20 +137,6 @@ def sell_put_opening_capacity_inputs(
             "put_cash_capacity_reason": "cash_capacity_inputs_invalid",
         }
 
-    native_required = strike_value * multiplier_value
-    if cash_headroom.available and cash_headroom.cash_free is not None:
-        return {
-            "put_cash_required": native_required,
-            "put_cash_free": cash_headroom.cash_free,
-            "put_cash_capacity_available": True,
-            "put_cash_capacity_reason": cash_headroom.reason,
-        }
-    return {
-        "put_cash_required": native_required,
-        "put_cash_free": None,
-        "put_cash_capacity_available": False,
-        "put_cash_capacity_reason": cash_headroom.reason,
-    }
 
 
 def enrich_sell_put_candidates_with_cash(
@@ -202,6 +173,15 @@ def enrich_sell_put_candidates_with_cash(
         out["cash_capacity_basis"] = "demo_scenario"
         out["capacity_source"] = "demo_scenario"
         out["max_new_contracts"] = valid.astype(int)
+        for idx in out.index[valid]:
+            # Demo supplies exactly one contract's collateral; no real cash authority.
+            native = normalize_currency(out.loc[idx].get("currency")) or "CNY"
+            capacity = strategy_core.calculate_capacity(
+                {"strike": strike.loc[idx], "multiplier": multiplier.loc[idx], "currency": native},
+                mode="put", exchange_rate_converter=exchange_rate_converter,
+                capacity_inputs=strategy_core.PutCapacityInputs(((native, required.loc[idx]),)),
+            )
+            out.at[idx, "max_new_contracts"] = capacity["max_new_contracts"]
         out["cash_pool_additive_across_candidates"] = False
         out["cash_secured_used_usd_total"] = 0.0
         out["cash_secured_used_usd_symbol"] = 0.0
@@ -442,15 +422,12 @@ def enrich_sell_put_candidates_with_cash(
             df_sp_lab.at[idx, 'cash_required_native'] = required_native
         if not native_currency or required_native is None:
             continue
-        available_headroom = _effective_cash_in_native_currency(
-            cash_by_ccy=cash_by_ccy,
-            cash_secured_by_ccy={},
-            native_currency=native_currency,
-            exchange_rate_converter=exchange_rate_converter,
-            cash_required_native=required_native,
-            fx_status=fx_status,
+        available_headroom = strategy_core.calculate_capacity(
+            {"strike": row.get("strike"), "multiplier": row.get("multiplier"), "currency": native_currency},
+            mode="put", exchange_rate_converter=exchange_rate_converter,
+            capacity_inputs=strategy_core.PutCapacityInputs(tuple((cash_by_ccy or {}).items()), fx_status=fx_status),
         )
-        capacity = sell_put_opening_capacity_inputs(
+        capacity = _sell_put_opening_capacity(
             symbol=symbol,
             strike=row.get('strike'),
             multiplier=row.get('multiplier'),
@@ -477,11 +454,9 @@ def enrich_sell_put_candidates_with_cash(
             continue
         free_cash = float(capacity["put_cash_free"])
         df_sp_lab.at[idx, 'cash_free_effective_native'] = free_cash
-        df_sp_lab.at[idx, 'max_new_contracts'] = int(
-            free_cash // required_native
-        )
-        if available_headroom.available and available_headroom.cash_free is not None:
-            df_sp_lab.at[idx, 'cash_available_effective_native'] = available_headroom.cash_free
+        df_sp_lab.at[idx, 'max_new_contracts'] = capacity["max_new_contracts"]
+        if available_headroom["put_cash_capacity_available"] and available_headroom["put_cash_free"] is not None:
+            df_sp_lab.at[idx, 'cash_available_effective_native'] = available_headroom["put_cash_free"]
         df_sp_lab.at[idx, 'cash_capacity_basis'] = f'same_currency_then_fx:{native_currency}'
 
         if native_currency == 'USD':
@@ -493,12 +468,12 @@ def enrich_sell_put_candidates_with_cash(
         )
         available_cny = (
             exchange_rate_converter.convert(
-                available_headroom.cash_free,
+                available_headroom["put_cash_free"],
                 from_ccy=native_currency,
                 to_ccy='CNY',
             )
-            if available_headroom.available
-            and available_headroom.cash_free is not None
+            if available_headroom["put_cash_capacity_available"]
+            and available_headroom["put_cash_free"] is not None
             else None
         )
         if free_cny is not None:

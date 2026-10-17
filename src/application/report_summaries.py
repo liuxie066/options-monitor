@@ -11,7 +11,8 @@ from typing import Any
 
 import pandas as pd
 
-from domain.domain.engine import rank_candidate_rows, rank_combo_yield_rows
+from domain.domain.engine import rank_combo_yield_rows
+from domain.domain.strategy_core import rank_candidates
 from domain.domain.strategy_vocab import STRATEGY_COMBO_YIELD
 from domain.domain.symbol_identity import symbol_currency
 from src.application.numeric_helpers import safe_float as _safe_float
@@ -234,6 +235,8 @@ def _build_ranked_row(
 ) -> dict[str, Any]:
     row = _empty_summary_row(symbol, strategy, extra_fields=extra_fields)
     row['candidate_count'] = len(df)
+    if isinstance(top.get("strategy_core"), dict):
+        row["strategy_core"] = top["strategy_core"]
     row.update({
         'top_contract': _format_top_contract(top, contract_suffix),
         'expiration': _safe_text(top.get('expiration')),
@@ -307,7 +310,7 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | None
     if df.empty:
         return row
 
-    ranked = rank_candidate_rows(df.to_dict("records"), mode="put")
+    ranked = rank_candidates(df.to_dict("records"), mode="put")
     top = pd.Series(ranked[0]) if ranked else None
     if top is None:
         row['candidate_count'] = len(df)
@@ -331,7 +334,7 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | Non
     if df.empty:
         return row
 
-    ranked = rank_candidate_rows(df.to_dict("records"), mode="call")
+    ranked = rank_candidates(df.to_dict("records"), mode="call")
     top = pd.Series(ranked[0]) if ranked else None
     if top is None:
         row['candidate_count'] = len(df)

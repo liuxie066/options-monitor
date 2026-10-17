@@ -206,7 +206,6 @@ _ACTOR = '''
 import json, sys, time
 from pathlib import Path
 from src.application.bot.host_store import BotHostStore
-from src.application.inbound import feishu_ws as f
 folder, name, mode = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 def wait(file):
     end = time.monotonic() + 10
@@ -219,6 +218,7 @@ wait("go")
 if mode == "claim":
     out = store.claim_reply(channel="feishu")
 else:
+    from src.application.inbound import feishu_ws as f
     def reply(**kw):
         (folder / (name + ".entered")).write_text("entered")
         wait(name + ".release")

@@ -5,11 +5,11 @@ from typing import Any
 import pandas as pd
 
 from domain.domain.cash_secured_utils import cash_secured_unavailable_for_cash_snapshot, normalize_cash_secured_total_by_ccy
-from domain.domain.option_position_identity import normalize_currency
 from domain.domain.short_vol_assessment import ShortVolPortfolioContext
 from domain.domain.portfolio_assignment_scenario import project_non_option_assignment_assets
 from src.application.portfolio_context_service import cash_snapshot_is_usable
-from domain.domain.symbol_identity import canonical_symbol, symbol_currency
+from domain.domain.symbol_identity import canonical_symbol
+from domain.domain.currency_conversion import amount_to_cny, enrich_short_vol_contract_cny_fields
 from src.infrastructure.exchange_rates import CurrencyConverter
 from src.application.numeric_helpers import float_or_none as _float
 from src.application.cash_totals import sum_by_currency_to_cny
@@ -74,44 +74,6 @@ def build_portfolio_risk_context(
     )
 
 
-def amount_to_cny(
-    value: Any,
-    ccy: Any,
-    *,
-    exchange_rate_converter: CurrencyConverter,
-) -> float | None:
-    amount = _float(value)
-    if amount is None:
-        return None
-    currency = normalize_currency(ccy)
-    if currency in {"CNY", "RMB"}:
-        return float(amount)
-    if not currency:
-        return None
-    converted = exchange_rate_converter.native_to_cny(float(amount), native_ccy=currency)
-    return float(converted) if converted is not None else None
-
-
-def enrich_short_vol_contract_cny_fields(
-    row: dict[str, Any],
-    *,
-    exchange_rate_converter: CurrencyConverter,
-) -> dict[str, float]:
-    ccy = normalize_currency(row.get("currency") or row.get("option_ccy")) or symbol_currency(row.get("symbol"))
-    fields: dict[str, float] = {}
-    if _float(row.get("net_income_cny")) is None:
-        net_income = _first_float(row, "net_income", "net_credit")
-        net_income_cny = amount_to_cny(net_income, ccy, exchange_rate_converter=exchange_rate_converter)
-        if net_income_cny is not None:
-            fields["net_income_cny"] = net_income_cny
-    if _float(row.get("option_contract_point_value_cny")) is None:
-        multiplier = _first_float(row, "multiplier", "option_contract_multiplier", "option_contract_size")
-        point_value_cny = amount_to_cny(multiplier, ccy, exchange_rate_converter=exchange_rate_converter)
-        if point_value_cny is not None:
-            fields["option_contract_point_value_cny"] = point_value_cny
-    return fields
-
-
 def _short_put_assignment_from_option_ctx(
     option_ctx: dict[str, Any],
     *,
@@ -151,11 +113,3 @@ def _short_put_assignment_from_option_ctx(
     if unavailable:
         total_cny = None
     return by_symbol, total_cny, unavailable
-
-
-def _first_float(row: dict[str, Any], *keys: str) -> float | None:
-    for key in keys:
-        value = _float(row.get(key))
-        if value is not None:
-            return value
-    return None
