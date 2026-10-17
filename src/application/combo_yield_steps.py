@@ -633,6 +633,13 @@ def run_cc_lp_variant(
         }
         if demo_capacity:
             scan_kwargs["demo_capacity"] = True
+        # Keep CC+LP's default floor unless the policy explicitly overrides it.
+        if "min_net_credit_retention" in policy.explicit_fields:
+            explicit_min_retention = _optional_float(
+                policy.config, "min_net_credit_retention"
+            )
+            if explicit_min_retention is not None:
+                scan_kwargs["min_retention"] = explicit_min_retention
         df = run_cc_lp_scan_fn(
             **scan_kwargs,
         )
