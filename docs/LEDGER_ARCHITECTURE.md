@@ -1487,6 +1487,8 @@ CC 覆盖按实际平仓数量记录半开时间区间，平仓时点释放对�
 
 `option_positions_read` 的 list、events、history、inspect、assigned-stock，以及 `om option-positions` 的 list、events、history、inspect，经 `ledger.api.open_position_query_ledger_from_data_config` 使用 SQLite `mode=ro` / `query_only`。它们保留既有筛选、账户授权和事件分页，不创建数据库、补 schema 或自动恢复 `position_lots`。缺库、旧/不完整 lot 身份 schema 或所需表不可读时明确失败；events/history/inspect 可观察尚未恢复的事件与投影差异。`bootstrap.status=read_only` 表示本次没有执行启动恢复。
 
+非分页持仓/事件读取除保留既有空文本兼容外，要求所消费的 `fields_json` / `event_json` 解码为 JSON 对象；坏语法或非对象值明确失败，不报告为完整空集合或未找到。
+
 该入口读取已存事实；资金余量/指派情景仍使用要求可信投影的 `read_position_query_ledger`。已有受控写入/恢复继续使用原工作流。assigned-stock 的报价刷新选项保持原合同，不表示生产账本写入授权；SQLite 活跃 WAL/SHM 协调也不等于业务写入。
 
 ### 持仓事实快照校验与耗时
