@@ -325,7 +325,12 @@ git branch -d <exact-local-branch>
   service.profile.json
   upgrade_status.json
   locks/upgrade.lock
+  locks/upgrade.lock.guard
 ```
+
+`upgrade.lock.guard` 保留稳定文件身份，供升级和回滚持有非阻塞 OS 互斥锁；它存在不代表升级正在进行。
+`upgrade.lock` 保留原有 PID 诊断用途，正常释放时删除。所有采用此协议的转换共享同一 runtime 的 guard；
+未修改的旧版本进程不遵守 guard，外部删除或替换 guard 也不在此互斥保证内。
 
 升级检查只读：
 
