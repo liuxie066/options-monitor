@@ -152,6 +152,15 @@ def test_status_preserves_inventory_errors_without_apply(monkeypatch, error_name
     OBSERVATIONS.append({"case": error_name, "kind": "read_error", "error_type": error_type.__name__, "apply_calls": calls})
 
 
+@pytest.fixture
+def wal_keeper(tmp_path: Path, request: pytest.FixtureRequest) -> sqlite3.Connection:
+    # Keep WAL identity stable throughout the measured read and replay windows.
+    keeper = sqlite3.connect(tmp_path / "ledger.sqlite3")
+    request.addfinalizer(keeper.close)
+    assert keeper.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+    return keeper
+
+
 def _fixture(tmp_path: Path, monkeypatch, *, accounts: tuple[str, ...] = ("lx",)) -> SQLiteOptionPositionsRepository:
     # Cleanup does not pass now_ms to status; bind the real owner's wall clock too.
     monkeypatch.setattr(migration.time, "time", lambda: NOW_MS / 1000)
@@ -245,7 +254,7 @@ def _cleanup_preview(repo: SQLiteOptionPositionsRepository, monkeypatch) -> dict
 
 
 @pytest.mark.parametrize("defect", ["healthy", "schema-cookie", "missing-index", "missing-trigger"])
-def test_schema_repairs_block_status_and_public_cleanup(tmp_path: Path, monkeypatch, defect: str) -> None:
+def test_schema_repairs_block_status_and_public_cleanup(tmp_path: Path, monkeypatch, defect: str, wal_keeper: sqlite3.Connection) -> None:
     repo = _fixture(tmp_path, monkeypatch)
     statements = {
         "schema-cookie": "CREATE TABLE issue655_schema_drift(marker INTEGER)",
@@ -323,7 +332,7 @@ def test_schema_repairs_block_status_and_public_cleanup(tmp_path: Path, monkeypa
 
 
 @pytest.mark.parametrize("control", ["generation-missing", "projection-absent", "projection-partial", "projection-dirty", "empty-account"])
-def test_status_preserves_existing_sqlite_states(tmp_path: Path, monkeypatch, control: str) -> None:
+def test_status_preserves_existing_sqlite_states(tmp_path: Path, monkeypatch, control: str, wal_keeper: sqlite3.Connection) -> None:
     accounts = () if control == "empty-account" else ("lx", "sy") if control == "projection-partial" else ("lx",)
     repo = _fixture(tmp_path, monkeypatch, accounts=accounts)
     statements = {
