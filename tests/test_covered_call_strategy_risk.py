@@ -42,10 +42,11 @@ def _candidate(**overrides):
         "open_interest": 100,
         "volume": 20,
         "dte": 30,
-        "strike_above_spot_pct": 0.166667,
     }
     row.update(_earnings_evidence())
     row.update(overrides)
+    row["strike_above_spot_pct"] = round((row["strike"] - row["spot"]) / row["spot"], 10)
+    row["strike_upside_margin_pct"] = row["strike_above_spot_pct"]
     return row
 
 
@@ -80,7 +81,7 @@ def test_covered_call_underwriting_enrichment_accepts_and_adds_pricing_fields(tm
     assert top["short_gamma_profile"] == "short_gamma"
     assert top["short_vega_profile"] == "short_vega"
     assert top["covered_notional_cny"] > 0
-    assert top["strike_upside_margin_pct"] == 0.166667
+    assert top["strike_upside_margin_pct"] == top["strike_above_spot_pct"] == 0.1666666667
     assert "call_gap_up_opportunity_cost_cny" not in top
 
 

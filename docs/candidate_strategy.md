@@ -314,6 +314,8 @@ max_new_contracts = floor(shares_available_for_cover / multiplier)
    - 更高净权利金；
    - symbol 和合约 ID。
 
+`strike_above_spot_pct` 与 `strike_upside_margin_pct` 均保留 Candidate Engine 计算的相对现价距离；承保底价只参与行权价门槛，不改写这两个字段。
+
 ## 7. 期限匹配 RV
 
 CSP 与 CC 使用完全相同的正式 RV：

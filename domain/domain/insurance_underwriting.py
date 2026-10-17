@@ -111,8 +111,6 @@ def underwriting_fields(
     if mode_norm == "put":
         out["strike_safety_margin_pct"] = _strike_safety_margin(row, cfg=cfg)
         out["net_assignment_discount_pct"] = _net_assignment_discount(row)
-    else:
-        out["strike_upside_margin_pct"] = _strike_upside_margin(row, cfg=cfg)
     return out
 
 
@@ -192,16 +190,6 @@ def _net_assignment_discount(row: dict[str, Any]) -> float | None:
     if spot is None or spot <= 0 or breakeven is None:
         return None
     return round((spot - breakeven) / spot, 6)
-
-
-def _strike_upside_margin(row: dict[str, Any], *, cfg: InsuranceUnderwritingConfig) -> float | None:
-    min_strike = _first_float(row, "effective_min_strike", "min_strike")
-    if min_strike is None:
-        min_strike = cfg.min_strike
-    strike = _float(row.get("strike"))
-    if min_strike is None or strike is None or min_strike <= 0:
-        return None
-    return round((strike - min_strike) / min_strike, 6)
 
 
 def _first_float(row: dict[str, Any], *keys: str) -> float | None:
