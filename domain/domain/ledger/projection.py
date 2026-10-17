@@ -250,6 +250,12 @@ def project_resumable_trade_events(
             allocate_economics=mode == "tail",
         )
         if transition.applied and transition.lot_after is not None:
+            if mode == "tail" and event.event_type == "open" and event.asset_type != "stock":
+                if _effective_open_error(transition.lot_after, ()) is not None:
+                    return _force_full_result(initial_state, reason="tail_effective_open_invalid")
+                # Active state omits finalized members needed by the full Combo oracle.
+                if _canonical_combo_member(event) is not None:
+                    return _force_full_result(initial_state, reason="tail_combo_attribution")
             transitions.append(transition)
             lot_id = transition.lot_after.lot_id
             if lot_id not in retained_by_id:
@@ -981,6 +987,28 @@ def _effective_open_error(
     return None
 
 
+def _canonical_combo_member(event: TradeEvent) -> tuple[str, str] | None:
+    resolved = resolve_strategy_metadata(
+        event.raw_payload,
+        source_id=event.event_id,
+    )
+    if resolved.issues:
+        return None
+    metadata = resolved.metadata
+    group_id = metadata.strategy_group_id or ""
+    role = metadata.leg_role
+    if (
+        not group_id
+        or role not in set().union(*_COMBO_ROLE_SETS.values())
+        or (
+            metadata.strategy != "combo_yield"
+            and not group_id.startswith("combo_yield:")
+        )
+    ):
+        return None
+    return group_id, role
+
+
 def _validate_combo_attribution(
     lots: dict[str, PositionLot],
     events: dict[str, TradeEvent],
@@ -992,26 +1020,10 @@ def _validate_combo_attribution(
         list[tuple[str, PositionLot, TradeEvent, str]],
     ] = {}
     for lot_id, event in events.items():
-        resolved = resolve_strategy_metadata(
-            event.raw_payload,
-            source_id=event.event_id,
-        )
-        if resolved.issues:
+        member = _canonical_combo_member(event)
+        if member is None:
             continue
-        metadata = resolved.metadata
-        strategy = metadata.strategy
-        group_id = metadata.strategy_group_id or ""
-        role = metadata.leg_role
-        canonical_roles = set().union(*_COMBO_ROLE_SETS.values())
-        if (
-            not group_id
-            or role not in canonical_roles
-            or (
-                strategy != "combo_yield"
-                and not group_id.startswith("combo_yield:")
-            )
-        ):
-            continue
+        group_id, role = member
         grouped.setdefault(group_id, []).append(
             (lot_id, lots[lot_id], event, role)
         )
