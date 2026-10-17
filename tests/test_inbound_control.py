@@ -1693,6 +1693,14 @@ def test_inbound_manual_trade_update_pending_preview_then_confirm(monkeypatch: p
     assert events[0]["price"] == "2.75"
 
 
+@pytest.fixture
+def _manual_open_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Keep undated opening previews before the fixed May/June 2026 expirations.
+    opened_at_ms = int(datetime(2026, 5, 1, 12, tzinfo=timezone.utc).timestamp() * 1000)
+    monkeypatch.setattr("domain.domain.ledger.position_fields.now_ms", lambda: opened_at_ms)
+
+
+@pytest.mark.usefixtures("_manual_open_clock")
 def test_inbound_pending_operations_lists_current_conversation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable_inbound_trade_write(monkeypatch)
     monkeypatch.setenv("OM_INBOUND_SYMBOL_WRITE_ENABLED", "1")
@@ -2440,6 +2448,7 @@ def test_upgrade_worker_launcher_falls_back_to_service_profile_env_file(monkeypa
     assert "OM_FEISHU_BOT_APP_SECRET=secret" not in " ".join(first)
 
 
+@pytest.mark.usefixtures("_manual_open_clock")
 def test_inbound_manual_trade_bare_confirm_requires_unique_pending(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import src.application.ledger.repository as ledger_repository
 
@@ -2476,6 +2485,7 @@ def test_inbound_manual_trade_bare_confirm_requires_unique_pending(monkeypatch: 
     assert repo.list_trade_events() == []
 
 
+@pytest.mark.usefixtures("_manual_open_clock")
 def test_inbound_manual_trade_update_requires_unique_pending(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import src.application.ledger.repository as ledger_repository
 
@@ -2518,6 +2528,7 @@ def test_inbound_manual_trade_update_requires_unique_pending(monkeypatch: pytest
     assert repo.list_trade_events() == []
 
 
+@pytest.mark.usefixtures("_manual_open_clock")
 def test_inbound_bare_symbol_confirm_does_not_confirm_manual_trade(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import src.application.ledger.repository as ledger_repository
 
@@ -2604,6 +2615,7 @@ def test_inbound_bare_confirm_is_scoped_to_conversation(monkeypatch: pytest.Monk
     assert len(repo.list_trade_events()) == 1
 
 
+@pytest.mark.usefixtures("_manual_open_clock")
 def test_inbound_manual_trade_preview_canonicalizes_symbol_and_keeps_diagnostics(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable_inbound_trade_write(monkeypatch)
     cfg_path, _sqlite_path = _write_inbound_runtime_config(tmp_path)
@@ -3980,6 +3992,7 @@ def test_bot_cli_handle_uses_bot_disabled_config(monkeypatch, capsys, tmp_path: 
     assert settings.context_window_messages == 4
 
 
+@pytest.mark.usefixtures("_manual_open_clock")
 def test_bot_cli_pending_and_audit_diagnostics(monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
 

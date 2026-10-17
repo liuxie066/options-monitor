@@ -691,6 +691,10 @@ def test_option_positions_cli_add_dry_run_infers_currency_from_symbol(
 ) -> None:
     import src.interfaces.cli.option_positions as cli_mod
 
+    # Keep undated opening previews before the fixed May/June 2026 expirations.
+    opened_at_ms = int(datetime.fromisoformat("2026-05-01T12:00:00+00:00").timestamp() * 1000)
+    monkeypatch.setattr("domain.domain.ledger.position_fields.now_ms", lambda: opened_at_ms)
+
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
 
