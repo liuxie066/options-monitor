@@ -1090,6 +1090,189 @@ def test_generic_event_writer_rolls_back_event_when_projection_is_invalid(tmp_pa
     assert repo.list_position_lots()[0]["fields"]["status"] == "close"
 
 
+def _all_ledger_tables(db_path: Path) -> dict[str, tuple]:
+    """Snapshot all logical rows, including internal sequence tables, afresh."""
+    conn = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)
+    try:
+        conn.execute("BEGIN")
+        tables = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").fetchall()
+        snapshot = {}
+        for (name,) in tables:
+            quoted_name = '"' + name.replace('"', '""') + '"'
+            cursor = conn.execute(f"SELECT * FROM {quoted_name}")
+            snapshot[name] = (
+                tuple(column[0] for column in cursor.description),
+                tuple(sorted(cursor.fetchall(), key=repr)),
+            )
+        return snapshot
+    finally:
+        conn.close()
+
+
+def _adjustment_facts(db_path: Path) -> tuple[list[dict], dict]:
+    conn = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)
+    try:
+        conn.execute("BEGIN")
+        events = [json.loads(row[0]) for row in conn.execute(
+            "SELECT event_json FROM trade_events ORDER BY event_id"
+        )]
+        fields = json.loads(conn.execute(
+            "SELECT fields_json FROM position_lots WHERE lot_id = ?", ("lot-aapl",),
+        ).fetchone()[0])
+        return events, fields
+    finally:
+        conn.close()
+
+
+def _write_quantity_adjustment(repo: Any, route: str, patch: dict) -> Any:
+    if route == "normalized":
+        from src.application.ledger.api import record_normalized_trade_event
+
+        return record_normalized_trade_event(repo, _deal(
+            deal_id="adjust-quantity", order_id=None, symbol="NVDA", strike=100,
+            expiration_ymd="2026-08-21", currency="USD", position_effect="adjust",
+            contracts=0, price=0, trade_time_ms=2000,
+            raw_payload={"target_lot_id": "lot-aapl", "patch": patch},
+        ))
+
+    from src.application.ledger.event_codec import encode_trade_event_for_storage
+
+    event = _trade_event(
+        event_id="adjust-quantity", event_type="adjust", event_time_ms=2000,
+        contracts=0, price=0, lot_id=None, target_lot_id="lot-aapl",
+        raw_payload={"patch": patch},
+    )
+    encoded = encode_trade_event_for_storage(event)
+    # The codec preserves invalid evidence too; projection owns rejection.
+    assert json.dumps(json.loads(encoded.event_json)["raw_payload"]["patch"], sort_keys=True) == json.dumps(patch, sort_keys=True)
+    return ledger_writer.persist_trade_event_object(repo, encoded.event)
+
+
+@pytest.mark.parametrize("route", ["canonical", "normalized"])
+@pytest.mark.parametrize("patch,checkpoint_enabled", [
+    pytest.param({"contracts": 1.9}, False, id="opened-positive"),
+    pytest.param({"contracts": -0.5}, False, id="opened-negative"),
+    pytest.param({"contracts_open": 1.9, "contracts_closed": 1}, False, id="open-positive"),
+    pytest.param({"contracts_open": -0.5, "contracts_closed": 2}, False, id="open-negative"),
+    pytest.param({"contracts_closed": 1.9}, False, id="closed-positive"),
+    pytest.param({"contracts_closed": -0.5}, False, id="closed-negative"),
+    pytest.param({"contracts": True}, False, id="bool"),
+    pytest.param({"contracts_closed": "NaN"}, False, id="nonfinite"),
+    pytest.param({"contracts_closed": -1}, False, id="negative-integer"),
+    pytest.param({"contracts_open": 1}, False, id="conservation"),
+    pytest.param({"contracts": 1.9}, True, id="trusted-checkpoint-opened"),
+    pytest.param({"contracts_open": -0.5, "contracts_closed": 2}, True, id="trusted-checkpoint-open"),
+])
+def test_adjust_writer_rolls_back_every_table_and_allows_corrected_retry(
+    tmp_path: Path, route: str, patch: dict, checkpoint_enabled: bool,
+) -> None:
+    from src.application.ledger.position_projection_runtime import run_position_projection_forced_full
+
+    db_path = tmp_path / "ledger.sqlite3"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    ledger_writer.persist_trade_event_object(repo, _trade_event(contracts=2))
+    if checkpoint_enabled:
+        seeded = run_position_projection_forced_full(repo, seed_checkpoint=True)
+        assert seeded.checkpoint_written
+        repo.set_position_projection_checkpoint_mode("enabled")
+        checkpoints = repo.list_position_projection_checkpoints(trusted_only=True)
+        assert checkpoints and all(row["prefix_event_count"] == 1 for row in checkpoints)
+        assert repo.read_position_projection_source_state()["checkpoint_mode"] == "enabled"
+    else:
+        assert repo.read_position_projection_source_state()["checkpoint_mode"] == "disabled"
+    original_events = repo.list_trade_events()
+    original_lots = repo.list_position_lots()
+    original_patch = json.dumps(patch, sort_keys=True)
+    baseline = _all_ledger_tables(db_path)
+    if checkpoint_enabled:
+        assert baseline["position_projection_checkpoints"][1]
+        columns, heads = baseline["position_projection_heads"]
+        assert heads and all(row[columns.index("status")] == "trusted" for row in heads)
+
+    for _ in range(2):
+        before = _all_ledger_tables(db_path)
+        assert before == baseline
+        with pytest.raises(ValueError, match="adjust_patch_invalid"):
+            _write_quantity_adjustment(repo, route, patch)
+        assert _all_ledger_tables(db_path) == before
+        assert repo.list_trade_events() == original_events
+        assert repo.list_position_lots() == original_lots
+        assert json.dumps(patch, sort_keys=True) == original_patch
+
+    # The same request identity can succeed after correction: failure must not
+    # reserve its event ID or leave a partial deduplication/decision record.
+    corrected = {"contracts": "3.0"}
+    first = _write_quantity_adjustment(repo, route, corrected)
+    assert first.created is True
+    facts = _adjustment_facts(db_path)
+    events, fields = facts
+    adjustments = [event for event in events if event["event_type"] == "adjust"]
+    assert len(events) == 2 and len(adjustments) == 1
+    assert adjustments[0]["raw_payload"]["patch"] == corrected
+    assert (fields["contracts_opened"], fields["contracts_open"], fields["contracts_closed"]) == (3, 3, 0)
+    retry = _write_quantity_adjustment(repo, route, corrected)
+    assert retry.created is False
+    assert retry.event_id == first.event_id
+    assert _adjustment_facts(db_path) == facts
+
+
+@pytest.mark.parametrize("route", ["canonical", "normalized"])
+@pytest.mark.parametrize("patch,expected", [
+    pytest.param({"note": "fixture"}, (2, 2, 0), id="omitted"),
+    pytest.param({"contracts": None, "contracts_open": None, "contracts_closed": None}, (2, 2, 0), id="none"),
+    pytest.param({"contracts": "", "contracts_open": "", "contracts_closed": ""}, (2, 2, 0), id="empty"),
+    pytest.param({"contracts": "2.0", "contracts_open": "1.0", "contracts_closed": "1"}, (2, 1, 1), id="integer-text"),
+    pytest.param({"contracts": 0}, (0, 0, 0), id="zero"),
+    pytest.param({"contracts": 2**53 + 1}, (2**53 + 1, 2**53 + 1, 0), id="large-integer"),
+])
+def test_adjust_writer_preserves_valid_quantities_and_raw_patch(
+    tmp_path: Path, route: str, patch: dict, expected: tuple,
+) -> None:
+    db_path = tmp_path / "ledger.sqlite3"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    ledger_writer.persist_trade_event_object(repo, _trade_event(contracts=2))
+    first = _write_quantity_adjustment(repo, route, patch)
+    assert first.created is True
+    facts = _adjustment_facts(db_path)
+    events, fields = facts
+    assert len(events) == 2
+    adjustment = next(event for event in events if event["event_type"] == "adjust")
+    assert json.dumps(adjustment["raw_payload"]["patch"], sort_keys=True) == json.dumps(patch, sort_keys=True)
+    assert (fields["contracts_opened"], fields["contracts_open"], fields["contracts_closed"]) == expected
+    retry = _write_quantity_adjustment(repo, route, patch)
+    assert retry.created is False
+    assert retry.event_id == first.event_id
+    assert _adjustment_facts(db_path) == facts
+
+
+@pytest.mark.parametrize("patch", [
+    {"contracts": 1.9}, {"contracts_open": -0.5, "contracts_closed": 2},
+    {"contracts_closed": "1.9"},
+])
+def test_rebuild_rejects_fractional_adjustment_and_preserves_historical_evidence(
+    tmp_path: Path, patch: dict,
+) -> None:
+    db_path = tmp_path / "ledger.sqlite3"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    ledger_writer.persist_trade_event_object(repo, _trade_event(contracts=2))
+    original_lots = repo.list_position_lots()
+    repo.upsert_trade_event(_trade_event(
+        event_id="historical-bad-adjust", event_type="adjust", event_time_ms=2000,
+        contracts=0, price=0, lot_id=None, target_lot_id="lot-aapl",
+        source="historical-fixture", raw_payload={"patch": patch},
+    ))
+    historical_facts = _adjustment_facts(db_path)
+    bad = next(event for event in historical_facts[0] if event["event_id"] == "historical-bad-adjust")
+    assert bad["raw_payload"]["patch"] == patch
+    before = _all_ledger_tables(db_path)
+    for _ in range(2):
+        with pytest.raises(ValueError, match="adjust_patch_invalid"):
+            ledger_writer.rebuild_position_lots_from_trade_events(repo)
+        assert _all_ledger_tables(db_path) == before
+        assert _adjustment_facts(db_path) == historical_facts
+        assert repo.list_position_lots() == original_lots
+
+
 def test_rebuild_preserves_existing_lots_when_event_history_is_invalid(tmp_path: Path) -> None:
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     key = _contract_key(underlying_symbol="AAPL", strike=150.0, expiration_ymd="2026-06-19")

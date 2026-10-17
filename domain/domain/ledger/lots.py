@@ -231,9 +231,9 @@ class PositionLot:
                 expiration_ymd=_patch_expiration_ymd(patch, fallback=contract_key.expiration_ymd),
             )
 
-        contracts_opened = _patch_int(patch, "contracts", self.contracts_opened)
-        contracts_closed = _patch_int(patch, "contracts_closed", self.contracts_closed)
-        contracts_open = _patch_int(patch, "contracts_open", max(0, contracts_opened - contracts_closed))
+        contracts_opened = _patch_contracts(patch, "contracts", self.contracts_opened)
+        contracts_closed = _patch_contracts(patch, "contracts_closed", self.contracts_closed)
+        contracts_open = _patch_contracts(patch, "contracts_open", max(0, contracts_opened - contracts_closed))
         if contracts_open < 0:
             raise ValueError("adjust patch contracts_open must be >= 0")
         if contracts_closed < 0:
@@ -369,6 +369,13 @@ def _patch_value(patch: PositionLotPatch, key: str, fallback: Any) -> Any:
     if value in (None, ""):
         return fallback
     return value
+
+
+def _patch_contracts(patch: PositionLotPatch, key: str, fallback: int) -> int:
+    value = to_decimal(_patch_value(patch, key, fallback), field_name=key)
+    if value != value.to_integral_value():
+        raise ValueError(f"adjust patch {key} must be an integer")
+    return int(value)
 
 
 def _patch_int(patch: PositionLotPatch, key: str, fallback: int) -> int:
