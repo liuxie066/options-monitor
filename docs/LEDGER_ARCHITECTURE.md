@@ -1417,13 +1417,15 @@ Agent 通过 `option_positions_read action=events` 分页读取 canonical `trade
 
 到期短仓不能仅凭“过了 expiry”自动写成 worthless：
 
-- 价外自动关闭需要符合市场时区和报价证据；
-- 价内、平值或缺少 spot 时进入 review；
+- 短 Put/Call 通过既有到期宽限期、身份和数量等前置校验后，维护判定进入 `expiry_assignment_review_required`；当前或事后 spot 的价外、价内、平值仅用于诊断，不能证明到期未指派，缺少 spot 也不能靠补取现价解除复核；
+- 到期未交割/未指派的终结确认由既有 broker close anchor、完整冻结结算观察和 canonical reconciliation/writer 完成，证据规则见 [Futu 成交与持仓同步](FUTU_TRADE_HOLDINGS_SYNC.md)；只有零价 option leg 或自行标记 complete/unassigned 不足以授权维护入口关闭；
 - option leg 与 stock settlement leg 可以异步到达；
 - assignment / exercise 必须有匹配的交割事实；
 - 缺少 broker lifecycle evidence 时，当前配置账户的到期流程要求人工复核。已移出配置的历史外部账户不会被自动到期流程枚举；其未结 lot 须在账户迁移前单独清点并确定归属和处理方案。
 
 到期维护由独立 `auto-close-expired` 服务/定时入口负责，不是普通 `account_run` 或扫描 pipeline 的隐式步骤。
+
+`plan_expired_position_closes` 与 `record_expired_position_closes` 共享上述短仓复核边界；既有 long 维护规则不变。维护入口保留 `expiry_assignment_quote_refresh` 输出 key 和阶段日志，但跳过实际取价，返回 `enabled=false`、`quote_count=0`、`status=skipped_broker_evidence_required`，其余 symbol/error 列表为空、`quote_source=null`。
 
 一次交割涉及多个期权批次时，`stock_settlement_source` 保留源总量，
 `stock_settlement` 保存各目标批次的分配。股数按分配合约数与乘数确定；已保存费用按

@@ -383,6 +383,7 @@ def test_dispatcher_ledger_write_serializes_auto_close_projection_refresh(
         for item in auto_close_repo.list_position_lots()
     ]
     positions[0]["_auto_close_underlying_spot"] = 101
+    events_before = auto_close_repo.list_trade_events()
     as_of_ms = parse_exp_to_ms("2026-04-20")
     assert as_of_ms is not None
 
@@ -437,9 +438,13 @@ def test_dispatcher_ledger_write_serializes_auto_close_projection_refresh(
         auto_close_result = auto_close_future.result(timeout=2).to_payload()
 
     assert auto_close_writer_entered.is_set()
-    assert len(auto_close_result["applied"]) == 1
+    assert auto_close_result["applied"] == []
     assert auto_close_result["errors"] == []
-    assert auto_close_repo.list_position_lots()[0]["fields"]["status"] == "close"
+    assert auto_close_result["decisions"][0]["skip_reason"] == "expiry_assignment_review_required"
+    assert auto_close_result["decisions"][0]["patch"] is None
+    assert auto_close_repo.list_position_lots()[0]["fields"]["status"] == "open"
+    assert auto_close_repo.list_position_lots()[0]["fields"]["contracts_open"] == 1
+    assert auto_close_repo.list_trade_events() == events_before
 
 
 def test_quiet_window_and_oldest_max_wait_are_both_enforced(
