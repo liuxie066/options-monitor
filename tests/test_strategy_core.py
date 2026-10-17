@@ -249,3 +249,25 @@ def test_zero_dte_and_per_symbol_willingness_are_compatible():
     experiment = replace(baseline, ranking_profile="concentration_first")
     assert experiment.identity["policy_kind"] == "custom"
     assert experiment.identity["effective_policy_hash"] != baseline.identity["effective_policy_hash"]
+
+
+@pytest.mark.parametrize("floor", ["missing", None, float("nan"), float("inf"), True, "invalid"])
+def test_public_cc_evaluation_requires_prepared_constraints(floor):
+    case = next(c for c in VALID if c["mode"] == "call" and c["decision"]["accepted"])
+    row = {key: value for key, value in deepcopy(case["policy_row"]).items()
+           if not key.startswith("policy_") and key != "effective_min_strike"}
+    row["avg_cost"] = 130.0
+    assert row["strike"] == 120 and row["spot"] == 110
+    if floor != "missing":
+        row["effective_min_strike"] = floor
+    strategy = resolve_strategy(mode="call", config=InsuranceUnderwritingConfig())
+    with pytest.raises(ValueError):
+        evaluate_candidates([row], strategy=strategy)
+    row.pop("effective_min_strike", None)
+    prepared = calculate_constraints(row, mode="call", risk_ctx=UNKNOWN,
+                                     exchange_rate_converter=CONVERTER, strategy=strategy)
+    decision = evaluate_candidates([prepared], strategy=strategy)["decisions"][0]
+    assert prepared["effective_min_strike"] == 132.6
+    assert not decision["accepted"]
+    assert any(reject["reason"] == "hard_strike" and reject["threshold"] == 132.6
+               for reject in decision["opening_decision"]["rejects"])

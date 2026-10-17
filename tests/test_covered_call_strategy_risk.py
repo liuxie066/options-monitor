@@ -89,9 +89,11 @@ def test_covered_call_blocks_near_expiry_but_retains_distant_earnings() -> None:
     cfg = resolve_covered_call_underwriting_config(
         {"strategy": "insurance_underwriting"}
     )
+    # Earnings evaluation consumes rows after the strike-constraint stage.
     near = evaluate_covered_call_underwriting_row(
         _candidate(
             net_income_cny=1_400.0,
+            effective_min_strike=120.0,
             **_earnings_evidence(event_date="2026-06-13"),
         ),
         cfg=cfg,
@@ -99,6 +101,7 @@ def test_covered_call_blocks_near_expiry_but_retains_distant_earnings() -> None:
     distant = evaluate_covered_call_underwriting_row(
         _candidate(
             net_income_cny=1_400.0,
+            effective_min_strike=120.0,
             **_earnings_evidence(event_date="2026-06-01"),
         ),
         cfg=cfg,

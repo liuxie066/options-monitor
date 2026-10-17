@@ -63,6 +63,9 @@
 
 应用层继续负责配置合并、账户事实和行情资格检查。前置拒绝不会重新进入评价，
 四项能力不合并或改变现有扫描、现金及 underwriting 阶段顺序。
+独立调用 `evaluate_candidates` 前也须先运行 `calculate_constraints`，并传入其返回行。
+若模板要求 `effective_min_strike`，评价入口拒绝缺失或无效的该字段，不在此阶段
+重新计算容量或覆盖已冻结的行权价约束。
 `calculate_capacity` 是约束能力的纯计算子入口：正式 CSP 现金阶段与 CC 持股阶段
 传入冻结的 `PutCapacityInputs` / `CallCapacityInputs`，无需提前计算集中度。
 CSP 保留原有 `//` 浮点边界、原币优先、占款、缺失和 FX 资格语义；OM 仍负责

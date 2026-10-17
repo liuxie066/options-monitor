@@ -100,6 +100,22 @@ for c in baseline['cases']:
             risk_ctx=ShortVolPortfolioContext(None, {}, {}, None), exchange_rate_converter=CurrencyConverter(ExchangeRates(**c['rates'])))
         assert constrained['concentration_evaluable'] is False
 assert not any(name.startswith(('pandas', 'futu', 'src.', 'domain.storage', 'domain.services')) for name in sys.modules)
+case = next(c for c in baseline['cases'] if c['mode'] == 'call' and c.get('decision', {}).get('accepted'))
+row = {k: v for k, v in case['policy_row'].items() if not k.startswith('policy_') and k != 'effective_min_strike'}
+row['avg_cost'] = 130.0
+policy = resolve_strategy(mode='call', config=InsuranceUnderwritingConfig())
+try:
+    evaluate_candidates([row], strategy=policy)
+except ValueError as exc:
+    assert 'calculate_constraints before evaluation' in str(exc)
+else:
+    raise AssertionError('unprepared CC candidate accepted')
+prepared = calculate_constraints(row, mode='call', strategy=policy,
+    risk_ctx=ShortVolPortfolioContext(None, {}, {}, None),
+    exchange_rate_converter=CurrencyConverter(ExchangeRates(**case['rates'])))
+decision = evaluate_candidates([prepared], strategy=policy)['decisions'][0]
+assert not decision['accepted']
+assert any(r['reason'] == 'hard_strike' and r['threshold'] == 132.6 for r in decision['opening_decision']['rejects'])
 identity = runtime_identity(mode='installed')
 assert identity['mode'] == 'installed' and len(identity['build_digest']) == 64
 print(json.dumps(identity))

@@ -334,7 +334,7 @@ def _constraint_fields(descriptor, row, *, mode, cfg):
 
 
 def evaluate_candidates(rows: list[dict[str, Any]], *, strategy: ResolvedStrategy) -> dict[str, Any]:
-    """Evaluate the underwriting-stage universe, keeping every decision and pass."""
+    """Evaluate rows already prepared by calculate_constraints, without repeating capacity."""
     descriptor = _execution_template(strategy)
     decisions = []
     accepted = []
@@ -351,6 +351,10 @@ def evaluate_candidates(rows: list[dict[str, Any]], *, strategy: ResolvedStrateg
         canonical = {**row, **fields}
         # Reproject policy scalars after shared annotations; never recompute capacity here.
         constraints = _constraint_fields(descriptor, canonical, mode=strategy.mode, cfg=strategy.config)
+        if constraints.get("effective_min_strike") is not None:
+            floor = _float(row.get("effective_min_strike"))
+            if isinstance(row.get("effective_min_strike"), bool) or floor is None or not math.isfinite(floor):
+                raise ValueError("candidate requires calculate_constraints before evaluation: invalid effective_min_strike")
         fields.update({key: value for key, value in constraints.items() if key.startswith("policy_")})
         canonical.update(fields)
         policy = _invoke(descriptor.evaluate, canonical, mode=strategy.mode, cfg=strategy.config)
