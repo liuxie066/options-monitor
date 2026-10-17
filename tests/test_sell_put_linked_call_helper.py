@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -329,6 +330,72 @@ def _single_put_df(
     row.update(overrides)
     row.setdefault("spot_observed_at_utc", row["snapshot_received_at_utc"])
     return pd.DataFrame([row])
+
+
+@pytest.mark.parametrize(
+    "funding_fields",
+    [
+        pytest.param({"net_income": 498.7}, id="number"),
+        pytest.param({"net_income": "498.7"}, id="numeric-string"),
+        pytest.param({"net_income": None}, id="null"),
+        pytest.param({"net_income": float("nan")}, id="nan"),
+        pytest.param({}, id="absent"),
+    ],
+)
+def test_combo_yield_pair_keeps_combo_net_income(
+    tmp_path: Path,
+    funding_fields: dict[str, object],
+) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_combo_yield_pairs
+
+    now_utc = datetime(2026, 5, 6, 15, 0, tzinfo=timezone.utc)
+    source_puts = _nvda_put_frame()
+    calls = _nvda_call_frame(mid=0.245, implied_volatility=0.40)
+    for frame in (source_puts, calls):
+        frame["snapshot_received_at_utc"] = "2026-05-06T14:59:00Z"
+        frame["spot_observed_at_utc"] = "2026-05-06T14:59:00Z"
+    earnings_events = [{"earnings_date": "2026-05-20", "blocking": False}]
+    candidates = pd.DataFrame(
+        [{
+            **source_puts.iloc[0].to_dict(),
+            "funding_put_eligible": True,
+            "cash_required_cny": 9_500.0,
+            "earnings_events": earnings_events,
+            **funding_fields,
+        }]
+    )
+    original_candidates = candidates.copy(deep=True)
+
+    pairs = find_sell_put_combo_yield_pairs(
+        df_candidates=candidates,
+        symbol="NVDA",
+        input_root=tmp_path,
+        combo_yield_cfg=_combo_yield_cfg(),
+        sell_put_cfg=_sell_put_cfg(),
+        required_data_frame=pd.concat([source_puts, calls], ignore_index=True),
+        now_utc=now_utc,
+    )
+
+    assert len(pairs) == 1
+    assert pairs.attrs["reject_counts"] == {}
+    pair = pairs.iloc[0].to_dict()
+    assert isinstance(pair["net_income"], (int, float))
+    assert math.isfinite(pair["net_income"])
+    assert pair["net_income"] == pytest.approx(pair["net_credit"])
+    assert pair["net_income"] == pytest.approx(pair["combo_net_credit"])
+    assert pair["net_credit"] < 498.7
+    assert pair["put_only_net_credit"] == pytest.approx(
+        pair["put_bid"] * pair["multiplier"] - pair["put_sell_fee"]
+    )
+    assert pair["put_net_credit"] == pytest.approx(pair["put_only_net_credit"])
+    assert pair["net_credit"] == pytest.approx(
+        pair["put_only_net_credit"]
+        - (pair["call_ask"] * pair["multiplier"] + pair["call_buy_fee"])
+    )
+    assert pair["funding_put_eligible"] is True
+    assert pair["cash_required_cny"] == 9_500.0
+    assert pair["earnings_events"] == earnings_events
+    pd.testing.assert_frame_equal(candidates, original_candidates)
 
 
 def test_combo_yield_pair_preserves_funding_put_earnings_evidence(
