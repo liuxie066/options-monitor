@@ -1113,9 +1113,37 @@ def _event_with_existing_fee_evidence(event: TradeEvent, existing: dict[str, Any
             event = replace(event, raw_payload=incoming_payload)
         incoming = encode_trade_event_for_storage(event).event_json
         stored = encode_trade_event_for_storage(existing).event_json
-        if incoming != stored:
-            raise ValueError(f"trade event fee evidence conflict for event_id={event.event_id}")
-        return event
+        if incoming == stored:
+            return event
+        incoming_provenance = incoming_payload.get("fee_provenance")
+        if (
+            isinstance(incoming_provenance, Mapping)
+            and str(incoming_provenance.get("basis") or "").strip().lower() == "actual"
+            and isinstance(stored_provenance, dict)
+            and stored_provenance.get("basis") == "actual"
+            and isinstance(stored_provenance.get("reason"), str)
+            and type(stored_provenance.get("frozen_at_ms")) is int
+        ):
+            resolution = _incoming_fee_resolution(event)
+            if resolution["status"] == "actual":
+                candidate = _event_with_actual_fee(
+                    event,
+                    amount=resolution["amount"],
+                    source=str(resolution["source"]),
+                    frozen_at_ms=stored_provenance["frozen_at_ms"],
+                    reason=stored_provenance["reason"],
+                )
+                candidate_payload = dict(candidate.raw_payload)
+                candidate_provenance = dict(candidate_payload["fee_provenance"])
+                # Recover omitted writer metadata without hiding explicit contradictions.
+                for key in ("reason", "frozen_at_ms"):
+                    if key in incoming_provenance:
+                        candidate_provenance[key] = incoming_provenance[key]
+                candidate_payload["fee_provenance"] = candidate_provenance
+                candidate = replace(candidate, raw_payload=candidate_payload)
+                if encode_trade_event_for_storage(candidate).event_json == stored:
+                    return candidate
+        raise ValueError(f"trade event fee evidence conflict for event_id={event.event_id}")
     if "fee_provenance" in existing_payload:
         incoming_payload["fee_provenance"] = dict(existing_payload["fee_provenance"])
     return replace(event, fees=float(existing.get("fees") or 0.0), raw_payload=incoming_payload)
