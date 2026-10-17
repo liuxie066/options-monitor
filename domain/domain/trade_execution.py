@@ -824,7 +824,7 @@ def ledger_execution_event_set_is_complete(rows: list[dict[str, Any]]) -> bool:
     if not metadata_rows:
         has_resolution = any("close_target_resolution" in (row.get("raw_payload") or {}) for row in rows)
         return (len(rows) == 1 and not has_resolution) or (
-            _split_events_are_coherent(rows) and _legacy_split_set_is_complete(rows)
+            _split_events_are_coherent(rows) and ledger_close_allocation_set_is_complete(rows)
         )
     if len(metadata_rows) != len(rows):
         return False
@@ -859,13 +859,14 @@ def _deal_completion_payload(event: dict[str, Any]) -> dict[str, Any] | None:
 
 def _allocation_close_resolution_is_complete(rows: list[dict[str, Any]]) -> bool:
     if {row.get("event_type") for row in rows} != {"open", "close"}:
-        return _legacy_split_set_is_complete(rows)
+        return ledger_close_allocation_set_is_complete(rows)
     closes = [row for row in rows if row.get("event_type") == "close"]
     # Parent economics describe the WHOLE fill; the FIFO selector only its close part.
-    return _legacy_split_set_is_complete(closes, check_source_quantity=False)
+    return ledger_close_allocation_set_is_complete(closes, check_source_quantity=False)
 
 
-def _legacy_split_set_is_complete(rows: list[dict[str, Any]], *, check_source_quantity: bool = True) -> bool:
+def ledger_close_allocation_set_is_complete(rows: list[dict[str, Any]], *, check_source_quantity: bool = True) -> bool:
+    """Check declared close allocation, not broker identity, economics or void status."""
     resolutions: list[dict[str, Any]] = []
     target_lot_ids: set[str] = set()
     for event in rows:

@@ -24,7 +24,11 @@ from domain.domain.trade_contract_identity import (
 )
 
 from domain.domain.ledger import ContractKey, TradeEvent
-from domain.domain.trade_execution import execution_identity_from_input
+from domain.domain.trade_execution import (
+    execution_identity_from_input,
+    ledger_close_allocation_set_is_complete,
+    ledger_execution_event_set_is_complete,
+)
 from src.application.ledger import api, writer_trade_events
 from src.application.ledger.api import (
     applied_execution_association_conflicts,
@@ -612,6 +616,23 @@ def _proven_legacy_execution_fixture(tmp_path, *, split=False, order_known=True,
     return repo, payload, normalize(payload)
 
 
+def test_direct_legacy_replay_does_not_convert_presplit_broker_close_family(tmp_path):
+    repo, _payload, deal = _proven_legacy_execution_fixture(tmp_path, split=True)
+    before = repo.list_trade_events()
+    lots = [row["fields"] for row in repo.list_position_lots()]
+    notifications = repo.list_trade_lifecycle_notifications()
+    closes = [row for row in before if row["event_type"] == "close"]
+    assert len(closes) == 2
+    assert all(":close:" in row["event_id"] for row in closes)
+    for row in closes:
+        assert writer_trade_events.persist_trade_event_object(repo, TradeEvent.from_dict(row)).created is False
+    with pytest.raises(ValueError, match="trade event conflict"):
+        record_normalized_trade_event(repo, replace(deal, execution_input={}))
+    assert repo.list_trade_events() == before
+    assert [row["fields"] for row in repo.list_position_lots()] == lots
+    assert repo.list_trade_lifecycle_notifications() == notifications
+
+
 @pytest.mark.parametrize("split", [False, True])
 def test_proven_legacy_order_replay_preserves_original_group_at_public_intake(tmp_path, monkeypatch, split):
     repo, payload, deal = _proven_legacy_execution_fixture(tmp_path, split=split)
@@ -736,6 +757,18 @@ def _complete_split_rows(*, quantities=(1, 1), legacy=False):
             "raw_payload": raw,
         })
     return rows
+
+
+def test_close_allocation_primitive_does_not_weaken_broker_source_proof():
+    rows = _complete_split_rows(quantities=(1, 2), legacy=True)
+    for row in rows:
+        row["raw_payload"].pop("qty")
+    assert ledger_close_allocation_set_is_complete(rows) is True
+    assert ledger_execution_event_set_is_complete(rows) is False
+    assert ledger_close_allocation_set_is_complete(rows[:1]) is False
+    duplicate = deepcopy(rows)
+    duplicate[1]["target_lot_id"] = duplicate[0]["target_lot_id"]
+    assert ledger_close_allocation_set_is_complete(duplicate) is False
 
 
 @pytest.mark.parametrize("legacy", [False, True])
