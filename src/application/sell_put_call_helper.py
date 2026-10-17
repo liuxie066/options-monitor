@@ -510,7 +510,6 @@ def _put_risk_fields(row: pd.Series) -> dict[str, Any]:
         "premium_edge_score",
         "spread_ratio",
         "open_interest",
-        "net_income",
         "cash_required_usd",
         "cash_required_cny",
         "cash_available_usd",
