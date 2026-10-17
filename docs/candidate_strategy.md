@@ -630,7 +630,7 @@ CC+LP 是 `combo_yield` 模块下的同到期变体（`combo_yield.variant=cc_lp
 - Long Put 反转腿默认 `0.15 ≤ |delta| ≤ 0.35`，通过 `combo_yield.put.min_delta/max_delta` 覆盖；排序次键目标仍为 0.12；
 - Long Put 成腿前复用统一开仓证据校验和规范化数值，在决策时复验期权 snapshot 的 300 秒取得时效；证据不可用与合法零候选分别保留，混合结果沿现有状态 owner 标为 `partial_data`；
 - 结构方向 `call_strike > put_strike`（复用 `strike_order` 角色参数化）；
-- 保留率 `net_credit / call_net_credit >= 0.20`（不允许净 debit/自掏腰包），无 gap 硬门槛（`gap_width_pct` 仅诊断）；
+- 保留率 `net_credit / call_net_credit` 默认至少为 `0.20`，可由显式 `combo_yield.min_net_credit_retention` 覆盖；未配置或为 `null` 时保持 `0.20`，不采用 SP+LC 的通用 `0.60` 默认值；不允许净 debit/自掏腰包，无 gap 硬门槛（`gap_width_pct` 仅诊断）；
 - 资金占用 = 持仓当前市值 `spot * multiplier`（1 张合约覆盖股数），不扣净权利金；
 - 排序：保留率主键，次键反转腿 delta 趋近 0.12，再 spread/OI；
 - 候选写入独立 `cc_lp_candidate_snapshot.v4`，Daily Brief 加载快照到数据源（不渲染）；

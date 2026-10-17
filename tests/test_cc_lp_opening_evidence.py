@@ -6,6 +6,7 @@ import pytest
 
 from src.application import cc_lp_steps
 from src.application import cc_lp_candidate_snapshot as snapshots
+from src.application import combo_yield_steps
 from src.application.combo_yield_steps import run_cc_lp_variant
 from src.application.opening_quote_evidence import (
     normalize_option_observation,
@@ -18,6 +19,7 @@ from test_cc_lp_steps import (
     _cc_lp_scan_kwargs,
     _cc_lp_symbol_cfg,
     _cc_lp_variant_kwargs,
+    _converter,
     _put_row,
     _scan_call_row,
     _write_required_data,
@@ -214,3 +216,52 @@ def test_variant_and_snapshot_preserve_evidence_status(monkeypatch, tmp_path, pu
     assert payload["opening_status"] == opening
     assert payload["scope_results"][0]["reason_code"] == (reason or None)
     assert snapshots.project_cc_lp_candidates(payload) == pairs
+
+
+@pytest.mark.parametrize("missing_put", [False, True])
+def test_explicit_retention_preserves_facade_and_snapshot_status(monkeypatch, tmp_path, missing_put):
+    cfg = _cc_lp_symbol_cfg()
+    cfg["combo_yield"]["min_net_credit_retention"] = 0.90
+    puts = [_put_row()]
+    if missing_put:
+        puts.append(_put_row(contract_symbol="MISSING_PUT", bid=None))
+    evidence = []
+    variant = combo_yield_steps.run_cc_lp_variant
+
+    def scan(**kwargs):
+        return cc_lp_steps.run_cc_lp_scan(
+            **kwargs, now_utc_fn=lambda: DECISION_NOW,
+            run_sell_call_scan_fn=lambda **_: pd.DataFrame([_scan_call_row()]),
+        )
+
+    # Thread the existing funding-call/clock seams through the real facade.
+    monkeypatch.setattr(combo_yield_steps, "run_cc_lp_variant", lambda **kw: variant(**kw, run_cc_lp_scan_fn=scan))
+    summary = combo_yield_steps.run_combo_yield_for_symbol_and_summarize(
+        sym="NVDA", symbol="NVDA", symbol_lower="nvda", symbol_cfg=cfg,
+        sell_put_cfg={}, top_n=3, required_data_dir=tmp_path, report_dir=tmp_path,
+        is_scheduled=True, exchange_rate_converter=_converter(),
+        portfolio_ctx=_available_cc_lp_context(), stock=STOCK,
+        required_data_frame=pd.DataFrame(puts), combo_evidence_sink_fn=evidence.append,
+    )
+    reason = "partial_data" if missing_put else "no_candidate"
+    assert (summary["status"], summary["reason"], summary["candidate_count"]) == ("no_candidate", reason, 0)
+    assert evidence[0]["ranked_pairs"] == []
+    storage = {}
+
+    def write(**kwargs):
+        storage[kwargs["name"]] = kwargs["payload"]
+        return tmp_path / kwargs["name"]
+
+    monkeypatch.setattr(snapshots, "write_account_run_state_bytes_once_safely", write)
+    monkeypatch.setattr(snapshots, "read_account_run_state_bytes_safely", lambda **kw: storage[kw["name"]])
+    payload = snapshots.seal_cc_lp_candidate_snapshot(
+        base=tmp_path, run_id="synthetic-retention", account="qa", market="us",
+        account_config_sha256="a" * 64, strategy_policy_sha256="b" * 64,
+        dependencies=_dependencies(), run_mode={"scan_mode": "standard", "executable": True},
+        scan_statuses=[{"symbol": "NVDA", "strategy_mode": "combo_yield", "variant": "cc_lp",
+                        "status": "completed", "reason": summary["reason"]}],
+        ranked_pairs=evidence[0]["ranked_pairs"], sealed_at=DECISION_NOW,
+    )
+    assert payload["opening_status"] == reason
+    assert payload["scope_results"][0]["reason_code"] == reason
+    assert snapshots.project_cc_lp_candidates(payload) == []
