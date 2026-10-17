@@ -34,6 +34,7 @@ from src.application.ledger.position_projection_runtime import (
     ProjectionPreviewResult,
     preview_position_projection_append,
 )
+from src.application.ledger.publisher import PublishedPositionLotProjection
 from src.application.ledger.results import LedgerPreflightResult, ManualAdjustPreflightResult
 
 
@@ -473,6 +474,18 @@ def _preflight_open_event(
             f"{operation_label} ledger preflight rejected projected open event",
         ),
     )
+    projection = preview.projection
+    if isinstance(projection, PublishedPositionLotProjection) and (
+        projection.resumable_state is None or projection.resumable_publication_state is None
+    ):
+        raise LedgerPreflightError(
+            "open_projection_invalid",
+            f"{operation_label} ledger preflight rejected projected open event",
+            details={
+                "event_id": event.event_id,
+                "errors": [item.to_dict() for item in projection.diagnostics],
+            },
+        )
     before_lots = _preview_current_lots(preview)
     after_lots = _preview_lots(preview)
     target_lot = next((lot for lot in after_lots if lot.lot_id == event.lot_id), None)

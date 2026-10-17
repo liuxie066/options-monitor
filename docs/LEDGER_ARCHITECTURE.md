@@ -23,6 +23,12 @@ trade_events -> deterministic projection -> position_lots
 
 不要直接修改 SQLite 行。修复必须表达为可审计的语义事件，或通过受控 projection rebuild / verify 恢复派生状态。
 
+checkpoint 续算的新期权开仓复用完整重放的有效开仓日期校验；日期不合法或属于 canonical
+Combo group/role 时回退完整历史投影。已终结成员不在活动续算状态中，组合资格由完整历史
+判定；合法单腿暂存保持可用，普通开仓仍可续算。手工及券商开仓预检对 full 候选要求领域和
+发布两种 resumable state 均存在，与 writer 的发布门槛一致。历史更正仍先折叠有效 adjustment
+再校验，current/no-event 读取和 adjustment 的既有 warning 预览规则不变；本契约不修复既有坏历史。
+
 订单费用是同一成交事件的延迟证据，不另建费用事实账本。受控 fee enrichment 是唯一
 允许更新既有事件费用 provenance 的路径：按完整订单组执行 CAS、审计、读回并在同一
 事务重放受影响投影。其他模块不得直接改 `event_json`。下文“Futu 订单身份
@@ -1418,6 +1424,12 @@ CC 覆盖按实际平仓数量记录半开时间区间，平仓时点释放对�
 ```
 
 生产定时验证显式使用 `--publish-evidence`；临时排查保持默认只读。
+
+独立诊断模块 `src.application.ledger.lot_parity_probe` 的 `--out` 必须位于
+`output_shared/state/` 之外，且不能与本次 `--db` 输入为同一文件（包括解析后的路径、
+软链接和硬链接）。身份检查在创建目录和写报告前完成；无法检查输入或目标时失败，
+仅目标尚不存在可继续。独立报告仍可创建或有意覆盖，不指定 `--out` 时输出到 stdout。
+这项检查针对稳定路径，不保证抵御检查后并发换链；不改变 `verify-projection` 的证据发布流程。
 
 发现 read model、report 或 lot 状态异常时，按顺序处理：
 
