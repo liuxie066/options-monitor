@@ -1425,6 +1425,12 @@ CC 覆盖按实际平仓数量记录半开时间区间，平仓时点释放对�
 
 生产定时验证显式使用 `--publish-evidence`；临时排查保持默认只读。
 
+独立诊断模块 `src.application.ledger.lot_parity_probe` 的 `--out` 必须位于
+`output_shared/state/` 之外，且不能与本次 `--db` 输入为同一文件（包括解析后的路径、
+软链接和硬链接）。身份检查在创建目录和写报告前完成；无法检查输入或目标时失败，
+仅目标尚不存在可继续。独立报告仍可创建或有意覆盖，不指定 `--out` 时输出到 stdout。
+这项检查针对稳定路径，不保证抵御检查后并发换链；不改变 `verify-projection` 的证据发布流程。
+
 发现 read model、report 或 lot 状态异常时，按顺序处理：
 
 1. 用只读 inspect/history/verify 确认 active runtime root 和 SQLite；
