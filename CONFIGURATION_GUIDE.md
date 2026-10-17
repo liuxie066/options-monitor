@@ -169,6 +169,10 @@ Symbol pipeline 不提供 worker 数配置。它按输入顺序串行处理 Symb
 Linux/macOS `scan-pipeline` 主线程中的 `runtime.symbol_timeout_sec` 能真正中断超时处理。
 整次 Tick 的 wall-clock 最终边界仍由 `tick-cron --timeout` 负责。
 
+需要获取 RV 时，`runtime.opend_rate_limits.history_kline` 的 `max_calls`、
+`window_sec`、`max_wait_sec` 在普通扫描和 scheduled 预取中逐页约束历史 K 线请求。
+该共享端点预算独立于 Symbol 总超时；省略配置时保持既有默认值。
+
 不要设置 `runtime.pipeline_symbol_max_workers` 或 `runtime.watchlist_max_workers`；
 这两个键已退役，配置验证会要求删除。数据预取并发与账户并发是独立合同，不受影响。
 
