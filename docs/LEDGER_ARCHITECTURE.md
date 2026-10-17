@@ -171,6 +171,13 @@ PM 的持仓同步与通知边界仍由
 不能补零。适配器负责来源精度、时间和合约解析，保留原始证据，不通过四舍五入修补
 来源冲突，不默认乘数为 100。既有浮点事件和投影的存储编码不在本切片批量重写。
 
+adjust 的 `contracts`、`contracts_open`、`contracts_closed` 同样要求精确整数，拒绝小数、
+bool 和非有限值，不经 float 截断或舍入；零、整数字符串及省略/null/空串的既有继承语义保留，
+数量非负与开平仓总数守恒继续校验。`opened_at` 解析和股票 Decimal 股数路径不变。
+历史非法数量保留原始事件，完整重放报告 `adjust_patch_invalid` 并阻止投影发布；真实 writer
+失败时整笔事务回滚。adjust 仍是续算 control event：启用可信 checkpoint 时先返回
+`tail_control_event` 再完整重放，未启用时直接完整重放，不支持直接 tail adjust。
+
 期权乘数在原始输入上校验为有限正整数；缺失、null、空串、bool、零、负数、小数及
 非有限值均不能参与经济计算或写入。100、500、1000 使用同一规则，股票的乘数 0 仍表示
 不适用。payload 真正省略乘数时可以沿原有 cache/OpenD 链解析，显式非法值不进入后备来源。

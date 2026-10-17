@@ -88,6 +88,47 @@ def _event(
     )
 
 
+@pytest.mark.parametrize("patch,valid", [
+    ({"contracts": 1.9}, False),
+    ({"contracts": -0.5}, False),
+    ({"contracts_open": 1.9, "contracts_closed": 1}, False),
+    ({"contracts_open": -0.5, "contracts_closed": 2}, False),
+    ({"contracts_closed": 1.9}, False),
+    ({"contracts_closed": -0.5}, False),
+    ({"contracts": "3.0"}, True),
+])
+def test_adjust_tail_falls_back_to_full_quantity_validation(patch: dict, valid: bool) -> None:
+    key = _key()
+    opening = _event("open", "open", 1000, key=key, contracts=2, lot_id="lot")
+    adjustment = _event("adjust", "adjust", 2000, key=key, contracts=0,
+                        target_lot_id="lot", patch=patch)
+    prefix = project_resumable_trade_events([opening], entry_mode="full")
+    assert prefix.eligible
+    original_state = prefix.state.to_dict()
+    restored = ResumableProjectionState.from_dict(json.loads(json.dumps(original_state)))
+
+    tail = project_resumable_trade_events([adjustment], initial_state=restored, entry_mode="tail")
+    assert tail.requires_full_replay
+    assert tail.full_replay_reason == "tail_control_event"
+    assert tail.state is None
+    assert not tail.eligible
+    assert not tail.transitions
+    assert [lot.to_dict() for lot in tail.active_lots] == [lot.to_dict() for lot in prefix.active_lots]
+    assert restored.to_dict() == original_state
+
+    full = project_resumable_trade_events([opening, adjustment], entry_mode="full")
+    assert full.eligible is valid
+    if valid:
+        assert full.retained_lots[0].contracts_opened == 3
+        assert full.retained_lots[0].contracts_open == 3
+    else:
+        assert full.state is None
+        assert any(diag.code == "adjust_patch_invalid" and diag.event_id == adjustment.event_id
+                   for diag in full.diagnostics)
+        assert [lot.to_dict() for lot in full.retained_lots] == [lot.to_dict() for lot in prefix.retained_lots]
+    assert adjustment.raw_payload["patch"] == patch
+
+
 def _sequence() -> list[TradeEvent]:
     lx_put = _key()
     sy_call = _key(
