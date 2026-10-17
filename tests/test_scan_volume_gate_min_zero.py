@@ -55,6 +55,7 @@ def test_sell_put_accepts_but_ignores_legacy_liquidity_gate_parameters(tmp_path:
                 mid=2.0,
                 quote_update_time="2026-04-17 10:00:00",
                 snapshot_received_at_utc="2026-04-17T02:00:00Z",
+                spot_observed_at_utc="2026-04-17T02:00:00Z",
                 open_interest=0,
                 volume=0,
                 implied_volatility=0.2,

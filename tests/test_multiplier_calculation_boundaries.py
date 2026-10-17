@@ -24,6 +24,7 @@ BAD = [True, "100.00000000000000001"]
 
 
 def _row(multiplier=100):
+    observed_at = datetime.now(timezone.utc).isoformat()
     return {
         "symbol": "NVDA", "market": "US", "option_type": "put", "expiration": "2027-06-18",
         "dte": 43, "contract_symbol": "US.NVDA270618P00100000", "currency": "USD",
@@ -32,7 +33,8 @@ def _row(multiplier=100):
         "underlier_observation_status": "ready", "option_standard_type": "STANDARD",
         "stock_owner": "US.NVDA", "stock_type": "DRVT", "chain_multiplier": multiplier,
         "snapshot_multiplier": multiplier, "multiplier": multiplier, "opening_contract_status": "ready",
-        "snapshot_received_at_utc": datetime.now(timezone.utc).isoformat(),
+        "snapshot_received_at_utc": observed_at,
+        "spot_observed_at_utc": observed_at,
     }
 
 

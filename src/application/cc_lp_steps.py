@@ -20,6 +20,10 @@ from domain.domain.engine.cc_lp import (
     validate_cc_lp_pair,
 )
 from domain.domain.engine.combo_yield import ComboYieldLeg
+from domain.domain.engine.candidate_engine import (
+    CandidateCalculationError,
+    validate_opening_contract_evidence,
+)
 from domain.domain.fee_calc import calc_futu_option_fee
 from domain.domain.sell_call_config import resolve_effective_sell_call_min_strike
 from domain.domain.symbol_identity import symbol_market
@@ -30,6 +34,7 @@ from src.application.covered_call_strategy_risk import (
 )
 from src.application.sell_put_call_helper import (
     _call_leg_from_required_data,
+    _canonical_evidence_diagnostic,
     _put_leg_from_sell_put_row,
 )
 from src.application.strategy_policy import SELL_CALL_FAMILY
@@ -64,7 +69,7 @@ def _load_required_data_puts(
     return df.loc[mask].copy()
 
 
-def _put_leg_from_required_data(row: pd.Series) -> ComboYieldLeg | None:
+def _put_leg_from_required_data(row: dict[str, Any]) -> ComboYieldLeg | None:
     """Build a ComboYieldLeg for a long-put reversal leg from required-data row."""
 
     return _put_leg_from_sell_put_row(row)
@@ -191,14 +196,28 @@ def run_cc_lp_scan(
 
     rows: list[dict[str, Any]] = []
     put_rows = df_puts.to_dict("records")
+    decision_now = now_utc_fn()
+    put_legs: list[ComboYieldLeg] = []
+    unresolved = 0
+    for put_row in put_rows:
+        try:
+            evidence = validate_opening_contract_evidence(
+                put_row, mode="put", now_utc=decision_now,
+            )
+        except CandidateCalculationError as exc:
+            if _canonical_evidence_diagnostic(exc)["evidence_status"] == "unavailable":
+                unresolved += 1
+            continue
+        put_leg = _put_leg_from_required_data({**put_row, **evidence})
+        if put_leg is None:
+            unresolved += 1
+            continue
+        put_legs.append(put_leg)
     for call_row in df_calls.to_dict("records"):
         call_leg = _call_leg_from_required_data(call_row)
         if call_leg is None:
             continue
-        for put_row in put_rows:
-            put_leg = _put_leg_from_required_data(put_row)
-            if put_leg is None:
-                continue
+        for put_leg in put_legs:
             rejects = validate_cc_lp_pair(
                 call_leg,
                 put_leg,
@@ -282,7 +301,7 @@ def run_cc_lp_scan(
                     "put_otm_pct": metrics.put_otm_pct,
                     "gap_width_pct": metrics.gap_width_pct,
                     "combo_spread_ratio": metrics.combo_spread_ratio,
-                    "generated_at_utc": now_utc_fn().isoformat(),
+                    "generated_at_utc": decision_now.isoformat(),
                     **(
                         {
                             "capacity_source": "demo_scenario",
@@ -294,7 +313,12 @@ def run_cc_lp_scan(
                 }
             )
     ranked = rank_cc_lp_rows(rows)
-    return pd.DataFrame(ranked)
+    result = pd.DataFrame(ranked)
+    result.attrs["_evidence_summary"] = {
+        "evaluated_contract_count": len(put_rows),
+        "eligibility_unresolved_count": unresolved,
+    }
+    return result
 
 
 def summarize_cc_lp_result(

@@ -60,6 +60,15 @@
   它只作为最新价活跃度诊断，不再作为候选可用性门槛。
 - 期权候选的 5 分钟窗口约束的是 OM 取得 OpenD snapshot 到完成候选决策的时间
   （`snapshot_age_seconds <= 300`），用每批请求的 request/receive receipt 证明。
+- 每行保留产生该记录的成功批次 receipt：request 包含该批等待和重试的窗口，receive
+  在返回后、记录转换前取得。后续批次或 fallback 不刷新已取得记录的时间；fallback
+  只为新返回记录赋值。整次 fetch 的最早 request / 最晚 receive 仅作汇总诊断，
+  不填补行级缺失时间；候选与估值适配器均逐字段使用对应记录的 receipt。
+- 统一开仓证据入口在同一决策时钟下分别复核 `spot_observed_at_utc` 的源报价年龄和
+  `snapshot_received_at_utc` 的取得年龄；显式回放时钟同样适用。源报价时间必须带时区，
+  缺失、非法、未来或超过 300 秒均为 `evidence_unavailable`，恰好 300 秒仍可继续校验。
+  不以 fetch 时的 `ready`、冻结年龄或期权 receipt 代替标的源时间；期权的
+  `max_snapshot_age_seconds` 参数不改变标的独立的 300 秒门槛。
 - 期权 bid/ask 的可用性由本次 snapshot 的盘口合法性（`bid > 0`、`ask >= bid`、
   tick、spread、合约身份与状态）判定，不由 `update_time` 判定。
 - OpenD 明确返回 `bid=0` 且其余身份/盘口/状态证据完整时，视为当前无有效
@@ -319,6 +328,14 @@ CSP 与 CC 使用完全相同的正式 RV：
 RV20 / RV60 / RV120 只保留为诊断字段，不加权生成正式 RV。历史不足时不可用，
 不回退其他窗口，也不重新归一化。
 
+OpenD 未来交易日历仅覆盖扫描市场日期所在年的 12 月 31 日；超出该范围的 expiry
+明确标记 `calendar_coverage_incomplete`，同批范围内的 expiry 继续计算。覆盖边界不以
+最后返回的交易日推断，因此周末、节假日到期不会仅因当日无交易 session 被拒绝。
+日历状态只表示实际请求区间的取数结果；目标期限和支持区间分别记录为 `requested_end`
+和 `coverage_end`，混合期限的 RV 总体状态仍为 `partial`。
+未知交易日类型（包括 SDK 的 `N/A`）使日历证据不可用，不能当作休市日丢弃。
+全天、半日交易及既有空类型、`TRADING` 输入保持兼容；明确的 `NON_TRADING` 不计入 session。
+
 日线缓存按 `market + symbol + QFQ` 持久化共享：
 
 - 不在每次 intraday run 全量重复抓取；
@@ -327,6 +344,10 @@ RV20 / RV60 / RV120 只保留为诊断字段，不加权生成正式 RV。历史
 - 发现 QFQ 历史修订时刷新所需完整区间；
 - 每次 run 仍按目标 expiry 重新计算期限匹配 RV，并记录输入区间与 hash；
 - 缺口或更新失败只使受影响 expiry 不可用。
+
+每页 QFQ 日线先核对每行证券 `code` 与请求身份一致，再归一化并缓存；缺失、混入其他证券
+或后续分页失败均不得发布成功缓存。未做身份验证的 v1 缓存不再复用，下次通过既有限流
+重新取得完整区间并验证成功后写入 v2；失败保留原文件且不回退为可用证据。
 
 新算法先与旧算法做 shadow comparison，再晋升为正式口径。
 
@@ -607,6 +628,7 @@ CC+LP 是 `combo_yield` 模块下的同到期变体（`combo_yield.variant=cc_lp
 - CC 腿独立扫描，继承 CC 全部硬门槛（收益下限、`max(min_strike, avg_cost*1.02)`、max_strike、流动性、期限），
   无持仓上下文 → `not_applicable` 跳过；
 - Long Put 反转腿默认 `0.15 ≤ |delta| ≤ 0.35`，通过 `combo_yield.put.min_delta/max_delta` 覆盖；排序次键目标仍为 0.12；
+- Long Put 成腿前复用统一开仓证据校验和规范化数值，在决策时复验期权 snapshot 的 300 秒取得时效；证据不可用与合法零候选分别保留，混合结果沿现有状态 owner 标为 `partial_data`；
 - 结构方向 `call_strike > put_strike`（复用 `strike_order` 角色参数化）；
 - 保留率 `net_credit / call_net_credit >= 0.20`（不允许净 debit/自掏腰包），无 gap 硬门槛（`gap_width_pct` 仅诊断）；
 - 资金占用 = 持仓当前市值 `spot * multiplier`（1 张合约覆盖股数），不扣净权利金；

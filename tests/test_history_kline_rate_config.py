@@ -56,7 +56,7 @@ class HistoryProvider:
         if self.empty:
             return {"data": [], "page_req_key": None}
         days = pd.bdate_range(kwargs["start"], self.today - timedelta(days=1))
-        rows = [{"time_key": d.date().isoformat(),
+        rows = [{"code": kwargs["code"], "time_key": d.date().isoformat(),
                  "close": 100 * math.exp(0.001 * i + 0.01 * math.sin(i))}
                 for i, d in enumerate(days)]
         midpoint = len(rows) // 2
@@ -107,7 +107,8 @@ def acquisition(monkeypatch, tmp_path):
     def chain(**_kwargs):
         rows = [] if state.empty_chain else [{"code": "US.NVDA261113P95000",
             "strike_time": expiry, "strike_price": 95, "option_type": "PUT",
-            "lot_size": 100, "stock_owner": "US.NVDA"}]
+            "lot_size": 100, "stock_owner": "US.NVDA", "option_standard_type": "STANDARD",
+            "stock_type": "DRVT", "suspension": False}]
         return SymbolOptionChainResult(rows=rows, expirations_all=[expiry], expirations_pick=[expiry],
             fetch_meta={"status": "ok", "source_outcome": "success_empty" if not rows else "success_rows",
                         "reason_code": "no_contract_rows" if not rows else None,
@@ -120,7 +121,8 @@ def acquisition(monkeypatch, tmp_path):
             "option_standard_type": "STANDARD", "sec_status": "NORMAL", "suspension": False,
             "option_contract_size": 100, "bid_price": 2, "ask_price": 2.1, "last_price": 2.05,
             "bid_vol": 10, "ask_vol": 10, "volume": 100, "option_open_interest": 100,
-            "price_spread": .01, "update_time": now} for code in codes}
+            "price_spread": .01, "update_time": now,
+            "snapshot_requested_at_utc": now, "snapshot_received_at_utc": now} for code in codes}
         return MarketSnapshotFetchResult(snap_map=rows, errors=[], requested_codes=codes,
             returned_codes=codes, missing_codes=frozenset(), unexpected_codes=frozenset(),
             complete=True, requested_at_utc=now, received_at_utc=now)
@@ -214,6 +216,10 @@ def _assert_history(state, strict):
         assert payload["meta"]["status"] == "ok", payload["meta"]
         assert rv["status"] == "ok", rv
         row = payload["rows"][0]
+        assert row["opening_contract_status"] == "ready", row
+        assert row["opening_contract_reason_codes"] == []
+        assert row["snapshot_requested_at_utc"] == state.observation.observed_at_utc
+        assert row["snapshot_received_at_utc"] == state.observation.observed_at_utc
         assert row["term_matched_rv_status"] == "ok"
         assert row["term_matched_rv"] > 0
         assert row["realized_volatility_20"] > 0

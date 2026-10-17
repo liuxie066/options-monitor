@@ -837,6 +837,7 @@ def _run_full_symbol_capture(
             "opening_contract_reason_codes": [],
             "underlier_observation_status": "ready",
             "snapshot_received_at_utc": "2026-09-08T13:59:00Z",
+            "spot_observed_at_utc": "2026-09-08T13:59:00Z",
             "option_standard_type": "STANDARD",
             "stock_owner": symbol,
             "price_tick": 0.01,

@@ -43,6 +43,7 @@ def _formal_metric_row(*, mode: str, currency: str, **overrides):  # type: ignor
         "snapshot_received_at_utc": datetime.now(timezone.utc).isoformat(),
     }
     row.update(overrides)
+    row.setdefault("spot_observed_at_utc", row["snapshot_received_at_utc"])
     return row
 
 

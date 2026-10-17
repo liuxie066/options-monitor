@@ -645,23 +645,23 @@ def run_cc_lp_variant(
                 "ranked_pairs": [dict(item) for item in df.to_dict("records")],
             }
         )
-    if df.empty:
-        status = "no_candidate"
-        if unavailable_reason:
-            status = (
-                "not_applicable"
-                if unavailable_reason == "stock_context_missing"
-                else "unavailable"
-            )
-        summary = summarize_cc_lp_result(
-            df=df,
-            symbol=symbol,
-            status=status,
-            reason=unavailable_reason,
+    if unavailable_reason:
+        status = (
+            "not_applicable"
+            if unavailable_reason == "stock_context_missing"
+            else "unavailable"
         )
-        return summary
+        reason = unavailable_reason
+    else:
+        status, reason = project_evidence_scan_status(
+            evidence=dict(df.attrs.get("_evidence_summary") or {}),
+            candidate_count=len(df),
+        )
+        if status == "completed":
+            status = "no_candidate" if df.empty else "candidates_found"
     return summarize_cc_lp_result(
         df=df,
         symbol=symbol,
-        status="candidates_found",
+        status=status,
+        reason=reason or "",
     )

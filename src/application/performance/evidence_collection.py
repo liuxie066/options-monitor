@@ -283,13 +283,14 @@ def _default_option_snapshot_rows(
             code = code_by_key.get(key)
             if not code:
                 continue
+            snapshot_row = snapshots.snap_map.get(code) or {}
             out.append(
                 {
-                    **dict(snapshots.snap_map.get(code) or {}),
+                    **dict(snapshot_row),
                     "code": code,
                     "_requested_instrument_key": key,
-                    "_snapshot_requested_at_utc": snapshots.requested_at_utc,
-                    "_snapshot_received_at_utc": snapshots.received_at_utc,
+                    "_snapshot_requested_at_utc": snapshot_row.get("snapshot_requested_at_utc"),
+                    "_snapshot_received_at_utc": snapshot_row.get("snapshot_received_at_utc"),
                 }
             )
         return out

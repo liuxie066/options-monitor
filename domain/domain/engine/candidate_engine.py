@@ -233,7 +233,7 @@ def _opening_not_ready_reason(status: str) -> str:
 
 
 def _parse_decision_time(value: Any) -> datetime | None:
-    """Parse a UTC receipt timestamp recorded by OM.
+    """Parse a timezone-aware timestamp used for decision-time evidence.
 
     Decision-time freshness evidence must carry an explicit timezone; naive
     values are rejected rather than guessed against a market clock.
@@ -433,6 +433,32 @@ def validate_opening_contract_evidence(
             "OpenD option snapshot is stale relative to the decision moment",
             metric_value={"snapshot_age_seconds": snapshot_age},
             threshold=int(max_snapshot_age_seconds),
+        )
+
+    spot_observed_text = _first_text(raw, "spot_observed_at_utc")
+    spot_observed = _parse_decision_time(spot_observed_text)
+    if spot_observed is None:
+        raise CandidateCalculationError(
+            REJECT_EVIDENCE_UNAVAILABLE,
+            "OpenD underlier source timestamp is missing or invalid",
+            metric_value={"spot_observed_at_utc": spot_observed_text or None},
+            threshold="present timezone-aware source time",
+        )
+    spot_age = (decision_now - spot_observed).total_seconds()
+    if spot_age < 0:
+        raise CandidateCalculationError(
+            REJECT_EVIDENCE_UNAVAILABLE,
+            "OpenD underlier source timestamp is in the future",
+            metric_value={"spot_age_seconds": spot_age},
+            threshold=">= 0",
+        )
+    # Spot source age has its own fixed limit, independent of option receipt age.
+    if spot_age > 300:
+        raise CandidateCalculationError(
+            REJECT_EVIDENCE_UNAVAILABLE,
+            "OpenD underlier quote is stale relative to the decision moment",
+            metric_value={"spot_age_seconds": spot_age},
+            threshold=300,
         )
 
     option_type = _first_text(raw, "option_type").lower()

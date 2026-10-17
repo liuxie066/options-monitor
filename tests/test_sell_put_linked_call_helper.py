@@ -14,6 +14,7 @@ def _with_opening_evidence(frame: pd.DataFrame, *, mode: str) -> pd.DataFrame:
     out["opening_contract_status"] = "ready"
     out["underlier_observation_status"] = "ready"
     out["snapshot_received_at_utc"] = datetime.now(timezone.utc).isoformat()
+    out["spot_observed_at_utc"] = out["snapshot_received_at_utc"]
     out["option_standard_type"] = "STANDARD"
     out["stock_owner"] = out["symbol"]
     out["price_tick"] = 0.01
@@ -280,6 +281,7 @@ def _write_single_call(
                 "opening_contract_status": "ready",
                 "underlier_observation_status": "ready",
                 "snapshot_received_at_utc": receipt,
+                "spot_observed_at_utc": receipt,
                 "option_standard_type": "STANDARD",
                 "stock_owner": "NVDA",
                 "price_tick": 0.01,
@@ -325,6 +327,7 @@ def _single_put_df(
         "snapshot_multiplier": 100,
     }
     row.update(overrides)
+    row.setdefault("spot_observed_at_utc", row["snapshot_received_at_utc"])
     return pd.DataFrame([row])
 
 

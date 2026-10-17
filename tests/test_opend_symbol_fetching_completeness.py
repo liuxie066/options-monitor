@@ -80,6 +80,7 @@ def _install_symbol_dependencies(monkeypatch, *, chain_bundle: SymbolOptionChain
 
     monkeypatch.setattr(mod, "get_trading_date", lambda _market: date(2026, 5, 20))
     monkeypatch.setattr(mod, "fetch_symbol_option_chain", lambda **_kwargs: chain_bundle)
+    monkeypatch.setattr("src.application.opend_utils.load_runtime_symbol_aliases", lambda *_: {})
 
 
 def _fetch_symbol_request(tmp_path: Path, **overrides):
@@ -512,6 +513,9 @@ def test_provider_shaped_contract_rows_preserve_ready_and_minimal_failure_scope(
         }
         for code in (ready_code, conflict_code)
     }
+    for snapshot in snapshots.values():
+        snapshot["snapshot_requested_at_utc"] = observed_now.isoformat()
+        snapshot["snapshot_received_at_utc"] = observed_now.isoformat()
     monkeypatch.setattr(
         mod,
         "fetch_option_snapshots",
