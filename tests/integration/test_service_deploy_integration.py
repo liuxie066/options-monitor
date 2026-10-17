@@ -4677,8 +4677,18 @@ def test_update_handler_contends_with_real_application_owner(
         finally:
             release.set()
         holder_result = future.result(timeout=10)
-    assert holder_result["ok"] is False
-    assert holder_result["data"]["error"] == "RuntimeError: fixture stops holder before transition"
+        assert holder_result["ok"] is False
+        assert holder_result["data"]["error"] == "RuntimeError: fixture stops holder before transition"
+        assert not lock_path.exists()
+        retry_result = executor.submit(handle_service_update_command, holding_request).result(timeout=10)
+    assert retry_result["tool_name"] == f"update.{holding_operation}"
+    assert retry_result["ok"] is False
+    assert retry_result["data"]["error"] == "RuntimeError: fixture stops holder before transition"
+    assert retry_result["data"]["changed"] is False
+    assert retry_result["data"]["write_applied"] is False
+    assert retry_result["data"]["operations"] == []
+    assert protected_calls == [first_effect, first_effect]
     assert not lock_path.exists()
-    with upgrade._UpgradeLock(lock_path):
-        pass
+    assert current.resolve() == (releases / "1.0.1").resolve()
+    assert {config: config.read_bytes() for config in config_paths} == before_configs
+    assert {path: path.read_bytes() for path in releases.rglob("*") if path.is_file()} == before_releases
