@@ -36,6 +36,26 @@ class _FakeRepo:
         return list(self.events)
 
 
+def test_corrupt_state_blocks_backfill_before_inbox_and_history_reads(tmp_path, monkeypatch):
+    state_path = tmp_path / "state.json"
+    original = b'{"unresolved_deal_ids":'
+    state_path.write_bytes(original)
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("corrupt state reached Inbox or provider history")
+    monkeypatch.setattr(backfill_module, "read_trade_payloads_for_reconciliation", unexpected)
+    with pytest.raises(ValueError, match="invalid trade intake state"):
+        backfill_module._known_old_deal_targets(
+            state_path=state_path, inbox_path=tmp_path / "inbox.sqlite3",
+            futu_account_ids=["REAL_1"], now=datetime(2026, 6, 3, tzinfo=timezone.utc), lookback_hours=6,
+        )
+    result = run_history_backfill(
+        **_backfill_kwargs(tmp_path), history_deals_fn=unexpected, process_payload_fn=unexpected,
+    )
+    assert result["ok"] is False and result["failed_count"] == 1
+    assert "invalid trade intake state" in result["error"] and str(state_path) in result["error"]
+    assert state_path.read_bytes() == original
+
+
 def test_known_old_unresolved_deal_targets_original_date_and_account(monkeypatch, tmp_path):
     monkeypatch.setattr(backfill_module, "load_trade_intake_state", lambda _path: {
         "unresolved_deal_ids": {"old-1": {"status": "unresolved"}},

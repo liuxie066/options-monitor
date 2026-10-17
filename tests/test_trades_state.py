@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -71,6 +72,135 @@ def test_trade_intake_state_round_trip(tmp_path: Path) -> None:
 
     assert lookup_deal_state(loaded, "deal-1")["status"] == "applied"
     assert lookup_deal_state_entry(loaded, "deal-1")[0] == "processed_deal_ids"
+
+
+def _state_operation(operation: str, path: Path, desired: dict) -> object:
+    if operation == "load":
+        return load_trade_intake_state(path)
+    if operation == "write":
+        return write_trade_intake_state(path, desired)
+    if operation == "update":
+        return state_module.update_trade_intake_state_entries(path, desired, deal_ids=("new",))
+    return state_module.compare_and_update_trade_intake_state_entries(
+        path, desired, deal_ids=("new",), expected_state=state_module.empty_trade_intake_state(),
+    )
+
+
+@pytest.mark.parametrize("original", [
+    b"", b'{"unresolved_deal_ids":{"old":', b"\xff", b"null", b"[]", b'"text"', b"0", b"false",
+    b'{"processed_deal_ids":{"new":{"status":"applied"}},"unresolved_deal_ids":null}',
+    *[json.dumps({bucket: value}).encode() for bucket in state_module.STATE_BUCKETS
+      for value in (None, [], "", 0, False, ["old"], "invalid", 1, True)],
+])
+@pytest.mark.parametrize("operation", ["load", "write", "update", "compare"])
+def test_invalid_existing_state_is_never_replaced(tmp_path, monkeypatch, original, operation):
+    path = tmp_path / "state.json"
+    path.write_bytes(original)
+    def unexpected_write(*_args, **_kwargs):
+        pytest.fail("invalid existing state reached atomic writer")
+    monkeypatch.setattr(state_module, "atomic_write_json", unexpected_write)
+    with pytest.raises(ValueError, match="trade intake state") as error:
+        _state_operation(operation, path, {"processed_deal_ids": {"new": {"status": "applied"}}})
+    assert str(path) in str(error.value)
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("operation", ["load", "write", "update", "compare"])
+@pytest.mark.parametrize("kind", ["permission", "directory", "dangling_symlink"])
+def test_unreadable_existing_state_is_not_missing(tmp_path, monkeypatch, operation, kind):
+    path = tmp_path / "state.json"
+    if kind == "directory":
+        path.mkdir()
+    elif kind == "dangling_symlink":
+        path.symlink_to(tmp_path / "missing-target.json")
+    else:
+        path.write_bytes(b"{}")
+        read_text = Path.read_text
+        def denied_read(current, *args, **kwargs):
+            if current == path:
+                raise PermissionError("state fixture denied")
+            return read_text(current, *args, **kwargs)
+        monkeypatch.setattr(Path, "read_text", denied_read)
+    def unexpected_write(*_args, **_kwargs):
+        pytest.fail("unreadable existing state reached atomic writer")
+    monkeypatch.setattr(state_module, "atomic_write_json", unexpected_write)
+    with pytest.raises(ValueError, match="cannot read trade intake state") as error:
+        _state_operation(operation, path, {"processed_deal_ids": {"new": {"status": "applied"}}})
+    assert str(path) in str(error.value)
+    if kind == "permission":
+        assert path.read_bytes() == b"{}"
+    elif kind == "directory":
+        assert path.is_dir()
+    else:
+        assert path.is_symlink() and path.readlink() == tmp_path / "missing-target.json"
+        assert not (tmp_path / "missing-target.json").exists()
+
+
+def test_missing_state_load_does_not_initialize_file_or_parent(tmp_path):
+    path = tmp_path / "missing-parent" / "state.json"
+    assert load_trade_intake_state(path) == state_module.empty_trade_intake_state()
+    assert not path.parent.exists()
+
+
+def test_corrupt_state_cannot_be_reconciled_as_zero_pending(tmp_path):
+    from src.application.trades.state_reconcile import reconcile_trade_intake_state
+
+    path = tmp_path / "state.json"
+    original = b'{"unresolved_deal_ids":'
+    path.write_bytes(original)
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("corrupt state reached reconciliation update")
+    with pytest.raises(ValueError, match="invalid trade intake state"):
+        reconcile_trade_intake_state(
+            state_path=path, repo=object(), audit_path=tmp_path / "audit.jsonl", apply_changes=True,
+            update_state_fn=unexpected, before_state_update=unexpected,
+        )
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("buckets", [(), *[(name,) for name in state_module.STATE_BUCKETS], state_module.STATE_BUCKETS])
+def test_partial_and_current_state_preserve_legacy_payloads(tmp_path, buckets):
+    path = tmp_path / "state.json"
+    leaves = {"legacy": None, "opaque": [1, "old"], "futu:sy:123:old": {"status": "unknown", "receipt": {"custom": True}}}
+    raw = {name: leaves for name in buckets}
+    path.write_text(json.dumps({**raw, "ignored_metadata": "legacy"}), encoding="utf-8")
+    assert load_trade_intake_state(path) == {name: raw.get(name, {}) for name in state_module.STATE_BUCKETS}
+
+
+@pytest.mark.parametrize("operation", ["write", "update", "compare"])
+def test_locked_reread_rejects_corruption_after_valid_initial_read(tmp_path, monkeypatch, operation):
+    path = tmp_path / "state.json"
+    path.write_bytes(b"{}")
+    desired = load_trade_intake_state(path)
+    desired["processed_deal_ids"]["new"] = {"status": "applied"}
+    original_lock = state_module._trade_intake_state_lock
+    corrupt = b'{"unresolved_deal_ids":{"old":'
+    @contextmanager
+    def corrupt_before_lock(current):
+        current.write_bytes(corrupt)
+        with original_lock(current):
+            yield
+    monkeypatch.setattr(state_module, "_trade_intake_state_lock", corrupt_before_lock)
+    def unexpected_write(*_args, **_kwargs):
+        pytest.fail("corrupt locked reread reached atomic writer")
+    monkeypatch.setattr(state_module, "atomic_write_json", unexpected_write)
+    with pytest.raises(ValueError, match="invalid trade intake state"):
+        _state_operation(operation, path, desired)
+    assert path.read_bytes() == corrupt
+
+
+def test_valid_update_preserves_other_sources_and_full_writer_still_replaces(tmp_path):
+    path = tmp_path / "state.json"
+    unrelated = {"status": "unresolved", "retryable": True, "receipt": {"delivery_confirmed": True}}
+    write_trade_intake_state(path, {"unresolved_deal_ids": {"futu:sy:2002:other": unrelated}})
+    desired = {"processed_deal_ids": {"new": {"status": "applied"}}}
+    state_module.update_trade_intake_state_entries(path, desired, deal_ids=("new",))
+    assert load_trade_intake_state(path) == {
+        "processed_deal_ids": desired["processed_deal_ids"], "failed_deal_ids": {},
+        "unresolved_deal_ids": {"futu:sy:2002:other": unrelated},
+    }
+    write_trade_intake_state(path, desired)
+    assert load_trade_intake_state(path)["unresolved_deal_ids"] == {}
 
 
 def test_reconciliation_preserves_same_key_changes_and_counts_only_applied(tmp_path: Path) -> None:
