@@ -94,6 +94,7 @@ every row is green (bound:
 The report lands outside ``output_shared/state/`` on purpose (plan ⑥): the
 running state tree belongs to the runtime artifacts, and mixing an operator
 diagnostic into it would make the two indistinguishable.
+The report must not alias its input database, including symbolic or hard links.
 
 Pure comparison logic plus a thin module CLI::
 
@@ -1136,6 +1137,20 @@ def assert_report_path_outside_runtime_state(path: Path) -> Path:
 
 def write_report(report: dict[str, Any], *, out_path: str | Path) -> Path:
     target = assert_report_path_outside_runtime_state(Path(str(out_path)))
+    if "sqlite_path" in report:
+        source = Path(report["sqlite_path"]).resolve()
+        if target == source:
+            raise ValueError("lot parity probe report must not alias the input database")
+        source_stat = source.stat()
+        try:
+            target_stat = target.stat()
+        except FileNotFoundError:
+            pass
+        else:
+            if (source_stat.st_dev, source_stat.st_ino) == (
+                target_stat.st_dev, target_stat.st_ino
+            ):
+                raise ValueError("lot parity probe report must not alias the input database")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
         json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -1160,7 +1175,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--out",
         default=None,
-        help="report path; must be outside output_shared/state/ (default: print to stdout)",
+        help=(
+            "report path; must be outside output_shared/state/ and must not alias "
+            "the input database (default: print to stdout)"
+        ),
     )
     parser.add_argument(
         "--sample-limit",
