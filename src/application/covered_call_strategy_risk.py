@@ -18,8 +18,8 @@ from domain.domain.insurance_underwriting import (
     rank_underwriting_candidates,
 )
 from domain.domain.sell_call_config import resolve_effective_sell_call_min_strike
-from domain.domain.symbol_identity import symbol_currency
-from src.application.short_vol_risk_context import amount_to_cny, enrich_short_vol_contract_cny_fields, build_portfolio_risk_context
+from domain.domain.currency_conversion import covered_notional_cny as _covered_notional_cny
+from src.application.short_vol_risk_context import enrich_short_vol_contract_cny_fields, build_portfolio_risk_context
 from domain.domain.short_vol_assessment import portfolio_concentration_fields
 from src.infrastructure.exchange_rates import CurrencyConverter
 from src.application.numeric_helpers import float_or_none as _float
@@ -150,16 +150,3 @@ def evaluate_covered_call_underwriting_row(
     cfg: InsuranceUnderwritingConfig,
 ) -> dict[str, Any]:
     return evaluate_underwriting_candidate(row, mode="call", cfg=cfg)
-
-
-def _covered_notional_cny(
-    row: dict[str, Any],
-    *,
-    exchange_rate_converter: CurrencyConverter,
-) -> float | None:
-    spot = _float(row.get("spot"))
-    multiplier = _float(row.get("multiplier"))
-    if spot is None or multiplier is None or spot <= 0 or multiplier <= 0:
-        return None
-    ccy = row.get("currency") or symbol_currency(row.get("symbol"))
-    return amount_to_cny(spot * multiplier, ccy, exchange_rate_converter=exchange_rate_converter)

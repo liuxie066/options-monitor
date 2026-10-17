@@ -11,7 +11,7 @@ This module is intentionally minimal; expand only as needed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from domain.domain.currency_conversion import CurrencyConverter, ExchangeRates
 from datetime import datetime, timedelta, timezone
 import fcntl
 import json
@@ -50,79 +50,6 @@ _TENCENT_URL = "https://qt.gtimg.cn/q=whUSDCNY,whHKDCNY"
 # 新浪后备：需 Referer；fx_s* 为 `时间,价格,...,日期`。
 _SINA_URL = "https://hq.sinajs.cn/list=fx_susdcny,fx_shkdcny"
 _SINA_HEADERS = {"Referer": "https://finance.sina.com.cn"}
-
-
-@dataclass(frozen=True)
-class ExchangeRates:
-    usd_per_cny: float | None = None
-    cny_per_hkd: float | None = None
-
-
-@dataclass(frozen=True)
-class CurrencyConverter:
-    """Convert between base CNY and option native currencies (USD/HKD)."""
-
-    rates: ExchangeRates
-
-    def cny_to_usd(self, cny: float) -> float | None:
-        r = self.rates.usd_per_cny
-        if r is None or r <= 0:
-            return None
-        return float(cny) * float(r)
-
-    def usd_to_cny(self, usd: float) -> float | None:
-        r = self.rates.usd_per_cny
-        if r is None or r <= 0:
-            return None
-        return float(usd) / float(r)
-
-    def cny_to_hkd(self, cny: float) -> float | None:
-        cny_per_hkd_exchange_rate = self.rates.cny_per_hkd
-        if cny_per_hkd_exchange_rate is None or cny_per_hkd_exchange_rate <= 0:
-            return None
-        return float(cny) / float(cny_per_hkd_exchange_rate)
-
-    def hkd_to_cny(self, hkd: float) -> float | None:
-        cny_per_hkd_exchange_rate = self.rates.cny_per_hkd
-        if cny_per_hkd_exchange_rate is None or cny_per_hkd_exchange_rate <= 0:
-            return None
-        return float(hkd) * float(cny_per_hkd_exchange_rate)
-
-    def cny_to_native(self, cny: float, *, native_ccy: str) -> float | None:
-        c = str(native_ccy or '').upper()
-        if c == 'USD':
-            return self.cny_to_usd(cny)
-        if c == 'HKD':
-            return self.cny_to_hkd(cny)
-        return None
-
-    def native_to_cny(self, amount: float, *, native_ccy: str) -> float | None:
-        c = str(native_ccy or '').upper()
-        if c == 'USD':
-            return self.usd_to_cny(amount)
-        if c == 'HKD':
-            return self.hkd_to_cny(amount)
-        if c == 'CNY':
-            return float(amount)
-        return None
-
-    def convert(self, amount: float, *, from_ccy: str, to_ccy: str) -> float | None:
-        source = str(from_ccy or '').strip().upper()
-        target = str(to_ccy or '').strip().upper()
-        if source == 'RMB':
-            source = 'CNY'
-        if target == 'RMB':
-            target = 'CNY'
-        if not source or not target:
-            return None
-        if source == target:
-            return float(amount)
-        amount_cny = self.native_to_cny(float(amount), native_ccy=source)
-        if amount_cny is None:
-            return None
-        if target == 'CNY':
-            return amount_cny
-        return self.cny_to_native(amount_cny, native_ccy=target)
 
 
 def _utc_now() -> datetime:
