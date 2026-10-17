@@ -12,11 +12,12 @@ from src.application.ledger.event_codec import (
     trade_event_application_payload,
 )
 from src.application.ledger.repository_assigned_stock import AssignedStockRepositoryMixin
+from src.application.ledger.repository_common import _json_object
 from src.application.ledger.repository_decision_reads import DecisionReadRepositoryMixin
 from src.application.ledger.repository_strategy_groups import StrategyGroupRepositoryMixin
-from src.application.ledger.repository_projection_tail import PositionProjectionTailRepositoryMixin
 from src.application.ledger.repository_trade_events import TradeEventRepositoryMixin
 from src.application.ledger.sqlite_row_codec import (
+    position_lot_row_to_record,
     read_current_decision_projection_inputs_from_conn,
 )
 
@@ -623,8 +624,6 @@ class _ReadOnlyPositionQueryRepository(_ReadOnlyTradeReconciliationEvidenceRepos
     bootstrap_message = "query does not initialize or recover the ledger"
 
     # Reuse the store's read codecs and paging contract without its writer lifecycle.
-    list_position_lots = PositionProjectionTailRepositoryMixin.list_position_lots
-    list_trade_events = TradeEventRepositoryMixin.list_trade_events
     list_trade_events_page = TradeEventRepositoryMixin.list_trade_events_page
     list_wheel_events = AssignedStockRepositoryMixin.list_wheel_events
     list_strategy_group_identities = StrategyGroupRepositoryMixin.list_strategy_group_identities
@@ -644,6 +643,27 @@ class _ReadOnlyPositionQueryRepository(_ReadOnlyTradeReconciliationEvidenceRepos
 
     def _optional_conn(self, conn: sqlite3.Connection | None):
         return nullcontext(conn) if conn is not None else closing(self._connect())
+
+    def list_position_lots(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                "SELECT *, rowid FROM position_lots ORDER BY lot_id DESC"
+            ).fetchall()
+        return [
+            position_lot_row_to_record(row, fields=_json_object(row["fields_json"]))
+            for row in rows
+        ]
+
+    def list_trade_events(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                """
+                SELECT event_json
+                FROM trade_events
+                ORDER BY trade_time_ms ASC, event_id ASC
+                """
+            ).fetchall()
+        return [trade_event_application_payload(_json_object(row["event_json"])) for row in rows]
 
     def list_assigned_stock_events(self) -> list[dict[str, Any]]:
         with closing(self._connect()) as conn:
