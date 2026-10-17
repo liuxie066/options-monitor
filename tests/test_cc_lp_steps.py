@@ -152,6 +152,8 @@ def _scan_call_row(**overrides) -> dict:
         "spread_ratio": 0.05,
     }
     row.update(overrides)
+    row["strike_above_spot_pct"] = round((row["strike"] - row["spot"]) / row["spot"], 10)
+    row["strike_upside_margin_pct"] = row["strike_above_spot_pct"]
     return row
 
 

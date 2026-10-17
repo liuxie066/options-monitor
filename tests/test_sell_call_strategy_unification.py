@@ -76,6 +76,7 @@ def _rank_call_row(
         "annualized_net_premium_return": annualized_net_premium_return,
         "if_exercised_total_return": if_exercised_total_return,
         "strike_above_spot_pct": strike_above_spot_pct,
+        "strike_upside_margin_pct": strike_above_spot_pct,
         "strike_above_cost_pct": strike_above_cost_pct,
         "risk_label": risk_label,
         "spread_ratio": 0.10,
