@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -153,12 +154,23 @@ def test_status_preserves_inventory_errors_without_apply(monkeypatch, error_name
 
 
 @pytest.fixture
-def wal_keeper(tmp_path: Path, request: pytest.FixtureRequest) -> sqlite3.Connection:
+def wal_keeper(tmp_path: Path, request: pytest.FixtureRequest) -> tuple[sqlite3.Connection, dict[str, Any]]:
     # Keep WAL identity stable throughout the measured read and replay windows.
+    handles: dict[str, Any] = {}
+
+    def close_resources() -> None:
+        keeper.close()
+        for handle in handles.values():
+            handle.close()
+
     keeper = sqlite3.connect(tmp_path / "ledger.sqlite3")
-    request.addfinalizer(keeper.close)
+    request.addfinalizer(close_resources)
     assert keeper.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
-    return keeper
+    assert keeper.execute("SELECT name FROM sqlite_master").fetchall() == []
+    # Raw file closes would release this process's POSIX SQLite locks.
+    for suffix in ("", "-wal"):
+        handles[suffix] = Path(f"{tmp_path / 'ledger.sqlite3'}{suffix}").open("rb", buffering=0)
+    return keeper, handles
 
 
 def _fixture(tmp_path: Path, monkeypatch, *, accounts: tuple[str, ...] = ("lx",)) -> SQLiteOptionPositionsRepository:
@@ -192,7 +204,27 @@ def _fixture(tmp_path: Path, monkeypatch, *, accounts: tuple[str, ...] = ("lx",)
     return repo
 
 
-def _snapshot(path: Path) -> dict[str, Any]:
+def _physical_snapshot(path: Path, handles: dict[str, Any]) -> dict[str, Any]:
+    physical = {}
+    for suffix in ("", "-wal"):
+        item = Path(f"{path}{suffix}")
+        info = item.stat()
+        expected = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+        handle = handles[suffix]
+        held = os.fstat(handle.fileno())
+        assert (held.st_dev, held.st_ino, held.st_size, held.st_mtime_ns) == expected
+        handle.seek(0)
+        digest = hashlib.sha256(handle.read()).hexdigest()
+        for current in (os.fstat(handle.fileno()), item.stat()):
+            assert (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) == expected
+        physical[suffix] = {
+            "size": info.st_size, "mtime_ns": info.st_mtime_ns,
+            "inode": info.st_ino, "sha256": digest,
+        }
+    return physical
+
+
+def _snapshot(path: Path, handles: dict[str, Any]) -> dict[str, Any]:
     conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
     try:
         conn.execute("PRAGMA query_only=ON")
@@ -208,17 +240,7 @@ def _snapshot(path: Path) -> dict[str, Any]:
         stored_cookie = conn.execute("SELECT sqlite_schema_cookie FROM position_projection_source_state WHERE singleton_id=1").fetchone()
     finally:
         conn.close()
-    physical = {}
-    for suffix in ("", "-wal"):
-        item = Path(f"{path}{suffix}")
-        if item.exists():
-            info = item.stat()
-            physical[suffix] = {
-                "size": info.st_size, "mtime_ns": info.st_mtime_ns,
-                "inode": info.st_ino, "sha256": hashlib.sha256(item.read_bytes()).hexdigest(),
-            }
-        else:
-            physical[suffix] = None
+    physical = _physical_snapshot(path, handles)
     return {"logical_sha256": logical, "schema": schema, "row_counts": {key: len(value) for key, value in rows.items()}, "schema_cookie": cookie, "stored_schema_cookie": stored_cookie[0] if stored_cookie else None, "persistent": physical}
 
 
@@ -254,7 +276,7 @@ def _cleanup_preview(repo: SQLiteOptionPositionsRepository, monkeypatch) -> dict
 
 
 @pytest.mark.parametrize("defect", ["healthy", "schema-cookie", "missing-index", "missing-trigger"])
-def test_schema_repairs_block_status_and_public_cleanup(tmp_path: Path, monkeypatch, defect: str, wal_keeper: sqlite3.Connection) -> None:
+def test_schema_repairs_block_status_and_public_cleanup(tmp_path: Path, monkeypatch, defect: str, wal_keeper: tuple[sqlite3.Connection, dict[str, Any]]) -> None:
     repo = _fixture(tmp_path, monkeypatch)
     statements = {
         "schema-cookie": "CREATE TABLE issue655_schema_drift(marker INTEGER)",
@@ -268,10 +290,10 @@ def test_schema_repairs_block_status_and_public_cleanup(tmp_path: Path, monkeypa
             conn.commit()
         finally:
             conn.close()
-    before = _snapshot(repo.db_path)
+    before = _snapshot(repo.db_path, wal_keeper[1])
     observed = _observe(repo)
     preview = _cleanup_preview(repo, monkeypatch)
-    after = _snapshot(repo.db_path)
+    after = _snapshot(repo.db_path, wal_keeper[1])
     OBSERVATIONS.append({"case": defect, "kind": "schema", "phase": "before_repair", "path": str(repo.db_path), "before": before, "after": after, **observed, "cleanup": preview})
     assert before == after, "read surfaces changed retained DB/WAL/schema/logical state"
     inventory, status, verify = observed["inventory"], observed["status"], observed["verify"]
@@ -304,10 +326,10 @@ def test_schema_repairs_block_status_and_public_cleanup(tmp_path: Path, monkeypa
     assert preview["blockers"] == [{"gate": "current_decision_projection", "reason": "current_decision_projection_not_ready"}]
 
     applied = api.apply_current_decision_projection_migration(repo.db_path, inventory)
-    repair_before = _snapshot(repo.db_path)
+    repair_before = _snapshot(repo.db_path, wal_keeper[1])
     repaired = _observe(repo)
     repaired_preview = _cleanup_preview(repo, monkeypatch)
-    repair_after = _snapshot(repo.db_path)
+    repair_after = _snapshot(repo.db_path, wal_keeper[1])
     OBSERVATIONS.append({"case": defect, "kind": "schema", "phase": "after_repair", "applied": applied, "before": repair_before, "after": repair_after, **repaired, "cleanup": repaired_preview})
     assert applied["write_applied"] is True
     assert applied["state"] == _clean_repair()
@@ -325,14 +347,14 @@ def test_schema_repairs_block_status_and_public_cleanup(tmp_path: Path, monkeypa
     if defect == "schema-cookie":
         assert repair_after["row_counts"]["issue655_schema_drift"] == 0
     replay = api.apply_current_decision_projection_migration(repo.db_path, inventory)
-    replay_after = _snapshot(repo.db_path)
+    replay_after = _snapshot(repo.db_path, wal_keeper[1])
     OBSERVATIONS.append({"case": defect, "kind": "replay", "receipt": replay, "before": repair_after, "after": replay_after})
     assert replay["write_applied"] is False
     assert replay_after == repair_after, "no-op replay changed retained persistent state"
 
 
 @pytest.mark.parametrize("control", ["generation-missing", "projection-absent", "projection-partial", "projection-dirty", "empty-account"])
-def test_status_preserves_existing_sqlite_states(tmp_path: Path, monkeypatch, control: str, wal_keeper: sqlite3.Connection) -> None:
+def test_status_preserves_existing_sqlite_states(tmp_path: Path, monkeypatch, control: str, wal_keeper: tuple[sqlite3.Connection, dict[str, Any]]) -> None:
     accounts = () if control == "empty-account" else ("lx", "sy") if control == "projection-partial" else ("lx",)
     repo = _fixture(tmp_path, monkeypatch, accounts=accounts)
     statements = {
@@ -348,9 +370,9 @@ def test_status_preserves_existing_sqlite_states(tmp_path: Path, monkeypatch, co
             conn.commit()
         finally:
             conn.close()
-    before = _snapshot(repo.db_path)
+    before = _snapshot(repo.db_path, wal_keeper[1])
     observed = _observe(repo, accounts=accounts)
-    after = _snapshot(repo.db_path)
+    after = _snapshot(repo.db_path, wal_keeper[1])
     OBSERVATIONS.append({"case": control, "kind": "state_control", "path": str(repo.db_path), "before": before, "after": after, **observed})
     assert before == after
     status, inventory, verify = observed["status"], observed["inventory"], observed["verify"]
