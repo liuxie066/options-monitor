@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
+from domain.domain.strategy_core import ResolvedStrategy
 from domain.domain.candidate_defaults import (
     DEFAULT_SELL_CALL_WINDOW,
     resolve_candidate_liquidity,
@@ -21,12 +22,14 @@ from src.infrastructure.exchange_rates import CurrencyConverter
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.covered_call_strategy_risk import (
     enrich_and_filter_covered_call_underwriting,
+    resolve_covered_call_underwriting_config,
 )
 from src.application.strategy_policy import SELL_CALL_FAMILY, strategy_semantics_for_side_config
 from src.application.report_summaries import summarize_sell_call
 from src.application.scan_sell_call import run_sell_call_scan
 from src.application.candidate_scanning import (
     evidence_summary_from_decisions,
+    resolve_scan_strategy,
     project_evidence_scan_status,
     project_evidence_scan_status as _evidence_scan_status,
 )
@@ -75,9 +78,15 @@ def run_sell_call_scan_and_summarize(
     ) = None,
     required_data_frame: pd.DataFrame | None = None,
     demo_capacity: bool = False,
+    resolved_strategy: ResolvedStrategy | None = None,
 ) -> dict[str, Any]:
     """Run the CC opening policy in memory and summarize it."""
     sell_call_semantics = strategy_semantics_for_side_config(family=SELL_CALL_FAMILY, side_cfg=cc)
+    if resolved_strategy is not None:
+        resolve_scan_strategy(
+            mode="call", cfg=resolved_strategy.config, symbol=symbol,
+            portfolio_ctx=portfolio_ctx, resolved_strategy=resolved_strategy,
+        )
     portfolio_source = str(
         (portfolio_ctx or {}).get("portfolio_source_name")
         if isinstance(portfolio_ctx, dict)
@@ -195,7 +204,20 @@ def run_sell_call_scan_and_summarize(
     candidate_decisions: list[dict[str, Any]] = []
 
     liquidity = resolve_candidate_liquidity(global_sell_call_liquidity)
-    window = resolve_candidate_window(cc, defaults=DEFAULT_SELL_CALL_WINDOW)
+    window = resolve_candidate_window(
+        {"min_dte": resolved_strategy.config.min_dte, "max_dte": resolved_strategy.config.max_dte}
+        if resolved_strategy is not None else cc, defaults=DEFAULT_SELL_CALL_WINDOW,
+    )
+    strategy = resolve_scan_strategy(
+        mode="call",
+        cfg=(resolved_strategy.config if resolved_strategy is not None else resolve_covered_call_underwriting_config(
+            {**cc, "max_spread_ratio": liquidity.max_spread_ratio},
+        )),
+        symbol=symbol, portfolio_ctx=portfolio_ctx, resolved_strategy=resolved_strategy,
+    )
+    min_strike = strategy.config.min_strike if strategy is not None else cc.get('min_strike')
+    cost_multiplier = (strategy.config.min_strike_cost_multiplier if strategy is not None
+                       else float(cc.get('min_strike_cost_multiplier', 1.02) or 1.02))
     df_cc = run_sell_call_scan(
         symbols=[symbol],
         input_root=required_data_dir,
@@ -213,15 +235,15 @@ def run_sell_call_scan_and_summarize(
         }),
         min_dte=window.min_dte,
         max_dte=window.max_dte,
-        min_strike=(cc.get('min_strike') if demo_capacity else resolve_effective_sell_call_min_strike(
-            min_strike=cc.get('min_strike'),
+        min_strike=(min_strike if demo_capacity else resolve_effective_sell_call_min_strike(
+            min_strike=min_strike,
             avg_cost=avg_cost,
-            cost_multiplier=cc.get('min_strike_cost_multiplier', 1.02),
+            cost_multiplier=cost_multiplier,
         )),
-        max_strike=_optional_float(cc, 'max_strike'),
+        max_strike=strategy.config.max_strike if strategy is not None else _optional_float(cc, 'max_strike'),
         # Underwriting applies return/income thresholds once, after CNY enrichment.
         min_annualized_net_return=0.0,
-        min_strike_cost_multiplier=float(cc.get('min_strike_cost_multiplier', 1.02) or 1.02),
+        min_strike_cost_multiplier=cost_multiplier,
         min_net_income=0.0,
         min_open_interest=liquidity.min_open_interest,
         min_volume=liquidity.min_volume,
@@ -229,6 +251,7 @@ def run_sell_call_scan_and_summarize(
         strategy_family=sell_call_semantics.strategy_family,
         strategy_profile=sell_call_semantics.scan_strategy_profile,
         calculation_decision_sink_fn=candidate_decisions.extend,
+        resolved_strategy=strategy,
         required_data_frames=(
             {symbol: required_data_frame}
             if required_data_frame is not None
@@ -248,6 +271,7 @@ def run_sell_call_scan_and_summarize(
             portfolio_ctx=portfolio_ctx,
             exchange_rate_converter=exchange_rate_converter,
             decision_sink_fn=candidate_decisions.extend,
+            resolved_strategy=strategy,
         )
     if final_candidates_sink_fn is not None:
         final_candidates_sink_fn(

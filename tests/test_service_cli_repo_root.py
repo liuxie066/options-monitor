@@ -80,7 +80,7 @@ def releases(tmp_path_factory):
     for version in ("1.0.0", "1.0.1"):
         release = base / version
         release.mkdir()
-        for name in ("src", "domain", "scripts", "services", "configs", "contracts"):
+        for name in ("src", "domain", "om_strategy_core", "scripts", "services", "configs", "contracts"):
             shutil.copytree(REPO / name, release / name, ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copy2(REPO / "om", release / "om")
         (release / "VERSION").write_text(version + "\n")

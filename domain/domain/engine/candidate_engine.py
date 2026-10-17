@@ -8,6 +8,7 @@ from decimal import Decimal, ROUND_CEILING
 from typing import Any, Literal
 
 from domain.domain.fee_calc import estimate_futu_option_sell_fee
+from domain.domain.strategy_identity import candidate_ranking_profile
 from domain.domain.trade_contract_identity import contract_share_quantity, require_option_multiplier
 
 
@@ -694,6 +695,94 @@ def calculate_opening_candidate_metrics(
     return out
 
 
+def opening_qualification_rejects(
+    row: dict[str, Any], *, mode: StrategyMode | str, min_net_premium_cny: float | None,
+) -> list[dict[str, Any]]:
+    """Shared capacity, required value and earnings-evidence invariants."""
+    mode_norm = normalize_strategy_mode(mode)
+    src = row
+    rejects: list[dict[str, Any]] = []
+    resolved_min_net_premium_cny = _resolved_policy_float(
+        min_net_premium_cny, src, "policy_min_net_premium_cny", OPENING_CANDIDATE_MIN_NET_PREMIUM_CNY,
+    )
+    if mode_norm == "put":
+        max_new_contracts = _first_float(src, "max_new_contracts")
+        capacity_reason = _first_text(
+            src,
+            "cash_secured_unavailable_reason",
+            "cash_requirement_unavailable_reason",
+            "cash_fx_status",
+        )
+        if max_new_contracts is None or max_new_contracts < 1:
+            _reject(
+                rejects,
+                stage=STAGE_HARD_CONSTRAINTS,
+                reason=REJECT_HARD_CAPACITY_PUT,
+                message=(
+                    f"CSP capacity below one contract: {capacity_reason}"
+                    if capacity_reason
+                    else "CSP capacity below one contract or unavailable"
+                ),
+                metric_value=max_new_contracts,
+                threshold=1,
+            )
+    else:
+        covered_contracts = _first_float(
+            src,
+            "covered_contracts_available",
+            "max_new_contracts",
+        )
+        if covered_contracts is None or covered_contracts < 1:
+            _reject(
+                rejects,
+                stage=STAGE_HARD_CONSTRAINTS,
+                reason=REJECT_HARD_CAPACITY_CALL,
+                message="CC capacity below one contract or unavailable",
+                metric_value=covered_contracts,
+                threshold=1,
+            )
+
+    net_premium_cny = _first_float(src, "net_income_cny")
+    if net_premium_cny is None:
+        _reject(
+            rejects,
+            stage=STAGE_RETURN_FLOOR,
+            reason=REJECT_INPUT_MISSING,
+            message="one-contract net premium in CNY is unavailable",
+            metric_value={"field": "net_income_cny", "reason_code": "net_premium_cny_unavailable"},
+            threshold=resolved_min_net_premium_cny,
+        )
+    earnings_evidence = _evaluate_earnings_policy_evidence(src)
+    if not earnings_evidence["ready"]:
+        _reject(
+            rejects,
+            stage=STAGE_RISK_FILTER,
+            reason=REJECT_RISK_EARNINGS_UNAVAILABLE,
+            message="OpenD earnings coverage is unavailable for the near-expiry window",
+            metric_value=earnings_evidence["metric_value"],
+            threshold="ready",
+        )
+    return rejects
+
+
+def merge_opening_rejects(policy: list[dict[str, Any]], shared: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Preserve baseline rule order and stable custom-rule order within stages."""
+    rules = (
+        REJECT_HARD_DTE, REJECT_HARD_STRIKE, REJECT_HARD_CAPACITY_PUT, REJECT_HARD_CAPACITY_CALL,
+        REJECT_RETURN_ANNUALIZED, REJECT_INPUT_MISSING, REJECT_RETURN_NET_PREMIUM_CNY,
+        REJECT_RISK_SPREAD, REJECT_RISK_IV_RV_RATIO, REJECT_RISK_IV_MINUS_RV,
+        REJECT_RISK_EARNINGS_UNAVAILABLE, REJECT_RISK_EARNINGS_EVENT,
+    )
+    merged = [normalize_candidate_reject(item) for item in policy]
+    for item in shared:
+        if item not in merged:
+            merged.append(item)
+    return sorted(merged, key=lambda item: (
+        CANDIDATE_STAGE_ORDER.index(item["stage"]),
+        rules.index(item["reason"]) if item["reason"] in rules else len(rules),
+    ))
+
+
 def evaluate_opening_candidate_policy(
     raw: dict[str, Any] | Any,
     *,
@@ -828,42 +917,10 @@ def evaluate_opening_candidate_policy(
             threshold=effective_max_strike,
         )
 
-    if mode_norm == "put":
-        max_new_contracts = _first_float(src, "max_new_contracts")
-        capacity_reason = _first_text(
-            src,
-            "cash_secured_unavailable_reason",
-            "cash_requirement_unavailable_reason",
-            "cash_fx_status",
-        )
-        if max_new_contracts is None or max_new_contracts < 1:
-            _reject(
-                rejects,
-                stage=STAGE_HARD_CONSTRAINTS,
-                reason=REJECT_HARD_CAPACITY_PUT,
-                message=(
-                    f"CSP capacity below one contract: {capacity_reason}"
-                    if capacity_reason
-                    else "CSP capacity below one contract or unavailable"
-                ),
-                metric_value=max_new_contracts,
-                threshold=1,
-            )
-    else:
-        covered_contracts = _first_float(
-            src,
-            "covered_contracts_available",
-            "max_new_contracts",
-        )
-        if covered_contracts is None or covered_contracts < 1:
-            _reject(
-                rejects,
-                stage=STAGE_HARD_CONSTRAINTS,
-                reason=REJECT_HARD_CAPACITY_CALL,
-                message="CC capacity below one contract or unavailable",
-                metric_value=covered_contracts,
-                threshold=1,
-            )
+    qualification = opening_qualification_rejects(
+        src, mode=mode_norm, min_net_premium_cny=resolved_min_net_premium_cny,
+    )
+    rejects.extend(item for item in qualification if item["reason"] in (REJECT_HARD_CAPACITY_PUT, REJECT_HARD_CAPACITY_CALL))
 
     annualized = _first_float(
         src,
@@ -882,16 +939,8 @@ def evaluate_opening_candidate_policy(
         )
 
     net_premium_cny = _first_float(src, "net_income_cny")
-    if net_premium_cny is None:
-        _reject(
-            rejects,
-            stage=STAGE_RETURN_FLOOR,
-            reason=REJECT_INPUT_MISSING,
-            message="one-contract net premium in CNY is unavailable",
-            metric_value={"field": "net_income_cny", "reason_code": "net_premium_cny_unavailable"},
-            threshold=resolved_min_net_premium_cny,
-        )
-    elif net_premium_cny < resolved_min_net_premium_cny:
+    rejects.extend(item for item in qualification if item["reason"] == REJECT_INPUT_MISSING)
+    if net_premium_cny is not None and net_premium_cny < resolved_min_net_premium_cny:
         _reject(
             rejects,
             stage=STAGE_RETURN_FLOOR,
@@ -936,16 +985,8 @@ def evaluate_opening_candidate_policy(
 
     if require_earnings_evidence:
         earnings_evidence = _evaluate_earnings_policy_evidence(src)
-        if not earnings_evidence["ready"]:
-            _reject(
-                rejects,
-                stage=STAGE_RISK_FILTER,
-                reason=REJECT_RISK_EARNINGS_UNAVAILABLE,
-                message="OpenD earnings coverage is unavailable for the near-expiry window",
-                metric_value=earnings_evidence["metric_value"],
-                threshold="ready",
-            )
-        elif reject_known_earnings and earnings_evidence["blocking"]:
+        rejects.extend(item for item in qualification if item["reason"] == REJECT_RISK_EARNINGS_UNAVAILABLE)
+        if earnings_evidence["ready"] and reject_known_earnings and earnings_evidence["blocking"]:
             _reject(
                 rejects,
                 stage=STAGE_RISK_FILTER,
@@ -1400,13 +1441,14 @@ def explain_candidate_rank(
 ) -> dict[str, Any]:
     mode_norm = normalize_strategy_mode(mode)
     src = row if isinstance(row, dict) else {}
+    profile = candidate_ranking_profile([src], mode=mode_norm)
     rank_key = build_candidate_rank_key(src, mode=mode_norm)
     primary_drivers = [
         "period_net_return_on_cash_basis"
         if mode_norm == "put"
         else "period_net_premium_return"
     ]
-    return {
+    result = {
         "mode": mode_norm,
         "ranking_policy": "candidate_engine",
         "symbol": str(src.get("symbol") or "").strip().upper() or None,
@@ -1435,6 +1477,18 @@ def explain_candidate_rank(
             )
         ),
     }
+
+    if "strategy_core" in src:
+        result["strategy_core"] = src["strategy_core"]
+        result["ranking_profile"] = profile
+    if profile == "concentration_first":
+        result["primary_drivers"] = ["symbol_concentration_after", *primary_drivers]
+        result["primary_driver_labels"] = ["接货后集中度", *result["primary_driver_labels"]]
+        result["rank_reason"] = (
+            "同标的仍按持有期净收益分带选代表合约；跨标的先按接货后集中度从低到高分组，"
+            "未知集中度排后；同集中度组内按收益分带，再比较净接货折价、价差、OI 和净收入"
+        )
+    return result
 
 
 def _reject(
@@ -1594,10 +1648,13 @@ def rank_candidate_rows(
     rows: list[dict[str, Any]],
     *,
     mode: StrategyMode | str,
-    sell_put_ranking_profile: str = "current_tie_break",
+    sell_put_ranking_profile: str | None = None,
     near_return_threshold: float = OPENING_CANDIDATE_NEAR_RETURN_THRESHOLD,
 ) -> list[dict[str, Any]]:
     mode_norm = normalize_strategy_mode(mode)
+    sell_put_ranking_profile = candidate_ranking_profile(
+        rows, mode=mode_norm, explicit_profile=sell_put_ranking_profile,
+    )
     if sell_put_ranking_profile not in SELL_PUT_RANKING_PROFILES:
         raise ValueError(
             f"unsupported CSP ranking profile: {sell_put_ranking_profile}"

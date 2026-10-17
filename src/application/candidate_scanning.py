@@ -18,6 +18,10 @@ from domain.domain.engine.candidate_engine import (
     REJECT_POLICY_REJECTED,
     REJECT_RISK_EARNINGS_UNAVAILABLE,
 )
+from domain.domain.insurance_underwriting import InsuranceUnderwritingConfig
+from domain.domain.strategy_core import ResolvedStrategy, resolve_strategy, validate_strategy_identity
+from domain.domain.symbol_identity import symbol_market
+from om_strategy_core.identity import runtime_identity
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
 from src.application.earnings_calendar import annotate_candidates_with_earnings_evidence
 
@@ -29,6 +33,43 @@ _DEFINITIVE_CONTRACT_EVIDENCE_REASONS = frozenset(
         "option_type_mismatch",
     }
 )
+
+
+def resolve_scan_strategy(
+    *, mode: str, cfg: InsuranceUnderwritingConfig, symbol: str,
+    portfolio_ctx: dict[str, Any] | None = None, resolved_strategy: ResolvedStrategy | None = None,
+) -> ResolvedStrategy | None:
+    if resolved_strategy is None and not cfg.enabled:
+        return None
+    context = portfolio_ctx if isinstance(portfolio_ctx, dict) else {}
+    filters = context.get("filters") if isinstance(context.get("filters"), dict) else {}
+    account = filters.get("account")
+    evidence = context.get("position_sizing_evidence")
+    scope = evidence.get("scope") if isinstance(evidence, dict) else None
+    sizing_accounts = scope.get("accounts") if isinstance(scope, dict) else None
+    sizing_accounts = sizing_accounts if isinstance(sizing_accounts, list) else []
+    if len(sizing_accounts) == 1:
+        if account is not None and account != sizing_accounts[0]:
+            raise ValueError("portfolio account scope conflicts")
+        account = sizing_accounts[0]
+    market = (symbol_market(symbol) or "").lower() or None
+    if resolved_strategy is None:
+        return resolve_strategy(mode=mode, config=cfg, account=account, market=market)
+    validate_strategy_identity(
+        {"strategy_core": resolved_strategy.identity}, mode=mode, account=account, market=market,
+    )
+    return resolved_strategy
+
+
+def attach_strategy_identity(row: dict[str, Any], strategy: ResolvedStrategy) -> dict[str, Any]:
+    previous = validate_strategy_identity(row, mode=strategy.mode)
+    if previous is not None and previous != strategy:
+        raise ValueError("candidate identity conflicts with resolved strategy")
+    out = {**row, "strategy_core": {**strategy.identity, "runtime": runtime_identity()}}
+    validate_strategy_identity(
+        out, mode=strategy.mode, market=(symbol_market(row.get("symbol")) or "").lower() or None,
+    )
+    return out
 
 
 @dataclass(frozen=True)
@@ -57,6 +98,7 @@ class CandidateScanConfig:
     strategy_family: str | None = None
     strategy_profile: str | None = None
     required_data_frames: Mapping[str, pd.DataFrame] | None = None
+    resolved_strategy: ResolvedStrategy | None = None
 
 
 @dataclass(frozen=True)
@@ -129,6 +171,8 @@ def _calculation_decision_record(
         detail.get("rule") or "candidate_metrics_unavailable"
     )
     normalized_input = contract.to_gate_payload()
+    if config.resolved_strategy is not None:
+        normalized_input = attach_strategy_identity(normalized_input, config.resolved_strategy)
     opening_status = str(
         normalized_input.get("opening_contract_status") or ""
     ).strip().lower()
@@ -184,6 +228,8 @@ def run_candidate_scan(
 ) -> pd.DataFrame:
     """Build normalized, calculable rows; do not filter or rank strategy policy."""
 
+    if config.resolved_strategy is not None and config.resolved_strategy.mode != config.mode:
+        raise ValueError("resolved strategy mode conflicts with scan")
     rows: list[dict[str, Any]] = []
     calculation_decisions: list[dict[str, Any]] = []
     for symbol in config.symbols:
@@ -214,6 +260,8 @@ def run_candidate_scan(
                 continue
             candidate = deps.build_row_fn(contract, base_values, metrics)
             if candidate is not None:
+                if config.resolved_strategy is not None:
+                    candidate = attach_strategy_identity(candidate, config.resolved_strategy)
                 rows.append(candidate)
 
     out = pd.DataFrame(rows)

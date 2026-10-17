@@ -9,8 +9,6 @@ from typing import Any, Iterable, Mapping
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.engine import (
     evaluate_opening_candidate_policy,
-    explain_candidate_rank,
-    rank_candidate_rows,
     validate_candidate_decision_payload,
 )
 from domain.domain.engine.candidate_engine import (
@@ -21,6 +19,8 @@ from domain.domain.engine.candidate_engine import (
     REJECT_INPUT_MISSING,
     REJECT_RISK_EARNINGS_UNAVAILABLE,
 )
+from domain.domain.strategy_core import evaluate_candidates, validate_strategy_identity, rank_candidates, explain_rank
+from domain.domain.strategy_identity import candidate_ranking_profile, validate_strategy_identity as validate_stored_identity
 from domain.domain.symbol_identity import symbol_market
 from src.application.candidate_snapshot_contract import (
     CandidateSnapshotContractError,
@@ -324,7 +324,7 @@ def ranked_opening_candidates(
 
     mode_norm = _mode(mode) if mode is not None else None
     return [
-        dict(item)
+        {**item, "strategy_core_status": "source" if (item.get("facts") or {}).get("strategy_core") else "legacy"}
         for item in snapshot.get("ranked_candidates") or []
         if isinstance(item, Mapping)
         and (mode_norm is None or item.get("strategy_mode") == mode_norm)
@@ -353,6 +353,7 @@ def ranked_opening_candidate_decisions(
             {
                 **decision,
                 "opening_snapshot_rank": ranked.get("rank"),
+                "strategy_core_status": ranked["strategy_core_status"],
             }
         )
     return out
@@ -367,7 +368,7 @@ def rejected_opening_candidate_decisions(
 
     mode_norm = _mode(mode) if mode is not None else None
     return [
-        dict(item)
+        {**item, "strategy_core_status": "source" if (item.get("normalized_input") or {}).get("strategy_core") else "legacy"}
         for item in snapshot.get("candidate_decisions") or []
         if isinstance(item, Mapping)
         and (mode_norm is None or item.get("strategy_mode") == mode_norm)
@@ -477,6 +478,11 @@ def validate_opening_candidate_snapshot(
         or any(not isinstance(row, Mapping) for row in scopes)
     ):
         raise OpeningCandidateSnapshotError("opening candidate snapshot collections are invalid")
+    for strategy_mode in {row.get("strategy_mode") for row in decisions if row.get("strategy_mode")}:
+        _validate_core_scope(
+            [dict(row.get("normalized_input") or {}) for row in decisions if row.get("strategy_mode") == strategy_mode],
+            mode=_mode(strategy_mode), account=expected_account, market=_market(item.get("market")),
+        )
     candidate_ids = [str(row.get("candidate_id") or "") for row in decisions]
     if any(not value for value in candidate_ids) or len(candidate_ids) != len(set(candidate_ids)):
         raise OpeningCandidateSnapshotError("opening candidate identities are invalid")
@@ -843,6 +849,17 @@ def dependency_from_hash(*, kind: str, sha256: str) -> dict[str, Any]:
     }
 
 
+def _validate_core_scope(rows: list[dict[str, Any]], *, mode: str, account: str, market: str) -> None:
+    try:
+        for row in rows:
+            strategy = validate_stored_identity(row, mode=mode, account=account, market=market.lower())
+            if strategy is not None and not row["strategy_core"].get("runtime"):
+                raise ValueError("strategy runtime identity is missing")
+        candidate_ranking_profile(rows, mode=mode)
+    except ValueError as exc:
+        raise OpeningCandidateSnapshotError(str(exc)) from exc
+
+
 def _snapshot_decisions(
     rows_by_mode: Mapping[str, Iterable[Mapping[str, Any]]],
     *,
@@ -877,11 +894,17 @@ def _snapshot_decisions(
             mode = _mode(raw_mode)
             for raw in rows:
                 normalized = dict(raw or {})
-                opening = evaluate_opening_candidate_policy(normalized, mode=mode)
+                _validate_core_scope([normalized], mode=mode, account=account, market=market)
+                strategy = validate_strategy_identity(normalized, mode=mode, account=account, market=market.lower())
+                opening = (
+                    evaluate_candidates([normalized], strategy=strategy)["decisions"][0]["opening_decision"]
+                    if strategy is not None else evaluate_opening_candidate_policy(normalized, mode=mode)
+                )
                 if opening.get("accepted") is not True:
                     raise OpeningCandidateSnapshotError(
                         "final candidate is not accepted by opening policy"
                     )
+                normalized = dict(opening.get("normalized_input") or normalized)
                 evaluation_rows.setdefault(mode, []).append(
                     {
                         "normalized_input": normalized,
@@ -902,8 +925,13 @@ def _snapshot_decisions(
     out: list[dict[str, Any]] = []
     index: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for mode, rows in evaluation_rows.items():
+        _validate_core_scope(
+            [dict(record.get("normalized_input") or {}) for record in rows],
+            mode=mode, account=account, market=market,
+        )
         for record in rows:
             normalized = dict(record.get("normalized_input") or {})
+            validate_strategy_identity(normalized, mode=mode, account=account, market=market.lower())
             decision_scope = (
                 _required_text(normalized.get("symbol"), "candidate symbol").upper(),
                 mode,
@@ -995,9 +1023,13 @@ def _ranked_candidates(
                 raise OpeningCandidateSnapshotError(
                     "final candidate is not accepted by opening policy"
                 )
-            source_rows.append(dict(decision.get("normalized_input") or {}))
+            normalized = dict(decision.get("normalized_input") or {})
+            if final_row.get("strategy_core") != normalized.get("strategy_core"):
+                raise OpeningCandidateSnapshotError("final candidate strategy identity mismatch")
+            source_rows.append(normalized)
+        _validate_core_scope(source_rows, mode=mode, account=account, market=market)
         for mode_rank, ranked_row in enumerate(
-            rank_candidate_rows(source_rows, mode=mode),
+            rank_candidates(source_rows, mode=mode),
             start=1,
         ):
             key = _contract_key(mode, ranked_row)
@@ -1026,7 +1058,7 @@ def _ranked_candidates(
                     "strategy_mode": mode,
                     "rank": mode_rank,
                     "facts": ranked_row,
-                    "ranking": explain_candidate_rank(ranked_row, mode=mode),
+                    "ranking": explain_rank(ranked_row, mode=mode),
                     "decision_hash": decision.get("decision_hash"),
                     "risk_policy_hash": decision.get("risk_policy_hash"),
                     "quote_snapshot_id": decision.get("quote_snapshot_id"),
