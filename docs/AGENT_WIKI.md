@@ -223,6 +223,11 @@ The first run can omit `--backup-proof` to obtain
 `expected_backup_bindings`; it remains `not_ready` and emits no candidates.
 The proof must describe a standalone, integrity-checked SQLite backup whose
 logical contents and projection/lifecycle bindings match the live ledger.
+The current-decision gate requires migration status `clean`: all canonical
+repair counts must be zero, required indexes/triggers must be present, and the
+stored schema cookie must match the current schema.
+Inventory `ready` means repair can proceed; the unchanged `repair` details
+identify outstanding work and do not establish cleanup readiness.
 This command is preview-only: it never moves, deletes, vacuums, or rewrites
 data, and it has no `--confirm` or `--delete` mode. Even a ready result only
 authorizes a later operator decision. Legacy required-data CSV/base64 files,
