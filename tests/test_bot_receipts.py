@@ -9,7 +9,8 @@ import pytest
 from src.application.agent_tools import receipts
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.bot.tools import build_tool_payload
-from src.application.receipt_query import receipt_event
+from src.application.receipt_query import receipt_event, receipt_matches
+from src.application.tool_execution import execute_tool
 from src.application.trades.inbox import query_trade_receipts
 
 
@@ -25,6 +26,86 @@ def _event(i=0, body="原始业务回执"):
                          occurred=1788934554000 + i, revision=1, body=body,
                          business_result={"status": "failed", "reason": "exception:OperationalError"},
                          deal_id="7258806397173991645", diagnostic_code="exception:OperationalError")
+
+
+@pytest.mark.parametrize("field", ["account", "deal_id"])
+@pytest.mark.parametrize("value", ["", "x" * 201], ids=["empty", "too-long"])
+def test_receipt_facade_rejects_invalid_filter_lengths_before_reads(monkeypatch, field, value):
+    reads = {"config": 0, "sources": 0}
+
+    def read_config(**kwargs):
+        reads["config"] += 1
+        raise AssertionError("invalid filter reached config")
+
+    def read_sources(**kwargs):
+        reads["sources"] += 1
+        raise AssertionError("invalid filter reached sources")
+
+    monkeypatch.setattr(receipts, "load_runtime_config", read_config)
+    monkeypatch.setattr(receipts, "_sources", read_sources)
+    result = execute_tool("receipt_read", {field: value})
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INPUT_ERROR"
+    assert result["error"]["details"]["schema_errors"][0]["path"] == field
+    assert reads == {"config": 0, "sources": 0}
+
+
+@pytest.fixture
+def scoped_receipt_query(monkeypatch, tmp_path):
+    from src.application import agent_tool_config
+
+    rows = [
+        {**_event(0), "account": "lx", "deal_id": "deal-lx"},
+        {**_event(1), "account": "sy", "deal_id": "deal-sy"},
+    ]
+    _setup(monkeypatch, tmp_path, rows)
+
+    def read_config(**kwargs):
+        return tmp_path / "config.hk.json", {"accounts": ["lx", "sy"]}
+
+    def read_sources(*, accounts, query, **kwargs):
+        return [row for row in rows if row["account"] in accounts and receipt_matches(row, query)], []
+
+    monkeypatch.setattr(receipts, "load_runtime_config", read_config)
+    monkeypatch.setattr(agent_tool_config, "load_runtime_config", read_config)
+    monkeypatch.setattr(receipts, "_sources", read_sources)
+
+
+@pytest.mark.parametrize(("filters", "accounts", "event_ids"), [
+    ({}, ["lx", "sy"], {"0", "1"}),
+    ({"account": "lx"}, ["lx"], {"0"}),
+    ({"deal_id": "deal-sy"}, ["lx", "sy"], {"1"}),
+    ({"account": "sy", "deal_id": "deal-sy"}, ["sy"], {"1"}),
+])
+def test_receipt_facade_preserves_omitted_and_valid_filters(scoped_receipt_query, filters, accounts, event_ids):
+    result = execute_tool("receipt_read", filters)
+
+    assert result["ok"] is True, result
+    data = result["data"]
+    assert {row["event_ref"]["source_event_id"] for row in data["rows"]} == event_ids
+    assert data["coverage"]["scope"]["accounts"] == accounts
+    assert data["coverage"]["scope"]["query"] == {**filters, "market": "HK"}
+
+
+@pytest.mark.parametrize("model_input", [{}, {"account": ""}])
+def test_receipt_payload_assembly_preserves_fixed_account_before_execution(scoped_receipt_query, model_input):
+    payload, error = build_tool_payload("receipt_read", model_input, fixed_input={"account": "sy"})
+
+    assert error is None
+    assert payload is not None
+    assert payload["account"] == "sy"
+    result = execute_tool("receipt_read", payload)
+    assert result["ok"] is True, result
+    assert {row["event_ref"]["source_event_id"] for row in result["data"]["rows"]} == {"1"}
+    assert result["data"]["coverage"]["scope"]["accounts"] == ["sy"]
+
+
+def test_receipt_payload_assembly_rejects_conflicting_fixed_account(scoped_receipt_query):
+    payload, error = build_tool_payload("receipt_read", {"account": "lx"}, fixed_input={"account": "sy"})
+
+    assert payload is None
+    assert error == "tool input conflicts with trusted scope: account"
 
 
 def test_closed_schema_and_config_scope(monkeypatch, tmp_path):
