@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 import math
 from typing import Any, Callable
 
@@ -208,14 +208,42 @@ def validate_strategy_identity(
     return strategy
 
 
+def normalize_decision_time(value: datetime) -> datetime:
+    """Validate one captured decision instant without reading a clock."""
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("decision time must be a timezone-aware datetime")
+    return value.astimezone(timezone.utc)
+
+
+def decision_time_from_input(row: dict[str, Any]) -> datetime:
+    """Read recorded scan evidence without substituting a wall or seal clock."""
+    if "decision_now_utc" not in row:
+        raise ValueError("missing decision_now_utc: a recorded timezone-aware decision time is required")
+    value = row["decision_now_utc"]
+    if not isinstance(value, str) or not value:
+        raise ValueError("decision_now_utc must be a timezone-aware ISO timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("decision_now_utc must be a timezone-aware ISO timestamp") from exc
+    try:
+        return normalize_decision_time(parsed)
+    except ValueError as exc:
+        raise ValueError("decision_now_utc must be timezone-aware") from exc
+
+
 def calculate_metrics(
-    row: dict[str, Any], *, mode: str, now_utc: datetime,
+    row: dict[str, Any], *, mode: str, now_utc: datetime | None = None,
     avg_cost: float | None = None, exchange_rates: ExchangeRates | None = None,
 ) -> dict[str, Any]:
-    """Return metric fields with the old post-rounding CNY supplement."""
+    """Calculate at an explicit instant or the recorded scan decision instant."""
     _mode(mode)
-    if not isinstance(now_utc, datetime) or now_utc.tzinfo is None or now_utc.utcoffset() is None:
-        raise ValueError("now_utc must be a timezone-aware datetime")
+    recorded = decision_time_from_input(row) if "decision_now_utc" in row else None
+    if now_utc is None:
+        now_utc = recorded if recorded is not None else decision_time_from_input(row)
+    now_utc = normalize_decision_time(now_utc)
+    if recorded is not None and now_utc != recorded:
+        raise ValueError("now_utc conflicts with recorded decision_now_utc")
     metrics = calculate_opening_candidate_metrics(row, mode=mode, avg_cost=avg_cost, now_utc=now_utc)
     if mode == "call" and (
         isinstance(avg_cost, bool) or not isinstance(avg_cost, (int, float))

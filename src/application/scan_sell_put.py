@@ -15,7 +15,7 @@ if str(repo_base) not in sys.path:
 
 from domain.domain.engine import CandidateCalculationError
 from domain.domain.engine.candidate_engine import _decision_now
-from domain.domain.strategy_core import ResolvedStrategy, calculate_metrics
+from domain.domain.strategy_core import ResolvedStrategy, calculate_metrics, normalize_decision_time
 from domain.domain.candidate_defaults import (
     DEFAULT_CANDIDATE_LIQUIDITY,
     DEFAULT_SELL_PUT_WINDOW,
@@ -127,7 +127,9 @@ def run_sell_put_scan(
         source="--min-annualized-net-return",
     )
 
-    scan_now_utc = quote_freshness_now_utc or datetime.now(timezone.utc)
+    scan_now_utc = normalize_decision_time(
+        quote_freshness_now_utc if quote_freshness_now_utc is not None else datetime.now(timezone.utc)
+    )
     return run_candidate_scan(
         config=CandidateScanConfig(
             mode="put",
@@ -146,6 +148,7 @@ def run_sell_put_scan(
             strategy_profile=strategy_profile,
             required_data_frames=required_data_frames,
             resolved_strategy=resolved_strategy,
+            decision_now_utc=scan_now_utc.astimezone(timezone.utc).isoformat(),
         ),
         deps=CandidateScanDependencies(
             compute_metrics_fn=lambda contract: compute_metrics(
