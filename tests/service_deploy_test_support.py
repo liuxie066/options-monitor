@@ -650,6 +650,37 @@ def _synthetic_drift_context(monkeypatch, tmp_path: Path, *, target="systemd", s
     }
 
 
+def _guard_original_credential_migration(monkeypatch, fixture):
+    """Record the original probes and block every later migration side effect."""
+    from src.application import service_drift as owner
+
+    real_render = owner._expected_bundle_from_profile
+    real_drift = owner.service_drift
+    original_calls = []
+    render_calls = []
+
+    def original_render(profile, **kwargs):
+        if profile != fixture["profile"]:
+            fixture["fail"]("target profile render")()
+        render_calls.append(profile)
+        return real_render(profile, **kwargs)
+
+    def original_drift(**kwargs):
+        if kwargs.get("confirm") is not False or kwargs.get("profile") != fixture["profile"]:
+            fixture["fail"]("target or confirmed migration reconcile")()
+        original_calls.append(kwargs)
+        return real_drift(**kwargs)
+
+    monkeypatch.setattr(owner, "_expected_bundle_from_profile", original_render)
+    monkeypatch.setattr(owner, "service_drift", original_drift)
+    for name in (
+        "_preflight_encrypted_credentials", "_backup_service_profile", "_active_credential_consumers",
+        "_rollback_secret_credential_migration", "_restart_and_verify_credential_consumers",
+    ):
+        monkeypatch.setattr(owner, name, fixture["fail"](name))
+    return original_calls, render_calls
+
+
 def _drift_at(
     repo_root: Path,
     runtime_root: Path,

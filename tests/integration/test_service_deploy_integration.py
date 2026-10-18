@@ -35,6 +35,7 @@ from tests.service_deploy_test_support import (
     _drift_roots,
     _fake_systemd_query_runner,
     _synthetic_drift_context,
+    _guard_original_credential_migration,
     _legacy_credential_migration_fixture,
     _credential_migration_runner,
     _stub_pi_storage_readiness,
@@ -5744,30 +5745,7 @@ def test_service_credential_migration_blocks_unknown_before_target_work(unknown_
     fixture = unknown_drift_case
     target = "options-monitor-projection-verify.timer"
     fixture["observed"].update({("is-enabled", target): "masked", ("is-active", target): ""})
-    real_render = owner._expected_bundle_from_profile
-    real_drift = owner.service_drift
-    original_calls = []
-    render_calls = []
-
-    def original_render(profile, **kwargs):
-        if profile != fixture["profile"]:
-            fixture["fail"]("target profile render")()
-        render_calls.append(profile)
-        return real_render(profile, **kwargs)
-
-    def original_drift(**kwargs):
-        if kwargs.get("confirm") is not False or kwargs.get("profile") != fixture["profile"]:
-            fixture["fail"]("target or confirmed migration reconcile")()
-        original_calls.append(kwargs)
-        return real_drift(**kwargs)
-
-    monkeypatch.setattr(owner, "_expected_bundle_from_profile", original_render)
-    monkeypatch.setattr(owner, "service_drift", original_drift)
-    for name in (
-        "_preflight_encrypted_credentials", "_backup_service_profile", "_active_credential_consumers",
-        "_rollback_secret_credential_migration", "_restart_and_verify_credential_consumers",
-    ):
-        monkeypatch.setattr(owner, name, fixture["fail"](name))
+    original_calls, render_calls = _guard_original_credential_migration(monkeypatch, fixture)
     result = owner.migrate_service_credentials(
         repo_root=fixture["repo"], runtime_root=fixture["runtime"], profile_path=fixture["profile_path"],
         systemd_unit_root=fixture["units"], secret_credential_delivery="load-credential-encrypted",
