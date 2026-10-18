@@ -19,7 +19,7 @@ from domain.domain.engine.candidate_engine import (
     REJECT_INPUT_MISSING,
     REJECT_RISK_EARNINGS_UNAVAILABLE,
 )
-from domain.domain.strategy_core import evaluate_candidates, validate_strategy_identity, rank_candidates, explain_rank
+from domain.domain.strategy_core import evaluate_candidates, validate_strategy_identity, rank_candidates, explain_rank, decision_time_from_input
 from domain.domain.strategy_identity import candidate_ranking_profile, validate_strategy_identity as validate_stored_identity
 from domain.domain.symbol_identity import symbol_market
 from src.application.candidate_snapshot_contract import (
@@ -852,6 +852,8 @@ def dependency_from_hash(*, kind: str, sha256: str) -> dict[str, Any]:
 def _validate_core_scope(rows: list[dict[str, Any]], *, mode: str, account: str, market: str) -> None:
     try:
         for row in rows:
+            if "decision_now_utc" in row:
+                decision_time_from_input(row)
             strategy = validate_stored_identity(row, mode=mode, account=account, market=market.lower())
             if strategy is not None and not row["strategy_core"].get("runtime"):
                 raise ValueError("strategy runtime identity is missing")
@@ -1026,6 +1028,8 @@ def _ranked_candidates(
             normalized = dict(decision.get("normalized_input") or {})
             if final_row.get("strategy_core") != normalized.get("strategy_core"):
                 raise OpeningCandidateSnapshotError("final candidate strategy identity mismatch")
+            if final_row.get("decision_now_utc") != normalized.get("decision_now_utc"):
+                raise OpeningCandidateSnapshotError("final candidate decision time mismatch")
             source_rows.append(normalized)
         _validate_core_scope(source_rows, mode=mode, account=account, market=market)
         for mode_rank, ranked_row in enumerate(
