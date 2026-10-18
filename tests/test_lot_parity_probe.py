@@ -30,7 +30,10 @@ import hashlib
 import importlib
 import json
 from pathlib import Path
+import plistlib
+import shlex
 import sqlite3
+import subprocess
 import sys
 import types
 
@@ -38,6 +41,8 @@ import pytest
 
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.ledger.repository as ledger_repository
+from src.application.service_deploy import render_service_bundle
+from src.interfaces.cli.main import main as om_main
 from src.application.ledger.position_records import PositionLotRecord
 from src.application.ledger.repository_common import _position_lot_storage_values
 from src.application.ledger.lot_parity_probe import (
@@ -117,6 +122,34 @@ def _stored_fields(sqlite_path: Path) -> dict[str, object]:
         conn.close()
     assert row is not None
     return json.loads(str(row[0]))
+
+
+def _append_historical_invalid_adjustment(sqlite_path: Path) -> None:
+    """Keep a valid lot beside the historical fractional-adjustment fixture."""
+    repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
+    conn = connect_ledger_fixture(sqlite_path)
+    try:
+        row = conn.execute("SELECT event_json FROM trade_events").fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    event = json.loads(str(row[0]))
+    event.update(
+        event_id="historical-bad-adjust",
+        event_type="adjust",
+        event_time_ms=2000,
+        contracts=0,
+        price=0,
+        lot_id=None,
+        target_lot_id=_stored_lot_id(sqlite_path),
+        source="historical-fixture",
+        raw_payload={"patch": {"contracts": 1.9}},
+    )
+    before = repo.list_position_lots()
+    # Low-level storage retains history; the normal projected writer rejects
+    # this patch (test_rebuild_rejects_fractional_adjustment_and_preserves_historical_evidence).
+    assert repo.upsert_trade_event(event) is True
+    assert repo.list_position_lots() == before
 
 
 def _replace_with_v351_legacy_payload(sqlite_path: Path) -> None:
@@ -2039,6 +2072,220 @@ def test_verify_projection_adds_the_probe_under_a_new_key_without_touching_ok(
     assert "lot_parity_probe_error" not in payload
 
 
+@pytest.mark.parametrize("fmt", ["json", "text", None], ids=["json", "text", "default-text"])
+def test_verify_projection_fails_for_historical_error_with_green_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    fmt: str | None,
+) -> None:
+    sqlite_path, data_config = _build_green_store(tmp_path)
+    _append_historical_invalid_adjustment(sqlite_path)
+    _mount_cli(monkeypatch, sqlite_path, data_config, fmt=fmt)
+    before = _store_snapshot(sqlite_path)
+    probe = run_lot_parity_probe(sqlite_path=sqlite_path)
+    assert probe["projection_error_count"] == 1
+    assert probe["green"] is True
+    assert probe["difference_count"] == 0
+
+    assert om_main(["option-positions", *sys.argv[1:]]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    if fmt == "json":
+        payload = json.loads(captured.out)
+        assert payload["ok"] is False
+        assert payload["summary"] == {"projection_error": 1, "matched": 1}
+        error = next(item for item in payload["items"] if item["status"] == "projection_error")
+        assert error["event_id"] == "historical-bad-adjust"
+        assert error["code"] == "adjust_patch_invalid"
+        assert payload["projection_error_count"] == 1
+        assert payload["event_count"] == 2
+        assert payload["position_lot_count"] == payload["projected_lot_count"] == 1
+        assert payload["mode_requested"] == "auto"
+        assert payload["mode_used"] == "full_replay"
+        assert payload["checkpoint_reused"] is False
+        assert payload["evidence_published"] is False
+        assert payload["report_id"].startswith("projection-verify-")
+        assert payload["source_of_truth"] == "trade_events"
+        assert payload["projection"] == "position_lots"
+        assert payload["ledger_store"]["sqlite_path"] == str(sqlite_path.resolve())
+        assert payload["lot_parity_probe"]["green"] is True
+        assert payload["lot_parity_probe"]["difference_count"] == 0
+        assert "lot_parity_probe_error" not in payload
+    else:
+        assert "ok=False" in captured.out
+        assert "mode=full_replay matched=1" in captured.out
+        assert "green=True" in captured.out
+        assert "a_payload=0 b_columns=0 c_rows=0" in captured.out
+    after = _store_snapshot(sqlite_path)
+    assert {key: after[key] for key in PERSISTENT_SNAPSHOT_KEYS} == {
+        key: before[key] for key in PERSISTENT_SNAPSHOT_KEYS
+    }
+    assert not (tmp_path / "output_shared" / "state" / "option_positions").exists()
+
+
+@pytest.mark.parametrize("existing_checkpoint", [False, True])
+def test_verify_projection_failure_publishes_report_without_successful_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    existing_checkpoint: bool,
+) -> None:
+    sqlite_path, data_config = _build_green_store(tmp_path)
+    _mount_cli(monkeypatch, sqlite_path, data_config, extra_args=("--mode", "auto", "--publish-evidence"))
+    current = tmp_path / "output_shared" / "state" / "option_positions" / "current"
+    checkpoint = current / "projection_verify.checkpoint.json"
+    if existing_checkpoint:
+        assert om_main(["option-positions", *sys.argv[1:]]) == 0
+        baseline = json.loads(capsys.readouterr().out)
+        assert baseline["ok"] is True
+        checkpoint_before = checkpoint.read_bytes()
+        assert om_main(["option-positions", *sys.argv[1:]]) == 0
+        assert json.loads(capsys.readouterr().out)["checkpoint_reused"] is True
+    else:
+        checkpoint_before = None
+    _append_historical_invalid_adjustment(sqlite_path)
+    holder = connect_ledger_fixture(sqlite_path)
+    try:
+        # Keep last-connection WAL checkpointing outside the measured window.
+        assert holder.execute("SELECT count(*) FROM position_lots").fetchone() == (1,)
+        assert not holder.in_transaction
+        before = _store_snapshot(sqlite_path)
+        report_ids = []
+
+        for _ in range(2):
+            assert om_main(["option-positions", *sys.argv[1:]]) == 1
+            payload = json.loads(capsys.readouterr().out)
+            assert payload["ok"] is False
+            assert payload["lot_parity_probe"]["green"] is True
+            assert payload["checkpoint_reused"] is False
+            assert "checkpoint_id" not in payload
+            assert payload["mode_used"] == "full_replay"
+            assert payload["evidence_published"] is True
+            saved = json.loads((current / "projection_verify.latest.json").read_text(encoding="utf-8"))
+            assert saved["ok"] is False
+            assert saved["report_id"] == payload["report_id"]
+            assert saved["summary"] == {"projection_error": 1, "matched": 1}
+            report_ids.append(payload["report_id"])
+            assert (checkpoint.read_bytes() if checkpoint.exists() else None) == checkpoint_before
+
+        assert len(set(report_ids)) == 2
+        after = _store_snapshot(sqlite_path)
+        assert {key: after[key] for key in PERSISTENT_SNAPSHOT_KEYS} == {
+            key: before[key] for key in PERSISTENT_SNAPSHOT_KEYS
+        }
+    finally:
+        holder.close()
+
+
+@pytest.mark.parametrize("fmt", ["json", "text"])
+def test_verify_projection_primary_success_does_not_override_red_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    fmt: str,
+) -> None:
+    """Aggregation control: inject a real red report from a separate fixture."""
+    import src.interfaces.cli.option_positions as cli_mod
+
+    sqlite_path, data_config = _build_green_store(tmp_path)
+    red_root = tmp_path / "red-probe"
+    red_root.mkdir()
+    red_path, _ = _build_green_store(red_root)
+    _tamper(red_path, [("UPDATE position_lots SET strike = 999.0", ())])
+    red_probe = run_lot_parity_probe(sqlite_path=red_path)
+    assert red_probe["green"] is False
+    _mount_cli(monkeypatch, sqlite_path, data_config, fmt=fmt, extra_args=("--publish-evidence",))
+    monkeypatch.setattr(cli_mod, "run_lot_parity_probe", lambda **_kwargs: red_probe)
+
+    assert om_main(["option-positions", *sys.argv[1:]]) == 1
+
+    captured = capsys.readouterr()
+    if fmt == "json":
+        payload = json.loads(captured.out)
+        assert payload["ok"] is True
+        assert payload["lot_parity_probe"]["green"] is False
+    else:
+        assert "ok=True" in captured.out
+        assert "green=False" in captured.out
+        assert "lot parity probe is red" in captured.err
+    current = tmp_path / "output_shared" / "state" / "option_positions" / "current"
+    assert json.loads((current / "projection_verify.latest.json").read_text(encoding="utf-8"))["ok"] is True
+    assert (current / "projection_verify.checkpoint.json").exists()
+
+
+@pytest.mark.parametrize("target", ["systemd", "launchd"])
+def test_scheduled_verify_projection_process_fails_for_historical_error(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    """Run only the rendered verify argv in CI, never a unit or service manager."""
+    runtime = tmp_path / "runtime"
+    store_root = runtime / "output_shared" / "state"
+    store_root.mkdir(parents=True)
+    sqlite_path, fixture_config = _build_green_store(store_root)
+    _append_historical_invalid_adjustment(sqlite_path)
+    data_config = runtime / "portfolio.runtime.json"
+    data_config.write_text(fixture_config.read_text(encoding="utf-8"), encoding="utf-8")
+    config = runtime / "config.us.json"
+    config.write_text(json.dumps({"accounts": ["lx"]}), encoding="utf-8")
+    env_file = runtime / "options-monitor.env"
+    env_file.write_text("", encoding="utf-8")
+    child_home = tmp_path / "home"
+    child_home.mkdir()
+    repo_root = Path(__file__).resolve().parents[1]
+    bundle = render_service_bundle(
+        target=target, repo_root=repo_root, runtime_root=runtime,
+        accounts=["lx"], markets=["us"], config_paths={"us": config},
+        env_file=env_file, use_default_deploy_user=False,
+    )
+    files = {item["relative_path"]: item["content"] for item in bundle["files"]}
+    if target == "systemd":
+        unit = files["systemd/options-monitor-projection-verify.service"]
+        exec_line = next(line for line in unit.splitlines() if line.startswith("ExecStart="))
+        argv = shlex.split(exec_line.removeprefix("ExecStart="))
+    else:
+        plist = plistlib.loads(files["launchd/com.options-monitor.projection-verify.plist"].encode())
+        argv = plist["ProgramArguments"]
+    assert argv == [
+        str(repo_root / "om"), "option-positions", "--data-config", str(data_config),
+        "verify-projection", "--mode", "auto", "--publish-evidence",
+    ]
+    before = _store_snapshot(sqlite_path)
+
+    result = subprocess.run(
+        argv, cwd=runtime, capture_output=True, text=True, timeout=60,
+        env={
+            "PATH": "/usr/bin:/bin", "HOME": str(child_home),
+            "OM_PYTHON": sys.executable, "OM_SECRET_BACKEND": "env",
+            "OM_RUNTIME_ROOT": str(runtime), "OM_ENV_FILE": str(env_file),
+            "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1", "PYTHONUTF8": "1",
+        },
+    )
+
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert "ok=False" in result.stdout
+    assert "mode=full_replay matched=1" in result.stdout
+    assert "green=True" in result.stdout
+    assert "a_payload=0 b_columns=0 c_rows=0" in result.stdout
+    assert result.stderr == ""
+    current = runtime / "output_shared" / "state" / "option_positions" / "current"
+    saved = json.loads((current / "projection_verify.latest.json").read_text(encoding="utf-8"))
+    assert saved["ok"] is False
+    assert saved["summary"] == {"projection_error": 1, "matched": 1}
+    assert saved["mode_requested"] == "auto"
+    assert saved["mode_used"] == "full_replay"
+    assert saved["evidence_published"] is True
+    assert saved["checkpoint_reused"] is False
+    assert not (current / "projection_verify.checkpoint.json").exists()
+    after = _store_snapshot(sqlite_path)
+    # The real resolver may initialize schema; this binds unchanged fixture facts,
+    # not a claim that opening every historical store leaves its bytes untouched.
+    for key in ("schema", "events", "lots", "integrity_check"):
+        assert after[key] == before[key]
+
+
 def test_verify_projection_exits_non_zero_when_the_probe_is_red(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2206,10 +2453,12 @@ def test_verify_projection_reuse_path_still_runs_the_probe(
     }
 
 
+@pytest.mark.parametrize("historical_error", [False, True])
 def test_verify_projection_isolates_a_probe_that_cannot_run(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    historical_error: bool,
 ) -> None:
     """A probe that cannot run must not take the verification report with it.
 
@@ -2222,6 +2471,8 @@ def test_verify_projection_isolates_a_probe_that_cannot_run(
     import src.interfaces.cli.option_positions as cli_mod
 
     sqlite_path, data_config = _build_green_store(tmp_path)
+    if historical_error:
+        _append_historical_invalid_adjustment(sqlite_path)
     _mount_cli(monkeypatch, sqlite_path, data_config)
     monkeypatch.setattr(
         cli_mod,
@@ -2236,20 +2487,25 @@ def test_verify_projection_isolates_a_probe_that_cannot_run(
     assert "source_event_id" in payload["lot_parity_probe_error"]
     assert "lot_parity_probe" not in payload
     # The report the existing consumers read is intact.
-    assert payload["ok"] is True
+    assert payload["ok"] is not historical_error
     assert payload["summary"]["matched"] == 1
+    assert payload["summary"].get("projection_error", 0) == int(historical_error)
     assert payload["report_id"].startswith("projection-verify-")
 
 
+@pytest.mark.parametrize("historical_error", [False, True])
 def test_verify_projection_text_run_reports_a_probe_that_cannot_run(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    historical_error: bool,
 ) -> None:
     """Same isolation on the channel production actually uses, with exit code 2."""
     import src.interfaces.cli.option_positions as cli_mod
 
     sqlite_path, data_config = _build_green_store(tmp_path)
+    if historical_error:
+        _append_historical_invalid_adjustment(sqlite_path)
     _mount_cli(monkeypatch, sqlite_path, data_config, fmt=None)
     monkeypatch.setattr(
         cli_mod,
@@ -2261,6 +2517,7 @@ def test_verify_projection_text_run_reports_a_probe_that_cannot_run(
 
     captured = capsys.readouterr()
     assert "[DONE] verified trade_events projection against position_lots" in captured.out
+    assert f"ok={not historical_error}" in captured.out
     # "cannot run" (2) is not "red" (1): the message says which, and it is loud.
     assert "lot parity probe could not run: ValueError" in captured.err
     assert "lot parity probe is red" not in captured.err
