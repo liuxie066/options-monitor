@@ -479,6 +479,75 @@ def _scheduler_evidence(**overrides: Any) -> dict[str, Any]:
     return base
 
 
+@pytest.mark.parametrize(
+    "status, expected_status, warning_code",
+    [
+        pytest.param("sent_partial", "fail", "NOTIFICATION_PARTIAL_FAILURE", id="partial"),
+        pytest.param("send_failed_or_unconfirmed", "fail", "NOTIFICATION_DELIVERY_FAILED", id="unconfirmed"),
+        pytest.param("notification_route_missing", "fail", "NOTIFICATION_ROUTE_MISSING", id="missing-route"),
+        pytest.param("failed", "fail", "NOTIFICATION_DELIVERY_FAILED", id="legacy-failed"),
+        pytest.param("unconfirmed", "fail", "NOTIFICATION_DELIVERY_FAILED", id="legacy-unconfirmed"),
+        pytest.param("partial_failed", "fail", "NOTIFICATION_PARTIAL_FAILURE", id="legacy-partial"),
+        pytest.param(" Sent_Partial ", "fail", "NOTIFICATION_PARTIAL_FAILURE", id="normalized-partial"),
+        pytest.param("sent", "ok", None, id="sent"),
+        pytest.param("no_notification_content", "ok", None, id="no-content"),
+        pytest.param("no_send", "ok", None, id="no-send"),
+        pytest.param("outer_delivery_disabled", "ok", None, id="outer-disabled"),
+        pytest.param("scheduler_skipped", "ok", None, id="scheduler-skip"),
+        pytest.param("unknown", "warn", "RUNTIME_EVIDENCE_UNKNOWN", id="unknown"),
+        pytest.param("", "warn", "RUNTIME_EVIDENCE_UNKNOWN", id="empty"),
+        pytest.param(None, "warn", "RUNTIME_EVIDENCE_UNKNOWN", id="missing"),
+    ],
+)
+def test_research_notification_status_checks(
+    status: str | None, expected_status: str, warning_code: str | None,
+) -> None:
+    from src.application.research.checks import run_deterministic_checks
+
+    runtime = _runtime_status_data()
+    diagnosis: dict[str, Any] = {"status": status, "reason": "synthetic delivery evidence"}
+    if status is None:
+        runtime.pop("notification_diagnosis")
+    else:
+        runtime["notification_diagnosis"] = diagnosis
+    if warning_code is not None:
+        runtime["summary"].update(ok=False, warning_codes=[warning_code])
+    if expected_status == "fail":
+        diagnosis["account_messages_count"] = 2
+    if status == "scheduler_skipped":
+        runtime["latest_run"]["state"]["tick_metrics"]["json"]["scheduler_decision"]["should_run_scan"] = False
+
+    result = run_deterministic_checks({
+        "runtime_status": runtime,
+        "scheduler_evidence": {"provided": True, **_scheduler_evidence()},
+    })
+
+    findings = result["findings"]
+    notification_findings = [item for item in findings if item["code"] == "NOTIFICATION_DELIVERY_ISSUE"]
+    assert result["status"] == result["summary"]["status"] == expected_status
+    assert result["category"] == result["summary"]["category"]
+    assert any(item["code"] == "RUNTIME_STATUS_WARNINGS" for item in findings) is (warning_code is not None)
+    if expected_status == "fail":
+        assert result["category"] == "notification_issue"
+        assert len(notification_findings) == 1
+        finding = notification_findings[0]
+        assert finding["severity"] == "fail"
+        assert finding["category"] == "notification_issue"
+        assert finding["evidence"][0]["source"] == "runtime_status.notification_diagnosis"
+        assert finding["evidence"][0]["observed"] == diagnosis
+        assert len(result["issue_candidates"]) == 1
+        candidate = result["issue_candidates"][0]
+        assert candidate["category"] == "notification_issue"
+        assert candidate["basis"] == "NOTIFICATION_DELIVERY_ISSUE"
+        assert candidate["create_issue"] is False
+    else:
+        assert notification_findings == []
+        assert result["issue_candidates"] == []
+    if status == "scheduler_skipped":
+        skip = next(item for item in findings if item["code"] == "SCHEDULER_EXPECTED_SKIP")
+        assert skip["severity"] == "info"
+
+
 def test_research_reports_scheduler_failure(tmp_path: Path) -> None:
     from src.application.research.service import research_tool
 
@@ -1290,6 +1359,171 @@ def test_research_collect_runs_with_local_runtime_artifacts(tmp_path: Path) -> N
     assert bundle["runtime_runs"]["summary"]["total_count"] == 1
     assert bundle["runtime_runs"]["runs"][0]["run_id"] == "run-1"
     assert bundle["runtime_logs"]["summary"]["existing_file_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "counts, overrides, expected_status, warning_code",
+    [
+        pytest.param((2, 2, 1, 1), {}, "sent_partial", "NOTIFICATION_PARTIAL_FAILURE", id="partial"),
+        pytest.param((1, 1, 0, 1), {}, "send_failed_or_unconfirmed", "NOTIFICATION_DELIVERY_FAILED", id="failed"),
+        pytest.param(
+            (1, 1, 0, 0), {"ambiguous_send_count": 1},
+            "send_failed_or_unconfirmed", "NOTIFICATION_DELIVERY_FAILED", id="unconfirmed",
+        ),
+        pytest.param(
+            (1, 0, 0, 0), {"route_configured": False},
+            "notification_route_missing", "NOTIFICATION_ROUTE_MISSING", id="missing-route",
+        ),
+        pytest.param((1, 1, 1, 0), {}, "sent", None, id="sent"),
+        pytest.param((1, 0, 0, 0), {"no_send": True}, "no_send", None, id="no-send"),
+        pytest.param((0, 0, 0, 0), {"should_run_scan": False}, "scheduler_skipped", None, id="scheduler-skip"),
+        pytest.param(
+            (0, 0, 0, 0), {"reason": "no_account_notification"},
+            "no_notification_content", None, id="no-content",
+        ),
+        pytest.param((1, 0, 0, 0), {"delivery_mode": "none"}, "outer_delivery_disabled", None, id="outer-disabled"),
+        pytest.param(
+            (0, 0, 0, 0), {"route_configured": False, "should_notify": False, "reason": "not_sent"},
+            "not_sent", None, id="no-intent-no-route",
+        ),
+    ],
+)
+def test_research_collect_notification_delivery_outcomes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    counts: tuple[int, int, int, int],
+    overrides: dict[str, Any],
+    expected_status: str,
+    warning_code: str | None,
+) -> None:
+    from src.application.research.facade import run_research_collect
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    monkeypatch.setenv("OM_ENV_FILE", str(env_path))
+    monkeypatch.setenv("OM_DATA_CONFIG", str(tmp_path / "portfolio.runtime.json"))
+    monkeypatch.setenv("OM_INBOUND_AUDIT_DB", str(tmp_path / "inbound.sqlite3"))
+    cfg: dict[str, Any] = {
+        "_generated": {"market": "us", "source_format": "yaml"},
+        "accounts": ["lx"],
+        "symbols": [],
+    }
+    if overrides.get("route_configured", True):
+        cfg["notifications"] = {
+            "provider": "wechat_clawbot",
+            "channel": "wechat_clawbot",
+            "target": "clawbot:test-room",
+        }
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    shared_state_dir = tmp_path / "output_shared" / "state"
+    report_dir = tmp_path / "output_shared" / "reports"
+    accounts_root = tmp_path / "output_accounts"
+    runs_root = tmp_path / "output_runs"
+    run_dir = runs_root / "run-1"
+    for path in (
+        shared_state_dir, report_dir,
+        accounts_root / "lx" / "state", accounts_root / "lx" / "reports",
+        run_dir / "state", run_dir / "accounts" / "lx" / "state",
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+    ran_scan = overrides.get("should_run_scan", True)
+    last_run = {"status": "ok", "run_id": "run-1", "ran_scan": ran_scan}
+    for path in (
+        shared_state_dir / "last_run.json",
+        run_dir / "state" / "last_run.json",
+        accounts_root / "lx" / "state" / "last_run.json",
+        run_dir / "accounts" / "lx" / "state" / "last_run.json",
+    ):
+        path.write_text(json.dumps(last_run), encoding="utf-8")
+    (shared_state_dir / "last_run_dir.txt").write_text(str(run_dir), encoding="utf-8")
+    notify_summary = dict(zip(
+        ("account_messages_count", "send_attempted_count", "send_confirmed_count", "send_failed_count"),
+        counts,
+        strict=True,
+    ))
+    tick_metrics = {
+        "ran_scan": ran_scan,
+        "no_send": overrides.get("no_send", False),
+        "reason": overrides.get("reason", "run"),
+        "scheduler_decision": {
+            "should_run_scan": ran_scan,
+            "is_notify_window_open": overrides.get("should_notify", True),
+            "reason": "run" if ran_scan else "outside_scan_window",
+        },
+        "notify_summary": {**notify_summary, "ambiguous_send_count": overrides.get("ambiguous_send_count", 0)},
+        "accounts": [{"account": "lx", "status": "ok", "ran_scan": ran_scan}],
+    }
+    (run_dir / "state" / "tick_metrics.json").write_text(json.dumps(tick_metrics), encoding="utf-8")
+    output_dir = tmp_path / "research"
+    current_dir = tmp_path / "current"
+    payload = {
+        "scope": "quality",
+        "config_key": "us",
+        "config_path": str(cfg_path),
+        "report_dir": str(report_dir),
+        "state_dir": str(shared_state_dir),
+        "shared_state_dir": str(shared_state_dir),
+        "accounts_root": str(accounts_root),
+        "runs_root": str(runs_root),
+        "include_healthcheck": False,
+        "research_output_dir": str(output_dir),
+        "research_current_dir": str(current_dir),
+        "write_outputs": warning_code is not None,
+        "confirm": warning_code is not None,
+        "scheduler_evidence": _scheduler_evidence(last_triggered_at=datetime.now(timezone.utc).isoformat()),
+    }
+    if "delivery_mode" in overrides:
+        payload["delivery_mode"] = overrides["delivery_mode"]
+
+    out = run_research_collect(payload, repo_base_fn=lambda: tmp_path)
+
+    assert out["ok"] is True, out
+    assert out["tool_name"] == "research.collect"
+    data = out["data"]
+    quality = data["bundle"]["runtime_quality"]
+    summary = quality["summary"]
+    assert summary["notification_status"] == expected_status
+    for key in ("send_attempted_count", "send_confirmed_count", "send_failed_count"):
+        assert summary[f"notification_{key}"] == notify_summary[key]
+    findings = [item for item in quality["findings"] if item["code"] == "NOTIFICATION_DELIVERY_ISSUE"]
+    if warning_code is not None:
+        assert data["status"] == data["summary"]["status"] == quality["status"] == "fail"
+        assert data["category"] == data["summary"]["category"] == quality["category"] == "notification_issue"
+        assert summary["ok"] is False
+        assert warning_code in summary["warning_codes"]
+        assert any(expected_status in warning for warning in out["warnings"])
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "fail"
+        assert findings[0]["category"] == "notification_issue"
+        observed = findings[0]["evidence"][0]["observed"]
+        assert observed["status"] == expected_status
+        for key, value in notify_summary.items():
+            assert observed[key] == value
+        assert observed["ambiguous_send_count"] == overrides.get("ambiguous_send_count", 0)
+        outputs = data["outputs"]
+        assert outputs["written"] is True
+        for key in ("bundle_path", "current_path", "handoff_path"):
+            assert (tmp_path / outputs[key]).resolve().is_relative_to(tmp_path.resolve())
+        persisted = json.loads((tmp_path / outputs["bundle_path"]).read_text(encoding="utf-8"))
+        current = json.loads((tmp_path / outputs["current_path"]).read_text(encoding="utf-8"))
+        handoff = (tmp_path / outputs["handoff_path"]).read_text(encoding="utf-8")
+        assert persisted["runtime_quality"] == quality
+        assert current["status"] == "fail"
+        assert current["bundle_path"] == outputs["bundle_path"]
+        assert current["handoff_path"] == outputs["handoff_path"]
+        assert handoff == data["handoff_markdown"]
+        assert "## Runtime Quality\n- status: fail\n- category: notification_issue" in handoff
+    else:
+        assert findings == []
+        assert data["status"] in {"ok", "warn"}
+        assert data["outputs"] == {"written": False}
+        assert not output_dir.exists()
+        assert not current_dir.exists()
+    if not ran_scan:
+        skip = next(item for item in quality["findings"] if item["code"] == "SCHEDULER_EXPECTED_SKIP")
+        assert skip["severity"] == "info"
 
 
 def test_research_collects_combo_yield_pair_diagnostics(tmp_path: Path) -> None:

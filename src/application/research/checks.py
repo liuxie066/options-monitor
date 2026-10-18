@@ -244,7 +244,10 @@ def _check_prefetch(runtime: dict[str, Any], *, findings: list[dict[str, Any]], 
 def _check_notification(runtime: dict[str, Any], *, findings: list[dict[str, Any]], categories: list[str]) -> None:
     diagnosis = _dict(runtime.get("notification_diagnosis"))
     status = str(diagnosis.get("status") or "").strip().lower()
-    if status in {"failed", "unconfirmed", "partial_failed", "notification_route_missing"}:
+    if status in {
+        "failed", "unconfirmed", "partial_failed", "notification_route_missing",
+        "sent_partial", "send_failed_or_unconfirmed",
+    }:
         categories.append("notification_issue")
         findings.append(
             _finding(
