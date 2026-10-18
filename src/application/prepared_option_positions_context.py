@@ -27,6 +27,7 @@ from src.application.ledger.api import (
     attach_event_strategy_metadata,
     decision_state_snapshots_from_rows_many,
     open_performance_evidence_repository,
+    open_performance_query_ledger_from_data_config,
     open_position_ledger_from_data_config,
     read_current_decision_projection,
     read_decision_state_rows_many,
@@ -46,6 +47,7 @@ from src.application.tick_run_workspace import (
     AccountRunConfigAuthority,
     AccountRunConfigError,
     ensure_run_state_directory_safely,
+    load_retained_account_run_config,
     read_account_run_state_bytes_safely,
     write_account_run_state_bytes_once_safely,
 )
@@ -502,9 +504,14 @@ def prepare_option_positions_contexts(
     records_by_account = dict(reused["records_by_account"])
     wheel_models_by_account = dict(reused["wheel_models_by_account"])
     unavailable = dict(reused["unavailable"])
+    replay_authorities = (
+        {account: authorities[account] for account in records_by_account}
+        if persist_fx_evidence and fx_snapshot_sha256 is not None
+        else {}
+    )
     configs = {account: configs[account] for account in reused["pending"]}
     authorities = {account: authorities[account] for account in reused["pending"]}
-    if not configs:
+    if not configs and not replay_authorities:
         return PreparedOptionPositionsBatch(
             manifests=manifests,
             position_records_by_account=records_by_account,
@@ -538,7 +545,9 @@ def prepare_option_positions_contexts(
         data_config_by_ledger_path.setdefault(ledger_path, data_path)
 
     observed_at = datetime.now(timezone.utc)
-    observed_at_utc = observed_at.isoformat()
+    observed_at_utc = (
+        observed_at.isoformat() if configs else str(reused["observed_at_utc"])
+    )
     lifecycle_now_ms = int(observed_at.timestamp() * 1000)
     rows_a_by_ledger_path: dict[Path, dict[str, dict[str, Any]]] = {}
     repos_by_ledger_path: dict[Path, Any] = {}
@@ -602,13 +611,52 @@ def prepare_option_positions_contexts(
     )
     if persist_fx_evidence:
         with prepared_context_phase("fx_evidence"):
+            evidence_repos = dict(repos_by_ledger_path)
+            attempted_paths = set(evidence_repos)
+            target_errors = 0
+            if fx_observation is not None:
+                for account, authority in sorted(replay_authorities.items()):
+                    try:
+                        retained_config = load_retained_account_run_config(
+                            authority=authority,
+                            base=base_path,
+                            run_id=run_id_norm,
+                            account=account,
+                        )
+                        data_path = resolve_position_data_config_path(
+                            base=base_path,
+                            cfg=retained_config,
+                            config_path=Path(config_path),
+                        ).resolve()
+                        ledger_path = resolve_position_ledger_sqlite_path(
+                            base=base_path,
+                            data_config=data_path,
+                        )
+                        if ledger_path in attempted_paths:
+                            continue
+                        attempted_paths.add(ledger_path)
+                        _resolved_path, repo = open_performance_query_ledger_from_data_config(
+                            base=base_path,
+                            data_config=data_path,
+                        )
+                        evidence_repos[ledger_path] = repo
+                    except Exception as exc:
+                        target_errors += 1
+                        if log is not None:
+                            log(
+                                "[WARN] option performance FX evidence target unavailable: "
+                                f"{type(exc).__name__}"
+                            )
             fx_evidence = _persist_fx_evidence(
-                repos_by_ledger_path=repos_by_ledger_path,
+                repos_by_ledger_path=evidence_repos,
                 observation=fx_observation,
                 observation_status=fx_status,
                 migrated_at_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
                 log=log,
             )
+            if target_errors:
+                fx_evidence["error_count"] = int(fx_evidence.get("error_count") or 0) + target_errors
+                fx_evidence["status"] = "partial" if fx_evidence.get("ledger_count") else "error"
     else:
         fx_evidence = {"status": "disabled"}
     rows_b_by_ledger_path: dict[Path, dict[str, dict[str, Any]]] = {}
