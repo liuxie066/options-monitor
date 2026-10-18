@@ -274,6 +274,7 @@ def _read_window(
             read_statuses.append({"path": display, "status": "missing"})
             if state:
                 raise AgentToolError(code="INPUT_ERROR", message="source_changed") from None
+            stop_reason = stop_reason or "missing"
             continue
         except ProjectReaderError as exc:
             if exc.code in {"cancelled", "time_deadline"}:

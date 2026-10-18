@@ -37,7 +37,7 @@ SDK 的 `_init_connect_sync` / `_wait_reconnect` 钩子进入异步连接，后�
 
 成交回执的传输键由 deal 与冻结的结果修订生成；同一修订重试复用键，已确认或投递结果未知的重复尝试记为 `skipped_duplicate` 类原因。计划通知的默认传输键由 run、账户和渲染内容生成；Daily Brief 继续使用冻结的业务投递键，跨 run 重试也保持同一键。
 
-`notification_perception_read` 默认读取当前审计文件末尾 1 MiB，超过部分明确标为 partial。历史查询同时传入 `start_utc` 和 `end_utc`（ISO-8601 UTC），按当前及 `audit_events.YYYYMMDD.NNNNNN.jsonl` 段逐行扫描，单次最多 64 MiB；超预算、损坏和缺失均标明覆盖不完整。分页必须带原查询参数与返回游标；活动文件追加允许继续，源文件被替换或轮转须重新查询。
+`notification_perception_read` 默认读取当前审计文件末尾 1 MiB，超过部分明确标为 partial。历史查询同时传入 `start_utc` 和 `end_utc`（ISO-8601 UTC），按当前及 `audit_events.YYYYMMDD.NNNNNN.jsonl` 段逐行扫描，单次最多 64 MiB；超预算、损坏和缺失均标明覆盖不完整。请求的审计文件缺失时，窗口覆盖为 partial、完整窗口总数未知；已存在的普通空文件则可给出 complete 和精确零结果。分页必须带原查询参数与返回游标；活动文件追加允许继续，源文件被替换或轮转须重新查询。
 
 `./om service drift --output <路径>` 显式导出完整 JSON 明细，文件权限为私有。只读状态查询不会自行创建明细文件。
 
