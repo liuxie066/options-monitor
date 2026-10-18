@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
 from datetime import date, datetime, timedelta, timezone
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -3010,9 +3012,307 @@ def test_inbound_monitor_run_preview_requires_run_specific_confirmation(
     assert confirmed["data"]["status"] == "applied"
     assert confirmed["data"]["result"]["returncode"] == 0
     assert confirmed["data"]["result"]["command"] == "./om run tick-cron --market hk --accounts sy --timeout 600"
+    assert "reason" not in confirmed["data"]["result"]
+    assert confirmed["data"]["action_lifecycle"]["verify_status"] == "verified_applied"
+    assert "监控执行完成" in confirmed["data"]["response_text"]
+    saved = InboundOperationStore(audit_db).get(confirmed["data"]["operation_id"])
+    assert saved["status"] == "applied"
+    assert saved["applied_at"]
     assert len(calls) == 1
     assert calls[0]["command"][1:] == ["run", "tick-cron", "--market", "hk", "--accounts", "sy", "--timeout", "600"]
     assert calls[0]["timeout_seconds"] == 630
+
+
+def test_inbound_monitor_run_lock_skip_persists_and_replays(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from src.application import tick_cron
+    from src.application.bot.control.operation_diagnostics import collect_operation_timeline
+    from src.application.tool_execution import execute_tool as run_tool
+
+    _enable_inbound_monitor_run(monkeypatch)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    cfg_path = _write_symbols_runtime_config(tmp_path).with_name("config.hk.json")
+    audit_db = tmp_path / "inbound.sqlite3"
+    scope = {"config_path": str(cfg_path), "audit_db": str(audit_db)}
+    calls: list[list[str]] = []
+
+    def _must_not_run(*_args, **_kwargs):
+        raise AssertionError("locked tick must not create a run, preflight, or start a child")
+
+    def _locked(*_args, **_kwargs):
+        raise BlockingIOError("isolated lock contention")
+
+    def _runner(command, *, cwd, timeout_seconds):
+        calls.append(command)
+        stdout, stderr = StringIO(), StringIO()
+        assert command[1:] == ["run", "tick-cron", "--market", "hk", "--accounts", "sy", "--timeout", "600"]
+        assert timeout_seconds == 630
+        with monkeypatch.context() as lock_patch:
+            lock_patch.setattr(tick_cron.fcntl, "flock", _locked)
+            lock_patch.setattr(tick_cron, "create_run_id", _must_not_run)
+            rc = tick_cron.run_tick_cron(
+                market="hk", accounts=["sy"], config_path=str(cfg_path),
+                lock_path=str(tmp_path / "tick.lock"), runtime_root=tmp_path / "tick-runtime",
+                cwd=tmp_path, environ={}, stdout=stdout, stderr=stderr,
+                preflight_config_fn=_must_not_run, run_cmd=_must_not_run,
+            )
+        assert rc == 0
+        assert stdout.getvalue() == "SKIP_LOCKED\n"
+        assert stderr.getvalue() == ""
+        return subprocess.CompletedProcess(command, rc, stdout.getvalue(), stderr.getvalue())
+
+    monkeypatch.setattr("src.application.bot.control.monitor_run_operations.MONITOR_RUNNER", _runner)
+    preview = _handle("/monitor-run hk", "lock_preview", **scope)
+    assert preview["ok"] is True
+    assert calls == []
+    operation_id = preview["data"]["operation_id"]
+    confirm_text = f"/confirm monitor-run {operation_id}"
+    confirmed = _handle(confirm_text, "lock_confirm", **scope)
+    assert confirmed["ok"] is True
+    assert confirmed["error"] is None
+    data = confirmed["data"]
+    result = data["result"]
+    assert data["status"] == result["status"] == "skipped"
+    assert result["reason"] == "tick_cron_locked"
+    assert result["returncode"] == 0
+    assert result["stdout"] == "SKIP_LOCKED\n"
+    assert (result["market"], result["accounts"], result["symbols"], result["no_send"]) == ("hk", ["sy"], [], False)
+    assert result["command"] == "./om run tick-cron --market hk --accounts sy --timeout 600"
+    assert "run_id" not in result
+    for expected_text in ("市场锁占用已跳过", "本次未运行 tick", "市场：hk", "账户：sy", result["command"], operation_id):
+        assert expected_text in data["response_text"]
+    assert "执行完成" not in data["response_text"]
+    lifecycle = data["action_lifecycle"]
+    assert lifecycle["status"] == "skipped"
+    assert lifecycle["phase"] == "verify"
+    assert lifecycle["verify_status"] == "verified_skipped"
+    assert lifecycle["required_next_action"] is None
+    assert lifecycle["stages"] == [
+        {"name": "preview", "status": "complete", "code": "preview_saved"},
+        {"name": "confirm", "status": "complete", "code": "operator_confirmed"},
+        {"name": "execute", "status": "skipped", "code": "operation_skipped"},
+        {"name": "verify", "status": "complete", "code": "final_readback_skipped"},
+        {"name": "audit", "status": "complete", "code": "operation_result_recorded"},
+    ]
+    store = InboundOperationStore(audit_db)
+    saved = store.get(operation_id)
+    assert saved["status"] == "skipped"
+    assert saved["result"] == result
+    assert saved["confirmed_at"]
+    assert saved["applied_at"] is None
+    assert saved["cancelled_at"] is None
+    assert not (tmp_path / "tick-runtime").exists()
+    audit = InboundAuditStore(audit_db).find_by_message(channel="feishu", message_id="lock_confirm")
+    assert audit["result_ok"] == 1
+    assert audit["decision"] == "allowed"
+    assert json.loads(audit["response_json"])["data"]["status"] == "skipped"
+
+    for filters in ({}, {"operation_id": operation_id}, {"statuses": ["skipped"]}):
+        timeline = collect_operation_timeline(audit_db=str(audit_db), **filters)
+        assert timeline["timeline_count"] == 1
+        item = timeline["timelines"][0]
+        assert item["identity"]["operation_id"] == operation_id
+        assert item["identity"]["run_id"] is None
+        assert item["operation"]["status"] == item["outcome"]["status"] == "skipped"
+        assert item["operation"]["applied_at"] is None
+        assert item["outcome"]["ok"] is True
+        assert item["action_lifecycle"]["verify_status"] == "verified_skipped"
+    assert collect_operation_timeline(audit_db=str(audit_db), statuses=["applied"])["timeline_count"] == 0
+    diagnostic_scope = {
+        "audit_db": str(audit_db), "authenticated_channel": "feishu",
+        "authenticated_sender_id": "ou_1", "authenticated_conversation_id": "feishu:ou_1",
+    }
+    public = run_tool("operation_timeline", diagnostic_scope)
+    assert public["ok"] is True
+    assert public["data"]["timeline_count"] == 1
+    item = public["data"]["timelines"][0]
+    assert item["operation"]["status"] == item["outcome"]["status"] == "skipped"
+    assert item["outcome"]["ok"] is True
+    assert item["action_lifecycle"]["verify_status"] == "verified_skipped"
+    serialized = json.dumps(public["data"])
+    for private_text in ("SKIP_LOCKED", "./om", "ou_1", "lock_confirm", '"accounts"', '"stdout"'):
+        assert private_text not in serialized
+    for changed_scope in ({"authenticated_sender_id": "ou_other"}, {"authenticated_conversation_id": "other_chat"}):
+        other = run_tool("operation_timeline", {**diagnostic_scope, **changed_scope})
+        assert other["ok"] is True
+        assert other["data"]["timeline_count"] == 0
+
+    replay = _handle(confirm_text, "lock_confirm", **scope)
+    assert replay["meta"]["idempotent_replay"] is True
+    assert replay["data"] == data
+    assert replay["ok"] is True and replay["error"] is None
+    for action in ("confirm", "cancel"):
+        repeated = _handle(f"/{action} monitor-run {operation_id}", f"lock_repeat_{action}", **scope)
+        assert repeated["ok"] is False
+        assert repeated["error"]["code"] == "INPUT_ERROR"
+        assert "已跳过，未执行" in repeated["error"]["message"]
+    assert store.list_pending_operations(channel="feishu", sender_id="ou_1", include_expired=True) == []
+    assert store.reconcile_stale_operations(now=datetime.now(timezone.utc) + timedelta(days=1)) == {
+        "expired_previewed": 0, "failed_stale": 0,
+    }
+    assert store.get(operation_id) == saved
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr", "expected_status"),
+    [
+        pytest.param(0, "SKIP_LOCKED", "", "skipped", id="exact"),
+        pytest.param(0, "SKIP_LOCKED\n", "", "skipped", id="lf"),
+        pytest.param(0, "SKIP_LOCKED\r\n", "", "skipped", id="crlf"),
+        pytest.param(0, " \t\nSKIP_LOCKED\n\t ", "", "skipped", id="whitespace"),
+        pytest.param(0, " " * 4100 + "SKIP_LOCKED\n", "", "skipped", id="raw-before-clipping"),
+        pytest.param(0, "", "", "applied", id="empty-success"),
+        pytest.param(0, "tick completed", "", "applied", id="normal-success"),
+        pytest.param(0, "log SKIP_LOCKED result", "", "applied", id="embedded"),
+        pytest.param(0, "prefixSKIP_LOCKED", "", "applied", id="prefix"),
+        pytest.param(0, "SKIP_LOCKEDsuffix", "", "applied", id="suffix"),
+        pytest.param(0, "skip_locked", "", "applied", id="case-variant"),
+        pytest.param(0, "SKIP_LOCK", "", "applied", id="partial"),
+        pytest.param(0, "SKIP_LOCKED\nchild completed", "", "applied", id="multiple-lines"),
+        pytest.param(0, "", "SKIP_LOCKED\n", "applied", id="stderr-only"),
+        pytest.param(0, "child output " * 400, "", "applied", id="long-success"),
+        pytest.param(1, "SKIP_LOCKED\n", "failed", "failed", id="nonzero-marker"),
+        pytest.param(124, "SKIP_LOCKED\n", "timeout", "failed", id="timeout-exit-marker"),
+    ],
+)
+def test_inbound_monitor_run_classifies_full_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, returncode, stdout, stderr, expected_status,
+) -> None:
+    _enable_inbound_monitor_run(monkeypatch)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    cfg_path = _write_symbols_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+    scope = {"config_path": str(cfg_path), "audit_db": str(audit_db)}
+    calls = []
+
+    def _runner(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+
+    monkeypatch.setattr("src.application.bot.control.monitor_run_operations.MONITOR_RUNNER", _runner)
+    preview = _handle("/monitor-run hk", "output_preview", **scope)
+    assert preview["ok"] is True
+    operation_id = preview["data"]["operation_id"]
+    response = _handle(f"/confirm monitor-run {operation_id}", "output_confirm", **scope)
+    result = response["data"]["result"]
+    assert response["data"]["status"] == result["status"] == expected_status
+    assert response["ok"] is (expected_status != "failed")
+    if expected_status == "failed":
+        assert response["error"]["code"] == "MONITOR_RUN_FAILED"
+    else:
+        assert response["error"] is None
+    if expected_status == "skipped":
+        assert result["reason"] == "tick_cron_locked"
+    else:
+        assert "reason" not in result
+    assert result["returncode"] == returncode
+    assert result["stdout"] == (stdout if len(stdout) <= 4000 else stdout[:3997] + "...")
+    assert result["stderr"] == stderr
+    saved = InboundOperationStore(audit_db).get(operation_id)
+    assert saved["status"] == expected_status
+    assert saved["result"] == result
+    assert bool(saved["applied_at"]) is (expected_status == "applied")
+    assert response["data"]["action_lifecycle"]["verify_status"] == f"verified_{expected_status}"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("failure", ["timeout", "exception"])
+def test_inbound_monitor_run_runner_failure_stays_failed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure) -> None:
+    _enable_inbound_monitor_run(monkeypatch)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    cfg_path = _write_symbols_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+    scope = {"config_path": str(cfg_path), "audit_db": str(audit_db)}
+    calls = []
+
+    def _runner(command, *, cwd, timeout_seconds):
+        calls.append(command)
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(command, timeout_seconds, output="SKIP_LOCKED\n")
+        raise OSError("isolated runner failure")
+
+    monkeypatch.setattr("src.application.bot.control.monitor_run_operations.MONITOR_RUNNER", _runner)
+    preview = _handle("/monitor-run hk", "failure_preview", **scope)
+    assert preview["ok"] is True
+    operation_id = preview["data"]["operation_id"]
+    response = _handle(f"/confirm monitor-run {operation_id}", "failure_confirm", **scope)
+    assert response["ok"] is False
+    assert response["error"]["code"] == "TOOL_RUNTIME_ERROR"
+    expected_message = "超时" if failure == "timeout" else "失败"
+    assert expected_message in response["error"]["message"]
+    saved = InboundOperationStore(audit_db).get(operation_id)
+    assert saved["status"] == saved["result"]["status"] == "failed"
+    assert saved["result"]["error"] == ("TimeoutExpired" if failure == "timeout" else "OSError")
+    assert saved["applied_at"] is None
+    assert "reason" not in saved["result"]
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("initial_status", ["previewed", "confirmed", "running", "applied", "skipped", "failed", "cancelled", "expired"])
+def test_inbound_operation_skip_requires_running(tmp_path: Path, initial_status) -> None:
+    store = InboundOperationStore(tmp_path / "inbound.sqlite3")
+    operation_id = "in_skip_transition"
+    store.save_preview(
+        operation_id=operation_id, command_id=operation_id, channel="feishu", sender_id="ou_1",
+        operation_type="monitor_run_now", payload_hash="hash_skip", payload={}, preview={}, ttl_seconds=600,
+    )
+    if initial_status in {"confirmed", "running", "applied", "skipped"}:
+        assert store.mark_confirmed(operation_id)
+    if initial_status in {"running", "applied", "skipped"}:
+        assert store.mark_running(operation_id, result={"status": "running"})
+    if initial_status in {"applied", "skipped", "failed", "cancelled", "expired"}:
+        getattr(store, f"mark_{initial_status}")(operation_id, result={"status": initial_status})
+    before = store.get(operation_id)
+    result = {"status": "skipped", "reason": "tick_cron_locked"}
+    assert store.mark_skipped(operation_id, result=result) is (initial_status == "running")
+    after = store.get(operation_id)
+    if initial_status == "running":
+        assert after["status"] == "skipped"
+        assert after["result"] == result
+        assert after["confirmed_at"] == before["confirmed_at"]
+        assert after["applied_at"] is None and after["cancelled_at"] is None
+    else:
+        assert after == before
+
+
+def test_inbound_monitor_run_skip_lost_claim_preserves_current_terminal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _enable_inbound_monitor_run(monkeypatch)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    cfg_path = _write_symbols_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+    scope = {"config_path": str(cfg_path), "audit_db": str(audit_db)}
+    calls = []
+    competing_result = {"status": "applied", "source": "competing_writer"}
+    mark_skipped = InboundOperationStore.mark_skipped
+
+    def _runner(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "SKIP_LOCKED\n", "")
+
+    def _lose_claim(store, operation_id, *, result):
+        store.mark_applied(operation_id, result=competing_result)
+        return mark_skipped(store, operation_id, result=result)
+
+    def _must_not_mark_failed(*args, **kwargs):
+        raise AssertionError("lost skip claim must not enter runner failure handling")
+
+    monkeypatch.setattr("src.application.bot.control.monitor_run_operations.MONITOR_RUNNER", _runner)
+    monkeypatch.setattr(InboundOperationStore, "mark_skipped", _lose_claim)
+    monkeypatch.setattr(InboundOperationStore, "mark_failed", _must_not_mark_failed)
+    preview = _handle("/monitor-run hk", "claim_preview", **scope)
+    assert preview["ok"] is True
+    operation_id = preview["data"]["operation_id"]
+    response = _handle(f"/confirm monitor-run {operation_id}", "claim_confirm", **scope)
+    assert response["ok"] is False
+    assert response["error"]["code"] == "TOOL_RUNTIME_ERROR"
+    assert "未能保存跳过结果" in response["error"]["message"]
+    assert response["error"]["details"] == {"operation_id": operation_id, "status": "applied"}
+    assert "action_lifecycle" not in response["data"]
+    saved = InboundOperationStore(audit_db).get(operation_id)
+    assert saved["status"] == "applied"
+    assert saved["result"] == competing_result
+    assert saved["applied_at"]
+    assert len(calls) == 1
 
 
 def test_inbound_monitor_run_rejects_account_outside_target_market(
@@ -3065,6 +3365,11 @@ def test_inbound_monitor_run_cancel_does_not_execute_runner(monkeypatch: pytest.
     assert cancelled["data"]["status"] == "cancelled"
     assert cancelled["data"]["operation_id"] == operation_id
     assert "未运行 tick" in cancelled["data"]["response_text"]
+    assert cancelled["data"]["action_lifecycle"]["verify_status"] == "verified_cancelled"
+    saved = InboundOperationStore(audit_db).get(operation_id)
+    assert saved["status"] == "cancelled"
+    assert saved["cancelled_at"]
+    assert saved["applied_at"] is None
     assert calls == []
 
 

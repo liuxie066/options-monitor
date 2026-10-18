@@ -41,6 +41,17 @@ explicit command
 
 No model can enter the apply path.
 
+Confirmed `/monitor-run` operations use the guarded `tick-cron` wrapper. When
+its return code is 0 and its entire stdout, after stripping surrounding whitespace,
+is `SKIP_LOCKED`, Control records terminal `skipped` with reason `tick_cron_locked`.
+This attempt did not start a tick and has no `applied_at`. The response and operation
+timeline use `ok=True` for successful request handling; that flag is not evidence
+of tick execution or notification delivery. The receipt explicitly reports the
+occupied market lock and skipped attempt. Other successful output and nonzero
+exit codes retain their normal success/failure handling. Skipped operations are
+not retried automatically: repeated confirmation cannot run them again, and a
+later attempt requires a new preview and confirmation.
+
 When one expiry notice contains multiple contracts, `/record-expiry` creates one
 pending operation per contract. Confirm the whole notice with the plain reply
 `确认` (the conversation resolves its unique `command_id`), use
