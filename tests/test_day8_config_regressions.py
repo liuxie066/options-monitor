@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from functools import partial
 from hashlib import sha256
 from copy import deepcopy
 from pathlib import Path
@@ -8,6 +9,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+from domain.domain.candidate_defaults import (
+    DEFAULT_SELL_CALL_WINDOW,
+    DEFAULT_SELL_PUT_WINDOW,
+    resolve_candidate_window,
+)
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_defaults import default_config
 from src.application.config_validator import validate_config
@@ -64,6 +70,235 @@ def test_null_enabled_max_dte_is_config_error(side):
     config["symbols"][0][side] = {"enabled": True, "strategy": "insurance_underwriting", "min_dte": 7, "max_dte": None}
     with pytest.raises(SystemExit, match=rf"\[CONFIG_ERROR\] NVDA\.{side} enabled but missing max_dte"):
         validate_config(config)
+
+
+@pytest.mark.parametrize(
+    ("side", "min_dte", "max_dte"),
+    [
+        pytest.param("sell_put", "2", "10", id="put-strings"),
+        pytest.param("sell_call", "2", "10", id="call-strings"),
+        pytest.param("sell_put", 2, "10", id="put-int-string"),
+        pytest.param("sell_call", 2, "10", id="call-int-string"),
+        pytest.param("sell_put", "2", 10, id="put-string-int"),
+        pytest.param("sell_call", "2", 10, id="call-string-int"),
+        pytest.param("sell_put", 2, 10, id="put-integers"),
+        pytest.param("sell_call", 2, 10, id="call-integers"),
+        pytest.param("sell_put", 2.0, 10.0, id="put-integral-floats"),
+        pytest.param("sell_call", 2.0, 10.0, id="call-integral-floats"),
+    ],
+)
+def test_enabled_dte_window_uses_numeric_validation(side, min_dte, max_dte):
+    strategy = {"enabled": True, "strategy": "insurance_underwriting", "min_dte": min_dte, "max_dte": max_dte}
+    config = _runtime(symbols=[{"symbol": "NVDA", side: strategy}])
+    before = deepcopy(config)
+
+    validate_config(config)
+
+    assert config == before
+    assert type(config["symbols"][0][side]["min_dte"]) is type(min_dte)
+    assert type(config["symbols"][0][side]["max_dte"]) is type(max_dte)
+    defaults = DEFAULT_SELL_PUT_WINDOW if side == "sell_put" else DEFAULT_SELL_CALL_WINDOW
+    window = resolve_candidate_window(config["symbols"][0][side], defaults=defaults)
+    assert (window.min_dte, window.max_dte) == (2, 10)
+    assert type(window.min_dte) is int
+    assert type(window.max_dte) is int
+
+
+@pytest.fixture
+def dte_build_fixture(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    home = tmp_path / "home"
+    for directory in (repo, runtime, home):
+        directory.mkdir()
+    env_file = home / "options-monitor.env"
+    env_file.write_text("", encoding="utf-8")
+    data_path = runtime / "portfolio.runtime.json"
+    data_path.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
+    monkeypatch.setenv("OM_ENV_FILE", str(env_file))
+    monkeypatch.setenv("OM_DATA_CONFIG", str(data_path))
+
+    from src.application import agent_tool_config, config_yaml, runtime_config_paths, runtime_paths, secret_store
+    from src.application.secret_store import runtime as secret_runtime
+
+    forbidden_calls = []
+
+    def forbid(name, *_args, **_kwargs):
+        forbidden_calls.append(name)
+        raise AssertionError(f"unexpected fallback: {name}")
+
+    for module, name in (
+        (agent_tool_config, "resolve_runtime_root"),
+        (agent_tool_config, "build_effective_env"),
+        (runtime_config_paths, "build_effective_env"),
+        (runtime_paths, "build_effective_env"),
+        (secret_store, "default_secret_provider"),
+        (secret_runtime, "default_secret_provider"),
+    ):
+        monkeypatch.setattr(module, name, partial(forbid, f"{module.__name__}.{name}"))
+
+    source = repo / "config.yaml"
+    system = repo / "system.json"
+    system.write_text(json.dumps({"defaults": {"trade_intake": {"enabled": False}}, "markets": {"us": {}}}), encoding="utf-8")
+    output = runtime / "config.us.json"
+    writes = []
+    real_writer = config_yaml.write_json_atomic
+
+    def write_output(path, payload):
+        writes.append(path)
+        assert path == output
+        real_writer(path, payload)
+
+    monkeypatch.setattr(config_yaml, "write_json_atomic", write_output)
+
+    def snapshot():
+        return {
+            str(path.relative_to(tmp_path)): None if path.is_dir() else path.read_bytes()
+            for path in sorted(tmp_path.rglob("*"))
+        }
+
+    yield {
+        "root": tmp_path,
+        "source": source,
+        "output": output,
+        "document": {
+            "accounts": {"fixture": {"type": "futu", "futu_account_id": "REAL_00000001"}},
+            "portfolio": {"data_config": str(data_path)},
+            "markets": {"us": {"accounts": ["fixture"], "symbols": ["NVDA"]}},
+        },
+        "build_args": {
+            "repo_root": repo,
+            "market": "us",
+            "config_path": source,
+            "system_config_path": system,
+            "output_config_path": output,
+            "runtime_root": runtime,
+            "dry_run": False,
+        },
+        "writes": writes,
+        "forbidden_calls": forbidden_calls,
+        "snapshot": snapshot,
+    }
+    assert forbidden_calls == []
+
+
+@pytest.mark.parametrize(
+    ("side", "min_dte", "max_dte"),
+    [
+        pytest.param("sell_put", "2", "10", id="put-strings"),
+        pytest.param("sell_call", 2, "10", id="call-int-string"),
+        pytest.param("sell_put", "2", 10, id="put-string-int"),
+        pytest.param("sell_call", 2.0, 10.0, id="call-integral-floats"),
+    ],
+)
+def test_dte_build_preserves_supported_representations(dte_build_fixture, side, min_dte, max_dte):
+    fixture = dte_build_fixture
+    document = deepcopy(fixture["document"])
+    strategy = {"enabled": True, "strategy": "insurance_underwriting", "min_dte": min_dte, "max_dte": max_dte}
+    document["markets"]["us"]["overrides"] = {"NVDA": {side: strategy}}
+    fixture["source"].write_text(yaml.safe_dump(document), encoding="utf-8")
+    before = fixture["snapshot"]()
+
+    result = build_yaml_runtime_config_file(**fixture["build_args"])
+
+    assert result["ok"] is True
+    assert result["write_applied"] is True
+    assert result["dry_run"] is False
+    assert result["output_config_path"] == str(fixture["output"])
+    assert result["market"] == "us"
+    assert result["accounts"] == ["fixture"]
+    assert result["symbols"] == ["NVDA"]
+    assert fixture["writes"] == [fixture["output"]]
+    after_build = fixture["snapshot"]()
+    assert after_build == {**before, str(fixture["output"].relative_to(fixture["root"])): fixture["output"].read_bytes()}
+
+    generated = json.loads(fixture["output"].read_text(encoding="utf-8"))
+    assert generated["accounts"] == ["fixture"]
+    assert generated["account_settings"] == {"fixture": {"type": "futu", "futu": {"account_id": "REAL_00000001"}}}
+    assert generated["portfolio"]["account"] == "fixture"
+    assert generated["portfolio"]["data_config"] == str(fixture["root"] / "runtime" / "portfolio.runtime.json")
+    assert generated["trade_intake"]["enabled"] is False
+    assert generated["symbols"] == [{"symbol": "NVDA", side: strategy}]
+    generated_strategy = generated["symbols"][0][side]
+    assert generated_strategy["enabled"] is True
+    assert type(generated_strategy["min_dte"]) is type(min_dte)
+    assert type(generated_strategy["max_dte"]) is type(max_dte)
+    assert generated["_generated"]["market"] == "us"
+    assert generated["_generated"]["source_format"] == "yaml"
+    assert generated["_resolved"]["market"] == "us"
+    for role, filename, metadata_path, metadata_hash in (
+        ("system", "system.json", "system_config_path", "system_config_sha256"),
+        ("market_user", "config.yaml", "config_yaml_path", "config_yaml_sha256"),
+    ):
+        source = fixture["build_args"]["repo_root"] / filename
+        digest = sha256(source.read_bytes()).hexdigest()
+        assert result[metadata_path] == str(source)
+        assert result[metadata_hash] == digest
+        source_metadata = next(item for item in generated["_generated"]["sources"] if item["role"] == role)
+        assert source_metadata["loaded"] is True
+        assert source_metadata["path"] == filename
+        assert source_metadata["sha256"] == digest
+
+    from src.application.tool_execution import execute_tool
+
+    response = execute_tool("config_validate", {"config_path": str(fixture["output"])})
+    assert response["ok"] is True, response.get("error")
+    assert response["data"]["ok"] is True
+    assert response["data"]["account_count"] == 1
+    assert response["data"]["accounts"] == ["fixture"]
+    assert response["data"]["symbol_count"] == 1
+    defaults = DEFAULT_SELL_PUT_WINDOW if side == "sell_put" else DEFAULT_SELL_CALL_WINDOW
+    window = resolve_candidate_window(generated_strategy, defaults=defaults)
+    assert (window.min_dte, window.max_dte) == (2, 10)
+    assert type(window.min_dte) is int
+    assert type(window.max_dte) is int
+    assert fixture["snapshot"]() == after_build
+    assert fixture["writes"] == [fixture["output"]]
+    assert fixture["forbidden_calls"] == []
+
+
+@pytest.mark.parametrize(
+    ("side", "bounds", "message"),
+    [
+        pytest.param("sell_put", {"min_dte": "10", "max_dte": "2"}, "NVDA.sell_put.min_dte > NVDA.sell_put.max_dte", id="put-reversed-strings"),
+        pytest.param("sell_call", {"min_dte": 10, "max_dte": "2"}, "NVDA.sell_call.min_dte > NVDA.sell_call.max_dte", id="call-reversed-mixed"),
+        pytest.param("sell_put", {"min_dte": 2.5, "max_dte": 10}, "NVDA.sell_put.min_dte must be an integer", id="put-fractional"),
+        pytest.param("sell_call", {"min_dte": True, "max_dte": 10}, "NVDA.sell_call.min_dte must be an integer", id="call-boolean"),
+        pytest.param("sell_put", {"min_dte": None, "max_dte": 10}, "NVDA.sell_put enabled but missing min_dte", id="put-null-min"),
+        pytest.param("sell_call", {"min_dte": 2}, "NVDA.sell_call enabled but missing max_dte", id="call-missing-max"),
+    ],
+)
+def test_invalid_dte_build_preserves_outputs(dte_build_fixture, side, bounds, message):
+    fixture = dte_build_fixture
+    strategy = {"enabled": True, "strategy": "insurance_underwriting", **bounds}
+    config = _runtime(symbols=[{"symbol": "NVDA", side: strategy}])
+    before_config = deepcopy(config)
+    with pytest.raises(SystemExit) as direct_error:
+        validate_config(config)
+    assert str(direct_error.value) == f"[CONFIG_ERROR] {message}"
+    assert config == before_config
+    for key, value in bounds.items():
+        assert type(config["symbols"][0][side][key]) is type(value)
+
+    document = deepcopy(fixture["document"])
+    document["markets"]["us"]["overrides"] = {"NVDA": {side: strategy}}
+    fixture["source"].write_text(yaml.safe_dump(document), encoding="utf-8")
+    sentinel = b"retained existing output\n"
+    fixture["output"].write_bytes(sentinel)
+    absent_output = fixture["root"] / "uncreated" / "config.us.json"
+    before_files = fixture["snapshot"]()
+    for output in (fixture["output"], absent_output):
+        with pytest.raises(AgentToolError) as build_error:
+            build_yaml_runtime_config_file(**{**fixture["build_args"], "output_config_path": output})
+        assert build_error.value.code == "CONFIG_ERROR"
+        assert build_error.value.message == f"[CONFIG_ERROR] {message}"
+        assert fixture["writes"] == []
+        assert fixture["snapshot"]() == before_files
+        assert fixture["output"].read_bytes() == sentinel
+        assert not absent_output.parent.exists()
+        assert fixture["forbidden_calls"] == []
 
 
 def test_close_advice_runtime_typo_and_enabled_type():
