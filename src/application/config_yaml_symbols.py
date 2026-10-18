@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+from domain.domain.symbol_identity import resolve_underlier_alias
 from src.application.account_config import normalize_accounts
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_authoring_transaction import config_source_sha256, publish_yaml_config_generation
@@ -238,19 +239,23 @@ def _mutate_generic_symbol_config(
         market_doc["overrides"] = overrides
     if not isinstance(overrides, dict):
         raise AgentToolError(code="CONFIG_ERROR", message=f"markets.{market}.overrides must be an object")
-    existing = symbol in symbols
+    symbol_keys = _source_symbol_keys(symbols, path=f"markets.{market}.symbols")
+    override_keys = _source_symbol_keys(overrides, path=f"markets.{market}.overrides")
+    existing = symbol in symbol_keys
+    source_symbol = symbol_keys.get(symbol, symbol)
+    override_key = override_keys.get(symbol, source_symbol)
 
     if action == "remove":
         if not existing:
             raise AgentToolError(code="INPUT_ERROR", message=f"symbol not found: {symbol}")
-        symbols.remove(symbol)
-        overrides.pop(symbol, None)
+        symbols.remove(source_symbol)
+        overrides.pop(override_key, None)
         return {
             "action": "remove",
             "raw_symbol": str(payload.get("symbol") or "").strip(),
             "canonical_symbol": symbol,
             "calibration": calibration.public_payload(),
-            "changed_paths": [f"markets.{market}.symbols", f"markets.{market}.overrides.{symbol}"],
+            "changed_paths": [f"markets.{market}.symbols", f"markets.{market}.overrides.{override_key}"],
         }
 
     if action == "add":
@@ -259,13 +264,13 @@ def _mutate_generic_symbol_config(
         override = _build_generic_add_override(config_doc, market=market, payload=payload)
         symbols.append(symbol)
         if override:
-            overrides[symbol] = override
+            overrides[override_key] = override
         return {
             "action": "add",
             "raw_symbol": str(payload.get("symbol") or "").strip(),
             "canonical_symbol": symbol,
             "calibration": calibration.public_payload(),
-            "changed_paths": [f"markets.{market}.symbols[]", f"markets.{market}.overrides.{symbol}"],
+            "changed_paths": [f"markets.{market}.symbols[]", f"markets.{market}.overrides.{override_key}"],
             "entry": deepcopy(override),
         }
 
@@ -278,12 +283,12 @@ def _mutate_generic_symbol_config(
     sets = payload.get("set")
     if not isinstance(sets, dict) or not sets:
         raise AgentToolError(code="INPUT_ERROR", message="edit requires non-empty set object")
-    override = overrides.get(symbol)
+    override = overrides.get(override_key)
     if override is None:
         override = {}
-        overrides[symbol] = override
+        overrides[override_key] = override
     if not isinstance(override, dict):
-        raise AgentToolError(code="CONFIG_ERROR", message=f"markets.{market}.overrides.{symbol} must be an object")
+        raise AgentToolError(code="CONFIG_ERROR", message=f"markets.{market}.overrides.{override_key} must be an object")
     changed_paths: list[str] = []
     if symbol_added:
         changed_paths.append(f"markets.{market}.symbols[]")
@@ -298,10 +303,10 @@ def _mutate_generic_symbol_config(
             )
         except AgentToolError:
             raise
-        changed_paths.append(f"markets.{market}.overrides.{symbol}.{authoring_path}")
+        changed_paths.append(f"markets.{market}.overrides.{override_key}.{authoring_path}")
     if symbol_added and _enables_call_without_put(override):
         override.setdefault("sell_put", {})["enabled"] = False
-        changed_paths.append(f"markets.{market}.overrides.{symbol}.sell_put.enabled")
+        changed_paths.append(f"markets.{market}.overrides.{override_key}.sell_put.enabled")
     ensure_use = payload.get("ensure_use")
     if isinstance(ensure_use, list):
         current_use = _use_templates(override.get("use"))
@@ -311,7 +316,7 @@ def _mutate_generic_symbol_config(
                 current_use.append(template)
         if current_use != _use_templates(override.get("use")):
             override["use"] = current_use
-            changed_paths.append(f"markets.{market}.overrides.{symbol}.use")
+            changed_paths.append(f"markets.{market}.overrides.{override_key}.use")
     return {
         "action": "edit",
         "raw_symbol": str(payload.get("symbol") or "").strip(),
@@ -363,7 +368,8 @@ def _validate_changed_symbol(*, repo_root: Path, before: dict[str, Any], after: 
                 bounds[bound] = _positive_strike(raw, label=f"{symbol} {label} {bound}")
             if bounds.get("min_strike", 0) > bounds.get("max_strike", math.inf):
                 raise AgentToolError(code="INPUT_ERROR", message=f"{symbol} {label} min strike exceeds max strike")
-        if symbol not in before["markets"][market]["symbols"] and not enabled_count:
+        previous_symbols = _source_symbol_keys(before["markets"][market]["symbols"], path=f"markets.{market}.symbols")
+        if symbol not in previous_symbols and not enabled_count:
             raise AgentToolError(code="INPUT_ERROR", message="new symbol requires CSP or CC with its strike bound")
     return {"before_effective": previous, "before_error": previous_error, "after_effective": current,
             "affected_accounts": _market_accounts(after, market=market)}
@@ -509,11 +515,6 @@ def _mutate_symbol_config(
         raise AgentToolError(code="INPUT_ERROR", message=f"symbol belongs to {calibration.market}, not {market}")
     canonical_symbol = str(calibration.canonical_symbol)
     symbols = _symbols_list(market_doc, market=market)
-    symbol_added = False
-    if canonical_symbol not in symbols:
-        symbols.append(canonical_symbol)
-        symbol_added = True
-
     overrides = market_doc.get("overrides")
     if overrides is None:
         overrides = {}
@@ -521,12 +522,20 @@ def _mutate_symbol_config(
     if not isinstance(overrides, dict):
         raise AgentToolError(code="CONFIG_ERROR", message=f"markets.{market}.overrides must be an object")
 
-    override = overrides.get(canonical_symbol)
+    symbol_keys = _source_symbol_keys(symbols, path=f"markets.{market}.symbols")
+    override_keys = _source_symbol_keys(overrides, path=f"markets.{market}.overrides")
+    source_symbol = symbol_keys.get(canonical_symbol, canonical_symbol)
+    override_key = override_keys.get(canonical_symbol, source_symbol)
+    symbol_added = canonical_symbol not in symbol_keys
+    if symbol_added:
+        symbols.append(canonical_symbol)
+
+    override = overrides.get(override_key)
     if override is None:
         override = {}
-        overrides[canonical_symbol] = override
+        overrides[override_key] = override
     if not isinstance(override, dict):
-        raise AgentToolError(code="CONFIG_ERROR", message=f"markets.{market}.overrides.{canonical_symbol} must be an object")
+        raise AgentToolError(code="CONFIG_ERROR", message=f"markets.{market}.overrides.{override_key} must be an object")
 
     changed_paths: list[str] = []
     if symbol_added:
@@ -550,7 +559,7 @@ def _mutate_symbol_config(
             override["sell_put"] = sell_put
         if sell_put.get("enabled") is not bool(sell_put_enabled):
             sell_put["enabled"] = bool(sell_put_enabled)
-            changed_paths.append(f"markets.{market}.overrides.{canonical_symbol}.sell_put.enabled")
+            changed_paths.append(f"markets.{market}.overrides.{override_key}.sell_put.enabled")
     if sell_put_max_strike is not None:
         sell_put = override.get("sell_put")
         if not isinstance(sell_put, dict):
@@ -558,7 +567,7 @@ def _mutate_symbol_config(
             override["sell_put"] = sell_put
         if sell_put.get("max_strike") != sell_put_max_strike:
             sell_put["max_strike"] = sell_put_max_strike
-            changed_paths.append(f"markets.{market}.overrides.{canonical_symbol}.sell_put.max_strike")
+            changed_paths.append(f"markets.{market}.overrides.{override_key}.sell_put.max_strike")
 
     if combo_yield_enabled is not None:
         combo_yield = override.get("combo_yield")
@@ -567,7 +576,7 @@ def _mutate_symbol_config(
             override["combo_yield"] = combo_yield
         if combo_yield.get("enabled") is not bool(combo_yield_enabled):
             combo_yield["enabled"] = bool(combo_yield_enabled)
-            changed_paths.append(f"markets.{market}.overrides.{canonical_symbol}.combo_yield.enabled")
+            changed_paths.append(f"markets.{market}.overrides.{override_key}.combo_yield.enabled")
 
     call_key = _covered_call_authoring_key(override)
     if call_enabled_effective is not None or covered_call_min_strike is not None:
@@ -577,10 +586,10 @@ def _mutate_symbol_config(
             override[call_key] = call_cfg
         if call_enabled_effective is not None and call_cfg.get("enabled") is not bool(call_enabled_effective):
             call_cfg["enabled"] = bool(call_enabled_effective)
-            changed_paths.append(f"markets.{market}.overrides.{canonical_symbol}.{call_key}.enabled")
+            changed_paths.append(f"markets.{market}.overrides.{override_key}.{call_key}.enabled")
         if covered_call_min_strike is not None and call_cfg.get("min_strike") != covered_call_min_strike:
             call_cfg["min_strike"] = covered_call_min_strike
-            changed_paths.append(f"markets.{market}.overrides.{canonical_symbol}.{call_key}.min_strike")
+            changed_paths.append(f"markets.{market}.overrides.{override_key}.{call_key}.min_strike")
 
     use_changed = _sync_use_templates(
         override,
@@ -589,7 +598,7 @@ def _mutate_symbol_config(
         new_symbol=symbol_added,
     )
     if use_changed:
-        changed_paths.append(f"markets.{market}.overrides.{canonical_symbol}.use")
+        changed_paths.append(f"markets.{market}.overrides.{override_key}.use")
 
     return {
         "action": "set",
@@ -600,6 +609,19 @@ def _mutate_symbol_config(
         "changed_paths": changed_paths,
         "entry": deepcopy(override),
     }
+
+
+def _source_symbol_keys(values, *, path: str) -> dict[str, Any]:
+    keys: dict[str, Any] = {}
+    for raw in values:
+        canonical = resolve_underlier_alias(raw)
+        if canonical in keys:
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message=f"duplicate symbol in {path}: {keys[canonical]!r} and {raw!r} resolve to {canonical}",
+            )
+        keys[canonical] = raw
+    return keys
 
 
 def _market_doc(config_doc: dict[str, Any], *, market: str) -> dict[str, Any]:
