@@ -948,13 +948,13 @@ def generate_fixture(profile: str, *, verify_payload_hash: bool = True) -> dict[
             "completeness": {"status": "complete", "reason_codes": []},
             "freshness": {"authority": "not_applicable", "status": "not_applicable", "reason_codes": []},
         },
-        "broker_positions": build_runtime_portfolio_section(
+        "broker_positions": {**build_runtime_portfolio_section(
             "broker_positions",
             source_observed_at_utc=TIMESTAMPS["broker_source_observed_at_utc"],
             application_received_at_utc=TIMESTAMPS["broker_promoted_at_utc"],
             facts=project_broker_positions_facts(broker_source),
             **complete,
-        ),
+        ), "schema_version": "runtime_portfolio_snapshot.broker_positions.v1"},
         "cash_occupation": build_runtime_portfolio_section(
             "cash_occupation",
             source_observed_at_utc=TIMESTAMPS["ledger_source_observed_at_utc"],

@@ -2009,6 +2009,112 @@ def test_runtime_snapshot_shadow_is_account_scoped_and_current_only(
     assert runlog.events[1]["data"]["error_code"] == "ACCOUNT_RUN_STATE_CONFLICT"
 
 
+def test_real_holdings_fallback_shadow_publishes_replays_and_audits_each_account(monkeypatch, tmp_path):
+    from scripts import benchmark_runtime_portfolio_snapshot as fixture_owner
+    from tests import test_runtime_portfolio_snapshot as snapshot_fixture
+    from tests.test_prepared_portfolio_context import _prepare_cached_holdings_receipts
+    from src.application import runtime_portfolio_snapshot as snapshot_owner
+    from src.application import tick_account_execution as mod
+
+    run_id = fixture_owner.RUN_ID
+    prepared = _prepare_cached_holdings_receipts(tmp_path, monkeypatch, run_id=run_id, ages={"lx": 400, "sy": 0})
+    audit, runlog = _Audit(), _RunLog()
+    request = SimpleNamespace(base=tmp_path, run_id=run_id, audit_helper=audit, runlog=runlog)
+    snapshots, references_by_account, option_receipts, candidates = {}, {}, {}, {}
+    sealed_files, tasks = {}, []
+    forbidden_calls = []
+
+    def forbidden(*args, **kwargs):
+        forbidden_calls.append((args, kwargs))
+        raise AssertionError("shadow must only consume sealed owners")
+
+    for name in ("prepare_portfolio_contexts", "prepare_option_positions_contexts", "open_position_ledger_from_data_config",
+                 "decision_state_snapshot", "run_one_account", "prefetch_required_data", "seal_run_fx_snapshot",
+                 "retire_required_data_snapshot_shadows"):
+        monkeypatch.setattr(mod, name, forbidden)
+    for account in ("lx", "sy"):
+        authority = prepared.authorities[account]
+        # Customize only these synthetic accounts/configs. Default golden generation remains hash checked.
+        with monkeypatch.context() as fixture_patch:
+            fixture_patch.setattr(fixture_owner, "ACCOUNT", account)
+            fixture_patch.setattr(fixture_owner, "canonical_account_run_config_bytes", lambda _config: authority.canonical_bytes)
+            assembly = snapshot_fixture._owner_assembly_kwargs(verify_fixture_hash=False)
+        receipt = prepared.receipts[account]
+        assembly.update(prepared_portfolio_manifest_bytes=receipt["manifest_bytes"],
+                        prepared_portfolio_payload_bytes=receipt["payload_bytes"])
+        snapshot, references = snapshot_owner.assemble_runtime_portfolio_snapshot(**assembly)
+        snapshots[account], references_by_account[account] = snapshot, references
+        account_dir = tmp_path / "output_runs" / run_id / "accounts" / account
+        # Portfolio/config already exist through the real parent; assert bytes instead of replacing them.
+        required_binding = next(row for row in snapshot["replay_bindings"] if row["role"] == "required_data_snapshot")
+        for relpath, raw in references.items():
+            root = tmp_path / "output_runs" / run_id if relpath == required_binding["relpath"] else account_dir
+            path = root / relpath
+            assert path.is_relative_to(tmp_path)
+            if path.exists():
+                assert path.read_bytes() == raw
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(raw)
+            sealed_files[path] = raw
+        option_manifest = json.loads(assembly["prepared_option_manifest_bytes"])
+        option_path = account_dir / "state" / option_manifest["payload_relpath"]
+        option_path.write_bytes(assembly["prepared_option_payload_bytes"])
+        sealed_files[option_path] = assembly["prepared_option_payload_bytes"]
+        option_receipts[account] = {"manifest_bytes": assembly["prepared_option_manifest_bytes"],
+                                    "payload_bytes": assembly["prepared_option_payload_bytes"]}
+        candidates[account] = {"manifest": json.loads(assembly["candidate_manifest_bytes"])}
+        option_binding = next(row for row in snapshot["replay_bindings"] if row["role"] == "prepared_option_positions_context")
+        tasks.append(SimpleNamespace(account=account, account_config_authority=authority,
+            prepared_portfolio_manifest_path=Path(prepared.manifests[account]["manifest_path"]),
+            prepared_portfolio_manifest_sha256=prepared.manifests[account]["manifest_sha256"],
+            prepared_option_manifest_path=account_dir / option_binding["relpath"],
+            prepared_option_manifest_sha256=option_binding["sha256"],
+            required_data_manifest_path=tmp_path / "output_runs" / run_id / required_binding["relpath"]))
+
+    # Unchanged ledger/candidate producers are isolated at their read facade; all supplied bytes
+    # still pass the real assembler's canonical owner/hash/config validation.
+    def option_receipt(**kwargs):
+        account = kwargs["expected_account"]
+        assert kwargs["expected_account_config_sha256"] == prepared.authorities[account].account_config_sha256
+        return option_receipts[account]
+
+    monkeypatch.setattr(mod, "load_prepared_option_positions_context_receipt", option_receipt)
+    monkeypatch.setattr(mod, "load_candidate_snapshot_bundle", lambda *, account, **kwargs: candidates[account])
+    legacy = [AccountResult(account, True, True, "ok", "unchanged") for account in ("lx", "sy")]
+    legacy_before = [vars(result).copy() for result in legacy]
+    artifact_bytes = {}
+    for _ in range(2):
+        mod.publish_runtime_portfolio_snapshot_shadows(request=request, tasks=tuple(tasks))
+        for account in ("lx", "sy"):
+            loaded = snapshot_owner.load_runtime_portfolio_snapshot(base=tmp_path, run_id=run_id, account=account,
+                reference_payloads=references_by_account[account])
+            assert loaded == snapshots[account]
+            assert loaded["status"] == ("data_unavailable" if account == "lx" else "trusted")
+            assert loaded["sections"]["broker_positions"]["completeness"] == (
+                {"status": "unavailable", "reason_codes": ["position_snapshot_refresh_unavailable"]} if account == "lx"
+                else {"status": "complete", "reason_codes": []})
+            cash = loaded["sections"]["broker_cash"]["facts"]
+            assert cash["cash_snapshot"] == prepared.cached[account]["cash_snapshot"]
+            assert cash["cash_by_currency"] == prepared.cached[account]["cash_by_currency"]
+            assert cash["cash_by_currency"]["CNY"] == 1000
+            assert cash["cash_snapshot"]["status"] == "fresh"
+            path = tmp_path / "output_runs" / run_id / "accounts" / account / "state" / snapshot_owner.ARTIFACT_NAME
+            encoded = path.read_bytes()
+            assert encoded == snapshot_owner.canonical_json_bytes(loaded)
+            assert encoded == artifact_bytes.setdefault(account, encoded)
+            cache = prepared.authorities[account].state_path.parent / "portfolio_context.json"
+            assert cache.read_bytes() == prepared.cache_bytes[account]
+        assert all(path.read_bytes() == raw for path, raw in sealed_files.items())
+    assert [call["account"] for call in prepared.provider_calls] == ["lx"]
+    assert not forbidden_calls
+    assert [vars(result) for result in legacy] == legacy_before
+    assert [event["account"] for event in audit.events] == ["lx", "sy", "lx", "sy"]
+    assert [event["status"] for event in audit.events] == ["error", "ok", "error", "ok"]
+    assert all("error_type" not in event["extra"] for event in audit.events)
+    assert [event["status"] for event in runlog.events if event["step"] == "runtime_portfolio_snapshot"] == ["degraded", "ok", "degraded", "ok"]
+
+
 def test_scheduler_skip_does_not_emit_preparation_timings(monkeypatch, tmp_path):
     from src.application import tick_account_execution as mod
     request = _lx_request(tmp_path)
