@@ -17,7 +17,7 @@ from src.application.payload_helpers import nested as _nested
 
 
 OPERATION_TIMELINE_SCHEMA_VERSION = "operation-timeline-v1"
-_TIMELINE_STATUSES = ("previewed", "confirmed", "running", "applied", "cancelled", "expired", "failed")
+_TIMELINE_STATUSES = ("previewed", "confirmed", "running", "applied", "skipped", "cancelled", "expired", "failed")
 _OPERATION_AUDIT_TOOLS = frozenset({"inbound.attribution", "inbound.manual_trade", "inbound.symbols", "inbound.upgrade", "inbound.model", "inbound.monitor_run"})
 
 
@@ -502,7 +502,7 @@ def _build_operation_timeline(operation: dict[str, Any], audit_rows: list[dict[s
         "receipt": receipt,
         "outcome": {
             "status": status or "unknown",
-            "ok": status in {"previewed", "applied", "cancelled"},
+            "ok": status in {"previewed", "applied", "skipped", "cancelled"},
             "warnings": warnings,
         },
         "warnings": warnings,
