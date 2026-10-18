@@ -6,6 +6,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -47,7 +48,7 @@ def identity_fixture(tmp_path, monkeypatch):
     from src.application.agent_tool_contracts import AgentToolError
     from src.application.secret_store import runtime as secret_runtime
 
-    calls = {name: [] for name in ("forbidden", "writes", "publish", "prepared", "prepare_source", "stage", "resolve")}
+    calls = {name: [] for name in ("forbidden", "writes", "publish", "transaction", "prepared", "prepare_source", "stage", "resolve")}
 
     def forbid(name, *_args, **_kwargs):
         calls["forbidden"].append(name)
@@ -121,7 +122,9 @@ def identity_fixture(tmp_path, monkeypatch):
         assert kwargs["config_yaml_path"] == source
         assert kwargs["runtime_root"] == runtime
         calls["publish"].append(deepcopy(kwargs["config_doc"]))
-        return real_publish(**kwargs)
+        result = real_publish(**kwargs)
+        calls["transaction"].append(deepcopy(result))
+        return result
 
     monkeypatch.setattr(config_yaml_symbols, "publish_yaml_config_generation", publish)
 
@@ -168,20 +171,31 @@ def _assert_preview(fixture, result, before):
     assert result["dry_run"] is True
     assert result["write_applied"] is False
     assert result["backup_path"] is None
-    assert result["audit_id"] is None
+    assert isinstance(result["audit_id"], str)
+    assert re.fullmatch(r"audit_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{10}", result["audit_id"]) is not None
     assert result["rebuild"] is None
     assert result["summary"]["canonical_symbol"] == "9992.HK"
     assert result["summary"]["affected_accounts"] == ["fixture"]
     assert len(calls["publish"]) == len(calls["prepared"]) == len(calls["stage"]) == 1
+    assert len(calls["transaction"]) == 1
+    transaction = calls["transaction"][0]
+    assert transaction["audit_id"] is None
+    assert transaction["dry_run"] is True
+    assert transaction["write_applied"] is False
+    assert transaction["backup_path"] is None
+    assert transaction["recovered_transactions"] == []
     assert len(calls["prepare_source"]) == 1
     assert yaml.safe_load(calls["prepare_source"][0]) == calls["publish"][0]
     source_sha = sha256(fixture["source"].read_bytes()).hexdigest()
     candidate_sha = sha256(calls["prepare_source"][0]).hexdigest()
     assert result["source_revision"] == {"before_sha256": source_sha, "after_sha256": candidate_sha}
+    assert transaction["source_revision"] == result["source_revision"]
     assert [kind for kind, _ in calls["resolve"]] == ["runtime", "bot"]
     assert calls["writes"] == calls["forbidden"] == []
     prepared = calls["prepared"][0]
     assert result["validation"] == prepared["markets"]
+    assert transaction["markets"] == prepared["markets"]
+    assert transaction["bot"] == prepared["bot"]
     assert prepared["bot"]["ok"] is True
     assert [item["role"] for item in prepared["target_payloads"]] == ["runtime_hk", "bot"]
     payloads = {}
@@ -285,22 +299,23 @@ def test_public_build_preserves_unknown_nonempty_compatibility(identity_fixture)
 
 
 @pytest.mark.parametrize(
-    ("market", "symbols", "overrides", "messages"),
+    ("market", "symbols", "overrides", "messages", "expected_hint"),
     [
-        pytest.param("hk", ["POP", "9992.HK"], {}, ("symbols", "'POP'", "'9992.HK'"), id="list-alias-first"),
-        pytest.param("hk", ["9992.HK", "POP"], {}, ("symbols", "'POP'", "'9992.HK'"), id="list-canonical-first"),
-        pytest.param("hk", ["POP"], {"POP": {}, "9992.HK": {}}, ("overrides", "'POP'", "'9992.HK'"), id="override-alias-first"),
-        pytest.param("hk", ["POP"], {"9992.HK": {}, "POP": {}}, ("overrides", "'POP'", "'9992.HK'"), id="override-canonical-first"),
-        pytest.param("us", ["NVDA"], {"nvda": {}, " NVDA ": {}}, ("overrides", "'nvda'", "' NVDA '", "NVDA"), id="override-case-first"),
-        pytest.param("us", ["NVDA"], {" NVDA ": {}, "nvda": {}}, ("overrides", "'nvda'", "' NVDA '", "NVDA"), id="override-space-first"),
-        pytest.param("hk", [], {}, ("symbols", "non-empty list"), id="empty-list"),
-        pytest.param("hk", [700], {}, ("symbols[0]", "must be a symbol string"), id="nonstring"),
-        pytest.param("hk", [" "], {}, ("symbols[0]", "non-empty symbol"), id="blank"),
-        pytest.param("us", ["POP"], {}, ("symbols[0]", "9992.HK"), id="wrong-market"),
-        pytest.param("hk", ["0700.HK"], {"POP": {}}, ("overrides.9992.HK", "also appear in symbols"), id="nonmember-override"),
+        pytest.param("hk", ["POP", "9992.HK"], {}, ("symbols", "'POP'", "'9992.HK'"), None, id="list-alias-first"),
+        pytest.param("hk", ["9992.HK", "POP"], {}, ("symbols", "'POP'", "'9992.HK'"), None, id="list-canonical-first"),
+        pytest.param("hk", ["POP"], {"POP": {}, "9992.HK": {}}, ("overrides", "'POP'", "'9992.HK'"), None, id="override-alias-first"),
+        pytest.param("hk", ["POP"], {"9992.HK": {}, "POP": {}}, ("overrides", "'POP'", "'9992.HK'"), None, id="override-canonical-first"),
+        pytest.param("us", ["NVDA"], {"nvda": {}, " NVDA ": {}}, ("overrides", "'nvda'", "' NVDA '", "NVDA"), None, id="override-case-first"),
+        pytest.param("us", ["NVDA"], {" NVDA ": {}, "nvda": {}}, ("overrides", "'nvda'", "' NVDA '", "NVDA"), None, id="override-space-first"),
+        pytest.param("hk", [], {}, ("symbols", "non-empty list"), None, id="empty-list"),
+        pytest.param("hk", [700], {}, ("symbols[0]", "must be a symbol string"), None, id="nonstring"),
+        pytest.param("hk", [" "], {}, ("symbols[0]", "non-empty symbol"), None, id="blank"),
+        pytest.param("us", ["POP"], {}, ("markets.us.symbols[0] resolves to HK but is configured under markets.us",),
+                     "Move 9992.HK to markets.hk.symbols.", id="wrong-market"),
+        pytest.param("hk", ["0700.HK"], {"POP": {}}, ("overrides.9992.HK", "also appear in symbols"), None, id="nonmember-override"),
     ],
 )
-def test_build_rejects_invalid_identity_before_output(identity_fixture, market, symbols, overrides, messages):
+def test_build_rejects_invalid_identity_before_output(identity_fixture, market, symbols, overrides, messages, expected_hint):
     fixture = identity_fixture
     fixture["write_source"](symbols, overrides, market=market)
     output = fixture["runtime"] / f"config.{market}.json"
@@ -313,6 +328,9 @@ def test_build_rejects_invalid_identity_before_output(identity_fixture, market, 
         assert error.value.code == "CONFIG_ERROR"
         for message in messages:
             assert message in error.value.message
+        if expected_hint is not None:
+            assert error.value.message == messages[0]
+            assert error.value.hint == expected_hint
         assert fixture["snapshot"]() == before
         assert fixture["calls"]["writes"] == []
         assert not absent.parent.exists()
