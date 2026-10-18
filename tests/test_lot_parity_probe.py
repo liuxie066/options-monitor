@@ -2146,30 +2146,37 @@ def test_verify_projection_failure_publishes_report_without_successful_checkpoin
     else:
         checkpoint_before = None
     _append_historical_invalid_adjustment(sqlite_path)
-    before = _store_snapshot(sqlite_path)
-    report_ids = []
+    holder = connect_ledger_fixture(sqlite_path)
+    try:
+        # Keep last-connection WAL checkpointing outside the measured window.
+        assert holder.execute("SELECT count(*) FROM position_lots").fetchone() == (1,)
+        assert not holder.in_transaction
+        before = _store_snapshot(sqlite_path)
+        report_ids = []
 
-    for _ in range(2):
-        assert om_main(["option-positions", *sys.argv[1:]]) == 1
-        payload = json.loads(capsys.readouterr().out)
-        assert payload["ok"] is False
-        assert payload["lot_parity_probe"]["green"] is True
-        assert payload["checkpoint_reused"] is False
-        assert "checkpoint_id" not in payload
-        assert payload["mode_used"] == "full_replay"
-        assert payload["evidence_published"] is True
-        saved = json.loads((current / "projection_verify.latest.json").read_text(encoding="utf-8"))
-        assert saved["ok"] is False
-        assert saved["report_id"] == payload["report_id"]
-        assert saved["summary"] == {"projection_error": 1, "matched": 1}
-        report_ids.append(payload["report_id"])
-        assert (checkpoint.read_bytes() if checkpoint.exists() else None) == checkpoint_before
+        for _ in range(2):
+            assert om_main(["option-positions", *sys.argv[1:]]) == 1
+            payload = json.loads(capsys.readouterr().out)
+            assert payload["ok"] is False
+            assert payload["lot_parity_probe"]["green"] is True
+            assert payload["checkpoint_reused"] is False
+            assert "checkpoint_id" not in payload
+            assert payload["mode_used"] == "full_replay"
+            assert payload["evidence_published"] is True
+            saved = json.loads((current / "projection_verify.latest.json").read_text(encoding="utf-8"))
+            assert saved["ok"] is False
+            assert saved["report_id"] == payload["report_id"]
+            assert saved["summary"] == {"projection_error": 1, "matched": 1}
+            report_ids.append(payload["report_id"])
+            assert (checkpoint.read_bytes() if checkpoint.exists() else None) == checkpoint_before
 
-    assert len(set(report_ids)) == 2
-    after = _store_snapshot(sqlite_path)
-    assert {key: after[key] for key in PERSISTENT_SNAPSHOT_KEYS} == {
-        key: before[key] for key in PERSISTENT_SNAPSHOT_KEYS
-    }
+        assert len(set(report_ids)) == 2
+        after = _store_snapshot(sqlite_path)
+        assert {key: after[key] for key in PERSISTENT_SNAPSHOT_KEYS} == {
+            key: before[key] for key in PERSISTENT_SNAPSHOT_KEYS
+        }
+    finally:
+        holder.close()
 
 
 @pytest.mark.parametrize("fmt", ["json", "text"])
