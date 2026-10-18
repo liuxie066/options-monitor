@@ -284,6 +284,153 @@ def _stub_prepared_option_context(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("smoke", [False, True])
+def test_real_option_preparation_replays_fx_and_reports_tick_audit(monkeypatch, tmp_path, smoke):
+    import subprocess
+
+    from src.application import current_fx_run
+    from src.application import prepared_option_positions_context as prepared
+    from src.application import prepared_portfolio_context as portfolio
+    from src.application import tick_account_execution as mod
+    from src.infrastructure.performance_evidence_sqlite import PerformanceEvidenceSQLiteRepository
+
+    env_file = tmp_path / "isolated.env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("OM_ENV_FILE", str(env_file))
+    monkeypatch.setenv("OM_RUNTIME_ROOT", "")
+    monkeypatch.setenv("OM_DATA_CONFIG", "")
+    request = replace(_request(tmp_path, accounts=["lx", "sy"], workers=1, force=False), smoke=smoke)
+    request.cfg_path.write_text("{}\n", encoding="utf-8")
+    paths = {}
+    data_paths = {}
+    for account in request.account_ids:
+        data_path = tmp_path / account / "portfolio.runtime.json"
+        data_path.parent.mkdir(parents=True)
+        data_path.write_text("{}\n", encoding="utf-8")
+        data_paths[account] = data_path
+        paths[account] = data_path.parent / "output_shared" / "state" / "option_positions.sqlite3"
+    real_config = mod.build_account_runtime_config
+    real_prepare = prepared.prepare_option_positions_contexts
+    real_import = PerformanceEvidenceSQLiteRepository.import_envelope
+    batches = []
+    children = []
+    forbidden_calls = []
+    imports = []
+    fetches = []
+    failed = False
+    quoted = "2026-08-10T03:00:00+00:00"
+
+    def forbidden(*_args, **_kwargs):
+        forbidden_calls.append(True)
+        pytest.fail("unexpected provider, process, bootstrap or shadow boundary")
+
+    def account_config(**kwargs):
+        config = real_config(**kwargs)
+        config["portfolio"]["data_config"] = str(data_paths[kwargs["account"]])
+        return config
+
+    def fetch_fx(**kwargs):
+        assert kwargs["cache_path"].is_relative_to(tmp_path)
+        fetches.append(True)
+        assert len(fetches) == 1
+        return {"schema_version": 2, "pairs": {
+            pair: {"rate": rate, "source": "tencent_quote",
+                   "quote_at_utc": quoted, "observed_at_utc": quoted}
+            for pair, rate in (("USDCNY", 7.2), ("HKDCNY", 0.92))
+        }}
+
+    def prepare_options(**kwargs):
+        assert kwargs["base"] == tmp_path
+        assert kwargs["persist_fx_evidence"] is (not smoke)
+        batch = real_prepare(**kwargs)
+        batches.append(batch)
+        return batch
+
+    def import_once(repo, *args, **kwargs):
+        nonlocal failed
+        assert repo.db_path in paths.values()
+        imports.append(repo.db_path)
+        if repo.db_path == paths["sy"] and not failed:
+            failed = True
+            raise OSError("synthetic first import unavailable")
+        return real_import(repo, *args, **kwargs)
+
+    def run_account(*, request, **_kwargs):
+        assert request.allow_notifications is False
+        assert request.allow_mutations is (not smoke)
+        assert request.prepared_option_positions_context_manifest.is_relative_to(tmp_path)
+        prepared.load_prepared_option_positions_context_receipt(
+            manifest_path=request.prepared_option_positions_context_manifest,
+            expected_base=tmp_path,
+            expected_run_id=request.run_id,
+            expected_account=request.acct,
+            expected_account_config_sha256=request.account_config_authority.account_config_sha256,
+            expected_manifest_sha256=request.prepared_option_positions_context_manifest_sha256,
+            expected_runtime_config=json.loads(request.account_config_authority.canonical_bytes),
+        )
+        children.append(request.acct)
+        return _outcome(request.acct)
+
+    monkeypatch.setattr(mod, "build_account_runtime_config", account_config)
+    monkeypatch.setattr(mod, "_account_pipeline_is_required", lambda **_kwargs: True)
+    monkeypatch.setattr(current_fx_run, "current_exchange_rate_snapshot", fetch_fx)
+    monkeypatch.setattr(prepared, "get_exchange_rates_or_fetch_latest", forbidden)
+    monkeypatch.setattr(portfolio, "fetch_futu_portfolio_context", forbidden)
+    monkeypatch.setattr(portfolio, "load_account_portfolio_context", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(mod, "prepare_portfolio_contexts", _fake_prepare)
+    # Override the autouse fake with the actual owner and actual temporary evidence.
+    monkeypatch.setattr(mod, "prepare_option_positions_contexts", prepare_options)
+    monkeypatch.setattr(PerformanceEvidenceSQLiteRepository, "import_envelope", import_once)
+    monkeypatch.setattr(mod, "_build_close_advice_barrier_plan", lambda **kw: (kw["candidate_config"], None))
+    monkeypatch.setattr(mod, "open_position_ledger_from_data_config", forbidden)
+    monkeypatch.setattr(mod, "decision_state_snapshot", forbidden)
+    monkeypatch.setattr(mod, "prefetch_required_data", lambda **_kwargs: {
+        "global_required_data_plan": {"plan_id": "a" * 64, "symbols": []},
+        "symbols": [], "results": {},
+    })
+    monkeypatch.setattr(mod, "seal_required_data_snapshot", _seal_stub())
+    monkeypatch.setattr(mod, "_retire_required_data_shadows_after_manifest", lambda **_kwargs: None)
+    monkeypatch.setattr(mod, "_publish_runtime_portfolio_snapshot_shadow", forbidden)
+    monkeypatch.setattr(mod, "run_one_account", run_account)
+    first = mod.run_tick_account_execution(request)
+    assert first.ran_pipeline_accounts == ["lx", "sy"]
+    assert len(batches) == 1 and batches[0].unavailable_by_account == {}
+    frozen = {
+        account: (Path(manifest["manifest_path"]).read_bytes(),
+                  (Path(manifest["manifest_path"]).parent / "option_positions_context.json").read_bytes())
+        for account, manifest in batches[0].manifests.items()
+    }
+    assert PerformanceEvidenceSQLiteRepository(paths["sy"]).read_all().fx_rates == ()
+    monkeypatch.setattr(prepared, "open_position_ledger_from_data_config", forbidden)
+    monkeypatch.setattr(prepared, "read_decision_state_rows_many", forbidden)
+    second = mod.run_tick_account_execution(request)
+    assert second.ran_pipeline_accounts == ["lx", "sy"]
+    assert len(batches) == 2 and batches[1].unavailable_by_account == {}
+    assert children == ["lx", "sy", "lx", "sy"]
+    assert forbidden_calls == [] and fetches == [True]
+    assert batches[1].manifests == batches[0].manifests
+    assert batches[1].observed_at_utc == batches[0].observed_at_utc
+    assert batches[1].ledger_read_count == 0
+    for account, manifest in batches[1].manifests.items():
+        path = Path(manifest["manifest_path"])
+        assert (path.read_bytes(), (path.parent / "option_positions_context.json").read_bytes()) == frozen[account]
+        facts = PerformanceEvidenceSQLiteRepository(paths[account]).read_all().fx_rates
+        assert len(facts) == (0 if smoke else 2)
+        assert all(fact.source_id.startswith("verified_quote:tencent_quote:") for fact in facts)
+    events = [event for event in request.runlog.events if event["step"] == "option_performance_fx_evidence"]
+    if smoke:
+        assert imports == [] and events == []
+        assert [batch.fx_evidence_status for batch in batches] == ["disabled", "not_attempted"]
+    else:
+        assert imports == [paths[account] for _ in range(2) for account in ("lx", "sy")]
+        assert [event["status"] for event in events] == ["degraded", "ok"]
+        assert [event["data"] for event in events] == [
+            {"status": "partial", "ledger_count": 1, "inserted_count": 2, "idempotent_count": 0, "error_count": 1},
+            {"status": "persisted", "ledger_count": 2, "inserted_count": 2, "idempotent_count": 2, "error_count": 0},
+        ]
+
+
 @pytest.mark.parametrize("workers", [1, 2])
 @pytest.mark.parametrize("accounts", [["lx", "sy"], ["sy", "lx"]])
 @pytest.mark.parametrize("force", [False, True])
