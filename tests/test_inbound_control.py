@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import json
 import os
 import sqlite3
@@ -7,6 +8,7 @@ import subprocess
 from datetime import date, datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -4648,3 +4650,325 @@ def _enabled_bot_fixture(tmp_path, monkeypatch):
     path = tmp_path / "test-bot-default.json"
     path.write_text('{"bot":{"enabled":true}}')
     monkeypatch.setattr("src.application.bot.control.config_loader.default_bot_config_path", lambda **kwargs: path)
+
+
+@pytest.fixture
+def operation_timeline_query(tmp_path, monkeypatch):
+    from src.application.bot.control import audit, operation_diagnostics, operation_store
+    from src.application.tool_execution import execute_tool
+
+    root = tmp_path / "private-timeline"
+    root.mkdir()
+    database = root / "inbound.sqlite3"
+    scope = {
+        "channel": "fixture",
+        "sender_id": "PRIVATE-sender",
+        "conversation_id": "PRIVATE-conversation",
+    }
+
+    def create(operations=(), audit_rows=(), *, pending_table=True):
+        assert not database.exists()
+        with closing(sqlite3.connect(database)) as conn:
+            if pending_table:
+                conn.execute("""CREATE TABLE inbound_pending_operations (
+                    id INTEGER PRIMARY KEY, operation_id TEXT, command_id TEXT,
+                    channel TEXT, sender_id TEXT, conversation_id TEXT, operation_type TEXT,
+                    status TEXT, payload_json TEXT, preview_json TEXT, result_json TEXT,
+                    created_at TEXT)""")
+                for index, operation in enumerate(operations, 1):
+                    conn.execute("""INSERT INTO inbound_pending_operations VALUES (
+                        :id, :operation_id, :command_id, :channel, :sender_id, :conversation_id,
+                        :operation_type, :status, :payload_json, :preview_json, :result_json,
+                        :created_at)""", {
+                        **scope, "id": index, "command_id": f"PRIVATE-command-{index}",
+                        "operation_type": "model_use", "created_at": "2026-10-18T00:00:00+00:00",
+                        "payload_json": '{"private":"PRIVATE-payload"}',
+                        "preview_json": "{}", "result_json": "{}", **operation,
+                    })
+            conn.execute("""CREATE TABLE inbound_command_audit (
+                id INTEGER PRIMARY KEY, command_id TEXT, channel TEXT, sender_id TEXT,
+                conversation_id TEXT, message_id TEXT, raw_text TEXT, tool_name TEXT,
+                response_json TEXT, created_at TEXT)""")
+            for index, row in enumerate(audit_rows, 1):
+                conn.execute("""INSERT INTO inbound_command_audit VALUES (
+                    :id, :command_id, :channel, :sender_id, :conversation_id, :message_id,
+                    :raw_text, :tool_name, :response_json, :created_at)""", {
+                    **scope, "id": index, "command_id": f"PRIVATE-audit-{index}",
+                    "message_id": f"PRIVATE-message-{index}", "raw_text": "PRIVATE-command-text",
+                    "tool_name": "inbound.model", "created_at": "2026-10-18T00:01:00+00:00",
+                    "response_json": json.dumps({"data": {
+                        "operation_type": "model_use", "response_text": "PRIVATE-response",
+                        "payload": {"private": "PRIVATE-payload"}, **row,
+                    }}),
+                })
+            conn.commit()
+
+    forbidden_calls = []
+
+    def forbidden(name):
+        def fail(*_args, **_kwargs):
+            forbidden_calls.append(name)
+            raise AssertionError(f"unexpected timeline I/O: {name}")
+        return fail
+
+    monkeypatch.setattr(audit, "default_audit_db_path", forbidden("audit.default_path"))
+    monkeypatch.setattr(audit, "build_effective_env", forbidden("audit.effective_env"))
+    monkeypatch.setattr(operation_store, "default_audit_db_path", forbidden("operations.default_path"))
+    for store in (InboundAuditStore, InboundOperationStore):
+        for method in ("_ensure_schema", "_connect"):
+            monkeypatch.setattr(store, method, forbidden(f"{store.__name__}.{method}"))
+
+    connection_calls = []
+    expected_uri = None
+
+    def connect(database_uri, *args, **kwargs):
+        connection_calls.append((database_uri, args, dict(kwargs)))
+        assert database_uri == expected_uri
+        assert args == ()
+        assert kwargs == {"uri": True}
+        return sqlite3.connect(database_uri, *args, **kwargs)
+
+    monkeypatch.setattr(operation_diagnostics, "sqlite3", SimpleNamespace(
+        connect=connect, Row=sqlite3.Row, Error=sqlite3.Error,
+    ))
+
+    def inventory():
+        return {
+            path.relative_to(tmp_path).as_posix(): None if path.is_dir() else path.read_bytes()
+            for path in tmp_path.rglob("*")
+        }
+
+    def query(*, expect_connect=True, **overrides):
+        nonlocal expected_uri
+        payload = {
+            "audit_db": str(database),
+            **{f"authenticated_{key}": value for key, value in scope.items()},
+            **overrides,
+        }
+        target = Path(payload["audit_db"])
+        assert target.is_absolute() and target.is_relative_to(root)
+        expected_uri = f"{target.as_uri()}?mode=ro"
+        before = inventory()
+        call_count = len(connection_calls)
+        envelope = execute_tool("operation_timeline", payload)
+        assert forbidden_calls == []
+        assert inventory() == before
+        assert connection_calls[call_count:] == (
+            [(expected_uri, (), {"uri": True})] if expect_connect else []
+        ), {
+            "ok": envelope.get("ok"),
+            "error.code": (envelope.get("error") or {}).get("code"),
+            "error.message": str((envelope.get("error") or {}).get("message") or "")
+            .replace(str(root), "<fixture>")[:300],
+            "data.audit_db_exists": (envelope.get("data") or {}).get("audit_db_exists"),
+        }
+        serialized = json.dumps(envelope, ensure_ascii=False)
+        assert str(root) not in serialized
+        assert "PRIVATE-" not in serialized
+        if envelope["ok"]:
+            assert envelope["error"] is None
+            data = envelope["data"]
+            assert data["schema_version"] == "operation-timeline-v1"
+            assert data["scope"]["authenticated_conversation"] is True
+            assert data["timeline_count"] == len(data["timelines"])
+            assert envelope["warnings"] == data["warnings"]
+            assert f"Operation timeline：{data['timeline_count']} 条" in data["response_text"]
+            for item in data["timelines"]:
+                assert set(item["identity"]) == {"operation_id"}
+                assert item["operation"]["status"] == item["outcome"]["status"]
+                assert f"operation_id={item['identity']['operation_id']}" in data["response_text"]
+                assert f"status={item['operation']['status']}" in data["response_text"]
+        return envelope
+
+    return root, create, query
+
+
+@pytest.mark.parametrize("stored_status, statuses, expected_count", [
+    pytest.param("applied", ["applied"], 1, id="match-applied"),
+    pytest.param("applied", ["failed"], 0, id="mismatch"),
+    pytest.param("applied", ["failed", "applied"], 1, id="multiple"),
+    pytest.param("failed", ["failed"], 1, id="match-failed"),
+    pytest.param("applied", [" applied ", "applied"], 1, id="trim-duplicates"),
+    pytest.param("applied", ["APPLIED"], 0, id="case-sensitive"),
+])
+def test_operation_timeline_id_respects_explicit_statuses(
+    operation_timeline_query, stored_status, statuses, expected_count,
+):
+    _root, create, query = operation_timeline_query
+    create([
+        {"operation_id": "op-target", "status": stored_status},
+        {"operation_id": "op-other", "status": stored_status},
+    ])
+    result = query(operation_id="op-target", statuses=statuses)
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["timeline_count"] == expected_count
+    normalized = [status.strip() for status in statuses]
+    assert data["filters"]["statuses"] == normalized
+    assert data["filters"]["operation_id"] == "op-target"
+    assert "statuses=" + ",".join(normalized) in data["response_text"]
+    if expected_count:
+        item = data["timelines"][0]
+        assert item["identity"]["operation_id"] == "op-target"
+        assert item["operation"]["status"] == stored_status
+        assert item["action_lifecycle"]["status"] == stored_status
+        assert item["action_lifecycle"]["source"] == "operation_timeline"
+    else:
+        assert data["warnings"] == []
+        assert "没有匹配的 operator operation。" in data["response_text"]
+
+
+@pytest.mark.parametrize("status_input", [
+    pytest.param({}, id="omitted"),
+    pytest.param({"statuses": []}, id="empty"),
+    pytest.param({"statuses": [" ", "\t", ""]}, id="blank"),
+])
+def test_operation_timeline_empty_statuses_preserve_lookup_defaults(operation_timeline_query, status_input):
+    _root, create, query = operation_timeline_query
+    defaults = ["previewed", "confirmed", "running", "applied", "skipped", "cancelled", "expired", "failed"]
+    create([{"operation_id": f"op-{status}", "status": status} for status in [*defaults, "archived"]])
+    exact = query(operation_id="op-archived", **status_input)
+    assert exact["ok"] is True
+    assert exact["data"]["timeline_count"] == 1
+    assert exact["data"]["timelines"][0]["operation"]["status"] == "archived"
+    assert "statuses" not in exact["data"]["filters"]
+    assert "statuses=" not in exact["data"]["response_text"]
+    for id_input in ({}, {"operation_id": " \t"}):
+        listed = query(**id_input, **status_input)
+        assert listed["ok"] is True
+        assert listed["data"]["timeline_count"] == 8
+        assert {item["identity"]["operation_id"] for item in listed["data"]["timelines"]} == {
+            f"op-{status}" for status in defaults
+        }
+        assert "statuses" not in listed["data"]["filters"]
+        assert "operation_id" not in listed["data"]["filters"]
+    explicit_defaults = query(operation_id="op-archived", statuses=defaults)
+    assert explicit_defaults["ok"] is True
+    assert explicit_defaults["data"]["timeline_count"] == 0
+    assert explicit_defaults["data"]["warnings"] == []
+    assert explicit_defaults["data"]["filters"]["statuses"] == defaults
+    explicit_custom = query(operation_id="op-archived", statuses=["archived"])
+    assert explicit_custom["ok"] is True
+    assert explicit_custom["data"]["timeline_count"] == 1
+    assert explicit_custom["data"]["timelines"][0]["operation"]["status"] == "archived"
+    assert explicit_custom["data"]["filters"]["statuses"] == ["archived"]
+
+
+@pytest.mark.parametrize("changed_filter", [
+    pytest.param({"authenticated_channel": "other"}, id="channel"),
+    pytest.param({"authenticated_sender_id": "other-sender"}, id="sender"),
+    pytest.param({"authenticated_conversation_id": "other-conversation"}, id="conversation"),
+    pytest.param({"operation_types": ["monitor_run"]}, id="type"),
+])
+def test_operation_timeline_id_keeps_other_filters(operation_timeline_query, changed_filter):
+    _root, create, query = operation_timeline_query
+    create([{"operation_id": "op-target", "status": "applied"}])
+    request = {"operation_id": "op-target", "statuses": ["applied"], "operation_types": ["model_use"]}
+    matched = query(**request)
+    assert matched["ok"] is True
+    assert matched["data"]["timeline_count"] == 1
+    assert matched["data"]["timelines"][0]["identity"]["operation_id"] == "op-target"
+    excluded = query(**(request | changed_filter))
+    assert excluded["ok"] is True
+    assert excluded["data"]["timeline_count"] == 0
+    assert excluded["data"]["warnings"] == []
+    assert excluded["data"]["filters"]["statuses"] == ["applied"]
+    assert excluded["data"]["filters"]["operation_types"] == (request | changed_filter)["operation_types"]
+
+
+def test_operation_timeline_filters_before_ordered_limit(operation_timeline_query):
+    _root, create, query = operation_timeline_query
+    create([
+        {"operation_id": "failed-first", "status": "failed"},
+        {"operation_id": "failed-second", "status": "failed"},
+        {"operation_id": "applied-newest", "status": "applied", "created_at": "2026-10-18T01:00:00+00:00"},
+    ])
+    for limit, expected_ids in ((1, ["failed-second"]), (2, ["failed-second", "failed-first"])):
+        result = query(statuses=["failed"], limit=limit)
+        assert result["ok"] is True
+        assert result["data"]["filters"]["limit"] == limit
+        assert result["data"]["timeline_count"] == limit
+        assert [item["identity"]["operation_id"] for item in result["data"]["timelines"]] == expected_ids
+        assert all(item["operation"]["status"] == "failed" for item in result["data"]["timelines"])
+
+
+@pytest.mark.parametrize("pending_table, audit_status, requested_status, expected_count", [
+    pytest.param(True, "applied", "failed", 0, id="pending-audit-mismatch"),
+    pytest.param(False, "failed", "failed", 1, id="audit-only-match"),
+    pytest.param(False, "failed", "applied", 0, id="audit-only-mismatch"),
+    pytest.param(True, "failed", "failed", 1, id="historical-match"),
+])
+def test_operation_timeline_statuses_preserve_audit_fallback(
+    operation_timeline_query, pending_table, audit_status, requested_status, expected_count,
+):
+    _root, create, query = operation_timeline_query
+    create(
+        [{"operation_id": "op-target", "status": "applied"}] if pending_table else [],
+        [{"operation_id": "op-target", "status": audit_status}], pending_table=pending_table,
+    )
+    result = query(operation_id="op-target", statuses=[requested_status])
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["timeline_count"] == expected_count
+    assert data["filters"]["statuses"] == [requested_status]
+    assert ("operations_table_missing" in data["warnings"]) is (not pending_table)
+    if expected_count:
+        item = data["timelines"][0]
+        assert item["identity"]["operation_id"] == "op-target"
+        assert item["operation"]["source"] == "audit_only"
+        assert item["operation"]["status"] == item["outcome"]["status"] == "failed"
+        assert item["outcome"]["ok"] is False
+        assert item["audit"]["related_count"] == 1
+        assert item["action_lifecycle"]["status"] == "failed"
+        assert item["action_lifecycle"]["source"] == "operation_timeline_audit_only"
+        assert "operation_missing" in item["warnings"]
+        assert ("operation_store_missing" in item["warnings"]) is (not pending_table)
+    else:
+        assert data["warnings"] == ([] if pending_table else ["operations_table_missing"])
+
+
+@pytest.mark.parametrize("statuses", [
+    pytest.param(None, id="null"),
+    pytest.param("applied,failed", id="csv"),
+    pytest.param(1, id="scalar"),
+])
+def test_operation_timeline_rejects_non_list_statuses(operation_timeline_query, statuses):
+    _root, create, query = operation_timeline_query
+    create([{"operation_id": "op-target", "status": "applied"}])
+    result = query(operation_id="op-target", statuses=statuses, expect_connect=False)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INPUT_ERROR"
+    assert result["error"]["details"]["schema_errors"][0]["path"] == "statuses"
+
+
+def test_operation_timeline_missing_database_remains_missing(operation_timeline_query):
+    root, _create, query = operation_timeline_query
+    missing = root / "missing-parent" / "missing.sqlite3"
+    result = query(audit_db=str(missing), operation_id="op-target", statuses=["failed"], expect_connect=False)
+    assert result["ok"] is True
+    assert result["data"]["audit_db_exists"] is False
+    assert result["data"]["timeline_count"] == 0
+    assert result["data"]["warnings"] == ["audit_db_missing"]
+    assert result["warnings"] == ["audit_db_missing"]
+    assert result["data"]["filters"]["statuses"] == ["failed"]
+    assert not missing.exists()
+    assert not missing.parent.exists()
+
+
+def test_operation_timeline_corrupt_database_is_error(operation_timeline_query):
+    root, _create, query = operation_timeline_query
+    corrupt = root / "corrupt.sqlite3"
+    corrupt.write_bytes(b"synthetic non-SQLite evidence")
+    result = query(audit_db=str(corrupt), operation_id="op-target", statuses=["failed"])
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CONFIG_ERROR"
+    assert result["error"]["details"]["error_type"] == "DatabaseError"
+    assert corrupt.read_bytes() == b"synthetic non-SQLite evidence"
+
+
+def test_operation_timeline_rejects_conflicting_identity_before_read(operation_timeline_query):
+    _root, create, query = operation_timeline_query
+    create([{"operation_id": "op-target", "status": "applied"}])
+    result = query(operation_id="op-target", statuses=["applied"], sender_id="other-sender", expect_connect=False)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "PERMISSION_DENIED"

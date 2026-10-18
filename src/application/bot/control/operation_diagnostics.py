@@ -343,11 +343,12 @@ def _read_operation_rows(
     where: list[str] = []
     params: list[Any] = []
     normalized_operation_id = str(operation_id or "").strip()
-    normalized_statuses = {str(item).strip() for item in statuses if str(item).strip()} or set(_TIMELINE_STATUSES)
+    normalized_statuses = {str(item).strip() for item in statuses if str(item).strip()}
     if normalized_operation_id:
         where.append("operation_id = ?")
         params.append(normalized_operation_id)
-    else:
+    if normalized_statuses or not normalized_operation_id:
+        normalized_statuses = normalized_statuses or set(_TIMELINE_STATUSES)
         where.append(f"status IN ({','.join('?' for _ in sorted(normalized_statuses))})")
         params.extend(sorted(normalized_statuses))
     normalized_channel = str(channel or "").strip().lower()
