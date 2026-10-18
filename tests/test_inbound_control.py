@@ -4721,12 +4721,12 @@ def operation_timeline_query(tmp_path, monkeypatch):
     connection_calls = []
     expected_uri = None
 
-    def connect(uri, *args, **kwargs):
-        connection_calls.append((uri, args, dict(kwargs)))
-        assert uri == expected_uri
+    def connect(database_uri, *args, **kwargs):
+        connection_calls.append((database_uri, args, dict(kwargs)))
+        assert database_uri == expected_uri
         assert args == ()
         assert kwargs == {"uri": True}
-        return sqlite3.connect(uri, *args, **kwargs)
+        return sqlite3.connect(database_uri, *args, **kwargs)
 
     monkeypatch.setattr(operation_diagnostics, "sqlite3", SimpleNamespace(
         connect=connect, Row=sqlite3.Row, Error=sqlite3.Error,
