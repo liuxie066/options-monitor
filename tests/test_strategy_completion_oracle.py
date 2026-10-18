@@ -24,7 +24,26 @@ def test_oracle_provenance():
 
 @pytest.mark.parametrize("case", sorted(FIXTURE["cases"]))
 def test_real_steps_match_pre_amendment_source(case, actual):
-    assert actual[case] == FIXTURE["cases"][case]
+    observed = actual[case]
+    clock = oracle.old.NOW.isoformat()
+    for row in observed["finals"]:
+        assert row["decision_now_utc"] == clock
+    for collection in ("decisions", "sealed_decisions"):
+        for decision in observed[collection]:
+            assert decision["normalized_input"]["decision_now_utc"] == clock
+            assert decision["opening_decision"]["normalized_input"]["decision_now_utc"] == clock
+
+    def without_recorded_clock(value):
+        if isinstance(value, dict):
+            if "decision_now_utc" in value:
+                assert value["decision_now_utc"] == clock
+            return {k: without_recorded_clock(v) for k, v in value.items() if k != "decision_now_utc"}
+        if isinstance(value, list):
+            return [without_recorded_clock(v) for v in value]
+        return value
+
+    # The immutable pre-clock oracle still compares every original business field.
+    assert without_recorded_clock(observed) == FIXTURE["cases"][case]
 
 
 @pytest.mark.parametrize(
