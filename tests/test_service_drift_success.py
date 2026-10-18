@@ -25,7 +25,7 @@ def _summary(**changes):
         extra_profile_units=[], extra_installed_units=[], extra_managed_units=[],
         extra_managed_files=[], mismatched_units=[], missing_managed_files=[],
         mismatched_managed_files=[], mode_mismatched_managed_files=[],
-        activation_drift_units=[], preserved_activation_units=[],
+        activation_drift_units=[], activation_unknown_units=[], preserved_activation_units=[],
         activation_preservation_conflicts=[], execution_drift_units=[],
         profile_content_changed=False, compatibility_warning_count=0,
     )
@@ -51,7 +51,7 @@ def test_information_warnings_succeed_consistently(facts):
     "missing_required_units", "missing_profile_units", "missing_installed_units",
     "extra_profile_units", "extra_managed_units", "extra_managed_files",
     "mismatched_units", "missing_managed_files", "mismatched_managed_files",
-    "mode_mismatched_managed_files", "activation_drift_units",
+    "mode_mismatched_managed_files", "activation_drift_units", "activation_unknown_units",
     "activation_preservation_conflicts", "execution_drift_units", "profile_content_changed",
 ])
 def test_every_unresolved_drift_category_blocks(category):
@@ -109,7 +109,7 @@ def test_consumers_use_owner_boolean_not_status(tmp_path, summary, expected_ok):
 
 
 @pytest.fixture
-def runtime_drift_query(tmp_path, monkeypatch):
+def runtime_drift_query(tmp_path, monkeypatch, request):
     from src.application import service_drift as drift_owner
     from src.application.agent_tools import diagnostics, runtime_status_impl as status_owner
     from src.application.settings import EffectiveEnv
@@ -188,8 +188,9 @@ def runtime_drift_query(tmp_path, monkeypatch):
         "service_status_from_profile", "_tick_unit_execution_status",
     ):
         monkeypatch.setattr(status_owner, name, forbidden(name))
-    for name in ("_expected_bundle_from_profile", "_effective_profile_with_legacy_feishu_credential"):
-        monkeypatch.setattr(drift_owner, name, forbidden(name))
+    if getattr(request, "param", None) != "actual-owner":
+        for name in ("_expected_bundle_from_profile", "_effective_profile_with_legacy_feishu_credential"):
+            monkeypatch.setattr(drift_owner, name, forbidden(name))
     for module in (status_owner, drift_owner):
         monkeypatch.setattr(module, "subprocess", SimpleNamespace(
             run=forbidden(f"{module.__name__}.subprocess.run"),
@@ -308,16 +309,20 @@ def test_runtime_status_requires_boolean_drift_success(runtime_drift_query, summ
 def test_runtime_status_required_drift_warning_takes_priority(runtime_drift_query, summary_has_required):
     _root, query = runtime_drift_query
     missing = ["PRIVATE_REQUIRED_UNIT"]
-    summary = _summary(missing_required_units=missing)
+    summary = _summary(missing_required_units=missing, activation_unknown_units=["PRIVATE_UNKNOWN_UNIT"])
     if not summary_has_required:
         summary.pop("missing_required_units")
-    envelope, source = query({"summary": summary, "missing_required_units": missing})
+    envelope, source = query({
+        "summary": summary, "missing_required_units": missing,
+        "activation_unknown_units": ["PRIVATE_UNKNOWN_UNIT"],
+    })
     public_json, formatted = _assert_runtime_drift_result(
         envelope, source, warning_code="SERVICE_DRIFT_REQUIRED_UNIT_MISSING",
     )
     assert envelope["data"]["service_drift"]["summary"]["missing_required_count"] == 1
     for output in [public_json, *formatted]:
         assert "PRIVATE_REQUIRED_UNIT" not in output
+        assert "PRIVATE_UNKNOWN_UNIT" not in output
 
 
 @pytest.mark.parametrize("provider, profile, reason", [
@@ -336,7 +341,11 @@ def test_runtime_status_keeps_actual_skipped_drift_healthy(runtime_drift_query, 
         "preserved_activation_states": {},
     })
     assert source["reason"] == reason
-    assert source["summary"] == {"ok": True, "status": "skipped", "error_count": 0, "warning_count": 0}
+    assert source["summary"] == {
+        "ok": True, "status": "skipped", "error_count": 0, "warning_count": 0,
+        "activation_unknown_count": 0,
+    }
+    assert source["activation_unknown_units"] == []
     envelope, source = query(source)
     _assert_runtime_drift_result(envelope, source)
     assert envelope["data"]["service_drift"]["reason"] == reason
@@ -365,9 +374,73 @@ def test_runtime_status_retains_real_drift_check_exception(runtime_drift_query, 
     assert source["summary"]["ok"] is False
     assert source["summary"]["status"] == "error"
     assert source["summary"]["error_count"] == 1
+    assert source["summary"]["activation_unknown_count"] == 0
+    assert source["activation_unknown_units"] == []
     public_json, formatted = _assert_runtime_drift_result(envelope, source, warning_code="SERVICE_DRIFT")
     assert envelope["data"]["service_drift"]["reason"] == "service_drift_check_failed"
     for output in [public_json, *formatted]:
         assert "PRIVATE_DRIFT_EXCEPTION" not in output
         assert "PermissionError" not in output
         assert str(private_path) not in output
+
+
+@pytest.mark.parametrize("runtime_drift_query", ["actual-owner"], indirect=True)
+def test_runtime_status_retains_actual_unknown_drift(runtime_drift_query, tmp_path, monkeypatch):
+    from src.application.service_drift import service_drift
+    from tests.service_deploy_test_support import _synthetic_drift_context
+
+    _root, query = runtime_drift_query
+    target = "options-monitor-projection-verify.timer"
+    with monkeypatch.context() as producer_patch:
+        fixture = _synthetic_drift_context(producer_patch, tmp_path / "producer")
+        calls = []
+
+        def run_cmd(command, **kwargs):
+            command = list(command)
+            calls.append(command)
+            if (kwargs != {"capture_output": True, "text": True, "timeout": 60, "check": False}
+                    or len(command) != 3 or command[0] != "systemctl"
+                    or command[1] not in {"is-enabled", "is-active"}
+                    or command[2] not in fixture["timers"]):
+                fixture["fail"]("unexpected producer query")()
+            value = "enabled" if command[1] == "is-enabled" else "active"
+            if command[1:] == ["is-active", target]:
+                value = ""
+            return subprocess.CompletedProcess(command, 0, stdout=value, stderr="")
+
+        before = fixture["inventory"]()
+        source = service_drift(
+            repo_root=fixture["repo"], runtime_root=fixture["runtime"],
+            profile_path=fixture["profile_path"], systemd_unit_root=fixture["units"], run_cmd=run_cmd,
+        )
+        assert fixture["forbidden"] == []
+        assert fixture["inventory"]() == before
+    assert ["systemctl", "is-active", target] in calls
+    assert source["activation_unknown_units"] == [target]
+    assert source["summary"]["activation_unknown_count"] == 1
+    assert source["summary"]["error_count"] == source["summary"]["warning_count"] == 1
+    assert source["summary"]["ok"] is False and source["summary"]["status"] == "error"
+    assert source["profile_content_changed"] is False
+    original = deepcopy(source)
+    envelope, observed = query(source)
+    assert observed is source and observed == original
+    public_json, formatted = _assert_runtime_drift_result(envelope, observed, warning_code="SERVICE_DRIFT")
+    for output in [public_json, *formatted]:
+        assert target not in output
+        assert source["profile_path"] not in output
+    assert fixture["inventory"]() == before
+
+
+@pytest.mark.parametrize("include_timer", [
+    pytest.param(False, id="credential-only"), pytest.param(True, id="credential-and-timer"),
+])
+def test_secret_migration_unknown_filter_preserves_credential_exclusion(include_timer):
+    from src.application.service_drift import FEISHU_AGENT_CREDENTIAL_SERVICE, _unrelated_secret_migration_drift
+
+    timer = "options-monitor-projection-verify.timer"
+    units = [FEISHU_AGENT_CREDENTIAL_SERVICE, *([timer] if include_timer else [])]
+    source = {"activation_unknown_units": units}
+    before = deepcopy(source)
+    result = _unrelated_secret_migration_drift(source)
+    assert result == ({"activation_unknown_units": [timer]} if include_timer else {})
+    assert source == before
