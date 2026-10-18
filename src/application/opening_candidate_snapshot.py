@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -116,6 +118,7 @@ def seal_opening_candidate_snapshot(
         Mapping[str, Iterable[Mapping[str, Any]]] | None
     ) = None,
     run_mode: Mapping[str, Any],
+    capacity_fx_evidence: Mapping[str, Any] | None = None,
     sealed_at: datetime | str | None = None,
 ) -> dict[str, Any]:
     """Assemble, validate, and immutably publish one account-run snapshot."""
@@ -184,7 +187,7 @@ def seal_opening_candidate_snapshot(
         risk_policy_hash=policy_hash,
         candidate_evaluations=candidate_evaluations,
     )
-    ranked = _ranked_candidates(
+    ranked, ranking_input_ids = _ranked_candidates(
         final_candidates,
         modes=modes,
         decision_index=decision_index,
@@ -237,8 +240,11 @@ def seal_opening_candidate_snapshot(
         "scope_results": scope_results,
         "candidate_decisions": decisions,
         "ranked_candidates": ranked,
+        "replay_evidence": {"schema_version": 1, "ranking_input_ids": ranking_input_ids},
         **mode_fields,
     }
+    if capacity_fx_evidence is not None:
+        payload["replay_evidence"]["capacity_fx"] = deepcopy(dict(capacity_fx_evidence))
     payload["content_sha256"] = canonical_sha256(payload)
     validate_opening_candidate_snapshot(
         payload,
@@ -542,6 +548,7 @@ def validate_opening_candidate_snapshot(
         if opening.get("accepted") is True:
             accepted_decision_ids.add(candidate_id)
 
+    _validate_replay_evidence(item, decision_by_id, modes, dependencies)
     decision_ids = set(candidate_ids)
     mode_positions: dict[str, int] = {}
     validated_ranked_ids: set[str] = set()
@@ -1001,6 +1008,44 @@ def _snapshot_decisions(
     return out, index
 
 
+def _validate_replay_evidence(item, decision_by_id, modes, dependencies) -> None:
+    """Validate optional new evidence without changing historical read contracts."""
+    if "replay_evidence" not in item:
+        return
+    evidence = item["replay_evidence"]
+    if not isinstance(evidence, dict) or type(evidence.get("schema_version")) is not int or evidence["schema_version"] != 1:
+        raise OpeningCandidateSnapshotError("opening replay evidence schema is invalid")
+    inputs = evidence.get("ranking_input_ids")
+    if not isinstance(inputs, dict) or set(inputs) != set(modes):
+        raise OpeningCandidateSnapshotError("opening ranking input modes are invalid")
+    for mode, ids in inputs.items():
+        expected = {cid for cid, d in decision_by_id.items()
+                    if d.get("strategy_mode") == mode and (d.get("opening_decision") or {}).get("accepted") is True}
+        if (not isinstance(ids, list) or any(not isinstance(cid, str) for cid in ids)
+                or len(ids) != len(set(ids)) or set(ids) != expected):
+            raise OpeningCandidateSnapshotError("opening ranking inputs must exactly cover accepted decisions")
+    if "capacity_fx" not in evidence:
+        return
+    fx = evidence["capacity_fx"]
+    fields = {"source_snapshot", "source_sha256", "evaluated_at_utc", "status", "put_fx_status", "usd_per_cny", "cny_per_hkd"}
+    if not isinstance(fx, dict) or set(fx) != fields:
+        raise OpeningCandidateSnapshotError("opening capacity FX evidence fields are invalid")
+    source = fx["source_snapshot"]
+    if (not isinstance(source, dict) or not isinstance(source.get("pairs"), dict)
+            or canonical_sha256(source) != fx["source_sha256"]
+            or fx["source_sha256"] != _dependency_hash(dependencies, "fx")):
+        raise OpeningCandidateSnapshotError("opening capacity FX source binding mismatch")
+    _timestamp(fx["evaluated_at_utc"])
+    if not isinstance(fx["status"], str) or fx["status"] not in {"ready", "unavailable", "unavailable_stale"}:
+        raise OpeningCandidateSnapshotError("opening capacity FX status is invalid")
+    if fx["put_fx_status"] is not None and not isinstance(fx["put_fx_status"], str):
+        raise OpeningCandidateSnapshotError("opening capacity FX override is invalid")
+    for name in ("usd_per_cny", "cny_per_hkd"):
+        value = fx[name]
+        if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value <= 0):
+            raise OpeningCandidateSnapshotError("opening capacity FX scalar is invalid")
+
+
 def _ranked_candidates(
     rows_by_mode: Mapping[str, Iterable[Mapping[str, Any]]],
     *,
@@ -1009,10 +1054,12 @@ def _ranked_candidates(
     account: str,
     futu_account_id: str,
     market: str,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
     combined: list[dict[str, Any]] = []
+    input_ids: dict[str, list[str]] = {}
     for mode in modes:
         source_rows: list[dict[str, Any]] = []
+        input_ids[mode] = []
         for item in rows_by_mode.get(mode, []):
             final_row = dict(item)
             decision = decision_index.get(_contract_key(mode, final_row))
@@ -1031,6 +1078,7 @@ def _ranked_candidates(
             if final_row.get("decision_now_utc") != normalized.get("decision_now_utc"):
                 raise OpeningCandidateSnapshotError("final candidate decision time mismatch")
             source_rows.append(normalized)
+            input_ids[mode].append(str(decision["candidate_id"]))
         _validate_core_scope(source_rows, mode=mode, account=account, market=market)
         for mode_rank, ranked_row in enumerate(
             rank_candidates(source_rows, mode=mode),
@@ -1070,7 +1118,7 @@ def _ranked_candidates(
             )
     # A strategy rank is authoritative; cross-strategy interleaving is stable only.
     # Consumers expect each strategy's contiguous order, not a cross-strategy rank.
-    return sorted(combined, key=lambda row: (modes.index(str(row["strategy_mode"])), int(row["rank"])))
+    return sorted(combined, key=lambda row: (modes.index(str(row["strategy_mode"])), int(row["rank"]))), input_ids
 
 
 def _strategy_results(

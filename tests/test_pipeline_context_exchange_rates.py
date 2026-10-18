@@ -277,6 +277,11 @@ def test_prepared_fx_rechecks_capacity_at_scan_time(monkeypatch, tmp_path: Path,
 
     now = datetime.fromisoformat("2026-10-08T01:43:00+00:00" if reopened else "2026-10-02T01:43:00+00:00")
     monkeypatch.setattr(fx, "_utc_now", lambda: now)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+    monkeypatch.setattr(ctx, "datetime", Clock)
     snapshot = {
         "schema_version": 2,
         "pairs": {
@@ -324,3 +329,18 @@ def test_prepared_fx_rechecks_capacity_at_scan_time(monkeypatch, tmp_path: Path,
         assert current_option["cash_secured_total_cny"] == expected_cny
         assert current_portfolio["exchange_rate_status"] == "ready"
         assert (usd, hkd) == (1 / 7.2, 0.92)
+
+
+@pytest.mark.parametrize("status", ["ready", "unavailable", "unavailable_stale"])
+@pytest.mark.parametrize("prior", [None, "unavailable_stale", "fresh"])
+def test_final_put_fx_override_preserves_prepared_input(status, prior):
+    from src.application.pipeline_context import apply_sell_put_fx_status
+
+    original = {"_sell_put_fx_status": prior, "cash_by_currency": {"USD": 100}}
+    result = apply_sell_put_fx_status(original, status)
+    assert result["_sell_put_fx_status"] == ("unavailable_stale" if status == "unavailable_stale" else prior)
+    assert original["_sell_put_fx_status"] == prior
+    assert (result is original) == (status != "unavailable_stale")
+    missing = {}
+    preserved = apply_sell_put_fx_status(missing, status)
+    assert ("_sell_put_fx_status" in preserved) == (status == "unavailable_stale")

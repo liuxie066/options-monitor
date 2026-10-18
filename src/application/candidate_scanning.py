@@ -167,15 +167,20 @@ def _calculation_decision_record(
     config: CandidateScanConfig,
     reason: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    detail = dict(reason or {})
-    specific_reason = str(
-        detail.get("rule") or "candidate_metrics_unavailable"
-    )
     normalized_input = contract.to_gate_payload()
     if config.decision_now_utc is not None:
         normalized_input["decision_now_utc"] = config.decision_now_utc
     if config.resolved_strategy is not None:
         normalized_input = attach_strategy_identity(normalized_input, config.resolved_strategy)
+    return build_calculation_rejection_decision(normalized_input, mode=config.mode, reason=reason)
+
+
+def build_calculation_rejection_decision(
+    normalized_input: dict[str, Any], *, mode: str, reason: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Classify a calculation failure using the ordinary scan precedence."""
+    detail = dict(reason or {})
+    specific_reason = str(detail.get("rule") or "candidate_metrics_unavailable")
     opening_status = str(
         normalized_input.get("opening_contract_status") or ""
     ).strip().lower()
@@ -195,9 +200,9 @@ def _calculation_decision_record(
             reject_reason = candidate_reason
             break
     opening_decision = build_candidate_decision(
-        mode=config.mode,
-        symbol=contract.symbol,
-        contract_symbol=contract.contract_symbol,
+        mode=mode,
+        symbol=normalized_input.get("symbol"),
+        contract_symbol=normalized_input.get("contract_symbol"),
         accepted=False,
         rejects=[
             {

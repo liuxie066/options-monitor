@@ -67,14 +67,14 @@ def sell_put_opening_capacity_inputs(
     portfolio_ctx: dict[str, Any] | None, exchange_rate_converter: CurrencyConverter,
 ) -> dict[str, Any]:
     """Compatibility projection of the core capacity result."""
-    capacity = _sell_put_opening_capacity(
+    capacity = calculate_sell_put_opening_capacity(
         symbol=symbol, strike=strike, multiplier=multiplier, currency=currency,
         portfolio_ctx=portfolio_ctx, exchange_rate_converter=exchange_rate_converter,
     )
     return {key: value for key, value in capacity.items() if key.startswith("put_cash_")}
 
 
-def _sell_put_opening_capacity(
+def calculate_sell_put_opening_capacity(
     *,
     symbol: str,
     strike: Any,
@@ -427,7 +427,7 @@ def enrich_sell_put_candidates_with_cash(
             mode="put", exchange_rate_converter=exchange_rate_converter,
             capacity_inputs=strategy_core.PutCapacityInputs(tuple((cash_by_ccy or {}).items()), fx_status=fx_status),
         )
-        capacity = _sell_put_opening_capacity(
+        capacity = calculate_sell_put_opening_capacity(
             symbol=symbol,
             strike=row.get('strike'),
             multiplier=row.get('multiplier'),

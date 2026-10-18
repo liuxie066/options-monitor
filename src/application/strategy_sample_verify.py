@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from copy import deepcopy
+from datetime import datetime
 import json
 import math
 from pathlib import Path
@@ -17,12 +18,15 @@ from om_strategy_core import (
     CallCapacityInputs,
     CurrencyConverter,
     ExchangeRates,
-    PutCapacityInputs,
     calculate_capacity,
     calculate_metrics,
     evaluate_candidates,
     rank_candidates,
 )
+from src.application.candidate_scanning import build_calculation_rejection_decision
+from src.application.pipeline_context import apply_sell_put_fx_status
+from src.application.sell_put_cash import calculate_sell_put_opening_capacity
+from src.infrastructure.exchange_rates import exchange_rate_observation_status, project_exchange_rate_snapshot
 from src.application.candidate_evidence_history import load_candidate_snapshot_bundle_for_inspection
 from src.application.candidate_snapshot_manifest import CandidateSnapshotManifestError
 from src.application.opening_candidate_snapshot import candidate_universe_summary
@@ -99,14 +103,27 @@ def _contexts(base, snapshot):
     return contexts, errors
 
 
-def _rates(snapshot, contexts):
-    ledger = contexts.get("ledger")
-    if not ledger:
-        raise ValueError("bound prepared ledger FX facts unavailable")
+def _rates(snapshot, contexts, checks):
+    ledger, portfolio = contexts.get("ledger"), contexts.get("portfolio")
+    if not ledger or not portfolio:
+        raise ValueError("bound prepared ledger/portfolio FX facts unavailable")
     fx_hash = next(d["sha256"] for d in snapshot["dependencies"] if d["kind"] == "fx")
-    if (ledger.get("prepared_authority") or {}).get("run_fx_snapshot_sha256") != fx_hash:
+    if ((ledger.get("prepared_authority") or {}).get("run_fx_snapshot_sha256") != fx_hash
+            or portfolio.get("fx_snapshot_sha256") != fx_hash):
         raise ValueError("prepared FX facts are not bound to sample FX dependency")
-    usd, hkd = exchange_rate_scalars_from_option_context(ledger)
+    fx = (snapshot.get("replay_evidence") or {}).get("capacity_fx")
+    if fx is None:
+        raise ValueError("final capacity FX consumption evidence missing")
+    evaluated = datetime.fromisoformat(fx["evaluated_at_utc"].replace("Z", "+00:00"))
+    projection = project_exchange_rate_snapshot(fx["source_snapshot"], purpose="capacity", now=evaluated)
+    status = exchange_rate_observation_status(projection, now=evaluated)
+    derived_portfolio = apply_sell_put_fx_status(portfolio, status)
+    usd, hkd = exchange_rate_scalars_from_option_context({"exchange_rates": projection})
+    for name, value in (("status", status), ("put_fx_status", derived_portfolio.get("_sell_put_fx_status")),
+                        ("usd_per_cny", usd), ("cny_per_hkd", hkd)):
+        _check(checks, "capacity_fx", "replay_evidence/capacity_fx/" + name, fx[name], value)
+    contexts["portfolio"] = {**derived_portfolio, "exchange_rates": projection}
+    contexts["ledger"] = {**ledger, "exchange_rates": projection}
     return ExchangeRates(usd_per_cny=usd, cny_per_hkd=hkd)
 
 
@@ -119,23 +136,15 @@ def _quantity(row, mode, contexts, converter):
         return calculate_capacity(row, mode=mode, capacity_inputs=inputs, exchange_rate_converter=converter)[
             "covered_contracts_available"
         ]
-    portfolio, ledger = contexts.get("portfolio", {}), contexts.get("ledger", {})
-    names = ("cash_by_currency", "_sell_put_fx_status")
-    if any(n not in portfolio for n in names) or "cash_secured_total_by_ccy" not in ledger:
-        raise ValueError("require bound cash_by_currency/cash_secured_total_by_ccy/_sell_put_fx_status")
-    cash, secured = portfolio["cash_by_currency"], ledger["cash_secured_total_by_ccy"]
-    if not isinstance(cash, dict) or not isinstance(secured, dict):
-        raise ValueError("raw cash and secured amounts must be explicit currency maps")
-    if any(
-        isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
-        for amounts in (cash, secured)
-        for v in amounts.values()
-    ):
-        raise ValueError("raw cash and secured amounts must be finite numbers")
-    inputs = PutCapacityInputs(tuple(cash.items()), tuple(secured.items()), portfolio["_sell_put_fx_status"])
-    return calculate_capacity(row, mode=mode, capacity_inputs=inputs, exchange_rate_converter=converter)[
-        "max_new_contracts"
-    ]
+    portfolio, ledger = contexts.get("portfolio"), contexts.get("ledger")
+    result = calculate_sell_put_opening_capacity(
+        symbol=row.get("symbol"), strike=row.get("strike"), multiplier=row.get("multiplier"),
+        currency=row.get("currency"), portfolio_ctx={**portfolio, "option_ctx": ledger} if portfolio else None,
+        exchange_rate_converter=converter,
+    )
+    if "max_new_contracts" not in result:
+        raise ValueError(result.get("put_cash_capacity_reason") or "capacity quantity unavailable")
+    return result["max_new_contracts"]
 
 
 def _decision_checks(decision, snapshot, contexts, rates, fx_error, checks):
@@ -165,19 +174,9 @@ def _decision_checks(decision, snapshot, contexts, rates, fx_error, checks):
         metrics = calculate_metrics(raw, mode=mode, avg_cost=row.get("avg_cost"), exchange_rates=rates)
     except CandidateCalculationError as exc:
         if calculation_reject and len(rejects) == 1:
-            detail = exc.to_payload()
-            actual = {"reason_code": detail["rule"], "metric_value": detail.get("metric_value")}
-            _check(checks, "filter", loc + "/calculation/metric_value", rejects[0]["metric_value"], actual)
-            _check(
-                checks, "filter", loc + "/calculation/threshold", rejects[0].get("threshold"), detail.get("threshold")
-            )
-            _check(checks, "filter", loc + "/accepted", opening["accepted"], False)
-            _check(
-                checks,
-                "filter",
-                loc + "/calculation/adapter",
-                reason="scan adapter rejection classification not reconstructed",
-            )
+            replay = build_calculation_rejection_decision(raw, mode=mode, reason=exc.to_payload())["opening_decision"]
+            for field in ("accepted", "rejects"):
+                _check(checks, "filter", loc + "/calculation/" + field, opening[field], replay[field])
         else:
             _check(checks, "metrics", loc, reason=f"metrics cannot be reconstructed: {exc}")
         return True
@@ -241,17 +240,14 @@ def _ranking_checks(snapshot, eligible, checks):
             _check(checks, "ranking", location, reason="no accepted candidates to exercise ranking")
             continue
         try:
-            rows = [d["normalized_input"] for d in accepted]
+            inputs = (snapshot.get("replay_evidence") or {}).get("ranking_input_ids")
+            if inputs is None:
+                raise ValueError("original symbol-group input order not archived")
+            rows = [by_id[cid] for cid in inputs[mode]]
             recomputed = rank_candidates(deepcopy(rows), mode=mode)
             expected = [r["facts"]["contract_symbol"] for r in recorded]
             actual = [r["contract_symbol"] for r in recomputed]
-            counts = Counter(r["symbol"] for r in rows)
-            n = len(counts)
-            _check(checks, "ranking", location + "/representatives", expected[:n], actual[:n])
-            if sum(v > 1 for v in counts.values()) > 1:
-                _check(checks, "ranking", location + "/tail", reason="original symbol-group input order not archived")
-            else:
-                _check(checks, "ranking", location + "/order", expected, actual)
+            _check(checks, "ranking", location + "/order", expected, actual)
         except (ValueError, TypeError, KeyError) as exc:
             _check(checks, "ranking", location, reason=str(exc))
 
@@ -298,9 +294,10 @@ def verify_sample(*, base: Path, run_id: str, account: str) -> dict[str, Any]:
         _check(checks, "dependency", "dependencies/" + kind, reason=error)
     rates, fx_error = ExchangeRates(), None
     try:
-        rates = _rates(snapshot, contexts)
-    except (ValueError, KeyError, StopIteration) as exc:
+        rates = _rates(snapshot, contexts, checks)
+    except (ValueError, TypeError, KeyError, StopIteration) as exc:
         fx_error = str(exc)
+        _check(checks, "capacity_fx", "replay_evidence/capacity_fx", reason=fx_error)
     eligible = set()
     for decision in snapshot["candidate_decisions"]:
         if _decision_checks(decision, snapshot, contexts, rates, fx_error, checks):

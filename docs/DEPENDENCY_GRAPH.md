@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1236 (`src`: 569, `domain`: 95, `scripts`: 16, `tests`: 553)
-- Internal import edges: 10189 total, 3903 production/script edges excluding tests
+- Internal import edges: 10212 total, 3907 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -33,7 +33,7 @@ flowchart LR
   storage["domain.storage"]
   application -->|656| domain
   application -->|4| domain_services
-  application -->|188| infrastructure
+  application -->|189| infrastructure
   application -->|2| om_strategy_core
   application -->|57| storage
   domain_services -->|6| domain
@@ -50,10 +50,10 @@ flowchart LR
   scripts -->|2| interfaces
   scripts -->|1| tests
   storage -->|1| domain
-  tests -->|4794| application
-  tests -->|603| domain
+  tests -->|4809| application
+  tests -->|602| domain
   tests -->|2| domain_services
-  tests -->|298| infrastructure
+  tests -->|300| infrastructure
   tests -->|352| interfaces
   tests -->|5| om_strategy_core
   tests -->|31| scripts
@@ -66,7 +66,7 @@ flowchart LR
 |---|---|---|
 | application | domain | 656 |
 | interfaces | application | 196 |
-| application | infrastructure | 188 |
+| application | infrastructure | 189 |
 | scripts | application | 67 |
 | application | storage | 57 |
 | infrastructure | application | 10 |
@@ -88,10 +88,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 4794 |
-| tests | domain | 603 |
+| tests | application | 4809 |
+| tests | domain | 602 |
 | tests | interfaces | 352 |
-| tests | infrastructure | 298 |
+| tests | infrastructure | 300 |
 | tests | storage | 46 |
 | tests | scripts | 31 |
 | tests | om_strategy_core | 5 |
@@ -106,7 +106,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | domain.domain | 264 |
 | src.application.ledger | domain.domain | 176 |
 | src.interfaces | src.application | 158 |
-| src.application | src.infrastructure | 133 |
+| src.application | src.infrastructure | 134 |
 | src.application.ledger | domain.domain.ledger | 73 |
 | src.application.trades | domain.domain | 64 |
 | scripts | src.application | 54 |
@@ -203,7 +203,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.runtime_paths | 42 |
 | domain.domain.trade_execution | 37 |
 | domain.domain.ledger.events | 32 |
-| src.infrastructure.exchange_rates | 30 |
+| src.infrastructure.exchange_rates | 31 |
 
 ### Highest Fan-Out Production Modules
 

@@ -783,12 +783,24 @@ manifest 与 snapshot 哈希。退出码为 `0=matched`、`1=mismatched`、`2=in
 最终指标；过滤比较封存承保输入上的接受结果和拒绝原因；排序比较封存接受集合；张数调用原容量入口。
 不复验行情供应商、账户资格或历史组合约束的真实性，不评价哪种策略收益更好。
 
-CSP 张数需要 prepared portfolio 的 `cash_by_currency`、显式 `_sell_put_fx_status` 和 ledger 的
-`cash_secured_total_by_ccy`；CC 需要 `shares_total`、`shares_can_sell`、`shares_locked`。
-缺失不能用已计算的可用现金倒推，也不能假定占用为零。历史人民币指标需要 prepared ledger 的
-有效换算值及匹配的 run FX 哈希。旧样本缺 `decision_now_utc` 时不能拿封存时间代替。
+新产生的正式 run-bound prepared 普通 CSP/CC 样本在现有 v3 快照中附带可选
+`replay_evidence`（自身版本 1）。`capacity_fx` 记录实际最终消费的原始 run FX、来源哈希、
+消费时刻、资格、换算值及显式 `put_fx_status`（可为 null）。来源同时绑定两类 prepared
+收据和快照 FX 依赖；复算用封存的消费时刻重新投影汇率，并通过原 pipeline 规则从绑定的
+prepared portfolio 推导 override：stale 时覆盖为 `unavailable_stale`，否则保留原值。
+记录值与派生结果不符就是差异，不能把记录自身当作计算依据；缺字段不能默认为 null 或 ready。
 
-快照未保留多个标的尾部候选的原始分组输入顺序，此时仅核对代表候选顺序，尾部报告证据不足。
-不支持的计算前/现金预筛阶段也报告不足。source 模式的版本身份只能证明声明的核心/模板兼容，
-没有 build digest，不能证明与历史部署逐字节相同。即使分阶段结果 matched，也不等于生产验收完成；
-下一交易日的真实新样本仍需单独验收。
+CSP 张数复用 `sell_put_cash.calculate_sell_put_opening_capacity` 的完整应用边界，校验封存
+cash verdict、可信账本资格，规范化原币占款后调用原容量核心；不能用已计算的可用现金倒推，
+也不能假定占用为零。CC 仍需要封存的 `shares_total`、`shares_can_sell`、`shares_locked`。
+这复验的是封存资格在原适配器中的消费结果，不是对券商事实或历史账户资格的独立认证。
+
+`ranking_input_ids` 在最终账户排序调用前记录实际输入顺序，必须是对应方向已接受候选的
+完整、无重复排列；离线按该顺序调用原排序 owner，比较完整多标的尾序。计算异常的拒绝分类
+复用 `candidate_scanning.build_calculation_rejection_decision`；不能重构的计算前/现金预筛阶段
+仍报告不足。空候选集合可以通过结构校验，但不能充当已执行排序的验收证据。
+
+旧样本或非 prepared 路径缺少新证据时保持可读、明确报告不足，不补写历史文件或用当前值
+恢复历史。旧样本缺 `decision_now_utc` 时不能拿封存时间代替。source 模式的版本身份只能证明
+声明的核心/模板兼容，没有 build digest，不能证明与历史部署逐字节相同。即使分阶段结果
+matched，也不等于生产验收完成；真实新样本仍需单独采集验收，collector 升级不由此离线入口执行。
