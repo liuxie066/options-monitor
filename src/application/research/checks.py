@@ -196,7 +196,7 @@ def _check_runtime(runtime: dict[str, Any], *, scheduler: dict[str, Any], findin
                 severity="fail",
                 category="partial_account_failure",
                 code="ACCOUNT_FAILURES",
-                message="One or more accounts reported failed or error status in tick metrics.",
+                message="One or more accounts reported a failed status or explicit failure reason in tick metrics.",
                 evidence=[{"source": "latest_run.state.tick_metrics.accounts", "observed": account_failures, "expected": "all accounts ok or skipped"}],
             )
         )
@@ -400,6 +400,20 @@ def _account_failures(tick_metrics: dict[str, Any]) -> list[dict[str, Any]]:
     for item in items:
         status = str(item.get("status") or item.get("last_status") or "").strip().lower()
         reason = str(item.get("reason") or item.get("error") or "").strip().lower()
-        if status in {"failed", "fail", "error"} or "traceback" in reason or "exception" in reason:
+        error_code = str(item.get("error_code") or "").strip().lower()
+        if (
+            status in {"failed", "fail", "error"}
+            or "traceback" in reason
+            or "exception" in reason
+            or reason.startswith("account_config_")
+            or error_code.startswith("account_config_")
+            or reason in {
+                "prepared_option_context_integrity_failed",
+                "required_data_snapshot_integrity_failed",
+                "required_data_snapshot_failed",
+                "required_data_snapshot_manifest_unavailable",
+                "pipeline failed",
+            }
+        ):
             failures.append(item)
     return failures
