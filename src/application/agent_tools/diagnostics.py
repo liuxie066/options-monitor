@@ -570,7 +570,10 @@ OPERATION_TIMELINE_TOOL = build_agent_tool(
         "authenticated_conversation_id": "host-injected authenticated conversation scope",
         "operation_id": "optional exact pending operation id",
         "operation_types": "optional list[str] such as manual_open/manual_close",
-        "statuses": "optional list[str] of operation statuses; defaults to operator lifecycle statuses",
+        "statuses": (
+            "optional list[str] of operation statuses; nonempty normalized values also filter operation_id; "
+            "omitted or empty values use lifecycle defaults without an ID and all statuses with an ID"
+        ),
         "limit": "optional number of recent operation timelines to return; defaults to 10",
         "audit_scan_limit": "optional number of recent audit rows to scan for response/receipt links",
     },

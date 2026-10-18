@@ -147,6 +147,8 @@ Planner flags, task profiles, per-business Scene allowlists, and
 ./om-agent run --tool operation_timeline --input-json '{"limit":10}'
 ```
 
+`operation_timeline` 的 `statuses` 为字符串列表；非空规范化列表与 `operation_id` 及认证会话范围同时过滤。省略、空列表或仅含空白项时，精确 ID 查询不限制状态，无非空 ID 的查询使用既有生命周期默认状态。历史 audit-only 证据仍按原规则重建。
+
 Bot Host persists real sessions, runs, and model/tool events. Control audit
 rows must not be repackaged as synthetic Agent plans, evidence bundles, or
 verifier traces.
