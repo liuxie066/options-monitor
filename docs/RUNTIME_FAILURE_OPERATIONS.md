@@ -39,7 +39,7 @@ SDK 的 `_init_connect_sync` / `_wait_reconnect` 钩子进入异步连接，后�
 
 `notification_perception_read` 默认读取当前审计文件末尾 1 MiB，超过部分明确标为 partial。历史查询同时传入 `start_utc` 和 `end_utc`（ISO-8601 UTC），按当前及 `audit_events.YYYYMMDD.NNNNNN.jsonl` 段逐行扫描，单次最多 64 MiB；超预算、损坏和缺失均标明覆盖不完整。请求的审计文件缺失时，窗口覆盖为 partial、完整窗口总数未知；已存在的普通空文件则可给出 complete 和精确零结果。分页必须带原查询参数与返回游标；活动文件追加允许继续，源文件被替换或轮转须重新查询。
 
-`./om service drift --output <路径>` 显式导出完整 JSON 明细，文件权限为私有。只读状态查询不会自行创建明细文件。
+`./om service drift --output <路径>` 显式导出完整 JSON 明细，文件权限为私有。只读状态查询不会自行创建明细文件。`runtime_status` 将普通 service drift 和检查失败汇总为 `SERVICE_DRIFT`，缺失必需单元时保留优先的 `SERVICE_DRIFT_REQUIRED_UNIT_MISSING` 告警。
 
 `./om logs --kind audit` 只读取文件末尾 256 KiB，超过 16 MiB 的旧审计文件仍可返回近期行；`tail_truncated` 明示未覆盖全文件。`research` 的审计尾读保留最多请求行数，单行超过 1 MiB 时标 `partial`。只读取证发生读取失败或覆盖不完整时，会向本机 stderr/journal 写 `<3>READ_DIAGNOSTIC_DEGRADED`，不尝试外发通知。
 
