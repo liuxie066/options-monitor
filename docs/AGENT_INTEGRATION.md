@@ -65,6 +65,12 @@ Errors are normalized to stable codes such as:
 - 这些是顶层错误 envelope 的稳定代码。
 - 某些底层诊断项（例如 OpenD readiness probe 的细粒度失败原因）可能会体现在 `checks[]` 中，而不是顶层错误 code 枚举中。
 
+工具输入中声明的字符串 `minLength` / `maxLength` 在 handler 执行前校验，长度按 Unicode
+码点计算，不去除空白或转换类型。可选字段仍可省略；显式空字符串只有在长度约束允许时才通过，
+仅声明 `maxLength` 或声明 `minLength: 0` 不会禁止空字符串。例如 `receipt_read` 的
+`account` / `deal_id` 显式为空或超过声明上限时，会在读取配置及回执来源前返回 `INPUT_ERROR`，
+并在 `error.details.schema_errors` 中指出字段；省略这些筛选仍按原有范围查询。
+
 ## Project reference and run evidence tools
 
 The canonical `project` toolset provides `project_context` (configuration/account

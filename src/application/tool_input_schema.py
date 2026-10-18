@@ -285,6 +285,14 @@ def _validate_value(
     enum = schema.get("enum")
     if isinstance(enum, list) and enum and value not in enum:
         errors.append(_schema_error(path=path, expected=f"one of {enum}", actual=repr(value)))
+    if isinstance(value, str):
+        min_length = schema.get("minLength")
+        max_length = schema.get("maxLength")
+        length = len(value)
+        if isinstance(min_length, int) and length < min_length:
+            errors.append(_schema_error(path=path, expected=f"at least {min_length} characters", actual=str(length)))
+        if isinstance(max_length, int) and length > max_length:
+            errors.append(_schema_error(path=path, expected=f"at most {max_length} characters", actual=str(length)))
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         minimum = schema.get("minimum")
         maximum = schema.get("maximum")
