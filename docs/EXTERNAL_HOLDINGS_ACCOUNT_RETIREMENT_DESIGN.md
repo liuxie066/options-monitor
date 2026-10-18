@@ -156,7 +156,9 @@ Wheel 确认的落点：复用 candidate snapshot 已有 kind=portfolio 依赖�
 
 Prepared manifest/payload hash、run FX hash、run config hash 继续覆盖同一事实。新运行必须封存 cash_snapshot 和 cash_source_observed_at；runtime snapshot 的 broker_cash facts 和真实 tool 投影必须带出它们、cash_balance_reliable、cash_balance_unavailable_by_row 及原始来源状态。原 snapshot section 的 not_applicable freshness 不承担业务现金可信度，校验器不能据其放行现金，相关消费者读取现金字段结论。
 
-历史兼容限定在已有 artifact 读取入口：有封存结论的报告原样重放，不以当前时钟判过期，不发 broker 请求。旧封存缺少 cash_snapshot 时，仅当原绑定的配置、源现金事实、独立可信现金观测时间、可信的当次评价时刻都齐全，才在内存中调用同一评价函数重建；否则显示现金证据不足。不得以当前配置/文件 mtime 补旧证据，也不重写原内容、hash 或已持久化报告。结构化 runtime snapshot 的 broker_cash section 新写入使用 v2，原 v1 按其固定字段集合与原 hash 校验；顶层和其他 section 版本保持原合同。仅该 section 按版本分派固定字段集合，拒绝混合形状及未知字段，不引入通用 schema 迁移器。旧结构解码成功不代表现金可用于当前决策。旧 payload fixture 应覆盖这些行为。
+历史兼容限定在已有 artifact 读取入口：有封存结论的报告原样重放，不以当前时钟判过期，不发 broker 请求。旧封存缺少 cash_snapshot 时，仅当原绑定的配置、源现金事实、独立可信现金观测时间、可信的当次评价时刻都齐全，才在内存中调用同一评价函数重建；否则显示现金证据不足。不得以当前配置/文件 mtime 补旧证据，也不重写原内容、hash 或已持久化报告。结构化 runtime snapshot 的 broker_cash section 新写入使用 v2，原 v1 按其固定字段集合与原 hash 校验；broker_positions 新写入使用 v2，顶层和其余 section 版本保持原合同。按已知 section 版本分派，拒绝混合形状及未知字段，不引入通用 schema 迁移器。旧结构解码成功不代表现金或持仓可用于当前决策。旧 payload fixture 应覆盖这些行为。
+
+broker_positions.v2 在正式组装与封存重建时共用 portfolio_position_snapshot_errors，按绑定 account 检查股票身份、范围、完整性、300 秒时效及 position_refresh_error。评价时刻仅取原 hash 绑定 payload 的 cash_snapshot.evaluated_at，接受合法带偏移的时区时间；缺失、非法或无时区则持仓不可用，不能取当前时钟、观测时间或稍后的 promoted_at_utc 替代。现金结论独立保留；持仓不可用使综合 shadow 为 data_unavailable，既有审计降级。新持仓分节即使与旧现金分节组合也必须绑定原 payload。历史 broker_positions.v1 配 broker_cash.v2 时保留原快照 complete/quality/errors 判断，配 broker_cash.v1 时保留原 manifest 判断，以原 bytes/hash 重放；正式组装始终输出持仓 v2，缺证据不能降级使用历史规则。
 
 ### 消费者共用规则
 
