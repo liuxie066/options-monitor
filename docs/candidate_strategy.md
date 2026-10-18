@@ -759,3 +759,36 @@ Wheel 扫描包装候选时必须复制选中的手数评估字典，再附加�
 产生循环引用，严格封存无法完成。Call/Put 使用相同隔离规则；只复制外层字典，不改变
 各手数的费用或容量事实。验收同时覆盖全额分配与既有部分分配测试，候选可序列化且最终
 证据不含内部评估表。
+
+
+## 15. 离线样本一致性验收
+
+在包含封存 `output_runs/<run_id>/` 依赖文件的离线目录执行：
+
+```bash
+./.venv/bin/python -m src.application.strategy_sample_verify \
+  --runtime-root /path/to/offline-bundle --run-id <run_id> --account lx
+```
+
+工具只读取明确指定的账户和运行批次，JSON 写到标准输出。它复用 manifest、快照和 prepared
+context 的原有校验入口，再调用 `om_strategy_core`；不拉行情、不读取当前账户事实、不取当前
+时间、不补缺失参数，也不改推荐、排序、张数或运行状态。
+
+结果逐项列出 `category`、`location`、封存值和复算值，缺失时给出原因；报告绑定 run/account、
+manifest 与 snapshot 哈希。退出码为 `0=matched`、`1=mismatched`、`2=insufficient_evidence`。
+存在确定差异时总体为 mismatched，同时保留不足项；没有差异但有缺口时为 insufficient_evidence。
+空样本、未完成范围以及不兼容的策略身份不能算通过。
+
+这是封存事实上的分阶段核对：指标复算使用决策时钟和绑定的历史汇率，并通过原承保核心投影
+最终指标；过滤比较封存承保输入上的接受结果和拒绝原因；排序比较封存接受集合；张数调用原容量入口。
+不复验行情供应商、账户资格或历史组合约束的真实性，不评价哪种策略收益更好。
+
+CSP 张数需要 prepared portfolio 的 `cash_by_currency`、显式 `_sell_put_fx_status` 和 ledger 的
+`cash_secured_total_by_ccy`；CC 需要 `shares_total`、`shares_can_sell`、`shares_locked`。
+缺失不能用已计算的可用现金倒推，也不能假定占用为零。历史人民币指标需要 prepared ledger 的
+有效换算值及匹配的 run FX 哈希。旧样本缺 `decision_now_utc` 时不能拿封存时间代替。
+
+快照未保留多个标的尾部候选的原始分组输入顺序，此时仅核对代表候选顺序，尾部报告证据不足。
+不支持的计算前/现金预筛阶段也报告不足。source 模式的版本身份只能证明声明的核心/模板兼容，
+没有 build digest，不能证明与历史部署逐字节相同。即使分阶段结果 matched，也不等于生产验收完成；
+下一交易日的真实新样本仍需单独验收。
