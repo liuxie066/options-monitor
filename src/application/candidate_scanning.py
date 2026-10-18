@@ -19,7 +19,7 @@ from domain.domain.engine.candidate_engine import (
     REJECT_RISK_EARNINGS_UNAVAILABLE,
 )
 from domain.domain.insurance_underwriting import InsuranceUnderwritingConfig
-from domain.domain.strategy_core import ResolvedStrategy, resolve_strategy, validate_strategy_identity
+from domain.domain.strategy_core import ResolvedStrategy, resolve_strategy, validate_strategy_identity, decision_time_from_input
 from domain.domain.symbol_identity import symbol_market
 from om_strategy_core.identity import runtime_identity
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
@@ -99,6 +99,7 @@ class CandidateScanConfig:
     strategy_profile: str | None = None
     required_data_frames: Mapping[str, pd.DataFrame] | None = None
     resolved_strategy: ResolvedStrategy | None = None
+    decision_now_utc: str | None = None
 
 
 @dataclass(frozen=True)
@@ -171,6 +172,8 @@ def _calculation_decision_record(
         detail.get("rule") or "candidate_metrics_unavailable"
     )
     normalized_input = contract.to_gate_payload()
+    if config.decision_now_utc is not None:
+        normalized_input["decision_now_utc"] = config.decision_now_utc
     if config.resolved_strategy is not None:
         normalized_input = attach_strategy_identity(normalized_input, config.resolved_strategy)
     opening_status = str(
@@ -230,6 +233,8 @@ def run_candidate_scan(
 
     if config.resolved_strategy is not None and config.resolved_strategy.mode != config.mode:
         raise ValueError("resolved strategy mode conflicts with scan")
+    if config.decision_now_utc is not None:
+        decision_time_from_input({"decision_now_utc": config.decision_now_utc})
     rows: list[dict[str, Any]] = []
     calculation_decisions: list[dict[str, Any]] = []
     for symbol in config.symbols:
@@ -260,6 +265,8 @@ def run_candidate_scan(
                 continue
             candidate = deps.build_row_fn(contract, base_values, metrics)
             if candidate is not None:
+                if config.decision_now_utc is not None:
+                    candidate["decision_now_utc"] = config.decision_now_utc
                 if config.resolved_strategy is not None:
                     candidate = attach_strategy_identity(candidate, config.resolved_strategy)
                 rows.append(candidate)

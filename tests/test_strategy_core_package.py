@@ -94,6 +94,9 @@ for c in baseline['cases']:
         assert exc.to_payload() == c['error']
     else:
         assert result == {**c['metrics'], **c['cny_fields']}
+        recorded = {**c['row'], 'decision_now_utc': c['now_utc']}
+        assert calculate_metrics(recorded, mode=c['mode'], avg_cost=c['avg_cost'],
+            exchange_rates=ExchangeRates(**c['rates'])) == result
         policy = resolve_strategy(mode=c['mode'], config=InsuranceUnderwritingConfig())
         assert evaluate_candidates([c['policy_row']], strategy=policy)['decisions'] == [c['decision']]
         constrained = calculate_constraints({**c['policy_row'], 'avg_cost': c['avg_cost']}, mode=c['mode'],
