@@ -42,10 +42,19 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert 'Environment="HOME=' not in tick
     assert str(repo / "om") + " run tick-cron --market us" in tick
     assert "--lock-path " + str(runtime / "locks" / "tick-us.lock") in tick
-    assert str(repo / "om") + " option-positions auto-close-expired" in files["systemd/options-monitor-auto-close-us.service"]["content"]
+    assert str(repo / "scripts/auto_close_schedule.sh") + " --market us" in files["systemd/options-monitor-auto-close-us.service"]["content"]
     auto_close = files["systemd/options-monitor-auto-close-us.service"]["content"]
-    assert "--apply --yes --quiet" in auto_close
-    assert "TimeoutStartSec=600" in auto_close
+    assert "--apply --yes" in auto_close
+    assert "--runtime-root " + str(runtime) in auto_close
+    assert "TimeoutStartSec=620" in auto_close
+    assert "TimeoutStopSec=10" in auto_close
+    assert "Restart=on-failure" in auto_close
+    assert "RestartSec=300" in auto_close
+    assert "RestartPreventExitStatus=2 78" in auto_close
+    assert "StartLimitIntervalSec=14400" in auto_close
+    assert "StartLimitBurst=12" in auto_close
+    assert "KillMode=control-group" in auto_close
+    assert 12 * (620 + 10 + 300) < 14400 < 23 * 3600
     assert "OnCalendar=Mon..Fri *-*-* 09..16:00/10:00 America/New_York" in tick_timer
     assert "OnUnitActiveSec=10min" not in tick_timer
     assert "OnBootSec=2min" not in tick_timer
@@ -200,8 +209,15 @@ def test_render_systemd_bundle_service_hardening() -> None:
     assert "RuntimeMaxSec=" not in "\n".join(item["content"] for item in files.values())
     assert "[Install]\nWantedBy=multi-user.target" in intake
     assert "[Install]\nWantedBy=multi-user.target" not in tick
-    assert "OnCalendar=*-*-* 09:07:00 Asia/Shanghai" in auto_close_us_timer
-    assert "OnCalendar=*-*-* 09:05:00 Asia/Shanghai" in auto_close_hk_timer
+    assert "OnCalendar=*-*-* 00:07:00 America/New_York" in auto_close_us_timer
+    assert "OnCalendar=*-*-* 00:05:00 Asia/Hong_Kong" in auto_close_hk_timer
+    assert "Persistent=true" in auto_close_us_timer
+    assert "Persistent=true" in auto_close_hk_timer
+    assert "OnBootSec=2min" in auto_close_us_timer
+    assert "OnBootSec=2min" in auto_close_hk_timer
+    for name, item in files.items():
+        if name.endswith(".timer") and "OnCalendar=" in item["content"] and "auto-close" not in name:
+            assert "OnBootSec=" not in item["content"]
     assert str(repo / "om") + " option-positions --data-config " + str(runtime / "portfolio.runtime.json") in verify
     assert "verify-projection --mode auto" in verify
     assert "[Install]\nWantedBy=multi-user.target" not in verify
@@ -1102,13 +1118,16 @@ def test_render_launchd_bundle_uses_launch_agents_and_logs(tmp_path: Path) -> No
     assert "--market" in tick
     assert "hk" in tick
     assert "<string>com.options-monitor.auto-close-hk</string>" in auto_close_hk
-    assert "<key>Hour</key>" in auto_close_hk
-    assert "<integer>9</integer>" in auto_close_hk
-    assert "<key>Minute</key>" in auto_close_hk
-    assert "<integer>5</integer>" in auto_close_hk
     assert "<string>com.options-monitor.auto-close-us</string>" in auto_close_us
-    assert "<key>Minute</key>" in auto_close_us
-    assert "<integer>7</integer>" in auto_close_us
+    import plistlib
+    for market, raw in (("hk", auto_close_hk), ("us", auto_close_us)):
+        auto = plistlib.loads(raw.encode())
+        assert auto["StartCalendarInterval"] == {}
+        assert auto["RunAtLoad"] is True
+        assert "KeepAlive" not in auto
+        assert "TZ" not in auto["EnvironmentVariables"]
+        assert "AbandonProcessGroup" not in auto
+        assert auto["ProgramArguments"][:3] == [str(repo / "scripts/auto_close_schedule.sh"), "--market", market]
     assert "<string>com.options-monitor.projection-verify</string>" in verify
     assert "<key>Hour</key>" in verify
     assert "<integer>9</integer>" in verify
