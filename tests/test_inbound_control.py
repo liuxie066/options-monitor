@@ -4755,7 +4755,13 @@ def operation_timeline_query(tmp_path, monkeypatch):
         assert inventory() == before
         assert connection_calls[call_count:] == (
             [(expected_uri, (), {"uri": True})] if expect_connect else []
-        )
+        ), {
+            "ok": envelope.get("ok"),
+            "error.code": (envelope.get("error") or {}).get("code"),
+            "error.message": str((envelope.get("error") or {}).get("message") or "")
+            .replace(str(root), "<fixture>")[:300],
+            "data.audit_db_exists": (envelope.get("data") or {}).get("audit_db_exists"),
+        }
         serialized = json.dumps(envelope, ensure_ascii=False)
         assert str(root) not in serialized
         assert "PRIVATE-" not in serialized
