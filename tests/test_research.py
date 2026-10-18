@@ -548,6 +548,129 @@ def test_research_notification_status_checks(
         assert skip["severity"] == "info"
 
 
+@pytest.mark.parametrize("container", ["list", "dict"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param({"reason": "prepared_option_context_integrity_failed"}, id="prepared-integrity"),
+        pytest.param({"reason": "required_data_snapshot_integrity_failed"}, id="required-data-integrity"),
+        pytest.param({"reason": "required_data_snapshot_failed"}, id="barrier-failed"),
+        pytest.param({"reason": "required_data_snapshot_manifest_unavailable"}, id="barrier-unavailable"),
+        pytest.param({"reason": "pipeline failed"}, id="pipeline-failed"),
+        pytest.param({"reason": "account_config_hash_mismatch"}, id="config-hash-reason"),
+        pytest.param({"reason": "account_config_prepared_option_context_invalid"}, id="config-context-reason"),
+        pytest.param({"error_code": "ACCOUNT_CONFIG_HASH_MISMATCH"}, id="config-hash-code"),
+        pytest.param({"error_code": "ACCOUNT_CONFIG_IDENTITY_MISMATCH"}, id="config-identity-code"),
+        pytest.param({"reason": "  ACCOUNT_CONFIG_HASH_MISMATCH  "}, id="normalized-reason"),
+        pytest.param({"error_code": "  account_config_identity_mismatch  "}, id="normalized-code"),
+        pytest.param({"status": "failed"}, id="status-failed"),
+        pytest.param({"status": "fail"}, id="status-fail"),
+        pytest.param({"status": " ERROR "}, id="status-error"),
+        pytest.param({"last_status": "failed"}, id="last-status"),
+        pytest.param({"reason": "RuntimeException: interrupted"}, id="exception"),
+        pytest.param({"error": "Traceback: interrupted"}, id="traceback"),
+        pytest.param({"reason": "account_execution_exception:OSError"}, id="execution-exception"),
+    ],
+)
+def test_research_identifies_explicit_account_failure(failure: dict[str, Any], container: str) -> None:
+    from src.application.research.checks import run_deterministic_checks
+
+    row = {"account": "lx", **failure}
+    accounts = [row] if container == "list" else {"lx": failure}
+    evidence = {
+        "runtime_status": _runtime_status_data(tick_metrics={"accounts": accounts}),
+        "scheduler_evidence": {"provided": True, **_scheduler_evidence()},
+    }
+    before = json.dumps(evidence, sort_keys=True)
+
+    result = run_deterministic_checks(evidence)
+
+    assert json.dumps(evidence, sort_keys=True) == before
+    assert result["status"] == result["summary"]["status"] == "fail"
+    assert result["category"] == result["summary"]["category"] == "partial_account_failure"
+    assert result["summary"]["fail_count"] == 1
+    assert len(result["findings"]) == 1
+    finding = result["findings"][0]
+    assert finding["code"] == "ACCOUNT_FAILURES"
+    assert finding["severity"] == "fail"
+    assert finding["category"] == "partial_account_failure"
+    assert "explicit failure reason" in finding["message"]
+    assert finding["evidence"] == [{
+        "source": "latest_run.state.tick_metrics.accounts",
+        "observed": [row],
+        "expected": "all accounts ok or skipped",
+    }]
+    assert len(result["issue_candidates"]) == 1
+    assert result["issue_candidates"][0]["basis"] == "ACCOUNT_FAILURES"
+    assert result["issue_candidates"][0]["create_issue"] is False
+
+
+@pytest.mark.parametrize(
+    "accounts",
+    [
+        pytest.param([{"ran_pipeline": False, "reason": "outside_scan_window", "scan_outcome": "scheduler_skipped"}], id="scheduler-skip"),
+        pytest.param([{"ran_pipeline": False, "reason": "run | 本时段无对应市场标的"}], id="no-symbols"),
+        pytest.param([{"ran_pipeline": True, "reason": "no candidates"}], id="success-empty"),
+        pytest.param([{"ran_pipeline": False}], id="pipeline-unknown"),
+        pytest.param([{"status": "unknown", "reason": "unavailable"}], id="unknown-status"),
+        pytest.param([{"reason": "unrecognized_failed"}], id="unknown-failure-text"),
+        pytest.param([{"error_code": "UNRECOGNIZED_CODE"}], id="unknown-code"),
+        pytest.param([{"error": "unavailable"}], id="plain-error-text"),
+        pytest.param([{"reason": "skip", "error": "Traceback"}], id="existing-reason-priority"),
+        pytest.param([{"status": "ok", "last_status": "failed"}], id="existing-status-priority"),
+        pytest.param([{"reason": ""}], id="empty-reason"),
+        pytest.param([{}], id="missing-fields"),
+        pytest.param(None, id="missing-accounts"),
+        pytest.param([], id="empty-list"),
+        pytest.param({}, id="empty-dict"),
+        pytest.param("unavailable", id="invalid-text"),
+        pytest.param(1, id="invalid-number"),
+        pytest.param([None, "unavailable", []], id="invalid-list-rows"),
+        pytest.param({"lx": None}, id="invalid-dict-row"),
+    ],
+)
+def test_research_does_not_infer_account_failure_from_skip_or_unknown(accounts: Any) -> None:
+    from src.application.research.checks import run_deterministic_checks
+
+    runtime = _runtime_status_data(tick_metrics={"accounts": accounts})
+    runtime["summary"]["ok"] = False
+    result = run_deterministic_checks({
+        "runtime_status": runtime,
+        "scheduler_evidence": {"provided": True, **_scheduler_evidence()},
+    })
+
+    assert result["status"] == "warn"
+    assert [item["code"] for item in result["findings"]] == ["RUNTIME_STATUS_WARNINGS"]
+    assert result["issue_candidates"] == []
+
+
+@pytest.mark.parametrize("scheduler_failed", [False, True])
+def test_research_keeps_account_attribution_alongside_other_findings(scheduler_failed: bool) -> None:
+    from src.application.research.checks import run_deterministic_checks
+
+    failures = [
+        {"account": "lx", "reason": "prepared_option_context_integrity_failed", "ran_pipeline": False},
+        {"account": "sy", "reason": "account_config_hash_mismatch", "error_code": "ACCOUNT_CONFIG_HASH_MISMATCH"},
+    ]
+    runtime = _runtime_status_data(tick_metrics={
+        "accounts": [*failures, {"account": "normal", "ran_pipeline": True}, {"account": "skip", "ran_pipeline": False}],
+        "scheduler_decision": {"should_run_scan": False, "reason": "outside_scan_window"},
+    })
+    runtime["summary"]["ok"] = False
+    result = run_deterministic_checks({
+        "runtime_status": runtime,
+        "scheduler_evidence": {"provided": True, **_scheduler_evidence(last_status="failed" if scheduler_failed else "success")},
+    })
+
+    assert result["status"] == "fail"
+    assert result["category"] == ("scheduler_failed" if scheduler_failed else "partial_account_failure")
+    findings = {item["code"]: item for item in result["findings"]}
+    assert findings["ACCOUNT_FAILURES"]["evidence"][0]["observed"] == failures
+    assert findings["RUNTIME_STATUS_WARNINGS"]["severity"] == "warn"
+    assert findings["SCHEDULER_EXPECTED_SKIP"]["severity"] == "info"
+    assert ("SCHEDULER_FAILED" in findings) is scheduler_failed
+
+
 def test_research_reports_scheduler_failure(tmp_path: Path) -> None:
     from src.application.research.service import research_tool
 
@@ -1359,6 +1482,155 @@ def test_research_collect_runs_with_local_runtime_artifacts(tmp_path: Path) -> N
     assert bundle["runtime_runs"]["summary"]["total_count"] == 1
     assert bundle["runtime_runs"]["runs"][0]["run_id"] == "run-1"
     assert bundle["runtime_logs"]["summary"]["existing_file_count"] == 1
+
+
+@pytest.mark.parametrize("case", ["prepared", "config", "unknown"])
+def test_research_collect_preserves_account_failure_through_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str,
+) -> None:
+    from src.application.agent_tools import healthcheck_impl, runtime_status_impl
+    from src.application.research.facade import run_research_collect
+
+    cfg_path = tmp_path / "config.us.json"
+    env_path = tmp_path / "isolated.env"
+    profile_path = tmp_path / "service.profile.json"
+    output_dir = tmp_path / "research"
+    current_dir = tmp_path / "current"
+    paths = {
+        "report_dir": str(tmp_path / "output_shared" / "reports"),
+        "state_dir": str(tmp_path / "output_shared" / "state"),
+        "shared_state_dir": str(tmp_path / "output_shared" / "state"),
+        "accounts_root": str(tmp_path / "output_accounts"),
+        "runs_root": str(tmp_path / "output_runs"),
+    }
+    for value in paths.values():
+        Path(value).mkdir(parents=True, exist_ok=True)
+    env_path.write_text("OM_SECRET_BACKEND=env\n", encoding="utf-8")
+    monkeypatch.setenv("OM_ENV_FILE", str(env_path))
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    monkeypatch.setenv("OM_DATA_CONFIG", str(tmp_path / "portfolio.runtime.json"))
+    monkeypatch.setenv("OM_INBOUND_AUDIT_DB", str(tmp_path / "inbound.sqlite3"))
+    cfg_path.write_text(json.dumps({
+        "_generated": {"market": "us", "source_format": "yaml"},
+        "accounts": ["lx", "sy", "normal"],
+        "symbols": [],
+        "portfolio": {"data_config": str(tmp_path / "portfolio.runtime.json")},
+        "notifications": {"provider": "wechat_clawbot", "channel": "wechat_clawbot", "target": "clawbot:test-room"},
+    }), encoding="utf-8")
+    profile_path.write_text(json.dumps({
+        "repo_root": str(tmp_path), "runtime_root": str(tmp_path),
+        "install_dir": str(tmp_path / "units"), "env_file": str(env_path),
+        "bot_config_path": str(tmp_path / "config.bot.json"),
+        "service_provider": "systemd", "include_service_status": False,
+        "services": [], "paths": paths,
+    }), encoding="utf-8")
+    observations: list[str] = []
+
+    # Only external service/channel/credential observations are replaced; file readers and Research stay real.
+    def service_drift(**kwargs):
+        assert Path(kwargs["repo_root"]) == Path(kwargs["runtime_root"]) == tmp_path
+        assert kwargs["profile_path"] == profile_path
+        observations.append("drift")
+        return {"summary": {"status": "warn"}}
+
+    def bot_status(**kwargs):
+        assert kwargs["base"] == kwargs["runtime_root"] == tmp_path
+        assert kwargs["payload"]["env_file"] == str(env_path)
+        assert kwargs["payload"]["bot_config_path"] == str(tmp_path / "config.bot.json")
+        observations.append("bot")
+        return {"available": False}
+
+    def channel_status(**kwargs):
+        assert kwargs["base"] == kwargs["runtime_root"] == tmp_path
+        assert kwargs["include_service_status"] is False
+        observations.append("channel")
+        return {"channels": {}}
+
+    def service_status(profile, *, include_status):
+        assert profile["repo_root"] == profile["runtime_root"] == str(tmp_path)
+        assert include_status is False
+        observations.append("service")
+        return {"services": []}
+
+    def unexpected_observation(*_args, **_kwargs):
+        pytest.fail("unexpected external service, credential, or healthcheck observation")
+
+    monkeypatch.setattr(runtime_status_impl, "service_drift_status", service_drift)
+    monkeypatch.setattr(runtime_status_impl, "_bot_runtime_summary", bot_status)
+    monkeypatch.setattr(runtime_status_impl, "build_channel_status", channel_status)
+    monkeypatch.setattr(runtime_status_impl, "service_status_from_profile", service_status)
+    monkeypatch.setattr(runtime_status_impl, "_tick_unit_execution_status", unexpected_observation)
+    monkeypatch.setattr(runtime_status_impl, "resolve_secret_status", unexpected_observation)
+    monkeypatch.setattr(healthcheck_impl, "run_healthcheck_tool", unexpected_observation)
+
+    account = {"account": "lx", "ran_pipeline": False}
+    if case == "prepared":
+        account.update(reason="prepared_option_context_integrity_failed", error="token=fixture-private")
+    elif case == "config":
+        account.update(reason="account_config_hash_mismatch", typed_reason="account_config_hash_mismatch",
+                       error_code="ACCOUNT_CONFIG_HASH_MISMATCH")
+    else:
+        account.update(status="unknown", reason="unavailable")
+    now = datetime.now(timezone.utc).isoformat()
+    run_dir = Path(paths["runs_root"]) / "run-1"
+    (run_dir / "state").mkdir(parents=True)
+    last_run = {"status": "ok", "run_id": "run-1", "market": "US", "ran_scan": True, "last_run_utc": now}
+    for state_dir in (Path(paths["shared_state_dir"]), run_dir / "state"):
+        (state_dir / "last_run.json").write_text(json.dumps(last_run), encoding="utf-8")
+    (Path(paths["shared_state_dir"]) / "last_run_dir.txt").write_text(str(run_dir), encoding="utf-8")
+    tick_path = run_dir / "state" / "tick_metrics.json"
+    tick_text = json.dumps({
+        "ran_scan": True, "market": "US",
+        "scheduler_decision": {"should_run_scan": True, "is_notify_window_open": True, "reason": "run"},
+        "notify_summary": {"account_messages_count": 1, "send_attempted_count": 1, "send_confirmed_count": 1, "send_failed_count": 0},
+        "accounts": [account, {"account": "sy", "ran_pipeline": False, "reason": "outside_scan_window"},
+                     {"account": "normal", "ran_pipeline": True, "reason": "no candidates"}],
+    })
+    tick_path.write_text(tick_text, encoding="utf-8")
+    write_outputs = case != "unknown"
+
+    out = run_research_collect({
+        "config_path": str(cfg_path), "profile_path": str(profile_path), **paths,
+        "scope": "quality", "run_id": "run-1", "include_healthcheck": False,
+        "write_outputs": write_outputs, "confirm": write_outputs,
+        "research_output_dir": str(output_dir), "research_current_dir": str(current_dir),
+        "scheduler_evidence": _scheduler_evidence(last_triggered_at=now),
+    }, repo_base_fn=lambda: tmp_path)
+
+    assert out["ok"] is True, out
+    assert out["tool_name"] == "research.collect"
+    assert observations == ["drift", "bot", "channel", "service"]
+    assert tick_path.read_text(encoding="utf-8") == tick_text
+    data = out["data"]
+    bundle = data["bundle"]
+    quality = bundle["runtime_quality"]
+    expected_status = "fail" if write_outputs else "warn"
+    assert data["status"] == data["summary"]["status"] == quality["status"] == expected_status
+    assert data["category"] == data["summary"]["category"] == quality["category"]
+    assert f"- status: {expected_status}" in data["handoff_markdown"]
+    assert bundle["healthcheck_snapshot"]["included"] is False
+    failures = [item for item in quality["findings"] if item["code"] == "ACCOUNT_FAILURES"]
+    assert any(item["code"] == "RUNTIME_STATUS_WARNINGS" for item in quality["findings"])
+    assert data["outputs"]["written"] is write_outputs
+    if write_outputs:
+        assert quality["category"] == "partial_account_failure"
+        assert len(failures) == 1
+        expected_account = {**account, "error": "token=***REDACTED***"} if case == "prepared" else account
+        assert failures[0]["evidence"][0]["observed"] == [expected_account]
+        assert failures[0]["severity"] == "fail"
+        assert "- category: partial_account_failure" in data["handoff_markdown"]
+        outputs = data["outputs"]
+        assert json.loads((tmp_path / outputs["bundle_path"]).read_text(encoding="utf-8")) == bundle
+        assert (tmp_path / outputs["handoff_path"]).read_text(encoding="utf-8") == data["handoff_markdown"]
+        current = json.loads((tmp_path / outputs["current_path"]).read_text(encoding="utf-8"))
+        assert current["status"] == "fail"
+        assert current["bundle_path"] == outputs["bundle_path"]
+        assert current["handoff_path"] == outputs["handoff_path"]
+        assert "fixture-private" not in json.dumps(bundle)
+    else:
+        assert failures == []
+        assert not output_dir.exists()
+        assert not current_dir.exists()
 
 
 @pytest.mark.parametrize(
