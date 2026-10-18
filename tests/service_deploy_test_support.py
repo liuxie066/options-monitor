@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -449,6 +450,8 @@ def _fake_upgrade_release_runner(
     may return ``None`` to fall back to the plain success result.
     """
 
+    query_runner = _fake_systemd_query_runner()
+
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         command = list(command)
         if record is not None:
@@ -473,7 +476,7 @@ def _fake_upgrade_release_runner(
             result = tail(command)
             if result is not None:
                 return result
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+        return query_runner(command, **kwargs)
 
     return _run_cmd
 
@@ -550,6 +553,101 @@ def _drift_roots(tmp_path: Path) -> tuple[Path, Path, Path]:
     repo.mkdir()
     runtime.mkdir()
     return repo, runtime, systemd_root
+
+
+def _synthetic_drift_context(monkeypatch, tmp_path: Path, *, target="systemd", skip=None):
+    """Build inert installed definitions; no generated command is executed."""
+    from src.application import service_deploy as deploy, service_drift as drift
+    from src.interfaces.cli import main as cli
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    repo, runtime, units = _drift_roots(tmp_path)
+    env = runtime / "empty.env"
+    config = runtime / "config.us.json"
+    data = runtime / "portfolio.runtime.json"
+    env.write_text("", encoding="utf-8")
+    data.write_text("{}", encoding="utf-8")
+    config.write_text(json.dumps({
+        "accounts": ["fixture"], "portfolio": {"data_config": str(data)},
+        "notifications": {}, "trade_intake": {"enabled": False},
+    }), encoding="utf-8")
+    for name, path in {
+        "OM_ENV_FILE": env, "OM_RUNTIME_ROOT": runtime,
+        "OM_SYSTEMD_UNIT_ROOT": units, "OM_DATA_CONFIG": data,
+    }.items():
+        monkeypatch.setenv(name, str(path))
+    monkeypatch.setattr(cli, "repo_base", lambda: repo)
+    for name, relative in {
+        "DEFAULT_FEISHU_AGENT_CREDENTIAL_HELPER": "libexec/legacy-helper",
+        "DEFAULT_FEISHU_AGENT_CREDENTIAL_STORE": "credstore/agent",
+        "DEFAULT_FEISHU_HOLDINGS_CREDENTIAL_STORE": "credstore/holdings",
+        "DEFAULT_FEISHU_AGENT_CREDENTIAL_ENV_FILE": "run/credential.env",
+        "DEFAULT_SECRET_CREDENTIAL_HELPER": "libexec/secret-helper",
+        "DEFAULT_SECRET_CREDENTIAL_STORE_ROOT": "credstore/encrypted",
+    }.items():
+        for module in (deploy, drift):
+            monkeypatch.setattr(module, name, tmp_path / relative)
+    monkeypatch.setattr(drift, "LEGACY_FEISHU_AGENT_CREDENTIAL_UNIT_PATH", tmp_path / "legacy.service")
+    forbidden = []
+
+    def fail(name):
+        def unexpected(*_args, **_kwargs):
+            forbidden.append(name)
+            raise AssertionError(f"unexpected synthetic drift boundary: {name}")
+        return unexpected
+
+    monkeypatch.setattr(drift, "subprocess", SimpleNamespace(
+        run=fail("subprocess.run"), TimeoutExpired=subprocess.TimeoutExpired,
+    ))
+    for name in ("_write_text_with_sudo_fallback", "_delete_unit_with_sudo_fallback", "credential_spec"):
+        monkeypatch.setattr(drift, name, fail(name))
+    for name in (
+        "default_systemd_deploy_user", "_opend_service_plans_from_authoring_config",
+        "_legacy_opend_service_plan", "_bot_credential_name", "_systemd_secret_bindings",
+    ):
+        monkeypatch.setattr(deploy, name, fail(name))
+    bundle = _render_bundle(
+        repo, runtime, target=target, accounts=["fixture"], markets=["us"],
+        config_paths={"us": config}, env_file=env, deploy_home=home,
+        use_default_deploy_user=False, include_auto_upgrade=False, include_opend=False,
+        include_feishu_ws=False, include_wechat_clawbot=False, include_quality_monitoring=False,
+        include_feishu_agent_credential=False, include_secret_credentials=False,
+    )
+    profile = drift._bundle_profile(bundle)
+    # Presence blocks legacy host inference; null matches the renderer's absent value.
+    profile["feishu_agent_credential"] = None
+    profile_path = runtime / "service.profile.json"
+    profile_path.write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+    ctx = {"systemd_unit_root": units}
+    install_files = [item for item in bundle["files"] if item["kind"] in {
+        "systemd_service", "systemd_timer", "launchd_plist",
+    }]
+    resolved = [(item, drift._install_path(item, provider=target, ctx=ctx)) for item in install_files]
+    for _item, path in resolved:
+        assert path.is_relative_to(home if target == "launchd" else units)
+    if target == "systemd":
+        _write_systemd_units_from_bundle(bundle, units, skip=skip)
+    else:
+        for item, path in resolved:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(item["content"], encoding="utf-8")
+
+    def inventory():
+        return {
+            path.relative_to(tmp_path).as_posix(): None if path.is_dir() else path.read_bytes()
+            for path in tmp_path.rglob("*")
+        }
+
+    assert forbidden == []
+    return {
+        "repo": repo, "runtime": runtime, "units": units, "home": home,
+        "profile_path": profile_path, "profile": profile, "bundle": bundle,
+        "forbidden": forbidden, "fail": fail, "inventory": inventory,
+        "timers": sorted(Path(item["install_path"]).name for item in install_files if item["kind"] == "systemd_timer"),
+    }
 
 
 def _drift_at(
