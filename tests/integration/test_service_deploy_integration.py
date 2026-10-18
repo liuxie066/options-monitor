@@ -5,7 +5,12 @@ import hashlib
 import json
 import os
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -4562,133 +4567,942 @@ def test_service_drift_timeout_override_persists_before_next_reconcile(tmp_path)
 
 @pytest.mark.parametrize("holding_operation", ["apply", "rollback"])
 @pytest.mark.parametrize("operation", ["apply", "rollback"])
-def test_update_handler_contends_with_real_application_owner(
-    monkeypatch, tmp_path, holding_operation, operation,
-):
-    import threading
-    from concurrent.futures import ThreadPoolExecutor
+def test_update_handler_contends_with_real_application_owner(transition_case, holding_operation, operation):
+    case = transition_case()
+    case.status.write_text('{"status": "owner-sentinel"}\n')
+    holder_target = "1.0.2" if holding_operation == "apply" else "1.0.0"
+    contender_target = "1.0.3" if operation == "apply" else "0.9.0"
+    with _hold_transition(case, "build", holding_operation, holder_target) as future:
+        pid_identity = (case.pid.stat().st_dev, case.pid.stat().st_ino)
+        pid_bytes = case.pid.read_bytes()
+        _assert_busy_transition(case, operation, contender_target)
+        _assert_busy_transition(case, "apply", None)
+        assert (case.pid.stat().st_dev, case.pid.stat().st_ino) == pid_identity
+        assert case.pid.read_bytes() == pid_bytes
+    assert future.result()["ok"] is True
+    assert not case.pid.exists()
+    retry = case.invoke(operation, contender_target)
+    assert retry["ok"] is True
+    assert retry["data"]["write_applied"] is True
+    assert case.current.resolve() == case.releases / contender_target
+    assert json.loads(case.status.read_text())["target_version"] == contender_target
+    assert not case.pid.exists()
 
+
+@pytest.mark.parametrize("operation", ["apply", "rollback"])
+@pytest.mark.parametrize("phase", [
+    "acquire", "baseline", "build", "after_switch", "config_committed",
+    "compensation_enter", "compensation_config_restored", "terminal",
+])
+@pytest.mark.parametrize("exception_type", [KeyboardInterrupt, SystemExit])
+def test_update_transition_preserves_exception_boundaries(
+    monkeypatch, transition_case, operation, phase, exception_type,
+):
+    from src.application import service_upgrade as upgrade
+
+    case = transition_case()
+    case.status.write_text('{"status": "sentinel"}\n')
+    error = exception_type("fixture cancellation")
+    real_lock, writer = upgrade.single_instance_lock, upgrade.write_upgrade_status
+    terminal_writes = []
+
+    def cancel(**kwargs):
+        raise error
+
+    def write(**kwargs):
+        if kwargs["payload"]["status"] not in {"runtime_preparing", "runtime_prepared"}:
+            terminal_writes.append(kwargs["payload"]["status"])
+            case.emit("terminal")
+        writer(**kwargs)
+
+    monkeypatch.setattr(upgrade, "write_upgrade_status", write)
+    if phase == "acquire":
+        @contextmanager
+        def lock(*args, **kwargs):
+            raise error
+            yield
+        monkeypatch.setattr(upgrade, "single_instance_lock", lock)
+    elif phase == "baseline":
+        read_text = Path.read_text
+
+        def read(self, *args, **kwargs):
+            if self == case.releases / case.initial / "VERSION":
+                raise error
+            return read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", read)
+    else:
+        case.hooks[phase] = cancel
+    if phase.startswith("compensation"):
+        case.failure = "health"
+    with pytest.raises(exception_type) as raised:
+        case.invoke(operation, "1.0.2" if operation == "apply" else "1.0.0")
+    assert raised.value is error
+    assert not case.pid.exists()
+    assert len(terminal_writes) == (1 if phase == "terminal" else 0)
+    assert len(case.child_requests) == (1 if phase == "compensation_config_restored" else 0)
+    if phase in {"acquire", "baseline", "build"}:
+        assert case.current.resolve() == case.releases / case.initial
+    elif phase == "compensation_config_restored":
+        assert case.current.resolve() == case.releases / case.initial
+    elif phase != "compensation_config_restored":
+        assert case.current.resolve() == case.releases / ("1.0.2" if operation == "apply" else "1.0.0")
+    generations = [json.loads(path.read_text())["generation"] for path in case.configs]
+    if phase in {"acquire", "baseline", "build", "after_switch", "compensation_config_restored"}:
+        assert generations == [case.initial] * 3
+    elif phase == "config_committed":
+        assert generations == ["1.0.2" if operation == "apply" else "1.0.0", case.initial, case.initial]
+    else:
+        assert generations == ["1.0.2" if operation == "apply" else "1.0.0"] * 3
+    before = case.snapshot()
+    with real_lock(case.guard, busy_message="fixture guard busy"):
+        assert case.snapshot() == before
+    assert case.snapshot() == before
+
+
+@pytest.mark.parametrize("operation", ["apply", "rollback"])
+@pytest.mark.parametrize("failure", [None, "health", "restart"])
+def test_update_terminal_write_error_does_not_repeat_compensation(monkeypatch, transition_case, operation, failure):
+    from src.application import service_upgrade as upgrade
+
+    case = transition_case()
+    case.failure = failure
+    writer = upgrade.write_upgrade_status
+    error = OSError("fixture terminal disk failure")
+    attempts = []
+
+    def write(**kwargs):
+        if kwargs["payload"]["status"] not in {"runtime_preparing", "runtime_prepared"}:
+            attempts.append(kwargs["payload"])
+            raise error
+        writer(**kwargs)
+
+    monkeypatch.setattr(upgrade, "write_upgrade_status", write)
+    target = "1.0.2" if operation == "apply" else "1.0.0"
+    with pytest.raises(OSError) as raised:
+        case.invoke(operation, target)
+    assert raised.value is error and len(attempts) == 1
+    assert case.current.resolve() == case.releases / (case.initial if failure else target)
+    assert len(case.child_requests) == (1 if failure else 0)
+    assert not case.pid.exists()
+    before = case.snapshot()
+    with upgrade.single_instance_lock(case.guard, busy_message="fixture guard busy"):
+        pass
+    assert case.snapshot() == before
+
+
+@pytest.mark.parametrize("failure", ["plan_error", "apply_error", "failed_plan", "failed_apply"])
+def test_update_cleanup_keeps_guard_without_new_compensation(monkeypatch, transition_case, failure):
+    from src.application import service_cleanup as cleanup
+    from src.application import service_upgrade as upgrade
+
+    case = transition_case()
+    error = OSError("fixture cleanup failure")
+    calls = []
+
+    def clean(**kwargs):
+        calls.append(kwargs["confirm"])
+        _assert_busy_transition(case, "rollback", "1.0.0")
+        if failure == ("apply_error" if kwargs["confirm"] else "plan_error"):
+            raise error
+        return {"ok": failure != ("failed_apply" if kwargs["confirm"] else "failed_plan"),
+                "status": "fixture_cleanup", "changed": False, "kept_releases": ["1.0.1", "1.0.2"]}
+
+    monkeypatch.setattr(cleanup, "service_cleanup", clean)
+    if failure.endswith("error"):
+        with pytest.raises(OSError) as raised:
+            case.invoke("apply", "1.0.2", cleanup=True)
+        assert raised.value is error
+    else:
+        data = case.invoke("apply", "1.0.2", cleanup=True)["data"]
+        assert data["status"] == "upgraded" and data["changed"] is True
+        assert data["post_upgrade_cleanup"]["ok"] is False
+        assert data["post_upgrade_cleanup"]["status"] == ("skipped" if failure == "failed_plan" else "fixture_cleanup")
+    assert calls == ([False] if failure in {"plan_error", "failed_plan"} else [False, True])
+    assert case.current.resolve() == case.releases / "1.0.2"
+    assert case.child_requests == [] and not case.pid.exists()
+    with upgrade.single_instance_lock(case.guard, busy_message="fixture guard busy"):
+        pass
+
+
+@pytest.mark.parametrize("operation", ["apply", "rollback"])
+def test_update_transition_rechecks_deployment_user_under_guard(monkeypatch, transition_case, operation):
+    import pwd
+
+    from src.application import service_upgrade as upgrade
+
+    case = transition_case()
+    case.status.write_text('{"status": "sentinel"}\n')
+    real_lock = upgrade.single_instance_lock
+    status_before = case.status.read_bytes()
+
+    @contextmanager
+    def lock(path, **kwargs):
+        with real_lock(path, **kwargs):
+            profile = json.loads(case.profile.read_text())
+            profile["deploy_user"] = "fixture-other-user"
+            case.profile.write_text(json.dumps(profile))
+            yield
+
+    monkeypatch.setattr(pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=os.geteuid() + 1))
+    monkeypatch.setattr(upgrade, "single_instance_lock", lock)
+    data = case.invoke(operation, "1.0.2" if operation == "apply" else "1.0.0")["data"]
+    assert data["status"] == "deployment_user_check_failed"
+    assert data["changed"] is data["write_applied"] is False
+    assert case.queries == [] and case.commands == []
+    assert case.status.read_bytes() == status_before
+    assert case.current.resolve() == case.releases / case.initial
+    assert not case.pid.exists()
+    with real_lock(case.guard, busy_message="fixture guard busy"):
+        pass
+
+
+def test_update_transition_runtime_roots_remain_independent(monkeypatch, transition_case):
+    from src.application import service_upgrade as upgrade
+
+    first, second = transition_case("first"), transition_case("second")
+    real_lock = upgrade.single_instance_lock
+    holding, resume = threading.Event(), threading.Event()
+    main_thread = threading.get_ident()
+
+    @contextmanager
+    def lock(path, **kwargs):
+        with real_lock(path, **kwargs):
+            if Path(path) == first.guard and threading.get_ident() != main_thread:
+                holding.set()
+                assert resume.wait(15)
+            yield
+
+    monkeypatch.setattr(upgrade, "single_instance_lock", lock)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(first.invoke, "apply", "1.0.1")
+        try:
+            assert holding.wait(15)
+            _assert_busy_transition(first, "rollback", "1.0.0")
+            assert second.invoke("apply", "1.0.1")["data"]["status"] == "already_current"
+            assert second.commands == [] and first.commands == []
+            assert not first.status.exists()
+        finally:
+            resume.set()
+        assert future.result(timeout=15)["data"]["status"] == "already_current"
+    assert not first.pid.exists() and not second.pid.exists()
+
+
+@pytest.fixture
+def transition_case(monkeypatch, tmp_path):
+    """Real handlers, locks and config I/O; only subprocess/service leaves are fake."""
     from src.application import service_upgrade as upgrade
     from src.interfaces.cli.service_ops import add_service_update_commands, handle_service_update_command
 
-    releases = tmp_path / "releases"
-    for version in ("1.0.0", "1.0.1", "1.0.2"):
-        _write_upgrade_release_skeleton(releases / version, version)
-    current = tmp_path / "current"
-    current.symlink_to(releases / "1.0.1", target_is_directory=True)
-    runtime = tmp_path / "runtime"
-    runtime.mkdir()
-    config_paths = [runtime / "config.yaml", runtime / "config.us.json", runtime / "config.hk.json"]
-    for config in config_paths:
-        config.write_text(f"unchanged fixture {config.name}\n")
-    before_configs = {config: config.read_bytes() for config in config_paths}
-    before_releases = {path: path.read_bytes() for path in releases.rglob("*") if path.is_file()}
-    monkeypatch.setattr(upgrade, "service_upgrade_check", lambda **kwargs: {"latest_version": "1.0.2"})
-    holding = threading.Event()
-    release = threading.Event()
-    protected_calls = []
-    main_thread = threading.get_ident()
-    first_effect = (
-        "_materialize_release_from_git_cache" if holding_operation == "apply"
-        else "_prepare_runtime_configs_for_release"
-    )
+    cases = []
+    monkeypatch.setenv("OM_UPGRADE_INSTALLER", "pip")
+    real_replace = os.replace
 
-    def stop_protected_effect(*args, **kwargs):
-        pytest.fail("contender must not perform protected transition work")
+    def replace(source, destination, **kwargs):
+        for case in cases:
+            if Path(destination) == case.current:
+                restoring = Path(source).resolve() == case.releases / case.initial
+                case.emit("compensation_enter" if restoring else "before_switch")
+                result = real_replace(source, destination, **kwargs)
+                case.emit("after_restore_switch" if restoring else "after_switch")
+                return result
+            if Path(destination) in case.configs and str(source).endswith(".upgrade-tmp"):
+                result = real_replace(source, destination, **kwargs)
+                case.emit("config_committed")
+                return result
+        return real_replace(source, destination, **kwargs)
 
-    def pause_holder(*args, **kwargs):
-        assert threading.get_ident() != main_thread, "contender reached transition work"
-        protected_calls.append(first_effect)
-        holding.set()
-        assert release.wait(10)
-        raise RuntimeError("fixture stops holder before transition")
+    monkeypatch.setattr(os, "replace", replace)
 
-    for name in (
-        "capture_preserved_timer_activation_states", "_resolve_upgrade_remote_url",
-        "_materialize_release_from_git_cache", "_ensure_release_runtime", "_run_required",
-        "_run_command", "_prepare_runtime_configs_for_release", "_pi_storage_readiness",
-        "_switch_current_symlink", "_commit_prepared_runtime_configs",
-        "_validate_committed_runtime_configs", "_reconcile_services_from_current_release",
-        "_restart_services_from_loaded_profile", "_post_upgrade_service_health",
-        "_compensate_service_transition",
-    ):
-        monkeypatch.setattr(upgrade, name, pause_holder if name == first_effect else stop_protected_effect)
+    def query(**kwargs):
+        case = next(item for item in cases if item.runtime == Path(kwargs["runtime_root"]))
+        case.queries.append(dict(kwargs))
+        case.emit("query")
+        return {"latest_version": kwargs["target_version"] or case.latest}
 
-    parser = argparse.ArgumentParser()
-    add_service_update_commands(parser.add_subparsers(dest="command"))
+    monkeypatch.setattr(upgrade, "service_upgrade_check", query)
 
-    def request(selected):
-        target_flag, target = ("--target-version", "1.0.2") if selected == "apply" else ("--to-version", "1.0.0")
-        argv = [
-            "update", selected, "--repo-root", str(current), "--runtime-root", str(runtime),
-            "--releases-root", str(releases), target_flag, target, "--confirm",
-        ]
-        if selected == "apply":
-            argv += ["--cache-root", str(tmp_path / "cache")]
-        return parser.parse_args(argv)
+    def capture(**kwargs):
+        profile = kwargs["profile"]
+        name = profile["activation_name"]
+        return {
+            "checked": True, "supported": True,
+            "activation_states": {name: "disabled"}, "active_states": {name: "inactive"},
+            "expected_services": [name], "installed_units": [name],
+        }
 
-    holding_request, contender_request = request(holding_operation), request(operation)
-    lock_path = runtime / "locks" / "upgrade.lock"
+    monkeypatch.setattr(upgrade, "service_drift", capture)
+
+    def make(name="case"):
+        root = tmp_path / name
+        releases = root / "releases"
+        for version in ("0.9.0", "1.0.0", "1.0.1", "1.0.2", "1.0.3", "2.0.0"):
+            _write_upgrade_release_skeleton(releases / version, version)
+            _create_fake_venv_python_at(releases / version / ".venv")
+        current = root / "current"
+        current.symlink_to(releases / "1.0.1", target_is_directory=True)
+        runtime = root / "runtime"
+        runtime.mkdir()
+        authoring = runtime / "config.yaml"
+        authoring.write_text("accounts: {}\nmarkets: {}\n")
+        configs = [runtime / "config.us.json", runtime / "config.hk.json", runtime / "resolved" / "config.bot.json"]
+        configs[-1].parent.mkdir()
+        for config in configs:
+            config.write_text(json.dumps({"generation": "1.0.1", "kind": config.name}) + "\n")
+        profile_path = runtime / "service.profile.json"
+        profile_path.write_text(json.dumps({
+            "service_provider": "systemd", "repo_root": str(current), "runtime_root": str(runtime),
+            "generation": "1.0.1", "activation_name": "fixture-1.0.1.timer",
+            "markets": ["us", "hk"],
+            "config_paths": {"us": str(configs[0]), "hk": str(configs[1])},
+            "config_authoring": {"source": "yaml", "config_yaml": str(authoring), "markets": ["us", "hk"]},
+            "restart": {"command_prefix": ["systemctl"], "services": ["fixture.service"]},
+            "services": ["fixture.service"],
+        }))
+        case = SimpleNamespace(
+            root=root, releases=releases, current=current, runtime=runtime, configs=configs,
+            profile=profile_path, status=runtime / "upgrade_status.json",
+            guard=runtime / "locks" / "upgrade.lock.guard",
+            pid=runtime / "locks" / "upgrade.lock", initial="1.0.1", latest="1.0.2",
+            hooks={}, commands=[], queries=[], child_requests=[], failure=None,
+        )
+
+        def emit(phase, **details):
+            callback = case.hooks.get(phase)
+            if callback:
+                callback(**details)
+
+        case.emit = emit
+
+        def runner(command, **kwargs):
+            command = list(command)
+            case.commands.append(command)
+            emit("command", command=command)
+            def result(code=0, stdout="ok\n"):
+                return subprocess.CompletedProcess(command, code, stdout=stdout, stderr="")
+            if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
+                _create_fake_venv_python_at(Path(command[-1]))
+                return result()
+            if command[1:3] == ["-m", "pip"]:
+                return result()
+            if command[1:2] == ["-c"] and "import src.application.multi_account_tick" in command[2]:
+                return result()
+            if command[1:2] == ["scripts/release_check.py"] or command == ["./om-agent", "spec"]:
+                return result()
+            pi = _fake_pi_runtime_prepare(command)
+            if pi is not None:
+                return pi
+            if command[:3] in (["./om", "config", "build"], ["./om", "config", "build-bot"]):
+                emit("build", command=command)
+                destination = Path(command[command.index("--output") + 1])
+                generation = Path(kwargs["cwd"]).resolve().name
+                destination.write_text(json.dumps({"generation": generation, "kind": destination.name}) + "\n")
+                return result()
+            if len(command) > 2 and Path(command[0]).name == "om" and command[1:3] == ["config", "validate"]:
+                emit("validate", command=command)
+                failed = case.failure == "validate" and "--config-path" in command and Path(command[command.index("--config-path") + 1]) in configs
+                return result(1 if failed else 0)
+            if len(command) > 2 and Path(command[0]).name == "om" and command[1:3] == ["service", "drift"]:
+                emit("reconcile")
+                profile = json.loads(profile_path.read_text())
+                snapshot = {profile["activation_name"]: {"activation_state": "disabled", "active_state": "inactive"}}
+                profile.update(generation=current.resolve().name, activation_name=f"fixture-{current.resolve().name}.timer")
+                profile_path.write_text(json.dumps(profile))
+                data = {"summary": {"ok": True}, "apply_errors": [], "preserved_activation_states": snapshot}
+                return result(stdout=json.dumps({"tool_name": "service.drift", "ok": True, "data": data}))
+            if command[:1] == ["systemctl"] and command[1] in {"restart", "is-active", "is-enabled"}:
+                emit("restart" if command[1] == "restart" else "health")
+                failed = case.failure == "restart" and command[1] == "restart"
+                failed = failed or (case.failure == "health" and command[1] == "is-active")
+                return result(1 if failed else 0, "active\n" if command[1] == "is-active" else "enabled\n")
+            if len(command) == 6 and command[1:3] == ["-I", "-c"]:
+                # The real owner chooses the old-release executable and serializes this request.
+                assert Path(command[0]) == Path(command[4]) / ".venv" / "bin" / "python"
+                assert current.resolve() == Path(command[4])
+                request = json.loads(Path(command[5]).read_text())
+                case.child_requests.append(request)
+                assert request["profile"]["generation"] == current.resolve().name
+                assert all(json.loads(config.read_text())["generation"] == current.resolve().name for config in configs)
+                emit("compensation_config_restored", request=request)
+                profile_path.write_text(json.dumps(request["profile"]))
+                restored = {
+                    "ok": True, "config_validate": [{"phase": "restored"}],
+                    "service_reconcile": {"summary": {"ok": True}, "apply_errors": []},
+                    "restarted_services": ["fixture.service"],
+                    "service_health": {"ok": True}, "operations": [],
+                    "errors": [], "remediation": [],
+                }
+                emit("compensation_services_restored", request=request)
+                return result(stdout=json.dumps(restored))
+            pytest.fail(f"unexpected transition subprocess: {command}")
+
+        parser = argparse.ArgumentParser()
+        add_service_update_commands(parser.add_subparsers(dest="command"))
+
+        def invoke(operation="apply", target="1.0.2", *, confirm=True, preserve=False, cleanup=False, repo_root=None):
+            argv = ["update", operation, "--repo-root", str(repo_root or current), "--runtime-root", str(runtime),
+                    "--releases-root", str(releases)]
+            if target is not None:
+                argv += ["--target-version" if operation == "apply" else "--to-version", target]
+            if operation == "apply":
+                argv += ["--cache-root", str(root / "cache")]
+                if cleanup:
+                    argv += ["--cleanup-after-upgrade"]
+            if confirm:
+                argv.append("--confirm")
+            if preserve:
+                argv.append("--preserve-activation-state")
+            return handle_service_update_command(
+                parser.parse_args(argv), service_upgrade_fn=partial(upgrade.service_upgrade, run_cmd=runner),
+                service_rollback_fn=partial(upgrade.service_rollback, run_cmd=runner),
+            )
+
+        case.invoke = invoke
+        case.runner = runner
+        case.snapshot = lambda: (
+            current.resolve(), tuple(config.read_bytes() for config in configs),
+            profile_path.read_bytes(), case.status.read_bytes() if case.status.exists() else None,
+            authoring.read_bytes(),
+            {path: path.read_bytes() for path in releases.rglob("*") if path.is_file()},
+        )
+        cases.append(case)
+        return case
+
+    return make
+
+
+@contextmanager
+def _hold_transition(case, phase, operation, target, **kwargs):
+    entered, release = threading.Event(), threading.Event()
+
+    def pause(**_details):
+        entered.set()
+        assert release.wait(15), f"timed out releasing {phase}"
+
+    case.hooks[phase] = pause
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(handle_service_update_command, holding_request)
+        future = executor.submit(case.invoke, operation, target, **kwargs)
         try:
-            assert holding.wait(10)
-            identity = (lock_path.stat().st_dev, lock_path.stat().st_ino)
-            content = lock_path.read_bytes()
-            out = handle_service_update_command(contender_request)
-            assert out["tool_name"] == f"update.{operation}"
-            assert out["ok"] is False
-            data = out["data"]
-            expected_status = "failed" if operation == "apply" else "rollback_failed"
-            compensation_flag = "rolled_back" if operation == "apply" else "restored_original"
-            expected = {
-                "status": expected_status,
-                "failure_status": expected_status,
-                "operation": "upgrade" if operation == "apply" else "rollback",
-                "confirmed": True,
-                "ok": False,
-                "changed": False,
-                "write_applied": False,
-                "dry_run": False,
-                "operations": [],
-                "symlink_switched": False,
-                compensation_flag: False,
-                "compensation": {},
-                "runtime_config_prepare": {},
-                "runtime_config_commit": {},
-                "post_switch_runtime_config_validate": [],
-                "service_reconcile": {},
-                "service_health": {},
-                "pi_storage_readiness": {},
-                "error": f"RuntimeError: upgrade lock already exists: {lock_path}",
-            }
-            assert {key: data[key] for key in expected} == expected
-            assert data["audit_id"]
-            assert protected_calls == [first_effect]
-            assert current.resolve() == (releases / "1.0.1").resolve()
-            assert {config: config.read_bytes() for config in config_paths} == before_configs
-            assert {path: path.read_bytes() for path in releases.rglob("*") if path.is_file()} == before_releases
-            assert (lock_path.stat().st_dev, lock_path.stat().st_ino) == identity
-            assert lock_path.read_bytes() == content
-            receipt = json.loads((runtime / "upgrade_status.json").read_text())
-            assert receipt["status"] == expected_status
-            assert receipt["error"] == expected["error"]
-            assert receipt["changed"] is False
+            assert entered.wait(15), f"transition did not reach {phase}"
+            yield future
         finally:
             release.set()
-        holder_result = future.result(timeout=10)
-        assert holder_result["ok"] is False
-        assert holder_result["data"]["error"] == "RuntimeError: fixture stops holder before transition"
-        assert not lock_path.exists()
-        retry_result = executor.submit(handle_service_update_command, holding_request).result(timeout=10)
-    assert retry_result["tool_name"] == f"update.{holding_operation}"
-    assert retry_result["ok"] is False
-    assert retry_result["data"]["error"] == "RuntimeError: fixture stops holder before transition"
-    assert retry_result["data"]["changed"] is False
-    assert retry_result["data"]["write_applied"] is False
-    assert retry_result["data"]["operations"] == []
-    assert protected_calls == [first_effect, first_effect]
-    assert not lock_path.exists()
-    assert current.resolve() == (releases / "1.0.1").resolve()
-    assert {config: config.read_bytes() for config in config_paths} == before_configs
-    assert {path: path.read_bytes() for path in releases.rglob("*") if path.is_file()} == before_releases
+            case.hooks.pop(phase, None)
+        future.result(timeout=15)
+
+
+def _assert_busy_transition(case, operation, target):
+    # Snapshot after the holder pauses, including filesystem writes outside runner.
+    before = case.snapshot()
+    identity = (case.guard.stat().st_dev, case.guard.stat().st_ino)
+    queries, commands = len(case.queries), len(case.commands)
+    out = case.invoke(operation, target)
+    data = out["data"]
+    expected_status = "failed" if operation == "apply" else "rollback_failed"
+    assert out["tool_name"] == f"update.{operation}"
+    assert out["ok"] is False
+    assert data["status"] == data["failure_status"] == expected_status
+    assert data["error"] == f"RuntimeError: upgrade lock already exists: {case.pid}"
+    for key in ("ok", "changed", "write_applied", "dry_run", "symlink_switched",
+                "rolled_back" if operation == "apply" else "restored_original"):
+        assert data[key] is False
+    assert data["confirmed"] is True and data["audit_id"]
+    assert data["operation"] == ("upgrade" if operation == "apply" else "rollback")
+    assert data["operations"] == [] and data["post_switch_runtime_config_validate"] == []
+    for key in ("compensation", "runtime_config_prepare", "runtime_config_commit",
+                "service_reconcile", "service_health", "pi_storage_readiness"):
+        assert data[key] == {}
+    assert len(case.queries) == queries and len(case.commands) == commands
+    assert case.snapshot() == before
+    assert (case.guard.stat().st_dev, case.guard.stat().st_ino) == identity
+    if operation == "apply":
+        assert data["runtime_prepare"] == {} and data["config_rebuilt"] is False
+        assert data["target_version"] == target
+        assert data["release_tag"] == (f"v{target}" if target else None)
+        assert data["target_dir"] == (str(case.releases / target) if target else None)
+        if target is None:
+            assert data["release_materialize"] == {}
+    return data
+
+
+@pytest.mark.parametrize("operation", ["apply", "rollback"])
+@pytest.mark.parametrize("contender", ["apply", "rollback"])
+@pytest.mark.parametrize("phase", ["compensation_enter", "compensation_config_restored", "compensation_services_restored"])
+def test_update_transition_holds_guard_through_compensation(transition_case, operation, contender, phase):
+    case = transition_case()
+    original = case.snapshot()
+    case.failure = "health"
+    target = "1.0.2" if operation == "apply" else "1.0.0"
+    next_target = "1.0.3" if contender == "apply" else "0.9.0"
+    with _hold_transition(case, phase, operation, target, preserve=True) as future:
+        _assert_busy_transition(case, contender, next_target)
+        if phase != "compensation_enter":
+            assert case.current.resolve() == case.releases / case.initial
+            assert tuple(path.read_bytes() for path in case.configs) == original[1]
+    data = future.result()["data"]
+    assert data["status"] == ("upgrade_failed_rolled_back" if operation == "apply" else "rollback_failed_restored")
+    assert data["failure_status"] == ("upgraded_service_health_failed" if operation == "apply" else "rollback_service_health_failed")
+    assert data["rolled_back" if operation == "apply" else "restored_original"] is True
+    assert data["changed"] is data["symlink_switched"] is False
+    assert data["compensation"]["ok"] is True
+    assert data["compensation"]["config_restore"]["ok"] is True
+    assert json.loads(Path(data["runtime_config_commit"]["manifest_path"]).read_text())["state"] == "restored"
+    assert case.snapshot()[:3] == original[:3]
+    assert len(case.child_requests) == 1
+    assert case.child_requests[0]["preserved_activation_states"] == {
+        "fixture-1.0.1.timer": {"activation_state": "disabled", "active_state": "inactive"},
+    }
+    assert json.loads(case.status.read_text())["status"] == data["status"]
+    assert "audit_id" not in json.loads(case.status.read_text())
+    case.failure = None
+    retry = case.invoke(contender, next_target)
+    assert retry["ok"] is True
+    assert case.current.resolve() == case.releases / next_target
+    assert all(json.loads(path.read_text())["generation"] == next_target for path in case.configs)
+    assert json.loads(case.profile.read_text())["generation"] == next_target
+    assert json.loads(case.status.read_text())["target_version"] == next_target
+    assert len(case.child_requests) == 1 and not case.pid.exists()
+
+
+def test_update_transition_restart_failure_keeps_guard_during_compensation(transition_case):
+    case = transition_case()
+    case.failure = "restart"
+    with _hold_transition(case, "compensation_config_restored", "apply", "1.0.2") as future:
+        _assert_busy_transition(case, "rollback", "1.0.0")
+    data = future.result()["data"]
+    assert data["failure_status"] == "upgraded_restart_failed"
+    assert data["status"] == "upgrade_failed_rolled_back"
+    assert data["restart_failed_services"] == ["fixture.service"]
+    assert data["rolled_back"] is True and data["changed"] is False
+
+
+@pytest.mark.parametrize("operation", ["apply", "rollback"])
+@pytest.mark.parametrize("failure", [None, "health"])
+def test_update_transition_holds_guard_through_terminal_write(monkeypatch, transition_case, operation, failure):
+    from src.application import service_upgrade as upgrade
+
+    case = transition_case()
+    case.failure = failure
+    writer = upgrade.write_upgrade_status
+
+    def write(**kwargs):
+        if kwargs["payload"]["status"] not in {"runtime_preparing", "runtime_prepared"}:
+            case.emit("terminal")
+        writer(**kwargs)
+
+    monkeypatch.setattr(upgrade, "write_upgrade_status", write)
+    with _hold_transition(case, "terminal", operation, "1.0.2" if operation == "apply" else "1.0.0") as future:
+        _assert_busy_transition(case, "apply", "1.0.3")
+        _assert_busy_transition(case, "rollback", "0.9.0")
+    result = future.result()["data"]
+    assert json.loads(case.status.read_text())["status"] == result["status"]
+    case.failure = None
+    assert case.invoke("apply", "1.0.3")["ok"] is True
+    assert json.loads(case.status.read_text())["target_version"] == "1.0.3"
+
+
+@pytest.mark.parametrize(("operation", "target", "expected_target"), [
+    ("apply", "1.0.3", "1.0.3"), ("rollback", None, "1.0.1"), ("rollback", "1.0.0", "1.0.0"),
+])
+def test_update_transition_binds_baseline_after_acquiring_guard(
+    monkeypatch, transition_case, operation, target, expected_target,
+):
+    from src.application import service_upgrade as upgrade
+
+    case = transition_case()
+    real_lock = upgrade.single_instance_lock
+    main_thread = threading.get_ident()
+    arrived, resume = threading.Event(), threading.Event()
+
+    @contextmanager
+    def lock(path, **kwargs):
+        if threading.get_ident() != main_thread and not arrived.is_set():
+            arrived.set()
+            assert resume.wait(15)
+        with real_lock(path, **kwargs):
+            yield
+
+    monkeypatch.setattr(upgrade, "single_instance_lock", lock)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(case.invoke, operation, target, preserve=True)
+        try:
+            assert arrived.wait(15)
+            assert case.queries == [] and case.commands == []
+            assert case.invoke("apply", "1.0.2")["ok"] is True
+            baseline = case.snapshot()
+        finally:
+            resume.set()
+        data = future.result(timeout=15)["data"]
+    assert data["current_version"] == "1.0.2"
+    assert data["target_version"] == expected_target
+    assert data["preserved_activation_units"] == ["fixture-1.0.2.timer"]
+    assert data["runtime_config_prepare"]["staging_root"].endswith(f"1.0.2-to-{expected_target}")
+    for item, before in zip(data["runtime_config_commit"]["artifacts"], baseline[1], strict=True):
+        assert Path(item["backup_path"]).read_bytes() == before
+    assert data["service_reconcile"]["preserved_activation_states"] == {
+        "fixture-1.0.2.timer": {"activation_state": "disabled", "active_state": "inactive"},
+    }
+    if operation == "apply":
+        assert data["previous_dir"] == str(case.releases / "1.0.2")
+    assert case.current.resolve() == case.releases / expected_target
+
+
+@pytest.mark.parametrize(("operation", "target", "latest", "status"), [
+    ("apply", None, "", "no_target_version"),
+    ("apply", "1.0.1", None, "already_current"),
+    ("apply", "1.0.0", None, "target_older_than_current"),
+    ("apply", "2.0.0", None, "blocked_major_upgrade"),
+    ("rollback", None, None, "no_rollback_target"),
+    ("rollback", "9.9.9", None, "rollback_target_missing"),
+])
+@pytest.mark.parametrize("confirm", [False, True])
+def test_update_early_preview_persists_only_with_unchanged_baseline(
+    monkeypatch, transition_case, operation, target, latest, status, confirm,
+):
+    from src.application import service_upgrade as upgrade
+    from src.application.agent_tool_contracts import AgentToolError
+
+    case = transition_case()
+    case.latest = latest
+    writer = upgrade.write_upgrade_status
+    writes = []
+
+    def write(**kwargs):
+        with pytest.raises(AgentToolError) as busy:
+            with upgrade.single_instance_lock(case.guard, busy_message="fixture guard busy"):
+                pytest.fail("preview writer must hold the real guard")
+        assert busy.value.code == "RESOURCE_BUSY"
+        writes.append(kwargs["payload"]["status"])
+        writer(**kwargs)
+
+    monkeypatch.setattr(upgrade, "write_upgrade_status", write)
+    data = case.invoke(operation, target, confirm=confirm)["data"]
+    assert data["status"] == status
+    assert data["dry_run"] is (not confirm) and data["write_applied"] is False
+    assert writes == [status]
+    receipt = json.loads(case.status.read_text())
+    assert receipt["status"] == status and "audit_id" not in receipt
+    assert not case.pid.exists()
+    assert len(case.queries) == (1 if operation == "apply" else 0)
+    assert case.commands == []
+
+
+@pytest.mark.parametrize("operation", ["apply", "rollback"])
+@pytest.mark.parametrize("gate_failure", [False, True])
+def test_update_normal_preview_adds_no_transition_lock_or_receipt(
+    monkeypatch, transition_case, operation, gate_failure,
+):
+    from src.application import service_upgrade as upgrade
+
+    case = transition_case()
+    case.status.write_text('{"status": "sentinel"}\n')
+    before = case.snapshot()
+
+    @contextmanager
+    def unexpected_lock(*args, **kwargs):
+        pytest.fail("normal preview must not acquire a transition guard")
+        yield
+
+    monkeypatch.setattr(upgrade, "single_instance_lock", unexpected_lock)
+    if gate_failure:
+        monkeypatch.setattr(upgrade, "service_drift", lambda **kwargs: {"checked": False, "reason": "fixture unavailable"})
+    data = case.invoke(operation, "1.0.2" if operation == "apply" else "1.0.0", confirm=False, preserve=gate_failure)["data"]
+    assert data["status"] == ("service_activation_snapshot_failed" if gate_failure else "dry_run")
+    assert case.snapshot() == before and not case.guard.exists()
+
+
+@pytest.mark.parametrize("operation", ["apply", "rollback"])
+@pytest.mark.parametrize("change", [
+    "owner_failure", "same_bytes", "absent_to_present", "default_status",
+    "current", "profile", "target_appears",
+])
+def test_update_early_preview_cannot_overwrite_new_status(monkeypatch, transition_case, operation, change):
+    from src.application import service_upgrade as upgrade
+
+    case = transition_case()
+    # No current_version: the initial default rollback target is unavailable.
+    if change != "absent_to_present":
+        case.status.write_text('{"status": "sentinel"}\n')
+    original = case.snapshot()
+    real_lock = upgrade.single_instance_lock
+    main_thread = threading.get_ident()
+    arrived, resume = threading.Event(), threading.Event()
+
+    @contextmanager
+    def lock(path, **kwargs):
+        if threading.get_ident() != main_thread and not arrived.is_set():
+            arrived.set()
+            assert resume.wait(15)
+        with real_lock(path, **kwargs):
+            yield
+
+    monkeypatch.setattr(upgrade, "single_instance_lock", lock)
+    preview_target = "1.0.1" if operation == "apply" else None
+    if operation == "rollback" and change == "target_appears":
+        preview_target = "9.9.9"
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(case.invoke, operation, preview_target, confirm=False)
+        try:
+            assert arrived.wait(15)
+            preview_queries = len(case.queries)
+            if change == "owner_failure":
+                def fail_build(**kwargs):
+                    raise RuntimeError("fixture fails before switching")
+                case.hooks["build"] = fail_build
+                owner = case.invoke("apply", "1.0.2")
+                assert owner["ok"] is False
+                assert case.snapshot()[:3] == original[:3]
+            elif change == "same_bytes":
+                old_identity = (case.status.stat().st_dev, case.status.stat().st_ino)
+                replacement = case.runtime / "same-status.json"
+                replacement.write_bytes(case.status.read_bytes())
+                replacement.replace(case.status)
+                assert (case.status.stat().st_dev, case.status.stat().st_ino) != old_identity
+            elif change == "absent_to_present":
+                case.status.write_text('{"status": "new-owner"}\n')
+            elif change == "default_status":
+                upgrade.write_upgrade_status(runtime_root=case.runtime, payload={"current_version": "1.0.0", "status": "new-owner"})
+            elif change == "current":
+                replacement = case.root / "new-current"
+                replacement.symlink_to(case.releases / "1.0.2", target_is_directory=True)
+                replacement.replace(case.current)
+            elif change == "profile":
+                profile = json.loads(case.profile.read_text())
+                profile["generation"] = "changed"
+                case.profile.write_text(json.dumps(profile))
+            else:
+                (case.releases / "9.9.9").mkdir()
+                if operation == "apply":
+                    # A target-existence fact belongs only to rollback; change its
+                    # current input here so both directions still exercise revalidation.
+                    (case.releases / "1.0.1" / "VERSION").write_text("1.0.0\n")
+            after_change = case.snapshot()
+            expected_queries = preview_queries + (1 if change == "owner_failure" else 0)
+        finally:
+            resume.set()
+        data = future.result(timeout=15)["data"]
+    expected = "already_current" if operation == "apply" else "rollback_target_missing" if preview_target else "no_rollback_target"
+    assert data["status"] == expected
+    assert case.snapshot() == after_change
+    assert len(case.queries) == expected_queries
+    assert not case.pid.exists()
+
+
+@pytest.mark.parametrize("operation", ["apply", "rollback"])
+@pytest.mark.parametrize("input_name", ["upgrade_status.json", "service.profile.json"])
+@pytest.mark.parametrize("defect", [
+    "malformed", "nonobject", "invalid_utf8", "open_error", "missing_open",
+    "stat_error", "missing_stat", "replaced_during_read",
+])
+def test_update_early_preview_skips_unprovable_publication(
+    monkeypatch, transition_case, operation, input_name, defect,
+):
+    case = transition_case()
+    case.status.write_text('{"status": "sentinel"}\n')
+    path = case.runtime / input_name
+    if defect == "malformed":
+        path.write_text("{invalid")
+    elif defect == "nonobject":
+        path.write_text("[]")
+    elif defect == "invalid_utf8":
+        path.write_bytes(b"\xff")
+    original_open, original_stat = Path.open, Path.stat
+    replacement_done = False
+
+    def open_file(self, mode="r", *args, **kwargs):
+        if self == path and mode == "rb" and defect == "open_error":
+            raise PermissionError("fixture snapshot open failure")
+        if self == path and mode == "rb" and defect == "missing_open":
+            raise FileNotFoundError("fixture pathname remains present")
+        return original_open(self, mode, *args, **kwargs)
+
+    def stat_file(self, *args, **kwargs):
+        nonlocal replacement_done
+        if self == path and defect == "stat_error":
+            raise OSError("fixture snapshot stat failure")
+        if self == path and defect == "missing_stat":
+            raise FileNotFoundError("fixture pathname disappeared after opening")
+        if self == path and defect == "replaced_during_read" and not replacement_done:
+            replacement_done = True
+            with original_open(path, "rb") as stream:
+                raw = stream.read()
+            replacement = case.runtime / "replacement.json"
+            replacement.write_bytes(raw)
+            replacement.replace(path)
+        return original_stat(self, *args, **kwargs)
+
+    before = case.status.read_bytes()
+    monkeypatch.setattr(Path, "open", open_file)
+    monkeypatch.setattr(Path, "stat", stat_file)
+    data = case.invoke(operation, "1.0.1" if operation == "apply" else None, confirm=False)["data"]
+    assert data["status"] == ("already_current" if operation == "apply" else "no_rollback_target")
+    with original_open(case.status, "rb") as stream:
+        assert stream.read() == before
+    assert not case.guard.exists()
+    if defect == "replaced_during_read":
+        assert replacement_done
+
+
+@pytest.mark.parametrize("operation", ["apply", "rollback"])
+@pytest.mark.parametrize("failure", ["busy", "acquire_error", "acquire_runtime_error", "writer_error"])
+def test_update_early_preview_preserves_publication_errors(monkeypatch, transition_case, operation, failure):
+    from src.application import service_upgrade as upgrade
+
+    case = transition_case()
+    case.status.write_text('{"status": "sentinel"}\n')
+    before = case.snapshot()
+    target = "1.0.1" if operation == "apply" else None
+    error = RuntimeError("fixture nonbusy lock failure") if failure == "acquire_runtime_error" else OSError("fixture publication failure")
+    real_lock = upgrade.single_instance_lock
+    if failure == "busy":
+        with real_lock(case.guard, busy_message="fixture guard busy"):
+            data = case.invoke(operation, target, confirm=False)["data"]
+        assert data["status"] == ("already_current" if operation == "apply" else "no_rollback_target")
+        assert case.snapshot() == before
+    else:
+        if failure in {"acquire_error", "acquire_runtime_error"}:
+            @contextmanager
+            def lock(*args, **kwargs):
+                raise error
+                yield
+            monkeypatch.setattr(upgrade, "single_instance_lock", lock)
+        else:
+            def write(**kwargs):
+                raise error
+            monkeypatch.setattr(upgrade, "write_upgrade_status", write)
+        with pytest.raises(type(error)) as raised:
+            case.invoke(operation, target, confirm=False)
+        assert raised.value is error
+        assert case.snapshot() == before
+    with real_lock(case.guard, busy_message="fixture guard busy"):
+        pass
+    assert not case.pid.exists()
+
+
+@pytest.mark.parametrize("operation", ["apply", "rollback"])
+@pytest.mark.parametrize("exception_type", [OSError, RuntimeError])
+def test_update_acquisition_error_returns_failure_without_shared_writes(
+    monkeypatch, transition_case, operation, exception_type,
+):
+    from src.application import service_upgrade as upgrade
+
+    case = transition_case()
+    case.status.write_text('{"status": "owner-sentinel"}\n')
+    before = case.snapshot()
+    error = exception_type("fixture acquisition failure")
+
+    @contextmanager
+    def lock(*args, **kwargs):
+        raise error
+        yield
+
+    def unexpected_comparison(*args):
+        pytest.fail("acquisition failure must not evaluate a version verdict")
+
+    monkeypatch.setattr(upgrade, "single_instance_lock", lock)
+    monkeypatch.setattr(upgrade, "compare_versions", unexpected_comparison)
+    data = case.invoke(operation, "not-a-version")["data"]
+    assert data["failure_status"] == ("failed" if operation == "apply" else "rollback_failed")
+    assert data["error"] == f"{exception_type.__name__}: {error}"
+    assert data["target_version"] == "not-a-version"
+    assert data["compensation"] == {} and data["operations"] == []
+    assert case.queries == [] and case.commands == []
+    assert case.snapshot() == before
+
+
+@pytest.mark.parametrize("operation", ["apply", "rollback"])
+def test_update_early_preview_rejects_mixed_generation_baseline(monkeypatch, transition_case, operation):
+    case = transition_case()
+    case.status.write_text('{"status": "before"}\n')
+    open_file = Path.open
+    changed = False
+
+    def open_profile(self, mode="r", *args, **kwargs):
+        nonlocal changed
+        if self == case.profile and mode == "rb" and not changed:
+            changed = True
+            case.status.write_text('{"status": "after"}\n')
+            profile = json.loads(case.profile.read_text())
+            profile["generation"] = "after"
+            case.profile.write_text(json.dumps(profile))
+        return open_file(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_profile)
+    data = case.invoke(operation, "1.0.1" if operation == "apply" else None, confirm=False)["data"]
+    assert changed
+    assert data["status"] == ("already_current" if operation == "apply" else "no_rollback_target")
+    assert json.loads(case.status.read_text()) == {"status": "after"}
+    assert len(case.queries) == (1 if operation == "apply" else 0)
+
+
+@pytest.mark.parametrize("operation", ["apply", "rollback"])
+@pytest.mark.parametrize("input_name", ["upgrade_status.json", "service.profile.json"])
+def test_update_early_preview_dangling_input_is_not_proven_absent(
+    transition_case, operation, input_name,
+):
+    case = transition_case()
+    path = case.runtime / input_name
+    replacement = case.runtime / "dangling-input"
+    replacement.symlink_to(case.runtime / "missing-input")
+    replacement.replace(path)
+    data = case.invoke(operation, "1.0.1" if operation == "apply" else None, confirm=False)["data"]
+    assert data["status"] == ("already_current" if operation == "apply" else "no_rollback_target")
+    assert path.is_symlink() and not path.exists()
+    assert not case.guard.exists()
+
+
+
+@pytest.mark.parametrize("operation", ["apply", "rollback"])
+@pytest.mark.parametrize("input_name", ["upgrade_status.json", "service.profile.json"])
+def test_update_early_preview_rechecks_witness_after_current_read(
+    monkeypatch, transition_case, operation, input_name,
+):
+    case = transition_case()
+    case.status.write_text('{"status": "sentinel"}\n')
+    read_text = Path.read_text
+    version_reads = 0
+    before = case.status.read_bytes()
+
+    def read(self, *args, **kwargs):
+        nonlocal version_reads
+        if self == case.releases / case.initial / "VERSION":
+            version_reads += 1
+            if version_reads == 2:
+                path = case.runtime / input_name
+                replacement = case.runtime / "replacement-after-current.json"
+                replacement.write_bytes(path.read_bytes())
+                replacement.replace(path)
+        return read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    data = case.invoke(operation, "1.0.1" if operation == "apply" else None, confirm=False)["data"]
+    assert data["status"] == ("already_current" if operation == "apply" else "no_rollback_target")
+    assert version_reads == 2
+    assert case.status.read_bytes() == before
+    assert len(case.queries) == (1 if operation == "apply" else 0)
+    assert not case.pid.exists()
+
+
+def test_update_confirmed_nonsymlink_receipt_holds_guard(monkeypatch, transition_case):
+    from src.application import service_upgrade as upgrade
+    from src.application.agent_tool_contracts import AgentToolError
+
+    case = transition_case()
+    plain = case.root / "plain" / "repo"
+    _write_upgrade_release_skeleton(plain, "1.0.1")
+    writer = upgrade.write_upgrade_status
+    writes = []
+
+    def write(**kwargs):
+        with pytest.raises(AgentToolError) as busy:
+            with upgrade.single_instance_lock(case.guard, busy_message="fixture guard busy"):
+                pytest.fail("early confirmed receipt must hold the guard")
+        assert busy.value.code == "RESOURCE_BUSY"
+        writes.append(kwargs["payload"]["status"])
+        writer(**kwargs)
+
+    monkeypatch.setattr(upgrade, "write_upgrade_status", write)
+    data = case.invoke(repo_root=plain)["data"]
+    assert data["status"] == "repo_root_not_symlink"
+    assert writes == ["repo_root_not_symlink"]
+    assert case.commands == [] and not case.pid.exists()
