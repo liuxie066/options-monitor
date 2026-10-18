@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
 
 import pytest
+from tests.cash_evidence_helpers import cash_portfolio
 
 from domain.domain.decision_state_fingerprint import canonical_json_bytes as decision_json_bytes
 from tests import test_required_data_snapshot as required_data_fixture
@@ -101,8 +103,8 @@ def _published(base, snapshot: dict, reference_payloads: dict):  # type: ignore[
     )
 
 
-def _owner_assembly_kwargs() -> dict:
-    fixture = generate_fixture("current_scale")["builder_kwargs"]
+def _owner_assembly_kwargs(*, verify_fixture_hash: bool = True) -> dict:
+    fixture = generate_fixture("current_scale", verify_payload_hash=verify_fixture_hash)["builder_kwargs"]
     bindings = {row["role"]: row for row in fixture["replay_bindings"]}
     references = fixture["reference_payloads"]
     sections = fixture["sections"]
@@ -142,9 +144,15 @@ def _owner_assembly_kwargs() -> dict:
         **sections["broker_cash"]["facts"],
         **sections["broker_positions"]["facts"],
         "source_observed_at": portfolio_manifest["source_as_of_utc"],
-        "position_snapshot_input": {"completeness": "complete", "quality": {"status": "ready"}, "errors": []},
     }
+    for key in ("capacity_authority", "filters", "source_account_identifiers", "portfolio_source_name"):
+        portfolio_payload.pop(key, None)
+    portfolio_payload = cash_portfolio(
+        portfolio_payload, account=fixture["account"],
+        evaluated_at=datetime.fromisoformat(portfolio_manifest["promoted_at_utc"].replace("Z", "+00:00")),
+    )
     portfolio_payload_bytes = canonical_json_bytes(portfolio_payload)
+    portfolio_manifest["portfolio_source_name"] = "futu"
     portfolio_manifest["payload_sha256"] = sha256_bytes(portfolio_payload_bytes)
     portfolio_manifest["portfolio_context_relpath"] = f"portfolio_context.{portfolio_manifest['payload_sha256']}.json"
     portfolio_manifest_bytes = canonical_json_bytes(portfolio_manifest)
@@ -912,13 +920,13 @@ def test_benchmark_gate_measures_valid_path_and_faults() -> None:
 
 @pytest.mark.parametrize("positions_complete", [True, False])
 def test_v2_cash_preserves_verdict_and_binds_real_position_completeness(positions_complete):
-    from cash_evidence_helpers import cash_portfolio
     assembly = _owner_assembly_kwargs()
     original = json.loads(assembly["prepared_portfolio_payload_bytes"])
     original["position_snapshot_input"]["completeness"] = "complete" if positions_complete else "partial"
     for key in ("capacity_authority", "filters", "source_account_identifiers", "portfolio_source_name"):
         original.pop(key, None)
-    payload = cash_portfolio(original)
+    payload = cash_portfolio(original, account=assembly["account"],
+        evaluated_at=datetime.fromisoformat(original["cash_snapshot"]["evaluated_at"]))
     raw = canonical_json_bytes(payload)
     manifest = json.loads(assembly["prepared_portfolio_manifest_bytes"])
     manifest["payload_sha256"] = sha256_bytes(raw)
@@ -942,3 +950,201 @@ def test_legacy_cash_schema_rejects_mixed_v2_fields():
     kwargs["sections"]["broker_cash"]["facts"]["cash_snapshot"] = None
     with pytest.raises(RuntimePortfolioSnapshotError):
         build_runtime_portfolio_snapshot(**kwargs)
+
+
+def _replace_portfolio_payload(assembly: dict, payload: dict) -> None:
+    raw = canonical_json_bytes(payload)
+    manifest = json.loads(assembly["prepared_portfolio_manifest_bytes"])
+    manifest["payload_sha256"] = sha256_bytes(raw)
+    manifest["portfolio_context_relpath"] = f"portfolio_context.{manifest['payload_sha256']}.json"
+    assembly.update(prepared_portfolio_payload_bytes=raw, prepared_portfolio_manifest_bytes=canonical_json_bytes(manifest))
+
+
+def _rebuild_snapshot(snapshot: dict, references: dict) -> dict:
+    return build_runtime_portfolio_snapshot(
+        **{key: snapshot[key] for key in ("run_id", "account", "sections", "replay_bindings", "chosen_results", "ledger_shadow")},
+        reference_payloads=references,
+    )
+
+
+@pytest.mark.parametrize(("age", "complete"), [(0, True), (300, True), (301, False), (-1, False)],
+                         ids=["fresh", "at-limit", "stale", "future"])
+def test_current_positions_use_canonical_stock_age(age, complete):
+    assembly = _owner_assembly_kwargs()
+    payload = json.loads(assembly["prepared_portfolio_payload_bytes"])
+    evaluation = datetime.fromisoformat(payload["cash_snapshot"]["evaluated_at"])
+    instant = (evaluation - timedelta(seconds=age)).isoformat()
+    payload["position_snapshot_input"].update(observed_at_utc=instant, source_as_of_utc=instant)
+    # Valid zero holdings are still complete, independently of the cash verdict.
+    payload.update(stocks_by_symbol={}, raw_selected_count=0)
+    payload["cash_snapshot"].update(status="unavailable", reason_codes=["CASH_PROVIDER_UNAVAILABLE"])
+    _replace_portfolio_payload(assembly, payload)
+    snapshot, references = assemble_runtime_portfolio_snapshot(**assembly)
+    section = snapshot["sections"]["broker_positions"]
+    assert section["schema_version"] == "runtime_portfolio_snapshot.broker_positions.v2"
+    assert section["completeness"]["status"] == ("complete" if complete else "unavailable")
+    if not complete:
+        assert "snapshot_observed_at_utc_stale_or_future" in section["completeness"]["reason_codes"]
+    assert snapshot["sections"]["broker_cash"]["facts"]["cash_snapshot"] == payload["cash_snapshot"]
+    assert snapshot["status"] == ("trusted" if complete else "data_unavailable")
+    assert _verified(snapshot, expected_run_id=assembly["run_id"], expected_account=assembly["account"], reference_payloads=references) == snapshot
+
+
+@pytest.mark.parametrize(("field", "value", "reason"), [
+    ("refresh", "OSError", "position_snapshot_refresh_unavailable"),
+    ("missing", None, "position_snapshot_authority_unavailable"),
+    ("broker_account_ref", {"account_label": "other"}, "snapshot_account_mismatch"),
+    ("broker_account_ref", {"external_account_id": "999"}, "snapshot_physical_account_mismatch"),
+    ("broker_account_ref", {"environment": "SIMULATE"}, "snapshot_environment_mismatch"),
+    ("scope", {"markets": ["HK"]}, "snapshot_scope_mismatch"),
+    ("scope", {"asset_types": ["option"]}, "snapshot_scope_mismatch"),
+    ("scope", {"filtered": True}, "snapshot_scope_incomplete"),
+    ("completeness", "partial", "snapshot_scope_incomplete"),
+    ("quality", {"status": "unavailable"}, "snapshot_quality_unavailable"),
+    ("errors", ["fixture_query_failed"], "fixture_query_failed"),
+    ("source_order", None, "snapshot_source_after_observation"),
+], ids=["refresh-failed", "missing-snapshot", "logical-account", "physical-account", "environment",
+        "market", "asset", "filtered", "partial", "quality", "query-error", "source-order"])
+def test_current_positions_preserve_canonical_failure_reasons(field, value, reason):
+    assembly = _owner_assembly_kwargs()
+    payload = json.loads(assembly["prepared_portfolio_payload_bytes"])
+    positions = payload["position_snapshot_input"]
+    if field == "refresh":
+        payload["position_refresh_error"] = value
+    elif field == "missing":
+        payload["position_snapshot_input"] = value
+    elif field == "source_order":
+        positions["source_as_of_utc"] = (datetime.fromisoformat(positions["observed_at_utc"].replace("Z", "+00:00")) + timedelta(seconds=1)).isoformat()
+    else:
+        positions[field] = {**positions[field], **value} if isinstance(value, dict) else value
+    _replace_portfolio_payload(assembly, payload)
+    snapshot, references = assemble_runtime_portfolio_snapshot(**assembly)
+    assert snapshot["sections"]["broker_positions"]["completeness"]["status"] == "unavailable"
+    assert reason in snapshot["sections"]["broker_positions"]["completeness"]["reason_codes"]
+    assert snapshot["sections"]["broker_cash"]["facts"]["cash_snapshot"] == payload["cash_snapshot"]
+    assert snapshot["status"] == "data_unavailable"
+    assert _verified(snapshot, expected_run_id=assembly["run_id"], expected_account=assembly["account"], reference_payloads=references) == snapshot
+    forged = deepcopy(snapshot)
+    forged["sections"]["broker_positions"]["completeness"] = {"status": "complete", "reason_codes": []}
+    with pytest.raises(RuntimePortfolioSnapshotError, match="completeness"):
+        _rebuild_snapshot(forged, references)
+
+
+@pytest.mark.parametrize("evaluation", [None, "missing", "invalid", "2026-10-11T00:00:00", 123, "offset"],
+                         ids=["null", "missing", "malformed", "naive", "non-string", "aware-offset"])
+def test_current_positions_require_aware_frozen_evaluation(monkeypatch, evaluation):
+    from src.application import portfolio_context_service as service
+    from src.application import runtime_portfolio_snapshot as owner
+
+    assembly = _owner_assembly_kwargs()
+    payload = json.loads(assembly["prepared_portfolio_payload_bytes"])
+    if evaluation == "offset":
+        evaluation = datetime.fromisoformat(payload["cash_snapshot"]["evaluated_at"]).astimezone(timezone(timedelta(hours=8))).isoformat()
+    if evaluation == "missing":
+        payload["cash_snapshot"] = {key: value for key, value in payload["cash_snapshot"].items() if key != "evaluated_at"}
+    else:
+        payload["cash_snapshot"]["evaluated_at"] = evaluation
+    _replace_portfolio_payload(assembly, payload)
+
+    class NoWallClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            raise AssertionError("sealed qualification must not read the wall clock")
+
+    monkeypatch.setattr(owner, "datetime", NoWallClock)
+    monkeypatch.setattr(service, "datetime", NoWallClock)
+    snapshot, references = assemble_runtime_portfolio_snapshot(**assembly)
+    expected = ({"status": "complete", "reason_codes": []} if isinstance(evaluation, str) and "+08:00" in evaluation
+                else {"status": "unavailable", "reason_codes": ["position_snapshot_evaluation_time_invalid"]})
+    assert snapshot["sections"]["broker_positions"]["completeness"] == expected
+    assert _verified(snapshot, expected_run_id=assembly["run_id"], expected_account=assembly["account"], reference_payloads=references) == snapshot
+
+
+def test_position_replay_uses_evaluation_before_promotion_and_stays_frozen(tmp_path, monkeypatch):
+    from src.application import runtime_portfolio_snapshot as owner
+
+    assembly = _owner_assembly_kwargs()
+    payload = json.loads(assembly["prepared_portfolio_payload_bytes"])
+    observed = datetime.fromisoformat(payload["source_observed_at"].replace("Z", "+00:00"))
+    payload["cash_snapshot"]["evaluated_at"] = (observed + timedelta(seconds=299)).isoformat()
+    manifest = json.loads(assembly["prepared_portfolio_manifest_bytes"])
+    manifest["promoted_at_utc"] = (observed + timedelta(seconds=301)).isoformat()
+    manifest["prepared_at_utc"] = manifest["promoted_at_utc"]
+    assembly["prepared_portfolio_manifest_bytes"] = canonical_json_bytes(manifest)
+    _replace_portfolio_payload(assembly, payload)
+    snapshot, references = assemble_runtime_portfolio_snapshot(**assembly)
+    assert snapshot["status"] == "trusted"
+    path = _published(tmp_path, snapshot, references)
+    before = path.read_bytes()
+
+    class LaterClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return (observed + timedelta(days=10)).astimezone(tz or timezone.utc)
+
+    monkeypatch.setattr(owner, "datetime", LaterClock)
+    assert load_runtime_portfolio_snapshot(base=tmp_path, run_id=assembly["run_id"], account=assembly["account"], reference_payloads=references) == snapshot
+    assert _published(tmp_path, snapshot, references) == path
+    assert path.read_bytes() == before
+    payload["position_refresh_error"] = "OSError"
+    _replace_portfolio_payload(assembly, payload)
+    conflict, conflict_references = assemble_runtime_portfolio_snapshot(**assembly)
+    with pytest.raises(AccountRunConfigError):
+        _published(tmp_path, conflict, conflict_references)
+    assert path.read_bytes() == before
+
+
+def test_legacy_position_section_preserves_cash_v2_refresh_failed_history(tmp_path, monkeypatch):
+    from src.application import runtime_portfolio_snapshot as owner
+
+    assembly = _owner_assembly_kwargs()
+    payload = json.loads(assembly["prepared_portfolio_payload_bytes"])
+    payload["position_refresh_error"] = "OSError"
+    _replace_portfolio_payload(assembly, payload)
+    current, references = assemble_runtime_portfolio_snapshot(**assembly)
+    assert current["status"] == "data_unavailable"
+    legacy = deepcopy(current)
+    legacy["sections"]["broker_positions"].update(
+        schema_version="runtime_portfolio_snapshot.broker_positions.v1",
+        completeness={"status": "complete", "reason_codes": []},
+    )
+    legacy = _rebuild_snapshot(legacy, references)
+    assert legacy["status"] == "trusted"
+    path = _published(tmp_path, legacy, references)
+    before = path.read_bytes()
+    monkeypatch.setattr(owner, "portfolio_position_snapshot_errors", lambda *_a, **_k: pytest.fail("historical positions must retain their original predicate"))
+    assert load_runtime_portfolio_snapshot(base=tmp_path, run_id=assembly["run_id"], account=assembly["account"], reference_payloads=references) == legacy
+    assert path.read_bytes() == before
+
+
+def test_current_positions_with_legacy_cash_still_bind_original_payload():
+    from src.application.runtime_portfolio_snapshot import BROKER_CASH_V1_FACT_KEYS
+
+    assembly = _owner_assembly_kwargs()
+    payload = json.loads(assembly["prepared_portfolio_payload_bytes"])
+    payload["position_refresh_error"] = "OSError"
+    _replace_portfolio_payload(assembly, payload)
+    snapshot, references = assemble_runtime_portfolio_snapshot(**assembly)
+    cash = snapshot["sections"]["broker_cash"]
+    cash["schema_version"] = "runtime_portfolio_snapshot.broker_cash.v1"
+    cash["facts"] = {key: value for key, value in cash["facts"].items() if key in BROKER_CASH_V1_FACT_KEYS}
+    cash["content_sha256"] = sha256_bytes(canonical_json_bytes(cash["facts"]))
+    rebuilt = _rebuild_snapshot(snapshot, references)
+    assert rebuilt["status"] == "data_unavailable"
+    assert rebuilt["sections"]["broker_positions"]["completeness"]["reason_codes"] == ["position_snapshot_refresh_unavailable"]
+    payload_path = "state/" + json.loads(assembly["prepared_portfolio_manifest_bytes"])["portfolio_context_relpath"]
+    without_payload = {key: value for key, value in references.items() if key != payload_path}
+    with pytest.raises(RuntimePortfolioSnapshotError):
+        _rebuild_snapshot(snapshot, without_payload)
+    tampered = {**references, payload_path: assembly["prepared_portfolio_payload_bytes"] + b" "}
+    with pytest.raises(RuntimePortfolioSnapshotError, match="hash"):
+        _rebuild_snapshot(snapshot, tampered)
+    forged = deepcopy(snapshot)
+    positions = forged["sections"]["broker_positions"]
+    positions["facts"]["raw_selected_count"] += 1
+    positions["content_sha256"] = sha256_bytes(canonical_json_bytes(positions["facts"]))
+    with pytest.raises(RuntimePortfolioSnapshotError, match="projection differs"):
+        _rebuild_snapshot(forged, references)
+    snapshot["sections"]["broker_positions"]["schema_version"] = "runtime_portfolio_snapshot.broker_positions.v999"
+    with pytest.raises(RuntimePortfolioSnapshotError, match="schema"):
+        _rebuild_snapshot(snapshot, references)

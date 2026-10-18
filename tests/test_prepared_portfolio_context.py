@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import subprocess
 import sys
@@ -1280,3 +1281,128 @@ def test_failed_cash_evidence_survives_real_worker_manifest_and_brief(tmp_path, 
         assert funds["cash_total_cny"] is None
         assert funds["cash_snapshot"] == manifest["cash_snapshot"]
     assert len(calls) == (0 if invalid_ttl else 2)
+
+
+def _prepare_cached_holdings_receipts(tmp_path, monkeypatch, *, run_id, ages):
+    """Real worker/parent receipts from account-bound synthetic caches; no process or provider I/O."""
+    from tests.cash_evidence_helpers import cash_config, cash_portfolio
+    from src.application import portfolio_context_service as service
+    from src.application import prepared_portfolio_context as prepared
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+    from src.infrastructure import exchange_rates
+
+    evaluation = datetime(2026, 10, 11, tzinfo=timezone.utc)
+    env_file = tmp_path / "isolated.env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("OM_ENV_FILE", str(env_file))
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    monkeypatch.setenv("OM_DATA_CONFIG", "")
+    forbidden_calls = []
+
+    def forbidden(*args, **kwargs):
+        forbidden_calls.append((args, kwargs))
+        raise AssertionError("unexpected external preparation boundary")
+
+    class FrozenClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return evaluation.astimezone(tz or timezone.utc)
+
+    class RetainedWorkerDirectory:
+        def __init__(self, **kwargs):
+            self.path = tmp_path / "worker-evidence"
+            self.path.mkdir()
+
+        def __enter__(self):
+            return str(self.path)
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(prepared, "datetime", FrozenClock)
+    monkeypatch.setattr(service, "datetime", FrozenClock)
+    monkeypatch.setattr(prepared, "time", _PreparationClock())
+    monkeypatch.setattr(prepared, "tempfile", SimpleNamespace(TemporaryDirectory=RetainedWorkerDirectory))
+    monkeypatch.setattr(prepared, "load_run_fx_snapshot", forbidden)
+    monkeypatch.setattr(exchange_rates, "current_exchange_rate_snapshot", forbidden)
+    monkeypatch.setattr(prepared, "subprocess", SimpleNamespace(Popen=forbidden, TimeoutExpired=subprocess.TimeoutExpired, DEVNULL=subprocess.DEVNULL))
+    source_events = []
+    monkeypatch.setattr(prepared.state_repo, "append_source_snapshot_event", lambda base, event: source_events.append((base, event)))
+    sizing_accounts = []
+
+    def sizing(*, context, account, **kwargs):
+        sizing_accounts.append(account)
+        return context
+
+    monkeypatch.setattr(prepared, "prepare_position_sizing_evidence", sizing)
+    provider_calls = []
+
+    def failed_refresh(**kwargs):
+        provider_calls.append(kwargs)
+        assert kwargs["write_cache"] is False
+        assert kwargs["exchange_rate_cache_path"].is_relative_to(tmp_path)
+        raise OSError("synthetic holdings refresh failure")
+
+    monkeypatch.setattr(prepared, "fetch_futu_portfolio_context", failed_refresh)
+    authorities, states, cached, cache_bytes = {}, {}, {}, {}
+    for account, age in ages.items():
+        data_path = tmp_path / f"{account}.data.json"
+        data_path.write_text("{}\n", encoding="utf-8")
+        config = cash_config(account=account)
+        config["portfolio"].update(account=account, data_config=str(data_path))
+        authorities[account] = publish_account_run_config(base=tmp_path, run_id=run_id, account=account, config=config)
+        states[account] = authorities[account].state_path.parent
+        observed = (evaluation - timedelta(seconds=age)).isoformat()
+        cash = build_futu_portfolio_context(balance_rows=[{"cn_cash": 1000}], position_rows=[], account=account,
+            source_observed_at=observed, cash_source_observed_at=observed, broker_account_identifiers={"123"},
+            futu_account_id="123", trd_env="REAL", capacity_market="us")
+        cash.pop("position_snapshot_input", None)
+        cached[account] = cash_portfolio(cash, account=account, evaluated_at=evaluation)
+        cache_bytes[account] = _artifact_bytes(cached[account])
+        (states[account] / "portfolio_context.json").write_bytes(cache_bytes[account])
+    config_bytes = {account: authority.state_path.read_bytes() for account, authority in authorities.items()}
+
+    class RealWorker(_CompletedWorker):
+        def __init__(self, command, **kwargs):
+            request_path = Path(command[-1])
+            assert request_path.is_relative_to(tmp_path)
+            assert prepared.run_worker(request_path) == 0
+
+    manifests = _prepare(tmp_path, tmp_path / "output_runs" / run_id / "state", states, run_id,
+        authorities=authorities, popen_factory=RealWorker)
+    receipts = {}
+    for account, manifest in manifests.items():
+        assert manifest["status"] == "ready"
+        authority = authorities[account]
+        receipts[account] = load_prepared_portfolio_context_receipt(
+            manifest_path=Path(manifest["manifest_path"]), expected_base=tmp_path, expected_run_id=run_id,
+            expected_account=account, expected_account_config_sha256=authority.account_config_sha256,
+            expected_manifest_sha256=manifest["manifest_sha256"], expected_runtime_config=json.loads(authority.canonical_bytes),
+        )
+        assert authority.state_path.read_bytes() == config_bytes[account]
+        assert (states[account] / "portfolio_context.json").read_bytes() == cache_bytes[account]
+    assert not forbidden_calls
+    assert sorted(sizing_accounts) == sorted(ages)
+    assert len(source_events) == len(ages)
+    assert all(base == tmp_path for base, _event in source_events)
+    assert not (tmp_path / "output_shared" / "state" / "rate_cache.json").exists()
+    return SimpleNamespace(authorities=authorities, manifests=manifests, receipts=receipts,
+        cached=cached, cache_bytes=cache_bytes, provider_calls=provider_calls, evaluation=evaluation)
+
+
+def test_stale_holdings_refresh_preserves_cash_through_real_worker_receipt(tmp_path, monkeypatch):
+    from src.application.portfolio_context_service import portfolio_position_snapshot_errors
+
+    prepared = _prepare_cached_holdings_receipts(tmp_path, monkeypatch, run_id="holdings-fallback", ages={"lx": 400, "sy": 0})
+    assert [call["account"] for call in prepared.provider_calls] == ["lx"]
+    for account, receipt in prepared.receipts.items():
+        payload = receipt["payload"]
+        assert payload["cash_snapshot"]["status"] == "fresh"
+        assert payload["cash_snapshot"] == prepared.cached[account]["cash_snapshot"]
+        assert payload["cash_by_currency"] == prepared.cached[account]["cash_by_currency"]
+        assert payload["cash_by_currency"]["CNY"] == 1000
+        assert payload["position_snapshot_input"] == prepared.cached[account]["position_snapshot_input"]
+        assert receipt["manifest"]["source_as_of_utc"] == prepared.cached[account]["source_observed_at"]
+        assert hashlib.sha256(receipt["payload_bytes"]).hexdigest() == receipt["manifest"]["payload_sha256"]
+        assert portfolio_position_snapshot_errors(payload, account=account) == (["position_snapshot_refresh_unavailable"] if account == "lx" else [])
+        assert payload.get("position_refresh_error") == ("OSError" if account == "lx" else None)
