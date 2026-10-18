@@ -2555,7 +2555,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(report, ensure_ascii=False, indent=2))
             if probe_error is not None:
                 return 2
-            return 1 if probe_red else 0
+            return 1 if not report.get("ok") or probe_red else 0
         summary = report.get('summary') or {}
         print(
             "[DONE] verified trade_events projection against position_lots "
@@ -2607,7 +2607,7 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        return 0
+        return 0 if report.get("ok") else 1
 
     if args.cmd == 'void-event':
         control = write_controls["void-event"]
