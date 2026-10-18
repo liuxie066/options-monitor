@@ -1472,6 +1472,166 @@ def test_unavailable_prepared_context_fails_closed_before_shared_prefetch(
     assert metrics_by_account["lx"]["should_notify"] is False
 
 
+@pytest.mark.parametrize("healthy_account", [None, "lx"], ids=["all-overdue", "healthy-peer"])
+def test_real_preparation_deadline_excludes_accounts_from_tick(
+    monkeypatch, tmp_path: Path, healthy_account,
+) -> None:
+    import subprocess
+
+    from src.application import prepared_portfolio_context as prepared
+    from src.application import tick_account_execution as mod
+
+    request = _request(tmp_path, accounts=["lx", "sy"], workers=1, force=False)
+    clock = SimpleNamespace(now=0.0)
+    forbidden_calls = []
+    workers = {}
+    result_reads = []
+    source_events = []
+    account_children = []
+    real_prepare = prepared.prepare_portfolio_contexts
+    real_read_result = prepared._read_worker_result
+    build_prefetch_config = Mock(wraps=mod.build_cross_account_prefetch_config)
+    prepare_options = Mock(wraps=_fake_prepare_options)
+    prefetch = Mock(return_value={
+        "global_required_data_plan": {"plan_id": "a" * 64, "symbols": []},
+        "symbols": [], "results": {},
+    })
+
+    def _forbidden(*_args, **_kwargs):
+        forbidden_calls.append(True)
+        raise AssertionError("unexpected provider, subprocess or sleeping boundary")
+
+    class _Worker:
+        returncode = 0
+
+        def __init__(self, command, **_kwargs):
+            worker_request = json.loads(Path(command[-1]).read_text(encoding="utf-8"))
+            self.account = worker_request["account"]
+            self.terminated = False
+            self.waited = 0
+            workers[self.account] = self
+            context = {
+                **_portfolio_context(self.account),
+                "cash_by_currency": {},
+                "fx_snapshot_sha256": worker_request["fx_snapshot_sha256"],
+            }
+            payload_digest = hashlib.sha256(json.dumps(
+                context, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            Path(worker_request["result_path"]).write_text(json.dumps({
+                "schema_version": "prepared_portfolio_context_worker_result.v1",
+                "token": worker_request["token"],
+                "run_id": worker_request["run_id"],
+                "account": self.account,
+                "account_config_sha256": worker_request["account_config_sha256"],
+                "status": "ready",
+                "portfolio_context": context,
+                "payload_sha256": payload_digest,
+                "portfolio_source_name": "futu",
+                "portfolio_source_account": self.account,
+            }), encoding="utf-8")
+
+        def poll(self):
+            if self.account != healthy_account:
+                clock.now = 1.0
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            raise ProcessLookupError("synthetic worker already exited")
+
+        def wait(self, timeout=None):
+            self.waited += 1
+            return self.returncode
+
+        def kill(self):
+            _forbidden()
+
+    def _prepare(**kwargs):
+        assert kwargs["base"] == tmp_path
+        assert kwargs["timeout_sec"] == 1
+        return real_prepare(**kwargs, popen_factory=_Worker)
+
+    def _read_result(**kwargs):
+        result_reads.append(kwargs["request"]["account"])
+        return real_read_result(**kwargs)
+
+    def _run_one_account(*, request, **_kwargs):
+        account_children.append(request.acct)
+        assert request.acct == healthy_account
+        assert request.allow_notifications is False
+        loaded = prepared.load_prepared_portfolio_context(
+            manifest_path=request.prepared_portfolio_context_manifest,
+            expected_base=tmp_path,
+            expected_run_id=request.run_id,
+            expected_account=request.acct,
+            expected_account_config_sha256=request.account_config_authority.account_config_sha256,
+            expected_manifest_sha256=request.prepared_portfolio_context_manifest_sha256,
+            expected_runtime_config=json.loads(request.account_config_authority.canonical_bytes),
+        )
+        assert loaded["filters"]["account"] == request.acct
+        assert loaded["fx_snapshot_sha256"] == "f" * 64
+        return _outcome(request.acct)
+
+    monkeypatch.setattr(prepared, "time", SimpleNamespace(monotonic=lambda: clock.now, sleep=_forbidden))
+    monkeypatch.setattr(prepared, "_read_worker_result", _read_result)
+    monkeypatch.setattr(prepared, "run_worker", _forbidden)
+    monkeypatch.setattr(prepared, "fetch_futu_portfolio_context", _forbidden)
+    monkeypatch.setattr(prepared, "load_account_portfolio_context", _forbidden)
+    monkeypatch.setattr(subprocess, "Popen", _forbidden)
+    monkeypatch.setattr(prepared.state_repo, "append_source_snapshot_event",
+                        lambda _base, snapshot: source_events.append(snapshot))
+    monkeypatch.setattr(mod, "open_position_ledger_from_data_config", _forbidden)
+    monkeypatch.setattr(mod, "decision_state_snapshot", _forbidden)
+    monkeypatch.setattr(mod, "seal_run_fx_snapshot", lambda **_kwargs: ({}, "f" * 64))
+    monkeypatch.setattr(mod, "_account_pipeline_is_required", lambda **_kwargs: True)
+    monkeypatch.setattr(mod, "prepare_portfolio_contexts", _prepare)
+    monkeypatch.setattr(mod, "prepare_option_positions_contexts", prepare_options)
+    monkeypatch.setattr(mod, "build_cross_account_prefetch_config", build_prefetch_config)
+    monkeypatch.setattr(mod, "_build_close_advice_barrier_plan",
+                        lambda **kwargs: (kwargs["candidate_config"], None))
+    monkeypatch.setattr(mod, "prefetch_required_data", prefetch)
+    monkeypatch.setattr(mod, "seal_required_data_snapshot", _seal_stub())
+    monkeypatch.setattr(mod, "_retire_required_data_shadows_after_manifest", lambda **_kwargs: None)
+    monkeypatch.setattr(mod, "run_one_account", _run_one_account)
+
+    outcome = mod.run_tick_account_execution(request)
+
+    expected_healthy = [healthy_account] if healthy_account else []
+    assert forbidden_calls == []
+    assert set(workers) == {"lx", "sy"}
+    assert result_reads == expected_healthy
+    assert [item["payload"]["filters"]["account"] for item in source_events] == expected_healthy
+    assert build_prefetch_config.call_count == 1
+    planner_kwargs = build_prefetch_config.call_args.kwargs
+    assert set(planner_kwargs["account_configs"]) == set(expected_healthy)
+    assert set(planner_kwargs["prepared_portfolio_contexts"]) == set(expected_healthy)
+    assert prepare_options.call_count == 1
+    assert set(prepare_options.call_args.kwargs["account_config_authorities"]) == set(expected_healthy)
+    assert prefetch.call_count == len(expected_healthy)
+    assert account_children == expected_healthy
+    assert outcome.ran_pipeline_accounts == expected_healthy
+    results = {item.account: item for item in outcome.results}
+    metrics = {item["account"]: item for item in outcome.account_metrics}
+    prepared_metrics = {item["account"]: item for item in outcome.prepared_context_metrics}
+    for account in {"lx", "sy"} - set(expected_healthy):
+        state = tmp_path / "output_runs" / request.run_id / "accounts" / account / "state"
+        manifest = json.loads((state / "prepared_portfolio_context.v1.json").read_bytes())
+        assert manifest["status"] == "unavailable"
+        assert manifest["reason"] == "portfolio_context_deadline_exceeded"
+        assert manifest["worker_returncode"] == 0
+        assert not list(state.glob("portfolio_context.*.json"))
+        assert workers[account].terminated and workers[account].waited == 1
+        assert prepared_metrics[account]["reason"] == "portfolio_context_deadline_exceeded"
+        assert results[account].decision_reason == "account_config_prepared_context_invalid"
+        assert results[account].should_notify is False
+        assert metrics[account]["error_code"] == "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID"
+        assert metrics[account]["error"] == "portfolio_context_deadline_exceeded"
+        assert metrics[account]["ran_scan"] is False
+        assert metrics[account]["ran_pipeline"] is False
+        assert metrics[account]["should_notify"] is False
+
+
 def test_config_drift_isolated_to_one_account_before_shared_prefetch(
     monkeypatch,
     tmp_path: Path,
