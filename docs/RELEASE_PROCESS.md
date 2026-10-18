@@ -332,6 +332,15 @@ git branch -d <exact-local-branch>
 `upgrade.lock` 保留原有 PID 诊断用途，正常释放时删除。所有采用此协议的转换共享同一 runtime 的 guard；
 未修改的旧版本进程不遵守 guard，外部删除或替换 guard 也不在此互斥保证内。
 
+confirmed 升级/回滚先取得该 guard，再绑定 current、版本、profile、配置和 rollback 状态基线；
+持锁直到原有转换、失败补偿及读回、可选升级 cleanup 和终态状态写入尝试结束。
+竞争失败只返回本次失败，不覆盖持有者的 `upgrade_status.json`，也不查询目标版本或 fetch；
+未解析的隐式升级目标仍保留返回字段，`target_version`、`release_tag`、`target_dir` 为 `null`。
+未确认的早退结果（无目标、已是当前版本、版本限制或缺失回滚目录）仅在短持同一 guard、
+完整 status/profile 和 current 基线重验一致时保留原有状态持久化；忙、基线变化或无法证明一致时只返回当次预览。
+正常 dry-run 不新增转换锁或 `upgrade_status.json` 写入，既有一次版本查询及其 cache 行为不变。
+取消继续传播并释放 guard，不新增自动补偿；cleanup 或终态写入异常也继续传播，成功转换不会因此新增回滚。
+
 升级检查只读：
 
 ```bash
