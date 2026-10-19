@@ -6,7 +6,7 @@ import json
 import sqlite3
 from contextlib import closing, contextmanager
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from src.infrastructure.private_storage import (
     atomic_write_private_text, connect_private_sqlite, exclusive_private_file_lock, private_path,
@@ -53,8 +53,8 @@ def _manifest(path: Path) -> dict[str, Any] | None:
     return value
 
 
-def assert_bot_ready(path: str | Path) -> None:
-    """Run before schema ensure; missing fresh installs are handled by the caller."""
+def assert_bot_ready(path: str | Path, *, connect: Callable[[], sqlite3.Connection] | None = None) -> None:
+    """Check before schema ensure; connect must supply a fresh, owned connection to path."""
     target = private_path(path)
     manifest = _manifest(target)
     if manifest and manifest.get("status") != "complete":
@@ -63,7 +63,9 @@ def assert_bot_ready(path: str | Path) -> None:
         if manifest:
             raise ValueError("Bot migration database is missing")
         return
-    with _read_db(target) as conn:
+    # Online checks share the writer's open mode to avoid mixed-mode SQLite locks on macOS.
+    with (closing(connect()) if connect is not None else _read_db(target)) as conn:
+        conn.execute("PRAGMA query_only=ON")
         names = _tables(conn)
         if names.intersection(LEGACY_TABLES):
             raise ValueError("Legacy Copilot data requires ./om bot migrate --dry-run")

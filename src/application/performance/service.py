@@ -11,12 +11,26 @@ from zoneinfo import ZoneInfo
 from domain.domain.option_position_identity import normalize_broker
 from domain.domain.performance.period import PeriodWindow
 from domain.domain.performance.weighted_reducer import (
+    PERFORMANCE_PARTIAL_PROJECTION_CODES,
     PerformanceReduction,
     PerformanceScopeError,
     WeightedOptionFact,
     reduce_option_performance,
 )
 from src.application.ledger import api as ledger_api
+
+
+REPORT_SCHEMA_VERSION = "option_performance.report.v3"
+METRIC_SEMANTICS = {
+    "period_option_net_cashflow": "cash_event_effective_time",
+    "option_net_cashflow": "opening_cohort",
+    "rows": "opening_cohort",
+    "breakdowns": "opening_cohort",
+    "option_return": {"selection": "opening_cohort", "numerator": "option_net_cashflow"},
+    "sell_option_win_rate": "opening_cohort",
+    "buy_option_win_rate": "opening_cohort",
+    "daily_occupied_capital": "period_overlap_including_carry_in",
+}
 
 
 _CONTROL_GRAPH_CODES = {
@@ -26,14 +40,6 @@ _CONTROL_GRAPH_CODES = {
     "target_event_not_found",
     "target_event_self_reference",
     "target_event_type_invalid",
-}
-_PARTIAL_PROJECTION_CODES = {
-    "cc_lp_membership_incomplete",
-    "combo_membership_incomplete",
-    "csp_lc_membership_incomplete",
-    "economic_adjust_invalid",
-    "economic_adjust_non_conserving",
-    "target_economic_units_mismatch",
 }
 
 
@@ -150,7 +156,7 @@ def _fatal_projection_reasons(
         if item_broker and broker and item_broker != broker:
             continue
         code = str(getattr(item, "code", "") or "").strip()
-        if code in _PARTIAL_PROJECTION_CODES:
+        if code in PERFORMANCE_PARTIAL_PROJECTION_CODES:
             continue
         reasons.add(
             "ledger_control_graph_invalid"
@@ -176,6 +182,8 @@ def _serialize_report(
         tz=ZoneInfo(period.reporting_timezone),
     ).isoformat(timespec="milliseconds")
     result: dict[str, Any] = {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "metric_semantics": _json_value(METRIC_SEMANTICS),
         "period": {
             "kind": period.kind,
             "start_date": period.requested_start_date,
@@ -202,6 +210,7 @@ def _serialize_report(
             "status": "current" if period.is_current else "historical",
             "as_of": freshness_as_of,
         },
+        "period_option_net_cashflow": _json_value(bundle["period_option_net_cashflow"]),
         "option_net_cashflow": _json_value(bundle["option_net_cashflow"]),
         "sell_option_win_rate": _json_value(bundle["sell_option_win_rate"]),
         "buy_option_win_rate": _json_value(bundle["buy_option_win_rate"]),
