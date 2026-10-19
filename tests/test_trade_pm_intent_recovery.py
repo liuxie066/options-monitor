@@ -1,5 +1,6 @@
 import json
 import multiprocessing
+import sqlite3
 import threading
 import time
 from types import SimpleNamespace
@@ -9,7 +10,7 @@ import pytest
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.trades import auto_intake
 from src.application.trades.inbox_authority import resolve_execution_inbox_path
-from src.application.trades.inbox import (claim_trade_payload_refresh_intent, enqueue_trade_payload,
+from src.application.trades.inbox import (claim_trade_payload_refresh_intent, claim_trade_payload_refresh_intents, enqueue_trade_payload,
     list_retryable_trade_payloads, list_unclaimed_trade_payload_refresh_intents, mark_trade_payload_handled,
     read_trade_payload, record_trade_payload_refresh_intent,)
 
@@ -39,7 +40,17 @@ def _core(tmp_path, payload, *, source="push"):
         apply_changes=True, host="127.0.0.1", port=11111, source=source, allow_external_lookup=False,)
 
 
-def _loop(tmp_path, monkeypatch, *, payload=None, client=None, apply_changes=True):
+def _order_saved_intents(path, saved):
+    with sqlite3.connect(path) as conn:
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+        for index, item in enumerate(saved):
+            conn.execute("UPDATE trade_inbox SET received_at_ms=? WHERE inbox_id=?", (index + 1, item["inbox_id"]))
+
+
+def _loop(tmp_path, monkeypatch, *, payload=None, client=None, apply_changes=True, account_mapping=None):
+    monkeypatch.delenv("OM_ENV_FILE", raising=False)
+    monkeypatch.setenv("OM_INBOUND_AUDIT_DB", str(tmp_path / "isolated-inbound.sqlite3"))
+    account_mapping = {"123": "lx"} if account_mapping is None else account_mapping
     stop = threading.Event()
     class Listener:
         def __init__(self, *, on_deal, **kwargs):
@@ -60,7 +71,7 @@ def _loop(tmp_path, monkeypatch, *, payload=None, client=None, apply_changes=Tru
     source = {"id": "lx", "account": "lx", "host": "127.0.0.1", "port": 11111,
         "state_path": tmp_path / "state.json", "audit_path": tmp_path / "audit.jsonl",
         "status_path": tmp_path / "status.json", "inbox_path": _inbox(tmp_path),
-        "account_mapping": {"123": "lx"}, "futu_account_ids": ["123"],
+        "account_mapping": account_mapping, "futu_account_ids": list(account_mapping),
         "backfill": {"enabled": False}, "settlement_observation": {"enabled": False}}
     return auto_intake._run_listener_source_loop(
         source=source, repo=SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3"), cfg={},
@@ -122,6 +133,86 @@ def test_recovery_batch_coalesces_accounts_and_keeps_other_source_unclaimed(tmp_
     inbox = _inbox(tmp_path)
     assert all(read_trade_payload(inbox, inbox_id=item["inbox_id"])["portfolio_refresh_attempted_at_ms"] is not None for item in results)
     assert read_trade_payload(inbox, inbox_id=other["inbox_id"])["portfolio_refresh_attempted_at_ms"] is None
+
+
+def test_recovery_dispatches_prior_account_before_later_claim_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda cfg: True)
+    first = _core(tmp_path, _stock("first"))
+    second = _core(tmp_path, _stock("second", physical="456", account="sy"))
+    inbox = _inbox(tmp_path)
+    _order_saved_intents(inbox, [first, second])
+    original = auto_intake.claim_trade_payload_refresh_intents
+    calls = []
+
+    def fail_second(path, *, inbox_ids, account):
+        if account == "sy":
+            assert calls == [first["portfolio_refresh_intent"]]
+            raise OSError("second account claim failed")
+        return original(path, inbox_ids=inbox_ids, account=account)
+
+    def dispatch(**kwargs):
+        calls.append({key: kwargs[key] for key in ("account", "request_id")})
+        saved = first if kwargs["account"] == "lx" else second
+        assert read_trade_payload(inbox, inbox_id=saved["inbox_id"])["portfolio_refresh_attempted_at_ms"] is not None
+
+    monkeypatch.setattr(auto_intake, "claim_trade_payload_refresh_intents", fail_second)
+    mapping = {"123": "lx", "456": "sy"}
+    client = SimpleNamespace(request_holdings_refresh=dispatch)
+    assert _loop(tmp_path, monkeypatch, client=client, account_mapping=mapping) == 0
+    assert "second account claim failed" in json.loads((tmp_path / "status.json").read_text())["last_portfolio_refresh_recovery_error"]
+    assert read_trade_payload(inbox, inbox_id=second["inbox_id"])["portfolio_refresh_attempted_at_ms"] is None
+    monkeypatch.setattr(auto_intake, "claim_trade_payload_refresh_intents", original)
+    assert _loop(tmp_path, monkeypatch, client=client, account_mapping=mapping) == 0
+    assert calls == [first["portfolio_refresh_intent"], second["portfolio_refresh_intent"]]
+    assert "last_portfolio_refresh_recovery_error" not in json.loads((tmp_path / "status.json").read_text())
+
+
+def test_recovery_same_account_failure_preserves_whole_group(tmp_path, monkeypatch):
+    from src.application.trades import inbox as owner
+
+    monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda cfg: True)
+    saved = [_core(tmp_path, _stock(value)) for value in ("first", "second")]
+    _order_saved_intents(_inbox(tmp_path), saved)
+    original = owner._claim_trade_payload_refresh_intent
+
+    def fail_second(conn, *, inbox_id, account=None):
+        if inbox_id == saved[1]["inbox_id"]:
+            raise OSError("second row claim failed")
+        return original(conn, inbox_id=inbox_id, account=account)
+
+    calls = []
+    client = SimpleNamespace(request_holdings_refresh=lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(owner, "_claim_trade_payload_refresh_intent", fail_second)
+    assert _loop(tmp_path, monkeypatch, client=client) == 0
+    assert calls == []
+    assert all(read_trade_payload(_inbox(tmp_path), inbox_id=item["inbox_id"])["portfolio_refresh_attempted_at_ms"] is None
+               for item in saved)
+    monkeypatch.setattr(owner, "_claim_trade_payload_refresh_intent", original)
+    assert _loop(tmp_path, monkeypatch, client=client) == 0
+    assert len(calls) == 1
+    assert calls[0]["request_id"] == saved[0]["portfolio_refresh_intent"]["request_id"]
+    assert SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3").list_trade_events() == []
+
+
+def test_interrupted_recovery_dispatch_does_not_consume_next_account(tmp_path, monkeypatch):
+    monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda cfg: True)
+    first = _core(tmp_path, _stock("first"))
+    second = _core(tmp_path, _stock("second", physical="456", account="sy"))
+    _order_saved_intents(_inbox(tmp_path), [first, second])
+    calls = []
+
+    def interrupt(**kwargs):
+        calls.append(kwargs)
+        raise ProcessInterrupted()
+
+    mapping = {"123": "lx", "456": "sy"}
+    with pytest.raises(ProcessInterrupted):
+        _loop(tmp_path, monkeypatch, client=SimpleNamespace(request_holdings_refresh=interrupt), account_mapping=mapping)
+    assert calls == [{**first["portfolio_refresh_intent"], "timeout": 2.0}]
+    assert read_trade_payload(_inbox(tmp_path), inbox_id=second["inbox_id"])["portfolio_refresh_attempted_at_ms"] is None
+    assert _loop(tmp_path, monkeypatch, client=SimpleNamespace(request_holdings_refresh=lambda **kwargs: calls.append(kwargs)),
+                 account_mapping=mapping) == 0
+    assert calls == [{**item["portfolio_refresh_intent"], "timeout": 2.0} for item in (first, second)]
 
 
 @pytest.mark.parametrize("excluded", ["pending", "historical", "manual", "conflict", "claimed", "physical", "label"])
@@ -191,21 +282,31 @@ def test_pending_retry_while_pm_disabled_preserves_intent_for_enabled_restart(tm
     assert calls == [{**original_intent, "timeout": 2.0}]
 
 
-def _claim_saved_pm(path, ready, release, results):
+def _claim_saved_pm(path, ready, release, results, batch=False):
     candidates = list_unclaimed_trade_payload_refresh_intents(path, account_mapping={"123": "lx"})
     ready.put(len(candidates))
     if not release.wait(10):
         raise RuntimeError("PM claim barrier timed out")
-    results.put(claim_trade_payload_refresh_intent(path, inbox_id=candidates[0]["inbox_id"]))
+    results.put(claim_trade_payload_refresh_intents(path, inbox_ids=[candidates[0]["inbox_id"]], account="lx")
+                if batch else claim_trade_payload_refresh_intent(path, inbox_id=candidates[0]["inbox_id"]))
 
 
 def test_two_recovery_processes_claim_original_intent_only_once(tmp_path, monkeypatch):
+    _competing_recovery_claims(tmp_path, monkeypatch, batch=False)
+
+
+def test_batch_and_singular_recovery_processes_claim_original_intent_only_once(tmp_path, monkeypatch):
+    _competing_recovery_claims(tmp_path, monkeypatch, batch=True)
+
+
+def _competing_recovery_claims(tmp_path, monkeypatch, *, batch):
     monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda cfg: True)
     result = _core(tmp_path, _stock())
     path = _inbox(tmp_path)
     context = multiprocessing.get_context("spawn")
     ready, release, results = context.Queue(), context.Event(), context.Queue()
-    workers = [context.Process(target=_claim_saved_pm, args=(str(path), ready, release, results)) for _ in range(2)]
+    workers = [context.Process(target=_claim_saved_pm, args=(str(path), ready, release, results, batch and index == 1))
+               for index in range(2)]
     for worker in workers:
         worker.start()
     try:
