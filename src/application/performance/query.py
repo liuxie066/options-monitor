@@ -159,6 +159,8 @@ def _page_option_performance(
     source_hash = digest(
         {
             "ledger_input_hash": data["quality"]["ledger_input_hash"],
+            "schema_version": data.get("schema_version"),
+            "metric_semantics": data.get("metric_semantics"),
             "period": data["period"],
             "scope": data["scope"],
             "rows": all_rows,
@@ -173,6 +175,7 @@ def _page_option_performance(
         raise PerformanceQueryError("INPUT_ERROR", "cursor_invalidated")
     end = min(len(rows), offset + query["limit"])
     result = {name: data[name] for name in ("period", "scope", "freshness", "quality")}
+    result.update({name: data[name] for name in ("schema_version", "metric_semantics") if name in data})
     result.update(
         view=view,
         group_by=group if view == "breakdowns" else None,

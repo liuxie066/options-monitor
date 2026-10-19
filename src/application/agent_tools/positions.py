@@ -64,6 +64,9 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
     "pagination": {"mode": "keyset"},
     "source_label": "OM 本地 canonical trade_events ledger",
     "fact_fields": [
+        "schema_version",
+        "metric_semantics",
+        "period_option_net_cashflow",
         "period.kind",
         "period.start_date",
         "period.as_of_date",
@@ -87,6 +90,9 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "breakdowns.symbols",
     ],
     "missing_data_fields": [
+        "period_option_net_cashflow.missing",
+        "period_option_net_cashflow.by_currency.*.*.missing",
+        "period_option_net_cashflow.cny_total.missing",
         "quality.missing",
         "quality.diagnostics",
         "option_net_cashflow.by_currency.*.*.missing",
@@ -102,6 +108,9 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "quality.ledger_input_hash",
     ],
     "model_preview_fields": [
+        "schema_version",
+        "metric_semantics",
+        "period_option_net_cashflow",
         "period",
         "scope",
         "option_net_cashflow",
@@ -112,6 +121,9 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "quality",
     ],
     "model_value_fields": [
+        "schema_version",
+        "metric_semantics",
+        "period_option_net_cashflow",
         "period",
         "scope",
         "option_net_cashflow",
@@ -123,6 +135,9 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "available_breakdowns", "detail_query",
     ],
     "model_missing_data_fields": [
+        "period_option_net_cashflow.missing",
+        "period_option_net_cashflow.by_currency.*.*.missing",
+        "period_option_net_cashflow.cny_total.missing",
         "quality.missing",
         "quality.diagnostics",
         "option_net_cashflow.cny_total.missing",
@@ -1002,12 +1017,13 @@ _PERFORMANCE_READ_INPUT = {
 
 OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
     name="option_performance_report",
-    catalog_summary="读取 MTD/YTD 或自然月/自然年期权收益、实际日均占用与明细分解。",
+    catalog_summary="读取期间期权现金流、开仓批次收益、实际日均占用与批次明细。",
     description=(
         "Read-only MTD, YTD, natural-month, or natural-year option performance from the canonical ledger. Reports native-currency "
-        "option net cash flow plus an audited CNY total when persisted event-time conversions are complete, "
+        "period option net cash flow and separate opening-cohort cash results, each with historical CNY evidence; "
         "sell-option and buy-option win rates, hold-to-expiry returns, and independent actual daily unsettled "
-        "principal including carry-in positions. Daily principal is not the return denominator. Stock trades, "
+        "principal including carry-in positions. Returns, wins, rows and breakdowns keep opening-cohort semantics. "
+        "Never substitute cohort cash for unavailable period cash. Daily principal is not the return denominator. Stock trades, "
         "assignment settlement cash, PnL, read-time FX conversion, and quote refresh are outside this report."
     ),
     requires=("runtime_config", "sqlite_data_config"),
