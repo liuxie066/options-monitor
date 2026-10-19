@@ -301,6 +301,288 @@ def test_invalid_dte_build_preserves_outputs(dte_build_fixture, side, bounds, me
         assert fixture["forbidden_calls"] == []
 
 
+@pytest.fixture
+def schedule_offset_build_fixture(dte_build_fixture, request: pytest.FixtureRequest):
+    monkeypatch = pytest.MonkeyPatch()
+    request.addfinalizer(monkeypatch.undo)
+
+    import os
+    import socket
+    import sqlite3
+    import subprocess
+
+    from src.application import config_yaml
+
+    fixture = dte_build_fixture
+    forbidden_calls = []
+    prior_reads = []
+    real_reader = config_yaml.read_json_object_or_empty
+
+    def forbid(name, *_args, **_kwargs):
+        forbidden_calls.append(name)
+        raise AssertionError(f"unexpected schedule-offset effect: {name}")
+
+    for owner, name in (
+        (socket.socket, "connect"), (socket.socket, "connect_ex"),
+        (socket, "create_connection"), (socket, "getaddrinfo"),
+        (subprocess, "Popen"), (sqlite3, "connect"),
+        (os, "unlink"), (os, "remove"), (os, "rmdir"),
+        (Path, "unlink"), (Path, "rmdir"),
+    ):
+        monkeypatch.setattr(owner, name, partial(forbid, f"{owner.__name__}.{name}"))
+
+    def read_output(path):
+        assert path.resolve().is_relative_to(fixture["root"].resolve())
+        prior_reads.append(path)
+        return real_reader(path)
+
+    monkeypatch.setattr(config_yaml, "read_json_object_or_empty", read_output)
+    try:
+        yield {**fixture, "prior_reads": prior_reads}
+    finally:
+        assert forbidden_calls == []
+        assert fixture["forbidden_calls"] == []
+
+
+def _write_schedule_offset_source(fixture, schedule_key, run_points):
+    schedule = {
+        "enabled": True, "timezone": "America/New_York", "beijing_timezone": "Asia/Shanghai",
+        "cron_interval_min": 10, "run_window": {"start": "09:30", "end": "16:00", "breaks": []},
+        "run_points": deepcopy(run_points), "gates": [],
+    }
+    document = deepcopy(fixture["document"])
+    system_path = fixture["build_args"]["system_config_path"]
+    system = json.loads(system_path.read_text(encoding="utf-8"))
+    if schedule_key == "schedule":
+        document["markets"]["us"]["schedule"] = schedule
+    else:
+        # Legacy runtime keys enter through the supported system template, not YAML authoring.
+        assert schedule_key == "schedule_hk"
+        system["markets"]["us"][schedule_key] = schedule
+    fixture["source"].write_text(yaml.safe_dump(document), encoding="utf-8")
+    system_path.write_text(json.dumps(system), encoding="utf-8")
+    return schedule
+
+
+def _assert_schedule_offset_values(actual, expected):
+    assert actual == expected
+    assert json.dumps(actual, sort_keys=True) == json.dumps(expected, sort_keys=True)
+    for field in ("start_plus_min", "end_minus_min"):
+        if field in expected["run_points"]:
+            assert type(actual["run_points"][field]) is type(expected["run_points"][field])
+
+
+def _build_schedule_offset_output(fixture, schedule_key, schedule):
+    before = fixture["snapshot"]()
+    result = build_yaml_runtime_config_file(**fixture["build_args"])
+    assert result["ok"] is True
+    assert result["write_applied"] is True
+    assert result["dry_run"] is False
+    assert result["output_config_path"] == str(fixture["output"])
+    assert result["market"] == "us"
+    assert result["accounts"] == ["fixture"]
+    assert result["symbols"] == ["NVDA"]
+    assert fixture["prior_reads"] == [fixture["output"]]
+    assert fixture["writes"] == [fixture["output"]]
+    assert fixture["snapshot"]() == {
+        **before, str(fixture["output"].relative_to(fixture["root"])): fixture["output"].read_bytes(),
+    }
+
+    generated = json.loads(fixture["output"].read_text(encoding="utf-8"))
+    _assert_schedule_offset_values(generated[schedule_key], schedule)
+    assert generated["accounts"] == ["fixture"]
+    assert generated["account_settings"] == {"fixture": {"type": "futu", "futu": {"account_id": "REAL_00000001"}}}
+    assert generated["portfolio"]["account"] == "fixture"
+    assert generated["portfolio"]["data_config"] == str(fixture["root"] / "runtime" / "portfolio.runtime.json")
+    assert generated["trade_intake"]["enabled"] is False
+    assert generated["symbols"] == [{"symbol": "NVDA"}]
+    for metadata_key in ("_generated", "_resolved"):
+        assert generated[metadata_key]["market"] == "us"
+        assert generated[metadata_key]["source_format"] == "yaml"
+    for role, filename, path_key, hash_key in (
+        ("system", "system.json", "system_config_path", "system_config_sha256"),
+        ("market_user", "config.yaml", "config_yaml_path", "config_yaml_sha256"),
+    ):
+        source = fixture["build_args"]["repo_root"] / filename
+        digest = sha256(source.read_bytes()).hexdigest()
+        assert result[path_key] == str(source)
+        assert result[hash_key] == digest
+        metadata = next(item for item in generated["_generated"]["sources"] if item["role"] == role)
+        assert metadata["loaded"] is True
+        assert metadata["path"] == filename
+        assert metadata["sha256"] == digest
+        resolved_path = "default_source" if role == "system" else "config_yaml_path"
+        resolved_hash = "default_sha256" if role == "system" else "config_yaml_sha256"
+        assert generated["_resolved"][resolved_path] == filename
+        assert generated["_resolved"][resolved_hash] == digest
+
+
+def _read_schedule_offset_decision(fixture, schedule_key, now_utc):
+    from datetime import datetime
+
+    from src.application.scan_scheduler import build_scheduler_decision_payload
+
+    state = fixture["root"] / "scheduler-state.json"
+    before = fixture["snapshot"]()
+    kwargs = {
+        "config": fixture["output"], "state": state, "schedule_key": schedule_key,
+        "account": "fixture", "force": False, "base_dir": fixture["build_args"]["repo_root"],
+        "now_utc": datetime.fromisoformat(now_utc),
+    }
+    payload = build_scheduler_decision_payload(**kwargs)
+    assert build_scheduler_decision_payload(**kwargs) == payload
+    assert payload["schedule_key"] == schedule_key
+    assert payload["now_utc"] == now_utc
+    assert not state.exists()
+    assert fixture["snapshot"]() == before
+    assert fixture["prior_reads"] == [fixture["output"]]
+    assert fixture["writes"] == [fixture["output"]]
+    return payload
+
+
+def _assert_schedule_offset_due(payload, target):
+    assert payload["in_run_window"] is True
+    assert payload["should_run_scan"] is True
+    assert payload["is_notify_window_open"] is True
+    assert payload["should_notify"] is True
+    assert payload["scheduled_scan_target_market"] == target
+    assert payload["scheduled_target_market"] == target
+    assert payload["now_market"] == target
+    assert payload["next_run_market"] == target
+    assert payload["next_run_utc"] == payload["now_utc"]
+    assert payload["reason"] == f"到达运行点 {target[11:16]}：执行扫描并允许通知。"
+
+
+@pytest.mark.parametrize(
+    ("schedule_key", "value"),
+    [
+        pytest.param(schedule_key, value, id=f"{schedule_key}-{value_id}")
+        for schedule_key in ("schedule", "schedule_hk")
+        for value, value_id in (
+            (10, "integer"), (10.0, "integral-float"), ("10", "integer-string"),
+            ("+10", "signed-string"), (" 10 ", "spaced-string"),
+            ("1_0", "underscore-string"), ("１０", "unicode-string"),
+        )
+    ],
+)
+def test_schedule_offsets_build_preserves_consumable_representations(schedule_offset_build_fixture, schedule_key, value):
+    from src.application.config_validator import validate_schedule_cfg
+
+    fixture = schedule_offset_build_fixture
+    schedule = _write_schedule_offset_source(
+        fixture, schedule_key, {"hourly_minute": 0, "start_plus_min": value, "end_minus_min": value},
+    )
+    before = deepcopy(schedule)
+    validate_schedule_cfg(schedule, schedule_key)
+    _assert_schedule_offset_values(schedule, before)
+    _build_schedule_offset_output(fixture, schedule_key, schedule)
+    early = _read_schedule_offset_decision(fixture, schedule_key, "2026-10-19T13:39:00+00:00")
+    assert early["in_run_window"] is True
+    assert early["should_run_scan"] is False
+    assert early["is_notify_window_open"] is False
+    assert early["should_notify"] is False
+    assert early["scheduled_scan_target_market"] is None
+    assert early["scheduled_target_market"] is None
+    assert early["next_run_utc"] == "2026-10-19T13:40:00+00:00"
+    for now_utc, target in (
+        ("2026-10-19T13:40:00+00:00", "2026-10-19T09:40:00-04:00"),
+        ("2026-10-19T19:50:00+00:00", "2026-10-19T15:50:00-04:00"),
+    ):
+        _assert_schedule_offset_due(_read_schedule_offset_decision(fixture, schedule_key, now_utc), target)
+
+
+@pytest.mark.parametrize(
+    ("schedule_key", "field", "value", "suffix"),
+    [
+        pytest.param(schedule_key, field, value, suffix, id=f"{schedule_key}-{field}-{value_id}")
+        for schedule_key in ("schedule", "schedule_hk")
+        for field in ("start_plus_min", "end_minus_min")
+        for value, value_id, suffix in (
+            ("10.0", "decimal-string", "must be an integer"),
+            ("1e1", "exponent-string", "must be an integer"),
+            ("10.0000000000000000001", "rounded-fraction-string", "must be an integer"),
+            ("1e-999", "underflow-string", "must be an integer"),
+            ("", "empty-string", "must be an integer"),
+            (-1, "negative", "must be >= 0"), (1.5, "fraction", "must be an integer"),
+            (True, "boolean", "must be an integer"),
+            ("nan", "nan", "must be a finite number"), ("inf", "infinity", "must be a finite number"),
+        )
+    ],
+)
+def test_schedule_offset_build_rejects_invalid_representation(schedule_offset_build_fixture, schedule_key, field, value, suffix):
+    from src.application.config_validator import validate_schedule_cfg
+
+    fixture = schedule_offset_build_fixture
+    run_points = {"hourly_minute": 0, "start_plus_min": 10, "end_minus_min": 10, field: value}
+    schedule = _write_schedule_offset_source(fixture, schedule_key, run_points)
+    message = f"[CONFIG_ERROR] {schedule_key}.run_points.{field} {suffix}"
+    sentinel = b'{"sentinel":"retained existing output"}\n'
+    fixture["output"].write_bytes(sentinel)
+    absent_output = fixture["root"] / "uncreated" / "config.us.json"
+    before = fixture["snapshot"]()
+    for output in (fixture["output"], absent_output):
+        with pytest.raises(AgentToolError) as build_error:
+            build_yaml_runtime_config_file(**{**fixture["build_args"], "output_config_path": output})
+        assert build_error.value.code == "CONFIG_ERROR"
+        assert build_error.value.message == message
+        assert fixture["prior_reads"] == []
+        assert fixture["writes"] == []
+        assert fixture["snapshot"]() == before
+        assert fixture["output"].read_bytes() == sentinel
+        assert not absent_output.parent.exists()
+    original_schedule = deepcopy(schedule)
+    with pytest.raises(SystemExit) as direct_error:
+        validate_schedule_cfg(schedule, schedule_key)
+    assert str(direct_error.value) == message
+    _assert_schedule_offset_values(schedule, original_schedule)
+
+    run_points[field] = 10
+    corrected = _write_schedule_offset_source(fixture, schedule_key, run_points)
+    _build_schedule_offset_output(fixture, schedule_key, corrected)
+    now_utc, target = (
+        ("2026-10-19T13:40:00+00:00", "2026-10-19T09:40:00-04:00")
+        if field == "start_plus_min"
+        else ("2026-10-19T19:50:00+00:00", "2026-10-19T15:50:00-04:00")
+    )
+    _assert_schedule_offset_due(_read_schedule_offset_decision(fixture, schedule_key, now_utc), target)
+
+
+@pytest.mark.parametrize(
+    ("schedule_key", "variant"),
+    [
+        pytest.param(schedule_key, variant, id=f"{schedule_key}-{variant}")
+        for schedule_key in ("schedule", "schedule_hk")
+        for variant in ("missing", "null", "zero", "negative-zero")
+    ],
+)
+def test_schedule_offsets_keep_optional_zero_semantics(schedule_offset_build_fixture, schedule_key, variant):
+    from src.application.config_validator import validate_schedule_cfg
+
+    fixture = schedule_offset_build_fixture
+    run_points = {"hourly_minute": 0}
+    if variant != "missing":
+        value = {"null": None, "zero": 0, "negative-zero": -0.0}[variant]
+        run_points.update({"start_plus_min": value, "end_minus_min": value})
+    schedule = _write_schedule_offset_source(fixture, schedule_key, run_points)
+    before = deepcopy(schedule)
+    validate_schedule_cfg(schedule, schedule_key)
+    _assert_schedule_offset_values(schedule, before)
+    _build_schedule_offset_output(fixture, schedule_key, schedule)
+    opening = _read_schedule_offset_decision(fixture, schedule_key, "2026-10-19T13:30:00+00:00")
+    if variant == "missing":
+        assert opening["in_run_window"] is True
+        assert opening["should_run_scan"] is False
+        assert opening["is_notify_window_open"] is False
+        assert opening["should_notify"] is False
+        assert opening["scheduled_scan_target_market"] is None
+        assert opening["scheduled_target_market"] is None
+        assert opening["next_run_utc"] == "2026-10-19T14:00:00+00:00"
+    else:
+        _assert_schedule_offset_due(opening, "2026-10-19T09:30:00-04:00")
+        closing = _read_schedule_offset_decision(fixture, schedule_key, "2026-10-19T20:00:00+00:00")
+        _assert_schedule_offset_due(closing, "2026-10-19T16:00:00-04:00")
+
+
 def test_close_advice_runtime_typo_and_enabled_type():
     with pytest.raises(SystemExit, match="quote_sourse->quote_source"):
         validate_config(_runtime(close_advice={"quote_sourse": "auto"}))
