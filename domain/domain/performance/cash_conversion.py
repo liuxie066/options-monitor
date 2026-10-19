@@ -276,7 +276,7 @@ def _validate_observed_cash_conversion(
             return None, "fx_rate_invalid"
         if amount_cny != quantize_money(amount * rate):
             return None, "fx_arithmetic_mismatch"
-        rate_timestamp_ms = _timestamp_ms(conversion.get("rate_timestamp"))
+        rate_timestamp_ms = cash_conversion_timestamp_ms(conversion.get("rate_timestamp"))
         if rate_timestamp_ms is None:
             return None, "rate_timestamp_invalid"
         if method == DAILY_CASH_FX_METHOD and (
@@ -331,7 +331,7 @@ def _validate_observed_cash_conversion(
     return amount_cny, None
 
 
-def _timestamp_ms(value: Any) -> int | None:
+def cash_conversion_timestamp_ms(value: Any) -> int | None:
     raw = str(value or "").strip()
     if not raw:
         return None
@@ -353,6 +353,7 @@ __all__ = [
     "MAX_BOOKING_RATE_DISTANCE_MS",
     "MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS",
     "OFFICIAL_CARRY_FORWARD_SOURCES",
+    "cash_conversion_timestamp_ms",
     "cash_conversion_id",
     "cash_conversion_identity",
     "cash_fx_date",

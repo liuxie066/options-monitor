@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -8,11 +9,22 @@ import pytest
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tools import positions
 from src.application.bot import tools as bot_tools
-from src.application.performance.service import OptionPerformanceReadError
+from src.application.performance.service import METRIC_SEMANTICS, REPORT_SCHEMA_VERSION, OptionPerformanceReadError
 
 
 def _report(*, include_rows: bool = False) -> dict[str, Any]:
     value: dict[str, Any] = {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "metric_semantics": deepcopy(METRIC_SEMANTICS),
+        "period_option_net_cashflow": {
+            "schema_version": "period_option_net_cashflow.v1",
+            "selection": "cash_event_effective_time",
+            "time_policy": "trade_event_time_with_explicit_fee_effective_time",
+            "fee_mode": "actual",
+            "by_currency": {},
+            "cny_total": {"currency": "CNY", "amount": 0, "status": "observed", "missing": []},
+            "status": "observed", "missing": [], "fact_count": 0,
+        },
         "period": {
             "kind": "mtd", "start_date": "2026-09-01", "as_of_date": "2026-09-02",
             "start_at_ms": 1788192000000, "end_exclusive_at_ms": 1788364800000,
@@ -109,6 +121,7 @@ def test_option_performance_report_is_the_canonical_payload_without_legacy_prese
     assert data["daily_occupied_capital"] == _report()["daily_occupied_capital"]
     assert warnings == []
     assert set(data) == {
+        "schema_version", "metric_semantics", "period_option_net_cashflow",
         "period", "scope", "coverage", "freshness", "option_net_cashflow",
         "sell_option_win_rate", "buy_option_win_rate", "option_return",
         "daily_occupied_capital", "breakdowns", "quality", "rows",
@@ -231,6 +244,13 @@ def test_option_performance_output_contract_has_only_the_new_business_fields() -
 
     assert contract["evidence_type"] == "aggregate"
     assert "schema_version" not in contract
+    for field in ("schema_version", "metric_semantics", "period_option_net_cashflow"):
+        for field_set in ("fact_fields", "model_value_fields", "model_preview_fields"):
+            assert field in contract[field_set]
+    for field in ("period_option_net_cashflow.missing", "period_option_net_cashflow.cny_total.missing",
+                  "period_option_net_cashflow.by_currency.*.*.missing"):
+        assert field in contract["missing_data_fields"]
+        assert field in contract["model_missing_data_fields"]
     assert "option_net_cashflow" in contract["fact_fields"]
     assert "sell_option_win_rate" in contract["fact_fields"]
     assert "buy_option_win_rate" in contract["fact_fields"]

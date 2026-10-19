@@ -102,6 +102,12 @@ def test_real_client_cli_tool_and_bot_use_the_canonical_result(service, monkeypa
         mask_path=lambda p: "<bound-runtime>",
     )
     assert data == expected and warnings == []
+    assert data["schema_version"] == "option_performance.report.v3"
+    assert data["period_option_net_cashflow"]["by_currency"]["USD"]["total"]["amount"] == 600
+    status, envelope = _request(url, QUERY)
+    assert status == 200
+    assert envelope["schema_version"] == "option_performance.api.v1"
+    assert envelope["data"]["schema_version"] == data["schema_version"]
     assert str(path) not in json.dumps(meta)
     monkeypatch.setenv("OM_PERFORMANCE_SERVICE_URL", url)
     monkeypatch.setenv("OM_PERFORMANCE_SERVICE_TOKEN", TOKEN)
@@ -137,6 +143,8 @@ def test_real_client_cli_tool_and_bot_use_the_canonical_result(service, monkeypa
         "option_performance_report", payload, allowed_tools=("option_performance_report",), now_ms=1
     )
     assert response["ok"] and response["data"]["option_net_cashflow"] == expected["option_net_cashflow"]
+    for key in ("schema_version", "metric_semantics", "period_option_net_cashflow"):
+        assert response["data"][key] == expected[key]
     rejected, error = bot_tools.build_tool_payload("option_performance_report", {"config_path": "/bad"})
     assert rejected is None and "unsupported" in error
     with writer._connect() as conn:
