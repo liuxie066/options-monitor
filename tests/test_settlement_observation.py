@@ -1672,6 +1672,8 @@ def test_invalid_stock_quantity_blocks_real_due_before_economic_write(
 def test_corrected_stock_quantity_retries_once_through_canonical_writer(
     tmp_path: Path, isolated_settlement_quantity, quantity,
 ) -> None:
+    from src.application.ledger.api import project_assigned_stock_lifecycle_from_rows
+
     repo, case, policy, _ = _repo_with_pending_case(tmp_path)
     case_id = str(case["case_id"])
     now_ms = int(policy["settlement_deadline_ms"]) + 1
@@ -1712,7 +1714,23 @@ def test_corrected_stock_quantity_retries_once_through_canonical_writer(
     assert readback["reason_state"] == "resolved"
     assert readback["close_reason"] == "assignment"
     assert readback["remaining_contracts_by_lot"] == {"lot-1": 0}
-    _assert_current_lifecycle_matches_oracle(repo, now_ms=now_ms)
+    assigned_stock_report = project_assigned_stock_lifecycle_from_rows(
+        repo.read_lifecycle_account_rows(account="lx"), account="lx", as_of_ms=now_ms,
+    )
+    stock_lots = assigned_stock_report["_all_assigned_stock_lots"]
+    assert len(stock_lots) == 1
+    assert stock_lots[0]["source_assignment_event_id"] == assignments[0]["event_id"]
+    assert stock_lots[0]["source_option_lot_id"] == "lot-1"
+    assert stock_lots[0]["shares_opened"] == 100
+    assert stock_lots[0]["shares_remaining"] == 100
+    trusted = read_current_decision_projection(repo, account="lx", now_ms=now_ms)
+    oracle = preview_current_decision_projection_oracle(
+        repo, account="lx", now_ms=now_ms, assigned_stock_report=assigned_stock_report,
+    )
+    assert trusted["status"] == "trusted"
+    assert trusted["payload"]["lifecycle"] == oracle["lifecycle"]
+    assert trusted["payload"]["assigned_stock"] == oracle["assigned_stock"]
+    assert _settlement_economic_snapshot(repo, case_id) == after
     retry = reconcile_due_lifecycle_cases(
         repo, account="lx", now_ms=now_ms + 1, apply_changes=True, observation_collector=collector,
     )
