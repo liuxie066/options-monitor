@@ -41,6 +41,10 @@ explicit command
 
 No model can enter the apply path.
 
+Manual-trade labeled integer fields accept whole numeric values such as `1` and
+`1.0` without rounding. Fractional values return `INPUT_ERROR` before a trade
+preview or pending operation is created; correct the value in a new message.
+
 Confirmed `/monitor-run` operations use the guarded `tick-cron` wrapper. When
 its return code is 0 and its entire stdout, after stripping surrounding whitespace,
 is `SKIP_LOCKED`, Control records terminal `skipped` with reason `tick_cron_locked`.
