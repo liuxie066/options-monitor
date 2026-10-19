@@ -183,6 +183,9 @@ def test_service_reads_one_tuple_and_serializes_only_the_canonical_contract() ->
     }
     assert repo.read_count == 1
     assert set(report) == {
+        "schema_version",
+        "metric_semantics",
+        "period_option_net_cashflow",
         "period",
         "scope",
         "coverage",
@@ -223,6 +226,36 @@ def test_service_reads_one_tuple_and_serializes_only_the_canonical_contract() ->
     assert cny_total["missing"] == []
     assert report["quality"]["status"] == "observed"
     assert not _contains_not_observed(report)
+    assert report["schema_version"] == "option_performance.report.v3"
+    assert report["metric_semantics"]["option_return"] == {
+        "selection": "opening_cohort", "numerator": "option_net_cashflow",
+    }
+    period_cash = report["period_option_net_cashflow"]
+    assert period_cash["schema_version"] == "period_option_net_cashflow.v1"
+    assert period_cash["by_currency"]["USD"]["total"]["amount"] == 100.0
+    assert period_cash["by_currency"]["USD"]["gross"]["amount"] == 100.0
+    assert period_cash["by_currency"]["USD"]["fees"]["amount"] == 0.0
+    assert period_cash["cny_total"]["amount"] == 680.0
+    assert "cashflow_facts" not in report and "facts" not in period_cash
+
+
+def test_service_period_cash_includes_prior_opening_close_without_changing_cohort() -> None:
+    opened = _event("prior-open", "open", "2026-08-20T10:00:00")
+    closed = _event("close", "close", "2026-09-02T10:00:00", target_lot_id="lot-1")
+    report = _build_report(_Repo([opened.to_dict(), closed.to_dict()]), include_rows=True)
+
+    assert report["period_option_net_cashflow"]["by_currency"]["USD"]["total"]["amount"] == -100.0
+    assert report["option_net_cashflow"]["by_currency"] == {}
+    assert report["option_return"]["by_currency"] == {}
+    assert report["sell_option_win_rate"]["eligible_contracts"] == 0
+    assert report["rows"] == []
+    assert report["breakdowns"]["symbols"] == []
+
+
+def test_report_semantics_are_not_mutable_across_requests() -> None:
+    report = _build_report(_Repo([]))
+    report["metric_semantics"]["option_return"]["numerator"] = "wrong"
+    assert _build_report(_Repo([]))["metric_semantics"]["option_return"]["numerator"] == "option_net_cashflow"
 
 
 def test_service_keeps_native_cash_when_cny_conversion_is_missing() -> None:

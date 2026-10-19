@@ -112,6 +112,12 @@ portfolio_management:
 
 系统默认值在 `src/application/config_defaults.py::DEFAULT_CONFIG`。不需要把所有默认字段复制进 `config.yaml`。
 
+### 调度运行点
+
+`markets.<market>.schedule.run_points.start_plus_min` 和 `end_minus_min` 分别指定窗口开始后、结束前的分钟偏移。
+非空值必须是调度器可直接读取的非负整数表示，例如 `10`、`10.0` 或 `"10"`；构建保留原值和类型。
+字符串 `"10.0"`、`"1e1"` 不能直接读取为整数，`om config validate` 和 `om config build` 会报告具体字段的配置错误，构建不会覆盖已有运行快照。
+
 ## 维护监控标的
 
 人工入口是 `om symbols`：`list` 查看 YAML 中该市场的清单，`add`、`rm`、`edit` 默认只预览；确认后追加 `--apply`，会校验并发布 YAML 与运行快照。未指定 `--config-yaml` 时使用当前运行目录中的 `config.yaml`；操作另一实例须显式指定文件。生成的 `config.us.json` / `config.hk.json` 不是此命令的输入或写入目标。

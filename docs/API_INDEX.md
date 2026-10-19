@@ -47,6 +47,13 @@
 | 期权绩效、cashflow、胜率、资本时间、period | 完整查询 `src/application/performance/query.py::option_performance_report_tool`；公共计算 `src/application/performance/__init__.py::build_option_period_performance`；领域 `domain/domain/performance/weighted_reducer.py::reduce_option_performance`、`domain/domain/performance/period.py::normalize_performance_period` | 查询经 `ledger.api.open_performance_query_ledger_from_data_config` 读取一份严格只读 canonical ledger 事件快照，领域统一归约；服务端也复用完整结构化业务页，文本分页及 5000/6000 字节展示预算由 `agent_tools/performance_presentation.py` 承担；查询游标与展示游标复用 `query_cursor.py` 签名原语。显式服务模式只走 `src/infrastructure/option_performance_client.py::query_option_performance`，失败无本地回退。策略只作归属/分组；原币指标和历史 CNY 现金证据不可在 renderer 再汇算。 | [绩效合同](OPTION_PERFORMANCE_DESIGN.md)；`tests/test_performance_presentation.py`、`tests/test_performance_query_read_only.py`、`tests/test_performance_query_service.py`、`tests/test_performance_service_v2.py`、`tests/test_performance_weighted_reducer.py`、`tests/test_performance_period.py` |
 | 平仓建议、Close Advice、剩余收益 | `domain/domain/close_advice.py::evaluate_close_advice`；生成报告 `src/application/close_advice_runner.py::run_close_advice` | 领域负责政策；runner 组装输入并写报告。查询已有建议使用 `close_advice_read` Tool，不能为回答一次查询运行报告生成或另算评分。 | [平仓合同](CLOSE_ADVICE_CONTRACT.md)；`tests/test_strict_close_advice.py`、`tests/test_close_advice_required_data.py` |
 
+期间现金流由 `domain/domain/performance/period_cashflow.py::reduce_period_option_cashflow` 唯一归约，
+经上述 performance owner 发布 `period_option_net_cashflow`；`option_net_cashflow`、rows/breakdowns、
+收益率和胜率继续按开仓批次统计。报告 schema/口径由 `src/application/performance/service.py` 声明。
+离线入口 `domain/domain/performance/offline.py::calculate_option_performance` 复用同一归约器，
+`cashflow_input_digest` 绑定输入内容；独立费用类型由 `domain/domain/ledger/cash_facts.py::OptionFeeCashEvent`
+拥有。输入、费用更正及历史可见性边界见[离线合同](OPTION_CASHFLOW_OFFLINE_CONTRACT.md)。
+
 ## 账本、简报与策略工作流
 
 这些入口状态均为**现行**。读取、领域投影和写入仍是不同动作；模块存在公共函数不代表可以绕过工作流直接写生产数据。

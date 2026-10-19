@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any, Mapping
@@ -20,6 +21,63 @@ _CASH_KINDS = frozenset(
         "stock_settlement_fee_cash",
     }
 )
+
+
+@dataclass(frozen=True)
+class OptionFeeCashEvent:
+    """Explicit signed option fee cash; replacements restate the full attached fee."""
+
+    fee_id: str
+    source_event_id: str
+    effective_at_ms: int
+    currency: str
+    amount: Decimal | None
+    basis: FeeBasis
+    source: str
+    replaces_attached_fee: bool = False
+    cash_conversion: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("fee_id", "source_event_id", "source"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a nonempty string")
+            object.__setattr__(self, name, value.strip())
+        if type(self.effective_at_ms) is not int or self.effective_at_ms <= 0:
+            raise ValueError("effective_at_ms must be a positive integer")
+        if type(self.replaces_attached_fee) is not bool:
+            raise ValueError("replaces_attached_fee must be a boolean")
+        basis = FeeBasis(self.basis)
+        if basis == FeeBasis.MISSING:
+            if self.amount is not None:
+                raise ValueError("missing fee must not have an amount")
+            amount = None
+        else:
+            amount = quantize_money(self.amount)
+        if self.cash_conversion is not None and not isinstance(self.cash_conversion, Mapping):
+            raise ValueError("cash_conversion must be a mapping")
+        object.__setattr__(self, "basis", basis)
+        object.__setattr__(self, "amount", amount)
+        object.__setattr__(self, "currency", normalize_currency(self.currency, strict=True))
+        object.__setattr__(self, "cash_conversion", deepcopy(dict(self.cash_conversion))
+                           if self.cash_conversion is not None else None)
+
+    @property
+    def fact_id(self) -> str:
+        return f"option_fee_cash:fee:{self.fee_id}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "fee_id": self.fee_id,
+            "source_event_id": self.source_event_id,
+            "effective_at_ms": self.effective_at_ms,
+            "currency": self.currency,
+            "amount": None if self.amount is None else format(self.amount, "f"),
+            "basis": self.basis.value,
+            "source": self.source,
+            "replaces_attached_fee": self.replaces_attached_fee,
+            "cash_conversion": deepcopy(self.cash_conversion),
+        }
 
 
 @dataclass(frozen=True)
@@ -245,6 +303,7 @@ def _currency_or_none(value: Any) -> str | None:
 
 
 __all__ = [
+    "OptionFeeCashEvent",
     "TradeCashFact",
     "assignment_principal_anchor",
     "broker_settlement_multiplier_evidence",
