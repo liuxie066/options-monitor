@@ -197,3 +197,38 @@ except ValueError:
 else:
     raise AssertionError('editable claims installed identity')
 ''', cwd=work, env=clean_env)
+
+
+def test_installed_core_period_cashflow_without_application_or_network(installed):
+    work, _, python, env, _ = installed
+    output = run(python, '''
+import importlib.util, json, socket, sqlite3, sys
+from decimal import Decimal
+from om_strategy_core import (ContractKey, TradeEvent, PeriodWindow, calculate_option_performance,
+                              cashflow_input_digest, runtime_identity)
+def forbidden(*args, **kwargs):
+    raise AssertionError('offline I/O')
+socket.socket = forbidden
+sqlite3.connect = forbidden
+key = ContractKey.from_values(broker='futu', account='lx', underlying_symbol='NVDA',
+                             option_type='put', strike=100, expiration_ymd='2026-09-30')
+opening = TradeEvent(event_id='o', event_type='open', event_time_ms=1788220799000,
+    contract_key=key, contracts=1, price=Decimal('2'), currency='USD', source='frozen', multiplier=100,
+    lot_id='lot', raw_payload={'side':'sell','fee_provenance':{'basis':'actual','amount':0,'source':'test'}})
+closing = TradeEvent(event_id='c', event_type='close', event_time_ms=1788307200000,
+    contract_key=key, contracts=1, price=Decimal('3'), currency='USD', source='frozen', multiplier=100,
+    target_lot_id='lot', raw_payload={'side':'buy','close_type':'buy_to_close',
+    'fee_provenance':{'basis':'actual','amount':0,'source':'test'}})
+period = PeriodWindow('month','Asia/Shanghai','2026-09-01','2026-09-30',1788220800000,
+                      1790812800000,1788220799999,1790812799999,'complete_past')
+result = calculate_option_performance([opening, closing],period=period,accounts=['LX'],broker='FUTU')
+assert result.bundle['period_option_net_cashflow']['by_currency']['USD']['total']['amount'] == -300
+assert result.bundle['option_net_cashflow']['by_currency'] == {}
+assert len(cashflow_input_digest(opening)) == 64
+assert importlib.util.find_spec('src') is None
+assert not any(name.startswith(('pandas','futu','src.','domain.storage','domain.services')) for name in sys.modules)
+identity = runtime_identity(mode='installed')
+assert len(identity['build_digest']) == 64
+print(json.dumps(identity))
+''', cwd=work, env=env)
+    assert json.loads(output)['mode'] == 'installed'

@@ -40,9 +40,8 @@ def test_daily_capital_includes_carry_in_and_partial_closes_without_changing_ret
     # Carry: 1*1.5 + 2*5 contract-days; fresh: 1*3 days, over five calendar days.
     assert _daily(result)["amount"] == Decimal("29000")
     assert _daily(result)["status"] == MetricStatus.OBSERVED
-    assert {k: v for k, v in result.bundle.items() if k != "daily_occupied_capital"} == {
-        k: v for k, v in baseline.bundle.items() if k != "daily_occupied_capital"
-    }
+    cohort_fields = ("option_net_cashflow", "sell_option_win_rate", "buy_option_win_rate", "option_return")
+    assert {k: result.bundle[k] for k in cohort_fields} == {k: baseline.bundle[k] for k in cohort_fields}
     assert result.facts == baseline.facts
     assert result.breakdowns == baseline.breakdowns
 
@@ -935,7 +934,7 @@ def test_diagnostics_are_filtered_after_projection_and_missing_dimensions_fail_s
     assert isolated.bundle["missing"] == ("economic_adjust_invalid",)
 
 
-def test_diagnostics_for_lots_outside_the_opening_cohort_do_not_degrade_period() -> None:
+def test_diagnostics_outside_opening_cohort_preserve_cohort_but_period_fails_closed() -> None:
     projection = project_trade_events(
         [
             _event("aug-open", "open", "2026-08-01T10:00:00", lot_id="aug-lot"),
@@ -959,7 +958,11 @@ def test_diagnostics_for_lots_outside_the_opening_cohort_do_not_degrade_period()
 
     assert [fact.open_lot_id for fact in reduction.facts] == ["sep-lot"]
     assert reduction.diagnostics == ()
-    assert reduction.bundle["status"] == MetricStatus.OBSERVED
+    for field in ("option_net_cashflow", "option_return"):
+        usd = reduction.bundle[field]["by_currency"]["USD"]
+        assert usd.get("total", usd)["status"] == MetricStatus.OBSERVED
+    assert reduction.bundle["period_option_net_cashflow"]["status"] == MetricStatus.PARTIAL
+    assert reduction.bundle["status"] == MetricStatus.PARTIAL
 
     unprovable_opening_time = replace(
         old_lot_diagnostic,
@@ -995,7 +998,10 @@ def test_diagnostics_for_lots_outside_the_opening_cohort_do_not_degrade_period()
         period=_period(),
     )
     assert [fact.open_lot_id for fact in expiration_reduction.facts] == ["sep-lot"]
-    assert expiration_reduction.bundle["status"] == MetricStatus.OBSERVED
+    assert expiration_reduction.bundle["option_net_cashflow"]["by_currency"]["USD"]["total"]["status"] == MetricStatus.OBSERVED
+    assert expiration_reduction.bundle["option_return"]["by_currency"]["USD"]["status"] == MetricStatus.OBSERVED
+    assert expiration_reduction.bundle["period_option_net_cashflow"]["status"] == MetricStatus.PARTIAL
+    assert expiration_reduction.bundle["status"] == MetricStatus.PARTIAL
 
 
 def test_currency_conflict_fails_only_the_affected_scoped_allocation() -> None:
@@ -1172,3 +1178,30 @@ def test_open_expiry_duration_is_stable_until_actual_close(currency, now, as_of,
     result = reduction.bundle["option_return"]["by_currency"][currency]
     assert result["annualized_rate"] == Decimal(annualized)
     assert result["rate"] == (Decimal(cash) * period.statistic_days / Decimal(capital_days)).quantize(Decimal("0.000000000001"))
+
+
+@pytest.mark.parametrize("fee_basis", ["actual", "estimated"])
+@pytest.mark.parametrize("cohort_partial", [False, True])
+def test_bundle_status_includes_supplemental_fee_quality_without_changing_cohort(fee_basis, cohort_partial):
+    from domain.domain.ledger.cash_facts import OptionFeeCashEvent
+
+    carry = _event("carry", "open", "2026-08-20T00:00:00", lot_id="carry", currency="CNY")
+    events = [carry]
+    if cohort_partial:
+        events.extend([
+            _event("fresh", "open", "2026-09-01T00:00:00", lot_id="fresh", currency="CNY"),
+            _event("close", "close", "2026-09-02T00:00:00", target_lot_id="fresh",
+                   close_type="cause_pending", currency="CNY"),
+        ])
+    projection = project_trade_events(events)
+    baseline = reduce_option_performance(projection, period=_period())
+    fee = OptionFeeCashEvent("supplement", carry.event_id, _ms("2026-09-01T00:00:00"),
+                             "CNY", Decimal(-1), fee_basis, "fixture")
+    result = reduce_option_performance(projection, period=_period(), fee_cash_events=(fee,), fee_mode="simulated")
+    period_status = "estimated" if fee_basis == "estimated" else "observed"
+    assert result.bundle["period_option_net_cashflow"]["status"] == period_status
+    assert result.bundle["status"] == ("partial" if cohort_partial else period_status)
+    assert result.facts == baseline.facts
+    assert result.breakdowns == baseline.breakdowns
+    for field in ("option_net_cashflow", "sell_option_win_rate", "buy_option_win_rate", "option_return"):
+        assert result.bundle[field] == baseline.bundle[field]

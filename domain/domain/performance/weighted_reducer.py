@@ -7,13 +7,14 @@ from decimal import Decimal
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
-from domain.domain.ledger.cash_facts import cash_facts_for_trade_event
+from domain.domain.ledger.cash_facts import OptionFeeCashEvent, cash_facts_for_trade_event
 from domain.domain.ledger.economics import OptionEconomicAllocation, fee_fact_for_event
 from domain.domain.ledger.events import LedgerDiagnostic, TradeEvent, lot_id_for_open_event
 from domain.domain.ledger.fees import FeeBasis, FeeFact
 from domain.domain.ledger.lots import PositionLot
 from domain.domain.ledger.projection import ProjectionResult
 from domain.domain.money import quantize_money, to_decimal
+from domain.domain.option_position_identity import normalize_broker
 from domain.domain.performance.cash_conversion import validate_observed_cash_conversion
 from domain.domain.performance.models import (
     CAPITAL_DAYS_QUANTUM,
@@ -21,6 +22,7 @@ from domain.domain.performance.models import (
     MetricStatus,
 )
 from domain.domain.performance.period import PeriodWindow
+from domain.domain.performance.period_cashflow import reduce_period_option_cashflow
 from domain.domain.strategy_membership import (
     OptionStrategyMembership,
     resolve_option_strategy_membership,
@@ -35,11 +37,14 @@ _ECONOMIC_FAILURES = {
     "economic_adjust_invalid",
     "economic_adjust_non_conserving",
 }
-_ISOLATABLE_ERROR_DIAGNOSTICS = {
+PERFORMANCE_PARTIAL_PROJECTION_CODES = frozenset({
+    "cc_lp_membership_incomplete",
+    "combo_membership_incomplete",
+    "csp_lc_membership_incomplete",
     "economic_adjust_invalid",
     "economic_adjust_non_conserving",
     "target_economic_units_mismatch",
-}
+})
 _DIAGNOSTIC_REASONS = {
     "economic_adjust_invalid": "economic_adjust_invalid",
     "economic_adjust_non_conserving": "economic_adjust_non_conserving",
@@ -119,6 +124,7 @@ class PerformanceReduction:
     bundle: Mapping[str, Any]
     breakdowns: Mapping[str, tuple[Mapping[str, Any], ...]]
     diagnostics: tuple[LedgerDiagnostic, ...]
+    cashflow_facts: tuple[Mapping[str, Any], ...] = ()
 
 
 def reduce_option_performance(
@@ -128,14 +134,28 @@ def reduce_option_performance(
     account: str | None = None,
     accounts: Iterable[str] | None = None,
     broker: str | None = None,
+    fee_cash_events: Iterable[OptionFeeCashEvent] = (),
+    fee_mode: str = "actual",
 ) -> PerformanceReduction:
     """Reduce one fully resolved ledger projection into weighted cohort facts."""
 
     account_scope = str(account or "").strip().lower() or None
-    account_scopes = {str(item or "").strip().lower() for item in accounts or () if str(item or "").strip()}
+    account_values = None if accounts is None else tuple(accounts) if not isinstance(accounts, (str, bytes)) else accounts
+    if account_values is not None and (
+        isinstance(account_values, (str, bytes)) or not account_values
+        or any(not isinstance(item, str) or not item.strip() for item in account_values)
+    ):
+        raise ValueError("accounts must contain nonblank account names")
+    account_scopes = {item.strip().lower() for item in account_values or ()}
     if account_scope:
         account_scopes = {account_scope}
-    broker_scope = str(broker or "").strip().lower() or None
+    if broker is not None and (not isinstance(broker, str) or not broker.strip()):
+        raise ValueError("broker must be nonblank")
+    broker_scope = normalize_broker(broker) if broker is not None else None
+    period_cashflow, cashflow_facts = reduce_period_option_cashflow(
+        projection, period=period, accounts=account_scopes or None, broker=broker_scope,
+        fee_cash_events=fee_cash_events, fee_mode=fee_mode,
+    )
     diagnostics = tuple(
         item
         for item in projection.diagnostics
@@ -151,7 +171,7 @@ def reduce_option_performance(
         for item in diagnostics
         if _diagnostic_in_period(item, lots_by_id=lots_by_id, period=period)
     )
-    if any(item.severity == "error" and item.code not in _ISOLATABLE_ERROR_DIAGNOSTICS for item in diagnostics):
+    if any(item.severity == "error" and item.code not in PERFORMANCE_PARTIAL_PROJECTION_CODES for item in diagnostics):
         raise PerformanceScopeError("ledger projection contains an in-scope error")
 
     diagnostic_missing = tuple(
@@ -280,12 +300,20 @@ def reduce_option_performance(
             accounts=account_scopes, broker=broker_scope,
         ),
     }
+    bundle = {
+        **bundle,
+        "period_option_net_cashflow": period_cashflow,
+        "status": max((bundle["status"], period_cashflow["status"]),
+                      key={"observed": 0, "estimated": 1, "partial": 2}.__getitem__),
+        "missing": tuple(sorted({*bundle["missing"], *period_cashflow["missing"]})),
+    }
     return PerformanceReduction(
         period=period,
         facts=ordered_facts,
         bundle=bundle,
         breakdowns=breakdowns,
         diagnostics=diagnostics,
+        cashflow_facts=cashflow_facts,
     )
 
 
@@ -378,7 +406,7 @@ def _diagnostic_in_scope(
 ) -> bool:
     if accounts and diagnostic.account and diagnostic.account not in accounts:
         return False
-    if broker and diagnostic.broker and diagnostic.broker != broker:
+    if broker and diagnostic.broker and normalize_broker(diagnostic.broker) != broker:
         return False
     return True
 
@@ -1073,6 +1101,7 @@ def _fact_sort_key(fact: WeightedOptionFact) -> tuple[Any, ...]:
 
 
 __all__ = [
+    "PERFORMANCE_PARTIAL_PROJECTION_CODES",
     "PerformanceReduction",
     "PerformanceScopeError",
     "WeightedOptionFact",

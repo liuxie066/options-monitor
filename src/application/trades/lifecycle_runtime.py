@@ -2739,7 +2739,9 @@ def _local_control_state(
         ),
         "classification": "local",
         "outcome_kind": str(
-            (result or {}).get("status") or "not_due"
+            (result or {}).get("status")
+            or ((result or {}).get("decision") or {}).get("status")
+            or "not_due"
         ).strip(),
         "reason_code": None,
         "provider_code": None,

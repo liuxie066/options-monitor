@@ -118,6 +118,38 @@ def test_duplicate_freeform_message_reuses_audited_response(monkeypatch, tmp_pat
     assert second.meta["idempotent_replay"] is True
 
 
+@pytest.mark.parametrize("status,fee_mode", [("observed", "actual"), ("partial", "actual"), ("estimated", "simulated")])
+def test_option_performance_renderer_separates_period_cash_and_cohort(status, fee_mode) -> None:
+    from test_option_performance_agent_tool import _report
+
+    data = _report()
+    data["period_option_net_cashflow"].update(
+        status=status, fee_mode=fee_mode, missing=["fee_missing"] if status == "partial" else [],
+        by_currency={"USD": {
+            "total": {"amount": -302, "status": status, "missing": []},
+            "gross": {"amount": -300, "status": "observed", "missing": []},
+            "fees": {"amount": -2, "status": status, "missing": []},
+        }},
+        cny_total={"amount": None, "status": "partial", "missing": ["cash_conversion_missing"]},
+    )
+    data["option_net_cashflow"]["by_currency"] = {"USD": {
+        name: {"amount": amount, "status": "observed", "missing": []}
+        for name, amount in (("total", 200), ("open", 200), ("terminated", 0))
+    }}
+    text = render_canonical_tool_result(renderer_key="option_performance", tool_result={"ok": True}, data=data)
+    period_line = next(line for line in text.splitlines() if line.startswith("- 期间期权净现金流"))
+    assert "成交现金 -300.00" in period_line
+    assert "未终止" not in period_line and "已终止" not in period_line
+    assert "开仓批次期权现金结果：USD 合计 200.00" in text
+    assert "折合 CNY 合计 -（折算证据不完整）" in period_line
+    if status == "partial":
+        assert "合计 -（证据不完整）" in period_line and "fee_missing" in period_line
+        assert "-302.00" not in period_line
+    else:
+        assert "合计 -302.00" in period_line and "费用现金 -2.00" in period_line
+    assert ("模拟费用口径" in period_line) == (fee_mode == "simulated")
+
+
 def test_option_performance_renderer_uses_only_canonical_metrics() -> None:
     text = render_canonical_tool_result(
         renderer_key="option_performance",
@@ -175,12 +207,13 @@ def test_option_performance_renderer_uses_only_canonical_metrics() -> None:
     )
 
     assert text.startswith("期权收益统计完成（lx、sy；broker futu，MTD，2026-07-01 至 2026-07-23）")
-    assert "期权净现金流：USD 合计 799.65，未终止 500.00，已终止 299.65；折合 CNY 合计 ¥5,757.48" in text
+    assert "期间期权净现金流：不可用（服务未提供期间现金指标）" in text
+    assert "开仓批次期权现金结果：USD 合计 799.65，未终止 500.00，已终止 299.65；折合 CNY 合计 ¥5,757.48" in text
     assert "卖方胜率：75.00%（3/4 张）" in text
     assert "买方胜率：-（0/0 张）（不适用）" in text
     assert "日均占用：USD 12,345.67" in text
     assert "不是收益率分母" in text
-    assert "与实际日均未了结占用本金" in text
+    assert "与期间现金不可相加" in text
     assert "期权收益率：USD 期间 12.00%，年化 24.00%" in text
     assert "terminal_evidence_missing" in text
     assert "不提供 option PnL" in text

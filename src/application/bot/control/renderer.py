@@ -380,7 +380,8 @@ def _render_option_performance(data: dict[str, Any]) -> str:
     period_label = f"{period.get('start_date') or '-'} 至 {period.get('as_of_date') or '-'}"
     lines = [
         f"期权收益统计完成（{scope_label}，{period_kind_label}，{period_label}）：",
-        f"- 期权净现金流：{_canonical_cashflow_text(data.get('option_net_cashflow'))}",
+        f"- 期间期权净现金流：{_canonical_cashflow_text(data.get('period_option_net_cashflow'), period=True)}",
+        f"- 开仓批次期权现金结果：{_canonical_cashflow_text(data.get('option_net_cashflow'))}",
         f"- 卖方胜率：{_canonical_win_rate_text(data.get('sell_option_win_rate'))}",
         f"- 买方胜率：{_canonical_win_rate_text(data.get('buy_option_win_rate'))}",
         f"- 期权收益率：{_canonical_option_return_text(data.get('option_return'))}",
@@ -391,30 +392,43 @@ def _render_option_performance(data: dict[str, Any]) -> str:
         lines.append("缺失证据：" + "；".join(missing[:6]))
     lines.append("收益率计时：已终止部分按开仓至实际终止时间，未平仓部分按开仓至到期日结束，均至少计 1 天；未平仓收益率按持有至到期估算。")
     lines.append("日均占用：按统计期内实际未了结时间加权，含跨期持仓、不计未来时间；不是收益率分母。")
-    lines.append("口径：统计期权净现金流、卖方/买方胜率、按担保资本计算的期权收益率与实际日均未了结占用本金；不提供 option PnL。")
+    lines.append("口径：期间现金按现金事件有效时间统计，成交附带费用沿用成交时间；费用更正追溯原期间。开仓批次现金结果、胜率和收益率保留原口径，与期间现金不可相加；不提供 option PnL。")
     return "\n".join(lines)
 
 
-def _canonical_cashflow_text(value: Any) -> str:
+def _canonical_cashflow_text(value: Any, *, period: bool = False) -> str:
     cashflow = _dict(value)
+    if period and not cashflow:
+        return "不可用（服务未提供期间现金指标）"
     by_currency = _dict(cashflow.get("by_currency"))
     parts: list[str] = []
     for currency, raw in sorted(by_currency.items()):
         components = _dict(raw)
         component_text = []
-        for key, label in (("total", "合计"), ("open", "未终止"), ("terminated", "已终止")):
+        labels = (("total", "合计"), ("gross", "成交现金"), ("fees", "费用现金")) if period else (
+            ("total", "合计"), ("open", "未终止"), ("terminated", "已终止"))
+        for key, label in labels:
             metric = _dict(components.get(key))
             amount = _float_or_none(metric.get("amount"))
-            component_text.append(f"{label} {amount:,.2f}" if amount is not None else f"{label} -")
+            text = f"{label} {amount:,.2f}" if amount is not None else f"{label} -"
+            if period and metric.get("status") == "partial":
+                text = f"{label} -（证据不完整）"
+            component_text.append(text)
         parts.append(f"{str(currency).upper()} " + "，".join(component_text))
     cny_total = _dict(cashflow.get("cny_total"))
     if cny_total:
         amount = _float_or_none(cny_total.get("amount"))
         status = str(cny_total.get("status") or "").strip()
-        if amount is not None:
+        if period and status == "partial":
+            parts.append("折合 CNY 合计 -（折算证据不完整）")
+        elif amount is not None:
             parts.append(f"折合 CNY 合计 ¥{amount:,.2f}")
         elif status == "partial":
             parts.append("折合 CNY 合计 -（折算证据不完整）")
+    if period and (cashflow.get("fee_mode") == "simulated" or cashflow.get("status") == "estimated"):
+        parts.append("模拟费用口径，非实际费用结果")
+    if period and cashflow.get("missing"):
+        parts.append("缺失证据：" + "；".join(str(item) for item in _list(cashflow["missing"])[:6]))
     return "；".join(parts) if parts else "-"
 
 

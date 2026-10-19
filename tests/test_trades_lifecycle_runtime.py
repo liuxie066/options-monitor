@@ -638,6 +638,101 @@ def _run_due(
     )
 
 
+def test_nested_pending_result_is_persisted_and_cached_until_deadline(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import src.application.trades.lifecycle_runtime as mod
+
+    case_id = "provider-1"
+    candidate = _candidate(case_id)
+    counts = _patch_due_planner(monkeypatch, candidates=[candidate])
+    reconcile_at_deadline = mod.reconcile_due_lifecycle_cases
+
+    def reconcile(*args, **kwargs):
+        if kwargs["now_ms"] >= 200:
+            return reconcile_at_deadline(*args, **kwargs)
+        counts["reconciliations"] += 1
+        assert kwargs["observation_collector"] is None
+        return {
+            "case_count": 1,
+            "results": [{
+                "schema_version": "close_reason_reconciliation_result.v1",
+                "case_id": case_id,
+                "decision": {"status": "cause_pending"},
+                "lifecycle_read_model": _read_model(case_id),
+            }],
+        }
+
+    monkeypatch.setattr(mod, "reconcile_due_lifecycle_cases", reconcile)
+    source = _runtime_source(tmp_path)
+    collector = _Collector(supported=True)
+    first = _run_due(source, now_ms=180, collector=collector)
+    stored = get_settlement_attempt_state(
+        source["inbox_path"], source_id="lx", account="lx", case_id=case_id,
+    )
+
+    assert first["planned_case_count"] == 1
+    assert first["provider_attempt_count"] == 0
+    assert stored is not None
+    assert stored["classification"] == "local"
+    assert stored["outcome_kind"] == "cause_pending"
+    assert stored["next_attempt_at_ms"] == 200
+    assert stored["attempt_count"] == 0
+
+    counts["control_now_ms"] += 60_000
+    cached = _run_due(source, now_ms=199, collector=collector)
+    assert cached["planned_case_count"] == 0
+    assert cached["skipped_counts"]["cached_local"] == 1
+    assert cached["provider_attempt_count"] == 0
+    assert collector.calls == 0
+    assert counts["account_reads"] == counts["reconciliations"] == 1
+    assert get_settlement_attempt_state(
+        source["inbox_path"], source_id="lx", account="lx", case_id=case_id,
+    ) == stored
+    assert candidate["lifecycle_case"]["status"] == "waiting_settlement_evidence"
+    assert candidate["timing_policy"]["settlement_deadline_ms"] == 200
+
+    due = _run_due(source, now_ms=200, collector=collector)
+    assert due["planned_case_count"] == 1
+    assert due["provider_attempt_count"] == 1
+    assert collector.calls == 1
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_status"),
+    [
+        ({"status": "needs_review"}, "needs_review"),
+        ({"status": "resolved", "decision": {"status": "cause_pending"}}, "resolved"),
+        ({"status": "needs_review", "decision": {"status": "resolved"}}, "needs_review"),
+        ({"status": "", "decision": {"status": "cause_pending"}}, "cause_pending"),
+        ({"decision": {"status": "partially_resolved"}}, "partially_resolved"),
+        ({"decision": {"status": "needs_review"}}, "needs_review"),
+        ({"decision": {}}, "not_due"),
+        ({}, "not_due"),
+        (None, "not_due"),
+    ],
+)
+def test_local_control_state_status_precedence(result, expected_status) -> None:
+    import src.application.trades.lifecycle_runtime as mod
+
+    state = mod._local_control_state(
+        source_id="lx",
+        account="lx",
+        case_id="local-1",
+        case_scope_fingerprint_value="test-scope",
+        collector=None,
+        read_model=_read_model("local-1"),
+        result=result,
+        business_now_ms=170,
+        control_now_ms=1_000,
+    )
+
+    assert state["outcome_kind"] == expected_status
+    assert state["classification"] == "local"
+    assert state["next_attempt_at_ms"] == 180
+
+
 @pytest.mark.parametrize(
     (
         "finished",

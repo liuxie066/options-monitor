@@ -104,11 +104,17 @@
 - `portfolio_pnl_bridge`
 - `portfolio_cash_bridge`
 
-`option_performance_report` 提供 MTD/YTD/自然月/自然年的期权净现金流、卖出期权
-胜率、买入期权胜率和期权收益率；新增独立的实际日均未了结占用本金，含跨期持仓、
-仅按已发生时间加权，不作为收益率分母。现金流保留原币明细，并提供由事件发生时已落库
-`cash_conversion.v1` 证据汇总的 CNY 总额；读取时不查当前汇率。正股交易、指派/行权
-交割现金、PnL 和行情刷新不属于该报告。
+`option_performance_report` 提供 MTD/YTD/自然月/自然年的期间期权净现金流
+（`period_option_net_cashflow`，含以前开仓、本期平仓的现金）及独立展示的开仓批次现金结果
+（旧 `option_net_cashflow`）。卖方/买方胜率、收益率的原数值与口径不变。
+`schema_version=option_performance.report.v3` 和 `metric_semantics` 声明两种选择口径；
+rows/breakdowns 仍是开仓批次明细，分页也携带 schema/口径并将其绑定到来源哈希，
+symbol 页不附全账户期间总额。旧服务未返回新字段时，期间现金明确不可用，不拿旧字段替代。
+实际日均未了结占用本金含跨期持仓，仅按已发生时间加权，不作为收益率分母。
+现金保留原币，各现金指标的 CNY 总额只消费已落库 `cash_conversion.v1` 证据；不查当前汇率。
+成交附带费用随成交时间入期，迟到更正重述原期间；有独立事实时间的新扣费/退款才按独立时间入期。
+正股交易、指派/行权交割现金、PnL 和行情刷新不属于该报告。HTTP 外层保持 v1。
+纯领域离线接口及冻结证据限制见[离线合同](OPTION_CASHFLOW_OFFLINE_CONTRACT.md)。
 
 ### 持仓、现金与组合
 
