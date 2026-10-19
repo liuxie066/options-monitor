@@ -1390,36 +1390,66 @@ def claim_trade_payload_refresh_intent(
     with closing(_connect(inbox_path)) as conn:
         with conn:
             _ensure_schema(conn)
-            row = conn.execute("SELECT * FROM trade_inbox WHERE inbox_id=?", (str(inbox_id),)).fetchone()
-            if row is None or _trade_source_evidence_observation(conn, row)[1]:
-                return None
-            cursor = conn.execute(
-                """
-                UPDATE trade_inbox
-                SET portfolio_refresh_attempted_at_ms = ?
-                WHERE inbox_id = ?
-                  AND status != 'conflict'
-                  AND COALESCE(json_extract(result_json, '$.receipt_suppression_reason'), '') != 'reconciled_from_ledger'
-                  AND portfolio_refresh_intent_json IS NOT NULL
-                  AND portfolio_refresh_attempted_at_ms IS NULL
-                """,
-                (int(time.time() * 1000), str(inbox_id)),
-            )
-            if cursor.rowcount != 1:
-                return None
-            row = conn.execute(
-                """
-                SELECT portfolio_refresh_intent_json
-                FROM trade_inbox
-                WHERE inbox_id = ?
-                """,
-                (str(inbox_id),),
-            ).fetchone()
-            if row is None:
-                raise RuntimeError("trade inbox row disappeared after claim")
-            return _normalize_portfolio_refresh_intent(
-                json.loads(str(row["portfolio_refresh_intent_json"]))
-            )
+            return _claim_trade_payload_refresh_intent(conn, inbox_id=inbox_id)
+
+
+def claim_trade_payload_refresh_intents(
+    path: str | Path,
+    *,
+    inbox_ids: Iterable[str],
+    account: str,
+) -> dict[str, str] | None:
+    """Claim one account's captured hints together, immediately before dispatch."""
+    if not isinstance(account, str) or not account or account != account.strip().lower():
+        raise ValueError("portfolio refresh account must be a normalized non-empty label")
+    identifiers = tuple(dict.fromkeys(inbox_ids))
+    if not identifiers:
+        return None
+    first_intent = None
+    with closing(_connect(Path(path))) as conn, conn:
+        _ensure_schema(conn)
+        for inbox_id in identifiers:
+            intent = _claim_trade_payload_refresh_intent(conn, inbox_id=inbox_id, account=account)
+            if first_intent is None and intent is not None:
+                first_intent = intent
+    return first_intent
+
+
+def _claim_trade_payload_refresh_intent(
+    conn: sqlite3.Connection, *, inbox_id: str, account: str | None = None,
+) -> dict[str, str] | None:
+    row = conn.execute("SELECT * FROM trade_inbox WHERE inbox_id=?", (str(inbox_id),)).fetchone()
+    if row is None or _trade_source_evidence_observation(conn, row)[1]:
+        return None
+    eligible = """
+        inbox_id = ? AND status != 'conflict'
+        AND COALESCE(json_extract(result_json, '$.receipt_suppression_reason'), '') != 'reconciled_from_ledger'
+        AND portfolio_refresh_intent_json IS NOT NULL
+        AND portfolio_refresh_attempted_at_ms IS NULL
+    """
+    if account is not None:
+        row = conn.execute(
+            f"SELECT portfolio_refresh_intent_json FROM trade_inbox WHERE {eligible}",
+            (str(inbox_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        intent = _normalize_portfolio_refresh_intent(json.loads(str(row["portfolio_refresh_intent_json"])))
+        if intent["account"] != account:
+            return None
+    cursor = conn.execute(
+        f"UPDATE trade_inbox SET portfolio_refresh_attempted_at_ms = ? WHERE {eligible}",
+        (int(time.time() * 1000), str(inbox_id)),
+    )
+    if cursor.rowcount != 1:
+        return None
+    row = conn.execute(
+        "SELECT portfolio_refresh_intent_json FROM trade_inbox WHERE inbox_id = ?",
+        (str(inbox_id),),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("trade inbox row disappeared after claim")
+    return _normalize_portfolio_refresh_intent(json.loads(str(row["portfolio_refresh_intent_json"])))
 
 
 def _normalize_portfolio_refresh_intent(
@@ -3917,6 +3947,7 @@ __all__ = [
     "TRADE_EVIDENCE_SET_REF_PREFIX",
     "SettlementAttemptClaimOwnershipLost",
     "claim_trade_payload_refresh_intent",
+    "claim_trade_payload_refresh_intents",
     "enqueue_trade_payload",
     "claim_settlement_provider_batch",
     "complete_settlement_attempt",

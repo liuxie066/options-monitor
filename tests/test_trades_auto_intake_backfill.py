@@ -512,8 +512,12 @@ def test_push_lookup_account_mismatch_keeps_missing_economics_in_review(tmp_path
     assert repo.list_trade_events() == []
 
 
-def _standard_stock_execution(execution_id="stock-1"):
+def _standard_stock_execution(execution_id="stock-1", *, physical="123", account="lx"):
     payload = _standard_execution()
+    payload["broker_account_ref"] = {
+        "broker_id": "futu", "external_account_id": physical, "environment": "REAL",
+        "broker_account_id": f"futu:REAL:{physical}", "account_label": account,
+    }
     payload["instrument_ref"] = {"asset_type": "stock", "market": "US", "symbol": "NVDA", "currency": "USD"}
     payload.update(external_execution_id=execution_id, side="buy", quantity="100", price="100")
     return payload
@@ -542,6 +546,144 @@ def test_backfill_dispatches_once_per_account_after_all_inbox_settlements(tmp_pa
     assert order == ["stock-1", "stock-2", intents[0]]
     inbox = resolve_execution_inbox_path(repo, tmp_path / "legacy.sqlite3")
     assert trade_inbox_summary(inbox)["handled_count"] == 2
+
+
+@pytest.mark.parametrize("second_account", ["lx", "sy"])
+def test_backfill_claim_failure_keeps_unsent_account_recoverable(tmp_path, monkeypatch, second_account):
+    from src.application.trades import inbox as owner
+
+    monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda _: True)
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    payloads = [_standard_stock_execution("first"), _standard_stock_execution(
+        "second", physical="123" if second_account == "lx" else "456", account=second_account,
+    )]
+    saved, calls, order = [], [], []
+
+    def process(payload, **kwargs):
+        result = _process_payload(payload, **kwargs, allow_external_lookup=False)
+        saved.append(result)
+        order.append(payload["external_execution_id"])
+        return result
+
+    original = owner._claim_trade_payload_refresh_intent
+
+    def fail_second(conn, *, inbox_id, account=None):
+        if inbox_id == saved[1]["inbox_id"] and account == second_account:
+            raise OSError("second row claim failed")
+        return original(conn, inbox_id=inbox_id, account=account)
+
+    def dispatch(intent):
+        assert order[:2] == ["first", "second"]
+        calls.append(intent)
+
+    kwargs = _backfill_kwargs(tmp_path)
+    kwargs.update(repo=repo, account_mapping={"123": "lx", "456": "sy"}, futu_account_ids=["123", "456"],
+                  config={"portfolio_management": {"enabled": True}})
+    monkeypatch.setattr(owner, "_claim_trade_payload_refresh_intent", fail_second)
+    with pytest.raises(OSError, match="second row claim failed"):
+        run_history_backfill(**kwargs, history_deals_fn=lambda **_: (payloads, {}),
+                             process_payload_fn=process, dispatch_portfolio_refresh_fn=dispatch)
+    path = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    assert calls == ([saved[0]["portfolio_refresh_intent"]] if second_account == "sy" else [])
+    assert read_trade_payload(path, inbox_id=saved[1]["inbox_id"])["portfolio_refresh_attempted_at_ms"] is None
+    assert (read_trade_payload(path, inbox_id=saved[0]["inbox_id"])["portfolio_refresh_attempted_at_ms"] is None) == (
+        second_account == "lx"
+    )
+    expected = [saved[0]["portfolio_refresh_intent"]]
+    if second_account == "sy":
+        expected.append(saved[1]["portfolio_refresh_intent"])
+    monkeypatch.setattr(owner, "_claim_trade_payload_refresh_intent", original)
+    run_history_backfill(**kwargs, history_deals_fn=lambda **_: (payloads, {}),
+                         process_payload_fn=process, dispatch_portfolio_refresh_fn=dispatch)
+    assert calls == expected
+    assert repo.list_trade_events() == []
+
+
+def test_backfill_processing_interruption_leaves_earlier_hint_unclaimed(tmp_path, monkeypatch):
+    monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda _: True)
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    saved, calls = [], []
+    payloads = [_standard_stock_execution(value) for value in ("first", "second")]
+
+    class Interrupted(BaseException):
+        pass
+
+    def process(payload, **kwargs):
+        if saved:
+            raise Interrupted()
+        result = _process_payload(payload, **kwargs, allow_external_lookup=False)
+        saved.append(result)
+        return result
+
+    kwargs = _backfill_kwargs(tmp_path)
+    kwargs.update(repo=repo, account_mapping={"123": "lx"}, futu_account_ids=["123"],
+                  config={"portfolio_management": {"enabled": True}})
+    with pytest.raises(Interrupted):
+        run_history_backfill(**kwargs, history_deals_fn=lambda **_: (payloads, {}),
+                             process_payload_fn=process, dispatch_portfolio_refresh_fn=calls.append)
+    path = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    assert calls == []
+    assert read_trade_payload(path, inbox_id=saved[0]["inbox_id"])["portfolio_refresh_attempted_at_ms"] is None
+    from src.application.trades.inbox import list_unclaimed_trade_payload_refresh_intents
+    assert [item["inbox_id"] for item in list_unclaimed_trade_payload_refresh_intents(
+        path, account_mapping={"123": "lx"},
+    )] == [saved[0]["inbox_id"]]
+
+
+@pytest.mark.parametrize("outcome", ["accepted", "timeout", "interrupted"])
+def test_backfill_provider_outcome_never_reopens_claimed_hints(tmp_path, monkeypatch, outcome):
+    monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda _: True)
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    calls = []
+
+    class Interrupted(BaseException):
+        pass
+
+    def dispatch(intent):
+        calls.append(intent)
+        if outcome == "timeout":
+            raise TimeoutError("unknown provider result")
+        if outcome == "interrupted":
+            raise Interrupted()
+
+    kwargs = dict(dispatch_portfolio_refresh_fn=dispatch, config={"portfolio_management": {"enabled": True}})
+    if outcome == "interrupted":
+        with pytest.raises(Interrupted):
+            _run_standard_backfill(tmp_path, repo, _standard_stock_execution(), **kwargs)
+    else:
+        _run_standard_backfill(tmp_path, repo, _standard_stock_execution(), **kwargs)
+    _run_standard_backfill(tmp_path, repo, _standard_stock_execution(), **kwargs)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("intent_account", ["lx", "sy"])
+def test_backfill_preserves_pending_hint_eligibility_and_scoped_accounts(tmp_path, intent_account):
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    path = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    calls, captured = [], []
+
+    def process(payload, **kwargs):
+        rows = list_retryable_trade_payloads(path, retry_delay_sec=0)
+        inbox_id = next(row["inbox_id"] for row in rows
+                        if row["payload"]["external_execution_id"] == payload["external_execution_id"])
+        intent = {"account": intent_account,
+                  "request_id": f"refresh:{payload['external_execution_id']}"}
+        record_trade_payload_refresh_intent(path, inbox_id=inbox_id, intent=intent)
+        captured.append((inbox_id, intent))
+        return {"status": "unresolved", "reason": "pending fixture", "account": intent["account"]}
+
+    kwargs = _backfill_kwargs(tmp_path)
+    kwargs.update(repo=repo, account_mapping={"123": "lx", "456": "sy"}, futu_account_ids=["123"],
+                  config={"portfolio_management": {"enabled": True}})
+    run_history_backfill(
+        **kwargs, history_deals_fn=lambda **_: ([_standard_stock_execution()], {}),
+        process_payload_fn=process, dispatch_portfolio_refresh_fn=calls.append,
+    )
+    assert calls == ([captured[0][1]] if intent_account == "lx" else [])
+    assert read_trade_payload(path, inbox_id=captured[0][0])["status"] == "pending"
+    assert (read_trade_payload(path, inbox_id=captured[0][0])["portfolio_refresh_attempted_at_ms"] is not None) == (
+        intent_account == "lx"
+    )
 
 
 def test_backfill_dispatches_stored_refresh_after_duplicate_recovery(

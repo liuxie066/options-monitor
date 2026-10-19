@@ -102,6 +102,7 @@ from src.application.trades.inbox import (
     save_trade_payload_result,
     trade_payload_commit_scope,
     claim_trade_payload_refresh_intent,
+    claim_trade_payload_refresh_intents,
     enqueue_trade_payload,
     list_retryable_trade_payloads,
     list_trade_receipt_recovery_rows,
@@ -2793,19 +2794,18 @@ def _run_listener_source_loop(
                             break
                     if apply_changes and is_portfolio_management_enabled(cfg):
                         try:
-                            refresh_intents: dict[str, dict[str, str]] = {}
+                            refresh_inbox_ids: dict[str, list[str]] = {}
                             for candidate in list_unclaimed_trade_payload_refresh_intents(
                                 inbox_path, account_mapping={
                                     physical: label for physical, label in account_mapping.items()
                                     if physical in futu_account_ids
                                 },
                             ):
-                                intent = claim_trade_payload_refresh_intent(
-                                    inbox_path, inbox_id=candidate["inbox_id"],
+                                refresh_inbox_ids.setdefault(candidate["account"], []).append(candidate["inbox_id"])
+                            for account, inbox_ids in refresh_inbox_ids.items():
+                                intent = claim_trade_payload_refresh_intents(
+                                    inbox_path, inbox_ids=inbox_ids, account=account,
                                 )
-                                if intent is not None:
-                                    refresh_intents.setdefault(intent["account"], intent)
-                            for intent in refresh_intents.values():
                                 _dispatch_portfolio_refresh_intent(intent, config=cfg, audit_path=audit_path)
                             status_state.pop("last_portfolio_refresh_recovery_error", None)
                         except Exception as exc:
