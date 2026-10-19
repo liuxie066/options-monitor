@@ -416,7 +416,7 @@ class BotHostStore:
 
         # Reader checkpoints poll concurrently with Host persistence; they must
         # not initialize schema or run outbox cleanup on every cancellation check.
-        assert_bot_ready(self.path)
+        assert_bot_ready(self.path, connect=self._connect)
         if not self.path.exists():
             return False
         with closing(self._connect()) as conn:
@@ -770,7 +770,7 @@ class BotHostStore:
 
     def _ensure_schema(self, *, deadline_monotonic: float | None = None) -> None:
         from src.application.bot.migration import assert_bot_ready
-        assert_bot_ready(self.path)
+        assert_bot_ready(self.path, connect=lambda: self._connect(deadline_monotonic=deadline_monotonic))
         with self._connect(deadline_monotonic=deadline_monotonic) as conn:
             conn.executescript(
                 """

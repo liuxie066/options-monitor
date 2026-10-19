@@ -1167,6 +1167,8 @@ def discover_expired_lifecycle_cases_atomically(
         for lifecycle_case in existing_cases:
             if str(lifecycle_case.get("schema_version") or "").strip() != "lifecycle_case.v2":
                 continue
+            if str(lifecycle_case.get("status") or "").strip().lower() == "superseded":
+                continue
             case_id = str(lifecycle_case.get("case_id") or "").strip()
             target_manifest = dict(lifecycle_case.get("target_contracts_by_lot") or {})
             for lot_id in sorted(str(item or "").strip() for item in target_manifest):

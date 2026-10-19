@@ -5,6 +5,7 @@ from tests.ledger_sqlite_test_support import connect_ledger_fixture
 import hashlib
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -2404,6 +2405,98 @@ def test_lifecycle_delivery_status_cache_skips_unchanged_history(
     assert "revision unavailable" in status_state[
         "lifecycle_delivery"
     ]["error"]
+
+
+@pytest.mark.parametrize("superseded_status", ["superseded", " Superseded "])
+def test_expiry_discovery_ignores_superseded_targets_and_preserves_history(
+    tmp_path: Path,
+    superseded_status: str,
+) -> None:
+    repo, case_id, observed_at_ms = _case_with_option_anchor(tmp_path)
+    current_case = repo.get_trade_lifecycle_case(case_id)
+    assert current_case is not None
+    historical_case = {
+        **current_case,
+        "case_id": "historical-case",
+        "case_key": "historical-key",
+        "status": superseded_status,
+        "superseded_by_case_id": case_id,
+    }
+    assert repo.upsert_trade_lifecycle_case(historical_case)
+    assert repo.insert_trade_lifecycle_evidence_once({
+        **repo.list_trade_lifecycle_evidence(case_id=case_id)[0],
+        "evidence_id": "historical-anchor",
+        "case_id": "historical-case",
+        "source_event_id": "historical-option-close",
+    })
+    persist_trade_event_object(
+        repo, replace(_open_event(), event_id="open-2", lot_id="lot-2"),
+    )
+    before_evidence = repo.list_trade_lifecycle_evidence()
+    before_events = repo.list_trade_events()
+    with repo._connect() as conn:
+        before = tuple(conn.iterdump())
+
+    preview = discover_lifecycle_cases(
+        repo, account="lx", observed_at_ms=observed_at_ms, apply_changes=False,
+    )
+    assert len(preview["would_create_case_ids"]) == 1
+    assert preview["created_case_ids"] == []
+    assert preview["skipped_targeted_lot_ids"] == ["lot-1"]
+    with repo._connect() as conn:
+        assert tuple(conn.iterdump()) == before
+
+    applied = discover_lifecycle_cases(
+        repo, account="lx", observed_at_ms=observed_at_ms,
+    )
+    assert applied["created_case_ids"] == preview["would_create_case_ids"]
+    assert repo.get_trade_lifecycle_case(applied["created_case_ids"][0])[
+        "target_contracts_by_lot"
+    ] == {"lot-2": 1}
+    assert len(repo.list_trade_lifecycle_cases()) == 3
+    assert repo.get_trade_lifecycle_case("historical-case") == historical_case
+    assert repo.get_trade_lifecycle_case(case_id) == current_case
+    assert repo.list_trade_lifecycle_evidence() == before_evidence
+    assert repo.list_trade_events() == before_events
+    with repo._connect() as conn:
+        after = tuple(conn.iterdump())
+
+    repeated = discover_lifecycle_cases(
+        repo, account="lx", observed_at_ms=observed_at_ms,
+    )
+    assert repeated["created_case_ids"] == []
+    assert repeated["skipped_targeted_lot_ids"] == ["lot-1", "lot-2"]
+    with repo._connect() as conn:
+        assert tuple(conn.iterdump()) == after
+
+
+@pytest.mark.parametrize("overlapping_status", ["waiting_settlement_evidence", "ledger_written"])
+def test_expiry_discovery_rejects_non_superseded_overlap_without_writes(
+    tmp_path: Path,
+    overlapping_status: str,
+) -> None:
+    repo, case_id, observed_at_ms = _case_with_option_anchor(tmp_path)
+    current_case = repo.get_trade_lifecycle_case(case_id)
+    assert current_case is not None
+    assert repo.upsert_trade_lifecycle_case({
+        **current_case,
+        "case_id": "overlapping-case",
+        "case_key": "overlapping-key",
+        "status": overlapping_status,
+    })
+    persist_trade_event_object(
+        repo, replace(_open_event(), event_id="open-2", lot_id="lot-2"),
+    )
+    with repo._connect() as conn:
+        before = tuple(conn.iterdump())
+    for apply_changes in (False, True):
+        with pytest.raises(ValueError, match="lifecycle_case_target_overlap:lot-1"):
+            discover_lifecycle_cases(
+                repo, account="lx", observed_at_ms=observed_at_ms,
+                apply_changes=apply_changes,
+            )
+        with repo._connect() as conn:
+            assert tuple(conn.iterdump()) == before
 
 
 @pytest.mark.parametrize("raw", [None, True, 100.5, "100.00000000000000001"])
