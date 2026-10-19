@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1236 (`src`: 569, `domain`: 95, `scripts`: 16, `tests`: 553)
-- Internal import edges: 10189 total, 3903 production/script edges excluding tests
+- Internal import edges: 10225 total, 3905 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|656| domain
+  application -->|657| domain
   application -->|4| domain_services
   application -->|188| infrastructure
   application -->|2| om_strategy_core
@@ -50,10 +50,10 @@ flowchart LR
   scripts -->|2| interfaces
   scripts -->|1| tests
   storage -->|1| domain
-  tests -->|4794| application
-  tests -->|603| domain
+  tests -->|4820| application
+  tests -->|605| domain
   tests -->|2| domain_services
-  tests -->|298| infrastructure
+  tests -->|304| infrastructure
   tests -->|352| interfaces
   tests -->|5| om_strategy_core
   tests -->|31| scripts
@@ -64,7 +64,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 656 |
+| application | domain | 657 |
 | interfaces | application | 196 |
 | application | infrastructure | 188 |
 | scripts | application | 67 |
@@ -88,10 +88,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 4794 |
-| tests | domain | 603 |
+| tests | application | 4820 |
+| tests | domain | 605 |
 | tests | interfaces | 352 |
-| tests | infrastructure | 298 |
+| tests | infrastructure | 304 |
 | tests | storage | 46 |
 | tests | scripts | 31 |
 | tests | om_strategy_core | 5 |
@@ -103,7 +103,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 264 |
+| src.application | domain.domain | 265 |
 | src.application.ledger | domain.domain | 176 |
 | src.interfaces | src.application | 158 |
 | src.application | src.infrastructure | 133 |
@@ -189,7 +189,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 123 |
+| src.application.agent_tool_contracts | 124 |
 | src.application.payload_helpers | 98 |
 | src.application.ledger.api | 92 |
 | domain.domain.symbol_identity | 89 |

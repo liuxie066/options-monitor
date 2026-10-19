@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import localcontext
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from src.application.bot.control.manual_trade_parser import build_manual_expiry_drafts, build_manual_trade_draft
+from src.application.agent_tool_contracts import AgentToolError
+from src.application.bot.control.manual_trade_parser import _parse_int_value, build_manual_expiry_drafts, build_manual_trade_draft
 from src.application.multiplier_cache import save_cache
 
 
@@ -53,6 +55,145 @@ def _draft_kwargs(
         "repo_base": tmp_path,
         "allow_opend_refresh": allow_opend_refresh,
     }
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param("2", 2, id="integer"),
+        pytest.param("2.0", 2, id="decimal"),
+        pytest.param("+2", 2, id="positive"),
+        pytest.param("-2", -2, id="negative"),
+        pytest.param("0", 0, id="zero"),
+        pytest.param("-0.0", 0, id="negative-zero"),
+        pytest.param("2e0", 2, id="exponent"),
+        pytest.param("1_0", 10, id="underscore"),
+        pytest.param("１２", 12, id="unicode"),
+        pytest.param("9007199254740993", 9007199254740993, id="large-exact"),
+        pytest.param("1e308", 10**308, id="finite-range"),
+        pytest.param(" 2 ", 2, id="whitespace"),
+    ],
+)
+def test_labeled_integer_preserves_exact_whole_value(raw: str, expected: int) -> None:
+    with localcontext() as context:
+        context.prec = 2
+        result = _parse_int_value({"contracts": raw}, ("contracts",))
+    assert type(result) is int
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param("1.5", id="fraction"),
+        pytest.param("-1.5", id="negative-fraction"),
+        pytest.param("1.00000000000000000000000000001", id="precise-fraction"),
+        pytest.param("1e-999999999", id="underflow"),
+        pytest.param("NaN", id="nan"),
+        pytest.param("sNaN", id="signaling-nan"),
+        pytest.param("Infinity", id="infinity"),
+        pytest.param("-Infinity", id="negative-infinity"),
+        pytest.param("not-a-number", id="malformed"),
+        pytest.param("1__0", id="malformed-underscore"),
+        pytest.param("1e309", id="overflow"),
+        pytest.param("1e999999999", id="huge-exponent"),
+    ],
+)
+def test_labeled_integer_rejects_loss_or_invalid_range(raw: str) -> None:
+    with localcontext() as context:
+        context.prec = 2
+        with pytest.raises(AgentToolError) as caught:
+            _parse_int_value({"contracts": raw}, ("contracts",))
+    assert caught.value.code == "INPUT_ERROR"
+    assert caught.value.message == "contracts must be an integer within the supported numeric range"
+
+
+def test_labeled_integer_preserves_key_selection() -> None:
+    keys = ("contracts", "qty")
+    assert _parse_int_value({}, keys) is None
+    assert _parse_int_value({"contracts": "", "qty": ""}, keys) is None
+    assert _parse_int_value({"contracts": "", "qty": "2.0"}, keys) == 2
+    assert _parse_int_value({"qty": "2.0"}, keys) == 2
+    assert _parse_int_value({"contracts": "1.0", "qty": "bad"}, keys) == 1
+    assert _parse_int_value({"contracts": "0", "qty": "2"}, keys) == 0
+    assert _parse_int_value({"contracts": "-2", "qty": "2"}, keys) == -2
+    with pytest.raises(AgentToolError) as caught:
+        _parse_int_value({"contracts": "1.5", "qty": "2"}, keys)
+    assert caught.value.code == "INPUT_ERROR"
+
+
+def _integer_label_draft(tmp_path: Path, operation: str, label: str, value: str) -> dict[str, Any]:
+    text = (
+        "account=sy symbol=NVDA option_type=put side=short strike=100 exp=2026-06-18 "
+        "multiplier=100 premium=2 close_price=0.5 stock_price=100 "
+    )
+    if label not in {"contracts", "contracts_to_close", "qty", "数量"}:
+        text += "contracts=1 "
+    separator = "：" if label == "数量" else "="
+    return build_manual_trade_draft(
+        operation, raw_text=f"{text}{label}{separator}{value}", **_draft_kwargs(tmp_path, config_key="us"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("operation", "label", "target"),
+    [
+        pytest.param("manual_open", "contracts", "contracts", id="open-contracts"),
+        pytest.param("manual_open", "locked", "underlying_share_locked", id="open-locked"),
+        pytest.param("manual_close", "contracts_to_close", "contracts_to_close", id="close-contracts"),
+        pytest.param("manual_assignment", "contracts_to_close", "contracts_to_close", id="assignment-contracts"),
+        pytest.param("manual_assignment", "stock_qty", "stock_qty", id="assignment-shares"),
+        pytest.param("manual_assignment", "as_of_ms", "as_of_ms", id="assignment-time"),
+        pytest.param("manual_expiry", "contracts_to_close", "contracts_to_close", id="expiry-contracts"),
+        pytest.param("manual_expiry", "event_time_ms", "event_time_ms", id="expiry-time"),
+    ],
+)
+def test_manual_integer_callers_preserve_whole_value_and_reject_fraction(
+    tmp_path: Path, operation: str, label: str, target: str,
+) -> None:
+    arguments = _integer_label_draft(tmp_path, operation, label, "2.0")["arguments"]
+    assert arguments[target] == 2
+    assert type(arguments[target]) is int
+    if operation == "manual_assignment" and target == "contracts_to_close":
+        assert arguments["stock_qty"] == 200
+    with pytest.raises(AgentToolError) as caught:
+        _integer_label_draft(tmp_path, operation, label, "2.5")
+    assert caught.value.code == "INPUT_ERROR"
+    assert caught.value.message.startswith(f"{label} must be an integer")
+
+
+@pytest.mark.parametrize(
+    ("operation", "label", "target"),
+    [
+        pytest.param("manual_open", "qty", "contracts", id="open-qty"),
+        pytest.param("manual_open", "数量", "contracts", id="open-chinese-quantity"),
+        pytest.param("manual_close", "contracts", "contracts_to_close", id="close-contracts"),
+        pytest.param("manual_assignment", "qty", "contracts_to_close", id="assignment-qty"),
+        pytest.param("manual_assignment", "shares", "stock_qty", id="assignment-shares"),
+        pytest.param("manual_open", "locked_shares", "underlying_share_locked", id="open-locked-shares"),
+        pytest.param("manual_assignment", "event_time_ms", "as_of_ms", id="assignment-event-time"),
+        pytest.param("manual_expiry", "as_of_ms", "event_time_ms", id="expiry-as-of"),
+    ],
+)
+def test_manual_integer_label_aliases(tmp_path: Path, operation: str, label: str, target: str) -> None:
+    arguments = _integer_label_draft(tmp_path, operation, label, "1.0")["arguments"]
+    assert type(arguments[target]) is int
+    assert arguments[target] == 1
+
+
+@pytest.mark.parametrize("operation", ["open", "close", "assignment", "expiry"])
+def test_invalid_labeled_count_cannot_fall_back(tmp_path: Path, operation: str) -> None:
+    fallback = "2张"
+    if operation in {"assignment", "expiry"}:
+        fallback = "衍生品提醒: 证券所持有的-2张NVDA 260618 100.00P期权已到期失效"
+    text = (
+        "account=sy symbol=NVDA option_type=put side=short strike=100 exp=2026-06-18 "
+        f"multiplier=100 premium=2 close_price=0.5 stock_price=100 contracts=1.5 {fallback}"
+    )
+    with pytest.raises(AgentToolError) as caught:
+        build_manual_trade_draft(f"manual_{operation}", raw_text=text, **_draft_kwargs(tmp_path, config_key="us"))
+    assert caught.value.code == "INPUT_ERROR"
+    assert caught.value.message.startswith("contracts must be an integer")
 
 
 def test_manual_trade_draft_parses_futu_open_without_manual_multiplier(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -4972,3 +4972,333 @@ def test_operation_timeline_rejects_conflicting_identity_before_read(operation_t
     result = query(operation_id="op-target", statuses=["applied"], sender_id="other-sender", expect_connect=False)
     assert result["ok"] is False
     assert result["error"]["code"] == "PERMISSION_DENIED"
+
+
+@pytest.fixture
+def integral_manual_trade_flow(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Real Control/ledger flow; only isolated files and synthetic authority are admitted."""
+    import hashlib
+    import socket
+    from urllib.parse import unquote, urlsplit
+
+    # Set pointers before importing or calling any settings/provider consumers.
+    for key in tuple(os.environ):
+        if key != "PYTEST_CURRENT_TEST":
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.chdir(tmp_path)
+    for key, value in {
+        "HOME": tmp_path / "home",
+        "OM_RUNTIME_ROOT": tmp_path,
+        "OM_ENV_FILE": tmp_path / "absent-test.env",
+        "OM_DATA_CONFIG": tmp_path / "portfolio.runtime.json",
+        "OM_INBOUND_AUDIT_DB": tmp_path / "inbound.sqlite3",
+    }.items():
+        monkeypatch.setenv(key, str(value))
+
+    from domain.domain import option_position_identity
+    from src.application import agent_tool_config, multiplier_cache, notification_delivery_adapter
+    from src.application.bot import config_scope
+    from src.application.bot.control import audit, manual_trade_operations, operation_store
+    from src.application.bot.control_handoff import build_control_preview_request
+    from src.application.ledger import repository_common, repository_core, repository_schema
+    from src.application.ledger.api import open_position_ledger_from_runtime_config
+    from src.application.positions import workflows
+    from src.application.secret_store import INBOUND_OPERATION_HMAC_KEY, use_secret_provider
+    from src.application.secret_store import runtime as secret_runtime
+    from src.infrastructure import feishu_bot, private_storage
+    from src.infrastructure.secret_store import factory as secret_factory
+    from src.infrastructure.secret_store.memory import InMemorySecretProvider
+
+    forbidden: list[str] = []
+
+    def deny(name: str):
+        def blocked(*_args: Any, **_kwargs: Any):
+            forbidden.append(name)
+            raise AssertionError(f"unexpected isolated manual-trade effect: {name}")
+        return blocked
+
+    root = tmp_path.resolve()
+
+    def confined(path: str | Path) -> Path:
+        resolved = Path(path).expanduser().resolve()
+        if not resolved.is_relative_to(root):
+            deny("path outside fixture")()
+        return resolved
+
+    cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    # Exercise actual freshness checks against real synthetic source fingerprints.
+    cfg["_generated"]["sources"] = []
+    for role in ("system", "market_user"):
+        source = tmp_path / f"{role}.json"
+        content = json.dumps({"test_source": role}).encode()
+        source.write_bytes(content)
+        cfg["_generated"]["sources"].append({
+            "role": role, "path": str(source), "loaded": True,
+            "sha256": hashlib.sha256(content).hexdigest(),
+        })
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    assert confined(cfg["portfolio"]["data_config"]) == tmp_path / "portfolio.runtime.json"
+    data_cfg = json.loads((tmp_path / "portfolio.runtime.json").read_text(encoding="utf-8"))
+    assert confined(data_cfg["option_positions"]["sqlite_path"]) == sqlite_path
+    # Avoid connect_private_sqlite's absent-file mkstemp/link/unlink branch.
+    for database in (sqlite_path, audit_db):
+        confined(database).parent.mkdir(parents=True, exist_ok=True)
+        database.touch(exist_ok=False)
+    databases = {sqlite_path.resolve(), audit_db.resolve()}
+
+    real_private_path = private_storage.private_path
+    real_private_connect = private_storage.connect_private_sqlite
+    real_sqlite_connect = sqlite3.connect
+
+    def guarded_private_path(path: str | Path) -> Path:
+        confined(path)
+        return real_private_path(path)
+
+    def guarded_private_connect(path: str | Path, **kwargs: Any):
+        target = confined(path)
+        if target not in databases or not target.is_file():
+            deny("unprepared private database")()
+        return real_private_connect(path, **kwargs)
+
+    def guarded_sqlite_connect(database: Any, *args: Any, **kwargs: Any):
+        raw = os.fspath(database)
+        parsed = urlsplit(raw) if raw.startswith("file:") else None
+        if parsed is not None and parsed.netloc:
+            deny("SQLite URI authority")()
+        target = confined(unquote(parsed.path) if parsed is not None else raw)
+        if target not in databases:
+            deny("unexpected SQLite database")()
+        return real_sqlite_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(private_storage, "private_path", guarded_private_path)
+    for module in (private_storage, audit, repository_common, repository_schema, repository_core):
+        monkeypatch.setattr(module, "connect_private_sqlite", guarded_private_connect)
+    monkeypatch.setattr(sqlite3, "connect", guarded_sqlite_connect)
+    for name in ("unlink", "remove", "rmdir"):
+        monkeypatch.setattr(os, name, deny(f"os.{name}"))
+    for name in ("unlink", "rmdir"):
+        monkeypatch.setattr(Path, name, deny(f"Path.{name}"))
+    for name in ("connect", "connect_ex"):
+        monkeypatch.setattr(socket.socket, name, deny(f"socket.{name}"))
+    for name in ("create_connection", "getaddrinfo"):
+        monkeypatch.setattr(socket, name, deny(f"socket.{name}"))
+    monkeypatch.setattr(subprocess, "Popen", deny("subprocess"))
+    monkeypatch.setattr(secret_runtime, "default_secret_provider", deny("default secret provider"))
+    monkeypatch.setattr(secret_factory, "build_secret_provider", deny("secret backend"))
+    monkeypatch.setattr(multiplier_cache, "refresh_via_opend", deny("OpenD multiplier refresh"))
+    monkeypatch.setattr(multiplier_cache, "load_cache", deny("multiplier cache read"))
+    for name in ("reply_message", "send_message", "send_post_message"):
+        monkeypatch.setattr(feishu_bot, name, deny(f"Feishu {name}"))
+    monkeypatch.setattr(notification_delivery_adapter, "send_feishu_app_message", deny("notification send"))
+
+    real_load = agent_tool_config.load_runtime_config
+    real_resolve = agent_tool_config.resolve_runtime_config_path
+
+    def guarded_resolve(*, config_path: Any = None, config_key: Any = None) -> Path:
+        if config_key or config_path is None or confined(config_path) != cfg_path:
+            deny("runtime config discovery")()
+        return real_resolve(config_path=config_path, config_key=config_key)
+
+    def guarded_load(**kwargs: Any):
+        guarded_resolve(config_path=kwargs.get("config_path"), config_key=kwargs.get("config_key"))
+        return real_load(**kwargs)
+
+    for module in (agent_tool_config, manual_trade_operations, config_scope, audit):
+        monkeypatch.setattr(module, "repo_base", lambda: root)
+    for module in (agent_tool_config, manual_trade_operations, config_scope, inbound_service):
+        monkeypatch.setattr(module, "load_runtime_config", guarded_load)
+    for module in (agent_tool_config, config_scope):
+        monkeypatch.setattr(module, "resolve_runtime_config_path", guarded_resolve)
+
+    terminal = datetime(2026, 6, 19, 12, tzinfo=timezone.utc)
+    terminal_ms = int(terminal.timestamp() * 1000)
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return terminal.astimezone(tz) if tz is not None else terminal.replace(tzinfo=None)
+
+    monkeypatch.setattr(option_position_identity, "datetime", FixedDatetime)
+    monkeypatch.setattr(operation_store, "datetime", FixedDatetime)
+    for module in (operation_store, audit, inbound_service):
+        monkeypatch.setattr(module, "utc_now_iso", lambda: terminal.isoformat())
+
+    cache_calls: list[str] = []
+    model_calls: list[str] = []
+
+    def retain_cache(repo: Any, **_kwargs: Any) -> dict[str, Any]:
+        assert confined(repo.db_path) == sqlite_path
+        cache_calls.append(str(repo.db_path))
+        return {"ok": True, "removed": [], "retained_for_test": True}
+
+    def assignment_handoff(**kwargs: Any) -> AppResult:
+        text = kwargs["user_message"]
+        assert text.startswith("请预览指派 ")
+        model_calls.append(text)
+        control_request, error = build_control_preview_request(
+            {"intent_name": "manual_assignment", "arguments": {}},
+            user_message=text, specs=kwargs["control_preview_specs"],
+        )
+        assert error is None
+        assert control_request is not None
+        assert control_request["arguments"]["raw_text"] == text
+        return AppResult(ok=True, status="control_requested", control_request=control_request)
+
+    monkeypatch.setattr(workflows, "invalidate_option_positions_context_cache_for_repo", retain_cache)
+    monkeypatch.setattr(inbound_service, "run_channel_request", assignment_handoff)
+    _enable_inbound_trade_write(monkeypatch)
+    provider = InMemorySecretProvider({INBOUND_OPERATION_HMAC_KEY: "synthetic-integral-label-test-key"})
+    with use_secret_provider(provider):
+        _, repo = open_position_ledger_from_runtime_config(base=root, cfg=cfg, config_path=cfg_path)
+        store = InboundOperationStore(audit_db)
+
+        def send(text: str, message_id: str) -> dict[str, Any]:
+            return _handle(
+                text, message_id, conversation_id="feishu:integral-label-test",
+                config_path=str(cfg_path), audit_db=str(audit_db),
+            )
+
+        def snapshot() -> dict[str, Any]:
+            rows = repo.read_lifecycle_account_rows(account="sy")
+            return {key: rows[key] for key in (
+                "trade_events", "stored_position_lots", "account_assigned_stock_events",
+                "account_wheel_events", "account_lifecycle_cases", "account_lifecycle_allocations",
+            )}
+
+        def seed(operation: str) -> str | None:
+            if operation == "open":
+                return None
+            workflows.execute_manual_open(
+                repo, broker="富途", account="sy", symbol="NVDA", option_type="put", side="short",
+                contracts=1, currency="USD", strike=100, multiplier=100, expiration_ymd="2026-06-18",
+                premium_per_share=2, underlying_share_locked=None, note=None, dry_run=False,
+                opened_at_ms=int(datetime(2026, 6, 1, 12, tzinfo=timezone.utc).timestamp() * 1000),
+                request_id="integral-label-seed",
+            )
+            lots = repo.list_position_lots()
+            assert len(lots) == 1
+            return lots[0]["lot_id"]
+
+        try:
+            yield SimpleNamespace(
+                repo=repo, store=store, send=send, snapshot=snapshot, seed=seed,
+                terminal_ms=terminal_ms, cache_calls=cache_calls, model_calls=model_calls,
+            )
+        finally:
+            assert forbidden == [], f"forbidden effects were attempted: {forbidden}"
+
+
+def _integral_manual_message(operation: str, raw_count: str, terminal_ms: int) -> str:
+    prefix = "请预览指派" if operation == "assignment" else f"/record-{operation}"
+    expiration = "2027-06-18" if operation == "open" else "2026-06-18"
+    return (
+        f"{prefix} account=sy symbol=NVDA option_type=put side=short strike=100 exp={expiration} "
+        f"contracts={raw_count} multiplier=100 premium=2 close_price=0.5 stock_price=100 "
+        f"event_time_ms={terminal_ms}"
+    )
+
+
+def _assert_fractional_manual_failure(flow: SimpleNamespace, operation: str, message_id: str) -> None:
+    before = flow.snapshot()
+    result = flow.send(_integral_manual_message(operation, "1.5", flow.terminal_ms), message_id)
+    assert result["ok"] is False, result
+    assert result["error"]["code"] == "INPUT_ERROR"
+    assert result["error"]["message"] == "contracts must be an integer within the supported numeric range"
+    assert flow.store.get(result["data"]["command_id"]) is None
+    assert flow.store.list_pending_operations(channel="feishu", sender_id="ou_1") == []
+    assert flow.snapshot() == before
+
+
+@pytest.mark.parametrize("operation", ["open", "close", "assignment", "expiry"])
+def test_manual_fractional_label_has_no_pending_or_economic_write(
+    integral_manual_trade_flow: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, operation: str,
+) -> None:
+    from src.application.bot.control import manual_trade_operations
+
+    flow = integral_manual_trade_flow
+    flow.seed(operation)
+    opened: list[dict[str, Any]] = []
+
+    def unexpected_open(payload: dict[str, Any]):
+        opened.append(payload)
+        raise AssertionError("invalid quantity reached ledger preview/apply")
+
+    monkeypatch.setattr(manual_trade_operations, "_open_repo_for_payload", unexpected_open)
+    _assert_fractional_manual_failure(flow, operation, "fractional-label")
+    assert opened == []
+    assert len(flow.model_calls) == (1 if operation == "assignment" else 0)
+
+
+@pytest.mark.parametrize(
+    ("operation", "raw_count"),
+    [pytest.param(operation, raw_count, id=f"{operation}-{kind}")
+     for operation in ("open", "close", "assignment", "expiry")
+     for kind, raw_count in (("int", "1"), ("decimal", "1.0"))],
+)
+def test_manual_whole_label_preview_confirm_preserves_quantity(
+    integral_manual_trade_flow: SimpleNamespace, operation: str, raw_count: str,
+) -> None:
+    from src.application.bot.control.operation_signature import hash_operation_payload, verify_operation_signature
+    from src.application.ledger.api import project_assigned_stock_lifecycle_from_rows
+
+    flow = integral_manual_trade_flow
+    seed_lot_id = flow.seed(operation)
+    _assert_fractional_manual_failure(flow, operation, "invalid-before-correction")
+    before = flow.snapshot()
+    preview = flow.send(_integral_manual_message(operation, raw_count, flow.terminal_ms), "corrected-label")
+    assert preview["ok"] is True, preview
+    data = preview["data"]
+    assert data["status"] == "previewed"
+    key = "contracts" if operation == "open" else "contracts_to_close"
+    assert type(data["payload"]["arguments"][key]) is int
+    assert data["payload"]["arguments"][key] == 1
+    assert flow.snapshot() == before
+    operation_id = data["operation_id"]
+    pending = flow.store.get(operation_id)
+    assert pending is not None
+    assert pending["status"] == "previewed"
+    assert pending["payload"] == data["payload"]
+    assert pending["payload_hash"] == hash_operation_payload(data["payload"])
+    verify_operation_signature(pending)
+
+    confirmed = flow.send(f"/confirm trade {operation_id}", "confirm-corrected-label")
+    assert confirmed["ok"] is True, confirmed
+    assert confirmed["data"]["status"] == "applied"
+    assert confirmed["data"]["payload"]["arguments"][key] == 1
+    after = flow.snapshot()
+    previous_ids = {event["event_id"] for event in before["trade_events"]}
+    created = [event for event in after["trade_events"] if event["event_id"] not in previous_ids]
+    assert len(created) == 1
+    event = created[0]
+    assert event["event_type"] == ("expire_close" if operation == "expiry" else operation)
+    assert event["contracts"] == 1
+    option_lots = [lot for lot in after["stored_position_lots"] if lot["fields"]["asset_type"] == "option"]
+    assert len(option_lots) == 1
+    assert option_lots[0]["fields"]["contracts_opened"] == 1
+    assert option_lots[0]["fields"]["contracts_open"] == (1 if operation == "open" else 0)
+    if seed_lot_id is not None:
+        assert option_lots[0]["lot_id"] == seed_lot_id
+
+    report = project_assigned_stock_lifecycle_from_rows(
+        flow.repo.read_lifecycle_account_rows(account="sy"), account="sy", as_of_ms=flow.terminal_ms,
+    )
+    if operation == "assignment":
+        assert len(report["assigned_stock_lots"]) == 1
+        stock = report["assigned_stock_lots"][0]
+        assert stock["source_assignment_event_id"] == event["event_id"]
+        assert stock["source_option_lot_id"] == seed_lot_id
+        assert stock["shares_opened"] == stock["shares_remaining"] == 100
+    else:
+        assert report["assigned_stock_lots"] == []
+    assert flow.snapshot() == after
+    repeat = flow.send(f"/confirm trade {operation_id}", "repeat-confirm-corrected-label")
+    assert repeat["ok"] is False
+    assert repeat["error"]["code"] == "INPUT_ERROR"
+    assert flow.store.get(operation_id)["status"] == "applied"
+    assert flow.snapshot() == after
+    assert project_assigned_stock_lifecycle_from_rows(
+        flow.repo.read_lifecycle_account_rows(account="sy"), account="sy", as_of_ms=flow.terminal_ms,
+    ) == report
+    assert len(flow.model_calls) == (2 if operation == "assignment" else 0)
