@@ -1117,14 +1117,6 @@ def _stock_settlement_candidate(
             )
         )
         strike = Decimal(str(lifecycle_case.get("strike")))
-        quantity = abs(
-            int(
-                row.get("qty")
-                or row.get("quantity")
-                or row.get("shares")
-                or 0
-            )
-        )
         multiplier = require_option_multiplier(lifecycle_case.get("multiplier"))
     except (InvalidOperation, TypeError, ValueError, OverflowError):
         return None
@@ -1139,9 +1131,7 @@ def _stock_settlement_candidate(
         price.is_finite()
         and strike.is_finite()
         and price == strike
-        and quantity > 0
         and multiplier > 0
-        and quantity % multiplier == 0
         and trade_time_ms > 0
         and (
             observation_start_ms <= 0
@@ -1149,6 +1139,24 @@ def _stock_settlement_candidate(
         )
         and trade_time_ms <= int(settlement_deadline_ms)
     ):
+        return None
+    try:
+        magnitude = Decimal(
+            str(row.get("qty") or row.get("quantity") or row.get("shares") or 0)
+        ).copy_abs()
+        if magnitude.is_finite():
+            if magnitude == 0:
+                return None
+            quantity = _positive_integer(magnitude)
+        else:
+            quantity = None
+    except (InvalidOperation, TypeError, ValueError, OverflowError):
+        quantity = None
+    if quantity is None:
+        raise SettlementObservationDataError(
+            "stock settlement quantity must be a finite whole number"
+        )
+    if quantity % multiplier != 0:
         return None
     source_event_id = (
         f"futu:{account}:{futu_account_id}:{deal_id}"
