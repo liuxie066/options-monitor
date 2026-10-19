@@ -4975,8 +4975,11 @@ def test_operation_timeline_rejects_conflicting_identity_before_read(operation_t
 
 
 @pytest.fixture
-def integral_manual_trade_flow(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def integral_manual_trade_flow(tmp_path: Path, request: pytest.FixtureRequest):
     """Real Control/ledger flow; only isolated files and synthetic authority are admitted."""
+    monkeypatch = pytest.MonkeyPatch()
+    request.addfinalizer(monkeypatch.undo)
+
     import hashlib
     import socket
     from urllib.parse import unquote, urlsplit
