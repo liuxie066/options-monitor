@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1240 (`src`: 569, `domain`: 97, `scripts`: 16, `tests`: 555)
-- Internal import edges: 10234 total, 3926 production/script edges excluding tests
+- Python files scanned: 1241 (`src`: 569, `domain`: 97, `scripts`: 16, `tests`: 556)
+- Internal import edges: 10250 total, 3927 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|656| domain
+  application -->|657| domain
   application -->|4| domain_services
   application -->|188| infrastructure
   application -->|2| om_strategy_core
@@ -50,7 +50,7 @@ flowchart LR
   scripts -->|2| interfaces
   scripts -->|1| tests
   storage -->|1| domain
-  tests -->|4805| application
+  tests -->|4820| application
   tests -->|614| domain
   tests -->|2| domain_services
   tests -->|298| infrastructure
@@ -64,7 +64,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 656 |
+| application | domain | 657 |
 | interfaces | application | 196 |
 | application | infrastructure | 188 |
 | scripts | application | 67 |
@@ -88,7 +88,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 4805 |
+| tests | application | 4820 |
 | tests | domain | 614 |
 | tests | interfaces | 352 |
 | tests | infrastructure | 298 |
@@ -103,7 +103,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 264 |
+| src.application | domain.domain | 265 |
 | src.application.ledger | domain.domain | 176 |
 | src.interfaces | src.application | 158 |
 | src.application | src.infrastructure | 133 |
@@ -192,7 +192,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.agent_tool_contracts | 123 |
 | src.application.payload_helpers | 98 |
 | src.application.ledger.api | 92 |
-| domain.domain.symbol_identity | 89 |
+| domain.domain.symbol_identity | 90 |
 | src.application.agent_tool_config | 75 |
 | domain.domain.trade_contract_identity | 72 |
 | src.application.account_config | 57 |
