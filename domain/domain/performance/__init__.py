@@ -26,6 +26,9 @@ from domain.domain.performance.period import (
     normalize_performance_period,
 )
 
+from domain.domain.ledger.cash_facts import OptionFeeCashEvent
+from domain.domain.performance.offline import calculate_option_performance, cashflow_input_digest
+
 __all__ = [
     "EvidenceEnvelope",
     "EvidenceSelection",
@@ -50,4 +53,5 @@ __all__ = [
     "select_valuation_mark",
     "to_decimal",
     "validate_evidence_facts",
+    "OptionFeeCashEvent", "calculate_option_performance", "cashflow_input_digest"
 ]

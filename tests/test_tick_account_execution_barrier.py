@@ -284,6 +284,153 @@ def _stub_prepared_option_context(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("smoke", [False, True])
+def test_real_option_preparation_replays_fx_and_reports_tick_audit(monkeypatch, tmp_path, smoke):
+    import subprocess
+
+    from src.application import current_fx_run
+    from src.application import prepared_option_positions_context as prepared
+    from src.application import prepared_portfolio_context as portfolio
+    from src.application import tick_account_execution as mod
+    from src.infrastructure.performance_evidence_sqlite import PerformanceEvidenceSQLiteRepository
+
+    env_file = tmp_path / "isolated.env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("OM_ENV_FILE", str(env_file))
+    monkeypatch.setenv("OM_RUNTIME_ROOT", "")
+    monkeypatch.setenv("OM_DATA_CONFIG", "")
+    request = replace(_request(tmp_path, accounts=["lx", "sy"], workers=1, force=False), smoke=smoke)
+    request.cfg_path.write_text("{}\n", encoding="utf-8")
+    paths = {}
+    data_paths = {}
+    for account in request.account_ids:
+        data_path = tmp_path / account / "portfolio.runtime.json"
+        data_path.parent.mkdir(parents=True)
+        data_path.write_text("{}\n", encoding="utf-8")
+        data_paths[account] = data_path
+        paths[account] = data_path.parent / "output_shared" / "state" / "option_positions.sqlite3"
+    real_config = mod.build_account_runtime_config
+    real_prepare = prepared.prepare_option_positions_contexts
+    real_import = PerformanceEvidenceSQLiteRepository.import_envelope
+    batches = []
+    children = []
+    forbidden_calls = []
+    imports = []
+    fetches = []
+    failed = False
+    quoted = "2026-08-10T03:00:00+00:00"
+
+    def forbidden(*_args, **_kwargs):
+        forbidden_calls.append(True)
+        pytest.fail("unexpected provider, process, bootstrap or shadow boundary")
+
+    def account_config(**kwargs):
+        config = real_config(**kwargs)
+        config["portfolio"]["data_config"] = str(data_paths[kwargs["account"]])
+        return config
+
+    def fetch_fx(**kwargs):
+        assert kwargs["cache_path"].is_relative_to(tmp_path)
+        fetches.append(True)
+        assert len(fetches) == 1
+        return {"schema_version": 2, "pairs": {
+            pair: {"rate": rate, "source": "tencent_quote",
+                   "quote_at_utc": quoted, "observed_at_utc": quoted}
+            for pair, rate in (("USDCNY", 7.2), ("HKDCNY", 0.92))
+        }}
+
+    def prepare_options(**kwargs):
+        assert kwargs["base"] == tmp_path
+        assert kwargs["persist_fx_evidence"] is (not smoke)
+        batch = real_prepare(**kwargs)
+        batches.append(batch)
+        return batch
+
+    def import_once(repo, *args, **kwargs):
+        nonlocal failed
+        assert repo.db_path in paths.values()
+        imports.append(repo.db_path)
+        if repo.db_path == paths["sy"] and not failed:
+            failed = True
+            raise OSError("synthetic first import unavailable")
+        return real_import(repo, *args, **kwargs)
+
+    def run_account(*, request, **_kwargs):
+        assert request.allow_notifications is False
+        assert request.allow_mutations is (not smoke)
+        assert request.prepared_option_positions_context_manifest.is_relative_to(tmp_path)
+        prepared.load_prepared_option_positions_context_receipt(
+            manifest_path=request.prepared_option_positions_context_manifest,
+            expected_base=tmp_path,
+            expected_run_id=request.run_id,
+            expected_account=request.acct,
+            expected_account_config_sha256=request.account_config_authority.account_config_sha256,
+            expected_manifest_sha256=request.prepared_option_positions_context_manifest_sha256,
+            expected_runtime_config=json.loads(request.account_config_authority.canonical_bytes),
+        )
+        children.append(request.acct)
+        return _outcome(request.acct)
+
+    monkeypatch.setattr(mod, "build_account_runtime_config", account_config)
+    monkeypatch.setattr(mod, "_account_pipeline_is_required", lambda **_kwargs: True)
+    monkeypatch.setattr(current_fx_run, "current_exchange_rate_snapshot", fetch_fx)
+    monkeypatch.setattr(prepared, "get_exchange_rates_or_fetch_latest", forbidden)
+    monkeypatch.setattr(portfolio, "fetch_futu_portfolio_context", forbidden)
+    monkeypatch.setattr(portfolio, "load_account_portfolio_context", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(mod, "prepare_portfolio_contexts", _fake_prepare)
+    # Override the autouse fake with the actual owner and actual temporary evidence.
+    monkeypatch.setattr(mod, "prepare_option_positions_contexts", prepare_options)
+    monkeypatch.setattr(PerformanceEvidenceSQLiteRepository, "import_envelope", import_once)
+    monkeypatch.setattr(mod, "_build_close_advice_barrier_plan", lambda **kw: (kw["candidate_config"], None))
+    monkeypatch.setattr(mod, "open_position_ledger_from_data_config", forbidden)
+    monkeypatch.setattr(mod, "decision_state_snapshot", forbidden)
+    monkeypatch.setattr(mod, "prefetch_required_data", lambda **_kwargs: {
+        "global_required_data_plan": {"plan_id": "a" * 64, "symbols": []},
+        "symbols": [], "results": {},
+    })
+    monkeypatch.setattr(mod, "seal_required_data_snapshot", _seal_stub())
+    monkeypatch.setattr(mod, "_retire_required_data_shadows_after_manifest", lambda **_kwargs: None)
+    monkeypatch.setattr(mod, "_publish_runtime_portfolio_snapshot_shadow", forbidden)
+    monkeypatch.setattr(mod, "run_one_account", run_account)
+    first = mod.run_tick_account_execution(request)
+    assert first.ran_pipeline_accounts == ["lx", "sy"]
+    assert len(batches) == 1 and batches[0].unavailable_by_account == {}
+    frozen = {
+        account: (Path(manifest["manifest_path"]).read_bytes(),
+                  (Path(manifest["manifest_path"]).parent / "option_positions_context.json").read_bytes())
+        for account, manifest in batches[0].manifests.items()
+    }
+    assert PerformanceEvidenceSQLiteRepository(paths["sy"]).read_all().fx_rates == ()
+    monkeypatch.setattr(prepared, "open_position_ledger_from_data_config", forbidden)
+    monkeypatch.setattr(prepared, "read_decision_state_rows_many", forbidden)
+    second = mod.run_tick_account_execution(request)
+    assert second.ran_pipeline_accounts == ["lx", "sy"]
+    assert len(batches) == 2 and batches[1].unavailable_by_account == {}
+    assert children == ["lx", "sy", "lx", "sy"]
+    assert forbidden_calls == [] and fetches == [True]
+    assert batches[1].manifests == batches[0].manifests
+    assert batches[1].observed_at_utc == batches[0].observed_at_utc
+    assert batches[1].ledger_read_count == 0
+    for account, manifest in batches[1].manifests.items():
+        path = Path(manifest["manifest_path"])
+        assert (path.read_bytes(), (path.parent / "option_positions_context.json").read_bytes()) == frozen[account]
+        facts = PerformanceEvidenceSQLiteRepository(paths[account]).read_all().fx_rates
+        assert len(facts) == (0 if smoke else 2)
+        assert all(fact.source_id.startswith("verified_quote:tencent_quote:") for fact in facts)
+    events = [event for event in request.runlog.events if event["step"] == "option_performance_fx_evidence"]
+    if smoke:
+        assert imports == [] and events == []
+        assert [batch.fx_evidence_status for batch in batches] == ["disabled", "not_attempted"]
+    else:
+        assert imports == [paths[account] for _ in range(2) for account in ("lx", "sy")]
+        assert [event["status"] for event in events] == ["degraded", "ok"]
+        assert [event["data"] for event in events] == [
+            {"status": "partial", "ledger_count": 1, "inserted_count": 2, "idempotent_count": 0, "error_count": 1},
+            {"status": "persisted", "ledger_count": 2, "inserted_count": 2, "idempotent_count": 2, "error_count": 0},
+        ]
+
+
 @pytest.mark.parametrize("workers", [1, 2])
 @pytest.mark.parametrize("accounts", [["lx", "sy"], ["sy", "lx"]])
 @pytest.mark.parametrize("force", [False, True])
@@ -1472,6 +1619,166 @@ def test_unavailable_prepared_context_fails_closed_before_shared_prefetch(
     assert metrics_by_account["lx"]["should_notify"] is False
 
 
+@pytest.mark.parametrize("healthy_account", [None, "lx"], ids=["all-overdue", "healthy-peer"])
+def test_real_preparation_deadline_excludes_accounts_from_tick(
+    monkeypatch, tmp_path: Path, healthy_account,
+) -> None:
+    import subprocess
+
+    from src.application import prepared_portfolio_context as prepared
+    from src.application import tick_account_execution as mod
+
+    request = _request(tmp_path, accounts=["lx", "sy"], workers=1, force=False)
+    clock = SimpleNamespace(now=0.0)
+    forbidden_calls = []
+    workers = {}
+    result_reads = []
+    source_events = []
+    account_children = []
+    real_prepare = prepared.prepare_portfolio_contexts
+    real_read_result = prepared._read_worker_result
+    build_prefetch_config = Mock(wraps=mod.build_cross_account_prefetch_config)
+    prepare_options = Mock(wraps=_fake_prepare_options)
+    prefetch = Mock(return_value={
+        "global_required_data_plan": {"plan_id": "a" * 64, "symbols": []},
+        "symbols": [], "results": {},
+    })
+
+    def _forbidden(*_args, **_kwargs):
+        forbidden_calls.append(True)
+        raise AssertionError("unexpected provider, subprocess or sleeping boundary")
+
+    class _Worker:
+        returncode = 0
+
+        def __init__(self, command, **_kwargs):
+            worker_request = json.loads(Path(command[-1]).read_text(encoding="utf-8"))
+            self.account = worker_request["account"]
+            self.terminated = False
+            self.waited = 0
+            workers[self.account] = self
+            context = {
+                **_portfolio_context(self.account),
+                "cash_by_currency": {},
+                "fx_snapshot_sha256": worker_request["fx_snapshot_sha256"],
+            }
+            payload_digest = hashlib.sha256(json.dumps(
+                context, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            Path(worker_request["result_path"]).write_text(json.dumps({
+                "schema_version": "prepared_portfolio_context_worker_result.v1",
+                "token": worker_request["token"],
+                "run_id": worker_request["run_id"],
+                "account": self.account,
+                "account_config_sha256": worker_request["account_config_sha256"],
+                "status": "ready",
+                "portfolio_context": context,
+                "payload_sha256": payload_digest,
+                "portfolio_source_name": "futu",
+                "portfolio_source_account": self.account,
+            }), encoding="utf-8")
+
+        def poll(self):
+            if self.account != healthy_account:
+                clock.now = 1.0
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            raise ProcessLookupError("synthetic worker already exited")
+
+        def wait(self, timeout=None):
+            self.waited += 1
+            return self.returncode
+
+        def kill(self):
+            _forbidden()
+
+    def _prepare(**kwargs):
+        assert kwargs["base"] == tmp_path
+        assert kwargs["timeout_sec"] == 1
+        return real_prepare(**kwargs, popen_factory=_Worker)
+
+    def _read_result(**kwargs):
+        result_reads.append(kwargs["request"]["account"])
+        return real_read_result(**kwargs)
+
+    def _run_one_account(*, request, **_kwargs):
+        account_children.append(request.acct)
+        assert request.acct == healthy_account
+        assert request.allow_notifications is False
+        loaded = prepared.load_prepared_portfolio_context(
+            manifest_path=request.prepared_portfolio_context_manifest,
+            expected_base=tmp_path,
+            expected_run_id=request.run_id,
+            expected_account=request.acct,
+            expected_account_config_sha256=request.account_config_authority.account_config_sha256,
+            expected_manifest_sha256=request.prepared_portfolio_context_manifest_sha256,
+            expected_runtime_config=json.loads(request.account_config_authority.canonical_bytes),
+        )
+        assert loaded["filters"]["account"] == request.acct
+        assert loaded["fx_snapshot_sha256"] == "f" * 64
+        return _outcome(request.acct)
+
+    monkeypatch.setattr(prepared, "time", SimpleNamespace(monotonic=lambda: clock.now, sleep=_forbidden))
+    monkeypatch.setattr(prepared, "_read_worker_result", _read_result)
+    monkeypatch.setattr(prepared, "run_worker", _forbidden)
+    monkeypatch.setattr(prepared, "fetch_futu_portfolio_context", _forbidden)
+    monkeypatch.setattr(prepared, "load_account_portfolio_context", _forbidden)
+    monkeypatch.setattr(subprocess, "Popen", _forbidden)
+    monkeypatch.setattr(prepared.state_repo, "append_source_snapshot_event",
+                        lambda _base, snapshot: source_events.append(snapshot))
+    monkeypatch.setattr(mod, "open_position_ledger_from_data_config", _forbidden)
+    monkeypatch.setattr(mod, "decision_state_snapshot", _forbidden)
+    monkeypatch.setattr(mod, "seal_run_fx_snapshot", lambda **_kwargs: ({}, "f" * 64))
+    monkeypatch.setattr(mod, "_account_pipeline_is_required", lambda **_kwargs: True)
+    monkeypatch.setattr(mod, "prepare_portfolio_contexts", _prepare)
+    monkeypatch.setattr(mod, "prepare_option_positions_contexts", prepare_options)
+    monkeypatch.setattr(mod, "build_cross_account_prefetch_config", build_prefetch_config)
+    monkeypatch.setattr(mod, "_build_close_advice_barrier_plan",
+                        lambda **kwargs: (kwargs["candidate_config"], None))
+    monkeypatch.setattr(mod, "prefetch_required_data", prefetch)
+    monkeypatch.setattr(mod, "seal_required_data_snapshot", _seal_stub())
+    monkeypatch.setattr(mod, "_retire_required_data_shadows_after_manifest", lambda **_kwargs: None)
+    monkeypatch.setattr(mod, "run_one_account", _run_one_account)
+
+    outcome = mod.run_tick_account_execution(request)
+
+    expected_healthy = [healthy_account] if healthy_account else []
+    assert forbidden_calls == []
+    assert set(workers) == {"lx", "sy"}
+    assert result_reads == expected_healthy
+    assert [item["payload"]["filters"]["account"] for item in source_events] == expected_healthy
+    assert build_prefetch_config.call_count == 1
+    planner_kwargs = build_prefetch_config.call_args.kwargs
+    assert set(planner_kwargs["account_configs"]) == set(expected_healthy)
+    assert set(planner_kwargs["prepared_portfolio_contexts"]) == set(expected_healthy)
+    assert prepare_options.call_count == 1
+    assert set(prepare_options.call_args.kwargs["account_config_authorities"]) == set(expected_healthy)
+    assert prefetch.call_count == len(expected_healthy)
+    assert account_children == expected_healthy
+    assert outcome.ran_pipeline_accounts == expected_healthy
+    results = {item.account: item for item in outcome.results}
+    metrics = {item["account"]: item for item in outcome.account_metrics}
+    prepared_metrics = {item["account"]: item for item in outcome.prepared_context_metrics}
+    for account in {"lx", "sy"} - set(expected_healthy):
+        state = tmp_path / "output_runs" / request.run_id / "accounts" / account / "state"
+        manifest = json.loads((state / "prepared_portfolio_context.v1.json").read_bytes())
+        assert manifest["status"] == "unavailable"
+        assert manifest["reason"] == "portfolio_context_deadline_exceeded"
+        assert manifest["worker_returncode"] == 0
+        assert not list(state.glob("portfolio_context.*.json"))
+        assert workers[account].terminated and workers[account].waited == 1
+        assert prepared_metrics[account]["reason"] == "portfolio_context_deadline_exceeded"
+        assert results[account].decision_reason == "account_config_prepared_context_invalid"
+        assert results[account].should_notify is False
+        assert metrics[account]["error_code"] == "ACCOUNT_CONFIG_PREPARED_CONTEXT_INVALID"
+        assert metrics[account]["error"] == "portfolio_context_deadline_exceeded"
+        assert metrics[account]["ran_scan"] is False
+        assert metrics[account]["ran_pipeline"] is False
+        assert metrics[account]["should_notify"] is False
+
+
 def test_config_drift_isolated_to_one_account_before_shared_prefetch(
     monkeypatch,
     tmp_path: Path,
@@ -1700,6 +2007,112 @@ def test_runtime_snapshot_shadow_is_account_scoped_and_current_only(
     )
     assert [event["data"]["account"] for event in runlog.events] == ["lx", "sy"]
     assert runlog.events[1]["data"]["error_code"] == "ACCOUNT_RUN_STATE_CONFLICT"
+
+
+def test_real_holdings_fallback_shadow_publishes_replays_and_audits_each_account(monkeypatch, tmp_path):
+    from scripts import benchmark_runtime_portfolio_snapshot as fixture_owner
+    from tests import test_runtime_portfolio_snapshot as snapshot_fixture
+    from tests.test_prepared_portfolio_context import _prepare_cached_holdings_receipts
+    from src.application import runtime_portfolio_snapshot as snapshot_owner
+    from src.application import tick_account_execution as mod
+
+    run_id = fixture_owner.RUN_ID
+    prepared = _prepare_cached_holdings_receipts(tmp_path, monkeypatch, run_id=run_id, ages={"lx": 400, "sy": 0})
+    audit, runlog = _Audit(), _RunLog()
+    request = SimpleNamespace(base=tmp_path, run_id=run_id, audit_helper=audit, runlog=runlog)
+    snapshots, references_by_account, option_receipts, candidates = {}, {}, {}, {}
+    sealed_files, tasks = {}, []
+    forbidden_calls = []
+
+    def forbidden(*args, **kwargs):
+        forbidden_calls.append((args, kwargs))
+        raise AssertionError("shadow must only consume sealed owners")
+
+    for name in ("prepare_portfolio_contexts", "prepare_option_positions_contexts", "open_position_ledger_from_data_config",
+                 "decision_state_snapshot", "run_one_account", "prefetch_required_data", "seal_run_fx_snapshot",
+                 "retire_required_data_snapshot_shadows"):
+        monkeypatch.setattr(mod, name, forbidden)
+    for account in ("lx", "sy"):
+        authority = prepared.authorities[account]
+        # Customize only these synthetic accounts/configs. Default golden generation remains hash checked.
+        with monkeypatch.context() as fixture_patch:
+            fixture_patch.setattr(fixture_owner, "ACCOUNT", account)
+            fixture_patch.setattr(fixture_owner, "canonical_account_run_config_bytes", lambda _config: authority.canonical_bytes)
+            assembly = snapshot_fixture._owner_assembly_kwargs(verify_fixture_hash=False)
+        receipt = prepared.receipts[account]
+        assembly.update(prepared_portfolio_manifest_bytes=receipt["manifest_bytes"],
+                        prepared_portfolio_payload_bytes=receipt["payload_bytes"])
+        snapshot, references = snapshot_owner.assemble_runtime_portfolio_snapshot(**assembly)
+        snapshots[account], references_by_account[account] = snapshot, references
+        account_dir = tmp_path / "output_runs" / run_id / "accounts" / account
+        # Portfolio/config already exist through the real parent; assert bytes instead of replacing them.
+        required_binding = next(row for row in snapshot["replay_bindings"] if row["role"] == "required_data_snapshot")
+        for relpath, raw in references.items():
+            root = tmp_path / "output_runs" / run_id if relpath == required_binding["relpath"] else account_dir
+            path = root / relpath
+            assert path.is_relative_to(tmp_path)
+            if path.exists():
+                assert path.read_bytes() == raw
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(raw)
+            sealed_files[path] = raw
+        option_manifest = json.loads(assembly["prepared_option_manifest_bytes"])
+        option_path = account_dir / "state" / option_manifest["payload_relpath"]
+        option_path.write_bytes(assembly["prepared_option_payload_bytes"])
+        sealed_files[option_path] = assembly["prepared_option_payload_bytes"]
+        option_receipts[account] = {"manifest_bytes": assembly["prepared_option_manifest_bytes"],
+                                    "payload_bytes": assembly["prepared_option_payload_bytes"]}
+        candidates[account] = {"manifest": json.loads(assembly["candidate_manifest_bytes"])}
+        option_binding = next(row for row in snapshot["replay_bindings"] if row["role"] == "prepared_option_positions_context")
+        tasks.append(SimpleNamespace(account=account, account_config_authority=authority,
+            prepared_portfolio_manifest_path=Path(prepared.manifests[account]["manifest_path"]),
+            prepared_portfolio_manifest_sha256=prepared.manifests[account]["manifest_sha256"],
+            prepared_option_manifest_path=account_dir / option_binding["relpath"],
+            prepared_option_manifest_sha256=option_binding["sha256"],
+            required_data_manifest_path=tmp_path / "output_runs" / run_id / required_binding["relpath"]))
+
+    # Unchanged ledger/candidate producers are isolated at their read facade; all supplied bytes
+    # still pass the real assembler's canonical owner/hash/config validation.
+    def option_receipt(**kwargs):
+        account = kwargs["expected_account"]
+        assert kwargs["expected_account_config_sha256"] == prepared.authorities[account].account_config_sha256
+        return option_receipts[account]
+
+    monkeypatch.setattr(mod, "load_prepared_option_positions_context_receipt", option_receipt)
+    monkeypatch.setattr(mod, "load_candidate_snapshot_bundle", lambda *, account, **kwargs: candidates[account])
+    legacy = [AccountResult(account, True, True, "ok", "unchanged") for account in ("lx", "sy")]
+    legacy_before = [vars(result).copy() for result in legacy]
+    artifact_bytes = {}
+    for _ in range(2):
+        mod.publish_runtime_portfolio_snapshot_shadows(request=request, tasks=tuple(tasks))
+        for account in ("lx", "sy"):
+            loaded = snapshot_owner.load_runtime_portfolio_snapshot(base=tmp_path, run_id=run_id, account=account,
+                reference_payloads=references_by_account[account])
+            assert loaded == snapshots[account]
+            assert loaded["status"] == ("data_unavailable" if account == "lx" else "trusted")
+            assert loaded["sections"]["broker_positions"]["completeness"] == (
+                {"status": "unavailable", "reason_codes": ["position_snapshot_refresh_unavailable"]} if account == "lx"
+                else {"status": "complete", "reason_codes": []})
+            cash = loaded["sections"]["broker_cash"]["facts"]
+            assert cash["cash_snapshot"] == prepared.cached[account]["cash_snapshot"]
+            assert cash["cash_by_currency"] == prepared.cached[account]["cash_by_currency"]
+            assert cash["cash_by_currency"]["CNY"] == 1000
+            assert cash["cash_snapshot"]["status"] == "fresh"
+            path = tmp_path / "output_runs" / run_id / "accounts" / account / "state" / snapshot_owner.ARTIFACT_NAME
+            encoded = path.read_bytes()
+            assert encoded == snapshot_owner.canonical_json_bytes(loaded)
+            assert encoded == artifact_bytes.setdefault(account, encoded)
+            cache = prepared.authorities[account].state_path.parent / "portfolio_context.json"
+            assert cache.read_bytes() == prepared.cache_bytes[account]
+        assert all(path.read_bytes() == raw for path, raw in sealed_files.items())
+    assert [call["account"] for call in prepared.provider_calls] == ["lx"]
+    assert not forbidden_calls
+    assert [vars(result) for result in legacy] == legacy_before
+    assert [event["account"] for event in audit.events] == ["lx", "sy", "lx", "sy"]
+    assert [event["status"] for event in audit.events] == ["error", "ok", "error", "ok"]
+    assert all("error_type" not in event["extra"] for event in audit.events)
+    assert [event["status"] for event in runlog.events if event["step"] == "runtime_portfolio_snapshot"] == ["degraded", "ok", "degraded", "ok"]
 
 
 def test_scheduler_skip_does_not_emit_preparation_timings(monkeypatch, tmp_path):

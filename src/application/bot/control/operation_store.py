@@ -472,6 +472,9 @@ class InboundOperationStore:
     def mark_failed(self, operation_id: str, *, result: dict[str, Any]) -> None:
         self._set_status(operation_id, "failed", result_json=_json(result), expected_statuses=("previewed", "confirmed", "running"))
 
+    def mark_skipped(self, operation_id: str, *, result: dict[str, Any]) -> bool:
+        return self._set_status(operation_id, "skipped", result_json=_json(result), expected_statuses=("running",))
+
     def mark_terminal_with_outbox(
         self,
         operation_id: str,

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from contextlib import closing
 import json
 import os
 import sqlite3
+import subprocess
 from datetime import date, datetime, timedelta, timezone
+from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -3010,9 +3014,307 @@ def test_inbound_monitor_run_preview_requires_run_specific_confirmation(
     assert confirmed["data"]["status"] == "applied"
     assert confirmed["data"]["result"]["returncode"] == 0
     assert confirmed["data"]["result"]["command"] == "./om run tick-cron --market hk --accounts sy --timeout 600"
+    assert "reason" not in confirmed["data"]["result"]
+    assert confirmed["data"]["action_lifecycle"]["verify_status"] == "verified_applied"
+    assert "监控执行完成" in confirmed["data"]["response_text"]
+    saved = InboundOperationStore(audit_db).get(confirmed["data"]["operation_id"])
+    assert saved["status"] == "applied"
+    assert saved["applied_at"]
     assert len(calls) == 1
     assert calls[0]["command"][1:] == ["run", "tick-cron", "--market", "hk", "--accounts", "sy", "--timeout", "600"]
     assert calls[0]["timeout_seconds"] == 630
+
+
+def test_inbound_monitor_run_lock_skip_persists_and_replays(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from src.application import tick_cron
+    from src.application.bot.control.operation_diagnostics import collect_operation_timeline
+    from src.application.tool_execution import execute_tool as run_tool
+
+    _enable_inbound_monitor_run(monkeypatch)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    cfg_path = _write_symbols_runtime_config(tmp_path).with_name("config.hk.json")
+    audit_db = tmp_path / "inbound.sqlite3"
+    scope = {"config_path": str(cfg_path), "audit_db": str(audit_db)}
+    calls: list[list[str]] = []
+
+    def _must_not_run(*_args, **_kwargs):
+        raise AssertionError("locked tick must not create a run, preflight, or start a child")
+
+    def _locked(*_args, **_kwargs):
+        raise BlockingIOError("isolated lock contention")
+
+    def _runner(command, *, cwd, timeout_seconds):
+        calls.append(command)
+        stdout, stderr = StringIO(), StringIO()
+        assert command[1:] == ["run", "tick-cron", "--market", "hk", "--accounts", "sy", "--timeout", "600"]
+        assert timeout_seconds == 630
+        with monkeypatch.context() as lock_patch:
+            lock_patch.setattr(tick_cron.fcntl, "flock", _locked)
+            lock_patch.setattr(tick_cron, "create_run_id", _must_not_run)
+            rc = tick_cron.run_tick_cron(
+                market="hk", accounts=["sy"], config_path=str(cfg_path),
+                lock_path=str(tmp_path / "tick.lock"), runtime_root=tmp_path / "tick-runtime",
+                cwd=tmp_path, environ={}, stdout=stdout, stderr=stderr,
+                preflight_config_fn=_must_not_run, run_cmd=_must_not_run,
+            )
+        assert rc == 0
+        assert stdout.getvalue() == "SKIP_LOCKED\n"
+        assert stderr.getvalue() == ""
+        return subprocess.CompletedProcess(command, rc, stdout.getvalue(), stderr.getvalue())
+
+    monkeypatch.setattr("src.application.bot.control.monitor_run_operations.MONITOR_RUNNER", _runner)
+    preview = _handle("/monitor-run hk", "lock_preview", **scope)
+    assert preview["ok"] is True
+    assert calls == []
+    operation_id = preview["data"]["operation_id"]
+    confirm_text = f"/confirm monitor-run {operation_id}"
+    confirmed = _handle(confirm_text, "lock_confirm", **scope)
+    assert confirmed["ok"] is True
+    assert confirmed["error"] is None
+    data = confirmed["data"]
+    result = data["result"]
+    assert data["status"] == result["status"] == "skipped"
+    assert result["reason"] == "tick_cron_locked"
+    assert result["returncode"] == 0
+    assert result["stdout"] == "SKIP_LOCKED\n"
+    assert (result["market"], result["accounts"], result["symbols"], result["no_send"]) == ("hk", ["sy"], [], False)
+    assert result["command"] == "./om run tick-cron --market hk --accounts sy --timeout 600"
+    assert "run_id" not in result
+    for expected_text in ("市场锁占用已跳过", "本次未运行 tick", "市场：hk", "账户：sy", result["command"], operation_id):
+        assert expected_text in data["response_text"]
+    assert "执行完成" not in data["response_text"]
+    lifecycle = data["action_lifecycle"]
+    assert lifecycle["status"] == "skipped"
+    assert lifecycle["phase"] == "verify"
+    assert lifecycle["verify_status"] == "verified_skipped"
+    assert lifecycle["required_next_action"] is None
+    assert lifecycle["stages"] == [
+        {"name": "preview", "status": "complete", "code": "preview_saved"},
+        {"name": "confirm", "status": "complete", "code": "operator_confirmed"},
+        {"name": "execute", "status": "skipped", "code": "operation_skipped"},
+        {"name": "verify", "status": "complete", "code": "final_readback_skipped"},
+        {"name": "audit", "status": "complete", "code": "operation_result_recorded"},
+    ]
+    store = InboundOperationStore(audit_db)
+    saved = store.get(operation_id)
+    assert saved["status"] == "skipped"
+    assert saved["result"] == result
+    assert saved["confirmed_at"]
+    assert saved["applied_at"] is None
+    assert saved["cancelled_at"] is None
+    assert not (tmp_path / "tick-runtime").exists()
+    audit = InboundAuditStore(audit_db).find_by_message(channel="feishu", message_id="lock_confirm")
+    assert audit["result_ok"] == 1
+    assert audit["decision"] == "allowed"
+    assert json.loads(audit["response_json"])["data"]["status"] == "skipped"
+
+    for filters in ({}, {"operation_id": operation_id}, {"statuses": ["skipped"]}):
+        timeline = collect_operation_timeline(audit_db=str(audit_db), **filters)
+        assert timeline["timeline_count"] == 1
+        item = timeline["timelines"][0]
+        assert item["identity"]["operation_id"] == operation_id
+        assert item["identity"]["run_id"] is None
+        assert item["operation"]["status"] == item["outcome"]["status"] == "skipped"
+        assert item["operation"]["applied_at"] is None
+        assert item["outcome"]["ok"] is True
+        assert item["action_lifecycle"]["verify_status"] == "verified_skipped"
+    assert collect_operation_timeline(audit_db=str(audit_db), statuses=["applied"])["timeline_count"] == 0
+    diagnostic_scope = {
+        "audit_db": str(audit_db), "authenticated_channel": "feishu",
+        "authenticated_sender_id": "ou_1", "authenticated_conversation_id": "feishu:ou_1",
+    }
+    public = run_tool("operation_timeline", diagnostic_scope)
+    assert public["ok"] is True
+    assert public["data"]["timeline_count"] == 1
+    item = public["data"]["timelines"][0]
+    assert item["operation"]["status"] == item["outcome"]["status"] == "skipped"
+    assert item["outcome"]["ok"] is True
+    assert item["action_lifecycle"]["verify_status"] == "verified_skipped"
+    serialized = json.dumps(public["data"])
+    for private_text in ("SKIP_LOCKED", "./om", "ou_1", "lock_confirm", '"accounts"', '"stdout"'):
+        assert private_text not in serialized
+    for changed_scope in ({"authenticated_sender_id": "ou_other"}, {"authenticated_conversation_id": "other_chat"}):
+        other = run_tool("operation_timeline", {**diagnostic_scope, **changed_scope})
+        assert other["ok"] is True
+        assert other["data"]["timeline_count"] == 0
+
+    replay = _handle(confirm_text, "lock_confirm", **scope)
+    assert replay["meta"]["idempotent_replay"] is True
+    assert replay["data"] == data
+    assert replay["ok"] is True and replay["error"] is None
+    for action in ("confirm", "cancel"):
+        repeated = _handle(f"/{action} monitor-run {operation_id}", f"lock_repeat_{action}", **scope)
+        assert repeated["ok"] is False
+        assert repeated["error"]["code"] == "INPUT_ERROR"
+        assert "已跳过，未执行" in repeated["error"]["message"]
+    assert store.list_pending_operations(channel="feishu", sender_id="ou_1", include_expired=True) == []
+    assert store.reconcile_stale_operations(now=datetime.now(timezone.utc) + timedelta(days=1)) == {
+        "expired_previewed": 0, "failed_stale": 0,
+    }
+    assert store.get(operation_id) == saved
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr", "expected_status"),
+    [
+        pytest.param(0, "SKIP_LOCKED", "", "skipped", id="exact"),
+        pytest.param(0, "SKIP_LOCKED\n", "", "skipped", id="lf"),
+        pytest.param(0, "SKIP_LOCKED\r\n", "", "skipped", id="crlf"),
+        pytest.param(0, " \t\nSKIP_LOCKED\n\t ", "", "skipped", id="whitespace"),
+        pytest.param(0, " " * 4100 + "SKIP_LOCKED\n", "", "skipped", id="raw-before-clipping"),
+        pytest.param(0, "", "", "applied", id="empty-success"),
+        pytest.param(0, "tick completed", "", "applied", id="normal-success"),
+        pytest.param(0, "log SKIP_LOCKED result", "", "applied", id="embedded"),
+        pytest.param(0, "prefixSKIP_LOCKED", "", "applied", id="prefix"),
+        pytest.param(0, "SKIP_LOCKEDsuffix", "", "applied", id="suffix"),
+        pytest.param(0, "skip_locked", "", "applied", id="case-variant"),
+        pytest.param(0, "SKIP_LOCK", "", "applied", id="partial"),
+        pytest.param(0, "SKIP_LOCKED\nchild completed", "", "applied", id="multiple-lines"),
+        pytest.param(0, "", "SKIP_LOCKED\n", "applied", id="stderr-only"),
+        pytest.param(0, "child output " * 400, "", "applied", id="long-success"),
+        pytest.param(1, "SKIP_LOCKED\n", "failed", "failed", id="nonzero-marker"),
+        pytest.param(124, "SKIP_LOCKED\n", "timeout", "failed", id="timeout-exit-marker"),
+    ],
+)
+def test_inbound_monitor_run_classifies_full_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, returncode, stdout, stderr, expected_status,
+) -> None:
+    _enable_inbound_monitor_run(monkeypatch)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    cfg_path = _write_symbols_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+    scope = {"config_path": str(cfg_path), "audit_db": str(audit_db)}
+    calls = []
+
+    def _runner(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+
+    monkeypatch.setattr("src.application.bot.control.monitor_run_operations.MONITOR_RUNNER", _runner)
+    preview = _handle("/monitor-run hk", "output_preview", **scope)
+    assert preview["ok"] is True
+    operation_id = preview["data"]["operation_id"]
+    response = _handle(f"/confirm monitor-run {operation_id}", "output_confirm", **scope)
+    result = response["data"]["result"]
+    assert response["data"]["status"] == result["status"] == expected_status
+    assert response["ok"] is (expected_status != "failed")
+    if expected_status == "failed":
+        assert response["error"]["code"] == "MONITOR_RUN_FAILED"
+    else:
+        assert response["error"] is None
+    if expected_status == "skipped":
+        assert result["reason"] == "tick_cron_locked"
+    else:
+        assert "reason" not in result
+    assert result["returncode"] == returncode
+    assert result["stdout"] == (stdout if len(stdout) <= 4000 else stdout[:3997] + "...")
+    assert result["stderr"] == stderr
+    saved = InboundOperationStore(audit_db).get(operation_id)
+    assert saved["status"] == expected_status
+    assert saved["result"] == result
+    assert bool(saved["applied_at"]) is (expected_status == "applied")
+    assert response["data"]["action_lifecycle"]["verify_status"] == f"verified_{expected_status}"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("failure", ["timeout", "exception"])
+def test_inbound_monitor_run_runner_failure_stays_failed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure) -> None:
+    _enable_inbound_monitor_run(monkeypatch)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    cfg_path = _write_symbols_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+    scope = {"config_path": str(cfg_path), "audit_db": str(audit_db)}
+    calls = []
+
+    def _runner(command, *, cwd, timeout_seconds):
+        calls.append(command)
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(command, timeout_seconds, output="SKIP_LOCKED\n")
+        raise OSError("isolated runner failure")
+
+    monkeypatch.setattr("src.application.bot.control.monitor_run_operations.MONITOR_RUNNER", _runner)
+    preview = _handle("/monitor-run hk", "failure_preview", **scope)
+    assert preview["ok"] is True
+    operation_id = preview["data"]["operation_id"]
+    response = _handle(f"/confirm monitor-run {operation_id}", "failure_confirm", **scope)
+    assert response["ok"] is False
+    assert response["error"]["code"] == "TOOL_RUNTIME_ERROR"
+    expected_message = "超时" if failure == "timeout" else "失败"
+    assert expected_message in response["error"]["message"]
+    saved = InboundOperationStore(audit_db).get(operation_id)
+    assert saved["status"] == saved["result"]["status"] == "failed"
+    assert saved["result"]["error"] == ("TimeoutExpired" if failure == "timeout" else "OSError")
+    assert saved["applied_at"] is None
+    assert "reason" not in saved["result"]
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("initial_status", ["previewed", "confirmed", "running", "applied", "skipped", "failed", "cancelled", "expired"])
+def test_inbound_operation_skip_requires_running(tmp_path: Path, initial_status) -> None:
+    store = InboundOperationStore(tmp_path / "inbound.sqlite3")
+    operation_id = "in_skip_transition"
+    store.save_preview(
+        operation_id=operation_id, command_id=operation_id, channel="feishu", sender_id="ou_1",
+        operation_type="monitor_run_now", payload_hash="hash_skip", payload={}, preview={}, ttl_seconds=600,
+    )
+    if initial_status in {"confirmed", "running", "applied", "skipped"}:
+        assert store.mark_confirmed(operation_id)
+    if initial_status in {"running", "applied", "skipped"}:
+        assert store.mark_running(operation_id, result={"status": "running"})
+    if initial_status in {"applied", "skipped", "failed", "cancelled", "expired"}:
+        getattr(store, f"mark_{initial_status}")(operation_id, result={"status": initial_status})
+    before = store.get(operation_id)
+    result = {"status": "skipped", "reason": "tick_cron_locked"}
+    assert store.mark_skipped(operation_id, result=result) is (initial_status == "running")
+    after = store.get(operation_id)
+    if initial_status == "running":
+        assert after["status"] == "skipped"
+        assert after["result"] == result
+        assert after["confirmed_at"] == before["confirmed_at"]
+        assert after["applied_at"] is None and after["cancelled_at"] is None
+    else:
+        assert after == before
+
+
+def test_inbound_monitor_run_skip_lost_claim_preserves_current_terminal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _enable_inbound_monitor_run(monkeypatch)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    cfg_path = _write_symbols_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+    scope = {"config_path": str(cfg_path), "audit_db": str(audit_db)}
+    calls = []
+    competing_result = {"status": "applied", "source": "competing_writer"}
+    mark_skipped = InboundOperationStore.mark_skipped
+
+    def _runner(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "SKIP_LOCKED\n", "")
+
+    def _lose_claim(store, operation_id, *, result):
+        store.mark_applied(operation_id, result=competing_result)
+        return mark_skipped(store, operation_id, result=result)
+
+    def _must_not_mark_failed(*args, **kwargs):
+        raise AssertionError("lost skip claim must not enter runner failure handling")
+
+    monkeypatch.setattr("src.application.bot.control.monitor_run_operations.MONITOR_RUNNER", _runner)
+    monkeypatch.setattr(InboundOperationStore, "mark_skipped", _lose_claim)
+    monkeypatch.setattr(InboundOperationStore, "mark_failed", _must_not_mark_failed)
+    preview = _handle("/monitor-run hk", "claim_preview", **scope)
+    assert preview["ok"] is True
+    operation_id = preview["data"]["operation_id"]
+    response = _handle(f"/confirm monitor-run {operation_id}", "claim_confirm", **scope)
+    assert response["ok"] is False
+    assert response["error"]["code"] == "TOOL_RUNTIME_ERROR"
+    assert "未能保存跳过结果" in response["error"]["message"]
+    assert response["error"]["details"] == {"operation_id": operation_id, "status": "applied"}
+    assert "action_lifecycle" not in response["data"]
+    saved = InboundOperationStore(audit_db).get(operation_id)
+    assert saved["status"] == "applied"
+    assert saved["result"] == competing_result
+    assert saved["applied_at"]
+    assert len(calls) == 1
 
 
 def test_inbound_monitor_run_rejects_account_outside_target_market(
@@ -3065,6 +3367,11 @@ def test_inbound_monitor_run_cancel_does_not_execute_runner(monkeypatch: pytest.
     assert cancelled["data"]["status"] == "cancelled"
     assert cancelled["data"]["operation_id"] == operation_id
     assert "未运行 tick" in cancelled["data"]["response_text"]
+    assert cancelled["data"]["action_lifecycle"]["verify_status"] == "verified_cancelled"
+    saved = InboundOperationStore(audit_db).get(operation_id)
+    assert saved["status"] == "cancelled"
+    assert saved["cancelled_at"]
+    assert saved["applied_at"] is None
     assert calls == []
 
 
@@ -4343,3 +4650,658 @@ def _enabled_bot_fixture(tmp_path, monkeypatch):
     path = tmp_path / "test-bot-default.json"
     path.write_text('{"bot":{"enabled":true}}')
     monkeypatch.setattr("src.application.bot.control.config_loader.default_bot_config_path", lambda **kwargs: path)
+
+
+@pytest.fixture
+def operation_timeline_query(tmp_path, monkeypatch):
+    from src.application.bot.control import audit, operation_diagnostics, operation_store
+    from src.application.tool_execution import execute_tool
+
+    root = tmp_path / "private-timeline"
+    root.mkdir()
+    database = root / "inbound.sqlite3"
+    scope = {
+        "channel": "fixture",
+        "sender_id": "PRIVATE-sender",
+        "conversation_id": "PRIVATE-conversation",
+    }
+
+    def create(operations=(), audit_rows=(), *, pending_table=True):
+        assert not database.exists()
+        with closing(sqlite3.connect(database)) as conn:
+            if pending_table:
+                conn.execute("""CREATE TABLE inbound_pending_operations (
+                    id INTEGER PRIMARY KEY, operation_id TEXT, command_id TEXT,
+                    channel TEXT, sender_id TEXT, conversation_id TEXT, operation_type TEXT,
+                    status TEXT, payload_json TEXT, preview_json TEXT, result_json TEXT,
+                    created_at TEXT)""")
+                for index, operation in enumerate(operations, 1):
+                    conn.execute("""INSERT INTO inbound_pending_operations VALUES (
+                        :id, :operation_id, :command_id, :channel, :sender_id, :conversation_id,
+                        :operation_type, :status, :payload_json, :preview_json, :result_json,
+                        :created_at)""", {
+                        **scope, "id": index, "command_id": f"PRIVATE-command-{index}",
+                        "operation_type": "model_use", "created_at": "2026-10-18T00:00:00+00:00",
+                        "payload_json": '{"private":"PRIVATE-payload"}',
+                        "preview_json": "{}", "result_json": "{}", **operation,
+                    })
+            conn.execute("""CREATE TABLE inbound_command_audit (
+                id INTEGER PRIMARY KEY, command_id TEXT, channel TEXT, sender_id TEXT,
+                conversation_id TEXT, message_id TEXT, raw_text TEXT, tool_name TEXT,
+                response_json TEXT, created_at TEXT)""")
+            for index, row in enumerate(audit_rows, 1):
+                conn.execute("""INSERT INTO inbound_command_audit VALUES (
+                    :id, :command_id, :channel, :sender_id, :conversation_id, :message_id,
+                    :raw_text, :tool_name, :response_json, :created_at)""", {
+                    **scope, "id": index, "command_id": f"PRIVATE-audit-{index}",
+                    "message_id": f"PRIVATE-message-{index}", "raw_text": "PRIVATE-command-text",
+                    "tool_name": "inbound.model", "created_at": "2026-10-18T00:01:00+00:00",
+                    "response_json": json.dumps({"data": {
+                        "operation_type": "model_use", "response_text": "PRIVATE-response",
+                        "payload": {"private": "PRIVATE-payload"}, **row,
+                    }}),
+                })
+            conn.commit()
+
+    forbidden_calls = []
+
+    def forbidden(name):
+        def fail(*_args, **_kwargs):
+            forbidden_calls.append(name)
+            raise AssertionError(f"unexpected timeline I/O: {name}")
+        return fail
+
+    monkeypatch.setattr(audit, "default_audit_db_path", forbidden("audit.default_path"))
+    monkeypatch.setattr(audit, "build_effective_env", forbidden("audit.effective_env"))
+    monkeypatch.setattr(operation_store, "default_audit_db_path", forbidden("operations.default_path"))
+    for store in (InboundAuditStore, InboundOperationStore):
+        for method in ("_ensure_schema", "_connect"):
+            monkeypatch.setattr(store, method, forbidden(f"{store.__name__}.{method}"))
+
+    connection_calls = []
+    expected_uri = None
+
+    def connect(database_uri, *args, **kwargs):
+        connection_calls.append((database_uri, args, dict(kwargs)))
+        assert database_uri == expected_uri
+        assert args == ()
+        assert kwargs == {"uri": True}
+        return sqlite3.connect(database_uri, *args, **kwargs)
+
+    monkeypatch.setattr(operation_diagnostics, "sqlite3", SimpleNamespace(
+        connect=connect, Row=sqlite3.Row, Error=sqlite3.Error,
+    ))
+
+    def inventory():
+        return {
+            path.relative_to(tmp_path).as_posix(): None if path.is_dir() else path.read_bytes()
+            for path in tmp_path.rglob("*")
+        }
+
+    def query(*, expect_connect=True, **overrides):
+        nonlocal expected_uri
+        payload = {
+            "audit_db": str(database),
+            **{f"authenticated_{key}": value for key, value in scope.items()},
+            **overrides,
+        }
+        target = Path(payload["audit_db"])
+        assert target.is_absolute() and target.is_relative_to(root)
+        expected_uri = f"{target.as_uri()}?mode=ro"
+        before = inventory()
+        call_count = len(connection_calls)
+        envelope = execute_tool("operation_timeline", payload)
+        assert forbidden_calls == []
+        assert inventory() == before
+        assert connection_calls[call_count:] == (
+            [(expected_uri, (), {"uri": True})] if expect_connect else []
+        ), {
+            "ok": envelope.get("ok"),
+            "error.code": (envelope.get("error") or {}).get("code"),
+            "error.message": str((envelope.get("error") or {}).get("message") or "")
+            .replace(str(root), "<fixture>")[:300],
+            "data.audit_db_exists": (envelope.get("data") or {}).get("audit_db_exists"),
+        }
+        serialized = json.dumps(envelope, ensure_ascii=False)
+        assert str(root) not in serialized
+        assert "PRIVATE-" not in serialized
+        if envelope["ok"]:
+            assert envelope["error"] is None
+            data = envelope["data"]
+            assert data["schema_version"] == "operation-timeline-v1"
+            assert data["scope"]["authenticated_conversation"] is True
+            assert data["timeline_count"] == len(data["timelines"])
+            assert envelope["warnings"] == data["warnings"]
+            assert f"Operation timeline：{data['timeline_count']} 条" in data["response_text"]
+            for item in data["timelines"]:
+                assert set(item["identity"]) == {"operation_id"}
+                assert item["operation"]["status"] == item["outcome"]["status"]
+                assert f"operation_id={item['identity']['operation_id']}" in data["response_text"]
+                assert f"status={item['operation']['status']}" in data["response_text"]
+        return envelope
+
+    return root, create, query
+
+
+@pytest.mark.parametrize("stored_status, statuses, expected_count", [
+    pytest.param("applied", ["applied"], 1, id="match-applied"),
+    pytest.param("applied", ["failed"], 0, id="mismatch"),
+    pytest.param("applied", ["failed", "applied"], 1, id="multiple"),
+    pytest.param("failed", ["failed"], 1, id="match-failed"),
+    pytest.param("applied", [" applied ", "applied"], 1, id="trim-duplicates"),
+    pytest.param("applied", ["APPLIED"], 0, id="case-sensitive"),
+])
+def test_operation_timeline_id_respects_explicit_statuses(
+    operation_timeline_query, stored_status, statuses, expected_count,
+):
+    _root, create, query = operation_timeline_query
+    create([
+        {"operation_id": "op-target", "status": stored_status},
+        {"operation_id": "op-other", "status": stored_status},
+    ])
+    result = query(operation_id="op-target", statuses=statuses)
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["timeline_count"] == expected_count
+    normalized = [status.strip() for status in statuses]
+    assert data["filters"]["statuses"] == normalized
+    assert data["filters"]["operation_id"] == "op-target"
+    assert "statuses=" + ",".join(normalized) in data["response_text"]
+    if expected_count:
+        item = data["timelines"][0]
+        assert item["identity"]["operation_id"] == "op-target"
+        assert item["operation"]["status"] == stored_status
+        assert item["action_lifecycle"]["status"] == stored_status
+        assert item["action_lifecycle"]["source"] == "operation_timeline"
+    else:
+        assert data["warnings"] == []
+        assert "没有匹配的 operator operation。" in data["response_text"]
+
+
+@pytest.mark.parametrize("status_input", [
+    pytest.param({}, id="omitted"),
+    pytest.param({"statuses": []}, id="empty"),
+    pytest.param({"statuses": [" ", "\t", ""]}, id="blank"),
+])
+def test_operation_timeline_empty_statuses_preserve_lookup_defaults(operation_timeline_query, status_input):
+    _root, create, query = operation_timeline_query
+    defaults = ["previewed", "confirmed", "running", "applied", "skipped", "cancelled", "expired", "failed"]
+    create([{"operation_id": f"op-{status}", "status": status} for status in [*defaults, "archived"]])
+    exact = query(operation_id="op-archived", **status_input)
+    assert exact["ok"] is True
+    assert exact["data"]["timeline_count"] == 1
+    assert exact["data"]["timelines"][0]["operation"]["status"] == "archived"
+    assert "statuses" not in exact["data"]["filters"]
+    assert "statuses=" not in exact["data"]["response_text"]
+    for id_input in ({}, {"operation_id": " \t"}):
+        listed = query(**id_input, **status_input)
+        assert listed["ok"] is True
+        assert listed["data"]["timeline_count"] == 8
+        assert {item["identity"]["operation_id"] for item in listed["data"]["timelines"]} == {
+            f"op-{status}" for status in defaults
+        }
+        assert "statuses" not in listed["data"]["filters"]
+        assert "operation_id" not in listed["data"]["filters"]
+    explicit_defaults = query(operation_id="op-archived", statuses=defaults)
+    assert explicit_defaults["ok"] is True
+    assert explicit_defaults["data"]["timeline_count"] == 0
+    assert explicit_defaults["data"]["warnings"] == []
+    assert explicit_defaults["data"]["filters"]["statuses"] == defaults
+    explicit_custom = query(operation_id="op-archived", statuses=["archived"])
+    assert explicit_custom["ok"] is True
+    assert explicit_custom["data"]["timeline_count"] == 1
+    assert explicit_custom["data"]["timelines"][0]["operation"]["status"] == "archived"
+    assert explicit_custom["data"]["filters"]["statuses"] == ["archived"]
+
+
+@pytest.mark.parametrize("changed_filter", [
+    pytest.param({"authenticated_channel": "other"}, id="channel"),
+    pytest.param({"authenticated_sender_id": "other-sender"}, id="sender"),
+    pytest.param({"authenticated_conversation_id": "other-conversation"}, id="conversation"),
+    pytest.param({"operation_types": ["monitor_run"]}, id="type"),
+])
+def test_operation_timeline_id_keeps_other_filters(operation_timeline_query, changed_filter):
+    _root, create, query = operation_timeline_query
+    create([{"operation_id": "op-target", "status": "applied"}])
+    request = {"operation_id": "op-target", "statuses": ["applied"], "operation_types": ["model_use"]}
+    matched = query(**request)
+    assert matched["ok"] is True
+    assert matched["data"]["timeline_count"] == 1
+    assert matched["data"]["timelines"][0]["identity"]["operation_id"] == "op-target"
+    excluded = query(**(request | changed_filter))
+    assert excluded["ok"] is True
+    assert excluded["data"]["timeline_count"] == 0
+    assert excluded["data"]["warnings"] == []
+    assert excluded["data"]["filters"]["statuses"] == ["applied"]
+    assert excluded["data"]["filters"]["operation_types"] == (request | changed_filter)["operation_types"]
+
+
+def test_operation_timeline_filters_before_ordered_limit(operation_timeline_query):
+    _root, create, query = operation_timeline_query
+    create([
+        {"operation_id": "failed-first", "status": "failed"},
+        {"operation_id": "failed-second", "status": "failed"},
+        {"operation_id": "applied-newest", "status": "applied", "created_at": "2026-10-18T01:00:00+00:00"},
+    ])
+    for limit, expected_ids in ((1, ["failed-second"]), (2, ["failed-second", "failed-first"])):
+        result = query(statuses=["failed"], limit=limit)
+        assert result["ok"] is True
+        assert result["data"]["filters"]["limit"] == limit
+        assert result["data"]["timeline_count"] == limit
+        assert [item["identity"]["operation_id"] for item in result["data"]["timelines"]] == expected_ids
+        assert all(item["operation"]["status"] == "failed" for item in result["data"]["timelines"])
+
+
+@pytest.mark.parametrize("pending_table, audit_status, requested_status, expected_count", [
+    pytest.param(True, "applied", "failed", 0, id="pending-audit-mismatch"),
+    pytest.param(False, "failed", "failed", 1, id="audit-only-match"),
+    pytest.param(False, "failed", "applied", 0, id="audit-only-mismatch"),
+    pytest.param(True, "failed", "failed", 1, id="historical-match"),
+])
+def test_operation_timeline_statuses_preserve_audit_fallback(
+    operation_timeline_query, pending_table, audit_status, requested_status, expected_count,
+):
+    _root, create, query = operation_timeline_query
+    create(
+        [{"operation_id": "op-target", "status": "applied"}] if pending_table else [],
+        [{"operation_id": "op-target", "status": audit_status}], pending_table=pending_table,
+    )
+    result = query(operation_id="op-target", statuses=[requested_status])
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["timeline_count"] == expected_count
+    assert data["filters"]["statuses"] == [requested_status]
+    assert ("operations_table_missing" in data["warnings"]) is (not pending_table)
+    if expected_count:
+        item = data["timelines"][0]
+        assert item["identity"]["operation_id"] == "op-target"
+        assert item["operation"]["source"] == "audit_only"
+        assert item["operation"]["status"] == item["outcome"]["status"] == "failed"
+        assert item["outcome"]["ok"] is False
+        assert item["audit"]["related_count"] == 1
+        assert item["action_lifecycle"]["status"] == "failed"
+        assert item["action_lifecycle"]["source"] == "operation_timeline_audit_only"
+        assert "operation_missing" in item["warnings"]
+        assert ("operation_store_missing" in item["warnings"]) is (not pending_table)
+    else:
+        assert data["warnings"] == ([] if pending_table else ["operations_table_missing"])
+
+
+@pytest.mark.parametrize("statuses", [
+    pytest.param(None, id="null"),
+    pytest.param("applied,failed", id="csv"),
+    pytest.param(1, id="scalar"),
+])
+def test_operation_timeline_rejects_non_list_statuses(operation_timeline_query, statuses):
+    _root, create, query = operation_timeline_query
+    create([{"operation_id": "op-target", "status": "applied"}])
+    result = query(operation_id="op-target", statuses=statuses, expect_connect=False)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INPUT_ERROR"
+    assert result["error"]["details"]["schema_errors"][0]["path"] == "statuses"
+
+
+def test_operation_timeline_missing_database_remains_missing(operation_timeline_query):
+    root, _create, query = operation_timeline_query
+    missing = root / "missing-parent" / "missing.sqlite3"
+    result = query(audit_db=str(missing), operation_id="op-target", statuses=["failed"], expect_connect=False)
+    assert result["ok"] is True
+    assert result["data"]["audit_db_exists"] is False
+    assert result["data"]["timeline_count"] == 0
+    assert result["data"]["warnings"] == ["audit_db_missing"]
+    assert result["warnings"] == ["audit_db_missing"]
+    assert result["data"]["filters"]["statuses"] == ["failed"]
+    assert not missing.exists()
+    assert not missing.parent.exists()
+
+
+def test_operation_timeline_corrupt_database_is_error(operation_timeline_query):
+    root, _create, query = operation_timeline_query
+    corrupt = root / "corrupt.sqlite3"
+    corrupt.write_bytes(b"synthetic non-SQLite evidence")
+    result = query(audit_db=str(corrupt), operation_id="op-target", statuses=["failed"])
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CONFIG_ERROR"
+    assert result["error"]["details"]["error_type"] == "DatabaseError"
+    assert corrupt.read_bytes() == b"synthetic non-SQLite evidence"
+
+
+def test_operation_timeline_rejects_conflicting_identity_before_read(operation_timeline_query):
+    _root, create, query = operation_timeline_query
+    create([{"operation_id": "op-target", "status": "applied"}])
+    result = query(operation_id="op-target", statuses=["applied"], sender_id="other-sender", expect_connect=False)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "PERMISSION_DENIED"
+
+
+@pytest.fixture
+def integral_manual_trade_flow(tmp_path: Path, request: pytest.FixtureRequest):
+    """Real Control/ledger flow; only isolated files and synthetic authority are admitted."""
+    monkeypatch = pytest.MonkeyPatch()
+    request.addfinalizer(monkeypatch.undo)
+
+    import hashlib
+    import socket
+    from urllib.parse import unquote, urlsplit
+
+    # Set pointers before importing or calling any settings/provider consumers.
+    for key in tuple(os.environ):
+        if key != "PYTEST_CURRENT_TEST":
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.chdir(tmp_path)
+    for key, value in {
+        "HOME": tmp_path / "home",
+        "OM_RUNTIME_ROOT": tmp_path,
+        "OM_ENV_FILE": tmp_path / "absent-test.env",
+        "OM_DATA_CONFIG": tmp_path / "portfolio.runtime.json",
+        "OM_INBOUND_AUDIT_DB": tmp_path / "inbound.sqlite3",
+    }.items():
+        monkeypatch.setenv(key, str(value))
+
+    from domain.domain import option_position_identity
+    from src.application import agent_tool_config, multiplier_cache, notification_delivery_adapter
+    from src.application.bot import config_scope
+    from src.application.bot.control import audit, manual_trade_operations, operation_store
+    from src.application.bot.control_handoff import build_control_preview_request
+    from src.application.ledger import repository_common, repository_core, repository_schema
+    from src.application.ledger.api import open_position_ledger_from_runtime_config
+    from src.application.positions import workflows
+    from src.application.secret_store import INBOUND_OPERATION_HMAC_KEY, use_secret_provider
+    from src.application.secret_store import runtime as secret_runtime
+    from src.infrastructure import feishu_bot, private_storage
+    from src.infrastructure.secret_store import factory as secret_factory
+    from src.infrastructure.secret_store.memory import InMemorySecretProvider
+
+    forbidden: list[str] = []
+
+    def deny(name: str):
+        def blocked(*_args: Any, **_kwargs: Any):
+            forbidden.append(name)
+            raise AssertionError(f"unexpected isolated manual-trade effect: {name}")
+        return blocked
+
+    root = tmp_path.resolve()
+
+    def confined(path: str | Path) -> Path:
+        resolved = Path(path).expanduser().resolve()
+        if not resolved.is_relative_to(root):
+            deny("path outside fixture")()
+        return resolved
+
+    cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    # Exercise actual freshness checks against real synthetic source fingerprints.
+    cfg["_generated"]["sources"] = []
+    for role in ("system", "market_user"):
+        source = tmp_path / f"{role}.json"
+        content = json.dumps({"test_source": role}).encode()
+        source.write_bytes(content)
+        cfg["_generated"]["sources"].append({
+            "role": role, "path": str(source), "loaded": True,
+            "sha256": hashlib.sha256(content).hexdigest(),
+        })
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    assert confined(cfg["portfolio"]["data_config"]) == tmp_path / "portfolio.runtime.json"
+    data_cfg = json.loads((tmp_path / "portfolio.runtime.json").read_text(encoding="utf-8"))
+    assert confined(data_cfg["option_positions"]["sqlite_path"]) == sqlite_path
+    # Avoid connect_private_sqlite's absent-file mkstemp/link/unlink branch.
+    for database in (sqlite_path, audit_db):
+        confined(database).parent.mkdir(parents=True, exist_ok=True)
+        database.touch(exist_ok=False)
+    databases = {sqlite_path.resolve(), audit_db.resolve()}
+
+    real_private_path = private_storage.private_path
+    real_private_connect = private_storage.connect_private_sqlite
+    real_sqlite_connect = sqlite3.connect
+
+    def guarded_private_path(path: str | Path) -> Path:
+        confined(path)
+        return real_private_path(path)
+
+    def guarded_private_connect(path: str | Path, **kwargs: Any):
+        target = confined(path)
+        if target not in databases or not target.is_file():
+            deny("unprepared private database")()
+        return real_private_connect(path, **kwargs)
+
+    def guarded_sqlite_connect(database: Any, *args: Any, **kwargs: Any):
+        raw = os.fspath(database)
+        parsed = urlsplit(raw) if raw.startswith("file:") else None
+        if parsed is not None and parsed.netloc:
+            deny("SQLite URI authority")()
+        target = confined(unquote(parsed.path) if parsed is not None else raw)
+        if target not in databases:
+            deny("unexpected SQLite database")()
+        return real_sqlite_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(private_storage, "private_path", guarded_private_path)
+    for module in (private_storage, audit, repository_common, repository_schema, repository_core):
+        monkeypatch.setattr(module, "connect_private_sqlite", guarded_private_connect)
+    monkeypatch.setattr(sqlite3, "connect", guarded_sqlite_connect)
+    for name in ("unlink", "remove", "rmdir"):
+        monkeypatch.setattr(os, name, deny(f"os.{name}"))
+    for name in ("unlink", "rmdir"):
+        monkeypatch.setattr(Path, name, deny(f"Path.{name}"))
+    for name in ("connect", "connect_ex"):
+        monkeypatch.setattr(socket.socket, name, deny(f"socket.{name}"))
+    for name in ("create_connection", "getaddrinfo"):
+        monkeypatch.setattr(socket, name, deny(f"socket.{name}"))
+    monkeypatch.setattr(subprocess, "Popen", deny("subprocess"))
+    monkeypatch.setattr(secret_runtime, "default_secret_provider", deny("default secret provider"))
+    monkeypatch.setattr(secret_factory, "build_secret_provider", deny("secret backend"))
+    monkeypatch.setattr(multiplier_cache, "refresh_via_opend", deny("OpenD multiplier refresh"))
+    monkeypatch.setattr(multiplier_cache, "load_cache", deny("multiplier cache read"))
+    for name in ("reply_message", "send_message", "send_post_message"):
+        monkeypatch.setattr(feishu_bot, name, deny(f"Feishu {name}"))
+    monkeypatch.setattr(notification_delivery_adapter, "send_feishu_app_message", deny("notification send"))
+
+    real_load = agent_tool_config.load_runtime_config
+    real_resolve = agent_tool_config.resolve_runtime_config_path
+
+    def guarded_resolve(*, config_path: Any = None, config_key: Any = None) -> Path:
+        if config_key or config_path is None or confined(config_path) != cfg_path:
+            deny("runtime config discovery")()
+        return real_resolve(config_path=config_path, config_key=config_key)
+
+    def guarded_load(**kwargs: Any):
+        guarded_resolve(config_path=kwargs.get("config_path"), config_key=kwargs.get("config_key"))
+        return real_load(**kwargs)
+
+    for module in (agent_tool_config, manual_trade_operations, config_scope, audit):
+        monkeypatch.setattr(module, "repo_base", lambda: root)
+    for module in (agent_tool_config, manual_trade_operations, config_scope, inbound_service):
+        monkeypatch.setattr(module, "load_runtime_config", guarded_load)
+    for module in (agent_tool_config, config_scope):
+        monkeypatch.setattr(module, "resolve_runtime_config_path", guarded_resolve)
+
+    terminal = datetime(2026, 6, 19, 12, tzinfo=timezone.utc)
+    terminal_ms = int(terminal.timestamp() * 1000)
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return terminal.astimezone(tz) if tz is not None else terminal.replace(tzinfo=None)
+
+    monkeypatch.setattr(option_position_identity, "datetime", FixedDatetime)
+    monkeypatch.setattr(operation_store, "datetime", FixedDatetime)
+    for module in (operation_store, audit, inbound_service):
+        monkeypatch.setattr(module, "utc_now_iso", lambda: terminal.isoformat())
+
+    cache_calls: list[str] = []
+    model_calls: list[str] = []
+
+    def retain_cache(repo: Any, **_kwargs: Any) -> dict[str, Any]:
+        assert confined(repo.db_path) == sqlite_path
+        cache_calls.append(str(repo.db_path))
+        return {"ok": True, "removed": [], "retained_for_test": True}
+
+    def assignment_handoff(**kwargs: Any) -> AppResult:
+        text = kwargs["user_message"]
+        assert text.startswith("请预览指派 ")
+        model_calls.append(text)
+        control_request, error = build_control_preview_request(
+            {"intent_name": "manual_assignment", "arguments": {}},
+            user_message=text, specs=kwargs["control_preview_specs"],
+        )
+        assert error is None
+        assert control_request is not None
+        assert control_request["arguments"]["raw_text"] == text
+        return AppResult(ok=True, status="control_requested", control_request=control_request)
+
+    monkeypatch.setattr(workflows, "invalidate_option_positions_context_cache_for_repo", retain_cache)
+    monkeypatch.setattr(inbound_service, "run_channel_request", assignment_handoff)
+    _enable_inbound_trade_write(monkeypatch)
+    provider = InMemorySecretProvider({INBOUND_OPERATION_HMAC_KEY: "synthetic-integral-label-test-key"})
+    with use_secret_provider(provider):
+        _, repo = open_position_ledger_from_runtime_config(base=root, cfg=cfg, config_path=cfg_path)
+        store = InboundOperationStore(audit_db)
+
+        def send(text: str, message_id: str) -> dict[str, Any]:
+            return _handle(
+                text, message_id, conversation_id="feishu:integral-label-test",
+                config_path=str(cfg_path), audit_db=str(audit_db),
+            )
+
+        def snapshot() -> dict[str, Any]:
+            rows = repo.read_lifecycle_account_rows(account="sy")
+            return {key: rows[key] for key in (
+                "trade_events", "stored_position_lots", "account_assigned_stock_events",
+                "account_wheel_events", "account_lifecycle_cases", "account_lifecycle_allocations",
+            )}
+
+        def seed(operation: str) -> str | None:
+            if operation == "open":
+                return None
+            workflows.execute_manual_open(
+                repo, broker="富途", account="sy", symbol="NVDA", option_type="put", side="short",
+                contracts=1, currency="USD", strike=100, multiplier=100, expiration_ymd="2026-06-18",
+                premium_per_share=2, underlying_share_locked=None, note=None, dry_run=False,
+                opened_at_ms=int(datetime(2026, 6, 1, 12, tzinfo=timezone.utc).timestamp() * 1000),
+                request_id="integral-label-seed",
+            )
+            lots = repo.list_position_lots()
+            assert len(lots) == 1
+            return lots[0]["lot_id"]
+
+        try:
+            yield SimpleNamespace(
+                repo=repo, store=store, send=send, snapshot=snapshot, seed=seed,
+                terminal_ms=terminal_ms, cache_calls=cache_calls, model_calls=model_calls,
+            )
+        finally:
+            assert forbidden == [], f"forbidden effects were attempted: {forbidden}"
+
+
+def _integral_manual_message(operation: str, raw_count: str, terminal_ms: int) -> str:
+    prefix = "请预览指派" if operation == "assignment" else f"/record-{operation}"
+    expiration = "2027-06-18" if operation == "open" else "2026-06-18"
+    return (
+        f"{prefix} account=sy symbol=NVDA option_type=put side=short strike=100 exp={expiration} "
+        f"contracts={raw_count} multiplier=100 premium=2 close_price=0.5 stock_price=100 "
+        f"event_time_ms={terminal_ms}"
+    )
+
+
+def _assert_fractional_manual_failure(flow: SimpleNamespace, operation: str, message_id: str) -> None:
+    before = flow.snapshot()
+    result = flow.send(_integral_manual_message(operation, "1.5", flow.terminal_ms), message_id)
+    assert result["ok"] is False, result
+    assert result["error"]["code"] == "INPUT_ERROR"
+    assert result["error"]["message"] == "contracts must be an integer within the supported numeric range"
+    assert flow.store.get(result["data"]["command_id"]) is None
+    assert flow.store.list_pending_operations(channel="feishu", sender_id="ou_1") == []
+    assert flow.snapshot() == before
+
+
+@pytest.mark.parametrize("operation", ["open", "close", "assignment", "expiry"])
+def test_manual_fractional_label_has_no_pending_or_economic_write(
+    integral_manual_trade_flow: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, operation: str,
+) -> None:
+    from src.application.bot.control import manual_trade_operations
+
+    flow = integral_manual_trade_flow
+    flow.seed(operation)
+    opened: list[dict[str, Any]] = []
+
+    def unexpected_open(payload: dict[str, Any]):
+        opened.append(payload)
+        raise AssertionError("invalid quantity reached ledger preview/apply")
+
+    monkeypatch.setattr(manual_trade_operations, "_open_repo_for_payload", unexpected_open)
+    _assert_fractional_manual_failure(flow, operation, "fractional-label")
+    assert opened == []
+    assert len(flow.model_calls) == (1 if operation == "assignment" else 0)
+
+
+@pytest.mark.parametrize(
+    ("operation", "raw_count"),
+    [pytest.param(operation, raw_count, id=f"{operation}-{kind}")
+     for operation in ("open", "close", "assignment", "expiry")
+     for kind, raw_count in (("int", "1"), ("decimal", "1.0"))],
+)
+def test_manual_whole_label_preview_confirm_preserves_quantity(
+    integral_manual_trade_flow: SimpleNamespace, operation: str, raw_count: str,
+) -> None:
+    from src.application.bot.control.operation_signature import hash_operation_payload, verify_operation_signature
+    from src.application.ledger.api import project_assigned_stock_lifecycle_from_rows
+
+    flow = integral_manual_trade_flow
+    seed_lot_id = flow.seed(operation)
+    _assert_fractional_manual_failure(flow, operation, "invalid-before-correction")
+    before = flow.snapshot()
+    preview = flow.send(_integral_manual_message(operation, raw_count, flow.terminal_ms), "corrected-label")
+    assert preview["ok"] is True, preview
+    data = preview["data"]
+    assert data["status"] == "previewed"
+    key = "contracts" if operation == "open" else "contracts_to_close"
+    assert type(data["payload"]["arguments"][key]) is int
+    assert data["payload"]["arguments"][key] == 1
+    assert flow.snapshot() == before
+    operation_id = data["operation_id"]
+    pending = flow.store.get(operation_id)
+    assert pending is not None
+    assert pending["status"] == "previewed"
+    assert pending["payload"] == data["payload"]
+    assert pending["payload_hash"] == hash_operation_payload(data["payload"])
+    verify_operation_signature(pending)
+
+    confirmed = flow.send(f"/confirm trade {operation_id}", "confirm-corrected-label")
+    assert confirmed["ok"] is True, confirmed
+    assert confirmed["data"]["status"] == "applied"
+    assert confirmed["data"]["payload"]["arguments"][key] == 1
+    after = flow.snapshot()
+    previous_ids = {event["event_id"] for event in before["trade_events"]}
+    created = [event for event in after["trade_events"] if event["event_id"] not in previous_ids]
+    assert len(created) == 1
+    event = created[0]
+    assert event["event_type"] == ("expire_close" if operation == "expiry" else operation)
+    assert event["contracts"] == 1
+    option_lots = [lot for lot in after["stored_position_lots"] if lot["fields"]["asset_type"] == "option"]
+    assert len(option_lots) == 1
+    assert option_lots[0]["fields"]["contracts_opened"] == 1
+    assert option_lots[0]["fields"]["contracts_open"] == (1 if operation == "open" else 0)
+    if seed_lot_id is not None:
+        assert option_lots[0]["lot_id"] == seed_lot_id
+
+    report = project_assigned_stock_lifecycle_from_rows(
+        flow.repo.read_lifecycle_account_rows(account="sy"), account="sy", as_of_ms=flow.terminal_ms,
+    )
+    if operation == "assignment":
+        assert len(report["assigned_stock_lots"]) == 1
+        stock = report["assigned_stock_lots"][0]
+        assert stock["source_assignment_event_id"] == event["event_id"]
+        assert stock["source_option_lot_id"] == seed_lot_id
+        assert stock["shares_opened"] == stock["shares_remaining"] == 100
+    else:
+        assert report["assigned_stock_lots"] == []
+    assert flow.snapshot() == after
+    repeat = flow.send(f"/confirm trade {operation_id}", "repeat-confirm-corrected-label")
+    assert repeat["ok"] is False
+    assert repeat["error"]["code"] == "INPUT_ERROR"
+    assert flow.store.get(operation_id)["status"] == "applied"
+    assert flow.snapshot() == after
+    assert project_assigned_stock_lifecycle_from_rows(
+        flow.repo.read_lifecycle_account_rows(account="sy"), account="sy", as_of_ms=flow.terminal_ms,
+    ) == report
+    assert len(flow.model_calls) == (2 if operation == "assignment" else 0)

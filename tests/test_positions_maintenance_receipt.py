@@ -141,8 +141,17 @@ def test_send_auto_close_receipt_uses_existing_route_and_sender(tmp_path: Path) 
         receipt_config={"notifications": {"enabled": True}},
         dry_run=False,
         result=_receipt_result(
-            as_of_utc="2026-05-03T00:00:00+00:00",
-            applied=[{"record_id": "rec_1", "position_key": "pos_1", "expiration_ymd": "2026-05-01"}],
+            as_of_utc="2026-10-18T01:07:28+00:00",
+            applied_closed=3,
+            candidates_should_close=3,
+            applied=[
+                {
+                    "record_id": f"lot_futu:lx:fixture:{index}",
+                    "position_key": "富途|lx|FUTU|2026-10-16|100P|short",
+                    "expiration_ymd": "2026-10-16",
+                }
+                for index in range(3)
+            ],
         ),
         send_fn=_send,
         normalize_fn=lambda send_result: send_result,
@@ -152,11 +161,21 @@ def test_send_auto_close_receipt_uses_existing_route_and_sender(tmp_path: Path) 
     assert out["delivery_confirmed"] is True
     assert out["message_id"] == "msg-auto-1"
     assert calls[0]["target"] == "wechat:ops"
-    assert calls[0]["message"].startswith("# OM · 回执 · lx")
-    assert "类型｜持仓维护" in calls[0]["message"]
-    assert "状态｜✅ 已完成" in calls[0]["message"]
-    assert "时间｜2026-05-03 08:00:00 北京时间" in calls[0]["message"]
-    assert "rec_1｜pos_1｜到期 2026-05-01" in calls[0]["message"]
+    assert calls[0]["message"] == "\n".join([
+        "# OM · 回执 · lx",
+        "",
+        "类型｜持仓维护",
+        "状态｜✅ 已完成",
+        "券商｜富途",
+        "规则｜到期后 1 天",
+        "结果｜成功 3 · 候选 3 · 错误 0",
+        "时间｜2026-10-18 09:07:28 北京时间",
+        "",
+        "## 已完成",
+        "富途|lx|FUTU|2026-10-16|100P|short",
+        "富途|lx|FUTU|2026-10-16|100P|short",
+        "富途|lx|FUTU|2026-10-16|100P|short",
+    ])
     assert_mobile_flat_markdown(calls[0]["message"])
     assert out["attempt_count"] == 1
 

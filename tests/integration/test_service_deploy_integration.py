@@ -34,6 +34,8 @@ from tests.service_deploy_test_support import (
     _drift_at,
     _drift_roots,
     _fake_systemd_query_runner,
+    _synthetic_drift_context,
+    _guard_original_credential_migration,
     _legacy_credential_migration_fixture,
     _credential_migration_runner,
     _stub_pi_storage_readiness,
@@ -656,10 +658,13 @@ def test_service_drift_does_not_query_host_systemctl_for_custom_unit_root(
     )
     _write_systemd_units_from_bundle(bundle, systemd_root)
 
+    unexpected_calls = []
+
     def _unexpected_run(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        unexpected_calls.append((_args, _kwargs))
         raise AssertionError("custom unit roots must not query host systemctl")
 
-    monkeypatch.setattr(service_drift_module.subprocess, "run", _unexpected_run)
+    monkeypatch.setattr(service_drift_module, "subprocess", SimpleNamespace(run=_unexpected_run))
 
     out = service_drift_module.service_drift(
         repo_root=repo,
@@ -671,6 +676,9 @@ def test_service_drift_does_not_query_host_systemctl_for_custom_unit_root(
     assert out["activation_states"] == {}
     assert out["active_states"] == {}
     assert out["activation_drift_units"] == []
+    assert out["activation_unknown_units"] == []
+    assert out["summary"]["activation_unknown_count"] == 0
+    assert unexpected_calls == []
 
 def test_service_drift_confirm_writes_missing_timer_and_profile(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
@@ -695,7 +703,7 @@ def test_service_drift_confirm_writes_missing_timer_and_profile(tmp_path: Path) 
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+        return _fake_systemd_query_runner()(command, **_kwargs)
 
     out = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=_run_cmd)
 
@@ -731,7 +739,7 @@ def test_service_drift_confirm_updates_mismatched_timer_content(tmp_path: Path) 
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+        return _fake_systemd_query_runner()(command, **_kwargs)
 
     out = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=_run_cmd)
 
@@ -781,7 +789,7 @@ def test_service_drift_confirm_uses_sudo_fallback_for_systemd_permission_errors(
             return subprocess.CompletedProcess(command, 0, stdout="written\n", stderr="")
         if command[0:1] == ["systemctl"]:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="Access denied\n")
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+        return _fake_systemd_query_runner()(command, **kwargs)
 
     out = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=_run_cmd)
 
@@ -805,7 +813,7 @@ def test_service_drift_retires_installed_feishu_ws_when_profile_no_longer_declar
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        return subprocess.CompletedProcess(command, 0, stdout="enabled\n", stderr="")
+        return _fake_systemd_query_runner()(command, **_kwargs)
 
     out = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=_run_cmd)
     refreshed = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))
@@ -1083,7 +1091,7 @@ def test_service_drift_retires_removed_position_advice_promotion_units(
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+        return _fake_systemd_query_runner()(command, **_kwargs)
 
     out = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=_run_cmd)
     refreshed = json.loads(
@@ -1160,7 +1168,7 @@ def test_service_drift_repairs_masked_expected_timer_and_reads_back_enabled(tmp_
             states[target] = "disabled"
         if command[-3:] == ["enable", "--now", target]:
             states[target] = "enabled"
-        return subprocess.CompletedProcess(command, 0, stdout="enabled\n", stderr="")
+        return _fake_systemd_query_runner()(command, **_kwargs)
 
     out = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=_run_cmd)
 
@@ -1574,7 +1582,7 @@ def test_service_drift_retires_legacy_quality_http_and_keeps_local_quality(tmp_p
 
     def run_cmd(command, **_kwargs):
         calls.append(list(command))
-        return subprocess.CompletedProcess(command, 0, stdout="enabled\n", stderr="")
+        return _fake_systemd_query_runner()(command, **_kwargs)
 
     out = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=run_cmd)
     refreshed = json.loads((runtime / "service.profile.json").read_text())
@@ -3255,7 +3263,7 @@ def test_service_upgrade_coerces_release_entity_repo_root_to_current_symlink(mon
         drift = _fake_release_drift_command(list(command), run_cmd=_run_cmd)
         if drift is not None:
             return drift
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+        return _fake_systemd_query_runner()(command, **kwargs)
 
     out = service_upgrade(
         repo_root=v100,
@@ -5508,3 +5516,254 @@ def test_update_confirmed_nonsymlink_receipt_holds_guard(monkeypatch, transition
     assert data["status"] == "repo_root_not_symlink"
     assert writes == ["repo_root_not_symlink"]
     assert case.commands == [] and not case.pid.exists()
+
+
+@pytest.fixture
+def unknown_drift_case(monkeypatch, tmp_path, capsys, request):
+    from src.application import service_drift as owner
+    from src.interfaces.cli import main as cli
+
+    boundary = getattr(request, "param", "systemd")
+    missing = {"options-monitor-projection-verify.timer"} if boundary == "missing-timer" else set()
+    fixture = _synthetic_drift_context(
+        monkeypatch, tmp_path, target="launchd" if boundary == "launchd" else "systemd", skip=missing,
+    )
+    observed = {}
+    commands = []
+    repairable = set()
+    query_units = set(fixture["timers"]) - missing
+
+    def run_cmd(command, **kwargs):
+        command = list(command)
+        commands.append(command)
+        if kwargs != {"capture_output": True, "text": True, "timeout": 60, "check": False}:
+            fixture["fail"]("runner kwargs")()
+        if (len(command) == 3 and command[0] == "systemctl"
+                and command[1] in {"is-enabled", "is-active"} and command[2] in query_units):
+            kind, unit = command[1:]
+            state = observed.get((kind, unit), "enabled" if kind == "is-enabled" else "active")
+            if isinstance(state, Exception):
+                raise state
+            code = 3 if state == "inactive" else (1 if state in {"disabled", "masked"} else 0)
+            return subprocess.CompletedProcess(command, code, stdout=state, stderr="")
+        if (len(command) == 4 and command[:3] == ["systemctl", "enable", "--now"]
+                and command[3] in repairable):
+            unit = command[3]
+            observed[("is-enabled", unit)] = "enabled"
+            observed[("is-active", unit)] = "active"
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        fixture["fail"]("unexpected command: " + " ".join(command))()
+
+    monkeypatch.setattr(cli, "service_drift", partial(owner.service_drift, run_cmd=run_cmd))
+
+    def public_check(*, confirm=False):
+        argv = [
+            "service", "drift", "--repo-root", str(fixture["repo"]),
+            "--runtime-root", str(fixture["runtime"]), "--profile-path", str(fixture["profile_path"]),
+        ]
+        if confirm:
+            argv.append("--confirm")
+        code = cli.main(argv)
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        return code, json.loads(captured.out)
+
+    before = fixture["inventory"]()
+    yield {
+        **fixture, "observed": observed, "commands": commands, "repairable": repairable,
+        "run_cmd": run_cmd, "public_check": public_check,
+    }
+    assert fixture["forbidden"] == []
+    assert fixture["inventory"]() == before
+
+
+@pytest.mark.parametrize("query_kind", ["enabled", "active"])
+@pytest.mark.parametrize("failure", ["blank", "token", "oserror", "timeout"])
+def test_service_drift_unknown_query_through_public_cli(unknown_drift_case, query_kind, failure):
+    fixture = unknown_drift_case
+    target = "options-monitor-projection-verify.timer"
+    command = ["systemctl", f"is-{query_kind}", target]
+    response = {
+        "blank": "", "token": "unavailable-fixture-state",
+        "oserror": OSError("synthetic query unavailable"),
+        "timeout": subprocess.TimeoutExpired(command, 60),
+    }[failure]
+    fixture["observed"][(f"is-{query_kind}", target)] = response
+    code, payload = fixture["public_check"]()
+    assert code == 2
+    assert payload["tool_name"] == "service.drift"
+    assert payload["ok"] is False
+    result = payload["data"]
+    assert result["activation_states" if query_kind == "enabled" else "active_states"][target] == "unknown"
+    assert result["activation_unknown_units"] == [target]
+    assert result["summary"]["activation_unknown_count"] == 1
+    assert result["summary"]["ok"] is False
+    assert result["summary"]["status"] == "error"
+    assert result["summary"]["error_count"] == result["summary"]["warning_count"] == 1
+    assert result["activation_drift_units"] == result["observed_activation_drift_units"] == []
+    assert result["manual_actions"] == [
+        f"manual_check_activation_state: systemctl is-enabled {target}; systemctl is-active {target}",
+    ]
+    assert result["profile_content_changed"] is False
+    assert result["changed"] is False and result["operations"] == []
+    assert result["write_applied"] is False
+    assert command in fixture["commands"]
+    assert all(cmd[1] in {"is-enabled", "is-active"} for cmd in fixture["commands"])
+
+
+def test_service_drift_unknown_only_confirm_and_recovery(unknown_drift_case):
+    fixture = unknown_drift_case
+    code, healthy = fixture["public_check"]()
+    assert code == 0 and healthy["ok"] is True
+    assert healthy["data"]["summary"]["status"] == "ok"
+    assert healthy["data"]["summary"]["error_count"] == healthy["data"]["summary"]["warning_count"] == 0
+    assert healthy["data"]["profile_content_changed"] is False
+    targets = sorted(["options-monitor-tick-us.timer", "options-monitor-projection-verify.timer"])
+    fixture["observed"][("is-enabled", targets[0])] = ""
+    fixture["observed"][("is-active", targets[0])] = ""
+    fixture["observed"][("is-active", targets[1])] = ""
+    for _attempt in range(2):
+        code, payload = fixture["public_check"](confirm=True)
+        result = payload["data"]
+        assert code == 2 and payload["ok"] is False
+        for source in (result, result["before"]):
+            assert source["activation_unknown_units"] == targets
+            assert source["summary"]["activation_unknown_count"] == 2
+            assert source["summary"]["error_count"] == source["summary"]["warning_count"] == 1
+            assert source["activation_drift_units"] == []
+            assert source["profile_content_changed"] is False
+        assert result["changed"] is False and result["operations"] == []
+        assert result["write_applied"] is False and result["apply_errors"] == []
+        assert result["applied"]["profile_written"] is False
+        for key in ("written_units", "written_managed_files", "retired_units", "retired_managed_files",
+                    "enabled_timers", "enabled_services", "started_services", "restarted_timers"):
+            assert result["applied"][key] == []
+        assert result["manual_actions"] == [
+            f"manual_check_activation_state: systemctl is-enabled {name}; systemctl is-active {name}"
+            for name in targets
+        ]
+    for (kind, unit) in tuple(fixture["observed"]):
+        fixture["observed"][(kind, unit)] = "enabled" if kind == "is-enabled" else "active"
+    code, recovered = fixture["public_check"]()
+    assert code == 0 and recovered["ok"] is True
+    assert recovered["data"]["summary"]["status"] == "ok"
+    assert recovered["data"]["summary"]["error_count"] == recovered["data"]["summary"]["warning_count"] == 0
+    assert recovered["data"]["activation_unknown_units"] == []
+    assert recovered["data"]["summary"]["activation_unknown_count"] == 0
+    assert recovered["data"]["manual_actions"] == []
+    assert all(cmd[1] in {"is-enabled", "is-active"} for cmd in fixture["commands"])
+
+
+@pytest.mark.parametrize("activation, active", [
+    pytest.param("", "inactive", id="unknown-inactive"),
+    pytest.param("disabled", "", id="disabled-unknown"),
+    pytest.param("masked", "", id="masked-unknown"),
+])
+def test_service_drift_unknown_activation_isolated_from_known_repairs(unknown_drift_case, activation, active):
+    fixture = unknown_drift_case
+    unknown = "options-monitor-projection-verify.timer"
+    known = "options-monitor-tick-us.timer"
+    fixture["observed"].update({
+        ("is-enabled", unknown): activation, ("is-active", unknown): active,
+        ("is-enabled", known): "disabled", ("is-active", known): "inactive",
+    })
+    fixture["repairable"].add(known)
+    code, payload = fixture["public_check"](confirm=True)
+    result = payload["data"]
+    assert code == 2 and payload["ok"] is False
+    assert result["before"]["observed_activation_drift_units"] == sorted([unknown, known])
+    assert result["before"]["activation_drift_units"] == [known]
+    assert result["before"]["activation_states"][known] == "disabled"
+    assert result["before"]["active_states"][known] == "inactive"
+    assert result["activation_unknown_units"] == [unknown]
+    assert result["activation_drift_units"] == []
+    assert result["observed_activation_drift_units"] == [unknown]
+    assert result["activation_states"][known] == "enabled" and result["active_states"][known] == "active"
+    assert result["summary"]["error_count"] == result["summary"]["warning_count"] == 1
+    assert result["summary"]["activation_unknown_count"] == 1
+    assert result["changed"] is True and result["write_applied"] is True
+    assert result["applied"]["enabled_timers"] == [known]
+    assert result["applied"]["profile_written"] is False
+    assert result["apply_errors"] == []
+    assert len(result["operations"]) == 1
+    assert result["operations"][0]["command"] == ["systemctl", "enable", "--now", known]
+    mutations = [cmd for cmd in fixture["commands"] if cmd[1] not in {"is-enabled", "is-active"}]
+    assert mutations == [["systemctl", "enable", "--now", known]]
+    assert not any(unknown in action and "enable --now" in action for action in result["before"]["manual_actions"])
+
+
+@pytest.mark.parametrize("activation, active", [
+    pytest.param("", "inactive", id="unknown-inactive"),
+    pytest.param("disabled", "", id="disabled-unknown"),
+])
+def test_service_drift_unknown_preserved_activation_remains_unresolved(unknown_drift_case, activation, active):
+    fixture = unknown_drift_case
+    target = "options-monitor-projection-verify.timer"
+    fixture["observed"].update({("is-enabled", target): activation, ("is-active", target): active})
+    out = _drift_at(
+        fixture["repo"], fixture["runtime"], fixture["units"], confirm=True,
+        activation_policy="preserve-existing",
+        preserved_activation_states={target: {"activation_state": "disabled", "active_state": "inactive"}},
+        run_cmd=fixture["run_cmd"],
+    )
+    assert out["summary"]["ok"] is False and out["summary"]["status"] == "error"
+    assert out["summary"]["activation_unknown_count"] == 1
+    assert out["activation_unknown_units"] == [target]
+    assert out["observed_activation_drift_units"] == [target]
+    assert out["activation_states"][target] == (activation or "unknown")
+    assert out["active_states"][target] == (active or "unknown")
+    assert out["preserved_activation_units"] == out["activation_preservation_conflicts"] == [target]
+    assert out["activation_drift_units"] == []
+    assert out["changed"] is False and out["operations"] == []
+    assert out["applied"]["profile_written"] is False
+    assert all(cmd[1] in {"is-enabled", "is-active"} for cmd in fixture["commands"])
+
+
+@pytest.mark.parametrize("unknown_drift_case", ["launchd", "missing-timer"], indirect=True)
+def test_service_drift_nonqueried_boundary_has_no_unknown(unknown_drift_case):
+    fixture = unknown_drift_case
+    code, payload = fixture["public_check"]()
+    result = payload["data"]
+    assert result["activation_unknown_units"] == []
+    assert result["summary"]["activation_unknown_count"] == 0
+    assert result["changed"] is False and result["operations"] == []
+    if result["provider"] == "launchd":
+        assert code == 0 and payload["ok"] is True
+        assert result["activation_states"] == result["active_states"] == {}
+        assert fixture["commands"] == []
+        assert result["missing_installed_units"] == []
+    else:
+        missing = "options-monitor-projection-verify.timer"
+        assert code == 2 and payload["ok"] is False
+        assert result["missing_installed_units"] == result["missing_required_units"] == [missing]
+        assert missing not in result["activation_states"] and missing not in result["active_states"]
+        assert fixture["commands"] and all(cmd[-1] != missing for cmd in fixture["commands"])
+
+
+@pytest.mark.parametrize("confirm", [pytest.param(False, id="preview"), pytest.param(True, id="confirm")])
+def test_service_credential_migration_blocks_unknown_before_target_work(unknown_drift_case, monkeypatch, confirm):
+    from src.application import service_drift as owner
+
+    fixture = unknown_drift_case
+    target = "options-monitor-projection-verify.timer"
+    fixture["observed"].update({("is-enabled", target): "masked", ("is-active", target): ""})
+    original_calls, render_calls = _guard_original_credential_migration(monkeypatch, fixture)
+    result = owner.migrate_service_credentials(
+        repo_root=fixture["repo"], runtime_root=fixture["runtime"], profile_path=fixture["profile_path"],
+        systemd_unit_root=fixture["units"], secret_credential_delivery="load-credential-encrypted",
+        secret_credential_store_root=fixture["runtime"] / "synthetic-credstore",
+        confirm=confirm, run_cmd=fixture["run_cmd"],
+    )
+    assert result["ok"] is False and result["status"] == "blocked"
+    assert result["reason"] == "unrelated_service_drift_must_be_reconciled_first"
+    assert result["confirmed"] is confirm and result["changed"] is False
+    assert result["values_exposed"] is False
+    assert result["unrelated_drift"] == {"activation_unknown_units": [target]}
+    source = result["precondition_drift"]
+    assert source["activation_drift_units"] == []
+    assert source["observed_activation_drift_units"] == [target]
+    assert source["activation_unknown_units"] == [target]
+    assert source["summary"]["ok"] is False
+    assert source["profile_content_changed"] is False
+    assert len(original_calls) == len(render_calls) == 1
+    assert all(cmd[1] in {"is-enabled", "is-active"} for cmd in fixture["commands"])

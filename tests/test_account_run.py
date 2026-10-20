@@ -529,6 +529,16 @@ def test_run_one_account_fails_closed_when_prepared_option_context_changes_after
         event["action"] == "prepared_option_context_integrity"
         for event in env["audit_events"]
     )
+    from src.application.research.checks import run_deterministic_checks
+
+    assert "status" not in outcome.acct_metrics
+    diagnosis = run_deterministic_checks({"runtime_status": {
+        "latest_run": {"state": {"tick_metrics": {"json": {"accounts": [outcome.acct_metrics]}}}},
+    }})
+    failure = next(item for item in diagnosis["findings"] if item["code"] == "ACCOUNT_FAILURES")
+    assert diagnosis["status"] == "fail"
+    assert failure["category"] == "partial_account_failure"
+    assert failure["evidence"][0]["observed"] == [outcome.acct_metrics]
 
 
 def test_frozen_account_run_keeps_parent_generation_after_late_path_drift(
@@ -665,6 +675,16 @@ def test_pipeline_child_account_config_failure_preserves_typed_reason(
     assert outcome.result.decision_reason == expected_reason
     assert outcome.acct_metrics["error_code"] == error_code
     assert outcome.acct_metrics["ran_scan"] is False
+    from src.application.research.checks import run_deterministic_checks
+
+    assert "status" not in outcome.acct_metrics
+    diagnosis = run_deterministic_checks({"runtime_status": {
+        "latest_run": {"state": {"tick_metrics": {"json": {"accounts": [outcome.acct_metrics]}}}},
+    }})
+    failure = next(item for item in diagnosis["findings"] if item["code"] == "ACCOUNT_FAILURES")
+    assert diagnosis["status"] == "fail"
+    assert failure["category"] == "partial_account_failure"
+    assert failure["evidence"][0]["observed"] == [outcome.acct_metrics]
 
 
 def test_run_one_account_uses_runtime_root_for_state_and_repo_root_for_process(monkeypatch, tmp_path: Path) -> None:

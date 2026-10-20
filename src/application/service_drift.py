@@ -192,12 +192,14 @@ def service_drift_status(
             "supported": False,
             "reason": "service_drift_check_failed",
             "error": f"{type(exc).__name__}: {exc}",
+            "activation_unknown_units": [],
             "summary": {
                 "ok": False,
                 "status": "error",
                 "error_count": 1,
                 "warning_count": 0,
                 "missing_required_units": [],
+                "activation_unknown_count": 0,
             },
         }
 
@@ -696,6 +698,7 @@ def _unrelated_secret_migration_drift(drift: dict[str, Any]) -> dict[str, list[s
         "extra_installed_units",
         "mismatched_units",
         "activation_drift_units",
+        "activation_unknown_units",
         "execution_drift_units",
     ):
         values = [
@@ -1223,7 +1226,11 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
             "preserved_activation_states": ctx.get(
                 "preserved_activation_states", {}
             ),
-            "summary": {"ok": True, "status": "skipped", "error_count": 0, "warning_count": 0},
+            "activation_unknown_units": [],
+            "summary": {
+                "ok": True, "status": "skipped", "error_count": 0,
+                "warning_count": 0, "activation_unknown_count": 0,
+            },
         }
 
     if isinstance(profile.get("services"), list) and not profile.get("services"):
@@ -1255,6 +1262,7 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
             "execution_states": {},
             "observed_activation_drift_units": [],
             "activation_drift_units": [],
+            "activation_unknown_units": [],
             "preserved_activation_units": [],
             "activation_preservation_conflicts": [],
             "execution_drift_units": [],
@@ -1271,6 +1279,7 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
                 "status": "skipped",
                 "error_count": 0,
                 "warning_count": 0,
+                "activation_unknown_count": 0,
             },
         }
     effective_profile, profile_compatibility_warnings = _effective_profile_with_legacy_feishu_credential(
@@ -1350,6 +1359,12 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         if activation_states.get(name) in {"disabled", "masked"}
         or active_states.get(name) in {"inactive", "failed", "deactivating"}
     )
+    activation_unknown_units = sorted(
+        name
+        for name in set(activation_states) | set(active_states)
+        if activation_states.get(name) == "unknown"
+        or active_states.get(name) == "unknown"
+    )
     (
         preserved_activation_units,
         activation_preservation_conflicts,
@@ -1361,6 +1376,7 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
     )
     activation_drift_units = sorted(
         set(observed_activation_drift_units) - set(preserved_activation_units)
+        - set(activation_unknown_units)
     )
     execution_drift_units = sorted(
         name
@@ -1380,6 +1396,7 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         missing_installed_units=missing_installed_units,
         mismatched_units=mismatched_units,
         activation_drift_units=activation_drift_units,
+        activation_unknown_units=activation_unknown_units,
         activation_preservation_conflicts=activation_preservation_conflicts,
         execution_drift_units=execution_drift_units,
         extra_installed_units=extra_installed_units,
@@ -1403,6 +1420,7 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         mismatched_managed_files=mismatched_managed_files,
         mode_mismatched_managed_files=mode_mismatched_managed_files,
         activation_drift_units=activation_drift_units,
+        activation_unknown_units=activation_unknown_units,
         preserved_activation_units=preserved_activation_units,
         activation_preservation_conflicts=activation_preservation_conflicts,
         execution_drift_units=execution_drift_units,
@@ -1436,6 +1454,7 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         "execution_states": execution_states,
         "observed_activation_drift_units": observed_activation_drift_units,
         "activation_drift_units": activation_drift_units,
+        "activation_unknown_units": activation_unknown_units,
         "preserved_activation_units": preserved_activation_units,
         "activation_preservation_conflicts": activation_preservation_conflicts,
         "execution_drift_units": execution_drift_units,
@@ -2033,6 +2052,7 @@ def _drift_summary(
     mismatched_managed_files: list[str],
     mode_mismatched_managed_files: list[str],
     activation_drift_units: list[str],
+    activation_unknown_units: list[str],
     preserved_activation_units: list[str],
     activation_preservation_conflicts: list[str],
     execution_drift_units: list[str],
@@ -2052,6 +2072,7 @@ def _drift_summary(
             mismatched_managed_files,
             mode_mismatched_managed_files,
             activation_drift_units,
+            activation_unknown_units,
             execution_drift_units,
         )
         if values
@@ -2068,6 +2089,7 @@ def _drift_summary(
         + int(bool(mismatched_units))
         + int(bool(profile_content_changed))
         + int(bool(activation_drift_units))
+        + int(bool(activation_unknown_units))
         + int(bool(activation_preservation_conflicts))
         + int(bool(missing_managed_files))
         + int(bool(mismatched_managed_files))
@@ -2098,6 +2120,7 @@ def _drift_summary(
         "mismatched_managed_file_count": len(mismatched_managed_files),
         "mode_mismatched_managed_file_count": len(mode_mismatched_managed_files),
         "activation_drift_count": len(activation_drift_units),
+        "activation_unknown_count": len(activation_unknown_units),
         "preserved_activation_count": len(preserved_activation_units),
         "activation_preservation_conflict_count": len(
             activation_preservation_conflicts
@@ -2123,6 +2146,7 @@ def _manual_actions(
     missing_installed_units: list[str],
     mismatched_units: list[str],
     activation_drift_units: list[str],
+    activation_unknown_units: list[str],
     activation_preservation_conflicts: list[str],
     execution_drift_units: list[str],
     extra_installed_units: list[str],
@@ -2165,6 +2189,11 @@ def _manual_actions(
             f"manual_enable_service: sudo systemctl enable --now {name}"
             for name in activation_drift_units
             if not name.endswith(".timer")
+        )
+        actions.extend(
+            "manual_check_activation_state: "
+            f"systemctl is-enabled {name}; systemctl is-active {name}"
+            for name in activation_unknown_units
         )
         actions.extend(
             "manual_review_preserved_activation_state: "

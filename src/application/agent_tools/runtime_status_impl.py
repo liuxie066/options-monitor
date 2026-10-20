@@ -2612,7 +2612,7 @@ def private_runtime_status_tool(
     if missing_required_units:
         warnings.append("Service drift detected: required maintenance units are missing: " + ", ".join(missing_required_units) + ".")
         warning_codes.append("SERVICE_DRIFT_REQUIRED_UNIT_MISSING")
-    elif service_drift_summary.get("status") == "warn":
+    elif service_drift_summary.get("ok") is not True or service_drift_summary.get("status") == "warn":
         warnings.append("Service drift detected between current release, service profile, and installed units.")
         warning_codes.append("SERVICE_DRIFT")
 

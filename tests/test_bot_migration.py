@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -221,3 +222,54 @@ def test_genuine_fresh_bot_database_needs_no_migration_sidecar(tmp_path):
     assert not (tmp_path / "bot-migration.json").exists()
     with sqlite3.connect(db) as conn:
         assert migration.MARKER not in {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_online_readiness_is_query_only_and_closes_connection(tmp_path, monkeypatch, legacy):
+    db = tmp_path / "online.sqlite3"
+    table = "copilot_runs" if legacy else "bot_runs"
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute(f"CREATE TABLE {table}(value TEXT)")
+        conn.execute(f"INSERT INTO {table} VALUES ('preserved')")
+    before = db.read_bytes()
+    connections = []
+    tables = migration._tables
+
+    def connect():
+        connection = sqlite3.connect(db)
+        connections.append(connection)
+        return connection
+
+    def checked_tables(connection):
+        assert connection.execute("PRAGMA query_only").fetchone() == (1,)
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            connection.execute(f"DELETE FROM {table}")
+        return tables(connection)
+
+    monkeypatch.setattr(migration, "_tables", checked_tables)
+    if legacy:
+        with pytest.raises(ValueError, match="Legacy Copilot"):
+            migration.assert_bot_ready(db, connect=connect)
+    else:
+        migration.assert_bot_ready(db, connect=connect)
+    assert len(connections) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connections[0].execute("SELECT 1")
+    assert db.read_bytes() == before
+
+
+def test_missing_database_readiness_does_not_open_or_create(tmp_path):
+    db = tmp_path / "missing.sqlite3"
+
+    def unexpected_connect():
+        pytest.fail("readiness must not create a missing database")
+
+    migration.assert_bot_ready(db, connect=unexpected_connect)
+    assert not db.exists()
+    (tmp_path / "bot-migration.json").write_text(json.dumps({
+        "version": migration.VERSION, "database": str(db),
+        "backup": str(db.with_name(db.name + ".pre-bot.sqlite3")), "status": "pending",
+    }))
+    with pytest.raises(ValueError, match="incomplete"):
+        migration.assert_bot_ready(db, connect=unexpected_connect)
+    assert not db.exists()

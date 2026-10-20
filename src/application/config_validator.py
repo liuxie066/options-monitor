@@ -955,6 +955,10 @@ def validate_schedule_cfg(raw, path: str) -> None:
         for key in ('start_plus_min', 'end_minus_min'):
             if key in run_points and run_points.get(key) is not None:
                 validate_non_negative_integer(run_points.get(key), f'{path}.run_points.{key}')
+                try:
+                    int(run_points.get(key))
+                except (TypeError, ValueError, OverflowError):
+                    die(f'{path}.run_points.{key} must be an integer')
         if 'hourly_minute' in run_points and run_points.get('hourly_minute') is not None:
             validate_non_negative_integer(run_points.get('hourly_minute'), f'{path}.run_points.hourly_minute')
             if int(run_points.get('hourly_minute')) > 59:
@@ -1641,8 +1645,6 @@ def validate_config(cfg: dict):
             for k in ('min_dte', 'max_dte'):
                 if k not in sp or sp[k] is None:
                     die(f"{sym}.sell_put enabled but missing {k}")
-            if sp['min_dte'] > sp['max_dte']:
-                die(f"{sym}.sell_put min_dte > max_dte")
             if ('min_strike' in sp) and (sp['min_strike'] is not None) and (_finite_number(sp['min_strike'], f'{sym}.sell_put.min_strike') <= 0):
                 die(f"{sym}.sell_put min_strike must be > 0; use null or omit it instead of 0")
             if ('max_strike' in sp) and (sp['max_strike'] is not None) and (_finite_number(sp['max_strike'], f'{sym}.sell_put.max_strike') <= 0):
@@ -1686,8 +1688,6 @@ def validate_config(cfg: dict):
                 if k not in sc or sc[k] is None:
                     die(f"{sym}.sell_call enabled but missing {k}")
 
-            if sc['min_dte'] > sc['max_dte']:
-                die(f"{sym}.sell_call min_dte > max_dte")
             if ('min_strike' in sc) and (sc['min_strike'] is not None) and (_finite_number(sc['min_strike'], f'{sym}.sell_call.min_strike') <= 0):
                 die(f"{sym}.sell_call min_strike must be > 0")
             if ('max_strike' in sc) and (sc['max_strike'] is not None) and (_finite_number(sc['max_strike'], f'{sym}.sell_call.max_strike') <= 0):

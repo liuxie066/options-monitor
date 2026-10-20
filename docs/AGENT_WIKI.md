@@ -510,6 +510,10 @@ Prepared portfolio payloads use content-addressed names and a write-once/adopt m
 SHA-256 and passes it to the final scan child; both consumers therefore load the same prepared generation. The loader
 anchors manifest and payload reads to the expected runtime root/run/account through a no-follow directory chain, checks
 the account-config SHA-256, and verifies that Futu portfolio context and `filters.account` match the OM account label.
+New worker results are eligible only when the parent observes their exit strictly before the shared monotonic deadline.
+Startup, polling and earlier result reads consume that budget; an exit first observed at or after the deadline is
+conservatively unavailable, even if the worker actually exited earlier. An in-time observation remains eligible while
+its result is validated; validation, publication and cleanup may finish later. Same-run immutable adoption is unchanged.
 Global Holdings risk uses a separate all-accounts context with source and observation evidence. A config or prepared-authority failure is isolated to its account; healthy accounts remain eligible for
 shared planning and required-data prefetch.
 Historical `output_accounts/<account>/state/config.override.json` files are preserved for forensics but are not read or

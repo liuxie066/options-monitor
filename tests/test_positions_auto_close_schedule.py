@@ -312,6 +312,129 @@ def test_market_mismatch_and_confirmation_stop_before_child(scope, clock):
     assert schedule.main([*args, "--apply", "--yes"]) == 78
 
 
+@pytest.mark.parametrize("market,start_utc", [
+    ("us", "2026-10-18T04:07:00"),
+    ("hk", "2026-10-17T16:05:00"),
+])
+@pytest.mark.parametrize("outcome,expected_status,child_code", [
+    ("review_required", "noop", 0),
+    ("receipt_failed", "applied", 0),
+    ("receipt_unconfirmed", "applied", 0),
+    ("business_failed", "failed", 1),
+    ("partial_failed", "partial_failed", 1),
+])
+def test_schedule_public_cli_preserves_business_and_receipt_outcomes(
+    tmp_path, monkeypatch, capsys, market, start_utc, outcome, expected_status, child_code,
+):
+    import socket
+
+    from src.application.positions import auto_close, maintenance, maintenance_receipt
+    from src.interfaces.cli import option_positions
+
+    runtime = tmp_path / "runtime"
+    accounts = ["fixturea", "fixtureb"]
+    config = {
+        "_generated": {"market": market.upper()},
+        "accounts": accounts,
+        "portfolio": {"data_config": str(tmp_path / "unused-portfolio.json")},
+    }
+    config_path = tmp_path / "config.json"
+    config_bytes = json.dumps(config).encode()
+    config_path.write_bytes(config_bytes)
+    scope = schedule.schedule_scope(market, config_path, runtime, accounts)
+    clock = [instant(start_utc)]
+    launches, maintenance_calls, forbidden = [], [], []
+
+    def unexpected(*_args, **_kwargs):
+        forbidden.append(True)
+        pytest.fail("live ledger, receipt, network or subprocess boundary reached")
+
+    monkeypatch.setattr(auto_close, "safe_send_auto_close_receipt", unexpected)
+    monkeypatch.setattr(maintenance, "open_position_ledger", unexpected)
+    monkeypatch.setattr(maintenance, "safe_send_auto_close_receipt", unexpected)
+    monkeypatch.setattr(maintenance_receipt, "select_notification_delivery_adapter", unexpected)
+    monkeypatch.setattr(socket.socket, "connect", unexpected)
+    monkeypatch.setattr(socket.socket, "connect_ex", unexpected)
+    monkeypatch.setattr(subprocess, "run", unexpected)
+
+    def load_config(*, base, config_path: Path, is_scheduled, log):
+        assert base == runtime.resolve()
+        assert config_path == (tmp_path / "config.json").resolve()
+        assert is_scheduled is False
+        return config
+
+    def maintain(**kwargs):
+        assert kwargs["base"] == runtime.resolve()
+        assert kwargs["report_dir"].is_relative_to(runtime.resolve() / "output_runs")
+        assert kwargs["cfg"]["config_source_path"] == str(config_path.resolve())
+        assert kwargs["cfg"]["_generated"]["market"] == market.upper()
+        assert kwargs["dry_run"] is False and kwargs["send_receipt"] is True
+        account = kwargs["account"]
+        maintenance_calls.append(account)
+        failed = outcome == "business_failed" or outcome == "partial_failed" and account == "fixturea"
+        applied = int(not failed and outcome != "review_required")
+        return {
+            "mode": "error" if failed else "applied", "account": account,
+            "positions_checked": 1, "candidates_should_close": applied,
+            "applied_closed": applied, "skipped_already_closed": 0,
+            "skipped_review_required": int(outcome == "review_required"),
+            "errors": ["synthetic business failure"] if failed else [],
+            "applied": [{"record_id": f"fixture-{account}"}] if applied else [],
+            "receipt": {
+                "status": outcome.removeprefix("receipt_") if outcome.startswith("receipt_") else "skipped",
+                "delivery_confirmed": False,
+            },
+        }
+
+    monkeypatch.setattr(auto_close, "load_config", load_config)
+    monkeypatch.setattr(auto_close, "run_expired_position_maintenance_for_account", maintain)
+
+    def public_cli(argv):
+        assert argv == [
+            str(tmp_path / "om"), "option-positions", "auto-close-expired",
+            "--config", str(config_path.resolve()), "--accounts", *accounts,
+            "--runtime-root", str(runtime.resolve()), "--apply", "--yes", "--quiet",
+        ]
+        launches.append(list(argv))
+        return option_positions.main(argv[2:])
+
+    def scheduled():
+        return schedule.run_scheduled(
+            scope=scope, repo=tmp_path, now_fn=lambda: clock[0], run_child=public_cli,
+        )
+
+    assert scheduled() == (schedule.RETRY if child_code else 0)
+    assert maintenance_calls == accounts
+    assert checkpoint(scope)["child_exit_code"] == child_code
+    assert checkpoint(scope)["attempts"] == 1
+    result = json.loads((runtime / "output_shared/state/auto_close_expired.json").read_text())
+    assert result["status"] == expected_status
+    assert result["accounts"] == accounts
+    assert result["runtime_config_path"] == str(config_path.resolve())
+    assert Path(result["run_dir"]).is_relative_to(runtime.resolve() / "output_runs")
+    assert [item["account"] for item in result["account_results"]] == accounts
+    for item in result["account_results"]:
+        assert item["receipt"]["delivery_confirmed"] is False
+        if outcome.startswith("receipt_"):
+            assert item["receipt"]["status"] == outcome.removeprefix("receipt_")
+    if outcome == "review_required":
+        assert result["summary"]["skipped_review_required"] == len(accounts)
+
+    saved = {path.relative_to(runtime): path.read_bytes() for path in runtime.rglob("*") if path.is_file()}
+    clock[0] += timedelta(seconds=299)
+    assert scheduled() == (schedule.RETRY if child_code else 0)
+    assert len(launches) == 1
+    assert {path.relative_to(runtime): path.read_bytes() for path in runtime.rglob("*") if path.is_file()} == saved
+    clock[0] += timedelta(seconds=1)
+    assert scheduled() == (schedule.RETRY if child_code else 0)
+    assert len(launches) == (2 if child_code else 1)
+    assert checkpoint(scope)["attempts"] == (2 if child_code else 1)
+    assert len(list((runtime / "output_runs").iterdir())) == len(launches)
+    assert config_path.read_bytes() == config_bytes
+    assert forbidden == []
+    assert capsys.readouterr().out == ""
+
+
 def test_child_inherits_group_timeout_kills_and_reaps(monkeypatch):
     class Child:
         returncode = None

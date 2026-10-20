@@ -60,7 +60,7 @@ def test_exact_link_uses_existing_realized_cashflow_and_read_only_ledger(tmp_pat
     linked = value["rows"][0]["trade_results"][0]
     assert linked["status"] == "linked", linked
     assert linked["trades"][0]["outcomes"][0]["option_net_cashflow"] == 100
-    assert linked["trades"][0]["outcomes"][0]["label"] == "已实现期权净现金流"
+    assert linked["trades"][0]["outcomes"][0]["label"] == "合约期权现金结果"
     assert value["rows"][0]["brief"] == original
     assert hashlib.sha256(repo.db_path.read_bytes()).hexdigest() == before
 

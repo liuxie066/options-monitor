@@ -41,6 +41,21 @@ explicit command
 
 No model can enter the apply path.
 
+Manual-trade labeled integer fields accept whole numeric values such as `1` and
+`1.0` without rounding. Fractional values return `INPUT_ERROR` before a trade
+preview or pending operation is created; correct the value in a new message.
+
+Confirmed `/monitor-run` operations use the guarded `tick-cron` wrapper. When
+its return code is 0 and its entire stdout, after stripping surrounding whitespace,
+is `SKIP_LOCKED`, Control records terminal `skipped` with reason `tick_cron_locked`.
+This attempt did not start a tick and has no `applied_at`. The response and operation
+timeline use `ok=True` for successful request handling; that flag is not evidence
+of tick execution or notification delivery. The receipt explicitly reports the
+occupied market lock and skipped attempt. Other successful output and nonzero
+exit codes retain their normal success/failure handling. Skipped operations are
+not retried automatically: repeated confirmation cannot run them again, and a
+later attempt requires a new preview and confirmation.
+
 When one expiry notice contains multiple contracts, `/record-expiry` creates one
 pending operation per contract. Confirm the whole notice with the plain reply
 `确认` (the conversation resolves its unique `command_id`), use
@@ -135,6 +150,8 @@ Planner flags, task profiles, per-business Scene allowlists, and
 ./om bot llm-check
 ./om-agent run --tool operation_timeline --input-json '{"limit":10}'
 ```
+
+`operation_timeline` 的 `statuses` 为字符串列表；非空规范化列表与 `operation_id` 及认证会话范围同时过滤。省略、空列表或仅含空白项时，精确 ID 查询不限制状态，无非空 ID 的查询使用既有生命周期默认状态。历史 audit-only 证据仍按原规则重建。
 
 Bot Host persists real sessions, runs, and model/tool events. Control audit
 rows must not be repackaged as synthetic Agent plans, evidence bundles, or

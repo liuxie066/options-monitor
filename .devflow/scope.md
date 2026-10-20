@@ -58,3 +58,31 @@ review_history: "首次 Devflow Review 与用户显式独立 DeepReview 均确�
 repair_1: "portfolio_assignment_scenario 显式 write_cache=False；新增有/无缓存两种入口级无写入回归"
 repair_checks: "33 个相关 pytest 通过；两份改动 Python Ruff、git diff --check 通过"
 review_residual: "09:40 原始批次未回放；切片 2 的 8 个读模型用例仍未到业务断言"
+
+---
+
+# 持仓维护回执精简（2026-10-18）
+
+- 原目标及批准：用户逐步确认保留三笔明细、去掉 lot 编号及重复到期日期；展示完整版本后明确调用 `$devflow 实施`，进入单独 Impl。
+- 设计依据：本会话已展示的完整回执；无独立设计文件或设计文件 hash。不重跑前序节点。
+- 验收：已完成行仅展示原 `position_key`；相同合约三笔逐条保留；标题、状态、券商、规则、结果和北京时间保持；内部数据、身份去重与发送逻辑不变。
+- 初始主工作区：用户主 checkout options-monitor，main，HEAD `70b961834033cc025d6c81040d270dc5ff6aad44`，初始 tracked/untracked 状态干净。
+- 任务工作区：Codex managed worktree `maintenance-receipt/options-monitor`，detached HEAD；初始工作区干净。
+- 初始 base/HEAD：`7af7344bdc7e0b8c0914371dc2fb8478eeb9b9db`；成功 fetch origin main 后核验 origin/main 相同。
+- 责任边界：`positions/maintenance.py` 与 `positions/auto_close.py` → `safe_send_auto_close_receipt` → `send_auto_close_receipt` → `build_auto_close_receipt_message` → `_applied_line` → 通用 `render_receipt`。仅改明细行渲染及所属发送入口测试；不改配置、exports 或账本。
+- current_node: Impl；status: awaiting_user_confirmation；单切片已实施并验证，单节点交付后停止。
+- 实现：`_applied_line` 直接复用 `_display(position_key)`，删除 lot 与额外日期拼接；发送入口测试精确断言用户确认的完整三笔回执。
+- 测试：共享开发 venv 的 Python 3.12，当前任务工作区运行 `-m pytest -q tests/test_positions_maintenance_receipt.py tests/test_positions_maintenance.py tests/test_positions_auto_close.py tests/test_bot_receipt_producers.py tests/test_feishu_bot.py`，exit 0，134 passed，16.04s。仅 pytest 缓存权限警告；无业务断言失败，未连接真实通知渠道。
+- 分析：修改的两个 Python 文件 `ruff check --no-cache` exit 0；默认缓存初始化受沙箱限制，关闭缓存后通过。`git diff --check` 通过；`scripts/guardrails_check.py --check-doc-wording --check-runtime-config-tracking --check-sensitive-artifacts --check-public-surface --public-surface-base 7af7344bdc7e0b8c0914371dc2fb8478eeb9b9db` exit 0，`[guardrails] OK`。
+- 完整改动：仅回执 owner、对应测试与本文件任务记录；无 committed/staged、新增、删除、重命名或模式变更。原有已完成的汇率任务记录保留。
+- 边界：未跑全库回归或独立 Review，未做线上验收；相同合约仍按笔显示，但简化行不再区分 lot。下一步等待用户确认当前 Impl 结果，不自动进入 Review 或 Delivery。
+- Review/Planreview 尝试：0；无运行中子任务；不包含提交、推送、发布、升级或真实通知。
+
+## Delivery（用户于 2026-10-18 授权推送、建 PR 并合入 main）
+
+- 用户接受上述实施结果并进入独立 Delivery，不扩展 Devflow Review；研发单节点状态为 completed。
+- 分支：`codex/simplify-maintenance-receipt`；交付基线快进至最新核验的 `eaabe90aa2c40a6ae89278fc4e38e88b112a19dd`，初始基线记录不变。
+- 新基线验证：134 项相关测试通过（15.79s）；完整自动发现 `pytest -n 4 --dist loadfile --max-worker-restart=0 -o tmp_path_retention_policy=failed -p no:cacheprovider -q` exit 0，13412 passed、3 skipped、4 warnings（193.36s）。共享开发解释器通过 `OM_PYTHON` 显式绑定；未安装依赖。
+- Ruff、依赖图检查、版本元数据检查与 diff 格式检查通过；依赖图无需生成改动，README 无需变更。
+- 当前阶段 commit/pr，等待精确暂存护栏和 GitHub required guardrails；合并后核验最终主分支及清理任务工作区。主 checkout 有并行活动 owner，自动快进须重新核验占用。
+- 不发布版本、不升级运行环境。最终 PR、CI 与收口证据保留在交付 artifact。

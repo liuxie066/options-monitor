@@ -17,6 +17,7 @@ from src.application.conversation_scope import conversation_reference
 
 
 NOTIFICATION_PERCEPTION_READ_SCHEMA_VERSION = "notification_perception_read.v1"
+_MAX_WINDOW_OFFSET = 5000
 
 
 def read_notification_perception_events(
@@ -241,7 +242,7 @@ def _read_window(
     try:
         state = decode_cursor(cursor, binding)
         offset = state.get("index", 0) if state else 0
-        if type(offset) is not int or not 0 <= offset <= 5000:
+        if type(offset) is not int or not 0 <= offset <= _MAX_WINDOW_OFFSET:
             raise ProjectReaderError("cursor_invalidated")
     except ProjectReaderError as exc:
         raise AgentToolError(code="INPUT_ERROR", message=exc.code, details={"reason": exc.code}) from None
@@ -274,6 +275,7 @@ def _read_window(
             read_statuses.append({"path": display, "status": "missing"})
             if state:
                 raise AgentToolError(code="INPUT_ERROR", message="source_changed") from None
+            stop_reason = stop_reason or "missing"
             continue
         except ProjectReaderError as exc:
             if exc.code in {"cancelled", "time_deadline"}:
@@ -364,11 +366,15 @@ def _read_window(
         if len(events) == 1:
             raise AgentToolError(code="INPUT_ERROR", message="detail_too_large")
         events.pop()
+    next_offset = offset + len(events)
+    has_more = matched > next_offset
+    pagination_limited = has_more and next_offset > _MAX_WINDOW_OFFSET
+    if pagination_limited:
+        stop_reason = stop_reason or ("malformed" if malformed else "pagination_limit")
     complete = stop_reason is None and malformed == 0 and all(item["status"] != "unreadable" for item in read_statuses)
     status = "ok" if complete else "partial"
     if not snapshots and all(item["status"] == "missing" for item in read_statuses):
         status = "missing"
-    has_more = matched > offset + len(events)
     result = {"schema_version": NOTIFICATION_PERCEPTION_READ_SCHEMA_VERSION,
         "summary": {"ok": complete, "status": status, "total_count": matched if complete else None,
             "returned_count": len(events), "limit": max_rows, "run_id": run_id,
@@ -387,7 +393,10 @@ def _read_window(
             "scanned_bytes": scanned_bytes, "stop_reason": stop_reason or ("malformed" if malformed else None),
             "available_from_utc": first_segment_at.isoformat() if first_segment_at else None},
     }
-    set_continuation(result, {"binding": binding, "index": offset + len(events), "sources": snapshots} if has_more else None)
+    set_continuation(result, {"binding": binding, "index": next_offset, "sources": snapshots}
+                     if has_more and not pagination_limited else None)
+    if pagination_limited:
+        result["continuation_status"] = "pagination_limit"
     if conversation_id:
         for item in read_statuses:
             item["line_count"] = None

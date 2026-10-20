@@ -50,6 +50,7 @@ from src.application.prepared_option_positions_context import (
 from src.application.prepared_portfolio_context import (
     PREPARED_PORTFOLIO_CONTEXT_SCHEMA,
 )
+from src.application.portfolio_context_service import portfolio_position_snapshot_errors
 from src.application.required_data_snapshot import (
     REQUIRED_DATA_READY_ENTRY_FIELDS,
     REQUIRED_DATA_READY_ENTRY_OPTIONAL_FIELDS,
@@ -95,6 +96,8 @@ SECTION_NAMES = tuple("ledger_projection broker_cash broker_positions cash_occup
 SECTION_SCHEMA_VERSIONS = {name: f"runtime_portfolio_snapshot.{name}.v1" for name in SECTION_NAMES}
 BROKER_CASH_SCHEMA_V1 = SECTION_SCHEMA_VERSIONS["broker_cash"]
 SECTION_SCHEMA_VERSIONS["broker_cash"] = "runtime_portfolio_snapshot.broker_cash.v2"
+BROKER_POSITIONS_SCHEMA_V1 = SECTION_SCHEMA_VERSIONS["broker_positions"]
+SECTION_SCHEMA_VERSIONS["broker_positions"] = "runtime_portfolio_snapshot.broker_positions.v2"
 SOURCE_OWNERS = tuple("broker_portfolio candidate_results ledger_projection required_data".split())
 REPLAY_BINDING_ROLES = tuple(
     "account_config candidate_snapshot_manifest prepared_option_positions_context "
@@ -172,6 +175,22 @@ def _positions_completeness(context: Mapping[str, Any]) -> dict[str, Any]:
                 and (snapshot.get("quality") or {}).get("status") == "ready" and not snapshot.get("errors"))
     return {"status": "complete" if complete else "unavailable",
             "reason_codes": [] if complete else ["broker_positions_unavailable"]}
+
+
+def _current_positions_completeness(context: Mapping[str, Any], *, account: str) -> dict[str, Any]:
+    cash_snapshot = context.get("cash_snapshot")
+    evaluated_at = cash_snapshot.get("evaluated_at") if isinstance(cash_snapshot, Mapping) else None
+    try:
+        if not isinstance(evaluated_at, str):
+            raise ValueError("missing frozen evaluation time")
+        evaluation_time = datetime.fromisoformat(evaluated_at.replace("Z", "+00:00"))
+        if evaluation_time.utcoffset() is None:
+            raise ValueError("naive frozen evaluation time")
+    except ValueError:
+        errors = ["position_snapshot_evaluation_time_invalid"]
+    else:
+        errors = portfolio_position_snapshot_errors(context, account=account, now_utc=evaluation_time)
+    return {"status": "unavailable" if errors else "complete", "reason_codes": sorted(set(errors))}
 
 
 _TOP_LEVEL_KEYS = set(
@@ -522,6 +541,7 @@ def assemble_runtime_portfolio_snapshot(
     option_received = str(option_manifest.get("application_received_at_utc") or "")
     portfolio_observed = str(portfolio_manifest.get("source_as_of_utc") or "")
     portfolio_received = str(portfolio_manifest.get("promoted_at_utc") or "")
+    positions_completeness = _current_positions_completeness(portfolio_context, account=account_norm)
     sections = {
         "ledger_projection": build_runtime_portfolio_section(
             "ledger_projection",
@@ -552,8 +572,8 @@ def assemble_runtime_portfolio_snapshot(
             source_observed_at_utc=portfolio_observed,
             application_received_at_utc=portfolio_received,
             facts=project_broker_positions_facts(portfolio_context),
-            completeness_status=_positions_completeness(portfolio_context)["status"],
-            completeness_reason_codes=_positions_completeness(portfolio_context)["reason_codes"],
+            completeness_status=positions_completeness["status"],
+            completeness_reason_codes=positions_completeness["reason_codes"],
         ),
         "cash_occupation": build_runtime_portfolio_section(
             "cash_occupation",
@@ -765,7 +785,10 @@ def _build_runtime_portfolio_snapshot(
         replay_bindings=bindings,
         chosen_results=chosen,
         reference_payloads=reference_payloads,
-        require_portfolio_payload=normalized_sections["broker_cash"]["schema_version"] != BROKER_CASH_SCHEMA_V1,
+        require_portfolio_payload=(
+            normalized_sections["broker_cash"]["schema_version"] != BROKER_CASH_SCHEMA_V1
+            or normalized_sections["broker_positions"]["schema_version"] != BROKER_POSITIONS_SCHEMA_V1
+        ),
     )
     _validate_source_bindings(
         normalized_sections,
@@ -939,7 +962,8 @@ def _section(value: Any, name: str, account: str) -> dict[str, Any]:
     if normalize_account_label(row.get("account")) != account:
         _fail("SECTION_ACCOUNT_MISMATCH", f"{name} account mismatch")
     version = row.get("schema_version")
-    if version != SECTION_SCHEMA_VERSIONS[name] and not (name == "broker_cash" and version == BROKER_CASH_SCHEMA_V1):
+    legacy_version = {"broker_cash": BROKER_CASH_SCHEMA_V1, "broker_positions": BROKER_POSITIONS_SCHEMA_V1}.get(name)
+    if version != SECTION_SCHEMA_VERSIONS[name] and (legacy_version is None or version != legacy_version):
         _fail("SECTION_SCHEMA_INVALID", f"{name} schema is invalid")
     facts = (
         _source_status_facts(row.get("facts"))
@@ -1346,15 +1370,22 @@ def _validate_source_bindings(
         "prepared portfolio promoted_at_utc",
     )
     current_cash_schema = sections["broker_cash"]["schema_version"] != BROKER_CASH_SCHEMA_V1
+    current_positions_schema = sections["broker_positions"]["schema_version"] != BROKER_POSITIONS_SCHEMA_V1
     portfolio_payload = owner_payloads.get("broker_portfolio_payload")
-    if current_cash_schema and portfolio_status == "ready":
+    if (current_cash_schema or current_positions_schema) and portfolio_status == "ready":
         if not isinstance(portfolio_payload, Mapping):
             _fail("SOURCE_BINDING_INVALID", "prepared portfolio payload missing")
-        if sections["broker_cash"]["facts"] != project_broker_cash_facts(portfolio_payload) or sections["broker_positions"]["facts"] != project_broker_positions_facts(portfolio_payload):
+        if current_cash_schema and sections["broker_cash"]["facts"] != project_broker_cash_facts(portfolio_payload):
+            _fail("SOURCE_BINDING_INVALID", "broker projection differs from original payload")
+        if sections["broker_positions"]["facts"] != project_broker_positions_facts(portfolio_payload):
             _fail("SOURCE_BINDING_INVALID", "broker projection differs from original payload")
     for name in ("broker_cash", "broker_positions"):
-        expected_completeness = (_positions_completeness(portfolio_payload or {})
-                                 if current_cash_schema and name == "broker_positions" else portfolio_completeness)
+        expected_completeness = portfolio_completeness
+        if name == "broker_positions":
+            if current_positions_schema and portfolio_status == "ready":
+                expected_completeness = _current_positions_completeness(portfolio_payload, account=sections[name]["account"])
+            elif not current_positions_schema and current_cash_schema:
+                expected_completeness = _positions_completeness(portfolio_payload or {})
         _require_completeness(sections[name], expected_completeness, name)
         if sections[name]["freshness"] != _not_applicable_freshness():
             _fail("SOURCE_BINDING_INVALID", f"{name} freshness must be not_applicable")
