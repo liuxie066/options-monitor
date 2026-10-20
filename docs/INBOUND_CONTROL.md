@@ -68,8 +68,10 @@ contracts with `/confirm trade <operation_id>`.
 model conversations. Non-Control messages enter the model path only when enabled.
 Authenticated cancellation of an already admitted Feishu analysis remains available
 so disabling Bot does not strand active work; replacement work still requires Bot enabled.
-The Bot scene selects canonical read tools. Portfolio queries follow the
-`portfolio_management.enabled` integration gate; there is no extra Bot toolset switch.
+The Bot scene projects a fixed list of canonical read tools; it currently excludes
+the portfolio tools. `portfolio_management.enabled` does not add tools to the
+Scene. See the [capability boundary](OM_AGENT_CAPABILITY_MAP.md#surfaces) for the
+separate Tool Gateway PM contract.
 Bot reads the channel market by default. A validated
 `bot.read_markets: [us, hk]` grant can add the other market for
 authenticated senders. The Host resolves each requested market to a fresh
@@ -125,14 +127,11 @@ Bot internals directly.
 
 ## Configuration
 
-```yaml
-bot:
-  enabled: true
-  active_model: deepseek-default
-```
+Use the complete top-level `bot` authoring example in the
+[capability map](OM_AGENT_CAPABILITY_MAP.md#configuration), including the model
+profile selected by `bot.active_model`.
 
-Bot loads tools by scene; there is no portfolio toolset switch. PM-backed reads
-use the canonical `portfolio_management.enabled` integration boundary.
+Bot loads the fixed Scene tool list; there is no portfolio toolset switch.
 `om bot configure` changes `bot.enabled`. The default is false. Disabling Bot
 stops inbound processing and real model execution; local configuration, status,
 and diagnostic commands remain available. Saving configuration does not start a service.
