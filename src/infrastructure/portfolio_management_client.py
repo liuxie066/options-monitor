@@ -282,11 +282,11 @@ class PortfolioManagementClient:
                 f"portfolio-management API version mismatch: {version or 'missing'}"
             )
         decoded = _decode_object(response_body)
+        if path.startswith("/api/v1/") and decoded.get("success") is not True:
+            raise PortfolioManagementProtocolError(
+                "portfolio-management success response did not confirm success=true"
+            )
         if decoded.get("success") is False:
-            if path.startswith("/api/v1/"):
-                raise PortfolioManagementProtocolError(
-                    "portfolio-management success response did not confirm success=true"
-                )
             raise PortfolioManagementHTTPError(
                 str(decoded.get("message") or decoded.get("error") or "portfolio-management request failed"),
                 status=503,
