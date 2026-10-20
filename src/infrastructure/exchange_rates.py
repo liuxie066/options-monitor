@@ -60,12 +60,13 @@ def exchange_rate_observation_status(
     payload: Mapping[str, Any] | None,
     *,
     max_age_hours: int = 24,
+    now: datetime | None = None,
 ) -> str:
     """Classify one provider observation without changing its timestamp."""
 
     if not isinstance(payload, Mapping):
         return "unavailable"
-    now = _utc_now()
+    now = now if now is not None else _utc_now()
     pairs = _verified_pairs(payload, now=now)
     if any(pair not in pairs for pair in _REQUIRED_RATES):
         return "unavailable"

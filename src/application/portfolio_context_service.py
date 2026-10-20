@@ -83,24 +83,35 @@ def _validate_portfolio_context_account(
     return False
 
 
-def cash_snapshot_is_usable(context: Mapping[str, Any]) -> bool:
-    """Consume a well-formed shared verdict; never reconstruct one from legacy flags."""
+def cash_snapshot_evidence_is_complete(context: Mapping[str, Any]) -> bool:
+    """Distinguish a sealed non-fresh verdict from missing qualification evidence."""
     snapshot = context.get("cash_snapshot")
     if not isinstance(snapshot, Mapping) or set(snapshot) != {
         "status", "reason_codes", "source_observed_at", "evaluated_at", "max_age_sec",
     }:
         return False
-    if (snapshot["status"] != "fresh" or snapshot["reason_codes"] != []
-            or type(snapshot["max_age_sec"]) is not int or snapshot["max_age_sec"] <= 0):
+    if (not isinstance(snapshot["status"], str) or snapshot["status"] not in {"fresh", "stale", "unknown"}
+            or not isinstance(snapshot["reason_codes"], list)
+            or any(not isinstance(reason, str) or not reason for reason in snapshot["reason_codes"])):
+        return False
+    if (snapshot["status"] == "fresh") != (not snapshot["reason_codes"]):
         return False
     for key in ("source_observed_at", "evaluated_at"):
+        value = snapshot[key]
+        if value is None and snapshot["status"] == "unknown":
+            continue
         try:
-            value = snapshot[key]
             if not isinstance(value, str) or datetime.fromisoformat(value.replace("Z", "+00:00")).utcoffset() is None:
                 return False
         except (ValueError, TypeError, OverflowError):
             return False
-    return True
+    age = snapshot["max_age_sec"]
+    return (age is None and snapshot["status"] == "unknown") or (type(age) is int and age > 0)
+
+
+def cash_snapshot_is_usable(context: Mapping[str, Any]) -> bool:
+    """Consume a well-formed shared verdict; never reconstruct one from legacy flags."""
+    return cash_snapshot_evidence_is_complete(context) and context["cash_snapshot"]["status"] == "fresh"
 
 
 def _expected_capacity_authority(config: Mapping[str, Any], *, account: str | None) -> dict[str, Any]:

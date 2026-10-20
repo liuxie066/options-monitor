@@ -210,3 +210,23 @@ def test_concurrent_pair_updates_do_not_erase_each_other(tmp_path: Path, monkeyp
 
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert set(saved["pairs"]) == {"USDCNY", "HKDCNY"}
+
+
+def test_observation_status_uses_explicit_projection_time_without_live_clock(monkeypatch):
+    quoted = _at(9, 30, 14)
+    snapshot = {"schema_version": 2, "pairs": {
+        "USDCNY": _row(7.2, quoted), "HKDCNY": _row(0.92, quoted),
+    }}
+
+    def forbidden():
+        raise AssertionError("explicit evaluation must not use the current clock")
+
+    monkeypatch.setattr(fx, "_utc_now", forbidden)
+    for evaluated, status, rates in (
+        (_at(10, 2, 9, 43), "ready", {"USDCNY": 7.2, "HKDCNY": 0.92}),
+        (_at(10, 8, 9, 43), "unavailable_stale", {}),
+    ):
+        projection = fx.project_exchange_rate_snapshot(snapshot, purpose="capacity", now=evaluated)
+        assert projection["evaluated_at_utc"] == evaluated.isoformat()
+        assert projection["rates"] == rates
+        assert fx.exchange_rate_observation_status(projection, now=evaluated) == status

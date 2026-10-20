@@ -17,13 +17,18 @@ from om_strategy_core import (
     CallCapacityInputs,
     CurrencyConverter,
     ExchangeRates,
-    PutCapacityInputs,
     calculate_capacity,
     calculate_metrics,
     evaluate_candidates,
     rank_candidates,
 )
 from src.application.candidate_evidence_history import load_candidate_snapshot_bundle_for_inspection
+from src.application.candidate_scanning import calculation_rejection
+from src.application.sell_put_cash import (
+    sell_put_opening_capacity, sell_put_cash_context_unavailable_reason, enrich_sell_put_candidates_with_cash,
+)
+from src.application.pipeline_context import apply_sell_put_fx_status
+from src.application.portfolio_context_service import cash_snapshot_evidence_is_complete
 from src.application.candidate_snapshot_manifest import CandidateSnapshotManifestError
 from src.application.opening_candidate_snapshot import candidate_universe_summary
 from src.application.prepared_option_positions_context import (
@@ -106,23 +111,47 @@ def _rates(snapshot, contexts):
     fx_hash = next(d["sha256"] for d in snapshot["dependencies"] if d["kind"] == "fx")
     if (ledger.get("prepared_authority") or {}).get("run_fx_snapshot_sha256") != fx_hash:
         raise ValueError("prepared FX facts are not bound to sample FX dependency")
-    usd, hkd = exchange_rate_scalars_from_option_context(ledger)
+    evidence = snapshot.get("capacity_fx_evidence")
+    if evidence is not None:
+        if evidence["run_fx_snapshot_sha256"] != fx_hash:
+            raise ValueError("capacity FX evidence is not bound to sample FX dependency")
+        actual = {"exchange_rates": evidence["observation"]}
+        usd, hkd = exchange_rate_scalars_from_option_context(actual)
+        if not _equal([usd, hkd], [evidence["usd_per_cny"], evidence["cny_per_hkd"]]):
+            raise ValueError("sealed capacity FX scalars disagree with actual observation")
+    else:
+        usd, hkd = exchange_rate_scalars_from_option_context(ledger)
     return ExchangeRates(usd_per_cny=usd, cny_per_hkd=hkd)
 
 
-def _quantity(row, mode, contexts, converter):
+def _quantity(row, mode, contexts, converter, *, snapshot=None, fx_error=None):
     if mode == "call":
         names = ("shares_total", "shares_can_sell", "shares_locked")
         if any(type(row.get(n)) is not int or row[n] < 0 for n in names):
             raise ValueError("require sealed integer shares_total/shares_can_sell/shares_locked")
         inputs = CallCapacityInputs(*(row[n] for n in names))
-        return calculate_capacity(row, mode=mode, capacity_inputs=inputs, exchange_rate_converter=converter)[
+        quantity = calculate_capacity(row, mode=mode, capacity_inputs=inputs, exchange_rate_converter=converter)[
             "covered_contracts_available"
         ]
-    portfolio, ledger = contexts.get("portfolio", {}), contexts.get("ledger", {})
-    names = ("cash_by_currency", "_sell_put_fx_status")
-    if any(n not in portfolio for n in names) or "cash_secured_total_by_ccy" not in ledger:
-        raise ValueError("require bound cash_by_currency/cash_secured_total_by_ccy/_sell_put_fx_status")
+        return quantity, None
+    if not all(isinstance(contexts.get(k), dict) for k in ("portfolio", "ledger")):
+        raise ValueError("bound prepared portfolio and ledger facts unavailable")
+    if not cash_snapshot_evidence_is_complete(contexts["portfolio"]):
+        raise ValueError("bound cash qualification verdict missing")
+    if not isinstance(contexts["ledger"].get("decision_snapshot_status"), str) or not contexts["ledger"]["decision_snapshot_status"]:
+        raise ValueError("bound collateral qualification verdict missing")
+    portfolio = {**contexts["portfolio"], "option_ctx": contexts["ledger"]}
+    evidence = (snapshot or {}).get("capacity_fx_evidence")
+    if evidence is not None:
+        portfolio = apply_sell_put_fx_status(portfolio, evidence["observation_status"])
+        present = "_sell_put_fx_status" in portfolio
+        if present != evidence["marker_present"] or (
+            present and not _equal(portfolio["_sell_put_fx_status"], evidence["marker_value"])
+        ):
+            raise ValueError("sealed capacity FX marker disagrees with prepared facts and scan projection")
+    ledger = contexts["ledger"]
+    if "cash_by_currency" not in portfolio or "cash_secured_total_by_ccy" not in ledger:
+        raise ValueError("require bound cash_by_currency/cash_secured_total_by_ccy")
     cash, secured = portfolio["cash_by_currency"], ledger["cash_secured_total_by_ccy"]
     if not isinstance(cash, dict) or not isinstance(secured, dict):
         raise ValueError("raw cash and secured amounts must be explicit currency maps")
@@ -132,10 +161,30 @@ def _quantity(row, mode, contexts, converter):
         for v in amounts.values()
     ):
         raise ValueError("raw cash and secured amounts must be finite numbers")
-    inputs = PutCapacityInputs(tuple(cash.items()), tuple(secured.items()), portfolio["_sell_put_fx_status"])
-    return calculate_capacity(row, mode=mode, capacity_inputs=inputs, exchange_rate_converter=converter)[
-        "max_new_contracts"
-    ]
+    independent_block = sell_put_cash_context_unavailable_reason(ledger, portfolio)
+    if not independent_block:
+        if fx_error:
+            raise ValueError(fx_error)
+        if snapshot and "dependencies" in snapshot:
+            fx_hash = next(d["sha256"] for d in snapshot["dependencies"] if d["kind"] == "fx")
+            if portfolio.get("fx_snapshot_sha256") != fx_hash:
+                raise ValueError("prepared portfolio FX facts are not bound to sample FX dependency")
+        if evidence is None and "_sell_put_fx_status" not in portfolio:
+            raise ValueError("require sealed capacity FX evidence or explicit legacy _sell_put_fx_status")
+    capacity = sell_put_opening_capacity(
+        symbol=row["symbol"], strike=row["strike"], multiplier=row["multiplier"], currency=row["currency"],
+        portfolio_ctx=portfolio, exchange_rate_converter=converter,
+    )
+    if capacity.get("put_cash_capacity_available") is not True:
+        # Reuse the actual scan label projection; unavailable zero is not numerical capacity certification.
+        import pandas as pd
+
+        projected = enrich_sell_put_candidates_with_cash(
+            df_labeled=pd.DataFrame([deepcopy(row)]), symbol=row["symbol"],
+            portfolio_ctx=portfolio, exchange_rate_converter=converter,
+        ).iloc[0]
+        return int(projected["max_new_contracts"]), capacity["put_cash_capacity_reason"]
+    return capacity["max_new_contracts"], None
 
 
 def _decision_checks(decision, snapshot, contexts, rates, fx_error, checks):
@@ -164,22 +213,12 @@ def _decision_checks(decision, snapshot, contexts, rates, fx_error, checks):
     try:
         metrics = calculate_metrics(raw, mode=mode, avg_cost=row.get("avg_cost"), exchange_rates=rates)
     except CandidateCalculationError as exc:
-        if calculation_reject and len(rejects) == 1:
-            detail = exc.to_payload()
-            actual = {"reason_code": detail["rule"], "metric_value": detail.get("metric_value")}
-            _check(checks, "filter", loc + "/calculation/metric_value", rejects[0]["metric_value"], actual)
-            _check(
-                checks, "filter", loc + "/calculation/threshold", rejects[0].get("threshold"), detail.get("threshold")
-            )
-            _check(checks, "filter", loc + "/accepted", opening["accepted"], False)
-            _check(
-                checks,
-                "filter",
-                loc + "/calculation/adapter",
-                reason="scan adapter rejection classification not reconstructed",
-            )
+        detail = exc.to_payload()
+        if "opening_contract_status" not in row:
+            _check(checks, "filter", loc + "/calculation", reason="sealed opening contract status missing")
         else:
-            _check(checks, "metrics", loc, reason=f"metrics cannot be reconstructed: {exc}")
+            _check(checks, "filter", loc + "/calculation/rejects", rejects, [calculation_rejection(row, detail)])
+            _check(checks, "filter", loc + "/accepted", opening["accepted"], False)
         return True
     except (ValueError, TypeError, KeyError) as exc:
         _check(checks, "metrics", loc, reason=str(exc))
@@ -216,10 +255,13 @@ def _decision_checks(decision, snapshot, contexts, rates, fx_error, checks):
     except (ValueError, TypeError, KeyError) as exc:
         _check(checks, "filter", loc, reason=str(exc))
     try:
-        if mode == "put" and fx_error:
-            raise ValueError(fx_error)
-        quantity = _quantity(row, mode, contexts, CurrencyConverter(rates))
-        _check(checks, "quantity", loc + "/max_new_contracts", row.get("max_new_contracts", _MISSING), quantity)
+        quantity, blocked_reason = _quantity(
+            row, mode, contexts, CurrencyConverter(rates), snapshot=snapshot, fx_error=fx_error,
+        )
+        category = "capacity_unavailable" if blocked_reason is not None else "quantity"
+        if blocked_reason is not None:
+            _check(checks, category, loc + "/cash_fx_status", row.get("cash_fx_status", _MISSING), blocked_reason)
+        _check(checks, category, loc + "/max_new_contracts", row.get("max_new_contracts", _MISSING), quantity)
     except (ValueError, TypeError, KeyError) as exc:
         _check(checks, "quantity", loc, reason=str(exc))
     return True
@@ -241,14 +283,19 @@ def _ranking_checks(snapshot, eligible, checks):
             _check(checks, "ranking", location, reason="no accepted candidates to exercise ranking")
             continue
         try:
-            rows = [d["normalized_input"] for d in accepted]
+            input_evidence = snapshot.get("ranking_inputs")
+            if input_evidence is not None:
+                ids = input_evidence[mode]["candidate_ids"]
+                rows = [by_id[cid] for cid in ids]
+            else:
+                rows = [d["normalized_input"] for d in accepted]
             recomputed = rank_candidates(deepcopy(rows), mode=mode)
             expected = [r["facts"]["contract_symbol"] for r in recorded]
             actual = [r["contract_symbol"] for r in recomputed]
             counts = Counter(r["symbol"] for r in rows)
             n = len(counts)
             _check(checks, "ranking", location + "/representatives", expected[:n], actual[:n])
-            if sum(v > 1 for v in counts.values()) > 1:
+            if input_evidence is None and sum(v > 1 for v in counts.values()) > 1:
                 _check(checks, "ranking", location + "/tail", reason="original symbol-group input order not archived")
             else:
                 _check(checks, "ranking", location + "/order", expected, actual)
