@@ -161,26 +161,12 @@ def _optional_float(value: Any) -> float | None:
     return parsed if parsed == parsed else None
 
 
-def _calculation_decision_record(
-    *,
-    contract: CandidateContractInput,
-    config: CandidateScanConfig,
-    reason: dict[str, Any] | None,
-) -> dict[str, Any]:
-    normalized_input = contract.to_gate_payload()
-    if config.decision_now_utc is not None:
-        normalized_input["decision_now_utc"] = config.decision_now_utc
-    if config.resolved_strategy is not None:
-        normalized_input = attach_strategy_identity(normalized_input, config.resolved_strategy)
-    return build_calculation_rejection_decision(normalized_input, mode=config.mode, reason=reason)
-
-
-def build_calculation_rejection_decision(
-    normalized_input: dict[str, Any], *, mode: str, reason: dict[str, Any] | None,
-) -> dict[str, Any]:
-    """Classify a calculation failure using the ordinary scan precedence."""
+def calculation_rejection(normalized_input: Mapping[str, Any], reason: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The scan adapter owns calculation-failure precedence and projection."""
     detail = dict(reason or {})
-    specific_reason = str(detail.get("rule") or "candidate_metrics_unavailable")
+    specific_reason = str(
+        detail.get("rule") or "candidate_metrics_unavailable"
+    )
     opening_status = str(
         normalized_input.get("opening_contract_status") or ""
     ).strip().lower()
@@ -199,25 +185,37 @@ def build_calculation_rejection_decision(
         if matched:
             reject_reason = candidate_reason
             break
+    return {
+        "stage": STAGE_INPUT_NORMALIZATION,
+        "reason": reject_reason,
+        "message": str(
+            detail.get("message") or "candidate metrics unavailable"
+        ),
+        "metric_value": {
+            "reason_code": specific_reason,
+            "metric_value": detail.get("metric_value"),
+        },
+        "threshold": detail.get("threshold"),
+    }
+
+
+def _calculation_decision_record(
+    *,
+    contract: CandidateContractInput,
+    config: CandidateScanConfig,
+    reason: dict[str, Any] | None,
+) -> dict[str, Any]:
+    normalized_input = contract.to_gate_payload()
+    if config.decision_now_utc is not None:
+        normalized_input["decision_now_utc"] = config.decision_now_utc
+    if config.resolved_strategy is not None:
+        normalized_input = attach_strategy_identity(normalized_input, config.resolved_strategy)
     opening_decision = build_candidate_decision(
-        mode=mode,
-        symbol=normalized_input.get("symbol"),
-        contract_symbol=normalized_input.get("contract_symbol"),
+        mode=config.mode,
+        symbol=contract.symbol,
+        contract_symbol=contract.contract_symbol,
         accepted=False,
-        rejects=[
-            {
-                "stage": STAGE_INPUT_NORMALIZATION,
-                "reason": reject_reason,
-                "message": str(
-                    detail.get("message") or "candidate metrics unavailable"
-                ),
-                "metric_value": {
-                    "reason_code": specific_reason,
-                    "metric_value": detail.get("metric_value"),
-                },
-                "threshold": detail.get("threshold"),
-            }
-        ],
+        rejects=[calculation_rejection(normalized_input, reason)],
         normalized_input=normalized_input,
     )
     return {

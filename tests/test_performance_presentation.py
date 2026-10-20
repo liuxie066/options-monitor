@@ -20,7 +20,7 @@ from src.application.performance.query_contracts import PerformanceQueryError
 from src.application.ledger.api import encode_evidence_cursor
 from test_option_performance_agent_tool import _patch_dependencies, _report
 from test_performance_query_service import QUERY, TOKEN, _remote, service as service
-from test_performance_service_v2 import _event
+from test_performance_service_v2 import _event, _ms
 
 
 @pytest.fixture(autouse=True)
@@ -240,6 +240,53 @@ def test_capture_invalid_scope_is_translated_before_dependencies(monkeypatch):
                 "open_performance_evidence_repository", "repo_base", "mask_path", "evidence_collector")},
         )
     assert exc.value.code == "INPUT_ERROR"
+
+
+@pytest.mark.parametrize("view", ["rows", "breakdowns"])
+def test_scoped_pages_preserve_cohort_semantics_without_account_period_totals(monkeypatch, view):
+    report = _large_report()
+    _patch_dependencies(monkeypatch, report=report)
+    symbol = "TEST" if view == "rows" else "GROUP-0"
+    payload = {**QUERY, "view": view, "symbol": symbol, "limit": 2}
+    data = positions.OPTION_PERFORMANCE_REPORT_TOOL.call(payload)[0]
+    assert data["schema_version"] == report["schema_version"]
+    assert data["metric_semantics"] == report["metric_semantics"]
+    assert data["metric_semantics"][view] == "opening_cohort"
+    assert "period_option_net_cashflow" not in data
+    assert "option_net_cashflow" not in data
+    assert data["scope"]["symbol"] == symbol
+
+
+@pytest.mark.parametrize("field", ["schema_version", "metric_semantics"])
+def test_page_cursor_binds_schema_and_metric_semantics(monkeypatch, field):
+    report = _large_report()
+    _patch_dependencies(monkeypatch, report=report)
+    payload = {**QUERY, "view": "rows", "limit": 2}
+    cursor = positions.OPTION_PERFORMANCE_REPORT_TOOL.call(payload)[0]["next_cursor"]
+    if field == "schema_version":
+        report[field] = "changed-contract"
+    else:
+        report[field]["rows"] = "changed-selection"
+    with pytest.raises(AgentToolError, match="source_changed"):
+        positions.OPTION_PERFORMANCE_REPORT_TOOL.call({**payload, "cursor": cursor})
+
+
+def test_model_summary_preserves_period_missing_reasons_and_semantics(monkeypatch):
+    report = _report()
+    report["period_option_net_cashflow"].update(status="partial", missing=["fee_missing"])
+    report["period_option_net_cashflow"]["by_currency"] = {
+        "USD": {name: {"amount": None, "status": "partial", "missing": ["fee_missing"]}
+                for name in ("total", "gross", "fees")},
+    }
+    _patch_dependencies(monkeypatch, report=report)
+    response = bot_tools.call_read_tool(
+        "option_performance_report", {**QUERY, "view": "summary"},
+        allowed_tools=("option_performance_report",), now_ms=_ms("2026-10-01T12:00:00"),
+    )
+    observation = bot_tools.model_observation("option_performance_report", response)
+    assert observation["ok"], observation
+    for key in ("schema_version", "metric_semantics", "period_option_net_cashflow"):
+        assert observation["data"][key] == report[key]
 
 
 def test_canonical_query_and_transport_do_not_import_tool_contracts():

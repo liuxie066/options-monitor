@@ -35,7 +35,7 @@ def _option_multiplier(value: Any) -> int | None:
         return None
 
 
-def _cash_secured_context_unavailable_reason(
+def sell_put_cash_context_unavailable_reason(
     option_ctx: dict[str, Any] | None,
     portfolio_ctx: dict[str, Any] | None,
 ) -> str:
@@ -67,14 +67,14 @@ def sell_put_opening_capacity_inputs(
     portfolio_ctx: dict[str, Any] | None, exchange_rate_converter: CurrencyConverter,
 ) -> dict[str, Any]:
     """Compatibility projection of the core capacity result."""
-    capacity = calculate_sell_put_opening_capacity(
+    capacity = sell_put_opening_capacity(
         symbol=symbol, strike=strike, multiplier=multiplier, currency=currency,
         portfolio_ctx=portfolio_ctx, exchange_rate_converter=exchange_rate_converter,
     )
     return {key: value for key, value in capacity.items() if key.startswith("put_cash_")}
 
 
-def calculate_sell_put_opening_capacity(
+def sell_put_opening_capacity(
     *,
     symbol: str,
     strike: Any,
@@ -100,7 +100,7 @@ def calculate_sell_put_opening_capacity(
         }
 
     option_ctx = portfolio_ctx.get("option_ctx")
-    cash_secured_unavailable_reason = _cash_secured_context_unavailable_reason(
+    cash_secured_unavailable_reason = sell_put_cash_context_unavailable_reason(
         option_ctx if isinstance(option_ctx, dict) else None, portfolio_ctx
     )
     if cash_secured_unavailable_reason:
@@ -209,7 +209,7 @@ def enrich_sell_put_candidates_with_cash(
     used_total_usd = 0.0
     used_total_cny = None
     used_symbol_cny = None
-    cash_secured_unavailable_reason = _cash_secured_context_unavailable_reason(
+    cash_secured_unavailable_reason = sell_put_cash_context_unavailable_reason(
         option_ctx, portfolio_ctx
     )
     total_by_ccy_norm: dict[str, float] = {}
@@ -427,7 +427,7 @@ def enrich_sell_put_candidates_with_cash(
             mode="put", exchange_rate_converter=exchange_rate_converter,
             capacity_inputs=strategy_core.PutCapacityInputs(tuple((cash_by_ccy or {}).items()), fx_status=fx_status),
         )
-        capacity = calculate_sell_put_opening_capacity(
+        capacity = sell_put_opening_capacity(
             symbol=symbol,
             strike=row.get('strike'),
             multiplier=row.get('multiplier'),

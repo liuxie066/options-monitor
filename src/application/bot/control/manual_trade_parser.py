@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from typing import Any
 
+from domain.domain.money import to_decimal
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.account_config import DEFAULT_ACCOUNTS, normalize_accounts
+from src.application.agent_tool_contracts import AgentToolError
 from src.application.multiplier_cache import resolve_multiplier_with_source_and_diagnostics
 from src.application.parse_option_message import parse_option_message_text
 from src.application.symbol_aliases import symbol_aliases_from_config
@@ -733,7 +736,19 @@ def _parse_int_value(values: dict[str, str], keys: tuple[str, ...]) -> int | Non
     for key in keys:
         raw = values.get(key)
         if raw not in (None, ""):
-            return int(float(str(raw)))
+            try:
+                # Preserve the old finite numeric range without rounding the value.
+                if not math.isfinite(float(str(raw))):
+                    raise ValueError("nonfinite integer input")
+                number = to_decimal(raw, field_name=key)
+                if number != number.to_integral_value():
+                    raise ValueError("nonintegral input")
+                return int(number)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise AgentToolError(
+                    code="INPUT_ERROR",
+                    message=f"{key} must be an integer within the supported numeric range",
+                ) from exc
     return None
 
 

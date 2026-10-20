@@ -1,8 +1,8 @@
 """Offline parity: real sealed bundles, deliberate drift, missing evidence and CLI."""
 
 from copy import deepcopy
+from cash_evidence_helpers import cash_portfolio
 import json
-import hashlib
 from pathlib import Path
 import socket
 import subprocess
@@ -32,8 +32,10 @@ from test_scan_decision_clock import NOW, quote
 
 RATES = ExchangeRates(0.14, 0.92)
 CTX = {
-    "portfolio": {"cash_by_currency": {"USD": 100000}, "_sell_put_fx_status": "fresh"},
+    "portfolio": cash_portfolio({"cash_by_currency": {"USD": 100000}, "_sell_put_fx_status": "fresh", "cash_source_observed_at": NOW.isoformat(), "fx_snapshot_sha256": "d" * 64}, evaluated_at=NOW),
     "ledger": {
+        "decision_snapshot_status": "trusted",
+        "cash_secured_by_symbol_by_ccy": {},
         "cash_secured_total_by_ccy": {},
         "prepared_authority": {"run_fx_snapshot_sha256": "d" * 64},
         "exchange_rates": {"rates": {"USDCNY": 1 / 0.14, "HKDCNY": 0.92}},
@@ -116,13 +118,12 @@ def verify(base):
 
 
 @pytest.mark.parametrize("mode", ["put", "call"])
-def test_legacy_bundle_keeps_partial_comparisons(tmp_path, monkeypatch, contexts, mode):
+def test_stage_parity_on_real_sealed_bundle(tmp_path, monkeypatch, contexts, mode):
     seal(tmp_path, [candidate(mode)], mode)
     before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
     monkeypatch.setattr(socket, "socket", lambda *a, **k: pytest.fail("offline must not access network"))
     first = verify(tmp_path)
-    assert first["status"] == "insufficient_evidence", first
-    assert any(c["category"] == "capacity_fx" and c["status"] == "insufficient_evidence" for c in first["checks"])
+    assert first["status"] == "matched", first
     assert {c["category"] for c in first["checks"]} >= {"metrics", "filter", "quantity", "ranking"}
     assert first == verify(tmp_path)
     assert before == {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
@@ -132,10 +133,10 @@ def test_legacy_bundle_keeps_partial_comparisons(tmp_path, monkeypatch, contexts
     "field,value,category", [("net_income", 999, "metrics"), ("max_new_contracts", 999, "quantity")]
 )
 def test_wrong_sealed_results_are_mismatches(tmp_path, contexts, field, value, category):
-    row, decision = candidate("call")
+    row, decision = candidate()
     row[field] = value
     decision["normalized_input"] = row
-    seal(tmp_path, [(row, decision)], "call")
+    seal(tmp_path, [(row, decision)])
     result = verify(tmp_path)
     assert result["status"] == "mismatched"
     assert any(c["category"] == category and c["status"] == "mismatched" for c in result["checks"])
@@ -215,10 +216,12 @@ def test_explicit_scope_and_path_rejection(tmp_path, account, run):
     assert result["status"] == "insufficient_evidence"
 
 
-def test_ranking_mismatch_and_complete_tail(tmp_path, contexts):
+def test_ranking_mismatch_and_ambiguous_tail(tmp_path, contexts):
     payload = seal(tmp_path, [candidate(symbol=s, strike=k) for s in ("NVDA", "AMD") for k in (90, 91)])
+    payload.pop("ranking_inputs", None)
+    write_changed(tmp_path, payload)
     result = verify(tmp_path)
-    assert any(c["location"].endswith("/order") and c["status"] == "matched" for c in result["checks"])
+    assert any(c.get("reason") == "original symbol-group input order not archived" for c in result["checks"])
     payload["ranked_candidates"][0], payload["ranked_candidates"][1] = (
         payload["ranked_candidates"][1],
         payload["ranked_candidates"][0],
@@ -395,26 +398,55 @@ def test_cli_mismatch_precedes_partial_evidence(tmp_path):
     assert json.loads(result.stdout)["counts"]["insufficient_evidence"] > 0
 
 
+def test_calculation_rejection_preserves_partial_boundary():
+    from domain.domain.engine import CandidateCalculationError
+
+    row, decision = candidate()
+    row["bid"] = -1
+    with pytest.raises(CandidateCalculationError) as caught:
+        calculate_metrics(row, mode="put", exchange_rates=RATES)
+    detail = caught.value.to_payload()
+    decision["accepted"] = False
+    decision["rejects"] = [audit.calculation_rejection(row, detail)]
+    checks = []
+    audit._decision_checks(
+        {"candidate_id": "bad-quote", "strategy_mode": "put", "normalized_input": row, "opening_decision": decision},
+        {"account": "lx", "market": "us"},
+        CTX,
+        RATES,
+        None,
+        checks,
+    )
+    assert any(c["location"].endswith("/calculation/rejects") and c["status"] == "matched" for c in checks)
+    assert not any(c["status"] != "matched" for c in checks)
+
+
 @pytest.mark.parametrize("changes, expected", [
     ({"bid": -1}, "input_invalid"),
     ({"opening_contract_status": "ineligible"}, "contract_ineligible"),
     ({"opening_contract_status": "market_closed"}, "evidence_unavailable"),
     ({"bid": 0.01, "ask": 0.02, "mid": 0.015}, "policy_rejected"),
 ])
-def test_real_calculation_rejection_replay(tmp_path, changes, expected):
+def test_real_calculation_rejection_replay(tmp_path, monkeypatch, changes, expected):
     import pandas as pd
+    from src.application import candidate_scanning
     from test_scan_decision_clock import scan
+
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: pytest.fail("synthetic rejection must not access network"))
+    monkeypatch.setattr(candidate_scanning, "annotate_candidates_with_earnings_evidence",
+                        lambda *a, **k: pytest.fail("calculation rejection must not request earnings evidence"))
     strategy = resolve_strategy(mode="put", account="lx", market="us", config=InsuranceUnderwritingConfig())
     decisions = []
-    scan("put", tmp_path, pd.DataFrame([quote(**changes)]), decisions,
-         quote_freshness_now_utc=NOW, resolved_strategy=strategy)
+    candidates = scan("put", tmp_path, pd.DataFrame([quote(**changes)]), decisions,
+                      quote_freshness_now_utc=NOW, resolved_strategy=strategy)
+    assert candidates.empty
     assert len(decisions) == 1
     decision = decisions[0]
     assert decision["opening_decision"]["rejects"][0]["reason"] == expected
     checks = []
     audit._decision_checks({**decision, "candidate_id": "reject", "strategy_mode": "put"},
                           {"account": "lx", "market": "us"}, CTX, RATES, None, checks)
-    assert all(c["status"] == "matched" for c in checks), checks
+    assert checks and all(c["status"] == "matched" for c in checks), checks
     decision["opening_decision"]["rejects"][0]["reason"] = "wrong"
     checks = []
     audit._decision_checks({**decision, "candidate_id": "reject", "strategy_mode": "put"},
@@ -423,14 +455,11 @@ def test_real_calculation_rejection_replay(tmp_path, changes, expected):
 
 
 def test_capacity_uses_original_floor_division():
-    from tests.cash_evidence_helpers import cash_portfolio
     row = {"symbol": "NVDA", "currency": "USD", "strike": 0.1, "multiplier": 1}
-    contexts = {
-        "portfolio": cash_portfolio({"cash_by_currency": {"USD": 1.0}}),
-        "ledger": {"cash_secured_total_by_ccy": {}, "cash_secured_by_symbol_by_ccy": {},
-                   "cash_secured_unavailable_by_symbol": {}, "decision_snapshot_status": "trusted"},
-    }
-    assert audit._quantity(row, "put", contexts, CurrencyConverter(RATES)) == 9
+    contexts = deepcopy(CTX)
+    contexts["portfolio"]["cash_by_currency"] = {"USD": 1.0}
+    contexts["portfolio"]["_sell_put_fx_status"] = None
+    assert audit._quantity(row, "put", contexts, CurrencyConverter(RATES)) == (9, None)
 
 
 def test_real_prepared_ledger_loader(tmp_path, monkeypatch):
@@ -463,273 +492,236 @@ def test_real_prepared_ledger_loader(tmp_path, monkeypatch):
     assert "ledger" not in contexts
     assert "ledger" in errors
 
-
-def _produce_pipeline_sample(tmp_path, monkeypatch, *, stale=False):
-    """Actual prepared workers/loaders and default pipeline; only source facts are synthetic."""
-    from datetime import datetime, timedelta, timezone
-    from types import SimpleNamespace
-    import pandas as pd
-    from src.application import (
-        candidate_scanning, current_fx_run, futu_portfolio_context, pipeline_context, pipeline_watchlist,
-        portfolio_context_service, prepared_option_positions_context, prepared_portfolio_context,
-        scan_sell_call, scan_sell_put,
+@pytest.mark.parametrize("status,rule,expected", [
+    ("ineligible", "evidence_unavailable", "contract_ineligible"),
+    ("market_closed", "option_multiplier_conflict", "evidence_unavailable"),
+    ("data_unavailable", "net_premium_non_positive", "evidence_unavailable"),
+    ("ready", "evidence_unavailable", "evidence_unavailable"),
+    ("ready", "contract_ineligible", "contract_ineligible"),
+    ("ready", "option_multiplier_conflict", "contract_ineligible"),
+    (None, "net_premium_non_positive", "input_invalid"),
+    ("ready", "net_premium_non_positive", "policy_rejected"),
+    ("ready", "unknown", "input_invalid"),
+])
+def test_shared_calculation_rejection_precedence(status, rule, expected):
+    reject = audit.calculation_rejection(
+        {"opening_contract_status": status},
+        {"rule": rule, "message": "detail", "metric_value": -1, "threshold": 0},
     )
-    from src.application.futu_portfolio_context import build_futu_portfolio_context, build_futu_position_snapshot
-    from src.application.tick_run_workspace import publish_account_run_config
-    from src.infrastructure import exchange_rates
-    from tests.cash_evidence_helpers import cash_config
-    from test_pipeline_capture_status_routing import _symbol_config
-
-    clock = SimpleNamespace(now=NOW)
-
-    class Clock(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return clock.now.astimezone(tz or timezone.utc)
-
-    for module in (futu_portfolio_context, pipeline_context, portfolio_context_service, prepared_portfolio_context,
-                   prepared_option_positions_context, scan_sell_call, scan_sell_put):
-        monkeypatch.setattr(module, "datetime", Clock)
-    monkeypatch.setattr(exchange_rates, "_utc_now", lambda: clock.now)
-    monkeypatch.setattr(socket, "socket", lambda *a, **k: pytest.fail("synthetic pipeline must not access network"))
-    def frozen_earnings(rows, **kwargs):
-        from test_opening_candidate_snapshot import _candidate
-        facts = {k: v for k, v in _candidate(contract_symbol="synthetic", period_return=.03).items() if k.startswith("earnings_")}
-        result = rows.copy()
-        for key, value in facts.items():
-            result[key] = pd.Series([deepcopy(value) for _ in range(len(rows))], index=rows.index, dtype=object)
-        return result
-    monkeypatch.setattr(candidate_scanning, "annotate_candidates_with_earnings_evidence", frozen_earnings)
-    env_file = tmp_path / "isolated.env"
-    env_file.write_text("")
-    monkeypatch.setenv("OM_ENV_FILE", str(env_file))
-    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
-    monkeypatch.setenv("OM_DATA_CONFIG", "")
-    data = tmp_path / "portfolio.runtime.json"
-    data.write_text("{}\n")
-    config_path = tmp_path / "config.us.json"
-    config_path.write_text("{}\n")
-    cfg = cash_config()
-    cfg["portfolio"].update(account="lx", broker="富途", data_config=str(data))
-    cfg["runtime"] = {"symbol_workers": 1}
-    cfg["symbols"] = [_symbol_config(s, market="US", sell_call_enabled=True, combo_enabled=False)
-                      for s in ("NVDA", "AMD")]
-    for item in cfg["symbols"]:
-        for mode in ("sell_put", "sell_call"):
-            item[mode]["strategy"] = "insurance_underwriting"
-    authority = publish_account_run_config(base=tmp_path, run_id="parity", account="lx", config=cfg)
-    cfg = json.loads(authority.canonical_bytes)
-    account_state = authority.state_path.parent
-    run_state = tmp_path / "output_runs/parity/state"
-    fx_snapshot = {"schema_version": 2, "pairs": {
-        pair: {"rate": rate, "source": "tencent_quote", "quote_at_utc": NOW.isoformat(),
-               "observed_at_utc": NOW.isoformat()}
-        for pair, rate in (("USDCNY", 1 / RATES.usd_per_cny), ("HKDCNY", RATES.cny_per_hkd))}}
-    monkeypatch.setattr(current_fx_run, "current_exchange_rate_snapshot", lambda **kw: deepcopy(fx_snapshot))
-    _, fx_hash = current_fx_run.seal_run_fx_snapshot(base=tmp_path, run_id="parity")
-
-    def broker_facts(**kwargs):
-        rows = [{"code": "US." + s, "qty": 300, "can_sell_qty": 300,
-                 "average_cost": 80, "currency": "USD", "position_side": "LONG"} for s in ("NVDA", "AMD")]
-        positions = build_futu_position_snapshot(
-            rows=rows, broker_account_ref={"broker_id": "futu", "external_account_id": "123",
-                "environment": "REAL", "account_label": "lx", "broker_account_id": "futu:REAL:123"},
-            markets=["US"], asset_types=["stock", "option"], observed_at_utc=NOW.isoformat(), completeness="complete")
-        return build_futu_portfolio_context(
-            balance_rows=[{"us_cash": 100000}], position_rows=rows, account="lx",
-            source_observed_at=NOW.isoformat(), cash_source_observed_at=NOW.isoformat(),
-            broker_account_identifiers={"123"}, futu_account_id="123", trd_env="REAL", capacity_market="us",
-            exchange_rate_observation=kwargs.get("exchange_rate_observation"), position_snapshot_input=positions)
-
-    monkeypatch.setattr(prepared_portfolio_context, "fetch_futu_portfolio_context", broker_facts)
-
-    class RealWorker:
-        returncode = 0
-
-        def __init__(self, command, **kwargs):
-            request = Path(command[-1])
-            assert prepared_portfolio_context.run_worker(request) == 0
-
-        def poll(self):
-            return 0
-
-    portfolio = prepared_portfolio_context.prepare_portfolio_contexts(
-        base=tmp_path, repo_root=tmp_path, run_id="parity", account_config_authorities={"lx": authority},
-        account_state_dirs={"lx": account_state}, shared_state_dir=run_state, timeout_sec=30,
-        popen_factory=RealWorker, fx_snapshot_sha256=fx_hash)["lx"]
-    assert portfolio["status"] == "ready", portfolio
-    ledger = prepared_option_positions_context.prepare_option_positions_contexts(
-        base=tmp_path, run_id="parity", config_path=config_path, account_configs={"lx": cfg},
-        account_config_authorities={"lx": authority}, run_state_dir=run_state,
-        fx_snapshot_sha256=fx_hash).manifests["lx"]
-    assert ledger["status"] == "ready", ledger
-    if stale:
-        clock.now += timedelta(days=5)
-    rows_by_symbol = {}
-    for symbol in ("NVDA", "AMD"):
-        rows = []
-        for mode in ("put", "call"):
-            for strike in (91, 90):
-                rows.append(quote(mode, symbol=symbol, stock_owner="US." + symbol, strike=strike,
-                    contract_symbol=f"US.{symbol}260918{mode[0].upper()}{strike}000", spot=85 if mode == "call" else 100,
-                    snapshot_received_at_utc=clock.now.isoformat(), spot_observed_at_utc=clock.now.isoformat()))
-        rows_by_symbol[symbol] = pd.DataFrame(rows).to_csv(index=False).encode()
-    # Frozen source boundary only. Actual scanner, converter, all internal sinks and seal stay real.
-    required_dir = tmp_path / "output_runs/parity/required_data"
-    required_dir.mkdir(parents=True)
-    required_manifest = run_state / "required_data_snapshot_manifest.json"
-    required_manifest.write_text(json.dumps({"synthetic_csv_sha256": {
-        symbol: hashlib.sha256(raw).hexdigest() for symbol, raw in rows_by_symbol.items()}}))
-
-    class FrozenBatch:
-        def resolve(self, symbol):
-            return {"snapshot_id": "quote-" + symbol, "receipt_relpath": f"quotes/{symbol}/receipt.json",
-                    "source_outcome": "success_rows", "reason_code": None}, rows_by_symbol[symbol]
-
-    monkeypatch.setattr(pipeline_watchlist, "resolve_frozen_required_data_csv_bytes_batch", lambda **kw: FrozenBatch())
-    logs = []
-    pipeline_watchlist.run_watchlist_pipeline_default(
-        py=sys.executable, base=tmp_path, cfg=cfg, report_dir=account_state.parent, state_dir=account_state,
-        shared_state_dir=run_state, required_data_dir=required_dir, is_scheduled=True, top_n=5,
-        symbol_timeout_sec=30, portfolio_timeout_sec=30, want_scan=True, no_context=False, symbols_arg=None,
-        log=logs.append, want_fn=lambda name: name == "scan", source_account_run_id="parity",
-        required_data_snapshot_manifest=required_manifest,
-        prepared_portfolio_context_manifest=Path(portfolio["manifest_path"]),
-        prepared_portfolio_context_manifest_sha256=portfolio["manifest_sha256"],
-        prepared_option_positions_context_manifest=Path(ledger["manifest_path"]),
-        prepared_option_positions_context_manifest_sha256=ledger["manifest_sha256"],
-        account_config_sha256=authority.account_config_sha256)
-    payload = json.loads(_snapshot_path(tmp_path, "parity", "lx").read_text())
-    assert payload["replay_evidence"]["capacity_fx"]["source_sha256"] == fx_hash, logs
-    assert payload["replay_evidence"]["capacity_fx"]["evaluated_at_utc"] == clock.now.isoformat()
-    return payload, clock, logs
+    assert reject == {"stage": "stage0_input_normalization", "reason": expected, "message": "detail",
+                      "metric_value": {"reason_code": rule, "metric_value": -1}, "threshold": 0}
 
 
-def test_full_prepared_pipeline_to_offline_replay(tmp_path, monkeypatch, capsys, record_property):
-    payload, clock, logs = _produce_pipeline_sample(tmp_path, monkeypatch)
-    assert payload["replay_evidence"]["capacity_fx"]["put_fx_status"] is None
-    assert len(payload["ranked_candidates"]) == 8, logs
-    report = verify(tmp_path)
-    assert report["status"] == "matched", report
-    for mode, ids in payload["replay_evidence"]["ranking_input_ids"].items():
-        by_id = {d["candidate_id"]: d for d in payload["candidate_decisions"]}
-        assert [by_id[cid]["normalized_input"]["symbol"] for cid in ids] == ["NVDA", "NVDA", "AMD", "AMD"]
-        assert any(c["location"] == f"ranked_candidates/{mode}/order" and c["status"] == "matched" for c in report["checks"])
-    before = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in tmp_path.rglob("*") if p.is_file()}
-    from datetime import timedelta
-    clock.now += timedelta(days=500)
-    assert verify(tmp_path) == report
-    args = ["--runtime-root", str(tmp_path), "--run-id", "parity", "--account", "lx"]
-    assert audit.main(args) == audit.main(args) == 0
-    capsys.readouterr()
-    cli = subprocess.run([sys.executable, "-B", "-m", "src.application.strategy_sample_verify", *args],
-                         capture_output=True, text=True, check=False)
-    assert cli.returncode == 0, cli.stderr
-    assert json.loads(cli.stdout) == report
-    record_property("offline_cli_exit_code", cli.returncode)
-    record_property("snapshot_sha256", report["snapshot_sha256"])
-    record_property("manifest_sha256", report["manifest_sha256"])
-    record_property("unchanged_input_inventory_sha256", canonical_sha256({str(p.relative_to(tmp_path)): h for p, h in before.items()}))
-    assert before == {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in tmp_path.rglob("*") if p.is_file()}
+@pytest.mark.parametrize("field,value", [
+    ("stage", "other"), ("reason", "policy_rejected"), ("message", "wrong"),
+    ("metric_value", {"reason_code": "wrong", "metric_value": 9}), ("threshold", 999),
+])
+def test_complete_calculation_reject_drift_detected(field, value):
+    from domain.domain.engine import CandidateCalculationError
+
+    row, decision = candidate()
+    row["bid"] = -1
+    with pytest.raises(CandidateCalculationError) as caught:
+        calculate_metrics(row, mode="put", exchange_rates=RATES)
+    reject = audit.calculation_rejection(row, caught.value.to_payload())
+    reject[field] = value
+    decision.update(accepted=False, rejects=[reject])
+    checks = []
+    audit._decision_checks(
+        {"candidate_id": "drift", "strategy_mode": "put", "normalized_input": row, "opening_decision": decision},
+        {"account": "lx", "market": "us"}, CTX, RATES, None, checks,
+    )
+    assert any(c["status"] == "mismatched" for c in checks), checks
 
 
-@pytest.mark.parametrize("stale", [False, True])
-def test_final_fx_override_is_derived_not_trusted(tmp_path, monkeypatch, stale):
-    payload, _, _ = _produce_pipeline_sample(tmp_path, monkeypatch, stale=stale)
-    fx = payload["replay_evidence"]["capacity_fx"]
-    assert fx["status"] == ("unavailable_stale" if stale else "ready")
-    assert fx["put_fx_status"] == ("unavailable_stale" if stale else None)
-    baseline = verify(tmp_path)
-    fx_checks = [c for c in baseline["checks"] if c["category"] == "capacity_fx"]
-    assert fx_checks and all(c["status"] == "matched" for c in fx_checks), baseline
-    if stale:
-        assert fx["usd_per_cny"] is None and fx["cny_per_hkd"] is None
-        assert baseline["status"] == "insufficient_evidence"  # native checks remain; no invented CNY metrics
-    fx["put_fx_status"] = None if stale else "unavailable_stale"
-    write_changed(tmp_path, payload)
-    report = verify(tmp_path)
-    assert report["status"] == "mismatched", report
-    assert any(c["location"].endswith("/put_fx_status") and c["status"] == "mismatched" for c in report["checks"])
+def test_calculation_missing_status_remains_insufficient():
+    from domain.domain.engine import CandidateCalculationError
+
+    row, decision = candidate()
+    row["bid"] = -1
+    row.pop("opening_contract_status")
+    with pytest.raises(CandidateCalculationError) as caught:
+        calculate_metrics(row, mode="put", exchange_rates=RATES)
+    decision.update(accepted=False, rejects=[audit.calculation_rejection(row, caught.value.to_payload())])
+    checks = []
+    audit._decision_checks(
+        {"candidate_id": "gap", "strategy_mode": "put", "normalized_input": row, "opening_decision": decision},
+        {"account": "lx", "market": "us"}, CTX, RATES, None, checks,
+    )
+    assert any(c.get("reason") == "sealed opening contract status missing" for c in checks)
 
 
-@pytest.mark.parametrize("defect", ["source_hash", "missing_override", "bad_time", "duplicate_id", "missing_id", "cross_mode", "bool_version"])
-def test_new_evidence_invalid_before_recompute(tmp_path, monkeypatch, defect):
-    from src.application.opening_candidate_snapshot import OpeningCandidateSnapshotError, validate_opening_candidate_snapshot
-    payload, _, _ = _produce_pipeline_sample(tmp_path, monkeypatch)
-    evidence = payload["replay_evidence"]
-    if defect == "source_hash":
-        evidence["capacity_fx"]["source_snapshot"]["pairs"]["USDCNY"]["rate"] = 99
-    elif defect == "missing_override":
-        evidence["capacity_fx"].pop("put_fx_status")
-    elif defect == "bad_time":
-        evidence["capacity_fx"]["evaluated_at_utc"] = "2026-08-06T09:30:00"
-    elif defect == "duplicate_id":
-        evidence["ranking_input_ids"]["put"].append(evidence["ranking_input_ids"]["put"][0])
-    elif defect == "missing_id":
-        evidence["ranking_input_ids"]["put"].pop()
-    elif defect == "cross_mode":
-        evidence["ranking_input_ids"]["put"][0] = evidence["ranking_input_ids"]["call"][0]
+def test_blocked_capacity_owner_before_missing_fx_and_quantity_label():
+    row, decision = candidate()
+    ctx = deepcopy(CTX)
+    ctx["portfolio"].pop("_sell_put_fx_status")
+    ctx["ledger"]["cash_secured_unavailable_by_symbol"] = {"NVDA": "option_close_settlement_pending"}
+    reason = "NVDA:option_close_settlement_pending"
+    assert audit._quantity(row, "put", ctx, CurrencyConverter(RATES), fx_error="missing FX") == (0, reason)
+    row.update(max_new_contracts=0, cash_fx_status=reason)
+    checks = []
+    audit._decision_checks(
+        {"candidate_id": "blocked", "strategy_mode": "put", "normalized_input": row, "opening_decision": decision},
+        {"account": "lx", "market": "us"}, ctx, RATES, "missing FX", checks,
+    )
+    blocked = [c for c in checks if c["category"] == "capacity_unavailable"]
+    assert len(blocked) == 2 and all(c["status"] == "matched" for c in blocked)
+    assert not any(c["category"] == "quantity" and c["status"] == "matched" for c in checks)
+
+
+@pytest.mark.parametrize("missing", ["portfolio", "ledger", "cash_snapshot", "decision_snapshot_status"])
+def test_missing_prepared_qualification_is_not_matched_business_reject(missing):
+    row, _ = candidate()
+    ctx = deepcopy(CTX)
+    if missing in ("portfolio", "ledger"):
+        ctx.pop(missing)
     else:
-        evidence["schema_version"] = True
-    payload["content_sha256"] = canonical_sha256({k: v for k, v in payload.items() if k != "content_sha256"})
-    with pytest.raises(OpeningCandidateSnapshotError):
-        validate_opening_candidate_snapshot(payload, expected_run_id="parity", expected_account="lx")
-
-
-def test_legacy_evidence_absence_remains_insufficient(tmp_path, monkeypatch):
-    payload, _, _ = _produce_pipeline_sample(tmp_path, monkeypatch)
-    payload.pop("replay_evidence")
-    write_changed(tmp_path, payload)
-    report = verify(tmp_path)
-    assert report["status"] == "insufficient_evidence"
-    assert any("consumption evidence missing" in c.get("reason", "") for c in report["checks"])
-    assert any("input order not archived" in c.get("reason", "") for c in report["checks"])
-
-
-def test_multisymbol_tail_mismatch_from_real_pipeline(tmp_path, monkeypatch):
-    payload, _, _ = _produce_pipeline_sample(tmp_path, monkeypatch)
-    rows = [r for r in payload["ranked_candidates"] if r["strategy_mode"] == "put"]
-    rows[-1]["rank"], rows[-2]["rank"] = rows[-2]["rank"], rows[-1]["rank"]
-    payload["ranked_candidates"] = sorted(payload["ranked_candidates"], key=lambda r: (r["strategy_mode"], r["rank"]))
-    write_changed(tmp_path, payload)
-    report = verify(tmp_path)
-    assert report["status"] == "mismatched", report
-    assert any(c["location"] == "ranked_candidates/put/order" and c["status"] == "mismatched" for c in report["checks"])
-
-
-def test_capacity_adapter_qualifies_and_normalizes_bound_inputs():
-    from tests.cash_evidence_helpers import cash_portfolio
-    row = {"symbol": "NVDA", "currency": "USD", "strike": 100, "multiplier": 100}
-    ctx = {"portfolio": cash_portfolio({"cash_by_currency": {"USD": 30000}}),
-           "ledger": {"context_status": "available", "decision_snapshot_status": "trusted",
-                      "cash_secured_unavailable_by_symbol": {}, "cash_secured_by_symbol_by_ccy": {},
-                      "cash_secured_by_symbol": {"NVDA": 10000}}}
-    assert audit._quantity(row, "put", ctx, CurrencyConverter(RATES)) == 2
-    ctx["ledger"]["decision_snapshot_status"] = "untrusted"
-    with pytest.raises(ValueError, match="option_positions_cash_secured_context_unavailable"):
-        audit._quantity(row, "put", ctx, CurrencyConverter(RATES))
-    ctx["ledger"]["decision_snapshot_status"] = "trusted"
-    ctx["portfolio"]["cash_snapshot"]["status"] = "unknown"
-    with pytest.raises(ValueError, match="broker_cash_snapshot_unavailable"):
+        ctx["portfolio" if missing == "cash_snapshot" else "ledger"].pop(missing)
+    with pytest.raises(ValueError, match="(unavailable|missing)"):
         audit._quantity(row, "put", ctx, CurrencyConverter(RATES))
 
 
-def test_recomputed_fx_and_both_prepared_bindings_are_checked(tmp_path, monkeypatch):
-    payload, _, _ = _produce_pipeline_sample(tmp_path, monkeypatch)
-    contexts, errors = audit._contexts(tmp_path, payload)
-    assert not errors
-    for kind in ("portfolio", "ledger"):
-        changed = deepcopy(contexts)
-        if kind == "portfolio":
-            changed[kind]["fx_snapshot_sha256"] = "e" * 64
+def test_new_seal_replays_full_multigroup_tail(tmp_path, contexts):
+    records = [candidate(symbol=s, strike=k) for s in ("NVDA", "AMD") for k in (91, 90)]
+    payload = seal(tmp_path, records)
+    assert payload["ranking_inputs"]["put"]["candidate_ids"]
+    result = verify(tmp_path)
+    assert result["status"] == "matched", result
+    full_order = [c for c in result["checks"] if c["category"] == "ranking" and c["location"].endswith("/order")]
+    assert len(full_order) == 1 and full_order[0]["status"] == "matched"
+    payload["ranked_candidates"][-2:] = list(reversed(payload["ranked_candidates"][-2:]))
+    for i, ranked in enumerate(payload["ranked_candidates"], 1):
+        ranked["rank"] = i
+    write_changed(tmp_path, payload)
+    assert any(c["status"] == "mismatched" and c["location"].endswith("/order") for c in verify(tmp_path)["checks"])
+
+
+def capacity_fx_evidence(*, marker_present=False, marker_value=None, usd=None, hkd=None):
+    from domain.domain.decision_state_fingerprint import canonical_sha256
+
+    observation = {"rates": {}}
+    if usd is not None:
+        observation["rates"]["USDCNY"] = 1 / usd
+    if hkd is not None:
+        observation["rates"]["HKDCNY"] = hkd
+    return {"schema_version": 1, "evaluated_at_utc": NOW.isoformat(), "observation_status": "ready",
+            "observation": observation, "observation_sha256": canonical_sha256(observation),
+            "usd_per_cny": usd, "cny_per_hkd": hkd, "run_fx_snapshot_sha256": "d" * 64,
+            "marker_present": marker_present, **({"marker_value": marker_value} if marker_present else {})}
+
+
+def test_replay_rates_consume_actual_projection_instead_of_prepared():
+    evidence = capacity_fx_evidence(usd=None, hkd=0.93)
+    snapshot = {"capacity_fx_evidence": evidence, "dependencies": [{"kind": "fx", "sha256": "d" * 64}]}
+    actual = audit._rates(snapshot, CTX)
+    assert actual.usd_per_cny is None and actual.cny_per_hkd == 0.93
+    evidence["usd_per_cny"] = 0.14
+    with pytest.raises(ValueError, match="scalars disagree"):
+        audit._rates(snapshot, CTX)
+
+
+@pytest.mark.parametrize("present,value", [(False, None), (True, None), (True, "unavailable_stale")])
+def test_sealed_fx_marker_overrides_only_from_presence_fact(present, value):
+    ctx = deepcopy(CTX)
+    ctx["portfolio"].pop("_sell_put_fx_status")
+    if present:
+        ctx["portfolio"]["_sell_put_fx_status"] = value
+    row, _ = candidate()
+    quantity, reason = audit._quantity(
+        row, "put", ctx, CurrencyConverter(RATES),
+        snapshot={"capacity_fx_evidence": capacity_fx_evidence(marker_present=present, marker_value=value)},
+    )
+    # Native USD funds do not need conversion even with a stale cross-currency observation.
+    assert quantity == 11 and reason is None
+
+
+def test_blocked_capacity_reason_and_label_drift_are_mismatches():
+    row, decision = candidate()
+    ctx = deepcopy(CTX)
+    ctx["ledger"]["cash_secured_unavailable_by_symbol"] = {"NVDA": "option_close_settlement_pending"}
+    row.update(max_new_contracts=999, cash_fx_status="wrong")
+    checks = []
+    audit._decision_checks(
+        {"candidate_id": "blocked-drift", "strategy_mode": "put", "normalized_input": row, "opening_decision": decision},
+        {"account": "lx", "market": "us"}, ctx, RATES, None, checks,
+    )
+    assert sum(c["category"] == "capacity_unavailable" and c["status"] == "mismatched" for c in checks) == 2
+
+
+@pytest.mark.parametrize("change", [
+    {}, {"status": "fresh"}, {"status": []}, {"reason_codes": "missing"},
+    {"source_observed_at": "bad"}, {"evaluated_at": None}, {"max_age_sec": True},
+])
+def test_malformed_cash_verdict_remains_evidence_gap(change):
+    row, _ = candidate()
+    ctx = deepcopy(CTX)
+    ctx["portfolio"]["cash_snapshot"] = change if change in ({}, {"status": "fresh"}) else {
+        **ctx["portfolio"]["cash_snapshot"], **change,
+    }
+    with pytest.raises(ValueError, match="qualification verdict missing"):
+        audit._quantity(row, "put", ctx, CurrencyConverter(RATES))
+
+
+def test_explicit_stale_cash_verdict_reproduces_block_before_fx():
+    row, _ = candidate()
+    ctx = deepcopy(CTX)
+    ctx["portfolio"]["cash_snapshot"].update(status="stale", reason_codes=["CASH_OBSERVATION_STALE"])
+    ctx["portfolio"].pop("_sell_put_fx_status")
+    assert audit._quantity(row, "put", ctx, CurrencyConverter(RATES), fx_error="missing FX") == (
+        0, "broker_cash_snapshot_unavailable",
+    )
+
+
+@pytest.mark.parametrize("gap", ["marker", "fx_binding"])
+def test_fx_dependent_block_cannot_certify_missing_historical_fx(gap):
+    row, _ = candidate()
+    ctx = deepcopy(CTX)
+    ctx["portfolio"]["cash_by_currency"] = {"CNY": 100000}
+    if gap == "marker":
+        ctx["portfolio"].pop("_sell_put_fx_status")
+    with pytest.raises(ValueError, match="(FX evidence|not bound)"):
+        audit._quantity(row, "put", ctx, CurrencyConverter(ExchangeRates()),
+                        fx_error="FX not bound" if gap == "fx_binding" else None)
+
+
+def test_numeric_capacity_rejects_foreign_portfolio_fx_generation():
+    row, _ = candidate()
+    ctx = deepcopy(CTX)
+    ctx["portfolio"]["fx_snapshot_sha256"] = "e" * 64
+    with pytest.raises(ValueError, match="portfolio FX facts are not bound"):
+        audit._quantity(row, "put", ctx, CurrencyConverter(RATES),
+                        snapshot={"dependencies": [{"kind": "fx", "sha256": "d" * 64}]})
+
+
+@pytest.mark.parametrize("change", [
+    {"marker_present": False},
+    {"marker_present": True, "marker_value": None},
+    {"marker_present": True, "marker_value": "unavailable_stale"},
+])
+def test_sealed_fx_marker_must_follow_prepared_facts_and_shared_scan_rule(change):
+    evidence = capacity_fx_evidence(marker_present=True, marker_value="fresh")
+    evidence.update(change)
+    if not evidence["marker_present"]:
+        evidence.pop("marker_value")
+    row, _ = candidate()
+    with pytest.raises(ValueError, match="marker disagrees"):
+        audit._quantity(row, "put", deepcopy(CTX), CurrencyConverter(RATES),
+                        snapshot={"capacity_fx_evidence": evidence})
+
+
+def test_stale_projection_requires_original_scan_marker_assignment():
+    evidence = capacity_fx_evidence(marker_present=True, marker_value="unavailable_stale")
+    evidence["observation_status"] = "unavailable_stale"
+    row, _ = candidate()
+    quantity, reason = audit._quantity(row, "put", deepcopy(CTX), CurrencyConverter(RATES),
+                                     snapshot={"capacity_fx_evidence": evidence})
+    assert quantity == 11 and reason is None
+    for presence, value in ((False, None), (True, None), (True, "fresh")):
+        evidence["marker_present"] = presence
+        if presence:
+            evidence["marker_value"] = value
         else:
-            changed[kind]["prepared_authority"]["run_fx_snapshot_sha256"] = "e" * 64
-        with pytest.raises(ValueError, match="not bound"):
-            audit._rates(payload, changed, [])
-    payload["replay_evidence"]["capacity_fx"]["usd_per_cny"] = .99
-    write_changed(tmp_path, payload)
-    report = verify(tmp_path)
-    assert report["status"] == "mismatched"
-    assert any(c["location"].endswith("/usd_per_cny") and c["status"] == "mismatched" for c in report["checks"])
-    # A wrong recording must not become the input used to compute metric/capacity parity.
-    assert all(c["status"] == "matched" for c in report["checks"] if c["category"] in {"metrics", "quantity"})
+            evidence.pop("marker_value", None)
+        with pytest.raises(ValueError, match="marker disagrees"):
+            audit._quantity(row, "put", deepcopy(CTX), CurrencyConverter(RATES),
+                            snapshot={"capacity_fx_evidence": evidence})

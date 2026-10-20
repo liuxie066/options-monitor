@@ -1483,7 +1483,8 @@ def run_watchlist_pipeline_default(
             scan_statuses=normalized_statuses,
             final_candidates=captured_final_candidates,
             candidate_evaluations=captured_candidate_decisions,
-            capacity_fx_evidence=(portfolio_snapshot or {}).get("_opening_capacity_fx_evidence"),
+            **({"capacity_fx_evidence": portfolio_snapshot["capacity_fx_evidence"]}
+               if "capacity_fx_evidence" in portfolio_snapshot else {}),
             run_mode=run_mode,
             sealed_at=captured_at,
         )

@@ -22,7 +22,7 @@ from src.application.trades.lifecycle_reconciliation import discover_lifecycle_c
 from src.application.trades.inbox_authority import resolve_execution_inbox_path
 from src.application.trades.inbox import (
     TRADE_INTAKE_ADAPTER_VERSIONS,
-    claim_trade_payload_refresh_intent,
+    claim_trade_payload_refresh_intents,
     enqueue_trade_payload,
     mark_trade_payload_handled,
     read_trade_payload,
@@ -253,7 +253,7 @@ def run_history_backfill(
     last_result: dict[str, Any] | None = None
     durable_queue_complete = True
     durable_accounts = dict.fromkeys(scopes, True)
-    portfolio_refresh_intents: dict[str, dict[str, str]] = {}
+    portfolio_refresh_inbox_ids: list[str] = []
     fee_targets: set[tuple[str, str, str, str]] = set()
     try:
         lifecycle_accounts = _lifecycle_discovery_accounts(
@@ -332,7 +332,6 @@ def run_history_backfill(
     for payload, inbox_id in sorted(queued, key=lambda row: execution_chronology_key(row[0])):
         deal_id = payload_deal_id(payload)
         deal_key = broker_deal_key_from_payload(payload, account_mapping=account_mapping)
-        claimed_intent: dict[str, str] | None = None
         if inbox_id:
             inbox_row = read_trade_payload(inbox_path or state_path.with_name("trade_intake_inbox.sqlite3"),
                                           inbox_id=inbox_id)
@@ -432,16 +431,8 @@ def run_history_backfill(
                         inbox_id=inbox_id,
                         result=last_result,
                     )
-                    intent = claim_trade_payload_refresh_intent(
-                        inbox_path
-                        or state_path.with_name("trade_intake_inbox.sqlite3"),
-                        inbox_id=inbox_id,
-                    ) if refresh_enabled else None
-                    if intent is not None:
-                        portfolio_refresh_intents.setdefault(
-                            intent["account"],
-                            intent,
-                        )
+                    if refresh_enabled:
+                        portfolio_refresh_inbox_ids.append(inbox_id)
                 continue
 
             try:
@@ -484,11 +475,7 @@ def run_history_backfill(
                 )
                 continue
             if inbox_id and refresh_enabled:
-                claimed_intent = claim_trade_payload_refresh_intent(
-                    inbox_path
-                    or state_path.with_name("trade_intake_inbox.sqlite3"),
-                    inbox_id=inbox_id,
-                )
+                portfolio_refresh_inbox_ids.append(inbox_id)
         last_result = dict(result)
         status = str(result.get("status") or "").strip().lower()
         if fee_target is not None and (
@@ -529,14 +516,20 @@ def run_history_backfill(
         elif status == "failed":
             failed_count += 1
 
-        if inbox_id and claimed_intent is not None:
-            portfolio_refresh_intents.setdefault(
-                claimed_intent["account"],
-                claimed_intent,
+    if refresh_enabled and dispatch_portfolio_refresh_fn is not None:
+        refresh_accounts = dict.fromkeys(
+            str(account_mapping.get(physical) or "").strip().lower()
+            for physical in futu_account_ids
+        )
+        for account in refresh_accounts:
+            if not account:
+                continue
+            intent = claim_trade_payload_refresh_intents(
+                inbox_path or state_path.with_name("trade_intake_inbox.sqlite3"),
+                inbox_ids=portfolio_refresh_inbox_ids, account=account,
             )
-
-    if dispatch_portfolio_refresh_fn is not None:
-        for intent in portfolio_refresh_intents.values():
+            if intent is None:
+                continue
             try:
                 dispatch_portfolio_refresh_fn(intent)
             except Exception:

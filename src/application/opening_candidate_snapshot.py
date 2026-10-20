@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -35,6 +34,8 @@ from src.application.tick_run_workspace import (
     write_account_run_state_bytes_once_safely,
 )
 from src.application.payload_helpers import required_text
+from src.application.prepared_option_positions_context import exchange_rate_scalars_from_option_context
+from src.infrastructure.exchange_rates import exchange_rate_observation_status, project_exchange_rate_snapshot
 from functools import partial
 from src.application.payload_helpers import canonical_json_bytes_lines as _canonical_json_bytes
 
@@ -44,6 +45,7 @@ _required_text = partial(required_text, error=lambda m: OpeningCandidateSnapshot
 
 OPENING_CANDIDATE_SNAPSHOT_SCHEMA = "opening_candidate_snapshot.v3"
 OPENING_CANDIDATE_SNAPSHOT_FILE = "opening_candidate_snapshot.json"
+_CAPACITY_FX_NOT_PROVIDED = object()
 OPENING_STATUSES = frozenset(
     {
         "candidates_found",
@@ -118,8 +120,8 @@ def seal_opening_candidate_snapshot(
         Mapping[str, Iterable[Mapping[str, Any]]] | None
     ) = None,
     run_mode: Mapping[str, Any],
-    capacity_fx_evidence: Mapping[str, Any] | None = None,
     sealed_at: datetime | str | None = None,
+    capacity_fx_evidence: Mapping[str, Any] | None | object = _CAPACITY_FX_NOT_PROVIDED,
 ) -> dict[str, Any]:
     """Assemble, validate, and immutably publish one account-run snapshot."""
 
@@ -187,7 +189,7 @@ def seal_opening_candidate_snapshot(
         risk_policy_hash=policy_hash,
         candidate_evaluations=candidate_evaluations,
     )
-    ranked, ranking_input_ids = _ranked_candidates(
+    ranked, ranking_inputs = _ranked_candidates(
         final_candidates,
         modes=modes,
         decision_index=decision_index,
@@ -240,11 +242,13 @@ def seal_opening_candidate_snapshot(
         "scope_results": scope_results,
         "candidate_decisions": decisions,
         "ranked_candidates": ranked,
-        "replay_evidence": {"schema_version": 1, "ranking_input_ids": ranking_input_ids},
+        "ranking_inputs": ranking_inputs,
         **mode_fields,
     }
-    if capacity_fx_evidence is not None:
-        payload["replay_evidence"]["capacity_fx"] = deepcopy(dict(capacity_fx_evidence))
+    if capacity_fx_evidence is not _CAPACITY_FX_NOT_PROVIDED:
+        payload["capacity_fx_evidence"] = (
+            dict(capacity_fx_evidence) if isinstance(capacity_fx_evidence, Mapping) else capacity_fx_evidence
+        )
     payload["content_sha256"] = canonical_sha256(payload)
     validate_opening_candidate_snapshot(
         payload,
@@ -548,7 +552,6 @@ def validate_opening_candidate_snapshot(
         if opening.get("accepted") is True:
             accepted_decision_ids.add(candidate_id)
 
-    _validate_replay_evidence(item, decision_by_id, modes, dependencies)
     decision_ids = set(candidate_ids)
     mode_positions: dict[str, int] = {}
     validated_ranked_ids: set[str] = set()
@@ -580,6 +583,28 @@ def validate_opening_candidate_snapshot(
         raise OpeningCandidateSnapshotError(
             "accepted opening decisions and ranked candidates do not match"
         )
+    if "ranking_inputs" in item:
+        _validate_ranking_inputs(item["ranking_inputs"], modes=modes, decisions=decision_by_id)
+    if "capacity_fx_evidence" in item:
+        validate_capacity_fx_evidence(
+            item["capacity_fx_evidence"], expected_run_fx_snapshot_sha256=_dependency_hash(dependencies, "fx"),
+        )
+        if verify_dependency_root is not None:
+            from src.application.current_fx_run import RunFXError, load_run_fx_snapshot
+
+            evidence = item["capacity_fx_evidence"]
+            try:
+                run_fx, run_fx_hash = load_run_fx_snapshot(base=Path(verify_dependency_root), run_id=expected_run_id)
+            except RunFXError as exc:
+                raise OpeningCandidateSnapshotError("capacity FX run source is unavailable or invalid") from exc
+            if run_fx_hash != evidence["run_fx_snapshot_sha256"]:
+                raise OpeningCandidateSnapshotError("capacity FX run source hash mismatch")
+            expected_observation = project_exchange_rate_snapshot(
+                run_fx, purpose="capacity",
+                now=datetime.fromisoformat(evidence["evaluated_at_utc"].replace("Z", "+00:00")),
+            )
+            if canonical_sha256(expected_observation) != evidence["observation_sha256"]:
+                raise OpeningCandidateSnapshotError("capacity FX observation run source mismatch")
     contract_scope_ids = {
         str(row.get("candidate_id") or "")
         for row in scopes
@@ -675,6 +700,83 @@ def validate_opening_candidate_snapshot(
             raise OpeningCandidateSnapshotError(
                 "opening candidate aggregate status is inconsistent"
             )
+
+
+def _validate_ranking_inputs(
+    value: Any, *, modes: list[str], decisions: Mapping[str, Mapping[str, Any]],
+) -> None:
+    if not isinstance(value, dict) or set(value) != set(modes):
+        raise OpeningCandidateSnapshotError("opening candidate ranking input modes mismatch")
+    for mode, record in value.items():
+        if not isinstance(record, dict) or set(record) != {"candidate_ids", "profile"}:
+            raise OpeningCandidateSnapshotError("opening candidate ranking inputs are invalid")
+        ids = record["candidate_ids"]
+        accepted = {
+            cid for cid, decision in decisions.items()
+            if decision.get("strategy_mode") == mode
+            and (decision.get("opening_decision") or {}).get("accepted") is True
+        }
+        if (
+            not isinstance(ids, list) or any(not isinstance(cid, str) for cid in ids)
+            or len(ids) != len(set(ids)) or set(ids) != accepted
+        ):
+            raise OpeningCandidateSnapshotError("opening candidate ranking inputs accepted set mismatch")
+        rows = [dict(decisions[cid]["normalized_input"]) for cid in ids]
+        try:
+            profile = candidate_ranking_profile(rows, mode=mode)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise OpeningCandidateSnapshotError("opening candidate ranking profile is invalid") from exc
+        if record["profile"] != profile:
+            raise OpeningCandidateSnapshotError("opening candidate ranking profile mismatch")
+
+
+def validate_capacity_fx_evidence(value: Any, *, expected_run_fx_snapshot_sha256: str) -> None:
+    """Validate sealed scan-time FX evidence without a live clock or provider read."""
+    fields = {
+        "schema_version", "evaluated_at_utc", "observation_status", "observation", "observation_sha256",
+        "usd_per_cny", "cny_per_hkd", "run_fx_snapshot_sha256", "marker_present",
+    }
+    if not isinstance(value, dict) or type(value.get("marker_present")) is not bool:
+        raise OpeningCandidateSnapshotError("capacity FX evidence shape is invalid")
+    expected_fields = fields | ({"marker_value"} if value["marker_present"] else set())
+    if (
+        set(value) != expected_fields or type(value.get("schema_version")) is not int
+        or value["schema_version"] != 1
+        or (value["marker_present"] and value["marker_value"] is not None
+            and not isinstance(value["marker_value"], str))
+    ):
+        raise OpeningCandidateSnapshotError("capacity FX evidence shape is invalid")
+    if not isinstance(value["evaluated_at_utc"], str):
+        raise OpeningCandidateSnapshotError("capacity FX evaluation time is invalid")
+    evaluated_at = datetime.fromisoformat(_timestamp(value["evaluated_at_utc"]).replace("Z", "+00:00"))
+    digest = value["run_fx_snapshot_sha256"]
+    if _sha256(digest, "capacity FX run hash") != digest or digest != expected_run_fx_snapshot_sha256:
+        raise OpeningCandidateSnapshotError("capacity FX run dependency mismatch")
+    observation = value["observation"]
+    if observation is not None and not isinstance(observation, dict):
+        raise OpeningCandidateSnapshotError("capacity FX observation is invalid")
+    if (
+        _sha256(value["observation_sha256"], "capacity FX observation hash") != value["observation_sha256"]
+        or canonical_sha256(observation) != value["observation_sha256"]
+    ):
+        raise OpeningCandidateSnapshotError("capacity FX observation hash mismatch")
+    if observation is not None:
+        if observation.get("evaluated_at_utc") != value["evaluated_at_utc"]:
+            raise OpeningCandidateSnapshotError("capacity FX observation evaluation time mismatch")
+        projected = project_exchange_rate_snapshot(observation, purpose="capacity", now=evaluated_at)
+        if observation.get("rates") != projected["rates"]:
+            raise OpeningCandidateSnapshotError("capacity FX observation rates mismatch")
+    if value["observation_status"] != exchange_rate_observation_status(observation, now=evaluated_at):
+        raise OpeningCandidateSnapshotError("capacity FX observation status mismatch")
+    scalars = exchange_rate_scalars_from_option_context({"exchange_rates": observation})
+    for field, scalar in zip(("usd_per_cny", "cny_per_hkd"), scalars):
+        actual = value[field]
+        if actual is not None and (
+            isinstance(actual, bool) or not isinstance(actual, (int, float)) or not math.isfinite(actual) or actual <= 0
+        ):
+            raise OpeningCandidateSnapshotError("capacity FX scalar is invalid")
+        if actual != scalar:
+            raise OpeningCandidateSnapshotError("capacity FX scalar mismatch")
 
 
 _GENERIC_STRATEGY_GAP_REASONS = frozenset(
@@ -1008,44 +1110,6 @@ def _snapshot_decisions(
     return out, index
 
 
-def _validate_replay_evidence(item, decision_by_id, modes, dependencies) -> None:
-    """Validate optional new evidence without changing historical read contracts."""
-    if "replay_evidence" not in item:
-        return
-    evidence = item["replay_evidence"]
-    if not isinstance(evidence, dict) or type(evidence.get("schema_version")) is not int or evidence["schema_version"] != 1:
-        raise OpeningCandidateSnapshotError("opening replay evidence schema is invalid")
-    inputs = evidence.get("ranking_input_ids")
-    if not isinstance(inputs, dict) or set(inputs) != set(modes):
-        raise OpeningCandidateSnapshotError("opening ranking input modes are invalid")
-    for mode, ids in inputs.items():
-        expected = {cid for cid, d in decision_by_id.items()
-                    if d.get("strategy_mode") == mode and (d.get("opening_decision") or {}).get("accepted") is True}
-        if (not isinstance(ids, list) or any(not isinstance(cid, str) for cid in ids)
-                or len(ids) != len(set(ids)) or set(ids) != expected):
-            raise OpeningCandidateSnapshotError("opening ranking inputs must exactly cover accepted decisions")
-    if "capacity_fx" not in evidence:
-        return
-    fx = evidence["capacity_fx"]
-    fields = {"source_snapshot", "source_sha256", "evaluated_at_utc", "status", "put_fx_status", "usd_per_cny", "cny_per_hkd"}
-    if not isinstance(fx, dict) or set(fx) != fields:
-        raise OpeningCandidateSnapshotError("opening capacity FX evidence fields are invalid")
-    source = fx["source_snapshot"]
-    if (not isinstance(source, dict) or not isinstance(source.get("pairs"), dict)
-            or canonical_sha256(source) != fx["source_sha256"]
-            or fx["source_sha256"] != _dependency_hash(dependencies, "fx")):
-        raise OpeningCandidateSnapshotError("opening capacity FX source binding mismatch")
-    _timestamp(fx["evaluated_at_utc"])
-    if not isinstance(fx["status"], str) or fx["status"] not in {"ready", "unavailable", "unavailable_stale"}:
-        raise OpeningCandidateSnapshotError("opening capacity FX status is invalid")
-    if fx["put_fx_status"] is not None and not isinstance(fx["put_fx_status"], str):
-        raise OpeningCandidateSnapshotError("opening capacity FX override is invalid")
-    for name in ("usd_per_cny", "cny_per_hkd"):
-        value = fx[name]
-        if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value <= 0):
-            raise OpeningCandidateSnapshotError("opening capacity FX scalar is invalid")
-
-
 def _ranked_candidates(
     rows_by_mode: Mapping[str, Iterable[Mapping[str, Any]]],
     *,
@@ -1054,12 +1118,11 @@ def _ranked_candidates(
     account: str,
     futu_account_id: str,
     market: str,
-) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     combined: list[dict[str, Any]] = []
-    input_ids: dict[str, list[str]] = {}
+    ranking_inputs: dict[str, Any] = {}
     for mode in modes:
         source_rows: list[dict[str, Any]] = []
-        input_ids[mode] = []
         for item in rows_by_mode.get(mode, []):
             final_row = dict(item)
             decision = decision_index.get(_contract_key(mode, final_row))
@@ -1078,8 +1141,13 @@ def _ranked_candidates(
             if final_row.get("decision_now_utc") != normalized.get("decision_now_utc"):
                 raise OpeningCandidateSnapshotError("final candidate decision time mismatch")
             source_rows.append(normalized)
-            input_ids[mode].append(str(decision["candidate_id"]))
         _validate_core_scope(source_rows, mode=mode, account=account, market=market)
+        ranking_inputs[mode] = {
+            "candidate_ids": [
+                str(decision_index[_contract_key(mode, row)]["candidate_id"]) for row in source_rows
+            ],
+            "profile": candidate_ranking_profile(source_rows, mode=mode),
+        }
         for mode_rank, ranked_row in enumerate(
             rank_candidates(source_rows, mode=mode),
             start=1,
@@ -1118,7 +1186,7 @@ def _ranked_candidates(
             )
     # A strategy rank is authoritative; cross-strategy interleaving is stable only.
     # Consumers expect each strategy's contiguous order, not a cross-strategy rank.
-    return sorted(combined, key=lambda row: (modes.index(str(row["strategy_mode"])), int(row["rank"]))), input_ids
+    return sorted(combined, key=lambda row: (modes.index(str(row["strategy_mode"])), int(row["rank"]))), ranking_inputs
 
 
 def _strategy_results(
@@ -1527,6 +1595,7 @@ def _timestamp(value: datetime | str | Any) -> str:
 
 
 __all__ = [
+    "validate_capacity_fx_evidence",
     "OPENING_CANDIDATE_SNAPSHOT_FILE",
     "OPENING_CANDIDATE_SNAPSHOT_SCHEMA",
     "OpeningCandidateSnapshotError",

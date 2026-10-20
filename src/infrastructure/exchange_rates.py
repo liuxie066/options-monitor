@@ -66,7 +66,7 @@ def exchange_rate_observation_status(
 
     if not isinstance(payload, Mapping):
         return "unavailable"
-    now = (now or _utc_now()).astimezone(timezone.utc)
+    now = now if now is not None else _utc_now()
     pairs = _verified_pairs(payload, now=now)
     if any(pair not in pairs for pair in _REQUIRED_RATES):
         return "unavailable"

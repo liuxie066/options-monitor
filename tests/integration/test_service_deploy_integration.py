@@ -614,10 +614,12 @@ def test_service_drift_detects_mismatched_timer_content(tmp_path: Path) -> None:
     profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
     (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
     _write_systemd_units_from_bundle(bundle, systemd_root)
-    (systemd_root / "options-monitor-auto-close-us.timer").write_text(
-        (systemd_root / "options-monitor-auto-close-us.timer")
-        .read_text(encoding="utf-8")
-        .replace("OnCalendar=*-*-* 09:07:00 Asia/Shanghai", "OnCalendar=*-*-* 05:30:00 Asia/Shanghai"),
+    timer_path = systemd_root / "options-monitor-auto-close-us.timer"
+    original_timer = timer_path.read_text(encoding="utf-8")
+    changed_timer = original_timer.replace("OnCalendar=*-*-* 00:07:00 America/New_York", "OnCalendar=*-*-* 05:30:00 Asia/Shanghai")
+    assert changed_timer != original_timer
+    timer_path.write_text(
+        changed_timer,
         encoding="utf-8",
     )
     (systemd_root / "options-monitor-projection-verify.timer").write_text(

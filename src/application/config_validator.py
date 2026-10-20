@@ -955,6 +955,10 @@ def validate_schedule_cfg(raw, path: str) -> None:
         for key in ('start_plus_min', 'end_minus_min'):
             if key in run_points and run_points.get(key) is not None:
                 validate_non_negative_integer(run_points.get(key), f'{path}.run_points.{key}')
+                try:
+                    int(run_points.get(key))
+                except (TypeError, ValueError, OverflowError):
+                    die(f'{path}.run_points.{key} must be an integer')
         if 'hourly_minute' in run_points and run_points.get('hourly_minute') is not None:
             validate_non_negative_integer(run_points.get('hourly_minute'), f'{path}.run_points.hourly_minute')
             if int(run_points.get('hourly_minute')) > 59:

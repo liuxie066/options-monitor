@@ -57,6 +57,8 @@ env-file 不是合并进生成快照的配置层；它在进程启动或工具�
   验证器只输出迁移警告；
 - secrets、token、Feishu credential 和 Agent write gate 不进入 YAML。
 
+`POP` 等已知别名在生成 runtime 时按共享标的身份转为规范代码；symbols 与 override 键也按该身份匹配。同一列表或 override 映射中出现多个指向同一标的的项会报错，不按顺序覆盖或合并。构建不改写源 YAML；编辑已有标的会保留原始列表拼写及 override 键，新增标的使用规范代码。
+
 当前示例：
 
 - `configs/examples/config.yaml.example`

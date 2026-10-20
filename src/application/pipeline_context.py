@@ -35,6 +35,7 @@ from src.application.ledger.api import (
     open_position_ledger,
 )
 from domain.domain.portfolio_scope import portfolio_scope_id
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.portfolio_context_service import (
     load_account_portfolio_context,
     with_context_source,
@@ -391,9 +392,10 @@ def load_exchange_rates(
 
 
 def apply_sell_put_fx_status(portfolio_ctx: dict | None, fx_status: str) -> dict | None:
-    """Preserve the prepared override unless final FX consumption is stale."""
+    """Apply the scan's stale marker without filling or clearing existing markers."""
     if fx_status == "unavailable_stale" and isinstance(portfolio_ctx, dict):
-        return {**portfolio_ctx, "_sell_put_fx_status": fx_status}
+        portfolio_ctx = dict(portfolio_ctx)
+        portfolio_ctx["_sell_put_fx_status"] = fx_status
     return portfolio_ctx
 
 
@@ -435,8 +437,6 @@ def build_pipeline_context(
     if bool(no_context):
         return None, None, None, None
 
-    capacity_fx = None
-    fx_evaluated_at = None
     portfolio_cfg = cfg.get('portfolio', {}) or {}
     data_config = resolve_data_config_path(base=base, data_config=portfolio_cfg.get('data_config'))
     broker = portfolio_cfg.get('broker') or '富途'
@@ -561,6 +561,7 @@ def build_pipeline_context(
             ):
                 option_ctx["cash_secured_total_cny"] = None
 
+    capacity_fx_evidence = None
     if prepared_option_positions_context_manifest is not None:
         fx_authority = option_ctx.get("prepared_authority") if isinstance(option_ctx, dict) else None
         if (
@@ -580,10 +581,15 @@ def build_pipeline_context(
                 or authority.get("run_fx_snapshot_sha256") != fx_hash
             ):
                 raise PreparedOptionPositionsContextError("prepared context FX snapshot mismatch")
-            fx_evaluated_at = datetime.now(timezone.utc)
-            current_fx = project_exchange_rate_snapshot(snapshot, purpose="capacity", now=fx_evaluated_at)
-            capacity_fx = {"source_snapshot": snapshot, "source_sha256": fx_hash,
-                           "evaluated_at_utc": fx_evaluated_at.isoformat()}
+            evaluated_at = datetime.now(timezone.utc)
+            current_fx = project_exchange_rate_snapshot(snapshot, purpose="capacity", now=evaluated_at)
+            capacity_fx_evidence = {
+                "schema_version": 1,
+                "evaluated_at_utc": evaluated_at.isoformat(),
+                "observation": current_fx,
+                "observation_sha256": canonical_sha256(current_fx),
+                "run_fx_snapshot_sha256": fx_hash,
+            }
             prior_fx = option_ctx.get("exchange_rates")
             prior_rates = prior_fx.get("rates") if isinstance(prior_fx, dict) else None
             current_rates = current_fx["rates"]
@@ -601,7 +607,7 @@ def build_pipeline_context(
                 option_ctx["cash_secured_total_cny"] = None
             portfolio_ctx = dict(portfolio_ctx)
             portfolio_ctx["exchange_rates"] = current_fx
-            portfolio_ctx["exchange_rate_status"] = exchange_rate_observation_status(current_fx, now=fx_evaluated_at)
+            portfolio_ctx["exchange_rate_status"] = exchange_rate_observation_status(current_fx, now=evaluated_at)
         usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = (
             exchange_rate_scalars_from_option_context(option_ctx or {})
         )
@@ -613,7 +619,7 @@ def build_pipeline_context(
         )
         fx_status = exchange_rate_observation_status(
             option_ctx.get("exchange_rates") if isinstance(option_ctx, dict) else None,
-            now=fx_evaluated_at,
+            **({"now": evaluated_at} if capacity_fx_evidence is not None else {}),
         )
     else:
         rate_status: dict[str, str] = {}
@@ -630,15 +636,19 @@ def build_pipeline_context(
         fx_status = str(rate_status.get("status") or "").strip().lower()
 
     portfolio_ctx = apply_sell_put_fx_status(portfolio_ctx, fx_status)
-    if capacity_fx is not None and isinstance(portfolio_ctx, dict):
-        capacity_fx.update(
-            status=fx_status,
-            put_fx_status=portfolio_ctx.get("_sell_put_fx_status"),
-            usd_per_cny=usd_per_cny_exchange_rate,
-            cny_per_hkd=cny_per_hkd_exchange_rate,
-        )
-        portfolio_ctx = {**portfolio_ctx, "_opening_capacity_fx_evidence": capacity_fx}
 
     if isinstance(portfolio_ctx, dict):
+        portfolio_ctx = dict(portfolio_ctx)
+        portfolio_ctx.pop("capacity_fx_evidence", None)
+        if capacity_fx_evidence is not None:
+            capacity_fx_evidence.update(
+                observation_status=fx_status,
+                usd_per_cny=usd_per_cny_exchange_rate,
+                cny_per_hkd=cny_per_hkd_exchange_rate,
+                marker_present="_sell_put_fx_status" in portfolio_ctx,
+            )
+            if capacity_fx_evidence["marker_present"]:
+                capacity_fx_evidence["marker_value"] = portfolio_ctx["_sell_put_fx_status"]
+            portfolio_ctx = {**portfolio_ctx, "capacity_fx_evidence": capacity_fx_evidence}
         portfolio_ctx = {**portfolio_ctx, "option_ctx": option_ctx}
     return portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate
