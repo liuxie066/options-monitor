@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 
 from src.application.config_sections import resolve_watchlist_config, set_watchlist_config
-from src.application.symbol_mutations import normalize_symbol_read
+from src.application.symbol_mutations import normalize_symbol_read, split_symbol_whitelist
 
 
 DEFAULT_ACCOUNTS = ("user1",)
@@ -584,12 +584,12 @@ def accounts_from_config_path(path: str | Path, *, fallback: tuple[str, ...] = D
 
 
 def _symbol_whitelist(symbols_arg: str | None, *, cfg: dict[str, Any]) -> set[str] | None:
-    if not str(symbols_arg or "").strip():
+    items = split_symbol_whitelist(symbols_arg)
+    if items is None:
         return None
     out = {
         normalize_symbol_read(item, config=cfg)
-        for item in str(symbols_arg or "").split(",")
-        if str(item).strip()
+        for item in items
     }
     return {item for item in out if item} or None
 
@@ -608,6 +608,7 @@ def build_account_runtime_config(
     cfg["config_source_path"] = str(Path(cfg_path).resolve())
     cfg.setdefault("portfolio", {})
     cfg["portfolio"]["account"] = str(account).strip().lower()
+    whitelist = _symbol_whitelist(symbols_arg, cfg=cfg)
     try:
         symbols = resolve_watchlist_config(cfg)
         if markets_to_run:
@@ -616,7 +617,6 @@ def build_account_runtime_config(
                 for item in symbols
                 if isinstance(item, dict) and item.get("broker") in markets_to_run
             ]
-        whitelist = _symbol_whitelist(symbols_arg, cfg=cfg)
         if whitelist is not None:
             symbols = [
                 item
