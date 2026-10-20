@@ -87,6 +87,10 @@ def _optional_text(value: Any) -> str | None:
     return text or None
 
 
+def option_positions_list_account(payload: Mapping[str, Any]) -> str | None:
+    return _optional_text(_dict(payload.get("query")).get("account")) or _optional_text(payload.get("account"))
+
+
 def normalize_option_positions_read_input(
     payload: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -949,11 +953,9 @@ def option_positions_read_tool(
 
     config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
     query_payload = _dict(payload.get("query"))
-    requested_account = _optional_text(
-        query_payload.get("account") if action == "list" else payload.get("account")
+    requested_account = (
+        option_positions_list_account(payload) if action == "list" else _optional_text(payload.get("account"))
     )
-    if action == "list" and requested_account is None:
-        requested_account = _optional_text(payload.get("account"))
     try:
         account = normalize_account(requested_account) if requested_account else None
         if account:
@@ -977,7 +979,6 @@ def option_positions_read_tool(
         query = query_payload
         expiration_query = _dict(query.get("expiration"))
         broker = normalize_broker(payload.get("broker") or portfolio_cfg.get("broker") or "富途")
-        account = account or _optional_text(payload.get("account"))
         status = _scalar_text(query.get("status") if "status" in query else payload.get("status"), default="open").lower()
         if status == "closed":
             status = "close"

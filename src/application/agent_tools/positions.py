@@ -9,6 +9,7 @@ import src.application.wheel as wheel_application
 from src.application.wheel.candidate_snapshot import load_wheel_candidate_cash_fact
 from src.application.agent_tools.operations_impl import (
     normalize_option_positions_read_input,
+    option_positions_list_account,
     option_positions_read_tool,
 )
 from src.application.agent_tools.materialization_impl import option_performance_report_tool
@@ -420,8 +421,9 @@ def _option_positions_read_tool(
 
     action = _option_positions_action(normalized)
     if action != "events":
+        quality_account = option_positions_list_account(normalized) if action == "list" else normalized.get("account")
         assert_quality(
-            account=str(normalized.get("account") or "").strip().lower() or None,
+            account=normalize_account(quality_account) or None,
             market=str(normalized.get("config_key") or "").strip().lower() or None,
         )
 
@@ -1153,7 +1155,7 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
             "items": {"type": "string"},
             "description": "list-only open|close|all; legacy callers may pass a single-item list",
         },
-        "query": "list-only structured PositionQuery: account/status/symbol/option_type/side/strike/expiration/limit",
+        "query": "list-only structured PositionQuery: account/status/symbol/option_type/side/strike/expiration/limit; nonblank account overrides top-level account for quality checks and ledger reads",
         "limit": {
             "type": "integer",
             "minimum": 1,
