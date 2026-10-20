@@ -435,8 +435,6 @@ def _validate_valuation_evidence_response(
     if holdings_scope is not None:
         if scope.get("holdings_scope") != holdings_scope:
             raise PortfolioManagementProtocolError("portfolio valuation holdings scope mismatch")
-        if holdings_scope == "non_futu":
-            _validate_non_futu_inventory(item, requested_accounts)
     if not isinstance(snapshot, Mapping):
         raise PortfolioManagementProtocolError(
             "portfolio valuation snapshot must be an object"
@@ -508,6 +506,16 @@ def _validate_valuation_evidence_response(
         raise PortfolioManagementProtocolError(
             "portfolio valuation warnings must be strings"
         )
+    if holdings_scope == "non_futu":
+        try:
+            _validate_non_futu_inventory(item, requested_accounts)
+        except PortfolioManagementProtocolError as exc:
+            # PM source failures can leave no inventory; retain their cause after scope validation.
+            if warnings:
+                raise PortfolioManagementProtocolError(
+                    f"{exc}; PM valuation warnings: {'; '.join(warnings)}"
+                ) from exc
+            raise
     return item
 
 
