@@ -1,0 +1,232 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.5.3",
+  "base": {
+    "tag": "v4.5.2",
+    "commit": "d476c08fbe9f2d3228252e75b01ecb391909a7c0"
+  },
+  "reviewed_head": "f1c9957b276df8dffd551f61ba93c4c6c8001fde",
+  "commits": [
+    {
+      "sha": "597d9f8313bd84a2cce1a5f13b6935471553ec2a",
+      "subject": "chore(schedule): accept market-clock plan"
+    },
+    {
+      "sha": "ea76f27b25a5b79918cfbefe9fbb200968ad7c1b",
+      "subject": "fix(positions): schedule expiry maintenance in market time"
+    },
+    {
+      "sha": "5ceb102e0830a44f897eb6d37d9292569574394e",
+      "subject": "chore(schedule): accept market-clock deepreview"
+    },
+    {
+      "sha": "18f357b59bdb8977ff5aef6e13290d57bdb056c9",
+      "subject": "chore(schedule): reconcile main and document expiry fix"
+    },
+    {
+      "sha": "ee963200e5bb70a0be9860f244622b21a723803d",
+      "subject": "chore(schedule): integrate projection verification fix"
+    },
+    {
+      "sha": "79fe9015fbce13dce7a8feeb88937715274bd605",
+      "subject": "chore(gateflow): accept plan for offline sample evidence"
+    },
+    {
+      "sha": "c393e8027cfa72bf9a2a98f28f9b5ccf5d04e77e",
+      "subject": "feat(strategy): seal and verify consumed sample evidence"
+    },
+    {
+      "sha": "4ab2266b00f68b81cd6787e3318f924822415c5d",
+      "subject": "chore(gateflow): accept aggregate evidence review"
+    },
+    {
+      "sha": "c05a4cb8895b89bd78308728a830bbb67f2d848f",
+      "subject": "chore(schedule): refresh main and verify maintenance exit semantics"
+    },
+    {
+      "sha": "39cb2a40ce1df21f382e2ae784e48ea032c4db49",
+      "subject": "Merge pull request #833 from liuxie066/codex/auto-close-market-clock"
+    },
+    {
+      "sha": "93979b6cac0b92346d042ace36e1fdf43ee509bd",
+      "subject": "fix(strategy): unify sealed capacity and ranking replay evidence"
+    },
+    {
+      "sha": "2f31e13519de4090bfcf4463b0204c41b73e870c",
+      "subject": "Merge pull request #851 from liuxie066/codex/complete-offline-sample-evidence"
+    },
+    {
+      "sha": "3d2a9442589787bc96da129d4d3f9279b0f3993e",
+      "subject": "fix(positions): align list quality checks with effective account"
+    },
+    {
+      "sha": "05dc215186edd897fcb13df3da1f508f00139819",
+      "subject": "Merge pull request #861 from liuxie066/codex/fix-position-query-quality-scope"
+    },
+    {
+      "sha": "ca1f81f722856e3f7378f460ead42f958bce34ea",
+      "subject": "fix(sizing): preserve PM source warnings on inventory failure"
+    },
+    {
+      "sha": "f1c9957b276df8dffd551f61ba93c4c6c8001fde",
+      "subject": "Merge pull request #862 from liuxie066/codex/pm-sizing-error-evidence"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "PM 非富途持仓清单校验失败时保留已验证的上游告警，并传递至 Position Sizing 不可用原因；保留严格数据校验，不补造缺失持仓，也不推断历史原始异常（#862）。",
+      "commits": [
+        "ca1f81f722856e3f7378f460ead42f958bce34ea",
+        "f1c9957b276df8dffd551f61ba93c4c6c8001fde"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "普通 CSP/CC 封存样本补齐实际消费的现金资格、容量、FX 与排序输入证据，离线核验复用原计算和排序；缺失或损坏证据仍报告不足，旧样本不回填，真实新样本验收仍待完成（#851）。",
+      "commits": [
+        "c393e8027cfa72bf9a2a98f28f9b5ccf5d04e77e",
+        "93979b6cac0b92346d042ace36e1fdf43ee509bd",
+        "2f31e13519de4090bfcf4463b0204c41b73e870c"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "持仓列表查询的质量门禁与账本读取共用有效账户，保留嵌套账户优先级、空白回退及 Bot 账户冲突拒绝，避免健康账户的检查放行另一账户的阻断数据（#814）。",
+      "commits": [
+        "3d2a9442589787bc96da129d4d3f9279b0f3993e",
+        "05dc215186edd897fcb13df3da1f508f00139819"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "到期维护按市场本地日期每日运行（US 纽约时间 00:07、HK 香港时间 00:05，含周末），修复固定北京时间早于美股宽限期的问题；支持有界执行重试及停机积压恢复，保留券商终结证据要求与原回执策略（#833）。",
+      "commits": [
+        "ea76f27b25a5b79918cfbefe9fbb200968ad7c1b",
+        "18f357b59bdb8977ff5aef6e13290d57bdb056c9",
+        "c05a4cb8895b89bd78308728a830bbb67f2d848f",
+        "39cb2a40ce1df21f382e2ae784e48ea032c4db49"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "597d9f8313bd84a2cce1a5f13b6935471553ec2a",
+      "reason": "空提交，仅记录已有方案或评审接受，不含代码、配置或运行行为变化。"
+    },
+    {
+      "commit": "5ceb102e0830a44f897eb6d37d9292569574394e",
+      "reason": "空提交，仅记录已有方案或评审接受，不含代码、配置或运行行为变化。"
+    },
+    {
+      "commit": "79fe9015fbce13dce7a8feeb88937715274bd605",
+      "reason": "空提交，仅记录已有方案或评审接受，不含代码、配置或运行行为变化。"
+    },
+    {
+      "commit": "4ab2266b00f68b81cd6787e3318f924822415c5d",
+      "reason": "空提交，仅记录已有方案或评审接受，不含代码、配置或运行行为变化。"
+    },
+    {
+      "commit": "ee963200e5bb70a0be9860f244622b21a723803d",
+      "reason": "分支整合已在 v4.5.1 发布的投影验证修复；相对 v4.5.2 发布基线没有新增投影行为，不重复列出。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "597d9f8313bd84a2cce1a5f13b6935471553ec2a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/833"
+      ]
+    },
+    {
+      "commit": "ea76f27b25a5b79918cfbefe9fbb200968ad7c1b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/833"
+      ]
+    },
+    {
+      "commit": "5ceb102e0830a44f897eb6d37d9292569574394e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/833"
+      ]
+    },
+    {
+      "commit": "18f357b59bdb8977ff5aef6e13290d57bdb056c9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/833"
+      ]
+    },
+    {
+      "commit": "ee963200e5bb70a0be9860f244622b21a723803d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/833"
+      ]
+    },
+    {
+      "commit": "79fe9015fbce13dce7a8feeb88937715274bd605",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/851"
+      ]
+    },
+    {
+      "commit": "c393e8027cfa72bf9a2a98f28f9b5ccf5d04e77e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/851"
+      ]
+    },
+    {
+      "commit": "4ab2266b00f68b81cd6787e3318f924822415c5d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/851"
+      ]
+    },
+    {
+      "commit": "c05a4cb8895b89bd78308728a830bbb67f2d848f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/833"
+      ]
+    },
+    {
+      "commit": "39cb2a40ce1df21f382e2ae784e48ea032c4db49",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/833"
+      ]
+    },
+    {
+      "commit": "93979b6cac0b92346d042ace36e1fdf43ee509bd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/851"
+      ]
+    },
+    {
+      "commit": "2f31e13519de4090bfcf4463b0204c41b73e870c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/851"
+      ]
+    },
+    {
+      "commit": "3d2a9442589787bc96da129d4d3f9279b0f3993e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/861"
+      ]
+    },
+    {
+      "commit": "05dc215186edd897fcb13df3da1f508f00139819",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/861"
+      ]
+    },
+    {
+      "commit": "ca1f81f722856e3f7378f460ead42f958bce34ea",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/862"
+      ]
+    },
+    {
+      "commit": "f1c9957b276df8dffd551f61ba93c4c6c8001fde",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/862"
+      ]
+    }
+  ]
+}
