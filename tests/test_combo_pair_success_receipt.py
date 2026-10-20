@@ -35,9 +35,83 @@ def no_external_io(monkeypatch):
 def _config(config):
     config["notifications"] = {"enabled": True, "provider": "wechat_clawbot",
                                "target": "wechat:offline-combo-test"}
-    config["trade_intake"]["sources"] = [{"enabled": True, "account": "lx",
-                                        "receipt": {"enabled": True}}]
+    config["trade_intake"]["receipt"] = {"enabled": True}
+    config["trade_intake"]["enabled"] = True
+    config["account_settings"]["lx"]["trade_intake_enabled"] = True
     return config
+
+
+def _route_config():
+    return {
+        "accounts": ["paper"],
+        "account_settings": {"paper": {"futu": {
+            "account_id": "9001", "host": "127.0.0.1", "port": 19001, "trd_env": "REAL",
+        }}},
+        "trade_intake": {"enabled": True, "receipt": {"enabled": True}},
+        "notifications": {"enabled": True, "provider": "wechat_clawbot", "target": "wechat:offline-paper"},
+    }
+
+
+def test_raw_config_receipt_route_matches_normalized_dispatch_scope(tmp_path):
+    from src.application.trades.account_mapping import resolve_trade_intake_config
+    from src.application.trades.lifecycle_batch_dispatcher import resolve_lifecycle_receipt_dispatch_scope
+
+    config = _route_config()
+    before = deepcopy(config)
+    assert "sources" not in config["trade_intake"]
+    resolved = resolve_trade_intake_config(config)
+    assert resolve_lifecycle_receipt_dispatch_scope(resolved)["allowed_accounts"] == ["paper"]
+    actual = attribution.observe_combo_confirmation_receipt_route(
+        config=config, account="paper", runtime_root=tmp_path)
+    expected = receipt.resolve_trade_lifecycle_notification_batch_route(config=config, base=tmp_path)
+    assert actual["route_available"] is True
+    assert actual == {key: expected.get(key) for key in (
+        "route_available", "provider", "channel", "target_fingerprint", "route_fingerprint", "attribution_route_key",
+    )}
+    assert config == before
+
+
+@pytest.mark.parametrize("disabled", ["receipt", "intake", "account", "all_disabled_mapping", "unknown", "missing_accounts"])
+def test_receipt_scope_never_uses_legacy_or_injected_sources_to_authorize(tmp_path, monkeypatch, disabled):
+    config = _route_config()
+    account = "paper"
+    if disabled == "receipt":
+        config["trade_intake"]["receipt"]["enabled"] = False
+    elif disabled == "intake":
+        config["trade_intake"]["enabled"] = False
+    elif disabled in {"account", "all_disabled_mapping"}:
+        config["account_settings"]["paper"]["trade_intake_enabled"] = False
+        if disabled == "all_disabled_mapping":
+            config["trade_intake"]["account_mapping"] = {"futu": {"9001": "paper"}}
+    elif disabled == "missing_accounts":
+        del config["accounts"]
+    else:
+        account = "outsider"
+    config["trade_intake"]["sources"] = [{"account": account, "enabled": True, "receipt": {"enabled": True}}]
+    def forbidden(**kwargs):
+        raise AssertionError("disabled account must not resolve notification route")
+    monkeypatch.setattr(receipt, "resolve_trade_lifecycle_notification_batch_route", forbidden)
+    assert attribution.observe_combo_confirmation_receipt_route(
+        config=config, account=account, runtime_root=tmp_path
+    ) == {"route_available": False, "reason": "account_receipt_disabled"}
+
+
+@pytest.mark.parametrize("invalid", ["enabled", "receipt", "mode", "mapping"])
+def test_invalid_receipt_scope_config_is_rejected_before_route_resolution(tmp_path, monkeypatch, invalid):
+    config = _route_config()
+    if invalid == "enabled":
+        config["trade_intake"]["enabled"] = "false"
+    elif invalid == "receipt":
+        config["trade_intake"]["receipt"]["enabled"] = "false"
+    elif invalid == "mode":
+        config["trade_intake"]["mode"] = "unknown"
+    else:
+        config["trade_intake"]["account_mapping"] = {"futu": {"9999": "outsider"}}
+    def forbidden(**kwargs):
+        raise AssertionError("invalid config must not resolve notification route")
+    monkeypatch.setattr(receipt, "resolve_trade_lifecycle_notification_batch_route", forbidden)
+    with pytest.raises(ValueError):
+        attribution.observe_combo_confirmation_receipt_route(config=config, account="paper", runtime_root=tmp_path)
 
 
 def _case(tmp_path, monkeypatch):
@@ -173,16 +247,18 @@ def test_failure_after_publication_rolls_back_confirmation_and_intent(tmp_path, 
     assert repo.get_combo_pair_inference(case[2]["inference_id"])["status"] != "user_confirmed"
 
 
-@pytest.mark.parametrize("disabled", ["notifications", "source", "account", "missing_sender"])
+@pytest.mark.parametrize("disabled", ["notifications", "receipt", "account", "intake", "missing_sender"])
 def test_disabled_confirmation_never_becomes_historical_send_after_enable(tmp_path, monkeypatch, disabled):
     case = _case(tmp_path, monkeypatch)
     repo, config = case[:2]
     if disabled == "notifications":
         config["notifications"]["enabled"] = False
-    elif disabled == "source":
-        config["trade_intake"]["sources"][0]["receipt"]["enabled"] = False
+    elif disabled == "receipt":
+        config["trade_intake"]["receipt"]["enabled"] = False
     elif disabled == "account":
-        config["trade_intake"]["sources"][0]["account"] = "sy"
+        config["account_settings"]["lx"]["trade_intake_enabled"] = False
+    elif disabled == "intake":
+        config["trade_intake"]["enabled"] = False
     else:
         monkeypatch.setattr(receipt, "notification_reminder_route_key", lambda **kwargs: None)
     route = attribution.observe_combo_confirmation_receipt_route(config=config, account="lx", runtime_root=tmp_path)

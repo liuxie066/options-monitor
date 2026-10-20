@@ -95,10 +95,15 @@ def read_trade_attribution_context(repo: Any, *, config: Mapping[str, Any], acco
 def observe_combo_confirmation_receipt_route(
     *, config: Mapping[str, Any], account: str, runtime_root: Path,
 ) -> dict[str, Any]:
+    from src.application.account_config import accounts_from_config, resolve_account_trade_intake_enabled
+    from src.application.trades.account_mapping import resolve_trade_intake_config
     from src.application.trades.lifecycle_batch_dispatcher import resolve_lifecycle_receipt_dispatch_scope
     from src.application.trades.receipt import resolve_trade_lifecycle_notification_batch_route
 
-    scope = resolve_lifecycle_receipt_dispatch_scope(dict(config.get("trade_intake") or {}))
+    if (account not in accounts_from_config(dict(config), fallback=())
+            or not resolve_account_trade_intake_enabled(config, account=account)):
+        return {"route_available": False, "reason": "account_receipt_disabled"}
+    scope = resolve_lifecycle_receipt_dispatch_scope(resolve_trade_intake_config(dict(config)))
     if account not in scope["allowed_accounts"]:
         return {"route_available": False, "reason": "account_receipt_disabled"}
     try:

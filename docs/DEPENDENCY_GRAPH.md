@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1245 (`src`: 570, `domain`: 97, `scripts`: 16, `tests`: 559)
-- Internal import edges: 10387 total, 3941 production/script edges excluding tests
+- Internal import edges: 10391 total, 3943 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -50,7 +50,7 @@ flowchart LR
   scripts -->|2| interfaces
   scripts -->|1| tests
   storage -->|1| domain
-  tests -->|4914| application
+  tests -->|4916| application
   tests -->|624| domain
   tests -->|2| domain_services
   tests -->|314| infrastructure
@@ -88,7 +88,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 4914 |
+| tests | application | 4916 |
 | tests | domain | 624 |
 | tests | interfaces | 354 |
 | tests | infrastructure | 314 |
@@ -111,7 +111,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.trades | domain.domain | 64 |
 | scripts | src.application | 54 |
 | src.application | domain.storage | 45 |
-| src.application.trades | src.application | 43 |
+| src.application.trades | src.application | 44 |
 | src.application | src.application.ledger | 40 |
 | src.application.trades | src.application.ledger | 33 |
 | src.application | domain.domain.engine | 32 |
@@ -195,7 +195,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | domain.domain.symbol_identity | 90 |
 | src.application.agent_tool_config | 75 |
 | domain.domain.trade_contract_identity | 72 |
-| src.application.account_config | 58 |
+| src.application.account_config | 59 |
 | domain.domain.decision_state_fingerprint | 58 |
 | src.infrastructure.io_utils | 56 |
 | domain.domain.option_position_identity | 55 |

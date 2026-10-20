@@ -35,7 +35,7 @@ def test_sy_live_intake_end_to_end(tmp_path, monkeypatch, put_first, market):
         "account_settings": {"sy": {"futu": {"account_id": "2002", "trd_env": "REAL"}}},
         "trade_intake": {
             "combo_reconciliation": {"accounts": {"sy": "auto"}},
-            "sources": [{"enabled": True, "account": "sy", "receipt": {"enabled": True}}],
+            "receipt": {"enabled": True},
         },
         "notifications": {"enabled": True, "provider": "wechat_clawbot", "target": "wechat:offline-sy"},
     }
