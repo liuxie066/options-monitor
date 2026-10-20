@@ -274,6 +274,8 @@ Long Option 完全排除。工具是纯读；业务 `status=partial|unavailable`
 
 `option_positions_read` 不写账本，但当前时点查询可能从 OpenD 读取报价。
 
+`action=list` 支持结构化 `query`；非空白的 `query.account` 优先于顶层 `account`，省略、null 或空白时回退到顶层账户。质量门禁与账本查询使用同一个有效账户，并保留配置账户范围校验。此优先级适用于直接 Tool Gateway；Bot 仍拒绝顶层、嵌套或可信固定账户之间的冲突。
+
 `option_positions_read action=events` 读取 canonical SQLite `trade_events`，不会读取报价：
 
 - `limit` 默认 10，范围为 1–20；`position_effect` 当前只接受 `close`。
