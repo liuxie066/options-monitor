@@ -8,7 +8,7 @@
 
 `runtime.py` 直接使用现有 Python Chat Completions / Responses 适配器。没有历史上下文的首轮使用原生 `tool_choice=required` 要求一次工具调用；已有上下文的追问由模型判断是否需要重读。Host 校验参数和固定范围，调用原有 OM 工具，返回脱敏结果；模型随后直接给出正文。没有 Pi 子进程、IPC、答案提交工具、claims、证据编号准入或目录激活步骤。
 
-工具由现有 registry 与各领域 `TOOLS` 定义；Scene 直接列出 7 个工具：`project_context`、`project_files`、`candidate_filter_explain`、`runtime_runs`、`runtime_logs`、`runtime_status`、`receipt_read`。渠道场景按身份追加 `bot_memory`。不再按 toolset 展开工具，也不构造目录 catalog、snapshot 或 hash。工具仍拥有账户、配置、历史快照、分页和真实状态判断；Bot 不重新计算历史筛选结果。
+工具由现有 registry 与各领域 `TOOLS` 定义；Scene 按 [`om_chat.scene.json`](../src/application/bot/om_chat.scene.json) 的 `tool_selection.names` 固定清单投影只读工具。渠道场景按身份追加 `bot_memory`。不再按 toolset 展开工具，也不构造目录 catalog、snapshot 或 hash。工具仍拥有账户、配置、历史快照、分页和真实状态判断；Bot 不重新计算历史筛选结果。
 
 ## 上下文与记忆
 
