@@ -52,6 +52,14 @@ cd "$REPO_ROOT"
 - 服务化部署时，所有运行产物应位于 `runtime_root`，而不是 release 目录；详见 `DEPLOY.md`
 - `tick-cron` 是正式定时入口，负责锁、超时和触发证据；`run tick` 只用于明确的人工运行
 
+扫描范围：`run tick`、`run tick-cron`、`scan-pipeline` 和 `scan` 省略
+`--symbols` 时扫描配置中的完整标的列表。显式传入 `--symbols ""`、纯空白或
+`--symbols ",,,"` 会在读取扫描配置、预取或创建报告之前报参数错误，不会退化为全量。
+合法列表继续使用 `--symbols NVDA,AMD`；`run tick` / `run tick-cron` 也支持
+`--symbols NVDA AMD`（两个参数）。有效标的旁的空片段仍被忽略，如 `NVDA,,AMD`。
+Tool Gateway 的 `scan_opportunities` 省略 `symbols` 或传入 `[]` 仍表示未筛选；
+非空列表若仅含空片段则返回 `INPUT_ERROR`。
+
 服务化环境的只读巡检：
 
 ```bash

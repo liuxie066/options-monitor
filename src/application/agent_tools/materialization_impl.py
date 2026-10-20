@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.symbol_mutations import split_symbol_whitelist
 from src.application.performance.query_contracts import PerformanceQueryError
 from domain.domain.ledger.position_fields import normalize_account
 from domain.domain.performance.period import (
@@ -280,6 +281,16 @@ def scan_opportunities_tool(
     run_watchlist_pipeline_default,
     scan_summary_rows_fn,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    raw_symbols = payload.get("symbols")
+    symbols_arg = (
+        (",".join(str(item) for item in raw_symbols) if raw_symbols else None)
+        if isinstance(raw_symbols, list)
+        else (str(raw_symbols) if raw_symbols is not None else None)
+    )
+    try:
+        split_symbol_whitelist(symbols_arg)
+    except ValueError as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
     config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
 
     def _log(_msg: str) -> None:
@@ -305,12 +316,6 @@ def scan_opportunities_tool(
 
     top_n = int(payload.get("top_n") or (cfg_loaded.get("outputs", {}) or {}).get("top_n_alerts", 3) or 3)
     runtime = cfg_loaded.get("runtime", {}) or {}
-    raw_symbols = payload.get("symbols")
-    symbols_arg = (
-        ",".join(str(item) for item in raw_symbols)
-        if isinstance(raw_symbols, list)
-        else (str(raw_symbols) if raw_symbols is not None else None)
-    )
     summary_rows = run_watchlist_pipeline_default(
         py=str((repo_base() / ".venv" / "bin" / "python").resolve()),
         base=repo_base(),
