@@ -56,7 +56,7 @@ def _parse_positive_int(value: Any) -> int | None:
         return None
     try:
         parsed = int(float(text))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return parsed if parsed > 0 else None
 

@@ -3132,8 +3132,15 @@ def test_runtime_status_shows_unconfirmed_system_alert_separately(tmp_path: Path
     assert out["summary"]["ok"] is False
 
 
-def test_runtime_status_loads_service_profile_and_masks_external_paths(tmp_path: Path) -> None:
+@pytest.mark.parametrize("timeout", (700, "inf", "-inf", "1e309"))
+def test_runtime_status_loads_service_profile_and_masks_external_paths(
+    tmp_path: Path, monkeypatch, timeout,
+) -> None:
 
+    env_file = tmp_path / "synthetic.env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("OM_ENV_FILE", str(env_file))
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
     report_dir = tmp_path / "reports"
@@ -3163,7 +3170,7 @@ def test_runtime_status_loads_service_profile_and_masks_external_paths(tmp_path:
                 "trigger_source": "om_direct",
                 "trigger_job_id": "hk-direct-11",
                 "delivery": {"mode": "none"},
-                "timeoutSeconds": 700,
+                "timeoutSeconds": timeout,
                 "max_run_age_minutes": 30,
             },
             ensure_ascii=False,
@@ -3181,7 +3188,16 @@ def test_runtime_status_loads_service_profile_and_masks_external_paths(tmp_path:
     assert out["data"]["trigger_context"]["job_id"] == "hk-direct-11"
     assert out["data"]["trigger_context"]["delivery_mode"] == "none"
     assert out["data"]["trigger_context"]["announce_expected"] is False
-    assert out["data"]["trigger_context"]["timeout_seconds"] == 700
+    trigger_context = out["data"]["trigger_context"]
+    assert trigger_context["observed"] is True
+    if timeout == 700:
+        assert trigger_context["timeout_seconds"] == 700
+        assert "timeout_seconds_raw" not in trigger_context
+        assert "timeout_seconds_parse_error" not in trigger_context
+    else:
+        assert trigger_context["timeout_seconds_raw"] == timeout
+        assert trigger_context["timeout_seconds_parse_error"] is True
+        assert "timeout_seconds" not in trigger_context
     assert out["data"]["config"]["config_path"] == ".../config.us.json"
     assert out["data"]["paths"]["report_dir"] == ".../reports"
     assert out["data"]["account_summary"]["accounts"]["user1"]["last_status"] == "account_ok"
