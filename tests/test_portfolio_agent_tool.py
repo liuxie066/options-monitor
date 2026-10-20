@@ -243,6 +243,55 @@ def test_portfolio_query_converts_bad_response_to_agent_tool_error(monkeypatch, 
 
 
 @pytest.mark.parametrize(
+    "success_fields",
+    [{}, {"success": None}, {"success": False}, {"success": "true"},
+     {"success": "false"}, {"success": 0}, {"success": 1},
+     {"success": []}, {"success": {}}],
+    ids=["missing", "null", "false", "true-string", "false-string",
+         "zero", "one", "list", "object"],
+)
+def test_portfolio_accounts_rejects_malformed_success_before_freshness(
+    monkeypatch, success_fields
+) -> None:
+    response = {
+        **success_fields,
+        "accounts": ["sample"],
+        "count": 1,
+        "retrieved_at_utc": "2026-10-20T00:00:00Z",
+        "freshness": {
+            "status": "fresh",
+            "trust_status": "trusted",
+            "observed_at_utc": "2026-10-20T00:00:00Z",
+            "dataset_ids": ["pm.accounts"],
+            "reason_codes": [],
+        },
+    }
+    calls = []
+
+    def respond(request, timeout):
+        calls.append(request)
+        return _Response(response)
+
+    monkeypatch.setattr(portfolio.urllib.request, "urlopen", respond)
+    with pytest.raises(AgentToolError, match="success=true") as raised:
+        _tool("portfolio_query").call({"view": "accounts"})
+
+    assert raised.value.code == "PORTFOLIO_MANAGEMENT_INCOMPATIBLE"
+    assert len(calls) == 1
+
+
+def test_portfolio_health_preserves_unversioned_success_contract(monkeypatch) -> None:
+    data, warnings, _, seen = _call(
+        {"view": "health"}, monkeypatch, {"status": "ok"}
+    )
+
+    assert data["status"] == "ok"
+    assert data["freshness"]["status"] == "fresh"
+    assert warnings == []
+    assert urlsplit(seen["request"].full_url).path == "/health"
+
+
+@pytest.mark.parametrize(
     "failure",
     [
         urllib.error.URLError("connection refused"),
@@ -398,6 +447,6 @@ def test_portfolio_closed_account_matrix_before_transport(monkeypatch, view, sel
 
 @pytest.mark.parametrize("view", ["health", "accounts", "overview", "distribution"])
 def test_portfolio_empty_optional_account_keeps_unscoped_default(monkeypatch, view):
-    data, _, _, seen = _call({"view": view, "account": " "}, monkeypatch, {})
+    data, _, _, seen = _call({"view": view, "account": " "}, monkeypatch, {"success": True})
     assert data["scope"] == {"view": view}
     assert "account" not in parse_qs(urlsplit(seen["request"].full_url).query)
