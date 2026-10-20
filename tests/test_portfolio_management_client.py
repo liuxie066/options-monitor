@@ -121,6 +121,43 @@ def test_non_futu_client_posts_scope_and_accepts_consistent_inventory() -> None:
     assert result["scope"]["holding_counts"]["lx"]["included"] == 1
 
 
+@pytest.mark.parametrize("status", ["unavailable", "partial"])
+def test_non_futu_inventory_failure_preserves_source_warning(status) -> None:
+    receipt = _valuation_receipt(["sy"])
+    receipt.update(status=status, warnings=["sy: holdings read timed out"])
+    receipt["scope"].update(holdings_scope="non_futu", broker_inventory={}, holding_counts={})
+    receipt["account_status"][0].update(status="unavailable", warnings=receipt["warnings"])
+    client = PortfolioManagementClient(urlopen_fn=lambda *_args, **_kwargs: _Response(receipt))
+
+    with pytest.raises(PortfolioManagementProtocolError) as raised:
+        client.read_valuation_evidence(
+            accounts=["sy"], supplemental_codes=[], price_timeout=10, holdings_scope="non_futu"
+        )
+
+    assert "PM non_futu broker inventory account mismatch" in str(raised.value)
+    assert "sy: holdings read timed out" in str(raised.value)
+
+
+@pytest.mark.parametrize("mutation,error", [
+    (lambda item: item["scope"].update(accounts=["sy"]), "account scope mismatch"),
+    (lambda item: item["account_status"][0].update(account="sy"), "account status scope mismatch"),
+    (lambda item: item.update(warnings=[{"error": "invalid warning"}]), "warnings must be strings"),
+])
+def test_non_futu_rejects_invalid_warning_envelope_before_inventory(mutation, error) -> None:
+    receipt = _non_futu_receipt()
+    receipt["scope"]["broker_inventory"] = {}
+    receipt["warnings"] = ["unverified source warning"]
+    mutation(receipt)
+    client = PortfolioManagementClient(urlopen_fn=lambda *_args, **_kwargs: _Response(receipt))
+
+    with pytest.raises(PortfolioManagementProtocolError, match=error) as raised:
+        client.read_valuation_evidence(
+            accounts=["lx"], supplemental_codes=[], price_timeout=10, holdings_scope="non_futu"
+        )
+
+    assert "unverified source warning" not in str(raised.value)
+
+
 def _accepted_receipt(**overrides) -> dict:
     return {
         "success": True,

@@ -490,6 +490,52 @@ def test_query_preserves_futu_baseline_when_portfolio_source_is_down(monkeypatch
     assert "service down" in result["warnings"]
 
 
+def test_pm_read_failure_survives_client_preparation_and_position_sizing(monkeypatch, tmp_path):
+    from domain.domain.short_vol_assessment import portfolio_concentration_fields
+    from src.application.short_vol_risk_context import build_portfolio_risk_context
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+    from src.infrastructure.portfolio_management_client import PortfolioManagementClient
+
+    _patch_positions(monkeypatch, [], holdings_enabled=True)
+    receipt = _valuation_response()
+    source_error = "lx: Feishu holdings read timed out"
+    receipt.update(status="unavailable", warnings=[source_error])
+    receipt["freshness"].update(status="unavailable", trust_status="unavailable")
+    receipt["scope"].update(holdings_scope="non_futu", broker_inventory={}, holding_counts={})
+    receipt["account_status"][0].update(status="unavailable", warnings=[source_error])
+    client = PortfolioManagementClient(urlopen_fn=lambda *_args, **_kwargs: _Response(receipt))
+    monkeypatch.setattr(application, "resolve_portfolio_management_client", lambda *_args, **_kwargs: client)
+    context = cash_portfolio({
+        "cash_by_currency": {"CNY": 10000}, "source_observed_at": "2026-07-24T01:00:00Z",
+    }, evaluated_at=application.datetime.now(timezone.utc))
+    _, _, config = application._load_runtime_and_positions(["lx"])
+    prepared = application.prepare_position_sizing_evidence(
+        context=context, runtime_config=config, account="lx",
+        fx_observation=application.current_exchange_rate_snapshot(),
+    )
+    evidence = prepared["position_sizing_evidence"]
+    assert evidence["status"] == "partial"
+    assert evidence["pm_supplement"]["status"] == "missing"
+    assert any(source_error in warning for warning in evidence["warnings"])
+    assert any(source_error in reason for reason in evidence["freshness"]["reason_codes"])
+    assert prepared["cash_by_currency"] == context["cash_by_currency"]
+    prepared["option_ctx"] = {
+        "context_status": "available", "decision_snapshot_status": "trusted", "assignment_positions": [],
+    }
+    fields = portfolio_concentration_fields(
+        {"symbol": "NVDA", "strike": 8, "multiplier": 100, "currency": "CNY", "net_income_cny": 50},
+        mode="put", risk_ctx=build_portfolio_risk_context(
+            portfolio_ctx=prepared, exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+        ),
+    )
+    assert source_error in fields["concentration_unavailable_reason"]
+    assert fields["concentration_evaluable"] is False
+    assert all(fields[key] is None for key in (
+        "symbol_concentration_current", "symbol_concentration_after_existing_assignments", "symbol_concentration_after",
+    ))
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_scoped_old_pm_input_error_is_source_failure() -> None:
     from src.infrastructure.portfolio_management_client import PortfolioManagementHTTPError
 
