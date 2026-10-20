@@ -55,6 +55,44 @@ def _patch_runtime_bootstrap(monkeypatch, mod, runtime_root: Path, run_logger, g
     monkeypatch.setattr(mod, "run_tick_guard_flow", guard)
 
 
+@pytest.mark.parametrize("timeout", ("inf", "-inf", "1e309"))
+def test_invalid_trigger_timeout_reaches_run_logger(monkeypatch, tmp_path, timeout: str) -> None:
+    from src.application import multi_account_tick as mod
+
+    config = tmp_path / "config.us.json"
+    _write_market_config(config, "us", [])
+    runtime_root = tmp_path / "runtime"
+    _patch_config_bootstrap(monkeypatch, mod)
+    monkeypatch.setattr(
+        mod, "resolve_runtime_root", lambda **_kwargs: SimpleNamespace(runtime_root=runtime_root)
+    )
+    monkeypatch.setenv("OM_TIMEOUT_SECONDS", timeout)
+    contexts = []
+
+    def trigger_kind(**kwargs):
+        contexts.append(kwargs["trigger_context"])
+        return "manual"
+
+    class ReachedRunLogger(Exception):
+        pass
+
+    def run_logger(base):
+        assert base == runtime_root
+        raise ReachedRunLogger
+
+    monkeypatch.setattr(mod, "_resolve_daily_brief_trigger_kind", trigger_kind)
+    monkeypatch.setattr(mod, "RunLogger", run_logger)
+    with pytest.raises(ReachedRunLogger):
+        mod.main(["--config", str(config), "--accounts", "lx", "--no-send"])
+
+    assert len(contexts) == 1
+    assert contexts[0]["timeout_seconds_raw"] == timeout
+    assert contexts[0]["timeout_seconds_parse_error"] is True
+    assert contexts[0]["observed"] is True
+    assert "timeout_seconds" not in contexts[0]
+    assert not runtime_root.exists()
+
+
 def test_run_tick_forwards_cli_argv_and_returns_main_exit_code(monkeypatch) -> None:
     from src.application import multi_account_tick as mod
 
