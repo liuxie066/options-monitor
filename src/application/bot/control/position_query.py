@@ -281,7 +281,10 @@ def _parse_expiration_before(
     month: str | None,
     exact: str | None,
 ) -> str | None:
-    if "前" not in compact and "before" not in text.lower():
+    # Protect date prefixes such as 前2026-06-29 before removing quantity clauses.
+    cutoff_text = _DATE_RE.sub("<date>", text)
+    cutoff_text = _LIMIT_RE.sub("", cutoff_text)
+    if "前" not in cutoff_text and "before" not in cutoff_text.lower():
         return None
     if exact:
         return exact

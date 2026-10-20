@@ -2,13 +2,18 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from src.application.agent_tool_contracts import build_response
+from src.application.agent_tools.operations_impl import option_positions_read_tool
+from src.application.bot.control.command_parser import parse_bot_control_command
 from src.application.bot.control.contracts import BotInboundRequest, ControlCommand
 from src.application.bot.control.inbound_control import execute_explicit_control
 from src.application.bot.control.operation_store import InboundOperationStore
 from src.application.bot.control.position_query import parse_position_query_text, position_query_intent_arguments
-from src.application.ledger.read_model import list_position_rows
+from src.application.ledger.api import list_position_rows
 
 
 def _lot(record_id: str, **fields) -> dict:
@@ -70,6 +75,144 @@ def test_position_query_parser_treats_detail_synonyms_as_plain_open_list() -> No
             "status": "open",
             "limit": 50,
         }
+
+
+@pytest.mark.parametrize(("date_clause", "limit"), [
+    ("2026-06-29", 50),
+    ("2026-06-29 前10条", 10),
+    ("2026-06-29 前10个", 10),
+    ("2026-06-29 前10", 10),
+    ("2026-06-29 前 10 条", 10),
+    ("前10条 2026-06-29", 10),
+    ("2026/06/29 前10条", 10),
+    ("2026.06.29 前10条", 10),
+    ("2026-06-29 前10条 前20个", 10),
+    ("2026-06-29 limit 10", 10),
+    ("2026-06-29 LIMIT10", 10),
+    ("2026-06-29 前0条", 1),
+    ("2026-06-29 前100条", 100),
+    ("2026-06-29 前999条", 500),
+])
+def test_position_query_quantity_preserves_exact_expiration(date_clause: str, limit: int) -> None:
+    # An explicit symbol isolates expiration from the existing numeric-symbol parser behavior.
+    command = parse_bot_control_command(
+        f"/positions account-a NVDA put short strike 100 all {date_clause} 30天内",
+        now_fn=lambda: date(2026, 6, 1), accounts=["account-a"],
+    )
+
+    assert command is not None
+    assert command.arguments == {
+        "account": "account-a", "status": "all", "symbol": "NVDA", "option_type": "put",
+        "side": "short", "strike": 100.0, "expiration": {"exact": "2026-06-29", "within_days": 30},
+        "limit": limit,
+    }
+
+
+@pytest.mark.parametrize(("date_clause", "before", "limit"), [
+    ("2026-06-29前", "2026-06-29", 50),
+    ("2026-06-29之前 前10条", "2026-06-29", 10),
+    ("前2026-06-29", "2026-06-29", 202),
+    ("前 2026-06-29", "2026-06-29", 202),
+    ("前2026-06-29 10条", "2026-06-29", 202),
+    ("前2026/06/29 前10条", "2026-06-29", 202),
+    ("前2026.06.29 前10条", "2026-06-29", 202),
+    ("2026-06-29前 前10条", "2026-06-29", 10),
+    ("before 2026-06-29 前10条", "2026-06-29", 10),
+    ("2026-06-29 BEFORE 前10条", "2026-06-29", 10),
+    ("前10条 前2026-06-29 前20个", "2026-06-29", 10),
+    ("6月底前 前10条", "2026-06-30", 10),
+    ("本月月末前 前10条", "2026-06-30", 10),
+])
+def test_position_query_quantity_preserves_genuine_cutoff(date_clause: str, before: str, limit: int) -> None:
+    command = parse_bot_control_command(
+        f"/positions account-a NVDA {date_clause}",
+        now_fn=lambda: date(2026, 6, 1), accounts=["account-a"],
+    )
+
+    assert command is not None
+    assert command.arguments == {
+        "account": "account-a", "status": "open", "symbol": "NVDA",
+        "expiration": {"before": before}, "limit": limit,
+    }
+
+
+@pytest.mark.parametrize("date_clause", ["2026-06 前10条", "6月 前10个", "本月 前10", "2026/06 limit 10"])
+def test_position_query_quantity_preserves_month(date_clause: str) -> None:
+    command = parse_bot_control_command(
+        f"/positions account-a {date_clause}",
+        now_fn=lambda: date(2026, 6, 1), accounts=["account-a"],
+    )
+
+    assert command is not None
+    assert command.arguments == {
+        "account": "account-a", "status": "open", "expiration": {"month": "2026-06"}, "limit": 10,
+    }
+
+
+@pytest.mark.parametrize(("date_clause", "expiration", "expected_ids"), [
+    ("2026-06-29 前10条", {"exact": "2026-06-29"}, ["target"]),
+    ("2026-06-29 limit 10", {"exact": "2026-06-29"}, ["target"]),
+    ("2026-06-29前 前10条", {"before": "2026-06-29"}, [f"earlier-{i:02d}" for i in range(1, 11)]),
+    ("2026-06-29前 前20条", {"before": "2026-06-29"}, [*[f"earlier-{i:02d}" for i in range(1, 11)], "target"]),
+])
+def test_position_query_command_limit_does_not_displace_exact_date(
+    tmp_path: Path, date_clause: str, expiration: dict, expected_ids: list[str],
+) -> None:
+    class QueryRepo:
+        ledger_store = SimpleNamespace(to_dict=lambda: {"kind": "synthetic-in-memory"})
+
+        def list_position_lots(self) -> list[dict]:
+            return [
+                _lot("target", account="account-a", symbol="NVDA", option_type="put", side="short", status="open",
+                     strike=100, expiration_ymd="2026-06-29", contracts=1, contracts_open=1),
+                *[_lot(f"earlier-{i:02d}", account="account-a", symbol="NVDA", option_type="put", side="short",
+                       status="open", strike=100, expiration_ymd=f"2026-06-{i:02d}", contracts=1, contracts_open=1)
+                  for i in range(1, 11)],
+            ]
+
+    def forbid(*_args, **_kwargs):
+        raise AssertionError("position query entered writer or provider adapter")
+
+    calls = []
+
+    def execute_tool(tool_name: str, payload: dict) -> dict:
+        calls.append((tool_name, payload))
+        data, warnings, meta = option_positions_read_tool(
+            payload,
+            load_runtime_config=lambda **kw: (tmp_path / "config.json", {"accounts": ["account-a"]}),
+            resolve_public_data_config_path=lambda *a: tmp_path / "data.json",
+            normalize_broker=lambda value: "富途", normalize_account=lambda value: value.lower(),
+            refresh_assigned_stock_quotes=forbid,
+            resolve_option_positions_repo=lambda **kw: (tmp_path / "data.json", QueryRepo()),
+            list_position_rows=list_position_rows, build_lot_event_history=forbid,
+            inspect_projection_state=forbid, repo_base=lambda: tmp_path, mask_path=str,
+        )
+        return build_response(tool_name=tool_name, ok=True, data=data, warnings=warnings, meta=meta)
+
+    text = f"/positions account-a {date_clause}"
+    command = parse_bot_control_command(text, now_fn=lambda: date(2026, 6, 1), accounts=["account-a"])
+    assert command is not None
+    control = execute_explicit_control(
+        command, request=BotInboundRequest(text=text, sender_id="synthetic", config_key="us"),
+        command_id="position-query-limit", operation_store=InboundOperationStore(tmp_path / "inbound.sqlite3"),
+        execute_tool_fn=execute_tool,
+    )
+
+    limit = 20 if "前20条" in date_clause else 10
+    assert calls == [("option_positions_read", {
+        "config_key": "us", "action": "list",
+        "query": {"account": "account-a", "status": "open", "expiration": expiration, "limit": limit},
+    })]
+    assert control.ok and control.executed and not control.requires_confirmation
+    assert control.result is not None
+    data = control.result["data"]
+    assert [row["lot_id"] for row in data["rows"]] == expected_ids
+    assert data["row_count"] == len(expected_ids)
+    assert data["filters"]["query"]["expiration"] == {
+        "exact": expiration.get("exact"), "before": expiration.get("before"),
+        "month": None, "after": None, "within_days": None,
+    }
+    assert list(tmp_path.iterdir()) == []
 
 
 def _execute_control(command: ControlCommand, request: BotInboundRequest, tmp_path: Path):
