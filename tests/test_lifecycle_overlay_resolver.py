@@ -3,7 +3,10 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+import pytest
+
 from src.application.ledger.lifecycle_overlay import (
+    LifecycleOverlayContractError,
     advance_direct_lifecycle_anchor_resolution,
     lifecycle_case_generation_token,
     lifecycle_case_resolution,
@@ -151,16 +154,174 @@ def _resolve(
     evidence: list[dict[str, Any]],
     claims: list[dict[str, Any]],
     lots: list[dict[str, Any]],
+    allocations: list[dict[str, Any]] | None = None,
+    effective_void_event_ids: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     return resolve_account_lifecycle_overlay(
         account="lx",
         cases=cases,
         evidence=evidence,
-        allocations=[],
+        allocations=allocations or [],
         source_claims=claims,
         timing_policies=[],
         position_lots=lots,
+        effective_void_event_ids=effective_void_event_ids,
     )
+
+
+@pytest.mark.parametrize("capacity,quantities", [(2, (1, 1)), (3, (1, 1)), (3, (1, 1, 1))])
+@pytest.mark.parametrize("incremental", [False, True])
+def test_same_lot_distinct_sources_accumulate_within_capacity(capacity, quantities, incremental) -> None:
+    case = _case("case-a", {"lot-1": capacity})
+    pairs = [_direct_anchor(case_id="case-a", evidence_id=f"evidence-{i}", source_suffix=f"deal-{i}",
+                            manifest={"lot-1": quantity}, received_at_ms=1_700_000_000_200 + i)
+             for i, quantity in enumerate(quantities)]
+    results = []
+    for ordered in (pairs, list(reversed(pairs))):
+        if incremental:
+            result = lifecycle_case_resolution(_resolve(
+                cases=[case], evidence=[], claims=[], lots=[_lot("lot-1", capacity)]), case_id="case-a")
+            for evidence, claim in ordered:
+                result = advance_direct_lifecycle_anchor_resolution(
+                    lifecycle_case=case, prior_resolution=result, evidence=evidence, source_claim=claim)
+        else:
+            result = lifecycle_case_resolution(_resolve(
+                cases=[case], evidence=[p[0] for p in ordered], claims=[p[1] for p in ordered],
+                lots=[_lot("lot-1", capacity)]), case_id="case-a")
+        assert result["status"] == "direct"
+        assert result["reason_codes"] == []
+        assert result["requested_reservations_by_lot"] == {"lot-1": sum(quantities)}
+        assert result["effective_reservations_by_lot"] == {"lot-1": sum(quantities)}
+        assert len(result["anchor_facts"]) == len(quantities)
+        results.append(result)
+    assert results[0] == results[1]
+    full = lifecycle_case_resolution(_resolve(
+        cases=[case], evidence=[p[0] for p in pairs], claims=[p[1] for p in pairs],
+        lots=[_lot("lot-1", capacity)]), case_id="case-a")
+    assert results[0] == full
+
+
+@pytest.mark.parametrize("new_quantity", [1, 2])
+@pytest.mark.parametrize("void_mode", ["active", "terminal_void", "allocation_void"])
+def test_gross_anchor_capacity_is_independent_of_net_allocations(new_quantity, void_mode) -> None:
+    case = _case("case-a", {"lot-1": 2})
+    first, claim_1 = _direct_anchor(case_id="case-a", evidence_id="first", source_suffix="first",
+        manifest={"lot-1": 1}, received_at_ms=1_700_000_000_200)
+    second, claim_2 = _direct_anchor(case_id="case-a", evidence_id="second", source_suffix="second",
+        manifest={"lot-1": new_quantity}, received_at_ms=1_700_000_000_300)
+    allocation = {"allocation_id": "allocation-1", "case_id": "case-a", "evidence_id": "first",
+        "target_lot_id": "lot-1", "contracts_allocated": 1, "canonical_terminal_event_id": "terminal-1",
+        "voided": void_mode == "allocation_void"}
+    inputs = {"cases": [case], "lots": [_lot("lot-1", 2)], "allocations": [allocation],
+              "effective_void_event_ids": ("terminal-1",) if void_mode == "terminal_void" else ()}
+    prior = lifecycle_case_resolution(_resolve(evidence=[first], claims=[claim_1], **inputs), case_id="case-a")
+    assert prior["requested_reservations_by_lot"] == ({} if void_mode == "active" else {"lot-1": 1})
+    advanced = advance_direct_lifecycle_anchor_resolution(
+        lifecycle_case=case, prior_resolution=prior, evidence=second, source_claim=claim_2)
+    full = lifecycle_case_resolution(_resolve(evidence=[first, second], claims=[claim_1, claim_2], **inputs),
+                                     case_id="case-a")
+    for result in (advanced, full):
+        if new_quantity == 2:
+            assert result["status"] == "conflict"
+            assert result["reason_codes"] == ["lifecycle_anchor_target_quantity_invalid"]
+            assert result["effective_reservations_by_lot"] == {}
+        else:
+            assert result["status"] == "direct"
+            assert result["requested_reservations_by_lot"] == {"lot-1": 1 if void_mode == "active" else 2}
+            assert len(result["anchor_facts"]) == 2
+    assert advanced == full
+
+
+def test_same_lot_anchor_replay_preserves_source_identity() -> None:
+    case = _case("case-a", {"lot-1": 2})
+    first, claim = _direct_anchor(case_id="case-a", evidence_id="first", source_suffix="same-source",
+        manifest={"lot-1": 1}, received_at_ms=1_700_000_000_200)
+    prior = lifecycle_case_resolution(_resolve(cases=[case], evidence=[first], claims=[claim],
+        lots=[_lot("lot-1", 2)]), case_id="case-a")
+    assert advance_direct_lifecycle_anchor_resolution(
+        lifecycle_case=case, prior_resolution=prior, evidence=first, source_claim=claim) == prior
+    changed, changed_claim = _direct_anchor(case_id="case-a", evidence_id="changed", source_suffix="same-source",
+        manifest={"lot-1": 1}, received_at_ms=1_700_000_000_300)
+    rejected = advance_direct_lifecycle_anchor_resolution(
+        lifecycle_case=case, prior_resolution=prior, evidence=changed, source_claim=changed_claim)
+    assert rejected["reason_codes"] == ["direct_anchor_source_collision"]
+    assert rejected["effective_reservations_by_lot"] == {}
+    with pytest.raises(LifecycleOverlayContractError, match="duplicate"):
+        _resolve(cases=[case], evidence=[first, changed], claims=[claim, changed_claim], lots=[_lot("lot-1", 2)])
+
+
+@pytest.mark.parametrize("duplicate", ["cases", "evidence", "claims"])
+def test_duplicate_raw_anchor_rows_are_not_coalesced(duplicate) -> None:
+    evidence, claim = _direct_anchor(case_id="case-a", evidence_id="first", source_suffix="first",
+        manifest={"lot-1": 1}, received_at_ms=1_700_000_000_200)
+    rows = {"cases": [_case("case-a", {"lot-1": 2})], "evidence": [evidence], "claims": [claim],
+            "lots": [_lot("lot-1", 2)]}
+    rows[duplicate].append(deepcopy(rows[duplicate][0]))
+    with pytest.raises(LifecycleOverlayContractError, match="duplicate"):
+        _resolve(**rows)
+
+
+@pytest.mark.parametrize("invalid,reason", [
+    ("unknown_lot", "lifecycle_anchor_target_quantity_invalid"),
+    ("nonpositive", "direct_anchor_evidence_invalid"),
+    ("original_capacity", "lifecycle_target_quantity_invalid"),
+    ("excess_allocation", "lifecycle_allocation_exceeds_anchor"),
+    ("claim_hash", "direct_anchor_source_claim_invalid"),
+    ("claim_account", "direct_anchor_source_claim_invalid"),
+])
+def test_same_lot_capacity_repair_keeps_invalid_input_guards(invalid, reason) -> None:
+    case = _case("case-a", {"lot-1": 2})
+    evidence, claim = _direct_anchor(case_id="case-a", evidence_id="first", source_suffix="first",
+        manifest={"other-lot" if invalid == "unknown_lot" else "lot-1": 1}, received_at_ms=1_700_000_000_200)
+    allocations = []
+    if invalid == "nonpositive":
+        evidence["target_contracts_by_lot"] = {"lot-1": 0}
+    elif invalid == "excess_allocation":
+        allocations = [{"allocation_id": "allocation-1", "case_id": "case-a", "target_lot_id": "lot-1",
+                        "contracts_allocated": 2}]
+    elif invalid == "claim_hash":
+        claim["source_payload_hash"] = "invalid"
+    elif invalid == "claim_account":
+        case["futu_account_id"] = "different-account"
+    result = lifecycle_case_resolution(_resolve(cases=[case], evidence=[evidence], claims=[claim],
+        allocations=allocations, lots=[_lot("lot-1", 1 if invalid == "original_capacity" else 2)]), case_id="case-a")
+    assert result["status"] == "conflict"
+    assert result["reason_codes"] == [reason]
+    assert result["effective_reservations_by_lot"] == {}
+
+
+@pytest.mark.parametrize("mode", ["valid", "mixed", "competing_claim"])
+def test_same_lot_repair_preserves_bridge_ownership(mode) -> None:
+    case = _case("case-a", {"lot-1": 2})
+    evidence, claims, legacy = _bridge_anchor(case_id="case-a", legacy_case_id="legacy", manifest={"lot-1": 2})
+    direct, claim = _direct_anchor(case_id="case-a", evidence_id="direct", source_suffix="direct",
+        manifest={"lot-1": 1}, received_at_ms=1_700_000_000_300)
+    if mode == "mixed":
+        evidence.append(direct)
+    if mode != "valid":
+        claims.append(claim)
+    result = lifecycle_case_resolution(_resolve(cases=[case, legacy], evidence=evidence, claims=claims,
+        lots=[_lot("lot-1", 2)]), case_id="case-a")
+    if mode == "valid":
+        assert result["status"] == "bridged"
+        assert result["effective_reservations_by_lot"] == {"lot-1": 2}
+    else:
+        assert result["status"] == "conflict"
+        assert result["effective_reservations_by_lot"] == {}
+        assert result["reason_codes"] == ["direct_and_migration_bridge_conflict" if mode == "mixed"
+                                          else "migration_bridge_competing_owner_claim"]
+
+
+def test_valid_same_case_partials_do_not_relax_cross_case_contention() -> None:
+    pairs = [_direct_anchor(case_id=case_id, evidence_id=str(i), source_suffix=str(i),
+        manifest={"lot-1": 1}, received_at_ms=1_700_000_000_200 + i)
+        for i, case_id in enumerate(("case-a", "case-a", "case-b"))]
+    result = _resolve(cases=[_case("case-a", {"lot-1": 3}), _case("case-b", {"lot-1": 3})],
+        evidence=[p[0] for p in pairs], claims=[p[1] for p in pairs], lots=[_lot("lot-1", 3)])
+    for case_id in ("case-a", "case-b"):
+        resolution = lifecycle_case_resolution(result, case_id=case_id)
+        assert resolution["reason_codes"] == ["reservation_target_overlap"]
+        assert resolution["effective_reservations_by_lot"] == {}
 
 
 def test_disjoint_direct_anchors_are_canonical_and_order_stable() -> None:

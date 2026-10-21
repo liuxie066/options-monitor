@@ -78,7 +78,7 @@ def _oracle(repo: SQLiteOptionPositionsRepository, *, account: str = ACCOUNT, no
 
 def _authority(repo: SQLiteOptionPositionsRepository) -> dict[str, Any]:
     cases = repo.list_trade_lifecycle_cases()
-    return {"events": repo.list_trade_events(), "cases": {
+    return {"events": repo.list_trade_events(), "source_claims": repo.list_trade_lifecycle_source_consumptions(), "cases": {
         case["case_id"]: {"allocations": repo.list_trade_lifecycle_allocations(case_id=case["case_id"]),
                           "evidence": repo.list_trade_lifecycle_evidence(case_id=case["case_id"])}
         for case in cases}}
@@ -145,15 +145,71 @@ def test_partial_close_allocations_are_summed_once(tmp_path: Path) -> None:
     for model in (direct, compact):
         assert model["pending_close_contracts_by_lot"] == {lot_id: 2}
         assert model["remaining_contracts_by_lot"] == {lot_id: 1}
-    # #671 owns the existing overlapping-anchor conflict and incremental reason mismatch.
-    assert direct["reason_state"] == "conflict"
-    assert "direct_anchor_manifest_overlap" in direct["lifecycle_reason_codes"]
+        assert model["reason_state"] == "cause_pending"
+    assert "direct_anchor_manifest_overlap" not in direct["lifecycle_reason_codes"]
     before = _authority(repo)
     _rebuild(repo)
     replay = resolve_lifecycle_trade_deal(second_deal, repo=repo, apply_changes=True, notification_status="suppressed")
     assert replay is not None and replay.status == "skipped", replay
-    _assert_pending(repo, case_id, lot_id, pending=2, remaining=1, reason=direct["reason_state"])
+    _assert_pending(repo, case_id, lot_id, pending=2, remaining=1)
     assert _authority(repo) == before
+
+
+def test_split_full_close_preserves_pending_reason_source_replay_and_void(tmp_path: Path) -> None:
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    lot_id = _open(repo, contracts=2)
+    other_lot = _open(repo, account="other", contracts=2)
+    _rebuild(repo)
+    other_state = repo.read_current_decision_storage_state("other")
+    other_payload = api.read_current_decision_projection(repo, account="other", now_ms=NOW)["payload"]
+    case_id, _ = _close(repo, execution="first")
+    first_facts = api.lifecycle_case_coherent_facts(repo, case_id=case_id)
+    assert first_facts["case_resolution"]["status"] == "direct"
+    first_sources = {row["source_key"] for row in repo.list_trade_lifecycle_source_consumptions()}
+    second_case, second_deal = _close(repo, execution="second")
+    assert second_case == case_id
+    facts = api.lifecycle_case_coherent_facts(repo, case_id=case_id)
+    assert facts["case_resolution"]["status"] == "direct"
+    assert facts["case_resolution"]["reason_codes"] == []
+    assert len(facts["case_resolution"]["anchor_facts"]) == 2
+    assert repo.get_position_lot_fields(lot_id)["contracts_open"] == 0
+    _assert_pending(repo, case_id, lot_id, pending=2)
+    before = _authority(repo)
+    replay = resolve_lifecycle_trade_deal(second_deal, repo=repo, apply_changes=True, notification_status="suppressed")
+    assert replay is not None and replay.status == "skipped", replay
+    excess = resolve_lifecycle_trade_deal(_deal(execution="excess"), repo=repo,
+                                          apply_changes=True, notification_status="suppressed")
+    assert excess is not None and excess.status == "unresolved", excess
+    assert excess.reason == "lifecycle_close_target_not_found"
+    assert _authority(repo) == before
+    assert repo.read_current_decision_storage_state("other")["generation"] == other_state["generation"]
+    assert repo.get_position_lot_fields(other_lot)["contracts_open"] == 2
+    _rebuild(repo)
+    _assert_pending(repo, case_id, lot_id, pending=2)
+    assert api.verify_current_decision_projection_migration(repo.db_path, now_ms=NOW)["status"] == "valid"
+    assert _rebuild(repo)["write_applied"] is False
+    assert _authority(repo) == before
+
+    second_claim = next(row for row in before["source_claims"] if row["source_key"] not in first_sources)
+    terminal = next(row["canonical_terminal_event_id"] for row in repo.list_trade_lifecycle_allocations(case_id=case_id)
+                    if row["evidence_id"] == second_claim["owner_evidence_id"])
+    api.record_trade_event_void(repo, event_id=terminal, reason="synthetic partial-close void")
+    voided_authority = _authority(repo)
+    assert voided_authority["source_claims"] == before["source_claims"]
+    replay = resolve_lifecycle_trade_deal(second_deal, repo=repo, apply_changes=True, notification_status="suppressed")
+    assert replay is not None and replay.status == "skipped", replay
+    assert _authority(repo) == voided_authority
+    _rebuild(repo)
+    _assert_pending(repo, case_id, lot_id, pending=1, remaining=1)
+    assert _authority(repo) == voided_authority
+    assert repo.get_position_lot_fields(other_lot)["contracts_open"] == 2
+    other_after = api.read_current_decision_projection(repo, account="other", now_ms=NOW)
+    assert other_after["status"] == "trusted"
+    # Global position source generations and publication clocks legitimately advance.
+    for field in ("assigned_stock", "combo", "lifecycle", "lifecycle_quality", "source_bindings"):
+        assert other_after["payload"][field] == other_payload[field]
+    for field in ("position_lots_fingerprint", "position_lots_generation", "active_lot_count", "lot_count"):
+        assert other_after["payload"]["position_binding"][field] == other_payload["position_binding"][field]
 
 
 def test_rebuild_keeps_pending_cases_and_accounts_separate(tmp_path: Path) -> None:
