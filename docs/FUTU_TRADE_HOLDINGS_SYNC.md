@@ -743,6 +743,12 @@ Lifecycle discovery 只冻结到期 lot 并创建 immutable case，不刷新已�
 无 option-close anchor 的 case 在 canonical deadline 后仍 fail closed 为人工复核，但不因
 legacy discovery 重放而改写 broker timing policy 口径。
 
+`om option-positions lifecycle reconcile` 在发现 case 前读取并校验显式提供的
+`--evidence-json`，以及有 evidence 时才消费的可选 `--config`；这些输入加载失败时
+不进入本次 discovery/reconciliation。无 evidence 仍独立发现 case，合法空对象
+`{}` 仍交给业务校验并可返回 `needs_review`。该顺序不改变前置仓库恢复，也不保证
+后续业务失败时整条命令回滚；已有 case 不会因此被清除。
+
 History backfill 只从本次查询的 Futu account IDs 与 canonical account mapping 导出
 显式账户范围，并对每个账户分别执行 discovery；不向 discovery 传
 `account=None`。任一 configured Futu account ID 缺少 mapping 时，该轮 lifecycle discovery
