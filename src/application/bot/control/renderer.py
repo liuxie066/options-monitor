@@ -387,6 +387,9 @@ def _render_option_performance(data: dict[str, Any]) -> str:
         f"- 期权收益率：{_canonical_option_return_text(data.get('option_return'))}",
         f"- 日均占用：{_canonical_daily_capital_text(data.get('daily_occupied_capital'))}",
     ]
+    statistical_cutoff = _dict(data.get("freshness")).get("as_of")
+    if statistical_cutoff:
+        lines.insert(1, f"统计截止：{statistical_cutoff}（非手续费同步时间）")
     missing = [str(item) for item in _list(quality.get("missing")) if str(item)]
     if missing:
         lines.append("缺失证据：" + "；".join(missing[:6]))
@@ -413,6 +416,11 @@ def _canonical_cashflow_text(value: Any, *, period: bool = False) -> str:
             text = f"{label} {amount:,.2f}" if amount is not None else f"{label} -"
             if period and metric.get("status") == "partial":
                 text = f"{label} -（证据不完整）"
+            if amount is None and metric.get("status") == "partial" and any(
+                reason in {"actual_fee_missing", "fee_estimated", "fee_missing", "exercise_fee_missing"}
+                for reason in _list(metric.get("missing"))
+            ):
+                text = f"{label} -（实际手续费尚未确认，原因待核）"
             component_text.append(text)
         parts.append(f"{str(currency).upper()} " + "，".join(component_text))
     cny_total = _dict(cashflow.get("cny_total"))
@@ -420,11 +428,11 @@ def _canonical_cashflow_text(value: Any, *, period: bool = False) -> str:
         amount = _float_or_none(cny_total.get("amount"))
         status = str(cny_total.get("status") or "").strip()
         if period and status == "partial":
-            parts.append("折合 CNY 合计 -（折算证据不完整）")
+            parts.append("折合 CNY 合计 -（证据不完整）")
         elif amount is not None:
             parts.append(f"折合 CNY 合计 ¥{amount:,.2f}")
         elif status == "partial":
-            parts.append("折合 CNY 合计 -（折算证据不完整）")
+            parts.append("折合 CNY 合计 -（证据不完整）")
     if period and (cashflow.get("fee_mode") == "simulated" or cashflow.get("status") == "estimated"):
         parts.append("模拟费用口径，非实际费用结果")
     if period and cashflow.get("missing"):
