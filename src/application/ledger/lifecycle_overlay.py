@@ -583,7 +583,6 @@ def _resolve_case_anchor(
         if extra_claims:
             reasons.add("direct_anchor_claim_unbound")
         seen_source_keys: dict[str, tuple[str, str]] = {}
-        claimed_lots: set[str] = set()
         for evidence_row in sorted(
             direct_rows,
             key=lambda item: str(item.get("evidence_id") or ""),
@@ -615,11 +614,6 @@ def _resolve_case_anchor(
                 reasons.add("direct_anchor_source_collision")
                 continue
             seen_source_keys[source_key] = identity
-            fact_lots = set(fact["target_contracts_by_lot"])
-            if claimed_lots & fact_lots:
-                reasons.add("direct_anchor_manifest_overlap")
-                continue
-            claimed_lots.update(fact_lots)
             anchor_facts.append(fact)
     else:
         if len(bridge_rows) != 1:
@@ -676,13 +670,8 @@ def _resolve_case_anchor(
             *(sorted(reasons) or ["lifecycle_anchor_invalid"]),
         )
 
-    requested: dict[str, int] = {}
-    for fact in anchor_facts:
-        for lot_id, contracts in fact["target_contracts_by_lot"].items():
-            if lot_id not in manifest or contracts > manifest[lot_id]:
-                reasons.add("lifecycle_anchor_target_quantity_invalid")
-                continue
-            requested[lot_id] = requested.get(lot_id, 0) + contracts
+    requested, quantity_reasons = _anchor_contract_totals(anchor_facts, manifest)
+    reasons.update(quantity_reasons)
     allocated: dict[str, int] = {}
     for item in allocation_rows:
         if bool(item.get("voided")):
@@ -722,6 +711,24 @@ def _resolve_case_anchor(
     )
     base["resolution_hash"] = _hash_without(base, "resolution_hash")
     return base
+
+
+def _anchor_contract_totals(
+    anchor_facts: Sequence[Mapping[str, Any]],
+    target: Mapping[str, int],
+) -> tuple[dict[str, int], set[str]]:
+    """Bound gross source quantities before subtracting effective allocations."""
+    totals: dict[str, int] = {}
+    reasons: set[str] = set()
+    for fact in anchor_facts:
+        for lot_id, contracts in fact["target_contracts_by_lot"].items():
+            if lot_id not in target or contracts > target[lot_id]:
+                reasons.add("lifecycle_anchor_target_quantity_invalid")
+                continue
+            totals[lot_id] = totals.get(lot_id, 0) + contracts
+            if totals[lot_id] > target[lot_id]:
+                reasons.add("lifecycle_anchor_target_quantity_invalid")
+    return totals, reasons
 
 
 def advance_direct_lifecycle_anchor_resolution(
@@ -800,15 +807,9 @@ def advance_direct_lifecycle_anchor_resolution(
         for item in anchors
     ):
         return _conflicted_resolution(base, "direct_anchor_source_collision")
-    if any(
-        set(item.get("target_contracts_by_lot") or {})
-        & set(fact["target_contracts_by_lot"])
-        for item in anchors
-    ):
-        return _conflicted_resolution(
-            base,
-            "direct_anchor_manifest_overlap",
-        )
+    _, quantity_reasons = _anchor_contract_totals([*anchors, fact], target)
+    if quantity_reasons:
+        return _conflicted_resolution(base, *sorted(quantity_reasons))
     requested = dict(prior.get("requested_reservations_by_lot") or {})
     for lot_id, contracts in fact["target_contracts_by_lot"].items():
         requested[lot_id] = int(requested.get(lot_id, 0)) + int(contracts)
