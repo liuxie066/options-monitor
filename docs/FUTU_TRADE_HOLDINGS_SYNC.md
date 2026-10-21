@@ -1849,6 +1849,10 @@ A1–A8 是验收要求。源码、隔离测试、真实 broker 样本和生产�
 
 ### S1：成交状态与冻结证据
 
+成交 detail lookup 在经济写入前把原成交和匹配行的数量、价格分别保存为 Inbox 来源证据。数量别名 `contracts/qty/quantity`、价格别名 `price/execution_price/dealt_price` 按现有精确十进制规则比较；数值等价及真正缺失字段仍可补全，同键或跨别名矛盾、无效已提供数值均阻断自动入账。lookup 观察借用原成交的身份与非经济上下文，完整原始匹配行单独保留，不能把补出的上下文当作券商返回事实。订单摘要仍只补身份，不补成交数量或价格。
+
+原始 Futu、嵌套 `execution_input` 与标准成交输入均按其实际数量、价格字段保存 lookup 观察；保留的原始匹配行用于重算别名错误，不信任临时 `errors` 数组。数量、价格冲突按全部历史 canonical 证据判定。后续缺值、状态缺失或 OK、普通重试不能抹去既有矛盾；无经济矛盾的缺状态记录仍可由可信 OK 恢复。冲突保留在现有 Inbox，待核实，不自动修复历史账本或发送成功回执。
+
 
 入口与状态：push/backfill/file 经已有来源绑定，保存 broker+physical account+environment+market+deal ID、经济内容、status 和 provider updateTimestamp。适配器保留协议状态与原始修订。状态表：
 - 缺失/未知状态：保存来源，主动查询；新经济成交不入账。历史已入账事件保持可读，但相关证据不完整时待核实。

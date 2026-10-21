@@ -165,6 +165,11 @@ Bot runtime JSON 的有效性与激活流程保持现有合同；非 YAML 来源
 现在 `resolve_yaml_runtime_config` 从一次 YAML 读取构建市场输入并记录原始与 effective 两种指纹；公共 checker 按下述协议比较。
 
 `config_authoring_transaction.py::publish_yaml_config_generation` 已支持多市场生成、来源 SHA 冲突检测、备份与失败恢复。
+未完成事务恢复时，先校验全部 journal 内容，再在首次修改目标前核对该事务的完整目标集合。
+目标只能保持记录的修改前或修改后字节；原先不存在的目标也允许仍然缺席，原先存在但缺失的目标仍拒绝恢复。
+独立 build 等操作产生第三状态或目标不可读时，以 `CONFIG_TRANSACTION_RECOVERY_REQUIRED`
+和 `target_state_validation` 阶段拒绝，保留该事务的全部目标及 journal，供操作者核对；先前事务或当前发布已发生的写入仍如实保留在回执中。
+该检查不为独立 build 加锁，也不保证检查后没有并发改写。
 聊天模型切换经 `bot/control/model_operations.py` 调用该事务；CLI 模型 add/use 经 `write_model_config_update` 只写 YAML。
 补齐 CLI 联动不能覆盖手动编辑 YAML，且仍要求助手操作重建无关市场，因此不作为本次方向。
 

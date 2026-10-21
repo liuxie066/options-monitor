@@ -7,6 +7,12 @@ from src.infrastructure.futu_gateway import build_ready_futu_broker_gateway
 from src.infrastructure.futu_dataframe import futu_dataframe_records
 from domain.domain.trade_account_identity import extract_primary_account_id, extract_visible_account_fields
 from domain.domain.symbol_identity import resolve_symbol_identity
+from domain.domain.trade_execution import (
+    _FUTU_ECONOMIC_ALIASES,
+    _is_standard_execution,
+    _pick,
+    canonical_trade_execution_content,
+)
 from src.application.payload_helpers import text as _norm_str
 
 
@@ -224,6 +230,31 @@ def _merge_lookup_row(
     return enriched
 
 
+def _deal_economic_evidence(src: dict[str, Any], row: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    aliases = {alias for group in _FUTU_ECONOMIC_ALIASES.values() for alias in group}
+    # Bind only economics to the original context; lookup associations must not revoke a compatible claim.
+    evidence = {key: value for key, value in src.items() if key not in aliases}
+    evidence.update({key: row[key] for key in aliases if key in row})
+    if _is_standard_execution(src):
+        nested = src.get("execution_input")
+        numeric_target = dict(nested) if isinstance(nested, dict) else evidence
+        for field, source_aliases in _FUTU_ECONOMIC_ALIASES.items():
+            value = _pick(row, *source_aliases)
+            numeric_target[field] = str(value) if isinstance(value, float) else value
+        if isinstance(nested, dict):
+            evidence["execution_input"] = numeric_target
+    evidence["_futu_detail_lookup_row"] = dict(row)
+    original = canonical_trade_execution_content(src)
+    observed = canonical_trade_execution_content(evidence)
+    conflicts = [error for content in (original, observed) for error in content["errors"]
+                 if error.startswith(("invalid:quantity:", "invalid:price:"))]
+    for field in _FUTU_ECONOMIC_ALIASES:
+        left, right = original["economic"][field], observed["economic"][field]
+        if left not in (None, "") and right not in (None, "") and left != right:
+            conflicts.append(f"invalid:{field}:lookup_conflict")
+    return evidence, list(dict.fromkeys(conflicts))
+
+
 def enrich_trade_push_payload_with_account_id(
     payload: dict[str, Any] | Any,
     *,
@@ -323,6 +354,12 @@ def enrich_trade_push_payload_with_account_id(
             return TradePushAccountLookupResult(payload=fallback_payload, diagnostics=diagnostics)
         if deal_matches:
             acc_id, row = deal_matches[0]
+            evidence, conflicts = _deal_economic_evidence(src, row)
+            diagnostics["deal_lookup_evidence"] = evidence
+            diagnostics["economic_conflicts"] = conflicts
+            if conflicts:
+                diagnostics["matched_via"] = "conflicting_deal_economics"
+                return TradePushAccountLookupResult(payload=fallback_payload, diagnostics=diagnostics)
             enriched = _merge_lookup_row(src, row, fallback_acc_id=acc_id, diagnostics=diagnostics)
             if not order_id or _resolve_unified_symbol(enriched, {})[0]:
                 diagnostics["matched_via"] = "deal_lookup_by_acc_id"
