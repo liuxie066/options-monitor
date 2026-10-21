@@ -13,6 +13,7 @@ from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.ledger.api import derive_lifecycle_quality_view
 from src.application.quality.intake_checks import build_trade_intake_datasets
+from src.application.quality.model import sha256_json
 from src.application.quality.ledger_checks import (
     build_current_ledger_dataset,
     build_ledger_datasets,
@@ -27,7 +28,7 @@ from src.application.quality.position_checks import (
     build_position_dataset,
     normalize_opend_positions,
 )
-from src.application.quality.runtime_checks import build_runtime_checks
+from src.application.quality.runtime_checks import build_runtime_checks, runtime_verdict
 from src.application.quality.opend_position_adapter import OpenDOptionSnapshot
 
 import test_trades_resolver_close
@@ -1278,6 +1279,115 @@ def _runtime_checks(services: list[dict], **overrides: object) -> list[dict]:
             **overrides,
         }
     )
+
+
+def _listener_runtime(sources: list[dict], *, enabled: bool = True, market: str = "us") -> dict:
+    return {
+        "config": {"config_key": market},
+        "service_profile": {"services": [
+            {"name": "synthetic.service", "status": "ok"},
+            {"name": "synthetic.timer", "status": "ok"},
+        ]},
+        "tick_health": {"status": "ok", "market": market},
+        "trade_intake": {"enabled": enabled, "sources": sources},
+    }
+
+
+def _listener_source(label: str, *, heartbeat: str | None, enabled: bool = True,
+                     account: str = "reviewer", source: str = "synthetic") -> dict:
+    return {"id": source, "account": account, "enabled": enabled,
+            "summary": {"listener_status": label, "last_heartbeat_utc": heartbeat}}
+
+
+@pytest.mark.parametrize(("label", "fresh_status", "fresh_reason", "fresh_verdict"), [
+    ("listening", "pass", "LISTENER_HEARTBEAT_FRESH", "healthy"),
+    ("starting", "pass", "LISTENER_HEARTBEAT_FRESH", "healthy"),
+    ("once", "pass", "LISTENER_HEARTBEAT_FRESH", "healthy"),
+    ("reconnecting", "warn", "LISTENER_NOT_WORKING", "degraded"),
+    ("blocked", "warn", "LISTENER_NOT_WORKING", "degraded"),
+    ("error", "warn", "LISTENER_NOT_WORKING", "degraded"),
+    ("stopped", "warn", "LISTENER_NOT_WORKING", "degraded"),
+    ("failed", "warn", "LISTENER_NOT_WORKING", "degraded"),
+    ("  ReConnecting  ", "warn", "LISTENER_NOT_WORKING", "degraded"),
+    ("future-label", "pass", "LISTENER_HEARTBEAT_FRESH", "healthy"),
+    ("", "pass", "LISTENER_HEARTBEAT_FRESH", "healthy"),
+])
+@pytest.mark.parametrize("age", [-61, 0, 5, 600, 601, 1500, 1501, None, "invalid"])
+def test_listener_quality_status_and_existing_time_grace(
+    label: str, fresh_status: str, fresh_reason: str, fresh_verdict: str, age: int | str | None,
+) -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    heartbeat = (now - timedelta(seconds=age)).isoformat() if isinstance(age, int) else age
+    checks = build_runtime_checks(runtime_statuses=[_listener_runtime([
+        _listener_source(label, heartbeat=heartbeat),
+    ])], observed_at_utc=now.isoformat(), now=now)
+    listener = next(check for check in checks if check["check_id"] == "RT-OM-002")
+    expected = (fresh_status, fresh_reason, fresh_verdict)
+    if age is None or age == "invalid":
+        expected = ("unknown", "LISTENER_HEARTBEAT_MISSING", "unknown")
+    elif age == 1501:
+        expected = ("fail", "LISTENER_HEARTBEAT_STALE", "unhealthy")
+    elif age in {601, 1500}:
+        expected = ("warn", "LISTENER_HEARTBEAT_DELAYED", "degraded")
+    assert (listener["status"], listener["reason_code"], runtime_verdict(checks)) == expected
+    assert listener["observed"] == {
+        "heartbeat_age_seconds": age if isinstance(age, int) else None,
+        "listener_status": label.strip().lower() or None,
+    }
+    assert listener["scope"] == {"account": "reviewer", "source": "synthetic"}
+    assert listener["thresholds"] == {"healthy_max_seconds": 600, "unhealthy_after_seconds": 1500}
+    evidence = listener["evidence_refs"][0]
+    assert evidence["kind"] == "listener-heartbeat"
+    assert evidence["artifact_ref"] == "om-evidence:listener:synthetic"
+    assert evidence["sha256"] == sha256_json({"source": "synthetic", **listener["observed"]})
+    if expected[1] == "LISTENER_NOT_WORKING":
+        assert label.strip().lower() in listener["message"]
+
+
+@pytest.mark.parametrize(("label", "age", "reason"), [
+    ("starting", 20, "LISTENER_HEARTBEAT_FRESH"),
+    ("blocked", 20, "LISTENER_NOT_WORKING"),
+    ("blocked", 21, "LISTENER_HEARTBEAT_DELAYED"),
+    ("blocked", 51, "LISTENER_HEARTBEAT_STALE"),
+])
+def test_listener_quality_respects_configured_time_bands(label: str, age: int, reason: str) -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    checks = build_runtime_checks(runtime_statuses=[_listener_runtime([
+        _listener_source(label, heartbeat=(now - timedelta(seconds=age)).isoformat()),
+    ])], observed_at_utc=now.isoformat(), now=now, heartbeat_expected_seconds=10)
+    listener = next(check for check in checks if check["check_id"] == "RT-OM-002")
+    assert listener["reason_code"] == reason
+    assert listener["thresholds"] == {"healthy_max_seconds": 20, "unhealthy_after_seconds": 50}
+
+
+@pytest.mark.parametrize(("scenario", "verdict", "reasons"), [
+    ("disabled", "healthy", ["LISTENER_NOT_APPLICABLE"]),
+    ("no-sources", "unknown", ["LISTENER_EVIDENCE_MISSING"]),
+    ("all-disabled", "unknown", ["LISTENER_EVIDENCE_MISSING"]),
+    ("disabled-bad", "healthy", ["LISTENER_HEARTBEAT_FRESH"]),
+    ("mixed", "degraded", ["LISTENER_HEARTBEAT_FRESH", "LISTENER_NOT_WORKING"]),
+    ("markets", "degraded", ["LISTENER_HEARTBEAT_FRESH", "LISTENER_NOT_WORKING"]),
+])
+def test_listener_quality_preserves_enabled_source_scope(scenario: str, verdict: str, reasons: list[str]) -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    good = _listener_source("starting", heartbeat=now.isoformat(), source="good")
+    bad = _listener_source("blocked", heartbeat=now.isoformat(), source="bad", account="second")
+    runtimes = [_listener_runtime([good, bad])]
+    if scenario == "disabled":
+        runtimes = [_listener_runtime([bad], enabled=False)]
+    elif scenario == "no-sources":
+        runtimes = [_listener_runtime([])]
+    elif scenario in {"all-disabled", "disabled-bad"}:
+        bad["enabled"] = False
+        runtimes = [_listener_runtime([bad] if scenario == "all-disabled" else [good, bad])]
+    elif scenario == "markets":
+        runtimes = [_listener_runtime([good]), _listener_runtime([bad], market="hk")]
+    checks = build_runtime_checks(runtime_statuses=runtimes, observed_at_utc=now.isoformat(), now=now)
+    listeners = [check for check in checks if check["check_id"] == "RT-OM-002"]
+    assert [check["reason_code"] for check in listeners] == reasons
+    assert runtime_verdict(checks) == verdict
+    if scenario in {"mixed", "markets"}:
+        assert listeners[1]["scope"] == {"account": "second", "source": "bad"}
 
 
 def test_runtime_service_and_timer_checks_require_checked_active_units() -> None:

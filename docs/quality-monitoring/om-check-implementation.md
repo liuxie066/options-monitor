@@ -13,6 +13,13 @@
 | `RT-OM-003` | `src/application/quality/runtime_checks.py::build_runtime_checks` | `tests/quality/test_om_quality_service.py` | 读取现有 timer/run receipt |
 | `RT-OM-004` | `src/application/quality/position_checks.py::build_opend_runtime_check` | `tests/quality/test_om_quality_service.py`、`tests/quality/test_om_quality_checks.py` | 要求 REAL、显式账户、`refresh_cache=True`、snapshot complete |
 
+`RT-OM-002` 复用 `trades/listener_status.py` 的已知非工作状态
+`blocked/error/reconnecting/stopped`，并保留质检既有的 `failed` 兼容。
+心跳在正常时间窗内但状态为上述值时，报告 `warn/LISTENER_NOT_WORKING`；
+`listening/starting/once` 保持正常。心跳缺失仍为 unknown，延迟与过期仍按
+原有时间宽限判定；未知状态和未来时间戳政策不在本次修复范围内。
+告警 watchdog 只共享四个状态词汇，保留自身时间窗及发送规则。
+
 ## 数据检查
 
 | ID | 实现入口 | 确定性回归证据 | `blocked_consumers` |
