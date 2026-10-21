@@ -8,6 +8,7 @@ from threading import Lock
 from typing import Any, Protocol
 from uuid import uuid4
 
+from src.application.quality.model import validated_quality_status
 from src.application.quality.paths import default_quality_artifact_path
 from src.infrastructure.quality.artifact_repository import QualityArtifactRepository
 
@@ -144,7 +145,9 @@ def assert_quality_allows(
             lifecycle_rows_requested=False,
         )
         if service is not None
-        else QualityArtifactRepository(default_quality_artifact_path()).read()
+        else validated_quality_status(
+            QualityArtifactRepository(default_quality_artifact_path()).read()
+        )
     )
     if service is None:
         record_quality_consumer_read(
