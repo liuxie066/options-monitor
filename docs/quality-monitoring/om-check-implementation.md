@@ -76,6 +76,18 @@
 | Agent tool | `src/application/agent_tools/quality.py` | agent contract/plugin smoke 全量回归 |
 | 本地门禁 | `src/application/quality/gate.py` | onboarding 前无效；onboarding 后按 account/market/consumer 阻断；目标持仓数据集缺失/重复和 stale 均 fail closed |
 
+`last_probe_ledger_revision` 只确认普通质量状态的成功发布，使用普通刷新开始、
+取数之前捕获的 revision；刷新期间账本继续变化时，后续 probe 仍可触发复查。
+integrity 只发布独立 artifact，不推进普通游标；差异、生命周期和交易日历的
+控制状态仍按原顺序在 artifact 校验前保存。普通 artifact 发布成功后才写游标，
+`untrusted/unavailable` 等合法结论同样可以确认发布进度。
+
+artifact 和控制文件不是一个事务。游标写入前失败时，新 artifact 可能已存在而
+游标仍旧，后续允许重试；若存储已完成替换后才抛出异常，不能仅凭异常断言回滚，
+必须回读确认结果。service 保留异常，不自动隐藏重试。全局游标、单市场刷新保留
+其他市场结果和既有持仓快照复用规则不变；开始时采样不等于全程原子一致快照。
+回归由 `tests/quality/test_quality_publication_cursor.py` 覆盖。
+
 ## Quality refresh 账本读取效率合同
 
 状态：只读查询优化已实现并有确定性回归。现有质量检查语义、artifact
