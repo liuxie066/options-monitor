@@ -1955,6 +1955,9 @@ def _growth_and_forecast(
         if not isinstance(identity, dict) or not isinstance(research, dict):
             rejected.append({"report": path.name, "reason": "shape_invalid"})
             continue
+        if "status" in research and research["status"] != "complete":
+            rejected.append({"report": path.name, "reason": "research_storage_incomplete"})
+            continue
         try:
             report_root = Path(str(identity.get("runtime_root") or "")).resolve()
             timestamp = datetime.fromisoformat(str(identity.get("observed_at_utc") or "").replace("Z", "+00:00"))
