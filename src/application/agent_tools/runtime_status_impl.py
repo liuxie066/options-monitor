@@ -28,6 +28,7 @@ from src.application.system_alerts import system_alert_delivery_status
 from src.application.llm_provider_registry import provider_requires_api_key
 from src.application.secret_store import SecretError, resolve_secret_status
 from src.application.trades.account_mapping import resolve_trade_intake_config
+from src.application.trades.state import normalize_trade_intake_state_payload
 from src.application.trades.state_reconcile import preview_trade_intake_reconciliation_from_sqlite
 from src.application.payload_helpers import as_dict as _dict
 from src.application.payload_helpers import first_text as _first_text
@@ -36,6 +37,10 @@ from src.application.payload_helpers import parse_utc as _parse_utc
 
 
 PROFILE_PATH_KEYS = ("report_dir", "state_dir", "shared_state_dir", "accounts_root", "runs_root")
+TRADE_INTAKE_STATE_COUNT_KEYS = (
+    "processed_count", "failed_count", "unresolved_count", "pending_count",
+    "receipt_count", "receipt_confirmed_count", "receipt_failed_count",
+)
 PROFILE_TRIGGER_KEYS = (
     "trigger_source",
     "trigger_job_id",
@@ -143,6 +148,54 @@ def _path_from_config(value: Any, *, base: Path) -> Path:
     if not path.is_absolute():
         path = (base / path).resolve()
     return path
+
+
+def _trade_intake_state_info(path: Path, *, base: Path) -> dict[str, Any]:
+    out: dict[str, Any] = {"path": _relative_path(path, base=base)}
+    try:
+        out.update(_file_info(path, base=base))
+        if not out.get("exists"):
+            path.lstat()
+            return {**out, "read_status": "unreadable"}
+        if not out.get("is_file"):
+            return {**out, "read_status": "unreadable"}
+        out["json"] = {}
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return {**out, "read_status": "missing"}
+        except OSError as stat_exc:
+            return {**out, "read_status": "unreadable", "read_error": str(stat_exc)}
+        return {**out, "read_status": "unreadable", "read_error": str(exc)}
+    except UnicodeError as exc:
+        return {**out, "read_status": "invalid", "read_error": str(exc)}
+    except OSError as exc:
+        return {**out, "read_status": "unreadable", "read_error": str(exc)}
+    try:
+        raw = json.loads(text)
+        out["json"] = raw if isinstance(raw, dict) else {}
+        normalize_trade_intake_state_payload(raw, path=path)
+    except ValueError as exc:
+        return {**out, "read_status": "invalid", "read_error": str(exc)}
+    return {**out, "read_status": "available"}
+
+
+def _trade_intake_state_availability(sources: list[dict[str, Any]]) -> dict[str, Any]:
+    # Disabled sources still contribute history, unless the state is genuinely absent.
+    required = [
+        item for item in sources
+        if item.get("enabled") or _dict(item.get("state")).get("read_status") != "missing"
+    ]
+    available = sum(_dict(item.get("state")).get("read_status") == "available" for item in required)
+    return {
+        "state_counts_complete": available == len(required),
+        "state_availability": (
+            "not_required" if not required else "available" if available == len(required)
+            else "partial" if available else "unavailable"
+        ),
+    }
 
 
 def _trade_intake_summary(state_json: dict[str, Any], status_json: dict[str, Any]) -> dict[str, Any]:
@@ -2321,10 +2374,9 @@ def private_runtime_status_tool(
                     base=base,
                     read_json_object_or_empty=read_json_object_or_empty,
                 )
-                state_info = _json_file_info(
+                state_info = _trade_intake_state_info(
                     source_state_path,
                     base=base,
-                    read_json_object_or_empty=read_json_object_or_empty,
                 )
                 audit_info = _file_info(
                     source_audit_path,
@@ -2335,6 +2387,9 @@ def private_runtime_status_tool(
                 state_payload: dict[str, Any] = state_json if isinstance(state_json, dict) else {}
                 status_payload: dict[str, Any] = status_json if isinstance(status_json, dict) else {}
                 source_summary = _trade_intake_summary(state_payload, status_payload)
+                source_summary.update(_trade_intake_state_availability([
+                    {"enabled": bool(source.get("enabled")), "state": state_info},
+                ]))
                 source_summary.update(
                     _trade_intake_reconciliation_summary(
                         state_path=source_state_path,
@@ -2387,10 +2442,9 @@ def private_runtime_status_tool(
                 base=base,
                 read_json_object_or_empty=read_json_object_or_empty,
             )
-            trade_intake_state = _json_file_info(
+            trade_intake_state = _trade_intake_state_info(
                 _path_from_config(payload.get("trade_intake_state_path"), base=base) if payload.get("trade_intake_state_path") else default_intake_state_path,
                 base=base,
-                read_json_object_or_empty=read_json_object_or_empty,
             )
             trade_intake_audit = _file_info(
                 _path_from_config(payload.get("trade_intake_audit_path"), base=base) if payload.get("trade_intake_audit_path") else default_intake_audit_path,
@@ -2422,6 +2476,9 @@ def private_runtime_status_tool(
                 audit_path=resolved_legacy_audit_path,
                 ledger_store=ledger_store,
             )
+        trade_intake_summary.update(_trade_intake_state_availability(
+            source_infos or [{"enabled": bool(intake_cfg["enabled"]), "state": trade_intake_state}]
+        ))
         trade_intake = {
             "enabled": bool(intake_cfg["enabled"]),
             "mode": intake_cfg["mode"],
@@ -2523,6 +2580,13 @@ def private_runtime_status_tool(
 
     warnings: list[str] = []
     warning_codes: list[str] = []
+    if any(
+        item.get("enabled")
+        and _dict(item.get("state")).get("read_status") in {"invalid", "unreadable"}
+        for item in trade_intake.get("sources") or [trade_intake]
+    ):
+        warning_codes.append("TRADE_INTAKE_STATE_UNAVAILABLE")
+        warnings.append("Trade intake state is unavailable; state-derived counts cannot be verified.")
     if latest_run_selection.get("requested") and not latest_run_selection.get("found"):
         source = latest_run_selection.get("source")
         value = latest_run_selection.get("value")
@@ -3144,7 +3208,7 @@ def _status_safe_trade_intake(value: Any) -> dict[str, Any]:
         key: item
         for key, item in summary.items()
         if (
-            key in {"listener_status", "listener_stage", "reconciliation_preview_available", "identity_review_required"}
+            key in {"listener_status", "listener_stage", "reconciliation_preview_available", "identity_review_required", "state_counts_complete", "state_availability"}
             or key.endswith("_count")
             or key.endswith("_utc")
         )
@@ -3152,6 +3216,8 @@ def _status_safe_trade_intake(value: Any) -> dict[str, Any]:
         and "receipt_key" not in key
         and "error" not in key
     }
+    if summary.get("state_counts_complete") is False:
+        safe_summary.update({key: None for key in TRADE_INTAKE_STATE_COUNT_KEYS})
     sources = [item for item in source.get("sources") or [] if isinstance(item, dict)]
     return {
         **_pick(source, {"enabled", "mode"}),

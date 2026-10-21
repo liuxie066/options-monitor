@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1253 (`src`: 572, `domain`: 97, `scripts`: 16, `tests`: 565)
-- Internal import edges: 10489 total, 3955 production/script edges excluding tests
+- Python files scanned: 1255 (`src`: 572, `domain`: 97, `scripts`: 16, `tests`: 567)
+- Internal import edges: 10516 total, 3956 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -50,14 +50,14 @@ flowchart LR
   scripts -->|2| interfaces
   scripts -->|1| tests
   storage -->|1| domain
-  tests -->|4983| application
-  tests -->|626| domain
+  tests -->|5006| application
+  tests -->|627| domain
   tests -->|2| domain_services
   tests -->|316| infrastructure
-  tests -->|369| interfaces
+  tests -->|370| interfaces
   tests -->|6| om_strategy_core
   tests -->|31| scripts
-  tests -->|46| storage
+  tests -->|47| storage
 ```
 
 ### Production Layer Edges
@@ -88,11 +88,11 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 4983 |
-| tests | domain | 626 |
-| tests | interfaces | 369 |
+| tests | application | 5006 |
+| tests | domain | 627 |
+| tests | interfaces | 370 |
 | tests | infrastructure | 316 |
-| tests | storage | 46 |
+| tests | storage | 47 |
 | tests | scripts | 31 |
 | tests | om_strategy_core | 6 |
 | tests | domain_services | 2 |
@@ -123,7 +123,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.positions | src.application | 24 |
 | src.application.multi_tick | src.application | 23 |
 | src.application | src.application.settings | 22 |
-| src.application | src.application.trades | 20 |
+| src.application | src.application.trades | 21 |
 | src.application.ledger | src.infrastructure | 18 |
 | src.application | src.application.multi_tick | 16 |
 | src.application | domain.domain.ledger | 16 |
@@ -218,7 +218,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.interfaces.cli.main | 32 |
 | src.application.daily_decision_brief_service | 31 |
 | src.interfaces.cli.option_positions | 31 |
-| src.application.agent_tools.runtime_status_impl | 29 |
+| src.application.agent_tools.runtime_status_impl | 30 |
 | src.application.channels.wechat_clawbot.inbound | 29 |
 | src.application.multi_account_tick | 29 |
 | src.application.agent_tools.positions | 28 |

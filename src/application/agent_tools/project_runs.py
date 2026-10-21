@@ -182,8 +182,13 @@ def load_run_bundle(
     identity = {"account": account, "run_id": run_id, "market": market.upper(),
                 "as_of": manifest["sealed_at_utc"], "revision": manifest["content_sha256"]}
     return {
-        "manifest": {**identity, "terminal": True, "scanned": bool(manifest["expected_scopes"]),
-                     "resource_categories": ["candidate_snapshot", "status_index"]},
+        "manifest": {**identity, "terminal": True, "scanned": bool(bundle["status_index"]["items"]),
+                     "resource_categories": ["candidate_snapshot", "status_index"],
+                     "outcomes": {
+                         "usable_scan_result": any(item["status"] == "completed"
+                                                   for item in bundle["status_index"]["items"]),
+                         "pipeline_completed_successfully": None,
+                     }},
         "resources": {name: files[name] for name in resource_names},
         "scope": identity, "bytes_read": used_before - budget["bytes"],
     }
@@ -236,7 +241,7 @@ def load_run_metrics(
         "revision": hashlib.sha256(raw).hexdigest(), "terminal": None,
         "scanned": value["ran_scan"], "ran_pipeline": value["ran_pipeline"],
         "outcomes": {
-            "usable_scan_result": value["ran_scan"],
+            "usable_scan_result": None,
             "pipeline_completed_successfully": value["ran_pipeline"],
         },
         "resource_categories": ["account_diagnostics"],
@@ -311,6 +316,7 @@ def load_run_diagnostics(
                     "causal_link_to_other_records": "not_established",
                     "run_id": run_id, "account": account, "event_at_utc": as_of,
                     "outcomes": metrics["outcomes"],
+                    "usable_scan_result_source": None,
                     "reason": metrics["reason"], "reason_description": metrics["reason_description"],
                     "cause_available": metrics["cause_available"]})
                 authorized_rows += 1
@@ -322,6 +328,10 @@ def load_run_diagnostics(
                     # A present formal bundle must not contradict the metrics authority.
                     bundle = load_run_bundle(**owner_options)
                     fingerprints["candidate_manifest"] = bundle["scope"]["revision"]
+                    # This one fact comes from verified results, not metrics attempts.
+                    rows[-1]["outcomes"] = {**metrics["outcomes"],
+                        "usable_scan_result": bundle["manifest"]["outcomes"]["usable_scan_result"]}
+                    rows[-1]["usable_scan_result_source"] = "validated_candidate_bundle"
             else:
                 bundle = load_run_bundle(**owner_options)
                 as_of = bundle["scope"]["as_of"]
@@ -447,7 +457,8 @@ def load_run_diagnostics(
             "omitted_count": len(rows) - len(page) if complete else None, "has_more": has_more},
         "limitations": [
             "每条诊断记录相互独立；同一运行、排列顺序或时间接近都不能证明因果或先后链路。",
-            "false 结果字段仅表示没有可用扫描结果或流水线未成功完成，不能证明相应流程从未被调用。",
+            "扫描结果可用性为 null 表示尚无已验证结果证据；false 表示已验证范围没有完成结果。",
+            "结果字段不能证明相应流程从未被调用；补充扫描结果的来源由 usable_scan_result_source 标明。",
             "失败阶段只定位记录发生的位置，不证明具体根因、成交或通知完成。",
         ]}
     set_continuation(result, {"binding": binding, "source_hash": source_hash,

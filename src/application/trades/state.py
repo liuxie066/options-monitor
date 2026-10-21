@@ -43,6 +43,12 @@ def load_trade_intake_state(path: str | Path) -> dict[str, Any]:
         raw = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid trade intake state at {p}: {exc}") from exc
+    return normalize_trade_intake_state_payload(raw, path=p)
+
+
+def normalize_trade_intake_state_payload(raw: Any, *, path: str | Path) -> dict[str, Any]:
+    """Validate decoded state without reading or initializing its storage."""
+    p = Path(path)
     if not isinstance(raw, dict):
         raise ValueError(f"invalid trade intake state at {p}: root must be an object")
     out = empty_trade_intake_state()
