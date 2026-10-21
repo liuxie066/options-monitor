@@ -1026,7 +1026,12 @@ OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
         "sell-option and buy-option win rates, hold-to-expiry returns, and independent actual daily unsettled "
         "principal including carry-in positions. Returns, wins, rows and breakdowns keep opening-cohort semantics. "
         "Never substitute cohort cash for unavailable period cash. Daily principal is not the return denominator. Stock trades, "
-        "assignment settlement cash, PnL, read-time FX conversion, and quote refresh are outside this report."
+        "assignment settlement cash, PnL, read-time FX conversion, and quote refresh are outside this report. "
+        "actual_fee_missing and fee_estimated mean actual fee evidence is unconfirmed in this ledger snapshot, "
+        "not a synchronization state; do not substitute estimated fees for actual amounts. Only independent current evidence "
+        "can establish pending synchronization; preserve failed or overdue evidence. A hash change alone cannot prove "
+        "rebuild loss, who rebuilt, or that rebuild/backfill is required. freshness.as_of is the statistical cutoff, "
+        "not fee synchronization time. Explain unavailable amounts only for the affected metric and currency."
     ),
     requires=("runtime_config", "sqlite_data_config"),
     capabilities=("option_performance", "income_report", "option_positions", "read_only"),

@@ -19,7 +19,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, NamedTuple
 
 repo_base = Path(__file__).resolve().parents[3]
 if str(repo_base) not in sys.path:
@@ -51,6 +51,9 @@ from src.application.trades.order_fee_sync import (
     fee_target_from_trusted_payload,
     recover_order_fee_targets,
     sync_order_fees,
+)
+from src.application.trades.order_fee_timing import (
+    ClockSample, fee_clock_sample, fee_elapsed_ms, fee_timing_audit_summary, fee_timing_phase,
 )
 from src.application.trades.deal_identity import (
     broker_deal_key, broker_deal_key_from_payload, completed_ledger_execution_events,
@@ -2256,7 +2259,7 @@ def _run_listener_source_loop(
     inbox_summary_cache: dict[str, Any] = {}
     lifecycle_delivery_snapshot_cache: dict[str, Any] = {}
     inbox_wakeup = threading.Event()
-    fee_target_queue: queue.SimpleQueue[tuple[str, str, str, str]] = queue.SimpleQueue()
+    fee_target_queue: queue.SimpleQueue[_QueuedFeeTarget] = queue.SimpleQueue()
     try:
         previous_status = json.loads(Path(status_path).read_text(encoding="utf-8"))
         status_state["fee_recovery_cursors"] = dict(previous_status.get("fee_recovery_cursors") or {})
@@ -2265,7 +2268,7 @@ def _run_listener_source_loop(
     last_fee_recovery_monotonic = None
 
     def _enqueue_fee_target(target: tuple[str, str, str, str]) -> None:
-        fee_target_queue.put(target)
+        fee_target_queue.put(_QueuedFeeTarget(target, fee_clock_sample()))
 
     def current_inbox_summary() -> dict[str, Any]:
         return _cached_trade_inbox_summary(
@@ -2720,7 +2723,8 @@ def _run_listener_source_loop(
                 listener.check_health()
                 reconnect_delay_sec = reconnect_floor_sec
                 now_mono = time.monotonic()
-                fee_targets = _drain_fee_target_queue(fee_target_queue)
+                fee_queue_times = _drain_fee_target_queue(fee_target_queue)
+                fee_targets = list(fee_queue_times)
                 if apply_changes and (last_fee_recovery_monotonic is None
                                       or now_mono - last_fee_recovery_monotonic >= 60):
                     cursors = status_state.setdefault("fee_recovery_cursors", {})
@@ -2744,6 +2748,7 @@ def _run_listener_source_loop(
                         targets=fee_targets,
                         apply_changes=apply_changes,
                         observed_at_ms=int(time.time() * 1000),
+                        enqueued_times=fee_queue_times,
                     )
                     status_state["last_fee_sync"] = fee_status
                     for fee_receipt in fee_receipts:
@@ -3775,15 +3780,25 @@ def _update_status_from_backfill(status_state: dict[str, Any], result: dict[str,
     return out
 
 
+class _QueuedFeeTarget(NamedTuple):
+    target: tuple[str, str, str, str]
+    clock: ClockSample
+
+
 def _drain_fee_target_queue(
-    target_queue: queue.SimpleQueue[tuple[str, str, str, str]],
-) -> list[tuple[str, str, str, str]]:
-    targets: set[tuple[str, str, str, str]] = set()
+    target_queue: queue.SimpleQueue[_QueuedFeeTarget],
+) -> dict[tuple[str, str, str, str], ClockSample]:
+    targets: dict[tuple[str, str, str, str], ClockSample] = {}
     while True:
         try:
-            targets.add(target_queue.get_nowait())
+            item = target_queue.get_nowait()
         except queue.Empty:
-            return sorted(targets)
+            return targets
+        prior = targets.get(item.target)
+        # Concurrent producers may put an earlier sample after a later one.
+        if prior is None or (item.clock[1] is not None and prior[1] is not None
+                             and item.clock[1] < prior[1]):
+            targets[item.target] = item.clock
 
 
 def _durable_fee_target(
@@ -3813,19 +3828,30 @@ def _run_fee_sync_cycle(
     apply_changes: bool,
     observed_at_ms: int,
     sync_fn: Callable[..., dict[str, Any]] = sync_order_fees,
+    enqueued_times: Mapping[tuple[str, str, str, str], ClockSample] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     receipts: list[dict[str, Any]] = []
     for target in sorted(set(targets)):
+        queued = (enqueued_times or {}).get(target)
+        timing: dict[str, Any] = {
+            "queue_source": "enqueue" if queued is not None else "recovery",
+            "enqueued_at_ms": queued[0] if queued is not None else None,
+            "queue_wait_ms": None,
+        }
         try:
-            receipt = sync_fn(
-                repo,
-                account=target[1],
-                futu_account_id=target[2],
-                provider=provider,
-                apply=apply_changes,
-                observed_at_ms=int(observed_at_ms),
-                target_identity=target,
-            )
+            with fee_timing_phase(timing, "processing") as started:
+                if queued is not None:
+                    timing["queue_wait_ms"] = fee_elapsed_ms(queued[1], started[1])
+                receipt = sync_fn(
+                    repo,
+                    account=target[1],
+                    futu_account_id=target[2],
+                    provider=provider,
+                    apply=apply_changes,
+                    observed_at_ms=int(observed_at_ms),
+                    target_identity=target,
+                    timing=timing,
+                )
         except Exception as exc:
             receipt = {
                 "schema_version": "order_fee_sync_receipt.v1",
@@ -3838,6 +3864,7 @@ def _run_fee_sync_cycle(
                 "error_type": type(exc).__name__,
                 "reason_counts": {"fee_sync_failed": 1},
             }
+        receipt["timing"] = fee_timing_audit_summary(timing)
         receipts.append(receipt)
 
     counts = {
@@ -3920,6 +3947,7 @@ def _fee_attempt_audit_summary(receipt: dict[str, Any]) -> dict[str, Any]:
             (receipt.get("migration") or {}).get("status_counts") or {}
         ),
         "error_types": sorted(error_types),
+        "timing": fee_timing_audit_summary(receipt.get("timing")),
     }
 
 

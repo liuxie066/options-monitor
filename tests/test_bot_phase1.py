@@ -795,3 +795,19 @@ def test_empty_request_needs_clarification() -> None:
     assert isinstance(result, AppResult)
     assert result.status == "needs_clarification"
     assert result.user_response
+
+
+
+def test_performance_fee_interpretation_reaches_prompt_and_tool_contract():
+    manifest = build_scene_manifest(_contract("手续费为什么缺失？"), "fee_interpretation")
+    prompt = "\n".join(item["content"] for item in manifest.messages if item["role"] == "system")
+    description = bot_tools.tool_descriptions(("option_performance_report",))[0]["description"]
+    for text in (prompt, description):
+        assert "actual_fee_missing" in text and "fee_estimated" in text
+        assert "independent current evidence" in text
+        assert "failed or overdue" in text
+        assert "hash change" in text and "rebuild" in text
+        assert "freshness.as_of" in text and "statistical cutoff" in text
+    assert "实际手续费尚未确认（原因待核）" in prompt
+    assert "手续费待同步" in prompt
+    assert "affected metric and currency" in prompt

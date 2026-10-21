@@ -698,6 +698,33 @@ never replaces an already observed `cash_conversion.v1`.
 `net_income_cny` or generic return fields. The migration note is historical
 mapping only, not a callable rollback path.
 
+#### Automatic Order Fee Timing Evidence
+
+`auto_order_fee_attempt` retains one audit record per deduplicated target, with an
+additive `timing` object. The queue item samples `enqueued_at_ms` immediately before
+in-memory insertion; it is not durable trade arrival time. The first observed
+monotonic enqueue sample is retained for duplicates. Recovery-only targets have
+`queue_source=recovery` and unknown enqueue/queue-wait times, including after restart.
+
+`processing`, `terminal_query`, `fee_query`, and `ledger_enrichment` record wall-clock
+`started_at_ms`, `returned_at_ms` or `raised_at_ms`, and monotonic `elapsed_ms`.
+`queue_wait_ms` ends when that target begins processing, including time waiting for
+other targets in the same cycle. Processing is inclusive; nested phase durations
+must not be added to it. Wall timestamps may move backwards when the system clock
+changes; missing clock samples remain null and never affect fee processing.
+
+A provider call returning does not prove fee readiness. An enrichment call returning
+does not prove a commit: inspect the existing reason/status counts. A returned
+`ledger_enrichment` with a committed outcome confirms that the transaction returned,
+but is not the exact SQLite COMMIT instant. Existing `observed_at_ms`, `applied_at_ms`
+and `attempted_at_ms` retain their batch-input semantics. Timing does not replace them.
+
+Timing contains only fixed phase/scalar fields; target identifiers remain represented
+by the existing identity digest. No extra per-phase audit records or broker calls are
+introduced. Enqueue and intermediate samples are in memory until the attempt audit;
+a process exit before that audit loses them. This is diagnostic evidence for future
+attempts, not a historical latency reconstruction or a scheduling improvement.
+
 #### Historical Trade Receipt Compensation
 
 Use the guarded compensation mode only when an already-recorded open trade has
