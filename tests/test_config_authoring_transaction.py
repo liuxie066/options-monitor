@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import pytest
 import yaml
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.config_defaults import default_config
 from src.application.config_authoring_transaction import (
     config_source_sha256,
     locked_config_authoring,
@@ -17,6 +19,7 @@ from src.application.config_authoring_transaction import (
 from src.application.config_yaml import resolve_yaml_runtime_config
 from src.application.runtime_config_freshness import GENERATED_KEY, check_runtime_config_freshness
 import src.application.config_authoring_transaction as transaction_module
+from src.interfaces.cli.config_ops import add_config_commands, handle_config_command
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +86,240 @@ def _pending_transaction(
     )
     transaction_module._set_manifest_phase(manifest, "committing")
     return manifest
+
+
+def _build_recovery_runtime(source: Path, target: Path, *, independent: bool = False) -> None:
+    parser = argparse.ArgumentParser()
+    add_config_commands(parser.add_subparsers(dest="command", required=True))
+    argv = ["config", "build", "--source", "yaml", "--market", "us",
+            "--config-yaml", str(source), "--output", str(target)]
+    if independent:
+        system = default_config()
+        system["defaults"]["runtime"]["portfolio_context_ttl_sec"] = 77
+        system_path = target.parent / "independent-system.json"
+        system_path.write_text(json.dumps(system), encoding="utf-8")
+        argv.extend(["--system-config", str(system_path)])
+    result = handle_config_command(parser.parse_args(argv), repo_base_fn=lambda: REPO_ROOT)
+    assert result["ok"] and result["write_applied"]
+
+
+def _target_state_manifest(
+    tmp_path: Path, mode: str, *, before_exists: bool = True, role: str = "runtime_us",
+) -> Path:
+    source = tmp_path / "config.yaml"
+    _write_yaml(source, _config_doc())
+    before_sha = config_source_sha256(source)
+    after_doc = _config_doc()
+    after_doc["markets"]["us"]["symbols"].append("AMD")
+    staged_source = tmp_path / "retained-after.yaml"
+    _write_yaml(staged_source, after_doc)
+    after_bytes = staged_source.read_bytes()
+    after_sha = config_source_sha256(staged_source)
+    target = tmp_path / "generated 配置.json"
+    if before_exists:
+        _build_recovery_runtime(source, target)
+    desired, _ = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=staged_source)
+    transaction_module._retarget_runtime_metadata(
+        desired, repo_root=REPO_ROOT, source_path=source, source_sha=after_sha,
+        output_path=target, market="us",
+    )
+    earlier = tmp_path / "earlier.json"
+    earlier.write_bytes(b'{"before":"quote \\" and slash \\\\"}\n')
+    earlier_desired = '{"after":"空格 Unicode"}\n'.encode()
+    manifest = _pending_transaction(
+        runtime_root=tmp_path, source=source, before_source_sha=before_sha, after_source_sha=after_sha,
+        targets=[
+            {"role": "earlier_runtime", "path": earlier, "payload": earlier_desired},
+            {"role": "config_yaml", "path": source, "payload": after_bytes, "source": True},
+            {"role": role, "path": target, "payload": transaction_module._json_bytes(desired)},
+        ],
+        audit_id="target-states",
+    )
+    if mode == "roll_forward":
+        source.write_bytes(after_bytes)
+    else:
+        earlier.write_bytes(earlier_desired)
+    return manifest
+
+
+def _recovery_snapshot(manifest_path: Path) -> dict[Path, bytes | None]:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    paths = [Path(item["path"]) for item in manifest["targets"]]
+    paths.extend(manifest_path.parent.iterdir())
+    return {path: path.read_bytes() if path.is_file() else None for path in paths}
+
+
+def _block_recovery_effects(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    calls: list[str] = []
+
+    def block(operation: str):
+        def fail(*_args, **_kwargs):
+            calls.append(operation)
+            raise OSError(f"blocked recovery {operation}")
+        return fail
+
+    monkeypatch.setattr(transaction_module, "_atomic_write_bytes", block("write"))
+    monkeypatch.setattr(Path, "unlink", block("unlink"))
+    monkeypatch.setattr(transaction_module.shutil, "rmtree", block("cleanup"))
+    return calls
+
+
+@pytest.mark.parametrize("mode", ["roll_back", "roll_forward"])
+@pytest.mark.parametrize("before_exists", [False, True])
+@pytest.mark.parametrize("role", ["runtime_us", "runtime_hk", "bot"])
+def test_recovery_target_state_rejects_independent_build_before_first_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, before_exists: bool, role: str,
+) -> None:
+    manifest_path = _target_state_manifest(tmp_path, mode, before_exists=before_exists, role=role)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    target = Path(manifest["targets"][-1]["path"])
+    _build_recovery_runtime(Path(manifest["source_path"]), target, independent=True)
+    observed = config_source_sha256(target)
+    assert observed not in {manifest["targets"][-1]["before_sha256"], manifest["targets"][-1]["after_sha256"]}
+    before = _recovery_snapshot(manifest_path)
+    calls = _block_recovery_effects(monkeypatch)
+
+    with pytest.raises(AgentToolError) as exc:
+        transaction_module._recover_incomplete_transactions(state_root=tmp_path / "output_shared" / "state")
+
+    assert exc.value.code == "CONFIG_TRANSACTION_RECOVERY_REQUIRED"
+    assert exc.value.details["stage"] == "target_state_validation"
+    assert exc.value.details["manifest"] == str(manifest_path)
+    assert str(target) in exc.value.details["error"]
+    assert observed in exc.value.details["error"]
+    assert str(manifest_path) in exc.value.hint
+    assert exc.value.details["write_applied"] is False
+    audit = exc.value.details["recovered_transactions"][0]
+    assert audit["mode"] == mode
+    assert audit["targets"] == []
+    assert audit["write_applied"] is False and audit["cleanup"] is False
+    assert audit["source_revision"] == {
+        "before_sha256": manifest["before_source_sha256"], "after_sha256": manifest["after_source_sha256"],
+    }
+    assert calls == []
+    assert _recovery_snapshot(manifest_path) == before
+
+
+@pytest.mark.parametrize("failure", ["unreadable", "directory", "missing_existing"])
+@pytest.mark.parametrize("mode", ["roll_back", "roll_forward"])
+def test_recovery_target_state_read_failure_preserves_every_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, failure: str,
+) -> None:
+    manifest_path = _target_state_manifest(tmp_path, mode)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    target = Path(manifest["targets"][-1]["path"])
+    if failure != "unreadable":
+        target.rename(tmp_path / "retained-original-runtime.json")
+        if failure == "directory":
+            target.mkdir()
+    before = _recovery_snapshot(manifest_path)
+    calls = _block_recovery_effects(monkeypatch)
+    original_read = Path.read_bytes
+
+    def fail_read(path: Path) -> bytes:
+        if path == target:
+            raise PermissionError(f"injected unreadable target: {path}")
+        return original_read(path)
+
+    with monkeypatch.context() as patch:
+        if failure == "unreadable":
+            patch.setattr(Path, "read_bytes", fail_read)
+        with pytest.raises(AgentToolError) as exc:
+            transaction_module._recover_transaction(manifest_path)
+    assert exc.value.details["stage"] == "target_state_validation"
+    assert str(target) in exc.value.details["error"]
+    assert exc.value.details["write_applied"] is False
+    assert exc.value.details["recovered_transactions"][0]["targets"] == []
+    assert calls == [] and _recovery_snapshot(manifest_path) == before
+    if failure == "directory":
+        assert target.is_dir()
+
+
+@pytest.mark.parametrize("mode", ["roll_back", "roll_forward"])
+@pytest.mark.parametrize("before_exists,state", [(True, "before"), (True, "after"), (True, "equal"),
+                                                 (False, "absent"), (False, "after")])
+def test_recovery_target_state_allows_known_states(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, before_exists: bool, state: str,
+) -> None:
+    manifest_path = _target_state_manifest(tmp_path, mode, before_exists=before_exists)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    last = manifest["targets"][-1]
+    target = Path(last["path"])
+    if state == "after":
+        target.write_bytes(Path(last["desired_path"]).read_bytes())
+    elif state == "equal":
+        payload = target.read_bytes()
+        Path(last["desired_path"]).write_bytes(payload)
+        last["after_sha256"] = transaction_module._bytes_sha256(payload)
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    # Put earlier targets in the recovered state so the last target's action is observed.
+    for item in manifest["targets"][:-1]:
+        artifact = item["backup_path"] if mode == "roll_back" else item["desired_path"]
+        Path(item["path"]).write_bytes(Path(artifact).read_bytes())
+    before = _recovery_snapshot(manifest_path)
+    calls = _block_recovery_effects(monkeypatch)
+    with pytest.raises(AgentToolError) as exc:
+        transaction_module._recover_transaction(manifest_path)
+    expected = "cleanup"
+    if mode == "roll_forward" and state in {"before", "absent"}:
+        expected = "write"
+    elif mode == "roll_back" and state == "after":
+        expected = "write" if before_exists else "unlink"
+    assert calls == [expected]
+    assert exc.value.details["stage"] == ("cleanup" if expected == "cleanup" else "target")
+    assert _recovery_snapshot(manifest_path) == before
+
+
+@pytest.mark.parametrize("mode", ["roll_back", "roll_forward"])
+def test_regular_publisher_rejects_independent_build_during_recovery(tmp_path: Path, mode: str) -> None:
+    manifest_path = _target_state_manifest(tmp_path, mode)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    source = Path(manifest["source_path"])
+    target = Path(manifest["targets"][-1]["path"])
+    _build_recovery_runtime(source, target, independent=True)
+    before = _recovery_snapshot(manifest_path)
+    with pytest.raises(AgentToolError) as exc:
+        _publish(source, _config_doc(), tmp_path, markets=["us"], include_bot=False, apply=True)
+    assert exc.value.code == "CONFIG_TRANSACTION_RECOVERY_REQUIRED"
+    assert exc.value.details["stage"] == "target_state_validation"
+    assert exc.value.details["write_applied"] is False
+    assert _recovery_snapshot(manifest_path) == before
+
+
+def test_current_publish_compensation_preserves_independent_build_and_prior_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "config.yaml"
+    _write_yaml(source, _config_doc())
+    before_source = source.read_bytes()
+    target = tmp_path / "config.us.json"
+    _build_recovery_runtime(source, target)
+    after_doc = _config_doc()
+    after_doc["markets"]["us"]["symbols"].append("AMD")
+    original_write = transaction_module._atomic_write_bytes
+    independent: list[bytes] = []
+
+    def fail_source(path: Path, payload: bytes) -> None:
+        if path == source:
+            _build_recovery_runtime(source, target, independent=True)
+            independent.append(target.read_bytes())
+            raise OSError("injected source commit failure after independent build")
+        original_write(path, payload)
+
+    monkeypatch.setattr(transaction_module, "_atomic_write_bytes", fail_source)
+    with pytest.raises(AgentToolError) as exc:
+        _publish(source, after_doc, tmp_path, markets=["us"], include_bot=False, apply=True)
+    assert exc.value.code == "CONFIG_WRITE_FAILED"
+    assert exc.value.details["stage"] == "commit"
+    assert exc.value.details["write_applied"] is True
+    assert exc.value.details["recovery_error"] is not None
+    assert any(effect["write_applied"] is True for effect in exc.value.details["targets"])
+    audit = exc.value.details["recovered_transactions"][0]
+    assert audit["mode"] == "roll_back"
+    assert audit["targets"] == [] and audit["write_applied"] is False and audit["cleanup"] is False
+    assert len(independent) == 1 and target.read_bytes() == independent[0]
+    assert source.read_bytes() == before_source
+    assert Path(exc.value.details["transaction_manifest"]).exists()
 
 
 def test_config_authoring_rejects_stale_preview_without_writes(tmp_path: Path) -> None:
@@ -355,7 +592,7 @@ def test_regular_publisher_preserves_first_recovery_when_later_manifest_read_fai
         targets=[{"role": "second", "path": second, "payload": b'{"new":2}\n'}],
         audit_id="b-read-failure",
     )
-    first.write_bytes(b'{"partially-committed":1}\n')
+    first.write_bytes(b'{"new":1}\n')
     original_read_manifest = transaction_module._read_manifest
     second_reads = 0
 
@@ -462,7 +699,7 @@ def test_regular_publisher_allows_safe_source_outside_runtime_root_during_recove
         ],
         audit_id="outside-source-recovery",
     )
-    runtime.write_bytes(b'{"partially-committed":true}\n')
+    runtime.write_bytes(b'{"pending":true}\n')
     changed = _config_doc()
     changed["markets"]["us"]["symbols"].append("FUTU")
 

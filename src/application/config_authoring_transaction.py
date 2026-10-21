@@ -774,6 +774,27 @@ def _read_journal_artifact(path: Path, *, expected_sha256: str) -> bytes:
     return payload
 
 
+def _validate_recovery_target_states(targets: list[dict[str, Any]]) -> None:
+    for item in targets:
+        target = Path(str(item["path"])).expanduser().resolve()
+        expected = [str(item["after_sha256"])]
+        if bool(item.get("before_exists")):
+            expected.append(str(item["before_sha256"]))
+        try:
+            observed = _bytes_sha256(target.read_bytes())
+        except FileNotFoundError:
+            if not bool(item.get("before_exists")):
+                continue
+            observed = "<absent>"
+        except OSError as exc:
+            raise OSError(f"cannot read config transaction target {target}: {exc}") from exc
+        if observed not in expected:
+            raise ValueError(
+                f"config transaction target changed outside the transaction: {target} "
+                f"(expected {' or '.join(expected)}, actual {observed})"
+            )
+
+
 def _recover_incomplete_transactions(*, state_root: Path) -> list[dict[str, Any]]:
     transaction_root = state_root / "config_authoring_transactions"
     if not transaction_root.exists():
@@ -875,6 +896,16 @@ def _recover_transaction(manifest_path: Path) -> dict[str, Any]:
             audit=audit,
             exc=exc,
             stage="journal_validation",
+        ) from exc
+    try:
+        # Check the whole transaction before an earlier target can hide a later conflict.
+        _validate_recovery_target_states(targets)
+    except Exception as exc:
+        raise _recovery_error(
+            manifest_path=manifest_path,
+            audit=audit,
+            exc=exc,
+            stage="target_state_validation",
         ) from exc
     for item in targets:
         target = Path(str(item["path"])).expanduser().resolve()
