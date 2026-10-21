@@ -370,7 +370,7 @@ def poll_wechat_clawbot_once(
     client = client_factory(bot_token=bot_token, base_url=base_url, timeout=timeout_sec)
     current_allowlist = allowed_senders_fn or (lambda: allowed_senders)
     sender_identity = str(store.state_dir.resolve())
-    outbox_retry = _retry_pending_wechat_reply(audit_db=audit_db, client=client,
+    outbox_retry = _retry_pending_wechat_reply(audit_db=audit_db, client=client, reply_enabled=reply_enabled,
         allowed_senders_fn=current_allowlist, config_key=config_key, config_path=config_path,
         bot_config_path=bot_config_path, transport_identity=sender_identity)
     allowed_senders = current_allowlist()
@@ -1024,10 +1024,14 @@ def _retry_pending_wechat_reply(
     *,
     audit_db: str | None,
     client: WechatClawbotClient,
+    reply_enabled: bool = True,
     allowed_senders_fn: Callable[[], str | None] | None = None,
     config_key: str | None = None, config_path: str | None = None,
     bot_config_path: str | None = None, transport_identity: str | None = None,
 ) -> dict[str, Any]:
+    if not reply_enabled:
+        return {"attempted": False, "ok": True, "reason": "reply_disabled"}
+
     def authorize(record: dict[str, Any]) -> None:
         check_reply_authorization(record, channel="wechat", current_allowed_senders=allowed_senders_fn or (lambda: None),
             config_key=config_key, config_path=config_path, bot_config_path=bot_config_path,
