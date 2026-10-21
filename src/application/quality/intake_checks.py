@@ -199,6 +199,7 @@ def build_trade_intake_datasets(
         source_account = str(source.get("account") or "").strip().lower()
         scoped_accounts = [source_account] if source_account else list(accounts)
         summary = source.get("summary") if isinstance(source.get("summary"), dict) else {}
+        state_counts_complete = summary.get("state_counts_complete") is not False
         audit_reconciliation = (
             summary.get("audit_reconciliation")
             if isinstance(summary.get("audit_reconciliation"), dict)
@@ -264,7 +265,8 @@ def build_trade_intake_datasets(
             excluded_deal_ids=delegated_lifecycle_pending_deal_ids,
         )
         if (
-            pending_age is None
+            state_counts_complete
+            and pending_age is None
             and state_path is not None
             and state_path.is_relative_to(repo_root.resolve())
         ):
@@ -273,10 +275,7 @@ def build_trade_intake_datasets(
                 now=now,
                 excluded_deal_ids=delegated_lifecycle_pending_deal_ids,
             )
-        evidence = evidence_ref(
-            kind="trade-intake-state",
-            observed_at_utc=observed_at_utc,
-            value={
+        state_evidence = {
                 "source": source.get("id"),
                 "pending_count": pending_count,
                 "actionable_pending_count": actionable_pending_count,
@@ -303,11 +302,29 @@ def build_trade_intake_datasets(
                 "actionable_pending_after_reconcile_count": summary.get(
                     "actionable_pending_after_reconcile_count"
                 ),
-            },
+            }
+        if not state_counts_complete:
+            state_evidence.update({key: None for key in (
+                "pending_count", "actionable_pending_count", "failed_count",
+                "unresolved_count", "actionable_unresolved_count",
+                "delegated_lifecycle_pending_count", "delegated_lifecycle_pending_deal_ids",
+                "state_delegated_lifecycle_pending_count", "pending_age_seconds",
+            )})
+            state_evidence.update(
+                state_counts_complete=False,
+                state_availability=summary.get("state_availability"),
+            )
+        evidence = evidence_ref(
+            kind="trade-intake-state",
+            observed_at_utc=observed_at_utc,
+            value=state_evidence,
             artifact_ref=f"om-evidence:trade-intake:{str(source.get('id') or 'unknown')}",
         )
         for account in scoped_accounts:
-            if actionable_pending_count == 0:
+            if not state_counts_complete:
+                intake_status, intake_reason = "unknown", "INTAKE_STATE_UNAVAILABLE"
+                intake_message = "Trade intake state counts cannot be verified."
+            elif actionable_pending_count == 0:
                 intake_status, intake_reason = "pass", "INTAKE_PENDING_CLEAR"
                 intake_message = "No actionable trade intake row is pending."
             elif pending_age is None:
@@ -327,10 +344,10 @@ def build_trade_intake_datasets(
                 reason_code=intake_reason,
                 message=intake_message,
                 observed={
-                    "pending_count": pending_count,
-                    "actionable_pending_count": actionable_pending_count,
-                    "delegated_lifecycle_pending_count": delegated_lifecycle_pending_count,
-                    "oldest_pending_age_seconds": pending_age,
+                    "pending_count": pending_count if state_counts_complete else None,
+                    "actionable_pending_count": actionable_pending_count if state_counts_complete else None,
+                    "delegated_lifecycle_pending_count": delegated_lifecycle_pending_count if state_counts_complete else None,
+                    "oldest_pending_age_seconds": pending_age if state_counts_complete else None,
                 },
                 expected={"actionable_pending_count": 0},
                 thresholds={"pending_grace_seconds": pending_grace_seconds},
@@ -339,20 +356,21 @@ def build_trade_intake_datasets(
             unresolved = failed_count + actionable_unresolved_count
             check_unresolved = check_result(
                 check_id="OM-INT-002",
-                status="fail" if unresolved else "pass",
+                status="unknown" if not state_counts_complete else "fail" if unresolved else "pass",
                 scope={"account": account, "market": market, "source": str(source.get("id") or "trade-intake")},
                 observed_at_utc=observed_at_utc,
-                reason_code="INTAKE_UNRESOLVED_ROWS" if unresolved else "INTAKE_NO_UNRESOLVED_ROWS",
+                reason_code="INTAKE_STATE_UNAVAILABLE" if not state_counts_complete else "INTAKE_UNRESOLVED_ROWS" if unresolved else "INTAKE_NO_UNRESOLVED_ROWS",
                 message=(
-                    "Failed or unresolved trade-intake rows require repair."
+                    "Trade intake state counts cannot be verified."
+                    if not state_counts_complete else "Failed or unresolved trade-intake rows require repair."
                     if unresolved
                     else "No failed or unresolved trade-intake row remains."
                 ),
                 observed={
-                    "failed_count": failed_count,
-                    "unresolved_count": unresolved_count,
-                    "actionable_unresolved_count": actionable_unresolved_count,
-                    "delegated_lifecycle_pending_count": delegated_lifecycle_pending_count,
+                    "failed_count": failed_count if state_counts_complete else None,
+                    "unresolved_count": unresolved_count if state_counts_complete else None,
+                    "actionable_unresolved_count": actionable_unresolved_count if state_counts_complete else None,
+                    "delegated_lifecycle_pending_count": delegated_lifecycle_pending_count if state_counts_complete else None,
                 },
                 expected={"failed_count": 0, "actionable_unresolved_count": 0},
                 evidence_refs=[evidence],

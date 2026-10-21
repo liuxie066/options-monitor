@@ -312,6 +312,7 @@ def _trade_intake_line(trade: dict[str, Any]) -> str:
         f"receipts={_int_value(summary.get('receipt_count'))} "
         f"confirmed={_int_value(summary.get('receipt_confirmed_count'))} "
         f"receipt_failed={_int_value(summary.get('receipt_failed_count'))}"
+        + (f" state={summary['state_availability']}" if "state_availability" in summary else "")
         + (f" sources={sources}" if sources else "")
     )
 
