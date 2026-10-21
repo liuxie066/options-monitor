@@ -994,6 +994,7 @@ def test_close_advice_barrier_fails_closed_without_target_quality_dataset(
 ) -> None:
     from src.application import tick_account_execution as mod
     from src.application.quality import gate as quality_gate_module
+    from src.application.quality.model import dataset_status
     from src.infrastructure.quality.artifact_repository import (
         QualityArtifactRepository,
     )
@@ -1036,16 +1037,25 @@ def test_close_advice_barrier_fails_closed_without_target_quality_dataset(
     QualityArtifactRepository(artifact_path).write_atomic(
         {
             "schema_version": "investment.quality_status.v1",
+            "producer": {
+                "service": "options-monitor",
+                "producer_version": "test",
+                "policy_version": "quality-policy-v1",
+                "instance_id": "synthetic",
+            },
             "observed_at_utc": observed_at,
+            "runtime": {"status": "healthy", "as_of_utc": observed_at, "checks": []},
             "datasets": [
-                {
-                    "dataset_id": "om.option_positions",
-                    "scope": {"account": "sy", "market": "us"},
-                    "freshness": {"observed_at_utc": observed_at},
-                    "usable_for": ["close_advice"],
-                    "blocked_consumers": [],
-                }
+                dataset_status(
+                    dataset_id="om.option_positions",
+                    scope={"account": "sy", "market": "us"},
+                    status="trusted",
+                    as_of_utc=observed_at,
+                    checks=[],
+                    usable_for=["close_advice"],
+                )
             ],
+            "incidents": [],
         }
     )
     monkeypatch.setenv("OM_QUALITY_ONBOARDED", "true")
