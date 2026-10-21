@@ -28,6 +28,7 @@ if str(repo_base) not in sys.path:
 from domain.domain.trade_account_identity import extract_primary_account_id
 from domain.domain.trade_execution import _futu_asset_type, _parse_futu_option_code, execution_source_status
 from src.application.config_loader import load_config
+from src.application.symbol_aliases import symbol_aliases_from_config
 from src.application.trades.futu_detail_lookup import enrich_trade_push_payload_with_account_id
 from src.application.trades.account_mapping import resolve_trade_intake_config
 from src.application.trades.combo_reconciliation import (
@@ -591,19 +592,49 @@ def _process_payload(
     claim = None
 
     def _record_lookup_evidence(lookup: Any) -> dict[str, Any] | None:
-        evidence = dict(getattr(lookup, "diagnostics", {}) or {}).get("deal_lookup_evidence")
+        diagnostics = dict(getattr(lookup, "diagnostics", {}) or {})
+        evidence = diagnostics.get("deal_lookup_evidence") or diagnostics.get("underlying_lookup_evidence")
+        underlying_errors = (diagnostics.get("underlying_conflicts") or {}).get("errors") or []
         if not apply_changes or not isinstance(evidence, dict):
             return None
         if broker_deal_key_from_payload(evidence, account_mapping=account_mapping) != key:
             raise ValueError("lookup economic evidence changed execution identity")
-        recorded_id = enqueue_trade_payload(
-            inbox_path, payload=evidence, source="lookup", broker_deal_key=key, repo=repo,
-            adapter_version=TRADE_INTAKE_ADAPTER_VERSIONS["lookup"],
-        )
-        recorded = read_trade_payload(inbox_path, inbox_id=recorded_id)
-        if recorded_id != inbox_id or recorded is None:
-            raise RuntimeError("lookup economic evidence readback missing")
+        with with_sqlite_repo_writer_lock(repo):
+            recorded_id = enqueue_trade_payload(
+                inbox_path, payload=evidence, source="lookup", broker_deal_key=key, repo=repo,
+                adapter_version=TRADE_INTAKE_ADAPTER_VERSIONS["lookup"],
+                underlying_conflict_errors=underlying_errors,
+            )
+            recorded = read_trade_payload(inbox_path, inbox_id=recorded_id)
+            if recorded_id != inbox_id or recorded is None:
+                raise RuntimeError("lookup evidence readback missing")
+            if underlying_errors and not (
+                recorded["status"] in {"conflict", "handled"} or (
+                    recorded["status"] == "identity_needs_review"
+                    and recorded["result_reason"] == "broker_underlying_symbol_conflict")
+            ):
+                raise RuntimeError("lookup underlying conflict was not durably quarantined")
         return recorded
+
+    def _lookup_conflict_result(
+        lookup: Any, observed: dict[str, Any] | None, *, recover_missing_status: bool = False,
+    ) -> dict[str, Any] | None:
+        diagnostics = dict(getattr(lookup, "diagnostics", {}) or {})
+        economic_errors = diagnostics.get("economic_conflicts") or []
+        underlying_errors = (diagnostics.get("underlying_conflicts") or {}).get("errors") or []
+        observed_conflict = (observed or {}).get("status") == "conflict" and not (
+            recover_missing_status and (observed or {}).get("result_reason") == "broker_deal_status_missing")
+        if not (economic_errors or underlying_errors or observed_conflict):
+            return None
+        if apply_changes and economic_errors and (observed or {}).get("status") != "conflict":
+            raise RuntimeError("lookup economic conflict was not durably quarantined")
+        handled = (observed or {}).get("status") == "handled"
+        return {"status": "skipped" if handled else "unresolved",
+                "reason": "duplicate" if handled else (observed or {}).get("result_reason") or (
+                    "broker_economic_payload_conflict" if economic_errors else "broker_underlying_symbol_conflict"),
+                "deal_id": payload_deal_id(payload), **({"inbox_id": inbox_id} if apply_changes else {}),
+                "diagnostics": {"retryable": False, "errors": economic_errors + underlying_errors,
+                                "enrichment": diagnostics}}
 
     if apply_changes:
         key = ("" if (payload.get("_trade_intake_file_identity_unbound") or payload.get("_trade_intake_source_identity_errors")) else
@@ -643,8 +674,12 @@ def _process_payload(
         ):
             lookup = enrich_trade_push_payload_with_account_id(
                 payload, host=host, port=port, futu_account_ids=futu_account_ids,
+                symbol_aliases=symbol_aliases_from_config(config),
             )
             stored = _record_lookup_evidence(lookup) or stored
+            conflict_result = _lookup_conflict_result(lookup, stored, recover_missing_status=True)
+            if conflict_result is not None:
+                return conflict_result
             checked = lookup.payload
             if (
                 execution_source_status(checked) is not None
@@ -830,17 +865,12 @@ def _process_payload(
                 load_trade_intake_state(state_path)
             lookup = enrich_trade_push_payload_with_account_id(
                 payload, host=host, port=port, futu_account_ids=futu_account_ids,
+                symbol_aliases=symbol_aliases_from_config(config),
             )
             observed = _record_lookup_evidence(lookup)
-            errors = dict(getattr(lookup, "diagnostics", {}) or {}).get("economic_conflicts") or []
-            if errors or (observed or {}).get("status") == "conflict":
-                if apply_changes and (observed or {}).get("status") != "conflict":
-                    raise RuntimeError("lookup economic conflict was not durably quarantined")
-                return {"status": "unresolved", "reason": (observed or {}).get("result_reason") or
-                        "broker_economic_payload_conflict", "deal_id": payload_deal_id(payload),
-                        **({"inbox_id": inbox_id} if apply_changes else {}),
-                        "diagnostics": {"retryable": False, "errors": errors,
-                                        "enrichment": dict(getattr(lookup, "diagnostics", {}) or {})}}
+            conflict_result = _lookup_conflict_result(lookup, observed)
+            if conflict_result is not None:
+                return conflict_result
         result = process_trade_payload(
         payload,
         repo=repo,

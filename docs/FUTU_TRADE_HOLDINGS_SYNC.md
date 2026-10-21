@@ -1863,6 +1863,10 @@ A1–A8 是验收要求。源码、隔离测试、真实 broker 样本和生产�
 
 原始 Futu、嵌套 `execution_input` 与标准成交输入均按其实际数量、价格字段保存 lookup 观察；保留的原始匹配行用于重算别名错误，不信任临时 `errors` 数组。数量、价格冲突按全部历史 canonical 证据判定。后续缺值、状态缺失或 OK、普通重试不能抹去既有矛盾；无经济矛盾的缺状态记录仍可由可信 OK 恢复。冲突保留在现有 Inbox，待核实，不自动修复历史账本或发送成功回执。
 
+匹配的成交或订单 lookup 与原输入都明确声明 underlying、且按既有规范化规则不等价时，自动接纳进入现有 `identity_needs_review`，原因为 `broker_underlying_symbol_conflict`。应用在当前配置上下文比较原始字段的自定义别名；标准或嵌套成交沿用已声明的 canonical instrument，不被外层原始别名覆盖。仅代码根、显示名或普通 symbol 的差异仍可由查询纠正，POP 等合法别名继续等价。订单观察只保留原始身份来源，不把订单数量、价格当作成交经济事实。
+
+原输入和完整匹配行先保留为来源证据，并与复核状态在同一 Inbox 事务提交；该状态会使旧 claim 的提交复验失败。后续无 lookup 重试、缺状态→OK、关联补充和普通 resume 均不自动解除本项复核。已有冲突原因和 handled 结果不因本项标的复核降级；数量、价格及来源状态的原有冲突分类仍执行，已入账事件不回滚或重写。本项不新增别名持久策略、自动复核解除或历史修复。
+
 
 入口与状态：push/backfill/file 经已有来源绑定，保存 broker+physical account+environment+market+deal ID、经济内容、status 和 provider updateTimestamp。适配器保留协议状态与原始修订。状态表：
 - 缺失/未知状态：保存来源，主动查询；新经济成交不入账。历史已入账事件保持可读，但相关证据不完整时待核实。

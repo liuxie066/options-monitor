@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1255 (`src`: 572, `domain`: 97, `scripts`: 16, `tests`: 567)
-- Internal import edges: 10516 total, 3956 production/script edges excluding tests
+- Internal import edges: 10547 total, 3957 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -50,7 +50,7 @@ flowchart LR
   scripts -->|2| interfaces
   scripts -->|1| tests
   storage -->|1| domain
-  tests -->|5006| application
+  tests -->|5026| application
   tests -->|627| domain
   tests -->|2| domain_services
   tests -->|316| infrastructure
@@ -88,7 +88,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 5006 |
+| tests | application | 5026 |
 | tests | domain | 627 |
 | tests | interfaces | 370 |
 | tests | infrastructure | 316 |
@@ -111,7 +111,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.trades | domain.domain | 65 |
 | scripts | src.application | 54 |
 | src.application | domain.storage | 45 |
-| src.application.trades | src.application | 44 |
+| src.application.trades | src.application | 45 |
 | src.application | src.application.ledger | 40 |
 | src.application.trades | src.application.ledger | 33 |
 | src.application | domain.domain.engine | 32 |
@@ -210,7 +210,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | module | outgoing imports |
 |---|---|
 | src.application.ledger.api | 54 |
-| src.application.trades.auto_intake | 50 |
+| src.application.trades.auto_intake | 51 |
 | src.application.ledger.trade_attribution | 41 |
 | src.application.multi_tick.required_data_prefetch | 34 |
 | src.application.pipeline_watchlist | 33 |
