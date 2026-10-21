@@ -3,11 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 
 SCHEMA_VERSION = "investment.quality_status.v1"
+QUALITY_STATUS_SCHEMA_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "contracts" / "quality-monitoring" / "quality_status.v1.schema.json"
+)
 POLICY_VERSION = "quality-policy-v1"
 DATASET_STATUSES = ("trusted", "partial", "untrusted", "unavailable")
 
@@ -157,12 +162,27 @@ def summarize(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def validate_payload(payload: dict[str, Any], *, schema_path: Path) -> None:
+@lru_cache(maxsize=1)
+def _validator_for_schema(schema_text: str) -> Any:
     from jsonschema import Draft202012Validator, FormatChecker
 
-    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    schema = json.loads(schema_text)
     Draft202012Validator.check_schema(schema)
-    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    return Draft202012Validator(schema, format_checker=FormatChecker())
+
+
+def validated_quality_status(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return only canonical status artifacts; schema loading errors still propagate."""
+    if payload is None:
+        return None
+    validator = _validator_for_schema(QUALITY_STATUS_SCHEMA_PATH.read_text(encoding="utf-8"))
+    return payload if validator.is_valid(payload) else None
+
+
+def validate_payload(payload: dict[str, Any], *, schema_path: Path) -> None:
+    # Re-read schema content so custom paths and in-place updates keep their contract.
+    # Only validator construction is reused, never a payload's validation result.
+    validator = _validator_for_schema(schema_path.read_text(encoding="utf-8"))
     errors = sorted(validator.iter_errors(payload), key=lambda item: list(item.absolute_path))
     if errors:
         detail = "; ".join(
@@ -174,6 +194,7 @@ def validate_payload(payload: dict[str, Any], *, schema_path: Path) -> None:
 
 __all__ = [
     "POLICY_VERSION",
+    "QUALITY_STATUS_SCHEMA_PATH",
     "SCHEMA_VERSION",
     "check_result",
     "dataset_status",
@@ -184,4 +205,5 @@ __all__ = [
     "summarize",
     "utc_iso",
     "validate_payload",
+    "validated_quality_status",
 ]
