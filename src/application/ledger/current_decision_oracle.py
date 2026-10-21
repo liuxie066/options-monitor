@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.option_lifecycle import pending_close_quantities
+
 from .current_decision_assigned_stock import (
     compact_assigned_stock_view,
 )
@@ -153,6 +155,11 @@ def _oracle_lifecycle_case_facts(
             else None
         )
         try:
+            pending_close = pending_close_quantities(
+                facts["case_allocations"],
+                facts["trade_events"],
+                void_event_ids=facts["effective_void_event_ids"],
+            )
             compact_model = derive_lifecycle_read_model(
                 expiration_ymd=str(lifecycle_case.get("expiration_ymd") or ""),
                 market=str(
@@ -168,6 +175,7 @@ def _oracle_lifecycle_case_facts(
                 accepted_option_close_contracts_by_lot=dict(
                     case_resolution.get("effective_reservations_by_lot") or {}
                 ),
+                pending_close_contracts_by_lot=pending_close,
                 now_ms=now_ms,
                 observation_start_ms_override=(
                     int(lifecycle_case["observation_start_ms"])
@@ -189,6 +197,7 @@ def _oracle_lifecycle_case_facts(
             "lifecycle_case_id": case_id,
             "resolved_contracts_by_lot": compact_model.resolved_contracts_by_lot,
             "remaining_contracts_by_lot": compact_model.remaining_contracts_by_lot,
+            "pending_close_contracts_by_lot": pending_close,
             "resolved_contracts_by_terminal_type": (
                 compact_model.resolved_contracts_by_terminal_type
             ),
