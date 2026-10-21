@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1251 (`src`: 571, `domain`: 97, `scripts`: 16, `tests`: 564)
-- Internal import edges: 10467 total, 3952 production/script edges excluding tests
+- Python files scanned: 1252 (`src`: 571, `domain`: 97, `scripts`: 16, `tests`: 565)
+- Internal import edges: 10477 total, 3953 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -50,11 +50,11 @@ flowchart LR
   scripts -->|2| interfaces
   scripts -->|1| tests
   storage -->|1| domain
-  tests -->|4972| application
+  tests -->|4980| application
   tests -->|625| domain
   tests -->|2| domain_services
   tests -->|314| infrastructure
-  tests -->|364| interfaces
+  tests -->|365| interfaces
   tests -->|6| om_strategy_core
   tests -->|31| scripts
   tests -->|46| storage
@@ -88,9 +88,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 4972 |
+| tests | application | 4980 |
 | tests | domain | 625 |
-| tests | interfaces | 364 |
+| tests | interfaces | 365 |
 | tests | infrastructure | 314 |
 | tests | storage | 46 |
 | tests | scripts | 31 |
@@ -123,7 +123,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.positions | src.application | 24 |
 | src.application.multi_tick | src.application | 23 |
 | src.application | src.application.settings | 22 |
-| src.application | src.application.trades | 18 |
+| src.application | src.application.trades | 19 |
 | src.application.ledger | src.infrastructure | 18 |
 | src.application | src.application.multi_tick | 16 |
 | src.application | domain.domain.ledger | 16 |
@@ -218,7 +218,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.interfaces.cli.main | 32 |
 | src.application.daily_decision_brief_service | 31 |
 | src.interfaces.cli.option_positions | 31 |
-| src.application.agent_tools.runtime_status_impl | 29 |
+| src.application.agent_tools.runtime_status_impl | 30 |
 | src.application.channels.wechat_clawbot.inbound | 29 |
 | src.application.multi_account_tick | 29 |
 | src.application.agent_tools.positions | 28 |

@@ -152,6 +152,16 @@ listener 在现有每分钟维护周期核对本地 ledger、lifecycle、来源�
 不要删除或清空文件来继续接入；`--reconcile-state` 不会自动修复无法解析的文件。
 状态报错也不代表此前已完成的 ledger 或 Inbox 写入被回滚，重试仍须遵循现有幂等流程。
 
+`runtime_status` 与 `om status` 的成交接入摘要用 `state_counts_complete` 和
+`state_availability` 区分可核验计数与未知值。`available` 表示所计来源的状态均可读；
+`partial` 表示只有部分来源可读；`unavailable` 表示所需状态均不可核验；
+`not_required` 表示来源均停用且没有历史状态。其中两种未知情形（`partial`、
+`unavailable`）的公开 processed、failed、unresolved、pending 和三项 receipt 计数
+全部返回 `null`，CLI 显示 `-`，不把已知小计当完整总量。停用来源的有效历史仍计入。
+真正缺文件仍允许首次启动，单凭缺失不会新增运行故障告警；启用来源的损坏或不可读状态
+会报告 `TRADE_INTAKE_STATE_UNAVAILABLE`。这些只读诊断不初始化或修复文件，
+也不以 listener 心跳、账本对账或通知状态代替状态文件的计数证据。
+
 ## 生命周期观察隔离与一次性历史修复
 
 `trade_intake.settlement_observation.enabled` 是 lifecycle settlement provider
