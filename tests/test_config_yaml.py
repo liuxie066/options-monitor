@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
+import shlex
 from copy import deepcopy
 from pathlib import Path
 
@@ -32,6 +34,7 @@ from src.application.runtime_config_freshness import (
     RuntimeConfigFreshnessError,
     check_runtime_config_freshness,
     ensure_runtime_config_freshness,
+    format_runtime_config_freshness_error,
 )
 
 
@@ -1294,7 +1297,8 @@ def test_yaml_bot_config_unwraps_explicit_system_defaults(tmp_path: Path) -> Non
         output_config_path=output_path,
     )
     generated = json.loads(output_path.read_text(encoding="utf-8"))
-    assert f"--system-config {system_path}" in generated[GENERATED_KEY]["rebuild_command"]
+    command = shlex.split(generated[GENERATED_KEY]["rebuild_command"])
+    assert command[command.index("--system-config") + 1] == str(system_path)
 
 
 def test_yaml_bot_config_resolves_active_model_profile(tmp_path: Path) -> None:
@@ -1993,6 +1997,171 @@ def test_config_build_cli_supports_yaml_source(tmp_path: Path, capsys) -> None:
     assert cfg[RESOLVED_KEY]["config_yaml_path"].endswith("config.yaml")
     assert not _contains_mapping_key(cfg, "output_mode")
     validate_config(cfg)
+
+
+@pytest.mark.parametrize("market", ["us", "hk"])
+@pytest.mark.parametrize("relative", [False, True], ids=["absolute", "relative"])
+@pytest.mark.parametrize("producer", ["resolver", "file"])
+def test_yaml_custom_system_freshness_command_rebuild_preserves_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, market: str, relative: bool, producer: str,
+) -> None:
+    from src.interfaces.cli.config_ops import add_config_commands, handle_config_command
+
+    case = tmp_path / "空间 'quoted' \\folder"
+    case.mkdir()
+    source = _write_yaml(case / "authoring '配置'.yaml", _minimal_yaml())
+    system = case / 'system "默认" \\custom.json'
+    system_config = deepcopy(DEFAULT_CONFIG)
+    system_config["defaults"]["runtime"]["symbol_timeout_sec"] = 137
+    system.write_text(json.dumps(system_config), encoding="utf-8")
+    output = case / "runtime '输出' \\snapshot.json"
+    monkeypatch.chdir(case)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    parser = argparse.ArgumentParser()
+    add_config_commands(parser.add_subparsers(dest="command", required=True))
+
+    def dispatch(argv: list[str]) -> dict:
+        return handle_config_command(parser.parse_args(argv), repo_base_fn=lambda: tmp_path)
+
+    source_arg, system_arg, output_arg = (
+        path.name if relative else str(path) for path in (source, system, output)
+    )
+    argv = [
+        "config", "build", "--source", "yaml", "--market", market,
+        "--config-yaml", source_arg, "--system-config", system_arg, "--output", output_arg,
+    ]
+    input_bytes = (source.read_bytes(), system.read_bytes())
+    preview = dispatch([*argv, "--dry-run"])
+    assert preview["ok"] and preview["dry_run"] and not preview["write_applied"]
+    assert not output.exists()
+    assert input_bytes == (source.read_bytes(), system.read_bytes())
+
+    resolved, _ = resolve_yaml_runtime_config(
+        repo_root=tmp_path, market=market, config_path=source_arg, system_config_path=system_arg,
+    )
+    result = dispatch(argv)
+    assert result["ok"] and result["write_applied"] and not result["dry_run"]
+    assert result["output_config_path"] == str(output)
+    assert result["system_config_path"] == str(system)
+    assert result["source_format"] == "yaml"
+    written = json.loads(output.read_text(encoding="utf-8"))
+    output_bytes = output.read_bytes()
+    preview = dispatch([*argv, "--dry-run"])
+    assert preview["ok"] and preview["dry_run"] and not preview["write_applied"]
+    assert output.read_bytes() == output_bytes
+    before = resolved if producer == "resolver" else written
+    assert before["runtime"]["symbol_timeout_sec"] == 137
+    before_system = next(item for item in before[GENERATED_KEY]["sources"] if item["role"] == "system")
+    assert (tmp_path / before_system["path"]).resolve() == system
+    assert before_system["sha256"] == hashlib.sha256(input_bytes[1]).hexdigest()
+    assert input_bytes == (source.read_bytes(), system.read_bytes())
+
+    # Change only source bytes so the real freshness consumer supplies its recovery hint.
+    system.write_bytes(input_bytes[1] + b"\n")
+    stale = check_runtime_config_freshness(
+        before, repo_root=tmp_path, market=market, runtime_config_path=output,
+    )
+    assert not stale["ok"]
+    assert any(error["role"] == "system" and error["code"] == "source_changed" for error in stale["errors"])
+    hint = stale["rebuild_command"]
+    assert hint in format_runtime_config_freshness_error(stale)
+    command = shlex.split(hint)
+    assert command[:3] == ["./om", "config", "build"]
+    parsed = parser.parse_args(command[1:])
+    assert parsed.source == "yaml" and parsed.market == market
+    assert parsed.config_yaml == str(source)
+    assert parsed.system_config == str(system)
+    assert parsed.output == (str(output) if producer == "file" else None)
+
+    current_bytes = (source.read_bytes(), system.read_bytes())
+    rebuilt_result = dispatch(command[1:])
+    rebuilt_path = output if producer == "file" else tmp_path / f"config.{market}.json"
+    assert rebuilt_result["output_config_path"] == str(rebuilt_path)
+    after = json.loads(rebuilt_path.read_text(encoding="utf-8"))
+    assert after["runtime"]["symbol_timeout_sec"] == 137
+    assert {key: value for key, value in after.items() if key not in (GENERATED_KEY, RESOLVED_KEY)} == {
+        key: value for key, value in before.items() if key not in (GENERATED_KEY, RESOLVED_KEY)
+    }
+    after_system = next(item for item in after[GENERATED_KEY]["sources"] if item["role"] == "system")
+    assert after_system["path"] == before_system["path"]
+    assert after_system["sha256"] == hashlib.sha256(current_bytes[1]).hexdigest()
+    assert after[RESOLVED_KEY]["default_sha256"] == after_system["sha256"]
+    assert after[GENERATED_KEY]["market"] == market
+    assert check_runtime_config_freshness(
+        after, repo_root=tmp_path, market=market, runtime_config_path=rebuilt_path,
+    )["ok"]
+    assert current_bytes == (source.read_bytes(), system.read_bytes())
+
+
+@pytest.mark.parametrize("market", ["us", "hk"])
+@pytest.mark.parametrize("system_arg", [None, "", " \t"], ids=["omitted", "empty", "whitespace"])
+def test_yaml_default_rebuild_commands_keep_inline_system(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, market: str, system_arg: str | None,
+) -> None:
+    from src.interfaces.cli.config_ops import add_config_commands, handle_config_command
+
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    parser = argparse.ArgumentParser()
+    add_config_commands(parser.add_subparsers(dest="command", required=True))
+    source = _write_yaml(tmp_path / "config.yaml", _minimal_yaml())
+    source_bytes = source.read_bytes()
+    output = tmp_path / f"config.{market}.json"
+    resolved, _ = resolve_yaml_runtime_config(
+        repo_root=tmp_path, market=market, config_path=source, system_config_path=system_arg,
+    )
+    build_yaml_runtime_config_file(
+        repo_root=tmp_path, market=market, config_path=source,
+        system_config_path=system_arg, output_config_path=output,
+    )
+    written = json.loads(output.read_text(encoding="utf-8"))
+    for cfg in (resolved, written):
+        command = shlex.split(cfg[GENERATED_KEY]["rebuild_command"])
+        assert "--system-config" not in command
+        assert command[command.index("--market") + 1] == market
+        assert command[command.index("--config-yaml") + 1] == str(source)
+        system = next(item for item in cfg[GENERATED_KEY]["sources"] if item["role"] == "system")
+        assert system["inline"] and system["ref"] == DEFAULT_CONFIG_REF
+        assert "path" not in system
+        assert cfg["runtime"]["symbol_timeout_sec"] == DEFAULT_CONFIG["defaults"]["runtime"]["symbol_timeout_sec"]
+        assert check_runtime_config_freshness(cfg, repo_root=tmp_path, market=market)["ok"]
+        rebuilt_result = handle_config_command(parser.parse_args(command[1:]), repo_base_fn=lambda: tmp_path)
+        assert rebuilt_result["write_applied"] and rebuilt_result["system_config_ref"] == DEFAULT_CONFIG_REF
+        assert rebuilt_result["output_config_path"] == str(output)
+        rebuilt = json.loads(output.read_text(encoding="utf-8"))
+        rebuilt_system = next(item for item in rebuilt[GENERATED_KEY]["sources"] if item["role"] == "system")
+        assert rebuilt_system == system
+        assert {key: value for key, value in rebuilt.items() if key not in (GENERATED_KEY, RESOLVED_KEY)} == {
+            key: value for key, value in cfg.items() if key not in (GENERATED_KEY, RESOLVED_KEY)
+        }
+        assert check_runtime_config_freshness(rebuilt, repo_root=tmp_path, market=market)["ok"]
+    command = shlex.split(written[GENERATED_KEY]["rebuild_command"])
+    assert command[command.index("--output") + 1] == str(output)
+    assert source.read_bytes() == source_bytes
+
+
+@pytest.mark.parametrize("market", ["us", "hk"])
+@pytest.mark.parametrize("invalid", ["missing", "malformed"])
+@pytest.mark.parametrize("existing_output", [False, True])
+def test_yaml_invalid_custom_system_fails_before_output_write(
+    tmp_path: Path, market: str, invalid: str, existing_output: bool,
+) -> None:
+    source = _write_yaml(tmp_path / "config.yaml", _minimal_yaml())
+    system = tmp_path / "system.json"
+    if invalid == "malformed":
+        system.write_text("{invalid JSON", encoding="utf-8")
+    output = tmp_path / "output" / f"config.{market}.json"
+    if existing_output:
+        output.parent.mkdir()
+        output.write_bytes(b"existing output sentinel")
+    before_files = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    error_type = FileNotFoundError if invalid == "missing" else AgentToolError
+    with pytest.raises(error_type):
+        build_yaml_runtime_config_file(
+            repo_root=tmp_path, market=market, config_path=source,
+            system_config_path=system, output_config_path=output,
+        )
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before_files
+    assert output.parent.exists() is existing_output
 
 
 def test_config_validate_cli_supports_yaml_source(tmp_path: Path, capsys) -> None:
