@@ -336,6 +336,10 @@ def _branch_gate_reason(branch: Mapping[str, Any]) -> str | None:
     return "wheel_disabled"
 
 
+def _branch_evidence_reason(branch: Mapping[str, Any]) -> str | None:
+    return next(iter(sorted(branch.get("reason_codes") or [])), None)
+
+
 def _common_policy_decision(
     candidate: Mapping[str, Any],
     *,
@@ -388,6 +392,7 @@ def run_wheel_call_scan(
         and row.get("integrity_status") == "trusted"
         and _branch_capacity_reason(row) is None
         and _branch_gate_reason(row) is None
+        and _branch_evidence_reason(row) is None
     ]
     symbols = sorted({str(row.get("symbol") or "").strip().upper() for row in scan_batches})
     frames, unavailable_symbols = _frames_from_snapshot(required_data_snapshot, symbols)
@@ -441,6 +446,10 @@ def run_wheel_call_scan(
             continue
         if _branch_capacity_reason(raw_batch) is not None:
             scopes.append({**base_scope, "status": "not_applicable", "reason_code": _branch_capacity_reason(raw_batch)})
+            continue
+        evidence_reason = _branch_evidence_reason(raw_batch)
+        if evidence_reason is not None:
+            scopes.append({**base_scope, "status": "unavailable", "reason_code": evidence_reason})
             continue
         if symbol in unavailable_symbols:
             scopes.append({**base_scope, "status": "unavailable", "reason_code": unavailable_symbols[symbol]})
@@ -594,6 +603,7 @@ def run_wheel_put_scan(
         and row.get("integrity_status") == "trusted"
         and _branch_capacity_reason(row) is None
         and _branch_gate_reason(row) is None
+        and _branch_evidence_reason(row) is None
     ]
     symbols = sorted(
         {str(row.get("symbol") or "").strip().upper() for row in scan_branches}
@@ -668,6 +678,16 @@ def run_wheel_put_scan(
                     **base_scope,
                     "status": "not_applicable",
                     "reason_code": _branch_capacity_reason(branch),
+                }
+            )
+            continue
+        evidence_reason = _branch_evidence_reason(branch)
+        if evidence_reason is not None:
+            scopes.append(
+                {
+                    **base_scope,
+                    "status": "unavailable",
+                    "reason_code": evidence_reason,
                 }
             )
             continue
