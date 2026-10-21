@@ -20,6 +20,12 @@
 原有时间宽限判定；未知状态和未来时间戳政策不在本次修复范围内。
 告警 watchdog 只共享四个状态词汇，保留自身时间窗及发送规则。
 
+只有存在布尔 `enabled=false` 且没有 `config_error` 的接入运行证据才支持
+`LISTENER_NOT_APPLICABLE`。运行状态读取失败、缺失或错误标记产生
+`unknown/LISTENER_RUNTIME_UNAVAILABLE`，已知失败市场保留在 scope 中；另一市场
+明确禁用或 listener 心跳正常不会消除该未知项。service 传递现有运行读取错误，
+不为失败市场构造虚假 runtime 行，也不改变其他运行检查。
+
 ## 数据检查
 
 | ID | 实现入口 | 确定性回归证据 | `blocked_consumers` |
@@ -49,6 +55,15 @@
 现有聚合据此将数据集标为 `unavailable`；首次启动缺状态文件仍是合法接入行为，
 但尚不能证明数据质量。停用来源维持不适用，未携带该标记的旧输入维持原契约。
 `OM-INT-003` 的独立审计对账口径、delegated 结果和检查结论保持不变。
+
+接入运行证据本身缺失、`enabled` 非布尔或带有 `config_error` 时，
+`OM-INT-001/002/003` 均返回 `unknown/TRADE_INTAKE_RUNTIME_UNAVAILABLE`。
+该配置市场的账户数据集为 `unavailable`，`required_evidence_complete=false`、
+`usable_for=[]`；整体 runtime 已为 unknown 也不能替代这些逐数据集结论。
+明确禁用继续按不适用通过；正常启用时仍使用原有状态和审计证据，完整零结果
+可以可信，缺少终态审计证据仍是未知。两检查 owner 复用
+`src/application/quality/intake_checks.py::trade_intake_runtime_evidence_available`，
+不修改 producer 的错误表示或新增配置状态。
 
 ## 发布、读取和门禁边界
 
