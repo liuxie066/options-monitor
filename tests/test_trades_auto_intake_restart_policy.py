@@ -150,7 +150,7 @@ def test_real_listener_login_evidence_selects_existing_restart_policy(
         def close(self):
             history_closed.append(self)
 
-    def build_context(_listener):
+    def build_context(_listener, *, on_init_connect_error=None):
         context = Context()
         contexts.append(context)
         return context, object()
