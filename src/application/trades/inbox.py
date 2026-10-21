@@ -287,7 +287,7 @@ def enqueue_trade_payload(
                     execution_source_revision(json.loads(item[0])) for item in evidence
                 )
             )
-            conflict = any(
+            conflict = _has_source_economic_conflict(evidence_content) or any(
                 _economic_values_conflict(item.get("economic"), content.get("economic"))
                 or conflicting_execution_associations(item, content)
                 for item in evidence_content
@@ -305,7 +305,8 @@ def enqueue_trade_payload(
                     payload_version = payload_version + 1, claim_id = NULL, claim_until_ms = NULL,
                     updated_at_ms = ?, last_error = ?,
                     result_status = 'conflict', result_reason = ?
-                    WHERE inbox_id = ? AND (status != 'conflict' OR ?)""", (now_ms, reason, reason, inbox_id, int(new_evidence)),
+                    WHERE inbox_id = ? AND (status != 'conflict' OR ? OR result_reason IS NOT ?)""",
+                    (now_ms, reason, reason, inbox_id, int(new_evidence), reason),
                 )
             elif (
                 row["status"] == "conflict"
@@ -3477,6 +3478,20 @@ def _inbox_execution_content(source_key: str, payload: dict[str, Any]) -> dict[s
 
 def _has_source_identity_conflict(contents: Iterable[Mapping[str, Any]]) -> bool:
     return any("invalid:source_execution_identity" in item.get("errors", ()) for item in contents)
+
+
+def _has_source_economic_conflict(contents: Iterable[Mapping[str, Any]]) -> bool:
+    known: dict[str, set[str]] = {"quantity": set(), "price": set()}
+    for item in contents:
+        if any(error.startswith(("invalid:quantity:", "invalid:price:")) for error in item.get("errors", ())):
+            return True
+        for field, values in known.items():
+            value = (item.get("economic") or {}).get(field)
+            if value not in (None, ""):
+                values.add(value)
+                if len(values) > 1:
+                    return True
+    return False
 
 
 def _economic_values_conflict(left: Any, right: Any) -> bool:

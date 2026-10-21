@@ -578,6 +578,29 @@ def _futu_asset_type(src: dict[str, Any], option_info: dict[str, Any]) -> str | 
     return None
 
 
+_FUTU_ECONOMIC_ALIASES = {
+    "quantity": ("contracts", "qty", "quantity"),
+    "price": ("price", "execution_price", "dealt_price"),
+}
+
+
+def _source_economic_alias_errors(src: dict[str, Any]) -> list[str]:
+    errors = []
+    for field, aliases in _FUTU_ECONOMIC_ALIASES.items():
+        values = set()
+        for alias in aliases:
+            value = src.get(alias)
+            if value in (None, ""):
+                continue
+            try:
+                values.add(canonical_decimal(str(value) if isinstance(value, float) else value))
+            except ValueError:
+                errors.append(f"invalid:{field}:source_field:{alias}")
+        if len(values) > 1:
+            errors.append(f"invalid:{field}:source_alias_conflict")
+    return errors
+
+
 def _source_multiplier_errors(src: dict[str, Any]) -> list[str]:
     supplied = {}
     for key in ("multiplier", "contract_multiplier", "lot_size"):
@@ -656,6 +679,7 @@ def _futu_execution_input(src: dict[str, Any]) -> dict[str, Any]:
         "evidence_refs": src.get("evidence_refs") or [],
     }, source_payload=src)
     execution["errors"].extend(error for error in time_input["errors"] if error not in execution["errors"])
+    execution["errors"].extend(_source_economic_alias_errors(src))
     if asset_type == "option":
         execution["errors"].extend(_source_multiplier_errors(src))
     return execution
@@ -672,6 +696,11 @@ def canonical_trade_execution_content(payload: dict[str, Any]) -> dict[str, Any]
         execution = normalize_execution_input(payload)
     else:
         execution = _futu_execution_input(payload)
+    lookup_row = payload.get("_futu_detail_lookup_row")
+    if isinstance(lookup_row, dict):
+        # Standard numeric slots cannot retain errors from nonpreferred raw aliases.
+        execution["errors"].extend(error for error in _source_economic_alias_errors(lookup_row)
+                                   if error not in execution["errors"])
     return execution_economic_content(execution)
 
 

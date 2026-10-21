@@ -231,3 +231,36 @@ def test_futu_execution_collision_retains_us_economics(code) -> None:
     assert instrument["symbol"] == "MET.US"
     assert instrument["market"] == "US"
     assert instrument["currency"] == "USD"
+
+
+@pytest.mark.parametrize('field,aliases', [
+    ('quantity', ('contracts', 'qty', 'quantity')),
+    ('price', ('price', 'execution_price', 'dealt_price')),
+])
+@pytest.mark.parametrize('value,valid', [('2.00', True), (2, True), (2.0, True), (Decimal('2.000'), True),
+                                         ('3', False), (True, False), ('NaN', False), ('bad', False)])
+def test_futu_economic_aliases_cannot_hide_disagreement_or_invalid_values(field, aliases, value, valid):
+    raw = {'acc_id': '123', 'broker_account_id': 'futu:REAL:123', 'environment': 'REAL',
+           'deal_id': 'fill', 'external_id_namespace': 'futu.deal', 'code': 'US.NVDA261218P00100000',
+           'qty': '2', 'price': '2', 'multiplier': '100', 'trd_side': 'SELL_SHORT',
+           'create_time': '2026-10-21 10:30:00'}
+    for alias in aliases:
+        raw[alias] = '2'
+    raw[aliases[-1]] = value
+    errors = canonical_trade_execution_content(raw)['errors']
+    assert bool([error for error in errors if error.startswith(f'invalid:{field}:')]) is not valid
+
+
+@pytest.mark.parametrize('nested', [False, True])
+@pytest.mark.parametrize('has_lookup_row', [False, True])
+def test_lookup_raw_alias_errors_survive_standard_evidence_revalidation(nested, has_lookup_row):
+    standard = execution_input()
+    standard['errors'] = ['invalid:quantity:untrusted_stored_error']
+    payload = {'execution_input': standard} if nested else standard
+    payload['qty'] = '999'  # Arbitrary standard extras do not define raw Futu economics.
+    if has_lookup_row:
+        payload['_futu_detail_lookup_row'] = {'qty': '1', 'quantity': 'bad'}
+    errors = canonical_trade_execution_content(payload)['errors']
+    assert 'invalid:quantity:untrusted_stored_error' not in errors
+    assert ('invalid:quantity:source_field:quantity' in errors) is has_lookup_row
+    assert not any('source_alias_conflict' in error for error in errors)
