@@ -1803,19 +1803,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.lifecycle_cmd == 'reconcile':
             control = write_controls["lifecycle:reconcile"]
             dry_run = not bool(control["write_requested"])
-            discovery = discover_lifecycle_cases(
-                repo,
-                account=args.account,
-                observed_at_ms=args.observed_at_ms,
-                apply_changes=not dry_run,
-            )
-            reconciliation = None
             evidence_path = str(args.evidence_json or "").strip()
+            evidence = None
+            wheel_start_enabled = False
             if evidence_path:
                 evidence = _load_json_object(
                     _resolve_path_under(evidence_path, base=base)
                 )
-                wheel_start_enabled = False
                 if args.config:
                     lifecycle_cfg = _load_json_object(
                         _resolve_path_under(args.config, base=base)
@@ -1826,6 +1820,14 @@ def main(argv: list[str] | None = None) -> int:
                             str(evidence.get("account") or args.account or ""),
                         ).get("enabled_for_new_lifecycle")
                     )
+            discovery = discover_lifecycle_cases(
+                repo,
+                account=args.account,
+                observed_at_ms=args.observed_at_ms,
+                apply_changes=not dry_run,
+            )
+            reconciliation = None
+            if evidence is not None:
                 reconciliation = reconcile_lifecycle_evidence(
                     repo,
                     evidence=evidence,
