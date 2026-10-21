@@ -718,11 +718,16 @@ def _candidate_earnings_from_snapshot(
         identity = resolve_symbol_identity(symbol)
         if identity is None or identity.market != market:
             raise ValueError("symbol market mismatch")
-        projection = _project_earnings_for_expiry(
-            snapshot,
-            underlier_code=identity.futu_code,
-            expiration=str(expiration or "").strip(),
+        expiration_key = _strict_date(
+            str(expiration or "").strip(), field="expiration",
+        ).isoformat()
+        projection = (
+            snapshot["evidence_by_underlier"].get(identity.futu_code, {}).get(expiration_key)
         )
+        if not isinstance(projection, Mapping):
+            raise ValueError("earnings calendar stored projection mismatch")
+        # The loader validated every stored projection; keep each result independently mutable.
+        projection = deepcopy(projection)
     except Exception as exc:
         return _candidate_earnings_unavailable(
             "earnings_calendar_candidate_identity_invalid",
