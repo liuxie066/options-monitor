@@ -589,6 +589,22 @@ def _process_payload(
     review_reason = ("source_identity_needs_review" if payload.get("_trade_intake_source_identity_errors")
                      else "file_input_needs_review")
     claim = None
+
+    def _record_lookup_evidence(lookup: Any) -> dict[str, Any] | None:
+        evidence = dict(getattr(lookup, "diagnostics", {}) or {}).get("deal_lookup_evidence")
+        if not apply_changes or not isinstance(evidence, dict):
+            return None
+        if broker_deal_key_from_payload(evidence, account_mapping=account_mapping) != key:
+            raise ValueError("lookup economic evidence changed execution identity")
+        recorded_id = enqueue_trade_payload(
+            inbox_path, payload=evidence, source="lookup", broker_deal_key=key, repo=repo,
+            adapter_version=TRADE_INTAKE_ADAPTER_VERSIONS["lookup"],
+        )
+        recorded = read_trade_payload(inbox_path, inbox_id=recorded_id)
+        if recorded_id != inbox_id or recorded is None:
+            raise RuntimeError("lookup economic evidence readback missing")
+        return recorded
+
     if apply_changes:
         key = ("" if (payload.get("_trade_intake_file_identity_unbound") or payload.get("_trade_intake_source_identity_errors")) else
                broker_deal_key_from_payload(payload, account_mapping=account_mapping))
@@ -628,6 +644,7 @@ def _process_payload(
             lookup = enrich_trade_push_payload_with_account_id(
                 payload, host=host, port=port, futu_account_ids=futu_account_ids,
             )
+            stored = _record_lookup_evidence(lookup) or stored
             checked = lookup.payload
             if (
                 execution_source_status(checked) is not None
@@ -699,14 +716,6 @@ def _process_payload(
                 changes[attribute] = value
         normalized_deal = replace(deal, execution_input=execution, **changes)
         return normalized_deal
-
-    def _enrich_payload(raw: dict[str, Any]) -> Any:
-        return enrich_trade_push_payload_with_account_id(
-            raw,
-            host=host,
-            port=port,
-            futu_account_ids=futu_account_ids,
-        )
 
     def _resolve_with_wheel_intent(deal: Any, **kwargs: Any) -> Any:
         deal_account = str(getattr(deal, "internal_account", "") or "").strip()
@@ -814,6 +823,24 @@ def _process_payload(
                              "inbox_id": claim["inbox_id"] if claim else None})
 
     try:
+        lookup = None
+        if allow_external_lookup:
+            if apply_changes:
+                # Keep state validation ahead of provider work; generic intake rechecks its own snapshot.
+                load_trade_intake_state(state_path)
+            lookup = enrich_trade_push_payload_with_account_id(
+                payload, host=host, port=port, futu_account_ids=futu_account_ids,
+            )
+            observed = _record_lookup_evidence(lookup)
+            errors = dict(getattr(lookup, "diagnostics", {}) or {}).get("economic_conflicts") or []
+            if errors or (observed or {}).get("status") == "conflict":
+                if apply_changes and (observed or {}).get("status") != "conflict":
+                    raise RuntimeError("lookup economic conflict was not durably quarantined")
+                return {"status": "unresolved", "reason": (observed or {}).get("result_reason") or
+                        "broker_economic_payload_conflict", "deal_id": payload_deal_id(payload),
+                        **({"inbox_id": inbox_id} if apply_changes else {}),
+                        "diagnostics": {"retryable": False, "errors": errors,
+                                        "enrichment": dict(getattr(lookup, "diagnostics", {}) or {})}}
         result = process_trade_payload(
         payload,
         repo=repo,
@@ -825,7 +852,7 @@ def _process_payload(
         write_trade_intake_state_fn=_write_state,
         upsert_deal_state_fn=upsert_deal_state,
         append_trade_intake_audit_fn=append_trade_intake_audit if apply_changes else lambda *_a, **_k: None,
-        enrich_trade_payload_fn=_enrich_payload if allow_external_lookup else None,
+        enrich_trade_payload_fn=(lambda _raw: lookup) if allow_external_lookup else None,
         normalize_trade_deal_fn=normalize_fn,
         resolve_trade_deal_fn=_resolve_with_wheel_intent,
         before_receipt_fn=_before_receipt,
