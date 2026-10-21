@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -196,6 +196,73 @@ def _enriched_snapshot_input(account: str, market: str, *, complete: bool) -> di
         "errors": [],
         "internal_sentinel": "must-not-cross-public-boundary",
     }
+
+
+@pytest.mark.parametrize(("labels", "enabled", "expected_runtime", "expected_reasons"), [
+    (["listening"], True, "healthy", ["LISTENER_HEARTBEAT_FRESH"]),
+    (["starting"], True, "healthy", ["LISTENER_HEARTBEAT_FRESH"]),
+    (["once"], True, "healthy", ["LISTENER_HEARTBEAT_FRESH"]),
+    (["reconnecting"], True, "degraded", ["LISTENER_NOT_WORKING"]),
+    (["blocked"], True, "degraded", ["LISTENER_NOT_WORKING"]),
+    (["error"], True, "degraded", ["LISTENER_NOT_WORKING"]),
+    (["failed"], True, "degraded", ["LISTENER_NOT_WORKING"]),
+    (["stopped"], True, "degraded", ["LISTENER_NOT_WORKING"]),
+    (["blocked"], False, "healthy", ["LISTENER_NOT_APPLICABLE"]),
+    (["starting", "reconnecting"], True, "degraded", ["LISTENER_HEARTBEAT_FRESH", "LISTENER_NOT_WORKING"]),
+])
+def test_listener_status_survives_producer_summary_and_quality_publication(
+    monkeypatch, tmp_path: Path, labels: list[str], enabled: bool,
+    expected_runtime: str, expected_reasons: list[str],
+) -> None:
+    from src.application.agent_tools.runtime_status_impl import _trade_intake_summary
+    from src.application.trades import auto_intake
+
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    monkeypatch.setattr(auto_intake, "utc_now", lambda: (now - timedelta(seconds=5)).isoformat())
+    sources = []
+    for index, label in enumerate(labels):
+        source_id = f"synthetic-{index}"
+        base = {"source_id": source_id, "account": "reviewer"}
+        first, carried = tmp_path / f"{index}-first.json", tmp_path / f"{index}-carried.json"
+        auto_intake._write_listener_status(first, base, status=label, stage="synthetic")
+        auto_intake._write_listener_status(carried, base, status=base["status"], stage="receipt_recovery")
+        stored = json.loads(carried.read_text(encoding="utf-8"))
+        assert stored["status"] == label and base["status"] == label
+        sources.append({"id": source_id, "account": "reviewer", "enabled": True,
+                        "summary": _trade_intake_summary({}, stored)})
+    ledger_path = tmp_path / "absent-ledger.sqlite3"
+    runtime = _runtime(ledger_path, trade_intake={"enabled": enabled, "sources": sources})
+    runtime["service_profile"] = {"services": [
+        {"name": "synthetic.service", "status": "ok"},
+        {"name": "synthetic.timer", "status": "ok"},
+    ]}
+    runtime["tick_health"] = {"status": "ok", "market": "us"}
+    config_path = tmp_path / "config.us.json"
+    config_path.write_text("{}", encoding="utf-8")
+    _stub_single_market_config(monkeypatch, config_path, _account_config("reviewer"))
+    artifact = QualityArtifactRepository(tmp_path / "status.v1.json")
+    provider = _OpenD()
+    service = _service(
+        artifact=artifact, control=QualityControlStateRepository(tmp_path / "control.v1.json"),
+        integrity_artifact_repository=QualityArtifactRepository(tmp_path / "integrity.v1.json"),
+        cutover_receipt_path=tmp_path / "absent-cutover.json",
+        ledger_probe_path=tmp_path / "absent-probe.sqlite3",
+        runtime_status_fn=_runtime_status_for(runtime), opend=provider, now=lambda: now,
+    )
+    payload = service.refresh(config_keys=["us"], deep=True)
+    assert payload == service.read_published() == artifact.read()
+    assert payload == json.loads(artifact.path.read_text(encoding="utf-8"))
+    assert payload["runtime"]["status"] == expected_runtime
+    assert payload["summary"]["runtime_status"] == expected_runtime
+    listeners = [check for check in payload["runtime"]["checks"] if check["check_id"] == "RT-OM-002"]
+    assert [check["reason_code"] for check in listeners] == expected_reasons
+    if enabled:
+        assert [check["observed"]["listener_status"] for check in listeners] == labels
+        assert [check["observed"]["heartbeat_age_seconds"] for check in listeners] == [5] * len(labels)
+    assert provider.calls == [("reviewer", "us")]
+    assert any(dataset["status"] == "unavailable" for dataset in payload["datasets"])
+    assert payload["summary"]["blocking_consumers"]
+    assert not ledger_path.exists()
 
 
 @pytest.mark.parametrize("complete", [True, False], ids=["complete", "incomplete"])
