@@ -89,6 +89,8 @@
 
 Feishu 和 Wechat reply outbox 冻结上述权限、原接收上下文与发送配置路由。每次 claim 前和实际发送前重新核验当前权限与 scope；拒绝或缺证据返回 `authorization_blocked`，不当作空队列或 provider 成功。claim 前只延后现有下次尝试时间，不增加 attempt、延长 provider 窗口或改写冻结正文；claim 后本地阻塞保留已有 attempt fence、UUID、窗口及 UNKNOWN，不把未调用 provider 说成未知送达。已拒绝的队首延期，使其他合法回复可以继续。Feishu 的 no-reply 门禁保持；Wechat public poll 在禁回复时于待发重试的审计与队列初始化前返回 `reply_disabled`，不 claim 或改写已有待发记录；重新启用后沿用原发送标识和当前权限校验重试。stop、过期、取消及可靠 fallback 沿原 owner 处理。
 
+Wechat getupdates 返回可解析的非零顶层状态码且未显式 `ok=true` 时，poll 返回 `POLL_FAILED`，不消费该响应的消息或更新游标；保留空对象、合法无顶层状态的嵌套响应及已有状态码优先级。serve 对显式失败结果记录固定错误日志，新的错误与日志不包含 provider 原文、游标或 token，原 HTTP 异常日志路径不变。待发重试仍先于 getupdates，因此启用回复时不能把失败响应后的零消费理解为整个轮询没有先前重试效果。
+
 生产 Feishu reader 重读最初绑定的 env/credential env 来源，文件缺失、不可读、异常或删除名单键不会复用它原先写入进程的旧名单；Wechat 配置来源每次从已验证 Bot 配置读取。显式 CLI 或进程名单仍按该明确来源生效，其值变化或重启才改变授权。即时公开的工具权限引导与 sender 拒绝保持原区别：未授权 sender 仍静默；合法 sender 的新结果在 scope 暂不可用时可沿同一原路由即时回复一次，仅限新录入且新入队的正文。该例外不会使旧 cache、outbox 冲突或待发重试取得权限证明。历史未绑定待发消息不自动补送或迁移；恢复合法同 scope 后，原已绑定回复才可按既有窗口重试。
 
 Feishu 绑定配置 app_id；Wechat 绑定规范连接 profile 目录。目录不证明同路径重连后的实际 provider Bot 身份，本轮不新增凭据或账户归属规则，也未读取真实待发队列。授权检查与外部实际发送不能原子锁住配置变更；已发送消息不可回滚。新增可空绑定列不删旧数据，回滚旧代码会失去这些保护，发布/重启/补送需另行批准。
