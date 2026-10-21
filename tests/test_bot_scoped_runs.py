@@ -24,7 +24,7 @@ def test_bot_runtime_runs_uses_trusted_scope_and_safe_failure_record(tmp_path, m
     observation = tools.model_observation('runtime_runs', response)
     row = observation['data']['runs'][0]
     assert row['reason'] == 'account_config_hash_mismatch'
-    assert row['outcomes'] == {'usable_scan_result': True, 'pipeline_completed_successfully': False}
+    assert row['outcomes'] == {'usable_scan_result': None, 'pipeline_completed_successfully': False}
     assert 'scanned' not in row and 'ran_pipeline' not in row and 'terminal' not in row
     assert observation['data']['pagination']['returned_count'] == 1
     assert str(base) not in json.dumps(observation)

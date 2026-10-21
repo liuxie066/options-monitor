@@ -654,7 +654,7 @@ def model_observation(tool_name: str, response: dict[str, Any]) -> dict[str, Any
             if not isinstance(row, dict):
                 continue
             row.setdefault("outcomes", {
-                "usable_scan_result": row.get("scanned"),
+                "usable_scan_result": None,
                 "pipeline_completed_successfully": row.get("ran_pipeline"),
             })
             row.pop("scanned", None)

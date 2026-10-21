@@ -105,7 +105,7 @@ def test_real_writer_diagnostic_reason_and_stage_only_public_projection(tmp_path
     metrics = next(row for row in data_for_model["diagnostics"] if row["source_kind"] == "account_metrics")
     stage = next(row for row in data_for_model["diagnostics"] if row["source_kind"] == "run_audit")
     assert metrics["outcomes"] == {
-        "usable_scan_result": not typed,
+        "usable_scan_result": None,
         "pipeline_completed_successfully": False,
     }
     assert "ran_scan" not in metrics and "ran_pipeline" not in metrics
