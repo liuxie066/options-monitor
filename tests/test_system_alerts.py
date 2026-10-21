@@ -497,6 +497,9 @@ def test_trade_intake_heartbeat_ignores_transient_stage_labels(monkeypatch, tmp_
     ("once", 0),
     ("reconnecting", 1),
     ("blocked", 1),
+    ("error", 1),
+    ("stopped", 1),
+    ("failed", 0),  # Legacy quality label is not part of the watchdog's vocabulary.
 ])
 def test_trade_intake_heartbeat_reads_the_status_vocabulary(monkeypatch, tmp_path: Path, status_label: str, expected_sends: int) -> None:
     """A not-working label must still alert, and the working ones must not.

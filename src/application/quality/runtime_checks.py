@@ -5,6 +5,7 @@ from typing import Any
 
 from src.application.quality.model import check_result, evidence_ref
 from src.application.payload_helpers import parse_utc as _parse_utc
+from src.application.trades.listener_status import NONWORKING_LISTENER_STATUSES
 
 
 def build_runtime_checks(
@@ -118,8 +119,14 @@ def build_runtime_checks(
         listener_status = str(summary.get("listener_status") or "").strip().lower()
         if age is None:
             status, reason, message = "unknown", "LISTENER_HEARTBEAT_MISSING", "Listener heartbeat is missing."
-        elif age <= heartbeat_expected_seconds * 2 and listener_status not in {"failed", "stopped"}:
-            status, reason, message = "pass", "LISTENER_HEARTBEAT_FRESH", "Trade intake heartbeat is fresh."
+        elif age <= heartbeat_expected_seconds * 2:
+            if listener_status in NONWORKING_LISTENER_STATUSES or listener_status == "failed":
+                status, reason, message = (
+                    "warn", "LISTENER_NOT_WORKING",
+                    f"Trade intake listener reports nonworking status: {listener_status}.",
+                )
+            else:
+                status, reason, message = "pass", "LISTENER_HEARTBEAT_FRESH", "Trade intake heartbeat is fresh."
         elif age <= heartbeat_expected_seconds * 5:
             status, reason, message = "warn", "LISTENER_HEARTBEAT_DELAYED", "Trade intake heartbeat is delayed."
         else:

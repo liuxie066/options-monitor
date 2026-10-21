@@ -22,7 +22,7 @@
 
 未知工具、非法参数和跨范围参数不能执行。工具失败保持失败，过大的结果要求缩小范围，不当作有效空结果。项目源码一次最多读取 300 行；读取 cursor 自带下一位置，后续请求无需重复 start_line。模型观察不包含配置或内容摘要 hash，避免把完整性元数据误当业务原因；Host 和工具 owner 仍保留这些校验。取消或超时后的模型/读取结果不能保存答案；已运行的读取线程可能持续到自身超时，但没有提交回答的权限。
 
-运行诊断把 `ran_scan` / `ran_pipeline` 写入标志投影为 `usable_scan_result` / `pipeline_completed_successfully`，避免把失败结果误读成流程从未调用。`account_metrics` 与 `run_audit` 是独立记录；除非单条记录明确给出关系，运行 ID、顺序和时间接近均不构成因果链。
+运行诊断保留 `ran_scan` 的扫描尝试语义；`usable_scan_result` 仅由同运行、账户和市场的完整校验封存证据决定：至少一个范围完成为 true（包括零候选及部分成功），已验证但没有完成范围为 false，仅有指标记录时为 null。Bot 不从扫描尝试或预期范围推断结果可用。指标诊断行补充封存结果时，以 `usable_scan_result_source=validated_candidate_bundle` 标明该字段来源；它不改变指标原因、时间或记录间的因果关系。`pipeline_completed_successfully` 仍保留原指标值，封存运行记录没有该信息时保持 null。`account_metrics` 与 `run_audit` 是独立记录；除非单条记录明确给出关系，运行 ID、顺序和时间接近均不构成因果链。
 
 ### 成交回执的市场参数纠错（本次实现设计）
 
