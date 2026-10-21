@@ -242,6 +242,80 @@ def test_blocked_branch_keeps_healthy_same_symbol_sibling_eligible(direction):
     assert len(result["raw_candidates"]["healthy"]) == 1
 
 
+@pytest.mark.parametrize(("stock_currency", "candidate_currency", "options", "granted", "lifecycle_pnl"), [
+    ("USD", "USD", {}, 1, 1529.6403),
+    ("HKD", "HKD", {}, 1, 1483.303),
+    (" usd ", "uSd", {}, 1, 1529.6403),
+    ("hkd ", " hKd", {}, 1, 1483.303),
+    ("USD", "US$", {}, 1, 1529.6403),
+    ("HKD", "HK$", {}, 1, 1483.303),
+    ("USD", "HKD", {}, 0, None),
+    ("HKD", "USD", {}, 0, None),
+    (None, "USD", {}, 0, None),
+    ("USD", None, {}, 0, None),
+    (None, "USD", {"custom_fee": True}, 0, None),
+    ("USD", "USD", {"branch_currency": "HKD"}, 1, 1529.6403),
+    ("HKD", "USD", {"branch_currency": "USD"}, 0, None),
+    ("USD", "USD", {"shares": 200}, 2, 2726.2706),
+    ("USD", "USD", {"shares": 200, "committed": 100}, 1, 1529.6403),
+    ("USD", "USD", {"sibling_currency": "HKD"}, 1, 1529.6403),
+    ("USD", "USD", {"reasons": ["multiplier_unproven"]}, 0, None),
+])
+def test_wheel_call_currency_guard_reaches_final_capacity(
+    stock_currency, candidate_currency, options, granted, lifecycle_pnl,
+):
+    model = _read_model()
+    branch = model["batches"][0]
+    stock = model["assigned_stock_projection"]["_all_assigned_stock_lots"][0]
+    symbol = "0700.HK" if str(stock_currency or "").strip().upper() == "HKD" else "NVDA"
+    shares = options.get("shares", 100)
+    branch.update(symbol=symbol, wheel_branch_id="stock-1", shares_remaining=shares,
+        currency=options.get("branch_currency", stock_currency), reason_codes=options.get("reasons", []),
+        active_option_committed_shares=options.get("committed", 0))
+    if options.get("committed"):
+        branch["phase"] = "option_open"
+    stock.update(symbol=symbol, currency=stock_currency, remaining_stock_cost_basis=10_010 * shares / 100)
+    if options.get("sibling_currency"):
+        model["batches"].append({**branch, "stock_lot_id": "sibling", "wheel_branch_id": "sibling"})
+        model["assigned_stock_projection"]["_all_assigned_stock_lots"].append({
+            **stock, "stock_lot_id": "sibling", "currency": options["sibling_currency"],
+        })
+    row = phase2_opening_row(_call_row(
+        symbol=symbol, currency=candidate_currency, contract_symbol=symbol + "-CALL-110",
+    ))
+    fees = {"exchange_rate_converter": _converter()}
+    if options.get("custom_fee"):
+        fees["stock_exit_fee_fact_fn"] = lambda *_: {"basis": "estimated", "amount": 15}
+    before = json.dumps(model, sort_keys=True)
+    scan = run_wheel_call_scan(
+        model, _policy(), {"frames": {symbol: pd.DataFrame([row])}}, {}, fees,
+        decision_time_ms=int(AS_OF.timestamp() * 1000),
+    )
+    final = finalize_wheel_capacity(
+        account="lx", wheel_read_model=model, wheel_scan=scan, opening_call_candidates=[],
+        coverage_facts=[{"account": "lx", "symbol": symbol, "status": "available",
+            "shares_eligible": 1000, "shares_locked": 0, "shares_reserved": 0, "capacity_identity_hash": "c" * 64}],
+    )
+    assert json.dumps(model, sort_keys=True) == before
+    finals = [b["final_candidate"] for b in final["batches"] if b["final_candidate"]]
+    assert len(scan["capacity_claims"]) == len(finals) == (1 if granted else 0)
+    if granted:
+        assert scan["capacity_claims"][0]["wheel_branch_id"] == "stock-1"
+        assert scan["capacity_claims"][0]["requested_contracts"] == granted
+        assert finals[0]["stock_lot_id"] == "stock-1"
+        assert finals[0]["granted_contracts"] == granted
+        assert finals[0]["projected_lifecycle_net_pnl_if_called"] == lifecycle_pnl
+        assert finals[0]["currency"] == str(stock_currency).strip().upper()
+    for batch in final["batches"]:
+        if not granted or batch["wheel_branch_id"] == "sibling":
+            assert batch["candidate_status"] == "unavailable"
+            assert batch["raw_candidates"] == [] and batch["granted_contracts"] == 0
+            assert batch["final_candidate"] is None
+    if not granted:
+        assert all(not rows for rows in scan["raw_candidates"].values())
+        assert all(scope["status"] == "unavailable" for scope in scan["scope_results"])
+
+
 def test_wheel_scan_reuses_frozen_call_universe_and_builds_one_claim(tmp_path: Path) -> None:
     row = phase2_opening_row(_call_row())
     result = run_wheel_call_scan(

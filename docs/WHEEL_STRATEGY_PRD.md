@@ -1000,6 +1000,8 @@ replenishment_cash_remainder
 multiplier、费用、币种或本金锚缺失时返回 `data_unavailable`；硬条件完整但无合约通过时返回
 `no_candidate`。
 
+Call/Put 的经济金额必须使用同一币种：候选与来源批次币种经去除首尾空白、统一大小写后缺失或不一致时，分别返回 `currency_unavailable` / `currency_mismatch`，不生成候选或容量声明。Call 来源币种由正股事实提供；不猜测历史币种、不在此隐式换汇，也不改变费用事实的单位契约。
+
 `domain/domain/risk_capacity.py` 是唯一生产 Put 现金 allocator。它消费同一冻结事实集：物理账户 cash
 authority、`cash_by_currency`、已有 cash-secured positions、active Wheel Put intents、当前 ordinary CSP
 最终推荐 claims、当前 Wheel Put claims 和冻结 FX。为保持 A14 和普通 CSP 既有行为，ordinary CSP 最终
