@@ -41,6 +41,7 @@ from src.application.trades.lifecycle_reconciliation import (
 )
 from src.application.quality.model import (
     POLICY_VERSION,
+    QUALITY_STATUS_SCHEMA_PATH as _SCHEMA,
     SCHEMA_VERSION,
     check_result,
     dataset_status,
@@ -49,6 +50,7 @@ from src.application.quality.model import (
     summarize,
     utc_iso,
     validate_payload,
+    validated_quality_status,
 )
 from src.application.quality.position_checks import (
     build_opend_runtime_check,
@@ -73,7 +75,6 @@ from src.application.quality.opend_position_adapter import (
 
 
 _ROOT = Path(__file__).resolve().parents[3]
-_SCHEMA = _ROOT / "contracts" / "quality-monitoring" / "quality_status.v1.schema.json"
 _VERSION = _ROOT / "VERSION"
 _MARKET_TIMEZONES = {
     "us": ZoneInfo("America/New_York"),
@@ -286,7 +287,7 @@ class OMQualityService:
         market: str | None = None,
         lifecycle_rows_requested: bool = False,
     ) -> dict[str, Any] | None:
-        payload = self.artifact_repository.read()
+        payload = validated_quality_status(self.artifact_repository.read())
         record_quality_consumer_read(
             consumer=consumer,
             account=account,
@@ -312,7 +313,7 @@ class OMQualityService:
         return payload
 
     def read_integrity_published(self) -> dict[str, Any] | None:
-        return self.integrity_artifact_repository.read()
+        return validated_quality_status(self.integrity_artifact_repository.read())
 
     def refresh(
         self,
