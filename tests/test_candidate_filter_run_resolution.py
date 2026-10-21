@@ -140,6 +140,30 @@ def _seal_run(base: Path, run_id: str, *, account: str = "lx") -> None:
     )
 
 
+@pytest.mark.parametrize("segment_day", ["20261020", "20261021", "20261130"])
+def test_retained_notification_loads_populated_source_snapshot(tmp_path: Path, segment_day: str) -> None:
+    source = "retained-source"
+    seal_opening_candidate_fixture(tmp_path, run_id=source,
+        accepted_rows=[{"symbol": "NVDA", "contract_symbol": "NVDA-accepted"}],
+        rejected_rows=[{"symbol": "NVDA", "contract_symbol": "NVDA-rejected", "rule": "risk_spread"}])
+    today = _today_local()
+    moment = _local_day_start(today).astimezone(timezone.utc) + timedelta(hours=1)
+    row = _perception_audit_row(run_id="send-attempt", event_at_utc=moment, accounts=["lx"])
+    row["extra"]["report_refs"][0]["source_run_id"] = source
+    _write_shared_audit(tmp_path, [])
+    retained = tmp_path / "output_shared/state" / f"audit_events.{segment_day}.000001.jsonl"
+    retained.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    out = _query(tmp_path, notification_date=today.isoformat())
+    assert out["ok"], out
+    assert out["meta"]["source_files"][0]["run_resolution"]["resolved_run_id"] == source
+    group = next(item for item in out["data"]["functions"] if item["function"] == "sell_put")
+    assert group["reason_counts"]["risk_spread"] == 1
+    explicit = _run_tool({"runtime_root": str(tmp_path), "account": "lx", "symbol": "NVDA", "run_id": source})
+    assert explicit["ok"], explicit
+    assert out["data"]["functions"] == explicit["data"]["functions"]
+
+
 def test_latest_notification_resolves_delivered_run(tmp_path: Path) -> None:
     _seal_run(tmp_path, "run-notified")
     today = _today_local()
@@ -380,7 +404,8 @@ def test_truncated_window_reports_distinct_reason(tmp_path: Path, monkeypatch) -
     _seal_run(tmp_path, "run-x")
     today = _today_local()
 
-    def _truncated_iter(*, repo_root, event_kind=None, conversation_id=None, limit=None):
+    def _truncated_iter(*, repo_root, event_kind=None, conversation_id=None, limit=None,
+                        event_filter=None, deadline_monotonic=None, cancelled=None):
         return {"events": [], "total_count": 9000, "truncated": True}
 
     monkeypatch.setattr(
