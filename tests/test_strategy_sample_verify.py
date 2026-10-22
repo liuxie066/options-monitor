@@ -725,3 +725,37 @@ def test_stale_projection_requires_original_scan_marker_assignment():
         with pytest.raises(ValueError, match="marker disagrees"):
             audit._quantity(row, "put", deepcopy(CTX), CurrencyConverter(RATES),
                             snapshot={"capacity_fx_evidence": evidence})
+
+
+def test_old_template_snapshot_remains_readable_but_cannot_execute(tmp_path, contexts):
+    from domain.domain.strategy_identity import implementation_policy_hash
+    from src.application.opening_candidate_snapshot import load_opening_candidate_snapshot
+    payload=seal(tmp_path,[candidate()])
+    # Model an already sealed old archive, never ask the new execution owner to create one.
+    def old_identity(value):
+        if isinstance(value, dict):
+            if 'strategy_core' in value:
+                identity=value['strategy_core']
+                identity['core_version']=identity['template_version']='0.1.0'
+                identity['runtime']['core_version']='0.1.0'
+                identity['effective_parameters'].pop('max_abs_delta',None)
+                identity['effective_policy_hash']=implementation_policy_hash(identity)
+            for child in value.values(): old_identity(child)
+        elif isinstance(value,list):
+            for child in value: old_identity(child)
+    old_identity(payload)
+    for decision in payload['candidate_decisions']:
+        decision['normalized_input_hash']=canonical_sha256(decision['normalized_input'])
+        decision['decision_hash']=canonical_sha256(decision['opening_decision'])
+        for ranked in [*payload['ranked_candidates'], *payload['scope_results']]:
+            if ranked.get('candidate_id')==decision['candidate_id']:
+                ranked['decision_hash']=decision['decision_hash']
+                if 'normalized_input_hash' in ranked:
+                    ranked['normalized_input_hash']=decision['normalized_input_hash']
+    write_changed(tmp_path,payload)
+    before=_snapshot_path(tmp_path,'parity','lx').read_bytes()
+    assert load_opening_candidate_snapshot(base=tmp_path,run_id='parity',account='lx')==payload
+    result=verify(tmp_path)
+    assert result['status']=='insufficient_evidence'
+    assert any('unavailable strategy template' in str(c) for c in result['checks'])
+    assert _snapshot_path(tmp_path,'parity','lx').read_bytes()==before

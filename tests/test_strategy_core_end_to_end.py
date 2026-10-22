@@ -31,7 +31,7 @@ def _rows():
                 symbol=symbol, stock_owner=f"US.{symbol}", strike=strike,
                 contract_symbol=f"US.{symbol}260918P{int(strike * 1000):08d}",
                 bid=premium, ask=premium + 0.01,
-                snapshot_received_at_utc=NOW.isoformat(),
+                snapshot_received_at_utc=NOW.isoformat(), decision_now_utc=NOW.isoformat(),
             )
             contract = CandidateContractInput.from_row(raw, mode="put")
             metrics = compute_metrics(contract, now_utc=NOW)

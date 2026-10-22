@@ -286,3 +286,19 @@ def test_candidate_scan_classifies_only_explicit_contract_evidence_conflicts(
     reject = decisions[0]["opening_decision"]["rejects"][0]
     assert reject["reason"] == "contract_ineligible"
     assert reject["metric_value"]["reason_code"] == specific_reason
+
+
+def test_synthetic_phase2_helper_preserves_explicit_delta_gaps_and_frozen_age():
+    frozen = "2026-04-01T14:00:00Z"
+    row = phase2_opening_row({
+        "option_type": "put", "delta": None, "delta_source": None,
+        "delta_unit": None, "delta_reason_code": "delta_missing",
+        "snapshot_received_at_utc": frozen,
+        "decision_now_utc": "2026-04-01T15:00:00Z",
+    })
+    assert row["delta"] is None
+    assert row["delta_source"] is None
+    assert row["delta_unit"] is None
+    assert row["delta_reason_code"] == "delta_missing"
+    assert row["snapshot_received_at_utc"] == frozen
+    assert row["decision_now_utc"] == "2026-04-01T15:00:00Z"
