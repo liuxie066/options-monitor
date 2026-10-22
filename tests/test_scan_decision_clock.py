@@ -25,6 +25,8 @@ def quote(mode="put", **changes):
         "option_type": mode, "opening_contract_status": "ready",
         "snapshot_received_at_utc": NOW.isoformat(), "spot_observed_at_utc": NOW.isoformat(),
     })
+    raw["delta"] = -0.3 if mode == "put" else 0.3
+    raw.pop("decision_now_utc", None)  # This helper tests capture; the adapter supplies the clock.
     return {**raw, **changes}
 
 
@@ -164,6 +166,8 @@ def test_clock_tampering_without_rehash_is_detected(tmp_path):
 
 def test_legacy_archive_remains_readable_but_missing_clock_is_explicit(tmp_path):
     candidate = _candidate(contract_symbol="US.NVDA260918P90000", period_return=.03)
+    candidate.pop("decision_now_utc")
+    candidate["policy_max_abs_delta"] = None  # Legacy capture had no clock or delta gate.
     _seal_snapshot(tmp_path, run_id="legacy", final_candidates={"put": [candidate]},
                    scan_statuses=[_scan_status("NVDA", "put", "completed", snapshot_id="c" * 64, receipt="q.json")])
     snapshot = load_opening_candidate_snapshot(base=tmp_path, run_id="legacy", account="lx")

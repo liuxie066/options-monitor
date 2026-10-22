@@ -43,21 +43,89 @@ from src.application.required_data_snapshot import (
 )
 
 
-FIXTURE_SCHEMA = "required_data_scan_blob_benchmark_fixture.v1"
+FIXTURE_SCHEMA = "required_data_scan_blob_benchmark_fixture.v2"
 RECEIPT_SCHEMA = "required_data_scan_blob_benchmark.v2"
-FIXTURE_PATH = REPO_ROOT / "tests/fixtures/required_data_scan_blob_benchmark_metadata.v1.json"
-FIXTURE_CONTRACT_SHA256 = "e6d4c4033a4695bfc3f38298d34be0257d90042e3a1a84907dc9812f9ced1485"
+FIXTURE_PATH = REPO_ROOT / "tests/fixtures/required_data_scan_blob_benchmark_metadata.v2.json"
+FIXTURE_CONTRACT_SHA256 = "c101bd6bacb928b7beaf55762c511dbf8b36519896fc736702c8eded40132385"
 EXPECTED_FIXTURE = {
     "raw_json_sha256": "0520d76e029e6f7447d835cdb0fe77e8cd9f1b554006750c195bd7126d2a58ea",
-    "required_data_csv_sha256": "05685c16d0cb17fc1bf6359d51c01be81e96526f38920873afca266f5e709404",
-    "canonical_blob_sha256": "df7e782498fec5853515a4fd354fcfae6f13bb775cc80b64d522d5c64a5a6be3",
+    "required_data_csv_sha256": "938d4ffbfd6811f853e5b3c90f109b3c196818ac35d2fd260900330aaf48e65a",
+    "canonical_blob_sha256": "8658a51f44c37e6cf3b99a6f126c0981bd7f53c2f9f4b930c375c039bf7ae79a",
     "raw_json_bytes": 187_345,
-    "required_data_csv_bytes": 39_415,
-    "canonical_blob_bytes": 146_955,
+    "required_data_csv_bytes": 40_219,
+    "canonical_blob_bytes": 147_003,
 }
 SEED = 20260816
 ROW_COUNT = 254
-TARGET_LEGACY_PAIR_BYTES = 226_760
+TARGET_LEGACY_PAIR_BYTES = 226_760  # Historical observed p99, not a resource gate.
+# v2 retains the v1 raw payload and padding; only the CSV schema grows.
+SCHEMA_OVERHEAD_BYTES = 804  # 254 rows * 3 delimiters + 42 header bytes.
+FIXTURE_PAIR_BYTES = TARGET_LEGACY_PAIR_BYTES + SCHEMA_OVERHEAD_BYTES
+FIXTURE_COLUMNS = [
+    "symbol",
+    "market",
+    "option_type",
+    "expiration",
+    "dte",
+    "contract_symbol",
+    "strike",
+    "spot",
+    "spot_update_time",
+    "spot_observed_at_utc",
+    "spot_age_seconds",
+    "market_state",
+    "underlier_sec_status",
+    "underlier_suspension",
+    "underlier_observation_status",
+    "underlier_observation_reason_code",
+    "bid",
+    "ask",
+    "last_price",
+    "mid",
+    "last_price_update_time",
+    "last_price_observed_at_utc",
+    "last_price_age_seconds",
+    "last_price_activity_status",
+    "snapshot_requested_at_utc",
+    "snapshot_received_at_utc",
+    "snapshot_age_seconds",
+    "price_tick",
+    "volume",
+    "open_interest",
+    "implied_volatility",
+    "realized_volatility_20",
+    "realized_volatility_60",
+    "realized_volatility_120",
+    "realized_volatility_estimate",
+    "term_matched_rv",
+    "term_matched_rv_status",
+    "term_matched_rv_reason",
+    "term_matched_rv_remaining_sessions",
+    "term_matched_rv_lookback_sessions",
+    "term_matched_rv_input_start",
+    "term_matched_rv_input_end",
+    "term_matched_rv_input_session_count",
+    "term_matched_rv_input_hash",
+    "term_matched_rv_legacy_shadow",
+    "term_matched_rv_shadow_difference",
+    "in_the_money",
+    "currency",
+    "otm_pct",
+    "delta",
+    "delta_source",
+    "delta_unit",
+    "delta_reason_code",
+    "option_standard_type",
+    "stock_owner",
+    "stock_type",
+    "option_sec_status",
+    "option_suspension",
+    "chain_multiplier",
+    "snapshot_multiplier",
+    "multiplier",
+    "opening_contract_status",
+    "opening_contract_reason_codes",
+]
 WARMUPS = 5
 REPETITIONS = 30
 PROFILES = ("canonical",)
@@ -110,7 +178,17 @@ def fixture_descriptor() -> dict[str, Any]:
             "symbol": "FIXTURE",
             "market": "US",
             "row_count": ROW_COUNT,
-            "legacy_pair_uncompressed_bytes": TARGET_LEGACY_PAIR_BYTES,
+            "legacy_pair_uncompressed_bytes": FIXTURE_PAIR_BYTES,
+            "column_count": len(FIXTURE_COLUMNS),
+            "schema_growth": {
+                "historical_fixture_schema": "required_data_scan_blob_benchmark_fixture.v1",
+                "added_columns": ["delta_source", "delta_unit", "delta_reason_code"],
+                "row_delimiter_bytes": 762,
+                "header_bytes": 42,
+                "total_bytes": SCHEMA_OVERHEAD_BYTES,
+                "shape_is_new_observed_p99": False,
+                "raw_payload_and_padding_unchanged": True,
+            },
             "entropy_class_row_counts": {
                 "low": 85,
                 "median": 85,
@@ -193,6 +271,8 @@ def _raw_bytes(payload: dict[str, Any]) -> bytes:
 
 
 def generate_fixture(*, verify: bool = True) -> dict[str, Any]:
+    if REQUIRED_DATA_COLUMNS != FIXTURE_COLUMNS:
+        raise RuntimeError("scan blob fixture schema changed; review fixture contract explicitly")
     rows = [_fixture_row(index) for index in range(ROW_COUNT)]
     codes = [str(row["contract_symbol"]) for row in rows]
     provider = {
@@ -223,28 +303,28 @@ def generate_fixture(*, verify: bool = True) -> dict[str, Any]:
         "fixture_padding": "",
     }
     frame = pd.DataFrame(rows)
-    for column in REQUIRED_DATA_COLUMNS:
+    for column in FIXTURE_COLUMNS:
         if column not in frame.columns:
             frame[column] = pd.NA
-    frame = frame[REQUIRED_DATA_COLUMNS]
+    frame = frame[FIXTURE_COLUMNS]
     frame.loc[frame["multiplier"].isna(), "multiplier"] = 100
     output = io.StringIO()
     frame.to_csv(output, index=False)
     csv_bytes = output.getvalue().encode("utf-8")
     raw = _raw_bytes(provider)
-    padding = TARGET_LEGACY_PAIR_BYTES - len(raw) - len(csv_bytes)
+    padding = FIXTURE_PAIR_BYTES - len(raw) - len(csv_bytes)
     if padding < 0:
-        raise RuntimeError("scan blob fixture exceeds baseline p99 size")
+        raise RuntimeError("scan blob fixture exceeds declared shape size")
     provider["fixture_padding"] = _deterministic_text("padding", padding)
     raw = _raw_bytes(provider)
-    if len(raw) + len(csv_bytes) != TARGET_LEGACY_PAIR_BYTES:
-        raise RuntimeError("scan blob fixture p99 size is not exact")
+    if len(raw) + len(csv_bytes) != FIXTURE_PAIR_BYTES:
+        raise RuntimeError("scan blob fixture shape size is not exact")
     payload = build_required_data_scan_blob_payload(
         symbol="FIXTURE",
         market="US",
         raw_json_bytes=raw,
         required_data_csv_bytes=csv_bytes,
-        columns=REQUIRED_DATA_COLUMNS,
+        columns=FIXTURE_COLUMNS,
     )
     canonical = canonical_scan_blob_bytes(payload)
     observed = {
@@ -589,7 +669,7 @@ def benchmark_exit_code(receipt: dict[str, Any]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Benchmark deterministic p99 required-data CAS payloads.")
+    parser = argparse.ArgumentParser(description="Benchmark deterministic required-data CAS payloads derived from historical p99 metadata.")
     parser.add_argument("--profile", choices=PROFILES, required=True)
     parser.add_argument("--warmups", type=int, default=WARMUPS)
     parser.add_argument("--repetitions", type=int, default=REPETITIONS)

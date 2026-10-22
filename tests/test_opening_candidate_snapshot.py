@@ -56,6 +56,12 @@ def _candidate(*, contract_symbol: str, period_return: float) -> dict:
         "mid": 3.0,
         "multiplier": 100,
         "currency": "USD",
+        "delta": -0.3,
+        "delta_source": "opend_market_snapshot.option_delta",
+        "delta_unit": "fraction",
+        "delta_reason_code": None,
+        "snapshot_received_at_utc": NOW.isoformat(),
+        "decision_now_utc": NOW.isoformat(),
         "open_interest": 500,
         "volume": 50,
         "spread_ratio": 0.0667,
@@ -1173,7 +1179,7 @@ def test_one_blocked_call_scope_preserves_other_call_results(
 
     candidate = _candidate(contract_symbol="NVDA260918C00100000", period_return=0.04)
     candidate.update(
-        option_type="call", strike=100,
+        option_type="call", strike=100, delta=0.3,
         period_net_premium_return=0.04,
         annualized_net_premium_return=0.04 * 365 / 43,
     )
@@ -1479,3 +1485,44 @@ def test_capacity_fx_memory_validation_never_loads_run_source(tmp_path, monkeypa
     )
     monkeypatch.setattr(current_fx_run, "load_run_fx_snapshot", lambda **_kw: pytest.fail("memory validation performed IO"))
     _validate_changed_evidence(payload)
+
+
+@pytest.mark.parametrize("mode,sign", [("put", -1), ("call", 1)])
+@pytest.mark.parametrize("unverifiable", [False, True])
+def test_delta_rejection_sealed_and_explained_without_rescan(tmp_path, monkeypatch, mode, sign, unverifiable):
+    from domain.domain.engine import evaluate_opening_candidate_policy
+    from src.application.tool_execution import execute_tool
+
+    candidate = _candidate(contract_symbol=f"NVDA260918{'P' if mode == 'put' else 'C'}00100000", period_return=0.04)
+    candidate.update(option_type=mode, strike=100, delta=sign * 0.4001,
+                     period_net_premium_return=0.04, annualized_net_premium_return=0.34,
+                     policy_max_abs_delta=0.4)
+    if unverifiable:
+        candidate["delta_source"] = None
+    decision = evaluate_opening_candidate_policy(candidate, mode=mode)
+    reason = "risk_delta_unavailable" if unverifiable else "risk_delta"
+    assert [item["reason"] for item in decision["rejects"]] == [reason]
+    payload = _seal_snapshot(
+        tmp_path, run_id="delta-rejected", scan_statuses=[_scan_status("NVDA", mode, "completed")],
+        final_candidates={mode: []}, candidate_evaluations={mode: [{"normalized_input": candidate, "opening_decision": decision}]},
+    )
+    assert payload["opening_status"] == ("data_unavailable" if unverifiable else "no_candidate")
+    recorded = payload["candidate_decisions"][0]
+    assert recorded["normalized_input"]["delta"] == sign * 0.4001
+    assert recorded["normalized_input"]["policy_max_abs_delta"] == 0.4
+    assert recorded["normalized_input"]["snapshot_received_at_utc"] == NOW.isoformat()
+    _publish_opening_manifest(tmp_path, payload)
+
+    # Public explanation must read the sealed rejection without recomputing policy.
+    def forbidden(*args, **kwargs):
+        raise AssertionError("explanation must not rescan")
+    monkeypatch.setattr("src.application.opening_candidate_snapshot.evaluate_opening_candidate_policy", forbidden)
+    response = execute_tool("candidate_filter_explain", {
+        "runtime_root": str(tmp_path), "run_id": "delta-rejected", "account": "lx", "symbol": "NVDA", "rule": reason,
+    })
+    assert response["ok"] is True
+    events = [event for function in response["data"]["functions"] for event in function["events"] if event["is_rejection"]]
+    assert len(events) == 1
+    assert events[0]["threshold"] == 0.4
+    assert events[0]["metric_value"]["delta"] == sign * 0.4001
+    assert events[0]["metric_value"]["reason_code"] == ("delta_source_unverified" if unverifiable else None)

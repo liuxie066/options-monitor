@@ -19,6 +19,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                     "min_open_interest": 50,
                     "min_volume": 10,
                     "max_spread_ratio": 0.4,
+                    "max_abs_delta": 0.40,
                     "min_iv_rv_ratio": 1.10,
                     "min_iv_minus_rv": 0.05,
                 }
@@ -29,6 +30,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                     "min_open_interest": 50,
                     "min_volume": 10,
                     "max_spread_ratio": 0.4,
+                    "max_abs_delta": 0.40,
                     "min_strike_cost_multiplier": 1.02,
                     "min_iv_rv_ratio": 1.10,
                     "min_iv_minus_rv": 0.05,
