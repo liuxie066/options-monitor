@@ -30,7 +30,7 @@ def apply_multiplier_cache_to_required_data_csv(*, base: Path, required_data_dir
         if not parsed.exists() or parsed.stat().st_size <= 0:
             return
 
-        df = pd.read_csv(parsed, converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
+        df = pd.read_csv(parsed, float_precision="round_trip", converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
         if df.empty:
             return
 

@@ -13,6 +13,8 @@ RULE_LABELS = {
     "risk_open_interest": "OI 不足",
     "risk_volume": "成交量不足",
     "risk_spread": "价差不合格",
+    "risk_delta": "Delta 绝对值超出上限",
+    "risk_delta_unavailable": "Delta 证据不可验证",
     "single_trade_concentration_exceeded": "单笔集中度超限",
     "symbol_concentration_exceeded": "单标的集中度超限",
     "total_short_put_concentration_exceeded": "总 short put 集中度超限",
