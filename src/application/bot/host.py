@@ -274,6 +274,7 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
                            messages=messages, tools=descriptions, call_tool=tool_call, deadline=deadline,
                            cancelled=cancelled, event=log.record, request=model_request,
                            model_limit=manifest.limits["max_model_turns"], tool_limit=manifest.limits["max_tool_calls"],
+                           failed_batch_limit=manifest.limits["max_consecutive_failed_tool_batches"],
                            reserve_seconds=manifest.limits["final_answer_reserve_seconds"])
         check_run(deadline, cancelled)
         if memory_failed:
