@@ -1379,6 +1379,8 @@ CNY 金额继续通过读取校验。上述订单证据路径修正后必须独�
 
 ## 读取语义
 
+账本只读检查的 `trade_event_count` / `position_lot_count` 在对应表缺失或无法读取时保留 `None`（store inspect JSON 为 `null`）；表存在且为空时才为 `0`。健康检查对不可用计数沿用警告；公开运行状态沿用省略未知字段的契约，文本显示 `-`，不补成零。计数可读不代表完整 schema 有效或获准写入，既有多账本歧义检查仍按正行数判断。
+
 运行时风险、Close Advice、Performance 和 Agent tools 从 canonical read model 读取：
 
 - 单 lot 查询保留真实开仓、费用、策略快照和生命周期字段；
