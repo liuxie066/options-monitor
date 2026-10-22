@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pandas as pd
 import pytest
+from candidate_evidence_helpers import delta_evidence
 
 from domain.domain import strategy_core as core
 from domain.domain.engine.candidate_engine import build_candidate_decision, evaluate_opening_candidate_policy
@@ -146,7 +147,7 @@ def test_replacement_real_steps_summary_seal_load_explanation_and_restore(frozen
     ({'earnings_policy_version': 'unsupported'}, 'risk_earnings_unavailable'),
 ])
 def test_permissive_policy_cannot_bypass_qualification(alternatives, mode, changes, reason):
-    row = deepcopy(next(c['policy_row'] for c in VALID if c['mode'] == mode))
+    row = {**deepcopy(next(c['policy_row'] for c in VALID if c['mode'] == mode)), **delta_evidence(mode=mode)}
     row.update(changes)
     decision = core.evaluate_candidates([row], strategy=_alternate(mode))['decisions'][0]
     assert not decision['accepted']
@@ -155,7 +156,7 @@ def test_permissive_policy_cannot_bypass_qualification(alternatives, mode, chang
 
 @pytest.mark.parametrize('mode', ['put', 'call'])
 def test_baseline_multi_failure_exact_order_and_no_evidence_opt_out_regression(mode):
-    row = deepcopy(next(c['policy_row'] for c in VALID if c['mode'] == mode))
+    row = {**deepcopy(next(c['policy_row'] for c in VALID if c['mode'] == mode)), **delta_evidence(mode=mode)}
     row.update(dte=1, strike=1, max_new_contracts=0, covered_contracts_available=0, net_income_cny=None,
                annualized_net_return_on_cash_basis=0, annualized_net_premium_return=0, spread_ratio=1,
                iv_rv_ratio=0, iv_minus_rv=0, earnings_evidence_status='unavailable')
@@ -180,7 +181,7 @@ def test_callback_mutation_rejected_without_mutating_original(alternatives, monk
         return getattr(descriptor, operation)(facts, **kwargs)
     monkeypatch.setitem(core._TEMPLATES, (descriptor.template_id, descriptor.version), replace(descriptor, **{operation: mutate}))
     strategy = _alternate(mode)
-    row = attach_strategy_identity(deepcopy(next(c['policy_row'] for c in VALID if c['mode'] == mode)), strategy)
+    row = attach_strategy_identity({**deepcopy(next(c['policy_row'] for c in VALID if c['mode'] == mode)), **delta_evidence(mode=mode)}, strategy)
     before = deepcopy(row)
     with pytest.raises(ValueError, match='mutated frozen'):
         if operation == 'constraints':
@@ -220,7 +221,7 @@ def test_callback_output_contracts_fail_closed(alternatives, monkeypatch, mode, 
     callback = {'constraints': bad_constraints, 'evaluate': bad_evaluate, 'rank': bad_rank}[operation]
     monkeypatch.setitem(core._TEMPLATES, (descriptor.template_id, descriptor.version), replace(descriptor, **{operation: callback}))
     strategy = _alternate(mode)
-    row = deepcopy(next(c['policy_row'] for c in VALID if c['mode'] == mode))
+    row = {**deepcopy(next(c['policy_row'] for c in VALID if c['mode'] == mode)), **delta_evidence(mode=mode)}
     with pytest.raises(ValueError):
         if operation == 'constraints':
             core.calculate_constraints(row, mode=mode, risk_ctx=UNKNOWN, exchange_rate_converter=CONVERTER, strategy=strategy)
@@ -287,30 +288,29 @@ def test_constraint_extra_fields_survive_real_projection(frozen_scan, alternativ
     assert all(row['normalized_input']['policy_test_threshold'] == 42 for row in decisions)
 
 
-def test_exact_legacy_identity_restoration_and_sealed_read(frozen_scan):
+def test_exact_legacy_identity_readable_but_new_execution_rejected():
     from domain.domain import strategy_identity
     raw = deepcopy(next(case['policy_row'] for case in VALID if case['mode'] == 'put'))
-    strategy = _strategy('put')
-    legacy = strategy.identity
+    legacy = _strategy('put').identity
     legacy.pop('identity_format')
+    legacy['core_version'] = legacy['template_version'] = '0.1.0'
+    legacy['effective_parameters'].pop('max_abs_delta')
     legacy['effective_policy_hash'] = strategy_policy_hash(legacy['effective_parameters'], legacy['ranking_profile'])
     legacy['runtime'] = {'mode': 'source', 'core_version': '0.1.0', 'build_digest': None}
     row = {**raw, 'strategy_core': legacy}
-    restored = core.validate_strategy_identity(row, mode='put')
-    decision = core.evaluate_candidates([row], strategy=restored)['decisions'][0]['opening_decision']
-    canonical = decision['normalized_input']
-    sealed = _seal_snapshot(frozen_scan, run_id='run-1', scan_statuses=[_scan_status(raw['symbol'], 'put', 'completed')],
-        final_candidates={'put': [canonical]}, candidate_evaluations={'put': [{'normalized_input': canonical, 'opening_decision': decision}]})
-    before = _snapshot_path(frozen_scan).read_bytes()
-    assert load_opening_candidate_snapshot(base=frozen_scan, run_id='run-1', account='lx') == sealed
-    assert _snapshot_path(frozen_scan).read_bytes() == before
-    assert strategy_identity.validate_strategy_identity(canonical, mode='put') == legacy
+    before = deepcopy(row)
+    assert strategy_identity.validate_strategy_identity(row, mode='put') == legacy
+    with pytest.raises(ValueError, match='unavailable strategy template'):
+        core.validate_strategy_identity(row, mode='put')
+    with pytest.raises(ValueError, match='unavailable strategy template'):
+        core.rank_candidates([row], mode='put')
+    assert row == before
 
 
 @pytest.mark.parametrize('mode', ['put', 'call'])
 def test_known_event_treatment_is_policy_over_qualified_evidence(alternatives, mode):
     from candidate_evidence_helpers import earnings_evidence
-    row = deepcopy(next(case['policy_row'] for case in VALID if case['mode'] == mode))
+    row = {**deepcopy(next(case['policy_row'] for case in VALID if case['mode'] == mode)), **delta_evidence(mode=mode)}
     row.update(earnings_evidence(expiration=row['expiration'], market_date=row['earnings_market_date'],
                                  event_date=row['expiration']))
     baseline = core.evaluate_candidates([row], strategy=_strategy(mode))['decisions'][0]

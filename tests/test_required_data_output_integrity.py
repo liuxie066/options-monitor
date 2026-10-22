@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import hashlib
+import math
 import json
 from pathlib import Path
 
@@ -1100,6 +1101,7 @@ def test_finalizer_attests_multiplier_and_final_csv_hash(
     )
     payload = _payload(multiplier=None)
     payload["rows"][0]["implied_volatility"] = 0.13436424411240122
+    payload["rows"][0]["delta"] = -math.nextafter(0.4, math.inf)
     result = finalize_required_data_quote_candidate(
         base=tmp_path,
         producer_root=tmp_path,
@@ -1113,7 +1115,9 @@ def test_finalizer_attests_multiplier_and_final_csv_hash(
     )
 
     csv_path = result["csv_path"]
-    frame = pd.read_csv(csv_path)
+    frame = pd.read_csv(csv_path, float_precision="round_trip")
+    assert frame.loc[0, "delta"] == payload["rows"][0]["delta"]
+    assert abs(frame.loc[0, "delta"]) > 0.4
     metadata = json.loads(
         quote_cache_metadata_path(csv_path).read_text(encoding="utf-8")
     )
@@ -1138,6 +1142,7 @@ def test_finalizer_keeps_valid_multiplier_csv_canonical(
     )
     payload = _payload(multiplier=100.0)
     payload["rows"][0]["implied_volatility"] = 0.13436424411240122
+    payload["rows"][0]["delta"] = -math.nextafter(0.4, math.inf)
 
     result = finalize_required_data_quote_candidate(
         base=tmp_path,
@@ -1152,6 +1157,9 @@ def test_finalizer_keeps_valid_multiplier_csv_canonical(
     )
 
     assert result["quote_receipt_path"].is_file()
+    frame = pd.read_csv(result["csv_path"], float_precision="round_trip")
+    assert frame.loc[0, "delta"] == payload["rows"][0]["delta"]
+    assert abs(frame.loc[0, "delta"]) > 0.4
 
 
 def test_save_outputs_metadata_uses_raw_observation_time(tmp_path: Path) -> None:

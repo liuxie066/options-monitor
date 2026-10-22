@@ -651,7 +651,7 @@ def _materialize_csv_unchecked(payload: Mapping[str, Any]) -> bytes:
     overrides = list(projection["multiplier_overrides"])
     if not overrides:
         return initial
-    frame = pd.read_csv(io.BytesIO(initial), converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
+    frame = pd.read_csv(io.BytesIO(initial), float_precision="round_trip", converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
     if len(frame.index) != len(rows) or list(frame.columns) != columns:
         raise RequiredDataBlobError("required-data materialized frame shape mismatch")
     for item in overrides:

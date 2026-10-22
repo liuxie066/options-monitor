@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import math
+from numbers import Real
 
 from domain.domain.trade_contract_identity import require_option_multiplier
 from typing import Any, Mapping
@@ -266,6 +267,9 @@ class OpeningOptionObservation:
     chain_multiplier: int | None
     snapshot_multiplier: int | None
     multiplier: int | None
+    delta_source: str | None = None
+    delta_unit: str | None = None
+    delta_reason_code: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -343,7 +347,39 @@ def normalize_option_observation(
         snapshot.get("option_implied_volatility", snapshot.get("implied_volatility"))
     )
     implied_volatility = normalize_iv(raw_iv)
-    delta = _finite_float(snapshot.get("option_delta", snapshot.get("delta")))
+    # Only the canonical provider field certifies provenance. An alias remains
+    # display-compatible, but cannot establish evidence for the ordinary gate.
+    raw_delta = snapshot.get("option_delta", snapshot.get("delta"))
+    delta = (
+        _finite_float(raw_delta)
+        if not isinstance(raw_delta, bool) and (
+            "option_delta" not in snapshot or isinstance(raw_delta, Real)
+        )
+        else None
+    )
+    delta_source = None
+    delta_unit = None
+    delta_reason_code = None
+    if "option_delta" not in snapshot or not (
+        contract_symbol and snapshot_code == contract_symbol
+        and stock_owner == _text(expected_owner).upper()
+    ):
+        delta_reason_code = "delta_source_unverified"
+    else:
+        delta_source = "opend_market_snapshot.option_delta"
+        delta_unit = "fraction"
+        if raw_delta is None:
+            delta_reason_code = "delta_missing"
+        elif isinstance(raw_delta, bool) or not isinstance(raw_delta, Real):
+            delta_reason_code = "delta_invalid_type"
+        elif delta is None:
+            delta_reason_code = "delta_non_finite"
+        elif abs(delta) > 1:
+            delta_reason_code = "delta_out_of_range"
+        elif (_enum(chain.get("option_type")) == "PUT" and delta > 0) or (
+            _enum(chain.get("option_type")) == "CALL" and delta < 0
+        ):
+            delta_reason_code = "delta_sign_invalid"
     gamma = _finite_float(snapshot.get("option_gamma", snapshot.get("gamma")))
     theta = _finite_float(snapshot.get("option_theta", snapshot.get("theta")))
     vega = _finite_float(snapshot.get("option_vega", snapshot.get("vega")))
@@ -480,6 +516,9 @@ def normalize_option_observation(
         price_tick=price_tick,
         implied_volatility=implied_volatility,
         delta=delta,
+        delta_source=delta_source,
+        delta_unit=delta_unit,
+        delta_reason_code=delta_reason_code,
         gamma=gamma,
         theta=theta,
         vega=vega,
