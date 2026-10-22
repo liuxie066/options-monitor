@@ -238,6 +238,8 @@ def run_combo_yield_scan_and_summarize(
         and scope.get("account")
         else _CANDIDATE_FILTER_TRACE_EVIDENCE_PATH
     )
+    # Combo owns its existing leg bounds; ordinary CSP delta defaults do not apply.
+    yield_sp = {**yield_sp, "max_abs_delta": None}
     funding_put_min_annualized_return = resolve_min_annualized_net_return(
         symbol_cfg={"sell_put": yield_sp},
     )

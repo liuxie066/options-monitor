@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from candidate_evidence_helpers import earnings_evidence
+from candidate_evidence_helpers import earnings_evidence, delta_evidence
 from domain.domain.engine import (
     CANDIDATE_STAGE_ORDER,
     SELL_PUT_RANKING_CONTRACT_VERSION,
@@ -41,6 +41,7 @@ def _policy_row(*, mode: str = "put", **overrides):  # type: ignore[no-untyped-d
         "covered_contracts_available": 1,
     }
     row.update(_earnings_evidence())
+    row.update(delta_evidence(mode=mode))
     row.update(overrides)
     return row
 
@@ -184,9 +185,17 @@ def test_same_market_day_earnings_remains_pending_without_timestamp_semantics() 
     assert decision["accepted"] is True
 
 
-def test_optional_oi_volume_and_delta_do_not_create_hard_gates() -> None:
-    decision = _decide(_policy_row(open_interest=None, volume=None, delta=None))
+def test_optional_oi_volume_and_explicitly_disabled_delta_do_not_create_hard_gates() -> None:
+    # Preserve this legacy optional-data contract only when the new gate is disabled.
+    decision = _decide(_policy_row(open_interest=None, volume=None, delta=None), max_abs_delta=None)
     assert decision["accepted"] is True
+
+
+@pytest.mark.parametrize("mode", ["put", "call"])
+def test_default_delta_gate_rejects_missing_value(mode) -> None:
+    decision = _decide(_policy_row(mode=mode, delta=None), mode=mode)
+    assert decision["accepted"] is False
+    assert "risk_delta_unavailable" in _reasons(decision)
 
 
 def test_covered_call_requires_physical_share_capacity() -> None:

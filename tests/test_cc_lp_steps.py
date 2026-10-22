@@ -225,7 +225,8 @@ def _available_cc_lp_context() -> dict[str, Any]:
     }
 
 
-def test_run_cc_lp_scan_produces_candidates(tmp_path: Path) -> None:
+@pytest.mark.parametrize("ordinary_cap", [None, 0, .4])
+def test_run_cc_lp_scan_produces_candidates(tmp_path: Path, ordinary_cap) -> None:
     required_data = _cc_lp_required_data(tmp_path)
     captured: dict[str, Any] = {}
 
@@ -237,6 +238,7 @@ def test_run_cc_lp_scan_produces_candidates(tmp_path: Path) -> None:
             required_data,
             stock={"shares": 100, "can_sell_qty": 100, "shares_locked": 0, "avg_cost": 90.0},
             run_sell_call_scan_fn=_scan,
+            sell_call_cfg={"enabled": True, "max_abs_delta": ordinary_cap},
     ))
     assert not df.empty
     row = df.iloc[0]

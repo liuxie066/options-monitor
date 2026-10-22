@@ -118,6 +118,9 @@ REQUIRED_DATA_COLUMNS = [
     "currency",
     "otm_pct",
     "delta",
+    "delta_source",
+    "delta_unit",
+    "delta_reason_code",
     "option_standard_type",
     "stock_owner",
     "stock_type",
@@ -391,7 +394,7 @@ def _validate_required_data_quote_candidate(
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SourceReceiptError("required-data JSON is unreadable") from exc
     try:
-        frame = pd.read_csv(csv)
+        frame = pd.read_csv(csv, float_precision="round_trip")
     except Exception as exc:
         raise SourceReceiptError(
             "required-data CSV is unreadable"
@@ -417,7 +420,7 @@ def validate_required_data_quote_bytes(
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SourceReceiptError("required-data canonical JSON is unreadable") from exc
     try:
-        frame = pd.read_csv(io.BytesIO(bytes(required_data_csv_bytes)))
+        frame = pd.read_csv(io.BytesIO(bytes(required_data_csv_bytes)), float_precision="round_trip")
     except Exception as exc:
         raise SourceReceiptError("required-data canonical CSV is unreadable") from exc
     _validate_required_data_quote_content(
@@ -1209,7 +1212,7 @@ def _csv_roundtrip_frame(rows: list[Any]) -> pd.DataFrame:
     projected = projected[REQUIRED_DATA_COLUMNS]
     buffer = io.StringIO()
     projected.to_csv(buffer, index=False)
-    return pd.read_csv(io.StringIO(buffer.getvalue()))
+    return pd.read_csv(io.StringIO(buffer.getvalue()), float_precision="round_trip")
 
 
 def _canonical_csv_value(value: Any) -> tuple[str, Any]:
@@ -1807,7 +1810,7 @@ def _validate_unplanned_required_data_files(
     )
     _validate_payload_freshness(meta=meta, now=now)
     try:
-        frame = pd.read_csv(csv_path)
+        frame = pd.read_csv(csv_path, float_precision="round_trip")
     except Exception as exc:
         raise SourceReceiptError("required-data CSV is unreadable") from exc
     if source_outcome == "success_empty":
