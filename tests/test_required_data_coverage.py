@@ -361,3 +361,20 @@ def test_required_rv_coverage_accepts_typed_expiry_scoped_unavailability() -> No
         option_types="put",
         require_realized_volatility=True,
     )
+
+
+def test_prepared_source_loader_preserves_delta_precision(tmp_path: Path) -> None:
+    import math
+    from src.application.required_data_coverage import load_required_data_payload_from_csv
+
+    values = [-math.nextafter(0.4, math.inf), -0.4, 0.4, math.nextafter(0.4, math.inf)]
+    path = _write_required_data_csv(tmp_path / "NVDA_required_data.csv", [
+        {"symbol": "NVDA", "delta": value, "delta_source": "opend_market_snapshot.option_delta",
+         "delta_unit": "fraction", "multiplier": "100.00000000000000001"}
+        for value in values
+    ])
+    payload = load_required_data_payload_from_csv(parsed=path, symbol="NVDA")
+    assert [row["delta"] for row in payload["rows"]] == values
+    assert [abs(row["delta"]) > 0.4 for row in payload["rows"]] == [True, False, False, True]
+    assert all(row["multiplier"] == "100.00000000000000001" for row in payload["rows"])
+    assert all(row["delta_unit"] == "fraction" for row in payload["rows"])

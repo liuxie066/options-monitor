@@ -164,13 +164,26 @@ def test_close_advice_barrier_blocks_bad_history_even_without_lots(tmp_path, mon
 
 @pytest.mark.parametrize("cache_source", ["account", "shared", "aggregate"])
 @pytest.mark.parametrize("conflict_account", ["lx", "sy"])
-def test_pipeline_ttl_checks_current_inbox_constraints(tmp_path, monkeypatch, cache_source, conflict_account):
+@pytest.mark.parametrize("inbox_exists_first", [False, True], ids=["created-later", "existing"])
+def test_pipeline_ttl_checks_current_inbox_constraints(
+    tmp_path, monkeypatch, cache_source, conflict_account, inbox_exists_first,
+):
     import sqlite3
 
     from src.application import pipeline_context as mod
     from src.application.ledger.api import read_current_position_projection
 
     repo = _ledger(tmp_path)
+    inbox_path = tmp_path / "ledger.sqlite3.trade_intake_inbox.sqlite3"
+    inbox_schema = (
+        "CREATE TABLE IF NOT EXISTS trade_inbox(inbox_id TEXT, broker_deal_key TEXT, payload_json TEXT,"
+        "status TEXT, result_reason TEXT, payload_version INT);"
+        "CREATE TABLE IF NOT EXISTS trade_inbox_evidence(inbox_id TEXT, source TEXT, payload_hash TEXT,"
+        "evidence_id TEXT, evidence_json TEXT);"
+    )
+    if inbox_exists_first:
+        with sqlite3.connect(inbox_path) as conn:
+            conn.executescript(inbox_schema)
     monkeypatch.setattr(mod, "open_position_ledger", lambda *_a, **_k: repo)
     monkeypatch.setattr(mod, "_persist_source_snapshot", lambda *_a: None)
     args = dict(
@@ -180,17 +193,22 @@ def test_pipeline_ttl_checks_current_inbox_constraints(tmp_path, monkeypatch, ca
         state_dir=tmp_path / "state", shared_state_dir=tmp_path / "shared", log=lambda _m: None,
         exchange_rate_observation={},
     )
+    initial = decision_state_snapshot(repo, account="lx", portfolio_scope_id=mod.portfolio_scope_id("lx"))
+    assert initial["snapshot_status"] == "trusted"
+    assert initial["decision_state_fingerprint"]
+    initial_constraints = initial["account_trade_source_constraints"]
+    assert ("source_rows" in initial_constraints) is inbox_exists_first
     first, _ = mod.load_option_positions_context(**args)
     assert first["context_status"] == "available"
     if cache_source == "shared":
-        (tmp_path / "state" / "option_positions_context.json").unlink()
-    with sqlite3.connect(tmp_path / "ledger.sqlite3.trade_intake_inbox.sqlite3") as conn:
-        conn.executescript(
-            "CREATE TABLE trade_inbox(inbox_id TEXT, broker_deal_key TEXT, payload_json TEXT,"
-            "status TEXT, result_reason TEXT, payload_version INT);"
-            "CREATE TABLE trade_inbox_evidence(inbox_id TEXT, source TEXT, payload_hash TEXT,"
-            "evidence_id TEXT, evidence_json TEXT);"
-        )
+        original_account_path = tmp_path / "state" / "option_positions_context.json"
+        assert original_account_path.is_file()
+        original_account_bytes = original_account_path.read_bytes()
+        assert (tmp_path / "shared" / "option_positions_context.shared.json").is_file()
+        args["state_dir"] = tmp_path / "empty-state"
+        assert not (args["state_dir"] / "option_positions_context.json").exists()
+    with sqlite3.connect(inbox_path) as conn:
+        conn.executescript(inbox_schema)
         conn.execute("INSERT INTO trade_inbox VALUES(?,?,?,?,?,?)", (
             "bad", "deal", json.dumps({"account": conflict_account}),
             "conflict", "source_multiplier_conflict", 1,
@@ -199,20 +217,44 @@ def test_pipeline_ttl_checks_current_inbox_constraints(tmp_path, monkeypatch, ca
             "bad", "test", "hash", "id", "{}",
         ))
     assert read_current_position_projection(repo, account="lx")["status"] == "trusted"
-    current = decision_state_snapshot(repo, account="lx", portfolio_scope_id="test-lx")
+    current = decision_state_snapshot(repo, account="lx", portfolio_scope_id=mod.portfolio_scope_id("lx"))
     assert (current["snapshot_status"] == "trusted") is (conflict_account != "lx")
     context, refreshed = mod.load_option_positions_context(**args)
     if conflict_account == "lx":
         assert refreshed
+        assert context["context_source"] == "shared_refresh"
         assert context["context_status"] == "unavailable"
         assert context["cash_secured_total_by_ccy"] == {}
         assert context["open_positions_min"] == []
     else:
+        constraints = current["account_trade_source_constraints"]
+        assert constraints["status"] == "trusted"
+        assert constraints["reason_codes"] == constraints["inbox_ids"] == constraints["source_rows"] == []
+        for field in ("event_fingerprint", "stored_position_lots_fingerprint", "reprojected_position_lots_fingerprint"):
+            assert current[field] == initial[field]
+        assert current["decision_state_fingerprint"]
+        assert (current["decision_state_fingerprint"] == initial["decision_state_fingerprint"]) is inbox_exists_first
+        if inbox_exists_first:
+            assert constraints == initial_constraints
+        else:
+            assert constraints == {**initial_constraints, "source_rows": []}
         assert context["context_status"] == "available"
         assert context["cash_secured_total_by_ccy"] == {"USD": 50000.0}
-        assert context["context_source"] == {
-            "account": "account_cache", "shared": "shared_slice", "aggregate": "shared_refresh",
-        }[cache_source]
+        assert context["open_positions_min"] == first["open_positions_min"]
+        assert context["filters"]["broker"] == first["filters"]["broker"] == "富途"
+        assert context["filters"]["account"] == (None if cache_source == "aggregate" else "lx")
+        assert context["context_source"] == (
+            {"account": "account_cache", "shared": "shared_slice", "aggregate": "shared_refresh"}[cache_source]
+            if inbox_exists_first else "shared_refresh"
+        )
+        assert refreshed is (cache_source != "account" or not inbox_exists_first)
+        if cache_source == "aggregate":
+            shared = json.loads((tmp_path / "shared" / "option_positions_context.shared.json").read_text())
+            assert shared["by_account"]["lx"]["decision_state_fingerprint"] == current["decision_state_fingerprint"]
+        else:
+            assert context["decision_state_fingerprint"] == current["decision_state_fingerprint"]
+    if cache_source == "shared":
+        assert original_account_path.read_bytes() == original_account_bytes
 
 
 

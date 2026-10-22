@@ -64,6 +64,13 @@ def phase2_opening_row(row: dict[str, Any]) -> dict[str, Any]:
     out.setdefault("snapshot_multiplier", multiplier)
     out.setdefault("opening_contract_status", "ready")
     out.setdefault("opening_contract_reason_codes", "")
+    # This helper constructs current synthetic provider evidence, never archives.
+    # Preserve explicit invalid/missing values and the fixture's frozen receipt.
+    out.setdefault("delta", -0.3 if out.get("option_type") == "put" else 0.3)
+    out.setdefault("delta_source", "opend_market_snapshot.option_delta")
+    out.setdefault("delta_unit", "fraction")
+    out.setdefault("delta_reason_code", None)
+    out.setdefault("decision_now_utc", out["snapshot_received_at_utc"])
     return out
 
 
