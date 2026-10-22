@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from src.application.config_defaults import cash_snapshot_ttl_sec
+from domain.domain.candidate_defaults import validate_max_abs_delta
 
 from difflib import get_close_matches
 import math
@@ -63,7 +64,6 @@ REMOVED_STRATEGY_FILTER_FIELDS = (
     'min_iv',
     'max_iv',
     'min_abs_delta',
-    'max_abs_delta',
     'min_delta',
     'max_delta',
 )
@@ -216,6 +216,7 @@ OPENING_STRATEGY_ALLOWED_FIELDS = {
     'concentration',
     'combo_yield',
     'yield_enhancement',
+    "max_abs_delta",
     *REMOVED_STRATEGY_FILTER_FIELDS,
     *LEGACY_SELL_CALL_FETCH_FIELDS,
     *LEGACY_SELL_PUT_OTM_FIELDS,
@@ -252,6 +253,7 @@ COMBO_YIELD_ALLOWED_FIELDS = {
     '_explicit_put_fields',
     'strategy',
     'strategy_profile',
+    "max_abs_delta",
     *REMOVED_STRATEGY_FILTER_FIELDS,
     *COMBO_YIELD_REMOVED_TARGET_FIELDS,
     *COMBO_YIELD_LEGACY_SCENARIO_FIELDS,
@@ -623,6 +625,11 @@ def validate_bot_config(cfg: dict) -> None:
 def _validate_opening_strategy_config(cfg: dict, path: str) -> None:
     _reject_unknown_keys(cfg, OPENING_STRATEGY_ALLOWED_FIELDS, path)
     _validate_optional_bool(cfg, 'enabled', path)
+    if 'max_abs_delta' in cfg:
+        try:
+            validate_max_abs_delta(cfg['max_abs_delta'])
+        except ValueError as exc:
+            die(f'{path}.{exc}')
     if 'strategy_profile' in cfg:
         die(f'{path}.strategy_profile has been removed; use {path}.strategy')
     if 'pricing' in cfg:
@@ -776,7 +783,7 @@ def _validate_combo_yield_cfg(cfg: dict, path: str):
         )
     if 'strategy' in cfg or 'strategy_profile' in cfg:
         die(f'{path}.strategy is not supported; combo_yield is isolated from sell_put.strategy')
-    bad_keys = [k for k in REMOVED_STRATEGY_FILTER_FIELDS if k in cfg]
+    bad_keys = [k for k in (*REMOVED_STRATEGY_FILTER_FIELDS, "max_abs_delta") if k in cfg]
     if bad_keys:
         die(f"{path} has unsupported strategy filter keys: {', '.join(bad_keys)}")
     removed_target_keys = [k for k in COMBO_YIELD_REMOVED_TARGET_FIELDS if k in cfg]

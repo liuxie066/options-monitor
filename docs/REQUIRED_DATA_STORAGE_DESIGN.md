@@ -319,7 +319,7 @@ upgrade authorization.
 ### Goal, success signals, and non-goals
 
 Reduce the CPU cost of the shared JSON-to-CSV projection validator without
-changing its evidence or failure contract. The deterministic 254-row, 60-column
+changing its evidence or failure contract. The historical v1 deterministic 254-row, 60-column
 fixture must produce the same canonical comparison result while removing the
 per-cell pandas row indexing hotspot. On the same host and fixture, the fallback
 loop should be at least 80% faster than the recorded baseline, and the canonical
@@ -872,3 +872,24 @@ requirement. Missing snapshots, stale/incomplete chains, out-of-request rows and
 missing required exact position strikes still fail closed. Do not change strategy
 strike settings or turn a provider failure into a valid empty result to recover
 an expanded-window validation failure.
+
+
+### Delta evidence schema benchmark fixture v2
+
+The benchmark now pins the current 63-column projection. Its historical v1
+metadata descriptor remains unchanged: the observed p99 was 226,760 bytes and
+254 rows on 2026-08-16. The v2 synthetic pair is 227,564 bytes, **not a new
+observed p99**. Its three added Delta evidence columns contribute exactly 804
+CSV bytes: 254 rows × 3 empty-field delimiters plus 42 header bytes. The raw JSON,
+its SHA-256, the 419-byte deterministic padding, row count and entropy remain
+unchanged. The canonical blob grows from 146,955 to 147,003 bytes.
+
+The v2 descriptor pins the resulting bytes and hashes; an unreviewed projection
+schema change fails fixture generation. This shape update does not increase the
+Python allocation limit or alter retained-space, cleanup, mismatch, or exit
+criteria. The fixture retains empty Delta evidence, so it measures schema
+storage overhead, not representative live Greek completeness or value entropy.
+A separate populated current-schema correctness test exercises Delta values and
+source/unit/reason fields through the real canonical bundle. Delta precision is
+also covered by `test_required_data_output_integrity.py`; the benchmark runs the actual current
+publisher, validator, seal, cleanup and blob-only resolver without schema mocks.

@@ -206,6 +206,12 @@ allocation net 替代，不改变数量、事件身份或已平仓状态。缺�
 快照中完成校验，再在一个 writer 事务内写入；失败整批回滚，已有同 hash 回执支持重试。
 预览采用同一校验且只读，提交仍在事务内重查。
 
+普通扫描的账户仓位缓存及共享缓存切片除了 TTL、账户和券商校验，还要求缓存与本次读取的
+当前可信快照各自具有非空且完全相等的 canonical `decision_state_fingerprint`。缺失或不匹配
+沿用既有刷新和失败回退；合法空仓仍可命中。指纹使用既有全局及账户事实范围，不缩窄为
+账户局部版本。本次加载复用同一个当前观察，不承诺观察之后并发写入的全扫描原子性；
+已封存的 prepared context 继续按独立回执契约读取。
+
 费用沿用 `FeeFact` 的实际、估计与缺失语义及 `enrich_order_fees()` 的受控补证合同。
 订单引用与费用分组按 `broker_account_id + external_order_namespace + external_order_id`
 隔离；订单 ID 命名空间须经验证，不能默认与成交 ID 命名空间相同。

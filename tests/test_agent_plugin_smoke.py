@@ -2934,7 +2934,8 @@ def test_runtime_status_does_not_warn_missing_notification_for_expected_skip(tmp
     assert out["data"]["latest_run"]["path"].endswith("run-skip")
 
 
-def test_runtime_status_notification_diagnosis_uses_shared_last_run_counts(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", [None, "none", "announce"])
+def test_runtime_status_notification_diagnosis_uses_shared_last_run_counts(tmp_path: Path, mode: str | None) -> None:
 
     def write_json(path: Path, payload: dict[str, object]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2965,6 +2966,7 @@ def test_runtime_status_notification_diagnosis_uses_shared_last_run_counts(tmp_p
     out = _execute_private_runtime_status(
         {
             "config_key": "us",
+            "delivery_mode": mode,
             "config_path": str(cfg_path),
             "shared_state_dir": str(shared_state_dir),
             "runs_root": str(runs_root),
@@ -2973,6 +2975,7 @@ def test_runtime_status_notification_diagnosis_uses_shared_last_run_counts(tmp_p
         },
     )
 
+    assert any("Outer delivery.mode is none" in warning for warning in out["warnings"]) is (mode == "none")
     diagnosis = out["data"]["notification_diagnosis"]
     assert diagnosis["status"] == "sent"
     assert diagnosis["account_messages_count"] == 2
@@ -2980,8 +2983,9 @@ def test_runtime_status_notification_diagnosis_uses_shared_last_run_counts(tmp_p
     assert diagnosis["send_confirmed_count"] == 2
 
 
+@pytest.mark.parametrize("mode", [None, "none", "announce"])
 def test_runtime_status_historical_run_does_not_borrow_current_shared_delivery_counts(
-    tmp_path: Path,
+    tmp_path: Path, mode: str | None,
 ) -> None:
 
     def write_json(path: Path, payload: dict[str, object]) -> None:
@@ -3024,6 +3028,7 @@ def test_runtime_status_historical_run_does_not_borrow_current_shared_delivery_c
     out = _execute_private_runtime_status(
         {
             "config_key": "us",
+            "delivery_mode": mode,
             "config_path": str(cfg_path),
             "run_id": "run-historical",
             "shared_state_dir": str(shared_state_dir),
@@ -3033,6 +3038,7 @@ def test_runtime_status_historical_run_does_not_borrow_current_shared_delivery_c
         },
     )
 
+    assert any("Outer delivery.mode is none" in warning for warning in out["warnings"]) is (mode == "none")
     diagnosis = out["data"]["notification_diagnosis"]
     assert diagnosis["status"] == "send_failed_or_unconfirmed"
     assert diagnosis["send_confirmed_count"] == 0

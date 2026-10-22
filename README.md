@@ -68,7 +68,7 @@ trade_events -> projection -> position_lots
 
 在持股分支，已收到的期权收入会计入总收益，但不用于降低股票的卖出底线；系统合并检查所有可能占用持股的期权合约。在现金分支，新 Put 候选仍须通过资金门槛。该策略只提供监控和候选建议，不自动下单，也不保证收益。
 
-CSP / CC 新开仓只使用 `insurance_underwriting`。历史 artifact 和持仓解释可继续读取
+CSP / CC 新开仓只使用 `insurance_underwriting`，普通 Put / Call 默认分别启用 `abs(delta) <= 0.40` 硬门槛；delta 不参与排序。历史 artifact 和持仓解释可继续读取
 `return_first` / `short_vol`，但这些兼容语义不能重新进入当前开仓配置或正式候选排序。
 
 README 不复制完整规则：[候选策略合同](docs/candidate_strategy.md) 是已经确认的目标口径，
