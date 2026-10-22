@@ -64,7 +64,7 @@ def _count_table(conn: sqlite3.Connection, table: str) -> int | None:
         (table,),
     ).fetchone())
     if row is None:
-        return 0
+        return None
     count_row = cast(sqlite3.Row | None, conn.execute(f"SELECT COUNT(*) AS cnt FROM {table}").fetchone())
     raw_count: object = count_row["cnt"] if count_row is not None else 0
     return _coerce_int(raw_count or 0)
