@@ -210,9 +210,13 @@ def test_shared_context_reuses_fetch_calls_across_accounts(tmp_path: Path, monke
         },
     }
 
-    monkeypatch.setattr(pc, "decision_state_snapshot", lambda *_a, **_k: {"snapshot_status": "trusted"})
-    for context in shared_option["by_account"].values():
+    fingerprints = {"lx": "a" * 64, "sy": "b" * 64}
+    monkeypatch.setattr(pc, "decision_state_snapshot", lambda *_a, **kwargs: {
+        "snapshot_status": "trusted", "decision_state_fingerprint": fingerprints[kwargs["account"]],
+    })
+    for account, context in shared_option["by_account"].items():
         context["decision_snapshot_status"] = "trusted"
+        context["decision_state_fingerprint"] = fingerprints[account]
     counts = {"portfolio": 0, "option": 0}
     old_is_fresh = pc.is_fresh
     old_fetch_futu_portfolio_context = pc.fetch_futu_portfolio_context

@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from src.application import system_alerts
 from tests.notification_format_assertions import assert_mobile_flat_markdown
 
@@ -45,6 +47,114 @@ def test_watchdog_error_code_mapping() -> None:
 
     c, _ = w.classify_watchdog_result(None, 'something weird')
     assert c == 'OPEND_API_ERROR'
+
+
+def _watchdog_quote_responses(monkeypatch, responses):
+    from src.infrastructure import futu_gateway, opend_watchdog
+
+    pending = list(responses)
+    contexts = []
+
+    class Context:
+        closed = 0
+
+        def get_global_state(self):
+            value = pending.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        def close(self):
+            self.closed += 1
+
+    def build(**_kwargs):
+        context = Context()
+        contexts.append(context)
+        return context
+
+    monkeypatch.setattr(futu_gateway, "build_futu_quote_context", build)
+    monkeypatch.setattr(opend_watchdog, "port_open", lambda *_args: True)
+    monkeypatch.setattr(opend_watchdog, "try_start_opend", lambda: pytest.fail("unexpected service start"))
+    return contexts, pending
+
+
+@pytest.mark.parametrize("capability,qot,trd,expected", [
+    ("quote", False, True, "OPEND_QOT_NOT_LOGINED"),
+    ("both", False, True, "OPEND_QOT_NOT_LOGINED"),
+    ("quote", False, False, "OPEND_QOT_NOT_LOGINED"),
+    ("both", False, False, "OPEND_QOT_NOT_LOGINED"),
+    ("both", True, False, "OPEND_TRD_NOT_LOGINED"),
+    ("quote", True, False, None),
+    ("both", True, True, None),
+])
+def test_watchdog_classifies_real_unlogged_state_text(monkeypatch, capability, qot, trd, expected):
+    from src.infrastructure import opend_watchdog as w
+
+    state = {"program_status_type": "READY", "qot_logined": qot, "trd_logined": trd}
+    contexts, pending = _watchdog_quote_responses(monkeypatch, [(0, state)])
+    payload = w.run_watchdog_check(required_capability=capability).to_payload()
+    assert payload["error_code"] == expected
+    assert payload["ok"] is (expected is None)
+    assert payload["state"] == state
+    assert payload["action_taken"] is None
+    assert not pending and [context.closed for context in contexts] == [1]
+    assert w.Health(ok=payload["ok"], ports_open=True, state=state,
+                    error=payload["error"]).to_payload()["error_code"] == expected
+
+
+@pytest.mark.parametrize("message,expected,action", [
+    ("quote not logged in: {'trd_logined': True}", "OPEND_QOT_NOT_LOGINED", None),
+    ("trade not logged in: {'qot_logined': True}", "OPEND_TRD_NOT_LOGINED", None),
+    ("quote not logged in: phone verification", "OPEND_NEEDS_PHONE_VERIFY", "fail_fast_phone_verify"),
+    ("trade not logged in: 需要手机验证码", "OPEND_NEEDS_PHONE_VERIFY", "fail_fast_phone_verify"),
+    ("quote not logged in: 需要图形验证码", "OPEND_NEEDS_PIC_VERIFY", "fail_fast_pic_verify"),
+    ("登录密码被修改,已退出登录", "OPEND_LOGIN_INVALID", "fail_fast_login_invalid"),
+    ("quote not logged in: rate limit", "OPEND_RATE_LIMIT", "no_retry_rate_limit"),
+])
+@pytest.mark.parametrize("raised", [False, True])
+def test_watchdog_provider_login_evidence(monkeypatch, message, expected, action, raised):
+    from src.infrastructure import opend_watchdog as w
+
+    response = RuntimeError(message) if raised else (-1, message)
+    contexts, pending = _watchdog_quote_responses(monkeypatch, [response])
+    payload = w.run_watchdog_check().to_payload()
+    assert payload["error_code"] == expected
+    assert payload["action_taken"] == action
+    assert payload["ok"] is False
+    assert not pending and [context.closed for context in contexts] == [1]
+
+
+@pytest.mark.parametrize("message,expected", [
+    ("not logged in", "OPEND_API_ERROR"),
+    ("not login", "OPEND_API_ERROR"),
+    ("quote not logged in", "OPEND_QOT_NOT_LOGINED"),
+    ("trade not logged in", "OPEND_TRD_NOT_LOGINED"),
+])
+@pytest.mark.parametrize("suffix", ["", ": socket timeout", ": disconnected"])
+def test_watchdog_login_absence_does_not_add_probe_retry(monkeypatch, message, expected, suffix):
+    from src.infrastructure import opend_watchdog as w
+
+    contexts, pending = _watchdog_quote_responses(monkeypatch, [(-1, message + suffix)])
+    state, error, action = w.get_global_state("synthetic.invalid", 1, retry_once=True, ensure=True)
+    assert state is None and action is None
+    assert w.classify_watchdog_result(state, error)[0] == expected
+    assert not pending and [context.closed for context in contexts] == [1]
+
+
+@pytest.mark.parametrize("recovered", [False, True])
+def test_watchdog_transport_still_retries_once_and_closes(monkeypatch, recovered):
+    from src.infrastructure import opend_watchdog as w
+
+    ready = {"program_status_type": "READY", "qot_logined": True, "trd_logined": True}
+    contexts, pending = _watchdog_quote_responses(monkeypatch, [
+        ConnectionError("connection refused"), (0, ready) if recovered else ConnectionError("connection refused"),
+    ])
+    monkeypatch.setattr(w.time, "sleep", lambda _seconds: None)
+    payload = w.run_watchdog_check().to_payload()
+    assert payload["ok"] is recovered
+    assert payload["error_code"] == (None if recovered else "OPEND_PORT_CLOSED")
+    assert payload["action_taken"] == ("retry_once" if recovered else "retry_once_failed")
+    assert not pending and [context.closed for context in contexts] == [1, 1]
 
 
 def test_opend_alert_rate_limit(tmp_path: Path) -> None:

@@ -1751,7 +1751,12 @@ def _notification_diagnosis(
         The gates are ordered: the first one that applies wins, and the pair for
         insufficient runtime output is the fallback.
         """
-        if str(trigger_context.get("delivery_mode") or "").lower() == "none":
+        # Outer announcement suppression does not erase repository send receipts.
+        if (
+            str(trigger_context.get("delivery_mode") or "").lower() == "none"
+            and send_attempted_count <= 0
+            and send_confirmed_count <= 0
+        ):
             return (
                 "outer_delivery_disabled",
                 "outer delivery.mode is none; task output will not be announced by the runner",
