@@ -1654,6 +1654,13 @@ def test_research_collect_preserves_account_failure_through_outputs(
             "no_notification_content", None, id="no-content",
         ),
         pytest.param((1, 0, 0, 0), {"delivery_mode": "none"}, "outer_delivery_disabled", None, id="outer-disabled"),
+        pytest.param((2, 2, 1, 1), {"delivery_mode": "none"}, "sent_partial", "NOTIFICATION_PARTIAL_FAILURE", id="outer-none-partial"),
+        pytest.param((1, 1, 0, 1), {"delivery_mode": "none"}, "send_failed_or_unconfirmed", "NOTIFICATION_DELIVERY_FAILED", id="outer-none-failed"),
+        pytest.param((1, 1, 0, 0), {"delivery_mode": "none", "ambiguous_send_count": 1}, "send_failed_or_unconfirmed", "NOTIFICATION_DELIVERY_FAILED", id="outer-none-unconfirmed"),
+        pytest.param((1, 1, 1, 0), {"delivery_mode": "none"}, "sent", None, id="outer-none-confirmed"),
+        pytest.param((1, 0, 1, 0), {"delivery_mode": "none"}, "sent", None, id="outer-none-confirmed-without-attempt-count"),
+        pytest.param((1, 0, 0, 0), {"delivery_mode": "none", "no_send": True}, "outer_delivery_disabled", None, id="outer-none-no-send-zero"),
+        pytest.param((0, 0, 0, 0), {"delivery_mode": "none", "should_run_scan": False}, "outer_delivery_disabled", None, id="outer-none-skip-zero"),
         pytest.param(
             (0, 0, 0, 0), {"route_configured": False, "should_notify": False, "reason": "not_sent"},
             "not_sent", None, id="no-intent-no-route",
