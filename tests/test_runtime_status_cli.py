@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+from pathlib import Path
+
+import pytest
 
 from src.application.runtime_status_cli import format_runtime_status_summary
 from src.application.agent_tools.runtime_status_impl import (
     _aggregate_trade_intake_summaries,
+    _notification_diagnosis,
     _notification_delivery_health,
 )
 from src.interfaces.cli.observability_ops import handle_observability_command
@@ -239,3 +245,190 @@ def test_status_journal_marks_system_alert_delivery_degraded(capsys) -> None:
     output = capsys.readouterr()
     assert "system alert delivery: status=degraded" in output.out
     assert "<3>SYSTEM_ALERT_DELIVERY_DEGRADED" in output.err
+
+
+@pytest.mark.parametrize("mode", ["none", "announce"])
+@pytest.mark.parametrize("counts, overrides, expected", [
+    pytest.param((0, 0, 0), {}, "not_sent", id="no-evidence"),
+    pytest.param((0, 0, 0), {"no_send": True}, "no_send", id="no-send-zero"),
+    pytest.param((0, 0, 0), {"scheduler_decision": {"should_run_scan": False}}, "scheduler_skipped", id="skip-zero"),
+    pytest.param((0, 0, 0), {"account_messages_count": 0, "reason": "no_account_notification"}, "no_notification_content", id="no-content-zero"),
+    pytest.param((0, 0, 0), {"missing_route": True}, "notification_route_missing", id="missing-route-zero"),
+    pytest.param((0, 0, 1), {}, "not_sent", id="failed-only"),
+    pytest.param((-1, 0, 1), {}, "not_sent", id="negative-attempts"),
+    pytest.param((None, "", 0), {}, "not_sent", id="falsey-counts"),
+    pytest.param((1, 1, 0), {"no_send": True}, "no_send", id="no-send-with-receipt"),
+    pytest.param((1, 1, 0), {"scheduler_decision": {"should_run_scan": False}}, "scheduler_skipped", id="skip-with-receipt"),
+    pytest.param((1, 1, 0), {"account_messages_count": 0, "reason": "no_account_notification"}, "no_notification_content", id="no-content-with-receipt"),
+    pytest.param((1, 1, 0), {"no_send": True, "scheduler_decision": {"should_run_scan": False}}, "scheduler_skipped", id="skip-before-no-send"),
+    pytest.param(("1", "0", 1), {}, "send_failed_or_unconfirmed", id="numeric-string"),
+    pytest.param((0, 1, 0), {}, "sent", id="confirmed-without-attempt-count"),
+])
+def test_outer_mode_preserves_notification_controls(mode, counts, overrides, expected) -> None:
+    attempted, confirmed, failed = counts
+    metrics = {
+        "reason": "not_sent", "account_messages_count": 1,
+        "send_attempted_count": attempted, "send_confirmed_count": confirmed,
+        "send_failed_count": failed, **overrides,
+    }
+    cfg = {} if overrides.get("missing_route") else {
+        "notifications": {"enabled": True, "provider": "wechat_clawbot", "channel": "wechat_clawbot", "target": "clawbot:fixture"},
+    }
+    diagnosis = _notification_diagnosis(
+        cfg=cfg, shared_last_run={},
+        latest_run_payload={"path": "selected", "state": {"tick_metrics": {"json": metrics}}},
+        trigger_context={"delivery_mode": mode, "announce_expected": mode == "announce"},
+    )
+    if mode == "none" and int(attempted or 0) <= 0 and int(confirmed or 0) <= 0:
+        expected = "outer_delivery_disabled"
+    assert diagnosis["notification_route"]["configured"] is (not overrides.get("missing_route", False))
+    assert diagnosis["status"] == expected
+    assert diagnosis["send_attempted_count"] == int(attempted or 0)
+    assert diagnosis["send_confirmed_count"] == int(confirmed or 0)
+    assert diagnosis["send_failed_count"] == failed
+    assert diagnosis["outer_delivery_mode"] == mode
+    assert diagnosis["outer_announce_expected"] is (mode == "announce")
+
+
+@pytest.mark.parametrize("mode", ["none", "announce"])
+@pytest.mark.parametrize("key", ["send_attempted_count", "send_confirmed_count", "send_failed_count"])
+def test_outer_mode_does_not_change_invalid_count_conversion(mode, key) -> None:
+    with pytest.raises(ValueError):
+        _notification_diagnosis(
+            cfg={}, shared_last_run={}, trigger_context={"delivery_mode": mode},
+            latest_run_payload={"path": "selected", "state": {"tick_metrics": {"json": {key: "invalid"}}}},
+        )
+
+
+@pytest.mark.parametrize("mode", ["none", "announce"])
+@pytest.mark.parametrize("shared_run, local, expected", [
+    pytest.param("selected", {}, "sent", id="matching-fallback"),
+    pytest.param("different", {}, "unknown", id="unrelated-shared-ignored"),
+    pytest.param("selected", {"send_attempted_count": 0, "send_confirmed_count": 0}, "not_sent", id="explicit-local-zero"),
+])
+def test_outer_mode_preserves_shared_receipt_authority(mode, shared_run, local, expected) -> None:
+    diagnosis = _notification_diagnosis(
+        cfg={},
+        shared_last_run={"json": {"run_id": shared_run, "send_attempted_count": 2, "send_confirmed_count": 2}},
+        latest_run_payload={"path": "output_runs/selected", "state": {"tick_metrics": {"json": local}}},
+        trigger_context={"delivery_mode": mode},
+    )
+    if expected == "sent":
+        assert diagnosis["send_confirmed_count"] == 2
+    else:
+        assert diagnosis["send_attempted_count"] == diagnosis["send_confirmed_count"] == 0
+        if mode == "none":
+            expected = "outer_delivery_disabled"
+    assert diagnosis["status"] == expected
+
+
+@pytest.mark.parametrize("mode", ["none", "announce"])
+@pytest.mark.parametrize("counts, extra, expected", [
+    pytest.param((1, 1, 0, 1), {}, "send_failed_or_unconfirmed", id="failed"),
+    pytest.param((2, 2, 1, 1), {}, "sent_partial", id="partial"),
+    pytest.param((1, 1, 1, 0), {}, "sent", id="confirmed"),
+    pytest.param((1, 1, 0, 0), {"ambiguous_send_count": 1}, "send_failed_or_unconfirmed", id="ambiguous"),
+    pytest.param((1, 0, 1, 0), {}, "sent", id="confirmed-without-attempt-count"),
+    pytest.param((1, 1, 0, 1), {"duplicate_risk_count": 1}, "send_failed_or_unconfirmed", id="failure-and-duplicate"),
+    pytest.param((0, 0, 0, 0), {"duplicate_risk_count": 1}, "no_account_sent", id="duplicate-only"),
+    pytest.param((0, 0, 0, 0), {}, "no_account_sent", id="explicit-zero"),
+    pytest.param((1, 0, 0, 0), {"no_send": True}, "no_send", id="no-send"),
+    pytest.param((0, 0, 0, 0), {"should_run_scan": False}, "scheduler_skipped", id="scheduler-skip"),
+])
+def test_status_reads_native_receipts_before_outer_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, mode, counts, extra, expected,
+) -> None:
+    from domain.storage.repositories import state_repo
+    from src.application.config_yaml import resolve_yaml_runtime_config
+    from src.application.cron_runtime import (
+        apply_notify_results_to_tick_metrics, build_notify_summary, build_shared_last_run_meta,
+    )
+    from src.application.research.checks import run_deterministic_checks
+    from src.interfaces.cli.main import main
+
+    def write(path, payload):
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    env = tmp_path / "empty.env"
+    env.write_text("", encoding="utf-8")
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    monkeypatch.setenv("OM_ENV_FILE", str(env))
+    monkeypatch.setenv("OM_INBOUND_AUDIT_DB", str(tmp_path / "absent.sqlite3"))
+    root = Path(__file__).resolve().parents[1]
+    config, _ = resolve_yaml_runtime_config(
+        repo_root=root, market="us", config_path=root / "configs/examples/config.yaml.example",
+    )
+    config["notifications"] = {"enabled": True, "provider": "wechat_clawbot", "channel": "wechat_clawbot", "target": "clawbot:fixture"}
+    config_path = tmp_path / "config.us.json"
+    write(config_path, config)
+    bot_path = tmp_path / "config.bot.json"
+    write(bot_path, {"bot": {"enabled": False}})
+    total, attempted, confirmed, failed = counts
+    sent = ["lx"] if confirmed else []
+    failures = [{"account": "lx", "reason": "synthetic failure"}] * failed
+    summary = build_notify_summary(
+        sent_accounts=sent, notify_failures=failures, total_accounts=total,
+        send_attempted_count=attempted, send_confirmed_count=confirmed,
+        ambiguous_send_count=extra.get("ambiguous_send_count"),
+        duplicate_risk_count=extra.get("duplicate_risk_count"),
+    )
+    scan = extra.get("should_run_scan", True)
+    metrics = {
+        "run_id": "selected", "ran_scan": scan, "no_send": extra.get("no_send", False),
+        "scheduler_decision": {"should_run_scan": scan, "is_notify_window_open": scan},
+    }
+    apply_notify_results_to_tick_metrics(
+        tick_metrics=metrics, no_send=metrics["no_send"], sent_accounts=sent,
+        notify_failures=failures, notify_summary=summary,
+    )
+    state_repo.write_tick_metrics(tmp_path, "selected", metrics)
+    # Conflicting shared history cannot fill or replace selected-run receipt counts.
+    stale_sent = [] if confirmed else ["stale-account"]
+    stale_failures = [{"account": "stale-account", "reason": "old failure"}] if confirmed else []
+    stale_summary = build_notify_summary(sent_accounts=stale_sent, notify_failures=stale_failures, total_accounts=1)
+    stale = build_shared_last_run_meta(
+        run_id="different-old-run", now_utc="2020-01-01T00:00:00Z", channel="synthetic", target="fixture",
+        results=[], sent_accounts=stale_sent, notify_failures=stale_failures, notify_summary=stale_summary,
+    )
+    state_repo.write_shared_last_run(tmp_path, stale)
+    persisted = [*tmp_path.glob("output_shared/state/**/*.json"), *tmp_path.glob("output_runs/**/*.json")]
+    before = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in persisted}
+    assert len(persisted) == 5
+    for path in persisted:
+        assert json.loads(path.read_text()) == (stale if "last_run" in path.name else metrics)
+    profile_path = tmp_path / "synthetic.profile.json"
+    write(profile_path, {
+        "runtime_root": str(tmp_path), "config_paths": {"us": str(config_path)}, "accounts": ["lx"],
+        "delivery_mode": mode, "env_file": str(env), "bot_config_path": str(bot_path),
+        "feishu_ws": {"audit_db": str(tmp_path / "absent.sqlite3")},
+        "wechat_clawbot": {"state_dir": str(tmp_path / "absent-wechat")},
+        "paths": {key: str(tmp_path / value) for key, value in {
+            "report_dir": "output_shared/reports", "state_dir": "output_shared/state",
+            "shared_state_dir": "output_shared/state", "accounts_root": "output_accounts", "runs_root": "output_runs",
+        }.items()},
+    })
+    args = ["status", "--config-key", "us", "--config-path", str(config_path), "--profile-path", str(profile_path),
+            "--env-file", str(env), "--no-local-env-file", "--run-id", "selected"]
+    assert main(args + ["--json"], discover_local=False) == 0
+    response = json.loads(capsys.readouterr().out)
+    assert response["ok"] is True
+    data = response["data"]
+    diagnosis, delivery = data["notification_diagnosis"], data["notification_delivery"]
+    if mode == "none" and attempted == confirmed == 0:
+        expected = "outer_delivery_disabled"
+    assert diagnosis["status"] == expected
+    for key in ("send_attempted_count", "send_confirmed_count", "send_failed_count", "ambiguous_send_count", "duplicate_risk_count"):
+        assert diagnosis[key] == summary[key]
+    assert diagnosis["outer_delivery_mode"] == mode
+    assert diagnosis["outer_announce_expected"] is (mode == "announce")
+    failure_code = {"sent_partial": "NOTIFICATION_PARTIAL_FAILURE", "send_failed_or_unconfirmed": "NOTIFICATION_DELIVERY_FAILED"}.get(expected)
+    codes = ([failure_code] if failure_code else []) + (["NOTIFICATION_DUPLICATE_RISK"] if extra.get("duplicate_risk_count") else [])
+    assert delivery["reason_codes"] == codes
+    assert delivery["status"] == ("degraded" if codes else "confirmed" if expected == "sent" else "unknown")
+    assert all(code in data["summary"]["warning_codes"] for code in codes)
+    assert main(args + ["--journal-summary"], discover_local=False) == 0
+    journal = capsys.readouterr()
+    assert journal.err.count("<3>NOTIFICATION_DELIVERY_DEGRADED") == int(bool(codes))
+    research = run_deterministic_checks({"runtime_status": data})
+    assert any(f["code"] == "NOTIFICATION_DELIVERY_ISSUE" for f in research["findings"]) is bool(failure_code)
+    assert before == {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in persisted}
