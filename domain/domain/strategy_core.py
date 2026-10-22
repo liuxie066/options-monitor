@@ -36,7 +36,7 @@ from domain.domain.strategy_identity import (
     validate_strategy_identity as _validated_strategy_identity,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 def _mode(mode: str) -> str:
@@ -82,7 +82,7 @@ def _baseline_explain(row, *, mode, cfg):
 
 # Source-distributed implementations only; no registration API or serialized callbacks.
 _TEMPLATES = {
-    (name, "0.1.0"): StrategyTemplate(name, "0.1.0", mode, _baseline_constraints,
+    (name, "0.2.0"): StrategyTemplate(name, "0.2.0", mode, _baseline_constraints,
                                     _baseline_evaluate, _baseline_rank, _baseline_explain)
     for name, mode in (("csp_baseline", "put"), ("cc_baseline", "call"))
 }
@@ -103,7 +103,7 @@ class ResolvedStrategy:
     account: str | None = None
     market: str | None = None
     template_id: str | None = field(default=None, compare=False)
-    template_version: str = "0.1.0"
+    template_version: str = "0.2.0"
     descriptor: StrategyTemplate = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -127,7 +127,7 @@ class ResolvedStrategy:
         for name, value in asdict(self.config).items():
             if name == "strategy":
                 continue
-            if value is None and name in ("min_strike", "max_strike", "min_dte", "max_dte"):
+            if value is None and name in ("min_strike", "max_strike", "min_dte", "max_dte", "max_abs_delta"):
                 continue
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                 raise ValueError(f"{name} must be finite numeric policy")
@@ -173,7 +173,7 @@ class ResolvedStrategy:
 def resolve_strategy(
     *, mode: str, config: InsuranceUnderwritingConfig,
     ranking_profile: str = "current_tie_break", account: str | None = None, market: str | None = None,
-    template_id: str | None = None, template_version: str = "0.1.0",
+    template_id: str | None = None, template_version: str = "0.2.0",
 ) -> ResolvedStrategy:
     """Bind already-merged policy, never read or interpret legacy configuration."""
     return ResolvedStrategy(mode, config, ranking_profile, account, market, template_id, template_version)
@@ -341,7 +341,7 @@ def calculate_constraints(
         min_strike=min_strike, min_strike_cost_multiplier=min_strike_cost_multiplier,
     )
     descriptor = _execution_template(strategy) if strategy else _lookup_template(
-        f"{'csp' if mode == 'put' else 'cc'}_baseline", "0.1.0", mode,
+        f"{'csp' if mode == 'put' else 'cc'}_baseline", "0.2.0", mode,
     )
     annotated = {**out, **underwriting_fields(out, mode=mode, cfg=cfg)}
     fields = _constraint_fields(descriptor, annotated, mode=mode, cfg=cfg)
@@ -395,6 +395,7 @@ def evaluate_candidates(rows: list[dict[str, Any]], *, strategy: ResolvedStrateg
             raise ValueError("template evaluator changed canonical input or decision scope")
         rejects = merge_opening_rejects(policy["rejects"], opening_qualification_rejects(
             canonical, mode=strategy.mode, min_net_premium_cny=strategy.config.min_net_income,
+            max_abs_delta=strategy.config.max_abs_delta,
         ))
         opening = build_candidate_decision(
             mode=strategy.mode, symbol=policy["symbol"], contract_symbol=policy["contract_symbol"],
