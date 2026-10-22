@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from candidate_evidence_helpers import earnings_evidence
+from candidate_evidence_helpers import earnings_evidence, delta_evidence
 from test_candidate_engine_phase2_contract import _opening_row
 from domain.domain.engine import calculate_opening_candidate_metrics, rank_candidate_rows
 from domain.domain.insurance_underwriting import (
@@ -36,7 +36,8 @@ def _quote(symbol="NVDA", strike=110.0, spot=100.0):
         contract_symbol=f"{symbol}261113C{int(strike * 1000):08d}",
         strike=strike, spot=spot, bid=2.0, ask=2.1, price_tick=0.01,
         expiration=EXPIRATION, dte=28, open_interest=100, volume=20,
-        snapshot_received_at_utc=NOW.isoformat(), spot_observed_at_utc=NOW.isoformat(),
+        spot_observed_at_utc=NOW.isoformat(),
+        **delta_evidence(mode="call", observed_at=NOW.isoformat()),
     )
 
 

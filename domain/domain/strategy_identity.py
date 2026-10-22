@@ -7,6 +7,7 @@ import math
 from typing import Any
 
 from domain.domain.symbol_identity import symbol_market
+from domain.domain.candidate_defaults import validate_max_abs_delta
 
 
 def strategy_policy_hash(parameters: dict[str, Any], ranking_profile: str) -> str:
@@ -36,6 +37,10 @@ def validate_strategy_identity(
         json.dumps(identity, sort_keys=True, allow_nan=False)
         if not isinstance(identity["effective_parameters"], dict) or not isinstance(identity["core_version"], str):
             raise ValueError("invalid strategy policy identity")
+        if "max_abs_delta" in identity["effective_parameters"]:
+            validate_max_abs_delta(identity["effective_parameters"]["max_abs_delta"])
+        elif identity.get("template_version") == "0.2.0":
+            raise ValueError("missing max_abs_delta in current strategy identity")
         multiplier = identity["effective_parameters"]["min_strike_cost_multiplier"]
         if (isinstance(multiplier, bool) or not isinstance(multiplier, (int, float))
                 or not math.isfinite(multiplier) or multiplier <= 0):
