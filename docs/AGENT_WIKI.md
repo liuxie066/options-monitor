@@ -902,6 +902,8 @@ scripts/              -> operational wrappers only; delegate to src/ or domain/
 
 `runtime_status` exposes `notification_delivery.status` and `reason_codes` separately from overall health. A scheduled notification with no confirmed delivery is `degraded`; `./om status --journal-summary` emits a local `<3>NOTIFICATION_DELIVERY_DEGRADED` journal line for that state. This is a journal signal, so it does not establish external alert delivery when the notification route is missing.
 
+Outer `delivery_mode=none` remains visible in metadata and the private collector warning. When repository attempted or confirmed counts are positive, diagnosis continues through the existing scheduler, no-send, no-content and receipt gates; outer announcement suppression alone does not hide a repository failure, partial send or confirmation. With no positive attempted or confirmed count, outer-none retains `outer_delivery_disabled`. An attempted or ambiguous submission is not confirmed delivery.
+
 ### A Symbol Is Missing
 
 1. Get run/account/symbol from the user or runtime artifact.

@@ -203,6 +203,7 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
     catalog_summary="解释候选机会的筛选结果与排除原因。",
     description=(
         "Explain the recorded opening decision for a symbol from a terminal manifest-bound account snapshot. The tool never re-filters rows. "
+        "Delta is a hard gate, never a rank factor; report only the recorded threshold and evidence, without inferring a default for historical rows. "
         "Explicit run_id and run_selector are mutually exclusive. Omitted run_id or run_selector=latest selects the latest eligible terminal scan, skipping only proven scheduler skips. "
         "Use latest_notification only when the question refers to a delivered notification. "
         "With run_selector=latest_notification it resolves the validated source run of the most recent report actually delivered "
@@ -233,7 +234,7 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
         "authenticated_conversation_id": "host-injected authenticated notification conversation scope",
         "limit": {"type": "integer", "minimum": 1, "maximum": 40, "description": "Event page size, default 20; continue with cursor and the same query"},
         "cursor": {"type": "string", "maxLength": 8192},
-        "rule": {"type": "string", "maxLength": 100, "description": "Optional exact recorded rejection rule filter"},
+        "rule": {"type": "string", "maxLength": 100, "description": "Optional exact recorded rejection rule filter; risk_delta exceeds cap, risk_delta_unavailable is unverifiable source/unit/receipt evidence"},
         "function": (
             "optional "
             + strategy_key_help(

@@ -17,6 +17,7 @@ from domain.domain.engine.candidate_engine import (
     REJECT_INPUT_MISSING,
     REJECT_POLICY_REJECTED,
     REJECT_RISK_EARNINGS_UNAVAILABLE,
+    REJECT_RISK_DELTA_UNAVAILABLE,
 )
 from domain.domain.insurance_underwriting import InsuranceUnderwritingConfig
 from domain.domain.strategy_core import ResolvedStrategy, resolve_strategy, validate_strategy_identity, decision_time_from_input
@@ -129,7 +130,7 @@ def _load_required_data_rows(
     else:
         path = Path(input_root) / "parsed" / f"{symbol}_required_data.csv"
         try:
-            df = pd.read_csv(path, converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
+            df = pd.read_csv(path, float_precision="round_trip", converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
         except (FileNotFoundError, pd.errors.EmptyDataError):
             return pd.DataFrame()
     if df.empty or "option_type" not in df.columns:
@@ -314,6 +315,7 @@ def evidence_summary_from_decisions(
         REJECT_INPUT_INVALID,
         REJECT_INPUT_MISSING,
         REJECT_RISK_EARNINGS_UNAVAILABLE,
+        REJECT_RISK_DELTA_UNAVAILABLE,
     }
     for record in decisions:
         if not isinstance(record, dict):

@@ -6,6 +6,7 @@ import pandas as pd
 
 from domain.domain.candidate_defaults import (
     DEFAULT_CANDIDATE_LIQUIDITY,
+    DEFAULT_MAX_ABS_DELTA, validate_max_abs_delta,
     DEFAULT_SELL_CALL_WINDOW,
     resolve_candidate_liquidity,
     resolve_candidate_window,
@@ -37,6 +38,7 @@ def resolve_covered_call_underwriting_config(raw: dict[str, Any] | None) -> Insu
 
     return InsuranceUnderwritingConfig(
         strategy=strategy,
+        max_abs_delta=validate_max_abs_delta(cfg.get("max_abs_delta", DEFAULT_MAX_ABS_DELTA)),
         min_annualized_return=_float_setting_from_sources(
             "min_annualized_net_premium_return",
             _float_setting_from_sources("min_annualized_net_return", 0.10, pricing, cfg),

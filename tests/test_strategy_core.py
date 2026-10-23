@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 
 import pytest
+from candidate_evidence_helpers import delta_evidence
 
 from om_strategy_core import (
     __version__, CallCapacityInputs, CurrencyConverter, ExchangeRates, InsuranceUnderwritingConfig,
@@ -33,9 +34,12 @@ def test_independent_old_source_baseline(case):
         assert exc.value.to_payload() == case["error"]
     else:
         assert calculate_metrics(case["row"], **kwargs) == {**case["metrics"], **case["cny_fields"]}
-        strategy = resolve_strategy(mode=case["mode"], config=InsuranceUnderwritingConfig())
+        strategy = resolve_strategy(mode=case["mode"], config=InsuranceUnderwritingConfig(max_abs_delta=None))
         result = evaluate_candidates([case["policy_row"]], strategy=strategy)
-        assert result["decisions"] == [case["decision"]]
+        expected = deepcopy(case["decision"])
+        expected["fields"]["policy_max_abs_delta"] = None
+        expected["opening_decision"]["normalized_input"]["policy_max_abs_delta"] = None
+        assert result["decisions"] == [expected]
         assert len(result["accepted"]) == int(case["decision"]["accepted"])
     assert case == before
 
@@ -157,7 +161,7 @@ def test_policy_identity_and_immutability():
 
 
 def test_complete_passes_and_representatives_and_experimental_order():
-    base = VALID[0]["policy_row"]
+    base = {**VALID[0]["policy_row"], **delta_evidence()}
     rows = [
         {**base, "symbol": symbol, "contract_symbol": f"{symbol}-{n}", "symbol_concentration_after": concentration,
          "period_net_return_on_cash_basis": ret, "net_assignment_discount_pct": discount}
