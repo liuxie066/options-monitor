@@ -1,6 +1,8 @@
 """Retained audit contracts shared by candidate resolution and history windows."""
 from __future__ import annotations
 
+import errno
+import io
 import json
 import os
 import time
@@ -164,22 +166,94 @@ def test_candidate_cancellation_and_recovery(tmp_path, mid_read):
         _QUERY_CONTEXT.reset(token)
 
 
-def test_internal_append_during_read_is_incomplete(tmp_path):
-    _write(tmp_path, {CURRENT: [_event()] * 20})
-    path = tmp_path / "output_shared/state" / CURRENT
-    changed = False
+@pytest.mark.parametrize("source", [CURRENT, SEGMENT])
+@pytest.mark.parametrize("change", ["append", "truncate", "replace", "disappear"])
+def test_internal_source_change_during_read_is_incomplete(tmp_path, monkeypatch, source, change):
+    # Native physical mutations are CI-only under the local fixture-retention policy.
+    import src.application.agent_tools.candidate_filter_impl as candidate_filter
 
-    def append_once(event):
-        nonlocal changed
-        if not changed:
-            with path.open("ab") as handle:
-                handle.write(b"\n")
-            changed = True
-        return True
+    files = {source: [_event(), _event()]}
+    if source == SEGMENT:
+        files[CURRENT] = []
+    _write(tmp_path, files)
+    path = tmp_path / "output_shared/state" / source
+    original = path.read_bytes()
+    before = path.stat()
+    prefix = original.splitlines(keepends=True)[0]
+    # Keep both complete records within one read buffer, so truncation cannot
+    # leave a buffered partial JSON record and mask the identity failure.
+    assert len(original) < io.DEFAULT_BUFFER_SIZE
+    assert _resolve(tmp_path)["run_id"] == "source"
+    mutation_count = 0
+    scans = []
+    opened = []
+    original_open = os.open
+    original_iterator = candidate_filter.iter_notification_perception_events
 
-    result = iter_notification_perception_events(repo_root=tmp_path, event_filter=append_once)
-    assert result["summary"]["status"] == "failed"
-    assert result["read_statuses"][0]["reason"] == "source_changed"
+    def observed_open(name, flags, mode=0o777, *, dir_fd=None):
+        descriptor = original_open(name, flags, mode, dir_fd=dir_fd)
+        if name == source:
+            opened.append(descriptor)
+        return descriptor
+
+    def observed_iterator(**kwargs):
+        original_filter = kwargs["event_filter"]
+
+        def change_after_first_event(event):
+            nonlocal mutation_count
+            accepted = original_filter(event)
+            if mutation_count == 0:
+                if change == "append":
+                    with path.open("ab") as handle:
+                        handle.write(prefix)
+                    after = path.stat()
+                    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+                    assert after.st_size > before.st_size
+                elif change == "truncate":
+                    with path.open("r+b") as handle:
+                        handle.truncate(len(prefix))
+                    after = path.stat()
+                    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+                    assert after.st_size == len(prefix) < before.st_size
+                    assert path.read_bytes() == prefix
+                    assert json.loads(prefix) == _event()
+                elif change == "replace":
+                    replacement = path.with_suffix(".replacement")
+                    with replacement.open("xb") as handle:
+                        handle.write(original)
+                    os.replace(replacement, path)
+                    assert path.stat().st_ino != before.st_ino
+                    assert path.read_bytes() == original
+                else:
+                    path.unlink()
+                    assert not path.exists()
+                mutation_count += 1
+            return accepted
+
+        result = original_iterator(**{**kwargs, "event_filter": change_after_first_event})
+        scans.append(result)
+        return result
+
+    monkeypatch.setattr(os, "open", observed_open)
+    monkeypatch.setattr(os, "supports_dir_fd", {*os.supports_dir_fd, observed_open})
+    monkeypatch.setattr(candidate_filter, "iter_notification_perception_events", observed_iterator)
+
+    resolution = _resolve(tmp_path)
+
+    assert mutation_count == 1
+    assert len(scans) == 1
+    assert scans[0]["summary"]["status"] == "failed"
+    assert scans[0]["summary"]["malformed_count"] == 0
+    status = next(item for item in scans[0]["read_statuses"] if Path(item["path"]).name == source)
+    assert status["status"] == "unreadable"
+    assert status["reason"] == "source_changed"
+    assert resolution["reason"] == "notification_audit_incomplete"
+    assert "run_id" not in resolution
+    assert opened
+    for descriptor in opened:
+        with pytest.raises(OSError) as caught:
+            os.fstat(descriptor)
+        assert caught.value.errno == errno.EBADF
 
 
 @pytest.mark.parametrize("leaf", ["directory", "fifo", "hardlink", "symlink"])
