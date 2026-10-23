@@ -1,7 +1,20 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
+
+
+DEFAULT_MAX_ABS_DELTA = 0.40
+
+
+def validate_max_abs_delta(value: Any) -> float | None:
+    """None disables the ordinary gate; omission is resolved by the caller."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1 or not math.isfinite(value):
+        raise ValueError("max_abs_delta must be null or a finite number within [0, 1]")
+    return float(value)
 
 
 @dataclass(frozen=True)

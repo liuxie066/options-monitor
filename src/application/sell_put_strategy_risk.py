@@ -6,6 +6,7 @@ import pandas as pd
 
 from domain.domain.candidate_defaults import (
     DEFAULT_CANDIDATE_LIQUIDITY,
+    DEFAULT_MAX_ABS_DELTA, validate_max_abs_delta,
     DEFAULT_SELL_PUT_WINDOW,
     resolve_candidate_liquidity,
     resolve_candidate_window,
@@ -38,6 +39,7 @@ def resolve_sell_put_underwriting_config(raw: dict[str, Any] | None) -> Insuranc
 
     return InsuranceUnderwritingConfig(
         strategy=strategy,
+        max_abs_delta=validate_max_abs_delta(cfg.get("max_abs_delta", DEFAULT_MAX_ABS_DELTA)),
         min_annualized_return=_float_setting_from_sources("min_annualized_net_return", 0.10, pricing, cfg),
         min_net_income=_float_setting_from_sources("min_net_income", 50.0, pricing, cfg),
         min_iv_rv_ratio=_float_setting_from_sources("min_iv_rv_ratio", 1.10, pricing, cfg),

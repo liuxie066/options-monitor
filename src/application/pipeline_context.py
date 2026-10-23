@@ -205,6 +205,14 @@ def load_option_positions_context(
                         or context.get("decision_snapshot_status") != "trusted"
                     ):
                         raise ValueError("cached option context has no trusted current decision snapshot")
+                    current_fingerprint = current_decision_snapshot.get("decision_state_fingerprint")
+                    cached_fingerprint = context.get("decision_state_fingerprint")
+                    if (
+                        not current_fingerprint
+                        or not cached_fingerprint
+                        or cached_fingerprint != current_fingerprint
+                    ):
+                        raise ValueError("cached option context decision fingerprint differs from current snapshot")
                 return True
             except ValueError as exc:
                 log(

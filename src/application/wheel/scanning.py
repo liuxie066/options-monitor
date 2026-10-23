@@ -356,6 +356,7 @@ def _common_policy_decision(
         min_iv_rv_ratio=float(policy["min_iv_rv_ratio"]),
         min_iv_minus_rv=float(policy["min_iv_minus_rv"]),
         max_spread_ratio=float(policy["max_spread_ratio"]),
+        max_abs_delta=None,  # Wheel owns its existing direction-specific delta bounds.
         require_earnings_evidence=False,
         reject_known_earnings=False,
         apply_default_call_strike_cap=False,

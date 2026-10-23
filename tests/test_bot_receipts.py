@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from types import SimpleNamespace
 
@@ -281,3 +282,185 @@ def test_cursor_binds_original_source_when_redacted_body_is_unchanged(monkeypatc
     with pytest.raises(AgentToolError) as error:
         receipts.RECEIPT_READ_TOOL.call({"cursor": first["next_cursor"]})
     assert error.value.code == "cursor_invalidated"
+
+
+def _brief_receipt_reader(monkeypatch, base):
+    """Bind the real registered Tool to an isolated, provider-free runtime."""
+    config = base / "config.us.json"
+    config.write_text(json.dumps({"accounts": ["lx"], "_generated": {
+        "market": "us", "source_format": "yaml"}, "portfolio": {"source": "auto"}}))
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(base))
+
+    def read(run_id=None, kind="scheduled"):
+        payload = {"config_path": str(config), "account": "lx", "market": "US", "type": kind}
+        if run_id is not None:
+            payload["run_id"] = run_id
+        result = execute_tool("receipt_read", payload)
+        assert result["ok"], result
+        return result["data"]
+
+    return read
+
+
+def _prepare_receipt_failure(base):
+    from tests.test_daily_decision_brief_repository_v2 import _prepare, TARGET_1000
+
+    artifact = base / "output_runs/run-fail/accounts/lx/state/pipeline_failure.US.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text('{"reason":"synthetic_scan_failed"}\n')
+    return _prepare(base, run_id="run-fail", delivery_kind="fixed_failure", source_kind="scan_failure",
+        source_digest=hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        source_reference=artifact.relative_to(base).as_posix(), scheduled_target_market=TARGET_1000,
+        rendered_message="原扫描失败消息", render_context={"projection": "fixed_failure", "run_id": "run-fail"})
+
+
+def _advance_receipt_delivery(base, envelope, status):
+    from tests.test_daily_decision_brief_repository_v2 import MARKET_DATE
+    from src.application import daily_decision_brief_repository as repository
+    from src.application.notification_delivery_adapter import build_notification_transport_key
+
+    identity = {"base": base, "account": "lx", "market": "US", "market_trading_date": MARKET_DATE,
+        "delivery_key": envelope["delivery_key"], "source_digest": envelope["source_digest"],
+        "message_sha256": envelope["message_sha256"],
+        "transport_idempotency_key": build_notification_transport_key(envelope["delivery_key"])}
+    if status == "confirmed":
+        repository.confirm_daily_decision_brief_delivery_v2(**identity)
+    elif status == "ambiguous":
+        repository.record_daily_decision_brief_delivery_attempt(**identity, ambiguous=True)
+    elif status == "expired_unconfirmed":
+        repository.expire_daily_decision_brief_delivery_day(base=base, account="lx", market="US",
+            market_trading_date=MARKET_DATE)
+    else:
+        assert status == "pending"
+
+
+@pytest.mark.parametrize("status", ["pending", "confirmed", "ambiguous", "expired_unconfirmed"])
+@pytest.mark.parametrize("with_run_receipt", [False, True])
+def test_run_receipt_rejects_native_pending_failure_upgrade(monkeypatch, tmp_path, status, with_run_receipt):
+    from tests.test_daily_decision_brief_repository_v2 import _persist, _prepare_fixed
+    from src.application.daily_decision_brief_repository import query_daily_brief_receipts
+
+    read = _brief_receipt_reader(monkeypatch, tmp_path)
+    failure = _prepare_receipt_failure(tmp_path)
+    old_plan = failure["paths"]["run_plan"].read_bytes()
+    assert read("run-fail")["rows"][0]["receipt_body"] == "原扫描失败消息"
+    persisted = _persist(tmp_path, run_id="run-success")
+    upgraded = _prepare_fixed(tmp_path, persisted, message="后续成功消息")
+    assert upgraded["prepared"]
+    assert upgraded["envelope"]["delivery_key"] == failure["envelope"]["delivery_key"]
+    _advance_receipt_delivery(tmp_path, upgraded["envelope"], status)
+    if with_run_receipt:
+        path = failure["paths"]["run_plan"].parent / "last_run.json"
+        path.write_text(json.dumps({"account": "lx", "market": "US", "last_run_utc": "2026-07-21T14:00:00Z",
+            "reason": "scan_failed", "sent": False}))
+    before = upgraded["paths"]["delivery"].read_bytes()
+    with pytest.raises(ValueError, match="^daily_brief_run_content_mismatch$"):
+        query_daily_brief_receipts(base=tmp_path, account="lx", market="US", query={"run_id": "run-fail"})
+    old = read("run-fail")
+    assert old["status"] == ("partial" if with_run_receipt else "unavailable")
+    assert old["coverage"]["status"] == "partial"
+    assert {"source": "daily_brief:lx", "reason": "daily_brief_run_content_mismatch"} in old["missing_sources"]
+    assert len(old["rows"]) == int(with_run_receipt)
+    assert all(row["event_ref"]["source"] != "daily_brief" for row in old["rows"])
+    expected_state = {"pending": "prepared", "confirmed": "confirmed"}.get(status, "unknown")
+    for run in ("run-success", None):
+        direct = query_daily_brief_receipts(base=tmp_path, account="lx", market="US", query={"run_id": run})
+        assert len(direct) == 1 and direct[0]["receipt_body"] == "后续成功消息"
+        assert direct[0]["delivery_state"] == expected_state
+        current = read(run)
+        brief_rows = [row for row in current["rows"] if row["event_ref"]["source"] == "daily_brief"]
+        assert len(brief_rows) == 1 and brief_rows[0]["delivery_state"] == expected_state
+        if len(current["rows"]) == 1:
+            assert brief_rows[0]["receipt_body"] == "后续成功消息"
+    assert failure["paths"]["run_plan"].read_bytes() == old_plan
+    assert upgraded["paths"]["delivery"].read_bytes() == before
+
+
+def test_run_receipt_confirmed_failure_cannot_be_replaced(monkeypatch, tmp_path):
+    from tests.test_daily_decision_brief_repository_v2 import _persist, _prepare_fixed
+
+    read = _brief_receipt_reader(monkeypatch, tmp_path)
+    failure = _prepare_receipt_failure(tmp_path)
+    _advance_receipt_delivery(tmp_path, failure["envelope"], "confirmed")
+    persisted = _persist(tmp_path, run_id="run-success")
+    retained = _prepare_fixed(tmp_path, persisted, message="不应替换已确认消息")
+    assert not retained["prepared"]
+    row = read("run-fail")["rows"][0]
+    assert row["receipt_body"] == "原扫描失败消息" and row["delivery_state"] == "confirmed"
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+@pytest.mark.parametrize("legacy_optional", [False, True])
+def test_run_receipt_accepts_same_content_reuse_and_status_progression(monkeypatch, tmp_path, confirmed, legacy_optional):
+    from tests.test_daily_decision_brief_repository_v2 import _persist, _prepare, _prepare_fixed, MARKET_DATE, TARGET_1000
+
+    read = _brief_receipt_reader(monkeypatch, tmp_path)
+    persisted = _persist(tmp_path, run_id="source-run")
+    first = _prepare_fixed(tmp_path, persisted, message="同一冻结正文")
+    reused = _prepare(tmp_path, run_id="reuse-run", delivery_kind="fixed_report", source_kind="successful_brief",
+        revision=persisted["current_revision"], source_digest=persisted["current_brief_digest"],
+        scheduled_target_market=TARGET_1000, candidate_identities=persisted["current_candidate_identities"],
+        rendered_message="同一冻结正文", render_context={"projection": "fixed_report"})
+    assert reused["envelope"]["source_run_id"] == "source-run"
+    if confirmed:
+        _advance_receipt_delivery(tmp_path, reused["envelope"], "confirmed")
+    if legacy_optional:
+        state = json.loads(first["paths"]["delivery"].read_text())
+        envelope = state["days"][MARKET_DATE]["fixed_reports"][TARGET_1000]
+        plan = json.loads(reused["paths"]["run_plan"].read_text())
+        for item in (envelope, plan["envelope"]):
+            for key in ("source_reference", "rendered_transport", "rendered_transport_sha256", "source_run_id"):
+                item.pop(key, None)
+        first["paths"]["delivery"].write_text(json.dumps(state))
+        reused["paths"]["run_plan"].write_text(json.dumps(plan))
+    for run in ("source-run", "reuse-run"):
+        result = read(run)
+        assert not result["missing_sources"]
+        row = result["rows"][0]
+        assert row["receipt_body"] == "同一冻结正文" and row["related_run"] == run
+        assert row["delivery_state"] == ("confirmed" if confirmed else "prepared")
+
+
+def test_run_receipt_retains_confirmed_candidate_history_and_current(monkeypatch, tmp_path):
+    from tests.test_daily_decision_brief_repository_v2 import _action, _persist, _prepare, _record_candidates
+
+    read = _brief_receipt_reader(monkeypatch, tmp_path)
+    expected = []
+    for number, symbol in enumerate(("NVDA", "AMD")):
+        run = f"candidate-{number}"
+        persisted = _persist(tmp_path, run_id=run, actions=[_action(symbol=symbol)])
+        _record_candidates(tmp_path, revision=persisted["current_revision"],
+            brief_digest=persisted["current_brief_digest"], candidate_identities=persisted["current_candidate_identities"])
+        prepared = _prepare(tmp_path, run_id=run, delivery_kind="candidate_alert", source_kind="successful_brief",
+            revision=persisted["current_revision"], source_digest=persisted["current_brief_digest"],
+            candidate_identities=persisted["current_candidate_identities"], rendered_message=f"候选 {symbol}",
+            render_context={"projection": "candidate_alert", "run_id": run})
+        expected.append(prepared["envelope"]["delivery_key"])
+        if number == 0:
+            _advance_receipt_delivery(tmp_path, prepared["envelope"], "confirmed")
+    for number, symbol in enumerate(("NVDA", "AMD")):
+        result = read(f"candidate-{number}", kind="monitor")
+        assert not any(item["source"] == "daily_brief:lx" for item in result["missing_sources"])
+        row = result["rows"][0]
+        assert row["receipt_body"] == f"候选 {symbol}"
+        assert row["delivery_state"] == ("confirmed" if number == 0 else "prepared")
+    rows = read(kind="monitor")["rows"]
+    assert {row["event_ref"]["source_event_id"] for row in rows} == set(expected)
+
+
+@pytest.mark.parametrize("envelope", [None, [], ["invalid"], "invalid", {}])
+def test_run_receipt_invalid_plan_envelope_is_explicit(monkeypatch, tmp_path, envelope):
+    from tests.test_daily_decision_brief_repository_v2 import _persist, _prepare_fixed
+    from src.application.daily_decision_brief_repository import query_daily_brief_receipts
+
+    read = _brief_receipt_reader(monkeypatch, tmp_path)
+    prepared = _prepare_fixed(tmp_path, _persist(tmp_path))
+    path = prepared["paths"]["run_plan"]
+    plan = json.loads(path.read_text())
+    plan["envelope"] = envelope
+    path.write_text(json.dumps(plan))
+    with pytest.raises(ValueError, match="^daily_brief_run_plan_invalid$"):
+        query_daily_brief_receipts(base=tmp_path, account="lx", market="US", query={"run_id": "run-1"})
+    result = read("run-1")
+    assert result["status"] == "unavailable" and result["rows"] == []
+    assert {"source": "daily_brief:lx", "reason": "daily_brief_run_plan_invalid"} in result["missing_sources"]

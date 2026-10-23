@@ -55,8 +55,6 @@ def _looks_like_phone_verify(msg: str) -> bool:
         "验证码",
         "手机验证",
         "短信验证",
-        "not login",
-        "not logged",
     ]
     return any(k in s for k in ["验证码", "手机验证", "短信验证"]) or any(k in sl for k in keys)
 
@@ -91,9 +89,13 @@ def classify_watchdog_result(state: dict | None, error_text: str | None) -> tupl
             return ("OPEND_NEEDS_PHONE_VERIFY", "OpenD 需要手机验证码登录")
         if "not ready" in low:
             return ("OPEND_NOT_READY", "OpenD 未就绪")
-        if "trade not logged in" in low or "trd" in low:
+        if "trade not logged in" in low:
             return ("OPEND_TRD_NOT_LOGINED", "OpenD 交易未登录")
-        if "quote not logged in" in low or "qot" in low:
+        if "quote not logged in" in low:
+            return ("OPEND_QOT_NOT_LOGINED", "OpenD 行情未登录")
+        if "trd" in low:
+            return ("OPEND_TRD_NOT_LOGINED", "OpenD 交易未登录")
+        if "qot" in low:
             return ("OPEND_QOT_NOT_LOGINED", "OpenD 行情未登录")
 
     status = st.get("program_status_type")
@@ -115,7 +117,8 @@ def classify_watchdog_result(state: dict | None, error_text: str | None) -> tupl
 def _looks_like_disconnect_error(msg: str) -> bool:
     s = (msg or "").strip()
     sl = s.lower()
-    if _looks_like_phone_verify(s):
+    # Login absence still suppresses probe retries without proving phone verification.
+    if _looks_like_phone_verify(s) or "not login" in sl or "not logged" in sl:
         return False
     keys = [
         "opend unreachable",
