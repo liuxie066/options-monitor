@@ -204,8 +204,8 @@ def _wechat_clawbot_channel_health(
     service_status_error: str | None,
 ) -> dict[str, Any]:
     profile = _dict(payload.get("wechat_clawbot"))
-    bot_config_path, _bot_config_explicit = _bot_config_path_from_payload(payload)
-    cfg, config_error = _load_bot_config(bot_config_path, base=base)
+    bot_config_path, bot_config_explicit = _bot_config_path_from_payload(payload)
+    cfg, config_error = _load_bot_config(bot_config_path, base=base, missing_ok=not bot_config_explicit)
     inbound = _dict(_dict(cfg.get("inbound")).get("wechat_clawbot"))
     label = _first_text(profile.get("label"), inbound.get("label")) or "default"
     state_dir_raw = _first_text(profile.get("state_dir"), inbound.get("state_dir"))
@@ -230,7 +230,12 @@ def _wechat_clawbot_channel_health(
     configured = bool(profile.get("enabled")) or bool(inbound) or allowed_senders_configured or state_dir.exists() or service_present
     out: dict[str, Any] = {
         "configured": configured,
-        "available": configured and allowed_senders_configured and bool(str(state_payload.get("bot_token") or "").strip()),
+        "available": (
+            configured
+            and allowed_senders_configured
+            and bool(str(state_payload.get("bot_token") or "").strip())
+            and not (bot_config_explicit and config_error)
+        ),
         "profile_enabled": bool(profile.get("enabled")),
         "service_present": service_present,
         "service_status_checked": service_status_checked,
@@ -328,13 +333,13 @@ def _command_status_ok(value: Any) -> bool | None:
     return str(value.get("status") or "").strip().lower() == "ok"
 
 
-def _load_bot_config(path: Path | None, *, base: Path) -> tuple[dict[str, Any], str | None]:
+def _load_bot_config(path: Path | None, *, base: Path, missing_ok: bool = True) -> tuple[dict[str, Any], str | None]:
     if path is None:
         return {}, None
     try:
         from src.application.bot.control.config_loader import load_bot_config
 
-        _path, loaded = load_bot_config(config_path=path, repo_root=base, missing_ok=True)
+        _path, loaded = load_bot_config(config_path=path, repo_root=base, missing_ok=missing_ok)
         return (loaded if isinstance(loaded, dict) else {}), None
     except Exception as exc:
         return {}, f"{type(exc).__name__}: {exc}"
