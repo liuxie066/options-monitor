@@ -299,3 +299,16 @@ def _normalized_row(raw: Mapping[str, Any], *, accepted: bool) -> dict[str, Any]
 def _mode(row: Mapping[str, Any]) -> str:
     raw = str(row.get("mode") or row.get("option_type") or "put").lower()
     return "call" if raw in {"call", "covered_call", "sell_call"} else "put"
+
+
+def delta_evidence(*, mode: str = "put", observed_at: str = "2026-08-06T15:00:00+00:00", value: float | None = None) -> dict[str, Any]:
+    """Explicit current-source synthetic Delta facts; never patch historical archives."""
+    return {
+        "delta": (-0.3 if mode == "put" else 0.3) if value is None else value,
+        "delta_source": "opend_market_snapshot.option_delta",
+        "delta_unit": "fraction",
+        "delta_reason_code": None,
+        "snapshot_received_at_utc": observed_at,
+        "decision_now_utc": observed_at,
+        "option_type": mode,
+    }

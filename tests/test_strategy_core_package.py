@@ -78,6 +78,7 @@ def test_installed_core_calculates_without_om_or_dependencies(installed):
     work, source, python, env, _ = installed
     output = run(python, '''
 import importlib.util, json, sys
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from om_strategy_core import *
@@ -97,8 +98,15 @@ for c in baseline['cases']:
         recorded = {**c['row'], 'decision_now_utc': c['now_utc']}
         assert calculate_metrics(recorded, mode=c['mode'], avg_cost=c['avg_cost'],
             exchange_rates=ExchangeRates(**c['rates'])) == result
-        policy = resolve_strategy(mode=c['mode'], config=InsuranceUnderwritingConfig())
-        assert evaluate_candidates([c['policy_row']], strategy=policy)['decisions'] == [c['decision']]
+        # This immutable oracle records pre-delta policy; explicit null preserves that comparison.
+        policy = resolve_strategy(mode=c['mode'], config=InsuranceUnderwritingConfig(max_abs_delta=None))
+        expected = deepcopy(c['decision'])
+        expected['fields']['policy_max_abs_delta'] = None
+        expected['opening_decision']['normalized_input']['policy_max_abs_delta'] = None
+        assert evaluate_candidates([c['policy_row']], strategy=policy)['decisions'] == [expected]
+        current = resolve_strategy(mode=c['mode'], config=InsuranceUnderwritingConfig())
+        rejected = evaluate_candidates([c['policy_row']], strategy=current)['decisions'][0]
+        assert any(item['reason'] == 'risk_delta_unavailable' for item in rejected['opening_decision']['rejects'])
         constrained = calculate_constraints({**c['policy_row'], 'avg_cost': c['avg_cost']}, mode=c['mode'],
             risk_ctx=ShortVolPortfolioContext(None, {}, {}, None), exchange_rate_converter=CurrencyConverter(ExchangeRates(**c['rates'])))
         assert constrained['concentration_evaluable'] is False

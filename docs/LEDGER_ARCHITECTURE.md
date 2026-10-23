@@ -206,6 +206,12 @@ allocation net 替代，不改变数量、事件身份或已平仓状态。缺�
 快照中完成校验，再在一个 writer 事务内写入；失败整批回滚，已有同 hash 回执支持重试。
 预览采用同一校验且只读，提交仍在事务内重查。
 
+普通扫描的账户仓位缓存及共享缓存切片除了 TTL、账户和券商校验，还要求缓存与本次读取的
+当前可信快照各自具有非空且完全相等的 canonical `decision_state_fingerprint`。缺失或不匹配
+沿用既有刷新和失败回退；合法空仓仍可命中。指纹使用既有全局及账户事实范围，不缩窄为
+账户局部版本。本次加载复用同一个当前观察，不承诺观察之后并发写入的全扫描原子性；
+已封存的 prepared context 继续按独立回执契约读取。
+
 费用沿用 `FeeFact` 的实际、估计与缺失语义及 `enrich_order_fees()` 的受控补证合同。
 订单引用与费用分组按 `broker_account_id + external_order_namespace + external_order_id`
 隔离；订单 ID 命名空间须经验证，不能默认与成交 ID 命名空间相同。
@@ -1372,6 +1378,8 @@ CNY 金额继续通过读取校验。上述订单证据路径修正后必须独�
 标准成交内容和现金换算仍需另做联合验证；`--confirm` 拒绝该路径。未保留原始时间的历史记录不能推断修复。
 
 ## 读取语义
+
+账本只读检查的 `trade_event_count` / `position_lot_count` 在对应表缺失或无法读取时保留 `None`（store inspect JSON 为 `null`）；表存在且为空时才为 `0`。健康检查对不可用计数沿用警告；公开运行状态沿用省略未知字段的契约，文本显示 `-`，不补成零。计数可读不代表完整 schema 有效或获准写入，既有多账本歧义检查仍按正行数判断。
 
 运行时风险、Close Advice、Performance 和 Agent tools 从 canonical read model 读取：
 

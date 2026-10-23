@@ -138,12 +138,13 @@ def request_model(*, settings, api_key: str, messages: list[dict], tools: list[d
 
 def run_agent(*, settings, api_key: str, messages: list[dict], tools: list[dict], call_tool: Callable,
               deadline: float, cancelled: Callable[[], bool], event: Callable,
-              model_limit: int = 16, tool_limit: int = 12, reserve_seconds: float = 45,
+              model_limit: int = 16, tool_limit: int = 12, failed_batch_limit: int = 3,
+              reserve_seconds: float = 45,
               request: Callable = request_model) -> str:
     names = {tool["name"] for tool in tools}
     calls_seen: set[str] = set()
     repeated: Counter = Counter()
-    tool_count = failures = model_failures = 0
+    tool_count = failed_batches = model_failures = 0
     final = False
     continued = False
     parts: list[str] = []
@@ -152,7 +153,7 @@ def run_agent(*, settings, api_key: str, messages: list[dict], tools: list[dict]
     require_initial_tool = not any(message.get("role") == "assistant" for message in messages)
     for turn in range(model_limit):
         check_run(deadline, cancelled)
-        final = final or turn == model_limit - 1 or tool_count >= tool_limit or failures >= 3 or deadline - time.monotonic() <= reserve_seconds
+        final = final or turn == model_limit - 1 or tool_count >= tool_limit or failed_batches >= failed_batch_limit or deadline - time.monotonic() <= reserve_seconds
         # Providers report tokens for the exact previous request. Calibrate the
         # conservative local estimate before deciding that current evidence no
         # longer fits; without usage, fall back to the safe early answer.
@@ -212,6 +213,7 @@ def run_agent(*, settings, api_key: str, messages: list[dict], tools: list[dict]
                 calls_seen.add(call_id)
                 clean_calls.append({"id": call_id, "type": "function", "function": call["function"]})
             messages.append({"role": "assistant", "content": content, "tool_calls": clean_calls})
+            batch_succeeded = False
             for call in clean_calls:
                 check_run(deadline, cancelled)
                 fn = call["function"]
@@ -231,8 +233,9 @@ def run_agent(*, settings, api_key: str, messages: list[dict], tools: list[dict]
                 else:
                     tool_count += 1
                     result = call_tool(fn["name"], args)
-                failures = 0 if result.get("ok") else failures + 1
+                batch_succeeded = batch_succeeded or bool(result.get("ok"))
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result, ensure_ascii=False, allow_nan=False)})
+            failed_batches = 0 if batch_succeeded else failed_batches + 1
             continue
         if reply.get("finish_reason") == "length":
             if continued or turn + 1 >= model_limit:
