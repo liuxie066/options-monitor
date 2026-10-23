@@ -375,6 +375,25 @@ def poll_wechat_clawbot_once(
         bot_config_path=bot_config_path, transport_identity=sender_identity)
     allowed_senders = current_allowlist()
     response = client.get_updates(get_updates_buf=cursor_before)
+    provider_code = response_code(response)
+    if provider_code not in (None, 0) and not response_success(response):
+        return build_response(
+            tool_name="wechat_clawbot.poll_once",
+            ok=False,
+            data={
+                "label": label,
+                "update_count": 0,
+                "processed_count": 0,
+                "reply_count": 0,
+                "cursor_present": bool(cursor_before),
+                "cursor_updated": False,
+                "keepalive": {"attempted": False, "reason": "poll_failed"},
+                "outbox_retry": _status_only(outbox_retry),
+                "results": [],
+            },
+            error={"code": "POLL_FAILED", "message": "WeChat ClawBot getupdates failed"},
+            meta={"provider_response_code": provider_code},
+        )
     received_monotonic = time.monotonic()
     cursor_after = extract_first_string(response, ("get_updates_buf", "getUpdatesBuf"))
     messages = extract_messages(response)
@@ -641,7 +660,7 @@ def serve_wechat_clawbot(
     with _single_instance_lock(lock_path):
         while True:
             try:
-                poll_once_fn(
+                result = poll_once_fn(
                     base=settings.base,
                     label=settings.label,
                     state_dir=settings.state_dir,
@@ -656,6 +675,8 @@ def serve_wechat_clawbot(
                     keepalive_interval_sec=settings.keepalive_interval_sec,
                     timeout_sec=settings.timeout_sec,
                 )
+                if result.get("ok") is False:
+                    LOG.error("failed to process WeChat ClawBot inbound batch")
             except Exception:
                 LOG.exception("failed to process WeChat ClawBot inbound batch")
             batches += 1
