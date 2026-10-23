@@ -19,6 +19,7 @@ from domain.domain.engine.candidate_engine import (
     REJECT_INPUT_INVALID,
     REJECT_INPUT_MISSING,
     REJECT_RISK_EARNINGS_UNAVAILABLE,
+    REJECT_RISK_DELTA_UNAVAILABLE,
 )
 from domain.domain.strategy_core import evaluate_candidates, validate_strategy_identity, rank_candidates, explain_rank, decision_time_from_input
 from domain.domain.strategy_identity import candidate_ranking_profile, validate_strategy_identity as validate_stored_identity
@@ -874,6 +875,7 @@ def candidate_universe_summary(
         REJECT_INPUT_INVALID,
         REJECT_INPUT_MISSING,
         REJECT_RISK_EARNINGS_UNAVAILABLE,
+        REJECT_RISK_DELTA_UNAVAILABLE,
     }
     contract_gaps: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for raw in scopes:
@@ -1281,7 +1283,7 @@ def _unavailable_input_strategy_status(
     *,
     mode: str,
 ) -> str | None:
-    unavailable_reasons = {REJECT_INPUT_INVALID, REJECT_INPUT_MISSING}
+    unavailable_reasons = {REJECT_INPUT_INVALID, REJECT_INPUT_MISSING, REJECT_RISK_DELTA_UNAVAILABLE}
     evaluated_count = 0
     unavailable_count = 0
     for decision in decisions:

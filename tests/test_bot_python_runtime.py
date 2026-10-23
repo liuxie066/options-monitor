@@ -71,6 +71,164 @@ def test_unknown_tool_never_executes():
     assert 'INPUT_ERROR' in captured[-1]['messages'][-1]['content']
 
 
+def _tool_batch(calls):
+    return {'message': {'role': 'assistant', 'content': '', 'tool_calls': calls}, 'finish_reason': 'tool_calls'}
+
+
+@pytest.fixture
+def failed_batch_scene(tmp_path, monkeypatch):
+    from src.application.bot import scene
+
+    original = scene._SCENE_PATH
+    definition = json.loads(original.read_text())
+    for relative in definition['prompt_fragments']:
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((original.parent / relative).read_bytes())
+
+    def configure(**limits):
+        definition['runtime'].update(limits)
+        target = tmp_path / 'scene.json'
+        target.write_text(json.dumps(definition))
+        monkeypatch.setattr(scene, '_SCENE_PATH', target)
+        scene.load_general_scene.cache_clear()
+
+    yield configure
+    scene.load_general_scene.cache_clear()
+
+
+def _host_batches(monkeypatch, batches):
+    """Real Host/scene/runtime; only model and read leaf are synthetic."""
+    from src.application.bot import tools
+
+    captured, reads = [], []
+
+    def read(_name, payload, **_kwargs):
+        name = payload['relative_name']
+        reads.append(name)
+        if name.startswith('X'):
+            raise RuntimeError('synthetic read failure')
+        return {'ok': name.startswith('S'), 'data': {'text': name},
+                'error': {'code': 'SYNTHETIC_UNAVAILABLE'} if not name.startswith('S') else None}
+
+    def request(**kwargs):
+        index = len(captured)
+        captured.append(json.loads(json.dumps({'tools': kwargs['tools'], 'messages': kwargs['messages']})))
+        if index >= len(batches) or not kwargs['tools']:
+            return answer('合成读取已结束；缺失证据保持未知。')
+        calls = []
+        for offset, kind in enumerate(batches[index]):
+            ident = f'{index}-{offset}'
+            item = call('project_files', {'action': 'read', 'relative_name': f'{kind}-{ident}.md',
+                                         'start_line': 1, 'max_lines': 1}, id=ident)['message']['tool_calls'][0]
+            if kind == 'U':
+                item['function']['name'] = 'unavailable_tool'
+            elif kind == 'J':
+                item['function']['arguments'] = '{'
+            elif kind == 'I':
+                item['function']['arguments'] = json.dumps({'action': 'read', 'relative_name': f'I-{ident}.md',
+                                                          'max_lines': 'invalid'})
+            calls.append(item)
+        return _tool_batch(calls)
+
+    monkeypatch.setattr(tools, 'call_read_tool', read)
+    result = run_contract(contract('解释合成读取证据'),
+                          model_settings=replace(MODEL, context_window_tokens=200000),
+                          model_request=request)
+    assert result.ok, result
+    observations = [json.loads(item['content']) for item in captured[-1]['messages'] if item['role'] == 'tool']
+    return captured, reads, observations
+
+
+def test_runtime_default_failure_limit_counts_batches():
+    captured, reads = [], []
+    calls = [call(args={'index': index}, id=str(index))['message']['tool_calls'][0] for index in range(3)]
+
+    def read(_name, args):
+        reads.append(args)
+        return {'ok': args.get('recovery', False)}
+
+    assert run([_tool_batch(calls), call(args={'recovery': True}, id='recovery'), answer()],
+               captured, call_tool=read) == '答案'
+    assert len(reads) == 4 and captured[1]['tools'] == [TOOL]
+
+
+@pytest.mark.parametrize('batches,expected_tools', [
+    (['FFF', 'S'], [True, True, True]),
+    (['FF', 'FF', 'S'], [True, True, True, True]),
+    (['F', 'F', 'F'], [True, True, True, False]),
+])
+def test_host_failure_limit_counts_whole_batches(monkeypatch, batches, expected_tools):
+    captured, reads, observations = _host_batches(monkeypatch, batches)
+    assert [bool(item['tools']) for item in captured] == expected_tools
+    assert len(reads) == sum(map(len, batches))
+    assert [bool(item['ok']) for item in observations] == [kind == 'S' for batch in batches for kind in batch]
+
+
+@pytest.mark.parametrize('success_position', range(4))
+def test_host_partial_success_resets_batch_streak_in_any_order(monkeypatch, success_position):
+    partial = 'F' * success_position + 'S' + 'F' * (3 - success_position)
+    captured, reads, observations = _host_batches(monkeypatch, ['F', 'F', partial, 'F', 'S'])
+    assert [bool(item['tools']) for item in captured] == [True] * 6
+    assert len(reads) == 8
+    assert sum(bool(item['ok']) for item in observations) == 2
+    assert observations[-1]['ok'] is True
+
+
+@pytest.mark.parametrize('configured,effective', [(1, 1), (2, 2), (4, 4), (0, 3)])
+def test_host_honors_scene_failed_batch_limit(monkeypatch, failed_batch_scene, configured, effective):
+    failed_batch_scene(max_consecutive_failed_tool_batches=configured)
+    captured, reads, _ = _host_batches(monkeypatch, ['F'] * effective)
+    assert [bool(item['tools']) for item in captured] == [True] * effective + [False]
+    assert len(reads) == effective
+
+
+@pytest.mark.parametrize('kind,code', [('U', 'INPUT_ERROR'), ('J', 'INPUT_ERROR'),
+                                      ('I', 'TOOL_ERROR'), ('X', 'TOOL_ERROR')])
+def test_host_generated_and_read_errors_share_batch_limit(monkeypatch, kind, code):
+    captured, reads, observations = _host_batches(monkeypatch, [kind * 3, 'S'])
+    assert [bool(item['tools']) for item in captured] == [True, True, True]
+    assert len(reads) == (4 if kind == 'X' else 1)
+    assert [item['error']['code'] for item in observations[:3]] == [code] * 3
+    assert observations[-1]['ok'] is True
+
+
+@pytest.mark.parametrize('kind', ['U', 'J', 'I', 'X'])
+def test_host_success_with_generated_errors_resets_streak(monkeypatch, kind):
+    captured, reads, observations = _host_batches(monkeypatch, ['F', 'F', 'S' + kind * 2, 'F', 'S'])
+    assert [bool(item['tools']) for item in captured] == [True] * 6
+    assert len(reads) == (7 if kind == 'X' else 5)
+    assert [bool(item['ok']) for item in observations] == [False, False, True, False, False, False, True]
+
+
+@pytest.mark.parametrize('repeated', [False, True])
+def test_partial_success_cannot_reopen_budget_final(repeated):
+    captured, reads = [], []
+    calls = [call(args={'index': 0 if repeated else index}, id=str(index))['message']['tool_calls'][0]
+             for index in range(3)]
+
+    def read(_name, args):
+        reads.append(args)
+        return {'ok': True}
+
+    run([_tool_batch(calls), answer()], captured, call_tool=read, tool_limit=12 if repeated else 1)
+    assert len(reads) == (2 if repeated else 1)
+    assert captured[-1]['tools'] == []
+    observations = [json.loads(item['content']) for item in captured[-1]['messages'] if item['role'] == 'tool']
+    assert observations[0]['ok'] is True
+    assert observations[-1]['error']['code'] == 'BUDGET_EXHAUSTED'
+
+
+@pytest.mark.parametrize('same_batch', [False, True])
+def test_duplicate_tool_ids_keep_batch_validation(same_batch):
+    reads = []
+    duplicate = call()['message']['tool_calls'][0]
+    replies = [_tool_batch([duplicate, duplicate])] if same_batch else [call(), call()]
+    with pytest.raises(RunStopped, match='duplicate_tool_id'):
+        run(replies, [], call_tool=lambda *args: reads.append(args) or {'ok': False})
+    assert len(reads) == (0 if same_batch else 1)
+
+
 def test_truncation_has_one_continuation():
     captured=[]
     assert run([answer('前半', 'length'), answer('后半')], captured, call_tool=lambda *a: {}) == '前半后半'

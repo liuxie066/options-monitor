@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from candidate_evidence_helpers import earnings_evidence
+from candidate_evidence_helpers import delta_evidence, earnings_evidence
 from src.application.covered_call_strategy_risk import (
     enrich_and_filter_covered_call_underwriting,
     evaluate_covered_call_underwriting_row,
@@ -43,6 +43,7 @@ def _candidate(**overrides):
         "volume": 20,
         "dte": 30,
     }
+    row.update(delta_evidence(mode="call", observed_at="2026-05-20T15:00:00+00:00", value=0.20))
     row.update(_earnings_evidence())
     row.update(overrides)
     row["strike_above_spot_pct"] = round((row["strike"] - row["spot"]) / row["spot"], 10)
