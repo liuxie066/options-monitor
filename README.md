@@ -148,6 +148,8 @@ om symbols add YOUR_SYMBOL --strategy csp --csp-max-strike YOUR_MAX_STRIKE --app
 
 `om help` 按场景说明任务；`om help all` 保留所有高级命令。模型与控制命令统一推荐 `om bot`，Feishu 传输用 `om channel feishu`；旧 `assistant` / `inbound` 入口保留兼容。普通设置和静态凭证检查不证明 OpenD 登录、消息送达或模型可用。Linux 密钥录入和服务安装涉及系统权限，按终端提示完成；当前普通前台进程不能直接读取 systemd 加密凭证，详见[首次运行指南](docs/GETTING_STARTED.md#3-完成外部接入)。结构化集成使用 `om-agent spec` 和 `om-agent run`，边界见 [Tool Reference](docs/TOOL_REFERENCE.md)。
 
+`om channel status` 检测到显式 WeChat Bot 配置缺失、损坏或校验失败时，会报告 `available=false`，健康检查会提示已配置频道不可用。历史 `configured` 和 allowlist 配置标志仍保留；`service_active` 独立表示所查询的进程状态，配置错误不会将它改写为停止。`available` 不证明消息送达；显式 allowlist 未指定 Bot 配置的合法用法保持兼容。
+
 ### 2. 只读检查
 
 ```bash
