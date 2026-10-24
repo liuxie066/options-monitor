@@ -72,7 +72,7 @@ def _portfolio():
 
 
 def _put_quote(symbol, strike, bid):
-    return {**_quote(symbol, strike), "option_type": "put",
+    return {**_quote(symbol, strike), "option_type": "put", "delta": -0.3,
             "contract_symbol": f"{symbol}261113P{int(strike * 1000):08d}", "bid": bid, "ask": bid + .1}
 
 
@@ -177,7 +177,7 @@ def test_real_put_steps_multi_symbol_rank_complete_passes_and_reversion(frozen_s
     for record in exp_decisions:
         assert record["normalized_input"]["strategy_core"] == record["opening_decision"]["normalized_input"]["strategy_core"]
         assert record["normalized_input"]["strategy_core"]["runtime"] == {
-            "mode": "source", "core_version": "0.1.0", "build_digest": None,
+            "mode": "source", "core_version": "0.2.0", "build_digest": None,
         }
     assert "先按接货后集中度" in explain_candidate_rank(ranked[0], mode="put")["rank_reason"]
     restored, _, _ = _run_puts(frozen_scan, injected=False, context=context)
@@ -221,7 +221,7 @@ def test_injected_policy_wins_over_cfg_and_disabled_legacy_stays_passthrough(mod
 
 @pytest.mark.parametrize("mutation", ["account", "market", "profile", "hash", "runtime", "strike", "missing"])
 def test_rank_rejects_mixed_or_forged_identity(mutation):
-    row = attach_strategy_identity({"symbol": "NVDA", "option_type": "put", "market": "US"}, _strategy())
+    row = attach_strategy_identity({"symbol": "NVDA", "option_type": "put", "delta": -0.3, "market": "US"}, _strategy())
     other = deepcopy(row)
     if mutation == "account":
         other["strategy_core"]["scope"]["account"] = "sy"
@@ -439,3 +439,83 @@ def test_empty_underwriting_preserves_legacy_return_but_checks_injected_scope(mo
     assert adapter(**kwargs) is empty
     with pytest.raises(ValueError, match="account"):
         adapter(**kwargs, resolved_strategy=replace(_strategy(mode), account="sy"))
+
+
+@pytest.mark.parametrize("mode", ["put", "call"])
+@pytest.mark.parametrize("value,source,disabled,accepted,reason", [
+    (.40, "canonical", False, True, None),
+    (.4001, "canonical", False, False, "risk_delta"),
+    (0.0, "canonical", False, True, None),
+    (None, "canonical", False, False, "risk_delta_unavailable"),
+    (.30, "alias", False, False, "risk_delta_unavailable"),
+    (.4001, "alias", True, True, None),
+])
+def test_provider_normalization_to_scan_underwriting_and_sealed_delta(
+    frozen_scan, mode, value, source, disabled, accepted, reason,
+):
+    from src.application.opening_quote_evidence import normalize_option_observation, normalize_underlier_observation
+    from src.application.opening_candidate_snapshot import load_opening_candidate_snapshot
+    from test_opening_quote_evidence import _chain, _snapshot
+    from test_opening_candidate_snapshot import _seal_snapshot, _scan_status, _snapshot_path
+
+    raw = _put_quote("NVDA", 95, 3.0) if mode == "put" else _quote(strike=110)
+    signed_delta = None if value is None else (-value if mode == "put" else value)
+    provider = _snapshot(code=raw["contract_symbol"], bid_price=3.0, ask_price=3.1,
+                         option_delta=signed_delta, option_implied_volatility=30.0,
+                         update_time="2026-10-16 10:59:00")
+    if source == "alias":
+        provider.pop("option_delta")
+        provider["delta"] = signed_delta
+    underlier = normalize_underlier_observation(
+        code="US.NVDA", market="US", now_utc=NOW,
+        snapshot_row={"code": "US.NVDA", "last_price": 100.0,
+                      "update_time": "2026-10-16 10:59:00", "sec_status": "NORMAL", "suspension": False},
+        market_state_row={"code": "US.NVDA", "market_state": "MORNING"},
+    )
+    observed = normalize_option_observation(
+        expected_owner="US.NVDA", market="US", currency="USD",
+        chain_row=_chain(code=raw["contract_symbol"], option_type=mode.upper()),
+        snapshot_row=provider, underlier_observation=underlier, now_utc=NOW,
+        snapshot_requested_at_utc=NOW.isoformat(), snapshot_received_at_utc=NOW.isoformat(),
+    )
+    assert observed.status == "ready"
+    # The runtime frame carries the actual normalizer output, without substituting Delta facts.
+    frame = pd.DataFrame([{**raw, **observed.to_dict()}])
+    cfg = {"strategy": "insurance_underwriting", **({"max_abs_delta": None} if disabled else {})}
+    finals, decisions = [], []
+    common = dict(symbol="NVDA", symbol_cfg={}, required_data_dir=frozen_scan,
+                  required_data_frame=frame, exchange_rate_converter=CONVERTER,
+                  final_candidates_sink_fn=lambda mode, rows: finals.extend(rows),
+                  candidate_decisions_sink_fn=lambda mode, rows: decisions.extend(rows))
+    if mode == "put":
+        run_sell_put_scan_and_summarize(**common, sp=cfg, portfolio_ctx=_portfolio())
+    else:
+        run_sell_call_scan_and_summarize(
+            **common, cc=cfg, stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 80},
+            portfolio_ctx={"filters": {"account": "lx"}, "portfolio_source_name": "futu",
+                           "capacity_authority": {"status": "available"}},
+            locked_shares_status="available", locked_shares_by_symbol={}, locked_shares_unavailable_by_symbol={},
+        )
+    assert len(decisions) == 1
+    decision = decisions[0]
+    assert decision["opening_decision"]["accepted"] is accepted
+    assert len(finals) == int(accepted)
+    facts = decision["normalized_input"]
+    assert facts["delta"] == signed_delta
+    assert facts["delta_source"] == observed.delta_source
+    assert facts["policy_max_abs_delta"] == (None if disabled else .4)
+    if reason:
+        rejects = decision["opening_decision"]["rejects"]
+        assert [item["reason"] for item in rejects] == [reason]
+        assert rejects[0]["threshold"] == .4
+    sealed = _seal_snapshot(
+        frozen_scan, run_id="delta-chain", scan_statuses=[_scan_status("NVDA", mode, "completed")],
+        final_candidates={mode: finals}, candidate_evaluations={mode: decisions},
+    )
+    before = _snapshot_path(frozen_scan, "delta-chain").read_bytes()
+    assert load_opening_candidate_snapshot(base=frozen_scan, run_id="delta-chain", account="lx",
+                                          require_current_contract=True) == sealed
+    assert _snapshot_path(frozen_scan, "delta-chain").read_bytes() == before
+    stored = sealed["candidate_decisions"][0]["normalized_input"]
+    assert stored["delta"] == signed_delta
+    assert stored["delta_source"] == observed.delta_source

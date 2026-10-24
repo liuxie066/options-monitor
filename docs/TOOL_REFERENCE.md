@@ -241,6 +241,8 @@ Long Option 完全排除。工具是纯读；业务 `status=partial|unavailable`
   --input-json '{"run_id":"<run-id>","account":"lx","symbol":"NVDA"}'
 ```
 
+普通 CSP/CC 的新策略记录区分 `risk_delta`（超过上限）和 `risk_delta_unavailable`（来源、时间、数值等不可验证），保留具体原因。delta 是硬门槛，不是 rank driver；历史记录不得凭新默认补造阈值或来源。
+
 两者读取已有 artifact，不重跑扫描；运行根路径按显式 `runtime_root`、
 `OM_RUNTIME_ROOT`、repo fallback 的顺序解析。
 

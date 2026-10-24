@@ -4,6 +4,7 @@ import pytest
 
 from cash_evidence_helpers import cash_config, cash_portfolio
 
+from domain.domain.portfolio_scope import portfolio_scope_id
 from src.application.ledger.api import decision_state_snapshot
 from src.application.ledger.position_projection_runtime import run_position_projection_forced_full
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
@@ -16,7 +17,7 @@ def context_inputs(tmp_path, monkeypatch):
 
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     run_position_projection_forced_full(repo, [])
-    snapshot = decision_state_snapshot(repo, account="lx", portfolio_scope_id="test-lx")
+    snapshot = decision_state_snapshot(repo, account="lx", portfolio_scope_id=portfolio_scope_id("lx"))
     assert snapshot["snapshot_status"] == "trusted"
     option_context = build_context([], broker="富途", account="lx", decision_snapshot=snapshot)
     monkeypatch.setattr(pc, "open_position_ledger", lambda *_a, **_k: repo)
