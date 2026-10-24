@@ -981,6 +981,115 @@ def test_manifest_missing_or_declared_size_mismatch_is_critical(
     assert result["thresholds"]["preview"]["actions"] == []
 
 
+@pytest.mark.parametrize("envelope", [False, True])
+@pytest.mark.parametrize("research,accepted", [
+    ({"status": "complete"}, True),
+    ({}, True),
+    ({"status": "data_unavailable"}, False),
+    ({"status": "partial_data"}, False),
+    ({"status": "unknown"}, False),
+    ({"status": None}, False),
+    ({"status": ""}, False),
+    ({"status": True}, False),
+    ({"status": ["complete"]}, False),
+    ({"status": {"value": "complete"}}, False),
+])
+def test_history_research_status_qualifies_growth(tmp_path, research, accepted, envelope):
+    payload = {
+        "schema_version": module.SCHEMA_VERSION,
+        "status": "partial_data",
+        "sqlite": {"status": "data_unavailable"},
+        "identity": {"runtime_root": str(tmp_path), "observed_at_utc": "2026-07-14T05:00:00+00:00"},
+        "research_storage": {"unique_declared_bytes": 200, **research},
+    }
+    path = tmp_path / "history.json"
+    with path.open("x", encoding="utf-8") as handle:
+        json.dump({"tool_name": "research.storage-baseline", "data": payload} if envelope else payload, handle)
+    before = path.read_bytes()
+    result = module._growth_and_forecast(root=tmp_path, observed_at=NOW, current_unique_bytes=300, history_reports=[path])
+    assert path.read_bytes() == before
+    if accepted:
+        assert result["status"] == "complete"
+        assert result["monthly_unique_growth_bytes"] == 100
+        assert result["forecast_90d_additional_bytes"] == 300
+        assert result["rejected_reports"] == []
+    else:
+        assert result["status"] == "insufficient_history"
+        assert result["observations"] == [{"observed_at_utc": NOW.isoformat(), "unique_declared_bytes": 300, "source": "current"}]
+        assert result["intervals"] == []
+        assert result["monthly_unique_growth_bytes"] is None
+        assert result["forecast_90d_additional_bytes"] is None
+        assert result["rejected_reports"] == [{"report": path.name, "reason": "research_storage_incomplete"}]
+
+
+@pytest.mark.parametrize("order", ["bad-first", "bad-last", "only-bad"])
+def test_history_research_status_does_not_advance_ordering(tmp_path, order):
+    paths = {}
+    for name, status, date, size in [
+        ("valid", "complete", "2026-06-14T05:00:00+00:00", 100),
+        ("bad", "data_unavailable", "2026-07-14T05:00:00+00:00", 280),
+        ("bad2", "data_unavailable", "2026-07-15T05:00:00+00:00", 290),
+    ]:
+        path = tmp_path / f"{name}.json"
+        with path.open("x", encoding="utf-8") as handle:
+            json.dump({"schema_version": module.SCHEMA_VERSION,
+                "identity": {"runtime_root": str(tmp_path), "observed_at_utc": date},
+                "research_storage": {"status": status, "unique_declared_bytes": size}}, handle)
+        paths[name] = path
+    names = {"bad-first": ["bad", "valid", "bad2"], "bad-last": ["valid", "bad", "bad2"], "only-bad": ["bad", "bad2"]}[order]
+    result = module._growth_and_forecast(root=tmp_path, observed_at=NOW, current_unique_bytes=300,
+        history_reports=[paths[name] for name in names])
+    assert result["rejected_reports"] == [{"report": f"{name}.json", "reason": "research_storage_incomplete"} for name in names if name.startswith("bad")]
+    assert [row["source"] for row in result["observations"]] == (["current"] if order == "only-bad" else ["valid.json", "current"])
+    assert result["status"] == ("insufficient_history" if order == "only-bad" else "complete")
+    assert result["monthly_unique_growth_bytes"] == (None if order == "only-bad" else 100)
+    assert result["forecast_90d_additional_bytes"] == (None if order == "only-bad" else 300)
+
+
+@pytest.mark.parametrize("research", [{}, {"status": "complete"}])
+@pytest.mark.parametrize("previous,current,monthly,additional", [(0, 0, 0, 0), (400, 300, -100, 0), (200, 300, 100, 300)])
+def test_history_research_status_preserves_valid_deltas(tmp_path, research, previous, current, monthly, additional):
+    path = tmp_path / "valid.json"
+    with path.open("x", encoding="utf-8") as handle:
+        json.dump({"schema_version": module.SCHEMA_VERSION,
+            "identity": {"runtime_root": str(tmp_path), "observed_at_utc": "2026-07-14T05:00:00+00:00"},
+            "research_storage": {"unique_declared_bytes": previous, **research}}, handle)
+    result = module._growth_and_forecast(root=tmp_path, observed_at=NOW, current_unique_bytes=current, history_reports=[path])
+    assert result["status"] == "complete"
+    assert result["monthly_unique_growth_bytes"] == monthly
+    assert result["forecast_90d_additional_bytes"] == additional
+    assert result["rejected_reports"] == []
+
+
+@pytest.mark.parametrize("research", [{}, {"status": "complete"}])
+@pytest.mark.parametrize("fault,reason", [
+    ("json", "JSONDecodeError"), ("schema", "schema_mismatch"),
+    ("identity", "shape_invalid"), ("research", "shape_invalid"),
+    ("root", "runtime_root_mismatch"), ("time", "identity_or_measure_invalid"),
+    ("measure", "identity_or_measure_invalid"), ("future", "out_of_order"),
+])
+def test_history_research_status_preserves_other_rejections(tmp_path, research, fault, reason):
+    payload = {"schema_version": module.SCHEMA_VERSION,
+        "identity": {"runtime_root": str(tmp_path), "observed_at_utc": "2026-07-14T05:00:00+00:00"},
+        "research_storage": {"unique_declared_bytes": 200, **research}}
+    if fault == "schema":
+        payload["schema_version"] = "wrong"
+    elif fault in {"identity", "research"}:
+        payload["identity" if fault == "identity" else "research_storage"] = None
+    elif fault == "root":
+        payload["identity"]["runtime_root"] = str(tmp_path / "different")
+    elif fault in {"time", "future"}:
+        payload["identity"]["observed_at_utc"] = "bad-time" if fault == "time" else NOW.isoformat()
+    elif fault == "measure":
+        payload["research_storage"]["unique_declared_bytes"] = None
+    path = tmp_path / "history.json"
+    with path.open("x", encoding="utf-8") as handle:
+        handle.write("{broken" if fault == "json" else json.dumps(payload))
+    result = module._growth_and_forecast(root=tmp_path, observed_at=NOW, current_unique_bytes=300, history_reports=[path])
+    assert result["status"] == "insufficient_history"
+    assert result["rejected_reports"] == [{"report": path.name, "reason": reason}]
+
+
 def test_forecast_requires_compatible_ordered_history_and_uses_observed_deltas(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
