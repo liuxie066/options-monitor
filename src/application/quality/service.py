@@ -354,6 +354,7 @@ class OMQualityService:
         force_legacy: bool,
         artifact_repository: QualityArtifactRepository,
     ) -> dict[str, Any]:
+        publication_revision = None if force_legacy else self._ledger_revision()
         now = self.now_fn().astimezone(timezone.utc)
         now_ms = int(now.timestamp() * 1000)
         observed_at = utc_iso(now)
@@ -809,7 +810,6 @@ class OMQualityService:
         )
         observed_at = utc_iso(self.now_fn().astimezone(timezone.utc))
         control_state["updated_at_utc"] = observed_at
-        control_state["last_probe_ledger_revision"] = self._ledger_revision()
         self.control_repository.write(control_state)
         runtime_status = runtime_verdict(runtime_checks)
         if runtime_errors and runtime_status == "healthy":
@@ -906,6 +906,9 @@ class OMQualityService:
         )
         validate_payload(payload, schema_path=_SCHEMA)
         artifact_repository.write_atomic(payload)
+        if not force_legacy:
+            control_state["last_probe_ledger_revision"] = publication_revision
+            self.control_repository.write(control_state)
         return payload
 
     def refresh_if_due(
