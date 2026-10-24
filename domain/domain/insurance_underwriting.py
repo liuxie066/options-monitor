@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from domain.domain.candidate_defaults import DEFAULT_MAX_ABS_DELTA, validate_max_abs_delta
+
 
 INSURANCE_UNDERWRITING_PROFILE = "insurance_underwriting"
 
@@ -19,7 +21,11 @@ class InsuranceUnderwritingConfig:
     min_dte: int | None = None
     max_dte: int | None = None
     max_spread_ratio: float = 0.40
+    max_abs_delta: float | None = DEFAULT_MAX_ABS_DELTA
     min_strike_cost_multiplier: float = 1.02
+
+    def __post_init__(self) -> None:
+        validate_max_abs_delta(self.max_abs_delta)
 
     @property
     def enabled(self) -> bool:
@@ -57,6 +63,7 @@ def evaluate_underwriting_candidate(
         min_iv_rv_ratio=cfg.min_iv_rv_ratio,
         min_iv_minus_rv=cfg.min_iv_minus_rv,
         max_spread_ratio=cfg.max_spread_ratio,
+        max_abs_delta=cfg.max_abs_delta,
         require_earnings_evidence=True,
         reject_known_earnings=True,
     )
@@ -113,6 +120,7 @@ def underwriting_fields(
         "policy_min_iv_rv_ratio": cfg.min_iv_rv_ratio,
         "policy_min_iv_minus_rv": cfg.min_iv_minus_rv,
         "policy_max_spread_ratio": cfg.max_spread_ratio,
+        "policy_max_abs_delta": cfg.max_abs_delta,
     }
     if mode_norm == "put":
         out["strike_safety_margin_pct"] = _strike_safety_margin(row, cfg=cfg)

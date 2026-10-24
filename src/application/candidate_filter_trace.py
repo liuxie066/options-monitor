@@ -35,6 +35,12 @@ TRACE_REPLAY_FIELD_KEYS: tuple[str, ...] = (
     "spot",
     "dte",
     "delta",
+    "delta_source",
+    "delta_unit",
+    "delta_reason_code",
+    "snapshot_received_at_utc",
+    "decision_now_utc",
+    "policy_max_abs_delta",
     "abs_delta",
     "iv_rv_ratio",
     "iv_minus_rv",
@@ -171,7 +177,7 @@ def build_candidate_replay_fields(*sources: dict[str, Any] | None, annualized_re
         if not isinstance(source, dict):
             continue
         for key in TRACE_REPLAY_FIELD_KEYS:
-            if key in source and not _is_missing_scalar(source.get(key)):
+            if key in source and (key == "policy_max_abs_delta" or not _is_missing_scalar(source.get(key))):
                 out[key] = _jsonable(source.get(key))
         if "annualized_return" not in out:
             annual = _first_present(
@@ -217,7 +223,7 @@ def _clean_optional_text(value: Any) -> str | None:
 
 def _first_present(source: dict[str, Any], *keys: str) -> Any:
     for key in keys:
-        if key in source and not _is_missing_scalar(source.get(key)):
+        if key in source and (key == "policy_max_abs_delta" or not _is_missing_scalar(source.get(key))):
             return source.get(key)
     return None
 

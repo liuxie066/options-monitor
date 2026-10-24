@@ -559,6 +559,11 @@ def test_provider_shaped_contract_rows_preserve_ready_and_minimal_failure_scope(
     assert rows[ready_code]["multiplier"] == 100
     assert rows[ready_code]["mid"] == 1.1
     assert rows[ready_code]["open_interest"] == 0
+    assert rows[ready_code]["delta"] == -0.2
+    assert rows[ready_code]["delta_source"] == "opend_market_snapshot.option_delta"
+    assert rows[ready_code]["delta_unit"] == "fraction"
+    assert rows[ready_code]["delta_reason_code"] is None
+    assert rows[ready_code]["snapshot_received_at_utc"] == observed_now.isoformat()
     assert rows[conflict_code]["opening_contract_status"] == "data_unavailable"
     assert "option_multiplier_conflict" in rows[conflict_code][
         "opening_contract_reason_codes"

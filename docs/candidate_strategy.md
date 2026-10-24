@@ -191,9 +191,22 @@ sell_limit = ceil(raw_mid / price_tick) * price_tick
 
 - OI 不设硬门槛，只在收益接近时参与排序。
 - OI `0` 是已知值，必须与缺失区分；缺失排在可靠值之后。
-- volume 和 delta 只展示，不参与硬筛和正式排序；缺失显示 `—`。
+- volume 只展示，不参与硬筛和正式排序；缺失显示 `—`。
+- delta 不参与排序；普通 CSP/CC 的 delta 硬门槛见下节。
 - bid/ask size 可作为诊断证据，但不新增硬门槛。
 - OpenD IV 是百分号前数值，适配层固定除以 `100`；Delta 保持 `[-1, 1]`。
+
+### 3.5 普通 CSP/CC delta 上限
+
+Put 和 Call 各自默认 `max_abs_delta = 0.40`；旧配置省略此字段也启用该默认。显式 `null` 仅关闭本门槛，数字覆盖必须在 `[0,1]` 内且有限，拒绝布尔和字符串。只过滤 `abs(delta) > max_abs_delta`，等于保留；以原始精度判断，不能使用显示舍入值，也不把 `35` 猜成 `0.35`。真实零可以通过本门槛，仍须满足收益、期限、流动性等其他规则。
+
+启用时，delta 必须来自同一身份匹配的 OpenD snapshot 的 `option_delta`，`delta_source=opend_market_snapshot.option_delta`、`delta_unit=fraction`。使用真实 `snapshot_received_at_utc` 对冻结 `decision_now_utc` 验证 0–300 秒的接收新鲜度。该证据只证明近期获取；提供方未暴露独立 Greek 计算时间，不能宣称计算时间已验证。缺失、陈旧、非有限、错误符号、单位或来源异常均拒绝并保留原因，不补零、不回填历史来源。
+
+超过上限记录 `risk_delta`；不可验证记录 `risk_delta_unavailable` 及具体证据原因。旧 required-data 或快照缺少来源证据时，启用门槛会拒绝这些候选，可能整组无可用候选；不得静默放行或自动采集数据。此规则不改变 Wheel/Combo 自有策略，也不增加 delta 排序，同标的同方向仍允许跨到期日。0.40 是用户风险偏好，未经证明为收益或胜率最优值。
+
+新 `csp_baseline` / `cc_baseline` 模板与策略核心版本为 `0.2.0`，effective parameters 将上限（包括显式 `null`）纳入策略身份 hash。历史 `0.1.0` 身份仍可读取校验，但当前核心不执行旧模板，也不把旧身份重解释为新默认。离线验证需要对应版本和足够冻结证据；OB 的旧源代码锁不能直接作为本版本的一致性证明，更新由 OB 独立任务负责。
+
+回滚代码不回写已封存记录；旧版本可能拒绝新增配置字段，不能直接将包含新字段的配置交给旧版本。显式 `null` 关闭是新版本的配置能力，仍须通过正常配置预览与授权流程，本功能实现不修改任何生产配置。
 
 ## 4. 收益、费用与共同硬门槛
 
@@ -283,7 +296,7 @@ max_new_contracts = floor(effective_free_cash / assignment_notional)
 
 - stress / gap-down / sigma stress；
 - 路径压力和资本 charge；
-- delta band；
+- delta 下限分带（上限按 §3.5 执行）；
 - 单笔、单标的或总组合集中度；
 - OI、volume、bid/ask size。
 
@@ -378,7 +391,7 @@ max_new_contracts = floor(shares_available_for_cover / multiplier)
 
 - gap-up opportunity cost；
 - path stress；
-- delta band；
+- delta 下限分带（上限按 §3.5 执行）；
 - 单标的集中度；
 - OI、volume、bid/ask size。
 
@@ -490,7 +503,7 @@ OpenD 未来交易日历仅覆盖扫描市场日期所在年的 12 月 31 日；
 
 Wheel 在标的计算与分支评估边界隔离异常，资金和股票仍由账户共享分配。Brief 从已验证快照保留健康候选；历史候选仅在相同 symbol、策略、方向、Combo owner、Wheel 分支或合约的证据缺口下转为待核验。`candidate_universe_summary.affected_scopes` 在合约身份可用时携带 `scope=contract`、`contract_symbol`、`expiration`；没有细分证据时保留原策略范围。执行日志只补充匹配失败终态的诊断，不覆盖快照中的健康结果。
 
-OI、volume、delta 等可选字段缺失不产生 `partial_data`。
+OI、volume 等可选字段缺失不产生 `partial_data`；启用 delta 门槛时，delta 不可验证必须保留独立拒绝原因。
 
 每个账户/run 即使无候选也必须封存 snapshot，并包含 `scope_results`。snapshot 必须：
 
@@ -552,13 +565,13 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 | S07 | CC 收益分母使用正股当前市值 | §6.2 |
 | S08 | 单张合约净权利金至少 CNY 50 | §4.2 |
 | S09 | IV/RV 同时满足 ratio 1.10 和 spread 0.05 | §4.3 |
-| S10 | spread 40% 是硬门槛；OI 只在收益接近时排序，volume/delta 只展示 | §3.2、§3.4 |
+| S10 | spread 40% 是硬门槛；OI 只在收益接近时排序，volume 只展示；delta 按 §3.5 硬过滤 | §3.2、§3.4 |
 | S11 | `0.002` 使用锚定收益分组，不使用非传递性的两两“接近”比较 | §5.5、§6.5 |
 | S12 | 每个 symbol 先选一张代表合约，再做跨 symbol 排序 | §5.5、§6.5 |
 | S13 | CSP 同 symbol 收益接近时优先净接货折价、spread、OI、净权利金 | §5.5 |
 | S14 | CC 同 symbol 收益接近时先选更高 strike，再看 spread、OI、净权利金 | §6.5 |
 | S15 | 跨 symbol 时 concentration 仅作接近收益的排序参考，不作硬门槛 | §5.5、§6.5、§10 |
-| S16 | stress、gap、path、delta band、gamma、vega 和旧评分不进入正式开仓决策 | §5.4、§6.4、§12 |
+| S16 | stress、gap、path、gamma、vega 和旧评分不进入正式开仓决策 | §5.4、§6.4、§12 |
 
 ### 11.2 召回、容量与资金
 
@@ -592,7 +605,7 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 | D06 | 只接受 STANDARD、stock_owner 匹配、未停牌、普通股票交割合约 | §3.3 |
 | D07 | multiplier 必须 chain/snapshot 合约级一致，不默认 100 | §3.3 |
 | D08 | OpenD IV 从百分数除以 100，Delta 保持 `[-1,1]` | §3.4 |
-| D09 | OI 0 与缺失分开；可选 OI/volume/delta 缺失不产生 partial_data | §3.4、§9 |
+| D09 | OI 0 与缺失分开；可选 OI/volume 缺失不产生 partial_data；delta 不可验证独立记录 | §3.4、§9 |
 | D10 | 正式 RV 是按剩余交易 session 匹配的唯一指标，RV20/60/120 仅诊断 | §7 |
 | D11 | RV 日线持久化缓存、增量更新、回抓 5 个 session，QFQ 修订时刷新 | §7 |
 | D12 | 美股与港股共享算法，只使用各自 OpenD 日历、时区、费用和配置 | §10 |
@@ -642,7 +655,7 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 - RV20/60/120 分档加权正式算法；
 - `strategy_score`、`premium_edge_score`、`risk_distance`、`path_risk_score`、
   gamma、vega、gap-up/gap-down 等旧开仓评分；
-- OI / volume / delta 硬门槛；
+- OI / volume 硬门槛；
 - 第二套 application 排序；
 - runtime 候选 CSV 流水线和重复候选 artifact；JSONL 只保留为非权威审计证据；
 - multiplier `100` 默认值、旧 spot/last/CSV fallback；

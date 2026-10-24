@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -32,9 +33,13 @@ def test_original_metric_and_policy_contract(case):
         {**raw, **metrics}, exchange_rate_converter=CurrencyConverter(RATES),
     )
     assert fields == case["cny_fields"]
+    # Frozen pre-delta oracle: retain the historical policy explicitly.
+    expected = deepcopy(case["decision"])
+    expected["fields"]["policy_max_abs_delta"] = None
+    expected["opening_decision"]["normalized_input"]["policy_max_abs_delta"] = None
     assert evaluate_underwriting_candidate(
-        case["policy_row"], mode=case["mode"], cfg=InsuranceUnderwritingConfig(),
-    ) == case["decision"]
+        case["policy_row"], mode=case["mode"], cfg=InsuranceUnderwritingConfig(max_abs_delta=None),
+    ) == expected
 
 
 @pytest.mark.parametrize("case", GOLDEN["fx"])

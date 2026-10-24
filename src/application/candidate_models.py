@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import math
+from numbers import Real
+
 from dataclasses import dataclass
 from typing import Any
 
@@ -81,6 +84,9 @@ class CandidateContractInput:
     multiplier: float | None
     opening_contract_status: str
     opening_contract_reason_codes: str
+    delta_source: str | None = None
+    delta_unit: str | None = None
+    delta_reason_code: str | None = None
 
     @classmethod
     def from_row(cls, row: pd.Series, *, mode: str) -> "CandidateContractInput":
@@ -90,6 +96,24 @@ class CandidateContractInput:
                 multipliers[field] = require_option_multiplier(row.get(field))
             except (TypeError, ValueError):
                 multipliers[field] = None
+        def delta_text(field: str) -> str | None:
+            value = row.get(field)
+            if value is None or pd.isna(value):
+                return None
+            return str(value).strip() or None
+
+        raw_delta = row.get("delta")
+        delta_reason = delta_text("delta_reason_code")
+        if isinstance(raw_delta, bool) or (raw_delta is not None and not isinstance(raw_delta, Real)):
+            delta = None
+            delta_reason = delta_reason or "delta_invalid_type"
+        elif raw_delta is None:
+            delta = None
+        elif not math.isfinite(raw_delta):
+            delta = None
+            delta_reason = delta_reason or "delta_non_finite"
+        else:
+            delta = float(raw_delta)
         return cls(
             mode=str(mode),
             symbol=str(row.get("symbol") or "").strip().upper(),
@@ -129,7 +153,10 @@ class CandidateContractInput:
             term_matched_rv_status=str(row.get("term_matched_rv_status") or "").strip(),
             term_matched_rv_reason=str(row.get("term_matched_rv_reason") or "").strip(),
             term_matched_rv_input_hash=str(row.get("term_matched_rv_input_hash") or "").strip(),
-            delta=_as_float(row.get("delta")),
+            delta=delta,
+            delta_source=delta_text("delta_source"),
+            delta_unit=delta_text("delta_unit"),
+            delta_reason_code=delta_reason,
             option_standard_type=str(row.get("option_standard_type") or "").strip(),
             stock_owner=str(row.get("stock_owner") or "").strip(),
             stock_type=str(row.get("stock_type") or "").strip(),
@@ -184,6 +211,9 @@ class CandidateContractInput:
             "term_matched_rv_reason": self.term_matched_rv_reason,
             "term_matched_rv_input_hash": self.term_matched_rv_input_hash,
             "delta": self.delta,
+            "delta_source": self.delta_source,
+            "delta_unit": self.delta_unit,
+            "delta_reason_code": self.delta_reason_code,
             "option_standard_type": self.option_standard_type,
             "stock_owner": self.stock_owner,
             "stock_type": self.stock_type,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from tests.cash_evidence_helpers import cash_portfolio
+from candidate_evidence_helpers import delta_evidence
 
 from pathlib import Path
 from typing import Any
@@ -541,6 +542,7 @@ def _run_wheel_scan_failure_capture(
                     "spread_ratio": 0.0667,
                     "iv_rv_ratio": 1.4,
                     "iv_minus_rv": 0.12,
+                    **delta_evidence(mode="call", observed_at="2026-09-08T14:00:00+00:00"),
                     "earnings_evidence_status": "ready",
                     "earnings_reason_code": None,
                     "earnings_policy_version": "earnings_near_expiry.v1",

@@ -154,7 +154,11 @@ class OpenDHistoryDealClient:
                         or row.get("trd_env") not in (None, "REAL")):
                     raise ValueError("order receipt account differs")
                 from domain.domain.trade_execution import futu_execution_time, execution_instant_milliseconds
-                created = futu_execution_time({"create_time": row.get("create_time")})
+                # Preserve local-time context without replacing authoritative order creation time.
+                creation_context = {key: value for key, value in row.items() if key not in (
+                    "occurred_at_utc", "trade_time_ms", "create_timestamp", "createTimestamp", "updated_time",
+                )}
+                created = futu_execution_time(creation_context)
                 orders.append({"order_id": str(row.get("order_id") or "").strip(),
                     "status": _normalize_order_status(row.get("order_status")),
                     "dealt_qty": _decimal_text(row.get("dealt_qty"), nonnegative=True),
