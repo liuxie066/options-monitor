@@ -135,6 +135,15 @@ def _state_oldest_pending_age_seconds(
     )
 
 
+def trade_intake_runtime_evidence_available(runtime: dict[str, Any]) -> bool:
+    intake = runtime.get("trade_intake")
+    return (
+        isinstance(intake, dict)
+        and isinstance(intake.get("enabled"), bool)
+        and "config_error" not in intake
+    )
+
+
 def build_trade_intake_datasets(
     *,
     runtime_statuses: list[dict[str, Any]],
@@ -145,6 +154,33 @@ def build_trade_intake_datasets(
     now: datetime,
     pending_grace_seconds: int = 300,
 ) -> list[dict[str, Any]]:
+    if not runtime_statuses or not all(
+        trade_intake_runtime_evidence_available(runtime) for runtime in runtime_statuses
+    ):
+        return [
+            dataset_status(
+                dataset_id="om.trade_intake",
+                scope={"account": account, "market": market, "source": "trade-intake"},
+                status="unavailable",
+                as_of_utc=observed_at_utc,
+                checks=[
+                    check_result(
+                        check_id=check_id,
+                        status="unknown",
+                        scope={"account": account, "market": market, "source": "trade-intake"},
+                        observed_at_utc=observed_at_utc,
+                        reason_code="TRADE_INTAKE_RUNTIME_UNAVAILABLE",
+                        message="Trade intake runtime configuration evidence is unavailable.",
+                        evidence_refs=[],
+                    )
+                    for check_id in ("OM-INT-001", "OM-INT-002", "OM-INT-003")
+                ],
+                blocked_consumers=["option_position_report", "lifecycle", "close_advice"],
+                blocked_by=["OM-INT-001", "OM-INT-002", "OM-INT-003"],
+                reason_codes=["TRADE_INTAKE_RUNTIME_UNAVAILABLE"],
+            )
+            for account in accounts
+        ]
     source_rows: list[dict[str, Any]] = []
     intake_enabled = False
     for runtime in runtime_statuses:
@@ -444,4 +480,4 @@ def build_trade_intake_datasets(
     return out
 
 
-__all__ = ["build_trade_intake_datasets"]
+__all__ = ["build_trade_intake_datasets", "trade_intake_runtime_evidence_available"]
