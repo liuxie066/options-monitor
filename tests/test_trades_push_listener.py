@@ -29,7 +29,7 @@ def _install_fake_sdk(monkeypatch, context) -> None:
     monkeypatch.setitem(
         sys.modules,
         "futu",
-        SimpleNamespace(OpenSecTradeContext=context, TradeDealHandlerBase=_FakeHandlerBase),
+        SimpleNamespace(RET_OK=0, OpenSecTradeContext=context, TradeDealHandlerBase=_FakeHandlerBase),
     )
 
 
@@ -74,11 +74,18 @@ def _blocking_context(release: threading.Event, *, log_phone_verification: bool 
     class _BlockingContext:
         def __init__(self, **_kwargs):
             if log_phone_verification:
-                logging.getLogger("FTConsoleLog").warning(
-                    "[open_context_base.py:407] _init_connect_sync: init connect fail: "
-                    "msg=需要手机验证码 context=<futu.trade.open_trade_context.OpenSecTradeContext object>"
-                )
+                assert self._init_connect_sync() == 0
             release.wait(5)
+
+        def _wait_reconnect(self, delay):
+            assert delay == 0
+            self._init_connect_sync()
+
+        def _init_connect_sync(self):
+            return self._send_init_connect_sync()[0]
+
+        def _send_init_connect_sync(self):
+            return -1, "需要手机验证码"
 
         def set_sync_query_connect_timeout(self, _timeout):
             pass
@@ -232,18 +239,22 @@ def test_trade_push_generic_init_log_uses_real_async_handshake_timeout(monkeypat
             assert self._init_connect_sync() == 0
 
         def _init_connect_sync(self):
-            pytest.fail("unexpected synchronous SDK handshake")
+            return self._send_init_connect_sync()[0]
+
+        def _send_init_connect_sync(self):
+            return -1, message
 
         def _wait_reconnect(self, delay):
             self.scheduled.append(delay)
-            logging.getLogger("FTConsoleLog").warning(
-                "init connect fail: msg=%s context=OpenSecTradeContext", message,
-            )
+            self.pending_connect = True
 
         def set_sync_query_connect_timeout(self, seconds):
             assert seconds == gateway.FUTU_QUERY_CONNECT_TIMEOUT_SEC
 
         def get_sync_conn_id(self):
+            if self.pending_connect:
+                self.pending_connect = False
+                self._init_connect_sync()
             return 0
 
         def close(self):
@@ -281,11 +292,19 @@ def test_trade_push_init_log_cancellation_or_auth_closes_late_context(monkeypatc
 
     class Context:
         def __init__(self, **_kwargs):
-            logging.getLogger("FTConsoleLog").warning(
-                "init connect fail: msg=%s context=OpenSecTradeContext", message,
-            )
+            assert self._init_connect_sync() == 0
             emitted.set()
             assert release.wait(2), "test did not release synthetic SDK constructor"
+
+        def _wait_reconnect(self, delay):
+            assert delay == 0
+            self._init_connect_sync()
+
+        def _init_connect_sync(self):
+            return self._send_init_connect_sync()[0]
+
+        def _send_init_connect_sync(self):
+            return -1, message
 
         def get_sync_conn_id(self):
             return 1
@@ -359,11 +378,10 @@ def test_abandoned_initialization_closes_late_context(monkeypatch, reason):
 
     listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=lambda _row: None)
 
-    def construct():
+    def construct(*, on_init_connect_error=None):
         entered.set()
         if reason == "auth":
-            logging.getLogger("FTConsoleLog").warning(
-                "init connect fail: 需要手机验证码 context=OpenSecTradeContext")
+            on_init_connect_error("需要手机验证码")
         assert release.wait(3)
         return Context(), object()
 
@@ -394,7 +412,7 @@ def test_initialization_failure_closes_owned_context(monkeypatch, failure):
     )
     context.close = lambda: setattr(context, "close_calls", context.close_calls + 1)
     listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=lambda _row: None)
-    monkeypatch.setattr(listener, "_build_default_context", lambda: (context, object()))
+    monkeypatch.setattr(listener, "_build_default_context", lambda **_kwargs: (context, object()))
     with pytest.raises(RuntimeError):
         listener.start()
     listener.close()
@@ -681,7 +699,7 @@ def test_start_wait_hook_runs_repeatedly_before_initialization_and_stops(monkeyp
     calls = []
     listener = OpenDTradePushListener(host="127.0.0.1", port=11111, on_deal=lambda _: None)
 
-    def build():
+    def build(*, on_init_connect_error=None):
         constructed.set()
         try:
             assert release_constructor.wait(5)
