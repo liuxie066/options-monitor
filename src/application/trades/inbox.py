@@ -170,9 +170,15 @@ def enqueue_trade_payload(
     repo: Any = None,
     delivery_purpose: str | None = None,
     adapter_version: str = LEGACY_ADAPTER_VERSION,
+    underlying_conflict_errors: list[str] | None = None,
 ) -> str:
     """Persist every source version before any economic use; never clear conflicts."""
     authoritative = adapter_version in TRADE_INTAKE_ADAPTER_VERSIONS.values()
+    if underlying_conflict_errors and not (
+        source == "lookup" and adapter_version == TRADE_INTAKE_ADAPTER_VERSIONS["lookup"]
+        and repo is not None and broker_deal_key
+    ):
+        raise ValueError("underlying review requires an authoritative bound lookup")
     if authoritative and repo is None:
         raise ValueError("authoritative trade source requires the ledger writer lock")
     if authoritative:
@@ -254,6 +260,15 @@ def enqueue_trade_payload(
                 broker_deal_key=canonical_key,
                 adapter_version=raw_adapter_version,
             ) or new_evidence
+        # The config-aware lookup decision is durable; later receptions retain evidence,
+        # but may not turn this review into status-missing and then reopen it on OK.
+        if (row["status"] == "identity_needs_review"
+                and row["result_reason"] == "broker_underlying_symbol_conflict"):
+            return inbox_id
+        if underlying_conflict_errors and (
+            row["status"] == "conflict" and row["result_reason"] != "broker_deal_status_missing"
+        ):
+            return inbox_id
         if canonical_key:
             from domain.domain.trade_execution import conflicting_execution_associations
             original_content = execution_content(original_json)
@@ -293,6 +308,9 @@ def enqueue_trade_payload(
                 for item in evidence_content
             )
             applied_conflicts = applied_execution_association_conflicts(repo, canonical_key, content)
+            if (underlying_conflict_errors and row["status"] == "handled"
+                    and not (source_identity_conflict or conflict or applied_conflicts or status_conflict or status_missing or stale_revision)):
+                return inbox_id
             if source_identity_conflict or conflict or applied_conflicts or status_conflict or status_missing or stale_revision:
                 reason = ("broker_source_identity_conflict" if source_identity_conflict else
                           "broker_economic_payload_conflict" if conflict else
@@ -330,10 +348,10 @@ def enqueue_trade_payload(
             elif str(row["economic_payload_hash"] or "") != original_hash:
                 conn.execute("UPDATE trade_inbox SET economic_payload_hash = ? WHERE inbox_id = ?",
                              (original_hash, inbox_id))
-            if not source_identity_conflict and not conflict and not applied_conflicts and any(
-                value is not None and name not in known_before
-                for name, value in content.get("associations", {}).items()
-            ):
+            if (not (underlying_conflict_errors and row["status"] == "handled")
+                    and not source_identity_conflict and not conflict and not applied_conflicts
+                    and any(value is not None and name not in known_before
+                            for name, value in content.get("associations", {}).items())):
                 prior_effect = _has_persisted_execution(repo, canonical_key, payload)
                 suppress_delivery = prior_effect is not False or (
                     row["result_status"] == "skipped" and row["result_reason"] == "not_option_deal"
@@ -351,6 +369,18 @@ def enqueue_trade_payload(
                        status = 'pending'
                        WHERE inbox_id = ? AND status IN ('pending', 'handled')""",
                     (now_ms, suppress_delivery, inbox_id),
+                )
+            if underlying_conflict_errors and row["status"] != "handled":
+                # This update and both raw sources are one Inbox transaction. A prior
+                # worker's claim must fail its existing commit-scope revalidation.
+                conn.execute(
+                    """UPDATE trade_inbox SET status = 'identity_needs_review',
+                       payload_version = payload_version + 1, claim_id = NULL, claim_until_ms = NULL,
+                       updated_at_ms = ?, last_error = ?, result_status = 'unresolved',
+                       result_reason = 'broker_underlying_symbol_conflict'
+                       WHERE inbox_id = ? AND (status = 'pending' OR
+                         (status = 'conflict' AND result_reason = 'broker_deal_status_missing'))""",
+                    (now_ms, json.dumps(underlying_conflict_errors, ensure_ascii=False), inbox_id),
                 )
     return inbox_id
 

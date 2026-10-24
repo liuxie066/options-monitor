@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections.abc import Mapping
 from typing import Any, Iterable
 
 from src.infrastructure.futu_gateway import build_ready_futu_broker_gateway
@@ -189,6 +190,32 @@ def _resolve_unified_symbol(src: dict[str, Any], row: dict[str, Any]) -> tuple[s
     }
 
 
+def _explicit_underlying_conflict(
+    src: dict[str, Any], row: dict[str, Any], *, symbol_aliases: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    def candidates(container, *, standard=False):
+        if standard:
+            execution = container.get("execution_input")
+            execution = execution if isinstance(execution, Mapping) else container
+            instrument = execution.get("instrument_ref")
+            fields = {"instrument_ref.symbol": instrument.get("symbol")} if isinstance(instrument, Mapping) else {}
+        else:
+            fields = {key: container.get(key) for key in sorted(_AUTHORITATIVE_UNDERLIER_KEYS)}
+        out = []
+        for key, raw in fields.items():
+            identity = resolve_symbol_identity(raw, symbol_aliases=None if standard else symbol_aliases)
+            if identity is not None and identity.source_kind != "option_code":
+                out.append({"key": key, "raw": raw, "canonical": identity.canonical})
+        return out
+
+    original = candidates(src, standard=_is_standard_execution(src))
+    observed = candidates(row)
+    if not any(left["canonical"] != right["canonical"] for left in original for right in observed):
+        return {}
+    return {"errors": ["invalid:instrument_ref.symbol:source_underlying_conflict"],
+            "source_candidates": original, "lookup_candidates": observed}
+
+
 @dataclass(frozen=True)
 class TradePushAccountLookupResult:
     payload: dict[str, Any]
@@ -261,6 +288,7 @@ def enrich_trade_push_payload_with_account_id(
     host: str,
     port: int,
     futu_account_ids: Iterable[str],
+    symbol_aliases: Mapping[str, Any] | None = None,
 ) -> TradePushAccountLookupResult:
     src = dict(payload) if isinstance(payload, dict) else {}
     existing_account_id = extract_primary_account_id(src) or ""
@@ -357,8 +385,14 @@ def enrich_trade_push_payload_with_account_id(
             evidence, conflicts = _deal_economic_evidence(src, row)
             diagnostics["deal_lookup_evidence"] = evidence
             diagnostics["economic_conflicts"] = conflicts
+            underlying = _explicit_underlying_conflict(src, row, symbol_aliases=symbol_aliases)
+            if underlying:
+                diagnostics["underlying_conflicts"] = underlying
             if conflicts:
                 diagnostics["matched_via"] = "conflicting_deal_economics"
+                return TradePushAccountLookupResult(payload=fallback_payload, diagnostics=diagnostics)
+            if underlying:
+                diagnostics["matched_via"] = "conflicting_deal_underlying"
                 return TradePushAccountLookupResult(payload=fallback_payload, diagnostics=diagnostics)
             enriched = _merge_lookup_row(src, row, fallback_acc_id=acc_id, diagnostics=diagnostics)
             if not order_id or _resolve_unified_symbol(enriched, {})[0]:
@@ -392,6 +426,12 @@ def enrich_trade_push_payload_with_account_id(
             return TradePushAccountLookupResult(payload=fallback_payload, diagnostics=diagnostics)
         if order_matches:
             acc_id, row = order_matches[0]
+            underlying = _explicit_underlying_conflict(src, row, symbol_aliases=symbol_aliases)
+            if underlying:
+                diagnostics["underlying_conflicts"] = underlying
+                diagnostics["underlying_lookup_evidence"] = {**src, "_futu_underlying_lookup_row": dict(row)}
+                diagnostics["matched_via"] = "conflicting_order_underlying"
+                return TradePushAccountLookupResult(payload=fallback_payload, diagnostics=diagnostics)
             enriched = _merge_lookup_row(
                 enriched,
                 row,
