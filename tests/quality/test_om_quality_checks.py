@@ -1299,6 +1299,121 @@ def _listener_source(label: str, *, heartbeat: str | None, enabled: bool = True,
             "summary": {"listener_status": label, "last_heartbeat_utc": heartbeat}}
 
 
+@pytest.mark.parametrize("intake", [
+    None, [], False, {}, {"enabled": None}, {"enabled": 0}, {"enabled": 1},
+    {"enabled": "false"}, {"enabled": []},
+    *[{"enabled": enabled, "config_error": error}
+      for enabled in (False, True) for error in ("invalid config", "", None)],
+])
+@pytest.mark.parametrize("companion", [None, False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_intake_runtime_evidence_unavailable_is_not_disable(
+    intake: object, companion: bool | None, reverse: bool,
+) -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    unavailable = {"config": {"config_key": "hk"}, "trade_intake": intake}
+    runtimes = [unavailable]
+    if companion is not None:
+        runtimes.append(_listener_runtime([
+            _listener_source("listening", heartbeat=now.isoformat()),
+        ], enabled=companion))
+    if reverse:
+        runtimes.reverse()
+    datasets = build_trade_intake_datasets(
+        runtime_statuses=runtimes, accounts=["alpha", "beta"], market="hk",
+        repo_root=Path("."), observed_at_utc=now.isoformat(), now=now,
+    )
+    assert [row["scope"]["account"] for row in datasets] == ["alpha", "beta"]
+    for row in datasets:
+        assert row["scope"]["market"] == "hk"
+        assert row["status"] == "unavailable"
+        assert row["required_evidence_complete"] is False
+        assert row["usable_for"] == []
+        assert row["blocked_consumers"] == ["close_advice", "lifecycle", "option_position_report"]
+        assert row["blocked_by"] == ["OM-INT-001", "OM-INT-002", "OM-INT-003"]
+        assert row["reason_codes"] == ["TRADE_INTAKE_RUNTIME_UNAVAILABLE"]
+        assert row["evidence_refs"] == []
+        for check in row["checks"]:
+            assert (check["status"], check["reason_code"]) == ("unknown", "TRADE_INTAKE_RUNTIME_UNAVAILABLE")
+            assert "observed" not in check
+    checks = build_runtime_checks(runtime_statuses=runtimes, observed_at_utc=now.isoformat(), now=now)
+    listeners = [row for row in checks if row["check_id"] == "RT-OM-002"]
+    missing = [row for row in listeners if row["reason_code"] == "LISTENER_RUNTIME_UNAVAILABLE"]
+    assert len(missing) == 1
+    assert missing[0]["scope"] == {"market": "hk", "source": "trade-intake"}
+    assert missing[0]["status"] == "unknown"
+    assert all(row["reason_code"] != "LISTENER_NOT_APPLICABLE" for row in listeners)
+    assert sum(row["reason_code"] == "LISTENER_HEARTBEAT_FRESH" for row in listeners) == int(companion is True)
+
+
+@pytest.mark.parametrize("runtimes", [[], [{}]])
+def test_intake_runtime_evidence_absent_scopes_are_unknown(runtimes: list[dict]) -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    rows = build_trade_intake_datasets(
+        runtime_statuses=runtimes, accounts=["alpha"], market="us",
+        repo_root=Path("."), observed_at_utc=now.isoformat(), now=now,
+    )
+    assert rows[0]["status"] == "unavailable"
+    checks = build_runtime_checks(runtime_statuses=runtimes, observed_at_utc=now.isoformat(), now=now)
+    listener = next(row for row in checks if row["check_id"] == "RT-OM-002")
+    assert (listener["status"], listener["scope"]) == ("unknown", {"source": "trade-intake"})
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("failed_market", ["us", "hk"])
+def test_intake_runtime_evidence_errors_only_affect_listener(
+    enabled: bool, failed_market: str,
+) -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    runtime = _listener_runtime([
+        _listener_source("once", heartbeat=now.isoformat()),
+    ], enabled=enabled, market="hk" if failed_market == "us" else "us")
+    kwargs = {"runtime_statuses": [runtime], "observed_at_utc": now.isoformat(), "now": now}
+    before = build_runtime_checks(**kwargs)
+    after = build_runtime_checks(**kwargs, runtime_status_errors=[{
+        "config_key": failed_market.upper(), "reason": "private-error-canary",
+    }])
+    assert [row for row in before if row["check_id"] != "RT-OM-002"] == [
+        row for row in after if row["check_id"] != "RT-OM-002"
+    ]
+    missing = next(row for row in after if row["reason_code"] == "LISTENER_RUNTIME_UNAVAILABLE")
+    assert missing["scope"] == {"market": failed_market, "source": "trade-intake"}
+    assert "private-error-canary" not in json.dumps(after)
+    assert runtime_verdict(after) == "unknown"
+    assert all(row["reason_code"] != "LISTENER_NOT_APPLICABLE" for row in after)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("state_complete", [None, True, False])
+@pytest.mark.parametrize("audit_available", [False, True])
+def test_intake_runtime_evidence_valid_zero_and_disable_compatibility(
+    enabled: bool, state_complete: bool | None, audit_available: bool,
+) -> None:
+    now = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
+    summary = {"pending_count": 0, "failed_count": 0, "unresolved_count": 0,
+               "audit_reconciliation": {"available": audit_available, "pending_after_reconcile_count": 0}}
+    if state_complete is not None:
+        summary["state_counts_complete"] = state_complete
+    rows = build_trade_intake_datasets(
+        runtime_statuses=[{"trade_intake": {"enabled": enabled, "summary": summary}}],
+        accounts=["alpha"], market="us", repo_root=Path("."),
+        observed_at_utc=now.isoformat(), now=now,
+    )
+    row = rows[0]
+    trusted = not enabled or (state_complete is not False and audit_available)
+    assert row["status"] == ("trusted" if trusted else "unavailable")
+    assert row["required_evidence_complete"] is trusted
+    assert bool(row["usable_for"]) is trusted
+    if not enabled:
+        assert all(check["reason_code"] == "TRADE_INTAKE_NOT_APPLICABLE" for check in row["checks"])
+    else:
+        assert [check["status"] for check in row["checks"]] == [
+            "unknown" if state_complete is False else "pass",
+            "unknown" if state_complete is False else "pass",
+            "pass" if audit_available else "unknown",
+        ]
+
+
 @pytest.mark.parametrize(("label", "fresh_status", "fresh_reason", "fresh_verdict"), [
     ("listening", "pass", "LISTENER_HEARTBEAT_FRESH", "healthy"),
     ("starting", "pass", "LISTENER_HEARTBEAT_FRESH", "healthy"),
