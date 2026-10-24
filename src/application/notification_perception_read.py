@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import sys
 import os
@@ -152,6 +153,9 @@ def iter_notification_perception_events(
     conversation_id: str | None = None,
     event_kind: str | None = None,
     limit: int | None = None,
+    event_filter: Callable[[dict[str, Any]], bool] | None = None,
+    deadline_monotonic: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Read shared notification perception events for internal resolution.
 
@@ -165,32 +169,58 @@ def iter_notification_perception_events(
     """
 
     base = repo_root.resolve()
-    paths = _audit_paths(base=base, run_id=None, audit_path=None)
-    rows: list[dict[str, Any]] = []
-    read_statuses: list[dict[str, Any]] = []
-    for path in paths:
-        file_rows, read_status = _read_jsonl(path, base=base)
-        rows.extend(file_rows)
-        read_statuses.append(read_status)
-    filtered = [
-        row
-        for row in rows
-        if row.get("event_type") == NOTIFICATION_PERCEPTION_EVENT_TYPE
-        and _matches_event(row, conversation_id=conversation_id, event_kind=event_kind)
-    ]
-    filtered.sort(key=lambda row: str(row.get("event_at_utc") or row.get("created_at_utc") or ""), reverse=True)
+    paths, first_segment_at, omitted = _retained_audit_paths(base=base)
     max_rows = max(0, min(int(limit if limit is not None else 5000), 5000))
-    events = [_public_event(row) for row in filtered[:max_rows]]
-    malformed = sum(item["malformed_count"] for item in read_statuses)
+    top: list[tuple[str, int, dict[str, Any]]] = []
+    matched = malformed = 0
+
+    def consume(raw: bytes, display: str) -> str | None:
+        nonlocal matched, malformed
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return "unreadable"
+        if not text.strip():
+            return None
+        try:
+            row = json.loads(text)
+            if not isinstance(row, dict):
+                raise ValueError("not an object")
+        except ValueError:
+            malformed += 1
+            return None
+        if row.get("event_type") != NOTIFICATION_PERCEPTION_EVENT_TYPE or not _matches_event(
+            row, conversation_id=conversation_id, event_kind=event_kind,
+        ):
+            return None
+        row["_source_path"] = display
+        event = _public_event(row)
+        if event_filter is not None and not event_filter(event):
+            return None
+        # Stable ordering matches the current-file iterator, including equal clocks.
+        item = (str(row.get("event_at_utc") or row.get("created_at_utc") or ""), -matched, event)
+        matched += 1
+        heapq.heappush(top, item)
+        if len(top) > max_rows + 1:
+            heapq.heappop(top)
+        return None
+
+    scan = _scan_audit_sources(base=base, paths=paths, consume=consume,
+        deadline_monotonic=deadline_monotonic, cancelled=cancelled, require_stable_files=True)
+    read_statuses = scan["read_statuses"]
+    events = [item[2] for item in sorted(top, reverse=True)[:max_rows]]
     unreadable = sum(item["status"] == "unreadable" for item in read_statuses)
     missing = sum(item["status"] == "missing" for item in read_statuses)
+    truncated = matched > max_rows or omitted or scan["stop_reason"] in {"scan_budget", "line_too_large"}
     return {
         "events": events,
-        "total_count": len(filtered),
-        "truncated": len(filtered) > len(events) or any(item.get("tail_truncated") for item in read_statuses),
+        "total_count": matched,
+        "truncated": truncated,
         "read_statuses": read_statuses,
+        # Filename time is only a hint; account/delivery qualification owns its use.
+        "first_segment_at_utc": first_segment_at.isoformat() if first_segment_at else None,
         "summary": {
-            "status": "failed" if unreadable else "partial" if malformed or any(item.get("tail_truncated") for item in read_statuses) else "missing" if missing else "ok",
+            "status": "failed" if unreadable else "partial" if malformed or truncated else "missing" if missing else "partial" if scan["stop_reason"] else "ok",
             "malformed_count": malformed,
             "unreadable_count": unreadable,
             "missing_count": missing,
@@ -198,30 +228,11 @@ def iter_notification_perception_events(
     }
 
 
-def _read_window(
-    *, base: Path, run_id: str | None, conversation_id: str | None,
-    event_kind: str | None, limit: int, audit_path: str | Path | None,
-    cursor: str | None, start_utc: str | None, end_utc: str | None,
-    deadline_monotonic: float | None, cancelled: Callable[[], bool] | None,
-) -> dict[str, Any]:
-    from src.application.agent_tool_contracts import AgentToolError
-    from src.application.agent_tools.project_reader import (
-        ProjectReaderError, _check, _directory, decode_cursor, digest, set_continuation,
-    )
-
-    try:
-        if not start_utc or not end_utc:
-            raise ValueError("both start_utc and end_utc are required")
-        start = datetime.fromisoformat(start_utc.replace("Z", "+00:00"))
-        end = datetime.fromisoformat(end_utc.replace("Z", "+00:00"))
-        if start.tzinfo is None or end.tzinfo is None or start > end:
-            raise ValueError("invalid UTC time window")
-        start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
-    except ValueError as exc:
-        raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from None
+def _retained_audit_paths(*, base: Path, run_id: str | None = None,
+                          audit_path: str | Path | None = None) -> tuple[list[Path], datetime | None, bool]:
     current = _audit_paths(base=base, run_id=run_id, audit_path=audit_path)[0]
     paths = [current]
-    first_segment_at: datetime | None = None
+    first_segment_at = None
     if not run_id and audit_path is None and current.parent.is_dir() and not current.parent.is_symlink():
         segments = sorted(current.parent.glob("audit_events.????????.??????.jsonl"))
         paths = segments + paths
@@ -230,33 +241,23 @@ def _read_window(
                 first_segment_at = datetime.strptime(segments[0].name.split(".")[1], "%Y%m%d").replace(tzinfo=timezone.utc)
             except ValueError:
                 pass
-    if len(paths) > 64:
-        paths = paths[-64:]
-        omitted_segments = True
-    else:
-        omitted_segments = False
-    max_rows = max(1, min(int(limit or 10), 50))
-    binding = digest({"tool": "notification_perception_read.window", "root": str(base),
-        "run_id": run_id, "conversation_id": conversation_id, "event_kind": event_kind,
-        "start_utc": start.isoformat(), "end_utc": end.isoformat(), "limit": max_rows})
-    try:
-        state = decode_cursor(cursor, binding)
-        offset = state.get("index", 0) if state else 0
-        if type(offset) is not int or not 0 <= offset <= _MAX_WINDOW_OFFSET:
-            raise ProjectReaderError("cursor_invalidated")
-    except ProjectReaderError as exc:
-        raise AgentToolError(code="INPUT_ERROR", message=exc.code, details={"reason": exc.code}) from None
+    return paths[-64:], first_segment_at, len(paths) > 64
 
-    # ponytail: one bounded sequential scan; add an index only if historical queries need >64 MiB.
+
+def _scan_audit_sources(
+    *, base: Path, paths: list[Path], consume: Callable[[bytes, str], str | None],
+    deadline_monotonic: float | None, cancelled: Callable[[], bool] | None,
+    prior_sources: list[dict[str, Any]] | None = None, require_stable_files: bool = False,
+) -> dict[str, Any]:
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.agent_tools.project_reader import ProjectReaderError, _check, _directory, _identity
+
+    # Share bounded raw I/O, not the consumers' clocks, parsing or pagination.
     budget = 64 * 1024 * 1024
     read_statuses: list[dict[str, Any]] = []
     snapshots: list[dict[str, Any]] = []
-    top: list[tuple[float, int, dict[str, Any]]] = []
-    scanned_bytes = matched = malformed = 0
-    stop_reason: str | None = "segments_omitted" if omitted_segments else (
-        "history_before_first_segment" if first_segment_at and start < first_segment_at else None
-    )
-    seq = 0
+    scanned_bytes = 0
+    stop_reason = None
     for path in paths:
         _check(deadline_monotonic, cancelled)
         display = str(_display_path(path, base=base))
@@ -273,7 +274,7 @@ def _read_window(
                          dir_fd=parent_fd)
         except FileNotFoundError:
             read_statuses.append({"path": display, "status": "missing"})
-            if state:
+            if prior_sources is not None:
                 raise AgentToolError(code="INPUT_ERROR", message="source_changed") from None
             stop_reason = stop_reason or "missing"
             continue
@@ -290,19 +291,25 @@ def _read_window(
         finally:
             if parent_fd is not None:
                 os.close(parent_fd)
-        with os.fdopen(fd, "rb") as handle:
+        try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 read_statuses.append({"path": display, "status": "unreadable", "reason": "unsupported"})
                 stop_reason = stop_reason or "unreadable"
+                os.close(fd)
                 continue
+            handle = os.fdopen(fd, "rb")
+        except BaseException:
+            os.close(fd)
+            raise
+        with handle:
             size = info.st_size
             head = os.pread(fd, min(4096, size), 0)
             tail = os.pread(fd, min(4096, size), max(0, size - 4096))
             snapshot = {"path": display, "dev": info.st_dev, "ino": info.st_ino,
                 "size": size, "edge": hashlib.sha256(head + tail).hexdigest()}
-            if state:
-                previous = next((item for item in state.get("sources", []) if item.get("path") == display), None)
+            if prior_sources is not None:
+                previous = next((item for item in prior_sources if item.get("path") == display), None)
                 if previous is None or previous["dev"] != info.st_dev or previous["ino"] != info.st_ino or size < previous["size"]:
                     raise AgentToolError(code="INPUT_ERROR", message="source_changed") from None
                 old_size = previous["size"]
@@ -314,6 +321,7 @@ def _read_window(
                 snapshot = previous
             snapshots.append(snapshot)
             line_count = 0
+            line_reason = None
             while handle.tell() < size:
                 _check(deadline_monotonic, cancelled)
                 remaining = min(size - handle.tell(), budget - scanned_bytes)
@@ -325,41 +333,115 @@ def _read_window(
                 if len(raw) > 1024 * 1024:
                     stop_reason = stop_reason or "line_too_large"
                     break
-                if not raw.endswith(b"\n"):
+                if not raw:
                     stop_reason = stop_reason or "incomplete_line"
                     break
+                line_reason = consume(raw, display)
+                if line_reason:
+                    stop_reason = stop_reason or line_reason
+                    break
+                if not raw.endswith(b"\n") and handle.tell() < size:
+                    stop_reason = stop_reason or ("scan_budget" if scanned_bytes >= budget else "incomplete_line")
+                    break
                 line_count += 1
-                try:
-                    row = json.loads(raw)
-                    if not isinstance(row, dict):
-                        raise ValueError("not an object")
-                except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-                    malformed += 1
-                    continue
-                try:
-                    at = datetime.fromisoformat(str(row.get("event_at_utc") or row.get("created_at_utc") or "").replace("Z", "+00:00"))
-                    if at.tzinfo is None:
-                        raise ValueError("naive time")
-                    at = at.astimezone(timezone.utc)
-                except ValueError:
-                    malformed += 1
-                    continue
-                if not start <= at <= end or row.get("event_type") != NOTIFICATION_PERCEPTION_EVENT_TYPE:
-                    continue
-                if not _matches_event(row, conversation_id=conversation_id, event_kind=event_kind):
-                    continue
-                if run_id and str(row.get("run_id") or "") != str(run_id).strip():
-                    continue
-                matched += 1
-                row["_source_path"] = display
-                top.append((at.timestamp(), seq, row))
-                seq += 1
-                if len(top) > offset + max_rows + 1:
-                    top.sort(key=lambda item: (item[0], item[1]), reverse=True)
-                    top.pop()
-            read_statuses.append({"path": display, "status": "ok" if handle.tell() >= size else "partial", "line_count": line_count})
-    if state and len(snapshots) != len(state.get("sources", [])):
+            status = "unreadable" if line_reason == "unreadable" else "ok" if handle.tell() >= size else "partial"
+            if require_stable_files:
+                after = os.fstat(fd)
+                if _identity(info) != _identity(after) or after.st_nlink != 1:
+                    status = "unreadable"
+                    line_reason = "source_changed"
+                    stop_reason = stop_reason or line_reason
+            read_status = {"path": display, "status": status, "line_count": line_count}
+            if line_reason and require_stable_files:
+                read_status["reason"] = line_reason
+            read_statuses.append(read_status)
+    if prior_sources is not None and len(snapshots) != len(prior_sources):
         raise AgentToolError(code="INPUT_ERROR", message="source_changed") from None
+    return {"read_statuses": read_statuses, "snapshots": snapshots,
+            "scanned_bytes": scanned_bytes, "stop_reason": stop_reason}
+
+
+def _read_window(
+    *, base: Path, run_id: str | None, conversation_id: str | None,
+    event_kind: str | None, limit: int, audit_path: str | Path | None,
+    cursor: str | None, start_utc: str | None, end_utc: str | None,
+    deadline_monotonic: float | None, cancelled: Callable[[], bool] | None,
+) -> dict[str, Any]:
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.agent_tools.project_reader import (
+        ProjectReaderError, decode_cursor, digest, set_continuation,
+    )
+
+    try:
+        if not start_utc or not end_utc:
+            raise ValueError("both start_utc and end_utc are required")
+        start = datetime.fromisoformat(start_utc.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(end_utc.replace("Z", "+00:00"))
+        if start.tzinfo is None or end.tzinfo is None or start > end:
+            raise ValueError("invalid UTC time window")
+        start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+    except ValueError as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from None
+    paths, first_segment_at, omitted_segments = _retained_audit_paths(base=base, run_id=run_id, audit_path=audit_path)
+    max_rows = max(1, min(int(limit or 10), 50))
+    binding = digest({"tool": "notification_perception_read.window", "root": str(base),
+        "run_id": run_id, "conversation_id": conversation_id, "event_kind": event_kind,
+        "start_utc": start.isoformat(), "end_utc": end.isoformat(), "limit": max_rows})
+    try:
+        state = decode_cursor(cursor, binding)
+        offset = state.get("index", 0) if state else 0
+        if type(offset) is not int or not 0 <= offset <= _MAX_WINDOW_OFFSET:
+            raise ProjectReaderError("cursor_invalidated")
+    except ProjectReaderError as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=exc.code, details={"reason": exc.code}) from None
+
+    top: list[tuple[float, int, dict[str, Any]]] = []
+    matched = malformed = 0
+    stop_reason: str | None = "segments_omitted" if omitted_segments else (
+        "history_before_first_segment" if first_segment_at and start < first_segment_at else None
+    )
+    seq = 0
+
+    def consume(raw: bytes, display: str) -> str | None:
+        nonlocal matched, malformed, seq
+        if not raw.endswith(b"\n"):
+            return "incomplete_line"
+        try:
+            row = json.loads(raw)
+            if not isinstance(row, dict):
+                raise ValueError("not an object")
+        except (UnicodeDecodeError, ValueError):
+            malformed += 1
+            return None
+        try:
+            at = datetime.fromisoformat(str(row.get("event_at_utc") or row.get("created_at_utc") or "").replace("Z", "+00:00"))
+            if at.tzinfo is None:
+                raise ValueError("naive time")
+            at = at.astimezone(timezone.utc)
+        except ValueError:
+            malformed += 1
+            return None
+        if not start <= at <= end or row.get("event_type") != NOTIFICATION_PERCEPTION_EVENT_TYPE:
+            return None
+        if not _matches_event(row, conversation_id=conversation_id, event_kind=event_kind):
+            return None
+        if run_id and str(row.get("run_id") or "") != str(run_id).strip():
+            return None
+        matched += 1
+        row["_source_path"] = display
+        top.append((at.timestamp(), seq, row))
+        seq += 1
+        if len(top) > offset + max_rows + 1:
+            top.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            top.pop()
+        return None
+
+    scan = _scan_audit_sources(base=base, paths=paths, consume=consume,
+        deadline_monotonic=deadline_monotonic, cancelled=cancelled,
+        prior_sources=state.get("sources", []) if state else None)
+    read_statuses, snapshots = scan["read_statuses"], scan["snapshots"]
+    scanned_bytes = scan["scanned_bytes"]
+    stop_reason = stop_reason or scan["stop_reason"]
     top.sort(key=lambda item: (item[0], item[1]), reverse=True)
     events = [_public_event(row) for _, _, row in top[offset:offset + max_rows]]
     while events and len(json.dumps(events, ensure_ascii=False).encode()) > 6500:

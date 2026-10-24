@@ -198,6 +198,157 @@ def _enriched_snapshot_input(account: str, market: str, *, complete: bool) -> di
     }
 
 
+@pytest.mark.parametrize("mode", ["disabled", "enabled", "partial_accounts", "read_error", "config_error", "missing_intake"])
+@pytest.mark.parametrize("affected_market", ["us", "hk"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_intake_runtime_evidence_through_generated_config_and_public_cli(
+    monkeypatch, tmp_path: Path, mode: str, affected_market: str, reverse: bool,
+) -> None:
+    """Real config resolution/read, runtime collector, checks and native fixture publication.
+
+    Only external service/provider observations and deliberate runtime-input faults
+    are synthetic. No real SDK, service or notification operation is performed.
+    """
+    from contextlib import redirect_stdout
+    from io import StringIO
+
+    from src.application import agent_tool_config
+    from src.application.agent_tools import diagnostics, quality as quality_tool
+    from src.application.agent_tools import runtime_status_impl as runtime
+    from src.application.config_defaults import default_config
+    from src.application.config_yaml import resolve_yaml_runtime_config
+    from src.application.quality.runtime_status_facade import read_runtime_status
+    from src.application.trades.account_mapping import resolve_trade_intake_config
+    from src.interfaces.cli import main as public_cli
+    from src.interfaces.quality import cli as quality_cli
+
+    def write_json(path, payload):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("x", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+
+    env_file = tmp_path / "empty.env"
+    env_file.open("x").close()
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    monkeypatch.setenv("OM_ENV_FILE", str(env_file))
+    monkeypatch.setenv("OM_SECRET_BACKEND", "env")
+    for module in (agent_tool_config, service_module, diagnostics, public_cli):
+        monkeypatch.setattr(module, "repo_base", lambda: tmp_path)
+    authoring = {"accounts": {
+        account: {"type": "futu", "futu": {
+            "host": "isolated.invalid", "port": 1, "account_id": str(100 + index), "trd_env": "REAL",
+        }} for index, account in enumerate(["alpha", "beta"])
+    }, "markets": {
+        "us": {"accounts": ["alpha", "beta"], "symbols": ["NVDA"]},
+        "hk": {"accounts": ["alpha", "beta"], "symbols": ["0700.HK"]},
+    }}
+    yaml_path = tmp_path / "config.yaml"
+    write_json(yaml_path, authoring)  # JSON is a supported YAML document.
+    system_config = default_config()
+    for market in ("us", "hk"):
+        system_config["markets"][market]["trade_intake"] = {
+            "enabled": market == affected_market and mode != "disabled",
+        }
+    system_path = tmp_path / "system.json"
+    write_json(system_path, system_config)
+    for market in ("us", "hk"):
+        cfg, _meta = resolve_yaml_runtime_config(
+            repo_root=Path(__file__).resolve().parents[2], market=market,
+            config_path=yaml_path, system_config_path=system_path,
+        )
+        write_json(tmp_path / f"config.{market}.json", cfg)
+        if market == affected_market:
+            for source in resolve_trade_intake_config(cfg)["sources"]:
+                if mode == "partial_accounts" and source["account"] == "beta":
+                    continue
+                write_json(tmp_path / source["state_path"], {
+                    "processed_deal_ids": {}, "failed_deal_ids": {}, "unresolved_deal_ids": {},
+                })
+                write_json(tmp_path / source["status_path"], {
+                    "status": "listening", "last_heartbeat_utc": "2026-07-13T10:00:00Z",
+                })
+
+    monkeypatch.setattr(runtime, "service_drift_status", lambda **kw: {"summary": {"ok": False, "status": "unknown"}})
+    monkeypatch.setattr(runtime, "_tick_unit_execution_status", lambda market: "unknown")
+    monkeypatch.setattr(runtime, "_bot_runtime_summary", lambda **kw: {"available": False})
+    monkeypatch.setattr(runtime, "build_channel_status", lambda **kw: {"channels": {}})
+    original_loader = agent_tool_config.load_runtime_config
+
+    def runtime_config(**kwargs):
+        if kwargs.get("config_key") == affected_market and mode == "read_error":
+            raise OSError("isolated runtime read failure")
+        path, cfg = original_loader(**kwargs)
+        if kwargs.get("config_key") == affected_market and mode == "config_error":
+            cfg["trade_intake"]["mode"] = "invalid-runtime-mode"
+        return path, cfg
+
+    monkeypatch.setattr(diagnostics, "load_runtime_config", runtime_config)
+    calls = []
+    responses = {}
+
+    def runtime_status(tool, payload):
+        key = payload["config_key"]
+        calls.append(key)
+        response = read_runtime_status(tool, payload)
+        if key == affected_market and mode == "missing_intake":
+            assert response["ok"] is True
+            response["data"].pop("trade_intake")
+        responses[key] = response
+        return response
+
+    artifact = QualityArtifactRepository(tmp_path / "quality.json")
+    service = _service(
+        artifact=artifact, control=QualityControlStateRepository(tmp_path / "control.json"),
+        runtime_status_fn=runtime_status, opend=_OpenD(complete=False, error_code="FIXTURE_UNAVAILABLE"),
+        ledger_probe_path=tmp_path / "missing-probe.sqlite3",
+        integrity_artifact_repository=QualityArtifactRepository(tmp_path / "integrity.json"),
+        cutover_receipt_path=tmp_path / "missing-cutover.json",
+    )
+    monkeypatch.setattr(quality_cli, "OMQualityService", lambda: service)
+    monkeypatch.setattr(quality_tool, "OMQualityService", lambda: service)
+    keys = ["hk", "us"] if reverse else ["us", "hk"]
+    argv = ["quality", "refresh"] + (["--config-key", "hk", "--config-key", "us"] if reverse else [])
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        assert public_cli.main(argv) == 0
+    payload = json.loads(stdout.getvalue())
+    assert calls == keys
+    assert payload == artifact.read() == service.read_published()
+    assert set(responses) == {"us", "hk"}
+    if mode == "read_error":
+        assert responses[affected_market]["ok"] is False
+    else:
+        assert responses[affected_market]["ok"] is True
+    if mode == "config_error":
+        assert responses[affected_market]["data"]["trade_intake"]["config_error"]
+    bad = mode in {"read_error", "config_error", "missing_intake"}
+    intake = [row for row in payload["datasets"] if row["dataset_id"] == "om.trade_intake"]
+    assert len(intake) == 4
+    for row in intake:
+        target = row["scope"]["market"] == affected_market
+        if target and bad:
+            assert row["status"] == "unavailable"
+            assert row["required_evidence_complete"] is False
+            assert row["usable_for"] == []
+            assert {check["reason_code"] for check in row["checks"]} == {"TRADE_INTAKE_RUNTIME_UNAVAILABLE"}
+        elif not target or mode == "disabled":
+            assert row["status"] == "trusted"
+            assert {check["reason_code"] for check in row["checks"]} == {"TRADE_INTAKE_NOT_APPLICABLE"}
+        else:
+            expected = "unknown" if mode == "partial_accounts" and row["scope"]["account"] == "beta" else "pass"
+            assert [check["status"] for check in row["checks"]] == [expected, expected, "unknown"]
+    missing = [check for check in payload["runtime"]["checks"] if check["reason_code"] == "LISTENER_RUNTIME_UNAVAILABLE"]
+    assert len(missing) == int(bad)
+    if bad:
+        assert missing[0]["scope"] == {"market": affected_market, "source": "trade-intake"}
+    projected, warnings, _meta = quality_tool._quality_status_tool({
+        "account": "beta", "market": affected_market, "dataset_id": "om.trade_intake",
+    })
+    assert warnings == []
+    assert len(projected["datasets"]) == 1
+    assert projected["datasets"][0] in intake
+
+
 @pytest.mark.parametrize(("labels", "enabled", "expected_runtime", "expected_reasons"), [
     (["listening"], True, "healthy", ["LISTENER_HEARTBEAT_FRESH"]),
     (["starting"], True, "healthy", ["LISTENER_HEARTBEAT_FRESH"]),
