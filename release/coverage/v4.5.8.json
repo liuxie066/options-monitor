@@ -1,0 +1,46 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.5.8",
+  "base": {
+    "tag": "v4.5.7",
+    "commit": "f24157f8d5e8ab5d1f77c0c894050ec5bb378b97"
+  },
+  "reviewed_head": "cec5f5b244e02c29fa01599df0b5c691ba5a55b2",
+  "commits": [
+    {
+      "sha": "faf8746ff79d94ec6bfb2cf838e43cc3e354a6a8",
+      "subject": "fix(healthcheck): preserve readiness failure causes"
+    },
+    {
+      "sha": "cec5f5b244e02c29fa01599df0b5c691ba5a55b2",
+      "subject": "Merge pull request #903 from liuxie066/codex/fix-healthcheck-reasons"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "健康检查保留期权字段与开仓前置证据，明确区分休市和字段缺失；安全凭证上下文不可用时报告无法验证，保留真实配置缺失错误、未就绪阻断和非零退出码。",
+      "commits": [
+        "faf8746ff79d94ec6bfb2cf838e43cc3e354a6a8",
+        "cec5f5b244e02c29fa01599df0b5c691ba5a55b2"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "faf8746ff79d94ec6bfb2cf838e43cc3e354a6a8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/903",
+        "RUNBOOK.md"
+      ]
+    },
+    {
+      "commit": "cec5f5b244e02c29fa01599df0b5c691ba5a55b2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/903",
+        "RUNBOOK.md"
+      ]
+    }
+  ]
+}
