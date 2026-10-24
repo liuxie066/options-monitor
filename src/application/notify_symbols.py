@@ -412,7 +412,7 @@ def _build_notification_block_compact(
     l2_parts = []
     if '权利金' in income_line:
         premium_match = re.search(r'(?:组合净)?权利金[=:]([^|]+)', income_line)
-        annual_match = re.search(r'年化\s*([\d.]+)%?', income_line)
+        annual_match = re.search(r'年化\s*([-+]?[\d.]+)%?', income_line)
         if premium_match:
             premium_raw = premium_match.group(1).strip()
             ccy_match = re.search(r'\((\w+)\)', premium_raw)
@@ -492,7 +492,7 @@ def _build_notification_block_compact(
         out_lines.append(l3)
     if l4:
         out_lines.append(l4)
-    if not is_call and not is_enhancement and note.startswith(("当前", "所需")):
+    if not is_call and note.startswith(("当前", "所需")):
         out_lines.append(f"备注｜{note}")
 
     return "\n".join(out_lines)
