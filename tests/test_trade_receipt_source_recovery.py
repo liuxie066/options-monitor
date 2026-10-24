@@ -54,7 +54,7 @@ def test_source_recovers_again_while_sdk_constructor_remains_unfinished(tmp_path
     stop = threading.Event()
     sends = []
 
-    def build(_self):
+    def build(_self, *, on_init_connect_error=None):
         entered.set()
         clock[0] = 61
         try:

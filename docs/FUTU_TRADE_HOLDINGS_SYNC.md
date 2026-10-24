@@ -576,6 +576,15 @@ transport 的 `start` 复用已有 SDK 初始化线程，在当前 `queue.get(ti
 因此初始化长时间未完成也能恢复通知；回调每次先检查 stop/due，实际工作受批量与发送
 超时约束，异常只进 status，不逃逸中断 SDK 等待。取消后不开始新的通知尝试。
 
+初始化认证证据由 `futu_gateway.build_futu_trade_context` 观察同一 context 的
+`_send_init_connect_sync` 失败返回值，传给本次 listener start；不再从共享
+`FTConsoleLog` 推断来源。builder 返回或失败后停止初始观察，已放弃的 start
+忽略迟到回调。phone/picture/password 分类和 code/message 保持，detail 使用
+上游原始错误消息，不拼造 SDK 日志前缀。普通 broker 调用省略 observer，原 SDK
+返回值、异常、8 秒握手预算和后续重连保留；SDK 升级需复核该私有 hook 的 `(ret, msg)`
+契约。某一来源认证失败仍可按现有协调策略停止全部来源；健康来源因此取消，
+不应被记录为持有另一来源的认证错误。后续健康查询继续负责已建立连接的状态。
+
 同步 health 查询须有 SDK 连接等待与请求超时：transport 使用现有
 `set_sync_query_connect_timeout` 设置有限连接等待，并沿用 SDK 请求超时；不能只依靠
 _queue 轮询超时。恢复最早到期为 60 秒，实际还受本轮有界 I/O 延迟影响，不承诺精确周期。
