@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from domain.domain.lifecycle_allocation import resolve_allocations
 from domain.domain.option_lifecycle import pending_close_quantities
+from domain.domain.symbol_identity import canonical_symbol, looks_like_option_contract_label
 from src.application.ledger.api import (
     latest_trade_lifecycle_settlement_evidence,
     lifecycle_case_coherent_facts,
@@ -1070,14 +1071,17 @@ def _stock_settlement_candidate(
     timezone: ZoneInfo,
     settlement_deadline_ms: int,
 ) -> dict[str, Any] | None:
-    code = str(
-        row.get("code")
-        or row.get("stock_code")
-        or row.get("symbol")
-        or ""
-    ).strip().upper()
+    code = next(
+        (value for key in ("code", "stock_code", "symbol")
+         if (value := str(row.get(key) or "").strip())),
+        "",
+    )
     symbol = str(lifecycle_case.get("symbol") or "").strip().upper()
-    if code and symbol and code.split(".", 1)[-1] != symbol.split(".", 1)[-1]:
+    if looks_like_option_contract_label(code):
+        return None
+    stock_symbol = canonical_symbol(code)
+    case_symbol = canonical_symbol(symbol)
+    if stock_symbol and case_symbol and stock_symbol != case_symbol:
         return None
     deal_id = str(
         row.get("deal_id")
@@ -1158,6 +1162,9 @@ def _stock_settlement_candidate(
         )
     if quantity % multiplier != 0:
         return None
+    if not stock_symbol or not case_symbol:
+        # An otherwise matching row with unknown identity is not evidence of no settlement.
+        raise SettlementObservationDataError("stock settlement symbol must establish a known stock identity")
     source_event_id = (
         f"futu:{account}:{futu_account_id}:{deal_id}"
     )

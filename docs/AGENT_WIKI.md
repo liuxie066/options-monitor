@@ -174,7 +174,13 @@ unsafe paths, invalid references and other missing manifest objects retain the
 existing fail-closed treatment. This does not verify blob content.
 
 Pass prior reports in chronological order to obtain a measured growth and
-90-day forecast; one observation remains `insufficient_history`:
+90-day forecast; one observation remains `insufficient_history`.
+
+History with an explicit research-storage status other than `complete` is
+excluded and listed in `rejected_reports`. Older reports without that field
+remain compatible. A top-level `partial_data` caused only by SQLite metadata
+does not disqualify complete research counts; other valid history can still
+support a forecast after an incomplete report is excluded.
 
 ```bash
 ./om research storage-baseline \

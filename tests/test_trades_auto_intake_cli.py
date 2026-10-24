@@ -22,6 +22,171 @@ BASE = Path(__file__).resolve().parents[1]
 AUTO_INTAKE_CLI_TIMEOUT_SEC = 15
 
 
+@pytest.mark.parametrize("shape", ["raw", "sparse", "nested", "standard", "missing_status", "order", "custom_alias"])
+def test_explicit_underlying_conflict_blocks_real_intake_and_retry(tmp_path, monkeypatch, shape):
+    from copy import deepcopy
+    from tests.test_trades_lookup_economics import _payload, _setup
+    from src.application.trades import futu_detail_lookup
+    from src.application.trades.normalizer import normalize_trade_deal
+    from src.application.trades.inbox import read_trade_payload, read_trade_source_evidence, trade_payload_evidence_ref
+    raw = _payload(qty="1", price="2.50", underlying_symbol="US.NVDA")
+    row = {"acc_id": "123", "deal_id": raw["deal_id"], "order_id": raw["order_id"],
+           "qty": "1", "price": "2.50", "owner_stock_code": "US.AAPL", "status": "OK"}
+    if shape in {"nested", "standard"}:
+        execution = normalize_trade_deal(raw, futu_account_mapping={"123": "synthetic"},
+                                        allow_opend_refresh=False).execution_input
+        raw = {**raw, "execution_input": execution} if shape == "nested" else {**execution,
+            "deal_id": raw["deal_id"], "order_id": raw["order_id"], "futu_account_id": "123", "status": "OK"}
+    if shape == "sparse":
+        raw.pop("qty")
+        raw.pop("price")
+    if shape == "missing_status":
+        raw.pop("status")
+    if shape == "custom_alias":
+        raw["underlying_symbol"] = "CHIP"
+    class Gateway:
+        def get_deal_list(self, **_):
+            return [] if shape == "order" else [deepcopy(row)]
+        def get_order_list(self, **_):
+            return [deepcopy(row)]
+        def close(self):
+            pass
+    monkeypatch.setattr(futu_detail_lookup, "build_ready_futu_broker_gateway", lambda **_: Gateway())
+    repo, inbox, process = _setup(tmp_path)
+    result = process(raw, config={"intake": {"symbol_aliases": {"CHIP": "NVDA"}}} if shape == "custom_alias" else None,
+                     on_result_fn=lambda _: pytest.fail("conflict must not dispatch"))
+    assert (result["status"], result["reason"]) == ("unresolved", "broker_underlying_symbol_conflict")
+    stored = read_trade_payload(inbox, inbox_id=result["inbox_id"])
+    assert (stored["status"], stored["result_reason"]) == ("identity_needs_review", "broker_underlying_symbol_conflict")
+    evidence = read_trade_source_evidence(inbox, evidence_ref=trade_payload_evidence_ref(result["inbox_id"]))
+    assert any(item["raw_payload"].get("_futu_underlying_lookup_row" if shape == "order" else "_futu_detail_lookup_row") == row
+               for item in evidence)
+    for later in (raw, {**raw, "status": None}, {**raw, "status": "OK", "position_effect": "open"}):
+        retried = process(later, allow_external_lookup=False, retry_failed_deal=True)
+        assert retried["status"] == "unresolved"
+        assert read_trade_payload(inbox, inbox_id=result["inbox_id"])["result_reason"] == "broker_underlying_symbol_conflict"
+    assert repo.list_trade_events() == []
+    assert repo.list_position_lots() == []
+    assert not (tmp_path / "state.json").exists()
+
+
+@pytest.mark.parametrize("original,query,aliases,expected", [
+    ("US.NVDA", "nvda", {}, "NVDA"),
+    ("CHIP", "US.NVDA", {"CHIP": "NVDA"}, "NVDA"),
+    ("US.CNC", "US.NVDA", {"US.CNC": "NVDA"}, "NVDA"),
+    ("POP", "HK.09992", {}, "9992.HK"),
+])
+def test_underlying_alias_controls_reach_real_writer(tmp_path, monkeypatch, original, query, aliases, expected):
+    from tests.test_trades_lookup_economics import _gateway, _payload, _setup
+    payload = _payload(qty="1", price="2.50", underlying_symbol=original)
+    if expected.endswith(".HK"):
+        payload["code"] = "HK.POP261218P100000"
+    _gateway(monkeypatch, {"acc_id": "123", "deal_id": payload["deal_id"], "order_id": payload["order_id"],
+        "owner_stock_code": query, "qty": "1", "price": "2.50"})
+    # Only unrelated post-write diagnostics are isolated; admission/normalizer/writer are real.
+    monkeypatch.setattr("src.application.quality.service.check_post_trade_positions", lambda **_: {"status": "not_run"})
+    monkeypatch.setattr(auto_intake, "_trade_attribution_diagnosis", lambda **_: {})
+    repo, _, process = _setup(tmp_path)
+    result = process(payload, config={"intake": {"symbol_aliases": aliases}})
+    assert (result["status"], result["reason"]) == ("applied", "applied_open"), result
+    events = repo.list_trade_events()
+    assert len(events) == len(repo.list_position_lots()) == 1
+    assert events[0]["contract_key"]["underlying_symbol"] == expected
+    assert events[0]["contracts"] == 1 and events[0]["price"] == "2.5"
+    from src.application.trades.deal_identity import broker_deal_key_from_payload
+    from src.application.trades.inbox import enqueue_trade_payload, read_trade_payload, TRADE_INTAKE_ADAPTER_VERSIONS
+    from src.application.trades.inbox_authority import resolve_execution_inbox_path
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "unused.sqlite3")
+    before = read_trade_payload(inbox, inbox_id=result["inbox_id"])
+    enqueue_trade_payload(inbox, payload={**payload, "_futu_underlying_lookup_row": {"owner_stock_code": "US.AAPL"}},
+        source="lookup", broker_deal_key=broker_deal_key_from_payload(payload, account_mapping={"123": "synthetic"}),
+        repo=repo, adapter_version=TRADE_INTAKE_ADAPTER_VERSIONS["lookup"],
+        underlying_conflict_errors=["invalid:instrument_ref.symbol:source_underlying_conflict"])
+    after = read_trade_payload(inbox, inbox_id=result["inbox_id"])
+    assert (after["status"], after["result"], after["payload_version"]) == (
+        before["status"], before["result"], before["payload_version"])
+    assert repo.list_trade_events() == events and len(repo.list_position_lots()) == 1
+
+
+def test_underlying_conflict_preview_has_no_inbox_or_ledger_write(tmp_path, monkeypatch):
+    from tests.test_trades_lookup_economics import _gateway, _payload, _setup
+    payload = _payload(qty="1", price="2.50", underlying_symbol="US.NVDA")
+    _gateway(monkeypatch, {"acc_id": "123", "deal_id": payload["deal_id"], "order_id": payload["order_id"],
+        "owner_stock_code": "US.AAPL", "qty": "1", "price": "2.50"})
+    repo, inbox, process = _setup(tmp_path)
+    result = process(payload, apply_changes=False)
+    assert (result["status"], result["reason"]) == ("unresolved", "broker_underlying_symbol_conflict")
+    assert not inbox.exists() and not (tmp_path / "state.json").exists()
+    assert repo.list_trade_events() == [] and repo.list_position_lots() == []
+
+
+def test_missing_status_equivalent_underlying_still_recovers_from_lookup_ok(tmp_path, monkeypatch):
+    from tests.test_trades_lookup_economics import _gateway, _payload, _setup
+    payload = _payload(qty="1", price="2.50", underlying_symbol="US.NVDA")
+    payload.pop("status")
+    _gateway(monkeypatch, {"acc_id": "123", "deal_id": payload["deal_id"], "order_id": payload["order_id"],
+        "owner_stock_code": "US.NVDA", "qty": "1", "price": "2.50", "status": "OK"})
+    repo, _, process = _setup(tmp_path)
+    result = process(payload)
+    assert (result["status"], result["reason"]) == ("applied", "applied_open"), result
+    assert len(repo.list_trade_events()) == len(repo.list_position_lots()) == 1
+
+
+@pytest.mark.parametrize("readback", ["missing", "pending"])
+def test_underlying_conflict_requires_quarantine_readback(tmp_path, monkeypatch, readback):
+    from tests.test_trades_lookup_economics import _gateway, _payload, _setup
+    payload = _payload(qty="1", price="2.50", underlying_symbol="US.NVDA")
+    _gateway(monkeypatch, {"acc_id": "123", "deal_id": payload["deal_id"], "order_id": payload["order_id"],
+        "owner_stock_code": "US.AAPL", "qty": "1", "price": "2.50"})
+    repo, _, process = _setup(tmp_path)
+    real_read = auto_intake.read_trade_payload
+    def read(*args, **kwargs):
+        row = real_read(*args, **kwargs)
+        if row and row["result_reason"] == "broker_underlying_symbol_conflict":
+            return None if readback == "missing" else {**row, "status": "pending"}
+        return row
+    monkeypatch.setattr(auto_intake, "read_trade_payload", read)
+    with pytest.raises(RuntimeError, match="readback missing|not durably quarantined"):
+        process(payload)
+    assert repo.list_trade_events() == [] and repo.list_position_lots() == []
+
+
+def test_underlying_quarantine_readback_holds_cross_process_writer_lock(tmp_path, monkeypatch):
+    from tests.test_trades_lookup_economics import _gateway, _payload, _setup
+
+    payload = _payload(qty="1", price="2.50", underlying_symbol="US.NVDA")
+    _gateway(monkeypatch, {"acc_id": "123", "deal_id": payload["deal_id"], "order_id": payload["order_id"],
+        "owner_stock_code": "US.AAPL", "qty": "1", "price": "2.50"})
+    repo, _, process = _setup(tmp_path)
+    real_read = auto_intake.read_trade_payload
+    probes = []
+
+    def read(*args, **kwargs):
+        row = real_read(*args, **kwargs)
+        if row and row["result_reason"] == "broker_underlying_symbol_conflict":
+            probe = subprocess.run([sys.executable, "-c", """
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR)
+try:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit(0)
+    sys.exit(1)
+finally:
+    os.close(fd)
+""", str(repo.db_path) + ".writer.lock"], capture_output=True, text=True, timeout=5)
+            assert probe.returncode == 0, probe.stderr or "writer lock was released before readback"
+            probes.append(True)
+        return row
+
+    monkeypatch.setattr(auto_intake, "read_trade_payload", read)
+    result = process(payload)
+    assert result["reason"] == "broker_underlying_symbol_conflict"
+    assert probes == [True]
+    assert repo.list_trade_events() == [] and repo.list_position_lots() == []
+
+
 def test_intake_result_failures_have_journal_warning_level(capsys) -> None:
     failed = {"status": "failed", "account": "lx", "deal_id": "d-1"}
     receipt_missing = {"status": "handled", "account": "lx", "deal_id": "d-2",
