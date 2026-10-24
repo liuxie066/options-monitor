@@ -130,6 +130,118 @@ def _call_row(**overrides: object) -> dict:
     }
 
 
+def _eligibility_model(direction: str, **overrides: object) -> dict:
+    model = _read_model()
+    branch = model["batches"][0]
+    branch.update(
+        direction=direction, wheel_branch_id="stock-1", remaining_contracts=1,
+        principal_anchor=10_010, realized_put_net_pnl_in_current_stage=0, currency="USD",
+    )
+    branch.update(overrides)
+    model["wheel_branches"] = [branch]
+    return model
+
+
+def _scan_eligibility_model(model: dict, direction: str) -> dict:
+    row = phase2_opening_row({
+        **_call_row(), "option_type": direction,
+        "strike": 99 if direction == "put" else 110,
+        "delta": -0.3 if direction == "put" else 0.3,
+    })
+    args = (model, _policy(), {"frames": {"NVDA": pd.DataFrame([row])}})
+    fees = {"exchange_rate_converter": _converter()}
+    decision_time_ms = int(AS_OF.timestamp() * 1000)
+    if direction == "put":
+        return run_wheel_put_scan(*args, fees, decision_time_ms=decision_time_ms)
+    return run_wheel_call_scan(*args, {}, fees, decision_time_ms=decision_time_ms)
+
+
+@pytest.mark.parametrize("direction", ["call", "put"])
+@pytest.mark.parametrize("phase", ["ready", "data_unavailable", "option_open", "intent_pending"])
+@pytest.mark.parametrize("reasons", [
+    ["multiplier_unproven"],
+    ["assignment_cash_facts_unavailable"],
+    ["multiplier_unproven", "assignment_cash_facts_unavailable"],
+])
+def test_canonical_branch_reasons_block_scan_before_candidate_calculation(
+    direction, phase, reasons, monkeypatch,
+):
+    from src.application.wheel import scanning
+
+    model = _eligibility_model(direction, phase=phase, reason_codes=reasons)
+    calls = []
+    original = scanning._scan_symbols
+
+    def record_symbols(**kwargs):
+        calls.append(kwargs["symbols"])
+        return original(**kwargs)
+
+    monkeypatch.setattr(scanning, "_scan_symbols", record_symbols)
+    result = _scan_eligibility_model(model, direction)
+
+    assert calls == [[]]
+    assert result["capacity_claims"] == []
+    assert not result["raw_candidates"].get("stock-1")
+    scope = result["scope_results"][0]
+    assert (scope["status"], scope["reason_code"], scope["candidate_count"]) == (
+        "unavailable", sorted(reasons)[0], 0,
+    )
+    assert scope["wheel_branch_id"] == "stock-1"
+    assert scope["account"] == "lx" and scope["direction"] == direction
+    assert scope["batch_generation_hash"] == "a" * 64
+    assert model["wheel_branches"][0]["reason_codes"] == reasons
+
+
+@pytest.mark.parametrize("direction", ["call", "put"])
+@pytest.mark.parametrize("phase", ["ready", "data_unavailable", "option_open", "intent_pending"])
+@pytest.mark.parametrize("reason_fields", [{}, {"reason_codes": None}, {"reason_codes": []}])
+def test_absent_branch_reasons_preserve_legacy_remaining_capacity(direction, phase, reason_fields):
+    model = _eligibility_model(direction, phase=phase, **reason_fields)
+    result = _scan_eligibility_model(model, direction)
+    assert len(result["capacity_claims"]) == 1
+    assert result["capacity_claims"][0]["requested_contracts"] == 1
+    assert len(result["raw_candidates"]["stock-1"]) == 1
+    assert result["scope_results"][0]["reason_code"] == "candidates_found"
+
+
+@pytest.mark.parametrize("direction", ["call", "put"])
+@pytest.mark.parametrize(("overrides", "status", "reason"), [
+    ({"lifecycle_status": "pending_decision"}, "not_applicable", "wheel_pending_decision"),
+    ({"lifecycle_status": "ended"}, None, None),
+    ({"integrity_status": "conflict"}, "failed", "multiplier_unproven"),
+    ({"monitoring_gate": "disabled"}, "not_applicable", "wheel_disabled"),
+    ({"monitoring_gate": "config_mismatch"}, "not_applicable", "wheel_config_mismatch"),
+    ({"active_option_committed_shares": 100}, "not_applicable", "wheel_capacity_fully_committed_or_reserved"),
+])
+def test_branch_reasons_preserve_existing_gate_precedence(direction, overrides, status, reason):
+    model = _eligibility_model(direction, reason_codes=["multiplier_unproven"], **overrides)
+    result = _scan_eligibility_model(model, direction)
+    assert result["capacity_claims"] == []
+    if status is None:
+        assert result["scope_results"] == []
+    else:
+        scope = result["scope_results"][0]
+        assert (scope["status"], scope["reason_code"]) == (status, reason)
+
+
+@pytest.mark.parametrize("direction", ["call", "put"])
+def test_blocked_branch_keeps_healthy_same_symbol_sibling_eligible(direction):
+    model = _eligibility_model(direction, reason_codes=["multiplier_unproven"])
+    model["wheel_branches"].append({
+        **model["wheel_branches"][0], "wheel_branch_id": "healthy", "stock_lot_id": "healthy",
+        "reason_codes": [],
+    })
+    stock = model["assigned_stock_projection"]["_all_assigned_stock_lots"][0]
+    model["assigned_stock_projection"]["_all_assigned_stock_lots"].append({
+        **stock, "stock_lot_id": "healthy",
+    })
+    result = _scan_eligibility_model(model, direction)
+    assert len(result["capacity_claims"]) == 1
+    assert result["capacity_claims"][0]["wheel_branch_id"] == "healthy"
+    assert not result["raw_candidates"].get("stock-1")
+    assert len(result["raw_candidates"]["healthy"]) == 1
+
+
 def test_wheel_scan_reuses_frozen_call_universe_and_builds_one_claim(tmp_path: Path) -> None:
     row = phase2_opening_row(_call_row())
     result = run_wheel_call_scan(
