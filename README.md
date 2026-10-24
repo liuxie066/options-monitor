@@ -68,7 +68,7 @@ trade_events -> projection -> position_lots
 
 在持股分支，已收到的期权收入会计入总收益，但不用于降低股票的卖出底线；系统合并检查所有可能占用持股的期权合约。在现金分支，新 Put 候选仍须通过资金门槛。该策略只提供监控和候选建议，不自动下单，也不保证收益。
 
-CSP / CC 新开仓只使用 `insurance_underwriting`。历史 artifact 和持仓解释可继续读取
+CSP / CC 新开仓只使用 `insurance_underwriting`，普通 Put / Call 默认分别启用 `abs(delta) <= 0.40` 硬门槛；delta 不参与排序。历史 artifact 和持仓解释可继续读取
 `return_first` / `short_vol`，但这些兼容语义不能重新进入当前开仓配置或正式候选排序。
 
 README 不复制完整规则：[候选策略合同](docs/candidate_strategy.md) 是已经确认的目标口径，
@@ -147,6 +147,8 @@ om symbols add YOUR_SYMBOL --strategy csp --csp-max-strike YOUR_MAX_STRIKE --app
 | 管理常驻服务 | `om service install`、`om service start`、`om service stop`；默认预览 |
 
 `om help` 按场景说明任务；`om help all` 保留所有高级命令。模型与控制命令统一推荐 `om bot`，Feishu 传输用 `om channel feishu`；旧 `assistant` / `inbound` 入口保留兼容。普通设置和静态凭证检查不证明 OpenD 登录、消息送达或模型可用。Linux 密钥录入和服务安装涉及系统权限，按终端提示完成；当前普通前台进程不能直接读取 systemd 加密凭证，详见[首次运行指南](docs/GETTING_STARTED.md#3-完成外部接入)。结构化集成使用 `om-agent spec` 和 `om-agent run`，边界见 [Tool Reference](docs/TOOL_REFERENCE.md)。
+
+`om channel status` 检测到显式 WeChat Bot 配置缺失、损坏或校验失败时，会报告 `available=false`，健康检查会提示已配置频道不可用。历史 `configured` 和 allowlist 配置标志仍保留；`service_active` 独立表示所查询的进程状态，配置错误不会将它改写为停止。`available` 不证明消息送达；显式 allowlist 未指定 Bot 配置的合法用法保持兼容。
 
 ### 2. 只读检查
 
