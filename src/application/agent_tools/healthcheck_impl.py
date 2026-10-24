@@ -39,6 +39,24 @@ def _quote_probe_message(probe: dict[str, Any], *, ready: bool) -> str:
             or "OpenD quote readiness failed"
         )
     if probe.get("required_fields_ok") is False:
+        rows = _dict(probe.get("required_fields")).get("results") or []
+        reasons = []
+        for row in rows:
+            if not isinstance(row, dict) or row.get("ok"):
+                continue
+            missing = row.get("missing_snapshot_cols") or []
+            observation = _dict(row.get("underlier_observation"))
+            if missing:
+                reason = "required option fields unavailable: " + ", ".join(missing)
+            elif row.get("option_fields_ok") is True and row.get("scan_prerequisites_ok") is False:
+                reason = "opening prerequisites unavailable: " + str(
+                    observation.get("reason_code") or observation.get("status") or "unknown"
+                )
+            else:
+                reason = "required option fields or opening prerequisites unavailable"
+            reasons.append(f"{row.get('symbol') or 'unknown'}: {reason}")
+        if reasons:
+            return "OpenD quote readiness failed: " + "; ".join(reasons)
         return "OpenD quote required option fields are unavailable"
     return str(probe.get("error_code") or "OpenD quote readiness failed")
 
@@ -96,6 +114,9 @@ def run_healthcheck_tool(
         mask_path=mask_path,
     )
     warnings.extend(str(item) for item in effective_env.warnings)
+    credential_context_available = bool(
+        _dict(_dict(environment.get("secret_credentials")).get("summary")).get("ok")
+    )
     checks: list[dict[str, Any]] = []
     validate_runtime_config(cfg, allow_empty_symbols=True)
     checks.append({"name": "runtime_config", "status": "ok", "message": "config validation passed"})
@@ -182,22 +203,30 @@ def run_healthcheck_tool(
             )
             warnings.append("Replace the example Feishu bot user open_id before enabling real sends.")
         send_missing = list(bot_cfg.credential_missing_fields)
+        if not credential_context_available:
+            send_missing = [name for name in send_missing if name != bot_cfg.app_secret_credential_name]
         if not target:
             send_missing.append(bot_cfg.user_open_id_env)
-        if send_missing:
+        if send_missing or not credential_context_available:
+            message = (
+                "Feishu bot credential presence could not be verified: secret backend unavailable in this diagnostic context"
+                if not credential_context_available
+                else "Feishu bot send configuration is incomplete"
+            )
+            if send_missing:
+                message += "; missing configuration: " + ", ".join(send_missing)
             checks.append(
                 {
                     "name": "notification_credentials",
-                    "status": "error",
-                    "message": "Feishu bot send configuration is incomplete",
-                    "value": bot_cfg.redacted_status(),
+                    "status": "error" if send_missing else "skipped",
+                    "message": message,
+                    "value": {
+                        **bot_cfg.redacted_status(),
+                        "credential_context_available": credential_context_available,
+                    },
                 }
             )
-            warnings.append(
-                "Feishu bot send configuration is incomplete; set "
-                + ", ".join(send_missing)
-                + " before enabling sends."
-            )
+            warnings.append(message)
         else:
             if bot_cfg.app_id == "cli_xxx" or bot_cfg.app_secret == "xxx":
                 checks.append(
@@ -221,6 +250,7 @@ def run_healthcheck_tool(
         payload,
         mask_path=mask_path,
         environ=effective_env.values,
+        credential_context_available=credential_context_available,
     )
     checks.append(feishu_inbound_check)
     warnings.extend(feishu_inbound_warnings)
@@ -238,7 +268,9 @@ def run_healthcheck_tool(
     )
     channel_health_raw = channel_status.get("channels")
     channel_health = channel_health_raw if isinstance(channel_health_raw, dict) else {}
-    channel_health_check, channel_health_warnings = _channel_health_check(channel_status)
+    channel_health_check, channel_health_warnings = _channel_health_check(
+        channel_status, credential_context_available=credential_context_available,
+    )
     checks.append(channel_health_check)
     warnings.extend(channel_health_warnings)
 
@@ -456,6 +488,7 @@ def run_healthcheck_tool(
     quote_skipped = False
     quote_message = "canonical Futu quote route is missing or conflicting"
     quote_global_state: dict[str, Any] = {}
+    quote_required_fields: dict[str, Any] = {}
     quote_telnet: dict[str, Any] = {}
     if quote_route.ok:
         quote_symbols = list(
@@ -490,6 +523,7 @@ def run_healthcheck_tool(
         quote_watchdog = _dict(quote_probe.get("watchdog"))
         quote_global_state = _dict(quote_watchdog.get("state"))
         quote_telnet = _dict(quote_probe.get("telnet"))
+        quote_required_fields = _dict(quote_probe.get("required_fields"))
         quote_message = _quote_probe_message(quote_probe, ready=quote_ready)
     if quote_route.ok and quote_route.host is not None and quote_route.port is not None:
         quote_key = f"{quote_route.host}:{quote_route.port}"
@@ -767,6 +801,7 @@ def run_healthcheck_tool(
                 "global_state": quote_global_state,
                 "telnet": quote_telnet,
                 "member_count": len(quote_route.members),
+                "required_fields": quote_required_fields,
             },
             "summary_excluded": True,
         }
@@ -847,13 +882,15 @@ def _feishu_inbound_check(
     *,
     mask_path: Callable[[Any], str],
     environ: dict[str, str],
+    credential_context_available: bool,
 ) -> tuple[dict[str, Any], list[str]]:
     bot_cfg = resolve_feishu_bot_config(environ=environ, metadata_only=True)
     audit_path = _audit_db_path(payload, environ=environ)
     value: dict[str, Any] = {
         "audit_db": mask_path(audit_path),
         "audit_db_exists": audit_path.exists(),
-        "credentials_configured": bot_cfg.credentials_ready,
+        "credentials_configured": bot_cfg.credentials_ready and credential_context_available,
+        "credential_context_available": credential_context_available,
         "allowed_open_ids_count": len(bot_cfg.allowed_open_ids),
         "pending_store": {},
     }
@@ -876,7 +913,9 @@ def _feishu_inbound_check(
         )
 
     problems: list[str] = []
-    if not bot_cfg.credentials_ready:
+    if not credential_context_available:
+        problems.append("Feishu Bot credential presence is unverified: secret backend unavailable in this diagnostic context")
+    elif not bot_cfg.credentials_ready:
         problems.append("Feishu Bot app credentials are incomplete")
     if not bot_cfg.allowed_open_ids:
         problems.append("Feishu inbound sender allowlist is empty")
@@ -947,7 +986,9 @@ def _feishu_inbound_check(
     )
 
 
-def _channel_health_check(channel_status: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+def _channel_health_check(
+    channel_status: dict[str, Any], *, credential_context_available: bool,
+) -> tuple[dict[str, Any], list[str]]:
     channels_raw = channel_status.get("channels")
     channels: dict[str, Any] = channels_raw if isinstance(channels_raw, dict) else {}
     unavailable = [
@@ -956,6 +997,7 @@ def _channel_health_check(channel_status: dict[str, Any]) -> tuple[dict[str, Any
         if isinstance(raw, dict)
         and (bool(raw.get("profile_enabled")) or bool(raw.get("service_present")))
         and not bool(raw.get("available"))
+        and not (name == "feishu" and not credential_context_available)
     ]
     status = "warn" if unavailable else "ok"
     message = "channel health is readable"
@@ -963,6 +1005,11 @@ def _channel_health_check(channel_status: dict[str, Any]) -> tuple[dict[str, Any
     if unavailable:
         message = "configured channel is not available: " + ", ".join(sorted(unavailable))
         warnings.append(message)
+    if not credential_context_available and _dict(channels.get("feishu")).get("configured"):
+        status = "warn"
+        context_message = "Feishu channel readiness is unverified: secret backend unavailable in this diagnostic context"
+        message = context_message + ("; " + message if unavailable else "")
+        warnings.append(context_message)
     return (
         {
             "name": "channel_health",

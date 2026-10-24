@@ -142,6 +142,16 @@ Agent 优先使用只读入口：
 ./om-agent run --tool runtime_status --input-json '{"profile_path":"/var/lib/options-monitor/service.profile.json"}'
 ```
 
+`healthcheck` 检查当前开仓扫描前置条件；休市时仍返回未就绪和非零退出码。
+查看 typed `opend_quote_readiness_*` 的 `value.required_fields.results`，区分
+`option_fields_ok`、`scan_prerequisites_ok` 和 `underlier_observation.reason_code`；
+`market_closed` 不表示期权字段缺失，也不应通过放宽开仓门禁消除。
+
+Linux 普通 shell 不继承 systemd unit 的凭证上下文。后端上下文不可用时，通知凭证检查
+报告无法验证（公共配置另有缺失时仍报错），不能据此认定运行服务缺少凭证。
+应结合实际 unit 的凭证交付元数据和服务状态核对；不要导出凭证值或改用 env 后端来让检查通过。
+无法验证的检查仍阻止 readiness 通过，服务运行也不证明通知已经送达。
+
 人工直接查看文件时，再用下面三步：
 
 1. 查看是否在跑：

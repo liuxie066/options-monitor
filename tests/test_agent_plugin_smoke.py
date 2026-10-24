@@ -4715,3 +4715,133 @@ def test_scheduler_status_exposes_processed_scan_target_watermark(tmp_path: Path
     assert out["data"]["state"]["last_processed_scan_target_utc_for_account"] == (
         "2026-07-21T14:30:00+00:00"
     )
+
+
+@pytest.mark.parametrize("command", ["healthcheck", "doctor"])
+@pytest.mark.parametrize("case,expected", [
+    ("closed", "market_closed"),
+    ("stale", "stale"),
+    ("missing_fields", "option_delta"),
+    ("provider_failure", "required option fields or opening prerequisites unavailable"),
+    ("ready", "passed"),
+])
+def test_healthcheck_quote_causes_reach_public_cli(monkeypatch, tmp_path, capsys, command, case, expected):
+    from datetime import datetime, timedelta, timezone
+    from src.application import futu_doctor
+    import src.interfaces.cli.main as cli
+
+    cfg_path = _write_healthcheck_config(tmp_path)
+
+    class Gateway:
+        def get_option_chain(self, **kwargs):
+            if case == "provider_failure":
+                raise RuntimeError("synthetic provider failure")
+            return [{"code": "synthetic-option"}]
+
+        def get_snapshot(self, codes):
+            if codes == ["US.NVDA"]:
+                return [{"code": "US.NVDA", "last_price": 100, "sec_status": "NORMAL", "suspension": False,
+                         "update_time": (datetime.now(timezone.utc) - timedelta(seconds=600 if case == "stale" else 0)).isoformat()}]
+            row = {name: 1 for name in futu_doctor.REQUIRED_SNAPSHOT_COLS}
+            row["code"] = "synthetic-option"
+            if case == "missing_fields":
+                row.pop("option_delta")
+            return [row]
+
+        def get_market_state(self, codes):
+            return [{"code": codes[0], "market_state": "CLOSED" if case == "closed" else "MORNING"}]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(futu_doctor, "build_ready_futu_quote_gateway", lambda **kwargs: Gateway())
+
+    def probe(**kwargs):
+        fields = futu_doctor.check_required_option_fields(
+            symbols=kwargs["symbols"], host=kwargs["host"], port=kwargs["port"],
+        )
+        ready = futu_doctor.required_fields_ok(fields, symbols=kwargs["symbols"])
+        return {"ok": ready, "sdk": {"ok": True}, "watchdog_ok": True,
+                "watchdog": {"ok": True}, "required_fields_ok": ready, "required_fields": fields}
+
+    _patch_healthcheck_dependencies(monkeypatch, run_futu_doctor=probe)
+    rc = cli.main([command, "--config-path", str(cfg_path)])
+    result = json.loads(capsys.readouterr().out)
+    health = result if command == "healthcheck" else result["data"]["healthcheck"]
+    checks = health["data"]["checks"]
+    quote = next(c for c in checks if c["name"].startswith("opend_quote_readiness_"))
+    aggregate = next(c for c in checks if c["name"] == "opend_readiness")
+    assert rc == (0 if case == "ready" else 2)
+    assert health["data"]["summary"]["ok"] is (case == "ready")
+    assert quote["status"] == ("ok" if case == "ready" else "error")
+    assert aggregate["status"] == quote["status"]
+    assert expected in quote["message"]
+    if case != "ready":
+        assert expected in aggregate["message"]
+    row = quote["value"]["required_fields"]["results"][0]
+    if case == "closed":
+        assert row["option_fields_ok"] is True
+        assert row["scan_prerequisites_ok"] is False
+        assert "required option fields unavailable" not in quote["message"]
+    if case == "provider_failure":
+        assert "synthetic provider failure" in row["error"]
+    assert health["data"]["account_paths"]["user1"]["primary"]["ok"] is True
+
+
+@pytest.mark.parametrize("case,expected_status", [
+    ("unavailable", "skipped"),
+    ("unavailable_with_legacy_value", "skipped"),
+    ("unavailable_missing_app_id", "error"),
+    ("missing", "error"),
+    ("present", "ok"),
+])
+def test_healthcheck_distinguishes_credential_context_from_missing_secret(
+    monkeypatch, tmp_path, capsys, case, expected_status,
+):
+    import src.interfaces.cli.main as cli
+    from src.infrastructure.secret_store import factory
+    from src.application.secret_store.registry import FEISHU_BOT_APP_SECRET, require_credential_spec
+
+    monkeypatch.setattr(factory.platform, "system", lambda: "Linux")
+    monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+    monkeypatch.setenv("OM_SECRET_BACKEND", "auto")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "fixture-app")
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "fixture-user")
+    monkeypatch.delenv("OM_FEISHU_BOT_APP_SECRET", raising=False)
+    if case == "unavailable_missing_app_id":
+        monkeypatch.delenv("OM_FEISHU_BOT_APP_ID")
+    if case == "unavailable_with_legacy_value":
+        monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "ignored-fixture-secret")
+    if case in {"missing", "present"}:
+        credentials = tmp_path / "credentials"
+        credentials.mkdir()
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(credentials))
+        if case == "present":
+            name = require_credential_spec(FEISHU_BOT_APP_SECRET).systemd_credential_id
+            (credentials / name).write_text("fixture-secret")
+    cfg = _public_cfg_with_futu("portfolio.runtime.json")
+    cfg["notifications"] = {"provider": "feishu_app"}
+    cfg_path = _write_healthcheck_config(tmp_path, cfg=cfg)
+    _patch_healthcheck_dependencies(monkeypatch)
+    rc = cli.main(["healthcheck", "--config-path", str(cfg_path)])
+    result = json.loads(capsys.readouterr().out)
+    data = result["data"]
+    check = next(c for c in data["checks"] if c["name"] == "notification_credentials")
+    assert check["status"] == expected_status
+    assert rc == (0 if case == "present" else 2)
+    assert data["summary"]["ok"] is (case == "present")
+    if case.startswith("unavailable"):
+        assert "could not be verified" in check["message"]
+        assert check["value"]["credential_context_available"] is False
+        inbound = next(c for c in data["checks"] if c["name"] == "feishu_inbound")
+        assert "unverified" in inbound["message"]
+        channel = next(c for c in data["checks"] if c["name"] == "channel_health")
+        assert "unverified" in channel["message"]
+        assert channel["status"] == "warn"
+    if case == "unavailable_missing_app_id":
+        assert "OM_FEISHU_BOT_APP_ID" in check["message"]
+        assert data["summary"]["critical_count"] > 0
+    if expected_status == "skipped":
+        assert data["summary"]["skipped_count"] == 1
+        assert data["summary"]["reason_code"] == "SECRET_BACKEND_UNAVAILABLE"
+    assert "fixture-secret" not in json.dumps(result)
