@@ -101,10 +101,11 @@ Any drift — a statement added, repointed, or removed — fails `tests/quality/
 | `trades.inbox` 的 enqueue、claim、review、commit scope 和两个 resume 入口 | 收件箱独立存储；原 ledger 锁约束 claim、payload version、身份冲突与经济提交的竞争。commit scope 在进入账本命令前关闭 Inbox 连接，继续持锁。 | `test_trade_intake_recovery.py`：claim 被撤销/抢占、其他入口冲突、进程崩溃后恢复、提交期间 review 竞争 |
 | `trades.resolver.resolve_trade_deal` | apply 时绑定成交身份、幂等判断与后续账本命令选择；实际事件事务由已有 ledger 命令负责。 | `test_trades_resolver_close.py`、`test_trade_intake_recovery.py` |
 | `trades.auto_intake` 的 receipt recovery、skipped recovery 主入口和 source completion | 绑定账本收据读取、Inbox CAS 与来源状态更新；恢复快照查询已归账本 owner，恢复授权和跨库补偿仍归应用。 | `test_trade_receipt_recovery.py`、`test_trades_auto_intake_cli.py` |
+| `trades.auto_intake._process_payload._record_lookup_evidence` | provider 查询结束后，复用可重入 writer 锁绑定 Inbox 来源/复核事务及其回读，防止后续经济决策读取被竞争改写的结果；不开启账本 SQL 事务。 | `test_trades_auto_intake_cli.py`：回读时跨进程非阻塞锁探针、异常回读拒绝；`test_trades_inbox.py`：复核与来源同事务回滚、旧 claim 失效 |
 | `positions.workflows.execute_broker_assigned_stock_sale` | 锁内匹配股票批次并调用现有账本卖出命令；事件写入、余额复验与投影仍由 ledger 事务负责。 | `test_assigned_stock_sale_intake.py`：真实事件/投影、幂等及失败回滚 |
 | `bot.control.attribution_operations._finish_attribution_operation` | 将签名操作状态、取消/恢复与完整账本收据绑定，防止迟到 worker 重获写入资格；归属命令继续持有经济事务。 | `test_attribution_operations.py`：取消后迟到 worker、提交后收据恢复和读回失败 |
 
-`test_remaining_ledger_coordination_locks_have_reviewed_owners` 固定上述 5 个模块、12 个函数的调用范围，并禁止非 ledger 运行代码重新导入/访问低层事务函数。该静态门禁识别相对导入、别名和新增/嵌套调用点；动态反射不在其证明范围。Inbox 自有 SQL、quality/research 独立物理诊断仍遵守各自 owner 和现有 SQL 门禁，不因共享账本查询而删除必要的独立验证。
+`test_remaining_ledger_coordination_locks_have_reviewed_owners` 固定上述 5 个模块、13 个函数的调用范围，并禁止非 ledger 运行代码重新导入/访问低层事务函数。该静态门禁识别相对导入、别名和新增/嵌套调用点；动态反射不在其证明范围。Inbox 自有 SQL、quality/research 独立物理诊断仍遵守各自 owner 和现有 SQL 门禁，不因共享账本查询而删除必要的独立验证。
 
 
 成交容量入口只适配证据资格与配置，数量对账和容量计算复用 `domain.domain.risk_capacity.evaluate_booked_option_capacity`，Wheel 预留转换复用领域 intents owner。`tests/test_booked_option_capacity.py` 覆盖账本/券商错配、未知与真实零、跨账户、原币占用和预留转换；`tests/test_trade_attribution_ledger_command.py` 验证 ledger 与 Wheel 兼容入口实际委托同一领域判定，过期证据在委托前拒绝。

@@ -151,6 +151,42 @@ def test_underlying_conflict_requires_quarantine_readback(tmp_path, monkeypatch,
     assert repo.list_trade_events() == [] and repo.list_position_lots() == []
 
 
+def test_underlying_quarantine_readback_holds_cross_process_writer_lock(tmp_path, monkeypatch):
+    from tests.test_trades_lookup_economics import _gateway, _payload, _setup
+
+    payload = _payload(qty="1", price="2.50", underlying_symbol="US.NVDA")
+    _gateway(monkeypatch, {"acc_id": "123", "deal_id": payload["deal_id"], "order_id": payload["order_id"],
+        "owner_stock_code": "US.AAPL", "qty": "1", "price": "2.50"})
+    repo, _, process = _setup(tmp_path)
+    real_read = auto_intake.read_trade_payload
+    probes = []
+
+    def read(*args, **kwargs):
+        row = real_read(*args, **kwargs)
+        if row and row["result_reason"] == "broker_underlying_symbol_conflict":
+            probe = subprocess.run([sys.executable, "-c", """
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR)
+try:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit(0)
+    sys.exit(1)
+finally:
+    os.close(fd)
+""", str(repo.db_path) + ".writer.lock"], capture_output=True, text=True, timeout=5)
+            assert probe.returncode == 0, probe.stderr or "writer lock was released before readback"
+            probes.append(True)
+        return row
+
+    monkeypatch.setattr(auto_intake, "read_trade_payload", read)
+    result = process(payload)
+    assert result["reason"] == "broker_underlying_symbol_conflict"
+    assert probes == [True]
+    assert repo.list_trade_events() == [] and repo.list_position_lots() == []
+
+
 def test_intake_result_failures_have_journal_warning_level(capsys) -> None:
     failed = {"status": "failed", "account": "lx", "deal_id": "d-1"}
     receipt_missing = {"status": "handled", "account": "lx", "deal_id": "d-2",
