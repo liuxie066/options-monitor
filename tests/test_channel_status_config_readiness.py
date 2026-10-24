@@ -75,7 +75,7 @@ def _exercise(tmp_path, monkeypatch, *, source, kind, location="top", active=Tru
         repo_base_fn=lambda: tmp_path,
         channel_status_response_fn=status_response,
     )
-    check, warnings = _channel_health_check(status["data"])
+    check, warnings = _channel_health_check(status["data"], credential_context_available=True)
 
     def forbidden_serve(*_args, **_kwargs):
         pytest.fail("serve-check must not enter the real service")
