@@ -408,6 +408,7 @@ class OMQualityService:
 
         runtime_checks = build_runtime_checks(
             runtime_statuses=runtime_statuses,
+            runtime_status_errors=runtime_errors,
             observed_at_utc=observed_at,
             now=now,
         )
