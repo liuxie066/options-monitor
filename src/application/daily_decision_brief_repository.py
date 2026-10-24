@@ -2456,12 +2456,16 @@ def query_daily_brief_receipts(*, base: Path, account: str, market: str, query: 
     if not result.get("available"):
         raise ValueError("daily_brief_" + str(result.get("reason")))
     selected_key = None
+    selected_envelope = None
     if query.get("run_id"):
         run_id = _normalize_run_id(query["run_id"])
         plan = read_receipt_json(paths.run_account_state_dir(base, run_id, account) / f"daily_decision_brief_delivery_plan.{market}.json")
         if plan.get("account") != account or plan.get("market") != market or plan.get("run_id") != run_id:
             raise ValueError("daily_brief_run_scope_mismatch")
-        selected_key = (plan.get("envelope") or {}).get("delivery_key")
+        selected_envelope = plan.get("envelope")
+        if not isinstance(selected_envelope, Mapping):
+            raise ValueError("daily_brief_run_plan_invalid")
+        selected_key = selected_envelope.get("delivery_key")
         if not selected_key:
             raise ValueError("daily_brief_run_plan_invalid")
     rows = []
@@ -2472,6 +2476,8 @@ def query_daily_brief_receipts(*, base: Path, account: str, market: str, query: 
         for item in envelopes:
             if selected_key and item["delivery_key"] != selected_key:
                 continue
+            if selected_envelope is not None and _delivery_envelope_content(selected_envelope) != _delivery_envelope_content(item):
+                raise ValueError("daily_brief_run_content_mismatch")
             event = receipt_event(source="daily_brief", event_id=item["delivery_key"], account=account, market=market,
                 kind="monitor" if item["delivery_kind"] == "candidate_alert" else "scheduled",
                 occurred=item.get("first_prepared_at_utc"), recorded=item.get("last_attempt_at_utc"),

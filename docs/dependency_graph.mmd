@@ -1,5 +1,5 @@
 flowchart LR
-  src_application["src.application"] -->|267| domain_domain["domain.domain"]
+  src_application["src.application"] -->|268| domain_domain["domain.domain"]
   src_application_ledger["src.application.ledger"] -->|177| domain_domain["domain.domain"]
   src_interfaces["src.interfaces"] -->|159| src_application["src.application"]
   src_application["src.application"] -->|134| src_infrastructure["src.infrastructure"]
@@ -46,8 +46,8 @@ flowchart LR
   src_interfaces["src.interfaces"] -->|6| src_application_research["src.application.research"]
   src_interfaces["src.interfaces"] -->|6| src_application_settings["src.application.settings"]
   src_interfaces["src.interfaces"] -->|6| src_infrastructure["src.infrastructure"]
+  domain_domain_engine["domain.domain.engine"] -->|5| domain_domain["domain.domain"]
   src_application_positions["src.application.positions"] -->|5| src_application_ledger["src.application.ledger"]
-  domain_domain_engine["domain.domain.engine"] -->|4| domain_domain["domain.domain"]
   scripts["scripts"] -->|4| src_application_trades["src.application.trades"]
   src_application_ledger["src.application.ledger"] -->|4| src_application_trades["src.application.trades"]
   src_application_settings["src.application.settings"] -->|4| src_application["src.application"]

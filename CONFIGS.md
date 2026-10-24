@@ -40,6 +40,7 @@ env-file 不是合并进生成快照的配置层；它在进程启动或工具�
 - per-symbol 策略 override 放在 `markets.<market>.overrides.<symbol>`；
 - US 调度 override 放在 `markets.us.schedule`，例如通过 `gates` 设置北京时间截止点；
 - YAML 中使用 `covered_call`，生成的内部 runtime / CSV / trace key 仍可能是 `sell_call`；
+- 普通 `sell_put` / `covered_call` 的 `max_abs_delta` 省略默认 `0.40`；显式 `null` 关闭该门槛，有限 `[0,1]` 数字覆盖。旧配置省略字段也启用新默认，详见 [配置指南](CONFIGURATION_GUIDE.md#市场与-symbol-override)。
 - `combo_yield` 是当前开仓策略 key；旧 `yield_enhancement` 只在明确兼容边界读取；
 - `portfolio_management.enabled` 是全局、默认关闭的 PM 集成开关，控制 PM 只读工具、
   Holdings 开启时的补充来源和成交后的持仓刷新提示；不要放在 `markets.*` 下；

@@ -180,6 +180,7 @@ def run_cc_lp_scan(
         sell_call_cfg={
             **sell_call_cfg,
             "strategy": "insurance_underwriting",
+            "max_abs_delta": None,  # Combo funding Call retains its existing leg policy.
         },
         portfolio_ctx=portfolio_ctx,
         exchange_rate_converter=exchange_rate_converter,

@@ -108,6 +108,81 @@ def test_auth_required_stops_without_retry_and_writes_blocked_status(
     assert _Listener.starts == 1
 
 
+@pytest.mark.parametrize("message,code,auth_required", [
+    ("quote not logged in", "OPEND_QOT_NOT_LOGINED", False),
+    ("trade not logged in", "OPEND_TRD_NOT_LOGINED", False),
+    ("not logged in", "OPEND_API_ERROR", False),
+    ("not login", "OPEND_API_ERROR", False),
+    ("需要手机验证码", "OPEND_NEEDS_PHONE_VERIFY", True),
+    ("需要图形验证码", "OPEND_NEEDS_PIC_VERIFY", True),
+    ("登录密码被修改,已退出登录", "OPEND_LOGIN_INVALID", True),
+])
+def test_real_listener_login_evidence_selects_existing_restart_policy(
+    tmp_path: Path, monkeypatch, message, code, auth_required,
+):
+    from src.infrastructure.futu_trade_push import OpenDTradePushListener
+
+    contexts = []
+    history_closed = []
+    statuses = []
+    write_status = auto_intake._write_listener_status
+    waits, stop = _backoff_clock(monkeypatch, stop_when=lambda _seconds, total: total >= 5)
+
+    class Context:
+        closed = 0
+
+        def set_handler(self, _handler):
+            pass
+
+        def start(self):
+            pass
+
+        def get_global_state(self):
+            return -1, message
+
+        def close(self):
+            self.closed += 1
+
+    class History:
+        def __init__(self, **_kwargs):
+            pass
+
+        def close(self):
+            history_closed.append(self)
+
+    def build_context(_listener):
+        context = Context()
+        contexts.append(context)
+        return context, object()
+
+    def record_status(*args, **kwargs):
+        statuses.append(dict(kwargs))
+        return write_status(*args, **kwargs)
+
+    monkeypatch.setattr(OpenDTradePushListener, "_build_default_context", build_context)
+    monkeypatch.setattr(auto_intake, "OpenDHistoryDealClient", History)
+    monkeypatch.setattr(auto_intake, "_write_listener_status", record_status)
+    monkeypatch.setattr(auto_intake, "build_futu_gateway", lambda **_kwargs: pytest.fail("unexpected provider"))
+    rc = _run(tmp_path, monkeypatch, OpenDTradePushListener, stop_event=stop)
+
+    assert len(contexts) == 1 and contexts[0].closed == 1
+    assert len(history_closed) == 1 and stop.is_set()
+    status = json.loads((tmp_path / "status.json").read_text())
+    if auth_required:
+        assert rc == auto_intake.TRADE_INTAKE_AUTH_REQUIRED_EXIT_CODE == 78
+        assert waits == []
+        assert status["status"] == "blocked" and status["stage"] == "auth_required"
+        assert status["error_code"] == code and status["reason_code"] == code
+        assert not any(row["status"] == "reconnecting" for row in statuses)
+    else:
+        assert rc == 0 and waits == [1] * 5
+        reconnecting = [row for row in statuses if row["status"] == "reconnecting"]
+        assert len(reconnecting) == 1 and reconnecting[0]["reconnect_delay_sec"] == 5
+        assert reconnecting[0]["restart_count"] == 1 and code in reconnecting[0]["last_error"]
+        assert status["status"] == "stopped" and status["stage"] == "stop_event"
+        assert status["restart_count"] == 1
+
+
 def test_retryable_disconnect_recovers_and_resets_to_floor(tmp_path: Path, monkeypatch) -> None:
     waits, stop_event = _backoff_clock(monkeypatch, stop_when=lambda seconds, _total: seconds == 0)
 
