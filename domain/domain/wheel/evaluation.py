@@ -41,6 +41,8 @@ def evaluate_wheel_call_candidate(
     realized_stock = _finite_float(batch.get("realized_prior_stock_sale_net_pnl"))
     fee_amount = _finite_float(stock_exit_fee_fact.get("amount"))
     fee_basis = str(stock_exit_fee_fact.get("basis") or "").strip().lower()
+    candidate_currency = str(result.get("currency") or "").strip().upper()
+    batch_currency = str(batch.get("currency") or "").strip().upper()
     min_abs_delta, max_abs_delta = _wheel_abs_delta_bounds(wheel_policy)
     for field, value in (
         ("multiplier_unavailable", multiplier),
@@ -61,6 +63,10 @@ def evaluate_wheel_call_candidate(
             unavailable.append(field)
     if fee_basis not in {"actual", "estimated"}:
         unavailable.append("stock_exit_fee_unavailable")
+    if not candidate_currency or not batch_currency:
+        unavailable.append("currency_unavailable")
+    elif candidate_currency != batch_currency:
+        unavailable.append("currency_mismatch")
     if unavailable:
         return {
             **result,

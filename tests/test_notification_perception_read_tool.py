@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from src.application import query_cursor
 
+import errno
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -539,6 +541,85 @@ def test_window_tool_distinguishes_missing_sources_from_empty_files(
     assert audit.parent.exists() is (source_state != "missing_parent")
     if empty:
         assert audit.read_bytes() == b""
+
+
+@pytest.mark.parametrize("source_scope", ["run", "shared"])
+@pytest.mark.parametrize("change", ["append", "truncate"])
+def test_window_tool_signed_cursor_handles_same_inode_size_change(
+    window_tool, monkeypatch, source_scope: str, change: str,
+) -> None:
+    # Native truncation is CI-only under the local fixture-retention policy.
+    root, query = window_tool
+    audit, scope = _window_source(root, source_scope)
+    audit.parent.mkdir(parents=True)
+    _append(audit, _window_row("window-run", "notification_prepared", "chat"))
+    _append(audit, _window_row("window-run", "notification_delivery_decided", "chat"))
+    original = audit.read_bytes()
+    before = audit.stat()
+    initial_inventory = _window_inventory(root)
+
+    first = query(**scope, limit=1)
+
+    assert first["ok"] is True
+    initial = first["data"]
+    assert initial["summary"]["total_count"] == 2
+    assert initial["summary"]["returned_count"] == 1
+    assert [event["event_kind"] for event in initial["events"]] == ["notification_delivery_decided"]
+    cursor = initial["next_cursor"]
+    assert isinstance(cursor, str) and cursor
+    assert _window_inventory(root) == initial_inventory
+    if change == "truncate":
+        prefix = original.splitlines(keepends=True)[0]
+        with audit.open("r+b") as handle:
+            handle.truncate(len(prefix))
+        assert audit.read_bytes() == prefix
+        assert json.loads(prefix) == _window_row("window-run", "notification_prepared", "chat")
+        assert audit.stat().st_size == len(prefix) < before.st_size
+    else:
+        _append(audit, _window_row("window-run", "notification_delivery_completed", "appended-chat"))
+        assert audit.read_bytes().startswith(original)
+        assert audit.stat().st_size > before.st_size
+    after = audit.stat()
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    changed_inventory = _window_inventory(root)
+    original_open = os.open
+    opened = []
+
+    def observed_open(name, flags, mode=0o777, *, dir_fd=None):
+        descriptor = original_open(name, flags, mode, dir_fd=dir_fd)
+        if name == audit.name:
+            opened.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(os, "open", observed_open)
+    monkeypatch.setattr(os, "supports_dir_fd", {*os.supports_dir_fd, observed_open})
+
+    response = query(**scope, limit=1, cursor=cursor)
+
+    if change == "truncate":
+        assert response["ok"] is False
+        assert response["error"]["code"] == "INPUT_ERROR"
+        assert response["error"]["message"] == "source_changed"
+        assert response["data"] == {}
+    else:
+        assert response["ok"] is True
+        data = response["data"]
+        assert data["summary"]["status"] == "ok"
+        assert data["summary"]["total_count"] == 2
+        assert data["summary"]["returned_count"] == 1
+        assert data["source_hash"] == initial["source_hash"]
+        assert data["coverage"]["scanned_bytes"] == len(original)
+        assert [(event["run_id"], event["event_kind"]) for event in data["events"]] == [
+            ("window-run", "notification_prepared"),
+        ]
+        assert data["pagination"]["has_more"] is False
+        assert data["next_cursor"] is None
+    assert _window_inventory(root) == changed_inventory
+    assert opened
+    for descriptor in opened:
+        with pytest.raises(OSError) as caught:
+            os.fstat(descriptor)
+        assert caught.value.errno == errno.EBADF
 
 
 @pytest.mark.parametrize(
