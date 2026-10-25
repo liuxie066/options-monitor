@@ -420,3 +420,132 @@ def test_cli_no_reply_blocks_old_outbox_and_new_response(recovery, monkeypatch):
     monkeypatch.setattr(cli, "serve_feishu_ws", serve)
     assert cli.main(["inbound", "feishu-ws", "--no-reply", "--audit-db", settings.audit_db]) == 0
     assert store.list_replies() == before
+
+
+@pytest.mark.parametrize("channel", ["feishu", "wechat"])
+@pytest.mark.parametrize("state", ["processing", "expired", "incomplete"])
+def test_claim_observations_do_not_occupy_final_outbox_identity(
+    tmp_path, monkeypatch, example_config_path, channel, state,
+):
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+    from src.application.agent_tool_contracts import build_response
+    from src.application.bot.control.audit import InboundAuditStore
+    from src.application.bot.control.settings import BotSettings
+    from src.application.channels.wechat_clawbot import inbound as wechat
+    from src.application.inbound.feishu import handle_feishu_payload
+    from tests.test_inbound_feishu_ws import _message_payload
+
+    path = str(tmp_path / "observations.sqlite3")
+    settings = FeishuWsSettings(config_path=str(example_config_path), audit_db=path,
+        allowed_senders="feishu:ou_1", app_id="synthetic-app", app_secret="synthetic-secret")
+    state_dir = str(tmp_path / "synthetic-wechat-state")
+    message = {"from_user_id": "ou_1", "message_id": "observation", "context_token": "synthetic-context",
+               "item_list": [{"type": 1, "text_item": {"text": "/status"}}]}
+    event = _message_payload(text="/status", message_id="observation")
+    started, release = threading.Event(), threading.Event()
+    effects, sends = [], []
+    counts = {"enqueue": 0, "claim": 0}
+    enqueue, claim = BotHostStore.enqueue_reply, BotHostStore.claim_reply
+    def enqueue_counted(self, *args, **kwargs):
+        counts["enqueue"] += 1
+        return enqueue(self, *args, **kwargs)
+    def claim_counted(self, *args, **kwargs):
+        counts["claim"] += 1
+        return claim(self, *args, **kwargs)
+    monkeypatch.setattr(BotHostStore, "enqueue_reply", enqueue_counted)
+    monkeypatch.setattr(BotHostStore, "claim_reply", claim_counted)
+    def tool(name, payload):
+        effects.append("effect")
+        started.set()
+        assert release.wait(10)
+        if state == "incomplete":
+            raise RuntimeError("effect observed but final result lost")
+        return build_response(tool_name=name, ok=True, data={"state": "final-business-result"})
+    def receive():
+        kwargs = dict(config_path=str(example_config_path), audit_db=path, allowed_senders=f"{channel}:ou_1",
+                      execute_tool_fn=tool, bot_settings=BotSettings(enabled=True))
+        if channel == "feishu":
+            return handle_feishu_payload(event, bot_reply_options={"reply_sender_identity": settings.app_id}, **kwargs)
+        return wechat.handle_wechat_clawbot_message(message, base=tmp_path, label="synthetic",
+            state_dir=state_dir, **kwargs)
+    def deliver(inbound):
+        if channel == "feishu":
+            def send(**kwargs):
+                guard = kwargs.pop("before_send", None)
+                if guard is not None:
+                    guard()
+                sends.append(kwargs)
+                return {"code": 0, "data": {"message_id": "final-receipt"}}
+            return feishu_ws._maybe_reply(inbound=inbound, settings=settings, reply_fn=send)
+        def send(**kwargs):
+            sends.append(kwargs)
+            return {"ret": 0, "message_id": "final-receipt"}
+        return wechat._maybe_reply(message=message, inbound=inbound,
+            client=SimpleNamespace(send_text_message=send), reply_enabled=True, max_reply_chars=3500,
+            audit_db=path, allowed_senders_fn=lambda: "wechat:ou_1", config_path=str(example_config_path),
+            transport_identity=state_dir)
+    store = BotHostStore(path)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(receive)
+        try:
+            assert started.wait(10)
+            observation = receive()
+            assert observation["error"]["code"] == "INBOUND_PROCESSING"
+            status = deliver(observation)
+            assert status == {"attempted": False, "ok": True, "reason": "inbound_processing"}
+            assert counts == {"enqueue": 0, "claim": 0} and sends == []
+            assert not store.list_replies()
+            if state == "expired":
+                with sqlite3.connect(path) as conn:
+                    conn.execute("UPDATE inbound_command_audit SET execution_expires_at_utc='2000-01-01T00:00:00+00:00'")
+                observation = receive()
+                assert observation["error"]["code"] == "INBOUND_INCOMPLETE"
+                assert deliver(observation)["reason"] == "inbound_incomplete"
+                assert not store.list_replies() and counts == {"enqueue": 0, "claim": 0}
+                assert InboundAuditStore(path).list_recent()[0]["execution_state"] == "processing"
+        finally:
+            release.set()
+        final = future.result(timeout=10)
+    if state == "incomplete":
+        assert not final["ok"] and final["error"]["code"] == "INBOUND_INCOMPLETE"
+        assert deliver(final)["reason"] == "inbound_incomplete"
+        assert receive()["error"]["code"] == "INBOUND_INCOMPLETE"
+        assert sends == [] and not store.list_replies()
+        assert counts == {"enqueue": 0, "claim": 0}
+    else:
+        assert final["ok"], final
+        assert deliver(final)["ok"] is True
+        rows = store.list_replies()
+        assert len(rows) == 1 and rows[0]["status"] == "delivered"
+        command_id = final["data"]["inbound_result"]["command_id"]
+        assert rows[0]["delivery_key"] == f"{channel}:{command_id}"
+        replay = receive()
+        assert replay["meta"]["idempotent_replay"]
+        assert deliver(replay)["reason"] == "idempotent_replay"
+        assert len(sends) == 1
+        assert "处理中" not in json.dumps(sends, ensure_ascii=False)
+        assert "结果未确认" not in json.dumps(sends, ensure_ascii=False)
+    assert effects == ["effect"]
+
+
+@pytest.mark.parametrize(
+    ("code", "enabled", "expected"),
+    [("INBOUND_PROCESSING", True, "inbound_processing"),
+     ("INBOUND_INCOMPLETE", True, "inbound_incomplete"),
+     ("INBOUND_PROCESSING", False, "reply_disabled"),
+     ("SYNTHETIC_FAILURE", True, "send"),
+     ("PERMISSION_DENIED", True, "permission_denied")],
+)
+def test_observation_filter_preserves_other_shared_reply_decisions(code, enabled, expected):
+    from src.application.channels.reply_decision import decide_inbound_reply
+    error = {"code": code, "message": "sender is not allowed to use Bot control" if code == "PERMISSION_DENIED" else "known result"}
+    inbound = {"ok": False, "data": {"kind": "message", "response_text": "visible response",
+        "inbound_result": {"ok": False, "error": error}}}
+    decision = decide_inbound_reply(inbound, reply_enabled=enabled, max_reply_chars=100)
+    if expected == "send":
+        assert decision.should_send and decision.text == "visible response"
+    else:
+        assert not decision.should_send and decision.status["reason"] == expected
+    assert inbound["data"]["response_text"] == "visible response"
+    assert inbound["data"]["inbound_result"]["error"]["code"] == code
