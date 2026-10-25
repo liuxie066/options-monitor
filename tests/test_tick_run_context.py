@@ -132,3 +132,22 @@ def test_failed_tick_record_retains_account_outcomes_for_replay(tmp_path):
         write_record_fn=lambda *args, **kwargs: saved.append(kwargs["payload"]))
     assert saved[0]["account_outcomes"] == outcomes
     assert outcomes[1] == {"account": "sy", "scan_ok": False, "notify_failed": False, "failure_notification_confirmed": True}
+
+
+def test_complete_tick_real_owner_rejects_old_run_and_preserves_successor(tmp_path):
+    import json
+    import pytest
+    from domain.storage.repositories import state_repo
+    from src.application.tick_run_context import complete_tick_idempotency
+
+    state_repo.claim_idempotency_record(tmp_path, scope='tick_execution', key='same-key',
+                                       payload={'run_id': 'old', 'pid': 99999999})
+    successor = state_repo.claim_idempotency_record(tmp_path, scope='tick_execution', key='same-key',
+                                                   payload={'run_id': 'successor'})
+    before = successor['path'].read_bytes()
+    with pytest.raises(RuntimeError, match='ownership'):
+        complete_tick_idempotency(base=tmp_path, key='same-key', run_id='old', market_config='us', accounts=['lx'])
+    assert successor['path'].read_bytes() == before
+    complete_tick_idempotency(base=tmp_path, key='same-key', run_id='successor', market_config='us', accounts=['lx'])
+    saved = json.loads(successor['path'].read_text())
+    assert saved['run_id'] == 'successor' and saved['status'] == 'completed' and saved['ok']

@@ -91,6 +91,7 @@ def test_watchdog_timeout_should_not_degrade_and_should_skip_pipeline(
     monkeypatch,
 ) -> None:
     mt = importlib.import_module("src.application.multi_account_tick")
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent / "runtime"))
 
     events: list[dict] = []
     scheduler_called = {"value": 0}
@@ -110,7 +111,6 @@ def test_watchdog_timeout_should_not_degrade_and_should_skip_pipeline(
     monkeypatch.setattr(mt, "send_opend_alert", lambda *a, **k: None)
     monkeypatch.setattr(mt, "admit_project_run", lambda *_a, **_k: {"allowed": True})
     monkeypatch.setattr(mt.state_repo, "write_account_last_run", lambda *a, **k: None)
-    monkeypatch.setattr(mt.state_repo, "claim_idempotency_record", lambda *a, **k: {"claimed": True})
     monkeypatch.setattr(mt.state_repo, "append_audit_event", lambda *a, **k: None)
     monkeypatch.setattr(mt, "is_opend_phone_verify_pending", lambda _base: False)
 
@@ -138,13 +138,13 @@ def test_phone_verify_pending_fails_without_reprobe(
     argv_scope, example_config_path, fake_runlog_factory, monkeypatch,
 ) -> None:
     mt = importlib.import_module("src.application.multi_account_tick")
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent / "runtime"))
     events = []
     monkeypatch.setattr(mt, "RunLogger", lambda base: fake_runlog_factory(events))
     monkeypatch.setattr(mt, "is_opend_phone_verify_pending", lambda _base: True)
     monkeypatch.setattr(mt, "run_opend_watchdog", lambda **_kwargs: (_ for _ in ()).throw(
         AssertionError("pending login must not be reprobed")))
     monkeypatch.setattr(mt, "admit_project_run", lambda *_a, **_k: {"allowed": True})
-    monkeypatch.setattr(mt.state_repo, "claim_idempotency_record", lambda *a, **k: {"claimed": True})
     monkeypatch.setattr(mt.state_repo, "append_audit_event", lambda *a, **k: None)
     argv_scope(["om", "--config", str(example_config_path), "--accounts", "lx",
                 "--market-config", "us", "--no-send"])
