@@ -3567,18 +3567,19 @@ def test_rollback_identity_rejects_path_and_version_failures(transition_case, mo
             }[fault]
             (target / "VERSION").write_bytes(content)
     before = case.snapshot()
-    read_version = upgrade._read_version
+    read_text = Path.read_text
 
-    def read(path):
-        if Path(path) == target:
+    def read(path, *args, **kwargs):
+        if path == target / "VERSION":
             if fault == "permission":
                 raise PermissionError("synthetic VERSION access failure")
             if fault == "io_error":
                 raise OSError("synthetic VERSION read failure")
-        assert Path(path) == case.current.resolve() or Path(path).is_relative_to(case.releases)
-        return read_version(path)
+        if path.name == "VERSION":
+            assert path.parent == case.current.resolve() or path.parent.is_relative_to(case.releases)
+        return read_text(path, *args, **kwargs)
 
-    monkeypatch.setattr(upgrade, "_read_version", read)
+    monkeypatch.setattr(Path, "read_text", read)
     out = case.invoke("rollback", "3.0.0", confirm=confirm)
     assert out["ok"] is False
     data = out["data"]
@@ -3639,25 +3640,27 @@ def test_rollback_identity_busy_skips_admission(transition_case, monkeypatch, ta
     case = transition_case()
     case.status.write_text('{"status":"holder-sentinel"}\n')
     before = case.snapshot()
-    read_version = upgrade._read_version
+    read_text = Path.read_text
 
-    def read(path):
-        assert Path(path) == case.current.resolve(), "busy contender read target VERSION"
-        return read_version(path)
+    def read(path, *args, **kwargs):
+        if path.name == "VERSION":
+            assert path.parent == case.current.resolve(), "busy contender read target VERSION"
+        return read_text(path, *args, **kwargs)
 
-    monkeypatch.setattr(upgrade, "_read_version", read)
-    with upgrade._UpgradeLock(case.pid):
+    monkeypatch.setattr(Path, "read_text", read)
+    with upgrade.single_instance_lock(case.guard, busy_message="fixture guard busy"):
         identity = case.guard.stat().st_ino
         data = case.invoke("rollback", target)["data"]
         assert data["status"] == data["failure_status"] == "rollback_failed"
         assert "upgrade lock already exists" in data["error"]
-        assert case.pid.exists() and case.guard.stat().st_ino == identity
+        assert not case.pid.exists() and case.guard.stat().st_ino == identity
         assert case.snapshot() == before and case.commands == []
     assert not case.pid.exists()
 
 
 def test_rollback_identity_failure_receipt_error_releases_lock_and_retry(transition_case, monkeypatch):
     from src.application import service_upgrade as upgrade
+    from src.application.agent_tool_contracts import AgentToolError
 
     case = transition_case()
     writer = upgrade.write_upgrade_status
@@ -3666,9 +3669,11 @@ def test_rollback_identity_failure_receipt_error_releases_lock_and_retry(transit
 
     def fail(**kwargs):
         assert kwargs["payload"]["status"] == "rollback_target_invalid"
-        with pytest.raises(RuntimeError, match="upgrade lock already exists"):
-            with upgrade._UpgradeLock(case.pid):
+        with pytest.raises(AgentToolError, match="fixture guard busy") as busy:
+            with upgrade.single_instance_lock(case.guard, busy_message="fixture guard busy"):
                 pytest.fail("failure receipt writer did not hold guard")
+        assert busy.value.code == "RESOURCE_BUSY"
+        assert busy.value.details == {"lock_path": str(case.guard)}
         raise error
 
     monkeypatch.setattr(upgrade, "write_upgrade_status", fail)
