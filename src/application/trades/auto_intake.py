@@ -412,9 +412,22 @@ def _receipt_preparation_scope(*, source: dict[str, Any], deal: Any, result: dic
 
 
 def _readback_trade_receipt_result(*, repo: Any, deal: Any,
-                                  result: dict[str, Any]) -> dict[str, Any]:
+                                  result: dict[str, Any],
+                                  observed_attempt_count: int | None = None) -> dict[str, Any]:
     """Resolve uncertain writes from one read-only snapshot, never through the writer."""
     diagnostics = dict(result.get("diagnostics") or {})
+    policy = result.get("retry_policy")
+    saved_attempt_count = policy.get("attempt_count") if isinstance(policy, dict) else None
+    if (result.get("status") == "failed"
+            and diagnostics.get("exception_stage") == "lifecycle_context_read"
+            and diagnostics.get("write_outcome") == "not_started"
+            and result.get("receipt_kind") not in {"recorded", "verification_pending"}
+            and type(saved_attempt_count) is int and saved_attempt_count > 0
+            and type(observed_attempt_count) is int and observed_attempt_count > 0
+            and saved_attempt_count == observed_attempt_count):
+        # The original saved policy must prove the observed latest attempt;
+        # a newer claim retains an older result until it saves its own outcome.
+        return result
     try:
         if deal is None or not getattr(deal, "execution_input", None):
             raise ValueError("execution identity unavailable for readback")
@@ -497,7 +510,8 @@ def recover_trade_intake_receipts(*, repo: Any, source: dict[str, Any],
                 # Keep compensation -> repository -> Inbox order; an expired lease may still be committing.
                 with with_sqlite_repo_writer_lock(repo):
                     if row["status"] == "pending":
-                        prepared = {**prepared, **_readback_trade_receipt_result(repo=repo, deal=deal, result=result)}
+                        prepared = {**prepared, **_readback_trade_receipt_result(
+                            repo=repo, deal=deal, result=result, observed_attempt_count=row["attempt_count"])}
                     prepared.setdefault("_receipt_payload", _receipt_deal_snapshot(deal))
                     result = prepare_trade_receipt_result(path, inbox_id=row["inbox_id"], result=prepared,
                         expected_payload_version=row["payload_version"], expected_result=row.get("result"),

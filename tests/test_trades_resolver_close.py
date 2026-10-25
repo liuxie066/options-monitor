@@ -2914,3 +2914,50 @@ def test_strict_execution_multiplier_cannot_be_repaired_from_dto_or_lot(tmp_path
         record_normalized_trade_event(repo, deal)
     with repo._connect() as conn:
         assert tuple(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("apply_changes", [False, True])
+def test_lifecycle_context_read_failure_is_explicit(tmp_path, monkeypatch, apply_changes):
+    import sqlite3
+
+    repo = _open_lot(tmp_path, contracts=1)
+    before = repo.list_trade_events(), repo.list_position_lots()
+    failure = sqlite3.OperationalError("database is locked")
+    failure.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    def unavailable():
+        raise failure
+    monkeypatch.setattr(repo, "list_position_lots", unavailable)
+    stock = _deal(asset_type="stock", option_type=None, position_effect=None,
+        symbol="TIGR", side="buy", contracts=100, price=6, strike=None,
+        multiplier=None, expiration_ymd=None, currency="USD", trade_time_ms=1779468400000,
+        execution_input={})
+    with pytest.raises(Exception) as raised:
+        resolve_trade_deal(stock, repo=repo, state={}, apply_changes=apply_changes)
+    assert type(raised.value).__name__ == "LifecycleContextReadError"
+    assert raised.value.cause is failure
+    assert raised.value.__cause__ is failure
+    assert raised.value.cause.sqlite_errorcode == sqlite3.SQLITE_BUSY
+    monkeypatch.undo()
+    assert (repo.list_trade_events(), repo.list_position_lots()) == before
+    assert repo.list_trade_lifecycle_cases() == []
+    assert repo.list_trade_lifecycle_evidence() == []
+
+
+def test_lifecycle_context_preserves_claim_loss_and_empty_lots(tmp_path, monkeypatch):
+    from src.application.trades.inbox import TradePayloadClaimLost
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    stock = _deal(asset_type="stock", option_type=None, position_effect=None,
+        symbol="TIGR", side="buy", contracts=100, price=6, strike=None,
+        multiplier=None, expiration_ymd=None, currency="USD", trade_time_ms=1779468400000,
+        execution_input={})
+    empty = resolve_trade_deal(stock, repo=repo, state={}, apply_changes=True)
+    assert (empty.status, empty.reason) == ("skipped", "not_option_deal")
+    lost = TradePayloadClaimLost("replaced owner")
+    def unavailable():
+        raise lost
+    monkeypatch.setattr(repo, "list_position_lots", unavailable)
+    with pytest.raises(TradePayloadClaimLost) as raised:
+        resolve_trade_deal(stock, repo=repo, state={}, apply_changes=True)
+    assert raised.value is lost
+    assert repo.list_trade_lifecycle_evidence() == []

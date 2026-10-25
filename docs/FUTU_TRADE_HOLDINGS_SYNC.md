@@ -488,6 +488,11 @@ SDK 转换丢字段。无身份记录只保留证据，关联必须经既有证�
 
 ### 普通成交回执与恢复
 
+股票生命周期 fallback 在写入前读取 lot 失败时，不能判定为没有生命周期上下文而跳过。
+该失败保留原异常，沿现有暂态分类与 Inbox 预算重试；非暂态错误要求处理，正常空集合仍按原规则跳过。
+持久恢复仅在原失败结果的 attempt 计数与当前观察完全相同时承认本次尚未写入；
+缺少证明或跨 attempt 的旧结果仍走原 canonical readback，无法核验则保持待核对，不能盲重试。
+
 以现有 Inbox 为唯一持久化 owner。扩展 `receipt_json` 为显式版本的记录，按语义保存
 `pending_retry`、`recorded`、`manual_required`、`verification_pending` 回执，而不是每次异常建立新通知。
 这些是普通回执的结果版本，不是新的交易生命周期状态。JSON envelope 包含 schema_version、

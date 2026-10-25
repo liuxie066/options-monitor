@@ -52,9 +52,18 @@ from src.application.trades.lifecycle_reconciliation import (
     reconcile_lifecycle_evidence,
 )
 from src.application.trades.normalizer import NormalizedTradeDeal
+from src.application.trades.inbox import TradePayloadClaimLost
 
 
 EARLY_LIFECYCLE_STOCK_OPTION_WINDOW_MS = 5 * 60 * 1000
+
+
+class LifecycleContextReadError(Exception):
+    """The fallback lot read failed before this lifecycle attempt could write."""
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
 
 
 @dataclass(frozen=True)
@@ -1485,8 +1494,10 @@ def _stock_settlement_has_lifecycle_context(repo: Any, *, stock_evidence: dict[s
         return False
     try:
         lots = list_lots()
-    except Exception:
-        return False
+    except TradePayloadClaimLost:
+        raise
+    except Exception as exc:
+        raise LifecycleContextReadError(exc) from exc
     # Built at most once per call, and only when a lot actually needs its
     # closing event's payload read.
     events_by_id: dict[str, dict[str, Any]] | None = None
