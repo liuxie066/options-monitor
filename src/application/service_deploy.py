@@ -386,10 +386,18 @@ def _opend_service_plans_from_configs(
 
     multi = len(candidates) > 1
     plans: list[OpendServicePlan] = []
+    identity_accounts: dict[str, str] = {}
     for account, root, host, port in candidates:
         slug = _service_slug(account)
         systemd_name = f"options-monitor-opend-{slug}.service" if multi else "options-monitor-opend.service"
         launchd_label = f"com.options-monitor.opend.{slug}" if multi else "com.options-monitor.opend"
+        for identity in (systemd_name, launchd_label):
+            if identity in identity_accounts:
+                raise ValueError(
+                    f"OpenD service identity collision for accounts {identity_accounts[identity]!r} and {account!r}: "
+                    f"{systemd_name} / {launchd_label}"
+                )
+            identity_accounts[identity] = account
         plans.append(
             OpendServicePlan(
                 account=account,

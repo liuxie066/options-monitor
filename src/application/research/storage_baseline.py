@@ -526,6 +526,13 @@ def _gc_file_inventory(
                         path=relpath,
                     )
                 )
+            elif _gc_manifest_is_protected(relpath, retained_run_ids=retained_run_ids):
+                blockers.append(
+                    _gc_blocker(
+                        reason="protected_manifest_symlink_not_followed",
+                        path=relpath,
+                    )
+                )
     return (
         sorted(rows, key=lambda item: str(item["path"])),
         blockers,

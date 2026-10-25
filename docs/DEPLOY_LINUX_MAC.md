@@ -452,6 +452,8 @@ launchd 的日历时间按 Mac 本机时区执行；要等价于北京时间 09:
 
 可以同时包含托管本地 OpenD 和连接远端 OpenD 的账户；未配置 root 的账户不生成本地 unit。对于仍在 profile 账户范围内、此前已托管的账户，root 丢失会阻止 `service drift --confirm`，并保留原有 unit 和 profile。先补全配置，再重新预览和确认修复。
 
+多实例生成时，账户标签必须生成不同的托管 OpenD 身份。例如 `a_b` 和 `a-b` 会生成相同的 systemd 服务名与 launchd label，系统会在写入服务定义或 profile 前报错；应选用生成身份不同的账户标签。既有命名规则、配置推导的单实例及显式 `--opend-root` 单实例行为保持不变，系统不会自动重命名账户或迁移服务。
+
 默认部署不托管 OpenD 进程；启用 `--include-opend` 可以生成托管服务定义。部署前必须确认：
 
 - Linux 机器能连接可用 OpenD host/port，或本机已运行 OpenD。

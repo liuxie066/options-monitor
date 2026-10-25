@@ -26,6 +26,7 @@ from tests.service_deploy_test_support import (
     _fake_pi_runtime_prepare,
     _fake_release_drift_command,
     _fake_release_target_query,
+    _mock_published_releases,
     _fake_upgrade_release_runner,
     _fake_legacy_config_build,
     _write_cloned_release_with_server_deps,
@@ -47,6 +48,7 @@ def _legacy_service_fixtures_have_ready_pi_storage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _stub_pi_storage_readiness(monkeypatch)
+    _mock_published_releases(monkeypatch)
 
 def test_render_systemd_bundle_can_own_feishu_agent_credential_assets(
     tmp_path: Path,
@@ -2165,7 +2167,7 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(
     assert out["auto"] is auto
     assert current.resolve() == (releases / "1.0.1").resolve()
     cache_repo = install / "_cache" / "git" / "options-monitor.git"
-    assert ["git", "clone", "--mirror", "https://example.invalid/repo.git", str(cache_repo)] in calls
+    assert ["git", "clone", "--mirror", "--origin", "origin", "https://github.com/example/options-monitor.git", str(cache_repo)] in calls
     assert any(command[:3] == ["git", f"--git-dir={cache_repo}", "archive"] for command in calls)
     assert any(command[:2] == ["tar", "-xf"] for command in calls)
     assert not any(command[:4] == ["git", "clone", "--depth", "1"] for command in calls)
@@ -2320,7 +2322,7 @@ def test_service_upgrade_restarts_feishu_ws_from_refreshed_profile_after_reconci
         "options-monitor-feishu-ws.service",
     ]
 
-def test_service_upgrade_check_falls_back_to_git_cache_when_current_release_has_no_git(tmp_path: Path) -> None:
+def test_service_upgrade_check_falls_back_to_git_cache_when_current_release_has_no_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from src.application.service_upgrade import service_upgrade_check
 
     repo = tmp_path / "releases" / "1.0.0"
@@ -2330,10 +2332,13 @@ def test_service_upgrade_check_falls_back_to_git_cache_when_current_release_has_
     cache_root = tmp_path / "_cache"
     cache_repo = cache_root / "git" / "options-monitor.git"
     cache_repo.mkdir(parents=True)
+    _responses, http_calls = _mock_published_releases(monkeypatch, repository="cached/repository")
     calls: list[tuple[list[str], str | None]] = []
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         calls.append((list(command), kwargs.get("cwd")))
+        if command == ["git", f"--git-dir={cache_repo}", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(command, 0, stdout="git@github.com:cached/repository.git", stderr="")
         if command[:3] == ["git", f"--git-dir={cache_repo}", "fetch"]:
             return subprocess.CompletedProcess(command, 0, stdout="fetched\n", stderr="")
         if command[:3] == ["git", f"--git-dir={cache_repo}", "for-each-ref"]:
@@ -2355,6 +2360,8 @@ def test_service_upgrade_check_falls_back_to_git_cache_when_current_release_has_
     assert out["version_check"]["source"] == "latest_from_cache"
     assert out["version_check"]["cache_fetched"] is True
     assert any(command[:3] == ["git", f"--git-dir={cache_repo}", "for-each-ref"] for command, _cwd in calls)
+
+    assert http_calls[0][0] == "https://api.github.com/repos/cached/repository/releases/tags/v1.0.1"
 
 def test_service_upgrade_check_reports_no_upgrade_available(tmp_path: Path) -> None:
     from src.application.service_upgrade import service_upgrade_check
@@ -2408,9 +2415,11 @@ def test_service_upgrade_confirm_uses_cached_remote_when_current_release_has_no_
                 stderr="",
             )
         if command[:3] == ["git", "config", "--get"]:
+            if kwargs.get("cwd") == str(cache_repo):
+                return subprocess.CompletedProcess(command, 0, stdout="https://github.com/example/options-monitor.git\n", stderr="")
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="fatal: not a git repository")
         if command[:3] == ["git", f"--git-dir={cache_repo}", "config"]:
-            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+            return subprocess.CompletedProcess(command, 0, stdout="https://github.com/example/options-monitor.git\n", stderr="")
         materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
         if materialized is not None:
             return materialized
@@ -3165,7 +3174,7 @@ def test_service_upgrade_blocks_major_by_default(tmp_path: Path) -> None:
         repo_root=repo,
         runtime_root=runtime,
         target_version="2.0.0",
-        run_cmd=lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, stdout="", stderr=""),
+        run_cmd=_fake_upgrade_release_runner(materialize=False),
     )
 
     assert out["status"] == "blocked_major_upgrade"
@@ -3181,6 +3190,9 @@ def test_service_upgrade_dry_run_warns_when_repo_root_is_not_symlink(tmp_path: P
     (repo / "VERSION").write_text("1.0.0\n", encoding="utf-8")
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        query = _fake_release_target_query(list(command))
+        if query is not None:
+            return query
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     out = service_upgrade(
@@ -3207,6 +3219,9 @@ def test_service_upgrade_confirm_fails_fast_when_repo_root_is_not_symlink(tmp_pa
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
+        query = _fake_release_target_query(list(command))
+        if query is not None:
+            return query
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     out = service_upgrade(
@@ -3490,6 +3505,199 @@ def test_service_rollback_preserves_paused_timer_snapshot(
         },
         "reconcile": child_snapshot,
     }
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+@pytest.mark.parametrize("implicit", [False, True])
+@pytest.mark.parametrize("target", [
+    "../outside", "/absolute", "1.0.0/../../outside", "1.0.0/child", ".", "..",
+    "01.0.0", "1.00.0", "1.0", "1.0.0-", "1.0.0-rc..1", "1.0.0-01",
+    "１.0.0", "1.0.0\nextra", "1.0.0+build", "1.0.0\\child",
+])
+def test_rollback_identity_rejects_invalid_target(transition_case, monkeypatch, target, implicit, confirm):
+    from src.application import service_upgrade as upgrade
+
+    case = transition_case()
+    case.status.write_text(json.dumps({"current_version": target if implicit else "1.0.0"}))
+    session = case.runtime / "output_shared/state/pi_sessions.sqlite3"
+    session.parent.mkdir(parents=True)
+    session.write_bytes(b"isolated-session-sentinel")
+    before = case.snapshot()
+
+    def unexpected(**kwargs):
+        pytest.fail("invalid target reached transition work")
+
+    monkeypatch.setattr(upgrade, "_prepare_runtime_configs_for_release", unexpected)
+    monkeypatch.setattr(upgrade, "_pi_storage_readiness", unexpected)
+    monkeypatch.setattr(upgrade, "_compensate_service_transition", unexpected)
+    out = case.invoke("rollback", None if implicit else target, confirm=confirm)
+    data = out["data"]
+    assert out["ok"] is False
+    assert data["status"] == "rollback_target_invalid"
+    assert data["target_version"] == target
+    assert data["changed"] is False and data["operations"] == []
+    assert data["dry_run"] is (not confirm) and data["write_applied"] is False
+    assert data["error"] and data["remediation"]
+    after = case.snapshot()
+    assert after[:3] == before[:3] and after[4:] == before[4:]
+    assert session.read_bytes() == b"isolated-session-sentinel"
+    assert case.commands == [] and case.queries == [] and case.child_requests == []
+    assert not (case.runtime / "upgrade_staging").exists() and not case.pid.exists()
+    if confirm:
+        assert json.loads(case.status.read_text())["status"] == "rollback_target_invalid"
+    else:
+        assert after == before and not case.guard.exists()
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+@pytest.mark.parametrize("fault", [
+    "outside", "outside_missing", "sibling_prefix", "loop", "root", "file",
+    "missing_version", "empty_version", "mismatch", "prefixed", "noncanonical",
+    "multiline", "invalid_utf8", "permission", "io_error",
+])
+def test_rollback_identity_rejects_path_and_version_failures(transition_case, monkeypatch, fault, confirm):
+    from src.application import service_upgrade as upgrade
+
+    case = transition_case()
+    target = case.releases / "3.0.0"
+    if fault in {"outside", "outside_missing", "sibling_prefix"}:
+        outside = case.root / ("releases-extra" if fault == "sibling_prefix" else "outside")
+        if fault != "outside_missing":
+            outside.mkdir()
+            (outside / "VERSION").write_text("3.0.0\n")
+        target.symlink_to(outside, target_is_directory=True)
+    elif fault == "loop":
+        target.symlink_to(target)
+    elif fault == "root":
+        target.symlink_to(case.releases, target_is_directory=True)
+    elif fault == "file":
+        target.write_bytes(b"not a directory")
+    else:
+        target.mkdir()
+        if fault != "missing_version":
+            content = {
+                "empty_version": b"", "mismatch": b"3.0.1\n", "prefixed": b"v3.0.0\n",
+                "noncanonical": b"03.0.0\n", "multiline": b"3.0.0\nother\n",
+                "invalid_utf8": b"\xff", "permission": b"3.0.0\n", "io_error": b"3.0.0\n",
+            }[fault]
+            (target / "VERSION").write_bytes(content)
+    before = case.snapshot()
+    read_text = Path.read_text
+
+    def read(path, *args, **kwargs):
+        if path == target / "VERSION":
+            if fault == "permission":
+                raise PermissionError("synthetic VERSION access failure")
+            if fault == "io_error":
+                raise OSError("synthetic VERSION read failure")
+        if path.name == "VERSION":
+            assert path.parent == case.current.resolve() or path.parent.is_relative_to(case.releases)
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    out = case.invoke("rollback", "3.0.0", confirm=confirm)
+    assert out["ok"] is False
+    data = out["data"]
+    assert data["status"] == "rollback_target_invalid"
+    assert data["changed"] is False and data["operations"] == []
+    assert data["error"] and data["remediation"]
+    after = case.snapshot()
+    assert after[:3] == before[:3] and after[4:] == before[4:]
+    assert case.commands == [] and case.child_requests == [] and not case.pid.exists()
+    assert not (case.runtime / "upgrade_staging").exists()
+    if not confirm:
+        assert after == before and not case.guard.exists()
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+@pytest.mark.parametrize("implicit", [False, True])
+@pytest.mark.parametrize("target", ["1.0.0", "0.0.0", "1.0.0-rc.1", "1.0.0-0", "1.0.0-01a", " v1.0.0 "])
+def test_rollback_identity_admits_supported_versions(transition_case, target, implicit, confirm):
+    case = transition_case()
+    version = target.strip().removeprefix("v")
+    release = case.releases / version
+    _write_upgrade_release_skeleton(release, version)
+    case.status.write_text(json.dumps({"current_version": target}))
+    before = case.snapshot()
+    out = case.invoke("rollback", None if implicit else target, confirm=confirm)
+    data = out["data"]
+    assert out["ok"] is True
+    assert data["target_version"] == version and data["target_dir"] == str(release)
+    assert data["status"] == ("rolled_back" if confirm else "dry_run")
+    assert data["changed"] is confirm
+    assert not case.pid.exists()
+    if confirm:
+        assert case.current.resolve() == release
+        assert data["runtime_config_commit"]["status"] == "committed"
+        assert any(command[0] == str(release / "om") for command in case.commands)
+    else:
+        assert case.snapshot() == before and case.commands == [] and not case.guard.exists()
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+def test_rollback_identity_uses_admitted_in_root_alias(transition_case, confirm):
+    case = transition_case()
+    admitted = case.releases / "release-storage"
+    (case.releases / "1.0.0").rename(admitted)
+    (case.releases / "1.0.0").symlink_to(admitted, target_is_directory=True)
+    out = case.invoke("rollback", "1.0.0", confirm=confirm)["data"]
+    assert out["ok"] is True and out["target_dir"] == str(admitted)
+    if confirm:
+        assert case.current.readlink() == admitted
+        assert out["runtime_config_prepare"]["staging_root"].endswith("1.0.1-to-release-storage")
+        assert any(command[0] == str(admitted / "om") for command in case.commands)
+
+
+@pytest.mark.parametrize("target", ["../outside", "9.9.9", "1.0.0"])
+def test_rollback_identity_busy_skips_admission(transition_case, monkeypatch, target):
+    from src.application import service_upgrade as upgrade
+
+    case = transition_case()
+    case.status.write_text('{"status":"holder-sentinel"}\n')
+    before = case.snapshot()
+    read_text = Path.read_text
+
+    def read(path, *args, **kwargs):
+        if path.name == "VERSION":
+            assert path.parent == case.current.resolve(), "busy contender read target VERSION"
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    with upgrade.single_instance_lock(case.guard, busy_message="fixture guard busy"):
+        identity = case.guard.stat().st_ino
+        data = case.invoke("rollback", target)["data"]
+        assert data["status"] == data["failure_status"] == "rollback_failed"
+        assert "upgrade lock already exists" in data["error"]
+        assert not case.pid.exists() and case.guard.stat().st_ino == identity
+        assert case.snapshot() == before and case.commands == []
+    assert not case.pid.exists()
+
+
+def test_rollback_identity_failure_receipt_error_releases_lock_and_retry(transition_case, monkeypatch):
+    from src.application import service_upgrade as upgrade
+    from src.application.agent_tool_contracts import AgentToolError
+
+    case = transition_case()
+    writer = upgrade.write_upgrade_status
+    before = case.snapshot()
+    error = OSError("synthetic failure receipt write")
+
+    def fail(**kwargs):
+        assert kwargs["payload"]["status"] == "rollback_target_invalid"
+        with pytest.raises(AgentToolError, match="fixture guard busy") as busy:
+            with upgrade.single_instance_lock(case.guard, busy_message="fixture guard busy"):
+                pytest.fail("failure receipt writer did not hold guard")
+        assert busy.value.code == "RESOURCE_BUSY"
+        assert busy.value.details == {"lock_path": str(case.guard)}
+        raise error
+
+    monkeypatch.setattr(upgrade, "write_upgrade_status", fail)
+    with pytest.raises(OSError) as caught:
+        case.invoke("rollback", "../outside")
+    assert caught.value is error
+    assert case.snapshot() == before and case.commands == [] and not case.pid.exists()
+    monkeypatch.setattr(upgrade, "write_upgrade_status", writer)
+    assert case.invoke("rollback", "1.0.0")["data"]["status"] == "rolled_back"
 
 
 def test_service_rollback_switches_current_symlink(tmp_path: Path) -> None:
@@ -4309,7 +4517,7 @@ def test_deployment_user_check_uses_uid_and_rejects_unknown_user(monkeypatch, tm
     (tmp_path / "service.profile.json").write_text(json.dumps({"deploy_user": "operator"}))
     monkeypatch.setattr(pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=uid))
     monkeypatch.setattr(upgrade.os, "geteuid", lambda: uid)
-    monkeypatch.setattr(upgrade, "service_upgrade_check", lambda **kwargs: {"latest_version": "1.0.0"})
+    monkeypatch.setattr(upgrade, "service_upgrade_check", lambda **kwargs: {"ok": True, "latest_version": "1.0.0"})
     assert upgrade.service_upgrade(repo_root=repo, runtime_root=tmp_path)["status"] == "already_current"
     before = (tmp_path / "upgrade_status.json").read_bytes()
     def unknown(name):
@@ -4828,7 +5036,7 @@ def transition_case(monkeypatch, tmp_path):
         case = next(item for item in cases if item.runtime == Path(kwargs["runtime_root"]))
         case.queries.append(dict(kwargs))
         case.emit("query")
-        return {"latest_version": kwargs["target_version"] or case.latest}
+        return {"ok": True, "latest_version": kwargs["target_version"] or case.latest}
 
     monkeypatch.setattr(upgrade, "service_upgrade_check", query)
 
@@ -5767,3 +5975,123 @@ def test_service_credential_migration_blocks_unknown_before_target_work(unknown_
     assert source["profile_content_changed"] is False
     assert len(original_calls) == len(render_calls) == 1
     assert all(cmd[1] in {"is-enabled", "is-active"} for cmd in fixture["commands"])
+
+
+def _published_upgrade_case(tmp_path):
+    releases = tmp_path / "releases"
+    old = releases / "1.0.0"
+    _write_upgrade_release_skeleton(old, "1.0.0")
+    current = tmp_path / "current"
+    current.symlink_to(old, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    return dict(repo_root=current, runtime_root=runtime, releases_root=releases,
+                cache_root=tmp_path / "cache", restart_services=False)
+
+
+@pytest.mark.parametrize("failure", ["draft", "missing", "empty", "starter", "404", "timeout", "bad_metadata"])
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("existing", [False, True])
+def test_published_release_failure_blocks_real_service_apply(monkeypatch, tmp_path, failure, explicit, existing):
+    from src.application import service_upgrade as upgrade
+
+    args = _published_upgrade_case(tmp_path)
+    responses, http_calls = _mock_published_releases(monkeypatch)
+    base = "https://api.github.com/repos/example/options-monitor"
+    release_url = f"{base}/releases/tags/v1.0.1"
+    asset_url = f"{base}/releases/2/assets?per_page=100&page=1"
+    if failure == "draft":
+        responses[release_url]["draft"] = True
+    elif failure in {"404", "timeout"}:
+        responses[release_url] = ValueError("release_not_found_or_inaccessible: HTTP 404" if failure == "404"
+                                            else "release_metadata_unavailable: TimeoutError")
+    elif failure == "bad_metadata":
+        responses[release_url] = []
+    elif failure == "missing":
+        responses[asset_url].pop()
+    elif failure == "empty":
+        responses[asset_url][0]["size"] = 0
+    else:
+        responses[asset_url][0]["state"] = "starter"
+    target = args["releases_root"] / "1.0.1"
+    if existing:
+        _write_upgrade_release_skeleton(target, "1.0.1")
+    calls = []
+    runner = _fake_upgrade_release_runner(record=lambda command, kwargs: calls.append(command))
+    def forbidden(**kwargs):
+        pytest.fail("qualification failure reached materialization/configuration/runtime preparation")
+    for name in ("_materialize_release_from_git_cache", "_ensure_release_runtime", "_prepare_runtime_configs_for_release"):
+        monkeypatch.setattr(upgrade, name, forbidden)
+    check = upgrade.service_upgrade_check(repo_root=args["repo_root"], runtime_root=args["runtime_root"],
+                                           cache_root=args["cache_root"], run_cmd=runner,
+                                           target_version="1.0.1" if explicit else None)
+    assert check["ok"] is False and check["status"] == "upgrade_check_failed"
+    assert check["upgrade_available"] is False and check["release_tag"] is None
+    out = upgrade.service_upgrade(**args, target_version="1.0.1" if explicit else None,
+                                   confirm=True, auto=True, allow_major=True, run_cmd=runner)
+    assert out["ok"] is False and out["status"] == "no_target_version"
+    assert out["changed"] is False and out["target_version"] is out["release_tag"] is None
+    assert out["check"]["status"] == "upgrade_check_failed"
+    assert args["repo_root"].resolve() == (args["releases_root"] / "1.0.0").resolve()
+    assert target.exists() is existing
+    assert not any("archive" in c or c[:2] == ["tar", "-xf"] or c[0] in {"systemctl", "launchctl"} for c in calls)
+    assert not list(args["runtime_root"].glob("config*"))
+    assert sum("/tags/v1.0.1" in url for url, _ in http_calls) == 2
+
+
+@pytest.mark.parametrize("change", ["draft", "missing", "unavailable"])
+def test_published_release_is_rechecked_after_service_preview(monkeypatch, tmp_path, change):
+    from src.application import service_upgrade as upgrade
+
+    args = _published_upgrade_case(tmp_path)
+    _write_upgrade_release_skeleton(args["releases_root"] / "1.0.1", "1.0.1")
+    responses, calls = _mock_published_releases(monkeypatch)
+    runner = _fake_upgrade_release_runner(materialize=False)
+    preview = upgrade.service_upgrade(**args, target_version="1.0.1", run_cmd=runner)
+    assert preview["status"] == "dry_run" and preview["planned_operations"]
+    base = "https://api.github.com/repos/example/options-monitor"
+    if change == "draft":
+        responses[f"{base}/releases/tags/v1.0.1"]["draft"] = True
+    elif change == "missing":
+        responses[f"{base}/releases/2/assets?per_page=100&page=1"] = []
+    else:
+        responses[f"{base}/releases/tags/v1.0.1"] = ValueError("release_metadata_unavailable: TimeoutError")
+    out = upgrade.service_upgrade(**args, target_version="1.0.1", confirm=True, run_cmd=runner)
+    assert out["status"] == "no_target_version" and out["changed"] is False
+    assert out["target_version"] is out["release_tag"] is None
+    assert sum("/tags/v1.0.1" in url for url, _ in calls) == 2
+    assert args["repo_root"].resolve().name == "1.0.0"
+
+
+def test_failed_check_cannot_smuggle_target_into_apply(monkeypatch, tmp_path):
+    from src.application import service_upgrade as upgrade
+
+    args = _published_upgrade_case(tmp_path)
+    monkeypatch.setattr(upgrade, "service_upgrade_check", lambda **kw: {
+        "ok": False, "latest_version": "1.0.1", "release_tag": "v1.0.1", "status": "upgrade_check_failed",
+    })
+    out = upgrade.service_upgrade(**args, target_version="1.0.1", confirm=True)
+    assert out["status"] == "no_target_version" and out["changed"] is False
+    assert out["target_version"] is out["release_tag"] is None
+    assert out["check"]["latest_version"] == "1.0.1"
+    assert args["repo_root"].resolve().name == "1.0.0"
+
+
+def test_source_failure_does_not_guess_mirror_remote(monkeypatch, tmp_path):
+    from src.application import service_upgrade as upgrade
+
+    args = _published_upgrade_case(tmp_path)
+    cache_repo = args["cache_root"] / "git" / "options-monitor.git"
+    cache_repo.mkdir(parents=True)
+    calls = []
+    def runner(command, **kwargs):
+        calls.append(command)
+        assert command == ["git", f"--git-dir={cache_repo}", "config", "--get", "remote.origin.url"]
+        return subprocess.CompletedProcess(command, 1, "", "no such remote")
+    _, http_calls = _mock_published_releases(monkeypatch)
+    out = upgrade.service_upgrade_check(repo_root=args["repo_root"], runtime_root=args["runtime_root"],
+                                        cache_root=args["cache_root"], remote_name="upstream", run_cmd=runner)
+    assert out["status"] == "upgrade_check_failed"
+    assert out["version_check"]["error"] == "upgrade_source_unavailable"
+    assert "origin" in out["version_check"]["message"]
+    assert len(calls) == 1 and not http_calls

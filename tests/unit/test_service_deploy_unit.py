@@ -1863,7 +1863,7 @@ def test_service_upgrade_materialize_uses_existing_git_cache_fetch(tmp_path: Pat
     assert out["fetched"] is True
     assert target.exists()
     assert ["git", f"--git-dir={cache_repo}", "fetch", "--tags", "--prune", "origin"] in calls
-    assert ["git", "clone", "--mirror", "https://example.invalid/repo.git", str(cache_repo)] not in calls
+    assert ["git", "clone", "--mirror", "--origin", "origin", "https://example.invalid/repo.git", str(cache_repo)] not in calls
 
 def test_service_upgrade_materialize_reuses_existing_target_without_git(tmp_path: Path) -> None:
     from src.application.service_upgrade import _materialize_release_from_git_cache

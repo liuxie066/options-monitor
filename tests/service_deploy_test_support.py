@@ -143,7 +143,7 @@ def _fake_release_target_query(
     command: list[str],
     *,
     tags: tuple[str, ...] = ("1.0.0", "1.0.1"),
-    remote_url: str = "https://example.invalid/repo.git",
+    remote_url: str = "https://github.com/example/options-monitor.git",
 ) -> subprocess.CompletedProcess | None:
     if command[:3] == ["git", "config", "--get"]:
         return subprocess.CompletedProcess(command, 0, stdout=f"{remote_url}\n", stderr="")
@@ -164,6 +164,43 @@ def _fake_release_target_query(
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
     return None
 
+
+
+def _mock_published_releases(monkeypatch, *, tags=("v1.0.0", "v1.0.1", "v2.0.0"),
+                             repository="example/options-monitor"):
+    """Opt-in HTTP fixtures: exact known URLs, no unplanned request or live HTTP."""
+    import copy
+    import src.application.release_target as release_target
+
+    base = f"https://api.github.com/repos/{repository}"
+    responses = {}
+    calls = []
+    for release_id, tag in enumerate(tags, start=1):
+        responses[f"{base}/releases/tags/{tag}"] = {
+            "id": release_id, "tag_name": tag, "draft": False, "published_at": "2026-10-25T00:00:00Z",
+        }
+        responses[f"{base}/releases/{release_id}/assets?per_page=100&page=1"] = [
+            {"name": name, "state": "uploaded", "size": 1}
+            for name in ("VERSION", "om-agent-spec.json", f"options-monitor-{tag}.tar.gz")
+        ]
+
+    def get(url, *, timeout):
+        calls.append((url, timeout))
+        if url not in responses:
+            raise AssertionError(f"unplanned GitHub request: {url}")
+        value = responses[url]
+        if isinstance(value, Exception):
+            raise value
+        return copy.deepcopy(value)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("live HTTP transport is forbidden")
+
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(release_target, "build_opener", unexpected)
+    monkeypatch.setattr(release_target, "_github_get_json", get)
+    return responses, calls
 
 def _install_complete_systemd_bundle(bundle: dict, systemd_root: Path) -> None:
     systemd_root.mkdir(parents=True, exist_ok=True)

@@ -212,6 +212,14 @@ manifests, unsafe paths or missing protected blobs suppress all candidates.
 deletion. Blob-store ancestors (`blobs`, `blobs/sha256`, and shard directories)
 must remain real directories: symlinks or file ancestors cannot be treated as
 reclaimed blobs. An unreadable inventory is an error, never proof of absence.
+Skipped symlinks at protected manifests or their inventoried ancestors (such
+as `state`, account directories, or research directories) suppress all
+candidates with `protected_manifest_symlink_not_followed`; their targets are
+not followed. The exact top-level `output -> output_accounts/<account>`
+compatibility alias remains accepted and reported without traversal. Its
+canonical account directory is inventoried independently, so a skipped link
+there still blocks eligibility. Nested links solely beneath expired,
+non-retained runs retain the existing unprotected status.
 There is no confirm or delete mode.
 
 Historical cleanup has a separate gated preview:
