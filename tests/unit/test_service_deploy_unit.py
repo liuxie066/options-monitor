@@ -1694,6 +1694,7 @@ def test_service_cleanup_reports_delete_failure_and_only_actual_freed_bytes(monk
     out = cleanup_module.service_cleanup(
         repo_root=current,
         releases_root=releases,
+        runtime_root=tmp_path / "runtime",
         keep_releases=2,
         confirm=True,
     )
