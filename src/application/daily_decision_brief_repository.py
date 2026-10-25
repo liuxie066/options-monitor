@@ -236,7 +236,7 @@ def record_daily_decision_brief_candidates(
     candidate_identities: list[str] | tuple[str, ...],
     observed_at_utc: datetime | str | None = None,
 ) -> dict[str, Any]:
-    """Replace the current day's pending set from one successful snapshot."""
+    """Replace pending candidates only from the day's latest successful snapshot."""
 
     base_path = Path(base).resolve()
     account_norm = _normalize_account(account)
@@ -249,14 +249,6 @@ def record_daily_decision_brief_candidates(
         account=account_norm,
         market=market_norm,
     )
-    _validate_successful_revision_source(
-        base=base_path,
-        account=account_norm,
-        market=market_norm,
-        market_trading_date=date_norm,
-        revision=revision_norm,
-        source_digest=digest_norm,
-    )
     observed_at = _coerce_utc_iso(observed_at_utc)
 
     state_dir = paths.account_state_dir(base_path, account_norm)
@@ -264,12 +256,40 @@ def record_daily_decision_brief_candidates(
     lock_path = state_dir / f"daily_decision_brief.{market_norm}.lock"
     delivery_path = _delivery_path(base_path, account_norm, market_norm)
     with _exclusive_lock(lock_path):
+        _validate_successful_revision_source(
+            base=base_path,
+            account=account_norm,
+            market=market_norm,
+            market_trading_date=date_norm,
+            revision=revision_norm,
+            source_digest=digest_norm,
+        )
+        latest_raw = _history_raw(
+            base=base_path, account=account_norm, market=market_norm,
+            market_date=date_norm, successful=True,
+        )
+        latest = _normalize_persisted_brief(
+            latest_raw, path=history_path(base_path), account=account_norm, market=market_norm,
+        )
+        if latest["market_trading_date"] != date_norm or revision_norm > int(latest["revision"]):
+            raise DailyDecisionBriefStateError("daily brief candidate revision has no matching successful current")
         state = _load_or_create_delivery_state(
             base=base_path,
             path=delivery_path,
             account=account_norm,
             market=market_norm,
         )
+        if revision_norm < int(latest["revision"]):
+            day = state["days"].get(date_norm, {})
+            return {
+                "state": state,
+                "market_trading_date": date_norm,
+                "pending_candidate_identities": sorted(day.get("pending_candidates", {})),
+                "alerted_candidate_identities": sorted(day.get("alerted_candidates", {})),
+                "path": delivery_path,
+                "applied": False,
+                "reason": "stale_revision",
+            }
         day = _delivery_day(state, date_norm)
         alerted = set(day["alerted_candidates"])
         existing_pending = day["pending_candidates"]
@@ -291,6 +311,8 @@ def record_daily_decision_brief_candidates(
             "pending_candidate_identities": sorted(day["pending_candidates"]),
             "alerted_candidate_identities": sorted(alerted),
             "path": delivery_path,
+            "applied": True,
+            "reason": "applied",
         }
 
 

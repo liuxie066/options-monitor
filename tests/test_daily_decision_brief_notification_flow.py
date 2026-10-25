@@ -1657,3 +1657,102 @@ def test_terminal_write_failure_does_not_mark_scan_recovered(monkeypatch, tmp_pa
         mod.run_tick_notification_flow(bundle.request)
     assert bundle.request.audit_helper.successes == 0
     assert len(calls) == (0 if no_send else 1)
+
+
+@pytest.mark.parametrize(
+    ("replacement", "frozen_kind"),
+    [
+        ("empty", "none"),
+        ("AMD", "none"),
+        ("empty", "candidate_pending"),
+        ("empty", "candidate_ambiguous"),
+        ("empty", "fixed_pending"),
+        ("empty", "fixed_confirmed"),
+    ],
+)
+def test_late_candidate_flow_ignores_old_snapshot_and_preserves_exact_retry(
+    monkeypatch, tmp_path: Path, replacement: str, frozen_kind: str,
+) -> None:
+    from src.application.daily_decision_brief_repository import (
+        confirm_daily_decision_brief_delivery_v2,
+        record_daily_decision_brief_delivery_attempt,
+    )
+    from src.application.notification_delivery_adapter import build_notification_transport_key
+
+    _patch_assembler(monkeypatch)
+    frozen = None
+    if frozen_kind != "none":
+        prepared = mod._prepare_daily_brief_notification(
+            _request(tmp_path, run_id="frozen-source", fixed=frozen_kind.startswith("fixed_")).request,
+        )
+        frozen = prepared.lifecycles_by_account["lx"]["envelope"]
+        transition = {
+            "base": tmp_path, "account": "lx", "market": "US", "market_trading_date": MARKET_DATE,
+            "delivery_key": frozen["delivery_key"], "source_digest": frozen["source_digest"],
+            "message_sha256": frozen["message_sha256"],
+            "transport_idempotency_key": build_notification_transport_key(frozen["delivery_key"]),
+        }
+        if frozen_kind == "candidate_ambiguous":
+            record_daily_decision_brief_delivery_attempt(**transition, ambiguous=True)
+        elif frozen_kind == "fixed_confirmed":
+            confirm_daily_decision_brief_delivery_v2(**transition)
+
+    original_record = mod.record_daily_decision_brief_candidates
+    interleaved = []
+
+    def record_after_newer_success(**kwargs):
+        # A has persisted its real source; B now persists and records before A resumes.
+        newer = _brief(base=tmp_path, run_id="newer-source", candidate=replacement == "AMD")
+        if replacement == "AMD":
+            for row in newer["actions"] + newer["candidates"]["sell_put"]:
+                row["symbol"] = "AMD"
+                row["contract_symbol"] = "AMD260821P00100000"
+        persisted = persist_daily_decision_brief_success(base=tmp_path, brief=newer)
+        current = original_record(
+            base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE,
+            revision=persisted["current_revision"], brief_digest=persisted["current_brief_digest"],
+            candidate_identities=persisted["current_candidate_identities"],
+        )
+        before = current["path"].read_bytes()
+        late = original_record(**kwargs)
+        assert late["applied"] is False and late["reason"] == "stale_revision"
+        assert late["path"].read_bytes() == before
+        interleaved.append((persisted, late))
+        return late
+
+    monkeypatch.setattr(mod, "record_daily_decision_brief_candidates", record_after_newer_success)
+    calls: list[dict] = []
+    _patch_sender(monkeypatch, calls=calls)
+    bundle = _request(tmp_path, run_id="late-candidate", fixed=False)
+    assert mod.run_tick_notification_flow(bundle.request) == 0
+    assert len(interleaved) == 1
+    assert bundle.commits == [{"lx": HALF_TARGET}]
+    audit = bundle.request.tick_metrics["daily_brief"]["prepared"][0]
+    assert audit["candidate_record_reason"] == "stale_revision"
+    assert audit["decision"] == "none"
+    assert audit["decision_reason"] == "stale_candidate_revision"
+    assert audit["pending_candidate_count"] == 0
+    day = read_daily_decision_brief_delivery_state(
+        base=tmp_path, account="lx", market="US",
+    )["state"]["days"][MARKET_DATE]
+    assert set(day["pending_candidates"]) == (
+        {"candidate:v1:lx:US:AMD:sell_put"} if replacement == "AMD" else set()
+    )
+    if frozen_kind in {"candidate_ambiguous", "fixed_pending"}:
+        assert len(calls) == 1
+        assert calls[0]["message"] == frozen["rendered_message"]
+        assert calls[0]["idempotency_key"] == build_notification_transport_key(frozen["delivery_key"])
+        envelope = day["candidate_delivery"] if frozen_kind == "candidate_ambiguous" else day["fixed_reports"][FIXED_TARGET]
+        assert envelope["status"] == "confirmed"
+        for field in ("revision", "source_digest", "message_sha256", "rendered_message", "delivery_key"):
+            assert envelope[field] == frozen[field]
+    else:
+        assert calls == []
+        if frozen_kind == "fixed_confirmed":
+            assert day["fixed_reports"][FIXED_TARGET]["status"] == "confirmed"
+        elif frozen_kind == "candidate_pending":
+            retry = read_retryable_daily_decision_brief_delivery(
+                base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE,
+            )
+            assert retry["envelope"] is None
+            assert retry["reason"] == "stale_candidate_envelope"
