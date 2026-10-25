@@ -3,10 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import cmp_to_key
+from http.client import HTTPException
 from pathlib import Path
+import json
+import os
 import re
+import time
 import subprocess
 from typing import Any, Callable
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
@@ -150,6 +157,7 @@ def resolve_upgrade_target(
     current_version: str,
     repo_root: Path,
     cache_root: Path,
+    remote_url: str,
     remote_name: str = "origin",
     explicit_target: str | None = None,
     fetch: bool = True,
@@ -182,6 +190,13 @@ def resolve_upgrade_target(
                 cache_repo=cache_repo,
                 error=str(exc),
                 message="版本检查失败：目标版本无效",
+            )
+        try:
+            _require_published_release(remote_url, f"v{target}")
+        except ValueError as exc:
+            return _target_error(
+                current_version=current_version, remote_name=remote_name, checked_at=checked,
+                cache_repo=cache_repo, error=str(exc), message="版本检查失败：无法确认完整已发布 Release",
             )
         return _target_result(
             current_version=current_version,
@@ -247,6 +262,14 @@ def resolve_upgrade_target(
         )
 
     latest_version, release_tag = latest
+    try:
+        _require_published_release(remote_url, release_tag)
+    except ValueError as exc:
+        return _target_error(
+            current_version=current_version, remote_name=remote_name, checked_at=checked,
+            cache_repo=cache_repo, error=str(exc), message="版本检查失败：无法确认完整已发布 Release",
+            cache_fetched=cache_fetched, tag_count=len(tags),
+        )
     return _target_result(
         current_version=current_version,
         latest_version=latest_version,
@@ -261,6 +284,122 @@ def resolve_upgrade_target(
         selected_tag=release_tag,
     )
 
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _github_get_json(url: str, *, timeout: float) -> Any:
+    # Only this fixed host receives ambient API credentials. Never reuse Git userinfo.
+    parsed = urlsplit(url)
+    if parsed.scheme != "https" or parsed.netloc != "api.github.com":
+        raise ValueError("release_metadata_unavailable: invalid API destination")
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "options-monitor-upgrade",
+        "X-GitHub-Api-Version": "2026-03-10",
+    }
+    token = (os.environ.get("GH_TOKEN") or "").strip() or (os.environ.get("GITHUB_TOKEN") or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        request = Request(url, headers=headers)
+        with build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
+            return json.load(response)
+    except HTTPError as exc:
+        reason = "release_not_found_or_inaccessible" if exc.code == 404 else "release_metadata_unavailable"
+        raise ValueError(f"{reason}: HTTP {exc.code}") from None
+    except (URLError, OSError, ValueError, HTTPException) as exc:
+        raise ValueError(f"release_metadata_unavailable: {type(exc).__name__}") from None
+
+
+def _github_repository(remote_url: str) -> tuple[str, str]:
+    source = remote_url.strip()
+    scp = re.fullmatch(r"git@github\.com:(.+)", source)
+    try:
+        if scp:
+            path = scp.group(1)
+        else:
+            parsed = urlsplit(source)
+            if (parsed.scheme not in {"https", "ssh"} or parsed.hostname != "github.com"
+                    or parsed.query or parsed.fragment):
+                raise ValueError
+            # Access port as well to reject malformed URLs; SSH ports never select the API host.
+            if parsed.port is not None and parsed.scheme == "https" and parsed.port != 443:
+                raise ValueError
+            if parsed.scheme == "ssh" and parsed.username != "git":
+                raise ValueError
+            path = parsed.path.removeprefix("/")
+        path = path.removesuffix("/").removesuffix(".git")
+        parts = path.split("/")
+        if (len(parts) != 2 or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", parts[0])
+                or not re.fullmatch(r"[A-Za-z0-9_.-]+", parts[1]) or parts[1] in {".", ".."}):
+            raise ValueError
+        return parts[0], parts[1]
+    except ValueError:
+        raise ValueError("release_metadata_unavailable: unsupported GitHub source") from None
+
+
+def _require_published_release(remote_url: str, tag: str) -> None:
+    owner, repo = _github_repository(remote_url)
+    base = f"https://api.github.com/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+    deadline = time.monotonic() + 30
+
+    def get(path: str) -> Any:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError("release_metadata_unavailable: time budget exhausted")
+        result = _github_get_json(base + path, timeout=min(10, remaining))
+        if time.monotonic() >= deadline:
+            raise ValueError("release_metadata_unavailable: time budget exhausted")
+        return result
+
+    metadata = get(f"/releases/tags/{quote(tag, safe='')}")
+    if not isinstance(metadata, dict):
+        raise ValueError("release_metadata_unavailable: invalid release metadata")
+    if (metadata.get("tag_name") != tag or type(metadata.get("draft")) is not bool
+            or type(metadata.get("id")) is not int or metadata["id"] <= 0
+            or "published_at" not in metadata):
+        raise ValueError("release_metadata_unavailable: invalid release metadata")
+    if metadata["draft"] or metadata["published_at"] is None:
+        raise ValueError("release_not_eligible: unpublished release")
+    published = metadata["published_at"]
+    try:
+        if not isinstance(published, str) or not published:
+            raise ValueError
+        timestamp = datetime.fromisoformat(published.replace("Z", "+00:00"))
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise ValueError
+    except ValueError:
+        raise ValueError("release_metadata_unavailable: invalid publication time") from None
+
+    required = {"VERSION", "om-agent-spec.json", f"options-monitor-{tag}.tar.gz"}
+    found: set[str] = set()
+    eligible: set[str] = set()
+    page = 1
+    while True:
+        uploaded = get(f"/releases/{metadata['id']}/assets?per_page=100&page={page}")
+        if not isinstance(uploaded, list):
+            raise ValueError("release_metadata_unavailable: invalid asset list")
+        for asset in uploaded:
+            if not isinstance(asset, dict) or not isinstance(asset.get("name"), str):
+                raise ValueError("release_metadata_unavailable: invalid asset metadata")
+            name = asset["name"]
+            if name not in required:
+                continue
+            if (name in found or not isinstance(asset.get("state"), str)
+                    or type(asset.get("size")) is not int):
+                raise ValueError("release_metadata_unavailable: invalid required asset metadata")
+            found.add(name)
+            if asset["state"] == "uploaded" and asset["size"] > 0:
+                eligible.add(name)
+        if len(uploaded) < 100:
+            break
+        page += 1
+    if eligible != required:
+        raise ValueError("release_not_eligible: required uploaded nonempty assets missing")
 
 def _parse_prerelease(value: str) -> tuple[tuple[int, Any], ...]:
     if not value:

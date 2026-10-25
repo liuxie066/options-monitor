@@ -258,7 +258,7 @@ VERSION="$(cat VERSION)"
 - `release/coverage/v<version>.json` 完整覆盖上一稳定 tag 以来的所有 commit 和目标版本所有
   Changelog 条目，并为每个 commit 附有有效 design evidence
 - README 与 Agent / Tool Gateway 文档没有明显过期命令
-- 更新检查功能读取远端 `origin` 的 Git tags，并与本地 `VERSION` 比较
+- 通用版本检查读取远端 `origin` 的 Git tags 并比较本地 `VERSION`；`om update` 的升级检查还要求下述完整已发布 Release 资格
 
 ---
 
@@ -310,7 +310,24 @@ git branch -d <exact-local-branch>
 
 ## 远端自动升级
 
-远端升级只消费已经发布成功的 GitHub release tag，不追 `main`。
+远端升级只消费已经发布成功的 GitHub Release tag，不追 `main`。自动和显式目标都要求精确
+`tag_name`、非 draft、有效的发布时间，以及三个精确命名的上传资产：`VERSION`、
+`om-agent-spec.json`、`options-monitor-<release_tag>.tar.gz`（例如 `options-monitor-v1.2.3.tar.gz`）。
+三个资产必须均为 `state=uploaded` 且 `size>0`；GitHub 自动生成的源码下载链接不算上传资产。
+这是发布资格 metadata 检查，不验证资产内容、digest 或其与现有 Git archive 的对应关系；源码物化仍走原有镜像归档流程。
+
+自动检查仍选择最高 SemVer Git tag；最高 tag 只有标签、为 draft 或资产未上传完整时，检查失败，
+不会自动回退到旧版本。可显式指定另一个合格版本；确认执行时在锁内重新验证，即使目标目录已存在也不能绕过。
+网络、超时、权限、限流、非法 metadata 或资产分页失败均关闭升级入口，不把不可用解释为没有新版本。
+HTTP 404 表示 Release 未找到或不可访问，不能据此断言私库资源不存在。
+
+GitHub 来源取自当前 checkout remote；已有升级镜像时以镜像对应 remote 配置为准，因此无 `.git` 的归档部署
+仍可使用缓存来源。支持 `github.com` 的 HTTPS、`git@github.com:owner/repo.git` 和 SSH URL；
+不推断 SSH host alias、非 GitHub 来源或重定向后的仓库，不自动迁移镜像配置。
+资格查询固定访问 GitHub HTTPS API，公开仓库可匿名访问；若运行环境已有非空 `GH_TOKEN`，优先使用，
+否则读取 `GITHUB_TOKEN`。私库可能需要对目标仓库具备 Contents-read 权限的 token，默认 token 不保证有权限；
+不会借用 Git/SSH 凭据或新增认证配置流程。token 和 HTTPS userinfo 不写入诊断，HTTP 不自动跟随 redirect。
+每次请求超时最多 10 秒，一次资格校验使用 30 秒 monotonic 预算、在每次请求前后检查，不自动重试。
 
 推荐部署布局：
 
@@ -358,7 +375,7 @@ confirmed 升级/回滚先取得该 guard，再绑定 current、版本、profile
   --no-check-latest
 ```
 
-`update verify` 汇总当前 symlink、版本、runtime config freshness、事件源配置、最近 upgrade status 和升级时保存的 service health 快照；`services.source=upgrade_status`，对应状态记录时间是 `upgrade.updated_at`，这不是当前 systemd live 查询。`--no-check-latest` 会跳过 git tag 查询，适合 release 已确认后快速复核远端状态。`upgrade.status` / `upgrade.last_status` 表示最近一次升级结果，`upgrade.has_status_record` 表示是否存在 `upgrade_status.json`；是否有新版本只看 `version.upgrade_available`。需要当前服务事实时，另行执行 `./om service drift --runtime-root /var/lib/options-monitor` 和对应 systemd 只读检查。
+`update verify` 汇总当前 symlink、版本、runtime config freshness、事件源配置、最近 upgrade status 和升级时保存的 service health 快照；`services.source=upgrade_status`，对应状态记录时间是 `upgrade.updated_at`，这不是当前 systemd live 查询。`--no-check-latest` 会跳过升级目标资格查询（包括 Git tag 和 GitHub Release），适合 release 已确认后快速复核远端状态。`upgrade.status` / `upgrade.last_status` 表示最近一次升级结果，`upgrade.has_status_record` 表示是否存在 `upgrade_status.json`；是否有新版本只看 `version.upgrade_available`。需要当前服务事实时，另行执行 `./om service drift --runtime-root /var/lib/options-monitor` 和对应 systemd 只读检查。
 
 当 `service.profile.json` 声明 `deploy_user` 时，升级和回滚的预览、执行都要求当前有效 UID 与该系统用户一致。无法解析用户或 UID 不一致时返回 `deployment_user_check_failed`，在目标查询、锁和状态文件写入之前停止。请以部署用户运行整个命令，仅由既有服务操作按需使用 sudo；不要用 sudo 包裹升级命令，以免原子替换后的配置归属 root。未声明部署用户的旧 profile 保留原有行为。
 

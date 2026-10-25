@@ -5305,3 +5305,47 @@ def test_manual_whole_label_preview_confirm_preserves_quantity(
         flow.repo.read_lifecycle_account_rows(account="sy"), account="sy", as_of_ms=flow.terminal_ms,
     ) == report
     assert len(flow.model_calls) == (2 if operation == "assignment" else 0)
+
+
+@pytest.mark.parametrize("explicit,lower_eligible,highest_eligible,can_confirm", [
+    (True, True, False, True), (True, False, True, False),
+    (False, True, False, False), (False, False, True, True),
+])
+def test_inbound_upgrade_published_exact_target_chain(monkeypatch, tmp_path, explicit,
+                                                       lower_eligible, highest_eligible, can_confirm):
+    from functools import partial
+    from src.application import service_upgrade as upgrade
+    from src.application.bot.control import upgrade_operations
+    from tests.service_deploy_test_support import _fake_upgrade_release_runner, _mock_published_releases
+
+    _enable_inbound_upgrade_write(monkeypatch)
+    repo = tmp_path / "current-release"
+    repo.mkdir()
+    (repo / "VERSION").write_text("1.0.0")
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
+    monkeypatch.setattr(upgrade_operations, "repo_base", lambda: repo)
+    runner = _fake_upgrade_release_runner(tags=("1.0.1", "1.0.2"), materialize=False)
+    monkeypatch.setattr(upgrade_operations, "service_upgrade_check", partial(upgrade.service_upgrade_check, run_cmd=runner))
+    responses, calls = _mock_published_releases(monkeypatch, tags=("v1.0.1", "v1.0.2"))
+    base = "https://api.github.com/repos/example/options-monitor"
+    responses[f"{base}/releases/tags/v1.0.1"]["draft"] = not lower_eligible
+    responses[f"{base}/releases/tags/v1.0.2"]["draft"] = not highest_eligible
+    out = _handle("/upgrade 1.0.1" if explicit else "/upgrade", "exact_preview",
+                  conversation_id="feishu:chat_a:ou_1", audit_db=str(tmp_path / "audit.sqlite3"))
+    data = out["data"]
+    assert bool(data.get("operation_id")) is can_confirm
+    assert calls[0][0] == f"{base}/releases/tags/v{'1.0.1' if explicit else '1.0.2'}"
+    assert upgrade_operations._preview_can_confirm(data["preview"]) is can_confirm
+    if can_confirm:
+        target = "1.0.1" if explicit else "1.0.2"
+        assert data["payload"]["arguments"]["target_version"] == target
+        # The confirmed service owner revalidates the frozen target; no worker or receipt is sent.
+        responses[f"{base}/releases/tags/v{target}"]["draft"] = True
+        applied = upgrade.service_upgrade(repo_root=repo, runtime_root=runtime,
+                    target_version=data["payload"]["arguments"]["target_version"], confirm=True, run_cmd=runner)
+        assert applied["status"] == "no_target_version" and applied["changed"] is False
+        assert applied["target_version"] is applied["release_tag"] is None
+        assert sum("/tags/" in url for url, _ in calls) == 2
+    else:
+        assert data["status"] == "upgrade_check_failed"

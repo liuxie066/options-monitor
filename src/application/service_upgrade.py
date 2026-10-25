@@ -686,7 +686,25 @@ def _version_check_for_upgrade(
             "error": str(exc),
             "source": "release_target",
         }
+    try:
+        remote_url = (
+            _cache_remote_url(cache_root=cache_root, remote_name=remote_name, run_cmd=run_cmd)
+            if _cache_repo_path(cache_root).exists()
+            else _resolve_upgrade_remote_url(
+                repo_root=repo_root, cache_root=cache_root, remote_name=remote_name, run_cmd=run_cmd,
+            )
+        )
+    except Exception:
+        return {
+            "ok": False, "current_version": current_version, "latest_version": None,
+            "update_available": False, "remote_name": remote_name, "checked_at": utc_now_iso(now_fn),
+            "release_tag": None, "selected_tag": None, "target_source": None,
+            "cache_repo": str(_cache_repo_path(cache_root)), "cache_fetched": False,
+            "tag_count": 0, "highest_tag_seen": None, "source": "release_target",
+            "message": "版本检查失败：无法确定升级来源", "error": "upgrade_source_unavailable",
+        }
     resolved = resolve_upgrade_target(
+        remote_url=remote_url,
         current_version=current_version,
         repo_root=repo_root,
         cache_root=cache_root,
@@ -3002,7 +3020,7 @@ def service_upgrade(
         target = (
             _version_text(str(target_version or ""))
             if lock_error is not None
-            else _version_text(str(check.get("latest_version") or ""))
+            else _version_text(str(check.get("latest_version") or "")) if check.get("ok") is True else ""
         )
         tag = _tag_text(target) if target else None
         operations: list[dict[str, Any]] = []
@@ -3032,6 +3050,7 @@ def service_upgrade(
                 **status_base,
                 "ok": False,
                 "status": "no_target_version",
+                "check": check,
                 "changed": False,
                 "message": check.get("message") or "没有可升级版本。",
                 "operations": operations,
