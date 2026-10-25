@@ -22,6 +22,29 @@ BASE = Path(__file__).resolve().parents[1]
 AUTO_INTAKE_CLI_TIMEOUT_SEC = 15
 
 
+@pytest.mark.parametrize("source_code", [0, 1, 78])
+def test_public_cli_propagates_real_multi_source_result(tmp_path, monkeypatch, source_code) -> None:
+    from src.application.trades import process_supervisor
+    from src.interfaces.cli.main import main as public_main
+
+    config_path = _write_runtime_config(tmp_path)
+    observed_argv = []
+
+    def run_in_process(argv):
+        observed_argv.extend(argv)
+        return auto_intake._coordinate_listener_sources(
+            [{"id": "result"}, {"id": "clean"}],
+            run_source=lambda source, _stop: source_code if source["id"] == "result" else 0,
+        )
+
+    monkeypatch.setattr(process_supervisor, "run_trade_intake_process", run_in_process)
+    assert public_main([
+        "run", "trade-intake", "--config", str(config_path), "--runtime-root", str(tmp_path),
+    ]) == source_code
+    assert observed_argv[observed_argv.index("--config") + 1] == str(config_path)
+    assert observed_argv[observed_argv.index("--runtime-root") + 1] == str(tmp_path)
+
+
 @pytest.mark.parametrize("shape", ["raw", "sparse", "nested", "standard", "missing_status", "order", "custom_alias"])
 def test_explicit_underlying_conflict_blocks_real_intake_and_retry(tmp_path, monkeypatch, shape):
     from copy import deepcopy
