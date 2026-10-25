@@ -200,3 +200,28 @@ def test_cli_install_preview_redacts_installed_environment(instance, tmp_path, m
     assert '<redacted>' in str(data['files'])
     assert before == {path: path.read_bytes() for path in tmp_path.rglob('*') if path.is_file()}
     assert manager.calls and all(call[1] == 'show' for call in manager.calls)
+
+
+def test_cli_cleanup_real_owner_busy_then_retry(tmp_path, capsys):
+    from src.application.service_upgrade import _UpgradeLock
+
+    releases = tmp_path / 'releases'
+    for version in ('1.0.0', '1.1.0', '1.2.0'):
+        path = releases / version
+        path.mkdir(parents=True)
+        (path / 'VERSION').write_text(version)
+    current = tmp_path / 'current'
+    current.symlink_to(releases / '1.2.0')
+    runtime = tmp_path / 'runtime'
+    argv = ['service', 'cleanup', '--repo-root', str(current), '--releases-root', str(releases),
+            '--runtime-root', str(runtime), '--confirm']
+    with _UpgradeLock(runtime / 'locks/upgrade.lock'):
+        assert cli.main(argv) != 0
+        result = json.loads(capsys.readouterr().out)
+        assert result['ok'] is False and result['data']['status'] == 'upgrade_locked'
+        assert result['data']['changed'] is False
+        assert len(list(releases.iterdir())) == 3
+    assert cli.main(argv) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result['ok'] and result['data']['status'] == 'cleaned'
+    assert current.resolve().is_dir() and len(list(releases.iterdir())) == 2

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from functools import cmp_to_key
 import shutil
@@ -11,6 +12,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
+from src.application.agent_tool_contracts import AgentToolError
+from src.application.file_locks import single_instance_lock
 from src.application.bot.pi_migration import (
     pi_migration_receipt_path,
     read_pi_migration_receipt,
@@ -427,6 +430,60 @@ def _run_journal_vacuum(
 
 
 def service_cleanup(
+    *,
+    repo_root: str | Path,
+    releases_root: str | Path | None = None,
+    runtime_root: str | Path | None = None,
+    keep_releases: int = 2,
+    include_apt_cache: bool = False,
+    journal_vacuum_size: str | None = None,
+    cleanup_downloads: bool = False,
+    cleanup_pip_cache: bool = False,
+    cleanup_output_runs: bool = False,
+    output_runs_keep_days: int = 14,
+    output_runs_keep_count: int = 200,
+    cleanup_runtime_logs: bool = False,
+    runtime_logs_keep_days: int = 14,
+    expected_output_runs_plan_sha256: str | None = None,
+    confirm: bool = False,
+    run_cmd: Callable[..., Any] = subprocess.run,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    arguments = locals()
+    # Preserve early validation without creating a runtime lock for invalid roots.
+    if not confirm or not Path(repo_root).expanduser().is_symlink():
+        return _service_cleanup_under_transition_lock(**arguments)
+
+    runtime = Path(runtime_root).expanduser().resolve() if runtime_root else Path("/var/lib/options-monitor")
+    with ExitStack() as guard:
+        try:
+            guard.enter_context(single_instance_lock(
+                runtime / "locks/upgrade.lock.guard",
+                busy_message="service cleanup requires the upgrade/rollback transition guard",
+            ))
+        except (AgentToolError, OSError) as exc:
+            if isinstance(exc, AgentToolError) and exc.code != "RESOURCE_BUSY":
+                raise
+            repo_link = Path(repo_root).expanduser()
+            releases = Path(releases_root).expanduser().resolve() if releases_root else _default_releases_root(repo_link)
+            return {
+                "schema_version": 1,
+                "confirmed": True,
+                "repo_root": str(repo_link),
+                "releases_root": str(releases),
+                "runtime_root": str(runtime) if runtime_root else None,
+                "keep_releases": max(2, int(keep_releases or 2)),
+                "ok": False,
+                "status": "upgrade_locked" if isinstance(exc, AgentToolError) else "cleanup_failed",
+                "reason": str(exc),
+                "changed": False,
+                "deleted_paths": [],
+                "operations": [],
+            }
+        return _service_cleanup_under_transition_lock(**arguments)
+
+
+def _service_cleanup_under_transition_lock(
     *,
     repo_root: str | Path,
     releases_root: str | Path | None = None,
