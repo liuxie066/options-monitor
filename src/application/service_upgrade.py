@@ -5,6 +5,7 @@ import json
 import math
 import os
 import platform
+import re
 import shutil
 import shlex
 import subprocess
@@ -3526,6 +3527,46 @@ def service_upgrade(
         return out
 
 
+def _validate_rollback_target(*, target: str, releases_root: Path) -> Path:
+    match = re.fullmatch(
+        r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+        r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?",
+        target,
+    )
+    if match is None or any(
+        token.isdecimal() and len(token) > 1 and token.startswith("0")
+        for token in (match.group(1) or "").split(".")
+    ):
+        raise ServiceTransitionError(
+            f"rollback target is not a canonical supported version: {target!r}",
+            status="rollback_target_invalid",
+            remediation=["Select MAJOR.MINOR.PATCH with an optional canonical prerelease; do not supply a path."],
+        )
+    try:
+        target_dir = (releases_root / target).resolve()
+        if target_dir == releases_root or not target_dir.is_relative_to(releases_root):
+            raise ValueError("resolved rollback target must remain strictly inside releases_root")
+        if not target_dir.exists():
+            raise ServiceTransitionError(
+                f"rollback release directory is missing: {target_dir}",
+                status="rollback_target_missing",
+                remediation=["Select an existing released version inside releases_root."],
+            )
+        if not target_dir.is_dir():
+            raise ValueError("rollback target is not a directory")
+        if _read_version(target_dir) != target:
+            raise ValueError("rollback target VERSION does not exactly match the selected version")
+    except ServiceTransitionError:
+        raise
+    except (OSError, UnicodeError, RuntimeError, ValueError) as exc:
+        raise ServiceTransitionError(
+            f"invalid rollback release {target!r}: {exc}",
+            status="rollback_target_invalid",
+            remediation=["Select an in-root release directory with a readable VERSION matching the selected version."],
+        ) from exc
+    return target_dir
+
+
 def service_rollback(
     *,
     repo_root: str | Path,
@@ -3595,25 +3636,32 @@ def service_rollback(
                     status_witness=status_witness, profile_witness=profile_witness, payload=out,
                 )
             return out
-        target_dir = releases / target
-        if lock_error is None and not target_dir.exists():
-            out = {
-                **status_base,
-                "ok": False,
-                "status": "rollback_target_missing",
-                "changed": False,
-                "target_dir": str(target_dir),
-                "operations": operations,
-            }
-            if confirm:
-                write_upgrade_status(runtime_root=runtime, payload=out)
-            else:
-                _publish_early_upgrade_preview_status(
-                    runtime_root=runtime, repo_root=repo_root, baseline=preview_baseline,
-                    status_witness=status_witness, profile_witness=profile_witness, payload=out,
-                    missing_target_dir=target_dir if target else None,
-                )
-            return out
+        if lock_error is None:
+            try:
+                target_dir = _validate_rollback_target(target=target, releases_root=releases)
+            except ServiceTransitionError as exc:
+                out = {
+                    **status_base,
+                    "ok": False,
+                    "status": exc.status,
+                    "changed": False,
+                    "error": str(exc),
+                    "remediation": exc.remediation,
+                    "operations": operations,
+                }
+                if exc.status == "rollback_target_missing":
+                    out["target_dir"] = str(releases / target)
+                if confirm:
+                    write_upgrade_status(runtime_root=runtime, payload=out)
+                elif exc.status == "rollback_target_missing":
+                    _publish_early_upgrade_preview_status(
+                        runtime_root=runtime, repo_root=repo_root, baseline=preview_baseline,
+                        status_witness=status_witness, profile_witness=profile_witness, payload=out,
+                        missing_target_dir=releases / target,
+                    )
+                return out
+        else:
+            target_dir = releases / target
         previous_profile = _load_service_profile(runtime)
         preserved_activation_states: dict[str, dict[str, str]] = {}
         if not confirm:

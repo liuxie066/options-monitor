@@ -341,6 +341,14 @@ confirmed 升级/回滚先取得该 guard，再绑定 current、版本、profile
 正常 dry-run 不新增转换锁或 `upgrade_status.json` 写入，既有一次版本查询及其 cache 行为不变。
 取消继续传播并释放 guard，不新增自动补偿；cleanup 或终态写入异常也继续传播，成功转换不会因此新增回滚。
 
+回滚的显式 `--to-version` 和状态记录中的隐式目标使用同一准入检查：去除外层空白和可选小写 `v` 前缀后，
+必须是规范的 `MAJOR.MINOR.PATCH`，可带非空、点分隔的 ASCII prerelease；数字段不允许前导零，
+不支持 `+build`。解析后的目标目录必须严格位于 releases root 内，其可读 `VERSION` 去除外层空白后
+须与选定版本完全一致。路径越界、目录或 VERSION 不合法时返回 `rollback_target_invalid`，在目标运行时检查、
+配置暂存和服务操作之前停止；真正缺失的目录仍返回 `rollback_target_missing`。
+这些检查同时适用于预览与确认执行；新增的 invalid-target 预览不写状态或取转换锁，确认拒绝只在持锁时记录失败。
+原有无目标、缺目录预览的受控收据规则及 dry-run/confirm 边界不变。
+
 升级检查只读：
 
 ```bash
