@@ -368,8 +368,10 @@ om research collect \
 
 `om research collect` 默认不写 evidence bundle；写入需要同时使用
 `--write-outputs --confirm`。`archive pull` 默认只生成同步计划，只有 `--write`
-才拉取本地归档；`archive inventory` 与 `archive verify` 用于检查本地归档。执行前先看具体
-子命令的 `--help`，不要把 Research 整体理解成“永远只读”。Research 不自动修改生产配置、
+才拉取本地归档；`archive inventory` 与 `archive verify` 用于检查本地归档。
+显式指定 `--run-id` 时，每个 ID 都必须存在于按现有条件（包括 `--since-days`）筛选后的来源清单；
+任一缺失会列出缺失 ID，并在同步或写归档前拒绝本次 preview/write。未指定 run 筛选时，零 run 仍是合法结果。
+执行前先看具体子命令的 `--help`，不要把 Research 整体理解成“永远只读”。Research 不自动修改生产配置、
 交易状态或通知。
 
 ### Tool Gateway

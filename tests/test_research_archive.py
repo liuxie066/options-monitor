@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -11,6 +12,252 @@ from typing import Any, Callable
 import pytest
 
 from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
+
+
+def _archive_tree_snapshot(root: Path) -> dict[str, tuple[bytes | None, int]]:
+    return {
+        str(path.relative_to(root)): (
+            path.read_bytes() if path.is_file() else None, path.stat().st_mtime_ns,
+        )
+        for path in ([root, *root.rglob("*")] if root.exists() else [])
+    }
+
+
+@pytest.mark.parametrize("write", [False, True])
+@pytest.mark.parametrize("preexisting", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+def test_explicit_local_pull_rejects_missing_runs_before_any_effect(
+    tmp_path: Path, write: bool, preexisting: bool, present: bool,
+) -> None:
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.research.archive import archive_pull
+
+    source, root = tmp_path / "source", tmp_path / "archive"
+    if present:
+        _write_minimal_run(source, "present")
+    if preexisting:
+        (root / "manifests").mkdir(parents=True)
+        (root / "manifests" / "inventory.latest.json").write_text('{"sentinel":true}')
+        (root / "sentinel").write_bytes(b"keep")
+    before = _archive_tree_snapshot(root)
+    calls = []
+
+    def no_transfer(command, **_kwargs):
+        calls.append(command)
+        pytest.fail("missing explicit runs must reject before rsync")
+
+    requested = ["missing-z", "present", "missing-a", "missing-z"]
+    missing = ["missing-z", "missing-a"] if present else ["missing-z", "present", "missing-a"]
+    with pytest.raises(AgentToolError) as raised:
+        archive_pull(repo_root=tmp_path, archive_root=root, source_root=source,
+                     run_ids=requested, write=write, run_cmd=no_transfer)
+    assert raised.value.code == "SOURCE_INVENTORY_ERROR"
+    assert raised.value.details == {"missing_run_ids": missing}
+    assert raised.value.message == (
+        "requested runs unavailable in selected source inventory: " + ", ".join(missing)
+    )
+    assert calls == []
+    assert _archive_tree_snapshot(root) == before
+
+
+@pytest.mark.parametrize("write", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+@pytest.mark.parametrize("batched", [False, True])
+def test_explicit_remote_pull_checks_complete_inventory_before_transfer(
+    tmp_path: Path, write: bool, present: bool, batched: bool,
+) -> None:
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.research.archive import archive_pull
+
+    root = tmp_path / "archive"
+    (root / "manifests").mkdir(parents=True)
+    (root / "manifests" / "inventory.latest.json").write_text('{"sentinel":true}')
+    before = _archive_tree_snapshot(root)
+    requested = [f"run-{index}" for index in range(11)] if batched else ["present", "missing"]
+    missing = [requested[-1]] if present else requested
+    calls = []
+
+    def inventory_only(command, **_kwargs):
+        calls.append(command)
+        assert command[0] == "ssh", "must finish inventory and reject before any rsync"
+        batch = json.loads(shlex.split(command[-1])[-1])
+        return _completed(command, json.dumps({
+            "runtime_root": "/var/lib/options-monitor", "source_host": "fixture.example",
+            "runs": [{"run_id": run_id} for run_id in batch if run_id not in missing]
+                    + [{"run_id": "unsolicited"}],
+        }))
+
+    with pytest.raises(AgentToolError) as raised:
+        archive_pull(repo_root=tmp_path, archive_root=root, ssh_target="fixture@example",
+                     run_ids=[*requested, requested[-1]], write=write, run_cmd=inventory_only)
+    assert raised.value.code == "SOURCE_INVENTORY_ERROR"
+    assert raised.value.details == {"missing_run_ids": missing}
+    assert raised.value.message.endswith(", ".join(missing))
+    assert len(calls) == (2 if batched else 1)
+    assert _archive_tree_snapshot(root) == before
+
+
+@pytest.mark.parametrize("write", [False, True])
+@pytest.mark.parametrize("failure", ["json", "ssh", "later_batch"])
+def test_explicit_pull_preserves_failed_inventory_without_effects(
+    tmp_path: Path, write: bool, failure: str,
+) -> None:
+    from src.application.research.archive import archive_pull
+
+    root = tmp_path / "archive"
+    calls = []
+
+    def failed_inventory(command, **_kwargs):
+        calls.append(command)
+        assert command[0] == "ssh", "failed inventory must not attempt transfer"
+        if failure == "json":
+            return _completed(command, "not-json")
+        if failure == "ssh" or len(calls) == 2:
+            return subprocess.CompletedProcess(command, 255, stdout="", stderr="fixture transport failure")
+        batch = json.loads(shlex.split(command[-1])[-1])
+        return _completed(command, json.dumps({
+            "runtime_root": "/var/lib/options-monitor", "source_host": "fixture.example",
+            "runs": [{"run_id": run_id} for run_id in batch],
+        }))
+
+    requested = [f"run-{index}" for index in range(11)] if failure == "later_batch" else ["run-0"]
+    data = archive_pull(repo_root=tmp_path, archive_root=root, ssh_target="fixture@example",
+                        run_ids=requested, write=write, run_cmd=failed_inventory)
+    assert data["ok"] is False and data["changed"] is False
+    assert data["dry_run"] is (not write)
+    assert data["manifest"] is None and data["scan_blob_refs"] == []
+    assert len(data["operations"]) == 1
+    operation = data["operations"][0]
+    assert operation["ok"] is False
+    assert operation["returncode"] == (255 if failure == "ssh" else 1 if failure == "later_batch" else 0)
+    if failure == "json":
+        assert operation["stdout"] == "not-json"
+    else:
+        assert operation["stderr"] == "fixture transport failure"
+    assert operation["command"] == ([call for call in calls] if failure == "later_batch" else calls[0])
+    assert len(calls) == (2 if failure == "later_batch" else 1)
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("write", [False, True])
+def test_explicit_pull_respects_age_filter_and_safe_ids(tmp_path: Path, write: bool) -> None:
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.research.archive import archive_pull
+
+    source, root = tmp_path / "source", tmp_path / "archive"
+    run = _write_minimal_run(source, "old")
+    os.utime(run, (1, 1))
+
+    def no_transfer(*_args, **_kwargs):
+        pytest.fail("rejected selection must not transfer")
+
+    with pytest.raises(AgentToolError) as raised:
+        archive_pull(repo_root=tmp_path, archive_root=root, source_root=source,
+                     run_ids=[" old ", "old"], since_days=1, write=write, run_cmd=no_transfer)
+    assert raised.value.code == "SOURCE_INVENTORY_ERROR"
+    assert raised.value.details == {"missing_run_ids": ["old"]}
+    assert "since_days" in str(raised.value.hint)
+    with pytest.raises(AgentToolError) as unsafe:
+        archive_pull(repo_root=tmp_path, archive_root=root, source_root=source,
+                     run_ids=["../old"], write=write, run_cmd=no_transfer)
+    assert unsafe.value.code == "INPUT_ERROR"
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("write", [False, True])
+@pytest.mark.parametrize("requested", [None, [], ["", " "]])
+def test_archive_pull_retains_valid_empty_inventory(
+    tmp_path: Path, write: bool, requested: list[str] | None,
+) -> None:
+    from src.application.research.archive import archive_pull
+
+    calls = []
+
+    def transfer(command, **_kwargs):
+        calls.append(command)
+        return _completed(command)
+
+    data = archive_pull(repo_root=tmp_path, archive_root=tmp_path / "archive",
+                        source_root=tmp_path / "source", run_ids=requested,
+                        write=write, run_cmd=transfer, now_fn=_fixed_now)
+    assert data["ok"] is True and data["selected_run_ids"] == []
+    assert data["changed"] is write and data["dry_run"] is (not write)
+    assert calls and all(command[0] == "rsync" for command in calls)
+    assert (data["manifest"] is not None) is write
+
+
+@pytest.mark.parametrize("write", [False, True])
+def test_archive_cli_missing_explicit_run_uses_real_error_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], write: bool,
+) -> None:
+    from src.interfaces.cli.main import main
+
+    source, root = tmp_path / "source", tmp_path / "archive"
+    _write_minimal_run(source, "present")
+    monkeypatch.setattr("src.interfaces.cli.main.repo_base", lambda: tmp_path)
+    argv = ["research", "archive", "pull", "--source-root", str(source),
+            "--archive-root", str(root), "--run-id", "present", "--run-id", "missing",
+            "--rsync-path", str(tmp_path / "must-not-run")]
+    if write:
+        argv.append("--write")
+    assert main(argv) == 2
+    data = json.loads(capsys.readouterr().out)
+    assert data["ok"] is False
+    assert data["error"]["code"] == "SOURCE_INVENTORY_ERROR"
+    assert data["error"]["details"] == {"missing_run_ids": ["missing"]}
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("remote", [False, True])
+@pytest.mark.parametrize("write", [False, True])
+def test_complete_explicit_pull_preserves_transfer_verify_and_repeat(
+    tmp_path: Path, remote: bool, write: bool,
+) -> None:
+    import shutil
+
+    from src.application.research.archive import archive_pull, archive_verify
+
+    source, root = tmp_path / "source", tmp_path / "archive"
+    original = _write_minimal_run(source, "selected")
+    _write_minimal_run(source, "unselected")
+    calls = []
+
+    def transfer(command, **_kwargs):
+        calls.append(command)
+        if command[0] == "ssh":
+            return _completed(command, json.dumps(_remote_inventory_payload(tmp_path, source)))
+        assert command[0] == "rsync"
+        path = Path(command[-2].split(":", 1)[1] if remote else command[-2])
+        assert "unselected" not in path.parts
+        assert ("--dry-run" in command) is (not write)
+        if write and path.is_dir():
+            shutil.copytree(path, Path(command[-1]), dirs_exist_ok=True)
+        return _completed(command)
+
+    args = dict(repo_root=tmp_path, archive_root=root, run_ids=[" selected ", "selected"],
+                write=write, run_cmd=transfer, include_logs=False, now_fn=_fixed_now)
+    if remote:
+        args.update(ssh_target="fixture@example", remote_runtime_root=source)
+    else:
+        args.update(source_root=source)
+    first = archive_pull(**args)
+    assert first["ok"] is True and first["selected_run_ids"] == ["selected"]
+    if write:
+        assert (root / "output_runs" / "selected" / "state" / "last_run.json").read_bytes() == (
+            original / "state" / "last_run.json"
+        ).read_bytes()
+        before = _archive_tree_snapshot(root / "output_runs" / "selected")
+        assert archive_verify(repo_root=tmp_path, archive_root=root)["ok"] is True
+        assert first["manifest"] is not None
+    else:
+        assert not root.exists() and first["manifest"] is None
+    second = archive_pull(**args)
+    assert second["ok"] is True and second["selected_run_ids"] == ["selected"]
+    if write:
+        assert _archive_tree_snapshot(root / "output_runs" / "selected") == before
+        assert not (root / "output_runs" / "unselected").exists()
+        assert archive_verify(repo_root=tmp_path, archive_root=root)["ok"] is True
+    assert calls
 
 
 def _cleanup_payload(**overrides: Any) -> dict[str, Any]:
