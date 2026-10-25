@@ -1957,3 +1957,205 @@ def test_empty_pending_explicit_deal_request_keeps_noop_action(tmp_path):
     assert result["requested_deal_ids"] == ["missing"]
     assert result["actions"] == [{"deal_id": "missing", "from_bucket": None, "action": "noop",
                                   "reason": "deal_id_not_pending", "write_state": False}]
+
+
+def _stock_skip_audit(raw_overrides=None, *, context=None):
+    from src.application.trades.normalizer import normalize_trade_deal
+    from src.application.trades.intake import build_trade_intake_audit_event
+
+    raw = {"account": "lx", "futu_account_id": "REAL_1", "deal_id": "audit-D",
+           "code": "US.FUTU", "side": "BUY", "qty": 100, "price": 120,
+           "currency": "USD", "environment": "REAL", "external_id_namespace": "futu.deal",
+           "trade_time_ms": 1_700_000_000_000}
+    raw.update(raw_overrides or {})
+    if raw.get("futu_account_id") is None:
+        raw.pop("futu_account_id")
+    if context is not None:
+        raw["_trade_intake_source"] = context
+    deal = normalize_trade_deal(raw, futu_account_mapping={"REAL_1": "lx", "REAL_2": "sy"},
+                                allow_opend_refresh=False)
+    row = build_trade_intake_audit_event("resolved", source="push" if context is not None else "manual",
+        payload=raw, deal=deal, result={"status": "skipped", "reason": "not_option_deal",
+                                      "account": deal.internal_account, "deal_id": deal.deal_id})
+    assert row["payload"] == raw == row["deal"]["raw_payload"]
+    assert row["deal"]["internal_account"] == "lx"
+    assert row["deal"]["futu_account_id"] == "REAL_1"
+    return row
+
+
+def _audit_pending():
+    return {"account": "lx", "futu_account_id": "REAL_1", "source_deal_id": "audit-D",
+            "status": "unresolved", "reason": "missing_option_type"}
+
+
+@pytest.mark.parametrize("raw,valid", [
+    ({"account": "lx"}, True),
+    ({"account": "REAL_1", "futu_account_id": None}, True),
+    ({"account": "REAL_1", "futu_account_id": "REAL_1"}, True),
+    ({"account": "REAL_2"}, False),
+    ({"account": "sy"}, False),
+    ({"account": "REAL_1", "trd_acc_id": "REAL_2"}, False),
+])
+@pytest.mark.parametrize("key_kind", ["scoped", "bare", "canonical"])
+def test_audit_skip_real_producer_roles_preview_apply_and_retry(tmp_path, raw, valid, key_kind):
+    from src.application.ledger.api import execution_identity_from_input
+
+    row = _stock_skip_audit(raw)
+    key = {"scoped": "futu:lx:REAL_1:audit-D", "bare": "audit-D",
+           "canonical": execution_identity_from_input(row["deal"]["execution_input"])}[key_kind]
+    path, audit = tmp_path / "state.json", tmp_path / "audit.jsonl"
+    _write_state(path, unresolved={key: _audit_pending()}, failed={"untouched": {"status": "failed"}})
+    audit.write_text(json.dumps(row) + "\n")
+    before, audit_before = path.read_bytes(), audit.read_bytes()
+    preview = reconcile_trade_intake_state(state_path=path, repo=FakeRepo([]), audit_path=audit)
+    assert preview["planned_count"] == int(valid)
+    assert preview["applied_count"] == 0
+    assert path.read_bytes() == before and audit.read_bytes() == audit_before
+    assert list(tmp_path.glob("*.bak*")) == []
+    applied = reconcile_trade_intake_state(state_path=path, repo=FakeRepo([]), audit_path=audit, apply_changes=True)
+    assert applied["applied_count"] == int(valid)
+    state = load_trade_intake_state(path)
+    assert state["failed_deal_ids"] == {"untouched": {"status": "failed"}}
+    if valid:
+        assert state["processed_deal_ids"][key]["status"] == "skipped"
+        assert state["processed_deal_ids"][key]["reason"] == "not_option_deal"
+        assert state["processed_deal_ids"][key]["applied_record_ids"] == []
+        assert key not in state["unresolved_deal_ids"]
+    else:
+        assert path.read_bytes() == before
+        assert applied["actions"][-1]["reason"] == "no_reconciliation_evidence"
+        assert applied["backup_path"] is None
+    after = path.read_bytes()
+    assert reconcile_trade_intake_state(state_path=path, repo=FakeRepo([]), audit_path=audit,
+                                        apply_changes=True)["applied_count"] == 0
+    assert path.read_bytes() == after and audit.read_bytes() == audit_before
+
+
+@pytest.mark.parametrize("fault", [
+    "foreign_logical", "foreign_physical", "missing_logical", "missing_physical", "missing_state_logical",
+    "missing_state_physical", "state_key_conflict", "state_broker_key_conflict", "state_source_conflict",
+    "result_logical", "diagnostic_physical", "raw_copy", "raw_internal", "raw_deal",
+    "raw_alias", "environment", "namespace", "broker", "partial_execution", "execution_conflict",
+    "missing_role_witness", "malformed_context", "canonical_without_execution", "canonical_wrong_key",
+])
+def test_audit_skip_rejects_incomplete_or_conflicting_recorded_proof(tmp_path, fault):
+    from src.application.ledger.api import execution_identity_from_input
+
+    row, state = _stock_skip_audit(), _audit_pending()
+    key = "audit-D"
+    if fault == "foreign_logical":
+        row = {"deal_id": "audit-D", "account": "sy", "futu_account_id": "REAL_1", "reason": "not_option_deal"}
+    elif fault == "foreign_physical":
+        row = {"deal_id": "audit-D", "account": "lx", "futu_account_id": "REAL_2", "reason": "not_option_deal"}
+    elif fault == "missing_logical":
+        row = {"deal_id": "audit-D", "futu_account_id": "REAL_1", "reason": "not_option_deal"}
+    elif fault == "missing_physical":
+        row = {"deal_id": "audit-D", "account": "lx", "reason": "not_option_deal"}
+    elif fault.startswith("missing_state_"):
+        state.pop("account" if fault.endswith("logical") else "futu_account_id")
+    elif fault == "state_key_conflict": key = "futu:sy:REAL_1:audit-D"
+    elif fault == "state_broker_key_conflict": state["broker_deal_key"] = "futu:lx:REAL_2:audit-D"
+    elif fault == "state_source_conflict": state["source_deal_id"] = "another"
+    elif fault == "result_logical": row["result"]["account"] = "sy"
+    elif fault == "diagnostic_physical": row["result"]["diagnostics"] = {"futu_account_id": "REAL_2"}
+    elif fault == "raw_copy": row["deal"]["raw_payload"]["account"] = "sy"
+    elif fault == "raw_internal": row["payload"]["internal_account"] = "sy"
+    elif fault == "raw_deal": row["payload"]["dealID"] = "another"
+    elif fault == "raw_alias": row["payload"]["acc_id"] = "REAL_2"
+    elif fault == "environment": row["payload"]["trd_env"] = "SIMULATE"
+    elif fault == "namespace": row["payload"]["execution_id_namespace"] = "another"
+    elif fault == "broker": row["payload"]["broker_id"] = "other"
+    elif fault == "partial_execution": row["payload"]["execution_input"] = {"external_execution_id": "audit-D"}
+    elif fault == "execution_conflict": row["result"]["execution_input"] = {
+        **row["deal"]["execution_input"], "external_execution_id": "another"}
+    elif fault == "missing_role_witness": row["deal"].pop("internal_account")
+    elif fault == "malformed_context": row["payload"]["_trade_intake_source"] = {"transport": "push"}
+    elif fault == "canonical_without_execution":
+        key = execution_identity_from_input(row["deal"]["execution_input"])
+        row["deal"].pop("execution_input")
+    elif fault == "canonical_wrong_key": key = "execution:v1:" + "0" * 64
+    path, audit = tmp_path / "state.json", tmp_path / "audit.jsonl"
+    _write_state(path, unresolved={key: state})
+    audit.write_text("bad json\n[]\n" + json.dumps(row) + "\n")
+    before, audit_before = path.read_bytes(), audit.read_bytes()
+    for apply in (False, True):
+        result = reconcile_trade_intake_state(state_path=path, repo=FakeRepo([]), audit_path=audit, apply_changes=apply)
+        assert result["planned_count"] == result["applied_count"] == 0
+        assert result["actions"][0]["reason"] == "no_reconciliation_evidence"
+        assert result["backup_path"] is None
+        assert path.read_bytes() == before and audit.read_bytes() == audit_before
+
+
+@pytest.mark.parametrize("producer", ["push", "nested_execution", "direct_execution"])
+@pytest.mark.parametrize("raw_account,valid", [("lx", True), ("REAL_1", False), ("sy", False)])
+def test_audit_skip_trusted_raw_producer_role_is_strict(tmp_path, producer, raw_account, valid):
+    from copy import deepcopy
+
+    context = {"schema_version": "trade_intake_source.v1", "transport": "push", "source_id": "fixture",
+               "account": "lx", "futu_account_id": "REAL_1", "opend_process": "fixture-opend",
+               "opend_host": "127.0.0.1", "opend_port": 11111, "received_at_utc": "2026-10-25T00:00:00Z"}
+    row = _stock_skip_audit(context=context if producer == "push" else None)
+    for raw in (row["payload"], row["deal"]["raw_payload"]):
+        raw["account"] = raw_account
+        if producer == "nested_execution": raw["execution_input"] = deepcopy(row["deal"]["execution_input"])
+        elif producer == "direct_execution": raw.update(deepcopy(row["deal"]["execution_input"]))
+    path, audit = tmp_path / "state.json", tmp_path / "audit.jsonl"
+    _write_state(path, unresolved={"audit-D": _audit_pending()})
+    audit.write_text(json.dumps(row) + "\n")
+    result = reconcile_trade_intake_state(state_path=path, repo=FakeRepo([]), audit_path=audit)
+    assert result["planned_count"] == int(valid)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_audit_skip_rows_are_independent_and_foreign_rows_do_not_veto(tmp_path, reverse):
+    row = _stock_skip_audit()
+    incomplete = [{"deal_id": "audit-D", "account": "lx", "reason": "not_option_deal"},
+                  {"deal_id": "audit-D", "futu_account_id": "REAL_1", "reason": "not_option_deal"}]
+    foreign = {"deal_id": "audit-D", "account": "sy", "futu_account_id": "REAL_2", "reason": "not_option_deal"}
+    path, audit = tmp_path / "state.json", tmp_path / "audit.jsonl"
+    _write_state(path, unresolved={"audit-D": _audit_pending()})
+    audit.write_text("\n".join(json.dumps(x) for x in incomplete) + "\n")
+    assert reconcile_trade_intake_state(state_path=path, repo=FakeRepo([]), audit_path=audit)["planned_count"] == 0
+    rows = [foreign, row] if reverse else [row, foreign]
+    audit.write_text("\n".join(json.dumps(x) for x in rows) + "\n")
+    assert reconcile_trade_intake_state(state_path=path, repo=FakeRepo([]), audit_path=audit)["planned_count"] == 1
+
+
+def test_audit_skip_preserves_own_reason_without_historical_identity(tmp_path):
+    path = tmp_path / "state.json"
+    _write_state(path, unresolved={"old": {"status": "unresolved", "reason": "not_option_deal"}})
+    assert reconcile_trade_intake_state(state_path=path, repo=FakeRepo([]), apply_changes=True)["applied_count"] == 1
+    assert load_trade_intake_state(path)["processed_deal_ids"]["old"]["status"] == "skipped"
+
+
+@pytest.mark.parametrize("failure", ["callback_reject", "callback_raise", "write_raise", "same_key_changed"])
+def test_audit_skip_conditional_update_failure_and_retry(tmp_path, failure):
+    path, audit = tmp_path / "state.json", tmp_path / "audit.jsonl"
+    _write_state(path, unresolved={"audit-D": _audit_pending()})
+    audit.write_text(json.dumps(_stock_skip_audit()) + "\n")
+    before = path.read_bytes()
+    options = {}
+    if failure == "callback_reject": options["before_state_update"] = lambda *_: []
+    elif failure == "callback_raise":
+        def callback(*_): raise OSError("fixture callback failed")
+        options["before_state_update"] = callback
+    else:
+        def update(path, state, *, deal_ids, expected_state):
+            if failure == "write_raise": raise OSError("fixture write failed")
+            changed = load_trade_intake_state(path)
+            changed["unresolved_deal_ids"]["audit-D"]["reason"] = "concurrent correction"
+            write_trade_intake_state(path, changed)
+            return compare_and_update_trade_intake_state_entries(path, state, deal_ids=deal_ids, expected_state=expected_state)
+        options["update_state_fn"] = update
+    if failure in {"callback_raise", "write_raise"}:
+        with pytest.raises(OSError, match="fixture .* failed"):
+            reconcile_trade_intake_state(state_path=path, repo=FakeRepo([]), audit_path=audit, apply_changes=True, **options)
+        assert path.read_bytes() == before
+    else:
+        result = reconcile_trade_intake_state(state_path=path, repo=FakeRepo([]), audit_path=audit, apply_changes=True, **options)
+        assert result["applied_count"] == 0
+    state = load_trade_intake_state(path)
+    assert state["processed_deal_ids"] == {} and "audit-D" in state["unresolved_deal_ids"]
+    if failure == "same_key_changed": assert state["unresolved_deal_ids"]["audit-D"]["reason"] == "concurrent correction"
+    assert reconcile_trade_intake_state(state_path=path, repo=FakeRepo([]), audit_path=audit, apply_changes=True)["applied_count"] == 1
+    assert reconcile_trade_intake_state(state_path=path, repo=FakeRepo([]), audit_path=audit, apply_changes=True)["applied_count"] == 0
