@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- 升级缓存固定内部 origin，保留自定义 checkout remote 的重复检查、归档及无 Git release 续查；缺少内部来源时明确拒绝（#711）。
+
 ## 4.5.8 - 2026-10-25
 
 ### Bug Fixes

@@ -653,7 +653,7 @@ def _resolve_upgrade_remote_url(
     except Exception as exc:
         errors.append(f"current_release: {exc}")
     try:
-        return _cache_remote_url(cache_root=cache_root, remote_name=remote_name, run_cmd=run_cmd)
+        return _cache_remote_url(cache_root=cache_root, remote_name="origin", run_cmd=run_cmd)
     except Exception as exc:
         errors.append(f"upgrade_cache: {exc}")
     raise RuntimeError(
@@ -688,7 +688,7 @@ def _version_check_for_upgrade(
         }
     try:
         remote_url = (
-            _cache_remote_url(cache_root=cache_root, remote_name=remote_name, run_cmd=run_cmd)
+            _cache_remote_url(cache_root=cache_root, remote_name="origin", run_cmd=run_cmd)
             if _cache_repo_path(cache_root).exists()
             else _resolve_upgrade_remote_url(
                 repo_root=repo_root, cache_root=cache_root, remote_name=remote_name, run_cmd=run_cmd,
@@ -701,7 +701,9 @@ def _version_check_for_upgrade(
             "release_tag": None, "selected_tag": None, "target_source": None,
             "cache_repo": str(_cache_repo_path(cache_root)), "cache_fetched": False,
             "tag_count": 0, "highest_tag_seen": None, "source": "release_target",
-            "message": "版本检查失败：无法确定升级来源", "error": "upgrade_source_unavailable",
+            "message": "版本检查失败：无法确定升级来源",
+            "error": ("upgrade_source_unavailable: cache origin unavailable"
+                      if _cache_repo_path(cache_root).exists() else "upgrade_source_unavailable"),
         }
     resolved = resolve_upgrade_target(
         remote_url=remote_url,
@@ -745,6 +747,7 @@ def _materialize_release_from_git_cache(
 
     cache_repo.parent.mkdir(parents=True, exist_ok=True)
     if cache_repo.exists():
+        _cache_remote_url(cache_root=cache_root, remote_name="origin", run_cmd=run_cmd)
         _run_required(
             ["git", f"--git-dir={cache_repo}", "fetch", "--tags", "--prune", "origin"],
             cwd=None,
@@ -755,7 +758,7 @@ def _materialize_release_from_git_cache(
         out["fetched"] = True
     else:
         _run_required(
-            ["git", "clone", "--mirror", remote_url, str(cache_repo)],
+            ["git", "clone", "--mirror", "--origin", "origin", remote_url, str(cache_repo)],
             cwd=None,
             run_cmd=run_cmd,
             operations=operations,

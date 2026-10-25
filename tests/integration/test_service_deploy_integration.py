@@ -2167,7 +2167,7 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(
     assert out["auto"] is auto
     assert current.resolve() == (releases / "1.0.1").resolve()
     cache_repo = install / "_cache" / "git" / "options-monitor.git"
-    assert ["git", "clone", "--mirror", "https://github.com/example/options-monitor.git", str(cache_repo)] in calls
+    assert ["git", "clone", "--mirror", "--origin", "origin", "https://github.com/example/options-monitor.git", str(cache_repo)] in calls
     assert any(command[:3] == ["git", f"--git-dir={cache_repo}", "archive"] for command in calls)
     assert any(command[:2] == ["tar", "-xf"] for command in calls)
     assert not any(command[:4] == ["git", "clone", "--depth", "1"] for command in calls)
@@ -2415,6 +2415,8 @@ def test_service_upgrade_confirm_uses_cached_remote_when_current_release_has_no_
                 stderr="",
             )
         if command[:3] == ["git", "config", "--get"]:
+            if kwargs.get("cwd") == str(cache_repo):
+                return subprocess.CompletedProcess(command, 0, stdout="https://github.com/example/options-monitor.git\n", stderr="")
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="fatal: not a git repository")
         if command[:3] == ["git", f"--git-dir={cache_repo}", "config"]:
             return subprocess.CompletedProcess(command, 0, stdout="https://github.com/example/options-monitor.git\n", stderr="")
@@ -5891,11 +5893,11 @@ def test_source_failure_does_not_guess_mirror_remote(monkeypatch, tmp_path):
     calls = []
     def runner(command, **kwargs):
         calls.append(command)
-        assert command == ["git", f"--git-dir={cache_repo}", "config", "--get", "remote.upstream.url"]
+        assert command == ["git", f"--git-dir={cache_repo}", "config", "--get", "remote.origin.url"]
         return subprocess.CompletedProcess(command, 1, "", "no such remote")
     _, http_calls = _mock_published_releases(monkeypatch)
     out = upgrade.service_upgrade_check(repo_root=args["repo_root"], runtime_root=args["runtime_root"],
                                         cache_root=args["cache_root"], remote_name="upstream", run_cmd=runner)
     assert out["status"] == "upgrade_check_failed"
-    assert out["version_check"]["error"] == "upgrade_source_unavailable"
+    assert out["version_check"]["error"] == "upgrade_source_unavailable: cache origin unavailable"
     assert len(calls) == 1 and not http_calls
