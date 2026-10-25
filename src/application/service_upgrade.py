@@ -702,9 +702,9 @@ def _version_check_for_upgrade(
             "release_tag": None, "selected_tag": None, "target_source": None,
             "cache_repo": str(_cache_repo_path(cache_root)), "cache_fetched": False,
             "tag_count": 0, "highest_tag_seen": None, "source": "release_target",
-            "message": "版本检查失败：无法确定升级来源",
-            "error": ("upgrade_source_unavailable: cache origin unavailable"
-                      if _cache_repo_path(cache_root).exists() else "upgrade_source_unavailable"),
+            "message": ("版本检查失败：无法确定升级来源（cache origin unavailable）"
+                        if _cache_repo_path(cache_root).exists() else "版本检查失败：无法确定升级来源"),
+            "error": "upgrade_source_unavailable",
         }
     resolved = resolve_upgrade_target(
         remote_url=remote_url,

@@ -32,6 +32,7 @@ def git_fixture(tmp_path, monkeypatch):
         if name.startswith("GIT_"):
             monkeypatch.delenv(name)
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "file")
     config = tmp_path / "gitconfig"
     config.write_text("[clone]\n\tdefaultRemoteName = alternate\n")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
@@ -124,7 +125,7 @@ def test_materializer_initializes_origin_despite_clone_default(git_fixture, tmp_
 
 
 @pytest.mark.parametrize("origin_state", ["missing", "empty"])
-def test_missing_origin_refuses_decoy_before_fetch_or_archive(git_fixture, tmp_path, origin_state):
+def test_missing_origin_refuses_decoy_before_fetch_or_archive(git_fixture, tmp_path, origin_state, published_releases):
     source = git_fixture
     cache = tmp_path / "cache"
     mirror = cache / "git/options-monitor.git"
@@ -147,7 +148,9 @@ def test_missing_origin_refuses_decoy_before_fetch_or_archive(git_fixture, tmp_p
         remote_name="upstream", run_cmd=run,
     )
     assert not out["ok"]
-    assert "origin" in out["version_check"]["error"]
+    assert out["version_check"]["error"] == "upgrade_source_unavailable"
+    assert "origin" in out["version_check"]["message"]
+    assert published_releases[1] == []
     release = tmp_path / "releases/1.0.0"
     with pytest.raises(RuntimeError, match="origin"):
         _materialize_release_from_git_cache(

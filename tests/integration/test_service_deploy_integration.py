@@ -6092,5 +6092,6 @@ def test_source_failure_does_not_guess_mirror_remote(monkeypatch, tmp_path):
     out = upgrade.service_upgrade_check(repo_root=args["repo_root"], runtime_root=args["runtime_root"],
                                         cache_root=args["cache_root"], remote_name="upstream", run_cmd=runner)
     assert out["status"] == "upgrade_check_failed"
-    assert out["version_check"]["error"] == "upgrade_source_unavailable: cache origin unavailable"
+    assert out["version_check"]["error"] == "upgrade_source_unavailable"
+    assert "origin" in out["version_check"]["message"]
     assert len(calls) == 1 and not http_calls
