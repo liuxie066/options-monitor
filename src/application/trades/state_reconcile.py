@@ -941,7 +941,8 @@ def _audit_skip_matches_state(event: dict[str, Any], state_key: str, state_item:
                 _audit_add_identity_claims(claims, context)
             if "execution_input" in raw:
                 executions.add(_audit_add_execution(claims, raw["execution_input"], raw))
-            elif "broker_account_ref" in raw or "instrument_ref" in raw:
+            # A nested execution cannot hide a separately declared direct execution.
+            if "broker_account_ref" in raw or "instrument_ref" in raw:
                 executions.add(_audit_add_execution(claims, raw, raw))
             account = norm_account_identity(raw.get("account"))
             if account is not None:

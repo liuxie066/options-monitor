@@ -1983,6 +1983,71 @@ def _stock_skip_audit(raw_overrides=None, *, context=None):
     return row
 
 
+@pytest.mark.parametrize("shape,valid", [
+    ("legacy", True), ("nested", True), ("direct", True), ("both", True),
+    ("both_physical_conflict", False), ("both_incomplete_direct", False),
+])
+@pytest.mark.parametrize("key_kind", ["scoped", "canonical"])
+def test_audit_skip_checks_every_recorded_execution_shape(tmp_path, shape, valid, key_kind):
+    from copy import deepcopy
+    from src.application.ledger.api import execution_identity_from_input, open_trade_reconciliation_evidence_repo
+
+    execution = _stock_skip_audit()["deal"]["execution_input"]
+    raw = {}
+    if shape in {"nested", "both", "both_physical_conflict", "both_incomplete_direct"}:
+        raw["execution_input"] = deepcopy(execution)
+    if shape in {"direct", "both", "both_physical_conflict", "both_incomplete_direct"}:
+        raw.update(deepcopy(execution))
+    if shape == "both_physical_conflict":
+        raw["broker_account_ref"]["external_account_id"] = "REAL_2"
+    elif shape == "both_incomplete_direct":
+        raw["broker_account_ref"].pop("environment")
+    # Run the actual normalizer and audit builder after adding both declarations.
+    row = _stock_skip_audit(raw)
+    for retained in (row["payload"], row["deal"]["raw_payload"]):
+        assert all(retained[name] == value for name, value in raw.items())
+        if shape == "both_physical_conflict":
+            assert retained["execution_input"]["broker_account_ref"]["external_account_id"] == "REAL_1"
+            assert retained["broker_account_ref"]["external_account_id"] == "REAL_2"
+    key = ("futu:lx:REAL_1:audit-D" if key_kind == "scoped"
+           else execution_identity_from_input(row["deal"]["execution_input"]))
+    path, audit, ledger = tmp_path / "state.json", tmp_path / "audit.jsonl", tmp_path / "ledger.sqlite3"
+    _write_state(path, unresolved={key: _audit_pending()})
+    audit.write_text(json.dumps(row) + "\n")
+    with sqlite3.connect(ledger):
+        pass
+    before = {file: file.read_bytes() for file in (path, audit, ledger)}
+    files_before = set(tmp_path.iterdir())
+    summary = preview_trade_intake_reconciliation_from_sqlite(state_path=path, sqlite_path=ledger, audit_path=audit)
+    assert summary["available"] is True
+    assert summary["ignored_non_option_count"] == int(valid)
+    assert summary["pending_after_reconcile_count"] == int(not valid)
+    assert {file: file.read_bytes() for file in before} == before
+    assert set(tmp_path.iterdir()) == files_before
+    result = reconcile_trade_intake_state(state_path=path, audit_path=audit,
+        repo=open_trade_reconciliation_evidence_repo(ledger), apply_changes=True)
+    assert result["planned_count"] == result["applied_count"] == int(valid)
+    assert result["state_written"] is valid
+    assert audit.read_bytes() == before[audit] and ledger.read_bytes() == before[ledger]
+    state = load_trade_intake_state(path)
+    if valid:
+        assert state["processed_deal_ids"][key]["status"] == "skipped"
+        assert state["processed_deal_ids"][key]["reason"] == "not_option_deal"
+        assert state["processed_deal_ids"][key]["applied_record_ids"] == []
+        assert key not in state["unresolved_deal_ids"]
+    else:
+        assert result["actions"][0]["reason"] == "no_reconciliation_evidence"
+        assert result["backup_path"] is None
+        assert state["processed_deal_ids"] == {}
+        assert state["unresolved_deal_ids"][key] == _audit_pending()
+        assert {file: file.read_bytes() for file in before} == before
+        assert set(tmp_path.iterdir()) == files_before
+    after = path.read_bytes()
+    assert reconcile_trade_intake_state(state_path=path, audit_path=audit,
+        repo=open_trade_reconciliation_evidence_repo(ledger), apply_changes=True)["applied_count"] == 0
+    assert path.read_bytes() == after and audit.read_bytes() == before[audit] and ledger.read_bytes() == before[ledger]
+
+
 def _audit_pending():
     return {"account": "lx", "futu_account_id": "REAL_1", "source_deal_id": "audit-D",
             "status": "unresolved", "reason": "missing_option_type"}
