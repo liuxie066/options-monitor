@@ -361,8 +361,10 @@ def _ensure_cache_fetched(
 ) -> dict[str, Any]:
     cache_repo.parent.mkdir(parents=True, exist_ok=True)
     if cache_repo.exists():
+        if not _repo_remote_url(repo_root=cache_repo, remote_name="origin", run_cmd=run_cmd):
+            return {"ok": False, "cache_fetched": False, "error": "upgrade git cache has no configured origin URL"}
         result = _run(
-            ["git", f"--git-dir={cache_repo}", "fetch", "--tags", "--prune", remote_name],
+            ["git", f"--git-dir={cache_repo}", "fetch", "--tags", "--prune", "origin"],
             cwd=None,
             run_cmd=run_cmd,
             timeout=600,
@@ -379,7 +381,7 @@ def _ensure_cache_fetched(
             "error": f"upgrade git cache is missing and current release has no remote URL: {cache_repo}",
         }
     result = _run(
-        ["git", "clone", "--mirror", remote_url, str(cache_repo)],
+        ["git", "clone", "--mirror", "--origin", "origin", remote_url, str(cache_repo)],
         cwd=None,
         run_cmd=run_cmd,
         timeout=600,

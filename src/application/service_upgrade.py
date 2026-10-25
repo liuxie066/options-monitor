@@ -653,7 +653,7 @@ def _resolve_upgrade_remote_url(
     except Exception as exc:
         errors.append(f"current_release: {exc}")
     try:
-        return _cache_remote_url(cache_root=cache_root, remote_name=remote_name, run_cmd=run_cmd)
+        return _cache_remote_url(cache_root=cache_root, remote_name="origin", run_cmd=run_cmd)
     except Exception as exc:
         errors.append(f"upgrade_cache: {exc}")
     raise RuntimeError(
@@ -727,6 +727,7 @@ def _materialize_release_from_git_cache(
 
     cache_repo.parent.mkdir(parents=True, exist_ok=True)
     if cache_repo.exists():
+        _cache_remote_url(cache_root=cache_root, remote_name="origin", run_cmd=run_cmd)
         _run_required(
             ["git", f"--git-dir={cache_repo}", "fetch", "--tags", "--prune", "origin"],
             cwd=None,
@@ -737,7 +738,7 @@ def _materialize_release_from_git_cache(
         out["fetched"] = True
     else:
         _run_required(
-            ["git", "clone", "--mirror", remote_url, str(cache_repo)],
+            ["git", "clone", "--mirror", "--origin", "origin", remote_url, str(cache_repo)],
             cwd=None,
             run_cmd=run_cmd,
             operations=operations,
