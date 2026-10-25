@@ -1379,6 +1379,57 @@ def test_top_level_update_commands_delegate_to_service_upgrade(monkeypatch, caps
     assert calls[3][1]["preserve_activation_state"] is True
 
 
+@pytest.mark.parametrize(("target", "confirm", "valid"), [
+    ("../outside", False, False), ("../outside", True, False),
+    ("01.0.0", False, False), ("01.0.0", True, False), ("1.0.0", False, True),
+])
+def test_rollback_cli_enforces_actual_target_identity(monkeypatch, capsys, tmp_path, target, confirm, valid):
+    from functools import partial
+    import src.interfaces.cli.main as cli
+    from src.application import service_upgrade as upgrade
+
+    releases = tmp_path / "releases"
+    for version in ("1.0.0", "1.0.1"):
+        release = releases / version
+        release.mkdir(parents=True)
+        (release / "VERSION").write_text(version + "\n")
+    current = tmp_path / "current"
+    current.symlink_to(releases / "1.0.1", target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    status = runtime / "upgrade_status.json"
+    status.write_text('{"current_version":"1.0.0","status":"sentinel"}\n')
+    before = status.read_bytes()
+    readiness = []
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("CLI target admission invoked a subprocess")
+
+    def ready(**kwargs):
+        assert valid and kwargs["runtime_root"] == runtime
+        readiness.append(kwargs["runtime_dir"])
+        return {"ok": True}
+
+    monkeypatch.setattr(upgrade, "_pi_storage_readiness", ready)
+    monkeypatch.setattr(cli, "service_rollback", partial(upgrade.service_rollback, run_cmd=unexpected))
+    argv = ["update", "rollback", "--repo-root", str(current), "--runtime-root", str(runtime),
+            "--releases-root", str(releases), "--to-version", target]
+    if confirm:
+        argv.append("--confirm")
+    assert cli.main(argv) == (0 if valid else 2)
+    response = _read_json_output(capsys)
+    assert response["tool_name"] == "update.rollback" and response["ok"] is valid
+    data = response["data"]
+    assert data["status"] == ("dry_run" if valid else "rollback_target_invalid")
+    assert data["changed"] is False and data["write_applied"] is False
+    assert data["dry_run"] is (not confirm) and data["operations"] == []
+    assert current.resolve() == releases / "1.0.1"
+    assert readiness == ([releases / "1.0.0/agent-runtime"] if valid else [])
+    assert not (runtime / "locks/upgrade.lock").exists()
+    if not confirm:
+        assert status.read_bytes() == before and not (runtime / "locks/upgrade.lock.guard").exists()
+
+
 def test_service_upgrade_compat_commands_are_removed(capsys) -> None:
     import src.interfaces.cli.main as cli
 

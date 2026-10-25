@@ -3507,6 +3507,199 @@ def test_service_rollback_preserves_paused_timer_snapshot(
     }
 
 
+@pytest.mark.parametrize("confirm", [False, True])
+@pytest.mark.parametrize("implicit", [False, True])
+@pytest.mark.parametrize("target", [
+    "../outside", "/absolute", "1.0.0/../../outside", "1.0.0/child", ".", "..",
+    "01.0.0", "1.00.0", "1.0", "1.0.0-", "1.0.0-rc..1", "1.0.0-01",
+    "１.0.0", "1.0.0\nextra", "1.0.0+build", "1.0.0\\child",
+])
+def test_rollback_identity_rejects_invalid_target(transition_case, monkeypatch, target, implicit, confirm):
+    from src.application import service_upgrade as upgrade
+
+    case = transition_case()
+    case.status.write_text(json.dumps({"current_version": target if implicit else "1.0.0"}))
+    session = case.runtime / "output_shared/state/pi_sessions.sqlite3"
+    session.parent.mkdir(parents=True)
+    session.write_bytes(b"isolated-session-sentinel")
+    before = case.snapshot()
+
+    def unexpected(**kwargs):
+        pytest.fail("invalid target reached transition work")
+
+    monkeypatch.setattr(upgrade, "_prepare_runtime_configs_for_release", unexpected)
+    monkeypatch.setattr(upgrade, "_pi_storage_readiness", unexpected)
+    monkeypatch.setattr(upgrade, "_compensate_service_transition", unexpected)
+    out = case.invoke("rollback", None if implicit else target, confirm=confirm)
+    data = out["data"]
+    assert out["ok"] is False
+    assert data["status"] == "rollback_target_invalid"
+    assert data["target_version"] == target
+    assert data["changed"] is False and data["operations"] == []
+    assert data["dry_run"] is (not confirm) and data["write_applied"] is False
+    assert data["error"] and data["remediation"]
+    after = case.snapshot()
+    assert after[:3] == before[:3] and after[4:] == before[4:]
+    assert session.read_bytes() == b"isolated-session-sentinel"
+    assert case.commands == [] and case.queries == [] and case.child_requests == []
+    assert not (case.runtime / "upgrade_staging").exists() and not case.pid.exists()
+    if confirm:
+        assert json.loads(case.status.read_text())["status"] == "rollback_target_invalid"
+    else:
+        assert after == before and not case.guard.exists()
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+@pytest.mark.parametrize("fault", [
+    "outside", "outside_missing", "sibling_prefix", "loop", "root", "file",
+    "missing_version", "empty_version", "mismatch", "prefixed", "noncanonical",
+    "multiline", "invalid_utf8", "permission", "io_error",
+])
+def test_rollback_identity_rejects_path_and_version_failures(transition_case, monkeypatch, fault, confirm):
+    from src.application import service_upgrade as upgrade
+
+    case = transition_case()
+    target = case.releases / "3.0.0"
+    if fault in {"outside", "outside_missing", "sibling_prefix"}:
+        outside = case.root / ("releases-extra" if fault == "sibling_prefix" else "outside")
+        if fault != "outside_missing":
+            outside.mkdir()
+            (outside / "VERSION").write_text("3.0.0\n")
+        target.symlink_to(outside, target_is_directory=True)
+    elif fault == "loop":
+        target.symlink_to(target)
+    elif fault == "root":
+        target.symlink_to(case.releases, target_is_directory=True)
+    elif fault == "file":
+        target.write_bytes(b"not a directory")
+    else:
+        target.mkdir()
+        if fault != "missing_version":
+            content = {
+                "empty_version": b"", "mismatch": b"3.0.1\n", "prefixed": b"v3.0.0\n",
+                "noncanonical": b"03.0.0\n", "multiline": b"3.0.0\nother\n",
+                "invalid_utf8": b"\xff", "permission": b"3.0.0\n", "io_error": b"3.0.0\n",
+            }[fault]
+            (target / "VERSION").write_bytes(content)
+    before = case.snapshot()
+    read_text = Path.read_text
+
+    def read(path, *args, **kwargs):
+        if path == target / "VERSION":
+            if fault == "permission":
+                raise PermissionError("synthetic VERSION access failure")
+            if fault == "io_error":
+                raise OSError("synthetic VERSION read failure")
+        if path.name == "VERSION":
+            assert path.parent == case.current.resolve() or path.parent.is_relative_to(case.releases)
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    out = case.invoke("rollback", "3.0.0", confirm=confirm)
+    assert out["ok"] is False
+    data = out["data"]
+    assert data["status"] == "rollback_target_invalid"
+    assert data["changed"] is False and data["operations"] == []
+    assert data["error"] and data["remediation"]
+    after = case.snapshot()
+    assert after[:3] == before[:3] and after[4:] == before[4:]
+    assert case.commands == [] and case.child_requests == [] and not case.pid.exists()
+    assert not (case.runtime / "upgrade_staging").exists()
+    if not confirm:
+        assert after == before and not case.guard.exists()
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+@pytest.mark.parametrize("implicit", [False, True])
+@pytest.mark.parametrize("target", ["1.0.0", "0.0.0", "1.0.0-rc.1", "1.0.0-0", "1.0.0-01a", " v1.0.0 "])
+def test_rollback_identity_admits_supported_versions(transition_case, target, implicit, confirm):
+    case = transition_case()
+    version = target.strip().removeprefix("v")
+    release = case.releases / version
+    _write_upgrade_release_skeleton(release, version)
+    case.status.write_text(json.dumps({"current_version": target}))
+    before = case.snapshot()
+    out = case.invoke("rollback", None if implicit else target, confirm=confirm)
+    data = out["data"]
+    assert out["ok"] is True
+    assert data["target_version"] == version and data["target_dir"] == str(release)
+    assert data["status"] == ("rolled_back" if confirm else "dry_run")
+    assert data["changed"] is confirm
+    assert not case.pid.exists()
+    if confirm:
+        assert case.current.resolve() == release
+        assert data["runtime_config_commit"]["status"] == "committed"
+        assert any(command[0] == str(release / "om") for command in case.commands)
+    else:
+        assert case.snapshot() == before and case.commands == [] and not case.guard.exists()
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+def test_rollback_identity_uses_admitted_in_root_alias(transition_case, confirm):
+    case = transition_case()
+    admitted = case.releases / "release-storage"
+    (case.releases / "1.0.0").rename(admitted)
+    (case.releases / "1.0.0").symlink_to(admitted, target_is_directory=True)
+    out = case.invoke("rollback", "1.0.0", confirm=confirm)["data"]
+    assert out["ok"] is True and out["target_dir"] == str(admitted)
+    if confirm:
+        assert case.current.readlink() == admitted
+        assert out["runtime_config_prepare"]["staging_root"].endswith("1.0.1-to-release-storage")
+        assert any(command[0] == str(admitted / "om") for command in case.commands)
+
+
+@pytest.mark.parametrize("target", ["../outside", "9.9.9", "1.0.0"])
+def test_rollback_identity_busy_skips_admission(transition_case, monkeypatch, target):
+    from src.application import service_upgrade as upgrade
+
+    case = transition_case()
+    case.status.write_text('{"status":"holder-sentinel"}\n')
+    before = case.snapshot()
+    read_text = Path.read_text
+
+    def read(path, *args, **kwargs):
+        if path.name == "VERSION":
+            assert path.parent == case.current.resolve(), "busy contender read target VERSION"
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    with upgrade.single_instance_lock(case.guard, busy_message="fixture guard busy"):
+        identity = case.guard.stat().st_ino
+        data = case.invoke("rollback", target)["data"]
+        assert data["status"] == data["failure_status"] == "rollback_failed"
+        assert "upgrade lock already exists" in data["error"]
+        assert not case.pid.exists() and case.guard.stat().st_ino == identity
+        assert case.snapshot() == before and case.commands == []
+    assert not case.pid.exists()
+
+
+def test_rollback_identity_failure_receipt_error_releases_lock_and_retry(transition_case, monkeypatch):
+    from src.application import service_upgrade as upgrade
+    from src.application.agent_tool_contracts import AgentToolError
+
+    case = transition_case()
+    writer = upgrade.write_upgrade_status
+    before = case.snapshot()
+    error = OSError("synthetic failure receipt write")
+
+    def fail(**kwargs):
+        assert kwargs["payload"]["status"] == "rollback_target_invalid"
+        with pytest.raises(AgentToolError, match="fixture guard busy") as busy:
+            with upgrade.single_instance_lock(case.guard, busy_message="fixture guard busy"):
+                pytest.fail("failure receipt writer did not hold guard")
+        assert busy.value.code == "RESOURCE_BUSY"
+        assert busy.value.details == {"lock_path": str(case.guard)}
+        raise error
+
+    monkeypatch.setattr(upgrade, "write_upgrade_status", fail)
+    with pytest.raises(OSError) as caught:
+        case.invoke("rollback", "../outside")
+    assert caught.value is error
+    assert case.snapshot() == before and case.commands == [] and not case.pid.exists()
+    monkeypatch.setattr(upgrade, "write_upgrade_status", writer)
+    assert case.invoke("rollback", "1.0.0")["data"]["status"] == "rolled_back"
+
+
 def test_service_rollback_switches_current_symlink(tmp_path: Path) -> None:
     from src.application.service_upgrade import service_rollback, write_upgrade_status
 
