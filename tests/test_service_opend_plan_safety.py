@@ -33,18 +33,18 @@ def _write_configs(source, paths, settings, scopes):
             }))
 
 
-def _fixture(tmp_path, source, *, split=False, target="systemd"):
+def _fixture(tmp_path, source, *, split=False, target="systemd", accounts=("lx", "sy")):
     repo, runtime = tmp_path / "repo", tmp_path / "runtime"
     repo.mkdir()
     runtime.mkdir()
-    settings = _two_futu_service_accounts(tmp_path)
+    settings = dict(zip(accounts, _two_futu_service_accounts(tmp_path).values()))
     for index, value in enumerate(settings.values()):
         value["futu"]["account_id"] = f"REAL_{12345678 + index}"
-    scopes = {"us": ["lx"], "hk": ["sy"]} if split else {"us": ["lx", "sy"], "hk": ["lx", "sy"]}
+    scopes = {"us": [accounts[0]], "hk": [accounts[1]]} if split else {"us": list(accounts), "hk": list(accounts)}
     paths = {key: runtime / f"config.{key}.json" for key in scopes}
     paths["yaml"] = runtime / "config.yaml"
     _write_configs(source, paths, settings, scopes)
-    kwargs = dict(target=target, repo_root=repo, runtime_root=runtime, accounts=["lx", "sy"],
+    kwargs = dict(target=target, repo_root=repo, runtime_root=runtime, accounts=list(accounts),
                   markets=["us", "hk"], include_opend=True)
     kwargs.update({"config_yaml": paths["yaml"]} if source == "yaml" else {"config_paths": {key: paths[key] for key in scopes}})
     return paths, settings, scopes, kwargs
@@ -198,3 +198,117 @@ def test_service_render_cli_no_roots_fails_without_output(tmp_path, capsys):
     assert response["ok"] is False
     assert response["error"]["code"] == "CONFIG_ERROR"
     assert not output.exists()
+
+
+@pytest.mark.parametrize("source", ["json", "yaml"])
+@pytest.mark.parametrize("target", ["systemd", "launchd"])
+@pytest.mark.parametrize("accounts,slug", [(("a_b", "a-b"), "a-b"), (("a_", "a"), "a")])
+def test_render_rejects_colliding_opend_identities(tmp_path, source, target, accounts, slug):
+    _, settings, _, kwargs = _fixture(tmp_path, source, target=target, accounts=accounts)
+    with pytest.raises(ValueError, match="OpenD service identity collision") as error:
+        render_service_bundle(**kwargs)
+    message = str(error.value)
+    assert f"accounts {accounts[0]!r} and {accounts[1]!r}" in message
+    assert f"options-monitor-opend-{slug}.service" in message
+    assert f"com.options-monitor.opend.{slug}" in message
+    for account in settings.values():
+        assert account["futu"]["account_id"] not in message
+        assert account["futu"]["opend_root"] not in message
+
+
+@pytest.mark.parametrize("source", ["json", "yaml"])
+@pytest.mark.parametrize("target", ["systemd", "launchd"])
+def test_distinct_opend_slugs_preserve_order_and_single_instance(tmp_path, source, target):
+    _, settings, _, kwargs = _fixture(tmp_path, source, target=target, accounts=("a_b", "a-c"))
+    bundle = render_service_bundle(**kwargs)
+    names = (["options-monitor-opend-a-b.service", "options-monitor-opend-a-c.service"]
+             if target == "systemd" else ["com.options-monitor.opend.a-b", "com.options-monitor.opend.a-c"])
+    assert _profile(bundle)["opend"]["services"] == [
+        {"account": account, "root": settings[account]["futu"]["opend_root"],
+         "executable": str(Path(settings[account]["futu"]["opend_root"]) / "FutuOpenD"),
+         "service_name": name, "host": settings[account]["futu"]["host"], "port": settings[account]["futu"]["port"]}
+        for account, name in zip(("a_b", "a-c"), names)
+    ]
+    paths = [item["relative_path"] for item in bundle["files"] if "opend" in item["relative_path"]]
+    assert len(paths) == len(set(paths)) == 2
+    if target == "systemd":
+        intake = next(item["content"] for item in bundle["files"]
+                      if item["relative_path"] == "systemd/options-monitor-trade-intake.service")
+        for dependency in ("After", "Wants"):
+            assert f"{dependency}=network-online.target {' '.join(names)}" in intake
+    kwargs["accounts"] = ["a_b"]
+    services = _profile(render_service_bundle(**kwargs))["opend"]["services"]
+    assert len(services) == 1
+    assert services[0]["account"] == "a_b"
+    assert services[0]["root"] == settings["a_b"]["futu"]["opend_root"]
+    assert services[0]["service_name"] == ("options-monitor-opend.service" if target == "systemd" else "com.options-monitor.opend")
+
+
+@pytest.mark.parametrize("source", ["json", "yaml"])
+@pytest.mark.parametrize("target", ["systemd", "launchd"])
+def test_explicit_opend_root_keeps_legacy_identity_with_colliding_accounts(tmp_path, source, target):
+    _, _, _, kwargs = _fixture(tmp_path, source, target=target, accounts=("a_b", "a-b"))
+    kwargs["opend_root"] = tmp_path / "explicit-opend"
+    services = _profile(render_service_bundle(**kwargs))["opend"]["services"]
+    assert services == [{"root": str(kwargs["opend_root"]),
+                         "executable": str(kwargs["opend_root"] / "FutuOpenD"),
+                         "service_name": "options-monitor-opend.service" if target == "systemd" else "com.options-monitor.opend"}]
+
+
+@pytest.mark.parametrize("target", ["systemd", "launchd"])
+@pytest.mark.parametrize("existing_output", [False, True])
+def test_service_render_cli_collision_preserves_output(tmp_path, capsys, target, existing_output):
+    paths, _, _, kwargs = _fixture(tmp_path, "yaml", target=target, accounts=("a_b", "a-b"))
+    output = tmp_path / "rendered"
+    if existing_output:
+        name = "options-monitor-opend-a-b.service" if target == "systemd" else "com.options-monitor.opend.a-b.plist"
+        sentinel = output / target / name
+        sentinel.parent.mkdir(parents=True)
+        sentinel.write_bytes(b"original OpenD definition")
+        (output / "service.profile.json").write_bytes(b"original profile")
+    before = {path.relative_to(output): path.read_bytes() if path.is_file() else None for path in output.rglob("*")}
+    argv = ["service", "render", "--target", target, "--repo-root", str(kwargs["repo_root"]),
+            "--runtime-root", str(kwargs["runtime_root"]), "--markets", "us", "hk", "--accounts", "a_b", "a-b",
+            "--config-yaml", str(paths["yaml"]), "--include-opend", "--output-dir", str(output)]
+    if existing_output:
+        argv.append("--no-content")
+    code = cli.main(argv)
+    response = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert response["ok"] is False
+    assert response["error"]["code"] == "CONFIG_ERROR"
+    message = response["error"]["message"]
+    assert "OpenD service identity collision" in message
+    assert "accounts 'a_b' and 'a-b'" in message
+    assert "options-monitor-opend-a-b.service" in message
+    assert "com.options-monitor.opend.a-b" in message
+    assert output.exists() is existing_output
+    assert {path.relative_to(output): path.read_bytes() if path.is_file() else None for path in output.rglob("*")} == before
+
+
+@pytest.mark.parametrize("source", ["json", "yaml"])
+@pytest.mark.parametrize("confirm", [False, True])
+def test_drift_collision_is_effect_free_and_recovers(tmp_path, source, confirm):
+    paths, settings, scopes, kwargs = _fixture(tmp_path, source, accounts=("a_b", "a-b"))
+    second_root = settings["a-b"]["futu"].pop("opend_root")
+    _write_configs(source, paths, settings, scopes)
+    units, profile_path, calls, options = _install(tmp_path, kwargs)
+    original_units = {path.name: path.read_bytes() for path in units.iterdir()}
+    original_profile = profile_path.read_bytes()
+    settings["a-b"]["futu"]["opend_root"] = second_root
+    _write_configs(source, paths, settings, scopes)
+    before = {path.relative_to(tmp_path): path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")}
+    with pytest.raises(ValueError, match="OpenD service identity collision"):
+        service_drift(**options, confirm=confirm)
+    assert calls == []
+    assert {path.relative_to(tmp_path): path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")} == before
+    settings["a-b"]["futu"].pop("opend_root")
+    _write_configs(source, paths, settings, scopes)
+    for _ in range(2):
+        out = service_drift(**options, confirm=True)
+        assert out["summary"]["ok"] is True
+        assert out["changed"] is False
+        assert out["applied"]["retired_units"] == []
+    assert profile_path.read_bytes() == original_profile
+    assert {path.name: path.read_bytes() for path in units.iterdir()} == original_units
+    assert not any("disable" in command for command in calls)
