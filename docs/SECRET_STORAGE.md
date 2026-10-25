@@ -42,6 +42,11 @@ Facebook 等后续集成遵循同一规则：App ID 是普通配置；App Secret
 ./om secrets delete llm.deepseek.api_key --confirm
 ```
 
+systemd `status` 只检查固定凭据文件的元数据，不读取或解密值。明确不存在时报告未配置；
+权限或 I/O 错误使 CLI 返回脱敏配置错误和非零退出码，不作为成功的零配置结果。
+元数据有效不证明内容可读、可解密或服务已生效；运行时诊断的既有 unavailable / legacy-env
+兼容回退不因该检查改变。
+
 `set` / `rotate` 只通过可见终端中的隐藏输入读取秘密，两次输入必须一致。命令结束后只报告
 逻辑名、后端、是否改变和可能受影响的服务；不会自动重启服务。
 非交互 stdin、命令参数和管道输入都会被拒绝。
