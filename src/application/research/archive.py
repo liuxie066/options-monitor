@@ -269,6 +269,35 @@ def archive_pull(
     )
     if source_inventory_metadata.get("source_host"):
         source["source_host"] = source_inventory_metadata["source_host"]
+    requested = list(dict.fromkeys(
+        _safe_run_id(value) for value in (run_ids or []) if str(value or "").strip()
+    ))
+    if requested and inventory_operation is not None and not inventory_operation.get("ok"):
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "action": "pull",
+            "ok": False,
+            "changed": False,
+            "dry_run": not bool(write),
+            "remote": _safe_label(remote or DEFAULT_REMOTE),
+            "archive_root": str(root),
+            "source": _source_summary(source),
+            "since_days": since_days,
+            "selected_run_ids": selected_runs,
+            "include_logs": bool(include_logs),
+            "scan_blob_refs": [],
+            "operations": [inventory_operation],
+            "manifest": None,
+        }
+    selected = set(selected_runs)
+    missing = [run_id for run_id in requested if run_id not in selected]
+    if missing:
+        raise AgentToolError(
+            code="SOURCE_INVENTORY_ERROR",
+            message="requested runs unavailable in selected source inventory: " + ", ".join(missing),
+            hint="Runs excluded by since_days are unavailable for this pull." if since_days is not None else None,
+            details={"missing_run_ids": missing},
+        )
     scan_blob_refs = _selected_scan_blob_refs(
         source=source,
         source_run_inventory=source_run_inventory,
