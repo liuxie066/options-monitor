@@ -329,6 +329,10 @@ def test_runtime_status_required_drift_warning_takes_priority(runtime_drift_quer
     pytest.param("", {}, "service_profile_missing", id="missing-profile"),
     pytest.param("unsupported", {}, "unsupported_service_provider", id="unsupported-provider"),
     pytest.param("systemd", {"services": []}, "service_profile_has_no_services", id="empty-services"),
+    pytest.param("launchd", {"services": []}, "service_profile_has_no_services", id="empty-launchd"),
+    pytest.param("systemd", {"services": [], "feishu_ws": {"enabled": False},
+                              "wechat_clawbot": {"enabled": False}},
+                 "service_profile_has_no_services", id="disabled-empty-services"),
 ])
 def test_runtime_status_keeps_actual_skipped_drift_healthy(runtime_drift_query, provider, profile, reason):
     from src.application.service_drift import _build_drift

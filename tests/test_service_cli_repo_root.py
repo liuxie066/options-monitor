@@ -17,12 +17,55 @@ from src.interfaces.cli import main as cli
 from src.interfaces.cli import service_ops
 from tests.service_deploy_test_support import (
     _fake_systemd_query_runner,
+    _synthetic_drift_context,
     _write_systemd_units_from_bundle,
 )
 from tests.test_service_lifecycle import Manager, _preview_probe, apply, context, instance
 
 
 REPO = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("target", ["systemd", "launchd"])
+@pytest.mark.parametrize("empty_services", [False, True])
+@pytest.mark.parametrize("inbound, metadata, error", [
+    ("feishu_ws", {}, "feishu_ws_config_key"),
+    ("wechat_clawbot", {"allowed_senders": "wechat:fixture"}, "wechat_clawbot_config_key"),
+    ("wechat_clawbot", {"config_key": "us"}, "wechat_clawbot_allowed_senders"),
+])
+def test_cli_drift_incomplete_inbound_is_config_error_without_effects(
+    tmp_path, monkeypatch, capsys, target, empty_services, inbound, metadata, error,
+):
+    from src.application import service_drift as owner
+
+    fixture = _synthetic_drift_context(monkeypatch, tmp_path, target=target)
+    profile = fixture["profile"]
+    profile["markets"] = ["us", "hk"]
+    profile[inbound] = {"enabled": True, **metadata}
+    name = inbound.replace("_", "-")
+    unit_name = f"options-monitor-{name}.service" if target == "systemd" else f"com.options-monitor.{name}"
+    unit = (fixture["units"] / unit_name if target == "systemd" else
+            fixture["home"] / "Library/LaunchAgents" / f"{unit_name}.plist")
+    assert unit.is_relative_to(tmp_path)
+    unit.write_text("installed inbound definition\n", encoding="utf-8")
+    profile["services"] = [] if empty_services else [*profile["services"], {"name": unit_name}]
+    fixture["profile_path"].write_text(json.dumps(profile), encoding="utf-8")
+    monkeypatch.setattr(owner, "_apply_service_drift", fixture["fail"]("apply"))
+    monkeypatch.setattr(cli, "service_drift", lambda **kwargs: service_drift(
+        **kwargs, systemd_unit_root=fixture["units"], run_cmd=fixture["fail"]("runner"),
+    ))
+    before = fixture["inventory"]()
+    for extra in ([], ["--confirm"]):
+        assert cli.main([
+            "service", "drift", "--repo-root", str(fixture["repo"]),
+            "--runtime-root", str(fixture["runtime"]), *extra,
+        ]) == 2
+        response = json.loads(capsys.readouterr().out)
+        assert response["ok"] is False
+        assert response["error"]["code"] == "CONFIG_ERROR"
+        assert error in response["error"]["message"]
+        assert fixture["inventory"]() == before
+    assert fixture["forbidden"] == []
 
 
 @pytest.fixture
