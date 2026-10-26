@@ -346,6 +346,11 @@ GitHub 来源取自当前 checkout remote；已有升级镜像时以镜像对应
 ```
 
 `upgrade.lock.guard` 保留稳定文件身份，供升级和回滚持有非阻塞 OS 互斥锁；它存在不代表升级正在进行。
+确认执行的 `service cleanup` 也使用同一 runtime 的 `upgrade.lock.guard`，从重新读取 current、保留依据到删除和结果构造全程持锁。
+忙时返回 `upgrade_locked` 且无删除，不修改持有者的 PID 或升级收据；释放后可重试，重读当前活动 release。
+cleanup 预览保持只读、不创建转换锁，结果仅供参考。升级后的内部 cleanup 复用外层已持有的 guard，避免重复取锁。
+省略 runtime 时 guard 使用 `/var/lib/options-monitor`；运行目录应与升级/回滚一致，权限失败明确拒绝执行。
+
 `upgrade.lock` 保留原有 PID 诊断用途，正常释放时删除。所有采用此协议的转换共享同一 runtime 的 guard；
 未修改的旧版本进程不遵守 guard，外部删除或替换 guard 也不在此互斥保证内。
 
