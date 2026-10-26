@@ -41,6 +41,14 @@
 | `OM-LCY-002` | 同上 | external adjustment 与 legacy gap 分离回归 | 受影响的 `lifecycle`、`close_advice` |
 | `OM-LCY-003` | 同上 | legacy history 独立 dataset 回归 | 受影响历史报告 |
 
+`OM-POS-002` 对同一 broker code、当前经济条款及方向一致的非零持仓行
+按合计数量定位条款漂移；拆行与合行的即时阻断结论一致，仍先于生命周期覆盖判定。
+零数量行继续忽略；同 code 的无效非零行、混合方向或不同经济条款不参与漂移推断，
+不同 code 仍须满足原有总量和双向唯一性约束。来源条款冲突继续返回不可用，
+普通数量差异仍沿用五分钟收敛窗口与日终严格检查。
+离线回归见 `tests/quality/test_om_quality_split_contract_terms.py`，覆盖真实
+adapter、数据集与三个消费者门禁；不以合成输入证明真实 provider 的拆行频率。
+
 质检读取的私有 `runtime_status.trade_intake` 保留不读取历史 audit 的原有 reconciliation 预览，
 用于运行状态展示。每个分源 `summary.audit_reconciliation`（显式单源路径在顶层
 `summary`）是使用该 source audit 路径的只读预览；`OM-INT-003` 只用这份

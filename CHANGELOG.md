@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- 同一期权 code、当前条款及方向一致的持仓拆行按合计数量识别条款漂移，立即阻断持仓报告、生命周期和平仓建议；保留歧义映射与来源不完整的既有处理（#776）。
+
 ### Removed
 - 完全退役 Pi/Node 执行与会话转换代码；受控升级及回滚只接受 Python Bot 目标，在副作用前拒绝旧 Node 发布。`om bot migrate` 仅保留 Host schema 迁移、不再接受 `--pi-db`；历史数据库、回执、未知目录及备份默认保留，release 清理不再解析 Pi 迁移回执。
 
