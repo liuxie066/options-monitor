@@ -46,6 +46,7 @@ def resolve_pending_operation_or_raise(
     not_found_message: str,
     not_found_hint: str,
     candidate_hint: CandidateHintFn,
+    recoverable_statuses: frozenset[str] = frozenset(),
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
     resolution = store.resolve_pending_operation(
         channel=request.channel,
@@ -54,6 +55,7 @@ def resolve_pending_operation_or_raise(
         conversation_id=request.conversation_id,
         explicit_operation_id=operation_id,
         allow_expired=allow_expired,
+        recoverable_statuses=recoverable_statuses,
     )
     details = _operation_resolution_details(resolution)
     status = str(resolution.get("status") or "")

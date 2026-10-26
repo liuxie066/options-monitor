@@ -231,6 +231,9 @@ Daily Brief 是普通调度通知的权威读取面。普通 scan / Tick 不再�
 
 运行产物清理：
 
+日志清理保留固定服务输出 `*.out.log`、`*.err.log`，即使 mtime 很旧或服务定义已缺失；
+文件仍可能被 launchd 的进程描述符引用。其余过期普通 `.log` 文件按预览清理。
+
 ```bash
 REPO_ROOT="$HOME/apps/options-monitor/current"
 cd "$REPO_ROOT"

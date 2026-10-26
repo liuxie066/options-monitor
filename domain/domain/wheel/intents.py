@@ -56,8 +56,13 @@ def resolve_wheel_fill_intent(branch: Mapping[str, Any], fill: Mapping[str, Any]
         same_contract = (payload.get("expiration_ymd") == event.get("expiration_ymd")
                          and _finite_float(payload.get("strike")) == _finite_float(event.get("strike")))
         at_fill = historical.get(intent["intent_id"], {})
-        if same_contract or at_fill.get("status") == "active":
+        if same_contract or at_fill.get("status") == "active" or intent.get("status") == "conflict":
             relevant.append((intent, at_fill))
+    # Only proven terminal history at fill time can stop competing with a newer intent.
+    contenders = [(intent, at_fill) for intent, at_fill in relevant
+                  if at_fill.get("status") not in {"cancelled", "expired"} or intent.get("status") == "conflict"]
+    if contenders:
+        relevant = contenders
     if not relevant:
         return {"intent": None, "reserved_contracts_to_consume": 0, "reason_codes": []}
     if len(relevant) != 1:

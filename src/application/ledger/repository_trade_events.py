@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+
+from .trade_event_pagination import TradeEventPaginationError
+
 from .external_event_key import (
     applied_execution_association_conflicts,
     ensure_execution_writer_guard,
@@ -262,6 +266,7 @@ class TradeEventRepositoryMixin:
         *,
         limit: int = 10,
         snapshot_max_ingest_seq: int | None = None,
+        snapshot_order_revision: str | None = None,
         last_trade_time_ms: int | None = None,
         last_event_id: str | None = None,
         account: str | None = None,
@@ -358,6 +363,26 @@ class TradeEventRepositoryMixin:
                 )
                 base_params.append(float(strike))
 
+            base_where = " AND ".join(base_clauses)
+            # Protected time repairs persist provenance atomically with the changed key.
+            revision = hashlib.sha256()
+            for row in active_conn.execute(
+                f"""
+                SELECT event_id, trade_time_ms FROM trade_events
+                WHERE {base_where}
+                  AND json_type(event_json, '$.raw_payload.trade_time_correction_provenance') IS NOT NULL
+                ORDER BY event_id
+                """,
+                base_params,
+            ):
+                revision.update(json.dumps([row["event_id"], int(row["trade_time_ms"])]).encode("utf-8"))
+            order_revision = revision.hexdigest()
+            if snapshot_order_revision is not None and snapshot_order_revision != order_revision:
+                raise TradeEventPaginationError(
+                    "event ordering changed; start a new query (new results may overlap)",
+                    code="invalid_cursor",
+                )
+
             page_clauses = list(base_clauses)
             page_params = list(base_params)
             if last_trade_time_ms is not None and last_event_id is not None:
@@ -381,7 +406,6 @@ class TradeEventRepositoryMixin:
 
             total = None
             if include_total:
-                base_where = " AND ".join(base_clauses)
                 count_row = active_conn.execute(
                     f"SELECT COUNT(*) AS row_count FROM trade_events WHERE {base_where}",
                     base_params,
@@ -395,6 +419,7 @@ class TradeEventRepositoryMixin:
                 for row in page
             ],
             "snapshot_max_ingest_seq": int(fence),
+            "snapshot_order_revision": order_revision,
             "has_more": len(rows) > page_limit,
             "total_count": total,
             "last_trade_time_ms": (

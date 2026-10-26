@@ -154,7 +154,7 @@ def test_projection_runtime_facade_modes_are_fully_inventoried() -> None:
             ): 1,
             (
                 "src/application/ledger/manual_trades.py",
-                "persist_manual_adjust_events>_run",
+                "_persist_manual_adjust_events_in_transaction",
                 "'fast_if_safe'",
             ): 1,
             (

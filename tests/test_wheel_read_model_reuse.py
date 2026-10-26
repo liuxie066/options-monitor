@@ -100,14 +100,18 @@ def test_pair_preserves_selection_fallback(monkeypatch):
     row = _trade().to_dict()
     row.update(event_time_ms=0, trade_time_ms=6000)
     rows = {'trade_events': [row]}
+    before = deepcopy(rows)
     expected = model.build_wheel_read_model_from_rows(rows, account='lx', as_of_ms=4000)
     calls = []
     original = assigned.project_trade_event_log
     monkeypatch.setattr(assigned, 'project_trade_event_log',
-                        lambda events: (calls.append(len(events)), original(events))[1])
+                        lambda events: (calls.append(deepcopy(events)), original(events))[1])
     pair = model.build_wheel_read_model_with_capacity_from_rows(rows, account='lx', as_of_ms=4000, market=None)
     assert pair == (expected, expected)
-    assert calls == [1, 0]
+    # Canonical selection applies the trade_time fallback before the sole replay.
+    assert calls == [[]]
+    assert pair[0]['assigned_stock_projection']['assigned_stock_lots'] == []
+    assert rows == before
 
 
 @pytest.mark.parametrize("paired", [False, True])

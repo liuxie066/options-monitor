@@ -45,18 +45,12 @@ def _oracle_assigned_stock_report(
     now_ms: int,
 ) -> dict[str, Any]:
     from src.application.ledger.event_codec import import_stored_trade_events
-    from src.application.ledger.event_codec import valid_void_target_event_id
+    from src.application.ledger.assigned_stock_projection import _select_assigned_stock_trade_rows
     from src.application.ledger.publisher import (
         project_stored_trade_events_to_position_lots,
     )
 
-    event_rows = [
-        dict(item)
-        for item in rows.get("trade_events") or []
-        if int(item.get("event_time_ms") or item.get("trade_time_ms") or 0)
-        <= now_ms
-        or valid_void_target_event_id(item) is not None
-    ]
+    event_rows = _select_assigned_stock_trade_rows(rows, now_ms, account=account)
     events, _diagnostics = import_stored_trade_events(event_rows)
     projected = project_stored_trade_events_to_position_lots(event_rows)
     from src.application.ledger.assigned_stock_projection import (

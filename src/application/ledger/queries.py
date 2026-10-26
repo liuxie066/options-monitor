@@ -453,6 +453,7 @@ def trade_event_page(
                 if state is not None
                 else None
             ),
+            snapshot_order_revision=state["snapshot_order_revision"] if state is not None else None,
             last_trade_time_ms=(
                 int(state["last_trade_time_ms"])
                 if state is not None and state.get("last_trade_time_ms") is not None
@@ -477,6 +478,7 @@ def trade_event_page(
             query=query,
             authority_scope=authority_scope,
             snapshot_max_ingest_seq=int(page["snapshot_max_ingest_seq"]),
+            snapshot_order_revision=page["snapshot_order_revision"],
             as_of=snapshot_as_of,
         )
     state["last_trade_time_ms"] = page["last_trade_time_ms"]
