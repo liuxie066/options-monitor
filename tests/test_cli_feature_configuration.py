@@ -241,7 +241,7 @@ def test_wechat_connect_cancel_does_not_claim_no_effect(tmp_path):
 
 
 def test_linux_secret_permission_is_pending_without_escalation(tmp_path, monkeypatch):
-    monkeypatch.setattr("src.interfaces.cli.feature_ops.sys.platform", "linux")
+    monkeypatch.setattr("src.interfaces.cli.feature_ops.sys", argparse.Namespace(platform="linux"))
     path = source(tmp_path)
     answers = iter(["true", "fixture", "deepseek", "deepseek-chat", "24000", "2048", "y", "y", "set"])
     calls = []

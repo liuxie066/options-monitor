@@ -2341,14 +2341,14 @@ def _load_current_index(path: Path) -> dict[str, Any]:
 
 
 def _candidate_identity_set(brief: Mapping[str, Any] | None) -> set[str]:
-    if not isinstance(brief, Mapping):
+    if not isinstance(brief, Mapping) or brief.get("actionability") != "live_actionable":
         return set()
     identities = {
         str(item.get("identity") or "").strip()
         for item in brief.get("candidate_index") or []
         if isinstance(item, Mapping) and str(item.get("identity") or "").strip()
     }
-    if identities or brief.get("actionability") == "blocked":
+    if identities:
         return identities
     for action in brief.get("actions") or []:
         if not isinstance(action, Mapping):

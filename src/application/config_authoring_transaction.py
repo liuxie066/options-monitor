@@ -237,6 +237,24 @@ def _publish_yaml_config_generation(
             "source": True,
         },
     ]
+    try:
+        validate_config_target_access_identity([Path(item["path"]) for item in targets])
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise AgentToolError(
+            code="CONFIG_WRITE_FAILED",
+            message="failed to validate config target access before publication",
+            details={
+                "audit_id": audit_id,
+                "stage": "target_preflight",
+                "error": f"{type(exc).__name__}: {exc}",
+                "backup_path": None,
+                "backup_write_applied": False,
+                "transaction_write_applied": False,
+                "targets": [],
+                "recovered_transactions": list(recovered_transactions),
+                "write_applied": False,
+            },
+        ) from exc
     transaction_dir = state_root / "config_authoring_transactions" / audit_id
     manifest_path = transaction_dir / "manifest.json"
     published_targets: list[dict[str, Any]] = []

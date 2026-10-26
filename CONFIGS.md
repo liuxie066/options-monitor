@@ -166,6 +166,11 @@ Bot runtime JSON 的有效性与激活流程保持现有合同；非 YAML 来源
 现在 `resolve_yaml_runtime_config` 从一次 YAML 读取构建市场输入并记录原始与 effective 两种指纹；公共 checker 按下述协议比较。
 
 `config_authoring_transaction.py::publish_yaml_config_generation` 已支持多市场生成、来源 SHA 冲突检测、备份与失败恢复。
+apply 在持有配置锁、形成全部实际目标后，先复用访问身份校验，再创建本次备份和事务 manifest。
+校验覆盖 YAML、选中市场快照及启用生成的 Bot 快照：已有文件须属于当前部署用户，替换探针须保持 uid/gid，
+特殊 mode、自定义原文件或继承探针 ACL、身份检查 I/O 失败均拒绝本次发布；请由原部署用户处理，不自动迁移权限。
+不存在的新目标沿用现有创建身份；dry-run 不创建身份探针。已有 pending recovery 仍先执行，已完成的恢复写入会如实报告，
+因此新发布被拒绝不等于整个调用零写入；此校验不保证阻止绕过锁的管理员并发改权。
 未完成事务恢复时，先校验全部 journal 内容，再在首次修改目标前核对该事务的完整目标集合。
 目标只能保持记录的修改前或修改后字节；原先不存在的目标也允许仍然缺席，原先存在但缺失的目标仍拒绝恢复。
 独立 build 等操作产生第三状态或目标不可读时，以 `CONFIG_TRANSACTION_RECOVERY_REQUIRED`

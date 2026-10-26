@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -85,6 +85,9 @@ class _Gateway:
     def get_trading_days(self, **_kwargs):  # noqa: ANN003, ANN201
         return [{"time": "2026-07-31", "trade_date_type": "WHOLE"}]
 
+    def get_trading_days_with_receipt(self, **kwargs):
+        return _calendar_receipt(rows=self.get_trading_days(**kwargs))
+
     def get_snapshot(self, codes):  # noqa: ANN001, ANN201
         batch = list(codes)
         self.snapshot_calls.append(batch)
@@ -101,6 +104,103 @@ def _wire(monkeypatch: pytest.MonkeyPatch, gateway: _Gateway) -> None:
 
 def _fetch(*, market: str = "us"):
     return OpenDOptionPositionAdapter().fetch(cfg=_config(), account="lx", market=market)
+
+
+def _calendar_receipt(**overrides):
+    return {
+        "retcode": 0,
+        "coverage_complete": True,
+        "pagination_complete": True,
+        "page_count": 1,
+        "rows": [],
+        **overrides,
+    }
+
+
+@pytest.mark.parametrize("receipt", [
+    None, [], {},
+    _calendar_receipt(retcode=1),
+    _calendar_receipt(coverage_complete=None),
+    _calendar_receipt(coverage_complete=False),
+    _calendar_receipt(pagination_complete=None),
+    _calendar_receipt(pagination_complete=False),
+    _calendar_receipt(page_count=None),
+    _calendar_receipt(page_count=2),
+    _calendar_receipt(rows=None),
+    _calendar_receipt(rows=[None]),
+])
+def test_calendar_requires_complete_receipt_and_dictionary_rows(monkeypatch, receipt) -> None:
+    gateway = _Gateway(positions=[], snapshots={})
+    monkeypatch.setattr(gateway, "get_trading_days_with_receipt", lambda **_kwargs: receipt)
+    _wire(monkeypatch, gateway)
+
+    snapshot = _fetch()
+
+    assert snapshot.complete is False
+    assert snapshot.rows == snapshot.trading_days == []
+    assert snapshot.snapshot_input["completeness"] == "unknown"
+    assert snapshot.error_code == "VALUEERROR"
+    assert snapshot.error_message in {
+        "OpenD trading calendar receipt is incomplete",
+        "OpenD trading calendar rows are invalid",
+    }
+    assert gateway.closed is True
+
+
+@pytest.mark.parametrize("row, message", [
+    ({}, "date is invalid"),
+    ({"time": "not-a-date"}, "date is invalid"),
+    ({"time": "2026-07-32"}, "date is invalid"),
+    ({"time": "bad", "trade_date_type": "NON_TRADING"}, "date is invalid"),
+    ({"time": "2026-07-31", "trade_date_type": "UNKNOWN"}, "session kind is invalid"),
+])
+def test_calendar_rejects_invalid_dates_and_unknown_sessions(monkeypatch, row, message) -> None:
+    gateway = _Gateway(positions=[], snapshots={})
+    monkeypatch.setattr(gateway, "get_trading_days", lambda **_kwargs: [row])
+    _wire(monkeypatch, gateway)
+
+    snapshot = _fetch()
+
+    assert snapshot.complete is False
+    assert snapshot.error_code == "VALUEERROR"
+    assert snapshot.error_message == f"OpenD trading calendar {message}"
+    assert snapshot.snapshot_input["completeness"] == "unknown"
+    assert snapshot.trading_days == []
+    assert gateway.closed is True
+
+
+@pytest.mark.parametrize("field", ["time", "date", "trade_date"])
+@pytest.mark.parametrize("kind", [None, "", "WHOLE", "MORNING", "AFTERNOON", "TRADING"])
+def test_calendar_preserves_date_aliases_and_supported_sessions(monkeypatch, field, kind) -> None:
+    gateway = _Gateway(positions=[], snapshots={})
+    row = {field: "2026-07-31 09:30:00", "trade_date_type": kind}
+    monkeypatch.setattr(gateway, "get_trading_days", lambda **_kwargs: [row])
+    _wire(monkeypatch, gateway)
+
+    snapshot = _fetch()
+
+    assert snapshot.complete is True
+    assert snapshot.trading_days == [date(2026, 7, 31)]
+    assert gateway.closed is True
+
+
+@pytest.mark.parametrize("rows, expected", [
+    ([], []),
+    ([{"time": "2026-07-31", "trade_date_type": "NON_TRADING"}], []),
+    ([{"time": "2026-07-30", "trade_date_type": "NON_TRADING"},
+      {"time": "2026-07-31", "trade_date_type": "WHOLE"}], [date(2026, 7, 31)]),
+])
+def test_complete_empty_and_nontrading_calendars_remain_valid(monkeypatch, rows, expected) -> None:
+    gateway = _Gateway(positions=[], snapshots={})
+    monkeypatch.setattr(gateway, "get_trading_days", lambda **_kwargs: rows)
+    _wire(monkeypatch, gateway)
+
+    snapshot = _fetch()
+
+    assert snapshot.complete is True
+    assert snapshot.snapshot_input["completeness"] == "complete"
+    assert snapshot.trading_days == expected
+    assert gateway.closed is True
 
 
 @pytest.mark.parametrize("response", [None, [None], [{"code": "US.NVDA", "qty": 100, "acc_id": "999"}], [{"code": "US.NVDA", "qty": 100, "trd_env": "SIMULATE"}]])

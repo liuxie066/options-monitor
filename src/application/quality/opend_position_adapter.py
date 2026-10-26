@@ -154,14 +154,26 @@ class OpenDOptionPositionAdapter:
             )
             start = calendar_start or (datetime.now(timezone.utc).date() - timedelta(days=45))
             end = calendar_end or (datetime.now(timezone.utc).date() + timedelta(days=14))
-            raw_days = quote_gateway.get_trading_days(
+            calendar_receipt = quote_gateway.get_trading_days_with_receipt(
                 market=market,
                 start=start.isoformat(),
                 end=end.isoformat(),
             )
+            if not isinstance(calendar_receipt, Mapping) or (
+                calendar_receipt.get("retcode") != 0
+                or calendar_receipt.get("coverage_complete") is not True
+                or calendar_receipt.get("pagination_complete") is not True
+                or calendar_receipt.get("page_count") != 1
+            ):
+                raise ValueError("OpenD trading calendar receipt is incomplete")
+            calendar_rows = calendar_receipt.get("rows")
+            if not isinstance(calendar_rows, list) or any(
+                not isinstance(row, dict) for row in calendar_rows
+            ):
+                raise ValueError("OpenD trading calendar rows are invalid")
             trading_days = [
                 parsed
-                for row in _rows(raw_days)
+                for row in calendar_rows
                 for parsed in [_parse_trading_day(row)]
                 if parsed is not None
             ]
@@ -275,11 +287,13 @@ def _parse_trading_day(row: dict[str, Any]) -> date | None:
     raw = str(row.get("time") or row.get("date") or row.get("trade_date") or "").strip()
     try:
         parsed = date.fromisoformat(raw[:10])
-    except ValueError:
-        return None
+    except ValueError as exc:
+        raise ValueError("OpenD trading calendar date is invalid") from exc
     kind = str(row.get("trade_date_type") or "").strip().upper()
-    if kind and kind not in {"WHOLE", "MORNING", "AFTERNOON", "TRADING"}:
+    if kind == "NON_TRADING":
         return None
+    if kind and kind not in {"WHOLE", "MORNING", "AFTERNOON", "TRADING"}:
+        raise ValueError("OpenD trading calendar session kind is invalid")
     return parsed
 
 

@@ -1254,6 +1254,105 @@ def test_later_nonfixed_scan_preserves_existing_pending_candidate_envelope(monke
     assert second_envelope["revision"] == first_envelope["revision"]
 
 
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_planning_scan_preserves_frozen_live_candidate_with_existing_retry_rules(
+    monkeypatch, tmp_path: Path, ambiguous: bool,
+) -> None:
+    from src.application.daily_decision_brief_repository import record_daily_decision_brief_delivery_attempt
+    from src.application.notification_delivery_adapter import build_notification_transport_key
+
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_test")
+    _patch_assembler(monkeypatch)
+    first = mod._prepare_daily_brief_notification(
+        _request(tmp_path, run_id="live-candidate", fixed=False, config=_feishu_config()).request,
+    )
+    original = first.lifecycles_by_account["lx"]["envelope"]
+    assert original["rendered_transport"]
+    if ambiguous:
+        record_daily_decision_brief_delivery_attempt(
+            base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE,
+            delivery_key=original["delivery_key"], source_digest=original["source_digest"],
+            message_sha256=original["message_sha256"],
+            transport_idempotency_key=build_notification_transport_key(original["delivery_key"]),
+            ambiguous=True,
+        )
+    before = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")
+    frozen = before["state"]["days"][MARKET_DATE]["candidate_delivery"]
+
+    def planning(*, base, run_id, account, markets_to_run, **_kwargs):
+        brief = _brief(base=base, run_id=run_id, account=account)
+        brief.update(actionability="planning_only", candidate_index=[])
+        return {market: {**brief, "market": market} for market in markets_to_run}
+
+    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", planning)
+    second = _request(tmp_path, run_id="new-planning", fixed=False, config=_feishu_config())
+    prepared = mod._prepare_daily_brief_notification(second.request)
+    day = read_daily_decision_brief_delivery_state(
+        base=tmp_path, account="lx", market="US",
+    )["state"]["days"][MARKET_DATE]
+    assert day["pending_candidates"] == {}
+    assert day["candidate_delivery"] == frozen
+    assert second.commits == [{"lx": HALF_TARGET}]
+    retry = read_retryable_daily_decision_brief_delivery(
+        base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE,
+    )
+    if ambiguous:
+        assert retry["reason"] == "ambiguous"
+        assert retry["envelope"] == frozen
+        assert prepared.lifecycles_by_account["lx"]["envelope"] == frozen
+        assert prepared.transport_envelopes_by_account["lx"] == frozen["rendered_transport"]
+        calls = []
+        _patch_sender(monkeypatch, calls=calls)
+        idle = _request(tmp_path, run_id="exact-retry", delivery_only=True, config=_feishu_config())
+        assert mod.run_tick_notification_flow(idle.request) == 0
+        assert len(calls) == 1
+        assert calls[0]["idempotency_key"] == build_notification_transport_key(frozen["delivery_key"])
+        assert calls[0]["message"] == frozen["rendered_message"]
+        assert calls[0]["transport_envelope"] == frozen["rendered_transport"]
+        confirmed = read_daily_decision_brief_delivery_state(
+            base=tmp_path, account="lx", market="US",
+        )["state"]["days"][MARKET_DATE]["candidate_delivery"]
+        assert confirmed["status"] == "confirmed"
+        for key in ("delivery_key", "revision", "source_digest", "message_sha256", "rendered_message", "rendered_transport"):
+            assert confirmed[key] == frozen[key]
+    else:
+        assert retry["reason"] == "stale_candidate_envelope"
+        assert retry["envelope"] is None
+        assert prepared.lifecycles_by_account == {}
+
+
+@pytest.mark.parametrize("trigger_kind", ["scheduled", "manual"])
+def test_planning_fixed_report_and_manual_snapshot_keep_existing_delivery_scope(
+    monkeypatch, tmp_path: Path, trigger_kind: str,
+) -> None:
+    def planning(*, base, run_id, account, markets_to_run, **_kwargs):
+        brief = _brief(base=base, run_id=run_id, account=account)
+        brief.update(actionability="planning_only", candidate_index=[])
+        return {market: {**brief, "market": market} for market in markets_to_run}
+
+    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", planning)
+    calls = []
+    _patch_sender(monkeypatch, calls=calls)
+    bundle = _request(tmp_path, run_id="planning-fixed", trigger_kind=trigger_kind)
+    assert mod.run_tick_notification_flow(bundle.request) == 0
+    brief = read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["brief"]
+    assert brief["actions"] and brief["candidate_index"] == []
+    assert brief["actionability"] == "planning_only"
+    state = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")
+    if trigger_kind == "scheduled":
+        day = state["state"]["days"][MARKET_DATE]
+        envelope = day["fixed_reports"][FIXED_TARGET]
+        assert envelope["delivery_kind"] == "fixed_report"
+        assert envelope["candidate_identities"] == []
+        assert envelope["status"] == "confirmed"
+        assert len(calls) == 1
+        assert bundle.commits == [{"lx": FIXED_TARGET}]
+    else:
+        assert calls == []
+        assert bundle.commits == []
+        assert not state["available"] or state["state"]["days"] == {}
+
+
 def test_later_half_hour_sends_new_candidate_after_prior_candidate_confirmation(
     monkeypatch,
     tmp_path: Path,

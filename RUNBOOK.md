@@ -67,6 +67,19 @@ Tool Gateway 的 `scan_opportunities` 省略 `symbols` 或传入 `[]` 仍表示�
 ./om-agent run --tool runtime_status --input-json '{"profile_path":"/var/lib/options-monitor/service.profile.json"}'
 ```
 
+### 入站服务无法调和
+
+`om service drift` 默认只读预览；仍声明启用的 Feishu WS / WeChat 服务若无法渲染，
+预览和 `--confirm` 都会在修改 unit/profile 或停服前报错，status 的 drift 汇总显示 error。
+即使 profile 的 `services` 为空，入站 `enabled` 意图仍须校验；缺元数据不代表退役。
+
+先核对目标 runtime 的 `service.profile.json`：双市场须有对应入站 `config_key`；
+WeChat 须有显式 allowlist，或 profile 指向的 YAML 中有效的
+`inbound.wechat_clawbot.allowed_senders`。单市场仍自动选择该市场。
+核实原部署意图并通过受控配置/部署流程修复后，再预览 drift；不要通过删除启用声明消除错误。
+真正退役必须明确取消 enabled 和 services 中的声明，并先核对退役预览。
+launchd 的确认应用仍不受支持。
+
 ## 命令副作用总表（先看这个）
 
 | 命令 / 工具 | 写本地状态 | 写远端 | 发通知 | 备注 |

@@ -849,6 +849,9 @@ class _Gateway:
             ]
         )
         self.history_deal_queries: list[dict] = []
+        self.history_order_rows = [
+            {"order_id": "option-order-1", "is_broker_auto": True}
+        ]
         self.history_order_queries: list[dict] = []
         self.position_queries: list[dict] = []
         self.calendar_queries: list[dict] = []
@@ -859,14 +862,7 @@ class _Gateway:
 
     def get_history_orders(self, **kwargs: object) -> dict:
         self.history_order_queries.append(dict(kwargs))
-        return _complete_receipt(
-            [
-                {
-                    "order_id": "option-order-1",
-                    "is_broker_auto": True,
-                }
-            ]
-        )
+        return _complete_receipt(self.history_order_rows)
 
     def get_positions_with_receipt(
         self,
@@ -1405,15 +1401,156 @@ def _stock_settlement_deal(
         "trd_side": "BUY",
         "trade_time_ms": trade_time_ms,
     }
-    if order_id is not None:
-        row["order_id"] = order_id
+    row["order_id"] = order_id if order_id is not None else f"stock-order:{deal_id}"
     return row
 
 
 def _settlement_gateway(*stock_rows: dict) -> _Gateway:
-    return _Gateway(
+    gateway = _Gateway(
         history_deals=[dict(_OPTION_CLOSE_DEAL), *stock_rows]
     )
+    gateway.history_order_rows.extend(
+        {"order_id": order_id, "is_broker_auto": True}
+        for order_id in dict.fromkeys(row.get("order_id") for row in stock_rows)
+        if order_id
+    )
+    return gateway
+
+
+_STOCK_SOURCE_FAILURES = [
+    "client", "manual", "api", "app", "missing-id", "unmatched", "duplicate",
+    "unknown", "normal-type", "option-id-only", "explicit-not-auto",
+    *[
+        f"{source}:{field}"
+        for source in ("history_deals", "history_orders")
+        for field in (
+            "coverage_complete", "pagination_complete", "stale", "fallback_cache",
+            "retcode", "error",
+        )
+    ],
+]
+
+
+def _stock_source_failure_gateway(now_ms: int, failure: str, ordering: str) -> _Gateway:
+    bad = _stock_settlement_deal("unqualified", trade_time_ms=now_ms - 2)
+    valid = _stock_settlement_deal("qualified", trade_time_ms=now_ms - 2)
+    rows = (
+        [bad] if ordering == "only"
+        else [valid, bad] if ordering == "valid-first" else [bad, valid]
+    )
+    gateway = _settlement_gateway(*rows)
+    stock_order = next(
+        row for row in gateway.history_order_rows if row["order_id"] == bad["order_id"]
+    )
+    if failure in {"client", "manual", "api", "app", "unknown"}:
+        stock_order.pop("is_broker_auto")
+        stock_order["order_origin"] = failure
+    elif failure == "normal-type":
+        stock_order.pop("is_broker_auto")
+        stock_order["order_type"] = "NORMAL"
+    elif failure == "explicit-not-auto":
+        stock_order["is_broker_auto"] = False
+    elif failure == "missing-id":
+        bad.pop("order_id")
+    elif failure in {"unmatched", "option-id-only"}:
+        gateway.history_order_rows.remove(stock_order)
+        if failure == "option-id-only":
+            # An automatic option anchor cannot prove the stock order's origin.
+            assert gateway.history_order_rows[0]["is_broker_auto"] is True
+    elif failure == "duplicate":
+        gateway.history_order_rows.append(dict(stock_order))
+    else:
+        source, field = failure.split(":")
+        original_query = getattr(gateway, f"get_{source}")
+
+        def incomplete_query(**kwargs):
+            receipt = original_query(**kwargs)
+            # Raw gateway status cannot override the canonical receipt contract.
+            receipt["status"] = "complete"
+            receipt[field] = {
+                "coverage_complete": False, "pagination_complete": False,
+                "stale": True, "fallback_cache": True, "retcode": -1,
+                "error": "source incomplete with rows still present",
+            }[field]
+            assert receipt["rows"]
+            return receipt
+
+        setattr(gateway, f"get_{source}", incomplete_query)
+    return gateway
+
+
+@pytest.mark.parametrize("failure", _STOCK_SOURCE_FAILURES)
+@pytest.mark.parametrize("ordering", ["only", "valid-first", "invalid-first"])
+def test_stock_source_admission_rejects_entire_collect_before_due_writes(
+    tmp_path: Path, isolated_settlement_identity, failure: str, ordering: str,
+) -> None:
+    repo, case, policy, _ = _repo_with_pending_case(tmp_path)
+    cid = case["case_id"]
+    now_ms = policy["settlement_deadline_ms"] + 1
+    gateway = _stock_source_failure_gateway(now_ms, failure, ordering)
+    collector = build_settlement_observation_collector(
+        repo=repo, gateway=gateway, futu_account_id="1001", now_ms_fn=lambda: now_ms,
+    )
+    before = _settlement_economic_snapshot(repo, cid)
+    read_model = lifecycle_case_read_model(repo, case_id=cid, now_ms=now_ms)
+    with pytest.raises(SettlementObservationDataError, match="stock settlement requires"):
+        collector(case, read_model)
+    outcome = collector.collect_outcome(case, read_model)
+    assert (outcome.kind, outcome.error_class, outcome.observation) == (
+        "unknown_error", "case_data", None,
+    )
+    result = reconcile_due_lifecycle_cases(
+        repo, account="lx", now_ms=now_ms, apply_changes=True, observation_collector=collector,
+    )
+    rejected = result["results"][0]
+    assert (rejected["status"], rejected["failure_class"], rejected["write_status"]) == (
+        "needs_review", "case_data", "not_attempted",
+    )
+    assert rejected["reason_codes"] == ["settlement_observation_data_invalid"]
+    assert _settlement_economic_snapshot(repo, cid) == before
+
+
+@pytest.mark.parametrize("automatic", [
+    {"is_broker_auto": True}, {"order_origin": "broker_auto"},
+    {"source": "expiry"}, {"order_source": "settlement"},
+])
+def test_stock_own_automatic_order_with_id_preview_apply_and_replay(
+    tmp_path: Path, isolated_settlement_identity, automatic: dict,
+) -> None:
+    repo, case, policy, _ = _repo_with_pending_case(tmp_path)
+    cid = case["case_id"]
+    now_ms = policy["settlement_deadline_ms"] + 1
+    _bootstrap_current_decision_shadow(repo, now_ms=now_ms)
+    stock = _stock_settlement_deal("automatic", trade_time_ms=now_ms - 2)
+    gateway = _settlement_gateway(stock)
+    gateway.history_order_rows = [
+        {"order_id": "option-order-1", "order_origin": "manual"},
+        {"order_id": stock["order_id"], **automatic},
+    ]
+    collector = build_settlement_observation_collector(
+        repo=repo, gateway=gateway, futu_account_id="1001", now_ms_fn=lambda: now_ms,
+    )
+    observation = collector(case, lifecycle_case_read_model(repo, case_id=cid, now_ms=now_ms))
+    assert observation["complete"] is False
+    assert observation["stock_settlement_candidates"][0]["order_id"] == stock["order_id"]
+    before = _settlement_economic_snapshot(repo, cid)
+    reconcile_lifecycle_close_reason(
+        repo, case_id=cid, now_ms=now_ms, observation=observation, apply_changes=False,
+    )
+    assert _settlement_economic_snapshot(repo, cid) == before
+    applied = reconcile_due_lifecycle_cases(
+        repo, account="lx", now_ms=now_ms, apply_changes=True, observation_collector=collector,
+    )
+    assert applied["results"][0]["poll_settlement_results"][0]["status"] == "applied"
+    after = _settlement_economic_snapshot(repo, cid)
+    assert len([row for row in after["events"] if row["event_type"] == "assignment"]) == 1
+    assert len(after["allocations"]) == 1
+    assert len(after["claims"]) == len(before["claims"]) + 1
+    retry = reconcile_due_lifecycle_cases(
+        repo, account="lx", now_ms=now_ms + 1, apply_changes=True, observation_collector=collector,
+    )
+    assert retry["results"] == []
+    assert _settlement_economic_snapshot(repo, cid) == after
 
 
 @pytest.fixture
@@ -1816,6 +1953,7 @@ def test_settlement_stock_identity_known_other_or_empty_keeps_valid_zero(
     _bootstrap_current_decision_shadow(repo, now_ms=now)
     rows = [] if code is None else [{**_stock_settlement_deal("other", trade_time_ms=now - 2), "code": code, "qty": 100.5}]
     gateway = _settlement_gateway(*rows)
+    gateway.history_order_rows = gateway.history_order_rows[:1]
     gateway.history_deal_rows[0]["code"] = option_code
     collector = build_settlement_observation_collector(repo=repo, gateway=gateway, futu_account_id="1001", now_ms_fn=lambda: now)
     observation = collector(case, lifecycle_case_read_model(repo, case_id=case["case_id"], now_ms=now))
@@ -1974,8 +2112,9 @@ def test_unrelated_fractional_stock_keeps_complete_zero_observation(
     assert isolated_settlement_quantity
 
 
-def test_invalid_stock_quantity_runtime_records_error_and_backoff_without_terminal(
-    tmp_path: Path, isolated_settlement_quantity,
+@pytest.mark.parametrize("failure", ["quantity", *_STOCK_SOURCE_FAILURES])
+def test_invalid_stock_input_runtime_records_error_and_backoff_without_terminal(
+    tmp_path: Path, isolated_settlement_quantity, failure: str,
 ) -> None:
     from src.application.trades.inbox import get_settlement_attempt_state
 
@@ -1984,7 +2123,10 @@ def test_invalid_stock_quantity_runtime_records_error_and_backoff_without_termin
     now_ms = int(policy["settlement_deadline_ms"]) + 1
     _bootstrap_current_decision_shadow(repo, now_ms=now_ms)
     row = {**_stock_settlement_deal("runtime-quantity", trade_time_ms=now_ms - 2), "qty": 100.5}
-    gateway = _settlement_gateway(row)
+    gateway = (
+        _settlement_gateway(row) if failure == "quantity"
+        else _stock_source_failure_gateway(now_ms, failure, "valid-first")
+    )
     collector = build_settlement_observation_collector(
         repo=repo, gateway=gateway, futu_account_id="1001", now_ms_fn=lambda: now_ms, source_id="lx",
     )

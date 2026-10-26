@@ -589,21 +589,34 @@ def collect_broker_settlement_observation(
     )
     if order_ambiguous:
         extra_incomplete.add("anchor_order_classification_ambiguous")
-    stock_candidates = [
-        candidate
-        for item in list(history_deals.get("rows") or [])
-        for candidate in [
-            _stock_settlement_candidate(
-                item,
-                lifecycle_case=lifecycle_case,
-                account=account,
-                futu_account_id=account_id,
-                timezone=timezone,
-                settlement_deadline_ms=deadline_ms,
+    stock_candidates = []
+    for item in list(history_deals.get("rows") or []):
+        candidate = _stock_settlement_candidate(
+            item,
+            lifecycle_case=lifecycle_case,
+            account=account,
+            futu_account_id=account_id,
+            timezone=timezone,
+            settlement_deadline_ms=deadline_ms,
+        )
+        if candidate is None:
+            continue
+        if any(
+            receipt.get("status") != "complete"
+            for receipt in (history_deals, history_orders)
+        ):
+            raise SettlementObservationDataError(
+                "stock settlement requires complete history_deals and history_orders"
             )
-        ]
-        if candidate is not None
-    ]
+        stock_normal_order, stock_order_ambiguous = _normal_order_facts(
+            order_rows,
+            anchor_order_id=str(candidate.get("order_id") or ""),
+        )
+        if stock_normal_order or stock_order_ambiguous:
+            raise SettlementObservationDataError(
+                "stock settlement requires its own unambiguous broker automatic order"
+            )
+        stock_candidates.append(candidate)
     option_position_absent = not any(
         _row_matches_option_contract(
             item,
