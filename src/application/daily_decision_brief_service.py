@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import math
 import json
+import re
 from collections.abc import Mapping
-from datetime import datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from domain.domain.daily_decision_brief import (
     build_daily_brief_candidate_identity,
     normalize_daily_decision_brief,
 )
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.close_advice import (
     safe_int,
     select_close_advice_notification_rows,
@@ -559,12 +561,18 @@ def assemble_daily_decision_brief(
 
     for rank, row in enumerate(selected_wheel, start=1):
         cap = _wheel_capacity(row)
+        event_risk = _candidate_event_risk(
+            row,
+            family="wheel",
+            market_date=market_date,
+        )
         candidate_payloads.setdefault("wheel", []).append(
             _candidate_view(
                 row,
                 family="wheel",
                 rank=rank,
                 capacity=cap,
+                event_risk=event_risk,
             )
         )
         if cap["contracts_available"] >= 1:
@@ -575,6 +583,7 @@ def assemble_daily_decision_brief(
                     account=account_norm,
                     rank=rank,
                     capacity=cap,
+                    event_risk=event_risk,
                 )
             )
 
@@ -2409,6 +2418,90 @@ def _source_view(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _candidate_earnings_comparable_chain_id(
+    row: Mapping[str, Any],
+    *,
+    family: str,
+    market_date: str,
+    symbol: str,
+    expirations: Mapping[str, Any],
+) -> str:
+    def strict_date(value: Any) -> date | None:
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+            return None
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+
+    market = symbol_market(symbol)
+    snapshot_hash = row.get("earnings_snapshot_hash")
+    window = row.get("earnings_window_days")
+    if (
+        family not in {"sell_put", "covered_call", "wheel", "combo_yield"}
+        or not symbol or canonical_symbol(symbol) != symbol or market not in {"US", "HK"}
+        or not isinstance(snapshot_hash, str)
+        or not re.fullmatch(r"[0-9a-fA-F]{64}", snapshot_hash)
+        or row.get("earnings_policy_version") != EARNINGS_NEAR_EXPIRY_POLICY_VERSION
+        or not (
+            type(window) is int
+            or (isinstance(window, str) and re.fullmatch(r"[0-9]+", window))
+        )
+    ):
+        return ""
+    # Compare canonical digits without accepting truncation or unbounded integer parsing.
+    if str(window).lstrip("0") != str(EARNINGS_NEAR_EXPIRY_WINDOW_DAYS):
+        return ""
+    as_of = strict_date(market_date)
+    if as_of is None or strict_date(row.get("earnings_market_date")) != as_of:
+        return ""
+    if family == "combo_yield":
+        expirations = {"put": row.get("put_expiration"), "call": row.get("call_expiration")}
+    expected_labels = {"put", "call"} if family == "combo_yield" else {"contract"}
+    if set(expirations) != expected_labels:
+        return ""
+    expiry_dates = {label: strict_date(value) for label, value in expirations.items()}
+    if any(value is None for value in expiry_dates.values()) or len(set(expiry_dates.values())) != 1:
+        return ""
+    expiry = next(iter(expiry_dates.values()))
+    assert expiry is not None
+    if expiry < as_of:
+        return ""
+    hard_start = expiry - timedelta(days=min(EARNINGS_NEAR_EXPIRY_WINDOW_DAYS, (expiry - as_of).days))
+    if (
+        row.get("earnings_hard_coverage_status") != "complete"
+        or strict_date(row.get("earnings_hard_window_start")) != hard_start
+        or strict_date(row.get("earnings_hard_window_end")) != expiry
+    ):
+        return ""
+    if hard_start > as_of:
+        soft_start, soft_end = as_of.isoformat(), (hard_start - timedelta(days=1)).isoformat()
+        soft_status = "complete"
+        if (
+            strict_date(row.get("earnings_soft_window_start")) != as_of
+            or strict_date(row.get("earnings_soft_window_end")) != hard_start - timedelta(days=1)
+        ):
+            return ""
+    else:
+        soft_start = soft_end = None
+        soft_status = "not_applicable"
+        if any(row.get(key) not in (None, "") for key in (
+            "earnings_soft_window_start", "earnings_soft_window_end",
+        )):
+            return ""
+    if row.get("earnings_soft_coverage_status") != soft_status:
+        return ""
+    return "earnings-comparable-v1:" + canonical_sha256({
+        "provider": "opend", "market": market, "market_date": market_date,
+        "symbol": symbol, "family": family,
+        "expirations": {label: value.isoformat() for label, value in expiry_dates.items()},
+        "policy_version": EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
+        "window_days": EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
+        "hard": {"status": "complete", "start": hard_start.isoformat(), "end": expiry.isoformat()},
+        "soft": {"status": soft_status, "start": soft_start, "end": soft_end},
+    })
+
+
 def _candidate_event_risk(
     row: Mapping[str, Any],
     *,
@@ -2423,6 +2516,8 @@ def _candidate_event_risk(
         }
     else:
         expirations = {"contract": row.get("expiration") or row.get("expiration_ymd")}
+    snapshot_hash = _text(row.get("earnings_snapshot_hash"))
+    provenance = {"evidence_snapshot_hash": snapshot_hash} if snapshot_hash else {}
     status = _text(row.get("earnings_evidence_status")).lower()
     if status != "ready":
         return {
@@ -2432,7 +2527,8 @@ def _candidate_event_risk(
             "reliable": False,
             "symbol": symbol,
             "selected_provider": "opend",
-            "evidence_chain_id": _text(row.get("earnings_snapshot_hash")),
+            "evidence_chain_id": "",
+            **provenance,
             "coverage": {
                 "earnings": status or "unavailable",
                 "earnings_hard": _text(
@@ -2462,7 +2558,8 @@ def _candidate_event_risk(
             "reliable": False,
             "symbol": symbol,
             "selected_provider": "opend",
-            "evidence_chain_id": _text(row.get("earnings_snapshot_hash")),
+            "evidence_chain_id": "",
+            **provenance,
             "coverage": {"earnings": "unavailable"},
             "nearest_event": None,
             "events": [],
@@ -2519,7 +2616,8 @@ def _candidate_event_risk(
             "reliable": False,
             "symbol": symbol,
             "selected_provider": "opend",
-            "evidence_chain_id": _text(row.get("earnings_snapshot_hash")),
+            "evidence_chain_id": "",
+            **provenance,
             "coverage": {"earnings": "unavailable"},
             "nearest_event": None,
             "events": [],
@@ -2527,6 +2625,9 @@ def _candidate_event_risk(
             "expiration_relations": {},
             "in_attention_window": False,
         }
+    chain_id = _candidate_earnings_comparable_chain_id(
+        row, family=family, market_date=market_date, symbol=symbol, expirations=expirations,
+    )
     if not has_event:
         return {
             "user_state": "confirmed_none",
@@ -2534,7 +2635,8 @@ def _candidate_event_risk(
             "reliable": True,
             "symbol": symbol,
             "selected_provider": "opend",
-            "evidence_chain_id": _text(row.get("earnings_snapshot_hash")),
+            "evidence_chain_id": chain_id,
+            **provenance,
             "coverage": {
                 "earnings": "complete",
                 "earnings_hard": _text(
@@ -2587,7 +2689,8 @@ def _candidate_event_risk(
         "reliable": True,
         "symbol": symbol,
         "selected_provider": "opend",
-        "evidence_chain_id": _text(row.get("earnings_snapshot_hash")),
+        "evidence_chain_id": chain_id,
+        **provenance,
         "coverage": {
             "earnings": "complete",
             "earnings_hard": _text(
