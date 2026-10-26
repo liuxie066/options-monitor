@@ -101,17 +101,23 @@ def _simulate_unsafe_target(monkeypatch: pytest.MonkeyPatch, target: Path, viola
 
     def simulated_run(args, *positional, **kwargs):
         if args[:2] == ["ls", "-lde"]:
+            if Path(args[2]) == target and violation == "acl_process":
+                raise subprocess.CalledProcessError(
+                    1, args, output="", stderr="fixture ACL query unavailable",
+                )
             names = acl_names(args[2])
             return subprocess.CompletedProcess(args, 0, "file\n" + (" acl\n" if names else ""), "")
         return original_run(args, *positional, **kwargs)
 
+    if violation == "acl_process":
+        monkeypatch.setattr(transaction_module, "sys", argparse.Namespace(platform="darwin"))
     monkeypatch.setattr(Path, "stat", simulated_stat)
     monkeypatch.setattr(transaction_module.subprocess, "run", simulated_run)
     monkeypatch.setattr(transaction_module.os, "listxattr", acl_names, raising=False)
 
 
 @pytest.mark.parametrize("target_name", ["config.yaml", "config.us.json", "config.hk.json", "resolved/config.bot.json"])
-@pytest.mark.parametrize("violation", ["uid", "gid", "special_mode", "acl", "probe_acl", "acl_io"])
+@pytest.mark.parametrize("violation", ["uid", "gid", "special_mode", "acl", "probe_acl", "acl_io", "acl_process"])
 def test_regular_publisher_rejects_unsafe_fresh_target_before_any_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target_name: str, violation: str,
 ) -> None:
@@ -132,9 +138,23 @@ def test_regular_publisher_rejects_unsafe_fresh_target_before_any_publication(
         return atomic_write(path, payload)
 
     monkeypatch.setattr(transaction_module, "_atomic_write_bytes", record_write)
-    with pytest.raises((ValueError, OSError), match="deployment|special config mode|ACL"):
+    io_failure = violation in {"acl_io", "acl_process"}
+    with pytest.raises(AgentToolError if io_failure else ValueError) as failure:
         _publish(source, doc, tmp_path, markets=["us", "hk"], apply=True)
 
+    if io_failure:
+        assert failure.value.code == "CONFIG_WRITE_FAILED"
+        assert failure.value.details["stage"] == "target_preflight"
+        assert failure.value.details["write_applied"] is False
+        assert isinstance(failure.value.__cause__, (OSError, subprocess.CalledProcessError))
+        if violation == "acl_process":
+            assert isinstance(failure.value.__cause__, subprocess.CalledProcessError)
+            assert failure.value.__cause__.stderr == "fixture ACL query unavailable"
+            assert "CalledProcessError" in failure.value.details["error"]
+        else:
+            assert "ACL query unavailable" in failure.value.details["error"]
+    else:
+        assert any(text in str(failure.value) for text in ("deployment", "special config mode", "ACL"))
     assert writes == []
     assert {path: path.read_bytes() for path in before} == before
     assert {path for path in tmp_path.rglob("*") if path.is_file()} == {
@@ -156,9 +176,17 @@ def test_regular_publisher_rejects_probe_io_failure_before_backup(
         raise PermissionError("fixture identity probe unavailable")
 
     monkeypatch.setattr(transaction_module.tempfile, "NamedTemporaryFile", unavailable_probe)
-    with pytest.raises(PermissionError, match="identity probe unavailable"):
+    with pytest.raises(AgentToolError) as failure:
         _publish(source, doc, tmp_path, markets=["us", "hk"], apply=True)
 
+    assert failure.value.code == "CONFIG_WRITE_FAILED"
+    assert failure.value.details["stage"] == "target_preflight"
+    assert failure.value.details["write_applied"] is False
+    assert failure.value.details["backup_write_applied"] is False
+    assert failure.value.details["transaction_write_applied"] is False
+    assert failure.value.details["targets"] == []
+    assert isinstance(failure.value.__cause__, PermissionError)
+    assert "identity probe unavailable" in failure.value.details["error"]
     assert source.read_bytes() == before
     assert not list(tmp_path.glob("config.yaml.bak.*"))
     assert not list(tmp_path.rglob("manifest.json"))
@@ -231,8 +259,9 @@ def test_regular_publisher_ignores_unselected_targets_and_disabled_bot(
     assert bot.read_bytes() == b"untouched bot" and hk.read_bytes() == b"untouched hk"
 
 
+@pytest.mark.parametrize("violation", ["gid", "acl_io", "acl_process"])
 def test_regular_publisher_reports_completed_recovery_before_new_identity_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, violation: str,
 ) -> None:
     source = tmp_path / "config.yaml"
     doc = _config_doc()
@@ -249,14 +278,30 @@ def test_regular_publisher_reports_completed_recovery_before_new_identity_failur
     runtime.write_bytes(b'{"pending":true}\n')
     hk = tmp_path / "config.hk.json"
     hk.write_bytes(b'{"untouched":true}\n')
-    _simulate_unsafe_target(monkeypatch, hk, "gid")
+    _simulate_unsafe_target(monkeypatch, hk, violation)
 
     with pytest.raises(AgentToolError) as failure:
         _publish(source, doc, tmp_path, markets=["us", "hk"], apply=True)
 
     assert failure.value.code == "CONFIG_WRITE_FAILED"
-    assert isinstance(failure.value.__cause__, ValueError)
-    assert "uid/gid" in failure.value.details["error"]
+    if violation == "gid":
+        assert isinstance(failure.value.__cause__, ValueError)
+        assert "uid/gid" in failure.value.details["error"]
+    else:
+        assert failure.value.details["stage"] == "target_preflight"
+        assert failure.value.details["backup_write_applied"] is False
+        assert failure.value.details["transaction_write_applied"] is False
+        assert failure.value.details["targets"] == []
+        preflight_error = failure.value.__cause__
+        assert isinstance(preflight_error, AgentToolError)
+        assert preflight_error.code == "CONFIG_WRITE_FAILED"
+        if violation == "acl_process":
+            assert isinstance(preflight_error.__cause__, subprocess.CalledProcessError)
+            assert preflight_error.__cause__.stderr == "fixture ACL query unavailable"
+            assert "CalledProcessError" in failure.value.details["error"]
+        else:
+            assert isinstance(preflight_error.__cause__, OSError)
+            assert "ACL query unavailable" in failure.value.details["error"]
     assert failure.value.details["write_applied"] is True
     recovered = failure.value.details["recovered_transactions"]
     assert len(recovered) == 1 and recovered[0]["audit_id"] == "recover-before-new-identity-failure"
@@ -293,6 +338,74 @@ def test_cli_preserves_config_error_for_new_target_identity_failure(
     assert source.read_bytes() == before
     assert not list(tmp_path.glob("config.yaml.bak.*"))
     assert not list(tmp_path.rglob("manifest.json"))
+
+
+@pytest.mark.parametrize("entrypoint", ["model", "account", "feature"])
+@pytest.mark.parametrize("io_failure", ["probe_permission", "acl_io", "acl_process"])
+def test_cli_reports_target_preflight_io_failure_without_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+    entrypoint: str, io_failure: str,
+) -> None:
+    import src.interfaces.cli.main as cli
+
+    source = tmp_path / "config.yaml"
+    doc = _config_doc()
+    doc["bot"] = {"active_model": "first", "models": {
+        name: {"provider": "openai", "model": "fixture-model", "api_key_env": "FIXTURE_KEY",
+               "context_window_tokens": 24000, "max_output_tokens": 2048}
+        for name in ("first", "second")
+    }}
+    _write_yaml(source, doc)
+    for name in ("config.us.json", "config.hk.json", "resolved/config.bot.json"):
+        target = tmp_path / name
+        target.parent.mkdir(exist_ok=True)
+        target.write_bytes(b'{"old":true}\n')
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    revision = config_source_sha256(source)
+    commands = {
+        "model": ["assistant", "model", "use", "second", "--config-yaml", str(source), "--apply"],
+        "account": ["accounts", "edit", "--market", "us", "--account-label", "lx",
+                    "--futu-port", "11112", "--config-yaml", str(source), "--apply", "--confirm"],
+        "feature": ["close-advice", "configure", "--enabled", "false", "--config-yaml", str(source),
+                    "--apply", "--confirm", "--expected-source-sha256", revision],
+    }
+    if io_failure == "probe_permission":
+        def unavailable_probe(*args, **kwargs):
+            raise PermissionError("fixture identity probe unavailable")
+
+        monkeypatch.setattr(transaction_module.tempfile, "NamedTemporaryFile", unavailable_probe)
+    else:
+        _simulate_unsafe_target(monkeypatch, source, io_failure)
+
+    def forbidden_write(*args, **kwargs):
+        pytest.fail("target identity preflight must finish before backup, manifest or replacement")
+
+    for name in ("_create_human_backup", "_prepare_transaction_manifest", "_atomic_write_bytes"):
+        monkeypatch.setattr(transaction_module, name, forbidden_write)
+
+    rc = cli.main(commands[entrypoint])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert rc != 0 and payload["ok"] is False
+    assert payload["error"]["code"] == "CONFIG_WRITE_FAILED"
+    details = payload["error"]["details"]
+    assert details["stage"] == "target_preflight"
+    assert details["write_applied"] is False
+    assert details["backup_write_applied"] is False
+    assert details["transaction_write_applied"] is False
+    assert details["backup_path"] is None
+    assert details["targets"] == [] and details["recovered_transactions"] == []
+    assert ("PermissionError" if io_failure == "probe_permission" else
+            "OSError" if io_failure == "acl_io" else "CalledProcessError") in details["error"]
+    assert "Traceback" not in captured.out + captured.err
+    assert {path: path.read_bytes() for path in before} == before
+    assert {path for path in tmp_path.rglob("*") if path.is_file()} == {
+        *before, tmp_path / "output_shared/state/config_authoring.lock",
+    }
+    assert not (tmp_path / "output_shared/state/config_authoring_transactions").exists()
+    assert not list(tmp_path.glob("config.yaml.bak.*"))
+    assert not list(tmp_path.rglob(".om-owner-*"))
 
 
 def _pending_transaction(
