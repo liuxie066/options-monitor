@@ -149,6 +149,41 @@ def test_normalize_feishu_app_send_output_marks_failed_on_feishu_code() -> None:
     assert "denied-tail" not in repr(out)
 
 
+@pytest.mark.parametrize(
+    ("configured_open_id", "credential_present", "expected"),
+    [
+        ('  ou_fixture_"\\中  ', False, 'ou_fixture_"\\中'),
+        ("ou_fixture_with_credential", True, "ou_fixture_with_credential"),
+        (None, False, ""),
+    ],
+    ids=["recipient-without-credential", "recipient-with-credential", "recipient-unconfigured"],
+)
+def test_resolve_feishu_bot_send_target_reads_only_recipient_metadata(
+    monkeypatch, configured_open_id, credential_present, expected,
+) -> None:
+    from types import SimpleNamespace
+
+    from src.application import notification_delivery_adapter as service
+    from src.application import secret_resolver as secrets
+
+    def forbidden_secret_resolution(*args, **kwargs):
+        raise AssertionError("target preparation must not resolve sender secret")
+
+    monkeypatch.setattr(secrets, "_secret", forbidden_secret_resolution)
+    monkeypatch.setattr(
+        secrets, "resolve_secret_status",
+        lambda *args, **kwargs: SimpleNamespace(configured=credential_present),
+    )
+    if configured_open_id is None:
+        monkeypatch.delenv("OM_FEISHU_BOT_USER_OPEN_ID", raising=False)
+    else:
+        monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", configured_open_id)
+
+    assert service.resolve_feishu_bot_send_target(
+        notifications={"target": "ou_config_must_not_replace_canonical_recipient"},
+    ) == expected
+
+
 def test_send_feishu_app_message_uses_bot_user_open_id_when_target_empty(monkeypatch, tmp_path: Path) -> None:
     from src.application import notification_delivery_adapter as service
 
