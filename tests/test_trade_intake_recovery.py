@@ -2028,3 +2028,51 @@ def test_simultaneous_duplicate_repair_reads_back_in_transaction(monkeypatch, tm
     assert second["mode"] == "no_op"
     assert second["repair_event_id"] == first_result["repair_event_id"]
     assert len(repo.list_trade_events()) == 3
+
+
+@pytest.mark.parametrize("lot_account,lot_symbol,accepted", [
+    ("sy", "NVDA", False), ("lx", "AMD", False), ("sy", "AMD", False),
+    ("lx", "NVDA", True),
+])
+def test_stock_fallback_scope_through_real_inbox(tmp_path, monkeypatch, lot_account, lot_symbol, accepted):
+    from src.application.ledger.manual_trades import persist_manual_open_event
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    persist_manual_open_event(
+        repo, broker="富途", account=lot_account, symbol=lot_symbol,
+        option_type="put", side="short", contracts=1, currency="USD", strike=100,
+        multiplier=100, expiration_ymd="2026-09-18", premium_per_share=2,
+        opened_at_ms=1788652800000,
+    )
+    payload = _execution(deal_id="scope-stock", price="100")
+    payload = {**payload, "instrument_ref": {"asset_type": "stock", "market": "US", "symbol": "NVDA", "currency": "USD"},
+               "side": "buy", "position_effect": None, "quantity": "100"}
+    def no_external(*args, **kwargs):
+        pytest.fail("isolated stock intake must not contact an external service")
+    monkeypatch.setattr("src.application.trades.auto_intake._dispatch_portfolio_refresh_intent", no_external)
+    before = repo.list_trade_events(), repo.list_position_lots()
+    config = {"portfolio_management": {"enabled": True}}
+    result = _process(repo, tmp_path, "scope", payload, config=config)
+    assert (result["status"], result["reason"]) == (
+        ("unresolved", "stock_settlement_waiting_option_leg") if accepted else ("skipped", "not_option_deal")
+    )
+    assert len(repo.list_trade_lifecycle_evidence()) == int(accepted)
+    assert repo.list_trade_lifecycle_cases() == []
+    assert (repo.list_trade_events(), repo.list_position_lots()) == before
+    inbox = resolve_execution_inbox_path(repo, tmp_path / "scope" / "inbox.sqlite3")
+    row = read_trade_payload(inbox, inbox_id=result["inbox_id"], read_only=True)
+    assert row is not None
+    assert row["payload"]["external_execution_id"] == "scope-stock"
+    assert row["result"]["reason"] == result["reason"]
+    source = read_trade_source_evidence(inbox, evidence_ref=trade_payload_evidence_ref(result["inbox_id"]))
+    assert source
+    assert all(item["raw_payload"]["external_execution_id"] == "scope-stock" for item in source)
+    if not accepted:
+        assert row["status"] == "handled"
+        assert result["portfolio_refresh_intent"]["account"] == "lx"
+        assert claim_trade_payload_refresh_intent(inbox, inbox_id=result["inbox_id"]) == result["portfolio_refresh_intent"]
+        replay = _process(repo, tmp_path, "scope", payload, config=config)
+        assert replay["portfolio_refresh_intent"] == result["portfolio_refresh_intent"]
+        assert claim_trade_payload_refresh_intent(inbox, inbox_id=result["inbox_id"]) is None
+        assert len(repo.list_trade_lifecycle_evidence()) == 0
+        assert (repo.list_trade_events(), repo.list_position_lots()) == before

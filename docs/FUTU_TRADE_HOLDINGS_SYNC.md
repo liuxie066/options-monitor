@@ -486,6 +486,12 @@ SDK 转换丢字段。无身份记录只保留证据，关联必须经既有证�
 只对已明确分类且确认可安全重试的临时故障沿用 durable 重试；本轮不增加进程内 sleep
 或第二套快速重试政策。首发成功率主要通过修复身份与锁缺陷提升。
 
+股票先到的生命周期 open-lot fallback 仅使用同一规范化逻辑账户与 canonical 标的的 lot，
+并在数量聚合前排除开仓事件中可证明的富途物理账户冲突。物理身份读取已有开仓事件的
+`futu_account_id` 与富途 execution account ref；任一已知值冲突都不能参与匹配。
+缺少这些身份资料的 legacy lot 继续兼容，不把 unknown 当成 mismatch，也不将其视为完整身份已获证明。
+已有 case/evidence、数量价格时间条件及后续配对 owner 保持原合同。
+
 ### 普通成交回执与恢复
 
 以现有 Inbox 为唯一持久化 owner。扩展 `receipt_json` 为显式版本的记录，按语义保存
