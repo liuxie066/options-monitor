@@ -234,6 +234,8 @@ def _contract_terms_drifts(
 ) -> list[dict[str, str]]:
     compared_keys = set(raw_comparison)
     proposals: list[tuple[str, str, Decimal, str]] = []
+    code_quantities: dict[str, tuple[str, Decimal]] = {}
+    invalid_codes: set[str] = set()
     for row in broker_rows:
         code = str(
             row.get("code") or row.get("symbol") or row.get("stock_code") or ""
@@ -242,9 +244,26 @@ def _contract_terms_drifts(
         if code_match is None:
             continue
         normalized, errors = normalize_opend_positions([row])
-        if errors or len(normalized) != 1:
+        if errors or len(normalized) > 1:
+            invalid_codes.add(code)
+            continue
+        if not normalized:
             continue
         current_key, quantity = next(iter(normalized.items()))
+        previous = code_quantities.get(code)
+        if previous is not None:
+            if previous[0] != current_key or (previous[1] > 0) != (quantity > 0):
+                invalid_codes.add(code)
+                continue
+            quantity += previous[1]
+        code_quantities[code] = (current_key, quantity)
+
+    for code, (current_key, quantity) in code_quantities.items():
+        if code in invalid_codes:
+            continue
+        code_match = OPTION_CODE_RE.match(code)
+        if code_match is None:
+            continue
         if current_key not in compared_keys or broker.get(current_key) != quantity:
             continue
         current_parts = current_key.split("|")
