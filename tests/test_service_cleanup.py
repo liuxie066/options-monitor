@@ -11,6 +11,9 @@ import pytest
 from src.application import service_cleanup as cleanup
 
 
+_PYTHON_RUNTIME_MARKER = b"# Python Bot fixture\n"
+
+
 def test_path_size_counts_links_without_following_them(tmp_path: Path) -> None:
     root = tmp_path / 'tree'
     nested = root / 'nested'
@@ -150,6 +153,9 @@ def test_cleanup_preserves_plan_bytes_and_safe_targets(
         release = releases / version
         release.mkdir(parents=True)
         (release / 'VERSION').write_text(version)
+        marker = release / "src/application/bot/runtime.py"
+        marker.parent.mkdir(parents=True)
+        marker.write_bytes(_PYTHON_RUNTIME_MARKER)
         (release / 'payload').write_bytes(b'x' * 20)
     current = tmp_path / 'current'
     current.symlink_to(releases / '1.2.0')
@@ -186,8 +192,8 @@ def test_cleanup_preserves_plan_bytes_and_safe_targets(
         return
 
     assert out['ok'] is True
-    assert out['estimated_freed_bytes'] == 25 + 30 + 40
-    assert out['freed_bytes'] == (95 if confirm else 0)
+    assert out['estimated_freed_bytes'] == 25 + len(_PYTHON_RUNTIME_MARKER) + 30 + 40
+    assert out['freed_bytes'] == (95 + len(_PYTHON_RUNTIME_MARKER) if confirm else 0)
     assert out['output_runs_plan_sha256'] == preview['output_runs_plan_sha256']
     assert (releases / '1.0.0').exists() is not confirm
     assert (runs / 'old').exists() is not confirm
@@ -205,6 +211,9 @@ def test_cleanup_single_release_does_not_require_decodable_version(tmp_path: Pat
     active.mkdir(parents=True)
     version = active / 'VERSION'
     version.write_bytes(b'\xff')
+    marker = active / "src/application/bot/runtime.py"
+    marker.parent.mkdir(parents=True)
+    marker.write_bytes(_PYTHON_RUNTIME_MARKER)
     current = tmp_path / 'current'
     current.symlink_to(active)
 
@@ -228,6 +237,9 @@ def _transition_layout(root):
         release = releases / version
         release.mkdir(parents=True)
         (release / 'VERSION').write_text(version)
+        marker = release / "src/application/bot/runtime.py"
+        marker.parent.mkdir(parents=True)
+        marker.write_bytes(_PYTHON_RUNTIME_MARKER)
     current = root / 'current'
     current.symlink_to(releases / '1.3.0')
     return current, releases, root / 'runtime'

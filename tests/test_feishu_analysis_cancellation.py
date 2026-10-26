@@ -12,7 +12,7 @@ from src.application.bot import channel_facade
 from src.application.bot.host_store import BotHostStore
 from src.application.inbound import feishu_ws
 from src.application.inbound.feishu import prepare_feishu_analysis_control
-from tests.bot_pi_test_support import ModelTurn, run_contract
+from tests.bot_test_support import ModelTurn, run_contract
 from tests.test_inbound_feishu_ws import _message_payload
 
 

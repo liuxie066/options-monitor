@@ -1406,11 +1406,11 @@ def test_rollback_cli_enforces_actual_target_identity(monkeypatch, capsys, tmp_p
         pytest.fail("CLI target admission invoked a subprocess")
 
     def ready(**kwargs):
-        assert valid and kwargs["runtime_root"] == runtime
-        readiness.append(kwargs["runtime_dir"])
+        assert valid and kwargs["release_dir"] == releases / "1.0.0"
+        readiness.append(kwargs["release_dir"])
         return {"ok": True}
 
-    monkeypatch.setattr(upgrade, "_pi_storage_readiness", ready)
+    monkeypatch.setattr(upgrade, "_runtime_readiness", ready)
     monkeypatch.setattr(cli, "service_rollback", partial(upgrade.service_rollback, run_cmd=unexpected))
     argv = ["update", "rollback", "--repo-root", str(current), "--runtime-root", str(runtime),
             "--releases-root", str(releases), "--to-version", target]
@@ -1424,7 +1424,7 @@ def test_rollback_cli_enforces_actual_target_identity(monkeypatch, capsys, tmp_p
     assert data["changed"] is False and data["write_applied"] is False
     assert data["dry_run"] is (not confirm) and data["operations"] == []
     assert current.resolve() == releases / "1.0.1"
-    assert readiness == ([releases / "1.0.0/agent-runtime"] if valid else [])
+    assert readiness == ([releases / "1.0.0"] if valid else [])
     assert not (runtime / "locks/upgrade.lock").exists()
     if not confirm:
         assert status.read_bytes() == before and not (runtime / "locks/upgrade.lock.guard").exists()

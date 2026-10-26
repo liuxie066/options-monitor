@@ -23,7 +23,6 @@ from tests.service_deploy_test_support import (
     _write_systemd_units_from_bundle,
     _create_fake_venv_python_at,
     _fake_git_cache_materialize,
-    _fake_pi_runtime_prepare,
     _fake_release_drift_command,
     _fake_release_target_query,
     _mock_published_releases,
@@ -39,15 +38,13 @@ from tests.service_deploy_test_support import (
     _guard_original_credential_migration,
     _legacy_credential_migration_fixture,
     _credential_migration_runner,
-    _stub_pi_storage_readiness,
 )
 
 
 @pytest.fixture(autouse=True)
-def _legacy_service_fixtures_have_ready_pi_storage(
+def _offline_published_release_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _stub_pi_storage_readiness(monkeypatch)
     _mock_published_releases(monkeypatch)
 
 def test_render_systemd_bundle_can_own_feishu_agent_credential_assets(
@@ -1608,6 +1605,8 @@ def test_service_upgrade_verify_returns_compact_read_only_summary(tmp_path: Path
     release = releases / "1.2.3"
     release.mkdir(parents=True)
     (release / "VERSION").write_text("1.2.3\n", encoding="utf-8")
+    (release / "src/application/bot").mkdir(parents=True, exist_ok=True)
+    (release / "src/application/bot/runtime.py").write_text("# Python Bot fixture\n", encoding="utf-8")
     (release / "configs").mkdir()
     system_config = release / "configs" / "system.json"
     system_config.write_text('{"runtime": {}}\n', encoding="utf-8")
@@ -2101,6 +2100,8 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(
     v100 = releases / "1.0.0"
     v100.mkdir(parents=True)
     (v100 / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    (v100 / "src/application/bot").mkdir(parents=True, exist_ok=True)
+    (v100 / "src/application/bot/runtime.py").write_text("# Python Bot fixture\n", encoding="utf-8")
     current = install / "current"
     current.symlink_to(v100, target_is_directory=True)
     runtime = tmp_path / "runtime"
@@ -2484,7 +2485,7 @@ def test_service_upgrade_confirm_noops_when_latest_is_current(tmp_path: Path) ->
     assert not any(command[:3] == [CURRENT_PYTHON, "-m", "venv"] for command in calls)
     assert load_upgrade_status(runtime_root=runtime)["message"] == "没有可升级版本。当前已是最新版本 1.0.1"
 
-def test_service_upgrade_pi_prepare_failure_keeps_current_and_precedes_config(monkeypatch, tmp_path: Path) -> None:
+def test_service_upgrade_bot_prepare_failure_keeps_current_and_precedes_config(monkeypatch, tmp_path: Path) -> None:
     import src.application.service_upgrade as service_upgrade_module
 
     monkeypatch.setenv("OM_UPGRADE_INSTALLER", "pip")
@@ -2520,11 +2521,8 @@ def test_service_upgrade_pi_prepare_failure_keeps_current_and_precedes_config(mo
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
-        pi_runtime = _fake_pi_runtime_prepare(list(command))
-        if pi_runtime is not None:
-            if command[:2] == ["npm", "ci"]:
-                return subprocess.CompletedProcess(command, 1, stdout="", stderr="npm failed\n")
-            return pi_runtime
+        if command[1:] == ["-c", "import src.application.bot.host; import src.application.bot.runtime"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="Bot import failed\n")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     out = service_upgrade_module.service_upgrade(
@@ -2540,7 +2538,13 @@ def test_service_upgrade_pi_prepare_failure_keeps_current_and_precedes_config(mo
     assert out["symlink_switched"] is False
     assert current.resolve() == previous.resolve()
     assert config_prepare_called is False
-    assert out["runtime_prepare"]["pi_runtime"]["node_version"] == "v22.19.0"
+    assert "import src.application.bot.host" in out["error"]
+    assert out["operations"][-1]["returncode"] == 1
+    assert out["operations"][-1]["stderr"] == "Bot import failed\n"
+    assert out["operations"][-1]["command"] == [str(target / ".venv/bin/python"), "-c",
+                                                "import src.application.bot.host; import src.application.bot.runtime"]
+    assert out["operations"][-1]["ok"] is False
+    assert out["runtime_prepare"]["duration_seconds"] >= 0
 
 def test_service_upgrade_restart_failure_is_non_success_and_restores_previous_symlink(monkeypatch, tmp_path: Path) -> None:
     import pwd
@@ -2553,6 +2557,8 @@ def test_service_upgrade_restart_failure_is_non_success_and_restores_previous_sy
     v100 = releases / "1.0.0"
     v100.mkdir(parents=True)
     (v100 / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    (v100 / "src/application/bot").mkdir(parents=True, exist_ok=True)
+    (v100 / "src/application/bot/runtime.py").write_text("# Python Bot fixture\n", encoding="utf-8")
     current = install / "current"
     current.symlink_to(v100, target_is_directory=True)
     runtime = tmp_path / "runtime"
@@ -2623,6 +2629,8 @@ def test_service_upgrade_requires_yaml_authoring_source_before_switch(monkeypatc
     v100 = releases / "1.0.0"
     v100.mkdir(parents=True)
     (v100 / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    (v100 / "src/application/bot").mkdir(parents=True, exist_ok=True)
+    (v100 / "src/application/bot/runtime.py").write_text("# Python Bot fixture\n", encoding="utf-8")
     (v100 / "configs").mkdir()
     for name in ("user.common.json", "user.hk.json", "user.us.json"):
         (v100 / "configs" / name).write_text(json.dumps({"name": name}), encoding="utf-8")
@@ -2706,6 +2714,8 @@ def test_service_upgrade_missing_user_config_fails_before_switch_with_remediatio
     v100 = releases / "1.0.0"
     v100.mkdir(parents=True)
     (v100 / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    (v100 / "src/application/bot").mkdir(parents=True, exist_ok=True)
+    (v100 / "src/application/bot/runtime.py").write_text("# Python Bot fixture\n", encoding="utf-8")
     (v100 / "configs").mkdir()
     (v100 / "configs" / "user.common.json").write_text("{}", encoding="utf-8")
     current = install / "current"
@@ -3169,6 +3179,8 @@ def test_service_upgrade_blocks_major_by_default(tmp_path: Path) -> None:
     repo.mkdir()
     runtime.mkdir()
     (repo / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    (repo / "src/application/bot").mkdir(parents=True, exist_ok=True)
+    (repo / "src/application/bot/runtime.py").write_text("# Python Bot fixture\n", encoding="utf-8")
 
     out = service_upgrade(
         repo_root=repo,
@@ -3188,6 +3200,8 @@ def test_service_upgrade_dry_run_warns_when_repo_root_is_not_symlink(tmp_path: P
     repo.mkdir()
     runtime.mkdir()
     (repo / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    (repo / "src/application/bot").mkdir(parents=True, exist_ok=True)
+    (repo / "src/application/bot/runtime.py").write_text("# Python Bot fixture\n", encoding="utf-8")
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         query = _fake_release_target_query(list(command))
@@ -3215,6 +3229,8 @@ def test_service_upgrade_confirm_fails_fast_when_repo_root_is_not_symlink(tmp_pa
     repo.mkdir()
     runtime.mkdir()
     (repo / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    (repo / "src/application/bot").mkdir(parents=True, exist_ok=True)
+    (repo / "src/application/bot/runtime.py").write_text("# Python Bot fixture\n", encoding="utf-8")
     calls: list[list[str]] = []
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
@@ -3528,7 +3544,7 @@ def test_rollback_identity_rejects_invalid_target(transition_case, monkeypatch, 
         pytest.fail("invalid target reached transition work")
 
     monkeypatch.setattr(upgrade, "_prepare_runtime_configs_for_release", unexpected)
-    monkeypatch.setattr(upgrade, "_pi_storage_readiness", unexpected)
+    monkeypatch.setattr(upgrade, "_runtime_readiness", unexpected)
     monkeypatch.setattr(upgrade, "_compensate_service_transition", unexpected)
     out = case.invoke("rollback", None if implicit else target, confirm=confirm)
     data = out["data"]
@@ -3565,6 +3581,8 @@ def test_rollback_identity_rejects_path_and_version_failures(transition_case, mo
         if fault != "outside_missing":
             outside.mkdir()
             (outside / "VERSION").write_text("3.0.0\n")
+            (outside / "src/application/bot").mkdir(parents=True, exist_ok=True)
+            (outside / "src/application/bot/runtime.py").write_text("# Python Bot fixture\n", encoding="utf-8")
         target.symlink_to(outside, target_is_directory=True)
     elif fault == "loop":
         target.symlink_to(target)
@@ -3710,7 +3728,11 @@ def test_service_rollback_switches_current_symlink(tmp_path: Path) -> None:
     v100.mkdir(parents=True)
     v101.mkdir()
     (v100 / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    (v100 / "src/application/bot").mkdir(parents=True, exist_ok=True)
+    (v100 / "src/application/bot/runtime.py").write_text("# Python Bot fixture\n", encoding="utf-8")
     (v101 / "VERSION").write_text("1.0.1\n", encoding="utf-8")
+    (v101 / "src/application/bot").mkdir(parents=True, exist_ok=True)
+    (v101 / "src/application/bot/runtime.py").write_text("# Python Bot fixture\n", encoding="utf-8")
     current = install / "current"
     current.symlink_to(v101, target_is_directory=True)
     runtime = tmp_path / "runtime"
@@ -4144,6 +4166,8 @@ def test_service_cleanup_requires_repo_root_symlink(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    (repo / "src/application/bot").mkdir(parents=True, exist_ok=True)
+    (repo / "src/application/bot/runtime.py").write_text("# Python Bot fixture\n", encoding="utf-8")
 
     out = service_cleanup(repo_root=repo, releases_root=tmp_path / "releases", confirm=True, runtime_root=tmp_path / "runtime")
 
@@ -4159,6 +4183,8 @@ def test_service_cleanup_reports_journal_command_failure(tmp_path: Path) -> None
     for path in (active, previous):
         path.mkdir(parents=True)
         (path / "VERSION").write_text(path.name, encoding="utf-8")
+        (path / "src/application/bot").mkdir(parents=True, exist_ok=True)
+        (path / "src/application/bot/runtime.py").write_text("# Python Bot fixture\n", encoding="utf-8")
     current = tmp_path / "current"
     current.symlink_to(active, target_is_directory=True)
 
@@ -4517,6 +4543,8 @@ def test_deployment_user_check_uses_uid_and_rejects_unknown_user(monkeypatch, tm
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "VERSION").write_text("1.0.0")
+    (repo / "src/application/bot").mkdir(parents=True, exist_ok=True)
+    (repo / "src/application/bot/runtime.py").write_text("# Python Bot fixture\n", encoding="utf-8")
     (tmp_path / "service.profile.json").write_text(json.dumps({"deploy_user": "operator"}))
     monkeypatch.setattr(pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=uid))
     monkeypatch.setattr(upgrade.os, "geteuid", lambda: uid)
@@ -5110,9 +5138,8 @@ def transition_case(monkeypatch, tmp_path):
                 return result()
             if command[1:2] == ["scripts/release_check.py"] or command == ["./om-agent", "spec"]:
                 return result()
-            pi = _fake_pi_runtime_prepare(command)
-            if pi is not None:
-                return pi
+            if command[1:] == ["-c", "import src.application.bot.host; import src.application.bot.runtime"]:
+                return result()
             if command[:3] in (["./om", "config", "build"], ["./om", "config", "build-bot"]):
                 emit("build", command=command)
                 destination = Path(command[command.index("--output") + 1])
@@ -5231,7 +5258,7 @@ def _assert_busy_transition(case, operation, target):
     assert data["operation"] == ("upgrade" if operation == "apply" else "rollback")
     assert data["operations"] == [] and data["post_switch_runtime_config_validate"] == []
     for key in ("compensation", "runtime_config_prepare", "runtime_config_commit",
-                "service_reconcile", "service_health", "pi_storage_readiness"):
+                "service_reconcile", "service_health", "runtime_readiness"):
         assert data[key] == {}
     assert len(case.queries) == queries and len(case.commands) == commands
     assert case.snapshot() == before
@@ -6098,3 +6125,307 @@ def test_source_failure_does_not_guess_mirror_remote(monkeypatch, tmp_path):
     assert out["version_check"]["error"] == "upgrade_source_unavailable"
     assert "origin" in out["version_check"]["message"]
     assert len(calls) == 1 and not http_calls
+
+
+
+def _release(path: Path, version: str) -> Path:
+    _write_upgrade_release_skeleton(path, version)
+    return path
+
+
+def _upgrade_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    releases = tmp_path / "releases"
+    previous = _release(releases / "3.5.1", "3.5.1")
+    target = _release(releases / "3.5.2", "3.5.2")
+    current = tmp_path / "current"
+    current.symlink_to(previous, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    return current, previous, target, runtime
+
+
+
+def _stub_upgrade_preparation(monkeypatch: pytest.MonkeyPatch, module, target: Path) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(
+        module,
+        "service_upgrade_check",
+        lambda **_kwargs: {"ok": True, "latest_version": "3.5.2", "release_tag": "v3.5.2"},
+    )
+    monkeypatch.setattr(
+        module,
+        "_materialize_release_from_git_cache",
+        lambda **_kwargs: {"status": "reused", "target_dir": str(target)},
+    )
+    monkeypatch.setattr(module, "_ensure_release_runtime", lambda **_kwargs: {"status": "ready"})
+    monkeypatch.setattr(module, "_run_required", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        module,
+        "_prepare_runtime_configs_for_release",
+        lambda **_kwargs: {"status": "prepared", "items": []},
+    )
+    monkeypatch.setattr(module, "_commit_prepared_runtime_configs", lambda **_kwargs: {"status": "committed"})
+    monkeypatch.setattr(module, "_validate_committed_runtime_configs", lambda **_kwargs: [])
+    monkeypatch.setattr(module, "_load_service_profile", lambda _runtime: {})
+
+
+
+def _fail_lambda(message: str):
+    """A seam stub that fails the test if the seam is reached."""
+
+    def _fail(**_kwargs):
+        pytest.fail(message)
+
+    return _fail
+
+
+
+def _upgrade(
+    module,
+    *,
+    current: Path,
+    runtime: Path,
+    target: Path,
+    confirm: bool,
+    restart_services: bool,
+):  # type: ignore[no-untyped-def]
+    """Run the upgrade entrypoint with the fixture's fixed release/runtime arguments."""
+    return module.service_upgrade(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=target.parent,
+        target_version="3.5.2",
+        confirm=confirm,
+        restart_services=restart_services,
+        preserve_activation_state=True,
+    )
+
+
+
+def _cleanup_fixture(tmp_path: Path, versions: list[str]) -> tuple[Path, list[Path], Path]:
+    """Create one release dir per version (newest first) and point `current` at the newest."""
+    releases = tmp_path / "releases"
+    created = [_release(releases / version, version) for version in versions]
+    current = tmp_path / "current"
+    current.symlink_to(created[0], target_is_directory=True)
+    return releases, created, current
+
+
+
+def _cleanup(module, *, current: Path, releases: Path, **kwargs):  # type: ignore[no-untyped-def]
+    """Run the cleanup entrypoint with the fixture's fixed keep/confirm arguments."""
+    return module.service_cleanup(
+        repo_root=current,
+        releases_root=releases,
+        keep_releases=2,
+        confirm=True,
+        **kwargs,
+    )
+
+
+
+def test_upgrade_verify_reports_unsupported_runtime(monkeypatch, tmp_path: Path) -> None:
+    import src.application.service_upgrade as module
+
+    current, previous, _target, runtime = _upgrade_fixture(tmp_path)
+    (previous / "src/application/bot/runtime.py").unlink()
+    (runtime / "config.us.json").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(module, "_load_service_profile", lambda _runtime: {})
+    monkeypatch.setattr(module, "_runtime_config_verify_summary", lambda **_kwargs: {"ok": True})
+    out = module.service_upgrade_verify(repo_root=current, runtime_root=runtime, check_latest=False)
+    assert out["ok"] is False
+    assert out["status"] == "attention_required"
+    assert out["repo_root_resolved"] == str(previous)
+    assert out["runtime_readiness"]["ok"] is False
+    assert out["runtime_readiness"]["status"] == "unsupported_runtime"
+    assert str(previous) in out["runtime_readiness"]["error"]
+    assert out["runtime_readiness"]["remediation"]
+    assert current.resolve() == previous
+
+
+def test_upgrade_preview_is_read_only_and_keeps_services_stopped(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import src.application.service_upgrade as module
+
+    current, previous, target, runtime = _upgrade_fixture(tmp_path)
+    _stub_upgrade_preparation(monkeypatch, module, target)
+    monkeypatch.setattr(module, "_materialize_release_from_git_cache", _fail_lambda("preview materialized release"))
+    monkeypatch.setattr(module, "_switch_current_symlink", _fail_lambda("preview switched current"))
+    monkeypatch.setattr(module, "_restart_services_from_loaded_profile", _fail_lambda("preview restarted service"))
+
+    out = _upgrade(module, current=current, runtime=runtime, target=target, confirm=False, restart_services=False)
+
+    assert out["status"] == "dry_run"
+    assert current.resolve() == previous
+
+
+
+def test_upgrade_checks_target_runtime_before_switch_and_does_not_restart_in_maintenance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.service_upgrade as module
+
+    current, previous, target, runtime = _upgrade_fixture(tmp_path)
+    _stub_upgrade_preparation(monkeypatch, module, target)
+    assert current.resolve() == previous
+    monkeypatch.setattr(
+        module, "_restart_services_from_loaded_profile", _fail_lambda("maintenance restarted service")
+    )
+
+    out = _upgrade(module, current=current, runtime=runtime, target=target, confirm=True, restart_services=False)
+
+    assert out["status"] == "upgraded"
+    assert out["ok"] is True
+    assert out["runtime_readiness"] == {"ok": True, "runtime": "python"}
+    assert out["symlink_switched"] is True
+    assert out["target_dir"] == str(target)
+    assert out["restarted_services"] == []
+    assert current.resolve() == target
+
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+def test_rollback_rejects_legacy_runtime_before_config_switch_or_restart(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, confirm: bool) -> None:
+    import src.application.service_upgrade as module
+
+    current, old, new, runtime = _upgrade_fixture(tmp_path)
+    current.unlink()
+    current.symlink_to(new, target_is_directory=True)
+    (old / "src/application/bot/runtime.py").unlink()
+    monkeypatch.setattr(module, "_prepare_runtime_configs_for_release", _fail_lambda("legacy rollback prepared config"))
+    monkeypatch.setattr(module, "_switch_current_symlink", _fail_lambda("rollback switched current"))
+    monkeypatch.setattr(module, "_restart_services_from_loaded_profile", _fail_lambda("rollback restarted service"))
+
+    out = module.service_rollback(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=old.parent,
+        to_version="3.5.1",
+        confirm=confirm,
+    )
+
+    assert out["status"] == "unsupported_runtime"
+    assert out["changed"] is False
+    assert current.resolve() == new
+
+
+def test_failure_before_switch_does_not_resume_old_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.service_upgrade as module
+
+    current, previous, target, runtime = _upgrade_fixture(tmp_path)
+    _stub_upgrade_preparation(monkeypatch, module, target)
+    monkeypatch.setattr(
+        module,
+        "_load_service_profile",
+        lambda _runtime: {"service_provider": "systemd"},
+    )
+
+    def _fail_switch(**_kwargs):
+        raise module.ServiceTransitionError(
+            "switch failed before current changed", status="switch_failed"
+        )
+
+    monkeypatch.setattr(
+        module, "capture_preserved_timer_activation_states", lambda **_kwargs: {}
+    )
+    monkeypatch.setattr(module, "_switch_current_symlink", _fail_switch)
+    monkeypatch.setattr(module, "_compensate_service_transition", _fail_lambda("failure before switch compensated"))
+    monkeypatch.setattr(
+        module, "_restart_services_from_loaded_profile", _fail_lambda("failure path started old service")
+    )
+
+    out = _upgrade(module, current=current, runtime=runtime, target=target, confirm=True, restart_services=True)
+
+    assert out["status"] == "switch_failed"
+    assert out["compensation"] == {}
+    assert out["symlink_switched"] is False
+    assert current.resolve() == previous
+
+
+
+def test_activation_snapshot_failure_stops_before_runtime_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.service_upgrade as module
+
+    current, previous, target, runtime = _upgrade_fixture(tmp_path)
+    _stub_upgrade_preparation(monkeypatch, module, target)
+    monkeypatch.setattr(
+        module,
+        "_load_service_profile",
+        lambda _runtime: {"service_provider": "systemd"},
+    )
+
+    def _fail_activation(**_kwargs):
+        raise module.ServiceTransitionError(
+            "activation snapshot failed",
+            status="service_activation_snapshot_failed",
+        )
+
+    monkeypatch.setattr(
+        module,
+        "capture_preserved_timer_activation_states",
+        _fail_activation,
+    )
+    monkeypatch.setattr(
+        module,
+        "_ensure_release_runtime",
+        _fail_lambda("snapshot failure prepared target runtime"),
+    )
+    monkeypatch.setattr(
+        module,
+        "_runtime_readiness",
+        _fail_lambda("snapshot failure checked target runtime"),
+    )
+
+    out = _upgrade(
+        module,
+        current=current,
+        runtime=runtime,
+        target=target,
+        confirm=True,
+        restart_services=True,
+    )
+
+    assert out["status"] == "service_activation_snapshot_failed"
+    assert out["compensation"] == {}
+    assert out["symlink_switched"] is False
+    assert current.resolve() == previous
+
+
+
+@pytest.mark.parametrize("runtime_provided", [False, True])
+def test_cleanup_retains_legacy_release_without_parsing_receipts(monkeypatch, tmp_path: Path, runtime_provided: bool) -> None:
+    import src.application.service_cleanup as module
+
+    releases, created, current = _cleanup_fixture(tmp_path, ["3.5.3", "3.5.2", "3.5.1", "3.5.0"])
+    _active, _previous, legacy, stale = created
+    (legacy / "src/application/bot/runtime.py").unlink()
+    historical = legacy / "output_shared/state/pi_sessions.sqlite3.migration.json"
+    historical.parent.mkdir(parents=True)
+    historical.write_bytes(b"invalid historical receipt; never parsed")
+    before = historical.read_bytes()
+    runtime = tmp_path / "runtime"
+    original_lock = module.single_instance_lock
+    guard_paths: list[Path] = []
+
+    def isolated_default_guard(path, **kwargs):
+        guard_paths.append(path)
+        assert path == Path("/var/lib/options-monitor/locks/upgrade.lock.guard")
+        return original_lock(runtime / "locks/upgrade.lock.guard", **kwargs)
+
+    if not runtime_provided:
+        monkeypatch.setattr(module, "single_instance_lock", isolated_default_guard)
+    out = _cleanup(module, current=current, releases=releases, **({"runtime_root": runtime} if runtime_provided else {}))
+    assert out["status"] == "cleaned"
+    assert out["runtime_root"] == (str(runtime) if runtime_provided else None)
+    assert guard_paths == ([] if runtime_provided else [Path("/var/lib/options-monitor/locks/upgrade.lock.guard")])
+    assert {item["version"] for item in out["kept_releases"]} == {"3.5.3", "3.5.2", "3.5.1"}
+    assert out["retained_legacy_releases"] == [{"path": str(legacy), "version": "3.5.1"}]
+    assert "pi_retained_releases" not in out and "pi_migration_receipt_count" not in out
+    assert historical.read_bytes() == before
+    assert legacy.exists()
+    assert not stale.exists()

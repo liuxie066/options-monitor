@@ -210,6 +210,8 @@ def test_cli_cleanup_real_owner_busy_then_retry(tmp_path, capsys):
         path = releases / version
         path.mkdir(parents=True)
         (path / 'VERSION').write_text(version)
+        (path / "src/application/bot").mkdir(parents=True, exist_ok=True)
+        (path / "src/application/bot/runtime.py").write_text("# Python Bot fixture\n", encoding="utf-8")
     current = tmp_path / 'current'
     current.symlink_to(releases / '1.2.0')
     runtime = tmp_path / 'runtime'

@@ -12,7 +12,7 @@ import pytest
 
 from src.application.bot import channel_facade, tools as bot_tools
 from src.application.bot.contracts import AppResult, BotRequest, BotScope, new_id
-from tests.bot_pi_test_support import (
+from tests.bot_test_support import (
     _TEST_MODEL,
     ModelTurn,
     ToolCall,
@@ -22,7 +22,7 @@ from src.application.bot.host_store import BotHostStore
 from src.application.bot.service import prepare_contract
 from src.interfaces.cli import bot_ops
 from src.interfaces.cli.bot_ops import add_bot_commands, handle_bot_command
-from src.infrastructure.pi_agent_process import derive_pi_session_id
+from src.application.conversation_scope import derive_session_id
 
 
 def _bot_run_namespace(**overrides) -> Namespace:
@@ -64,7 +64,7 @@ def _store(tmp_path, run_id: str) -> BotHostStore:
     return store
 
 
-def test_successful_channel_answer_uses_opaque_pi_session_without_legacy_write(
+def test_successful_channel_answer_uses_opaque_host_session_without_legacy_write(
     monkeypatch, tmp_path, example_config_path
 ) -> None:
     database = tmp_path / "bot.sqlite3"
@@ -85,7 +85,7 @@ def test_successful_channel_answer_uses_opaque_pi_session_without_legacy_write(
     result = _run_channel(config_key="us", conversation_id="chat_1", host_db_path=str(database))
 
     assert result.status == "answered"
-    assert captured["session_key"] == derive_pi_session_id(
+    assert captured["session_key"] == derive_session_id(
         "feishu", "ou_1", "chat_1", "key:us"
     )
     assert BotHostStore(database).session_turns("feishu:chat_1") == ()
@@ -135,7 +135,7 @@ def test_channel_path_scope_is_canonical_and_sender_scoped(tmp_path, example_con
         sender_id="ou_1",
         conversation_id=None,
         authority_scope=scope,
-    ) == derive_pi_session_id("feishu", "ou_1", "sender:ou_1", scope)
+    ) == derive_session_id("feishu", "ou_1", "sender:ou_1", scope)
 
 
 def test_channel_key_and_path_resolve_to_the_same_internal_config(

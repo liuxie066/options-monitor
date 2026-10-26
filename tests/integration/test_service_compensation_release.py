@@ -67,6 +67,8 @@ def _release_fixture(tmp_path: Path, *, scenario: str = "ok"):
     python.symlink_to(sys.executable)
     new = tmp_path / "new-controller"
     new.mkdir()
+    (new / "src/application/bot").mkdir(parents=True)
+    (new / "src/application/bot/runtime.py").write_text("# Fixture uses a Python Bot runtime.\n")
     current = tmp_path / "current"
     current.symlink_to(new)
     runtime = tmp_path / "runtime"
@@ -92,7 +94,7 @@ def _compensate(fixture, *, run_cmd=subprocess.run, restart_services=True):
     old, new, current, runtime, profile, commit, snapshot = fixture
     operations = []
     out = upgrade._compensate_service_transition(
-        repo_link=current, previous_dir=old, transition_dir=new, runtime_root=runtime,
+        repo_link=current, previous_dir=old, runtime_root=runtime,
         previous_profile=profile, config_commit=commit, restart_services=restart_services,
         activation_policy="preserve-existing", preserved_activation_states=snapshot,
         run_cmd=run_cmd, operations=operations)
@@ -229,7 +231,7 @@ def test_public_upgrade_does_not_claim_rollback_of_incompatible_config(monkeypat
     new = tmp_path / "1.0.1"
     (old / "VERSION").write_text("1.0.0\n")
     (new / "VERSION").write_text("1.0.1\n")
-    (new / "src/application/bot").mkdir(parents=True)
+    (new / "src/application/bot").mkdir(parents=True, exist_ok=True)
     (new / "src/application/bot/runtime.py").write_text("# Python fixture\n")
     (runtime / "service.profile.json").write_text(json.dumps(profile))
     (runtime / "backup.json").write_text("incompatible independent migration\n")

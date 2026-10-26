@@ -7,8 +7,6 @@ import sys
 from pathlib import Path
 from threading import Event, Thread
 
-import pytest
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -57,7 +55,10 @@ dest=""
 for arg in "$@"; do
   dest="$arg"
 done
-mkdir -p "$dest/requirements" "$dest/constraints" "$dest/agent-runtime" "$dest/scripts"
+mkdir -p "$dest/requirements" "$dest/constraints" "$dest/src/application/bot" "$dest/scripts"
+: > "$dest/src/__init__.py"
+: > "$dest/src/application/__init__.py"
+: > "$dest/src/application/bot/__init__.py"
 : > "$dest/VERSION"
 printf '9.9.%s\n' "${FAKE_RELEASE_PATCH:-9}" > "$dest/VERSION"
 : > "$dest/requirements.txt"
@@ -76,29 +77,10 @@ chmod +x "$dest/om" "$dest/om-agent"
 if [[ "${FAKE_MISSING_OM_AGENT:-0}" == "1" ]]; then
   rm -f "$dest/om-agent"
 fi
-pi_version="${FAKE_PI_PACKAGE_VERSION:-0.84.2}"
-cat > "$dest/agent-runtime/package.json" <<JSON
-{"dependencies":{"@earendil-works/pi-agent-core":"$pi_version","@earendil-works/pi-ai":"$pi_version","@earendil-works/pi-session-backend-sqlite-node":"$pi_version"}}
-JSON
-cat > "$dest/agent-runtime/package-lock.json" <<JSON
-{"lockfileVersion":3,"packages":{"":{"dependencies":{"@earendil-works/pi-agent-core":"$pi_version","@earendil-works/pi-ai":"$pi_version","@earendil-works/pi-session-backend-sqlite-node":"$pi_version"}}}}
-JSON
-cat > "$dest/scripts/pi_runtime_smoke.sh" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-printf 'smoke %s\n' "$*" >> "${FAKE_SMOKE_LOG:?}"
-[[ -x "$4" ]]
-[[ -d "$2/agent-runtime/node_modules" ]]
-if [[ "${FAKE_PI_IMPORT_FAIL:-0}" == "1" ]]; then
-  echo "Pi import failed" >&2
-  exit 31
+printf '# Isolated Python host fixture\n' > "$dest/src/application/bot/host.py"
+if [[ "${FAKE_RUNTIME_MISSING:-0}" != "1" ]]; then
+  printf '# Isolated Python runtime fixture\n' > "$dest/src/application/bot/runtime.py"
 fi
-if [[ "${FAKE_SMOKE_FAIL:-0}" == "1" ]]; then
-  echo "Pi smoke failed" >&2
-  exit 32
-fi
-SH
-chmod +x "$dest/scripts/pi_runtime_smoke.sh"
 """,
     )
     _write_executable(
@@ -106,32 +88,6 @@ chmod +x "$dest/scripts/pi_runtime_smoke.sh"
         """#!/usr/bin/env bash
 set -euo pipefail
 printf '{"tag_name":"v9.9.10"}\\n'
-""",
-    )
-    _write_executable(
-        bin_dir / "node",
-        """#!/usr/bin/env bash
-set -euo pipefail
-if [[ "${FAKE_NODE_FAIL:-0}" == "1" ]]; then
-  exit 33
-fi
-printf '%s\n' "${FAKE_NODE_VERSION:-v22.19.0}"
-""",
-    )
-    _write_executable(
-        bin_dir / "npm",
-        """#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$*" >> "${FAKE_NPM_LOG:?}"
-if [[ "${1:-}" == "--version" ]]; then
-  printf '10.8.2\n'
-  exit 0
-fi
-if [[ "${FAKE_NPM_FAIL:-0}" == "1" ]]; then
-  echo "npm install failed" >&2
-  exit 34
-fi
-mkdir -p agent-runtime/node_modules
 """,
     )
     fake_python = """#!/usr/bin/env bash
@@ -158,7 +114,8 @@ SH
   cat > "$venv/bin/python" <<'SH'
 #!/usr/bin/env bash
 printf 'python import smoke\n' >> "${FAKE_SMOKE_LOG:?}"
-[[ "${FAKE_SMOKE_FAIL:-0}" != "1" ]]
+[[ "${FAKE_SMOKE_FAIL:-0}" != "1" ]] || exit 32
+exec "${FAKE_REAL_PYTHON:?}" "$@"
 SH
   chmod +x "$venv/bin/pip" "$venv/bin/python"
   exit 0
@@ -179,7 +136,6 @@ def _installer_env(tmp_path: Path, *, path_prefix: str | None = None) -> dict[st
         path_parts.append(path_prefix)
     path_parts.append(env.get("PATH", ""))
     env["PATH"] = os.pathsep.join(path_parts)
-    env["FAKE_NPM_LOG"] = str(tmp_path / "npm.log")
     env["FAKE_SMOKE_LOG"] = str(tmp_path / "smoke.log")
     env["FAKE_REAL_PYTHON"] = sys.executable
     return env
@@ -412,44 +368,21 @@ def test_install_script_current_switch_has_no_missing_link_window(tmp_path: Path
     assert missing_reads == []
 
 
-def test_install_script_accepts_old_node(tmp_path: Path) -> None:
+def test_install_script_rejects_unsupported_runtime_before_publishing(tmp_path: Path) -> None:
     env, first = _installed_baseline(tmp_path)
     prefix = tmp_path / "apps" / "options-monitor"
     active = (prefix / "current").resolve()
-    env["FAKE_NODE_VERSION"] = "v22.18.9"
-    env["FAKE_RELEASE_PATCH"] = "10"
-
+    wrappers = [tmp_path / "home/.local/bin" / name for name in ("om", "om-agent")]
+    before = [path.read_bytes() for path in wrappers]
+    env.update({"FAKE_RELEASE_PATCH": "10", "FAKE_RUNTIME_MISSING": "1"})
     result = _run_installer_without_version(tmp_path, *_UPGRADE_ARGS, env=env)
-
     assert first.returncode == 0, first.stderr
-    assert result.returncode == 0, result.stderr
-    assert (prefix / "current").resolve() != active
-    assert not (tmp_path / "npm.log").exists()
+    assert result.returncode != 0
+    assert "src.application.bot.runtime" in result.stderr
+    assert (prefix / "current").resolve() == active
+    assert not (prefix / "releases/v9.9.10").exists()
+    assert [path.read_bytes() for path in wrappers] == before
 
-
-@pytest.mark.parametrize(
-    ("missing_tool", "expected"),
-    (("node", "node was not found on PATH"), ("npm", "npm is required")),
-)
-def test_install_script_accepts_missing_node_or_npm(
-    tmp_path: Path,
-    missing_tool: str,
-    expected: str,
-) -> None:
-    env, first = _installed_baseline(tmp_path)
-    prefix = tmp_path / "apps" / "options-monitor"
-    active = (prefix / "current").resolve()
-    fake_bin = Path(env["PATH"].split(os.pathsep, 1)[0])
-    (fake_bin / missing_tool).unlink()
-    env["PATH"] = os.pathsep.join((str(fake_bin), "/usr/bin", "/bin"))
-    env["FAKE_RELEASE_PATCH"] = "10"
-
-    result = _run_installer_without_version(tmp_path, *_UPGRADE_ARGS, env=env)
-
-    assert first.returncode == 0, first.stderr
-    assert result.returncode == 0, result.stderr
-    assert (prefix / "current").resolve() != active
-    assert not (tmp_path / "npm.log").exists()
 
 
 
@@ -463,7 +396,7 @@ def test_install_script_no_install_cli_skips_wrappers(tmp_path: Path) -> None:
     assert "./om setup check" in result.stdout
 
 
-def test_first_pi_transition_stages_private_target_without_changing_production(
+def test_python_install_stages_private_target_without_changing_production(
     tmp_path: Path,
 ) -> None:
     production = tmp_path / "production"
@@ -486,7 +419,6 @@ def test_first_pi_transition_stages_private_target_without_changing_production(
 
     stage = tmp_path / "private-upgrade-control"
     env = _installer_env(tmp_path)
-    env["FAKE_PI_PACKAGE_VERSION"] = "0.85.1"
     result = subprocess.run(
         [
             "bash",
@@ -513,11 +445,8 @@ def test_first_pi_transition_stages_private_target_without_changing_production(
     ]["@earendil-works/pi-agent-core"] == "0.84.2"
     target_control = stage / "releases" / "v9.9.9"
     assert (stage / "current").resolve() == target_control.resolve()
-    assert json.loads(
-        (target_control / "agent-runtime" / "package.json").read_text(
-            encoding="utf-8"
-        )
-    )["dependencies"]["@earendil-works/pi-agent-core"] == "0.85.1"
+    assert (target_control / "src/application/bot/runtime.py").is_file()
+    assert not (target_control / "agent-runtime").exists()
     assert not (tmp_path / "home" / ".local" / "bin" / "om").exists()
     assert not (tmp_path / "home" / ".local" / "bin" / "om-agent").exists()
 

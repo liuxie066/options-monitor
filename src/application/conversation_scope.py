@@ -13,7 +13,7 @@ def derive_session_id(channel: str, sender: str, conversation: str, authority_sc
     parts = (channel, sender, conversation, authority_scope)
     if any(not isinstance(part, str) or not part.strip() or "\0" in part for part in parts):
         raise ValueError("session identity parts must be nonempty and contain no NUL")
-    # Existing Host leases and cancellations use this digest; no Pi database is opened.
+    # Frozen scope-ID namespace preserves Host leases/cancellation/replay keys; unrelated to Pi execution.
     material = "om-pi-session-v1\0" + "\0".join(parts)
     return "om_" + hashlib.sha256(material.encode()).hexdigest()
 

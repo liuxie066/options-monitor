@@ -620,6 +620,66 @@
       "module": "src/application/portfolio_assignment_scenario.py",
       "name": "approved_non_futu_brokers",
       "reason": "Holdings now includes all account-scoped non-Futu assets automatically; the manual broker approval gate is retired."
+    },
+    {
+      "module": "src/application/bot/pi_migration.py",
+      "name": "PI_MIGRATION_RECEIPT_VERSION",
+      "reason": "Pi execution and storage conversion are fully retired. The Python Bot owns current sessions; upgrade and rollback accept only Python Bot releases. Historical stores, backups and receipts remain operator-owned and are not converted or executed."
+    },
+    {
+      "module": "src/application/bot/pi_migration.py",
+      "name": "assert_pi_storage_ready",
+      "reason": "Pi execution and storage conversion are fully retired. The Python Bot owns current sessions; upgrade and rollback accept only Python Bot releases. Historical stores, backups and receipts remain operator-owned and are not converted or executed."
+    },
+    {
+      "module": "src/application/bot/pi_migration.py",
+      "name": "migrate_pi",
+      "reason": "Pi execution and storage conversion are fully retired. The Python Bot owns current sessions; upgrade and rollback accept only Python Bot releases. Historical stores, backups and receipts remain operator-owned and are not converted or executed."
+    },
+    {
+      "module": "src/application/bot/pi_migration.py",
+      "name": "pi_migration_receipt_path",
+      "reason": "Pi execution and storage conversion are fully retired. The Python Bot owns current sessions; upgrade and rollback accept only Python Bot releases. Historical stores, backups and receipts remain operator-owned and are not converted or executed."
+    },
+    {
+      "module": "src/application/bot/pi_migration.py",
+      "name": "read_pi_migration_receipt",
+      "reason": "Pi execution and storage conversion are fully retired. The Python Bot owns current sessions; upgrade and rollback accept only Python Bot releases. Historical stores, backups and receipts remain operator-owned and are not converted or executed."
+    },
+    {
+      "module": "src/application/bot/pi_migration.py",
+      "name": "retained_pi_runtime_paths",
+      "reason": "Pi execution and storage conversion are fully retired. The Python Bot owns current sessions; upgrade and rollback accept only Python Bot releases. Historical stores, backups and receipts remain operator-owned and are not converted or executed."
+    },
+    {
+      "module": "src/infrastructure/pi_agent_process.py",
+      "name": "MAX_SAFE_MESSAGE_CHARS",
+      "reason": "Pi execution and storage conversion are fully retired. The Python Bot owns current sessions; upgrade and rollback accept only Python Bot releases. Historical stores, backups and receipts remain operator-owned and are not converted or executed."
+    },
+    {
+      "module": "src/infrastructure/pi_agent_process.py",
+      "name": "MIN_NODE_VERSION",
+      "reason": "Pi execution and storage conversion are fully retired. The Python Bot owns current sessions; upgrade and rollback accept only Python Bot releases. Historical stores, backups and receipts remain operator-owned and are not converted or executed."
+    },
+    {
+      "module": "src/infrastructure/pi_agent_process.py",
+      "name": "derive_pi_local_session_id",
+      "reason": "Pi execution and storage conversion are fully retired. The Python Bot owns current sessions; upgrade and rollback accept only Python Bot releases. Historical stores, backups and receipts remain operator-owned and are not converted or executed."
+    },
+    {
+      "module": "src/infrastructure/pi_agent_process.py",
+      "name": "derive_pi_session_id",
+      "reason": "Pi execution and storage conversion are fully retired. The Python Bot owns current sessions; upgrade and rollback accept only Python Bot releases. Historical stores, backups and receipts remain operator-owned and are not converted or executed."
+    },
+    {
+      "module": "src/infrastructure/pi_agent_process.py",
+      "name": "pi_session_locks",
+      "reason": "Pi execution and storage conversion are fully retired. The Python Bot owns current sessions; upgrade and rollback accept only Python Bot releases. Historical stores, backups and receipts remain operator-owned and are not converted or executed."
+    },
+    {
+      "module": "src/infrastructure/pi_agent_process.py",
+      "name": "run_pi_migration_bridge",
+      "reason": "Pi execution and storage conversion are fully retired. The Python Bot owns current sessions; upgrade and rollback accept only Python Bot releases. Historical stores, backups and receipts remain operator-owned and are not converted or executed."
     }
   ]
 }

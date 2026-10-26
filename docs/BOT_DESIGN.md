@@ -81,7 +81,11 @@
 
 交易、账本、配置、通知与服务操作仍由原有业务模块和 deterministic Control 管理。模型没有修改这些状态的工具。既有渠道权限、去重、取消、Host 租约、outbox 和真实数据保持独立。
 
-普通安装与新版升级仅需要 Python。回滚到旧发布仍要核验旧 Pi 存储和旧运行时；历史迁移说明见 [Pi legacy storage](PI_AGENT_CORE_INTEGRATION.md)。
+普通安装、受控升级与回滚仅支持 Python Bot 目标；旧 Node/Pi 发布在依赖安装、服务切换或运行时数据写入前被明确拒绝。当前代码不再提供 Pi 执行、存储转换或反向转换入口，不需要安装 Node 或 Pi 包。
+
+旧 `pi_sessions.sqlite3`、迁移回执、备份和未知历史目录作为历史数据保留；新版不读取、重写、删除或自动转换这些数据，也不依据旧 Pi 回执决定 release 清理。未知历史目录及备份默认保留；含 `output_shared` 历史状态的 Python 发布目录也不自动删除。保留旧发布不等于允许重新激活旧 Node 运行时。
+
+`om bot migrate --host-db ...` 仅检查或迁移现有 Host schema，保留显式 `--dry-run` / `--apply` 和 apply 前 writer 停止要求；不再接受 `--pi-db`，也不导入旧 Pi 会话。 已完成的历史回执保持原样；未完成且含旧 Pi 清单的混合迁移会在打开数据库前拒绝，保留现场并要求操作者恢复，不能由新版直接标记为完成。
 
 ## 原消息重放与待发回复权限
 
