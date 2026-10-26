@@ -152,7 +152,7 @@ def test_presend_release_preserves_other_state(monkeypatch, tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize("change", ["new_incident", "confirmed", "missing_reservation"])
-def test_late_presend_failure_never_writes_changed_reservation(monkeypatch, tmp_path: Path, change) -> None:
+def test_late_presend_failure_never_writes_changed_reservation(monkeypatch, tmp_path: Path, capsys, change) -> None:
     from src.application.multi_tick import opend_guard
 
     expected = []
@@ -179,9 +179,13 @@ def test_late_presend_failure_never_writes_changed_reservation(monkeypatch, tmp_
         tmp_path, _cfg(), error_code="OPEND_LOGIN_INVALID", message_text="invalid", skip_consecutive_gate=True,
     )
     assert opend_guard.opend_alert_rl_path(tmp_path).read_bytes() == expected[0]
+    err = capsys.readouterr().err
+    assert "<3>OPEND_ALERT_INFRA_FAILED" in err
+    assert "<3>OPEND_ALERT_RELEASE_FAILED" not in err
 
 
-@pytest.mark.parametrize("fault", ["lock", "read", "write"])
+
+@pytest.mark.parametrize("fault", ["lock", "write"])
 def test_presend_release_failure_is_conservative(monkeypatch, tmp_path: Path, capsys, fault) -> None:
     from contextlib import contextmanager
     from src.application.multi_tick import opend_guard
@@ -201,7 +205,7 @@ def test_presend_release_failure_is_conservative(monkeypatch, tmp_path: Path, ca
         if fault == "lock":
             monkeypatch.setattr(opend_guard, "_alert_state_lock", fail_lock)
         else:
-            monkeypatch.setattr(opend_guard, "read_json" if fault == "read" else "write_json", fail_io)
+            monkeypatch.setattr(opend_guard, "write_json", fail_io)
         raise system_alerts.SystemAlertPreSendFailure("fixture")
 
     monkeypatch.setattr(opend_guard, "report_system_failure", fail)
@@ -209,6 +213,51 @@ def test_presend_release_failure_is_conservative(monkeypatch, tmp_path: Path, ca
         tmp_path, _cfg(), error_code="OPEND_LOGIN_INVALID", message_text="invalid", skip_consecutive_gate=True,
     )
     assert opend_guard.opend_alert_rl_path(tmp_path).read_bytes() == before[0]
+    err = capsys.readouterr().err
+    assert "<3>OPEND_ALERT_INFRA_FAILED" in err
+    assert "<3>OPEND_ALERT_RELEASE_FAILED" in err
+
+
+
+@pytest.mark.parametrize("fault", [
+    "oserror", "invalid_json", "null", "array", "string", "sent_array", "statuses_array",
+])
+def test_presend_release_real_loader_failure_never_writes(monkeypatch, tmp_path: Path, capsys, fault) -> None:
+    from src.application.multi_tick import opend_guard
+    from src.infrastructure.io_utils import read_json
+
+    path = opend_guard.opend_alert_rl_path(tmp_path)
+    original_read_text = Path.read_text
+    before = []
+    reads = []
+    assert opend_guard.read_json is read_json
+
+    def faulty_read_text(self, *args, **kwargs):
+        if self != path:
+            return original_read_text(self, *args, **kwargs)
+        reads.append(self)
+        if fault == "oserror":
+            raise OSError("isolated underlying read failure")
+        if fault == "invalid_json":
+            return "{broken"
+        if fault == "sent_array":
+            return '{"last_sent_utc_by_error": []}'
+        if fault == "statuses_array":
+            return '{"last_delivery_status_by_error": []}'
+        return {"null": "null", "array": "[]", "string": '"invalid state"'}[fault]
+
+    def fail(**kwargs):
+        before.append(path.read_bytes())
+        monkeypatch.setattr(Path, "read_text", faulty_read_text)
+        monkeypatch.setattr(opend_guard, "write_json", lambda *args: pytest.fail("unreadable release must not write"))
+        raise system_alerts.SystemAlertPreSendFailure("fixture")
+
+    monkeypatch.setattr(opend_guard, "report_system_failure", fail)
+    assert not opend_guard.send_opend_alert(
+        tmp_path, _cfg(), error_code="OPEND_LOGIN_INVALID", message_text="invalid", skip_consecutive_gate=True,
+    )
+    assert reads == [path]
+    assert path.read_bytes() == before[0]
     err = capsys.readouterr().err
     assert "<3>OPEND_ALERT_INFRA_FAILED" in err
     assert "<3>OPEND_ALERT_RELEASE_FAILED" in err

@@ -329,10 +329,15 @@ def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: st
         try:
             with _alert_state_lock(base):
                 path = opend_alert_rl_path(base)
-                state = read_json(path, {})
-                sent = state.get('last_sent_utc_by_error') if isinstance(state, dict) else None
-                statuses = state.get('last_delivery_status_by_error') if isinstance(state, dict) else None
-                if (reserved_at and isinstance(sent, dict) and isinstance(statuses, dict)
+                unreadable = object()
+                state = read_json(path, unreadable)
+                if state is unreadable or not isinstance(state, dict):
+                    raise ValueError('OpenD reservation release state unavailable')
+                sent = state.get('last_sent_utc_by_error', {})
+                statuses = state.get('last_delivery_status_by_error', {})
+                if not isinstance(sent, dict) or not isinstance(statuses, dict):
+                    raise ValueError('OpenD reservation release maps invalid')
+                if (reserved_at
                         and sent.get(key) == reserved_at and statuses.get(key) == 'delivery_unknown'):
                     del sent[key]
                     del statuses[key]
