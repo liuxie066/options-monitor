@@ -1663,6 +1663,8 @@ def test_trade_intake_audit_reconciliation_prevents_unrepairable_terminal_fail(
         "unresolved_deal_ids": {
             "deal-non-option": {
                 "account": "lx",
+                "futu_account_id": "123",
+                "source_deal_id": "deal-non-option",
                 "status": "unresolved",
                 "reason": "source_classification_pending",
                 "updated_at": "2026-07-13T09:00:00+00:00",
@@ -1675,6 +1677,8 @@ def test_trade_intake_audit_reconciliation_prevents_unrepairable_terminal_fail(
         json.dumps({
             "phase": "resolved",
             "deal_id": "deal-non-option",
+            "account": "lx",
+            "futu_account_id": "123",
             "result": {"reason": "not_option_deal"},
         }) + "\n",
         encoding="utf-8",

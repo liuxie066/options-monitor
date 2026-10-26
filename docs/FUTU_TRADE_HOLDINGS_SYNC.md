@@ -132,6 +132,8 @@ listener 在现有每分钟维护周期核对本地 ledger、lifecycle、来源�
 不构成完成证据。被 void 的终结事件、部分分配、数量冲突及缺失身份继续保留 pending。
 本地收口独立于 OpenD 采集；收口失败单独记录，不改变 lifecycle seal 的恢复状态。
 
+共享 audit 中的 `not_option_deal` 不能仅凭成交 ID 收口：同一条记录必须证明与 pending 相同的逻辑账户、物理账户和成交来源，所有显式身份声明须一致。raw `account` 的逻辑或旧版物理角色仅由该条记录的可信 producer context 或已存 normalized 双证据确定，不读取当前映射补历史身份；身份不足或冲突继续保留 pending。条目自身已有的显式 `not_option_deal` 分类继续有效。
+
 `./om run trade-intake --reconcile-state --dry-run` 提供只读预览；明确授权后使用
 同一入口的 `--apply` 更新状态。`--account` 与重复的 `--deal-id` 可限定范围。
 收口先核对 Inbox 的准确身份、经济内容、当前版本及完整历史凭证集，再更新来源文件；

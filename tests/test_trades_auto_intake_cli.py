@@ -2382,3 +2382,69 @@ def _initialize_preview_ledger(root, config_path):
     path = auto_intake.resolve_position_ledger_sqlite_path(base=root,
         cfg=json.loads(config_path.read_text()), data_config=None)
     return SQLiteOptionPositionsRepository(path)
+
+
+@pytest.mark.parametrize("raw_account,physical_alias,other_alias,valid", [
+    ("lx", "REAL_1", None, True),
+    ("REAL_1", "REAL_1", None, True),
+    ("REAL_1", None, None, True),
+    ("REAL_2", "REAL_1", None, False),
+    ("sy", "REAL_1", None, False),
+    ("REAL_1", "REAL_1", "REAL_2", False),
+])
+def test_shared_host_reconcile_audit_requires_same_recorded_source(
+    tmp_path, capsys, raw_account, physical_alias, other_alias, valid,
+):
+    from src.application.trades.normalizer import normalize_trade_deal
+    from src.application.trades.intake import build_trade_intake_audit_event
+    from src.application.trades.state import write_trade_intake_state, load_trade_intake_state
+
+    config = _write_runtime_config(tmp_path)
+    repo = _initialize_preview_ledger(tmp_path, config)
+    raw = {"account": raw_account, "deal_id": "cli-audit-D", "code": "US.FUTU", "side": "BUY",
+           "qty": 100, "price": 120, "currency": "USD", "trade_time_ms": 1_700_000_000_000,
+           "environment": "REAL", "external_id_namespace": "futu.deal"}
+    if physical_alias is not None: raw["futu_account_id"] = physical_alias
+    if other_alias is not None: raw["trd_acc_id"] = other_alias
+    deal = normalize_trade_deal(raw, futu_account_mapping={"REAL_1": "lx", "REAL_2": "sy"},
+                                allow_opend_refresh=False)
+    row = build_trade_intake_audit_event("resolved", source="manual", payload=raw, deal=deal,
+        result={"status": "skipped", "reason": "not_option_deal", "account": deal.internal_account,
+                "deal_id": deal.deal_id})
+    assert row["payload"] == row["deal"]["raw_payload"] == raw
+    assert row["deal"]["internal_account"] == "lx" and row["deal"]["futu_account_id"] == "REAL_1"
+    path, audit = tmp_path / "state.json", tmp_path / "audit.jsonl"
+    # Deliberately unrelated to the configured mapping: only stored row evidence can bind this audit.
+    item = {"status": "unresolved", "reason": "missing_option_type", "account": "lx",
+            "futu_account_id": "REAL_1", "source_deal_id": "cli-audit-D"}
+    key = "futu:lx:REAL_1:cli-audit-D"
+    write_trade_intake_state(path, {"unresolved_deal_ids": {key: item}})
+    audit.write_text(json.dumps(row) + "\n")
+    before, audit_before, ledger_before = path.read_bytes(), audit.read_bytes(), repo.db_path.read_bytes()
+    common = ["--config", str(config), "--runtime-root", str(tmp_path), "--host", "127.0.0.1",
+              "--port", "11111", "--state-path", str(path), "--audit-path", str(audit), "--reconcile-state"]
+    assert auto_intake.main([*common, "--dry-run"]) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["planned_count"] == int(valid) and preview["applied_count"] == 0
+    assert path.read_bytes() == before and audit.read_bytes() == audit_before
+    assert repo.db_path.read_bytes() == ledger_before
+    assert preview["inbox_updated_count"] == 0 and preview["backup_paths"] == []
+    assert auto_intake.main([*common, "--apply"]) == 0
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["applied_count"] == int(valid) and applied["inbox_updated_count"] == 0
+    assert applied["sources"][0]["deferred"] == []
+    state = load_trade_intake_state(path)
+    if valid:
+        assert state["processed_deal_ids"][key]["status"] == "skipped"
+        assert state["processed_deal_ids"][key]["reason"] == "not_option_deal"
+        assert state["processed_deal_ids"][key]["applied_record_ids"] == []
+    else:
+        assert path.read_bytes() == before and state["unresolved_deal_ids"][key] == item
+        assert applied["backup_paths"] == []
+    after = path.read_bytes()
+    assert auto_intake.main([*common, "--apply"]) == 0
+    repeat = json.loads(capsys.readouterr().out)
+    assert repeat["applied_count"] == repeat["inbox_updated_count"] == 0
+    assert path.read_bytes() == after and audit.read_bytes() == audit_before
+    assert repo.list_trade_events() == [] and repo.list_position_lots() == []
+    assert not list(tmp_path.rglob("*receipt*")) and not list(tmp_path.rglob("*pm*dispatch*"))
