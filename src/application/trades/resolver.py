@@ -18,7 +18,7 @@ from src.application.ledger.api import (
     resolve_broker_trade_close_targets,
     summarize_broker_trade_close_candidates,
 )
-from src.application.trades.deal_identity import broker_deal_key, completed_ledger_execution_events
+from src.application.trades.deal_identity import active_ledger_events, broker_deal_key, completed_ledger_execution_events
 from src.application.trades.normalizer import NormalizedTradeDeal
 from src.application.trades.lifecycle import (
     LifecycleTradeResolution,
@@ -1016,7 +1016,8 @@ def _inference_order_problem(repo: Any, deal: Any) -> str | None:
 
     key = contract_key(deal.symbol, deal.option_type, deal.expiration_ymd, deal.strike)
     events = list(repo.list_trade_events())
-    for event in events:
+    # Effective chronology; retain raw events below for pending execution proof.
+    for event in active_ledger_events(events):
         fields = event.get("contract_key") or event
         if str(fields.get("account") or "").lower() != deal.internal_account:
             continue

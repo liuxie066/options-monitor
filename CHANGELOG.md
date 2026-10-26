@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- 成交缺少开平方向时，顺序推断忽略有效撤销及其目标，保留有效后继成交、前序分配完整性与账本投影检查（#797）。
+
 ### Removed
 - 完全退役 Pi/Node 执行与会话转换代码；受控升级及回滚只接受 Python Bot 目标，在副作用前拒绝旧 Node 发布。`om bot migrate` 仅保留 Host schema 迁移、不再接受 `--pi-db`；历史数据库、回执、未知目录及备份默认保留，release 清理不再解析 Pi 迁移回执。
 
