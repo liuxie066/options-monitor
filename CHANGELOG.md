@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- 晚完成的规划简报保留成功快照与扫描目标提交，不再从行动列表生成候选告警身份；保留 live 简报兼容回退及合法冻结重试（#787）。
+
 ### Removed
 - 完全退役 Pi/Node 执行与会话转换代码；受控升级及回滚只接受 Python Bot 目标，在副作用前拒绝旧 Node 发布。`om bot migrate` 仅保留 Host schema 迁移、不再接受 `--pi-db`；历史数据库、回执、未知目录及备份默认保留，release 清理不再解析 Pi 迁移回执。
 

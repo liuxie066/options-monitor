@@ -1506,6 +1506,109 @@ def test_noop_account_result_is_not_a_successful_snapshot(tmp_path: Path) -> Non
     assert brief["candidate_index"] == []
 
 
+@pytest.mark.parametrize("completion_offset", [-1, 0, 1])
+def test_real_completion_boundary_keeps_planning_snapshot_without_candidate_delivery(
+    monkeypatch, tmp_path: Path, completion_offset: int,
+) -> None:
+    from dataclasses import replace
+
+    from domain.storage import paths
+    from src.application import daily_decision_brief_service as service
+    from src.application import tick_notification_flow as flow
+    from src.application.daily_decision_brief_repository import (
+        read_daily_decision_brief_delivery_state,
+        read_latest_daily_decision_brief,
+    )
+    from tests.test_daily_decision_brief_notification_flow import (
+        _config as notification_config,
+        _patch_sender,
+        _request,
+    )
+
+    _write_labeled_put_candidates(tmp_path)
+    _materialize_opening_snapshot_fixture(tmp_path, market="US")
+    _materialize_combo_snapshot_fixture(tmp_path, market="US")
+    _materialize_candidate_bundle_fixture(tmp_path)
+    boundary = datetime(2026, 7, 17, 14, 0, tzinfo=timezone.utc)
+    completed_at = boundary + timedelta(seconds=completion_offset)
+
+    class CompletionClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return completed_at.astimezone(tz) if tz else completed_at.replace(tzinfo=None)
+
+    monkeypatch.setattr(service, "datetime", CompletionClock)
+    config = notification_config()
+    config["schedule"] = _config()["schedule"]
+    config["schedule"]["run_window"]["end"] = "10:00"
+    bundle = _request(tmp_path, run_id="run-1", fixed=False, config=config)
+    target = "2026-07-17T09:45:00-04:00"
+    scheduler = {
+        "in_run_window": True, "should_run_scan": True,
+        "now_utc": "2026-07-17T13:45:00Z", "now_market": target,
+        "scheduled_scan_target_market": target, "scheduled_target_market": None,
+    }
+    request = replace(
+        bundle.request, scheduler_decision=scheduler,
+        scheduler_decisions_by_account={"lx": scheduler},
+        scheduled_scan_targets_by_account={"lx": target},
+    )
+    persisted_results = []
+    persist = flow.persist_daily_decision_brief_success
+
+    def capture_success(**kwargs):
+        result = persist(**kwargs)
+        persisted_results.append(result)
+        return result
+
+    monkeypatch.setattr(flow, "persist_daily_decision_brief_success", capture_success)
+    calls = []
+    _patch_sender(monkeypatch, calls=calls)
+    assert flow.run_tick_notification_flow(request) == 0
+    assert len(persisted_results) == 1
+    persisted = persisted_results[0]
+    brief = persisted["brief"]
+    assert brief["status"] in {"ready", "degraded"}
+    assert brief["valid_until_utc"] == boundary.isoformat()
+    assert brief["generated_at_utc"] == completed_at.isoformat()
+    assert any(
+        action["state"] == "active" and action["priority"] == "P1"
+        and action["action_type"] == "open_candidate"
+        and action["metrics"]["capacity"]["contracts_available"] >= 1
+        for action in brief["actions"]
+    )
+    current = read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["brief"]
+    assert current == brief
+    assert json.loads(persisted["paths"]["run_brief"].read_text())["actions"] == brief["actions"]
+    assert bundle.commits == [{"lx": target}]
+    state = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")
+    assert state["available"] is True
+    day = state["state"]["days"]["2026-07-17"]
+    if completion_offset < 0:
+        assert brief["actionability"] == "live_actionable"
+        assert brief["candidate_index"]
+        assert persisted["current_candidate_identities"]
+        assert len(calls) == 1
+        assert day["candidate_delivery"]["delivery_kind"] == "candidate_alert"
+        assert day["candidate_delivery"]["status"] == "confirmed"
+    else:
+        assert brief["actionability"] == "planning_only"
+        assert brief["candidate_index"] == []
+        assert persisted["current_candidate_identities"] == []
+        assert persisted["newly_detected_candidate_identities"] == []
+        assert day["pending_candidates"] == {}
+        assert day["candidate_delivery"] is None
+        assert day["fixed_reports"] == {}
+        assert calls == []
+        assert bundle.completions == [{"status": "skipped", "message": "no_daily_brief_delivery"}]
+        assert request.tick_metrics["sent"] is False
+        assert request.audit_helper.successes == 1
+        for state_dir in (paths.shared_state_dir(tmp_path), paths.run_state_dir(tmp_path, "run-1")):
+            metrics = json.loads((state_dir / "tick_metrics.json").read_text())
+            assert metrics["sent"] is False
+        assert [e["status"] for e in request.runlog.events if e["step"] == "run_end"] == ["ok"]
+
+
 def test_distant_candidate_event_is_retained_without_attention_filter(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
     row = _put_row()
