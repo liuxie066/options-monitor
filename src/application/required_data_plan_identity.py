@@ -555,6 +555,66 @@ def _validate_fetch_request_shape(
     return True, validated_side_plans
 
 
+def required_data_planned_empty_reason(fetch_plan: Mapping[str, Any]) -> str | None:
+    """Identify a proven empty plan without changing provider discovery facts."""
+    if fetch_plan.get("projection_outcome") != "success_empty":
+        return None
+    discovery = fetch_plan.get("expiration_discovery")
+    if not isinstance(discovery, Mapping):
+        return None
+    if discovery.get("outcome") == "success_empty":
+        reason = discovery.get("reason_code")
+        return reason if reason in {"no_expirations", "no_contract_rows"} else None
+    if (
+        discovery.get("outcome") != "success_rows"
+        or fetch_plan.get("expiration_discovery_complete") is not True
+        or fetch_plan.get("expiration_discovery_error") not in (None, "")
+        or not discovery.get("expirations")
+        or discovery.get("error") not in (None, "")
+        or discovery.get("reason_code") not in (None, "")
+        or fetch_plan.get("projected_expirations") != []
+        or fetch_plan.get("merged_requests") != []
+    ):
+        return None
+    spot = _validated_optional_positive_number(
+        fetch_plan.get("spot_reference"), field="empty opening plan spot"
+    )
+    observation = fetch_plan.get("underlier_observation")
+    if (
+        spot is None
+        or not isinstance(observation, Mapping)
+        or observation.get("status") != "ready"
+        or observation.get("last_price") != spot
+    ):
+        return None
+    plans = fetch_plan.get("side_plans")
+    if not isinstance(plans, list) or not plans:
+        return None
+    for plan in plans:
+        if (
+            not isinstance(plan, Mapping)
+            or plan.get("explicit_expirations") != []
+            or plan.get("required_exact_strikes_by_expiration") != {}
+        ):
+            return None
+        window = plan.get("strike_window")
+        if not isinstance(window, Mapping) or not all(
+            source.endswith(".no_feasible_strikes")
+            for source in str(window.get("source") or "").split("+")
+        ):
+            return None
+        boundary = _validated_optional_positive_number(
+            window.get("base_min_strike" if plan.get("option_type") == "put" else "base_max_strike"),
+            field="empty opening plan configured boundary",
+        )
+        if boundary is None or not (
+            (plan.get("option_type") == "put" and spot < boundary)
+            or (plan.get("option_type") == "call" and spot > boundary)
+        ):
+            return None
+    return "no_feasible_strikes"
+
+
 def _validate_expiration_discovery(
     *,
     fetch_plan: Mapping[str, Any],
@@ -569,8 +629,11 @@ def _validate_expiration_discovery(
     discovery = fetch_plan.get("expiration_discovery")
     if not isinstance(discovery, Mapping):
         raise ValueError("required-data expiration discovery evidence is missing")
+    opening_empty = required_data_planned_empty_reason(fetch_plan) == "no_feasible_strikes"
     expected_outcome = (
-        "success_empty" if projection_outcome == "success_empty" else "success_rows"
+        "success_empty"
+        if projection_outcome == "success_empty" and not opening_empty
+        else "success_rows"
     )
     if str(discovery.get("outcome") or "").strip().lower() != expected_outcome:
         raise ValueError("required-data expiration discovery outcome mismatch")
@@ -606,7 +669,7 @@ def _validate_expiration_discovery(
             projected,
             field="success-rows projected expirations",
         )
-        if not normalized_projected or not set(normalized_projected).issubset(
+        if (not normalized_projected and not opening_empty) or not set(normalized_projected).issubset(
             normalized_expirations
         ):
             raise ValueError("success-rows projected expirations are invalid")

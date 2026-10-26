@@ -554,12 +554,13 @@ def test_terminal_manifest_rejects_minimal_legacy_opening_contract(
         _publish_opening_manifest(tmp_path, legacy)
 
 
-def test_empty_result_is_a_sealed_no_candidate_snapshot(tmp_path: Path) -> None:
+@pytest.mark.parametrize("reason", ["no_expirations", "no_contract_rows", "no_feasible_strikes"])
+def test_empty_result_is_a_sealed_no_candidate_snapshot(tmp_path: Path, reason: str) -> None:
     payload = _seal_snapshot(
         tmp_path,
         run_id="run-empty",
         scan_statuses=[
-            _scan_status("NVDA", "put", "completed", reason="no_expirations",
+            _scan_status("NVDA", "put", "completed", reason=reason,
                          snapshot_id="empty-quote", receipt="quotes/NVDA/receipt.json")
         ],
         final_candidates={"put": []},
@@ -575,8 +576,32 @@ def test_empty_result_is_a_sealed_no_candidate_snapshot(tmp_path: Path) -> None:
     assert warnings == []
     assert function["status"] == "completed"
     assert function["rejection_reason_counts"] == {}
-    assert function["events"][0]["rule"] == "no_expirations"
+    assert function["events"][0]["rule"] == reason
     assert function["events"][0]["is_rejection"] is False
+    assert candidate_universe_summary(payload) == {"status": "complete", "affected_scopes": []}
+    bundle = load_candidate_snapshot_bundle(base=tmp_path, run_id="run-empty", account="lx")
+    assert bundle["owners"]["opening"]["scope_results"][0]["reason_code"] == reason
+    assert bundle["status_index"]["items"][0]["reason_code"] == reason
+
+
+@pytest.mark.parametrize("status,reason", [
+    ("completed", "unknown_source_reason"),
+    ("unavailable", "provider_incomplete"),
+    ("failed", "unknown_source_reason"),
+])
+def test_unknown_and_provider_empty_scopes_remain_unavailable(tmp_path: Path, status: str, reason: str) -> None:
+    payload = _seal_snapshot(
+        tmp_path, run_id="run-unavailable",
+        scan_statuses=[_scan_status("NVDA", "put", status, reason=reason)],
+        final_candidates={"put": []},
+    )
+    assert payload["opening_status"] == "data_unavailable"
+    assert payload["strategy_results"][0]["strategy_status"] == "data_unavailable"
+    assert payload["ranked_candidates"] == []
+    assert candidate_universe_summary(payload) == {
+        "status": "partial",
+        "affected_scopes": [{"symbol": "NVDA", "strategy_mode": "put", "reason_code": reason}],
+    }
 
 
 @pytest.mark.parametrize(

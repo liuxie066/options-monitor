@@ -63,6 +63,7 @@ def format_runtime_status_summary(envelope: dict[str, Any]) -> str:
         _run_line("latest", latest_run, summary.get("latest_status")),
         _run_line("latest scanned", latest_scanned, None),
         _freshness_line(freshness),
+        _tick_line(_dict(data.get("tick_health"))),
         "",
         _notification_line(notification),
         _notification_delivery_line(notification_delivery),
@@ -113,6 +114,7 @@ def format_runtime_status_journal_summary(envelope: dict[str, Any], *, max_bytes
         _config_line(config),
         _run_line("latest", latest_run, summary.get("latest_status")),
         _freshness_line(freshness),
+        _tick_line(_dict(data.get("tick_health"))),
         _notification_line(notification),
         _notification_delivery_line(notification_delivery),
         _system_alert_delivery_line(system_alert_delivery),
@@ -223,6 +225,15 @@ def _freshness_line(freshness: dict[str, Any]) -> str:
     if freshness.get("latest_source"):
         parts.append(f"source={freshness.get('latest_source')}")
     return " ".join(parts)
+
+
+def _tick_line(tick: dict[str, Any]) -> str:
+    return (
+        "tick: "
+        f"scheduled={_yes_no(tick.get('scheduled'))} "
+        f"status={_value(tick.get('status'))} "
+        f"reason={_value(tick.get('reason_code'))}"
+    )
 
 
 def _notification_line(notification: dict[str, Any]) -> str:

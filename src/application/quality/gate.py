@@ -176,9 +176,9 @@ def assert_quality_allows(
     reasons: set[str] = set()
     account_key = str(account or "").strip().lower()
     market_key = str(market or "").strip().lower()
-    require_scoped_option_positions = bool(
-        consumer == "close_advice" and account_key and market_key
-    )
+    require_scoped_option_positions = consumer in {"close_advice", "option_position_report"}
+    if require_scoped_option_positions and not (account_key and market_key):
+        raise QualityGateBlocked(consumer, "QUALITY_DATASET_UNAVAILABLE", ("OM-POS-001",))
     scoped_option_position_count = 0
     scoped_option_position_declaration_count = 0
     cutover_active = (

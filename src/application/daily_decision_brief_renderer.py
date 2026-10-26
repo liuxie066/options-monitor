@@ -2029,13 +2029,13 @@ def _strategy_data_gap_reminders(
             continue
         if (
             _lower(item.get("outcome")) == "success_empty"
-            and reason in {"no_expirations", "no_contract_rows"}
+            and reason in {"no_expirations", "no_contract_rows", "no_feasible_strikes"}
         ):
-            detail = (
-                "本轮未发现可用到期日"
-                if reason == "no_expirations"
-                else "本轮未找到可扫描合约"
-            )
+            detail = {
+                "no_expirations": "本轮未发现可用到期日",
+                "no_contract_rows": "本轮未找到可扫描合约",
+                "no_feasible_strikes": "本轮无可行开仓行权价",
+            }[reason]
             reminders.append(
                 f"{symbol} {family}：{detail}，已按零候选完成（非操作建议）"
             )

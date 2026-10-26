@@ -67,6 +67,7 @@ from src.application.multi_tick_finalization import (
 from src.application.notification_delivery_route import notifications_enabled, resolve_notification_delivery_route, notification_reminder_route_key
 from src.application.notification_delivery_adapter import (
     notification_target_reference,
+    resolve_feishu_bot_send_target,
     select_notification_delivery_adapter,
 )
 from src.application.scheduled_notification import (
@@ -1254,6 +1255,7 @@ def _prepare_daily_brief_notification(
                                 render_feishu_notification_card(
                                     markdown=card_markdown,
                                     fallback_text=message,
+                                    fallback_open_id=resolve_feishu_bot_send_target(notifications=request.base_cfg.get("notifications")),
                                 )
                                 if feishu_card_delivery
                                 else None
@@ -1544,7 +1546,10 @@ def _rebuild_daily_brief_delivery(
         candidate_identities=identities,
         rendered_message=message,
         rendered_transport=(
-            render_feishu_notification_card(markdown=card_markdown, fallback_text=message)
+            render_feishu_notification_card(
+                markdown=card_markdown, fallback_text=message,
+                fallback_open_id=resolve_feishu_bot_send_target(notifications=request.base_cfg.get("notifications")),
+            )
             if feishu_card_delivery
             else None
         ),

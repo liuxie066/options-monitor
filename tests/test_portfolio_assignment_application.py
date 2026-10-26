@@ -1311,3 +1311,41 @@ def test_quote_recovery_preserves_non_futu_holdings_and_closed_market_quotes(siz
     assert result["holdings"][-1] == holding
     assert result["quotes"][-1] == quote
     assert evidence == before
+
+
+@pytest.mark.parametrize("entry", ["query", "agent_bot"])
+def test_ledger_read_failure_keeps_account_cash_unknown_through_public_consumers(monkeypatch, entry):
+    import sqlite3
+    from src.application.bot.tools import model_observation
+    from src.application.tool_execution import execute_tool
+
+    def failed_ledger(_accounts):
+        raise sqlite3.OperationalError("synthetic assignment ledger unavailable")
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("ledger failure must not fetch portfolio/provider evidence")
+
+    monkeypatch.setattr(application, "_load_runtime_and_positions", failed_ledger)
+    monkeypatch.setattr(application, "fetch_futu_portfolio_context", forbidden)
+    monkeypatch.setattr(application, "read_portfolio_valuation_evidence", forbidden)
+    monkeypatch.setattr(application, "_read_futu_quotes", forbidden)
+    if entry == "query":
+        result = application.query_portfolio_assignment_scenario(["lx", "sy"])
+    else:
+        response = execute_tool("portfolio_assignment_scenario", {"accounts": ["lx", "sy"]})
+        assert response["ok"] is True  # Transport success is not business availability.
+        observation = model_observation("portfolio_assignment_scenario", response)
+        assert observation["ok"] is True
+        result = observation["data"]
+    assert result["status"] == "unavailable"
+    assert result["cash_coverage"]["ending_cash_net_estimated_cny"] is None
+    assert [row["account"] for row in result["account_breakdown"]] == ["lx", "sy"]
+    for account in result["account_breakdown"]:
+        assert account["opening_cash_mmf_cny"] is None
+        assert account["ending_cash_gross_cny"] is None
+        assert account["ending_cash_net_estimated_cny"] is None
+        assert account["funding_gap_cny"] is None
+        assert account["fees_complete"] is False
+    assert result["fee_summary"]["status"] == "partial"
+    assert result["fee_summary"]["total_fees_cny"] is None
+    assert any("synthetic assignment ledger unavailable" in warning for warning in result["warnings"])

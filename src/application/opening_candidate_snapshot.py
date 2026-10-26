@@ -71,6 +71,7 @@ _CLEAN_NO_CANDIDATE_REASONS = frozenset(
         "market_closed",
         "no_expirations",
         "no_contract_rows",
+        "no_feasible_strikes",
         "covered_call_underlying_not_held",
         "",
     }

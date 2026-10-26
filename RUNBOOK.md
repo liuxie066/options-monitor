@@ -52,6 +52,15 @@ cd "$REPO_ROOT"
 - 服务化部署时，所有运行产物应位于 `runtime_root`，而不是 release 目录；详见 `DEPLOY.md`
 - `tick-cron` 是正式定时入口，负责锁、超时和触发证据；`run tick` 只用于明确的人工运行
 
+
+`./om status` 默认文本及 `--journal-summary` 显示 `tick: scheduled=… status=… reason=…`。
+`scheduled` 仅表示有效 service profile 中包含当前市场的 systemd Tick timer 或 launchd Tick label，
+不证明主机 timer 此刻已启用；仅有市场配置、手动 service 或另一市场 timer 不算计划 Tick 适用。
+适用而缺少 current Tick 完成证据时保留 `unknown/TICK_EVIDENCE_MISSING` 并纳入摘要警告，
+不能用新鲜 `last_run` 替代；未配置时保留 unknown 明细，但不单因此降级。
+合法跳过沿用既有 wrapper 完成回执，单独的 skipped last_run 或一次退出 0 不能证明完成。
+查询成功的 CLI 退出码仍为 0，业务健康须结合摘要及 Tick 原因码判断。
+
 扫描范围：`run tick`、`run tick-cron`、`scan-pipeline` 和 `scan` 省略
 `--symbols` 时扫描配置中的完整标的列表。显式传入 `--symbols ""`、纯空白或
 `--symbols ",,,"` 会在读取扫描配置、预取或创建报告之前报参数错误，不会退化为全量。

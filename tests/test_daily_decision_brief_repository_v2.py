@@ -1052,6 +1052,7 @@ def test_retry_payload_classifier_blocks_retired_source_text_and_card(
     card = render_feishu_notification_card(
         markdown="# AI Decision Advice\nretired",
         fallback_text=clean["rendered_message"],
+        fallback_open_id="ou_test",
     )
     card_only = {
         **clean,

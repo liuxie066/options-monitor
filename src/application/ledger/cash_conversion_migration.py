@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
+from domain.domain.assigned_stock import assigned_stock_sale_allocations
 from domain.domain.ledger import TradeEvent
 from domain.domain.ledger.cash_facts import cash_facts_for_trade_event
 from domain.domain.money import to_decimal
@@ -472,30 +473,76 @@ def _build_plan(
         if not event_id:
             unresolved.append(_unresolved("assigned_stock_event", "", None, "stock_event_id_missing"))
             continue
-        candidates = _assigned_conversion_candidates(
+        generated = attach_assigned_stock_sale_cash_conversions(
             event,
-            fx_rates=fx_rates,
-            migrated_at_ms=int(migrated_at_ms),
+            fx_payload={"fx_rate_facts": tuple(fx_rates)},
+            observed_at_ms=int(migrated_at_ms),
         )
-        if not candidates:
+        updated_event = dict(event)
+        components = [(updated_event, generated)]
+        if "sale_allocations" in event:
+            updated_event["sale_allocations"] = assigned_stock_sale_allocations(event)
+            components.extend(zip(
+                updated_event["sale_allocations"], generated["sale_allocations"], strict=True,
+            ))
+        if not any(candidate.get("cash_conversions") for _, candidate in components):
             continue
         scanned += 1
-        cash_fact_count += len(candidates)
-        existing_conversions = (
-            dict(event.get("cash_conversions") or {})
-            if isinstance(event.get("cash_conversions"), Mapping)
-            else {}
-        )
-        updated_conversions = dict(existing_conversions)
         conversion_changes = []
-        for fact_kind, conversion in candidates.items():
-            cash_fact_id = str(conversion.get("cash_fact_id") or "")
-            existing = existing_conversions.get(fact_kind)
-            if _existing_conversion_is_observed_for_candidate(existing, conversion):
-                existing_observed += 1
-                if not replace_superseded:
+        for component, candidate in components:
+            candidates = candidate.get("cash_conversions") or {}
+            cash_fact_count += len(candidates)
+            existing_conversions = (
+                dict(component.get("cash_conversions") or {})
+                if isinstance(component.get("cash_conversions"), Mapping)
+                else {}
+            )
+            updated_conversions = dict(existing_conversions)
+            for fact_kind, conversion in candidates.items():
+                cash_fact_id = str(conversion.get("cash_fact_id") or "")
+                existing = existing_conversions.get(fact_kind)
+                if _existing_conversion_is_observed_for_candidate(existing, conversion):
+                    existing_observed += 1
+                    if not replace_superseded:
+                        continue
+                    if not _is_superseding_conversion(existing, conversion, fx_rates=fx_rates):
+                        continue
+                    updated_conversions[fact_kind] = conversion
+                    conversion_changes.append(
+                        CashConversionChange(
+                            event_kind="assigned_stock_event",
+                            event_id=event_id,
+                            cash_fact_id=cash_fact_id,
+                            previous_status="observed",
+                            conversion=conversion,
+                        )
+                    )
                     continue
-                if not _is_superseding_conversion(existing, conversion, fx_rates=fx_rates):
+                if replace_superseded:
+                    continue
+                if isinstance(existing, Mapping) and str(existing.get("status") or "").lower() not in {
+                    "",
+                    "pending",
+                    "observed",
+                }:
+                    unresolved.append(
+                        _unresolved(
+                            "assigned_stock_event",
+                            event_id,
+                            cash_fact_id,
+                            "existing_conversion_invalid_or_non_pending",
+                        )
+                    )
+                    continue
+                if conversion.get("status") != "observed":
+                    unresolved.append(
+                        _unresolved(
+                            "assigned_stock_event",
+                            event_id,
+                            cash_fact_id,
+                            str(conversion.get("missing_reason") or "event_time_fx_unavailable"),
+                        )
+                    )
                     continue
                 updated_conversions[fact_kind] = conversion
                 conversion_changes.append(
@@ -503,50 +550,12 @@ def _build_plan(
                         event_kind="assigned_stock_event",
                         event_id=event_id,
                         cash_fact_id=cash_fact_id,
-                        previous_status="observed",
+                        previous_status=_conversion_status(existing),
                         conversion=conversion,
                     )
                 )
-                continue
-            if replace_superseded:
-                continue
-            if isinstance(existing, Mapping) and str(existing.get("status") or "").lower() not in {
-                "",
-                "pending",
-                "observed",
-            }:
-                unresolved.append(
-                    _unresolved(
-                        "assigned_stock_event",
-                        event_id,
-                        cash_fact_id,
-                        "existing_conversion_invalid_or_non_pending",
-                    )
-                )
-                continue
-            if conversion.get("status") != "observed":
-                unresolved.append(
-                    _unresolved(
-                        "assigned_stock_event",
-                        event_id,
-                        cash_fact_id,
-                        str(conversion.get("missing_reason") or "event_time_fx_unavailable"),
-                    )
-                )
-                continue
-            updated_conversions[fact_kind] = conversion
-            conversion_changes.append(
-                CashConversionChange(
-                    event_kind="assigned_stock_event",
-                    event_id=event_id,
-                    cash_fact_id=cash_fact_id,
-                    previous_status=_conversion_status(existing),
-                    conversion=conversion,
-                )
-            )
+            component["cash_conversions"] = updated_conversions
         if conversion_changes:
-            updated_event = dict(event)
-            updated_event["cash_conversions"] = updated_conversions
             event_changes.append(
                 _EventChange(
                     event_kind="assigned_stock_event",
@@ -599,20 +608,6 @@ def _conversion_from_evidence(
         effective_at_ms=int(effective_at_ms),
         observed_at_ms=int(migrated_at_ms),
     )
-
-
-def _assigned_conversion_candidates(
-    event: Mapping[str, Any],
-    *,
-    fx_rates: Sequence[FXRateFact],
-    migrated_at_ms: int,
-) -> dict[str, dict[str, Any]]:
-    generated = attach_assigned_stock_sale_cash_conversions(
-        event,
-        fx_payload={"fx_rate_facts": tuple(fx_rates)},
-        observed_at_ms=int(migrated_at_ms),
-    ).get("cash_conversions")
-    return dict(generated) if isinstance(generated, Mapping) else {}
 
 
 def _trade_event_in_scope(event: TradeEvent, scope: Mapping[str, Any]) -> bool:
@@ -784,11 +779,19 @@ def _apply_plan(
                 f"{event_change.event_kind}={event_change.event_id}"
             )
         before_payload = json.loads(event_change.previous_json)
-        before_conversions = (
-            before_payload.get("raw_payload", {}).get("cash_conversions", {})
-            if event_change.event_kind == "trade_event"
-            else before_payload.get("cash_conversions", {})
-        )
+        if event_change.event_kind == "trade_event":
+            before_conversions = before_payload.get("raw_payload", {}).get("cash_conversions", {})
+        else:
+            # Allocation cash facts have their own identities, even within one atomic event.
+            components = [before_payload]
+            if "sale_allocations" in before_payload:
+                components.extend(assigned_stock_sale_allocations(before_payload))
+            before_conversions = {
+                f"{kind}:{component.get('stock_event_id') or component.get('event_id')}": conversion
+                for component in components
+                if isinstance(component.get("cash_conversions"), Mapping)
+                for kind, conversion in component["cash_conversions"].items()
+            }
         time_correction = (
             before_payload.get("raw_payload", {}).get("trade_time_correction_provenance")
             if event_change.event_kind == "trade_event"
@@ -843,7 +846,10 @@ def _apply_plan(
             previous = None
             if isinstance(before_conversions, Mapping):
                 fact_kind = conversion_change.cash_fact_id.split(":", 1)[0]
-                previous = before_conversions.get(fact_kind)
+                previous = before_conversions.get(
+                    fact_kind if event_change.event_kind == "trade_event"
+                    else conversion_change.cash_fact_id
+                )
             columns = (
                 ""
                 if target_audit_table != "cash_conversion_trade_time_repair_audit"

@@ -160,7 +160,9 @@ def test_public_readers_preserve_valid_status(quality_runtime, capsys, integrity
         else:
             assert_quality_allows("close_advice", account="qa", market="us")
         if variant == "empty":
-            assert_quality_allows("option_position_report", account="qa", market="us")
+            with pytest.raises(QualityGateBlocked) as error:
+                assert_quality_allows("option_position_report", account="qa", market="us")
+            assert error.value.reason_code == "QUALITY_DATASET_UNAVAILABLE"
     assert path.read_bytes() == before
 
 

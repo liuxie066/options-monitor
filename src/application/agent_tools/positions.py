@@ -26,7 +26,9 @@ from src.application.ledger.api import (
 )
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError, mask_path
-from src.application.quality.gate import QualityGateBlocked, assert_quality_allows
+from src.application.quality.gate import QualityGateBlocked, assert_quality_allows, quality_onboarded
+from src.application.account_config import resolve_configured_accounts
+from src.application.runtime_config_freshness import infer_runtime_config_market
 from domain.domain.option_position_identity import normalize_account
 from src.application.agent_tools.runtime_helpers import normalize_broker
 from src.application.positions.assigned_stock_quotes import refresh_assigned_stock_quote_snapshots as refresh_assigned_stock_quotes
@@ -420,24 +422,36 @@ def _option_positions_read_tool(
             ) from exc
 
     action = _option_positions_action(normalized)
-    if action != "events":
-        quality_account = option_positions_list_account(normalized) if action == "list" else normalized.get("account")
-        assert_quality(
-            account=normalize_account(quality_account) or None,
-            market=str(normalized.get("config_key") or "").strip().lower() or None,
-        )
+    def load_quality_scoped_config(**kwargs: Any) -> tuple[Path, dict[str, Any]]:
+        config_path, cfg = load_runtime_config(**kwargs)
+        if action != "events" and quality_onboarded():
+            requested_account = (
+                option_positions_list_account(normalized) if action == "list" else normalized.get("account")
+            )
+            try:
+                accounts = resolve_configured_accounts(cfg, [requested_account] if requested_account else None)
+            except ValueError as exc:
+                raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+            market = infer_runtime_config_market(
+                config_key=normalized.get("config_key"), config_path=config_path, config=cfg,
+            )
+            for account in accounts or [None]:
+                assert_quality(account=account, market=market)
+        return config_path, cfg
 
     def admit_event_query(
         query: dict[str, Any], authority_scope: dict[str, Any]
     ) -> None:
-        assert_quality(
-            account=str(query.get("account") or "").strip().lower() or None,
-            market=str(authority_scope.get("market") or "").strip().lower() or None,
-        )
+        accounts = [query["account"]] if query.get("account") else authority_scope.get("accounts") or [None]
+        for account in accounts:
+            assert_quality(
+                account=str(account or "").strip().lower() or None,
+                market=str(authority_scope.get("market") or "").strip().lower() or None,
+            )
 
     return option_positions_read_tool(
         normalized,
-        load_runtime_config=load_runtime_config,
+        load_runtime_config=load_quality_scoped_config,
         resolve_public_data_config_path=resolve_public_data_config_path,
         normalize_broker=normalize_broker,
         normalize_account=normalize_account,
