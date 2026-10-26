@@ -175,3 +175,30 @@ def test_resolve_secret_status_fallback_on_backend_unavailable(monkeypatch: pyte
         assert status2.source == "legacy_env_fallback"
     finally:
         factory._platform_name = original_platform
+
+
+@pytest.mark.parametrize("legacy_value", ["", "synthetic-legacy"])
+def test_real_systemd_status_io_keeps_runtime_fallback(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, legacy_value: str,
+) -> None:
+    from pathlib import Path
+    from src.application.secret_store import LLM_DEEPSEEK_API_KEY
+    from src.application.secret_store.runtime import resolve_secret_status
+    from src.infrastructure.secret_store.systemd_credentials import SystemdCredentialProvider
+
+    target = tmp_path / "om-llm-deepseek-api-key"
+    original_lstat = Path.lstat
+
+    def denied(path, *args, **kwargs):
+        if path == target:
+            raise PermissionError("synthetic-private-value")
+        return original_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", denied)
+    status = resolve_secret_status(LLM_DEEPSEEK_API_KEY, provider=SystemdCredentialProvider(tmp_path),
+                                   environ={"DEEPSEEK_API_KEY": legacy_value}, legacy_env_name="DEEPSEEK_API_KEY")
+    assert status.backend == "unavailable"
+    assert status.configured is bool(legacy_value)
+    assert status.source == ("legacy_env_fallback" if legacy_value else "missing")
+    if legacy_value:
+        assert legacy_value not in str(status.public_payload())
