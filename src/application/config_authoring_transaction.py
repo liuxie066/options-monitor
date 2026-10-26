@@ -237,6 +237,7 @@ def _publish_yaml_config_generation(
             "source": True,
         },
     ]
+    validate_config_target_access_identity([Path(item["path"]) for item in targets])
     transaction_dir = state_root / "config_authoring_transactions" / audit_id
     manifest_path = transaction_dir / "manifest.json"
     published_targets: list[dict[str, Any]] = []

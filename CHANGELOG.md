@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 普通配置发布在备份和事务 manifest 前校验全部实际目标的部署访问身份，拒绝无法保持 uid/gid、特殊 mode 或 ACL 的替换，保留 dry-run 与既有恢复效果报告（#744）。
+
 ### Removed
 - 完全退役 Pi/Node 执行与会话转换代码；受控升级及回滚只接受 Python Bot 目标，在副作用前拒绝旧 Node 发布。`om bot migrate` 仅保留 Host schema 迁移、不再接受 `--pi-db`；历史数据库、回执、未知目录及备份默认保留，release 清理不再解析 Pi 迁移回执。
 
