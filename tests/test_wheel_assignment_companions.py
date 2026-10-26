@@ -898,17 +898,22 @@ def test_lifecycle_allocation_writer_enters_wheel_from_cc_lp_assignment(tmp_path
     _open_activation(repo)
     stock_time_ms = int(policy["settlement_deadline_ms"]) - 1
     now_ms = stock_time_ms + 2
+    gateway = _Gateway(history_deals=[
+        {"deal_id": "option-close-1", "acc_id": "1001",
+         "code": "US.NVDA260821C110000", "price": "0", "qty": 1},
+        {"deal_id": "combo-cc-stock-settlement", "acc_id": "1001",
+         "code": "US.NVDA", "price": "110", "qty": 100,
+         "trd_side": "SELL", "trade_time_ms": stock_time_ms,
+         "order_id": "combo-cc-stock-order"},
+    ])
+    gateway.history_order_rows.append({
+        "order_id": "combo-cc-stock-order", "acc_id": "1001",
+        "code": "US.NVDA", "is_broker_auto": True,
+    })
     observation = _collect_broker_observation(
         repo, lifecycle_case=lifecycle_case, case_id=lifecycle_case["case_id"],
         now_ms=now_ms,
-        gateway=_Gateway(history_deals=[
-            {"deal_id": "option-close-1", "acc_id": "1001",
-             "code": "US.NVDA260821C110000", "price": "0", "qty": 1},
-            {"deal_id": "combo-cc-stock-settlement", "acc_id": "1001",
-             "code": "US.NVDA", "price": "110", "qty": 100,
-             "trd_side": "SELL", "trade_time_ms": stock_time_ms,
-             "order_id": "combo-cc-stock-order"},
-        ]),
+        gateway=gateway,
     )
     assert observation["stock_settlement_present"] is True
     result = reconcile_lifecycle_close_reason(
