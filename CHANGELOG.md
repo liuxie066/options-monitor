@@ -3,4 +3,6325 @@
 ## Unreleased
 
 ### Bug Fixes
+- systemd 凭据状态区分明确缺失与权限/I/O 无法核验，访问错误沿现有脱敏失败出口返回，保留元数据规则及运行时兼容回退（#683）。
 - 确认清理与升级/回滚共享转换互斥，持锁重读活动版本及保留依据，忙时零删除并保留预览和升级后清理语义（#726）。
+- Tick 同 key 的首次 claim 与过期恢复串行化，终态写入核对当前 run 身份，阻止并发恢复及旧执行覆盖继任者，保留原有时间桶和超时策略（#800）。
+- 自动和显式升级目标均须对应已发布的非草稿 GitHub Release，且三项项目资产已上传且非空；来源或发布资格无法确认时拒绝升级（#710）。
+- 回滚目标统一校验规范版本、release 目录边界及 VERSION 身份，阻断越界或错配目标，同时保留预览、确认和锁语义（#780）。
+- 托管多实例 OpenD 在写入服务定义或 profile 前拒绝账户生成身份冲突，保留原有单实例和服务命名规则（#793）。
+- 研究 blob GC 预览遇受保护清单或其祖先目录为跳过的软链接时禁止候选删除，保留精确兼容别名和既有保留策略（#812）。
+- 升级缓存固定内部 origin，保留自定义 checkout remote 的重复检查、归档及无 Git release 续查；缺少内部来源时明确拒绝（#711）。
+
+## 4.5.8 - 2026-10-25
+
+### Bug Fixes
+- 健康检查保留期权字段与开仓前置证据，明确区分休市和字段缺失；安全凭证上下文不可用时报告无法验证，保留真实配置缺失错误、未就绪阻断和非零退出码。
+
+## 4.5.7 - 2026-10-25
+
+### Bug Fixes
+- 人工兼容 compact 正文保留组合负年化与已有观察警示，零值和正值、CSP/CC 格式及原筛选规则保持；只修不增，不改变 Daily Brief 或发送行为（#735）。
+- 空间增长预测排除明确不完整的历史研究计数，并在缺少有效历史时保持预测不可用；保留旧无状态报告、SQLite 单独不可用及有效零增长，避免错误放行只读清理预览的空间子门禁（#781）。
+- 成交与订单 lookup 的双方明确标的冲突会保留原始来源并原子进入 Inbox 人工复核，阻断重试和旧 claim 入账；保留配置别名、标准成交身份、低可信代码根纠正及既有数量价格门禁（#759）。
+- 结算观察要求相关股票成交具有可核实的标的身份，缺失或未知代码按既有数据错误阻止写入；统一 US/HK 代码与别名匹配，避免错误指派或漏记交割，并保留期权行排除及数量校验（#742）。
+- Wheel Call 经济评估与 Put 一致校验候选和正股批次币种，缺失或错配时返回不可用，避免混合金额进入推荐及收益排序；保留同币种计算和既有费用契约（#676）。
+- 成交监听初始化认证证据绑定实际 context 的 InitConnect 失败结果，避免并发监听源或无关 broker 日志导致健康源被误标认证阻塞；保留取消、重连与全源协调停机语义，诊断 detail 使用上游原始错误消息（#700）。
+- 通知来源候选诊断复用有界审计扫描，查找当前文件及保留段中的已确认投递来源；保留账户、会话、原始来源 run 和通知日期语义，覆盖缺失、损坏或超限时明确报告证据不完整（#684）。
+- 普通质量状态仅在校验和发布成功后确认本轮开始时的账本 revision；独立 integrity 刷新或失败发布不再消耗普通复查游标，保留差异复查计时和市场范围（#690）。
+- 接入质检区分明确禁用与运行证据不可用，读取失败或配置错误不再发布可信接入数据；保留双市场部分失败、账户范围和合法零结果（#704）。
+- Wheel Call/Put 扫描在生成候选及容量声明前检查分支的既有证据阻塞原因，避免未知乘数来源等可见分支仍获推荐；保留合法未覆盖数量，并将具体原因传递至快照和简报（#678）。
+
+## 4.5.6 - 2026-10-23
+
+### Bug Fixes
+- 持仓维护策略跳过保留同一业务身份已有的确认回执，并记录最近跳过原因，避免恢复通知后重复发送；未确认重试、账户隔离和预览策略保持不变（#670）。
+- 按 run 查询 Daily Brief 回执时核对冻结消息身份，旧失败计划的时点键被后续成功正文复用后明确返回证据不可用；保留相同冻结消息跨 run 复用、送达状态推进及其他来源的有效回执（#785）。
+- 财报候选只消费已验证的标的与到期日登记投影，未登记日期（含覆盖范围内）返回证据不可用，避免复用窄快照时把未查询窗口误报为完整；保留覆盖终点、硬/软失败区别与每市场一次验证（#627）。
+- 微信轮询遇明确业务失败时返回失败并保留原游标，跳过失败响应的消息处理；常驻循环记录固定失败日志，保留合法空响应、嵌套消息与显式成功优先级及原待发重试顺序（#692）。
+- WeChat 频道状态将显式必需 Bot 配置的读取或校验失败计入不可用，避免旧 allowlist 标志和已有 token 掩盖启动配置错误；保留历史配置标志、独立服务状态及无显式配置的合法 allowlist 用法（#774）。
+- Bot 按完整工具批次累计连续失败，并使用场景已有失败批次限额；同轮多个失败不再提前关闭恢复读取，保留部分成功重置及独立额度、取消和结束限制（#706）。
+- 账本只读检查将缺失表的计数保留为未知，避免健康检查把未初始化或缺表的 SQLite 误报为正常空账本；保留合法零行、仓库计数覆盖与既有多账本写入保护（#718）。
+- 普通成交归因的当前及历史订单保留创建时间所需的市场与源时区上下文，避免合法本地时间被误判为缺证；创建时间仍为唯一依据，缺失、冲突和歧义时间继续拒绝（#681）。
+
+## 4.5.5 - 2026-10-22
+
+### Breaking Changes
+- 普通 CSP/CC 默认启用 abs(delta)≤0.40，可按方向设置有限 [0,1] 上限或显式 null 关闭；启用时缺少可验证来源的候选拒绝并标为不可验证，Wheel/Combo 规则不变。策略核心与模板升级 0.2.0，旧 0.1.0 身份保留历史读取但不再执行（#885）。
+
+### Improvements
+- 在原手续费同步审计中记录排队、终态查询、费用查询和账本调用返回的分段时间，保留未知恢复时间和原调度；不据此承诺线上提速或解释历史128秒延迟（#871）。
+
+### Bug Fixes
+- OpenD 看门狗按明确证据区分行情/交易未登录与手机验证，保留真实验证码、密码失效及单次探测重试语义；成交监听的普通未登录错误沿用既有重连退避，避免被误判为手机验证终止（#699）。
+- 普通扫描的账户及共享仓位缓存须与当前可信决策快照指纹一致，避免失效后晚写回的旧仓位继续命中；保留合法空仓、TTL、刷新回退及 prepared 回执读取契约（#715）。
+- 运行状态按仓库已有发送尝试与确认回执诊断投递结果，外层播报 `none` 不再单独掩盖失败、部分发送或确认；保留零发送、调度跳过、禁发送及运行范围隔离语义（#783）。
+- 质量状态与完整性质检状态读取统一校验已有 schema 版本和结构，异常文件返回不可用，避免 CLI、Agent 和默认业务 gate 将异常声明视为有效；保留合法空结果、原有时间判断及自定义 reader 契约（#689）。
+- 历史运行诊断按已验证的逐范围结果报告扫描可用性，保留零候选和部分成功；仅有尝试指标时明确未知，全部失败不会再被 Bot 误报为已有可用结果（#802）。
+- 运行质检识别心跳新鲜但处于重连、阻塞等非工作状态的成交监听源，明确降级并保留正常阶段、时间宽限及告警既有词汇边界（#705）。
+- 生命周期 reconcile 在发现 case 前校验已提供的 evidence 及其可选 config 文件，避免输入加载失败后已留下本次发现的 case；保留无 evidence 独立发现和合法空对象的业务复核行为（#815）。
+- 生命周期全量与增量解析按同 lot 的累计来源数量校验容量，允许不同有效来源的合法分笔零价平仓；保留来源唯一性、分配与作废规则、跨 case 冲突及待确认数量（#671）。
+- 成交 detail lookup 按数量、价格语义比较所有别名并保留双方来源证据；冲突或无效数值进入现有 Inbox 待核实，后续缺值与状态恢复不能重新放行，保留等价数值和缺字段补全（#758）。
+- 当前决策快照重建保留零价平仓后仍待确认原因的生命周期待办及数量，复用有效事件和作废过滤规则，避免重建后遗漏待办却通过验证（#657）。
+- WeChat 入站禁用回复时同时跳过旧待发重试，保留原队列记录；重新启用后继续按当前权限校验和原发送标识重试，避免 `--no-reply` 期间仍发送旧回复。
+- YAML 市场配置的重建提示保留显式 `--system-config` 来源，避免按提示恢复时切换到内置默认参数；已有快照需携带原系统来源显式重建一次以更新提示（#756）。
+- 扫描入口拒绝显式空标的范围，避免意外扩大到完整watchlist；省略参数、Tool空数组和合法Wheel空范围保持既有行为（#867）。
+- 触发器timeout元数据溢出时保留原始值与解析错误，避免诊断入口中断（#868）。
+- 持仓查询同时含精确日期与数量限制时保留精确到期日，不再误作截止日期（#869）。
+- 更正Bot配置示例及内部Scene与Tool Gateway的PM能力边界，不扩工具权限（#870）。
+- 手续费缺证文案明确实际费用尚未确认、原因待核，保留统计截止与币种/指标范围，避免无依据归因同步或重建（#871）。
+- 配置事务恢复在首个目标写入前校验全部before/after状态，遇独立重建的第三状态或不可读目标时保留现场并停止（#875）。
+- 成交接入状态缺失、损坏或不可读时，公开不完整计数保留null并在CLI显示“-”；不把未知视为有效零（#881）。
+
+## 4.5.4 - 2026-10-20
+
+### Bug Fixes
+- PM v1 响应必须明确返回布尔 success=true；缺失或类型不符时按协议错误报告，避免无效响应被当作可信数据，保留非版本化健康检查及无自动重试行为（#864）。
+- Combo 配对成功回执复用成交摄取的配置解析，避免正常启用的账户因原始配置缺少派生来源而被误判为禁用；保留账户及回执禁用限制、发送幂等和历史 suppressed 回执不补发行为。
+
+## 4.5.3 - 2026-10-20
+
+### Bug Fixes
+- PM 非富途持仓清单校验失败时保留已验证的上游告警，并传递至 Position Sizing 不可用原因；保留严格数据校验，不补造缺失持仓，也不推断历史原始异常（#862）。
+- 普通 CSP/CC 封存样本补齐实际消费的现金资格、容量、FX 与排序输入证据，离线核验复用原计算和排序；缺失或损坏证据仍报告不足，旧样本不回填，真实新样本验收仍待完成（#851）。
+- 持仓列表查询的质量门禁与账本读取共用有效账户，保留嵌套账户优先级、空白回退及 Bot 账户冲突拒绝，避免健康账户的检查放行另一账户的阻断数据（#814）。
+- 到期维护按市场本地日期每日运行（US 纽约时间 00:07、HK 香港时间 00:05，含周末），修复固定北京时间早于美股宽限期的问题；支持有界执行重试及停机积压恢复，保留券商终结证据要求与原回执策略（#833）。
+
+## 4.5.2 - 2026-10-20
+
+### New Features
+- 新增按期权收付生效时间统计的期间净现金流及共享离线入口，覆盖跨期开仓后的本期平仓与费用；原开仓批次现金结果、收益率和胜率口径保持，二者不可相加（#856）。
+- 新增只读封存样本核对入口，复用原策略核心比较指标、过滤原因、候选顺序与张数，并明确区分一致、不一致和证据不足；不补取行情、不推断缺失历史事实，真实新样本验收仍待完成（#844）。
+
+### Improvements
+- 精简持仓维护回执中的内部 lot 编号和重复到期日，保留逐笔合约、汇总、状态、时间及内部去重身份（#838）。
+
+### Bug Fixes
+- Research 保留运行时已报告的部分发送和失败或未确认状态，统一失败归因及持久化报告，未知与合法跳过仍按原契约处理（#837）。
+- Research 识别不含 status 的明确账户失败记录，保留账户和原始原因，不把正常跳过或未知记录误报为失败（#839）。
+- Bot 将遇到既有扫描锁而未执行的请求记录为 skipped，保持回复、生命周期和诊断一致，不自动重试或声称已完成扫描（#840）。
+- prepared worker 在共享截止时间前后复验观察时间，拒绝迟到结果进入扫描，保留健康账户及既有超时、取消与清理路径（#841）。
+- prepared 上下文复用时，显式启用持久化的封存 FX 证据仍按原身份和来源时间向目标账本幂等补写缺失的 FX 证据，保留账户隔离及逐账本失败结果（#842）。
+- 新建影子持仓快照复用账户、范围、完整性、时效与刷新错误校验；持仓不可用时降级，现金结论独立保留，历史 v1 快照保持原始重放语义（#843）。
+- 通知历史窗口缺少审计来源时明确报告覆盖不完整，保留已取得事件和未知总数；已有空文件仍可表示完整零结果（#845）。
+- 运行状态保留服务漂移检查的失败结论，避免明细报错而总体仍显示健康，保留缺少必需服务时的告警优先级（#846）。
+- 指定 operation_id 的时间线查询同时应用显式状态过滤，保留省略或空状态的兼容语义及账户、会话和类型隔离（#847）。
+- 服务激活状态不可读或无法识别时，漂移检查明确失败并排除该单元的自动修复，保留其它已确认单元与凭据迁移门禁（#848）。
+- 通知历史分页在下一偏移超出上限时停止签发不可用游标，保留当前页、真实 has_more 和 partial 原因，提示缩小查询范围（#849）。
+- 启用策略的 DTE 窗口复用共享数值校验，修复数字字符串按字典序误拒和混合类型异常，保留必填、非法输入拒绝及原始配置类型（#850）。
+- 生命周期发现忽略已被替代的历史 case，保留真实冲突；本地操作结果读取实际嵌套决策状态，避免误报 not_due；结算等待规则不变（#857）。
+- Bot 在线就绪检查与写连接采用一致打开方式，查询仍设为只读并及时关闭，避免 macOS SQLite 混合连接锁模式触发 I/O 错误；离线迁移保持只读打开（#857）。
+- 手工交易草稿的整数标签改为无损解析，小数输入在生成预览前明确报错，保留 `1`、`1.0` 等合法整数表示，避免张数和交割股数被静默截断（#747、#854）。
+- 结算观察在转换前无损校验相关股票交割股数，拒绝小数等无效数量并保留合法整数兼容，避免截断后生成错误的整手交割事实（#743、#853）。
+- YAML 配置构建统一标的别名与覆盖项的规范身份，拒绝大小写或别名冲突，编辑既有标的时保留源键，避免别名落入运行快照或策略被静默覆盖（#754、#755、#852）。
+- 配置构建提前拒绝定时扫描无法读取的开盘后、收盘前偏移表示，保留合法整数及数值整型输入，避免构建成功后调度失败（#752、#855）。
+- 成交接入按账户在同一事务内认领 PM 刷新意图，组内失败回滚并在每组提交后立即派发，避免后续认领失败吞掉前组提示；提交后硬中断的发送不确定窗口仍保留，历史标记不自动重置（#858、#803）。
+
+## 4.5.1 - 2026-10-18
+
+### Bug Fixes
+- 普通 CSP/CC 扫描封存实际决策时间，离线指标复算消费同一时刻并拒绝缺失、无效或冲突时间；保留旧快照读取，不回填历史时间、不改变筛选排序和张数（#832）。
+- 公共持仓查询对事件及持仓载荷中的非对象 JSON 明确报错，避免把损坏记录当作完整空结果（#823）。
+- 旧格式成交重试复用实际费用的规范化证据，完整平仓重试复用已冻结分配；保留事实冲突与缺片拒绝，恢复幂等结果（#825、#826）。
+- 组合候选和简报保留组合净收入，避免被资金腿单腿净收入覆盖；不改写历史快照（#827）。
+- 到期筛选显式传入零天时保留其含义，避免把更远到期持仓混入结果（#828）。
+- 短期权到期关闭要求券商结算证据；到期后报价仅用于诊断，不能据此推断未指派并关闭持仓（#829）。
+- 升级与回滚通过稳定文件锁防止并发接管，并将转换锁覆盖到失败补偿和最终回执，避免后续转换被旧操作覆盖（#830、#831）。
+- 投影验证 CLI 将主验证失败传播为失败退出码，即使独立行比对成功也不再报告进程成功（#834）。
+- Tool Gateway 执行已有字符串长度约束，拒绝可能扩大回执查询范围的空过滤值；保留省略参数及原有账户隔离（#835）。
+
+## 4.5.0 - 2026-10-18
+
+### New Features
+- 普通 short Put/Call 在提示到期且完整券商证据排除竞争归属后，可保守确认为 CSP/CC；保留人工决定和迟到组合重新仲裁，缺失证据仍待确认（#617）。
+
+### Improvements
+- 将普通 CSP/CC 约束、筛选、排序及解释抽取为可替换的版本化策略核心，并贯通扫描、摘要和封存快照；保留现有基线行为，不包含回测、收益优劣评价或 Combo 策略抽象。真实历史冻结输入对照仍待完成（#819）。
+- 账本撤销与修复预检复用已读取历史和投影，减少重复计算；保留事务内新鲜复验、写后完整投影和失败回滚，不承诺次线性复杂度（#613）。
+
+### Bug Fixes
+- 可选券商历史超时时保留已取得的组合容量观察；普通归属仍要求历史查询后的新鲜完整持仓证据，取消优先且不延长时限（#635）。
+- 研究归档只读核验不再覆盖来源证明，重复拉取按单 run 核对，并统一 Unicode 文件名摘要；清理资格仍须独立复验（#634）。
+- CC+LP 配对前核验 Long Put 开仓资格与决策时效，明确区分数据不可用、部分数据与合法零候选（#636）。
+- 候选在决策时重新核验正股报价源时间，避免取数后过期的正股证据被新鲜期权回执掩盖（#637）。
+- 期权快照保留各批次真实请求与接收时间，失败补取不再刷新先前报价的时效身份（#638）。
+- RV 计算核验交易日历覆盖、历史日线证券身份及交易日类型；旧缓存须验证重取，失败不回退为可用证据（#641）。
+- 普通扫描与定时取数完整传递 history_kline 限流配置，分页请求执行实际配置预算（#639）。
+- 禁用调度时 JSON 模式仅输出决策对象，避免附加提示破坏严格消费者；人类输出及 force 行为不变（#642）。
+- CC+LP 入口传递显式净权利金保留率门槛，省略或 null 保持原默认；上游模板继承 explicit-marker 问题仍待独立修复（#643）。
+- CC 承保保留相对现价的行权价上行距离，修复成本底价不同导致的跨标的候选及冻结快照排序偏差；成本底线与既有排序规则不变（#651）。
+- 账本 checkpoint 续算对非法开仓日期及需核对完整历史的 Combo 成员回退 full，开仓预检同步校验可发布状态，避免提交后无法完整重建（#816）。
+- 账本 lot parity 报告写入前拒绝与输入数据库相同文件及软硬链接，避免截断输入数据库（#817）。
+- 当前决策迁移状态纳入 schema cookie、必需索引和 generation trigger 的完整修复判定，避免错误报告可清理（#818）。
+- 成交接入状态文件不可读、损坏或已有 bucket 类型错误时明确失败，保留原始恢复证据；缺失文件和受支持旧对象仍可正常初始化（#820）。
+- 账本 adjustment 拒绝小数张数并保留超大整数精度，非法历史阻止发布且不自动改写（#821）。
+- 部分平仓后更正开仓权利金时，同步持仓累计盈亏、transition 和续算快照，保留费用分摊口径与事务回滚（#822）。
+
+## 4.4.4 - 2026-10-15
+
+### Improvements
+- 精简成交回执中的机器标识符和重复成功说明，多候选改为数量提示；保留成交编号、自动恢复说明及异常重试、处理和诊断信息（#609）。
+- 清理预览复用文件清单和版本读取，减少目录遍历开销；保留原有保留策略、符号链接处理及删除前复验（#608）。
+- 账本撤销和修复预览复用已核验事件，减少重复构建及历史读取，并确保返回事件经过同一预检；保留实际写入、事务内复验和幂等读回（#611）。
+
+### Bug Fixes
+- 服务归属核验区分 systemd 已返回但无法识别的状态与查询失败，避免将前者误报为管理器不可用；保留原有操作门禁（#610）。
+
+## 4.4.3 - 2026-10-15
+
+### Improvements
+- 增加合成离线取数基准，覆盖共享上下文、prepared、CLI/Tool 适配器与失败场景；数据来源、测量边界和历史结果明确记录，不代表生产性能结论（#563）。
+
+### Bug Fixes
+- Position Sizing 可用同次扫描、同账户且路由匹配的新报价恢复原先仅因报价陈旧而不完整的证据，保留来源与时效校验；不写入持仓或资金状态，不修改策略资格规则（#604）。
+- systemd 渲染在输出前拒绝参数、环境赋值和部署用户中的回车或换行，保留合法单行路径及 launchd 行为（#603）。
+- systemd 服务操作返回管理器实际报告的 LoadState，区分未取得、空值及具体加载错误，保留已有安装验证和权限门禁（#605）。
+- 服务备份冲突诊断列明备份与受管路径，并提示保留比对、授权处置后重新预览；继续拒绝覆盖冲突备份（#606）。
+- tick metrics 历史追加由稳定锁保护，避免遵守同一锁协议的并发追加丢失；损坏内容保留并明确报告失败，run/shared 独立写入及错误归属保持可核验（#548）。
+
+## 4.4.2 - 2026-10-14
+
+### Bug Fixes
+- 服务操作部分写入后保留结构化错误及已完成操作、备份回执，CLI 同步返回错误原因；重新预览后重试保持已有写入与备份（#529）。
+
+## 4.4.1 - 2026-10-14
+
+### Bug Fixes
+- 普通手工 CSP/CC 成交确认不再误要求历史推荐；仍核验账户、成交身份、完整未平仓数量与幂等证明。
+- 完整冲突批次可恢复最后有效人工 Wheel Call 的原股票、分支和数量分配，包括三张分别对应三批各一张；保留当前完整容量、成员复验与事务回滚，不改原经济成交。
+- Bot 原消息缓存绑定配置、账户和会话，待发回复在领取及发送前重验当前权限；查找故障保留原成功缓存，历史无绑定结果保留但不能自动重放或补送。
+
+## 4.4.0 - 2026-10-13
+
+### New Features
+- 新确认的 Combo 组合新增独立的配对成功回执，展示账户、标的、两腿与确认时间；复用账本事务和持久化发送意图，原成交消息保持不变，不自动补发历史组合。
+
+### Improvements
+- 完整回归按测试文件分配到八个 CI 分片，并核验完整收集、提交身份及每项恰好执行一次；保留全部测试和门禁，减少 CI 等待，本地发布预检保持完整四进程回归。
+
+### Bug Fixes
+- Bot 重试回复前统一核验当前发送者权限，拒绝请求保留审计和原结果，合法重试保持幂等。
+- 服务安装仅在管理器读回确认定义加载及归属后报告成功；未知或不匹配时保留已写文件与备份回执，避免 reload 成功掩盖未确认的安装结果，macOS 未加载的 LaunchAgent 保持合法。
+- 身份与 OpenD 时间修复在 apply 时明确拒绝显式传入的 expected_input_hash（包括空字符串与空白），避免静默忽略；不传 hash 的合法修复与重试保持原状。
+- 持仓 inspect 通过账本规范化身份核验账户授权，修复合法持仓被拒绝及冲突顶层字段覆盖真实身份的问题，查询保持只读。
+- 期权绩效查询返回完整业务分页与汇总组，仅在 Tool 展示层限制响应长度；CLI 与 HTTP 不再被展示预算截断，旧 Tool 文本游标需重新发起查询。
+- Bot 仅纠正市场时沿用已明确的账户和查询目标，在所选市场重新核验权限与配置，避免要求重复确认账户。
+- Feishu 回复失败后可在启动及空闲时恢复到期重试，复用原正文与消息身份；租约、退避及重放窗口有界，不确定发送结果仍保守处理。
+
+## 4.3.1 - 2026-10-13
+
+### Improvements
+- 持仓事实契约校验复用原账本解析与依赖验证，省去被丢弃的期望侧哈希计算，并补充快照构建与校验耗时；完整指纹与失败关闭检查保持不变。
+- 完整回归统一使用四进程按文件分配，减少重复源码扫描与测试服务关闭等待，并清理通过用例的临时目录；测试范围、断言及失败诊断保持不变。
+
+### Bug Fixes
+- 公开持仓查询统一使用账本只读入口，不再初始化缺失数据库或自动恢复空投影；CLI 列表、事件、历史、详情及 Tool 查询保留原有账户隔离和诊断语义。
+- 存储基线用完整的无跟随清单解析 canonical scan blob，避免盘上完好的对象被误报缺失；保留受保护引用、损坏和不可信路径的拒绝语义。
+- GC 预览允许仅由过期 run 引用的已回收 blob 保持明确缺失，避免下轮预览自锁；祖先目录 symlink、非目录占位和不可访问清单仍拒绝，不新增实际删除权限。
+- 持仓投影按当前内容与 checkpoint 绑定判定就绪，拒绝复用损坏的 head 指纹或数量；合法增量不再因历史全量标记滞后被阻断，真实全量发布与只读验证的语义保持独立。
+- 单标的、单策略及 Wheel 分支失败只影响所属范围，保留健康结果；统一扫描终态与原因，避免正常无合约结果被误判为整批失败，真实共享数据或封存完整性错误仍阻断。
+- 简报、历史、tick 退出与失败重入共用可靠性结论；失败简报送达不再被当作扫描恢复，账户告警依据同轮收据归属，并保留不发送模式。
+- 归属容量证据缺失或过期时保留已有确认关系，不再制造持久超限冲突；真实共享库存或跨市场现金不足仍按已证明事实阻断。
+- 归属待办提醒只消费同账户、市场及实际送达路由的冻结明细与确认回执，避免重复展开未变化的旧待办；变化、重新出现或发送身份未知时保留必要详情。
+- 指派情景与仓位准备统一核验持仓身份、范围、完整性和观测及来源时效，防止新观测时间掩盖过期来源；完整零持仓仍有效。
+- 服务漂移中的信息告警不再使健康升级或回滚失败；真实定义、运行态及保留状态冲突仍阻断，自定义单元保持原状。
+- 服务安装将回滚备份隔离到专用私有目录，保留原相对路径、内容校验和确认复验；历史备份不迁移或删除。
+- 服务安装预览按 systemd 逻辑行脱敏环境变量，覆盖缩进、续行和异常语法，避免凭据出现在 JSON 或终端预览中。
+
+## 4.3.0 - 2026-10-12
+
+### New Features
+- 期权绩效查询增加可选的鉴权本地服务；CLI、Tool Gateway、Bot 和 /income 共用查询 owner，服务故障明确失败，未启用服务时保留本地查询。
+
+### Improvements
+- Futu 查询与成交推送复用 DataFrame 转换、单次规范化及账本读取连接，减少重复处理；离线回放输出保持一致，生产端到端提速尚待验证。
+- 真实 tick 的现有运行日志补充 prepared context 阶段耗时，覆盖账本、汇率证据、持仓投影与账户上下文；共享操作只记录一次，阶段耗时包含子阶段且不能直接相加。
+- 完整回归 CI 保留逐项测试名、线程堆栈、步骤超时和独立诊断产物，避免超大参数名污染日志；测试范围和失败判定不变。
+
+### Bug Fixes
+- OpenD 初始协议连接采用有界等待，重试保留原异常与原因码；取消、认证中断和推送启动失败时清理未交付连接，健康检查要求 READY 且交易已登录。
+- 服务 CLI 默认保留部署符号链接路径；跨市场 OpenD 计划缺失或冲突时在写入前阻断，避免错误删除多账户服务；无 Install 段的 service 不再提示 enable。
+- 服务 profile 保存并在漂移对账与升级中复用 tick 超时预算；无效预算在副作用前拒绝，旧 profile 未声明时沿用原默认值。
+- 现金、担保和风险上下文从原币金额使用同一份当前汇率计算 CNY 汇总；缺失或不可信证据保持未知，不以缓存小计替代完整总额，历史记账汇率不变。
+- 资金余量与指派查询复用严格只读账本快照，避免查询触发初始化或修复；持仓资格统一核验账户、市场、资产范围、完整性和时效，缺失、失效或不可信持仓明确拒绝。
+
+## 4.2.16 - 2026-10-10
+
+### Improvements
+- 简化交易、持仓、行情和配置链路中的重复代码，复用已有实现；保留公开接口、账本校验、账户与市场隔离及原有业务规则。
+- 运行状态历史查询在同一次请求内共享目录遍历和筛选文件，只为选中的运行读取完整详情；保持历史选择、搜索计数与公开输出一致。
+- 更新 CLI、Tool Gateway、订单、行情存储及运营文档，使能力说明和责任边界与当前实现一致；文档门禁同时核验源码符号和本地文档引用。
+
+### Bug Fixes
+- 服务漂移对账仅自动停用和删除产品明确拥有的 service/timer；保留备份与自定义单元，账户专属 OpenD 单元要求原部署配置明确声明账户，重试不扩大删除权限。
+
+## 4.2.15 - 2026-10-10
+
+### Improvements
+- 期权收益报告新增“日均占用”：按统计期内实际未了结本金及时间加权，包含跨期持仓，不计未来时间；原现金流、月收益率和年化计算保持不变。
+
+### Bug Fixes
+- 修复新封存行情快照在运行组合回放中被误拒绝的问题，共用 ready 条目字段与 blob 引用校验，保留路径、内容哈希、账户及运行身份校验和部分数据状态。
+
+## 4.2.14 - 2026-10-10
+
+### Improvements
+- Daily Brief 的 Position Sizing 简化为“当前 · 指派后 · 再卖 1 张指派后”，删除括号说明与休市估值行；底层计算和报价证据不变。
+
+### Bug Fixes
+- 普通交易平仓回执补齐已确认的平仓原因，显示“主动交易平仓”，避免已确认结果仍显示“待确认”。
+- 成交归属恢复按账户开放成交加载并校验 US、HK 市场配置，修复以美股配置启动时遗漏已入账港股成交的问题；市场失败、恢复游标和取消仍相互隔离。
+- 已过期的组合提案可通过人工预览重新核验当前完整两腿及历史候选证据后确认归属；自动恢复仍阻断过期提案，确认保持原子性和幂等性。
+- 待确认的零价平仓结算补齐平仓前数量证据，在同一事务内作废原待确认事件并写入终结事件；保留成交身份与经济数据校验，订单重放仅使用有效事件，避免持续占用 CC 开仓容量。
+
+## 4.2.13 - 2026-10-09
+
+### Bug Fixes
+- 归属历史回放保留指向范围内事实的后补 void 更正，避免重新计入已作废的到期事件而导致归属待办读取失败；更正继续由权威账本投影校验。
+- Position Sizing 在市场休市时接受完整交易日历验证的最近交易日报价，并展示估值市场及最早报价时间；缺失或未通过日历校验的报价仍明确不可用，开平仓实时报价门禁不变。
+- 启用 Holdings 后自动纳入本账户通过校验的 PM 非富途资产，不再要求手工确认券商名单；保留账户隔离、来源完整性、时效和可信度校验，非富途资产不增加富途可用于期权开仓的现金。
+- 修复同一快照混合正常空集与有合约结果时，ready 条目的可选字段污染后续条目校验的问题；保留严格字段、收据及数据完整性校验。
+
+## 4.2.12 - 2026-10-09
+
+### Bug Fixes
+- 修复持仓扩展期权抓取范围与开仓行权价窗口不重叠时被误判为行情缺失的问题；完整期权链与快照证明范围内无合约时保留有效空结果，真实缺失、过期数据及持仓必需合约缺失仍拒绝。
+
+## 4.2.11 - 2026-10-09
+
+### Bug Fixes
+- CSP、CC 候选与组合指派查询统一使用实际交割后的仓位比例：正股按同一现价估值，Put 接货同时增加股数并减少现金，Call 交割同时减少股数并增加现金；三个情景分别重算账户非期权净资产，候选净权利金仅计入一次。富途作为基础，启用 Holdings 时补充 PM 的非富途资产并排除富途副本；证据不足明确不可用，容量与持股覆盖规则不变。
+- 关闭承保评估时继续保留普通 CSP、CC 决策链，避免仓位上下文统一后丢失既有决策；历史回执保留冻结值并标明原口径。
+
+## 4.2.10 - 2026-10-08
+
+### Improvements
+- CSP 仓位比例行简化为 Position Sizing，去掉重复的账户与估算口径括注；三个指派情景的计算口径不变。
+
+### Bug Fixes
+- 富途现金仅将 CNY、HKD、USD 纳入业务资金计算；其他币种明确为零时保留原始证据但不请求汇率，避免 JPY、SGD 零余额让仓位比例与容量暂不可用。其他币种非零或无效时仍明确阻断，旧当前缓存经共享校验后重新获取。
+- 未平仓期权收益率按开仓至到期的预计持有时间计算，避免刚开仓时年化虚高；已终止份额仍按实际终止时间计算，每份至少计一天，历史查询保留截止时间边界。
+
+## 4.2.9 - 2026-10-08
+
+### Improvements
+- CSP 候选展示本账户当前仓位、已有 Put 全指派及再卖一张后全指派的比例，沿用现有接货金额与估算口径；不改变筛选、排序、容量或通知触发规则。
+
+### Bug Fixes
+- 组合增强（CSP+LC）回执展示长 Call Delta，缺失或无效时明确标注暂不可用，不再以短 Put Delta 代替。
+- 修复已成交 Combo 归属被无关正股碎股、当前现金或汇率变化阻塞的问题，保留期权持仓核对与 Wheel 占用约束；归属待办和回执区分系统处理、人工选择与证据阻塞。
+
+## 4.2.8 - 2026-10-08
+
+### Breaking Changes
+- 首次配置向导和初始化命令不再隐式使用 lx 账户标签；脚本调用必须显式提供 --account-label，已有账户配置不受影响。
+
+### Bug Fixes
+- 升级时正确保留已暂停定时器的状态，不再因此误判失败；失败补偿由恢复后的旧版本校验配置并对账服务，验证失败时保留人工恢复指引。
+- 修复期权成交缺少开平方向时无法记账的问题：以 OM 账本按 FIFO 平掉对向持仓，剩余数量开仓；跨零成交整笔校验和原子入账，保留原始成交数量、费用与幂等回执。已保存成交可基于真实账本只读预览，历史顺序不明时保留待核对，成交后 OpenD 检查仅提示差异。
+
+## 4.2.7 - 2026-10-08
+
+### Breaking Changes
+- Assistant 配置与实现统一为 Bot，仅保留 `bot.enabled`，运行快照改为 `config.bot.json`；移除无效 Bot toolsets/loading mode、Daily Brief 开关、Wheel enabled 与固定 combo default_mode；用 `om config migrate-switches` 显式预览和发布迁移。新配置通知默认关闭；迁移保留旧配置省略通知开关时的原意及市场覆盖。
+- 决策历史改由 SQLite 保存和读取；旧 JSON 不再作为读取回退。有历史 JSON 的运行环境需先预览并显式导入可验证记录，缺少来源或账户身份的记录逐项报告，不自动迁移。
+
+### New Features
+- 保存每次实际决策的成功、正常空、部分可用及失败结果；同运行幂等，新运行追加版本。新增 `decision_history_read` 只读查询和历史通知原始引用校验，翻页固定记录范围。
+- 历史建议仅沿已有明确 Wheel 意图关联展示账本状态与已实现期权净现金流；身份、数量、费用等证据不足时保留缺口，未结束不展示最终收益。
+
+### Improvements
+- Bot 入站新指令与实际模型执行共用一个启用开关；PM 与 Holdings 可在预检后一次发布，取消或失败不再部分启用 PM。权限诊断与执行共用解释并显示模型写权限。
+- CSP+LC 与 CC+LP 长腿默认限制在 `0.15 ≤ |delta| ≤ 0.35`，支持独立配置并贯穿筛选与指标校验；缺失 delta 拒绝入选，保持短腿、权利金留存和排序规则。
+
+### Bug Fixes
+- 当前资金、Wheel 容量与事件现金折算共用汇率证据和交易时段校验；事件按发生时点选择可验证报价，保留连续休市沿用及缺证不可用语义。独立查询使用运行实例汇率缓存，费用补全保留原始报价来源；既有有效现金折算不自动回写。
+
+## 4.2.6 - 2026-10-07
+
+### Bug Fixes
+- Bot 将支持的跨市场配置变更交给 Control 权限校验和预览，避免把读取范围误当成操作权限；关闭组合增强仅修改对应开关，保留 CSP、CC 监控及执行前确认。
+
+## 4.2.5 - 2026-10-07
+
+### Bug Fixes
+- 零价期权成交已平仓、原因待定时，归因核验恢复同一成交的完整平仓前数量，避免因剩余持仓为零而误报证据不完整；保留缺证、冲突和投影漂移拦截，并去除平仓回执重复的状态行。
+
+## 4.2.4 - 2026-10-07
+
+### Breaking Changes
+- 历史 Daily Brief 日期及修订查询要求显式账户与市场，不再默认美股；最新查询保留跨已启用市场读取。
+
+### Bug Fixes
+- 显式美股代码与期权根保留市场身份，避免与港股别名混淆；港股代码拒绝通过剥离字符修复畸形输入。
+- 持仓 DTE 和平仓建议相对到期过滤按各自市场日期判断，避免美股在亚洲跨日时提前过期。
+- 旧 CSP 汇总保留候选原生容量，港币和美元的零或未知容量均不能产生高优先级开仓提醒；富途诊断对两市场统一检查标的行情前提，并分别报告期权字段可用性。
+- HK/US 期权到期结算等待统一截止于到期后第一个市场交易日收盘，按各自市场日历和时区处理休市、半日交易及夏令时；同步调整完整结算观察的日历要求，既有冻结期限保留至受控迁移。
+- 单个标的的 CC 容量或证据阻断只形成局部缺口，保留其他标的候选和正常扫描结果；简报区分局部受阻与整个策略不可用。
+
+## 4.2.3 - 2026-10-06
+
+### Bug Fixes
+- 历史富途期权成交缺少交易环境时，可经原成交日的完整 OpenD 回执和唯一精确成交补证 REAL 环境；保留成交、价格、数量、lot 及下游指派，拒绝冲突和过期证据，支持预览哈希、事务回滚及幂等重试，使满足身份与容量要求的历史 Wheel 分支可继续接收 Call 归属。
+
+## 4.2.2 - 2026-10-06
+
+### Improvements
+- 日报运行日志增加按账户、市场和操作区分的组装、历史校验、持久化、渲染、锁等待及账户准备耗时；计时或日志失败保留业务结果，异常、取消和进程中断分别保留可核对的诊断证据。
+
+### Bug Fixes
+- 新 Call 成交归属不再把成交时和当前可信投影均证明已被其他 Call 满额覆盖的 Wheel 分支计入替代候选或竞争需求；唯一剩余分支仍需通过账户、实股容量及竞争核验，保留已有归属、明确意图和人工跨分支分配。
+
+## 4.2.1 - 2026-10-06
+
+### Breaking Changes
+- Close Advice 当前报告只由计划 Tick 的封存行情路径生成；移除 Agent 的可变行情准备、生成入口和兼容流水线，读取要求报告及每一行绑定同一 snapshot 和计划，历史未封存报告保守显示为不可评估。
+- 当前交易执行、持仓快照、Daily Brief 和 Wheel 输入要求显式版本；无版本持久历史仅经具名适配器读取，新 required-data quote receipt 必须发布 canonical blob。
+
+### Improvements
+- 同一次冻结账本读取中，多账户决策快照复用公共投影、比较与摘要；成交归属的当前市场视图和全账户容量视图共享 Wheel 基础投影，保留账户隔离、历史时点计算和事务重验。
+- 日报准备在连续只读阶段及单次历史校验内复用已验证来源，减少重复解析与摘要计算；后台归属通过同一只读连接观察账本提交变化，无变化时复用批次快照，保留并发更新、事务内重验和写后读回。
+- 新账户运行只发布 canonical state config；旧 sibling 配置副本仅保留历史读取，不再参与当前候选、Wheel、审计或 Close Advice 选择。
+
+### Bug Fixes
+- 配置构建和校验会拒绝非正整数的多账户 worker 上限及两个已知键的明显拼写错误，保留现代键优先、旧键兼容和账户数量上限。
+- 决策简报固定展示 CSP、CC 和 Combo 栏目，并按候选已有容量显示最多手数；缺失与真实零容量分别呈现，组合标签保持统一。
+- Close Advice 计划通过 canonical ledger read model 解析嵌套合约身份，避免合格持仓被漏出 required-data plan。
+- 期权收益计算的资金占用时间下限为 24 小时，避免刚开仓或极短持仓把现金流收益率异常放大；36 小时仍按 1.5 天计算。
+
+## 4.2.0 - 2026-10-06
+
+### Breaking Changes
+- 通知预览统一读取已持久化的 Daily Decision Brief；`om notify preview` 和 `preview_notification` 不再接受旧 alerts/changes 文本、文件路径、account_label 或 render_style 输入，调用方需迁移到账户、市场、日期和修订选择器；普通流水线移除 `--stage alert|notify`，显式手动 `--stage-only alert|notify` 保留。
+- 当前候选链路仅接受统一的新状态、索引、清单及 owner schema；旧候选产物保留显式历史检查和回放能力，不再参与当前决策，混合新旧产物会被拒绝。
+
+### Bug Fixes
+- 单账户执行异常时持久化同账户、同运行的错误指标，保留已有上下文；指标或遥测写入失败不会阻断其它账户的错误结果。
+- 账户运行状态统一使用不跟随符号链接的原子写入；拒绝不安全目录，状态写入失败仍保留屏障结果，并通过共享审计记录失败。
+- 运行快照保留上游不可用事实与原因，以有来源的 ledger_shadow 状态替代自我比较；新快照写入 v2，历史 v1 保持可读且不改写。
+- 修复方向性 Wheel 候选证据的运行快照校验，核对实际发布的清单、状态索引及 call/put owner 身份。
+- 决策简报将期权平仓待结算明确显示为相关开仓容量暂不可用，并与行情获取失败分别提示；结算期限和容量保护不变。
+- Futu 成交统一按交易所时区转换为 UTC，美股自动处理夏令时；来源证据和结算核验复用相同解析，保留显式时间戳及小数精度，历史账本须另做修复预览。
+- 历史 Wheel Call 人工确认在身份、来源和当前关联一致时保留人工归属；同标的其他股票分支不再单独触发重复确认，明确意图、跨策略证据及容量冲突继续核验。
+- 决策简报直接消费候选包已验证的扫描状态版本，正确记录当前状态索引和清单路径，避免有效批次被误报无效。
+- 开仓筛选将人民币净权利金缺失明确归为输入不可用，封存及简报保留数据缺口，不再与低于收益门槛混淆；正常假期汇率展示保持简约。
+
+### Improvements
+- 新增受控 Futu 历史成交时间批次修复：预览绑定原行、两库和汇率证据，确认后备份并原子更新账本与 inbox，保留成交身份、原币经济数据和结算期限，支持审计回读及幂等重试；旧单笔原始时间入口仍仅预览。
+- 已核实连续休市期间，最新有效汇率可用于开仓筛选、跨币种容量和 Wheel；保留真实报价时间，交易时段缺价或来源不可验证时继续标为不可用。
+- Wheel 简报补充已覆盖 Call 的到期日和行权价，同一标的连续展示；合并批次保留全部覆盖合约，明细缺失时明确待核实。
+
+## 4.1.6 - 2026-10-05
+
+### Improvements
+- 决策简报恢复简约资金汇总，不再提示正常假期汇率或重复展开原币明细；精简 Wheel 覆盖、归属待办、持仓和同一时刻的双时区文案，保留预留数量、待确认及异常信息。
+
+## 4.1.5 - 2026-10-05
+
+### Bug Fixes
+- Daily Brief 的成交归属复用本批次已核实的持仓容量证据，避免已绑定 Wheel 的 Call 被空容量快照误报为待确认；旧富途开仓在账户、环境和成交别名可精确验证时也可确认普通单腿，且普通单腿确认不再依赖 Wheel 容量检查。
+- Daily Brief 的原币资金明细只展示 CNY、HKD 和 USD，折 CNY 汇总仍保留完整资金与汇率计算口径。
+- Lifecycle 在未绑定时间策略时将 72 小时仅作为人工复核等待点，不再误称不可变结算截止时间；质量检查与旧数据对照使用同一证据口径。
+- 未归属 Wheel Put 按分支身份进入待关联阶段，拒绝或完成归属后恢复正确阶段，不再因缺少股票 lot 身份绕过关联闸门。
+- Lifecycle migration 识别通知槽占用与冲突，显式迁移保留股票交收数量、来源经济参数并绑定唯一富途账户；证据歧义时失败关闭。
+- Lifecycle migration 不再为历史完成状态补发 `resolution_confirmed` 通知；新清单移除 `seed_final_intent`，旧冻结清单仅接受显式 `false`，其它值在写入前拒绝。
+- 空选择的 lifecycle migration manifest 现在会在 apply 时失败关闭，CLI 返回错误信封与退出码 2；只读 inventory 和 dry-run 仍可用于盘点。
+- 重放已完成的 lifecycle migration manifest 若未产生新写入，返回 `status: "noop"`，并保留 `applied_count=0`、已有回执数及成功退出码。
+- `om wheel` 的 branch end、end、intent 和 linkage 在使用 `--config <path>` 时，现从已加载运行配置解析市场，不再因缺少 `--config-key` 而失败。
+- Wheel Call 关联拒绝遇到同账户同市场的 Put 待关联候选时，跳过不含 Call 身份字段的候选，避免未捕获的 `KeyError`。
+
+### Improvements
+- 首次安装与日常菜单接入可执行的账户、标的、通知、Bot、全局持仓风险和服务流程；新增 `channel/bot/holdings/close-advice configure` 与预览确认式 `service install/start/stop`。可选功能可跳过；普通设置写入实例 env，密钥经终端隐藏输入和既有系统存储。通知显式关闭同时约束定时投递、回执与系统告警，旧配置保持原默认行为。
+- `bot` 统一承载模型、能力和消息入口，`channel feishu event/serve` 提供飞书接入；保留 `assistant/inbound` 兼容。账户和标的变更发布同一代运行快照，同市场账户共享标的。菜单子命令隔离实例环境；手动扫描使用 `--force --no-send`，并如实保留失败与未验证状态。
+- 人工 CLI 首页与帮助按“首次安装”和“日常管理”组织任务；首次安装明确列出富途 OpenAPI/OpenD、通知通道和 Bot LLM 接入，并区分离线检查与外部就绪。`om --help` 显示任务入口，`om help all` 保留完整顶层命令表。`om config init` 仍可用于高级脚本化初始化，不再与 `om setup init` 并列推荐。
+- 首次 `om setup init` 要求用户提供所选市场的监控标的并预览实际清单；缺少标的时不写配置，未选市场和示例标的不再进入新建 YAML。
+- 人工 `om symbols` 改为维护权威 `config.yaml` 并重建运行快照，默认写入前预览；原先 `--config` 指向运行 JSON 的写法需改用 `--config-yaml` 指向 YAML，策略字段改用 `edit --set`。`om help` 按场景区分人工命令与 `om-agent` 结构化工具。
+- 人工 `om symbols add/rm/edit` 可从标的自动识别 US/HK 市场；显式 `--market` 与标的冲突时拒绝。单市场配置下 `list` 也可省略 `--market`。
+- 人工 `om symbols add` 现在要求明确选择 CSP、CC 或两者；CSP 必填 `max_strike`，CC 必填 `min_strike`，另一端边界可选。预览会显示策略和填写的行权价边界。
+- 首次 `om setup init` 与高级 `om config init` 也要求逐个标的填写策略和必要的行权价边界；交互引导和预览会显示实际生效值。
+
+## 4.1.4 - 2026-10-04
+
+### Improvements
+- 减少 Combo 匹配、财报证据标注、Wheel 投影、账户决策最终化和 Close-advice 报告回退中的重复计算与读取，保持现有结果和失败语义。
+
+## 4.1.3 - 2026-10-03
+
+### Improvements
+- Daily Brief 优先展示人民币现金，并保留原币明细；同一次运行的汇率证据在现金、组合与 Wheel 判断中复用，节假日展示沿用最后一次已验证汇率。
+
+### Bug Fixes
+- 统一账户现金的来源时间、身份和有效期判定；缺失、过期或不可信的金额不再被当作可用现金，真实零值仍保留。
+- 统一期权乘数校验与经济计算，拒绝缺失或非法乘数，避免隐式 100 倍回退及历史成交状态误判。
+- 统一期权 Lot 身份和 ordinary、Wheel、Combo 归属提交；缺少来源身份或归属证据冲突时拒绝持久化，重试保持幂等。
+- 修复 Wheel 股票交收已有可信成交与数量证据时，因可选股票订单号缺失而误判乘数证据无效的问题。
+- 修复历史期权成交的合约键带有 `position_key` 时，人工策略归属预览与确认失败的问题。
+
+## 4.1.2 - 2026-10-02
+
+### Bug Fixes
+- 修复已归属的 Call 因后到候选证据显示为冲突时，仍被误算作其他 Wheel 股票分支的未归属竞争成交，阻断多分支人工确认的问题。
+
+## 4.1.1 - 2026-10-02
+
+### Bug Fixes
+- 修复人工归属预览缺少富途期权合约条款和历史账户身份、Call 容量误计其他标的，以及旧成交证据查询过慢的问题；美团同笔 3 张 Call 可分别确认到三条各有 500 股的 Wheel 分支。
+
+## 4.1.0 - 2026-10-02
+
+### New Features
+- 人工归属可将同一笔多张 Wheel Call 成交按合约张数分配给多个股票分支，并在确认前逐分支预览；平仓或结算证据不足时保守保留占用。
+
+## 4.0.0 - 2026-10-02
+
+### Breaking Changes
+- 退役旧的逐来源成交归属开关、独立 Wheel 成交写入接口，以及已无扫描调用方的全局 Holdings 风险接口；新成交统一由交易接收与归属流程处理。
+
+### New Features
+- Portfolio Exposure 以富途股票、现金、货币基金及价格作为账户基线，并只将获准的非富途 PM Holdings 纳入补充持仓；数据不完整时明确标记。
+- 成交归属无法唯一确定时，展示待人工确认的候选分支；归属策略切换走受控迁移，保留历史记录可读。
+
+### Improvements
+- Daily Brief 将美团同系列 Put 指派形成的 Wheel 分支合并展示，同时保留各分支身份与状态。
+
+### Bug Fixes
+- 已确认的期权平仓及时更新剩余张数；零价平仓也入账，平仓原因留待结算证据确认。
+- Put 开仓现金、Call 股票覆盖与 Daily Brief 共用结算占用口径；只有对应的可信成交及更新的富途资金证据才解除相关阻断。
+- 成交接收绑定富途成交状态与来源证据，并用订单线索约束归属；模糊归属留待人工处理，历史回查避免漏推后遗漏。
+- Wheel 自动启动在各入口使用同一账户启用条件，投影指纹随成交归属变化更新，避免状态或容量读数偏离账本。
+
+## 3.8.5 - 2026-09-30
+
+### Bug Fixes
+- 修复 Portfolio Exposure 开启 Holdings 时把 PM 额外账户也纳入质量预检、导致已配置的 OM 账户证据可信却仍无法开启的问题。
+
+## 3.8.4 - 2026-09-30
+
+### Bug Fixes
+- 修复历史 Wheel 恢复把其他独立短 Put 的到期平仓误判为同标的后续冲突、阻止已验证指派恢复的问题。
+
+## 3.8.3 - 2026-09-30
+
+### Bug Fixes
+- 修复历史 Combo Yield 身份保存原始开仓合约键时，75P 等已指派卖腿的 Wheel 恢复被误判为身份不匹配的问题。
+
+## 3.8.2 - 2026-09-30
+
+### Bug Fixes
+- 修复开仓后经受控归属事件绑定的 Combo Yield Put 指派无法恢复 Wheel 分支的问题；仅在归属身份与后续事件可精确验证时允许恢复。
+
+## 3.8.1 - 2026-09-30
+
+### Breaking Changes
+- 退役账户级 `external_holdings` 类型、`holdings_account` 和指向 Holdings 的账户来源映射；旧配置现在明确报错，全局 Holdings 风险数据仍保留。
+
+### New Features
+- Bot 支持经显式授权的跨市场只读访问，并按市场、账户和授权代际隔离会话与数据。
+- 新增默认关闭的全局 `portfolio.holdings.enabled` 开关及预览、确认写入流程；本版不会因该开关改变 Portfolio Exposure 计算结果。
+- 已验证的外部 Combo Yield 卖腿指派可按历史 Wheel 激活窗口自动创建相反方向的监控分支；历史漏建分支仍需显式恢复。
+
+### Bug Fixes
+- 回滚时改由目标 release 执行服务对账，并严格检查子进程结果和激活状态快照。
+- 已确认关闭的期权腿不再占用 Daily Brief 的 Put 现金担保或 Call 锁定股份；结算未确认时仍保守标记开仓资金不可用。
+- Bot 交易归因翻页绑定原查询范围，香港标的先规范化；撤销授权会取消跨读取代际的在途分析。
+- 富途股票交割成交与期权指派乱序到达时按精确证据配对，并支持对历史人工待处理行做受控恢复；缺乏唯一证据时保留待核实。
+- Holdings 记录更新时间不再冒充持仓观察时间；观察时间未知时保留风险计算并提示，旧假可信缓存和不完整 Feishu 分页会被拒绝。
+
+## 3.8.0 - 2026-09-29
+
+### New Features
+- `om` 增加交互式命令引导和预览优先的 `setup init`，并提供易读的配置、设置与凭据就绪状态；凭据值只显示脱敏信息。
+
+### Improvements
+- 首次运行的 `om setup init` 增加完整写入预览、并发目标保护与失败恢复，并记住运行配置目录供新终端使用；`om setup check` 会阻断所选市场的缺失快照和占位富途账户 ID，Bot 就绪单独报告。
+- 必需数据预取移除无法命中的本轮缓存探测，每次按计划重新抓取；来源快照事件追加失败会留下警告，抓取流程保持原样。
+- 默认配置不再写入扁平 `wheel.min_delta`；显式保留的旧键仍通过校验并提示迁移，Covered Call 的有效 Delta 下限保持 0.25。
+
+### Bug Fixes
+- 配置校验现在对启用策略的空 DTE 边界、`close_advice.enabled` 类型，以及 `close_advice` 和标的覆盖项中的未知键给出明确错误。
+- 静默时段跳过通知的日志不再输出原始通知目标。
+- 必需数据无可执行请求时，将计划中的标的观测值带入空结果，避免合法结果被误判为范围身份不一致。
+
+## 3.7.7 - 2026-09-27
+
+### Bug Fixes
+- 修复重复平仓回执的合约选择器读的是**已退役的扁平字段**、而存储形状为嵌套 `contract_key`/`position_side`，导致回执声称复现了某笔平仓却指不出是哪张合约（七个身份字段全空）的问题：改经既有候选归一化读取，**嵌套优先、扁平字段仅作旧格式回退**。
+- 修复手动平仓的重复判定只存在于写入路径、预览路径没有，导致**幂等重放无法预览**的问题：同一 lot 首次成功后重放时，`--dry-run` 原本抛 `target_lot_not_open`，而 `--apply --confirm` 却返回幂等重复。现把重复判定提为预览与写入共用的前置，`--dry-run` 返回 duplicate 预览且不新增事件。（注：仅去掉 `--dry-run` 仍是默认预览，须 `--apply --confirm` 才进入写入路径。）
+- 修复零价到期平仓的时区判定被上海日历单方面支配（上海本地日期恒不早于纽约，故纽约分支为死代码），使**美东到期前一交易日 16:00 之后的零价平仓被误判为到期平仓**、并落入 `EXPIRE_AUTO_CLOSE` 分类的问题：改为只按 `America/New_York` 判定，并加注释说明到期是美东日历概念、不与上海并列。
+
+## 3.7.6 - 2026-09-26
+
+### Bug Fixes
+- 修复 OpenD 符号输出的指标文件在写入中断时可能只剩半个文件、且读取端一旦解析失败就把整段历史静默清空的问题：改为原子替换写入；既有文件解析失败或顶层不是列表时先留档为 `*.corrupt-<时间戳>` 再写新内容；读取报错不再被当作损坏而覆盖文件。
+
+## 3.7.5 - 2026-09-26
+
+### Bug Fixes
+- 修复关闭结算采集（collector）会让整轮生命周期 due 扫描抛出 `ValueError`、该 source 本轮所有 case 被放弃且不写 sealed 结果的问题：禁用分支不再把携带 invocation 字段的状态行展开进通用 upsert（改由共用的剥离 helper 处理三处同形状站点）。同时为「计划或合格但未写入」的 case 补齐 skip 计数（可证活跃 claim 计入 `claimed`，否则计入 `state_not_writable`，重读后 scope 不一致计入 `scope_changed`），使运行结果的账可与持久化状态对上。
+- 修复升级门禁在重启后约 5 秒就探测「登录级能力」且不带重试，导致 OpenD 尚未完成登录时判失败并触发补偿回滚的问题：改为有界等待（下限 300 秒、上限 600 秒、每 5 秒轮询至就绪或预算耗尽），解析改用仓库既定的容错 JSON 约定（生产 stdout 携带 futu SDK 日志行），判定保持 fail-closed。**注意：安装 3.7.5 的那次升级仍由旧版本的 `om` 执行旧门禁，新门禁自再下一次升级起生效。**
+- 修复交易入队质检与修复使用不同口径（质检用的预览不计历史审计、而修复会计入），可能产生没有任何修复能清除的终态失败、使数据集长期不可信的问题：保留原无审计预览及其既有契约，另提供计入审计的只读对账结果供 `OM-INT-003` 判定。并修正分源聚合按配置顺序取末值而非按事件取值的问题（时间戳取最大、事件字段跟随所属最新事件、同刻冲突置空，五个回填计数随最新回填事件），删除一处不可达分支，复用共享 UTC 解析器。
+
+## 3.7.4 - 2026-09-25
+
+### Improvements
+- `claim_settlement_attempt` 撤出结算尝试模块的公开导出面（函数与既有直接导入的测试保留），退役原因登记进 `docs/public_surface_retirements.json`。
+
+### Bug Fixes
+- 修复结算尝试的歧义状态既无法定位、也无法安全处置的问题：控制库 summary 与本轮 due 运行结果新增 `ambiguous_provider_result_ids`（最多 20 条按 case_id 排序；`ambiguous_provider_result_count` 仍是该范围内的完整计数），并新增 `om option-positions lifecycle resolve-ambiguous`，供操作员凭 provider 证据把歧义行收敛为 `committed` 或 `not-executed`。命令默认只读预览，写入需 `--apply --confirm`，`not-executed` 另需旧 worker 已排空的人工核证引用；缺证据、状态漂移、重复或冲突处置一律拒绝，命令不查询 provider、不自动重试。
+- 修复结算失败分类在代码到错误类目映射与异常回执映射两处重复维护、可能不一致的问题：映射保留唯一来源，可重试类目由映射值导出，未知代码仍保守归入 `unknown`。
+- 修复陈旧 invocation 调和在控制库部分不可读时把 SQLite 错误直接抛出的问题：可读控制库上的 `OperationalError` 返回结构化 `control_store_unavailable`。
+- 修复结算尝试 upsert 无法区分「确实落库」与「未发生写入」的问题：以同一事务的 SQL rowcount 暴露 `write_applied`，local、disabled、blocked_static 与批量租约启动失败等调用点只在确实落库时上报 provider 结果，外部活跃 claim 造成的 no-op 不再被当成已持久化。
+- 停止新建不服务任何读取路径的 `idx_lifecycle_settlement_attempt_due` 索引（既有生产库索引不迁移、不删除）；`invocation_writer_epoch` 的 trigger 改名为写计数器语义并按已确认的旧定义同事务迁移，触发错误文案与机制一致。
+
+## 3.7.3 - 2026-09-25
+
+### Improvements
+- 取消每分钟磁盘容量阈值检查与重复告警；磁盘空间问题仅在导致实际任务失败时，沿任务故障回执报告。升级时静默退役旧的磁盘阈值事故状态。
+
+## 3.7.2 - 2026-09-25
+
+### Bug Fixes
+- 修复成交接收心跳看门狗把健康账号长期判为失联并实际投递告警的问题：判据只看单元活性与心跳新鲜度（1200 秒，约实测单轮最坏值的 2 倍），阶段标签只作为告警上下文；OpenD 掉线进入重连期间仍判失联，不会假报恢复。同时修复收据恢复钩子把状态文件反复写回 `starting`（实测 20 秒采样 13/13），导致 `runtime_status` 的 `listener_status` 在会话间摆动的问题。
+- 修复升级后的服务对账使用启动升级的旧 release 渲染代码的问题：现在由新 release 自己的 `om` 执行，升级新增的 systemd 单元不再漏装。
+
+## 3.7.1 - 2026-09-24
+
+### Improvements
+- 退役 `om option-positions lot-identity-migration apply`（含 `--dry-run`）：一次性 D1–D4 生产窗口已于 3.6.5 执行完毕，破坏性半边（D1/D2 重建、D3/D4 payload 重写、`wheel_events.stock_lot_id` 改名）与其启用开关一并移除；该父组只剩只读的 `inventory` / `verify`。需要重跑窗口只能使用 3.6.x 的旧 tag。
+- Close Advice 在净兑现和剩余年化条件成立后，对剩余可交易日不超过 3 日且绝对 Delta 不超过 0.05 的价外期权建议持有到期；美港股分别使用独立交易日日历，缺少判断证据时不提醒。
+- 运行故障主动告警：计划 Tick 失败、成交接收进入不可自恢复终止态、成交接收心跳失联、磁盘使用率越过 85%/90% 都会发出通知，并留下含失败码、阶段、退出码与首次出错时间的运行记录；同一指纹在静默窗内只发一次，恢复后发出恢复通知。
+- 通知渠道自身失效不再沉默：渠道未配置、投递未确认、渠道可用性变化都会发出元信号；主渠道缺失时可改用另一个已注册渠道投递，两者都不可用时记录到本机 journal。
+- 升级重启 OpenD 后自动执行登录态只读自检，未通过时在升级结果中记录失败检查与修复建议。
+- 成交接收心跳区分「进程不在」与「进程在但不出数据」，登录失效原因码在网关、状态文件与告警三处统一。
+- 只读 `om option-positions projection-migration status` 新增 `execution_identity_index_gaps`（`table`/`cause`/`rows`），可识别执行身份索引缺失或定义不匹配的库；投影尾部读取改用索引定位，行序与安全全读回退不变。
+- 超大审计文件改为有界流式读取（不再整体拒读），取证工具降级时发出元信号；失败路径日志提升到 WARNING/ERROR。
+- 随仓库提供 logrotate 配置，并对单个审计段设体积上限。
+
+### Bug Fixes
+- 修复告警事故键被时间戳盐化导致重发保护失效、恢复通知投递未确认后永久丢失、通知回执与渲染键不稳定造成重复投递的问题。
+- 修复成交重复入库只报错不留证据的问题：同一 `deal` 经 push 与 backfill 双路到达只入账一次，并记录 `skipped_duplicate`。
+- 修复 systemd 凭据已物化时 `ENV_FILE` 缺失把 `runtime_status` 长期压成 unhealthy 的误报，并让通知健康信号在既有字段与新增投递字段同时可见。
+- 修复 Bot 成交回执查询把市场参数冲突说成回执所属市场的问题：冲突时在读取前返回 `INPUT_ERROR`，遮盖形式的 `deal_id` 要求补全，不再建议切换配置或把回执判给被拒绝的市场。
+
+## 3.7.0 - 2026-09-24
+
+### New Features
+- 支持按时间窗流式读取历史通知审计，并提供事故磁盘回收的只读引用检查预览。
+
+### Improvements
+- Close Advice 改用净兑现至少 80% 与剩余最高年化不超过 10% 的提前平仓条件，并展示资金分母和决策指标。
+- 审计文件写入侧轮转，服务日志、drift 明细与无凭证健康检查提供更清晰的运维证据。
+
+### Bug Fixes
+- 修复已知标的行情失败时 Close Advice 将逐仓数据缺口误判为封存快照整体失效的问题。
+- OpenD 登录失效、验证码和执行失败时，计划 Tick 当轮有界失败并留下可查询的原因、阶段、运行状态和告警证据。
+
+## 3.6.8 - 2026-09-23
+
+### Bug Fixes
+- 修复 OpenD 故障通知的事件幂等，同一故障持续期间只通知一次，恢复后才允许新的同类告警。
+
+## 3.6.7 - 2026-09-23
+
+### Bug Fixes
+- 修复交易收据读取与索引查找，确保收据生命周期和重试状态在异常场景下保持一致。
+- OpenD 登录失效时让行情 tick 立即失败并告警，避免无限重试空转；大型通知审计文件改为读取尾部并明确历史覆盖不完整。
+
+## 3.6.6 - 2026-09-23
+
+### New Features
+- Unified trade strategy attribution and OM Bot confirmation for account-scoped trade intake.
+
+### Improvements
+- Clarified evidence ownership, repository safety boundaries, and scoped validation guidance for agent workflows.
+
+### Bug Fixes
+- Isolated auto-intake failures and reconciled pending trade state without blocking unrelated accounts.
+- Preserved paused timer activation state during upgrades.
+
+## 3.6.5 - 2026-09-22
+
+### Improvements
+- Finalized position-lot storage on canonical `lot_id`, rejecting ordinary writes to unmigrated stores while retaining legacy access only in explicit migration and audit paths and closing the production migration window.
+
+### Bug Fixes
+- Made `lot-identity-migration apply --dry-run` a read-only preview and preserved the historical Wheel `stock_lot_id` payload contract after the final schema cutover.
+
+## 3.6.4 - 2026-09-22
+
+### Bug Fixes
+- Validated legacy flat and canonical position-lot payloads against fresh ledger replay before rebuilding identity, preserving stock economics and rejecting conflicting event or asset identities without writes.
+
+## 3.6.3 - 2026-09-22
+
+### Improvements
+- Armed the reviewed liuxie-incus lot-identity migration window while retaining the existing manifest, SQL-registry, transaction, integrity, and explicit confirmation gates.
+
+## 3.6.2 - 2026-09-21
+
+### Bug Fixes
+- Compared legacy floating-point option premiums with replayed decimal premiums using the canonical money precision, while continuing to reject real premium changes.
+
+## 3.6.1 - 2026-09-21
+
+### Bug Fixes
+- Compared legacy and nested position-lot payloads through shared business facts during the R1 window, preserved legacy yield-enhancement metadata through event replay, and repaired relocated virtual-environment script paths after atomic upgrades.
+
+## 3.6.0 - 2026-09-21
+
+### New Features
+- Added R1-compatible old/new SQLite order-lot storage support with read-only lot-identity inventory and verification surfaces plus a guarded migration path that remains disabled outside a separately authorized production window.
+
+### Improvements
+- Unified canonical order, execution, and position identity across ledger, Wheel, trade intake and reconciliation, assistant, and quality consumers.
+- Centralized stock settlement quantities and directions, execution arbitration, retired-column SQL checks, and public-surface gates while simplifying duplicate internal models without changing the R1 compatibility contract.
+
+### Bug Fixes
+- Preserved exact decimal stock quantities instead of truncating fractional shares, while continuing to reject fractional option contracts and replaying legacy integer events consistently.
+- Derived stock cost basis and realized economics only from confirmed fee evidence, returning unknown values when fees are missing or estimated and recovering exact values after replay once fees become authoritative.
+- Rejected unknown reservation states and corrected stock settlement direction and quantity handling so canonical ledger projections cannot accept ambiguous or contradictory execution facts.
+
+## 3.5.15 - 2026-09-18
+
+### Bug Fixes
+- Accepted Wheel candidate identities in Daily Brief delivery validation so a single Wheel candidate can no longer abort an entire notification tick, with the identity validator now taking its strategy families, supported markets, and branch suffix from the domain builder instead of a stale copy of that vocabulary.
+
+## 3.5.14 - 2026-09-18
+
+### Improvements
+- Accepted drifted Wheel activation policies with a single previewed and confirmed `wheel activation accept-policy` command, replacing the rebuild, preview, rebind, and readback sequence while preserving activation history and reporting per-account outcomes.
+- Attached a runnable remediation command to Wheel activation gates whose policy drifted, and warned during configuration builds when a rebuild would close an already-bound window.
+- Derived required-data prefetch fixture expirations from the trading date so the suite no longer fails once a hard-coded expiry reaches zero days to expiry.
+
+### Bug Fixes
+- Reported `policy_drift` as false for window identity and boundary refusals so a true value always identifies the drift a policy rebind can accept, and carried the field through the runtime status, healthcheck, and diagnostics views that previously dropped it.
+- Preserved the original exception raised inside an agent tool error so tool failures report their real reason instead of a dataclass assignment error.
+
+## 3.5.13 - 2026-09-18
+
+### Improvements
+- Relaxed the Wheel volatility margin so Covered Call and Cash-Secured Put candidates qualify once implied volatility is no lower than matched-term realized volatility, lowering the ratio threshold from 1.10 to 1.0 and the spread threshold from 0.05 to 0.0.
+
+## 3.5.12 - 2026-09-15
+
+### Bug Fixes
+- Derived stock and ETF execution currency from the canonical symbol identity so Futu deal pushes without a currency field no longer suppress the portfolio-management holdings refresh hint, while options and unresolved symbols keep their previous behavior.
+
+## 3.5.11 - 2026-09-15
+
+### Bug Fixes
+- Fixed Wheel candidate snapshot failures caused by non-finite ranking placeholders and circular per-grant evaluation references, preserving candidate order and strict snapshot validation.
+
+## 3.5.10 - 2026-09-15
+
+### Improvements
+- Ran local full release preflight tests with two workers grouped by file, preserving complete test discovery and failing on worker crashes.
+
+### Bug Fixes
+- Rebound active Wheel windows to updated strategy policies through explicit preview and confirmation, preserving activation history and rejecting stale-policy candidates for new intents.
+- Rejected upgrade and rollback commands whose effective user does not match the declared deployment user before writing state or preparing a release, preventing generated configuration ownership changes.
+
+## 3.5.9 - 2026-09-15
+
+### Improvements
+- Reduced runtime dependencies by removing unused SciPy-backed assessment and integration helpers while preserving active strategy, scheduling, and messaging behavior.
+- Parallelized the full CI regression suite while preserving all existing checks.
+
+### Bug Fixes
+- Recognized Futu zero-price expiry orders recorded on the following calendar day while preserving strict source, date, and execution validation.
+- Preserved Wheel candidate rejection diagnostics so normal strategy rejections are distinguished from missing data, and displayed clear Chinese status messages for both Call and Put scans.
+
+## 3.5.8 - 2026-09-14
+
+### Improvements
+- Replaced the active Bot Pi/Node answer path with the Python model-and-tool loop while preserving scoped sessions, memory, cancellation, persistence, and Feishu reply delivery.
+
+### Bug Fixes
+- Refreshed Wheel assignment economics from the canonical source event after fee sync, and accepted validated broker settlement shares as the contract-multiplier evidence for that assignment.
+
+## 3.5.7 - 2026-09-14
+
+### Bug Fixes
+- Allowed Wheel recovery after voids that only correct older events, while retaining rejection of invalidated assignment sources and unsafe subsequent trades.
+- Queried complete broker trading days for exact historical order-fee targets so millisecond fills are found without widening account or order identity.
+
+## 3.5.6 - 2026-09-14
+
+### Bug Fixes
+- Restored missing Wheel assignment branches as visible fail-closed monitoring state, including an explicit transition for fully closed Combo Yield funding-put assignments without changing the original trade history.
+- Refreshed unverified contract-multiplier cache entries from OpenD and recorded actual assigned-stock settlement fees separately from zero-fee option assignment events.
+- Preserved validated historical event timestamps when repairing lifecycle records, without moving old assignments behind newer ledger events.
+- Reconciled a single broker stock sale across its complete assigned-stock inventory while retaining one execution identity, conserved fees and cash, and safe replay.
+
+## 3.5.5 - 2026-09-14
+
+### Bug Fixes
+- Accepted broker-proven short-position sellable quantities and evaluated snapshot freshness after collection while preserving strict malformed, cached, and future-data rejection.
+- Preserved complete split-execution and lifecycle stock-settlement evidence when checking ledger identity conservation, while rejecting incomplete or conflicting source groups.
+- Required durable Inbox identity evidence before receipt and portfolio-management claims, and reconciled source completion with compare-and-set recovery without duplicate economic or notification effects.
+- Canonicalized Hong Kong CNC option contracts to CNOOC (0883.HK) with the correct contract multiplier while preserving US CNC identity.
+- Surfaced persistent trade-intake identity quarantine for operator review instead of leaving historical records silently stranded.
+
+## 3.5.4 - 2026-09-13
+
+### Improvements
+- Retired the quality HTTP endpoint and its credential binding while preserving local quality refresh, status access, and business gates.
+
+### Bug Fixes
+- Preserved original fees when repairing ledger events and rebuilt cash conversions from the corrected event identity and amounts; missing historical FX remains pending.
+- Removed legacy secret environment variables from every generated systemd service when secure credential delivery is enabled, including services that do not consume credentials.
+
+## 3.5.3 - 2026-09-11
+
+### Bug Fixes
+- Scoped YAML freshness checks to the effective market input, preventing an unrelated market's configuration from making runtime state appear fresh.
+- Bound Bot configuration identity to its authorized market and read scheduler history from the production state location, distinguishing missing or invalid data from empty history.
+- Added an authorized OM scheduled-task inventory with structured names, counts, and independent enabled/active states; preserved explicit query failures and successful memory receipts in the final response.
+- Preserved candidate provenance and answer evidence through Bot tool responses so reports retain their source facts.
+- Made CSP/CC activation a single durable operation and kept cleanly closed activation ledgers readable while rejecting partial WAL sidecars.
+
+### Improvements
+- Added explicit Bot task completion handling and independent read rules for bounded, auditable operations.
+
+## 3.5.2 - 2026-09-10
+
+### Improvements
+- Adapted Bot to Pi 0.85.1 while preserving committed session history, compaction, cancellation, and explicit commit admission; added controlled bidirectional session migration with recovery receipts and runtime readiness checks before service activation.
+
+### Bug Fixes
+- Fixed Bot memory scope loading for runtime configurations that declare accounts as a list.
+
+## 3.5.1 - 2026-09-09
+
+### New Features
+- Upgraded Copilot to Bot with receipt-aware context, bounded execution, and durable conversation memory.
+
+### Bug Fixes
+- Preserved verified account and environment evidence from OpenD trade push headers so valid fills can be recorded on first delivery without guessing account identity.
+- Preserved active SQLite transaction locks while securing database and sidecar file permissions.
+- Added bounded trade-intake and notification recovery with actionable failure receipts and distinct recovery-success receipts, while preventing duplicate economic effects and blind resends after ambiguous delivery.
+
+## 3.5.0 - 2026-09-09
+
+### New Features
+- Added bidirectional Wheel monitoring, recommendation, and result tracking for Call and Put rotations, with explicit human transition confirmation, manual broker trading, market/account isolation, and receipt-bound multiplier evidence.
+
+### Improvements
+- Reduced bulk performance-evidence import cost by validating correction graphs once per batch while preserving per-fact validation and transaction behavior.
+
+### Bug Fixes
+- Kept trade-intake status and lifecycle reconciliation on the resolved canonical inbox after startup, preventing restarts from recreating and reading legacy per-account SQLite shells.
+
+## 3.4.13 - 2026-09-08
+
+### Improvements
+- Hardened cross-asset trade intake and lifecycle accounting for exact execution identity, assigned-stock settlement, shared capacity evidence, Combo/Wheel relationships, and fail-closed decision briefs.
+
+## 3.4.12 - 2026-09-08
+
+### Bug Fixes
+- Kept public OpenD quality source snapshots limited to the stable schema, preventing internal fields from leaking into quality evidence (PR #254).
+
+## 3.4.11 - 2026-09-08
+
+### Improvements
+- Reduced overlapping put/call required-data chain requests by partitioning expirations at the shared merger, and reused the existing opening warmer for scheduled HK ticks while preserving fresh formal quotes.
+- Hardened OpenD execution intake and ledger persistence around execution identity, idempotent recovery, fee and FX evidence, and strategy attribution.
+- Removed retired Strategy Lab and Shadow Replay code, tests, and experiment-only provider paths; production scanning and Research evidence collection remain.
+
+## 3.4.10 - 2026-09-05
+
+### Improvements
+- Simplified Strategy Lab by separating recipe readiness from candidate construction, moving deterministic single-recommendation evaluation into the domain owner, and removing obsolete recommendation-point envelope branches without migrating current facts.
+
+### Bug Fixes
+- Prevented optional Research and Strategy Lab import failures from blocking unrelated CLI commands or production Tick startup by deferring side-lane imports.
+- Bounded low-priority Strategy Lab OpenD provider units with a fail-closed deadline so experiment work cannot wait indefinitely and consume scheduled Tick capacity.
+
+## 3.4.9 - 2026-09-05
+
+### Improvements
+- Reduced scheduled Tick required-data latency by batching underlier observations per OpenD binding, reusing the frozen result across symbol workers, enforcing deadlines before provider calls, and avoiding redundant projection validation.
+
+## 3.4.8 - 2026-09-04
+
+### Improvements
+- Reduced quality-refresh ledger work by filtering lifecycle case, account, and symbol evidence in SQLite before JSON decoding, preserving existing report semantics.
+
+## 3.4.7 - 2026-09-04
+
+### Bug Fixes
+- Allowed the combined US/HK quality refresh to complete by giving the scheduled one-shot a ten-minute execution budget instead of terminating it after five minutes.
+
+## 3.4.6 - 2026-09-04
+
+### Improvements
+- Added flushed expiry-maintenance stage markers and Python fatal-signal stack dumps so native crashes can be localized without changing settlement behavior.
+
+### Bug Fixes
+- Allowed long-lived Pi Agent sessions to continue after successful compaction when the rebuilt context is above the 50% target but within the 75% hard budget.
+- Stopped expired short puts from consuming collateral after the one-natural-day assignment settlement buffer while retaining them in lifecycle views.
+
+## 3.4.5 - 2026-09-04
+
+### Bug Fixes
+- Accepted compact option-performance requests where MTD or YTD directly touches Chinese text or punctuation, while continuing to reject longer ASCII identifiers that merely contain those tokens.
+- Prevented disabled trade-intake settlement observation from eagerly constructing lifecycle Futu gateways or querying timing, while preserving checkpoint sealing, new fills, retryable Inbox rows, and recent missed-push recovery.
+
+## 3.4.4 - 2026-09-03
+
+### Breaking Changes
+- Reject the retired `runtime.pipeline_symbol_max_workers` and `runtime.watchlist_max_workers` settings instead of silently ignoring them.
+
+### Improvements
+- Reduced batch manual-adjustment preflight to one current projection and one combined candidate projection, bounding full-history reads without changing atomic validation.
+
+### Bug Fixes
+- Allowed audited metadata-only binding of missing Futu account and order identities on historical open events, preserving event identity and downstream close/adjust lineage for subsequent fee enrichment.
+- Bound Strategy Lab FX observation time to the sealed prepared-receipt timestamp instead of the earlier position snapshot, preserving strict temporal validation for natural formal points.
+- Added an audited OpenD-evidence repair for incorrect historical Futu trade times, preserving event identity and projection lineage while invalidating stale event-time cash conversions for explicit backfill.
+
+## 3.4.3 - 2026-09-03
+
+### Breaking Changes
+- Removed the generic `analysis_catalog` and `analysis_query` tools from Tool Gateway and Copilot; current reads use canonical typed tools, while unsupported cross-view aggregation remains unavailable.
+
+### New Features
+- Added an audited CNY aggregate for option net cash flow, summing validated event-time conversions while keeping native-currency metrics available when CNY evidence is incomplete.
+
+### Improvements
+- Reduced required-data CSV projection validation overhead by building each canonical row once while preserving fail-closed schema and enrichment semantics.
+
+### Bug Fixes
+- Queried and persisted actual option fees by the specific broker order after automatic trade intake, with exact account isolation, terminal-order evidence, and recent-history retry instead of a full-ledger fee scan.
+- Scoped Strategy Lab formal-point positions, marks, and position-derived FX to the point market, rejecting unknown or cross-market evidence.
+
+## 3.4.2 - 2026-09-02
+
+### Bug Fixes
+- Bound Copilot option-performance period inputs to the current request before tool execution and recorded model-selected versus effective inputs, preventing valid natural-month and natural-year answers from failing evidence admission.
+
+## 3.4.1 - 2026-09-02
+
+### Improvements
+- Restored natural-month and natural-year option-performance reports across the CLI, Assistant, Analysis, and Copilot with canonical coverage and freshness evidence.
+
+### Bug Fixes
+- Replaced Copilot's generic answer-admission failure receipt with categorized evidence diagnostics and enforced frozen period selection for option-performance answers.
+
+## 3.4.0 - 2026-09-02
+
+### Breaking Changes
+- Replaced the public option-performance report with four MTD/YTD metrics and removed legacy custom periods plus activity, cash, PnL, capital, valuation, and assigned-stock fields.
+
+### Improvements
+- Unified option-performance calculations on canonical ledger cash facts, fee allocation, and average occupied capital while keeping CSP, CC, Combo Yield, and Wheel as grouping dimensions only.
+- Added a product-facing terminology reference for CSP, CC, bullish risk reversal, collar, and Wheel strategy relationships.
+
+## 3.3.1 - 2026-09-01
+
+### Improvements
+- Simplified the rebuilt Strategy Lab prepared option-position context to one canonical unversioned contract, removing obsolete compatibility handling.
+- Standardized product-facing option strategy terminology around Cash-Secured Put (CSP) and Covered Call (CC) while preserving internal persisted contracts.
+
+### Bug Fixes
+- Allowed Strategy Lab formal recommendation points to use sealed prepared position facts without requiring current-decision projection migration.
+- Prevented compact notifications from classifying Covered Call candidates as Puts.
+
+## 3.3.0 - 2026-09-01
+
+### New Features
+- Added account-scoped automatic Combo Yield adoption for uniquely matched, delivery-confirmed Funding Put and Participation Call fills, with successful grouping shown in the trade receipt.
+
+### Bug Fixes
+- Stopped runtime quality refreshes from scanning complete historical trade-intake audit logs while preserving explicit reconciliation access to that evidence.
+
+## 3.2.0 - 2026-09-01
+
+### New Features
+- Added a read-only two-day Strategy Lab engineering canary that validates complete formal-corpus and concentration-recipe evidence before starting the full 20-day research window.
+
+## 3.1.1 - 2026-09-01
+
+### Bug Fixes
+- Resolved stable release symlinks before verifying source identity, allowing deployed Strategy Lab previews to bind the audited release commit.
+
+## 3.1.0 - 2026-09-01
+
+### New Features
+- Added operator-controlled Strategy Lab workflows for deterministic 20-day concentration research and confirmed 10-day hidden validation, including low-priority batched Bid evidence, expiry outcomes, and auditable Research and Final Receipts without delaying production Tick.
+
+### Bug Fixes
+- Reduced each portfolio fetch to one CNH OpenD funds refresh and isolated accounts with unavailable prepared portfolio context before shared prefetch, while preserving healthy peer scans and scheduled failure alerts.
+- Let Copilot recover once from both plain and rejected answer attempts, preserve real cancellation and budget failures, and remove stale unrequested MTD cutoffs before option-performance reads.
+- Allowed the release gate to validate the unchanged GitHub merge commit that wraps an audited release-metadata commit on protected `main`.
+
+## 3.0.2 - 2026-08-31
+
+### Improvements
+- Reduced per-run Tick storage by omitting duplicated provider payloads from persisted prefetch summaries and compacting opening candidate snapshot JSON, without changing canonical required-data facts, candidate semantics, or notification behavior.
+- Added Strategy Lab evidence-source readiness and zero-wait, low-priority OpenD admission so historical evidence requests fail closed instead of delaying production Tick.
+
+## 3.0.1 - 2026-08-30
+
+### Improvements
+- Removed the retired internal option-intake and unused TradeIntent compatibility paths while preserving the current Assistant manual-trade commands and fill-timestamp parser coverage.
+
+## 3.0.0 - 2026-08-30
+
+### Breaking Changes
+- Removed the retired generic `./om research strategy-lab readiness`, `experiment`, `proposal`, and `llm-context` commands and their legacy artifact readers; use Shadow Replay for exploratory analysis and `strategy-lab top1-loop` for the formal 20-day research and 10-day hidden-validation workflow.
+
+### Improvements
+- Made Strategy Lab Top1 bind its scheduled service and experiment workspace to an explicit configured HK account, and consolidated runtime evidence on Formal Corpus.
+
+## 2.2.3 - 2026-08-29
+
+### Improvements
+- Made Strategy Lab Top1 readiness compute a bounded 20-day corpus-health view directly from formal corpus facts, removing the stale duplicate health-artifact dependency while retaining fail-closed calendar and storage-capacity checks.
+
+## 2.2.2 - 2026-08-29
+
+### Improvements
+- Retired redundant inline and loose-file copies for newly sealed required-data snapshots after durable canonical-blob verification, reducing runtime storage without changing historical reads, scan decisions, or notifications.
+
+### Bug Fixes
+- Reused startup option-position projection recovery during expiry maintenance and serialized SQLite WAL setup, writes, connection close, and artifact hardening under one writer lock, preventing duplicate refreshes and close-time locking failures.
+
+## 2.2.1 - 2026-08-29
+
+### Improvements
+- Reduced required-data CSV validation overhead for canonical snapshots without changing freshness or data-quality decisions.
+- Delegated post-trade Futu holdings refresh requests to Portfolio Management, so PM rereads its authoritative full snapshot while OM retains only trade facts and refresh intent.
+
+### Bug Fixes
+- Rejected new Wheel Call intents when Wheel is disabled for the account instead of allowing a stale candidate snapshot to reserve share coverage.
+
+## 2.2.0 - 2026-08-27
+
+### New Features
+- Added a manual Futu simulated-account experience scan for Sell Put, Covered Call, and Combo Yield that uses explicit one-contract demonstration capacity, skips account cash and holdings reads, never sends notifications, and marks every result as non-executable.
+
+### Improvements
+- Required every release-delta commit to reference a tracked design document or GitHub Pull Request so reviewers can recover the decisions behind the change before publication.
+- Warmed required US option chains before the opening scan so the first candidate pass can reuse complete quote evidence without changing scheduled-trigger or notification semantics.
+
+### Bug Fixes
+- Derived Covered Call and Combo Yield capacity from each option contract's authoritative multiplier, removing the fixed 100-share assumption and failing closed when multiplier evidence is missing or conflicting.
+
+## 2.1.3 - 2026-08-27
+
+### Bug Fixes
+- Allowed audited trade-event repairs to correct broker account and order identities, enabling canonical OpenD fee enrichment for legacy events with incomplete identity evidence.
+
+## 2.1.2 - 2026-08-27
+
+### Bug Fixes
+- Treated confirmed option assignments and no-execution expiries as actual zero-fee lifecycle events, while preserving real executed-order fees and fail-closed evidence handling.
+
+## 2.1.1 - 2026-08-27
+
+### Bug Fixes
+- Rejected unknown schedule fields during configuration validation instead of silently accepting misspelled or unsupported keys.
+- Validated persisted performance-evidence correction graphs independently of SQLite fact-ID ordering, allowing append-only superseding FX facts to remain readable after import.
+
+## 2.1.0 - 2026-08-27
+
+### New Features
+- Added a confirmed, audited cash-conversion correction path that replaces observed event-time CNY snapshots only when append-only FX evidence explicitly supersedes their bound rate fact.
+
+### Bug Fixes
+- Allowed authored US schedule gates to pass from YAML into runtime configuration and marked scheduler-status observations as current evidence for admitted operator answers.
+
+## 2.0.0 - 2026-08-26
+
+### Breaking Changes
+- Removed the retired legacy configuration and Daily Brief delivery migration CLI surfaces; installations must already use YAML authoring and current delivery state before upgrading.
+- Removed active `yield_enhancement` naming and configuration aliases in favor of `combo_yield`, while preserving read-only interpretation of historical ledger and artifact data.
+
+### Bug Fixes
+- Allowed a failed Copilot answer-admission turn to collect fresh read-only evidence before its single resubmission, so option-performance replies no longer fail by reusing stale observations.
+- Classified lifecycle-only option expiries as actual zero-fee events while keeping broker expiries with missing order identity explicitly incomplete until OpenD supplies authoritative fees.
+
+## 1.17.3 - 2026-08-26
+
+### Bug Fixes
+- Sealed each market's Strategy Lab formal expectation in its existing tick-cron before the production scan, preventing cross-market scheduler timing from leaving formal corpus days incomplete.
+
+## 1.17.2 - 2026-08-26
+
+### New Features
+- Added production-bound HK/US Strategy Lab formal corpus capture with deterministic gzip, source-hash readback, corpus health diagnostics, and fail-closed 20-day research gating while preserving ordinary scan and notification outcomes.
+
+### Improvements
+- Made persisted broker actual fees, including actual zero, the canonical executed-trade fee evidence for option cash-flow returns; controlled backfill freezes formula estimates only when actual fees are unavailable and preserves missing evidence as partial.
+- Tightened OpenD and Futu integration boundaries by moving provider adapters into their owning application and infrastructure modules and extending architecture regressions without changing public CLI behavior.
+
+## 1.17.1 - 2026-08-25
+
+### Improvements
+- Removed the obsolete Strategy Lab legacy-history migration preview and historical-window bridge; Top1 research now accepts only sealed current-corpus datasets, while existing archived runtime files remain untouched.
+- Added source-bound Strategy Lab corpus health receipts that expose current and first mature-day observations, 20-day accumulation progress, freshness, and blockers through readiness without changing research gates or production strategy.
+
+## 1.17.0 - 2026-08-25
+
+### New Features
+- Added canonical option cash-flow returns for MTD and YTD, combining signed option trades and fees with active secured-capital days across Sell Put, Covered Call, long-option, Combo, and Wheel positions.
+
+### Bug Fixes
+- Detected VERSION changes across the complete pushed commit range so queued release metadata commits still trigger the VERSION-driven publication workflow.
+- Scoped Strategy Lab Top1 readiness to its own scheduled units, kept corpus-only W3 accumulation healthy before validation capabilities are available, and distinguished position snapshot read failures from true position drift.
+
+## 1.16.0 - 2026-08-24
+
+### New Features
+- Added the controlled Strategy Lab Sell Put Top1 experiment workflow, with auditable 20-trading-day research, explicit confirmation before research and 10-day hidden validation, and immutable receipts without direct production-configuration writes.
+
+### Improvements
+- Captured compact account- and run-bound option-position, quote, FX, market-concentration, and ranking evidence at formal recommendation points, with complete-day corpus gating and exact source hashes for reproducible research.
+- Kept historical Strategy Lab migration preview-only and limited research archive inventory to selected runs, reporting evidence gaps instead of repairing or inventing legacy facts.
+
+### Bug Fixes
+- Classified Copilot option-performance results as aggregate evidence with explicit full-query coverage and fact-time freshness so historical T-1 results remain admissible.
+- Kept formal-point evidence collection fail-closed and best-effort so missing experiment evidence cannot interrupt ordinary scheduled scanning or notification delivery.
+
+## 1.15.19 - 2026-08-23
+
+### Bug Fixes
+- Bound each fixed scheduled target to its exact reliable Daily Brief revision before committing the scan watermark, allowing delivery-only recovery to rebuild the original report even after the successful-current pointer advances.
+- Recognized only the canonical `output -> output_accounts/<account>` compatibility symlink during scan-blob GC preview while continuing to block all other symlink traversal.
+
+### Improvements
+- Replaced prepared option-position context duplication with a compact v2 current-decision binding while retaining explicit v1 reads for historical runtime snapshots.
+- Reduced Shadow Replay data-plan receipts to hashes, counts, action summaries, and safety results while retaining exception type and a non-plaintext error hash, and added a separate three-way-verified `shadow-replay-receipts` remote-prune scope with preview and apply-time plan/content checks.
+
+## 1.15.18 - 2026-08-23
+
+### Bug Fixes
+- Serialized canonical option-ledger SQLite write transactions and connection-level WAL setup with a database-scoped process lock, preventing lifecycle receipt dispatch from racing auto-close projection refresh without holding the lock during provider sends.
+
+## 1.15.17 - 2026-08-23
+
+### Bug Fixes
+- Reported when a bounded Copilot trade-event query has reached the end of its current result set, so larger follow-up requests explain that a new query is required instead of failing evidence admission.
+
+### Improvements
+- Added a fast loopback-bind permission probe to full release preflight, giving an immediate non-sandbox rerun instruction while retaining the HTTP and model-path tests.
+
+## 1.15.16 - 2026-08-23
+
+### Bug Fixes
+- Kept follow-up Copilot answers bound to successful observations from the current request, preventing prior-turn evidence references from rejecting paginated replies.
+
+## 1.15.15 - 2026-08-23
+
+### Bug Fixes
+- Routed recent close-history requests to bounded canonical trade events, matched historical evidence claims to their freshness, and reported answer-admission failures separately from model outages.
+
+## 1.15.14 - 2026-08-23
+
+### Bug Fixes
+- Allowed the controlled trade-event pagination migration to preserve legacy rows whose sole contract defect is a non-positive timestamp only when a valid canonical void already neutralizes them.
+
+## 1.15.13 - 2026-08-23
+
+### Bug Fixes
+- Paged Copilot analysis materialization through the bounded trade-event cursor contract so history queries no longer exceed the 20-event tool limit.
+- Classified a failed forced-final turn after tool-budget exhaustion as budget exhaustion instead of reporting a model outage.
+
+## 1.15.12 - 2026-08-23
+
+### Bug Fixes
+- Kept isolated-worktree release preflight on the selected Python runtime so nested checks no longer fall back to an unsupported system interpreter.
+- Restored Copilot trade-event pagination by deriving its signing key from the existing inbound HMAC secret and removing the unused dedicated credential, with fail-closed paused-timer preservation during target service reconciliation.
+
+## 1.15.11 - 2026-08-23
+
+### Improvements
+- Bounded Copilot context growth with directory-based Pi tool activation, compact evidence projections, snapshot-stable cursor pagination for trade events, explicit freshness metadata, and Host-admitted answers.
+
+### Bug Fixes
+- Removed the API-key environment variable name from Copilot evaluation metadata so reports no longer expose credential lookup configuration.
+
+## 1.15.10 - 2026-08-22
+
+### Improvements
+- Shortened scheduled Tick task-to-notification latency by deferring non-delivery post-processing until after provider confirmation while preserving run finalization ordering and recording per-stage timing evidence.
+
+### Bug Fixes
+- Used authoritative OpenD contract terms for dividend-adjusted option positions and failed closed on ambiguous term drift before position reports, lifecycle processing, or Close Advice could consume it.
+- Made the active Assistant model profile the single operator-controlled context budget while preserving and validating the existing Pi startup protocol field.
+
+## 1.15.9 - 2026-08-21
+
+### Bug Fixes
+- Preserved validated business-day FX carry-forward conversions during replay so completed historical cash backfills remain idempotent.
+
+## 1.15.8 - 2026-08-21
+
+### Improvements
+- Reused successful Guardrails regression results for automatic VERSION-driven releases, removed duplicate local preflight suites, and made `update verify` service-health snapshot timing explicit.
+
+### Bug Fixes
+- Allowed audited official FX evidence to carry forward across explicitly listed weekend and holiday dates during historical cash-conversion backfills, while preserving the default 24-hour limit and never looking ahead.
+
+## 1.15.7 - 2026-08-21
+
+### Bug Fixes
+- Staggered HK and US expired-position maintenance to 09:05 and 09:07 Beijing time so the two market jobs no longer start concurrently.
+
+## 1.15.6 - 2026-08-21
+
+### Bug Fixes
+- Staggered automatic expired-position maintenance away from the HK opening tick and preserved intentionally paused timer activation during unattended upgrades.
+
+## 1.15.5 - 2026-08-21
+
+### Bug Fixes
+- Prevented Copilot from admitting token-truncated partial replies, compacted analysis-catalog observations, and allowed one tool-free continuation after read-only tool chains before failing closed with `BUDGET_EXHAUSTED`.
+
+## 1.15.4 - 2026-08-21
+
+### Bug Fixes
+- Persisted scheduled-tick USD/CNY and HKD/CNY evidence for option-performance conversion and attached event-time cash conversion snapshots to lifecycle terminal events.
+
+## 1.15.3 - 2026-08-21
+
+### Bug Fixes
+- Reused the active release's verified Pi dependencies when the lockfile is unchanged, avoiding redundant npm downloads during routine upgrades while retaining target-release smoke validation.
+
+## 1.15.2 - 2026-08-21
+
+### Bug Fixes
+- Preserved pre-Wheel Daily Brief digests for existing Sell Put, Covered Call, and Combo Yield candidates so historical confirmed deliveries remain valid after Wheel support is enabled.
+- Serialized expired-position maintenance runs within one runtime root, preventing simultaneous HK/US jobs from competing for SQLite WAL locks and racing shared run pointers.
+
+## 1.15.1 - 2026-08-21
+
+### Bug Fixes
+- Prevented Feishu and WeChat channel services from passing conflicting runtime scopes, restoring Copilot tool requests after the Pi cutover while preserving explicit config-path authority.
+
+## 1.15.0 - 2026-08-21
+
+### New Features
+- Completed the Pi Agent Core cutover for Assistant conversations, adding durable scoped sessions, provider-backed execution, guarded control handling, and rollback-safe release packaging while starting new Pi-backed conversation memory fresh at cutover.
+- Added opt-in Wheel monitoring for assigned Sell Put stock, with lot-scoped Covered Call candidates, shared stock-coverage limits, explicit trade attribution, and terminal called-away or manual-end lifecycle handling.
+
+### Bug Fixes
+- Scoped service, Tick, auto-close, and Assistant account selection to each market's runtime configuration, preventing HK-only setups and custom account labels from inheriting or accepting unrelated `lx` / `sy` accounts.
+
+## 1.14.12 - 2026-08-20
+
+### Bug Fixes
+- Corrected required-data prefetch observability for merged OpenD requests by aggregating per-request provider work while preserving de-duplicated snapshot counts and rejecting malformed child metadata.
+
+## 1.14.11 - 2026-08-20
+
+### Bug Fixes
+- Batch-resolved sealed required-data once per account scan and per consumer validation pass, eliminating per-symbol full-manifest receipt/blob revalidation that could exhaust the quote freshness window and produce incomplete US/HK candidate results.
+
+## 1.14.10 - 2026-08-19
+
+### Improvements
+- Included each candidate's symbol in Daily Brief event-summary labels.
+
+## 1.14.9 - 2026-08-18
+
+### New Features
+- Added a strategy-lab historical research window bridge.
+
+### Bug Fixes
+- Defaulted multi-account scan parallelism to the full account count when `runtime.multi_account_max_workers` is unset, so every account's opening-candidate decision stays within the option-snapshot freshness window (fixes sy's shared snapshot going stale and all its US sell-put candidates being rejected). Explicitly setting the value still caps parallelism.
+
+### Improvements
+- Made circuit-breaker `probe_max_accounts` an internal constant (1) instead of a user-facing config key — a half-open probe only needs one representative account, and exposing it added a config surface that could drift.
+- `pipeline_watchlist` now raises on an unknown `use` template reference instead of silently dropping the symbol's merged config (defense in depth; validate/build already rejects it).
+
+## 1.14.8 - 2026-08-18
+
+### Bug Fixes
+- Marked conversation-memory tool findings as historical snapshots so Copilot re-queries live read-only tools for candidate/run/position/notification questions instead of repeating stale conclusions (e.g. "0700 腾讯为什么被过滤" 复读旧结果而报「本轮未取得可验证的当前证据」).
+
+## 1.14.7 - 2026-08-18
+
+### Bug Fixes
+- Fixed auto-close-expired opening an empty SQLite ledger in the release directory instead of the real runtime store, which caused a concurrent "locking protocol" failure when both accounts ran against the same wrong file.
+- Corrected decision-brief batch time and null evidence rendering.
+
+## 1.14.6 - 2026-08-17
+
+### Improvements
+- Report the offending field name when decision-state normalization rejects a non-finite numeric value, making candidate-seal NaN failures diagnosable.
+
+## 1.14.5 - 2026-08-17
+
+### New Features
+- Integrated the Pi Agent Core process boundary (S1): a real child-process agent runtime with cancel/exit classification, stderr diagnostics, and a read-only tool bridge (S2).
+
+### Bug Fixes
+- Tolerated expiration-date ordering differences between the prefetch projection and side plans, fixing the US market-open first batch failing with "required-data projected expirations contradict side plans" when OpenD returned expirations out of chronological order.
+- Aligned the Top1 research window to 20 days and the validation window to 10 days.
+
+## 1.14.4 - 2026-08-17
+
+### Bug Fixes
+- Replaced the unreliable OpenD total-assets ratio exchange-rate derivation with a single market source (Tencent primary, Sina fallback), fixing decision-brief "折CNY" amounts that used a false USDCNY≈4.72 instead of ≈6.74.
+- Forced `refresh_cache=True` on the OpenD account-balance query so stale fund snapshots no longer understate money-fund balances and produce a bogus negative "available to open options".
+
+## 1.14.3 - 2026-08-17
+
+### Bug Fixes
+- Fixed HK decision-brief batches failing with "required-data CSV differs outside multiplier enrichment" when provider-projection and pipeline-CSV floats landed a few ULP apart (observed up to 3 ULP on otm_pct during lunch-reopen batches); blob validation now uses a 1e-12 relative tolerance, far tighter than any financial meaning.
+- Made fresh-evidence recheck fail closed when no current observation was obtained, and preserved quote snapshots when the multiplier cache skips enrichment.
+
+## 1.14.2 - 2026-08-17
+
+### Bug Fixes
+- Fixed OpenD probe paths (healthcheck, trading-day guard, trade push/backfill services) hanging indefinitely in the futu SDK reconnect loop when the gateway is offline; they now fail fast with a typed UNREACHABLE error.
+
+## 1.14.1 - 2026-08-17
+
+### New Features
+- Added a durable lifecycle-attempt audit pipeline that atomically binds broker observations, evidence, audit chains, restart reconciliation, and run seals to the existing SQLite ledger and controlled runtime flow.
+- Added current-decision projections with atomic writer fences, indexed current-state reads, migration and shadow verification, and query-only quality and performance consumers.
+- Added immutable per-account runtime portfolio snapshots that bind prepared portfolio inputs, current decision facts, source receipts, and replay references without rereading historical state.
+- Added content-addressed required-data scan blobs with canonical-first consumers, exact reachable-blob archive sync, and read-only retention and garbage-collection previews while retaining legacy compatibility during the migration window.
+- Added immutable Shadow Replay generations and a gated read-only historical-cleanup preview that verifies downstream cutover evidence before identifying removable legacy artifacts.
+
+## 1.14.0 - 2026-08-16
+
+### New Features
+- Added an opt-in experimental HK/lx Sell Put Top1 optimization loop that captures official recommendation points, compares baseline and challenger ranking profiles on a frozen 40-trading-day research corpus, validates the locked challenger over a separate 20-trading-day hidden window, and advances through an auditable scheduled runner without changing production strategy configuration or automatically adopting a winner. Its explicit W0R preflight records compact HK calendar, account fee-plan, quote, exact-expiration terms, history-quota, and exact-expiration close receipts while keeping raw provider responses out of storage.
+
+### Improvements
+- Reduced candidate scanning, Close Advice loading, alert rendering, and combo construction overhead by replacing pandas row iteration in hot paths with record materialization and by reusing the materialized put-leg set across call combinations.
+
+## 1.13.23 - 2026-08-14
+
+### Bug Fixes
+- Allowed Phase 3A projection migration verification in archive-based releases to resolve and integrity-check the exact version tag through the controlled Git mirror, eliminating `source_commit_unavailable` without accepting modified production source.
+
+## 1.13.22 - 2026-08-14
+
+### Bug Fixes
+- Required Copilot to re-check current read-only evidence before accepting a repeated historical diagnostic, preventing stale runtime-snapshot-unavailable answers from being reused when production artifacts are available.
+
+## 1.13.21 - 2026-08-14
+
+### Improvements
+- Added a checkpoint-and-tail projection path with exact changed-lot publication for ordinary append-safe option-position writes, while retaining canonical full-history replay for recovery, audit, research, backtest, repair, and any trust mismatch. On the deterministic 10,000-event reference benchmark, writer p95 wall and CPU time improved by about 95%.
+- Added read-only projection inventory, shadow verification, and status commands plus guarded apply, activate, and deactivate controls bound to the exact store, source, schema, implementation, and generation evidence. Release and upgrade leave checkpoint mode disabled until a separately authorized live activation.
+
+### Bug Fixes
+- Aligned Agent candidate, runtime-log, and runtime-run artifact resolution with the configured runtime root, so deployed tools read production artifacts instead of release-directory-local paths.
+
+## 1.13.20 - 2026-08-13
+
+### Improvements
+- Added notification-round run resolution to the `candidate_filter_explain` agent tool: with `run_selector=latest_notification` and an optional ISO `notification_date`, Copilot can resolve the run whose notification was actually delivered to the account on that date and explain why a symbol was filtered, instead of requiring an explicit run id or defaulting to the latest run. Resolution is fail-closed with explicit `no_notification_run`, `audit_window_truncated`, and `snapshot_unavailable_for_notification_run` reasons, and records `run_resolution` provenance in the output.
+
+## 1.13.19 - 2026-08-13
+
+### Bug Fixes
+- Sealed combo-yield candidate rank records as nullable integers, so valid funding-put candidates no longer fail the strict integer rank validation and abort the HK decision batch.
+
+## 1.13.18 - 2026-08-13
+
+### Breaking Changes
+- Removed candidate compatibility CSV production and consumption for Sell Put, Covered Call, SP+LC, and CC+LP, including scanner output/reject-log flags, Combo Yield `output_mode`, v1 status publication, and CSV-only adapters. Current candidate facts now require terminal manifest-bound JSON snapshots and JSONL trace; historical CSV-only runs remain untouched but unsupported for automated replay. Required-data, Close Advice, symbols summary, and mark/outcome CSV contracts are unchanged.
+
+### Improvements
+- Bound Daily Brief, Agent candidate explanations, Research, archive, Shadow Replay, Strategy Lab, and Combo Funding Put projections to one validated account-run candidate manifest with exact owner, scope, identity, file hash, status, reason, and count evidence; interrupted or inconsistent modern runs now fail closed instead of falling back to partial or stale candidate facts.
+
+## 1.13.17 - 2026-08-13
+
+### Bug Fixes
+- Normalized binary floating-point transport noise when rendering guarded historical trade receipts, so the displayed fill price matches the broker price already accepted by the ledger without weakening price validation.
+
+## 1.13.16 - 2026-08-13
+
+### Bug Fixes
+- Reconciled terminal lifecycle intake rows from the canonical frozen observation anchor when the evidence event ID identifies the observation itself rather than the original broker deal.
+
+## 1.13.15 - 2026-08-13
+
+### Bug Fixes
+- Reconciled completed lifecycle intake state from the canonical v2 terminal summary when legacy `decision_type` fields are absent, including the exact resolved lot IDs.
+- Allowed guarded historical receipt compensation for applied open trades whose original delivery was provably skipped because no route was available, while preserving duplicate and outbox evidence checks.
+
+## 1.13.14 - 2026-08-13
+
+### Improvements
+- Retired AI Decision Advice end to end: removed model generation, external-news collection, portfolio-distribution preparation, configuration, managed collector services, and current Daily Brief/Agent rendering. Deterministic candidate, position, funds, Close Advice, and Daily Brief authorities remain unchanged; legacy frozen deliveries containing AI content fail closed until separately resolved.
+
+### Bug Fixes
+- Preserved candidate and Daily Brief evidence integrity by treating deterministic non-positive premiums as policy rejections, retaining specific sealed RV gaps, accepting successful prefetch receipts, and requiring CC+LP snapshots only when that variant is effectively enabled.
+- Normalized binary floating-point transport noise at the three-decimal trade-price boundary, so broker fills such as `1.5699999999999998` resolve as `1.570` while genuinely over-precise prices remain rejected.
+- Classified only exact zero-price, fully filled Futu option orders recorded on contract expiration as broker-generated expiry receipts, allowing due lifecycle cases to settle while ambiguous orders continue to fail closed for review.
+
+## 1.13.13 - 2026-08-12
+
+### Improvements
+- Condensed the scheduled Daily Brief by removing repeated AI and candidate headings, shortening event copy, and showing shared-cash guidance only when per-candidate capacity is visible.
+
+### Bug Fixes
+- Limited fixed-report reminders to confirmed quote-prefetch, strategy-scan, or candidate-snapshot failures, while keeping ordinary no-bid and partial-data outcomes in structured audit evidence and treating successful `fetched` prefetch results as available.
+
+## 1.13.12 - 2026-08-12
+
+### Improvements
+- Limited known earnings-event blocking for Sell Put, Covered Call, and Combo Yield Funding Put to the inclusive six-natural-day window ending at expiration; day 7 and earlier remain non-blocking context, while same-day events remain pending for the full market-local date.
+
+### Bug Fixes
+- Made OpenD earnings-coverage failures contract-scoped and fail closed only when the near-expiry outcome remains unresolved, preserving fully evidenced candidates with a partial-universe warning and preventing unavailable evidence from being reported as clean `no_candidate` Advice.
+- Preserved Combo Yield Funding Put evidence and capacity diagnostics through Candidate Engine and sealed JSON by removing the cash prefilter drop, propagating capture status, validating malformed snapshot rows, and correcting candidate-universe completeness classification.
+
+## 1.13.11 - 2026-08-11
+
+### Bug Fixes
+- Restored Sell Put and Covered Call candidate evaluation for short-history underliers by accepting the canonical term-matched realized-volatility status, keeping term-matched RV authoritative when the legacy DTE-weighted estimate is unavailable, and preserving `partial_data` versus `data_unavailable` in sealed snapshots for fail-closed Advice and Daily Brief handling.
+
+## 1.13.10 - 2026-08-11
+
+### Bug Fixes
+- Fixed `feishu-ws --check` validation in metadata-only mode: `validate_for_serve` no longer requires a resolved `app_secret` value when running as a diagnostic check, allowing the upgrade health check to pass in subprocess contexts where the systemd credential directory is unavailable.
+
+## 1.13.9 - 2026-08-11
+
+### Bug Fixes
+- Fixed upgrade health check failure for `options-monitor-feishu-ws.service`: `feishu-ws --check` now uses metadata-only secret status (`resolve_secret_status`) instead of resolving the secret value, and `resolve_secret_status` degrades gracefully when the systemd credential backend context is unavailable (e.g. health-check subprocess lacks `CREDENTIALS_DIRECTORY`), preventing `SecretBackendUnavailable` from blocking production upgrades.
+
+## 1.13.8 - 2026-08-11
+
+### Breaking Changes
+- Removed the Position Advice v2 subsystem (authority service, promotion pipeline, notification authority, source receipts, agent tool, CLI `om position-advice`, and the `position-advice-promotion` service timer) after it was superseded by the strict close-advice policy; daily brief now reads close advice directly from `close_advice.csv`.
+- Removed staggered expiry pair (`staggered_expiry_pair` / diagonal) from the Combo Yield opening path: ranking, metrics, config validation, data-requirement planning, notification rendering, and shadow replay variants now support `same_expiry_pair` only; configs carrying removed keys are rejected with explicit diagnostics.
+
+### Improvements
+- Simplified close advice to a single strict profit-capture policy (`strict_profit_capture.v1`): close only when the position is OTM, at least 90% of the net premium is captured in the first half of the contract term, and all-in close cost and spread quality pass versioned thresholds; legacy tier thresholds and notify-level configuration are ignored with an explicit config validation warning.
+- Removed the legacy staggered-expiry notification authority gate from scheduled notification delivery, simplifying the per-account send path.
+
+## 1.13.7 - 2026-08-10
+
+### Improvements
+- Reduced external news-evidence collection from every 4 hours to every 24 hours and extended evidence freshness to 48 hours, preserving the existing two-refresh-cycle tolerance.
+
+### Bug Fixes
+- Completed the strict external-evidence response schema by requiring nullable `event_time`, preventing provider-side schema rejection before web search or generation.
+
+## 1.13.6 - 2026-08-10
+
+### Bug Fixes
+- Preserved pre-existing inactive, disabled, or masked timer states during upgrades when activation-state preservation is requested, preventing intentionally paused schedules from being re-enabled by service reconciliation or rollback.
+- Defined broker portfolio `avg_cost` strictly as OpenD `average_cost` without current-price or diluted-cost fallback, and treated shared-config Covered Call symbols absent from an account's holdings as a legal no-candidate result while keeping missing or corrupt portfolio evidence fail-closed.
+
+## 1.13.5 - 2026-08-10
+
+### Bug Fixes
+- Restored scheduled Daily Brief delivery after the AI Decision Advice rollout by preserving pre-existing confirmed Brief digests when their frozen revisions predate the new optional advice fields; unrelated digest mismatches still fail closed.
+
+## 1.13.4 - 2026-08-10
+
+### Bug Fixes
+- Restored HK scheduled failure reporting by routing Combo Yield capture statuses to their owning SP+LC or CC+LP snapshots instead of the opening put/call validator, and by publishing the validated portfolio identity receipt before required-data prefetch so OpenD or pipeline failures can reach the existing guarded Daily Brief failure path.
+
+## 1.13.3 - 2026-08-10
+
+### Bug Fixes
+- Kept runtime and channel diagnostics metadata-only: credential readiness now uses `SecretStatus` and degrades safely when a Linux process has no credential context, so scheduled runtime-status snapshots no longer require or read Feishu secret values.
+
+## 1.13.2 - 2026-08-10
+
+### Improvements
+- Bound AI Decision Advice account context to the configured portfolio distribution and authoritative prepared option-position source, with run, account, and source receipts preventing cross-account or fallback input drift.
+
+### Bug Fixes
+- Fixed restricted Incus `runtime-files` credential delivery to normalize the root-owned runtime parent to traverse-only mode, so hardened systemd `UMask=0077` cannot make per-service `0400` credential files unreadable by their owning service user after boot or restart.
+
+## 1.13.1 - 2026-08-10
+
+### New Features
+- Added an explicit Linux `runtime-files` secret-delivery profile for restricted Incus/LXC hosts, materializing fixed systemd-encrypted credentials into a root-owned tmpfs runtime directory without exposing secret values through argv, logs, or environment variables.
+
+### Improvements
+- Added a guarded `om service credentials-migrate` workflow with decryptability and consumer preflights, dry-run-first activation, active-service-only restarts, post-apply drift verification, rollback, and legacy shared-environment cleanup only after a successful cutover.
+
+### Bug Fixes
+- Fixed service-profile drift and rollback to compare against the profile persisted on disk, so failed credential migrations restore the previous profile and unit state instead of validating against the requested target profile.
+
+## 1.13.0 - 2026-08-10
+
+### New Features
+- Completed the account-scoped AI Decision Advice workflow for Sell Put and Covered Call: each run now prepares an explicitly configured portfolio-management distribution, authoritative open-option context, deterministic one-contract projections, frozen external evidence, and strict `keep` / `switch` / `defer` / `needs_review` advice for the existing Daily Brief and Agent read surface.
+- Added the managed external-evidence pipeline with anonymous market observation sets, audited native web-search coverage, bounded concurrent refresh, immutable evidence snapshots, and fail-closed handling for new symbols or incomplete searches.
+
+### Improvements
+- Hardened model privacy and auditability with random account references, exact run/account/source bindings, a deterministic fact registry, strict evidence references and action ceilings, and an account-level options decision-advisor role that cannot generate candidates, alter strategy rules, execute trades, or replace the user's decision.
+
+### Bug Fixes
+- Removed legacy and inferred Advice data paths, froze evidence at Advice start, preserved legal zero-candidate runs without a model call, and made material advice transitions, Daily Brief rendering, reuse, and Agent reads consume the same validated recommendation instead of drifting across retries or notifications.
+- Aligned the commit-message guardrail with the canonical `chore: release <version>` subject required by delta coverage, so validated release metadata commits no longer require bypassing repository hooks.
+
+## 1.12.1 - 2026-08-10
+
+### Bug Fixes
+- Fixed macOS Keychain provisioning to answer both native password prompts through a private PTY, preventing a successful `security` exit from storing an empty credential while keeping values out of argv, output, and temporary files.
+
+## 1.12.0 - 2026-08-10
+
+### New Features
+- Added optional AI Decision Advice that assembles sealed and redacted candidate evidence, calls configured LLM providers through an advisory-only boundary, validates and provenance-seals results, supports deterministic reuse, and renders advice in the Daily Brief without changing Candidate Engine decisions or gaining trade, write, or notification authority.
+- Added typed logical-credential storage with macOS Login Keychain and Linux systemd encrypted credentials, hidden interactive provisioning, redacted status and settings diagnostics, managed service credential wiring, and an explicit deprecated environment backend for migration.
+
+### Improvements
+- Hardened public and model-facing projections, path-scoped diagnostics, private file and SQLite permissions, provider-evidence retention, and repository guardrails against broker, financial, path, email, and credential-shaped data leakage.
+
+## 1.11.0 - 2026-08-08
+
+### New Features
+- Added the CC+LP (Covered Call + Long Put, same-expiry) opening-candidate variant to the Combo Yield module, mirroring the SP+LC policy: Sell Call is the funding leg and independently scans with the full Sell Call hard gates (annualized net-premium floor, `max(min_strike, avg_cost*1.02)`, max strike, liquidity, expiry window, and underwriting gates including net income, IV/RV, and earnings coverage); Long Put is the reversal leg with delta 0.10-0.25; the combination requires `call_strike > put_strike`, `net_credit / call_net_credit >= 0.20`, and uses the held-stock current market value (`spot * multiplier`) as the return denominator without deducting net credit.
+- Ranked CC+LP candidates by retained net credit first, then reversal-put delta closeness to 0.12, then two-leg spread and liquidity; `combo_yield.variant=cc_lp` selects the variant (default `sp_lc` keeps the existing behavior unchanged).
+- Sealed per-account run CC+LP candidate decisions into an immutable `cc_lp_candidate_snapshot.v1` and loaded the snapshot into the Daily Brief data source (renderer unchanged).
+
+## 1.10.19 - 2026-08-08
+
+### Bug Fixes
+- Hardened the notification-perception read tool's path boundary: `run_id` is now validated as a single safe path component, run-scoped reads are contained under `output_runs` instead of the whole repo root, and symlinked `output_runs` / `output_shared` / run / `state` directories are explicitly rejected, closing path-traversal and symlink-escape reads outside the runtime boundary.
+
+## 1.10.18 - 2026-08-08
+
+### Improvements
+- Aligned Combo Yield opening candidate policy with the confirmed Sell Put + Long Call definition: Funding Put reuses the complete Sell Put underwriting hard gates (including net-income thresholds), the combination cost constraint is unified to `min_net_credit_retention=0.60` as the single expression of "at most 40% of put premium funds the call", and cash required uses the net-premium basis (`put_strike * multiplier - combo_net_credit`). Removed `funding_mode`, `max_call_cost_to_put_credit`, `max_debit`, and `max_debit_native` configuration fields are now explicitly rejected by config validation instead of silently accepted.
+- Reordered Combo Yield selection by retained deterministic premium first (`net_credit_retention`), then call participation, spread, and liquidity; cross-symbol ranking now uses the Funding Put whole-period non-annualized net return instead of the annualized return.
+- Sealed per-account run Combo Yield candidate decisions into an immutable `combo_yield_candidate_snapshot.v1` and switched Daily Brief consumption from CSV to the sealed snapshot, removing the consumer-side second ranking.
+
+### Bug Fixes
+- Made the run-level Combo Yield snapshot sealing actually trigger: symbol monitoring now reports combo capture status into the same status sink used by Sell Put and Covered Call, and the watchlist seals the snapshot based on that status instead of a never-populated family field.
+
+## 1.10.17 - 2026-08-08
+
+### Bug Fixes
+- Scoped Daily Brief scan-failure wording to the failed symbol instead of the strategy family: reminders now list each failed symbol per strategy, the candidate section appends an omission line when other candidates remain, and the empty-candidate summary names the failed symbols, so a single-symbol failure no longer reads as a whole-strategy outage.
+
+## 1.10.16 - 2026-08-07
+
+### Bug Fixes
+- Classified OpenD zero-bid option snapshots as an ineligible market state when contract identity, quote, and state evidence are complete, so no-current-bid contracts no longer degrade opening scans to partial_data; missing or negative bid values still fail closed as data_unavailable.
+
+## 1.10.15 - 2026-08-07
+
+### Bug Fixes
+- Replaced update_time-based opening quote freshness with OM-recorded snapshot acquisition receipts and a decision-time 300s re-check, so illiquid HK option contracts whose update_time only reflects the last trade or order-book change are no longer fail-closed as stale; rejects now distinguish contract ineligibility, unavailable evidence, and policy rejection, and partial evidence degrades strategy scans to an explicit partial_data status that surfaces in the Daily Brief instead of silently dropping candidates.
+
+## 1.10.14 - 2026-08-07
+
+### Bug Fixes
+- Made post-upgrade Feishu WebSocket health checks explicitly merge the managed credential env file after the base service env under `sudo`, preventing secure credential deployments from being falsely rolled back as missing credentials.
+
+## 1.10.13 - 2026-08-07
+
+### Improvements
+- Brought the encrypted Feishu Agent credential materializer, consumer drop-ins, and oneshot execution health under the repository service profile and drift contract, so adopted hosts preserve the credential dependency across manual and automatic upgrades.
+
+## 1.10.12 - 2026-08-07
+
+### Improvements
+- Aligned Sell Put and Covered Call opening candidate policy in the domain Candidate Engine with spot-bounded recall windows, whole-period net return anchoring, near-return strike preference, and contract-level decision evidence.
+- Bound opening capacity to physical accounts with same-currency cash and securities priority and explicit OpenD FX fallback, so capacity authority follows one per-account decision.
+- Established OpenD earnings-calendar capability with run-shared, market-scoped coverage, treating empty calendars as authoritative absence rather than provider failure.
+- Normalized OpenD opening quote evidence and established term-matched realized volatility with explicit trade-date market mapping at the Futu gateway boundary.
+- Sealed per-account opening candidate snapshots so Agent analysis, Daily Brief, and Position Advice consume one immutable decision record.
+- Removed legacy opening candidate paths, event resolvers, and yfinance/Sina dependencies from the current opening flow, and added opening-policy shadow replay coverage.
+
+### Bug Fixes
+- Failed closed on unclassified opening shadow differences so unknown policy divergence blocks promotion instead of passing silently.
+- Hardened opening candidate policy evidence so sealed snapshots preserve resolved policy thresholds, capacity authority, and contract-level rejections instead of re-evaluating with defaults.
+- Normalized trade-date market at the Futu gateway boundary so historical K-line dates survive OpenD realized-volatility intake.
+
+## 1.10.11 - 2026-08-06
+
+### Improvements
+- Aligned Sell Put opportunity selection with assignment-tolerant underwriting by using a spot-bounded 20% strike recall window, mid-price limit economics, whole-period net return, and near-return tie-breaks where concentration and open interest remain ranking evidence instead of hard gates.
+- Made Sell Put market and capital evidence explicit with five-minute active-session quote freshness, DTE-matched OpenD realized volatility, fixed implied-volatility units, and settlement-currency cash capacity with stale-FX controls.
+- Consolidated Close Advice short-vol compatibility in the domain model and removed obsolete opening-strategy adapters without changing historical position interpretation.
+
+### Bug Fixes
+- Made Sell Put fail closed when live spot, quote, required realized-volatility windows, earnings coverage, cash headroom, or required FX evidence is missing or stale, preventing incomplete OpenD or runtime data from becoming actionable recommendations.
+
+## 1.10.10 - 2026-08-06
+
+### Improvements
+- Simplified required-data validation by consolidating typed coverage evaluation and removing redundant output-layer and post-failure revalidation, while preserving fail-closed checks at the canonical OpenD evidence boundary.
+
+## 1.10.9 - 2026-08-06
+
+### Bug Fixes
+- Accepted complete OpenD required-data evidence independently of scope, child-request, and contract-code ordering, and treated fully observed filtered-empty grids as successful empty results while retaining fail-closed checks for missing snapshots, exact contracts, stale evidence, and identity mismatches.
+
+## 1.10.8 - 2026-08-05
+
+### Bug Fixes
+- Validated required option-chain and volatility coverage against each account's requested symbol and expiry scope, preventing complete scoped runs from being rejected because unrelated catalog rows were absent while still failing closed on genuinely missing inputs.
+
+## 1.10.7 - 2026-08-05
+
+### Bug Fixes
+- Made Daily Brief consume the immutable run-scoped prepared portfolio context and recognize non-applicable strategy scans as terminal, preventing valid account runs from being downgraded to missing-context or scan-failure states.
+
+## 1.10.6 - 2026-08-05
+
+### Bug Fixes
+- Reused the run-scoped prepared portfolio context when publishing Position Advice sources, preventing valid hashed context artifacts from being misclassified as missing and restoring the authority path for scheduled Daily Brief delivery.
+
+## 1.10.5 - 2026-08-05
+
+### Bug Fixes
+- Accepted complete OpenD finite strike grids whose configured interval endpoints are not listed contracts, while retaining strict endpoint validation when provider completeness evidence is absent.
+- Bounded settlement observation retries around unavailable or repeating provider results while preserving canonical ledger authority and local deadline reconciliation, preventing expensive lifecycle retry loops.
+
+## 1.10.4 - 2026-08-05
+
+### Bug Fixes
+- Kept multi-account option data, prepared portfolio facts, and execution context coherent within each run, preventing cross-account state from affecting option monitoring and advice.
+- Unified required-data physical binding identity between global plans and expected fetch contracts, preventing valid scans from being blocked by a mismatched binding hash before candidate generation and notification.
+
+## 1.10.3 - 2026-08-05
+
+### Bug Fixes
+- Removed the unsupported Futu account cash-flow query from lifecycle settlement observations and close-reason resolution, so an unavailable broker data source no longer leaves valid option closures permanently incomplete; cash-settled contracts remain fail-closed from contract metadata.
+
+## 1.10.2 - 2026-08-05
+
+### Bug Fixes
+- Adapted canonical string Futu account IDs to lossless SDK integer values only at the broker adapter boundary, preventing valid real accounts from being rejected as nonexistent while preserving exact account identity in config and durable state.
+
+## 1.10.1 - 2026-08-05
+
+### Bug Fixes
+- Hardened run-scoped multi-account authority so account selection, runtime paths, prepared portfolio facts, and completion receipts remain bound to one immutable run workspace instead of leaking across accounts or configuration generations.
+- Separated the canonical Futu quote route from per-account broker gateways, validating each broker identity before use and preventing multi-account trade intake, settlement, positions, and health checks from querying an account through the wrong OpenD endpoint.
+
+## 1.10.0 - 2026-08-04
+
+### New Features
+- Added a guarded historical trade-receipt compensation workflow that validates exact ledger and intake-state evidence, freezes the reviewed payload and route, sends one idempotent combined receipt, and never replays economic events.
+
+### Improvements
+- Reduced Feishu agent response latency by removing foreground model-based memory compaction while preserving read-only structured-memory context and fail-closed handling of malformed stored memory.
+
+### Bug Fixes
+- Made required-data completion authority require exact account-scoped fetch contracts, provider coverage, volatility and expiry evidence, immutable output bytes, and terminal receipts, preventing partial, stale, or cross-account market data from becoming candidate authority.
+- Retired the scheduler's deprecated shadow execution path and reject `--run-if-due` before config, state, or adapter effects, preventing hidden duplicate scan execution.
+
+## 1.9.3 - 2026-08-04
+
+### Bug Fixes
+- Bound Strategy Lab mark sampling to one canonical Futu account and OpenD endpoint, removing unrelated OpenD service dependencies while making ambiguous legacy bindings and malformed ports fail closed.
+
+## 1.9.2 - 2026-08-04
+
+### Improvements
+- Simplified the position-fact review section by removing redundant explanatory copy while keeping the section hidden when there are no review items.
+
+### Bug Fixes
+- Made lifecycle discovery create-only and centralized existing-case deadline and state transitions in the canonical account-scoped reconciler, preventing history backfill from overwriting broker timing policy or invalidating prepared per-account notifications.
+
+## 1.9.1 - 2026-08-03
+
+### Bug Fixes
+- Restored trade-intake receipts for ordinary open fills while keeping lifecycle notifications on the durable outbox, requiring persisted outbox evidence before suppressing direct delivery, and preventing blind retries or duplicate backfill receipts.
+
+## 1.9.0 - 2026-08-02
+
+### New Features
+- Added durable lifecycle receipt delivery batches that aggregate same-route case transitions across accounts, preserve every case-level audit intent, and expose batch inspection and reconciliation controls.
+
+### Bug Fixes
+- Prevented row-by-row lifecycle receipt storms and automatic duplicate retries by enforcing one paced provider call per route, atomically settling batch members, and freezing ambiguous or stale sends for explicit review.
+
+## 1.8.5 - 2026-08-01
+
+### Bug Fixes
+- Skipped legacy Shadow Replay datasets without verifiable integrity before consuming Strategy Lab sampling quota or OpenD capacity, while preserving them as read-only evidence and validating direct write collection before provider or cache activity.
+
+## 1.8.4 - 2026-08-01
+
+### Bug Fixes
+- Kept Strategy Lab OpenD cache and rate-limit state under the configured runtime root and inherited conservative endpoint limits from the service profile, preventing release-local limiter silos and repeated provider throttling.
+- Made generated systemd execution bounds effective for controlled one-shot services by using `TimeoutStartSec` instead of the ignored `RuntimeMaxSec` directive.
+
+## 1.8.3 - 2026-08-01
+
+### Bug Fixes
+- Bounded Strategy Lab OpenD sampling after the first confirmed provider rate limit, deferring the remaining collection work instead of exhausting the service runtime budget while preserving fail-closed handling for other collection errors.
+- Made IQ stock-refresh evidence trust explicit no-trigger, option-only, dry-run, and already-synchronized outcomes while keeping observed activity without an intent unavailable and rejected or failed refreshes partial.
+
+## 1.8.2 - 2026-08-01
+
+### Bug Fixes
+- Made IQ option-position reconciliation consume lifecycle cases, timing policies, allocations, and position lots from one account-coherent SQLite snapshot, while reporting unavailable evidence instead of a false persistent divergence when that read cannot be proven.
+- Made Position Advice promotion retain integrity-valid legacy position-fact sources as incompatible archive evidence, exclude them from the current gate, and wait successfully when no compatible source exists while still rejecting malformed current-contract inputs.
+
+## 1.8.1 - 2026-08-01
+
+### Bug Fixes
+- Restored IQ option-position validation by enriching missing OpenD contract multipliers from authoritative market snapshots and treating only exact, in-deadline lifecycle-owned quantity differences as non-blocking partial evidence, while unresolved evidence and true divergences remain fail closed.
+- Canonicalized broker option roots when matching lifecycle contracts, preventing supported aliases such as `TCH` and `POP` from creating false contract conflicts.
+- Resolved broker identity from nested lifecycle evidence so unrelated historical stock-settlement facts no longer create false blockers for expired-position maintenance.
+
+## 1.8.0 - 2026-07-31
+
+### New Features
+- Added review-gated post-trade Combo reconciliation that derives deterministic Put/Call lot pairings from authoritative ledger facts and writes canonical Combo identities only after exact operator confirmation.
+
+### Bug Fixes
+- Hardened lifecycle and position-fact reconciliation with account-coherent frozen evidence, exact Combo membership validation, and per-case due-run isolation so malformed or ambiguous holdings fail closed without interrupting unrelated cases.
+- Made read-only trade-intake reconciliation reject corrupt persisted JSON instead of treating it as an empty state, preserving fail-closed production quality signals.
+
+## 1.7.8 - 2026-07-31
+
+### Bug Fixes
+- Corrected the IQ quality producer to treat Strategy Lab units as auxiliary, scope lifecycle and option-position evidence by market, and distinguish canonical lifecycle-owned intake rows from actionable stale state while failing closed on ambiguous ownership.
+
+## 1.7.7 - 2026-07-31
+
+### Bug Fixes
+- Stopped lifecycle migration inventory from treating voided or internal manual/system close events as missing broker deals, while recovering legacy Futu closes only when all available account identities agree.
+
+## 1.7.6 - 2026-07-31
+
+### Bug Fixes
+- Made legacy lifecycle cutover require operator-curated account-scoped evidence, existing terminal events, valid allocations, and closed lot projections, while bridging waiting cases only to an existing v2 case with a frozen timing policy; frozen history no longer creates economic terminal events or delivery retries.
+
+## 1.7.5 - 2026-07-31
+
+### Improvements
+- Split expired-option handling into independently auditable close-fact and close-reason phases, unifying Futu push and history polling under account-scoped immutable evidence, frozen settlement observations, and a durable notification Outbox.
+
+### Bug Fixes
+- Prevented cross-account, ambiguous, price-mismatched, or out-of-window stock settlements from being recorded as assignment or exercise, and required canonical terminal events, allocations, and projection changes before marking lifecycle cases written or creating final receipts.
+- Made expiry, assignment, and exercise reconciliation fail closed on incomplete or conflicting broker evidence while preserving idempotency across Push/Poll arrival order, so repeated scans cannot repeatedly emit the same final Feishu receipt.
+- Corrected Daily Brief price presentation and separated non-actionable position fact reviews from trading actions, preventing review-only rows from being shown as close or roll recommendations.
+
+## 1.7.4 - 2026-07-30
+
+### Bug Fixes
+- Restored per-account scheduled Daily Brief failure notifications when the normal Position Advice source graph is unavailable, using only a purpose-restricted token derived from the current run's verified immutable portfolio identity while keeping normal reports fail closed.
+- Bound fixed-failure authority tokens to the exact persisted delivery envelope and upgraded recovered reports only when no accepted, ambiguous, or in-flight provider evidence exists, preventing cross-run substitutions, duplicate sends, and stale failure messages after recovery.
+
+## 1.7.3 - 2026-07-29
+
+### Bug Fixes
+- Aligned ledger preflight with canonical projection handling for historical events superseded by a valid void, allowing new broker fills to be recorded while active invalid events continue to fail closed.
+
+## 1.7.2 - 2026-07-29
+
+### Bug Fixes
+- Validated the complete immutable Position Advice artifact before filtering its returned rows by market, preventing valid multi-market advice from being rejected as an authority conflict.
+
+## 1.7.1 - 2026-07-29
+
+### Bug Fixes
+- Ignored validation diagnostics from historical ledger events already superseded by a valid void, allowing Daily Brief and Position Advice to trust the repaired projection while unresolved invalid events continue to fail closed.
+
+## 1.7.0 - 2026-07-29
+
+### New Features
+- Added deterministic Combo Yield shadow-replay experiments with variant evaluation, funding and settlement analysis, and archived redacted evidence for Strategy Lab research.
+- Added a transactional, schema-aware configuration control plane for account, symbol, and settings changes, with runtime readiness checks and safer upgrade and service-drift operations.
+
+### Improvements
+- Hardened opening-opportunity monitoring by unifying candidate eligibility, ranking, trace evidence, and strategy-aligned required-data planning across Sell Put, Covered Call, and Combo Yield.
+- Hardened holdings management with exact ledger identity and economics, atomic lifecycle and trade handling, broker snapshot receipts, and authority-safe Position Advice inputs.
+- Made runtime notifications fail closed and recover safely through durable Daily Brief revisions and envelopes, exact scheduler target identity, notification perception, and authority-safe Position Advice delivery.
+- Made failed VERSION-driven releases recoverable through a guarded manual retry that reruns the same current-main metadata, coverage, test, archive, and publication gates.
+
+### Bug Fixes
+- Bound Close Advice evaluation to an immutable per-run required-data plan and verified manifest integrity through report publication, preventing cross-account or mid-run snapshot drift.
+- Made Daily Brief reuse the canonical Close Advice notification selector for pricing status, tier, ranking, and per-account limits, preventing optional or truncated buy-to-close rows from appearing as recommendations.
+- Prevented staged or custom systemd unit roots from querying the host systemctl, eliminating Linux-only false timer activation drift while preserving live-root checks and explicitly injected runners.
+
+## 1.6.5 - 2026-07-28
+
+### Improvements
+- Added direction-aware recommended prices to both Combo Yield legs in Daily Brief cards, using pipe-separated mobile-friendly lines and explicit unavailable states when a leg quote is missing.
+
+### Bug Fixes
+- Froze one immutable required-data snapshot and prepared portfolio context across every account in a shared scan, preventing later accounts from observing newer broker data or rebuilding inconsistent strategy evidence.
+
+## 1.6.4 - 2026-07-28
+
+### New Features
+- Added an automatic daily Position Advice promotion-evidence refresh that discovers the exact current v2-shadow plan generation, computes safety counters from immutable plans, runs deterministic critical replays, and publishes the fixed gate without performing the final v2 authority CAS.
+
+### Improvements
+- Added promotion refresh/status CLI operations, preserved exact shadow sources in a compressed content-addressed archive without pinning complete output runs, and surfaced the exact passing evidence path and expected policy hash for the final human CAS.
+
+## 1.6.3 - 2026-07-28
+
+### Improvements
+- Replaced compact recommendation comparison tables in Feishu Daily Brief cards with mobile-friendly per-candidate summaries that keep the contract and key metrics together.
+
+### Bug Fixes
+- Allowed a first-use Position Advice authority policy to formalize only verified implicit v1 notification history while preserving immutable delivery receipts and requiring an explicit v1 bootstrap before v2 shadow mode.
+
+## 1.6.2 - 2026-07-28
+
+### Bug Fixes
+- Allowed first-use Position Advice authority binding to validate production nested portfolio receipts and made repeated quote observations within one multi-account run publish distinct immutable snapshots, so every account can enter and accumulate v2 shadow evidence.
+
+## 1.6.1 - 2026-07-28
+
+### Improvements
+- Added a mandatory release-delta coverage manifest and publication gate that maps every commit since the previous stable tag to an exact release note or an explicit no-user-impact reason.
+
+### Bug Fixes
+- Captured Position Advice source completion only after reading the ledger decision snapshot, allowing Account Runs to publish valid source receipts for v2 authority bootstrap.
+
+## 1.6.0 - 2026-07-28
+
+### New Features
+- Added Position Advice v2 as an independent portfolio-level advisory contract for existing option positions, comparing hold, roll, replace, reallocate, and manual-review outcomes from one coherent account snapshot while retaining Close Advice v1.
+- Added per-account v1/v2 advice authority, non-actionable v2 shadow generation, evidence-gated promotion, fail-closed Position Advice reads and notification selection, and controlled rollback without granting trading authority.
+- Added a fully funded staggered-expiry Combo Yield structure that selects one underwritten Funding Put per symbol and then maximizes Participation Call upside within expiry-gap and retained-premium constraints.
+
+### Improvements
+- Consolidated new Sell Put and Covered Call recommendations onto the single `insurance_underwriting` profile, removing configurable opening `return_first`, `short_vol`, and score-weight variants.
+- Ranked eligible Sell Put and Covered Call candidates first within each symbol and then across symbols by annualized net return, using assignment or strike margin and concentration only to break ties.
+- Made Combo Yield, Daily Brief, and agent-facing candidate selection reuse canonical domain ranking, including one best structure per symbol before cross-symbol truncation.
+- Planned option-chain and market-data fetching once from all enabled strategy requirements, using exact DTE-derived expirations instead of request-window counts as a business control.
+
+### Bug Fixes
+- Kept Daily Brief event summaries outside Feishu candidate tables by explicitly ending the table block before rendering event prose.
+- Required independently enabled Combo Yield scans to execute Funding Put underwriting with realized-volatility evidence instead of bypassing the opening hard gates.
+- Preserved an empty exact-DTE result as no required option-chain fetch, preventing a missing window from expanding into a full-chain request.
+- Aligned config validation with the runtime default underwriting strategy and removed the unused global `min_net_income` liquidity side channel.
+
+## 1.5.3 - 2026-07-27
+
+### Bug Fixes
+- Treated a timer-triggered oneshot service that is still activating during its own runtime check as healthy, while continuing to fail closed for an actual failed service.
+
+## 1.5.2 - 2026-07-27
+
+### Bug Fixes
+- Treated normally inactive systemd services triggered by active timers as healthy while continuing to fail closed when a timer-triggered service actually enters the failed state.
+
+## 1.5.1 - 2026-07-27
+
+### Bug Fixes
+- Preserved opt-in quality monitoring services during systemd service-profile reconstruction so drift checks no longer misclassify installed quality units or discard their metadata.
+
+## 1.5.0 - 2026-07-27
+
+### New Features
+- Added the versioned OM runtime and data-quality producer, atomic local artifacts, an independently authenticated loopback status endpoint, and local fail-closed gates for position-dependent advice and official option performance.
+- Added opt-in systemd units for the quality HTTP endpoint, 15-minute regular checks, one-minute due probes, and market-local US/HK day-end authoritative reconciliation.
+
+### Improvements
+- Made regular quality scans reuse still-current authoritative OpenD evidence and query the broker only for baseline creation, local ledger changes, due discrepancy rechecks, day-end reconciliation, or explicit operator refresh.
+- Preserved the other market's published evidence during a single-market day-end refresh and persisted only redacted control timing, trading-calendar, and local ledger revision hashes.
+- Separated validated development delivery from VERSION-driven publication, standardized future release notes as New Features, Improvements, and Bug Fixes, and kept production upgrades behind a separate explicit action.
+
+### Bug Fixes
+- Required legacy quality artifacts without an authoritative refresh deadline to rebuild their OpenD baseline instead of carrying old evidence indefinitely.
+
+## 1.4.30 - 2026-07-26
+
+### Fixed
+- Made broker-deal completion use only authoritative structured deal IDs and require complete split metadata, avoiding false duplicate suppression from unrelated numeric identifiers.
+- Made multi-lot broker closes and lifecycle closes atomic so a failed later split cannot leave a partially written ledger or projection.
+- Adopted late zero-price Futu close evidence into an exact existing generic expiry close without creating duplicate trade events, and made terminal lifecycle results converge stale intake state.
+- Added a durable per-source trade inbox and successful-backfill checkpoint so push/history overlap is idempotent and OpenD downtime longer than the configured lookback is recovered after restart.
+- Reconciled every configured trade source by default, reused OpenD history contexts safely, and exposed pending, stale-state, checkpoint, inbox, and callback-error diagnostics through runtime status.
+
+## 1.4.29 - 2026-07-25
+
+### Changed
+- Kept Daily Brief funds as compact prose lines in Feishu cards; only candidate comparisons, Combo Yield legs, and actionable-position advice remain tabular.
+
+## 1.4.28 - 2026-07-25
+
+### Added
+- Added Feishu Card JSON 2.0 rendering for proactive Daily Brief notifications, with compact comparison tables for Sell Put and Covered Call candidates, explicit two-leg tables for Combo Yield candidates, actionable-position advice tables, and account-funds tables.
+- Added a versioned, digest-verified proactive transport envelope so failed deliveries and delivery-only retries reuse the exact rendered card and logical idempotency key.
+
+### Changed
+- Kept single-candidate alerts compact and kept events, reminders, blocked scans, and other narrative context as prose instead of forcing all monitoring content into tables.
+- Limited the richer transport to Feishu while preserving the existing canonical flat notification text for WeChat, compatibility fallback, and safe rollback to older releases.
+
+### Fixed
+- Fell back to the existing Feishu `post` projection only after a definite permanent card rejection, using a distinct fallback UUID; ambiguous or transient sends remain fail-closed to avoid duplicate notifications.
+- Enforced local character and byte budgets with block-aware truncation so tables are never cut through a row and over-sized card requests are rejected before any provider call.
+
+## 1.4.27 - 2026-07-25
+
+### Added
+- Added adaptive Feishu conversation replies that render Copilot and rich Markdown responses as display-only Card JSON 2.0 content, including readable Markdown tables, while keeping short plain control and error replies as text.
+- Added block-aware character and byte truncation, safe link and mention sanitization, deterministic table-to-text fallback, and render metadata without duplicating response bodies in delivery receipts.
+
+### Changed
+- Persisted final Feishu reply transport envelopes before delivery so retries reuse the same content and UUID, while retaining legacy text-row compatibility and a top-level text copy that remains drainable after a code rollback.
+- Kept the adaptive renderer limited to inbound Feishu conversations without changing scheduled briefs, proactive notifications, other channels, or financial calculations.
+
+## 1.4.26 - 2026-07-25
+
+### Fixed
+- Allowed the canonical YAML authoring config to persist the `trade_intake.holdings_sync` subtree so the deployed stock/ETF holdings-sync dispatcher can be enabled without editing generated runtime JSON.
+- Kept trade-intake mode, confirmation, and other write-policy fields outside YAML authoring while validating holdings-sync values through the existing runtime contract.
+
+## 1.4.25 - 2026-07-25
+
+### Added
+- Added an asynchronous, account-isolated stock and ETF holdings-sync dispatcher from normalized Futu trade intake to the loopback portfolio-management API, with bounded retries, debounce, persistent deal-id deduplication, and audit receipts.
+- Added explicit account-mapping and runtime configuration for the holdings-sync boundary, which remains disabled by default and only starts for confirmed apply-mode trade intake.
+
+### Changed
+- Routed both Futu push events and history backfill through the same normalized post-intake callback while keeping option trades exclusively within the Options Monitor ledger.
+- Kept portfolio quantity and average-cost authority in portfolio-management by sending refresh intents rather than inferred position deltas or transaction records.
+
+## 1.4.24 - 2026-07-25
+
+### Added
+- Added a deterministic `option_performance_presentation.v1` contract for Copilot MTD/YTD answers, with total-first pure-option realized PnL and option-trade cash flow, account breakdowns, metric-specific CNY evidence, and compact supporting assignment and premium facts.
+
+### Changed
+- Made option-performance model projections consume only the presentation contract when available, while preserving a compatibility fallback for older tool results.
+- Clarified that option-trade cash flow excludes assigned-stock settlement and sale cash, and required Copilot answers to present realized PnL before cash flow without inventing missing CNY, fee, or net evidence.
+
+### Fixed
+- Exposed pure-option and assigned-stock realized gross/net components directly in account summaries instead of deriving them by subtracting combined totals.
+- Rejected unreadable performance answers that leak raw evidence identifiers, misorder MTD/YTD totals, omit cash-flow scope, or collapse partial CNY evidence into an all-or-nothing status.
+
+## 1.4.23 - 2026-07-24
+
+### Added
+- Added an explicit dry-run-first `option-performance cash-conversion backfill` command that enriches only missing/pending historical `cash_conversion.v1` snapshots from persisted event-time FX evidence.
+- Added atomic cash-conversion audit receipts with before/after event hashes, selected FX fact IDs, account/date scoping, and idempotent rerun reporting.
+
+### Changed
+- Extended cash-conversion provenance with the original rate source, source ID, and persisted performance-evidence fact ID while preserving existing write-time conversion behavior.
+- Kept FX evidence beyond the 24-hour booking window and cash fees without actual provenance explicitly unresolved instead of applying stale rates or inferred zero fees.
+
+## 1.4.22 - 2026-07-24
+
+### Added
+- Added a read-only all-short-options assignment stress scenario with one shared domain calculation for internal callers, the human CLI, Tool Gateway, and Copilot.
+- Added CNY cash/MMF coverage, assignment and fee details, expiry ladders, post-assignment asset distribution, funding liabilities, short-stock liabilities, and account/FX evidence in the versioned `portfolio.assignment_scenario.v1` result.
+- Added the project feature inventory and assignment-scenario usage contract to the README.
+
+### Changed
+- Read open short put/call lots strictly from the canonical SQLite projection and current non-option holdings, spot quotes, and explicit FX evidence from portfolio-management; long options are excluded entirely.
+- Reused the unified Futu stock-fee calculator and kept missing broker, currency, FX, or assignment-fee evidence explicitly partial instead of treating it as zero.
+
+## 1.4.21 - 2026-07-24
+
+### Fixed
+- Required every option-performance answer, including corrections and follow-ups, to state the explicit period and account scope before reporting monetary facts.
+- Recognized semantically equivalent evidence-limit wording such as `不可` and `不完整` in the production P1 gate, while retaining the requirement that partial observations be disclosed.
+
+## 1.4.20 - 2026-07-24
+
+### Fixed
+- Preserved the current user request and every current-turn tool-call/result pair during Copilot context compaction, distributing the context budget across large observations so a later catalog cannot evict the business report or original question.
+
+## 1.4.19 - 2026-07-24
+
+### Fixed
+- Prevented Copilot review answers from replacing an available business report with `analysis_catalog` schema metadata after context compaction; direct facts now take precedence, and incomplete reviews must state a supported partial conclusion plus the specific evidence gap.
+
+## 1.4.18 - 2026-07-24
+
+### Fixed
+- Accepted an explicit complete account enumeration such as `账户 lx+sy` in the production Copilot P1 MTD response gate, while retaining the canonical all-account tool-input check and human scope/currency review so narrowed account queries still fail closed.
+
+## 1.4.17 - 2026-07-24
+
+### Added
+- Added a Scene v3 Copilot prompt contract that compiles ordered behavior, quantitative options-trader persona, financial fact, tool, and channel fragments with prompt/tool-schema fingerprints and runtime provenance.
+- Added strict structural admission for raw JSON, fenced JSON, and fenced Markdown responses, plus expanded P1 cases for format compliance, non-expansion, no-trade conclusions, quantitative bias, and prompt-injection resistance.
+
+### Changed
+- Made Feishu Copilot default to concise, neutral Chinese from an options trader focused on quantitative analysis, while preserving user decision authority and allowing wait, hold, or insufficient-evidence conclusions.
+- Isolated user conversation context from fixed tool scope, limited tool execution to declared scene toolsets, and exposed safe scene preparation metadata without leaking prompt or tool traces.
+
+### Fixed
+- Made P1 command success require both structural and evidence gates so a missing or failed evidence result can no longer pass the release acceptance command.
+
+## 1.4.16 - 2026-07-24
+
+### Changed
+- Reworked the README and living documentation around the current CLI, Tool Gateway, YAML configuration authority, runtime output layout, deployment, research, Close Advice, Option Performance, and assigned-stock contracts.
+- Added a current ledger architecture document and separated living operational guidance from completed plans and historical migration evidence.
+
+### Fixed
+- Corrected obsolete commands, output paths, dry-run/apply semantics, service-render requirements, Shadow Replay overwrite behavior, installation guidance, and release-test document mapping.
+- Removed the obsolete Futu multi-account OpenD redesign plan and replaced the completed trade/position redesign document with a historical pointer.
+- Made the assigned-stock cash-conversion regression independent of the wall-clock date while preserving the 24-hour event-time FX evidence boundary.
+
+## 1.4.15 - 2026-07-23
+
+### Fixed
+- Made Feishu Copilot MTD option-performance questions execute the canonical `option_performance_report` on the first call by removing hidden null defaults, normalizing period-specific input, preserving channel-owned scope, and keeping omitted account scope as all accounts.
+- Split combined realized PnL into auditable pure-option and assigned-stock gross/net components while separately showing premium activity, option cash, fees, assignment settlement principal, assigned-stock sale proceeds, assignment state, and evidence gaps without changing ledger or accounting semantics.
+- Added deterministic regressions and P1 quality gates for the exact “7月 mtd 的期权收益” and “我写的是mtd” conversations so generic-analysis fallback, natural-month substitution, and silent narrowing to one account are rejected.
+
+## 1.4.14 - 2026-07-23
+
+### Fixed
+- Preserved the existing P0 Close Advice tier wording in Daily Brief notifications so strong, medium, weak, and optional standard close rows render as “强烈建议平仓”, “建议平仓”, “可观察平仓”, and “低价买回可选” instead of flattening every row to “建议平仓”; missing or unknown tiers retain the generic fallback and existing actionable counts.
+- Renamed the displayed `remaining_annualized_return` metric to “剩余权利金毛年化” without changing its calculation, value, strategy policy, notification selection, or runtime configuration.
+
+## 1.4.13 - 2026-07-23
+
+### Added
+- Added idempotent Close Advice decision-facet capture to Strategy Lab datasets so prospective replay evidence can be collected from the latest non-empty Close Advice run without changing production recommendations.
+
+### Changed
+- Enabled the existing Strategy Lab recorder to include complete Close Advice decision artifacts, while preserving candidate-only fallback, collision safety, and `P0_current` as the only production authority; P1/P2/P3 remain shadow-only.
+
+## 1.4.12 - 2026-07-23
+
+### Added
+- Added a formal Close Advice recommendation contract with stable policy version, recommendation state, decision basis, and evidence status fields while preserving `P0_current` as the only production authority and keeping P1/P2/P3 variants shadow-only.
+- Added prospective Close Advice Shadow Replay episode capture, point-in-time marking, lifecycle settlement, paired policy analysis, and readiness gates without mutating production recommendations, notifications, position state, or runtime configuration.
+
+### Changed
+- Daily Brief position sections now summarize total positions and positions that need action; when actionable rows exceed the message limit, the summary reports how many are shown instead of describing non-actionable rows as folded or unexpanded.
+
+### Fixed
+- Restored visible blank lines between Feishu `post` sections and items without injecting zero-width characters into Markdown nodes: blank separators now become dedicated plain-text spacer paragraphs, keeping desktop bold titles at the start of their own Markdown paragraphs.
+
+## 1.4.11 - 2026-07-23
+
+### Changed
+- Removed the historical monthly-income reporting model and its public Agent/CLI/Assistant/analysis/portfolio compatibility surfaces. Option performance now has one public authority: explicit `activity`, `cash`, `pnl`, and `capital` namespaces; real option trade cash remains `cash.option_trade_cash_gross` and is never presented as income or profit.
+
+### Fixed
+- Evaluated assigned-stock sale validation at the sale event time so canonical lifecycle projection can consume all facts that precede the sale, including same-day events later than the current wall clock.
+
+## 1.4.10 - 2026-07-23
+
+### Fixed
+- Frozen CNY cash conversions when option trade, assignment settlement, and assigned-stock sale events are written, preserving the original native amount, booking FX evidence, and idempotent retry semantics instead of re-pricing historical cash during report reads.
+- Kept legacy or newly written cash facts without a valid event-time FX snapshot explicitly `partial` with `amount_cny=null`, while exposing the missing reason and conversion evidence through `option_cash_components`.
+
+## 1.4.9 - 2026-07-23
+
+### Fixed
+- Made Sell Put market-data visibility account-invariant by removing the early native-currency cash strike cap; affordability remains enforced after candidates are visible through the canonical CNY capacity gate, preventing valid TCOM Put contracts from disappearing for `lx` while preserving fail-closed cash rejection.
+
+## 1.4.8 - 2026-07-23
+
+### Fixed
+- Feishu desktop rendering of proactive notifications: blank-line placeholder characters (zero-width spaces) no longer leak into rendered lines, which showed as leading spaces and broke line-start bold titles. The Feishu `post` projection now maps blank/spacer-only lines to native message paragraphs (one `md` node per paragraph); the canonical Markdown and the WeChat projection are unchanged.
+
+## 1.4.7 - 2026-07-22
+
+### Changed
+- Daily Brief position sections now show only actionable close, take-profit, or manual-review advice; observe and not-evaluable positions remain in the structured brief artifact and contribute to the omitted-position count without adding notification noise.
+
+## 1.4.6 - 2026-07-22
+
+### Changed
+- Daily Brief funds section now shows only the CNY-total lines (`现金总额（折CNY）` / `可用于期权开仓（折CNY）`) when the totals are available; per-currency cash and opening lines are kept as fallback for missing exchange-rate data instead of always being displayed.
+
+## 1.4.5 - 2026-07-22
+
+### Fixed
+- Daily Brief funds no longer degrade when secured margin exists in a currency missing from the cash table (e.g. an account holding only HKD money-fund assets while selling USD puts): cash and option-opening availability are now also aggregated to explicit CNY totals using the exchange rates embedded in the option positions context, per-currency opening is computed for cash currencies only, and the brief renders `现金总额（折CNY）` / `可用于期权开仓（折CNY）` lines alongside the per-currency ones.
+
+## 1.4.4 - 2026-07-22
+
+### Changed
+- Combo Yield candidates now render their Put/Call legs directly under the title, adjacent to the premium metrics line, instead of below the event line.
+
+### Added
+- Each Combo Yield leg line shows its executable reference price when the source quote exists: the Put leg carries its bid as the sell reference and the Call leg carries its ask as the buy reference; legs without per-leg quotes stay unchanged instead of inventing prices.
+
+## 1.4.3 - 2026-07-22
+
+### Fixed
+- Kept visible blank lines between Daily Brief sections and candidate items in Feishu App delivery: Feishu `post` Markdown nodes collapse empty lines, so section separators now use a zero-width-space spacer that survives the send path and restores readable spacing on mobile and desktop.
+
+## 1.4.2 - 2026-07-21
+
+### Added
+- Restored predictable full option-monitoring reports at the market-local `09:40`, valid whole hours, and `15:50`, and added half-hour immediate full reports only when new ordinary candidates are pending, all from the same canonical strategy scan.
+- Added read-only latest-report queries across enabled accounts and markets, backed by each account-market pair’s latest successful scan rather than its last notification.
+
+### Changed
+- Made fixed report points win when fixed-report and new-candidate conditions coincide, while manual or forced reliable scans may refresh the query snapshot without creating ordinary notification envelopes.
+- Limited funding presentation to cash total, funds available for option opening, and candidate capacity; total assets, NAV, and securities value are not shown.
+- Deprecated `notifications.daily_brief.enabled` as warning-only compatibility input with no authority to disable Daily Brief or restore Compact/Legacy scheduled routing.
+
+### Fixed
+- Prevented failed strategy pipelines from advancing the latest successful snapshot or being reported as a normal no-candidate result, and made unsupported combined multi-market execution fail before brief persistence or delivery work.
+- Persisted exact delivery messages, keys, and hashes with explicit failure, ambiguity, confirmation, and delivery-only retry semantics; delivery-only `--no-send` now leaves the original envelope pending.
+
+## 1.4.1 - 2026-07-21
+
+### Changed
+- Switched proactive Feishu App notifications to `post` payloads with exactly one Markdown node while preserving the canonical WeChat Markdown path, the 28 KiB preflight limit, delivery confirmation, retry, and operator-controlled text rollback boundaries.
+- Made Daily Brief the only scheduled ordinary-notification renderer; Compact Tick is now compatibility-only, Legacy Tick is deprecated, and manual or forced runs no longer auto-send ordinary Tick notifications.
+- Standardized Daily Brief, Tick compatibility output, no-candidate states, System Notices, and receipts on a mobile-flat Markdown layout with one H1, limited H2 sections, and flat `字段｜值` rows.
+- Shared minimal System Notice and Receipt presentation shells while keeping business state, deduplication, persistence, rate limits, retries, and provider behavior in their existing callers.
+- Removed legacy renderer-selection keys from defaults and examples while continuing to accept known old keys with compatibility warnings during the migration window.
+
+### Fixed
+- Removed nested-list, blockquote, and duplicate-title formatting that made Feishu mobile notifications difficult to read.
+- Made unsupported multi-market scheduled notification delivery fail terminally with deterministic idempotency evidence, and prevented compatibility artifacts from being treated as canonical delivery evidence.
+
+## 1.4.0 - 2026-07-21
+
+### Added
+- Added candidate-bound event risk projections to Daily Decision Briefs, including the nearest important event, evidence reliability, calendar-day distance, attention-window membership, and relation to Sell Put or Combo Yield expirations.
+- Added material candidate event transitions for event addition, date change, entry before expiration, evidence degradation, evidence recovery, and same-chain confirmed removal through the existing last-confirmed delivery lifecycle.
+
+### Changed
+- Made the current run-level `state/event_snapshot.json` the sole Daily Brief event authority; candidate CSV event compatibility fields no longer participate as fallback evidence.
+- Rendered every displayed candidate with one decision-oriented event state: confirmed event, confirmed no important event in the contract window, or temporarily unable to confirm.
+
+### Fixed
+- Prevented missing, malformed, stale, partial, conflicting, unsupported, or empty fallback evidence from being presented as confirmed event absence.
+- Prevented provider degradation and freshness-only metadata changes from being announced as event removal or other material candidate changes.
+
+## 1.3.7 - 2026-07-21
+
+### Fixed
+- Added actionable Daily Decision Brief close-position details with an advisory mid price, signed estimated close P&L, and remaining annualized return, while suppressing stale, unavailable, and malformed metrics.
+
+## 1.3.6 - 2026-07-21
+
+### Fixed
+- Suppressed Daily Decision Brief assembly, revision persistence, rendering, and delivery when an account tick explicitly denies notification, preventing no-op scheduled batches from emitting false “数据异常” briefs while preserving genuine pipeline-failure alerts and independent per-account delivery.
+
+## 1.3.5 - 2026-07-20
+
+### Changed
+- Replaced system-shaped Daily Decision Brief Markdown with a compact allowlisted user projection using readable option contracts, localized market/Beijing times, separate scheduled-batch context, and self-contained material-update snapshots.
+- Reframed opening opportunities as candidates, with candidate-scoped capacity, shared-cash warnings for Sell Put alternatives, and explicit scheduled versus manual/force presentation while preserving the existing US 09:40 plus hourly cadence.
+- Renamed candidate material-change events around candidate lifecycle semantics while preserving stable canonical action identities and delivery confirmation behavior.
+
+### Fixed
+- Preserved existing Combo Yield position attribution when no new Combo Yield candidate exists, without parsing or exposing internal strategy-group or leg identifiers.
+- Removed internal IDs, broker contract codes, raw enums, ISO timestamps, revision metadata, and rejection diagnostics from user-facing Daily Decision Brief Markdown while retaining structured audit evidence.
+
+## 1.3.4 - 2026-07-20
+
+### Changed
+- Replaced volatile live-contract HK Daily Brief Canary assertions with exact-run, per-account labeled-identity membership and raw-only disjointness acceptance, while keeping named contract checks confined to deterministic fixtures.
+- Recorded the production no-send Canary closeout, immutable evidence-manifest verification, adversarial plan/PR review results, and the explicit boundary that real provider sending remains separately authorized.
+
+## 1.3.3 - 2026-07-20
+
+### Added
+- Added preview-and-confirm Assistant and CLI support for per-symbol `combo_yield.enabled` YAML authoring, including validation, backup, and runtime-config rebuild.
+
+## 1.3.2 - 2026-07-20
+
+### Fixed
+- Made labeled Sell Put artifacts the only Daily Decision Brief candidate authority, with explicit fail-closed semantics for missing, malformed, partial, and invalid-empty labeled artifacts.
+- Prevented rejected or raw-only Sell Put contracts from re-entering Daily Brief ranking, actions, events, summaries, or rendered Markdown.
+- Unified Daily Brief CLI and Agent Tool reads on the effective `OM_RUNTIME_ROOT`, avoiding stale repo-local shadow revisions in production.
+- Distinguished active actions, non-action candidate evidence, and data quality in rendered briefs, and added exact prepared-message digest and render-limit evidence for no-send Canary verification.
+
+## 1.3.1 - 2026-07-20
+
+### Added
+- Added advisory automatic `major|minor|patch` release-version recommendations from standardized Unreleased intent and the remote stable-tag baseline, with explicit preview confirmation, freshness validation, and VERSION-only apply semantics.
+
+## 1.3.0 - 2026-07-19
+
+### Added
+- Added the canonical `daily_decision_brief.v1` account, market, and trading-date read model with deterministic action identity, priorities, actionability, and material-delta semantics.
+- Added immutable Daily Brief revisions, current and run-scoped envelopes, last-confirmed delivery pointers, bounded Chinese Markdown rendering, and pure-read CLI and Agent Tool surfaces.
+
+### Changed
+- Integrated the default-off Daily Brief into the existing scheduled notification path: the first confirmed single-market brief is sent in full, while later eligible scans send only material changes against the last successfully delivered revision.
+- Exposed expired live briefs as planning-only, preserved closed-market no-run behavior, and failed closed for unsupported multi-market outbound delivery.
+
+### Fixed
+- Recovered revision allocation after interrupted multi-file publication by advancing beyond all existing same-day immutable revisions without deleting history.
+- Treated stable actions returning from blocked, observe, or invalidated state into active P0/P1 as material changes while avoiding duplicate priority-upgrade events.
+
+## 1.2.420 - 2026-07-19
+
+### Fixed
+- Preserved snapshot analysis views when applying month filters while deriving trade-event months from Beijing timestamps or epoch milliseconds.
+- Added explicit query-filter metadata and empty-result evidence semantics for current exposure and requested-period trade-event queries.
+
+## 1.2.419 - 2026-07-19
+
+### Fixed
+- Stopped normal tick workspace preparation from silently deleting `output_runs` older than seven days, keeping retention under the explicit audited cleanup workflow.
+- Made multi-source trade-intake fail closed when any listener source terminates or crashes, with bounded sibling shutdown so the supervisor can recover instead of leaving an account silently unmonitored.
+
+## 1.2.418 - 2026-07-19
+
+### Fixed
+- Isolated the complete trade-intake runtime in a disposable child process so Futu SDK non-daemon threads cannot keep the service alive after terminal OpenD phone-verification detection.
+- Propagated the existing auth-required exit status 78 through a normal parent supervisor, allowing systemd restart prevention to stop the authentication log loop deterministically.
+
+## 1.2.417 - 2026-07-19
+
+### Fixed
+- Detected OpenD phone-verification failures while the Futu trade-context constructor is still synchronously reconnecting, allowing trade-intake to reach its stable auth-required exit instead of remaining trapped inside SDK construction.
+- Made multi-source shutdown cancel blocked sibling trade-context construction without entering the ordinary reconnect loop.
+
+## 1.2.416 - 2026-07-19
+
+### Changed
+- Added auth-aware lifecycle handling for the long-running trade-intake listener while preserving bounded automatic recovery for ordinary OpenD disconnects.
+- Added a public troubleshooting path for trade-intake authentication stops and manual recovery after OpenD phone verification.
+
+### Fixed
+- Stopped trade-intake from endlessly reconnecting and flooding logs when OpenD requires phone verification by exiting with stable status 78.
+- Prevented systemd from restarting trade-intake on the auth-required exit while retaining `Restart=always` for retryable failures.
+
+## 1.2.415 - 2026-07-19
+
+### Changed
+- Switched generated Runtime Status services to a bounded journal summary while preserving the full human and structured diagnostic surfaces.
+- Added a ten-minute systemd runtime limit to the observed stuck auto-close and Strategy Lab sample one-shot services without changing long-running listeners or tick timeouts.
+
+### Fixed
+- Prevented Runtime Status timers from amplifying large JSON envelopes into tens of thousands of journal lines.
+- Bounded journal summaries to 20 lines and 16 KiB even when runtime metadata, warnings, or errors contain long, multiline, or non-ASCII text.
+
+## 1.2.414 - 2026-07-18
+
+### Changed
+- Reduced full release preflight time by avoiding a redundant focused agent/plugin pytest pass before the complete suite.
+- Replaced two real 30-second cooldown waits in tests with narrow injected seams while preserving the production cooldown-policy assertion.
+
+### Fixed
+- Made isolated residual-Call attribution quality follow the actual gross and net PnL evidence status instead of treating time isolation alone as complete evidence.
+- Made assigned-stock Combo attribution fail closed when strategy metadata conflicts or required group provenance is incomplete, while preserving observed-empty behavior for ordinary non-Combo stock.
+
+## 1.2.413 - 2026-07-18
+
+### Changed
+- Set Python 3.12 as the repository-wide hard minimum across public launchers, installation, release preflight, service-upgrade runtime creation, generated release commands, Ruff, and CI.
+- Bound service-upgrade venv creation to the already-running supported interpreter while keeping shared dependency-cache identity stable at the Python major/minor contract.
+
+### Fixed
+- Prevented missing or incompatible repo virtualenvs from silently falling back to an older shell `python3`, including macOS Python 3.9; failures now report the selected executable, observed version, and remediation.
+
+## 1.2.412 - 2026-07-18
+
+### Added
+- Added true diagonal Combo Yield lifecycle support with independent funding-Put and participation-Call expiries, required composition dependencies, pair diagnostics, and lifecycle reporting.
+- Added additive cross-expiry strategy attribution for Funding Put, Participation Call, assigned stock, and residual Call tail lifecycles, including native-currency PnL conservation and risk-capital-days efficiency while preserving canonical report totals.
+
+### Changed
+- Made Combo Yield an explicit per-symbol runtime strategy step controlled solely by `combo_yield.enabled`, independent of Sell Put enablement, prefiltering, candidate availability, or scan failure.
+- Kept Call premium as the Participation Call lifecycle cost basis, reported Put-to-Call funding separately, and failed closed instead of mismatching residual-tail PnL when an exact Put-close transition mark is unavailable.
+- Planned Combo Yield Put and Call required-data prefetch independently and preserved market funding configuration when Sell Put is disabled for an account.
+
+### Fixed
+- Cleared disabled or failed strategy artifacts on fixed output paths so stale Sell Put or Combo Yield recommendations cannot survive into a later run.
+
+## 1.2.411 - 2026-07-18
+
+### Added
+- Introduced Option Performance v1 with MTD, YTD, specified natural-month, and specified natural-year reporting under the `Asia/Shanghai` operator-date boundary.
+- Added evidence-backed activity, cash, realized/unrealized PnL, capital, valuation/FX, and assigned-stock lifecycle reporting across the Agent tool, CLI, Assistant, and Feishu read paths.
+- Added strict portfolio PnL and cash bridges plus old/new reconciliation, replay/coverage gates, and an exact legacy-reference inventory.
+
+### Changed
+- Separated option premium activity, option/assignment cash movement, option and assigned-stock profit, and capital metrics instead of exposing the legacy mixed monthly-income value as a generic return.
+- Made exact account ownership, reporting timezone, report-level quality, fee/FX/valuation coverage, assignment settlement, and proven-zero evidence binding before totals or bridge amounts can be reported as observed.
+
+### Deprecated
+- Kept `monthly_income_report`, the monthly-income CLI adapter, and `portfolio_capital_bridge` only as documented rollback boundaries pending a later versioned removal gate.
+
+## 1.2.410 - 2026-07-18
+
+### Fixed
+- Preserved official mixed-case Feishu Reaction enum values at the final HTTP request boundary, preventing `Typing` from being sent as invalid `TYPING`.
+
+## 1.2.409 - 2026-07-17
+
+### Fixed
+- Preserved official mixed-case Feishu Reaction enum values such as `Typing`, so inbound ACKs can use the keyboard-typing reaction without being rewritten to an invalid all-uppercase value.
+
+## 1.2.408 - 2026-07-17
+
+### Fixed
+- Dispatched configured Feishu inbound Reaction acknowledgements through an independent bounded worker after allowlist and business-queue acceptance, so long Copilot turns no longer delay later message ACKs.
+- Gave Reaction token and HTTP calls fail-fast budgets, bounded stale/queue/shutdown drops, and sanitized stage timing logs without changing normal Feishu reply/send retry defaults.
+
+## 1.2.407 - 2026-07-17
+
+### Added
+- Added the read-only `portfolio_capital_bridge` Copilot tool for selectable MTD/YTD total-asset bridge analysis across portfolio change, external cash flow, and option cash evidence.
+- Added structured bridge `steps[]` and Markdown-friendly `fallback_text` output without image or chart generation.
+
+### Changed
+- Required an explicit data month for MTD analysis and preserved partial, unavailable, observed, not-observed, and not-applicable evidence instead of treating missing inputs as zero.
+- Reused one shared option-ledger load per request and consumed the portfolio-management capital facts API through the existing loopback-only boundary.
+
+### Fixed
+- Enforced historical cutoffs in option income reporting so period analysis never uses transactions after the requested end date.
+
+## 1.2.406 - 2026-07-17
+
+### Fixed
+- Prevented broker trade payloads from overriding canonical staggered Combo Yield strategy and leg relationship metadata.
+- Revalidated Combo Yield lot state and strategy-group uniqueness inside the SQLite write transaction before recording paired adjustments.
+- Removed same-expiry breakeven and max-loss metrics from staggered-expiry Combo Yield candidates.
+
+## 1.2.405 - 2026-07-17
+
+### Changed
+- Increased the per-account monitoring notification candidate limit from five to six while preserving cross-strategy coverage and priority ordering.
+- Simplified the production compact monitoring notification layout and candidate wording, including concise `Put`, `Call`, and `组合` sections plus `组合·同期` / `组合·跨期` labels.
+
+### Fixed
+- Counted compact notification candidates within their strategy sections so cross-expiry Combo Yield leg details no longer inflate the Put or Call totals.
+
+## 1.2.404 - 2026-07-17
+
+### Added
+- Added `staggered_expiry_pair` Combo Yield candidates that pair one underwriting-approved short Put with one later-expiring long Call, using independent leg horizons, fee-aware full-funding checks, structure-specific ranking, notifications, diagnostics, and replay support.
+- Added explicit `pair_intent_id` trade grouping and `option-positions pair-combo-yield`, which validates exact open lot IDs and atomically records the `funding_put` / `participation_call` relationship without heuristic matching.
+
+### Changed
+- Kept `same_expiry_pair` as the default while documenting the staggered filtering, notification ordering, candidate-versus-trade identity boundary, receipt wording, and illustrative non-production Call horizon configuration.
+
+## 1.2.403 - 2026-07-16
+
+### Fixed
+- Restored trade-intake state persistence and receipt notifications after typed ledger operations replaced dictionary payloads, preventing applied broker fills from failing before notification delivery.
+
+## 1.2.402 - 2026-07-16
+
+### Added
+- Added fail-closed `assistant.copilot.toolsets.portfolio` configuration so operators can explicitly share the existing pure-read portfolio-management toolset with Copilot.
+
+### Changed
+- Removed `portfolio_query` from the default Copilot Scene projection while keeping the external `./om-agent` tool contract unchanged; current assistant config is reapplied when building and resuming Copilot runs.
+
+## 1.2.401 - 2026-07-16
+
+### Added
+- Added the pure-read `portfolio_query` tool to the existing `om_chat` Copilot so it can read portfolio-management health, accounts, overview, holdings, cash, NAV, distribution, and full-report views through same-host loopback HTTP.
+
+### Changed
+- Kept the cross-product boundary GET-only and loopback-only, rejected model-provided endpoints, and added explicit source, scope, freshness, and standardized upstream-error evidence.
+- Updated the Copilot Scene, financial-fact guidance, Agent capability documentation, and public tool contracts without adding a second Copilot or portfolio write path.
+
+## 1.2.400 - 2026-07-16
+
+### Added
+- Added read-only Research summaries for Combo Yield pair diagnostics, including per-stage rejection funnels, cross-account market-row deduplication, and threshold-distance nearest misses.
+
+### Changed
+- Included Combo Yield pair diagnostics in candidate evidence and Research handoff Markdown while preserving existing strategy policy, ranking, notifications, and production state.
+
+## 1.2.399 - 2026-07-16
+
+### Removed
+- Removed unused healthcheck and pipeline runners, assistant memory, Agent Tool compatibility shims, legacy config/audit/cron/OpenD/OpenAI wrappers, and obsolete implementation-history tests.
+- Removed dictionary-style compatibility methods from typed ledger records and the unused `tabulate` runtime dependency.
+
+### Changed
+- Made Agent Tool registration explicit, made assistant and WeChat package imports side-effect-free, and migrated callers and tests to owning modules and typed attributes.
+- Regenerated the dependency graph after simplification; production modules remain cycle-free.
+
+## 1.2.398 - 2026-07-16
+
+### Added
+- Added a research-only Combo Yield pair diagnostics artifact that records Call prefiltering, Put matching, pair-level rejection reasons, economic metrics, and active policy thresholds without changing production filtering, ranking, notifications, or runtime config.
+
+## 1.2.397 - 2026-07-16
+
+### Added
+- Added Put-only versus Combo breakeven, downside-penalty, lottery-budget, and residual-premium metrics, plus 1.5σ and 2.0σ Call payoff multiples.
+- Added a research-only Combo Yield Shadow ranking artifact with baseline and shadow ranks without changing production recommendations.
+
+### Changed
+- Required each Funding Put leg to independently satisfy the Sell Put annualized net-return floor while retaining separate event, cash, strike, and liquidity gates.
+
+## 1.2.396 - 2026-07-15
+
+### Changed
+- Added a dedicated fail-closed event-risk gate for Combo Yield without applying Sell Put IV/RV underwriting.
+- Standardized the default premium-funded call range to 0.05-0.20 delta, at least 80% net-credit retention, and at least 8% annualized remaining credit while preserving explicitly configured legacy thresholds.
+- Applied market-specific liquidity defaults when deriving Combo Yield policy, so HK uses its intended open-interest and volume thresholds.
+
+### Fixed
+- Aggregated structural, liquidity, funding, retention, and other pair rejection reasons into Combo Yield candidate traces.
+- Rejected `min_net_credit_retention` values outside the inclusive 0..1 range.
+
+## 1.2.395 - 2026-07-15
+
+### Changed
+- Updated README to match the current release surfaces, including distance-first underwriting ranking, read-first Copilot Control previews, analysis tools, assigned-stock handling, and Close Advice reallocation-shadow boundaries.
+
+## 1.2.394 - 2026-07-14
+
+### Fixed
+- Made `symbol_config_read` follow the calibrated symbol market so cross-market ClawBot queries use the matching runtime config instead of reporting configured US or HK symbols as missing.
+
+## 1.2.393 - 2026-07-14
+
+### Fixed
+- Kept empty portfolio-capacity shadow artifacts parseable by writing stable CSV headers when no candidates survive filtering.
+
+## 1.2.392 - 2026-07-13
+
+### Added
+- Added an advisory-only Close Advice capital-reallocation shadow that combines formal exit advice, ranked portfolio capacity, and lot-specific position context without changing notifications, candidate ranking, position state, or runtime config.
+
+### Changed
+- Limited production-parameter replay comparisons to single-field variants backed by fee-complete `complete_closed` lifecycle outcomes; incomplete assignment or call-away transitions remain explicit evidence gaps.
+- Propagated lifecycle net P&L, capital days, fee quality, and Covered Call allocation evidence through settlement and candidate-impact reports while keeping runtime config writes disabled.
+- Versioned the monthly-income detail contract as v3 and clarified that current assigned-stock rows may refresh read-only quotes while historical cutoffs never use realtime prices.
+
+## 1.2.391 - 2026-07-13
+
+### Added
+- Added stable Close Advice lot identities and assigned-stock lifecycle evidence, including quotes, assignment dates, inventory days, fees, net returns, and capital days.
+- Added ranked portfolio-capacity shadow output across symbols without changing production candidate selection.
+
+### Changed
+- Made trade receipts show opening premium cash flow alongside fill details.
+
+## 1.2.390 - 2026-07-13
+
+### Changed
+- Made Sell Put rank strike safety distance first and Covered Call rank strike upside distance first, ahead of premium compensation.
+- Deduplicated underwriting compensation to combine annualized return with the weaker IV/RV or IV-RV edge, while keeping net income as a hard gate and final tie-break only.
+- Aligned candidate-rank explanations and Strategy Lab ranking evidence with the production ordering, including spread and open-interest liquidity tie-breaks.
+
+## 1.2.389 - 2026-07-13
+
+### Added
+- Added an offline four-cell underwriting experiment that compares fixed versus historical-percentile IV/RV filters across production-observed and deduplicated rankings without changing production selection.
+- Added read-only account-and-symbol Wheel lifecycle risk and outcome summaries, including lifecycle return, adverse-path, assignment, call-away, and empirical CVaR evidence.
+- Added a group-level Combo Yield outcome evaluator that validates complete paired legs and reports synchronized group outcomes without generating single-leg variants.
+- Added Close Advice calibration evidence for remaining stress, close cost, replacement opportunity, and continued willingness without changing the existing action thresholds.
+
+### Changed
+- Made offline underwriting ranking prioritize willingness-price safety margin and deduplicated volatility compensation while keeping net income as a threshold or explanation field only.
+- Split Strategy Lab recording into a six-hour cohort builder, a mark-only sampler, and an unrestricted daily outcome settler.
+
+### Removed
+- Removed the legacy Strategy Lab Combo Yield optimizer and new `risk_exit` action generation while retaining read-only rendering compatibility for historical Close Advice artifacts.
+
+### Fixed
+- Preserved the configured absolute IV/RV floor in historical-percentile experiments, used prior runs only, and blocked production recommendations when lifecycle outcomes are incomplete.
+- Preserved effective Covered Call willingness-price boundaries and underwriting order through alert rendering.
+- Prevented soft IV/RV, delta, event, or missing-observation changes from overriding valid return-capture Close Advice actions.
+- Prevented settled datasets from consuming the mark-sampling batch and starving new Strategy Lab observations.
+
+## 1.2.388 - 2026-07-12
+
+### Changed
+- Made Covered Call capacity use each option contract's actual multiplier instead of a hardcoded 100-share threshold.
+
+### Removed
+- Removed the retired Close Advice optimizer layer, its redeploy tiers, configuration, notification formatting, and model-visible fields.
+
+### Fixed
+- Rejected non-finite and crossed option quotes before Sell Put or Covered Call strategy evaluation.
+- Made `event_risk.mode=reject` remove candidates and record canonical rejection traces, while rejecting unknown event-risk modes.
+- Prevented underwriting from comparing USD or HKD income directly with CNY thresholds when exchange rates are unavailable.
+- Tightened opening-strategy numeric, boolean, DTE, event-mode, and merged-template configuration validation.
+
+## 1.2.387 - 2026-07-11
+
+### Fixed
+- Added an offline `--review-report` mode so human quality scores attach to the exact P1 report that was reviewed instead of rerunning the model and scoring different answers.
+- Required the review case set to exactly match the existing report before calculating the answer-quality gate.
+
+## 1.2.386 - 2026-07-11
+
+### Added
+- Added a contract-level option trade lifecycle analysis view derived from canonical trade events without introducing a review-specific tool.
+- Added production Copilot evaluation metadata, evidence-health checks, tool-efficiency metrics, and importable 0..2 human review scores.
+
+### Changed
+- Reused successful identical read observations within one Agent run while preserving transient-error retries and trace provenance.
+- Exposed required information for manual open and close previews so the Agent asks for missing fields before requesting deterministic Control.
+
+### Fixed
+- Prevented incomplete manual opening requests from creating confirmable pending operations.
+- Made production evaluation report the actual configured provider and model instead of assuming DeepSeek.
+
+## 1.2.385 - 2026-07-11
+
+### Changed
+- Made gross realized option PnL and its return rate the primary monthly performance metrics; kept sell-open premium as an activity metric and `net_income` as a legacy option-cashflow compatibility field that excludes assignment-stock settlement principal.
+- Separated assigned-stock realized/unrealized PnL and missing-quote risk from option PnL, while clarifying that assignment principal is an asset conversion rather than a loss.
+- Added tool-contract semantics and query warnings that prevent premium, realized PnL, legacy cashflow, and non-additive component rows from being mislabeled or summed together.
+
+## 1.2.384 - 2026-07-11
+
+### Changed
+- Standardized Copilot-visible tool schemas, defaults, required fields, output contracts, evidence scope, coverage, freshness, missing-data semantics, and recoverable error observations across all pure-read tools.
+- Hid internal paths and compatibility-only inputs from the Copilot model while preserving the complete `./om-agent` execution contracts.
+- Made production Copilot evaluation require read evidence without hardcoding a specific business tool, allowing the Agent to choose the strongest available read-only evidence path.
+
+### Fixed
+- Preserved contract-prioritized facts during observation compaction instead of truncating results by dictionary insertion order.
+- Corrected runtime-run, close-advice, monthly-detail, and required-symbol contracts that could misclassify valid evidence or generate invalid model calls.
+
+## 1.2.383 - 2026-07-11
+
+### Changed
+- Required evaluative Copilot answers to provide a supported judgment, key good and bad points, and actionable recommendations instead of stopping at a data summary.
+
+### Fixed
+- Added an explicit `--runtime-root` input to the production Copilot P1 evaluation and restored the prior process environment after each run.
+
+## 1.2.382 - 2026-07-11
+
+### Added
+- Added Host-owned structured conversation memory with bounded compaction, stale-write protection, and current Control context precedence.
+- Added durable Copilot run state, safe read-only resume, cancellation, iteration identity, usage metrics, coarse progress, concurrency leases, and persistent reply outboxes for WeChat and Feishu.
+- Added production-side Copilot P1 v2 evaluation cases for free-form analysis, follow-up continuity, missing-data honesty, and safe Control preview requests.
+
+### Changed
+- Simplified the free-form runtime to one `om_chat` Service + Host + Agent path backed by canonical pure-read tools and deterministic Control previews.
+- Made channel delivery retryable and idempotent with stable provider request identifiers and stale-delivery claim recovery.
+- Replaced the retired Assistant router boundary with the deterministic inbound service while retaining Control, permission, audit, and operation lifecycle ownership.
+
+### Removed
+- Removed the obsolete `src/application/assistant/router.py` compatibility boundary and its retired Router naming fallback.
+
+### Fixed
+- Preserved successful read observations across safe resume without replaying Control previews or writes.
+- Classified provider and tool-protocol failures in Trace, preserved malformed tool arguments for recovery, and prevented progress events from leaking model or tool data.
+- Treated Feishu business error responses as retryable delivery failures instead of successful replies.
+
+## 1.2.381 - 2026-07-11
+
+### Changed
+- Rendered monthly option income separately by original currency when a period contains both HKD and USD, instead of presenting one cross-currency total.
+- Made the canonical symbol market authoritative for option-open currency and surfaced automatic currency corrections in manual-trade previews.
+
+### Fixed
+- Prevented Futu Hong Kong timestamps and broker labels from misclassifying US option fills such as PDD and TCOM as HKD.
+- Kept repaired close events' canonical `target_lot_id` aligned when `trade-events repair --record-id` changes the target lot.
+
+## 1.2.380 - 2026-07-11
+
+### Added
+- Enabled natural-language upgrade, monitored-symbol configuration, manual option lifecycle, model-switch, and guarded monitor-run requests to create deterministic Control previews without exposing confirmation or apply tools to the model.
+- Added authoritative pending-operation context and structured Control receipts so follow-up edits, confirmations, cancellations, and compacted conversations retain the correct operation scope.
+
+### Changed
+- Updated the single `om_chat` Scene from strictly read-only to read-first: ordinary tools remain pure-read while supported mutations use the existing preview -> pending -> confirm -> apply Control flow.
+
+### Fixed
+- Preserved runtime scope and pending-operation context during context compaction, rejected forged confirmation or cancellation requests at the router boundary, and prevented context-storage failures from masking successful Control results.
+- Removed retired Copilot channel-scene and human-review configuration keys during upgrade migration.
+
+## 1.2.379 - 2026-07-11
+
+### Added
+- Added a production-side Copilot P1 evaluation harness with fixed free-form questions, read-only tool assertions, scope checks, and sanitized result capture.
+- Added the single `om_chat` Scene prompt pack and persistent Host session/run/event storage for the Service + Host + Agent runtime.
+
+### Changed
+- Rebuilt inbound free-form handling around one generic read-only Copilot Agent loop while keeping explicit commands and confirmed writes in deterministic Control.
+- Unified model access, tool projection, result admission, channel audit, and follow-up context around the new Copilot runtime.
+
+### Removed
+- Removed the legacy Assistant perception, reasoning, evidence, verifier, task-contract, and session pipeline, together with task-specific Copilot routing and projection modules.
+
+### Fixed
+- Preserved explicit UI scope over model-generated tool arguments, converted tool exits into recoverable observations, rejected leaked tool protocol, and aligned required tool inputs with their implementations.
+
+## 1.2.378 - 2026-07-10
+
+### Added
+- Added conversation-aware batch confirmation for multi-contract option-expiry notices, so replying `确认` applies the unique pending expiry batch without copying an operation id.
+
+## 1.2.377 - 2026-07-10
+
+### Added
+- Added `/record-expiry` for Futu option-expiry notices, parsing every contract into an independently confirmed ledger preview so multi-leg notices cannot silently drop positions.
+
+## 1.2.376 - 2026-07-10
+
+### Fixed
+- Preserved confirmed trade-intake receipts when later cycles skip an already-notified unresolved or failed deal, preventing duplicate online notifications.
+
+## 1.2.375 - 2026-07-10
+
+### Changed
+- Aligned Copilot scene execution with Dayu-style evidence-first runs by expanding agent iteration budget, disabling the core run timeout by default, and collecting required read-only tool evidence before model synthesis.
+
+## 1.2.374 - 2026-07-10
+
+### Fixed
+- Stopped repeated trade-intake receipts for the same unresolved or failed deal after a confirmed notification has already been sent.
+- Made Futu deal lookups compatible with SDK builds whose `deal_list_query` does not accept `deal_id` or `order_id` filters by querying supported account-scoped data and filtering locally.
+- Let expired OTM lifecycle-pending zero-price option closes write `expire_close` after the existing auto-close grace window when no matching stock settlement evidence exists.
+
+## 1.2.373 - 2026-07-10
+
+### Added
+- Enabled `monthly_income_attribution` as a channel-ready Copilot scene so ClawBot can answer read-only monthly income questions such as `7月收益` after the scene and model gates pass.
+
+## 1.2.371 - 2026-07-10
+
+### Added
+- Enabled `operations_diagnostics` as the first channel-ready Copilot scene so ClawBot can answer allowlisted read-only diagnostics questions through the Copilot channel gate.
+
+## 1.2.370 - 2026-07-10
+
+### Removed
+- Removed the dedicated `monthly_option_review` Copilot scene and its June option-review eval fixtures so local Copilot keeps only generic diagnostics, income attribution, and current exposure lanes.
+
+## 1.2.369 - 2026-07-10
+
+### Added
+- Strengthened the OM Copilot monthly option review answer-quality eval with production-shaped evidence, recommendations, and missing-data assertions.
+
+## 1.2.368 - 2026-07-10
+
+### Fixed
+- Made the Copilot model action schema compatible with strict OpenAI structured outputs so real model synthesis is not rejected before answer generation.
+
+## 1.2.367 - 2026-07-10
+
+### Changed
+- Tightened OM Copilot model answer admission so qualitative recommendations must be supported by claimable findings and requested-period evidence.
+- Validated the local Copilot model synthesis path against explicit assistant model config without enabling channel free-form answers.
+
+### Fixed
+- Let `config_key`-based agent tools resolve runtime configs from `OM_RUNTIME_ROOT`, so release-tree Copilot runs can read production `/var/lib/options-monitor` evidence instead of failing with repo-local `CONFIG_ERROR`.
+
+## 1.2.366 - 2026-07-10
+
+### Added
+- Added the OM Copilot v2 Service + Host + Agent runtime, local harness, model boundary, trace store, and Phase 1/2 answer-quality fixtures.
+
+### Changed
+- Reset Assistant free-form handling to a deterministic command core while moving new free-form Copilot behavior into `src/application/copilot/`.
+- Removed obsolete Assistant planner/evidence/context modules and stale architecture documents that no longer describe the active runtime.
+
+### Fixed
+- Kept Copilot model requests inside the allowed prompt boundary and removed stale answer-guard wording from the assistant trace manifest.
+
+## 1.2.365 - 2026-07-10
+
+### Fixed
+- Let `close_advice_read` derive runtime run/report roots from an explicit runtime `config_path`, so remote release trees can read `/var/lib/options-monitor/output_runs` reports without requiring `runs_root`.
+
+## 1.2.364 - 2026-07-08
+
+### Fixed
+- Stopped `om run trade-intake` from forwarding default `--host 127.0.0.1 --port 11111`, so multi-account Futu configs start per-account trade-intake sources instead of falling back to the legacy single OpenD listener.
+
+## 1.2.362 - 2026-07-08
+
+### Added
+- Added per-account Futu OpenD runtime plans so each Futu account can carry its own account id, host, ports, trade intake source, and service deployment profile.
+- Added account-aware trade-intake source routing, runtime status reporting, and service bundle rendering for multi-OpenD deployments.
+
+### Changed
+- Treated Futu portfolio and API trade data as a single account runtime source while keeping external holdings/manual trade accounts explicit.
+- Keyed broker trade events by account and Futu account id so assigned-stock and option lifecycle reconciliation stay separated across accounts.
+
+### Fixed
+- Rejected invalid OpenD service config JSON instead of silently falling back to a legacy single OpenD service.
+- Required single-deal trade replay in apply mode to match the payload's account or Futu account id when multiple trade-intake sources are configured.
+- Kept `om-agent` and `om accounts` Futu account mutations valid by writing explicit OpenD host/port into account settings.
+
+## 1.2.361 - 2026-07-07
+
+### Fixed
+- Retried WeChat ClawBot `ret=-2` proactive sends once without the stale `context_token`, while preserving unconfirmed delivery handling and fallback diagnostics.
+
+## 1.2.360 - 2026-07-07
+
+### Added
+- Added the host-owned OM Copilot task/evidence/answer loop for free-form Assistant analysis questions.
+
+### Changed
+- Routed read-only Assistant Q&A through Copilot task profiles, scoped evidence planning, guarded tool execution, and deterministic answer composition.
+- Made option-operation reviews answer with a conclusion, problem patterns, optimization guidance, and evidence boundaries instead of raw detail rows.
+- Marked Copilot answers as `copilot_answer` in turn metadata and kept external LLM trace separate from host-owned Copilot execution.
+
+### Removed
+- Removed the legacy provider-planned Assistant tool loop, model continuation path, task runtime shim, and obsolete tool-calling design docs.
+
+### Fixed
+- Refused qualitative option-operation judgements when OM analysis evidence returns no matching rows, instead of treating empty evidence as proof of no problem.
+
+## 1.2.359 - 2026-07-06
+
+### Fixed
+- Aligned task-shaped Assistant analysis with the model-continuation loop so host-collected OM evidence cannot be returned as a raw renderer answer when a qualitative conclusion is required.
+- Kept option-operation review evidence collection active while blocking `analysis_query` table fallback text when model continuation is unavailable.
+
+## 1.2.358 - 2026-07-04
+
+### Added
+- Added stricter Assistant live planner diagnostics for repeated read-only probes, expected tools, event types, and argument subsets.
+- Added regression coverage for Assistant routing, evidence-gap continuation, unknown-tool repair, and compact trace diagnostics.
+
+### Changed
+- Clarified Assistant planner guidance for monthly income, assigned-stock positions, analysis queries, and write-preview boundaries.
+- Exposed compact Assistant diagnostics without raw provider payloads or secret-looking fields.
+
+## 1.2.357 - 2026-07-03
+
+### Fixed
+- Made lifecycle trade-intake evidence retries idempotent when broker evidence is unchanged but normalization diagnostics differ.
+- Mapped Futu's `MET` option root to `3690.HK` so Meituan option trades reuse the canonical HK multiplier cache and lifecycle matching.
+
+## 1.2.356 - 2026-07-03
+
+### Fixed
+- Stopped Assistant upgrade previews from creating confirmable pending operations when the requested target version is older than the running release.
+
+## 1.2.355 - 2026-07-03
+
+### Changed
+- Narrowed Assistant model planning manifests to the preview capabilities authorized by the current user message.
+- Rendered Assistant analysis-query results as concise summaries, including assigned-stock lifecycle PnL and option-premium attribution.
+
+### Fixed
+- Treated self-contained symbol-setting edits as current-message scope even when prior context contains conflicting symbols.
+- Repaired single-authority preview requests when the model returns a read tool or final answer instead of the controlled preview tool.
+- Retried only retryable incomplete/truncated Assistant final answers before storing the audited response.
+
+## 1.2.354 - 2026-07-03
+
+### Fixed
+- Rejected Assistant model final answers that leak raw `analysis_query` table receipts and replaced them with grounded user-facing fallbacks.
+- Marked answer-verification fallbacks that use Assistant user summaries as `user_fallback` in the agent-loop trace instead of `canonical_renderer`.
+
+## 1.2.353 - 2026-07-02
+
+### Changed
+- Rendered Assistant `analysis_query` fallback replies as user-facing summaries instead of raw read-only query tables.
+
+### Fixed
+- Preserved analysis warnings, coverage notes, and key numeric evidence in Assistant fallback answers without leaking SQL/tool receipt text.
+
+## 1.2.352 - 2026-07-02
+
+### Fixed
+- Converted Assistant preview-gate upgrade requests into pending upgrade permission requests based on the verified tool-effect boundary, even when the upstream task contract is still read-only.
+
+## 1.2.351 - 2026-07-02
+
+### Changed
+- Let explicit immediate update requests reach the Assistant `upgrade_now` preview gate even when an upstream task contract is overly conservative.
+- Allowed read-only tools inside preview-intent conversations so the model can inspect status before reaching a controlled preview boundary.
+
+### Fixed
+- Rejected provider-truncated or dangling Assistant final answers instead of storing incomplete half-sentence replies.
+- Kept update-status questions such as `立即更新了吗` on the read path so they cannot accidentally trigger an upgrade preview.
+
+## 1.2.350 - 2026-07-02
+
+### Fixed
+- Recognized natural-language monitored-symbol setting edits such as `把3690 sell put 的max strike 改为65` as Assistant symbol-edit previews while keeping current-value questions read-only.
+- Treated self-contained symbol-setting edits as current-message scope so ambiguous prior context no longer blocks the preview plan.
+
+## 1.2.349 - 2026-07-02
+
+### Changed
+- Strengthened the Assistant read-tool event loop so model turns observe tool evidence, perform bounded read-only follow-ups, and expose clearer stop/evidence trace fields.
+- Expanded model-facing tool observations with data quality, query scope, output-contract, and continuation guidance for higher-quality synthesized answers.
+
+### Fixed
+- Retried final-answer-only synthesis when the Assistant model returns an empty continuation, repeats an already-observed read call, or exhausts the read-tool budget with usable evidence.
+- Reconciled assigned-stock sale state after lifecycle sale intake so released assigned lots stay consistent.
+
+## 1.2.348 - 2026-07-02
+
+### Added
+- Added symbol-scoped monitor-run previews so Assistant update requests can stay within the requested symbol.
+- Added protocolized Assistant final-answer event evidence for model tool-loop responses.
+
+### Changed
+- Allowed short natural-language upgrade/update requests to converge on the controlled `upgrade_now` preview capability.
+
+### Fixed
+- Marked ambiguous assigned-stock sale intake receipts as pending confirmation and listed candidate lots before any ledger write.
+- Included assigned-stock lot cost and source assignment details in ambiguous sale diagnostics.
+
+## 1.2.347 - 2026-07-01
+
+### Changed
+- Moved Assistant write-preview handling onto model tool calls intercepted by the host preview gate.
+- Removed the legacy Assistant PlannerPlan execution fallback so model turns run through the event tool loop.
+
+### Fixed
+- Returned recoverable Assistant guard mismatches to the model as tool observations instead of exposing internal planner errors.
+- Preserved verified frame-delta context for short symbol-setting follow-ups such as "改为90" while still rejecting read-only prompts that select write-preview tools.
+
+## 1.2.346 - 2026-06-30
+
+### Added
+- Added Assistant frame-delta follow-up handling for ongoing ClawBot conversations.
+- Added low-frequency WeChat ClawBot context keepalive in the existing inbound polling service.
+- Added `inbound.wechat_clawbot.keepalive_interval_sec` with a 30-minute default and validation.
+
+## 1.2.345 - 2026-06-28
+
+### Changed
+- Removed the legacy `handle_assistant_message` API after moving production and test callers to typed Assistant turns.
+- Replaced `AssistantTurnResult.legacy_response` with explicit `data` and `meta` fields for structured turn details.
+- Moved Assistant turn-result projection into a small dedicated module, shrinking the runtime entrypoint.
+
+## 1.2.344 - 2026-06-28
+
+### Changed
+- Promoted `AssistantTurnResult` as the typed Assistant turn API while keeping the legacy response shape only as a
+  compatibility bridge.
+- Moved Feishu, WeChat ClawBot, and CLI Assistant entry points onto `handle_assistant_turn`.
+- Centralized Assistant tool output contracts so model previews, evidence extraction, and canonical render routing share
+  the Tool Gateway facts source.
+
+### Fixed
+- Prevented config/max-strike and cash-headroom replies from falling back to raw tool observations when a canonical
+  renderer is required.
+
+## 1.2.343 - 2026-06-27
+
+### Changed
+- Rebuilt Assistant read-tool bindings from the Tool Gateway registry while keeping direct-executable capability metadata
+  scoped to intents the inbound reasoning layer can actually run.
+- Made the sell-put cash-headroom query a pure read tool for Assistant use, avoiding local report/cache writes on that
+  path.
+
+### Fixed
+- Routed sell-put cash sufficiency questions to the cash-headroom tool instead of healthcheck or generic analysis output.
+- Added a canonical cash-headroom renderer so ClawBot answers with the exceed/not-exceed conclusion rather than raw tool
+  tables.
+- Guarded max-strike/config questions from being answered through generic analysis queries, including common Chinese
+  phrasing such as "卖 put 最大行权价".
+
+## 1.2.342 - 2026-06-27
+
+### Changed
+- Moved Assistant planner tool notes and semantics onto the Tool Gateway `AgentTool` definitions so tool metadata has a
+  single source of truth shared by registry manifests and planner manifests.
+- Kept Assistant intent bindings focused on command, scope, and routing metadata instead of duplicating tool capability
+  semantics.
+
+### Fixed
+- Passed `project_guard` through YAML runtime config generation.
+
+## 1.2.341 - 2026-06-26
+
+### Fixed
+- Let Assistant manual assignment and expiry previews accept model-extracted lifecycle fields, then normalize and validate
+  them against the existing preview and open-lot flow before any ledger write.
+- Prevented assignment `stock_side=buy` from expanding the action-safety symbol scope.
+
+## 1.2.340 - 2026-06-26
+
+### Fixed
+- Added shared Tool Gateway and Assistant tool-input schema validation so malformed tool arguments are rejected before
+  handlers run.
+- Stopped inferring required tool fields from description text, keeping conditional fields such as symbol-edit
+  confirmation arguments out of provider-level required lists.
+- Enforced flat dot-path scalar maps for `manage_symbols.set` payloads while keeping legacy single-item list
+  compatibility scoped to `option_positions_read`.
+
+## 1.2.339 - 2026-06-25
+
+### Changed
+- Bumped release version.
+
+## 1.2.338 - 2026-06-25
+
+### Fixed
+- Prevented internal analysis catalog renderers from being promoted into final answers when the assistant loop runs out
+  of tool budget, so catalog UI text no longer leaks as the user-facing reply.
+- Kept task-shaped analytical fallbacks for user-facing result renderers such as analysis query tables and income
+  summaries unchanged.
+
+## 1.2.337 - 2026-06-25
+
+### Fixed
+- Refreshed the configured WeChat ClawBot proactive notification binding from allowed inbound messages before same-message
+  reply delivery, so expired proactive `context_token` state can recover even when reply delivery fails.
+- Kept inbound binding refresh scoped to the existing `wechat_clawbot` notification target and sender allowlist, leaving
+  unauthorized senders unable to update durable notification context.
+
+### Changed
+- Documented the allowed-inbound ClawBot binding recovery contract and the inbound-vs-reply audit fields used for
+  diagnosis.
+
+## 1.2.336 - 2026-06-24
+
+### Added
+- Added hint-only Assistant memory loading from `assistant_memory/*.md`, projecting bounded relevant memories into
+  planner context without granting tool evidence or write authority.
+- Added deterministic Assistant memory proposal commands for propose, suggest, list, accept, and reject lifecycle
+  management under `assistant_memory/proposals/`.
+- Added turn-level memory suggestion sidecars for explicit remember/preference/correction Assistant requests, requiring
+  explicit accept before accepted memory becomes active.
+
+### Changed
+- Documented the OM Assistant memory model, authority rules, proposal lifecycle, and safety budget.
+- Refreshed Assistant architecture and capability documentation for the memory read/proposal surfaces.
+
+### Fixed
+- Prevented failed or unauthorized Assistant requests from creating memory proposal sidecars.
+- Redacted sensitive Assistant memory frontmatter fields before projection and rejected sensitive proposal tags.
+
+## 1.2.335 - 2026-06-24
+
+### Added
+- Added compressed Assistant perception events to the tick notification flow so notification prepare, delivery decision,
+  skip, and completion facts can be reused as evidence-only Assistant context.
+- Added a read-only `notification_perception_read` tool for inspecting recent notification perception audit events by
+  run, event kind, or conversation scope.
+
+### Changed
+- Scoped WeChat ClawBot Assistant conversation history to the visible chat window while keeping pending confirmations
+  sender-scoped.
+- Projected notification perception events into Assistant context as system-event evidence without exposing raw message
+  bodies or granting write authority.
+
+### Fixed
+- Forced Assistant-initiated `notification_perception_read` calls to the current conversation scope so model-supplied
+  arguments cannot read another ClawBot window by default.
+
+## 1.2.334 - 2026-06-24
+
+### Added
+- Added YAML authority support for `sell_put.max_strike` symbol edits, keeping ClawBot/IM changes in the existing
+  preview-confirm workflow and rebuilding runtime configs only after confirmation.
+
+### Changed
+- Refreshed dependency-graph release metadata for the Assistant context-composed config edit rollout.
+
+### Fixed
+- Let Assistant config-edit follow-ups such as `改为90` compose intent from the visible conversation context when a
+  unique prior `symbol_config_read` evidence ref anchors the symbol, strategy, and setting path.
+- Kept inherited symbol config edits guarded by host context validation so ambiguous or field-drifted writes still ask
+  for clarification instead of creating a preview.
+
+## 1.2.332 - 2026-06-23
+
+### Removed
+- Retired the Tool Gateway `openclaw_readiness` surface and removed the legacy OpenClaw profile/cron documentation path.
+
+## 1.2.331 - 2026-06-23
+
+### Fixed
+- Refreshed the configured WeChat ClawBot proactive notification binding after a successful allowed same-message reply,
+  recording reply-backed audit fields so expired proactive `context_token` state can recover without QR rebinding.
+- Kept reply-backed binding refresh scoped to the existing `wechat_clawbot` notification target and skipped refreshes for
+  failed replies, unauthorized senders, or failed inbound handling.
+
+### Changed
+- Documented the ClawBot reply-vs-proactive-send context split and the `SEND_UNCONFIRMED` / `ret=-2` diagnostic path.
+
+## 1.2.330 - 2026-06-22
+
+### Added
+- Added a separate `kimi-code` Assistant provider for Kimi Code's OpenAI-compatible coding endpoint
+  `https://api.kimi.com/coding/v1`, defaulting to `KIMI_API_KEY` and `kimi-for-coding`.
+
+### Changed
+- Updated Assistant model examples, diagnostics, and service environment pass-through so OM can select Kimi Code API
+  without changing the existing Moonshot-compatible `kimi` provider.
+
+## 1.2.329 - 2026-06-22
+
+### Fixed
+- Updated Kimi/Moonshot provider defaults, examples, and docs to use the official Kimi Open Platform endpoint
+  `https://api.moonshot.ai/v1` so `MOONSHOT_API_KEY` credentials authenticate against the correct API host.
+
+## 1.2.328 - 2026-06-22
+
+### Added
+- Added a Kimi/Moonshot Assistant provider profile using the OpenAI-compatible Chat Completions API with
+  `MOONSHOT_API_KEY` and Kimi Code model defaults.
+
+### Changed
+- Adjusted Chat Completions provider payload construction so Kimi requests omit DeepSeek-only `thinking` and
+  temperature parameters while DeepSeek keeps its existing deterministic defaults.
+- Preserved Kimi `reasoning_content` through tool-call continuation messages without exposing it in public Assistant
+  event payloads.
+- Updated Assistant environment diagnostics, examples, and inbound-control docs for `MOONSHOT_API_KEY` support.
+
+## 1.2.327 - 2026-06-22
+
+### Fixed
+- Fixed Assistant model tool-call context attribution so explicit current-message scope is not misclassified as inherited
+  context when optional filters such as `sell put` are normalized to internal values like `sell_put`.
+- Preserved context validation for truly inherited execution scope such as carried `run_id` values.
+
+### Changed
+- Documented the Assistant context authority boundary between current user messages, provider structured tool-call
+  arguments, `ContextProjection.safe_slots`, `context_use.inherited_slots`, and host guards.
+- Added scenario and runtime regressions for the 0700.HK sell put candidate-diagnostic path.
+
+## 1.2.326 - 2026-06-22
+
+### Changed
+- Raised Assistant Agent Loop budgets so one model-planned batch can contain up to 5 tool calls and the full loop can
+  execute up to 10 tool calls before budget exhaustion.
+
+## 1.2.325 - 2026-06-22
+
+### Changed
+- Split Inbound Assistant routing into explicit slash protocol commands, bound pending-operation permission responses,
+  and AgentLoop natural-language handling so ordinary Chinese analysis/query text no longer falls back to keyword
+  business-tool parsing.
+- Made `assistant.agent_loop.enabled` the primary Assistant loop switch while keeping `assistant.planner.enabled` as a
+  deprecated compatibility alias in config/status payloads.
+
+### Fixed
+- Updated manual trade, symbol, upgrade, and model preview receipts to show canonical `/confirm ...` and `/cancel ...`
+  commands while still accepting short Chinese confirmation replies only when they bind to an existing pending
+  operation.
+
+## 1.2.324 - 2026-06-20
+
+### Fixed
+- Preserved complete moderate-size Assistant analysis and income-report row previews for LLM synthesis so ClawBot can
+  summarize 6月收益 attribution instead of falling back to truncated detail tables.
+- Converted duplicate Assistant analysis tool calls into final-answer-only continuations so repeated queries reuse
+  existing evidence rather than stopping before the user-facing summary.
+
+## 1.2.323 - 2026-06-20
+
+### Fixed
+- Fixed Assistant/ClawBot income-summary continuations so analysis query rows are visible to the model and the answer
+  guard rejects claims that observed numeric rows were unavailable.
+
+## 1.2.322 - 2026-06-20
+
+### Added
+- Added Assistant model-turn loop hardening so recoverable provider protocol, guard, duplicate, and tool-result errors
+  are returned to the model as bounded observations instead of using the removed planner-repair path.
+- Added Assistant scenario-eval decision checks for terminal route, selected tool, requested effect, and forbidden
+  preview/clarification/tool regressions across income, assignment, expiry, assigned-stock, candidate, and follow-up
+  workflows.
+
+### Changed
+- Switched the Assistant production loop to the bounded model-turn runtime path, keeping `tool_loop` as an internal
+  precomputed envelope while exposing concrete preview operations such as assignment, expiry, and symbol-edit responses.
+- Hardened inbound ClawBot and Feishu assistant responses so preview terminals preserve concrete operation
+  perception/reasoning while trace metadata still explains the model-loop route.
+- Updated Assistant tool-calling design and completion-plan docs to describe the model-turn cutover, observation stop
+  policy, and Slice 12 intelligence-quality regression plan.
+
+## 1.2.320 - 2026-06-20
+
+### Added
+- Added an Assistant tool-loop completion plan documenting the event-native runtime boundary, release gates, and
+  user-facing regression scenarios for natural-language read and preview workflows.
+- Added diagnostics coverage that rejects legacy planner-plan live probes and requires event-native tool-loop output.
+
+### Changed
+- Completed the Assistant event-native tool-loop cutover by removing the legacy JSON/`PlannerPlan` runtime bridge and
+  obsolete synthesis callback API from the assistant package and tests.
+- Updated assistant architecture, tool-calling, context, and tool-reference docs so diagnostics and implementation
+  guidance point at event transcripts, tool guards, evidence, stop reasons, and answer routes instead of JSON plans.
+
+## 1.2.318 - 2026-06-19
+
+### Changed
+- Added a bounded Assistant planner repair pass for `PLAN_RISK_MISMATCH`, feeding validation errors back to the LLM so
+  broker lifecycle notices can be re-planned from mistaken read-only tools into the correct preview capabilities.
+- Passed planner `task_contract` effect into preview action-safety checks so `preview_write` plans remain preview-only
+  and still require the existing confirmation flow before any ledger mutation.
+
+## 1.2.317 - 2026-06-19
+
+### Added
+- Added Assistant preview support for Futu option assignment and expired-invalid lifecycle notices, routing them through
+  the existing `inbound.manual_trade` pending-operation confirmation flow.
+
+### Changed
+- Extended Assistant planner capability metadata, deterministic lifecycle notice detection, scope safety, and docs so
+  assignment and expiry notices create previews only and never bypass `确认记录` / `取消记录`.
+
+## 1.2.315 - 2026-06-19
+
+### Fixed
+- Fixed provider-native Assistant tool schema inference so pipe-delimited enum arguments such as
+  `option_positions_read.action` are exposed as scalar string enums instead of arrays.
+- Accepted single-item list wrappers for `option_positions_read` scalar selectors, preventing ClawBot assigned-stock
+  queries from failing with `unsupported option_positions_read action: ['assigned-stock']`.
+
+## 1.2.314 - 2026-06-19
+
+### Added
+- Added provider-native Assistant tool-call planning for OpenAI Responses and Chat Completions providers, including
+  structured model tool events, tool-result adapters, continuation payload helpers, and evidence verification support.
+- Added Assistant regressions covering provider tool-call planning, multiple read-only tool calls, follow-up context
+  validation, model-event parsing, model continuation, and model evidence assembly.
+
+### Changed
+- Switched the default Assistant read planner from plain JSON plan output to provider tool/function calls, while keeping
+  the legacy JSON planner only for explicitly injected test paths.
+- Preserved multiple model-selected read-only tool calls from a single provider response instead of dropping all but the
+  first tool call.
+- Applied host-derived `context_use` and the existing context-validation gate to provider tool-call plans so contextual
+  follow-ups cannot bypass clarification checks.
+- Updated the Assistant LLM diagnostics live probe to exercise the provider tool-call path instead of the deprecated JSON
+  planner request shape.
+
+## 1.2.312 - 2026-06-19
+
+### Added
+- Added the Assistant Tool Calling v2 system design, documenting the model-driven read loop, capability selection,
+  evidence-loop, clarification, risk, trace, and release rollout boundaries.
+- Added Assistant trace fields for capability selection risk/source, loop stop reason, repair attempts, and read-loop
+  guard decisions.
+
+### Changed
+- Made Assistant planner output require an explicit `task_contract`, and migrated assistant eval fixtures and tests to
+  the current planner contract shape without preserving the old planner path.
+- Tightened the automatic Assistant read loop with risk-class checks, read-only enforcement, duplicate-call prevention,
+  scoped evidence follow-up, and release-ready regression coverage.
+
+## 1.2.310 - 2026-06-19
+
+### Fixed
+- Made expired option auto-close market-scoped and market-local, so US and HK maintenance runs only process their own
+  symbols and evaluate grace cutoffs in the underlying market timezone.
+- Required short expired options to have post-expiry OpenD spot evidence proving they are out of the money before writing
+  an automatic expire-close event; in/at-the-money or missing-quote lots now wait for assignment review.
+
+## 1.2.308 - 2026-06-18
+
+### Fixed
+- Published the WeChat ClawBot scheduled-notification `client_id` hashing fix with refreshed dependency-graph metadata so
+  the VERSION-driven release gate passes.
+- Restored the Assistant LLM planner settings import used by the context-validation repair path.
+
+## 1.2.307 - 2026-06-18
+
+### Fixed
+- Hashed WeChat ClawBot scheduled-notification idempotency keys before passing them to iLink `client_id`, matching the
+  inbound reply path while preserving local idempotency and receipt diagnostics.
+- Restored the Assistant LLM planner settings import used by the context-validation repair path.
+
+## 1.2.306 - 2026-06-18
+
+### Fixed
+- Retried WeChat ClawBot scheduled notification sends when iLink returned an unconfirmed business response without an
+  upstream message id, including `SEND_UNCONFIRMED` responses such as `ret=-2`.
+- Passed the stable scheduled-notification idempotency key through to iLink `client_id` so retries reuse the same
+  outbound client identifier instead of generating a fresh random id.
+
+### Added
+- Added structured ClawBot notification diagnostics for provider response codes, upstream message ids, and local receipt
+  ids in per-account failure records and failure summaries.
+- Added redacted WeChat ClawBot binding freshness diagnostics to channel health, runtime status, and healthcheck output
+  without exposing context tokens or message text.
+
+## 1.2.304 - 2026-06-18
+
+### Fixed
+- Made Assistant task contracts treat user-requested account, symbol, and month scope as user-text authority while
+  keeping planner-declared scope limited to planned scope.
+- Fixed Assistant action safety so explicit contract scope is authoritative, preventing planner payloads from expanding
+  user-requested scope.
+- Fixed lowercase monitored-symbol requests such as `tigr` in symbol-edit previews without treating diagnostic words
+  such as `trace`, `risk`, or `reason` as stock symbols.
+
+## 1.2.302 - 2026-06-18
+
+### Fixed
+- Refreshed existing WeChat ClawBot notification bindings from inbound messages so scheduled notification pushes reuse
+  the latest valid conversation context after the operator talks to ClawBot.
+- Kept the ClawBot binding refresh scoped to existing matching targets and surfaced a redacted `binding_refresh` summary
+  in poll results for diagnostics.
+
+## 1.2.301 - 2026-06-17
+
+### Added
+- Added planner manifest budgeting to Assistant traces so scoped analysis-view selection, manifest size, and recent-read
+  hint counts are auditable for capability planning.
+- Added planner-context golden eval fixtures covering short follow-ups, explicit-message precedence over prior context, and
+  evidence-gap suggested views.
+
+### Changed
+- Scoped the Assistant planner manifest so `analysis_query` receives only task-relevant analysis views while keeping the
+  full tool list visible and preserving `analysis_catalog` as the fallback.
+- Updated the P2 reliability design gates to treat planner context budget as part of the Assistant golden eval surface.
+
+## 1.2.300 - 2026-06-17
+
+### Added
+- Added investigation recipes to the read-only analysis catalog so Agent planners can map task contracts and evidence
+  gaps to generic analysis views, `analysis_query`, `operation_timeline`, and trace tools.
+- Added Planner `selected_recipe` trace support so Agent sessions record the investigation recipe chosen from the task
+  contract, including runtime inference for older planner outputs.
+- Added action lifecycle evidence to preview/readback traces and `operation_timeline`, exposing preview/confirm/execute/
+  verify/audit phase, required next action, and verification status without expanding write permissions.
+- Added recipe-driven coverage checks so selected investigation recipes can require income breakdown evidence, operation
+  readback/receipt evidence, risk-premise evidence, and replay/dry-run evidence.
+- Added `strategy_replay_read_surface` to `analysis_query`, exposing read-only Strategy Lab and Shadow Replay artifact
+  summaries for replay, dry-run proposal, and strategy evidence review.
+- Added structured assistant trace state for capability selection, progress, blockers, and clarification requests.
+- Added the OM Assistant architecture authority document that separates `./om-agent`, `./om assistant`, and `AgentLoop`
+  into Tool Gateway, Inbound Assistant, and internal planner dimensions.
+
+### Changed
+- Tightened read-only follow-up planning around recipe coverage gaps: operation readback gaps now suggest
+  `operation_timeline` with the scoped operation id, while strategy replay gaps now suggest a bounded
+  `analysis_query` follow-up over `strategy_replay_read_surface`.
+- Renamed current Tool Gateway / Inbound Assistant documentation and public manifest wording to avoid treating
+  `./om-agent` as OM's autonomous assistant.
+
+### Fixed
+- Fixed assistant clarification payloads so account options come from request context instead of hardcoded account labels.
+
+## 1.2.299 - 2026-06-17
+
+### Added
+- Added the OM Agent intelligence upgrade plan covering phased planner contract, investigation runtime, coverage,
+  follow-up, composer, answer verifier, and action lifecycle work.
+- Added planner-declared `task_contract` support to AgentLoop tool plans so task domain, task mode, evidence needs, and
+  answer shape can be traced and verified.
+
+### Changed
+- Upgraded TaskContract inference, coverage checks, and answer shape verification so income analysis requests require
+  breakdown/driver evidence while pure metric calculations stay on key-fact evidence.
+- Taught the monthly income planner guard to request detail rows for income analysis, review, and performance questions
+  without changing ordinary monthly income summaries.
+
+### Fixed
+- Fixed monthly income analysis answers so guarded composition cannot pass a receipt-like summary that omits the requested
+  driver or breakdown explanation.
+
+## 1.2.298 - 2026-06-16
+
+### Fixed
+- Kept deterministic fallback renderer text out of AgentLoop synthesis evidence so natural-language analysis answers
+  compose from structured tool facts instead of copying fixed OM ledger receipts.
+- Updated assistant evidence coverage and docs to keep provenance deterministic while treating fallback renderer text as
+  internal fallback state only.
+
+## 1.2.297 - 2026-06-16
+
+### Fixed
+- Fixed account notification run artifacts so `symbols_notification.txt` is written after close advice is appended,
+  keeping the saved notification text aligned with the text used by the delivery flow.
+
+## 1.2.296 - 2026-06-16
+
+### Changed
+- Added explicit `composer` and `guard` audit aliases to AgentLoop synthesis traces so operator diagnostics can read
+  `composer.attempted`, `guard.status`, and `guard.violation_type` without knowing the older internal field names.
+
+## 1.2.295 - 2026-06-16
+
+### Changed
+- Upgraded the AgentLoop answer guard into an evidence-aware claim verifier so symbol-like tokens are classified against
+  tool evidence vocabulary before they can trigger hard symbol violations.
+- Added answer guard audit details for passed, rewritten, and fallback routes, including violation type summaries,
+  contract verifier payloads, and claim classification records.
+
+### Fixed
+- Fixed candidate-filter LLM answers that mention metrics or rule vocabulary such as `IV/RV`, `OI`, `DTE`,
+  `annualized_return_below_min`, or `risk_spread` so those evidence-backed terms no longer force renderer fallback.
+- Fixed ISO-style date claim extraction so unsupported full dates such as `2026-06-19` are verified as dates instead of
+  being truncated during answer guard checks.
+
+## 1.2.294 - 2026-06-16
+
+### Changed
+- Upgraded AgentLoop tool plans to `om-tool-plan-v2`, removing planner-controlled `response_mode` and making
+  AgentLoop responsible for final answer routing, evidence verification, and deterministic fallback.
+- Moved normal diagnostic, analytical, and financial assistant answers onto LLM composition over guarded tool evidence,
+  while keeping deterministic renderers as evidence formatters and fallback paths.
+- Updated candidate filter explanation evidence with readable rejection reason labels and counts so one-symbol filter
+  diagnostics can be summarized without exposing raw trace rule dumps.
+- Renamed operation session snapshot answer markers from `response_mode` to `plan_kind` to avoid reintroducing answer
+  mode terminology outside the planner boundary.
+
+### Fixed
+- Fixed candidate-filter assistant answers such as `泡泡玛特被哪个参数过滤了？` so they use the evidence composer path
+  instead of the deterministic candidate renderer during normal AgentLoop responses.
+
+## 1.2.293 - 2026-06-16
+
+### Changed
+- Moved the heavy Agent tool implementations behind `src/application/agent_tools/*_impl.py` modules while keeping
+  root `agent_tool_*` files as compatibility re-export shims, reducing duplicate handler surfaces without changing the
+  registered tool manifest.
+- Documented the current Agent tool ownership boundary: domain modules own implementation and metadata, registry only
+  collects tools, and planner-facing tool arguments continue to hide system/path fields from the LLM.
+
+### Fixed
+- Fixed `candidate_filter_explain` trace discovery so one-symbol questions can find runtime traces from resolved
+  config paths, `OM_RUNTIME_ROOT`, service profile roots, latest-run pointers, recent `output_runs`, and legacy shared
+  report fallbacks.
+- Fixed `candidate_filter_diagnostics` to use the same runtime trace discovery path as `candidate_filter_explain`, so
+  Tool OS analysis and the narrow LLM tool no longer disagree about where candidate filter traces live.
+
+## 1.2.292 - 2026-06-15
+
+### Changed
+- Consolidated Inbound LLM planning onto the registered tool surface, removing the old LLM intent translator path and
+  assistant command metadata duplication.
+- Retired `assistant.mode` from runtime assistant config; active controls are now `assistant.enabled` and
+  `assistant.planner.enabled`.
+- Renamed Shadow Replay parameter backtest internals to candidate-impact naming and made `candidate-impact` /
+  `candidate-impact-report` the only supported CLI entries.
+
+### Removed
+- Removed legacy assistant LLM intent schema/eval fixtures and the old command catalog module.
+- Removed Shadow Replay `parameter-backtest` and `parameter-report` compatibility aliases.
+
+## 1.2.291 - 2026-06-15
+
+### Added
+- Added direct assistant eval and trace-route guards for the documented P2 minimum golden-case checklist, mapping each
+  case in the design document to one or more required fixtures and failing if the 6.6.2 checklist drifts from the
+  checked-in fixture mappings; release test planning now includes those drift guards and JSONL fixture format checks in
+  the Agent reliability gate.
+- Added an online-sample contract guard for documented P2 minimum agent eval fixtures, requiring route/result assertions,
+  tool evidence, required business text, forbidden leak text, and explicit gap/impact text when diagnostics or coverage
+  gaps are expected.
+- Added an online-sample contract guard for compact trace route fixtures, requiring trace naming, compact trace payloads,
+  final-route assertions, display assertions, and explicit forbidden assertions for sensitive payload values.
+- Added compact assistant trace route coverage for candidate-filter missing trace cases, ensuring the user-facing trace
+  explains the evidence gap without exposing tool names, trace paths, or raw artifacts.
+- Added compact assistant trace route coverage for upgrade command-log-missing cases, ensuring upgrade receipt gaps are
+  visible without exposing SQL, local artifact paths, or raw command logs.
+- Added compact assistant trace route coverage for failed release workflow evidence, pairing the existing published
+  release sample with a failure sample while redacting raw workflow logs and GitHub URLs.
+- Added compact assistant trace route coverage for successful runtime notification delivery audits, ensuring positive
+  delivery evidence remains readable without exposing SQL, run IDs, message IDs, or local runtime paths.
+- Added compact assistant trace route coverage for prompt-injection deny cases, ensuring untrusted tool-output
+  instructions stop at the safety route without exposing the injected text or internal tool payload.
+- Added compact assistant trace route coverage for planner apply attempts, ensuring confirm/apply requests stop at the
+  deterministic operation boundary without exposing operation ids or apply payloads.
+- Strengthened compact assistant trace coverage for manual-trade previews so receipt and confirmation-guard hooks prove
+  the preview requires explicit confirmation and still hides operation ids, apply flags, and raw trade text.
+- Added compact assistant trace route coverage for SQL-only period scope expansion, proving period-mismatched read
+  follow-ups ask for clarification without exposing the generated SQL.
+- Added a P2 closure-completion evidence guard that maps each documented 6.18 completion criterion to existing coverage,
+  follow-up, answer, or eval tests.
+- Added a P2 not-do boundary guard that maps each documented 6.17 boundary to existing permission, config, registry,
+  trace/eval, or leak-guard tests.
+- Added a release-gap evidence guard that maps each documented 6.19 P2 pre-release gap to concrete assistant eval,
+  compact trace, or release-plan test evidence.
+- Added a release-plan guard for the documented P2 pre-release gap categories, ensuring each 6.19 gap maps to a
+  concrete Agent reliability release-gate command.
+- Added a release-plan guard for the documented P2 release-readiness checks, ensuring each 6.21 release criterion maps
+  to a concrete Agent reliability release-gate command.
+- Added a P2 failure-handling route guard that maps each documented 6.12 failure point to existing test, Agent eval, or
+  compact trace evidence.
+- Added a P2 bounded follow-up deny-list guard that maps each documented 6.12 follow-up prohibition to runtime, Agent
+  eval, or compact trace evidence.
+- Added a P2 code-acceptance evidence guard that maps each documented 6.13 slice to model/runtime/trace-eval test or
+  fixture evidence.
+- Added a P2 route-priority evidence guard that maps the documented 6.14 final routes to existing tests or compact trace
+  fixtures.
+- Added a P2 evidence/trace ownership guard that maps the documented 6.15 final-answer, hook, session-store, compact-trace,
+  and test-assertion boundaries to existing test evidence.
+- Added an assistant golden eval for assigned-stock fresh quote cases on the `option_positions_read action=assigned-stock`
+  path, proving current spot, stock PnL, and lifecycle PnL can be answered when quote evidence is fresh.
+- Added an assistant golden eval for income breakdown follow-ups, ensuring summary-only monthly income evidence triggers
+  a read-only component query before the Agent explains main drivers.
+- Added an assistant golden eval for assigned-stock missing quote cases, ensuring the Agent performs the read-only
+  quote refresh follow-up and still refuses to calculate current floating PnL when spot remains unavailable.
+- Added assistant golden eval coverage for symbol identity resolution and moved single-symbol candidate why samples onto
+  `candidate_filter_explain`, with evidence extraction for observed rejection and missing trace rows.
+- Added TaskContract coverage for single-symbol candidate-filter diagnostics and symbol identity answer-guard evidence,
+  so `candidate_filter_explain` answers no longer require generic breakdown drivers and `canonical_symbol` claims are
+  verified from tool facts.
+- Added scalar output-contract evidence annotations for `symbol_resolve`, allowing post-tool checks to pass without
+  inventing table rows for scalar identity results.
+
+### Changed
+- Release test planning now treats `src/application/config_validator.py` changes as config-surface changes so assistant
+  config boundary fixes automatically run config validation gates.
+- Agent reliability release gates now include direct `candidate_filter_trace` tests for symbol resolution and
+  single-symbol trace matching.
+
+### Fixed
+- Tightened bounded follow-up gates so recoverable gaps require an explicit `suggested_tool`, validate it against
+  registry-declared pure-read tools, expose only gap-specific allowed tools to the follow-up planner, track attempted
+  gap signatures so the same scoped gap is only queried once, normalize recoverable-source casing, and block release
+  workflow / service repair sources before invoking the follow-up planner.
+- Fixed `candidate_filter_explain` so AgentLoop-injected runtime config aliases are used before matching
+  `candidate_filter_trace` rows, and LLM intent routing now carries the symbol's market sibling config into the same
+  tool so single-symbol candidate diagnostics stay consistent with `symbol_resolve` and configured Chinese/name aliases.
+- Fixed assigned-stock missing-quote receipts so they explicitly state which symbols lack realtime quotes and that
+  current stock floating PnL and lifecycle PnL cannot be calculated.
+
+## 1.2.290 - 2026-06-15
+
+### Added
+- Added an assistant golden eval for income comparisons where the first read only covers `lx`; the Agent must perform a
+  same-scope read-only follow-up for `sy` before answering winner, amount difference, and rate difference.
+- Added an assistant golden eval for candidate diagnostics with no matching artifact rows, so missing evidence cannot
+  become a definitive filter root cause.
+
+## 1.2.289 - 2026-06-15
+
+### Added
+- Added compact assistant trace route fixtures for release-status no-match, runtime notification-missing, and runtime
+  freshness-gap cases, including redaction guards for SQL, local paths, raw logs, GitHub URLs, internal IDs, and
+  internal tool names.
+- Added an assistant golden eval for runtime freshness gaps so stale runtime snapshots cannot be turned into a
+  definitive current push-failure root cause.
+- Added an assistant golden eval for partial-confidence candidate diagnostics so summary-only evidence cannot become a
+  definitive filter root cause.
+
+## 1.2.288 - 2026-06-15
+
+### Added
+- Added upgrade-cancel operation readback trace coverage, including a runtime regression and compact trace redaction
+  fixture for internal upgrade tool names, runtime paths, and raw logs.
+- Added an assistant golden eval for release-status queries with no matching rows, ensuring the Agent does not treat
+  missing release evidence as a successful publication.
+
+### Fixed
+- Fixed release-only Task Contracts so remote release publication questions require release evidence without forcing
+  unrelated upgrade command/current-version/target-version gaps into the answer.
+
+## 1.2.287 - 2026-06-15
+
+### Added
+- Added compact assistant trace route samples for confirmed and cancelled manual-trade operation readback, including redaction guards
+  for internal operation tool names, raw trade text, and ledger internals.
+
+### Fixed
+- Preserved operation payload and preview metadata in cancelled operation responses so final readback updates the same
+  assistant session trace as the original preview.
+
+### Changed
+- Updated the Agent reliability P0-P2 design notes to count the new operation readback route fixtures.
+
+## 1.2.286 - 2026-06-15
+
+### Added
+- Added AgentLoop preview receipt postchecks and receipt hook results so manual-trade preview traces verify operation
+  identity, permission request schema, and confirmation guard state.
+- Persisted AgentLoop preview sessions into assistant trace storage so pending manual-trade previews can be audited by
+  operation id without exposing raw trade-alert text.
+- Added deterministic operation readback sessions so confirmed manual-trade operations update assistant trace from
+  pending preview to final applied/cancelled status with postcheck hooks.
+
+### Changed
+- Updated the Agent reliability P0-P2 design notes to mark preview receipt/session trace and confirm/apply readback as
+  landed in the shared trace model.
+
+## 1.2.285 - 2026-06-15
+
+### Added
+- Added centralized assistant final-answer UX leak guards so eval cases fail if user-facing receipts expose internal tool names, SQL, internal IDs, local paths, raw logs, internal modes, or forced fact/analysis sectioning.
+- Added centralized compact trace redaction guards so route samples fail if compact traces expose session IDs, internal tool names, SQL, internal IDs, local paths, raw logs, or internal modes.
+
+### Changed
+- Updated the Agent reliability P0-P2 design notes to reflect the current ToolExecutor read-path implementation and the remaining preview/receipt convergence work.
+
+## 1.2.284 - 2026-06-15
+
+### Added
+- Added an Agent reliability release-test-plan rule so assistant, agent-tool, eval, trace, and reliability design changes automatically require the P2 fixture, eval, runtime, analysis, and plugin gates.
+- Added P2 coverage guards for assistant golden eval gap groups and compact trace route samples.
+
+### Changed
+- Updated the Agent reliability P0-P2 design notes and regenerated the dependency graph for the new release gate coverage.
+
+## 1.2.283 - 2026-06-15
+
+### Added
+- Added an `analysis_catalog` canonical renderer that summarizes available analysis views without exposing embedded SQL templates.
+- Added evidence extraction coverage for `analysis_catalog` contract facts so planner support tools produce usable source-backed facts.
+
+### Fixed
+- Fixed the `analysis_catalog` evidence contract by declaring its canonical renderer, row count, and fact fields so ToolExecutor postchecks no longer report an incomplete contract.
+- Regenerated the dependency graph after the new evidence-session coverage changed test imports.
+
+## 1.2.282 - 2026-06-15
+
+### Added
+- Added Agent reliability golden eval coverage for upgrade `operation_timeline` follow-up answers, including tool-call count, plan revision, and injected audit DB assertions.
+- Updated the Agent reliability P0-P2 design notes and release gate counts for the expanded follow-up eval coverage.
+
+## 1.2.281 - 2026-06-15
+
+### Fixed
+- Fixed AgentLoop upgrade-status follow-up so command-id questions can trigger one read-only `operation_timeline` lookup with system-injected audit DB evidence.
+- Fixed upgrade answer verification so operation timeline diagnostics expose operation, outcome, and receipt statuses as verifiable evidence without letting stale first-pass capability gaps dominate the final answer.
+- Fixed assistant task contracts so upgrade "why" questions are not misclassified as income breakdown requests.
+
+## 1.2.280 - 2026-06-15
+
+### Added
+- Added Agent reliability eval and compact trace coverage for runtime scheduler market-window skips.
+
+### Fixed
+- Fixed runtime tick diagnostics so scheduler skips expose scheduler reason fields and are not misclassified as notification delivery failures.
+- Fixed assistant answer verification so notification-channel failure claims are rejected when evidence only proves a scheduler skip.
+
+## 1.2.279 - 2026-06-15
+
+### Added
+- Added Agent reliability eval and compact trace coverage for runtime notification conflicts, stale quote freshness, and stale upgrade operation timelines.
+
+### Fixed
+- Fixed runtime status diagnostics so successful tick completion with failed notification delivery is treated as conflicting evidence instead of a successful push.
+- Fixed quote freshness diagnostics to preserve quote status and as-of/spot timestamps in analysis evidence and answer verification.
+
+## 1.2.278 - 2026-06-15
+
+### Fixed
+- Fixed assistant upgrade/release evidence handling so a published release status that conflicts with a failed operation outcome is treated as conflicting evidence, not a confirmed successful release.
+- Added Agent reliability eval and evidence-session coverage for release/outcome status conflicts.
+
+## 1.2.277 - 2026-06-15
+
+### Fixed
+- Fixed assistant action safety so SQL-only read payloads still enforce requested account, symbol, and month scope boundaries.
+- Fixed assistant task contracts so month digits and SQL keywords are not misclassified as requested symbols.
+- Expanded Agent reliability eval and compact trace fixtures for read-scope clarification paths.
+
+## 1.2.276 - 2026-06-15
+
+### Added
+- Added assistant golden eval coverage for runtime notification audits where job success does not prove final message delivery.
+- Added a compact trace fixture for successful release-workflow evidence so release answers can show verified publication without leaking raw logs or internal fields.
+
+### Fixed
+- Fixed assistant answer verification so stale, missing, conflicting, or partial diagnostics cannot support definitive root-cause or delivery-success claims.
+- Preserved direct runtime skip explanations while requiring caveats for stale runtime snapshots, missing notification evidence, and partial diagnostic confidence.
+- Updated Agent reliability P0-P2 design notes and release gate counts for the expanded diagnostic, eval, and trace coverage.
+
+## 1.2.275 - 2026-06-15
+
+### Fixed
+- Fixed assistant coverage verification so release publication questions require explicit GitHub Release status evidence, not only a release tag.
+- Fixed upgrade-status fallback copy to explain missing release publication evidence when the operation timeline lacks a published or failed release status.
+- Updated Agent reliability P0-P2 design notes to reflect the release publication coverage verifier behavior.
+
+## 1.2.274 - 2026-06-15
+
+### Added
+- Added release publication fields to the `upgrade_operation_status` analysis view so Agent answers can distinguish a release tag from confirmed GitHub Release publication.
+- Added compact assistant trace route fixtures for ask, preview, rewrite, fallback, and denied paths.
+
+### Fixed
+- Fixed answer verification so a `release_tag` alone cannot be summarized as a successful or failed remote release without publication status evidence.
+- Fixed upgrade diagnostics to surface missing release publication evidence and to allow explicit published/failed release status when supported by evidence.
+
+## 1.2.273 - 2026-06-15
+
+### Added
+- Added Agent reliability golden eval coverage for stale quotes, runtime conflict/stale evidence, upgrade command-log gaps, old operation timelines, and read/write scope expansion boundaries.
+
+### Fixed
+- Fixed upgrade diagnostics so missing command logs, command audits, and operation logs are surfaced as explicit artifact gaps.
+- Fixed answer verification so stale, missing, or conflicting diagnostics cannot be summarized as definitive success/failure/completion without disclosing the evidence gap.
+- Fixed quote freshness verification so stale analysis evidence cannot be over-explained as an upstream OpenD/Futu failure without supporting evidence.
+
+## 1.2.272 - 2026-06-15
+
+### Added
+- Added the Agent reliability P0-P2 design document and the first implementation slice for TaskContract, action policy/safety checks, coverage verification, verifier hooks, evidence bundles, and compact assistant traces.
+- Added read-only upgrade operation status evidence to `analysis_query`, backed by operation timeline audit data.
+
+### Changed
+- Expanded AgentLoop evidence handling so LLM synthesis is guarded by task coverage, answer shape checks, and deterministic fallback without exposing internal SQL or tool ids.
+- Updated dependency graph output for the new assistant reliability modules.
+
+### Fixed
+- Fixed account income comparisons so coverage only passes with same-period, same-currency comparable metrics for all requested accounts.
+- Fixed upgrade diagnostics so conflicting operation/outcome statuses and missing audit artifacts are surfaced as explicit evidence gaps instead of being summarized as successful upgrades.
+
+## 1.2.271 - 2026-06-14
+
+### Fixed
+- Fixed inbound WeChat ClawBot upgrade confirmations to preserve reply context through the background upgrade worker and send the final upgrade receipt through ClawBot instead of silently skipping non-Feishu channels.
+- Fixed upgrade confirmation copy to describe the active notification service instead of hard-coding Feishu.
+- Added idempotent WeChat ClawBot final replies with stable client ids and persisted outbound receipts for safe worker retry.
+
+## 1.2.270 - 2026-06-14
+
+### Changed
+- Added a Claude/OpenClaw supplement preference to address the operator as `棒棒的liuxie`.
+
+## 1.2.269 - 2026-06-14
+
+### Added
+- Added the expanded SQLite Tool OS design and implementation for semantic catalog v2, P0/P1/P2 semantic analysis views, lazy materialization, query preflight/explain metadata, evidence v2, bounded read-only follow-up planning, and P2 diagnostic interpretation.
+- Added normal-answer UX golden eval coverage for account income comparison, assigned-stock PnL, candidate diagnostics, close advice, runtime diagnostics, and strategy config questions.
+
+### Changed
+- Expanded AgentLoop and EvidenceBundle handling so open-ended analytical questions can use guarded `analysis_query` evidence, follow-up decisions, formula checks, diagnostic records, and task-shaped fallback without exposing internal SQL or mode details to users.
+- Updated Tool OS documentation, tool reference, and dependency graph output to match the current Agent loop and analysis workspace behavior.
+
+### Fixed
+- Fixed normal LLM-composed Agent answers so internal mode names, `analysis_query` / `analysis_catalog`, SQL, internal ids, artifact paths, and forced `事实` / `分析` headings trigger rewrite or deterministic fallback before reaching users.
+- Fixed evidence unit inference for per-share cost fields such as `stock_cost_per_share`, allowing user-facing expressions like `USD 117.45/股` to be verified as currency facts.
+
+## 1.2.268 - 2026-06-14
+
+### Fixed
+- Fixed AgentLoop analysis planning so `analysis_query` exposes whitelisted view fields and query templates to the planner, preventing LLM-generated SQL from inventing nonexistent income columns such as `net_cashflow` or `return_rate`.
+
+## 1.2.267 - 2026-06-14
+
+### Added
+- Added Tool OS v1 read-only analysis tools: `analysis_catalog` and `analysis_query` for flexible SELECT-only comparisons, rankings, trends, breakdowns, and cross-domain OM analysis over whitelisted ledger/config views.
+
+### Changed
+- Updated AgentLoop planning, evidence extraction, answer verification, and fallback rendering so open-ended analytical questions can be composed by the LLM from query evidence while preserving task-shaped table fallback when synthesis is unavailable or unsafe.
+- Documented the expanded-and-pruned Agent Tool OS design, including why narrow one-off answer tools such as account income comparison are not the primary path.
+
+## 1.2.266 - 2026-06-13
+
+### Fixed
+- Fixed inbound upgrade confirmation receipts to recover current and target versions from payload, release tags, and nested version-check data instead of showing `-` when preview fields are incomplete.
+- Fixed inbound upgrade final receipts to preserve the Feishu reply target through the running worker state and retry transient reply failures before recording `final_receipt`.
+
+## 1.2.265 - 2026-06-13
+
+### Added
+- Added durable AgentSession snapshots, assistant trace diagnostics, evidence bundles, permission-request metadata, and an Agent completion design document for the unified assistant loop.
+
+### Changed
+- Expanded AgentLoop read planning to support bounded evidence-gap follow-up plans, answer verification, and source-backed session traces.
+- Refreshed Agent architecture/control-plane docs and dependency graph output to match the current Agent loop implementation.
+
+### Fixed
+- Fixed `assistant_trace` so read-only trace queries do not create missing AgentSession tables.
+- Fixed message-less local Agent sessions so repeated local requests no longer overwrite prior session traces.
+- Fixed AgentLoop budget exhaustion to return an explicit `TOOL_BUDGET_EXHAUSTED` error instead of producing a successful partial answer.
+- Fixed AgentLoop follow-up planning so recoverable missing-quote replans must directly close the evidence gap.
+
+## 1.2.264 - 2026-06-13
+
+### Changed
+- Reworked AgentLoop financial answers to use a single guarded Agent Composer path: tools provide evidence, the LLM writes the user-facing response, deterministic provenance is appended, and canonical renderers remain fallback.
+- Updated assigned-stock holding PnL natural-language answers to use concise Agent-composed summaries without exposing internal lot ids or forcing a facts/analysis split.
+
+### Fixed
+- Added assigned-stock answer guard coverage so unsupported LLM currency amounts, share/count claims, or percentage claims trigger rewrite/fallback instead of reaching users.
+
+## 1.2.263 - 2026-06-13
+
+### Changed
+- Kept direct assigned-stock holding PnL queries factual-only, reserving LLM analysis blocks for explicit analysis, advice, risk, why/how, or what-to-do requests.
+
+### Fixed
+- Fixed upgrade confirmation receipts to preserve current and target version values from the upgrade preview instead of showing `-` when the background worker launch result has no version fields.
+
+## 1.2.262 - 2026-06-13
+
+### Changed
+- Removed obsolete option-position migration docs and archived memory templates, and redirected operators to the current canonical ledger repair flow.
+- Removed historical Feishu backup/bootstrap memory entries that were superseded by the local `trade_events -> position_lots` ledger boundary.
+
+## 1.2.261 - 2026-06-13
+
+### Changed
+- Simplified assigned-stock assistant receipts by showing per-currency summaries before one-line lot details, suppressing normal `fresh` quote noise, and keeping missing quote diagnostics explicit.
+
+## 1.2.260 - 2026-06-13
+
+### Fixed
+- Fixed assigned-stock realtime spot refresh to write OpenD snapshot limiter state under the active runtime root instead of the release code directory, preventing permission-denied `missing_quote` results after production upgrades.
+
+## 1.2.259 - 2026-06-13
+
+### Changed
+- Simplified assigned-stock assistant receipts by hiding internal stock lot ids from default user-facing replies.
+
+### Fixed
+- Fixed assigned-stock holding PnL answers so natural-language queries use facts-first rendering with LLM analysis instead of falling back to canonical-only responses when the planner chooses canonical mode.
+
+## 1.2.258 - 2026-06-13
+
+### Changed
+- Improved assigned-stock assistant receipts with numbered lot rows and per-currency summaries.
+
+### Fixed
+- Fixed `/assigned-stock` open assigned-stock reads to include partially sold lots that still have remaining shares, so partial stock sales stay visible in holding PnL.
+
+## 1.2.257 - 2026-06-12
+
+### Added
+- Added `/assigned-stock` inbound read command for Sell Put assigned-stock lots, including spot, stock cost basis, realized/unrealized stock PnL, and lifecycle PnL.
+
+### Fixed
+- Fixed assistant planning and canonical rendering so "指派正股持仓盈亏" routes to `option_positions_read action=assigned-stock` with realtime quote refresh instead of ordinary option positions or monthly income.
+
+## 1.2.256 - 2026-06-12
+
+### Added
+- Added assigned-stock lifecycle reporting for Sell Put assignments, including true stock cost basis, realized/unrealized assigned-stock PnL, lifecycle PnL, review rows, and explicit double-counting guards.
+- Added `option_positions_read action=assigned-stock` with opt-in realtime spot refresh for open assigned-stock lots.
+- Added manual and broker stock-sale intake for assigned-stock lots, with dry-run/confirm safety, source deal id idempotency, and ambiguous-lot review handling.
+
+### Changed
+- Excluded assignment stock settlement principal cashflow from return-summary net income while preserving it in cashflow diagnostics.
+- Documented assigned-stock return accounting, quote refresh semantics, and broker stock-sale source boundaries.
+
+## 1.2.255 - 2026-06-12
+
+### Added
+- Added local assistant user profile context so LLM replies can incorporate operator-specific preferences without relying on prompt-only state.
+
+### Fixed
+- Fixed required-data spot planning so opening scans prefer a live underlier spot and refresh cached required data when its spot no longer matches the current spot reference.
+- Fixed alert symbol normalization so broker option display names no longer pollute alert output.
+
+## 1.2.254 - 2026-06-11
+
+### Fixed
+- Fixed runtime status so systemd-injected service environment files that are intentionally unreadable by the app user no longer degrade OM status with an `ENV_FILE` warning when the required environment is already present.
+
+## 1.2.253 - 2026-06-11
+
+### Fixed
+- Fixed Combo Yield cash protection so the sell-put leg is cash-gated before pair selection while preserving the unfiltered put universe for planning and diagnostics.
+- Added Combo Yield cash-filter trace/report labeling for candidates blocked by insufficient put cash headroom.
+
+## 1.2.252 - 2026-06-10
+
+### Fixed
+- Fixed Assistant factual answers so tool-owned fact rows are rendered before LLM analysis for diagnostics, positions, close advice, config, and runtime tools.
+- Drove Assistant factual rendering policy from agent tool contracts and expanded eval coverage for facts-then-analysis responses.
+
+## 1.2.251 - 2026-06-10
+
+### Fixed
+- Fixed WeChat ClawBot notification accounting so local receipts or successful command execution no longer mark a business-level send failure such as `ret:-2` as delivered.
+
+## 1.2.250 - 2026-06-10
+
+### Fixed
+- Fixed early assignment intake so a zero-price option lifecycle close can match the same-account stock settlement leg before expiration when the stock side, quantity, strike price, and event time window strongly agree.
+- Included lifecycle stock settlement source deal ids in trade backfill and state reconciliation so assignment stock legs are recognized as already recorded after the ledger event is written.
+
+## 1.2.249 - 2026-06-10
+
+### Fixed
+- Fixed Sell Put and Covered Call summaries to preserve upstream scanner ordering so notification top picks respect account cash, covered-share capacity, strategy weights, and underwriting ranking instead of being re-ranked with the default candidate engine.
+
+## 1.2.248 - 2026-06-10
+
+### Fixed
+- Fixed option position list reads to sort by expiration before applying the result limit, so all-account open position replies return near expirations first instead of SQLite insertion order.
+
+## 1.2.247 - 2026-06-10
+
+### Added
+- Added opt-in Strategy Lab recorder service timers for remote latest-run dataset builds, mark sampling, and outcome settlement.
+
+### Changed
+- Made Strategy Lab latest-run dataset builds idempotent by default so existing replay datasets keep accumulated mark paths and outcome facts.
+- Documented the remote Strategy Lab recorder deployment path, local artifact write boundaries, and upgrade-preserved service drift behavior.
+
+## 1.2.246 - 2026-06-09
+
+### Fixed
+- Fixed assistant symbol-config queries for service requests that pass a standard runtime `config_path`, switching `config.us.json` / `config.hk.json` to the symbol's market before reading monitored-symbol config.
+
+## 1.2.245 - 2026-06-09
+
+### Fixed
+- Fixed assistant symbol-config queries so HK aliases such as `泡泡玛特` / `9992.HK` use the HK runtime config even when the product entry has a US default market scope.
+
+## 1.2.244 - 2026-06-09
+
+### Fixed
+- Fixed Assistant AgentLoop capability validation so successful registry-backed position reads satisfy generic tool capabilities such as `option_positions` and `read_only` instead of being reported as missing.
+- Clarified planner guidance and tests for position detail phrases such as `持仓明细`, `持仓明晰`, and `持仓详情` so they route to ordinary read-only position list/detail queries.
+
+## 1.2.243 - 2026-06-09
+
+### Added
+- Added the Strategy Lab MVP workflow for offline hypotheses, evidence readiness, proposal/update review, and Combo Yield optimization experiments.
+- Added the read-only `symbol_config_read` agent tool and LLM `symbol_config_query` path for current monitored-symbol strategy config questions.
+
+### Changed
+- Split assistant natural-language handling so slash commands stay in `command_parser.py`, deterministic code only handles pending/write-preview commands, and natural-language read requests use planner tool manifests.
+- Updated inbound assistant docs and tests to document slash-command read surfaces, planner-backed config reads, and explicit missing-capability responses.
+
+### Removed
+- Removed the legacy `src/application/assistant/parser.py` monolith and added architecture guards to prevent it from returning.
+
+## 1.2.242 - 2026-06-09
+
+### Fixed
+- Separated AgentLoop fact observations from compressed LLM observations so deterministic assistant renderers and answer guards use untruncated tool data.
+- Fixed canonical monthly income replies so all-account annualized basis days are rendered from the full `monthly_income_report` result even when the LLM observation view is clipped.
+
+## 1.2.241 - 2026-06-08
+
+### Changed
+- Reframed Research / Shadow Replay around offline evidence readiness, manual strategy review, and candidate-impact comparison instead of automatic parameter optimization.
+- Added `candidate-impact` and `candidate-impact-report` as the preferred Shadow Replay commands while preserving the older `parameter-backtest` and `parameter-report` compatibility entries.
+- Added `review_readiness` to Shadow Replay analysis/readiness output while preserving the legacy `parameter_advice_gate` compatibility field.
+- Updated README-style operator docs and tool references to document candidate-impact usage, data-readiness boundaries, and the no-production-mutation safety contract.
+
+## 1.2.240 - 2026-06-08
+
+### Fixed
+- Made required-data prefetch reuse the spot-aware fetch plan so Combo Yield call coverage is consistent across accounts in the same tick run.
+- Tightened required-data coverage checks so a cached bounded strike range must cover both requested edges instead of only containing several strikes inside the range.
+
+## 1.2.239 - 2026-06-08
+
+### Changed
+- Clarified that repo-local Assistant inbound audit DB overrides should use the runtime-root-relative `output_shared/state/inbound_control.sqlite3` path, while `/var/lib/options-monitor/...` remains a server runtime-root path.
+
+## 1.2.238 - 2026-06-08
+
+### Fixed
+- Restored the missing `Any` import in the agent tool registry so the published Copilot tool manifest module passes static undefined-name checks.
+
+## 1.2.237 - 2026-06-08
+
+### Changed
+- Upgraded OM Copilot to a single AgentLoop planner path with bounded perception, deterministic understanding, registry-backed read tools, and approved preview-only write capabilities.
+- Replaced active assistant product modes with `assistant.enabled` and `assistant.planner.enabled`, keeping `assistant.mode` as legacy metadata only.
+- Added an inbound capability catalog and planner manifest guardrails without introducing a parallel ToolRegistry control plane.
+- Clarified the conceptual AgentSession and AgentLoop architecture in docs so Copilot boundaries are fixed around perception, understanding, planning, and action.
+
+### Fixed
+- Aligned the planner-facing catalog with the real manifest so planner reads only expose registry-backed read tools and preview capabilities remain explicit.
+- Hardened planner validation to reject banned system, path, config, audit, service, host, port, timeout, and environment arguments recursively inside nested payloads.
+
+## 1.2.236 - 2026-06-08
+
+### Fixed
+- Confirmed successful WeChat ClawBot sends with the local idempotency receipt when iLink accepts a message but does not return an upstream `message_id`, preventing false `SEND_UNCONFIRMED` multi-account notification failures.
+
+## 1.2.235 - 2026-06-07
+
+### Changed
+- Changed assistant monthly income detail replies to render deterministic ledger facts before optional LLM analysis so contracts, amounts, accounts, symbols, dates, and currencies stay grounded in `monthly_income_report`.
+- Added monthly income detail rendering for realized and cashflow rows, including option strike, expiration, close type, contract count, and original-currency amounts.
+
+### Fixed
+- Preserved option strike and expiration fields in monthly income detail rows so assistant replies can identify contracts such as `0700.HK Put 440P @ 2026-06-05` without LLM inference.
+
+## 1.2.234 - 2026-06-07
+
+### Fixed
+- Added an assistant answer guard for monthly income detail rows so LLM synthesis cannot report a multi-contract option row as one contract when `contracts` or `contracts_closed` shows a larger quantity.
+
+## 1.2.233 - 2026-06-07
+
+### Fixed
+- Corrected WeChat ClawBot `sendmessage` payload shape so `client_id` is inside `msg` and `base_info.channel_version` is sent with iLink POST requests.
+- Treated empty iLink `sendmessage` responses as accepted replies while keeping delivery confirmation false unless an upstream message id is present.
+
+## 1.2.232 - 2026-06-07
+
+### Changed
+- Completed the Ops Copilot `AgentTool` architecture migration so all `om-agent` tools now own their metadata, execution handler, validation hook, write policy, and manifest output in domain modules under `src/application/agent_tools/`.
+- Converted the agent registry into a tool-pool assembler that discovers domain `TOOLS`, deduplicates enabled tools, renders the manifest, and derives `PURE_READ_TOOLS` from registry metadata.
+- Centralized Ops Copilot write gating in `agent_tools/permissions.py`, removing tool-name write special cases from the execution layer.
+- Kept Research and Shadow Replay outside the Ops Copilot core tool pool while documenting them as side lanes for offline evidence and strategy-quality evaluation.
+
+### Removed
+- Removed the legacy `agent_tool_handlers.py` switchboard so new Ops Copilot tools no longer require parallel registry and handler edits.
+
+### Fixed
+- Fixed WeChat ClawBot `sendmessage` requests to include the iLink `client_id`, `base_info`, and empty `from_user_id` fields expected by the upstream API.
+- Persisted WeChat ClawBot reply receipts into inbound audit responses for both successful and failed replies so operator timelines can show delivery outcome evidence.
+
+## 1.2.231 - 2026-06-07
+
+### Added
+- Added WeChat ClawBot typing indicator support for inbound assistant replies, using iLink `getconfig` / `sendtyping` before processing and cancelling typing after replies complete.
+
+## 1.2.229 - 2026-06-06
+
+### Fixed
+- Added `WantedBy=multi-user.target` install sections to restartable systemd services so OpenD, trade-intake, Feishu WS, and WeChat ClawBot can be enabled cleanly and survive host reboots.
+
+## 1.2.228 - 2026-06-06
+
+### Fixed
+- Fixed WeChat ClawBot `sendmessage` payloads to wrap message bodies under `msg`, matching the iLink API contract so inbound replies are accepted instead of returning `ret=-2`.
+
+## 1.2.227 - 2026-06-06
+
+### Added
+- Added the read-only `operation_timeline` agent tool to reconstruct Assistant operation timelines from inbound audit rows, pending operations, ledger identities, and observed reply receipts.
+- Added `docs/OM_AGENT_CAPABILITY_MAP.md` as the explicit authority for OM Agent capability boundaries, risk classes, Assistant exposure, and verification paths.
+
+### Changed
+- Updated Agent integration and tool documentation to reference the capability map instead of duplicating remote-control allowlist policy.
+
+## 1.2.226 - 2026-06-06
+
+### Added
+- Added `./om channel wechat-clawbot connect` as a guided QR login and target binding flow for first-class WeChat ClawBot notification setup.
+- Added `./om channel wechat-clawbot poll-once` to process one WeChat ClawBot inbound batch through Assistant control and reply through the same ClawBot channel.
+- Added `./om channel wechat-clawbot serve` plus `serve --check` for long-running WeChat ClawBot inbound control, using the same channel receive/reply path and explicit sender allowlist.
+- Added `./om service render --include-wechat-clawbot` to generate systemd/launchd WeChat ClawBot inbound services with profile, lock-path, upgrade restart, and post-upgrade health-check support.
+- Added a first-class message channel registry, inbound channel service dispatch, and WeChat ClawBot state store so channel capabilities and channel state are no longer embedded in notification, inbound, or binding flow code.
+- Added `./om channel status` plus shared `healthcheck` / `runtime_status` channel health output for Feishu and WeChat ClawBot.
+
+### Changed
+- WeChat ClawBot service profiles now record YAML-sourced sender allowlists as configured/source metadata instead of duplicating the allowlist text in `service.profile.json`.
+- Unified Feishu and WeChat inbound reply decisions so permission-denied, disabled replies, empty responses, and truncation behavior share the same channel decision path.
+- Expanded channel health and service upgrade diagnostics to report WeChat cursor, bot-token readiness, allowlist configuration, service active/enabled status, drift discovery, and precise `serve --check` remediation commands.
+- Improved WeChat ClawBot binding UX with QR artifact open commands, list-time `wechat:<from_user_id>` sender hints, and connect command templates when `serve --check` finds a missing bot token.
+
+## 1.2.225 - 2026-06-06
+
+### Fixed
+- Fixed direct healthcheck calls with `env_file` so Feishu inbound audit DB paths from `OM_INBOUND_AUDIT_DB` are honored without requiring the caller to preload process environment variables.
+
+## 1.2.224 - 2026-06-06
+
+### Fixed
+- Fixed healthcheck `starter_symbols` diagnostics so production watchlists containing example symbols such as `NVDA` no longer warn unless the watchlist is still only starter symbols.
+
+## 1.2.223 - 2026-06-06
+
+### Added
+- Added first-class WeChat ClawBot channel support with `./om channel wechat-clawbot` QR login, status, bind, and list commands.
+- Added WeChat ClawBot binding state, iLink client, and notification delivery adapter so WeChat targets can be bound and addressed directly.
+
+### Changed
+- Removed the `notifications -> OpenClaw -> openclaw-weixin` routing chain; WeChat notification configuration now uses `provider=wechat_clawbot` and `channel=wechat_clawbot`.
+- Routed OpenD watchdog and recovery notices through the unified notification delivery adapter and only records alert cooldowns after a confirmed send.
+- Refreshed the dependency graph after the channel, notification, ledger, and trade-intake boundary changes.
+
+### Fixed
+- Fixed report, alert, and risk-capacity handling for missing numeric values and closed short-option positions.
+- Fixed OpenD prefetch/cache diagnostics and watchlist/symbol fetch paths so required-data and pipeline outputs stay consistent after failed or missing upstream reads.
+- Hardened canonical trade-event void handling so invalid legacy-shaped void rows no longer hide active events in projection, review, or position reporting.
+- Fixed lifecycle/manual ledger identity and lifecycle close validation so assignment, exercise, expiration, and manual-open events cannot collide or write mismatched close targets.
+- Fixed trade-intake lifecycle matching, cache invalidation, backfill retries, and `trade_intake.enabled` validation so retryable unresolved deals and disabled listeners behave as configured.
+
+## 1.2.222 - 2026-06-06
+
+### Fixed
+- Fixed service-drift reconciliation so confirmed upgrades rewrite installed systemd units whose content differs from the current release render and restart changed timers after daemon reload.
+
+## 1.2.221 - 2026-06-06
+
+### Changed
+- Moved expired option auto-close maintenance to 09:00 Beijing time and projection verify to 09:30 Beijing time so the default `grace_days=1` cutoff has passed before scheduled maintenance runs.
+
+### Fixed
+- Surfaced expired-but-waiting lots as `grace_period_pending` in auto-close decisions and maintenance summaries so successful runs no longer look like silent noops before the grace cutoff.
+- Centralized close-lot alias matching helpers so Combo Yield companion-leg detection and close-candidate summaries consistently canonicalize HK option aliases.
+
+## 1.2.220 - 2026-06-06
+
+### Fixed
+- Fixed Futu trade intake for Combo Yield long-call legs when OpenD deals omit open/close position effect by resolving against current lots first, then safely recording unmatched buy calls as Combo Yield long calls.
+- Preserved Combo Yield strategy metadata on broker-open previews, preflight results, and projected `position_lots` so paired legs share a stable account/symbol/expiration group id even when the sell-put leg arrives later.
+
+## 1.2.219 - 2026-06-05
+
+### Changed
+- Renamed Combo Yield runtime/config/reporting surfaces from legacy `yield_enhancement` to canonical `combo_yield` while preserving safe legacy reads for old configs, artifacts, and existing positions.
+- Updated Combo Yield trace, reject-summary, research, shadow-replay, required-data, alert, and documentation surfaces to emit `combo_yield` naming for new outputs.
+
+### Fixed
+- Fixed operator-facing Combo Yield examples and config validation messages so new configs point to `combo_yield` instead of the removed `yield_enhancement` authoring key.
+
+## 1.2.218 - 2026-06-05
+
+### Fixed
+- Fixed assistant Planner capability validation so single-account income requests such as `lx 6月 收益` accept calculable `monthly_income_report.return_summary` results instead of incorrectly reporting missing `account_return` capability.
+
+## 1.2.217 - 2026-06-05
+
+### Fixed
+- Fixed trade-intake runtime-root propagation so remote services and one-shot CLI runs can explicitly use the active runtime root instead of falling back to the release directory.
+- Fixed option-position subcommands so `--runtime-root` can be passed at the parent or subcommand level for ledger-backed reads and writes.
+
+## 1.2.216 - 2026-06-05
+
+### Fixed
+- Fixed lifecycle expiry confirmation for Futu HK option roots such as `TCH` by canonicalizing them to ledger symbols before resolving `expire_close` targets.
+
+## 1.2.215 - 2026-06-05
+
+### Changed
+- Completed the Sell Put / Covered Call opening-config migration to `insurance_underwriting` by removing generated `short_vol` blocks and validating underwriting parameters as top-level opening fields.
+- Updated Close Advice configuration resolution so Sell Put / Covered Call close thesis still accepts historical `short_vol` positions while reading current underwriting thresholds from the new top-level fields.
+- Updated Shadow Replay parameter backtests and opportunity-quality analysis to use `insurance_underwriting` as the current parameter profile while mapping historical `short_vol` samples into that profile.
+
+### Fixed
+- Fixed agent config validation and health diagnostics after the strategy refactor by aligning generated defaults and validation rules with the new underwriting fields.
+
+## 1.2.214 - 2026-06-05
+
+### Added
+- Added a guarded `option-positions lifecycle confirm-expired` command to confirm pending zero-price option lifecycle cases as expired without assignment or exercise.
+
+### Fixed
+- Fixed trade-intake state reconciliation so completed lifecycle `expire_close` cases clear unresolved zero-price option deals after manual confirmation.
+
+## 1.2.213 - 2026-06-05
+
+### Added
+- Added the target product architecture and strategy architecture docs for the underwriting-centered strategy module split.
+- Added mixed-policy candidate ranking diagnostics so `candidate_rank_explain` keeps `insurance_underwriting` and unsupported/legacy profiles in separate ranking groups.
+- Added trace-only research archive market inference so archived candidate traces can build usable local evidence when final run metadata is absent.
+
+### Changed
+- Reworked Sell Put and Covered Call opening semantics from short-vol trading toward `insurance_underwriting`, including shared recall, filtering, and ranking behavior around acceptable assignment/called-away prices.
+- Isolated Combo Yield as its own strategy family instead of treating it as an overlay on Sell Put or Covered Call.
+- Simplified strategy defaults and generated config/docs around the refreshed underwriting parameters, including the IV/RV floor update to `1.10`.
+- Refreshed the dependency graph after the strategy module split.
+
+### Fixed
+- Fixed close-advice supplementary quote refresh so RV-only refreshes do not build an implicit OpenD gateway in offline/unit-test paths.
+- Fixed auto trade-intake `deal-json` dry-run replay so it does not connect to OpenD for enrichment or multiplier refresh.
+
+## 1.2.212 - 2026-06-05
+
+### Added
+- Added combined all-account monthly income summaries so `monthly_income_report` can return `combined_return_summary` using summed CNY cashflow and summed cash-secured denominator instead of averaging account return rates.
+- Added assistant Planner `required_capabilities` satisfaction checks so agent-loop replies report partial fulfillment when tool observations do not provide requested capabilities such as combined account returns.
+
+### Changed
+- Updated monthly income chat rendering to show combined account income first when available, followed by per-account breakdown.
+
+## 1.2.211 - 2026-06-05
+
+### Fixed
+- Fixed Feishu `状态` rendering so successful `runtime_status` results without a latest status field show `OM 状态：ok` instead of `unknown`.
+- Used shared `last_run.notify_summary` as fallback runtime evidence so status replies can show recent scan/notification counts when the latest run directory only contains audit or maintenance artifacts.
+
+## 1.2.210 - 2026-06-05
+
+### Fixed
+- Fixed Feishu WebSocket `agent_loop` handling so conversation-context audit DB read failures degrade to empty context instead of dropping inbound messages before audit and reply.
+- Added regression coverage for Feishu WebSocket messages continuing through planner execution when recent conversation context cannot be read.
+
+## 1.2.209 - 2026-06-04
+
+### Fixed
+- Fixed assistant LLM-first routing so deterministic confirm/cancel operation commands such as `确认升级` take priority over agent-loop planning, preventing bare upgrade confirmations from creating a new dry-run upgrade preview.
+- Added regression coverage for bare upgrade confirmation in agent-loop mode while preserving deterministic fallback for preview-write intents rejected by the LLM translator.
+
+## 1.2.208 - 2026-06-04
+
+### Added
+- Added `om research archive` commands to mirror remote runtime evidence into local `output_shared/research/remote_archive/<remote>/`, verify archive manifests, and build Shadow Replay datasets from verified archived runs.
+- Added guarded `research archive prune-remote` cleanup, which previews remote `service cleanup` and refuses confirmed deletion unless every planned `output_runs` removal is present in the local verified inventory.
+- Documented the remote-evidence archive workflow for low-storage production hosts, including dry-run-first pull, local verify, dataset build, and separate remote prune steps.
+
+## 1.2.207 - 2026-06-04
+
+### Fixed
+- Fixed trade-intake state reconciliation so pending lifecycle deals are marked processed when their lifecycle case has already been written as assignment or exercise.
+- Added regression coverage to keep waiting lifecycle cases pending while allowing completed lifecycle evidence to reconcile unresolved deal state.
+
+## 1.2.206 - 2026-06-04
+
+### Fixed
+- Fixed broker trade intake for early assignment/exercise evidence so zero-price option close legs enter the lifecycle workflow before settlement evidence arrives, instead of failing normal close-price preflight.
+- Added regression coverage for retrying a failed Futu zero-price assignment close so it records a lifecycle pending case rather than repeating `LedgerPreflightError`.
+
+## 1.2.205 - 2026-06-04
+
+### Added
+- Added approved preview-write capability planning to assistant `agent_loop`, allowing natural-language requests to create pending previews for manual trade records, monitored-symbol edits, model switches, and upgrade requests.
+- Added agent-loop safeguards that reject write-like requests when the LLM incorrectly plans a read-only query, preventing Futu fill alerts from being answered as nearby position or income queries.
+
+### Changed
+- Kept legacy `llm_router` on its existing structured intent surface while moving broader natural-language capability planning to bounded `agent_loop` plans.
+- Kept confirm/cancel/apply operations deterministic and outside the Planner manifest; Planner preview steps can only create pending operation previews.
+
+## 1.2.204 - 2026-06-04
+
+### Added
+- Added assistant `agent_loop` tool semantics and coverage metadata for monthly income observations, so LLM synthesis can distinguish OM local-ledger scope from broker account history.
+- Added assistant answer-guard verification that catches LLM replies contradicting tool observations and asks for one guarded rewrite before falling back to canonical rendering.
+
+### Fixed
+- Fixed assistant plan normalization for all-history, all-account, and multi-month income/cashflow requests so tool arguments do not silently collapse to the wrong account or month.
+- Added income/cashflow agent-loop regressions covering cumulative cashflow, multi-month income, account comparisons, detail/composition, premium, realized PnL, and default month queries.
+
+## 1.2.203 - 2026-06-04
+
+### Fixed
+- Fixed assistant `agent_loop` fallback responses so successful tool results are rendered through the canonical formatter when LLM synthesis is unavailable, instead of showing raw tool row-count summaries to users.
+- Fixed assistant tool-plan normalization so misplaced `response_mode` fields inside tool arguments are hoisted to the plan level before validation, preventing `monthly_income_report` detail queries from failing with unsupported arguments.
+
+## 1.2.202 - 2026-06-04
+
+### Fixed
+- Fixed release cleanup so internal directories such as `releases/_cache` are not counted as retained releases, preserving the intended rollback release count.
+
+## 1.2.201 - 2026-06-04
+
+### Fixed
+- Fixed assistant `agent_loop` planning for no-year month phrases such as `6月` by injecting Asia/Shanghai temporal context and normalizing monthly income plan arguments before tool execution.
+- Treated cashflow/net-cashflow natural-language requests as income-report intents in deterministic fallback so detail questions do not fall through to clarification when LLM planning is unavailable.
+
+## 1.2.200 - 2026-06-03
+
+### Added
+- Added a bounded read-only assistant tool planner for Feishu/assistant `agent_loop` mode, allowing natural-language analysis requests to plan up to three safe read-only tool calls before generating a response.
+- Added planner synthesis for detail/composition questions such as monthly net-cashflow breakdowns, including `monthly_income_report(include_rows=true)` observations.
+
+### Changed
+- Kept `assistant.tool_plan` as an internal pseudo-tool hidden from the public LLM capability manifest while routing execution through the existing inbound router and read-only tool policy.
+- Allowed the planner to return an explicit no-plan result instead of guessing when no safe read-only tool plan exists.
+
+## 1.2.199 - 2026-06-03
+
+### Added
+- Added optional OpenD service rendering via `om service render --include-opend`, including systemd/launchd service files, profile metadata, install commands, and upgrade restart participation.
+
+### Changed
+- Made rendered trade-intake systemd units declare `After/Wants=options-monitor-opend.service` when OpenD is included, so broker connectivity is managed before the deal listener starts.
+- Documented OpenD service rendering and upgrade restart behavior for production service bundles.
+
+## 1.2.198 - 2026-06-03
+
+### Added
+- Added periodic Futu history-deal backfill to auto trade intake so missed realtime deal pushes can still be detected and routed through the existing idempotent intake pipeline.
+- Exposed push/backfill timestamps, applied counts, duplicate counts, and backfill errors in `runtime_status` trade-intake diagnostics.
+
+### Changed
+- Tagged trade-intake audit and receipt context with `push`, `backfill`, or `manual` source to make missed-push repairs distinguishable from realtime intake.
+- Serialized realtime push and backfill processing with a shared lock to keep deal-state updates idempotent under concurrent OpenD callbacks and scheduled checks.
+
+## 1.2.197 - 2026-06-03
+
+### Added
+- Added `research shadow-replay parameter-report` to generate paired JSON and Markdown parameter candidate-impact reports from existing scan evidence and explicit parameter files.
+
+### Changed
+- Renamed filter-only parameter backtest recommendations to `ready_for_live_shadow_candidate_review` so reports no longer imply live shadow has already run.
+
+## 1.2.196 - 2026-06-03
+
+### Changed
+- Split candidate rejection summaries so unavailable spread ratios render as `报价不可评估/流动性不足` and non-positive candidate net income renders as `净收入非正` instead of being folded into generic data-missing counts.
+- Tuned default option liquidity gates by adding low open-interest floors to Sell Put and Covered Call templates and relaxing the Yield Enhancement open-interest floor.
+
+## 1.2.195 - 2026-06-03
+
+### Added
+- Added explicit Shadow Replay parameter-backtest gates for candidate-impact review versus production parameter recommendation, so filter-only evidence can show candidate-count effects without implying production config readiness.
+- Added candidate-impact summaries to JSON and Markdown parameter-backtest reports, including best variants by newly accepted and total accepted candidates.
+
+### Changed
+- Allowed parameter backtests with enough complete parameter-field samples to report filter-only candidate impact even when a small portion of fields is still missing, while keeping production recommendation blocked until mark/outcome evidence is available.
+
+## 1.2.194 - 2026-06-03
+
+### Fixed
+- Preserved short-vol parameter fields in candidate trace and reject evidence so Shadow Replay parameter backtests can evaluate DTE, Delta, IV/RV, IV-RV edge, and annualized return gates instead of producing empty candidate results.
+- Reported missing parameter evidence as `parameter_fields_missing` with field coverage diagnostics before treating zero accepted variants as a parameter outcome.
+- Inferred short-vol replay profile for accepted Sell Put and Covered Call candidate snapshots when explicit strategy metadata is absent but replay fields are present.
+
+## 1.2.193 - 2026-06-02
+
+### Added
+- Added read-only `research shadow-replay parameter-backtest` for counterfactual short-vol parameter replay across existing datasets or historical `output_runs` date windows.
+- Added parameter-variant whitelist validation, coverage gating for missing scan artifacts, observed-universe reporting, and Markdown report output for replay reviews.
+
+### Changed
+- Preserved bid/ask/mid/last, open interest, and volume fields in Shadow Replay candidate snapshots so parameter backtests can retain liquidity evidence.
+
+## 1.2.192 - 2026-06-02
+
+### Changed
+- Reworked short-vol Close Advice so IV/RV edge weakness, delta drift, and event context remain underwriting observations unless profit-capture thresholds are met.
+- Simplified compact monitoring receipts into status, candidate, position, and funding sections with compressed rejection summaries and clearer pending-data text.
+
+### Fixed
+- Prevented normal medium close advice from being counted or tagged as optimizer close actions unless optimizer detail evidence is present.
+
+## 1.2.191 - 2026-06-02
+
+### Added
+- Added strategy-aware candidate-filter trace fields for option type, strategy family, and strategy profile across Sell Put, Covered Call, Yield Enhancement, and Close Advice evidence.
+- Added Shadow Replay readiness diagnostics that separate sample size, instrument identity, strategy profile, trace-only evidence, mark coverage, outcome coverage, and bad-decision signal blockers.
+- Added an Opportunity Quality gate for Shadow Replay parameter review so replay remains dry-run-only until evidence is sufficient.
+
+### Changed
+- Extracted Yield Enhancement overlay orchestration out of the Sell Put main flow while preserving the existing scanner and notification behavior.
+- Kept Close Advice event-risk failures contextual for lifecycle review instead of fail-closing profitable or acceptable short-vol positions solely because an event source is unavailable.
+- Preserved strategy metadata from scan and post-filter contexts into replay snapshots before parameter review, reducing reliance on filename or function inference.
+
+## 1.2.190 - 2026-06-02
+
+### Added
+- Added offline short-vol insurance replay metrics for Sell Put and Covered Call, including loss ratio, underwriting margin, premium-to-capital, assignment/called-away rates, and adverse-path loss versus premium.
+- Exposed insurance replay metrics by status, option mode, and DTE/Delta/IV-RV/Spread/concentration buckets for parameter review before production config tuning.
+
+### Changed
+- Treated non-profitable short-vol close scenarios as hold-by-default when assignment or called-away is acceptable, while keeping explicit risk-budget exits separate from mark-to-market losses.
+- Preserved premium and capital-at-risk fields in shadow replay candidate snapshots so replay analysis can evaluate underwriting quality instead of only trade PnL.
+
+## 1.2.189 - 2026-06-01
+
+### Changed
+- Kept Assistant natural-language routing LLM-first while reconciling same-intent read slots from the deterministic shadow parser, so explicit account/month filters such as `sy 2026-06` stay stable.
+- Allowed LLM to recognize monitored-symbol `symbol_edit` requests only as preview-write operations for covered-call and sell-put settings, leaving confirm/apply/cancel paths deterministic-only.
+
+### Fixed
+- Rejected conflicting LLM preview-write interpretations when the deterministic parser identifies a different operation, preventing ambiguous text from creating unintended pending writes.
+- Added offline LLM intent replay coverage for income, positions, close advice, runs, upgrade-confirm rejection, and symbol-edit previews.
+
+## 1.2.188 - 2026-06-01
+
+### Fixed
+- Allowed LLM-first Assistant routing to fall back to deterministic confirm commands only when the LLM rejected the same known non-executable OM intent, fixing `确认升级` without broadening LLM write execution.
+- Added explicit LLM rejection reasons for known non-executable intents versus unknown intents so fallback decisions stay auditable.
+
+## 1.2.187 - 2026-06-01
+
+### Added
+- Added `om config symbol set` for audited `config.yaml` symbol strategy edits, including covered-call min-strike updates and optional runtime config rebuilds.
+- Enabled Assistant/IM monitored-symbol setting previews to write YAML-backed config after confirmation while preserving sender allowlist, audit, and pending-operation confirmation controls.
+
+### Fixed
+- Prevented natural-language symbol setting phrases such as `设置 09898 covered call min strike 85` from treating command words as symbols.
+
+## 1.2.186 - 2026-06-01
+
+### Changed
+- Simplified rejection-summary notification receipts to keep total pass/filter counts and top rejection categories while removing module breakdowns, rule-level details, and sample symbols from the main message.
+
+## 1.2.185 - 2026-06-01
+
+### Fixed
+- Prevented soft short-vol thesis warnings from being promoted to actionable close notifications when buying back would lock in a loss.
+- Rendered actionable risk exits as `风险平仓` / `风险止损` with `平仓损益`, avoiding profit-capture wording such as negative `已锁定` or negative `收益`.
+
+## 1.2.184 - 2026-06-01
+
+### Changed
+- Made `llm_router` and `agent_loop` natural-language Assistant perception LLM-first, with deterministic parsing kept as fallback/shadow evidence while slash commands remain command-first and LLM-skipped.
+- Simplified monthly income Assistant receipts around net cashflow, realized PnL, premium, annualization, and explicit long-option cash-recovery hints.
+
+### Fixed
+- Parsed Chinese month expressions such as `6月`, `六月`, and `2026年6月` for natural-language and slash-command income queries.
+
+## 1.2.183 - 2026-06-01
+
+### Added
+- Added compact read-only `om update verify` release verification for symlink, version, runtime config freshness, event-source config, upgrade status, and service health.
+- Added `om event-source probe --summary-only` for remote event-source checks without raw event payload noise.
+- Added the read-only `scripts/release_test_plan.py` advisor to map changed files to a focused release validation plan.
+
+### Changed
+- Documented the faster release verification loop and refreshed the dependency graph for the new release-planning module.
+
+## 1.2.182 - 2026-06-01
+
+### Changed
+- Made Futu/OpenD the default event-risk source, with HK scans pinned to Futu and US scans using Futu before yfinance fallback.
+- Added the default Futu-first event-source policy to generated runtime configs so missing user overrides no longer fall back to yfinance.
+
+## 1.2.181 - 2026-06-01
+
+### Fixed
+- Added explicit Yield Enhancement long-call take-profit ask guidance with bid/ask context in Close Advice notifications.
+- Fixed compact close-advice alternative candidate strike rendering so Ruff lint passes.
+- Kept trade-intake deal-json stdout machine-readable when the Futu SDK writes connection logs.
+
+## 1.2.180 - 2026-06-01
+
+### Fixed
+- Rendered Yield Enhancement long-call Close Advice rows with call value ratio and unrealized gain metrics instead of empty short-option capture fields.
+
+## 1.2.179 - 2026-06-01
+
+### Added
+- Added a multi-source event-risk resolver with Futu/OpenD primary support, yfinance fallback support, market-specific provider chains, and resolved per-run event snapshots.
+- Added the read-only `om event-source probe` CLI for checking Futu/OpenD and yfinance event-source availability without writing runtime state.
+
+### Changed
+- Treated `ok_with_fallback` event-source results as usable for short-vol scanning and Close Advice while preserving per-provider failure details in `source_results`.
+- Kept `futu-api` and `yfinance` as lower-bounded runtime dependencies instead of pinned constraints so validated data-source SDK upgrades can be picked up during normal releases.
+
+## 1.2.178 - 2026-06-01
+
+### Fixed
+- Preserved position-lot strategy metadata in the option-positions context so Close Advice can evaluate repaired Yield Enhancement long-call lots.
+
+## 1.2.177 - 2026-06-01
+
+### Added
+- Added audited `option-positions adjust-lot` strategy metadata repair fields so historical Yield Enhancement long-call lots can be marked without direct SQLite edits.
+
+### Fixed
+- Preserved adjusted strategy metadata in projected position lots so Close Advice can evaluate repaired Yield Enhancement long-call legs.
+
+## 1.2.176 - 2026-06-01
+
+### Fixed
+- Preserved runtime event-risk snapshot paths through resolved candidate defaults so event-source failures remain visible to scanner and reject-summary diagnostics.
+- Made `runtime_status` service-profile config resolution honor an explicit `config_key` when selecting the runtime `config_path`.
+- Surfaced `event_source_unavailable` as an event-risk warning in candidate rejection summaries instead of burying it as generic missing data.
+- Fixed account notification overview counts so rejection summaries and other explanatory text no longer inflate Covered Call or Yield Enhancement candidate totals when no detailed candidates are rendered.
+
+## 1.2.175 - 2026-06-01
+
+### Added
+- Added service-profile and runtime-root aware Shadow Replay dataset construction so production scan evidence can be replayed without manually stitching `output_runs` and dataset paths.
+- Added `--latest-scanned-run`, `--runs-root`, `--runtime-root`, and `--dataset-root` support to `research shadow-replay build`.
+- Added founder operating model guidance to the agent manual, including CEO final decision authority and CTO/strategy-lead boundaries.
+
+### Changed
+- Made Shadow Replay `status`, `list`, and `run-data-plan` derive runtime dataset, required-data, and receipt roots from `service.profile.json` when provided.
+- Updated Shadow Replay docs and runbooks with the profile-driven production evidence workflow and offline-only safety boundary.
+
+## 1.2.174 - 2026-05-31
+
+### Added
+- Added Shadow Replay `status` / `list` dashboards with local dataset readiness, sampling freshness, data-maintenance plans, and a separate manual review queue.
+- Added `research shadow-replay run-data-plan` as a dry-run-first local data-maintenance runner for eligible `collect_marks` / `settle` actions.
+
+### Changed
+- Split Shadow Replay maintenance actions from manual `analyze` review so `data_plan` stays executable-only and `review_queue` carries review prompts.
+- Extended Close Advice redeploy evidence so `optimizer_switch` rows include explicit alternative candidate identity and source path fields.
+
+### Fixed
+- Prevented Shadow Replay data-plan dry-runs from writing receipts and rejected receipt output flags unless `--write` is explicit.
+- Kept `run-data-plan` from accepting or executing `analyze`, preserving manual review as an explicit offline step.
+
+## 1.2.173 - 2026-05-31
+
+### Changed
+- Split the unified CLI assistant, inbound, and run command implementations into focused `src.interfaces.cli.*_ops` owners while preserving the public `./om` facade.
+- Updated dependency graph generation and docs to reflect the split CLI ownership model without stale high-fan-out guidance.
+
+### Fixed
+- Strengthened architecture guard coverage so CLI boundary checks continue to cover the new assistant and inbound owner files after refactors.
+
+## 1.2.172 - 2026-05-31
+
+### Added
+- Added `./om research shadow-replay collect-marks` for repeatable Shadow Replay mark sampling from local required-data cache or explicit OpenD current quotes.
+- Added a Shadow Replay runbook covering dataset construction, mark sampling cadence, settlement, analysis, and offline-only boundaries.
+
+### Changed
+- Documented Shadow Replay sampling in README, Tool Reference, Agent Wiki, and the strategy optimization first-steps guide.
+- Extended Shadow Replay mark collection safety output with explicit persistent write targets.
+
+### Fixed
+- Kept OpenD collect preview mode from persisting required-data, replay marks, OpenD limiter state, or OpenD cache files by routing preview fetches through temporary paths.
+
+## 1.2.171 - 2026-05-31
+
+### Added
+- Added offline shadow replay evidence under `src/application/shadow_replay/` with staged capture, marking, settlement, analysis, and readiness modules for accepted/rejected candidate universes.
+- Added `./om research shadow-replay build|mark|settle|analyze` and `candidate_evidence.shadow_replay` readiness output for Research candidate bundles.
+- Added `runtime_status.config_authority` so operators can verify runtime config identity, freshness, source hashes, stale reasons, and rebuild commands.
+- Added `run_id` / `run_dir` / `account` lookup support to `candidate_rank_explain` for run-specific candidate ranking diagnosis.
+
+### Changed
+- Updated Research, CLI, agent-tool metadata, README, Tool Reference, and Agent Wiki docs for offline shadow replay evidence boundaries and candidate evidence handoff.
+- Updated the agent manual guidance so LLM memory is treated as navigation context, not current-state proof.
+
+## 1.2.170 - 2026-05-30
+
+### Added
+- Added a Close Advice action-policy scenario matrix covering Sell Put, Covered Call, Yield Enhancement short-put, and Yield Enhancement long-call exit actions.
+
+### Changed
+- Refactored Close Advice action mapping into explicit `strategy_exit_mode` policies so domain exit states, strategy-specific close actions, and shared rendering stay separated.
+- Updated Close Advice architecture docs and README guidance to describe the current action-policy boundary.
+
+## 1.2.169 - 2026-05-30
+
+### Added
+- Added candidate rejection summaries to account scan notifications, grouping existing `candidate_filter_trace.jsonl` / reject-log evidence into user-readable causes such as missing data, volatility edge, liquidity, risk budget, event risk, and cash or coverage constraints.
+
+### Changed
+- Account scan notifications now surface why a run produced no candidates or filtered candidates, without changing candidate selection, ranking, or strategy thresholds.
+
+## 1.2.168 - 2026-05-30
+
+### Changed
+- Centralized Sell Put / Covered Call strategy semantics in `strategy_policy` so scanning, Yield Enhancement, required-data planning, and Close Advice share one mode contract.
+- Updated Yield Enhancement to follow the active Sell Put strategy: return-first uses income/upside enhancement, short-vol uses vol-convexity enhancement with short-vol put-universe gates.
+- Added net-credit-yield and annualized-net-credit-yield handling for Yield Enhancement reports, summaries, ranking evidence, and notifications.
+- Refactored Yield Enhancement pair selection so call-leg loading, pair evaluation, funding gates, and persistence are separated inside the existing pipeline.
+
+### Fixed
+- Fixed strategy required-data planning to fail fast when template-backed symbol configs reach planning before profile expansion.
+- Fixed Close Advice Yield Enhancement leg detection so short-put and long-call action semantics use one shared position-role contract instead of duplicated local checks.
+
+## 1.2.167 - 2026-05-30
+
+### Fixed
+- Fixed Close Advice chat analysis so the default US runtime config no longer hides HK positions; symbol-specific queries now use the symbol market and symbol-less exit analysis reads recent US/HK reports.
+- Fixed monitor-symbol chat writes so explicit HK/US symbols choose the matching runtime config instead of inheriting the default chat market.
+
+## 1.2.166 - 2026-05-30
+
+### Added
+- Added a read-only `close_advice_read` agent tool and Assistant `position_exit_analysis` routing so chat can answer close/take-profit analysis requests from existing Close Advice reports without refreshing market data or writing reports.
+- Added readable chat rendering for Close Advice rows, including Yield Enhancement put/call action semantics and long-call value metrics.
+
+### Fixed
+- Fixed Close Advice chat source selection so `config_key`/runtime config market filters out runs from the wrong market.
+- Fixed Close Advice chat fallback ordering so runtime-root reports are preferred over repo/release-directory agent-tool artifacts.
+
+## 1.2.165 - 2026-05-30
+
+### Fixed
+- Fixed upgrade checks and chat-triggered upgrades so an already-current release returns `没有可升级版本` and does not create a pending confirmation.
+- Fixed inbound confirmation lifecycle so expired preview records are persisted as `expired`, and stale `confirmed`/`running` operations are finalized as `failed` instead of lingering without an audit result.
+
+## 1.2.164 - 2026-05-30
+
+### Fixed
+- Fixed expired auto-close maintenance so omitted `portfolio.data_config` uses the runtime-root SQLite ledger default instead of failing on a missing `portfolio.runtime.json`.
+- Fixed `runtime_status` so maintenance runs no longer trigger stale scan-notification warnings and auto-close failures are surfaced explicitly.
+- Fixed Feishu status rendering so failed auto-close runs show `failed` with the failure reason instead of only `sent, closed=0`.
+
+## 1.2.163 - 2026-05-29
+
+### Added
+- Added explicit assistant perception, reasoning, action, and observation contracts so command, deterministic, and LLM inputs flow through one auditable assistant lifecycle.
+- Added Close Advice source-data readiness coverage for short-vol positions, including RV/IV/delta refresh behavior and event snapshot availability.
+
+### Changed
+- Replaced the old assistant frame/tool-plan planner path with the perception -> reasoning -> action -> observation chain, with reasoning owning tool selection, safety class, and confirmation requirements.
+- Updated assistant architecture and inbound-control docs to describe the current contract names, audit fields, and capability catalog behavior.
+
+### Fixed
+- Fixed short-vol Close Advice preparation so incomplete required-data quote rows trigger realized-volatility refresh through OpenD instead of surfacing stale missing-RV gaps.
+- Fixed short-vol Close Advice event-risk handling so run-level event snapshots are merged before evaluation and missing event sources fail closed with readable diagnostics.
+
+## 1.2.162 - 2026-05-29
+
+### Added
+- Added a Close Advice contract document and regression matrix for direct Sell Put, Covered Call, Yield Enhancement short-put, and Yield Enhancement long-call exit semantics.
+- Added regression coverage for yield-enhancement combo close gating, not-evaluable quote handling, and long-call convexity spread checks.
+
+### Changed
+- Updated README and tool documentation to describe the current Sell Put, Covered Call, Yield Enhancement, and Close Advice behavior without historical migration notes.
+- Changed Close Advice output so Yield Enhancement short-put exits use strategy-specific semantics and optional combo-close advice only appears when paired-call economics are complete.
+
+### Fixed
+- Fixed Close Advice quote handling so domain `not_evaluable` results are preserved instead of being marked as priced.
+- Fixed long-call convexity advice to reject wide bid/ask spreads as not evaluable.
+
+## 1.2.161 - 2026-05-29
+
+### Added
+- Added regression coverage for expired auto-close runs launched from release directories with runtime-root-backed state.
+- Added regression coverage for explicit `--runtime-root` propagation through the `option-positions auto-close-expired` facade.
+
+### Fixed
+- Fixed expired auto-close runtime resolution so audit logs, run outputs, shared state, and default `portfolio.runtime.json` resolution stay under the configured runtime root instead of the release directory.
+- Fixed missing auto-close data config handling so scheduled jobs fail explicitly instead of reporting a successful skipped run.
+
+## 1.2.160 - 2026-05-29
+
+### Added
+- Added option lifecycle case/evidence storage for assignment and exercise workflows.
+- Added manual `option-positions assign`, `option-positions exercise`, and lifecycle inspect/list CLI commands.
+- Added regression coverage for same-expiry lifecycle closes, stock-first/option-first assignment and exercise, and lifecycle auto-close blockers.
+
+### Changed
+- Separated normal close, expire-close, assignment, and exercise into distinct ledger semantics while preserving the canonical `trade_events -> projection -> position_lots` path.
+- Changed expired auto-close to skip pending lifecycle cases and matching stock settlement evidence, with external/manual accounts requiring review instead of automatic close.
+
+### Fixed
+- Fixed lifecycle close publishing so assignment and exercise close types are not rewritten as buy-to-close or sell-to-close.
+- Fixed stock settlement handling so ordinary stock trades keep skipping as non-option deals while late assignment evidence can still surface conflicts after expire-close.
+
+## 1.2.159 - 2026-05-28
+
+### Added
+- Added assistant model profiles with OpenAI and DeepSeek provider catalog support.
+- Added `om assistant model` commands to catalog, list, inspect, add, switch, and check assistant model profiles.
+- Added `/model` chat commands for listing models and previewing model switches through the existing confirm/apply operation flow.
+- Added event prefetch snapshots backed by the runtime event source path so scanner runs can reuse event-risk evidence.
+
+### Changed
+- Changed Feishu inbound processing to reload assistant configuration per message so model switches take effect without restarting the long-lived gateway.
+- Changed runtime status to report event prefetch state alongside the existing run, ledger, and service summaries.
+- Changed assistant routing contracts to use the semantic-frame naming consistently across command, deterministic, and LLM paths.
+
+## 1.2.158 - 2026-05-28
+
+### Added
+- Added an explicit semantic-frame schema version to assistant intent payloads so command, deterministic, and LLM routing share one auditable contract.
+- Added assistant NLU eval coverage for expected source and safety class, preventing intent-only tests from missing route or write-safety drift.
+- Added an architecture guard to keep inbound transport adapters from importing assistant parser, LLM, router, and arbitration internals.
+
+### Changed
+- Centralized assistant LLM provider selection, endpoint resolution, and unsupported-provider errors behind the shared LLM provider boundary.
+- Kept Feishu inbound transport on a thinner boundary by removing its dependency on assistant router typing.
+- Simplified the default small-talk response so user-visible capability wording stays catalog-driven.
+
+## 1.2.157 - 2026-05-28
+
+### Changed
+- Removed legacy JSON authoring write paths so human-authored runtime config flows through `config.yaml` and generated runtime snapshots only.
+- Simplified option-position ledger handling around the canonical `trade_events -> projection -> position_lots` path, removing legacy SQLite migration and tuple result compatibility surfaces.
+- Removed legacy runtime `output` symlink repair paths and old monthly report row handling, keeping runtime artifacts under `output_runs`, `output_shared`, and `output_accounts`.
+
+## 1.2.156 - 2026-05-27
+
+### Added
+- Added structured assistant frames and tool plans so inbound messages are audited with intent, payload, safety class, planned tool, and confirmation requirement before execution.
+- Added structured natural-language option-position queries with account, status, symbol, option type, side, strike, expiration, and limit filters.
+
+### Changed
+- Moved inbound tool planning out of the router into a single frame planner path, replacing the previous per-intent router mapping.
+- Consolidated shared preview-save and confirm-validation lifecycle logic across manual trade, symbol, and upgrade operations.
+
+### Fixed
+- Fixed natural-language position queries such as `5月到期的持仓` so exact help examples no longer bypass semantic parsing and drop the expiration filter.
+
+## 1.2.155 - 2026-05-27
+
+### Added
+- Added deterministic `/record-open` and `/record-close` assistant commands for manual trade write-preview intake.
+
+### Changed
+- Documented that manual trade slash commands reuse the existing preview/confirm safety path and remain outside the LLM-executable intent set.
+
+## 1.2.154 - 2026-05-27
+
+### Added
+- Added a canonical strategy policy resolver so close advice, yield enhancement, and position workflows resolve strategy state from the same Sell Put / Covered Call configuration path.
+- Added strategy snapshots for newly opened option lots and preserved them through manual trade intake, ledger preflight, publishing, projection fields, and position views.
+
+### Changed
+- Changed close advice and yield enhancement to follow the active Sell Put / Covered Call strategy profile instead of maintaining independent strategy modes.
+- Regenerated dependency graph documentation after the strategy policy boundary change.
+
+### Fixed
+- Added config validation to reject independent `close_advice.strategy` and `yield_enhancement.strategy` settings, keeping strategy switching tied to the scanner strategy configuration.
+
+## 1.2.153 - 2026-05-27
+
+### Changed
+- Unified cash footer wording to prefer total CNY cash and post-guarantee headroom, avoiding account-specific "holding" versus "cash-like" labels caused by different data sources.
+
+## 1.2.152 - 2026-05-26
+
+### Changed
+- Changed Futu/OpenD cash aggregation to use explicit currency cash fields and fund assets, ignoring the ambiguous legacy `cash` aggregate.
+- Added cash component/source diagnostics and separated broker cash buying power from cash-like asset totals.
+- Clarified cash notification and Sell Put alert wording so cash-like assets and post-guarantee headroom are not described as broker available cash.
+
+## 1.2.151 - 2026-05-26
+
+### Added
+- Added assistant intent arbitration and decision metadata so command, deterministic, LLM, and agent-loop candidates can be compared and audited.
+- Added assistant NLU eval fixtures covering recent inbound inputs and Covered Call symbol configuration phrasing.
+
+### Changed
+- Moved assistant intent arbitration out of runtime into a dedicated IntentArbitrator control-plane component.
+- Kept runtime focused on request orchestration, router execution, agent-loop tool traces, and response metadata.
+
+### Fixed
+- Fixed natural-language Covered Call symbol configuration so inputs such as `tigr covered call min strike=6.5` route to symbol edit instead of manual trade update.
+
+## 1.2.150 - 2026-05-26
+
+### Added
+- Added a low-noise Ruff lint entrypoint via `make lint` and the guardrails CI workflow, limited to syntax errors and undefined names.
+
+### Fixed
+- Fixed undefined helper references in assistant manual-trade update parsing and stale standalone test runner function names that the new lint gate now catches.
+
+## 1.2.149 - 2026-05-26
+
+### Fixed
+- Added config validation to fail fast when enabled Sell Put or Covered Call entries do not inherit a strategy template or set an explicit strategy, preventing silent fallback from `short_vol` to `return_first`.
+- Updated symbol add/edit flows so Covered Call changes add `call_base` by default and inbound Covered Call edits can request the required template inheritance.
+
+## 1.2.148 - 2026-05-26
+
+### Added
+- Added a shared short-vol assessment for Sell Put and Covered Call covering IV/RV edge, Delta band, event risk, path stress, and portfolio concentration.
+- Added Covered Call gap-up right-tail opportunity cost fields, hard NAV/premium stress budgets, candidate trace rejection rules, and alert output.
+- Added required-data planning for short-vol scanner inputs including realized volatility, event risk, portfolio holdings, and option-position concentration context.
+
+### Changed
+- Changed the default Covered Call profile to `short_vol` so it follows the same short-vol / short-gamma risk framing as Sell Put.
+- Changed `short_vol` scanning so annualized return and net income are ranking inputs rather than first-stage hard filters.
+- Expanded candidate ranking and diagnostics with volatility edge, Delta target quality, concentration, and path-risk scoring dimensions.
+
+### Fixed
+- Updated release smoke validation to assert the new `short_vol` default template contract instead of removed return-first threshold fields.
+
+## 1.2.146 - 2026-05-26
+
+### Fixed
+- Preserved Sell Put event-risk fields through summary normalization, alert rendering, and Feishu notification output so flagged events appear in user-facing scan notifications.
+- Stopped caching event-source failures as empty event lists; event fetch errors now persist source status/error metadata and legacy empty caches are refetched instead of hiding source outages.
+
+## 1.2.145 - 2026-05-26
+
+### Added
+- Added Sell Put `short_vol` strategy screening with IV/RV edge gates, Delta target-band checks, and portfolio concentration caps.
+- Added realized-volatility snapshots from OpenD/Futu historical daily K-line data, including RV20/RV60/RV120 and a weighted RV estimate in candidate outputs.
+- Added short-vol ranking dimensions for volatility edge, Delta target quality, and concentration usage.
+
+### Changed
+- Changed the default Sell Put strategy to `short_vol`, making missing IV/RV/Delta/NAV/concentration evidence fail closed instead of ranking by yield alone.
+- Expanded Sell Put reports, summaries, and alerts with IV/RV, Delta, and concentration diagnostics.
+
+## 1.2.144 - 2026-05-26
+
+### Changed
+- Added `covered_call` as the preferred `config.yaml` authoring key for Covered Call settings while preserving the generated runtime/internal `sell_call` key for snapshots, traces, CSV files, and existing code paths.
+- Updated YAML config migration, starter examples, config explain, and operator docs so user-facing configuration uses Covered Call terminology consistently.
+
+## 1.2.143 - 2026-05-25
+
+### Removed
+- Removed the obsolete strategy replay analysis surface (`om strategy-replay analyze`, agent `strategy_replay_analyze`, and `scripts/tools/compare_strategy_replay.py`) after the old analysis surface was retired for redesign.
+
+### Changed
+- Renamed scan-quality evidence diagnostics from strategy evidence to candidate evidence across `healthcheck`, `doctor`, and `research`.
+- Renamed the user-facing Sell Call terminology to Covered Call while preserving the stable internal `sell_call` key for runtime snapshots, traces, and historical files.
+- Centralized strategy vocabulary in `domain.domain.strategy_vocab` so notifications, reports, scanner text, and agent manifests share one internal-key-to-display-name mapping.
+
+## 1.2.138 - 2026-05-24
+
+### Fixed
+- Clarified final Feishu upgrade receipts so the pre-upgrade version is labeled separately from the active current version, and internal `applied` status no longer leaks into user-facing text.
+
+## 1.2.137 - 2026-05-24
+
+### Added
+- Added the `research` evidence collector and agent tool as the public replacement for the old AI Cofunder naming.
+
+## 1.2.136 - 2026-05-24
+
+### Added
+- Added an explicit trade-intake `--retry-failed` replay path for single-deal JSON repair of historical failed deal ids without allowing processed deal ids to be written again.
+- Added `om run trade-intake --reconcile-state` to reconcile historical failed/unresolved intake state from ledger and audit evidence after a manual ledger repair has already corrected the position.
+
+### Fixed
+- Prevented corrected historical trade-intake failures from continuing to degrade runtime status when the ledger already contains the canonical close or skipped non-option evidence.
+
+## 1.2.135 - 2026-05-23
+
+### Fixed
+- Clarified post-upgrade Feishu WebSocket remediation so root-only env-file deployments point operators to an explicit sudo env-file check.
+
+## 1.2.134 - 2026-05-23
+
+### Fixed
+- Fixed post-upgrade Feishu WebSocket health checks for root-only service env directories by explicitly passing the service profile env file and using non-interactive sudo when the upgrade process cannot read that file directly.
+
+## 1.2.133 - 2026-05-23
+
+### Added
+- Added explicit `--env-file` support for `./om healthcheck`, `./om doctor`, `./om status`, Feishu inbound commands, assistant commands, and `./om-agent run`.
+- Added redacted environment-source diagnostics to `healthcheck` and `runtime_status` so production checks can confirm which env file and keys are loaded without exposing secret values.
+
+### Fixed
+- Unified Feishu Bot, Feishu holdings, assistant, and runtime-status environment loading through the same effective-env path, reducing drift between manual CLI checks, systemd services, and upgrade health checks.
+
+## 1.2.132 - 2026-05-23
+
+### Fixed
+- Preserved systemd-loaded OM and LLM environment variables for post-upgrade Feishu WS health checks, preventing root-only env files from causing false service-health failures after release upgrades.
+
+## 1.2.131 - 2026-05-23
+
+### Changed
+- Made `./om assistant handle` the canonical controlled message entrypoint and moved pending, audit, and upgrade-worker diagnostics under `./om assistant`.
+- Narrowed `./om inbound` to channel transport adapters only, leaving `feishu` and `feishu-ws` as the public inbound subcommands.
+- Removed the legacy `agent_runtime` package and old inbound backend wrappers so Assistant owns command parsing, routing, policy, audit, operation handling, and rendering directly.
+
+### Fixed
+- Updated Feishu event handling and Feishu WS to always enter Assistant control, removing the old assistant bypass flags.
+- Added architecture guards and CLI smoke coverage to prevent old `inbound handle` and `agent_runtime` compatibility paths from returning.
+
+## 1.2.130 - 2026-05-23
+
+### Added
+- Added an assistant capability catalog that exposes the project abilities visible to LLM routing while marking write, confirm, symbol-edit, and upgrade flows as known but non-executable by LLM.
+- Added `om assistant capabilities` and capability summaries in `om assistant llm-check` so operators can inspect the LLM routing surface directly.
+
+### Fixed
+- Kept unknown slash commands on the deterministic command path instead of letting the LLM invent unsupported project commands.
+
+## 1.2.129 - 2026-05-23
+
+### Fixed
+- Treated broker expiration zero-price option closes as canonical `expire_close` ledger events, allowing assigned or expired option positions to close at `0.0` without failing preflight.
+
+## 1.2.128 - 2026-05-23
+
+### Changed
+- Consolidated the assistant control plane under `src.application.assistant`, leaving `agent_runtime` and inbound backend modules as thin compatibility wrappers.
+- Made `./om assistant` the public conversational assistant inspection entry while keeping the old `./om agent` command as a hidden compatibility alias.
+- Renamed assistant-facing command specs to `AssistantCommandSpec` while preserving the old `AgentCommandSpec` import alias.
+
+### Fixed
+- Added architecture guards that prevent application code from depending on the old `agent_runtime` backend and keep assistant, inbound channel adapters, and compatibility wrappers separated.
+
+## 1.2.127 - 2026-05-23
+
+### Changed
+- Consolidated runtime artifact cleanup under `om service cleanup`, replacing the old standalone cleanup script with the canonical maintenance entry.
+
+### Added
+- Added type-aware retention controls for `output_runs` and runtime `.log` files, with dry-run planning, protected latest-run pointers, and minimum recent-run retention.
+
+## 1.2.126 - 2026-05-22
+
+### Added
+- Added a constrained LLM general-reply fallback for harmless non-business chat, such as assistant identity questions, after deterministic and read-only intent routing cannot produce an action.
+
+### Fixed
+- Kept the general LLM reply path blocked for trade, position, income, config, upgrade, symbol, confirmation, and other write-like or business requests so it cannot bypass deterministic tools or preview/confirm flows.
+
+## 1.2.125 - 2026-05-22
+
+### Fixed
+- Made automatic trade intake silently ignore non-option stock deals, preventing stock buys/sells from entering option-position state or sending "not recorded" receipts.
+
+## 1.2.124 - 2026-05-22
+
+### Fixed
+- Kept default `portfolio.runtime.json` resolution scoped to the runtime root, avoiding permission failures from probing `/etc/options-monitor` during cash footer generation.
+
+## 1.2.123 - 2026-05-22
+
+### Added
+- Added a structured `om-agent-loop-v1` trace contract for the optional assistant agent loop, including planned read-only steps, sanitized tool observations, and final response ownership.
+- Added runtime status diagnostics for assistant config, LLM provider readiness, inbound audit state, and latest agent route.
+- Added shared helpers for assistant read-only tool allowlists and config section resolution.
+
+### Fixed
+- Kept the assistant agent loop restricted to read-only intents that re-enter the deterministic inbound router and tool policy.
+- Prevented LLM-routed write or confirmation intents from bypassing deterministic preview/confirm flows.
+- Avoided reporting an LLM endpoint in `runtime_status` when LLM routing is disabled or no supported provider is configured.
+- Made Feishu chat upgrade workers inherit the effective environment when launched without systemd-run, preserving deployed env-file settings.
+
+## 1.2.122 - 2026-05-22
+
+### Fixed
+- Made Feishu chat upgrade workers inherit `OM_ENV_FILE` and `OM_RUNTIME_ROOT` through systemd-run without exposing secret values, so final upgrade receipts can use the deployed bot credentials.
+- Made `config migrate-yaml` convert legacy `agent.*` settings into the canonical `assistant.*` config shape.
+
+## 1.2.121 - 2026-05-22
+
+### Changed
+- Split `runtime_status_tool` into `agent_tool_runtime_status.py`, leaving `agent_tool_openclaw.py` focused on OpenClaw readiness.
+- Updated agent tool handlers and runtime-status tests to use the neutral runtime-status module.
+
+### Added
+- Added an architecture guard to prevent `runtime_status_tool` from moving back into the OpenClaw module.
+
+## 1.2.120 - 2026-05-22
+
+### Changed
+- Made `scripts/install.sh` resolve the latest published GitHub release by default while preserving explicit release-tag installs and avoiding floating `main`.
+- Updated the quick-install documentation to use the one-line installer path, with fixed-version installs kept for production replay and rollback.
+
+### Fixed
+- Made re-running the installer for the already active release idempotent while still allowing optional server/dev dependencies to be added.
+
+## 1.2.119 - 2026-05-22
+
+### Fixed
+- Made `runtime_status` normalize `v`-prefixed service-upgrade target versions before comparing them with the active release.
+- Added service-upgrade failure details to runtime status summaries and Feishu replies, including target/current versions, reason, failed services, and remediation hints.
+
+## 1.2.118 - 2026-05-22
+
+### Added
+- Added a bounded assistant agent loop and read-only tool policy layer for optional LLM and future LangGraph routing.
+- Added assistant config diagnostics and architecture guard tests for the assistant/runtime split, read-only LLM intent surface, and Feishu WS config boundaries.
+
+### Changed
+- Split assistant control-plane settings into `config.assistant.json`, keeping `config.us.json` and `config.hk.json` focused on business runtime settings.
+- Made Feishu inbound and Feishu WS load assistant behavior from `--assistant-config` while keeping business tools on `--config-path`.
+- Retired live `agent.*` config in favor of `assistant.*`, with `assistant.mode` controlling deterministic, LLM router, and agent loop behavior.
+
+### Fixed
+- Rejected business runtime config files when passed as assistant config, preventing `accounts` / `symbols` / `portfolio` from entering the assistant control plane.
+- Kept LLM translation restricted to read-only intents that re-enter the deterministic inbound router and renderer.
+- Added signed pending-operation confirmation checks so write previews cannot be confirmed after payload or signing-key drift.
+
+## 1.2.117 - 2026-05-22
+
+### Fixed
+- Made `runtime_status` auto-load the runtime `service.profile.json` after resolving the ledger runtime root, so Feishu status replies inspect production runtime paths instead of release-local fallback paths.
+- Made service upgrade locks recover from stale PID files while preserving active upgrade locks.
+- Kept failed upgrades for newer target versions classified as unrecovered runtime failures instead of historical failures.
+
+## 1.2.116 - 2026-05-22
+
+### Added
+- Added an independent inbound upgrade worker so Feishu upgrade confirmations can survive `feishu-ws` service restarts and write final applied/failed results.
+- Added final Feishu upgrade receipts from the worker after the upgrade completes.
+
+### Changed
+- Changed Feishu `确认升级` to acknowledge immediately and queue the upgrade instead of running it synchronously inside the WebSocket handler.
+- Replaced raw pending-operation statuses in user-facing duplicate confirmation messages with readable progress text.
+
+## 1.2.115 - 2026-05-22
+
+### Added
+- Added `agent.llm.provider: deepseek` support through DeepSeek's OpenAI-compatible Chat Completions API.
+- Added a Chat Completions JSON-mode client for LLM intent translation, including DeepSeek endpoint diagnostics in `om agent llm-check`.
+
+### Changed
+- Documented DeepSeek LLM configuration with `DEEPSEEK_API_KEY`, `https://api.deepseek.com`, and `deepseek-v4-flash`.
+- Kept OpenAI on the existing Responses API path while routing DeepSeek through `/chat/completions`.
+
+## 1.2.114 - 2026-05-21
+
+### Added
+- Added a shared command catalog for inbound slash commands, operator help, and the optional LLM intent surface.
+- Added `om agent commands` and `om agent llm-check` diagnostics for inspecting command routing and optional LLM readiness.
+
+### Changed
+- Enabled the one-shot AgentRuntime command facade by default for inbound handling, with `--no-agent-runtime` available for explicit fallback to the legacy parser path.
+- Clarified that LangGraph remains deferred; the production path is the deterministic command facade plus an optional one-shot LLM translator.
+- Removed legacy `om service upgrade-check`, `om service upgrade`, and `om service rollback` CLI aliases; use `om update check/apply/rollback` for release updates.
+- Unified release tag parsing and upgrade target resolution behind a shared release target resolver with fetch-before-select diagnostics.
+
+### Fixed
+- Returned structured inbound configuration errors when the audit SQLite database is unwritable instead of surfacing a Python traceback.
+- Kept inbound confirmation, income, and position receipts aligned with the canonical renderer behavior, including untruncated open-position output.
+
+## 1.2.113 - 2026-05-21
+
+### Added
+- Added the optional `AgentRuntime` inbound facade with slash commands for status, health, positions, income, runs, logs, monitored symbols, pending previews, and typed confirm/cancel flows.
+- Added an opt-in OpenAI Responses intent translator that can only produce bounded read-only `om-llm-intent-v1` intents before re-entering the existing inbound router, allowlist, audit, and renderer path.
+- Added agent runtime config defaults, YAML passthrough, config validation, settings inspection support for `OM_LLM_API_KEY`, and coverage for Feishu WS agent runtime settings.
+
+### Changed
+- Updated inbound help and operator docs to describe the command facade, optional LLM translation, same-conversation context window, and Feishu WS runtime gating.
+
+### Fixed
+- Made one-shot `om inbound handle --agent-runtime` load the same runtime config settings as Feishu WS, keeping context-window and LLM settings consistent across local and remote inbound paths.
+
+## 1.2.112 - 2026-05-21
+
+### Added
+- Added an inbound `立即升级` operation with preview, pending confirmation, cancellation, admin write gates, and service-upgrade execution through the existing release upgrade path.
+- Added `OM_INBOUND_UPGRADE_WRITE_ENABLED` to settings inspection and doctor readiness checks for explicitly enabling inbound upgrade writes.
+
+### Changed
+- Updated inbound help, pending-operation summaries, and inbound control docs to include the `确认升级` / `取消升级` flow.
+
+## 1.2.111 - 2026-05-21
+
+### Added
+- Added `om config init` to generate a starter `config.yaml` and build US/HK runtime config snapshots for first-run setup.
+- Added YAML authoring metadata to rendered service profiles so `update apply` can rebuild runtime configs from `config.yaml`.
+
+### Changed
+- Made `om config build` and `om config explain` default to YAML authoring, with explicit `--source legacy` required for deprecated JSON overlay inputs.
+- Marked `om setup init`, legacy JSON authoring, service rendering without `--config-yaml`, and runtime JSON `config set` writes with deprecation or boundary warnings.
+- Updated operator and agent docs around `config.yaml` authoring, generated runtime snapshots, YAML-aware service updates, and first-run smoke checks.
+
+### Fixed
+- Rejected mixed YAML/runtime flags in `om config validate`, keeping authoring validation and generated runtime snapshot validation separate.
+
+## 1.2.110 - 2026-05-21
+
+### Fixed
+- Made `runtime_status.latest_run` respect the requested US/HK market, preventing newer cross-market skipped runs from masking the current market runtime state.
+- Stopped treating expected scheduler skips as missing-notification runtime warnings, so skip-only runs no longer produce false quality failures.
+- Made AI Cofunder healthcheck snapshots load the service profile env file temporarily before checking online runtime settings.
+- Included projection replay verification in AI Cofunder ledger quality, clearing the `trade_events` to `position_lots` evidence gap when replay passes.
+
+## 1.2.109 - 2026-05-21
+
+### Added
+- Added `om support bundle` for generating a redacted JSON diagnostic bundle with setup, settings, config validation, runtime status, and optional healthcheck snapshots.
+
+### Changed
+- Refreshed quick-start, install, configuration, tool, deployment, and release docs around the current `config.yaml` authoring model, generated runtime config snapshots, global `om` / `om-agent` wrappers, and the remaining legacy auto-upgrade config rebuild boundary.
+
+## 1.2.108 - 2026-05-21
+
+### Changed
+- Added installed global `om` / `om-agent` wrapper startup coverage to the release smoke gate, including repo-outside startup checks for `om --help`, `om setup check`, `om settings doctor`, and `om-agent spec`.
+
+## 1.2.107 - 2026-05-21
+
+### Changed
+- Updated quick-start, install guide, and installer help examples to point at the fixed `v1.2.107` release instead of the broken `v1.2.105` global wrapper release.
+
+## 1.2.106 - 2026-05-21
+
+### Fixed
+- Fixed installed `om` and `om-agent` entrypoints so global wrappers work from directories outside the release checkout by adding the release root to `PYTHONPATH` without changing the caller's current working directory.
+
+## 1.2.105 - 2026-05-21
+
+### Added
+- Added installer-managed user-level `om` and `om-agent` wrappers, created in `$HOME/.local/bin` by default and pointed at the active `current` release.
+- Added installer flags to skip CLI wrapper creation, choose a custom wrapper directory, or explicitly take over existing non-managed wrapper paths.
+
+### Changed
+- Updated install docs and quick-start commands to present `om` / `om-agent` as the normal installed entrypoints, while keeping `./om` / `./om-agent` as repo-local fallbacks.
+
+## 1.2.104 - 2026-05-21
+
+### Added
+- Added a shared write contract for CLI and agent write paths, including standard `dry_run`, `write_applied`, `backup_path`, `audit_id`, and `rollback_hint` fields.
+- Added Feishu app notification idempotency keys and send-attempt diagnostics for retries, ambiguous sends, and duplicate-risk reporting.
+
+### Changed
+- Unified write flag semantics: local writes use `--apply`, while high-risk trade, Feishu, and service writes require `--confirm` or non-interactive `--yes`.
+- Made inbound `收益` and `持仓` default to all accounts when no account is provided, expanded income receipt details, and removed fixed truncation from income and position renderers.
+- Updated rendered service commands to pass `--yes` for non-interactive trade intake and expired-position auto-close jobs.
+
+## 1.2.103 - 2026-05-21
+
+### Fixed
+- Made agent and inbound monthly income reports use the shared exchange-rate loader and the runtime config's rate cache path, so CNY return summaries can be calculated when runtime rates are available or fetchable.
+
+## 1.2.102 - 2026-05-21
+
+### Added
+- Added conversation-scoped inbound pending operation resolution, so bare replies such as `确认记录` / `取消记录` can safely resolve the current Feishu conversation when there is exactly one pending operation.
+- Added inbound pending and audit diagnostics commands for inspecting pending previews and recent command audit rows.
+- Added Feishu inbound audit and Feishu WS service profile diagnostics to `healthcheck` / `doctor`.
+
+### Changed
+- Made manual trade preview replies more readable and support in-conversation edits such as premium, contract count, expiry, strike, and close-price updates before confirmation.
+- Made symbol operation confirmation follow the same conversation-scoped confirmation flow as manual trade records.
+
+### Fixed
+- Made pending operation confirmation an atomic claim before ledger/config writes, preventing duplicate confirmations from applying the same preview twice.
+- Rejected decimal input for integer manual trade fields instead of silently truncating values such as contract counts.
+- Avoided command-id collisions for local inbound requests without a remote message id.
+- Restored option intake ledger opener compatibility and release-local ledger drift detection used by the write guard.
+
+## 1.2.101 - 2026-05-21
+
+### Added
+- Added dependency-hash based shared virtualenv reuse for service upgrades, so unchanged release dependencies can skip repeated pip/uv installation.
+- Added runtime prepare timing and intermediate `runtime_preparing` / `runtime_prepared` upgrade status writes for clearer upgrade progress diagnosis.
+
+### Changed
+- Build service upgrade virtualenvs in temporary cache paths and publish them atomically after successful dependency installation.
+- Include Python, platform, installer mode, requirements, constraints, and server dependency inputs in the virtualenv cache fingerprint.
+
+## 1.2.100 - 2026-05-20
+
+### Added
+- Added a YAML authoring surface for runtime config, backed by code-owned `DEFAULT_CONFIG` defaults and explicit US/HK market resolution.
+- Added `./om config migrate-yaml` to preview or apply migration from layered JSON user config into ignored local `config.yaml`, with backup and post-write validation.
+
+### Changed
+- Documented the split between human-edited `config.yaml`, generated market runtime snapshots, env-backed write gates/secrets, and per-symbol strategy overrides.
+
+## 1.2.99 - 2026-05-20
+
+### Added
+- Added `./om multiplier-cache seed` to dry-run or confirm runtime multiplier cache repairs without editing market config.
+- Added setup diagnostics for uv availability and forced `OM_UPGRADE_INSTALLER=uv` readiness.
+
+### Changed
+- Made manual trade and broker trade multiplier resolution prefer the shared runtime cache inferred from runtime root or runtime config path before OpenD refresh.
+- Made service upgrade coerce a release-entity repo root back to the active current symlink when the runtime service profile identifies it.
+
+### Fixed
+- Reconciled legacy service profiles that had an installed Feishu WS service outside the managed service list, so upgrades restart and check Feishu WS with trade-intake.
+- Added sudo fallback for service drift systemd unit writes and permission-denied `systemctl` operations.
+- Preserved selected runtime config hotfixes such as `inbound.feishu_ws.ack_reaction` before upgrade rebuilds overwrite generated configs.
+
+## 1.2.98 - 2026-05-20
+
+### Added
+- Added remote runtime selection flags to `om ai-cofunder collect`, including run roots, explicit run ids, report/state roots, tail limits, and notification/freshness limits.
+
+### Fixed
+- Fixed AI Cofunder strategy evidence collection for service-profile runtime roots outside the repo checkout, so remote run candidate, reject-log, trace, and ranking evidence can be included in handoff bundles.
+- Made runtime status select the latest scanned run for the requested US/HK market instead of crossing shared `output_runs` markets.
+
+## 1.2.97 - 2026-05-20
+
+### Changed
+- Reworked multiplier resolution to use only payload fields, the shared `output_shared/state/multiplier_cache.json`, and OpenD refresh, retiring `intake.multiplier_by_symbol` and market default multiplier config fields.
+- Enabled manual trade inbound drafts to refresh missing multipliers from OpenD and include clearer multiplier cache/failure diagnostics.
+
+### Fixed
+- Made Feishu WS send a visible reply when an allowlisted sender hits the inbound write-gate, while keeping unauthorized senders silent.
+- Added settings doctor diagnostics for duplicate deprecated Feishu ACK env keys and manual trade write-gate readiness.
+
+## 1.2.96 - 2026-05-20
+
+### Added
+- Added an upgrade cache boundary for service upgrades: release code is materialized from `_cache/git/options-monitor.git`, with `--cache-root` and `OM_UPGRADE_CACHE_ROOT` overrides.
+- Added stable uv and pip download cache directories for release runtime preparation.
+
+### Changed
+- Changed confirmed upgrades to mirror/fetch once and archive target release tags instead of cloning a fresh working tree for every release.
+- Kept release directories free of `.git` while allowing later upgrade checks and upgrades to resolve release tags and remote URLs from the upgrade git cache.
+- Updated uv runtime preparation to use the host `python3` interpreter and to avoid installing uv during upgrades.
+
+## 1.2.95 - 2026-05-20
+
+### Changed
+- Removed legacy `./om init runtime ...` and top-level `./om setup --market ...` compatibility entrypoints in favor of the current `./om setup init ...` command.
+- Updated generated runtime config rebuild commands and onboarding docs to reference only the current setup/init flow.
+
+## 1.2.94 - 2026-05-20
+
+### Fixed
+- Fixed service drift reconciliation to preserve profile-provided runtime roots and to skip empty service profiles instead of forcing default maintenance units into intentionally empty profiles.
+
+## 1.2.93 - 2026-05-20
+
+### Added
+- Added active ledger store write guards for `trade-events`, `option-positions`, and manual option intake write paths, including `--runtime-root` support and structured ledger-store diagnostics.
+- Added service drift diagnostics and reconciliation for rendered systemd/launchd profiles, with runtime status visibility for missing required maintenance units.
+
+### Changed
+- Hardened broker trade intake so Futu millisecond timestamps parse as Beijing time and broker trade events no longer write `trade_time_ms=0`.
+- Verified post-write close projections before reporting intake success, added ledger/projection details to trade-intake receipts, and invalidated stale option-position context caches after applied closes.
+- Included ledger store details in repair/replay/inspect/verify outputs so production operators can see which SQLite store a command actually used.
+- Reconciled missing service units during confirmed upgrades before restarting long-running services.
+
+## 1.2.92 - 2026-05-20
+
+### Added
+- Added a shared Linux/macOS platform profile for install/setup defaults, including service target, recommended runtime root, env-file path, prerequisite hints, and service notes.
+
+### Changed
+- Improved `./om setup check` onboarding output with platform profile diagnostics, optional Feishu long-connection server dependency visibility, recommended runtime/env paths, and platform-specific service render next steps.
+- Improved `scripts/install.sh` with Linux/macOS prerequisite hints, Python/venv preflight checks, and platform-specific env-file guidance without writing secrets or enabling services.
+- Expanded install/getting-started/deployment docs with separate Linux and macOS paths, Feishu `--with-server` guidance, and safer env-file initialization examples.
+
+## 1.2.91 - 2026-05-20
+
+### Changed
+- Split Feishu inbound manual-trade recognition from trade draft normalization so the parser only identifies manual open/close commands while a dedicated draft builder handles Futu fill parsing, symbol canonicalization, multiplier resolution, and close-side conversion.
+- Added auditable manual-trade draft diagnostics to inbound preview payloads, including raw/canonical symbol, multiplier source and attempts, fill parser source, fill time, side conversion, and missing fields.
+
+## 1.2.90 - 2026-05-20
+
+### Added
+- Added `scripts/install.sh`, a pinned-release installer that creates a release directory, prepares `.venv`, installs dependencies, and updates the `current` symlink without writing config, secrets, services, timers, or runtime state.
+- Added `./om setup check`, a read-only first-run diagnostic for install layout, dependencies, settings, runtime config, runtime root, option-position SQLite path, and service/timer presence.
+
+### Changed
+- Split installation, ordinary getting started, and Agent getting started docs into separate `docs/INSTALL.md`, `docs/GETTING_STARTED.md`, and `docs/AGENT_GETTING_STARTED.md` paths.
+
+## 1.2.89 - 2026-05-20
+
+### Added
+- Added `./om settings inspect`, `./om settings explain`, and `./om settings doctor` to show redacted effective env-file settings, sources, deprecated env usage, Feishu Bot readiness, and write-gate state.
+- Added automatic local env-file bootstrap for `./om` and `./om-agent`, with service rendering support for systemd `EnvironmentFile` and launchd `OM_ENV_FILE`.
+
+### Changed
+- Moved Feishu long-connection reaction, reply, and queue behavior into runtime config under `inbound.feishu_ws` instead of secret env vars.
+- Hardened config validation against inline secret material, retired Feishu callback settings, and retired option-position Feishu sync/bootstrap settings.
+- Clarified setup, deployment, inbound, and agent docs around env-file secrets, fixed option-position store paths, and Feishu long-connection configuration.
+
+## 1.2.88 - 2026-05-20
+
+### Added
+- Added `./om service cleanup`, a dry-run-by-default release cleanup command that reports active, kept, and deletable releases, optional cache cleanup, and estimated freed space.
+- Added `--cleanup-after-upgrade` for service upgrades so old releases can be cleaned only after a successful symlink switch and runtime config rebuild/validation.
+
+### Changed
+- Made confirmed service upgrades fail fast when `--repo-root` is not the current symlink path, preventing clones into the wrong release layout.
+- Improved monthly income diagnostics so existing original-currency cash-secured values are not reported as missing when only CNY conversion rates are absent.
+- Changed inbound income replies to show original-currency premium, cash-secured, and return-rate summaries when CNY conversion is unavailable.
+
+## 1.2.87 - 2026-05-20
+
+### Changed
+- Expanded Feishu inbound read-only replies for status, healthcheck, config validation, position, recent-run, and log queries so bot responses show actionable summaries instead of generic completion messages.
+
+## 1.2.86 - 2026-05-20
+
+### Added
+- Added project-level memory governance docs that define `memory/` as the LLM wiki, including authority order, ingest triggers, lint expectations, and audit logging.
+- Added `memory/index.md` to organize existing decisions, patterns, and failures by module for future agent work.
+- Added templates for durable memory decisions, patterns, and failures.
+
+### Changed
+- Documented the Memory / LLM Wiki workflow in `docs/AGENT_WIKI.md`, including manual ingest prompts and the rule that ordinary debug/session summaries must not be promoted automatically.
+
+## 1.2.85 - 2026-05-20
+
+### Added
+- Added inbound manual trade recording with preview, sender-gated confirmation, pending-operation audit records, and readable Feishu responses for manual open/close ledger writes.
+- Added canonical monitored-symbol calibration for config writes so inputs such as `700`, `HK.00700`, `腾讯`, `POP`, and lowercase US symbols resolve to stable `symbols[]` entries.
+- Added the `./om symbols` CLI for monitored-symbol list/add/edit/remove operations with preview-by-default writes.
+- Added inbound monitored-symbol operations with preview/confirm/cancel flow and the dedicated `OM_INBOUND_SYMBOL_WRITE_ENABLED` safety gate.
+
+### Changed
+- Routed `manage_symbols` writes through the same canonical symbol calibration contract.
+
+### Removed
+- Removed the old `./om watchlist` user entrypoint and watchlist mutation compatibility module; user-facing monitored-symbol operations now use `symbols`.
+
+## 1.2.84 - 2026-05-20
+
+### Fixed
+- Distinguish remediated or historical service-upgrade failures in `runtime_status` so stale `upgrade_status.json` failures no longer force a current `runtime_failed` result.
+- Downgrade remediated service-upgrade failures to AI Cofunder warnings while preserving unrecovered upgrade failures as runtime failures.
+
+## 1.2.83 - 2026-05-20
+
+### Fixed
+- Restart all profile-managed long-running systemd services after service upgrades, including `options-monitor-trade-intake.service` and `options-monitor-feishu-ws.service`, using the configured restart command strategy.
+- Record service-restart failures after a successful symlink/config switch as `upgraded_restart_failed` with `restart_failed_services` and manual remediation instead of failing the upgrade unit outright.
+
+## 1.2.82 - 2026-05-20
+
+### Changed
+- Added structured monthly-income diagnostics for inbound `收益` queries so empty or incomplete return summaries explain matched events, lots, closed lots, premium rows, cash-secured availability, and missing fields.
+- Changed inbound monthly-income rendering to show an explicit "暂无可计算收益" explanation instead of successful-looking rows with all return fields as `-`.
+
+## 1.2.81 - 2026-05-19
+
+### Changed
+- Replaced the Feishu HTTPS callback inbound gateway with `./om inbound feishu-ws`, a Feishu long-connection client that reuses the existing allowlist, audit, idempotency, and read-only tool routing.
+- Added optional Feishu message reaction acknowledgements for `feishu-ws` through `OM_FEISHU_ACK_REACTION`.
+- Switched rendered services from `--include-feishu-gateway` to `--include-feishu-ws` and removed callback-only Feishu encrypt/token/host/port/path environment settings.
+
+## 1.2.80 - 2026-05-19
+
+### Added
+- Added account-level `return_summary` to monthly income reports, including current cash-secured basis, CNY income totals, monthly and annualized return rates, and CLI/inbound summary rendering.
+
+## 1.2.79 - 2026-05-19
+
+### Changed
+- Consolidated Feishu bot inbound/reply/send configuration on fixed `OM_FEISHU_BOT_*` environment variables and removed gateway CLI secret override flags.
+- Moved Feishu notification route resolution into the application layer while keeping infrastructure Feishu bot code as an HTTP client only.
+- Retired default ledger legacy bootstrap paths; legacy SQLite `trade_events`, `position_lots`, and `option_positions` migration now requires the explicit `option-positions store migrate-legacy` command.
+
+### Fixed
+- Applied Feishu event signature verification consistently to URL verification callbacks when signature checks are enabled.
+- Added architecture guard tests for infrastructure layering, Feishu gateway secret flags, and Feishu bot custom env-name compatibility regressions.
+
+## 1.2.78 - 2026-05-19
+
+### Fixed
+- Hardened service upgrade user overlay recovery by falling back from runtime config metadata to runtime overlays and older complete releases before rebuilding and validating runtime configs.
+- Added post-switch runtime config rebuild/validation so upgrade success is tied to the current symlink freshness path used by tick services.
+
+## 1.2.77 - 2026-05-19
+
+### Added
+- Added controlled inbound remote command handling with deterministic read-only routing, sender allowlist enforcement, message-id idempotency, and SQLite audit records.
+- Added Feishu App event callback support through `./om inbound feishu-gateway`, including signature/token checks, encrypted payload handling, and Feishu App reply API responses.
+- Added `./om service render --include-feishu-gateway` to generate a long-running Feishu gateway service and documented the Linux deployment/env configuration.
+
+### Fixed
+- Rebuild runtime configs during service upgrades after migrating `configs/user*.json` from the previous release, failing before symlink switch when required market user overlays are missing.
+
+## 1.2.76 - 2026-05-19
+
+### Fixed
+- Restart trade-intake during systemd service upgrades through profile-driven `sudo -n systemctl` when the upgrade unit runs as a non-root deploy user, and record restart remediation on permission failures.
+
+## 1.2.75 - 2026-05-19
+
+### Fixed
+- Resolved manual option intake ledger stores from the runtime config path so `/var/lib/options-monitor/config.*.json` writes to the runtime active SQLite store without requiring `OM_RUNTIME_ROOT`.
+- Added manual intake ledger target output and fail-closed protection when populated active/default stores indicate possible ledger drift.
+- Standardized human-readable trade time output on Beijing time across manual intake summaries, trade intake receipts, trade-event review output, and option-position history/inspection payloads.
+
+## 1.2.74 - 2026-05-19
+
+### Added
+- Added top-level `./om status` as a terminal-friendly, read-only wrapper over `runtime_status`, with `--json` for the raw agent-tool envelope.
+- Added top-level `./om runs` to list and inspect local runtime run snapshots from `output_runs`.
+- Added top-level `./om logs` to tail run audit files and service logs from the terminal.
+- Added read-only `runtime_runs` and `runtime_logs` agent tools for Clawbot/agent access to the same runtime evidence as `./om runs` and `./om logs`.
+- Added `runtime_runs` and `runtime_logs` snapshots to AI Cofunder bundles so handoffs use the same terminal evidence surfaces.
+
+## 1.2.73 - 2026-05-19
+
+### Changed
+- Preserved symlink repo roots in service rendering and defaulted auto-upgrade config paths to runtime-root configs.
+- Prepared release `.venv` runtime dependencies during confirmed service upgrades before switching the `current` symlink.
+- Reused the current Python executable for tick child processes instead of assuming every release directory already has `.venv/bin/python`.
+
+## 1.2.72 - 2026-05-19
+
+### Added
+- Added top-level `./om doctor`, `./om setup`, `./om update check/apply/rollback`, and safe `./om config get/set` operator entrypoints.
+
+### Changed
+- Render opt-in auto-upgrade services through `./om update apply` while keeping legacy `./om service upgrade*` commands compatible.
+
+## 1.2.71 - 2026-05-19
+
+### Fixed
+- Use parsed Futu fill timestamps for manual BTC close preview and write paths when available, while preserving execution-time fallback.
+
+## 1.2.70 - 2026-05-19
+
+### Changed
+- Render US and HK systemd tick timers with market-timezone calendar-aligned 10-minute boundaries while leaving scheduler run-point decisions unchanged.
+
+## 1.2.69 - 2026-05-19
+
+### Added
+- Added opt-in service release upgrade commands and timers: `service upgrade-check`, dry-run/confirmed `service upgrade`, and dry-run/confirmed `service rollback`.
+- Surfaced the latest service upgrade status in runtime status.
+
+## 1.2.68 - 2026-05-19
+
+### Added
+- Added checkpointed `./om option-positions verify-projection` to validate `position_lots` by replaying canonical `trade_events`, with latest report and checkpoint artifacts under option-position state.
+- Surfaced the latest projection verification status in option-position inspection and runtime status.
+- Added a rendered daily projection verification service/timer that runs at 06:00 Beijing time.
+- Moved rendered expired auto-close service/timer execution to 05:30 Beijing time.
+
+### Removed
+- Removed the external option-position snapshot reconciliation command and loader so reconciliation is internal event-vs-position projection verification only.
+
+## 1.2.67 - 2026-05-19
+
+### Added
+- Added Linux service preflight checks for env-file shape, runtime directory permissions, output symlink state, and generated runtime config metadata.
+- Added `./om service repair-output` to migrate a real runtime `output` directory into `output_accounts/<default-account>` and replace it with the required symlink.
+- Added OpenD Telnet readiness reporting to healthcheck and Futu doctor outputs.
+
+### Changed
+- `./om service render` now always writes `OM_RUNTIME_ROOT` into systemd units and supports optional deploy identity via `--deploy-user` / `--deploy-home` or `OM_DEPLOY_USER` / `DEPLOY_USER`.
+- Runtime config JSON parse errors now include precise file, line, and column diagnostics.
+- Standardized user-facing call-side strategy naming on Sell Call to match Sell Put terminology.
+
+## 1.2.66 - 2026-05-19
+
+### Changed
+- Retired the repo-local dev-to-prod checkout deployment path from Makefile, guardrails, and operator docs; service deployment guidance now points to `./om service render` for Linux systemd and Mac launchd.
+- Narrowed guardrails checks to current documentation wording and runtime config tracking after removing the obsolete deploy argument policy.
+
+### Removed
+- Removed old deploy helper entrypoints and deploy observability remnants from the active architecture contract.
+- Removed obsolete OpenD, Futu, healthcheck, watchdog-loop, required-data schema, report-retention, and SSH deploy-key self-check scripts that duplicated maintained CLI/application paths.
+
+### Tests
+- Added structural regressions to keep retired deployment, WebUI, OpenD doctor, healthcheck wrapper, report-retention, and deploy-key helper scripts from returning.
+- Re-ran focused structure/runtime/service/OpenD CLI tests, guardrails, release metadata validation, and diff checks.
+
+## 1.2.65 - 2026-05-19
+
+### Added
+- Added `./om service render` / `./om service status` support for Linux systemd and Mac launchd deployments, including runtime-root aware service profiles and split runtime/dev/server dependency files.
+- Added runtime path and secret resolution helpers so deployed services can read server-local environment variables without depending on repo-local secret JSON files.
+- Added AI Cofunder ranking evidence for strategy handoff bundles, including per-report top candidates, score inputs, configured score weights, cash headroom, reject samples, and handoff Markdown summaries.
+
+### Changed
+- Added `--env-file` to `./om service render` for systemd deployments so generated services reference the server-local environment file for Feishu credentials.
+- Routed scheduler, sell-put cash, pipeline runtime, multiplier cache, external service, and agent health/status paths through the configured runtime root.
+- Enforced sell-put `min_otm_pct` in the candidate engine and scan pipeline so configured OTM distance is part of the hard strategy gate.
+
+### Removed
+- Retired option-position Feishu Bitable mirror sync, including the `sync-feishu` CLI, sync metadata writes, sync receipts, runtime-status sync readouts, config defaults, docs, and sync-specific tests.
+- Removed repo-local `secrets/*.json` from the formal runtime path; Feishu holdings and Feishu app notifications now resolve credentials from environment variables, and option-position SQLite defaults to runtime-root storage without `portfolio.data_config`.
+- Removed retired one-off scripts and obsolete optimization notes that duplicated maintained CLI, runtime status, close-advice, notification, and deployment paths.
+
+### Tests
+- Re-ran full pytest, changed Python compile checks, focused AI Cofunder/plugin tests, config build dry-runs for US/HK, changed-path type checks, diff checks, and release metadata validation.
+
+## 1.2.64 - 2026-05-18
+
+### Fixed
+- Enforced canonical option trade write rules for symbol, type, side, strike, expiration, contracts, multiplier, locked shares, premium, and cash-secured amount.
+- Required positive `premium_per_share` on manual and broker open writes, preserved up to three decimal places, and stopped defaulting missing open prices to `0.0`.
+- Required positive manual/broker close prices while keeping expire auto-close as the only zero-price close path.
+- Marked parsed trade messages without premium as not write-ready instead of only listing `premium_per_share` in missing fields.
+
+### Changed
+- Treat `underlying_share_locked` as a short-call-only derived risk field that must equal `contracts * multiplier` when explicitly supplied.
+- Treat `cash_secured_amount` as a short-put-only derived risk field from `strike * multiplier * contracts`.
+
+### Tests
+- Added domain regressions for required write fields, price precision, locked-share validation, and cash-secured derivation.
+- Re-ran changed-path type checking, compile checks, focused option-position/trade-intake tests, full pytest, diff checks, and release metadata validation.
+
+## 1.2.63 - 2026-05-18
+
+### Fixed
+- Preserved scheduler `last_run_id` / trigger timing in AI Cofunder evidence so stale runtime output can be judged against the actual online job run.
+- Downgraded stale runtime output from a hard failure to a warning when scheduler evidence confirms the latest runtime run completed successfully.
+- Split candidate CSVs from `*_reject_log.csv` files in AI Cofunder strategy evidence so rejected rows no longer inflate candidate counts or create bogus empty candidate samples.
+- Added Feishu option-position sync failure/conflict details to AI Cofunder ledger evidence and deterministic findings.
+- Added account-level candidate, reject-log, and filter-trace summaries to the AI Cofunder account-strategy matrix.
+
+### Tests
+- Added AI Cofunder regressions for scheduler run-id evidence, confirmed stale runtime handling, Feishu sync `partial_failed` details, reject-log separation, and account-level strategy evidence.
+- Re-ran focused AI Cofunder tests, agent plugin contract/smoke tests, changed-path type checking, compile checks, diff checks, and release metadata validation.
+
+## 1.2.62 - 2026-05-18
+
+### Changed
+- Repointed runtime position/trade imports to the canonical `domain.domain.ledger.position_fields` owner instead of the legacy `domain.domain.option_position_lots` re-export.
+- Removed retired post-write v2 projection status payloads from option-position workflow and CLI outputs.
+- Retired the old local WebUI surface, including `src/interfaces/webui`, `src/application/webui_*`, `scripts/webui`, `run_webui.sh`, and WebUI-specific tests/static assets.
+- Updated onboarding docs and install guidance to use `./om init runtime` and CLI/agent entrypoints instead of the retired WebUI.
+- Updated project memory and architecture guidance so future work no longer treats WebUI as an active interface.
+
+### Tests
+- Added structural coverage to keep runtime code off the legacy `option_position_lots` re-export.
+- Added structural coverage to keep retired WebUI code and script entrypoints from returning.
+- Verified with focused ledger/WebUI-retirement tests, changed-file type checking, compile checks, full pytest, diff checks, and release metadata validation.
+
+## 1.2.61 - 2026-05-18
+
+### Changed
+- Rewrote `AGENTS.md` as the short agent-facing operating manual for safety boundaries, entrypoint selection, module ownership, and focused quality gates.
+- Rebuilt `docs/AGENT_WIKI.md` into a task-driven agent handbook covering tool selection, AI Cofunder handoff, runtime evidence paths, investigation playbooks, module boundaries, and verification guidance.
+- Updated README, Getting Started, Agent Integration, Docs Index, and Tool Reference navigation so agents can find the handbook and the `ai_cofunder` workflow from the public docs.
+
+### Tests
+- Verified doc whitespace with `git diff --check`, confirmed the `ai_cofunder` manifest through `./om-agent spec`, and checked `./om ai-cofunder collect --help`.
+
+## 1.2.60 - 2026-05-18
+
+### Fixed
+- Fixed legacy SQLite bootstrap so `option_positions.bootstrap_from_legacy_sqlite.enabled=true` reads the deprecated `option_positions.sqlite_path` database instead of the active runtime database.
+- Prefer migrating legacy `trade_events` as the source of truth, with explicit fallbacks for legacy `position_lots` and old `option_positions` snapshots.
+- Added explicit bootstrap statuses for missing, empty, disabled, and unreadable legacy SQLite stores instead of silently skipping migration.
+
+### Tests
+- Added regression coverage for active-empty / legacy-populated dual-store bootstrap, legacy `trade_events` precedence, disabled legacy migration, and missing legacy database diagnostics.
+- Re-ran focused ledger/option-position/trade CLI tests, changed-file type checking, compile checks, full pytest, diff checks, and release metadata validation.
+
+## 1.2.59 - 2026-05-18
+
+### Added
+- Added `./om ai-cofunder collect` and the `ai_cofunder` agent tool as the dedicated MacBook Codex handoff path for redacted runtime, scheduler, ledger, account-strategy, and strategy evidence.
+- Added optional `--include-healthcheck` / `include_healthcheck=true` support so AI Cofunder bundles can carry a redacted `healthcheck_snapshot` without duplicating healthcheck readiness logic.
+
+### Changed
+- Removed the old top-level `doctor` CLI/tool/module instead of keeping it as a compatibility alias for the AI partner workflow.
+- Moved AI Cofunder evidence collection, deterministic checks, and redaction into `src/application/ai_cofunder/`.
+- Renamed healthcheck OpenD output checks from `opend_doctor*` to `opend_readiness*` to keep readiness probes distinct from the removed doctor lane.
+
+### Tests
+- Replaced doctor contract/behavior coverage with AI Cofunder tests for scheduler evidence, strategy evidence, redaction, output-write gating, and local runtime artifacts.
+- Re-ran focused AI Cofunder/agent tests, changed-file type checking, compile checks, full pytest, CLI smoke checks, diff checks, and release metadata validation.
+
+## 1.2.58 - 2026-05-18
+
+### Added
+- Added `./om option-positions store inspect` to diagnose active, legacy-configured, and repository-default SQLite stores, including `trade_events` / `position_lots` row counts and multi-store drift warnings.
+- Added ledger-store visibility to agent healthcheck, runtime status, option-position inspection/rebuild output, trade-event replay output, and expired-position maintenance results.
+
+### Changed
+- Fixed the option-position ledger store to `<runtime_root>/output_shared/state/option_positions.sqlite3`; deprecated `option_positions.sqlite_path` is ignored as an active path and retained only for diagnostics.
+- Retired Feishu `option_positions` bootstrap reads so option positions are sourced from local SQLite `trade_events -> projection -> position_lots`; Feishu `option_positions` remains mirror/sync-only.
+- Kept general Feishu holdings / `external_holdings` reads intact while limiting Feishu `option_positions` schema checks to explicitly enabled mirror sync.
+- Updated migration, architecture, getting-started, and ledger redesign docs to document the SQLite-only source of truth and Feishu mirror-only boundary.
+
+### Tests
+- Added regression coverage for ignored legacy SQLite paths, store inspection drift diagnostics, retired Feishu bootstrap config, healthcheck mirror-schema gating, and ledger-store payload exposure.
+- Re-ran full pytest, focused ledger/position/trade/healthcheck type checks, compile checks, `git diff --check`, release metadata validation, and store-inspect CLI verification.
+
+## 1.2.57 - 2026-05-18
+
+### Added
+- Added a canonical trade/position ledger package around `trade_events -> projection -> position_lots`, with explicit lot identity, projection replay, read views, close-target resolution, preflight, writer, maintenance, intervention, reconciliation, and storage boundaries.
+- Added dedicated `positions` and `trades` application namespaces for position workflows, auto-close maintenance, Feishu mirror sync, trade intake, trade normalization, receipts, and trade-event review.
+- Added explicit result contracts for ledger preflight/write/projection refresh, manual open/close/adjust, broker trade operations, expired-close decisions, and manual void/repair interventions.
+
+### Changed
+- Retired the v2 snapshot/compatibility position model and removed legacy option-position facade/service modules from default runtime paths.
+- Unified manual close, broker close, and auto-close target resolution through a single `CloseTargetResolution` contract with fail-closed guards for same-expiry, same-strike, multi-lot, and cross-expiry cases.
+- Moved position lot fields, patch handling, sync metadata, projection writes, and close target validation behind explicit contracts instead of free-form core dictionaries.
+- Kept Feishu, reports, receipts, CLI JSON, SQLite codec, migration, and reconciliation as boundary adapters rather than canonical position sources.
+
+### Tests
+- Added structural regression guards preventing retired v2/facade imports, legacy fallback reads, non-public ledger imports, and free-form result contracts from returning to core position/trade paths.
+- Added ledger, position, trade, close-target, auto-close, migration, projection, publisher, reporting, Feishu sync, and trade-intake regression coverage for the rebuilt core model.
+- Re-ran full pytest, focused ledger/position/trade type checking, release metadata validation, diff checks, and a dry-run trade-event replay.
+
+## 1.2.56 - 2026-05-17
+
+### Added
+- Added the `doctor` agent tool and `./om doctor` CLI for production-quality triage from runtime status, scheduler evidence, audit tails, and deployment metadata.
+- Added optional OpenAI-compatible AI triage with custom `base_url`, `model`, `api_key_env`, strict JSON prompting, and redacted evidence handoff output.
+- Added strategy evidence collection from candidate CSVs, `candidate_filter_trace.jsonl`, and strategy replay artifacts so doctor can support evidence-backed optimization suggestions.
+
+### Changed
+- Made doctor report writes opt-in through `write_outputs=true`, write-tool permission, and `confirm=true`, while keeping the default path as no local writes.
+- Restricted doctor output directories to the repository tree and kept API keys, webhooks, bearer tokens, and long account identifiers out of handoff evidence.
+- Preserved deterministic runtime status in handoffs when AI triage is unavailable, and kept runtime summary warnings visible alongside scheduler findings.
+
+### Tests
+- Added doctor coverage for scheduler evidence boundaries, AI config/redaction, strategy evidence, output-write gating, path restrictions, and agent/CLI contracts.
+- Re-ran focused doctor, agent plugin contract/smoke, type checking, compile, config dry-runs, diff, and release metadata checks.
+
+## 1.2.55 - 2026-05-16
+
+### Added
+- Added `./om option-positions auto-close-expired` as the dedicated expired-position auto-close entrypoint with runtime config, account, dry-run/apply, `--no-send`, and persisted run-state support.
+
+### Changed
+- Removed expired auto-close execution from option-monitor tick/account/pipeline orchestration so scans no longer perform maintenance writes as a side effect.
+- Removed the obsolete `option_positions.auto_close.run_on_tick` config knob and related validation surface.
+- Updated README, RUNBOOK, CONFIGS, and configuration guidance to document auto-close as an independent scheduled/manual workflow.
+
+### Tests
+- Added dedicated auto-close command coverage and removed tick notification/account-run tests that depended on auto-close side effects.
+- Re-ran focused tick, position-maintenance, auto-close, config dry-run, compile, diff, and targeted type checks.
+
+## 1.2.54 - 2026-05-15
+
+### Added
+- Added task-level receipt delivery for `option-positions sync-feishu` with confirmed duplicate suppression and unconfirmed receipt retry support.
+- Added persisted `option_positions_feishu_sync` last-run and receipt state for Feishu mirror synchronization diagnostics.
+- Added `runtime_status.option_positions_feishu_sync` so operators can inspect the latest sync result and receipt status without reading cron logs.
+- Added `--no-send` to `option-positions sync-feishu` for silent manual or scheduled runs.
+
+### Changed
+- Documented Feishu mirror sync receipt behavior, daily cron handoff, `receipt_key` dedupe, and troubleshooting surfaces.
+- Extended `option_positions.sync_to_feishu.receipt` defaults and config validation.
+
+### Tests
+- Added regression coverage for Feishu sync receipt decisions, message rendering, duplicate suppression, retry behavior, persisted receipt state, runtime-status summaries, and config validation.
+- Re-ran full pytest, focused type checking, compile checks, config dry-runs, diff checks, and release metadata validation.
+
+## 1.2.53 - 2026-05-15
+
+### Added
+- Added idempotent auto-close receipt state keyed by account, broker, business date, and closed position records so daily maintenance cron retries do not resend already confirmed receipts.
+- Added `retry_unconfirmed` receipt policy for retrying prior unconfirmed auto-close receipt deliveries.
+- Added `runtime_status.latest_run.accounts.<account>.auto_close_receipt` summary fields for receipt diagnosis.
+
+### Changed
+- Emitted explicit auto-close receipt audit events with status, attempt count, and receipt key metadata.
+- Documented daily maintenance cron handoff and auto-close receipt dedupe behavior.
+
+### Tests
+- Added regression coverage for confirmed duplicate skips, unconfirmed receipt retries, receipt state persistence, receipt audit events, and runtime-status receipt summaries.
+- Re-ran focused receipt/account-run/runtime-status tests, changed-file type checking, compile checks, config dry-runs, and release metadata validation.
+
+## 1.2.52 - 2026-05-15
+
+### Added
+- Added `runtime_status` support for inspecting a specific `output_runs` directory by `run_id` or `run_dir`.
+- Added `latest_scanned_run` and scanned-run prefetch summaries so a later skipped tick no longer hides the most recent real scan from runtime diagnostics.
+
+### Changed
+- Expanded required-data prefetch observability with sparse/shared summary fields such as `cached_unique_symbols`, `skipped`, `force_refresh`, reported OpenD call counts, and shared force-prefetch markers.
+
+### Tests
+- Added runtime-status regression coverage for skipped latest runs, explicit run selection, and shared force-prefetch summaries.
+- Re-ran focused agent plugin smoke/contract tests, changed-file type checking, compile checks, and release metadata validation.
+
+## 1.2.51 - 2026-05-15
+
+### Fixed
+- Isolated yield enhancement from account cash prefilters so account-specific sell-put cash caps no longer shrink the market put universe used for YE pair selection.
+- Kept ordinary sell-put cash hard filtering on the account-scoped sell-put path while leaving the YE put universe market-scoped.
+
+### Changed
+- Updated Agent Wiki architecture references to current candidate engine, option-position ledger, close-advice, and tick entrypoint symbols.
+
+### Tests
+- Added regression coverage for account-prefiltered YE orchestration, YE put-universe cash-filter isolation, and current Agent Wiki symbol references.
+- Re-ran focused domain-boundary, sell-put liquidity, symbol-monitoring, YE helper/planning, pipeline wrapper, type, compile, and release metadata checks.
+
+## 1.2.50 - 2026-05-15
+
+### Added
+- Added generated runtime config freshness metadata for system, common user, and market user config sources.
+- Added stale runtime config checks to `config validate --market`, `run tick`, and `run tick-cron`, with clear rebuild commands.
+- Added an emergency `--allow-stale-config` override for tick entrypoints.
+
+### Fixed
+- Prevented cron/tick runs from silently using stale runtime configs after `configs/system.json`, `configs/user.common.json`, or market user configs change.
+- Preserved `init runtime` compatibility by recording inline generation metadata for starter runtime configs.
+- Returned schedule contract validation failures as structured JSON from `config validate --market`.
+
+### Tests
+- Added regression coverage for stale market-user config detection, newly appearing common-user config detection, tick-cron preflight failures, init-runtime metadata, and structured validation errors.
+- Re-ran focused pytest, smoke tests, changed-file type checking, compile checks, config dry-runs, and release metadata validation.
+
+## 1.2.49 - 2026-05-15
+
+### Added
+- Added `./om run tick-cron` as the cron-safe tick entrypoint with market-specific default config, lock file, timeout, dry-run command output, and trigger diagnostics.
+- Added runtime trigger context capture so tick runs and `runtime_status` can report outer runner source, job id, delivery mode, and timeout metadata.
+- Added `runtime_status.notification_diagnosis` to distinguish scheduler skips, `delivery.mode=none`, `--no-send`, missing notification routes, confirmed sends, partial sends, and unconfirmed delivery attempts.
+
+### Changed
+- Documented the recommended HK/US cron handoff through `tick-cron`, keeping cron as a 10-minute wakeup while code owns business-window and run-point decisions.
+- Clarified cron wrapper return semantics so lock skips, process failures, and timeouts are observable as distinct outcomes.
+
+### Tests
+- Added tick-cron, trigger-context, CLI, and runtime-status diagnosis coverage.
+- Re-ran full pytest, changed-file type checking, compile checks, config dry-runs, tick-cron dry-runs, and release metadata validation.
+
+## 1.2.48 - 2026-05-15
+
+### Fixed
+- Added a runtime schedule market guard so HK ticks fail fast when the loaded config carries a US-market schedule timezone instead of silently skipping during HK day-session cron runs.
+- Added HK 11:00 Beijing-time scheduler regression coverage to keep the HK run window on `09:30-16:00`.
+
+### Tests
+- Re-ran the full pytest suite, HK 11:00 scheduler verification, config dry-runs, and release metadata validation.
+
+## 1.2.47 - 2026-05-15
+
+### Changed
+- Reworked scan scheduling around explicit `timezone`, `run_window`, `run_points`, `gates`, and `cron_interval_min` settings.
+- Simplified scan/notification timing so scheduled points are open-plus-10 minutes, hourly, and close-minus-10 minutes instead of separate scan and notify intervals.
+- Applied the US Beijing-before-02:00 gate to auto market selection so US tick work is skipped after the cutoff across daylight saving and standard time.
+- Updated WebUI, generated static assets, config validation, migration helpers, and configuration guidance to use the new schedule fields.
+
+### Fixed
+- Preserved per-account scheduler behavior when reading upgraded state by falling back to legacy `last_scan_utc_by_account` only for the matching account.
+- Prevented stale WebUI bundles from shipping old schedule field names.
+
+### Tests
+- Added regression coverage for Beijing cutoff auto-market selection, legacy per-account scheduler state, and committed WebUI schedule bundle contents.
+- Re-ran the full pytest suite, config dry-runs, WebUI bundle checks, and release metadata validation.
+
+## 1.2.46 - 2026-05-15
+
+### Added
+- Added default-on receipt delivery for expired auto-close maintenance after local `option_positions` events/projection are updated.
+- Added `option_positions.auto_close.receipt` controls for applied, failed, noop, and dry-run receipt behavior, with `--no-send` suppressing receipt delivery.
+- Added `runtime_status` visibility for the latest run's `expired_position_maintenance` state and receipt result.
+
+### Changed
+- Kept receipt delivery outside the option-position persistence service so the canonical `trade_events -> projection -> position_lots` chain remains replayable.
+- Documented auto-close receipt side effects and troubleshooting surfaces in README, RUNBOOK, CONFIGS, and configuration guidance.
+
+### Tests
+- Added auto-close receipt decision, message, delivery, no-send, account-run state/audit, runtime status, and config validation coverage.
+- Re-ran focused auto-close, account-run, runtime-status, tick orchestration, option-position service, import ownership, compile, config dry-run, type, and release metadata checks.
+
+## 1.2.45 - 2026-05-15
+
+### Added
+- Added auto trade intake receipt delivery for applied, unresolved, and failed deals, using the configured notification route and default-on `trade_intake.receipt` settings.
+- Added listener status output with heartbeat, restart/error state, last deal result, and last receipt result so long-running intake jobs are observable from cron.
+- Added `runtime_status.trade_intake` summaries for intake state, listener status, audit file presence, and receipt confirmation counts.
+
+### Changed
+- Kept receipt delivery outside the option-position resolver path, sending only after intake resolution/persistence has produced a terminal result.
+- Documented auto trade intake receipt side effects and troubleshooting surfaces in README, RUNBOOK, and configuration guidance.
+
+### Tests
+- Added receipt decision, delivery normalization, state/audit persistence, duplicate-retry, runtime status, and receipt-config validation coverage.
+- Re-ran focused intake/runtime suites, changed-file type checking, compile checks, config dry-runs, and release metadata validation.
+
+## 1.2.44 - 2026-05-14
+
+### Changed
+- Rewrote the README into a product/operator manual with a safer quick start, clearer entry-point guidance, and a workflow-first structure for WebUI, `./om`, and `./om-agent`.
+- Promoted candidate filter trace troubleshooting, side-effect boundaries, scheduled-task guidance, and agent safety rules so common online issues can be collected and analyzed locally with less guesswork.
+
+### Tests
+- Re-ran the agent plugin contract/smoke suite, `./om-agent spec` JSON validation, and `git diff --check` while verifying the README command surface against the current CLI.
+
+## 1.2.43 - 2026-05-14
+
+### Added
+- Added candidate filter trace rows for Sell Put, Sell Call, close advice, yield enhancement, cash reserve, and share coverage decisions.
+- Added the read-only `candidate_filter_explain` agent tool to explain why a symbol was rejected, post-filtered, accepted, notified, or not observed from existing trace files.
+
+### Changed
+- Tightened candidate scan typing and trace-path handling so changed-file `basedpyright` can validate the trace/explain implementation without being blocked by older weakly typed code.
+
+### Tests
+- Added regression coverage for candidate filter trace writing, missing required_data visibility, cash-reserve filtering traces, and the explain tool.
+- Re-ran focused candidate, close-advice, agent-plugin, compile, type, and release metadata validation.
+
+## 1.2.42 - 2026-05-14
+
+### Fixed
+- 修复收益增强通知建议挂单字段，Put 建议价固定使用 Put 卖出报价，避免误用组合净价。
+- 修复收益增强 `max_debit` 模式下默认成本比例约束的处理，仅在显式配置时限制 Call 成本/Put 权利金比例。
+- 统一收益增强 Call 侧 DTE 规划与 Sell Put 窗口，避免预取窗口和候选过滤窗口不一致。
+
+### Tests
+- 补充收益增强通知字段、资金过滤模式和 required_data 规划回归测试。
+
+## 1.2.41 - 2026-05-14
+
+### Changed
+- Reworked Sell Put yield enhancement from a second-pass Sell Put optimizer into a premium-funded long-call combination strategy.
+- Moved yield-enhancement defaults into application configuration constants and locked `configs/system.json` against those defaults.
+- Broadened yield-enhancement Put universe generation so it inherits symbol, strike, DTE, cash, risk, and liquidity boundaries without inheriting Sell Put return thresholds.
+- Replaced old optimizer output fields with funding coverage and upside elasticity fields across candidates, summaries, canonical rows, alerts, and README guidance.
+
+### Fixed
+- Kept yield enhancement running when normal Sell Put minimum-income currency conversion is unavailable, while normal Sell Put output still fails closed.
+- Rejected removed yield-enhancement optimizer and legacy call OTM fields during config validation instead of allowing stale settings to apply silently.
+
+### Tests
+- Added regression coverage for system default consistency, premium-funded call acceptance/rejection, config tombstones, required-data call planning, and Sell Put return-floor isolation.
+- Re-ran the full pytest suite plus release metadata, config dry-run, compile, type, and diff validation.
+
+## 1.2.40 - 2026-05-14
+
+### Added
+- Added required_data prefetch option-chain budget waves so OpenD `get_option_chain` calls stay under the configured shared window during global prefetch.
+- Added run summary fields for OpenD rate-limit classes, rate-limit items, prefetch budget plans, cooldowns, and stale option-chain cache hits.
+
+### Changed
+- Reduced effective prefetch option-chain budget below the raw OpenD limit to leave headroom for retries and concurrent callers.
+- Reused stale option-chain cache only as a bounded RATE_LIMIT fallback, with force-refresh runs and cache entries older than the retention horizon excluded.
+
+### Fixed
+- Recorded single-expiration OpenD option-chain RATE_LIMIT details in required_data prefetch summaries instead of leaving `opend_rate_limit_classes` empty.
+
+### Tests
+- Added focused US/HK required_data prefetch, OpenD coordinator, option-chain cache fallback, and budget planning regression coverage.
+- Re-ran focused OpenD limiter/config, required_data prefetch, explicit-expiration fetch, runtime status, compile, type, and diff validation.
+
+## 1.2.39 - 2026-05-14
+
+### Changed
+- Tightened close-advice remaining annualized thresholds: `strong` now requires remaining annualized return at or below 4.5%, and `medium` now requires at or below 7%.
+- Kept close-advice system defaults, no-config domain fallbacks, and operator documentation aligned on the new thresholds.
+
+### Tests
+- Re-ran focused close-advice, web UI presenter, layered config, and config dry-run validation.
+
+## 1.2.38 - 2026-05-13
+
+### Changed
+- Simplified recently split tick helper modules without changing runtime behavior.
+- Inlined low-value single-use helper code while preserving compatibility exports and tick orchestration boundaries.
+
+### Tests
+- Re-ran focused tick helper, import-boundary, watchdog, and unified tick regression suites.
+
+## 1.2.37 - 2026-05-13
+
+### Added
+- Added `docs/ARCHITECTURE.md` to document module layers, public entry points, tick orchestration, scan/candidate ownership, option positions, close advice, and runtime state boundaries.
+- Added narrow tick helper modules for idempotency context, guard admission, run workspace setup, scheduler context, account execution, and notification delivery.
+
+### Changed
+- Reduced `multi_account_tick` to a public orchestration spine while preserving the `./om run tick` chain and compatibility exports.
+- Updated architecture guard tests to assert against the new owner modules instead of relying on implementation details inside the main tick entry point.
+
+### Tests
+- Added coverage for tick idempotency context and tick run workspace preparation.
+
+## 1.2.36 - 2026-05-13
+
+### Changed
+- Consolidated candidate reject-rule mapping so scanner and pandas adapter reject logs share the same engine reason vocabulary.
+- Removed unused event-risk gate hooks from the candidate scanner wiring because current production behavior remains post-scan annotation.
+
+### Fixed
+- Logged Stage 1 hard-constraint rejects plus open-interest, volume, and spread-quality rejects in candidate reject CSVs.
+- Treated unavailable or invalid bid/ask spread quality as a `max_spread_ratio` rejection when spread filtering is enabled.
+
+## 1.2.35 - 2026-05-13
+
+### Changed
+- Reused parsed required_data CSV reads during prefetch cache coverage checks instead of reading the same CSV twice per symbol.
+- Preserved option-chain DataFrames through OpenD symbol fetch processing and used tuple iteration for final row assembly to reduce pandas round trips.
+
+### Fixed
+- Removed duplicate option type and strike filtering during OpenD row construction after the existing pre-snapshot pruning already applied those bounds.
+
+## 1.2.34 - 2026-05-13
+
+### Changed
+- Ordered alert rows within each priority section by strategy and then by candidate strength so same-strategy candidates stay consistently ranked.
+- Updated notification candidate selection to preserve cross-strategy coverage across high, medium, and low sections while keeping the existing global 5-item budget.
+
+### Fixed
+- Prevented high-priority Sell Put rows from crowding out medium-priority Sell Call notifications when capacity-limited strategy coverage is needed.
+- Kept compact and legacy notification renderers aligned on the same capped cross-strategy selection behavior.
+
+## 1.2.33 - 2026-05-13
+
+### Added
+- Added run-level required_data prefetch metrics and `required_data_prefetch_summary.json` status exposure through OpenClaw runtime status.
+- Added OpenD option-expiration caching by underlier and trading date to reduce repeated `get_option_expiration_date` calls.
+- Added same-run required_data prefetch dedupe that merges matching OpenD endpoints while preserving strategy DTE and strike bounds.
+
+### Changed
+- Narrowed required_data prefetches by enabled strategy bounds and pushed single-side option-chain requests down to OpenD when only put or call data is needed.
+- Kept prefetch completion-first without adding complete/best-effort mode switches, expiration cache switches, or dedupe switches.
+- Removed repeated OpenD snapshot and expiration endpoint defaults from `configs/system.json`; code defaults still protect those endpoints and explicit config overrides remain compatible.
+
+### Fixed
+- Recorded OpenD rate-limit cooldowns for legacy option-type fallback calls during option-chain fetches.
+- Required cached required_data coverage to satisfy requested max DTE before skipping a fetch.
+- Avoided marking shared force-prefetch state done when a prefetch run fails, so later accounts can retry.
+
+## 1.2.32 - 2026-05-13
+
+### Added
+- Added offline strategy replay analysis for joined candidate outcome rows, including DTE effectiveness, Delta win-rate buckets, symbol risk/return summaries, filter-value diagnostics, and shadow-only dry-run parameter suggestions.
+- Exposed the replay analyzer through `./om-agent run --tool strategy_replay_analyze` and `./om strategy-replay analyze`.
+- Documented the replay input contract and evidence model.
+
+## 1.2.31 - 2026-05-12
+
+### Changed
+- Moved the OpenD option-chain rate-limit configuration surface to `runtime.opend_rate_limits.option_chain`, while keeping `runtime.option_chain_fetch` compatible for older local configs.
+- Removed the legacy `runtime.option_chain_fetch` default from `configs/system.json`; the built-in `10 calls / 30 seconds` option-chain limit now comes from code defaults unless explicitly configured.
+
+### Fixed
+- Serialized file-backed OpenD rate-limit acquisition across independent in-process/subprocess workers to prevent bursts from exceeding shared OpenD windows.
+- Recorded server-side OpenD rate-limit responses as a shared cooldown so retries wait for the configured window instead of immediately hammering the endpoint again.
+
+## 1.2.30 - 2026-05-12
+
+### Changed
+- Enabled default Sell Put and Sell Call candidate ranking weights for liquidity and risk distance through the system templates.
+- Wired configured candidate `score_weights` through the sell-put/sell-call scan pipeline so ranking can use the risk-adjusted score instead of remaining return-only by default.
+
+## 1.2.29 - 2026-05-12
+
+### Changed
+- Relaxed default Sell Put yield-enhancement optimizer thresholds for US/HK symbol defaults so volatile names can surface candidates while keeping funding mode and combo-spread limits unchanged.
+
+## 1.2.28 - 2026-05-12
+
+### Added
+- Added trade intent normalization for manual intake and Futu normalized deals, making trade side, position effect, and target position side explicit.
+- Added `om trade-events` review, replay, void, and repair commands for manual intervention on the trade event ledger.
+
+### Changed
+- Allow manual close flows to auto-match a strict unique open lot when `record_id` is omitted, while listing candidates and refusing ambiguous matches.
+- Made manual close parsing skip multiplier resolution and rely on contract selectors for safe matching.
+
+### Fixed
+- Guarded manual trade-event repair against repeated repair of an already voided event.
+- Blocked open-event repair when downstream close or adjust events depend on the original lot identity.
+- Included projection previews in trade-event void and repair dry runs before applying ledger changes.
+
+## 1.2.27 - 2026-05-12
+
+### Changed
+- Simplified Sell Call strike-floor configuration by replacing `min_if_exercised_total_return` with `min_strike_cost_multiplier`.
+- Raised the system Sell Call template floor to `avg_cost * 1.02` while preserving the configured `min_strike` floor.
+
+## 1.2.26 - 2026-05-12
+
+### Changed
+- Made multi-account tick default to sequential account execution unless `runtime.multi_account_max_workers` or `runtime.account_max_workers` explicitly opts into account-level parallelism.
+- Replaced per-account scheduler CLI subprocess calls with in-process scheduler decisions while keeping the run-level scheduler CLI audit surface.
+
+### Fixed
+- Batched scheduler state updates for scanned/notified accounts to reduce OpenClaw cron overhead.
+- Reduced nested OpenD/Futu pressure from account-level and symbol-level worker pools that could push cron runs into the 120s timeout.
+
+## 1.2.24 - 2026-05-12
+
+### Changed
+- Validated `--default-account` against the active account set for the current tick run.
+
+### Fixed
+- Made multi-account tick scan scheduling account-scoped so one account's scheduler state no longer suppresses or drives another account's pipeline run.
+- Marked scheduler scans only for accounts whose pipeline actually ran.
+- Kept `--no-send` shared last-run metadata observable without marking dry runs as sent.
+
+## 1.2.23 - 2026-05-12
+
+### Changed
+- Refined compact notification wording and Markdown layout for per-account reports.
+
+## 1.2.22 - 2026-05-12
+
+### Changed
+- Extracted reusable release workflow to DRY `release.yml` and `release-from-version.yml`.
+- Opted into Node.js 24 for GitHub Actions to resolve Node 20 deprecation warnings.
+
+## 1.2.21 - 2026-05-12
+
+### Added
+- Added per-account notification delivery audits for send start, confirmation, failure reason, message id, retry attempts, and run-level attempted/confirmed counters.
+- Added no-candidate heartbeat backfill for scanned accounts that have no candidates when another account in the same run does have candidate messages.
+- Added an operator failure-summary notification when one or more per-account notification sends fail.
+
+### Changed
+- Changed notification routing to use `notifications.provider` for the delivery adapter and `notifications.channel` for the OpenClaw transport channel, while keeping the legacy `wechat_clawbot` alias compatible.
+- Changed OpenClaw notification sending to require a confirmed `message_id` before marking an account notified.
+- Updated WebUI, docs, examples, healthcheck, and validation surfaces to default to `provider: openclaw` with `channel: openclaw-weixin`.
+
+### Fixed
+- Prevented one account's notification send timeout or failure from silently stopping later account sends.
+- Marked scheduler `sent_accounts` only for confirmed per-account deliveries.
+
+## 1.2.17 - 2026-05-11
+
+### Added
+- Added a stricter Sell Put yield-enhancement optimizer score that compares Sell Put alone against Sell Put + Long Call before recommending the long Call.
+
+### Changed
+- Yield-enhancement ranking now prioritizes optimizer score, scenario-score lift, downside breakeven deterioration, and combo spread before falling back to the existing scenario score ordering.
+
+## 1.2.16 - 2026-05-11
+
+### Added
+- Added `candidate_rank_explain` as a read-only Agent diagnostic tool for explaining existing candidate CSV ranking scores, score components, inputs, warnings, and optional baseline rank changes.
+- Added `explain_candidate_rank()` to the candidate engine so ranking explanations reuse the canonical score calculation instead of introducing another ranking path.
+
+## 1.2.15 - 2026-05-11
+
+### Changed
+- Rewrote the README into a product-oriented guide covering user onboarding, common workflows, strategy models, configuration, notifications, Agent safety defaults, scheduling, troubleshooting, and documentation navigation.
+- Extracted candidate ranking score calculation into the canonical candidate engine with explicit score weights and explainable score components.
+- Made the legacy DataFrame candidate strategy wrapper delegate sorting to `candidate_engine.rank_candidate_rows()`, leaving it as an adapter for DataFrame/reject-log/layered selection behavior instead of a separate ranking implementation.
+
+## 1.2.14 - 2026-05-11
+
+### Changed
+- Split OpenD symbol required-data ownership so option-chain fetching, market-snapshot fetching, and required-data output writing live in separate application modules.
+- Updated required-data, close-advice, CLI, agent-tool, and prefetch callers to use the new output/planning owners instead of treating `opend_symbol_fetching.py` as the owner for every OpenD concern.
+
+### Fixed
+- Kept snapshot fallback, expiration rate limiting, output preservation on fetch errors, and owner-boundary coverage intact after the OpenD hot-path split.
+
+## 1.2.13 - 2026-05-11
+
+### Changed
+- Moved the operational healthcheck owner from `scripts/healthcheck.py` into `src.application.healthcheck_runner`, with structured results and the legacy human report formatter kept behind the application service.
+- Extracted OpenD required-data prefetch lifecycle pieces into `src.infrastructure.futu_gateway_pool` and `src.application.multi_tick.prefetch_coordinator`, separating gateway reuse and prefetch scheduling from the hot-path fetch entrypoint.
+
+### Fixed
+- Removed the healthcheck notify wrapper's subprocess dependency on `scripts/healthcheck.py`.
+- Kept OpenD prefetch endpoint reuse keyed by host/port/cache settings while moving the lifecycle policy out of `required_data_prefetch.py`.
+
+## 1.2.12 - 2026-05-11
+
+### Changed
+- Moved OpenD watchdog, Futu doctor, and cash footer runtime logic out of `scripts/` into application/infrastructure modules, leaving scripts as operational CLI wrappers.
+- Consolidated DataFrame candidate filtering around `candidate_engine` return and risk gates so `candidate_strategy` only adapts, ranks, and formats reject logs.
+
+### Fixed
+- Removed application-layer subprocess/JSON-stdout coupling for watchdog, doctor, and cash footer flows.
+
+## 1.2.11 - 2026-05-11
+
+### Changed
+- Restored Sell Call assigned-return hard filtering with `min_if_exercised_total_return`, using account `avg_cost` as the cost basis.
+- Documented the default `0.0` assigned-return floor in system config and strategy docs.
+
+## 1.2.10 - 2026-05-11
+
+### Changed
+- Removed legacy `scripts.option_candidate_strategy` and `scripts.pm_bridge` compatibility owners after callers moved to domain/application modules.
+- Added boundary coverage so tests fail if removed business-script owners are reintroduced.
+
+## 1.2.9 - 2026-05-11
+
+### Changed
+- Redesigned monthly option income reporting around cashflow, realized PnL, and open-basis attribution views.
+- Updated CLI and agent monthly income output to expose cashflow, realized, open-basis, and yield-enhancement detail rows while keeping `premium_received_gross` and `realized_gross` as compatibility fields.
+
+### Fixed
+- Counted buy-to-close cash outflows and long call open/close cashflows in monthly income reports.
+- Calculated long option realized PnL as close proceeds minus open cost instead of using the short-option premium formula.
+
+## 1.2.7 - 2026-05-11
+
+### Added
+- Added shared risk-capacity helpers for Sell Put cash headroom and Sell Call share coverage decisions.
+
+### Changed
+- Hardened Sell Put and Sell Call gating so missing multiplier, currency, cash-secured basis, or cash requirement data fails closed instead of using guessed defaults.
+- Propagated cash-secured unavailable diagnostics through candidate filtering, cash-headroom queries, and cash footers so unknown cash usage is visible instead of silently reported as available.
+
+### Fixed
+- Stopped defaulting short-call locked shares to multiplier 100 when the real contract multiplier is missing.
+- Stopped defaulting short-put secured cash currency or candidate cash requirement currency to USD when the real currency is missing.
+- Stopped summary generation from inventing `cash_required_usd` with `strike * 100`.
+
+## 1.2.3 - 2026-05-10
+
+### Added
+- Added `./om config explain` to show the final layered value, source layer, and override trace for a config key.
+
+### Changed
+- Consolidated portfolio data-config examples around a single `portfolio.sqlite.json` shape that can also hold optional Feishu holdings and option-position mirror table refs.
+- Made `option_positions.sync_to_feishu.enabled` available as a runtime config override, so `configs/user.common.json` can enable or disable Feishu option-position mirror writes across US/HK.
+- Allowed `symbol_defaults` in user/common config to override system defaults before they are applied to each `symbols[]` item.
+
+## 1.2.2 - 2026-05-10
+
+### Added
+- Added an optional `configs/user.common.json` authoring layer for shared US/HK user overrides, with CLI controls, example config, and documentation.
+
+### Changed
+- Changed the multi-tick OpenD watchdog fallback so `retry_enabled` defaults to enabled when `watchdog.retry_enabled` is omitted, matching the shipped system default.
+
+## 1.2.1 - 2026-05-10
+
+### Changed
+- Added bounded account-level and watchlist-symbol parallelism for unified tick scans while preserving deterministic account and symbol output ordering.
+- Reused shared required-data prefetch state across concurrent account workers to avoid duplicate fetch work in one tick run.
+
+### Fixed
+- Serialized option-position maintenance across concurrent account workers so auto-close projection writes do not race on the shared option positions store.
+- Avoided concurrent legacy `output` symlink refreshes during multi-account runs by keeping that compatibility update to single-account execution.
+
+## 1.2.0 - 2026-05-10
+
+### Added
+- Added `option_positions.sync_to_feishu.enabled` as an explicit data-config switch for Feishu `option_positions` mirror writes, defaulting to off.
+
+### Changed
+- Guarded post-write option-position auto sync and `./om option-positions sync-feishu --apply` writes behind the new switch, reporting disabled writes as skipped instead of creating remote rows.
+- Updated portfolio data-config examples, configuration docs, and repair guidance to show the default-off Feishu mirror switch.
+
+### Fixed
+- Rejected `./om option-positions sync-feishu --apply --dry-run` as an invalid mixed mode to prevent accidental remote writes.
+
+## 1.1.7 - 2026-05-09
+
+### Changed
+- Completed release metadata alignment for `v1.1.7`.
+- Added automatic GitHub Release publishing from `main` when the top-level `VERSION` changes, so `1.1.7` no longer waits on a separate manual tag push.
+
+## 1.1.6 - 2026-05-08
+
+### Added
+- Added OpenClaw profile support for agent runtime and readiness tools, including path, account, cron job, and freshness defaults.
+- Added OpenClaw readiness diagnostics for runtime freshness, per-account output summaries, notification route checks, optional cron inspection, and machine-readable next actions.
+
+### Changed
+- Hardened agent write-capable surfaces so VERSION updates and account config mutations require explicit write-tool enablement and confirmation, with account commands supporting dry-run previews.
+
+## 1.1.5 - 2026-05-08
+
+### Fixed
+- Mapped the config-level `wechat_clawbot` notification channel to the actual OpenClaw transport channel `openclaw-weixin` so unified tick, WebUI test sends, healthcheck notifications, and OpenD alerts no longer call OpenClaw with an unknown channel.
+
+## 1.1.4 - 2026-05-07
+
+### Added
+- Added `wechat_clawbot` as a supported notification channel, routing it through OpenClaw message sending while preserving the Feishu App sender for `feishu`.
+- Exposed 微信 Clawbot as a WebUI notification channel option and documented its target/secrets semantics.
+
+## 1.1.3 - 2026-05-07
+
+### Changed
+- Tightened shipped starter defaults so onboarding configs no longer silently rely on market-level multiplier fallbacks and now surface starter placeholder warnings more clearly across healthcheck and WebUI.
+
+### Fixed
+- Removed remaining default-config/runtime drift in the WebUI notification model so saved config fields now match actual send semantics.
+
+## 1.1.2 - 2026-05-07
+
+### Changed
+- Aligned shipped starter configs with current runtime defaults so US/HK DTE windows and close-advice spread defaults no longer drift from code behavior.
+- Removed market-level multiplier starter defaults from onboarding configs so new installs prefer payload/cache/per-symbol multiplier sources over silent money-math fallbacks.
+
+### Fixed
+- Split pure config validation from runtime notification readiness checks and surfaced placeholder starter values through healthcheck/init warnings instead of hiding them.
+- Removed the ineffective `notifications.enabled` WebUI toggle so saved config fields now match actual notification send logic.
+
+## 1.1.1 - 2026-05-07
+
+### Fixed
+- Changed unified tick idempotency from start-time success writes to in-progress claims with stale recovery and final completion writes.
+- Required the WebUI token before running local-write tools and rejected WebUI tool path inputs outside the repository/runtime-config roots.
+- Reused shared symbol and account normalization for WebUI/watchlist mutations so aliases and account labels persist canonically.
+
+### Changed
+- Reused the RunLogger run id for run directories, audit events, and current-run pointers.
+- Added install constraints for reproducible dependency resolution.
+
+## 1.1.0 - 2026-05-06
+
+### Added
+- Added Sell Put 收益增厚 recommendations that pair qualifying Sell Put candidates with the best same-expiration buy-Call strike, including separate/inline outputs and notification rendering.
+- Added expected-move scenario scoring for the paired Put/Call plan using option-chain IV, DTE, spot, liquidity, spread, and funding coverage.
+- Added automatic Call-chain required-data planning for 收益增厚, so `sell_call.enabled=false` symbols can still fetch the Call data needed for recommendations.
+
+### Changed
+- Simplified 收益增厚 configuration to a single top-level `yield_enhancement.enabled=true` switch on each symbol, with optional tuning fields only when stricter Call bounds, liquidity, funding, or scenario thresholds are needed.
+
+## 1.0.12 - 2026-05-06
+
+### Added
+- Added the agent-facing `version_update` tool for dry-run-first local `VERSION` updates with explicit apply mode.
+
+### Changed
+- Documented scheduled and long-running task entry points for tick monitoring, scheduler checks, trade intake, Feishu mirroring, and version checks.
+- Tightened manual `/om` option-intake command parsing around account/action flags, apply/dry-run aliases, and record-id shorthand.
+
+### Fixed
+- Restored close-message parsing for common close-price aliases and buy-to-close wording.
+
+## 1.0.11 - 2026-05-06
+
+### Changed
+- Moved the agent tool manifest, response contract, and handler ownership into `src/application` while keeping `scripts/agent_plugin/*` as compatibility facades.
+- Moved unified tick and WebUI implementation ownership behind `src/application/multi_account_tick.py` and `src/interfaces/webui/server.py`, leaving script paths as thin compatibility entry points.
+
+### Fixed
+- Restored direct multi-account tick help via the unified `./om run tick --help` entrypoint.
+
+### Documentation
+- Clarified that `query_cash_headroom` is the agent-facing wrapper for `query_sell_put_cash(...)` and documented `lx` / `sy` account examples.
+- Documented that single-account tick execution is now a one-account invocation of the unified tick chain rather than a separate business path.
+
+## 1.0.10 - 2026-05-05
+
+### Changed
+- Calculated sell-call net premium annualized return against current spot opportunity cost while keeping exercised total return on the holding cost basis.
+- Promoted monthly option income statistics to the agent-facing `monthly_income_report` tool.
+- Added agent-facing read tools for version checks, config validation, scheduler decisions, and option-position ledger diagnostics.
+
+## 1.0.9 - 2026-05-04
+
+### Fixed
+- Recorded structured failed intake state and audit diagnostics when trade normalization or resolver persistence raises, preventing received Futu fills from disappearing without a terminal state.
+- Isolated per-fill OpenD push callback failures so one bad deal cannot interrupt later rows in the same push batch.
+- Canonicalized option-position trade event symbols and close projection matching on both sides, allowing legacy HK aliases such as `00700.HK` to close the canonical `0700.HK` lot.
+- Returned structured unresolved diagnostics for invalid open-fill numeric fields such as zero contracts instead of letting validation exceptions bypass intake state recording.
+- Moved deal IDs between intake state buckets on status changes so retryable unresolved entries are removed after a later applied or failed outcome.
+
+## 1.0.8 - 2026-05-04
+
+### Fixed
+- Restored spaced broker trade-side aliases such as `sell short`, `short sell`, and `buy to close` so valid option fills continue to normalize to open/close effects after the shared contract identity refactor.
+
+## 1.0.7 - 2026-05-04
+
+### Changed
+- Centralized symbol identity normalization across intake, multiplier fallback, OpenD lookup, cash-secured usage, portfolio context, and watchlist paths so HK display names and Futu codes resolve through the same canonical contract.
+- Consolidated trade contract identity normalization for side, position effect, expiration, option type, strike keys, and quote keys across auto-intake, ledger projection, close-advice, and agent scan summaries.
+- Reused shared account and currency normalization in position-event persistence, portfolio context, close-advice, cash-secured aggregation, fee calculation, and agent summaries to keep HK/CNY/USD aliases and account labels consistent.
+
+## 1.0.6 - 2026-05-04
+
+### Fixed
+- Normalized Futu HK option display names such as `泡泡玛特 260528 135.00 沽` to their canonical underlier before multiplier resolution.
+- Resolved the remaining auto-trade intake multiplier fallback gap when the active listener config lacks HK `intake` defaults but receives valid HK Futu option fills.
+
+## 1.0.5 - 2026-05-04
+
+### Fixed
+- Preserved broker fill timestamps from Futu trade messages during option intake so persisted events no longer fall back to local execution time.
+- Persisted valid Futu option open fills that omit multiplier by resolving multiplier from payload data, contract metadata, configured symbol overrides, or market defaults.
+- Canonicalized Futu option symbols before intake persistence and close matching, preventing non-canonical broker payload text from drifting ledger and timeline state.
+- Stored retryable unresolved intake records with structured diagnostics when required normalization fields are still missing.
+
+## 1.0.4 - 2026-05-02
+
+### Fixed
+- Refreshed local option-position projections before expired-position auto-close runs so stale `position_lots` cannot create duplicate close attempts after trade events have already closed a lot.
+- Treated already-closed or zero-open expired lots as skipped auto-close decisions instead of errors, preventing stale local candidates from producing false `contracts_open <= 0` alerts.
+- Included skipped auto-close counts in summaries only when there is an actual close or error, while keeping skipped-only maintenance runs silent.
+
+## 1.0.3 - 2026-05-02
+
+### Fixed
+- Used a compact auto-close notification template when scan gating skips the options monitor, preventing skipped-scan auto-close alerts from including regular candidate counts and cash footers.
+
+## 1.0.2 - 2026-05-02
+
+### Fixed
+- Moved expired option-position auto-close into per-account maintenance so it can run, report, and notify even when scan gating skips the pipeline.
+- Preserved scheduler state selection when trading-day guards block scans, preventing blocked-market runs from falling back to the shared scheduler state file.
+- Hardened auto-close configuration validation and summary formatting so invalid grace/max-close values fail explicitly instead of silently changing close timing.
+
+## 1.0.1 - 2026-05-01
+
+### Fixed
+- Normalized option expiration timestamp display and DTE calculations to Asia/Shanghai business dates, so midnight Beijing records no longer render one UTC calendar day early in close-advice and position contexts.
+
+## 1.0.0 - 2026-05-01
+
+### Changed
+- Promoted the agent-facing tool surface to the first stable release after adding local-runtime diagnostics and OpenClaw readiness checks for safer Codex, Claude Code, and OpenClaw usage.
+- Documented the release/update-check contract around Git tags, `VERSION`, and agent tool references so remote version checks have a stable source of truth.
+
+## 0.4.8 - 2026-05-01
+
+### Changed
+- Made scheduled config validation cache writes happen only after validation succeeds, preventing failed scheduled configs from being treated as already validated.
+- Removed `sys.argv` mutation from the multi-account tick application entrypoint and passed CLI arguments explicitly into the reusable multi-tick main function.
+- Moved multi-account notification preparation details into application helpers, keeping the operational multi-tick script focused on orchestration.
+
+## 0.4.7 - 2026-05-01
+
+### Changed
+- Made multi-account notifications explicitly per-account by introducing account delivery batch naming in the application layer while preserving the existing delivery contract for compatibility.
+- Removed the unused merged notification formatter and updated multi-account CLI/docs/tests to state that each account sends one message to the configured target with isolated failures.
+- Simplified multi-tick scheduler result state by removing an always-empty `markets_to_run` field.
+
+## 0.4.6 - 2026-05-01
+
+### Changed
+- Unified OpenD spot, option-expiration, option-chain, and market-snapshot calls behind shared endpoint-specific rate-limit configuration and diagnostics, so required-data and close-advice refreshes use the same throttling contract.
+- Ensured close-advice held-position coverage can fetch missing option quotes via the converged OpenD path while marking last-price-only or unusable quotes as not evaluable instead of emitting close suggestions.
+- Moved reusable OpenD symbol-fetch orchestration into the application layer, leaving the script as a CLI adapter, and made multiplier-cache writes lock-protected and atomic.
+- Tightened runtime config validation for OpenD rate-limit endpoint names and close-advice item limits to fail fast on ignored typos or decimal values.
+
+## 0.4.5 - 2026-05-01
+
+### Changed
+- Inferred manual option-position currency from normalized symbols when no explicit currency is provided, so HK symbols such as `0700.HK` record as `HKD` while US symbols default to `USD`
+- Reused the same symbol-based currency inference in chat-style trade intake and manual position writes to keep dry-run previews, persisted trade events, and position lots aligned
+
+## 0.4.4 - 2026-05-01
+
+### Changed
+- Routed OpenD option-chain requests through a shared coordinator with cross-process file limiting and per-expiration cache shards, reducing `get_option_chain` rate-limit failures during required-data refreshes
+- Preserved existing parsed required-data CSVs when OpenD returns structured empty errors, while surfacing rate-limit diagnostics as `OpenD 限频` in close-advice output
+- Allowed holdings-only Feishu data configs in agent healthcheck so external holdings accounts do not require an unrelated `feishu.tables.option_positions` bootstrap table
+
+## 0.4.2 - 2026-04-30
+
+### Changed
+- Refactored option-position projection around stable local lot `record_id` targets so runtime close/adjust replay no longer depends on mutable projected `source_event_id` state
+- Added projection diagnostics and a read-only `option_positions inspect` flow to explain unmatched or conflicting close/adjust events and export reproducible local incident state
+- Restricted direct `position_lots` field updates to Feishu sync metadata only, preventing business-state drift outside canonical `trade_events -> position_lots` replay while keeping closed lots out of downstream context and notify paths
+
+## 0.4.1 - 2026-04-30
+
+### Changed
+- Unified sell-put cash gating around upstream candidate filtering while preserving defensive consistency in standalone alert/detail renderers, so `base CNY`, `total CNY`, and `USD` fallback paths no longer disagree about whether a candidate can still be added
+- Carried `cash_available_total_cny` and `cash_free_total_cny` through candidate enrichment, processor summaries, canonical normalization, and notification rendering so merged cash footers, alert text, and per-contract detail views share the same cash semantics
+- Hardened standalone `alert_engine` / `render_sell_put_alerts` replay flows against unfiltered input CSVs by downgrading or explaining cash-insufficient sell-put rows instead of emitting contradictory high-priority or positive judgment text
+
+## 0.4.0 - 2026-04-30
+
+### Changed
+- Hardened option-position close projection so bootstrap seed lots and historical `manual-close-*` events rebuild correctly from canonical `trade_events -> position_lots`
+- Made manual close events carry explicit lot targets via `close_target_source_event_id` while preserving legacy `record_id` replay compatibility for existing repair history
+- Prevented explicit-target close events from partially applying during reprojection when event quantity exceeds the targeted lot's remaining open contracts
+
+## 0.3.7 - 2026-04-30
+
+### Changed
+- Redesigned required-data fetch planning so `sell_put` and `sell_call` derive independent near/far strike bounds before merging compatible OpenD requests, ensuring sell-call target strikes are fetched instead of being filtered only at scan time
+- Removed legacy `target_otm_pct_*` planning semantics, standardized fetch/debug terminology on side-specific near/far bounds, and kept fetch-plan diagnostics backward compatible by emitting both `coverage` and `bounds_coverage`
+
+## 0.3.6 - 2026-04-29
+
+### Changed
+- Refined SQLite and Feishu sync flows by fixing incremental sync and remote-prune edge cases, refreshing Feishu tenant tokens once on auth failures, and simplifying bootstrap, transaction, payload, and context-building paths without adding extra fallback layers
+
+## 0.3.5 - 2026-04-29
+
+### Changed
+- Tightened Claude Code / OpenClaw repository guidance so agents prefer read-first analysis, `./om-agent` / `./om` entry points, and low-risk validation steps before direct runtime Python scripts or live operational commands
+
+## 0.3.4 - 2026-04-29
+
+### Changed
+- Suppressed the close-advice fallback `行情质量不足` summary in notifications when `spread_too_wide` is the sole quote-quality issue and no strong/medium close suggestions were generated, reducing expiry-day noise without changing evaluation logic
+
+## 0.3.3 - 2026-04-29
+
+### Changed
+- Stopped writing canonical option contract fields (`expiration`, `strike`, `multiplier`, `premium`) into `note` for new or adjusted position lots, leaving them in structured fields only
+- Preserved backward-compatible readers for historical `note` tokens while making adjustment flows actively scrub legacy `exp=` / `strike=` / `multiplier=` / `premium_per_share=` tokens when those fields are updated
+- Kept close advice, reporting, context building, trade-intake matching, and manual close flows aligned on the structured lot fields so old note payloads are no longer required for steady-state behavior
+
+## 0.3.2 - 2026-04-29
+
+### Changed
+- Improved close-advice quote evaluation to accept reliable bid/ask-derived mids, reducing false `missing_quote` / `missing_mid` skips when required-data rows lack a precomputed mid
+- Split close-advice account summaries into system issues versus market-quality issues so wide spreads and thin liquidity no longer read like runtime failures
+- Hardened Feishu/bootstrap and repository write paths against incomplete option lots, and fixed legacy auto-close quantity fallback so records without `contracts_open` no longer report applied closes on zero contracts
+
+## 0.3.1 - 2026-04-29
+
+### Changed
+- Added first-class SQLite contract columns for `position_lots` (`expiration`, `strike`, `multiplier`), backfilled legacy rows on startup, and exposed local expiry-aware listing so near-expiration queries no longer need Feishu as a read-time fallback
+- Propagated contract metadata through `option_positions_context`, close-advice preparation, reporting, manual close events, and trade-intake close matching so downstream consumers consistently read canonical lot fields instead of ad hoc note parsing
+- Hardened trade-open workflow construction against optional contract fields by preserving nulls instead of serializing `"None"` into generated commands and notes
+
+## 0.3.0 - 2026-04-29
+
+### Changed
+- Stabilized local option-position repair workflows around the canonical `trade_events -> position_lots` model by adding operator-safe rebuild, lot history inspection, event voiding, and controlled lot adjustment paths
+- Preserved Feishu mirror sync metadata across local reprojection, added optional remote orphan cleanup during repairs, and documented the repair playbook so invalid records no longer pollute downstream monthly income and premium reporting
+- Unified `position_id` generation on canonical `symbol` values instead of alias names so SQLite and Feishu stop drifting on underlier naming for new records
+
+## 0.2.0-beta.9 - 2026-04-29
+
+### Changed
+- Hardened local option-position repair workflows around the canonical `trade_events -> position_lots` model by adding CLI repair primitives for rebuild, lot history inspection, event voiding, and controlled lot adjustment
+- Preserved Feishu sync metadata across local reprojection, added optional remote orphan cleanup for mirror rows, and documented the operator repair playbook so repaired records no longer leak into downstream monthly income and premium reporting
+
+## 0.2.0-beta.8 - 2026-04-28
+
+### Changed
+- Unified expiration normalization for OpenD explicit-expiration fetch paths so held-option requests consistently convert `YYYY-MM-DD`, Unix seconds, and Unix milliseconds into the `YYYY-MM-DD` format required by `get_option_chain`
+- Hardened close-advice preparation and required-data fetch entrypoints against timestamp expirations, preventing `wrong time or time format` regressions when open positions carry numeric expiration values
+
+## 0.2.0-beta.7 - 2026-04-28
+
+### Changed
+- Hardened close-advice held-expiration pricing by forcing exact-contract coverage refreshes to bypass stale same-day option-chain cache when coverage is missing
+- Fixed OpenD explicit-expiration cache semantics so cache coverage is proven by returned chain rows rather than declared expiration lists, preventing false full-coverage hits for partially fetched chains
+
+## 0.2.0-beta.6 - 2026-04-28
+
+### Changed
+- Refactored close advice around exact-contract pricing so each open position is priced by its concrete symbol, option type, expiration, and strike before any suggestion tier is computed
+- Made close advice self-heal required-data coverage for held expirations, merge refreshed rows back into required_data, and classify unpriced positions as not evaluable instead of mixing them into normal advice tiers
+
+## 0.2.0-beta.5 - 2026-04-28
+
+### Changed
+- Redesigned close-advice required-data preparation to fetch option chains by open position contract coverage, passing explicit held expirations, option types, and strike bounds instead of relying on symbol-level recent-expiration scans
+- Added required-data coverage diagnostics so close advice can distinguish missing expiration/contract coverage from quote usability issues, keeping OpenD fallback limited to last-mile quote repair when the contract is already present in required_data
+
+## 0.2.0-beta.4 - 2026-04-28
+
+### Changed
+- Unified shared symbol canonicalization across close advice, watchlist writes, option-position writes, multiplier refresh, Futu portfolio context, trade detail enrichment, and trade event normalization so aliases like `POP` consistently resolve to canonical symbols such as `9992.HK`
+- Added system-level symbol normalization contract coverage plus repository guardrails documenting that user-entered symbols, broker raw payloads, and OpenD/Futu underliers must canonicalize before entering business logic
+
+## 0.2.0-beta.3 - 2026-04-28
+
+### Changed
+- Added a final Futu option-code root fallback for trade intake so payloads like `HK.POP260528P150000` can resolve `symbol=9992.HK` even when no underlying fields are present in the raw push or lookup response
+
+## 0.2.0-beta.2 - 2026-04-28
+
+### Changed
+- Unified Futu underlying symbol normalization during trade enrichment and deal normalization so raw fields like `owner_stock_code=HK.09992` resolve into canonical symbols such as `9992.HK` for automatic option bookkeeping
+
+## 0.2.0-beta.1 - 2026-04-28
+
+### Changed
+- Completed Futu auto trade-intake semantic parsing for raw deal payloads by deriving option fields from option codes, mapping raw `trd_side` values into open/close semantics, and allowing these trades to proceed into automatic option bookkeeping
+
+## 0.1.0-beta.14 - 2026-04-28
+
+### Changed
+- Completed Futu auto trade-intake semantic parsing for raw deal payloads by mapping `trd_side` values like `SELL_SHORT` and `BUY_BACK`, and inferring option currency from the option code when standard fields are absent
+
+## 0.1.0-beta.13 - 2026-04-28
+
+### Changed
+- Made trade-intake normalization accept Futu option-code payloads by backfilling lookup row fields and deriving symbol, option type, strike, and expiration from enriched OpenD trade data
+
+## 0.1.0-beta.12 - 2026-04-28
+
+### Changed
+- Hardened auto trade intake account enrichment by retrying OpenD order/deal lookups without `acc_id` when push payloads omit the futu account id
+- Added explicit trade-intake diagnostics for missing account mapping, including visible account fields, attempted lookup paths, and enrichment audit events
+
+## 0.1.0-beta.11 - 2026-04-28
+
+### Changed
+- Made close advice fee-aware so post-fee non-positive buybacks no longer emit close recommendations
+- Grouped standalone close-advice markdown by account, aligned notify row counts with rendered output, and surfaced spread-blocked quote issues in fallback summaries
+
+## 0.1.0-beta.10 - 2026-04-27
+
+### Changed
+- Prevented cross-account option position sync collisions by requiring account-aware business-lot matching for shared `position_id` values
+- Preserved schema-aware numeric payload coercion and explicit conflict reporting in the beta10 sync behavior shipped from `origin/main`
+
+## 0.1.0-beta.9 - 2026-04-27
+
+### Changed
+- Hardened option position Feishu sync payload typing with schema-aware numeric coercion before create/update writes
+- Added explicit duplicate-business-key conflict reporting for rows blocked by repeated remote option position identifiers
+
+## 0.1.0-beta.8 - 2026-04-27
+
+### Changed
+- Preserved bootstrapped option positions by migrating snapshot lots into synthetic trade events before projection rebuilds
+- Kept best-effort Feishu sync wiring available on manual option position writes without changing local-write success behavior
+
+## 0.1.0-beta.7 - 2026-04-27
+
+### Changed
+- Simplified cash footer account config so notifications default to the top-level `accounts` list
+- Made WebUI show effective cash footer accounts and avoid persisting redundant `cash_footer_accounts` overrides
+
+## 0.1.0-beta.6 - 2026-04-27
+
+### Changed
+- Clarified cash footer wording so base-CNY and total-CNY cash figures are labeled by actual data scope
+- Narrowed close-advice quote lookup to the current market run and surfaced quote-failure samples in notifications
+- Improved auto trade intake account resolution by enriching push payloads via `order_id`/`deal_id` lookups when account ids are absent
+- Cleaned legacy schedule fields from the US example config and preserved explicit non-Futu fetch sources
+
+## 0.1.0-beta.5 - 2026-04-27
+
+### Changed
+- Removed account-level primary/backup source fallback semantics while preserving `external_holdings` as a distinct primary source identity
+- Simplified healthcheck and WebUI account surfaces to expose a single primary source path
+- Cleaned stale fallback wording in tests, docs, and historical notes to match the single-source model
+
+## 0.1.0-beta.4 - 2026-04-27
+
+### Added
+- Version update check via `./om version` against remote `origin` git tags
+- Shared version-check service for CLI and WebUI consumption
+
+### Changed
+- WebUI surfaces a non-blocking header status for release update checks
+- Release documentation now records the git-tag based update-check contract
+
+## 0.1.0-beta.3 - 2026-04-26
+
+### Added
+- 6-module WebUI configuration center with modular frontend structure
+- Per-account OpenD holdings runtime support for Futu-backed accounts
+- Feishu app notification secrets example and stronger local notification wiring
+
+### Changed
+- Rewrote README and key docs into product-facing install/init/use guidance
+- Reorganized WebUI code into API, actions, model, shared, state, and panel layers
+- Repositioned `scripts/send_if_needed_multi.py` as a compatibility/developer launcher while preferring unified CLI docs
+
+### Fixed
+- Futu/OpenD doctor and healthcheck false-negative handling under noisy SDK output
+- Futu SDK compatibility for `get_option_chain` when `is_force_refresh` is unsupported
+- Pipeline/runtime compatibility issues around `append_cash_summary`, holdings context wiring, and multi-account launcher argument flow
+- Option intake parsing by inferring currency from symbol when explicit currency is absent
+
+## 0.1.0-beta.2 - 2026-04-24
+
+### Added
+- Local plugin initialization flow for standalone setup
+- Web UI phase 1/2 productization, including server and frontend updates
+- Expanded public docs and example configs for agent/plugin and portfolio setup
+
+### Changed
+- Productized standalone install flow and reduced legacy pm fallback coupling
+- Updated public tool surface, config discovery, and release-facing smoke coverage
+
+### Fixed
+- Lazy-load agent tool handlers on the `spec` path
+- Correct futu mapped account id typing for cash queries
+- Sanitize futu account ids in release-facing tests
+
+## 0.1.0-beta.1 - 2026-04-23
+
+### Added
+- Public local agent launcher: `./om-agent`
+- Public JSON tool manifest via `./om-agent spec`
+- Public agent tool surface:
+  - `healthcheck`
+  - `scan_opportunities`
+  - `query_cash_headroom`
+  - `get_portfolio_context`
+  - `manage_symbols`
+  - `preview_notification`
+- Public config discovery with `OM_CONFIG_DIR`, `OM_CONFIG_US`, `OM_CONFIG_HK`, `OM_DATA_CONFIG`
+- Write-tool gate with `OM_AGENT_ENABLE_WRITE_TOOLS`
+- Install script: `scripts/install_agent_plugin.sh`
+- Public docs for agent integration, getting started, and tool reference
+- Repository `LICENSE` and `SECURITY.md`
+- Public release metadata: `VERSION`, release validation, and generated release notes
