@@ -1236,11 +1236,17 @@ def test_public_batch_premium_adjustment_restates_durable_pnl_and_runtime_tail(
     projection = ledger_writer.project_stored_trade_events_to_position_lots(repo.list_trade_events())
     assert projection.ledger_projection.allocations[0].realized_pnl_net == expected - Decimal(open_fee) / 2
 
-    # Existing batch retry advances event time while retaining event identity;
-    # that conflict must not introduce another event or any partial durable row.
+    # The same request reuses the persisted event, including its frozen time.
     before_retry = _all_ledger_tables(db_path)
+    retry, = record_manual_position_adjustments(repo, [request])
+    assert retry.result.created is False
+    assert retry.result.event_id == result.result.event_id
+    assert retry.patch == result.patch
+    assert _all_ledger_tables(db_path) == before_retry
+    # Changing an existing event's time is still an immutable-event conflict.
+    stored = TradeEvent.from_dict(repo.get_trade_events_by_ids((result.result.event_id,))[0])
     with pytest.raises(ValueError, match="trade event conflict"):
-        record_manual_position_adjustments(repo, [request])
+        repo.upsert_trade_event(replace(stored, event_time_ms=stored.event_time_ms + 1))
     assert _all_ledger_tables(db_path) == before_retry
     assert request == {"record_id": "lot-aapl", "premium_per_share": premium, "as_of_ms": 3000}
 

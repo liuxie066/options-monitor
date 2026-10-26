@@ -18,6 +18,7 @@ from src.application.ledger.preflight import _preflight_open_event, preflight_ma
 from src.application.ledger.position_projection_runtime import (
     CHECKPOINT_ROTATE_EVENT_COUNT,
     ProjectionRuntimeResult,
+    PositionProjectionEventSnapshot,
     compare_full_and_resumed_position_projection,
     extend_event_prefix_chain,
     initial_event_prefix_chain,
@@ -1451,3 +1452,177 @@ def test_content_recovery_failure_and_cancellation_roll_back_all_rows(tmp_path: 
             _event("next", "open", 3000, lot_id="next-lot")], failure_hook=fail)
     with repo._connect() as conn:
         assert list(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("seed_checkpoint", [False, True])
+def test_event_snapshot_reuses_prefix_read_and_decode_with_mixed_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_checkpoint: bool,
+) -> None:
+    from src.application.ledger import position_projection_runtime as runtime
+
+    repo = _repo(tmp_path)
+    existing = _event("open-existing", "open", 2_000, lot_id="lot-existing")
+    run_position_projection_forced_full(repo, [existing])
+    reads = []
+    decodes = []
+    read = repo.list_position_projection_event_rows
+    decode = runtime._application_event
+
+    def counted_read(**kwargs):
+        reads.append(kwargs.get("after"))
+        return read(**kwargs)
+
+    def counted_decode(payload):
+        decodes.append(json.loads(payload)["event_id"])
+        return decode(payload)
+
+    monkeypatch.setattr(repo, "list_position_projection_event_rows", counted_read)
+    monkeypatch.setattr(runtime, "_application_event", counted_decode)
+    with repo._connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        snapshot = PositionProjectionEventSnapshot.capture(repo, conn=conn)
+        result = run_position_projection_in_transaction(
+            repo,
+            [existing, _event("open-earlier", "open", 1_000, lot_id="lot-earlier"),
+             _event("open-later", "open", 3_000, lot_id="lot-later")],
+            conn=conn, mode="forced_full", seed_checkpoint=seed_checkpoint,
+            event_snapshot=snapshot,
+        )
+        assert result.created_flags == (False, True, True)
+        assert result.position_lot_count == 3
+        assert result.checkpoint_written == seed_checkpoint
+        assert reads == [None]
+        assert sorted(decodes) == ["open-earlier", "open-existing", "open-later"]
+        conn.commit()
+    before = repo.list_position_lots()
+    assert [row["event_id"] for row in repo.list_trade_events()] == [
+        "open-earlier", "open-existing", "open-later",
+    ]
+    run_position_projection_forced_full(repo)
+    assert repo.list_position_lots() == before
+
+
+def test_event_snapshot_rejects_different_connection_before_writing(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    with repo._connect() as owner, repo._connect() as other:
+        owner.execute("BEGIN IMMEDIATE")
+        snapshot = PositionProjectionEventSnapshot.capture(repo, conn=owner)
+        other.execute("BEGIN")
+        with pytest.raises(ValueError, match="different transaction"):
+            run_position_projection_in_transaction(
+                repo, [_event("rejected", "open", 1_000, lot_id="lot-a")],
+                conn=other, mode="forced_full", event_snapshot=snapshot,
+            )
+        assert other.execute("SELECT COUNT(*) FROM trade_events").fetchone()[0] == 0
+        other.rollback()
+        owner.rollback()
+
+
+@pytest.mark.parametrize("mutation_stage", ["before_write", "after_event_write"])
+def test_event_snapshot_rejects_source_generation_drift(
+    tmp_path: Path, mutation_stage: str,
+) -> None:
+    repo = _repo(tmp_path)
+    with repo._connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        snapshot = PositionProjectionEventSnapshot.capture(repo, conn=conn)
+
+        def mutate(stage):
+            if stage == mutation_stage:
+                repo.upsert_trade_event(
+                    _event("intervening", "open", 500, lot_id="lot-other"), conn=conn,
+                )
+
+        mutate("before_write")
+        with pytest.raises(ValueError, match="source generation changed"):
+            run_position_projection_in_transaction(
+                repo, [_event("requested", "open", 1_000, lot_id="lot-a")],
+                conn=conn, mode="forced_full", event_snapshot=snapshot, failure_hook=mutate,
+            )
+        event_ids = {row[0] for row in conn.execute("SELECT event_id FROM trade_events")}
+        assert event_ids == ({"intervening"} if mutation_stage == "before_write"
+                             else {"intervening", "requested"})
+        assert conn.in_transaction
+        conn.rollback()
+    assert repo.list_trade_events() == []
+    assert repo.list_position_lots() == []
+
+
+def test_event_snapshot_failure_rolls_back_then_reopen_publishes(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    existing = _event("existing", "open", 1_000, lot_id="lot-existing")
+    added = _event("added", "open", 2_000, lot_id="lot-added")
+    run_position_projection_forced_full(repo, [existing], seed_checkpoint=True)
+    before = repo.list_position_lots()
+
+    def fail(stage):
+        if stage == "after_head_publication":
+            raise RuntimeError("rollback snapshot publication")
+
+    with repo._connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        snapshot = PositionProjectionEventSnapshot.capture(repo, conn=conn)
+        with pytest.raises(RuntimeError, match="rollback snapshot publication"):
+            run_position_projection_in_transaction(
+                repo, [added], conn=conn, mode="forced_full", seed_checkpoint=True,
+                event_snapshot=snapshot, failure_hook=fail,
+            )
+        assert conn.in_transaction
+        conn.rollback()
+    repo = SQLiteOptionPositionsRepository(repo.db_path)
+    assert repo.list_position_lots() == before
+    assert [row["event_id"] for row in repo.list_trade_events()] == ["existing"]
+    with repo._connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        with pytest.raises(ValueError, match="different transaction"):
+            run_position_projection_in_transaction(
+                repo, [added], conn=conn, mode="forced_full", event_snapshot=snapshot,
+            )
+        current = PositionProjectionEventSnapshot.capture(repo, conn=conn)
+        result = run_position_projection_in_transaction(
+            repo, [existing, added], conn=conn, mode="forced_full", seed_checkpoint=True,
+            event_snapshot=current,
+        )
+        assert result.created_flags == (False, True)
+        conn.commit()
+    before = repo.list_position_lots()
+    run_position_projection_forced_full(repo)
+    assert repo.list_position_lots() == before
+
+
+@pytest.mark.parametrize("rollback_kind", ["transaction", "savepoint"])
+def test_event_snapshot_rejects_rollback_generation_collision_on_same_connection(
+    tmp_path: Path, rollback_kind: str,
+) -> None:
+    repo = _repo(tmp_path)
+    with repo._connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if rollback_kind == "savepoint":
+            conn.execute("SAVEPOINT captured")
+        repo.upsert_trade_event(
+            _event("rolled-back", "open", 1_000, lot_id="lot-rolled-back"), conn=conn,
+        )
+        snapshot = PositionProjectionEventSnapshot.capture(repo, conn=conn)
+        if rollback_kind == "savepoint":
+            conn.execute("ROLLBACK TO captured")
+            conn.execute("RELEASE captured")
+        else:
+            conn.rollback()
+            conn.execute("BEGIN IMMEDIATE")
+        committed = _event("committed", "open", 2_000, lot_id="lot-committed")
+        repo.upsert_trade_event(committed, conn=conn)
+        assert repo.read_position_projection_source_state(conn=conn)["source_generation"] == snapshot.source_generation
+        with pytest.raises(ValueError, match="connection changed since capture"):
+            run_position_projection_in_transaction(
+                repo, (), conn=conn, mode="forced_full", event_snapshot=snapshot,
+            )
+        assert conn.execute("SELECT COUNT(*) FROM position_lots").fetchone()[0] == 0
+        current = PositionProjectionEventSnapshot.capture(repo, conn=conn)
+        run_position_projection_in_transaction(
+            repo, (), conn=conn, mode="forced_full", event_snapshot=current,
+        )
+        conn.commit()
+    assert [row["event_id"] for row in repo.list_trade_events()] == ["committed"]
+    assert [(row["record_id"], row["fields"]["open_event_id"]) for row in repo.list_position_lots()] == [
+        ("lot-committed", "committed"),
+    ]

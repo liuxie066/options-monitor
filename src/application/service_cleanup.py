@@ -282,6 +282,10 @@ def _runtime_log_cleanup_plan(
         if item.suffix != ".log":
             protected_logs.append(_set_result_item(kind="runtime_log", path=item, root=logs_root, reason="non_log_file"))
             continue
+        # shortcut: retain fixed service outputs until closed descriptors can be verified.
+        if item.name.endswith((".out.log", ".err.log")):
+            protected_logs.append(_set_result_item(kind="runtime_log", path=item, root=logs_root, reason="service_output_log"))
+            continue
         try:
             mtime = _mtime_utc(item)
         except OSError:

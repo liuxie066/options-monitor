@@ -122,6 +122,23 @@ class InboundOperationStore:
                   AND operation_id > ? ORDER BY operation_id LIMIT 100""", (after,)).fetchall()
         return [operation for row in rows if (operation := _row_to_operation(row)) is not None]
 
+    def list_expiry_batch_operations(
+        self, *, command_id: str, channel: str, sender_id: str,
+        conversation_id: str | None,
+    ) -> list[dict[str, Any]]:
+        """Read the complete scoped batch, including terminal/expired children."""
+        self.reconcile_stale_operations()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM inbound_pending_operations
+                WHERE command_id = ? AND channel = ? AND sender_id = ?
+                  AND COALESCE(conversation_id, '') = ?
+                  AND operation_type = 'manual_expiry'
+                ORDER BY created_at, operation_id""",
+                (command_id, channel, sender_id, str(conversation_id or "")),
+            ).fetchall()
+        return [operation for row in rows if (operation := _row_to_operation(row)) is not None]
+
     def list_pending_operations(
         self,
         *,
@@ -164,6 +181,7 @@ class InboundOperationStore:
         explicit_operation_id: str | None = None,
         allow_expired: bool = False,
         now: datetime | None = None,
+        recoverable_statuses: frozenset[str] = frozenset(),
     ) -> dict[str, Any]:
         self.reconcile_stale_operations(now=now)
         normalized_types = {str(item).strip() for item in operation_types if str(item).strip()}
@@ -185,10 +203,12 @@ class InboundOperationStore:
                 operation_types=normalized_types,
                 allow_expired=allow_expired,
                 now=now,
+                recoverable_statuses=recoverable_statuses,
             )
             return {**resolution, **validation, "operation": operation}
 
         candidate_statuses = {"previewed", "expired"} if allow_expired else {"previewed"}
+        candidate_statuses |= recoverable_statuses - {"applied"}
         candidates = self._list_operations(
             channel=channel,
             sender_id=sender_id,
@@ -199,6 +219,9 @@ class InboundOperationStore:
         active: list[dict[str, Any]] = []
         expired: list[dict[str, Any]] = []
         for operation in candidates:
+            if operation.get("status") in recoverable_statuses:
+                active.append(operation)
+                continue
             if str(operation.get("status") or "").strip() == "expired" or operation_is_expired(operation, now=now):
                 if allow_expired:
                     active.append(operation)
@@ -310,7 +333,10 @@ class InboundOperationStore:
                 SELECT *
                 FROM inbound_pending_operations
                 WHERE status IN ('confirmed', 'running')
-                  AND operation_type != 'trade_attribution'
+                  AND operation_type NOT IN (
+                      'trade_attribution', 'manual_open', 'manual_close',
+                      'manual_assignment', 'manual_expiry'
+                  )
                 """
             ).fetchall()
             for row in rows:
@@ -438,8 +464,15 @@ class InboundOperationStore:
             raise RuntimeError(f"failed to load updated inbound operation: {normalized}")
         return updated
 
-    def mark_applied(self, operation_id: str, *, result: dict[str, Any]) -> None:
-        self._set_status(operation_id, "applied", applied_at=utc_now_iso(), result_json=_json(result))
+    def mark_applied(
+        self, operation_id: str, *, result: dict[str, Any],
+        expected_payload_hash: str | None = None,
+        expected_statuses: tuple[str, ...] | None = None,
+    ) -> bool:
+        return self._set_status(
+            operation_id, "applied", applied_at=utc_now_iso(), result_json=_json(result),
+            expected_payload_hash=expected_payload_hash, expected_statuses=expected_statuses,
+        )
 
     def mark_running(self, operation_id: str, *, result: dict[str, Any]) -> bool:
         self._ensure_schema()
@@ -879,6 +912,7 @@ def _validate_pending_operation(
     operation_types: set[str],
     allow_expired: bool,
     now: datetime | None,
+    recoverable_statuses: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     stored_conversation = str(operation.get("conversation_id") or "").strip()
     normalized_conversation = str(conversation_id or "").strip()
@@ -894,6 +928,8 @@ def _validate_pending_operation(
     if operation_types and operation_type not in operation_types:
         return {"status": "wrong_family"}
     status = str(operation.get("status") or "").strip()
+    if status in recoverable_statuses:
+        return {"status": "resolved"}
     if status == "expired":
         return {"status": "resolved" if allow_expired else "expired"}
     if status != "previewed":

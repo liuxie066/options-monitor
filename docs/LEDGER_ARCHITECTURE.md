@@ -1412,7 +1412,12 @@ Agent 通过 `option_positions_read action=events` 分页读取 canonical `trade
 `trade_time_ms DESC, event_id DESC` 的 keyset cursor，并始终限制在该序号边界内。因此新增事件
 不会插入正在进行的结果流，分页条数可以在 1–20 之间变化，也不会导致已返回成员重复。
 
-这个 snapshot 冻结的是成员集合、筛选字段和排序字段，不是整行 JSON 的历史版本。事件成员
+这个 snapshot 冻结成员集合与筛选字段；排序字段修订后必须重新开始，不保存整行 JSON 的历史版本。
+v2 cursor 在同一 SQLite 读事务中绑定 ingest fence 内、匹配筛选与授权范围的时间修订事件排序键摘要。
+续页发现摘要变化时明确返回 `invalid_cursor` 并要求重新查询，不返回错误的 `snapshot_exhausted`。
+普通追加（包括 fence 外事件的时间修复）、其他查询范围的修复、修复回滚和 no-op 不改变该摘要；
+已存在修订的事件仍可开始新的完整分页。缺少修订证明的旧版 cursor 明确拒绝，重查结果可能重叠。
+摘要读取复用修复事务内持久化的 provenance，不新增分页状态或另一套排序规则。事件成员
 不可删除，`ingest_seq`、事件身份、账户、市场、position effect 和合约筛选字段不可修改；交易
 时间只允许上述 OpenD 证据约束的原位修正，其他时间更新仍不可变。价格等不参与查询的补充字段
 仍可按现有账本语义更新。完整 TradeEvent 的编码与验证继续

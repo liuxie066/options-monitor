@@ -2768,8 +2768,20 @@ def test_incremental_owner_fact_surfaces_match_the_frozen_matrix() -> None:
             "_finish_trade_event_decision_projection",
             "_finish_lifecycle_decision_projection",
         ),
+        manual_trades.persist_manual_adjust_event: (
+            "get_position_lots_by_ids",
+            "_build_manual_adjust_event",
+            "_persist_manual_adjust_events_in_transaction",
+            "with_sqlite_repo_transaction",
+        ),
         manual_trades.persist_manual_adjust_events: (
             "current_by_lot_id",
+            "_build_manual_adjust_event",
+            "_persist_manual_adjust_events_in_transaction",
+            "with_sqlite_repo_transaction",
+        ),
+        manual_trades._persist_manual_adjust_events_in_transaction: (
+            "capture_trade_event_decision_projection_fence",
             "run_position_projection_in_transaction",
             "_finish_trade_event_decision_projection",
         ),

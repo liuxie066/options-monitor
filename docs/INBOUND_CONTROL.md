@@ -62,6 +62,16 @@ pending operation per contract. Confirm the whole notice with the plain reply
 `/confirm trade <command_id>` as an explicit fallback, or confirm individual
 contracts with `/confirm trade <operation_id>`.
 
+If confirmation loses its receipt after a possible ledger commit, the operation
+remains unverified. Confirm the original operation ID to check its signed request
+against effective ledger evidence; this recovery never repeats the write. A close
+or legacy expiry without a stable operation identity remains unverified. Ordinary
+completed single-operation confirmations retain their existing rejection behavior.
+Batch retries inspect every child, including expired or cancelled children; an
+unfinished child prevents whole-batch success. `applied_count` counts children
+completed or recovered by this call, while `already_applied_count` counts earlier
+completions whose ledger evidence was checked again.
+
 ## Bot Boundary
 
 `bot.enabled` is the single activation switch for new inbound Control commands and

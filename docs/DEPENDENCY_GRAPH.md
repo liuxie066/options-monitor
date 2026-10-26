@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1273 (`src`: 570, `domain`: 97, `scripts`: 16, `tests`: 587)
-- Internal import edges: 11064 total, 3967 production/script edges excluding tests
+- Python files scanned: 1280 (`src`: 570, `domain`: 97, `scripts`: 16, `tests`: 594)
+- Internal import edges: 11129 total, 3971 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|666| domain
+  application -->|668| domain
   application -->|4| domain_services
   application -->|188| infrastructure
   application -->|2| om_strategy_core
@@ -50,11 +50,11 @@ flowchart LR
   scripts -->|2| interfaces
   scripts -->|1| tests
   storage -->|1| domain
-  tests -->|5394| application
-  tests -->|649| domain
+  tests -->|5441| application
+  tests -->|656| domain
   tests -->|2| domain_services
   tests -->|357| infrastructure
-  tests -->|400| interfaces
+  tests -->|402| interfaces
   tests -->|6| om_strategy_core
   tests -->|31| scripts
   tests -->|77| storage
@@ -64,7 +64,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 666 |
+| application | domain | 668 |
 | interfaces | application | 196 |
 | application | infrastructure | 188 |
 | scripts | application | 67 |
@@ -88,9 +88,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 5394 |
-| tests | domain | 649 |
-| tests | interfaces | 400 |
+| tests | application | 5441 |
+| tests | domain | 656 |
+| tests | interfaces | 402 |
 | tests | infrastructure | 357 |
 | tests | storage | 77 |
 | tests | scripts | 31 |
@@ -104,10 +104,10 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | from | to | imports |
 |---|---|---|
 | src.application | domain.domain | 269 |
-| src.application.ledger | domain.domain | 178 |
+| src.application.ledger | domain.domain | 179 |
 | src.interfaces | src.application | 158 |
 | src.application | src.infrastructure | 133 |
-| src.application.ledger | domain.domain.ledger | 73 |
+| src.application.ledger | domain.domain.ledger | 74 |
 | src.application.trades | domain.domain | 67 |
 | scripts | src.application | 54 |
 | src.application | domain.storage | 45 |

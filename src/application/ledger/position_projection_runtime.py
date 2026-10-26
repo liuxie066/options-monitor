@@ -72,6 +72,40 @@ class ProjectionRuntimeResult:
 
 
 @dataclass(frozen=True)
+class PositionProjectionEventSnapshot:
+    """Event prefix captured and reused only in its owning write transaction."""
+
+    conn: Any
+    source_generation: int
+    connection_changes: int
+    rows: tuple[dict[str, Any], ...]
+    events: tuple[dict[str, Any], ...]
+
+    @classmethod
+    def capture(cls, repo: Any, *, conn: Any) -> PositionProjectionEventSnapshot:
+        if conn is None or not conn.in_transaction:
+            raise ValueError("event snapshot requires an active caller transaction")
+        source = repo.read_position_projection_source_state(conn=conn)
+        rows = tuple(repo.list_position_projection_event_rows(conn=conn))
+        return cls(
+            conn, int(source["source_generation"]), conn.total_changes, rows,
+            tuple(_application_event(row["event_json"]) for row in rows),
+        )
+
+    def validate(self, repo: Any, *, conn: Any) -> None:
+        if conn is not self.conn or not conn.in_transaction:
+            raise ValueError("event snapshot belongs to a different transaction")
+        source = repo.read_position_projection_source_state(conn=conn)
+        if int(source["source_generation"]) != self.source_generation:
+            raise ValueError("event snapshot source generation changed")
+        # Unlike source_generation, total_changes never rewinds on transaction
+        # or savepoint rollback. It prevents a rolled-back prefix passing an
+        # equal-generation check after replacement writes on this connection.
+        if conn.total_changes != self.connection_changes:
+            raise ValueError("event snapshot connection changed since capture")
+
+
+@dataclass(frozen=True)
 class ProjectionPreviewResult:
     mode_used: str
     fallback_reason: str | None
@@ -194,6 +228,7 @@ def run_position_projection_in_transaction(
     seed_checkpoint: bool = False,
     failure_hook: Callable[[str], None] | None = None,
     pending_close_replacements: dict[str, str] | None = None,
+    event_snapshot: PositionProjectionEventSnapshot | None = None,
 ) -> ProjectionRuntimeResult:
     """Write events and publish their projection inside a caller-owned transaction."""
 
@@ -208,6 +243,7 @@ def run_position_projection_in_transaction(
             seed_checkpoint=seed_checkpoint,
             failure_hook=failure_hook,
             pending_close_replacements=pending_close_replacements,
+            event_snapshot=event_snapshot,
         )
     except Exception as exc:
         _record_runtime_telemetry(
@@ -234,6 +270,7 @@ def _run_position_projection_in_transaction_impl(
     seed_checkpoint: bool = False,
     failure_hook: Callable[[str], None] | None = None,
     pending_close_replacements: dict[str, str] | None = None,
+    event_snapshot: PositionProjectionEventSnapshot | None = None,
 ) -> ProjectionRuntimeResult:
 
     candidate = require_position_projection_publication_repo(repo)
@@ -244,6 +281,11 @@ def _run_position_projection_in_transaction_impl(
     if mode not in {"forced_full", "fast_if_safe"}:
         raise ValueError(f"unsupported position projection runtime mode: {mode}")
 
+    if event_snapshot is not None:
+        event_snapshot.validate(candidate, conn=conn)
+        if pending_close_replacements:
+            raise ValueError("event snapshot cannot accompany event replacements")
+
     created_flags = tuple(
         bool(candidate.upsert_trade_event(
             event, conn=conn,
@@ -252,7 +294,29 @@ def _run_position_projection_in_transaction_impl(
         ))
         for event in events
     )
+    if event_snapshot is not None:
+        created_ids = [event.event_id for event, created in zip(events, created_flags, strict=True) if created]
+        added_rows = [dict(row) for row in conn.execute(
+            "SELECT event_id, account, event_json, trade_time_ms FROM trade_events "
+            "WHERE event_id IN (SELECT value FROM json_each(?))",
+            (json.dumps(created_ids),),
+        )] if created_ids else []
+        rows = tuple(sorted(
+            (*event_snapshot.rows, *added_rows),
+            key=lambda row: (int(row["trade_time_ms"]), str(row["event_id"])),
+        ))
+        decoded = {str(event["event_id"]): event for event in event_snapshot.events}
+        decoded.update((str(row["event_id"]), _application_event(row["event_json"])) for row in added_rows)
+        event_snapshot = replace(
+            event_snapshot,
+            source_generation=event_snapshot.source_generation + sum(created_flags),
+            connection_changes=conn.total_changes,
+            rows=rows,
+            events=tuple(decoded[str(row["event_id"])] for row in rows),
+        )
     _fail(failure_hook, "after_event_write")
+    if event_snapshot is not None:
+        event_snapshot.validate(candidate, conn=conn)
     try:
         implementation = loaded_projector_implementation_fingerprint()
     except ProjectorImplementationUnavailable:
@@ -264,6 +328,7 @@ def _run_position_projection_in_transaction_impl(
             seed_checkpoint=False,
             implementation=None,
             failure_hook=failure_hook,
+            event_snapshot=event_snapshot,
         )
         return replace(result, created_flags=created_flags)
 
@@ -283,6 +348,7 @@ def _run_position_projection_in_transaction_impl(
         seed_checkpoint=seed_checkpoint,
         implementation=implementation,
         failure_hook=failure_hook,
+        event_snapshot=event_snapshot,
     )
     return replace(result, created_flags=created_flags)
 
@@ -749,6 +815,7 @@ def _run_in_transaction(
     seed_checkpoint: bool,
     implementation: str,
     failure_hook: Callable[[str], None] | None,
+    event_snapshot: PositionProjectionEventSnapshot | None = None,
 ) -> ProjectionRuntimeResult:
     source = repo.read_position_projection_source_state(conn=conn)
     checkpoint_mode = str(source.get("checkpoint_mode") or "disabled")
@@ -778,6 +845,8 @@ def _run_in_transaction(
                     mark_mode_untrusted=True,
                     conn=conn,
                 )
+                if event_snapshot is not None:
+                    event_snapshot = replace(event_snapshot, connection_changes=conn.total_changes)
                 checkpoint_mode = "untrusted"
                 fallback_reason = f"checkpoint_untrusted:{exc}"
 
@@ -805,6 +874,7 @@ def _run_in_transaction(
         ),
         implementation=implementation,
         failure_hook=failure_hook,
+        event_snapshot=event_snapshot,
     )
 
 
@@ -990,9 +1060,15 @@ def _run_full_path(
     seed_checkpoint: bool,
     implementation: str,
     failure_hook: Callable[[str], None] | None,
+    event_snapshot: PositionProjectionEventSnapshot | None = None,
 ) -> ProjectionRuntimeResult:
-    rows = repo.list_position_projection_event_rows(conn=conn)
-    events = [_application_event(item["event_json"]) for item in rows]
+    if event_snapshot is None:
+        rows = repo.list_position_projection_event_rows(conn=conn)
+        events = [_application_event(item["event_json"]) for item in rows]
+    else:
+        event_snapshot.validate(repo, conn=conn)
+        rows = event_snapshot.rows
+        events = event_snapshot.events
     projection = project_stored_trade_events_to_position_lots(events)
     ensure_projection_publishable(projection, operation="position projection runtime full replay")
     if projection.resumable_state is None or projection.resumable_publication_state is None:
