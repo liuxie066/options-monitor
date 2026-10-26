@@ -1029,6 +1029,15 @@ def _coordinate_listener_sources(
     completed = 0
     shutdown_deadline: float | None = None
     timeout_sec = max(0.0, float(shutdown_timeout_sec))
+
+    def _record_result(source_code: int) -> None:
+        nonlocal completed, exit_code
+        completed += 1
+        if source_code == TRADE_INTAKE_AUTH_REQUIRED_EXIT_CODE:
+            exit_code = source_code
+        elif source_code != 0 and exit_code == 0:
+            exit_code = source_code
+
     try:
         for thread in threads:
             thread.start()
@@ -1043,18 +1052,26 @@ def _coordinate_listener_sources(
                 source_code = results.get(timeout=wait_timeout)
             except queue.Empty:
                 continue
-            completed += 1
+            _record_result(source_code)
             if shutdown_deadline is None:
                 shutdown_deadline = time.monotonic() + timeout_sec
-            if source_code == TRADE_INTAKE_AUTH_REQUIRED_EXIT_CODE:
-                exit_code = source_code
-            elif source_code != 0 and exit_code == 0:
-                exit_code = source_code
         for thread in threads:
             remaining = None if shutdown_deadline is None else max(0.0, shutdown_deadline - time.monotonic())
             thread.join(timeout=remaining)
-            if thread.is_alive():
-                _log(f"[ERROR] listener thread={thread.name} did not stop within {timeout_sec:g} sec")
+        # A worker can publish its result during the final join. Consume only
+        # results already available; the shared shutdown budget is not extended.
+        while completed < len(threads):
+            try:
+                _record_result(results.get_nowait())
+            except queue.Empty:
+                break
+        alive_threads = [thread for thread in threads if thread.is_alive()]
+        for thread in alive_threads:
+            _log(f"[ERROR] listener thread={thread.name} did not stop within {timeout_sec:g} sec")
+        if completed != len(threads) or alive_threads:
+            _log(f"[ERROR] listener shutdown incomplete: results={completed}/{len(threads)} alive={len(alive_threads)}")
+            if exit_code == 0:
+                exit_code = 1
     except KeyboardInterrupt:
         stop_event.set()
         for thread in threads:
