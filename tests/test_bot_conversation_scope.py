@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from src.application.conversation_scope import (
     conversation_scope_from_notification_route,
+    derive_session_id,
     normalize_conversation_scope,
     wechat_window_conversation_id,
 )
@@ -35,3 +38,22 @@ def test_notification_route_scope_uses_wechat_window_target_without_secret_urls(
         channel="feishu_app",
         target="https://example.invalid/webhook/token",
     ) == {"channel": "feishu_app", "conversation_id": "feishu_app:webhook"}
+
+
+def test_host_session_identity_preserves_persisted_keys_and_scope_isolation():
+    parts = ("feishu", "ou_1", "chat_1", "key:us")
+    expected = "om_dfad1e762df4152e8a3aa39131a58d9648a6572acbae7c823004b82322bfe332"
+    assert derive_session_id(*parts) == expected
+    for index, replacement in enumerate(("wechat", "ou_2", "chat_2", "key:hk")):
+        changed = list(parts)
+        changed[index] = replacement
+        assert derive_session_id(*changed) != expected
+
+
+@pytest.mark.parametrize("invalid", ["", " ", "bad\0identity", None])
+@pytest.mark.parametrize("index", range(4))
+def test_host_session_identity_rejects_missing_or_ambiguous_parts(index, invalid):
+    parts = ["feishu", "ou_1", "chat_1", "key:us"]
+    parts[index] = invalid
+    with pytest.raises(ValueError, match="session identity"):
+        derive_session_id(*parts)

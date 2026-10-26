@@ -17,11 +17,11 @@ from src.application.bot.control_handoff import (
 from src.application.bot.control.capability_catalog import preview_operation_capabilities
 from src.application.bot.host_store import BotHostStore
 from src.application.bot import channel_facade
-from src.infrastructure.pi_agent_process import derive_pi_session_id
+from src.application.conversation_scope import derive_session_id
 from src.application.bot.scene import GENERAL_SCENE, build_scene_manifest, load_general_scene
 from src.application.bot.service import prepare_contract
 from src.application.agent_tool_contracts import AgentToolError
-from tests.bot_pi_test_support import (
+from tests.bot_test_support import (
     _TEST_MODEL,
     ModelRequest,
     ModelTurn,
@@ -65,7 +65,7 @@ def _call(name: str, arguments: dict, call_id: str = "call_1") -> ToolCall:
 
 
 def _channel_session_id() -> str:
-    return derive_pi_session_id("test", "test-user", "test-conversation", "key:us")
+    return derive_session_id("test", "test-user", "test-conversation", "key:us")
 
 
 def _model_config(**overrides: object) -> str:
@@ -84,11 +84,11 @@ def _model_config(**overrides: object) -> str:
 
 
 def _run_prepared(prepared, **overrides: object):
-    """Run one prepared contract with the Pi-ready assistant turn this module repeats.
+    """Run one prepared contract with the Python Host assistant turn this module repeats.
 
     A call site that deliberately has no turn passes ``model_turn_json=None``.
     """
-    base: dict[str, object] = {"model_turn_json": json.dumps({"text": "Pi runtime ready."})}
+    base: dict[str, object] = {"model_turn_json": json.dumps({"text": "Bot runtime ready."})}
     base.update(overrides)
     return local_harness.run_prepared_contract(prepared, **base)
 
@@ -619,7 +619,7 @@ def test_eval_model_turn_skips_implicit_bot_toolset_loading(monkeypatch) -> None
 
     def fake_run(_prepared, **kwargs):
         captured.update(kwargs)
-        return AppResult(status="answered", user_response="Pi runtime ready.")
+        return AppResult(status="answered", user_response="Bot runtime ready.")
 
     monkeypatch.setattr(local_harness, "bot_config_error", unexpected_load)
     monkeypatch.setattr(local_harness, "run_contract", fake_run)

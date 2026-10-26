@@ -93,7 +93,7 @@ README 不复制完整规则：[候选策略合同](docs/candidate_strategy.md) 
 
 ## 安装
 
-运行时要求 Python 3.12 或更高版本。
+运行时要求 Python 3.12 或更高版本。Bot 仅使用 Python，不需要 Node 或 Pi 依赖；受控升级和回滚只支持 Python 目标，旧 Node/Pi 发布会在安装依赖、切换服务或改写运行时数据前被明确拒绝。历史 Bot 数据的保留边界见 [Bot 设计](docs/BOT_DESIGN.md#保留边界)。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash

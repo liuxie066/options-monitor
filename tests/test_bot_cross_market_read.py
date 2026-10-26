@@ -19,7 +19,7 @@ from src.application.bot.service import prepare_contract
 from src.application.bot.session import session_key_for_contract
 from src.application.config_yaml import build_yaml_runtime_config_file
 from src.application.agent_tool_contracts import AgentToolError
-from tests.bot_pi_test_support import _TEST_MODEL
+from tests.bot_test_support import _TEST_MODEL
 
 
 def _scope(tmp_path, monkeypatch, markets, *, source=None):

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import plistlib
@@ -20,7 +19,6 @@ from tests.service_deploy_test_support import (
     _write_runtime_target_with_server_deps,
     _create_fake_venv_python_at,
     _fake_git_cache_materialize,
-    _fake_pi_runtime_prepare,
     _render_bundle,
 )
 
@@ -1680,6 +1678,8 @@ def test_service_cleanup_reports_delete_failure_and_only_actual_freed_bytes(monk
     ):
         path.mkdir(parents=True)
         (path / "VERSION").write_text(path.name, encoding="utf-8")
+        (path / "src/application/bot").mkdir(parents=True, exist_ok=True)
+        (path / "src/application/bot/runtime.py").write_text("# Python Bot fixture\n", encoding="utf-8")
         (path / "payload.bin").write_bytes(payload)
     current = tmp_path / "current"
     current.symlink_to(active, target_is_directory=True)
@@ -1898,9 +1898,6 @@ def test_service_upgrade_runtime_prepare_auto_uses_pip_when_uv_missing(monkeypat
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        pi_runtime = _fake_pi_runtime_prepare(list(command))
-        if pi_runtime is not None:
-            return pi_runtime
         if command == ["sh", "-lc", "command -v uv"]:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
@@ -1918,68 +1915,28 @@ def test_service_upgrade_runtime_prepare_auto_uses_pip_when_uv_missing(monkeypat
     assert (target / ".venv").is_symlink()
     assert Path(out["shared_venv_path"]).exists()
     assert not Path(out["shared_venv_build_path"]).exists()
-    assert out["pi_runtime"] == {
-        "node_version": "v22.19.0",
-        "npm_version": "10.8.2",
-        "package_lock_sha256": hashlib.sha256(
-            (target / "agent-runtime" / "package-lock.json").read_bytes()
-        ).hexdigest(),
-        "install_strategy": "npm_ci",
-        "reused_from": None,
-    }
-    assert [
-        "npm",
-        "ci",
-        "--omit=dev",
-        "--ignore-scripts",
-        "--prefer-offline",
-        "--no-audit",
-        "--prefix",
-        "agent-runtime",
-    ] in calls
-    assert any(command[:2] == ["bash", "scripts/pi_runtime_smoke.sh"] for command in calls)
+    assert out["bot_runtime"] == {"ok": True, "runtime": "python"}
+    assert [str(target / ".venv/bin/python"), "-c",
+            "import src.application.bot.host; import src.application.bot.runtime"] in calls
+    assert not any(command[0] in {"node", "npm"} for command in calls)
     assert operations and all("duration_seconds" in item for item in operations)
 
-def test_service_upgrade_pi_runtime_reuses_previous_modules_when_lock_matches(monkeypatch, tmp_path: Path) -> None:
-    from src.application.service_upgrade import _ensure_release_runtime
+def test_service_upgrade_rejects_legacy_runtime_before_dependency_install(tmp_path: Path) -> None:
+    from src.application.service_upgrade import ServiceTransitionError, _ensure_release_runtime
 
-    monkeypatch.setenv("OM_UPGRADE_INSTALLER", "pip")
-    previous = tmp_path / "previous"
-    target = tmp_path / "target"
-    _write_runtime_target_with_server_deps(previous)
+    target = tmp_path / "legacy"
     _write_runtime_target_with_server_deps(target)
-    previous_module = previous / "agent-runtime" / "node_modules" / "example" / "index.js"
-    previous_module.parent.mkdir(parents=True)
-    previous_module.write_text("module.exports = true;\n", encoding="utf-8")
-    partial_module = target / "agent-runtime" / "node_modules" / "partial" / "index.js"
-    partial_module.parent.mkdir(parents=True)
-    partial_module.write_text("partial\n", encoding="utf-8")
-    calls: list[list[str]] = []
-
-    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
-        calls.append(list(command))
-        pi_runtime = _fake_pi_runtime_prepare(list(command))
-        if pi_runtime is not None:
-            return pi_runtime
-        if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
-            _create_fake_venv_python_at(Path(command[-1]))
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
-
-    out = _ensure_release_runtime(
-        target_dir=target,
-        previous_dir=previous,
-        run_cmd=_run_cmd,
-        operations=[],
-    )
-
-    assert out["pi_runtime"]["install_strategy"] == "reuse_previous"
-    assert out["pi_runtime"]["reused_from"] == str(previous / "agent-runtime" / "node_modules")
-    assert (target / "agent-runtime" / "node_modules" / "example" / "index.js").read_text() == (
-        "module.exports = true;\n"
-    )
-    assert not partial_module.exists()
-    assert not any(command[:2] == ["npm", "ci"] for command in calls)
-    assert any(command[:2] == ["bash", "scripts/pi_runtime_smoke.sh"] for command in calls)
+    (target / "src/application/bot/runtime.py").unlink()
+    operations: list[dict] = []
+    with pytest.raises(ServiceTransitionError) as caught:
+        _ensure_release_runtime(
+            target_dir=target,
+            run_cmd=lambda *_args, **_kwargs: pytest.fail("unsupported runtime installed dependencies"),
+            operations=operations,
+        )
+    assert caught.value.status == "unsupported_runtime"
+    assert operations == []
+    assert not (target / ".venv").exists()
 
 def test_service_upgrade_runtime_prepare_auto_uses_uv_and_maps_pip_index(monkeypatch, tmp_path: Path) -> None:
     from src.application.service_upgrade import _ensure_release_runtime
@@ -1994,9 +1951,6 @@ def test_service_upgrade_runtime_prepare_auto_uses_uv_and_maps_pip_index(monkeyp
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        pi_runtime = _fake_pi_runtime_prepare(list(command))
-        if pi_runtime is not None:
-            return pi_runtime
         if command == ["sh", "-lc", "command -v uv"]:
             return subprocess.CompletedProcess(command, 0, stdout="/usr/bin/uv\n", stderr="")
         if command[:4] == ["uv", "venv", "--python", CURRENT_PYTHON]:
@@ -2030,9 +1984,6 @@ def test_service_upgrade_runtime_prepare_pip_mode_skips_uv(monkeypatch, tmp_path
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        pi_runtime = _fake_pi_runtime_prepare(list(command))
-        if pi_runtime is not None:
-            return pi_runtime
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
@@ -2055,9 +2006,6 @@ def test_service_upgrade_runtime_prepare_reuses_dependency_cached_venv(monkeypat
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        pi_runtime = _fake_pi_runtime_prepare(list(command))
-        if pi_runtime is not None:
-            return pi_runtime
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
@@ -2093,9 +2041,6 @@ def test_service_upgrade_rebuilds_cache_with_relocated_pip_shebang(monkeypatch, 
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        pi_runtime = _fake_pi_runtime_prepare(list(command))
-        if pi_runtime is not None:
-            return pi_runtime
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
@@ -2153,9 +2098,6 @@ def test_service_upgrade_runtime_prepare_removes_temp_venv_on_install_failure(mo
     _write_runtime_target_with_server_deps(target)
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
-        pi_runtime = _fake_pi_runtime_prepare(list(command))
-        if pi_runtime is not None:
-            return pi_runtime
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
@@ -2181,9 +2123,6 @@ def test_service_upgrade_runtime_prepare_uv_mode_failure_does_not_fallback(monke
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        pi_runtime = _fake_pi_runtime_prepare(list(command))
-        if pi_runtime is not None:
-            return pi_runtime
         if command[:4] == ["uv", "venv", "--python", CURRENT_PYTHON]:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="uv failed\n")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
@@ -2207,9 +2146,6 @@ def test_service_upgrade_runtime_prepare_auto_falls_back_to_pip_after_uv_failure
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        pi_runtime = _fake_pi_runtime_prepare(list(command))
-        if pi_runtime is not None:
-            return pi_runtime
         if command == ["sh", "-lc", "command -v uv"]:
             return subprocess.CompletedProcess(command, 0, stdout="/usr/bin/uv\n", stderr="")
         if command[:4] == ["uv", "venv", "--python", CURRENT_PYTHON]:
@@ -2229,58 +2165,58 @@ def test_service_upgrade_runtime_prepare_auto_falls_back_to_pip_after_uv_failure
     assert "uv install failed" in str(out["uv_error"])
     assert any(command[:3] == [CURRENT_PYTHON, "-m", "venv"] for command in calls)
 
-def test_service_upgrade_pi_prepare_reruns_npm_after_partial_failure(monkeypatch, tmp_path: Path) -> None:
+def test_service_upgrade_bot_prepare_retries_after_import_failure(monkeypatch, tmp_path: Path) -> None:
     from src.application.service_upgrade import RuntimePrepareError, _ensure_release_runtime
 
     monkeypatch.setenv("OM_UPGRADE_INSTALLER", "pip")
     target = tmp_path / "release"
     _write_runtime_target_with_server_deps(target)
-    npm_attempts = 0
+    attempts = 0
 
-    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
-        nonlocal npm_attempts
+    def _run_cmd(command, **_kwargs):
+        nonlocal attempts
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
-        pi_runtime = _fake_pi_runtime_prepare(list(command))
-        if pi_runtime is not None:
-            if command[:2] == ["npm", "ci"]:
-                npm_attempts += 1
-                if npm_attempts == 1:
-                    return subprocess.CompletedProcess(command, 1, stdout="", stderr="partial npm failure\n")
-            return pi_runtime
+        if command[1:] == ["-c", "import src.application.bot.host; import src.application.bot.runtime"]:
+            attempts += 1
+            if attempts == 1:
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="Bot import failed\n")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
-    with pytest.raises(RuntimePrepareError):
-        _ensure_release_runtime(target_dir=target, run_cmd=_run_cmd, operations=[])
-
+    operations: list[dict] = []
+    with pytest.raises(RuntimePrepareError, match="import src.application.bot.host"):
+        _ensure_release_runtime(target_dir=target, run_cmd=_run_cmd, operations=operations)
+    assert operations[-1]["returncode"] == 1
+    assert operations[-1]["stderr"] == "Bot import failed\n"
+    assert operations[-1]["command"] == [str(target / ".venv/bin/python"), "-c",
+                                          "import src.application.bot.host; import src.application.bot.runtime"]
     out = _ensure_release_runtime(target_dir=target, run_cmd=_run_cmd, operations=[])
-    assert npm_attempts == 2
-    assert out["pi_runtime"]["node_version"] == "v22.19.0"
+    assert attempts == 2
+    assert out["bot_runtime"] == {"ok": True, "runtime": "python"}
 
-def test_service_upgrade_pi_smoke_timeout_keeps_structured_prepare_evidence(monkeypatch, tmp_path: Path) -> None:
+def test_service_upgrade_bot_smoke_timeout_keeps_structured_prepare_evidence(monkeypatch, tmp_path: Path) -> None:
     from src.application.service_upgrade import RuntimePrepareError, _ensure_release_runtime
 
     monkeypatch.setenv("OM_UPGRADE_INSTALLER", "pip")
     target = tmp_path / "release"
     _write_runtime_target_with_server_deps(target)
+    operations: list[dict] = []
 
-    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+    def _run_cmd(command, **_kwargs):
         if command[:3] == [CURRENT_PYTHON, "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
-        pi_runtime = _fake_pi_runtime_prepare(list(command))
-        if command[:2] == ["bash", "scripts/pi_runtime_smoke.sh"]:
-            raise subprocess.TimeoutExpired(command, timeout=180)
-        if pi_runtime is not None:
-            return pi_runtime
+        if command[1:] == ["-c", "import src.application.bot.host; import src.application.bot.runtime"]:
+            raise subprocess.TimeoutExpired(command, timeout=30)
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     with pytest.raises(RuntimePrepareError) as caught:
-        _ensure_release_runtime(target_dir=target, run_cmd=_run_cmd, operations=[])
-
+        _ensure_release_runtime(target_dir=target, run_cmd=_run_cmd, operations=operations)
     assert isinstance(caught.value.__cause__, RuntimeError)
-    assert caught.value.runtime_prepare["pi_runtime"]["node_version"] == "v22.19.0"
-    assert caught.value.runtime_prepare["pi_runtime"]["npm_version"] == "10.8.2"
-    assert caught.value.runtime_prepare["pi_runtime"]["package_lock_sha256"]
+    assert operations[-1]["timed_out"] is True
+    assert operations[-1]["timeout_seconds"] == 30
+    assert operations[-1]["ok"] is False
+    assert caught.value.runtime_prepare["duration_seconds"] >= 0
+    assert not Path(caught.value.runtime_prepare["shared_venv_path"]).exists()
 
 def test_service_upgrade_restart_denied_includes_remediation(tmp_path: Path) -> None:
     from src.application.service_upgrade import ServiceRestartError, _restart_services_from_profile
@@ -2584,3 +2520,66 @@ def test_service_render_rejects_invalid_timeout(tmp_path, target, timeout_second
     with pytest.raises(ValueError, match="timeout_seconds must be a positive integer"):
         _render_bundle(tmp_path / "repo", tmp_path / "runtime", target=target,
                        accounts=["lx"], markets=["us"], timeout_seconds=timeout_seconds)
+
+
+
+def test_python_bot_runtime_import_preserves_legacy_store(tmp_path: Path) -> None:
+    from src.application import service_upgrade as module
+
+    release = tmp_path / "release"
+    _write_upgrade_release_skeleton(release, "3.5.2")
+    python = release / ".venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(CURRENT_PYTHON)
+    legacy_db = release / "output_shared/state/pi_sessions.sqlite3"
+    legacy_db.parent.mkdir(parents=True)
+    legacy_db.write_bytes(b"legacy store must never be opened")
+    before = legacy_db.read_bytes()
+    operations: list[dict] = []
+    out = module._ensure_bot_runtime(release, subprocess.run, operations)
+    assert out == {"ok": True, "runtime": "python"}
+    assert module._runtime_readiness(release_dir=release) == out
+    assert len(operations) == 1 and operations[0]["ok"] is True
+    assert operations[0]["command"] == [str(python), "-c", "import src.application.bot.host; import src.application.bot.runtime"]
+    assert legacy_db.read_bytes() == before
+
+
+def test_failed_compensation_never_restores_or_starts_incompatible_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.service_upgrade as module
+
+    previous = tmp_path / "releases/3.5.1"
+    target = tmp_path / "releases/3.5.2"
+    _write_upgrade_release_skeleton(previous, "3.5.1")
+    _write_upgrade_release_skeleton(target, "3.5.2")
+    current = tmp_path / "current"
+    current.symlink_to(target, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+
+    (previous / "src/application/bot/runtime.py").unlink()
+    monkeypatch.setattr(module, "_switch_current_symlink", lambda **_kwargs: pytest.fail("compensation restored old runtime"))
+    monkeypatch.setattr(module, "service_drift", lambda **_kwargs: pytest.fail("compensation reconciled old services"))
+    monkeypatch.setattr(module, "_restart_services_from_loaded_profile", lambda **_kwargs: pytest.fail("compensation started old service"))
+
+    out = module._compensate_service_transition(  # noqa: SLF001 - exact failure boundary
+        repo_link=current,
+        previous_dir=previous,
+        runtime_root=runtime,
+        previous_profile={"service_provider": "systemd"},
+        config_commit={},
+        restart_services=True,
+        activation_policy="preserve-existing",
+        preserved_activation_states={},
+        run_cmd=lambda *_args, **_kwargs: pytest.fail("unexpected service command"),
+        operations=[],
+    )
+
+    assert out["status"] == "unsupported_runtime"
+    assert out["symlink_restored"] is False
+    assert out["restarted_services"] == []
+    assert out["runtime_readiness"] == {}
+    assert out["config_restore"]["status"] == "skipped"
+    assert current.resolve() == target

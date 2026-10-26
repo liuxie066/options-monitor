@@ -90,8 +90,7 @@
 - [OM Capability Surfaces](OM_AGENT_CAPABILITY_MAP.md)：Tool Gateway、Control、Bot 的能力边界。
 - [Inbound Control](INBOUND_CONTROL.md)：确定性 Control、pending operation 和 channel 安全。
 - [Bot PRD](BOT_PRD.md)：Bot产品合同及项目内通用只读助理需求。
-- [Bot / Python runtime / Scene v7](BOT_DESIGN.md)：策略、报错与过滤原因问答，个人记忆、上下文和只读工具合同。
-- [Legacy Pi storage](PI_AGENT_CORE_INTEGRATION.md)：历史会话保留、离线转换与旧版本回滚边界。
+- [Bot / Python runtime / Scene v7](BOT_DESIGN.md)：策略、报错与过滤原因问答，个人记忆、上下文和只读工具合同；历史 Bot 数据保留与 Host schema 迁移边界。
 - [Agent Handbook](AGENT_WIKI.md)：本地 agent 的任务 playbook、模块地图和验证矩阵。
 - [Session Summary](SESSION_SUMMARY.md)：仅在显式 handoff 时使用的模板。
 

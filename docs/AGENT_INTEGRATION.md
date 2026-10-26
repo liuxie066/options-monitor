@@ -82,7 +82,7 @@ For `resource=project`, `list` returns only the requested directory's immediate
 allowed children, with `kind=file|directory`. Directory names have no trailing
 slash and can be used directly for another `list` or `search`; only files can be
 read. An empty `relative_name` means the project root. Root list/search visit
-`src`, `domain`, `agent-runtime`, `docs`, `configs`, then allowed root Markdown
+`src`, `domain`, `docs`, `configs`, then allowed root Markdown
 files, retaining only existing allowed resources. `configs` permits only the
 existing example configuration path. Search remains recursive, case-sensitive
 literal matching with the first match per file. An explicit directory confines

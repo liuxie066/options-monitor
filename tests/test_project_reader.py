@@ -226,7 +226,7 @@ def test_filters_and_scope_are_explicit(tmp_path):
 
 
 def test_list_is_one_layer_and_root_implementation_directories_lead(tmp_path, monkeypatch):
-    for directory in ("src", "domain", "agent-runtime", "docs"):
+    for directory in ("src", "domain", "docs"):
         _file(tmp_path, f"{directory}/nested/file.py", "needle")
     _file(tmp_path, "configs/examples/config.yaml.example")
     _file(tmp_path, "AGENTS.md")
@@ -240,8 +240,8 @@ def test_list_is_one_layer_and_root_implementation_directories_lead(tmp_path, mo
     monkeypatch.setattr(reader, "list_names", list_names)
     root = reader.project_files(tmp_path, scope={})
     assert visited == [""]
-    assert [row["relative_name"] for row in root["entries"]] == ["src", "domain", "agent-runtime", "docs", "configs", "AGENTS.md"]
-    assert [row["kind"] for row in root["entries"]] == ["directory"] * 5 + ["file"]
+    assert [row["relative_name"] for row in root["entries"]] == ["src", "domain", "docs", "configs", "AGENTS.md"]
+    assert [row["kind"] for row in root["entries"]] == ["directory"] * 4 + ["file"]
     assert all("size_bytes" not in row for row in root["entries"][:-1])
     assert root["coverage"]["complete"] and root["next_cursor"] is None
     child = reader.project_files(tmp_path, relative_name="src", scope={})
@@ -252,7 +252,7 @@ def test_list_is_one_layer_and_root_implementation_directories_lead(tmp_path, mo
 
 def test_search_priority_preserves_all_pages_and_explicit_scope(tmp_path):
     expected = []
-    for directory in ("src", "domain", "agent-runtime", "docs"):
+    for directory in ("src", "domain", "docs"):
         for n in range(25):
             expected.append(f"{directory}/{n:02}.py")
             _file(tmp_path, expected[-1], "needle")
@@ -420,3 +420,11 @@ def test_sensitive_key_quotes_preserve_source_lines(quote, key):
     assert safe.count("\n") == original.count("\n")
     assert safe.endswith("public = 'visible'")
     assert redact_text(safe) == safe
+
+
+def test_retired_runtime_is_not_a_project_reader_root(tmp_path):
+    _file(tmp_path, "agent-runtime/legacy.py", "retired-runtime-token")
+    assert reader.project_files(tmp_path, scope={})["entries"] == []
+    assert reader.project_files(tmp_path, action="search", query="retired-runtime-token", scope={})["entries"] == []
+    with pytest.raises(reader.ProjectReaderError):
+        reader.project_files(tmp_path, action="read", relative_name="agent-runtime/legacy.py", scope={})

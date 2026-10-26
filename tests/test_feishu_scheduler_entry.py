@@ -99,7 +99,6 @@ def test_feishu_key_only_scope_runs_python_bot_and_runtime_status(monkeypatch, t
         encoding="utf-8",
     )
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
-    monkeypatch.setenv("OM_PI_SESSION_DB", str(tmp_path / "pi.sqlite3"))
     seen: list[dict] = []
 
     def submit(payload):
@@ -202,7 +201,6 @@ def test_feishu_hk_can_use_two_active_read_tools(monkeypatch, tmp_path):
         partial(service_deploy.scheduled_tasks_from_profile, run_cmd=run_os),
     )
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
-    monkeypatch.setenv("OM_PI_SESSION_DB", str(tmp_path / "pi.sqlite3"))
     seen: list[dict] = []
 
     def submit(payload):
