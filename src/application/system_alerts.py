@@ -35,6 +35,13 @@ _MAX_INCIDENTS = 512
 _SILENCE_SECONDS = 600
 
 
+class SystemAlertPreSendFailure(RuntimeError):
+    """The initial incident read failed before any journal or provider attempt."""
+
+    stage = "state_read"
+    provider_attempted = False
+
+
 @contextmanager
 def _state_lock(path: Path):
     lock_path = path.with_suffix(".lock")
@@ -233,7 +240,10 @@ def report_system_failure(
     path = base / "output_shared" / "state" / "system_alerts.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     with _state_lock(path):
-        state = _read_state(path)
+        try:
+            state = _read_state(path)
+        except (OSError, ValueError) as exc:
+            raise SystemAlertPreSendFailure("system alert initial state read failed") from exc
         now = datetime.now(timezone.utc)
         previous = state.get(key)
         active = isinstance(previous, dict) and previous.get("status") == "failed"

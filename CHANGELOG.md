@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- OpenD 告警仅在系统事故 owner 证明首次状态读取失败、尚未开始发送时，释放仍匹配的本次预约与 burst 记录；状态修复后可重试，未知投递及迟到旧失败保持保守去重（#772）。
+
 ### Removed
 - 完全退役 Pi/Node 执行与会话转换代码；受控升级及回滚只接受 Python Bot 目标，在副作用前拒绝旧 Node 发布。`om bot migrate` 仅保留 Host schema 迁移、不再接受 `--pi-db`；历史数据库、回执、未知目录及备份默认保留，release 清理不再解析 Pi 迁移回执。
 

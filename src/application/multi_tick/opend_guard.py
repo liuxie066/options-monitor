@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src.application.notification_shells import render_system_notice
-from src.application.system_alerts import report_system_failure, report_system_recovery
+from src.application.system_alerts import SystemAlertPreSendFailure, report_system_failure, report_system_recovery
 from src.application.trade_time_format import format_iso_time_beijing
 from src.infrastructure.io_utils import read_json, atomic_write_json as write_json, utc_now
 
@@ -299,7 +299,8 @@ def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: st
 
     with _alert_state_lock(base):
         # Reserve the incident before contacting the provider. An ambiguous
-        # response remains reserved; recovery is the only automatic reset.
+        # response remains reserved; only a proven initial-read failure can
+        # release this reservation without recovery.
         if not should_send_opend_alert(
             base,
             str(error_code),
@@ -323,6 +324,30 @@ def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: st
             run_id=now_utc, rc=1, first_error_at=reserved_at or now_utc,
             opend_login_state=str(error_code), message=msg,
         )
+    except SystemAlertPreSendFailure:
+        print('<3>OPEND_ALERT_INFRA_FAILED', file=sys.stderr)
+        try:
+            with _alert_state_lock(base):
+                path = opend_alert_rl_path(base)
+                state = read_json(path, {})
+                sent = state.get('last_sent_utc_by_error') if isinstance(state, dict) else None
+                statuses = state.get('last_delivery_status_by_error') if isinstance(state, dict) else None
+                if (reserved_at and isinstance(sent, dict) and isinstance(statuses, dict)
+                        and sent.get(key) == reserved_at and statuses.get(key) == 'delivery_unknown'):
+                    del sent[key]
+                    del statuses[key]
+                    recent = state.get('recent_sent')
+                    if isinstance(recent, list):
+                        state['recent_sent'] = [
+                            item for item in recent
+                            if not (isinstance(item, dict) and item.get('scope') == 'project'
+                                    and item.get('family') == _opend_alert_family(error_code)
+                                    and item.get('ts') == reserved_at)
+                        ]
+                    write_json(path, state)
+        except Exception:
+            print('<3>OPEND_ALERT_RELEASE_FAILED', file=sys.stderr)
+        return False
     except Exception:
         print('<3>OPEND_ALERT_INFRA_FAILED', file=sys.stderr)
         return False
