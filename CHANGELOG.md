@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Bug Fixes
+- 安装器在 current 切换前的可恢复失败或 INT/TERM 退出中恢复原入口，切换后保留新入口，恢复失败保留备份；新发布前拒绝初始精确同目标链接，保留既有重试规则（#766）。
+
 ### Removed
 - 完全退役 Pi/Node 执行与会话转换代码；受控升级及回滚只接受 Python Bot 目标，在副作用前拒绝旧 Node 发布。`om bot migrate` 仅保留 Host schema 迁移、不再接受 `--pi-db`；历史数据库、回执、未知目录及备份默认保留，release 清理不再解析 Pi 迁移回执。
 
