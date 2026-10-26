@@ -13,6 +13,16 @@
 | `RT-OM-003` | `src/application/quality/runtime_checks.py::build_runtime_checks` | `tests/quality/test_om_quality_service.py` | 读取现有 timer/run receipt |
 | `RT-OM-004` | `src/application/quality/position_checks.py::build_opend_runtime_check` | `tests/quality/test_om_quality_service.py`、`tests/quality/test_om_quality_checks.py` | 要求 REAL、显式账户、`refresh_cache=True`、snapshot complete |
 
+OpenD 持仓质量适配器使用现有 `get_trading_days_with_receipt`：日历必须有成功、
+完整覆盖和完整单页回执，行必须为字典且日期、交易时段可识别。缺失封包、
+坏日期或未知时段使本次快照不完整，`OM-POS-001/002` 为 unavailable，
+`RT-OM-004` 为 unknown，不生成可信权威复查期限；下次普通 `--no-deep` 刷新仍会重查。
+完整回执的空列表、有效日期的 `NON_TRADING` 行继续表示合法零交易日，沿用既有
+排期；有效盘中日历仍每十五分钟复查。来源时间门禁不变，不把可复用期限当作新鲜来源时间。
+确定性回归见 `tests/quality/test_opend_position_adapter.py` 与
+`tests/quality/test_quality_calendar_source.py`，后者经过公开 CLI handler、真实 service、
+适配器、gateway 回执及临时质量产物，只有外部 I/O 和时钟为隔离夹具。
+
 `RT-OM-002` 复用 `trades/listener_status.py` 的已知非工作状态
 `blocked/error/reconnecting/stopped`，并保留质检既有的 `failed` 兼容。
 心跳在正常时间窗内但状态为上述值时，报告 `warn/LISTENER_NOT_WORKING`；
