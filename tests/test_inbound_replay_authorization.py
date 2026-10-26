@@ -217,3 +217,95 @@ def test_public_cli_rejects_revoked_cached_reply(tmp_path, monkeypatch, capsys, 
     assert json.loads(output)["error"]["code"] == "PERMISSION_DENIED"
     assert _rows(tmp_path / "cli.sqlite3")[0]["response_json"] == original
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("conflict", ["sender", "conversation", "scope", "revoked", "text"])
+def test_processing_duplicate_keeps_current_authorization(tmp_path, monkeypatch, business, conflict):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    original_tool, calls = business
+    started, release = Event(), Event()
+    request = _request(tmp_path)
+    def tool(name, payload):
+        started.set()
+        assert release.wait(10)
+        return original_tool(name, payload)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(handle_bot_turn, request, execute_tool_fn=tool,
+                             allowed_senders="feishu:sender_a", settings=SETTINGS)
+        try:
+            assert started.wait(10)
+            before = _rows(request.audit_db)[0]
+            altered = request
+            allowed = "feishu:sender_a,feishu:sender_b"
+            if conflict == "sender":
+                altered = replace(request, sender_id="sender_b")
+            elif conflict == "conversation":
+                altered = replace(request, conversation_id="different")
+            elif conflict == "scope":
+                altered = replace(request, config_key="hk")
+            elif conflict == "revoked":
+                allowed = ""
+            else:
+                altered = replace(request, text="different text")
+            observed = handle_bot_turn(altered, execute_tool_fn=tool, allowed_senders=allowed, settings=SETTINGS)
+            expected = ("INBOUND_PROCESSING" if conflict == "text" else "PERMISSION_DENIED"
+                        if conflict in {"sender", "revoked"} else "CHANNEL_NOT_READY")
+            assert observed.error["code"] == expected
+            assert PRIVATE not in json.dumps(observed.public_payload())
+            after = _rows(request.audit_db)[0]
+            for key in ("response_json", "execution_token", "execution_state", "replay_authorization_json"):
+                assert after[key] == before[key]
+        finally:
+            release.set()
+        assert future.result(timeout=10).ok
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("denied_first", [False, True])
+def test_denial_claim_race_preserves_the_winning_original_row(tmp_path, business, denied_first):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier, Event
+
+    tool, calls = business
+    request = _request(tmp_path)
+    barrier, committed = Barrier(2), Event()
+    class RacingStore(InboundAuditStore):
+        def find_by_message(self, **kwargs):
+            row = super().find_by_message(**kwargs)
+            assert row is None
+            barrier.wait(timeout=10)
+            return row
+    class AllowedStore(RacingStore):
+        def claim_message(self, record):
+            if denied_first:
+                assert committed.wait(10)
+            value = super().claim_message(record)
+            if not denied_first:
+                committed.set()
+            return value
+    class DeniedStore(RacingStore):
+        def record_result(self, record):
+            if not denied_first:
+                assert committed.wait(10)
+            super().record_result(record)
+            if denied_first:
+                committed.set()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        allowed = pool.submit(handle_bot_turn, request, audit_store=AllowedStore(request.audit_db),
+                              execute_tool_fn=tool, allowed_senders="feishu:sender_a", settings=SETTINGS)
+        denied = pool.submit(handle_bot_turn, request, audit_store=DeniedStore(request.audit_db),
+                             execute_tool_fn=tool, allowed_senders="", settings=SETTINGS)
+        assert denied.result(timeout=10).error["code"] == "PERMISSION_DENIED"
+        result = allowed.result(timeout=10)
+    rows = _rows(request.audit_db)
+    assert len(rows) == 1 and rows[0]["execution_state"] == "completed"
+    if denied_first:
+        assert result.error["code"] == "CHANNEL_NOT_READY"
+        assert calls == [] and rows[0]["decision"] == "denied"
+    else:
+        assert result.ok and len(calls) == 1
+        assert rows[0]["result_ok"] == 1
+        assert PRIVATE in rows[0]["response_json"]
+    assert rows[0]["duplicate_count"] >= 1

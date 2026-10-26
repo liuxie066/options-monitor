@@ -292,26 +292,236 @@ def test_multi_source_crash_stops_sibling_and_returns_failure() -> None:
     assert sibling_stopped.is_set()
 
 
-def test_multi_source_shutdown_is_bounded_when_sibling_ignores_stop() -> None:
+@pytest.mark.parametrize("first_code", [0, 1, 7, 78])
+def test_multi_source_shutdown_is_bounded_when_sibling_ignores_stop(first_code: int) -> None:
     release_sibling = threading.Event()
+    sibling_entered = threading.Event()
+    workers: list[threading.Thread] = []
 
-    def _runner(source: dict, _stop_event: threading.Event) -> int:
-        if source["id"] == "failed":
-            return 1
-        release_sibling.wait(2)
+    def _runner(source: dict, stop_event: threading.Event) -> int:
+        workers.append(threading.current_thread())
+        if source["id"] == "first":
+            assert sibling_entered.wait(2)
+            return first_code
+        sibling_entered.set()
+        assert stop_event.wait(2)
+        assert release_sibling.wait(3)
         return 0
 
     started_at = time.monotonic()
-    rc = auto_intake._coordinate_listener_sources(
-        [{"id": "failed"}, {"id": "stuck"}],
-        run_source=_runner,
-        shutdown_timeout_sec=0.05,
-    )
-    elapsed = time.monotonic() - started_at
-    release_sibling.set()
+    try:
+        rc = auto_intake._coordinate_listener_sources(
+            [{"id": "first"}, {"id": "stuck"}],
+            run_source=_runner,
+            shutdown_timeout_sec=0.05,
+        )
+        elapsed = time.monotonic() - started_at
+        assert rc == (first_code or 1)
+        assert elapsed < 1
+    finally:
+        release_sibling.set()
+        for worker in workers:
+            worker.join(timeout=2)
+        assert len(workers) == 2 and not any(worker.is_alive() for worker in workers)
 
-    assert rc == 1
-    assert elapsed < 0.5
+
+def test_multi_source_blocked_auth_status_cannot_report_success(tmp_path: Path, monkeypatch) -> None:
+    auth_blocked = threading.Event()
+    release_auth = threading.Event()
+    workers: list[threading.Thread] = []
+    history_closed = []
+    auth_results = []
+    original_status = auto_intake._write_listener_status
+
+    class Listener:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self, **_kwargs):
+            pass
+
+        def check_health(self):
+            raise TradeIntakeAuthRequired(
+                error_code="OPEND_NEEDS_PHONE_VERIFY", message="phone verification required", detail="fixture",
+            )
+
+        def close(self):
+            pass
+
+    class History:
+        def __init__(self, **_kwargs):
+            pass
+
+        def close(self):
+            history_closed.append(True)
+
+    def write_status(*args, **kwargs):
+        if kwargs.get("stage") == "auth_required":
+            auth_blocked.set()
+            assert release_auth.wait(3)
+        return original_status(*args, **kwargs)
+
+    monkeypatch.setattr(auto_intake, "OpenDHistoryDealClient", History)
+    monkeypatch.setattr(auto_intake, "_write_listener_status", write_status)
+    monkeypatch.setattr(auto_intake, "build_futu_gateway", lambda **_: pytest.fail("unexpected provider"))
+    monkeypatch.setattr(auto_intake, "run_history_backfill", lambda **_: pytest.fail("unexpected backfill"))
+
+    def run_source(source, stop_event):
+        workers.append(threading.current_thread())
+        if source["id"] == "auth":
+            code = _run(tmp_path, monkeypatch, Listener, stop_event=stop_event)
+            auth_results.append(code)
+            return code
+        assert auth_blocked.wait(2)
+        assert stop_event.is_set()
+        return 0
+
+    started_at = time.monotonic()
+    try:
+        rc = auto_intake._coordinate_listener_sources(
+            [{"id": "auth"}, {"id": "sibling"}], run_source=run_source, shutdown_timeout_sec=0.05,
+        )
+        assert auth_blocked.is_set() and not auth_results
+        assert rc == 1
+        assert time.monotonic() - started_at < 1
+    finally:
+        release_auth.set()
+        for worker in workers:
+            worker.join(timeout=2)
+        assert len(workers) == 2 and not any(worker.is_alive() for worker in workers)
+    assert auth_results == [78] and history_closed == [True]
+    assert json.loads((tmp_path / "status.json").read_text())["stage"] == "auth_required"
+
+
+@pytest.mark.parametrize("first_code,later_code,expected", [
+    (0, 78, 78), (7, 78, 78), (78, 7, 78), (7, 9, 7), (0, 0, 0),
+])
+def test_multi_source_result_priority_after_sibling_within_deadline(first_code, later_code, expected) -> None:
+    sibling_returned = threading.Event()
+
+    def run_source(source, stop_event):
+        if source["id"] == "sibling":
+            sibling_returned.set()
+            return first_code
+        assert sibling_returned.wait(2)
+        # The first worker sets stop only after publishing its result.
+        assert stop_event.wait(2)
+        return later_code
+
+    assert auto_intake._coordinate_listener_sources(
+        [{"id": "sibling"}, {"id": "auth"}], run_source=run_source,
+    ) == expected
+
+
+@pytest.mark.parametrize("boundary,expected", [("late_auth", 78), ("missing", 1), ("alive", 1)])
+def test_multi_source_final_join_result_boundary(monkeypatch, boundary, expected) -> None:
+    from collections import deque
+    import queue
+
+    pending = deque([0])
+    joins = []
+    created = []
+
+    class Results:
+        def get(self, *, timeout):
+            return pending.popleft()
+
+        def get_nowait(self):
+            if pending:
+                return pending.popleft()
+            raise queue.Empty
+
+    class Worker:
+        def __init__(self, **kwargs):
+            self.name = kwargs["name"]
+            created.append(self)
+
+        def start(self):
+            pass
+
+        def join(self, *, timeout):
+            joins.append(timeout)
+            if self is created[-1] and boundary != "missing":
+                pending.append(78 if boundary == "late_auth" else 0)
+
+        def is_alive(self):
+            return boundary == "alive" and self is created[-1]
+
+    monkeypatch.setattr(auto_intake.queue, "Queue", Results)
+    monkeypatch.setattr(auto_intake.threading, "Thread", Worker)
+    monkeypatch.setattr(auto_intake.time, "monotonic", lambda: 0)
+    logs = []
+    monkeypatch.setattr(auto_intake, "_log", logs.append)
+    assert auto_intake._coordinate_listener_sources(
+        [{"id": "first"}, {"id": "last"}], run_source=lambda *_: pytest.fail("fake worker ran"),
+        shutdown_timeout_sec=0,
+    ) == expected
+    assert joins == [0, 0] and not pending
+    if boundary in {"missing", "alive"}:
+        assert any("shutdown incomplete" in line for line in logs)
+
+
+def test_multi_source_joins_share_one_deadline(monkeypatch) -> None:
+    from collections import deque
+
+    clock = [0.0]
+    pending = deque([0, 0, 0])
+    joins = []
+
+    class Results:
+        def get(self, *, timeout):
+            return pending.popleft()
+
+    class Worker:
+        def __init__(self, **kwargs):
+            self.name = kwargs["name"]
+
+        def start(self):
+            pass
+
+        def join(self, *, timeout):
+            joins.append(timeout)
+            clock[0] += timeout
+
+        def is_alive(self):
+            return False
+
+    monkeypatch.setattr(auto_intake.queue, "Queue", Results)
+    monkeypatch.setattr(auto_intake.threading, "Thread", Worker)
+    monkeypatch.setattr(auto_intake.time, "monotonic", lambda: clock[0])
+    assert auto_intake._coordinate_listener_sources(
+        [{"id": str(index)} for index in range(3)], run_source=lambda *_: pytest.fail("fake worker ran"),
+        shutdown_timeout_sec=0.5,
+    ) == 0
+    assert joins == [0.5, 0, 0] and clock == [0.5]
+
+
+def test_multi_source_keyboard_interrupt_preserves_clean_cancellation(monkeypatch) -> None:
+    stop = threading.Event()
+    joins = []
+
+    class Results:
+        def get(self, *, timeout):
+            raise KeyboardInterrupt
+
+    class Worker:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def join(self, *, timeout):
+            joins.append(timeout)
+
+    monkeypatch.setattr(auto_intake.queue, "Queue", Results)
+    monkeypatch.setattr(auto_intake.threading, "Thread", Worker)
+    monkeypatch.setattr(auto_intake.threading, "Event", lambda: stop)
+    assert auto_intake._coordinate_listener_sources(
+        [{"id": "one"}, {"id": "two"}], run_source=lambda *_: pytest.fail("fake worker ran"),
+        shutdown_timeout_sec=0.05,
+    ) == 0
+    assert stop.is_set() and joins == [0.05, 0.05]
 
 
 def test_order_hints_coalesce_to_one_probe_and_deal_backfill(tmp_path: Path, monkeypatch) -> None:

@@ -3974,6 +3974,7 @@ def test_service_cleanup_confirm_deletes_only_old_releases_and_selected_caches(t
     (downloads / "release.tar.gz").write_text("download-cache", encoding="utf-8")
 
     out = service_cleanup(
+        runtime_root=tmp_path / "runtime",
         repo_root=current,
         releases_root=releases,
         cleanup_downloads=True,
@@ -4006,6 +4007,7 @@ def test_service_cleanup_keeps_active_release_even_when_it_is_not_newest(tmp_pat
     current.symlink_to(v100, target_is_directory=True)
 
     out = service_cleanup(
+        runtime_root=tmp_path / "runtime",
         repo_root=current,
         releases_root=releases,
         keep_releases=2,
@@ -4143,7 +4145,7 @@ def test_service_cleanup_requires_repo_root_symlink(tmp_path: Path) -> None:
     repo.mkdir()
     (repo / "VERSION").write_text("1.0.0\n", encoding="utf-8")
 
-    out = service_cleanup(repo_root=repo, releases_root=tmp_path / "releases", confirm=True)
+    out = service_cleanup(repo_root=repo, releases_root=tmp_path / "releases", confirm=True, runtime_root=tmp_path / "runtime")
 
     assert out["ok"] is False
     assert out["status"] == "repo_root_not_symlink"
@@ -4164,6 +4166,7 @@ def test_service_cleanup_reports_journal_command_failure(tmp_path: Path) -> None
         return subprocess.CompletedProcess(command, 1, stdout="", stderr="denied")
 
     out = service_cleanup(
+        runtime_root=tmp_path / "runtime",
         repo_root=current,
         releases_root=releases,
         journal_vacuum_size="256M",
@@ -4926,7 +4929,7 @@ def test_update_cleanup_keeps_guard_without_new_compensation(monkeypatch, transi
         return {"ok": failure != ("failed_apply" if kwargs["confirm"] else "failed_plan"),
                 "status": "fixture_cleanup", "changed": False, "kept_releases": ["1.0.1", "1.0.2"]}
 
-    monkeypatch.setattr(cleanup, "service_cleanup", clean)
+    monkeypatch.setattr(cleanup, "_service_cleanup_under_transition_lock", clean)
     if failure.endswith("error"):
         with pytest.raises(OSError) as raised:
             case.invoke("apply", "1.0.2", cleanup=True)

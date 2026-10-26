@@ -3482,9 +3482,10 @@ def service_upgrade(
                     "runtime_config_status": runtime_config_prepare.get("status"),
                 }
             else:
-                from src.application.service_cleanup import service_cleanup
+                # The outer transition guard covers both cleanup calls and terminal publication.
+                from src.application.service_cleanup import _service_cleanup_under_transition_lock
 
-                cleanup_plan = service_cleanup(
+                cleanup_plan = _service_cleanup_under_transition_lock(
                     repo_root=repo_link,
                     releases_root=releases,
                     runtime_root=runtime,
@@ -3511,7 +3512,7 @@ def service_upgrade(
                         "reason": "cleanup-after-upgrade requires at least keep_releases retained releases",
                     }
                 else:
-                    cleanup_result = service_cleanup(
+                    cleanup_result = _service_cleanup_under_transition_lock(
                         repo_root=repo_link,
                         releases_root=releases,
                         runtime_root=runtime,

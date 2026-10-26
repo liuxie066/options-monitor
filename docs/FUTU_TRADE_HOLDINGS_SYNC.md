@@ -132,6 +132,8 @@ listener 在现有每分钟维护周期核对本地 ledger、lifecycle、来源�
 不构成完成证据。被 void 的终结事件、部分分配、数量冲突及缺失身份继续保留 pending。
 本地收口独立于 OpenD 采集；收口失败单独记录，不改变 lifecycle seal 的恢复状态。
 
+共享 audit 中的 `not_option_deal` 不能仅凭成交 ID 收口：同一条记录必须证明与 pending 相同的逻辑账户、物理账户和成交来源，所有显式身份声明须一致。raw `account` 的逻辑或旧版物理角色仅由该条记录的可信 producer context 或已存 normalized 双证据确定，不读取当前映射补历史身份；身份不足或冲突继续保留 pending。条目自身已有的显式 `not_option_deal` 分类继续有效。
+
 `./om run trade-intake --reconcile-state --dry-run` 提供只读预览；明确授权后使用
 同一入口的 `--apply` 更新状态。`--account` 与重复的 `--deal-id` 可限定范围。
 收口先核对 Inbox 的准确身份、经济内容、当前版本及完整历史凭证集，再更新来源文件；
@@ -486,7 +488,18 @@ SDK 转换丢字段。无身份记录只保留证据，关联必须经既有证�
 只对已明确分类且确认可安全重试的临时故障沿用 durable 重试；本轮不增加进程内 sleep
 或第二套快速重试政策。首发成功率主要通过修复身份与锁缺陷提升。
 
+股票先到的生命周期 open-lot fallback 仅使用同一规范化逻辑账户与 canonical 标的的 lot，
+并在数量聚合前排除开仓事件中可证明的富途物理账户冲突。物理身份读取已有开仓事件的
+`futu_account_id` 与富途 execution account ref；任一已知值冲突都不能参与匹配。
+缺少这些身份资料的 legacy lot 继续兼容，不把 unknown 当成 mismatch，也不将其视为完整身份已获证明。
+已有 case/evidence、数量价格时间条件及后续配对 owner 保持原合同。
+
 ### 普通成交回执与恢复
+
+股票生命周期 fallback 在写入前读取 lot 失败时，不能判定为没有生命周期上下文而跳过。
+该失败保留原异常，沿现有暂态分类与 Inbox 预算重试；非暂态错误要求处理，正常空集合仍按原规则跳过。
+持久恢复仅在原失败结果的 attempt 计数与当前观察完全相同时承认本次尚未写入；
+缺少证明或跨 attempt 的旧结果仍走原 canonical readback，无法核验则保持待核对，不能盲重试。
 
 以现有 Inbox 为唯一持久化 owner。扩展 `receipt_json` 为显式版本的记录，按语义保存
 `pending_retry`、`recorded`、`manual_required`、`verification_pending` 回执，而不是每次异常建立新通知。
@@ -584,6 +597,11 @@ transport 的 `start` 复用已有 SDK 初始化线程，在当前 `queue.get(ti
 返回值、异常、8 秒握手预算和后续重连保留；SDK 升级需复核该私有 hook 的 `(ret, msg)`
 契约。某一来源认证失败仍可按现有协调策略停止全部来源；健康来源因此取消，
 不应被记录为持有另一来源的认证错误。后续健康查询继续负责已建立连接的状态。
+
+多来源协调器在首个来源返回后使用同一个有界关闭期限，并在最终 join 后补收已经入队的
+结果。只有全部结果已收齐且全部 worker 已结束才可返回成功；关闭不完整且没有已知
+非零结果时返回通用失败码 1。已观察到的认证退出码 78 优先，其它已知非零保持原样；
+截止后尚未产生的认证结果不能推定为 78。正常取消及单来源退出语义保持不变。
 
 同步 health 查询须有 SDK 连接等待与请求超时：transport 使用现有
 `set_sync_query_connect_timeout` 设置有限连接等待，并沿用 SDK 请求超时；不能只依靠

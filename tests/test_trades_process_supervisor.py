@@ -4,6 +4,8 @@ import subprocess
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from src.application.trades import process_supervisor
 
 
@@ -44,6 +46,25 @@ def test_child_entry_hard_exits_with_application_status(monkeypatch) -> None:
     process_supervisor._trade_intake_child(["--config", "config.us.json"])
 
     assert observed == [78]
+
+
+@pytest.mark.parametrize("source_code", [1, 78])
+def test_child_entry_preserves_real_coordinator_result(monkeypatch, source_code) -> None:
+    from src.application.trades import auto_intake
+
+    observed = []
+
+    def run_main(argv):
+        assert argv == ["--runtime-root", "/isolated-fixture"]
+        return auto_intake._coordinate_listener_sources(
+            [{"id": "result"}, {"id": "clean"}],
+            run_source=lambda source, _stop: source_code if source["id"] == "result" else 0,
+        )
+
+    monkeypatch.setattr(auto_intake, "main", run_main)
+    monkeypatch.setattr(process_supervisor, "hard_exit", observed.append)
+    process_supervisor._trade_intake_child(["--runtime-root", "/isolated-fixture"])
+    assert observed == [source_code]
 
 
 def test_supervisor_terminates_child_on_keyboard_interrupt(monkeypatch) -> None:

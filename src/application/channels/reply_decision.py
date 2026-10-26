@@ -47,6 +47,15 @@ def decide_inbound_reply(
             inbound_result=inbound_result,
         )
 
+    observation_code = inbound_error_code(inbound_result)
+    if observation_code in {"INBOUND_PROCESSING", "INBOUND_INCOMPLETE"}:
+        return InboundReplyDecision(
+            False,
+            {"attempted": False, "ok": True, "reason": observation_code.lower()},
+            data=data,
+            inbound_result=inbound_result,
+        )
+
     response_text = trim_reply(str(data.get("response_text") or ""), max_chars=max_reply_chars)
     send_reason = "permission_denied_sent" if permission_denied else "sent"
     if not response_text and permission_denied and permission_denied_message_fn is not None:

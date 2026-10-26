@@ -52,9 +52,18 @@ from src.application.trades.lifecycle_reconciliation import (
     reconcile_lifecycle_evidence,
 )
 from src.application.trades.normalizer import NormalizedTradeDeal
+from src.application.trades.inbox import TradePayloadClaimLost
 
 
 EARLY_LIFECYCLE_STOCK_OPTION_WINDOW_MS = 5 * 60 * 1000
+
+
+class LifecycleContextReadError(Exception):
+    """The fallback lot read failed before this lifecycle attempt could write."""
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
 
 
 @dataclass(frozen=True)
@@ -1449,6 +1458,32 @@ def _lot_close_type(
     return ""
 
 
+def _lot_has_conflicting_physical_account(
+    fields: dict[str, Any],
+    events_by_id: dict[str, dict[str, Any]],
+    *,
+    futu_account_id: str,
+) -> bool:
+    if not futu_account_id:
+        return False
+    event = events_by_id.get(str(fields.get("open_event_id") or "").strip())
+    if not isinstance(event, dict):
+        return False
+    raw = event.get("raw_payload")
+    if not isinstance(raw, dict):
+        return False
+    execution = raw.get("execution_input")
+    ref = execution.get("broker_account_ref") if isinstance(execution, dict) else None
+    physical_ids = [raw.get("futu_account_id")]
+    if isinstance(ref, dict) and normalize_broker(ref.get("broker_id")) == "富途":
+        physical_ids.append(ref.get("external_account_id"))
+    return any(
+        str(value).strip() and str(value).strip() != futu_account_id
+        for value in physical_ids
+        if isinstance(value, (str, int)) and not isinstance(value, bool)
+    )
+
+
 def _stock_settlement_has_lifecycle_context(repo: Any, *, stock_evidence: dict[str, Any]) -> bool:
     if _find_matching_option_cases(
         repo,
@@ -1485,10 +1520,16 @@ def _stock_settlement_has_lifecycle_context(repo: Any, *, stock_evidence: dict[s
         return False
     try:
         lots = list_lots()
-    except Exception:
+    except TradePayloadClaimLost:
+        raise
+    except Exception as exc:
+        raise LifecycleContextReadError(exc) from exc
+    account = normalize_account(stock_evidence.get("account"))
+    symbol = canonical_contract_symbol(stock_evidence.get("symbol"))
+    if not account or not symbol:
         return False
-    # Built at most once per call, and only when a lot actually needs its
-    # closing event's payload read.
+    futu_account_id = str(stock_evidence.get("futu_account_id") or "").strip()
+    # Reuse the event index for opening identity and closing type.
     events_by_id: dict[str, dict[str, Any]] | None = None
     candidates_by_contract: dict[tuple[Any, ...], dict[str, Any]] = {}
     for item in list(lots or []):
@@ -1502,9 +1543,17 @@ def _stock_settlement_has_lifecycle_context(repo: Any, *, stock_evidence: dict[s
         # (``write-side-definition.md`` §2); the flat siblings stay readable for
         # a row written before the shape switch.
         contract_key = contract_key_from_lot_fields(fields)
+        lot_account = normalize_account(lot_contract_value(fields, contract_key, "account", "account"))
+        lot_symbol = canonical_contract_symbol(
+            lot_contract_value(fields, contract_key, "underlying_symbol", "symbol")
+        )
+        if not lot_account or not lot_symbol or lot_account != account or lot_symbol != symbol:
+            continue
         status = str(fields.get("status") or "").strip().lower()
         if events_by_id is None:
             events_by_id = _trade_events_by_id(repo)
+        if _lot_has_conflicting_physical_account(fields, events_by_id, futu_account_id=futu_account_id):
+            continue
         close_type = _lot_close_type(fields, events_by_id)
         contracts = effective_contracts_open(fields)
         if status == "close" and close_type in {"expire_auto_close", "expire_close", "expiration_zero_close"}:
@@ -1525,12 +1574,8 @@ def _stock_settlement_has_lifecycle_context(repo: Any, *, stock_evidence: dict[s
         if strike in (None, ""):
             strike = effective_strike(fields)
         case = {
-            "account": normalize_account(
-                lot_contract_value(fields, contract_key, "account", "account")
-            ),
-            "symbol": canonical_contract_symbol(
-                lot_contract_value(fields, contract_key, "underlying_symbol", "symbol")
-            ),
+            "account": lot_account,
+            "symbol": lot_symbol,
             "option_type": normalize_option_type(
                 lot_contract_value(fields, contract_key, "option_type", "option_type")
             ),

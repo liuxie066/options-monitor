@@ -5349,3 +5349,409 @@ def test_inbound_upgrade_published_exact_target_chain(monkeypatch, tmp_path, exp
         assert sum("/tags/" in url for url, _ in calls) == 2
     else:
         assert data["status"] == "upgrade_check_failed"
+
+
+def _legacy_claim_schema(path):
+    import sqlite3
+    with sqlite3.connect(path) as conn:
+        conn.execute("""CREATE TABLE inbound_command_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, command_id TEXT NOT NULL UNIQUE,
+            channel TEXT NOT NULL, sender_id TEXT NOT NULL, conversation_id TEXT, message_id TEXT,
+            raw_text TEXT NOT NULL, parser TEXT, intent_name TEXT, tool_name TEXT,
+            tool_payload_json TEXT, control_json TEXT, decision TEXT NOT NULL,
+            result_ok INTEGER NOT NULL DEFAULT 0, error_code TEXT, response_json TEXT,
+            duplicate_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, finished_at TEXT NOT NULL,
+            last_duplicate_at TEXT, last_duplicate_sender_id TEXT, last_duplicate_decision TEXT,
+            replay_authorization_json TEXT)""")
+
+
+def _claim_process(request, barrier, started, release, results, effects):
+    import sqlite3
+    import time
+    from src.application.agent_tool_contracts import build_response
+
+    class RacingStore(InboundAuditStore):
+        def find_by_message(self, **kwargs):
+            value = super().find_by_message(**kwargs)
+            assert value is None
+            barrier.wait(timeout=10)
+            return value
+
+    def tool(name, payload):
+        with sqlite3.connect(effects) as conn:
+            conn.execute("INSERT INTO effects VALUES ('business')")
+        started.set()
+        assert release.wait(10)
+        return build_response(tool_name=name, ok=True, data={"synthetic": "final-result"})
+
+    try:
+        store = RacingStore(request.audit_db, deadline_monotonic=time.monotonic() + 180)
+        response = handle_bot_turn(request, audit_store=store, execute_tool_fn=tool,
+                                   allowed_senders="feishu:ou_1", settings=BotSettings(enabled=True))
+        results.put(response.public_payload())
+    except BaseException as exc:
+        results.put({"worker_error": repr(exc)})
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_message_claim_has_one_executor_across_processes(tmp_path, example_config_path, legacy):
+    import multiprocessing
+    import sqlite3
+    from src.application.agent_tool_contracts import build_response
+
+    path = tmp_path / "claim.sqlite3"
+    if legacy:
+        _legacy_claim_schema(path)
+    effects = tmp_path / "effects.sqlite3"
+    with sqlite3.connect(effects) as conn:
+        conn.execute("CREATE TABLE effects (value TEXT)")
+    request = _request("/status", "simultaneous", config_path=str(example_config_path), audit_db=str(path))
+    ctx = multiprocessing.get_context("spawn")
+    barrier, started, release, results = ctx.Barrier(2), ctx.Event(), ctx.Event(), ctx.Queue()
+    processes = [ctx.Process(target=_claim_process, args=(request, barrier, started, release, results, str(effects)))
+                 for _ in range(2)]
+    try:
+        for process in processes:
+            process.start()
+        assert started.wait(15)
+        duplicate = results.get(timeout=15)
+        assert duplicate["error"]["code"] == "INBOUND_PROCESSING", duplicate
+        assert duplicate["status"] == "processing" and duplicate["ok"] is False
+        assert "execution_token" not in json.dumps(duplicate)
+    finally:
+        release.set()
+        for process in processes:
+            if process.pid is not None:
+                process.join(timeout=15)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=5)
+    final = results.get(timeout=5)
+    assert final["ok"], final
+    assert all(process.exitcode == 0 for process in processes)
+    with sqlite3.connect(effects) as conn:
+        assert conn.execute("SELECT count(*) FROM effects").fetchone()[0] == 1
+    rows = InboundAuditStore(path).list_recent()
+    assert len(rows) == 1 and rows[0]["execution_state"] == "completed"
+    replay = handle_bot_turn(request, allowed_senders="feishu:ou_1", settings=BotSettings(enabled=True),
+        execute_tool_fn=lambda *_: pytest.fail("completed replay executed business"))
+    assert replay.ok and replay.meta["idempotent_replay"]
+    assert replay.command_id == final["command_id"]
+    assert replay.data["tool_result"] == final["data"]["tool_result"]
+    # Existing direct users remain completed and preserve their response through migration.
+    store = InboundAuditStore(tmp_path / "legacy-direct.sqlite3")
+    _legacy_claim_schema(store.path)
+    store.record_result({"command_id": "legacy", "channel": "local", "sender_id": "local",
+                         "raw_text": "read", "decision": "allowed", "result_ok": True,
+                         "response": build_response(tool_name="legacy", ok=True, data={"legacy": True})})
+    assert store.list_recent()[0]["execution_state"] == "completed"
+
+
+@pytest.mark.parametrize("failure", ["before_business", "after_effect", "interrupt", "system_exit", "complete_error", "complete_zero"])
+def test_claim_unknown_outcome_never_reexecutes(tmp_path, monkeypatch, example_config_path, failure):
+    from src.application.agent_tool_contracts import AgentToolError, build_response
+
+    request = _request("/status", "unknown", config_path=str(example_config_path),
+                       audit_db=str(tmp_path / "unknown.sqlite3"))
+    effects = []
+    if failure == "before_business":
+        monkeypatch.setattr(inbound_service, "_parse_command", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("parse")))
+    if failure in {"complete_error", "complete_zero"}:
+        def complete(*args, **kwargs):
+            if failure == "complete_error":
+                raise AgentToolError(code="CONFIG_ERROR", message="synthetic disk failure")
+            return False
+        monkeypatch.setattr(InboundAuditStore, "complete_message", complete)
+
+    def tool(name, payload):
+        effects.append("effect")
+        if failure == "after_effect":
+            raise RuntimeError("lost result after effect")
+        if failure == "interrupt":
+            raise KeyboardInterrupt()
+        if failure == "system_exit":
+            raise SystemExit(2)
+        return build_response(tool_name=name, ok=True, data={"effect": True})
+
+    if failure in {"interrupt", "system_exit"}:
+        with pytest.raises(KeyboardInterrupt if failure == "interrupt" else SystemExit):
+            handle_bot_turn(request, execute_tool_fn=tool, allowed_senders="feishu:ou_1", settings=BotSettings(enabled=True))
+    else:
+        first = handle_bot_turn(request, execute_tool_fn=tool, allowed_senders="feishu:ou_1", settings=BotSettings(enabled=True))
+        assert first.error["code"] == "INBOUND_INCOMPLETE" and first.ok is False
+        if failure == "before_business":
+            assert "未进入业务" in first.response_text
+        else:
+            assert "结果未确认" in first.response_text
+    row = InboundAuditStore(request.audit_db).list_recent()[0]
+    assert row["execution_state"] == "incomplete" and row["result_ok"] == 0
+    for _ in range(2):
+        replay = handle_bot_turn(request, execute_tool_fn=tool, allowed_senders="feishu:ou_1", settings=BotSettings(enabled=True))
+        assert replay.error["code"] == "INBOUND_INCOMPLETE" and replay.ok is False
+    assert len(effects) == (0 if failure == "before_business" else 1)
+
+
+def _hard_stop_claim_process(request, started):
+    import os
+    def tool(name, payload):
+        started.set()
+        os._exit(23)
+    handle_bot_request(request, allowed_senders="feishu:ou_1", execute_tool_fn=tool)
+
+
+def test_hard_stopped_owner_becomes_unknown_without_takeover(tmp_path, example_config_path):
+    import multiprocessing
+    import sqlite3
+
+    request = _request("/status", "hard-stop", config_path=str(example_config_path),
+                       audit_db=str(tmp_path / "hard-stop.sqlite3"))
+    ctx = multiprocessing.get_context("spawn")
+    started = ctx.Event()
+    process = ctx.Process(target=_hard_stop_claim_process, args=(request, started))
+    process.start()
+    try:
+        assert started.wait(15)
+        process.join(10)
+        assert process.exitcode == 23
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+    store = InboundAuditStore(request.audit_db)
+    row = store.list_recent()[0]
+    assert row["execution_state"] == "processing" and row["result_ok"] == 0
+    with sqlite3.connect(request.audit_db) as conn:
+        conn.execute("UPDATE inbound_command_audit SET execution_expires_at_utc='2000-01-01T00:00:00+00:00'")
+    for _ in range(2):
+        result = handle_bot_turn(request, execute_tool_fn=lambda *_: pytest.fail("unknown outcome reexecuted"),
+                                 allowed_senders="feishu:ou_1", settings=BotSettings(enabled=True))
+        assert result.error["code"] == "INBOUND_INCOMPLETE"
+    assert store.list_recent()[0]["execution_state"] == "processing"
+
+
+def test_claim_cas_and_response_updates_cannot_finalize_observation(tmp_path, example_config_path):
+    from src.application.bot.control.audit import build_command_id, utc_now_iso
+    from src.application.bot.config_scope import resolve_replay_authorization
+    from src.application.agent_tool_contracts import build_response
+
+    request = _request("/status", "cas", conversation_id="feishu:ou_1", config_path=str(example_config_path))
+    record = inbound_service._audit_record(request=request,
+        command_id=build_command_id(channel=request.channel, sender_id=request.sender_id, message_id=request.message_id, text=request.text),
+        created_at=utc_now_iso(), command=None, control=None, decision="processing", response={"ok": False})
+    record["replay_authorization"] = resolve_replay_authorization(request)
+    record["execution_expires_at_utc"] = "2000-01-01T00:00:00+00:00"
+    store = InboundAuditStore(tmp_path / "cas.sqlite3")
+    claim = store.claim_message(record)
+    assert claim["claimed"]
+    assert store.complete_message(record, "wrong-token") is False
+    assert store.interrupt_message(command_id=record["command_id"], token="wrong-token", response={}) is False
+    store.update_response(command_id=record["command_id"], response={"ok": True}, expected_response={"ok": False})
+    assert store.merge_response_data(command_id=record["command_id"], data={"receipt": "bad"}) is False
+    row = store.list_recent()[0]
+    assert row["execution_state"] == "processing" and json.loads(row["response_json"]) == {"ok": False}
+    record.update(response=build_response(tool_name="test", ok=True, data={"final": True}), result_ok=True)
+    assert store.complete_message(record, claim["token"]) is True
+    assert store.complete_message(record, claim["token"]) is False
+    assert store.merge_response_data(command_id=record["command_id"], data={"receipt": "real"}) is True
+
+
+def test_claim_keeps_original_budget_and_checks_it_before_business(tmp_path, monkeypatch, example_config_path):
+    import time
+    from datetime import datetime, timezone
+
+    received = time.monotonic() - 179
+    request = _request("/status", "budget-claim", config_path=str(example_config_path),
+                       audit_db=str(tmp_path / "budget-claim.sqlite3"), received_monotonic=received)
+    original_claim = InboundAuditStore.claim_message
+    recorded = []
+    def claim(self, record):
+        recorded.append(record)
+        result = original_claim(self, record)
+        monkeypatch.setattr(inbound_service.time, "monotonic", lambda: received + 181)
+        return result
+    monkeypatch.setattr(InboundAuditStore, "claim_message", claim)
+    result = handle_bot_request(request, execute_tool_fn=lambda *_: pytest.fail("expired claim executed"),
+                                allowed_senders="feishu:ou_1")
+    assert result["error"]["code"] == "BUDGET_EXHAUSTED"
+    expires = datetime.fromisoformat(recorded[0]["execution_expires_at_utc"])
+    assert 0 <= (expires - datetime.now(timezone.utc)).total_seconds() <= 1.1
+    assert InboundAuditStore(request.audit_db).list_recent()[0]["execution_state"] == "completed"
+
+
+@pytest.mark.parametrize("entry", ["bot", "inbound"])
+@pytest.mark.parametrize("output_format", ["json", "text"])
+def test_cli_exposes_claim_observation_without_reexecution(
+    tmp_path, monkeypatch, example_config_path, capsys, entry, output_format,
+):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from src.application.agent_tool_contracts import build_response
+    from tests.test_inbound_feishu_ws import _message_payload
+    from src.application.inbound.feishu import feishu_payload_to_inbound_request
+    import src.interfaces.cli.main as cli
+
+    monkeypatch.setenv("OM_FEISHU_BOT_ALLOWED_OPEN_IDS", "ou_1")
+    bot_path = tmp_path / "cli-bot.json"
+    bot_path.write_text(json.dumps({"bot": {"enabled": True}}))
+    path = str(tmp_path / "cli-claim.sqlite3")
+    event = _message_payload(text="/status", message_id="cli-claim")
+    if entry == "inbound":
+        request = feishu_payload_to_inbound_request(event, config_path=str(example_config_path),
+            audit_db=path, bot_config_path=str(bot_path))
+        args = ["inbound", "feishu", "--input-json", json.dumps(event)]
+    else:
+        request = _request("/status", "cli-claim", config_path=str(example_config_path),
+                           audit_db=path, bot_config_path=str(bot_path))
+        args = ["bot", "handle", "--text", "/status", "--sender", "ou_1", "--channel", "feishu", "--message-id", "cli-claim"]
+    args += ["--config-path", str(example_config_path), "--bot-config", str(bot_path), "--audit-db", path,
+             "--format", output_format]
+    started, release = Event(), Event()
+    calls = []
+    def tool(name, payload):
+        calls.append(name)
+        started.set()
+        assert release.wait(10)
+        return build_response(tool_name=name, ok=True, data={"state": "synthetic"})
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(handle_bot_turn, request, execute_tool_fn=tool,
+                             allowed_senders="feishu:ou_1", settings=BotSettings(enabled=True))
+        try:
+            assert started.wait(10)
+            for expired in (False, True):
+                if expired:
+                    import sqlite3
+                    with sqlite3.connect(path) as conn:
+                        conn.execute("UPDATE inbound_command_audit SET execution_expires_at_utc='2000-01-01T00:00:00+00:00'")
+                assert cli.main(args) == 2
+                observation = capsys.readouterr().out
+                if output_format == "json":
+                    assert json.loads(observation)["error"]["code"] == ("INBOUND_INCOMPLETE" if expired else "INBOUND_PROCESSING")
+                else:
+                    assert ("结果未确认" if expired else "处理中") in observation
+        finally:
+            release.set()
+        assert future.result(timeout=10).ok
+    assert cli.main(args) == 0
+    capsys.readouterr()
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("handoff", [False, True])
+def test_bot_and_control_handoff_share_message_execution_claim(tmp_path, monkeypatch, example_config_path, handoff):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    from src.application.bot.control.inbound_control import ControlExecution
+
+    started, release = threading.Event(), threading.Event()
+    model_calls, control_calls = [], []
+    request = _request("synthetic freeform question", "bot-claim", config_path=str(example_config_path),
+                       audit_db=str(tmp_path / "bot-claim.sqlite3"))
+
+    def model(**kwargs):
+        model_calls.append(kwargs["user_message"])
+        started.set()
+        assert release.wait(10)
+        if handoff:
+            return AppResult(status="control_requested", control_request={
+                "intent_name": "upgrade_now", "arguments": {"target_version": "1.2.400"}})
+        return AppResult(status="answered", user_response="synthetic final answer")
+
+    def control(command, **kwargs):
+        control_calls.append(command)
+        return ControlExecution(status="preview_required", intent_name=command.intent_name,
+            safety_class="admin_preview", action_kind="operation", reason="confirmation_required",
+            result={"data": {"operation_id": "synthetic-preview"}},
+            response_text="synthetic preview only", requires_confirmation=True, ok=True)
+
+    monkeypatch.setattr(inbound_service, "run_channel_request", model)
+    monkeypatch.setattr(inbound_service, "execute_explicit_control", control)
+
+    def receive():
+        return handle_bot_turn(request, allowed_senders="feishu:ou_1", settings=BotSettings(enabled=True))
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(receive)
+        try:
+            assert started.wait(10)
+            duplicate = receive()
+            assert not duplicate.ok and duplicate.error["code"] == "INBOUND_PROCESSING"
+            assert control_calls == []
+            assert model_calls == [request.text]
+        finally:
+            release.set()
+        final = future.result(timeout=10)
+    assert final.ok
+    assert len(control_calls) == int(handoff)
+    if handoff:
+        assert control_calls[0].intent_name == "upgrade_now"
+        assert control_calls[0].arguments == {"target_version": "1.2.400"}
+        assert final.data["control"]["requires_confirmation"]
+    replay = receive()
+    assert replay.ok and replay.meta["idempotent_replay"]
+    assert replay.response_text == final.response_text
+    assert model_calls == [request.text] and len(control_calls) == int(handoff)
+    rows = InboundAuditStore(request.audit_db).list_recent()
+    assert len(rows) == 1 and rows[0]["execution_state"] == "completed"
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_preexisting_legacy_completed_row_migrates_without_reexecution(tmp_path, example_config_path, scoped):
+    from src.application.bot.config_scope import resolve_replay_authorization
+
+    path = tmp_path / "preexisting.sqlite3"
+    _legacy_claim_schema(path)
+    request = _request("/status", "preexisting", conversation_id="feishu:ou_1",
+                       config_path=str(example_config_path), audit_db=str(path))
+    response = build_response(tool_name="legacy.status", ok=True,
+                              data={"command_id": "legacy-command", "response_text": "saved legacy answer"})
+    authorization = resolve_replay_authorization(request) if scoped else None
+    raw = json.dumps(response, ensure_ascii=False, sort_keys=True)
+    with sqlite3.connect(path) as conn:
+        conn.execute("""INSERT INTO inbound_command_audit
+            (command_id, channel, sender_id, conversation_id, message_id, raw_text, decision,
+             result_ok, response_json, created_at, finished_at, replay_authorization_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("legacy-command", "feishu", "ou_1", request.conversation_id, request.message_id,
+             request.text, "allowed", 1, raw, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00",
+             json.dumps(authorization, sort_keys=True) if authorization else None))
+        assert "execution_state" not in {row[1] for row in conn.execute("PRAGMA table_info(inbound_command_audit)")}
+    result = handle_bot_turn(request, allowed_senders="feishu:ou_1", settings=BotSettings(enabled=True),
+        execute_tool_fn=lambda *_: pytest.fail("legacy row reexecuted"))
+    if scoped:
+        assert result.ok and result.meta["idempotent_replay"]
+        assert result.response_text == "saved legacy answer"
+    else:
+        assert not result.ok and result.error["code"] == "CHANNEL_NOT_READY"
+        assert "saved legacy answer" not in json.dumps(result.public_payload())
+    rows = InboundAuditStore(path).list_recent()
+    assert len(rows) == 1 and rows[0]["execution_state"] == "completed"
+    assert rows[0]["execution_token"] is None and rows[0]["response_json"] == raw
+
+
+def test_failed_finalization_and_interrupt_keep_durable_claim(tmp_path, monkeypatch, example_config_path):
+    request = _request("/status", "unwritable-final", config_path=str(example_config_path),
+                       audit_db=str(tmp_path / "unwritable-final.sqlite3"))
+    effects = []
+
+    def unwritable(*args, **kwargs):
+        raise AgentToolError(code="CONFIG_ERROR", message="synthetic unavailable final persistence")
+
+    def tool(name, payload):
+        effects.append("effect")
+        return build_response(tool_name=name, ok=True, data={"effect": True})
+
+    monkeypatch.setattr(InboundAuditStore, "complete_message", unwritable)
+    monkeypatch.setattr(InboundAuditStore, "interrupt_message", unwritable)
+    result = handle_bot_turn(request, allowed_senders="feishu:ou_1", execute_tool_fn=tool,
+                             settings=BotSettings(enabled=True))
+    assert not result.ok and result.error["code"] == "INBOUND_INCOMPLETE"
+    assert "结果未确认" in result.response_text
+    assert InboundAuditStore(request.audit_db).list_recent()[0]["execution_state"] == "processing"
+    with sqlite3.connect(request.audit_db) as conn:
+        conn.execute("UPDATE inbound_command_audit SET execution_expires_at_utc='2000-01-01T00:00:00+00:00'")
+    for _ in range(2):
+        replay = handle_bot_turn(request, allowed_senders="feishu:ou_1", execute_tool_fn=tool,
+                                 settings=BotSettings(enabled=True))
+        assert not replay.ok and replay.error["code"] == "INBOUND_INCOMPLETE"
+    assert effects == ["effect"]
+    assert InboundAuditStore(request.audit_db).list_recent()[0]["execution_state"] == "processing"

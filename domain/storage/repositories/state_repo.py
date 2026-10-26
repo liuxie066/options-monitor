@@ -311,7 +311,21 @@ def write_idempotency_record(base: Path, *, scope: str, key: str, payload: dict[
     body["idempotency_key"] = str(key)
     body["scope"] = str(scope or "tool_execution")
     body["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
-    write_json(p, body)
+    if scope == "tick_execution":
+        with private_json_file_lock(p):
+            try:
+                current = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError, UnicodeError):
+                raise RuntimeError("tick idempotency ownership could not be verified") from None
+            owner = body.get("run_id")
+            if (
+                not isinstance(owner, str) or not owner.strip()
+                or not isinstance(current, dict) or current.get("run_id") != owner
+            ):
+                raise RuntimeError("tick idempotency ownership mismatch")
+            write_json(p, body)
+    else:
+        write_json(p, body)
     return p
 
 
@@ -364,24 +378,28 @@ def claim_idempotency_record(
     """Claim an idempotency key without recording success prematurely."""
     p = _idempotency_path(base, scope=scope, key=key)
     p.parent.mkdir(parents=True, exist_ok=True)
-    now = datetime.now(timezone.utc)
-    body = {
-        "idempotency_key": str(key),
-        "scope": str(scope or "tool_execution"),
-        "ok": False,
-        "status": "in_progress",
-        "updated_at_utc": now.isoformat(),
-    }
-    if isinstance(payload, dict):
-        body.update(payload)
-        body["ok"] = False
-        body["status"] = str(body.get("status") or "in_progress")
-    raw = (json.dumps(body, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-
-    try:
-        fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    except FileExistsError:
-        prev = read_idempotency_record(base, scope=scope, key=key) or {}
+    with private_json_file_lock(p):
+        now = datetime.now(timezone.utc)
+        body = {
+            "idempotency_key": str(key),
+            "scope": str(scope or "tool_execution"),
+            "ok": False,
+            "status": "in_progress",
+            "updated_at_utc": now.isoformat(),
+        }
+        if isinstance(payload, dict):
+            body.update(payload)
+            body["ok"] = False
+            body["status"] = str(body.get("status") or "in_progress")
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            write_json(p, body)
+            return {"claimed": True, "created": True, "stale": False, "path": p, "record": body}
+        except (ValueError, UnicodeError):
+            prev = {}
+        else:
+            prev = data if isinstance(data, dict) else {}
         status = str(prev.get("status") or "").strip().lower()
         if bool(prev.get("ok")) or status in {"success", "completed", "fetched"}:
             return {"claimed": False, "created": False, "stale": False, "path": p, "record": prev}
@@ -414,10 +432,3 @@ def claim_idempotency_record(
 
         write_json(p, body)
         return {"claimed": True, "created": False, "stale": True, "path": p, "record": body}
-    try:
-        written = os.write(fd, raw)
-        if written != len(raw):
-            raise OSError(f"short write: {written}/{len(raw)} bytes")
-    finally:
-        os.close(fd)
-    return {"claimed": True, "created": True, "stale": False, "path": p, "record": body}

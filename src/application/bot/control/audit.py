@@ -4,7 +4,7 @@ import hashlib
 import json
 import sqlite3
 import time
-from datetime import datetime, timezone
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -123,65 +123,72 @@ class InboundAuditStore:
 
     def record_result(self, record: dict[str, Any]) -> None:
         self._ensure_schema()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO inbound_command_audit (
-                    command_id,
-                    channel,
-                    sender_id,
-                    conversation_id,
-                    message_id,
-                    raw_text,
-                    parser,
-                    intent_name,
-                    tool_name,
-                    tool_payload_json,
-                    control_json,
-                    decision,
-                    result_ok,
-                    error_code,
-                    response_json,
-                    created_at,
-                    finished_at,
-                    replay_authorization_json
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    str(record.get("command_id") or ""),
-                    str(record.get("channel") or ""),
-                    str(record.get("sender_id") or ""),
-                    _optional_str(record.get("conversation_id")),
-                    _optional_str(record.get("message_id")),
-                    str(record.get("raw_text") or ""),
-                    _optional_str(record.get("parser")),
-                    _optional_str(record.get("intent_name")),
-                    _optional_str(record.get("tool_name")),
-                    _json(record.get("tool_payload")),
-                    _json(record.get("control")),
-                    str(record.get("decision") or ""),
-                    1 if bool(record.get("result_ok")) else 0,
-                    _optional_str(record.get("error_code")),
-                    _json(record.get("response")),
-                    str(record.get("created_at") or utc_now_iso()),
-                    str(record.get("finished_at") or utc_now_iso()),
-                    _json(record["replay_authorization"]) if record.get("replay_authorization") else None,
-                ),
+        with self._transaction() as conn:
+            _insert_record(conn, record, conflict_noop=True)
+
+    def claim_message(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Acquire execution once; an existing claim is never taken over."""
+        self._ensure_schema()
+        with self._transaction() as conn:
+            if record.get("message_id"):
+                row = conn.execute(
+                    "SELECT * FROM inbound_command_audit WHERE channel=? AND message_id=?",
+                    (record["channel"], record["message_id"]),
+                ).fetchone()
+            else:
+                row = conn.execute("SELECT * FROM inbound_command_audit WHERE command_id=?",
+                                   (record["command_id"],)).fetchone()
+            if row is not None:
+                return {"claimed": False, "existing": _row_to_dict(row)}
+            token = uuid4().hex
+            _insert_record(conn, record, execution_state="processing", execution_token=token)
+            return {"claimed": True, "token": token}
+
+    def complete_message(self, record: dict[str, Any], token: str) -> bool:
+        self._ensure_schema()
+        values = _record_values(record)
+        command_id = values.pop("command_id")
+        with self._transaction() as conn:
+            updated = conn.execute(
+                "UPDATE inbound_command_audit SET " + ", ".join(f"{key}=?" for key in values)
+                + ", execution_state='completed' WHERE command_id=? AND execution_token=? AND execution_state='processing'",
+                (*values.values(), command_id, token),
             )
+            return updated.rowcount == 1
+
+    def interrupt_message(self, *, command_id: str, token: str, response: dict[str, Any]) -> bool:
+        self._ensure_schema()
+        with self._transaction() as conn:
+            updated = conn.execute(
+                "UPDATE inbound_command_audit SET execution_state='incomplete', result_ok=0, "
+                "decision='incomplete', error_code='INBOUND_INCOMPLETE', response_json=?, finished_at=? "
+                "WHERE command_id=? AND execution_token=? AND execution_state='processing'",
+                (_json(response), utc_now_iso(), command_id, token),
+            )
+            return updated.rowcount == 1
+
+    @contextmanager
+    def _transaction(self):
+        try:
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                yield conn
+        except (OSError, sqlite3.Error) as exc:
+            raise inbound_sqlite_error(self.path, exc) from exc
 
     def record_analysis_control_once(
         self, *, channel: str, sender_id: str, conversation_id: str | None,
         message_id: str, text: str, scope: str,
         resolve: Callable[[sqlite3.Connection], dict[str, Any]],
+        claim_command_id: str | None = None, claim_token: str | None = None,
+        claim_authorization: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Bind one provider message to its cancellation target and CAS outcome."""
         self._ensure_schema()
         control_channel = f"{channel}:analysis_control"
         command_id = build_command_id(channel=control_channel, sender_id=sender_id,
             message_id=message_id, text=text)
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        with self._transaction() as conn:
             if self.deadline_monotonic is not None and time.monotonic() >= self.deadline_monotonic:
                 raise AgentToolError(code="BUDGET_EXHAUSTED", message="analysis control deadline exceeded")
             row = conn.execute("SELECT sender_id, conversation_id, response_json FROM inbound_command_audit "
@@ -191,12 +198,22 @@ class InboundAuditStore:
                 if row["sender_id"] != sender_id or row["conversation_id"] != conversation_id or result.get("scope") != scope:
                     raise AgentToolError(code="PERMISSION_DENIED", message="analysis control identity conflict")
                 return {**result, "duplicate": True}
-            original = conn.execute("SELECT sender_id FROM inbound_command_audit WHERE channel=? AND message_id=?",
+            original = conn.execute("SELECT * FROM inbound_command_audit WHERE channel=? AND message_id=?",
                 (channel, message_id)).fetchone()
+            has_proof = claim_command_id is not None or claim_token is not None or claim_authorization is not None
             if original is not None:
                 if original["sender_id"] != sender_id:
                     raise AgentToolError(code="PERMISSION_DENIED", message="analysis control identity conflict")
-                return {"status": "already_processed", "target_run_id": None, "scope": scope, "duplicate": True}
+                if original["execution_state"] != "processing" or not has_proof:
+                    return {"status": "already_processed", "target_run_id": None, "scope": scope, "duplicate": True}
+                frozen = json.loads(original["replay_authorization_json"] or "null")
+                if not (claim_token and claim_command_id and original["execution_token"] == claim_token
+                        and original["command_id"] == claim_command_id
+                        and original["conversation_id"] == (conversation_id or f"{channel}:{sender_id}")
+                        and original["raw_text"] == text and frozen == claim_authorization):
+                    raise AgentToolError(code="PERMISSION_DENIED", message="analysis control claim conflict")
+            elif has_proof:
+                raise AgentToolError(code="PERMISSION_DENIED", message="analysis control claim missing")
             result = {**resolve(conn), "scope": scope}
             now = utc_now_iso()
             conn.execute("""INSERT INTO inbound_command_audit
@@ -220,7 +237,7 @@ class InboundAuditStore:
                 UPDATE inbound_command_audit
                 SET response_json = ?,
                     finished_at = ?
-                WHERE command_id = ? AND response_json = ?
+                WHERE command_id = ? AND response_json = ? AND execution_state = 'completed'
                 """,
                 (_json(response), utc_now_iso(), normalized_command_id, _json(expected_response)),
             )
@@ -244,7 +261,7 @@ class InboundAuditStore:
                 """
                 SELECT response_json
                 FROM inbound_command_audit
-                WHERE command_id = ?
+                WHERE command_id = ? AND execution_state = 'completed'
                 LIMIT 1
                 """,
                 (normalized_command_id,),
@@ -260,7 +277,7 @@ class InboundAuditStore:
                 """
                 UPDATE inbound_command_audit
                 SET response_json = ?
-                WHERE command_id = ?
+                WHERE command_id = ? AND execution_state = 'completed'
                 """,
                 (_json(response), normalized_command_id),
             )
@@ -289,6 +306,7 @@ class InboundAuditStore:
     def _ensure_schema(self) -> None:
         try:
             with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS inbound_command_audit (
@@ -329,8 +347,52 @@ class InboundAuditStore:
                 _ensure_column(conn, "conversation_id", "TEXT")
                 _ensure_column(conn, "control_json", "TEXT")
                 _ensure_column(conn, "replay_authorization_json", "TEXT")
-        except sqlite3.Error as exc:
+                _ensure_column(conn, "execution_state", "TEXT NOT NULL DEFAULT 'completed'")
+                _ensure_column(conn, "execution_token", "TEXT")
+                _ensure_column(conn, "execution_expires_at_utc", "TEXT")
+        except (OSError, sqlite3.Error) as exc:
             raise inbound_sqlite_error(self.path, exc) from exc
+
+
+def _record_values(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "command_id": str(record.get("command_id") or ""),
+        "channel": str(record.get("channel") or ""),
+        "sender_id": str(record.get("sender_id") or ""),
+        "conversation_id": _optional_str(record.get("conversation_id")),
+        "message_id": _optional_str(record.get("message_id")),
+        "raw_text": str(record.get("raw_text") or ""),
+        "parser": _optional_str(record.get("parser")),
+        "intent_name": _optional_str(record.get("intent_name")),
+        "tool_name": _optional_str(record.get("tool_name")),
+        "tool_payload_json": _json(record.get("tool_payload")),
+        "control_json": _json(record.get("control")),
+        "decision": str(record.get("decision") or ""),
+        "result_ok": 1 if bool(record.get("result_ok")) else 0,
+        "error_code": _optional_str(record.get("error_code")),
+        "response_json": _json(record.get("response")),
+        "created_at": str(record.get("created_at") or utc_now_iso()),
+        "finished_at": str(record.get("finished_at") or utc_now_iso()),
+        "replay_authorization_json": _json(record["replay_authorization"]) if record.get("replay_authorization") else None,
+    }
+
+
+def _insert_record(conn: sqlite3.Connection, record: dict[str, Any], *,
+                   execution_state: str = "completed", execution_token: str | None = None,
+                   conflict_noop: bool = False) -> None:
+    values = _record_values(record)
+    values.update(execution_state=execution_state, execution_token=execution_token,
+                  execution_expires_at_utc=record.get("execution_expires_at_utc"))
+    conflict = (" ON CONFLICT(channel, message_id) WHERE message_id IS NOT NULL AND message_id != '' DO NOTHING"
+                if conflict_noop else "")
+    cursor = conn.execute("INSERT INTO inbound_command_audit (" + ", ".join(values) + ") VALUES ("
+                         + ", ".join("?" for _ in values) + ")" + conflict, tuple(values.values()))
+    if conflict_noop and cursor.rowcount == 0:
+        conn.execute("UPDATE inbound_command_audit SET duplicate_count=duplicate_count+1, "
+                     "last_duplicate_at=?, last_duplicate_sender_id=?, last_duplicate_decision=? "
+                     "WHERE channel=? AND message_id=?",
+                     (utc_now_iso(), record.get("sender_id"), record.get("decision"),
+                      record.get("channel"), record.get("message_id")))
 
 
 def connect_inbound_sqlite(path: Path, *, deadline_monotonic: float | None = None) -> sqlite3.Connection:

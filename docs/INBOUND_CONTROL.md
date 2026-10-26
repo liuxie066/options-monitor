@@ -227,3 +227,40 @@ Do not add:
 模型没有 confirm/apply 权限；归属操作不下单、不重复记经济成交、不重发原成交回执。
 普通单腿确认不依赖 provider 容量；Wheel/Combo 依赖当前完整竞争证据和新鲜容量。
 预览后实质变化需重新预览，重复确认按既有事实读回；取消已认领的操作不撤销账本。
+
+## Concurrent message execution and unknown outcomes
+
+Within one inbound audit SQLite database, the normalized `(channel, message_id)`
+obtains one durable execution claim before Control, Bot, or analysis cancellation
+runs. A concurrent authorized duplicate receives the stored completed result or a
+non-success observation; it never acquires a second execution right. Requests
+without a message ID retain independent local invocation semantics. Every replay
+still checks the current sender allowlist and trusted conversation/config scope.
+
+`INBOUND_PROCESSING` (`status=processing`, `ok=false`) means the original request
+is still within its observation budget. `INBOUND_INCOMPLETE` (`status=incomplete`,
+`ok=false`) means its business outcome is not confirmed. Both remain visible in
+JSON/text CLI output with a nonzero exit code. The shared Feishu/WeChat reply
+decider does not enqueue these observations into the stable final-result outbox
+identity; completed known business failures still follow normal reply rules.
+
+The budget remains 180 seconds from the original received monotonic time,
+including database waits. Observation expiry is not a takeover lease: an expired
+processing claim is displayed as incomplete without mutation, and only its owner
+may still save a late final result. Interrupted or unsaved results cannot be
+reset, reclaimed, or automatically executed again. A failed final-result save
+must not be reported as business success. Existing completed audit rows remain
+completed after schema extension; unprovable legacy scope still blocks replay.
+
+For an incomplete result, use its command ID to inspect existing operation
+history, the relevant tool's readback, and any delivery receipt. Do not assume
+that an external effect failed or replay it with a new ID while the outcome is
+unknown. Only an operator who has established that no effect occurred, or has
+explicitly resolved the effect, may decide on a new request. This local claim does
+not guarantee provider exactly-once delivery or repair historical state.
+
+Analysis cancellation retains its original preflight target binding and completed
+message guard. Only the current service claim owner can pass its private identity
+proof into that same cancellation transaction; the proof never becomes a public
+message field or provider key. Queue redelivery reuses the original preflight
+target and cannot cancel a later run or start replacement analysis again.

@@ -463,7 +463,19 @@ def test_cleanup_without_runtime_root_still_keeps_release_local_receipt_runtime(
         lambda _receipt: (retained_release / "agent-runtime",),
     )
 
+    original_lock = module.single_instance_lock
+    guard_paths: list[Path] = []
+
+    def _isolated_default_guard(path: Path, **kwargs):  # type: ignore[no-untyped-def]
+        guard_paths.append(path)
+        assert path == Path("/var/lib/options-monitor/locks/upgrade.lock.guard")
+        return original_lock(tmp_path / "runtime" / "locks" / "upgrade.lock.guard", **kwargs)
+
+    monkeypatch.setattr(module, "single_instance_lock", _isolated_default_guard)
     out = _cleanup(module, current=current, releases=releases)
+
+    assert guard_paths == [Path("/var/lib/options-monitor/locks/upgrade.lock.guard")]
+    assert out["runtime_root"] is None
 
     assert out["status"] == "cleaned"
     assert retained_db in observed

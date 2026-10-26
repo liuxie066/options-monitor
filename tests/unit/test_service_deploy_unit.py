@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import plistlib
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -1491,7 +1492,7 @@ def test_post_upgrade_opend_login_check_requires_profile_endpoint(tmp_path: Path
 def test_post_upgrade_service_health_reports_precise_wechat_check_failure(tmp_path: Path) -> None:
     from src.application.service_upgrade import _post_upgrade_service_health
 
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repo with space 中文"
     repo.mkdir()
     state_dir = tmp_path / "wechat-state"
     audit_db = tmp_path / "inbound.sqlite3"
@@ -1523,7 +1524,7 @@ def test_post_upgrade_service_health_reports_precise_wechat_check_failure(tmp_pa
     assert out["failed_checks"][0]["check"] == "wechat-clawbot-check"
     assert (
         "manual_check: "
-        + " ".join(
+        + shlex.join(
             [
                 str(repo / "om"),
                 "channel",
@@ -1694,6 +1695,7 @@ def test_service_cleanup_reports_delete_failure_and_only_actual_freed_bytes(monk
     out = cleanup_module.service_cleanup(
         repo_root=current,
         releases_root=releases,
+        runtime_root=tmp_path / "runtime",
         keep_releases=2,
         confirm=True,
     )
