@@ -876,6 +876,43 @@ inbound:
     assert "allowed_senders" not in profile["wechat_clawbot"]
     assert profile["wechat_clawbot"]["bot_config_path"] == str(runtime / "resolved" / "config.bot.json")
 
+
+@pytest.mark.parametrize("target", ["systemd", "launchd"])
+@pytest.mark.parametrize("source", ["single-market", "explicit-key", "yaml"])
+def test_service_drift_wechat_profile_uses_canonical_renderer(tmp_path, target, source):
+    from src.application.service_drift import _expected_bundle_from_profile
+
+    repo, runtime = tmp_path / "repo", tmp_path / "runtime"
+    repo.mkdir()
+    runtime.mkdir()
+    kwargs = dict(
+        target=target, accounts=["fixture"], markets=["us"],
+        include_wechat_clawbot=True, wechat_clawbot_allowed_senders="wechat:fixture",
+        use_default_deploy_user=False, deploy_home=tmp_path / "home",
+    )
+    if source != "single-market":
+        kwargs.update(markets=["us", "hk"], wechat_clawbot_config_key="hk")
+    if source == "yaml":
+        config_yaml = runtime / "config.yaml"
+        config_yaml.write_text(
+            "accounts: {}\nmarkets: {}\ninbound:\n  wechat_clawbot:\n"
+            "    allowed_senders: wechat:fixture\n", encoding="utf-8",
+        )
+        kwargs.update(config_yaml=config_yaml, wechat_clawbot_allowed_senders=None)
+    bundle = _render_bundle(repo, runtime, **kwargs)
+    profile = json.loads(next(item["content"] for item in bundle["files"] if item["kind"] == "service_profile"))
+    if source == "single-market":
+        profile["wechat_clawbot"].pop("config_key")
+    if source == "yaml":
+        # YAML content, rather than historical summary flags, supplies the allowlist.
+        profile["wechat_clawbot"].pop("allowed_senders_configured")
+        profile["wechat_clawbot"].pop("allowed_senders_source")
+    rebuilt = _expected_bundle_from_profile(profile, provider=target, repo_root=repo, runtime_root=runtime)
+    assert {item["relative_path"]: item["content"] for item in rebuilt["files"]} == {
+        item["relative_path"]: item["content"] for item in bundle["files"]
+    }
+
+
 def test_render_systemd_auto_upgrade_preserves_symlink_repo_root(tmp_path: Path) -> None:
     releases = tmp_path / "releases"
     release_dir = releases / "1.2.71"

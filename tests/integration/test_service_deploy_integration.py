@@ -797,15 +797,124 @@ def test_service_drift_confirm_uses_sudo_fallback_for_systemd_permission_errors(
     assert ["sudo", "-n", "systemctl", "daemon-reload"] in calls
     assert ["sudo", "-n", "systemctl", "enable", "--now", "options-monitor-projection-verify.timer"] in calls
 
-def test_service_drift_retires_installed_feishu_ws_when_profile_no_longer_declares_it(tmp_path: Path) -> None:
+@pytest.mark.parametrize("target", ["systemd", "launchd"])
+@pytest.mark.parametrize("intent", ["enabled", "service-entry", "empty-enabled"])
+@pytest.mark.parametrize("inbound, missing, error", [
+    ("feishu_ws", "config_key", "feishu_ws_config_key"),
+    ("wechat_clawbot", "config_key", "wechat_clawbot_config_key"),
+    ("wechat_clawbot", "allowed_senders", "wechat_clawbot_allowed_senders"),
+])
+def test_service_drift_rejects_incomplete_enabled_inbound_without_effects(
+    tmp_path, monkeypatch, target, intent, inbound, missing, error,
+):
+    from src.application import service_deploy as deploy, service_drift as owner
+
+    credential_name = deploy._bot_credential_name
+    fixture = _synthetic_drift_context(monkeypatch, tmp_path, target=target)
+    monkeypatch.setattr(deploy, "_bot_credential_name", credential_name)
+    profile = fixture["profile"]
+    profile["markets"] = ["us", "hk"]
+    profile[inbound] = {"enabled": True, "config_key": "us"}
+    if inbound == "wechat_clawbot":
+        profile[inbound]["allowed_senders"] = "wechat:fixture"
+    bundle = owner._expected_bundle_from_profile(
+        profile, provider=target, repo_root=fixture["repo"], runtime_root=fixture["runtime"],
+    )
+    for item in bundle["files"]:
+        if item["kind"] not in {"systemd_service", "systemd_timer", "launchd_plist"}:
+            continue
+        path = owner._install_path(item, provider=target, ctx={"systemd_unit_root": fixture["units"]})
+        assert path.is_relative_to(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(item["content"], encoding="utf-8")
+    profile["services"] = owner._bundle_profile(bundle)["services"]
+    profile[inbound].pop(missing)
+    if intent == "empty-enabled":
+        profile["services"] = []
+    elif intent == "service-entry":
+        profile[inbound]["enabled"] = False
+    fixture["profile_path"].write_text(json.dumps(profile), encoding="utf-8")
+    monkeypatch.setattr(owner, "_apply_service_drift", fixture["fail"]("apply"))
+    before = fixture["inventory"]()
+    kwargs = dict(repo_root=fixture["repo"], runtime_root=fixture["runtime"],
+                  profile_path=fixture["profile_path"], systemd_unit_root=fixture["units"])
+    for confirm in (False, True):
+        with pytest.raises(ValueError, match=error):
+            owner.service_drift(**kwargs, confirm=confirm, run_cmd=fixture["fail"]("runner"))
+        assert fixture["inventory"]() == before
+    status = owner.service_drift_status(**kwargs)
+    assert status["reason"] == "service_drift_check_failed"
+    assert status["summary"]["status"] == "error"
+    assert status["summary"]["ok"] is False
+    assert error in status["error"]
+    assert fixture["inventory"]() == before
+    assert fixture["forbidden"] == []
+
+
+@pytest.mark.parametrize("target", ["systemd", "launchd"])
+@pytest.mark.parametrize("inbound, source", [
+    ("feishu_ws", "single-market"),
+    ("feishu_ws", "explicit-key"),
+    ("wechat_clawbot", "single-market"),
+    ("wechat_clawbot", "explicit-key"),
+    ("wechat_clawbot", "yaml"),
+])
+def test_service_drift_renders_valid_enabled_inbound_even_with_empty_services(
+    tmp_path, monkeypatch, target, inbound, source,
+):
+    from src.application import service_deploy as deploy, service_drift as owner
+
+    credential_name = deploy._bot_credential_name
+    fixture = _synthetic_drift_context(monkeypatch, tmp_path, target=target)
+    monkeypatch.setattr(deploy, "_bot_credential_name", credential_name)
+    profile = fixture["profile"]
+    profile["services"] = []
+    profile[inbound] = {"enabled": True}
+    if source != "single-market":
+        profile["markets"] = ["us", "hk"]
+        profile[inbound]["config_key"] = "hk"
+    if inbound == "wechat_clawbot":
+        if source == "yaml":
+            config_yaml = fixture["runtime"] / "config.yaml"
+            config_yaml.write_text(
+                "accounts: {}\nmarkets: {}\ninbound:\n  wechat_clawbot:\n"
+                "    allowed_senders: wechat:fixture\n", encoding="utf-8",
+            )
+            profile["config_authoring"] = {"source": "yaml", "config_yaml": str(config_yaml)}
+        else:
+            profile[inbound]["allowed_senders"] = "wechat:fixture"
+    fixture["profile_path"].write_text(json.dumps(profile), encoding="utf-8")
+    before = fixture["inventory"]()
+    result = owner.service_drift(
+        repo_root=fixture["repo"], runtime_root=fixture["runtime"],
+        systemd_unit_root=fixture["units"], run_cmd=_fake_systemd_query_runner(),
+    )
+    name = inbound.replace("_", "-")
+    expected = f"options-monitor-{name}.service" if target == "systemd" else f"com.options-monitor.{name}"
+    assert result["checked"] is True
+    assert expected in result["expected_services"]
+    assert expected in result["missing_profile_units"]
+    assert result["confirmed"] is False
+    assert result["operations"] == []
+    assert fixture["inventory"]() == before
+    assert fixture["forbidden"] == []
+
+
+
+@pytest.mark.parametrize("inbound, unit_name", [
+    ("feishu_ws", "options-monitor-feishu-ws.service"),
+    ("wechat_clawbot", "options-monitor-wechat-clawbot.service"),
+])
+def test_service_drift_retires_installed_inbound_when_profile_no_longer_declares_it(tmp_path: Path, inbound, unit_name) -> None:
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift
 
     repo, runtime, systemd_root = _drift_roots(tmp_path)
-    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"], include_feishu_ws=True)
+    bundle = _render_bundle(repo, runtime, accounts=["lx"], markets=["us"],
+                            **{f"include_{inbound}": True}, wechat_clawbot_allowed_senders="wechat:fixture")
     profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
-    profile.pop("feishu_ws", None)
-    profile["services"] = [item for item in profile["services"] if item["name"] != "options-monitor-feishu-ws.service"]
+    profile.pop(inbound, None)
+    profile["services"] = [item for item in profile["services"] if item["name"] != unit_name]
     (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
     _write_systemd_units_from_bundle(bundle, systemd_root)
     calls: list[list[str]] = []
@@ -817,13 +926,13 @@ def test_service_drift_retires_installed_feishu_ws_when_profile_no_longer_declar
     out = _drift_at(repo, runtime, systemd_root, confirm=True, run_cmd=_run_cmd)
     refreshed = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))
 
-    assert "options-monitor-feishu-ws.service" not in out["expected_services"]
-    assert {"name": "options-monitor-feishu-ws.service"} not in refreshed["services"]
-    assert "feishu_ws" not in refreshed
-    assert not (systemd_root / "options-monitor-feishu-ws.service").exists()
-    assert out["before"]["extra_installed_units"] == ["options-monitor-feishu-ws.service"]
-    assert out["applied"]["retired_units"] == ["options-monitor-feishu-ws.service"]
-    assert ["systemctl", "disable", "--now", "options-monitor-feishu-ws.service"] in calls
+    assert unit_name not in out["expected_services"]
+    assert {"name": unit_name} not in refreshed["services"]
+    assert inbound not in refreshed
+    assert not (systemd_root / unit_name).exists()
+    assert out["before"]["extra_installed_units"] == [unit_name]
+    assert out["applied"]["retired_units"] == [unit_name]
+    assert ["systemctl", "disable", "--now", unit_name] in calls
 
 
 def test_service_drift_preserves_backups_nonunits_and_custom_units(

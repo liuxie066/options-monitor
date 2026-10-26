@@ -1233,7 +1233,14 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
             },
         }
 
-    if isinstance(profile.get("services"), list) and not profile.get("services"):
+    if (
+        isinstance(profile.get("services"), list)
+        and not profile.get("services")
+        and not any(
+            isinstance(profile.get(key), dict) and profile[key].get("enabled")
+            for key in ("feishu_ws", "wechat_clawbot")
+        )
+    ):
         return {
             "checked": True,
             "supported": True,
@@ -1529,19 +1536,8 @@ def _expected_bundle_from_profile(
     include_secret_credentials = bool(secret_credentials.get("enabled"))
     market_values = _profile_markets(profile)
     feishu_ws_config_key = str(feishu_ws.get("config_key") or "").strip() or None
-    if include_feishu_ws and feishu_ws_config_key is None and len([market for market in market_values if market in {"us", "hk"}]) != 1:
-        include_feishu_ws = False
     wechat_clawbot_config_key = str(wechat_clawbot.get("config_key") or "").strip() or None
     wechat_clawbot_allowed_senders = str(wechat_clawbot.get("allowed_senders") or "").strip() or None
-    wechat_clawbot_allowed_senders_configured = bool(
-        wechat_clawbot_allowed_senders
-        or wechat_clawbot.get("allowed_senders_configured")
-        or str(wechat_clawbot.get("allowed_senders_source") or "").strip() == "config_yaml"
-    )
-    if include_wechat_clawbot and wechat_clawbot_config_key is None and len([market for market in market_values if market in {"us", "hk"}]) != 1:
-        include_wechat_clawbot = False
-    if include_wechat_clawbot and not wechat_clawbot_allowed_senders_configured:
-        include_wechat_clawbot = False
     accounts = _profile_accounts(profile)
     opend_root, opend_executable = _profile_opend_render_values(opend)
     render_kwargs: dict[str, Any] = {
