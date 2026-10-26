@@ -6,23 +6,57 @@ from typing import Any, Mapping
 
 from src.application.channels.feishu_reply_renderer import (
     FEISHU_CARD_SCHEMA_VERSION,
+    FEISHU_REPLY_TRUNCATION_NOTICE,
     has_markdown_table,
     sanitize_feishu_markdown,
     truncate_feishu_markdown,
 )
 from src.application.payload_helpers import text_sha256 as _sha256
+from src.infrastructure.feishu_bot import (
+    FEISHU_POST_REQUEST_BUDGET_BYTES,
+    build_post_message_payload,
+    feishu_request_body_bytes,
+)
 
 
 FEISHU_NOTIFICATION_ENVELOPE_SCHEMA_VERSION = "feishu-proactive-notification.v1"
-FEISHU_NOTIFICATION_RENDERER_VERSION = "1"
+FEISHU_NOTIFICATION_RENDERER_VERSION = "2"
 FEISHU_NOTIFICATION_CONTENT_BUDGET_BYTES = 24 * 1024
 FEISHU_NOTIFICATION_MAX_CHARS = 12_000
+# Production compacts every logical key to om-<32 hex>; fallback appends :fallback.
+_FALLBACK_UUID_BUDGET = "om-" + "0" * 32 + ":fallback"
+
+
+def _fallback_request_bytes(markdown: str, open_id: str) -> int:
+    return feishu_request_body_bytes(build_post_message_payload(
+        open_id=open_id, markdown=markdown, uuid=_FALLBACK_UUID_BUDGET,
+    ))
+
+
+def _bounded_fallback(text: str, *, open_id: str, max_chars: int) -> tuple[str, bool]:
+    if _fallback_request_bytes(text, open_id) <= FEISHU_POST_REQUEST_BUDGET_BYTES:
+        return text, False
+    notice_bytes = len(FEISHU_REPLY_TRUNCATION_NOTICE.encode("utf-8"))
+    if _fallback_request_bytes(FEISHU_REPLY_TRUNCATION_NOTICE, open_id) > FEISHU_POST_REQUEST_BUDGET_BYTES:
+        raise ValueError("Feishu notification fallback identity exceeds the request budget")
+    low, high = notice_bytes, len(text.encode("utf-8"))
+    rendered = FEISHU_REPLY_TRUNCATION_NOTICE
+    while low <= high:
+        max_bytes = (low + high) // 2
+        candidate, _ = truncate_feishu_markdown(text, max_chars=max_chars, max_bytes=max_bytes)
+        if _fallback_request_bytes(candidate, open_id) <= FEISHU_POST_REQUEST_BUDGET_BYTES:
+            rendered = candidate
+            low = max_bytes + 1
+        else:
+            high = max_bytes - 1
+    return rendered, True
 
 
 def render_feishu_notification_card(
     *,
     markdown: str,
     fallback_text: str,
+    fallback_open_id: str,
     max_chars: int = FEISHU_NOTIFICATION_MAX_CHARS,
 ) -> dict[str, Any]:
     source = str(markdown or "").strip()
@@ -31,6 +65,9 @@ def render_feishu_notification_card(
         raise ValueError("Feishu notification card markdown is required")
     if not fallback:
         raise ValueError("Feishu notification fallback text is required")
+    fallback_markdown, fallback_truncated = _bounded_fallback(
+        fallback, open_id=fallback_open_id, max_chars=max_chars,
+    )
     sanitized = sanitize_feishu_markdown(source)
     rendered, truncated = truncate_feishu_markdown(
         sanitized,
@@ -62,10 +99,14 @@ def render_feishu_notification_card(
         "transport": transport,
         "fallback": {
             "msg_type": "post",
-            "markdown": fallback,
+            "markdown": fallback_markdown,
         },
         "render_meta": {
             "renderer_version": FEISHU_NOTIFICATION_RENDERER_VERSION,
+            "fallback_sha256": _sha256(fallback_markdown),
+            "fallback_truncated": fallback_truncated,
+            "fallback_receive_id_json_bytes": len(json.dumps(str(fallback_open_id or "").strip(), ensure_ascii=False).encode("utf-8")),
+            "fallback_request_body_bytes": _fallback_request_bytes(fallback_markdown, fallback_open_id),
             "card_schema": FEISHU_CARD_SCHEMA_VERSION,
             "source_chars": len(source),
             "source_sha256": _sha256(source),
@@ -125,10 +166,22 @@ def normalize_feishu_notification_envelope(
         raise ValueError("Feishu notification Markdown exceeds the local content budget")
 
     fallback = _mapping(envelope.get("fallback"))
-    if str(fallback.get("msg_type") or "") != "post" or str(fallback.get("markdown") or "").strip() != text:
-        raise ValueError("Feishu notification fallback transport is invalid")
-
+    fallback_markdown = str(fallback.get("markdown") or "").strip()
     render_meta = _mapping(envelope.get("render_meta"))
+    if str(fallback.get("msg_type") or "") != "post" or not fallback_markdown:
+        raise ValueError("Feishu notification fallback transport is invalid")
+    if str(render_meta.get("renderer_version") or "") == "2":
+        if str(render_meta.get("fallback_sha256") or "") != _sha256(fallback_markdown):
+            raise ValueError("Feishu notification fallback transport digest mismatch")
+        # The receiver is private routing metadata; retain its exact JSON byte cost, not its value.
+        receiver_bytes = int(render_meta.get("fallback_receive_id_json_bytes") or 0)
+        size = _fallback_request_bytes(fallback_markdown, "") + receiver_bytes - 2
+        if receiver_bytes < 2 or size != int(render_meta.get("fallback_request_body_bytes") or 0):
+            raise ValueError("Feishu notification fallback request byte count mismatch")
+        if size > FEISHU_POST_REQUEST_BUDGET_BYTES:
+            raise ValueError("Feishu notification fallback exceeds the request byte budget")
+    elif fallback_markdown != text:
+        raise ValueError("Feishu notification fallback transport is invalid")
     rendered_json = _canonical_json({"msg_type": "interactive", "content": content})
     if str(render_meta.get("rendered_sha256") or "") != _sha256(rendered_json):
         raise ValueError("Feishu notification rendered digest mismatch")
@@ -148,7 +201,7 @@ def normalize_feishu_notification_envelope(
         },
         "fallback": {
             "msg_type": "post",
-            "markdown": text,
+            "markdown": fallback_markdown,
         },
         "render_meta": dict(render_meta),
     }

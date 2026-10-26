@@ -1312,6 +1312,10 @@ def project_assigned_stock_lifecycle(
                 )
             )
             continue
+        # The option terminal fact can precede its stock settlement. Keep the
+        # validated option history, but expose stock economics only when effective.
+        if as_of_ms is not None and settlement_at > int(as_of_ms):
+            continue
         if expected_stock_side == "sell":
             payload = _event_payload(event)
             target_lot_id = next(

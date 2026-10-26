@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from domain.domain.portfolio_assignment_scenario import project_assignment_scenario
 
 
@@ -545,3 +547,76 @@ def test_explicit_missing_scenario_fx_does_not_use_quote_embedded_rate():
     assert result["assignments"][0]["principal_cny"] is None
     assert result["cash_coverage"]["gross_put_requirement_cny"] is None
     assert any("fx_evidence_missing" in warning for warning in result["warnings"])
+
+
+@pytest.mark.parametrize("missing", ["status", "freshness", "trust", "snapshot"])
+def test_unavailable_evidence_withholds_account_cash_and_fee_completeness(missing):
+    evidence = _evidence()
+    if missing == "status":
+        evidence["status"] = "unavailable"
+    elif missing == "freshness":
+        evidence.pop("freshness")
+    elif missing == "trust":
+        evidence["freshness"]["trust_status"] = "untrusted"
+    else:
+        evidence["snapshot"] = {}
+
+    result = project_assignment_scenario(
+        accounts=["lx"], portfolio_evidence=evidence,
+        option_positions=[], snapshot=_snapshot(),
+    )
+
+    assert result["status"] == "unavailable"
+    account = result["account_breakdown"][0]
+    for field in (
+        "opening_cash_mmf_cny", "put_assignment_outflow_cny",
+        "call_assignment_inflow_cny", "ending_cash_gross_cny",
+        "ending_cash_net_estimated_cny", "funding_gap_cny",
+    ):
+        assert account[field] is None, field
+    assert account["fees_complete"] is False
+    assert result["cash_coverage"]["total_fees_cny"] is None
+    assert result["fee_summary"]["status"] == "partial"
+    assert result["fee_summary"]["total_fees_cny"] is None
+
+
+def test_complete_empty_evidence_preserves_account_zero_cash_and_complete_fees():
+    result = project_assignment_scenario(
+        accounts=["lx"], portfolio_evidence=_evidence(),
+        option_positions=[], snapshot=_snapshot(),
+    )
+
+    assert result["status"] == "complete"
+    account = result["account_breakdown"][0]
+    for field in (
+        "opening_cash_mmf_cny", "put_assignment_outflow_cny",
+        "call_assignment_inflow_cny", "known_estimated_fees_cny",
+        "ending_cash_gross_cny", "ending_cash_net_estimated_cny", "funding_gap_cny",
+    ):
+        assert account[field] == "0.00", field
+    assert account["fees_complete"] is True
+    assert result["fee_summary"]["status"] == "complete"
+    assert result["fee_summary"]["total_fees_cny"] == "0.00"
+
+
+def test_partial_cash_preserves_known_account_without_zeroing_unknown_account():
+    unknown = _holding("CNY-CASH", "现金", "cash", quantity=100, market_value_cny=None)
+    known = _holding("CNY-CASH", "现金", "cash", quantity=5000, market_value_cny=5000)
+    known["account"] = "sy"
+    evidence = _evidence(holdings=[unknown, known], status="partial")
+    evidence["scope"]["accounts"] = ["lx", "sy"]
+    result = project_assignment_scenario(
+        accounts=["lx", "sy"], portfolio_evidence=evidence,
+        option_positions=[], snapshot=_snapshot(),
+    )
+
+    assert result["status"] == "partial"
+    accounts = {row["account"]: row for row in result["account_breakdown"]}
+    assert accounts["lx"]["opening_cash_mmf_cny"] is None
+    assert accounts["lx"]["ending_cash_net_estimated_cny"] is None
+    assert accounts["lx"]["funding_gap_cny"] is None
+    assert accounts["sy"]["opening_cash_mmf_cny"] == "5000.00"
+    assert accounts["sy"]["ending_cash_net_estimated_cny"] == "5000.00"
+    assert accounts["sy"]["funding_gap_cny"] == "0.00"
+    assert all(row["fees_complete"] for row in accounts.values())
+    assert result["fee_summary"]["status"] == "complete"

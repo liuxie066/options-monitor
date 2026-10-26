@@ -709,10 +709,12 @@ def _merge_service_profile_payload(payload: dict[str, Any], *, profile: dict[str
     return merged
 
 
-def _merge_explicit_service_profile(payload: dict[str, Any], *, base: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
+def _merge_explicit_service_profile(
+    payload: dict[str, Any], *, base: Path,
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
     profile_path = _service_profile_path_from_payload(payload, base=base)
     if profile_path is None:
-        return dict(payload), None
+        return dict(payload), None, None
     if not profile_path.exists():
         raise AgentToolError(
             code="CONFIG_ERROR",
@@ -720,7 +722,7 @@ def _merge_explicit_service_profile(payload: dict[str, Any], *, base: Path) -> t
             hint="Remove profile_path or create the referenced JSON profile.",
         )
     profile = _read_json_object(profile_path)
-    return _merge_service_profile_payload(payload, profile=profile), _profile_meta(profile, profile_path=profile_path, base=base)
+    return _merge_service_profile_payload(payload, profile=profile), _profile_meta(profile, profile_path=profile_path, base=base), profile
 
 
 def _merge_runtime_service_profile(
@@ -729,16 +731,16 @@ def _merge_runtime_service_profile(
     base: Path,
     runtime_root: Path,
     existing_profile_meta: dict[str, Any] | None,
-) -> tuple[dict[str, Any], dict[str, Any] | None]:
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
     if existing_profile_meta is not None:
-        return payload, existing_profile_meta
+        return payload, existing_profile_meta, None
     if str(payload.get("profile_path") or "").strip():
-        return payload, existing_profile_meta
+        return payload, existing_profile_meta, None
     profile_path = (runtime_root / "service.profile.json").resolve()
     if not profile_path.exists():
-        return payload, existing_profile_meta
+        return payload, existing_profile_meta, None
     profile = _read_json_object(profile_path)
-    return _merge_service_profile_payload(payload, profile=profile), _profile_meta(profile, profile_path=profile_path, base=base)
+    return _merge_service_profile_payload(payload, profile=profile), _profile_meta(profile, profile_path=profile_path, base=base), profile
 
 
 def _service_profile_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1232,6 +1234,27 @@ def _upgrade_status_evaluation(
         "reason": "upgrade_failure_still_requires_remediation",
         "service_check": service_check,
     }
+
+
+def _scheduled_tick_configured(profile: dict[str, Any], *, market: str | None) -> bool:
+    market_key = str(market or "").strip().lower()
+    if market_key not in {"hk", "us"}:
+        return False
+    provider = str(profile.get("service_provider") or profile.get("provider") or "").strip().lower()
+    scheduled_name = {
+        "systemd": f"options-monitor-tick-{market_key}.timer",
+        "launchd": f"com.options-monitor.tick-{market_key}",
+    }.get(provider)
+    if scheduled_name is None:
+        return False
+    services = profile.get("services")
+    if not isinstance(services, list):
+        return False
+    return any(
+        str(item.get("name") or item.get("label") or "").strip() == scheduled_name
+        if isinstance(item, dict) else str(item or "").strip() == scheduled_name
+        for item in services
+    )
 
 
 def _tick_health_from_artifacts(
@@ -2233,7 +2256,7 @@ def private_runtime_status_tool(
     mask_path: Callable[[Any], str | None],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     base = repo_base().resolve()
-    payload, profile_meta = _merge_explicit_service_profile(payload, base=base)
+    payload, profile_meta, explicit_profile = _merge_explicit_service_profile(payload, base=base)
     config_path, cfg = load_runtime_config(
         config_key=payload.get("config_key"),
         config_path=payload.get("config_path"),
@@ -2250,7 +2273,7 @@ def private_runtime_status_tool(
         data_config_path = (config_path.parent / "portfolio.runtime.json").resolve()
     ledger_store = ledger_store_payload(data_config_path)
     ledger_runtime_root = Path(str(ledger_store.get("runtime_root") or base)).expanduser()
-    payload, profile_meta = _merge_runtime_service_profile(
+    payload, profile_meta, runtime_profile = _merge_runtime_service_profile(
         payload,
         base=base,
         runtime_root=ledger_runtime_root,
@@ -2694,7 +2717,16 @@ def private_runtime_status_tool(
         account_status=account_status,
         read_json_object_or_empty=read_json_object_or_empty,
     )
-    if bool(payload.get("include_service_status")) and tick_health["market"] in {"hk", "us"}:
+    # Reuse the loaded file, not caller hints merged over its service inventory.
+    # Explicit profile selection takes precedence over the default runtime file.
+    tick_profile = explicit_profile if explicit_profile is not None else runtime_profile
+    if tick_profile is None:
+        tick_profile = service_profile_for_drift_map
+    tick_health["scheduled"] = _scheduled_tick_configured(tick_profile, market=desired_market)
+    if (
+        bool(payload.get("include_service_status")) and tick_health["scheduled"]
+        and str(tick_profile.get("service_provider") or "").strip().lower() == "systemd"
+    ):
         unit_status = _tick_unit_execution_status(tick_health["market"])
         if unit_status == "failed" and tick_health["status"] == "ok":
             tick_health = {**tick_health, "status": "failed", "reason_code": "TICK_SERVICE_FAILED"}
@@ -2702,6 +2734,9 @@ def private_runtime_status_tool(
             tick_health = {**tick_health, "status": "unknown", "reason_code": "TICK_SERVICE_UNAVAILABLE"}
     if tick_health["status"] in {"failed", "evidence_incomplete"}:
         warnings.append("Scheduled Tick failed: " + str(tick_health["reason_code"]))
+        warning_codes.append(str(tick_health["reason_code"]))
+    elif tick_health["status"] == "unknown" and tick_health["scheduled"]:
+        warnings.append("Scheduled Tick state is unknown: " + str(tick_health["reason_code"]))
         warning_codes.append(str(tick_health["reason_code"]))
     env_file_path = _bot_env_file_path_from_payload(payload, base=base)
     effective_env, environment = build_effective_env_with_status(
@@ -3053,7 +3088,7 @@ def _status_safe_runtime_payload(data: dict[str, Any]) -> dict[str, Any]:
         "projection_verify": projection_verify,
         "service_upgrade": _status_safe_service_upgrade(data.get("service_upgrade")),
         "service_drift": _status_safe_service_drift(data.get("service_drift")),
-        "tick_health": _pick(data.get("tick_health"), {"status", "reason_code", "market", "observed_at_utc", "run_id"}),
+        "tick_health": _pick(data.get("tick_health"), {"status", "reason_code", "market", "observed_at_utc", "run_id", "scheduled"}),
         "accounts": _status_safe_accounts(data.get("accounts")),
         "latest_run_selection": latest_run_selection,
         "latest_run": _status_safe_run(latest_run),

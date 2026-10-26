@@ -329,6 +329,30 @@ def _post_md_paragraphs(markdown: str) -> list[list[dict[str, str]]]:
     return paragraphs
 
 
+def build_post_message_payload(*, open_id: str, markdown: str, uuid: str | None = None) -> dict[str, Any]:
+    """Canonical post body shared by preparation budgeting and the actual sender."""
+    payload = {
+        "receive_id": str(open_id or "").strip(),
+        "msg_type": "post",
+        "content": json.dumps(
+            {
+                "zh_cn": {
+                    "content": _post_md_paragraphs(str(markdown or "").strip()),
+                }
+            },
+            ensure_ascii=False,
+        ),
+    }
+    if uuid:
+        payload["uuid"] = str(uuid)
+
+    return payload
+
+
+def feishu_request_body_bytes(payload: dict[str, Any]) -> int:
+    return len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+
+
 def send_post_message(
     *,
     app_id: str,
@@ -348,22 +372,8 @@ def send_post_message(
 
     request_path = "/open-apis/im/v1/messages?receive_id_type=open_id"
     url = f"https://open.feishu.cn{request_path}"
-    payload = {
-        "receive_id": open_id_value,
-        "msg_type": "post",
-        "content": json.dumps(
-            {
-                "zh_cn": {
-                    "content": _post_md_paragraphs(markdown_value),
-                }
-            },
-            ensure_ascii=False,
-        ),
-    }
-    if uuid:
-        payload["uuid"] = str(uuid)
-
-    request_body_bytes = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    payload = build_post_message_payload(open_id=open_id_value, markdown=markdown_value, uuid=uuid)
+    request_body_bytes = feishu_request_body_bytes(payload)
     if request_body_bytes > FEISHU_POST_REQUEST_BUDGET_BYTES:
         raise FeishuPermanentError(
             "feishu post request exceeds local byte budget",

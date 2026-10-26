@@ -3398,3 +3398,97 @@ def test_opening_chain_warmup_supervisor_rejects_child_that_survives_kill(
             worker_stop_at_utc=stop,
             lock_release_by_utc=stop,
         )
+
+
+@pytest.mark.parametrize("side,spot,held_strike", [("put", 100.0, 90.0), ("call", 111.0, 120.0)])
+@pytest.mark.parametrize("held", [False, True])
+def test_infeasible_opening_window_preserves_public_prefetch_other_symbol_dispatch(
+    monkeypatch, tmp_path, side, spot, held_strike, held,
+):
+    import src.application.opend_utils as opend_utils
+    import src.application.required_data_planning as planning
+
+    monkeypatch.setattr(opend_utils, "get_trading_date", lambda _market: date(2026, 7, 27))
+    monkeypatch.setattr(planning, "list_option_expirations", lambda *_args, **_kwargs: ["2026-08-21"])
+    monkeypatch.setattr(planning, "get_underlier_spot", lambda *_args, **_kwargs: spot)
+    watchlist = [{
+        "symbol": "NVDA", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
+        "sell_put": {"enabled": side == "put", "min_dte": 7, "max_dte": 45,
+                     "min_strike": 120, "max_strike": 130},
+        "sell_call": {"enabled": side == "call", "min_dte": 7, "max_dte": 45,
+                      "min_strike": 105, "max_strike": 110},
+        "_close_advice_position_requirements": [{
+            "planning_status": "ready", "option_type": side,
+            "expiration": "2026-08-21", "strike": held_strike,
+        }] if held else [],
+    }, {
+        "symbol": "AAPL", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
+        "sell_put": {"enabled": False}, "sell_call": {"enabled": False},
+        "_close_advice_position_requirements": [{
+            "planning_status": "ready", "option_type": "put",
+            "expiration": "2026-08-21", "strike": 80.0,
+        }],
+    }]
+    _patch_prefetch_sources(monkeypatch, watchlist=watchlist)
+    _silence_source_snapshot_events(monkeypatch)
+    dispatched = {}
+
+    def provider_failure(symbol, **kwargs):
+        dispatched[symbol] = kwargs
+        # This fixture proves dispatch only; it never invents provider success.
+        raise RuntimeError("synthetic provider failure after dispatch")
+
+    monkeypatch.setattr(mod, "fetch_symbol", provider_failure)
+    result = _prefetch(tmp_path, producer_run_id="infeasible-opening")
+
+    assert set(dispatched) == ({"NVDA", "AAPL"} if held else {"AAPL"})
+    assert dispatched["AAPL"]["side_strike_windows"] == {"put": {"min_strike": 80.0, "max_strike": 80.0}}
+    assert result["errors"] == (2 if held else 1)
+    assert result["fetched_ok"] == (0 if held else 1)
+    if held:
+        assert dispatched["NVDA"]["side_strike_windows"] == {
+            side: {"min_strike": held_strike, "max_strike": held_strike},
+        }
+    else:
+        raw = json.loads((tmp_path / "shared_required" / "raw" / "NVDA_required_data.json").read_text())
+        assert raw["rows"] == []
+        assert raw["meta"]["reason_code"] == "no_feasible_strikes"
+        assert raw["meta"]["source_outcome"] == "success_empty"
+    plans = {item["symbol"]: item for item in result["global_required_data_plan"]["symbols"]}
+    assert plans["NVDA"]["projection_outcome"] == ("success_rows" if held else "success_empty")
+    assert plans["AAPL"]["projection_outcome"] == "success_rows"
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("holding", [False, True])
+def test_cross_account_empty_openings_merge_without_poisoning_exact_holdings(monkeypatch, tmp_path, reverse, holding):
+    import src.application.opend_utils as opend_utils
+    import src.application.required_data_planning as planning
+
+    monkeypatch.setattr(opend_utils, "get_trading_date", lambda _market: date(2026, 7, 27))
+    monkeypatch.setattr(planning, "list_option_expirations", lambda *_args, **_kwargs: ["2026-08-21"])
+    sources = [{
+        "symbol": "NVDA", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111},
+        "sell_put": {"enabled": True, "min_dte": 7, "max_dte": 45,
+                     "min_strike": minimum, "max_strike": 140},
+        "sell_call": {"enabled": False},
+        "_close_advice_position_requirements": [{
+            "planning_status": "ready", "option_type": "put", "expiration": "2026-08-21", "strike": 90,
+        }] if holding and minimum == 130 else [],
+    } for minimum in (120, 130)]
+    if reverse:
+        sources.reverse()
+    config = {**sources[0], "_prefetch_source_symbol_cfgs": sources}
+    plan = mod._build_prefetch_fetch_plan(
+        config, base=tmp_path, shared_required=tmp_path / "required", opend_fetch_cfg={},
+        expiration_discovery_cache={}, spot_observation_cache={},
+    )
+    contract = mod._expected_fetch_contract(config, plan)
+    assert contract["coverage_policy"]["projection_outcome"] == ("success_rows" if holding else "success_empty")
+    assert plan.expiration_discovery.outcome == "success_rows"
+    if holding:
+        assert plan.side_plans[0].required_exact_strikes_by_expiration == {"2026-08-21": [90.0]}
+        assert plan.merged_specs[0].side_strike_windows == {"put": {"min_strike": 90.0, "max_strike": 90.0}}
+    else:
+        assert plan.projected_expirations == []
+        assert plan.merged_specs == []

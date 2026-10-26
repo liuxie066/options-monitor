@@ -56,7 +56,9 @@ def _verified_source(base: Path, path: Path, account: str, market: str) -> dict[
         raise ValueError("historical_scope_unproven")
     if raw.get("decision_scope") and raw["decision_scope"] != scope:
         raise ValueError("historical_scope_conflict")
-    return {"payload": raw, "scope": scope, "source_hash": hashlib.sha256(encoded).hexdigest(),
+    return {"payload": raw, "scope": scope,
+            "successful": normalized["status"] in {"ready", "degraded"} and normalized["actionability"] != "blocked",
+            "source_hash": hashlib.sha256(encoded).hexdigest(),
             "binding_hash": content_hash(manifest)}
 
 
@@ -142,7 +144,7 @@ def apply_history_import(*, base: Path, account: str, market: str, preview_hash:
                 raw = row["payload"]
                 # Preserve exact historical source, including compatible retired fields.
                 store.insert(conn, source=raw, payload=raw, scope=row["scope"],
-                             successful=raw.get("status") in {"ready", "degraded"} and raw.get("actionability") != "blocked")
+                             successful=row["successful"])
             from src.infrastructure.decision_history_sqlite import canonical_json
             conn.execute("INSERT INTO history_imports(account,market,preview_hash,report_json,report_hash) VALUES(?,?,?,?,?)",
                          (report["account"], report["market"], preview_hash, canonical_json(report), content_hash(report)))

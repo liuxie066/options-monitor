@@ -1855,3 +1855,49 @@ def test_late_candidate_flow_ignores_old_snapshot_and_preserves_exact_retry(
             )
             assert retry["envelope"] is None
             assert retry["reason"] == "stale_candidate_envelope"
+
+
+@pytest.mark.parametrize('fixed', [False, True])
+def test_feishu_large_fallback_is_frozen_and_retried_without_rerender(monkeypatch, tmp_path: Path, fixed: bool) -> None:
+    import hashlib
+    from src.application.channels.feishu_notification_renderer import feishu_notification_envelope_sha256
+    from src.infrastructure.feishu_bot import FEISHU_POST_REQUEST_BUDGET_BYTES, build_post_message_payload, feishu_request_body_bytes
+
+    _patch_assembler(monkeypatch)
+    receiver = 'ou_' + 'x' * 64
+    monkeypatch.setenv('OM_FEISHU_BOT_USER_OPEN_ID', receiver)
+    text = '\n\n'.join('中文🙂"\\' * 10 for _ in range(700))
+    monkeypatch.setattr(mod, 'render_fixed_report', lambda *args, **kwargs: text)
+    monkeypatch.setattr(mod, 'render_candidate_alert', lambda *args, **kwargs: text)
+    calls = []
+    _patch_sender(monkeypatch, calls=calls, result={
+        'ok': False, 'command_ok': False, 'delivery_confirmed': False,
+        'returncode': 1, 'error_code': 'FEISHU_SEND_UNKNOWN', 'ambiguous_send': True,
+    })
+    bundle = _request(tmp_path, run_id='freeze-long-fallback', config=_feishu_config(), fixed=fixed)
+    assert mod.run_tick_notification_flow(bundle.request) == 1
+    retry = read_retryable_daily_decision_brief_delivery(base=tmp_path, account='lx', market='US', market_trading_date=MARKET_DATE)
+    envelope = retry['envelope']
+    assert envelope['rendered_message'] == text
+    assert envelope['message_sha256'] == hashlib.sha256(text.encode()).hexdigest()
+    frozen = envelope['rendered_transport']
+    assert frozen['text'] == text
+    assert frozen['fallback']['markdown'] != text
+    assert envelope['rendered_transport_sha256'] == feishu_notification_envelope_sha256(frozen)
+    assert calls[0]['transport_envelope'] == frozen
+    uuid = calls[0]['idempotency_key'] + ':fallback'
+    size = feishu_request_body_bytes(build_post_message_payload(open_id=receiver, markdown=frozen['fallback']['markdown'], uuid=uuid))
+    assert size == frozen['render_meta']['fallback_request_body_bytes']
+    assert size <= FEISHU_POST_REQUEST_BUDGET_BYTES
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('unknown-result retry must reuse the frozen payload, not rerender')
+
+    monkeypatch.setattr(mod, 'render_feishu_notification_card', forbidden)
+    monkeypatch.setattr(mod, 'assemble_daily_decision_briefs', forbidden)
+    calls.clear()
+    _patch_sender(monkeypatch, calls=calls)
+    again = _request(tmp_path, run_id='retry-long-fallback', delivery_only=True, config=_feishu_config(), fixed=fixed)
+    assert mod.run_tick_notification_flow(again.request) == 0
+    assert calls[0]['transport_envelope'] == frozen
+    assert calls[0]['message'] == text

@@ -17,6 +17,7 @@ from src.application.candidate_models import CandidateContractInput
 from src.application.close_advice_quote_cache import quote_cache_metadata_path
 from src.application.opend_symbol_outputs import (
     finalize_required_data_quote_candidate,
+    finalize_unplanned_required_data_candidate,
     publish_required_data_quote_snapshot,
     save_outputs,
     validate_required_data_quote_candidate,
@@ -1801,3 +1802,50 @@ def test_finalizer_preserves_put_and_position_call_outside_opening_window(
         csv_path=result["csv_path"], expected_fetch_contract=contract,
         now=COMPLETED_AT, require_fresh=True,
     )
+
+
+@pytest.mark.parametrize("reason", [
+    "no_feasible_strikes", "NO_FEASIBLE_STRIKES", " NO_FEASIBLE_STRIKES ",
+])
+@pytest.mark.parametrize("require_rv", [False, True])
+def test_unplanned_empty_opening_demand_requires_exact_plan_before_persistence(
+    tmp_path: Path, reason: str, require_rv: bool,
+) -> None:
+    payload, _contract = _no_expirations_candidate()
+    _as_dict(payload["meta"])["reason_code"] = reason
+    producer_root = tmp_path / "manual"
+
+    with pytest.raises(SourceReceiptError, match="empty opening demand requires an exact fetch contract"):
+        finalize_unplanned_required_data_candidate(
+            base=tmp_path, producer_root=producer_root, symbol="NVDA", payload=payload,
+            source="opend", host=HOST, port=PORT,
+            require_realized_volatility=require_rv, now=COMPLETED_AT,
+        )
+
+    assert not producer_root.exists()
+    assert not list(tmp_path.rglob("*receipt*.json"))
+
+
+@pytest.mark.parametrize("reason", ["no_expirations", "no_contract_rows"])
+@pytest.mark.parametrize("require_rv", [False, True])
+def test_unplanned_legacy_empty_finalizes_without_planned_authority(
+    tmp_path: Path, reason: str, require_rv: bool,
+) -> None:
+    payload, _contract = _no_expirations_candidate()
+    _as_dict(payload["meta"])["reason_code"] = reason
+    result = finalize_unplanned_required_data_candidate(
+        base=tmp_path, producer_root=tmp_path / "manual", symbol="NVDA", payload=payload,
+        source="opend", host=HOST, port=PORT,
+        require_realized_volatility=require_rv, now=COMPLETED_AT,
+    )
+
+    assert result["mode"] == "manual_unplanned"
+    assert result["quote_receipt_path"] is None
+    assert result["quote_receipt"] is None
+    assert result["evidence"] is None
+    raw = json.loads(result["raw_path"].read_text(encoding="utf-8"))
+    assert raw["meta"]["reason_code"] == reason
+    assert raw["rows"] == []
+    assert pd.read_csv(result["csv_path"]).empty
+    assert quote_cache_metadata_path(result["csv_path"]).is_file()
+    assert not list(tmp_path.rglob("*receipt*.json"))

@@ -79,7 +79,7 @@ def resolve_feishu_bot_send_target(
     *,
     notifications: dict[str, Any] | None = None,
 ) -> str:
-    return resolve_feishu_bot_config(notifications).user_open_id
+    return resolve_feishu_bot_config(notifications, metadata_only=True).user_open_id
 
 
 def send_feishu_app_message(

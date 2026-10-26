@@ -21,6 +21,7 @@ from src.application.required_data_coverage import (
 )
 from src.application.required_data_plan_identity import (
     validate_required_data_expected_fetch_contract,
+    required_data_planned_empty_reason,
 )
 from src.application.required_data_blobs import (
     RequiredDataBlobError,
@@ -48,7 +49,7 @@ from src.application.close_advice_quote_cache import (
 
 REQUIRED_DATA_QUOTE_SNAPSHOT_SCHEMA = "required_data_quote_snapshot.v2"
 SUCCESS_EMPTY_REASON_CODES = frozenset(
-    {"no_expirations", "no_contract_rows"}
+    {"no_expirations", "no_contract_rows", "no_feasible_strikes"}
 )
 _VALIDATION_REASON_CODES = frozenset(
     {
@@ -231,7 +232,7 @@ def _validate_required_data_payload_candidate_impl(
     )
     if source_outcome == "success_empty":
         empty_reason = str(meta.get("reason_code") or "").strip().lower()
-        if empty_reason == "no_expirations" and projection_outcome != "success_empty":
+        if empty_reason in {"no_expirations", "no_feasible_strikes"} and projection_outcome != "success_empty":
             raise SourceReceiptError(
                 "success-empty payload contradicts expected fetch contract"
             )
@@ -258,18 +259,14 @@ def _validate_required_data_payload_candidate_impl(
                 "success-empty required-data RV evidence contradicts fetch contract"
             )
         discovery = contract.get("fetch_plan", {}).get("expiration_discovery")
-        if empty_reason == "no_expirations":
+        if empty_reason in {"no_expirations", "no_feasible_strikes"}:
             _validate_snapshot_completeness(meta=meta, rows=rows)
             if not isinstance(discovery, Mapping):
                 raise SourceReceiptError(
                     "success-empty required-data lacks expected discovery evidence"
                 )
             if (
-                str(discovery.get("outcome") or "").strip().lower()
-                != "success_empty"
-                or str(discovery.get("reason_code") or "").strip().lower()
-                != empty_reason
-                or list(discovery.get("expirations") or [])
+                required_data_planned_empty_reason(contract["fetch_plan"]) != empty_reason
                 or list(raw_payload.get("expirations") or [])
                 or int(raw_payload.get("expiration_count") or 0) != 0
                 or not _same_datetime(
@@ -1770,6 +1767,8 @@ def _validate_unplanned_required_data_payload(
             "required-data expiration evidence is invalid"
         )
     if source_outcome == "success_empty":
+        if _reason == "no_feasible_strikes":
+            raise SourceReceiptError("empty opening demand requires an exact fetch contract")
         if normalized_expirations:
             raise SourceReceiptError(
                 "success-empty required-data contains expirations"

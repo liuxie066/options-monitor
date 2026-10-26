@@ -50,22 +50,6 @@ def close_advice_read_tool(
         config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
 
     query = _query_from_payload(payload)
-    try:
-        assert_quality_allows(
-            "close_advice",
-            account=str(query.account or "").strip().lower() or None,
-            market=str(payload.get("config_key") or "").strip().lower() or None,
-        )
-    except QualityGateBlocked as exc:
-        raise AgentToolError(
-            code="QUALITY_GATE_BLOCKED",
-            message=str(exc),
-            details={
-                "consumer": exc.consumer,
-                "reason_code": exc.reason_code,
-                "blocked_by": list(exc.blocked_by),
-            },
-        ) from exc
     config_market = _desired_market(payload, cfg=cfg, config_path=config_path)
     query_market = _query_market(query)
     payload_market_scope = _payload_market_scope(payload)
@@ -79,6 +63,31 @@ def close_advice_read_tool(
         resolve_output_root=resolve_output_root,
         mask_path=mask_path,
     )
+    # Use the validated report scope, including empty reports, rather than
+    # optional request hints or the rows surviving position filters.
+    quality_targets = {
+        (account, market)
+        for source in sources
+        for account in ([query.account] if query.account else source.accounts or [None])
+        for market in ([desired_market] if desired_market else source.markets or [None])
+    }
+    try:
+        for account, market in sorted(quality_targets, key=lambda target: (target[0] or "", target[1] or "")):
+            assert_quality_allows(
+                "close_advice",
+                account=normalize_account(account) or None,
+                market=str(market or "").strip().lower() or None,
+            )
+    except QualityGateBlocked as exc:
+        raise AgentToolError(
+            code="QUALITY_GATE_BLOCKED",
+            message=str(exc),
+            details={
+                "consumer": exc.consumer,
+                "reason_code": exc.reason_code,
+                "blocked_by": list(exc.blocked_by),
+            },
+        ) from exc
     rows: list[dict[str, Any]] = []
     used_sources: list[_Source] = []
     for source in sources:
@@ -157,6 +166,8 @@ class _Source:
         self.source_type = source_type
         self.run_id = run_id
         self.account = account
+        self.accounts: list[str] = []
+        self.markets: list[str] = []
         self.csv_bytes: bytes | None = None
         self.generated_at_utc: str | None = None
         self.manifest_run_id: str | None = None
@@ -472,6 +483,8 @@ def _validate_source_manifest(
     validation = snapshot["validation"]
     if validation.get("ok"):
         source.csv_bytes = snapshot["csv_bytes"]
+        source.accounts = list(validation.get("accounts") or [])
+        source.markets = list(validation.get("included_markets") or [])
         source.generated_at_utc = str(validation.get("generated_at_utc") or "").strip() or None
         source.manifest_run_id = str(validation.get("run_id") or "").strip() or None
         source.manifest_quote_mode = str(validation.get("quote_mode") or "").strip().lower() or None
