@@ -11,6 +11,7 @@ from src.application.quality.position_checks import (
     build_position_dataset,
     normalize_opend_positions,
 )
+from src.infrastructure.futu_gateway import FutuGateway, _FutuAPIBackend, _FutuAPIClient
 
 
 NOW = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
@@ -65,7 +66,9 @@ def _lot(qty, *, side="SHORT"):
     }
 
 
-def _dataset(monkeypatch, rows, quotes, lots, *, context="ordinary", market="us", symbol="NVDA"):
+def _dataset(
+    monkeypatch, rows, quotes, lots, *, context="ordinary", market="us", symbol="NVDA", calendar_complete=True,
+):
     originals = deepcopy((rows, quotes, lots))
     calls = []
 
@@ -78,15 +81,16 @@ def _dataset(monkeypatch, rows, quotes, lots, *, context="ordinary", market="us"
         def close(self):
             calls.append("broker.close")
 
-    class Quote:
-        def get_trading_days(self, **kwargs):
-            assert kwargs == {"market": market, "start": "2026-07-01", "end": "2026-07-31"}
-            return [{"time": "2026-07-13", "trade_date_type": "WHOLE"}]
+    class SDKContext:
+        def request_trading_days(self, **kwargs):
+            assert kwargs == {"market": market.upper(), "start": "2026-07-01", "end": "2026-07-31"}
+            calls.append("calendar")
+            return 0, ([{"time": "2026-07-13", "trade_date_type": "WHOLE"}] if calendar_complete else None)
 
-        def get_snapshot(self, codes):
-            assert codes == sorted({row["code"] for row in rows})
+        def get_market_snapshot(self, **kwargs):
+            assert kwargs == {"code_list": sorted({row["code"] for row in rows})}
             calls.append("terms")
-            return deepcopy(quotes)
+            return 0, deepcopy(quotes)
 
         def close(self):
             calls.append("quote.close")
@@ -103,7 +107,12 @@ def _dataset(monkeypatch, rows, quotes, lots, *, context="ordinary", market="us"
 
     def quote_factory(**kwargs):
         assert kwargs == {"host": "fixture.invalid", "port": 1776, "is_option_chain_cache_enabled": False}
-        return Quote()
+        backend = _FutuAPIBackend(host="fixture.invalid", port=1776)
+        backend._quote_client = SDKContext()
+        return FutuGateway(
+            client=_FutuAPIClient(backend, is_option_chain_cache_enabled=False),
+            backend=backend, host="fixture.invalid", port=1776,
+        )
 
     class Clock(datetime):
         @classmethod
@@ -165,7 +174,12 @@ def _dataset(monkeypatch, rows, quotes, lots, *, context="ordinary", market="us"
     )
     assert (rows, quotes, lots) == originals
     assert calls.count("broker.close") == calls.count("quote.close") == 1
+    assert calls.count("positions") == 1
+    if not calendar_complete:
+        assert calls.count("calendar") == 1
+        assert "terms" not in calls
     if snapshot.complete:
+        assert calls.count("calendar") == calls.count("terms") == 1
         assert len(snapshot.snapshot_input["rows"]) == len(rows)
         assert snapshot.snapshot_input["errors"] == []
     return snapshot, dataset, state
@@ -237,6 +251,40 @@ def test_unchanged_split_terms_remain_trusted(monkeypatch, side):
     assert dataset["status"] == "trusted"
     assert dataset["checks"][1]["reason_code"] == "POSITIONS_RECONCILED"
     assert _gate_results(monkeypatch, dataset) == dict.fromkeys(CONSUMERS, True)
+
+
+@pytest.mark.parametrize("calendar_complete", [True, False])
+@pytest.mark.parametrize("quantities", [(2,), (1, 1)])
+@pytest.mark.parametrize("context", ["ordinary", "lifecycle", "day-end"])
+@pytest.mark.parametrize("terms_drift", [True, False])
+def test_calendar_completeness_precedes_split_terms_and_context_gates(
+    monkeypatch, calendar_complete, quantities, context, terms_drift,
+):
+    snapshot, dataset, state = _dataset(
+        monkeypatch,
+        [_row(q) for q in quantities],
+        [_terms() if terms_drift else _terms(strike=100, multiplier=100)],
+        [_lot(sum(quantities))],
+        context=context,
+        calendar_complete=calendar_complete,
+    )
+    assert snapshot.complete is calendar_complete
+    assert dataset["source_snapshots"][0]["complete"] is calendar_complete
+    if not calendar_complete:
+        assert snapshot.rows == snapshot.trading_days == []
+        assert snapshot.snapshot_input["source_payload"]["rows"] == [_row(q) for q in quantities]
+        assert dataset["status"] == "unavailable"
+        assert dataset["checks"][0]["status"] == "unknown"
+        assert dataset["checks"][1]["reason_code"] == "POSITION_CONVERGENCE_SOURCE_UNAVAILABLE"
+        assert not dataset.get("extensions", {}).get("next_authoritative_refresh_due_utc")
+        assert state["position_mismatches"] == {}
+    else:
+        assert snapshot.trading_days == [date(2026, 7, 13)]
+        assert dataset["status"] == ("untrusted" if terms_drift else "trusted")
+        assert dataset["checks"][1]["reason_code"] == (
+            "POSITION_CONTRACT_TERMS_DRIFT" if terms_drift else "POSITIONS_RECONCILED"
+        )
+    assert _gate_results(monkeypatch, dataset) == dict.fromkeys(CONSUMERS, calendar_complete and not terms_drift)
 
 
 @pytest.mark.parametrize("failure", ["terms-conflict", "missing-multiplier", "account", "environment"])

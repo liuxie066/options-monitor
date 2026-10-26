@@ -58,7 +58,7 @@ def _annotated(base, *, event="2026-08-05", market="US", symbol="NVDA",
     ).to_dict("records")[0]
 
 
-def _brief(base, row, *, family="sell_put", priority="P1", now=NOW):
+def _brief(base, row, *, family="sell_put", priority="P1", now=NOW, window_end="23:59"):
     account_dir = _account_dir(base)
     for name in ("portfolio_context.json", "option_positions_context.json"):
         path = account_dir / "state" / name
@@ -70,7 +70,7 @@ def _brief(base, row, *, family="sell_put", priority="P1", now=NOW):
     row = dict(row, tier=priority)
     market = row["market"]
     config = _config(timezone_name="Asia/Hong_Kong" if market == "HK" else "America/New_York")
-    config["schedule"]["run_window"]["end"] = "23:59"
+    config["schedule"]["run_window"]["end"] = window_end
     if family == "covered_call":
         row = {**_call_row(), **{k: v for k, v in row.items() if k.startswith("earnings_")},
                "market": market, "tier": priority}
@@ -376,3 +376,39 @@ def test_invalid_market_date_and_legacy_first_pair_are_conservative(tmp_path):
             action["event_risk"]["evidence_chain_id"] = before_row["earnings_snapshot_hash"]
             action["event_risk"].pop("evidence_snapshot_hash", None)
     assert diff_daily_decision_briefs(before, after)["changes"] == []
+
+
+@pytest.mark.parametrize("family", ["sell_put", "covered_call", "combo_yield", "wheel"])
+def test_planning_history_does_not_restore_candidates_or_hide_comparable_removal(tmp_path, family):
+    from src.application.daily_decision_brief_repository import (
+        persist_daily_decision_brief_success, record_daily_decision_brief_candidates,
+    )
+
+    before_row = _annotated(tmp_path / "before")
+    after_row = _annotated(tmp_path / "after", event=None)
+    before = _brief(tmp_path / "before", before_row, family=family)
+    planning = _brief(tmp_path / "planning", after_row, family=family, window_end="09:59")
+    after = _brief(tmp_path / "after", after_row, family=family)
+    assert before["actionability"] == after["actionability"] == "live_actionable"
+    assert planning["actionability"] == "planning_only"
+    assert any(action["state"] == "active" for action in planning["actions"])
+    history = tmp_path / "history"
+    persisted = []
+    for index, brief in enumerate((before, planning, after)):
+        brief["run_id"] = f"combined-run-{index}"
+        result = persist_daily_decision_brief_success(base=history, brief=brief)
+        recorded = record_daily_decision_brief_candidates(
+            base=history, account=brief["account"], market=brief["market"],
+            market_trading_date=brief["market_trading_date"],
+            revision=result["current_revision"], brief_digest=result["current_brief_digest"],
+            candidate_identities=result["current_candidate_identities"],
+        )
+        assert recorded["applied"]
+        if index == 1:
+            assert result["current_candidate_identities"] == []
+            assert result["newly_detected_candidate_identities"] == []
+            assert recorded["pending_candidate_identities"] == []
+        else:
+            assert result["current_candidate_identities"]
+        persisted.append(result["brief"])
+    _assert_removal(persisted[0], persisted[2], before_row, after_row)
