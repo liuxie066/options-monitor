@@ -2435,7 +2435,9 @@ def test_combo_yield_event_projection_relates_to_shared_expiration(
     assert candidate["event_risk"]["user_state"] == "confirmed_event"
     assert candidate["event_risk"]["reason_code"] == "confirmed_distant_earnings_event"
     assert candidate["event_risk"]["reliable"] is True
-    assert candidate["event_risk"]["evidence_chain_id"] == "e" * 64
+    assert candidate["event_risk"]["evidence_chain_id"].startswith("earnings-comparable-v1:")
+    assert candidate["event_risk"]["evidence_snapshot_hash"] == "e" * 64
+    assert representative["event_risk"] == candidate["event_risk"]
     assert candidate["event_risk"]["expiration_relations"] == {
         "put": {
             "expiration": "2026-08-21",

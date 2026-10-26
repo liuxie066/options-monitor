@@ -2020,3 +2020,41 @@ def test_stale_candidate_noop_preserves_exact_historical_delivery(tmp_path: Path
                 assert retry is None
             else:
                 assert retry == prepared["envelope"]
+
+
+@pytest.mark.parametrize("with_provenance", [False, True])
+def test_earnings_comparability_roundtrip_and_diff(tmp_path: Path, with_provenance: bool) -> None:
+    from domain.domain.daily_decision_brief import diff_daily_decision_briefs
+    from src.application.daily_decision_brief_repository import (
+        persist_daily_decision_brief_success, read_latest_daily_decision_brief,
+    )
+    from test_daily_decision_event_risk import _risk
+
+    chain = "earnings-comparable-v1:" + "c" * 64 if with_provenance else "legacy-hash"
+    briefs = []
+    for index, state in enumerate(("confirmed_event", "confirmed_none")):
+        action = _action()
+        risk = _risk(state, event_date="2026-08-05" if index == 0 else None, chain=chain)
+        if with_provenance:
+            risk["evidence_snapshot_hash"] = ("a" if index == 0 else "b") * 64
+        action["event_risk"] = risk
+        persist_daily_decision_brief_success(
+            base=tmp_path, brief=_brief(run_id=f"run-{index}", actions=[action]),
+        )
+        loaded = read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")
+        assert loaded["available"] is True
+        brief = loaded["brief"]
+        persisted_risk = brief["actions"][0]["event_risk"]
+        assert persisted_risk["evidence_chain_id"] == chain
+        if with_provenance:
+            assert persisted_risk["evidence_snapshot_hash"] == risk["evidence_snapshot_hash"]
+        else:
+            assert "evidence_snapshot_hash" not in persisted_risk
+        briefs.append(brief)
+    change, = diff_daily_decision_briefs(*briefs)["changes"]
+    assert change["change_type"] == "candidate_event_removed"
+    if with_provenance:
+        assert change["before_event_risk"]["evidence_snapshot_hash"] == "a" * 64
+        assert change["after_event_risk"]["evidence_snapshot_hash"] == "b" * 64
+    else:
+        assert "evidence_snapshot_hash" not in change["before_event_risk"]
