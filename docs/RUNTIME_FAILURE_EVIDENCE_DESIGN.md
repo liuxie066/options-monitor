@@ -51,6 +51,8 @@ wrapper 严格核对本轮身份、账户集合、布尔字段及退出码一致
 
 告警复用现有独立于富途的通道；三种登录人工动作码归同一事故族。限流状态在窄锁内作原子认领，每次事故最多**一次发送尝试**，不把 provider 提交等同于投递确认。提交结果不明保持认领并给运维可读的 `delivery_unknown`，人工或恢复事件才解锁下一次事故；`no_send` 不认领也不发送。其他 OpenD 暂时故障仍遵守现有限流及重试策略。
 
+唯一的发送前释放例外：`report_system_failure` 首次读取事故状态失败时，由该 owner 抛出 `SystemAlertPreSendFailure`（`stage=state_read`、`provider_attempted=False`），证明本次尚未写事故 journal、尚未调用 provider。OpenD guard 在原锁内仅当时间预约仍匹配且状态仍为 `delivery_unknown` 时，删除本次闩锁和 scope/family/时间完全匹配的 burst 记录，保留失败计数、其他预约和系统事故状态；修复状态后仍遵守事故 owner 的抑制规则。普通异常、写入失败、发送后读失败和非 confirmed 返回均不能解锁；释放失败保留保守边界并报告 `OPEND_ALERT_RELEASE_FAILED`。此规则不修复历史状态或重试未知投递。
+
 运行状态以最新 read model 和 pending/账户错误证据判定；登录细码在其账号和时间覆盖范围内优先于外层通用码，缺文件或本轮写证据缺口是 `unknown/evidence_incomplete`，不是健康。`quality_status` 使用同一原因码生成运行检查，不因服务 unit `active` 就覆盖业务故障。状态读取不触发 OpenD、告警或写入。
 
 `tick-cron --timeout 600` 的 systemd `TimeoutStartSec` 设为 900，`TimeoutStopSec` 给有界终止宽限；CLI 与 unit 保持可配置超时关系。失败终态用 systemd 可解析的 `<3>` 前缀写入 stderr，普通状态保持现有 stdout；渲染 unit 明示 `SyslogLevelPrefix=yes`。这只改变调度入口的分级，不重写全部日志系统。

@@ -12,6 +12,291 @@ from src.application import system_alerts
 from tests.notification_format_assertions import assert_mobile_flat_markdown
 
 
+def test_repaired_state_with_existing_unknown_incident_still_suppresses(monkeypatch, tmp_path: Path) -> None:
+    from src.application.multi_tick import opend_guard
+
+    sends = []
+
+    def send(*args):
+        sends.append(args)
+        return dict(delivery_confirmed=False, provider="fixture", fallback_used=False, attempted=True)
+
+    monkeypatch.setattr(system_alerts, "_send", send)
+    assert system_alerts.report_system_failure(
+        base=tmp_path, config=_cfg(), unit="OpenD", market="all", account="all",
+        failure_code="OPEND_LOGIN_ACTION_REQUIRED", stage="watchdog", run_id="fixture",
+        rc=1, first_error_at="2026-01-01T00:00:00+00:00", opend_login_state="OPEND_LOGIN_INVALID",
+    ) == "unconfirmed"
+    path = tmp_path / "output_shared/state/system_alerts.json"
+    original = path.read_bytes()
+    path.write_text("{broken")
+    fields = dict(base=tmp_path, cfg=_cfg(opend_alert_burst_max=1), error_code="OPEND_LOGIN_INVALID",
+                  message_text="invalid", skip_consecutive_gate=True)
+    assert not opend_guard.send_opend_alert(**fields)
+    path.write_bytes(original)
+    assert not opend_guard.send_opend_alert(**fields)
+    assert not opend_guard.send_opend_alert(**fields)
+    assert len(sends) == 1
+    assert path.read_bytes() == original
+
+
+def test_presend_state_repair_retries_once_with_burst_one(monkeypatch, tmp_path: Path, capsys) -> None:
+    from src.application.multi_tick import opend_guard
+
+    path = tmp_path / "output_shared/state/system_alerts.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{broken")
+    sends = []
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", _adapter(
+        lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True},
+    ))
+    fields = dict(base=tmp_path, cfg=_cfg(opend_alert_after_consecutive_failures=1, opend_alert_burst_max=1),
+                  error_code="OPEND_LOGIN_INVALID", message_text="invalid")
+    assert not opend_guard.send_opend_alert(**fields)
+    assert sends == []
+    assert "<3>OPEND_ALERT_INFRA_FAILED" in capsys.readouterr().err
+    state = json.loads(opend_guard.opend_alert_rl_path(tmp_path).read_text())
+    assert state["last_sent_utc_by_error"] == {}
+    assert state["last_delivery_status_by_error"] == {}
+    assert state["recent_sent"] == []
+    assert state["consecutive_fail_state"]["project"]["count"] == 1
+    assert path.read_text() == "{broken"
+
+    path.write_text("{}")
+    assert opend_guard.send_opend_alert(**fields)
+    assert not opend_guard.send_opend_alert(**fields)
+    assert len(sends) == 1
+    state = json.loads(opend_guard.opend_alert_rl_path(tmp_path).read_text())
+    assert state["consecutive_fail_state"]["project"]["count"] == 3
+
+
+@pytest.mark.parametrize("outcome", ["unconfirmed", "unconfigured", "suppressed", "exception"])
+def test_unproven_report_outcome_keeps_reservation(monkeypatch, tmp_path: Path, outcome) -> None:
+    from src.application.multi_tick import opend_guard
+
+    calls = []
+
+    def report(**kwargs):
+        calls.append(kwargs)
+        if outcome == "exception":
+            raise OSError("unproven stage")
+        return outcome
+
+    monkeypatch.setattr(opend_guard, "report_system_failure", report)
+    fields = dict(base=tmp_path, cfg=_cfg(), error_code="OPEND_LOGIN_INVALID",
+                  message_text="invalid", skip_consecutive_gate=True)
+    assert not opend_guard.send_opend_alert(**fields)
+    before = opend_guard.opend_alert_rl_path(tmp_path).read_bytes()
+    assert not opend_guard.send_opend_alert(**fields)
+    assert opend_guard.opend_alert_rl_path(tmp_path).read_bytes() == before
+    assert len(calls) == 1
+
+
+def test_post_send_state_read_failure_keeps_unknown_reservation(monkeypatch, tmp_path: Path) -> None:
+    from src.application.multi_tick import opend_guard
+
+    sends = []
+    original_read = system_alerts._read_state
+
+    def read(path):
+        if sends:
+            raise OSError("post-send read")
+        return original_read(path)
+
+    monkeypatch.setattr(system_alerts, "_read_state", read)
+    monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", _adapter(
+        lambda **kwargs: sends.append(kwargs) or {"delivery_confirmed": True},
+    ))
+    fields = dict(base=tmp_path, cfg=_cfg(), error_code="OPEND_LOGIN_INVALID",
+                  message_text="invalid", skip_consecutive_gate=True)
+    assert not opend_guard.send_opend_alert(**fields)
+    assert not opend_guard.send_opend_alert(**fields)
+    assert len(sends) == 1
+    state = json.loads(opend_guard.opend_alert_rl_path(tmp_path).read_text())
+    assert state["last_delivery_status_by_error"]["project::OPEND_LOGIN_ACTION_REQUIRED"] == "delivery_unknown"
+
+
+def test_presend_release_preserves_other_state(monkeypatch, tmp_path: Path) -> None:
+    from copy import deepcopy
+    from src.application.multi_tick import opend_guard
+
+    expected = {}
+
+    def fail(**kwargs):
+        path = opend_guard.opend_alert_rl_path(tmp_path)
+        state = json.loads(path.read_text())
+        key = "project::OPEND_LOGIN_ACTION_REQUIRED"
+        ts = state["last_sent_utc_by_error"][key]
+        own_record = state["recent_sent"][0]
+        state["recent_sent"].extend([
+            {"ts": ts, "scope": "other", "family": own_record["family"]},
+            {"ts": ts, "scope": "project", "family": "OPEND_RATE_LIMIT"},
+            {"ts": ts, "family": own_record["family"]}, "opaque",
+        ])
+        state["last_sent_utc_by_error"]["other::OPEND_LOGIN_ACTION_REQUIRED"] = ts
+        state["last_delivery_status_by_error"]["other::OPEND_LOGIN_ACTION_REQUIRED"] = "delivery_unknown"
+        state["consecutive_fail_state"] = {"project": {"count": 7, "last_ok_utc": "retained"}}
+        state["unrelated"] = {"retained": True}
+        path.write_text(json.dumps(state))
+        expected.update(deepcopy(state))
+        del expected["last_sent_utc_by_error"][key]
+        del expected["last_delivery_status_by_error"][key]
+        expected["recent_sent"] = expected["recent_sent"][1:]
+        raise system_alerts.SystemAlertPreSendFailure("fixture")
+
+    monkeypatch.setattr(opend_guard, "report_system_failure", fail)
+    assert not opend_guard.send_opend_alert(
+        tmp_path, _cfg(), error_code="OPEND_LOGIN_INVALID", message_text="invalid", skip_consecutive_gate=True,
+    )
+    assert json.loads(opend_guard.opend_alert_rl_path(tmp_path).read_text()) == expected
+
+
+@pytest.mark.parametrize("change", ["new_incident", "confirmed", "missing_reservation"])
+def test_late_presend_failure_never_writes_changed_reservation(monkeypatch, tmp_path: Path, capsys, change) -> None:
+    from src.application.multi_tick import opend_guard
+
+    expected = []
+
+    def fail(**kwargs):
+        path = opend_guard.opend_alert_rl_path(tmp_path)
+        key = "project::OPEND_LOGIN_ACTION_REQUIRED"
+        if change == "new_incident":
+            opend_guard.record_opend_recovery(tmp_path)
+            assert opend_guard.should_send_opend_alert(tmp_path, "OPEND_LOGIN_INVALID")
+        else:
+            state = json.loads(path.read_text())
+            if change == "confirmed":
+                state["last_delivery_status_by_error"][key] = "delivery_confirmed"
+            else:
+                state["last_sent_utc_by_error"].pop(key)
+            path.write_text(json.dumps(state))
+        expected.append(path.read_bytes())
+        monkeypatch.setattr(opend_guard, "write_json", lambda *args: pytest.fail("CAS mismatch must not write"))
+        raise system_alerts.SystemAlertPreSendFailure("late fixture")
+
+    monkeypatch.setattr(opend_guard, "report_system_failure", fail)
+    assert not opend_guard.send_opend_alert(
+        tmp_path, _cfg(), error_code="OPEND_LOGIN_INVALID", message_text="invalid", skip_consecutive_gate=True,
+    )
+    assert opend_guard.opend_alert_rl_path(tmp_path).read_bytes() == expected[0]
+    err = capsys.readouterr().err
+    assert "<3>OPEND_ALERT_INFRA_FAILED" in err
+    assert "<3>OPEND_ALERT_RELEASE_FAILED" not in err
+
+
+
+@pytest.mark.parametrize("fault", ["lock", "write"])
+def test_presend_release_failure_is_conservative(monkeypatch, tmp_path: Path, capsys, fault) -> None:
+    from contextlib import contextmanager
+    from src.application.multi_tick import opend_guard
+
+    before = []
+
+    def fail_io(*args):
+        raise OSError("isolated release failure")
+
+    @contextmanager
+    def fail_lock(*args):
+        raise OSError("isolated release lock failure")
+        yield
+
+    def fail(**kwargs):
+        before.append(opend_guard.opend_alert_rl_path(tmp_path).read_bytes())
+        if fault == "lock":
+            monkeypatch.setattr(opend_guard, "_alert_state_lock", fail_lock)
+        else:
+            monkeypatch.setattr(opend_guard, "write_json", fail_io)
+        raise system_alerts.SystemAlertPreSendFailure("fixture")
+
+    monkeypatch.setattr(opend_guard, "report_system_failure", fail)
+    assert not opend_guard.send_opend_alert(
+        tmp_path, _cfg(), error_code="OPEND_LOGIN_INVALID", message_text="invalid", skip_consecutive_gate=True,
+    )
+    assert opend_guard.opend_alert_rl_path(tmp_path).read_bytes() == before[0]
+    err = capsys.readouterr().err
+    assert "<3>OPEND_ALERT_INFRA_FAILED" in err
+    assert "<3>OPEND_ALERT_RELEASE_FAILED" in err
+
+
+
+@pytest.mark.parametrize("fault", [
+    "oserror", "invalid_json", "null", "array", "string", "sent_array", "statuses_array",
+])
+def test_presend_release_real_loader_failure_never_writes(monkeypatch, tmp_path: Path, capsys, fault) -> None:
+    from src.application.multi_tick import opend_guard
+    from src.infrastructure.io_utils import read_json
+
+    path = opend_guard.opend_alert_rl_path(tmp_path)
+    original_read_text = Path.read_text
+    before = []
+    reads = []
+    assert opend_guard.read_json is read_json
+
+    def faulty_read_text(self, *args, **kwargs):
+        if self != path:
+            return original_read_text(self, *args, **kwargs)
+        reads.append(self)
+        if fault == "oserror":
+            raise OSError("isolated underlying read failure")
+        if fault == "invalid_json":
+            return "{broken"
+        if fault == "sent_array":
+            return '{"last_sent_utc_by_error": []}'
+        if fault == "statuses_array":
+            return '{"last_delivery_status_by_error": []}'
+        return {"null": "null", "array": "[]", "string": '"invalid state"'}[fault]
+
+    def fail(**kwargs):
+        before.append(path.read_bytes())
+        monkeypatch.setattr(Path, "read_text", faulty_read_text)
+        monkeypatch.setattr(opend_guard, "write_json", lambda *args: pytest.fail("unreadable release must not write"))
+        raise system_alerts.SystemAlertPreSendFailure("fixture")
+
+    monkeypatch.setattr(opend_guard, "report_system_failure", fail)
+    assert not opend_guard.send_opend_alert(
+        tmp_path, _cfg(), error_code="OPEND_LOGIN_INVALID", message_text="invalid", skip_consecutive_gate=True,
+    )
+    assert reads == [path]
+    assert path.read_bytes() == before[0]
+    err = capsys.readouterr().err
+    assert "<3>OPEND_ALERT_INFRA_FAILED" in err
+    assert "<3>OPEND_ALERT_RELEASE_FAILED" in err
+
+
+def test_overlapping_presend_failure_releases_only_after_owner_returns(monkeypatch, tmp_path: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from src.application.multi_tick import opend_guard
+
+    entered, finish = Event(), Event()
+    calls = []
+
+    def report(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            entered.set()
+            assert finish.wait(5), "test did not release owner"
+            raise system_alerts.SystemAlertPreSendFailure("fixture")
+        return "confirmed"
+
+    monkeypatch.setattr(opend_guard, "report_system_failure", report)
+    fields = dict(base=tmp_path, cfg=_cfg(opend_alert_burst_max=1), error_code="OPEND_LOGIN_INVALID",
+                  message_text="invalid", skip_consecutive_gate=True)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(opend_guard.send_opend_alert, **fields)
+        try:
+            assert entered.wait(5), "owner did not enter"
+            assert not opend_guard.send_opend_alert(**fields)
+            assert len(calls) == 1
+        finally:
+            finish.set()
+        assert pending.result(timeout=5) is False
+    assert opend_guard.send_opend_alert(**fields)
+    assert not opend_guard.send_opend_alert(**fields)
+    assert len(calls) == 2
+
+
+
 def _adapter(send_fn):
     """A clawbot delivery-adapter selector; asserts the guard picks that provider."""
 
