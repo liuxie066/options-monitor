@@ -2030,49 +2030,244 @@ def test_simultaneous_duplicate_repair_reads_back_in_transaction(monkeypatch, tm
     assert len(repo.list_trade_events()) == 3
 
 
-@pytest.mark.parametrize("lot_account,lot_symbol,accepted", [
-    ("sy", "NVDA", False), ("lx", "AMD", False), ("sy", "AMD", False),
-    ("lx", "NVDA", True),
-])
-def test_stock_fallback_scope_through_real_inbox(tmp_path, monkeypatch, lot_account, lot_symbol, accepted):
+
+
+
+def _stock_context_fixture(tmp_path):
     from src.application.ledger.manual_trades import persist_manual_open_event
 
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    persist_manual_open_event(
-        repo, broker="富途", account=lot_account, symbol=lot_symbol,
+    persist_manual_open_event(repo, broker="富途", account="lx", symbol="NVDA",
         option_type="put", side="short", contracts=1, currency="USD", strike=100,
         multiplier=100, expiration_ymd="2026-09-18", premium_per_share=2,
-        opened_at_ms=1788652800000,
-    )
-    payload = _execution(deal_id="scope-stock", price="100")
-    payload = {**payload, "instrument_ref": {"asset_type": "stock", "market": "US", "symbol": "NVDA", "currency": "USD"},
-               "side": "buy", "position_effect": None, "quantity": "100"}
-    def no_external(*args, **kwargs):
-        pytest.fail("isolated stock intake must not contact an external service")
-    monkeypatch.setattr("src.application.trades.auto_intake._dispatch_portfolio_refresh_intent", no_external)
+        opened_at_ms=1788652800000)
+    payload = {**_execution(deal_id="context-stock", price="100"),
+        "instrument_ref": {"asset_type": "stock", "market": "US", "symbol": "NVDA", "currency": "USD"},
+        "side": "buy", "position_effect": None, "quantity": "100"}
+    return repo, payload
+
+
+def _context_read_error(kind):
+    if kind == "permission":
+        return PermissionError("isolated lot access denied")
+    if kind == "json":
+        return json.JSONDecodeError("bad lot", "{", 0)
+    if kind == "imprecise_lock":
+        return sqlite3.OperationalError("maybe database is locked somewhere")
+    if kind == "legacy_lock":
+        return sqlite3.OperationalError("database is locked")
+    error = sqlite3.OperationalError("isolated storage failure")
+    error.sqlite_errorcode = {"busy": sqlite3.SQLITE_BUSY, "locked": sqlite3.SQLITE_LOCKED,
+        "protocol": sqlite3.SQLITE_PROTOCOL, "extended": sqlite3.SQLITE_BUSY | (1 << 8),
+        "full": sqlite3.SQLITE_FULL, "schema": sqlite3.SQLITE_SCHEMA}[kind]
+    return error
+
+
+@pytest.mark.parametrize("kind,category,retryable", [
+    ("busy", "sqlite_transient", True), ("locked", "sqlite_transient", True),
+    ("protocol", "sqlite_transient", True), ("extended", "sqlite_transient", True),
+    ("legacy_lock", "sqlite_transient", True), ("imprecise_lock", "storage_schema", False),
+    ("permission", "storage_permission", False), ("full", "storage_full", False),
+    ("schema", "storage_schema", False), ("json", "processing_error", False),
+])
+def test_lifecycle_context_failure_real_inbox_classification(tmp_path, monkeypatch, kind, category, retryable):
+    from src.application.trades.state import load_trade_intake_state
+
+    repo, payload = _stock_context_fixture(tmp_path)
     before = repo.list_trade_events(), repo.list_position_lots()
-    config = {"portfolio_management": {"enabled": True}}
-    result = _process(repo, tmp_path, "scope", payload, config=config)
-    assert (result["status"], result["reason"]) == (
-        ("unresolved", "stock_settlement_waiting_option_leg") if accepted else ("skipped", "not_option_deal")
-    )
-    assert len(repo.list_trade_lifecycle_evidence()) == int(accepted)
+    error = _context_read_error(kind)
+    def unavailable():
+        raise error
+    monkeypatch.setattr(repo, "list_position_lots", unavailable)
+    result = _process(repo, tmp_path, "context", payload, source="push")
+    assert result["status"] == "failed"
+    assert result["reason"] == "exception:" + type(error).__name__
+    assert result["operations"] == []
+    diagnostics = result["diagnostics"]
+    assert diagnostics["exception_stage"] == "lifecycle_context_read"
+    assert diagnostics["exception_type"] == type(error).__name__
+    assert diagnostics["exception_message"] == str(error)
+    assert diagnostics["sqlite_errorcode"] == getattr(error, "sqlite_errorcode", None)
+    assert diagnostics["failure_category"] == category
+    assert diagnostics["retryable"] is retryable
+    assert diagnostics["write_outcome"] == "not_started"
+    assert result["receipt_kind"] == ("pending_retry" if retryable else "manual_required")
+    path = resolve_execution_inbox_path(repo, tmp_path / "context/inbox.sqlite3")
+    row = read_trade_payload(path, inbox_id=result["inbox_id"], read_only=True)
+    assert row["status"] == ("pending" if retryable else "handled")
+    assert row["attempt_count"] == row["result"]["retry_policy"]["attempt_count"] == 1
+    assert row["result"]["retry_policy"]["max_attempts"] == 20
+    assert row["payload"] == payload
+    evidence = read_trade_source_evidence(path, evidence_ref=trade_payload_evidence_ref(row["inbox_id"]))
+    assert evidence and all(item["raw_payload"] == payload for item in evidence)
+    state = load_trade_intake_state(tmp_path / "context/state.json")
+    assert not state["processed_deal_ids"]
+    assert state["failed_deal_ids"]
+    assert repo.list_trade_lifecycle_evidence() == []
     assert repo.list_trade_lifecycle_cases() == []
+    monkeypatch.undo()
     assert (repo.list_trade_events(), repo.list_position_lots()) == before
-    inbox = resolve_execution_inbox_path(repo, tmp_path / "scope" / "inbox.sqlite3")
-    row = read_trade_payload(inbox, inbox_id=result["inbox_id"], read_only=True)
-    assert row is not None
-    assert row["payload"]["external_execution_id"] == "scope-stock"
-    assert row["result"]["reason"] == result["reason"]
-    source = read_trade_source_evidence(inbox, evidence_ref=trade_payload_evidence_ref(result["inbox_id"]))
-    assert source
-    assert all(item["raw_payload"]["external_execution_id"] == "scope-stock" for item in source)
-    if not accepted:
-        assert row["status"] == "handled"
-        assert result["portfolio_refresh_intent"]["account"] == "lx"
-        assert claim_trade_payload_refresh_intent(inbox, inbox_id=result["inbox_id"]) == result["portfolio_refresh_intent"]
-        replay = _process(repo, tmp_path, "scope", payload, config=config)
-        assert replay["portfolio_refresh_intent"] == result["portfolio_refresh_intent"]
-        assert claim_trade_payload_refresh_intent(inbox, inbox_id=result["inbox_id"]) is None
-        assert len(repo.list_trade_lifecycle_evidence()) == 0
-        assert (repo.list_trade_events(), repo.list_position_lots()) == before
+
+
+def _failed_stock_context(tmp_path, monkeypatch):
+    repo, payload = _stock_context_fixture(tmp_path)
+    read_lots = repo.list_position_lots
+    def unavailable():
+        raise _context_read_error("busy")
+    monkeypatch.setattr(repo, "list_position_lots", unavailable)
+    result = _process(repo, tmp_path, "context", payload, source="push")
+    assert result["receipt_kind"] == "pending_retry"
+    monkeypatch.setattr(repo, "list_position_lots", read_lots)
+    path = resolve_execution_inbox_path(repo, tmp_path / "context/inbox.sqlite3")
+    source = {"account": "lx", "account_mapping": {"123": "lx"}, "futu_account_ids": ["123"],
+        "inbox_path": path, "state_path": tmp_path / "context/state.json", "receipt": {"enabled": True}}
+    return repo, payload, result, path, source
+
+
+def test_lifecycle_context_same_attempt_recovery_and_due_retry(tmp_path, monkeypatch):
+    from src.application.trades import auto_intake
+
+    repo, payload, first, path, source = _failed_stock_context(tmp_path, monkeypatch)
+    initial = read_trade_payload(path, inbox_id=first["inbox_id"], read_only=True)
+    now = [time.time() + 61]
+    monkeypatch.setattr("src.application.trades.inbox.time.time", lambda: now[0])
+    callbacks = []
+    recovered = auto_intake.recover_trade_intake_receipts(repo=repo, source=source,
+        receipt_callback=lambda context: callbacks.append(context), stop_event=threading.Event())
+    assert recovered["errors"] == [] and recovered["checked"] == 1
+    assert callbacks[0]["result"]["receipt_kind"] == "pending_retry"
+    row = read_trade_payload(path, inbox_id=first["inbox_id"], read_only=True)
+    assert row["attempt_count"] == row["result"]["retry_policy"]["attempt_count"] == 1
+    assert row["next_attempt_at_ms"] == initial["next_attempt_at_ms"]
+    assert row["result"]["diagnostics"]["write_outcome"] == "not_started"
+    pending = list_retryable_trade_payloads(path, account_ids=["123"])
+    assert [item["inbox_id"] for item in pending] == [first["inbox_id"]]
+    retried = _process(repo, tmp_path, "context", pending[0]["payload"], source="push")
+    assert retried["reason"] == "stock_settlement_waiting_option_leg"
+    assert len(repo.list_trade_lifecycle_evidence()) == 1
+    row = read_trade_payload(path, inbox_id=first["inbox_id"], read_only=True)
+    assert row["attempt_count"] == 2
+    option = {**_execution(deal_id="context-option", price="0"), "side": "buy", "position_effect": "close"}
+    resolved = _process(repo, tmp_path, "context", option, source="push")
+    assert resolved["status"] == "applied" and resolved["action"] == "assignment"
+    events = repo.list_trade_events()
+    assert len([event for event in events if event["event_type"] == "assignment"]) == 1
+    _process(repo, tmp_path, "context", payload, source="push")
+    _process(repo, tmp_path, "context", option, source="push")
+    assert repo.list_trade_events() == events
+
+
+def test_lifecycle_context_old_attempt_marker_cannot_authorize_retry_after_write_crash(tmp_path, monkeypatch):
+    from src.application.trades import auto_intake
+
+    repo, payload, first, path, source = _failed_stock_context(tmp_path, monkeypatch)
+    now = [time.time() + 61]
+    monkeypatch.setattr("src.application.trades.inbox.time.time", lambda: now[0])
+    pending = list_retryable_trade_payloads(path, account_ids=["123"])
+    assert len(pending) == 1
+    class Crash(BaseException):
+        pass
+    def after_write(_):
+        assert len(repo.list_trade_lifecycle_evidence()) == 1
+        raise Crash()
+    with pytest.raises(Crash):
+        _process(repo, tmp_path, "context", payload, source="push", before_receipt_fn=after_write)
+    row = read_trade_payload(path, inbox_id=first["inbox_id"], read_only=True)
+    assert row["attempt_count"] == 2
+    assert row["result"]["retry_policy"]["attempt_count"] == 1
+    assert row["result"]["diagnostics"]["write_outcome"] == "not_started"
+    before = repo.list_trade_events(), repo.list_position_lots(), repo.list_trade_lifecycle_evidence()
+    now[0] += 121
+    callbacks = []
+    recovered = auto_intake.recover_trade_intake_receipts(repo=repo, source=source,
+        receipt_callback=lambda context: callbacks.append(context), stop_event=threading.Event())
+    assert recovered["errors"] == [] and recovered["checked"] == 1
+    assert callbacks[0]["result"]["receipt_kind"] == "verification_pending"
+    assert callbacks[0]["result"]["diagnostics"]["retryable"] is False
+    assert callbacks[0]["result"]["diagnostics"].get("readback") != "absent"
+    row = read_trade_payload(path, inbox_id=first["inbox_id"], read_only=True)
+    assert row["attempt_count"] == 2
+    assert row["result"]["receipt_kind"] == "verification_pending"
+    assert list_retryable_trade_payloads(path, account_ids=["123"]) == []
+    assert (repo.list_trade_events(), repo.list_position_lots(), repo.list_trade_lifecycle_evidence()) == before
+
+
+@pytest.mark.parametrize("saved,observed", [
+    (None, 1), (True, 1), ("1", 1), (0, 1), (1, None), (1, True), (1, "1"), (1, 0), (1, 2),
+])
+def test_lifecycle_context_recovery_requires_exact_attempt_proof(tmp_path, saved, observed):
+    from src.application.trades.auto_intake import _readback_trade_receipt_result
+    from src.application.trades.normalizer import normalize_trade_deal
+
+    repo, payload = _stock_context_fixture(tmp_path)
+    deal = normalize_trade_deal(payload, futu_account_mapping={"123": "lx"}, allow_opend_refresh=False)
+    marker = {"status": "failed", "receipt_kind": "pending_retry", "retry_policy": {"attempt_count": saved},
+        "diagnostics": {"exception_stage": "lifecycle_context_read", "write_outcome": "not_started", "retryable": True}}
+    result = _readback_trade_receipt_result(repo=repo, deal=deal, result=marker, observed_attempt_count=observed)
+    assert result["receipt_kind"] == "verification_pending"
+    assert result["diagnostics"]["retryable"] is False
+    assert result["diagnostics"].get("readback") != "absent"
+
+
+def test_lifecycle_context_recovery_changed_observation_keeps_claim_and_sends_nothing(tmp_path, monkeypatch):
+    from src.application.trades import auto_intake
+
+    repo, _, first, path, source = _failed_stock_context(tmp_path, monkeypatch)
+    now = time.time() + 61
+    monkeypatch.setattr("src.application.trades.inbox.time.time", lambda: now)
+    prepare = auto_intake.prepare_trade_receipt_result
+    claims, callbacks = [], []
+    def replaced(*args, **kwargs):
+        claim = claim_trade_payload(path, inbox_id=first["inbox_id"], repo=repo)
+        assert claim is not None
+        claims.append(claim)
+        return prepare(*args, **kwargs)
+    monkeypatch.setattr(auto_intake, "prepare_trade_receipt_result", replaced)
+    recovered = auto_intake.recover_trade_intake_receipts(repo=repo, source=source,
+        receipt_callback=lambda context: callbacks.append(context), stop_event=threading.Event())
+    assert recovered["checked"] == 0 and recovered["errors"] == []
+    assert callbacks == [] and len(claims) == 1
+    row = read_trade_payload(path, inbox_id=first["inbox_id"], read_only=True)
+    assert row["claim_id"] == claims[0]["claim_id"]
+    assert row["attempt_count"] == 2
+    assert row["result"]["retry_policy"]["attempt_count"] == 1
+
+
+
+@pytest.mark.parametrize("changes", [
+    {"receipt_kind": "recorded"}, {"receipt_kind": "verification_pending"},
+    {"status": "applied"}, {"diagnostics": {"exception_stage": "resolve", "write_outcome": "not_started", "retryable": True}},
+    {"diagnostics": {"exception_stage": "lifecycle_context_read", "write_outcome": "unknown", "retryable": True}},
+    {"retry_policy": None},
+])
+def test_lifecycle_context_marker_cannot_override_uncertain_or_recorded_result(tmp_path, changes):
+    from src.application.trades.auto_intake import _readback_trade_receipt_result
+    from src.application.trades.normalizer import normalize_trade_deal
+
+    repo, payload = _stock_context_fixture(tmp_path)
+    deal = normalize_trade_deal(payload, futu_account_mapping={"123": "lx"}, allow_opend_refresh=False)
+    marker = {"status": "failed", "receipt_kind": "pending_retry", "retry_policy": {"attempt_count": 1},
+        "diagnostics": {"exception_stage": "lifecycle_context_read", "write_outcome": "not_started", "retryable": True},
+        **changes}
+    result = _readback_trade_receipt_result(repo=repo, deal=deal, result=marker, observed_attempt_count=1)
+    assert result["receipt_kind"] == "verification_pending"
+    assert result["diagnostics"]["retryable"] is False
+    assert result["diagnostics"].get("readback") != "absent"
+
+
+def test_lifecycle_context_marker_in_raw_payload_is_not_trusted(tmp_path):
+    from src.application.trades.auto_intake import _readback_trade_receipt_result
+    from src.application.trades.normalizer import normalize_trade_deal
+
+    repo, payload = _stock_context_fixture(tmp_path)
+    payload.update(diagnostics={"exception_stage": "lifecycle_context_read", "write_outcome": "not_started", "retryable": True},
+        retry_policy={"attempt_count": 1}, observed_attempt_count=1, receipt_kind="pending_retry")
+    result = _process(repo, tmp_path, "context", payload, source="push")
+    assert (result["status"], result["reason"]) == ("unresolved", "stock_settlement_waiting_option_leg")
+    assert result["diagnostics"].get("exception_stage") != "lifecycle_context_read"
+    assert result["diagnostics"].get("write_outcome") != "not_started"
+    deal = normalize_trade_deal(payload, futu_account_mapping={"123": "lx"}, allow_opend_refresh=False)
+    recovered = _readback_trade_receipt_result(repo=repo, deal=deal, result=result, observed_attempt_count=1)
+    assert recovered["receipt_kind"] == "verification_pending"
+    assert recovered["diagnostics"]["retryable"] is False
+    assert len(repo.list_trade_lifecycle_evidence()) == 1

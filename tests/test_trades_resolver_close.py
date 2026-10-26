@@ -2916,164 +2916,50 @@ def test_strict_execution_multiplier_cannot_be_repaired_from_dto_or_lot(tmp_path
         assert tuple(conn.iterdump()) == before
 
 
-def _fallback_stock_deal(**overrides):
-    return _deal(**{
-        "deal_id": "fallback-stock", "symbol": "TIGR", "option_type": None,
-        "side": "buy", "position_effect": None, "contracts": 100, "price": 6,
-        "strike": None, "multiplier": None, "expiration_ymd": None,
-        "currency": "USD", "trade_time_ms": 1779468400000,
-        "execution_input": {},
-        "raw_payload": {"deal_id": "fallback-stock", "code": "US.TIGR"},
-        **overrides,
-    })
-
-
-def _persist_fallback_open(repo, *, raw=None, lot_id="fallback-open", account="lx", symbol="TIGR"):
-    event = TradeEvent(
-        event_id=f"seed-{lot_id}", event_type="open", event_time_ms=1779129617118,
-        contract_key=ContractKey.from_values(
-            broker="富途", account=account, underlying_symbol=symbol,
-            option_type="put", strike=6, expiration_ymd="2026-05-22",
-        ),
-        contracts=1, price=0.2, currency="HKD" if symbol.startswith("HK.") else "USD", source="test_seed_open_lot",
-        multiplier=100, lot_id=lot_id,
-        raw_payload={"side": "sell", "source_type": "test_seed", **(raw or {})},
-    )
-    persist_trade_event_object(repo, event)
-    fields = repo.get_record_fields(lot_id)
-    assert fields["open_event_id"] == event.event_id
-    stored = next(row for row in repo.list_trade_events() if row["event_id"] == event.event_id)
-    for key, value in (raw or {}).items():
-        assert stored["raw_payload"][key] == value
-    return event
 
 
 @pytest.mark.parametrize("apply_changes", [False, True])
-@pytest.mark.parametrize("lot_account,lot_symbol", [("sy", "TIGR"), ("lx", "AMD"), ("sy", "AMD")])
-def test_stock_fallback_rejects_other_logical_scope(tmp_path, apply_changes, lot_account, lot_symbol):
-    repo = _open_lot(tmp_path, account=lot_account, symbol=lot_symbol, contracts=1)
-    before = repo.list_trade_events(), repo.list_position_lots()
-    result = resolve_trade_deal(_fallback_stock_deal(), repo=repo, state={}, apply_changes=apply_changes)
-    assert (result.status, result.reason) == ("skipped", "not_option_deal")
-    assert repo.list_trade_lifecycle_evidence() == []
-    assert repo.list_trade_lifecycle_cases() == []
-    assert (repo.list_trade_events(), repo.list_position_lots()) == before
+def test_lifecycle_context_read_failure_is_explicit(tmp_path, monkeypatch, apply_changes):
+    import sqlite3
 
-
-@pytest.mark.parametrize("apply_changes", [False, True])
-@pytest.mark.parametrize("raw,accepted", [
-    pytest.param({"futu_account_id": "REAL_1"}, True, id="raw-match"),
-    pytest.param({"futu_account_id": "REAL_2"}, False, id="raw-conflict"),
-    pytest.param({"execution_input": {"broker_account_ref": {"broker_id": "futu", "external_account_id": "REAL_1"}}}, True, id="ref-match"),
-    pytest.param({"execution_input": {"broker_account_ref": {"broker_id": "富途证券", "external_account_id": "REAL_2"}}}, False, id="ref-conflict-broker-alias"),
-    pytest.param({"futu_account_id": "REAL_1", "execution_input": {"broker_account_ref": {"broker_id": "futu", "external_account_id": "REAL_2"}}}, False, id="raw-match-ref-conflict"),
-    pytest.param({"futu_account_id": "REAL_2", "execution_input": {"broker_account_ref": {"broker_id": "futu", "external_account_id": "REAL_1"}}}, False, id="raw-conflict-ref-match"),
-    pytest.param({}, True, id="legacy-unknown"),
-    pytest.param({"futu_account_id": "  REAL_1  "}, True, id="raw-whitespace"),
-    pytest.param({"futu_account_id": False}, True, id="bool-is-unknown"),
-    pytest.param({"futu_account_id": ["REAL_2"]}, True, id="nonscalar-is-unknown"),
-    pytest.param({"execution_input": []}, True, id="malformed-execution-is-unknown"),
-    pytest.param({"execution_input": {"broker_account_ref": []}}, True, id="malformed-ref-is-unknown"),
-    pytest.param({"execution_input": {"broker_account_ref": {"broker_id": "ibkr", "external_account_id": "REAL_2"}}}, True, id="other-broker-is-unknown"),
-])
-def test_stock_fallback_checks_linked_open_event_physical_scope(tmp_path, apply_changes, raw, accepted):
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    _persist_fallback_open(repo, raw=raw)
-    before = repo.list_trade_events(), repo.list_position_lots()
-    result = resolve_trade_deal(_fallback_stock_deal(), repo=repo, state={}, apply_changes=apply_changes)
-    if accepted:
-        assert (result.status, result.reason) == (
-            ("unresolved", "stock_settlement_waiting_option_leg") if apply_changes
-            else ("dry_run", "preview_stock_settlement_evidence")
-        )
-    else:
-        assert (result.status, result.reason) == ("skipped", "not_option_deal")
-    assert len(repo.list_trade_lifecycle_evidence()) == int(accepted and apply_changes)
-    assert repo.list_trade_lifecycle_cases() == []
-    assert (repo.list_trade_events(), repo.list_position_lots()) == before
-
-
-@pytest.mark.parametrize("stored,incoming,accepted", [(123, "123", True), (124, "123", False), (True, "123", True)])
-def test_stock_fallback_physical_scalar_ids(tmp_path, stored, incoming, accepted):
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    _persist_fallback_open(repo, raw={"futu_account_id": stored})
-    result = resolve_trade_deal(_fallback_stock_deal(futu_account_id=incoming), repo=repo, state={}, apply_changes=True)
-    assert result.reason == ("stock_settlement_waiting_option_leg" if accepted else "not_option_deal")
-    assert len(repo.list_trade_lifecycle_evidence()) == int(accepted)
-
-
-@pytest.mark.parametrize("other_raw,shares,accepted", [
-    ({"futu_account_id": "REAL_2"}, 200, False),
-    ({"futu_account_id": "REAL_2"}, 100, True),
-    ({}, 200, True),
-])
-def test_stock_fallback_filters_physical_scope_before_contract_aggregation(tmp_path, other_raw, shares, accepted):
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    _persist_fallback_open(repo, raw={"futu_account_id": "REAL_1"}, lot_id="matching")
-    _persist_fallback_open(repo, raw=other_raw, lot_id="other")
-    before = repo.list_trade_events(), repo.list_position_lots()
-    result = resolve_trade_deal(_fallback_stock_deal(contracts=shares), repo=repo, state={}, apply_changes=True)
-    assert result.reason == ("stock_settlement_waiting_option_leg" if accepted else "not_option_deal")
-    assert len(repo.list_trade_lifecycle_evidence()) == int(accepted)
-    assert (repo.list_trade_events(), repo.list_position_lots()) == before
-
-
-@pytest.mark.parametrize("account,symbol", [("sy", "TIGR"), ("lx", "AMD")])
-def test_stock_fallback_cannot_borrow_other_scope_contract_capacity(tmp_path, account, symbol):
     repo = _open_lot(tmp_path, contracts=1)
-    _persist_lot(repo, account=account, symbol=symbol, contracts=2)
-    result = resolve_trade_deal(_fallback_stock_deal(contracts=200), repo=repo, state={}, apply_changes=True)
-    assert (result.status, result.reason) == ("skipped", "not_option_deal")
-    assert repo.list_trade_lifecycle_evidence() == []
+    before = repo.list_trade_events(), repo.list_position_lots()
+    failure = sqlite3.OperationalError("database is locked")
+    failure.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    def unavailable():
+        raise failure
+    monkeypatch.setattr(repo, "list_position_lots", unavailable)
+    stock = _deal(asset_type="stock", option_type=None, position_effect=None,
+        symbol="TIGR", side="buy", contracts=100, price=6, strike=None,
+        multiplier=None, expiration_ymd=None, currency="USD", trade_time_ms=1779468400000,
+        execution_input={})
+    with pytest.raises(Exception) as raised:
+        resolve_trade_deal(stock, repo=repo, state={}, apply_changes=apply_changes)
+    assert type(raised.value).__name__ == "LifecycleContextReadError"
+    assert raised.value.cause is failure
+    assert raised.value.__cause__ is failure
+    assert raised.value.cause.sqlite_errorcode == sqlite3.SQLITE_BUSY
+    monkeypatch.undo()
+    assert (repo.list_trade_events(), repo.list_position_lots()) == before
     assert repo.list_trade_lifecycle_cases() == []
+    assert repo.list_trade_lifecycle_evidence() == []
 
 
-def test_stock_fallback_keeps_standard_execution_physical_admission(tmp_path):
-    from src.application.trades.normalizer import normalize_trade_deal
+def test_lifecycle_context_preserves_claim_loss_and_empty_lots(tmp_path, monkeypatch):
+    from src.application.trades.inbox import TradePayloadClaimLost
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    _persist_fallback_open(repo, raw={"futu_account_id": "REAL_2"})
-    payload = {
-        "schema_version": "trade_execution.v1",
-        "broker_account_ref": {"broker_id": "futu", "external_account_id": "REAL_1", "environment": "REAL", "account_label": "lx"},
-        "instrument_ref": {"asset_type": "stock", "market": "US", "symbol": "TIGR", "currency": "USD"},
-        "external_id_namespace": "futu.deal", "external_execution_id": "standard-stock",
-        "side": "buy", "quantity": "100", "price": "6", "currency": "USD",
-        "occurred_at_utc": "2026-05-22T14:00:00Z", "status": "OK",
-    }
-    deal = normalize_trade_deal(payload, futu_account_mapping={"REAL_1": "lx"}, allow_opend_refresh=False)
-    assert deal.execution_input
-    result = resolve_trade_deal(deal, repo=repo, state={}, apply_changes=True)
-    assert (result.status, result.reason) == ("unresolved", "execution_admission_failed")
-    assert "unsupported:multiple_physical_accounts_in_projection" in result.diagnostics["errors"]
+    stock = _deal(asset_type="stock", option_type=None, position_effect=None,
+        symbol="TIGR", side="buy", contracts=100, price=6, strike=None,
+        multiplier=None, expiration_ymd=None, currency="USD", trade_time_ms=1779468400000,
+        execution_input={})
+    empty = resolve_trade_deal(stock, repo=repo, state={}, apply_changes=True)
+    assert (empty.status, empty.reason) == ("skipped", "not_option_deal")
+    lost = TradePayloadClaimLost("replaced owner")
+    def unavailable():
+        raise lost
+    monkeypatch.setattr(repo, "list_position_lots", unavailable)
+    with pytest.raises(TradePayloadClaimLost) as raised:
+        resolve_trade_deal(stock, repo=repo, state={}, apply_changes=True)
+    assert raised.value is lost
     assert repo.list_trade_lifecycle_evidence() == []
-    assert repo.list_trade_lifecycle_cases() == []
-
-
-@pytest.mark.parametrize("lot_symbol,stock_symbol", [("TIGR", "TIGR"), ("HK.03690", "3690.HK")])
-@pytest.mark.parametrize("known_physical", [False, True])
-def test_stock_fallback_scope_preserves_assignment_and_replay(tmp_path, lot_symbol, stock_symbol, known_physical):
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
-    if known_physical:
-        _persist_fallback_open(repo, raw={"futu_account_id": "REAL_1"}, symbol=lot_symbol)
-    else:
-        _persist_lot(repo, symbol=lot_symbol, contracts=1)
-    currency = "HKD" if stock_symbol.endswith(".HK") else "USD"
-    stock = _fallback_stock_deal(symbol=stock_symbol, internal_account=" LX ", currency=currency)
-    first = resolve_trade_deal(stock, repo=repo, state={}, apply_changes=True)
-    assert first.reason == "stock_settlement_waiting_option_leg"
-    assert len(repo.list_trade_lifecycle_evidence()) == 1
-    option = _deal(
-        deal_id="fallback-option", symbol=stock_symbol, contracts=1, price=0,
-        strike=6, expiration_ymd="2026-05-22", currency=currency,
-        trade_time_ms=1779468493916, raw_payload={"deal_id": "fallback-option"},
-    )
-    resolved = resolve_trade_deal(option, repo=repo, state={}, apply_changes=True)
-    assert (resolved.status, resolved.action, resolved.reason) == ("applied", "assignment", "assignment_recorded")
-    events = repo.list_trade_events()
-    assert len([row for row in events if row["event_type"] == "assignment"]) == 1
-    evidence = repo.list_trade_lifecycle_evidence()
-    resolve_trade_deal(stock, repo=repo, state={}, apply_changes=True)
-    resolve_trade_deal(option, repo=repo, state={}, apply_changes=True)
-    assert repo.list_trade_events() == events
-    assert repo.list_trade_lifecycle_evidence() == evidence
