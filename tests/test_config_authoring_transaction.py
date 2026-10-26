@@ -71,6 +71,7 @@ def _publish_locked(lock, source: Path, doc: dict, runtime_root: Path, **kwargs)
 def _simulate_unsafe_target(monkeypatch: pytest.MonkeyPatch, target: Path, violation: str) -> None:
     original_stat = Path.stat
     original_run = subprocess.run
+    original_listxattr = getattr(os, "listxattr", None)
     probe_for_target = False
 
     def simulated_stat(path: Path, *args, **kwargs):
@@ -86,7 +87,7 @@ def _simulate_unsafe_target(monkeypatch: pytest.MonkeyPatch, target: Path, viola
             return os.stat_result(values)
         return result
 
-    def acl_names(candidate):
+    def acl_names(candidate, *, follow_symlinks=True):
         nonlocal probe_for_target
         path = Path(candidate)
         if not path.name.startswith(".om-owner-"):
@@ -97,6 +98,8 @@ def _simulate_unsafe_target(monkeypatch: pytest.MonkeyPatch, target: Path, viola
             path.name.startswith(".om-owner-") and probe_for_target and violation == "probe_acl"
         ):
             return ["system.posix_acl_access"]
+        if path != target and not path.name.startswith(".om-owner-") and original_listxattr is not None:
+            return original_listxattr(candidate, follow_symlinks=follow_symlinks)
         return []
 
     def simulated_run(args, *positional, **kwargs):
