@@ -2140,6 +2140,7 @@ def _runtime_status_upgrade_fixture(tmp_path: Path, *, target_version: str = "1.
             {
                 "service_provider": "systemd",
                 "runtime_root": str(tmp_path),
+                "feishu_ws": {"config_key": "us"},
                 "services": [
                     {"name": "options-monitor-trade-intake.service"},
                     {"name": "options-monitor-feishu-ws.service"},

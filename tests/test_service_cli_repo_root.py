@@ -36,11 +36,9 @@ REPO = Path(__file__).resolve().parents[1]
 def test_cli_drift_incomplete_inbound_is_config_error_without_effects(
     tmp_path, monkeypatch, capsys, target, empty_services, inbound, metadata, error,
 ):
-    from src.application import service_deploy as deploy, service_drift as owner
+    from src.application import service_drift as owner
 
-    credential_name = deploy._bot_credential_name
     fixture = _synthetic_drift_context(monkeypatch, tmp_path, target=target)
-    monkeypatch.setattr(deploy, "_bot_credential_name", credential_name)
     profile = fixture["profile"]
     profile["markets"] = ["us", "hk"]
     profile[inbound] = {"enabled": True, **metadata}

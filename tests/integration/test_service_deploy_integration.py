@@ -807,27 +807,40 @@ def test_service_drift_confirm_uses_sudo_fallback_for_systemd_permission_errors(
 def test_service_drift_rejects_incomplete_enabled_inbound_without_effects(
     tmp_path, monkeypatch, target, intent, inbound, missing, error,
 ):
-    from src.application import service_deploy as deploy, service_drift as owner
+    from src.application import service_drift as owner
+    from src.application.service_deploy import render_service_bundle
 
-    credential_name = deploy._bot_credential_name
     fixture = _synthetic_drift_context(monkeypatch, tmp_path, target=target)
-    monkeypatch.setattr(deploy, "_bot_credential_name", credential_name)
     profile = fixture["profile"]
     profile["markets"] = ["us", "hk"]
     profile[inbound] = {"enabled": True, "config_key": "us"}
     if inbound == "wechat_clawbot":
         profile[inbound]["allowed_senders"] = "wechat:fixture"
-    bundle = owner._expected_bundle_from_profile(
-        profile, provider=target, repo_root=fixture["repo"], runtime_root=fixture["runtime"],
+    bundle = render_service_bundle(
+        target=target, repo_root=fixture["repo"], runtime_root=fixture["runtime"],
+        accounts=profile["accounts"], markets=profile["markets"],
+        config_paths=profile["config_paths"], env_file=profile["env_file"],
+        deploy_home=fixture["home"], use_default_deploy_user=False,
+        include_feishu_ws=inbound == "feishu_ws", feishu_ws_config_key="us",
+        include_wechat_clawbot=inbound == "wechat_clawbot", wechat_clawbot_config_key="us",
+        wechat_clawbot_allowed_senders="wechat:fixture",
     )
     for item in bundle["files"]:
         if item["kind"] not in {"systemd_service", "systemd_timer", "launchd_plist"}:
             continue
-        path = owner._install_path(item, provider=target, ctx={"systemd_unit_root": fixture["units"]})
-        assert path.is_relative_to(tmp_path)
+        install_path = Path(item["install_path"])
+        if target == "systemd":
+            path = fixture["units"] / install_path.name
+            assert path.is_relative_to(fixture["units"])
+        else:
+            path = install_path.expanduser().resolve()
+            assert path.is_relative_to(fixture["home"].resolve())
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(item["content"], encoding="utf-8")
-    profile["services"] = owner._bundle_profile(bundle)["services"]
+    rendered_profile = json.loads(next(
+        item["content"] for item in bundle["files"] if item["kind"] == "service_profile"
+    ))
+    profile["services"] = rendered_profile["services"]
     profile[inbound].pop(missing)
     if intent == "empty-enabled":
         profile["services"] = []
@@ -862,11 +875,9 @@ def test_service_drift_rejects_incomplete_enabled_inbound_without_effects(
 def test_service_drift_renders_valid_enabled_inbound_even_with_empty_services(
     tmp_path, monkeypatch, target, inbound, source,
 ):
-    from src.application import service_deploy as deploy, service_drift as owner
+    from src.application import service_drift as owner
 
-    credential_name = deploy._bot_credential_name
     fixture = _synthetic_drift_context(monkeypatch, tmp_path, target=target)
-    monkeypatch.setattr(deploy, "_bot_credential_name", credential_name)
     profile = fixture["profile"]
     profile["services"] = []
     profile[inbound] = {"enabled": True}

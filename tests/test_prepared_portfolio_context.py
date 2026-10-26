@@ -763,7 +763,7 @@ def test_completed_context_is_promoted_while_slow_peer_is_killed(
         popen_factory=mixed_factory,
     )
 
-    assert manifests["lx"]["status"] == "ready"
+    assert manifests["lx"]["status"] == "ready", manifests
     assert manifests["sy"]["status"] == "unavailable"
     assert manifests["sy"]["reason"] == "portfolio_context_deadline_exceeded"
     assert (states["lx"] / manifests["lx"]["portfolio_context_relpath"]).is_file()

@@ -625,7 +625,7 @@ def _synthetic_drift_context(monkeypatch, tmp_path: Path, *, target="systemd", s
         monkeypatch.setattr(drift, name, fail(name))
     for name in (
         "default_systemd_deploy_user", "_opend_service_plans_from_authoring_config",
-        "_legacy_opend_service_plan", "_bot_credential_name", "_systemd_secret_bindings",
+        "_legacy_opend_service_plan", "_systemd_secret_bindings",
     ):
         monkeypatch.setattr(deploy, name, fail(name))
     bundle = _render_bundle(
