@@ -1,0 +1,974 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.5.9",
+  "base": {
+    "tag": "v4.5.8",
+    "commit": "b83d8371a38ac8f0e285bf4d78ba111daed1fabf"
+  },
+  "reviewed_head": "65eaa24b56d1cc68a6ca0741293e885618607366",
+  "commits": [
+    {
+      "sha": "ca965e3626f6836e63cc0137427f9d2562ae17e3",
+      "subject": "chore(gateflow): accept plan for issue 711"
+    },
+    {
+      "sha": "16b3eb42a453df1ef6579b8af6a75d6c3bcf5a8a",
+      "subject": "chore(gateflow): accept plan for issue 780"
+    },
+    {
+      "sha": "51e25a3362c76e81a0807a214ae9fd8d97fba4bd",
+      "subject": "chore(gateflow): accept plan for issue 793"
+    },
+    {
+      "sha": "5fc3c29a8bc12413cccc82d51b54cfb408c89c72",
+      "subject": "chore(gateflow): accept plan for issue 812"
+    },
+    {
+      "sha": "f670e6290c77b8af818b97ada2eef55d2e2ffcfd",
+      "subject": "fix(upgrade): preserve custom remote cache lifecycle"
+    },
+    {
+      "sha": "587e4a956336047f7315be95d4fedf3bdb0225a5",
+      "subject": "fix(upgrade): validate rollback release identity"
+    },
+    {
+      "sha": "16ab1ec3c3e415873820c22e00c07f0969e1a1b6",
+      "subject": "chore(gateflow): accept plan for issue 710"
+    },
+    {
+      "sha": "b0787394f305d66c39f697eb8e6e4e193819fb3f",
+      "subject": "chore(gateflow): accept deepreview for issue 780"
+    },
+    {
+      "sha": "83ab79014b9601990530c845a4e3cdb3dcadf31e",
+      "subject": "chore(gateflow): accept deepreview for issue 711"
+    },
+    {
+      "sha": "407d06e2113baac3103669ae2c16a1191d071633",
+      "subject": "fix(research): block GC when protected state is hidden"
+    },
+    {
+      "sha": "a3bf65d9c0888291e7ef8dac41b33a624207e1fb",
+      "subject": "chore(gateflow): accept deepreview for issue 812"
+    },
+    {
+      "sha": "1294b81cc6673316e9b97766e34af2faa055bc98",
+      "subject": "fix(service): reject colliding OpenD identities"
+    },
+    {
+      "sha": "09f70ef8c379ecf1e520cf20adcd50189b12c8a5",
+      "subject": "test(upgrade): exercise rollback through public lock entry"
+    },
+    {
+      "sha": "7f892b15adf074d9183779d03518b06c44579f00",
+      "subject": "chore(gateflow): accepted-deepreview for issue 793"
+    },
+    {
+      "sha": "b55e1092f2848b7298cb8c4fad3f21d2cbb378a6",
+      "subject": "fix(upgrade): require complete published release targets"
+    },
+    {
+      "sha": "217475875fbc3b8ddbaee2a2c03d0ccfef0d6092",
+      "subject": "chore(gateflow): accept deepreview for issue 710"
+    },
+    {
+      "sha": "ac5d8850907ef6d11e391829eeba858c9fe421c1",
+      "subject": "fix(upgrade): integrate cache origin with published release eligibility"
+    },
+    {
+      "sha": "82330e3a138d8d922301ff7fee76f14e478637c0",
+      "subject": "fix(upgrade): integrate rollback target identity validation"
+    },
+    {
+      "sha": "c244298c1588f05173846c7f8719ae091ae98f84",
+      "subject": "fix(service): integrate OpenD service identity collision rejection"
+    },
+    {
+      "sha": "b6dc1ff03db2ccec4967e92faa16a3446f779798",
+      "subject": "fix(maintenance): integrate protected GC and finalize five issue fixes"
+    },
+    {
+      "sha": "704086b3b24d6f45ea9b874a5da22f85231bd6ac",
+      "subject": "Merge pull request #909 from liuxie066/codex/fix-710-published-release"
+    },
+    {
+      "sha": "32adc8a717af55913d2dd587167f62426086faa5",
+      "subject": "chore(gateflow): accept plan for issue 726"
+    },
+    {
+      "sha": "81f04ad4b0d52ca3a5167ed5f7c110994f2ed665",
+      "subject": "chore(gateflow): accept plan for issue 800"
+    },
+    {
+      "sha": "900c4ad5972d71911bd612b39f124647ea148db5",
+      "subject": "chore(gateflow): accept plan for issue 804"
+    },
+    {
+      "sha": "ead4e2f4eeeb6f7499dda770f24381f82b5ae7c0",
+      "subject": "chore(gateflow): accept plan for issue 683"
+    },
+    {
+      "sha": "a941fa14b47032a72f30dea6060e62f389e62164",
+      "subject": "chore(gateflow): accept plan for issue 730"
+    },
+    {
+      "sha": "6970496aa55edf82ec4c245ced3233e7e0e95903",
+      "subject": "chore(gateflow): accept plan for issue 790"
+    },
+    {
+      "sha": "0eeea3b31611c121b69af4cd442f341ad081d1d4",
+      "subject": "chore(gateflow): accept plan for issue 809"
+    },
+    {
+      "sha": "9b700b2f2c4451e4cb600f17480ec77710b295ba",
+      "subject": "fix(secrets): distinguish credential access failures from absence"
+    },
+    {
+      "sha": "93293a2e7b9f5018d70b21547b3a0c3fee708ef0",
+      "subject": "chore(gateflow): accept revised plan for issue 791"
+    },
+    {
+      "sha": "7ae06c321683eb35e76163a238892068c8c75589",
+      "subject": "chore(gateflow): accept issue 726 slice S1"
+    },
+    {
+      "sha": "054e1397d2efc7c3a6c9f0acd2197aff2bab5bd6",
+      "subject": "chore(gateflow): accept issue 800 slice S1"
+    },
+    {
+      "sha": "ee9fd1b9f2b6ce332b1067d0f077f80691b4f7a9",
+      "subject": "chore(gateflow): accept deepreview for issue 683"
+    },
+    {
+      "sha": "ec0963730047b17b0bf1aee74bfe99ea802b9a9b",
+      "subject": "fix(trades): fail incomplete listener shutdown"
+    },
+    {
+      "sha": "ea61665730bed487dc85ab2bf0069bbec1fd0975",
+      "subject": "chore(gateflow): accept deepreview for issue 804"
+    },
+    {
+      "sha": "64d593fa5201a473f991c2df0d59dfd315cf35f7",
+      "subject": "chore(gateflow): accept revised plan for issue 810"
+    },
+    {
+      "sha": "f3e1233efb2203ba94fdeab3feb85932700b0059",
+      "subject": "chore(gateflow): accept deepreview for issue 726"
+    },
+    {
+      "sha": "6a0ac79249c87f1f5a0455824f8dc38bdc29f54a",
+      "subject": "chore(gateflow): accept deepreview for issue 800"
+    },
+    {
+      "sha": "e1e978f24840f43b43f8b8cbdc68023a49c1c798",
+      "subject": "gateflow(issue-730): accept S1"
+    },
+    {
+      "sha": "028f0003557a12c1a40bfa7da3ae12e73a979ed6",
+      "subject": "chore(gateflow): accept issue 730 deepreview"
+    },
+    {
+      "sha": "510ac410a2b0f4324ac825b351af125d6d05e84c",
+      "subject": "chore(gateflow): accept issue 808 plan"
+    },
+    {
+      "sha": "0ddc1681137334170a9874b620651379cf8bf6ab",
+      "subject": "fix(brief): prevent stale revisions restoring candidates"
+    },
+    {
+      "sha": "442833dbfc5a88b0e5be9ec85426b29e2200fc64",
+      "subject": "test(cleanup): isolate runtime guards in cleanup fixtures"
+    },
+    {
+      "sha": "f67b81466b3a1e24b21ec07f201159adb9fcab27",
+      "subject": "chore(gateflow): accept issue 809 deepreview"
+    },
+    {
+      "sha": "6b577578da98a71b95d6b8d663008a89e2571c28",
+      "subject": "fix(trades): isolate lifecycle stock fallback scope"
+    },
+    {
+      "sha": "f17c97dcf75481df54cb4d8d0f7720b535f22559",
+      "subject": "chore(gateflow): accept issue 791 slice S1"
+    },
+    {
+      "sha": "5f4b467524a0da37d995263e8283d11560d736b3",
+      "subject": "chore(gateflow): accept issue 790 aggregate deepreview"
+    },
+    {
+      "sha": "b5cc1594e626716018c3c9c569493558aa9aaa99",
+      "subject": "gateflow(issue-808): accept S1"
+    },
+    {
+      "sha": "01558d2cdf08dc84147e464a2c26e0aaea1db709",
+      "subject": "gateflow(issue-808): accept deepreview"
+    },
+    {
+      "sha": "841b899651d664124fa4485fb9aa76c5c45ec51e",
+      "subject": "chore(gateflow): accept issue 791 aggregate deepreview"
+    },
+    {
+      "sha": "e9a8a064e821c1731722dfb372fade2fd15b5f84",
+      "subject": "fix(trades): validate all declared audit executions"
+    },
+    {
+      "sha": "fa53d03d9baf91a5bd22cd96bd32b88b01d3f84c",
+      "subject": "chore(gateflow): accept issue 810 slice S810"
+    },
+    {
+      "sha": "ee68fec1cf7b0ed041006e79fc8775d38fa6b1ef",
+      "subject": "chore(gateflow): accept deepreview for issue 810"
+    },
+    {
+      "sha": "ed6c45982bd7a83151ba136add05f133b0562679",
+      "subject": "merge(maintenance): integrate issue 683"
+    },
+    {
+      "sha": "16668e35c80efa4ca5115649dfb3c9b9f32bfed2",
+      "subject": "merge(maintenance): integrate issue 726"
+    },
+    {
+      "sha": "75e211a6f046f8c6a10c553c1e57a6de5e604db3",
+      "subject": "merge(maintenance): integrate issue 730"
+    },
+    {
+      "sha": "4d8acf25568429ee5d534670ec807a1e9a76e742",
+      "subject": "merge(maintenance): integrate issue 790"
+    },
+    {
+      "sha": "163b40843e888607181c346381661f2f4bac7709",
+      "subject": "merge(maintenance): integrate issue 791"
+    },
+    {
+      "sha": "5f0392e169da14f15c6a8697664c63fd7e7199ef",
+      "subject": "merge(maintenance): integrate issue 800"
+    },
+    {
+      "sha": "935896684ea1f31f24cba3f5faa5a37fb53bdf70",
+      "subject": "merge(maintenance): integrate issue 804"
+    },
+    {
+      "sha": "5cfe480be0170d0ca4735cb9767d831c4aea9eb1",
+      "subject": "merge(maintenance): integrate issue 808"
+    },
+    {
+      "sha": "9085a484cf0bf3334e21b9ee8fb0c5e025b15938",
+      "subject": "merge(maintenance): integrate issue 809"
+    },
+    {
+      "sha": "56f86cd9b3f515abfe111b382c4c8637060318b5",
+      "subject": "test(service): preserve quoted healthcheck commands in integration"
+    },
+    {
+      "sha": "65eaa24b56d1cc68a6ca0741293e885618607366",
+      "subject": "Merge pull request #919 from liuxie066/codex/fix-810-inbound-message-claim-20261025"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "显式研究归档在复制或写入前验证全部请求 run，缺失项集中列出并零写入，保留未指定 run 的默认选择与有效归档（#730）。",
+      "commits": [
+        "e1e978f24840f43b43f8b8cbdc68023a49c1c798",
+        "75e211a6f046f8c6a10c553c1e57a6de5e604db3",
+        "56f86cd9b3f515abfe111b382c4c8637060318b5",
+        "65eaa24b56d1cc68a6ca0741293e885618607366"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "股票结算生命周期回退仅使用同账户、同标的且无明确物理账户冲突的期权批次，保留历史缺证兼容、合法分笔和重放（#790）。",
+      "commits": [
+        "6b577578da98a71b95d6b8d663008a89e2571c28",
+        "4d8acf25568429ee5d534670ec807a1e9a76e742",
+        "163b40843e888607181c346381661f2f4bac7709",
+        "5f0392e169da14f15c6a8697664c63fd7e7199ef",
+        "56f86cd9b3f515abfe111b382c4c8637060318b5",
+        "65eaa24b56d1cc68a6ca0741293e885618607366"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "生命周期上下文读取失败明确进入原有失败与重试分类，保留 claim 丢失、零写入证据及同次 attempt 恢复边界，避免误作非期权成交（#791）。",
+      "commits": [
+        "f17c97dcf75481df54cb4d8d0f7720b535f22559",
+        "163b40843e888607181c346381661f2f4bac7709",
+        "5f0392e169da14f15c6a8697664c63fd7e7199ef",
+        "56f86cd9b3f515abfe111b382c4c8637060318b5",
+        "65eaa24b56d1cc68a6ca0741293e885618607366"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "成交对账的非期权审计跳过须由同条记录证明逻辑账户、物理账户及成交身份，独立校验全部明确 execution 声明；缺证或冲突继续待核实，保留条目自身跳过依据（#808）。",
+      "commits": [
+        "b5cc1594e626716018c3c9c569493558aa9aaa99",
+        "e9a8a064e821c1731722dfb372fade2fd15b5f84",
+        "5cfe480be0170d0ca4735cb9767d831c4aea9eb1",
+        "56f86cd9b3f515abfe111b382c4c8637060318b5",
+        "65eaa24b56d1cc68a6ca0741293e885618607366"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Daily Brief 候选更新在锁内校验最新成功 revision，过期扫描不覆盖候选也不触发普通候选通知，保留固定时点恢复及账户、市场和交易日隔离（#809）。",
+      "commits": [
+        "0ddc1681137334170a9874b620651379cf8bf6ab",
+        "9085a484cf0bf3334e21b9ee8fb0c5e025b15938",
+        "56f86cd9b3f515abfe111b382c4c8637060318b5",
+        "65eaa24b56d1cc68a6ca0741293e885618607366"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "入站控制在业务效果前持久化消息 claim 并以 owner token 完成，重复或未决处理不占用最终回复键，取消保留原目标与事务所有权，避免重放重复执行（#810）。",
+      "commits": [
+        "fa53d03d9baf91a5bd22cd96bd32b88b01d3f84c",
+        "56f86cd9b3f515abfe111b382c4c8637060318b5",
+        "65eaa24b56d1cc68a6ca0741293e885618607366"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "systemd 凭据状态区分明确缺失与权限/I/O 无法核验，访问错误沿现有脱敏失败出口返回，保留元数据规则及运行时兼容回退（#683）。",
+      "commits": [
+        "9b700b2f2c4451e4cb600f17480ec77710b295ba",
+        "ed6c45982bd7a83151ba136add05f133b0562679",
+        "16668e35c80efa4ca5115649dfb3c9b9f32bfed2",
+        "5f0392e169da14f15c6a8697664c63fd7e7199ef",
+        "65eaa24b56d1cc68a6ca0741293e885618607366"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "确认清理与升级/回滚共享转换互斥，持锁重读活动版本及保留依据，忙时零删除并保留预览和升级后清理语义（#726）。",
+      "commits": [
+        "7ae06c321683eb35e76163a238892068c8c75589",
+        "442833dbfc5a88b0e5be9ec85426b29e2200fc64",
+        "16668e35c80efa4ca5115649dfb3c9b9f32bfed2",
+        "5f0392e169da14f15c6a8697664c63fd7e7199ef",
+        "56f86cd9b3f515abfe111b382c4c8637060318b5",
+        "65eaa24b56d1cc68a6ca0741293e885618607366"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Tick 同 key 的首次 claim 与过期恢复串行化，终态写入核对当前 run 身份，阻止并发恢复及旧执行覆盖继任者，保留原有时间桶和超时策略（#800）。",
+      "commits": [
+        "054e1397d2efc7c3a6c9f0acd2197aff2bab5bd6",
+        "5f0392e169da14f15c6a8697664c63fd7e7199ef",
+        "65eaa24b56d1cc68a6ca0741293e885618607366"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "多来源成交监听关闭时补收已可用结果，结果未齐或仍有线程存活不再误报成功；保留已观察认证退出码 78、有界关闭及正常取消语义（#804）。",
+      "commits": [
+        "ec0963730047b17b0bf1aee74bfe99ea802b9a9b",
+        "935896684ea1f31f24cba3f5faa5a37fb53bdf70",
+        "65eaa24b56d1cc68a6ca0741293e885618607366"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "自动和显式升级目标均须对应已发布的非草稿 GitHub Release，且三项项目资产已上传且非空；来源或发布资格无法确认时拒绝升级（#710）。",
+      "commits": [
+        "b55e1092f2848b7298cb8c4fad3f21d2cbb378a6",
+        "ac5d8850907ef6d11e391829eeba858c9fe421c1",
+        "b6dc1ff03db2ccec4967e92faa16a3446f779798",
+        "704086b3b24d6f45ea9b874a5da22f85231bd6ac",
+        "16668e35c80efa4ca5115649dfb3c9b9f32bfed2",
+        "5f0392e169da14f15c6a8697664c63fd7e7199ef"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "回滚目标统一校验规范版本、release 目录边界及 VERSION 身份，阻断越界或错配目标，同时保留预览、确认和锁语义（#780）。",
+      "commits": [
+        "587e4a956336047f7315be95d4fedf3bdb0225a5",
+        "b0787394f305d66c39f697eb8e6e4e193819fb3f",
+        "09f70ef8c379ecf1e520cf20adcd50189b12c8a5",
+        "82330e3a138d8d922301ff7fee76f14e478637c0",
+        "b6dc1ff03db2ccec4967e92faa16a3446f779798",
+        "704086b3b24d6f45ea9b874a5da22f85231bd6ac",
+        "16668e35c80efa4ca5115649dfb3c9b9f32bfed2",
+        "5f0392e169da14f15c6a8697664c63fd7e7199ef"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "托管多实例 OpenD 在写入服务定义或 profile 前拒绝账户生成身份冲突，保留原有单实例和服务命名规则（#793）。",
+      "commits": [
+        "1294b81cc6673316e9b97766e34af2faa055bc98",
+        "c244298c1588f05173846c7f8719ae091ae98f84",
+        "b6dc1ff03db2ccec4967e92faa16a3446f779798",
+        "704086b3b24d6f45ea9b874a5da22f85231bd6ac",
+        "16668e35c80efa4ca5115649dfb3c9b9f32bfed2",
+        "5f0392e169da14f15c6a8697664c63fd7e7199ef"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "研究 blob GC 预览遇受保护清单或其祖先目录为跳过的软链接时禁止候选删除，保留精确兼容别名和既有保留策略（#812）。",
+      "commits": [
+        "407d06e2113baac3103669ae2c16a1191d071633",
+        "b6dc1ff03db2ccec4967e92faa16a3446f779798",
+        "704086b3b24d6f45ea9b874a5da22f85231bd6ac",
+        "16668e35c80efa4ca5115649dfb3c9b9f32bfed2",
+        "5f0392e169da14f15c6a8697664c63fd7e7199ef"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "升级缓存固定内部 origin，保留自定义 checkout remote 的重复检查、归档及无 Git release 续查；缺少内部来源时明确拒绝（#711）。",
+      "commits": [
+        "f670e6290c77b8af818b97ada2eef55d2e2ffcfd",
+        "ac5d8850907ef6d11e391829eeba858c9fe421c1",
+        "b6dc1ff03db2ccec4967e92faa16a3446f779798",
+        "704086b3b24d6f45ea9b874a5da22f85231bd6ac",
+        "16668e35c80efa4ca5115649dfb3c9b9f32bfed2",
+        "5f0392e169da14f15c6a8697664c63fd7e7199ef"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "ca965e3626f6836e63cc0137427f9d2562ae17e3",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "16b3eb42a453df1ef6579b8af6a75d6c3bcf5a8a",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "51e25a3362c76e81a0807a214ae9fd8d97fba4bd",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "5fc3c29a8bc12413cccc82d51b54cfb408c89c72",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "16ab1ec3c3e415873820c22e00c07f0969e1a1b6",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "83ab79014b9601990530c845a4e3cdb3dcadf31e",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "a3bf65d9c0888291e7ef8dac41b33a624207e1fb",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "7f892b15adf074d9183779d03518b06c44579f00",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "217475875fbc3b8ddbaee2a2c03d0ccfef0d6092",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "32adc8a717af55913d2dd587167f62426086faa5",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "81f04ad4b0d52ca3a5167ed5f7c110994f2ed665",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "900c4ad5972d71911bd612b39f124647ea148db5",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "ead4e2f4eeeb6f7499dda770f24381f82b5ae7c0",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "a941fa14b47032a72f30dea6060e62f389e62164",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "6970496aa55edf82ec4c245ced3233e7e0e95903",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "0eeea3b31611c121b69af4cd442f341ad081d1d4",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "93293a2e7b9f5018d70b21547b3a0c3fee708ef0",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "ee9fd1b9f2b6ce332b1067d0f077f80691b4f7a9",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "ea61665730bed487dc85ab2bf0069bbec1fd0975",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "64d593fa5201a473f991c2df0d59dfd315cf35f7",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "f3e1233efb2203ba94fdeab3feb85932700b0059",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "6a0ac79249c87f1f5a0455824f8dc38bdc29f54a",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "028f0003557a12c1a40bfa7da3ae12e73a979ed6",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "510ac410a2b0f4324ac825b351af125d6d05e84c",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "f67b81466b3a1e24b21ec07f201159adb9fcab27",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "5f4b467524a0da37d995263e8283d11560d736b3",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "01558d2cdf08dc84147e464a2c26e0aaea1db709",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "841b899651d664124fa4485fb9aa76c5c45ec51e",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    },
+    {
+      "commit": "ee68fec1cf7b0ed041006e79fc8775d38fa6b1ef",
+      "reason": "Full commit tree exactly equals its sole parent tree; no tracked product/test/doc/graph change. Gate acceptance only."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "ca965e3626f6836e63cc0137427f9d2562ae17e3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/906"
+      ]
+    },
+    {
+      "commit": "16b3eb42a453df1ef6579b8af6a75d6c3bcf5a8a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/905"
+      ]
+    },
+    {
+      "commit": "51e25a3362c76e81a0807a214ae9fd8d97fba4bd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/908"
+      ]
+    },
+    {
+      "commit": "5fc3c29a8bc12413cccc82d51b54cfb408c89c72",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/907"
+      ]
+    },
+    {
+      "commit": "f670e6290c77b8af818b97ada2eef55d2e2ffcfd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/906"
+      ]
+    },
+    {
+      "commit": "587e4a956336047f7315be95d4fedf3bdb0225a5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/905"
+      ]
+    },
+    {
+      "commit": "16ab1ec3c3e415873820c22e00c07f0969e1a1b6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/909"
+      ]
+    },
+    {
+      "commit": "b0787394f305d66c39f697eb8e6e4e193819fb3f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/905"
+      ]
+    },
+    {
+      "commit": "83ab79014b9601990530c845a4e3cdb3dcadf31e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/906"
+      ]
+    },
+    {
+      "commit": "407d06e2113baac3103669ae2c16a1191d071633",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/907"
+      ]
+    },
+    {
+      "commit": "a3bf65d9c0888291e7ef8dac41b33a624207e1fb",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/907"
+      ]
+    },
+    {
+      "commit": "1294b81cc6673316e9b97766e34af2faa055bc98",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/908"
+      ]
+    },
+    {
+      "commit": "09f70ef8c379ecf1e520cf20adcd50189b12c8a5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/905"
+      ]
+    },
+    {
+      "commit": "7f892b15adf074d9183779d03518b06c44579f00",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/908"
+      ]
+    },
+    {
+      "commit": "b55e1092f2848b7298cb8c4fad3f21d2cbb378a6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/909"
+      ]
+    },
+    {
+      "commit": "217475875fbc3b8ddbaee2a2c03d0ccfef0d6092",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/909"
+      ]
+    },
+    {
+      "commit": "ac5d8850907ef6d11e391829eeba858c9fe421c1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/906",
+        "https://github.com/liuxie066/options-monitor/pull/909"
+      ]
+    },
+    {
+      "commit": "82330e3a138d8d922301ff7fee76f14e478637c0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/905",
+        "https://github.com/liuxie066/options-monitor/pull/909"
+      ]
+    },
+    {
+      "commit": "c244298c1588f05173846c7f8719ae091ae98f84",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/908",
+        "https://github.com/liuxie066/options-monitor/pull/909"
+      ]
+    },
+    {
+      "commit": "b6dc1ff03db2ccec4967e92faa16a3446f779798",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/905",
+        "https://github.com/liuxie066/options-monitor/pull/906",
+        "https://github.com/liuxie066/options-monitor/pull/907",
+        "https://github.com/liuxie066/options-monitor/pull/908",
+        "https://github.com/liuxie066/options-monitor/pull/909"
+      ]
+    },
+    {
+      "commit": "704086b3b24d6f45ea9b874a5da22f85231bd6ac",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/905",
+        "https://github.com/liuxie066/options-monitor/pull/906",
+        "https://github.com/liuxie066/options-monitor/pull/907",
+        "https://github.com/liuxie066/options-monitor/pull/908",
+        "https://github.com/liuxie066/options-monitor/pull/909"
+      ]
+    },
+    {
+      "commit": "32adc8a717af55913d2dd587167f62426086faa5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/912"
+      ]
+    },
+    {
+      "commit": "81f04ad4b0d52ca3a5167ed5f7c110994f2ed665",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/913"
+      ]
+    },
+    {
+      "commit": "900c4ad5972d71911bd612b39f124647ea148db5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/911"
+      ]
+    },
+    {
+      "commit": "ead4e2f4eeeb6f7499dda770f24381f82b5ae7c0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/910"
+      ]
+    },
+    {
+      "commit": "a941fa14b47032a72f30dea6060e62f389e62164",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/914"
+      ]
+    },
+    {
+      "commit": "6970496aa55edf82ec4c245ced3233e7e0e95903",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/916"
+      ]
+    },
+    {
+      "commit": "0eeea3b31611c121b69af4cd442f341ad081d1d4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/915"
+      ]
+    },
+    {
+      "commit": "9b700b2f2c4451e4cb600f17480ec77710b295ba",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/910"
+      ]
+    },
+    {
+      "commit": "93293a2e7b9f5018d70b21547b3a0c3fee708ef0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/918"
+      ]
+    },
+    {
+      "commit": "7ae06c321683eb35e76163a238892068c8c75589",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/912"
+      ]
+    },
+    {
+      "commit": "054e1397d2efc7c3a6c9f0acd2197aff2bab5bd6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/913"
+      ]
+    },
+    {
+      "commit": "ee9fd1b9f2b6ce332b1067d0f077f80691b4f7a9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/910"
+      ]
+    },
+    {
+      "commit": "ec0963730047b17b0bf1aee74bfe99ea802b9a9b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/911"
+      ]
+    },
+    {
+      "commit": "ea61665730bed487dc85ab2bf0069bbec1fd0975",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/911"
+      ]
+    },
+    {
+      "commit": "64d593fa5201a473f991c2df0d59dfd315cf35f7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/919"
+      ]
+    },
+    {
+      "commit": "f3e1233efb2203ba94fdeab3feb85932700b0059",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/912"
+      ]
+    },
+    {
+      "commit": "6a0ac79249c87f1f5a0455824f8dc38bdc29f54a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/913"
+      ]
+    },
+    {
+      "commit": "e1e978f24840f43b43f8b8cbdc68023a49c1c798",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/914"
+      ]
+    },
+    {
+      "commit": "028f0003557a12c1a40bfa7da3ae12e73a979ed6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/914"
+      ]
+    },
+    {
+      "commit": "510ac410a2b0f4324ac825b351af125d6d05e84c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/917"
+      ]
+    },
+    {
+      "commit": "0ddc1681137334170a9874b620651379cf8bf6ab",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/915"
+      ]
+    },
+    {
+      "commit": "442833dbfc5a88b0e5be9ec85426b29e2200fc64",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/912"
+      ]
+    },
+    {
+      "commit": "f67b81466b3a1e24b21ec07f201159adb9fcab27",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/915"
+      ]
+    },
+    {
+      "commit": "6b577578da98a71b95d6b8d663008a89e2571c28",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/916"
+      ]
+    },
+    {
+      "commit": "f17c97dcf75481df54cb4d8d0f7720b535f22559",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/918"
+      ]
+    },
+    {
+      "commit": "5f4b467524a0da37d995263e8283d11560d736b3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/916"
+      ]
+    },
+    {
+      "commit": "b5cc1594e626716018c3c9c569493558aa9aaa99",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/917"
+      ]
+    },
+    {
+      "commit": "01558d2cdf08dc84147e464a2c26e0aaea1db709",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/917"
+      ]
+    },
+    {
+      "commit": "841b899651d664124fa4485fb9aa76c5c45ec51e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/918"
+      ]
+    },
+    {
+      "commit": "e9a8a064e821c1731722dfb372fade2fd15b5f84",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/917"
+      ]
+    },
+    {
+      "commit": "fa53d03d9baf91a5bd22cd96bd32b88b01d3f84c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/919"
+      ]
+    },
+    {
+      "commit": "ee68fec1cf7b0ed041006e79fc8775d38fa6b1ef",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/919"
+      ]
+    },
+    {
+      "commit": "ed6c45982bd7a83151ba136add05f133b0562679",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/910",
+        "https://github.com/liuxie066/options-monitor/pull/919"
+      ]
+    },
+    {
+      "commit": "16668e35c80efa4ca5115649dfb3c9b9f32bfed2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/905",
+        "https://github.com/liuxie066/options-monitor/pull/906",
+        "https://github.com/liuxie066/options-monitor/pull/907",
+        "https://github.com/liuxie066/options-monitor/pull/908",
+        "https://github.com/liuxie066/options-monitor/pull/909",
+        "https://github.com/liuxie066/options-monitor/pull/910",
+        "https://github.com/liuxie066/options-monitor/pull/912",
+        "https://github.com/liuxie066/options-monitor/pull/919"
+      ]
+    },
+    {
+      "commit": "75e211a6f046f8c6a10c553c1e57a6de5e604db3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/914",
+        "https://github.com/liuxie066/options-monitor/pull/919"
+      ]
+    },
+    {
+      "commit": "4d8acf25568429ee5d534670ec807a1e9a76e742",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/916",
+        "https://github.com/liuxie066/options-monitor/pull/919"
+      ]
+    },
+    {
+      "commit": "163b40843e888607181c346381661f2f4bac7709",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/916",
+        "https://github.com/liuxie066/options-monitor/pull/918",
+        "https://github.com/liuxie066/options-monitor/pull/919"
+      ]
+    },
+    {
+      "commit": "5f0392e169da14f15c6a8697664c63fd7e7199ef",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/905",
+        "https://github.com/liuxie066/options-monitor/pull/906",
+        "https://github.com/liuxie066/options-monitor/pull/907",
+        "https://github.com/liuxie066/options-monitor/pull/908",
+        "https://github.com/liuxie066/options-monitor/pull/909",
+        "https://github.com/liuxie066/options-monitor/pull/910",
+        "https://github.com/liuxie066/options-monitor/pull/912",
+        "https://github.com/liuxie066/options-monitor/pull/913",
+        "https://github.com/liuxie066/options-monitor/pull/916",
+        "https://github.com/liuxie066/options-monitor/pull/918",
+        "https://github.com/liuxie066/options-monitor/pull/919"
+      ]
+    },
+    {
+      "commit": "935896684ea1f31f24cba3f5faa5a37fb53bdf70",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/911",
+        "https://github.com/liuxie066/options-monitor/pull/919"
+      ]
+    },
+    {
+      "commit": "5cfe480be0170d0ca4735cb9767d831c4aea9eb1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/917",
+        "https://github.com/liuxie066/options-monitor/pull/919"
+      ]
+    },
+    {
+      "commit": "9085a484cf0bf3334e21b9ee8fb0c5e025b15938",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/915",
+        "https://github.com/liuxie066/options-monitor/pull/919"
+      ]
+    },
+    {
+      "commit": "56f86cd9b3f515abfe111b382c4c8637060318b5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/919"
+      ]
+    },
+    {
+      "commit": "65eaa24b56d1cc68a6ca0741293e885618607366",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/919"
+      ]
+    }
+  ]
+}
