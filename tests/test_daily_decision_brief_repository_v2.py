@@ -288,6 +288,91 @@ def test_success_persistence_advances_only_reliable_current_and_returns_identity
     assert read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["brief"]["revision"] == 1
 
 
+@pytest.mark.parametrize("actionability", ["planning_only", "blocked", None, "unknown"])
+def test_nonlive_candidate_identity_ignores_raw_index_and_eligible_actions(actionability) -> None:
+    from src.application.daily_decision_brief_repository import _candidate_identity_set
+
+    brief = _brief(run_id="nonlive", actions=[_action()], actionability=actionability)
+    brief["candidate_index"] = [{"identity": IDENTITY_NVDA}]
+    assert _candidate_identity_set(brief) == set()
+    brief.pop("candidate_index")
+    assert _candidate_identity_set(brief) == set()
+    assert _candidate_identity_set(None) == set()
+    assert _candidate_identity_set([]) == set()
+
+
+@pytest.mark.parametrize("index", [None, [], [{"identity": IDENTITY_AMD}]])
+def test_live_identity_preserves_index_priority_and_legacy_action_fallback(index) -> None:
+    from src.application.daily_decision_brief_repository import _candidate_identity_set
+
+    actions = [_action(), _action(symbol="PZERO", priority="P0")]
+    combo = _action(symbol="COMBO")
+    combo.update(action_type="open_combo_yield", strategy_family="combo_yield")
+    actions.append(combo)
+    for overrides in (
+        {"state": "blocked"}, {"priority": "P2"}, {"action_type": "close_position"},
+        {"metrics": {"capacity": {"contracts_available": 0}}},
+        {"metrics": {"capacity": {"contracts_available": "unknown"}}},
+    ):
+        actions.append({**_action(symbol="INELIGIBLE"), **overrides})
+    brief = _brief(run_id="legacy-live", actions=actions)
+    if index is not None:
+        brief["candidate_index"] = index
+    expected = ({IDENTITY_AMD} if index else {
+        IDENTITY_NVDA, "candidate:v1:lx:US:PZERO:sell_put", "candidate:v1:lx:US:COMBO:combo_yield",
+    })
+    assert _candidate_identity_set(brief) == expected
+
+
+def test_planning_success_preserves_snapshot_and_alerted_but_clears_pending(tmp_path: Path) -> None:
+    from src.application.daily_decision_brief_repository import (
+        confirm_daily_decision_brief_delivery_v2,
+        persist_daily_decision_brief_success,
+        read_latest_daily_decision_brief,
+    )
+    from src.application.notification_delivery_adapter import build_notification_transport_key
+
+    first = _persist(tmp_path, actions=[_action()])
+    _record_candidates(tmp_path, revision=first["current_revision"],
+                       brief_digest=first["current_brief_digest"], candidate_identities=[IDENTITY_NVDA])
+    envelope = _prepare_fixed(tmp_path, first)["envelope"]
+    confirm_daily_decision_brief_delivery_v2(
+        base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE,
+        delivery_key=envelope["delivery_key"], source_digest=envelope["source_digest"],
+        message_sha256=envelope["message_sha256"],
+        transport_idempotency_key=build_notification_transport_key(envelope["delivery_key"]),
+    )
+    live = _persist(tmp_path, run_id="live-two", actions=[_action(), _action(symbol="AMD")])
+    recorded = _record_candidates(tmp_path, revision=live["current_revision"],
+                                  brief_digest=live["current_brief_digest"],
+                                  candidate_identities=live["current_candidate_identities"])
+    assert recorded["pending_candidate_identities"] == [IDENTITY_AMD]
+    before = _read_state(tmp_path)["state"]["days"][MARKET_DATE]
+    source = _brief(run_id="late-planning", actions=[_action(), _action(symbol="AMD")],
+                    actionability="planning_only")
+    planning = persist_daily_decision_brief_success(base=tmp_path, brief=source)
+    assert planning["previous_candidate_identities"] == [IDENTITY_AMD, IDENTITY_NVDA]
+    assert planning["current_candidate_identities"] == []
+    assert planning["newly_detected_candidate_identities"] == []
+    current = read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["brief"]
+    assert current["run_id"] == "late-planning"
+    assert current["actions"] == planning["brief"]["actions"]
+    assert len(current["actions"]) == 2
+    assert current["candidate_index"] == []
+    cleared = _record_candidates(tmp_path, revision=planning["current_revision"],
+                                 brief_digest=planning["current_brief_digest"], candidate_identities=[])
+    assert cleared["applied"] is True
+    assert cleared["pending_candidate_identities"] == []
+    after = _read_state(tmp_path)["state"]["days"][MARKET_DATE]
+    assert after["pending_candidates"] == {}
+    assert after["alerted_candidates"] == before["alerted_candidates"]
+    assert after["fixed_reports"] == before["fixed_reports"]
+    stale = _record_candidates(tmp_path, revision=live["current_revision"],
+                               brief_digest=live["current_brief_digest"], candidate_identities=[IDENTITY_AMD])
+    assert stale["reason"] == "stale_revision"
+    assert _read_state(tmp_path)["state"]["days"][MARKET_DATE] == after
+
+
 def test_v2_delivery_reads_existing_legacy_delivery_candidate(tmp_path: Path) -> None:
     persisted = _persist(tmp_path, actions=[_action()])
     _record_candidates(
