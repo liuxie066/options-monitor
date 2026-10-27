@@ -2,7 +2,7 @@
   "api_version": "portfolio.api.v1",
   "upstream_repository": "portfolio-management",
   "upstream_contract_release": null,
-  "upstream_commit": "c41f7690be74e78849a4fdd258969e13ecb20b6f",
+  "upstream_commit": "db41a6042c8a114668179e2e79edfe52e55855c3",
   "contract_path": "contracts/portfolio-management/v1.openapi.json",
   "sha256": "c26f04f4e212a2289578dfeb41eb5f4e0b7c1a6a0a70e4cb3f6c4815434de462",
   "source_state": "unreleased"
