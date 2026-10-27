@@ -714,6 +714,15 @@
             "title": "Accounts",
             "type": "array"
           },
+          "holdings_scope": {
+            "default": "all",
+            "enum": [
+              "all",
+              "non_futu"
+            ],
+            "title": "Holdings Scope",
+            "type": "string"
+          },
           "price_timeout": {
             "default": 30,
             "maximum": 300.0,
@@ -1531,8 +1540,108 @@
         ]
       }
     },
+    "/api/v1/futu/holdings/durable-refresh-requests": {
+      "post": {
+        "description": "Durably admit an account/request identity before 202; duplicates, including completed requests, are absorbed. Acceptance does not prove sync completion.",
+        "operationId": "request_durable_futu_holdings_refresh_api_v1_futu_holdings_durable_refresh_requests_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FutuHoldingsRefreshRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FutuHoldingsRefreshAcceptedResponse"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-PM-API-Version": {
+                "description": "Stable PM business API version.",
+                "schema": {
+                  "const": "portfolio.api.v1",
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Request Durable Futu Holdings Refresh",
+        "tags": [
+          "holdings"
+        ]
+      }
+    },
     "/api/v1/futu/holdings/refresh-requests": {
       "post": {
+        "deprecated": true,
+        "description": "Legacy non-durable background hint. A 202 does not survive a PM restart; replayable handoffs must use durable-refresh-requests.",
         "operationId": "request_futu_holdings_refresh_api_v1_futu_holdings_refresh_requests_post",
         "requestBody": {
           "content": {

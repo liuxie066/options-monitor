@@ -1380,6 +1380,24 @@ def list_unclaimed_trade_payload_refresh_intents(
     limit: int = 100,
 ) -> list[dict[str, str]]:
     """Read completed live stock hints that have never entered the PM call boundary."""
+    return _list_trade_payload_refresh_intents(path, account_mapping=account_mapping, limit=limit)
+
+
+def list_pending_trade_payload_refresh_handoffs(
+    path: str | Path, *, account_mapping: Mapping[str, str], limit: int = 100,
+    after_inbox_id: str | None = None,
+) -> list[dict[str, str]]:
+    """Replay only new durable handoffs, never legacy attempted-only records."""
+    return _list_trade_payload_refresh_intents(
+        path, account_mapping=account_mapping, limit=limit, pending_handoff=True,
+        after_inbox_id=after_inbox_id,
+    )
+
+
+def _list_trade_payload_refresh_intents(
+    path: str | Path, *, account_mapping: Mapping[str, str], limit: int,
+    pending_handoff: bool = False, after_inbox_id: str | None = None,
+) -> list[dict[str, str]]:
     inbox_path = Path(path)
     allowed = {str(key).strip(): str(value).strip().lower()
                for key, value in account_mapping.items() if str(key).strip() and str(value).strip()}
@@ -1388,13 +1406,29 @@ def list_unclaimed_trade_payload_refresh_intents(
     out: list[dict[str, str]] = []
     with closing(sqlite3.connect(f"{inbox_path.resolve().as_uri()}?mode=ro", uri=True)) as conn:
         conn.row_factory = sqlite3.Row
+        if pending_handoff and "portfolio_refresh_handoff_request_id" not in {
+            row["name"] for row in conn.execute("PRAGMA table_info(trade_inbox)")
+        }:
+            return []
+        eligibility = (
+            "portfolio_refresh_handoff_request_id IS NOT NULL "
+            "AND portfolio_refresh_accepted_at_ms IS NULL"
+            if pending_handoff else "portfolio_refresh_attempted_at_ms IS NULL"
+        )
+        after = (
+            "AND (received_at_ms, inbox_id) > "
+            "(SELECT received_at_ms, inbox_id FROM trade_inbox WHERE inbox_id = ?)"
+            if after_inbox_id is not None else ""
+        )
+        seen: set[tuple[str, str]] = set()
         rows = conn.execute(
-            """SELECT * FROM trade_inbox WHERE status = 'handled' AND delivery_purpose = 'live'
+            f"""SELECT * FROM trade_inbox WHERE status = 'handled' AND delivery_purpose = 'live'
                  AND source IN ('push', 'backfill')
                  AND COALESCE(json_extract(result_json, '$.receipt_suppression_reason'), '') != 'reconciled_from_ledger'
                  AND portfolio_refresh_intent_json IS NOT NULL
-                 AND portfolio_refresh_attempted_at_ms IS NULL
+                 AND {eligibility} {after}
                ORDER BY received_at_ms, inbox_id""",
+            (after_inbox_id,) if after_inbox_id is not None else (),
         )
         for row in rows:
             payload = json.loads(row["payload_json"])
@@ -1406,6 +1440,12 @@ def list_unclaimed_trade_payload_refresh_intents(
                 continue
             if _trade_source_evidence_observation(conn, row)[1]:
                 continue
+            if pending_handoff:
+                intent["request_id"] = str(row["portfolio_refresh_handoff_request_id"])
+                identity = (intent["account"], intent["request_id"])
+                if identity in seen:
+                    continue
+                seen.add(identity)
             out.append({"inbox_id": str(row["inbox_id"]), **intent})
             if len(out) >= max(1, int(limit)):
                 break
@@ -1421,7 +1461,10 @@ def claim_trade_payload_refresh_intent(
     with closing(_connect(inbox_path)) as conn:
         with conn:
             _ensure_schema(conn)
-            return _claim_trade_payload_refresh_intent(conn, inbox_id=inbox_id)
+            intent = _claim_trade_payload_refresh_intent(conn, inbox_id=inbox_id)
+            if intent is not None:
+                _bind_portfolio_refresh_handoff(conn, inbox_ids=(inbox_id,), intent=intent)
+            return intent
 
 
 def claim_trade_payload_refresh_intents(
@@ -1437,13 +1480,42 @@ def claim_trade_payload_refresh_intents(
     if not identifiers:
         return None
     first_intent = None
+    claimed_ids = []
     with closing(_connect(Path(path))) as conn, conn:
         _ensure_schema(conn)
         for inbox_id in identifiers:
             intent = _claim_trade_payload_refresh_intent(conn, inbox_id=inbox_id, account=account)
-            if first_intent is None and intent is not None:
-                first_intent = intent
+            if intent is not None:
+                claimed_ids.append(inbox_id)
+                if first_intent is None:
+                    first_intent = intent
+        if first_intent is not None:
+            _bind_portfolio_refresh_handoff(conn, inbox_ids=claimed_ids, intent=first_intent)
     return first_intent
+
+
+def _bind_portfolio_refresh_handoff(
+    conn: sqlite3.Connection, *, inbox_ids: Iterable[str], intent: Mapping[str, str],
+) -> None:
+    conn.executemany(
+        "UPDATE trade_inbox SET portfolio_refresh_handoff_request_id = ? WHERE inbox_id = ?",
+        [(intent["request_id"], str(inbox_id)) for inbox_id in inbox_ids],
+    )
+
+
+def accept_trade_payload_refresh_handoff(
+    path: str | Path, *, account: str, request_id: str,
+) -> None:
+    """Absorb a validated durable acceptance; an attempted timestamp alone is insufficient."""
+    with closing(_connect(Path(path))) as conn, conn:
+        _ensure_schema(conn)
+        conn.execute(
+            """UPDATE trade_inbox SET portfolio_refresh_accepted_at_ms = ?
+               WHERE portfolio_refresh_handoff_request_id = ?
+                 AND json_extract(portfolio_refresh_intent_json, '$.account') = ?
+                 AND portfolio_refresh_accepted_at_ms IS NULL""",
+            (int(time.time() * 1000), request_id, account),
+        )
 
 
 def _claim_trade_payload_refresh_intent(
@@ -3123,6 +3195,7 @@ _READ_SCHEMA_COLUMNS = {
     "trade_inbox": """inbox_id source deal_id broker_deal_key identity_status payload_json
         economic_payload_hash status attempt_count received_at_ms updated_at_ms last_error
         result_status result_reason portfolio_refresh_intent_json portfolio_refresh_attempted_at_ms
+        portfolio_refresh_handoff_request_id portfolio_refresh_accepted_at_ms
         next_attempt_at_ms payload_version claim_id claim_until_ms claim_owner result_json
         receipt_json receipt_recovery_allowed delivery_purpose""".split(),
     "trade_inbox_evidence": """inbox_id source payload_hash payload_json received_at_ms
@@ -3315,6 +3388,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         "portfolio_refresh_attempted_at_ms",
         "INTEGER",
     )
+    # Nullable additions deliberately leave legacy attempted outcomes unreplayable.
+    _add_column_if_missing(conn, "trade_inbox", "portfolio_refresh_handoff_request_id", "TEXT")
+    _add_column_if_missing(conn, "trade_inbox", "portfolio_refresh_accepted_at_ms", "INTEGER")
     # Economic retry due time must survive metadata/enrichment updates to updated_at_ms.
     retry_deadline_missing = "next_attempt_at_ms" not in {
         row["name"] for row in conn.execute("PRAGMA table_info(trade_inbox)")}
@@ -3993,6 +4069,8 @@ __all__ = [
     "SettlementAttemptClaimOwnershipLost",
     "claim_trade_payload_refresh_intent",
     "claim_trade_payload_refresh_intents",
+    "list_pending_trade_payload_refresh_handoffs",
+    "accept_trade_payload_refresh_handoff",
     "enqueue_trade_payload",
     "claim_settlement_provider_batch",
     "complete_settlement_attempt",
