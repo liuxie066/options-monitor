@@ -149,7 +149,8 @@ def test_receiver_cancels_before_paused_model_and_queue_preserves_deadline(monke
     def handler(payload, **kwargs):
         received.append((payload["event"]["message"]["message_id"], kwargs["received_monotonic"], time.monotonic()))
         out = original_handler(payload, **kwargs)
-        if payload["event"]["message"]["message_id"] == "cancel":
+        # Keep the client alive until both queued deliveries finish; stop does not drain.
+        if payload["event"]["message"]["message_id"] == "cancel" and sum(row[0] == "cancel" for row in received) == 2:
             done.set()
         return out
 
