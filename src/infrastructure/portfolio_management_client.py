@@ -36,7 +36,7 @@ _VIEW_PATHS = {
 }
 CAPITAL_FACTS_PATH = "/api/v1/analysis/capital-facts"
 VALUATION_EVIDENCE_PATH = "/api/v1/analysis/valuation-evidence"
-HOLDINGS_REFRESH_PATH = "/api/v1/futu/holdings/refresh-requests"
+HOLDINGS_REFRESH_PATH = "/api/v1/futu/holdings/durable-refresh-requests"
 CONTRACT_OPERATIONS = {
     **{
         ("GET", path): 200

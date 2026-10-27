@@ -107,6 +107,8 @@ from src.application.trades.inbox import (
     trade_payload_commit_scope,
     claim_trade_payload_refresh_intent,
     claim_trade_payload_refresh_intents,
+    list_pending_trade_payload_refresh_handoffs,
+    accept_trade_payload_refresh_handoff,
     enqueue_trade_payload,
     list_retryable_trade_payloads,
     list_trade_receipt_recovery_rows,
@@ -308,6 +310,7 @@ def _dispatch_portfolio_refresh_intent(
     *,
     config: dict[str, Any],
     audit_path: Path,
+    inbox_path: Path | None = None,
     client: Any | None = None,
     append_audit_fn: Callable[[Path, dict[str, Any]], Any] = append_trade_intake_audit,
     log_fn: Callable[[str], Any] = _log,
@@ -335,6 +338,8 @@ def _dispatch_portfolio_refresh_intent(
                 request_id=request_id,
                 timeout=2.0,
             )
+            if inbox_path is not None:
+                accept_trade_payload_refresh_handoff(inbox_path, account=account, request_id=request_id)
             event = {
                 "phase": "portfolio_refresh_hint_accepted",
                 "account": account,
@@ -1536,6 +1541,7 @@ def main(argv: list[str] | None = None) -> int:
                     claim_trade_payload_refresh_intent(saved_inbox_path, inbox_id=args.inbox_id),
                     config=cfg,
                     audit_path=manual_audit_path,
+                    inbox_path=saved_inbox_path,
                 )
         if saved_inbox and not apply_changes:
             result.update(inbox_id=saved_inbox["inbox_id"], delivery_purpose=saved_inbox["delivery_purpose"])
@@ -2579,6 +2585,7 @@ def _run_listener_source_loop(
                     ),
                     config=cfg,
                     audit_path=audit_path,
+                    inbox_path=inbox_path,
                 )
         return result
 
@@ -2740,6 +2747,7 @@ def _run_listener_source_loop(
     last_backfill_monotonic: float | None = None
     last_heartbeat_monotonic: float | None = None
     last_inbox_retry_monotonic: float | None = None
+    portfolio_refresh_cursor: str | None = None
     last_lifecycle_due_monotonic: float | None = None
     last_combo_reconciliation_monotonic: float | None = None
     backfill_cfg = dict(source.get("backfill") or intake_cfg.get("backfill") or {})
@@ -2887,19 +2895,33 @@ def _run_listener_source_loop(
                             break
                     if apply_changes and is_portfolio_management_enabled(cfg):
                         try:
+                            refresh_mapping = {
+                                physical: label for physical, label in account_mapping.items()
+                                if physical in futu_account_ids
+                            }
+                            pending_handoffs = list_pending_trade_payload_refresh_handoffs(
+                                inbox_path, account_mapping=refresh_mapping,
+                                after_inbox_id=portfolio_refresh_cursor,
+                            )
+                            portfolio_refresh_cursor = (
+                                pending_handoffs[-1]["inbox_id"] if len(pending_handoffs) == 100 else None
+                            )
+                            for pending in pending_handoffs:
+                                _dispatch_portfolio_refresh_intent(
+                                    pending, config=cfg, audit_path=audit_path, inbox_path=inbox_path,
+                                )
                             refresh_inbox_ids: dict[str, list[str]] = {}
                             for candidate in list_unclaimed_trade_payload_refresh_intents(
-                                inbox_path, account_mapping={
-                                    physical: label for physical, label in account_mapping.items()
-                                    if physical in futu_account_ids
-                                },
+                                inbox_path, account_mapping=refresh_mapping,
                             ):
                                 refresh_inbox_ids.setdefault(candidate["account"], []).append(candidate["inbox_id"])
                             for account, inbox_ids in refresh_inbox_ids.items():
                                 intent = claim_trade_payload_refresh_intents(
                                     inbox_path, inbox_ids=inbox_ids, account=account,
                                 )
-                                _dispatch_portfolio_refresh_intent(intent, config=cfg, audit_path=audit_path)
+                                _dispatch_portfolio_refresh_intent(
+                                    intent, config=cfg, audit_path=audit_path, inbox_path=inbox_path,
+                                )
                             status_state.pop("last_portfolio_refresh_recovery_error", None)
                         except Exception as exc:
                             status_state["last_portfolio_refresh_recovery_error"] = f"{type(exc).__name__}: {exc}"
@@ -3072,6 +3094,7 @@ def _run_listener_source_loop(
                                         intent,
                                         config=cfg,
                                         audit_path=audit_path,
+                                        inbox_path=inbox_path,
                                     )
                                 ),
                                 process_lock=process_lock,

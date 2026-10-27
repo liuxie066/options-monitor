@@ -1,12 +1,15 @@
+# Only closed archives in bounded, reusable slots belong in logs/closed/.
+# Never move open launchd stdout/stderr or OpenD/audit files into this directory.
 # Render @RUNTIME_ROOT@ and @DEPLOY_USER@ from the service profile before installation.
 # Run logrotate hourly; maxsize is checked only when logrotate runs.
-@RUNTIME_ROOT@/logs/*.log {
+@RUNTIME_ROOT@/logs/closed/*.log {
     hourly
     maxsize 16M
     rotate 168
     compress
     delaycompress
     missingok
-    notifempty
+    # Rotate empty placeholders too so one-off archives compress and expire.
+    ifempty
     create 0600 @DEPLOY_USER@ @DEPLOY_USER@
 }

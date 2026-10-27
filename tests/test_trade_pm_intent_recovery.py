@@ -11,6 +11,7 @@ from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.trades import auto_intake
 from src.application.trades.inbox_authority import resolve_execution_inbox_path
 from src.application.trades.inbox import (claim_trade_payload_refresh_intent, claim_trade_payload_refresh_intents, enqueue_trade_payload,
+    accept_trade_payload_refresh_handoff, list_pending_trade_payload_refresh_handoffs,
     list_retryable_trade_payloads, list_unclaimed_trade_payload_refresh_intents, mark_trade_payload_handled,
     read_trade_payload, record_trade_payload_refresh_intent,)
 
@@ -47,11 +48,16 @@ def _order_saved_intents(path, saved):
             conn.execute("UPDATE trade_inbox SET received_at_ms=? WHERE inbox_id=?", (index + 1, item["inbox_id"]))
 
 
-def _loop(tmp_path, monkeypatch, *, payload=None, client=None, apply_changes=True, account_mapping=None):
+def _loop(tmp_path, monkeypatch, *, payload=None, client=None, apply_changes=True, account_mapping=None, cycles=1):
     monkeypatch.delenv("OM_ENV_FILE", raising=False)
     monkeypatch.setenv("OM_INBOUND_AUDIT_DB", str(tmp_path / "isolated-inbound.sqlite3"))
     account_mapping = {"123": "lx"} if account_mapping is None else account_mapping
     stop = threading.Event()
+    health_cycles = [0]
+    if cycles > 1:
+        monkeypatch.setattr(auto_intake, "time", SimpleNamespace(
+            monotonic=lambda: health_cycles[0] * 61.0, time=time.time, sleep=time.sleep,
+        ))
     class Listener:
         def __init__(self, *, on_deal, **kwargs):
             self.on_deal = on_deal
@@ -59,7 +65,9 @@ def _loop(tmp_path, monkeypatch, *, payload=None, client=None, apply_changes=Tru
             if payload is not None:
                 self.on_deal(payload)
         def check_health(self):
-            stop.set()
+            health_cycles[0] += 1
+            if health_cycles[0] >= cycles:
+                stop.set()
         def close(self):
             pass
     monkeypatch.setattr(auto_intake, "OpenDTradePushListener", Listener)
@@ -82,7 +90,7 @@ def _loop(tmp_path, monkeypatch, *, payload=None, client=None, apply_changes=Tru
 
 
 @pytest.mark.parametrize("outcome", ["accepted", "timeout", "interrupted"])
-def test_listener_restart_recovers_handled_unclaimed_pm_intent_once(tmp_path, monkeypatch, outcome):
+def test_listener_restart_recovers_durable_pm_handoff(tmp_path, monkeypatch, outcome):
     monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda cfg: True)
     original = auto_intake._durable_fee_target
     def crash_after_handled(**kwargs):
@@ -105,9 +113,9 @@ def test_listener_restart_recovers_handled_unclaimed_pm_intent_once(tmp_path, mo
         def request_holdings_refresh(self, **kwargs):
             calls.append(kwargs)
             assert read_trade_payload(inbox, inbox_id=inbox_id)["portfolio_refresh_attempted_at_ms"] is not None
-            if outcome == "timeout":
+            if len(calls) == 1 and outcome == "timeout":
                 raise TimeoutError("ambiguous PM response")
-            if outcome == "interrupted":
+            if len(calls) == 1 and outcome == "interrupted":
                 raise ProcessInterrupted()
     if outcome == "interrupted":
         with pytest.raises(ProcessInterrupted):
@@ -115,7 +123,8 @@ def test_listener_restart_recovers_handled_unclaimed_pm_intent_once(tmp_path, mo
     else:
         assert _loop(tmp_path, monkeypatch, client=PMClient()) == 0
     assert _loop(tmp_path, monkeypatch, client=PMClient()) == 0
-    assert calls == [{**intent, "timeout": 2.0}]
+    assert calls == [{**intent, "timeout": 2.0}] * (1 if outcome == "accepted" else 2)
+    assert read_trade_payload(inbox, inbox_id=inbox_id)["portfolio_refresh_accepted_at_ms"] is not None
     assert list_unclaimed_trade_payload_refresh_intents(inbox, account_mapping={"123": "lx"}) == []
     assert SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3").list_trade_events() == []
 
@@ -212,7 +221,7 @@ def test_interrupted_recovery_dispatch_does_not_consume_next_account(tmp_path, m
     assert read_trade_payload(_inbox(tmp_path), inbox_id=second["inbox_id"])["portfolio_refresh_attempted_at_ms"] is None
     assert _loop(tmp_path, monkeypatch, client=SimpleNamespace(request_holdings_refresh=lambda **kwargs: calls.append(kwargs)),
                  account_mapping=mapping) == 0
-    assert calls == [{**item["portfolio_refresh_intent"], "timeout": 2.0} for item in (first, second)]
+    assert calls == [{**item["portfolio_refresh_intent"], "timeout": 2.0} for item in (first, first, second)]
 
 
 @pytest.mark.parametrize("excluded", ["pending", "historical", "manual", "conflict", "claimed", "physical", "label"])
@@ -327,6 +336,121 @@ def _competing_recovery_claims(tmp_path, monkeypatch, *, batch):
                 worker.join(5)
 
 
+def test_claim_commit_before_post_is_recoverable_with_fixed_group_identity(tmp_path, monkeypatch):
+    monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda _: True)
+    saved = [_core(tmp_path, _stock(key)) for key in ("first", "second")]
+    path = _inbox(tmp_path)
+    intent = claim_trade_payload_refresh_intents(
+        path, inbox_ids=[item["inbox_id"] for item in saved], account="lx",
+    )
+    assert intent == saved[0]["portfolio_refresh_intent"]
+    # Crash here: the batch claim committed but no POST started.
+    pending = list_pending_trade_payload_refresh_handoffs(path, account_mapping={"123": "lx"})
+    assert len(pending) == 1 and pending[0]["request_id"] == intent["request_id"]
+    later = _core(tmp_path, _stock("later"))
+    calls = []
+    assert _loop(tmp_path, monkeypatch, client=SimpleNamespace(request_holdings_refresh=lambda **kw: calls.append(kw))) == 0
+    assert calls == [{**item, "timeout": 2.0} for item in (intent, later["portfolio_refresh_intent"])]
+    for item in saved:
+        row = read_trade_payload(path, inbox_id=item["inbox_id"])
+        assert row["portfolio_refresh_handoff_request_id"] == intent["request_id"]
+        assert row["portfolio_refresh_accepted_at_ms"] is not None
+    assert list_pending_trade_payload_refresh_handoffs(path, account_mapping={"123": "lx"}) == []
+
+
+def test_acceptance_loss_replays_identity_and_receiver_absorbs_duplicate(tmp_path, monkeypatch):
+    monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda _: True)
+    saved = _core(tmp_path, _stock())
+    path = _inbox(tmp_path)
+    admitted = set()
+    calls = []
+
+    def receive(**kwargs):
+        identity = (kwargs["account"], kwargs["request_id"])
+        calls.append(identity)
+        admitted.add(identity)
+        if len(calls) == 1:
+            raise ProcessInterrupted()  # PM accepted; OM never persisted the acknowledgment.
+
+    with pytest.raises(ProcessInterrupted):
+        _loop(tmp_path, monkeypatch, client=SimpleNamespace(request_holdings_refresh=receive))
+    assert read_trade_payload(path, inbox_id=saved["inbox_id"])["portfolio_refresh_accepted_at_ms"] is None
+    assert _loop(tmp_path, monkeypatch, client=SimpleNamespace(request_holdings_refresh=receive)) == 0
+    assert _loop(tmp_path, monkeypatch, client=SimpleNamespace(request_holdings_refresh=receive)) == 0
+    assert len(calls) == 2 and calls[0] == calls[1] and len(admitted) == 1
+
+
+def test_ack_write_failure_stays_pending_and_audit_failure_does_not_reopen(tmp_path, monkeypatch):
+    monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda _: True)
+    saved = _core(tmp_path, _stock())
+    path = _inbox(tmp_path)
+    intent = claim_trade_payload_refresh_intent(path, inbox_id=saved["inbox_id"])
+    original = auto_intake.accept_trade_payload_refresh_handoff
+    monkeypatch.setattr(auto_intake, "accept_trade_payload_refresh_handoff", lambda *a, **k: (_ for _ in ()).throw(sqlite3.OperationalError("locked")))
+    client = SimpleNamespace(request_holdings_refresh=lambda **_: None)
+    auto_intake._dispatch_portfolio_refresh_intent(intent, config={}, audit_path=tmp_path / "audit.jsonl", inbox_path=path, client=client)
+    assert len(list_pending_trade_payload_refresh_handoffs(path, account_mapping={"123": "lx"})) == 1
+    monkeypatch.setattr(auto_intake, "accept_trade_payload_refresh_handoff", original)
+    auto_intake._dispatch_portfolio_refresh_intent(
+        intent, config={}, audit_path=tmp_path / "audit.jsonl", inbox_path=path, client=client,
+        append_audit_fn=lambda *a: (_ for _ in ()).throw(OSError("audit disk")), log_fn=lambda _: None,
+    )
+    assert list_pending_trade_payload_refresh_handoffs(path, account_mapping={"123": "lx"}) == []
+
+
+def test_legacy_attempted_is_never_replayed_and_ack_is_account_bound_absorbing(tmp_path, monkeypatch):
+    monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda _: True)
+    legacy = _core(tmp_path, _stock("legacy"))
+    fresh = _core(tmp_path, _stock("fresh"))
+    path = _inbox(tmp_path)
+    with sqlite3.connect(path) as conn:
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+        conn.execute("UPDATE trade_inbox SET portfolio_refresh_attempted_at_ms=1 WHERE inbox_id=?", (legacy["inbox_id"],))
+    calls = []
+    assert _loop(tmp_path, monkeypatch, client=SimpleNamespace(request_holdings_refresh=lambda **kw: calls.append(kw))) == 0
+    assert calls == [{**fresh["portfolio_refresh_intent"], "timeout": 2.0}]
+    old = read_trade_payload(path, inbox_id=legacy["inbox_id"])
+    assert old["portfolio_refresh_attempted_at_ms"] == 1
+    assert old["portfolio_refresh_handoff_request_id"] is None
+    assert old["portfolio_refresh_accepted_at_ms"] is None
+    accepted = read_trade_payload(path, inbox_id=fresh["inbox_id"])["portfolio_refresh_accepted_at_ms"]
+    monkeypatch.setattr("src.application.trades.inbox.time.time", lambda: 9999999999)
+    accept_trade_payload_refresh_handoff(path, **fresh["portfolio_refresh_intent"])
+    assert read_trade_payload(path, inbox_id=fresh["inbox_id"])["portfolio_refresh_accepted_at_ms"] == accepted
+    other = _core(tmp_path, _stock("other"))
+    intent = claim_trade_payload_refresh_intent(path, inbox_id=other["inbox_id"])
+    accept_trade_payload_refresh_handoff(path, account="sy", request_id=intent["request_id"])
+    assert read_trade_payload(path, inbox_id=other["inbox_id"])["portfolio_refresh_accepted_at_ms"] is None
+    assert list_pending_trade_payload_refresh_handoffs(path, account_mapping={"456": "lx"}) == []
+    assert list_pending_trade_payload_refresh_handoffs(path, account_mapping={"123": "sy"}) == []
+
+
+@pytest.mark.parametrize("failure", [404, "identity"])
+def test_incompatible_receiver_or_wrong_identity_does_not_ack_or_use_legacy(tmp_path, monkeypatch, failure):
+    from src.infrastructure.portfolio_management_client import PortfolioManagementClient
+    import io
+    import urllib.error
+
+    monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda _: True)
+    _core(tmp_path, _stock())
+    requests = []
+
+    def respond(request, **kwargs):
+        requests.append(request.full_url)
+        if failure == 404:
+            raise urllib.error.HTTPError(request.full_url, 404, "old PM", {}, io.BytesIO(b"{}"))
+        response = io.BytesIO(json.dumps({"success": True, "status": "accepted", "account": "sy", "request_id": "wrong"}).encode())
+        response.headers = {"X-PM-API-Version": "portfolio.api.v1"}
+        response.status = 202
+        return response
+
+    client = PortfolioManagementClient(urlopen_fn=respond)
+    assert _loop(tmp_path, monkeypatch, client=client) == 0
+    assert _loop(tmp_path, monkeypatch, client=client) == 0
+    assert len(requests) == 2 and all(url.endswith("/durable-refresh-requests") for url in requests)
+    assert len(list_pending_trade_payload_refresh_handoffs(_inbox(tmp_path), account_mapping={"123": "lx"})) == 1
+
+
 @pytest.mark.parametrize("legacy_inbox", [False, True])
 def test_saved_inbox_public_preview_uses_authority_and_legacy_guard(tmp_path, monkeypatch, capsys, legacy_inbox):
     import shutil
@@ -394,3 +518,29 @@ def test_resumed_unclaimed_work_keeps_processing_and_verification_owners(tmp_pat
     recovery = list_trade_receipt_recovery_rows(path, account_ids=["123"])
     assert [item["inbox_id"] for item in recovery] == ([inbox_id] if kind == "verification_pending" else [])
     assert bool(claim_trade_payload(path, inbox_id=inbox_id, repo=repo)) is (kind == "pending_retry")
+
+
+def test_pending_recovery_advances_past_failed_first_page_without_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(auto_intake, "is_portfolio_management_enabled", lambda _: True)
+    path = _inbox(tmp_path)
+    # Real durable Inbox rows, no broker/network calls; distinct groups are intentional.
+    saved = []
+    for index in range(101):
+        item = _core(tmp_path, _stock(f"queued-{index}"))
+        claim_trade_payload_refresh_intent(path, inbox_id=item["inbox_id"])
+        saved.append(item)
+    _order_saved_intents(path, saved)
+    healthy = saved[-1]["portfolio_refresh_intent"]
+    calls = []
+
+    def receive(**kwargs):
+        calls.append(kwargs)
+        if kwargs["request_id"] != healthy["request_id"]:
+            raise TimeoutError("this identity remains unavailable")
+
+    assert _loop(tmp_path, monkeypatch, client=SimpleNamespace(request_holdings_refresh=receive), cycles=3) == 0
+    assert calls[100] == {**healthy, "timeout": 2.0}
+    assert len(calls) == 201  # bounded100, suffix1, wrap100
+    assert read_trade_payload(path, inbox_id=saved[-1]["inbox_id"])["portfolio_refresh_accepted_at_ms"] is not None
+    assert all(read_trade_payload(path, inbox_id=item["inbox_id"])["portfolio_refresh_accepted_at_ms"] is None
+               for item in saved[:-1])

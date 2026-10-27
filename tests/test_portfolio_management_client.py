@@ -367,7 +367,7 @@ def test_refresh_request_is_accepted_only_and_not_retried() -> None:
     )
     assert result["account"] == "lx"
     assert result["status"] == "accepted"
-    assert seen["url"].endswith("/api/v1/futu/holdings/refresh-requests")
+    assert seen["url"].endswith("/api/v1/futu/holdings/durable-refresh-requests")
     assert seen["body"] == {
         "account": "lx",
         "request_id": "stock-refresh:abc",
