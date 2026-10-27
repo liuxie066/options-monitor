@@ -353,7 +353,11 @@ def persist_auto_close_receipt_state(
 
     status = str(receipt.get("status") or "").strip().lower()
     reason = str(receipt.get("reason") or "").strip().lower()
-    if status == "skipped" and reason in {"skipped_duplicate_confirmed", "skipped_duplicate_unconfirmed"}:
+    prior_receipt = current.get("receipt")
+    prior_confirmed = isinstance(prior_receipt, dict) and bool(prior_receipt.get("delivery_confirmed"))
+    if status == "skipped" and (
+        prior_confirmed or reason in {"skipped_duplicate_confirmed", "skipped_duplicate_unconfirmed"}
+    ):
         if current:
             current["last_skip"] = _receipt_state_entry(result=result, receipt=receipt).get("receipt")
             current["updated_at_utc"] = _utc_now()
@@ -580,12 +584,7 @@ def _flat_error(value: Any) -> str:
 
 
 def _applied_line(item: dict[str, Any]) -> str:
-    lot_id = _display(item.get("record_id"))
-    # §7.1: ``position_id`` is retired; the applied payload carries the
-    # ``position_key`` (contract identity + derived side).
-    position_key = _display(item.get("position_key"))
-    expiration = _display(item.get("expiration_ymd") or item.get("expiration_ms"))
-    return f"{lot_id}｜{position_key}｜到期 {expiration}"
+    return _display(item.get("position_key"))
 
 
 def _display(value: Any) -> str:

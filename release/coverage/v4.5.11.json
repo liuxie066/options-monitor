@@ -1,0 +1,127 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.5.11",
+  "base": {
+    "tag": "v4.5.10",
+    "commit": "3798dd3c7d76c28794040f48726f775f82962a5a"
+  },
+  "reviewed_head": "9eab973179272e7000703a63506e3f023e36fb0a",
+  "commits": [
+    {
+      "sha": "f9aad4f9224d23eea202616a2dc85ef5945d7bbd",
+      "subject": "fix(maintenance): resolve ten scoped runtime and ledger defects"
+    },
+    {
+      "sha": "3e663d20f5fdb2251c73701d268a7b58a59c679b",
+      "subject": "fix(notifications): resolve recipient without reading sender secret"
+    },
+    {
+      "sha": "9eab973179272e7000703a63506e3f023e36fb0a",
+      "subject": "Merge pull request #933 from liuxie066/codex/fix-ten-medium-20261026"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "无可行开仓行权价区间不再阻断有效持仓或其他标的数据需求，保留配置倒置校验和可证明空结果（#633）。",
+      "commits": [
+        "f9aad4f9224d23eea202616a2dc85ef5945d7bbd",
+        "9eab973179272e7000703a63506e3f023e36fb0a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "指派情景来源不可用时，账户现金、缺口及费用完整性保持未知，不再误报可信零值（#623）。",
+      "commits": [
+        "f9aad4f9224d23eea202616a2dc85ef5945d7bbd",
+        "9eab973179272e7000703a63506e3f023e36fb0a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "历史 Brief 导入按已校验的归一化状态判断成功，保留原始历史正文（#687）。",
+      "commits": [
+        "f9aad4f9224d23eea202616a2dc85ef5945d7bbd",
+        "9eab973179272e7000703a63506e3f023e36fb0a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "决策历史累积未解决的导入拒绝，后续无关导入不再掩盖覆盖缺口，匹配成功证据可正常消解（#686）。",
+      "commits": [
+        "f9aad4f9224d23eea202616a2dc85ef5945d7bbd",
+        "9eab973179272e7000703a63506e3f023e36fb0a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "持仓报告和平仓建议按实际账户、市场逐范围核验质量声明，缺失声明不再借用其他范围的健康状态（#688）。",
+      "commits": [
+        "f9aad4f9224d23eea202616a2dc85ef5945d7bbd",
+        "9eab973179272e7000703a63506e3f023e36fb0a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "macOS Keychain 仅将明确条目不存在映射为未配置，其余访问失败报告凭据后端不可用（#682）。",
+      "commits": [
+        "f9aad4f9224d23eea202616a2dc85ef5945d7bbd",
+        "9eab973179272e7000703a63506e3f023e36fb0a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Feishu 备用 post 在首次冻结前按完整序列化消息预算裁剪，保留既有冻结重试与未知发送结果的去重语义（#691）。",
+      "commits": [
+        "f9aad4f9224d23eea202616a2dc85ef5945d7bbd",
+        "9eab973179272e7000703a63506e3f023e36fb0a",
+        "3e663d20f5fdb2251c73701d268a7b58a59c679b"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "已配置的定时 Tick 缺少执行证据时，默认状态输出明确显示证据不足，不再显示正常（#707）。",
+      "commits": [
+        "f9aad4f9224d23eea202616a2dc85ef5945d7bbd",
+        "9eab973179272e7000703a63506e3f023e36fb0a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "正股生命周期按内嵌交割生效时点过滤买卖库存，保留期权终结与撤销图校验（#679）。",
+      "commits": [
+        "f9aad4f9224d23eea202616a2dc85ef5945d7bbd",
+        "9eab973179272e7000703a63506e3f023e36fb0a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "分配型正股销售的历史换汇回填及纠正同步处理父事件和各子分配，审计绑定独立现金事实并原子回滚（#659）。",
+      "commits": [
+        "f9aad4f9224d23eea202616a2dc85ef5945d7bbd",
+        "9eab973179272e7000703a63506e3f023e36fb0a"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "f9aad4f9224d23eea202616a2dc85ef5945d7bbd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/933"
+      ]
+    },
+    {
+      "commit": "3e663d20f5fdb2251c73701d268a7b58a59c679b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/933"
+      ]
+    },
+    {
+      "commit": "9eab973179272e7000703a63506e3f023e36fb0a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/933"
+      ]
+    }
+  ]
+}

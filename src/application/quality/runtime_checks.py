@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from src.application.quality.intake_checks import trade_intake_runtime_evidence_available
 from src.application.quality.model import check_result, evidence_ref
 from src.application.payload_helpers import parse_utc as _parse_utc
+from src.application.trades.listener_status import NONWORKING_LISTENER_STATUSES
 
 
 def build_runtime_checks(
@@ -13,6 +15,7 @@ def build_runtime_checks(
     observed_at_utc: str,
     now: datetime,
     heartbeat_expected_seconds: int = 300,
+    runtime_status_errors: list[dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     service_rows: list[dict[str, Any]] = []
@@ -77,7 +80,15 @@ def build_runtime_checks(
 
     source_rows: list[dict[str, Any]] = []
     intake_enabled = False
+    unavailable_markets = [
+        str(error.get("config_key") or "").strip().lower() or None
+        for error in runtime_status_errors or []
+    ]
     for item in runtime_statuses:
+        if not trade_intake_runtime_evidence_available(item):
+            config = item.get("config") if isinstance(item.get("config"), dict) else {}
+            unavailable_markets.append(str(config.get("config_key") or "").strip().lower() or None)
+            continue
         intake = item.get("trade_intake") if isinstance(item.get("trade_intake"), dict) else {}
         if not bool(intake.get("enabled")):
             continue
@@ -87,7 +98,21 @@ def build_runtime_checks(
             for row in intake.get("sources") or []
             if isinstance(row, dict) and bool(row.get("enabled"))
         )
-    if not intake_enabled:
+    if not runtime_statuses and not unavailable_markets:
+        unavailable_markets.append(None)
+    for market in unavailable_markets:
+        checks.append(
+            check_result(
+                check_id="RT-OM-002",
+                status="unknown",
+                scope={"market": market, "source": "trade-intake"},
+                observed_at_utc=observed_at_utc,
+                reason_code="LISTENER_RUNTIME_UNAVAILABLE",
+                message="Trade intake listener runtime configuration evidence is unavailable.",
+                evidence_refs=[],
+            )
+        )
+    if not intake_enabled and not unavailable_markets:
         checks.append(
             check_result(
                 check_id="RT-OM-002",
@@ -99,7 +124,7 @@ def build_runtime_checks(
                 evidence_refs=[],
             )
         )
-    elif not source_rows:
+    elif intake_enabled and not source_rows:
         checks.append(
             check_result(
                 check_id="RT-OM-002",
@@ -118,8 +143,14 @@ def build_runtime_checks(
         listener_status = str(summary.get("listener_status") or "").strip().lower()
         if age is None:
             status, reason, message = "unknown", "LISTENER_HEARTBEAT_MISSING", "Listener heartbeat is missing."
-        elif age <= heartbeat_expected_seconds * 2 and listener_status not in {"failed", "stopped"}:
-            status, reason, message = "pass", "LISTENER_HEARTBEAT_FRESH", "Trade intake heartbeat is fresh."
+        elif age <= heartbeat_expected_seconds * 2:
+            if listener_status in NONWORKING_LISTENER_STATUSES or listener_status == "failed":
+                status, reason, message = (
+                    "warn", "LISTENER_NOT_WORKING",
+                    f"Trade intake listener reports nonworking status: {listener_status}.",
+                )
+            else:
+                status, reason, message = "pass", "LISTENER_HEARTBEAT_FRESH", "Trade intake heartbeat is fresh."
         elif age <= heartbeat_expected_seconds * 5:
             status, reason, message = "warn", "LISTENER_HEARTBEAT_DELAYED", "Trade intake heartbeat is delayed."
         else:

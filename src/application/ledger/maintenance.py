@@ -370,15 +370,18 @@ def _assignment_review_details(fields: dict[str, Any]) -> dict[str, Any] | None:
         "quote_status": str(fields.get("_auto_close_quote_status") or "").strip() or None,
         "quote_time_ms": safe_float(fields.get("_auto_close_quote_time_ms")),
         "underlier_code": str(fields.get("_auto_close_underlier_code") or "").strip() or None,
+        "block_auto_close": True,
+        "skip_reason": "expiry_assignment_review_required",
+        "reason": (
+            "underlying spot does not prove expiration without assignment; "
+            "confirmed broker settlement evidence is required"
+        ),
     }
     if strike is None:
         details.update(
             {
                 "status": "missing_strike",
                 "moneyness": "unknown",
-                "block_auto_close": True,
-                "skip_reason": "expiry_assignment_review_required",
-                "reason": "short option expiry auto-close requires strike; assignment review required",
             }
         )
         return details
@@ -387,26 +390,22 @@ def _assignment_review_details(fields: dict[str, Any]) -> dict[str, Any] | None:
             {
                 "status": "missing_spot",
                 "moneyness": "unknown",
-                "block_auto_close": True,
-                "skip_reason": "expiry_assignment_review_required",
-                "reason": "short option expiry auto-close requires underlying spot; assignment review required",
             }
         )
         return details
 
     if option_type == "put":
-        otm_verified = float(spot) > float(strike)
+        spot_is_otm = float(spot) > float(strike)
         intrinsic_value = max(0.0, float(strike) - float(spot))
     else:
-        otm_verified = float(spot) < float(strike)
+        spot_is_otm = float(spot) < float(strike)
         intrinsic_value = max(0.0, float(spot) - float(strike))
     details["intrinsic_value"] = intrinsic_value
-    if otm_verified:
+    if spot_is_otm:
         details.update(
             {
-                "status": "otm_verified",
+                "status": "broker_evidence_required",
                 "moneyness": "otm",
-                "block_auto_close": False,
             }
         )
         return details
@@ -415,12 +414,6 @@ def _assignment_review_details(fields: dict[str, Any]) -> dict[str, Any] | None:
         {
             "status": "itm_or_atm",
             "moneyness": "itm_or_atm",
-            "block_auto_close": True,
-            "skip_reason": "expiry_assignment_review_required",
-            "reason": (
-                f"short {option_type} expired in/at the money; wait for assignment outcome: "
-                f"spot={float(spot):g} strike={float(strike):g}"
-            ),
         }
     )
     return details

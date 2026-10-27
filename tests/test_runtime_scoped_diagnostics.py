@@ -21,7 +21,7 @@ def build_runtime_diagnostic_fixture(
     """Generate A12 bytes through run_one_account and its real metrics/audit writers.
 
     Reuses the existing typed child-error fixture; only the child process is fake.
-    The returned files can be reused unchanged by Host/Pi local acceptance runs.
+    The returned files can be reused unchanged by Python Host local acceptance runs.
     """
     from domain.storage.repositories import state_repo
     from src.application.account_run import run_one_account
@@ -105,7 +105,7 @@ def test_real_writer_diagnostic_reason_and_stage_only_public_projection(tmp_path
     metrics = next(row for row in data_for_model["diagnostics"] if row["source_kind"] == "account_metrics")
     stage = next(row for row in data_for_model["diagnostics"] if row["source_kind"] == "run_audit")
     assert metrics["outcomes"] == {
-        "usable_scan_result": not typed,
+        "usable_scan_result": None,
         "pipeline_completed_successfully": False,
     }
     assert "ran_scan" not in metrics and "ran_pipeline" not in metrics

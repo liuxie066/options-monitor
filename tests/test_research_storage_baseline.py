@@ -981,6 +981,115 @@ def test_manifest_missing_or_declared_size_mismatch_is_critical(
     assert result["thresholds"]["preview"]["actions"] == []
 
 
+@pytest.mark.parametrize("envelope", [False, True])
+@pytest.mark.parametrize("research,accepted", [
+    ({"status": "complete"}, True),
+    ({}, True),
+    ({"status": "data_unavailable"}, False),
+    ({"status": "partial_data"}, False),
+    ({"status": "unknown"}, False),
+    ({"status": None}, False),
+    ({"status": ""}, False),
+    ({"status": True}, False),
+    ({"status": ["complete"]}, False),
+    ({"status": {"value": "complete"}}, False),
+])
+def test_history_research_status_qualifies_growth(tmp_path, research, accepted, envelope):
+    payload = {
+        "schema_version": module.SCHEMA_VERSION,
+        "status": "partial_data",
+        "sqlite": {"status": "data_unavailable"},
+        "identity": {"runtime_root": str(tmp_path), "observed_at_utc": "2026-07-14T05:00:00+00:00"},
+        "research_storage": {"unique_declared_bytes": 200, **research},
+    }
+    path = tmp_path / "history.json"
+    with path.open("x", encoding="utf-8") as handle:
+        json.dump({"tool_name": "research.storage-baseline", "data": payload} if envelope else payload, handle)
+    before = path.read_bytes()
+    result = module._growth_and_forecast(root=tmp_path, observed_at=NOW, current_unique_bytes=300, history_reports=[path])
+    assert path.read_bytes() == before
+    if accepted:
+        assert result["status"] == "complete"
+        assert result["monthly_unique_growth_bytes"] == 100
+        assert result["forecast_90d_additional_bytes"] == 300
+        assert result["rejected_reports"] == []
+    else:
+        assert result["status"] == "insufficient_history"
+        assert result["observations"] == [{"observed_at_utc": NOW.isoformat(), "unique_declared_bytes": 300, "source": "current"}]
+        assert result["intervals"] == []
+        assert result["monthly_unique_growth_bytes"] is None
+        assert result["forecast_90d_additional_bytes"] is None
+        assert result["rejected_reports"] == [{"report": path.name, "reason": "research_storage_incomplete"}]
+
+
+@pytest.mark.parametrize("order", ["bad-first", "bad-last", "only-bad"])
+def test_history_research_status_does_not_advance_ordering(tmp_path, order):
+    paths = {}
+    for name, status, date, size in [
+        ("valid", "complete", "2026-06-14T05:00:00+00:00", 100),
+        ("bad", "data_unavailable", "2026-07-14T05:00:00+00:00", 280),
+        ("bad2", "data_unavailable", "2026-07-15T05:00:00+00:00", 290),
+    ]:
+        path = tmp_path / f"{name}.json"
+        with path.open("x", encoding="utf-8") as handle:
+            json.dump({"schema_version": module.SCHEMA_VERSION,
+                "identity": {"runtime_root": str(tmp_path), "observed_at_utc": date},
+                "research_storage": {"status": status, "unique_declared_bytes": size}}, handle)
+        paths[name] = path
+    names = {"bad-first": ["bad", "valid", "bad2"], "bad-last": ["valid", "bad", "bad2"], "only-bad": ["bad", "bad2"]}[order]
+    result = module._growth_and_forecast(root=tmp_path, observed_at=NOW, current_unique_bytes=300,
+        history_reports=[paths[name] for name in names])
+    assert result["rejected_reports"] == [{"report": f"{name}.json", "reason": "research_storage_incomplete"} for name in names if name.startswith("bad")]
+    assert [row["source"] for row in result["observations"]] == (["current"] if order == "only-bad" else ["valid.json", "current"])
+    assert result["status"] == ("insufficient_history" if order == "only-bad" else "complete")
+    assert result["monthly_unique_growth_bytes"] == (None if order == "only-bad" else 100)
+    assert result["forecast_90d_additional_bytes"] == (None if order == "only-bad" else 300)
+
+
+@pytest.mark.parametrize("research", [{}, {"status": "complete"}])
+@pytest.mark.parametrize("previous,current,monthly,additional", [(0, 0, 0, 0), (400, 300, -100, 0), (200, 300, 100, 300)])
+def test_history_research_status_preserves_valid_deltas(tmp_path, research, previous, current, monthly, additional):
+    path = tmp_path / "valid.json"
+    with path.open("x", encoding="utf-8") as handle:
+        json.dump({"schema_version": module.SCHEMA_VERSION,
+            "identity": {"runtime_root": str(tmp_path), "observed_at_utc": "2026-07-14T05:00:00+00:00"},
+            "research_storage": {"unique_declared_bytes": previous, **research}}, handle)
+    result = module._growth_and_forecast(root=tmp_path, observed_at=NOW, current_unique_bytes=current, history_reports=[path])
+    assert result["status"] == "complete"
+    assert result["monthly_unique_growth_bytes"] == monthly
+    assert result["forecast_90d_additional_bytes"] == additional
+    assert result["rejected_reports"] == []
+
+
+@pytest.mark.parametrize("research", [{}, {"status": "complete"}])
+@pytest.mark.parametrize("fault,reason", [
+    ("json", "JSONDecodeError"), ("schema", "schema_mismatch"),
+    ("identity", "shape_invalid"), ("research", "shape_invalid"),
+    ("root", "runtime_root_mismatch"), ("time", "identity_or_measure_invalid"),
+    ("measure", "identity_or_measure_invalid"), ("future", "out_of_order"),
+])
+def test_history_research_status_preserves_other_rejections(tmp_path, research, fault, reason):
+    payload = {"schema_version": module.SCHEMA_VERSION,
+        "identity": {"runtime_root": str(tmp_path), "observed_at_utc": "2026-07-14T05:00:00+00:00"},
+        "research_storage": {"unique_declared_bytes": 200, **research}}
+    if fault == "schema":
+        payload["schema_version"] = "wrong"
+    elif fault in {"identity", "research"}:
+        payload["identity" if fault == "identity" else "research_storage"] = None
+    elif fault == "root":
+        payload["identity"]["runtime_root"] = str(tmp_path / "different")
+    elif fault in {"time", "future"}:
+        payload["identity"]["observed_at_utc"] = "bad-time" if fault == "time" else NOW.isoformat()
+    elif fault == "measure":
+        payload["research_storage"]["unique_declared_bytes"] = None
+    path = tmp_path / "history.json"
+    with path.open("x", encoding="utf-8") as handle:
+        handle.write("{broken" if fault == "json" else json.dumps(payload))
+    result = module._growth_and_forecast(root=tmp_path, observed_at=NOW, current_unique_bytes=300, history_reports=[path])
+    assert result["status"] == "insufficient_history"
+    assert result["rejected_reports"] == [{"report": path.name, "reason": reason}]
+
+
 def test_forecast_requires_compatible_ordered_history_and_uses_observed_deltas(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1332,46 +1441,235 @@ def test_scan_blob_gc_preview_rejects_runtime_root_symlink(tmp_path: Path) -> No
         module.preview_scan_blob_gc(runtime_root=link)
 
 
+@pytest.mark.parametrize("account", ["alpha", "beta"])
 def test_scan_blob_gc_preview_accepts_exact_output_account_compatibility_alias(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, account: str,
 ) -> None:
     root = _make_runtime(tmp_path, with_ledger=False)
-    account_root = root / "output_accounts" / "lx"
-    account_root.mkdir(parents=True)
+    account_root = root / "output_accounts" / account
+    protected_ref = _publish_scan_blob(root, "AAA")
+    orphan_ref = _publish_scan_blob(root, "BBB")
+    _write_scan_blob_manifest(account_root / "state/manifest.json", protected_ref)
     output = root / "output"
     output.symlink_to(account_root, target_is_directory=True)
+    before = _tree_identity(root)
+    scandir = os.scandir
 
-    result = module.preview_scan_blob_gc(
-        runtime_root=root,
-        now_fn=lambda: datetime(2030, 2, 1, tzinfo=timezone.utc),
-    )
+    def no_alias_traversal(path):
+        assert Path(path) != output
+        return scandir(path)
 
+    with monkeypatch.context() as guard:
+        guard.setattr(os, "scandir", no_alias_traversal)
+        result = module.preview_scan_blob_gc(
+            runtime_root=root,
+            now_fn=lambda: datetime(2030, 2, 1, tzinfo=timezone.utc),
+        )
+
+    assert _tree_identity(root) == before
     assert result["deletion_allowed"] is True
+    assert result["reachable_blob_sha256"] == [protected_ref["blob_sha256"]]
+    assert [row["blob_sha256"] for row in result["candidates"]] == [orphan_ref["blob_sha256"]]
     assert result["compatibility_aliases_not_followed"] == [
         {
             "path": "output",
-            "target": "output_accounts/lx",
+            "target": f"output_accounts/{account}",
             "classification": "compatibility_alias",
         }
     ]
 
 
-def test_scan_blob_gc_preview_rejects_output_alias_outside_account_root(
-    tmp_path: Path,
+@pytest.mark.parametrize("target_kind", ["outside", "descendant", "account-link-outside", "dangling"])
+def test_scan_blob_gc_preview_rejects_unsafe_output_alias(
+    tmp_path: Path, target_kind: str,
 ) -> None:
     root = _make_runtime(tmp_path, with_ledger=False)
     outside = tmp_path / "outside"
     outside.mkdir()
+    target = outside
+    if target_kind == "descendant":
+        target = root / "output_accounts/alpha/state"
+        target.mkdir(parents=True)
+    elif target_kind == "account-link-outside":
+        target = root / "output_accounts/alpha"
+        target.symlink_to(outside, target_is_directory=True)
+    elif target_kind == "dangling":
+        target = tmp_path / "absent-account"
+    orphan_ref = _publish_scan_blob(root, "AAA")
     output = root / "output"
-    output.symlink_to(outside, target_is_directory=True)
+    output.symlink_to(target, target_is_directory=True)
+    before, outside_before = _tree_identity(root), _tree_identity(outside)
 
-    result = module.preview_scan_blob_gc(runtime_root=root)
+    result = module.preview_scan_blob_gc(
+        runtime_root=root, now_fn=lambda: datetime(2030, 2, 1, tzinfo=timezone.utc),
+    )
 
+    assert _tree_identity(root) == before
+    assert _tree_identity(outside) == outside_before
     assert result["deletion_allowed"] is False
     assert result["compatibility_aliases_not_followed"] == []
-    assert {row["reason"] for row in result["blockers"]} == {
-        "runtime_subroot_unsafe"
-    }
+    assert {"reason": "runtime_subroot_unsafe", "path": "output"} in result["blockers"]
+    assert result["candidates"] == []
+    assert result["summary"]["stored_blob_count"] == 1
+    assert orphan_ref["blob_sha256"] not in result["reachable_blob_sha256"]
+
+
+def _assert_gc_link_blocked(result: dict[str, Any], relpath: str) -> None:
+    assert result["status"] == "data_unavailable"
+    assert result["deletion_allowed"] is False
+    assert result["candidates"] == []
+    assert result["summary"]["candidate_blob_count"] == 0
+    assert result["summary"]["candidate_bytes"] == 0
+    assert result["blockers"].count({
+        "reason": "protected_manifest_symlink_not_followed", "path": relpath,
+    }) == 1
+    assert result["safety"]["mutation_operations"] == 0
+    assert result["safety"]["automatic_actions"] == []
+
+
+@pytest.mark.parametrize(("relpath", "target_kind"), [
+    pytest.param("output_runs/current/state", "external", id="retained-state"),
+    ("output_runs/current/state", "internal"),
+    ("output_runs/current/state", "dangling"),
+    ("output_runs/current/state", "self-loop"),
+    ("output_shared/state", "external"),
+    ("output_shared/research/dataset", "external"),
+    ("output_accounts/alpha", "external"),
+    ("output_accounts/alpha/state", "external"),
+    ("output_shared/arbitrary/nested", "external"),
+    ("manifests/nested", "external"),
+    ("output/nested", "external"),
+    ("output_shared/research/dataset/manifest.json", "external"),
+])
+def test_gc_protected_ancestor_link_blocks_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, relpath: str, target_kind: str,
+) -> None:
+    from src.interfaces.cli.main import main
+
+    observed_at = datetime(2030, 2, 1, tzinfo=timezone.utc)
+    root = _make_runtime(tmp_path, with_ledger=False)
+    protected_ref = _publish_scan_blob(root, "AAA")
+    orphan_ref = _publish_scan_blob(root, "BBB")
+    ancestor = root / relpath
+    manifest = ancestor if ancestor.suffix == ".json" else ancestor / "manifest.json"
+    _write_scan_blob_manifest(manifest, protected_ref)
+    if relpath == "output_accounts/alpha/state":
+        (root / "output").symlink_to(ancestor.parent, target_is_directory=True)
+    visible = module.preview_scan_blob_gc(runtime_root=root, now_fn=lambda: observed_at)
+    assert visible["deletion_allowed"] is True
+    assert visible["reachable_blob_sha256"] == [protected_ref["blob_sha256"]]
+    assert [row["blob_sha256"] for row in visible["candidates"]] == [orphan_ref["blob_sha256"]]
+
+    preserved = (root if target_kind == "internal" else tmp_path) / "preserved-target"
+    ancestor.rename(preserved)
+    target = {"dangling": tmp_path / "absent-target", "self-loop": ancestor}.get(target_kind, preserved)
+    ancestor.symlink_to(target)
+    before = _tree_identity(root)
+    preserved_before = preserved.read_bytes() if preserved.is_file() else _tree_identity(preserved)
+    link_before = os.readlink(ancestor)
+    scandir, read_bytes = os.scandir, Path.read_bytes
+
+    def no_target_scan(path):
+        if not isinstance(path, int):
+            assert Path(os.fsdecode(path)) not in {ancestor, preserved}
+        return scandir(path)
+
+    def no_target_read(path):
+        assert not any(path == base or base in path.parents for base in (ancestor, preserved))
+        return read_bytes(path)
+
+    with monkeypatch.context() as guard:
+        guard.setattr(os, "scandir", no_target_scan)
+        guard.setattr(Path, "read_bytes", no_target_read)
+        result = module.preview_scan_blob_gc(runtime_root=root, now_fn=lambda: observed_at)
+        _assert_gc_link_blocked(result, relpath)
+        assert module.preview_scan_blob_gc(runtime_root=root, now_fn=lambda: observed_at) == result
+        later = module.preview_scan_blob_gc(
+            runtime_root=root, now_fn=lambda: datetime(2030, 2, 1, 1, tzinfo=timezone.utc),
+        )
+        assert later["plan_sha256"] == result["plan_sha256"]
+        if relpath == "output_runs/current/state" and target_kind == "external":
+            guard.setattr(module, "_utc_now", lambda _fn: observed_at)
+            assert main(["research", "storage-gc-preview", "--runtime-root", str(root)]) == 0
+            envelope = json.loads(capsys.readouterr().out)
+            assert envelope["ok"] is True
+            assert envelope["tool_name"] == "research.storage-gc-preview"
+            assert envelope["data"] == result
+    assert _tree_identity(root) == before
+    assert (preserved.read_bytes() if preserved.is_file() else _tree_identity(preserved)) == preserved_before
+    assert os.readlink(ancestor) == link_before
+    assert result["summary"]["stored_blob_count"] == 2
+    assert result["compatibility_aliases_not_followed"] == visible["compatibility_aliases_not_followed"]
+
+
+@pytest.mark.parametrize("retention", ["latest", "recent", "expired"])
+def test_gc_state_link_keeps_run_retention_policy(tmp_path: Path, retention: str) -> None:
+    root = _make_runtime(tmp_path, with_ledger=False)
+    observed_at = datetime(2030, 2, 1, tzinfo=timezone.utc)
+    protected_ref = _publish_scan_blob(root, "AAA")
+    orphan_ref = _publish_scan_blob(root, "BBB")
+    timestamp = observed_at.timestamp() - (12 if retention == "recent" else 30) * 86400
+    for index in range(201):
+        run = root / "output_runs" / f"run-{index:03d}"
+        run.mkdir()
+        os.utime(run, (timestamp + index, timestamp + index))
+    current = root / "output_runs/run-000"
+    state = current / "state"
+    _write_scan_blob_manifest(state / "manifest.json", protected_ref)
+    preserved = tmp_path / "preserved-state"
+    state.rename(preserved)
+    state.symlink_to(preserved, target_is_directory=True)
+    current_time = timestamp + 500 if retention == "latest" else timestamp - 86400
+    os.utime(current, (current_time, current_time))
+    before, preserved_before = _tree_identity(root), _tree_identity(preserved)
+
+    result = module.preview_scan_blob_gc(runtime_root=root, now_fn=lambda: observed_at)
+
+    assert _tree_identity(root) == before
+    assert _tree_identity(preserved) == preserved_before
+    assert ("run-000" in result["retained_run_ids"]) is (retention != "expired")
+    if retention == "expired":
+        assert result["deletion_allowed"] is True
+        assert result["blockers"] == []
+        assert {row["blob_sha256"] for row in result["candidates"]} == {
+            protected_ref["blob_sha256"], orphan_ref["blob_sha256"],
+        }
+    else:
+        _assert_gc_link_blocked(result, "output_runs/run-000/state")
+        assert result["summary"]["retained_run_count"] == (201 if retention == "recent" else 200)
+
+
+def test_gc_internal_account_alias_chain_preserves_alias_and_blocks_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _make_runtime(tmp_path, with_ledger=False)
+    protected_ref = _publish_scan_blob(root, "AAA")
+    orphan_ref = _publish_scan_blob(root, "BBB")
+    real = root / "output_accounts/real"
+    _write_scan_blob_manifest(real / "state/manifest.json", protected_ref)
+    observed_at = datetime(2030, 2, 1, tzinfo=timezone.utc)
+    visible = module.preview_scan_blob_gc(runtime_root=root, now_fn=lambda: observed_at)
+    assert [row["blob_sha256"] for row in visible["candidates"]] == [orphan_ref["blob_sha256"]]
+    alias = root / "output_accounts/alias"
+    alias.symlink_to(real, target_is_directory=True)
+    output = root / "output"
+    output.symlink_to(alias, target_is_directory=True)
+    before = _tree_identity(root)
+    scandir = os.scandir
+
+    def no_alias_traversal(path):
+        assert Path(path) not in {alias, output}
+        return scandir(path)
+
+    with monkeypatch.context() as guard:
+        guard.setattr(os, "scandir", no_alias_traversal)
+        result = module.preview_scan_blob_gc(runtime_root=root, now_fn=lambda: observed_at)
+    _assert_gc_link_blocked(result, "output_accounts/alias")
+    assert result["compatibility_aliases_not_followed"] == [{
+        "path": "output", "target": "output_accounts/real", "classification": "compatibility_alias",
+    }]
+    assert result["reachable_blob_sha256"] == [protected_ref["blob_sha256"]]
+    assert _tree_identity(root) == before
 
 
 @pytest.mark.parametrize(

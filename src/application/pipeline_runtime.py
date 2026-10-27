@@ -18,6 +18,7 @@ from src.infrastructure.logging_config import get_logger
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.pipeline_symbol import process_symbol
 from src.application.runtime_paths import resolve_runtime_root
+from src.application.symbol_mutations import split_symbol_whitelist
 from src.application.tick_run_workspace import (
     AccountRunConfigAuthority,
     AccountRunConfigError,
@@ -178,7 +179,12 @@ def _want(step: str) -> bool:
 def main(argv: list[str] | None = None) -> int:
     global runtime_mode, is_scheduled, stage, stage_only, shared_required_data
 
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        split_symbol_whitelist(args.symbols)
+    except ValueError as exc:
+        parser.error(str(exc))
     experience = bool(getattr(args, "experience", False))
     account_display_name = str(
         getattr(args, "account_display_name", None) or ""

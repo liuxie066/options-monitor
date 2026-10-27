@@ -1,0 +1,855 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.5.7",
+  "base": {
+    "tag": "v4.5.6",
+    "commit": "bfa57d592274e98893e51579a50a9dfcf09dc548"
+  },
+  "reviewed_head": "4d9edb5d94af6868a78cf2ac1d3f5c33d6726c9e",
+  "commits": [
+    {
+      "sha": "bda12588c99e67de48d6607f4e1e7282816826b2",
+      "subject": "gateflow(plan): accept issue 684 retained notification plan"
+    },
+    {
+      "sha": "5d86b60fd7a5bdc226c88558f2ad72fbc7199266",
+      "subject": "fix(notification): resolve retained report sources for issue 684"
+    },
+    {
+      "sha": "228c3416cb08eab898fbb974ece8cf8453aab97f",
+      "subject": "chore(gateflow): accept plan for issue 678"
+    },
+    {
+      "sha": "e5096fc1b9c56e93dc2e6cfac18751547ed7b762",
+      "subject": "merge(notification): integrate main for issue 684 validation"
+    },
+    {
+      "sha": "778313b6cd28a05cd8c4cb76b347f37b8ac0dc74",
+      "subject": "fix(wheel): honor branch evidence before scanning"
+    },
+    {
+      "sha": "f9a05e60b1fc3cb37c4ac639ae1a19765ffd72c3",
+      "subject": "chore(gateflow): accept deepreview for issue 678"
+    },
+    {
+      "sha": "c9bcb9e096bc51d0732bd7d039d1348b2b468647",
+      "subject": "chore(gateflow): accept plan for issue 676"
+    },
+    {
+      "sha": "62933b6dd2dd7c0bb8d389a0713d6fc9306d6acb",
+      "subject": "fix(wheel): reject unavailable or mismatched call currency"
+    },
+    {
+      "sha": "00162dd04f3fb1ff557ada3d3ee7568cd942d7fb",
+      "subject": "chore(gateflow): accept local aggregate for issue 676"
+    },
+    {
+      "sha": "449515bd4575838bc2e9d8954d08af08eb5acaa9",
+      "subject": "chore(gateflow): accept issue 742 stock identity plan"
+    },
+    {
+      "sha": "389126551d4e9e4634b78deb51cca67da2d6f279",
+      "subject": "chore(gateflow): accept issue 704 runtime evidence plan"
+    },
+    {
+      "sha": "2ba2924172f6a91bfe8416b99f83ef7abb340c37",
+      "subject": "chore(gateflow): accept issue 759 underlying conflict plan"
+    },
+    {
+      "sha": "6abc5795604a9afef3ed918df9df609ceb10b136",
+      "subject": "fix(trades): require known stock settlement identity (#742)"
+    },
+    {
+      "sha": "7165594f505c0b884471d4690104e57f8de15974",
+      "subject": "chore(gateflow): record issue 742 local aggregate acceptance"
+    },
+    {
+      "sha": "f582e24f6ad311a069c202d865cbdcc36b591247",
+      "subject": "fix(quality): preserve unavailable intake runtime evidence (#704)"
+    },
+    {
+      "sha": "38b811beca556dd32d3c3dcf95f322354d81319b",
+      "subject": "chore(gateflow): record issue 704 local aggregate acceptance"
+    },
+    {
+      "sha": "097edca67fb3a1d0026d0f17551970c1a53dab18",
+      "subject": "fix(trades): quarantine explicit lookup underlying conflicts (#759)"
+    },
+    {
+      "sha": "612e84bac46b1d326cc866034ad690d6c182391f",
+      "subject": "chore(gateflow): record issue 759 local aggregate acceptance"
+    },
+    {
+      "sha": "a9a1229d92e5439a4e037ebccbb17e1f2f3e9870",
+      "subject": "chore(gateflow): accept issue 781 implementation plan"
+    },
+    {
+      "sha": "7de7151be39ca1a1ddccd1a32be127afd8160688",
+      "subject": "fix(research): reject incomplete storage history"
+    },
+    {
+      "sha": "dabf613e9cfcde7ffb265bf63373dee538296dc0",
+      "subject": "chore(gateflow): record issue 781 local aggregate acceptance"
+    },
+    {
+      "sha": "4f76272ca842686ce81f7186967f211abc7614a7",
+      "subject": "chore(quality): accept issue 690 repair plan"
+    },
+    {
+      "sha": "1bc277bb9f32b48b2e323b1592b3ef5afd504c7b",
+      "subject": "fix(quality): acknowledge ordinary publication after persistence"
+    },
+    {
+      "sha": "1ac2292ffe66df009c362376bdd143d8d35d07e2",
+      "subject": "chore(quality): record local aggregate acceptance for 690"
+    },
+    {
+      "sha": "a77a3c1ebe982068f6a871be95d576da49725bbd",
+      "subject": "chore(gateflow): accept compact rendering fix plan 735"
+    },
+    {
+      "sha": "c62627aaab60805d093e9788510418405a80de8e",
+      "subject": "fix(notify): preserve signed Combo annual and observation note"
+    },
+    {
+      "sha": "9e220f298472778a98c5880d3b9e8493abf578cb",
+      "subject": "chore(gateflow): accept compact renderer aggregate for #735"
+    },
+    {
+      "sha": "aacdd7c79e858bdcc6155ac06d9adf4d345c96bc",
+      "subject": "chore(plan): accept instance-bound authentication plan for issue 700"
+    },
+    {
+      "sha": "cd295717ca4d59b9c83e15ab71441a1c3194507a",
+      "subject": "fix(trades): bind listener auth failures to their source context"
+    },
+    {
+      "sha": "409165bf24f414230ce2f56690a6d3b7f570387c",
+      "subject": "chore(gateflow): record issue 700 local aggregate acceptance"
+    },
+    {
+      "sha": "865ece7ba4cb20f629c8abc7b48339464e109f71",
+      "subject": "chore(notification): integrate main for retained audit resolution"
+    },
+    {
+      "sha": "94cfcdcd1b31c09e02304253ced1ed059e66992e",
+      "subject": "chore(wheel): integrate main for fail-closed call admission"
+    },
+    {
+      "sha": "31b3064e83fdae0b48e052b170a2630d85c40562",
+      "subject": "chore(quality): integrate main for unavailable intake status"
+    },
+    {
+      "sha": "b5caa5db606fae715bab28fe62116ded80f31eeb",
+      "subject": "test(notification): cover retained audit source races"
+    },
+    {
+      "sha": "d58773c184e0c76c03e0d44cde52e8ec2d12271e",
+      "subject": "docs(graph): refresh notification regression imports"
+    },
+    {
+      "sha": "ec96d72cfc343ee8b0208da578dc4867abf11548",
+      "subject": "chore(integration): merge main for listener auth source fix"
+    },
+    {
+      "sha": "f9023e8bea01178c3ac73dff2deecf146d5cc36c",
+      "subject": "chore(integration): rebase wheel eligibility evidence on released main"
+    },
+    {
+      "sha": "ed86a8293e220704cff0b3766afab24e4e362f59",
+      "subject": "chore(integration): merge released main into retained audit fix"
+    },
+    {
+      "sha": "f71a4a12eaf487759ecefa1b44db878bf6c73803",
+      "subject": "chore(integration): merge released main into listener source fix"
+    },
+    {
+      "sha": "3de54fe45da8643b4fd13d606f2944f8d4114f82",
+      "subject": "chore(integration): merge released main into intake quality fix"
+    },
+    {
+      "sha": "611cf00fb755aedd370890ea19fd38cc02128fdc",
+      "subject": "chore(integration): merge released main into settlement identity fix"
+    },
+    {
+      "sha": "eb3c062bbd1d32aaa28624be4a1bb254e596e8ad",
+      "subject": "Merge pull request #896 from liuxie066/codex/fix-wheel-branch-eligibility-678"
+    },
+    {
+      "sha": "6a2a929eaf041ebee2c9f191e405d003566cfccc",
+      "subject": "chore(integration): merge accepted main into intake quality fix"
+    },
+    {
+      "sha": "43154b561f541f6492339196737614272e849638",
+      "subject": "chore(integration): merge accepted main into retained notification lookup"
+    },
+    {
+      "sha": "9b62f901fba988e5685b78f7adc85c9f67b7f6ca",
+      "subject": "chore(integration): update listener authentication fix on accepted main"
+    },
+    {
+      "sha": "35eea0850d82211971c018f58e3c0cd617103b81",
+      "subject": "Merge pull request #897 from liuxie066/codex/fix-intake-runtime-availability-704"
+    },
+    {
+      "sha": "f4d603e921a709b91380fe051f5da89d738d880b",
+      "subject": "chore(integration): merge intake evidence fix into notification lookup"
+    },
+    {
+      "sha": "6d8429fb551b5163c7c4b0081e84322b1b12778d",
+      "subject": "chore(integration): merge intake evidence fix into listener authentication"
+    },
+    {
+      "sha": "5637ab87cf61cd9f72b8ff21256adcc6bf8a3030",
+      "subject": "chore(integration): merge accepted intake quality main into stock identity fix"
+    },
+    {
+      "sha": "7ab22a0ab2fa64b1d9d49402e3578bc9fef8eabf",
+      "subject": "Merge pull request #899 from liuxie066/codex/fix-latest-notification-segments-684"
+    },
+    {
+      "sha": "f786944057d9e75f6c17ce5007325c75a08172cd",
+      "subject": "chore(integration): preserve validated Wheel eligibility merge for currency fix"
+    },
+    {
+      "sha": "2eb267cf22e758e0866ab67a659d8c01354a726b",
+      "subject": "chore(integration): update listener authentication fix on notification main"
+    },
+    {
+      "sha": "e5e463b0d15b39b778253d4ed2a2636345043607",
+      "subject": "chore(integration): update Wheel currency fix on accepted maintenance main"
+    },
+    {
+      "sha": "6c91f3da60d37bcbb9c95f331f93ada36afc22c8",
+      "subject": "chore(integration): preserve quality publication cursor dependency merge"
+    },
+    {
+      "sha": "af99a9b1aeeed371d43e27f3b0c473a5a7c1cfac",
+      "subject": "chore(integration): combine settlement identity and Wheel currency repairs"
+    },
+    {
+      "sha": "e3d71d0fe1c9290194b74b725d8503d6faef93e7",
+      "subject": "Merge pull request #900 from liuxie066/codex/fix-listener-auth-source-700"
+    },
+    {
+      "sha": "40e9470ab7cf9dd2255914042e33561fbf07f18b",
+      "subject": "chore(maintenance): integrate quality publication cursor fix"
+    },
+    {
+      "sha": "cd1a095ac9193c70004e80980a620c5b51ff24a4",
+      "subject": "chore(maintenance): integrate explicit underlying conflict fix"
+    },
+    {
+      "sha": "1fc63a229c6f390ed4f47790a497f7dbb8a4375c",
+      "subject": "chore(maintenance): integrate incomplete storage history fix"
+    },
+    {
+      "sha": "c8796ccb8bea6cdce97660a919c7ab10666894ce",
+      "subject": "chore(maintenance): integrate signed compact yield rendering fix"
+    },
+    {
+      "sha": "c57054d27f5dee0c1ffd137a83144122ce244f1c",
+      "subject": "chore(maintenance): integrate accepted listener source baseline"
+    },
+    {
+      "sha": "82bb325819dd81062a6c189db837aa7c1cacd6ea",
+      "subject": "test(ledger): verify lookup evidence coordination ownership"
+    },
+    {
+      "sha": "4d9edb5d94af6868a78cf2ac1d3f5c33d6726c9e",
+      "subject": "Merge pull request #901 from liuxie066/codex/fix-settlement-stock-identity-742"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "人工兼容 compact 正文保留组合负年化与已有观察警示，零值和正值、CSP/CC 格式及原筛选规则保持；只修不增，不改变 Daily Brief 或发送行为（#735）。",
+      "commits": [
+        "c62627aaab60805d093e9788510418405a80de8e",
+        "c8796ccb8bea6cdce97660a919c7ab10666894ce",
+        "4d9edb5d94af6868a78cf2ac1d3f5c33d6726c9e"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "空间增长预测排除明确不完整的历史研究计数，并在缺少有效历史时保持预测不可用；保留旧无状态报告、SQLite 单独不可用及有效零增长，避免错误放行只读清理预览的空间子门禁（#781）。",
+      "commits": [
+        "7de7151be39ca1a1ddccd1a32be127afd8160688",
+        "1fc63a229c6f390ed4f47790a497f7dbb8a4375c",
+        "4d9edb5d94af6868a78cf2ac1d3f5c33d6726c9e"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "成交与订单 lookup 的双方明确标的冲突会保留原始来源并原子进入 Inbox 人工复核，阻断重试和旧 claim 入账；保留配置别名、标准成交身份、低可信代码根纠正及既有数量价格门禁（#759）。",
+      "commits": [
+        "097edca67fb3a1d0026d0f17551970c1a53dab18",
+        "cd1a095ac9193c70004e80980a620c5b51ff24a4",
+        "82bb325819dd81062a6c189db837aa7c1cacd6ea",
+        "4d9edb5d94af6868a78cf2ac1d3f5c33d6726c9e"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "结算观察要求相关股票成交具有可核实的标的身份，缺失或未知代码按既有数据错误阻止写入；统一 US/HK 代码与别名匹配，避免错误指派或漏记交割，并保留期权行排除及数量校验（#742）。",
+      "commits": [
+        "6abc5795604a9afef3ed918df9df609ceb10b136",
+        "611cf00fb755aedd370890ea19fd38cc02128fdc",
+        "5637ab87cf61cd9f72b8ff21256adcc6bf8a3030",
+        "af99a9b1aeeed371d43e27f3b0c473a5a7c1cfac",
+        "4d9edb5d94af6868a78cf2ac1d3f5c33d6726c9e"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Wheel Call 经济评估与 Put 一致校验候选和正股批次币种，缺失或错配时返回不可用，避免混合金额进入推荐及收益排序；保留同币种计算和既有费用契约（#676）。",
+      "commits": [
+        "62933b6dd2dd7c0bb8d389a0713d6fc9306d6acb",
+        "94cfcdcd1b31c09e02304253ced1ed059e66992e",
+        "f786944057d9e75f6c17ce5007325c75a08172cd",
+        "e5e463b0d15b39b778253d4ed2a2636345043607",
+        "af99a9b1aeeed371d43e27f3b0c473a5a7c1cfac",
+        "4d9edb5d94af6868a78cf2ac1d3f5c33d6726c9e"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "成交监听初始化认证证据绑定实际 context 的 InitConnect 失败结果，避免并发监听源或无关 broker 日志导致健康源被误标认证阻塞；保留取消、重连与全源协调停机语义，诊断 detail 使用上游原始错误消息（#700）。",
+      "commits": [
+        "cd295717ca4d59b9c83e15ab71441a1c3194507a",
+        "ec96d72cfc343ee8b0208da578dc4867abf11548",
+        "f71a4a12eaf487759ecefa1b44db878bf6c73803",
+        "9b62f901fba988e5685b78f7adc85c9f67b7f6ca",
+        "6d8429fb551b5163c7c4b0081e84322b1b12778d",
+        "2eb267cf22e758e0866ab67a659d8c01354a726b",
+        "e3d71d0fe1c9290194b74b725d8503d6faef93e7",
+        "c57054d27f5dee0c1ffd137a83144122ce244f1c"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "通知来源候选诊断复用有界审计扫描，查找当前文件及保留段中的已确认投递来源；保留账户、会话、原始来源 run 和通知日期语义，覆盖缺失、损坏或超限时明确报告证据不完整（#684）。",
+      "commits": [
+        "5d86b60fd7a5bdc226c88558f2ad72fbc7199266",
+        "e5096fc1b9c56e93dc2e6cfac18751547ed7b762",
+        "865ece7ba4cb20f629c8abc7b48339464e109f71",
+        "b5caa5db606fae715bab28fe62116ded80f31eeb",
+        "d58773c184e0c76c03e0d44cde52e8ec2d12271e",
+        "ed86a8293e220704cff0b3766afab24e4e362f59",
+        "43154b561f541f6492339196737614272e849638",
+        "f4d603e921a709b91380fe051f5da89d738d880b",
+        "7ab22a0ab2fa64b1d9d49402e3578bc9fef8eabf",
+        "2eb267cf22e758e0866ab67a659d8c01354a726b",
+        "e5e463b0d15b39b778253d4ed2a2636345043607",
+        "af99a9b1aeeed371d43e27f3b0c473a5a7c1cfac"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "普通质量状态仅在校验和发布成功后确认本轮开始时的账本 revision；独立 integrity 刷新或失败发布不再消耗普通复查游标，保留差异复查计时和市场范围（#690）。",
+      "commits": [
+        "1bc277bb9f32b48b2e323b1592b3ef5afd504c7b",
+        "31b3064e83fdae0b48e052b170a2630d85c40562",
+        "6c91f3da60d37bcbb9c95f331f93ada36afc22c8",
+        "40e9470ab7cf9dd2255914042e33561fbf07f18b",
+        "4d9edb5d94af6868a78cf2ac1d3f5c33d6726c9e"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "接入质检区分明确禁用与运行证据不可用，读取失败或配置错误不再发布可信接入数据；保留双市场部分失败、账户范围和合法零结果（#704）。",
+      "commits": [
+        "f582e24f6ad311a069c202d865cbdcc36b591247",
+        "3de54fe45da8643b4fd13d606f2944f8d4114f82",
+        "6a2a929eaf041ebee2c9f191e405d003566cfccc",
+        "35eea0850d82211971c018f58e3c0cd617103b81",
+        "f4d603e921a709b91380fe051f5da89d738d880b",
+        "6d8429fb551b5163c7c4b0081e84322b1b12778d",
+        "5637ab87cf61cd9f72b8ff21256adcc6bf8a3030",
+        "e5e463b0d15b39b778253d4ed2a2636345043607"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Wheel Call/Put 扫描在生成候选及容量声明前检查分支的既有证据阻塞原因，避免未知乘数来源等可见分支仍获推荐；保留合法未覆盖数量，并将具体原因传递至快照和简报（#678）。",
+      "commits": [
+        "778313b6cd28a05cd8c4cb76b347f37b8ac0dc74",
+        "f9023e8bea01178c3ac73dff2deecf146d5cc36c",
+        "eb3c062bbd1d32aaa28624be4a1bb254e596e8ad",
+        "6a2a929eaf041ebee2c9f191e405d003566cfccc",
+        "43154b561f541f6492339196737614272e849638",
+        "9b62f901fba988e5685b78f7adc85c9f67b7f6ca",
+        "5637ab87cf61cd9f72b8ff21256adcc6bf8a3030"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "bda12588c99e67de48d6607f4e1e7282816826b2",
+      "reason": "Empty planning or acceptance checkpoint for #684; tree equals its parent. No source, configuration, runtime or operator behavior changed."
+    },
+    {
+      "commit": "228c3416cb08eab898fbb974ece8cf8453aab97f",
+      "reason": "Empty planning or acceptance checkpoint for #678; tree equals its parent. No source, configuration, runtime or operator behavior changed."
+    },
+    {
+      "commit": "f9a05e60b1fc3cb37c4ac639ae1a19765ffd72c3",
+      "reason": "Empty planning or acceptance checkpoint for #678; tree equals its parent. No source, configuration, runtime or operator behavior changed."
+    },
+    {
+      "commit": "c9bcb9e096bc51d0732bd7d039d1348b2b468647",
+      "reason": "Empty planning or acceptance checkpoint for #676; tree equals its parent. No source, configuration, runtime or operator behavior changed."
+    },
+    {
+      "commit": "00162dd04f3fb1ff557ada3d3ee7568cd942d7fb",
+      "reason": "Empty planning or acceptance checkpoint for #676; tree equals its parent. No source, configuration, runtime or operator behavior changed."
+    },
+    {
+      "commit": "449515bd4575838bc2e9d8954d08af08eb5acaa9",
+      "reason": "Empty planning or acceptance checkpoint for #742; tree equals its parent. No source, configuration, runtime or operator behavior changed."
+    },
+    {
+      "commit": "389126551d4e9e4634b78deb51cca67da2d6f279",
+      "reason": "Empty planning or acceptance checkpoint for #704; tree equals its parent. No source, configuration, runtime or operator behavior changed."
+    },
+    {
+      "commit": "2ba2924172f6a91bfe8416b99f83ef7abb340c37",
+      "reason": "Empty planning or acceptance checkpoint for #759; tree equals its parent. No source, configuration, runtime or operator behavior changed."
+    },
+    {
+      "commit": "7165594f505c0b884471d4690104e57f8de15974",
+      "reason": "Empty planning or acceptance checkpoint for #742; tree equals its parent. No source, configuration, runtime or operator behavior changed."
+    },
+    {
+      "commit": "38b811beca556dd32d3c3dcf95f322354d81319b",
+      "reason": "Empty planning or acceptance checkpoint for #704; tree equals its parent. No source, configuration, runtime or operator behavior changed."
+    },
+    {
+      "commit": "612e84bac46b1d326cc866034ad690d6c182391f",
+      "reason": "Empty planning or acceptance checkpoint for #759; tree equals its parent. No source, configuration, runtime or operator behavior changed."
+    },
+    {
+      "commit": "a9a1229d92e5439a4e037ebccbb17e1f2f3e9870",
+      "reason": "Empty planning or acceptance checkpoint for #781; tree equals its parent. No source, configuration, runtime or operator behavior changed."
+    },
+    {
+      "commit": "dabf613e9cfcde7ffb265bf63373dee538296dc0",
+      "reason": "Empty planning or acceptance checkpoint for #781; tree equals its parent. No source, configuration, runtime or operator behavior changed."
+    },
+    {
+      "commit": "4f76272ca842686ce81f7186967f211abc7614a7",
+      "reason": "Empty planning or acceptance checkpoint for #690; tree equals its parent. No source, configuration, runtime or operator behavior changed."
+    },
+    {
+      "commit": "1ac2292ffe66df009c362376bdd143d8d35d07e2",
+      "reason": "Empty planning or acceptance checkpoint for #690; tree equals its parent. No source, configuration, runtime or operator behavior changed."
+    },
+    {
+      "commit": "a77a3c1ebe982068f6a871be95d576da49725bbd",
+      "reason": "Empty planning or acceptance checkpoint for #735; tree equals its parent. No source, configuration, runtime or operator behavior changed."
+    },
+    {
+      "commit": "9e220f298472778a98c5880d3b9e8493abf578cb",
+      "reason": "Empty planning or acceptance checkpoint for #735; tree equals its parent. No source, configuration, runtime or operator behavior changed."
+    },
+    {
+      "commit": "aacdd7c79e858bdcc6155ac06d9adf4d345c96bc",
+      "reason": "Empty planning or acceptance checkpoint for #700; tree equals its parent. No source, configuration, runtime or operator behavior changed."
+    },
+    {
+      "commit": "409165bf24f414230ce2f56690a6d3b7f570387c",
+      "reason": "Empty planning or acceptance checkpoint for #700; tree equals its parent. No source, configuration, runtime or operator behavior changed."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "bda12588c99e67de48d6607f4e1e7282816826b2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/899"
+      ]
+    },
+    {
+      "commit": "5d86b60fd7a5bdc226c88558f2ad72fbc7199266",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/899"
+      ]
+    },
+    {
+      "commit": "228c3416cb08eab898fbb974ece8cf8453aab97f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/896"
+      ]
+    },
+    {
+      "commit": "e5096fc1b9c56e93dc2e6cfac18751547ed7b762",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/899"
+      ]
+    },
+    {
+      "commit": "778313b6cd28a05cd8c4cb76b347f37b8ac0dc74",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/896"
+      ]
+    },
+    {
+      "commit": "f9a05e60b1fc3cb37c4ac639ae1a19765ffd72c3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/896"
+      ]
+    },
+    {
+      "commit": "c9bcb9e096bc51d0732bd7d039d1348b2b468647",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "62933b6dd2dd7c0bb8d389a0713d6fc9306d6acb",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "00162dd04f3fb1ff557ada3d3ee7568cd942d7fb",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "449515bd4575838bc2e9d8954d08af08eb5acaa9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "389126551d4e9e4634b78deb51cca67da2d6f279",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/897"
+      ]
+    },
+    {
+      "commit": "2ba2924172f6a91bfe8416b99f83ef7abb340c37",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "6abc5795604a9afef3ed918df9df609ceb10b136",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "7165594f505c0b884471d4690104e57f8de15974",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "f582e24f6ad311a069c202d865cbdcc36b591247",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/897"
+      ]
+    },
+    {
+      "commit": "38b811beca556dd32d3c3dcf95f322354d81319b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/897"
+      ]
+    },
+    {
+      "commit": "097edca67fb3a1d0026d0f17551970c1a53dab18",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "612e84bac46b1d326cc866034ad690d6c182391f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "a9a1229d92e5439a4e037ebccbb17e1f2f3e9870",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "7de7151be39ca1a1ddccd1a32be127afd8160688",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "dabf613e9cfcde7ffb265bf63373dee538296dc0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "4f76272ca842686ce81f7186967f211abc7614a7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "1bc277bb9f32b48b2e323b1592b3ef5afd504c7b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "1ac2292ffe66df009c362376bdd143d8d35d07e2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "a77a3c1ebe982068f6a871be95d576da49725bbd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "c62627aaab60805d093e9788510418405a80de8e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "9e220f298472778a98c5880d3b9e8493abf578cb",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "aacdd7c79e858bdcc6155ac06d9adf4d345c96bc",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/900"
+      ]
+    },
+    {
+      "commit": "cd295717ca4d59b9c83e15ab71441a1c3194507a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/900"
+      ]
+    },
+    {
+      "commit": "409165bf24f414230ce2f56690a6d3b7f570387c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/900"
+      ]
+    },
+    {
+      "commit": "865ece7ba4cb20f629c8abc7b48339464e109f71",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/899"
+      ]
+    },
+    {
+      "commit": "94cfcdcd1b31c09e02304253ced1ed059e66992e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "31b3064e83fdae0b48e052b170a2630d85c40562",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "b5caa5db606fae715bab28fe62116ded80f31eeb",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/899"
+      ]
+    },
+    {
+      "commit": "d58773c184e0c76c03e0d44cde52e8ec2d12271e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/899"
+      ]
+    },
+    {
+      "commit": "ec96d72cfc343ee8b0208da578dc4867abf11548",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/900"
+      ]
+    },
+    {
+      "commit": "f9023e8bea01178c3ac73dff2deecf146d5cc36c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/896"
+      ]
+    },
+    {
+      "commit": "ed86a8293e220704cff0b3766afab24e4e362f59",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/899"
+      ]
+    },
+    {
+      "commit": "f71a4a12eaf487759ecefa1b44db878bf6c73803",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/900"
+      ]
+    },
+    {
+      "commit": "3de54fe45da8643b4fd13d606f2944f8d4114f82",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/897"
+      ]
+    },
+    {
+      "commit": "611cf00fb755aedd370890ea19fd38cc02128fdc",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "eb3c062bbd1d32aaa28624be4a1bb254e596e8ad",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/896"
+      ]
+    },
+    {
+      "commit": "6a2a929eaf041ebee2c9f191e405d003566cfccc",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/896",
+        "https://github.com/liuxie066/options-monitor/pull/897"
+      ]
+    },
+    {
+      "commit": "43154b561f541f6492339196737614272e849638",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/896",
+        "https://github.com/liuxie066/options-monitor/pull/899"
+      ]
+    },
+    {
+      "commit": "9b62f901fba988e5685b78f7adc85c9f67b7f6ca",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/896",
+        "https://github.com/liuxie066/options-monitor/pull/900"
+      ]
+    },
+    {
+      "commit": "35eea0850d82211971c018f58e3c0cd617103b81",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/897"
+      ]
+    },
+    {
+      "commit": "f4d603e921a709b91380fe051f5da89d738d880b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/897",
+        "https://github.com/liuxie066/options-monitor/pull/899"
+      ]
+    },
+    {
+      "commit": "6d8429fb551b5163c7c4b0081e84322b1b12778d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/897",
+        "https://github.com/liuxie066/options-monitor/pull/900"
+      ]
+    },
+    {
+      "commit": "5637ab87cf61cd9f72b8ff21256adcc6bf8a3030",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/896",
+        "https://github.com/liuxie066/options-monitor/pull/897",
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "7ab22a0ab2fa64b1d9d49402e3578bc9fef8eabf",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/899"
+      ]
+    },
+    {
+      "commit": "f786944057d9e75f6c17ce5007325c75a08172cd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "2eb267cf22e758e0866ab67a659d8c01354a726b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/899",
+        "https://github.com/liuxie066/options-monitor/pull/900"
+      ]
+    },
+    {
+      "commit": "e5e463b0d15b39b778253d4ed2a2636345043607",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/897",
+        "https://github.com/liuxie066/options-monitor/pull/899",
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "6c91f3da60d37bcbb9c95f331f93ada36afc22c8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "af99a9b1aeeed371d43e27f3b0c473a5a7c1cfac",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/899",
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "e3d71d0fe1c9290194b74b725d8503d6faef93e7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/900"
+      ]
+    },
+    {
+      "commit": "40e9470ab7cf9dd2255914042e33561fbf07f18b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "cd1a095ac9193c70004e80980a620c5b51ff24a4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "1fc63a229c6f390ed4f47790a497f7dbb8a4375c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "c8796ccb8bea6cdce97660a919c7ab10666894ce",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "c57054d27f5dee0c1ffd137a83144122ce244f1c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/900"
+      ]
+    },
+    {
+      "commit": "82bb325819dd81062a6c189db837aa7c1cacd6ea",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    },
+    {
+      "commit": "4d9edb5d94af6868a78cf2ac1d3f5c33d6726c9e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/901"
+      ]
+    }
+  ]
+}

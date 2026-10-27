@@ -289,15 +289,18 @@ def _evaluate(prepared: PreparedQuery, bundle: dict, fx: dict, index: int, now: 
                 unknown += 1
                 reasons[exc.reason] += 1
             continue
-        row = {**raw, **metrics}
+        row = {**raw, **metrics, "decision_now_utc": now.isoformat()}
         decision = evaluate_opening_candidate_policy(row, mode=mode, min_dte=cfg.min_dte, max_dte=cfg.max_dte,
             min_strike=cfg.min_strike, max_strike=cfg.max_strike, min_annualized_return=cfg.min_annualized_return,
             min_net_premium_cny=cfg.min_net_income, min_iv_rv_ratio=cfg.min_iv_rv_ratio,
-            min_iv_minus_rv=cfg.min_iv_minus_rv, max_spread_ratio=cfg.max_spread_ratio,
+            min_iv_minus_rv=cfg.min_iv_minus_rv, max_spread_ratio=cfg.max_spread_ratio, max_abs_delta=cfg.max_abs_delta,
             check_capacity=False, require_earnings_evidence=False, reject_known_earnings=False)
         if decision["accepted"]:
             row["_candidate"] = _candidate(row, decision, mode)
             matched.append(row)
+        elif any(item["reason"] == "risk_delta_unavailable" for item in decision["rejects"]):
+            unknown += 1
+            reasons["risk_delta_unavailable"] += 1
         else:
             excluded[(decision["rejects"] or [{}])[0].get("reason", "policy_rejected")] += 1
     excluded_count = sum(excluded.values())

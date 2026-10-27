@@ -238,6 +238,8 @@ def run_combo_yield_scan_and_summarize(
         and scope.get("account")
         else _CANDIDATE_FILTER_TRACE_EVIDENCE_PATH
     )
+    # Combo owns its existing leg bounds; ordinary CSP delta defaults do not apply.
+    yield_sp = {**yield_sp, "max_abs_delta": None}
     funding_put_min_annualized_return = resolve_min_annualized_net_return(
         symbol_cfg={"sell_put": yield_sp},
     )
@@ -633,6 +635,13 @@ def run_cc_lp_variant(
         }
         if demo_capacity:
             scan_kwargs["demo_capacity"] = True
+        # Keep CC+LP's default floor unless the policy explicitly overrides it.
+        if "min_net_credit_retention" in policy.explicit_fields:
+            explicit_min_retention = _optional_float(
+                policy.config, "min_net_credit_retention"
+            )
+            if explicit_min_retention is not None:
+                scan_kwargs["min_retention"] = explicit_min_retention
         df = run_cc_lp_scan_fn(
             **scan_kwargs,
         )
@@ -645,23 +654,23 @@ def run_cc_lp_variant(
                 "ranked_pairs": [dict(item) for item in df.to_dict("records")],
             }
         )
-    if df.empty:
-        status = "no_candidate"
-        if unavailable_reason:
-            status = (
-                "not_applicable"
-                if unavailable_reason == "stock_context_missing"
-                else "unavailable"
-            )
-        summary = summarize_cc_lp_result(
-            df=df,
-            symbol=symbol,
-            status=status,
-            reason=unavailable_reason,
+    if unavailable_reason:
+        status = (
+            "not_applicable"
+            if unavailable_reason == "stock_context_missing"
+            else "unavailable"
         )
-        return summary
+        reason = unavailable_reason
+    else:
+        status, reason = project_evidence_scan_status(
+            evidence=dict(df.attrs.get("_evidence_summary") or {}),
+            candidate_count=len(df),
+        )
+        if status == "completed":
+            status = "no_candidate" if df.empty else "candidates_found"
     return summarize_cc_lp_result(
         df=df,
         symbol=symbol,
-        status="candidates_found",
+        status=status,
+        reason=reason or "",
     )

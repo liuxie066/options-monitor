@@ -1,0 +1,129 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.5.4",
+  "base": {
+    "tag": "v4.5.3",
+    "commit": "c0b086fab152c1dda34908b074d1688bafe4b6eb"
+  },
+  "reviewed_head": "779174fe560a73e162c299ba6b2032eaf5a698a2",
+  "commits": [
+    {
+      "sha": "173df4af23e8d0392e3b666d58b0881fa145f2b1",
+      "subject": "chore(gateflow): accept PM v1 success contract plan"
+    },
+    {
+      "sha": "b8c49373d77c6b322c9c5d709c55ce1907b4efde",
+      "subject": "fix(pm): require true success in v1 responses"
+    },
+    {
+      "sha": "1710c2dbb49b0e43b6320ebcb44bced3a6cbce6b",
+      "subject": "chore(gateflow): accept PM v1 success aggregate review"
+    },
+    {
+      "sha": "8c0daf809e09eff92c92c4c24c2715896a839c89",
+      "subject": "Merge pull request #864 from liuxie066/codex/fix-pm-v1-success-694"
+    },
+    {
+      "sha": "517dc5dd5ade49f16fae6b8c88a58cd012fa5cfb",
+      "subject": "chore(gateflow): accept plan for combo receipt scope"
+    },
+    {
+      "sha": "a6e447f9a82f0e9078cde71b1fb0c9ec90f398c8",
+      "subject": "fix(trades): normalize combo success receipt scope"
+    },
+    {
+      "sha": "c16c70ab96a2fa3d01984a1b5f6467379d77d398",
+      "subject": "chore(gateflow): accept deepreview for combo receipt scope"
+    },
+    {
+      "sha": "779174fe560a73e162c299ba6b2032eaf5a698a2",
+      "subject": "Merge pull request #865 from liuxie066/codex/combo-receipt-scope"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "PM v1 响应必须明确返回布尔 success=true；缺失或类型不符时按协议错误报告，避免无效响应被当作可信数据，保留非版本化健康检查及无自动重试行为（#864）。",
+      "commits": [
+        "b8c49373d77c6b322c9c5d709c55ce1907b4efde",
+        "8c0daf809e09eff92c92c4c24c2715896a839c89"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Combo 配对成功回执复用成交摄取的配置解析，避免正常启用的账户因原始配置缺少派生来源而被误判为禁用；保留账户及回执禁用限制、发送幂等和历史 suppressed 回执不补发行为。",
+      "commits": [
+        "a6e447f9a82f0e9078cde71b1fb0c9ec90f398c8",
+        "779174fe560a73e162c299ba6b2032eaf5a698a2"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "173df4af23e8d0392e3b666d58b0881fa145f2b1",
+      "reason": "Empty workflow plan/review checkpoint; no source, configuration, runtime or user-visible change."
+    },
+    {
+      "commit": "1710c2dbb49b0e43b6320ebcb44bced3a6cbce6b",
+      "reason": "Empty workflow plan/review checkpoint; no source, configuration, runtime or user-visible change."
+    },
+    {
+      "commit": "517dc5dd5ade49f16fae6b8c88a58cd012fa5cfb",
+      "reason": "Empty workflow plan/review checkpoint; no source, configuration, runtime or user-visible change."
+    },
+    {
+      "commit": "c16c70ab96a2fa3d01984a1b5f6467379d77d398",
+      "reason": "Empty workflow plan/review checkpoint; no source, configuration, runtime or user-visible change."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "173df4af23e8d0392e3b666d58b0881fa145f2b1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/864"
+      ]
+    },
+    {
+      "commit": "b8c49373d77c6b322c9c5d709c55ce1907b4efde",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/864"
+      ]
+    },
+    {
+      "commit": "1710c2dbb49b0e43b6320ebcb44bced3a6cbce6b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/864"
+      ]
+    },
+    {
+      "commit": "8c0daf809e09eff92c92c4c24c2715896a839c89",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/864"
+      ]
+    },
+    {
+      "commit": "517dc5dd5ade49f16fae6b8c88a58cd012fa5cfb",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/865"
+      ]
+    },
+    {
+      "commit": "a6e447f9a82f0e9078cde71b1fb0c9ec90f398c8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/865"
+      ]
+    },
+    {
+      "commit": "c16c70ab96a2fa3d01984a1b5f6467379d77d398",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/865"
+      ]
+    },
+    {
+      "commit": "779174fe560a73e162c299ba6b2032eaf5a698a2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/865"
+      ]
+    }
+  ]
+}

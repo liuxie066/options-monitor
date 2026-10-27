@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable
 
+from domain.domain.trade_account_identity import ACCOUNT_ID_KEYS, norm_account_identity
 from domain.domain.trade_execution import (
     epoch_milliseconds_instant,
     execution_economic_content,
@@ -360,7 +361,7 @@ def reconcile_trade_intake_state(
             )
             continue
 
-        if _is_ignored_non_option(item, audit_by_deal.get(deal_id) or []):
+        if _is_ignored_non_option(item, _audit_candidates(audit_by_deal, deal_id, item), state_key=deal_id):
             payload = _processed_payload_for_ignored_non_option(deal_id=deal_id, from_bucket=bucket, state_item=item)
             actions.append(
                 {
@@ -801,17 +802,181 @@ def _deal_ids_from_audit_event(event: dict[str, Any]) -> list[str]:
             for key in ("deal_id", "dealID", "id"):
                 if section.get(key) not in (None, ""):
                     values.append(str(section.get(key)))
+    for section in (event, event.get("payload"), event.get("deal"), event.get("result")):
+        if isinstance(section, dict):
+            execution = section.get("execution_input")
+            if isinstance(execution, dict) and execution.get("external_execution_id") not in (None, ""):
+                values.append(str(execution["external_execution_id"]))
     return _normalize_deal_ids(values)
 
 
-def _is_ignored_non_option(state_item: dict[str, Any], audit_events: list[dict[str, Any]]) -> bool:
+def _audit_candidates(
+    indexed: dict[str, list[dict[str, Any]]], state_key: str, state_item: dict[str, Any],
+) -> list[dict[str, Any]]:
+    keys = [state_key, str(state_item.get("source_deal_id") or "").strip()]
+    parts = state_key.split(":", 3)
+    if len(parts) == 4 and parts[0] == "futu" and all(parts[1:]):
+        keys.append(parts[3])
+    rows: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for key in keys:
+        for row in indexed.get(key, []):
+            if id(row) not in seen:
+                seen.add(id(row))
+                rows.append(row)
+    return rows
+
+
+def _audit_add_identity_claims(
+    claims: dict[str, set[str]], section: dict[str, Any], *, raw: bool = False,
+) -> None:
+    fields = {
+        "logical": ("internal_account",) if raw else ("account", "internal_account"),
+        "physical": tuple(key for key in ACCOUNT_ID_KEYS if key != "account") if raw else ("futu_account_id",),
+        "deal": ("source_deal_id", "deal_id", "futu_deal_id", "external_execution_id") + (("dealID", "id") if raw else ()),
+        "broker": ("broker", "broker_id"),
+        "environment": ("environment", "trd_env"),
+        "namespace": ("external_id_namespace", "execution_id_namespace"),
+    }
+    for kind, names in fields.items():
+        for name in names:
+            value = norm_account_identity(section.get(name))
+            if value is None:
+                continue
+            if kind == "logical":
+                value = value.lower()
+            elif kind == "broker":
+                value = "futu" if value.lower() in {"futu", "富途"} else value.lower()
+            elif kind == "environment":
+                value = value.upper()
+            claims[kind].add(value)
+
+
+def _audit_add_execution(
+    claims: dict[str, set[str]], execution: Any, source: dict[str, Any],
+) -> str:
+    key = execution_identity_from_input(execution)
+    if not key or execution_source_identity_conflicts(source, execution):
+        raise ValueError("unproven audit execution")
+    ref = execution["broker_account_ref"]
+    _audit_add_identity_claims(claims, {
+        "account": ref.get("account_label"), "futu_account_id": ref.get("external_account_id"),
+        "broker_id": ref.get("broker_id"), "environment": ref.get("environment"),
+        "external_id_namespace": execution.get("external_id_namespace"),
+        "external_execution_id": execution.get("external_execution_id"),
+    })
+    return key
+
+
+def _audit_push_context(raw: dict[str, Any], event: dict[str, Any]) -> dict[str, Any] | None:
+    if "_trade_intake_source" not in raw:
+        return None
+    context = raw["_trade_intake_source"]
+    if (not isinstance(context, dict)
+            or str(event.get("source") or "").strip().lower() != "push"
+            or context.get("schema_version") != "trade_intake_source.v1"
+            or str(context.get("transport") or "").strip().lower() != "push"
+            or any(not str(context.get(key) or "").strip() for key in (
+                "source_id", "account", "futu_account_id", "opend_process", "opend_host", "received_at_utc"))
+            or isinstance(context.get("opend_port"), bool)
+            or not isinstance(context.get("opend_port"), int) or context["opend_port"] <= 0):
+        raise ValueError("invalid recorded push source")
+    return context
+
+
+def _audit_skip_matches_state(event: dict[str, Any], state_key: str, state_item: dict[str, Any]) -> bool:
+    # These are recorded claims, not an identity reconstructed from current mappings.
+    claims = {kind: set() for kind in ("logical", "physical", "deal", "broker", "environment", "namespace")}
+    state_claims = {kind: set() for kind in claims}
+    state_execution_keys: set[str] = set()
+    try:
+        _audit_add_identity_claims(state_claims, state_item)
+        for key in (state_key, state_item.get("broker_deal_key")):
+            if key in (None, ""):
+                continue
+            text = str(key).strip()
+            if text.startswith("futu:"):
+                parts = text.split(":", 3)
+                if len(parts) != 4 or not all(parts[1:]):
+                    return False
+                _audit_add_identity_claims(state_claims, {
+                    "account": parts[1], "futu_account_id": parts[2], "deal_id": parts[3],
+                })
+            elif text.startswith("execution:"):
+                if not text.startswith("execution:v1:"):
+                    return False
+                state_execution_keys.add(text)
+            else:
+                state_claims["deal"].add(text)
+        if "execution_input" in state_item:
+            state_execution_key = _audit_add_execution(state_claims, state_item["execution_input"], state_item)
+            if state_key.startswith("execution:") and state_execution_key != state_key:
+                return False
+
+        deal = event.get("deal") if isinstance(event.get("deal"), dict) else {}
+        result = event.get("result") if isinstance(event.get("result"), dict) else {}
+        sections = [event, deal, result]
+        executions: set[str] = set()
+        for section in sections:
+            _audit_add_identity_claims(claims, section)
+            diagnostics = section.get("diagnostics")
+            if isinstance(diagnostics, dict):
+                _audit_add_identity_claims(claims, {"futu_account_id": diagnostics.get("futu_account_id")})
+            if "execution_input" in section:
+                executions.add(_audit_add_execution(claims, section["execution_input"], section))
+
+        raw_sections = []
+        for section, field in ((event, "payload"), (deal, "raw_payload")):
+            if field in section:
+                if not isinstance(section[field], dict):
+                    return False
+                raw_sections.append(section[field])
+        contexts = [_audit_push_context(raw, event) for raw in raw_sections]
+        raw_standard = any("execution_input" in raw or "broker_account_ref" in raw or "instrument_ref" in raw
+                           for raw in raw_sections)
+        strict_raw_account = raw_standard or any(context is not None for context in contexts)
+        for raw, context in zip(raw_sections, contexts):
+            _audit_add_identity_claims(claims, raw, raw=True)
+            if context is not None:
+                _audit_add_identity_claims(claims, context)
+            if "execution_input" in raw:
+                executions.add(_audit_add_execution(claims, raw["execution_input"], raw))
+            # A nested execution cannot hide a separately declared direct execution.
+            if "broker_account_ref" in raw or "instrument_ref" in raw:
+                executions.add(_audit_add_execution(claims, raw, raw))
+            account = norm_account_identity(raw.get("account"))
+            if account is not None:
+                if strict_raw_account:
+                    claims["logical"].add(account.lower())
+                else:
+                    # Only the same row's independent normalized pair disambiguates account.
+                    logical = norm_account_identity(deal.get("internal_account"))
+                    physical = norm_account_identity(deal.get("futu_account_id"))
+                    if not logical or not physical or (account.lower() != logical.lower() and account != physical):
+                        return False
+        if len(executions) > 1 or (state_execution_keys and executions != state_execution_keys):
+            return False
+        for kind in ("logical", "physical", "deal"):
+            if len(claims[kind]) != 1 or claims[kind] != state_claims[kind]:
+                return False
+        for kind, expected in (("broker", "futu"), ("environment", "REAL"), ("namespace", "futu.deal")):
+            if (claims[kind] - {expected}) or (state_claims[kind] - {expected}):
+                return False
+        return True
+    except (TypeError, ValueError, KeyError, AttributeError):
+        return False
+
+
+def _is_ignored_non_option(
+    state_item: dict[str, Any], audit_events: list[dict[str, Any]], *, state_key: str,
+) -> bool:
     if str(state_item.get("reason") or "").strip() == "not_option_deal":
         return True
     for event in audit_events:
         reason = str(event.get("reason") or "").strip()
         result = event.get("result") if isinstance(event.get("result"), dict) else {}
         result_reason = str(result.get("reason") or "").strip()
-        if reason == "not_option_deal" or result_reason == "not_option_deal":
+        if (reason == "not_option_deal" or result_reason == "not_option_deal") and _audit_skip_matches_state(event, state_key, state_item):
             return True
     return False
 

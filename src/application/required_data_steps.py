@@ -37,6 +37,7 @@ from src.application.opend_fetch_config import filter_opend_fetch_kwargs
 from src.application.required_data_planning import RequiredDataFetchPlanBundle
 from src.application.required_data_plan_identity import (
     build_required_data_expected_fetch_contract,
+    required_data_planned_empty_reason,
 )
 from src.application.required_data_snapshot import (
     resolve_frozen_required_data_csv_bytes,
@@ -426,12 +427,8 @@ def _success_empty_payload_from_plan(
     fetch_port: int,
 ) -> dict[str, object]:
     discovery = fetch_plan.expiration_discovery
-    if (
-        fetch_plan.projection_outcome != "success_empty"
-        or discovery is None
-        or discovery.outcome != "success_empty"
-        or discovery.reason_code not in {"no_expirations", "no_contract_rows"}
-    ):
+    empty_reason = required_data_planned_empty_reason(fetch_plan.to_debug_dict())
+    if empty_reason is None or discovery is None:
         raise RuntimeError(
             f"{symbol} required_data has no executable requests or valid "
             "success-empty discovery evidence"
@@ -450,7 +447,7 @@ def _success_empty_payload_from_plan(
             "port": identity.get("port") or int(fetch_port),
             "status": "ok",
             "source_outcome": "success_empty",
-            "reason_code": discovery.reason_code,
+            "reason_code": empty_reason,
             "snapshot_complete": True,
             "snapshot_requested_codes": 0,
             "snapshot_returned_codes": 0,

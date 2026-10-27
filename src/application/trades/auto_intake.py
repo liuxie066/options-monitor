@@ -19,7 +19,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, NamedTuple
 
 repo_base = Path(__file__).resolve().parents[3]
 if str(repo_base) not in sys.path:
@@ -28,6 +28,7 @@ if str(repo_base) not in sys.path:
 from domain.domain.trade_account_identity import extract_primary_account_id
 from domain.domain.trade_execution import _futu_asset_type, _parse_futu_option_code, execution_source_status
 from src.application.config_loader import load_config
+from src.application.symbol_aliases import symbol_aliases_from_config
 from src.application.trades.futu_detail_lookup import enrich_trade_push_payload_with_account_id
 from src.application.trades.account_mapping import resolve_trade_intake_config
 from src.application.trades.combo_reconciliation import (
@@ -51,6 +52,9 @@ from src.application.trades.order_fee_sync import (
     fee_target_from_trusted_payload,
     recover_order_fee_targets,
     sync_order_fees,
+)
+from src.application.trades.order_fee_timing import (
+    ClockSample, fee_clock_sample, fee_elapsed_ms, fee_timing_audit_summary, fee_timing_phase,
 )
 from src.application.trades.deal_identity import (
     broker_deal_key, broker_deal_key_from_payload, completed_ledger_execution_events,
@@ -102,6 +106,9 @@ from src.application.trades.inbox import (
     save_trade_payload_result,
     trade_payload_commit_scope,
     claim_trade_payload_refresh_intent,
+    claim_trade_payload_refresh_intents,
+    list_pending_trade_payload_refresh_handoffs,
+    accept_trade_payload_refresh_handoff,
     enqueue_trade_payload,
     list_retryable_trade_payloads,
     list_trade_receipt_recovery_rows,
@@ -303,6 +310,7 @@ def _dispatch_portfolio_refresh_intent(
     *,
     config: dict[str, Any],
     audit_path: Path,
+    inbox_path: Path | None = None,
     client: Any | None = None,
     append_audit_fn: Callable[[Path, dict[str, Any]], Any] = append_trade_intake_audit,
     log_fn: Callable[[str], Any] = _log,
@@ -330,6 +338,8 @@ def _dispatch_portfolio_refresh_intent(
                 request_id=request_id,
                 timeout=2.0,
             )
+            if inbox_path is not None:
+                accept_trade_payload_refresh_handoff(inbox_path, account=account, request_id=request_id)
             event = {
                 "phase": "portfolio_refresh_hint_accepted",
                 "account": account,
@@ -407,9 +417,22 @@ def _receipt_preparation_scope(*, source: dict[str, Any], deal: Any, result: dic
 
 
 def _readback_trade_receipt_result(*, repo: Any, deal: Any,
-                                  result: dict[str, Any]) -> dict[str, Any]:
+                                  result: dict[str, Any],
+                                  observed_attempt_count: int | None = None) -> dict[str, Any]:
     """Resolve uncertain writes from one read-only snapshot, never through the writer."""
     diagnostics = dict(result.get("diagnostics") or {})
+    policy = result.get("retry_policy")
+    saved_attempt_count = policy.get("attempt_count") if isinstance(policy, dict) else None
+    if (result.get("status") == "failed"
+            and diagnostics.get("exception_stage") == "lifecycle_context_read"
+            and diagnostics.get("write_outcome") == "not_started"
+            and result.get("receipt_kind") not in {"recorded", "verification_pending"}
+            and type(saved_attempt_count) is int and saved_attempt_count > 0
+            and type(observed_attempt_count) is int and observed_attempt_count > 0
+            and saved_attempt_count == observed_attempt_count):
+        # The original saved policy must prove the observed latest attempt;
+        # a newer claim retains an older result until it saves its own outcome.
+        return result
     try:
         if deal is None or not getattr(deal, "execution_input", None):
             raise ValueError("execution identity unavailable for readback")
@@ -492,7 +515,8 @@ def recover_trade_intake_receipts(*, repo: Any, source: dict[str, Any],
                 # Keep compensation -> repository -> Inbox order; an expired lease may still be committing.
                 with with_sqlite_repo_writer_lock(repo):
                     if row["status"] == "pending":
-                        prepared = {**prepared, **_readback_trade_receipt_result(repo=repo, deal=deal, result=result)}
+                        prepared = {**prepared, **_readback_trade_receipt_result(
+                            repo=repo, deal=deal, result=result, observed_attempt_count=row["attempt_count"])}
                     prepared.setdefault("_receipt_payload", _receipt_deal_snapshot(deal))
                     result = prepare_trade_receipt_result(path, inbox_id=row["inbox_id"], result=prepared,
                         expected_payload_version=row["payload_version"], expected_result=row.get("result"),
@@ -585,6 +609,52 @@ def _process_payload(
     review_reason = ("source_identity_needs_review" if payload.get("_trade_intake_source_identity_errors")
                      else "file_input_needs_review")
     claim = None
+
+    def _record_lookup_evidence(lookup: Any) -> dict[str, Any] | None:
+        diagnostics = dict(getattr(lookup, "diagnostics", {}) or {})
+        evidence = diagnostics.get("deal_lookup_evidence") or diagnostics.get("underlying_lookup_evidence")
+        underlying_errors = (diagnostics.get("underlying_conflicts") or {}).get("errors") or []
+        if not apply_changes or not isinstance(evidence, dict):
+            return None
+        if broker_deal_key_from_payload(evidence, account_mapping=account_mapping) != key:
+            raise ValueError("lookup economic evidence changed execution identity")
+        with with_sqlite_repo_writer_lock(repo):
+            recorded_id = enqueue_trade_payload(
+                inbox_path, payload=evidence, source="lookup", broker_deal_key=key, repo=repo,
+                adapter_version=TRADE_INTAKE_ADAPTER_VERSIONS["lookup"],
+                underlying_conflict_errors=underlying_errors,
+            )
+            recorded = read_trade_payload(inbox_path, inbox_id=recorded_id)
+            if recorded_id != inbox_id or recorded is None:
+                raise RuntimeError("lookup evidence readback missing")
+            if underlying_errors and not (
+                recorded["status"] in {"conflict", "handled"} or (
+                    recorded["status"] == "identity_needs_review"
+                    and recorded["result_reason"] == "broker_underlying_symbol_conflict")
+            ):
+                raise RuntimeError("lookup underlying conflict was not durably quarantined")
+        return recorded
+
+    def _lookup_conflict_result(
+        lookup: Any, observed: dict[str, Any] | None, *, recover_missing_status: bool = False,
+    ) -> dict[str, Any] | None:
+        diagnostics = dict(getattr(lookup, "diagnostics", {}) or {})
+        economic_errors = diagnostics.get("economic_conflicts") or []
+        underlying_errors = (diagnostics.get("underlying_conflicts") or {}).get("errors") or []
+        observed_conflict = (observed or {}).get("status") == "conflict" and not (
+            recover_missing_status and (observed or {}).get("result_reason") == "broker_deal_status_missing")
+        if not (economic_errors or underlying_errors or observed_conflict):
+            return None
+        if apply_changes and economic_errors and (observed or {}).get("status") != "conflict":
+            raise RuntimeError("lookup economic conflict was not durably quarantined")
+        handled = (observed or {}).get("status") == "handled"
+        return {"status": "skipped" if handled else "unresolved",
+                "reason": "duplicate" if handled else (observed or {}).get("result_reason") or (
+                    "broker_economic_payload_conflict" if economic_errors else "broker_underlying_symbol_conflict"),
+                "deal_id": payload_deal_id(payload), **({"inbox_id": inbox_id} if apply_changes else {}),
+                "diagnostics": {"retryable": False, "errors": economic_errors + underlying_errors,
+                                "enrichment": diagnostics}}
+
     if apply_changes:
         key = ("" if (payload.get("_trade_intake_file_identity_unbound") or payload.get("_trade_intake_source_identity_errors")) else
                broker_deal_key_from_payload(payload, account_mapping=account_mapping))
@@ -623,7 +693,12 @@ def _process_payload(
         ):
             lookup = enrich_trade_push_payload_with_account_id(
                 payload, host=host, port=port, futu_account_ids=futu_account_ids,
+                symbol_aliases=symbol_aliases_from_config(config),
             )
+            stored = _record_lookup_evidence(lookup) or stored
+            conflict_result = _lookup_conflict_result(lookup, stored, recover_missing_status=True)
+            if conflict_result is not None:
+                return conflict_result
             checked = lookup.payload
             if (
                 execution_source_status(checked) is not None
@@ -695,14 +770,6 @@ def _process_payload(
                 changes[attribute] = value
         normalized_deal = replace(deal, execution_input=execution, **changes)
         return normalized_deal
-
-    def _enrich_payload(raw: dict[str, Any]) -> Any:
-        return enrich_trade_push_payload_with_account_id(
-            raw,
-            host=host,
-            port=port,
-            futu_account_ids=futu_account_ids,
-        )
 
     def _resolve_with_wheel_intent(deal: Any, **kwargs: Any) -> Any:
         deal_account = str(getattr(deal, "internal_account", "") or "").strip()
@@ -810,6 +877,19 @@ def _process_payload(
                              "inbox_id": claim["inbox_id"] if claim else None})
 
     try:
+        lookup = None
+        if allow_external_lookup:
+            if apply_changes:
+                # Keep state validation ahead of provider work; generic intake rechecks its own snapshot.
+                load_trade_intake_state(state_path)
+            lookup = enrich_trade_push_payload_with_account_id(
+                payload, host=host, port=port, futu_account_ids=futu_account_ids,
+                symbol_aliases=symbol_aliases_from_config(config),
+            )
+            observed = _record_lookup_evidence(lookup)
+            conflict_result = _lookup_conflict_result(lookup, observed)
+            if conflict_result is not None:
+                return conflict_result
         result = process_trade_payload(
         payload,
         repo=repo,
@@ -821,7 +901,7 @@ def _process_payload(
         write_trade_intake_state_fn=_write_state,
         upsert_deal_state_fn=upsert_deal_state,
         append_trade_intake_audit_fn=append_trade_intake_audit if apply_changes else lambda *_a, **_k: None,
-        enrich_trade_payload_fn=_enrich_payload if allow_external_lookup else None,
+        enrich_trade_payload_fn=(lambda _raw: lookup) if allow_external_lookup else None,
         normalize_trade_deal_fn=normalize_fn,
         resolve_trade_deal_fn=_resolve_with_wheel_intent,
         before_receipt_fn=_before_receipt,
@@ -954,6 +1034,15 @@ def _coordinate_listener_sources(
     completed = 0
     shutdown_deadline: float | None = None
     timeout_sec = max(0.0, float(shutdown_timeout_sec))
+
+    def _record_result(source_code: int) -> None:
+        nonlocal completed, exit_code
+        completed += 1
+        if source_code == TRADE_INTAKE_AUTH_REQUIRED_EXIT_CODE:
+            exit_code = source_code
+        elif source_code != 0 and exit_code == 0:
+            exit_code = source_code
+
     try:
         for thread in threads:
             thread.start()
@@ -968,18 +1057,26 @@ def _coordinate_listener_sources(
                 source_code = results.get(timeout=wait_timeout)
             except queue.Empty:
                 continue
-            completed += 1
+            _record_result(source_code)
             if shutdown_deadline is None:
                 shutdown_deadline = time.monotonic() + timeout_sec
-            if source_code == TRADE_INTAKE_AUTH_REQUIRED_EXIT_CODE:
-                exit_code = source_code
-            elif source_code != 0 and exit_code == 0:
-                exit_code = source_code
         for thread in threads:
             remaining = None if shutdown_deadline is None else max(0.0, shutdown_deadline - time.monotonic())
             thread.join(timeout=remaining)
-            if thread.is_alive():
-                _log(f"[ERROR] listener thread={thread.name} did not stop within {timeout_sec:g} sec")
+        # A worker can publish its result during the final join. Consume only
+        # results already available; the shared shutdown budget is not extended.
+        while completed < len(threads):
+            try:
+                _record_result(results.get_nowait())
+            except queue.Empty:
+                break
+        alive_threads = [thread for thread in threads if thread.is_alive()]
+        for thread in alive_threads:
+            _log(f"[ERROR] listener thread={thread.name} did not stop within {timeout_sec:g} sec")
+        if completed != len(threads) or alive_threads:
+            _log(f"[ERROR] listener shutdown incomplete: results={completed}/{len(threads)} alive={len(alive_threads)}")
+            if exit_code == 0:
+                exit_code = 1
     except KeyboardInterrupt:
         stop_event.set()
         for thread in threads:
@@ -1444,6 +1541,7 @@ def main(argv: list[str] | None = None) -> int:
                     claim_trade_payload_refresh_intent(saved_inbox_path, inbox_id=args.inbox_id),
                     config=cfg,
                     audit_path=manual_audit_path,
+                    inbox_path=saved_inbox_path,
                 )
         if saved_inbox and not apply_changes:
             result.update(inbox_id=saved_inbox["inbox_id"], delivery_purpose=saved_inbox["delivery_purpose"])
@@ -2255,7 +2353,7 @@ def _run_listener_source_loop(
     inbox_summary_cache: dict[str, Any] = {}
     lifecycle_delivery_snapshot_cache: dict[str, Any] = {}
     inbox_wakeup = threading.Event()
-    fee_target_queue: queue.SimpleQueue[tuple[str, str, str, str]] = queue.SimpleQueue()
+    fee_target_queue: queue.SimpleQueue[_QueuedFeeTarget] = queue.SimpleQueue()
     try:
         previous_status = json.loads(Path(status_path).read_text(encoding="utf-8"))
         status_state["fee_recovery_cursors"] = dict(previous_status.get("fee_recovery_cursors") or {})
@@ -2264,7 +2362,7 @@ def _run_listener_source_loop(
     last_fee_recovery_monotonic = None
 
     def _enqueue_fee_target(target: tuple[str, str, str, str]) -> None:
-        fee_target_queue.put(target)
+        fee_target_queue.put(_QueuedFeeTarget(target, fee_clock_sample()))
 
     def current_inbox_summary() -> dict[str, Any]:
         return _cached_trade_inbox_summary(
@@ -2487,6 +2585,7 @@ def _run_listener_source_loop(
                     ),
                     config=cfg,
                     audit_path=audit_path,
+                    inbox_path=inbox_path,
                 )
         return result
 
@@ -2648,6 +2747,7 @@ def _run_listener_source_loop(
     last_backfill_monotonic: float | None = None
     last_heartbeat_monotonic: float | None = None
     last_inbox_retry_monotonic: float | None = None
+    portfolio_refresh_cursor: str | None = None
     last_lifecycle_due_monotonic: float | None = None
     last_combo_reconciliation_monotonic: float | None = None
     backfill_cfg = dict(source.get("backfill") or intake_cfg.get("backfill") or {})
@@ -2719,7 +2819,8 @@ def _run_listener_source_loop(
                 listener.check_health()
                 reconnect_delay_sec = reconnect_floor_sec
                 now_mono = time.monotonic()
-                fee_targets = _drain_fee_target_queue(fee_target_queue)
+                fee_queue_times = _drain_fee_target_queue(fee_target_queue)
+                fee_targets = list(fee_queue_times)
                 if apply_changes and (last_fee_recovery_monotonic is None
                                       or now_mono - last_fee_recovery_monotonic >= 60):
                     cursors = status_state.setdefault("fee_recovery_cursors", {})
@@ -2743,6 +2844,7 @@ def _run_listener_source_loop(
                         targets=fee_targets,
                         apply_changes=apply_changes,
                         observed_at_ms=int(time.time() * 1000),
+                        enqueued_times=fee_queue_times,
                     )
                     status_state["last_fee_sync"] = fee_status
                     for fee_receipt in fee_receipts:
@@ -2793,20 +2895,33 @@ def _run_listener_source_loop(
                             break
                     if apply_changes and is_portfolio_management_enabled(cfg):
                         try:
-                            refresh_intents: dict[str, dict[str, str]] = {}
-                            for candidate in list_unclaimed_trade_payload_refresh_intents(
-                                inbox_path, account_mapping={
-                                    physical: label for physical, label in account_mapping.items()
-                                    if physical in futu_account_ids
-                                },
-                            ):
-                                intent = claim_trade_payload_refresh_intent(
-                                    inbox_path, inbox_id=candidate["inbox_id"],
+                            refresh_mapping = {
+                                physical: label for physical, label in account_mapping.items()
+                                if physical in futu_account_ids
+                            }
+                            pending_handoffs = list_pending_trade_payload_refresh_handoffs(
+                                inbox_path, account_mapping=refresh_mapping,
+                                after_inbox_id=portfolio_refresh_cursor,
+                            )
+                            portfolio_refresh_cursor = (
+                                pending_handoffs[-1]["inbox_id"] if len(pending_handoffs) == 100 else None
+                            )
+                            for pending in pending_handoffs:
+                                _dispatch_portfolio_refresh_intent(
+                                    pending, config=cfg, audit_path=audit_path, inbox_path=inbox_path,
                                 )
-                                if intent is not None:
-                                    refresh_intents.setdefault(intent["account"], intent)
-                            for intent in refresh_intents.values():
-                                _dispatch_portfolio_refresh_intent(intent, config=cfg, audit_path=audit_path)
+                            refresh_inbox_ids: dict[str, list[str]] = {}
+                            for candidate in list_unclaimed_trade_payload_refresh_intents(
+                                inbox_path, account_mapping=refresh_mapping,
+                            ):
+                                refresh_inbox_ids.setdefault(candidate["account"], []).append(candidate["inbox_id"])
+                            for account, inbox_ids in refresh_inbox_ids.items():
+                                intent = claim_trade_payload_refresh_intents(
+                                    inbox_path, inbox_ids=inbox_ids, account=account,
+                                )
+                                _dispatch_portfolio_refresh_intent(
+                                    intent, config=cfg, audit_path=audit_path, inbox_path=inbox_path,
+                                )
                             status_state.pop("last_portfolio_refresh_recovery_error", None)
                         except Exception as exc:
                             status_state["last_portfolio_refresh_recovery_error"] = f"{type(exc).__name__}: {exc}"
@@ -2979,6 +3094,7 @@ def _run_listener_source_loop(
                                         intent,
                                         config=cfg,
                                         audit_path=audit_path,
+                                        inbox_path=inbox_path,
                                     )
                                 ),
                                 process_lock=process_lock,
@@ -3775,15 +3891,25 @@ def _update_status_from_backfill(status_state: dict[str, Any], result: dict[str,
     return out
 
 
+class _QueuedFeeTarget(NamedTuple):
+    target: tuple[str, str, str, str]
+    clock: ClockSample
+
+
 def _drain_fee_target_queue(
-    target_queue: queue.SimpleQueue[tuple[str, str, str, str]],
-) -> list[tuple[str, str, str, str]]:
-    targets: set[tuple[str, str, str, str]] = set()
+    target_queue: queue.SimpleQueue[_QueuedFeeTarget],
+) -> dict[tuple[str, str, str, str], ClockSample]:
+    targets: dict[tuple[str, str, str, str], ClockSample] = {}
     while True:
         try:
-            targets.add(target_queue.get_nowait())
+            item = target_queue.get_nowait()
         except queue.Empty:
-            return sorted(targets)
+            return targets
+        prior = targets.get(item.target)
+        # Concurrent producers may put an earlier sample after a later one.
+        if prior is None or (item.clock[1] is not None and prior[1] is not None
+                             and item.clock[1] < prior[1]):
+            targets[item.target] = item.clock
 
 
 def _durable_fee_target(
@@ -3813,19 +3939,30 @@ def _run_fee_sync_cycle(
     apply_changes: bool,
     observed_at_ms: int,
     sync_fn: Callable[..., dict[str, Any]] = sync_order_fees,
+    enqueued_times: Mapping[tuple[str, str, str, str], ClockSample] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     receipts: list[dict[str, Any]] = []
     for target in sorted(set(targets)):
+        queued = (enqueued_times or {}).get(target)
+        timing: dict[str, Any] = {
+            "queue_source": "enqueue" if queued is not None else "recovery",
+            "enqueued_at_ms": queued[0] if queued is not None else None,
+            "queue_wait_ms": None,
+        }
         try:
-            receipt = sync_fn(
-                repo,
-                account=target[1],
-                futu_account_id=target[2],
-                provider=provider,
-                apply=apply_changes,
-                observed_at_ms=int(observed_at_ms),
-                target_identity=target,
-            )
+            with fee_timing_phase(timing, "processing") as started:
+                if queued is not None:
+                    timing["queue_wait_ms"] = fee_elapsed_ms(queued[1], started[1])
+                receipt = sync_fn(
+                    repo,
+                    account=target[1],
+                    futu_account_id=target[2],
+                    provider=provider,
+                    apply=apply_changes,
+                    observed_at_ms=int(observed_at_ms),
+                    target_identity=target,
+                    timing=timing,
+                )
         except Exception as exc:
             receipt = {
                 "schema_version": "order_fee_sync_receipt.v1",
@@ -3838,6 +3975,7 @@ def _run_fee_sync_cycle(
                 "error_type": type(exc).__name__,
                 "reason_counts": {"fee_sync_failed": 1},
             }
+        receipt["timing"] = fee_timing_audit_summary(timing)
         receipts.append(receipt)
 
     counts = {
@@ -3920,6 +4058,7 @@ def _fee_attempt_audit_summary(receipt: dict[str, Any]) -> dict[str, Any]:
             (receipt.get("migration") or {}).get("status_counts") or {}
         ),
         "error_types": sorted(error_types),
+        "timing": fee_timing_audit_summary(receipt.get("timing")),
     }
 
 

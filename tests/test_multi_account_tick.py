@@ -51,8 +51,45 @@ def _patch_runtime_bootstrap(monkeypatch, mod, runtime_root: Path, run_logger, g
     monkeypatch.setattr(mod, "resolve_config_contract", lambda *args, **kwargs: {})
     monkeypatch.setattr(mod, "ensure_runtime_canonical_config", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "ensure_runtime_schedule_matches_market", lambda *args, **kwargs: {"market": ""})
-    monkeypatch.setattr(mod.state_repo, "claim_idempotency_record", lambda *args, **kwargs: {"claimed": True})
     monkeypatch.setattr(mod, "run_tick_guard_flow", guard)
+
+
+@pytest.mark.parametrize("timeout", ("inf", "-inf", "1e309"))
+def test_invalid_trigger_timeout_reaches_run_logger(monkeypatch, tmp_path, timeout: str) -> None:
+    from src.application import multi_account_tick as mod
+
+    config = tmp_path / "config.us.json"
+    _write_market_config(config, "us", [])
+    runtime_root = tmp_path / "runtime"
+    _patch_config_bootstrap(monkeypatch, mod)
+    monkeypatch.setattr(
+        mod, "resolve_runtime_root", lambda **_kwargs: SimpleNamespace(runtime_root=runtime_root)
+    )
+    monkeypatch.setenv("OM_TIMEOUT_SECONDS", timeout)
+    contexts = []
+
+    def trigger_kind(**kwargs):
+        contexts.append(kwargs["trigger_context"])
+        return "manual"
+
+    class ReachedRunLogger(Exception):
+        pass
+
+    def run_logger(base):
+        assert base == runtime_root
+        raise ReachedRunLogger
+
+    monkeypatch.setattr(mod, "_resolve_daily_brief_trigger_kind", trigger_kind)
+    monkeypatch.setattr(mod, "RunLogger", run_logger)
+    with pytest.raises(ReachedRunLogger):
+        mod.main(["--config", str(config), "--accounts", "lx", "--no-send"])
+
+    assert len(contexts) == 1
+    assert contexts[0]["timeout_seconds_raw"] == timeout
+    assert contexts[0]["timeout_seconds_parse_error"] is True
+    assert contexts[0]["observed"] is True
+    assert "timeout_seconds" not in contexts[0]
+    assert not runtime_root.exists()
 
 
 def test_run_tick_forwards_cli_argv_and_returns_main_exit_code(monkeypatch) -> None:
@@ -1394,3 +1431,54 @@ def test_duplicate_failed_scan_replays_original_scope_without_rerun(monkeypatch,
     assert receipt["inner_run_id"] == "original-run"
     assert receipt["status"] == "failed" and receipt["rc"] == 1
     assert receipt["account_outcomes"][0]["failure_notification_confirmed"] is True
+
+
+def test_real_tick_terminal_owner_loss_fails_and_audits_without_overwrite(monkeypatch, tmp_path):
+    import os
+    from domain.storage.json_io import atomic_write_private_json, private_json_file_lock
+    from src.application import multi_account_tick as mod
+
+    cfg = tmp_path / 'config.us.json'
+    _write_market_config(cfg, 'us', [])
+    runtime = tmp_path / 'runtime'
+    events, guard_failures = [], []
+    successor = {}
+
+    class RunLogger:
+        def __init__(self, _base):
+            self.run_id = 'old-tick'
+        def safe_event(self, step, status, **kwargs):
+            events.append({'step': step, 'status': status, **kwargs})
+
+    def guard(request):
+        files = list((runtime / 'output_shared/state/idempotency/tick_execution').glob('*.json'))
+        assert len(files) == 1
+        path = files[0]
+        with private_json_file_lock(path):
+            old = json.loads(path.read_text())
+            assert old['run_id'] == 'old-tick' and old['status'] == 'in_progress'
+            old['pid'] = 99999999  # Isolated fixture simulates the existing dead-owner recovery policy.
+            atomic_write_private_json(path, old)
+        claimed = mod.state_repo.claim_idempotency_record(
+            runtime, scope='tick_execution', key=old['idempotency_key'],
+            payload={'run_id': 'successor', 'pid': os.getpid()},
+        )
+        assert claimed['claimed'] and claimed['stale']
+        successor.update(path=path, contents=path.read_bytes())
+        request.complete_tick_idempotency_fn(status='completed', ok=True)
+        pytest.fail('obsolete completion must fail out of the public tick')
+
+    _patch_runtime_bootstrap(monkeypatch, mod, runtime, RunLogger, guard)
+    monkeypatch.setattr(mod, 'record_project_failure', lambda *args, **kwargs: guard_failures.append(kwargs) or {})
+    monkeypatch.setattr(mod, 'run_scan_scheduler_cli', lambda **kwargs: pytest.fail('no scheduler/provider call'))
+    monkeypatch.setenv('OM_TRIGGER_SOURCE', 'cron')
+    with pytest.raises(RuntimeError, match='ownership'):
+        mod.main(['--config', str(cfg), '--accounts', 'lx', '--no-send'])
+    assert successor['path'].read_bytes() == successor['contents']
+    assert any(e['step'] == 'idempotency' and e['status'] == 'error'
+               and e.get('error_code') == 'TICK_IDEMPOTENCY_TERMINAL_WRITE_FAILED' for e in events)
+    assert not any(e['step'] == 'run_end' and e['status'] == 'ok' for e in events)
+    assert guard_failures and guard_failures[-1]['error_code'] == 'TICK_IDEMPOTENCY_TERMINAL_WRITE_FAILED'
+    audit = [json.loads(line) for file in (runtime / 'output_shared').rglob('audit_events.jsonl')
+             for line in file.read_text().splitlines()]
+    assert any(e['action'] == 'complete_tick_execution_failed' and e['status'] == 'error' for e in audit)

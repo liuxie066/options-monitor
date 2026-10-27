@@ -629,9 +629,9 @@ def project_assignment_scenario(
     put_outflow = _ZERO
     call_inflow = _ZERO
     known_fees = _ZERO
-    fees_complete = True
-    all_fees_complete = True
-    assignment_cash_complete = True
+    fees_complete = not unavailable
+    all_fees_complete = not unavailable
+    assignment_cash_complete = not unavailable
     cash_adjustments: dict[tuple[str, str, str], dict[str, Any]] = {}
     unknown_cash_buckets: set[tuple[str, str, str]] = set()
     expiry_accumulator: dict[str, dict[str, Any]] = defaultdict(
@@ -960,12 +960,12 @@ def project_assignment_scenario(
     account_cash: dict[str, dict[str, Any]] = {
         account: {
             "opening_cash_mmf_cny": _ZERO,
-            "opening_complete": True,
+            "opening_complete": not unavailable,
             "put_outflow_cny": _ZERO,
             "call_inflow_cny": _ZERO,
             "known_fees_cny": _ZERO,
-            "fees_complete": True,
-            "cash_complete": True,
+            "fees_complete": not unavailable,
+            "cash_complete": not unavailable,
             "cash_components": [],
         }
         for account in normalized_accounts

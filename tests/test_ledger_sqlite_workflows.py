@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,8 @@ from typing import Any
 import pytest  # pyright: ignore[reportMissingImports]
 
 from domain.domain.ledger import ContractKey, TradeEvent, fee_fact_for_event
-from src.application.trades.normalizer import NormalizedTradeDeal
+from src.application.ledger.api import record_normalized_trade_event, record_trade_event_void
+from src.application.trades.normalizer import NormalizedTradeDeal, normalize_trade_deal
 from tests.ledger_legacy_helpers import LegacyTradeEvent
 import src.application.ledger.bootstrap as bootstrap
 import src.application.ledger.bootstrap as ledger_bootstrap
@@ -20,6 +22,7 @@ from src.application.ledger.position_records import PositionLotRecord
 import src.application.ledger.repository as ledger_repository
 from src.application.ledger.store_resolution import ledger_store_write_guard, resolve_ledger_store
 import src.application.ledger.writer as ledger_writer
+import src.application.ledger.writer_trade_events as ledger_trade_writer
 
 BASE = Path(__file__).resolve().parents[1]
 
@@ -240,6 +243,23 @@ def _deal(**overrides: Any) -> NormalizedTradeDeal:
     }
     base.update(overrides)
     return NormalizedTradeDeal(**base)
+
+
+def _actual_fee_replay_deal(amount: str = "2.5") -> NormalizedTradeDeal:
+    return _deal(
+        trade_time_ms=1_770_000_000_000,
+        raw_payload={
+            "deal_id": "deal-open-1",
+            "fee_provenance": {
+                "basis": "actual",
+                "amount": amount,
+                "source": "opend.order_fee_query",
+                "provider_observed_at_ms": 1_770_000_000_100,
+                "provider_batch_id": "synthetic-fee-batch",
+                "fee_details_sha256": "a" * 64,
+            },
+        },
+    )
 
 
 def test_resolve_ledger_store_ignores_sqlite_path_for_standard_runtime_config(tmp_path: Path) -> None:
@@ -1088,6 +1108,374 @@ def test_generic_event_writer_rolls_back_event_when_projection_is_invalid(tmp_pa
         "close-aapl",
     ]
     assert repo.list_position_lots()[0]["fields"]["status"] == "close"
+
+
+def _all_ledger_tables(db_path: Path) -> dict[str, tuple]:
+    """Snapshot all logical rows, including internal sequence tables, afresh."""
+    conn = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)
+    try:
+        conn.execute("BEGIN")
+        tables = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").fetchall()
+        snapshot = {}
+        for (name,) in tables:
+            quoted_name = '"' + name.replace('"', '""') + '"'
+            cursor = conn.execute(f"SELECT * FROM {quoted_name}")
+            snapshot[name] = (
+                tuple(column[0] for column in cursor.description),
+                tuple(sorted(cursor.fetchall(), key=repr)),
+            )
+        return snapshot
+    finally:
+        conn.close()
+
+
+def _adjustment_facts(db_path: Path) -> tuple[list[dict], dict]:
+    conn = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)
+    try:
+        conn.execute("BEGIN")
+        events = [json.loads(row[0]) for row in conn.execute(
+            "SELECT event_json FROM trade_events ORDER BY event_id"
+        )]
+        fields = json.loads(conn.execute(
+            "SELECT fields_json FROM position_lots WHERE lot_id = ?", ("lot-aapl",),
+        ).fetchone()[0])
+        return events, fields
+    finally:
+        conn.close()
+
+
+def _assert_premium_readback(db_path: Path, *, expected: Decimal, premium: int, closed: bool) -> dict:
+    from src.application.ledger.api import list_canonical_position_lot_snapshots
+
+    # A new repository and a separate SQL connection read the durable result.
+    fresh = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    events, stored = _adjustment_facts(db_path)
+    projection = ledger_writer.project_stored_trade_events_to_position_lots(fresh.list_trade_events())
+    assert projection.diagnostics == []
+    assert projection.ledger_projection.lots[0].realized_pnl == expected
+    assert projection.lots[0].fields == stored == fresh.get_position_lot_fields("lot-aapl")
+    canonical = list_canonical_position_lot_snapshots(fresh)
+    assert len(canonical) == 1 and canonical[0]["lot_id"] == "lot-aapl"
+    for fields in (stored, canonical[0]["fields"]):
+        assert Decimal(str(fields["realized_pnl"])) == expected
+        assert fields["premium_open"] == str(premium)
+        assert (fields["contracts_opened"], fields["contracts_open"], fields["contracts_closed"]) == (
+            2, 0 if closed else 1, 2 if closed else 1,
+        )
+        assert fields["status"] == ("close" if closed else "open")
+        assert fields["open_event_id"] == "open-aapl"
+        assert fields["close_event_ids"] == (["partial", "final"] if closed else ["partial"])
+    assert len([event for event in events if event["event_type"] == "adjust"]) == 1
+    return stored
+
+
+@pytest.mark.parametrize("checkpoint_enabled", [False, True])
+@pytest.mark.parametrize("timing,premium,open_fee,close_fee,expected", [
+    pytest.param("late", 3, 0, 0, Decimal("200"), id="late-zero-fees"),
+    pytest.param("before", 3, 0, 0, Decimal("200"), id="before-close"),
+    pytest.param("late", 2, 0, 0, Decimal("100"), id="unchanged-premium"),
+    pytest.param("late", 3, 3, 2, Decimal("198"), id="actual-fees"),
+])
+def test_public_batch_premium_adjustment_restates_durable_pnl_and_runtime_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpoint_enabled: bool, timing: str, premium: int,
+    open_fee: int, close_fee: int, expected: Decimal,
+) -> None:
+    from src.application.ledger.api import record_manual_position_adjustments
+    from src.application.ledger import writer_trade_events
+    from src.application.ledger.position_projection_runtime import run_position_projection_forced_full
+
+    db_path = tmp_path / "ledger.sqlite3"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+
+    def assert_actual_fees(expected_fees: dict[str, Decimal]) -> None:
+        fresh = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+        stored = {row["event_id"]: TradeEvent.from_dict(row) for row in fresh.list_trade_events()}
+        for event_id, amount in expected_fees.items():
+            event = stored[event_id]
+            fact = fee_fact_for_event(event)
+            assert fact.basis.value == "actual" and fact.amount == amount
+            assert fact.source == "opend.trade_event" and fact.reason == "broker_receipt_fee"
+            assert event.fees == amount
+            assert event.raw_payload["fee_provenance"]["frozen_at_ms"] > 0
+
+    # Synthetic broker receipts satisfy the real writer's actual-fee admission;
+    # merely labelling an untrusted test/manual event "actual" is insufficient.
+    ledger_writer.persist_trade_event_object(repo, _trade_event(
+        contracts=2, price=2, fees=open_fee, source="opend_push",
+        raw_payload={
+            "side": "sell", "source_type": "broker_trade_event",
+            "futu_account_id": "issue650-fixture-account",
+            "order_id": "issue650-open-order", "source_deal_id": "issue650-open-deal",
+            "fee_provenance": {"basis": "actual", "amount": open_fee, "source": "opend.trade_event"},
+        },
+    ))
+    if checkpoint_enabled:
+        assert run_position_projection_forced_full(repo, seed_checkpoint=True).checkpoint_written
+        repo.set_position_projection_checkpoint_mode("enabled")
+    partial = _trade_event(
+        event_id="partial", event_type="close", event_time_ms=4000 if timing == "before" else 2000,
+        price=1, fees=close_fee, lot_id=None, target_lot_id="lot-aapl", source="opend_push",
+        raw_payload={
+            "side": "buy", "source_type": "broker_trade_event",
+            "futu_account_id": "issue650-fixture-account",
+            "order_id": "issue650-partial-order", "source_deal_id": "issue650-partial-deal",
+            "fee_provenance": {"basis": "actual", "amount": close_fee, "source": "opend.trade_event"},
+        },
+    )
+    if timing == "late":
+        ledger_writer.persist_trade_event_object(repo, partial)
+    request = {"record_id": "lot-aapl", "premium_per_share": premium, "as_of_ms": 3000}
+    result, = record_manual_position_adjustments(repo, [request])
+    assert result.result.created is True
+    if timing == "before":
+        assert repo.get_position_lot_fields("lot-aapl")["realized_pnl"] == "0"
+        ledger_writer.persist_trade_event_object(repo, partial)
+    assert_actual_fees({"open-aapl": Decimal(open_fee), "partial": Decimal(close_fee)})
+    fields = _assert_premium_readback(db_path, expected=expected, premium=premium, closed=False)
+    assert fields["last_event_id"] == ("partial" if timing == "before" else result.result.event_id)
+    projection = ledger_writer.project_stored_trade_events_to_position_lots(repo.list_trade_events())
+    assert projection.ledger_projection.allocations[0].realized_pnl_net == expected - Decimal(open_fee) / 2
+
+    # The same request reuses the persisted event, including its frozen time.
+    before_retry = _all_ledger_tables(db_path)
+    retry, = record_manual_position_adjustments(repo, [request])
+    assert retry.result.created is False
+    assert retry.result.event_id == result.result.event_id
+    assert retry.patch == result.patch
+    assert _all_ledger_tables(db_path) == before_retry
+    # Changing an existing event's time is still an immutable-event conflict.
+    stored = TradeEvent.from_dict(repo.get_trade_events_by_ids((result.result.event_id,))[0])
+    with pytest.raises(ValueError, match="trade event conflict"):
+        repo.upsert_trade_event(replace(stored, event_time_ms=stored.event_time_ms + 1))
+    assert _all_ledger_tables(db_path) == before_retry
+    assert request == {"record_id": "lot-aapl", "premium_per_share": premium, "as_of_ms": 3000}
+
+    seeded = run_position_projection_forced_full(repo, seed_checkpoint=checkpoint_enabled)
+    assert seeded.mode_used == "full"
+    assert seeded.checkpoint_written is checkpoint_enabled
+    assert repo.get_position_lot_fields("lot-aapl") == fields
+    final = _trade_event(
+        event_id="final", event_type="close", event_time_ms=6000, price=0.5,
+        fees=0.5, lot_id=None, target_lot_id="lot-aapl", source="opend_push",
+        raw_payload={
+            "side": "buy", "source_type": "broker_trade_event",
+            "futu_account_id": "issue650-fixture-account",
+            "order_id": "issue650-final-order", "source_deal_id": "issue650-final-deal",
+            "fee_provenance": {"basis": "actual", "amount": 0.5, "source": "opend.trade_event"},
+        },
+    )
+    runtime_results = []
+    original_runtime = writer_trade_events.run_position_projection_in_transaction
+
+    def capture_runtime(*args: Any, **kwargs: Any) -> Any:
+        result = original_runtime(*args, **kwargs)
+        runtime_results.append(result)
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(writer_trade_events, "run_position_projection_in_transaction", capture_runtime)
+        final_write = ledger_writer.persist_trade_event_object(repo, final)
+    assert final_write.created is True
+    assert len(runtime_results) == 1
+    assert runtime_results[0].mode_used == ("fast_tail" if checkpoint_enabled else "full")
+    assert_actual_fees({"open-aapl": Decimal(open_fee), "partial": Decimal(close_fee), "final": Decimal("0.5")})
+    final_expected = expected + (Decimal(premium) - Decimal("0.5")) * 100 - Decimal("0.5")
+    closed_fields = _assert_premium_readback(db_path, expected=final_expected, premium=premium, closed=True)
+    assert closed_fields["last_event_id"] == "final"
+    run_position_projection_forced_full(repo)
+    assert repo.get_position_lot_fields("lot-aapl") == closed_fields
+    before_closed_adjust = _all_ledger_tables(db_path)
+    with pytest.raises(ValueError, match="target lot is not open"):
+        record_manual_position_adjustments(repo, [{**request, "premium_per_share": 4, "as_of_ms": 7000}])
+    assert _all_ledger_tables(db_path) == before_closed_adjust
+
+
+@pytest.mark.parametrize("checkpoint_enabled", [False, True])
+def test_public_batch_premium_adjustment_failure_rolls_back_then_valid_retry_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpoint_enabled: bool,
+) -> None:
+    from src.application.ledger.api import record_manual_position_adjustments
+    from src.application.ledger.position_projection_runtime import run_position_projection_forced_full
+
+    db_path = tmp_path / "ledger.sqlite3"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    ledger_writer.persist_trade_event_object(repo, _trade_event(contracts=2, price=2))
+    ledger_writer.persist_trade_event_object(repo, _trade_event(
+        event_id="partial", event_type="close", event_time_ms=2000, price=1,
+        lot_id=None, target_lot_id="lot-aapl", raw_payload={"side": "buy"},
+    ))
+    if checkpoint_enabled:
+        assert run_position_projection_forced_full(repo, seed_checkpoint=True).checkpoint_written
+        repo.set_position_projection_checkpoint_mode("enabled")
+    request = {"record_id": "lot-aapl", "premium_per_share": 3, "as_of_ms": 3000}
+    before = _all_ledger_tables(db_path)
+    with pytest.raises(ValueError, match="missing-lot"):
+        record_manual_position_adjustments(repo, [request, {**request, "record_id": "missing-lot"}])
+    assert _all_ledger_tables(db_path) == before
+
+    def fail_finalization(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("synthetic late finalization failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger_manual_trades, "_finish_trade_event_decision_projection", fail_finalization)
+        with pytest.raises(RuntimeError, match="synthetic late finalization failure"):
+            record_manual_position_adjustments(repo, [request])
+    assert _all_ledger_tables(db_path) == before
+    assert repo.get_position_lot_fields("lot-aapl")["realized_pnl"] == "100"
+    result, = record_manual_position_adjustments(repo, [request])
+    assert result.result.created is True
+    fields = _assert_premium_readback(db_path, expected=Decimal("200"), premium=3, closed=False)
+    assert fields["last_event_id"] == result.result.event_id
+    assert len(repo.list_trade_events()) == 3
+
+
+def _write_quantity_adjustment(repo: Any, route: str, patch: dict) -> Any:
+    if route == "normalized":
+        from src.application.ledger.api import record_normalized_trade_event
+
+        return record_normalized_trade_event(repo, _deal(
+            deal_id="adjust-quantity", order_id=None, symbol="NVDA", strike=100,
+            expiration_ymd="2026-08-21", currency="USD", position_effect="adjust",
+            contracts=0, price=0, trade_time_ms=2000,
+            raw_payload={"target_lot_id": "lot-aapl", "patch": patch},
+        ))
+
+    from src.application.ledger.event_codec import encode_trade_event_for_storage
+
+    event = _trade_event(
+        event_id="adjust-quantity", event_type="adjust", event_time_ms=2000,
+        contracts=0, price=0, lot_id=None, target_lot_id="lot-aapl",
+        raw_payload={"patch": patch},
+    )
+    encoded = encode_trade_event_for_storage(event)
+    # The codec preserves invalid evidence too; projection owns rejection.
+    assert json.dumps(json.loads(encoded.event_json)["raw_payload"]["patch"], sort_keys=True) == json.dumps(patch, sort_keys=True)
+    return ledger_writer.persist_trade_event_object(repo, encoded.event)
+
+
+@pytest.mark.parametrize("route", ["canonical", "normalized"])
+@pytest.mark.parametrize("patch,checkpoint_enabled", [
+    pytest.param({"contracts": 1.9}, False, id="opened-positive"),
+    pytest.param({"contracts": -0.5}, False, id="opened-negative"),
+    pytest.param({"contracts_open": 1.9, "contracts_closed": 1}, False, id="open-positive"),
+    pytest.param({"contracts_open": -0.5, "contracts_closed": 2}, False, id="open-negative"),
+    pytest.param({"contracts_closed": 1.9}, False, id="closed-positive"),
+    pytest.param({"contracts_closed": -0.5}, False, id="closed-negative"),
+    pytest.param({"contracts": True}, False, id="bool"),
+    pytest.param({"contracts_closed": "NaN"}, False, id="nonfinite"),
+    pytest.param({"contracts_closed": -1}, False, id="negative-integer"),
+    pytest.param({"contracts_open": 1}, False, id="conservation"),
+    pytest.param({"contracts": 1.9}, True, id="trusted-checkpoint-opened"),
+    pytest.param({"contracts_open": -0.5, "contracts_closed": 2}, True, id="trusted-checkpoint-open"),
+])
+def test_adjust_writer_rolls_back_every_table_and_allows_corrected_retry(
+    tmp_path: Path, route: str, patch: dict, checkpoint_enabled: bool,
+) -> None:
+    from src.application.ledger.position_projection_runtime import run_position_projection_forced_full
+
+    db_path = tmp_path / "ledger.sqlite3"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    ledger_writer.persist_trade_event_object(repo, _trade_event(contracts=2))
+    if checkpoint_enabled:
+        seeded = run_position_projection_forced_full(repo, seed_checkpoint=True)
+        assert seeded.checkpoint_written
+        repo.set_position_projection_checkpoint_mode("enabled")
+        checkpoints = repo.list_position_projection_checkpoints(trusted_only=True)
+        assert checkpoints and all(row["prefix_event_count"] == 1 for row in checkpoints)
+        assert repo.read_position_projection_source_state()["checkpoint_mode"] == "enabled"
+    else:
+        assert repo.read_position_projection_source_state()["checkpoint_mode"] == "disabled"
+    original_events = repo.list_trade_events()
+    original_lots = repo.list_position_lots()
+    original_patch = json.dumps(patch, sort_keys=True)
+    baseline = _all_ledger_tables(db_path)
+    if checkpoint_enabled:
+        assert baseline["position_projection_checkpoints"][1]
+        columns, heads = baseline["position_projection_heads"]
+        assert heads and all(row[columns.index("status")] == "trusted" for row in heads)
+
+    for _ in range(2):
+        before = _all_ledger_tables(db_path)
+        assert before == baseline
+        with pytest.raises(ValueError, match="adjust_patch_invalid"):
+            _write_quantity_adjustment(repo, route, patch)
+        assert _all_ledger_tables(db_path) == before
+        assert repo.list_trade_events() == original_events
+        assert repo.list_position_lots() == original_lots
+        assert json.dumps(patch, sort_keys=True) == original_patch
+
+    # The same request identity can succeed after correction: failure must not
+    # reserve its event ID or leave a partial deduplication/decision record.
+    corrected = {"contracts": "3.0"}
+    first = _write_quantity_adjustment(repo, route, corrected)
+    assert first.created is True
+    facts = _adjustment_facts(db_path)
+    events, fields = facts
+    adjustments = [event for event in events if event["event_type"] == "adjust"]
+    assert len(events) == 2 and len(adjustments) == 1
+    assert adjustments[0]["raw_payload"]["patch"] == corrected
+    assert (fields["contracts_opened"], fields["contracts_open"], fields["contracts_closed"]) == (3, 3, 0)
+    retry = _write_quantity_adjustment(repo, route, corrected)
+    assert retry.created is False
+    assert retry.event_id == first.event_id
+    assert _adjustment_facts(db_path) == facts
+
+
+@pytest.mark.parametrize("route", ["canonical", "normalized"])
+@pytest.mark.parametrize("patch,expected", [
+    pytest.param({"note": "fixture"}, (2, 2, 0), id="omitted"),
+    pytest.param({"contracts": None, "contracts_open": None, "contracts_closed": None}, (2, 2, 0), id="none"),
+    pytest.param({"contracts": "", "contracts_open": "", "contracts_closed": ""}, (2, 2, 0), id="empty"),
+    pytest.param({"contracts": "2.0", "contracts_open": "1.0", "contracts_closed": "1"}, (2, 1, 1), id="integer-text"),
+    pytest.param({"contracts": 0}, (0, 0, 0), id="zero"),
+    pytest.param({"contracts": 2**53 + 1}, (2**53 + 1, 2**53 + 1, 0), id="large-integer"),
+])
+def test_adjust_writer_preserves_valid_quantities_and_raw_patch(
+    tmp_path: Path, route: str, patch: dict, expected: tuple,
+) -> None:
+    db_path = tmp_path / "ledger.sqlite3"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    ledger_writer.persist_trade_event_object(repo, _trade_event(contracts=2))
+    first = _write_quantity_adjustment(repo, route, patch)
+    assert first.created is True
+    facts = _adjustment_facts(db_path)
+    events, fields = facts
+    assert len(events) == 2
+    adjustment = next(event for event in events if event["event_type"] == "adjust")
+    assert json.dumps(adjustment["raw_payload"]["patch"], sort_keys=True) == json.dumps(patch, sort_keys=True)
+    assert (fields["contracts_opened"], fields["contracts_open"], fields["contracts_closed"]) == expected
+    retry = _write_quantity_adjustment(repo, route, patch)
+    assert retry.created is False
+    assert retry.event_id == first.event_id
+    assert _adjustment_facts(db_path) == facts
+
+
+@pytest.mark.parametrize("patch", [
+    {"contracts": 1.9}, {"contracts_open": -0.5, "contracts_closed": 2},
+    {"contracts_closed": "1.9"},
+])
+def test_rebuild_rejects_fractional_adjustment_and_preserves_historical_evidence(
+    tmp_path: Path, patch: dict,
+) -> None:
+    db_path = tmp_path / "ledger.sqlite3"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    ledger_writer.persist_trade_event_object(repo, _trade_event(contracts=2))
+    original_lots = repo.list_position_lots()
+    repo.upsert_trade_event(_trade_event(
+        event_id="historical-bad-adjust", event_type="adjust", event_time_ms=2000,
+        contracts=0, price=0, lot_id=None, target_lot_id="lot-aapl",
+        source="historical-fixture", raw_payload={"patch": patch},
+    ))
+    historical_facts = _adjustment_facts(db_path)
+    bad = next(event for event in historical_facts[0] if event["event_id"] == "historical-bad-adjust")
+    assert bad["raw_payload"]["patch"] == patch
+    before = _all_ledger_tables(db_path)
+    for _ in range(2):
+        with pytest.raises(ValueError, match="adjust_patch_invalid"):
+            ledger_writer.rebuild_position_lots_from_trade_events(repo)
+        assert _all_ledger_tables(db_path) == before
+        assert _adjustment_facts(db_path) == historical_facts
+        assert repo.list_position_lots() == original_lots
 
 
 def test_rebuild_preserves_existing_lots_when_event_history_is_invalid(tmp_path: Path) -> None:
@@ -3030,6 +3418,447 @@ def test_writer_admits_only_consistent_actual_fee_candidates_from_trusted_broker
     assert fact.basis.value == "actual"
     assert fact.amount == expected
     assert Decimal(str(persisted.fees)).quantize(Decimal("0.000001")) == expected
+
+
+def _legacy_close_replay_fixture(
+    tmp_path: Path, *, quantities: tuple[int, ...] = (1, 2),
+    close_contracts: int | None = None, raw_fields: dict[str, Any] | None = None,
+):
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    openings = []
+    for index, quantity in enumerate(quantities):
+        identifier = ("z-open", "a-open")[index]
+        openings.append(record_normalized_trade_event(repo, _deal(
+            deal_id=identifier, order_id=f"order-{identifier}", contracts=quantity,
+            trade_time_ms=1_770_000_000_000 + index * 1000,
+            raw_payload={"deal_id": identifier},
+        )))
+    deal = _deal(
+        deal_id="legacy-close", order_id="order-close", side="buy", position_effect="close",
+        contracts=sum(quantities) if close_contracts is None else close_contracts, price=1.0,
+        trade_time_ms=1_770_000_003_000,
+        raw_payload={"deal_id": "legacy-close", **(raw_fields or {})},
+    )
+    return repo, deal, openings
+
+
+@pytest.mark.parametrize("close_contracts", [1, 2], ids=["partial", "full"])
+def test_public_legacy_close_replays_saved_allocation(tmp_path: Path, monkeypatch, close_contracts: int) -> None:
+    repo, deal, openings = _legacy_close_replay_fixture(tmp_path, quantities=(2,), close_contracts=close_contracts)
+    original = json.dumps(deal.to_dict(), sort_keys=True)
+    assert deal.execution_input == {} and "qty" not in deal.raw_payload
+    first = record_normalized_trade_event(repo, deal)
+    assert first.created is True and first.lot_id == openings[0].lot_id
+    events = _all_ledger_tables(tmp_path / "ledger.sqlite3")["trade_events"]
+    fields = [row["fields"] for row in repo.list_position_lots()]
+    assert fields[0]["contracts_open"] == 2 - close_contracts
+
+    def forbid_fifo(*args, **kwargs):
+        raise AssertionError("historical replay must not resolve current FIFO")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger_trade_writer, "resolve_fifo_close_targets", forbid_fifo)
+        for current in (repo, ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")):
+            retry = record_normalized_trade_event(current, deal)
+            assert retry.created is False and (retry.event_id, retry.lot_id) == (first.event_id, first.lot_id)
+            assert _all_ledger_tables(tmp_path / "ledger.sqlite3")["trade_events"] == events
+            assert [row["fields"] for row in current.list_position_lots()] == fields
+    later = record_normalized_trade_event(repo, _deal(
+        deal_id="later-open", order_id="order-later", contracts=3,
+        trade_time_ms=1_770_000_004_000, raw_payload={"deal_id": "later-open"},
+    ))
+    assert later.created is True
+    events = _all_ledger_tables(tmp_path / "ledger.sqlite3")["trade_events"]
+    fields = [row["fields"] for row in repo.list_position_lots()]
+    monkeypatch.setattr(ledger_trade_writer, "resolve_fifo_close_targets", forbid_fifo)
+    retry = record_normalized_trade_event(repo, deal)
+    assert retry.created is False and retry.lot_id == first.lot_id
+    assert _all_ledger_tables(tmp_path / "ledger.sqlite3")["trade_events"] == events
+    assert [row["fields"] for row in repo.list_position_lots()] == fields
+    assert json.dumps(deal.to_dict(), sort_keys=True) == original
+
+
+@pytest.mark.parametrize("fee_kind", ["formula", "raw", "actual", "zero"])
+def test_public_legacy_multi_close_replay_preserves_fee_allocations(tmp_path: Path, monkeypatch, fee_kind: str) -> None:
+    fee_fields = {}
+    total = Decimal("0" if fee_kind == "zero" else "3.000001")
+    if fee_kind == "raw":
+        fee_fields = {"fee_amount": str(total)}
+    elif fee_kind in {"actual", "zero"}:
+        fee_fields = {"fee_provenance": {**_actual_fee_replay_deal().raw_payload["fee_provenance"], "amount": str(total)}}
+    monkeypatch.setattr(ledger_trade_writer, "utc_now_ms", lambda: 1_770_000_010_000)
+    repo, deal, openings = _legacy_close_replay_fixture(tmp_path, raw_fields=fee_fields)
+    original = json.dumps(deal.to_dict(), sort_keys=True)
+    first = record_normalized_trade_event(repo, deal)
+    assert first.created is True and first.lot_id == openings[0].lot_id
+    closes = [row for row in repo.list_trade_events() if row["event_type"] == "close"]
+    assert len(closes) == 2
+    assert all(row["raw_payload"]["cash_conversions"] for row in closes)
+    assert closes[0]["raw_payload"]["close_target_resolution"]["record_ids"] == [item.lot_id for item in openings]
+    assert openings[0].lot_id > openings[1].lot_id  # FIFO follows time, not lexical IDs.
+    assert all(row["raw_payload"]["fee_provenance"]["frozen_at_ms"] == 1_770_000_010_000 for row in closes)
+    if fee_kind != "formula":
+        assert all(row["raw_payload"]["fee_provenance"]["basis"] == "actual" for row in closes)
+        assert sum(Decimal(str(row["fees"])) for row in closes) == total
+        by_target = {row["target_lot_id"]: Decimal(str(row["fees"])) for row in closes}
+        assert by_target[openings[0].lot_id] == (Decimal(0) if fee_kind == "zero" else Decimal("1.000000"))
+        assert by_target[openings[1].lot_id] == (Decimal(0) if fee_kind == "zero" else Decimal("2.000001"))
+    else:
+        assert all(row["raw_payload"]["fee_provenance"]["basis"] == "estimated" for row in closes)
+    events = _all_ledger_tables(tmp_path / "ledger.sqlite3")["trade_events"]
+    fields = [row["fields"] for row in repo.list_position_lots()]
+    monkeypatch.setattr(ledger_trade_writer, "utc_now_ms", lambda: 1_770_000_020_000)
+
+    def forbid_estimate(*args, **kwargs):
+        raise AssertionError("replay must retain frozen formula fees")
+
+    monkeypatch.setattr(ledger_trade_writer, "estimate_futu_executed_option_fee", forbid_estimate)
+    replays = [deal]
+    if fee_kind in {"actual", "zero"}:
+        replays.append(replace(deal, raw_payload={
+            **deal.raw_payload, "fee_provenance": {**deal.raw_payload["fee_provenance"], "amount": format(total, ".8f")},
+        }))
+    for replay in replays:
+        result = record_normalized_trade_event(repo, replay)
+        assert result.created is False and (result.event_id, result.lot_id) == (first.event_id, first.lot_id)
+        assert _all_ledger_tables(tmp_path / "ledger.sqlite3")["trade_events"] == events
+        assert [row["fields"] for row in repo.list_position_lots()] == fields
+    assert json.dumps(deal.to_dict(), sort_keys=True) == original
+
+
+def test_public_legacy_close_replay_keeps_writer_field_ownership(tmp_path: Path) -> None:
+    repo, deal, openings = _legacy_close_replay_fixture(tmp_path, raw_fields={
+        "fee_order_group_id": "caller-label", "close_target_resolution": {"caller": "ignored"},
+        "close_target_source_event_id": "caller-source", "record_id": "", "target_lot_id": "", "note": "kept",
+    })
+    original = json.dumps(deal.to_dict(), sort_keys=True)
+    first = record_normalized_trade_event(repo, deal)
+    closes = [row for row in repo.list_trade_events() if row["event_type"] == "close"]
+    assert first.created is True
+    assert all(row["raw_payload"]["fee_order_group_id"] == first.event_id for row in closes)
+    assert {row["raw_payload"]["close_target_source_event_id"] for row in closes} == {item.event_id for item in openings}
+    assert record_normalized_trade_event(repo, deal).created is False
+    before = _all_ledger_tables(tmp_path / "ledger.sqlite3")
+    with pytest.raises(ValueError, match="trade event conflict"):
+        record_normalized_trade_event(repo, replace(deal, raw_payload={**deal.raw_payload, "note": "changed"}))
+    assert _all_ledger_tables(tmp_path / "ledger.sqlite3") == before
+    assert json.dumps(deal.to_dict(), sort_keys=True) == original
+
+
+@pytest.mark.parametrize("location,key,value", [
+    pytest.param("deal", "contracts", 4, id="quantity"),
+    pytest.param("deal", "price", 2.0, id="price"),
+    pytest.param("deal", "trade_time_ms", 1_770_000_003_001, id="time"),
+    pytest.param("deal", "side", "sell", id="side"),
+    pytest.param("deal", "strike", 481.0, id="strike"),
+    pytest.param("deal", "order_id", "other-order", id="order"),
+    pytest.param("raw", "note", "changed", id="raw-fact"),
+    pytest.param("fee", "amount", "4", id="fee-total"),
+    pytest.param("fee", "source", "other.receipt", id="fee-source"),
+    pytest.param("fee", "provider_batch_id", "other-batch", id="provider"),
+    pytest.param("fee", "reason", None, id="null-reason"),
+    pytest.param("fee", "frozen_at_ms", None, id="null-freeze"),
+    pytest.param("fee", "amount", "bad", id="malformed-fee"),
+    pytest.param("raw", "fee_amount", "4", id="conflicting-fee"),
+])
+def test_public_legacy_close_replay_rejects_changed_facts(tmp_path: Path, location: str, key: str, value: Any) -> None:
+    repo, deal, _ = _legacy_close_replay_fixture(tmp_path, raw_fields={
+        "fee_provenance": {**_actual_fee_replay_deal().raw_payload["fee_provenance"], "amount": "3.000001"},
+    })
+    first = record_normalized_trade_event(repo, deal)
+    assert first.created is True
+    if location == "deal":
+        changed = replace(deal, **{key: value})
+    else:
+        raw = json.loads(json.dumps(deal.raw_payload))
+        (raw["fee_provenance"] if location == "fee" else raw)[key] = value
+        changed = replace(deal, raw_payload=raw)
+    original = json.dumps(changed.to_dict(), sort_keys=True)
+    before = _all_ledger_tables(tmp_path / "ledger.sqlite3")
+    with pytest.raises(ValueError, match=r"trade event (?:fee evidence )?conflict"):
+        record_normalized_trade_event(repo, changed)
+    assert _all_ledger_tables(tmp_path / "ledger.sqlite3") == before
+    assert json.dumps(changed.to_dict(), sort_keys=True) == original
+    retry = record_normalized_trade_event(repo, deal)
+    assert retry.created is False and retry.event_id == first.event_id
+    assert _all_ledger_tables(tmp_path / "ledger.sqlite3")["trade_events"] == before["trade_events"]
+
+
+@pytest.mark.parametrize("damage", [
+    "missing-root", "missing-child", "duplicate-target", "declared-target", "total", "selector",
+    "allocation-quantity", "root-group", "scope",
+])
+def test_public_legacy_close_replay_requires_complete_history(tmp_path: Path, monkeypatch, damage: str) -> None:
+    source, deal, _ = _legacy_close_replay_fixture(tmp_path / "source")
+    first = record_normalized_trade_event(source, deal)
+    assert first.created is True
+    rows = json.loads(json.dumps(source.list_trade_events()))
+    closes = sorted((row for row in rows if row["event_type"] == "close"), key=lambda row: row["event_id"])
+    if damage == "missing-root":
+        rows = [row for row in rows if row["event_id"] != first.event_id]
+    elif damage == "missing-child":
+        rows = [row for row in rows if row["event_id"] != closes[1]["event_id"]]
+    elif damage == "duplicate-target":
+        closes[1]["target_lot_id"] = closes[0]["target_lot_id"]
+    elif damage == "allocation-quantity":
+        closes[0]["contracts"], closes[1]["contracts"] = closes[1]["contracts"], closes[0]["contracts"]
+    elif damage == "root-group":
+        closes[0]["raw_payload"]["fee_order_group_id"] = "wrong-group"
+    elif damage == "scope":
+        closes[1]["raw_payload"]["futu_account_id"] = "OTHER"
+    else:
+        for row in closes:
+            resolution = row["raw_payload"]["close_target_resolution"]
+            if damage == "declared-target":
+                resolution["record_ids"][1] = "absent-lot"
+            elif damage == "total":
+                resolution["contracts_to_close"] = 4
+            else:
+                resolution["selector"]["strike"] = 481.0
+    db_path = tmp_path / "damaged.sqlite3"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    for row in rows:
+        repo.upsert_trade_event(row)
+    before = _all_ledger_tables(db_path)
+
+    def forbid_fallthrough(*args, **kwargs):
+        raise AssertionError("incomplete history must fail before FIFO or FX")
+
+    monkeypatch.setattr(ledger_trade_writer, "resolve_fifo_close_targets", forbid_fallthrough)
+    monkeypatch.setattr(ledger_trade_writer, "load_cash_fx_payload", forbid_fallthrough)
+    with pytest.raises(ValueError, match="trade event conflict"):
+        record_normalized_trade_event(repo, deal)
+    assert _all_ledger_tables(db_path) == before
+
+
+@pytest.mark.parametrize("void_all", [False, True], ids=["one-child", "all-children"])
+def test_public_legacy_close_replay_preserves_voided_history(tmp_path: Path, void_all: bool) -> None:
+    repo, deal, _ = _legacy_close_replay_fixture(tmp_path)
+    first = record_normalized_trade_event(repo, deal)
+    closes = [row for row in repo.list_trade_events() if row["event_type"] == "close"]
+    for row in (closes if void_all else closes[:1]):
+        assert record_trade_event_void(repo, event_id=row["event_id"], reason="synthetic correction")["mode"] == "applied"
+    before = _all_ledger_tables(tmp_path / "ledger.sqlite3")
+    fields = [row["fields"] for row in repo.list_position_lots()]
+    retry = record_normalized_trade_event(repo, deal)
+    assert retry.created is False and (retry.event_id, retry.lot_id) == (first.event_id, first.lot_id)
+    for row in closes:
+        assert ledger_writer.persist_trade_event_object(repo, TradeEvent.from_dict(row)).created is False
+    assert _all_ledger_tables(tmp_path / "ledger.sqlite3")["trade_events"] == before["trade_events"]
+    assert [row["fields"] for row in repo.list_position_lots()] == fields
+    before = _all_ledger_tables(tmp_path / "ledger.sqlite3")
+    with pytest.raises(ValueError, match="trade event conflict"):
+        record_normalized_trade_event(repo, replace(deal, price=2.0))
+    assert _all_ledger_tables(tmp_path / "ledger.sqlite3") == before
+
+
+def test_public_targeted_legacy_close_replay_preserves_void(tmp_path: Path) -> None:
+    repo, source, openings = _legacy_close_replay_fixture(tmp_path, quantities=(1,))
+    deal = replace(source, raw_payload={**source.raw_payload, "target_lot_id": openings[0].lot_id})
+    first = record_normalized_trade_event(repo, deal)
+    assert first.created is True
+    assert record_normalized_trade_event(repo, deal).created is False
+    record_trade_event_void(repo, event_id=first.event_id, reason="synthetic targeted correction")
+    before = _all_ledger_tables(tmp_path / "ledger.sqlite3")["trade_events"]
+    fields = [row["fields"] for row in repo.list_position_lots()]
+    retry = record_normalized_trade_event(repo, deal)
+    assert retry.created is False and retry.lot_id == first.lot_id
+    assert _all_ledger_tables(tmp_path / "ledger.sqlite3")["trade_events"] == before
+    assert [row["fields"] for row in repo.list_position_lots()] == fields
+
+
+@pytest.mark.parametrize("scope", [{"internal_account": "sy"}, {"futu_account_id": "REAL_2"}], ids=["internal", "physical"])
+def test_public_legacy_close_replay_keeps_account_scope(tmp_path: Path, scope: dict[str, str]) -> None:
+    repo, deal, _ = _legacy_close_replay_fixture(tmp_path, quantities=(1,))
+    first = record_normalized_trade_event(repo, deal)
+    old_rows = {row["event_id"]: row for row in repo.list_trade_events()}
+    opening = record_normalized_trade_event(repo, _deal(
+        **scope, deal_id="new-scope-open", order_id="new-scope-order", contracts=1,
+        trade_time_ms=1_770_000_004_000, raw_payload={"deal_id": "new-scope-open"},
+    ))
+    second = record_normalized_trade_event(repo, replace(deal, **scope, trade_time_ms=1_770_000_005_000))
+    assert first.created is True and opening.created is True and second.created is True
+    assert second.event_id != first.event_id and second.lot_id == opening.lot_id
+    after = {row["event_id"]: row for row in repo.list_trade_events()}
+    assert {key: after[key] for key in old_rows} == old_rows
+    assert record_normalized_trade_event(repo, deal).created is False
+
+
+@pytest.mark.parametrize("amount", ["2.5", "0"])
+def test_public_legacy_actual_fee_replay_preserves_frozen_evidence(tmp_path: Path, monkeypatch, amount: str) -> None:
+    db_path = tmp_path / "ledger.sqlite3"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    deal = _actual_fee_replay_deal(amount)
+    original = json.dumps(deal.to_dict(), sort_keys=True)
+    assert deal.execution_input == {}
+    frozen_at_ms = 1_770_000_001_000
+    monkeypatch.setattr(ledger_trade_writer, "utc_now_ms", lambda: frozen_at_ms)
+
+    first = record_normalized_trade_event(repo, deal)
+
+    assert first.created is True
+    columns, rows = _all_ledger_tables(db_path)["trade_events"]
+    assert len(rows) == 1
+    frozen = json.loads(rows[0][columns.index("event_json")])
+    provenance = frozen["raw_payload"]["fee_provenance"]
+    assert provenance == {
+        **deal.raw_payload["fee_provenance"],
+        "reason": "broker_receipt_fee",
+        "frozen_at_ms": frozen_at_ms,
+    }
+    assert Decimal(frozen["fees"]) == Decimal(amount)
+    assert frozen["raw_payload"]["cash_conversions"]
+    fields = [row["fields"] for row in repo.list_position_lots()]
+    assert len(fields) == 1
+    assert fields[0]["contracts_open"] == deal.contracts
+
+    retry = record_normalized_trade_event(repo, deal)
+    assert retry.created is False and retry.event_id == first.event_id
+    assert _all_ledger_tables(db_path)["trade_events"] == (columns, rows)
+    assert [row["fields"] for row in repo.list_position_lots()] == fields
+
+    monkeypatch.setattr(ledger_trade_writer, "utc_now_ms", lambda: frozen_at_ms + 10_000)
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    equivalent = replace(deal, raw_payload={
+        **deal.raw_payload,
+        "fee_provenance": {**deal.raw_payload["fee_provenance"], "amount": format(Decimal(amount), ".6f")},
+    })
+    for replay in (deal, equivalent):
+        result = record_normalized_trade_event(repo, replay)
+        assert result.created is False and result.event_id == first.event_id
+        assert _all_ledger_tables(db_path)["trade_events"] == (columns, rows)
+        assert [row["fields"] for row in repo.list_position_lots()] == fields
+    assert json.dumps(deal.to_dict(), sort_keys=True) == original
+
+
+@pytest.mark.parametrize("omitted", [(), ("reason",), ("frozen_at_ms",), ("reason", "frozen_at_ms")])
+def test_frozen_actual_fee_replay_preserves_explicit_metadata(tmp_path: Path, omitted: tuple[str, ...]) -> None:
+    db_path = tmp_path / "ledger.sqlite3"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    first = record_normalized_trade_event(repo, _actual_fee_replay_deal())
+    assert first.created is True
+    columns, rows = _all_ledger_tables(db_path)["trade_events"]
+    fields = [row["fields"] for row in repo.list_position_lots()]
+    replay_payload = json.loads(rows[0][columns.index("event_json")])
+    for key in omitted:
+        replay_payload["raw_payload"]["fee_provenance"].pop(key)
+    replay = TradeEvent.from_dict(replay_payload)
+    before_input = json.dumps(replay.to_dict(), sort_keys=True)
+
+    result = ledger_writer.persist_trade_event_object(repo, replay)
+
+    assert result.created is False and result.event_id == first.event_id
+    assert _all_ledger_tables(db_path)["trade_events"] == (columns, rows)
+    assert [row["fields"] for row in repo.list_position_lots()] == fields
+    assert json.dumps(replay.to_dict(), sort_keys=True) == before_input
+
+
+@pytest.mark.parametrize("location,key,value", [
+    pytest.param("fee", "amount", "3", id="amount"),
+    pytest.param("fee", "source", "another.receipt", id="source"),
+    pytest.param("deal", "price", 4.93, id="price"),
+    pytest.param("fee", "provider_observed_at_ms", 1_770_000_000_101, id="provider-time"),
+    pytest.param("fee", "provider_batch_id", "another-batch", id="provider-batch"),
+    pytest.param("fee", "fee_details_sha256", "b" * 64, id="provider-details"),
+    pytest.param("raw", "note", "different evidence", id="other-raw-evidence"),
+    pytest.param("fee", "reason", None, id="explicit-null-reason"),
+    pytest.param("fee", "frozen_at_ms", None, id="explicit-null-freeze"),
+    pytest.param("fee", "amount", "bad", id="malformed-amount"),
+    pytest.param("raw", "fee_amount", "3", id="conflicting-candidate"),
+])
+def test_public_legacy_actual_fee_replay_rejects_changed_evidence(
+    tmp_path: Path, location: str, key: str, value: Any,
+) -> None:
+    db_path = tmp_path / "ledger.sqlite3"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    deal = _actual_fee_replay_deal()
+    first = record_normalized_trade_event(repo, deal)
+    assert first.created is True
+    before = _all_ledger_tables(db_path)
+    if location == "deal":
+        changed = replace(deal, **{key: value})
+    else:
+        raw = json.loads(json.dumps(deal.raw_payload))
+        if location == "fee":
+            raw["fee_provenance"][key] = value
+        else:
+            raw[key] = value
+        changed = replace(deal, raw_payload=raw)
+    before_input = json.dumps(changed.to_dict(), sort_keys=True)
+
+    with pytest.raises(ValueError, match="trade event fee evidence conflict"):
+        record_normalized_trade_event(repo, changed)
+
+    assert _all_ledger_tables(db_path) == before
+    assert json.dumps(changed.to_dict(), sort_keys=True) == before_input
+    replay = record_normalized_trade_event(repo, deal)
+    assert replay.created is False and replay.event_id == first.event_id
+    assert _all_ledger_tables(db_path)["trade_events"] == before["trade_events"]
+
+
+@pytest.mark.parametrize("fee_fields,basis", [({}, "estimated"), ({"fee_amount": "2.5"}, "actual")])
+def test_public_legacy_fee_controls_replay(tmp_path: Path, fee_fields: dict[str, Any], basis: str) -> None:
+    db_path = tmp_path / "ledger.sqlite3"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    deal = _deal(trade_time_ms=1_770_000_000_000, raw_payload={"deal_id": "deal-open-1", **fee_fields})
+    first = record_normalized_trade_event(repo, deal)
+    assert first.created is True
+    columns, rows = _all_ledger_tables(db_path)["trade_events"]
+    assert len(rows) == 1
+    stored = json.loads(rows[0][columns.index("event_json")])
+    assert stored["raw_payload"]["fee_provenance"]["basis"] == basis
+    assert stored["raw_payload"]["cash_conversions"]
+    fields = [row["fields"] for row in repo.list_position_lots()]
+
+    replay = record_normalized_trade_event(repo, deal)
+
+    assert replay.created is False and replay.event_id == first.event_id
+    assert _all_ledger_tables(db_path)["trade_events"] == (columns, rows)
+    assert [row["fields"] for row in repo.list_position_lots()] == fields
+
+
+def test_public_standard_execution_actual_fee_replay_keeps_economic_guard(tmp_path: Path) -> None:
+    db_path = tmp_path / "ledger.sqlite3"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    payload = {
+        "schema_version": "trade_execution.v1",
+        "status": "OK",
+        "broker_account_ref": {
+            "broker_id": "futu", "external_account_id": "123", "environment": "REAL",
+            "broker_account_id": "futu:REAL:123", "account_label": "lx",
+        },
+        "instrument_ref": {
+            "asset_type": "option", "market": "US", "symbol": "NVDA", "currency": "USD",
+            "option_type": "put", "strike": "100", "expiration_ymd": "2026-09-18", "multiplier": "100",
+        },
+        "external_id_namespace": "futu.deal", "external_execution_id": "standard-fee-fill",
+        "external_order_namespace": "futu.order", "external_order_id": "standard-fee-order",
+        "side": "sell", "position_effect": "open", "quantity": "1", "price": "2.50", "currency": "USD",
+        "occurred_at_utc": "2026-09-07T02:30:00Z",
+        "fee_provenance": {"basis": "actual", "amount": "2.5", "source": "opend.order_fee_query"},
+    }
+    deal = normalize_trade_deal(payload, allow_opend_refresh=False)
+    assert deal.execution_input and deal.execution_input["errors"] == []
+    first = record_normalized_trade_event(repo, deal)
+    assert first.created is True
+    columns, rows = _all_ledger_tables(db_path)["trade_events"]
+    assert len(rows) == 1
+    stored = json.loads(rows[0][columns.index("event_json")])
+    assert stored["raw_payload"]["execution_id"]
+    assert stored["raw_payload"]["fee_provenance"]["basis"] == "actual"
+    fields = [row["fields"] for row in repo.list_position_lots()]
+
+    replay = record_normalized_trade_event(repo, deal)
+
+    assert replay.created is False and replay.event_id == first.event_id
+    assert _all_ledger_tables(db_path)["trade_events"] == (columns, rows)
+    assert [row["fields"] for row in repo.list_position_lots()] == fields
+    changed = normalize_trade_deal({**payload, "price": "2.51"}, allow_opend_refresh=False)
+    assert changed.execution_input["errors"] == []
+    before = _all_ledger_tables(db_path)
+    with pytest.raises(ValueError, match="trade_execution_economic_conflict"):
+        record_normalized_trade_event(repo, changed)
+    assert _all_ledger_tables(db_path) == before
 
 
 def test_writer_marks_conflicting_trusted_actual_candidates_missing_without_blocking_intake(

@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -57,12 +58,13 @@ def _write_upgrade_release_skeleton(path: Path, version: str) -> None:
     (path / "constraints.txt").write_text("-c constraints/runtime.txt\n", encoding="utf-8")
     (path / "requirements" / "runtime.txt").write_text("", encoding="utf-8")
     (path / "constraints" / "runtime.txt").write_text("", encoding="utf-8")
-    (path / "agent-runtime").mkdir(exist_ok=True)
-    (path / "agent-runtime" / "package-lock.json").write_text('{"lockfileVersion":3}\n', encoding="utf-8")
+    bot = path / "src/application/bot"
+    bot.mkdir(parents=True, exist_ok=True)
+    for package in (path / "src", path / "src/application", bot):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    (bot / "host.py").write_text("# Isolated Python Bot host fixture\n", encoding="utf-8")
+    (bot / "runtime.py").write_text("# Isolated Python Bot runtime fixture\n", encoding="utf-8")
     (path / "scripts").mkdir(exist_ok=True)
-    smoke = path / "scripts" / "pi_runtime_smoke.sh"
-    smoke.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-    smoke.chmod(0o755)
 
 
 def _write_systemd_units_from_bundle(bundle: dict, systemd_root: Path, *, skip: set[str] | None = None) -> None:
@@ -91,9 +93,6 @@ def _create_fake_venv_python_at(venv_dir: Path) -> None:
 
 
 def _fake_git_cache_materialize(command: list[str], *, version: str = "1.0.1") -> subprocess.CompletedProcess | None:
-    pi_runtime = _fake_pi_runtime_prepare(command)
-    if pi_runtime is not None:
-        return pi_runtime
     if command[:3] == ["git", "clone", "--mirror"]:
         Path(command[-1]).mkdir(parents=True, exist_ok=True)
         return subprocess.CompletedProcess(command, 0, stdout="mirrored\n", stderr="")
@@ -118,31 +117,15 @@ def _fake_git_cache_materialize(command: list[str], *, version: str = "1.0.1") -
     return None
 
 
-def _fake_pi_runtime_prepare(command: list[str]) -> subprocess.CompletedProcess | None:
-    if command == ["node", "--version"]:
-        return subprocess.CompletedProcess(command, 0, stdout="v22.19.0\n", stderr="")
-    if command == ["npm", "--version"]:
-        return subprocess.CompletedProcess(command, 0, stdout="10.8.2\n", stderr="")
-    if command[:2] == ["npm", "ci"] or command[:2] == ["bash", "scripts/pi_runtime_smoke.sh"]:
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
-    return None
 
 
-def _stub_pi_storage_readiness(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    import src.application.service_upgrade as service_upgrade_module
-
-    monkeypatch.setattr(
-        service_upgrade_module,
-        "_pi_storage_readiness",
-        lambda **_kwargs: {"ok": True, "stores": []},
-    )
 
 
 def _fake_release_target_query(
     command: list[str],
     *,
     tags: tuple[str, ...] = ("1.0.0", "1.0.1"),
-    remote_url: str = "https://example.invalid/repo.git",
+    remote_url: str = "https://github.com/example/options-monitor.git",
 ) -> subprocess.CompletedProcess | None:
     if command[:3] == ["git", "config", "--get"]:
         return subprocess.CompletedProcess(command, 0, stdout=f"{remote_url}\n", stderr="")
@@ -163,6 +146,43 @@ def _fake_release_target_query(
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
     return None
 
+
+
+def _mock_published_releases(monkeypatch, *, tags=("v1.0.0", "v1.0.1", "v2.0.0"),
+                             repository="example/options-monitor"):
+    """Opt-in HTTP fixtures: exact known URLs, no unplanned request or live HTTP."""
+    import copy
+    import src.application.release_target as release_target
+
+    base = f"https://api.github.com/repos/{repository}"
+    responses = {}
+    calls = []
+    for release_id, tag in enumerate(tags, start=1):
+        responses[f"{base}/releases/tags/{tag}"] = {
+            "id": release_id, "tag_name": tag, "draft": False, "published_at": "2026-10-25T00:00:00Z",
+        }
+        responses[f"{base}/releases/{release_id}/assets?per_page=100&page=1"] = [
+            {"name": name, "state": "uploaded", "size": 1}
+            for name in ("VERSION", "om-agent-spec.json", f"options-monitor-{tag}.tar.gz")
+        ]
+
+    def get(url, *, timeout):
+        calls.append((url, timeout))
+        if url not in responses:
+            raise AssertionError(f"unplanned GitHub request: {url}")
+        value = responses[url]
+        if isinstance(value, Exception):
+            raise value
+        return copy.deepcopy(value)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("live HTTP transport is forbidden")
+
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(release_target, "build_opener", unexpected)
+    monkeypatch.setattr(release_target, "_github_get_json", get)
+    return responses, calls
 
 def _install_complete_systemd_bundle(bundle: dict, systemd_root: Path) -> None:
     systemd_root.mkdir(parents=True, exist_ok=True)
@@ -449,6 +469,8 @@ def _fake_upgrade_release_runner(
     may return ``None`` to fall back to the plain success result.
     """
 
+    query_runner = _fake_systemd_query_runner()
+
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         command = list(command)
         if record is not None:
@@ -473,7 +495,7 @@ def _fake_upgrade_release_runner(
             result = tail(command)
             if result is not None:
                 return result
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+        return query_runner(command, **kwargs)
 
     return _run_cmd
 
@@ -550,6 +572,132 @@ def _drift_roots(tmp_path: Path) -> tuple[Path, Path, Path]:
     repo.mkdir()
     runtime.mkdir()
     return repo, runtime, systemd_root
+
+
+def _synthetic_drift_context(monkeypatch, tmp_path: Path, *, target="systemd", skip=None):
+    """Build inert installed definitions; no generated command is executed."""
+    from src.application import service_deploy as deploy, service_drift as drift
+    from src.interfaces.cli import main as cli
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    repo, runtime, units = _drift_roots(tmp_path)
+    env = runtime / "empty.env"
+    config = runtime / "config.us.json"
+    data = runtime / "portfolio.runtime.json"
+    env.write_text("", encoding="utf-8")
+    data.write_text("{}", encoding="utf-8")
+    config.write_text(json.dumps({
+        "accounts": ["fixture"], "portfolio": {"data_config": str(data)},
+        "notifications": {}, "trade_intake": {"enabled": False},
+    }), encoding="utf-8")
+    for name, path in {
+        "OM_ENV_FILE": env, "OM_RUNTIME_ROOT": runtime,
+        "OM_SYSTEMD_UNIT_ROOT": units, "OM_DATA_CONFIG": data,
+    }.items():
+        monkeypatch.setenv(name, str(path))
+    monkeypatch.setattr(cli, "repo_base", lambda: repo)
+    for name, relative in {
+        "DEFAULT_FEISHU_AGENT_CREDENTIAL_HELPER": "libexec/legacy-helper",
+        "DEFAULT_FEISHU_AGENT_CREDENTIAL_STORE": "credstore/agent",
+        "DEFAULT_FEISHU_HOLDINGS_CREDENTIAL_STORE": "credstore/holdings",
+        "DEFAULT_FEISHU_AGENT_CREDENTIAL_ENV_FILE": "run/credential.env",
+        "DEFAULT_SECRET_CREDENTIAL_HELPER": "libexec/secret-helper",
+        "DEFAULT_SECRET_CREDENTIAL_STORE_ROOT": "credstore/encrypted",
+    }.items():
+        for module in (deploy, drift):
+            monkeypatch.setattr(module, name, tmp_path / relative)
+    monkeypatch.setattr(drift, "LEGACY_FEISHU_AGENT_CREDENTIAL_UNIT_PATH", tmp_path / "legacy.service")
+    forbidden = []
+
+    def fail(name):
+        def unexpected(*_args, **_kwargs):
+            forbidden.append(name)
+            raise AssertionError(f"unexpected synthetic drift boundary: {name}")
+        return unexpected
+
+    monkeypatch.setattr(drift, "subprocess", SimpleNamespace(
+        run=fail("subprocess.run"), TimeoutExpired=subprocess.TimeoutExpired,
+    ))
+    for name in ("_write_text_with_sudo_fallback", "_delete_unit_with_sudo_fallback", "credential_spec"):
+        monkeypatch.setattr(drift, name, fail(name))
+    for name in (
+        "default_systemd_deploy_user", "_opend_service_plans_from_authoring_config",
+        "_legacy_opend_service_plan", "_systemd_secret_bindings",
+    ):
+        monkeypatch.setattr(deploy, name, fail(name))
+    bundle = _render_bundle(
+        repo, runtime, target=target, accounts=["fixture"], markets=["us"],
+        config_paths={"us": config}, env_file=env, deploy_home=home,
+        use_default_deploy_user=False, include_auto_upgrade=False, include_opend=False,
+        include_feishu_ws=False, include_wechat_clawbot=False, include_quality_monitoring=False,
+        include_feishu_agent_credential=False, include_secret_credentials=False,
+    )
+    profile = drift._bundle_profile(bundle)
+    # Presence blocks legacy host inference; null matches the renderer's absent value.
+    profile["feishu_agent_credential"] = None
+    profile_path = runtime / "service.profile.json"
+    profile_path.write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+    ctx = {"systemd_unit_root": units}
+    install_files = [item for item in bundle["files"] if item["kind"] in {
+        "systemd_service", "systemd_timer", "launchd_plist",
+    }]
+    resolved = [(item, drift._install_path(item, provider=target, ctx=ctx)) for item in install_files]
+    for _item, path in resolved:
+        assert path.is_relative_to(home if target == "launchd" else units)
+    if target == "systemd":
+        _write_systemd_units_from_bundle(bundle, units, skip=skip)
+    else:
+        for item, path in resolved:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(item["content"], encoding="utf-8")
+
+    def inventory():
+        return {
+            path.relative_to(tmp_path).as_posix(): None if path.is_dir() else path.read_bytes()
+            for path in tmp_path.rglob("*")
+        }
+
+    assert forbidden == []
+    return {
+        "repo": repo, "runtime": runtime, "units": units, "home": home,
+        "profile_path": profile_path, "profile": profile, "bundle": bundle,
+        "forbidden": forbidden, "fail": fail, "inventory": inventory,
+        "timers": sorted(Path(item["install_path"]).name for item in install_files if item["kind"] == "systemd_timer"),
+    }
+
+
+def _guard_original_credential_migration(monkeypatch, fixture):
+    """Record the original probes and block every later migration side effect."""
+    from src.application import service_drift as owner
+
+    real_render = owner._expected_bundle_from_profile
+    real_drift = owner.service_drift
+    original_calls = []
+    render_calls = []
+
+    def original_render(profile, **kwargs):
+        if profile != fixture["profile"]:
+            fixture["fail"]("target profile render")()
+        render_calls.append(profile)
+        return real_render(profile, **kwargs)
+
+    def original_drift(**kwargs):
+        if kwargs.get("confirm") is not False or kwargs.get("profile") != fixture["profile"]:
+            fixture["fail"]("target or confirmed migration reconcile")()
+        original_calls.append(kwargs)
+        return real_drift(**kwargs)
+
+    monkeypatch.setattr(owner, "_expected_bundle_from_profile", original_render)
+    monkeypatch.setattr(owner, "service_drift", original_drift)
+    for name in (
+        "_preflight_encrypted_credentials", "_backup_service_profile", "_active_credential_consumers",
+        "_rollback_secret_credential_migration", "_restart_and_verify_credential_consumers",
+    ):
+        monkeypatch.setattr(owner, name, fixture["fail"](name))
+    return original_calls, render_calls
 
 
 def _drift_at(

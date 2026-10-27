@@ -85,6 +85,7 @@ markets:
     overrides:
       NVDA:
         sell_put:
+          max_abs_delta: 0.40
           dte: [20, 45]
           strike: [80, 120]
 
@@ -111,6 +112,12 @@ portfolio_management:
 - YAML 使用空格缩进，tab 会被拒绝。
 
 系统默认值在 `src/application/config_defaults.py::DEFAULT_CONFIG`。不需要把所有默认字段复制进 `config.yaml`。
+
+### 调度运行点
+
+`markets.<market>.schedule.run_points.start_plus_min` 和 `end_minus_min` 分别指定窗口开始后、结束前的分钟偏移。
+非空值必须是调度器可直接读取的非负整数表示，例如 `10`、`10.0` 或 `"10"`；构建保留原值和类型。
+字符串 `"10.0"`、`"1e1"` 不能直接读取为整数，`om config validate` 和 `om config build` 会报告具体字段的配置错误，构建不会覆盖已有运行快照。
 
 ## 维护监控标的
 
@@ -168,6 +175,10 @@ PM 不可用时仍可预览开启目标，但 apply 会拒绝；关闭无需 PM 
 Symbol pipeline 不提供 worker 数配置。它按输入顺序串行处理 Symbol，使受支持的
 Linux/macOS `scan-pipeline` 主线程中的 `runtime.symbol_timeout_sec` 能真正中断超时处理。
 整次 Tick 的 wall-clock 最终边界仍由 `tick-cron --timeout` 负责。
+
+需要获取 RV 时，`runtime.opend_rate_limits.history_kline` 的 `max_calls`、
+`window_sec`、`max_wait_sec` 在普通扫描和 scheduled 预取中逐页约束历史 K 线请求。
+该共享端点预算独立于 Symbol 总超时；省略配置时保持既有默认值。
 
 不要设置 `runtime.pipeline_symbol_max_workers` 或 `runtime.watchlist_max_workers`；
 这两个键已退役，配置验证会要求删除。数据预取并发与账户并发是独立合同，不受影响。
@@ -231,12 +242,15 @@ markets:
           strike: [80, 120]
         covered_call:
           enabled: true
+          max_abs_delta: 0.35
           dte: [20, 60]
           strike: [125, 160]
         combo_yield: true
 ```
 
 YAML authoring 使用 `covered_call`；生成的 runtime、CSV 或 trace 可能使用内部 key `sell_call`。`combo_yield` 是当前开仓策略名，旧 `yield_enhancement` 只属于明确的兼容读取。
+
+普通 CSP/CC 的 `max_abs_delta` 可分别覆盖，省略默认均为 `0.40`，显式 `null` 关闭该方向的 delta 门槛。数字须有限且在 `[0,1]` 内，`0` 只允许可验证的真实零；布尔、字符串和 `35` 均非法。旧配置省略字段的行为从无上限变为默认 0.40。其他门槛与排序保持不变。来源和历史兼容限制见[候选策略](docs/candidate_strategy.md#35-普通-cspcc-delta-上限)。
 
 不要在静态文档里猜某个字段是否仍有效。检查来源和值：
 

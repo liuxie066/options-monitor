@@ -116,11 +116,27 @@ def _resolve_notification_run(
     tz: timezone,
     conversation_id: str | None = None,
 ) -> NotificationRunResolution:
-    result = iter_notification_perception_events(
-        repo_root=base,
-        event_kind=_DELIVERED_EVENT_KIND,
-        conversation_id=conversation_id,
-    )
+    from src.application.agent_tools.project import _QUERY_CONTEXT
+
+    deadline, cancelled = _QUERY_CONTEXT.get()
+    try:
+        result = iter_notification_perception_events(
+            repo_root=base,
+            event_kind=_DELIVERED_EVENT_KIND,
+            conversation_id=conversation_id,
+            event_filter=lambda event: _event_local_date(event, tz) == notification_date,
+            deadline_monotonic=deadline,
+            cancelled=cancelled,
+        )
+    except ProjectReaderError as exc:
+        if exc.code == "cancelled":
+            raise AgentToolError(code="CANCELLED", message=exc.code, hint="查询已取消。") from None
+        if exc.code == "time_deadline":
+            raise AgentToolError(code="BUDGET_EXHAUSTED", message=exc.code,
+                hint="本次查询时间已到；可缩小范围后重试。") from None
+        return {"reason": "notification_audit_incomplete", "total_count": 0, "truncated": False}
+    except (OSError, ValueError):
+        return {"reason": "notification_audit_incomplete", "total_count": 0, "truncated": False}
     resolution: NotificationRunResolution = {
         "truncated": bool(result.get("truncated")),
         "total_count": int(result.get("total_count") or 0),
@@ -157,6 +173,11 @@ def _resolve_notification_run(
         resolution["market"] = str(refs[0]["market"]).upper()
         resolution["matched_event_created_at_utc"] = event.get("created_at_utc")
         return resolution
+    first_segment_at = result.get("first_segment_at_utc")
+    if first_segment_at:
+        start = datetime.combine(notification_date, datetime.min.time(), tzinfo=tz)
+        if start < datetime.fromisoformat(first_segment_at):
+            resolution["reason"] = "notification_audit_incomplete"
     return resolution
 
 

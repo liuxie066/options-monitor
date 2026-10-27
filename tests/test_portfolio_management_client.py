@@ -121,6 +121,43 @@ def test_non_futu_client_posts_scope_and_accepts_consistent_inventory() -> None:
     assert result["scope"]["holding_counts"]["lx"]["included"] == 1
 
 
+@pytest.mark.parametrize("status", ["unavailable", "partial"])
+def test_non_futu_inventory_failure_preserves_source_warning(status) -> None:
+    receipt = _valuation_receipt(["sy"])
+    receipt.update(status=status, warnings=["sy: holdings read timed out"])
+    receipt["scope"].update(holdings_scope="non_futu", broker_inventory={}, holding_counts={})
+    receipt["account_status"][0].update(status="unavailable", warnings=receipt["warnings"])
+    client = PortfolioManagementClient(urlopen_fn=lambda *_args, **_kwargs: _Response(receipt))
+
+    with pytest.raises(PortfolioManagementProtocolError) as raised:
+        client.read_valuation_evidence(
+            accounts=["sy"], supplemental_codes=[], price_timeout=10, holdings_scope="non_futu"
+        )
+
+    assert "PM non_futu broker inventory account mismatch" in str(raised.value)
+    assert "sy: holdings read timed out" in str(raised.value)
+
+
+@pytest.mark.parametrize("mutation,error", [
+    (lambda item: item["scope"].update(accounts=["sy"]), "account scope mismatch"),
+    (lambda item: item["account_status"][0].update(account="sy"), "account status scope mismatch"),
+    (lambda item: item.update(warnings=[{"error": "invalid warning"}]), "warnings must be strings"),
+])
+def test_non_futu_rejects_invalid_warning_envelope_before_inventory(mutation, error) -> None:
+    receipt = _non_futu_receipt()
+    receipt["scope"]["broker_inventory"] = {}
+    receipt["warnings"] = ["unverified source warning"]
+    mutation(receipt)
+    client = PortfolioManagementClient(urlopen_fn=lambda *_args, **_kwargs: _Response(receipt))
+
+    with pytest.raises(PortfolioManagementProtocolError, match=error) as raised:
+        client.read_valuation_evidence(
+            accounts=["lx"], supplemental_codes=[], price_timeout=10, holdings_scope="non_futu"
+        )
+
+    assert "unverified source warning" not in str(raised.value)
+
+
 def _accepted_receipt(**overrides) -> dict:
     return {
         "success": True,
@@ -267,6 +304,54 @@ def test_versioned_success_status_rejects_public_error_envelope() -> None:
         client.read_view("holdings", timeout=2)
 
 
+@pytest.mark.parametrize(
+    "success_fields",
+    [{}, {"success": None}, {"success": False}, {"success": "true"},
+     {"success": "false"}, {"success": 0}, {"success": 1},
+     {"success": []}, {"success": {}}],
+    ids=["missing", "null", "false", "true-string", "false-string",
+         "zero", "one", "list", "object"],
+)
+@pytest.mark.parametrize(
+    "endpoint",
+    ["accounts", "overview", "holdings", "cash", "nav", "distribution",
+     "full_report", "capital_facts", "valuation", "refresh"],
+)
+def test_versioned_success_requires_boolean_true(endpoint, success_fields) -> None:
+    receipt = (
+        _valuation_receipt() if endpoint == "valuation"
+        else _accepted_receipt() if endpoint == "refresh"
+        else {"accounts": ["sample"], "count": 1}
+    )
+    receipt.pop("success", None)
+    receipt.update(success_fields)
+    calls = []
+
+    def respond(request, *, timeout):
+        calls.append(request)
+        return _Response(receipt, status=202 if endpoint == "refresh" else 200)
+
+    client = PortfolioManagementClient(urlopen_fn=respond)
+    with pytest.raises(PortfolioManagementProtocolError, match="success=true"):
+        if endpoint == "capital_facts":
+            client.read_capital_facts(account="sample", period="monthly", as_of_month="2026-10")
+        elif endpoint == "valuation":
+            client.read_valuation_evidence(accounts=["lx"], supplemental_codes=[], price_timeout=10)
+        elif endpoint == "refresh":
+            client.request_holdings_refresh(account="lx", request_id="stock-refresh:abc", timeout=2)
+        else:
+            client.read_view(endpoint, timeout=2)
+    assert len(calls) == 1
+
+
+def test_health_does_not_require_v1_success_or_version_header() -> None:
+    client = PortfolioManagementClient(
+        urlopen_fn=lambda *_args, **_kwargs: _Response({"status": "ok"}, version="")
+    )
+
+    assert client.read_view("health", timeout=2) == {"status": "ok"}
+
+
 def test_refresh_request_is_accepted_only_and_not_retried() -> None:
     seen = {}
 
@@ -282,7 +367,7 @@ def test_refresh_request_is_accepted_only_and_not_retried() -> None:
     )
     assert result["account"] == "lx"
     assert result["status"] == "accepted"
-    assert seen["url"].endswith("/api/v1/futu/holdings/refresh-requests")
+    assert seen["url"].endswith("/api/v1/futu/holdings/durable-refresh-requests")
     assert seen["body"] == {
         "account": "lx",
         "request_id": "stock-refresh:abc",

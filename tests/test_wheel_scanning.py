@@ -130,6 +130,192 @@ def _call_row(**overrides: object) -> dict:
     }
 
 
+def _eligibility_model(direction: str, **overrides: object) -> dict:
+    model = _read_model()
+    branch = model["batches"][0]
+    branch.update(
+        direction=direction, wheel_branch_id="stock-1", remaining_contracts=1,
+        principal_anchor=10_010, realized_put_net_pnl_in_current_stage=0, currency="USD",
+    )
+    branch.update(overrides)
+    model["wheel_branches"] = [branch]
+    return model
+
+
+def _scan_eligibility_model(model: dict, direction: str) -> dict:
+    row = phase2_opening_row({
+        **_call_row(), "option_type": direction,
+        "strike": 99 if direction == "put" else 110,
+        "delta": -0.3 if direction == "put" else 0.3,
+    })
+    args = (model, _policy(), {"frames": {"NVDA": pd.DataFrame([row])}})
+    fees = {"exchange_rate_converter": _converter()}
+    decision_time_ms = int(AS_OF.timestamp() * 1000)
+    if direction == "put":
+        return run_wheel_put_scan(*args, fees, decision_time_ms=decision_time_ms)
+    return run_wheel_call_scan(*args, {}, fees, decision_time_ms=decision_time_ms)
+
+
+@pytest.mark.parametrize("direction", ["call", "put"])
+@pytest.mark.parametrize("phase", ["ready", "data_unavailable", "option_open", "intent_pending"])
+@pytest.mark.parametrize("reasons", [
+    ["multiplier_unproven"],
+    ["assignment_cash_facts_unavailable"],
+    ["multiplier_unproven", "assignment_cash_facts_unavailable"],
+])
+def test_canonical_branch_reasons_block_scan_before_candidate_calculation(
+    direction, phase, reasons, monkeypatch,
+):
+    from src.application.wheel import scanning
+
+    model = _eligibility_model(direction, phase=phase, reason_codes=reasons)
+    calls = []
+    original = scanning._scan_symbols
+
+    def record_symbols(**kwargs):
+        calls.append(kwargs["symbols"])
+        return original(**kwargs)
+
+    monkeypatch.setattr(scanning, "_scan_symbols", record_symbols)
+    result = _scan_eligibility_model(model, direction)
+
+    assert calls == [[]]
+    assert result["capacity_claims"] == []
+    assert not result["raw_candidates"].get("stock-1")
+    scope = result["scope_results"][0]
+    assert (scope["status"], scope["reason_code"], scope["candidate_count"]) == (
+        "unavailable", sorted(reasons)[0], 0,
+    )
+    assert scope["wheel_branch_id"] == "stock-1"
+    assert scope["account"] == "lx" and scope["direction"] == direction
+    assert scope["batch_generation_hash"] == "a" * 64
+    assert model["wheel_branches"][0]["reason_codes"] == reasons
+
+
+@pytest.mark.parametrize("direction", ["call", "put"])
+@pytest.mark.parametrize("phase", ["ready", "data_unavailable", "option_open", "intent_pending"])
+@pytest.mark.parametrize("reason_fields", [{}, {"reason_codes": None}, {"reason_codes": []}])
+def test_absent_branch_reasons_preserve_legacy_remaining_capacity(direction, phase, reason_fields):
+    model = _eligibility_model(direction, phase=phase, **reason_fields)
+    result = _scan_eligibility_model(model, direction)
+    assert len(result["capacity_claims"]) == 1
+    assert result["capacity_claims"][0]["requested_contracts"] == 1
+    assert len(result["raw_candidates"]["stock-1"]) == 1
+    assert result["scope_results"][0]["reason_code"] == "candidates_found"
+
+
+@pytest.mark.parametrize("direction", ["call", "put"])
+@pytest.mark.parametrize(("overrides", "status", "reason"), [
+    ({"lifecycle_status": "pending_decision"}, "not_applicable", "wheel_pending_decision"),
+    ({"lifecycle_status": "ended"}, None, None),
+    ({"integrity_status": "conflict"}, "failed", "multiplier_unproven"),
+    ({"monitoring_gate": "disabled"}, "not_applicable", "wheel_disabled"),
+    ({"monitoring_gate": "config_mismatch"}, "not_applicable", "wheel_config_mismatch"),
+    ({"active_option_committed_shares": 100}, "not_applicable", "wheel_capacity_fully_committed_or_reserved"),
+])
+def test_branch_reasons_preserve_existing_gate_precedence(direction, overrides, status, reason):
+    model = _eligibility_model(direction, reason_codes=["multiplier_unproven"], **overrides)
+    result = _scan_eligibility_model(model, direction)
+    assert result["capacity_claims"] == []
+    if status is None:
+        assert result["scope_results"] == []
+    else:
+        scope = result["scope_results"][0]
+        assert (scope["status"], scope["reason_code"]) == (status, reason)
+
+
+@pytest.mark.parametrize("direction", ["call", "put"])
+def test_blocked_branch_keeps_healthy_same_symbol_sibling_eligible(direction):
+    model = _eligibility_model(direction, reason_codes=["multiplier_unproven"])
+    model["wheel_branches"].append({
+        **model["wheel_branches"][0], "wheel_branch_id": "healthy", "stock_lot_id": "healthy",
+        "reason_codes": [],
+    })
+    stock = model["assigned_stock_projection"]["_all_assigned_stock_lots"][0]
+    model["assigned_stock_projection"]["_all_assigned_stock_lots"].append({
+        **stock, "stock_lot_id": "healthy",
+    })
+    result = _scan_eligibility_model(model, direction)
+    assert len(result["capacity_claims"]) == 1
+    assert result["capacity_claims"][0]["wheel_branch_id"] == "healthy"
+    assert not result["raw_candidates"].get("stock-1")
+    assert len(result["raw_candidates"]["healthy"]) == 1
+
+
+@pytest.mark.parametrize(("stock_currency", "candidate_currency", "options", "granted", "lifecycle_pnl"), [
+    ("USD", "USD", {}, 1, 1529.6403),
+    ("HKD", "HKD", {}, 1, 1483.303),
+    (" usd ", "uSd", {}, 1, 1529.6403),
+    ("hkd ", " hKd", {}, 1, 1483.303),
+    ("USD", "US$", {}, 1, 1529.6403),
+    ("HKD", "HK$", {}, 1, 1483.303),
+    ("USD", "HKD", {}, 0, None),
+    ("HKD", "USD", {}, 0, None),
+    (None, "USD", {}, 0, None),
+    ("USD", None, {}, 0, None),
+    (None, "USD", {"custom_fee": True}, 0, None),
+    ("USD", "USD", {"branch_currency": "HKD"}, 1, 1529.6403),
+    ("HKD", "USD", {"branch_currency": "USD"}, 0, None),
+    ("USD", "USD", {"shares": 200}, 2, 2726.2706),
+    ("USD", "USD", {"shares": 200, "committed": 100}, 1, 1529.6403),
+    ("USD", "USD", {"sibling_currency": "HKD"}, 1, 1529.6403),
+    ("USD", "USD", {"reasons": ["multiplier_unproven"]}, 0, None),
+])
+def test_wheel_call_currency_guard_reaches_final_capacity(
+    stock_currency, candidate_currency, options, granted, lifecycle_pnl,
+):
+    model = _read_model()
+    branch = model["batches"][0]
+    stock = model["assigned_stock_projection"]["_all_assigned_stock_lots"][0]
+    symbol = "0700.HK" if str(stock_currency or "").strip().upper() == "HKD" else "NVDA"
+    shares = options.get("shares", 100)
+    branch.update(symbol=symbol, wheel_branch_id="stock-1", shares_remaining=shares,
+        currency=options.get("branch_currency", stock_currency), reason_codes=options.get("reasons", []),
+        active_option_committed_shares=options.get("committed", 0))
+    if options.get("committed"):
+        branch["phase"] = "option_open"
+    stock.update(symbol=symbol, currency=stock_currency, remaining_stock_cost_basis=10_010 * shares / 100)
+    if options.get("sibling_currency"):
+        model["batches"].append({**branch, "stock_lot_id": "sibling", "wheel_branch_id": "sibling"})
+        model["assigned_stock_projection"]["_all_assigned_stock_lots"].append({
+            **stock, "stock_lot_id": "sibling", "currency": options["sibling_currency"],
+        })
+    row = phase2_opening_row(_call_row(
+        symbol=symbol, currency=candidate_currency, contract_symbol=symbol + "-CALL-110",
+    ))
+    fees = {"exchange_rate_converter": _converter()}
+    if options.get("custom_fee"):
+        fees["stock_exit_fee_fact_fn"] = lambda *_: {"basis": "estimated", "amount": 15}
+    before = json.dumps(model, sort_keys=True)
+    scan = run_wheel_call_scan(
+        model, _policy(), {"frames": {symbol: pd.DataFrame([row])}}, {}, fees,
+        decision_time_ms=int(AS_OF.timestamp() * 1000),
+    )
+    final = finalize_wheel_capacity(
+        account="lx", wheel_read_model=model, wheel_scan=scan, opening_call_candidates=[],
+        coverage_facts=[{"account": "lx", "symbol": symbol, "status": "available",
+            "shares_eligible": 1000, "shares_locked": 0, "shares_reserved": 0, "capacity_identity_hash": "c" * 64}],
+    )
+    assert json.dumps(model, sort_keys=True) == before
+    finals = [b["final_candidate"] for b in final["batches"] if b["final_candidate"]]
+    assert len(scan["capacity_claims"]) == len(finals) == (1 if granted else 0)
+    if granted:
+        assert scan["capacity_claims"][0]["wheel_branch_id"] == "stock-1"
+        assert scan["capacity_claims"][0]["requested_contracts"] == granted
+        assert finals[0]["stock_lot_id"] == "stock-1"
+        assert finals[0]["granted_contracts"] == granted
+        assert finals[0]["projected_lifecycle_net_pnl_if_called"] == lifecycle_pnl
+        assert finals[0]["currency"] == str(stock_currency).strip().upper()
+    for batch in final["batches"]:
+        if not granted or batch["wheel_branch_id"] == "sibling":
+            assert batch["candidate_status"] == "unavailable"
+            assert batch["raw_candidates"] == [] and batch["granted_contracts"] == 0
+            assert batch["final_candidate"] is None
+    if not granted:
+        assert all(not rows for rows in scan["raw_candidates"].values())
+        assert all(scope["status"] == "unavailable" for scope in scan["scope_results"])
+
+
 def test_wheel_scan_reuses_frozen_call_universe_and_builds_one_claim(tmp_path: Path) -> None:
     row = phase2_opening_row(_call_row())
     result = run_wheel_call_scan(
@@ -529,6 +715,45 @@ def test_wheel_scan_preserves_partial_data_when_another_candidate_is_valid() -> 
     assert len(result["raw_candidates"]["stock-1"]) == 1
     assert result["scope_results"][0]["status"] == "completed"
     assert result["scope_results"][0]["reason_code"] == "partial_data"
+
+
+@pytest.mark.parametrize("direction", ["put", "call"])
+@pytest.mark.parametrize("ages,status,reason,count", [
+    ([300], "completed", "candidates_found", 1),
+    ([301], "unavailable", "data_unavailable", 0),
+    ([300, 301], "completed", "partial_data", 1),
+    ([None], "unavailable", "data_unavailable", 0),
+])
+def test_wheel_rechecks_underlier_source_age_at_decision(direction, ages, status, reason, count):
+    rows = [phase2_opening_row(_call_row(
+        option_type=direction, contract_symbol=f"NVDA-{direction}-{index}",
+        strike=99 if direction == "put" else 110, delta=-0.3 if direction == "put" else 0.3,
+        snapshot_received_at_utc=AS_OF.isoformat(), spot_age_seconds=0,
+        spot_observed_at_utc=None if age is None else (AS_OF - timedelta(seconds=age)).isoformat(),
+    )) for index, age in enumerate(ages)]
+    model = _read_model()
+    fee_context = {"exchange_rate_converter": _converter(),
+                   "stock_assignment_fee_fact_fn": lambda *_: {"basis": "estimated", "amount": 10}}
+    if direction == "put":
+        model["wheel_branches"] = [{
+            **model["batches"][0], "direction": "put", "wheel_branch_id": "stock-1",
+            "remaining_contracts": 1, "multiplier": 100, "principal_anchor": 10_010,
+            "realized_put_net_pnl_in_current_stage": 0, "currency": "USD",
+        }]
+        result = run_wheel_put_scan(
+            model, _policy(), {"frames": {"NVDA": pd.DataFrame(rows)}}, fee_context,
+            decision_time_ms=int(AS_OF.timestamp() * 1000),
+        )
+    else:
+        result = run_wheel_call_scan(
+            model, _policy(), {"frames": {"NVDA": pd.DataFrame(rows)}}, {}, fee_context,
+            decision_time_ms=int(AS_OF.timestamp() * 1000),
+        )
+    scope = result["scope_results"][0]
+    assert (scope["status"], scope["reason_code"]) == (status, reason)
+    assert len(result["raw_candidates"]["stock-1"]) == len(result["capacity_claims"]) == count
+    for record in result["calculation_decisions"]:
+        assert record["opening_decision"]["rejects"][0]["reason"] == "evidence_unavailable"
 
 
 def test_partial_capacity_grant_recomputes_final_candidate_economics() -> None:

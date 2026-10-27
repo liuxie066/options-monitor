@@ -235,6 +235,10 @@ $HOME/.local/bin/
 升级时安装新 tag，再切换 `current` symlink。长期运行服务应使用 `current` 作为 repo root。
 用户级 wrapper 指向 `current`，所以升级后 `om` / `om-agent` 会自动跟随新的 release。
 
+在 `current` 实际切换前发生可恢复失败或收到 INT/TERM，安装器会恢复原有 wrapper，原本没有入口则移除本次新建入口；切换完成后保留新入口。恢复或清理失败会非零退出，并报告尚存备份的路径。已发布的失败 release 保留，普通重试仍拒绝已有 inactive target；确认后可沿用 `--force` 重建，活动 release 仍拒绝 `--force`。
+
+新发布路径若发现初始 `current` 的链接文本已精确等于本次目标 release 路径（包括悬空链接），或无法读取初始链接，会在事务备份和发布前拒绝，保留原链接、入口与已有备份；已安装快路径保持原行为。上述恢复不保证覆盖 SIGKILL、断电或其他安装器/操作者并发修改现场。
+
 ## Safety Contract
 
 installer 允许做：

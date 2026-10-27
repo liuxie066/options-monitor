@@ -917,8 +917,8 @@ def fetch_symbol_request(
                 chain_row=chain_record,
                 snapshot_row=srow,
                 underlier_observation=underlier_observation,
-                snapshot_requested_at_utc=snapshot_result.code_receipts.get(opt_code, (snapshot_result.requested_at_utc, snapshot_result.received_at_utc))[0],
-                snapshot_received_at_utc=snapshot_result.code_receipts.get(opt_code, (snapshot_result.requested_at_utc, snapshot_result.received_at_utc))[1],
+                snapshot_requested_at_utc=(srow or {}).get("snapshot_requested_at_utc"),
+                snapshot_received_at_utc=(srow or {}).get("snapshot_received_at_utc"),
             )
             last_price = option_observation.last_price
             bid = option_observation.bid
@@ -966,6 +966,9 @@ def fetch_symbol_request(
                 'currency': u.currency,
                 'otm_pct': None,
                 'delta': delta,
+                'delta_source': option_observation.delta_source,
+                'delta_unit': option_observation.delta_unit,
+                'delta_reason_code': option_observation.delta_reason_code,
                 'gamma': gamma,
                 'theta': theta,
                 'vega': vega,

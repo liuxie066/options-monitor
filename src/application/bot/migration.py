@@ -1,4 +1,4 @@
-"""Offline, explicit one-time migration. Never imported as an old-name alias."""
+"""Offline, explicit Host schema/config migration. Unrelated legacy artifacts stay operator-owned."""
 from __future__ import annotations
 
 import hashlib
@@ -6,7 +6,7 @@ import json
 import sqlite3
 from contextlib import closing, contextmanager
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from src.infrastructure.private_storage import (
     atomic_write_private_text, connect_private_sqlite, exclusive_private_file_lock, private_path,
@@ -50,11 +50,14 @@ def _manifest(path: Path) -> dict[str, Any] | None:
         raise ValueError("Bot migration manifest identity mismatch")
     if value.get("backup") != str(path.with_name(path.name + ".pre-bot.sqlite3")):
         raise ValueError("Bot migration backup path mismatch")
+    # Pending legacy inventories cannot be certified after Pi verification was retired.
+    if value.get("status") != "complete" and value.get("pi_databases"):
+        raise ValueError("Bot migration incomplete with legacy Pi inventory; operator recovery required")
     return value
 
 
-def assert_bot_ready(path: str | Path) -> None:
-    """Run before schema ensure; missing fresh installs are handled by the caller."""
+def assert_bot_ready(path: str | Path, *, connect: Callable[[], sqlite3.Connection] | None = None) -> None:
+    """Check before schema ensure; connect must supply a fresh, owned connection to path."""
     target = private_path(path)
     manifest = _manifest(target)
     if manifest and manifest.get("status") != "complete":
@@ -63,7 +66,9 @@ def assert_bot_ready(path: str | Path) -> None:
         if manifest:
             raise ValueError("Bot migration database is missing")
         return
-    with _read_db(target) as conn:
+    # Online checks share the writer's open mode to avoid mixed-mode SQLite locks on macOS.
+    with (closing(connect()) if connect is not None else _read_db(target)) as conn:
+        conn.execute("PRAGMA query_only=ON")
         names = _tables(conn)
         if names.intersection(LEGACY_TABLES):
             raise ValueError("Legacy Copilot data requires ./om bot migrate --dry-run")
@@ -187,18 +192,13 @@ def _check_config_inventory(current: dict[str, Any], *, create_backups: bool = F
             if _file_hash(backup) != row["backup_sha256"]:
                 raise ValueError("configuration backup verification failed")
 
-def migrate_bot(*, host_db: str | Path, config_paths: Sequence[str | Path] = (), pi_paths: Sequence[str | Path] = (), apply: bool = False, writers_stopped: bool = False) -> dict[str, Any]:
+def migrate_bot(*, host_db: str | Path, config_paths: Sequence[str | Path] = (), apply: bool = False, writers_stopped: bool = False) -> dict[str, Any]:
     path = private_path(host_db)
     configs = sorted({private_path(p) for p in config_paths}, key=str)
-    pi_dbs = sorted({private_path(p) for p in pi_paths}, key=str)
-    if path in configs or path in pi_dbs or set(configs).intersection(pi_dbs):
+    if path in configs:
         raise ValueError("migration resources must have distinct identities")
     current = _manifest(path)
     prepared = [(p, *_config(p)) for p in configs]
-    for p in pi_dbs:
-        with _read_db(p) as conn:
-            if conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
-                raise ValueError("Pi database integrity check failed")
     with _read_db(path) as conn:
         conn.execute("BEGIN")
         names = _tables(conn)
@@ -211,15 +211,9 @@ def migrate_bot(*, host_db: str | Path, config_paths: Sequence[str | Path] = (),
             raise ValueError("Host database integrity check failed")
         source_sha256 = _database_hash(conn)
         counts = {name: conn.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0] for name in legacy}
-    report = {"ok": True, "dry_run": not apply, "tables": counts, "config_count": len(configs), "pi_database_count": len(pi_dbs), "config_changes": sum(item[3] for item in prepared), "write_applied": False}
+    report = {"ok": True, "dry_run": not apply, "tables": counts, "config_count": len(configs), "config_changes": sum(item[3] for item in prepared), "write_applied": False}
     if current and current.get("status") != "complete":
         _check_config_inventory(current)
-        if current.get("pi_databases") != [str(p) for p in pi_dbs]:
-            raise ValueError("migration Pi database inventory changed")
-        for p in pi_dbs:
-            with _read_db(p) as conn:
-                if _database_hash(conn) != current.get("pi_sha256", {}).get(str(p)):
-                    raise ValueError("Pi database changed during migration")
         expected = {current.get("source_sha256"), current.get("database_after_sha256")}
         if source_sha256 not in expected:
             raise ValueError("Host database changed outside migration")
@@ -253,12 +247,8 @@ def migrate_bot(*, host_db: str | Path, config_paths: Sequence[str | Path] = (),
                 config_records.append({"path": str(p), "changed": changed, "original_sha256": original,
                     "new_sha256": hashlib.sha256(encoded.encode()).hexdigest(), "backup": str(backup_config),
                     "backup_sha256": original if changed else None})
-            pi_sha256 = {}
-            for p in pi_dbs:
-                with _read_db(p) as conn:
-                    pi_sha256[str(p)] = _database_hash(conn)
             current = {"source_sha256": source_sha256, "config_records": config_records,
-                       "pi_databases": [str(p) for p in pi_dbs], "pi_sha256": pi_sha256, "version": VERSION, "database": str(path), "database_id": uuid4().hex, "configs": identities, "status": "pending", "database_done": False, "config_done": [], "backup": str(backup), "counts": counts}
+                       "version": VERSION, "database": str(path), "database_id": uuid4().hex, "configs": identities, "status": "pending", "database_done": False, "config_done": [], "backup": str(backup), "counts": counts}
             atomic_write_private_text(_manifest_path(path), json.dumps(current, ensure_ascii=False, indent=2))
         _check_config_inventory(current, create_backups=True)
         backup = Path(current["backup"])

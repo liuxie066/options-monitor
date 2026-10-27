@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from candidate_evidence_helpers import earnings_evidence
+from candidate_evidence_helpers import delta_evidence, earnings_evidence
 from cash_evidence_helpers import cash_portfolio
 
 
@@ -49,6 +49,7 @@ def _candidate(**overrides):
         "dte": 30,
         "otm_pct": 0.10,
     }
+    row.update(delta_evidence(mode="put", observed_at="2026-05-20T15:00:00+00:00", value=-0.20))
     row.update(_earnings_evidence())
     row.update(overrides)
     return row

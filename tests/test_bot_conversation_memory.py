@@ -5,12 +5,14 @@ import sqlite3
 import threading
 import time
 from argparse import ArgumentParser, Namespace
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 
 import pytest
 
 from src.application.bot import channel_facade, tools as bot_tools
 from src.application.bot.contracts import AppResult, BotRequest, BotScope, new_id
-from tests.bot_pi_test_support import (
+from tests.bot_test_support import (
     _TEST_MODEL,
     ModelTurn,
     ToolCall,
@@ -20,7 +22,7 @@ from src.application.bot.host_store import BotHostStore
 from src.application.bot.service import prepare_contract
 from src.interfaces.cli import bot_ops
 from src.interfaces.cli.bot_ops import add_bot_commands, handle_bot_command
-from src.infrastructure.pi_agent_process import derive_pi_session_id
+from src.application.conversation_scope import derive_session_id
 
 
 def _bot_run_namespace(**overrides) -> Namespace:
@@ -62,7 +64,7 @@ def _store(tmp_path, run_id: str) -> BotHostStore:
     return store
 
 
-def test_successful_channel_answer_uses_opaque_pi_session_without_legacy_write(
+def test_successful_channel_answer_uses_opaque_host_session_without_legacy_write(
     monkeypatch, tmp_path, example_config_path
 ) -> None:
     database = tmp_path / "bot.sqlite3"
@@ -83,7 +85,7 @@ def test_successful_channel_answer_uses_opaque_pi_session_without_legacy_write(
     result = _run_channel(config_key="us", conversation_id="chat_1", host_db_path=str(database))
 
     assert result.status == "answered"
-    assert captured["session_key"] == derive_pi_session_id(
+    assert captured["session_key"] == derive_session_id(
         "feishu", "ou_1", "chat_1", "key:us"
     )
     assert BotHostStore(database).session_turns("feishu:chat_1") == ()
@@ -133,7 +135,7 @@ def test_channel_path_scope_is_canonical_and_sender_scoped(tmp_path, example_con
         sender_id="ou_1",
         conversation_id=None,
         authority_scope=scope,
-    ) == derive_pi_session_id("feishu", "ou_1", "sender:ou_1", scope)
+    ) == derive_session_id("feishu", "ou_1", "sender:ou_1", scope)
 
 
 def test_channel_key_and_path_resolve_to_the_same_internal_config(
@@ -398,23 +400,19 @@ def test_cancel_and_commit_compare_and_set_have_exactly_one_winner(tmp_path) -> 
         run_id = f"run_race_{index}"
         starter.start_run(run_id, contract=_contract("运行状态"), session_key="wechat:chat")
         barrier = threading.Barrier(3)
-        outcome: dict[str, object] = {}
-
-        def cancel() -> None:
+        def cancel() -> bool:
             barrier.wait()
-            outcome["cancel"] = cancel_store.request_cancel(run_id)
+            return cancel_store.request_cancel(run_id)
 
-        def commit() -> None:
+        def commit() -> str:
             barrier.wait()
-            outcome["decision"] = decision_store.claim_admission_decision(run_id, "commit")
+            return decision_store.claim_admission_decision(run_id, "commit")
 
-        workers = [threading.Thread(target=cancel), threading.Thread(target=commit)]
-        for worker in workers:
-            worker.start()
-        barrier.wait()
-        for worker in workers:
-            worker.join(timeout=2)
-            assert not worker.is_alive()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            cancellation = pool.submit(cancel)
+            decision = pool.submit(commit)
+            barrier.wait(timeout=2)
+            outcome = {"cancel": cancellation.result(timeout=2), "decision": decision.result(timeout=2)}
 
         state = str(starter.run_record(run_id)["admission_state"])
         assert state in {"cancel", "commit"}
@@ -422,6 +420,39 @@ def test_cancel_and_commit_compare_and_set_have_exactly_one_winner(tmp_path) -> 
             assert outcome == {"cancel": True, "decision": "cancel"}
         else:
             assert outcome == {"cancel": False, "decision": "commit"}
+
+
+@pytest.mark.parametrize("initialize", [False, True])
+def test_readiness_reader_allows_concurrent_admission_writer(tmp_path, monkeypatch, initialize) -> None:
+    from src.application.bot import migration
+
+    store = _store(tmp_path, "readiness_race")
+    reading = threading.Event()
+    release = threading.Event()
+    tables = migration._tables
+
+    def hold_read_snapshot(conn):
+        conn.execute("BEGIN")
+        names = tables(conn)
+        reading.set()
+        assert release.wait(2)
+        return names
+
+    monkeypatch.setattr(migration, "_tables", hold_read_snapshot)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        reader = (pool.submit(store._ensure_schema) if initialize
+                  else pool.submit(store.is_cancel_requested, "readiness_race"))
+        try:
+            assert reading.wait(2)
+            with closing(store._connect()) as writer, writer:
+                writer.execute("BEGIN IMMEDIATE")
+                assert store.request_cancel("readiness_race", connection=writer)
+                release.set()
+        finally:
+            release.set()
+        reader.result(timeout=2)
+    monkeypatch.setattr(migration, "_tables", tables)
+    assert store.claim_admission_decision("readiness_race", "commit") == "cancel"
 
 
 def test_stale_run_becomes_terminal_without_resumable_progress(tmp_path) -> None:
@@ -606,10 +637,12 @@ def test_cancel_survives_short_schema_writer_contention(tmp_path, monkeypatch) -
     assert store.run_record("contended")["cancel_requested"] == 1
 
 
-def test_schema_writer_wait_respects_admission_deadline(tmp_path) -> None:
+
+@pytest.mark.parametrize("lock_mode", ["IMMEDIATE", "EXCLUSIVE"])
+def test_schema_writer_wait_respects_admission_deadline(tmp_path, lock_mode) -> None:
     store = _store(tmp_path, "existing")
     with sqlite3.connect(store.path) as blocker:
-        blocker.execute("BEGIN IMMEDIATE")
+        blocker.execute(f"BEGIN {lock_mode}")
         for acquire in (
             lambda deadline: store.acquire_lane("foreground", "late", limit=1, ttl_seconds=180, deadline_monotonic=deadline),
             lambda deadline: store.acquire_session_run("wechat:late", "late", ttl_seconds=180, deadline_monotonic=deadline),

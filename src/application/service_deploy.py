@@ -32,6 +32,7 @@ from src.application.secret_store import (
 )
 from src.application.settings import build_effective_env
 from src.application.payload_helpers import first_text as _first_text
+from src.application.positions.auto_close_schedule import MARKET_CLOCKS
 
 
 ServiceTarget = Literal["systemd", "launchd"]
@@ -58,12 +59,8 @@ DEFAULT_TIMEOUT_SECONDS = 600
 US_TICK_SYSTEMD_CALENDAR = "Mon..Fri *-*-* 09..16:00/10:00 America/New_York"
 HK_TICK_SYSTEMD_CALENDAR = "Mon..Fri *-*-* 09..16:00/10:00 Asia/Hong_Kong"
 AUTO_CLOSE_SYSTEMD_CALENDARS = {
-    "hk": "*-*-* 09:05:00 Asia/Shanghai",
-    "us": "*-*-* 09:07:00 Asia/Shanghai",
-}
-AUTO_CLOSE_LAUNCHD_CALENDARS = {
-    "hk": {"Hour": 9, "Minute": 5},
-    "us": {"Hour": 9, "Minute": 7},
+    market: f"*-*-* 00:{minute:02d}:00 {zone}"
+    for market, (zone, minute) in MARKET_CLOCKS.items()
 }
 PROJECTION_VERIFY_SYSTEMD_CALENDAR = "*-*-* 09:30:00 Asia/Shanghai"
 PROJECTION_VERIFY_LAUNCHD_CALENDAR = {"Hour": 9, "Minute": 30}
@@ -389,10 +386,18 @@ def _opend_service_plans_from_configs(
 
     multi = len(candidates) > 1
     plans: list[OpendServicePlan] = []
+    identity_accounts: dict[str, str] = {}
     for account, root, host, port in candidates:
         slug = _service_slug(account)
         systemd_name = f"options-monitor-opend-{slug}.service" if multi else "options-monitor-opend.service"
         launchd_label = f"com.options-monitor.opend.{slug}" if multi else "com.options-monitor.opend"
+        for identity in (systemd_name, launchd_label):
+            if identity in identity_accounts:
+                raise ValueError(
+                    f"OpenD service identity collision for accounts {identity_accounts[identity]!r} and {account!r}: "
+                    f"{systemd_name} / {launchd_label}"
+                )
+            identity_accounts[identity] = account
         plans.append(
             OpendServicePlan(
                 account=account,
@@ -753,6 +758,10 @@ def _systemd_unit(
     syslog_level_prefix: bool = False,
     restart_prevent_exit_statuses: list[int] | None = None,
     on_failure: str | None = None,
+    restart_sec: int = 10,
+    start_limit_interval_sec: int | None = None,
+    start_limit_burst: int | None = None,
+    kill_mode: str | None = None,
 ) -> str:
     after_units = _dedupe_unit_dependencies(["network-online.target", *(after or [])])
     wants_units = _dedupe_unit_dependencies(["network-online.target", *(wants or [])])
@@ -767,6 +776,10 @@ def _systemd_unit(
         lines.append(f"Before={' '.join(before_units)}")
     if on_failure:
         lines.append(f"OnFailure={on_failure}")
+    if start_limit_interval_sec is not None:
+        lines.append(f"StartLimitIntervalSec={int(start_limit_interval_sec)}")
+    if start_limit_burst is not None:
+        lines.append(f"StartLimitBurst={int(start_limit_burst)}")
     lines.extend([
         "",
         "[Service]",
@@ -800,9 +813,11 @@ def _systemd_unit(
         lines.append(f"TimeoutStopSec={int(timeout_stop_sec)}")
     if syslog_level_prefix:
         lines.append("SyslogLevelPrefix=yes")
+    if kill_mode:
+        lines.append(f"KillMode={kill_mode}")
     if restart:
         lines.append(f"Restart={restart}")
-        lines.append("RestartSec=10")
+        lines.append(f"RestartSec={int(restart_sec)}")
         if restart_prevent_exit_statuses:
             statuses = [int(status) for status in restart_prevent_exit_statuses]
             if any(status < 0 or status > 255 for status in statuses):
@@ -832,6 +847,7 @@ def _systemd_timer(
     accuracy_sec: str | None = None,
     randomized_delay_sec: int | None = None,
     persistent: bool = True,
+    on_boot_sec: str | None = None,
 ) -> str:
     timer_lines = [
         "[Unit]",
@@ -842,6 +858,8 @@ def _systemd_timer(
     calendars = [calendar] if isinstance(calendar, str) else list(calendar or [])
     if calendars:
         timer_lines.extend(f"OnCalendar={value}" for value in calendars)
+        if on_boot_sec is not None:
+            timer_lines.append(f"OnBootSec={on_boot_sec}")
     else:
         timer_lines.extend(["OnBootSec=2min", f"OnUnitActiveSec={interval or '10min'}"])
     if accuracy_sec is not None:
@@ -879,6 +897,7 @@ def _launchd_plist(
     start_interval: int | None = None,
     start_calendar_interval: dict[str, int] | None = None,
     keep_alive: bool = False,
+    run_at_load: bool | None = None,
 ) -> str:
     environment = {
         "OM_RUNTIME_ROOT": str(runtime_root),
@@ -894,7 +913,7 @@ def _launchd_plist(
         "EnvironmentVariables": environment,
         "StandardOutPath": str(log_root / f"{label}.out.log"),
         "StandardErrorPath": str(log_root / f"{label}.err.log"),
-        "RunAtLoad": bool(keep_alive),
+        "RunAtLoad": bool(keep_alive) if run_at_load is None else run_at_load,
     }
     if keep_alive:
         payload["KeepAlive"] = True
@@ -1293,16 +1312,17 @@ def render_service_bundle(
             auto_close_service = f"options-monitor-auto-close-{market}.service"
             auto_close_timer = f"options-monitor-auto-close-{market}.timer"
             auto_close_args = [
-                om,
-                "option-positions",
-                "auto-close-expired",
+                str(repo / "scripts" / "auto_close_schedule.sh"),
+                "--market",
+                market,
                 "--config",
                 str(config_by_market[market]),
                 "--accounts",
                 *market_accounts,
+                "--runtime-root",
+                str(runtime),
                 "--apply",
                 "--yes",
-                "--quiet",
             ]
             add(
                 f"systemd/{auto_close_service}",
@@ -1314,7 +1334,14 @@ def render_service_bundle(
                     deploy_user=systemd_user,
                     deploy_home=systemd_home,
                     exec_args=auto_close_args,
-                    timeout_start_sec=600,
+                    timeout_start_sec=620,
+                    timeout_stop_sec=10,
+                    restart="on-failure",
+                    restart_sec=300,
+                    restart_prevent_exit_statuses=[2, 78],
+                    start_limit_interval_sec=14400,
+                    start_limit_burst=12,
+                    kill_mode="control-group",
                 ),
                 install_path=f"/etc/systemd/system/{auto_close_service}",
                 kind="systemd_service",
@@ -1326,6 +1353,7 @@ def render_service_bundle(
                     description=f"Options Monitor {market.upper()} expired option maintenance timer",
                     unit_name=auto_close_service,
                     calendar=AUTO_CLOSE_SYSTEMD_CALENDARS[market],
+                    on_boot_sec="2min",
                 ),
                 install_path=f"/etc/systemd/system/{auto_close_timer}",
                 kind="systemd_timer",
@@ -1912,16 +1940,17 @@ def render_service_bundle(
 
             auto_label = f"com.options-monitor.auto-close-{market}"
             auto_close_args = [
-                om,
-                "option-positions",
-                "auto-close-expired",
+                str(repo / "scripts" / "auto_close_schedule.sh"),
+                "--market",
+                market,
                 "--config",
                 str(config_by_market[market]),
                 "--accounts",
                 *market_accounts,
+                "--runtime-root",
+                str(runtime),
                 "--apply",
                 "--yes",
-                "--quiet",
             ]
             add(
                 f"launchd/{auto_label}.plist",
@@ -1932,7 +1961,8 @@ def render_service_bundle(
                     program_args=auto_close_args,
                     log_root=log_root,
                     env_file=env_file_path,
-                    start_calendar_interval=AUTO_CLOSE_LAUNCHD_CALENDARS[market],
+                    start_calendar_interval={},
+                    run_at_load=True,
                 ),
                 install_path=f"~/Library/LaunchAgents/{auto_label}.plist",
                 kind="launchd_plist",

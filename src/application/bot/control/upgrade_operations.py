@@ -854,6 +854,7 @@ def _preview_upgrade(args: dict[str, Any]) -> dict[str, Any]:
         repo_root=args["repo_root"],
         runtime_root=args["runtime_root"],
         cache_root=args.get("cache_root"),
+        target_version=args.get("target_version"),
         remote_name=str(args.get("remote_name") or "origin"),
     )
     current = str(check.get("current_version") or "")

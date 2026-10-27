@@ -308,16 +308,21 @@ def build_futu_quote_context(*, host: str, port: int, deadline: float | None = N
     return _wait_for_futu_context(context, host=host, port=port, deadline=deadline, cancelled=cancelled)
 
 
-def build_futu_trade_context(*, host: str, port: int, is_encrypt: bool | None = None) -> Any:
+def build_futu_trade_context(
+    *, host: str, port: int, is_encrypt: bool | None = None,
+    on_init_connect_error: Callable[[str], None] | None = None,
+) -> Any:
     _ensure_futu_api_importable()
     import futu
 
     if not port_open(host, port):
         raise FutuGatewayUnreachableError(f"OpenD unreachable: {host}:{port}")
 
+    observing_initialization = True
+
     class AsyncOpenSecTradeContext(futu.OpenSecTradeContext):
         def _init_connect_sync(self):
-            # shortcut: trade SDK lacks async construction; verify these hooks on SDK upgrades.
+            # shortcut: verify async hooks and the InitConnect (ret, msg) contract on SDK upgrades.
             if getattr(self, "_om_initial_connect", True):
                 self._om_initial_connect = False
                 self.set_sync_query_connect_timeout(FUTU_QUERY_CONNECT_TIMEOUT_SEC)
@@ -325,11 +330,21 @@ def build_futu_trade_context(*, host: str, port: int, is_encrypt: bool | None = 
                 return futu.RET_OK
             return super()._init_connect_sync()
 
+        def _send_init_connect_sync(self):
+            result = super()._send_init_connect_sync()
+            ret, message = result
+            if observing_initialization and on_init_connect_error is not None and ret != futu.RET_OK:
+                on_init_connect_error(message)
+            return result
+
     kwargs = {"host": host, "port": port}
     if is_encrypt is not None:
         kwargs["is_encrypt"] = is_encrypt
-    context = AsyncOpenSecTradeContext(**kwargs)
-    return _wait_for_futu_context(context, host=host, port=port)
+    try:
+        context = AsyncOpenSecTradeContext(**kwargs)
+        return _wait_for_futu_context(context, host=host, port=port)
+    finally:
+        observing_initialization = False
 
 
 class _FutuAPIBackend:

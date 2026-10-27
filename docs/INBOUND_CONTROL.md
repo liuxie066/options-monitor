@@ -41,11 +41,36 @@ explicit command
 
 No model can enter the apply path.
 
+Manual-trade labeled integer fields accept whole numeric values such as `1` and
+`1.0` without rounding. Fractional values return `INPUT_ERROR` before a trade
+preview or pending operation is created; correct the value in a new message.
+
+Confirmed `/monitor-run` operations use the guarded `tick-cron` wrapper. When
+its return code is 0 and its entire stdout, after stripping surrounding whitespace,
+is `SKIP_LOCKED`, Control records terminal `skipped` with reason `tick_cron_locked`.
+This attempt did not start a tick and has no `applied_at`. The response and operation
+timeline use `ok=True` for successful request handling; that flag is not evidence
+of tick execution or notification delivery. The receipt explicitly reports the
+occupied market lock and skipped attempt. Other successful output and nonzero
+exit codes retain their normal success/failure handling. Skipped operations are
+not retried automatically: repeated confirmation cannot run them again, and a
+later attempt requires a new preview and confirmation.
+
 When one expiry notice contains multiple contracts, `/record-expiry` creates one
 pending operation per contract. Confirm the whole notice with the plain reply
 `确认` (the conversation resolves its unique `command_id`), use
 `/confirm trade <command_id>` as an explicit fallback, or confirm individual
 contracts with `/confirm trade <operation_id>`.
+
+If confirmation loses its receipt after a possible ledger commit, the operation
+remains unverified. Confirm the original operation ID to check its signed request
+against effective ledger evidence; this recovery never repeats the write. A close
+or legacy expiry without a stable operation identity remains unverified. Ordinary
+completed single-operation confirmations retain their existing rejection behavior.
+Batch retries inspect every child, including expired or cancelled children; an
+unfinished child prevents whole-batch success. `applied_count` counts children
+completed or recovered by this call, while `already_applied_count` counts earlier
+completions whose ledger evidence was checked again.
 
 ## Bot Boundary
 
@@ -53,8 +78,10 @@ contracts with `/confirm trade <operation_id>`.
 model conversations. Non-Control messages enter the model path only when enabled.
 Authenticated cancellation of an already admitted Feishu analysis remains available
 so disabling Bot does not strand active work; replacement work still requires Bot enabled.
-The Bot scene selects canonical read tools. Portfolio queries follow the
-`portfolio_management.enabled` integration gate; there is no extra Bot toolset switch.
+The Bot scene projects a fixed list of canonical read tools; it currently excludes
+the portfolio tools. `portfolio_management.enabled` does not add tools to the
+Scene. See the [capability boundary](OM_AGENT_CAPABILITY_MAP.md#surfaces) for the
+separate Tool Gateway PM contract.
 Bot reads the channel market by default. A validated
 `bot.read_markets: [us, hk]` grant can add the other market for
 authenticated senders. The Host resolves each requested market to a fresh
@@ -110,14 +137,11 @@ Bot internals directly.
 
 ## Configuration
 
-```yaml
-bot:
-  enabled: true
-  active_model: deepseek-default
-```
+Use the complete top-level `bot` authoring example in the
+[capability map](OM_AGENT_CAPABILITY_MAP.md#configuration), including the model
+profile selected by `bot.active_model`.
 
-Bot loads tools by scene; there is no portfolio toolset switch. PM-backed reads
-use the canonical `portfolio_management.enabled` integration boundary.
+Bot loads the fixed Scene tool list; there is no portfolio toolset switch.
 `om bot configure` changes `bot.enabled`. The default is false. Disabling Bot
 stops inbound processing and real model execution; local configuration, status,
 and diagnostic commands remain available. Saving configuration does not start a service.
@@ -135,6 +159,8 @@ Planner flags, task profiles, per-business Scene allowlists, and
 ./om bot llm-check
 ./om-agent run --tool operation_timeline --input-json '{"limit":10}'
 ```
+
+`operation_timeline` 的 `statuses` 为字符串列表；非空规范化列表与 `operation_id` 及认证会话范围同时过滤。省略、空列表或仅含空白项时，精确 ID 查询不限制状态，无非空 ID 的查询使用既有生命周期默认状态。历史 audit-only 证据仍按原规则重建。
 
 Bot Host persists real sessions, runs, and model/tool events. Control audit
 rows must not be repackaged as synthetic Agent plans, evidence bundles, or
@@ -211,3 +237,40 @@ Do not add:
 模型没有 confirm/apply 权限；归属操作不下单、不重复记经济成交、不重发原成交回执。
 普通单腿确认不依赖 provider 容量；Wheel/Combo 依赖当前完整竞争证据和新鲜容量。
 预览后实质变化需重新预览，重复确认按既有事实读回；取消已认领的操作不撤销账本。
+
+## Concurrent message execution and unknown outcomes
+
+Within one inbound audit SQLite database, the normalized `(channel, message_id)`
+obtains one durable execution claim before Control, Bot, or analysis cancellation
+runs. A concurrent authorized duplicate receives the stored completed result or a
+non-success observation; it never acquires a second execution right. Requests
+without a message ID retain independent local invocation semantics. Every replay
+still checks the current sender allowlist and trusted conversation/config scope.
+
+`INBOUND_PROCESSING` (`status=processing`, `ok=false`) means the original request
+is still within its observation budget. `INBOUND_INCOMPLETE` (`status=incomplete`,
+`ok=false`) means its business outcome is not confirmed. Both remain visible in
+JSON/text CLI output with a nonzero exit code. The shared Feishu/WeChat reply
+decider does not enqueue these observations into the stable final-result outbox
+identity; completed known business failures still follow normal reply rules.
+
+The budget remains 180 seconds from the original received monotonic time,
+including database waits. Observation expiry is not a takeover lease: an expired
+processing claim is displayed as incomplete without mutation, and only its owner
+may still save a late final result. Interrupted or unsaved results cannot be
+reset, reclaimed, or automatically executed again. A failed final-result save
+must not be reported as business success. Existing completed audit rows remain
+completed after schema extension; unprovable legacy scope still blocks replay.
+
+For an incomplete result, use its command ID to inspect existing operation
+history, the relevant tool's readback, and any delivery receipt. Do not assume
+that an external effect failed or replay it with a new ID while the outcome is
+unknown. Only an operator who has established that no effect occurred, or has
+explicitly resolved the effect, may decide on a new request. This local claim does
+not guarantee provider exactly-once delivery or repair historical state.
+
+Analysis cancellation retains its original preflight target binding and completed
+message guard. Only the current service claim owner can pass its private identity
+proof into that same cancellation transaction; the proof never becomes a public
+message field or provider key. Queue redelivery reuses the original preflight
+target and cannot cancel a later run or start replacement analysis again.

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib
 from contextlib import suppress
-import logging
 import queue
 import sys
 import threading
@@ -46,7 +45,9 @@ class OpenDTradePushListener:
         self._handler: Any = None
         self._order_handler: Any = None
 
-    def _build_default_context(self) -> tuple[Any, Any]:
+    def _build_default_context(
+        self, *, on_init_connect_error: Callable[[str], None] | None = None,
+    ) -> tuple[Any, Any]:
         try:
             futu_mod = importlib.import_module("futu")
         except Exception as exc:
@@ -101,7 +102,7 @@ class OpenDTradePushListener:
             {"host": self.host, "port": self.port, "is_encrypt": False},
         ):
             try:
-                ctx = build_futu_trade_context(**kwargs)
+                ctx = build_futu_trade_context(**kwargs, on_init_connect_error=on_init_connect_error)
                 break
             except FutuGatewayError:
                 raise
@@ -262,19 +263,17 @@ class OpenDTradePushListener:
         auth_required = threading.Event()
         auth_evidence: dict[str, str] = {}
 
-        class _TradeContextInitLogHandler(logging.Handler):
-            def emit(self, record: logging.LogRecord) -> None:
-                detail = record.getMessage()
-                if "init connect fail" not in detail or "OpenSecTradeContext" not in detail:
-                    return
-                error_code, message = classify_watchdog_result(None, detail)
-                if error_code in {"OPEND_NEEDS_PHONE_VERIFY", "OPEND_NEEDS_PIC_VERIFY", "OPEND_LOGIN_INVALID"}:
-                    auth_evidence.update(error_code=error_code, message=message, detail=detail)
-                    auth_required.set()
+        def observe_init_connect_error(detail: str) -> None:
+            if abandoned.is_set():
+                return
+            error_code, message = classify_watchdog_result(None, detail)
+            if error_code in {"OPEND_NEEDS_PHONE_VERIFY", "OPEND_NEEDS_PIC_VERIFY", "OPEND_LOGIN_INVALID"}:
+                auth_evidence.update(error_code=error_code, message=message, detail=detail)
+                auth_required.set()
 
         def _construct() -> None:
             try:
-                ctx, handler = self._build_default_context()
+                ctx, handler = self._build_default_context(on_init_connect_error=observe_init_connect_error)
             except Exception as exc:
                 results.put(("error", exc, None))
             else:
@@ -285,9 +284,6 @@ class OpenDTradePushListener:
                     else:
                         results.put(("ok", ctx, handler))
 
-        sdk_logger = logging.getLogger("FTConsoleLog")
-        log_handler = _TradeContextInitLogHandler()
-        sdk_logger.addHandler(log_handler)
         worker = threading.Thread(
             target=_construct,
             name=f"trade-context-init-{self.host}-{self.port}",
@@ -325,7 +321,6 @@ class OpenDTradePushListener:
                 self.close()
             raise
         finally:
-            sdk_logger.removeHandler(log_handler)
             with construction_lock:
                 abandoned.set()
                 try:

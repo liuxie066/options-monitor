@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import pytest
+from conftest import phase2_opening_row
 
 from domain.domain.engine import (
     EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
@@ -21,6 +23,9 @@ from src.application.combo_yield_config import (
     resolve_combo_yield_cfg,
 )
 from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+
+DECISION_NOW = datetime(2026, 8, 8, 15, 0, tzinfo=timezone.utc)
 
 
 def _write_required_data(tmp_path: Path, *, call_rows: list[dict], put_rows: list[dict]) -> Path:
@@ -67,6 +72,9 @@ def _call_row(**overrides) -> dict:
 def _put_row(**overrides) -> dict:
     row = {
         "symbol": "NVDA",
+        "option_type": "put",
+        "snapshot_received_at_utc": DECISION_NOW.isoformat(),
+        "spot_observed_at_utc": DECISION_NOW.isoformat(),
         "expiration": "2026-08-28",
         "dte": 20,
         "contract_symbol": "NVDA260828P90000",
@@ -85,7 +93,7 @@ def _put_row(**overrides) -> dict:
         "spread_ratio": 0.10,
     }
     row.update(overrides)
-    return row
+    return phase2_opening_row(row)
 
 
 def _scan_call_row(**overrides) -> dict:
@@ -144,6 +152,8 @@ def _scan_call_row(**overrides) -> dict:
         "spread_ratio": 0.05,
     }
     row.update(overrides)
+    row["strike_above_spot_pct"] = round((row["strike"] - row["spot"]) / row["spot"], 10)
+    row["strike_upside_margin_pct"] = row["strike_above_spot_pct"]
     return row
 
 
@@ -175,6 +185,7 @@ def _cc_lp_scan_kwargs(required_data: Path, **overrides: Any) -> dict[str, Any]:
         "sell_call_cfg": {"enabled": True},
         "exchange_rate_converter": _converter(),
         "portfolio_ctx": None,
+        "now_utc_fn": lambda: DECISION_NOW,
     }
     kwargs.update(overrides)
     return kwargs
@@ -214,7 +225,8 @@ def _available_cc_lp_context() -> dict[str, Any]:
     }
 
 
-def test_run_cc_lp_scan_produces_candidates(tmp_path: Path) -> None:
+@pytest.mark.parametrize("ordinary_cap", [None, 0, .4])
+def test_run_cc_lp_scan_produces_candidates(tmp_path: Path, ordinary_cap) -> None:
     required_data = _cc_lp_required_data(tmp_path)
     captured: dict[str, Any] = {}
 
@@ -226,6 +238,7 @@ def test_run_cc_lp_scan_produces_candidates(tmp_path: Path) -> None:
             required_data,
             stock={"shares": 100, "can_sell_qty": 100, "shares_locked": 0, "avg_cost": 90.0},
             run_sell_call_scan_fn=_scan,
+            sell_call_cfg={"enabled": True, "max_abs_delta": ordinary_cap},
     ))
     assert not df.empty
     row = df.iloc[0]
@@ -461,7 +474,145 @@ def test_variant_long_put_delta_reaches_scan_and_metrics(tmp_path: Path, delta, 
         stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0},
         run_cc_lp_scan_fn=lambda **kwargs: run_cc_lp_scan(
             **kwargs, run_sell_call_scan_fn=lambda **kw: pd.DataFrame([_scan_call_row()]),
+            now_utc_fn=lambda: DECISION_NOW,
         ),
     ))
     assert summary is not None
     assert (summary["status"] == "candidates_found") is accepted
+
+
+def _with_retention(symbol_cfg: dict, value: Any) -> dict:
+    return {
+        **symbol_cfg,
+        "combo_yield": {**symbol_cfg["combo_yield"], "min_net_credit_retention": value},
+    }
+
+
+def _run_cc_lp_variant_with_real_scan(
+    symbol_cfg: dict,
+    required_data: Path,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    evidence: list[dict[str, Any]] = []
+    summary = run_cc_lp_variant(**_cc_lp_variant_kwargs(
+        symbol_cfg, required_data, portfolio_ctx=_available_cc_lp_context(),
+        stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0},
+        run_cc_lp_scan_fn=lambda **kwargs: run_cc_lp_scan(
+            **kwargs, run_sell_call_scan_fn=lambda **kw: pd.DataFrame([_scan_call_row()]),
+            now_utc_fn=lambda: DECISION_NOW,
+        ),
+        combo_evidence_sink_fn=evidence.append,
+    ))
+    assert summary is not None
+    return summary, evidence
+
+
+def test_run_cc_lp_variant_forwards_min_net_credit_retention_only_when_explicit(
+    tmp_path: Path,
+) -> None:
+    required_data = _cc_lp_required_data(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def _scan(**kwargs: Any) -> pd.DataFrame:
+        captured.clear()
+        captured.update(kwargs)
+        return pd.DataFrame()
+
+    def _run(symbol_cfg: dict) -> dict[str, Any]:
+        run_cc_lp_variant(**_cc_lp_variant_kwargs(
+            symbol_cfg, required_data, portfolio_ctx=_available_cc_lp_context(),
+            stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0},
+            run_cc_lp_scan_fn=_scan,
+        ))
+        return dict(captured)
+
+    symbol_cfg = _cc_lp_symbol_cfg()
+    assert "min_retention" not in _run(symbol_cfg)
+
+    symbol_cfg = _with_retention(symbol_cfg, 0.90)
+    assert _run(symbol_cfg)["min_retention"] == 0.90
+
+    # Explicitly configuring the generic default value is still an operator
+    # choice and must travel; only the merged default alone may not leak.
+    symbol_cfg = _with_retention(symbol_cfg, 0.60)
+    assert _run(symbol_cfg)["min_retention"] == 0.60
+
+    # Numeric strings pass config validation; the scan compares against a
+    # float, so the forwarded value must be coerced like its sibling readers.
+    symbol_cfg = _with_retention(symbol_cfg, "0.90")
+    assert _run(symbol_cfg)["min_retention"] == 0.90
+
+    symbol_cfg = _with_retention(symbol_cfg, 0.0)
+    assert _run(symbol_cfg)["min_retention"] == 0.0
+
+    # Retention is optional; explicit null preserves the existing CC+LP floor.
+    symbol_cfg = _with_retention(symbol_cfg, None)
+    assert "min_retention" not in _run(symbol_cfg)
+
+
+def test_run_cc_lp_variant_explicit_min_net_credit_retention_replaces_cc_lp_default(
+    tmp_path: Path,
+) -> None:
+    required_data = _cc_lp_required_data(tmp_path)
+    baseline_cfg = _cc_lp_symbol_cfg()
+    baseline, evidence = _run_cc_lp_variant_with_real_scan(baseline_cfg, required_data)
+    assert baseline["status"] == "candidates_found"
+    retention = float(evidence[0]["ranked_pairs"][0]["net_credit_retention"])
+    # Synthetic .44021 retained-credit ratio: above the CC+LP .20 floor and
+    # below the .60 generic option policy, so the omitted case proves the
+    # generic default never replaced the CC+LP floor.
+    assert 0.20 < retention < 0.60
+
+    summary_20, _ = _run_cc_lp_variant_with_real_scan(
+        _with_retention(baseline_cfg, 0.20), required_data,
+    )
+    assert summary_20["status"] == "candidates_found"
+
+    summary_90, _ = _run_cc_lp_variant_with_real_scan(
+        _with_retention(baseline_cfg, 0.90), required_data,
+    )
+    assert summary_90["status"] == "no_candidate"
+    assert summary_90["candidate_count"] == 0
+    assert summary_90["reason"] == "no_candidate"
+
+    summary_at_threshold, _ = _run_cc_lp_variant_with_real_scan(
+        _with_retention(baseline_cfg, retention), required_data,
+    )
+    assert summary_at_threshold["status"] == "candidates_found"
+
+    summary_above_threshold, _ = _run_cc_lp_variant_with_real_scan(
+        _with_retention(baseline_cfg, retention + 0.000001), required_data,
+    )
+    assert summary_above_threshold["status"] == "no_candidate"
+
+
+def test_run_cc_lp_variant_ignores_materialized_generic_default_retention(
+    tmp_path: Path,
+) -> None:
+    required_data = _cc_lp_required_data(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def _scan(**kwargs: Any) -> pd.DataFrame:
+        captured.update(kwargs)
+        return pd.DataFrame()
+
+    symbol_cfg = _cc_lp_symbol_cfg()
+    # Shape of a generated runtime config: the authored block carries the
+    # explicit-field marker, while the system symbol_defaults materialize the
+    # full policy - including the generic .60 retention - without making it an
+    # operator choice.
+    symbol_cfg["combo_yield"].update({
+        "_explicit_fields": ["enabled", "variant"],
+        "min_net_credit_retention": 0.60,
+    })
+    policy = derive_combo_yield_policy(
+        resolve_combo_yield_cfg(symbol_cfg), market="us",
+    )
+    assert policy.config["min_net_credit_retention"] == 0.60
+    assert "min_net_credit_retention" not in policy.explicit_fields
+
+    run_cc_lp_variant(**_cc_lp_variant_kwargs(
+        symbol_cfg, required_data, portfolio_ctx=_available_cc_lp_context(),
+        stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 90.0},
+        run_cc_lp_scan_fn=_scan,
+    ))
+    assert "min_retention" not in captured

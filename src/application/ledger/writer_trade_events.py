@@ -6,7 +6,8 @@ from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.ledger import position_lots_fingerprint
 from domain.domain.lifecycle_allocation import validate_stock_settlement_allocation_group
 from domain.domain.trade_execution import (
-    execution_economic_content, execution_source_identity_conflicts, ledger_execution_event_set_is_complete, normalize_execution_input,
+    execution_economic_content, execution_source_identity_conflicts, ledger_close_allocation_set_is_complete,
+    ledger_execution_event_set_is_complete, normalize_execution_input, structured_deal_keys_from_ledger_event,
 )
 from .event_codec import trade_event_application_payload, valid_void_target_event_id
 
@@ -1113,9 +1114,37 @@ def _event_with_existing_fee_evidence(event: TradeEvent, existing: dict[str, Any
             event = replace(event, raw_payload=incoming_payload)
         incoming = encode_trade_event_for_storage(event).event_json
         stored = encode_trade_event_for_storage(existing).event_json
-        if incoming != stored:
-            raise ValueError(f"trade event fee evidence conflict for event_id={event.event_id}")
-        return event
+        if incoming == stored:
+            return event
+        incoming_provenance = incoming_payload.get("fee_provenance")
+        if (
+            isinstance(incoming_provenance, Mapping)
+            and str(incoming_provenance.get("basis") or "").strip().lower() == "actual"
+            and isinstance(stored_provenance, dict)
+            and stored_provenance.get("basis") == "actual"
+            and isinstance(stored_provenance.get("reason"), str)
+            and type(stored_provenance.get("frozen_at_ms")) is int
+        ):
+            resolution = _incoming_fee_resolution(event)
+            if resolution["status"] == "actual":
+                candidate = _event_with_actual_fee(
+                    event,
+                    amount=resolution["amount"],
+                    source=str(resolution["source"]),
+                    frozen_at_ms=stored_provenance["frozen_at_ms"],
+                    reason=stored_provenance["reason"],
+                )
+                candidate_payload = dict(candidate.raw_payload)
+                candidate_provenance = dict(candidate_payload["fee_provenance"])
+                # Recover omitted writer metadata without hiding explicit contradictions.
+                for key in ("reason", "frozen_at_ms"):
+                    if key in incoming_provenance:
+                        candidate_provenance[key] = incoming_provenance[key]
+                candidate_payload["fee_provenance"] = candidate_provenance
+                candidate = replace(candidate, raw_payload=candidate_payload)
+                if encode_trade_event_for_storage(candidate).event_json == stored:
+                    return candidate
+        raise ValueError(f"trade event fee evidence conflict for event_id={event.event_id}")
     if "fee_provenance" in existing_payload:
         incoming_payload["fee_provenance"] = dict(existing_payload["fee_provenance"])
     return replace(event, fees=float(existing.get("fees") or 0.0), raw_payload=incoming_payload)
@@ -1826,6 +1855,9 @@ def _canonical_close_events_for_storage(
         expiration_ymd=event.contract_key.expiration_ymd,
         contracts_to_close=event.contracts,
     )
+    existing = _existing_legacy_close_events_for_storage(repo, event, selector=selector, conn=conn)
+    if existing is not None:
+        return existing
     try:
         resolution = resolve_fifo_close_targets(
             repo,
@@ -1835,34 +1867,143 @@ def _canonical_close_events_for_storage(
         )
     except LotCloseResolutionError as exc:
         raise ValueError(f"close trade event target resolution failed: {exc.code}") from exc
+    return _canonical_close_events_from_resolution(event, resolution.to_dict())
+
+
+def _existing_legacy_close_events_for_storage(
+    repo: Any,
+    event: TradeEvent,
+    *,
+    selector: LotCloseSelector,
+    conn: Any | None = None,
+) -> list[TradeEvent] | None:
+    """Rebuild a complete direct-writer history, including allocations later voided."""
+    raw = dict(event.raw_payload or {})
+    if (event.asset_type != "option" or event.event_type != "close" or event.source != "opend_push"
+            or event.target_lot_id or raw.get("execution_input") or raw.get("broker_deal_completion")):
+        return None
+    root_id = event.event_id
+    if not root_id:
+        return None
+    rows = [row for row in repo.list_trade_events(conn=conn)
+            if row.get("event_id") == root_id
+            or (row.get("raw_payload") or {}).get("fee_order_group_id") == root_id
+            or root_id in structured_deal_keys_from_ledger_event(row)]
+    if not rows:
+        return None
+    conflict = f"trade event conflict for event_id={root_id}"
+    if (futu_compatibility_source_key(
+            account=event.contract_key.account, futu_account_id=raw.get("futu_account_id"),
+            source_deal_id=raw.get("source_deal_id")) != root_id
+            or root_id not in structured_deal_keys_from_ledger_event(event.to_dict())):
+        raise ValueError(conflict)
+    stored = [_canonical_storage_event(row) for row in rows]
+    by_id = {item.event_id: item for item in stored}
+    if len(by_id) != len(stored) or root_id not in by_id:
+        raise ValueError(conflict)
+    for item in stored:
+        payload = item.raw_payload
+        if (payload.get("execution_input") or payload.get("broker_deal_completion")
+                or payload.get("fee_order_group_id") != root_id
+                or root_id not in structured_deal_keys_from_ledger_event(item.to_dict())):
+            raise ValueError(conflict)
+    resolution = by_id[root_id].raw_payload.get("close_target_resolution")
+    if (not isinstance(resolution, dict) or resolution.get("status") != "resolved"
+            or resolution.get("source") != "stored_canonical_trade_close"
+            or resolution.get("strategy") != "strict_exact_fifo"
+            or json.dumps(resolution.get("selector"), sort_keys=True) != json.dumps(selector.to_dict(), sort_keys=True)):
+        raise ValueError(conflict)
+    if any(json.dumps(item.raw_payload.get("close_target_resolution"), sort_keys=True)
+           != json.dumps(resolution, sort_keys=True) for item in stored):
+        raise ValueError(conflict)
+    record_ids = resolution.get("record_ids")
+    targets = resolution.get("targets")
+    if (not isinstance(record_ids, list) or not record_ids
+            or any(not isinstance(value, str) or not value for value in record_ids)
+            or not isinstance(targets, list) or len(targets) != len(record_ids)
+            or type(resolution.get("target_count")) is not int or resolution["target_count"] != len(targets)
+            or type(resolution.get("contracts_to_close")) is not int
+            or resolution["contracts_to_close"] <= 0 or resolution["contracts_to_close"] != event.contracts):
+        raise ValueError(conflict)
+    for lot_id, target in zip(record_ids, targets):
+        if (not isinstance(target, dict) or target.get("record_id") != lot_id
+                or target.get("matched_by") != "strict_exact_fifo"
+                or type(target.get("contracts_to_close")) is not int or target["contracts_to_close"] <= 0
+                or not isinstance(target.get("candidate"), dict)
+                or target["candidate"].get("record_id") != lot_id):
+            raise ValueError(conflict)
+    if not ledger_close_allocation_set_is_complete([item.to_dict() for item in stored]):
+        raise ValueError(conflict)
+    # Keep incoming facts for the existing whole-event comparison after allocation.
+    rebuilt = _canonical_close_events_from_resolution(event, resolution)
+    if {item.event_id for item in rebuilt} != set(by_id):
+        raise ValueError(conflict)
+    for candidate, target in zip(rebuilt, targets):
+        saved = by_id[candidate.event_id]
+        source_event_id = target["candidate"].get("source_event_id")
+        if (saved.target_lot_id != candidate.target_lot_id or saved.contracts != candidate.contracts
+                or saved.raw_payload.get("record_id") != candidate.target_lot_id
+                or saved.raw_payload.get("target_lot_id") != candidate.target_lot_id
+                or (source_event_id not in (None, "")
+                    and saved.raw_payload.get("close_target_source_event_id") != source_event_id)):
+            raise ValueError(conflict)
+    provenance = raw.get("fee_provenance")
+    stored_provenances = [by_id[item.event_id].raw_payload.get("fee_provenance") for item in rebuilt]
+    if (len(rebuilt) > 1 and isinstance(provenance, Mapping)
+            and str(provenance.get("basis") or "").strip().lower() == "actual"
+            and all(isinstance(value, dict) and value.get("basis") == "actual"
+                    and isinstance(value.get("reason"), str) and type(value.get("frozen_at_ms")) is int
+                    for value in stored_provenances)):
+        fee = _incoming_fee_resolution(event)
+        if fee["status"] != "actual":
+            raise ValueError(f"trade event fee evidence conflict for event_id={root_id}")
+        rebuilt = _allocate_actual_fee_group(
+            rebuilt, total=fee["amount"], source=str(fee["source"]),
+            frozen_at_ms=stored_provenances[0]["frozen_at_ms"],
+        )
+        for index, candidate in enumerate(rebuilt):
+            payload = dict(candidate.raw_payload)
+            candidate_provenance = dict(payload["fee_provenance"])
+            for key in ("reason", "frozen_at_ms"):
+                candidate_provenance[key] = provenance[key] if key in provenance else stored_provenances[index][key]
+            payload["fee_provenance"] = candidate_provenance
+            rebuilt[index] = replace(candidate, raw_payload=payload)
+    return rebuilt
+
+
+def _canonical_close_events_from_resolution(
+    event: TradeEvent, resolution_payload: dict[str, Any],
+) -> list[TradeEvent]:
     out: list[TradeEvent] = []
-    resolution_payload = resolution.to_dict()
-    for index, match in enumerate(resolution.matches):
-        event_id = event.event_id if index == 0 else f"{event.event_id}:target:{match.lot_id}"
+    targets = resolution_payload["targets"]
+    for index, target in enumerate(targets):
+        lot_id = target["record_id"]
+        quantity = target["contracts_to_close"]
+        event_id = event.event_id if index == 0 else f"{event.event_id}:target:{lot_id}"
         raw_payload = {
             **dict(event.raw_payload or {}),
             "fee_order_group_id": event.event_id,
-            "record_id": match.lot_id,
-            "target_lot_id": match.lot_id,
+            "record_id": lot_id,
+            "target_lot_id": lot_id,
             "close_target_resolution": resolution_payload,
         }
         if execution_identity_from_input(raw_payload.get("execution_input")):
             raw_payload["broker_deal_completion"] = broker_deal_completion_payload(
                 source_deal_id=str(raw_payload.get("source_deal_id") or "").strip(),
                 expected_contracts=int(event.contracts),
-                split_count=len(resolution.matches),
+                split_count=len(targets),
                 split_index=index + 1,
-                allocated_contracts=int(match.contracts_to_close),
+                allocated_contracts=int(quantity),
             )
-        source_event_id = getattr(match.candidate, "source_event_id", None)
+        source_event_id = (target.get("candidate") or {}).get("source_event_id")
         if source_event_id not in (None, ""):
             raw_payload["close_target_source_event_id"] = source_event_id
         out.append(
             replace(
                 event,
                 event_id=event_id,
-                contracts=int(match.contracts_to_close),
-                target_lot_id=match.lot_id,
+                contracts=int(quantity),
+                target_lot_id=lot_id,
                 raw_payload=raw_payload,
             )
         )

@@ -12,7 +12,7 @@ from typing import Any
 import yaml
 
 from domain.domain.strategy_vocab import STRATEGY_COVERED_CALL
-from domain.domain.symbol_identity import symbol_market
+from domain.domain.symbol_identity import resolve_underlier_alias, symbol_market
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.account_config import normalize_account_label
 from src.application.bot.control.llm_model_profiles import resolve_authoring_bot_config
@@ -228,7 +228,7 @@ def _normalize_symbol(raw: Any, *, path: str) -> str:
     symbol = str(raw or "").strip().upper()
     if not symbol:
         raise AgentToolError(code="CONFIG_ERROR", message=f"{path} must be a non-empty symbol")
-    return symbol
+    return resolve_underlier_alias(symbol)
 
 
 def _normalize_account_setting(raw: Any, *, account: str, path: str) -> dict[str, Any]:
@@ -291,7 +291,7 @@ def _normalize_symbols(raw_symbols: Any, *, path: str, market: str) -> list[str]
     if not isinstance(raw_symbols, list) or not raw_symbols:
         raise AgentToolError(code="CONFIG_ERROR", message=f"{path} must be a non-empty list of symbol strings")
     out: list[str] = []
-    seen: set[str] = set()
+    seen: dict[str, str] = {}
     for index, raw in enumerate(raw_symbols):
         if not isinstance(raw, str):
             raise AgentToolError(
@@ -302,8 +302,11 @@ def _normalize_symbols(raw_symbols: Any, *, path: str, market: str) -> list[str]
         symbol = _normalize_symbol(raw, path=f"{path}[{index}]")
         _ensure_symbol_market(symbol, market=market, path=f"{path}[{index}]")
         if symbol in seen:
-            raise AgentToolError(code="CONFIG_ERROR", message=f"duplicate symbol in {path}: {symbol}")
-        seen.add(symbol)
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message=f"duplicate symbol in {path}: {seen[symbol]!r} and {raw!r} resolve to {symbol}",
+            )
+        seen[symbol] = raw
         out.append(symbol)
     return out
 
@@ -756,6 +759,7 @@ def yaml_to_market_user_config(raw_cfg: dict[str, Any], *, market: str) -> dict[
         raise AgentToolError(code="CONFIG_ERROR", message=f"markets.{normalized_market}.overrides must be an object")
 
     overrides: dict[str, dict[str, Any]] = {}
+    override_source_keys: dict[str, Any] = {}
     symbol_set = set(symbols)
     for raw_symbol, raw_override in overrides_raw.items():
         symbol = _normalize_symbol(raw_symbol, path=f"markets.{normalized_market}.overrides.<key>")
@@ -769,6 +773,15 @@ def yaml_to_market_user_config(raw_cfg: dict[str, Any], *, market: str) -> dict[
                 code="CONFIG_ERROR",
                 message=f"markets.{normalized_market}.overrides.{symbol} must also appear in symbols",
             )
+        if symbol in override_source_keys:
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message=(
+                    f"duplicate symbol in markets.{normalized_market}.overrides: "
+                    f"{override_source_keys[symbol]!r} and {raw_symbol!r} resolve to {symbol}"
+                ),
+            )
+        override_source_keys[symbol] = raw_symbol
         overrides[symbol] = _normalize_symbol_override(
             raw_override,
             path=f"markets.{normalized_market}.overrides.{symbol}",
@@ -815,7 +828,9 @@ def market_user_config_fingerprint(user_config: dict[str, Any], *, market: str) 
     return {**identity, "sha256": hashlib.sha256(body).hexdigest()}
 
 
-def _yaml_rebuild_command(*, config_path: Path, market: str, output_path: Path | None = None) -> str:
+def _yaml_rebuild_command(
+    *, config_path: Path, market: str, system_path: Path | None = None, output_path: Path | None = None,
+) -> str:
     command = [
         "./om",
         "config",
@@ -827,6 +842,8 @@ def _yaml_rebuild_command(*, config_path: Path, market: str, output_path: Path |
         "--config-yaml",
         str(config_path),
     ]
+    if system_path is not None:
+        command.extend(["--system-config", str(system_path)])
     if output_path is not None:
         command.extend(["--output", str(output_path)])
     return " ".join(shlex.quote(part) for part in command)
@@ -893,6 +910,7 @@ def _build_yaml_generated_metadata(
         "rebuild_command": _yaml_rebuild_command(
             config_path=yaml_path,
             market=market,
+            system_path=system_path,
             output_path=output_path,
         ),
     }
@@ -986,6 +1004,7 @@ def build_yaml_runtime_config_file(
     cfg[GENERATED_KEY]["rebuild_command"] = _yaml_rebuild_command(
         config_path=Path(meta["config_yaml_path"]),
         market=normalized_market,
+        system_path=Path(meta["system_config_path"]) if meta["system_config_ref"] != DEFAULT_CONFIG_REF else None,
         output_path=output_path,
     )
 

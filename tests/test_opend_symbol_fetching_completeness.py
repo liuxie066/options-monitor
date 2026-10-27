@@ -80,6 +80,7 @@ def _install_symbol_dependencies(monkeypatch, *, chain_bundle: SymbolOptionChain
 
     monkeypatch.setattr(mod, "get_trading_date", lambda _market: date(2026, 5, 20))
     monkeypatch.setattr(mod, "fetch_symbol_option_chain", lambda **_kwargs: chain_bundle)
+    monkeypatch.setattr("src.application.opend_utils.load_runtime_symbol_aliases", lambda *_: {})
 
 
 def _fetch_symbol_request(tmp_path: Path, **overrides):
@@ -512,6 +513,9 @@ def test_provider_shaped_contract_rows_preserve_ready_and_minimal_failure_scope(
         }
         for code in (ready_code, conflict_code)
     }
+    for snapshot in snapshots.values():
+        snapshot["snapshot_requested_at_utc"] = observed_now.isoformat()
+        snapshot["snapshot_received_at_utc"] = observed_now.isoformat()
     monkeypatch.setattr(
         mod,
         "fetch_option_snapshots",
@@ -555,6 +559,11 @@ def test_provider_shaped_contract_rows_preserve_ready_and_minimal_failure_scope(
     assert rows[ready_code]["multiplier"] == 100
     assert rows[ready_code]["mid"] == 1.1
     assert rows[ready_code]["open_interest"] == 0
+    assert rows[ready_code]["delta"] == -0.2
+    assert rows[ready_code]["delta_source"] == "opend_market_snapshot.option_delta"
+    assert rows[ready_code]["delta_unit"] == "fraction"
+    assert rows[ready_code]["delta_reason_code"] is None
+    assert rows[ready_code]["snapshot_received_at_utc"] == observed_now.isoformat()
     assert rows[conflict_code]["opening_contract_status"] == "data_unavailable"
     assert "option_multiplier_conflict" in rows[conflict_code][
         "opening_contract_reason_codes"

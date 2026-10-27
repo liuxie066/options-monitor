@@ -14,7 +14,7 @@ from typing import Any, Mapping
 from domain.domain.symbol_identity import resolve_symbol_identity
 
 
-CURSOR_VERSION = 1
+CURSOR_VERSION = 2
 CURSOR_TTL_SECONDS = 30 * 60
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 20
@@ -224,6 +224,7 @@ def new_stream_state(
     query: Mapping[str, Any],
     authority_scope: Mapping[str, Any],
     snapshot_max_ingest_seq: int,
+    snapshot_order_revision: str,
     as_of: str,
 ) -> dict[str, Any]:
     canonical_query = {name: query.get(name) for name in _QUERY_FIELDS}
@@ -235,6 +236,7 @@ def new_stream_state(
         "authority_scope": dict(authority_scope),
         "order": TRADE_EVENT_ORDER,
         "snapshot_max_ingest_seq": int(snapshot_max_ingest_seq),
+        "snapshot_order_revision": snapshot_order_revision,
         "last_trade_time_ms": None,
         "last_event_id": None,
         "stream_id": f"tev_{uuid.uuid4().hex}",
@@ -248,7 +250,7 @@ def validate_cursor_state(
     authority_scope: Mapping[str, Any],
 ) -> dict[str, Any]:
     if state.get("version") != CURSOR_VERSION:
-        raise _cursor_mismatch("cursor version mismatch")
+        raise _cursor_mismatch("cursor version mismatch; start a new query (new results may overlap)")
     if state.get("tool") != TRADE_EVENT_TOOL or state.get("action") != TRADE_EVENT_ACTION:
         raise _cursor_mismatch("cursor tool mismatch")
     if state.get("order") != TRADE_EVENT_ORDER:
@@ -265,6 +267,9 @@ def validate_cursor_state(
     fence = _required_int(state, "snapshot_max_ingest_seq")
     if fence < 0:
         raise _cursor_mismatch("cursor snapshot boundary is invalid")
+    revision = state.get("snapshot_order_revision")
+    if not isinstance(revision, str) or len(revision) != 64 or any(char not in "0123456789abcdef" for char in revision):
+        raise _cursor_mismatch("cursor order revision is invalid; start a new query (new results may overlap)")
     last_trade_time_ms = state.get("last_trade_time_ms")
     last_event_id = state.get("last_event_id")
     if (last_trade_time_ms is None) != (last_event_id is None):

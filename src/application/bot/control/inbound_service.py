@@ -4,7 +4,7 @@ import time
 from dataclasses import replace
 
 import json
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
@@ -94,35 +94,7 @@ def handle_bot_request(
             response=response, error_code=sender_error.code,
         )
     if existing is not None:
-        if str(existing.get("sender_id") or "") != normalized_request.sender_id:
-            store.mark_duplicate(
-                command_id=str(existing.get("command_id") or ""),
-                sender_id=normalized_request.sender_id,
-                decision="sender_conflict",
-            )
-            return _error_response(
-                command_id=command_id,
-                request=normalized_request,
-                err=AgentToolError(
-                    code="PERMISSION_DENIED",
-                    message="message_id was already used by a different sender",
-                ),
-            )
-        try:
-            current = resolve_replay_authorization(normalized_request)
-            frozen = json.loads(existing.get("replay_authorization_json") or "null")
-        except (AgentToolError, BotConfigScopeError, OSError, ValueError):
-            current, frozen = None, None
-        if not current or not isinstance(frozen, dict) or not frozen.get("scope") or frozen != current:
-            store.mark_duplicate(command_id=str(existing.get("command_id") or ""),
-                                 sender_id=normalized_request.sender_id, decision="scope_conflict")
-            return _error_response(command_id=command_id, request=normalized_request,
-                err=AgentToolError(code="CHANNEL_NOT_READY", message="原消息的作用域无法验证；请发送新消息。"), audit_db=store.path)
-        store.mark_duplicate(
-            command_id=str(existing.get("command_id") or ""),
-            sender_id=normalized_request.sender_id,
-        )
-        return _duplicate_response(existing)
+        return _replay_existing(store, normalized_request, existing, command_id=command_id)
 
     try:
         authorization = resolve_replay_authorization(normalized_request)
@@ -134,111 +106,151 @@ def handle_bot_request(
     normalized_request = replace(normalized_request, replay_authorization=authorization)
 
     created_at = utc_now_iso()
+    audit_request = normalized_request
+    placeholder = _claim_response(normalized_request, command_id, store, status="processing")
+    record = _audit_record(request=normalized_request, command_id=command_id, created_at=created_at,
+                           command=None, control=None, decision="processing", response=placeholder)
+    remaining = max(0.0, normalized_request.received_monotonic + 180 - time.monotonic())
+    record["execution_expires_at_utc"] = (datetime.now(timezone.utc) + timedelta(seconds=remaining)).isoformat()
+    try:
+        claim = store.claim_message(record)
+    except AgentToolError as err:
+        return _error_response(command_id=command_id, request=normalized_request, err=err, audit_db=store.path)
+    if not claim["claimed"]:
+        return _replay_existing(store, normalized_request, claim["existing"], command_id=command_id)
+    token = claim["token"]
     command: ControlCommand | None = None
     control: ControlExecution | None = None
-    response: dict[str, Any]
     decision = "unknown"
     error_code: str | None = None
+    business_started = False
 
     try:
-        _check_request_deadline(normalized_request)
-        replacement = analysis_control_replacement(normalized_request.text) if normalized_request.channel == "feishu" else None
-        if replacement is not None:
-            outcome = cancel_channel_analysis(request=normalized_request, audit_store=store)
-            if not replacement or outcome["status"] == "not_ready":
-                message = {"cancelled": "已请求取消当前分析；迟到结果不会作为新回答提交。",
-                    "completed": "该分析已完成，已提交的回复不会撤回。",
-                    "no_active_run": "当前没有正在运行的分析。",
-                    "not_ready": "当前分析作用域不可用，本次未取消或替换。"}[outcome["status"]]
-                response = build_response(tool_name="bot.handle", ok=outcome["status"] != "not_ready",
-                    data={"command_id": command_id, "request": normalized_request.public_payload(),
-                        "decision": {"allowed": True, "reason": "analysis_control"}, "response_text": message,
-                        "analysis_control": {key: outcome[key] for key in ("status", "target_run_id")}},
-                    meta={"audit_db": mask_path(store.path)})
-                return _record_and_return(store=store, request=normalized_request, command_id=command_id,
-                    created_at=created_at, command=None, control=None, decision="analysis_control", response=response)
-            normalized_request = replace(normalized_request, text=replacement)
-        command = _parse_command(
-            normalized_request,
-            store=store,
-            now_fn=now_fn,
-            parse_command_fn=parse_command_fn,
-        )
-        _check_request_deadline(normalized_request)
-        if command is None:
-            bot_result = _run_bot(normalized_request, command_id=command_id, audit_db=store.path)
-            if bot_result.ok and bot_result.status == "control_requested" and bot_result.control_request:
+        try:
+            _check_request_deadline(normalized_request)
+            replacement = analysis_control_replacement(normalized_request.text) if normalized_request.channel == "feishu" else None
+            cancel_only = False
+            if replacement is not None:
+                business_started = True
+                outcome = cancel_channel_analysis(request=normalized_request, audit_store=store,
+                                                  claim_command_id=command_id, claim_token=token)
+                if not replacement or outcome["status"] == "not_ready":
+                    message = {"cancelled": "已请求取消当前分析；迟到结果不会作为新回答提交。",
+                        "completed": "该分析已完成，已提交的回复不会撤回。",
+                        "no_active_run": "当前没有正在运行的分析。",
+                        "already_processed": "原消息已经处理，本次未再次取消或替换。",
+                        "not_ready": "当前分析作用域不可用，本次未取消或替换。"}[outcome["status"]]
+                    response = build_response(tool_name="bot.handle", ok=outcome["status"] not in {"not_ready", "already_processed"},
+                        data={"command_id": command_id, "request": normalized_request.public_payload(),
+                            "decision": {"allowed": True, "reason": "analysis_control"}, "response_text": message,
+                            "analysis_control": {key: outcome[key] for key in ("status", "target_run_id")}},
+                        meta={"audit_db": mask_path(store.path)})
+                    decision = "analysis_control"
+                    cancel_only = True
+                else:
+                    normalized_request = replace(normalized_request, text=replacement)
+            if not cancel_only:
+                command = _parse_command(normalized_request, store=store, now_fn=now_fn, parse_command_fn=parse_command_fn)
                 _check_request_deadline(normalized_request)
-                command = _control_command_from_bot(bot_result.control_request)
-                control = execute_explicit_control(
-                    command,
-                    request=(replace(normalized_request, conversation_id=request.conversation_id)
-                             if command.intent_name.startswith("attribution_") else normalized_request),
-                    command_id=command_id,
-                    operation_store=InboundOperationStore(store.path),
-                    execute_tool_fn=execute_tool_fn,
-                )
-                response = _success_response(
-                    command_id=command_id,
-                    request=normalized_request,
-                    control=control,
-                    sender_decision=sender_decision.public_payload(),
-                    audit_db=store.path,
-                )
-                data = response.get("data") if isinstance(response.get("data"), dict) else {}
-                data["bot"] = _bot_result_payload(bot_result)
-                response["data"] = data
-                decision = _decision_for_control(control)
-            else:
-                response = _bot_response(
-                    normalized_request,
-                    command_id=command_id,
-                    audit_db=store.path,
-                    result=bot_result,
-                )
-                decision = "bot"
-            return _record_and_return(
-                store=store,
-                request=normalized_request,
-                command_id=command_id,
-                created_at=created_at,
-                command=command,
-                control=control,
-                decision=decision,
-                response=response,
-            )
-        control = execute_explicit_control(
-            command,
-            request=(replace(normalized_request, conversation_id=request.conversation_id)
-                     if command.intent_name.startswith("attribution_") else normalized_request),
-            command_id=command_id,
-            operation_store=InboundOperationStore(store.path),
-            execute_tool_fn=execute_tool_fn,
+                bot_result = None
+                if command is None:
+                    business_started = True
+                    bot_result = _run_bot(normalized_request, command_id=command_id, audit_db=store.path)
+                    if bot_result.ok and bot_result.status == "control_requested" and bot_result.control_request:
+                        _check_request_deadline(normalized_request)
+                        command = _control_command_from_bot(bot_result.control_request)
+                if command is not None:
+                    business_started = True
+                    control = execute_explicit_control(
+                        command,
+                        request=(replace(normalized_request, conversation_id=request.conversation_id)
+                                 if command.intent_name.startswith("attribution_") else normalized_request),
+                        command_id=command_id, operation_store=InboundOperationStore(store.path), execute_tool_fn=execute_tool_fn,
+                    )
+                    response = _success_response(command_id=command_id, request=normalized_request, control=control,
+                                                 sender_decision=sender_decision.public_payload(), audit_db=store.path)
+                    if bot_result is not None:
+                        response["data"]["bot"] = _bot_result_payload(bot_result)
+                    decision = _decision_for_control(control)
+                else:
+                    response = _bot_response(normalized_request, command_id=command_id, audit_db=store.path, result=bot_result)
+                    decision = "bot"
+        except AgentToolError as err:
+            error_code = err.code
+            response = _error_response(command_id=command_id, request=normalized_request, err=err, audit_db=store.path)
+            decision = _decision_for_error(err)
+
+        # Finalization is outside business-error handling; never INSERT/re-execute after failed CAS.
+        return _record_and_return(store=store, request=audit_request, command_id=command_id, created_at=created_at,
+                                  command=command, control=control, decision=decision, response=response,
+                                  error_code=error_code, claim_token=token)
+    except (Exception, KeyboardInterrupt, SystemExit) as exc:
+        response = _claim_response(audit_request, command_id, store, status="incomplete", business_started=business_started)
+        try:
+            store.interrupt_message(command_id=command_id, token=token, response=response)
+        except Exception:
+            pass  # A durable processing claim still prevents replay if SQLite is unavailable.
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        return response
+
+
+def _replay_existing(store: InboundAuditStore, normalized_request: BotInboundRequest,
+                     existing: dict[str, Any], *, command_id: str) -> dict[str, Any]:
+    if str(existing.get("sender_id") or "") != normalized_request.sender_id:
+        store.mark_duplicate(
+            command_id=str(existing.get("command_id") or ""),
+            sender_id=normalized_request.sender_id,
+            decision="sender_conflict",
         )
-        response = _success_response(
+        return _error_response(
             command_id=command_id,
             request=normalized_request,
-            control=control,
-            sender_decision=sender_decision.public_payload(),
-            audit_db=store.path,
+            err=AgentToolError(
+                code="PERMISSION_DENIED",
+                message="message_id was already used by a different sender",
+            ),
         )
-        decision = _decision_for_control(control)
-    except AgentToolError as err:
-        error_code = err.code
-        response = _error_response(command_id=command_id, request=normalized_request, err=err, audit_db=store.path)
-        decision = _decision_for_error(err)
-
-    return _record_and_return(
-        store=store,
-        request=normalized_request,
-        command_id=command_id,
-        created_at=created_at,
-        command=command,
-        control=control,
-        decision=decision,
-        response=response,
-        error_code=error_code,
+    try:
+        current = resolve_replay_authorization(normalized_request)
+        frozen = json.loads(existing.get("replay_authorization_json") or "null")
+    except (AgentToolError, BotConfigScopeError, OSError, ValueError):
+        current, frozen = None, None
+    if not current or not isinstance(frozen, dict) or not frozen.get("scope") or frozen != current:
+        store.mark_duplicate(command_id=str(existing.get("command_id") or ""),
+                             sender_id=normalized_request.sender_id, decision="scope_conflict")
+        return _error_response(command_id=command_id, request=normalized_request,
+            err=AgentToolError(code="CHANNEL_NOT_READY", message="原消息的作用域无法验证；请发送新消息。"), audit_db=store.path)
+    store.mark_duplicate(
+        command_id=str(existing.get("command_id") or ""),
+        sender_id=normalized_request.sender_id,
     )
+    state = existing.get("execution_state") or "completed"
+    if state != "completed":
+        status = "incomplete"
+        if state == "processing":
+            try:
+                expires = datetime.fromisoformat(existing.get("execution_expires_at_utc") or "")
+                if expires > datetime.now(timezone.utc):
+                    status = "processing"
+            except (TypeError, ValueError):
+                pass
+        return _claim_response(normalized_request, str(existing["command_id"]), store, status=status)
+    return _duplicate_response(existing)
+
+
+
+def _claim_response(request: BotInboundRequest, command_id: str, store: InboundAuditStore, *,
+                    status: str, business_started: bool = True) -> dict[str, Any]:
+    code = "INBOUND_PROCESSING" if status == "processing" else "INBOUND_INCOMPLETE"
+    message = ("原消息处理中，本次未再次执行，可稍后查询同一消息。" if status == "processing" else
+               ("原消息业务结果未确认；本次未再次执行。请按 command_id 核查已有操作记录、工具读回和送达回执；未知时勿重新执行。"
+                if business_started else "原消息未进入业务执行，但结果未保存完成；本次未再次执行，请先核查 command_id。"))
+    response = _error_response(command_id=command_id, request=request,
+                              err=AgentToolError(code=code, message=message), audit_db=store.path)
+    response["data"].update(status=status, response_text=message)
+    response["meta"].update(idempotent_replay=True, original_command_id=command_id)
+    return response
 
 
 def _check_request_deadline(request: BotInboundRequest) -> None:
@@ -439,19 +451,27 @@ def _success_response(
 
 
 def _record_and_return(
-    *,
-    store: InboundAuditStore,
-    request: BotInboundRequest,
-    command_id: str,
-    created_at: str,
-    command: ControlCommand | None,
-    control: ControlExecution | None,
-    decision: str,
-    response: dict[str, Any],
-    error_code: str | None = None,
+    *, store: InboundAuditStore, request: BotInboundRequest, command_id: str, created_at: str,
+    command: ControlCommand | None, control: ControlExecution | None, decision: str,
+    response: dict[str, Any], error_code: str | None = None, claim_token: str | None = None,
 ) -> dict[str, Any]:
-    store.record_result(
-        {
+    record = _audit_record(request=request, command_id=command_id, created_at=created_at, command=command,
+                           control=control, decision=decision, response=response, error_code=error_code)
+    if claim_token is None:
+        try:
+            store.record_result(record)
+        except AgentToolError as err:
+            return _error_response(command_id=command_id, request=request, err=err, audit_db=store.path)
+    elif not store.complete_message(record, claim_token):
+        raise AgentToolError(code="CONFIG_ERROR", message="inbound claim completion was not saved")
+    return response
+
+
+def _audit_record(
+    *, request: BotInboundRequest, command_id: str, created_at: str, command: ControlCommand | None,
+    control: ControlExecution | None, decision: str, response: dict[str, Any], error_code: str | None = None,
+) -> dict[str, Any]:
+    return {
             "command_id": command_id,
             "channel": request.channel,
             "sender_id": request.sender_id,
@@ -471,8 +491,6 @@ def _record_and_return(
             "created_at": created_at,
             "finished_at": utc_now_iso(),
         }
-    )
-    return response
 
 
 def _duplicate_response(existing: dict[str, Any]) -> dict[str, Any]:

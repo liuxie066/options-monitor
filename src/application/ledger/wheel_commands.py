@@ -19,6 +19,7 @@ from domain.domain.wheel.config import (
     resolve_wheel_activation_request, wheel_activation_window_descriptor,
 )
 
+from domain.domain.wheel.projection import effective_wheel_events
 from domain.domain.risk_capacity import revalidate_opening_share_coverage
 from domain.domain.portfolio_scope import portfolio_scope_id
 from domain.domain.wheel import (
@@ -384,6 +385,22 @@ def _intent_summaries(
             if str(item.get("event_id") or "").strip()
         },
     )
+
+
+def _require_effective_intent_cancellation(
+    rows: Mapping[str, Any], event: Mapping[str, Any], *, direction: str, as_of_ms: int,
+) -> None:
+    events = rows.get("account_wheel_events") or []
+    effective, _invalid = effective_wheel_events(events, as_of_ms=as_of_ms)
+    intents = project_wheel_intents(
+        events, account=event["account"],
+        wheel_branch_id=event.get("wheel_branch_id") or event["stock_lot_id"],
+        direction=direction, as_of_ms=as_of_ms,
+        known_trade_event_ids={str(item.get("event_id") or "") for item in rows.get("trade_events") or []},
+    )
+    if (not any(item["event_id"] == event["event_id"] for item in effective)
+            or not any(item["intent_id"] == event["intent_id"] and item["status"] == "cancelled" for item in intents)):
+        raise ValueError("Wheel intent cancellation is no longer effective; use a new request_id")
 
 
 def _snapshot_final_candidate(
@@ -1052,6 +1069,7 @@ def cancel_wheel_intent(
                     != market_value
                 ):
                     raise ValueError("Wheel Put intent cancellation identity conflicts")
+                _require_effective_intent_cancellation(rows, existing[0], direction="put", as_of_ms=instant)
                 return _canonical_wheel_result(
                     _intent_result(
                         existing[0],
@@ -2071,6 +2089,7 @@ def _cancel_wheel_call_intent(
                 != market_value
             ):
                 raise ValueError("Wheel Call intent cancellation identity conflicts")
+            _require_effective_intent_cancellation(rows, existing[0], direction="call", as_of_ms=instant)
             return _intent_result(
                 existing[0],
                 status="idempotent",

@@ -36,7 +36,8 @@ def analysis_control_replacement(text: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
-def cancel_channel_analysis(*, request: Any, audit_store: Any) -> dict[str, Any]:
+def cancel_channel_analysis(*, request: Any, audit_store: Any,
+                            claim_command_id: str | None = None, claim_token: str | None = None) -> dict[str, Any]:
     # Sender authorization is performed by the inbound owner before this facade.
     if not request.message_id or not request.sender_id or request.channel != "feishu":
         raise AgentToolError(code="INPUT_ERROR", message="analysis control identity unavailable")
@@ -60,6 +61,8 @@ def cancel_channel_analysis(*, request: Any, audit_store: Any) -> dict[str, Any]
     return audit_store.record_analysis_control_once(channel=request.channel, sender_id=request.sender_id,
         conversation_id=request.conversation_id or f"{request.channel}:{request.sender_id}",
         message_id=request.message_id, text=request.text,
+        claim_command_id=claim_command_id, claim_token=claim_token,
+        claim_authorization=request.replay_authorization if claim_token is not None else None,
         scope=session_key, resolve=lambda connection: store.cancel_session_run(session_key,
             connection=connection, trusted_identity=identity))
 

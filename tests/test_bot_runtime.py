@@ -118,6 +118,38 @@ def test_duplicate_freeform_message_reuses_audited_response(monkeypatch, tmp_pat
     assert second.meta["idempotent_replay"] is True
 
 
+@pytest.mark.parametrize("status,fee_mode", [("observed", "actual"), ("partial", "actual"), ("estimated", "simulated")])
+def test_option_performance_renderer_separates_period_cash_and_cohort(status, fee_mode) -> None:
+    from test_option_performance_agent_tool import _report
+
+    data = _report()
+    data["period_option_net_cashflow"].update(
+        status=status, fee_mode=fee_mode, missing=["fee_missing"] if status == "partial" else [],
+        by_currency={"USD": {
+            "total": {"amount": -302, "status": status, "missing": []},
+            "gross": {"amount": -300, "status": "observed", "missing": []},
+            "fees": {"amount": -2, "status": status, "missing": []},
+        }},
+        cny_total={"amount": None, "status": "partial", "missing": ["cash_conversion_missing"]},
+    )
+    data["option_net_cashflow"]["by_currency"] = {"USD": {
+        name: {"amount": amount, "status": "observed", "missing": []}
+        for name, amount in (("total", 200), ("open", 200), ("terminated", 0))
+    }}
+    text = render_canonical_tool_result(renderer_key="option_performance", tool_result={"ok": True}, data=data)
+    period_line = next(line for line in text.splitlines() if line.startswith("- 期间期权净现金流"))
+    assert "成交现金 -300.00" in period_line
+    assert "未终止" not in period_line and "已终止" not in period_line
+    assert "开仓批次期权现金结果：USD 合计 200.00" in text
+    assert "折合 CNY 合计 -（证据不完整）" in period_line
+    if status == "partial":
+        assert "合计 -（证据不完整）" in period_line and "fee_missing" in period_line
+        assert "-302.00" not in period_line
+    else:
+        assert "合计 -302.00" in period_line and "费用现金 -2.00" in period_line
+    assert ("模拟费用口径" in period_line) == (fee_mode == "simulated")
+
+
 def test_option_performance_renderer_uses_only_canonical_metrics() -> None:
     text = render_canonical_tool_result(
         renderer_key="option_performance",
@@ -175,12 +207,13 @@ def test_option_performance_renderer_uses_only_canonical_metrics() -> None:
     )
 
     assert text.startswith("期权收益统计完成（lx、sy；broker futu，MTD，2026-07-01 至 2026-07-23）")
-    assert "期权净现金流：USD 合计 799.65，未终止 500.00，已终止 299.65；折合 CNY 合计 ¥5,757.48" in text
+    assert "期间期权净现金流：不可用（服务未提供期间现金指标）" in text
+    assert "开仓批次期权现金结果：USD 合计 799.65，未终止 500.00，已终止 299.65；折合 CNY 合计 ¥5,757.48" in text
     assert "卖方胜率：75.00%（3/4 张）" in text
     assert "买方胜率：-（0/0 张）（不适用）" in text
     assert "日均占用：USD 12,345.67" in text
     assert "不是收益率分母" in text
-    assert "与实际日均未了结占用本金" in text
+    assert "与期间现金不可相加" in text
     assert "期权收益率：USD 期间 12.00%，年化 24.00%" in text
     assert "terminal_evidence_missing" in text
     assert "不提供 option PnL" in text
@@ -256,3 +289,82 @@ def test_option_performance_daily_capital_never_falls_back_to_return_denominator
     assert expected in text
     assert "999999" not in text
     assert "期权收益率：USD 期间 12.00%，年化 24.00%" in text
+
+
+@pytest.mark.parametrize("reason", ["actual_fee_missing", "fee_estimated", "fee_missing", "exercise_fee_missing"])
+def test_performance_fee_uncertainty_is_scoped_and_does_not_invent_sync_state(reason):
+    from copy import deepcopy
+    from test_option_performance_agent_tool import _report
+
+    data = _report()
+    data["quality"].update(status="partial", missing=[reason, "terminal_evidence_missing", "cash_conversion_missing"])
+    def metric(amount, status="observed", missing=None):
+        return {"amount": amount, "status": status, "missing": missing or []}
+    data["period_option_net_cashflow"].update(
+        status="partial", missing=[reason], by_currency={
+            "USD": {"gross": metric(100), "fees": metric(None, "partial", [reason]),
+                    "total": metric(None, "partial", [reason])},
+            "HKD": {"gross": metric(200), "fees": metric(-2), "total": metric(198)},
+        },
+    )
+    data["option_net_cashflow"]["by_currency"] = {"USD": {
+        "total": metric(None, "partial", [reason, "terminal_evidence_missing"]),
+        "open": metric(None, "partial", [reason]), "terminated": metric(0),
+    }}
+    before = deepcopy(data)
+    text = render_canonical_tool_result(renderer_key="option_performance", tool_result={"ok": True}, data=data)
+    assert data == before
+    assert "统计截止：2026-09-02T23:59:59.999+08:00" in text
+    assert "HKD 合计 198.00，成交现金 200.00，费用现金 -2.00" in text
+    assert "USD 合计 -（实际手续费尚未确认，原因待核）" in text
+    assert "成交现金 100.00" in text
+    assert reason in text and "cash_conversion_missing" in text and "terminal_evidence_missing" in text
+    assert "待同步" not in text and "重建" not in text
+    assert "数据同步截至" not in text
+
+
+@pytest.mark.parametrize("reason", [None, "cash_conversion_missing", "terminal_evidence_missing"])
+def test_performance_renderer_does_not_turn_other_or_absent_gaps_into_fee_pending(reason):
+    from test_option_performance_agent_tool import _report
+
+    data = _report()
+    status = "partial" if reason else "observed"
+    data["quality"].update(status=status, missing=[reason] if reason else [])
+    data["period_option_net_cashflow"]["by_currency"] = {"USD": {
+        key: {"amount": None if reason else amount, "status": status,
+              "missing": [reason] if reason else []}
+        for key, amount in (("total", 98), ("gross", 100), ("fees", -2))
+    }}
+    data.pop("freshness")
+    text = render_canonical_tool_result(renderer_key="option_performance", tool_result={"ok": True}, data=data)
+    assert "实际手续费尚未确认" not in text and "待同步" not in text
+    assert "统计截止" not in text
+    if reason is None:
+        assert "费用现金 -2.00" in text
+
+
+
+def test_performance_cny_fee_gap_does_not_claim_missing_conversion():
+    from test_option_performance_agent_tool import _report
+    from test_performance_period_cashflow import _conversion, _event, _reduce
+    from src.application.performance.service import _json_value
+
+    # Recorded conversion exists for both native cash facts; only actual fee is unconfirmed.
+    event = _event(currency="USD", fee=2, basis="estimated", raw={"cash_conversions": {
+        "option_trade_cash_gross": _conversion("option_trade_cash_gross:open", 200),
+        "option_fee_cash": _conversion("option_fee_cash:open", -2),
+    }})
+    period_cash, _ = _reduce([event])
+    assert period_cash["cny_total"]["amount"] is None
+    assert period_cash["cny_total"]["missing"] == ("actual_fee_missing",)
+    data = _report()
+    data["period_option_net_cashflow"] = _json_value(period_cash)
+    data["option_net_cashflow"]["cny_total"] = {
+        "amount": None, "status": "partial", "missing": ["fee_estimated"],
+    }
+    data["quality"].update(status="partial", missing=["actual_fee_missing", "fee_estimated"])
+    text = render_canonical_tool_result(renderer_key="option_performance", tool_result={"ok": True}, data=data)
+    assert text.count("折合 CNY 合计 -（证据不完整）") == 2
+    assert "折算证据不完整" not in text
+    assert "actual_fee_missing" in text and "fee_estimated" in text
+    assert "cash_conversion_missing" not in text

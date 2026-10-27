@@ -83,6 +83,8 @@ read view 可以展示明确标注的 estimated fee；这些正股指标不进�
 CC 只有在显式 `stock_lot_id` 关联，或完全可证明的 assigned-stock FIFO
 场景下才归属；mixed ordinary/assigned inventory 会 fail closed。
 
+按历史时点读取时，期权终结与正股交割分别按各自生效时间判断。期权可以已经终结，正股买入或卖出在内嵌交割时间到达前仍不进入库存与现金投影；撤销图和交割身份验证保持有效。
+
 ## CNY 与 FX 证据
 
 现金 CNY 和非现金 PnL/估值 CNY 是两条合同：
@@ -102,6 +104,8 @@ CC 只有在显式 `stock_lot_id` 关联，或完全可证明的 assigned-stock 
 4. activity、PnL 和 valuation 的 CNY 使用
    `option_performance_evidence.v1` FX facts，并受自己的 as-of 与 stale gate
    约束。这里的 FX evidence 不能反向替代现金 booking snapshot。
+
+分配型正股销售的父事件与各 lot 子分配各有独立现金事实。历史回填及显式 superseding FX 纠正在同一父事件事务中逐项更新，审计绑定各自的旧、新 conversion；预览不写入，重试不重复修复。
 
 所以 `activity.premium_collected_gross.cny` 与
 `cash.option_trade_cash_gross.cny` 可能有不同 evidence path。缺证据时保留原币，

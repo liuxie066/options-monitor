@@ -13,7 +13,9 @@ repo_base = Path(__file__).resolve().parents[2]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
-from domain.domain.engine import CandidateCalculationError, calculate_opening_candidate_metrics
+from domain.domain.engine import CandidateCalculationError
+from domain.domain.engine.candidate_engine import _decision_now
+from domain.domain.strategy_core import ResolvedStrategy, calculate_metrics, normalize_decision_time
 from domain.domain.candidate_defaults import (
     DEFAULT_CANDIDATE_LIQUIDITY,
     DEFAULT_SELL_CALL_WINDOW,
@@ -25,7 +27,8 @@ from domain.domain.sell_call_config import (
     validate_min_strike_cost_multiplier,
 )
 from domain.domain.strategy_vocab import STRATEGY_COVERED_CALL, strategy_display_name
-from domain.domain.risk_capacity import compute_sell_call_share_capacity
+from domain.domain import strategy_core
+from domain.domain.currency_conversion import CurrencyConverter, ExchangeRates
 from src.application.candidate_scanning import (
     CandidateScanConfig,
     CandidateScanDependencies,
@@ -52,11 +55,11 @@ def compute_metrics(
 ) -> dict[str, Any] | None:
     contract = _normalize_contract_input(contract)
     try:
-        metrics = calculate_opening_candidate_metrics(
+        metrics = calculate_metrics(
             contract.to_gate_payload(),
             mode="call",
             avg_cost=avg_cost,
-            now_utc=now_utc,
+            now_utc=_decision_now(now_utc),
         )
     except CandidateCalculationError:
         return None
@@ -74,11 +77,11 @@ def explain_metrics_rejection(
 ) -> dict[str, Any] | None:
     contract = _normalize_contract_input(contract)
     try:
-        calculate_opening_candidate_metrics(
+        calculate_metrics(
             contract.to_gate_payload(),
             mode="call",
             avg_cost=avg_cost,
-            now_utc=now_utc,
+            now_utc=_decision_now(now_utc),
         )
     except CandidateCalculationError as exc:
         return exc.to_payload()
@@ -122,16 +125,15 @@ def _resolve_sell_call_contract_capacity(
     shares_can_sell: int,
     shares_locked: int,
 ) -> tuple[int, int, bool]:
-    capacity = compute_sell_call_share_capacity(
-        shares_total=shares,
-        shares_can_sell=shares_can_sell,
-        shares_locked=shares_locked,
-        multiplier=multiplier,
+    capacity = strategy_core.calculate_capacity(
+        {"multiplier": multiplier}, mode="call",
+        capacity_inputs=strategy_core.CallCapacityInputs(shares, shares_can_sell, shares_locked),
+        exchange_rate_converter=CurrencyConverter(ExchangeRates()),
     )
     return (
-        int(capacity.shares_available_for_cover),
-        int(capacity.covered_contracts_available),
-        bool(capacity.is_fully_covered_available),
+        int(capacity["shares_available_for_cover"]),
+        int(capacity["covered_contracts_available"]),
+        bool(capacity["is_fully_covered_available"]),
     )
 
 
@@ -237,6 +239,7 @@ def run_sell_call_scan(
     ) = None,
     quote_freshness_now_utc: datetime | None = None,
     required_data_frames: Mapping[str, pd.DataFrame] | None = None,
+    resolved_strategy: ResolvedStrategy | None = None,
     demo_capacity: bool = False,
 ) -> pd.DataFrame:
     """计算 CC 候选，并返回类型化内存结果。"""
@@ -267,9 +270,11 @@ def run_sell_call_scan(
         source="--min-annualized-net-return",
     )
     cost_multiplier = validate_min_strike_cost_multiplier(
-        min_strike_cost_multiplier,
+        resolved_strategy.config.min_strike_cost_multiplier if resolved_strategy is not None else min_strike_cost_multiplier,
         source="--min-strike-cost-multiplier",
     )
+    if resolved_strategy is not None:
+        min_strike = resolved_strategy.config.min_strike
     effective_min_strike = (
         min_strike
         if demo_capacity
@@ -279,7 +284,9 @@ def run_sell_call_scan(
             cost_multiplier=cost_multiplier,
         )
     )
-    scan_now_utc = quote_freshness_now_utc or datetime.now(timezone.utc)
+    scan_now_utc = normalize_decision_time(
+        quote_freshness_now_utc if quote_freshness_now_utc is not None else datetime.now(timezone.utc)
+    )
     return run_candidate_scan(
         config=CandidateScanConfig(
             mode="call",
@@ -297,6 +304,8 @@ def run_sell_call_scan(
             strategy_family=strategy_family,
             strategy_profile=strategy_profile,
             required_data_frames=required_data_frames,
+            resolved_strategy=resolved_strategy,
+            decision_now_utc=scan_now_utc.astimezone(timezone.utc).isoformat(),
         ),
         deps=CandidateScanDependencies(
             compute_metrics_fn=_make_compute_metrics(

@@ -4,7 +4,7 @@
 >
 > 权威范围：CSP / CC 的召回、数据、筛选、容量、排序和候选快照
 >
-> 实施状态：已实现并发布；具体部署状态以目标环境的运行证据为准
+> 实施状态：以当前源码与测试为准；发布及部署状态分别以版本记录和目标环境运行证据为准
 
 本文是 CSP / CC 开仓候选策略的唯一细则真源。产品域和依赖方向见
 [STRATEGY_ARCHITECTURE.md](STRATEGY_ARCHITECTURE.md)；Combo Yield 保持独立策略，
@@ -48,6 +48,93 @@
 应用层不得再实现第二套评分、排序或候选裁剪。Combo Yield 可以共享标准化证据，
 但必须使用 `strategy=combo_yield` 的独立策略结果，不能修改 CSP / CC 决策。
 
+### 2.1 可复用 CSP / CC 核心
+
+`om-strategy-core` 是 Python ≥3.12、仅依赖标准库的本地安装包，公共导出为
+`om_strategy_core`。实现仍只有一份 `domain.domain`；费用、容量、集中度及排序
+继续委托各自现有 owner。发行包不包含 OM 应用层、行情服务、存储适配器或运行配置。
+
+| 入口 | 输入与结果 |
+| --- | --- |
+| `resolve_strategy` | 接收已合并政策、方向、账户/市场及可选 `template_id` / `template_version`，绑定有限代码表中的精确实现。 |
+| `calculate_metrics` | 接收合约、显式带时区的决策时间或输入中封存的 `decision_now_utc`，以及 CC 成本；可传原始 FX，返回费用收益等指标。 |
+| `calculate_constraints` | 接收冻结组合事实和已有资格的 FX，可传现金/持股容量输入，返回补充约束后的新行。 |
+| `evaluate_candidates` | 只评价到达 underwriting 阶段的候选，分别返回所有决策、完整合格集合及每标的代表。 |
+
+普通 CSP/CC 扫描入口只捕获一次实际决策时钟，按完整精度 UTC ISO 时间写入
+`decision_now_utc`。成功候选及计算阶段提前拒绝均携带该字段，随规范化输入和
+决策哈希进入账户级 opening snapshot；不同账户、方向或扫描调用可以使用不同时间。
+它不是行情观测时间、调度时间或快照封存时间，也不会参与评分或排序。
+
+离线 `calculate_metrics(row, mode=...)` 可直接读取该字段，无需取当前时间。
+显式传入 `now_utc` 时必须带时区；与封存时间同时存在时，二者须为同一时刻。
+缺失、无效或无时区的封存时间不能默认替换成当前时间。旧快照没有该字段仍可读取，
+但不具备自动恢复历史决策时钟的条件；旧调用显式指定时间仍可做情景计算，不能据此
+宣称恢复了真实历史时间。没有候选计算的空扫描不产生合约级决策时间记录。
+离线复算入口是 `om_strategy_core.calculate_metrics`；应用层 scanner 的 `compute_metrics`
+是扫描适配器，会重新规范化行情输入且不消费行内决策时钟，不能作为历史重放入口。
+本字段补齐时钟证据，不代表完整收益回测或全部历史行为等价已经验收。
+
+应用层继续负责配置合并、账户事实和行情资格检查。前置拒绝不会重新进入评价，
+四项能力不合并或改变现有扫描、现金及 underwriting 阶段顺序。
+独立调用 `evaluate_candidates` 前也须先运行 `calculate_constraints`，并传入其返回行。
+若模板要求 `effective_min_strike`，评价入口拒绝缺失或无效的该字段，不在此阶段
+重新计算容量或覆盖已冻结的行权价约束。
+`calculate_capacity` 是约束能力的纯计算子入口：正式 CSP 现金阶段与 CC 持股阶段
+传入冻结的 `PutCapacityInputs` / `CallCapacityInputs`，无需提前计算集中度。
+CSP 保留原有 `//` 浮点边界、原币优先、占款、缺失和 FX 资格语义；OM 仍负责
+账户和账本证据资格，demo 保留明确标识。
+每个标的的愿买卖行权价单独绑定为输入；政策参数偏离基线时标记 `custom`。
+CC 成本底价倍数 `min_strike_cost_multiplier` 在已有配置合并后冻结到 resolved
+配置（默认 `1.02`），参与有效参数哈希和 `custom` 判定。扫描与 underwriting
+消费同一冻结值；注入策略优先于旧 CC 配置。身份传输、恢复及重排均校验该参数，
+缺失或非正有限数值的 resolved 身份拒绝消费；不影响无策略身份的 legacy 快照。
+内置 `csp_baseline@0.1.0` / `cc_baseline@0.1.0` 委托既有规则。
+冻结的 `StrategyTemplate` 描述符绑定约束、筛选、排序和解释；新增源码模板只需
+实现并加入 core 的有限查找表，OM 消费者无需新增分支。没有公开注册 API、
+外部模块加载器或生产切换配置。参数模式仍是 `InsuranceUnderwritingConfig`。
+CSP 基线支持 `current_tie_break` / `concentration_first`，后者只改变跨标的代表顺序。
+
+容量不足、必要 CNY 值缺失和财报覆盖资格由 Candidate Engine 的
+`opening_qualification_rejects` 独立强制检查；已知财报事件如何处理属于可替换政策。
+共享收益指标和 underwriting 注释仍由既有 owner 生成。模板约束只返回
+`effective_min_strike` / `policy_*` 标量，不能改写价格、现金、数量或证据；
+评价必须返回既有 opening decision，core 合并资格拒绝并保留规则顺序。
+`rank_candidates` 对已评价集合调度模板，验证合约排列与事实不变；`explain_rank`
+使用同一实现。summary 和快照均经过这些入口。
+各实现的标的内代表不得依赖其他标的；基线保留输入相关尾序（第二次排序可能改变
+尾序），新增模板必须采用确定性事实排序并对完整输出幂等。测试替代模板不随生产表发布。
+策略身份保存在候选及 decision 的 `normalized_input.strategy_core` 中，
+进入现有输入、决策和快照哈希链。新身份格式 `strategy_identity.v2` 将模板 id、
+实现版本、有效参数、行权价输入及 rank preset 纳入政策摘要；同一 universe 不允许
+混用身份格式、模板版本或账户/市场/方向/排序范围，允许标的参数不同。
+旧 baseline 身份使用原哈希算法验证，仅已知精确版本可恢复执行。
+摘要与解释使用同一身份，Brief 和通知保留已封存顺序。旧快照仍按原合同校验，
+无身份行只在读取投影中标记 `legacy`，不改写历史文件或哈希。
+封存读取只验证身份结构、范围和哈希，使用存储的顺序与解释，即使实现已不可用也能读；
+新评价、重排或封存必须找到精确实现版本，否则明确失败。
+
+FX 保持原始 `usd_per_cny`、`cny_per_hkd` 的运算顺序和舍入位置。
+收入及 point value 的缺失补算与 CC `covered_notional_cny` 的 `setdefault`
+语义分别保留。不能用派生倒数替换原始汇率来证明数值等价。
+
+运行身份由 `om_strategy_core.runtime_identity` 在计算外读取：
+源码及 editable 运行返回 `mode=source`、核心版本和空构建摘要；
+隔离 wheel 运行须显式调用 `runtime_identity(mode="installed")`，
+校验发行清单、代码内容及实际模块来源后才返回构建摘要。
+源码模式不能证明正在执行某个已验证 wheel。
+核心版本独立于 OM 的 `VERSION`；模板版本表示实现合同，与核心包版本独立。
+可用 `python -m pip wheel --no-deps . -w <临时构建目录>` 构建本地包；
+安装验证应在仓库外的干净虚拟环境执行。
+
+包验证和合成回归不等于真实历史验收。阶段最终验收仍需 CSP、CC 的完整归档输入，
+在固定旧提交、相同参数与时钟下逐字段精确比较。缺少合格归档时不能宣称阶段验收完成。
+该源码变更也不构成发布或生产升级证据。
+
+后续回测项目可引用同一核心；特征准备、历史数据质量与收益评估由该项目另行验证。
+未来 Combo 保留独立多腿入口，Funding Put 使用完整合格集合，Long Call 不套用卖出
+CC 的持股覆盖或成本底价。组合资金、风险和排序由组合 owner 决定，本期不扩展 Combo。
+
 ## 3. 共同报价与合约合同
 
 ### 3.1 市场状态与新鲜度
@@ -60,6 +147,15 @@
   它只作为最新价活跃度诊断，不再作为候选可用性门槛。
 - 期权候选的 5 分钟窗口约束的是 OM 取得 OpenD snapshot 到完成候选决策的时间
   （`snapshot_age_seconds <= 300`），用每批请求的 request/receive receipt 证明。
+- 每行保留产生该记录的成功批次 receipt：request 包含该批等待和重试的窗口，receive
+  在返回后、记录转换前取得。后续批次或 fallback 不刷新已取得记录的时间；fallback
+  只为新返回记录赋值。整次 fetch 的最早 request / 最晚 receive 仅作汇总诊断，
+  不填补行级缺失时间；候选与估值适配器均逐字段使用对应记录的 receipt。
+- 统一开仓证据入口在同一决策时钟下分别复核 `spot_observed_at_utc` 的源报价年龄和
+  `snapshot_received_at_utc` 的取得年龄；显式回放时钟同样适用。源报价时间必须带时区，
+  缺失、非法、未来或超过 300 秒均为 `evidence_unavailable`，恰好 300 秒仍可继续校验。
+  不以 fetch 时的 `ready`、冻结年龄或期权 receipt 代替标的源时间；期权的
+  `max_snapshot_age_seconds` 参数不改变标的独立的 300 秒门槛。
 - 期权 bid/ask 的可用性由本次 snapshot 的盘口合法性（`bid > 0`、`ask >= bid`、
   tick、spread、合约身份与状态）判定，不由 `update_time` 判定。
 - OpenD 明确返回 `bid=0` 且其余身份/盘口/状态证据完整时，视为当前无有效
@@ -95,9 +191,22 @@ sell_limit = ceil(raw_mid / price_tick) * price_tick
 
 - OI 不设硬门槛，只在收益接近时参与排序。
 - OI `0` 是已知值，必须与缺失区分；缺失排在可靠值之后。
-- volume 和 delta 只展示，不参与硬筛和正式排序；缺失显示 `—`。
+- volume 只展示，不参与硬筛和正式排序；缺失显示 `—`。
+- delta 不参与排序；普通 CSP/CC 的 delta 硬门槛见下节。
 - bid/ask size 可作为诊断证据，但不新增硬门槛。
 - OpenD IV 是百分号前数值，适配层固定除以 `100`；Delta 保持 `[-1, 1]`。
+
+### 3.5 普通 CSP/CC delta 上限
+
+Put 和 Call 各自默认 `max_abs_delta = 0.40`；旧配置省略此字段也启用该默认。显式 `null` 仅关闭本门槛，数字覆盖必须在 `[0,1]` 内且有限，拒绝布尔和字符串。只过滤 `abs(delta) > max_abs_delta`，等于保留；以原始精度判断，不能使用显示舍入值，也不把 `35` 猜成 `0.35`。真实零可以通过本门槛，仍须满足收益、期限、流动性等其他规则。
+
+启用时，delta 必须来自同一身份匹配的 OpenD snapshot 的 `option_delta`，`delta_source=opend_market_snapshot.option_delta`、`delta_unit=fraction`。使用真实 `snapshot_received_at_utc` 对冻结 `decision_now_utc` 验证 0–300 秒的接收新鲜度。该证据只证明近期获取；提供方未暴露独立 Greek 计算时间，不能宣称计算时间已验证。缺失、陈旧、非有限、错误符号、单位或来源异常均拒绝并保留原因，不补零、不回填历史来源。
+
+超过上限记录 `risk_delta`；不可验证记录 `risk_delta_unavailable` 及具体证据原因。旧 required-data 或快照缺少来源证据时，启用门槛会拒绝这些候选，可能整组无可用候选；不得静默放行或自动采集数据。此规则不改变 Wheel/Combo 自有策略，也不增加 delta 排序，同标的同方向仍允许跨到期日。0.40 是用户风险偏好，未经证明为收益或胜率最优值。
+
+新 `csp_baseline` / `cc_baseline` 模板与策略核心版本为 `0.2.0`，effective parameters 将上限（包括显式 `null`）纳入策略身份 hash。历史 `0.1.0` 身份仍可读取校验，但当前核心不执行旧模板，也不把旧身份重解释为新默认。离线验证需要对应版本和足够冻结证据；OB 的旧源代码锁不能直接作为本版本的一致性证明，更新由 OB 独立任务负责。
+
+回滚代码不回写已封存记录；旧版本可能拒绝新增配置字段，不能直接将包含新字段的配置交给旧版本。显式 `null` 关闭是新版本的配置能力，仍须通过正常配置预览与授权流程，本功能实现不修改任何生产配置。
 
 ## 4. 收益、费用与共同硬门槛
 
@@ -187,7 +296,7 @@ max_new_contracts = floor(effective_free_cash / assignment_notional)
 
 - stress / gap-down / sigma stress；
 - 路径压力和资本 charge；
-- delta band；
+- delta 下限分带（上限按 §3.5 执行）；
 - 单笔、单标的或总组合集中度；
 - OI、volume、bid/ask size。
 
@@ -282,7 +391,7 @@ max_new_contracts = floor(shares_available_for_cover / multiplier)
 
 - gap-up opportunity cost；
 - path stress；
-- delta band；
+- delta 下限分带（上限按 §3.5 执行）；
 - 单标的集中度；
 - OI、volume、bid/ask size。
 
@@ -305,6 +414,8 @@ max_new_contracts = floor(shares_available_for_cover / multiplier)
    - 更高净权利金；
    - symbol 和合约 ID。
 
+`strike_above_spot_pct` 与 `strike_upside_margin_pct` 均保留 Candidate Engine 计算的相对现价距离；承保底价只参与行权价门槛，不改写这两个字段。
+
 ## 7. 期限匹配 RV
 
 CSP 与 CC 使用完全相同的正式 RV：
@@ -319,6 +430,14 @@ CSP 与 CC 使用完全相同的正式 RV：
 RV20 / RV60 / RV120 只保留为诊断字段，不加权生成正式 RV。历史不足时不可用，
 不回退其他窗口，也不重新归一化。
 
+OpenD 未来交易日历仅覆盖扫描市场日期所在年的 12 月 31 日；超出该范围的 expiry
+明确标记 `calendar_coverage_incomplete`，同批范围内的 expiry 继续计算。覆盖边界不以
+最后返回的交易日推断，因此周末、节假日到期不会仅因当日无交易 session 被拒绝。
+日历状态只表示实际请求区间的取数结果；目标期限和支持区间分别记录为 `requested_end`
+和 `coverage_end`，混合期限的 RV 总体状态仍为 `partial`。
+未知交易日类型（包括 SDK 的 `N/A`）使日历证据不可用，不能当作休市日丢弃。
+全天、半日交易及既有空类型、`TRADING` 输入保持兼容；明确的 `NON_TRADING` 不计入 session。
+
 日线缓存按 `market + symbol + QFQ` 持久化共享：
 
 - 不在每次 intraday run 全量重复抓取；
@@ -327,6 +446,10 @@ RV20 / RV60 / RV120 只保留为诊断字段，不加权生成正式 RV。历史
 - 发现 QFQ 历史修订时刷新所需完整区间；
 - 每次 run 仍按目标 expiry 重新计算期限匹配 RV，并记录输入区间与 hash；
 - 缺口或更新失败只使受影响 expiry 不可用。
+
+每页 QFQ 日线先核对每行证券 `code` 与请求身份一致，再归一化并缓存；缺失、混入其他证券
+或后续分页失败均不得发布成功缓存。未做身份验证的 v1 缓存不再复用，下次通过既有限流
+重新取得完整区间并验证成功后写入 v2；失败保留原文件且不回退为可用证据。
 
 新算法先与旧算法做 shadow comparison，再晋升为正式口径。
 
@@ -380,7 +503,7 @@ RV20 / RV60 / RV120 只保留为诊断字段，不加权生成正式 RV。历史
 
 Wheel 在标的计算与分支评估边界隔离异常，资金和股票仍由账户共享分配。Brief 从已验证快照保留健康候选；历史候选仅在相同 symbol、策略、方向、Combo owner、Wheel 分支或合约的证据缺口下转为待核验。`candidate_universe_summary.affected_scopes` 在合约身份可用时携带 `scope=contract`、`contract_symbol`、`expiration`；没有细分证据时保留原策略范围。执行日志只补充匹配失败终态的诊断，不覆盖快照中的健康结果。
 
-OI、volume、delta 等可选字段缺失不产生 `partial_data`。
+OI、volume 等可选字段缺失不产生 `partial_data`；启用 delta 门槛时，delta 不可验证必须保留独立拒绝原因。
 
 每个账户/run 即使无候选也必须封存 snapshot，并包含 `scope_results`。snapshot 必须：
 
@@ -442,13 +565,13 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 | S07 | CC 收益分母使用正股当前市值 | §6.2 |
 | S08 | 单张合约净权利金至少 CNY 50 | §4.2 |
 | S09 | IV/RV 同时满足 ratio 1.10 和 spread 0.05 | §4.3 |
-| S10 | spread 40% 是硬门槛；OI 只在收益接近时排序，volume/delta 只展示 | §3.2、§3.4 |
+| S10 | spread 40% 是硬门槛；OI 只在收益接近时排序，volume 只展示；delta 按 §3.5 硬过滤 | §3.2、§3.4 |
 | S11 | `0.002` 使用锚定收益分组，不使用非传递性的两两“接近”比较 | §5.5、§6.5 |
 | S12 | 每个 symbol 先选一张代表合约，再做跨 symbol 排序 | §5.5、§6.5 |
 | S13 | CSP 同 symbol 收益接近时优先净接货折价、spread、OI、净权利金 | §5.5 |
 | S14 | CC 同 symbol 收益接近时先选更高 strike，再看 spread、OI、净权利金 | §6.5 |
 | S15 | 跨 symbol 时 concentration 仅作接近收益的排序参考，不作硬门槛 | §5.5、§6.5、§10 |
-| S16 | stress、gap、path、delta band、gamma、vega 和旧评分不进入正式开仓决策 | §5.4、§6.4、§12 |
+| S16 | stress、gap、path、gamma、vega 和旧评分不进入正式开仓决策 | §5.4、§6.4、§12 |
 
 ### 11.2 召回、容量与资金
 
@@ -482,7 +605,7 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 | D06 | 只接受 STANDARD、stock_owner 匹配、未停牌、普通股票交割合约 | §3.3 |
 | D07 | multiplier 必须 chain/snapshot 合约级一致，不默认 100 | §3.3 |
 | D08 | OpenD IV 从百分数除以 100，Delta 保持 `[-1,1]` | §3.4 |
-| D09 | OI 0 与缺失分开；可选 OI/volume/delta 缺失不产生 partial_data | §3.4、§9 |
+| D09 | OI 0 与缺失分开；可选 OI/volume 缺失不产生 partial_data；delta 不可验证独立记录 | §3.4、§9 |
 | D10 | 正式 RV 是按剩余交易 session 匹配的唯一指标，RV20/60/120 仅诊断 | §7 |
 | D11 | RV 日线持久化缓存、增量更新、回抓 5 个 session，QFQ 修订时刷新 | §7 |
 | D12 | 美股与港股共享算法，只使用各自 OpenD 日历、时区、费用和配置 | §10 |
@@ -532,7 +655,7 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 - RV20/60/120 分档加权正式算法；
 - `strategy_score`、`premium_edge_score`、`risk_distance`、`path_risk_score`、
   gamma、vega、gap-up/gap-down 等旧开仓评分；
-- OI / volume / delta 硬门槛；
+- OI / volume 硬门槛；
 - 第二套 application 排序；
 - runtime 候选 CSV 流水线和重复候选 artifact；JSONL 只保留为非权威审计证据；
 - multiplier `100` 默认值、旧 spot/last/CSV fallback；
@@ -607,8 +730,9 @@ CC+LP 是 `combo_yield` 模块下的同到期变体（`combo_yield.variant=cc_lp
 - CC 腿独立扫描，继承 CC 全部硬门槛（收益下限、`max(min_strike, avg_cost*1.02)`、max_strike、流动性、期限），
   无持仓上下文 → `not_applicable` 跳过；
 - Long Put 反转腿默认 `0.15 ≤ |delta| ≤ 0.35`，通过 `combo_yield.put.min_delta/max_delta` 覆盖；排序次键目标仍为 0.12；
+- Long Put 成腿前复用统一开仓证据校验和规范化数值，在决策时复验期权 snapshot 的 300 秒取得时效；证据不可用与合法零候选分别保留，混合结果沿现有状态 owner 标为 `partial_data`；
 - 结构方向 `call_strike > put_strike`（复用 `strike_order` 角色参数化）；
-- 保留率 `net_credit / call_net_credit >= 0.20`（不允许净 debit/自掏腰包），无 gap 硬门槛（`gap_width_pct` 仅诊断）；
+- 保留率 `net_credit / call_net_credit` 默认至少为 `0.20`，可由显式 `combo_yield.min_net_credit_retention` 覆盖；未配置或为 `null` 时保持 `0.20`，不采用 SP+LC 的通用 `0.60` 默认值；不允许净 debit/自掏腰包，无 gap 硬门槛（`gap_width_pct` 仅诊断）；
 - 资金占用 = 持仓当前市值 `spot * multiplier`（1 张合约覆盖股数），不扣净权利金；
 - 排序：保留率主键，次键反转腿 delta 趋近 0.12，再 spread/OI；
 - 候选写入独立 `cc_lp_candidate_snapshot.v4`，Daily Brief 加载快照到数据源（不渲染）；
@@ -648,3 +772,49 @@ Wheel 扫描包装候选时必须复制选中的手数评估字典，再附加�
 产生循环引用，严格封存无法完成。Call/Put 使用相同隔离规则；只复制外层字典，不改变
 各手数的费用或容量事实。验收同时覆盖全额分配与既有部分分配测试，候选可序列化且最终
 证据不含内部评估表。
+
+
+## 15. 离线样本一致性验收
+
+在包含封存 `output_runs/<run_id>/` 依赖文件的离线目录执行：
+
+```bash
+./.venv/bin/python -m src.application.strategy_sample_verify \
+  --runtime-root /path/to/offline-bundle --run-id <run_id> --account lx
+```
+
+工具只读取明确指定的账户和运行批次，JSON 写到标准输出。它复用 manifest、快照和 prepared
+context 的原有校验入口，再调用 `om_strategy_core`；不拉行情、不读取当前账户事实、不取当前
+时间、不补缺失参数，也不改推荐、排序、张数或运行状态。
+
+结果逐项列出 `category`、`location`、封存值和复算值，缺失时给出原因；报告绑定 run/account、
+manifest 与 snapshot 哈希。退出码为 `0=matched`、`1=mismatched`、`2=insufficient_evidence`。
+存在确定差异时总体为 mismatched，同时保留不足项；没有差异但有缺口时为 insufficient_evidence。
+空样本、未完成范围以及不兼容的策略身份不能算通过。
+
+这是封存事实上的分阶段核对：指标复算使用决策时钟和绑定的历史汇率，并通过原承保核心投影
+最终指标；过滤比较封存承保输入上的接受结果和拒绝原因；排序比较封存接受集合；张数调用原容量入口。
+不复验行情供应商、账户资格或历史组合约束的真实性，不评价哪种策略收益更好。
+
+CSP 核对先复用 `sell_put_cash.sell_put_opening_capacity` 的现金与结算占款前置链。
+绑定的 prepared portfolio/ledger 及其资格事实缺失时保留不足；前置链明确不可用时，复用原现金
+enricher 投影，比较原因和标签，单列 `capacity_unavailable`。该类别的一致与零标签不代表数值容量
+或历史 FX 资格验收。可用分支才比较数值张数，要求显式现金/占款映射和封存 FX 输入。
+CC 仍需要 `shares_total`、`shares_can_sell`、`shares_locked`；不从已计算可用现金倒推原始事实。
+
+新快照可携带 `capacity_fx_evidence`，保存扫描实际投影、有效换算值、评估时间、原观察摘要、run FX
+依赖摘要，以及 `_sell_put_fx_status` 的存在状态和值。读取本地封存时，从绑定 run FX 原件按封存时刻
+重投影并比对实际观察；状态标记由 prepared 上下文与原扫描赋值 owner 复算后核对。验证器消费
+已绑定的实际投影；字段不存在与显式
+null 不互换，损坏的新证据不能降级回旧事实。旧样本没有新证据时，数值容量仍需显式 prepared FX
+标记；不能按今天时钟重新判断历史新鲜度。历史人民币指标需要绑定的换算值与匹配 run FX 摘要。
+旧样本缺 `decision_now_utc` 时不能拿封存时间代替。
+
+计算拒绝由扫描和验证器复用同一分类 owner，比较完整阶段、类别、消息、指标与阈值；原始状态缺失
+仍报不足。新快照的 `ranking_inputs` 保存快照层全账户排序调用前的候选 ID 顺序和 profile，经现有
+快照与 manifest 哈希链绑定。验证器按此输入调用原排序入口并比较全序；该证据不证明更早的每标的
+排序调用。旧样本无输入顺序且多标的尾序有歧义时，仍只核对代表候选并报告尾部不足。
+
+source 模式的版本身份只能证明声明的核心/模板兼容，没有 build digest，不能证明与历史部署
+逐字节相同。未提交源码的开发验收需另记基线与完整补丁/源码摘要，不冒充正式固定提交来源证明。
+即使分阶段结果 matched，也不等于生产验收完成；自然新样本的正向 FX、容量与多组排序仍需单独验收。

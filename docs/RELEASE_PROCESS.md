@@ -258,7 +258,7 @@ VERSION="$(cat VERSION)"
 - `release/coverage/v<version>.json` 完整覆盖上一稳定 tag 以来的所有 commit 和目标版本所有
   Changelog 条目，并为每个 commit 附有有效 design evidence
 - README 与 Agent / Tool Gateway 文档没有明显过期命令
-- 更新检查功能读取远端 `origin` 的 Git tags，并与本地 `VERSION` 比较
+- 通用版本检查读取远端 `origin` 的 Git tags 并比较本地 `VERSION`；`om update` 的升级检查还要求下述完整已发布 Release 资格
 
 ---
 
@@ -310,7 +310,24 @@ git branch -d <exact-local-branch>
 
 ## 远端自动升级
 
-远端升级只消费已经发布成功的 GitHub release tag，不追 `main`。
+远端升级只消费已经发布成功的 GitHub Release tag，不追 `main`。自动和显式目标都要求精确
+`tag_name`、非 draft、有效的发布时间，以及三个精确命名的上传资产：`VERSION`、
+`om-agent-spec.json`、`options-monitor-<release_tag>.tar.gz`（例如 `options-monitor-v1.2.3.tar.gz`）。
+三个资产必须均为 `state=uploaded` 且 `size>0`；GitHub 自动生成的源码下载链接不算上传资产。
+这是发布资格 metadata 检查，不验证资产内容、digest 或其与现有 Git archive 的对应关系；源码物化仍走原有镜像归档流程。
+
+自动检查仍选择最高 SemVer Git tag；最高 tag 只有标签、为 draft 或资产未上传完整时，检查失败，
+不会自动回退到旧版本。可显式指定另一个合格版本；确认执行时在锁内重新验证，即使目标目录已存在也不能绕过。
+网络、超时、权限、限流、非法 metadata 或资产分页失败均关闭升级入口，不把不可用解释为没有新版本。
+HTTP 404 表示 Release 未找到或不可访问，不能据此断言私库资源不存在。
+
+GitHub 来源取自当前 checkout remote；已有升级镜像时以镜像对应 remote 配置为准，因此无 `.git` 的归档部署
+仍可使用缓存来源。支持 `github.com` 的 HTTPS、`git@github.com:owner/repo.git` 和 SSH URL；
+不推断 SSH host alias、非 GitHub 来源或重定向后的仓库，不自动迁移镜像配置。
+资格查询固定访问 GitHub HTTPS API，公开仓库可匿名访问；若运行环境已有非空 `GH_TOKEN`，优先使用，
+否则读取 `GITHUB_TOKEN`。私库可能需要对目标仓库具备 Contents-read 权限的 token，默认 token 不保证有权限；
+不会借用 Git/SSH 凭据或新增认证配置流程。token 和 HTTPS userinfo 不写入诊断，HTTP 不自动跟随 redirect。
+每次请求超时最多 10 秒，一次资格校验使用 30 秒 monotonic 预算、在每次请求前后检查，不自动重试。
 
 推荐部署布局：
 
@@ -325,7 +342,34 @@ git branch -d <exact-local-branch>
   service.profile.json
   upgrade_status.json
   locks/upgrade.lock
+  locks/upgrade.lock.guard
 ```
+
+`upgrade.lock.guard` 保留稳定文件身份，供升级和回滚持有非阻塞 OS 互斥锁；它存在不代表升级正在进行。
+确认执行的 `service cleanup` 也使用同一 runtime 的 `upgrade.lock.guard`，从重新读取 current、保留依据到删除和结果构造全程持锁。
+忙时返回 `upgrade_locked` 且无删除，不修改持有者的 PID 或升级收据；释放后可重试，重读当前活动 release。
+cleanup 预览保持只读、不创建转换锁，结果仅供参考。升级后的内部 cleanup 复用外层已持有的 guard，避免重复取锁。
+省略 runtime 时 guard 使用 `/var/lib/options-monitor`；运行目录应与升级/回滚一致，权限失败明确拒绝执行。
+
+`upgrade.lock` 保留原有 PID 诊断用途，正常释放时删除。所有采用此协议的转换共享同一 runtime 的 guard；
+未修改的旧版本进程不遵守 guard，外部删除或替换 guard 也不在此互斥保证内。
+
+confirmed 升级/回滚先取得该 guard，再绑定 current、版本、profile、配置和 rollback 状态基线；
+持锁直到原有转换、失败补偿及读回、可选升级 cleanup 和终态状态写入尝试结束。
+竞争失败只返回本次失败，不覆盖持有者的 `upgrade_status.json`，也不查询目标版本或 fetch；
+未解析的隐式升级目标仍保留返回字段，`target_version`、`release_tag`、`target_dir` 为 `null`。
+未确认的早退结果（无目标、已是当前版本、版本限制或缺失回滚目录）仅在短持同一 guard、
+完整 status/profile 和 current 基线重验一致时保留原有状态持久化；忙、基线变化或无法证明一致时只返回当次预览。
+正常 dry-run 不新增转换锁或 `upgrade_status.json` 写入，既有一次版本查询及其 cache 行为不变。
+取消继续传播并释放 guard，不新增自动补偿；cleanup 或终态写入异常也继续传播，成功转换不会因此新增回滚。
+
+回滚的显式 `--to-version` 和状态记录中的隐式目标使用同一准入检查：去除外层空白和可选小写 `v` 前缀后，
+必须是规范的 `MAJOR.MINOR.PATCH`，可带非空、点分隔的 ASCII prerelease；数字段不允许前导零，
+不支持 `+build`。解析后的目标目录必须严格位于 releases root 内，其可读 `VERSION` 去除外层空白后
+须与选定版本完全一致。路径越界、目录或 VERSION 不合法时返回 `rollback_target_invalid`，在目标运行时检查、
+配置暂存和服务操作之前停止；真正缺失的目录仍返回 `rollback_target_missing`。
+这些检查同时适用于预览与确认执行；新增的 invalid-target 预览不写状态或取转换锁，确认拒绝只在持锁时记录失败。
+原有无目标、缺目录预览的受控收据规则及 dry-run/confirm 边界不变。
 
 升级检查只读：
 
@@ -344,7 +388,7 @@ git branch -d <exact-local-branch>
   --no-check-latest
 ```
 
-`update verify` 汇总当前 symlink、版本、runtime config freshness、事件源配置、最近 upgrade status 和升级时保存的 service health 快照；`services.source=upgrade_status`，对应状态记录时间是 `upgrade.updated_at`，这不是当前 systemd live 查询。`--no-check-latest` 会跳过 git tag 查询，适合 release 已确认后快速复核远端状态。`upgrade.status` / `upgrade.last_status` 表示最近一次升级结果，`upgrade.has_status_record` 表示是否存在 `upgrade_status.json`；是否有新版本只看 `version.upgrade_available`。需要当前服务事实时，另行执行 `./om service drift --runtime-root /var/lib/options-monitor` 和对应 systemd 只读检查。
+`update verify` 汇总当前 symlink、版本、runtime config freshness、事件源配置、最近 upgrade status 和升级时保存的 service health 快照；`services.source=upgrade_status`，对应状态记录时间是 `upgrade.updated_at`，这不是当前 systemd live 查询。`--no-check-latest` 会跳过升级目标资格查询（包括 Git tag 和 GitHub Release），适合 release 已确认后快速复核远端状态。`upgrade.status` / `upgrade.last_status` 表示最近一次升级结果，`upgrade.has_status_record` 表示是否存在 `upgrade_status.json`；是否有新版本只看 `version.upgrade_available`。需要当前服务事实时，另行执行 `./om service drift --runtime-root /var/lib/options-monitor` 和对应 systemd 只读检查。
 
 当 `service.profile.json` 声明 `deploy_user` 时，升级和回滚的预览、执行都要求当前有效 UID 与该系统用户一致。无法解析用户或 UID 不一致时返回 `deployment_user_check_failed`，在目标查询、锁和状态文件写入之前停止。请以部署用户运行整个命令，仅由既有服务操作按需使用 sudo；不要用 sudo 包裹升级命令，以免原子替换后的配置归属 root。未声明部署用户的旧 profile 保留原有行为。
 
@@ -409,58 +453,11 @@ Drift 的 `summary.ok` 表示是否存在阻断项，`status` 仍保留 `ok` / `
 
 升级快照只恢复这次升级覆盖的生成配置，不会撤销之前独立执行的 YAML 或数据库迁移。如果快照已经与旧 release 不兼容，需要操作者从兼容备份恢复作者配置和生成配置，用旧 release 校验，再通过受控流程对账和恢复服务。`--no-restart-services` 只跳过重启及其健康检查，补偿前的配置校验仍须通过。
 
-### Pi Session 不兼容版本的首次切换
+### Python Bot 目标与历史数据
 
-Pi Session 存储格式不兼容时，普通 `update apply` 不会隐式转换数据库。首次从 0.84.2
-切换到 0.85.1 必须由新 release 在维护窗口内控制；不要确认执行旧 release 的
-`update apply`。先记录并停用自动升级任务，停止并 drain 所有 Agent ingress、共享数据库
-writer 和手工持久会话进程，同时保留它们原有的 activation state。
+受控升级与回滚只支持 Python Bot 目标。旧 Node/Pi 发布在安装依赖、切换服务或改写运行时数据前被明确拒绝；不再提供 Pi 存储迁移、反向转换或恢复旧 Node 运行时的路径。`om bot migrate` 只处理 Host schema，不接受 `--pi-db`；具体数据边界见 [Bot 设计](BOT_DESIGN.md#保留边界)。
 
-用现有安装器在生产 release/runtime 目录之外准备私有控制目录：
-
-```bash
-bash "$PI_OLD_RELEASE/scripts/install.sh" --version "$PI_TARGET_TAG" \
-  --prefix "$PI_UPGRADE_STAGE" --no-install-cli
-PI_TARGET_CONTROL="$PI_UPGRADE_STAGE/releases/$PI_TARGET_TAG"
-```
-
-这一步只改变私有 prefix 内的 `current`，不改变生产 symlink、配置、服务或 SQLite。验证
-目标 tag、commit 和三项 Pi package identity 后，对每个已清点的 Session 数据库从目标
-目录执行只读 preview，再在已授权的维护窗口内显式 apply：
-
-```bash
-(cd "$PI_TARGET_CONTROL" && "$PI_TARGET_CONTROL/om" bot migrate-pi \
-  --pi-db "$PI_SESSION_DB" \
-  --source-runtime "$PI_OLD_RELEASE/agent-runtime" \
-  --target-runtime "$PI_TARGET_CONTROL/agent-runtime" --dry-run)
-
-(cd "$PI_TARGET_CONTROL" && "$PI_TARGET_CONTROL/om" bot migrate-pi \
-  --pi-db "$PI_SESSION_DB" \
-  --source-runtime "$PI_OLD_RELEASE/agent-runtime" \
-  --target-runtime "$PI_TARGET_CONTROL/agent-runtime" \
-  --apply --writers-stopped)
-```
-
-所有数据库都必须有已发布且读回通过的 conversion receipt，之后才可从同一目标目录预览
-生产切换。维护窗口内保留 ingress 停止状态：
-
-```bash
-(cd "$PI_TARGET_CONTROL" && "$PI_TARGET_CONTROL/om" update apply \
-  --repo-root "$PI_PRODUCTION_LINK" --runtime-root "$PI_RUNTIME_ROOT" \
-  --target-version "$PI_TARGET_TAG" --no-restart-services \
-  --preserve-activation-state)
-```
-
-preview 通过后原样增加 `--confirm --yes`。升级器会在生产 symlink 改变前，用已准备的目标
-runtime 读回当前有效 Session 数据库及已有的 release-local 手工数据库；runtime、store 或
-receipt 任一不匹配都会停止切换。切换后验证当前依赖、runtime config freshness 和 live
-service health，再按记录恢复 ingress 与自动升级任务的 activation state。
-
-数据库发布前失败时保留旧 store 和生产 link。发布后任何失败都必须先在相同维护门禁下，
-用当前数据和保留的旧 runtime 完成并验证反向转换，旧服务才可恢复。反向转换或补偿读回失败
-时保持 ingress 停止，不恢复旧 symlink，也不启动不兼容服务。conversion receipt 引用的旧
-release runtime 是回滚依赖；普通 release cleanup 必须独立于 `--keep-releases` 保留它，直到
-operator 显式结束该回滚义务。
+历史会话数据库、迁移回执、未知历史目录及备份默认保留，不自动转换或删除；保留这些文件不表示它们是新版上下文来源或可激活的旧运行时。升级失败的补偿继续遵守前述原版本、配置和服务读回要求，不能借补偿路径启用旧 Node 目标。
 
 存量主机如果仍使用 `/usr/lib/systemd/system/options-monitor-feishu-agent-credential.service`，首次升级到包含 repository-owned credential 资产的 release 后，必须用新 release 显式执行一次 `service drift` dry-run 和 `--confirm`。原因是升级进程由旧 release 启动，无法在同一次切换中可靠使用尚未加载的新 reconcile 逻辑。收编后 profile 会保留 `feishu_agent_credential` opt-in，后续手动升级、自动升级和回滚都按同一契约 reconcile。在旧 release 回滚窗口结束前保留 `/usr/lib` legacy unit，不由 drift 自动删除。
 
@@ -477,7 +474,9 @@ liuxie ALL=(root) NOPASSWD: /usr/bin/systemctl restart options-monitor-feishu-ws
 
 如果 release/config 已切换成功但服务重启失败，升级状态会写成 `upgraded_restart_failed`，并记录 `symlink_switched=true`、`config_rebuilt`、`restart_failed_services` 和 `manual_remediation`。这种部分成功状态不会让自动升级 unit 因已知的服务重启权限问题反复 failed；按 remediation 手工重启服务并补齐 sudoers 即可。
 
-升级默认把下载缓存放在 `repo_root` 同级的 `_cache/`，也可用 `OM_UPGRADE_CACHE_ROOT` 或 `--cache-root` 覆盖。代码物料使用 `_cache/git/options-monitor.git`：首次 `git clone --mirror`，后续 `git fetch --tags --prune`，再用 `git archive` 解包到目标 release，因此不会每次重新 clone 完整 tag 工作树。release 目录不保留 `.git`；后续 `update check` 和确认升级会在当前 release 不是 git checkout 时从 `_cache/git/options-monitor.git` 读取 remote 与 release tags。
+升级默认把下载缓存放在 `repo_root` 同级的 `_cache/`，也可用 `OM_UPGRADE_CACHE_ROOT` 或 `--cache-root` 覆盖。代码物料使用 `_cache/git/options-monitor.git`：首次 `git clone --mirror --origin origin`，后续 `git fetch --tags --prune origin`，再用 `git archive` 解包到目标 release，因此不会每次重新 clone 完整 tag 工作树。release 目录不保留 `.git`；后续 `update check` 和确认升级会在当前 release 不是 git checkout 时从 `_cache/git/options-monitor.git` 读取 remote 与 release tags。
+
+缓存内部固定使用 `origin`；`--remote-name` 只选择当前 Git checkout 的来源 URL。已有缓存缺少非空 `remote.origin.url` 时检查和物料提取会拒绝继续，不会猜测其他 remote。先人工核对缓存来源，再恢复其 `origin` 配置；程序不自动重命名或重建缓存。
 
 Release runtime 依赖安装默认使用 `OM_UPGRADE_INSTALLER=auto`：先检测宿主机 PATH 上的 `uv`，可用时把当前运行中的 Python 3.12+ `sys.executable` 传给 `uv venv --python`，再执行 `uv pip install -p .venv/bin/python ...`；不可用或 auto 模式下 uv 安装失败时回退到原 pip 流程。升级流程不会自动安装 uv；需要加速时应在宿主机安装一次。可用 `OM_UPGRADE_INSTALLER=pip` 强制旧流程，或 `OM_UPGRADE_INSTALLER=uv` 强制 uv 且失败即中止升级。依赖下载缓存默认复用 `_cache/uv` 和 `_cache/pip`；只配置了 `PIP_INDEX_URL` 时，升级会把它映射为 uv 命令的 `UV_INDEX_URL`。
 
@@ -504,7 +503,7 @@ release 清理默认 dry-run，不删除文件：
   --confirm
 ```
 
-清理只处理旧 release 和显式允许的缓存，不会触碰 `/var/lib/options-monitor`、SQLite、`output*`、locks、runtime config、用户 overlay config、当前 active release 或最近一个 rollback release。有效 Pi conversion receipt 引用的 release runtime 也会独立于 keep count 保留；receipt 无法验证时 release cleanup 会 fail closed。需要额外清理系统缓存时可加 `--include-apt-cache` 或 `--journal-vacuum-size 64M`。
+清理只处理旧 release 和显式允许的缓存，不会触碰 `/var/lib/options-monitor`、SQLite、`output*`、locks、runtime config、用户 overlay config、当前 active release 或最近一个 rollback release。未知历史目录及备份默认保留，含 `output_shared` 历史状态的 Python 发布目录也会保留；清理不再解析或验证旧 Pi 迁移回执，也不据此自动转换或删除历史数据。需要额外清理系统缓存时可加 `--include-apt-cache` 或 `--journal-vacuum-size 64M`。
 
 确认升级成功后也可以追加后置清理：
 

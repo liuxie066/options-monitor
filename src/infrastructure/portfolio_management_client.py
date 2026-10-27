@@ -36,7 +36,7 @@ _VIEW_PATHS = {
 }
 CAPITAL_FACTS_PATH = "/api/v1/analysis/capital-facts"
 VALUATION_EVIDENCE_PATH = "/api/v1/analysis/valuation-evidence"
-HOLDINGS_REFRESH_PATH = "/api/v1/futu/holdings/refresh-requests"
+HOLDINGS_REFRESH_PATH = "/api/v1/futu/holdings/durable-refresh-requests"
 CONTRACT_OPERATIONS = {
     **{
         ("GET", path): 200
@@ -282,11 +282,11 @@ class PortfolioManagementClient:
                 f"portfolio-management API version mismatch: {version or 'missing'}"
             )
         decoded = _decode_object(response_body)
+        if path.startswith("/api/v1/") and decoded.get("success") is not True:
+            raise PortfolioManagementProtocolError(
+                "portfolio-management success response did not confirm success=true"
+            )
         if decoded.get("success") is False:
-            if path.startswith("/api/v1/"):
-                raise PortfolioManagementProtocolError(
-                    "portfolio-management success response did not confirm success=true"
-                )
             raise PortfolioManagementHTTPError(
                 str(decoded.get("message") or decoded.get("error") or "portfolio-management request failed"),
                 status=503,
@@ -435,8 +435,6 @@ def _validate_valuation_evidence_response(
     if holdings_scope is not None:
         if scope.get("holdings_scope") != holdings_scope:
             raise PortfolioManagementProtocolError("portfolio valuation holdings scope mismatch")
-        if holdings_scope == "non_futu":
-            _validate_non_futu_inventory(item, requested_accounts)
     if not isinstance(snapshot, Mapping):
         raise PortfolioManagementProtocolError(
             "portfolio valuation snapshot must be an object"
@@ -508,6 +506,16 @@ def _validate_valuation_evidence_response(
         raise PortfolioManagementProtocolError(
             "portfolio valuation warnings must be strings"
         )
+    if holdings_scope == "non_futu":
+        try:
+            _validate_non_futu_inventory(item, requested_accounts)
+        except PortfolioManagementProtocolError as exc:
+            # PM source failures can leave no inventory; retain their cause after scope validation.
+            if warnings:
+                raise PortfolioManagementProtocolError(
+                    f"{exc}; PM valuation warnings: {'; '.join(warnings)}"
+                ) from exc
+            raise
     return item
 
 

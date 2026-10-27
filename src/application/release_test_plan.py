@@ -115,7 +115,7 @@ TEST_RULES: tuple[TestRule, ...] = (
             "tests/test_install_script.py",
             "tests/test_release_check.py",
             "tests/test_release_delta_coverage.py",
-            "tests/test_service_pi_readiness.py",
+            "tests/test_pi_retirement.py",
         ),
         reason="service, installer, or release-upgrade files changed",
         commands=(
@@ -124,7 +124,7 @@ TEST_RULES: tuple[TestRule, ...] = (
             "tests/test_release_delta_coverage.py "
             "tests/test_release_version_recommendation.py tests/test_version_check.py "
             "tests/test_install_script.py tests/test_release_test_plan.py",
-            "./.venv/bin/python -m pytest tests/test_service_pi_readiness.py",
+            "./.venv/bin/python -m pytest tests/test_pi_retirement.py",
         ),
     ),
     TestRule(
@@ -132,7 +132,6 @@ TEST_RULES: tuple[TestRule, ...] = (
         patterns=(
             ".github/workflows/_release-reusable.yml",
             ".github/workflows/guardrails.yml",
-            "agent-runtime/**",
             "scripts/bot_p1_eval.py",
             "scripts/install.sh",
             "scripts/release_preflight.sh",
@@ -140,12 +139,8 @@ TEST_RULES: tuple[TestRule, ...] = (
             "src/application/release_test_plan.py",
             "src/application/service_upgrade.py",
             "src/application/setup/check.py",
-            "src/infrastructure/pi_agent_process.py",
-            "docs/PI_AGENT_CORE_INTEGRATION.md",
-            "tests/bot_pi_test_support.py",
             "tests/test_architecture_guards.py",
-            "tests/test_bot_pi_migration.py",
-            "tests/test_service_pi_readiness.py",
+            "tests/test_pi_retirement.py",
             "tests/test_bot_p1_eval.py",
             "tests/test_bot_*.py",
             "tests/test_inbound_control.py",
@@ -161,7 +156,7 @@ TEST_RULES: tuple[TestRule, ...] = (
         reason="Python Bot runtime, packaging, or public contract files changed",
         commands=(
             "./.venv/bin/python -m pytest tests/test_bot_python_runtime.py tests/test_bot_long_term_memory.py",
-            "./.venv/bin/python -m pytest tests/test_service_pi_readiness.py",
+            "./.venv/bin/python -m pytest tests/test_pi_retirement.py",
             "./.venv/bin/python -m pytest tests/test_bot_phase1.py "
             "tests/test_bot_conversation_memory.py tests/test_bot_p1_eval.py "
             "tests/test_inbound_control.py "

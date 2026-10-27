@@ -14,6 +14,7 @@ from domain.domain.ledger.position_fields import (
     build_close_patch_contract,
     build_open_adjustment_patch_contract,
     build_position_lot_fields,
+    decode_position_lot_patch,
     effective_multiplier,
     strategy_metadata_fields_from_payload,
 )
@@ -79,6 +80,7 @@ from src.application.ledger.preflight import (
 )
 from src.application.ledger.repository import (
     require_option_positions_read_repo,
+    with_sqlite_repo_writer_lock,
 )
 from src.application.ledger.lifecycle_attempt_audit import (
     LifecycleAttemptAuditEnvelope,
@@ -376,7 +378,6 @@ def persist_manual_adjust_event_with_ledger(
     if event_time_ms is None:
         raise RuntimeError("manual adjust ledger preflight did not provide event_time_ms")
     current_fields = preflight_result.fields
-    patch = preflight_result.patch_contract
     result = persist_manual_adjust_event(
         repo,
         lot_id=str(lot_id),
@@ -396,8 +397,10 @@ def persist_manual_adjust_event_with_ledger(
     return ManualAdjustLedgerResult(
         result=LedgerWriteResult.from_payload(result),
         fields=current_fields,
-        patch=patch,
-        ledger_preflight=ledger_preflight,
+        patch=decode_position_lot_patch(result.details["patch"]),
+        ledger_preflight=replace(
+            ledger_preflight, event_time_ms=int(result.details["patch"]["last_action_at"]),
+        ),
     )
 
 
@@ -451,8 +454,11 @@ def record_manual_position_adjustments(
         ManualAdjustLedgerResult(
             result=LedgerWriteResult.from_payload(ledger_result),
             fields=preflight_result.fields,
-            patch=preflight_result.patch_contract,
-            ledger_preflight=preflight_result.ledger_preflight,
+            patch=decode_position_lot_patch(ledger_result.details["patch"]),
+            ledger_preflight=replace(
+                preflight_result.ledger_preflight,
+                event_time_ms=int(ledger_result.details["patch"]["last_action_at"]),
+            ),
         )
         for preflight_result, ledger_result in zip(preflight_results, ledger_results, strict=True)
     ]
@@ -608,71 +614,72 @@ def persist_manual_close_event_with_ledger(
     close_reason: str,
     as_of_ms: int | None = None,
 ) -> ManualCloseLedgerResult:
-    resolved_lot_id = str(lot_id or "").strip()
-    current_fields = _current_record_fields(repo, lot_id=resolved_lot_id)
-    if fields is not None:
-        _assert_fields_match_current(
+    with with_sqlite_repo_writer_lock(repo):
+        resolved_lot_id = str(lot_id or "").strip()
+        current_fields = _current_record_fields(repo, lot_id=resolved_lot_id)
+        if fields is not None:
+            _assert_fields_match_current(
+                lot_id=resolved_lot_id,
+                fields=fields,
+                current_fields=current_fields,
+                operation_label="manual close",
+            )
+
+        duplicate_result = existing_manual_close_event_result(
+            repo,
             lot_id=resolved_lot_id,
-            fields=fields,
-            current_fields=current_fields,
-            operation_label="manual close",
-        )
-
-    duplicate_result = existing_manual_close_event_result(
-        repo,
-        lot_id=resolved_lot_id,
-        fields=current_fields,
-        contracts_to_close=int(contracts_to_close),
-        close_price=close_price,
-        close_reason=close_reason,
-    )
-    if duplicate_result is not None:
-        return ManualCloseLedgerResult(
-            result=LedgerWriteResult.from_payload(duplicate_result),
             fields=current_fields,
-            patch=PositionLotPatch(),
-            ledger_preflight=LedgerPreflightResult(
-                status="duplicate",
-                read_model="legacy_trade_events",
-                fail_closed=False,
-                target_lot_id=resolved_lot_id,
-                event_id=duplicate_result.event_id,
-            ),
-            duplicate_checked_before_patch=True,
+            contracts_to_close=int(contracts_to_close),
+            close_price=close_price,
+            close_reason=close_reason,
         )
+        if duplicate_result is not None:
+            return ManualCloseLedgerResult(
+                result=LedgerWriteResult.from_payload(duplicate_result),
+                fields=current_fields,
+                patch=PositionLotPatch(),
+                ledger_preflight=LedgerPreflightResult(
+                    status="duplicate",
+                    read_model="legacy_trade_events",
+                    fail_closed=False,
+                    target_lot_id=resolved_lot_id,
+                    event_id=duplicate_result.event_id,
+                ),
+                duplicate_checked_before_patch=True,
+            )
 
-    ledger_preflight = preflight_manual_close(
-        repo,
-        lot_id=resolved_lot_id,
-        fields=current_fields,
-        contracts_to_close=int(contracts_to_close),
-        close_price=close_price,
-        close_reason=close_reason,
-        as_of_ms=as_of_ms,
-    )
-    event_time_ms = int(ledger_preflight.event_time_ms)
-    patch = build_close_patch_contract(
-        current_fields,
-        contracts_to_close=int(contracts_to_close),
-        close_price=close_price,
-        close_reason=close_reason,
-        as_of_ms=event_time_ms,
-    )
-    result = persist_manual_close_event(
-        repo,
-        lot_id=resolved_lot_id,
-        fields=current_fields,
-        contracts_to_close=int(contracts_to_close),
-        close_price=close_price,
-        close_reason=close_reason,
-        as_of_ms=event_time_ms,
-    )
-    return ManualCloseLedgerResult(
-        result=LedgerWriteResult.from_payload(result),
-        fields=current_fields,
-        patch=patch,
-        ledger_preflight=ledger_preflight,
-    )
+        ledger_preflight = preflight_manual_close(
+            repo,
+            lot_id=resolved_lot_id,
+            fields=current_fields,
+            contracts_to_close=int(contracts_to_close),
+            close_price=close_price,
+            close_reason=close_reason,
+            as_of_ms=as_of_ms,
+        )
+        event_time_ms = int(ledger_preflight.event_time_ms)
+        patch = build_close_patch_contract(
+            current_fields,
+            contracts_to_close=int(contracts_to_close),
+            close_price=close_price,
+            close_reason=close_reason,
+            as_of_ms=event_time_ms,
+        )
+        result = persist_manual_close_event(
+            repo,
+            lot_id=resolved_lot_id,
+            fields=current_fields,
+            contracts_to_close=int(contracts_to_close),
+            close_price=close_price,
+            close_reason=close_reason,
+            as_of_ms=event_time_ms,
+        )
+        return ManualCloseLedgerResult(
+            result=LedgerWriteResult.from_payload(result),
+            fields=current_fields,
+            patch=patch,
+            ledger_preflight=ledger_preflight,
+        )
 
 
 def preview_manual_position_open(

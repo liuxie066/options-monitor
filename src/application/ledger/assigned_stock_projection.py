@@ -14,7 +14,11 @@ from domain.domain.assigned_stock import (
     assigned_stock_trade_event_row,
     project_assigned_stock_lifecycle,
 )
-from domain.domain.ledger.events import LedgerDiagnostic, TradeEvent
+from domain.domain.ledger.events import TARGET_EVENT_TYPES, LedgerDiagnostic, TradeEvent
+from domain.domain.ledger.projection import (
+    _append_target_event_graph_diagnostics,
+    _validated_events,
+)
 from domain.domain.option_position_identity import normalize_broker
 from domain.domain.performance.models import (
     StockInstrumentKey,
@@ -27,6 +31,7 @@ from domain.domain.wheel import (
     merge_lot_strategy_metadata,
 )
 from src.application.ledger.event_codec import (
+    iter_import_stored_trade_events,
     stored_trade_event_to_ledger_event,
     valid_void_target_event_id,
 )
@@ -132,7 +137,7 @@ def project_assigned_stock_lifecycle_from_rows(
     stock_holdings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     instant = int(as_of_ms)
-    selected_rows = _select_assigned_stock_trade_rows(rows, instant)
+    selected_rows = _select_assigned_stock_trade_rows(rows, instant, account=account, broker=broker)
     published = project_trade_event_log(selected_rows)
     return _project_assigned_stock_from_prepared_rows(
         rows, selected_rows=selected_rows, published=published, instant=instant,
@@ -142,13 +147,37 @@ def project_assigned_stock_lifecycle_from_rows(
 
 
 def _select_assigned_stock_trade_rows(
-    rows: Mapping[str, Any], instant: int,
+    rows: Mapping[str, Any], instant: int, *, account: str | None = None, broker: str | None = None,
 ) -> list[dict[str, Any]]:
+    trade_rows = [dict(row) for row in rows.get("trade_events") or [] if isinstance(row, Mapping)]
+    decoded = list(iter_import_stored_trade_events(trade_rows))
+    events = [event for _row, event, _diagnostics in decoded if event is not None]
+    validated = _validated_events(events)
+    _append_target_event_graph_diagnostics(validated)
+    # Validate controls against the full graph without replaying future economics.
+    control_diagnostics = [
+        diagnostic for row, _event, diagnostics in decoded
+        if str(row.get("event_type") or "").strip() in TARGET_EVENT_TYPES
+        for diagnostic in diagnostics
+    ]
+    control_diagnostics.extend(
+        diagnostic for event, diagnostics in validated if event.event_type in TARGET_EVENT_TYPES
+        for diagnostic in diagnostics
+    )
+    _require_trusted_assigned_stock_projection(control_diagnostics, events, account=account, broker=broker)
+    historical_ids = {
+        event.event_id for row, event, _diagnostics in decoded
+        if event is not None and _event_time_ms(row) <= instant
+    }
+    future_ids = {
+        event.event_id for row, event, _diagnostics in decoded
+        if event is not None and _event_time_ms(row) > instant
+    } - historical_ids
     return [
         dict(row)
-        for row in rows.get("trade_events") or []
-        if isinstance(row, Mapping)
-        and (_event_time_ms(row) <= instant or valid_void_target_event_id(row) is not None)
+        for row in trade_rows
+        if _event_time_ms(row) <= instant
+        or ((target := valid_void_target_event_id(row)) is not None and target not in future_ids)
     ]
 
 
@@ -172,7 +201,7 @@ def project_position_lots_and_assigned_stock_from_rows(
         }
         for item in published.lots
     ]
-    selected_rows = _select_assigned_stock_trade_rows(rows, instant)
+    selected_rows = _select_assigned_stock_trade_rows(rows, instant, account=account)
     # Its trade_time fallback and late void rules can select different rows.
     assigned_projection = (
         published if selected_rows == trade_events else project_trade_event_log(selected_rows)
@@ -339,19 +368,7 @@ def _build_wheel_read_model_base(
     instant = int(as_of_ms)
     if instant <= 0:
         raise ValueError("wheel read model requires as_of_ms > 0")
-    historical_event_ids = {
-        item.get("event_id") for item in rows.get("trade_events") or []
-        if isinstance(item, Mapping) and item.get("event_id")
-        and _wheel_event_time_ms(item, "event_time_ms") <= instant
-    }
-    trade_events = [
-        dict(item)
-        for item in rows.get("trade_events") or []
-        if isinstance(item, Mapping)
-        # Later corrections still void historical facts; future economics stay out.
-        and (_wheel_event_time_ms(item, "event_time_ms") <= instant
-             or valid_void_target_event_id(item) in historical_event_ids)
-    ]
+    trade_events = _select_assigned_stock_trade_rows(rows, instant, account=account_value)
     wheel_events = [
         dict(item)
         for item in rows.get("account_wheel_events") or []

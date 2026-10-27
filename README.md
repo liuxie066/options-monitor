@@ -47,6 +47,7 @@ trade_events -> projection -> position_lots
 |---|---|---|
 | YAML 配置构建与校验 | `om config` | [CONFIGS.md](CONFIGS.md) |
 | CSP / CC | `om run tick`、`om scan` | [策略架构](docs/STRATEGY_ARCHITECTURE.md) |
+| 指定标的卖出开仓查询 | `om-agent run --tool option_candidates`；Bot / Hermes 对话 | [工具合同](docs/TOOL_REFERENCE.md#指定标的卖出开仓候选) |
 | Combo Yield | 与开仓扫描同链路 | [策略架构](docs/STRATEGY_ARCHITECTURE.md) |
 | 轮转策略 | `om run tick`、`om wheel` | [轮转策略 PRD](docs/WHEEL_STRATEGY_PRD.md) |
 | Close Advice | 计划 Tick 生产、`./om-agent run --tool close_advice_read` 读取、`om close-advice configure` 启停 | [Close Advice Contract](docs/CLOSE_ADVICE_CONTRACT.md) |
@@ -62,18 +63,24 @@ trade_events -> projection -> position_lots
 
 本表是主要能力索引，不是 CLI 或 Tool Gateway 的完整命令清单。人工任务按“首次安装”和“日常管理”在 `om help` 中组织；完整顶层命令见 `om help all`。结构化工具名、输入 schema、风险级别和副作用以 `om-agent spec` 为准。
 
+指定标的查询支持 1–5 项 `short_put` / `short_call`，标的与卖出方向必填，行权价和 DTE 可选。返回符合条件的合约、收益估算及原因；财报在查询日至到期日内只提示，不作为该入口的淘汰条件。查询只评估合约，不判断账户现金、持股覆盖、成本底线或集中度。
+
 ### 轮转策略
 
 轮转策略管理卖出 Put 后买入股票、卖出 Call 后交付股票形成的分支。Wheel 已启用且身份与交割证据完整时，外部 CSP / CC 及对应 Combo 卖腿的指派会自动进入相应分支。成交可对应多个分支或证据不足时，Daily Brief 会持续提示待人工确认，用户可在 Control 预览并确认归属；同一笔多张 Call 成交可按张数分配给多个 Wheel 股票分支，系统不自行选择分支。当前门槛关闭后不再产生新的 Wheel 开仓候选；已有分支与真实成交仍按账本事实保留。
 
 在持股分支，已收到的期权收入会计入总收益，但不用于降低股票的卖出底线；系统合并检查所有可能占用持股的期权合约。在现金分支，新 Put 候选仍须通过资金门槛。该策略只提供监控和候选建议，不自动下单，也不保证收益。
 
-CSP / CC 新开仓只使用 `insurance_underwriting`。历史 artifact 和持仓解释可继续读取
+CSP / CC 新开仓只使用 `insurance_underwriting`，普通 Put / Call 默认分别启用 `abs(delta) <= 0.40` 硬门槛；delta 不参与排序。历史 artifact 和持仓解释可继续读取
 `return_first` / `short_vol`，但这些兼容语义不能重新进入当前开仓配置或正式候选排序。
 
 README 不复制完整规则：[候选策略合同](docs/candidate_strategy.md) 是已经确认的目标口径，
 [策略架构](docs/STRATEGY_ARCHITECTURE.md) 定义模块责任；目标是否已经上线必须以当前代码和测试验证，
 不能只凭文档判断。
+
+普通 CSP / CC 的纯计算可通过本地包 `om-strategy-core` 复用；代码内版本模板可替换筛选、排序和解释，共享事实资格保持不变。接口、安装身份和验收边界见
+[可复用策略核心](docs/candidate_strategy.md#21-可复用-csp--cc-核心)。回测与外部策略模板发布不在该包当前范围内。
+封存样本可使用[离线一致性验收](docs/candidate_strategy.md#15-离线样本一致性验收)逐项核对指标、过滤、排序和张数；缺失事实明确报告，分阶段一致不代表收益或生产验收。
 
 ### 策略术语对照
 
@@ -89,7 +96,7 @@ README 不复制完整规则：[候选策略合同](docs/candidate_strategy.md) 
 
 ## 安装
 
-运行时要求 Python 3.12 或更高版本。
+运行时要求 Python 3.12 或更高版本。Bot 仅使用 Python，不需要 Node 或 Pi 依赖；受控升级和回滚只支持 Python 目标，旧 Node/Pi 发布会在安装依赖、切换服务或改写运行时数据前被明确拒绝。历史 Bot 数据的保留边界见 [Bot 设计](docs/BOT_DESIGN.md#保留边界)。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash
@@ -143,6 +150,8 @@ om symbols add YOUR_SYMBOL --strategy csp --csp-max-strike YOUR_MAX_STRIKE --app
 | 管理常驻服务 | `om service install`、`om service start`、`om service stop`；默认预览 |
 
 `om help` 按场景说明任务；`om help all` 保留所有高级命令。模型与控制命令统一推荐 `om bot`，Feishu 传输用 `om channel feishu`；旧 `assistant` / `inbound` 入口保留兼容。普通设置和静态凭证检查不证明 OpenD 登录、消息送达或模型可用。Linux 密钥录入和服务安装涉及系统权限，按终端提示完成；当前普通前台进程不能直接读取 systemd 加密凭证，详见[首次运行指南](docs/GETTING_STARTED.md#3-完成外部接入)。结构化集成使用 `om-agent spec` 和 `om-agent run`，边界见 [Tool Reference](docs/TOOL_REFERENCE.md)。
+
+`om channel status` 检测到显式 WeChat Bot 配置缺失、损坏或校验失败时，会报告 `available=false`，健康检查会提示已配置频道不可用。历史 `configured` 和 allowlist 配置标志仍保留；`service_active` 独立表示所查询的进程状态，配置错误不会将它改写为停止。`available` 不证明消息送达；显式 allowlist 未指定 Bot 配置的合法用法保持兼容。
 
 ### 2. 只读检查
 
@@ -326,11 +335,19 @@ om-agent run --tool option_performance_report \
   --input-json '{"config_key":"us","account":"lx","period":"ytd","as_of_date":"2026-07-17"}'
 ```
 
-报告提供期权净现金流、卖出/买入期权胜率、期权收益率和实际日均未了结占用本金，
-日均占用含跨期持仓、仅计算已发生的占用时间，独立于收益率分母。支持 MTD/YTD，金额保持
-原币。正股交易、指派/行权交割现金、PnL、CNY 换算和行情刷新均不在该报告内。
+报告分别提供**期间期权净现金流**（`period_option_net_cashflow`，按现金事件有效时间）
+和**开仓批次期权现金结果**（保留 `option_net_cashflow`），两者不可相加。
+卖出/买入期权胜率、期权收益率与批次明细保留原口径，收益率分子仍为旧批次现金结果。
+实际日均未了结占用本金含跨期持仓、仅计算已发生的占用时间，独立于收益率分母。
+支持 MTD/YTD/自然月/自然年；金额保持原币，各现金指标的 CNY 总额只用已保存的历史转换证据。
+正股交易、指派/行权交割现金、PnL、读取时查汇率和行情刷新均不在该报告内。
 券商确认的零价期权平仓按成交时间更新未平仓数量；原因待证时胜率暂不可算，
 现金和费用证据完整时仍可计算收益率。历史未入账成交不会自动补账。
+
+响应体标识为 `option_performance.report.v3`，附带 `metric_semantics`；HTTP 外层仍为 v1。
+成交附带费用按成交时间计入，迟到更正重述原期间；有独立事实时间的新增扣费/退款单独入期。
+离线复算复用同一领域 owner，严格区分当前更正快照和带来源证据的冻结历史输入，见
+[离线现金流与兼容合同](docs/OPTION_CASHFLOW_OFFLINE_CONTRACT.md)。
 
 绩效查询可显式启用本地 HTTP 服务：操作员先在服务端与消费者进程私下设置同一
 `OM_PERFORMANCE_SERVICE_TOKEN`，再运行
@@ -354,8 +371,10 @@ om research collect \
 
 `om research collect` 默认不写 evidence bundle；写入需要同时使用
 `--write-outputs --confirm`。`archive pull` 默认只生成同步计划，只有 `--write`
-才拉取本地归档；`archive inventory` 与 `archive verify` 用于检查本地归档。执行前先看具体
-子命令的 `--help`，不要把 Research 整体理解成“永远只读”。Research 不自动修改生产配置、
+才拉取本地归档；`archive inventory` 与 `archive verify` 用于检查本地归档。
+显式指定 `--run-id` 时，每个 ID 都必须存在于按现有条件（包括 `--since-days`）筛选后的来源清单；
+任一缺失会列出缺失 ID，并在同步或写归档前拒绝本次 preview/write。未指定 run 筛选时，零 run 仍是合法结果。
+执行前先看具体子命令的 `--help`，不要把 Research 整体理解成“永远只读”。Research 不自动修改生产配置、
 交易状态或通知。
 
 ### Tool Gateway
@@ -451,6 +470,8 @@ om service render \
 ```
 
 Linux 主机预置加密凭据后，推荐在 render 时显式加上 `--include-secret-credentials`，按 unit 生成最小凭据注入；默认使用 `LoadCredentialEncrypted`，受限 Incus/LXC 可显式选择 `--secret-credential-delivery runtime-files`，两者都不使用 secret env。渲染不会创建或修改凭据。旧 `--include-feishu-agent-credential` 只用于存量共享 env materializer；用 `om service credentials-migrate` 做默认 dry-run 的受控迁移。完整契约见 [Secret Storage](docs/SECRET_STORAGE.md)。
+
+自动和显式升级目标均须为完整已发布的 GitHub Release，资格条件与失败关闭边界见[发布流程](docs/RELEASE_PROCESS.md#远端自动升级)。
 
 平台部署、升级、回滚和服务检查见 [DEPLOY.md](DEPLOY.md)、[Linux / Mac Deployment](docs/DEPLOY_LINUX_MAC.md) 与 [RUNBOOK.md](RUNBOOK.md)。
 

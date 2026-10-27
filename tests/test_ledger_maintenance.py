@@ -406,7 +406,13 @@ def test_build_expired_close_decisions_waits_for_short_put_assignment_when_itm()
 
 
 
-def test_build_expired_close_decisions_closes_short_put_when_otm_spot_verified() -> None:
+@pytest.mark.parametrize(("option_type", "spot"), [("put", 90), ("p", 90), ("call", 80), ("c", 80)])
+@pytest.mark.parametrize(
+    "spot_field", ["_auto_close_underlying_spot", "spot", "underlying_spot", "underlying_price", "stock_price"]
+)
+def test_build_expired_close_decisions_waits_for_broker_evidence_when_spot_otm(
+    option_type: str, spot: float, spot_field: str,
+) -> None:
     exp_ms = parse_exp_to_ms("2026-06-18")
     assert exp_ms is not None
     as_of_ms = int(datetime(2026, 6, 19, 4, 0, tzinfo=timezone.utc).timestamp() * 1000)
@@ -415,12 +421,12 @@ def test_build_expired_close_decisions_closes_short_put_when_otm_spot_verified()
         [
             {
                 "record_id": "rec_pdd",
-                "position_key": "PDD_20260618_85P_short",
+                "position_key": f"PDD_20260618_85{option_type[0].upper()}_short",
                 "symbol": "PDD",
-                "option_type": "put",
+                "option_type": option_type,
                 "side": "short",
                 "strike": 85,
-                "_auto_close_underlying_spot": 90,
+                spot_field: spot,
                 "status": "open",
                 "contracts": 2,
                 "contracts_open": 2,
@@ -432,9 +438,61 @@ def test_build_expired_close_decisions_closes_short_put_when_otm_spot_verified()
         grace_days=1,
     )
 
-    assert decisions[0].to_payload()["should_close"] is True
-    assert decisions[0].to_payload()["assignment_review"]["status"] == "otm_verified"
-    assert decisions[0].to_payload()["assignment_review"]["spot"] == 90
+    decision = decisions[0].to_payload()
+    assert decision["should_close"] is False
+    assert decision["skip_reason"] == "expiry_assignment_review_required"
+    assert decision["patch"] is None
+    assert decision["assignment_review"]["status"] == "broker_evidence_required"
+    assert decision["assignment_review"]["moneyness"] == "otm"
+    assert decision["assignment_review"]["spot"] == spot
+    assert decision["assignment_review"]["block_auto_close"] is True
+
+
+@pytest.mark.parametrize("option_type", ["put", "call"])
+@pytest.mark.parametrize(("strike", "expected_status"), [(100, "itm_or_atm"), (None, "missing_strike")])
+def test_build_expired_close_decisions_reviews_short_atm_or_missing_strike(
+    option_type: str, strike: float | None, expected_status: str,
+) -> None:
+    decisions = build_expired_close_decisions(
+        [{
+            "record_id": "short-expired", "symbol": "AAPL", "option_type": option_type,
+            "side": "short", "strike": strike, "spot": 100, "status": "open",
+            "contracts": 1, "contracts_open": 1, "multiplier": 100,
+            "expiration": parse_exp_to_ms("2026-06-18"),
+        }],
+        as_of_ms=int(datetime(2026, 6, 20, tzinfo=timezone.utc).timestamp() * 1000),
+        grace_days=1,
+    )
+    decision = decisions[0].to_payload()
+    assert decision["should_close"] is False
+    assert decision["skip_reason"] == "expiry_assignment_review_required"
+    assert decision["patch"] is None
+    assert decision["assignment_review"]["status"] == expected_status
+    assert "confirmed broker settlement evidence is required" in decision["reason"]
+
+
+@pytest.mark.parametrize("option_type", ["put", "call"])
+@pytest.mark.parametrize(
+    ("symbol", "cutoff"),
+    [("AAPL", datetime(2026, 6, 19, 4, tzinfo=timezone.utc)),
+     ("0700.HK", datetime(2026, 6, 18, 16, tzinfo=timezone.utc))],
+)
+def test_short_expiry_review_starts_at_market_grace_boundary(option_type: str, symbol: str, cutoff: datetime) -> None:
+    fields = {
+        "record_id": "expired-short", "broker": "富途", "account": "lx", "symbol": symbol,
+        "option_type": option_type, "side": "short", "strike": 100,
+        "spot": 110 if option_type == "put" else 90, "currency": "USD" if symbol == "AAPL" else "HKD",
+        "contracts": 1, "contracts_open": 1, "multiplier": 100, "status": "open",
+        "expiration": parse_exp_to_ms("2026-06-18"),
+    }
+    cutoff_ms = int(cutoff.timestamp() * 1000)
+    before = build_expired_close_decisions([fields], as_of_ms=cutoff_ms - 1, grace_days=1)[0].to_payload()
+    at_cutoff = build_expired_close_decisions([fields], as_of_ms=cutoff_ms, grace_days=1)[0].to_payload()
+    assert before["skip_reason"] == "grace_period_pending"
+    assert before["eligible_after_ms"] == cutoff_ms
+    assert at_cutoff["skip_reason"] == "expiry_assignment_review_required"
+    assert at_cutoff["assignment_review"]["status"] == "broker_evidence_required"
+    assert before["patch"] is at_cutoff["patch"] is None
 
 
 
@@ -467,6 +525,7 @@ def test_build_expired_close_decisions_waits_for_short_call_assignment_when_itm(
     assert decisions[0].to_payload()["should_close"] is False
     assert decisions[0].to_payload()["skip_reason"] == "expiry_assignment_review_required"
     assert decisions[0].to_payload()["assignment_review"]["status"] == "itm_or_atm"
+    assert decisions[0].to_payload()["patch"] is None
 
 
 
@@ -584,7 +643,10 @@ def _converged_option_lot_fields(
     }
 
 
-def test_auto_close_expired_positions_uses_effective_contracts_open_fallback(tmp_path: Path) -> None:
+@pytest.mark.parametrize("position_side", ["short", "long"])
+def test_auto_close_expired_positions_uses_effective_contracts_open_fallback(
+    tmp_path: Path, position_side: str,
+) -> None:
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     _seed_open_lot_event(
@@ -593,7 +655,7 @@ def test_auto_close_expired_positions_uses_effective_contracts_open_fallback(tmp
         account="lx",
         symbol="NVDA",
         option_type="put",
-        side="short",
+        side=position_side,
         contracts=1,
         currency="USD",
         strike=100,
@@ -615,6 +677,16 @@ def test_auto_close_expired_positions_uses_effective_contracts_open_fallback(tmp
     decisions, applied, errors = _auto_close_decisions(repo, positions, as_of_ms)
 
     assert len(decisions) == 1
+    assert errors == []
+    if position_side == "short":
+        assert decisions[0]["contracts_open"] == 1
+        assert decisions[0]["skip_reason"] == "expiry_assignment_review_required"
+        assert decisions[0]["patch"] is None
+        assert applied == []
+        assert repo.get_record_fields("rec_nvda")["contracts_open"] == 1
+        assert repo.get_record_fields("rec_nvda")["status"] == "open"
+        assert len(repo.list_trade_events()) == 1
+        return
     assert decisions[0]["should_close"] is True
     assert len(applied) == 1
     assert errors == []
@@ -802,8 +874,10 @@ def test_auto_close_skips_same_record_id_when_selection_identity_changed() -> No
     assert result["decisions"][0]["skip_reason"] == "position_lot_identity_changed"
 
 
+@pytest.mark.parametrize("position_side", ["short", "long"])
 def test_auto_close_skips_when_identity_changes_after_fresh_selection(
     tmp_path: Path,
+    position_side: str,
 ) -> None:
 
     expiration = parse_exp_to_ms("2026-05-28")
@@ -812,10 +886,12 @@ def test_auto_close_skips_when_identity_changes_after_fresh_selection(
     assert as_of_ms is not None
     class Repo(ledger_repository.SQLiteOptionPositionsRepository):
         identity_changed = False
+        drift_reads = 0
 
         def get_record_fields(self, lot_id):  # type: ignore[no-untyped-def]
             fields = super().get_record_fields(lot_id)
             if self.identity_changed:
+                self.drift_reads += 1
                 # The contract identity lives under ``contract_key`` and the open
                 # event under ``open_event_id`` in the converged payload
                 # (``write-side-definition.md`` §2), so a repair that moves them
@@ -838,7 +914,7 @@ def test_auto_close_skips_when_identity_changes_after_fresh_selection(
         account="lx",
         symbol="AAPL",
         option_type="put",
-        side="short",
+        side=position_side,
         contracts=1,
         currency="USD",
         strike=100,
@@ -866,7 +942,12 @@ def test_auto_close_skips_when_identity_changes_after_fresh_selection(
     assert result["applied"] == []
     assert result["errors"] == []
     assert result["decisions"][0]["should_close"] is False
-    assert result["decisions"][0]["skip_reason"] == "position_lot_identity_changed"
+    if position_side == "short":
+        assert result["decisions"][0]["skip_reason"] == "expiry_assignment_review_required"
+        assert repo.drift_reads == 0
+    else:
+        assert result["decisions"][0]["skip_reason"] == "position_lot_identity_changed"
+        assert repo.drift_reads == 1
     assert [row for row in repo.list_trade_events() if row["event_type"] == "expire_close"] == []
 
 
@@ -906,6 +987,11 @@ def test_fresh_auto_close_lot_keeps_quote_when_only_source_event_id_changes() ->
     assert fresh[0].get("_auto_close_skip_reason") is None
     assert fresh[0]["source_event_id"] == "repair-open"
     assert fresh[0]["_auto_close_underlying_spot"] == 120
+    decision = build_expired_close_decisions(
+        fresh, as_of_ms=parse_exp_to_ms("2026-05-31"), grace_days=1,
+    )[0].to_payload()
+    assert decision["skip_reason"] == "expiry_assignment_review_required"
+    assert decision["patch"] is None
 
 
 @pytest.mark.parametrize("failure_mode", ["error", "non_mapping"])
@@ -964,7 +1050,10 @@ def test_auto_close_skips_when_fresh_lot_refresh_is_unavailable(
     assert result["decisions"][0]["skip_reason"] == "position_lot_refresh_unavailable"
 
 
-def test_auto_close_expired_positions_closes_same_expiry_without_crossing_later_expiry(tmp_path: Path) -> None:
+@pytest.mark.parametrize("position_side", ["short", "long"])
+def test_auto_close_expired_positions_respects_side_and_expiry_scope(
+    tmp_path: Path, position_side: str,
+) -> None:
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     _seed_open_lot_event(
@@ -973,7 +1062,7 @@ def test_auto_close_expired_positions_closes_same_expiry_without_crossing_later_
         account="sy",
         symbol="0700.HK",
         option_type="call",
-        side="short",
+        side=position_side,
         contracts=2,
         currency="HKD",
         strike=510,
@@ -987,7 +1076,7 @@ def test_auto_close_expired_positions_closes_same_expiry_without_crossing_later_
         account="sy",
         symbol="0700.HK",
         option_type="put",
-        side="short",
+        side=position_side,
         contracts=6,
         currency="HKD",
         strike=450,
@@ -1001,7 +1090,7 @@ def test_auto_close_expired_positions_closes_same_expiry_without_crossing_later_
         account="sy",
         symbol="0700.HK",
         option_type="put",
-        side="short",
+        side=position_side,
         contracts=3,
         currency="HKD",
         strike=450,
@@ -1016,6 +1105,22 @@ def test_auto_close_expired_positions_closes_same_expiry_without_crossing_later_
     decisions, applied, errors = _auto_close_decisions(repo, positions, as_of_ms)
 
     assert errors == []
+    if position_side == "short":
+        assert applied == []
+        assert {item["record_id"]: item["skip_reason"] for item in decisions} == {
+            "lot_0700_call_510_20260528": "expiry_assignment_review_required",
+            "lot_0700_put_450_20260528": "expiry_assignment_review_required",
+            "lot_0700_put_450_20260629": "not_expired",
+        }
+        assert all(item["patch"] is None for item in decisions)
+        assert {row["record_id"]: row["fields"]["contracts_open"] for row in repo.list_position_lots()} == {
+            "lot_0700_call_510_20260528": 2,
+            "lot_0700_put_450_20260528": 6,
+            "lot_0700_put_450_20260629": 3,
+        }
+        assert all(row["fields"]["status"] == "open" for row in repo.list_position_lots())
+        assert len(repo.list_trade_events()) == 3
+        return
     assert {item["record_id"] for item in applied} == {
         "lot_0700_call_510_20260528",
         "lot_0700_put_450_20260528",
@@ -1045,10 +1150,20 @@ def test_auto_close_expired_positions_closes_same_expiry_without_crossing_later_
     assert lots_by_id["lot_0700_put_450_20260629"]["contracts_open"] == 3
 
 
-def test_auto_close_expired_positions_skips_when_lifecycle_assignment_pending(tmp_path: Path) -> None:
+@pytest.mark.parametrize("position_side", ["short", "long"])
+def test_auto_close_expired_positions_skips_when_lifecycle_assignment_pending(
+    tmp_path: Path, position_side: str,
+) -> None:
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    _seed_tigr_put(repo)
-    repo.upsert_trade_lifecycle_case(_tigr_expire_case("lc_tigr_assignment"))
+    _seed_open_lot_event(
+        repo, lot_id="lot_tigr_put_6_20260522", account="lx", symbol="TIGR",
+        option_type="put", side=position_side, contracts=10, currency="USD",
+        strike=6, multiplier=100, expiration_ymd="2026-05-22",
+    )
+    case = _tigr_expire_case("lc_tigr_assignment")
+    case.update(position_side=position_side, case_key=f"富途|lx|TIGR|put|{position_side}|6|2026-05-22")
+    repo.upsert_trade_lifecycle_case(case)
+    cases_before = repo.list_trade_lifecycle_cases()
     as_of_ms, positions = _auto_close_positions(repo, as_of_ymd="2026-05-25")
     positions[0]["_auto_close_underlying_spot"] = 7
 
@@ -1057,44 +1172,46 @@ def test_auto_close_expired_positions_skips_when_lifecycle_assignment_pending(tm
     assert errors == []
     assert applied == []
     assert decisions[0]["should_close"] is False
-    assert decisions[0]["skip_reason"] == "lifecycle_assignment_pending"
-    assert decisions[0]["lifecycle_blocker"]["case_id"] == "lc_tigr_assignment"
+    if position_side == "short":
+        assert decisions[0]["skip_reason"] == "expiry_assignment_review_required"
+        assert decisions[0]["patch"] is None
+    else:
+        assert decisions[0]["skip_reason"] == "lifecycle_assignment_pending"
+        assert decisions[0]["lifecycle_blocker"]["case_id"] == "lc_tigr_assignment"
+    assert repo.list_trade_lifecycle_cases() == cases_before
+    assert repo.list_trade_lifecycle_evidence() == []
+    assert repo.list_trade_lifecycle_allocations() == []
     assert [item for item in repo.list_trade_events() if item["event_type"] == "expire_close"] == []
     assert repo.get_record_fields("lot_tigr_put_6_20260522")["status"] == "open"
 
 
-def test_auto_close_expired_positions_records_lifecycle_expire_close_for_otm_pending_case(tmp_path: Path) -> None:
+def test_auto_close_expired_positions_reviews_otm_short_case_with_only_zero_price_evidence(tmp_path: Path) -> None:
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     _seed_tigr_put(repo)
     repo.upsert_trade_lifecycle_case(_tigr_expire_case("lc_tigr_expire"))
     repo.upsert_trade_lifecycle_evidence(_tigr_zero_price_close_evidence("lc_tigr_expire"))
+    cases_before = repo.list_trade_lifecycle_cases()
+    evidence_before = repo.list_trade_lifecycle_evidence()
+    events_before = repo.list_trade_events()
     as_of_ms, positions = _auto_close_positions(repo, as_of_ymd="2026-05-25")
     positions[0]["_auto_close_underlying_spot"] = 7
 
     decisions, applied, errors = _auto_close_decisions(repo, positions, as_of_ms)
 
     assert errors == []
-    assert len(applied) == 1
-    assert decisions[0]["should_close"] is True
-    assert repo.get_record_fields("lot_tigr_put_6_20260522")["status"] == "close"
-    events = [item for item in repo.list_trade_events() if item["event_type"] == "expire_close"]
-    assert len(events) == 1
-    assert events[0]["source"] == "option_lifecycle_decision"
-    assert events[0]["raw_payload"]["case_id"] == "lc_tigr_expire"
-    assert events[0]["raw_payload"]["evidence_ids"] == ["ev_tigr_zero_close"]
-    case = repo.get_trade_lifecycle_case("lc_tigr_expire")
-    assert case is not None
-    assert case["status"] == "ledger_written"
-    assert case["decision_type"] == "expire_close"
-    assert case["target_lot_ids"] == ["lot_tigr_put_6_20260522"]
-    allocations = repo.list_trade_lifecycle_allocations(case_id="lc_tigr_expire")
-    assert len(allocations) == 1
-    assert allocations[0]["evidence_id"] == "ev_tigr_zero_close"
-    assert allocations[0]["target_lot_id"] == "lot_tigr_put_6_20260522"
-    assert allocations[0]["canonical_terminal_event_id"] == events[0]["event_id"]
+    assert applied == []
+    assert decisions[0]["should_close"] is False
+    assert decisions[0]["skip_reason"] == "expiry_assignment_review_required"
+    assert decisions[0]["patch"] is None
+    assert repo.get_record_fields("lot_tigr_put_6_20260522")["status"] == "open"
+    assert repo.get_record_fields("lot_tigr_put_6_20260522")["contracts_open"] == 10
+    assert repo.list_trade_events() == events_before
+    assert repo.list_trade_lifecycle_cases() == cases_before
+    assert repo.list_trade_lifecycle_evidence() == evidence_before
+    assert repo.list_trade_lifecycle_allocations() == []
 
 
-def test_lifecycle_auto_expire_rejects_identity_change_after_outer_preflight(
+def test_long_lifecycle_auto_expire_rejects_identity_change_after_outer_preflight(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1110,7 +1227,7 @@ def test_lifecycle_auto_expire_rejects_identity_change_after_outer_preflight(
         account="lx",
         symbol="TIGR",
         option_type="put",
-        side="short",
+        side="long",
         contracts=10,
         currency="USD",
         strike=6,
@@ -1118,12 +1235,16 @@ def test_lifecycle_auto_expire_rejects_identity_change_after_outer_preflight(
         expiration_ymd="2026-05-22",
         opened_at_ms=1000,
     )
-    repo.upsert_trade_lifecycle_case(_tigr_expire_case("lc_tigr_expire"))
+    case = _tigr_expire_case("lc_tigr_expire")
+    case.update(position_side="long", case_key="富途|lx|TIGR|put|long|6|2026-05-22")
+    repo.upsert_trade_lifecycle_case(case)
     repo.upsert_trade_lifecycle_evidence(_tigr_zero_price_close_evidence("lc_tigr_expire"))
     original_preflight = maintenance_mod._resolve_preflight_expire_auto_close()
+    repair_calls = []
 
     def repair_after_preflight(*args, **kwargs):  # type: ignore[no-untyped-def]
         result = original_preflight(*args, **kwargs)
+        repair_calls.append(result)
         repair = {"account": "sy", "symbol": "MSFT"}
         reason = "simulate concurrent identity repair"
         repair_time = int(result.event_time_ms) + 1
@@ -1149,6 +1270,7 @@ def test_lifecycle_auto_expire_rejects_identity_change_after_outer_preflight(
 
     decisions, applied, errors = _auto_close_decisions(repo, positions, as_of_ms)
 
+    assert len(repair_calls) == 1
     assert applied == []
     assert errors and "target fields do not match current lot state" in errors[0]
     assert decisions[0]["ledger_preflight"]["status"] == "ok"
@@ -1160,24 +1282,38 @@ def test_lifecycle_auto_expire_rejects_identity_change_after_outer_preflight(
     assert repo.get_record_fields(lot_id)["contract_key"]["underlying_symbol"] == "MSFT"
 
 
-def test_lifecycle_auto_expire_rolls_back_event_lot_and_allocation_when_case_write_fails(
+def test_long_lifecycle_auto_expire_rolls_back_event_and_lot_without_allocation_leak_when_case_write_fails(
     tmp_path: Path,
 ) -> None:
     class FailingCaseRepo(ledger_repository.SQLiteOptionPositionsRepository):
+        failed_case_writes = 0
+
         def upsert_trade_lifecycle_case(self, case, *, conn=None):  # type: ignore[no-untyped-def]
             if str(case.get("status") or "") == "ledger_written":
+                self.failed_case_writes += 1
                 raise RuntimeError("injected lifecycle case write failure")
             return super().upsert_trade_lifecycle_case(case, conn=conn)
 
     repo = FailingCaseRepo(tmp_path / "option_positions.sqlite3")
-    _seed_tigr_put(repo)
-    repo.upsert_trade_lifecycle_case(_tigr_expire_case("lc_tigr_expire"))
+    _seed_open_lot_event(
+        repo, lot_id="lot_tigr_put_6_20260522", account="lx", symbol="TIGR",
+        option_type="put", side="long", contracts=10, currency="USD",
+        strike=6, multiplier=100, expiration_ymd="2026-05-22",
+    )
+    case = _tigr_expire_case("lc_tigr_expire")
+    case.update(position_side="long", case_key="富途|lx|TIGR|put|long|6|2026-05-22")
+    repo.upsert_trade_lifecycle_case(case)
     repo.upsert_trade_lifecycle_evidence(_tigr_zero_price_close_evidence("lc_tigr_expire"))
+    cases_before = repo.list_trade_lifecycle_cases()
+    events_before = repo.list_trade_events()
+    lots_before = {row["record_id"]: row["fields"] for row in repo.list_position_lots()}
+    evidence_before = repo.list_trade_lifecycle_evidence()
     as_of_ms, positions = _auto_close_positions(repo, as_of_ymd="2026-05-25")
     positions[0]["_auto_close_underlying_spot"] = 7
 
     _decisions, applied, errors = _auto_close_decisions(repo, positions, as_of_ms)
 
+    assert repo.failed_case_writes == 1
     assert applied == []
     assert errors and "injected lifecycle case write failure" in errors[0]
     assert repo.get_record_fields("lot_tigr_put_6_20260522")["status"] == "open"
@@ -1186,6 +1322,10 @@ def test_lifecycle_auto_expire_rolls_back_event_lot_and_allocation_when_case_wri
     case = repo.get_trade_lifecycle_case("lc_tigr_expire")
     assert case is not None
     assert case["status"] == "waiting_settlement_evidence"
+    assert repo.list_trade_lifecycle_cases() == cases_before
+    assert repo.list_trade_events() == events_before
+    assert {row["record_id"]: row["fields"] for row in repo.list_position_lots()} == lots_before
+    assert repo.list_trade_lifecycle_evidence() == evidence_before
 
 
 def test_auto_close_expired_positions_skips_when_exercise_stock_evidence_seen(tmp_path: Path) -> None:
@@ -1232,7 +1372,12 @@ def test_auto_close_expired_positions_skips_when_exercise_stock_evidence_seen(tm
     assert repo.get_record_fields("lot_aapl_call_200_20260522")["status"] == "open"
 
 
-def test_auto_close_ignores_nested_broker_stock_evidence_for_other_contract(tmp_path: Path) -> None:
+@pytest.mark.parametrize("position_side", ["short", "long"])
+def test_auto_close_ignores_nested_broker_stock_evidence_for_other_contract(
+    tmp_path: Path, position_side: str,
+) -> None:
+    from src.application.ledger import maintenance as maintenance_mod
+
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     _seed_open_lot_event(
         repo,
@@ -1240,7 +1385,7 @@ def test_auto_close_ignores_nested_broker_stock_evidence_for_other_contract(tmp_
         account="lx",
         symbol="0700.HK",
         option_type="put",
-        side="short",
+        side=position_side,
         contracts=1,
         currency="HKD",
         strike=440,
@@ -1257,7 +1402,7 @@ def test_auto_close_ignores_nested_broker_stock_evidence_for_other_contract(tmp_
             "evidence_type": "stock_settlement_leg",
             "account": "lx",
             "symbol": "0700.HK",
-            "side": "buy",
+            "side": "buy" if position_side == "short" else "sell",
             "stock_qty": 100,
             "stock_price": 450,
             "trade_time_ms": parse_exp_to_ms("2026-06-29"),
@@ -1269,19 +1414,40 @@ def test_auto_close_ignores_nested_broker_stock_evidence_for_other_contract(tmp_
     )
     as_of_ms, positions = _auto_close_positions(repo, as_of_ymd="2026-08-01")
     positions[0]["_auto_close_underlying_spot"] = 500
+    # Direct isolation control: unrelated strike evidence must not block either
+    # side. Only the long control can reach this guard through maintenance.
+    assert maintenance_mod._lifecycle_auto_close_blocker(
+        repo, fields=repo.get_record_fields("lot_0700_put_440_20260730"), contracts_to_close=1,
+    ) is None
 
     decisions, applied, errors = _auto_close_decisions(repo, positions, as_of_ms)
 
     assert errors == []
+    if position_side == "short":
+        assert applied == []
+        assert decisions[0]["skip_reason"] == "expiry_assignment_review_required"
+        assert decisions[0]["patch"] is None
+        assert repo.get_record_fields("lot_0700_put_440_20260730")["status"] == "open"
+        assert len(repo.list_trade_events()) == 1
+        return
     assert [item["record_id"] for item in applied] == ["lot_0700_put_440_20260730"]
     assert decisions[0]["should_close"] is True
     assert decisions[0].get("lifecycle_blocker") is None
     assert repo.get_record_fields("lot_0700_put_440_20260730")["status"] == "close"
 
 
-def test_auto_close_expired_positions_fail_closed_on_ledger_identity_mismatch(tmp_path: Path) -> None:
+@pytest.mark.parametrize("position_side", ["short", "long"])
+def test_auto_close_expired_positions_fail_closed_on_ledger_identity_mismatch(
+    tmp_path: Path, position_side: str,
+) -> None:
 
     class MismatchedSnapshotRepo(ledger_repository.SQLiteOptionPositionsRepository):
+        canonical_reads = 0
+
+        def get_record_fields(self, lot_id):  # type: ignore[no-untyped-def]
+            self.canonical_reads += 1
+            return super().get_record_fields(lot_id)
+
         def list_position_lots(self):  # type: ignore[no-untyped-def]
             rows = super().list_position_lots()
             patched = []
@@ -1301,7 +1467,7 @@ def test_auto_close_expired_positions_fail_closed_on_ledger_identity_mismatch(tm
         account="sy",
         symbol="0700.HK",
         option_type="put",
-        side="short",
+        side=position_side,
         contracts=6,
         currency="HKD",
         strike=450,
@@ -1312,13 +1478,19 @@ def test_auto_close_expired_positions_fail_closed_on_ledger_identity_mismatch(tm
     )
     as_of_ms, positions = _auto_close_positions(repo, as_of_ymd="2026-05-31")
     positions[0]["_auto_close_underlying_spot"] = 500
+    repo.canonical_reads = 0
 
     decisions, applied, errors = _auto_close_decisions(repo, positions, as_of_ms)
 
     assert applied == []
     assert errors == []
     assert decisions[0]["should_close"] is False
-    assert decisions[0]["skip_reason"] == "position_lot_identity_changed"
+    if position_side == "short":
+        assert decisions[0]["skip_reason"] == "expiry_assignment_review_required"
+        assert repo.canonical_reads == 0
+    else:
+        assert decisions[0]["skip_reason"] == "position_lot_identity_changed"
+        assert repo.canonical_reads == 1
     assert decisions[0].get("ledger_preflight") is None
     lot_id = str(decisions[0]["record_id"])
     fields = repo.get_record_fields(lot_id)
@@ -1326,12 +1498,16 @@ def test_auto_close_expired_positions_fail_closed_on_ledger_identity_mismatch(tm
     assert fields["contracts_open"] == 6
 
 
+@pytest.mark.parametrize("position_side", ["short", "long"])
 def test_position_maintenance_requires_active_ledger_repair_before_closing_position_lots_without_events(
     tmp_path: Path,
+    position_side: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.application.positions.maintenance import run_expired_position_maintenance_for_account
 
     runtime_root = tmp_path / "runtime"
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
     db_path = runtime_root / "output_shared" / "state" / "option_positions.sqlite3"
     data_config = runtime_root / "portfolio.runtime.json"
     data_config.parent.mkdir(parents=True, exist_ok=True)
@@ -1350,7 +1526,7 @@ def test_position_maintenance_requires_active_ledger_repair_before_closing_posit
                         account="lx",
                         symbol="NVDA",
                         option_type="put",
-                        position_side="short",
+                        position_side=position_side,
                         strike=100,
                         expiration_ymd="2026-04-17",
                         contracts_open=1,
@@ -1369,13 +1545,21 @@ def test_position_maintenance_requires_active_ledger_repair_before_closing_posit
         account="lx",
         report_dir=tmp_path / "reports",
         as_of_ms=as_of_ms,
+        send_receipt=False,
     )
 
     assert result["applied_closed"] == 0
-    assert len(result["errors"]) == 1
-    assert "active ledger repair required before auto-close" in result["errors"][0]
-    assert "repair the active ledger" in result["errors"][0]
+    if position_side == "short":
+        assert result["errors"] == []
+        assert result["skipped_review_required"] == 1
+        assert result["decision_items"][0]["skip_reason"] == "expiry_assignment_review_required"
+        assert result["decision_items"][0]["patch"] is None
+    else:
+        assert len(result["errors"]) == 1
+        assert "active ledger repair required before auto-close" in result["errors"][0]
+        assert "repair the active ledger" in result["errors"][0]
     lots = ledger_repository.SQLiteOptionPositionsRepository(db_path).list_position_lots()
     assert len(lots) == 1
     assert lots[0]["fields"]["status"] == "open"
     assert "close_type" not in lots[0]["fields"]
+    assert repo.list_trade_events() == []

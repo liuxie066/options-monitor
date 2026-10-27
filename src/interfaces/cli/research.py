@@ -87,7 +87,7 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     pull.add_argument("--rsync-path", default="rsync")
     pull.add_argument("--write", action="store_true", help="execute rsync and write local sync/verify manifests")
 
-    verify = archive_commands.add_parser("verify", help="verify local archive structure and write inventory.latest.json")
+    verify = archive_commands.add_parser("verify", help="check local archive structure without changing source verification evidence")
     verify.add_argument("--remote", default="prod")
     verify.add_argument("--archive-root", default=None)
 

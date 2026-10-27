@@ -89,8 +89,11 @@ class SystemdCredentialProvider:
         try:
             file_stat = path.lstat()
             configured = stat.S_ISREG(file_stat.st_mode) and 0 < file_stat.st_size <= MAX_SECRET_BYTES
-        except OSError:
-            configured = False
+        except OSError as exc:
+            if not isinstance(exc, FileNotFoundError) and exc.errno != errno.ENOENT:
+                raise SecretBackendUnavailable(
+                    f"systemd credential status is unavailable: {logical_name}"
+                ) from exc
         return SecretStatus(
             logical_name=logical_name,
             configured=configured,
@@ -126,8 +129,11 @@ class SystemdCredentialProvisioner:
         try:
             file_stat = path.lstat()
             configured = stat.S_ISREG(file_stat.st_mode) and file_stat.st_size > 0
-        except OSError:
-            configured = False
+        except OSError as exc:
+            if not isinstance(exc, FileNotFoundError) and exc.errno != errno.ENOENT:
+                raise SecretBackendUnavailable(
+                    f"systemd encrypted credential status is unavailable: {logical_name}"
+                ) from exc
         return SecretStatus(
             logical_name=logical_name,
             configured=configured,

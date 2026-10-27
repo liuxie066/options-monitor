@@ -1506,6 +1506,109 @@ def test_noop_account_result_is_not_a_successful_snapshot(tmp_path: Path) -> Non
     assert brief["candidate_index"] == []
 
 
+@pytest.mark.parametrize("completion_offset", [-1, 0, 1])
+def test_real_completion_boundary_keeps_planning_snapshot_without_candidate_delivery(
+    monkeypatch, tmp_path: Path, completion_offset: int,
+) -> None:
+    from dataclasses import replace
+
+    from domain.storage import paths
+    from src.application import daily_decision_brief_service as service
+    from src.application import tick_notification_flow as flow
+    from src.application.daily_decision_brief_repository import (
+        read_daily_decision_brief_delivery_state,
+        read_latest_daily_decision_brief,
+    )
+    from tests.test_daily_decision_brief_notification_flow import (
+        _config as notification_config,
+        _patch_sender,
+        _request,
+    )
+
+    _write_labeled_put_candidates(tmp_path)
+    _materialize_opening_snapshot_fixture(tmp_path, market="US")
+    _materialize_combo_snapshot_fixture(tmp_path, market="US")
+    _materialize_candidate_bundle_fixture(tmp_path)
+    boundary = datetime(2026, 7, 17, 14, 0, tzinfo=timezone.utc)
+    completed_at = boundary + timedelta(seconds=completion_offset)
+
+    class CompletionClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return completed_at.astimezone(tz) if tz else completed_at.replace(tzinfo=None)
+
+    monkeypatch.setattr(service, "datetime", CompletionClock)
+    config = notification_config()
+    config["schedule"] = _config()["schedule"]
+    config["schedule"]["run_window"]["end"] = "10:00"
+    bundle = _request(tmp_path, run_id="run-1", fixed=False, config=config)
+    target = "2026-07-17T09:45:00-04:00"
+    scheduler = {
+        "in_run_window": True, "should_run_scan": True,
+        "now_utc": "2026-07-17T13:45:00Z", "now_market": target,
+        "scheduled_scan_target_market": target, "scheduled_target_market": None,
+    }
+    request = replace(
+        bundle.request, scheduler_decision=scheduler,
+        scheduler_decisions_by_account={"lx": scheduler},
+        scheduled_scan_targets_by_account={"lx": target},
+    )
+    persisted_results = []
+    persist = flow.persist_daily_decision_brief_success
+
+    def capture_success(**kwargs):
+        result = persist(**kwargs)
+        persisted_results.append(result)
+        return result
+
+    monkeypatch.setattr(flow, "persist_daily_decision_brief_success", capture_success)
+    calls = []
+    _patch_sender(monkeypatch, calls=calls)
+    assert flow.run_tick_notification_flow(request) == 0
+    assert len(persisted_results) == 1
+    persisted = persisted_results[0]
+    brief = persisted["brief"]
+    assert brief["status"] in {"ready", "degraded"}
+    assert brief["valid_until_utc"] == boundary.isoformat()
+    assert brief["generated_at_utc"] == completed_at.isoformat()
+    assert any(
+        action["state"] == "active" and action["priority"] == "P1"
+        and action["action_type"] == "open_candidate"
+        and action["metrics"]["capacity"]["contracts_available"] >= 1
+        for action in brief["actions"]
+    )
+    current = read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["brief"]
+    assert current == brief
+    assert json.loads(persisted["paths"]["run_brief"].read_text())["actions"] == brief["actions"]
+    assert bundle.commits == [{"lx": target}]
+    state = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")
+    assert state["available"] is True
+    day = state["state"]["days"]["2026-07-17"]
+    if completion_offset < 0:
+        assert brief["actionability"] == "live_actionable"
+        assert brief["candidate_index"]
+        assert persisted["current_candidate_identities"]
+        assert len(calls) == 1
+        assert day["candidate_delivery"]["delivery_kind"] == "candidate_alert"
+        assert day["candidate_delivery"]["status"] == "confirmed"
+    else:
+        assert brief["actionability"] == "planning_only"
+        assert brief["candidate_index"] == []
+        assert persisted["current_candidate_identities"] == []
+        assert persisted["newly_detected_candidate_identities"] == []
+        assert day["pending_candidates"] == {}
+        assert day["candidate_delivery"] is None
+        assert day["fixed_reports"] == {}
+        assert calls == []
+        assert bundle.completions == [{"status": "skipped", "message": "no_daily_brief_delivery"}]
+        assert request.tick_metrics["sent"] is False
+        assert request.audit_helper.successes == 1
+        for state_dir in (paths.shared_state_dir(tmp_path), paths.run_state_dir(tmp_path, "run-1")):
+            metrics = json.loads((state_dir / "tick_metrics.json").read_text())
+            assert metrics["sent"] is False
+        assert [e["status"] for e in request.runlog.events if e["step"] == "run_end"] == ["ok"]
+
+
 def test_distant_candidate_event_is_retained_without_attention_filter(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
     row = _put_row()
@@ -1990,6 +2093,169 @@ def test_close_advice_daily_brief_honors_ranked_account_limit(
     assert "汇总｜共 3 条，需处理 1 条。" in message
 
 
+def test_paired_combo_net_income_survives_snapshot_and_brief(tmp_path: Path) -> None:
+    from domain.domain.engine import calculate_opening_candidate_metrics
+    from src.application.combo_yield_candidate_snapshot import (
+        load_combo_yield_candidate_snapshot,
+        seal_combo_yield_candidate_snapshot,
+    )
+    from src.application.daily_decision_brief_renderer import (
+        build_daily_brief_user_view,
+        render_fixed_report_card_markdown,
+        render_full_brief,
+    )
+    from src.application.sell_put_call_helper import (
+        build_combo_yield_rank_shadow,
+        find_sell_put_combo_yield_pairs,
+        get_combo_yield_pair_diagnostics,
+        select_best_combo_yield_pairs,
+    )
+
+    account_dir = _account_dir(tmp_path)
+    now_utc = datetime(2026, 7, 17, 14, 0, tzinfo=timezone.utc)
+    contract_evidence = {
+        "currency": "USD",
+        "multiplier": 100,
+        "chain_multiplier": 100,
+        "snapshot_multiplier": 100,
+        "opening_contract_status": "ready",
+        "underlier_observation_status": "ready",
+        "snapshot_received_at_utc": "2026-07-17T13:59:00Z",
+        "spot_observed_at_utc": "2026-07-17T13:59:00Z",
+        "option_standard_type": "STANDARD",
+        "stock_owner": "NVDA",
+        "price_tick": 0.01,
+        "implied_volatility": 0.40,
+    }
+    put_source = {
+        **_put_row(),
+        **contract_evidence,
+        "bid": 3.00,
+        "ask": 3.20,
+        "mid": 3.10,
+        "term_matched_rv": 0.20,
+        "term_matched_rv_status": "ok",
+    }
+    call_source = {
+        **_call_row(),
+        **contract_evidence,
+        "bid": 0.40,
+        "ask": 0.50,
+        "mid": 0.45,
+    }
+    funding_put = {
+        **put_source,
+        **calculate_opening_candidate_metrics(put_source, mode="put", now_utc=now_utc),
+    }
+    funding_income = funding_put["net_income"]
+    pairs = find_sell_put_combo_yield_pairs(
+        df_candidates=pd.DataFrame([funding_put]),
+        symbol="NVDA",
+        input_root=tmp_path,
+        combo_yield_cfg={"enabled": True},
+        sell_put_cfg={"enabled": True, "min_dte": 20, "max_dte": 60},
+        required_data_frame=pd.DataFrame([put_source, call_source]),
+        now_utc=now_utc,
+    )
+    selected = select_best_combo_yield_pairs(pairs)
+    assert len(selected) == 1
+    pair = selected.iloc[0].to_dict()
+    assert pair["net_income"] == pytest.approx(pair["net_credit"])
+    assert pair["combo_net_credit"] == pytest.approx(pair["net_credit"])
+    assert funding_income > pair["net_credit"]
+    assert funding_income != pytest.approx(pair["put_only_net_credit"])
+    assert pair["put_only_net_credit"] == pytest.approx(
+        put_source["bid"] * 100 - pair["put_sell_fee"]
+    )
+    assert pair["net_credit"] == pytest.approx(
+        pair["put_only_net_credit"] - (call_source["ask"] * 100 + pair["call_buy_fee"])
+    )
+
+    sealed = seal_combo_yield_candidate_snapshot(
+        base=tmp_path,
+        run_id="run-1",
+        account="lx",
+        market="us",
+        account_config_sha256="f" * 64,
+        strategy_policy_sha256="1" * 64,
+        dependencies=_fixture_dependencies(),
+        scan_statuses=[{
+            "symbol": "NVDA",
+            "strategy_mode": "combo_yield",
+            "variant": "sp_lc",
+            "status": "completed",
+            "quote_snapshot_id": None,
+            "quote_receipt_relpath": None,
+        }],
+        funding_put_decisions=[],
+        pair_evaluations=get_combo_yield_pair_diagnostics(pairs).to_dict("records"),
+        rank_records=build_combo_yield_rank_shadow(pairs).to_dict("records"),
+        ranked_pairs=selected.to_dict("records"),
+        run_mode={"scan_mode": "standard", "executable": True},
+        sealed_at="2026-07-17T14:00:00Z",
+    )
+    loaded = load_combo_yield_candidate_snapshot(
+        base=tmp_path, run_id="run-1", account="lx"
+    )
+    assert loaded["content_sha256"] == sealed["content_sha256"]
+    assert len(loaded["ranked_pairs"]) == 1
+    frozen_pair = loaded["ranked_pairs"][0]
+    assert frozen_pair["candidate_pair_id"] == pair["candidate_pair_id"]
+    assert frozen_pair["net_income"] == pytest.approx(pair["net_credit"])
+    for field in (
+        "net_credit", "put_only_net_credit", "put_sell_fee", "call_buy_fee",
+        "annualized_net_credit_yield",
+    ):
+        assert frozen_pair[field] == pytest.approx(pair[field])
+
+    pd.DataFrame([_put_row()]).to_csv(
+        account_dir / "nvda_sell_put_candidates_labeled.csv", index=False
+    )
+    pd.DataFrame([_call_row()]).to_csv(
+        account_dir / "nvda_sell_call_candidates.csv", index=False
+    )
+    brief = _assemble(tmp_path, now_utc=now_utc)
+    assert brief["actionability"] == "live_actionable"
+    assert len(brief["candidates"]["combo_yield"]) == 1
+    candidate = brief["candidates"]["combo_yield"][0]
+    action = next(item for item in brief["actions"] if item["action_type"] == "open_combo_yield")
+    representative = next(
+        item["representative"] for item in brief["candidate_index"]
+        if item["strategy_family"] == "combo_yield"
+    )
+    for item in (candidate, action, representative):
+        assert item["candidate_pair_id"] == pair["candidate_pair_id"]
+        assert item["metrics"]["net_income"] == pytest.approx(pair["net_credit"])
+        assert item["metrics"]["net_credit"] == pytest.approx(pair["net_credit"])
+        assert item["metrics"]["annualized_net_credit_yield"] == pytest.approx(
+            pair["annualized_net_credit_yield"]
+        )
+    for item in (candidate, representative):
+        assert item["put_sell_reference"] == put_source["bid"]
+        assert item["call_buy_reference"] == call_source["ask"]
+    assert action["metrics"]["put_contract_symbol"] == pair["put_contract_symbol"]
+    assert action["metrics"]["call_contract_symbol"] == pair["call_contract_symbol"]
+    assert brief["candidates"]["sell_put"][0]["metrics"]["net_income"] == 200
+    assert brief["candidates"]["covered_call"][0]["metrics"]["net_income"] == 100
+
+    view = build_daily_brief_user_view(brief, delivery_kind="fixed_report")
+    views = {item["family"]: item for item in view["candidates"]}
+    combo_view = views["combo_yield"]
+    combo_money = f"${pair['net_credit']:,.2f}"
+    funding_money = f"${funding_income:,.2f}"
+    assert f"预计净收入 {combo_money}" in "\n".join(combo_view["details"])
+    assert f"净收入 {combo_money}" in combo_view["return_card"]
+    assert funding_money not in "\n".join(combo_view["details"])
+    assert funding_money not in combo_view["return_card"]
+    for family, income in (("sell_put", 200), ("covered_call", 100)):
+        assert f"预计净收入 ${income:.2f}" in "\n".join(views[family]["details"])
+    for render in (render_full_brief, render_fixed_report_card_markdown):
+        message = render(brief)
+        combo_section = message.split("## 组合增强", 1)[1].split("\n## ", 1)[0]
+        assert f"预计净收入 {combo_money}" in combo_section
+        assert f"预计净收入 {funding_money}" not in combo_section
+
+
 def test_combo_yield_selects_one_pair_per_symbol_and_ranks_before_truncation(tmp_path: Path) -> None:
     account_dir = _account_dir(tmp_path)
     pd.DataFrame(
@@ -2169,7 +2435,9 @@ def test_combo_yield_event_projection_relates_to_shared_expiration(
     assert candidate["event_risk"]["user_state"] == "confirmed_event"
     assert candidate["event_risk"]["reason_code"] == "confirmed_distant_earnings_event"
     assert candidate["event_risk"]["reliable"] is True
-    assert candidate["event_risk"]["evidence_chain_id"] == "e" * 64
+    assert candidate["event_risk"]["evidence_chain_id"].startswith("earnings-comparable-v1:")
+    assert candidate["event_risk"]["evidence_snapshot_hash"] == "e" * 64
+    assert representative["event_risk"] == candidate["event_risk"]
     assert candidate["event_risk"]["expiration_relations"] == {
         "put": {
             "expiration": "2026-08-21",

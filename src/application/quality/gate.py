@@ -8,6 +8,7 @@ from threading import Lock
 from typing import Any, Protocol
 from uuid import uuid4
 
+from src.application.quality.model import validated_quality_status
 from src.application.quality.paths import default_quality_artifact_path
 from src.infrastructure.quality.artifact_repository import QualityArtifactRepository
 
@@ -144,7 +145,9 @@ def assert_quality_allows(
             lifecycle_rows_requested=False,
         )
         if service is not None
-        else QualityArtifactRepository(default_quality_artifact_path()).read()
+        else validated_quality_status(
+            QualityArtifactRepository(default_quality_artifact_path()).read()
+        )
     )
     if service is None:
         record_quality_consumer_read(
@@ -173,9 +176,9 @@ def assert_quality_allows(
     reasons: set[str] = set()
     account_key = str(account or "").strip().lower()
     market_key = str(market or "").strip().lower()
-    require_scoped_option_positions = bool(
-        consumer == "close_advice" and account_key and market_key
-    )
+    require_scoped_option_positions = consumer in {"close_advice", "option_position_report"}
+    if require_scoped_option_positions and not (account_key and market_key):
+        raise QualityGateBlocked(consumer, "QUALITY_DATASET_UNAVAILABLE", ("OM-POS-001",))
     scoped_option_position_count = 0
     scoped_option_position_declaration_count = 0
     cutover_active = (

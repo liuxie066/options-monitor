@@ -81,6 +81,8 @@ def _row(*, mode="put", market="US", strike=None, dte=31, **overrides):
         "opening_contract_status": "ready", "opening_contract_reason_codes": [],
         "snapshot_received_at_utc": NOW.isoformat(), "spot_observed_at_utc": NOW.isoformat(),
         "last_price_update_time": None, "delta": -0.3 if mode == "put" else 0.3,
+        "delta_source": "opend_market_snapshot.option_delta", "delta_unit": "fraction",
+        "delta_reason_code": None, "decision_now_utc": NOW.isoformat(),
         "open_interest": None, "volume": None,
     }
     row.update(overrides)
@@ -216,6 +218,33 @@ def test_evaluate_valid_rejections_are_none_with_canonical_reasons(override, rea
     assert result["outcome"] == "none"
     _assert_counts(result, matched=0, excluded=1, unassessed=0)
     assert {item["code"] for item in result["exclusion_summary"]} >= {reason}
+
+
+@pytest.mark.parametrize("mode", ["put", "call"])
+@pytest.mark.parametrize("cap,value,expected", [(0.4, 0.4, "found"), (0.2, 0.3, "none"),
+    (0.5, 0.45, "found"), (None, None, "found"), (0.4, None, "unable")])
+def test_query_uses_configured_delta_cap_and_current_decision_clock(mode, cap, value, expected):
+    row = _row(mode=mode, delta=None if value is None else (-value if mode == "put" else value),
+               decision_now_utc="2000-01-01T00:00:00+00:00", policy_max_abs_delta=0)
+    result = _evaluate([row], prepared=_prepared(mode=mode, policy={"max_abs_delta": cap}))
+    assert result["outcome"] == expected
+    _assert_counts(result, matched=int(expected == "found"), excluded=int(expected == "none"),
+                   unassessed=int(expected == "unable"))
+    if expected == "unable":
+        assert result["coverage"]["status"] == "unavailable"
+        assert result["reason_codes"] == ["risk_delta_unavailable"]
+    elif expected == "none":
+        assert result["exclusion_summary"] == [{"code": "risk_delta", "count": 1}]
+
+
+def test_delta_evidence_gap_preserves_partial_results_and_is_not_an_exclusion():
+    good = _row()
+    unknown = _row(strike=99, delta_source="unverified", implied_volatility=0.21)
+    result = _evaluate([good, unknown])
+    assert result["outcome"] == "found"
+    assert result["coverage"]["status"] == "partial"
+    _assert_counts(result, matched=1, excluded=0, unassessed=1)
+    assert result["reason_codes"] == ["risk_delta_unavailable"]
 
 
 @pytest.mark.parametrize("override", [{"bid": None}, {"price_tick": None}, {"multiplier": None},

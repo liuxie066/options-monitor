@@ -271,6 +271,73 @@ restore_cli_wrapper() {
   fi
 }
 
+cleanup_install_transaction() {
+  local cleanup_status=$?
+  local cleanup_failed=0 cleanup_state=indeterminate cleanup_current
+  local cleanup_name cleanup_wrapper cleanup_backup cleanup_existed cleanup_armed
+  trap - EXIT INT TERM
+
+  if [ -L "$CURRENT_LINK" ]; then
+    if cleanup_current="$(readlink "$CURRENT_LINK")"; then
+      if [ "$cleanup_current" = "$TARGET_DIR" ]; then
+        cleanup_state=committed
+      elif [ "$initial_current_existed" -eq 1 ] && [ "$cleanup_current" = "$initial_current_target" ]; then
+        cleanup_state=uncommitted
+      fi
+    fi
+  elif [ "$initial_current_existed" -eq 0 ] && [ ! -e "$CURRENT_LINK" ]; then
+    cleanup_state=uncommitted
+  fi
+  if [ "$cleanup_state" = indeterminate ]; then
+    printf 'install.sh: cannot determine current commit state; preserving CLI backups: %s\n' "$CURRENT_LINK" >&2
+    cleanup_failed=1
+  fi
+
+  if [ "$INSTALL_CLI" -eq 1 ]; then
+    for cleanup_name in om om-agent; do
+      cleanup_wrapper="${BIN_DIR}/${cleanup_name}"
+      if [ "$cleanup_name" = om ]; then
+        cleanup_backup="$backup_om_wrapper"
+        cleanup_existed="$om_wrapper_existed"
+        cleanup_armed="$om_rollback_armed"
+      else
+        cleanup_backup="$backup_agent_wrapper"
+        cleanup_existed="$agent_wrapper_existed"
+        cleanup_armed="$agent_rollback_armed"
+      fi
+      if [ "$cleanup_state" = indeterminate ]; then
+        if [ -e "$cleanup_backup" ] || [ -L "$cleanup_backup" ]; then
+          printf 'install.sh: retained CLI backup: %s -> %s\n' "$cleanup_backup" "$cleanup_wrapper" >&2
+        fi
+      elif [ "$cleanup_state" = uncommitted ] && [ "$cleanup_armed" -eq 1 ]; then
+        if restore_cli_wrapper "$cleanup_wrapper" "$cleanup_backup" "$cleanup_existed"; then
+          if [ "$cleanup_name" = om ]; then om_rollback_armed=0; else agent_rollback_armed=0; fi
+        else
+          printf 'install.sh: failed to restore CLI wrapper: %s; backup retained if present: %s\n' "$cleanup_wrapper" "$cleanup_backup" >&2
+          cleanup_failed=1
+        fi
+      elif ! rm -f "$cleanup_backup"; then
+        printf 'install.sh: failed to remove CLI backup: %s\n' "$cleanup_backup" >&2
+        cleanup_failed=1
+      fi
+    done
+    if ! rm -f "$staged_om_wrapper" "$staged_agent_wrapper"; then
+      printf 'install.sh: failed to remove staged CLI wrappers: %s, %s\n' "$staged_om_wrapper" "$staged_agent_wrapper" >&2
+      cleanup_failed=1
+    fi
+  fi
+  if ! rm -rf "$tmp_dir"; then
+    printf 'install.sh: failed to remove staged release: %s\n' "$tmp_dir" >&2
+    cleanup_failed=1
+  fi
+  if ! rm -f "${CURRENT_LINK}.tmp.$$"; then
+    printf 'install.sh: failed to remove staged current link: %s\n' "${CURRENT_LINK}.tmp.$$" >&2
+    cleanup_failed=1
+  fi
+  if [ "$cleanup_status" -eq 0 ] && [ "$cleanup_failed" -ne 0 ]; then cleanup_status=1; fi
+  exit "$cleanup_status"
+}
+
 replace_current_link() {
   staged_link="${CURRENT_LINK}.tmp.$$"
   rm -f "$staged_link"
@@ -490,13 +557,28 @@ if [ "$ALREADY_INSTALLED" -eq 1 ]; then
     || die "active release VERSION mismatch; expected=${TAG#v}; observed=${installed_version:-missing}"
   run_bot_smoke "$TARGET_DIR"
 else
+  initial_current_existed=0
+  initial_current_target=""
+  if [ -L "$CURRENT_LINK" ]; then
+    initial_current_target="$(readlink "$CURRENT_LINK")" \
+      || die "cannot read initial current symlink: $CURRENT_LINK"
+    initial_current_existed=1
+    [ "$initial_current_target" != "$TARGET_DIR" ] \
+      || die "initial current already points to target on new publication path: $CURRENT_LINK -> $TARGET_DIR"
+  fi
   tmp_dir="${RELEASES_DIR}/.${TAG}.tmp.$$"
   staged_om_wrapper="${BIN_DIR}/.om.tmp.$$"
   staged_agent_wrapper="${BIN_DIR}/.om-agent.tmp.$$"
   backup_om_wrapper="${BIN_DIR}/.om.backup.$$"
   backup_agent_wrapper="${BIN_DIR}/.om-agent.backup.$$"
+  om_wrapper_existed=0
+  agent_wrapper_existed=0
+  om_rollback_armed=0
+  agent_rollback_armed=0
+  trap cleanup_install_transaction EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   rm -rf "$tmp_dir"
-  trap 'rm -rf "$tmp_dir"; if [ "$INSTALL_CLI" -eq 1 ]; then rm -f "$staged_om_wrapper" "$staged_agent_wrapper" "$backup_om_wrapper" "$backup_agent_wrapper"; fi; rm -f "${CURRENT_LINK}.tmp.$$"' EXIT
 
   printf '[install] cloning %s at %s\n' "$REPO_URL" "$TAG"
   git clone --depth 1 --branch "$TAG" "$REPO_URL" "$tmp_dir"
@@ -513,14 +595,14 @@ else
   if [ "$INSTALL_CLI" -eq 1 ]; then
     stage_cli_wrapper "om" "${CURRENT_LINK}/om" "$tmp_dir/om" "$staged_om_wrapper"
     stage_cli_wrapper "om-agent" "${CURRENT_LINK}/om-agent" "$tmp_dir/om-agent" "$staged_agent_wrapper"
-    om_wrapper_existed=0
-    agent_wrapper_existed=0
     if backup_cli_wrapper "${BIN_DIR}/om" "$backup_om_wrapper"; then
       om_wrapper_existed=1
     fi
+    om_rollback_armed=1
     if backup_cli_wrapper "${BIN_DIR}/om-agent" "$backup_agent_wrapper"; then
       agent_wrapper_existed=1
     fi
+    agent_rollback_armed=1
   fi
 
   if [ "$REPLACE_INACTIVE_TARGET" -eq 1 ]; then
@@ -530,28 +612,16 @@ else
 
   if [ "$INSTALL_CLI" -eq 1 ]; then
     if ! mv -f "$staged_om_wrapper" "${BIN_DIR}/om"; then
-      restore_cli_wrapper "${BIN_DIR}/om" "$backup_om_wrapper" "$om_wrapper_existed"
-      restore_cli_wrapper "${BIN_DIR}/om-agent" "$backup_agent_wrapper" "$agent_wrapper_existed"
       die "failed to publish CLI wrapper: ${BIN_DIR}/om"
     fi
     if ! mv -f "$staged_agent_wrapper" "${BIN_DIR}/om-agent"; then
-      restore_cli_wrapper "${BIN_DIR}/om" "$backup_om_wrapper" "$om_wrapper_existed"
-      restore_cli_wrapper "${BIN_DIR}/om-agent" "$backup_agent_wrapper" "$agent_wrapper_existed"
       die "failed to publish CLI wrapper: ${BIN_DIR}/om-agent"
     fi
   fi
 
   if ! replace_current_link; then
-    if [ "$INSTALL_CLI" -eq 1 ]; then
-      restore_cli_wrapper "${BIN_DIR}/om" "$backup_om_wrapper" "$om_wrapper_existed"
-      restore_cli_wrapper "${BIN_DIR}/om-agent" "$backup_agent_wrapper" "$agent_wrapper_existed"
-    fi
     die "failed to atomically switch current release: $CURRENT_LINK"
   fi
-  if [ "$INSTALL_CLI" -eq 1 ]; then
-    rm -f "$backup_om_wrapper" "$backup_agent_wrapper"
-  fi
-  trap - EXIT
 fi
 
 if [ "$INSTALL_CLI" -eq 1 ] && [ "$ALREADY_INSTALLED" -eq 1 ]; then

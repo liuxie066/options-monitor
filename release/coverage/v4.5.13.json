@@ -1,0 +1,88 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.5.13",
+  "base": {
+    "tag": "v4.5.12",
+    "commit": "68689d542288c18683147cf8c1fa67c1b868383c"
+  },
+  "reviewed_head": "8cfbed0509365a5ead1aae1241cb290e1de480ff",
+  "commits": [
+    {
+      "sha": "fd0e7919b385840d9463ca41866c2cbd29ef350e",
+      "subject": "chore: accept plan for issues 799 and 803"
+    },
+    {
+      "sha": "0ed8cc46936f7c66284cc3f742bd32bd42ba346b",
+      "subject": "fix(ops): restrict optional rotation to closed log archives"
+    },
+    {
+      "sha": "5d5247ee0600a2e1542cf372446480e8bd164b77",
+      "subject": "fix(trades): recover durable portfolio refresh handoffs"
+    },
+    {
+      "sha": "d8ed396f7fc33b357526e4c7b8903eed62a34226",
+      "subject": "chore(contract): accept joint refresh recovery deepreview"
+    },
+    {
+      "sha": "8cfbed0509365a5ead1aae1241cb290e1de480ff",
+      "subject": "Merge pull request #937 from liuxie066/codex/fix-799-803"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "可选日志轮转模板仅适用于已关闭且使用有界复用文件名的归档，排除常驻服务仍持有描述符的活动日志，保留压缩与到期清理（#799）。",
+      "commits": [
+        "0ed8cc46936f7c66284cc3f742bd32bd42ba346b",
+        "8cfbed0509365a5ead1aae1241cb290e1de480ff"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "新 PM 持仓刷新意图持久化稳定交接身份与接收确认，中断或响应丢失后重试同一请求，并避免失败前缀饿死后续请求；须先升级配套 PM 接收端，历史结果不明记录不自动补发（#803）。",
+      "commits": [
+        "5d5247ee0600a2e1542cf372446480e8bd164b77",
+        "d8ed396f7fc33b357526e4c7b8903eed62a34226",
+        "8cfbed0509365a5ead1aae1241cb290e1de480ff"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "fd0e7919b385840d9463ca41866c2cbd29ef350e",
+      "reason": "Internal plan acceptance checkpoint; no independent runtime or operator behavior change."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "fd0e7919b385840d9463ca41866c2cbd29ef350e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/937"
+      ]
+    },
+    {
+      "commit": "0ed8cc46936f7c66284cc3f742bd32bd42ba346b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/937"
+      ]
+    },
+    {
+      "commit": "5d5247ee0600a2e1542cf372446480e8bd164b77",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/937"
+      ]
+    },
+    {
+      "commit": "d8ed396f7fc33b357526e4c7b8903eed62a34226",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/937"
+      ]
+    },
+    {
+      "commit": "8cfbed0509365a5ead1aae1241cb290e1de480ff",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/937"
+      ]
+    }
+  ]
+}

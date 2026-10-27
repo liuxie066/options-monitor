@@ -288,6 +288,91 @@ def test_success_persistence_advances_only_reliable_current_and_returns_identity
     assert read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["brief"]["revision"] == 1
 
 
+@pytest.mark.parametrize("actionability", ["planning_only", "blocked", None, "unknown"])
+def test_nonlive_candidate_identity_ignores_raw_index_and_eligible_actions(actionability) -> None:
+    from src.application.daily_decision_brief_repository import _candidate_identity_set
+
+    brief = _brief(run_id="nonlive", actions=[_action()], actionability=actionability)
+    brief["candidate_index"] = [{"identity": IDENTITY_NVDA}]
+    assert _candidate_identity_set(brief) == set()
+    brief.pop("candidate_index")
+    assert _candidate_identity_set(brief) == set()
+    assert _candidate_identity_set(None) == set()
+    assert _candidate_identity_set([]) == set()
+
+
+@pytest.mark.parametrize("index", [None, [], [{"identity": IDENTITY_AMD}]])
+def test_live_identity_preserves_index_priority_and_legacy_action_fallback(index) -> None:
+    from src.application.daily_decision_brief_repository import _candidate_identity_set
+
+    actions = [_action(), _action(symbol="PZERO", priority="P0")]
+    combo = _action(symbol="COMBO")
+    combo.update(action_type="open_combo_yield", strategy_family="combo_yield")
+    actions.append(combo)
+    for overrides in (
+        {"state": "blocked"}, {"priority": "P2"}, {"action_type": "close_position"},
+        {"metrics": {"capacity": {"contracts_available": 0}}},
+        {"metrics": {"capacity": {"contracts_available": "unknown"}}},
+    ):
+        actions.append({**_action(symbol="INELIGIBLE"), **overrides})
+    brief = _brief(run_id="legacy-live", actions=actions)
+    if index is not None:
+        brief["candidate_index"] = index
+    expected = ({IDENTITY_AMD} if index else {
+        IDENTITY_NVDA, "candidate:v1:lx:US:PZERO:sell_put", "candidate:v1:lx:US:COMBO:combo_yield",
+    })
+    assert _candidate_identity_set(brief) == expected
+
+
+def test_planning_success_preserves_snapshot_and_alerted_but_clears_pending(tmp_path: Path) -> None:
+    from src.application.daily_decision_brief_repository import (
+        confirm_daily_decision_brief_delivery_v2,
+        persist_daily_decision_brief_success,
+        read_latest_daily_decision_brief,
+    )
+    from src.application.notification_delivery_adapter import build_notification_transport_key
+
+    first = _persist(tmp_path, actions=[_action()])
+    _record_candidates(tmp_path, revision=first["current_revision"],
+                       brief_digest=first["current_brief_digest"], candidate_identities=[IDENTITY_NVDA])
+    envelope = _prepare_fixed(tmp_path, first)["envelope"]
+    confirm_daily_decision_brief_delivery_v2(
+        base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE,
+        delivery_key=envelope["delivery_key"], source_digest=envelope["source_digest"],
+        message_sha256=envelope["message_sha256"],
+        transport_idempotency_key=build_notification_transport_key(envelope["delivery_key"]),
+    )
+    live = _persist(tmp_path, run_id="live-two", actions=[_action(), _action(symbol="AMD")])
+    recorded = _record_candidates(tmp_path, revision=live["current_revision"],
+                                  brief_digest=live["current_brief_digest"],
+                                  candidate_identities=live["current_candidate_identities"])
+    assert recorded["pending_candidate_identities"] == [IDENTITY_AMD]
+    before = _read_state(tmp_path)["state"]["days"][MARKET_DATE]
+    source = _brief(run_id="late-planning", actions=[_action(), _action(symbol="AMD")],
+                    actionability="planning_only")
+    planning = persist_daily_decision_brief_success(base=tmp_path, brief=source)
+    assert planning["previous_candidate_identities"] == [IDENTITY_AMD, IDENTITY_NVDA]
+    assert planning["current_candidate_identities"] == []
+    assert planning["newly_detected_candidate_identities"] == []
+    current = read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")["brief"]
+    assert current["run_id"] == "late-planning"
+    assert current["actions"] == planning["brief"]["actions"]
+    assert len(current["actions"]) == 2
+    assert current["candidate_index"] == []
+    cleared = _record_candidates(tmp_path, revision=planning["current_revision"],
+                                 brief_digest=planning["current_brief_digest"], candidate_identities=[])
+    assert cleared["applied"] is True
+    assert cleared["pending_candidate_identities"] == []
+    after = _read_state(tmp_path)["state"]["days"][MARKET_DATE]
+    assert after["pending_candidates"] == {}
+    assert after["alerted_candidates"] == before["alerted_candidates"]
+    assert after["fixed_reports"] == before["fixed_reports"]
+    stale = _record_candidates(tmp_path, revision=live["current_revision"],
+                               brief_digest=live["current_brief_digest"], candidate_identities=[IDENTITY_AMD])
+    assert stale["reason"] == "stale_revision"
+    assert _read_state(tmp_path)["state"]["days"][MARKET_DATE] == after
+
+
 def test_v2_delivery_reads_existing_legacy_delivery_candidate(tmp_path: Path) -> None:
     persisted = _persist(tmp_path, actions=[_action()])
     _record_candidates(
@@ -453,6 +538,17 @@ def test_candidate_retry_stops_after_later_success_removes_identity_from_pending
     retry = _retry(tmp_path)
     assert retry["reason"] == "stale_candidate_envelope"
     assert retry["envelope"] is None
+
+    before = _read_state(tmp_path)["path"].read_bytes()
+    late = _record_candidates(
+        tmp_path, revision=first["current_revision"],
+        brief_digest=first["current_brief_digest"], candidate_identities=[IDENTITY_NVDA],
+    )
+    assert late["applied"] is False
+    assert late["reason"] == "stale_revision"
+    assert late["pending_candidate_identities"] == []
+    assert late["path"].read_bytes() == before
+    assert _retry(tmp_path)["reason"] == "stale_candidate_envelope"
 
 
 def test_fixed_failure_validates_source_once_then_retries_from_durable_envelope(tmp_path: Path) -> None:
@@ -956,6 +1052,7 @@ def test_retry_payload_classifier_blocks_retired_source_text_and_card(
     card = render_feishu_notification_card(
         markdown="# AI Decision Advice\nretired",
         fallback_text=clean["rendered_message"],
+        fallback_open_id="ou_test",
     )
     card_only = {
         **clean,
@@ -1644,3 +1741,321 @@ def test_delivery_source_reuse_keeps_candidate_membership_check(tmp_path):
     rejected = _read_state(tmp_path)
     assert rejected["available"] is False and rejected["state"] is None
     assert "absent from its revision" in rejected["error"]
+
+
+def test_stale_record_returns_current_pending_without_rewriting_it(tmp_path: Path) -> None:
+    first = _persist(tmp_path, run_id="older", actions=[_action()])
+    second = _persist(tmp_path, run_id="newer", actions=[_action(symbol="AMD")])
+    current = _record_candidates(
+        tmp_path, revision=second["current_revision"], brief_digest=second["current_brief_digest"],
+        candidate_identities=second["current_candidate_identities"], observed_at_utc="2026-07-21T14:01:00Z",
+    )
+    before = current["path"].read_bytes()
+    late = _record_candidates(
+        tmp_path, revision=first["current_revision"], brief_digest=first["current_brief_digest"],
+        candidate_identities=first["current_candidate_identities"], observed_at_utc="2026-07-21T14:02:00Z",
+    )
+    assert late["applied"] is False and late["reason"] == "stale_revision"
+    assert late["pending_candidate_identities"] == [IDENTITY_AMD]
+    assert late["state"] == current["state"]
+    assert late["path"].read_bytes() == before
+    repeated = _record_candidates(
+        tmp_path, revision=second["current_revision"], brief_digest=second["current_brief_digest"],
+        candidate_identities=second["current_candidate_identities"], observed_at_utc="2026-07-21T14:03:00Z",
+    )
+    assert repeated["applied"] is True and repeated["reason"] == "applied"
+    assert repeated["path"].read_bytes() == before
+
+
+def test_stale_record_does_not_create_missing_delivery_day(tmp_path: Path) -> None:
+    first = _persist(tmp_path, run_id="older", actions=[_action()])
+    _persist(tmp_path, run_id="newer", actions=[])
+    late = _record_candidates(
+        tmp_path, revision=first["current_revision"], brief_digest=first["current_brief_digest"],
+        candidate_identities=first["current_candidate_identities"],
+    )
+    assert late["applied"] is False
+    assert late["state"]["days"] == {}
+    assert late["pending_candidate_identities"] == []
+    assert not late["path"].exists()
+
+
+@pytest.mark.parametrize("fault", ["digest", "missing_source", "changed_source", "history", "latest_missing", "latest_identity", "latest_older", "delivery"])
+def test_stale_record_validates_source_and_state_before_noop(tmp_path: Path, monkeypatch, fault: str) -> None:
+    import src.application.daily_decision_brief_repository as repository
+
+    first = _persist(tmp_path, run_id="older", actions=[_action()])
+    second = _persist(tmp_path, run_id="newer", actions=[])
+    current = _record_candidates(
+        tmp_path, revision=second["current_revision"], brief_digest=second["current_brief_digest"],
+        candidate_identities=[],
+    )
+    digest = first["current_brief_digest"]
+    if fault == "digest":
+        digest = "0" * 64
+    elif fault == "missing_source":
+        delete_history_revision(tmp_path, revision=first["current_revision"])
+    elif fault == "changed_source":
+        replace_history_payload(tmp_path, {**first["brief"], "strategy_summary": "changed"},
+                                revision=first["current_revision"])
+    elif fault in {"history", "latest_missing", "latest_identity", "latest_older"}:
+        original = repository._history_raw
+
+        def broken_latest(**kwargs):
+            if kwargs.get("successful"):
+                if fault == "history":
+                    raise repository.DailyDecisionBriefStateError("synthetic history unavailable")
+                if fault == "latest_missing":
+                    return repository._MISSING
+                if fault == "latest_older":
+                    return {**second["brief"], "revision": first["current_revision"] - 1}
+                return {**second["brief"], "market_trading_date": "2026-07-22"}
+            return original(**kwargs)
+
+        monkeypatch.setattr(repository, "_history_raw", broken_latest)
+    else:
+        current["path"].write_text("{invalid delivery", encoding="utf-8")
+    before = current["path"].read_bytes()
+    with pytest.raises(repository.DailyDecisionBriefStateError):
+        _record_candidates(
+            tmp_path, revision=first["current_revision"], brief_digest=digest,
+            candidate_identities=[IDENTITY_NVDA],
+        )
+    assert current["path"].read_bytes() == before
+
+
+@pytest.mark.parametrize("scope", ["account", "market", "date"])
+def test_candidate_latest_success_is_scoped_to_account_market_and_day(tmp_path: Path, scope: str) -> None:
+    from src.application.daily_decision_brief_repository import persist_daily_decision_brief_success
+
+    first = _persist(tmp_path, actions=[_action()])
+    other = {"account": "other"} if scope == "account" else (
+        {"market": "HK"} if scope == "market" else {"market_date": "2026-07-22"}
+    )
+    for number in range(3):
+        persist_daily_decision_brief_success(base=tmp_path, brief=_brief(run_id=f"other-{number}", **other))
+    recorded = _record_candidates(
+        tmp_path, revision=first["current_revision"], brief_digest=first["current_brief_digest"],
+        candidate_identities=[IDENTITY_NVDA],
+    )
+    assert recorded["applied"] is True
+    assert recorded["pending_candidate_identities"] == [IDENTITY_NVDA]
+
+
+def test_failed_revisions_do_not_supersede_successful_candidate_source(tmp_path: Path) -> None:
+    from src.application.daily_decision_brief_repository import persist_daily_decision_brief_failure
+
+    first = _persist(tmp_path, actions=[_action()])
+    persist_daily_decision_brief_failure(
+        base=tmp_path, brief=_brief(run_id="failed", status="blocked", actionability="blocked"),
+    )
+    recorded = _record_candidates(
+        tmp_path, revision=first["current_revision"], brief_digest=first["current_brief_digest"],
+        candidate_identities=[IDENTITY_NVDA],
+    )
+    assert recorded["applied"] is True
+    later = _persist(tmp_path, run_id="after-failure", actions=[])
+    assert later["current_revision"] > first["current_revision"] + 1
+    assert _record_candidates(
+        tmp_path, revision=later["current_revision"], brief_digest=later["current_brief_digest"],
+        candidate_identities=[],
+    )["applied"] is True
+
+
+def test_candidate_revision_fence_preserves_evidence_hold_and_recovery(tmp_path: Path) -> None:
+    from src.application.daily_decision_brief_repository import persist_daily_decision_brief_success
+
+    first = _persist(tmp_path, run_id="complete", actions=[_action()])
+    gap = _brief(run_id="gap", status="degraded")
+    gap["data_gaps"] = [{"scope": "strategy", "market": "US", "symbol": "NVDA",
+                         "strategy_family": "sell_put", "reason": "required_data_snapshot_unavailable"}]
+    held = persist_daily_decision_brief_success(base=tmp_path, brief=gap)
+    assert held["brief"]["actions"][0]["action_id"] == first["brief"]["actions"][0]["action_id"]
+    assert held["brief"]["actions"][0]["evidence_state"] == "unavailable"
+    assert held["current_candidate_identities"] == []
+    current = _record_candidates(
+        tmp_path, revision=held["current_revision"], brief_digest=held["current_brief_digest"],
+        candidate_identities=held["current_candidate_identities"],
+    )
+    before = current["path"].read_bytes()
+    assert _record_candidates(
+        tmp_path, revision=first["current_revision"], brief_digest=first["current_brief_digest"],
+        candidate_identities=first["current_candidate_identities"],
+    )["applied"] is False
+    assert current["path"].read_bytes() == before
+    recovered = _persist(tmp_path, run_id="recovered", actions=[_action()])
+    assert recovered["brief"]["actions"][0]["action_id"] == first["brief"]["actions"][0]["action_id"]
+    assert recovered["current_candidate_identities"] == [IDENTITY_NVDA]
+    assert _record_candidates(
+        tmp_path, revision=recovered["current_revision"], brief_digest=recovered["current_brief_digest"],
+        candidate_identities=recovered["current_candidate_identities"],
+    )["pending_candidate_identities"] == [IDENTITY_NVDA]
+
+
+def test_candidate_latest_check_and_pending_write_share_the_success_lock(tmp_path: Path, monkeypatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+    from threading import Event, current_thread
+    import src.application.daily_decision_brief_repository as repository
+
+    first = _persist(tmp_path, actions=[_action()])
+    checked, release, writer_waiting = Event(), Event(), Event()
+    original_history = repository._history_raw
+    original_lock = repository._shared_exclusive_lock
+    original_persist = repository._persist_json
+    order = []
+
+    def paused_latest(**kwargs):
+        raw = original_history(**kwargs)
+        if kwargs.get("successful") and kwargs.get("market_date") == MARKET_DATE:
+            checked.set()
+            assert release.wait(5)
+        return raw
+
+    @contextmanager
+    def observed_lock(path):
+        is_writer = current_thread().name.startswith("success-writer") and path.name == "daily_decision_brief.US.lock"
+        if is_writer:
+            writer_waiting.set()
+        with original_lock(path):
+            if is_writer:
+                order.append("new-success-lock")
+            yield
+
+    def observed_persist(path, payload):
+        if path.name == "daily_decision_brief.US.delivery.json":
+            order.append("candidate-write")
+        return original_persist(path, payload)
+
+    monkeypatch.setattr(repository, "_history_raw", paused_latest)
+    monkeypatch.setattr(repository, "_shared_exclusive_lock", observed_lock)
+    monkeypatch.setattr(repository, "_persist_json", observed_persist)
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="candidate-writer") as candidate_pool, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="success-writer") as success_pool:
+        candidate = candidate_pool.submit(
+            _record_candidates, tmp_path, revision=first["current_revision"],
+            brief_digest=first["current_brief_digest"], candidate_identities=[IDENTITY_NVDA],
+        )
+        try:
+            assert checked.wait(5)
+            success = success_pool.submit(_persist, tmp_path, run_id="newer", actions=[])
+            assert writer_waiting.wait(5)
+        finally:
+            release.set()
+        assert candidate.result(timeout=5)["applied"] is True
+        assert success.result(timeout=5)["current_revision"] > first["current_revision"]
+    assert order == ["candidate-write", "new-success-lock"]
+
+
+@pytest.mark.parametrize("kind", ["candidate_ambiguous", "candidate_confirmed", "fixed_pending", "fixed_confirmed", "fixed_recovery"])
+def test_stale_candidate_noop_preserves_exact_historical_delivery(tmp_path: Path, kind: str) -> None:
+    from src.application.daily_decision_brief_repository import (
+        confirm_daily_decision_brief_delivery_v2,
+        read_daily_decision_brief_fixed_recovery,
+        record_daily_decision_brief_delivery_attempt,
+        record_daily_decision_brief_fixed_recovery,
+    )
+    from src.application.notification_delivery_adapter import build_notification_transport_key
+
+    first = _persist(tmp_path, actions=[_action()])
+    _record_candidates(
+        tmp_path, revision=first["current_revision"], brief_digest=first["current_brief_digest"],
+        candidate_identities=[IDENTITY_NVDA],
+    )
+    if kind == "fixed_recovery":
+        record_daily_decision_brief_fixed_recovery(
+            base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE,
+            scheduled_target_market=TARGET_1000, revision=first["current_revision"],
+            brief_digest=first["current_brief_digest"], candidate_identities=[IDENTITY_NVDA],
+        )
+        frozen = read_daily_decision_brief_fixed_recovery(
+            base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE,
+        )
+    else:
+        prepared = (_prepare(
+            tmp_path, run_id="run-1", delivery_kind="candidate_alert", source_kind="successful_brief",
+            revision=first["current_revision"], source_digest=first["current_brief_digest"],
+            candidate_identities=[IDENTITY_NVDA], rendered_message="# 新增候选\nNVDA",
+        ) if kind.startswith("candidate_") else _prepare_fixed(tmp_path, first))
+        envelope = prepared["envelope"]
+        transition = {
+            "base": tmp_path, "account": "lx", "market": "US", "market_trading_date": MARKET_DATE,
+            "delivery_key": envelope["delivery_key"], "source_digest": envelope["source_digest"],
+            "message_sha256": envelope["message_sha256"],
+            "transport_idempotency_key": build_notification_transport_key(envelope["delivery_key"]),
+        }
+        if kind == "candidate_ambiguous":
+            record_daily_decision_brief_delivery_attempt(**transition, ambiguous=True)
+        elif kind in {"fixed_confirmed", "candidate_confirmed"}:
+            confirm_daily_decision_brief_delivery_v2(**transition)
+        frozen = _read_state(tmp_path)["state"]
+    second = _persist(tmp_path, run_id="newer", actions=[])
+    current = _record_candidates(
+        tmp_path, revision=second["current_revision"], brief_digest=second["current_brief_digest"],
+        candidate_identities=[],
+    )
+    before = current["path"].read_bytes()
+    late = _record_candidates(
+        tmp_path, revision=first["current_revision"], brief_digest=first["current_brief_digest"],
+        candidate_identities=[IDENTITY_NVDA],
+    )
+    assert late["applied"] is False
+    assert late["path"].read_bytes() == before
+    if kind == "fixed_recovery":
+        assert read_daily_decision_brief_fixed_recovery(
+            base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE,
+        ) == frozen
+    else:
+        day = current["state"]["days"][MARKET_DATE]
+        old_day = frozen["days"][MARKET_DATE]
+        if kind.startswith("candidate_"):
+            assert day["candidate_delivery"] == old_day["candidate_delivery"]
+            if kind == "candidate_ambiguous":
+                assert _retry(tmp_path)["envelope"] == old_day["candidate_delivery"]
+            else:
+                assert _retry(tmp_path)["envelope"] is None
+        else:
+            assert day["fixed_reports"] == old_day["fixed_reports"]
+            retry = _retry(tmp_path)["envelope"]
+            if kind == "fixed_confirmed":
+                assert retry is None
+            else:
+                assert retry == prepared["envelope"]
+
+
+@pytest.mark.parametrize("with_provenance", [False, True])
+def test_earnings_comparability_roundtrip_and_diff(tmp_path: Path, with_provenance: bool) -> None:
+    from domain.domain.daily_decision_brief import diff_daily_decision_briefs
+    from src.application.daily_decision_brief_repository import (
+        persist_daily_decision_brief_success, read_latest_daily_decision_brief,
+    )
+    from test_daily_decision_event_risk import _risk
+
+    chain = "earnings-comparable-v1:" + "c" * 64 if with_provenance else "legacy-hash"
+    briefs = []
+    for index, state in enumerate(("confirmed_event", "confirmed_none")):
+        action = _action()
+        risk = _risk(state, event_date="2026-08-05" if index == 0 else None, chain=chain)
+        if with_provenance:
+            risk["evidence_snapshot_hash"] = ("a" if index == 0 else "b") * 64
+        action["event_risk"] = risk
+        persist_daily_decision_brief_success(
+            base=tmp_path, brief=_brief(run_id=f"run-{index}", actions=[action]),
+        )
+        loaded = read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")
+        assert loaded["available"] is True
+        brief = loaded["brief"]
+        persisted_risk = brief["actions"][0]["event_risk"]
+        assert persisted_risk["evidence_chain_id"] == chain
+        if with_provenance:
+            assert persisted_risk["evidence_snapshot_hash"] == risk["evidence_snapshot_hash"]
+        else:
+            assert "evidence_snapshot_hash" not in persisted_risk
+        briefs.append(brief)
+    change, = diff_daily_decision_briefs(*briefs)["changes"]
+    assert change["change_type"] == "candidate_event_removed"
+    if with_provenance:
+        assert change["before_event_risk"]["evidence_snapshot_hash"] == "a" * 64
+        assert change["after_event_risk"]["evidence_snapshot_hash"] == "b" * 64
+    else:
+        assert "evidence_snapshot_hash" not in change["before_event_risk"]

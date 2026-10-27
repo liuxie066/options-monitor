@@ -72,7 +72,8 @@
 - [External Holdings Account Retirement Design](EXTERNAL_HOLDINGS_ACCOUNT_RETIREMENT_DESIGN.md)：账户退役、全局扫描风险分支退役与旧配置切换边界；前半部分保留历史设计依据。
 - [Close Advice Contract](CLOSE_ADVICE_CONTRACT.md)：严格止盈平仓、报价证据、状态机与通知边界。
 - [Current Exchange Rate Contract](EXCHANGE_RATE_FACT_DESIGN.md)：当前汇率唯一 owner、运行快照、用途资格及历史现金边界。
-- [Option Performance Design](OPTION_PERFORMANCE_DESIGN.md)：期权净现金流、胜率、收益率、统一账本真源与公开入口的当前合同。
+- [Option Performance Design](OPTION_PERFORMANCE_DESIGN.md)：期间现金流、开仓批次现金结果、胜率、收益率、统一账本真源与公开入口的当前合同。
+- [Option Cashflow Offline Contract](OPTION_CASHFLOW_OFFLINE_CONTRACT.md)：纯领域复算、独立费用、冻结输入来源与可见性、报告 v3 兼容合同。
 - [Assigned Stock Return Design](ASSIGNED_STOCK_RETURN_DESIGN.md)：assignment 后的正股事实和收益归因。
 - [Portfolio Assignment Scenario Design](PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md)：全部指派后分布来源、报价及资金覆盖的实现依据。
 - [OM Runtime and Data Quality](quality-monitoring/README.md)：OM 本地质量检查、文件契约与操作入口。
@@ -89,8 +90,7 @@
 - [OM Capability Surfaces](OM_AGENT_CAPABILITY_MAP.md)：Tool Gateway、Control、Bot 的能力边界。
 - [Inbound Control](INBOUND_CONTROL.md)：确定性 Control、pending operation 和 channel 安全。
 - [Bot PRD](BOT_PRD.md)：Bot产品合同及项目内通用只读助理需求。
-- [Bot / Python runtime / Scene v7](BOT_DESIGN.md)：策略、报错与过滤原因问答，个人记忆、上下文和只读工具合同。
-- [Legacy Pi storage](PI_AGENT_CORE_INTEGRATION.md)：历史会话保留、离线转换与旧版本回滚边界。
+- [Bot / Python runtime / Scene v7](BOT_DESIGN.md)：策略、报错与过滤原因问答，个人记忆、上下文和只读工具合同；历史 Bot 数据保留与 Host schema 迁移边界。
 - [Agent Handbook](AGENT_WIKI.md)：本地 agent 的任务 playbook、模块地图和验证矩阵。
 - [Session Summary](SESSION_SUMMARY.md)：仅在显式 handoff 时使用的模板。
 

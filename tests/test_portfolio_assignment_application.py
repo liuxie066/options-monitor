@@ -490,6 +490,52 @@ def test_query_preserves_futu_baseline_when_portfolio_source_is_down(monkeypatch
     assert "service down" in result["warnings"]
 
 
+def test_pm_read_failure_survives_client_preparation_and_position_sizing(monkeypatch, tmp_path):
+    from domain.domain.short_vol_assessment import portfolio_concentration_fields
+    from src.application.short_vol_risk_context import build_portfolio_risk_context
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+    from src.infrastructure.portfolio_management_client import PortfolioManagementClient
+
+    _patch_positions(monkeypatch, [], holdings_enabled=True)
+    receipt = _valuation_response()
+    source_error = "lx: Feishu holdings read timed out"
+    receipt.update(status="unavailable", warnings=[source_error])
+    receipt["freshness"].update(status="unavailable", trust_status="unavailable")
+    receipt["scope"].update(holdings_scope="non_futu", broker_inventory={}, holding_counts={})
+    receipt["account_status"][0].update(status="unavailable", warnings=[source_error])
+    client = PortfolioManagementClient(urlopen_fn=lambda *_args, **_kwargs: _Response(receipt))
+    monkeypatch.setattr(application, "resolve_portfolio_management_client", lambda *_args, **_kwargs: client)
+    context = cash_portfolio({
+        "cash_by_currency": {"CNY": 10000}, "source_observed_at": "2026-07-24T01:00:00Z",
+    }, evaluated_at=application.datetime.now(timezone.utc))
+    _, _, config = application._load_runtime_and_positions(["lx"])
+    prepared = application.prepare_position_sizing_evidence(
+        context=context, runtime_config=config, account="lx",
+        fx_observation=application.current_exchange_rate_snapshot(),
+    )
+    evidence = prepared["position_sizing_evidence"]
+    assert evidence["status"] == "partial"
+    assert evidence["pm_supplement"]["status"] == "missing"
+    assert any(source_error in warning for warning in evidence["warnings"])
+    assert any(source_error in reason for reason in evidence["freshness"]["reason_codes"])
+    assert prepared["cash_by_currency"] == context["cash_by_currency"]
+    prepared["option_ctx"] = {
+        "context_status": "available", "decision_snapshot_status": "trusted", "assignment_positions": [],
+    }
+    fields = portfolio_concentration_fields(
+        {"symbol": "NVDA", "strike": 8, "multiplier": 100, "currency": "CNY", "net_income_cny": 50},
+        mode="put", risk_ctx=build_portfolio_risk_context(
+            portfolio_ctx=prepared, exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+        ),
+    )
+    assert source_error in fields["concentration_unavailable_reason"]
+    assert fields["concentration_evaluable"] is False
+    assert all(fields[key] is None for key in (
+        "symbol_concentration_current", "symbol_concentration_after_existing_assignments", "symbol_concentration_after",
+    ))
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_scoped_old_pm_input_error_is_source_failure() -> None:
     from src.infrastructure.portfolio_management_client import PortfolioManagementHTTPError
 
@@ -1265,3 +1311,41 @@ def test_quote_recovery_preserves_non_futu_holdings_and_closed_market_quotes(siz
     assert result["holdings"][-1] == holding
     assert result["quotes"][-1] == quote
     assert evidence == before
+
+
+@pytest.mark.parametrize("entry", ["query", "agent_bot"])
+def test_ledger_read_failure_keeps_account_cash_unknown_through_public_consumers(monkeypatch, entry):
+    import sqlite3
+    from src.application.bot.tools import model_observation
+    from src.application.tool_execution import execute_tool
+
+    def failed_ledger(_accounts):
+        raise sqlite3.OperationalError("synthetic assignment ledger unavailable")
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("ledger failure must not fetch portfolio/provider evidence")
+
+    monkeypatch.setattr(application, "_load_runtime_and_positions", failed_ledger)
+    monkeypatch.setattr(application, "fetch_futu_portfolio_context", forbidden)
+    monkeypatch.setattr(application, "read_portfolio_valuation_evidence", forbidden)
+    monkeypatch.setattr(application, "_read_futu_quotes", forbidden)
+    if entry == "query":
+        result = application.query_portfolio_assignment_scenario(["lx", "sy"])
+    else:
+        response = execute_tool("portfolio_assignment_scenario", {"accounts": ["lx", "sy"]})
+        assert response["ok"] is True  # Transport success is not business availability.
+        observation = model_observation("portfolio_assignment_scenario", response)
+        assert observation["ok"] is True
+        result = observation["data"]
+    assert result["status"] == "unavailable"
+    assert result["cash_coverage"]["ending_cash_net_estimated_cny"] is None
+    assert [row["account"] for row in result["account_breakdown"]] == ["lx", "sy"]
+    for account in result["account_breakdown"]:
+        assert account["opening_cash_mmf_cny"] is None
+        assert account["ending_cash_gross_cny"] is None
+        assert account["ending_cash_net_estimated_cny"] is None
+        assert account["funding_gap_cny"] is None
+        assert account["fees_complete"] is False
+    assert result["fee_summary"]["status"] == "partial"
+    assert result["fee_summary"]["total_fees_cny"] is None
+    assert any("synthetic assignment ledger unavailable" in warning for warning in result["warnings"])

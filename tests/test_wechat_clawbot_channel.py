@@ -798,6 +798,109 @@ def test_wechat_reply_outbox_retries_with_stable_client_id(tmp_path: Path, expli
     assert record["attempt_count"] == 2
 
 
+@pytest.mark.parametrize("explicit_db", [False, True])
+@pytest.mark.parametrize("initial_status", ["pending", "retryable_failed"])
+def test_wechat_no_reply_preserves_pending_until_reenabled(
+    tmp_path, monkeypatch, example_config_path, explicit_db, initial_status,
+):
+    import argparse
+    from src.application.bot.config_scope import resolve_replay_authorization
+    from src.interfaces.cli.channel_ops import add_channel_commands
+
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
+    state_dir = _wechat_state_dir(tmp_path)
+    state_before = (state_dir / "state.json").read_bytes()
+    audit_argument = str(tmp_path / "audit.sqlite3") if explicit_db else None
+    store = BotHostStore(InboundAuditStore(audit_argument).path)
+    request = BotInboundRequest(
+        text="/status", sender_id="synthetic-sender", channel="wechat",
+        message_id="synthetic-message", conversation_id="synthetic-conversation",
+        config_path=str(example_config_path), audit_db=audit_argument,
+        reply_context={"reply_sender_identity": str(state_dir.resolve())},
+    )
+    delivery_key = "wechat:synthetic-pending"
+    payload = {"to_user_id": "synthetic-sender", "context_token": "synthetic-context",
+               "group_id": None, "text": "合成待发回复"}
+    store.enqueue_reply(delivery_key=delivery_key, channel="wechat", payload=payload,
+                        authorization=resolve_replay_authorization(request))
+    if initial_status == "retryable_failed":
+        assert store.claim_reply(delivery_key=delivery_key)
+        assert store.mark_reply_failed(delivery_key, error="synthetic failure", retryable=True)
+    with store._connect() as conn:
+        conn.execute("UPDATE bot_reply_outbox SET next_attempt_at=? WHERE delivery_key=?",
+                     ("2000-01-01T00:00:00+00:00", delivery_key))
+    before = store.list_replies()[0]
+    assert before["status"] == initial_status
+    sends = []
+    flags = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_updates(self, **kwargs):
+            return {"ret": 0, "msgs": []}
+
+        def send_text_message(self, **kwargs):
+            sends.append(kwargs)
+            return {"ret": 0, "data": {"message_id": "synthetic-receipt"}}
+
+    def actual_poll(**kwargs):
+        flags.append(kwargs["reply_enabled"])
+        return poll_wechat_clawbot_once(**kwargs, client_factory=FakeClient)
+
+    parser = argparse.ArgumentParser()
+    add_channel_commands(parser.add_subparsers(dest="command", required=True))
+    argv = ["channel", "wechat-clawbot", "poll-once", "--state-dir", str(state_dir),
+            "--config-path", str(example_config_path), "--allowed-senders", "wechat:synthetic-sender"]
+    if explicit_db:
+        argv.extend(["--audit-db", audit_argument])
+
+    def poll(*extra):
+        return handle_channel_command(parser.parse_args([*argv, *extra]),
+                                      repo_base_fn=lambda: tmp_path, poll_once_fn=actual_poll)
+
+    disabled = poll("--no-reply")
+    assert disabled["ok"] is True
+    assert disabled["data"]["outbox_retry"] == {"attempted": False, "ok": True, "reason": "reply_disabled"}
+    assert flags == [False] and sends == []
+    assert store.list_replies()[0] == before
+    assert (state_dir / "state.json").read_bytes() == state_before
+
+    enabled = poll()
+    assert enabled["data"]["outbox_retry"]["reason"] == "sent"
+    assert sends == [{**payload, "client_id": _outbox_client_id(delivery_key)}]
+    delivered = store.list_replies()[0]
+    assert delivered["delivery_key"] == before["delivery_key"]
+    assert delivered["authorization_json"] == before["authorization_json"]
+    assert delivered["status"] == "delivered" and delivered["payload_json"] == "{}"
+    assert delivered["attempt_count"] == before["attempt_count"] + 1
+    assert poll()["data"]["outbox_retry"] == {"attempted": False, "reason": "outbox_empty"}
+    assert flags == [False, True, True] and len(sends) == 1
+    assert store.list_replies()[0] == delivered
+
+
+@pytest.mark.parametrize("explicit_db", [False, True])
+def test_wechat_disabled_retry_does_not_initialize_or_authorize(tmp_path, monkeypatch, explicit_db):
+    database = tmp_path / "missing" / "audit.sqlite3" if explicit_db else tmp_path / "default-audit.sqlite3"
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("disabled retry must not initialize, authorize, claim or send")
+
+    monkeypatch.setattr(inbound, "InboundAuditStore", forbidden)
+    monkeypatch.setattr(inbound, "BotHostStore", forbidden)
+    monkeypatch.setattr(inbound, "check_reply_authorization", forbidden)
+    result = _retry_pending_wechat_reply(
+        audit_db=str(database) if explicit_db else None,
+        client=SimpleNamespace(send_text_message=forbidden), reply_enabled=False,
+        allowed_senders_fn=forbidden,
+    )
+    assert result == {"attempted": False, "ok": True, "reason": "reply_disabled"}
+    assert not database.exists()
+    if explicit_db:
+        assert not database.parent.exists()
+
+
 def test_wechat_clawbot_poll_once_accepts_empty_sendmessage_response(tmp_path: Path) -> None:
     state_dir = _wechat_state_dir(tmp_path)
 
@@ -1324,7 +1427,7 @@ def test_wechat_clawbot_serve_polls_until_stop_condition(tmp_path: Path) -> None
     assert calls[0]["config_key"] == "us"
     assert calls[0]["audit_db"] == str(tmp_path / "audit.sqlite3")
     assert calls[0]["allowed_senders"] == "wechat:user_1"
-    assert calls[0]["reply_enabled"] is False
+    assert all(call["reply_enabled"] is False for call in calls)
     assert calls[0]["max_reply_chars"] == 88
     assert calls[0]["keepalive_interval_sec"] == 30
     assert calls[0]["timeout_sec"] == 7

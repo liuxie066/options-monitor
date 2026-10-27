@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -153,27 +154,120 @@ def test_unowned_config_backup_is_never_adopted(tmp_path):
     assert not (tmp_path / "bot-migration.json").exists()
 
 
-def test_pi_store_is_read_only_and_pending_inventory_is_bound(tmp_path, monkeypatch):
+@pytest.mark.parametrize("state", ["fresh", "host_pending", "complete"])
+def test_host_migration_leaves_retired_storage_backups_and_receipts_untouched(tmp_path, monkeypatch, state):
     db, configs = _fixture(tmp_path)
-    pi = tmp_path / "pi.sqlite3"
-    with sqlite3.connect(pi) as conn:
-        conn.execute("CREATE TABLE sessions(id TEXT, body TEXT)")
-        conn.execute("INSERT INTO sessions VALUES ('unchanged-session-id', 'Copilot old message')")
-    before = pi.read_bytes()
-    write = migration.atomic_write_private_text
-    def interrupted(path, content):
-        if path == configs[0]:
-            raise OSError("fixture interruption")
-        return write(path, content)
-    monkeypatch.setattr(migration, "atomic_write_private_text", interrupted)
-    with pytest.raises(OSError):
-        migration.migrate_bot(host_db=db, config_paths=configs, pi_paths=[pi], apply=True, writers_stopped=True)
-    monkeypatch.setattr(migration, "atomic_write_private_text", write)
-    assert pi.read_bytes() == before
-    with pytest.raises(ValueError, match="Pi database inventory"):
-        migration.migrate_bot(host_db=db, config_paths=configs)
-    migration.migrate_bot(host_db=db, config_paths=configs, pi_paths=[pi], apply=True, writers_stopped=True)
-    assert pi.read_bytes() == before
+    retired = [tmp_path / "pi.sqlite3", tmp_path / "pi.sqlite3.pre-migration",
+               tmp_path / "pi.sqlite3.migration.json"]
+    for path in retired:
+        path.write_bytes(b"historical operator-owned artifact\x00")
+    before = {path: path.read_bytes() for path in retired}
+    historical = {"pi_databases": [str(retired[0]), str(tmp_path / "missing-pi.sqlite3")],
+                  "pi_sha256": {str(retired[0]): "historical-frozen-digest"}}
+    if state != "fresh":
+        if state == "host_pending":
+            _interrupt(monkeypatch, db, configs)
+            historical = {"pi_databases": [], "pi_sha256": {}}
+        else:
+            migration.migrate_bot(host_db=db, config_paths=configs, apply=True, writers_stopped=True)
+        manifest_path = tmp_path / "bot-migration.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest.update(historical)
+        manifest_path.write_text(json.dumps(manifest))
+    read_db = migration._read_db
+
+    def host_only(path):
+        assert path not in retired, "Host schema migration must not open retired storage"
+        return read_db(path)
+
+    monkeypatch.setattr(migration, "_read_db", host_only)
+    preview = migration.migrate_bot(host_db=db, config_paths=configs)
+    assert preview["dry_run"] and not preview["write_applied"]
+    assert "pi_database_count" not in preview
+    result = migration.migrate_bot(host_db=db, config_paths=configs, apply=True, writers_stopped=True)
+    assert result["write_applied"] is (state != "complete")
+    migration.assert_bot_ready(db)
+    repeat = migration.migrate_bot(host_db=db, config_paths=configs, apply=True, writers_stopped=True)
+    assert repeat["already_complete"] and not repeat["write_applied"]
+    assert {path: path.read_bytes() for path in retired} == before
+    assert not (tmp_path / "missing-pi.sqlite3").exists()
+    manifest = json.loads((tmp_path / "bot-migration.json").read_text())
+    if state != "fresh":
+        assert {key: manifest[key] for key in historical} == historical
+    else:
+        assert not set(historical).intersection(manifest)
+
+
+@pytest.mark.parametrize("entry", ["api", "cli"])
+@pytest.mark.parametrize("apply", [False, True])
+def test_pending_legacy_pi_inventory_requires_recovery_before_effects(tmp_path, monkeypatch, entry, apply):
+    import argparse
+    from src.interfaces.cli.bot_ops import add_bot_commands, handle_bot_command
+
+    db, configs = _fixture(tmp_path)
+    _interrupt(monkeypatch, db, configs)
+    retired = tmp_path / "pi.sqlite3"
+    retired.write_bytes(b"operator-owned historical storage")
+    manifest_path = tmp_path / "bot-migration.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest.update({"pi_databases": [str(retired), str(tmp_path / "missing-pi.sqlite3")],
+                     "pi_sha256": {str(retired): "historical-frozen-digest"}})
+    manifest_path.write_text(json.dumps(manifest))
+    before = {p: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()}
+
+    def no_database_read(path):
+        pytest.fail("unresolved legacy inventory must fail before opening any database")
+
+    monkeypatch.setattr(migration, "_read_db", no_database_read)
+    with pytest.raises(ValueError, match="legacy Pi inventory.*operator recovery"):
+        if entry == "api":
+            migration.migrate_bot(host_db=db, config_paths=configs, apply=apply, writers_stopped=True)
+        else:
+            parser = argparse.ArgumentParser()
+            add_bot_commands(parser.add_subparsers(dest="command", required=True))
+            command = ["bot", "migrate", "--host-db", str(db)]
+            for config in configs:
+                command.extend(["--config", str(config)])
+            command.extend(["--apply", "--writers-stopped"] if apply else ["--dry-run"])
+            handle_bot_command(parser.parse_args(command))
+    with pytest.raises(ValueError, match="legacy Pi inventory.*operator recovery"):
+        migration.assert_bot_ready(db)
+    assert {p: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()} == before
+    assert manifest["status"] == "pending"
+
+
+@pytest.mark.parametrize("retired_args", [
+    ["migrate-pi", "--pi-db", "pi.sqlite3", "--source-runtime", "old", "--target-runtime", "new", "--dry-run"],
+    ["migrate", "--host-db", "host.sqlite3", "--pi-db", "pi.sqlite3", "--dry-run"],
+])
+def test_cli_rejects_retired_conversion_before_effects(tmp_path, monkeypatch, retired_args):
+    import argparse
+    from src.interfaces.cli.bot_ops import add_bot_commands
+    monkeypatch.chdir(tmp_path)
+    parser = argparse.ArgumentParser()
+    add_bot_commands(parser.add_subparsers(dest="command", required=True))
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["bot", *retired_args])
+    assert exc.value.code == 2
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cli_host_schema_migration_preview_apply_and_repeat(tmp_path):
+    import argparse
+    from src.interfaces.cli.bot_ops import add_bot_commands, handle_bot_command
+    db, configs = _fixture(tmp_path)
+    parser = argparse.ArgumentParser()
+    add_bot_commands(parser.add_subparsers(dest="command", required=True))
+    command = ["bot", "migrate", "--host-db", str(db)]
+    for config in configs:
+        command.extend(["--config", str(config)])
+    preview = handle_bot_command(parser.parse_args([*command, "--dry-run"]))
+    assert preview["dry_run"] and not preview["write_applied"]
+    applied = handle_bot_command(parser.parse_args([*command, "--apply", "--writers-stopped"]))
+    assert applied["write_applied"]
+    migration.assert_bot_ready(db)
+    repeated = handle_bot_command(parser.parse_args([*command, "--apply", "--writers-stopped"]))
+    assert repeated["already_complete"] and not repeated["write_applied"]
 
 
 def test_new_cli_only_and_protocol_rename_preserves_user_data():
@@ -221,3 +315,54 @@ def test_genuine_fresh_bot_database_needs_no_migration_sidecar(tmp_path):
     assert not (tmp_path / "bot-migration.json").exists()
     with sqlite3.connect(db) as conn:
         assert migration.MARKER not in {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_online_readiness_is_query_only_and_closes_connection(tmp_path, monkeypatch, legacy):
+    db = tmp_path / "online.sqlite3"
+    table = "copilot_runs" if legacy else "bot_runs"
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute(f"CREATE TABLE {table}(value TEXT)")
+        conn.execute(f"INSERT INTO {table} VALUES ('preserved')")
+    before = db.read_bytes()
+    connections = []
+    tables = migration._tables
+
+    def connect():
+        connection = sqlite3.connect(db)
+        connections.append(connection)
+        return connection
+
+    def checked_tables(connection):
+        assert connection.execute("PRAGMA query_only").fetchone() == (1,)
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            connection.execute(f"DELETE FROM {table}")
+        return tables(connection)
+
+    monkeypatch.setattr(migration, "_tables", checked_tables)
+    if legacy:
+        with pytest.raises(ValueError, match="Legacy Copilot"):
+            migration.assert_bot_ready(db, connect=connect)
+    else:
+        migration.assert_bot_ready(db, connect=connect)
+    assert len(connections) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connections[0].execute("SELECT 1")
+    assert db.read_bytes() == before
+
+
+def test_missing_database_readiness_does_not_open_or_create(tmp_path):
+    db = tmp_path / "missing.sqlite3"
+
+    def unexpected_connect():
+        pytest.fail("readiness must not create a missing database")
+
+    migration.assert_bot_ready(db, connect=unexpected_connect)
+    assert not db.exists()
+    (tmp_path / "bot-migration.json").write_text(json.dumps({
+        "version": migration.VERSION, "database": str(db),
+        "backup": str(db.with_name(db.name + ".pre-bot.sqlite3")), "status": "pending",
+    }))
+    with pytest.raises(ValueError, match="incomplete"):
+        migration.assert_bot_ready(db, connect=unexpected_connect)
+    assert not db.exists()

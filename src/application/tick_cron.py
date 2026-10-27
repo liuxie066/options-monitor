@@ -20,6 +20,7 @@ from src.application.runtime_config_freshness import (
     ensure_runtime_config_identity,
 )
 from src.application.runtime_paths import resolve_runtime_root
+from src.application.symbol_mutations import split_symbol_whitelist
 from src.application.system_alerts import report_system_failure, report_system_recovery
 from src.infrastructure.io_utils import read_json
 from src.infrastructure.run_log import create_run_id
@@ -74,6 +75,8 @@ def _normalize_accounts(accounts: list[str] | tuple[str, ...] | None) -> list[st
 
 
 def _normalize_symbols(symbols: list[str] | tuple[str, ...] | None) -> list[str]:
+    if symbols:
+        split_symbol_whitelist(",".join(str(item or "") for item in symbols))
     out: list[str] = []
     for item in symbols or []:
         symbol = str(item or "").strip()

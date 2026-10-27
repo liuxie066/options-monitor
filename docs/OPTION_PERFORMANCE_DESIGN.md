@@ -7,20 +7,20 @@ its cause is pending. Complete cash and fee evidence can support return; win rat
 resolved cause. Previously accepted closes without a terminal ledger event require separate repair.
 
 This document is the canonical owner of the option-performance contract. Current source and tests
-remain the runtime authority. The implementation is in place: there is no parallel version,
-compatibility payload, dual read, dual write, or historical backfill path.
+remain the runtime authority. One report carries separate event-time period cash and preserved
+opening-cohort metrics; there is no parallel reducer, dual read/write, or automatic historical backfill.
 
 ## Goal
 
 Replace the mixed performance report with one option-only statistical module that:
 
-- calculates four agreed metrics from one canonical ledger source;
+- calculates period cash, opening-cohort cash/wins/returns and actual daily occupied capital from one canonical ledger source;
 - applies one calculation path to Short Put, Short Call, Long Put, and Long Call legs;
 - treats strategy as attribution and grouping rather than a second calculation system;
-- supports MTD, YTD, natural-month, and natural-year opening cohorts;
-- keeps the existing public entry names and read-only behavior while replacing the business payload;
+- supports MTD, YTD, natural-month, and natural-year periods and opening cohorts;
+- keeps public entry names, read-only behavior and original cohort fields while adding period cash;
 - removes PnL, stock, valuation, read-time FX, and legacy compatibility behavior from the report
-  path while reusing persisted event-time conversion evidence for one CNY cash-flow total.
+  path while reusing persisted event-time conversion evidence for each cash metric's CNY total.
 
 ## Non-goals
 
@@ -32,8 +32,7 @@ Replace the mixed performance report with one option-only statistical module tha
   return metrics remain separate.
 - Market marks, quote refresh, valuation evidence, or current-price collection.
 - Strategy-specific formulas or inference from matching symbol, trade date, strike, or expiration.
-- Data migration, report-version selection, legacy field aliases, or preservation of the old response
-  shape.
+- Data migration, report-version selection or additional aliases for the retained cohort field.
 - VERSION, release, deployment, service changes, production writes, or ledger repair.
 
 Assigned-stock reporting remains owned by its independent read model. Assignment is retained here
@@ -47,7 +46,8 @@ The refactor is complete only when all of the following are true:
    application API and projects it once. Position lots, economic allocations, fees, lifecycle state,
    and strategy attribution are derived from that snapshot rather than joined from independent report
    sources.
-2. Every metric is reduced from the same contract-share facts. A public adapter, renderer, bridge, or
+2. All metrics use one canonical projection. Period cash selects cash events; cohort metrics select
+   opening contract-share facts. A public adapter, renderer, bridge, or
    strategy view does not recalculate cash, capital-days, or win rates.
 3. For a complete currency, `option_net_cashflow.total.amount =
    option_net_cashflow.open.amount + option_net_cashflow.terminated.amount`. Each component carries
@@ -56,7 +56,7 @@ The refactor is complete only when all of the following are true:
 4. Parent totals and every dimension conserve contract counts, cash, and capital-days before rates are
    calculated.
 5. The report contains no stock, PnL, valuation, quote, read-time FX, or legacy-period fields. Its
-   only cross-currency value is the root CNY net-cash-flow total backed by persisted event-time
+   only cross-currency values are the two root cash metrics' CNY totals backed by persisted event-time
    `cash_conversion.v1` evidence.
 6. `./om option-performance report`, `option_performance_report`, and `/income` keep their names and
    produce the same canonical facts for equal inputs.
@@ -74,9 +74,15 @@ The refactor is complete only when all of the following are true:
 
 ## Current Facts and Constraints
 
-The option-only report, canonical ledger projection, metric reducer, facade cutover, natural-period
-windows, and fail-closed Bot admission are implemented. Current behavior adds three narrow
-contracts without reopening those completed boundaries:
+The option-only report uses canonical projection, natural-period windows and fail-closed evidence.
+Current public contracts include:
+
+- Report bodies declare `option_performance.report.v3` and `metric_semantics`; period cash is
+  `period_option_net_cashflow.v1`. Original cohort cash, rates, win samples and row shapes are preserved.
+- The pure offline entry and live service share the domain reducer. Explicit supplemental/replacement
+  fee inputs affect only period cash; original cohort metrics still use ledger-attached fees.
+  Frozen archive provenance is content/time validated, not independently authenticated;
+  see [Offline Contract](OPTION_CASHFLOW_OFFLINE_CONTRACT.md).
 
 - `PeriodRequest` and every public facade accept `mtd|ytd|month|year` with exactly one matching
   selector.
@@ -124,7 +130,7 @@ Ownership boundaries:
   proportional allocation with deterministic rounding.
 - Fee provenance, fee facts, and domain money precision are ledger-owned or lower-level primitives.
   `domain.domain.ledger` must not import `domain.domain.performance`.
-- `domain.domain.performance` owns cohort selection, contract-share state, native and persisted-FX CNY
+- `domain.domain.performance` owns period cash-event selection, cohort selection, contract-share state, native and persisted-FX CNY
   net cash flow, capital-days, win counts, dimensions, aggregation, and quality.
 - `src.application.performance` loads the frozen event stream, normalizes scope, and calls the domain
   owner. It does not load assigned-stock rows, evidence repositories, marks, rates, or quotes.
@@ -206,10 +212,15 @@ Public period kinds are exactly `mtd`, `ytd`, `month`, and `year`. Dates use `As
 - Automatic latest-complete-day discovery is outside this module. A caller that requires completed
   data passes the selected T-1 `as_of_date` explicitly.
 
-Selection is by each option leg's own opening date. A leg is admitted when its opening date falls in
+`period_option_net_cashflow` selects option cash facts by their own effective time, including closes
+whose openings predate the period. Trade-attached fees use trade time. Independently evidenced fees
+use their explicit effective time; later corrections of attached fees restate the original trade period.
+
+For `option_net_cashflow`, rows/breakdowns, wins and returns, selection is by each leg's opening date.
+A leg is admitted when its opening date falls in
 the requested period window. For an admitted leg, all canonical lifecycle cash and state transitions
 before `end_exclusive_at_ms` participate. A close inside the period for a leg opened before the period
-is not admitted.
+is not admitted to the cohort metrics; it does participate in period cash.
 
 Strategies do not have a separate opening date. Each member leg independently passes or fails the
 cohort test.
@@ -279,17 +290,48 @@ partial/null rather than continuing capital to `as_of_date` or inventing a settl
 
 ## Metric Contract
 
-### Option Net Cash Flow
+### Period Option Net Cash Flow
 
-The public Chinese name is **期权净现金流**.
+The public Chinese name is **期间期权净现金流**. The root `period_option_net_cashflow` selects
+cash facts in `[start_at_ms,end_exclusive_at_ms)` and has no open/terminated split:
 
 ```text
-期权净现金流
+schema_version = period_option_net_cashflow.v1
+selection = cash_event_effective_time
+time_policy = trade_event_time_with_explicit_fee_effective_time
+fee_mode = actual | simulated
+by_currency[currency]
+  total, gross, fees -> amount, status, missing
+cny_total -> currency, amount, status, missing
+status, missing, fact_count
+```
+
+Sale receipts are positive; purchase payments are negative; fees are signed cash (negative charge,
+positive refund). Complete `total = gross + fees`. Missing facts stay partial; no live FX is fetched.
+This is trade/effective-time cash, not a settlement-date statement or realized profit. Expiry does
+not rebook opening premium; physical stock settlement is excluded. Period fact details and attribution
+remain in domain `cashflow_facts`, not normal summary or cohort `rows`.
+
+A replacement fee suppresses the whole attached fee and must have the original trade time.
+Correcting -2 to -3 in a later snapshot restates the original period. A distinct new -1 debit or +1
+refund needs a separate identity and its own evidenced effective time; it does not suppress the
+attached fee. The optional offline `fee_cash_events` inputs affect only this period metric, not
+legacy cohort cash/returns. Full input, visibility and fee contracts live in the
+[Offline Contract](OPTION_CASHFLOW_OFFLINE_CONTRACT.md).
+
+### Opening-Cohort Option Cash Result
+
+The public Chinese name is **开仓批次期权现金结果**. Its compatibility key is `option_net_cashflow`;
+its numbers, components and original return numerator remain unchanged. It overlaps with period cash
+and must not be added to it. The following formulas apply to the admitted opening cohort only:
+
+```text
+开仓批次期权现金结果
   = 卖出期权成交金额
   - 买入期权成交金额
   - 实际手续费
 
-期权净现金流
+开仓批次期权现金结果
   = 持仓中期权净现金流
   + 已终结期权净现金流
 ```
@@ -604,7 +646,8 @@ for eligibility/outcome flags; and `null` for unproved nullable values. Domain c
 Decimal and apply domain precision before the one public serializer converts them. Objects use sorted
 keys and lists use the deterministic ordering defined here.
 
-Every breakdown member uses this metric bundle. The root publishes the same four metric objects; its
+Every breakdown member uses the original cohort metric bundle below. The root also publishes
+`period_option_net_cashflow` and independent `daily_occupied_capital`; its
 bundle-level `status` and `missing` are serialized as `quality.status` and `quality.missing`:
 
 ```text
@@ -637,7 +680,7 @@ bundle uses this fixed aggregation:
 therefore has observed zero cash/count facts, not-applicable rates, and an `observed` bundle. Every
 bundle in a successful report is exactly `observed` or `partial`.
 
-Root `quality` covers the complete requested payload: the root metric bundle and every emitted
+Root `quality` covers the complete requested payload: period cash, the cohort metric bundle and every emitted
 breakdown bundle. Its `status` is `partial` when any of those bundles is `partial`; it is
 otherwise `observed`. `quality.missing` is the sorted unique union of all requested bundle reason
 codes and relevant scoped diagnostic reason codes. Detailed event/lot context stays in
@@ -703,9 +746,13 @@ ledger read. The Host does not translate a natural month/year into MTD/YTD. Dire
 CLI, `/income`, and Control callers pass canonical `month=YYYY-MM` or `year=YYYY` and rely on the
 period owner for validation.
 
-The business payload is replaced in place and does not expose a report-version selector or legacy
-aliases. If the generic Tool Gateway envelope requires framework schema metadata, that metadata stays
-outside the business calculation contract and must not create a second report implementation.
+The body declares `schema_version=option_performance.report.v3` and `metric_semantics`, owned by
+`src.application.performance.service`. The new period metric is additive; `option_net_cashflow`
+retains its opening-cohort numbers/shape. `metric_semantics` explicitly binds the return numerator
+to `option_net_cashflow` and marks rows/breakdowns/wins/returns as cohort metrics. It also marks actual
+daily occupied capital as period overlap including carry-in. There is no version selector or second
+implementation. A new Bot receiving an old body renders period cash unavailable, never relabels old
+cash as period cash. Decision history calls its original per-contract amount “合约期权现金结果”.
 
 The one shared option-performance public adapter owns error translation and reuses the existing
 `AgentToolError` contract:
@@ -727,7 +774,7 @@ differ, but a failed framework envelope has `ok=false`, empty business `data`, a
 `src.application.performance.query.option_performance_report_tool` is the canonical complete query:
 request/period normalization, report time, scope, error translation and pagination. The existing
 `agent_tools.materialization_impl` entry reexports the shared time context and routes consumers.
-The reducer and event-time cash conversion remain unchanged. Local reports use
+The transport does not calculate metrics or conversions. Local reports use
 `ledger.api.open_performance_query_ledger_from_data_config`: `mode=ro`, `query_only=ON`, one
 transaction for strict ordered events and the existing lot-identity schema guard. Reports never
 initialize a database, migrate schema, recover projections or query providers. An existing initialized
@@ -773,6 +820,9 @@ evidence, not a replacement structured financial API. Necessary quality metadata
 truncated; an irreducible response or unsupported body size returns an explicit read failure.
 The display cursor wraps a canonical page cursor and a within-page position; replay revalidates
 source, frozen report time and current local account authority before displaying more data.
+Row/breakdown pages carry `schema_version` and `metric_semantics`; both participate in the canonical
+source hash, so a semantic change invalidates continuation. These pages contain cohort rows only,
+including under a symbol filter; full-account `period_option_net_cashflow` totals are not attached.
 `page_cursor` is internal to this adapter and is omitted from Tool responses. Old unwrapped Tool
 cursors require a fresh query. Tool calls with no pagination/view selectors retain the existing
 full structured contract; public Bot input normalization selects summary by default.
@@ -786,7 +836,7 @@ the same code, message, hint and details into the established operator/Agent err
 
 The transport envelope uses `schema_version=option_performance.api.v1`, `ok`, `data`, `warnings`,
 `meta`, and `error` with the existing `code`/`message`/optional `hint`/`details` contract. The financial
-business payload has no new version or formulas. Bound paths are masked in metadata; raw exceptions,
+business body separately carries report v3 and additive period semantics. Bound paths are masked in metadata; raw exceptions,
 request bodies and bearer tokens are not logged or returned. Status mapping is 400 input, 401 auth,
 403 scope, 503 read failure and sanitized 500 internal failure; route/method errors are 404/405.
 
@@ -818,11 +868,19 @@ performance, Tool, CLI, Bot, schema and paging tests.
 Minimal result shape:
 
 ```text
+schema_version = option_performance.report.v3
+metric_semantics                 # period cash vs opening cohort; return numerator is option_net_cashflow
 period
   kind, start_date, as_of_date, start_at_ms, end_exclusive_at_ms,
   statistic_days, reporting_timezone, freshness_status
 scope
   config_key, accounts, brokers
+period_option_net_cashflow
+  schema_version = period_option_net_cashflow.v1
+  selection, time_policy, fee_mode, status, missing, fact_count
+  by_currency[currency]
+    total, gross, fees -> amount, status, missing
+  cny_total -> currency=CNY, amount, status, missing
 option_net_cashflow
   by_currency
     total       -> amount, status, missing
@@ -868,9 +926,9 @@ were fully queried with no pagination or projection omission. It does not mean e
 observed. Missing fee, terminal, or occupied-capital evidence remains represented by the metric bundle
 and root `quality`; a complete query may therefore produce a partial report.
 
-Bot never requests `rows[]`. This keeps the source-declared complete scope equal to the
-model-visible aggregate projection. A future row-detail Bot contract would require its own
-bounded collection coverage and is outside this aggregate Bot contract.
+Bot defaults to a bounded summary and does not accept the direct `include_rows` flag.
+Explicit row/breakdown views use the existing page contract and requested-page coverage;
+they are not full-account aggregates and do not contain period-cash totals.
 
 `freshness.status=current` requires a current partial period and an ISO `as_of` at the frozen report
 instant. Completed natural periods and past MTD/YTD cutoffs are `historical` with an ISO `as_of` at the
@@ -942,7 +1000,8 @@ All in-repository consumers must switch atomically to the new canonical fields. 
 deleted PnL or stock cash, or derive a CNY amount other than the canonical root `cny_total`.
 
 - The option-performance renderer, Control `/income`, Bot projection, and Tool contract use the
-  canonical fields without recalculation.
+  canonical fields without recalculation. Period cash is primary and cohort cash is separately
+  labelled; old responses without period cash remain explicitly unavailable for that metric.
 - `portfolio_pnl_bridge` cannot use this report after `pnl.period_total_net` is removed. Its public
   route may remain, but option PnL must be explicitly unavailable until a separate authoritative PnL
   source is designed.

@@ -8,6 +8,87 @@ from types import SimpleNamespace
 
 import pytest
 
+def _failure_fields(base: Path) -> dict:
+    return dict(base=base, config=_config(), unit="test.service", market="us", account="lx",
+                failure_code="TICK_TIMEOUT", stage="timeout", run_id="run-1", rc=124,
+                first_error_at="2026-09-24T00:00:00+00:00", opend_login_state="unknown")
+
+
+@pytest.mark.parametrize("cause", [OSError("state unavailable"), ValueError("not an object")])
+def test_only_initial_state_read_proves_no_send(monkeypatch, tmp_path: Path, cause) -> None:
+    from src.application import system_alerts
+
+    def fail_read(_path):
+        raise cause
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("neither journal nor provider may run")
+
+    monkeypatch.setattr(system_alerts, "_read_state", fail_read)
+    monkeypatch.setattr(system_alerts, "atomic_write_json", forbidden)
+    monkeypatch.setattr(system_alerts, "_send", forbidden)
+    with pytest.raises(system_alerts.SystemAlertPreSendFailure) as failure:
+        system_alerts.report_system_failure(**_failure_fields(tmp_path))
+    assert failure.value.__cause__ is cause
+    assert failure.value.stage == "state_read"
+    assert failure.value.provider_attempted is False
+    assert str(failure.value) == "system alert initial state read failed"
+
+
+@pytest.mark.parametrize("fault", ["journal_write", "provider", "post_send_read"])
+def test_other_failure_stages_do_not_prove_no_send(monkeypatch, tmp_path: Path, fault) -> None:
+    from src.application import system_alerts
+
+    calls = []
+    cause = OSError("isolated failure")
+    original_read = system_alerts._read_state
+    reads = []
+
+    def read(path):
+        reads.append(path)
+        if fault == "post_send_read" and len(reads) == 2:
+            raise cause
+        return original_read(path)
+
+    def send(*args):
+        calls.append(args)
+        if fault == "provider":
+            raise cause
+        return dict(delivery_confirmed=True, provider="fixture", fallback_used=False, attempted=True)
+
+    def fail_write(*args):
+        raise cause
+
+    monkeypatch.setattr(system_alerts, "_read_state", read)
+    monkeypatch.setattr(system_alerts, "_send", send)
+    if fault == "journal_write":
+        monkeypatch.setattr(system_alerts, "atomic_write_json", fail_write)
+    if fault == "provider":
+        assert system_alerts.report_system_failure(**_failure_fields(tmp_path)) == "unconfigured"
+    else:
+        with pytest.raises(OSError) as failure:
+            system_alerts.report_system_failure(**_failure_fields(tmp_path))
+        assert failure.value is cause
+        assert not isinstance(failure.value, system_alerts.SystemAlertPreSendFailure)
+    assert len(calls) == (0 if fault == "journal_write" else 1)
+
+
+def test_corrupt_state_recovery_and_status_keep_existing_behavior(tmp_path: Path) -> None:
+    from src.application import system_alerts
+
+    path = tmp_path / "output_shared/state/system_alerts.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{broken")
+    status = system_alerts.system_alert_delivery_status(tmp_path)
+    assert status["status"] == "degraded"
+    assert status["reason_code"] == "SYSTEM_ALERT_STATE_UNREADABLE"
+    with pytest.raises(json.JSONDecodeError):
+        system_alerts.report_system_recovery(
+            base=tmp_path, config=_config(), unit="test.service", market="us", account="lx",
+            failure_code="TICK_TIMEOUT", stage="timeout",
+        )
+
+
 
 def _config() -> dict:
     return {"notifications": {"enabled": True, "provider": "wechat_clawbot", "target": "fixture-target"}}
@@ -146,12 +227,16 @@ def test_corrupt_alert_state_fails_closed_without_resending(monkeypatch, tmp_pat
     path.parent.mkdir(parents=True)
     path.write_text("{broken", encoding="utf-8")
     monkeypatch.setattr(system_alerts, "select_notification_delivery_adapter", lambda _provider: (_ for _ in ()).throw(AssertionError("must not send")))
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises(system_alerts.SystemAlertPreSendFailure) as failure:
         system_alerts.report_system_failure(
             base=tmp_path, config=_config(), unit="test.service", market="us", account="lx",
             failure_code="TICK_TIMEOUT", stage="timeout", run_id="run-1", rc=124,
             first_error_at="2026-09-24T00:00:00+00:00", opend_login_state="unknown",
         )
+    assert isinstance(failure.value.__cause__, json.JSONDecodeError)
+    assert failure.value.stage == "state_read"
+    assert failure.value.provider_attempted is False
+    assert path.read_text(encoding="utf-8") == "{broken"
 
 
 def test_journal_meta_signal_dedupes_and_reports_recovery(tmp_path: Path, capsys) -> None:
@@ -497,6 +582,9 @@ def test_trade_intake_heartbeat_ignores_transient_stage_labels(monkeypatch, tmp_
     ("once", 0),
     ("reconnecting", 1),
     ("blocked", 1),
+    ("error", 1),
+    ("stopped", 1),
+    ("failed", 0),  # Legacy quality label is not part of the watchdog's vocabulary.
 ])
 def test_trade_intake_heartbeat_reads_the_status_vocabulary(monkeypatch, tmp_path: Path, status_label: str, expected_sends: int) -> None:
     """A not-working label must still alert, and the working ones must not.

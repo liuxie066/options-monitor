@@ -33,6 +33,28 @@ def _original_candidates(brief: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _unresolved_import_rejections(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unresolved = {}
+    identity_fields = ("run_id", "market_date", "revision", "scope")
+    for report in reports:
+        for row in report["rows"]:
+            if row["status"] == "rejected":
+                # Repeated observations of one source/identity are one coverage gap.
+                key = content_hash({field: row.get(field) for field in ("source", *identity_fields)})
+                unresolved[key] = row
+            elif row["status"] in {"ready", "already_imported"}:
+                # Only committed receipts reach this reader; preview alone cannot resolve a gap.
+                for key, rejected in list(unresolved.items()):
+                    if all(field in rejected for field in identity_fields):
+                        matches = all(rejected[field] == row[field] for field in identity_fields)
+                    else:
+                        # An unverified source has no proven run or broker identity to match.
+                        matches = rejected["source"] == row["source"]
+                    if matches:
+                        del unresolved[key]
+    return list(unresolved.values())
+
+
 def read_decision_history(*, base: Path, account: str, market: str, scope: dict[str, str],
                           start_date: str, end_date: str, cursor_key: Callable[[], str],
                           symbol: str | None = None, limit: int = 10, cursor: str | None = None,
@@ -72,10 +94,10 @@ def read_decision_history(*, base: Path, account: str, market: str, scope: dict[
             if cancelled:
                 conn.set_progress_handler(lambda: 1 if cancelled() else 0, 1000)
             imports = store.import_reports(conn, account=account, market=market)
-            if imports:
-                rejected = [row for row in imports[-1]["rows"] if row["status"] == "rejected"]
-                if rejected:
-                    result["missing"].append({"reason": "historical_sources_rejected", "count": len(rejected)})
+            rejected = [row for row in _unresolved_import_rejections(imports)
+                        if not row.get("scope") or row["scope"] == scope]
+            if rejected:
+                result["missing"].append({"reason": "historical_sources_rejected", "count": len(rejected)})
             watermark = conn.execute("SELECT id,payload_hash,scope_hash FROM decisions ORDER BY id DESC LIMIT 1").fetchone()
             if state:
                 ceiling = int(state["ceiling"])

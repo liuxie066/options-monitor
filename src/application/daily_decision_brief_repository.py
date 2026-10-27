@@ -236,7 +236,7 @@ def record_daily_decision_brief_candidates(
     candidate_identities: list[str] | tuple[str, ...],
     observed_at_utc: datetime | str | None = None,
 ) -> dict[str, Any]:
-    """Replace the current day's pending set from one successful snapshot."""
+    """Replace pending candidates only from the day's latest successful snapshot."""
 
     base_path = Path(base).resolve()
     account_norm = _normalize_account(account)
@@ -249,14 +249,6 @@ def record_daily_decision_brief_candidates(
         account=account_norm,
         market=market_norm,
     )
-    _validate_successful_revision_source(
-        base=base_path,
-        account=account_norm,
-        market=market_norm,
-        market_trading_date=date_norm,
-        revision=revision_norm,
-        source_digest=digest_norm,
-    )
     observed_at = _coerce_utc_iso(observed_at_utc)
 
     state_dir = paths.account_state_dir(base_path, account_norm)
@@ -264,12 +256,40 @@ def record_daily_decision_brief_candidates(
     lock_path = state_dir / f"daily_decision_brief.{market_norm}.lock"
     delivery_path = _delivery_path(base_path, account_norm, market_norm)
     with _exclusive_lock(lock_path):
+        _validate_successful_revision_source(
+            base=base_path,
+            account=account_norm,
+            market=market_norm,
+            market_trading_date=date_norm,
+            revision=revision_norm,
+            source_digest=digest_norm,
+        )
+        latest_raw = _history_raw(
+            base=base_path, account=account_norm, market=market_norm,
+            market_date=date_norm, successful=True,
+        )
+        latest = _normalize_persisted_brief(
+            latest_raw, path=history_path(base_path), account=account_norm, market=market_norm,
+        )
+        if latest["market_trading_date"] != date_norm or revision_norm > int(latest["revision"]):
+            raise DailyDecisionBriefStateError("daily brief candidate revision has no matching successful current")
         state = _load_or_create_delivery_state(
             base=base_path,
             path=delivery_path,
             account=account_norm,
             market=market_norm,
         )
+        if revision_norm < int(latest["revision"]):
+            day = state["days"].get(date_norm, {})
+            return {
+                "state": state,
+                "market_trading_date": date_norm,
+                "pending_candidate_identities": sorted(day.get("pending_candidates", {})),
+                "alerted_candidate_identities": sorted(day.get("alerted_candidates", {})),
+                "path": delivery_path,
+                "applied": False,
+                "reason": "stale_revision",
+            }
         day = _delivery_day(state, date_norm)
         alerted = set(day["alerted_candidates"])
         existing_pending = day["pending_candidates"]
@@ -291,6 +311,8 @@ def record_daily_decision_brief_candidates(
             "pending_candidate_identities": sorted(day["pending_candidates"]),
             "alerted_candidate_identities": sorted(alerted),
             "path": delivery_path,
+            "applied": True,
+            "reason": "applied",
         }
 
 
@@ -2319,14 +2341,14 @@ def _load_current_index(path: Path) -> dict[str, Any]:
 
 
 def _candidate_identity_set(brief: Mapping[str, Any] | None) -> set[str]:
-    if not isinstance(brief, Mapping):
+    if not isinstance(brief, Mapping) or brief.get("actionability") != "live_actionable":
         return set()
     identities = {
         str(item.get("identity") or "").strip()
         for item in brief.get("candidate_index") or []
         if isinstance(item, Mapping) and str(item.get("identity") or "").strip()
     }
-    if identities or brief.get("actionability") == "blocked":
+    if identities:
         return identities
     for action in brief.get("actions") or []:
         if not isinstance(action, Mapping):
@@ -2456,12 +2478,16 @@ def query_daily_brief_receipts(*, base: Path, account: str, market: str, query: 
     if not result.get("available"):
         raise ValueError("daily_brief_" + str(result.get("reason")))
     selected_key = None
+    selected_envelope = None
     if query.get("run_id"):
         run_id = _normalize_run_id(query["run_id"])
         plan = read_receipt_json(paths.run_account_state_dir(base, run_id, account) / f"daily_decision_brief_delivery_plan.{market}.json")
         if plan.get("account") != account or plan.get("market") != market or plan.get("run_id") != run_id:
             raise ValueError("daily_brief_run_scope_mismatch")
-        selected_key = (plan.get("envelope") or {}).get("delivery_key")
+        selected_envelope = plan.get("envelope")
+        if not isinstance(selected_envelope, Mapping):
+            raise ValueError("daily_brief_run_plan_invalid")
+        selected_key = selected_envelope.get("delivery_key")
         if not selected_key:
             raise ValueError("daily_brief_run_plan_invalid")
     rows = []
@@ -2472,6 +2498,8 @@ def query_daily_brief_receipts(*, base: Path, account: str, market: str, query: 
         for item in envelopes:
             if selected_key and item["delivery_key"] != selected_key:
                 continue
+            if selected_envelope is not None and _delivery_envelope_content(selected_envelope) != _delivery_envelope_content(item):
+                raise ValueError("daily_brief_run_content_mismatch")
             event = receipt_event(source="daily_brief", event_id=item["delivery_key"], account=account, market=market,
                 kind="monitor" if item["delivery_kind"] == "candidate_alert" else "scheduled",
                 occurred=item.get("first_prepared_at_utc"), recorded=item.get("last_attempt_at_utc"),

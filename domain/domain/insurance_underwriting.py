@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
+
+from domain.domain.candidate_defaults import DEFAULT_MAX_ABS_DELTA, validate_max_abs_delta
 
 
 INSURANCE_UNDERWRITING_PROFILE = "insurance_underwriting"
@@ -19,6 +21,11 @@ class InsuranceUnderwritingConfig:
     min_dte: int | None = None
     max_dte: int | None = None
     max_spread_ratio: float = 0.40
+    max_abs_delta: float | None = DEFAULT_MAX_ABS_DELTA
+    min_strike_cost_multiplier: float = 1.02
+
+    def __post_init__(self) -> None:
+        validate_max_abs_delta(self.max_abs_delta)
 
     @property
     def enabled(self) -> bool:
@@ -56,9 +63,15 @@ def evaluate_underwriting_candidate(
         min_iv_rv_ratio=cfg.min_iv_rv_ratio,
         min_iv_minus_rv=cfg.min_iv_minus_rv,
         max_spread_ratio=cfg.max_spread_ratio,
+        max_abs_delta=cfg.max_abs_delta,
         require_earnings_evidence=True,
         reject_known_earnings=True,
     )
+    return build_underwriting_result(fields, decision)
+
+
+def build_underwriting_result(fields: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
+    """Project the canonical opening decision into the existing underwriting API."""
     if bool(decision.get("accepted")):
         return {
             "accepted": True,
@@ -107,12 +120,11 @@ def underwriting_fields(
         "policy_min_iv_rv_ratio": cfg.min_iv_rv_ratio,
         "policy_min_iv_minus_rv": cfg.min_iv_minus_rv,
         "policy_max_spread_ratio": cfg.max_spread_ratio,
+        "policy_max_abs_delta": cfg.max_abs_delta,
     }
     if mode_norm == "put":
         out["strike_safety_margin_pct"] = _strike_safety_margin(row, cfg=cfg)
         out["net_assignment_discount_pct"] = _net_assignment_discount(row)
-    else:
-        out["strike_upside_margin_pct"] = _strike_upside_margin(row, cfg=cfg)
     return out
 
 
@@ -126,7 +138,14 @@ def rank_underwriting_candidates(
     enriched: list[dict[str, Any]] = []
     for row in rows:
         payload = dict(row)
+        from domain.domain.strategy_identity import validate_strategy_identity
+
+        identity = validate_strategy_identity(payload, mode=mode_norm)
+        if identity is not None and identity["template"] != f"{'csp' if mode_norm == 'put' else 'cc'}_baseline":
+            raise ValueError("underwriting compatibility ranking requires a baseline template")
         if cfg is not None:
+            if identity is not None and {**identity["effective_parameters"], **identity["strike_inputs"]} != asdict(cfg):
+                raise ValueError("underwriting config conflicts with strategy identity")
             payload.update(underwriting_fields(payload, mode=mode_norm, cfg=cfg))
         enriched.append(payload)
 
@@ -192,16 +211,6 @@ def _net_assignment_discount(row: dict[str, Any]) -> float | None:
     if spot is None or spot <= 0 or breakeven is None:
         return None
     return round((spot - breakeven) / spot, 6)
-
-
-def _strike_upside_margin(row: dict[str, Any], *, cfg: InsuranceUnderwritingConfig) -> float | None:
-    min_strike = _first_float(row, "effective_min_strike", "min_strike")
-    if min_strike is None:
-        min_strike = cfg.min_strike
-    strike = _float(row.get("strike"))
-    if min_strike is None or strike is None or min_strike <= 0:
-        return None
-    return round((strike - min_strike) / min_strike, 6)
 
 
 def _first_float(row: dict[str, Any], *keys: str) -> float | None:

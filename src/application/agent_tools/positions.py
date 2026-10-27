@@ -9,6 +9,7 @@ import src.application.wheel as wheel_application
 from src.application.wheel.candidate_snapshot import load_wheel_candidate_cash_fact
 from src.application.agent_tools.operations_impl import (
     normalize_option_positions_read_input,
+    option_positions_list_account,
     option_positions_read_tool,
 )
 from src.application.agent_tools.materialization_impl import option_performance_report_tool
@@ -25,7 +26,9 @@ from src.application.ledger.api import (
 )
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError, mask_path
-from src.application.quality.gate import QualityGateBlocked, assert_quality_allows
+from src.application.quality.gate import QualityGateBlocked, assert_quality_allows, quality_onboarded
+from src.application.account_config import resolve_configured_accounts
+from src.application.runtime_config_freshness import infer_runtime_config_market
 from domain.domain.option_position_identity import normalize_account
 from src.application.agent_tools.runtime_helpers import normalize_broker
 from src.application.positions.assigned_stock_quotes import refresh_assigned_stock_quote_snapshots as refresh_assigned_stock_quotes
@@ -64,6 +67,9 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
     "pagination": {"mode": "keyset"},
     "source_label": "OM 本地 canonical trade_events ledger",
     "fact_fields": [
+        "schema_version",
+        "metric_semantics",
+        "period_option_net_cashflow",
         "period.kind",
         "period.start_date",
         "period.as_of_date",
@@ -87,6 +93,9 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "breakdowns.symbols",
     ],
     "missing_data_fields": [
+        "period_option_net_cashflow.missing",
+        "period_option_net_cashflow.by_currency.*.*.missing",
+        "period_option_net_cashflow.cny_total.missing",
         "quality.missing",
         "quality.diagnostics",
         "option_net_cashflow.by_currency.*.*.missing",
@@ -102,6 +111,9 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "quality.ledger_input_hash",
     ],
     "model_preview_fields": [
+        "schema_version",
+        "metric_semantics",
+        "period_option_net_cashflow",
         "period",
         "scope",
         "option_net_cashflow",
@@ -112,6 +124,9 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "quality",
     ],
     "model_value_fields": [
+        "schema_version",
+        "metric_semantics",
+        "period_option_net_cashflow",
         "period",
         "scope",
         "option_net_cashflow",
@@ -123,6 +138,9 @@ _OPTION_PERFORMANCE_OUTPUT_CONTRACT: dict[str, Any] = {
         "available_breakdowns", "detail_query",
     ],
     "model_missing_data_fields": [
+        "period_option_net_cashflow.missing",
+        "period_option_net_cashflow.by_currency.*.*.missing",
+        "period_option_net_cashflow.cny_total.missing",
         "quality.missing",
         "quality.diagnostics",
         "option_net_cashflow.cny_total.missing",
@@ -404,23 +422,36 @@ def _option_positions_read_tool(
             ) from exc
 
     action = _option_positions_action(normalized)
-    if action != "events":
-        assert_quality(
-            account=str(normalized.get("account") or "").strip().lower() or None,
-            market=str(normalized.get("config_key") or "").strip().lower() or None,
-        )
+    def load_quality_scoped_config(**kwargs: Any) -> tuple[Path, dict[str, Any]]:
+        config_path, cfg = load_runtime_config(**kwargs)
+        if action != "events" and quality_onboarded():
+            requested_account = (
+                option_positions_list_account(normalized) if action == "list" else normalized.get("account")
+            )
+            try:
+                accounts = resolve_configured_accounts(cfg, [requested_account] if requested_account else None)
+            except ValueError as exc:
+                raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+            market = infer_runtime_config_market(
+                config_key=normalized.get("config_key"), config_path=config_path, config=cfg,
+            )
+            for account in accounts or [None]:
+                assert_quality(account=account, market=market)
+        return config_path, cfg
 
     def admit_event_query(
         query: dict[str, Any], authority_scope: dict[str, Any]
     ) -> None:
-        assert_quality(
-            account=str(query.get("account") or "").strip().lower() or None,
-            market=str(authority_scope.get("market") or "").strip().lower() or None,
-        )
+        accounts = [query["account"]] if query.get("account") else authority_scope.get("accounts") or [None]
+        for account in accounts:
+            assert_quality(
+                account=str(account or "").strip().lower() or None,
+                market=str(authority_scope.get("market") or "").strip().lower() or None,
+            )
 
     return option_positions_read_tool(
         normalized,
-        load_runtime_config=load_runtime_config,
+        load_runtime_config=load_quality_scoped_config,
         resolve_public_data_config_path=resolve_public_data_config_path,
         normalize_broker=normalize_broker,
         normalize_account=normalize_account,
@@ -1002,13 +1033,19 @@ _PERFORMANCE_READ_INPUT = {
 
 OPTION_PERFORMANCE_REPORT_TOOL = build_agent_tool(
     name="option_performance_report",
-    catalog_summary="读取 MTD/YTD 或自然月/自然年期权收益、实际日均占用与明细分解。",
+    catalog_summary="读取期间期权现金流、开仓批次收益、实际日均占用与批次明细。",
     description=(
         "Read-only MTD, YTD, natural-month, or natural-year option performance from the canonical ledger. Reports native-currency "
-        "option net cash flow plus an audited CNY total when persisted event-time conversions are complete, "
+        "period option net cash flow and separate opening-cohort cash results, each with historical CNY evidence; "
         "sell-option and buy-option win rates, hold-to-expiry returns, and independent actual daily unsettled "
-        "principal including carry-in positions. Daily principal is not the return denominator. Stock trades, "
-        "assignment settlement cash, PnL, read-time FX conversion, and quote refresh are outside this report."
+        "principal including carry-in positions. Returns, wins, rows and breakdowns keep opening-cohort semantics. "
+        "Never substitute cohort cash for unavailable period cash. Daily principal is not the return denominator. Stock trades, "
+        "assignment settlement cash, PnL, read-time FX conversion, and quote refresh are outside this report. "
+        "actual_fee_missing and fee_estimated mean actual fee evidence is unconfirmed in this ledger snapshot, "
+        "not a synchronization state; do not substitute estimated fees for actual amounts. Only independent current evidence "
+        "can establish pending synchronization; preserve failed or overdue evidence. A hash change alone cannot prove "
+        "rebuild loss, who rebuilt, or that rebuild/backfill is required. freshness.as_of is the statistical cutoff, "
+        "not fee synchronization time. Explain unavailable amounts only for the affected metric and currency."
     ),
     requires=("runtime_config", "sqlite_data_config"),
     capabilities=("option_performance", "income_report", "option_positions", "read_only"),
@@ -1137,7 +1174,7 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
             "items": {"type": "string"},
             "description": "list-only open|close|all; legacy callers may pass a single-item list",
         },
-        "query": "list-only structured PositionQuery: account/status/symbol/option_type/side/strike/expiration/limit",
+        "query": "list-only structured PositionQuery: account/status/symbol/option_type/side/strike/expiration/limit; nonblank account overrides top-level account for quality checks and ledger reads",
         "limit": {
             "type": "integer",
             "minimum": 1,

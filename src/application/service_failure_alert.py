@@ -9,6 +9,7 @@ from src.application.account_config import accounts_from_config_path
 from src.application.payload_helpers import parse_utc
 from src.application.system_alerts import report_system_failure, report_system_recovery, retire_system_failure
 from src.application.trades.account_mapping import resolve_trade_intake_config
+from src.application.trades.listener_status import NONWORKING_LISTENER_STATUSES
 from src.infrastructure.io_utils import read_json
 from src.infrastructure.run_log import create_run_id
 
@@ -21,18 +22,6 @@ from src.infrastructure.run_log import create_run_id
 # within ~21 minutes. Re-measure when the loop's work changes — a longer backfill
 # lookback, a slower broker, or a new per-iteration stage all widen the cycle.
 _HEARTBEAT_STALE_SECONDS = 1200
-
-# `status` is a stage label, not the liveness signal: it churns every iteration
-# (the listener reports "starting" throughout receipt/backfill work), and every
-# write refreshes the heartbeat, so gating on one healthy label (3.7.1 required
-# `status == "listening"`) reported a healthy intake as stale. The whole
-# vocabulary the writer produces is listening / starting / once for a working
-# source and blocked / error / reconnecting / stopped for one that is not, so
-# only the latter four are listed here. `reconnecting` is the one that would
-# otherwise go silent: the retry loop refreshes the heartbeat while it backs off,
-# so ignoring the label would report recovery for a dead OpenD connection.
-_INTAKE_UNHEALTHY_STATUSES = frozenset({"blocked", "error", "reconnecting", "stopped"})
-
 
 def alert_failed_service(*, unit: str, market: str, config_path: str, runtime_root: str | Path) -> int:
     config_file = Path(config_path)
@@ -120,7 +109,7 @@ def check_trade_intake_heartbeat(
             status_label = str(status.get("status") or "").strip().lower()
             healthy = (
                 active
-                and status_label not in _INTAKE_UNHEALTHY_STATUSES
+                and status_label not in NONWORKING_LISTENER_STATUSES
                 and -60 <= age <= _HEARTBEAT_STALE_SECONDS
             )
             if healthy:

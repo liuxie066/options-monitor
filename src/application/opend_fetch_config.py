@@ -33,6 +33,9 @@ OPEND_FETCH_KWARG_KEYS = frozenset(
         "expiration_max_wait_sec",
         "expiration_window_sec",
         "expiration_max_calls",
+        "history_kline_max_wait_sec",
+        "history_kline_window_sec",
+        "history_kline_max_calls",
     }
 )
 OPEND_RATE_LIMIT_ENDPOINT_ALIASES = {
@@ -154,6 +157,9 @@ class OpenDFetchLimits:
             "expiration_max_wait_sec": self.option_expiration.max_wait_sec,
             "expiration_window_sec": self.option_expiration.window_sec,
             "expiration_max_calls": self.option_expiration.max_calls,
+            "history_kline_max_wait_sec": self.history_kline.max_wait_sec,
+            "history_kline_window_sec": self.history_kline.window_sec,
+            "history_kline_max_calls": self.history_kline.max_calls,
         }
 
     def discovery_kwargs(self) -> dict[str, float | int]:

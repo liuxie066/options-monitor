@@ -1856,14 +1856,18 @@ def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path, ident
         json.dumps(
             {
                 "processed_deal_ids": {},
-                "failed_deal_ids": {"sy-deal-1": {"reason": "source_classification_pending"}},
+                "failed_deal_ids": {"sy-deal-1": {
+                    "account": "sy", "futu_account_id": "281756479859383817",
+                    "source_deal_id": "sy-deal-1", "reason": "source_classification_pending",
+                }},
                 "unresolved_deal_ids": {},
             }
         ),
         encoding="utf-8",
     )
     (state_dir / "trade_intake" / "sy" / "audit.jsonl").write_text(
-        json.dumps({"deal_id": "sy-deal-1", "result": {"reason": "not_option_deal"}}) + "\n",
+        json.dumps({"account": "sy", "futu_account_id": "281756479859383817",
+                    "deal_id": "sy-deal-1", "result": {"reason": "not_option_deal"}}) + "\n",
         encoding="utf-8",
     )
 
@@ -1931,6 +1935,83 @@ def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path, ident
     assert "sources" not in legacy_trade
     assert legacy_trade["summary"]["pending_after_reconcile_count"] == 1
     assert legacy_trade["summary"]["audit_reconciliation"]["pending_after_reconcile_count"] == 0
+
+
+@pytest.mark.parametrize("evidence", [
+    "complete", "bare_audit", "missing_logical", "missing_physical",
+    "other_logical", "other_physical", "conflicting_deal", "incomplete_state", "split_rows",
+])
+def test_runtime_status_keeps_unproven_audit_skip_pending(tmp_path: Path, evidence: str) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    physical = "999000000000000001"
+    deal_id = "pending-stock-deal"
+    cfg_path = tmp_path / "config.us.json"
+    cfg = _public_cfg_with_futu("portfolio.runtime.json")
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    (tmp_path / "portfolio.runtime.json").write_text(json.dumps({
+        "option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"},
+    }), encoding="utf-8")
+    state_dir = tmp_path / "output_shared/state"
+    source_dir = state_dir
+    source_dir.mkdir(parents=True)
+    ledger_path = state_dir / "option_positions.sqlite3"
+    with sqlite3.connect(ledger_path):
+        pass
+    (source_dir / "auto_trade_intake_status.json").write_text(
+        json.dumps({"status": "listening"}), encoding="utf-8",
+    )
+    state_item = {"account": "user1", "futu_account_id": physical,
+                  "source_deal_id": deal_id, "reason": "source_classification_pending"}
+    audit = {"account": "user1", "futu_account_id": physical, "deal_id": deal_id,
+             "result": {"reason": "not_option_deal"}}
+    if evidence == "bare_audit":
+        audit = {"deal_id": deal_id, "result": {"reason": "not_option_deal"}}
+    elif evidence == "missing_logical":
+        audit.pop("account")
+    elif evidence == "missing_physical":
+        audit.pop("futu_account_id")
+    elif evidence == "other_logical":
+        audit["account"] = "user2"
+    elif evidence == "other_physical":
+        audit["futu_account_id"] = "different-physical"
+    elif evidence == "conflicting_deal":
+        audit["result"]["deal_id"] = "different-deal"
+    elif evidence == "incomplete_state":
+        state_item.pop("futu_account_id")
+    rows = [audit]
+    if evidence == "split_rows":
+        rows = [{key: value for key, value in audit.items() if key != "account"},
+                {key: value for key, value in audit.items() if key != "futu_account_id"}]
+    state_path = source_dir / "auto_trade_intake_state.json"
+    audit_path = source_dir / "auto_trade_intake_audit.jsonl"
+    state_path.write_text(json.dumps({"processed_deal_ids": {}, "unresolved_deal_ids": {},
+                                     "failed_deal_ids": {deal_id: state_item}}), encoding="utf-8")
+    audit_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    payload = {"config_path": str(cfg_path), "state_dir": str(state_dir),
+               "shared_state_dir": str(state_dir), "report_dir": str(tmp_path / "reports"),
+               "accounts_root": str(tmp_path / "output_accounts"), "runs_root": str(tmp_path / "output_runs")}
+    before = {path: path.read_bytes() for path in (state_path, audit_path, ledger_path)}
+
+    public = run_tool("runtime_status", payload)
+    assert public["ok"] is True
+    assert public["data"]["schema_version"] == "runtime-status-public.v2"
+    summary = public["data"]["trade_intake"]["summary"]
+    assert summary["reconciliation_preview_available"] is True
+    assert summary["failed_count"] == 1
+    # The public live summary does not consume historical audit rows.
+    assert summary["pending_after_reconcile_count"] == 1
+    assert summary["ignored_non_option_count"] == 0
+    assert deal_id not in json.dumps(public)
+    assert physical not in json.dumps(public)
+
+    # The trusted collector exposes the separate audit preview behind that facade.
+    private = _execute_private_runtime_status(payload)
+    source = private["data"]["trade_intake"]["sources"][0]["summary"]
+    assert source["pending_after_reconcile_count"] == 1
+    assert source["audit_reconciliation"]["available"] is True
+    assert source["audit_reconciliation"]["pending_after_reconcile_count"] == (0 if evidence == "complete" else 1)
+    assert {path: path.read_bytes() for path in before} == before
 
 
 def test_trade_intake_summary_reports_single_fee_failed_source() -> None:
@@ -2059,6 +2140,7 @@ def _runtime_status_upgrade_fixture(tmp_path: Path, *, target_version: str = "1.
             {
                 "service_provider": "systemd",
                 "runtime_root": str(tmp_path),
+                "feishu_ws": {"config_key": "us"},
                 "services": [
                     {"name": "options-monitor-trade-intake.service"},
                     {"name": "options-monitor-feishu-ws.service"},
@@ -2934,7 +3016,8 @@ def test_runtime_status_does_not_warn_missing_notification_for_expected_skip(tmp
     assert out["data"]["latest_run"]["path"].endswith("run-skip")
 
 
-def test_runtime_status_notification_diagnosis_uses_shared_last_run_counts(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", [None, "none", "announce"])
+def test_runtime_status_notification_diagnosis_uses_shared_last_run_counts(tmp_path: Path, mode: str | None) -> None:
 
     def write_json(path: Path, payload: dict[str, object]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2965,6 +3048,7 @@ def test_runtime_status_notification_diagnosis_uses_shared_last_run_counts(tmp_p
     out = _execute_private_runtime_status(
         {
             "config_key": "us",
+            "delivery_mode": mode,
             "config_path": str(cfg_path),
             "shared_state_dir": str(shared_state_dir),
             "runs_root": str(runs_root),
@@ -2973,6 +3057,7 @@ def test_runtime_status_notification_diagnosis_uses_shared_last_run_counts(tmp_p
         },
     )
 
+    assert any("Outer delivery.mode is none" in warning for warning in out["warnings"]) is (mode == "none")
     diagnosis = out["data"]["notification_diagnosis"]
     assert diagnosis["status"] == "sent"
     assert diagnosis["account_messages_count"] == 2
@@ -2980,8 +3065,9 @@ def test_runtime_status_notification_diagnosis_uses_shared_last_run_counts(tmp_p
     assert diagnosis["send_confirmed_count"] == 2
 
 
+@pytest.mark.parametrize("mode", [None, "none", "announce"])
 def test_runtime_status_historical_run_does_not_borrow_current_shared_delivery_counts(
-    tmp_path: Path,
+    tmp_path: Path, mode: str | None,
 ) -> None:
 
     def write_json(path: Path, payload: dict[str, object]) -> None:
@@ -3024,6 +3110,7 @@ def test_runtime_status_historical_run_does_not_borrow_current_shared_delivery_c
     out = _execute_private_runtime_status(
         {
             "config_key": "us",
+            "delivery_mode": mode,
             "config_path": str(cfg_path),
             "run_id": "run-historical",
             "shared_state_dir": str(shared_state_dir),
@@ -3033,6 +3120,7 @@ def test_runtime_status_historical_run_does_not_borrow_current_shared_delivery_c
         },
     )
 
+    assert any("Outer delivery.mode is none" in warning for warning in out["warnings"]) is (mode == "none")
     diagnosis = out["data"]["notification_diagnosis"]
     assert diagnosis["status"] == "send_failed_or_unconfirmed"
     assert diagnosis["send_confirmed_count"] == 0
@@ -3132,8 +3220,15 @@ def test_runtime_status_shows_unconfirmed_system_alert_separately(tmp_path: Path
     assert out["summary"]["ok"] is False
 
 
-def test_runtime_status_loads_service_profile_and_masks_external_paths(tmp_path: Path) -> None:
+@pytest.mark.parametrize("timeout", (700, "inf", "-inf", "1e309"))
+def test_runtime_status_loads_service_profile_and_masks_external_paths(
+    tmp_path: Path, monkeypatch, timeout,
+) -> None:
 
+    env_file = tmp_path / "synthetic.env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("OM_ENV_FILE", str(env_file))
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
     report_dir = tmp_path / "reports"
@@ -3163,7 +3258,7 @@ def test_runtime_status_loads_service_profile_and_masks_external_paths(tmp_path:
                 "trigger_source": "om_direct",
                 "trigger_job_id": "hk-direct-11",
                 "delivery": {"mode": "none"},
-                "timeoutSeconds": 700,
+                "timeoutSeconds": timeout,
                 "max_run_age_minutes": 30,
             },
             ensure_ascii=False,
@@ -3181,7 +3276,16 @@ def test_runtime_status_loads_service_profile_and_masks_external_paths(tmp_path:
     assert out["data"]["trigger_context"]["job_id"] == "hk-direct-11"
     assert out["data"]["trigger_context"]["delivery_mode"] == "none"
     assert out["data"]["trigger_context"]["announce_expected"] is False
-    assert out["data"]["trigger_context"]["timeout_seconds"] == 700
+    trigger_context = out["data"]["trigger_context"]
+    assert trigger_context["observed"] is True
+    if timeout == 700:
+        assert trigger_context["timeout_seconds"] == 700
+        assert "timeout_seconds_raw" not in trigger_context
+        assert "timeout_seconds_parse_error" not in trigger_context
+    else:
+        assert trigger_context["timeout_seconds_raw"] == timeout
+        assert trigger_context["timeout_seconds_parse_error"] is True
+        assert "timeout_seconds" not in trigger_context
     assert out["data"]["config"]["config_path"] == ".../config.us.json"
     assert out["data"]["paths"]["report_dir"] == ".../reports"
     assert out["data"]["account_summary"]["accounts"]["user1"]["last_status"] == "account_ok"
@@ -4693,3 +4797,133 @@ def test_scheduler_status_exposes_processed_scan_target_watermark(tmp_path: Path
     assert out["data"]["state"]["last_processed_scan_target_utc_for_account"] == (
         "2026-07-21T14:30:00+00:00"
     )
+
+
+@pytest.mark.parametrize("command", ["healthcheck", "doctor"])
+@pytest.mark.parametrize("case,expected", [
+    ("closed", "market_closed"),
+    ("stale", "stale"),
+    ("missing_fields", "option_delta"),
+    ("provider_failure", "required option fields or opening prerequisites unavailable"),
+    ("ready", "passed"),
+])
+def test_healthcheck_quote_causes_reach_public_cli(monkeypatch, tmp_path, capsys, command, case, expected):
+    from datetime import datetime, timedelta, timezone
+    from src.application import futu_doctor
+    import src.interfaces.cli.main as cli
+
+    cfg_path = _write_healthcheck_config(tmp_path)
+
+    class Gateway:
+        def get_option_chain(self, **kwargs):
+            if case == "provider_failure":
+                raise RuntimeError("synthetic provider failure")
+            return [{"code": "synthetic-option"}]
+
+        def get_snapshot(self, codes):
+            if codes == ["US.NVDA"]:
+                return [{"code": "US.NVDA", "last_price": 100, "sec_status": "NORMAL", "suspension": False,
+                         "update_time": (datetime.now(timezone.utc) - timedelta(seconds=600 if case == "stale" else 0)).isoformat()}]
+            row = {name: 1 for name in futu_doctor.REQUIRED_SNAPSHOT_COLS}
+            row["code"] = "synthetic-option"
+            if case == "missing_fields":
+                row.pop("option_delta")
+            return [row]
+
+        def get_market_state(self, codes):
+            return [{"code": codes[0], "market_state": "CLOSED" if case == "closed" else "MORNING"}]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(futu_doctor, "build_ready_futu_quote_gateway", lambda **kwargs: Gateway())
+
+    def probe(**kwargs):
+        fields = futu_doctor.check_required_option_fields(
+            symbols=kwargs["symbols"], host=kwargs["host"], port=kwargs["port"],
+        )
+        ready = futu_doctor.required_fields_ok(fields, symbols=kwargs["symbols"])
+        return {"ok": ready, "sdk": {"ok": True}, "watchdog_ok": True,
+                "watchdog": {"ok": True}, "required_fields_ok": ready, "required_fields": fields}
+
+    _patch_healthcheck_dependencies(monkeypatch, run_futu_doctor=probe)
+    rc = cli.main([command, "--config-path", str(cfg_path)])
+    result = json.loads(capsys.readouterr().out)
+    health = result if command == "healthcheck" else result["data"]["healthcheck"]
+    checks = health["data"]["checks"]
+    quote = next(c for c in checks if c["name"].startswith("opend_quote_readiness_"))
+    aggregate = next(c for c in checks if c["name"] == "opend_readiness")
+    assert rc == (0 if case == "ready" else 2)
+    assert health["data"]["summary"]["ok"] is (case == "ready")
+    assert quote["status"] == ("ok" if case == "ready" else "error")
+    assert aggregate["status"] == quote["status"]
+    assert expected in quote["message"]
+    if case != "ready":
+        assert expected in aggregate["message"]
+    row = quote["value"]["required_fields"]["results"][0]
+    if case == "closed":
+        assert row["option_fields_ok"] is True
+        assert row["scan_prerequisites_ok"] is False
+        assert "required option fields unavailable" not in quote["message"]
+    if case == "provider_failure":
+        assert "synthetic provider failure" in row["error"]
+    assert health["data"]["account_paths"]["user1"]["primary"]["ok"] is True
+
+
+@pytest.mark.parametrize("case,expected_status", [
+    ("unavailable", "skipped"),
+    ("unavailable_with_legacy_value", "skipped"),
+    ("unavailable_missing_app_id", "error"),
+    ("missing", "error"),
+    ("present", "ok"),
+])
+def test_healthcheck_distinguishes_credential_context_from_missing_secret(
+    monkeypatch, tmp_path, capsys, case, expected_status,
+):
+    import src.interfaces.cli.main as cli
+    from src.infrastructure.secret_store import factory
+    from src.application.secret_store.registry import FEISHU_BOT_APP_SECRET, require_credential_spec
+
+    monkeypatch.setattr(factory.platform, "system", lambda: "Linux")
+    monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+    monkeypatch.setenv("OM_SECRET_BACKEND", "auto")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "fixture-app")
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "fixture-user")
+    monkeypatch.delenv("OM_FEISHU_BOT_APP_SECRET", raising=False)
+    if case == "unavailable_missing_app_id":
+        monkeypatch.delenv("OM_FEISHU_BOT_APP_ID")
+    if case == "unavailable_with_legacy_value":
+        monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "ignored-fixture-secret")
+    if case in {"missing", "present"}:
+        credentials = tmp_path / "credentials"
+        credentials.mkdir()
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(credentials))
+        if case == "present":
+            name = require_credential_spec(FEISHU_BOT_APP_SECRET).systemd_credential_id
+            (credentials / name).write_text("fixture-secret")
+    cfg = _public_cfg_with_futu("portfolio.runtime.json")
+    cfg["notifications"] = {"provider": "feishu_app"}
+    cfg_path = _write_healthcheck_config(tmp_path, cfg=cfg)
+    _patch_healthcheck_dependencies(monkeypatch)
+    rc = cli.main(["healthcheck", "--config-path", str(cfg_path)])
+    result = json.loads(capsys.readouterr().out)
+    data = result["data"]
+    check = next(c for c in data["checks"] if c["name"] == "notification_credentials")
+    assert check["status"] == expected_status
+    assert rc == (0 if case == "present" else 2)
+    assert data["summary"]["ok"] is (case == "present")
+    if case.startswith("unavailable"):
+        assert "could not be verified" in check["message"]
+        assert check["value"]["credential_context_available"] is False
+        inbound = next(c for c in data["checks"] if c["name"] == "feishu_inbound")
+        assert "unverified" in inbound["message"]
+        channel = next(c for c in data["checks"] if c["name"] == "channel_health")
+        assert "unverified" in channel["message"]
+        assert channel["status"] == "warn"
+    if case == "unavailable_missing_app_id":
+        assert "OM_FEISHU_BOT_APP_ID" in check["message"]
+        assert data["summary"]["critical_count"] > 0
+    if expected_status == "skipped":
+        assert data["summary"]["skipped_count"] == 1
+        assert data["summary"]["reason_code"] == "SECRET_BACKEND_UNAVAILABLE"
+    assert "fixture-secret" not in json.dumps(result)

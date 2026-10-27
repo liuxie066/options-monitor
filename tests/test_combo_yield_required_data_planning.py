@@ -161,3 +161,24 @@ def test_strategy_expiration_plan_is_not_truncated_by_legacy_limit(monkeypatch, 
     put_plan = _side(plan, "put")
     assert put_plan.explicit_expirations == ["2026-06-19", "2026-07-17", "2026-08-21"]
     assert plan.merged_specs[0].limit_expirations == 0
+
+
+def test_combo_empty_put_opening_keeps_healthy_call_and_exact_put_holding(monkeypatch, tmp_path):
+    from src.application.required_data_plan_identity import build_required_data_expected_fetch_contract
+
+    _stub(monkeypatch, ["2026-06-19"])
+    plan = _plan(tmp_path, sell_put_cfg={
+        "enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60,
+        "min_strike": 120, "max_strike": 130,
+    }, position_requirements=[{
+        "planning_status": "ready", "option_type": "put", "expiration": "2026-06-19", "strike": 90,
+    }])
+    build_required_data_expected_fetch_contract(
+        symbol="NVDA", fetch_plan=plan.to_debug_dict(), source="futu", host="127.0.0.1", port=11111,
+    )
+    assert plan.projection_outcome == "success_rows"
+    assert _side(plan, "put").strike_window.min_strike == 90
+    assert _side(plan, "put").strike_window.max_strike == 90
+    assert _side(plan, "put").required_exact_strikes_by_expiration == {"2026-06-19": [90.0]}
+    assert _side(plan, "call").strike_window.base_min_strike == 100
+    assert plan.merged_specs[0].option_types == ("put", "call")

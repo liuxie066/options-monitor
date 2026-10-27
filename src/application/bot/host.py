@@ -293,6 +293,7 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
                            allow_initial_clarification=("option_candidates" in manifest.allowed_tools and bool(
                                _OPTION_CLARIFICATION.search(str(contract.input.get("user_message") or ""))) and not
                                _EVIDENCE_QUESTION.search(str(contract.input.get("user_message") or ""))),
+                           failed_batch_limit=manifest.limits["max_consecutive_failed_tool_batches"],
                            reserve_seconds=manifest.limits["final_answer_reserve_seconds"])
         check_run(deadline, cancelled)
         if memory_failed:

@@ -54,7 +54,9 @@ def position_lots_reads_face_b(conn: sqlite3.Connection) -> bool:
     return set(DERIVED_COLUMN_NAMES) <= present
 
 
-def position_lot_row_to_record(row: Any) -> dict[str, Any]:
+def position_lot_row_to_record(
+    row: Any, *, fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     # No column heal. ``comparator-spec.md`` §2 rules that both sides of the
     # parity comparison are normalized to one convention and that the columns are
     # compared on their own face, so re-injecting ``expiration``/``strike``/
@@ -63,9 +65,10 @@ def position_lot_row_to_record(row: Any) -> dict[str, Any]:
     # exact dict comparison (``:153``) then reported ``field_mismatch`` for every
     # option row while none of the slice's completion legs could see it. The
     # columns still travel on face B (``lot_parity_probe`` reads them raw).
-    fields = json.loads(str(row["fields_json"]) or "{}")
-    if not isinstance(fields, dict):
-        fields = {}
+    if fields is None:
+        fields = json.loads(str(row["fields_json"]) or "{}")
+        if not isinstance(fields, dict):
+            fields = {}
     # ``or ""`` rather than a bare ``str()``: a NULL record_id would otherwise
     # become the string "None", a fabricated identity that differs from the ""
     # the read-only evidence surface emits for the same row.

@@ -13,6 +13,29 @@
 | `RT-OM-003` | `src/application/quality/runtime_checks.py::build_runtime_checks` | `tests/quality/test_om_quality_service.py` | 读取现有 timer/run receipt |
 | `RT-OM-004` | `src/application/quality/position_checks.py::build_opend_runtime_check` | `tests/quality/test_om_quality_service.py`、`tests/quality/test_om_quality_checks.py` | 要求 REAL、显式账户、`refresh_cache=True`、snapshot complete |
 
+OpenD 持仓质量适配器使用现有 `get_trading_days_with_receipt`：日历必须有成功、
+完整覆盖和完整单页回执，行必须为字典且日期、交易时段可识别。缺失封包、
+坏日期或未知时段使本次快照不完整，`OM-POS-001/002` 为 unavailable，
+`RT-OM-004` 为 unknown，不生成可信权威复查期限；下次普通 `--no-deep` 刷新仍会重查。
+完整回执的空列表、有效日期的 `NON_TRADING` 行继续表示合法零交易日，沿用既有
+排期；有效盘中日历仍每十五分钟复查。来源时间门禁不变，不把可复用期限当作新鲜来源时间。
+确定性回归见 `tests/quality/test_opend_position_adapter.py` 与
+`tests/quality/test_quality_calendar_source.py`，后者经过公开 CLI handler、真实 service、
+适配器、gateway 回执及临时质量产物，只有外部 I/O 和时钟为隔离夹具。
+
+`RT-OM-002` 复用 `trades/listener_status.py` 的已知非工作状态
+`blocked/error/reconnecting/stopped`，并保留质检既有的 `failed` 兼容。
+心跳在正常时间窗内但状态为上述值时，报告 `warn/LISTENER_NOT_WORKING`；
+`listening/starting/once` 保持正常。心跳缺失仍为 unknown，延迟与过期仍按
+原有时间宽限判定；未知状态和未来时间戳政策不在本次修复范围内。
+告警 watchdog 只共享四个状态词汇，保留自身时间窗及发送规则。
+
+只有存在布尔 `enabled=false` 且没有 `config_error` 的接入运行证据才支持
+`LISTENER_NOT_APPLICABLE`。运行状态读取失败、缺失或错误标记产生
+`unknown/LISTENER_RUNTIME_UNAVAILABLE`，已知失败市场保留在 scope 中；另一市场
+明确禁用或 listener 心跳正常不会消除该未知项。service 传递现有运行读取错误，
+不为失败市场构造虚假 runtime 行，也不改变其他运行检查。
+
 ## 数据检查
 
 | ID | 实现入口 | 确定性回归证据 | `blocked_consumers` |
@@ -28,6 +51,14 @@
 | `OM-LCY-002` | 同上 | external adjustment 与 legacy gap 分离回归 | 受影响的 `lifecycle`、`close_advice` |
 | `OM-LCY-003` | 同上 | legacy history 独立 dataset 回归 | 受影响历史报告 |
 
+`OM-POS-002` 对同一 broker code、当前经济条款及方向一致的非零持仓行
+按合计数量定位条款漂移；拆行与合行的即时阻断结论一致，仍先于生命周期覆盖判定。
+零数量行继续忽略；同 code 的无效非零行、混合方向或不同经济条款不参与漂移推断，
+不同 code 仍须满足原有总量和双向唯一性约束。来源条款冲突继续返回不可用，
+普通数量差异仍沿用五分钟收敛窗口与日终严格检查。
+离线回归见 `tests/quality/test_om_quality_split_contract_terms.py`，覆盖真实
+adapter、数据集与三个消费者门禁；不以合成输入证明真实 provider 的拆行频率。
+
 质检读取的私有 `runtime_status.trade_intake` 保留不读取历史 audit 的原有 reconciliation 预览，
 用于运行状态展示。每个分源 `summary.audit_reconciliation`（显式单源路径在顶层
 `summary`）是使用该 source audit 路径的只读预览；`OM-INT-003` 只用这份
@@ -35,6 +66,22 @@
 检查为 `unknown`，不以无 audit 的数值判 `fail`，也不把未知当零。两次预览
 不是同一个原子快照；坏 JSONL 审计行仍按现有共同解析器跳过，不能把
 `available` 解读为审计文件完整性证明。
+
+启用来源的 `summary.state_counts_complete` 明确为 `false` 时，`OM-INT-001/002`
+返回 `unknown` / `INTAKE_STATE_UNAVAILABLE`，其状态计数、派生计数和年龄证据为
+未知值，不把私有诊断中的部分计数或零值当作已核验事实，也不再通过年龄回读补成成功。
+现有聚合据此将数据集标为 `unavailable`；首次启动缺状态文件仍是合法接入行为，
+但尚不能证明数据质量。停用来源维持不适用，未携带该标记的旧输入维持原契约。
+`OM-INT-003` 的独立审计对账口径、delegated 结果和检查结论保持不变。
+
+接入运行证据本身缺失、`enabled` 非布尔或带有 `config_error` 时，
+`OM-INT-001/002/003` 均返回 `unknown/TRADE_INTAKE_RUNTIME_UNAVAILABLE`。
+该配置市场的账户数据集为 `unavailable`，`required_evidence_complete=false`、
+`usable_for=[]`；整体 runtime 已为 unknown 也不能替代这些逐数据集结论。
+明确禁用继续按不适用通过；正常启用时仍使用原有状态和审计证据，完整零结果
+可以可信，缺少终态审计证据仍是未知。两检查 owner 复用
+`src/application/quality/intake_checks.py::trade_intake_runtime_evidence_available`，
+不修改 producer 的错误表示或新增配置状态。
 
 ## 发布、读取和门禁边界
 
@@ -46,6 +93,18 @@
 | CLI | `src/interfaces/quality/cli.py` | 复用同一 service/artifact |
 | Agent tool | `src/application/agent_tools/quality.py` | agent contract/plugin smoke 全量回归 |
 | 本地门禁 | `src/application/quality/gate.py` | onboarding 前无效；onboarding 后按 account/market/consumer 阻断；目标持仓数据集缺失/重复和 stale 均 fail closed |
+
+`last_probe_ledger_revision` 只确认普通质量状态的成功发布，使用普通刷新开始、
+取数之前捕获的 revision；刷新期间账本继续变化时，后续 probe 仍可触发复查。
+integrity 只发布独立 artifact，不推进普通游标；差异、生命周期和交易日历的
+控制状态仍按原顺序在 artifact 校验前保存。普通 artifact 发布成功后才写游标，
+`untrusted/unavailable` 等合法结论同样可以确认发布进度。
+
+artifact 和控制文件不是一个事务。游标写入前失败时，新 artifact 可能已存在而
+游标仍旧，后续允许重试；若存储已完成替换后才抛出异常，不能仅凭异常断言回滚，
+必须回读确认结果。service 保留异常，不自动隐藏重试。全局游标、单市场刷新保留
+其他市场结果和既有持仓快照复用规则不变；开始时采样不等于全程原子一致快照。
+回归由 `tests/quality/test_quality_publication_cursor.py` 覆盖。
 
 ## Quality refresh 账本读取效率合同
 

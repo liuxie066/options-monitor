@@ -177,6 +177,7 @@ def test_direct_pipeline_uses_one_fx_observation_and_rejects_old_secured_total(
     assert option["exchange_rates"] is observation
     assert option["cash_secured_total_cny"] is None
     assert usd_per_cny == pytest.approx(1 / 7.2)
+    assert "capacity_fx_evidence" not in portfolio
 
 
 def test_fetch_opend_exchange_rate_observation_uses_market_fetch(
@@ -271,12 +272,18 @@ def test_prepared_option_context_disables_live_ledger_and_fx_fallbacks(
     [({"USD": 1000}, 7200.0), ({"CNY": 1000}, 1000.0)],
 )
 @pytest.mark.parametrize("reopened", [False, True])
-def test_prepared_fx_rechecks_capacity_at_scan_time(monkeypatch, tmp_path: Path, secured, expected_cny, reopened) -> None:
+@pytest.mark.parametrize("marker", ["absent", None, "ready"])
+def test_prepared_fx_rechecks_capacity_at_scan_time(monkeypatch, tmp_path: Path, secured, expected_cny, reopened, marker) -> None:
     from src.application import pipeline_context as ctx
     from src.infrastructure import exchange_rates as fx
 
     now = datetime.fromisoformat("2026-10-08T01:43:00+00:00" if reopened else "2026-10-02T01:43:00+00:00")
     monkeypatch.setattr(fx, "_utc_now", lambda: now)
+    class Clock:
+        @staticmethod
+        def now(_tz):
+            return now
+    monkeypatch.setattr(ctx, "datetime", Clock)
     snapshot = {
         "schema_version": 2,
         "pairs": {
@@ -291,6 +298,8 @@ def test_prepared_fx_rechecks_capacity_at_scan_time(monkeypatch, tmp_path: Path,
     }
     old_fx = {**snapshot, "rates": {"USDCNY": 7.2, "HKDCNY": 0.92}}
     portfolio = {"fx_snapshot_sha256": "f" * 64}
+    if marker != "absent":
+        portfolio["_sell_put_fx_status"] = marker
     option = {
         "prepared_authority": {"fx_status": "ready", "run_fx_snapshot_sha256": "f" * 64},
         "exchange_rates": old_fx,
@@ -324,3 +333,84 @@ def test_prepared_fx_rechecks_capacity_at_scan_time(monkeypatch, tmp_path: Path,
         assert current_option["cash_secured_total_cny"] == expected_cny
         assert current_portfolio["exchange_rate_status"] == "ready"
         assert (usd, hkd) == (1 / 7.2, 0.92)
+
+    from domain.domain.decision_state_fingerprint import canonical_sha256
+    evidence = current_portfolio["capacity_fx_evidence"]
+    assert evidence["schema_version"] == 1
+    assert evidence["evaluated_at_utc"] == now.isoformat()
+    assert evidence["observation"] == current_option["exchange_rates"]
+    assert evidence["observation"]["evaluated_at_utc"] == evidence["evaluated_at_utc"]
+    assert evidence["observation_sha256"] == canonical_sha256(evidence["observation"])
+    assert evidence["run_fx_snapshot_sha256"] == "f" * 64
+    assert (evidence["usd_per_cny"], evidence["cny_per_hkd"]) == (usd, hkd)
+    assert evidence["observation_status"] == ("unavailable_stale" if reopened else "ready")
+    assert evidence["marker_present"] == (reopened or marker != "absent")
+    if evidence["marker_present"]:
+        assert evidence["marker_value"] == ("unavailable_stale" if reopened else marker)
+    else:
+        assert "marker_value" not in evidence
+
+
+@pytest.mark.parametrize("portfolio_hash,option_hash", [("e" * 64, "f" * 64), ("f" * 64, "e" * 64)])
+def test_capacity_fx_evidence_cannot_bind_conflicting_prepared_generation(monkeypatch, tmp_path, portfolio_hash, option_hash):
+    from src.application import pipeline_context as ctx
+
+    monkeypatch.setattr(ctx, "load_prepared_portfolio_context", lambda **_kw: {"fx_snapshot_sha256": portfolio_hash})
+    monkeypatch.setattr(ctx, "load_prepared_option_positions_context", lambda **_kw: {
+        "prepared_authority": {"run_fx_snapshot_sha256": option_hash}, "exchange_rates": {},
+    })
+    monkeypatch.setattr(ctx, "adapt_option_positions_context", lambda value: value)
+    monkeypatch.setattr(ctx, "_persist_source_snapshot", lambda *_args: None)
+    monkeypatch.setattr(ctx, "load_run_fx_snapshot", lambda **_kw: ({"schema_version": 2, "pairs": {}}, "f" * 64))
+    monkeypatch.setattr(ctx, "get_exchange_rates_or_fetch_latest", lambda **_kw: pytest.fail("no live fallback"))
+    with pytest.raises(ctx.PreparedOptionPositionsContextError, match="FX snapshot mismatch"):
+        _build_context(
+            tmp_path,
+            prepared_portfolio_context_manifest=tmp_path / "portfolio.json",
+            prepared_option_positions_context_manifest=tmp_path / "options.json",
+            prepared_option_positions_context_run_id="run-1",
+        )
+
+
+def test_unbound_prepared_context_cannot_reuse_old_capacity_fx_evidence(monkeypatch, tmp_path):
+    from src.application import pipeline_context as ctx
+
+    monkeypatch.setattr(ctx, "load_prepared_portfolio_context", lambda **_kw: {"capacity_fx_evidence": {"old": True}})
+    monkeypatch.setattr(ctx, "load_prepared_option_positions_context", lambda **_kw: {"exchange_rates": {}})
+    monkeypatch.setattr(ctx, "adapt_option_positions_context", lambda value: value)
+    monkeypatch.setattr(ctx, "_persist_source_snapshot", lambda *_args: None)
+    monkeypatch.setattr(ctx, "load_run_fx_snapshot", lambda **_kw: pytest.fail("unbound run"))
+    monkeypatch.setattr(ctx, "get_exchange_rates_or_fetch_latest", lambda **_kw: pytest.fail("no live fallback"))
+    portfolio, _option, usd, hkd = _build_context(
+        tmp_path,
+        prepared_portfolio_context_manifest=tmp_path / "portfolio.json",
+        prepared_option_positions_context_manifest=tmp_path / "options.json",
+    )
+    assert "capacity_fx_evidence" not in portfolio
+    assert (usd, hkd) == (None, None)
+
+
+@pytest.mark.parametrize("status", ["ready", "unavailable", "unavailable_stale"])
+@pytest.mark.parametrize("marker", [..., None, "ready", "unavailable_stale"])
+def test_apply_sell_put_fx_status_preserves_original_marker_semantics(status, marker):
+    from src.application.pipeline_context import apply_sell_put_fx_status
+
+    original = {"cash": 0}
+    if marker is not ...:
+        original["_sell_put_fx_status"] = marker
+    before = dict(original)
+    result = apply_sell_put_fx_status(original, status)
+    assert original == before
+    if status == "unavailable_stale":
+        assert result is not original
+        assert result == {**before, "_sell_put_fx_status": status}
+    else:
+        assert result is original
+        assert result == before
+
+
+@pytest.mark.parametrize("status", ["ready", "unavailable", "unavailable_stale"])
+def test_apply_sell_put_fx_status_preserves_absent_context(status):
+    from src.application.pipeline_context import apply_sell_put_fx_status
+
+    assert apply_sell_put_fx_status(None, status) is None

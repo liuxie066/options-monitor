@@ -7,7 +7,7 @@ from src.application.bot import tools as bot_tools
 from src.application.bot.host import run_contract
 from src.application.bot.scene import build_scene_manifest, load_general_scene
 from src.application.tool_execution import execute_tool
-from tests.bot_pi_test_support import _TEST_MODEL
+from tests.bot_test_support import _TEST_MODEL
 from tests.test_bot_phase1 import _contract
 
 

@@ -277,6 +277,7 @@ def test_each_snapshot_batch_and_fallback_preserves_its_receipt_in_cache(tmp_pat
 
     monkeypatch.setattr(snapshots, 'datetime', Clock)
     actual_receipts = {}
+    attempt_receipts = []
     attempts = {}
     calls = []
 
@@ -286,6 +287,7 @@ def test_each_snapshot_batch_and_fallback_preserves_its_receipt_in_cache(tmp_pat
         code = codes[0]
         requested_at = clock[0].isoformat()
         clock[0] += timedelta(seconds=20)
+        attempt_receipts.append((requested_at, clock[0].isoformat()))
         attempts[code] = attempts.get(code, 0) + 1
         if fallback_mode and code in {'B', 'C'} and attempts[code] == 1:
             if fallback_mode == 'error':
@@ -307,7 +309,10 @@ def test_each_snapshot_batch_and_fallback_preserves_its_receipt_in_cache(tmp_pat
     assert first.fallback_filled == (2 if fallback_mode else 0)
     assert calls == [['A'], ['B'], ['C']] + ([['B'], ['C']] if fallback_mode else [])
     assert {code: value[1:] for code, value in cache.items()} == expected
-    assert first.received_at_utc == old_time
+    all_receipts = [(old_time, old_time), *attempt_receipts]
+    assert first.requested_at_utc == min(receipt[0] for receipt in all_receipts)
+    assert first.received_at_utc == max(receipt[1] for receipt in all_receipts)
+    assert first.snap_map['CACHED']['snapshot_received_at_utc'] == old_time
     frozen_cache = dict(cache)
 
     clock[0] += timedelta(seconds=100)
@@ -316,11 +321,17 @@ def test_each_snapshot_batch_and_fallback_preserves_its_receipt_in_cache(tmp_pat
     assert second.opend_call_count == 1 and calls[-1] == ['D']
     assert second.code_receipts == {**expected, 'D': actual_receipts['D']}
     assert {code: cache[code] for code in frozen_cache} == frozen_cache
+    all_receipts = [(old_time, old_time), *attempt_receipts]
+    assert second.requested_at_utc == min(receipt[0] for receipt in all_receipts)
+    assert second.received_at_utc == max(receipt[1] for receipt in all_receipts)
 
     clock[0] += timedelta(seconds=100)
     third = fetch_option_snapshots(option_codes=['CACHED', 'A', 'B', 'C', 'D'], **kwargs)
     assert third.opend_call_count == 0
     assert third.code_receipts == second.code_receipts
+    assert third.requested_at_utc == second.requested_at_utc
+    assert third.received_at_utc == second.received_at_utc
+    assert third.snap_map['CACHED']['snapshot_received_at_utc'] == old_time
 
 
 @pytest.mark.parametrize('stage', ['expiration', 'chain', 'snapshot'])
@@ -401,10 +412,13 @@ def test_shared_gate_deadline_and_cancellation_do_not_change_identity(tmp_path):
 
 def test_rv_reuses_facts_and_expands_history_for_expiry_union(tmp_path):
     from tests.test_short_vol_metrics import _Gateway, _sessions_around, _prices
-    past, future = _sessions_around(DAY, before=500, after=280)
+    # Keep the long expiry inside OpenD's supported calendar year.
+    trading_day = date(2026, 1, 5)
+    past, future = _sessions_around(trading_day, before=500, after=280)
+    assert future[250].year == trading_day.year
     gateway = _Gateway(calendar=past+future, prices=_prices(past))
     cache = {}
-    args = dict(gateway=gateway, underlier_code='US.NVDA', trading_day=DAY, market='US',
+    args = dict(gateway=gateway, underlier_code='US.NVDA', trading_day=trading_day, market='US',
                 base_dir=tmp_path, facts_cache=cache)
     short_exp = future[19].isoformat()
     long_exp = future[250].isoformat()
@@ -444,6 +458,33 @@ def test_query_unassessable_underlier_stops_before_chain_history_and_quotes(tmp_
     assert result['meta']['reason_code'] == reason
     assert result['meta']['expiration_enumeration_complete'] is False
     assert result['meta']['query_scope_validated'] is False
+
+
+@pytest.mark.parametrize('facade', [snapshots.get_underlier_spot, snapshots.get_underlier_observation])
+def test_underlier_facades_forward_controls_and_cancel_during_connection(tmp_path, monkeypatch, facade):
+    stop = threading.Event()
+    cancelled = stop.is_set
+    deadline = time.monotonic() + 30
+    calls = []
+
+    class Quote:
+        def get_global_state(self):
+            pytest.fail('cancelled facade must not query readiness')
+
+        def close(self):
+            calls.append('close')
+
+    def build_context(**kwargs):
+        assert kwargs['deadline'] == deadline
+        assert kwargs['cancelled'] is cancelled
+        calls.append('connect')
+        stop.set()
+        return Quote()
+
+    monkeypatch.setattr(retry, 'build_futu_quote_context', build_context)
+    with pytest.raises(TimeoutError, match='cancelled'):
+        facade('NVDA', host='offline.invalid', base_dir=tmp_path, deadline=deadline, cancelled=cancelled)
+    assert calls == ['connect', 'close']
 
 
 def test_quote_constructor_cancel_after_handshake_prevents_global_state_and_closes_once(monkeypatch):

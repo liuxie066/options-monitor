@@ -66,6 +66,7 @@ from src.application.required_data_planning import (
 from src.application.required_data_plan_identity import (
     build_required_data_fetch_binding,
     build_required_data_expected_fetch_contract,
+    required_data_planned_empty_reason,
 )
 from src.application.required_data_prefetch_planning import (
     _has_any_market_demand,
@@ -437,6 +438,8 @@ def _build_prefetch_fetch_plan(
                 projection_outcome = "success_empty"
             elif discovery_outcome in {"provider_error", "parse_error"}:
                 projection_outcome = discovery_outcome
+            elif source_projection_outcomes == {"success_empty"}:
+                projection_outcome = "success_empty"
             elif merged_side_plans and not projected_expirations:
                 projection_outcome = "projection_empty"
             else:
@@ -802,6 +805,9 @@ def _fetch_symbol_for_required_data_request(
         expiration_max_wait_sec=request.expiration_max_wait_sec,
         expiration_window_sec=request.expiration_window_sec,
         expiration_max_calls=request.expiration_max_calls,
+        history_kline_max_wait_sec=request.history_kline_max_wait_sec,
+        history_kline_window_sec=request.history_kline_window_sec,
+        history_kline_max_calls=request.history_kline_max_calls,
         include_realized_volatility=request.include_realized_volatility,
     )
 
@@ -956,13 +962,11 @@ def _publish_planned_success_empty(
     fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
     source, _decision = resolve_symbol_fetch_source(fetch_cfg)
     discovery = fetch_plan.expiration_discovery
+    empty_reason = required_data_planned_empty_reason(fetch_plan.to_debug_dict())
     if (
-        fetch_plan.projection_outcome != "success_empty"
+        empty_reason not in {"no_expirations", "no_feasible_strikes"}
         or discovery is None
-        or discovery.outcome != "success_empty"
-        or discovery.reason_code != "no_expirations"
         or not str(discovery.observed_at_utc or "").strip()
-        or discovery.expirations
     ):
         raise RuntimeError(
             "success-empty scheduled plan lacks valid discovery evidence"
@@ -982,15 +986,15 @@ def _publish_planned_success_empty(
             "port": port,
             "status": "ok",
             "source_outcome": "success_empty",
-            "reason_code": "no_expirations",
+            "reason_code": empty_reason,
             "error_code": None,
             "error": None,
             "expiration_statuses": {},
             "errors": [],
             "diagnostics": [
                 {
-                    "diagnostic_code": "NO_EXPIRATIONS",
-                    "message": "no_expirations",
+                    "diagnostic_code": empty_reason.upper(),
+                    "message": empty_reason,
                 }
             ],
             "expiration_opend_calls": 0,
@@ -1057,7 +1061,7 @@ def _publish_planned_success_empty(
         limit_exp=0,
         status="fetched",
         ok=True,
-        message="success_empty:no_expirations",
+        message=f"success_empty:{empty_reason}",
         returncode=0,
     )
     payload["payload"] = payload0

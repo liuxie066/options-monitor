@@ -67,13 +67,6 @@ def _read_ordinary_attribution_broker_evidence(*, config: Mapping[str, Any], acc
 def _attribution_capacity_worker(connection: Any, config: dict[str, Any], account: str, runtime_root: Path,
                                  ordinary_history_start_ms: int | None = None) -> None:
     try:
-        ordinary = None
-        if ordinary_history_start_ms is not None:
-            try:
-                ordinary = _read_ordinary_attribution_broker_evidence(config=config, account=account,
-                    runtime_root=runtime_root, start_ms=ordinary_history_start_ms)
-            except Exception as exc:
-                ordinary = {"error": type(exc).__name__}
         cache_path = runtime_root / "output_shared" / "state" / "rate_cache.json"
         try:
             fx = project_exchange_rate_snapshot(current_exchange_rate_snapshot(cache_path=cache_path, write_cache=False), purpose="capacity")
@@ -81,15 +74,25 @@ def _attribution_capacity_worker(connection: Any, config: dict[str, Any], accoun
             raise
         except Exception:
             fx = None
-        portfolio = load_account_portfolio_context(
+        portfolio_args = dict(
             runtime_config=config, account=account, market="富途", portfolio_source="futu",
             state_dir=runtime_root / "output_accounts" / account / "state", log=lambda _: None,
             fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
             include_options=True, write_cache=False, exchange_rate_observation=fx,
             exchange_rate_cache_path=cache_path,
-            **({"load_json_fn": lambda _: None} if ordinary and not ordinary.get("error") else {}),
         )
-        connection.send({"portfolio": portfolio, **({"ordinary_evidence": ordinary} if ordinary else {})})
+        portfolio = load_account_portfolio_context(**portfolio_args)
+        connection.send({"portfolio": portfolio})
+        if ordinary_history_start_ms is None:
+            return
+        try:
+            ordinary = _read_ordinary_attribution_broker_evidence(config=config, account=account,
+                runtime_root=runtime_root, start_ms=ordinary_history_start_ms)
+        except Exception as exc:
+            ordinary = {"error": type(exc).__name__}
+        if ordinary and not ordinary.get("error"):
+            portfolio = load_account_portfolio_context(**portfolio_args, load_json_fn=lambda _: None)
+        connection.send({"portfolio": portfolio, "ordinary_evidence": ordinary})
     except Exception as exc:
         connection.send({"error": type(exc).__name__})
     finally:
@@ -111,6 +114,17 @@ def observe_trade_attribution_capacity(*, config: dict[str, Any], account: str, 
         args += (ordinary_history_start_ms,)
     process = context.Process(target=_attribution_capacity_worker, args=args, daemon=True)
     deadline = time.monotonic() + 10
+    base_result = None
+
+    def finish(result: dict[str, Any]) -> dict[str, Any]:
+        if stop_event is not None and stop_event.is_set():
+            return {"error": "cancelled"}
+        return result
+
+    def unavailable(error: Any) -> dict[str, Any]:
+        return finish({**base_result, "ordinary_evidence": {"error": error}}
+                      if base_result is not None else {"error": error})
+
     try:
         process.start()
         sender.close()
@@ -119,14 +133,28 @@ def observe_trade_attribution_capacity(*, config: dict[str, Any], account: str, 
                 return {"error": "cancelled"}
             if receiver.poll(min(0.1, max(0, deadline - time.monotonic()))):
                 result = receiver.recv()
+                if stop_event is not None and stop_event.is_set():
+                    return {"error": "cancelled"}
                 if time.monotonic() >= deadline:
-                    return {"error": "provider_timeout"}
-                return result
+                    return unavailable("provider_timeout")
+                if not isinstance(result, Mapping):
+                    return unavailable("provider_unavailable")
+                if "error" in result:
+                    return unavailable(result["error"])
+                if "portfolio" not in result:
+                    return unavailable("provider_unavailable")
+                if ordinary_history_start_ms is None or "ordinary_evidence" in result:
+                    return finish(dict(result))
+                if base_result is not None:
+                    return unavailable("provider_unavailable")
+                base_result = dict(result)
             if not process.is_alive():
-                return {"error": "provider_worker_exited"}
-        return {"error": "provider_timeout"}
+                if receiver.poll(0):
+                    continue
+                return unavailable("provider_worker_exited")
+        return unavailable("provider_timeout")
     except (EOFError, OSError):
-        return {"error": "provider_unavailable"}
+        return unavailable("provider_unavailable")
     finally:
         sender.close()
         receiver.close()

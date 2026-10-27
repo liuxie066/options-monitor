@@ -1004,3 +1004,312 @@ def test_snapshot_timing_preserves_entry_exception_semantics(monkeypatch, tmp_pa
     assert events[-1].kwargs["data"]["error_type"] == error_type.__name__
     assert (events[-1].kwargs["data"].get("account") == "lx") == (phase == "snapshot_contract")
     assert "private snapshot detail" not in str(log.safe_event.call_args_list)
+
+
+def _sealed_fx_replay_setup(monkeypatch, tmp_path, *, shared=False):
+    from types import SimpleNamespace
+    from src.application import current_fx_run
+    from src.application import prepared_option_positions_context as mod
+    from src.infrastructure import exchange_rates
+
+    env_file = tmp_path / "isolated.env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("OM_ENV_FILE", str(env_file))
+    monkeypatch.setenv("OM_RUNTIME_ROOT", "")
+    monkeypatch.setenv("OM_DATA_CONFIG", "")
+    common_data, config_path = _empty_config_files(tmp_path)
+    configs = {account: {"portfolio": {"account": account, "broker": "富途"},
+                         "runtime": {}, "symbols": []} for account in ("lx", "sy")}
+    run_id = "sealed-fx-replay"
+    authorities = {}
+    db_paths = {}
+    for account, config in configs.items():
+        data_path = common_data if shared else tmp_path / account / "portfolio.runtime.json"
+        data_path.parent.mkdir(parents=True, exist_ok=True)
+        data_path.write_text("{}\n", encoding="utf-8")
+        config["portfolio"]["data_config"] = str(data_path)
+        authorities[account] = publish_account_run_config(
+            base=tmp_path, run_id=run_id, account=account, config=config,
+        )
+        db_paths[account] = data_path.parent / "output_shared" / "state" / "option_positions.sqlite3"
+    clock = SimpleNamespace(now=NOW)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock.now if tz is not None else clock.now.replace(tzinfo=None)
+
+    monkeypatch.setattr(mod, "datetime", Clock)
+    monkeypatch.setattr(exchange_rates, "_utc_now", lambda: clock.now)
+    snapshot = {
+        "schema_version": 2,
+        "pairs": {
+            pair: {"rate": rate, "source": "tencent_quote",
+                   "quote_at_utc": NOW.isoformat(), "observed_at_utc": NOW.isoformat()}
+            for pair, rate in (("USDCNY", 7.2), ("HKDCNY", 0.92))
+        },
+    }
+    monkeypatch.setattr(current_fx_run, "current_exchange_rate_snapshot", lambda **_kwargs: snapshot)
+    _, digest = current_fx_run.seal_run_fx_snapshot(base=tmp_path, run_id=run_id)
+
+    def forbidden(**_kwargs):
+        pytest.fail("sealed replay must not fetch current FX")
+
+    monkeypatch.setattr(current_fx_run, "current_exchange_rate_snapshot", forbidden)
+    monkeypatch.setattr(mod, "get_exchange_rates_or_fetch_latest", forbidden)
+    return dict(run_id=run_id, config_path=config_path, configs=configs,
+                authorities=authorities, fx_snapshot_sha256=digest), db_paths, clock
+
+
+def _prepared_bytes(batch):
+    return {
+        account: (Path(manifest["manifest_path"]).read_bytes(),
+                  (Path(manifest["manifest_path"]).parent / "option_positions_context.json").read_bytes())
+        for account, manifest in batch.manifests.items()
+    }
+
+
+def _fx_counts(batch):
+    return (batch.fx_evidence_status, batch.fx_evidence_ledger_count,
+            batch.fx_evidence_inserted_count, batch.fx_evidence_idempotent_count,
+            batch.fx_evidence_error_count)
+
+
+@pytest.mark.parametrize("first_import", ["success", "before_commit", "after_commit"])
+def test_sealed_ready_replay_repairs_original_fx_without_rebuilding_contexts(
+    monkeypatch, tmp_path, first_import,
+):
+    from domain.domain.performance.cash_conversion import select_cash_fx_rate
+    from src.application import prepared_option_positions_context as mod
+    from src.application.ledger import read_model, store_resolution
+
+    kwargs, paths, clock = _sealed_fx_replay_setup(monkeypatch, tmp_path)
+    real_import = PerformanceEvidenceSQLiteRepository.import_envelope
+    imports = []
+    failed = False
+
+    def import_once(repo, *args, **kw):
+        nonlocal failed
+        imports.append(repo.db_path)
+        if repo.db_path == paths["sy"] and not failed and first_import != "success":
+            failed = True
+            if first_import == "after_commit":
+                real_import(repo, *args, **kw)
+            raise OSError("synthetic first import failure")
+        return real_import(repo, *args, **kw)
+
+    monkeypatch.setattr(PerformanceEvidenceSQLiteRepository, "import_envelope", import_once)
+    first = _prepare(tmp_path, **kwargs, persist_fx_evidence=True)
+    assert first.unavailable_by_account == {}
+    assert _fx_counts(first) == {
+        "success": ("persisted", 2, 4, 0, 0),
+        "before_commit": ("partial", 1, 2, 0, 1),
+        "after_commit": ("partial", 1, 2, 0, 1),
+    }[first_import]
+    frozen = _prepared_bytes(first)
+    before = PerformanceEvidenceSQLiteRepository(paths["sy"]).read_all().fx_rates
+    selection = select_cash_fx_rate(before, base_currency="USD", at_ms=int(NOW.timestamp() * 1000))
+    assert selection.status == ("missing" if first_import == "before_commit" else "selected")
+    for name in ("open_position_ledger_from_data_config", "read_decision_state_rows_many",
+                 "read_current_decision_projection", "decision_state_snapshots_from_rows_many",
+                 "build_wheel_read_model_from_rows", "_publish_ready_context"):
+        monkeypatch.setattr(mod, name, lambda *_args, **_kwargs: pytest.fail("ready replay rebuilt positions"))
+    monkeypatch.setattr(read_model, "load_option_positions_repo",
+                        lambda *_args, **_kwargs: pytest.fail("ready replay bootstrapped positions"))
+    monkeypatch.setattr(store_resolution, "_sqlite_counts",
+                        lambda *_args, **_kwargs: pytest.fail("ready replay inspected position counts"))
+    clock.now = NOW + timedelta(days=3)
+    snapshot, _ = mod.load_run_fx_snapshot(base=tmp_path, run_id=kwargs["run_id"])
+    assert mod.project_exchange_rate_snapshot(snapshot, purpose="capacity")["rates"] == {}
+    repeated = _prepare(tmp_path, **kwargs, persist_fx_evidence=True)
+    missing = first_import == "before_commit"
+    assert _fx_counts(repeated) == (("persisted", 2, 2, 2, 0) if missing else ("idempotent", 2, 0, 4, 0))
+    assert repeated.ledger_read_count == 0 and repeated.fx_observation_count == 1
+    assert repeated.observed_at_utc == first.observed_at_utc
+    assert repeated.manifests == first.manifests
+    assert repeated.position_records_by_account == first.position_records_by_account
+    assert repeated.wheel_read_models_by_account == first.wheel_read_models_by_account
+    assert _prepared_bytes(repeated) == frozen
+    third = _prepare(tmp_path, **kwargs, persist_fx_evidence=True)
+    assert _fx_counts(third) == ("idempotent", 2, 0, 4, 0)
+    assert _prepared_bytes(third) == frozen
+    assert imports == [paths[account] for _ in range(3) for account in ("lx", "sy")]
+    for path in paths.values():
+        facts = PerformanceEvidenceSQLiteRepository(path).read_all().fx_rates
+        assert len(facts) == 2
+        assert {(fact.base_currency, float(fact.rate)) for fact in facts} == {("USD", 7.2), ("HKD", 0.92)}
+        assert {fact.effective_at_ms for fact in facts} == {int(NOW.timestamp() * 1000)}
+        assert {fact.observed_at_ms for fact in facts} == {int(NOW.timestamp() * 1000)}
+        assert all(fact.source_id.startswith("verified_quote:tencent_quote:") for fact in facts)
+        assert select_cash_fx_rate(facts, base_currency="USD", at_ms=int(NOW.timestamp() * 1000)).status == "selected"
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_sealed_replay_combines_ready_and_pending_ledgers_once(monkeypatch, tmp_path, shared):
+    from unittest.mock import Mock
+    from src.application import prepared_option_positions_context as mod
+
+    kwargs, paths, _ = _sealed_fx_replay_setup(monkeypatch, tmp_path, shared=shared)
+    first_kwargs = {**kwargs, "configs": {"lx": kwargs["configs"]["lx"]},
+                    "authorities": {"lx": kwargs["authorities"]["lx"]}}
+    real_import = PerformanceEvidenceSQLiteRepository.import_envelope
+
+    def fail_initial_import(*_args, **_kwargs):
+        raise OSError("synthetic initial reused-ledger failure")
+
+    monkeypatch.setattr(PerformanceEvidenceSQLiteRepository, "import_envelope", fail_initial_import)
+    first = _prepare(tmp_path, **first_kwargs, persist_fx_evidence=True)
+    assert _fx_counts(first) == ("error", 0, 0, 0, 1)
+    frozen = _prepared_bytes(first)
+    reads = Mock(wraps=mod.read_decision_state_rows_many)
+    imports = []
+
+    def record_import(repo, *args, **kw):
+        imports.append(repo.db_path)
+        return real_import(repo, *args, **kw)
+
+    monkeypatch.setattr(mod, "read_decision_state_rows_many", reads)
+    monkeypatch.setattr(PerformanceEvidenceSQLiteRepository, "import_envelope", record_import)
+    batch = _prepare(tmp_path, **kwargs, persist_fx_evidence=True)
+    count = 1 if shared else 2
+    assert _fx_counts(batch) == ("persisted", count, count * 2, 0, 0)
+    assert batch.unavailable_by_account == {}
+    assert batch.ledger_read_count == reads.call_count == 2
+    assert all(call.kwargs["accounts"] == ("sy",) for call in reads.call_args_list)
+    assert len(imports) == count and set(imports) == set(paths.values())
+    assert _prepared_bytes(batch)["lx"] == frozen["lx"]
+
+
+@pytest.mark.parametrize("failure", ["open_one", "open_shared", "path", "bytes", "account", "run", "state_path"])
+def test_sealed_replay_target_failure_preserves_context_and_counts(monkeypatch, tmp_path, failure):
+    from src.application import prepared_option_positions_context as mod
+
+    kwargs, paths, _ = _sealed_fx_replay_setup(monkeypatch, tmp_path, shared=failure == "open_shared")
+    first = _prepare(tmp_path, **kwargs)
+    frozen = _prepared_bytes(first)
+    real_open = mod.open_performance_query_ledger_from_data_config
+    opens = []
+
+    def open_target(**kw):
+        opens.append(kw["data_config"])
+        if failure in {"open_one", "open_shared"} and kw["data_config"].parent == paths["lx"].parents[2]:
+            raise OSError("synthetic opener failure")
+        return real_open(**kw)
+
+    monkeypatch.setattr(mod, "open_performance_query_ledger_from_data_config", open_target)
+    if failure == "path":
+        real_resolve = mod.resolve_position_data_config_path
+
+        def resolve(**kw):
+            if kw.get("cfg", {}).get("portfolio", {}).get("account") == "lx":
+                raise OSError("synthetic path failure")
+            return real_resolve(**kw)
+
+        monkeypatch.setattr(mod, "resolve_position_data_config_path", resolve)
+    elif failure in {"bytes", "account", "run", "state_path"}:
+        authority = kwargs["authorities"]["lx"]
+        changes = {"bytes": {"canonical_bytes": b"{}"}, "account": {"account": "sy"},
+                   "run": {"run_id": "other"}, "state_path": {"state_path": tmp_path / "wrong.json"}}
+        kwargs["authorities"]["lx"] = replace(authority, **changes[failure])
+    batch = _prepare(tmp_path, **kwargs, persist_fx_evidence=True)
+    shared_failure = failure == "open_shared"
+    assert _fx_counts(batch) == (("error", 0, 0, 0, 1) if shared_failure else ("partial", 1, 2, 0, 1))
+    assert batch.unavailable_by_account == {}
+    assert _prepared_bytes(batch) == frozen
+    assert len(opens) == (2 if failure == "open_one" else 1)
+    assert PerformanceEvidenceSQLiteRepository(paths["lx"]).read_all().fx_rates == ()
+    if not shared_failure:
+        assert len(PerformanceEvidenceSQLiteRepository(paths["sy"]).read_all().fx_rates) == 2
+
+
+def test_sealed_replay_uses_retained_config_and_excludes_invalid_context(monkeypatch, tmp_path):
+    from src.application import prepared_option_positions_context as mod
+
+    kwargs, paths, _ = _sealed_fx_replay_setup(monkeypatch, tmp_path)
+    first = _prepare(tmp_path, **kwargs)
+    lx_frozen = _prepared_bytes(first)["lx"]
+    redirected = tmp_path / "foreign" / "portfolio.runtime.json"
+    kwargs["configs"]["lx"]["portfolio"]["data_config"] = str(redirected)
+    sy_manifest = Path(first.manifests["sy"]["manifest_path"])
+    sy_manifest.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(mod, "open_position_ledger_from_data_config",
+                        lambda **_kwargs: pytest.fail("invalid context must not bootstrap"))
+    batch = _prepare(tmp_path, **kwargs, persist_fx_evidence=True)
+    assert _fx_counts(batch) == ("persisted", 1, 2, 0, 0)
+    assert set(batch.unavailable_by_account) == {"sy"}
+    assert _prepared_bytes(first)["lx"] == lx_frozen
+    assert len(PerformanceEvidenceSQLiteRepository(paths["lx"]).read_all().fx_rates) == 2
+    assert PerformanceEvidenceSQLiteRepository(paths["sy"]).read_all().fx_rates == ()
+    assert not redirected.parent.exists()
+
+
+@pytest.mark.parametrize("failure", ["missing", "corrupt", "hash", "run", "replaced"])
+def test_sealed_replay_unavailable_source_never_opens_or_fetches(monkeypatch, tmp_path, failure):
+    from domain.domain.decision_state_fingerprint import canonical_sha256
+    from src.application import current_fx_run
+    from src.application import prepared_option_positions_context as mod
+
+    kwargs, _, _ = _sealed_fx_replay_setup(monkeypatch, tmp_path)
+    first = _prepare(tmp_path, **kwargs)
+    frozen = _prepared_bytes(first)
+    path = tmp_path / "output_runs" / kwargs["run_id"] / "state" / current_fx_run.RUN_FX_NAME
+    if failure == "missing":
+        path.rename(path.with_suffix(".retained"))
+    elif failure == "corrupt":
+        path.write_text("{", encoding="utf-8")
+    else:
+        envelope = json.loads(path.read_bytes())
+        if failure == "replaced":
+            envelope["snapshot"]["pairs"]["USDCNY"]["rate"] = 8.0
+            envelope["snapshot_sha256"] = canonical_sha256(envelope["snapshot"])
+        else:
+            envelope["snapshot_sha256" if failure == "hash" else "run_id"] = "wrong"
+        path.write_text(json.dumps(envelope), encoding="utf-8")
+    for name in ("open_performance_query_ledger_from_data_config", "open_performance_evidence_repository",
+                 "open_position_ledger_from_data_config"):
+        monkeypatch.setattr(mod, name, lambda *_args, **_kwargs: pytest.fail("unverified FX opened a ledger"))
+    batch = _prepare(tmp_path, **kwargs, persist_fx_evidence=True)
+    assert _fx_counts(batch) == ("source_unavailable", 0, 0, 0, 0)
+    assert batch.ledger_read_count == 0 and batch.fx_observation_count == 1
+    assert batch.observed_at_utc == first.observed_at_utc
+    assert _prepared_bytes(batch) == frozen
+
+
+@pytest.mark.parametrize("mode", ["disabled", "unsealed"])
+def test_ready_replay_disabled_or_unsealed_keeps_fast_return(monkeypatch, tmp_path, mode):
+    from src.application import prepared_option_positions_context as mod
+
+    kwargs, paths, _ = _sealed_fx_replay_setup(monkeypatch, tmp_path)
+    first = _prepare(tmp_path, **kwargs)
+    if mode == "unsealed":
+        kwargs["fx_snapshot_sha256"] = None
+    for name in ("load_run_fx_snapshot", "open_performance_query_ledger_from_data_config",
+                 "open_performance_evidence_repository", "open_position_ledger_from_data_config"):
+        monkeypatch.setattr(mod, name, lambda *_args, **_kwargs: pytest.fail("fast reuse performed I/O"))
+    batch = _prepare(tmp_path, **kwargs, persist_fx_evidence=mode == "unsealed")
+    assert _fx_counts(batch) == ("not_attempted", 0, 0, 0, 0)
+    assert batch.ledger_read_count == batch.fx_observation_count == 0
+    assert batch.manifests == first.manifests
+    assert all(PerformanceEvidenceSQLiteRepository(path).read_all().fx_rates == () for path in paths.values())
+
+
+def test_sealed_replay_cancellation_propagates_and_can_reenter(monkeypatch, tmp_path):
+    from src.application import prepared_option_positions_context as mod
+
+    kwargs, paths, _ = _sealed_fx_replay_setup(monkeypatch, tmp_path)
+    first = _prepare(tmp_path, **kwargs)
+    frozen = _prepared_bytes(first)
+    real_open = mod.open_performance_query_ledger_from_data_config
+
+    def interrupted(**_kwargs):
+        raise KeyboardInterrupt("synthetic cancellation")
+
+    monkeypatch.setattr(mod, "open_performance_query_ledger_from_data_config", interrupted)
+    with pytest.raises(KeyboardInterrupt, match="synthetic cancellation"):
+        _prepare(tmp_path, **kwargs, persist_fx_evidence=True)
+    assert _prepared_bytes(first) == frozen
+    assert all(PerformanceEvidenceSQLiteRepository(path).read_all().fx_rates == () for path in paths.values())
+    monkeypatch.setattr(mod, "open_performance_query_ledger_from_data_config", real_open)
+    resumed = _prepare(tmp_path, **kwargs, persist_fx_evidence=True)
+    assert _fx_counts(resumed) == ("persisted", 2, 4, 0, 0)
+    assert _prepared_bytes(resumed) == frozen

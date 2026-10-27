@@ -125,7 +125,7 @@ def _link(entry, candidate, *, scope, account, market, events, invalid, open_eve
                 if not terminal_scope_ok:
                     view["missing"] = sorted(set(view["missing"]) | {"terminal_scope_unproven"})
             else:
-                view.update(label="已实现期权净现金流", option_net_cashflow=fact["option_net_cashflow"],
+                view.update(label="合约期权现金结果", option_net_cashflow=fact["option_net_cashflow"],
                             opening_actual_fee=fact["opening_actual_fee"], terminal_actual_fee=fact["terminal_actual_fee"])
             outcomes.append(view)
         entry["trades"].append({"open_event_id": event_id, "contracts": opening.contracts, "outcomes": outcomes})

@@ -10,11 +10,168 @@ from src.application.trades.auto_intake import (
     _cached_trade_inbox_summary,
 )
 
+
+def _underlying_review_fixture(tmp_path):
+    from tests.test_trades_lookup_economics import _payload, _setup
+    from src.application.trades.deal_identity import broker_deal_key_from_payload
+    from src.application.trades.inbox import TRADE_INTAKE_ADAPTER_VERSIONS
+    repo, path, _ = _setup(tmp_path)
+    payload = _payload(qty="1", price="2.50", underlying_symbol="US.NVDA")
+    key = broker_deal_key_from_payload(payload, account_mapping={"123": "synthetic"})
+    def enqueue(value, *, review=False, source="lookup"):
+        return enqueue_trade_payload(path, payload=value, source=source, broker_deal_key=key, repo=repo,
+            adapter_version=TRADE_INTAKE_ADAPTER_VERSIONS[source],
+            underlying_conflict_errors=["invalid:instrument_ref.symbol:source_underlying_conflict"] if review else None)
+    inbox_id = enqueue(payload, source="push")
+    evidence = {**payload, "_futu_underlying_lookup_row": {"owner_stock_code": "US.AAPL", "order_id": payload["order_id"]}}
+    return repo, path, payload, evidence, inbox_id, enqueue
+
+
+def test_underlying_review_atomically_invalidates_claim_and_survives_reception(tmp_path):
+    from src.application.ledger.api import with_sqlite_repo_writer_lock
+    from src.application.trades.inbox import (read_trade_payload, read_trade_source_evidence,
+        resume_trade_payload, trade_payload_commit_scope, trade_payload_evidence_ref)
+    repo, path, payload, evidence, inbox_id, enqueue = _underlying_review_fixture(tmp_path)
+    claim = claim_trade_payload(path, inbox_id=inbox_id, repo=repo, owner="synthetic-old-worker")
+    assert claim is not None
+    with with_sqlite_repo_writer_lock(repo):
+        assert enqueue(evidence, review=True) == inbox_id
+        stored = read_trade_payload(path, inbox_id=inbox_id)
+    assert stored["status"] == "identity_needs_review"
+    assert stored["payload_version"] > claim["payload_version"]
+    assert stored["claim_id"] is None and stored["claim_until_ms"] is None
+    entered = []
+    with pytest.raises(TradePayloadClaimLost):
+        with trade_payload_commit_scope(path, claim=claim, repo=repo):
+            entered.append(True)
+    assert entered == []
+    version = stored["payload_version"]
+    for later in (evidence, {**payload, "status": None}, {**payload, "status": "OK", "position_effect": "open"}):
+        enqueue(later)
+        current = read_trade_payload(path, inbox_id=inbox_id)
+        assert (current["status"], current["result_reason"], current["payload_version"]) == (
+            "identity_needs_review", "broker_underlying_symbol_conflict", version)
+    assert claim_trade_payload(path, inbox_id=inbox_id, repo=repo, owner="later") is None
+    assert resume_trade_payload(path, inbox_id=inbox_id, repo=repo, operator="synthetic") is False
+    observations = read_trade_source_evidence(path, evidence_ref=trade_payload_evidence_ref(inbox_id))
+    assert any(row["raw_payload"] == evidence for row in observations)
+    assert repo.list_trade_events() == [] and repo.list_position_lots() == []
+
+
+def test_underlying_review_and_source_evidence_roll_back_together(tmp_path):
+    from src.application.trades.inbox import read_trade_payload, read_trade_source_evidence, trade_payload_evidence_ref
+    repo, path, _, evidence, inbox_id, enqueue = _underlying_review_fixture(tmp_path)
+    before = read_trade_payload(path, inbox_id=inbox_id)
+    before_sources = read_trade_source_evidence(path, evidence_ref=trade_payload_evidence_ref(inbox_id))
+    with sqlite3.connect(path) as conn:
+        conn.execute("""CREATE TRIGGER synthetic_review_abort BEFORE UPDATE ON trade_inbox
+            WHEN NEW.result_reason = 'broker_underlying_symbol_conflict'
+            BEGIN SELECT RAISE(ABORT, 'synthetic review failure'); END""")
+    with pytest.raises(sqlite3.IntegrityError, match="synthetic review failure"):
+        enqueue(evidence, review=True)
+    assert read_trade_payload(path, inbox_id=inbox_id) == before
+    assert read_trade_source_evidence(path, evidence_ref=trade_payload_evidence_ref(inbox_id)) == before_sources
+    assert repo.list_trade_events() == []
+
+
+@pytest.mark.parametrize("prior", ["economic", "source_identity", "handled", "handled_missing_status"])
+def test_underlying_review_preserves_stronger_conflict_and_handled(tmp_path, prior):
+    from src.application.trades.inbox import read_trade_payload
+    repo, path, payload, evidence, inbox_id, enqueue = _underlying_review_fixture(tmp_path)
+    if prior == "economic":
+        enqueue({**payload, "price": "99"})
+    elif prior == "source_identity":
+        # A different declared source ID in the same stable execution namespace.
+        enqueue({**payload, "source_deal_id": "different-deal"})
+    else:
+        mark_trade_payload_handled(path, inbox_id=inbox_id, result={"status": "applied", "reason": "already-recorded"})
+        if prior == "handled_missing_status":
+            evidence = {**evidence, "status": None, "position_effect": "open"}
+    before = read_trade_payload(path, inbox_id=inbox_id)
+    assert before["status"] == ("handled" if prior.startswith("handled") else "conflict")
+    enqueue(evidence, review=True)
+    after = read_trade_payload(path, inbox_id=inbox_id)
+    if prior == "handled_missing_status":
+        # Existing reception policy treats the later absent status against retained
+        # OK as a status conflict; the new symbol guard must not hide that either.
+        assert (after["status"], after["result_reason"]) == ("conflict", "broker_deal_status_conflict")
+        assert after["result"] == before["result"]
+    else:
+        assert (after["status"], after["result_reason"], after["result"], after["payload_version"]) == (
+            before["status"], before["result_reason"], before["result"], before["payload_version"])
+
+
+def test_underlying_review_requires_authoritative_bound_lookup(tmp_path):
+    with pytest.raises(ValueError, match="authoritative bound lookup"):
+        enqueue_trade_payload(tmp_path / "uncreated.sqlite3", payload={}, source="push",
+            underlying_conflict_errors=["invalid:instrument_ref.symbol:source_underlying_conflict"])
+    assert not (tmp_path / "uncreated.sqlite3").exists()
+
+
+def test_underlying_review_does_not_mask_new_economic_conflict_after_handled(tmp_path):
+    from tests.test_trades_lookup_economics import _payload, _setup
+    from src.application.trades.deal_identity import broker_deal_key_from_payload
+    from src.application.trades.inbox import read_trade_payload, TRADE_INTAKE_ADAPTER_VERSIONS
+    repo, path, process = _setup(tmp_path)
+    payload = _payload(qty="1", price="2.50", underlying_symbol="US.NVDA")
+    result = process(payload, allow_external_lookup=False)
+    assert result["status"] == "applied"
+    before = repo.list_trade_events(), repo.list_position_lots()
+    assert read_trade_payload(path, inbox_id=result["inbox_id"])["status"] == "handled"
+    enqueue_trade_payload(path, payload={**payload, "qty": "9", "_futu_detail_lookup_row": {"qty": "9", "owner_stock_code": "US.AAPL"}},
+        source="lookup", broker_deal_key=broker_deal_key_from_payload(payload, account_mapping={"123": "synthetic"}),
+        repo=repo, adapter_version=TRADE_INTAKE_ADAPTER_VERSIONS["lookup"],
+        underlying_conflict_errors=["invalid:instrument_ref.symbol:source_underlying_conflict"])
+    after = read_trade_payload(path, inbox_id=result["inbox_id"])
+    assert (after["status"], after["result_reason"]) == ("conflict", "broker_economic_payload_conflict")
+    assert (repo.list_trade_events(), repo.list_position_lots()) == before
+
+
+def test_underlying_review_preserves_missing_status_after_real_manual_handled(tmp_path, monkeypatch):
+    from tests.test_trades_lookup_economics import _gateway, _payload, _setup
+    from src.application.trades import futu_detail_lookup
+    from src.application.trades.deal_identity import broker_deal_key_from_payload
+    from src.application.trades.inbox import TRADE_INTAKE_ADAPTER_VERSIONS
+    repo, path, process = _setup(tmp_path)
+    payload = _payload(qty="1", price="2.50", underlying_symbol="US.NVDA")
+    payload.pop("status")
+    result = process(payload, source="manual", allow_external_lookup=False)
+    assert result["status"] == "applied"
+    before = repo.list_trade_events(), repo.list_position_lots()
+    assert tuple(map(len, before)) == (1, 1)
+    stored = read_trade_payload(path, inbox_id=result["inbox_id"])
+    assert (stored["status"], stored["result_reason"]) == ("handled", "applied_open")
+    row = {"acc_id": "123", "deal_id": payload["deal_id"], "order_id": payload["order_id"],
+           "qty": "1", "price": "2.50", "owner_stock_code": "US.AAPL"}
+    calls = _gateway(monkeypatch, row)
+    lookup = futu_detail_lookup.enrich_trade_push_payload_with_account_id(
+        payload, host="example.invalid", port=1, futu_account_ids=["123"])
+    assert lookup.diagnostics["economic_conflicts"] == []
+    errors = lookup.diagnostics["underlying_conflicts"]["errors"]
+    assert errors == ["invalid:instrument_ref.symbol:source_underlying_conflict"]
+    evidence = lookup.diagnostics["deal_lookup_evidence"]
+    assert evidence.get("status") is None
+    inbox_id = enqueue_trade_payload(path, payload=evidence, source="lookup",
+        broker_deal_key=broker_deal_key_from_payload(payload, account_mapping={"123": "synthetic"}),
+        repo=repo, adapter_version=TRADE_INTAKE_ADAPTER_VERSIONS["lookup"],
+        underlying_conflict_errors=errors)
+    assert inbox_id == result["inbox_id"]
+    after = read_trade_payload(path, inbox_id=inbox_id)
+    assert (after["status"], after["result_reason"]) == ("conflict", "broker_deal_status_missing")
+    assert after["result"] == stored["result"]
+    assert (repo.list_trade_events(), repo.list_position_lots()) == before
+    assert claim_trade_payload(path, inbox_id=inbox_id, repo=repo) is None
+    sources = read_trade_source_evidence(path, evidence_ref=trade_payload_evidence_ref(inbox_id))
+    assert any(item["raw_payload"] == payload for item in sources)
+    assert any(item["raw_payload"] == evidence for item in sources)
+    assert calls == ["deal", "close"]
+
 from src.application.trades.inbox import (
     TradePayloadClaimLost,
     begin_trade_receipt_attempt,
     claim_trade_payload,
     claim_trade_payload_refresh_intent,
+    claim_trade_payload_refresh_intents,
     enqueue_trade_payload,
     get_settlement_attempt_state,
     list_retryable_trade_payloads,
@@ -275,6 +432,156 @@ def test_trade_inbox_claims_portfolio_refresh_intent_once(
         intent=intent,
     )
     assert claim_trade_payload_refresh_intent(path, inbox_id=inbox_id) is None
+
+
+def _refresh_row(path, deal_id, *, account="lx"):
+    physical = "1001" if account == "lx" else "2001"
+    inbox_id = _enqueue(path, payload={"deal_id": deal_id, "futu_account_id": physical},
+                        broker_deal_key=f"futu:{account}:{physical}:{deal_id}")
+    record_trade_payload_refresh_intent(
+        path, inbox_id=inbox_id, intent={"account": account, "request_id": f"refresh:{deal_id}"},
+    )
+    return inbox_id
+
+
+@pytest.mark.parametrize("failure", ["sql", "normalization", "interrupt"])
+def test_refresh_batch_rolls_back_earlier_marks_on_later_failure(tmp_path, monkeypatch, failure):
+    from src.application.trades import inbox as owner
+
+    path = tmp_path / "inbox.sqlite3"
+    identifiers = [_refresh_row(path, value) for value in ("first", "second")]
+    original = owner._claim_trade_payload_refresh_intent
+
+    class Interrupted(BaseException):
+        pass
+
+    def fail_second(conn, *, inbox_id, account=None):
+        if inbox_id == identifiers[1]:
+            if failure == "sql":
+                conn.execute("SELECT * FROM deliberately_missing_refresh_test_table")
+            if failure == "normalization":
+                owner._normalize_portfolio_refresh_intent({"account": account})
+            raise Interrupted()
+        return original(conn, inbox_id=inbox_id, account=account)
+
+    monkeypatch.setattr(owner, "_claim_trade_payload_refresh_intent", fail_second)
+    expected = {"sql": sqlite3.OperationalError, "normalization": ValueError, "interrupt": Interrupted}[failure]
+    with pytest.raises(expected):
+        claim_trade_payload_refresh_intents(path, inbox_ids=identifiers, account="lx")
+    assert all(read_trade_payload(path, inbox_id=value, read_only=True)["portfolio_refresh_attempted_at_ms"] is None
+               for value in identifiers)
+    monkeypatch.setattr(owner, "_claim_trade_payload_refresh_intent", original)
+    assert claim_trade_payload_refresh_intents(path, inbox_ids=identifiers, account="lx") == {
+        "account": "lx", "request_id": "refresh:first",
+    }
+    assert claim_trade_payload_refresh_intents(path, inbox_ids=identifiers, account="lx") is None
+
+
+def test_refresh_batch_known_commit_failure_leaves_no_marks(tmp_path, monkeypatch):
+    from src.application.trades import inbox as owner
+
+    path = tmp_path / "inbox.sqlite3"
+    identifiers = [_refresh_row(path, value) for value in ("first", "second")]
+
+    class RollbackBeforeCommit(sqlite3.Connection):
+        def __exit__(self, exc_type, exc_value, traceback):
+            if exc_type is None:
+                self.rollback()
+                raise sqlite3.OperationalError("injected before commit")
+            return super().__exit__(exc_type, exc_value, traceback)
+
+    def connect(path):
+        conn = sqlite3.connect(path, factory=RollbackBeforeCommit)
+        conn.row_factory = sqlite3.Row
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+        return conn
+
+    monkeypatch.setattr(owner, "_connect", connect)
+    with pytest.raises(sqlite3.OperationalError, match="injected before commit"):
+        claim_trade_payload_refresh_intents(path, inbox_ids=identifiers, account="lx")
+    assert all(read_trade_payload(path, inbox_id=value, read_only=True)["portfolio_refresh_attempted_at_ms"] is None
+               for value in identifiers)
+
+
+def test_refresh_batch_filters_accounts_and_uses_first_actual_claim(tmp_path):
+    path = tmp_path / "inbox.sqlite3"
+    prior = _refresh_row(path, "prior")
+    other = _refresh_row(path, "other", account="sy")
+    first, second = (_refresh_row(path, value) for value in ("first", "second"))
+    assert claim_trade_payload_refresh_intent(path, inbox_id=prior)
+    identifiers = ["missing", prior, other, first, first, second]
+    assert claim_trade_payload_refresh_intents(path, inbox_ids=identifiers, account="lx") == {
+        "account": "lx", "request_id": "refresh:first",
+    }
+    assert read_trade_payload(path, inbox_id=other, read_only=True)["portfolio_refresh_attempted_at_ms"] is None
+    assert read_trade_payload(path, inbox_id=first, read_only=True)["status"] == "pending"
+    assert claim_trade_payload_refresh_intents(path, inbox_ids=identifiers, account="sy") == {
+        "account": "sy", "request_id": "refresh:other",
+    }
+
+
+@pytest.mark.parametrize("corrupt", ["{", "{}"])
+def test_refresh_batch_invalid_persisted_intent_rolls_back_prior_mark(tmp_path, corrupt):
+    path = tmp_path / "inbox.sqlite3"
+    first, second = (_refresh_row(path, value) for value in ("first", "second"))
+    with sqlite3.connect(path) as conn:
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+        conn.execute("UPDATE trade_inbox SET portfolio_refresh_intent_json=? WHERE inbox_id=?", (corrupt, second))
+    with pytest.raises(ValueError):
+        claim_trade_payload_refresh_intents(path, inbox_ids=[first, second], account="lx")
+    assert all(read_trade_payload(path, inbox_id=value, read_only=True)["portfolio_refresh_attempted_at_ms"] is None
+               for value in (first, second))
+
+
+def test_refresh_batch_handles_large_captured_id_list_without_bind_expansion(tmp_path):
+    path = tmp_path / "inbox.sqlite3"
+    inbox_id = _refresh_row(path, "last")
+    assert claim_trade_payload_refresh_intents(
+        path, inbox_ids=[*(f"missing-{index}" for index in range(1200)), inbox_id], account="lx",
+    ) == {"account": "lx", "request_id": "refresh:last"}
+
+
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize("excluded", ["missing", "no_intent", "attempted", "conflict", "reconciled", "evidence"])
+def test_refresh_claim_does_not_parse_ineligible_intent(tmp_path, batch, excluded):
+    path = tmp_path / "inbox.sqlite3"
+    inbox_id = _refresh_row(path, "unused")
+    with sqlite3.connect(path) as conn:
+        conn.create_function("trade_inbox_writer_version", 0, lambda: 2)
+        conn.execute("UPDATE trade_inbox SET portfolio_refresh_intent_json='{' WHERE inbox_id=?", (inbox_id,))
+        if excluded == "no_intent":
+            conn.execute("UPDATE trade_inbox SET portfolio_refresh_intent_json=NULL WHERE inbox_id=?", (inbox_id,))
+        elif excluded == "attempted":
+            conn.execute("UPDATE trade_inbox SET portfolio_refresh_attempted_at_ms=1 WHERE inbox_id=?", (inbox_id,))
+        elif excluded == "conflict":
+            conn.execute("UPDATE trade_inbox SET status='conflict' WHERE inbox_id=?", (inbox_id,))
+        elif excluded == "reconciled":
+            conn.execute("UPDATE trade_inbox SET result_json=? WHERE inbox_id=?",
+                         (json.dumps({"receipt_suppression_reason": "reconciled_from_ledger"}), inbox_id))
+        elif excluded == "evidence":
+            conn.execute("DELETE FROM trade_inbox_evidence WHERE inbox_id=?", (inbox_id,))
+    candidate = "missing" if excluded == "missing" else inbox_id
+    if batch:
+        assert claim_trade_payload_refresh_intents(path, inbox_ids=[candidate], account="lx") is None
+    else:
+        assert claim_trade_payload_refresh_intent(path, inbox_id=candidate) is None
+    assert read_trade_payload(path, inbox_id=inbox_id, read_only=True)["portfolio_refresh_attempted_at_ms"] == (
+        1 if excluded == "attempted" else None
+    )
+
+
+@pytest.mark.parametrize("account", ["", " LX", "LX", None])
+def test_refresh_batch_rejects_invalid_scope_before_creating_store(tmp_path, account):
+    path = tmp_path / "absent" / "inbox.sqlite3"
+    with pytest.raises(ValueError, match="normalized"):
+        claim_trade_payload_refresh_intents(path, inbox_ids=["unused"], account=account)
+    assert not path.parent.exists()
+
+
+def test_empty_refresh_batch_does_not_create_store(tmp_path):
+    path = tmp_path / "absent" / "inbox.sqlite3"
+    assert claim_trade_payload_refresh_intents(path, inbox_ids=[], account="lx") is None
+    assert not path.parent.exists()
 
 
 def test_trade_inbox_is_idempotent_and_retries_callback_exception(

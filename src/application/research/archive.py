@@ -186,7 +186,7 @@ if runs_root.exists() and runs_root.is_dir():
             "scheduler": scheduler_summary(item),
             "critical_files": critical,
             "file_manifest": files,
-            "content_digest": hashlib.sha256(json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
+            "content_digest": hashlib.sha256(json.dumps(files, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
             "scan_blob_refs": blob_refs,
             "scan_blob_reference_status": blob_status,
             "scan_blob_reference_error": blob_error,
@@ -269,6 +269,35 @@ def archive_pull(
     )
     if source_inventory_metadata.get("source_host"):
         source["source_host"] = source_inventory_metadata["source_host"]
+    requested = list(dict.fromkeys(
+        _safe_run_id(value) for value in (run_ids or []) if str(value or "").strip()
+    ))
+    if requested and inventory_operation is not None and not inventory_operation.get("ok"):
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "action": "pull",
+            "ok": False,
+            "changed": False,
+            "dry_run": not bool(write),
+            "remote": _safe_label(remote or DEFAULT_REMOTE),
+            "archive_root": str(root),
+            "source": _source_summary(source),
+            "since_days": since_days,
+            "selected_run_ids": selected_runs,
+            "include_logs": bool(include_logs),
+            "scan_blob_refs": [],
+            "operations": [inventory_operation],
+            "manifest": None,
+        }
+    selected = set(selected_runs)
+    missing = [run_id for run_id in requested if run_id not in selected]
+    if missing:
+        raise AgentToolError(
+            code="SOURCE_INVENTORY_ERROR",
+            message="requested runs unavailable in selected source inventory: " + ", ".join(missing),
+            hint="Runs excluded by since_days are unavailable for this pull." if since_days is not None else None,
+            details={"missing_run_ids": missing},
+        )
     scan_blob_refs = _selected_scan_blob_refs(
         source=source,
         source_run_inventory=source_run_inventory,
@@ -368,7 +397,7 @@ def archive_pull(
                     live_item = next(
                         (
                             item
-                            for item in _run_inventory(root / "output_runs", base=base)
+                            for item in _run_inventory(root / "output_runs", base=base, run_ids=[run_id])
                             if item.get("run_id") == run_id
                         ),
                         {},
@@ -494,9 +523,10 @@ def archive_verify(
         "runs": runs,
         "shared": shared,
     }
-    manifests = root / "manifests"
-    manifests.mkdir(parents=True, exist_ok=True)
-    _write_json(manifests / "inventory.latest.json", data)
+    if source_identity is not None or source_run_inventory is not None:
+        manifests = root / "manifests"
+        manifests.mkdir(parents=True, exist_ok=True)
+        _write_json(manifests / "inventory.latest.json", data)
     return data
 
 
@@ -527,7 +557,7 @@ def archive_prune_remote(
             "remote": _safe_label(remote or DEFAULT_REMOTE),
             "archive_root": str(root),
             "status": "missing_verified_inventory",
-            "reason": "run archive verify before remote pruning",
+            "reason": "run archive pull --write with the intended SSH source before remote pruning",
         }
     source_identity = latest.get("source_identity")
     source_identity = source_identity if isinstance(source_identity, dict) else {}

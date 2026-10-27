@@ -44,6 +44,7 @@ def _candidate(**overrides) -> dict:
         "opening_contract_status": "ready",
         "underlier_observation_status": "ready",
         "snapshot_received_at_utc": "2026-07-17T13:59:00Z",
+        "spot_observed_at_utc": "2026-07-17T13:59:00Z",
         "option_standard_type": "STANDARD",
         "stock_owner": "NVDA",
         "price_tick": 0.01,
@@ -75,6 +76,7 @@ def _call_candidate(**overrides) -> dict:
         "opening_contract_status": "ready",
         "underlier_observation_status": "ready",
         "snapshot_received_at_utc": "2026-07-17T13:59:00Z",
+        "spot_observed_at_utc": "2026-07-17T13:59:00Z",
         "option_standard_type": "STANDARD",
         "stock_owner": "NVDA",
         "price_tick": 0.01,
@@ -326,6 +328,7 @@ def test_combo_yield_reuses_sell_put_underwriting_before_pairing(tmp_path: Path)
 
     assert captured_underwriting["sell_put_cfg"]["strategy"] == "insurance_underwriting"
     assert captured_underwriting["symbol"] == "NVDA"
+    assert captured_underwriting["sell_put_cfg"]["max_abs_delta"] is None
     assert len(captured) == 1
     assert float(captured.iloc[0]["premium_edge_score"]) == 0.25
     assert float(captured.iloc[0]["strike_safety_margin_pct"]) == 0.12

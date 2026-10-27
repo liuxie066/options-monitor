@@ -57,7 +57,7 @@ def test_accepted_query_exposes_effective_numeric_gates_without_account_evidence
     decision = _query(row, mode=mode, min_dte=7, max_dte=60)
     assert decision["accepted"] is True
     conditions = _conditions(decision)
-    assert len(conditions) == 7
+    assert len(conditions) == 8
     assert all(item["status"] == "pass" and item["reason_code"] is None for item in conditions.values())
     expected = {
         "dte": (43, "between", [7, 60]),
@@ -67,6 +67,7 @@ def test_accepted_query_exposes_effective_numeric_gates_without_account_evidence
         "spread_ratio": (0.08, "lte", 0.40),
         "iv_rv_ratio": (1.50, "gte", 1.10),
         "iv_minus_rv": (0.12, "gte", 0.05),
+        "abs_delta": (0.30, "lte", 0.40),
     }
     for name, (actual, operator, value) in expected.items():
         assert conditions[name]["actual"] == actual
@@ -139,6 +140,35 @@ def test_capacity_switch_does_not_disable_earnings_gates():
     assert decision["accepted"] is False
     assert decision["rejects"][0]["reason"] == "risk_earnings_unavailable"
     assert all(item["status"] == "pass" for item in decision["conditions"])
+
+
+@pytest.mark.parametrize("mode", ["put", "call"])
+@pytest.mark.parametrize("value,status", [(0.4, "pass"), (0.4001, "fail"), (None, "unknown")])
+def test_contract_only_retains_delta_qualification(mode, value, status):
+    delta = None if value is None else (-value if mode == "put" else value)
+    row = _policy_row(mode=mode, delta=delta, max_new_contracts=0, covered_contracts_available=0)
+    decision = _query(row, mode=mode)
+    condition = _conditions(decision)["abs_delta"]
+    assert decision["accepted"] is (status == "pass")
+    assert condition["status"] == status
+    assert condition["actual"] == value
+    assert condition["required"] == {"operator": "lte", "value": 0.4}
+    if status != "pass":
+        assert condition["reason_code"] == ("risk_delta_unavailable" if value is None else "risk_delta")
+        assert [item["reason"] for item in decision["rejects"]] == [condition["reason_code"]]
+    disabled = _query(row, mode=mode, max_abs_delta=None)
+    assert disabled["accepted"] is True
+    assert "abs_delta" not in _conditions(disabled)
+
+
+def test_contract_only_delta_source_and_explicit_limit_override_row_policy():
+    row = _policy_row(delta=-0.3, policy_max_abs_delta=None, delta_source="unverified")
+    assert _query(row)["accepted"] is True
+    decision = _query(row, max_abs_delta=0.4)
+    assert decision["accepted"] is False
+    assert _conditions(decision)["abs_delta"]["status"] == "unknown"
+    row["delta_source"] = "opend_market_snapshot.option_delta"
+    assert _query(row, max_abs_delta=0.2)["rejects"][0]["reason"] == "risk_delta"
 
 
 @pytest.mark.parametrize("mode", ["put", "call"])

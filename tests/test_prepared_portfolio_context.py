@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import subprocess
 import sys
@@ -60,6 +61,80 @@ class _CompletedWorker:
 
     def poll(self):
         return 0
+
+
+class _PreparationClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+        self.source_events: list[dict] = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+class _DeadlineWorker(_CompletedWorker):
+    def __init__(self, command, *, clock, finished_at=0.0, poll_delay=0.0, **kwargs):
+        super().__init__(command, **kwargs)
+        self.request = json.loads(Path(command[-1]).read_text(encoding="utf-8"))
+        self.result_path = Path(self.request["result_path"])
+        result = json.loads(self.result_path.read_text(encoding="utf-8"))
+        context = result["portfolio_context"]
+        context["cash_by_currency"] = {}
+        context["as_of_utc"] = context["source_observed_at"]
+        result["payload_sha256"] = hashlib.sha256(
+            json.dumps(context, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        self.result_path.write_text(json.dumps(result), encoding="utf-8")
+        self.clock = clock
+        self.finished_at = finished_at
+        self.poll_delay = poll_delay
+        self.returncode = None
+        self.poll_calls = 0
+        self.terminated = False
+        self.waited = 0
+        self.killed = False
+
+    def poll(self):
+        self.poll_calls += 1
+        self.clock.now += self.poll_delay
+        if self.returncode is None and self.clock.now >= self.finished_at:
+            self.returncode = 0
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        if self.returncode is not None or self.clock.now >= self.finished_at:
+            self.returncode = 0 if self.returncode is None else self.returncode
+            raise ProcessLookupError("synthetic worker already exited")
+        self.returncode = -15
+
+    def wait(self, timeout=None):
+        self.waited += 1
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired("synthetic worker", timeout)
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+
+@pytest.fixture
+def preparation_clock(monkeypatch):
+    from src.application import prepared_portfolio_context as mod
+
+    clock = _PreparationClock()
+    monkeypatch.setattr(mod, "time", clock)
+    monkeypatch.setattr(
+        mod.state_repo, "append_source_snapshot_event",
+        lambda _base, snapshot: clock.source_events.append(snapshot),
+    )
+    return clock
 
 
 def _state_dirs(tmp_path: Path, run_id: str) -> tuple[Path, dict[str, Path]]:
@@ -271,6 +346,303 @@ def test_context_workers_share_one_absolute_deadline(tmp_path: Path) -> None:
     assert not any((state_dir / "portfolio_context.json").exists() for state_dir in states.values())
 
 
+@pytest.mark.parametrize(
+    ("startup_time", "worker_finished_at"),
+    [(0.5, 0.5), (1.0, 1.0), (1.2, 1.1), (1.2, 0.5)],
+    ids=["before", "at", "after", "early-exit-observed-late"],
+)
+def test_worker_observation_after_startup_uses_shared_deadline(
+    monkeypatch, tmp_path: Path, preparation_clock, startup_time: float, worker_finished_at: float,
+) -> None:
+    from src.application import prepared_portfolio_context as mod
+
+    run_id = "run-startup-deadline"
+    shared, states = _state_dirs(tmp_path, run_id)
+    authorities = _config_authorities(tmp_path, run_id)
+    workers = {}
+    reads = []
+    read_result = mod._read_worker_result
+
+    def _spawn(command, **kwargs):
+        worker = _DeadlineWorker(
+            command, clock=preparation_clock, finished_at=worker_finished_at, **kwargs,
+        )
+        workers[worker.request["account"]] = worker
+        # Parent setup delays observation of workers finishing during startup.
+        preparation_clock.now = startup_time
+        return worker
+
+    def _read(**kwargs):
+        reads.append(kwargs["request"]["account"])
+        return read_result(**kwargs)
+
+    monkeypatch.setattr(mod, "_read_worker_result", _read)
+    manifests = _prepare(
+        tmp_path, shared, states, run_id, authorities=authorities, popen_factory=_spawn,
+    )
+    ready = startup_time < 1.0
+    assert reads == (["lx", "sy"] if ready else [])
+    assert len(preparation_clock.source_events) == (2 if ready else 0)
+    for account, manifest in manifests.items():
+        assert manifest["status"] == ("ready" if ready else "unavailable")
+        assert manifest["worker_returncode"] == 0
+        assert manifest["deadline_seconds"] == 1
+        assert manifest["account_config_sha256"] == authorities[account].account_config_sha256
+        path = Path(manifest["manifest_path"])
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == manifest["manifest_sha256"]
+        identity = {
+            **_generation_kwargs(tmp_path, path, run_id=run_id, authority=authorities[account],
+                                 manifest_sha256=manifest["manifest_sha256"]),
+            "expected_account": account,
+        }
+        loaded = load_prepared_portfolio_context(**identity)
+        assert load_prepared_portfolio_context_receipt(**identity)["payload"] == loaded
+        if ready:
+            assert loaded["filters"]["account"] == account
+            assert manifest["portfolio_source_name"] == "futu"
+            assert manifest["portfolio_source_account"] == account
+            assert path.parent.joinpath(manifest["portfolio_context_relpath"]).is_file()
+        else:
+            assert loaded is None
+            assert manifest["reason"] == "portfolio_context_deadline_exceeded"
+            assert "payload_sha256" not in manifest
+            assert not list(states[account].glob("portfolio_context.*.json"))
+            assert workers[account].terminated and workers[account].waited == 1
+
+
+@pytest.mark.parametrize(
+    ("poll_delay", "finished_at", "ready"),
+    [(0.5, 0.0, True), (1.0, 0.0, False), (1.2, 0.0, False), (1.0, 10.0, False)],
+    ids=["terminal-before", "terminal-at", "terminal-after", "running-at"],
+)
+def test_poll_elapsed_time_cannot_admit_late_worker(
+    monkeypatch, tmp_path: Path, preparation_clock, poll_delay, finished_at, ready,
+) -> None:
+    from src.application import prepared_portfolio_context as mod
+
+    run_id = "run-poll-deadline"
+    shared, states = _state_dirs(tmp_path, run_id)
+    reads = []
+    read_result = mod._read_worker_result
+
+    def _spawn(command, **kwargs):
+        account = json.loads(Path(command[-1]).read_text(encoding="utf-8"))["account"]
+        return _DeadlineWorker(
+            command, clock=preparation_clock,
+            poll_delay=poll_delay if account == "lx" else 0.0,
+            finished_at=finished_at if account == "lx" else 0.0, **kwargs,
+        )
+
+    def _read(**kwargs):
+        reads.append(kwargs["request"]["account"])
+        return read_result(**kwargs)
+
+    monkeypatch.setattr(mod, "_read_worker_result", _read)
+    manifests = _prepare(tmp_path, shared, states, run_id, popen_factory=_spawn)
+    assert reads == (["lx", "sy"] if ready else [])
+    assert len(preparation_clock.source_events) == (2 if ready else 0)
+    assert {item["status"] for item in manifests.values()} == {"ready" if ready else "unavailable"}
+    if not ready:
+        assert {item["reason"] for item in manifests.values()} == {"portfolio_context_deadline_exceeded"}
+        assert all(not list(state.glob("portfolio_context.*.json")) for state in states.values())
+
+
+@pytest.mark.parametrize("read_finished_at", [1.0, 1.2], ids=["at", "after"])
+def test_result_read_consumes_peer_budget_and_reentry_keeps_generation(
+    monkeypatch, tmp_path: Path, preparation_clock, read_finished_at,
+) -> None:
+    from src.application import prepared_portfolio_context as mod
+
+    run_id = "run-read-deadline"
+    shared, states = _state_dirs(tmp_path, run_id)
+    authorities = _config_authorities(tmp_path, run_id)
+    reads = []
+    read_result = mod._read_worker_result
+
+    def _read(**kwargs):
+        reads.append(kwargs["request"]["account"])
+        result = read_result(**kwargs)
+        preparation_clock.now = read_finished_at
+        return result
+
+    def _spawn(command, **kwargs):
+        account = json.loads(Path(command[-1]).read_text(encoding="utf-8"))["account"]
+        return _DeadlineWorker(
+            command, clock=preparation_clock,
+            finished_at=read_finished_at if account == "sy" else 0.0, **kwargs,
+        )
+
+    monkeypatch.setattr(mod, "_read_worker_result", _read)
+    manifests = _prepare(
+        tmp_path, shared, states, run_id, authorities=authorities,
+        popen_factory=_spawn,
+    )
+    assert reads == ["lx"]
+    assert manifests["lx"]["status"] == "ready"
+    assert manifests["sy"]["reason"] == "portfolio_context_deadline_exceeded"
+    assert not list(states["sy"].glob("portfolio_context.*.json"))
+    assert [item["payload"]["filters"]["account"] for item in preparation_clock.source_events] == ["lx"]
+    identity = _generation_kwargs(
+        tmp_path, Path(manifests["lx"]["manifest_path"]), run_id=run_id,
+        authority=authorities["lx"], manifest_sha256=manifests["lx"]["manifest_sha256"],
+    )
+    assert load_prepared_portfolio_context(**identity)["filters"]["account"] == "lx"
+    saved = {account: Path(item["manifest_path"]).read_bytes() for account, item in manifests.items()}
+    spawned_again = []
+
+    def _no_respawn(*_args, **_kwargs):
+        spawned_again.append(True)
+        raise AssertionError("same-run generations must be adopted")
+
+    repeated = _prepare(
+        tmp_path, shared, states, run_id, authorities=authorities, popen_factory=_no_respawn,
+    )
+    assert spawned_again == []
+    assert reads == ["lx"]
+    assert len(preparation_clock.source_events) == 1
+    for account, item in repeated.items():
+        assert item["status"] == manifests[account]["status"]
+        assert item["manifest_sha256"] == manifests[account]["manifest_sha256"]
+        assert Path(item["manifest_path"]).read_bytes() == saved[account]
+
+
+def test_last_in_time_worker_read_may_finish_after_deadline(
+    monkeypatch, tmp_path: Path, preparation_clock,
+) -> None:
+    from src.application import prepared_portfolio_context as mod
+
+    run_id = "run-last-read"
+    shared, states = _state_dirs(tmp_path, run_id)
+    read_result = mod._read_worker_result
+
+    def _read(**kwargs):
+        result = read_result(**kwargs)
+        if kwargs["request"]["account"] == "sy":
+            preparation_clock.now = 1.2
+        return result
+
+    monkeypatch.setattr(mod, "_read_worker_result", _read)
+    manifests = _prepare(
+        tmp_path, shared, states, run_id,
+        popen_factory=lambda command, **kwargs: _DeadlineWorker(command, clock=preparation_clock, **kwargs),
+    )
+    assert {item["status"] for item in manifests.values()} == {"ready"}
+    assert len(preparation_clock.source_events) == 2
+    assert preparation_clock.sleeps == []
+
+
+def test_sweep_end_sleep_uses_remaining_budget_after_result_read(
+    monkeypatch, tmp_path: Path, preparation_clock,
+) -> None:
+    from src.application import prepared_portfolio_context as mod
+
+    run_id = "run-sweep-budget"
+    shared, states = _state_dirs(tmp_path, run_id)
+    read_result = mod._read_worker_result
+
+    def _read(**kwargs):
+        result = read_result(**kwargs)
+        preparation_clock.now = 0.995
+        return result
+
+    def _spawn(command, **kwargs):
+        account = json.loads(Path(command[-1]).read_text(encoding="utf-8"))["account"]
+        return _DeadlineWorker(
+            command, clock=preparation_clock, finished_at=10.0 if account == "sy" else 0.0, **kwargs,
+        )
+
+    monkeypatch.setattr(mod, "_read_worker_result", _read)
+    manifests = _prepare(tmp_path, shared, states, run_id, popen_factory=_spawn)
+    assert preparation_clock.sleeps == pytest.approx([0.005])
+    assert manifests["lx"]["status"] == "ready"
+    assert manifests["sy"]["reason"] == "portfolio_context_deadline_exceeded"
+
+
+@pytest.mark.parametrize("stage", ["poll", "read"])
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, RuntimeError], ids=["interrupt", "error"])
+def test_collection_exception_cleans_workers_without_ready_publication(
+    monkeypatch, tmp_path: Path, preparation_clock, stage, error_type,
+) -> None:
+    from src.application import prepared_portfolio_context as mod
+
+    run_id = "run-collection-cancel"
+    shared, states = _state_dirs(tmp_path, run_id)
+    workers = {}
+    interrupted = False
+
+    def _interrupt_once():
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            raise error_type("synthetic collection interruption")
+
+    def _spawn(command, **kwargs):
+        account = json.loads(Path(command[-1]).read_text(encoding="utf-8"))["account"]
+        worker = _DeadlineWorker(
+            command, clock=preparation_clock, finished_at=10.0 if account == "sy" else 0.0, **kwargs,
+        )
+        workers[account] = worker
+        if stage == "poll" and account == "lx":
+            original_poll = worker.poll
+
+            def _poll():
+                _interrupt_once()
+                return original_poll()
+
+            worker.poll = _poll
+        return worker
+
+    if stage == "read":
+        monkeypatch.setattr(mod, "_read_worker_result", lambda **_kwargs: _interrupt_once())
+    with pytest.raises(error_type, match="synthetic collection interruption"):
+        _prepare(tmp_path, shared, states, run_id, popen_factory=_spawn)
+    assert interrupted
+    assert workers["sy"].terminated and workers["sy"].waited == 1
+    assert workers["sy"].returncode == -15
+    assert preparation_clock.source_events == []
+    assert all(not (state / "prepared_portfolio_context.v1.json").exists() for state in states.values())
+    assert all(not list(state.glob("portfolio_context.*.json")) for state in states.values())
+
+
+@pytest.mark.parametrize(
+    ("failure", "returncode", "reason"),
+    [("nonzero", 7, "portfolio_context_worker_failed"),
+     ("malformed", 0, "portfolio_context_worker_result_unavailable")],
+    ids=["nonzero", "malformed"],
+)
+def test_in_time_worker_failure_preserves_reason_and_healthy_peer(
+    tmp_path: Path, preparation_clock, failure, returncode, reason,
+) -> None:
+    run_id = "run-result-failure"
+    shared, states = _state_dirs(tmp_path, run_id)
+    authorities = _config_authorities(tmp_path, run_id)
+
+    def _spawn(command, **kwargs):
+        worker = _DeadlineWorker(command, clock=preparation_clock, **kwargs)
+        if worker.request["account"] == "lx":
+            if failure == "nonzero":
+                worker.returncode = returncode
+            else:
+                worker.result_path.write_text("{invalid json", encoding="utf-8")
+        return worker
+
+    manifests = _prepare(
+        tmp_path, shared, states, run_id, authorities=authorities, popen_factory=_spawn,
+    )
+    assert manifests["lx"]["status"] == "unavailable"
+    assert manifests["lx"]["reason"] == reason
+    assert manifests["lx"]["worker_returncode"] == returncode
+    assert "payload_sha256" not in manifests["lx"]
+    assert not list(states["lx"].glob("portfolio_context.*.json"))
+    assert manifests["sy"]["status"] == "ready"
+    assert [item["payload"]["filters"]["account"] for item in preparation_clock.source_events] == ["sy"]
+    identity = _generation_kwargs(
+        tmp_path, Path(manifests["lx"]["manifest_path"]), run_id=run_id,
+        authority=authorities["lx"], manifest_sha256=manifests["lx"]["manifest_sha256"],
+    )
+    assert load_prepared_portfolio_context(**identity) is None
+
+
 def test_worker_exit_race_during_timeout_cleanup_is_isolated(
     tmp_path: Path,
 ) -> None:
@@ -391,7 +763,7 @@ def test_completed_context_is_promoted_while_slow_peer_is_killed(
         popen_factory=mixed_factory,
     )
 
-    assert manifests["lx"]["status"] == "ready"
+    assert manifests["lx"]["status"] == "ready", manifests
     assert manifests["sy"]["status"] == "unavailable"
     assert manifests["sy"]["reason"] == "portfolio_context_deadline_exceeded"
     assert (states["lx"] / manifests["lx"]["portfolio_context_relpath"]).is_file()
@@ -909,3 +1281,128 @@ def test_failed_cash_evidence_survives_real_worker_manifest_and_brief(tmp_path, 
         assert funds["cash_total_cny"] is None
         assert funds["cash_snapshot"] == manifest["cash_snapshot"]
     assert len(calls) == (0 if invalid_ttl else 2)
+
+
+def _prepare_cached_holdings_receipts(tmp_path, monkeypatch, *, run_id, ages):
+    """Real worker/parent receipts from account-bound synthetic caches; no process or provider I/O."""
+    from tests.cash_evidence_helpers import cash_config, cash_portfolio
+    from src.application import portfolio_context_service as service
+    from src.application import prepared_portfolio_context as prepared
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+    from src.infrastructure import exchange_rates
+
+    evaluation = datetime(2026, 10, 11, tzinfo=timezone.utc)
+    env_file = tmp_path / "isolated.env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("OM_ENV_FILE", str(env_file))
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    monkeypatch.setenv("OM_DATA_CONFIG", "")
+    forbidden_calls = []
+
+    def forbidden(*args, **kwargs):
+        forbidden_calls.append((args, kwargs))
+        raise AssertionError("unexpected external preparation boundary")
+
+    class FrozenClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return evaluation.astimezone(tz or timezone.utc)
+
+    class RetainedWorkerDirectory:
+        def __init__(self, **kwargs):
+            self.path = tmp_path / "worker-evidence"
+            self.path.mkdir()
+
+        def __enter__(self):
+            return str(self.path)
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(prepared, "datetime", FrozenClock)
+    monkeypatch.setattr(service, "datetime", FrozenClock)
+    monkeypatch.setattr(prepared, "time", _PreparationClock())
+    monkeypatch.setattr(prepared, "tempfile", SimpleNamespace(TemporaryDirectory=RetainedWorkerDirectory))
+    monkeypatch.setattr(prepared, "load_run_fx_snapshot", forbidden)
+    monkeypatch.setattr(exchange_rates, "current_exchange_rate_snapshot", forbidden)
+    monkeypatch.setattr(prepared, "subprocess", SimpleNamespace(Popen=forbidden, TimeoutExpired=subprocess.TimeoutExpired, DEVNULL=subprocess.DEVNULL))
+    source_events = []
+    monkeypatch.setattr(prepared.state_repo, "append_source_snapshot_event", lambda base, event: source_events.append((base, event)))
+    sizing_accounts = []
+
+    def sizing(*, context, account, **kwargs):
+        sizing_accounts.append(account)
+        return context
+
+    monkeypatch.setattr(prepared, "prepare_position_sizing_evidence", sizing)
+    provider_calls = []
+
+    def failed_refresh(**kwargs):
+        provider_calls.append(kwargs)
+        assert kwargs["write_cache"] is False
+        assert kwargs["exchange_rate_cache_path"].is_relative_to(tmp_path)
+        raise OSError("synthetic holdings refresh failure")
+
+    monkeypatch.setattr(prepared, "fetch_futu_portfolio_context", failed_refresh)
+    authorities, states, cached, cache_bytes = {}, {}, {}, {}
+    for account, age in ages.items():
+        data_path = tmp_path / f"{account}.data.json"
+        data_path.write_text("{}\n", encoding="utf-8")
+        config = cash_config(account=account)
+        config["portfolio"].update(account=account, data_config=str(data_path))
+        authorities[account] = publish_account_run_config(base=tmp_path, run_id=run_id, account=account, config=config)
+        states[account] = authorities[account].state_path.parent
+        observed = (evaluation - timedelta(seconds=age)).isoformat()
+        cash = build_futu_portfolio_context(balance_rows=[{"cn_cash": 1000}], position_rows=[], account=account,
+            source_observed_at=observed, cash_source_observed_at=observed, broker_account_identifiers={"123"},
+            futu_account_id="123", trd_env="REAL", capacity_market="us")
+        cash.pop("position_snapshot_input", None)
+        cached[account] = cash_portfolio(cash, account=account, evaluated_at=evaluation)
+        cache_bytes[account] = _artifact_bytes(cached[account])
+        (states[account] / "portfolio_context.json").write_bytes(cache_bytes[account])
+    config_bytes = {account: authority.state_path.read_bytes() for account, authority in authorities.items()}
+
+    class RealWorker(_CompletedWorker):
+        def __init__(self, command, **kwargs):
+            request_path = Path(command[-1])
+            assert request_path.is_relative_to(tmp_path)
+            assert prepared.run_worker(request_path) == 0
+
+    manifests = _prepare(tmp_path, tmp_path / "output_runs" / run_id / "state", states, run_id,
+        authorities=authorities, popen_factory=RealWorker)
+    receipts = {}
+    for account, manifest in manifests.items():
+        assert manifest["status"] == "ready"
+        authority = authorities[account]
+        receipts[account] = load_prepared_portfolio_context_receipt(
+            manifest_path=Path(manifest["manifest_path"]), expected_base=tmp_path, expected_run_id=run_id,
+            expected_account=account, expected_account_config_sha256=authority.account_config_sha256,
+            expected_manifest_sha256=manifest["manifest_sha256"], expected_runtime_config=json.loads(authority.canonical_bytes),
+        )
+        assert authority.state_path.read_bytes() == config_bytes[account]
+        assert (states[account] / "portfolio_context.json").read_bytes() == cache_bytes[account]
+    assert not forbidden_calls
+    assert sorted(sizing_accounts) == sorted(ages)
+    assert len(source_events) == len(ages)
+    assert all(base == tmp_path for base, _event in source_events)
+    assert not (tmp_path / "output_shared" / "state" / "rate_cache.json").exists()
+    return SimpleNamespace(authorities=authorities, manifests=manifests, receipts=receipts,
+        cached=cached, cache_bytes=cache_bytes, provider_calls=provider_calls, evaluation=evaluation)
+
+
+def test_stale_holdings_refresh_preserves_cash_through_real_worker_receipt(tmp_path, monkeypatch):
+    from src.application.portfolio_context_service import portfolio_position_snapshot_errors
+
+    prepared = _prepare_cached_holdings_receipts(tmp_path, monkeypatch, run_id="holdings-fallback", ages={"lx": 400, "sy": 0})
+    assert [call["account"] for call in prepared.provider_calls] == ["lx"]
+    for account, receipt in prepared.receipts.items():
+        payload = receipt["payload"]
+        assert payload["cash_snapshot"]["status"] == "fresh"
+        assert payload["cash_snapshot"] == prepared.cached[account]["cash_snapshot"]
+        assert payload["cash_by_currency"] == prepared.cached[account]["cash_by_currency"]
+        assert payload["cash_by_currency"]["CNY"] == 1000
+        assert payload["position_snapshot_input"] == prepared.cached[account]["position_snapshot_input"]
+        assert receipt["manifest"]["source_as_of_utc"] == prepared.cached[account]["source_observed_at"]
+        assert hashlib.sha256(receipt["payload_bytes"]).hexdigest() == receipt["manifest"]["payload_sha256"]
+        assert portfolio_position_snapshot_errors(payload, account=account) == (["position_snapshot_refresh_unavailable"] if account == "lx" else [])
+        assert payload.get("position_refresh_error") == ("OSError" if account == "lx" else None)

@@ -180,3 +180,61 @@ def test_file_rate_limiter_records_server_rate_limit_cooldown(tmp_path: Path) ->
     elapsed = time.monotonic() - started
 
     assert elapsed >= 0.15
+
+
+@pytest.mark.parametrize("stop", ["deadline", "cancelled"])
+def test_file_lock_contention_does_not_block_other_waiter_control(tmp_path, monkeypatch, stop):
+    fcntl = pytest.importorskip("fcntl")
+    state_path = tmp_path / "limiter.json"
+    gate = _gate(max_calls=1, window_sec=10, max_wait_sec=5, state_path=state_path)
+    first_attempted = threading.Event()
+    second_checked = threading.Event()
+    cancelled = threading.Event()
+    outcomes = {}
+    original = gate._try_acquire_external_locked
+
+    def observe(*args, **kwargs):
+        first_attempted.set()
+        return original(*args, **kwargs)
+
+    def check_cancelled():
+        value = cancelled.is_set()
+        second_checked.set()
+        return value
+
+    def acquire(name, **controls):
+        try:
+            outcomes[name] = gate.acquire(**controls)
+        except Exception as exc:
+            outcomes[name] = exc
+
+    monkeypatch.setattr(gate, "_try_acquire_external_locked", observe)
+    first = threading.Thread(target=acquire, args=("first",))
+    second = None
+    with state_path.with_suffix(".json.lock").open("a+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            first.start()
+            assert first_attempted.wait(1)
+            controls = ({"deadline": time.monotonic() + 0.05} if stop == "deadline"
+                        else {"cancelled": check_cancelled})
+            second = threading.Thread(target=acquire, args=("second",), kwargs=controls)
+            second.start()
+            if stop == "cancelled":
+                assert second_checked.wait(1)
+                cancelled.set()
+            second.join(1)
+            assert not second.is_alive(), "waiter control blocked behind another request's file lock"
+            assert isinstance(outcomes["second"], TimeoutError)
+            assert stop in str(outcomes["second"])
+            assert first.is_alive()
+            assert not state_path.exists(), "blocked/cancelled waiters must not consume quota"
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            first.join(2)
+            if second is not None:
+                second.join(2)
+    assert not first.is_alive()
+    assert isinstance(outcomes["first"], float)
+    assert not gate._waiters
+    assert len(json.loads(state_path.read_text())["timestamps"]) == 1

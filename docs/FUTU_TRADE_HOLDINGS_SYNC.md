@@ -60,12 +60,26 @@ backfill 时才会产生提示。旧 `trade_intake.holdings_sync.enabled` 只保
   成交不产生刷新提示；币种与 `instrument_ref.market` 同源，symbol 无法解析时保持 null，
   不新增独立映射、不用快照或在线查询补推。载荷显式给出 currency 时仍以载荷为准，本契约
   不新增显式值与推导值的改写。
-- Push 在该成交 Inbox 结算且账户锁释放后发送一次；结算失败时，同一 Inbox
-  可在后续重复 push 或 backfill 结算后认领该意图一次。history backfill 完整处理
-  本批成交后，每账户最多发送一次。
-- OM 不维护独立刷新队列、工作线程或 PM 同步状态；现有成交 Inbox 仅保存一次性
-  刷新意图和认领标记，不重试 PM 请求。请求固定超时 2 秒；PM 返回
-  `202 Accepted` 只表示接受提示，不表示持仓已经同步。
+- Push 在该成交 Inbox 结算且账户锁释放后认领提示；结算失败时，同一 Inbox
+  可在后续重复 push 或 backfill 结算后认领该意图。history backfill 完整处理本批成交后，
+  每账户合并为一个逻辑交接，在同一事务内固定成员和首个 request ID；同组失败整体回滚，
+  每账户提交后立即派发，再处理下一账户。
+- OM 不新增独立刷新队列或工作线程；成交 Inbox 同事务保存认领时间及
+  `portfolio_refresh_handoff_request_id`。仅带此新交接标识且未获接收确认的记录，
+  在现有 listener 恢复周期重试相同账户和 request ID；每周期最多恢复 100 个旧交接，
+  通过接收顺序游标翻页后循环回绕，避免持续失败的前页阻塞后续请求。
+  新增成交不会改写已冻结的批次身份。
+  请求固定超时 2 秒，成功后持久保存 `portfolio_refresh_accepted_at_ms`，确认后不再发送。
+  接收或本地确认前的中断、超时和落库失败保留待交接状态；审计失败不撤销已保存的确认。
+- 客户端仅调用 PM 新端点 `/api/v1/futu/holdings/durable-refresh-requests`，
+  不回退旧端点。PM 以 `(account, request_id)` 唯一持久接收后返回 `202 Accepted`，
+  重复提交不会重复入队，已完成请求也不会重新入队；PM 自己负责重启后恢复处理和同步失败重试。
+  accepted 只证明持久接收，不证明持仓同步完成，也不承诺跨 SQLite／飞书恰好一次写入。
+  同步中断后由现有 owner 重新读取最新券商及飞书事实收敛，不重放历史数量增量，不发送用户回执。
+- 部署需先升级 PM 接收端再启用新版 OM（部署另行授权）。旧 PM 返回 404 或返回错误身份时，
+  OM 记录失败并保留新交接待恢复，不尝试旧版非持久接口。禁用 PM 或 dry-run 不认领或重发。
+- 历史只有 `portfolio_refresh_attempted_at_ms`、没有新交接标识的记录，仍属结果不明；
+  不自动清空、不补发。历史恢复必须另有证据和操作授权，不能从时间戳猜测是否实际发出请求。
 - PM 调用失败不会回滚或改写 OM 已记录的成交、期权或生命周期事实；PM 的既有
   早晚全量同步仍是最终对账兜底。
 - 成交写入时冻结公式费用；持久化成功后按该成交的 canonical
@@ -111,6 +125,9 @@ identity 幂等入账；它不会按裸 deal ID、合约或端口绑定原隔离
 普通正价期权成交缺少 `position_effect` 时，由 OM 账本判断：买入先平空、余额开多，
 卖出先平多、余额开空；支持一笔跨零成交。整笔分配、费用和投影在同一事务完成，
 不将成交数量改成某个子分配的数量。已知的历史顺序缺口保留待核对。
+顺序检查使用有效经济事件；有效撤销及已撤销目标不单独阻断历史成交方向推断，
+仍有效的较晚或同时间成交继续阻断。前序成交完成证明仍读取完整原始历史，
+缺失分配、被撤销成员、无效撤销关系及账本投影不一致继续拒绝入账。
 详细约束见 [Ledger 架构](LEDGER_ARCHITECTURE.md#缺少开平方向的普通期权成交)。
 
 配置了运行环境且允许在线查询的实时成交，入账后在释放经济写锁的回执准备阶段，
@@ -128,6 +145,8 @@ listener 在现有每分钟维护周期核对本地 ledger、lifecycle、来源�
 不构成完成证据。被 void 的终结事件、部分分配、数量冲突及缺失身份继续保留 pending。
 本地收口独立于 OpenD 采集；收口失败单独记录，不改变 lifecycle seal 的恢复状态。
 
+共享 audit 中的 `not_option_deal` 不能仅凭成交 ID 收口：同一条记录必须证明与 pending 相同的逻辑账户、物理账户和成交来源，所有显式身份声明须一致。raw `account` 的逻辑或旧版物理角色仅由该条记录的可信 producer context 或已存 normalized 双证据确定，不读取当前映射补历史身份；身份不足或冲突继续保留 pending。条目自身已有的显式 `not_option_deal` 分类继续有效。
+
 `./om run trade-intake --reconcile-state --dry-run` 提供只读预览；明确授权后使用
 同一入口的 `--apply` 更新状态。`--account` 与重复的 `--deal-id` 可限定范围。
 收口先核对 Inbox 的准确身份、经济内容、当前版本及完整历史凭证集，再更新来源文件；
@@ -140,6 +159,23 @@ listener 在现有每分钟维护周期核对本地 ledger、lifecycle、来源�
 
 此路径保留旧结果和回执证据，不重放成交、不修改持仓事件，也不触发通知或 PM 刷新。
 已有 Inbox 文件无法读取或缺少 schema 时视为证据不可用，不能作为“没有待处理记录”。
+
+来源状态文件只有确实不存在时才按空状态初始化；空对象、缺少部分桶的旧格式仍可读取。
+现有文件无法读取、JSON 损坏、根值不是对象或已存在的状态桶不是对象时，依赖该状态的
+接入、回查或收口明确报错并标出文件路径，保留原文件。写入前在文件锁内重新检查，
+不以新成交覆盖损坏证据。请保留错误与原文件，依据单独核验的有效备份或原始凭证评审恢复，
+不要删除或清空文件来继续接入；`--reconcile-state` 不会自动修复无法解析的文件。
+状态报错也不代表此前已完成的 ledger 或 Inbox 写入被回滚，重试仍须遵循现有幂等流程。
+
+`runtime_status` 与 `om status` 的成交接入摘要用 `state_counts_complete` 和
+`state_availability` 区分可核验计数与未知值。`available` 表示所计来源的状态均可读；
+`partial` 表示只有部分来源可读；`unavailable` 表示所需状态均不可核验；
+`not_required` 表示来源均停用且没有历史状态。其中两种未知情形（`partial`、
+`unavailable`）的公开 processed、failed、unresolved、pending 和三项 receipt 计数
+全部返回 `null`，CLI 显示 `-`，不把已知小计当完整总量。停用来源的有效历史仍计入。
+真正缺文件仍允许首次启动，单凭缺失不会新增运行故障告警；启用来源的损坏或不可读状态
+会报告 `TRADE_INTAKE_STATE_UNAVAILABLE`。这些只读诊断不初始化或修复文件，
+也不以 listener 心跳、账本对账或通知状态代替状态文件的计数证据。
 
 ## 生命周期观察隔离与一次性历史修复
 
@@ -465,7 +501,18 @@ SDK 转换丢字段。无身份记录只保留证据，关联必须经既有证�
 只对已明确分类且确认可安全重试的临时故障沿用 durable 重试；本轮不增加进程内 sleep
 或第二套快速重试政策。首发成功率主要通过修复身份与锁缺陷提升。
 
+股票先到的生命周期 open-lot fallback 仅使用同一规范化逻辑账户与 canonical 标的的 lot，
+并在数量聚合前排除开仓事件中可证明的富途物理账户冲突。物理身份读取已有开仓事件的
+`futu_account_id` 与富途 execution account ref；任一已知值冲突都不能参与匹配。
+缺少这些身份资料的 legacy lot 继续兼容，不把 unknown 当成 mismatch，也不将其视为完整身份已获证明。
+已有 case/evidence、数量价格时间条件及后续配对 owner 保持原合同。
+
 ### 普通成交回执与恢复
+
+股票生命周期 fallback 在写入前读取 lot 失败时，不能判定为没有生命周期上下文而跳过。
+该失败保留原异常，沿现有暂态分类与 Inbox 预算重试；非暂态错误要求处理，正常空集合仍按原规则跳过。
+持久恢复仅在原失败结果的 attempt 计数与当前观察完全相同时承认本次尚未写入；
+缺少证明或跨 attempt 的旧结果仍走原 canonical readback，无法核验则保持待核对，不能盲重试。
 
 以现有 Inbox 为唯一持久化 owner。扩展 `receipt_json` 为显式版本的记录，按语义保存
 `pending_retry`、`recorded`、`manual_required`、`verification_pending` 回执，而不是每次异常建立新通知。
@@ -554,6 +601,20 @@ transport 的 `start` 复用已有 SDK 初始化线程，在当前 `queue.get(ti
 提供可选 on_wait 回调；只暴露等待机会，不包含业务查询或发送逻辑。source 注入到期函数，
 因此初始化长时间未完成也能恢复通知；回调每次先检查 stop/due，实际工作受批量与发送
 超时约束，异常只进 status，不逃逸中断 SDK 等待。取消后不开始新的通知尝试。
+
+初始化认证证据由 `futu_gateway.build_futu_trade_context` 观察同一 context 的
+`_send_init_connect_sync` 失败返回值，传给本次 listener start；不再从共享
+`FTConsoleLog` 推断来源。builder 返回或失败后停止初始观察，已放弃的 start
+忽略迟到回调。phone/picture/password 分类和 code/message 保持，detail 使用
+上游原始错误消息，不拼造 SDK 日志前缀。普通 broker 调用省略 observer，原 SDK
+返回值、异常、8 秒握手预算和后续重连保留；SDK 升级需复核该私有 hook 的 `(ret, msg)`
+契约。某一来源认证失败仍可按现有协调策略停止全部来源；健康来源因此取消，
+不应被记录为持有另一来源的认证错误。后续健康查询继续负责已建立连接的状态。
+
+多来源协调器在首个来源返回后使用同一个有界关闭期限，并在最终 join 后补收已经入队的
+结果。只有全部结果已收齐且全部 worker 已结束才可返回成功；关闭不完整且没有已知
+非零结果时返回通用失败码 1。已观察到的认证退出码 78 优先，其它已知非零保持原样；
+截止后尚未产生的认证结果不能推定为 78。正常取消及单来源退出语义保持不变。
 
 同步 health 查询须有 SDK 连接等待与请求超时：transport 使用现有
 `set_sync_query_connect_timeout` 设置有限连接等待，并沿用 SDK 请求超时；不能只依靠
@@ -732,6 +793,12 @@ Lifecycle discovery 只冻结到期 lot 并创建 immutable case，不刷新已�
 无 option-close anchor 的 case 在 canonical deadline 后仍 fail closed 为人工复核，但不因
 legacy discovery 重放而改写 broker timing policy 口径。
 
+`om option-positions lifecycle reconcile` 在发现 case 前读取并校验显式提供的
+`--evidence-json`，以及有 evidence 时才消费的可选 `--config`；这些输入加载失败时
+不进入本次 discovery/reconciliation。无 evidence 仍独立发现 case，合法空对象
+`{}` 仍交给业务校验并可返回 `needs_review`。该顺序不改变前置仓库恢复，也不保证
+后续业务失败时整条命令回滚；已有 case 不会因此被清除。
+
 History backfill 只从本次查询的 Futu account IDs 与 canonical account mapping 导出
 显式账户范围，并对每个账户分别执行 discovery；不向 discovery 传
 `account=None`。任一 configured Futu account ID 缺少 mapping 时，该轮 lifecycle discovery
@@ -763,6 +830,18 @@ US 取 13:00，下午交易仍取 16:00。跳过周末、休市日，美股自�
 date cash flow、交易日历和合约元数据的查询输入、返回码、覆盖范围、行及
 payload hash。任一来源不完整、日历 hash 变化、零价锚点无法在历史成交中
 唯一复核、source claim 不匹配或数量超出冻结余量，统一进入人工复核。
+
+相关股票交割的股数须在转换前证明为有限整数，保留原始数量并按精确绝对值匹配合约乘数。
+数量无法无损校验时，沿用结算观察的数据错误路径，不生成交割候选，也不作为“没有股票交割”的完整证据。
+
+经济匹配的股票成交进入交割候选前，历史成交与历史订单的 normalized receipt
+必须同时为 `complete`（返回码成功、覆盖与分页完整、非 stale、非 fallback cache、无错误）。
+随后以股票成交自身的 `order_id` 唯一匹配同次历史订单，仅接受已有来源分类器明确证明的
+`broker_auto`、`expiry`、`settlement` 或 `is_broker_auto=True`；有订单 ID 的自动交割仍可正常落账。
+客户订单、缺失或未匹配 ID、重复订单或不明来源均使整次 collect 在返回候选前报数据错误并待核查，
+不能让先遇到的合格候选提前写入，也不能通过丢弃不合格行形成无交割的到期证明。
+期权锚点订单不能替代股票订单来源；经济不匹配行仍按原筛选规则忽略。
+该准入不依赖 observation 整体 `complete`，因为合法股票交割本身也会使该值为 False。
 
 ### 股票成交先到与提前指派配对（2026-09-29 设计）
 
@@ -1828,6 +1907,14 @@ A1–A8 是验收要求。源码、隔离测试、真实 broker 样本和生产�
 7. 美团 HK 五个 500 股候选须由真实成交入口进入隔离账本。无唯一证据就待人工；精确意图仍需排除竞争；确认只关联目标分支的 500 股。保留 #418 Wheel 启用和 Combo 指派转 Wheel 的同一规划函数。
 
 ### S1：成交状态与冻结证据
+
+成交 detail lookup 在经济写入前把原成交和匹配行的数量、价格分别保存为 Inbox 来源证据。数量别名 `contracts/qty/quantity`、价格别名 `price/execution_price/dealt_price` 按现有精确十进制规则比较；数值等价及真正缺失字段仍可补全，同键或跨别名矛盾、无效已提供数值均阻断自动入账。lookup 观察借用原成交的身份与非经济上下文，完整原始匹配行单独保留，不能把补出的上下文当作券商返回事实。订单摘要仍只补身份，不补成交数量或价格。
+
+原始 Futu、嵌套 `execution_input` 与标准成交输入均按其实际数量、价格字段保存 lookup 观察；保留的原始匹配行用于重算别名错误，不信任临时 `errors` 数组。数量、价格冲突按全部历史 canonical 证据判定。后续缺值、状态缺失或 OK、普通重试不能抹去既有矛盾；无经济矛盾的缺状态记录仍可由可信 OK 恢复。冲突保留在现有 Inbox，待核实，不自动修复历史账本或发送成功回执。
+
+匹配的成交或订单 lookup 与原输入都明确声明 underlying、且按既有规范化规则不等价时，自动接纳进入现有 `identity_needs_review`，原因为 `broker_underlying_symbol_conflict`。应用在当前配置上下文比较原始字段的自定义别名；标准或嵌套成交沿用已声明的 canonical instrument，不被外层原始别名覆盖。仅代码根、显示名或普通 symbol 的差异仍可由查询纠正，POP 等合法别名继续等价。订单观察只保留原始身份来源，不把订单数量、价格当作成交经济事实。
+
+原输入和完整匹配行先保留为来源证据，并与复核状态在同一 Inbox 事务提交；该状态会使旧 claim 的提交复验失败。后续无 lookup 重试、缺状态→OK、关联补充和普通 resume 均不自动解除本项复核。已有冲突原因和 handled 结果不因本项标的复核降级；数量、价格及来源状态的原有冲突分类仍执行，已入账事件不回滚或重写。本项不新增别名持久策略、自动复核解除或历史修复。
 
 
 入口与状态：push/backfill/file 经已有来源绑定，保存 broker+physical account+environment+market+deal ID、经济内容、status 和 provider updateTimestamp。适配器保留协议状态与原始修订。状态表：

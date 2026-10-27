@@ -370,11 +370,30 @@ def poll_wechat_clawbot_once(
     client = client_factory(bot_token=bot_token, base_url=base_url, timeout=timeout_sec)
     current_allowlist = allowed_senders_fn or (lambda: allowed_senders)
     sender_identity = str(store.state_dir.resolve())
-    outbox_retry = _retry_pending_wechat_reply(audit_db=audit_db, client=client,
+    outbox_retry = _retry_pending_wechat_reply(audit_db=audit_db, client=client, reply_enabled=reply_enabled,
         allowed_senders_fn=current_allowlist, config_key=config_key, config_path=config_path,
         bot_config_path=bot_config_path, transport_identity=sender_identity)
     allowed_senders = current_allowlist()
     response = client.get_updates(get_updates_buf=cursor_before)
+    provider_code = response_code(response)
+    if provider_code not in (None, 0) and not response_success(response):
+        return build_response(
+            tool_name="wechat_clawbot.poll_once",
+            ok=False,
+            data={
+                "label": label,
+                "update_count": 0,
+                "processed_count": 0,
+                "reply_count": 0,
+                "cursor_present": bool(cursor_before),
+                "cursor_updated": False,
+                "keepalive": {"attempted": False, "reason": "poll_failed"},
+                "outbox_retry": _status_only(outbox_retry),
+                "results": [],
+            },
+            error={"code": "POLL_FAILED", "message": "WeChat ClawBot getupdates failed"},
+            meta={"provider_response_code": provider_code},
+        )
     received_monotonic = time.monotonic()
     cursor_after = extract_first_string(response, ("get_updates_buf", "getUpdatesBuf"))
     messages = extract_messages(response)
@@ -641,7 +660,7 @@ def serve_wechat_clawbot(
     with _single_instance_lock(lock_path):
         while True:
             try:
-                poll_once_fn(
+                result = poll_once_fn(
                     base=settings.base,
                     label=settings.label,
                     state_dir=settings.state_dir,
@@ -656,6 +675,8 @@ def serve_wechat_clawbot(
                     keepalive_interval_sec=settings.keepalive_interval_sec,
                     timeout_sec=settings.timeout_sec,
                 )
+                if result.get("ok") is False:
+                    LOG.error("failed to process WeChat ClawBot inbound batch")
             except Exception:
                 LOG.exception("failed to process WeChat ClawBot inbound batch")
             batches += 1
@@ -1024,10 +1045,14 @@ def _retry_pending_wechat_reply(
     *,
     audit_db: str | None,
     client: WechatClawbotClient,
+    reply_enabled: bool = True,
     allowed_senders_fn: Callable[[], str | None] | None = None,
     config_key: str | None = None, config_path: str | None = None,
     bot_config_path: str | None = None, transport_identity: str | None = None,
 ) -> dict[str, Any]:
+    if not reply_enabled:
+        return {"attempted": False, "ok": True, "reason": "reply_disabled"}
+
     def authorize(record: dict[str, Any]) -> None:
         check_reply_authorization(record, channel="wechat", current_allowed_senders=allowed_senders_fn or (lambda: None),
             config_key=config_key, config_path=config_path, bot_config_path=bot_config_path,

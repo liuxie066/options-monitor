@@ -305,9 +305,16 @@ def prepare_portfolio_contexts(
                 ).isoformat()
 
         while len(accepted) < len(processes):
-            now = time.monotonic()
             for account, process in processes.items():
-                if account in accepted or process.poll() is None:
+                if account in accepted:
+                    continue
+                if time.monotonic() >= deadline_monotonic:
+                    break
+                returncode = process.poll()
+                # Eligibility depends on observing exit before the shared deadline.
+                if time.monotonic() >= deadline_monotonic:
+                    break
+                if returncode is None:
                     continue
                 accepted.add(account)
                 child_finished_at_utc[account] = datetime.now(timezone.utc).isoformat()
@@ -317,6 +324,7 @@ def prepare_portfolio_contexts(
                     request=worker_requests[account],
                     returncode=process.returncode,
                 )
+            now = time.monotonic()
             if len(accepted) == len(processes) or now >= deadline_monotonic:
                 break
             time.sleep(min(0.02, max(0.001, deadline_monotonic - now)))

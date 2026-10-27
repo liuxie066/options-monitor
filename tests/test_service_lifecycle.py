@@ -1480,3 +1480,29 @@ def test_cancelled_reinstall_leaves_definition_and_no_backup_directory(instance,
     assert result['status'] == 'cancelled' and not result['changed']
     assert path.read_bytes() == original
     assert not (ctx['unit_root'] / '.om-service-backups').exists()
+
+
+@pytest.mark.parametrize("target", ["systemd", "launchd"])
+@pytest.mark.parametrize("confirm", [False, True])
+def test_install_rejects_opend_collision_before_any_effect(instance, tmp_path, target, confirm):
+    from src.application.config_yaml import resolve_yaml_runtime_config
+    from tests.service_deploy_test_support import _two_futu_service_accounts
+
+    source = instance / "config.yaml"
+    doc = yaml.safe_load(source.read_text())
+    doc["accounts"] = dict(zip(("a_b", "a-b"), _two_futu_service_accounts(tmp_path).values()))
+    for index, account in enumerate(doc["accounts"].values()):
+        account["futu"]["account_id"] = f"REAL_{12345678 + index}"
+    doc["markets"]["us"]["accounts"] = ["a_b", "a-b"]
+    source.write_text(yaml.safe_dump(doc))
+    config, _ = resolve_yaml_runtime_config(repo_root=REPO, market="us", config_path=source)
+    (instance / "config.us.json").write_text(json.dumps(config))
+    ctx, manager = context(instance, tmp_path, target)
+    ctx["include_opend"] = True
+    before = {path.relative_to(tmp_path): path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")}
+    with pytest.raises(ValueError, match="OpenD service identity collision"):
+        service_lifecycle("install", **ctx, confirm=confirm)
+    assert manager.calls == []
+    assert not ctx["unit_root"].exists()
+    assert not (instance / "service.profile.json").exists()
+    assert {path.relative_to(tmp_path): path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")} == before

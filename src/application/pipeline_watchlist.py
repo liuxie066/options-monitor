@@ -36,7 +36,7 @@ from src.application.combo_yield_config import (
     derive_combo_yield_policy,
     resolve_combo_yield_cfg,
 )
-from src.application.symbol_mutations import normalize_symbol_read
+from src.application.symbol_mutations import normalize_symbol_read, split_symbol_whitelist
 from src.application.config_validator import validate_resolved_watchlist_item_runtime_config
 from src.application.prefilters import apply_prefilters
 from src.application.strategy_scan_status import (
@@ -141,10 +141,10 @@ def _enforce_symbol_timeout(
 
 
 def _parse_symbols_whitelist(symbols_arg: str | None) -> set[str] | None:
-    if not symbols_arg:
+    items = split_symbol_whitelist(symbols_arg)
+    if items is None:
         return None
-    items = {normalize_symbol_read(s) for s in str(symbols_arg).split(',') if str(s).strip()}
-    return items or None
+    return {normalize_symbol_read(s) for s in items} or None
 
 
 
@@ -771,6 +771,7 @@ def run_watchlist_pipeline_default(
     experience: bool = False,
     account_display_name: str | None = None,
 ) -> list[dict]:
+    wheel_symbol_filter = _parse_symbols_whitelist(symbols_arg)
     from src.application.config_profiles import apply_profiles
     from src.application.pipeline_context import build_pipeline_context
     from src.application.pipeline_symbol import process_symbol
@@ -935,7 +936,6 @@ def run_watchlist_pipeline_default(
     )
     wheel_capture: dict[str, Any] | None = None
     wheel_read_model = option_snapshot.get("wheel_read_model")
-    wheel_symbol_filter = _parse_symbols_whitelist(symbols_arg)
     if isinstance(wheel_read_model, Mapping) and wheel_symbol_filter is not None:
         wheel_read_model = {
             **dict(wheel_read_model),
@@ -1483,6 +1483,8 @@ def run_watchlist_pipeline_default(
             scan_statuses=normalized_statuses,
             final_candidates=captured_final_candidates,
             candidate_evaluations=captured_candidate_decisions,
+            **({"capacity_fx_evidence": portfolio_snapshot["capacity_fx_evidence"]}
+               if "capacity_fx_evidence" in portfolio_snapshot else {}),
             run_mode=run_mode,
             sealed_at=captured_at,
         )

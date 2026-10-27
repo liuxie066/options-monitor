@@ -65,7 +65,7 @@ def current_wheel_candidate_policy_hash(
         current = build_account_runtime_config(
             base_cfg=dict(config), cfg_path=config_path, account=account,
             markets_to_run=list(dict.fromkeys(str(row.get("broker") or "") for row in scope)),
-            symbols_arg=",".join(str(row.get("symbol") or "") for row in scope),
+            symbols_arg=",".join(str(row.get("symbol") or "") for row in scope) if scope else None,
         )
         if not scope:
             set_watchlist_config(current, [])

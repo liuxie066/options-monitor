@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from tests.cash_evidence_helpers import cash_portfolio
+from candidate_evidence_helpers import delta_evidence
 
 from pathlib import Path
 from typing import Any
@@ -121,6 +122,7 @@ def _run_default_capture(
     pairs: list[dict[str, Any]] | None = None,
     emit_combo_evidence: bool = True,
     emit_status_capture: bool = True,
+    runtime_context: tuple[dict[str, Any], dict[str, Any]] | None = None,
 ) -> None:
     from src.application import pipeline_watchlist as mod
 
@@ -373,7 +375,7 @@ def _run_default_capture(
                 ],
             )
         kwargs["opening_runtime_context_sink_fn"](
-            {
+            runtime_context[0] if runtime_context is not None else {
                 "capacity_authority": {
                     "status": "available",
                     "logical_account": "lx",
@@ -384,7 +386,7 @@ def _run_default_capture(
                 },
                 "exchange_rates": {},
             },
-            {"exchange_rates": {}},
+            runtime_context[1] if runtime_context is not None else {"exchange_rates": {}},
         )
         return []
 
@@ -540,6 +542,7 @@ def _run_wheel_scan_failure_capture(
                     "spread_ratio": 0.0667,
                     "iv_rv_ratio": 1.4,
                     "iv_minus_rv": 0.12,
+                    **delta_evidence(mode="call", observed_at="2026-09-08T14:00:00+00:00"),
                     "earnings_evidence_status": "ready",
                     "earnings_reason_code": None,
                     "earnings_policy_version": "earnings_near_expiry.v1",
@@ -762,6 +765,7 @@ def _run_full_symbol_capture(
     scenario: str,
     account_holds_symbol: bool = True,
     combo_enabled: bool | None = None,
+    success_empty_reason: str = "no_contract_rows",
 ) -> dict[str, list[str] | int]:
     """Run the real watchlist/symbol/status/sealing chain with frozen adapters."""
 
@@ -837,6 +841,7 @@ def _run_full_symbol_capture(
             "opening_contract_reason_codes": [],
             "underlier_observation_status": "ready",
             "snapshot_received_at_utc": "2026-09-08T13:59:00Z",
+            "spot_observed_at_utc": "2026-09-08T13:59:00Z",
             "option_standard_type": "STANDARD",
             "stock_owner": symbol,
             "price_tick": 0.01,
@@ -888,7 +893,7 @@ def _run_full_symbol_capture(
             evidence.update(
                 {
                     "source_outcome": "success_empty",
-                    "reason_code": "no_contract_rows",
+                    "reason_code": success_empty_reason,
                 }
             )
         return evidence
@@ -1730,15 +1735,70 @@ def test_default_pipeline_enforces_combo_capture_contract(
     assert snapshot["opening_status"] == opening_status
 
 
-def test_real_success_empty_reason_is_projected_once_into_sealed_bundle(monkeypatch, tmp_path):
+@pytest.mark.parametrize("reason", ["no_expirations", "no_contract_rows", "no_feasible_strikes"])
+def test_real_success_empty_reason_is_projected_once_into_sealed_bundle(monkeypatch, tmp_path, reason):
     from src.application.candidate_snapshot_manifest import load_candidate_snapshot_bundle
+    from src.application.opening_candidate_snapshot import candidate_universe_summary
+    from src.application.tool_execution import execute_tool
+
     _run_full_symbol_capture(monkeypatch, tmp_path, market="US", symbol="TOST", variant="sp_lc",
-                             scenario="success_empty", opening_mode="put", combo_enabled=False)
+                             scenario="success_empty", opening_mode="put", combo_enabled=False,
+                             success_empty_reason=reason)
     bundle = load_candidate_snapshot_bundle(base=tmp_path, run_id=RUN_ID, account="lx")
     status = bundle["status_index"]["items"][0]
     assert status["reason"] == "no_candidate"
-    assert status["reason_code"] == "no_contract_rows"
-    assert bundle["owners"]["opening"]["scope_results"][0]["reason_code"] == "no_contract_rows"
+    assert status["reason_code"] == reason
+    opening = bundle["owners"]["opening"]
+    assert opening["scope_results"][0]["reason_code"] == reason
+    assert opening["opening_status"] == "no_candidate"
+    assert opening["ranked_candidates"] == []
+    assert candidate_universe_summary(opening) == {"status": "complete", "affected_scopes": []}
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("public explanation must read sealed evidence without rescanning")
+
+    monkeypatch.setattr("src.application.opening_candidate_snapshot.evaluate_opening_candidate_policy", forbidden)
+    response = execute_tool("candidate_filter_explain", {
+        "runtime_root": str(tmp_path), "run_id": RUN_ID, "account": "lx",
+        "symbol": "TOST", "function": "sell_put",
+    })
+    assert response["ok"] is True
+    function = response["data"]["functions"][0]
+    assert function["status"] == "completed"
+    assert function["rejection_reason_counts"] == {}
+    assert function["events"][0]["rule"] == reason
+    assert function["events"][0]["is_rejection"] is False
+
+
+@pytest.mark.parametrize("status,reason", [
+    ("unavailable", "provider_incomplete"), ("failed", "unknown_source_reason"),
+])
+def test_pipeline_public_read_preserves_unavailable_empty_evidence(monkeypatch, tmp_path, status, reason):
+    from src.application.candidate_snapshot_manifest import load_candidate_snapshot_bundle
+    from src.application.opening_candidate_snapshot import candidate_universe_summary
+    from src.application.tool_execution import execute_tool
+
+    _run_default_capture(
+        monkeypatch, tmp_path,
+        symbols=[_symbol_config("NVDA", market="US", combo_enabled=False)],
+        statuses=[_status("NVDA", "put", status, reason=reason)],
+    )
+    bundle = load_candidate_snapshot_bundle(base=tmp_path, run_id=RUN_ID, account="lx")
+    opening = bundle["owners"]["opening"]
+    assert opening["opening_status"] == "data_unavailable"
+    assert opening["scope_results"][0]["reason_code"] == reason
+    assert candidate_universe_summary(opening) == {
+        "status": "partial",
+        "affected_scopes": [{"symbol": "NVDA", "strategy_mode": "put", "reason_code": reason}],
+    }
+    response = execute_tool("candidate_filter_explain", {
+        "runtime_root": str(tmp_path), "run_id": RUN_ID, "account": "lx",
+        "symbol": "NVDA", "function": "sell_put",
+    })
+    assert response["ok"] is True
+    function = response["data"]["functions"][0]
+    assert function["status"] == status
+    assert function["events"][0]["rule"] == reason
 
 
 def test_cc_lp_owner_aggregates_not_applicable_and_failed_without_caller_override(monkeypatch, tmp_path):
@@ -1750,3 +1810,51 @@ def test_cc_lp_owner_aggregates_not_applicable_and_failed_without_caller_overrid
                   _status("9992.HK", "combo_yield", "failed", variant="cc_lp", reason="combo_yield_scan_failed")])
     snapshot = load_cc_lp_candidate_snapshot(base=tmp_path, run_id=RUN_ID, account="lx")
     assert snapshot["opening_status"] == "partial_data"
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_default_pipeline_forwards_capacity_fx_evidence_presence(monkeypatch, tmp_path, invalid):
+    from datetime import datetime, timezone
+    from domain.domain.decision_state_fingerprint import canonical_sha256
+    from src.application import current_fx_run
+    from src.application.opening_candidate_snapshot import OpeningCandidateSnapshotError, load_opening_candidate_snapshot
+    from src.infrastructure.exchange_rates import project_exchange_rate_snapshot
+
+    evaluated_at = datetime(2026, 8, 10, 2, 0, tzinfo=timezone.utc)
+    snapshot = {"schema_version": 2, "pairs": {}}
+    digest = canonical_sha256(snapshot)
+    observation = project_exchange_rate_snapshot(snapshot, purpose="capacity", now=evaluated_at)
+    evidence = {
+        "schema_version": 1, "evaluated_at_utc": evaluated_at.isoformat(),
+        "observation_status": "unavailable", "observation": observation,
+        "observation_sha256": canonical_sha256(observation),
+        "usd_per_cny": None, "cny_per_hkd": None,
+        "run_fx_snapshot_sha256": digest, "marker_present": True, "marker_value": None,
+    }
+    portfolio = {
+        "capacity_authority": {
+            "status": "available", "logical_account": "lx", "futu_account_id": "10001",
+            "trd_env": "REAL", "market": "HK", "source": "opend",
+        },
+        "exchange_rates": observation, "fx_snapshot_sha256": digest,
+        "capacity_fx_evidence": None if invalid else evidence,
+    }
+    option = {"exchange_rates": observation, "prepared_authority": {"run_fx_snapshot_sha256": digest}}
+    monkeypatch.setattr(current_fx_run, "load_run_fx_snapshot", lambda **_kwargs: (snapshot, digest))
+    kwargs = {
+        "symbols": [_symbol_config("0700.HK", combo_enabled=False)],
+        "statuses": [_status("0700.HK", "put", "completed")],
+        "runtime_context": (portfolio, option),
+    }
+    if invalid:
+        with pytest.raises(OpeningCandidateSnapshotError, match="capacity FX evidence shape"):
+            _run_default_capture(monkeypatch, tmp_path, **kwargs)
+        assert not _state_path(tmp_path, "opening_candidate_snapshot.json").exists()
+    else:
+        _run_default_capture(monkeypatch, tmp_path, **kwargs)
+        sealed = load_opening_candidate_snapshot(base=tmp_path, run_id=RUN_ID, account="lx")
+        assert sealed["capacity_fx_evidence"] == evidence
+        assert sealed["ranking_inputs"] == {"put": {"candidate_ids": [], "profile": "current_tie_break"}}
+        assert sealed["account"] == "lx"
+        assert sealed["account_config_sha256"] == ACCOUNT_CONFIG_SHA256
+        assert next(d["sha256"] for d in sealed["dependencies"] if d["kind"] == "fx") == digest

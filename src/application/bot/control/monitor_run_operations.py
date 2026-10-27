@@ -141,10 +141,18 @@ def _confirm_operation(*, operation_id: str | None, request: BotInboundRequest, 
         store.mark_failed(operation_id, result=failed)
         raise AgentToolError(code="TOOL_RUNTIME_ERROR", message="监控执行失败。", details=failed) from exc
 
-    status = "applied" if int(result.get("returncode") or 0) == 0 else "failed"
-    result = {**result, "operation_id": operation_id, "status": status}
+    status = result["status"]
+    result = {**result, "operation_id": operation_id}
     if status == "applied":
         store.mark_applied(operation_id, result=result)
+    elif status == "skipped":
+        if not store.mark_skipped(operation_id, result=result):
+            current = store.get(operation_id) or {}
+            raise AgentToolError(
+                code="TOOL_RUNTIME_ERROR",
+                message="监控因市场锁占用跳过，但未能保存跳过结果；请核对操作状态。",
+                details={"operation_id": operation_id, "status": current.get("status")},
+            )
     else:
         store.mark_failed(operation_id, result=result)
     text = render_monitor_run_response(status=status, operation_id=operation_id, payload=payload, preview=preview, result=result)
@@ -157,7 +165,7 @@ def _confirm_operation(*, operation_id: str | None, request: BotInboundRequest, 
     )
     return build_response(
         tool_name="inbound.monitor_run",
-        ok=status == "applied",
+        ok=status in {"applied", "skipped"},
         data={
             "operation_id": operation_id,
             **operation_resolution,
@@ -171,7 +179,7 @@ def _confirm_operation(*, operation_id: str | None, request: BotInboundRequest, 
             "response_text": text,
         },
         error=None
-        if status == "applied"
+        if status in {"applied", "skipped"}
         else build_error_payload(
             AgentToolError(code="MONITOR_RUN_FAILED", message="监控执行失败。", details=result)
         ),
@@ -304,7 +312,14 @@ def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
     root = repo_base()
     runner = MONITOR_RUNNER or _default_monitor_run_runner
     proc = runner(command, cwd=root, timeout_seconds=timeout_seconds + 30)
+    returncode = int(getattr(proc, "returncode", 1))
+    stdout = str(getattr(proc, "stdout", "") or "")
+    status = "failed" if returncode != 0 else "applied"
+    if returncode == 0 and stdout.strip() == "SKIP_LOCKED":
+        status = "skipped"
     return {
+        "status": status,
+        **({"reason": "tick_cron_locked"} if status == "skipped" else {}),
         "market": plan["market"],
         "accounts": list(plan["accounts"]),
         "symbols": list(plan["symbols"]),
@@ -312,8 +327,8 @@ def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
         "timeout_seconds": timeout_seconds,
         "command": plan["display_command"],
         "actual_command": command,
-        "returncode": int(getattr(proc, "returncode", 1)),
-        "stdout": _clip_output(getattr(proc, "stdout", "")),
+        "returncode": returncode,
+        "stdout": _clip_output(stdout),
         "stderr": _clip_output(getattr(proc, "stderr", "")),
     }
 
@@ -380,6 +395,18 @@ def render_monitor_run_response(
             f"通知：{'未发送' if no_send else '按监控规则处理'}",
             f"命令：{command}",
             f"returncode：{int((result or {}).get('returncode') or 0)}",
+            f"command_id: {operation_id}",
+        ]
+        if symbols != "-":
+            lines.insert(3, f"标的：{symbols}")
+        return "\n".join(lines)
+    if status == "skipped":
+        lines = [
+            f"{label}监控因市场锁占用已跳过，本次未运行 tick。",
+            f"市场：{market}",
+            f"账户：{accounts}",
+            f"命令：{command}",
+            f"returncode：{(result or {}).get('returncode', '-')}",
             f"command_id: {operation_id}",
         ]
         if symbols != "-":

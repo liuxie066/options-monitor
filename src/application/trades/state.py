@@ -13,7 +13,7 @@ from src.application.ledger.api import (
     build_lifecycle_attempt_run_seal,
     validate_lifecycle_attempt_run_seal,
 )
-from src.infrastructure.io_utils import atomic_write_json, ensure_dir, read_json, utc_now
+from src.infrastructure.io_utils import atomic_write_json, ensure_dir, utc_now
 from domain.storage.json_io import rotating_private_jsonl_lock
 
 
@@ -26,13 +26,37 @@ def empty_trade_intake_state() -> dict[str, Any]:
 
 
 def load_trade_intake_state(path: str | Path) -> dict[str, Any]:
-    raw = read_json(path, default={})
+    p = Path(path)
+    try:
+        text = p.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        try:
+            p.lstat()
+        except FileNotFoundError:
+            return empty_trade_intake_state()
+        except OSError as stat_exc:
+            raise ValueError(f"cannot read trade intake state at {p}: {stat_exc}") from stat_exc
+        raise ValueError(f"cannot read trade intake state at {p}: {exc}") from exc
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"cannot read trade intake state at {p}: {exc}") from exc
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid trade intake state at {p}: {exc}") from exc
+    return normalize_trade_intake_state_payload(raw, path=p)
+
+
+def normalize_trade_intake_state_payload(raw: Any, *, path: str | Path) -> dict[str, Any]:
+    """Validate decoded state without reading or initializing its storage."""
+    p = Path(path)
     if not isinstance(raw, dict):
-        return empty_trade_intake_state()
+        raise ValueError(f"invalid trade intake state at {p}: root must be an object")
     out = empty_trade_intake_state()
     for key in STATE_BUCKETS:
-        bucket = raw.get(key)
-        out[key] = dict(bucket) if isinstance(bucket, dict) else {}
+        bucket = raw.get(key, {})
+        if not isinstance(bucket, dict):
+            raise ValueError(f"invalid trade intake state at {p}: {key} must be an object")
+        out[key] = dict(bucket)
     return out
 
 
@@ -40,6 +64,7 @@ def write_trade_intake_state(path: str | Path, state: dict[str, Any]) -> Path:
     p = Path(path)
     ensure_dir(p.parent)
     with _trade_intake_state_lock(p):
+        load_trade_intake_state(p)
         _write_trade_intake_state_unlocked(p, state)
     return p
 

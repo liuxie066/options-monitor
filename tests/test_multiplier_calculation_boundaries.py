@@ -24,6 +24,7 @@ BAD = [True, "100.00000000000000001"]
 
 
 def _row(multiplier=100):
+    observed_at = datetime.now(timezone.utc).isoformat()
     return {
         "symbol": "NVDA", "market": "US", "option_type": "put", "expiration": "2027-06-18",
         "dte": 43, "contract_symbol": "US.NVDA270618P00100000", "currency": "USD",
@@ -32,7 +33,8 @@ def _row(multiplier=100):
         "underlier_observation_status": "ready", "option_standard_type": "STANDARD",
         "stock_owner": "US.NVDA", "stock_type": "DRVT", "chain_multiplier": multiplier,
         "snapshot_multiplier": multiplier, "multiplier": multiplier, "opening_contract_status": "ready",
-        "snapshot_received_at_utc": datetime.now(timezone.utc).isoformat(),
+        "snapshot_received_at_utc": observed_at,
+        "spot_observed_at_utc": observed_at,
     }
 
 
@@ -237,3 +239,45 @@ def test_blob_enrichment_preserves_other_multiplier_original_values():
     # Builder and canonical reader both materialize and check the exact CSV hash.
     assert canonical_scan_blob_bytes(payload)
     assert payload["provider_payload"]["rows"][0]["chain_multiplier"] == "100.00000000000000001"
+
+
+@pytest.mark.parametrize("override", [False, True])
+@pytest.mark.parametrize("sign", [-1, 1])
+def test_frozen_blob_materialization_preserves_delta_nextafter(tmp_path, override, sign):
+    import math
+    from src.application.required_data_blobs import (
+        publish_required_data_scan_blob, load_required_data_scan_blob,
+    )
+    from src.application.candidate_scanning import _load_required_data_rows
+    from src.application.candidate_models import CandidateContractInput
+
+    value = sign * math.nextafter(0.4, math.inf)
+    mode = "put" if sign < 0 else "call"
+    provider = {
+        "symbol": "NVDA", "option_type": mode, "expiration": "2027-06-18",
+        "contract_symbol": "US.NVDA270618P00100000" if sign < 0 else "US.NVDA270618C00100000",
+        "strike": 100, "multiplier": None if override else 100.0,
+        "delta": value, "delta_source": "opend_market_snapshot.option_delta",
+        "delta_unit": "fraction", "delta_reason_code": None,
+    }
+    raw = (json.dumps({"symbol": "NVDA", "rows": [provider]},
+                      ensure_ascii=False, indent=2) + "\n").encode()
+    final = pd.DataFrame([{**provider, "multiplier": 100.0}]).to_csv(index=False).encode()
+    ref = publish_required_data_scan_blob(
+        runtime_root=tmp_path, symbol="NVDA", market="US", raw_json_bytes=raw,
+        required_data_csv_bytes=final, columns=list(provider),
+    )
+    loaded = load_required_data_scan_blob(runtime_root=tmp_path, blob_ref=ref)
+    assert bool(loaded["payload"]["projection"]["multiplier_overrides"]) is override
+    assert loaded["required_data_csv_bytes"] == final
+    assert loaded["raw_json_bytes"] == raw
+    parsed = tmp_path / "parsed"
+    parsed.mkdir()
+    (parsed / "NVDA_required_data.csv").write_bytes(loaded["required_data_csv_bytes"])
+    rows = _load_required_data_rows(input_root=tmp_path, symbol="NVDA", mode=mode)
+    candidate = CandidateContractInput.from_row(rows.iloc[0], mode=mode)
+    assert candidate.delta == value
+    assert abs(candidate.delta) > 0.4
+    assert candidate.delta_source == provider["delta_source"]
+    assert candidate.delta_reason_code is None
+    assert candidate.multiplier == 100

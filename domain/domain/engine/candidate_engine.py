@@ -7,7 +7,9 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING
 from typing import Any, Literal
 
+from domain.domain.candidate_defaults import DEFAULT_MAX_ABS_DELTA, validate_max_abs_delta
 from domain.domain.fee_calc import estimate_futu_option_sell_fee
+from domain.domain.strategy_identity import candidate_ranking_profile
 from domain.domain.trade_contract_identity import contract_share_quantity, require_option_multiplier
 
 
@@ -61,6 +63,10 @@ REJECT_RETURN_NET_INCOME = "return_net_income"
 REJECT_RETURN_NET_PREMIUM_CNY = "return_net_premium_cny"
 REJECT_RISK_OPEN_INTEREST = "risk_open_interest"
 REJECT_RISK_VOLUME = "risk_volume"
+REJECT_RISK_DELTA = "risk_delta"
+REJECT_RISK_DELTA_UNAVAILABLE = "risk_delta_unavailable"
+_MAX_ABS_DELTA_UNSET = object()
+
 REJECT_RISK_SPREAD = "risk_spread"
 REJECT_RISK_IV_RV_RATIO = "risk_iv_rv_ratio"
 REJECT_RISK_IV_MINUS_RV = "risk_iv_minus_rv"
@@ -86,6 +92,8 @@ CANDIDATE_REJECT_REASONS: tuple[str, ...] = (
     REJECT_RISK_OPEN_INTEREST,
     REJECT_RISK_VOLUME,
     REJECT_RISK_SPREAD,
+    REJECT_RISK_DELTA,
+    REJECT_RISK_DELTA_UNAVAILABLE,
     REJECT_RISK_IV_RV_RATIO,
     REJECT_RISK_IV_MINUS_RV,
     REJECT_RISK_EARNINGS_UNAVAILABLE,
@@ -233,7 +241,7 @@ def _opening_not_ready_reason(status: str) -> str:
 
 
 def _parse_decision_time(value: Any) -> datetime | None:
-    """Parse a UTC receipt timestamp recorded by OM.
+    """Parse a timezone-aware timestamp used for decision-time evidence.
 
     Decision-time freshness evidence must carry an explicit timezone; naive
     values are rejected rather than guessed against a market clock.
@@ -444,9 +452,36 @@ def validate_opening_contract_evidence(
             threshold="ready",
         )
 
+    decision_now = _decision_now(now_utc)
     validate_opening_quote_freshness(
-        raw, now_utc=now_utc, max_snapshot_age_seconds=max_snapshot_age_seconds,
+        raw, now_utc=decision_now, max_snapshot_age_seconds=max_snapshot_age_seconds,
     )
+
+    spot_observed_text = _first_text(raw, "spot_observed_at_utc")
+    spot_observed = _parse_decision_time(spot_observed_text)
+    if spot_observed is None:
+        raise CandidateCalculationError(
+            REJECT_EVIDENCE_UNAVAILABLE,
+            "OpenD underlier source timestamp is missing or invalid",
+            metric_value={"spot_observed_at_utc": spot_observed_text or None},
+            threshold="present timezone-aware source time",
+        )
+    spot_age = (decision_now - spot_observed).total_seconds()
+    if spot_age < 0:
+        raise CandidateCalculationError(
+            REJECT_EVIDENCE_UNAVAILABLE,
+            "OpenD underlier source timestamp is in the future",
+            metric_value={"spot_age_seconds": spot_age},
+            threshold=">= 0",
+        )
+    # Spot source age has its own fixed limit, independent of option receipt age.
+    if spot_age > 300:
+        raise CandidateCalculationError(
+            REJECT_EVIDENCE_UNAVAILABLE,
+            "OpenD underlier quote is stale relative to the decision moment",
+            metric_value={"spot_age_seconds": spot_age},
+            threshold=300,
+        )
 
     option_type = _first_text(raw, "option_type").lower()
     if not option_type:
@@ -681,6 +716,152 @@ def calculate_opening_candidate_metrics(
     return out
 
 
+def _delta_qualification_rejects(row: dict[str, Any], *, mode: StrategyMode, max_abs_delta: Any) -> list[dict[str, Any]]:
+    cap = validate_max_abs_delta(
+        row.get("policy_max_abs_delta", DEFAULT_MAX_ABS_DELTA)
+        if max_abs_delta is _MAX_ABS_DELTA_UNSET else max_abs_delta
+    )
+    if cap is None:
+        return []
+    raw = row.get("delta")
+    try:
+        value = float(raw) if not isinstance(raw, bool) and isinstance(raw, (int, float)) else None
+    except OverflowError:
+        value = None
+    numeric = value is not None and math.isfinite(value)
+    value = value if numeric else None
+    reason = None
+    if _first_text(row, "delta_source") != "opend_market_snapshot.option_delta":
+        reason = "delta_source_unverified"
+    elif _first_text(row, "delta_unit") != "fraction":
+        reason = "delta_unit_invalid"
+    elif _first_text(row, "delta_reason_code"):
+        reason = _first_text(row, "delta_reason_code")
+    elif not numeric:
+        reason = "delta_missing_or_nonfinite"
+    elif abs(value) > 1:
+        reason = "delta_out_of_range"
+    elif (mode == "put" and value > 0) or (mode == "call" and value < 0):
+        reason = "delta_sign_mismatch"
+    elif _first_text(row, "option_type").lower() != mode:
+        reason = "delta_direction_mismatch"
+    else:
+        decision = _parse_decision_time(row.get("decision_now_utc"))
+        received = _parse_decision_time(row.get("snapshot_received_at_utc"))
+        if decision is None:
+            reason = "delta_decision_time_unavailable"
+        elif received is None:
+            reason = "delta_snapshot_receipt_unavailable"
+        else:
+            age = (decision - received).total_seconds()
+            if age < 0:
+                reason = "delta_snapshot_receipt_future"
+            elif age > 300:
+                reason = "delta_snapshot_receipt_stale"
+    rejects: list[dict[str, Any]] = []
+    if reason or abs(value) > cap:
+        _reject(rejects, stage=STAGE_RISK_FILTER,
+                reason=REJECT_RISK_DELTA_UNAVAILABLE if reason else REJECT_RISK_DELTA,
+                message="Delta evidence is unavailable" if reason else "absolute Delta exceeds configured maximum",
+                metric_value={"delta": value, "reason_code": reason,
+                              "source": _first_text(row, "delta_source") or None,
+                              "unit": _first_text(row, "delta_unit") or None,
+                              "snapshot_received_at_utc": _first_text(row, "snapshot_received_at_utc") or None,
+                              "decision_now_utc": _first_text(row, "decision_now_utc") or None},
+                threshold=cap)
+    return rejects
+
+
+def opening_qualification_rejects(
+    row: dict[str, Any], *, mode: StrategyMode | str, min_net_premium_cny: float | None,
+    max_abs_delta: Any = _MAX_ABS_DELTA_UNSET,
+) -> list[dict[str, Any]]:
+    """Shared capacity, required value and earnings-evidence invariants."""
+    mode_norm = normalize_strategy_mode(mode)
+    src = row
+    rejects: list[dict[str, Any]] = []
+    resolved_min_net_premium_cny = _resolved_policy_float(
+        min_net_premium_cny, src, "policy_min_net_premium_cny", OPENING_CANDIDATE_MIN_NET_PREMIUM_CNY,
+    )
+    if mode_norm == "put":
+        max_new_contracts = _first_float(src, "max_new_contracts")
+        capacity_reason = _first_text(
+            src,
+            "cash_secured_unavailable_reason",
+            "cash_requirement_unavailable_reason",
+            "cash_fx_status",
+        )
+        if max_new_contracts is None or max_new_contracts < 1:
+            _reject(
+                rejects,
+                stage=STAGE_HARD_CONSTRAINTS,
+                reason=REJECT_HARD_CAPACITY_PUT,
+                message=(
+                    f"CSP capacity below one contract: {capacity_reason}"
+                    if capacity_reason
+                    else "CSP capacity below one contract or unavailable"
+                ),
+                metric_value=max_new_contracts,
+                threshold=1,
+            )
+    else:
+        covered_contracts = _first_float(
+            src,
+            "covered_contracts_available",
+            "max_new_contracts",
+        )
+        if covered_contracts is None or covered_contracts < 1:
+            _reject(
+                rejects,
+                stage=STAGE_HARD_CONSTRAINTS,
+                reason=REJECT_HARD_CAPACITY_CALL,
+                message="CC capacity below one contract or unavailable",
+                metric_value=covered_contracts,
+                threshold=1,
+            )
+
+    net_premium_cny = _first_float(src, "net_income_cny")
+    if net_premium_cny is None:
+        _reject(
+            rejects,
+            stage=STAGE_RETURN_FLOOR,
+            reason=REJECT_INPUT_MISSING,
+            message="one-contract net premium in CNY is unavailable",
+            metric_value={"field": "net_income_cny", "reason_code": "net_premium_cny_unavailable"},
+            threshold=resolved_min_net_premium_cny,
+        )
+    earnings_evidence = _evaluate_earnings_policy_evidence(src)
+    if not earnings_evidence["ready"]:
+        _reject(
+            rejects,
+            stage=STAGE_RISK_FILTER,
+            reason=REJECT_RISK_EARNINGS_UNAVAILABLE,
+            message="OpenD earnings coverage is unavailable for the near-expiry window",
+            metric_value=earnings_evidence["metric_value"],
+            threshold="ready",
+        )
+    rejects.extend(_delta_qualification_rejects(src, mode=mode_norm, max_abs_delta=max_abs_delta))
+    return rejects
+
+
+def merge_opening_rejects(policy: list[dict[str, Any]], shared: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Preserve baseline rule order and stable custom-rule order within stages."""
+    rules = (
+        REJECT_HARD_DTE, REJECT_HARD_STRIKE, REJECT_HARD_CAPACITY_PUT, REJECT_HARD_CAPACITY_CALL,
+        REJECT_RETURN_ANNUALIZED, REJECT_INPUT_MISSING, REJECT_RETURN_NET_PREMIUM_CNY,
+        REJECT_RISK_SPREAD, REJECT_RISK_IV_RV_RATIO, REJECT_RISK_IV_MINUS_RV,
+        REJECT_RISK_EARNINGS_UNAVAILABLE, REJECT_RISK_EARNINGS_EVENT, REJECT_RISK_DELTA_UNAVAILABLE, REJECT_RISK_DELTA,
+    )
+    merged = [normalize_candidate_reject(item) for item in policy]
+    for item in shared:
+        if item not in merged:
+            merged.append(item)
+    return sorted(merged, key=lambda item: (
+        CANDIDATE_STAGE_ORDER.index(item["stage"]),
+        rules.index(item["reason"]) if item["reason"] in rules else len(rules),
+    ))
+
+
 def evaluate_opening_candidate_policy(
     raw: dict[str, Any] | Any,
     *,
@@ -694,6 +875,7 @@ def evaluate_opening_candidate_policy(
     min_iv_rv_ratio: float | None = None,
     min_iv_minus_rv: float | None = None,
     max_spread_ratio: float | None = None,
+    max_abs_delta: Any = _MAX_ABS_DELTA_UNSET,
     require_earnings_evidence: bool = True,
     reject_known_earnings: bool = True,
     apply_default_call_strike_cap: bool = True,
@@ -820,42 +1002,11 @@ def evaluate_opening_candidate_policy(
             threshold=effective_max_strike,
         )
 
-    if check_capacity and mode_norm == "put":
-        max_new_contracts = _first_float(src, "max_new_contracts")
-        capacity_reason = _first_text(
-            src,
-            "cash_secured_unavailable_reason",
-            "cash_requirement_unavailable_reason",
-            "cash_fx_status",
-        )
-        if max_new_contracts is None or max_new_contracts < 1:
-            _reject(
-                rejects,
-                stage=STAGE_HARD_CONSTRAINTS,
-                reason=REJECT_HARD_CAPACITY_PUT,
-                message=(
-                    f"CSP capacity below one contract: {capacity_reason}"
-                    if capacity_reason
-                    else "CSP capacity below one contract or unavailable"
-                ),
-                metric_value=max_new_contracts,
-                threshold=1,
-            )
-    elif check_capacity:
-        covered_contracts = _first_float(
-            src,
-            "covered_contracts_available",
-            "max_new_contracts",
-        )
-        if covered_contracts is None or covered_contracts < 1:
-            _reject(
-                rejects,
-                stage=STAGE_HARD_CONSTRAINTS,
-                reason=REJECT_HARD_CAPACITY_CALL,
-                message="CC capacity below one contract or unavailable",
-                metric_value=covered_contracts,
-                threshold=1,
-            )
+    qualification = opening_qualification_rejects(
+        src, mode=mode_norm, min_net_premium_cny=resolved_min_net_premium_cny, max_abs_delta=max_abs_delta,
+    )
+    if check_capacity:
+        rejects.extend(item for item in qualification if item["reason"] in (REJECT_HARD_CAPACITY_PUT, REJECT_HARD_CAPACITY_CALL))
 
     annualized = _first_float(
         src,
@@ -874,16 +1025,8 @@ def evaluate_opening_candidate_policy(
         )
 
     net_premium_cny = _first_float(src, "net_income_cny")
-    if net_premium_cny is None:
-        _reject(
-            rejects,
-            stage=STAGE_RETURN_FLOOR,
-            reason=REJECT_INPUT_MISSING,
-            message="one-contract net premium in CNY is unavailable",
-            metric_value={"field": "net_income_cny", "reason_code": "net_premium_cny_unavailable"},
-            threshold=resolved_min_net_premium_cny,
-        )
-    elif net_premium_cny < resolved_min_net_premium_cny:
+    rejects.extend(item for item in qualification if item["reason"] == REJECT_INPUT_MISSING)
+    if net_premium_cny is not None and net_premium_cny < resolved_min_net_premium_cny:
         _reject(
             rejects,
             stage=STAGE_RETURN_FLOOR,
@@ -928,16 +1071,8 @@ def evaluate_opening_candidate_policy(
 
     if require_earnings_evidence:
         earnings_evidence = _evaluate_earnings_policy_evidence(src)
-        if not earnings_evidence["ready"]:
-            _reject(
-                rejects,
-                stage=STAGE_RISK_FILTER,
-                reason=REJECT_RISK_EARNINGS_UNAVAILABLE,
-                message="OpenD earnings coverage is unavailable for the near-expiry window",
-                metric_value=earnings_evidence["metric_value"],
-                threshold="ready",
-            )
-        elif reject_known_earnings and earnings_evidence["blocking"]:
+        rejects.extend(item for item in qualification if item["reason"] == REJECT_RISK_EARNINGS_UNAVAILABLE)
+        if earnings_evidence["ready"] and reject_known_earnings and earnings_evidence["blocking"]:
             _reject(
                 rejects,
                 stage=STAGE_RISK_FILTER,
@@ -951,6 +1086,7 @@ def evaluate_opening_candidate_policy(
                 threshold="no pending event within six calendar days of expiration",
             )
 
+    rejects.extend(item for item in qualification if item["reason"] in (REJECT_RISK_DELTA, REJECT_RISK_DELTA_UNAVAILABLE))
     decision = build_candidate_decision(
         mode=mode_norm,
         symbol=str(src.get("symbol") or ""),
@@ -962,6 +1098,12 @@ def evaluate_opening_candidate_policy(
     if not check_capacity:
         # Project this evaluation's rejects and resolved bounds, never rerun policy.
         rejected_reasons = {item["reason"] for item in rejects}
+        resolved_max_abs_delta = validate_max_abs_delta(
+            src.get("policy_max_abs_delta", DEFAULT_MAX_ABS_DELTA)
+            if max_abs_delta is _MAX_ABS_DELTA_UNSET else max_abs_delta
+        )
+        delta = _first_float(src, "delta")
+        delta_unavailable = REJECT_RISK_DELTA_UNAVAILABLE in rejected_reasons
         conditions: list[dict[str, Any]] = []
         for name, actual, lower, upper, reason in (
             ("dte", dte, resolved_min_dte, resolved_max_dte, REJECT_HARD_DTE),
@@ -971,6 +1113,8 @@ def evaluate_opening_candidate_policy(
             ("spread_ratio", spread_ratio, None, resolved_max_spread_ratio, REJECT_RISK_SPREAD),
             ("iv_rv_ratio", iv_rv_ratio, resolved_min_iv_rv_ratio, None, REJECT_RISK_IV_RV_RATIO),
             ("iv_minus_rv", iv_minus_rv, resolved_min_iv_minus_rv, None, REJECT_RISK_IV_MINUS_RV),
+            ("abs_delta", abs(delta) if delta is not None and not delta_unavailable else None,
+             None, resolved_max_abs_delta, REJECT_RISK_DELTA_UNAVAILABLE if delta_unavailable else REJECT_RISK_DELTA),
         ):
             if lower is None and upper is None:
                 continue
@@ -1428,13 +1572,14 @@ def explain_candidate_rank(
 ) -> dict[str, Any]:
     mode_norm = normalize_strategy_mode(mode)
     src = row if isinstance(row, dict) else {}
+    profile = candidate_ranking_profile([src], mode=mode_norm)
     rank_key = build_candidate_rank_key(src, mode=mode_norm)
     primary_drivers = [
         "period_net_return_on_cash_basis"
         if mode_norm == "put"
         else "period_net_premium_return"
     ]
-    return {
+    result = {
         "mode": mode_norm,
         "ranking_policy": "candidate_engine",
         "symbol": str(src.get("symbol") or "").strip().upper() or None,
@@ -1463,6 +1608,18 @@ def explain_candidate_rank(
             )
         ),
     }
+
+    if "strategy_core" in src:
+        result["strategy_core"] = src["strategy_core"]
+        result["ranking_profile"] = profile
+    if profile == "concentration_first":
+        result["primary_drivers"] = ["symbol_concentration_after", *primary_drivers]
+        result["primary_driver_labels"] = ["接货后集中度", *result["primary_driver_labels"]]
+        result["rank_reason"] = (
+            "同标的仍按持有期净收益分带选代表合约；跨标的先按接货后集中度从低到高分组，"
+            "未知集中度排后；同集中度组内按收益分带，再比较净接货折价、价差、OI 和净收入"
+        )
+    return result
 
 
 def _reject(
@@ -1622,10 +1779,13 @@ def rank_candidate_rows(
     rows: list[dict[str, Any]],
     *,
     mode: StrategyMode | str,
-    sell_put_ranking_profile: str = "current_tie_break",
+    sell_put_ranking_profile: str | None = None,
     near_return_threshold: float = OPENING_CANDIDATE_NEAR_RETURN_THRESHOLD,
 ) -> list[dict[str, Any]]:
     mode_norm = normalize_strategy_mode(mode)
+    sell_put_ranking_profile = candidate_ranking_profile(
+        rows, mode=mode_norm, explicit_profile=sell_put_ranking_profile,
+    )
     if sell_put_ranking_profile not in SELL_PUT_RANKING_PROFILES:
         raise ValueError(
             f"unsupported CSP ranking profile: {sell_put_ranking_profile}"

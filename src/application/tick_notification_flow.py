@@ -67,6 +67,7 @@ from src.application.multi_tick_finalization import (
 from src.application.notification_delivery_route import notifications_enabled, resolve_notification_delivery_route, notification_reminder_route_key
 from src.application.notification_delivery_adapter import (
     notification_target_reference,
+    resolve_feishu_bot_send_target,
     select_notification_delivery_adapter,
 )
 from src.application.scheduled_notification import (
@@ -1084,6 +1085,7 @@ def _prepare_daily_brief_notification(
                     )
                     scan_outcomes_by_account[account] = scan_outcomes_by_account.get(account, True) and pipeline_reliable
                     pending: list[str] = []
+                    candidate_record_reason: str | None = None
                     persisted: dict[str, Any] | None = None
                     diff: dict[str, Any] = {}
                     failure_source: tuple[str, str] | None = None
@@ -1105,7 +1107,9 @@ def _prepare_daily_brief_notification(
                                 brief_digest=str(persisted["current_brief_digest"]),
                                 candidate_identities=persisted["current_candidate_identities"],
                             )
-                            pending = list(recorded["pending_candidate_identities"])
+                            candidate_record_reason = str(recorded["reason"])
+                            if recorded["applied"]:
+                                pending = list(recorded["pending_candidate_identities"])
                         if fixed_target and blocked_retry_envelope is None and not request.no_send:
                             record_daily_decision_brief_fixed_recovery(
                                 base=request.base,
@@ -1152,6 +1156,8 @@ def _prepare_daily_brief_notification(
                         if scheduled_trigger
                         else {"action": "none", "reason": "non_scheduled_snapshot_only"}
                     )
+                    if candidate_record_reason == "stale_revision" and not fixed_target:
+                        decision = {"action": "none", "reason": "stale_candidate_revision"}
                     action = str(decision["action"])
                     existing_retry = None
                     if scheduled_trigger and not multi_market:
@@ -1249,6 +1255,7 @@ def _prepare_daily_brief_notification(
                                 render_feishu_notification_card(
                                     markdown=card_markdown,
                                     fallback_text=message,
+                                    fallback_open_id=resolve_feishu_bot_send_target(notifications=request.base_cfg.get("notifications")),
                                 )
                                 if feishu_card_delivery
                                 else None
@@ -1319,6 +1326,7 @@ def _prepare_daily_brief_notification(
                             "decision_reason": decision["reason"],
                             "fixed_target": fixed_target or None,
                             "pending_candidate_count": len(pending),
+                            "candidate_record_reason": candidate_record_reason,
                             "pending_delivery_status": pending_delivery_status,
                             "retry_reason": retry.get("reason") if isinstance(retry, dict) else None,
                             "selected_delivery_kind": (
@@ -1538,7 +1546,10 @@ def _rebuild_daily_brief_delivery(
         candidate_identities=identities,
         rendered_message=message,
         rendered_transport=(
-            render_feishu_notification_card(markdown=card_markdown, fallback_text=message)
+            render_feishu_notification_card(
+                markdown=card_markdown, fallback_text=message,
+                fallback_open_id=resolve_feishu_bot_send_target(notifications=request.base_cfg.get("notifications")),
+            )
             if feishu_card_delivery
             else None
         ),

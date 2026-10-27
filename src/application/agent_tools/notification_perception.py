@@ -126,6 +126,10 @@ def _notification_perception_read_tool(
                 "Notification perception audit is partially corrupt; "
                 f"malformed_rows={summary['malformed_count']}."
             )
+        if data.get("continuation_status") == "pagination_limit":
+            warnings.append(
+                "通知历史结果不完整：已达到分页上限，请缩小时间窗口或过滤范围。"
+            )
     return data, warnings, {
         "audit_paths": [
             mask_path(path) for path in data.get("audit_paths") or []

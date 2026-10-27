@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import subprocess
 from pathlib import Path
@@ -176,3 +177,97 @@ def test_systemd_provisioner_requires_separate_root_authority(tmp_path: Path) ->
     provisioner = SystemdCredentialProvisioner(store_root=tmp_path, geteuid=lambda: 501)
     with pytest.raises(Exception, match="root-authorized"):
         provisioner.set(LLM_DEEPSEEK_API_KEY, "test-value", replace=False)
+
+
+@pytest.mark.parametrize("reader_kind", ["provider", "provisioner"])
+@pytest.mark.parametrize("error_number", [None, errno.ENOENT, errno.EACCES, errno.EPERM, errno.EIO, errno.ENOTDIR, errno.ELOOP])
+def test_systemd_status_distinguishes_missing_from_unverifiable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reader_kind: str, error_number: int | None,
+) -> None:
+    target = tmp_path / "om-llm-deepseek-api-key"
+    original_lstat = Path.lstat
+
+    def fail_lstat(path, *args, **kwargs):
+        if path == target:
+            if error_number is None:
+                raise FileNotFoundError("synthetic-secret-and-private-path")
+            raise OSError(error_number, "synthetic-secret-and-private-path")
+        return original_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", fail_lstat)
+    reader = (SystemdCredentialProvider(tmp_path) if reader_kind == "provider"
+              else SystemdCredentialProvisioner(store_root=tmp_path))
+    if error_number in {None, errno.ENOENT}:
+        status = reader.status(LLM_DEEPSEEK_API_KEY)
+        assert status.configured is False
+        assert status.source == ("systemd_credential" if reader_kind == "provider" else "systemd_encrypted_store")
+    else:
+        with pytest.raises(SecretBackendUnavailable) as caught:
+            reader.status(LLM_DEEPSEEK_API_KEY)
+        assert LLM_DEEPSEEK_API_KEY in str(caught.value)
+        assert "synthetic-secret-and-private-path" not in str(caught.value)
+        assert str(tmp_path) not in str(caught.value)
+
+
+@pytest.mark.parametrize("reader_kind", ["provider", "provisioner"])
+@pytest.mark.parametrize("kind", ["missing", "empty", "directory", "symlink", "valid", "limit", "oversize"])
+def test_systemd_status_preserves_metadata_policy_without_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reader_kind: str, kind: str,
+) -> None:
+    from src.infrastructure.secret_store.systemd_credentials import MAX_SECRET_BYTES
+
+    target = tmp_path / "om-llm-deepseek-api-key"
+    if kind == "directory":
+        target.mkdir()
+    elif kind == "symlink":
+        target.symlink_to(tmp_path / "absent-outside")
+    elif kind != "missing":
+        size = {"empty": 0, "valid": 1, "limit": MAX_SECRET_BYTES, "oversize": MAX_SECRET_BYTES + 1}[kind]
+        target.write_bytes(b"x" * size)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("status must not read/decrypt a credential")
+
+    original_open = Path.open
+
+    def guarded_open(path, *args, **kwargs):
+        if path == target:
+            forbidden()
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    reader = (SystemdCredentialProvider(tmp_path) if reader_kind == "provider"
+              else SystemdCredentialProvisioner(store_root=tmp_path, run_command=forbidden))
+    if reader_kind == "provider":
+        monkeypatch.setattr(reader, "get", forbidden)
+    status = reader.status(LLM_DEEPSEEK_API_KEY)
+    expected = kind in {"valid", "limit"} or (kind == "oversize" and reader_kind == "provisioner")
+    assert status.configured is expected
+    assert status.backend == "systemd"
+
+
+@pytest.mark.parametrize("error_number", [errno.ENOENT, errno.EACCES, errno.EIO])
+def test_systemd_status_direct_diagnostics_preserves_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_number: int,
+) -> None:
+    from src.application.secret_store.diagnostics import inspect_secret_credentials
+
+    target = tmp_path / "om-llm-deepseek-api-key"
+    original_lstat = Path.lstat
+
+    def fail_lstat(path, *args, **kwargs):
+        if path == target:
+            raise OSError(error_number, "synthetic-private-credential")
+        return original_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", fail_lstat)
+    spec = credential_spec(LLM_DEEPSEEK_API_KEY)
+    assert spec is not None
+    result = inspect_secret_credentials(provider=SystemdCredentialProvider(tmp_path), specs=(spec,), environ={})
+    assert result["summary"]["ok"] is (error_number == errno.ENOENT)
+    assert result["summary"]["values_exposed"] is False
+    assert result["summary"]["configured_count"] == 0
+    if error_number != errno.ENOENT:
+        assert result["credentials"] == []
+    assert "synthetic-private-credential" not in json.dumps(result)
+    assert str(tmp_path) not in json.dumps(result)

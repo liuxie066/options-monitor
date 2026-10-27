@@ -140,7 +140,10 @@ class OpenDRateGate:
         if self._state_path is None:
             return (False, 0.0)
         wall_now = self._wall_clock()
-        with _external_file_lock(self._state_path, deadline=deadline, cancelled=cancelled):
+        with _external_file_lock(self._state_path, deadline=deadline, cancelled=cancelled, blocking=False) as locked:
+            if not locked:
+                # Let Condition.wait release the gate mutex while the file is busy.
+                return (False, 0.05)
             check_fetch_control(deadline, cancelled)
             payload = self._read_external_payload()
             blocked_until = _as_float(payload.get("blocked_until") if isinstance(payload, dict) else None, 0.0)
@@ -206,7 +209,8 @@ class OpenDRateGate:
 @contextmanager
 def _external_file_lock(
     state_path: Path, *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
-) -> Iterator[None]:
+    blocking: bool = True,
+) -> Iterator[bool]:
     check_fetch_control(deadline, cancelled)
     path = Path(state_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -215,7 +219,13 @@ def _external_file_lock(
     locked = False
     try:
         if fcntl is not None:
-            if deadline is None and cancelled is None:
+            if not blocking:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    yield False
+                    return
+            elif deadline is None and cancelled is None:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
             else:
                 while True:
@@ -226,7 +236,7 @@ def _external_file_lock(
                     except BlockingIOError:
                         wait_fetch_control(0.05, deadline=deadline, cancelled=cancelled)
             locked = True
-        yield
+        yield True
     finally:
         try:
             if fcntl is not None and locked:

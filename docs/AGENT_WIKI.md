@@ -174,7 +174,13 @@ unsafe paths, invalid references and other missing manifest objects retain the
 existing fail-closed treatment. This does not verify blob content.
 
 Pass prior reports in chronological order to obtain a measured growth and
-90-day forecast; one observation remains `insufficient_history`:
+90-day forecast; one observation remains `insufficient_history`.
+
+History with an explicit research-storage status other than `complete` is
+excluded and listed in `rejected_reports`. Older reports without that field
+remain compatible. A top-level `partial_data` caused only by SQLite metadata
+does not disqualify complete research counts; other valid history can still
+support a forecast after an incomplete report is excluded.
 
 ```bash
 ./om research storage-baseline \
@@ -206,6 +212,14 @@ manifests, unsafe paths or missing protected blobs suppress all candidates.
 deletion. Blob-store ancestors (`blobs`, `blobs/sha256`, and shard directories)
 must remain real directories: symlinks or file ancestors cannot be treated as
 reclaimed blobs. An unreadable inventory is an error, never proof of absence.
+Skipped symlinks at protected manifests or their inventoried ancestors (such
+as `state`, account directories, or research directories) suppress all
+candidates with `protected_manifest_symlink_not_followed`; their targets are
+not followed. The exact top-level `output -> output_accounts/<account>`
+compatibility alias remains accepted and reported without traversal. Its
+canonical account directory is inventoried independently, so a skipped link
+there still blocks eligibility. Nested links solely beneath expired,
+non-retained runs retain the existing unprotected status.
 There is no confirm or delete mode.
 
 Historical cleanup has a separate gated preview:
@@ -223,6 +237,11 @@ The first run can omit `--backup-proof` to obtain
 `expected_backup_bindings`; it remains `not_ready` and emits no candidates.
 The proof must describe a standalone, integrity-checked SQLite backup whose
 logical contents and projection/lifecycle bindings match the live ledger.
+The current-decision gate requires migration status `clean`: all canonical
+repair counts must be zero, required indexes/triggers must be present, and the
+stored schema cookie must match the current schema.
+Inventory `ready` means repair can proceed; the unchanged `repair` details
+identify outstanding work and do not establish cleanup readiness.
 This command is preview-only: it never moves, deletes, vacuums, or rewrites
 data, and it has no `--confirm` or `--delete` mode. Even a ready result only
 authorizes a later operator decision. Legacy required-data CSV/base64 files,
@@ -444,6 +463,10 @@ When remote storage is constrained, use the shared Research archive surfaces:
 The default local archive is `output_shared/research/remote_archive/prod/`.
 `pull` is a dry run unless `--write` is passed; inventory and verify do not
 authorize a remote cleanup.
+Verify reports current local structure without rewriting or refreshing the
+source-bound `inventory.latest.json` from `pull --write`. If that evidence is
+missing, repeat `pull --write` from the intended SSH source. Pruning still checks
+the current source identity, local and remote contents, and cleanup plan.
 
 ### Tick Runtime
 
@@ -501,6 +524,10 @@ Prepared portfolio payloads use content-addressed names and a write-once/adopt m
 SHA-256 and passes it to the final scan child; both consumers therefore load the same prepared generation. The loader
 anchors manifest and payload reads to the expected runtime root/run/account through a no-follow directory chain, checks
 the account-config SHA-256, and verifies that Futu portfolio context and `filters.account` match the OM account label.
+New worker results are eligible only when the parent observes their exit strictly before the shared monotonic deadline.
+Startup, polling and earlier result reads consume that budget; an exit first observed at or after the deadline is
+conservatively unavailable, even if the worker actually exited earlier. An in-time observation remains eligible while
+its result is validated; validation, publication and cleanup may finish later. Same-run immutable adoption is unchanged.
 Global Holdings risk uses a separate all-accounts context with source and observation evidence. A config or prepared-authority failure is isolated to its account; healthy accounts remain eligible for
 shared planning and required-data prefetch.
 Historical `output_accounts/<account>/state/config.override.json` files are preserved for forensics but are not read or
@@ -685,6 +712,33 @@ never replaces an already observed `cash_conversion.v1`.
 `net_income_cny` or generic return fields. The migration note is historical
 mapping only, not a callable rollback path.
 
+#### Automatic Order Fee Timing Evidence
+
+`auto_order_fee_attempt` retains one audit record per deduplicated target, with an
+additive `timing` object. The queue item samples `enqueued_at_ms` immediately before
+in-memory insertion; it is not durable trade arrival time. The first observed
+monotonic enqueue sample is retained for duplicates. Recovery-only targets have
+`queue_source=recovery` and unknown enqueue/queue-wait times, including after restart.
+
+`processing`, `terminal_query`, `fee_query`, and `ledger_enrichment` record wall-clock
+`started_at_ms`, `returned_at_ms` or `raised_at_ms`, and monotonic `elapsed_ms`.
+`queue_wait_ms` ends when that target begins processing, including time waiting for
+other targets in the same cycle. Processing is inclusive; nested phase durations
+must not be added to it. Wall timestamps may move backwards when the system clock
+changes; missing clock samples remain null and never affect fee processing.
+
+A provider call returning does not prove fee readiness. An enrichment call returning
+does not prove a commit: inspect the existing reason/status counts. A returned
+`ledger_enrichment` with a committed outcome confirms that the transaction returned,
+but is not the exact SQLite COMMIT instant. Existing `observed_at_ms`, `applied_at_ms`
+and `attempted_at_ms` retain their batch-input semantics. Timing does not replace them.
+
+Timing contains only fixed phase/scalar fields; target identifiers remain represented
+by the existing identity digest. No extra per-phase audit records or broker calls are
+introduced. Enqueue and intermediate samples are in memory until the attempt audit;
+a process exit before that audit loses them. This is diagnostic evidence for future
+attempts, not a historical latency reconstruction or a scheduling improvement.
+
 #### Historical Trade Receipt Compensation
 
 Use the guarded compensation mode only when an already-recorded open trade has
@@ -862,6 +916,8 @@ scripts/              -> operational wrappers only; delegate to src/ or domain/
 
 `runtime_status` exposes `notification_delivery.status` and `reason_codes` separately from overall health. A scheduled notification with no confirmed delivery is `degraded`; `./om status --journal-summary` emits a local `<3>NOTIFICATION_DELIVERY_DEGRADED` journal line for that state. This is a journal signal, so it does not establish external alert delivery when the notification route is missing.
 
+Outer `delivery_mode=none` remains visible in metadata and the private collector warning. When repository attempted or confirmed counts are positive, diagnosis continues through the existing scheduler, no-send, no-content and receipt gates; outer announcement suppression alone does not hide a repository failure, partial send or confirmation. With no positive attempted or confirmed count, outer-none retains `outer_delivery_disabled`. An attempted or ambiguous submission is not confirmed delivery.
+
 ### A Symbol Is Missing
 
 1. Get run/account/symbol from the user or runtime artifact.
@@ -1036,6 +1092,7 @@ Smallest remaining actions, with blockers called out.
 - Scheduler: keep the 10-minute wake-up. Canonical scans run only at `09:40`, eligible whole hours, eligible `HH:30`, and `15:50`; `09:30`, lunch breaks, and other wake-ups do not scan. A process failure relies on a later eligible scheduler slot; it does not invent an off-schedule retry scan.
 - Fixed reports: `09:40`, eligible whole hours, and `15:50` prepare a full user report even with no candidates. A fixed failure prepares an explicit failure report and never projects the previous successful current as this round's result.
 - Candidate alerts: eligible half-hour successful scans send immediately only when `current candidate identities - alerted identities` is non-empty. If fixed-report and new-candidate conditions coincide, the single complete fixed report wins.
+- Candidate identity boundary: reliable `planning_only` scans retain their successful snapshot and planning actions but produce no candidate identities. Only `live_actionable` briefs use the candidate index or the legacy missing/empty-index action fallback. A newer planning snapshot does not replace a frozen older live envelope; pending eligibility and ambiguous exact retries keep their existing delivery lifecycle.
 - Trigger safety: manual/force reliable scans may advance the successful current snapshot for later query and candidate recovery, but they do not create an ordinary delivery envelope, resolve a provider route, or send an ordinary notification. Scheduled display uses the structured target; manual/force never infer a batch from reason text.
 - Persistence order: durable successful outcome plus fixed-target recovery binding, or fixed-failure evidence -> exact scheduled-target watermark -> exact envelope -> provider send -> attempt/ambiguous/confirmed transition. A completed envelope supersedes its recovery binding at the Daily Brief repository boundary.
 - Retry: no-scan wake-ups replay an already persisted exact envelope, or rebuild one missing fixed envelope from its exact target/revision/digest binding. They must not run broker access, pipeline, assembler, candidate detection, or revision persistence; recovery rendering consumes only the bound immutable Brief.

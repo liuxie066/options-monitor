@@ -1,4 +1,6 @@
 from contextlib import closing
+from dataclasses import replace
+from datetime import datetime, timezone
 import json
 import sqlite3
 
@@ -9,6 +11,17 @@ from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.tool_execution import execute_tool
 from tests.test_agent_plugin_smoke import _public_cfg_with_futu
 from tests.test_trade_event_pagination import _event
+
+
+INVALID_JSON_PAYLOADS = [
+    pytest.param("[]", id="array"),
+    pytest.param("null", id="null"),
+    pytest.param("1", id="number"),
+    pytest.param("true", id="boolean"),
+    pytest.param('"text"', id="string"),
+    pytest.param("not json", id="syntax"),
+]
+QUERY_JSON_COLUMNS = [("position_lots", "fields_json"), ("trade_events", "event_json")]
 
 
 def _forbid(*_args, **_kwargs):
@@ -39,12 +52,161 @@ def _payload(config, action):
     return payload
 
 
+def _corrupt_query_payload(path, table, column, payload):
+    targets = {
+        ("position_lots", "fields_json"): ("lot_id", "lot_open"),
+        ("trade_events", "event_json"): ("event_id", "open"),
+        ("assigned_stock_events", "event_json"): ("stock_event_id", "bad"),
+    }
+    key, target = targets[(table, column)]
+    with closing(sqlite3.connect(path)) as conn:
+        for (name,) in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name=?", (table,),
+        ).fetchall():
+            conn.execute('DROP TRIGGER "' + name.replace('"', '""') + '"')
+        for (name,) in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL", (table,),
+        ).fetchall():
+            conn.execute('DROP INDEX "' + name.replace('"', '""') + '"')
+        if table == "assigned_stock_events":
+            conn.execute(
+                "INSERT INTO assigned_stock_events(stock_event_id,account,event_json,trade_time_ms,created_at_ms,updated_at_ms) "
+                "VALUES ('bad','lx',?,1,1,1)", (payload,),
+            )
+        else:
+            changed = conn.execute(f"UPDATE {table} SET {column}=? WHERE {key}=?", (payload, target))
+            assert changed.rowcount == 1
+        conn.commit()
+
+
 @pytest.mark.parametrize("action", ["list", "events", "history", "inspect", "assigned-stock"])
 def test_public_tool_missing_store_never_creates_database(query_store, action):
     path, _, config = query_store
     result = execute_tool("option_positions_read", _payload(config, action))
     assert result["ok"] is False
     assert not path.parent.exists()
+
+
+@pytest.mark.parametrize(
+    "window_payload,expected_window,expected_error",
+    [
+        pytest.param({"query": {"expiration": {"within_days": 0}}}, 0, None, id="nested-zero"),
+        pytest.param({"exp_within_days": 0}, 0, None, id="flat-zero"),
+        pytest.param({"expiration_within_days": 0}, 0, None, id="last-zero"),
+        pytest.param(
+            {"query": {"expiration": {"within_days": 0}}, "exp_within_days": 1, "expiration_within_days": 7},
+            0, None, id="nested-zero-precedence",
+        ),
+        pytest.param({"exp_within_days": 0, "expiration_within_days": 7}, 0, None, id="flat-zero-precedence"),
+        pytest.param(
+            {"query": {"expiration": {"within_days": 1}}, "exp_within_days": 0, "expiration_within_days": 7},
+            1, None, id="nested-positive-precedence",
+        ),
+        pytest.param({"exp_within_days": 1, "expiration_within_days": 0}, 1, None, id="flat-positive-precedence"),
+        pytest.param({"expiration_within_days": 1}, 1, None, id="last-positive"),
+        pytest.param({}, None, None, id="omitted"),
+        pytest.param(
+            {"query": {"expiration": {"within_days": None}}, "exp_within_days": 0, "expiration_within_days": 7},
+            0, None, id="nested-null-fallback-zero",
+        ),
+        pytest.param(
+            {"query": {"expiration": {"within_days": ""}}, "exp_within_days": 1, "expiration_within_days": 7},
+            1, None, id="nested-empty-fallback-positive",
+        ),
+        pytest.param(
+            {"query": {"expiration": {"within_days": None}}, "expiration_within_days": 0},
+            0, None, id="nested-null-fallback-last",
+        ),
+        pytest.param({"expiration_within_days": None}, None, None, id="last-null"),
+        pytest.param(
+            {"query": {"expiration": {"within_days": False}}, "exp_within_days": 1},
+            1, None, id="nested-false-fallback",
+        ),
+        pytest.param(
+            {"query": {"expiration": {"within_days": []}}, "exp_within_days": 1},
+            1, None, id="nested-array-fallback",
+        ),
+        pytest.param(
+            {"query": {"expiration": {"within_days": {}}}, "exp_within_days": 1},
+            1, None, id="nested-object-fallback",
+        ),
+        pytest.param(
+            {"query": {"expiration": {"within_days": 0.0}}, "exp_within_days": 1},
+            1, None, id="nested-float-zero-fallback",
+        ),
+        pytest.param(
+            {"query": {"expiration": {"within_days": "0"}}, "exp_within_days": 1},
+            0, None, id="nested-string-zero",
+        ),
+        pytest.param({"expiration_within_days": False}, 0, None, id="last-false-parsed"),
+        pytest.param({"expiration_within_days": ""}, None, None, id="last-empty-parsed"),
+        pytest.param({"exp_within_days": None}, None, "INPUT_ERROR", id="declared-null-rejected"),
+        pytest.param({"exp_within_days": ""}, None, "INPUT_ERROR", id="declared-empty-rejected"),
+        pytest.param({"expiration_within_days": []}, None, "INPUT_ERROR", id="last-array-parser-error"),
+        pytest.param(
+            {"query": {"expiration": {"within_days": "invalid"}}, "exp_within_days": 1},
+            None, "INPUT_ERROR", id="truthy-invalid-no-fallback",
+        ),
+    ],
+)
+def test_public_position_list_preserves_expiration_window(
+    query_store, monkeypatch, window_payload, expected_window, expected_error,
+):
+    path, _, config = query_store
+    writer = SQLiteOptionPositionsRepository(path)
+    for event_id, symbol, expiration_ymd in (
+        ("us_past", "NVDA", "2026-10-08"),
+        ("us_today", "NVDA", "2026-10-09"),
+        ("us_next", "NVDA", "2026-10-10"),
+        ("us_far", "NVDA", "2026-10-16"),
+        ("hk_past", "0700.HK", "2026-10-09"),
+        ("hk_today", "0700.HK", "2026-10-10"),
+        ("hk_next", "0700.HK", "2026-10-11"),
+        ("hk_far", "0700.HK", "2026-10-17"),
+    ):
+        event = _event(event_id, event_time_ms=1_780_000_000_000, symbol=symbol)
+        writer.upsert_trade_event(replace(
+            event, contract_key=replace(event.contract_key, expiration_ymd=expiration_ymd),
+        ))
+    api.refresh_position_lot_projection(writer)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 9, 17, tzinfo=timezone.utc)
+
+    monkeypatch.setattr("src.application.ledger.read_model.datetime", Clock)
+    monkeypatch.setattr(SQLiteOptionPositionsRepository, "__init__", _forbid)
+    monkeypatch.setattr(SQLiteOptionPositionsRepository, "_connect", _forbid)
+    monkeypatch.setattr("src.application.ledger.bootstrap.load_option_positions_repo", _forbid)
+    with closing(sqlite3.connect(path)) as conn:
+        before = list(conn.iterdump())
+        result = execute_tool("option_positions_read", {**_payload(config, "list"), **window_payload})
+        assert list(conn.iterdump()) == before
+
+    if expected_error:
+        assert result["ok"] is False, result
+        assert result["error"]["code"] == expected_error
+    else:
+        assert result["ok"] is True, result
+        data = result["data"]
+        expected_lot_ids = {
+            0: {"lot_us_today", "lot_hk_today"},
+            1: {"lot_us_today", "lot_us_next", "lot_hk_today", "lot_hk_next"},
+            None: {
+                "lot_us_past", "lot_us_today", "lot_us_next", "lot_us_far",
+                "lot_hk_past", "lot_hk_today", "lot_hk_next", "lot_hk_far",
+            },
+        }[expected_window]
+        assert {row["lot_id"] for row in data["rows"]} == expected_lot_ids
+        assert data["row_count"] == len(data["rows"]) == len(expected_lot_ids)
+        assert data["bootstrap"]["status"] == "read_only"
+        filters = data["filters"]
+        assert filters["query"]["expiration"]["within_days"] == expected_window
+        assert filters["expiration_within_days"] == expected_window
+        if expected_window is not None:
+            assert type(filters["query"]["expiration"]["within_days"]) is int
+            assert type(filters["expiration_within_days"]) is int
 
 
 @pytest.mark.parametrize("action", ["list", "events", "history", "inspect", "assigned-stock"])
@@ -106,11 +268,16 @@ def test_query_reader_reuses_canonical_fields_and_paging(query_store, monkeypatc
         writer.upsert_trade_event(_event(f"event{index}", event_time_ms=1_780_000_000_000 + index))
     api.refresh_position_lot_projection(writer)
     expected = writer.list_position_lots()
+    expected_events = writer.list_trade_events()
     before = path.read_bytes()
     monkeypatch.setattr(SQLiteOptionPositionsRepository, "__init__", _forbid)
     monkeypatch.setattr(SQLiteOptionPositionsRepository, "_connect", _forbid)
     _, reader = api.open_position_query_ledger_from_data_config(base=data_config.parent, data_config=data_config)
-    assert reader.list_position_lots() == expected
+    lots = reader.list_position_lots()
+    assert lots == expected
+    assert [row["lot_id"] for row in lots] == ["lot_event2", "lot_event1", "lot_event0"]
+    assert reader.list_trade_events() == expected_events
+    monkeypatch.setattr(reader, "list_trade_events", _forbid)
     first = api.trade_event_page(reader, payload={"limit": 2}, account="lx", market="us",
                                 authorized_accounts=["lx"], cursor_key="test-key")
     second = api.trade_event_page(reader, payload={"cursor": first["next_cursor"]}, account="lx", market="us",
@@ -150,30 +317,216 @@ def test_required_missing_schema_fails_without_repair(query_store, mutation):
         assert list(conn.iterdump()) == before
 
 
+@pytest.mark.parametrize("payload", INVALID_JSON_PAYLOADS)
 @pytest.mark.parametrize("table,column,read", [
     ("position_lots", "fields_json", "list_position_lots"),
     ("trade_events", "event_json", "list_trade_events"),
     ("assigned_stock_events", "event_json", "list_assigned_stock_events"),
 ])
-def test_invalid_json_is_not_silently_dropped(query_store, table, column, read):
+def test_invalid_json_is_not_silently_dropped(query_store, monkeypatch, table, column, read, payload):
     path, data_config, _ = query_store
     writer = SQLiteOptionPositionsRepository(path)
     writer.upsert_trade_event(_event("open", event_time_ms=1_780_000_000_000))
     api.refresh_position_lot_projection(writer)
-    with sqlite3.connect(path) as conn:
-        for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'").fetchall():
-            conn.execute('DROP TRIGGER "' + name.replace('"', '""') + '"')
-        for (name,) in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL", (table,),
-        ).fetchall():
-            conn.execute('DROP INDEX "' + name.replace('"', '""') + '"')
-        if table == "assigned_stock_events":
-            conn.execute("INSERT INTO assigned_stock_events(stock_event_id,account,event_json,trade_time_ms,created_at_ms,updated_at_ms) VALUES ('bad','lx','not json',1,1,1)")
-        else:
-            conn.execute(f"UPDATE {table} SET {column} = 'not json'")
+    _corrupt_query_payload(path, table, column, payload)
+    monkeypatch.setattr(SQLiteOptionPositionsRepository, "__init__", _forbid)
+    monkeypatch.setattr(SQLiteOptionPositionsRepository, "_connect", _forbid)
+    monkeypatch.setattr("src.application.ledger.bootstrap.load_option_positions_repo", _forbid)
     _, reader = api.open_position_query_ledger_from_data_config(base=data_config.parent, data_config=data_config)
-    with pytest.raises(ValueError):
-        getattr(reader, read)()
+    with closing(sqlite3.connect(path)) as conn:
+        before = list(conn.iterdump())
+        with pytest.raises(ValueError) as error:
+            getattr(reader, read)()
+        if payload != "not json":
+            assert "stored ledger JSON value must be an object" in str(error.value)
+        assert list(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("payload", INVALID_JSON_PAYLOADS)
+@pytest.mark.parametrize("table,column", QUERY_JSON_COLUMNS)
+@pytest.mark.parametrize("action", ["list", "history", "inspect"])
+def test_public_tool_rejects_corrupt_query_payload(query_store, monkeypatch, action, table, column, payload):
+    path, _, config = query_store
+    writer = SQLiteOptionPositionsRepository(path)
+    writer.upsert_trade_event(_event("good", symbol="AAPL", event_time_ms=1_780_000_000_000))
+    writer.upsert_trade_event(_event("open", event_time_ms=1_780_000_000_001))
+    api.refresh_position_lot_projection(writer)
+    request = _payload(config, action)
+    valid = execute_tool("option_positions_read", request)
+    assert valid["ok"] is True, valid
+    if action == "list":
+        assert {row["symbol"] for row in valid["data"]["rows"]} == {"NVDA", "AAPL"}
+    elif action == "history":
+        assert [row["event_id"] for row in valid["data"]["events"]] == ["open"]
+    else:
+        assert {row["record_id"] for row in valid["data"]["current_lots"]} == {"lot_open", "lot_good"}
+
+    _corrupt_query_payload(path, table, column, payload)
+    monkeypatch.setattr(SQLiteOptionPositionsRepository, "__init__", _forbid)
+    monkeypatch.setattr(SQLiteOptionPositionsRepository, "_connect", _forbid)
+    monkeypatch.setattr("src.application.ledger.bootstrap.load_option_positions_repo", _forbid)
+    with closing(sqlite3.connect(path)) as conn:
+        before = list(conn.iterdump())
+        result = execute_tool("option_positions_read", request)
+        assert result["ok"] is False, result
+        assert result["data"] == {}
+        assert result["error"]["code"] == ("INPUT_ERROR" if action == "history" else "INTERNAL_ERROR")
+        if payload != "not json":
+            assert "stored ledger JSON value must be an object" in result["error"]["message"]
+        else:
+            assert "Expecting value" in result["error"]["message"]
+        assert list(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("payload", INVALID_JSON_PAYLOADS)
+@pytest.mark.parametrize("action,table,column", [
+    (action, table, column)
+    for action in ("list", "history", "inspect")
+    for table, column in QUERY_JSON_COLUMNS
+] + [("events", "trade_events", "event_json")])
+def test_cli_rejects_corrupt_query_payload(query_store, monkeypatch, capsys, action, table, column, payload):
+    from src.interfaces.cli.option_positions import main
+
+    path, data_config, _ = query_store
+    writer = SQLiteOptionPositionsRepository(path)
+    writer.upsert_trade_event(_event("good", symbol="AAPL", event_time_ms=1_780_000_000_000))
+    writer.upsert_trade_event(_event("open", event_time_ms=1_780_000_000_001))
+    api.refresh_position_lot_projection(writer)
+    selectors = ["--record-id", "lot_open"] if action == "history" else ["--account", "lx"]
+    argv = ["--data-config", str(data_config), action, *selectors, "--format", "json"]
+    assert main(argv) == 0
+    valid = json.loads(capsys.readouterr().out)
+    if action == "inspect":
+        assert len(valid["current_lots"]) == 2
+    else:
+        assert len(valid) == (1 if action == "history" else 2)
+
+    _corrupt_query_payload(path, table, column, payload)
+    monkeypatch.setattr(SQLiteOptionPositionsRepository, "__init__", _forbid)
+    monkeypatch.setattr(SQLiteOptionPositionsRepository, "_connect", _forbid)
+    monkeypatch.setattr("src.application.ledger.bootstrap.load_option_positions_repo", _forbid)
+    with closing(sqlite3.connect(path)) as conn:
+        before = list(conn.iterdump())
+        with pytest.raises(SystemExit if action == "history" else ValueError) as error:
+            main(argv)
+        if payload != "not json":
+            assert "stored ledger JSON value must be an object" in str(error.value)
+        else:
+            assert "Expecting value" in str(error.value)
+        assert capsys.readouterr().out == ""
+        assert list(conn.iterdump()) == before
+
+
+def test_public_empty_query_is_not_corruption(query_store, monkeypatch, capsys):
+    from src.interfaces.cli.option_positions import main
+
+    path, data_config, config = query_store
+    SQLiteOptionPositionsRepository(path)
+    monkeypatch.setattr(SQLiteOptionPositionsRepository, "__init__", _forbid)
+    monkeypatch.setattr(SQLiteOptionPositionsRepository, "_connect", _forbid)
+    monkeypatch.setattr("src.application.ledger.bootstrap.load_option_positions_repo", _forbid)
+    with closing(sqlite3.connect(path)) as conn:
+        before = list(conn.iterdump())
+        for action in ("list", "history"):
+            result = execute_tool("option_positions_read", _payload(config, action))
+            assert result["ok"] is True, result
+            data = result["data"]
+            assert data["coverage"]["status"] == "complete"
+            assert data["coverage"]["complete_for"] == "full_query"
+            if action == "list":
+                assert data["rows"] == []
+                assert data["row_count"] == 0
+            else:
+                assert data["events"] == []
+                assert data["event_count"] == 0
+                assert data["read_status"] == "not_found"
+        for action in ("list", "events"):
+            assert main(["--data-config", str(data_config), action, "--account", "lx", "--format", "json"]) == 0
+            assert json.loads(capsys.readouterr().out) == []
+        with pytest.raises(SystemExit, match="position lot or event history not found: lot_open"):
+            main(["--data-config", str(data_config), "history", "--record-id", "lot_open", "--format", "json"])
+        assert capsys.readouterr().out == ""
+        assert list(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("table,column,read", [
+    ("position_lots", "fields_json", "list_position_lots"),
+    ("trade_events", "event_json", "list_trade_events"),
+])
+def test_query_reader_accepts_empty_json_object(query_store, monkeypatch, table, column, read):
+    path, data_config, _ = query_store
+    writer = SQLiteOptionPositionsRepository(path)
+    writer.upsert_trade_event(_event("open", event_time_ms=1_780_000_000_000))
+    api.refresh_position_lot_projection(writer)
+    _corrupt_query_payload(path, table, column, "{}")
+    monkeypatch.setattr(SQLiteOptionPositionsRepository, "__init__", _forbid)
+    monkeypatch.setattr(SQLiteOptionPositionsRepository, "_connect", _forbid)
+    monkeypatch.setattr("src.application.ledger.bootstrap.load_option_positions_repo", _forbid)
+    _, reader = api.open_position_query_ledger_from_data_config(base=data_config.parent, data_config=data_config)
+    with closing(sqlite3.connect(path)) as conn:
+        before = list(conn.iterdump())
+        rows = getattr(reader, read)()
+        assert len(rows) == 1
+        assert (rows[0]["fields"] if table == "position_lots" else rows[0]) == {}
+        assert list(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+@pytest.mark.parametrize("table,column,read", [
+    ("position_lots", "fields_json", "list_position_lots"),
+    ("trade_events", "event_json", "list_trade_events"),
+])
+def test_query_readers_preserve_supplied_connection(query_store, monkeypatch, table, column, read, corrupt):
+    path, data_config, _ = query_store
+    writer = SQLiteOptionPositionsRepository(path)
+    writer.upsert_trade_event(_event("open", event_time_ms=1_780_000_000_000))
+    api.refresh_position_lot_projection(writer)
+    if corrupt:
+        _corrupt_query_payload(path, table, column, "[]")
+    monkeypatch.setattr(SQLiteOptionPositionsRepository, "__init__", _forbid)
+    monkeypatch.setattr(SQLiteOptionPositionsRepository, "_connect", _forbid)
+    monkeypatch.setattr("src.application.ledger.bootstrap.load_option_positions_repo", _forbid)
+    _, reader = api.open_position_query_ledger_from_data_config(base=data_config.parent, data_config=data_config)
+    with closing(sqlite3.connect(path)) as observer, closing(reader._connect()) as conn:
+        before = list(observer.iterdump())
+        assert conn.execute("PRAGMA query_only").fetchone()[0] == 1
+        conn.execute("BEGIN")
+        statements = []
+        conn.set_trace_callback(statements.append)
+        monkeypatch.setattr(reader, "_connect", _forbid)
+        if corrupt:
+            with pytest.raises(ValueError, match="stored ledger JSON value must be an object"):
+                getattr(reader, read)(conn=conn)
+        else:
+            assert len(getattr(reader, read)(conn=conn)) == 1
+        assert conn.in_transaction
+        assert conn.execute("SELECT 1").fetchone()[0] == 1
+        assert not any(sql.strip().upper().startswith(("COMMIT", "ROLLBACK")) for sql in statements)
+        assert sum(f"FROM {table}" in sql for sql in statements) == 1
+        assert list(observer.iterdump()) == before
+
+
+def test_public_query_keeps_account_scope(query_store, monkeypatch):
+    path, _, config = query_store
+    writer = SQLiteOptionPositionsRepository(path)
+    writer.upsert_trade_event(_event("open", account="lx", event_time_ms=1_780_000_000_000))
+    writer.upsert_trade_event(_event("foreign", account="sy", event_time_ms=1_780_000_000_001))
+    api.refresh_position_lot_projection(writer)
+    monkeypatch.setattr(SQLiteOptionPositionsRepository, "__init__", _forbid)
+    monkeypatch.setattr(SQLiteOptionPositionsRepository, "_connect", _forbid)
+    monkeypatch.setattr("src.application.ledger.bootstrap.load_option_positions_repo", _forbid)
+    with closing(sqlite3.connect(path)) as conn:
+        before = list(conn.iterdump())
+        result = execute_tool("option_positions_read", _payload(config, "list"))
+        assert result["ok"] is True, result
+        assert [row["account"] for row in result["data"]["rows"]] == ["lx"]
+        denied = execute_tool("option_positions_read", {**_payload(config, "list"), "account": "sy"})
+        assert denied["ok"] is False, denied
+        assert denied["error"]["code"] == "INPUT_ERROR"
+        history = execute_tool("option_positions_read", {**_payload(config, "history"), "record_id": "lot_foreign"})
+        assert history["ok"] is False, history
+        assert history["error"]["code"] == "PERMISSION_DENIED"
+        assert list(conn.iterdump()) == before
 
 
 def test_public_events_does_not_install_pagination_migration(query_store):

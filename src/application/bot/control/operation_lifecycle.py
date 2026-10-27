@@ -46,6 +46,7 @@ def resolve_pending_operation_or_raise(
     not_found_message: str,
     not_found_hint: str,
     candidate_hint: CandidateHintFn,
+    recoverable_statuses: frozenset[str] = frozenset(),
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
     resolution = store.resolve_pending_operation(
         channel=request.channel,
@@ -54,6 +55,7 @@ def resolve_pending_operation_or_raise(
         conversation_id=request.conversation_id,
         explicit_operation_id=operation_id,
         allow_expired=allow_expired,
+        recoverable_statuses=recoverable_statuses,
     )
     details = _operation_resolution_details(resolution)
     status = str(resolution.get("status") or "")
@@ -426,7 +428,7 @@ def _lifecycle_phase(status: str) -> str:
         return "confirm"
     if status == "running":
         return "execute"
-    if status in {"applied", "failed"}:
+    if status in {"applied", "skipped", "failed"}:
         return "verify"
     if status in {"cancelled", "expired"}:
         return "audit"
@@ -450,6 +452,8 @@ def _lifecycle_next_action(status: str) -> str | None:
 def _lifecycle_verify_status(status: str) -> str:
     if status == "applied":
         return "verified_applied"
+    if status == "skipped":
+        return "verified_skipped"
     if status == "cancelled":
         return "verified_cancelled"
     if status == "failed":
@@ -489,6 +493,13 @@ def _lifecycle_stage(stage: str, status: str, *, operation_id: str = "") -> dict
             "confirm": ("complete", "operator_confirmed"),
             "execute": ("complete", "operation_applied"),
             "verify": ("complete", "final_readback_applied"),
+            "audit": ("complete", "operation_result_recorded"),
+        },
+        "skipped": {
+            "preview": ("complete", "preview_saved"),
+            "confirm": ("complete", "operator_confirmed"),
+            "execute": ("skipped", "operation_skipped"),
+            "verify": ("complete", "final_readback_skipped"),
             "audit": ("complete", "operation_result_recorded"),
         },
         "cancelled": {

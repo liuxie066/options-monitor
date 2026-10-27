@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from candidate_evidence_helpers import earnings_evidence
+from candidate_evidence_helpers import delta_evidence, earnings_evidence
 from src.application.covered_call_strategy_risk import (
     enrich_and_filter_covered_call_underwriting,
     evaluate_covered_call_underwriting_row,
@@ -42,10 +42,12 @@ def _candidate(**overrides):
         "open_interest": 100,
         "volume": 20,
         "dte": 30,
-        "strike_above_spot_pct": 0.166667,
     }
+    row.update(delta_evidence(mode="call", observed_at="2026-05-20T15:00:00+00:00", value=0.20))
     row.update(_earnings_evidence())
     row.update(overrides)
+    row["strike_above_spot_pct"] = round((row["strike"] - row["spot"]) / row["spot"], 10)
+    row["strike_upside_margin_pct"] = row["strike_above_spot_pct"]
     return row
 
 
@@ -80,7 +82,7 @@ def test_covered_call_underwriting_enrichment_accepts_and_adds_pricing_fields(tm
     assert top["short_gamma_profile"] == "short_gamma"
     assert top["short_vega_profile"] == "short_vega"
     assert top["covered_notional_cny"] > 0
-    assert top["strike_upside_margin_pct"] == 0.166667
+    assert top["strike_upside_margin_pct"] == top["strike_above_spot_pct"] == 0.1666666667
     assert "call_gap_up_opportunity_cost_cny" not in top
 
 
@@ -88,9 +90,11 @@ def test_covered_call_blocks_near_expiry_but_retains_distant_earnings() -> None:
     cfg = resolve_covered_call_underwriting_config(
         {"strategy": "insurance_underwriting"}
     )
+    # Earnings evaluation consumes rows after the strike-constraint stage.
     near = evaluate_covered_call_underwriting_row(
         _candidate(
             net_income_cny=1_400.0,
+            effective_min_strike=120.0,
             **_earnings_evidence(event_date="2026-06-13"),
         ),
         cfg=cfg,
@@ -98,6 +102,7 @@ def test_covered_call_blocks_near_expiry_but_retains_distant_earnings() -> None:
     distant = evaluate_covered_call_underwriting_row(
         _candidate(
             net_income_cny=1_400.0,
+            effective_min_strike=120.0,
             **_earnings_evidence(event_date="2026-06-01"),
         ),
         cfg=cfg,

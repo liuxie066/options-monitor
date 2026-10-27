@@ -250,6 +250,12 @@ def project_resumable_trade_events(
             allocate_economics=mode == "tail",
         )
         if transition.applied and transition.lot_after is not None:
+            if mode == "tail" and event.event_type == "open" and event.asset_type != "stock":
+                if _effective_open_error(transition.lot_after, ()) is not None:
+                    return _force_full_result(initial_state, reason="tail_effective_open_invalid")
+                # Active state omits finalized members needed by the full Combo oracle.
+                if _canonical_combo_member(event) is not None:
+                    return _force_full_result(initial_state, reason="tail_combo_attribution")
             transitions.append(transition)
             lot_id = transition.lot_after.lot_id
             if lot_id not in retained_by_id:
@@ -267,6 +273,7 @@ def project_resumable_trade_events(
             effective_open_events,
             effective_cash_events,
             economic_accumulator,
+            realized_pnl_by_event,
         ) = _project_effective_economic_allocations(
             validated_events,
             voided_event_ids=voided_event_ids,
@@ -284,6 +291,30 @@ def project_resumable_trade_events(
                         Decimal(0),
                     )
                 )
+        for index, transition in enumerate(transitions):
+            if not transition.applied or transition.lot_after is None:
+                continue
+            before_key = transition.previous_close_event_id or transition.lot_after.open_event_id
+            after_key = (
+                transition.event.event_id
+                if transition.event.event_type in CLOSE_EVENT_TYPES
+                else before_key
+            )
+            if before_key in realized_pnl_by_event and after_key in realized_pnl_by_event:
+                transition = replace(
+                    transition,
+                    lot_before=(
+                        replace(transition.lot_before, realized_pnl=realized_pnl_by_event[before_key])
+                        if transition.lot_before is not None else None
+                    ),
+                    lot_after=replace(transition.lot_after, realized_pnl=realized_pnl_by_event[after_key]),
+                )
+                transitions[index] = transition
+            # Missing effective prefixes retain the chronological structure too:
+            # a later uncorrected close/adjust must replace any earlier snapshot.
+            lot_after = transition.lot_after
+            accumulator.lots_by_id[lot_after.lot_id] = lot_after
+            retained_by_id[lot_after.lot_id] = lot_after
     else:
         finalized_lot_ids = tuple(
             lot_id
@@ -729,6 +760,7 @@ def _project_effective_economic_allocations(
     tuple[TradeEvent, ...],
     tuple[TradeEvent, ...],
     _ProjectionAccumulator,
+    dict[str, Decimal],
 ]:
     """Fold effective opening facts first, then replay terminal economics once."""
 
@@ -850,6 +882,9 @@ def _project_effective_economic_allocations(
             lot_id: None for lot_id in effective_lots
         },
     )
+    realized_pnl_by_event = {
+        lot.open_event_id: lot.realized_pnl for lot in effective_lots.values()
+    }
     allocations: list[OptionEconomicAllocation] = []
     for event in surviving:
         if event.event_type not in CLOSE_EVENT_TYPES:
@@ -857,6 +892,7 @@ def _project_effective_economic_allocations(
         target_lot_id = str(event.target_lot_id or "")
         if target_lot_id not in replay.lots_by_id:
             continue
+        lot_before = replay.lots_by_id[target_lot_id]
         allocation = _apply_close_event(
             event,
             lots_by_id=replay.lots_by_id,
@@ -870,6 +906,11 @@ def _project_effective_economic_allocations(
             diagnostics=diagnostics,
             allocate_economics=True,
         )
+        lot_after = replay.lots_by_id[target_lot_id]
+        # Economic diagnostics can suppress an allocation while still accepting
+        # the close. Reuse the lot owner's exact PnL, including its fee contract.
+        if lot_after != lot_before:
+            realized_pnl_by_event[event.event_id] = lot_after.realized_pnl
         if allocation is not None:
             allocations.append(allocation)
             replay.last_close_event_id_by_lot_id[target_lot_id] = event.event_id
@@ -904,6 +945,7 @@ def _project_effective_economic_allocations(
             )
         ),
         replay,
+        realized_pnl_by_event,
     )
 
 
@@ -981,6 +1023,28 @@ def _effective_open_error(
     return None
 
 
+def _canonical_combo_member(event: TradeEvent) -> tuple[str, str] | None:
+    resolved = resolve_strategy_metadata(
+        event.raw_payload,
+        source_id=event.event_id,
+    )
+    if resolved.issues:
+        return None
+    metadata = resolved.metadata
+    group_id = metadata.strategy_group_id or ""
+    role = metadata.leg_role
+    if (
+        not group_id
+        or role not in set().union(*_COMBO_ROLE_SETS.values())
+        or (
+            metadata.strategy != "combo_yield"
+            and not group_id.startswith("combo_yield:")
+        )
+    ):
+        return None
+    return group_id, role
+
+
 def _validate_combo_attribution(
     lots: dict[str, PositionLot],
     events: dict[str, TradeEvent],
@@ -992,26 +1056,10 @@ def _validate_combo_attribution(
         list[tuple[str, PositionLot, TradeEvent, str]],
     ] = {}
     for lot_id, event in events.items():
-        resolved = resolve_strategy_metadata(
-            event.raw_payload,
-            source_id=event.event_id,
-        )
-        if resolved.issues:
+        member = _canonical_combo_member(event)
+        if member is None:
             continue
-        metadata = resolved.metadata
-        strategy = metadata.strategy
-        group_id = metadata.strategy_group_id or ""
-        role = metadata.leg_role
-        canonical_roles = set().union(*_COMBO_ROLE_SETS.values())
-        if (
-            not group_id
-            or role not in canonical_roles
-            or (
-                strategy != "combo_yield"
-                and not group_id.startswith("combo_yield:")
-            )
-        ):
-            continue
+        group_id, role = member
         grouped.setdefault(group_id, []).append(
             (lot_id, lots[lot_id], event, role)
         )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -55,6 +56,12 @@ def _candidate(*, contract_symbol: str, period_return: float) -> dict:
         "mid": 3.0,
         "multiplier": 100,
         "currency": "USD",
+        "delta": -0.3,
+        "delta_source": "opend_market_snapshot.option_delta",
+        "delta_unit": "fraction",
+        "delta_reason_code": None,
+        "snapshot_received_at_utc": NOW.isoformat(),
+        "decision_now_utc": NOW.isoformat(),
         "open_interest": 500,
         "volume": 50,
         "spread_ratio": 0.0667,
@@ -156,6 +163,14 @@ def _seal_snapshot(
     market: str = "US",
     **extra: object,
 ) -> dict:
+    dependencies = _dependencies(base, run_id, account)
+    if isinstance(extra.get("capacity_fx_evidence"), dict):
+        source = _capacity_fx_source()
+        source_hash = canonical_sha256(source)
+        next(d for d in dependencies if d["kind"] == "fx")["sha256"] = source_hash
+        (base / "output_runs" / run_id / "state" / "current_exchange_rates.v1.json").write_text(json.dumps({
+            "schema_version": 1, "run_id": run_id, "snapshot": source, "snapshot_sha256": source_hash,
+        }))
     return seal_opening_candidate_snapshot(
         base=base,
         run_id=run_id,
@@ -164,7 +179,7 @@ def _seal_snapshot(
         physical_account=_physical_account(account, market),
         account_config_sha256="a" * 64,
         strategy_policy_sha256="b" * 64,
-        dependencies=_dependencies(base, run_id, account),
+        dependencies=dependencies,
         scan_statuses=scan_statuses,
         final_candidates=final_candidates,
         run_mode={"scan_mode": "standard", "executable": True},
@@ -539,12 +554,13 @@ def test_terminal_manifest_rejects_minimal_legacy_opening_contract(
         _publish_opening_manifest(tmp_path, legacy)
 
 
-def test_empty_result_is_a_sealed_no_candidate_snapshot(tmp_path: Path) -> None:
+@pytest.mark.parametrize("reason", ["no_expirations", "no_contract_rows", "no_feasible_strikes"])
+def test_empty_result_is_a_sealed_no_candidate_snapshot(tmp_path: Path, reason: str) -> None:
     payload = _seal_snapshot(
         tmp_path,
         run_id="run-empty",
         scan_statuses=[
-            _scan_status("NVDA", "put", "completed", reason="no_expirations",
+            _scan_status("NVDA", "put", "completed", reason=reason,
                          snapshot_id="empty-quote", receipt="quotes/NVDA/receipt.json")
         ],
         final_candidates={"put": []},
@@ -560,8 +576,32 @@ def test_empty_result_is_a_sealed_no_candidate_snapshot(tmp_path: Path) -> None:
     assert warnings == []
     assert function["status"] == "completed"
     assert function["rejection_reason_counts"] == {}
-    assert function["events"][0]["rule"] == "no_expirations"
+    assert function["events"][0]["rule"] == reason
     assert function["events"][0]["is_rejection"] is False
+    assert candidate_universe_summary(payload) == {"status": "complete", "affected_scopes": []}
+    bundle = load_candidate_snapshot_bundle(base=tmp_path, run_id="run-empty", account="lx")
+    assert bundle["owners"]["opening"]["scope_results"][0]["reason_code"] == reason
+    assert bundle["status_index"]["items"][0]["reason_code"] == reason
+
+
+@pytest.mark.parametrize("status,reason", [
+    ("completed", "unknown_source_reason"),
+    ("unavailable", "provider_incomplete"),
+    ("failed", "unknown_source_reason"),
+])
+def test_unknown_and_provider_empty_scopes_remain_unavailable(tmp_path: Path, status: str, reason: str) -> None:
+    payload = _seal_snapshot(
+        tmp_path, run_id="run-unavailable",
+        scan_statuses=[_scan_status("NVDA", "put", status, reason=reason)],
+        final_candidates={"put": []},
+    )
+    assert payload["opening_status"] == "data_unavailable"
+    assert payload["strategy_results"][0]["strategy_status"] == "data_unavailable"
+    assert payload["ranked_candidates"] == []
+    assert candidate_universe_summary(payload) == {
+        "status": "partial",
+        "affected_scopes": [{"symbol": "NVDA", "strategy_mode": "put", "reason_code": reason}],
+    }
 
 
 @pytest.mark.parametrize(
@@ -1164,7 +1204,7 @@ def test_one_blocked_call_scope_preserves_other_call_results(
 
     candidate = _candidate(contract_symbol="NVDA260918C00100000", period_return=0.04)
     candidate.update(
-        option_type="call", strike=100,
+        option_type="call", strike=100, delta=0.3,
         period_net_premium_return=0.04,
         annualized_net_premium_return=0.04 * 365 / 43,
     )
@@ -1221,3 +1261,293 @@ def test_blocked_call_with_only_unheld_siblings_is_still_symbol_scoped(tmp_path)
     assert candidate_universe_summary(payload)["affected_scopes"] == [
         {"symbol": "FUTU", "strategy_mode": "call", "reason_code": "option_close_settlement_pending"}
     ]
+
+
+def _capacity_fx_source():
+    return {"schema_version": 2, "pairs": {
+        pair: {"rate": rate, "source": "tencent_quote",
+               "quote_at_utc": "2026-09-30T06:00:00+00:00",
+               "observed_at_utc": "2026-09-30T06:00:00+00:00"}
+        for pair, rate in (("USDCNY", 7.2), ("HKDCNY", 0.92))
+    }}
+
+
+def _capacity_fx_evidence(*, marker=..., stale=False):
+    from src.infrastructure.exchange_rates import project_exchange_rate_snapshot
+
+    evaluated_at = datetime(2026, 10, 8 if stale else 2, 1, 43, tzinfo=timezone.utc)
+    observation = project_exchange_rate_snapshot(
+        _capacity_fx_source(), purpose="capacity", now=evaluated_at,
+    )
+    evidence = {
+        "schema_version": 1, "evaluated_at_utc": evaluated_at.isoformat(),
+        "observation_status": "unavailable_stale" if stale else "ready",
+        "observation": observation, "observation_sha256": canonical_sha256(observation),
+        "usd_per_cny": None if stale else 1 / 7.2, "cny_per_hkd": None if stale else 0.92,
+        "run_fx_snapshot_sha256": canonical_sha256(_capacity_fx_source()), "marker_present": marker is not ...,
+    }
+    if marker is not ...:
+        evidence["marker_value"] = marker
+    return evidence
+
+
+def _validate_changed_evidence(payload):
+    payload["content_sha256"] = canonical_sha256({k: v for k, v in payload.items() if k != "content_sha256"})
+    validate_opening_candidate_snapshot(payload, expected_run_id=payload["run_id"], expected_account=payload["account"])
+
+
+def test_ranking_inputs_record_actual_preaggregate_order(tmp_path, monkeypatch):
+    from src.application import opening_candidate_snapshot as owner
+
+    rows = [
+        {**_candidate(contract_symbol=s + str(k), period_return=0.03 + k / 1000), "symbol": s}
+        for s in ("NVDA", "AMD") for k in (1, 2)
+    ]
+    seen = []
+    original = owner.rank_candidates
+
+    def rank(source_rows, **kwargs):
+        seen.append(deepcopy(source_rows))
+        return original(source_rows, **kwargs)
+
+    monkeypatch.setattr(owner, "rank_candidates", rank)
+    payload = _seal_snapshot(
+        tmp_path, run_id="ordered", final_candidates={"put": rows},
+        scan_statuses=[_scan_status(s, "put", "completed") for s in ("NVDA", "AMD")],
+    )
+    inputs = payload["ranking_inputs"]["put"]
+    by_id = {d["candidate_id"]: d["normalized_input"] for d in payload["candidate_decisions"]}
+    assert [by_id[cid] for cid in inputs["candidate_ids"]] == seen[0]
+    assert [row["contract_symbol"] for row in seen[0]] == [r["contract_symbol"] for r in rows]
+    assert inputs["profile"] == "current_tie_break"
+    assert [r["facts"]["contract_symbol"] for r in payload["ranked_candidates"]] != [r["contract_symbol"] for r in rows]
+
+
+@pytest.mark.parametrize("invalid", ["null", "mode", "duplicate", "missing", "foreign", "profile", "shape"])
+def test_ranking_inputs_invalid_presence_never_falls_back(tmp_path, invalid):
+    payload = _seal(tmp_path)
+    inputs = payload["ranking_inputs"]
+    if invalid == "null":
+        payload["ranking_inputs"] = None
+    elif invalid == "mode":
+        inputs["call"] = inputs.pop("put")
+    elif invalid == "duplicate":
+        inputs["put"]["candidate_ids"][1] = inputs["put"]["candidate_ids"][0]
+    elif invalid == "missing":
+        inputs["put"]["candidate_ids"].pop()
+    elif invalid == "foreign":
+        inputs["put"]["candidate_ids"][0] = "other-account-candidate"
+    elif invalid == "profile":
+        inputs["put"]["profile"] = "concentration_first"
+    else:
+        inputs["put"]["candidate_ids"] = "not-a-list"
+    with pytest.raises(OpeningCandidateSnapshotError, match="ranking"):
+        _validate_changed_evidence(payload)
+
+
+def test_optional_evidence_legacy_absence_remains_readable(tmp_path):
+    payload = _seal(tmp_path)
+    del payload["ranking_inputs"]
+    assert "capacity_fx_evidence" not in payload
+    _validate_changed_evidence(payload)
+
+
+@pytest.mark.parametrize("stale,marker", [(False, ...), (False, None), (False, "ready"), (True, "unavailable_stale")])
+def test_capacity_fx_seals_and_replays_without_current_time(tmp_path, monkeypatch, stale, marker):
+    from src.infrastructure import exchange_rates as fx
+    from src.application.opening_candidate_snapshot import validate_capacity_fx_evidence
+
+    evidence = _capacity_fx_evidence(marker=marker, stale=stale)
+    payload = _seal_snapshot(
+        tmp_path, run_id="fx", scan_statuses=[_scan_status("NVDA", "put", "completed")],
+        final_candidates={"put": []}, capacity_fx_evidence=evidence,
+    )
+    assert payload["capacity_fx_evidence"] == evidence
+    assert payload["ranking_inputs"] == {"put": {"candidate_ids": [], "profile": "current_tie_break"}}
+    monkeypatch.setattr(fx, "_utc_now", lambda: pytest.fail("sealed FX validation must not read current time"))
+    monkeypatch.setattr(fx, "fetch_market_exchange_rates", lambda: pytest.fail("no provider"))
+    validate_capacity_fx_evidence(evidence, expected_run_fx_snapshot_sha256=evidence["run_fx_snapshot_sha256"])
+    assert load_opening_candidate_snapshot(base=tmp_path, run_id="fx", account="lx") == payload
+
+
+@pytest.mark.parametrize("field,value", [
+    ("schema_version", True), ("evaluated_at_utc", "2026-10-02T01:43:00"),
+    ("evaluated_at_utc", None), ("observation", []), ("observation_sha256", "e" * 64),
+    ("run_fx_snapshot_sha256", "e" * 64), ("usd_per_cny", True), ("usd_per_cny", -0.1),
+    ("usd_per_cny", float("inf")), ("usd_per_cny", 0.2), ("cny_per_hkd", None),
+    ("observation_status", "unavailable"), ("marker_present", 1), ("marker_value", "ready"),
+])
+def test_capacity_fx_validator_rejects_malformed_evidence(field, value):
+    from src.application.opening_candidate_snapshot import validate_capacity_fx_evidence
+
+    evidence = _capacity_fx_evidence()
+    evidence[field] = value
+    with pytest.raises(OpeningCandidateSnapshotError):
+        validate_capacity_fx_evidence(evidence, expected_run_fx_snapshot_sha256=canonical_sha256(_capacity_fx_source()))
+
+
+@pytest.mark.parametrize("invalid", ["null", "marker_missing", "marker_type", "time", "rates", "digest"])
+def test_capacity_fx_invalid_presence_is_integrity_error(tmp_path, invalid):
+    payload = _seal(tmp_path)
+    evidence = _capacity_fx_evidence()
+    payload["capacity_fx_evidence"] = evidence
+    if invalid == "null":
+        payload["capacity_fx_evidence"] = None
+    elif invalid == "marker_missing":
+        evidence["marker_present"] = True
+    elif invalid == "marker_type":
+        evidence.update(marker_present=True, marker_value=0)
+    elif invalid == "time":
+        evidence["observation"]["evaluated_at_utc"] = "2026-10-02T02:43:00+00:00"
+    elif invalid == "rates":
+        evidence["observation"]["rates"]["USDCNY"] = 8
+        evidence["usd_per_cny"] = 1 / 8
+    else:
+        evidence["observation"]["rates"]["USDCNY"] = 8
+    if invalid in {"time", "rates"}:
+        evidence["observation_sha256"] = canonical_sha256(evidence["observation"])
+    with pytest.raises(OpeningCandidateSnapshotError):
+        _validate_changed_evidence(payload)
+
+
+def test_capacity_fx_evidence_tamper_breaks_snapshot_hash(tmp_path):
+    payload = _seal_snapshot(
+        tmp_path, run_id="fx", scan_statuses=[_scan_status("NVDA", "put", "completed")],
+        final_candidates={"put": []}, capacity_fx_evidence=_capacity_fx_evidence(),
+    )
+    payload["capacity_fx_evidence"]["marker_present"] = True
+    with pytest.raises(OpeningCandidateSnapshotError, match="content hash"):
+        validate_opening_candidate_snapshot(payload, expected_run_id="fx", expected_account="lx")
+
+
+def test_new_seal_rejects_explicit_null_capacity_fx_evidence(tmp_path):
+    with pytest.raises(OpeningCandidateSnapshotError, match="capacity FX evidence shape"):
+        _seal_snapshot(
+            tmp_path, run_id="fx-null", scan_statuses=[_scan_status("NVDA", "put", "completed")],
+            final_candidates={"put": []}, capacity_fx_evidence=None,
+        )
+
+
+def test_capacity_fx_snapshot_dependency_generation_is_semantically_bound(tmp_path):
+    payload = _seal(tmp_path)
+    payload["capacity_fx_evidence"] = _capacity_fx_evidence()
+    next(d for d in payload["dependencies"] if d["kind"] == "fx")["sha256"] = "e" * 64
+    with pytest.raises(OpeningCandidateSnapshotError, match="capacity FX run dependency mismatch"):
+        _validate_changed_evidence(payload)
+
+
+def test_ranking_inputs_reject_valid_candidate_from_other_account(tmp_path):
+    payload = _seal(tmp_path, account="lx")
+    foreign = _seal(tmp_path, account="sy")
+    payload["ranking_inputs"]["put"]["candidate_ids"][0] = foreign["ranking_inputs"]["put"]["candidate_ids"][0]
+    with pytest.raises(OpeningCandidateSnapshotError, match="ranking inputs accepted set mismatch"):
+        _validate_changed_evidence(payload)
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt", "wrong_run", "wrong_digest", "different_source"])
+def test_capacity_fx_loader_requires_actual_bound_run_source(tmp_path, damage):
+    _seal_snapshot(
+        tmp_path, run_id="fx", scan_statuses=[_scan_status("NVDA", "put", "completed")],
+        final_candidates={"put": []}, capacity_fx_evidence=_capacity_fx_evidence(),
+    )
+    source_path = tmp_path / "output_runs/fx/state/current_exchange_rates.v1.json"
+    envelope = json.loads(source_path.read_text())
+    if damage == "missing":
+        source_path.unlink()
+    elif damage == "corrupt":
+        source_path.write_text("{")
+    else:
+        if damage == "wrong_run":
+            envelope["run_id"] = "other"
+        elif damage == "wrong_digest":
+            envelope["snapshot_sha256"] = "e" * 64
+        else:
+            envelope["snapshot"]["pairs"]["USDCNY"]["rate"] = 8.0
+            envelope["snapshot_sha256"] = canonical_sha256(envelope["snapshot"])
+        source_path.write_text(json.dumps(envelope))
+    with pytest.raises(OpeningCandidateSnapshotError, match="capacity FX run source"):
+        load_opening_candidate_snapshot(base=tmp_path, run_id="fx", account="lx")
+
+
+@pytest.mark.parametrize("change", ["rate", "metadata"])
+def test_capacity_fx_actual_projection_rejects_self_consistent_forgery(tmp_path, change):
+    from src.infrastructure.exchange_rates import project_exchange_rate_snapshot
+
+    evidence = _capacity_fx_evidence()
+    source = _capacity_fx_source()
+    if change == "rate":
+        source["pairs"]["USDCNY"]["rate"] = 8.0
+        evidence["usd_per_cny"] = 1 / 8
+    else:
+        source["pairs"]["USDCNY"]["observed_at_utc"] = "2026-09-30T06:01:00+00:00"
+    evidence["observation"] = project_exchange_rate_snapshot(
+        source, purpose="capacity", now=datetime.fromisoformat(evidence["evaluated_at_utc"]),
+    )
+    evidence["observation_sha256"] = canonical_sha256(evidence["observation"])
+    payload = _seal_snapshot(
+        tmp_path, run_id="fx", scan_statuses=[_scan_status("NVDA", "put", "completed")],
+        final_candidates={"put": []}, capacity_fx_evidence=_capacity_fx_evidence(),
+    )
+    payload["capacity_fx_evidence"] = evidence
+    # Structural validation alone deliberately performs no filesystem lookup.
+    _validate_changed_evidence(payload)
+    _snapshot_path(tmp_path, "fx").write_bytes(_compact_bytes(payload))
+    with pytest.raises(OpeningCandidateSnapshotError, match="observation run source mismatch"):
+        load_opening_candidate_snapshot(base=tmp_path, run_id="fx", account="lx")
+    with pytest.raises(OpeningCandidateSnapshotError, match="observation run source mismatch"):
+        _seal_snapshot(
+            tmp_path / "seal", run_id="fx", scan_statuses=[_scan_status("NVDA", "put", "completed")],
+            final_candidates={"put": []}, capacity_fx_evidence=evidence,
+        )
+
+
+def test_capacity_fx_memory_validation_never_loads_run_source(tmp_path, monkeypatch):
+    from src.application import current_fx_run
+
+    payload = _seal_snapshot(
+        tmp_path, run_id="fx", scan_statuses=[_scan_status("NVDA", "put", "completed")],
+        final_candidates={"put": []}, capacity_fx_evidence=_capacity_fx_evidence(),
+    )
+    monkeypatch.setattr(current_fx_run, "load_run_fx_snapshot", lambda **_kw: pytest.fail("memory validation performed IO"))
+    _validate_changed_evidence(payload)
+
+
+@pytest.mark.parametrize("mode,sign", [("put", -1), ("call", 1)])
+@pytest.mark.parametrize("unverifiable", [False, True])
+def test_delta_rejection_sealed_and_explained_without_rescan(tmp_path, monkeypatch, mode, sign, unverifiable):
+    from domain.domain.engine import evaluate_opening_candidate_policy
+    from src.application.tool_execution import execute_tool
+
+    candidate = _candidate(contract_symbol=f"NVDA260918{'P' if mode == 'put' else 'C'}00100000", period_return=0.04)
+    candidate.update(option_type=mode, strike=100, delta=sign * 0.4001,
+                     period_net_premium_return=0.04, annualized_net_premium_return=0.34,
+                     policy_max_abs_delta=0.4)
+    if unverifiable:
+        candidate["delta_source"] = None
+    decision = evaluate_opening_candidate_policy(candidate, mode=mode)
+    reason = "risk_delta_unavailable" if unverifiable else "risk_delta"
+    assert [item["reason"] for item in decision["rejects"]] == [reason]
+    payload = _seal_snapshot(
+        tmp_path, run_id="delta-rejected", scan_statuses=[_scan_status("NVDA", mode, "completed")],
+        final_candidates={mode: []}, candidate_evaluations={mode: [{"normalized_input": candidate, "opening_decision": decision}]},
+    )
+    assert payload["opening_status"] == ("data_unavailable" if unverifiable else "no_candidate")
+    recorded = payload["candidate_decisions"][0]
+    assert recorded["normalized_input"]["delta"] == sign * 0.4001
+    assert recorded["normalized_input"]["policy_max_abs_delta"] == 0.4
+    assert recorded["normalized_input"]["snapshot_received_at_utc"] == NOW.isoformat()
+    _publish_opening_manifest(tmp_path, payload)
+
+    # Public explanation must read the sealed rejection without recomputing policy.
+    def forbidden(*args, **kwargs):
+        raise AssertionError("explanation must not rescan")
+    monkeypatch.setattr("src.application.opening_candidate_snapshot.evaluate_opening_candidate_policy", forbidden)
+    response = execute_tool("candidate_filter_explain", {
+        "runtime_root": str(tmp_path), "run_id": "delta-rejected", "account": "lx", "symbol": "NVDA", "rule": reason,
+    })
+    assert response["ok"] is True
+    events = [event for function in response["data"]["functions"] for event in function["events"] if event["is_rejection"]]
+    assert len(events) == 1
+    assert events[0]["threshold"] == 0.4
+    assert events[0]["metric_value"]["delta"] == sign * 0.4001
+    assert events[0]["metric_value"]["reason_code"] == ("delta_source_unverified" if unverifiable else None)

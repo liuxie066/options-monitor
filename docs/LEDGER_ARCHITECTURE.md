@@ -23,10 +23,26 @@ trade_events -> deterministic projection -> position_lots
 
 不要直接修改 SQLite 行。修复必须表达为可审计的语义事件，或通过受控 projection rebuild / verify 恢复派生状态。
 
+checkpoint 续算的新期权开仓复用完整重放的有效开仓日期校验；日期不合法或属于 canonical
+Combo group/role 时回退完整历史投影。已终结成员不在活动续算状态中，组合资格由完整历史
+判定；合法单腿暂存保持可用，普通开仓仍可续算。手工及券商开仓预检对 full 候选要求领域和
+发布两种 resumable state 均存在，与 writer 的发布门槛一致。历史更正仍先折叠有效 adjustment
+再校验，current/no-event 读取和 adjustment 的既有 warning 预览规则不变；本契约不修复既有坏历史。
+
 订单费用是同一成交事件的延迟证据，不另建费用事实账本。受控 fee enrichment 是唯一
 允许更新既有事件费用 provenance 的路径：按完整订单组执行 CAS、审计、读回并在同一
 事务重放受影响投影。其他模块不得直接改 `event_json`。下文“Futu 订单身份
 补录”定义一条同样受控的 metadata-only 例外。
+
+旧格式成交接口中，已准入的显式实际费用请求重试时，由同一费用 owner 规范化输入并复用首次冻结证据，
+仍须通过完整事件比较。省略的 writer 冻结字段可以恢复；保留的费用/成交事实变化或
+显式矛盾的冻结字段仍拒绝。重放不补证或更正已存费用，也不产生第二份经济效果。
+
+旧 DTO 经 `record_normalized_trade_event` 直接写入的无 target 普通期权平仓，重试先验证并恢复
+完整历史分配，再沿原费用、汇率及完整事件比较路径确认重复，不重新消耗当前 FIFO 仓位。
+历史组缺失或事实矛盾在同一事务中拒绝；完整历史组包含后来已 void 的成员，相同请求返回
+`created=False`，保留 void 及其有效持仓结果。显式 target、canonical 子事件和标准 execution
+的既有重试规则不变；此恢复不跨越 `record_broker_trade_close` 的预拆分 source 家族。
 
 ## 模块所有权
 
@@ -165,6 +181,18 @@ PM 的持仓同步与通知边界仍由
 不能补零。适配器负责来源精度、时间和合约解析，保留原始证据，不通过四舍五入修补
 来源冲突，不默认乘数为 100。既有浮点事件和投影的存储编码不在本切片批量重写。
 
+adjust 的 `contracts`、`contracts_open`、`contracts_closed` 同样要求精确整数，拒绝小数、
+bool 和非有限值，不经 float 截断或舍入；零、整数字符串及省略/null/空串的既有继承语义保留，
+数量非负与开平仓总数守恒继续校验。`opened_at` 解析和股票 Decimal 股数路径不变。
+晚于部分平仓的权利金 adjust，由 `domain/domain/ledger/projection.py` 复用有效历史重放所得的
+累计 lot `realized_pnl`，同步各 close 前后及 adjust transition、保留行和续算状态，发布与数据库
+快照沿用同一结果。lot PnL 保留既有方向损益减实际平仓费用的定义；不以另扣开仓分摊费用的
+allocation net 替代，不改变数量、事件身份或已平仓状态。缺失有效前缀保留原值和诊断，不补零；
+公开人工调整仍只接受未完全平仓的目标，历史 closed-lot adjust 的完整重放不扩大公开写入权限。
+历史非法数量保留原始事件，完整重放报告 `adjust_patch_invalid` 并阻止投影发布；真实 writer
+失败时整笔事务回滚。adjust 仍是续算 control event：启用可信 checkpoint 时先返回
+`tail_control_event` 再完整重放，未启用时直接完整重放，不支持直接 tail adjust。
+
 期权乘数在原始输入上校验为有限正整数；缺失、null、空串、bool、零、负数、小数及
 非有限值均不能参与经济计算或写入。100、500、1000 使用同一规则，股票的乘数 0 仍表示
 不适用。payload 真正省略乘数时可以沿原有 cache/OpenD 链解析，显式非法值不进入后备来源。
@@ -177,6 +205,12 @@ PM 的持仓同步与通知边界仍由
 不能在快照不可用时替代当前经济事实。lifecycle manifest 的一次选择集先在同一 SQLite
 快照中完成校验，再在一个 writer 事务内写入；失败整批回滚，已有同 hash 回执支持重试。
 预览采用同一校验且只读，提交仍在事务内重查。
+
+普通扫描的账户仓位缓存及共享缓存切片除了 TTL、账户和券商校验，还要求缓存与本次读取的
+当前可信快照各自具有非空且完全相等的 canonical `decision_state_fingerprint`。缺失或不匹配
+沿用既有刷新和失败回退；合法空仓仍可命中。指纹使用既有全局及账户事实范围，不缩窄为
+账户局部版本。本次加载复用同一个当前观察，不承诺观察之后并发写入的全扫描原子性；
+已封存的 prepared context 继续按独立回执契约读取。
 
 费用沿用 `FeeFact` 的实际、估计与缺失语义及 `enrich_order_fees()` 的受控补证合同。
 订单引用与费用分组按 `broker_account_id + external_order_namespace + external_order_id`
@@ -382,6 +416,8 @@ PM 的持仓同步合同，不建设下单系统，也不自动变更生产账�
 
 自动决定保存为 `rule` 来源的零经济量归属证明，附查询窗口、等待时点及证据摘要；人工普通决定仍为 `manual`，不能互相冒充。日常只读视图缺少新查询回执不会推翻已写入的普通证明；迟到的实际另一腿或新的策略竞争证据可重新触发自动决定的归属仲裁；过期 Combo 仍遵守原人工确认边界，人工普通决定仍受保护。自动兜底缺少完整或新鲜证据时不写入。观察复用现有有取消及十秒预算的账户观察进程，provider 查询在账本事务外完成，写入前及提交前由账本统一复验，不新增任务、配置或表。
 
+账户观察先返回基础持仓，再在同一十秒预算内查询可选历史。历史超时、异常或观察进程提前退出时，已收到的基础持仓仍可供既有 Combo/Wheel 路径按原资格复验，普通兜底只收到明确的证据错误；取消不会返回可用持仓。成功取得历史后须再次强制刷新持仓，因此该路径读取两次持仓，只有后一次可与历史组成普通归属证明。及时完成但不完整、错源或过期的新持仓继续按原规则拒绝，不能用较早基础持仓掩盖。
+
 `auto_intake.py` 保留启动、来源协调和已有周期调度。SDK 回调不执行整单费用查询、
 策略扫描、生命周期 provider 初始化或通知网络调用。外部查询先取得有版本的证据，
 写入前由领域与 Ledger owner 验证；不能为了缩小共享锁而取消必要的事务内校验。
@@ -440,10 +476,12 @@ outbox 接受此验证回调，不自行重建归属计算。新 kind 仅可走�
 PM 刷新沿既有 `portfolio_management` 开关、apply、首次 Futu push/backfill 股票
 资格生成，只发送账户与稳定 request ID。处理结果与刷新意图在同一 Inbox 事务保存，
 先于 processed 状态更新；接管处理不能丢掉尚未认领的意图。监听恢复同时读取已处理
-成交中尚未认领的提示，按原来源和物理账户核对资格。Inbox 认领后，在锁外尝试一次；普通
-期权成交不触发 PM，历史文件导入不触发 PM。原请求超时、结果未知或进程在认领后
-崩溃时不自动重发，仍由 PM 的既有全量同步兜底。不能把 PM 提示当成普通成交通知
-增加重试；返回 accepted 只证明 PM 收到提示，不证明持仓已同步。
+成交中尚未认领的提示，按原来源和物理账户核对资格。新认领同事务固定交接 request ID，
+在锁外调用 PM durable 接收端；未确认的新交接由 listener 按相同账户／ID 恢复。
+PM 持久幂等接收后保存确认；历史 attempted-only 结果不明记录保持不动，不自动补发。
+普通期权成交和历史文件导入不触发 PM。accepted 只证明 PM 持久收到提示，不证明持仓
+已同步；PM 用最新事实全量重读收敛，跨系统写入不承诺恰好一次。详见
+[Futu 同步合同](FUTU_TRADE_HOLDINGS_SYNC.md)。
 
 汇率按经济事件发生时点转换后的 `Asia/Shanghai` 自然日归属，同一日期、同一币对
 使用同一汇率，与美股交易日或接收日期无关。晚接收成交和晚到实际费用仍使用原经济
@@ -558,7 +596,7 @@ Inbox 留存各来源版本与冲突输入；费用恢复从 Ledger 的订单欠
 | V1 已领取，V2 冲突先登记；另测提交后才登记 V2 | 前者拒绝自动采用 V1，后者保留原经济结果与冲突；多进程和人工重放不能绕过共享边界 |
 | 领取者退出或旧令牌失效后返回 | 新领取可从持久结果恢复，旧令牌不能提交或回写；Ledger 已提交时不重复应用 |
 | 合约基础字段相同，仅乘数或交割规格不同 | 公共平仓目标选择与写入不消费另一规格的 lot；不支持的形状保留证据 |
-| 普通股票首次 push、重复 push、批量 backfill，或 PM 认领后超时/崩溃 | 沿现有条件触发一次提示，批量每账户至多一次；不重试 PM、不生成期权事件；accepted 不冒充同步完成 |
+| 普通股票首次 push、重复 push、批量 backfill，或 PM 认领后超时/崩溃 | 沿现有条件生成提示，批量每账户一个稳定交接；仅重试未确认的新交接，历史 attempted-only 不补发；不生成期权事件，accepted 不冒充同步完成 |
 | 历史文件首次导入普通平仓，随后重导入并重启 dispatcher | 无新的可投递意图，离线 sender 零调用；既有实时 pending/unknown 平仓的唯一 owner 与状态保留 |
 | 普通非 outbox 回执在 Ledger 提交后、发送前、发送后分别崩溃 | 原经济量不变；可证明未调用时安全恢复，结果不明时保持 unknown；旧回执缺证据不能补发 |
 | 自动重试达到上限后重启，再执行受控本地恢复 | 暂停原因可见，可从保存的版本重新处理；不依赖 provider 返回旧成交，不清冲突、不换成交键 |
@@ -1343,6 +1381,8 @@ CNY 金额继续通过读取校验。上述订单证据路径修正后必须独�
 
 ## 读取语义
 
+账本只读检查的 `trade_event_count` / `position_lot_count` 在对应表缺失或无法读取时保留 `None`（store inspect JSON 为 `null`）；表存在且为空时才为 `0`。健康检查对不可用计数沿用警告；公开运行状态沿用省略未知字段的契约，文本显示 `-`，不补成零。计数可读不代表完整 schema 有效或获准写入，既有多账本歧义检查仍按正行数判断。
+
 运行时风险、Close Advice、Performance 和 Agent tools 从 canonical read model 读取：
 
 - 单 lot 查询保留真实开仓、费用、策略快照和生命周期字段；
@@ -1374,7 +1414,12 @@ Agent 通过 `option_positions_read action=events` 分页读取 canonical `trade
 `trade_time_ms DESC, event_id DESC` 的 keyset cursor，并始终限制在该序号边界内。因此新增事件
 不会插入正在进行的结果流，分页条数可以在 1–20 之间变化，也不会导致已返回成员重复。
 
-这个 snapshot 冻结的是成员集合、筛选字段和排序字段，不是整行 JSON 的历史版本。事件成员
+这个 snapshot 冻结成员集合与筛选字段；排序字段修订后必须重新开始，不保存整行 JSON 的历史版本。
+v2 cursor 在同一 SQLite 读事务中绑定 ingest fence 内、匹配筛选与授权范围的时间修订事件排序键摘要。
+续页发现摘要变化时明确返回 `invalid_cursor` 并要求重新查询，不返回错误的 `snapshot_exhausted`。
+普通追加（包括 fence 外事件的时间修复）、其他查询范围的修复、修复回滚和 no-op 不改变该摘要；
+已存在修订的事件仍可开始新的完整分页。缺少修订证明的旧版 cursor 明确拒绝，重查结果可能重叠。
+摘要读取复用修复事务内持久化的 provenance，不新增分页状态或另一套排序规则。事件成员
 不可删除，`ingest_seq`、事件身份、账户、市场、position effect 和合约筛选字段不可修改；交易
 时间只允许上述 OpenD 证据约束的原位修正，其他时间更新仍不可变。价格等不参与查询的补充字段
 仍可按现有账本语义更新。完整 TradeEvent 的编码与验证继续
@@ -1387,13 +1432,15 @@ Agent 通过 `option_positions_read action=events` 分页读取 canonical `trade
 
 到期短仓不能仅凭“过了 expiry”自动写成 worthless：
 
-- 价外自动关闭需要符合市场时区和报价证据；
-- 价内、平值或缺少 spot 时进入 review；
+- 短 Put/Call 通过既有到期宽限期、身份和数量等前置校验后，维护判定进入 `expiry_assignment_review_required`；当前或事后 spot 的价外、价内、平值仅用于诊断，不能证明到期未指派，缺少 spot 也不能靠补取现价解除复核；
+- 到期未交割/未指派的终结确认由既有 broker close anchor、完整冻结结算观察和 canonical reconciliation/writer 完成，证据规则见 [Futu 成交与持仓同步](FUTU_TRADE_HOLDINGS_SYNC.md)；只有零价 option leg 或自行标记 complete/unassigned 不足以授权维护入口关闭；
 - option leg 与 stock settlement leg 可以异步到达；
 - assignment / exercise 必须有匹配的交割事实；
 - 缺少 broker lifecycle evidence 时，当前配置账户的到期流程要求人工复核。已移出配置的历史外部账户不会被自动到期流程枚举；其未结 lot 须在账户迁移前单独清点并确定归属和处理方案。
 
 到期维护由独立 `auto-close-expired` 服务/定时入口负责，不是普通 `account_run` 或扫描 pipeline 的隐式步骤。
+
+`plan_expired_position_closes` 与 `record_expired_position_closes` 共享上述短仓复核边界；既有 long 维护规则不变。维护入口保留 `expiry_assignment_quote_refresh` 输出 key 和阶段日志，但跳过实际取价，返回 `enabled=false`、`quote_count=0`、`status=skipped_broker_evidence_required`，其余 symbol/error 列表为空、`quote_source=null`。
 
 一次交割涉及多个期权批次时，`stock_settlement_source` 保留源总量，
 `stock_settlement` 保存各目标批次的分配。股数按分配合约数与乘数确定；已保存费用按
@@ -1416,6 +1463,17 @@ CC 覆盖按实际平仓数量记录半开时间区间，平仓时点释放对�
 ```
 
 生产定时验证显式使用 `--publish-evidence`；临时排查保持默认只读。
+
+JSON 与文本输出使用相同退出码：主报告 `ok=true` 且独立 probe 为绿色时返回 `0`；
+主报告失败或 probe 为红色时返回 `1`；probe 无法运行时优先返回 `2`，仍保留主报告。
+probe 的绿色只说明重放结果与已存持仓行一致，可能同时存在历史事件的 replay error；
+这不会覆盖主报告的失败，也不改变成功 checkpoint 的发布或复用条件。
+
+独立诊断模块 `src.application.ledger.lot_parity_probe` 的 `--out` 必须位于
+`output_shared/state/` 之外，且不能与本次 `--db` 输入为同一文件（包括解析后的路径、
+软链接和硬链接）。身份检查在创建目录和写报告前完成；无法检查输入或目标时失败，
+仅目标尚不存在可继续。独立报告仍可创建或有意覆盖，不指定 `--out` 时输出到 stdout。
+这项检查针对稳定路径，不保证抵御检查后并发换链；不改变 `verify-projection` 的证据发布流程。
 
 发现 read model、report 或 lot 状态异常时，按顺序处理：
 
@@ -1460,6 +1518,8 @@ CC 覆盖按实际平仓数量记录半开时间区间，平仓时点释放对�
 ### 公共持仓查询的只读边界
 
 `option_positions_read` 的 list、events、history、inspect、assigned-stock，以及 `om option-positions` 的 list、events、history、inspect，经 `ledger.api.open_position_query_ledger_from_data_config` 使用 SQLite `mode=ro` / `query_only`。它们保留既有筛选、账户授权和事件分页，不创建数据库、补 schema 或自动恢复 `position_lots`。缺库、旧/不完整 lot 身份 schema 或所需表不可读时明确失败；events/history/inspect 可观察尚未恢复的事件与投影差异。`bootstrap.status=read_only` 表示本次没有执行启动恢复。
+
+非分页持仓/事件读取除保留既有空文本兼容外，要求所消费的 `fields_json` / `event_json` 解码为 JSON 对象；坏语法或非对象值明确失败，不报告为完整空集合或未找到。
 
 该入口读取已存事实；资金余量/指派情景仍使用要求可信投影的 `read_position_query_ledger`。已有受控写入/恢复继续使用原工作流。assigned-stock 的报价刷新选项保持原合同，不表示生产账本写入授权；SQLite 活跃 WAL/SHM 协调也不等于业务写入。
 

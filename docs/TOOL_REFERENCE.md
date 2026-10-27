@@ -105,11 +105,22 @@
 - `portfolio_pnl_bridge`
 - `portfolio_cash_bridge`
 
-`option_performance_report` 提供 MTD/YTD/自然月/自然年的期权净现金流、卖出期权
-胜率、买入期权胜率和期权收益率；新增独立的实际日均未了结占用本金，含跨期持仓、
-仅按已发生时间加权，不作为收益率分母。现金流保留原币明细，并提供由事件发生时已落库
-`cash_conversion.v1` 证据汇总的 CNY 总额；读取时不查当前汇率。正股交易、指派/行权
-交割现金、PnL 和行情刷新不属于该报告。
+`option_performance_report` 提供 MTD/YTD/自然月/自然年的期间期权净现金流
+（`period_option_net_cashflow`，含以前开仓、本期平仓的现金）及独立展示的开仓批次现金结果
+（旧 `option_net_cashflow`）。卖方/买方胜率、收益率的原数值与口径不变。
+`schema_version=option_performance.report.v3` 和 `metric_semantics` 声明两种选择口径；
+rows/breakdowns 仍是开仓批次明细，分页也携带 schema/口径并将其绑定到来源哈希，
+symbol 页不附全账户期间总额。旧服务未返回新字段时，期间现金明确不可用，不拿旧字段替代。
+实际日均未了结占用本金含跨期持仓，仅按已发生时间加权，不作为收益率分母。
+现金保留原币，各现金指标的 CNY 总额只消费已落库 `cash_conversion.v1` 证据；不查当前汇率。
+成交附带费用随成交时间入期，迟到更正重述原期间；有独立事实时间的新扣费/退款才按独立时间入期。
+`actual_fee_missing` / `fee_estimated` 表示本次账本快照缺少所需实际费用证据，
+不能单独证明正在同步、同步失败或重建丢失；受影响的实际净额保持不可用，不以估算补齐。
+只有独立、当前的同步证据支持时才可称“手续费待同步”，失败或长期异常仍需明确保留。
+输入哈希变化不能证明重建主体、丢失原因或必须重建/backfill。
+`freshness.as_of` 表示统计截止，不是费用同步时间；`/income` 按此标签显示原值。
+正股交易、指派/行权交割现金、PnL 和行情刷新不属于该报告。HTTP 外层保持 v1。
+纯领域离线接口及冻结证据限制见[离线合同](OPTION_CASHFLOW_OFFLINE_CONTRACT.md)。
 
 ### 持仓、现金与组合
 
@@ -265,6 +276,8 @@ account、config_key、路径、runtime root 或 OpenD endpoint。
   --input-json '{"run_id":"<run-id>","account":"lx","symbol":"NVDA"}'
 ```
 
+普通 CSP/CC 的新策略记录区分 `risk_delta`（超过上限）和 `risk_delta_unavailable`（来源、时间、数值等不可验证），保留具体原因。delta 是硬门槛，不是 rank driver；历史记录不得凭新默认补造阈值或来源。
+
 两者读取已有 artifact，不重跑扫描；运行根路径按显式 `runtime_root`、
 `OM_RUNTIME_ROOT`、repo fallback 的顺序解析。
 
@@ -302,6 +315,8 @@ account、config_key、路径、runtime root 或 OpenD endpoint。
 返回的 `cash_snapshot` 包含 `status`（fresh/stale/unknown）、`reason_codes`、`source_observed_at`、`evaluated_at` 和 `max_age_sec`；仅 fresh 可用于现金容量。FX 缺失影响换算值，不改变原币现金可信度。历史报告保留封存时判定，缺少原现金证据时保持不可用。
 
 `option_positions_read` 不写账本，但当前时点查询可能从 OpenD 读取报价。
+
+`action=list` 支持结构化 `query`；非空白的 `query.account` 优先于顶层 `account`，省略、null 或空白时回退到顶层账户。质量门禁与账本查询使用同一个有效账户，并保留配置账户范围校验。此优先级适用于直接 Tool Gateway；Bot 仍拒绝顶层、嵌套或可信固定账户之间的冲突。
 
 `option_positions_read action=events` 读取 canonical SQLite `trade_events`，不会读取报价：
 

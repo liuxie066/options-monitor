@@ -521,6 +521,7 @@ def test_run_symbol_monitoring_uses_runtime_opend_fetch_config(monkeypatch, tmp_
                     "opend_rate_limits": {
                         "market_snapshot": {"max_calls": 23, "window_sec": 22, "max_wait_sec": 21},
                         "option_expiration": {"max_calls": 33, "window_sec": 32, "max_wait_sec": 31},
+                        "history_kline": {"max_calls": 43, "window_sec": 42, "max_wait_sec": 41},
                     },
                 }
             },
@@ -544,6 +545,9 @@ def test_run_symbol_monitoring_uses_runtime_opend_fetch_config(monkeypatch, tmp_
         "expiration_max_wait_sec": 31,
         "expiration_window_sec": 32,
         "expiration_max_calls": 33,
+        "history_kline_max_wait_sec": 41,
+        "history_kline_window_sec": 42,
+        "history_kline_max_calls": 43,
     }
 
 
@@ -1284,3 +1288,48 @@ def test_frozen_malformed_csv_is_symbol_unavailable(tmp_path):
         source_producer_run_id="run-1", required_data_snapshot_manifest=tmp_path / "manifest.json",
         required_data_snapshot_batch=batch, runtime_config={"portfolio": {"account": "lx"}}), deps=_deps())
     assert _published_scopes(tmp_path / "reports")[0]["status"] == "unavailable"
+
+
+@pytest.mark.parametrize("threshold", [0.35, 0.3, 0.1])
+@pytest.mark.parametrize("mode", ["put", "call"])
+def test_frozen_symbol_capture_preserves_delta_override_boundary(tmp_path, threshold, mode):
+    import math
+    import pandas as pd
+    import src.application.symbol_monitoring as mod
+    from domain.domain.engine import evaluate_opening_candidate_policy
+    from src.application.candidate_models import CandidateContractInput
+    from test_candidate_engine_contract import _policy_row, _earnings_evidence
+
+    delta = math.nextafter(threshold, math.inf) * (-1 if mode == "put" else 1)
+    row = _policy_row(mode=mode, delta=delta)
+    csv = pd.DataFrame([row]).to_csv(index=False).encode()
+    observed = []
+
+    def scan(**kwargs):
+        record = kwargs["required_data_frame"].iloc[0].to_dict()
+        contract = CandidateContractInput.from_row(pd.Series(record), mode=mode)
+        decision = evaluate_opening_candidate_policy(
+            {**record, **contract.to_gate_payload(), **_earnings_evidence(), "net_income_cny": 700.0},
+            mode=mode, max_abs_delta=threshold,
+        )
+        observed.append((contract.delta, decision))
+        return {"strategy": "sell_put" if mode == "put" else "sell_call", "candidate_count": 0}
+
+    batch = mod.FrozenRequiredDataBatch(
+        manifest={}, manifest_bytes=b"{}",
+        entries={"NVDA": ({"snapshot_id": "snapshot-delta", "receipt_relpath": "receipt.json"}, csv)},
+        unavailable={}, require_fresh=False,
+    )
+    mod.run_symbol_monitoring(
+        inputs=_inputs(tmp_path, symbol_cfg={
+            "symbol": "NVDA", "sell_put": {"enabled": mode == "put"},
+            "sell_call": {"enabled": mode == "call"},
+        }, required_data_snapshot_manifest=tmp_path / "manifest.json",
+            required_data_snapshot_run_id="run-delta", required_data_snapshot_batch=batch),
+        deps=_deps(run_sell_put_scan_fn=scan, run_sell_call_scan_fn=scan),
+    )
+    assert len(observed) == 1
+    transported, decision = observed[0]
+    assert transported == delta
+    assert not decision["accepted"]
+    assert [item["reason"] for item in decision["rejects"]] == ["risk_delta"]

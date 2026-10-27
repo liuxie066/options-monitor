@@ -285,3 +285,43 @@ def test_quality_cli_reads_local_artifact_and_rejects_retired_serve(monkeypatch,
     with pytest.raises(SystemExit) as exc:
         parser.parse_args(["quality", "serve"])
     assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("consumer", ["close_advice", "option_position_report"])
+@pytest.mark.parametrize("defect", ["other_market", "other_account", "undeclared", "ambiguous", "no_account", "no_market"])
+def test_protected_consumers_require_explicit_unique_target_declaration(monkeypatch, tmp_path, consumer, defect):
+    monkeypatch.setenv("OM_QUALITY_ONBOARDED", "true")
+    payload = _payload()
+    row = payload["datasets"][0]
+    row["usable_for"] = [consumer]
+    account, market = "lx", "us"
+    if defect == "other_market":
+        row["scope"]["market"] = "hk"
+    elif defect == "other_account":
+        row["scope"]["account"] = "sy"
+    elif defect == "undeclared":
+        row["usable_for"] = []
+    elif defect == "ambiguous":
+        payload["datasets"].append(dict(row))
+    elif defect == "no_account":
+        account = None
+    elif defect == "no_market":
+        market = None
+    with pytest.raises(QualityGateBlocked) as error:
+        assert_quality_allows(consumer, account=account, market=market, service=_service(tmp_path, payload))
+    assert error.value.reason_code == (
+        "QUALITY_DATASET_AMBIGUOUS" if defect == "ambiguous" else "QUALITY_DATASET_UNAVAILABLE"
+    )
+    assert error.value.blocked_by == ("OM-POS-001",)
+
+
+@pytest.mark.parametrize("consumer", ["close_advice", "option_position_report"])
+def test_protected_consumers_ignore_unrelated_blocked_scope(monkeypatch, tmp_path, consumer):
+    monkeypatch.setenv("OM_QUALITY_ONBOARDED", "true")
+    payload = _payload()
+    payload["datasets"][0]["usable_for"] = [consumer]
+    _append_dataset(
+        payload, scope={"account": "sy", "market": "hk"}, usable_for=[],
+        blocked_consumers=[consumer], blocked_by=["OM-POS-002"], reason_codes=["POSITION_DIVERGENCE_PERSISTENT"],
+    )
+    assert_quality_allows(consumer, account="lx", market="us", service=_service(tmp_path, payload))

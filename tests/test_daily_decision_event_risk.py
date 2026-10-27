@@ -273,3 +273,19 @@ def test_combo_event_entry_is_detected_per_leg_expiration() -> None:
     }
 
     assert _changes(before, after) == ["candidate_event_entered_expiry_window"]
+
+
+def test_comparable_chain_preserves_each_snapshot_provenance_and_legacy_boundary() -> None:
+    chain = "earnings-comparable-v1:" + "c" * 64
+    before = {**_risk("confirmed_event", event_date="2026-08-05", chain=chain),
+              "evidence_snapshot_hash": "a" * 64}
+    after = {**_risk("confirmed_none", chain=chain), "evidence_snapshot_hash": "b" * 64}
+    change, = _transitions(before, after)
+    assert change["change_type"] == "candidate_event_removed"
+    assert change["before_event_risk"]["evidence_snapshot_hash"] == "a" * 64
+    assert change["after_event_risk"]["evidence_snapshot_hash"] == "b" * 64
+    assert _transitions({**before, "evidence_chain_id": "a" * 64}, after) == []
+    assert _transitions(before, {**before, "evidence_snapshot_hash": "b" * 64}) == []
+    legacy = _transitions(_risk("confirmed_event", event_date="2026-08-05"), _risk("confirmed_none"))
+    assert "evidence_snapshot_hash" not in legacy[0]["before_event_risk"]
+    assert "evidence_snapshot_hash" not in legacy[0]["after_event_risk"]

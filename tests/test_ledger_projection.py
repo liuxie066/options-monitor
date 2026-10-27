@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from domain.domain.ledger import ContractKey, TradeEvent, project_trade_events
+import pytest
+
+from domain.domain.ledger import (
+    ContractKey, PositionLot, TradeEvent, project_resumable_trade_events, project_trade_events,
+)
 from domain.domain.ledger.identity import position_key_for
 from domain.domain.option_position_lots import parse_exp_to_ms
 from domain.domain.trade_contract_identity import derive_trade_side
@@ -80,6 +84,135 @@ def _adjust_event(
         target_lot_id=target_lot_id,
         raw_payload={"patch": patch},
     )
+
+
+@pytest.mark.parametrize("field", ["contracts", "contracts_open", "contracts_closed"])
+@pytest.mark.parametrize(
+    "value,previous_coercion",
+    [
+        (1.9, 1), (-0.5, 0), ("1.9", 1), ("-0.5", 0),
+        (Decimal("1.9"), 1), (Decimal("-0.5"), 0),
+        (True, 1), (False, 0), ("NaN", 0), ("Infinity", 0),
+        ("-Infinity", 0), ("invalid", 0),
+    ],
+)
+def test_adjust_rejects_inexact_quantities_without_changing_source_or_lot(
+    field: str, value: object, previous_coercion: int,
+) -> None:
+    key = _key()
+    opening = _event(event_id="open", event_type="open", contract_key=key,
+                     contracts=2, event_time_ms=1000, lot_id="lot")
+    lot = PositionLot.from_open_event(opening, lot_id="lot")
+    patch = {field: value}
+    if field == "contracts_open":
+        # Make the old truncation satisfy conservation, so that guard cannot
+        # conceal this parser regression.
+        patch["contracts_closed"] = 2 - previous_coercion
+    adjustment = _adjust_event(event_id="bad-adjust", contract_key=key,
+                               target_lot_id="lot", patch=patch)
+    original_patch = repr(adjustment.raw_payload)
+    original_lot = lot.to_dict()
+
+    with pytest.raises(ValueError, match=field):
+        lot.apply_adjust(adjustment)
+
+    full = project_resumable_trade_events([opening, adjustment], entry_mode="full")
+    assert any(diag.code == "adjust_patch_invalid" and diag.event_id == "bad-adjust"
+               and diag.severity == "error" for diag in full.diagnostics)
+    assert full.state is None
+    assert not full.eligible
+    assert full.retained_lots[0].to_dict() == original_lot
+    assert lot.to_dict() == original_lot
+    assert repr(adjustment.raw_payload) == original_patch
+
+
+@pytest.mark.parametrize("value", [2, 2.0, "2", "2.0", Decimal("2.0")])
+@pytest.mark.parametrize("field", ["contracts", "contracts_open", "contracts_closed"])
+def test_adjust_accepts_exact_integer_quantities(field: str, value: object) -> None:
+    key = _key()
+    opening = _event(event_id="open", event_type="open", contract_key=key,
+                     contracts=2, event_time_ms=1000, lot_id="lot")
+    adjustment = _adjust_event(event_id="adjust", contract_key=key,
+                               target_lot_id="lot", patch={field: value})
+    full = project_resumable_trade_events([opening, adjustment], entry_mode="full")
+    assert full.eligible
+    lot = full.retained_lots[0]
+    expected = (2, 0, 2) if field == "contracts_closed" else (2, 2, 0)
+    assert (lot.contracts_opened, lot.contracts_open, lot.contracts_closed) == expected
+    assert all(type(count) is int for count in (
+        lot.contracts_opened, lot.contracts_open, lot.contracts_closed,
+    ))
+
+
+@pytest.mark.parametrize("count", [2**53 + 1, 2**100 + 1])
+@pytest.mark.parametrize("as_text", [False, True])
+@pytest.mark.parametrize("field", ["contracts", "contracts_open", "contracts_closed"])
+def test_adjust_preserves_large_integer_precision(field: str, as_text: bool, count: int) -> None:
+    key = _key()
+    opening = _event(event_id="open", event_type="open", contract_key=key,
+                     contracts=2, event_time_ms=1000, lot_id="lot")
+    value = str(count) if as_text else count
+    adjustment = _adjust_event(event_id="adjust", contract_key=key, target_lot_id="lot",
+                               patch={"contracts": value, field: value})
+    lot = PositionLot.from_open_event(opening, lot_id="lot").apply_adjust(adjustment)
+    expected = (count, 0, count) if field == "contracts_closed" else (count, count, 0)
+    assert (lot.contracts_opened, lot.contracts_open, lot.contracts_closed) == expected
+
+
+@pytest.mark.parametrize(
+    "patch,expected",
+    [
+        ({"note": "fixture"}, (2, 1, 1)),
+        ({"contracts": None, "contracts_open": None, "contracts_closed": None}, (2, 1, 1)),
+        ({"contracts": "", "contracts_open": "", "contracts_closed": ""}, (2, 1, 1)),
+        ({"contracts": "3.0", "contracts_open": None}, (3, 2, 1)),
+        ({"contracts_closed": 0, "contracts_open": ""}, (2, 2, 0)),
+        ({"contracts_open": 0, "contracts_closed": 2}, (2, 0, 2)),
+        ({"contracts": 0, "contracts_closed": 0}, (0, 0, 0)),
+    ],
+)
+def test_adjust_keeps_zero_and_partial_close_inheritance(patch: dict, expected: tuple) -> None:
+    key = _key()
+    opening = _event(event_id="open", event_type="open", contract_key=key,
+                     contracts=2, event_time_ms=1000, lot_id="lot")
+    closing = _event(event_id="close", event_type="close", contract_key=key,
+                     contracts=1, event_time_ms=1500, target_lot_id="lot")
+    lot = PositionLot.from_open_event(opening, lot_id="lot").apply_close(
+        closing, actual_fee_amount=Decimal("0"),
+    )
+    adjusted = lot.apply_adjust(_adjust_event(event_id="adjust", contract_key=key,
+                                             target_lot_id="lot", patch=patch))
+    assert (adjusted.contracts_opened, adjusted.contracts_open, adjusted.contracts_closed) == expected
+    assert adjusted.status == ("close" if expected[1] == 0 else "open")
+
+
+@pytest.mark.parametrize("patch", [
+    {"contracts": -1}, {"contracts_closed": -1}, {"contracts_open": -1},
+    {"contracts_closed": 3}, {"contracts_open": 1},
+])
+def test_adjust_retains_nonnegative_and_conservation_guards(patch: dict) -> None:
+    key = _key()
+    opening = _event(event_id="open", event_type="open", contract_key=key,
+                     contracts=2, event_time_ms=1000, lot_id="lot")
+    with pytest.raises(ValueError, match="adjust patch"):
+        PositionLot.from_open_event(opening, lot_id="lot").apply_adjust(
+            _adjust_event(event_id="adjust", contract_key=key, target_lot_id="lot", patch=patch)
+        )
+
+
+@pytest.mark.parametrize("patch,expected", [
+    ({}, 1000), ({"opened_at": None}, 1000), ({"opened_at": ""}, 1000),
+    ({"opened_at": "1500.9"}, 1500),
+])
+def test_adjust_quantity_parser_keeps_opened_at_semantics(patch: dict, expected: int) -> None:
+    key = _key()
+    opening = _event(event_id="open", event_type="open", contract_key=key,
+                     contracts=2, event_time_ms=1000, lot_id="lot")
+    adjusted = PositionLot.from_open_event(opening, lot_id="lot").apply_adjust(
+        _adjust_event(event_id="adjust", contract_key=key, target_lot_id="lot",
+                      patch={"contracts": "2.0", **patch})
+    )
+    assert adjusted.opened_at_ms == expected
 
 
 def test_projection_closes_same_expiry_0700_lots_without_crossing_later_expiry() -> None:
@@ -488,6 +621,9 @@ def test_fractional_stock_full_and_serialized_tail_replay_agree() -> None:
     assert lot.shares_opened == Decimal("2.5")
     assert lot.shares_open == Decimal("1.75")
     assert lot.shares_closed == Decimal("0.75")
+    assert all(isinstance(quantity, Decimal) for quantity in (
+        lot.shares_opened, lot.shares_open, lot.shares_closed,
+    ))
     assert lot.realized_pnl == Decimal("1.5")
     assert lot.close_event_ids == ("fraction-close",)
 

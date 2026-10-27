@@ -8,6 +8,7 @@ import pytest
 from src.application.agent_tool_contracts import AgentToolError
 from src.interfaces.cli.main import parse_args
 from src.interfaces.cli import option_performance
+from test_option_performance_agent_tool import _report as _canonical_report
 
 
 def _args(*argv: str):
@@ -19,7 +20,7 @@ def test_report_cli_uses_same_request_payload(monkeypatch: pytest.MonkeyPatch) -
 
     def _report(payload, **_kwargs):
         captured.update(payload)
-        return {"period": {}, "scope": {}, "quality": {}, "daily_occupied_capital": {"by_currency": {"USD": {"amount": 5000, "status": "observed", "missing": []}}}}, [], {}
+        return _canonical_report(), [], {}
 
     monkeypatch.setattr(option_performance, "option_performance_report_tool", _report)
     args = _args(
@@ -30,7 +31,8 @@ def test_report_cli_uses_same_request_payload(monkeypatch: pytest.MonkeyPatch) -
     result = option_performance.handle_option_performance_command(args)
 
     assert result["daily_occupied_capital"]["by_currency"]["USD"]["amount"] == 5000
-    assert "schema_version" not in result
+    assert result == _canonical_report()
+    assert result["schema_version"] == "option_performance.report.v3"
     assert captured == {
         "config_key": "us",
         "config_path": None,

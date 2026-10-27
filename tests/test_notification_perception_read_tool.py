@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from src.application import query_cursor
 
+import errno
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -449,3 +451,668 @@ def test_internal_report_iterator_preserves_scope_and_incomplete_audit(tmp_path:
     assert data['summary']['malformed_count'] == 1
     audit.write_bytes(b'\xff')
     assert iter_notification_perception_events(repo_root=tmp_path)['summary']['status'] == 'failed'
+
+
+@pytest.fixture
+def window_tool(tmp_path: Path, monkeypatch):
+    import src.application.agent_tools.notification_perception as notification_tools
+    from src.application.tool_execution import execute_tool
+
+    root = tmp_path / "runtime"
+    root.mkdir()
+    monkeypatch.setattr(notification_tools, "repo_base", lambda: root)
+    monkeypatch.setattr(query_cursor, "_key", lambda: "isolated-window-fixture-key")
+
+    def query(**payload):
+        return execute_tool("notification_perception_read", {
+            "start_utc": "2026-09-23T00:00:00Z",
+            "end_utc": "2026-09-24T00:00:00Z",
+            **payload,
+            "runtime_root": str(root),
+        })
+
+    return root, query
+
+
+def _window_source(root: Path, source_scope: str) -> tuple[Path, dict]:
+    if source_scope == "run":
+        return root / "output_runs/window-run/state/audit_events.jsonl", {"run_id": "window-run"}
+    return root / "output_shared/state/audit_events.jsonl", {}
+
+
+def _window_inventory(root: Path) -> dict:
+    return {
+        str(path.relative_to(root)): None if path.is_dir() else path.read_bytes()
+        for path in root.rglob("*")
+    }
+
+
+def _window_row(run_id: str, action: str, conversation_id: str) -> dict:
+    row = _row(run_id, action, conversation_id)
+    row["event_at_utc"] = "2026-09-23T12:00:00+00:00"
+    row["extra"]["created_at_utc"] = row["event_at_utc"]
+    return row
+
+
+@pytest.mark.parametrize("source_scope", ["run", "shared"])
+@pytest.mark.parametrize("source_state", ["missing_leaf", "missing_parent", "empty"])
+def test_window_tool_distinguishes_missing_sources_from_empty_files(
+    window_tool, source_scope: str, source_state: str,
+) -> None:
+    root, query = window_tool
+    audit, scope = _window_source(root, source_scope)
+    if source_state != "missing_parent":
+        audit.parent.mkdir(parents=True)
+    if source_state == "empty":
+        audit.write_bytes(b"")
+    before = _window_inventory(root)
+
+    response = query(**scope)
+
+    assert response["ok"] is True
+    data = response["data"]
+    empty = source_state == "empty"
+    exact_total = 0 if empty else None
+    assert data["summary"]["ok"] is empty
+    assert data["summary"]["status"] == ("ok" if empty else "missing")
+    assert data["summary"]["missing_count"] == (0 if empty else 1)
+    assert data["summary"]["malformed_count"] == 0
+    assert data["summary"]["unreadable_count"] == 0
+    assert (
+        data["summary"]["total_count"], data["pagination"]["total_count"],
+        data["pagination"]["matched_count"], data["coverage"]["total_count"],
+        data["coverage"]["omitted_count"],
+    ) == (exact_total,) * 5
+    assert data["summary"]["returned_count"] == 0
+    assert data["pagination"]["returned_count"] == 0
+    assert data["pagination"]["scanned_count"] == 0
+    assert data["coverage"]["included_count"] == 0
+    assert data["coverage"]["scanned_bytes"] == 0
+    assert data["coverage"]["status"] == ("complete" if empty else "partial")
+    assert data["coverage"]["complete_for"] == "requested_window"
+    assert data["coverage"]["stop_reason"] == (None if empty else "missing")
+    assert data["pagination"]["has_more"] is False
+    assert data["coverage"]["has_more"] is False
+    assert data["next_cursor"] is None
+    assert data["events"] == data["event_summaries"] == []
+    assert [item["status"] for item in data["read_statuses"]] == ["ok" if empty else "missing"]
+    assert _window_inventory(root) == before
+    assert audit.exists() is empty
+    assert audit.parent.exists() is (source_state != "missing_parent")
+    if empty:
+        assert audit.read_bytes() == b""
+
+
+@pytest.mark.parametrize("source_scope", ["run", "shared"])
+@pytest.mark.parametrize("change", ["append", "truncate"])
+def test_window_tool_signed_cursor_handles_same_inode_size_change(
+    window_tool, monkeypatch, source_scope: str, change: str,
+) -> None:
+    # Native truncation is CI-only under the local fixture-retention policy.
+    root, query = window_tool
+    audit, scope = _window_source(root, source_scope)
+    audit.parent.mkdir(parents=True)
+    _append(audit, _window_row("window-run", "notification_prepared", "chat"))
+    _append(audit, _window_row("window-run", "notification_delivery_decided", "chat"))
+    original = audit.read_bytes()
+    before = audit.stat()
+    initial_inventory = _window_inventory(root)
+
+    first = query(**scope, limit=1)
+
+    assert first["ok"] is True
+    initial = first["data"]
+    assert initial["summary"]["total_count"] == 2
+    assert initial["summary"]["returned_count"] == 1
+    assert [event["event_kind"] for event in initial["events"]] == ["notification_delivery_decided"]
+    cursor = initial["next_cursor"]
+    assert isinstance(cursor, str) and cursor
+    assert _window_inventory(root) == initial_inventory
+    if change == "truncate":
+        prefix = original.splitlines(keepends=True)[0]
+        with audit.open("r+b") as handle:
+            handle.truncate(len(prefix))
+        assert audit.read_bytes() == prefix
+        assert json.loads(prefix) == _window_row("window-run", "notification_prepared", "chat")
+        assert audit.stat().st_size == len(prefix) < before.st_size
+    else:
+        _append(audit, _window_row("window-run", "notification_delivery_completed", "appended-chat"))
+        assert audit.read_bytes().startswith(original)
+        assert audit.stat().st_size > before.st_size
+    after = audit.stat()
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    changed_inventory = _window_inventory(root)
+    original_open = os.open
+    opened = []
+
+    def observed_open(name, flags, mode=0o777, *, dir_fd=None):
+        descriptor = original_open(name, flags, mode, dir_fd=dir_fd)
+        if name == audit.name:
+            opened.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(os, "open", observed_open)
+    monkeypatch.setattr(os, "supports_dir_fd", {*os.supports_dir_fd, observed_open})
+
+    response = query(**scope, limit=1, cursor=cursor)
+
+    if change == "truncate":
+        assert response["ok"] is False
+        assert response["error"]["code"] == "INPUT_ERROR"
+        assert response["error"]["message"] == "source_changed"
+        assert response["data"] == {}
+    else:
+        assert response["ok"] is True
+        data = response["data"]
+        assert data["summary"]["status"] == "ok"
+        assert data["summary"]["total_count"] == 2
+        assert data["summary"]["returned_count"] == 1
+        assert data["source_hash"] == initial["source_hash"]
+        assert data["coverage"]["scanned_bytes"] == len(original)
+        assert [(event["run_id"], event["event_kind"]) for event in data["events"]] == [
+            ("window-run", "notification_prepared"),
+        ]
+        assert data["pagination"]["has_more"] is False
+        assert data["next_cursor"] is None
+    assert _window_inventory(root) == changed_inventory
+    assert opened
+    for descriptor in opened:
+        with pytest.raises(OSError) as caught:
+            os.fstat(descriptor)
+        assert caught.value.errno == errno.EBADF
+
+
+@pytest.mark.parametrize(
+    ("start_utc", "stop_reason"),
+    [
+        pytest.param("2026-09-23T00:00:00Z", "missing", id="missing"),
+        pytest.param("2026-09-22T00:00:00Z", "history_before_first_segment", id="earlier_history_gap"),
+    ],
+)
+def test_window_tool_keeps_scoped_segment_events_when_current_is_missing(
+    window_tool, start_utc: str, stop_reason: str,
+) -> None:
+    root, query = window_tool
+    current, _ = _window_source(root, "shared")
+    current.parent.mkdir(parents=True)
+    segment = current.parent / "audit_events.20260923.000001.jsonl"
+    _append(segment, _window_row("visible-run", "notification_prepared", "visible-chat"))
+    _append(segment, _window_row("hidden-run", "notification_prepared", "hidden-chat"))
+    _append(segment, _window_row("other-kind-run", "notification_delivery_completed", "visible-chat"))
+    before = _window_inventory(root)
+
+    response = query(
+        start_utc=start_utc,
+        conversation_id="visible-chat",
+        authenticated_conversation_id="visible-chat",
+        event_kind="notification_prepared",
+    )
+
+    assert response["ok"] is True
+    data = response["data"]
+    assert data["summary"]["ok"] is False
+    assert data["summary"]["status"] == "partial"
+    assert data["summary"]["missing_count"] == 1
+    assert (
+        data["summary"]["total_count"], data["pagination"]["total_count"],
+        data["pagination"]["matched_count"], data["coverage"]["total_count"],
+        data["coverage"]["omitted_count"],
+    ) == (None,) * 5
+    assert data["summary"]["returned_count"] == 1
+    assert data["pagination"]["returned_count"] == 1
+    assert data["pagination"]["scanned_count"] == 1
+    assert data["coverage"]["included_count"] == 1
+    assert data["coverage"]["scanned_bytes"] == len(segment.read_bytes())
+    assert data["coverage"]["status"] == "partial"
+    assert data["coverage"]["complete_for"] == "requested_window"
+    assert data["coverage"]["stop_reason"] == stop_reason
+    assert data["coverage"]["available_from_utc"] == "2026-09-23T00:00:00+00:00"
+    assert data["pagination"]["has_more"] is False
+    assert data["coverage"]["has_more"] is False
+    assert data["next_cursor"] is None
+    assert [event["run_id"] for event in data["events"]] == ["visible-run"]
+    assert data["event_summaries"] == [{
+        "run_id": "visible-run",
+        "created_at_utc": "2026-09-23T12:00:00+00:00",
+        "event_kind": "notification_prepared",
+    }]
+    assert data["events"][0]["conversation_scope"] == {"channel": "wechat"}
+    assert data["scope"]["conversation_ref"].startswith("conversation:sha256:")
+    assert [item["status"] for item in data["read_statuses"]] == ["ok", "missing"]
+    assert all(item["line_count"] is None for item in data["read_statuses"])
+    serialized = json.dumps(data, ensure_ascii=False)
+    for hidden in ("hidden-run", "other-kind-run", "hidden-chat", "visible-chat", "must_not_leak"):
+        assert hidden not in serialized
+    assert not current.exists()
+    assert _window_inventory(root) == before
+
+
+def test_window_tool_returns_exact_zero_for_existing_filtered_audit(window_tool) -> None:
+    root, query = window_tool
+    audit, scope = _window_source(root, "run")
+    audit.parent.mkdir(parents=True)
+    _append(audit, _row("window-run", "notification_prepared", "chat"))
+    before = _window_inventory(root)
+
+    response = query(**scope)
+
+    assert response["ok"] is True
+    data = response["data"]
+    assert data["summary"]["ok"] is True
+    assert data["summary"]["status"] == "ok"
+    assert data["summary"]["missing_count"] == 0
+    assert (
+        data["summary"]["total_count"], data["pagination"]["total_count"],
+        data["pagination"]["matched_count"], data["coverage"]["total_count"],
+        data["coverage"]["omitted_count"],
+    ) == (0,) * 5
+    assert data["coverage"]["status"] == "complete"
+    assert data["coverage"]["complete_for"] == "requested_window"
+    assert data["coverage"]["stop_reason"] is None
+    assert data["coverage"]["scanned_bytes"] == len(audit.read_bytes()) > 0
+    assert data["read_statuses"][0]["status"] == "ok"
+    assert data["read_statuses"][0]["line_count"] == 1
+    assert data["events"] == data["event_summaries"] == []
+    assert data["pagination"]["has_more"] is False
+    assert data["coverage"]["has_more"] is False
+    assert data["next_cursor"] is None
+    assert _window_inventory(root) == before
+
+
+@pytest.mark.parametrize("source_scope", ["run", "shared"])
+def test_window_tool_signed_cursor_rejects_missing_leaf(window_tool, source_scope: str) -> None:
+    root, query = window_tool
+    audit, scope = _window_source(root, source_scope)
+    audit.parent.mkdir(parents=True)
+    for _ in range(2):
+        _append(audit, _window_row("window-run", "notification_prepared", "chat"))
+    before = _window_inventory(root)
+
+    first = query(**scope, limit=1)
+
+    assert first["ok"] is True
+    assert first["data"]["summary"]["total_count"] == 2
+    assert first["data"]["summary"]["returned_count"] == 1
+    assert first["data"]["pagination"]["has_more"] is True
+    cursor = first["data"]["next_cursor"]
+    assert isinstance(cursor, str) and cursor
+    assert _window_inventory(root) == before
+    retained = audit.with_name("audit_events.retained.jsonl")
+    assert not retained.exists()
+    original_bytes = audit.read_bytes()
+    audit.rename(retained)
+    after_rename = _window_inventory(root)
+
+    response = query(**scope, limit=1, cursor=cursor)
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == "INPUT_ERROR"
+    assert response["error"]["message"] == "source_changed"
+    assert not audit.exists()
+    assert retained.read_bytes() == original_bytes
+    assert _window_inventory(root) == after_rename
+
+
+@pytest.mark.parametrize(
+    ("context_kind", "error_code", "error_message"),
+    [
+        pytest.param("cancelled", "CANCELLED", "cancelled", id="cancelled"),
+        pytest.param("expired", "BUDGET_EXHAUSTED", "time_deadline", id="expired"),
+    ],
+)
+def test_window_tool_context_failure_resets_before_missing_read(
+    window_tool, context_kind: str, error_code: str, error_message: str,
+) -> None:
+    from src.application.agent_tools.project import project_query_context
+
+    root, query = window_tool
+    audit, _ = _window_source(root, "shared")
+    audit.parent.mkdir(parents=True)
+    before = _window_inventory(root)
+    context = {"cancelled": lambda: True} if context_kind == "cancelled" else {"deadline_monotonic": 0.0}
+
+    with project_query_context(**context):
+        response = query()
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == error_code
+    assert response["error"]["message"] == error_message
+    assert _window_inventory(root) == before
+
+    retry = query()
+
+    assert retry["ok"] is True
+    assert retry["data"]["summary"]["ok"] is False
+    assert retry["data"]["summary"]["status"] == "missing"
+    assert retry["data"]["summary"]["missing_count"] == 1
+    assert retry["data"]["summary"]["total_count"] is None
+    assert retry["data"]["coverage"]["status"] == "partial"
+    assert retry["data"]["coverage"]["stop_reason"] == "missing"
+    assert retry["data"]["events"] == []
+    assert not audit.exists()
+    assert _window_inventory(root) == before
+
+
+@pytest.fixture
+def guarded_window_tool(window_tool, monkeypatch):
+    from src.application import runtime_paths
+
+    root, query = window_tool
+    forbidden_calls = []
+
+    def forbidden(name):
+        def fail(*args, **kwargs):
+            forbidden_calls.append(name)
+            raise AssertionError(f"unexpected window query boundary: {name}")
+        return fail
+
+    monkeypatch.setattr(runtime_paths, "build_effective_env", forbidden("effective_env"))
+    monkeypatch.setattr(runtime_paths, "read_runtime_root_record", forbidden("home_runtime_record"))
+    monkeypatch.setattr(query_cursor, "resolve_secret", forbidden("cursor_secret"))
+
+    def guarded_query(**payload):
+        before = _window_inventory(root)
+        response = query(**payload)
+        assert forbidden_calls == []
+        assert _window_inventory(root) == before
+        return response
+
+    return root, guarded_query
+
+
+def _write_window_cap_source(root: Path, count: int, *, wide_tail: bool = False) -> Path:
+    audit, _ = _window_source(root, "shared")
+    audit.parent.mkdir(parents=True)
+    with audit.open("w", encoding="utf-8") as stream:
+        for index in range(count):
+            row = _window_row(f"r{index:04d}", "notification_prepared", "visible-chat")
+            if wide_tail and index < 5:
+                row["extra"]["detail"] = "界" * 1000
+            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+    assert audit.stat().st_size < 64 * 1024 * 1024
+    return audit
+
+
+def _seed_window_cap_cursor(query, index: int, **payload) -> tuple[str, dict]:
+    from src.application.ledger.api import decode_evidence_cursor
+
+    first = query(**payload)
+    assert first["ok"] is True, first
+    data = first["data"]
+    assert isinstance(data["next_cursor"], str) and data["next_cursor"]
+    state = decode_evidence_cursor(data["next_cursor"], "isolated-window-fixture-key")
+    assert state["index"] == data["summary"]["returned_count"]
+    # Seed a real signed snapshot near the bound; this does not simulate prior requests.
+    state["index"] = index
+    return query_cursor.encode_cursor(state), data
+
+
+def _assert_window_pagination_limit(response: dict, *, stop_reason: str = "pagination_limit") -> None:
+    assert response["ok"] is True, response
+    data = response["data"]
+    assert data["summary"]["ok"] is False
+    assert data["summary"]["status"] == "partial"
+    assert data["coverage"]["status"] == "partial"
+    assert data["coverage"]["complete_for"] == "requested_window"
+    assert data["coverage"]["stop_reason"] == stop_reason
+    assert data["continuation_status"] == "pagination_limit"
+    assert data["next_cursor"] is None
+    assert data["pagination"]["has_more"] is True
+    assert data["coverage"]["has_more"] is True
+    assert (
+        data["summary"]["total_count"], data["pagination"]["total_count"],
+        data["pagination"]["matched_count"], data["coverage"]["total_count"],
+        data["coverage"]["omitted_count"],
+    ) == (None,) * 5
+    assert data["summary"]["returned_count"] == len(data["events"]) > 0
+    assert data["pagination"]["returned_count"] == len(data["events"])
+    assert data["coverage"]["included_count"] == len(data["events"])
+    assert "通知历史结果不完整：已达到分页上限，请缩小时间窗口或过滤范围。" in response["warnings"]
+
+
+@pytest.mark.parametrize("limit", [1, 3, 50])
+def test_window_tool_stops_only_unusable_signed_continuation(guarded_window_tool, limit: int) -> None:
+    from src.application.ledger.api import decode_evidence_cursor
+
+    root, query = guarded_window_tool
+    audit = _write_window_cap_source(root, 5105)
+    _append(audit, _window_row("hidden-run", "notification_prepared", "hidden-chat"))
+    _append(audit, _window_row("other-kind", "notification_delivery_completed", "visible-chat"))
+    payload = {"limit": limit, "authenticated_conversation_id": "visible-chat",
+               "event_kind": "notification_prepared"}
+    offset = 5000 - limit
+    cursor, initial = _seed_window_cap_cursor(query, offset, **payload)
+    expected = [f"r{index:04d}" for index in reversed(range(5105))]
+    seen = []
+    for _ in range(limit + 1):
+        response = query(**payload, cursor=cursor)
+        assert response["ok"] is True, response
+        data = response["data"]
+        page = [event["run_id"] for event in data["events"]]
+        assert page == expected[offset:offset + len(page)]
+        assert 0 < len(page) <= limit <= 50
+        assert len(json.dumps(data["events"], ensure_ascii=False).encode()) <= 6500
+        assert data["source_hash"] == initial["source_hash"]
+        assert data["pagination"]["scanned_count"] == 5105
+        assert data["coverage"]["scanned_bytes"] == audit.stat().st_size
+        assert all(item["line_count"] is None for item in data["read_statuses"])
+        serialized = json.dumps(data, ensure_ascii=False)
+        for hidden in ("hidden-run", "other-kind", "hidden-chat", "visible-chat", "must_not_leak"):
+            assert hidden not in serialized
+        seen.extend(page)
+        offset += len(page)
+        cursor = data["next_cursor"]
+        if cursor is None:
+            assert offset > 5000
+            _assert_window_pagination_limit(response)
+            break
+        assert data["summary"]["ok"] is True
+        assert data["coverage"]["status"] == "complete"
+        assert "continuation_status" not in data
+        assert response["warnings"] == []
+        state = decode_evidence_cursor(cursor, "isolated-window-fixture-key")
+        assert state["index"] == offset <= 5000
+    else:
+        pytest.fail("bounded window did not stop at its accepted cursor limit")
+    assert seen == expected[5000 - limit:offset]
+    assert len(seen) == len(set(seen))
+
+
+def test_window_tool_limit_uses_actual_unicode_shrunken_page(guarded_window_tool) -> None:
+    from src.application.bot.tools import model_observation
+    from src.application.ledger.api import decode_evidence_cursor
+
+    root, query = guarded_window_tool
+    _write_window_cap_source(root, 5004, wide_tail=True)
+    cursor, _ = _seed_window_cap_cursor(query, 4999, limit=3)
+
+    first = query(limit=3, cursor=cursor)
+
+    assert first["ok"] is True, first
+    data = first["data"]
+    assert data["summary"]["ok"] is True
+    assert data["summary"]["returned_count"] == 1
+    assert [event["run_id"] for event in data["events"]] == ["r0004"]
+    assert len(json.dumps(data["events"], ensure_ascii=False).encode()) <= 6500
+    assert len(json.dumps(data["events"] * 2, ensure_ascii=False).encode()) > 6500
+    assert data["pagination"]["has_more"] is True
+    state = decode_evidence_cursor(data["next_cursor"], "isolated-window-fixture-key")
+    assert state["index"] == 5000
+    assert "continuation_status" not in data
+    assert first["warnings"] == []
+
+    terminal = query(limit=3, cursor=data["next_cursor"])
+
+    _assert_window_pagination_limit(terminal)
+    assert [event["run_id"] for event in terminal["data"]["events"]] == ["r0003"]
+    assert terminal["data"]["summary"]["returned_count"] == 1
+    assert len(json.dumps(terminal["data"]["events"], ensure_ascii=False).encode()) <= 6500
+    observation = model_observation("notification_perception_read", terminal)
+    assert observation["ok"] is True
+    assert observation["data"]["coverage"]["status"] == "partial"
+    assert observation["data"]["continuation_status"] == "pagination_limit"
+    assert observation["data"]["next_cursor"] is None
+    assert observation["warnings"] == terminal["warnings"]
+
+
+@pytest.mark.parametrize(
+    ("count", "offset", "limit"),
+    [pytest.param(5000, 4999, 1, id="ends-at-5000"),
+     pytest.param(5001, 5000, 1, id="last-start-5000"),
+     pytest.param(5002, 4999, 3, id="last-page-crosses-5000")],
+)
+def test_window_tool_exact_tail_is_complete_at_offset_boundary(
+    guarded_window_tool, count: int, offset: int, limit: int,
+) -> None:
+    root, query = guarded_window_tool
+    _write_window_cap_source(root, count)
+    cursor, _ = _seed_window_cap_cursor(query, offset, limit=limit)
+
+    response = query(limit=limit, cursor=cursor)
+
+    assert response["ok"] is True, response
+    data = response["data"]
+    returned = count - offset
+    assert [event["run_id"] for event in data["events"]] == [f"r{index:04d}" for index in reversed(range(returned))]
+    assert data["summary"]["ok"] is True
+    assert data["summary"]["status"] == "ok"
+    assert data["summary"]["returned_count"] == returned
+    assert data["coverage"]["status"] == "complete"
+    assert data["coverage"]["stop_reason"] is None
+    assert (
+        data["summary"]["total_count"], data["pagination"]["total_count"],
+        data["pagination"]["matched_count"], data["coverage"]["total_count"],
+    ) == (count,) * 4
+    assert data["coverage"]["omitted_count"] == count - returned
+    assert data["pagination"]["has_more"] is False
+    assert data["coverage"]["has_more"] is False
+    assert data["next_cursor"] is None
+    assert "continuation_status" not in data
+    assert response["warnings"] == []
+
+
+@pytest.mark.parametrize("degradation", ["malformed", "earlier_history"])
+def test_window_tool_preserves_primary_degradation_at_pagination_limit(
+    guarded_window_tool, degradation: str,
+) -> None:
+    root, query = guarded_window_tool
+    audit = _write_window_cap_source(root, 5004)
+    payload = {"limit": 1}
+    if degradation == "malformed":
+        with audit.open("a", encoding="utf-8") as stream:
+            stream.write("{broken\n")
+        reason = "malformed"
+    else:
+        segment = audit.with_name("audit_events.20260923.000001.jsonl")
+        assert not segment.exists()
+        audit.rename(segment)
+        audit.write_bytes(b"")
+        payload["start_utc"] = "2026-09-22T00:00:00Z"
+        reason = "history_before_first_segment"
+    cursor, _ = _seed_window_cap_cursor(query, 5000, **payload)
+
+    response = query(**payload, cursor=cursor)
+
+    _assert_window_pagination_limit(response, stop_reason=reason)
+    assert response["data"]["pagination"]["scanned_count"] == 5004
+    assert response["data"]["summary"]["missing_count"] == 0
+    assert response["data"]["summary"]["malformed_count"] == (1 if degradation == "malformed" else 0)
+    if degradation == "malformed":
+        assert response["warnings"][0] == "Notification perception audit is partially corrupt; malformed_rows=1."
+        assert len(response["warnings"]) == 2
+    else:
+        assert response["data"]["coverage"]["available_from_utc"] == "2026-09-23T00:00:00+00:00"
+        assert len(response["warnings"]) == 1
+
+
+@pytest.mark.parametrize("invalid", ["index", "binding", "signature"])
+def test_window_tool_rejects_invalid_boundary_cursor_before_source_open(
+    guarded_window_tool, monkeypatch, invalid: str,
+) -> None:
+    from src.application.agent_tools import project_reader
+
+    root, query = guarded_window_tool
+    _write_window_cap_source(root, 5004)
+    cursor, _ = _seed_window_cap_cursor(query, 5001 if invalid == "index" else 5000, limit=1)
+    payload = {"limit": 2 if invalid == "binding" else 1}
+    if invalid == "signature":
+        body, signature = cursor.split(".")
+        cursor = body + "." + ("A" if signature[0] != "A" else "B") + signature[1:]
+    opened = []
+
+    def forbidden_open(*args, **kwargs):
+        opened.append(True)
+        raise AssertionError("invalid cursor attempted to open its source")
+
+    monkeypatch.setattr(project_reader, "_directory", forbidden_open)
+
+    response = query(**payload, cursor=cursor)
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == "INPUT_ERROR"
+    assert response["error"]["message"] == "cursor_invalidated"
+    assert opened == []
+    assert response["data"] == {}
+
+
+@pytest.mark.parametrize("change", ["append", "replace", "missing"])
+def test_window_tool_keeps_source_identity_at_pagination_limit(guarded_window_tool, change: str) -> None:
+    root, query = guarded_window_tool
+    audit = _write_window_cap_source(root, 5004)
+    cursor, initial = _seed_window_cap_cursor(query, 5000, limit=1)
+    original = audit.read_bytes()
+    if change == "append":
+        _append(audit, _window_row("new-append", "notification_prepared", "visible-chat"))
+    else:
+        retained = audit.with_name("audit_events.retained.jsonl")
+        assert not retained.exists()
+        audit.rename(retained)
+        if change == "replace":
+            audit.write_bytes(original)
+
+    response = query(limit=1, cursor=cursor)
+
+    if change == "append":
+        _assert_window_pagination_limit(response)
+        assert response["data"]["source_hash"] == initial["source_hash"]
+        assert response["data"]["pagination"]["scanned_count"] == 5004
+        assert response["data"]["coverage"]["scanned_bytes"] == len(original)
+        assert [event["run_id"] for event in response["data"]["events"]] == ["r0003"]
+        assert audit.read_bytes().startswith(original)
+    else:
+        assert response["ok"] is False
+        assert response["error"]["code"] == "INPUT_ERROR"
+        assert response["error"]["message"] == "source_changed"
+        assert response["data"] == {}
+        assert retained.read_bytes() == original
+        assert audit.exists() is (change == "replace")
+
+
+@pytest.mark.parametrize("stop", ["cancelled", "expired", "cancel_during_read"])
+def test_window_tool_boundary_context_failure_does_not_become_partial(guarded_window_tool, stop: str) -> None:
+    from src.application.agent_tools.project import project_query_context
+
+    root, query = guarded_window_tool
+    _write_window_cap_source(root, 5004)
+    cursor, _ = _seed_window_cap_cursor(query, 5000, limit=1)
+    checks = []
+
+    def cancelled():
+        checks.append(True)
+        return stop == "cancelled" or len(checks) > 20
+
+    context = {"deadline_monotonic": 0.0} if stop == "expired" else {"cancelled": cancelled}
+    with project_query_context(**context):
+        response = query(limit=1, cursor=cursor)
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == ("BUDGET_EXHAUSTED" if stop == "expired" else "CANCELLED")
+    assert response["error"]["message"] == ("time_deadline" if stop == "expired" else "cancelled")
+    assert response["data"] == {}
+    if stop == "cancel_during_read":
+        assert len(checks) == 21
+
+    retry = query(limit=1, cursor=cursor)
+
+    _assert_window_pagination_limit(retry)
+    assert [event["run_id"] for event in retry["data"]["events"]] == ["r0003"]

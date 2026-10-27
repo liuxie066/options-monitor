@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from candidate_evidence_helpers import earnings_evidence
+from candidate_evidence_helpers import earnings_evidence, delta_evidence
 from domain.domain.engine import (
     CandidateCalculationError,
     build_candidate_rank_key,
@@ -55,7 +55,9 @@ def _opening_row(*, mode: str = "put", currency: str = "USD", **overrides):  # t
         "max_new_contracts": 1,
         "covered_contracts_available": 1,
     }
+    row.update(delta_evidence(mode=mode, observed_at=row["snapshot_received_at_utc"]))
     row.update(overrides)
+    row.setdefault("spot_observed_at_utc", row["snapshot_received_at_utc"])
     return row
 
 

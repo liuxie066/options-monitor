@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import hashlib
+import math
 import json
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from src.application.candidate_models import CandidateContractInput
 from src.application.close_advice_quote_cache import quote_cache_metadata_path
 from src.application.opend_symbol_outputs import (
     finalize_required_data_quote_candidate,
+    finalize_unplanned_required_data_candidate,
     publish_required_data_quote_snapshot,
     save_outputs,
     validate_required_data_quote_candidate,
@@ -1100,6 +1102,7 @@ def test_finalizer_attests_multiplier_and_final_csv_hash(
     )
     payload = _payload(multiplier=None)
     payload["rows"][0]["implied_volatility"] = 0.13436424411240122
+    payload["rows"][0]["delta"] = -math.nextafter(0.4, math.inf)
     result = finalize_required_data_quote_candidate(
         base=tmp_path,
         producer_root=tmp_path,
@@ -1113,7 +1116,9 @@ def test_finalizer_attests_multiplier_and_final_csv_hash(
     )
 
     csv_path = result["csv_path"]
-    frame = pd.read_csv(csv_path)
+    frame = pd.read_csv(csv_path, float_precision="round_trip")
+    assert frame.loc[0, "delta"] == payload["rows"][0]["delta"]
+    assert abs(frame.loc[0, "delta"]) > 0.4
     metadata = json.loads(
         quote_cache_metadata_path(csv_path).read_text(encoding="utf-8")
     )
@@ -1138,6 +1143,7 @@ def test_finalizer_keeps_valid_multiplier_csv_canonical(
     )
     payload = _payload(multiplier=100.0)
     payload["rows"][0]["implied_volatility"] = 0.13436424411240122
+    payload["rows"][0]["delta"] = -math.nextafter(0.4, math.inf)
 
     result = finalize_required_data_quote_candidate(
         base=tmp_path,
@@ -1152,6 +1158,9 @@ def test_finalizer_keeps_valid_multiplier_csv_canonical(
     )
 
     assert result["quote_receipt_path"].is_file()
+    frame = pd.read_csv(result["csv_path"], float_precision="round_trip")
+    assert frame.loc[0, "delta"] == payload["rows"][0]["delta"]
+    assert abs(frame.loc[0, "delta"]) > 0.4
 
 
 def test_save_outputs_metadata_uses_raw_observation_time(tmp_path: Path) -> None:
@@ -1793,3 +1802,50 @@ def test_finalizer_preserves_put_and_position_call_outside_opening_window(
         csv_path=result["csv_path"], expected_fetch_contract=contract,
         now=COMPLETED_AT, require_fresh=True,
     )
+
+
+@pytest.mark.parametrize("reason", [
+    "no_feasible_strikes", "NO_FEASIBLE_STRIKES", " NO_FEASIBLE_STRIKES ",
+])
+@pytest.mark.parametrize("require_rv", [False, True])
+def test_unplanned_empty_opening_demand_requires_exact_plan_before_persistence(
+    tmp_path: Path, reason: str, require_rv: bool,
+) -> None:
+    payload, _contract = _no_expirations_candidate()
+    _as_dict(payload["meta"])["reason_code"] = reason
+    producer_root = tmp_path / "manual"
+
+    with pytest.raises(SourceReceiptError, match="empty opening demand requires an exact fetch contract"):
+        finalize_unplanned_required_data_candidate(
+            base=tmp_path, producer_root=producer_root, symbol="NVDA", payload=payload,
+            source="opend", host=HOST, port=PORT,
+            require_realized_volatility=require_rv, now=COMPLETED_AT,
+        )
+
+    assert not producer_root.exists()
+    assert not list(tmp_path.rglob("*receipt*.json"))
+
+
+@pytest.mark.parametrize("reason", ["no_expirations", "no_contract_rows"])
+@pytest.mark.parametrize("require_rv", [False, True])
+def test_unplanned_legacy_empty_finalizes_without_planned_authority(
+    tmp_path: Path, reason: str, require_rv: bool,
+) -> None:
+    payload, _contract = _no_expirations_candidate()
+    _as_dict(payload["meta"])["reason_code"] = reason
+    result = finalize_unplanned_required_data_candidate(
+        base=tmp_path, producer_root=tmp_path / "manual", symbol="NVDA", payload=payload,
+        source="opend", host=HOST, port=PORT,
+        require_realized_volatility=require_rv, now=COMPLETED_AT,
+    )
+
+    assert result["mode"] == "manual_unplanned"
+    assert result["quote_receipt_path"] is None
+    assert result["quote_receipt"] is None
+    assert result["evidence"] is None
+    raw = json.loads(result["raw_path"].read_text(encoding="utf-8"))
+    assert raw["meta"]["reason_code"] == reason
+    assert raw["rows"] == []
+    assert pd.read_csv(result["csv_path"]).empty
+    assert quote_cache_metadata_path(result["csv_path"]).is_file()
+    assert not list(tmp_path.rglob("*receipt*.json"))
