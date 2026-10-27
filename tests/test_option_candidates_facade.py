@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from src.application import option_candidates as app, opend_symbol_fetching as fetch
+from src.application import opend_market_snapshot_fetching as snapshots, opening_quote_evidence as quotes
 from src.application.short_vol_metrics import RealizedVolatilitySnapshot, TermMatchedRVObservation
 from src.interfaces.agent import cli
 
@@ -48,8 +49,19 @@ def test_prepare_inheritance_overrides_defaults_and_known_route(configured, tmp_
 
 
 def test_cli_facade_reaches_real_fetch_policy_and_bounded_envelope(configured, monkeypatch, tmp_path, capsys):
-    now = datetime.now(timezone.utc)
+    # Keep provider quotes and receipt clocks inside a known FX trading session.
+    now = datetime(2026, 1, 5, 15, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+
+    monkeypatch.setattr(app, '_now', lambda: now)
+    monkeypatch.setattr(snapshots, 'datetime', Clock)
+    monkeypatch.setattr(quotes, 'datetime', Clock)
     day = app.earnings_calendar_scan_date('US', now)
+    monkeypatch.setattr(fetch, 'get_trading_date', lambda market: day)
     expiry = (day + timedelta(days=30)).isoformat()
     code = f"US.NVDA{day + timedelta(days=30):%y%m%d}P100000"
     calls = []
