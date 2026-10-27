@@ -91,6 +91,7 @@
 ### 候选与 symbol
 
 - `scan_opportunities`
+- `option_candidates`
 - `candidate_rank_explain`
 - `candidate_filter_explain`
 - `symbol_resolve`
@@ -230,6 +231,40 @@ Long Option 完全排除。工具是纯读；业务 `status=partial|unavailable`
 
 未显式传路径时，这两个工具按 `OM_RUNTIME_ROOT` 定位 `output_runs` 和 `logs`，
 未配置时才回退到 repo root。
+
+### 指定标的卖出开仓候选
+
+`option_candidates` 查询当前合约条件，入口为 Tool Gateway 和 Bot；历史过滤原因仍用
+`candidate_filter_explain`。输入只有 `queries`，1–5 项，每项必填 `symbol` 和
+`strategy`（仅 `short_put` / `short_call`）。标的接受代码别名，例如 `00700`、
+`HK.00700`、`0700.HK`、`US.NVDA`；中文名称由对话层先唯一校准，不作为结构化输入。
+
+```bash
+./om-agent run --tool option_candidates \
+  --input-json '{"queries":[{"symbol":"0700.HK","strategy":"short_put","strike":370,"dte":[7,90]},{"symbol":"NVDA","strategy":"short_call"}]}'
+```
+
+可选 `strike` 为有限正数，`dte=[min,max]` 为整数闭区间，`1≤min≤max≤365`。
+省略时继承有效配置/策略默认值；显式参数只覆盖本次查询。拒绝 null、额外字段、
+字符串行权价、裸 put/call、买入/平仓策略及规范化后的重复查询。调用者不能填写
+account、config_key、路径、runtime root 或 OpenD endpoint。
+
+结果按输入顺序给出 `results`：每项 `outcome=found/none/unable`，并独立保留
+`coverage.status=complete/partial/unavailable`；`none` 只用于完整评估且无合格合约，
+部分数据下找到候选仍可为 `found`。`effective_filters` 包含行权价上下界与 DTE，
+无界端点为 null，配置不可用时整个 filters 为 null。每项最多展示 3 个候选，含合约、
+到期日、行权价、参考卖价、单份净权利金、期间净收益率和履约义务；`displayed/omitted`
+说明展示量。整体 `completion` 单独说明完成程度，输出超限时可将 evidence 置为 null 或压缩候选。
+
+仅筛合约，不检查账户现金、股票覆盖、成本底线或集中度。财报不淘汰合约，只展示查询日
+至到期日内事件及 `days_before_expiry`；同日事件不判断日内先后，缺失时明确“财报信息不完整”。
+参考卖价不保证成交，费用及净收益是估算。查询不写账本、配置、正式报告或通知；
+既有行情缓存和共享限频记录仍可能更新，FX 查询固定 `write_cache=False`。
+
+应用总响应预算至多 60 秒，并受 Host 剩余预算限制；超时保留已完成结果，未完成项保留原因，
+在途 SDK 调用不保证硬中断。Bot 对整批市场授权后才执行，详见
+[Bot 合同](BOT_DESIGN.md#指定标的卖出开仓候选)。Hermes bridge 位于其所属环境，按 OM manifest
+自动发现只读工具并添加 `om_` 前缀。桥接的离线 schema/JSON 转发验收不替代真实 MCP 握手和远端部署验收。
 
 ### 候选解释
 

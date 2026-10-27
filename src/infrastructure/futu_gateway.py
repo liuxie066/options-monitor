@@ -269,14 +269,20 @@ def _ensure_futu_api_importable() -> None:
         raise ModuleNotFoundError("No module named 'futu'") from exc
 
 
-def _wait_for_futu_context(context: Any, *, host: str, port: int) -> Any:
+def _wait_for_futu_context(context: Any, *, host: str, port: int, deadline: float | None = None, cancelled: Callable[[], bool] | None = None) -> Any:
     try:
-        context.set_sync_query_connect_timeout(FUTU_QUERY_CONNECT_TIMEOUT_SEC)
-        deadline = time.monotonic() + FUTU_QUERY_CONNECT_TIMEOUT_SEC
-        while not context.get_sync_conn_id():
-            if time.monotonic() >= deadline:
+        check_fetch_control(deadline, cancelled)
+        timeout = FUTU_QUERY_CONNECT_TIMEOUT_SEC if deadline is None else min(FUTU_QUERY_CONNECT_TIMEOUT_SEC, max(0.0, deadline - time.monotonic()))
+        context.set_sync_query_connect_timeout(timeout)
+        connect_deadline = time.monotonic() + FUTU_QUERY_CONNECT_TIMEOUT_SEC
+        while True:
+            check_fetch_control(deadline, cancelled)
+            if context.get_sync_conn_id():
+                break
+            if time.monotonic() >= connect_deadline:
                 raise FutuGatewayTransientError(f"OpenD connect timeout: {host}:{port}")
-            time.sleep(0.05)
+            wait_fetch_control(0.05, deadline=deadline, cancelled=cancelled)
+        check_fetch_control(deadline, cancelled)
         return context
     except BaseException:
         try:
@@ -286,16 +292,20 @@ def _wait_for_futu_context(context: Any, *, host: str, port: int) -> Any:
         raise
 
 
-def build_futu_quote_context(*, host: str, port: int) -> Any:
+def build_futu_quote_context(*, host: str, port: int, deadline: float | None = None, cancelled: Callable[[], bool] | None = None) -> Any:
     """Create a quote context with bounded handshake and reconnect waits."""
 
+    check_fetch_control(deadline, cancelled)
     _ensure_futu_api_importable()
     import futu
 
-    if not port_open(host, port):
+    check_fetch_control(deadline, cancelled)
+    reachable = port_open(host, port)
+    check_fetch_control(deadline, cancelled)
+    if not reachable:
         raise FutuGatewayUnreachableError(f"OpenD unreachable: {host}:{port}")
     context = futu.OpenQuoteContext(host=host, port=port, is_async_connect=True)
-    return _wait_for_futu_context(context, host=host, port=port)
+    return _wait_for_futu_context(context, host=host, port=port, deadline=deadline, cancelled=cancelled)
 
 
 def build_futu_trade_context(
@@ -344,9 +354,11 @@ class _FutuAPIBackend:
         self._quote_client = None
         self._trade_client = None
 
-    def _ensure_quote_client(self) -> Any:
+    def _ensure_quote_client(self, *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None) -> Any:
+        check_fetch_control(deadline, cancelled)
         if self._quote_client is None:
-            self._quote_client = build_futu_quote_context(host=self.host, port=self.port)
+            controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+            self._quote_client = build_futu_quote_context(host=self.host, port=self.port, **controls)
             LOG.info(
                 "futu_sdk_client_created event=client_created capability=quote host=%s port=%s",
                 self.host,
@@ -745,14 +757,20 @@ class FutuGateway:
             except Exception:
                 pass
 
-    def _quote_client(self) -> Any:
+    def _quote_client(self, *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None) -> Any:
+        check_fetch_control(deadline, cancelled)
         try:
             ensure = getattr(self.backend, "_ensure_quote_client", None)
             if callable(ensure):
-                return ensure()
+                controls = {"deadline": deadline, "cancelled": cancelled} if isinstance(self.backend, _FutuAPIBackend) and (deadline is not None or cancelled is not None) else {}
+                quote = ensure(**controls)
+                check_fetch_control(deadline, cancelled)
+                return quote
             quote, _ = self.backend._ensure_clients()
+            check_fetch_control(deadline, cancelled)
             return quote
         except Exception as exc:
+            check_fetch_control(deadline, cancelled)
             self._raise_mapped(exc, action="ensure_quote_client")
         raise AssertionError("unreachable")
 
@@ -767,10 +785,13 @@ class FutuGateway:
             self._raise_mapped(exc, action="ensure_trade_client")
         raise AssertionError("unreachable")
 
-    def ensure_quote_ready(self) -> dict[str, Any]:
-        quote = self._quote_client()
+    def ensure_quote_ready(self, *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
+        controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+        quote = self._quote_client(**controls)
+        check_fetch_control(deadline, cancelled)
         try:
             ret, state = quote.get_global_state()
+            check_fetch_control(deadline, cancelled)
             if ret != 0:
                 raise RuntimeError(f"OpenD get_global_state ret={ret}: {state}")
             if not isinstance(state, dict):
@@ -781,6 +802,7 @@ class FutuGateway:
                 raise RuntimeError(f"OpenD quote not logged in: {state}")
             return state
         except Exception as exc:
+            check_fetch_control(deadline, cancelled)
             self._raise_mapped(exc, action="ensure_quote_ready")
         raise AssertionError("unreachable")
 
@@ -1157,7 +1179,10 @@ def build_ready_futu_gateway(
     is_option_chain_cache_enabled: bool = True,
     backend_cls: Any | None = None,
     client_cls: Any | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> FutuGateway:
+    check_fetch_control(deadline, cancelled)
     gateway = build_futu_gateway(
         host=host,
         port=port,
@@ -1166,7 +1191,9 @@ def build_ready_futu_gateway(
         client_cls=client_cls,
     )
     try:
-        gateway.ensure_quote_ready()
+        controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+        gateway.ensure_quote_ready(**controls)
+        check_fetch_control(deadline, cancelled)
         return gateway
     except BaseException:
         gateway.close()
@@ -1180,6 +1207,8 @@ def build_ready_futu_quote_gateway(
     is_option_chain_cache_enabled: bool = True,
     backend_cls: Any | None = None,
     client_cls: Any | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> FutuGateway:
     """Build a gateway and preflight only the quote capability."""
 
@@ -1189,6 +1218,7 @@ def build_ready_futu_quote_gateway(
         is_option_chain_cache_enabled=is_option_chain_cache_enabled,
         backend_cls=backend_cls,
         client_cls=client_cls,
+        **({"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}),
     )
 
 
@@ -1265,6 +1295,38 @@ def _mask_account_id(value: str) -> str:
     return f"{'*' * (len(raw) - 4)}{raw[-4:]}"
 
 
+def check_fetch_control(
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
+    """Cooperative control; SDK calls already in flight cannot be interrupted."""
+    if cancelled is not None and cancelled():
+        raise TimeoutError("OpenD fetch cancelled")
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("OpenD fetch deadline reached")
+
+
+def wait_fetch_control(
+    seconds: float,
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
+    check_fetch_control(deadline, cancelled)
+    if deadline is None and cancelled is None:
+        time.sleep(seconds)
+        return
+    end = time.monotonic() + seconds
+    while True:
+        check_fetch_control(deadline, cancelled)
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            return
+        if deadline is not None:
+            remaining = min(remaining, max(0.0, deadline - time.monotonic()))
+        time.sleep(min(remaining, 0.05) if cancelled is not None else remaining)
+
+
 def retry_futu_gateway_call(
     what: str,
     fn: Any,
@@ -1275,9 +1337,17 @@ def retry_futu_gateway_call(
     retry_base_delay_sec: float = 0.8,
     retry_max_delay_sec: float = 6.0,
     quiet: bool = False,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> Any:
+    check_fetch_control(deadline, cancelled)
     if no_retry or int(retry_max_attempts) <= 1:
-        return fn()
+        try:
+            result = fn()
+        finally:
+            check_fetch_control(deadline, cancelled)
+        return result
 
     t0 = time.monotonic()
     attempt = 0
@@ -1286,10 +1356,18 @@ def retry_futu_gateway_call(
     budget = float(retry_time_budget_sec or 0.0)
 
     while True:
+        check_fetch_control(deadline, cancelled)
         attempt += 1
+        if diagnostics is not None and attempt > 1:
+            diagnostics["retry_count"] = diagnostics.get("retry_count", 0) + 1
         try:
-            return fn()
+            try:
+                result = fn()
+            finally:
+                check_fetch_control(deadline, cancelled)
+            return result
         except Exception as exc:
+            check_fetch_control(deadline, cancelled)
             code = classify_opend_error(exc)
             if attempt >= int(retry_max_attempts) or not code.is_retryable:
                 raise
@@ -1303,7 +1381,7 @@ def retry_futu_gateway_call(
 
             if not quiet:
                 print(f"[WARN] {what} failed (attempt {attempt}/{retry_max_attempts}): {exc}; sleep {sleep_s:.1f}s")
-            time.sleep(sleep_s)
+            wait_fetch_control(sleep_s, deadline=deadline, cancelled=cancelled)
             # Scheduler delays must not start another request after the budget.
             if budget > 0 and time.monotonic() - t0 >= budget:
                 raise

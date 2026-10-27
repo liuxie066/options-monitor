@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1281 (`src`: 570, `domain`: 97, `scripts`: 16, `tests`: 595)
-- Internal import edges: 11130 total, 3971 production/script edges excluding tests
+- Python files scanned: 1292 (`src`: 572, `domain`: 97, `scripts`: 16, `tests`: 604)
+- Internal import edges: 11233 total, 4007 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,9 +31,9 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|668| domain
+  application -->|671| domain
   application -->|4| domain_services
-  application -->|188| infrastructure
+  application -->|194| infrastructure
   application -->|2| om_strategy_core
   application -->|58| storage
   domain_services -->|6| domain
@@ -50,11 +50,11 @@ flowchart LR
   scripts -->|2| interfaces
   scripts -->|1| tests
   storage -->|1| domain
-  tests -->|5441| application
-  tests -->|656| domain
+  tests -->|5494| application
+  tests -->|658| domain
   tests -->|2| domain_services
-  tests -->|358| infrastructure
-  tests -->|402| interfaces
+  tests -->|365| infrastructure
+  tests -->|404| interfaces
   tests -->|6| om_strategy_core
   tests -->|31| scripts
   tests -->|77| storage
@@ -64,9 +64,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 668 |
+| application | domain | 671 |
 | interfaces | application | 196 |
-| application | infrastructure | 188 |
+| application | infrastructure | 194 |
 | scripts | application | 67 |
 | application | storage | 58 |
 | infrastructure | application | 10 |
@@ -88,10 +88,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 5441 |
-| tests | domain | 656 |
-| tests | interfaces | 402 |
-| tests | infrastructure | 358 |
+| tests | application | 5494 |
+| tests | domain | 658 |
+| tests | interfaces | 404 |
+| tests | infrastructure | 365 |
 | tests | storage | 77 |
 | tests | scripts | 31 |
 | tests | om_strategy_core | 6 |
@@ -103,18 +103,18 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 269 |
+| src.application | domain.domain | 271 |
 | src.application.ledger | domain.domain | 179 |
 | src.interfaces | src.application | 158 |
-| src.application | src.infrastructure | 133 |
+| src.application | src.infrastructure | 139 |
 | src.application.ledger | domain.domain.ledger | 74 |
 | src.application.trades | domain.domain | 67 |
 | scripts | src.application | 54 |
 | src.application | domain.storage | 45 |
 | src.application.trades | src.application | 45 |
 | src.application | src.application.ledger | 40 |
+| src.application | domain.domain.engine | 33 |
 | src.application.trades | src.application.ledger | 33 |
-| src.application | domain.domain.engine | 32 |
 | src.application.research | src.application | 32 |
 | domain.domain | domain.domain.ledger | 32 |
 | src.application.inbound | src.application | 28 |
@@ -189,21 +189,21 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 126 |
+| src.application.agent_tool_contracts | 128 |
 | src.application.payload_helpers | 98 |
+| domain.domain.symbol_identity | 92 |
 | src.application.ledger.api | 92 |
-| domain.domain.symbol_identity | 91 |
-| src.application.agent_tool_config | 75 |
+| src.application.agent_tool_config | 77 |
 | domain.domain.trade_contract_identity | 72 |
 | src.application.account_config | 60 |
 | domain.domain.decision_state_fingerprint | 59 |
 | src.infrastructure.io_utils | 56 |
 | domain.domain.option_position_identity | 55 |
 | domain.domain.ledger.position_fields | 53 |
-| src.application.runtime_paths | 42 |
+| src.application.runtime_paths | 44 |
 | domain.domain.trade_execution | 38 |
 | domain.domain.ledger.events | 34 |
-| src.infrastructure.exchange_rates | 31 |
+| src.infrastructure.futu_gateway | 32 |
 
 ### Highest Fan-Out Production Modules
 

@@ -47,6 +47,7 @@ trade_events -> projection -> position_lots
 |---|---|---|
 | YAML 配置构建与校验 | `om config` | [CONFIGS.md](CONFIGS.md) |
 | CSP / CC | `om run tick`、`om scan` | [策略架构](docs/STRATEGY_ARCHITECTURE.md) |
+| 指定标的卖出开仓查询 | `om-agent run --tool option_candidates`；Bot / Hermes 对话 | [工具合同](docs/TOOL_REFERENCE.md#指定标的卖出开仓候选) |
 | Combo Yield | 与开仓扫描同链路 | [策略架构](docs/STRATEGY_ARCHITECTURE.md) |
 | 轮转策略 | `om run tick`、`om wheel` | [轮转策略 PRD](docs/WHEEL_STRATEGY_PRD.md) |
 | Close Advice | 计划 Tick 生产、`./om-agent run --tool close_advice_read` 读取、`om close-advice configure` 启停 | [Close Advice Contract](docs/CLOSE_ADVICE_CONTRACT.md) |
@@ -61,6 +62,8 @@ trade_events -> projection -> position_lots
 | 运行诊断、服务与版本升级 | `om status`、`om service`、`om update` | [RUNBOOK.md](RUNBOOK.md) |
 
 本表是主要能力索引，不是 CLI 或 Tool Gateway 的完整命令清单。人工任务按“首次安装”和“日常管理”在 `om help` 中组织；完整顶层命令见 `om help all`。结构化工具名、输入 schema、风险级别和副作用以 `om-agent spec` 为准。
+
+指定标的查询支持 1–5 项 `short_put` / `short_call`，标的与卖出方向必填，行权价和 DTE 可选。返回符合条件的合约、收益估算及原因；财报在查询日至到期日内只提示，不作为该入口的淘汰条件。查询只评估合约，不判断账户现金、持股覆盖、成本底线或集中度。
 
 ### 轮转策略
 

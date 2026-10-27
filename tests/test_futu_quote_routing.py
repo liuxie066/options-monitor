@@ -50,3 +50,26 @@ def test_shared_quote_route_requires_all_markets_to_converge() -> None:
     assert shared.ok is True
     assert (shared.host, shared.port) == ("q", 11111)
     assert split.status == "conflict"
+
+
+def test_known_symbol_uses_its_binding_despite_other_endpoint():
+    from src.application.futu_quote_routing import resolve_futu_quote_route
+    config = _config('us', [('one', 11111), ('two', 11112)])
+    assert resolve_futu_quote_route(config, symbol='US.S0').host == 'one'
+    assert resolve_futu_quote_route(config, symbol='NVDA').status == 'conflict'
+
+
+def test_known_non_futu_symbol_does_not_inherit_other_binding():
+    from src.application.futu_quote_routing import resolve_futu_quote_route
+    config = _config('us', [('one', 11111)])
+    config['symbols'].append({'symbol': 'NVDA', 'fetch': {'source': 'file'}})
+    assert resolve_futu_quote_route(config, symbol='NVDA').status == 'missing'
+
+
+def test_symbol_binding_aliases_and_duplicate_rejected():
+    from src.application.futu_quote_routing import resolve_futu_quote_route
+    config = {'_generated': {'market': 'hk'}, 'symbols': [
+        {'symbol': '0700.HK', 'fetch': {'source': 'futu', 'host': 'quote', 'port': 11111}}]}
+    assert resolve_futu_quote_route(config, symbol='00700').host == 'quote'
+    config['symbols'].append({'symbol': 'HK.00700', 'fetch': {'source': 'futu'}})
+    assert resolve_futu_quote_route(config, symbol='00700').status == 'conflict'

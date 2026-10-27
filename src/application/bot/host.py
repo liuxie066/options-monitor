@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from contextlib import contextmanager
 from dataclasses import replace
@@ -17,12 +18,21 @@ from src.application.bot.memory import BotMemoryStore, memory_tool_description
 from src.application.bot.model_config import ModelSettings
 from src.application.bot.result_admission import admit_result_with_decision
 from src.application.bot.runtime import RunStopped, bounded_call, check_run, request_model, run_agent
-from src.application.bot.scene import build_scene_manifest, scene_policy_rejection_reason
+from src.application.bot.scene import build_scene_manifest, load_general_scene, scene_policy_rejection_reason
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.research.redaction import redact_value
 
 _SESSION_LOCK = Lock()
 _RUNNING_SESSIONS: set[str] = set()
+# This only permits clarification; it never parses a trade direction or tool input.
+_OPTION_CLARIFICATION = re.compile(
+    r"(?<![A-Za-z0-9_.])(?:\d+(?:\.\d+)?\s*[pc]|put|call)(?![A-Za-z0-9_.])",
+    re.IGNORECASE,
+)
+_EVIDENCE_QUESTION = re.compile(
+    r"解释|说明|为什么|为何|被过滤|筛选规则|报错|日志|\b(?:explain|why|strategy|errors?|logs?)\b",
+    re.IGNORECASE,
+)
 @contextmanager
 def session_run_slot(
     session_key: str,
@@ -175,6 +185,8 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
         if control_preview_specs:
             descriptions.append(control_preview_tool_description(control_preview_specs))
         messages = [dict(m) for m in manifest.messages if m["role"] == "system"]
+        if "option_candidates" in manifest.allowed_tools:
+            messages.append({"role": "system", "content": load_general_scene()["option_candidates_guidance"]})
         memory = scope = None
         if host_store and contract.execution_environment == "channel":
             try:
@@ -203,7 +215,7 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
         def tool_call(name, arguments):
             nonlocal memory_failed, control_request
             check_run(deadline, cancelled)
-            if not read_scope_current():
+            if name != "option_candidates" and not read_scope_current():
                 raise RunStopped("SCOPE_REVOKED", "trusted Bot read authorization changed")
             ref = new_id("obv")
             log.record("tool_call", {"tool_name": name, "tool_input": bot_tools.audit_tool_input(name, arguments)})
@@ -244,11 +256,15 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
                         response = bounded_call(lambda: bot_tools.call_read_tool(
                             name, payload, allowed_tools=tuple(manifest.allowed_tools),
                             deadline_monotonic=deadline, cancelled=cancelled,
+                            trusted_input=manifest.fixed_tool_input,
                             now_ms=manifest.fixed_tool_input.get("report_now_ms")),
                             deadline=deadline, cancelled=cancelled)
                 check_run(deadline, cancelled)
                 observation = bot_tools.model_observation(name, response)
-                if payload and contract.input.get("read_generation"):
+                if name == "option_candidates":
+                    if response.get("host_scope"):
+                        observation["host_scope"] = response["host_scope"]
+                elif payload and contract.input.get("read_generation"):
                     query = payload.get("query")
                     observation["host_scope"] = {
                         "tool": name,
@@ -274,6 +290,9 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
                            messages=messages, tools=descriptions, call_tool=tool_call, deadline=deadline,
                            cancelled=cancelled, event=log.record, request=model_request,
                            model_limit=manifest.limits["max_model_turns"], tool_limit=manifest.limits["max_tool_calls"],
+                           allow_initial_clarification=("option_candidates" in manifest.allowed_tools and bool(
+                               _OPTION_CLARIFICATION.search(str(contract.input.get("user_message") or ""))) and not
+                               _EVIDENCE_QUESTION.search(str(contract.input.get("user_message") or ""))),
                            failed_batch_limit=manifest.limits["max_consecutive_failed_tool_batches"],
                            reserve_seconds=manifest.limits["final_answer_reserve_seconds"])
         check_run(deadline, cancelled)

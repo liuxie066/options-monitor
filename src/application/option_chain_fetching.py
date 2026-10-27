@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 import importlib
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -14,6 +14,7 @@ import pandas as pd
 from .expiration_normalization import normalize_expiration_ymd
 from src.application.opend_normalize import normalize_opend_option_type
 from src.infrastructure.io_utils import atomic_write_json
+from src.infrastructure.futu_gateway import check_fetch_control
 
 
 FreshnessPolicy = Literal["cache_first", "refresh_missing", "force_refresh"]
@@ -38,6 +39,44 @@ class OptionChainRateLimitExceeded(RuntimeError):
     pass
 
 
+class FetchRangeExceeded(ValueError):
+    """The request's unique chain or quote work exceeds its fixed limit."""
+
+
+@dataclass
+class QueryFetchCache:
+    """Facts and unique work for ONE serial request; never share across requests."""
+
+    underliers: dict[tuple, Any] = field(default_factory=dict)
+    expirations: dict[tuple, list[str]] = field(default_factory=dict)
+    chains: dict[tuple, tuple[list[dict[str, Any]], str]] = field(default_factory=dict)
+    snapshots: dict[tuple, dict[str, Any]] = field(default_factory=dict)
+    history: dict[tuple, dict[str, Any]] = field(default_factory=dict)
+    chain_units: set[tuple] = field(default_factory=set)
+    quote_units: set[tuple] = field(default_factory=set)
+    reuse_hits: int = 0
+    diagnostics: dict[str, Any] = field(default_factory=lambda: {"phase_ms": {}, "opend_calls": {}, "retry_count": 0, "reuse_hits": 0})
+
+    def record_phase(self, name: str, started: float) -> None:
+        phases = self.diagnostics["phase_ms"]
+        phases[name] = phases.get(name, 0.0) + (time.monotonic() - started) * 1000
+
+    def record_call(self, endpoint: str) -> None:
+        calls = self.diagnostics["opend_calls"]
+        calls[endpoint] = calls.get(endpoint, 0) + 1
+
+    def reserve_chain(self, key: tuple) -> None:
+        if key not in self.chain_units and len(self.chain_units) >= 50:
+            raise FetchRangeExceeded("query_range_exceeded: more than 50 unique chain work units")
+        self.chain_units.add(key)
+
+    def reserve_quotes(self, identity: tuple, codes: list[str]) -> None:
+        units = {(*identity, code) for code in codes}
+        if len(self.quote_units | units) > 1000:
+            raise FetchRangeExceeded("query_range_exceeded: more than 1000 unique quote contracts")
+        self.quote_units.update(units)
+
+
 @dataclass(frozen=True)
 class OptionChainFetchRequest:
     symbol: str
@@ -60,6 +99,9 @@ class OptionChainFetchRequest:
     retry_time_budget_sec: float = 8.0
     retry_base_delay_sec: float = 0.8
     retry_max_delay_sec: float = 6.0
+    deadline: float | None = None
+    cancelled: Callable[[], bool] | None = None
+    query_cache: QueryFetchCache | None = None
 
 
 @dataclass(frozen=True)
@@ -79,9 +121,11 @@ class OptionChainFetchResult:
     stale_cache_expirations: list[str] = field(default_factory=list)
     stale_cache_asof_dates: dict[str, str] = field(default_factory=dict)
     frame: pd.DataFrame | None = None
+    source_observed_at: str | None = None
 
     def to_meta(self) -> dict[str, Any]:
         return {
+            "source_observed_at": self.source_observed_at,
             "status": self.status,
             "error_code": self.error_code,
             "from_cache_expirations": list(self.from_cache_expirations),
@@ -128,16 +172,23 @@ class FileRateLimiter:
             sleep=self.sleep,
         )
 
-    def acquire(self) -> float:
+    def acquire(self, *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None) -> float:
+        check_fetch_control(deadline, cancelled)
         try:
-            return self._gate.acquire()
+            controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+            result = self._gate.acquire(**controls)
         except TimeoutError as exc:
+            check_fetch_control(deadline, cancelled)
             raise OptionChainRateLimitExceeded(str(exc)) from exc
+        check_fetch_control(deadline, cancelled)
+        return result
 
-    def record_rate_limit(self, *, cooldown_sec: float | None = None) -> None:
+    def record_rate_limit(self, *, cooldown_sec: float | None = None, deadline: float | None = None, cancelled: Callable[[], bool] | None = None) -> None:
+        check_fetch_control(deadline, cancelled)
         recorder = getattr(self._gate, "record_rate_limit", None)
         if callable(recorder):
-            recorder(cooldown_sec=cooldown_sec)
+            controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+            recorder(cooldown_sec=cooldown_sec, **controls)
 
 
 def _get_or_create_gate(
@@ -339,12 +390,31 @@ def prune_option_chain_cache(base_dir: Path, keep_days: int) -> None:
             pass
 
 
+def _validate_query_chain_rows(rows: list[dict[str, Any]], expiration: str | None) -> None:
+    """A malformed expiry shard cannot attest an empty query subrange."""
+    import math
+
+    for row in rows:
+        if not isinstance(row.get("code"), str) or not row["code"].strip():
+            raise ValueError("option chain contains an invalid code")
+        if normalize_opend_option_type(row.get("option_type")) not in {"put", "call"}:
+            raise ValueError("option chain contains an invalid option type")
+        actual_expiration = normalize_expiration_ymd(row.get("strike_time"))
+        if actual_expiration is None or (expiration and actual_expiration != expiration):
+            raise ValueError("option chain contains an invalid expiration")
+        strike = float(row.get("strike_price"))
+        if not math.isfinite(strike) or strike <= 0:
+            raise ValueError("option chain contains an invalid strike")
+
+
 def fetch_option_chains(
     *,
     gateway: Any,
     request: OptionChainFetchRequest,
     retry_call: Callable[..., Any],
 ) -> OptionChainFetchResult:
+    check_fetch_control(request.deadline, request.cancelled)
+    controls = {"deadline": request.deadline, "cancelled": request.cancelled} if request.deadline is not None or request.cancelled is not None else {}
     base_dir = Path(request.base_dir) if request.base_dir is not None else Path.cwd()
     asof_date = str(request.asof_date or "")
     freshness_policy = str(request.freshness_policy or "cache_first")
@@ -374,9 +444,29 @@ def fetch_option_chains(
     rate_gate_wait_sec = 0.0
     option_type_scope = _single_option_type(request.option_types)
 
+    observed_times: list[str] = []
+    local_cache = request.query_cache
+    identity = (str(base_dir.resolve()), request.host, int(request.port), request.underlier_code, asof_date)
     for exp in targets:
+        check_fetch_control(request.deadline, request.cancelled)
         exp_norm = normalize_expiration_ymd(exp) if exp else None
         exp_key = _cache_expiration_key(exp_norm)
+        local_key = (*identity, exp_key, option_type_scope or "both")
+        full_key = (*identity, exp_key, "both")
+        if local_cache is not None:
+            hit_key = full_key if full_key in local_cache.chains else local_key
+            if hit_key in local_cache.chains:
+                local_cache.reserve_chain(hit_key)
+                cached_rows, observed_at = local_cache.chains[hit_key]
+                rows.extend(dict(row) for row in cached_rows)
+                cached_frame = _records_to_frame(cached_rows)
+                if cached_frame is not None:
+                    frame_parts.append(cached_frame)
+                observed_times.append(observed_at)
+                from_cache.append(exp_key)
+                statuses[exp_key] = "cache" if cached_rows else "empty"
+                local_cache.reuse_hits += 1
+                continue
         cache_path = option_chain_shard_cache_path(
             base_dir,
             request.underlier_code,
@@ -385,10 +475,25 @@ def fetch_option_chains(
         )
         fallback_cache_path = option_chain_shard_cache_path(base_dir, request.underlier_code, exp_norm)
         if request.chain_cache and (not force_refresh) and asof_date:
+            loaded_path = cache_path
             cached_rows = load_option_chain_shard(cache_path, asof_date=asof_date)
             if not cached_rows and option_type_scope:
+                loaded_path = fallback_cache_path
                 cached_rows = load_option_chain_shard(fallback_cache_path, asof_date=asof_date)
+            check_fetch_control(request.deadline, request.cancelled)
+            if cached_rows and local_cache is not None:
+                try:
+                    _validate_query_chain_rows(cached_rows, exp_norm)
+                except (TypeError, ValueError):
+                    cached_rows = None
             if cached_rows:
+                if local_cache is not None:
+                    cache_key = full_key if loaded_path == fallback_cache_path else local_key
+                    local_cache.reserve_chain(cache_key)
+                    observed_at = datetime.fromtimestamp(loaded_path.stat().st_mtime, timezone.utc).isoformat()
+                    local_cache.diagnostics["persistent_cache_hits"] = local_cache.diagnostics.get("persistent_cache_hits", 0) + 1
+                    local_cache.chains[cache_key] = ([dict(row) for row in cached_rows], observed_at)
+                    observed_times.append(observed_at)
                 rows.extend(cached_rows)
                 cached_frame = _records_to_frame(cached_rows)
                 if cached_frame is not None and not cached_frame.empty:
@@ -397,14 +502,21 @@ def fetch_option_chains(
                 statuses[exp_key] = "cache"
                 continue
 
+        if local_cache is not None:
+            local_cache.reserve_chain(local_key)
+
         def _call_chain(exp0: str | None = exp_norm) -> Any:
             def _mark_opend_call() -> None:
                 nonlocal opend_calls
                 opend_calls += 1
+                if local_cache is not None:
+                    local_cache.record_call("option_chain")
 
             def _mark_rate_gate_wait(wait_sec: float) -> None:
                 nonlocal rate_gate_wait_sec
                 rate_gate_wait_sec += max(0.0, float(wait_sec))
+                if local_cache is not None:
+                    local_cache.diagnostics["rate_gate_wait_sec"] = local_cache.diagnostics.get("rate_gate_wait_sec", 0.0) + max(0.0, float(wait_sec))
 
             return _fetch_one_chain(
                 gateway,
@@ -425,8 +537,12 @@ def fetch_option_chains(
                 retry_base_delay_sec=float(request.retry_base_delay_sec),
                 retry_max_delay_sec=float(request.retry_max_delay_sec),
                 quiet=True,
+                **controls,
+                **({"diagnostics": local_cache.diagnostics} if local_cache is not None else {}),
             )
+            check_fetch_control(request.deadline, request.cancelled)
         except Exception as exc:
+            check_fetch_control(request.deadline, request.cancelled)
             code = classify_option_chain_error(exc)
             msg = str(exc)
             errors.append({"expiration": exp_norm, "error_code": code, "message": msg})
@@ -466,6 +582,8 @@ def fetch_option_chains(
         try:
             chain_frame = _chain_value_to_frame(chain)
             chain_rows = _chain_value_to_records(chain, frame=chain_frame)
+            if local_cache is not None:
+                _validate_query_chain_rows(chain_rows, exp_norm)
         except (TypeError, ValueError) as exc:
             errors.append(
                 {
@@ -476,6 +594,11 @@ def fetch_option_chains(
             )
             statuses[exp_key] = "error"
             continue
+        check_fetch_control(request.deadline, request.cancelled)
+        if local_cache is not None:
+            observed_at = datetime.now(timezone.utc).isoformat()
+            local_cache.chains[local_key] = ([dict(row) for row in chain_rows], observed_at)
+            observed_times.append(observed_at)
         if not chain_rows:
             statuses[exp_key] = "empty"
             empty_diagnostic = {
@@ -523,6 +646,7 @@ def fetch_option_chains(
                 rows=chain_rows,
             )
 
+    check_fetch_control(request.deadline, request.cancelled)
     source_outcome, reason_code = _source_outcome(
         rows=rows,
         errors=errors,
@@ -554,6 +678,7 @@ def fetch_option_chains(
         stale_cache_expirations=stale_cache,
         stale_cache_asof_dates=stale_cache_asof_dates,
         frame=_concat_frames(frame_parts),
+        source_observed_at=min(observed_times) if observed_times else None,
     )
 
 
@@ -580,7 +705,9 @@ def _fetch_one_chain(
     on_opend_call: Callable[[], None] | None = None,
     on_rate_gate_wait: Callable[[float], None] | None = None,
 ) -> Any:
-    wait_sec = limiter.acquire()
+    controls = {"deadline": request.deadline, "cancelled": request.cancelled} if request.deadline is not None or request.cancelled is not None else {}
+    check_fetch_control(request.deadline, request.cancelled)
+    wait_sec = limiter.acquire(**controls)
     if on_rate_gate_wait is not None:
         on_rate_gate_wait(wait_sec)
     if on_opend_call is not None:
@@ -594,11 +721,17 @@ def _fetch_one_chain(
         kwargs["option_type"] = option_type
 
     def _call_gateway(call_kwargs: dict[str, Any]) -> Any:
+        check_fetch_control(request.deadline, request.cancelled)
         try:
-            return gateway.get_option_chain(**call_kwargs)
+            try:
+                result = gateway.get_option_chain(**call_kwargs)
+            finally:
+                check_fetch_control(request.deadline, request.cancelled)
+            return result
         except Exception as exc:
+            check_fetch_control(request.deadline, request.cancelled)
             if classify_option_chain_error(exc) == "RATE_LIMIT":
-                limiter.record_rate_limit()
+                limiter.record_rate_limit(**controls)
             raise
 
     try:
@@ -607,6 +740,13 @@ def _fetch_one_chain(
         if "option_type" not in str(exc):
             raise
         kwargs.pop("option_type", None)
+        wait_sec = limiter.acquire(**controls)
+        if on_rate_gate_wait is not None:
+            on_rate_gate_wait(wait_sec)
+        if on_opend_call is not None:
+            on_opend_call()
+        if request.query_cache is not None:
+            request.query_cache.reserve_chain((str(Path(request.base_dir or Path.cwd()).resolve()), request.host, int(request.port), request.underlier_code, str(request.asof_date or ""), _cache_expiration_key(expiration), "both"))
         return _call_gateway(kwargs)
 
 

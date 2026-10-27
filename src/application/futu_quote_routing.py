@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetch_source
+from domain.domain.symbol_identity import resolve_symbol_identity
 from src.application.config_profiles import apply_profiles
 from src.application.config_sections import resolve_templates_config, resolve_watchlist_config
 
@@ -63,13 +64,26 @@ def resolve_futu_quote_route(
     *,
     config_key: str | None = None,
     market: str | None = None,
+    symbol: str | None = None,
 ) -> ResolvedFutuQuoteRoute:
     cfg = dict(config) if isinstance(config, Mapping) else {}
     resolved_market = runtime_config_market(cfg, fallback=market)
     profiles = resolve_templates_config(cfg)
     members: list[FutuQuoteRouteMember] = []
     errors: list[str] = []
-    for raw in resolve_watchlist_config(cfg):
+    watchlist = resolve_watchlist_config(cfg)
+    if symbol is not None:
+        identity = resolve_symbol_identity(symbol)
+        if identity is None:
+            return ResolvedFutuQuoteRoute("missing", None, None, (), ("invalid underlier",))
+        matched = [raw for raw in watchlist
+                   if (candidate := resolve_symbol_identity(raw.get("symbol"))) is not None
+                   and candidate.canonical == identity.canonical]
+        if len(matched) > 1:
+            return ResolvedFutuQuoteRoute("conflict", None, None, (), ("duplicate symbol bindings",))
+        if matched:
+            watchlist = matched
+    for raw in watchlist:
         try:
             item = apply_profiles(raw, profiles)
         except Exception as exc:
