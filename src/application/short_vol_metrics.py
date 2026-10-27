@@ -6,12 +6,13 @@ from datetime import date, timedelta
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import pandas as pd
 
 from src.application.opend_call_coordinator import rate_limited_opend_call
 from src.infrastructure.io_utils import atomic_write_json
+from src.infrastructure.futu_gateway import check_fetch_control
 
 
 TRADING_DAYS_PER_YEAR = 252
@@ -180,11 +181,17 @@ def fetch_realized_volatility_snapshot(
     history_kline_max_wait_sec: float = 30.0,
     history_kline_window_sec: float = 30.0,
     history_kline_max_calls: int = 60,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    facts_cache: dict[str, Any] | None = None,
 ) -> RealizedVolatilitySnapshot:
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     expiration_dates = _normalize_expiration_dates(expirations)
     if not expiration_dates or not str(market or "").strip():
         return _fetch_legacy_diagnostic_snapshot(
             gateway,
+            diagnostics=facts_cache.get("diagnostics") if facts_cache is not None else None,
             underlier_code=underlier_code,
             trading_day=trading_day,
             lookback_calendar_days=lookback_calendar_days,
@@ -192,6 +199,7 @@ def fetch_realized_volatility_snapshot(
             history_kline_max_wait_sec=history_kline_max_wait_sec,
             history_kline_window_sec=history_kline_window_sec,
             history_kline_max_calls=history_kline_max_calls,
+            **controls,
         )
 
     market_code = str(market or "").strip().upper()
@@ -208,13 +216,37 @@ def fetch_realized_volatility_snapshot(
     calendar_end = max(expiration_dates.values())
 
     try:
-        calendar_rows = gateway.get_trading_days(
-            market=market_code,
-            start=history_start.isoformat(),
-            end=calendar_end.isoformat(),
-        )
-        calendar_dates = _trading_calendar_dates(calendar_rows)
+        cached_calendar = facts_cache.get("calendar") if facts_cache is not None else None
+        calendar_dates = list(cached_calendar[2]) if cached_calendar is not None else []
+        ranges = [(history_start, calendar_end)]
+        if cached_calendar is not None:
+            ranges = []
+            if history_start < cached_calendar[0]:
+                ranges.append((history_start, cached_calendar[0] - timedelta(days=1)))
+            if calendar_end > cached_calendar[1]:
+                ranges.append((cached_calendar[1] + timedelta(days=1), calendar_end))
+        for start, end in ranges:
+            check_fetch_control(deadline, cancelled)
+            try:
+                if facts_cache is not None and "diagnostics" in facts_cache:
+                    calls = facts_cache["diagnostics"].setdefault("opend_calls", {})
+                    calls["trading_days"] = calls.get("trading_days", 0) + 1
+                calendar_rows = gateway.get_trading_days(
+                    market=market_code, start=start.isoformat(), end=end.isoformat(),
+                )
+            finally:
+                check_fetch_control(deadline, cancelled)
+            calendar_dates.extend(_trading_calendar_dates(calendar_rows))
+        calendar_dates = sorted(set(calendar_dates))
+        if facts_cache is not None and calendar_dates:
+            facts_cache["calendar"] = (
+                min(history_start, cached_calendar[0]) if cached_calendar else history_start,
+                max(calendar_end, cached_calendar[1]) if cached_calendar else calendar_end,
+                list(calendar_dates),
+            )
+        calendar_dates = [day for day in calendar_dates if history_start <= day <= calendar_end]
     except Exception as exc:
+        check_fetch_control(deadline, cancelled)
         return _unavailable_term_snapshot(
             expiration_dates,
             reason=f"trading_calendar_error:{type(exc).__name__}",
@@ -245,6 +277,7 @@ def fetch_realized_volatility_snapshot(
     try:
         history_rows, history_evidence = _load_refresh_qfq_history(
             gateway,
+            facts_cache=facts_cache,
             market=market_code,
             underlier_code=str(underlier_code),
             trading_day=trading_day,
@@ -253,8 +286,10 @@ def fetch_realized_volatility_snapshot(
             history_kline_max_wait_sec=history_kline_max_wait_sec,
             history_kline_window_sec=history_kline_window_sec,
             history_kline_max_calls=history_kline_max_calls,
+            **controls,
         )
     except Exception as exc:
+        check_fetch_control(deadline, cancelled)
         return _unavailable_term_snapshot(
             expiration_dates,
             reason=f"qfq_history_error:{type(exc).__name__}",
@@ -268,6 +303,7 @@ def fetch_realized_volatility_snapshot(
             },
         )
 
+    check_fetch_control(deadline, cancelled)
     diagnostic = compute_realized_volatility_snapshot(history_rows)
     term_matched = _compute_term_matched_observations(
         expiration_dates=expiration_dates,
@@ -324,7 +360,12 @@ def _fetch_legacy_diagnostic_snapshot(
     history_kline_max_wait_sec: float,
     history_kline_window_sec: float,
     history_kline_max_calls: int,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> RealizedVolatilitySnapshot:
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     start = trading_day - timedelta(days=max(140, int(lookback_calendar_days)))
     try:
         data = _fetch_qfq_history_rows(
@@ -336,6 +377,8 @@ def _fetch_legacy_diagnostic_snapshot(
             history_kline_max_wait_sec=history_kline_max_wait_sec,
             history_kline_window_sec=history_kline_window_sec,
             history_kline_max_calls=history_kline_max_calls,
+            **controls,
+            diagnostics=diagnostics,
         )
         snapshot = compute_realized_volatility_snapshot(data)
         if snapshot.status == "ok":
@@ -350,6 +393,7 @@ def _fetch_legacy_diagnostic_snapshot(
             reason=snapshot.reason or "history_kline_unusable",
         )
     except Exception as exc:
+        check_fetch_control(deadline, cancelled)
         return RealizedVolatilitySnapshot(
             status="error",
             reason=f"{type(exc).__name__}: {exc}",
@@ -413,11 +457,22 @@ def _fetch_qfq_history_rows(
     history_kline_max_wait_sec: float,
     history_kline_window_sec: float,
     history_kline_max_calls: int,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     raw_rows: list[dict[str, Any]] = []
     page_req_key = None
     for _ in range(20):
-        call = lambda page_req_key=page_req_key: gateway.request_history_kline(
+        check_fetch_control(deadline, cancelled)
+        def call(page_req_key=page_req_key):
+            check_fetch_control(deadline, cancelled)
+            if diagnostics is not None:
+                calls = diagnostics.setdefault("opend_calls", {})
+                calls["history_kline"] = calls.get("history_kline", 0) + 1
+            return gateway.request_history_kline(
                 code=str(underlier_code),
                 start=start.isoformat(),
                 end=end.isoformat(),
@@ -427,18 +482,24 @@ def _fetch_qfq_history_rows(
                 max_count=300,
                 page_req_key=page_req_key,
             )
-        result = (
-            rate_limited_opend_call(
-                base_dir=base_dir,
-                endpoint="history_kline",
-                max_wait_sec=history_kline_max_wait_sec,
-                window_sec=history_kline_window_sec,
-                max_calls=history_kline_max_calls,
-                call=call,
+        try:
+            result = (
+                rate_limited_opend_call(
+                    base_dir=base_dir,
+                    endpoint="history_kline",
+                    max_wait_sec=history_kline_max_wait_sec,
+                    window_sec=history_kline_window_sec,
+                    max_calls=history_kline_max_calls,
+                    call=call,
+                    **controls,
+                    **({"diagnostics": diagnostics} if diagnostics is not None else {}),
+                )
+                if base_dir is not None
+                else call()
             )
-            if base_dir is not None
-            else call()
-        )
+        finally:
+            check_fetch_control(deadline, cancelled)
+        check_fetch_control(deadline, cancelled)
         chunk = result.get("data") if isinstance(result, dict) else result
         raw_rows.extend(_rows(chunk))
         next_key = result.get("page_req_key") if isinstance(result, dict) else None
@@ -511,7 +572,30 @@ def _load_refresh_qfq_history(
     history_kline_max_wait_sec: float,
     history_kline_window_sec: float,
     history_kline_max_calls: int,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    facts_cache: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+    diagnostics = facts_cache.get("diagnostics") if facts_cache is not None else None
+    cached_fact = facts_cache.get("history") if facts_cache is not None else None
+    if cached_fact is not None:
+        covered_start, cached_rows, evidence = cached_fact
+        if history_start < covered_start:
+            prefix = _fetch_qfq_history_rows(
+                gateway, underlier_code=underlier_code, start=history_start, end=covered_start,
+                base_dir=base_dir, history_kline_max_wait_sec=history_kline_max_wait_sec,
+                history_kline_window_sec=history_kline_window_sec,
+                history_kline_max_calls=history_kline_max_calls, diagnostics=diagnostics, **controls,
+            )
+            cached_rows = [*prefix, *cached_rows]
+            covered_start = history_start
+        check_fetch_control(deadline, cancelled)
+        required_rows = _normalize_history_rows(cached_rows, start=history_start, completed_before=trading_day)
+        evidence = {**evidence, "session_count": len(required_rows), "input_hash": _hash_values(required_rows)}
+        facts_cache["history"] = (covered_start, cached_rows, evidence)
+        return required_rows, evidence
     cache_path = (
         qfq_history_cache_path(
             base_dir,
@@ -547,6 +631,8 @@ def _load_refresh_qfq_history(
         history_kline_max_wait_sec=history_kline_max_wait_sec,
         history_kline_window_sec=history_kline_window_sec,
         history_kline_max_calls=history_kline_max_calls,
+        **controls,
+        diagnostics=diagnostics,
     )
     revision_detected = _history_revision_detected(
         cached_rows,
@@ -564,6 +650,8 @@ def _load_refresh_qfq_history(
             history_kline_max_wait_sec=history_kline_max_wait_sec,
             history_kline_window_sec=history_kline_window_sec,
             history_kline_max_calls=history_kline_max_calls,
+            **controls,
+            diagnostics=diagnostics,
         )
     cached_merged = _merge_history_rows(
         ([] if revision_detected else cached_rows),
@@ -582,6 +670,7 @@ def _load_refresh_qfq_history(
         if revision_detected or cached_covered_from is None
         else min(cached_covered_from, history_start)
     )
+    check_fetch_control(deadline, cancelled)
     if cache_path is not None:
         atomic_write_json(
             cache_path,
@@ -613,6 +702,9 @@ def _load_refresh_qfq_history(
         "cached_session_count": len(cached_merged),
         "cache_hash": _hash_values(cached_merged),
     }
+    check_fetch_control(deadline, cancelled)
+    if facts_cache is not None:
+        facts_cache["history"] = (history_start, required_rows, dict(evidence))
     return required_rows, evidence
 
 

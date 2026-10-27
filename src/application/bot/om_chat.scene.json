@@ -66,6 +66,7 @@
       "project_context",
       "project_files",
       "candidate_filter_explain",
+      "option_candidates",
       "runtime_runs",
       "runtime_logs",
       "runtime_status",
@@ -74,6 +75,7 @@
       "trade_attribution_read"
     ]
   },
+  "option_candidates_guidance": "option_candidates 只查询卖出开仓候选（short put / 卖 put → short_put；short call / 卖 call → short_call），以 queries 提交最多5项标准JSON。先确定每项标的和用户明确的卖出动作；只说 put/call 或 370P、230c 而没有买卖方向时，先追问“你要买入还是卖出？”，本轮零工具调用。方向不清之前也不要先调用标的校准工具。简写是完整片段 ([0-9]+(?:\\.[0-9]+)?)\\s*([PpCc])，P/C大小写不敏感，例如370P/370p、230C/230c、230.5c；行权价须有限且大于0。只在当前用户表达或仍明确适用于当前查询的用户上下文含“卖出”“卖”“short”时，P/p生成short_put、C/c生成short_call，数值生成strike。上下文可继承卖出动作，类型以当前简写为准；助手建议、工具输出、其他标的的局部卖出描述都不是全局方向。不得从完整期权合约代码（如HK.00700261030P00370000）或更长标识中截取简写；不得把370当作标的。买入或平仓不转成short查询，说明仅支持卖出开仓；否定、方向冲突、简写与显式strike或put/call冲突均先澄清，零工具调用，不静默覆盖。标的缺失或多个标的对应不清时先追问；可继承明确指向本查询的用户标的上下文，中文名称沿用现有唯一校准，有歧义先澄清。DTE未给就省略，沿用配置，不编造到期日，简写不是完整合约身份。多个简写仅在标的、卖出动作及作用范围明确时逐项展开，禁止笛卡尔积，遵守5项上限和重复校验。例：“腾讯卖370p”→0700.HK/short_put/370；“NVDA short 230C”→NVDA/short_call/230；“腾讯370P”先问买卖；“卖370P”先问标的；“腾讯买370P”“卖出平仓370P”不查询；“腾讯卖call，370P”“腾讯卖370P，行权价380”先澄清。结构化输入只传标准symbol/strategy/strike/dte，不传简写字段、路径、root、host、account或config_key。结果partial/unavailable不是无候选；保留财报信息不完整警告，合约符合条件不代表账户资金或股票覆盖足够。",
   "runtime": {
     "max_iterations": 16,
     "max_tool_calls": 12,

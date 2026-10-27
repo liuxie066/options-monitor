@@ -208,7 +208,7 @@ def test_scene_selects_only_the_required_read_tools() -> None:
 
     assert manifest.allowed_tools == expected
     assert set(expected) == {
-        "project_context", "project_files", "candidate_filter_explain",
+        "project_context", "project_files", "candidate_filter_explain", "option_candidates",
         "runtime_runs", "runtime_logs", "runtime_status", "receipt_read", "option_positions_read", "trade_attribution_read",
     }
     assert len(manifest.tool_descriptions) == len(expected)

@@ -20,6 +20,7 @@ from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_config import resolve_output_root
 from src.application.symbol_aliases import symbol_aliases_from_config
+from src.application.option_candidates import QUERY_INPUT_SCHEMA, normalize_queries, option_candidates_tool
 
 
 def _normalize_candidate_filter_bot_input(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -275,7 +276,46 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
     bot_input_normalizer=_normalize_candidate_filter_bot_input,
 )
 
+OPTION_CANDIDATES_TOOL = build_agent_tool(
+    name="option_candidates",
+    catalog_summary="指定标的和卖出方向，查询当前符合合约条件的期权并解释收益与义务。",
+    description=(
+        "Query live selling-to-open option candidates, at most 5 independent queries. symbol and strategy are required; "
+        "strategy must be short_put or short_call. Accept user dialogue short put/卖 put and short call/卖 call. "
+        "Dialogue shorthand 370P/370p/230C/230c (positive decimals allowed) specifies strike and type only: "
+        "map to short_put/short_call only with explicit applicable USER selling-to-open context. Otherwise ask 买入还是卖出 and make zero tool calls. "
+        "Never infer sell from bare put/call, assistant text, buy, closing, negation, or another symbol's local intent. "
+        "Missing/ambiguous symbol or conflicting type/strike requires clarification. Resolve company names to underlier codes first. "
+        "Do not extract shorthand from full contract codes, invent expiry, or form Cartesian products. JSON is strict; strike must be numeric. "
+        "Optional exact strike and inclusive dte [1..365] override only this request; omitted fields inherit config/defaults (single-leg DTE 7..60). "
+        "Business read only; existing quote cache and shared limiter bookkeeping may occur. "
+        "Contract-only, no account cash/stock cover/cost/concentration checks. Earnings never reject here: show dates only from query date through expiry, "
+        "days_before_expiry and same-day intraday uncertainty; missing earnings must be disclosed. "
+        "Answer found/none/unable from each result; partial means at least, never none. Show up to 3 concise rows per query: expiry/DTE, strike, "
+        "reference sell limit, single-contract net premium, PERIOD net return. Explain reasons and acquisition/sale obligation. "
+        "For none/unable include effective_filters strike range and DTE, main exclusions/gaps. Null bounds mean unbounded; null filters mean config unknown. "
+        "Reference limit is not guaranteed executable; account checks not evaluated. Evidence may be omitted under output budget; narrowing is a fresh query."
+    ),
+    requires=("runtime_config", "opend_quotes"),
+    capabilities=("live_option_candidates", "read_only"),
+    input_schema=QUERY_INPUT_SCHEMA,
+    input_validator=normalize_queries,
+    handler=option_candidates_tool,
+    pure_read=True,
+    allow_additional_input=False,
+    bot_input_fields=("queries",),
+    examples=({"input": {"queries": [{"symbol": "00700", "strategy": "short_put", "strike": 370}]}},),
+    output_contract={
+        "schema_version": "option_candidates.output.v1", "evidence_type": "collection",
+        "bounded_projection": "contract_fields", "coverage": "source_declared", "freshness": "source_declared",
+        "pagination": {"mode": "none"}, "primary_rows": "results",
+        "model_value_fields": ["evaluation_scope", "completion", "results", "limits", "account_checks"],
+        "source_label": "OM live contract-only candidates",
+    },
+)
+
 TOOLS: tuple[AgentTool, ...] = (
+    OPTION_CANDIDATES_TOOL,
     CANDIDATE_RANK_EXPLAIN_TOOL,
     CANDIDATE_FILTER_EXPLAIN_TOOL,
 )

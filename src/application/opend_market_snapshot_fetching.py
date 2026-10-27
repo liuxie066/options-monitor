@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 import time
@@ -19,7 +19,7 @@ from src.application.opend_fetch_config import (
 )
 from src.application.opend_utils import normalize_underlier
 from src.application.option_chain_fetching import classify_option_chain_error
-from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway, retry_futu_gateway_call
+from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway, retry_futu_gateway_call, check_fetch_control
 from src.infrastructure.futu_dataframe import futu_dataframe_records
 
 
@@ -110,6 +110,7 @@ class MarketSnapshotFetchResult:
     opend_call_count: int = 0
     requested_at_utc: str | None = None
     received_at_utc: str | None = None
+    code_receipts: dict[str, tuple[str | None, str | None]] = field(default_factory=dict)
 
     @property
     def requested_codes_count(self) -> int:
@@ -139,8 +140,12 @@ def get_spot_opend(
     errors: list[dict[str, Any]] | None = None,
     rate_limited_call: Callable[..., Any] = rate_limited_opend_call,
     metrics: dict[str, Any] | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> float | None:
     """Try to get underlying spot from OpenD."""
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     snapshot_limit = OpenDFetchLimits.from_flat_kwargs(
         snapshot_max_wait_sec=snapshot_max_wait_sec,
         snapshot_window_sec=snapshot_window_sec,
@@ -150,13 +155,19 @@ def get_spot_opend(
         def _call_snapshot() -> Any:
             _increment_metric(metrics, "spot_snapshot_opend_calls")
             _increment_metric(metrics, "spot_snapshot_requested_codes")
-            return gateway.get_snapshot([underlier_code])
+            check_fetch_control(deadline, cancelled)
+            try:
+                result = gateway.get_snapshot([underlier_code])
+            finally:
+                check_fetch_control(deadline, cancelled)
+            return result
 
         if base_dir is not None:
             df = rate_limited_call(
                 base_dir=Path(base_dir),
                 endpoint="market_snapshot",
                 **snapshot_limit.call_kwargs(),
+                **controls,
                 call=_call_snapshot,
             )
         else:
@@ -184,6 +195,7 @@ def get_spot_opend(
         )
         return None
     except Exception as exc:
+        check_fetch_control(deadline, cancelled)
         _append_opend_observation_error(
             errors,
             stage="underlier_snapshot",
@@ -207,8 +219,12 @@ def get_underlier_observation_opend(
     rate_limited_call: Callable[..., Any] = rate_limited_opend_call,
     metrics: dict[str, Any] | None = None,
     now_utc: datetime | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> OpeningUnderlierObservation:
     """Fetch one run-scoped OpenD spot observation without fallback prices."""
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
 
     snapshot_limit = OpenDFetchLimits.from_flat_kwargs(
         snapshot_max_wait_sec=snapshot_max_wait_sec,
@@ -223,6 +239,7 @@ def get_underlier_observation_opend(
             base_dir=Path(base_dir),
             endpoint="market_snapshot",
             **snapshot_limit.call_kwargs(),
+            **controls,
             call=call,
         )
 
@@ -232,7 +249,12 @@ def get_underlier_observation_opend(
         def _snapshot_call() -> Any:
             _increment_metric(metrics, "spot_snapshot_opend_calls")
             _increment_metric(metrics, "spot_snapshot_requested_codes")
-            return gateway.get_snapshot([underlier_code])
+            check_fetch_control(deadline, cancelled)
+            try:
+                result = gateway.get_snapshot([underlier_code])
+            finally:
+                check_fetch_control(deadline, cancelled)
+            return result
 
         snapshot = _limited(_snapshot_call)
         snapshot_row = _single_provider_row(snapshot, expected_code=underlier_code)
@@ -245,6 +267,7 @@ def get_underlier_observation_opend(
                 message="underlier snapshot does not contain exactly one requested row",
             )
     except Exception as exc:
+        check_fetch_control(deadline, cancelled)
         _append_opend_observation_error(
             errors,
             stage="underlier_snapshot",
@@ -257,7 +280,12 @@ def get_underlier_observation_opend(
         def _market_state_call() -> Any:
             _increment_metric(metrics, "spot_market_state_opend_calls")
             _increment_metric(metrics, "spot_market_state_requested_codes")
-            return gateway.get_market_state([underlier_code])
+            check_fetch_control(deadline, cancelled)
+            try:
+                result = gateway.get_market_state([underlier_code])
+            finally:
+                check_fetch_control(deadline, cancelled)
+            return result
 
         market_state = _limited(_market_state_call)
         market_state_row = _single_provider_row(
@@ -273,6 +301,7 @@ def get_underlier_observation_opend(
                 message="market-state response does not contain exactly one requested row",
             )
     except Exception as exc:
+        check_fetch_control(deadline, cancelled)
         _append_opend_observation_error(
             errors,
             stage="underlier_market_state",
@@ -302,8 +331,12 @@ def get_underlier_observations_opend(
     monotonic: Callable[[], float] = time.monotonic,
     now_utc: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     rate_limited_call: Callable[..., Any] = rate_limited_opend_call,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, OpeningUnderlierObservation]:
     """Fetch exact run-scoped underlier observations in bounded batches."""
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
 
     codes = list(
         dict.fromkeys(
@@ -326,16 +359,22 @@ def get_underlier_observations_opend(
         def _call_before_deadline() -> Any:
             if stop_monotonic is not None and monotonic() >= stop_monotonic:
                 raise TimeoutError("underlier observation deadline reached")
-            return call()
+            check_fetch_control(deadline, cancelled)
+            try:
+                return call()
+            finally:
+                check_fetch_control(deadline, cancelled)
 
         return rate_limited_call(
             base_dir=Path(base_dir),
             endpoint="market_snapshot",
             **kwargs,
+            **controls,
             call=_call_before_deadline,
         )
 
     for start in range(0, len(codes), batch_size):
+        check_fetch_control(deadline, cancelled)
         if stop_monotonic is not None and monotonic() >= stop_monotonic:
             break
         batch = codes[start : start + batch_size]
@@ -343,15 +382,21 @@ def get_underlier_observations_opend(
         market_state: Any = None
         try:
             snapshot = _limited(lambda batch0=batch: gateway.get_snapshot(batch0))
+        except TimeoutError:
+            if controls:
+                raise
         except Exception:
-            pass
+            check_fetch_control(deadline, cancelled)
         if stop_monotonic is None or monotonic() < stop_monotonic:
             try:
                 market_state = _limited(
                     lambda batch0=batch: gateway.get_market_state(batch0)
                 )
+            except TimeoutError:
+                if controls:
+                    raise
             except Exception:
-                pass
+                check_fetch_control(deadline, cancelled)
         observed_at = now_utc()
         expected_codes = frozenset(batch)
         snapshot_rows = _provider_rows_by_code(
@@ -430,7 +475,11 @@ def get_underlier_spot(
     snapshot_max_wait_sec: float = 30.0,
     snapshot_window_sec: float = 30.0,
     snapshot_max_calls: int = 60,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> float | None:
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     gateway = build_ready_futu_quote_gateway(
         host=host,
         port=int(port),
@@ -446,6 +495,7 @@ def get_underlier_spot(
             snapshot_window_sec=snapshot_window_sec,
             snapshot_max_calls=snapshot_max_calls,
             rate_limited_call=rate_limited_opend_call,
+            **controls,
         )
     finally:
         try:
@@ -463,7 +513,11 @@ def get_underlier_observation(
     snapshot_max_wait_sec: float = 30.0,
     snapshot_window_sec: float = 30.0,
     snapshot_max_calls: int = 60,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> OpeningUnderlierObservation:
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     effective_base_dir = Path(base_dir) if base_dir is not None else REPO_ROOT
     underlier = normalize_underlier(symbol, base_dir=effective_base_dir)
     gateway = build_ready_futu_quote_gateway(
@@ -481,6 +535,7 @@ def get_underlier_observation(
             snapshot_window_sec=snapshot_window_sec,
             snapshot_max_calls=snapshot_max_calls,
             rate_limited_call=rate_limited_opend_call,
+            **controls,
         )
     finally:
         try:
@@ -506,7 +561,13 @@ def fetch_option_snapshots(
     retry_call: Callable[..., Any] = retry_futu_gateway_call,
     rate_limited_call: Callable[..., Any] = rate_limited_opend_call,
     classify_error: Callable[[Any], str] = classify_option_chain_error,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    snapshot_cache: dict[str, Any] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> MarketSnapshotFetchResult:
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     snap_map: dict[str, dict[str, Any]] = {}
     snapshot_errors: list[dict[str, Any]] = []
     batch_requested_at: list[datetime] = []
@@ -517,27 +578,48 @@ def fetch_option_snapshots(
         if (code := str(raw_code or "").strip())
     ))
     requested_codes = frozenset(requested_code_order)
-    returned_codes: set[str] = set()
+    code_receipts: dict[str, tuple[str | None, str | None]] = {}
+    if snapshot_cache is not None:
+        for code in requested_code_order:
+            if code in snapshot_cache:
+                row, requested_at, received_at = snapshot_cache[code]
+                snap_map[code] = dict(row)
+                code_receipts[code] = (requested_at, received_at)
+    if diagnostics is not None:
+        diagnostics["reuse_hits"] = diagnostics.get("reuse_hits", 0) + len(snap_map)
+    missing_order = [code for code in requested_code_order if code not in snap_map]
+    returned_codes: set[str] = set(snap_map)
     duplicate_codes: set[str] = set()
     batch_size = int(snapshot_batch_size) if snapshot_batch_size else DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT
     batch_size = max(1, batch_size)
     keep_columns = list(SNAPSHOT_KEEP_COLUMNS)
     opend_call_count = 0
 
-    for start in range(0, len(requested_code_order), batch_size):
-        batch = list(requested_code_order[start : start + batch_size])
+    for start in range(0, len(missing_order), batch_size):
+        check_fetch_control(deadline, cancelled)
+        batch = list(missing_order[start : start + batch_size])
         batch_requested_at.append(datetime.now(timezone.utc))
         try:
             def _call_snapshot(batch0: list[str] = batch) -> Any:
                 def _gateway_snapshot_call() -> Any:
                     nonlocal opend_call_count
                     opend_call_count += 1
-                    return gateway.get_snapshot(batch0)
+                    if diagnostics is not None:
+                        calls = diagnostics.setdefault("opend_calls", {})
+                        calls["market_snapshot"] = calls.get("market_snapshot", 0) + 1
+                    check_fetch_control(deadline, cancelled)
+                    try:
+                        result = gateway.get_snapshot(batch0)
+                    finally:
+                        check_fetch_control(deadline, cancelled)
+                    return result
 
                 return rate_limited_call(
                     base_dir=base_dir,
                     endpoint="market_snapshot",
                     **snapshot_limit.call_kwargs(),
+                    **controls,
+                    **({"diagnostics": diagnostics} if diagnostics is not None else {}),
                     call=_gateway_snapshot_call,
                 )
 
@@ -550,8 +632,11 @@ def fetch_option_snapshots(
                 retry_base_delay_sec=retry_base_delay_sec,
                 retry_max_delay_sec=retry_max_delay_sec,
                 quiet=True,
+                **({"diagnostics": diagnostics} if diagnostics is not None else {}),
+                **controls,
             )
         except Exception as exc:
+            check_fetch_control(deadline, cancelled)
             snapshot_errors.append(
                 {
                     "stage": "market_snapshot",
@@ -576,6 +661,8 @@ def fetch_option_snapshots(
             returned_codes=returned_codes,
             duplicate_codes=duplicate_codes,
             snap_map=snap_map,
+            code_receipts=code_receipts,
+            receipt=(batch_requested_at[-1].isoformat(), batch_received_at[-1].isoformat()),
         )
 
     fallback_filled = 0
@@ -609,11 +696,21 @@ def fetch_option_snapshots(
                 requested_codes=requested_codes,
                 returned_codes=returned_codes,
                 duplicate_codes=duplicate_codes,
+                code_receipts=code_receipts,
+                diagnostics=diagnostics,
+                **controls,
             )
             opend_call_count += fallback_opend_calls
             batch_requested_at.extend(fallback_requested_at)
             batch_received_at.extend(fallback_received_at)
 
+    check_fetch_control(deadline, cancelled)
+    requested_at = min(batch_requested_at).isoformat() if batch_requested_at else None
+    received_at = max(batch_received_at).isoformat() if batch_received_at else None
+    if snapshot_cache is not None:
+        for code, row in snap_map.items():
+            if code not in snapshot_cache:
+                snapshot_cache[code] = (dict(row), *code_receipts[code])
     returned_code_set = frozenset(returned_codes)
     missing_codes = frozenset(requested_codes.difference(snap_map))
     unexpected_codes = frozenset(returned_code_set.difference(requested_codes))
@@ -659,12 +756,9 @@ def fetch_option_snapshots(
         fallback_filled=fallback_filled,
         fallback_failed=fallback_failed,
         opend_call_count=opend_call_count,
-        requested_at_utc=(
-            min(batch_requested_at).isoformat() if batch_requested_at else None
-        ),
-        received_at_utc=(
-            max(batch_received_at).isoformat() if batch_received_at else None
-        ),
+        requested_at_utc=min((r[0] for r in code_receipts.values() if r[0]), default=requested_at),
+        received_at_utc=min((r[1] for r in code_receipts.values() if r[1]), default=received_at),
+        code_receipts=code_receipts,
     )
 
 
@@ -696,6 +790,8 @@ def _merge_snapshot_records(
     returned_codes: set[str],
     duplicate_codes: set[str],
     snap_map: dict[str, dict[str, Any]],
+    code_receipts: dict[str, tuple[str | None, str | None]] | None = None,
+    receipt: tuple[str, str] | None = None,
 ) -> None:
     """Merge one provider response without hiding duplicate code evidence."""
 
@@ -708,8 +804,12 @@ def _merge_snapshot_records(
         if code in snap_map:
             duplicate_codes.add(code)
             snap_map.pop(code, None)
+            if code_receipts is not None:
+                code_receipts.pop(code, None)
             continue
         snap_map[code] = rec
+        if code_receipts is not None and receipt is not None:
+            code_receipts[code] = receipt
 
 
 def _fallback_fetch_missing_snapshots(
@@ -733,7 +833,13 @@ def _fallback_fetch_missing_snapshots(
     requested_codes: frozenset[str],
     returned_codes: set[str],
     duplicate_codes: set[str],
+    code_receipts: dict[str, tuple[str | None, str | None]],
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> tuple[int, int, int, list[datetime], list[datetime]]:
+    check_fetch_control(deadline, cancelled)
+    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     if not missing_codes or int(max_fallback_codes) <= 0:
         return 0, 0, 0, [], []
 
@@ -758,6 +864,7 @@ def _fallback_fetch_missing_snapshots(
     filled_count = 0
     batch_size = max(1, int(fallback_batch_size))
     for start in range(0, len(allowed), batch_size):
+        check_fetch_control(deadline, cancelled)
         batch = allowed[start : start + batch_size]
         fallback_requested_at.append(datetime.now(timezone.utc))
         try:
@@ -765,12 +872,22 @@ def _fallback_fetch_missing_snapshots(
                 def _gateway_fallback_snapshot_call() -> Any:
                     nonlocal opend_call_count
                     opend_call_count += 1
-                    return gateway.get_snapshot(batch0)
+                    if diagnostics is not None:
+                        calls = diagnostics.setdefault("opend_calls", {})
+                        calls["market_snapshot"] = calls.get("market_snapshot", 0) + 1
+                    check_fetch_control(deadline, cancelled)
+                    try:
+                        result = gateway.get_snapshot(batch0)
+                    finally:
+                        check_fetch_control(deadline, cancelled)
+                    return result
 
                 return rate_limited_call(
                     base_dir=base_dir,
                     endpoint="market_snapshot",
                     **snapshot_limit.call_kwargs(),
+                    **controls,
+                    **({"diagnostics": diagnostics} if diagnostics is not None else {}),
                     call=_gateway_fallback_snapshot_call,
                 )
 
@@ -783,8 +900,11 @@ def _fallback_fetch_missing_snapshots(
                 retry_base_delay_sec=retry_base_delay_sec,
                 retry_max_delay_sec=retry_max_delay_sec,
                 quiet=True,
+                **({"diagnostics": diagnostics} if diagnostics is not None else {}),
+                **controls,
             )
         except Exception as exc:
+            check_fetch_control(deadline, cancelled)
             snapshot_errors.append(
                 {
                     "stage": "market_snapshot_fallback",
@@ -798,6 +918,7 @@ def _fallback_fetch_missing_snapshots(
             fallback_received_at.append(datetime.now(timezone.utc))
             continue
 
+        fallback_received_at.append(datetime.now(timezone.utc))
         if snap is None or snap.empty:
             snapshot_errors.append(
                 {
@@ -809,7 +930,6 @@ def _fallback_fetch_missing_snapshots(
                 }
             )
             failed_count += len(batch)
-            fallback_received_at.append(datetime.now(timezone.utc))
             continue
 
         records, keep = keep_snapshot_record_columns(snap, keep_columns)
@@ -824,9 +944,7 @@ def _fallback_fetch_missing_snapshots(
                 }
             )
             failed_count += len(batch)
-            fallback_received_at.append(datetime.now(timezone.utc))
             continue
-        fallback_received_at.append(datetime.now(timezone.utc))
 
         batch_codes = set(batch)
         filled_before = len(batch_codes.intersection(snap_map))
@@ -836,6 +954,8 @@ def _fallback_fetch_missing_snapshots(
             returned_codes=returned_codes,
             duplicate_codes=duplicate_codes,
             snap_map=snap_map,
+            code_receipts=code_receipts,
+            receipt=(fallback_requested_at[-1].isoformat(), fallback_received_at[-1].isoformat()),
         )
         filled_after = len(batch_codes.intersection(snap_map))
         filled_count += max(0, filled_after - filled_before)

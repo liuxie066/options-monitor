@@ -1,14 +1,40 @@
 # Bot / Python runtime / Scene v7
 
-本轮目标是解释 OM 策略、分析已记录的报错、说明标的被过滤的原因，并支持连续对话、个人记忆和只读工具调用。本文描述开发中的源码合同；是否已发布、是否部署以及真实模型的效果需要分别验证。
+Bot 支持解释 OM 策略、分析已记录的报错、说明历史过滤原因和查询当前卖出开仓候选，并提供连续对话、个人记忆和只读工具调用。本文描述开发中的源码合同；是否已发布、是否部署以及真实模型的效果需要分别验证。
 
 ## 调用链
 
 渠道鉴权与去重 → `channel_facade.py` → `local_harness.py` → `host.py` → `runtime.py`。
 
-`runtime.py` 直接使用现有 Python Chat Completions / Responses 适配器。没有历史上下文的首轮使用原生 `tool_choice=required` 要求一次工具调用；已有上下文的追问由模型判断是否需要重读。Host 校验参数和固定范围，调用原有 OM 工具，返回脱敏结果；模型随后直接给出正文。没有 Pi 子进程、IPC、答案提交工具、claims、证据编号准入或目录激活步骤。
+`runtime.py` 直接使用现有 Python Chat Completions / Responses 适配器。没有历史上下文的首轮默认使用原生 `tool_choice=required` 要求一次工具调用；Host 对独立数字+P/C 简写或完整 put/call 词片段（如“腾讯put”“NVDA call”“卖put”）显式允许先澄清；明确的解释、过滤原因和报错查询仍优先读取，工具名单本身不改变默认值。已有上下文的追问由模型判断是否需要重读。Host 校验参数和固定范围，调用原有 OM 工具，返回脱敏结果；模型随后直接给出正文。没有 Pi 子进程、IPC、答案提交工具、claims、证据编号准入或目录激活步骤。
 
-工具由现有 registry 与各领域 `TOOLS` 定义；Scene 直接列出 7 个工具：`project_context`、`project_files`、`candidate_filter_explain`、`runtime_runs`、`runtime_logs`、`runtime_status`、`receipt_read`。渠道场景按身份追加 `bot_memory`。不再按 toolset 展开工具，也不构造目录 catalog、snapshot 或 hash。工具仍拥有账户、配置、历史快照、分页和真实状态判断；Bot 不重新计算历史筛选结果。
+工具由现有 registry 与各领域 `TOOLS` 定义；Scene 直接列出 `project_context`、`project_files`、`candidate_filter_explain`、`option_candidates`、`runtime_runs`、`runtime_logs`、`runtime_status`、`receipt_read`、`option_positions_read`、`trade_attribution_read`。渠道场景按身份追加 `bot_memory`。不再按 toolset 展开工具，也不构造目录 catalog、snapshot 或 hash。工具仍拥有账户、配置、历史快照、分页和真实状态判断；Bot 不重新计算历史筛选结果。
+
+## 指定标的卖出开仓候选
+
+`option_candidates` 接受 1–5 项标准 `queries`；参数、结果和业务边界见
+[工具合同](TOOL_REFERENCE.md#指定标的卖出开仓候选)。它查询当前合约，Bot 不复制筛选或排名。
+`short put` / “卖 put”对应 `short_put`，`short call` / “卖 call”对应 `short_call`。
+独立的 `370P/370p`、`230C/230c`、`230.5c` 只表示行权价和期权类型；只有用户当前表达或
+明确适用于本查询的上下文包含卖出动作，才生成卖出开仓参数。没有方向先问买入还是卖出，
+不调用工具；买入、平仓、否定、类型/行权价冲突和标的对应不明需说明限制或澄清。
+不从完整合约代码或更长标识截取简写，不从助手建议推定方向，不补造到期日或展开笛卡尔积。
+
+Host 的窄简写检测只放开首轮澄清，不解析方向或生成工具参数；普通策略/报错问题仍要求首轮读取。
+对话语义由 scene 提示和模型处理，脚本模型用例证明允许零调用澄清及标准 JSON 接入，
+不代表对任意自然语言的确定性意图拦截或真实模型效果。
+
+`build_tool_payload` 对该工具只构造公共参数，不套用旧单市场路由。
+Host 把 `manifest.fixed_tool_input` 单独传给 `call_read_tool(trusted_input=...)`；
+该边界复核 `read_generation/read_markets`，用应用 `normalize_queries` 规范化整批，并校验配置身份。
+任一市场越权、身份冲突或可信上下文缺失，整次返回 `PERMISSION_DENIED`，不执行允许部分。
+配置缺失/过期仍绑定明确路径，由应用返回对应项 unavailable，不改用其他市场。
+可信配置以小写市场到配置路径的映射、固定 `runtime_root`、deadline 和 cancelled，经
+`option_candidates_context` 传入执行层；模型不能填写这些值。CLI 直接执行工具不要求 Bot 授权上下文。
+
+`observation.host_scope` 对该工具记录已验证的 `markets` 数组，旧工具继续使用单个 market/account。
+共享 `read_execution.bounded_call/check_run/RunStopped` 保留 Bot runtime 兼容导入，
+worker 显式复制 ContextVar；应用在自身预算内保留已完成结果，超时不等于远端 SDK 已取消。
 
 ## 上下文与记忆
 
@@ -44,13 +70,13 @@
 
 非目标：不改 Control、交易/账本写入、通知、券商连接，也不把行情或标的代码当成真实指派证明。不让模型决定授权。旧单市场配置默认维持单市场。
 
-现状与依据：渠道入口只接受一个 `config_key` 或 `config_path`，`resolve_trusted_config_scope` 校验身份和新鲜度；Scene 把它作为全部工具的固定输入，Host 遇到冲突拒绝。`bot.default_market_scope=all` 仅是 Control 默认市场语义，不是 Bot 读权限。现有 `receipt_read` 有 market 字段，`trade_attribution_read` 和 `option_positions_read` 有 config_key；后者是纯读工具但尚未放入 Scene。`symbol_market` 已提供标的身份判断。个人记忆当前以 sender 和单配置权限隔离，旧会话不能在授权扩张或撤销后直接继承。
+现状与依据：渠道入口只接受一个 `config_key` 或 `config_path`，`resolve_trusted_config_scope` 校验身份和新鲜度；Scene 将主配置作为 Host 的可信输入，普通工具按请求选择获准市场，候选批量按各项标的确定市场集合。`bot.default_market_scope=all` 仅是 Control 默认市场语义，不是 Bot 读权限。现有 `receipt_read` 有 market 字段，`trade_attribution_read` 和 `option_positions_read` 有 config_key；后者在 Scene 中仅开放 events 查询。`symbol_market` 已提供标的身份判断。个人记忆当前以 sender 和单配置权限隔离，旧会话不能在授权扩张或撤销后直接继承。
 
 选择的合同：
 
 1. 在经验证的独立 `config.bot.json` 的 `bot` 中增加显式 `read_markets: [us, hk]`；缺省为渠道原有单市场。只接受无重复的 `us`/`hk` 非空列表，必须包含渠道主市场；列表形状非法时配置验证失败，遗漏主市场时该渠道请求无法启动。主市场快照提供市场和账户身份，不提供读权限。渠道从同一运行目录解析另一个标准市场文件，不接受模型路径；每次选中后核验文件身份、新鲜度、账户集合及其与实际数据 runtime root 的对应关系。当前 allowlist 用户可配置双市场，生产启用仍遵守配置变更授权。
 2. 渠道把市场集合和 Bot 配置代际传入 Host 的可信合同。Host 根据顶层 `config_key`/`market`/`symbol` 和嵌套 `query.symbol` 选择目标市场并拒绝冲突；各工具 owner 规范化筛选并校验 cursor 绑定的查询条件。`symbol_market` 的大写值转为小写比较。省略时单市场沿用原行为，双市场且无可判定标的的查询要求明确市场，不能默选 US。Host 只为选中市场注入可信配置，工具 owner 仍作最终验证；模型永远不能传 `config_path`。
-3. Host 对目标市场及顶层/嵌套账户一起校验；同名 `lx` 只有在该市场配置包含 `lx` 时可读。成功构造工具 payload 后产生的工具观察附独立的 Host 路由标签（实际 market/account/tool）；输入被 Host 拒绝时没有这类标签。保留工具自身来源，不能把 Host 标签写成券商证明。回答说明本地 ledger、归属记录还是回执及分页覆盖；空、缺失、失败和未授权各自明确。跨市场一次只读一个目标，不合并两份记录为单一事实。
+3. Host 对目标市场及顶层/嵌套账户一起校验；同名 `lx` 只有在该市场配置包含 `lx` 时可读。成功构造工具 payload 后产生的工具观察附独立的 Host 路由标签（实际 market/account/tool）；输入被 Host 拒绝时没有这类标签。保留工具自身来源，不能把 Host 标签写成券商证明。回答说明本地 ledger、归属记录还是回执及分页覆盖；空、缺失、失败和未授权各自明确。普通工具每次只读一个市场；`option_candidates` 的批量授权按上文单独处理，不合并不同查询的事实。
 4. Scene 加入已有 `option_positions_read` 的 `events` 查询，限制可见字段为只读必要筛选；暂不开放 `list`，因为它的共享账本读取尚无市场谓词。现有事件投影补 `event_type`，据此区分本地 assignment 与普通 close，不把它称为券商确认。`trade_attribution_read` 保留独立入口并在现有 owner 增加规范化 `symbol` 筛选，分页前过滤。用户说「被指派」时按 HK 标的定位并分别核验可用证据；缺账户时仅在可信 HK 配置有唯一账户时可默认，否则请用户给账户。未读尽分页只能报告已查页，不能作否定结论。旧 `receipt_read` 的完整 ID 和不降级广泛查询规则继续适用。
 5. 会话键和个人记忆 owner 绑定渠道、sender、conversation、主配置身份与 Bot 配置代际；取消分析先按当前会话键定位，再按可信渠道身份匹配并取消旧代际的活跃运行。代际取已校验 assistant 文件的规范路径、完整字节 SHA-256、`_generated.generated_at` 及文件 `mtime_ns`；受控构建的 A→B→A 得到新代际。渠道只从可信 assistant 路径生成并写入合同，`session_key_for_contract` 和 `scope_from_contract` 从同一路径重算并比对，不能信任模型或序列化字段。业务证据记忆在现有 `account_scope` 使用 `us:lx`/`hk:lx`，只从工具的可信实际市场和账户生成。每次重建 Bot 配置（包括版本升级）都会隔离旧会话和个人记忆，即使 `read_markets` 未变；旧数据保留但不自动迁移。每次工具读取前以及回答/outbox 持久化前复核代际，变化即中止本轮，不返回旧授权下的结果。不可读取的配置、冲突、撤权和工具异常均失败关闭，不以空结果返回。
 

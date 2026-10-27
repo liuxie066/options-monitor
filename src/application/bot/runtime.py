@@ -3,51 +3,13 @@ from __future__ import annotations
 
 import json
 import math
-import queue
-import threading
 import time
 from collections import Counter
 from typing import Any, Callable
 
+from src.application.read_execution import RunStopped, bounded_call, check_run
 from src.infrastructure.openai_chat_completions import create_chat_completion
 from src.infrastructure.openai_responses import create_response
-
-
-class RunStopped(Exception):
-    def __init__(self, code: str, reason: str):
-        self.code, self.reason = code, reason
-        super().__init__(reason)
-
-
-def check_run(deadline: float, cancelled: Callable[[], bool]) -> None:
-    if cancelled():
-        raise RunStopped("CANCELLED", "cancelled")
-    if time.monotonic() >= deadline:
-        raise RunStopped("BUDGET_EXHAUSTED", "time_deadline")
-
-
-def bounded_call(fn: Callable, *, deadline: float, cancelled: Callable[[], bool], **kwargs):
-    """Discard late read/model results; workers cannot persist a reply or invoke tools."""
-    check_run(deadline, cancelled)
-    result: queue.Queue = queue.Queue(maxsize=1)
-
-    def work():
-        try:
-            result.put((True, fn(**kwargs)))
-        except BaseException as exc:
-            result.put((False, exc))
-
-    threading.Thread(target=work, daemon=True, name="bot-read").start()
-    while True:
-        check_run(deadline, cancelled)
-        try:
-            ok, value = result.get(timeout=min(0.05, max(0.001, deadline - time.monotonic())))
-        except queue.Empty:
-            continue
-        check_run(deadline, cancelled)
-        if not ok:
-            raise value
-        return value
 
 
 def token_estimate(value: Any) -> int:
@@ -139,6 +101,7 @@ def request_model(*, settings, api_key: str, messages: list[dict], tools: list[d
 def run_agent(*, settings, api_key: str, messages: list[dict], tools: list[dict], call_tool: Callable,
               deadline: float, cancelled: Callable[[], bool], event: Callable,
               model_limit: int = 16, tool_limit: int = 12, reserve_seconds: float = 45,
+              allow_initial_clarification: bool = False,
               request: Callable = request_model) -> str:
     names = {tool["name"] for tool in tools}
     calls_seen: set[str] = set()
@@ -149,7 +112,8 @@ def run_agent(*, settings, api_key: str, messages: list[dict], tools: list[dict]
     parts: list[str] = []
     capacity = int((settings.context_window_tokens - settings.output_reservation_tokens) * 0.9)
     estimate_scale: float | None = None
-    require_initial_tool = not any(message.get("role") == "assistant" for message in messages)
+    require_initial_tool = not allow_initial_clarification and not any(
+        message.get("role") == "assistant" for message in messages)
     for turn in range(model_limit):
         check_run(deadline, cancelled)
         final = final or turn == model_limit - 1 or tool_count >= tool_limit or failures >= 3 or deadline - time.monotonic() <= reserve_seconds

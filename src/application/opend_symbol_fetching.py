@@ -18,10 +18,13 @@ Notes:
 """
 
 import math
+import time
+from copy import deepcopy
 from dataclasses import dataclass, replace
+from functools import partial
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 import pandas as pd
 
@@ -36,6 +39,7 @@ if str(REPO_ROOT) not in sys.path:
 from src.infrastructure.futu_gateway import (
     build_ready_futu_quote_gateway,
     retry_futu_gateway_call,
+    check_fetch_control,
 )
 from src.application.opend_utils import normalize_underlier, get_trading_date
 from src.application.opend_call_coordinator import rate_limited_opend_call
@@ -52,8 +56,14 @@ from src.application.opening_quote_evidence import (
     OpeningUnderlierObservation,
     normalize_option_observation,
 )
-from src.application.opend_symbol_chain_fetching import fetch_symbol_option_chain
-from src.application.option_chain_fetching import classify_option_chain_error
+from src.application.opend_symbol_chain_fetching import (
+    fetch_symbol_option_chain, list_option_expirations_with_gateway,
+    select_symbol_expirations, SymbolOptionChainResult,
+)
+from src.application.option_chain_fetching import (
+    classify_option_chain_error, QueryFetchCache, FetchRangeExceeded,
+    OptionChainFetchRequest, fetch_option_chains,
+)
 from src.application.short_vol_metrics import RealizedVolatilitySnapshot, fetch_realized_volatility_snapshot
 
 
@@ -352,6 +362,10 @@ class FetchSymbolRequest:
     snapshot_fallback_batch_size: int = 20
     include_realized_volatility: bool = False
     trading_date: str | None = None
+    query_filters: list[dict[str, Any]] | None = None
+    query_cache: QueryFetchCache | None = None
+    deadline: float | None = None
+    cancelled: Callable[[], bool] | None = None
 
     @property
     def effective_base_dir(self) -> Path:
@@ -423,12 +437,136 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
     )
 
 
+def _query_filter_mask(chain: pd.DataFrame, filters: list[dict[str, Any]], today: date) -> pd.Series:
+    """OR complete query predicates, never their strike/DTE bounding boxes."""
+    keep = pd.Series(False, index=chain.index, dtype=bool)
+    strikes = pd.to_numeric(chain["strike_price"], errors="raise")
+    dtes = chain["expiration"].map(lambda value: (date.fromisoformat(value) - today).days)
+    for item in filters:
+        if not isinstance(item, dict) or set(item) - {"option_type", "min_strike", "max_strike", "min_dte", "max_dte"}:
+            raise ValueError("invalid query filter")
+        side = item.get("option_type")
+        if side not in {"put", "call"}:
+            raise ValueError("invalid query filter option_type")
+        mask = chain["_ot"] == side
+        for field, values in (("strike", strikes), ("dte", dtes)):
+            lower, upper = item.get("min_" + field), item.get("max_" + field)
+            for bound in (lower, upper):
+                if bound is not None and (isinstance(bound, bool) or not isinstance(bound, (int, float)) or not math.isfinite(bound) or bound < 0 or (field == "strike" and bound == 0) or (field == "dte" and int(bound) != bound)):
+                    raise ValueError("invalid query filter " + field)
+            if lower is not None and upper is not None and lower > upper:
+                raise ValueError("invalid query filter bounds")
+            if lower is not None:
+                mask &= values >= lower
+            if upper is not None:
+                mask &= values <= upper
+        keep |= mask
+    return keep
+
+
+def _fetch_query_chain(
+    *, gateway: Any, request: FetchSymbolRequest, underlier_code: str, today: date,
+    explicit_expirations_norm: list[str], limits: OpenDFetchLimits, identity: tuple,
+) -> SymbolOptionChainResult:
+    """Assemble the bounded request with existing discovery, selection and chain owners."""
+    controls = {"deadline": request.deadline, "cancelled": request.cancelled}
+    cache = request.query_cache
+    diagnostic_kwargs = {"diagnostics": cache.diagnostics} if cache is not None else {}
+    retry = partial(retry_futu_gateway_call, **controls, **diagnostic_kwargs)
+    limited = partial(rate_limited_opend_call, **controls, **diagnostic_kwargs)
+    metrics: dict[str, Any] = {"expiration_opend_calls": 0, "expiration_cache_hits": 0}
+    check_fetch_control(**controls)
+    phase_started = time.monotonic()
+    try:
+        if explicit_expirations_norm:
+            all_expirations = list(explicit_expirations_norm)
+        elif cache is not None and identity in cache.expirations:
+            all_expirations = list(cache.expirations[identity])
+            cache.reuse_hits += 1
+        else:
+            all_expirations = list_option_expirations_with_gateway(
+                gateway, underlier_code=underlier_code, base_dir=request.effective_base_dir,
+                expiration_limit=limits.option_expiration, no_retry=request.no_retry,
+                retry_max_attempts=request.retry_max_attempts,
+                retry_time_budget_sec=request.retry_time_budget_sec,
+                retry_base_delay_sec=request.retry_base_delay_sec,
+                retry_max_delay_sec=request.retry_max_delay_sec,
+                retry_call=retry, rate_limited_call=limited, asof_date=today.isoformat(), metrics=metrics,
+            )
+            check_fetch_control(**controls)
+            if cache is not None:
+                cache.expirations[identity] = list(all_expirations)
+    finally:
+        if cache is not None:
+            cache.record_phase("expiration", phase_started)
+            calls = cache.diagnostics["opend_calls"]
+            calls["option_expiration"] = calls.get("option_expiration", 0) + metrics.get("expiration_opend_calls", 0)
+            cache.diagnostics["persistent_cache_hits"] = cache.diagnostics.get("persistent_cache_hits", 0) + metrics.get("expiration_cache_hits", 0)
+    selected = select_symbol_expirations(
+        expirations_all=all_expirations, explicit_expirations_norm=explicit_expirations_norm,
+        limit_expirations=request.limit_expirations, min_dte=request.min_dte,
+        max_dte=request.max_dte, today=today,
+    )
+    if request.query_filters is not None:
+        # Apply the exact DTE union before consuming unique chain work too.
+        synthetic = pd.DataFrame([
+            {"expiration": exp, "strike_price": 1, "_ot": item["option_type"]}
+            for exp in selected for item in request.query_filters
+        ], columns=["expiration", "strike_price", "_ot"])
+        dte_filters = [{**item, "min_strike": None, "max_strike": None} for item in request.query_filters]
+        selected = sorted(set(synthetic.loc[_query_filter_mask(synthetic, dte_filters, today), "expiration"]))
+    metrics.update(expiration_enumeration_complete=True, requested_expirations=list(selected),
+                   available_expirations=list(all_expirations))
+    if not selected:
+        metrics.update(status="ok", source_outcome="success_empty", reason_code="no_expirations",
+                       expiration_statuses={}, enumeration_complete=True)
+        return SymbolOptionChainResult([], all_expirations, selected, metrics)
+    phase_started = time.monotonic()
+    try:
+        result = fetch_option_chains(
+            gateway=gateway,
+            request=OptionChainFetchRequest(
+                symbol=request.symbol, underlier_code=underlier_code, expirations=selected,
+                host=request.host, port=request.port, option_types=request.option_types,
+                base_dir=request.effective_base_dir, asof_date=today.isoformat(),
+                freshness_policy=request.freshness_policy, chain_cache=request.chain_cache,
+                is_force_refresh=request.chain_cache_force_refresh,
+                max_wait_sec=limits.option_chain.max_wait_sec, window_sec=limits.option_chain.window_sec,
+                max_calls=limits.option_chain.max_calls, no_retry=request.no_retry,
+                retry_max_attempts=request.retry_max_attempts,
+                retry_time_budget_sec=request.retry_time_budget_sec,
+                retry_base_delay_sec=request.retry_base_delay_sec,
+                retry_max_delay_sec=request.retry_max_delay_sec,
+                query_cache=cache, **controls,
+            ),
+            retry_call=retry_futu_gateway_call,
+        )
+    finally:
+        if cache is not None:
+            cache.record_phase("chain", phase_started)
+    check_fetch_control(**controls)
+    metrics.update(result.to_meta())
+    metrics["enumeration_complete"] = all(result.expiration_statuses.get(exp) in {"cache", "fetched", "empty"} for exp in selected)
+    return SymbolOptionChainResult(result.rows, all_expirations, selected, metrics, result.frame)
+
+
 def fetch_symbol_request(
     request: FetchSymbolRequest,
     *,
     snapshot_fallback_max_codes: int | None = None,
     snapshot_fallback_batch_size: int | None = None,
 ) -> dict[str, Any]:
+    check_fetch_control(request.deadline, request.cancelled)
+    if request.query_filters is not None and request.query_cache is None:
+        request = replace(request, query_cache=QueryFetchCache())
+    controls = {"deadline": request.deadline, "cancelled": request.cancelled} if request.deadline is not None or request.cancelled is not None else {}
+    query_mode = request.query_cache is not None or request.query_filters is not None or bool(controls)
+    cache = request.query_cache
+    diagnostics_before = deepcopy(cache.diagnostics) if cache is not None else {}
+    reuse_before = cache.reuse_hits if cache is not None else 0
+    fetch_diagnostics: dict[str, Any] = {}
+    phase_name: str | None = "underlier"
+    phase_started = time.monotonic()
     if not isinstance(request.fetch_spot_if_missing, bool):
         raise TypeError("fetch_spot_if_missing must be a bool")
     if snapshot_fallback_max_codes is not None or snapshot_fallback_batch_size is not None:
@@ -472,7 +610,7 @@ def fetch_symbol_request(
         for exp in (normalize_expiration_ymd(x) for x in (explicit_expirations or []))
         if exp
     })
-    if request.trading_date is not None and not explicit_expirations_norm:
+    if request.trading_date is not None and not explicit_expirations_norm and not query_mode:
         raise ValueError(
             "anchored required-data request lacks explicit expirations"
         )
@@ -483,6 +621,9 @@ def fetch_symbol_request(
         "spot_market_state_opend_calls": 0,
         "spot_market_state_requested_codes": 0,
     }
+    today = _resolve_request_trading_date(value=request.trading_date, market=u.market)
+    identity = (str(effective_base_dir.resolve()), host, int(port), u.market, u.code, today.isoformat())
+    enumeration_meta: dict[str, Any] = {"expiration_enumeration_complete": False, "enumeration_complete": False, "query_scope_validated": False} if query_mode else {}
     rv_snapshot = RealizedVolatilitySnapshot(status="skipped", reason="not_requested")
     if external_gateway:
         gateway = request.gateway
@@ -491,9 +632,14 @@ def fetch_symbol_request(
             host=host,
             port=int(port),
             is_option_chain_cache_enabled=bool(chain_cache),
+            **controls,
         )
 
     try:
+        check_fetch_control(**controls)
+        if cache is not None and request.underlier_observation is None and spot_override is None and request.fetch_spot_if_missing and identity in cache.underliers:
+            request = replace(request, underlier_observation=cache.underliers[identity].to_dict())
+            cache.reuse_hits += 1
         underlier_observation: OpeningUnderlierObservation
         if request.underlier_observation is not None:
             underlier_observation = OpeningUnderlierObservation.from_mapping(
@@ -520,8 +666,9 @@ def fetch_symbol_request(
                 snapshot_window_sec=snapshot_limit.window_sec,
                 snapshot_max_calls=snapshot_limit.max_calls,
                 errors=spot_errors,
-                rate_limited_call=rate_limited_opend_call,
+                rate_limited_call=partial(rate_limited_opend_call, diagnostics=cache.diagnostics) if cache is not None else rate_limited_opend_call,
                 metrics=spot_fetch_meta,
+                **controls,
             )
         else:
             underlier_observation = OpeningUnderlierObservation(
@@ -538,25 +685,43 @@ def fetch_symbol_request(
                 status="data_unavailable",
                 reason_code="underlier_observation_unattested",
             )
+        check_fetch_control(**controls)
+        if cache is not None and underlier_observation.status == "ready":
+            cache.underliers[identity] = underlier_observation
         spot = underlier_observation.last_price
+        if cache is not None:
+            cache.record_phase("underlier", phase_started)
+        phase_name = None
+        if query_mode and underlier_observation.status != "ready":
+            return {
+                "symbol": symbol, "underlier_code": u.code, "spot": spot,
+                "expiration_count": 0, "expirations": [], "rows": [],
+                "meta": {**enumeration_meta, "source": "opend", "status": "error",
+                         "source_outcome": "not_attempted", "reason_code": underlier_observation.reason_code,
+                         "error_code": underlier_observation.reason_code,
+                         "underlier_observation": underlier_observation.to_dict(),
+                         "fetch_diagnostics": fetch_diagnostics},
+            }
 
-        # Trading-date anchor for DTE / cache freshness.
-        today = _resolve_request_trading_date(
-            value=request.trading_date,
-            market=u.market,
-        )
+        if request.query_filters is not None:
+            _query_filter_mask(pd.DataFrame(columns=["_ot", "strike_price", "expiration"]), request.query_filters, today)
+        if query_mode:
+            chain_bundle = _fetch_query_chain(
+                gateway=gateway, request=request, underlier_code=u.code, today=today,
+                explicit_expirations_norm=explicit_expirations_norm, limits=opend_limits, identity=identity,
+            )
+            enumeration_meta = {key: chain_bundle.fetch_meta.get(key) for key in (
+                "expiration_enumeration_complete", "enumeration_complete", "requested_expirations", "available_expirations",
+            )}
+        else:
+            chain_bundle = fetch_symbol_option_chain(
+                gateway=gateway, request=request, underlier_code=u.code, today=today,
+                explicit_expirations_norm=explicit_expirations_norm, limits=opend_limits,
+                retry_call=retry_futu_gateway_call, rate_limited_call=rate_limited_opend_call,
+            )
+        check_fetch_control(**controls)
 
-        chain_bundle = fetch_symbol_option_chain(
-            gateway=gateway,
-            request=request,
-            underlier_code=u.code,
-            today=today,
-            explicit_expirations_norm=explicit_expirations_norm,
-            limits=opend_limits,
-            retry_call=retry_futu_gateway_call,
-            rate_limited_call=rate_limited_opend_call,
-        )
-
+        phase_name, phase_started = "filter", time.monotonic()
         # Reuse the fetched DataFrame when available to avoid records <-> DataFrame round trips.
         raw_chain = chain_bundle.frame
         chain: pd.DataFrame = raw_chain if isinstance(raw_chain, pd.DataFrame) else pd.DataFrame(chain_bundle.rows or [])
@@ -597,6 +762,10 @@ def fetch_symbol_request(
                 'expirations': [],
                 'rows': [],
                 'meta': {
+                    "fetch_diagnostics": fetch_diagnostics,
+                **enumeration_meta,
+                    # Query scope is validated above; per-expiry statuses attest coverage.
+                    'query_scope_validated': query_mode or source_outcome == 'success_empty',
                     'source': 'opend',
                     'host': host,
                     'port': port,
@@ -650,16 +819,24 @@ def fetch_symbol_request(
             max_strike=max_strike,
             side_strike_windows=side_strike_windows,
         )
+        if request.query_filters is not None:
+            chain = chain.loc[_query_filter_mask(chain, request.query_filters, today)].copy()
+            expirations = sorted(set(chain["expiration"]))
         option_chain_scope_coverage = _build_option_chain_scope_coverage(
             chain=chain,
             option_types=requested_option_types,
-            expirations=expirations,
+            expirations=enumeration_meta.get("requested_expirations", expirations),
             expiration_statuses=(chain_bundle.fetch_meta or {}).get("expiration_statuses"),
         )
 
         # Fetch snapshots for option codes in batches
-        option_codes = [str(x) for x in chain['code'].tolist() if isinstance(x, str) and x]
+        option_codes = list(dict.fromkeys(str(x) for x in chain['code'].tolist() if isinstance(x, str) and x))
+        if cache is not None:
+            cache.reserve_quotes(identity, option_codes)
 
+        if cache is not None:
+            cache.record_phase("filter", phase_started)
+        phase_name, phase_started = "history_rv", time.monotonic()
         if request.include_realized_volatility:
             if option_codes:
                 rv_snapshot = fetch_realized_volatility_snapshot(
@@ -672,11 +849,19 @@ def fetch_symbol_request(
                     history_kline_max_wait_sec=opend_limits.history_kline.max_wait_sec,
                     history_kline_window_sec=opend_limits.history_kline.window_sec,
                     history_kline_max_calls=opend_limits.history_kline.max_calls,
+                    **({"facts_cache": cache.history.setdefault(identity, {"diagnostics": cache.diagnostics})} if cache is not None else {}),
+                    **controls,
                 )
             else:
                 rv_snapshot = _no_contracts_realized_volatility()
 
+        if cache is not None:
+            cache.record_phase("history_rv", phase_started)
+        phase_name, phase_started = "snapshot", time.monotonic()
         snapshot_result = fetch_option_snapshots(
+            **({"diagnostics": cache.diagnostics} if cache is not None else {}),
+            **controls,
+            **({"snapshot_cache": cache.snapshots.setdefault(identity, {})} if cache is not None else {}),
             option_codes=option_codes,
             gateway=gateway,
             snapshot_limit=snapshot_limit,
@@ -693,6 +878,9 @@ def fetch_symbol_request(
             rate_limited_call=rate_limited_opend_call,
             classify_error=classify_option_chain_error,
         )
+        if cache is not None:
+            cache.record_phase("snapshot", phase_started)
+        phase_name, phase_started = "normalization", time.monotonic()
         snap_map = snapshot_result.snap_map
         snapshot_errors = snapshot_result.errors
         snapshot_fallback_filled = snapshot_result.fallback_filled
@@ -702,7 +890,9 @@ def fetch_symbol_request(
         rows: list[dict[str, Any]] = []
 
         chain_columns = {str(column): idx for idx, column in enumerate(chain.columns)}
+        check_fetch_control(**controls)
         for r in chain.itertuples(index=False, name=None):
+            check_fetch_control(**controls)
             chain_record = {
                 column: _tuple_col(r, chain_columns, column)
                 for column in chain_columns
@@ -727,8 +917,8 @@ def fetch_symbol_request(
                 chain_row=chain_record,
                 snapshot_row=srow,
                 underlier_observation=underlier_observation,
-                snapshot_requested_at_utc=snapshot_result.requested_at_utc,
-                snapshot_received_at_utc=snapshot_result.received_at_utc,
+                snapshot_requested_at_utc=snapshot_result.code_receipts.get(opt_code, (snapshot_result.requested_at_utc, snapshot_result.received_at_utc))[0],
+                snapshot_received_at_utc=snapshot_result.code_receipts.get(opt_code, (snapshot_result.requested_at_utc, snapshot_result.received_at_utc))[1],
             )
             last_price = option_observation.last_price
             bid = option_observation.bid
@@ -859,10 +1049,10 @@ def fetch_symbol_request(
             not option_codes
             and str(fetch_result_meta.get('source_outcome') or '').strip().lower()
             == 'success_rows'
-            and bool(scope_rows)
+            and (bool(scope_rows) or bool(enumeration_meta.get("enumeration_complete")))
             and all(
                 str(scope.get('chain_status') or '').strip()
-                in {'cache', 'fetched'}
+                in {'cache', 'fetched', 'empty'}
                 for scope in scope_rows
             )
         )
@@ -877,6 +1067,7 @@ def fetch_symbol_request(
             else fetch_result_meta.get('reason_code')
         )
 
+        check_fetch_control(**controls)
         return {
             'symbol': symbol,
             'underlier_code': u.code,
@@ -885,6 +1076,9 @@ def fetch_symbol_request(
             'expirations': expirations,
             'rows': rows,
             'meta': {
+                "fetch_diagnostics": fetch_diagnostics,
+                **enumeration_meta,
+                'query_scope_validated': True,
                 'source': 'opend',
                 'host': host,
                 'port': port,
@@ -928,6 +1122,7 @@ def fetch_symbol_request(
             },
         }
     except Exception as e:
+        check_fetch_control(**controls)
         error_text = f'{type(e).__name__}: {e}'
         return {
             'symbol': symbol,
@@ -941,7 +1136,11 @@ def fetch_symbol_request(
                 'host': host,
                 'port': port,
                 'status': 'error',
-                'error_code': classify_option_chain_error(e),
+                "fetch_diagnostics": fetch_diagnostics,
+                **enumeration_meta,
+                'enumeration_complete': False,
+                'query_scope_validated': False,
+                'error_code': 'query_range_exceeded' if isinstance(e, FetchRangeExceeded) else classify_option_chain_error(e),
                 'error': error_text,
                 'spot_errors': spot_errors,
                 **_snapshot_completeness_meta(None, empty_complete=False),
@@ -950,6 +1149,19 @@ def fetch_symbol_request(
         }
 
     finally:
+        if cache is not None:
+            if phase_name is not None:
+                cache.record_phase(phase_name, phase_started)
+            calls = cache.diagnostics["opend_calls"]
+            for endpoint, key in (("market_snapshot", "spot_snapshot_opend_calls"), ("market_state", "spot_market_state_opend_calls")):
+                calls[endpoint] = calls.get(endpoint, 0) + spot_fetch_meta.get(key, 0)
+            cache.diagnostics["reuse_hits"] += cache.reuse_hits - reuse_before
+            for key, value in cache.diagnostics.items():
+                before = diagnostics_before.get(key, {} if isinstance(value, dict) else 0)
+                fetch_diagnostics[key] = ({name: count - before.get(name, 0) for name, count in value.items()}
+                                          if isinstance(value, dict) else value - before)
+            fetch_diagnostics["unique_chain_units"] = len(cache.chain_units)
+            fetch_diagnostics["unique_quote_contracts"] = len(cache.quote_units)
         if not external_gateway:
             try:
                 gateway.close()

@@ -9,6 +9,7 @@ import threading
 import time
 
 from src.infrastructure.io_utils import atomic_write_json
+from src.infrastructure.futu_gateway import check_fetch_control, wait_fetch_control
 
 try:
     import fcntl
@@ -44,22 +45,24 @@ class OpenDRateGate:
         self._waiters: deque[int] = deque()
         self._next_ticket = 0
 
-    def acquire(self) -> float:
+    def acquire(self, *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None) -> float:
+        check_fetch_control(deadline, cancelled)
         started = self._clock()
-        deadline = started + self._max_wait
+        wait_deadline = started + self._max_wait
         with self._cv:
             ticket = self._next_ticket
             self._next_ticket += 1
             self._waiters.append(ticket)
             try:
                 while True:
+                    check_fetch_control(deadline, cancelled)
                     now = self._clock()
                     is_front = bool(self._waiters) and self._waiters[0] == ticket
                     wait_for: float | None = None
 
                     if self._state_path is not None:
                         if is_front:
-                            acquired, wait_for = self._try_acquire_external_locked(now)
+                            acquired, wait_for = self._try_acquire_external_locked(now, deadline=deadline, cancelled=cancelled)
                             if acquired:
                                 self._waiters.popleft()
                                 self._cv.notify()
@@ -78,7 +81,7 @@ class OpenDRateGate:
                         elif self._timestamps and len(self._timestamps) >= self._max_calls:
                             wait_for = max(0.0, self._window - (now - self._timestamps[0]))
 
-                    remaining = deadline - now
+                    remaining = wait_deadline - now
                     if remaining <= 0:
                         raise TimeoutError(self._timeout_message())
 
@@ -87,13 +90,18 @@ class OpenDRateGate:
                         timeout = min(timeout, wait_for)
                     if not is_front:
                         self._cv.notify()
+                    if deadline is not None:
+                        timeout = min(timeout, max(0.0, deadline - time.monotonic()))
+                    if cancelled is not None:
+                        timeout = min(timeout, 0.05)
                     self._cv.wait(timeout=timeout)
             finally:
                 if ticket in self._waiters:
                     self._waiters.remove(ticket)
                     self._cv.notify()
 
-    def record_rate_limit(self, *, cooldown_sec: float | None = None) -> None:
+    def record_rate_limit(self, *, cooldown_sec: float | None = None, deadline: float | None = None, cancelled: Callable[[], bool] | None = None) -> None:
+        check_fetch_control(deadline, cancelled)
         cooldown = self._window if cooldown_sec is None else max(0.0, float(cooldown_sec))
         now = self._clock()
         if self._state_path is None:
@@ -103,7 +111,8 @@ class OpenDRateGate:
             return
 
         wall_now = self._wall_clock()
-        with _external_file_lock(self._state_path):
+        with _external_file_lock(self._state_path, deadline=deadline, cancelled=cancelled):
+            check_fetch_control(deadline, cancelled)
             payload = self._read_external_payload()
             raw_timestamps = payload.get("timestamps") if isinstance(payload, dict) else []
             timestamps = self._fresh_wall_timestamps(raw_timestamps, wall_now)
@@ -125,11 +134,14 @@ class OpenDRateGate:
         while self._timestamps and now - self._timestamps[0] >= self._window:
             self._timestamps.popleft()
 
-    def _try_acquire_external_locked(self, now: float) -> tuple[bool, float | None]:
+    def _try_acquire_external_locked(
+        self, now: float, *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
+    ) -> tuple[bool, float | None]:
         if self._state_path is None:
             return (False, 0.0)
         wall_now = self._wall_clock()
-        with _external_file_lock(self._state_path):
+        with _external_file_lock(self._state_path, deadline=deadline, cancelled=cancelled):
+            check_fetch_control(deadline, cancelled)
             payload = self._read_external_payload()
             blocked_until = _as_float(payload.get("blocked_until") if isinstance(payload, dict) else None, 0.0)
             raw = payload.get("timestamps") if isinstance(payload, dict) else []
@@ -192,7 +204,10 @@ class OpenDRateGate:
 
 
 @contextmanager
-def _external_file_lock(state_path: Path) -> Iterator[None]:
+def _external_file_lock(
+    state_path: Path, *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
+) -> Iterator[None]:
+    check_fetch_control(deadline, cancelled)
     path = Path(state_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix(path.suffix + ".lock")
@@ -200,7 +215,16 @@ def _external_file_lock(state_path: Path) -> Iterator[None]:
     locked = False
     try:
         if fcntl is not None:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            if deadline is None and cancelled is None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            else:
+                while True:
+                    check_fetch_control(deadline, cancelled)
+                    try:
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        wait_fetch_control(0.05, deadline=deadline, cancelled=cancelled)
             locked = True
         yield
     finally:
