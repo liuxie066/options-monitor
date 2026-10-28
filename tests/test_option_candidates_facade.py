@@ -48,7 +48,8 @@ def test_prepare_inheritance_overrides_defaults_and_known_route(configured, tmp_
     assert other.filters['min_strike'] is None
 
 
-def test_cli_facade_reaches_real_fetch_policy_and_bounded_envelope(configured, monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize('symbol', ['NVDA', 'SNXX'])
+def test_cli_facade_reaches_real_fetch_policy_and_bounded_envelope(configured, monkeypatch, tmp_path, capsys, symbol):
     # Keep provider quotes and receipt clocks inside a known FX trading session.
     now = datetime(2026, 1, 5, 15, tzinfo=timezone.utc)
 
@@ -63,14 +64,14 @@ def test_cli_facade_reaches_real_fetch_policy_and_bounded_envelope(configured, m
     day = app.earnings_calendar_scan_date('US', now)
     monkeypatch.setattr(fetch, 'get_trading_date', lambda market: day)
     expiry = (day + timedelta(days=30)).isoformat()
-    code = f"US.NVDA{day + timedelta(days=30):%y%m%d}P100000"
+    code = f"US.{symbol}{day + timedelta(days=30):%y%m%d}P100000"
     calls = []
 
     class Gateway:
         def get_snapshot(self, codes):
             calls.append(('snapshot', codes))
-            if codes == ['US.NVDA']:
-                return pd.DataFrame([{'code': 'US.NVDA', 'last_price': 110, 'update_time': now.isoformat(),
+            if codes == [f'US.{symbol}']:
+                return pd.DataFrame([{'code': f'US.{symbol}', 'last_price': 110, 'update_time': now.isoformat(),
                                       'sec_status': 'NORMAL', 'suspension': False}])
             return pd.DataFrame([{'code': value, 'bid_price': 3, 'ask_price': 3.1, 'last_price': 3,
                                   'update_time': now.isoformat(), 'sec_status': 'NORMAL', 'suspension': False,
@@ -86,7 +87,7 @@ def test_cli_facade_reaches_real_fetch_policy_and_bounded_envelope(configured, m
         def get_option_chain(self, **kwargs):
             calls.append(('chain', kwargs))
             return pd.DataFrame([{'code': code, 'strike_time': expiry, 'strike_price': 100, 'option_type': 'PUT',
-                                  'lot_size': 100, 'option_standard_type': 'STANDARD', 'stock_owner': 'US.NVDA',
+                                  'lot_size': 100, 'option_standard_type': 'STANDARD', 'stock_owner': f'US.{symbol}',
                                   'stock_type': 'DRVT', 'suspension': False}])
 
         def get_earnings_calendar(self, **kwargs):
@@ -103,13 +104,15 @@ def test_cli_facade_reaches_real_fetch_policy_and_bounded_envelope(configured, m
     monkeypatch.setattr(app, 'current_exchange_rate_snapshot', lambda **kw: {'pairs': {'USDCNY': {
         'rate': 7.2, 'source': 'tencent_quote', 'quote_at_utc': now.isoformat(), 'observed_at_utc': now.isoformat()}}})
     monkeypatch.setenv('OM_RUNTIME_ROOT', str(tmp_path))
-    payload = {'queries': [{'symbol': 'NVDA', 'strategy': 'short_put', 'strike': 100}]}
+    payload = {'queries': [{'symbol': symbol, 'strategy': 'short_put', 'strike': 100}]}
     with app.option_candidates_context(runtime_root=tmp_path):
         assert cli.main(['run', '--tool', 'option_candidates', '--input-json', json.dumps(payload), '--no-local-env-file']) == 0
     response = json.loads(capsys.readouterr().out)
     assert response['ok'], response
     result = response['data']['results'][0]
     assert result['outcome'] == 'found', result
+    assert result['symbol'] == symbol
+    assert result['effective_filters']['dte'] == ([7, 45] if symbol == 'NVDA' else [7, 60])
     assert result['coverage']['status'] == 'complete'
     candidate = result['candidates'][0]
     assert candidate['contract'] == code and candidate['multiplier'] == 100
