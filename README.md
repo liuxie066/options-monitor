@@ -1,501 +1,338 @@
-# options-monitor
+# Options Monitor（OM）
 
-`options-monitor` 是一个本地运行、人工决策优先的期权监控系统。它把行情、现金、正股持仓、期权账本、策略规则、报告和通知串成一条可审计链路，帮助用户完成：
+**在自己的电脑上，查看期权候选、账户资金与持仓风险。**
 
-- `Cash-Secured Put (CSP)` 与 `Covered Call (CC)` 候选筛选；
-- `Combo Yield` 组合候选评估；
-- Wheel 已启用时，符合身份与交割证据的外部 CSP / CC 指派进入对应轮转分支；
-- 已开期权 lot 的 `Close Advice`；
-- 期权利润、现金活动、持仓与到期生命周期查询；
-- Daily Decision Brief、候选变化提醒和离线策略复盘。
+OM 面向使用富途账户、自己做交易决策的期权投资者。它结合行情、账户现金、股票持仓和你设定的策略条件，筛选现金担保卖出认沽（CSP）与备兑卖出看涨（CC）候选，并提供持仓、期权现金流和风险报告。
 
-它不是自动交易系统，不会替用户下单。候选、平仓建议和研究结论均为 advisory-only；真实交易、配置写入、通知发送、服务变更和生产状态修改必须走各自的显式确认边界。
+**OM 不会替你下单，也不保证收益。** 扫描会连接外部数据源，并保存本地结果；缺少必要数据时，会明确提示不可用或结果不完整，不用猜测值补齐。
 
-## 核心边界
+第一次使用，建议先在 Mac 上完成一个真实账户的一次扫描。通知、Bot 问答和后台定时运行都可以以后再配置。
 
-系统只有一套主运行链路：
+- **第一次使用：** 按下面的 Mac 入门步骤完成准备、安装、扫描和结果查看。
+- **已经安装：** 跳到[日常使用](#日常使用)。
+- **使用 Linux、固定版本或源码安装：** 见[安装指南](docs/INSTALL.md)。
+- **需要高级功能或开发集成：** 见[更多能力与文档](#更多能力与文档)。
 
-```text
-config.yaml
-├─ om config build --market us|hk
-│  └─ config.us.json / config.hk.json
-│     └─ om run tick | om run tick-cron
-│        └─ output_runs + output_shared + output_accounts
-└─ om config build-bot
-   └─ resolved/config.bot.json
+## 在 Mac 上完成第一次扫描
+
+以下步骤使用真实账户读取数据，但不会提交交易。需要你自己确认账户、市场、监控标的和策略边界。
+
+### 1. 准备电脑和富途连接
+
+#### 安装依赖
+
+OM 需要 **Python 3.12 或更高版本，以及 Git**。如果已经具备，可以跳过安装依赖。
+
+使用 Homebrew 的 Mac 可以在“终端”中运行：
+
+```bash
+brew install python@3.12 git
+python3.12 --version
+git --version
 ```
 
-期权持仓只有一套事实链：
+还没有 Homebrew 时，先按 [Homebrew 官方安装说明](https://docs.brew.sh/Installation.html)完成安装，并确认自己的 macOS 和机型符合其支持条件。OM 安装器会创建独立的 Python 环境，但不会替你安装系统所需的 Python 解释器。
 
-```text
-trade_events -> projection -> position_lots
-```
+不熟悉终端时，可以按 `⌘ Space`，输入“终端”并打开。下文代码块中的命令在终端运行，不需要输入代码块的边框。
 
-- `config.yaml` 是人工编辑源；生成的 JSON 是运行快照，不是日常手工编辑入口。
-- 本地 SQLite 是期权交易与持仓事实源；Feishu 不承载 `option_positions` 镜像。
-- Futu 账户现金由共享入口读取并判定可信度；扫描、查询、报告、Wheel 和指派情景采用同一套现金标准，有效期统一由 `runtime.portfolio_context_ttl_sec` 控制，缺少证据时明确标为不可用。
-- 普通手工 `tick` 不自动发送 scheduled ordinary notification；生产调度使用受保护的 `tick-cron`。
-- `./om-agent spec` 是 Tool Gateway 工具名、输入 schema、风险级别和副作用的权威清单。
-- 当前汇率统一取最新有效报价；已核实连续休市期间，沿用价也可用于开仓筛选和资金能力计算，保留真实报价时间，交易时段缺价或来源不可验证时明确不可用。
-- 缺少行情、费用、历史汇率、事件或身份事实时，系统显式返回 missing、partial 或 not-evaluable，不补造数据。
+#### 准备 OpenD 和账户资料
 
-产品域见 [产品架构](docs/PRODUCT_ARCHITECTURE.md)，技术调用链见 [系统架构](docs/ARCHITECTURE.md)。
+OpenD 是 OM 连接富途行情和账户数据所需的网关程序。先从[富途官方入口](https://support.futunn.com/topic464/)下载适合 Mac 的 OpenD，并按[官方说明](https://openapi.futunn.com/futu-api-doc/opend/opend-intro.html)完成安装和登录。OM 不会替你安装、启动或登录 OpenD。
 
-## 主要能力与入口
+继续前，准备好这些信息：
 
-| 能力 | 当前入口 | 权威说明 |
-|---|---|---|
-| YAML 配置构建与校验 | `om config` | [CONFIGS.md](CONFIGS.md) |
-| CSP / CC | `om run tick`、`om scan` | [策略架构](docs/STRATEGY_ARCHITECTURE.md) |
-| 指定标的卖出开仓查询 | `om-agent run --tool option_candidates`；Bot / Hermes 对话 | [工具合同](docs/TOOL_REFERENCE.md#指定标的卖出开仓候选) |
-| Combo Yield | 与开仓扫描同链路 | [策略架构](docs/STRATEGY_ARCHITECTURE.md) |
-| 轮转策略 | `om run tick`、`om wheel` | [轮转策略 PRD](docs/WHEEL_STRATEGY_PRD.md) |
-| Close Advice | 计划 Tick 生产、`./om-agent run --tool close_advice_read` 读取、`om close-advice configure` 启停 | [Close Advice Contract](docs/CLOSE_ADVICE_CONTRACT.md) |
-| Daily Decision Brief | `om daily-brief` | [通知体验 PRD](docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md) |
-| 决策历史与明确关联结果 | `om-agent run --tool decision_history_read`；旧记录通过 `om decision-history import` 显式迁移 | [决策历史](docs/DECISION_HISTORY.md) |
-| 期权账本与生命周期 | `om option-positions`、`om trade-events` | [Ledger Architecture](docs/LEDGER_ARCHITECTURE.md) |
-| 期权收益与现金 | `om option-performance` | [Option Performance](docs/OPTION_PERFORMANCE_DESIGN.md) |
-| 全部 CSP / CC 指派压力测试 | `om portfolio assignment-scenario` | 本 README 的“指派后资产分布” |
-| 本地 Bot（受控 US/HK 只读） | `om bot` | [Inbound Control](docs/INBOUND_CONTROL.md) |
-| 结构化 Tool Gateway | `om-agent spec`、`om-agent run --tool <name> --input-json '<json>'` | [Tool Reference](docs/TOOL_REFERENCE.md) |
-| Research 取证与归档 | `om research` | [Agent Handbook](docs/AGENT_WIKI.md) |
-| 运行诊断、服务与版本升级 | `om status`、`om service`、`om update` | [RUNBOOK.md](RUNBOOK.md) |
+| 需要准备 | 用途 |
+|---|---|
+| 一个要扫描的市场：美股或港股 | 第一次先完成一个市场，之后再添加 |
+| 已登录的 OpenD 地址和端口 | OM 通过它读取行情与账户数据；以你的 OpenD 实际设置为准 |
+| 真实账户的数字 `acc_id` | 用来对应正确的富途交易业务账户 |
+| 自定义账户标签 | OM 内用于识别账户的名称，使用小写；它与富途账户 ID 是两回事 |
+| 自己要监控的股票代码 | 不会自动填入示例标的 |
+| 每个标的的策略及行权价边界 | 在下一步向导中填写 |
 
-本表是主要能力索引，不是 CLI 或 Tool Gateway 的完整命令清单。人工任务按“首次安装”和“日常管理”在 `om help` 中组织；完整顶层命令见 `om help all`。结构化工具名、输入 schema、风险级别和副作用以 `om-agent spec` 为准。
+账户 ID 应取自 OpenD 返回的交易业务账户列表中的 `acc_id`，不要把它与账户卡号混用；同时核对账户环境和市场权限。获取方法见[富途账户列表说明](https://openapi.futunn.com/futu-api-doc/trade/get-acc-list.html)。如果还不确定对应哪一个账户，先核实再继续，不要照抄文档中的示例 ID。
 
-指定标的查询支持 1–5 项 `short_put` / `short_call`，标的与卖出方向必填，行权价和 DTE 可选。返回符合条件的合约、收益估算及原因；财报在查询日至到期日内只提示，不作为该入口的淘汰条件。查询只评估合约，不判断账户现金、持股覆盖、成本底线或集中度。
+### 2. 安装 OM
 
-### 轮转策略
-
-轮转策略管理卖出 Put 后买入股票、卖出 Call 后交付股票形成的分支。Wheel 已启用且身份与交割证据完整时，外部 CSP / CC 及对应 Combo 卖腿的指派会自动进入相应分支。成交可对应多个分支或证据不足时，Daily Brief 会持续提示待人工确认，用户可在 Control 预览并确认归属；同一笔多张 Call 成交可按张数分配给多个 Wheel 股票分支，系统不自行选择分支。当前门槛关闭后不再产生新的 Wheel 开仓候选；已有分支与真实成交仍按账本事实保留。
-
-在持股分支，已收到的期权收入会计入总收益，但不用于降低股票的卖出底线；系统合并检查所有可能占用持股的期权合约。在现金分支，新 Put 候选仍须通过资金门槛。该策略只提供监控和候选建议，不自动下单，也不保证收益。
-
-CSP / CC 新开仓只使用 `insurance_underwriting`，普通 Put / Call 默认分别启用 `abs(delta) <= 0.40` 硬门槛；delta 不参与排序。历史 artifact 和持仓解释可继续读取
-`return_first` / `short_vol`，但这些兼容语义不能重新进入当前开仓配置或正式候选排序。
-
-README 不复制完整规则：[候选策略合同](docs/candidate_strategy.md) 是已经确认的目标口径，
-[策略架构](docs/STRATEGY_ARCHITECTURE.md) 定义模块责任；目标是否已经上线必须以当前代码和测试验证，
-不能只凭文档判断。
-
-普通 CSP / CC 的纯计算可通过本地包 `om-strategy-core` 复用；代码内版本模板可替换筛选、排序和解释，共享事实资格保持不变。接口、安装身份和验收边界见
-[可复用策略核心](docs/candidate_strategy.md#21-可复用-csp--cc-核心)。回测与外部策略模板发布不在该包当前范围内。
-封存样本可使用[离线一致性验收](docs/candidate_strategy.md#15-离线样本一致性验收)逐项核对指标、过滤、排序和张数；缺失事实明确报告，分阶段一致不代表收益或生产验收。
-
-### 策略术语对照
-
-| OM 内部 key | 项目内名称 | 金融专业术语 |
-|---|---|---|
-| `sell_put` | Cash-Secured Put (CSP) | 现金担保认沽（Cash-Secured Put） |
-| `sell_call` | Covered Call (CC) | 备兑看涨（Covered Call） |
-| `combo_yield`（结构 `csp_lc`） | Combo Yield CSP+LC | 看涨风险反转（Bullish Risk Reversal，现金担保变体） |
-| `combo_yield`（variant `cc_lp`） | Combo Yield CC+LP | 领口策略（Collar，净收权利金即 Credit Collar） |
-| `wheel` | 轮转策略 | 轮转策略（Wheel Strategy） |
-
-结构说明、别名与参考来源见 [策略术语对照](docs/STRATEGY_TERMINOLOGY.md)。
-
-## 安装
-
-运行时要求 Python 3.12 或更高版本。Bot 仅使用 Python，不需要 Node 或 Pi 依赖；受控升级和回滚只支持 Python 目标，旧 Node/Pi 发布会在安装依赖、切换服务或改写运行时数据前被明确拒绝。历史 Bot 数据的保留边界见 [Bot 设计](docs/BOT_DESIGN.md#保留边界)。
+运行：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash
+```
+
+安装器默认安装最新的**已发布版本**，不会安装 `main` 上尚未发布的改动。它会准备程序、依赖和用户级命令入口；不会创建账户配置、保存密钥、安装服务或启动定时扫描。
+
+以下命令使用安装器创建的完整路径，不需要先配置 `PATH`。需要指定版本或安装目录时，见[安装指南](docs/INSTALL.md)。
+
+### 3. 用向导配置账户并扫描
+
+运行一次：
+
+```bash
 "$HOME/.local/bin/om" setup init
 ```
 
-第二行直接使用安装器创建的 wrapper，无需先修改 `PATH`。无参数安装会解析最新 GitHub Release，不跟随浮动 `main`；具体参数以安装版的 `om setup init --help` 为准。固定版本和自定义安装目录见 [Install](docs/INSTALL.md)。
+向导会显示默认的配置与运行目录。普通使用不需要自行选择目录，也不需要手动编辑 JSON 文件。
 
-安装器会准备 release 目录、Python 环境和 `om` / `om-agent` 用户级 wrapper；不会创建生产配置、写入 secrets、安装服务或启动定时任务。完整平台要求、目录布局和源码安装方式见 [Install](docs/INSTALL.md)。
+#### 填写必要信息
 
-在源码 checkout 中，以下示例里的 `om` / `om-agent` 可替换为 `./om` / `./om-agent`。
+按实际情况填写市场、OpenD 地址与端口、账户标签、数字账户 ID 和监控标的。本节要扫描真实账户，因此账户环境选择 **`REAL`**；`SIMULATE` 对应测试账户。
 
-## 五分钟开始
+每个标的还需要选择策略并设置行权价边界：
 
-### 1. 初始化配置
-
-第一次安装后运行：
-
-```bash
-om setup init
-```
-
-引导显示平台默认目录，依次填写市场、OpenD 地址、REAL/SIMULATE 环境、账户标签、富途账户 ID 和监控标的。首次完成一个账户，之后在日常管理中添加账户；同市场账户共享标的。每个标的必须选择 CSP、CC 或两者；CSP 必填最高行权价，CC 必填最低行权价，另一端边界可选。账户标签由用户填写，无默认值；账户标签、账户 ID 和标的不能为空，也不会填入示例标的。预览实际选择，输入 `yes` 后才保存 YAML、运行快照及 `~/.config/options-monitor/runtime-root` 目录记录。
-
-通知通道、Bot LLM 和常驻服务逐项询问，可以跳过；新配置的通知与 Bot 默认关闭。密钥在终端隐藏输入。服务安装、启动分别预览确认；首次手动运行默认不发通知。重新运行 `om setup init` 可以继续可选步骤，已保存的配置保留。然后检查：
-
-```bash
-om setup check --format text
-```
-
-脚本化初始化使用 `om setup init --help` 中的完整参数；账户标签须通过 `--account-label` 提供，写入还需要明确 `--futu-acc-id`、`--trd-env`、市场、用户标的和策略边界，先用 `--dry-run` 预览，再以相同参数改用 `--apply`。已有目标拒绝覆盖；异常中断留下的文件需先核对。高级占位配置仍可用 `om config init` 创建，同样须提供账户标签，未完成时不算就绪。`om setup check` 检查离线配置与安装条件，Bot 单独报告，不验证券商登录或通知可达。显式配置路径和有效 `OM_RUNTIME_ROOT` 优先于用户目录记录。完整说明见[首次运行指南](docs/GETTING_STARTED.md)和[配置指南](CONFIGURATION_GUIDE.md)。
-
-之后增删监控标的用人工 CLI；不直接编辑生成的 JSON。新增和删除默认只预览，核对后追加 `--apply`，命令会同时发布 `config.yaml`、已配置市场和 Bot 的运行快照：
-
-```bash
-om symbols list --market us
-om symbols add YOUR_SYMBOL --strategy csp --csp-max-strike YOUR_MAX_STRIKE
-om symbols add YOUR_SYMBOL --strategy csp --csp-max-strike YOUR_MAX_STRIKE --apply
-```
-
-将 `YOUR_SYMBOL` 和 `YOUR_MAX_STRIKE` 换成自己的标的与 CSP 行权价上限。新增时必须选 `--strategy csp|cc|both`；选 CC 时须给 `--cc-min-strike`，选 both 时两项都要给。CSP 下限和 CC 上限可选，详见 `om symbols add --help`。`NVDA` 会识别为美股，`0700.HK` 会识别为港股；`--market` 可省略，若指定则必须与标的一致。只配置一个市场时，`om symbols list` 也可省略 `--market`；配置多个市场时需指定。
-
-在终端运行 `om`，日常菜单提供结果与状态、账户与标的、通知与 Bot、策略与全局持仓风险、运行维护五组任务。也可以直接调用：
-
-| 任务 | 命令 |
-|---|---|
-| 查看账户或标的 | `om accounts list`、`om symbols list` |
-| 配置通知与 Bot | `om channel configure`、`om bot configure` |
-| 配置可选 Holdings 来源 | `om holdings configure`；依赖同机 PM，只补充全局持仓风险中的非富途资产 |
-| 开关平仓建议 | `om close-advice configure` |
-| 管理常驻服务 | `om service install`、`om service start`、`om service stop`；默认预览 |
-
-`om help` 按场景说明任务；`om help all` 保留所有高级命令。模型与控制命令统一推荐 `om bot`，Feishu 传输用 `om channel feishu`；旧 `assistant` / `inbound` 入口保留兼容。普通设置和静态凭证检查不证明 OpenD 登录、消息送达或模型可用。Linux 密钥录入和服务安装涉及系统权限，按终端提示完成；当前普通前台进程不能直接读取 systemd 加密凭证，详见[首次运行指南](docs/GETTING_STARTED.md#3-完成外部接入)。结构化集成使用 `om-agent spec` 和 `om-agent run`，边界见 [Tool Reference](docs/TOOL_REFERENCE.md)。
-
-`om channel status` 检测到显式 WeChat Bot 配置缺失、损坏或校验失败时，会报告 `available=false`，健康检查会提示已配置频道不可用。历史 `configured` 和 allowlist 配置标志仍保留；`service_active` 独立表示所查询的进程状态，配置错误不会将它改写为停止。`available` 不证明消息送达；显式 allowlist 未指定 Bot 配置的合法用法保持兼容。
-
-### 2. 只读检查
-
-```bash
-om config validate --config-key us
-om doctor --config-key us
-om status --config-key us
-```
-
-生产 release 目录通常没有 repo-local config。检查生产 runtime 时应显式传真实路径：
-
-```bash
-om-agent run --tool runtime_status \
-  --input-json '{"config_path":"/var/lib/options-monitor/config.us.json"}'
-```
-
-还可以用人工 CLI 查看环境、配置来源和运行条件：
-
-```bash
-om settings doctor
-om doctor --config-key us
-om config explain --source yaml --market us \
-  --key option_positions.auto_close.enabled
-```
-
-### 3. 第一轮扫描
-
-先禁发通知：
-
-```bash
-OM_CONFIG_DIR="$(cat "$HOME/.config/options-monitor/runtime-root")"
-om run tick --config "$OM_CONFIG_DIR/config.us.json" --accounts lx --no-send --force
-```
-
-`--force` 让这次手动扫描跳过计划时段限制。`--no-send` 只表示不发通知；扫描仍会读取外部数据并写本地 run、报告、cache 和状态 artifact。它不是 no-write 模式。
-
-示例中的 `lx` 换成初始化时选择的账户标签。检查结果后，可继续手工扫描：
-
-```bash
-om run tick --config "$OM_CONFIG_DIR/config.us.json" --accounts lx --force
-```
-
-计划内扫描和普通通知使用 guarded scheduler：
-
-```bash
-om run tick-cron --market us --config "$OM_CONFIG_DIR/config.us.json" --accounts lx --timeout 600
-```
-
-首次运行的完整顺序见 [Getting Started](docs/GETTING_STARTED.md)。
-
-## 常用工作流
-
-### 查询最新 Daily Brief
-
-查询只读取最近一次可靠成功扫描的快照，不重新扫描、不发送、不修改 delivery state：
-
-```bash
-om daily-brief latest
-om daily-brief latest --account lx --market US
-om daily-brief latest --account lx --market HK --json
-
-om-agent run --tool daily_decision_brief_read \
-  --input-json '{"account":"lx","market":"US"}'
-```
-
-固定报告点、候选增量提醒、失败重试和渲染规则统一维护在 [通知体验 PRD](docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md)，README 不保留第二份通知规范。
-
-### 解释候选
-
-解释已有候选排序：
-
-```bash
-om-agent run --tool candidate_rank_explain \
-  --input-json '{"run_id":"<run-id>","account":"lx","mode":"put","top_n":5}'
-```
-
-解释某个标的为什么未进入候选：
-
-```bash
-om-agent run --tool candidate_filter_explain \
-  --input-json '{"run_id":"<run-id>","account":"lx","symbol":"NVDA"}'
-```
-
-这两个工具读取已有 candidate / trace artifact，不重跑扫描。
-
-### 查询现金与持仓
-
-```bash
-om-agent run --tool query_cash_headroom \
-  --input-json '{"config_key":"us","account":"lx"}'
-
-om option-positions list --broker 富途 --account lx --status open
-om-agent run --tool option_positions_read \
-  --input-json '{"config_key":"us","action":"list","account":"lx","status":"open"}'
-```
-
-`query_cash_headroom` 是纯读工具，不持久化查询 cache。`option_positions_read` 也不写账本；某些当前时点查询可能从 OpenD 读取最新报价，并在响应中给出 quote freshness。
-
-新增、平仓、指派、行权和修复必须走语义化账本入口。先 dry-run：
-
-```bash
-om option-positions add \
-  --request-id manual-open-<stable-id> \
-  --account lx \
-  --symbol NVDA \
-  --option-type put \
-  --side short \
-  --contracts 1 \
-  --currency USD \
-  --strike 100 \
-  --multiplier 100 \
-  --exp <future-expiry> \
-  --dry-run
-```
-
-写入前确认目标 runtime root、SQLite、account、lot 和 event 语义。`add`、`assign`、
-`exercise` 在 dry-run、确认写入和重试时必须复用同一个 `--request-id`，以便在响应丢失后
-安全返回原结果。修账流程见 [Option Positions Repair](docs/OPTION_POSITIONS_REPAIR.md)。
-
-### 指派后资产分布
-
-把所选账户中所有 open short CSP 和 CC 同时按 strike 实物指派，并按当前现货价格与当前显式汇率证据计算 CNY 资产分布、现金覆盖、费用、到期梯度和潜在负债：
-
-```bash
-om portfolio assignment-scenario --accounts lx sy
-om portfolio assignment-scenario --accounts lx sy --format json
-
-om-agent run --tool portfolio_assignment_scenario \
-  --input-json '{"accounts":["lx","sy"]}'
-```
-
-该功能是纯读压力测试，不写 assignment event、不修改 `position_lots`、不修改 portfolio-management 持仓，也不发送通知。固定口径：
-
-- 只处理 open short put/call；Long Option 完全不读取、不估值、不保留；
-- 富途账户股票、现金与 MMF 从 OpenD 读取，富途股票现价也以 OpenD 为准；OM SQLite 提供 short option lot；
-- `portfolio.holdings.enabled` 默认关闭；开启后自动补充 PM Holdings 中同账户全部明确为非富途的资产，无需维护券商名单，不重复计入 PM 的富途股票、现金和 MMF 副本；
-- 非富途资产估值使用 PM 报价和显式 FX；PM 证据不可用时保留富途基线并标记 `partial`；
-- MMF 并入现金，资金覆盖统一用 CNY；账户、券商和币种拆分仍保留作操作约束；
-- 股票按当前 spot 估值，指派现金按 strike 结算；历史已收权利金不重复计入；
-- 费用复用统一股票费用计算器；缺少券商、币种或指派费用规则时返回 `partial` 和 `null`，不按 0 处理；
-- 现金不足形成 funding liability，CC 覆盖不足形成 short-stock liability，不会被改写成执行错误。
-
-CSP / CC 候选的 Position Sizing 展示当前、该标的已有同方向合约全指派后、再卖一张并同方向全指派后的仓位。
-CSP 只模拟 Short Put，CC 只模拟 Short Call，两个方向不相互抵消；这是冻结现价下的交付情景，不是最大亏损测算。
-股票与现金同时变化，各场景以非期权净资产为分母，统一为指派费用前；账户查询的 `position_sizing`
-复用同一算法，仍同时模拟 Put/Call，原有总资产权重与费用明细保留。资产证据缺失时显式不可用，不以成本替代现价。
-
-Bot 通过同一个 `portfolio_assignment_scenario` 纯读工具调用，不维护第二套触发词或计算逻辑。Bot 按场景加载该工具；需要 PM 补充时显式开启 PM 集成和 Holdings，并保持 portfolio-management API 仅在同机 loopback 提供服务。
-渠道 Bot 默认只读本渠道市场；只有显式配置 `bot.read_markets: [us, hk]` 后，已鉴权用户才可按标的和目标市场读取另一市场的配置账户。`assignment` 本地事件与成交归属分别取证，不代表券商确认；详见 [Bot 边界](docs/INBOUND_CONTROL.md#bot-boundary)。
-
-### Close Advice
-
-新报告只由计划 Tick 的 sealed required-data 路径生成。它把 run ID、snapshot manifest 和 Close Advice plan 绑定到同一份不可变输入；缺少或不一致时失败关闭。`om close-advice` 仅提供启停配置：
-
-```bash
-om close-advice configure
-```
-
-读取已有报告不会刷新持仓或行情，也不会生成新建议：
-
-```bash
-om-agent run --tool close_advice_read \
-  --input-json '{"config_key":"us","query":{"option_type":"call","side":"long"}}'
-```
-
-Close Advice 不自动平仓，不修改 lot，也不按当前默认策略重写历史开仓 thesis。
-
-### Option Performance
-
-```bash
-om option-performance report \
-  --config-key us \
-  --account lx \
-  --period mtd
-
-om option-performance report \
-  --config-key us \
-  --account lx \
-  --period ytd
-
-om-agent run --tool option_performance_report \
-  --input-json '{"config_key":"us","account":"lx","period":"ytd","as_of_date":"2026-07-17"}'
-```
-
-报告分别提供**期间期权净现金流**（`period_option_net_cashflow`，按现金事件有效时间）
-和**开仓批次期权现金结果**（保留 `option_net_cashflow`），两者不可相加。
-卖出/买入期权胜率、期权收益率与批次明细保留原口径，收益率分子仍为旧批次现金结果。
-实际日均未了结占用本金含跨期持仓、仅计算已发生的占用时间，独立于收益率分母。
-支持 MTD/YTD/自然月/自然年；金额保持原币，各现金指标的 CNY 总额只用已保存的历史转换证据。
-正股交易、指派/行权交割现金、PnL、读取时查汇率和行情刷新均不在该报告内。
-券商确认的零价期权平仓按成交时间更新未平仓数量；原因待证时胜率暂不可算，
-现金和费用证据完整时仍可计算收益率。历史未入账成交不会自动补账。
-
-响应体标识为 `option_performance.report.v3`，附带 `metric_semantics`；HTTP 外层仍为 v1。
-成交附带费用按成交时间计入，迟到更正重述原期间；有独立事实时间的新增扣费/退款单独入期。
-离线复算复用同一领域 owner，严格区分当前更正快照和带来源证据的冻结历史输入，见
-[离线现金流与兼容合同](docs/OPTION_CASHFLOW_OFFLINE_CONTRACT.md)。
-
-绩效查询可显式启用本地 HTTP 服务：操作员先在服务端与消费者进程私下设置同一
-`OM_PERFORMANCE_SERVICE_TOKEN`，再运行
-`om option-performance serve --config-key us --config-path /runtime/config.us.json --port 8766`。
-消费者设置 `OM_PERFORMANCE_SERVICE_URL=http://127.0.0.1:8766` 后，CLI、Tool Gateway 和 Bot
-通过同一客户端查询；服务不可用时明确报错。未设置 URL 时仍使用同一查询 owner 的本地只读路径。
-服务模式不接受消费者的 `config_path`／`data_config` 覆盖。接口、账户绑定、分页凭据及限制见
-[绩效服务合同](docs/OPTION_PERFORMANCE_DESIGN.md#explicit-loopback-query-service)。
-
-### Research
-
-只收集并输出到终端、不写 evidence bundle：
-
-```bash
-om research collect \
-  --config-key us \
-  --scope full \
-  --output both \
-  --no-write-outputs
-```
-
-`om research collect` 默认不写 evidence bundle；写入需要同时使用
-`--write-outputs --confirm`。`archive pull` 默认只生成同步计划，只有 `--write`
-才拉取本地归档；`archive inventory` 与 `archive verify` 用于检查本地归档。
-显式指定 `--run-id` 时，每个 ID 都必须存在于按现有条件（包括 `--since-days`）筛选后的来源清单；
-任一缺失会列出缺失 ID，并在同步或写归档前拒绝本次 preview/write。未指定 run 筛选时，零 run 仍是合法结果。
-执行前先看具体子命令的 `--help`，不要把 Research 整体理解成“永远只读”。Research 不自动修改生产配置、
-交易状态或通知。
-
-### Tool Gateway
-
-```bash
-om-agent spec
-om-agent run --tool healthcheck \
-  --input-json '{"config_key":"us"}'
-```
-
-`om-agent spec` 用于发现当前环境公开的工具及其调用合同；`om-agent run` 用于按工具名执行一次结构化调用，必须根据 manifest 传入符合 schema 的参数。
-
-`om-agent` 是给外部 agent、脚本和操作者使用的结构化 Tool Gateway，不是 OM 自己的自治 Agent。每个工具的 manifest 会声明：
-
-- `read_only`
-- `risk_level`
-- `side_effects`
-- `requires_confirm`
-- `requires_env`
-- `safe_default_input`
-
-`read_only=true` 表示不修改产品事实或配置，不一定表示不会物化本地报告/cache。调用前按 manifest 判断，不从工具名猜副作用。JSON envelope 与集成合同见 [Agent Integration](docs/AGENT_INTEGRATION.md)。
-
-## 配置与数据
-
-| 数据 | 权威位置 |
-|---|---|
-| 人工配置 | `config.yaml` |
-| US/HK 运行快照 | `config.us.json` / `config.hk.json` |
-| Bot 运行快照 | `om setup init` 默认生成 `<runtime_root>/resolved/config.bot.json`；高级命令可显式指定输出位置 |
-| 普通设置 / 写入开关 | `options-monitor.env` 或显式选择的 env-file |
-| Secrets | macOS Keychain / Linux systemd 加密凭证，使用 `om secrets` 管理，见 [密钥存储](docs/SECRET_STORAGE.md) |
-| 期权事实 | `<runtime_root>/output_shared/state/option_positions.sqlite3` |
-| 单次运行 | `<runtime_root>/output_runs/<run_id>/` |
-| 共享状态与报告 | `<runtime_root>/output_shared/` |
-| 账户级输出 | `<runtime_root>/output_accounts/<account>/` |
-
-账户标签使用小写，例如 `lx`、`sy`。账户类型为 `futu`；账户现金与股票持仓来自对应富途账户，trade-intake 能力从账户设置派生。富途失败时不使用 Holdings 回填账户数据。
-
-Feishu 在本项目中的角色：
-
-- 独立的 Holdings 持仓上下文导出命令（开仓扫描不读取它计算风险）；
-- `feishu_app` 出站通知；
-- Feishu long-connection 入站消息。
-
-这些角色不使 Feishu 成为期权账本事实源。
-
-## 副作用与确认
-
-仓库没有一个适用于所有命令的统一 `--write` 语法。按实际能力分级：
-
-| 类型 | 例子 | 默认边界 |
+| 选择 | 含义 | 必填边界 |
 |---|---|---|
-| 纯读取 | `config validate`、`runtime_status`、`daily-brief latest`、`query_cash_headroom` | 不写产品状态 |
-| 本地物化 | `run tick --no-send`、`scan_opportunities` | 可写 run/report/cache，不发送 |
-| 受控本地写入 | config/symbol/account 编辑、Research artifact | 通常 dry-run 或显式 apply/write；以子命令为准 |
-| 高风险写入 | trade event、lot、服务、Feishu、真实发送 | 需要明确目标和显式确认 |
+| `csp` | 现金担保卖出认沽（Cash-Secured Put） | 筛选允许的最高行权价 |
+| `cc` | 持有股票时的备兑卖出看涨（Covered Call） | 筛选允许的最低行权价 |
+| `both` | 同时检查上述两个方向 | 两项都要填写 |
 
-以下操作在执行前必须确认精确目标：
+CSP 的最低行权价、CC 的最高行权价可以不填。策略与价格边界需要你自己决定；OM 不会替你选择标的或确定可接受的买卖价格。这些边界也不代表最大亏损限制。
 
-- 发送真实通知；
-- 修改生产 `config.yaml`、runtime JSON、secrets 或 env-file；
-- 写 trade events、position lots、Feishu 或 broker-facing state；
-- 安装、启停或修改 systemd / launchd 服务；
-- 删除 runtime outputs、state、cache、SQLite 或历史证据。
+向导给出预览后，核对账户、环境、标的、策略和保存位置。确认无误，再输入 `yes` 保存。
 
-## 部署与运维
+#### 第一次只完成连接验证和手动扫描
 
-运行 `om` →「日常管理」→「运行与维护」→「service」，可以预览并确认安装、启动或停止服务。安装定义与启动分开确认；也可直接使用 `om service install/start/stop`，默认只预览。平台要求和确认参数见 [安装指南](docs/GETTING_STARTED.md#6-可选长期运行服务)。
+向导随后逐项询问可选步骤。对于这次首次真实账户扫描，按下面的顺序选择即可：
 
-代码目录与运行目录必须分离。典型 Linux 布局：
+| 向导询问 | 本次选择 |
+|---|---|
+| 现在验证 OpenD 登录和账户连接 | 是；先查看检查结果 |
+| 现在配置通知通道 | 否，暂时跳过 |
+| 现在配置 Bot LLM | 否，暂时跳过 |
+| 现在手动运行一次 | 连接检查没有未解决问题时，选择是 |
+| 使用 SIMULATE 体验模式 | 否；本节使用真实账户 |
+| 现在安装常驻服务定义 | 否，暂时跳过 |
+
+如果连接检查提示账户映射、登录或行情权限有问题，先跳过扫描，处理问题后再从日常菜单运行。不要把“配置已保存”当作“券商连接已验证”。
+
+**这次手动扫描不发送通知，也不会下单。** 它会读取外部数据，并写入本地扫描结果、报告、缓存和状态。向导使用的 `--force` 只是跳过计划时段限制，不代表忽略数据或策略检查。
+
+向导结束时会汇总哪些步骤已完成、跳过或失败。如果中途退出，已经确认保存的步骤会保留；重新运行同一命令可以继续。已有账户和标的的修改，应进入日常管理，不必重新初始化。
+
+> 上表以首次创建的新配置为前提。重新进入向导时，跳过通知或 Bot 配置不会关闭原有设置，也不会停止已经运行的服务。
+
+### 4. 查看第一份决策简报
+
+扫描结束后，按刚才选择的市场，只运行对应的一条命令：
+
+```bash
+# 美股
+"$HOME/.local/bin/om" daily-brief latest --market us
+
+# 港股
+"$HOME/.local/bin/om" daily-brief latest --market hk
+```
+
+这会读取所选市场中已配置账户的最近成功扫描快照，不重新扫描，不发送通知。无需填写账户标签；市场参数请保留，避免查询尚未配置的另一市场。
+
+**先核对账户、市场和数据时间，再看候选。** 如果本轮扫描失败，最新可读结果可能仍来自之前的成功扫描；不能只因为能读到报告，就认为本轮成功。
+
+## 看懂第一份结果
+
+下面仅展示阅读顺序，是**结构示意，非实际运行结果**。实际栏目会随数据、持仓和启用的功能变化。
 
 ```text
-<deploy-home>/apps/options-monitor/current   # code/release
-/var/lib/options-monitor                    # runtime state
-/etc/options-monitor/options-monitor.env    # ordinary process settings
-/etc/credstore.encrypted                    # encrypted systemd credentials
+OM · 决策简报 · [你的账户标签]
+
+状态｜[查询或扫描状态]
+市场｜[美股或港股]
+数据｜[这份结果使用的数据时间]
+
+策略候选
+[符合条件的合约，或没有候选、数据不足的说明]
+
+持仓
+[已有期权持仓及相关提示；视数据和功能状态展示]
+
+资金
+[账户资金及可用于期权开仓的金额，或不可用原因]
 ```
 
-服务文件先生成到临时目录供人工检查；`service render` 会写输出文件，但不会自动安装或启动服务：
+### 先分清“没有候选”和“没有可靠结果”
+
+| 看到的情况 | 如何理解 | 下一步 |
+|---|---|---|
+| 有候选，数据和账户范围正确 | 在该次扫描的数据与规则下，有合约通过筛选 | 继续检查价格、期限、现金或持股覆盖、仓位和风险提示；不要直接据此下单 |
+| 暂无符合条件的候选，且没有相关数据缺口 | 扫描完成，但没有合约通过当前条件 | 可以等待行情变化后再扫描；不必为了得到结果而放宽条件 |
+| 部分数据不可用、结果不完整或 `partial` | 只覆盖了部分账户、标的或计算项目 | 先看缺口范围；受影响部分不能按完整结果使用 |
+| 暂无成功扫描快照、扫描失败或不可评估 | 当前没有足够可靠的结果 | 查看运行状态，处理连接或数据问题后重新扫描 |
+| 报告的数据时间较早 | 这是已有快照，不是此刻的实时行情 | 需要新数据时重新扫描，不要反复执行查询命令代替扫描 |
+
+“暂无候选”与数据异常可能同时出现在同一份报告里，要一起看原因。缺失值、`null` 或“暂不可用”不能理解为 0，也不能理解为没有风险。
+
+### 再看候选中的几个关键项目
+
+| 项目 | 阅读重点 |
+|---|---|
+| 标的、策略、到期日、行权价 | 确认是你准备研究的合约，而不是只看收益数字 |
+| 权利金、预计净收入 | 是基于该次数据的估算，不是已经成交或已经到账的收入 |
+| 持有期净收益 | 对应该合约持有期的估算口径，不是账户整体投资回报 |
+| 门槛年化 | 筛选使用的年化指标，不代表未来一年能持续获得同样收益 |
+| 最多手数 | 受当次资金或持股条件限制；多个 CSP 候选共享现金额度，手数不能直接相加 |
+| Position Sizing（仓位情景） | 比较当前、已有同方向合约指派后、再卖一张并指派后的仓位；这是冻结现价的交付情景，不是最大亏损测算 |
+| 数据缺口与事件提示 | 即使有候选，也要核对行情新鲜度、财报等事件及未完成的检查 |
+
+看到 `DTE` 时，它表示距到期的天数；`lot` 表示一笔期权开仓批次。更多策略名称见[策略术语对照](docs/STRATEGY_TERMINOLOGY.md)。
+
+第一次使用的完成标准是：**你能确认扫描的是自己的目标账户，知道结果使用什么时间的数据，并能区分合格候选、零候选和数据不足。** 不要求一定出现候选，也不要求同时启用通知、Bot 或后台服务。
+
+## 日常使用
+
+打开任务菜单：
 
 ```bash
-om service render \
-  --target systemd \
-  --runtime-root /var/lib/options-monitor \
-  --env-file /etc/options-monitor/options-monitor.env \
-  --config-yaml /var/lib/options-monitor/config.yaml \
-  --config-us /var/lib/options-monitor/config.us.json \
-  --config-hk /var/lib/options-monitor/config.hk.json \
-  --markets us hk \
-  --accounts lx sy \
-  --output-dir /tmp/options-monitor-service
+"$HOME/.local/bin/om"
 ```
 
-Linux 主机预置加密凭据后，推荐在 render 时显式加上 `--include-secret-credentials`，按 unit 生成最小凭据注入；默认使用 `LoadCredentialEncrypted`，受限 Incus/LXC 可显式选择 `--secret-credential-delivery runtime-files`，两者都不使用 secret env。渲染不会创建或修改凭据。旧 `--include-feishu-agent-credential` 只用于存量共享 env materializer；用 `om service credentials-migrate` 做默认 dry-run 的受控迁移。完整契约见 [Secret Storage](docs/SECRET_STORAGE.md)。
+选择“日常管理”，按任务进入：
 
-自动和显式升级目标均须为完整已发布的 GitHub Release，资格条件与失败关闭边界见[发布流程](docs/RELEASE_PROCESS.md#远端自动升级)。
+| 想做什么 | 菜单入口 |
+|---|---|
+| 查看已有简报 | 单市场使用下方查询命令；已配置双市场时可用“查看结果与状态 → `brief`” |
+| 查看运行状态 | 查看结果与状态 → `status` |
+| 重新扫描 | 运行与维护 → `run`；真实账户不选择 SIMULATE 体验模式 |
+| 排查 OpenD 连接 | 运行与维护 → `doctor` |
+| 添加或修改账户、监控标的 | 账户与标的 |
+| 配置通知或 Bot | 通知与 Bot |
+| 查看策略和全局持仓风险设置 | 策略与全局持仓风险 |
+| 管理后台服务 | 运行与维护 → `service` |
 
-平台部署、升级、回滚和服务检查见 [DEPLOY.md](DEPLOY.md)、[Linux / Mac Deployment](docs/DEPLOY_LINUX_MAC.md) 与 [RUNBOOK.md](RUNBOOK.md)。
+菜单中的手动扫描会连接 OpenD，本次不发送通知；仍会保存本地结果。只有查看简报不会让数据更新。
 
-## 文档
+当前菜单的 `brief` 会尝试读取两个市场的运行配置；只配置一个市场时，请使用带市场参数的简报命令，无需为此添加另一市场。
 
-从 [Docs Index](docs/INDEX.md) 开始。主要权威文档：
+同一市场的账户共享监控标的。修改标的前，留意预览列出的受影响账户；不要直接编辑生成的 JSON 文件。
 
-- [Getting Started](docs/GETTING_STARTED.md)：首次安全运行。
-- [CONFIGS.md](CONFIGS.md)：配置事实源、生成链路与迁移契约。
-- [配置指南](CONFIGURATION_GUIDE.md)：账户、市场、环境变量和验证方法。
-- [产品架构](docs/PRODUCT_ARCHITECTURE.md)：产品域与模块关系。
-- [系统架构](docs/ARCHITECTURE.md)：技术分层与真实调用链。
-- [共享 API 索引](docs/API_INDEX.md)：按业务能力查可复用入口、事实归属、契约和测试。
-- [策略架构](docs/STRATEGY_ARCHITECTURE.md)：CSP、CC、Combo Yield。
-- [Ledger Architecture](docs/LEDGER_ARCHITECTURE.md)：交易与持仓事实边界。
-- [Tool Reference](docs/TOOL_REFERENCE.md)：当前 Tool Gateway 分类和 manifest 使用。
-- [RUNBOOK.md](RUNBOOK.md)：巡检、故障诊断和应急操作。
+熟悉命令后，也可以直接查询：
 
-`docs/gateflow/`、`docs/reviews/` 和 `docs/plans/` 是阶段性工作流证据，不是当前产品或运行契约。遇到冲突时，以当前源码、配置验证器、测试、runtime evidence 和上述 living docs 为准。
+```bash
+"$HOME/.local/bin/om" accounts list
+"$HOME/.local/bin/om" symbols list
+"$HOME/.local/bin/om" daily-brief latest --market us
+```
+
+简报示例使用美股；查询港股时将 `us` 换成 `hk`。
+
+`symbols list` 在只配置一个市场时不需要市场参数；配置多个市场后，加 `--market us` 或 `--market hk`。
+
+文档中的短命令 `om`、`om-agent` 分别对应 `"$HOME/.local/bin/om"`、`"$HOME/.local/bin/om-agent"`。如果终端已经能识别短命令，可以省去完整路径；否则继续使用上面的写法即可。
+
+### 需要时再开启通知、Bot 和后台运行
+
+- **通知：** 通过菜单配置 Feishu App 或 WeChat ClawBot。保存配置不代表消息已经送达。
+- **Bot：** 另外配置模型与凭证。第一次扫描不需要 LLM，也不需要 Node 或 Pi。
+- **常驻服务：** 安装和启动分别预览、分别确认。请检查任务清单，其中可能包含交易回执入账、自动平仓记录维护和通知；记录维护不等于替你下单。
+
+第一次成功手动扫描，并不意味着已经开启自动扫描。没有安装并启动相应服务时，需要你主动运行。长期运行的准备与检查见[服务指南](docs/GETTING_STARTED.md#6-可选长期运行服务)。macOS 使用当前用户的 LaunchAgents 和 Keychain；Linux 部署及长期无人值守运行见[部署指南](docs/DEPLOY_LINUX_MAC.md)。
+
+## 遇到问题时
+
+### 安装成功，但提示找不到 `om`
+
+先用完整路径运行，无需重装：
+
+```bash
+"$HOME/.local/bin/om" help
+```
+
+完整路径也不存在时，再核对安装输出和是否使用了自定义目录。命令入口、固定版本和源码安装见[安装指南](docs/INSTALL.md)。
+
+### 配置保存了，为什么仍不能扫描？
+
+配置检查与外部连接检查是两件事：
+
+```bash
+"$HOME/.local/bin/om" setup check --format text
+```
+
+这只检查离线配置和安装条件，不证明 OpenD 已登录、账户映射正确或消息可以送达。连接问题通过日常菜单的 `doctor` 检查，它会尝试连接 OpenD。先确认 OpenD 仍在运行、登录状态正确、市场权限和账户环境一致；具体接入要求见[首次运行指南](docs/GETTING_STARTED.md#3-完成外部接入)。
+
+闭市或行情缺失也可能导致扫描前置检查不通过。不要手工填写一个价格，替代系统要求的真实行情证据。
+
+### 为什么读取简报后，数据时间没变？
+
+`daily-brief latest` 只读取快照，查询时仍需指定实际市场。先从日常菜单运行一次扫描，再查询；如果扫描失败，先处理失败原因。更完整的排错步骤见[运行手册](RUNBOOK.md)。
+
+### 为什么没有收到通知或平仓建议？
+
+首次向导中的手动扫描默认不发送通知；通知和后台服务还需要单独配置与验证。普通手动扫描也不会自动发送计划普通通知。
+
+新的平仓建议（Close Advice）由计划扫描生成。读取旧报告、开启功能或完成一次手动扫描，都不能直接视为已经生成新建议。生成条件与读取入口见[平仓建议说明](docs/CLOSE_ADVICE_CONTRACT.md)。
+
+## 更多能力与文档
+
+以下功能不必在第一次使用时全部配置。按需要选择对应说明。
+
+| 能力 | 用途与说明 |
+|---|---|
+| CSP / CC 候选筛选 | 结合账户条件筛选卖出开仓候选；见[策略架构](docs/STRATEGY_ARCHITECTURE.md) |
+| 指定标的合约查询 | 查询指定标的的卖出 Put / Call 合约；**该入口只评估合约，不判断账户现金、持股覆盖、成本底线或集中度**；见[工具说明](docs/TOOL_REFERENCE.md#指定标的卖出开仓候选) |
+| Combo Yield | 查看组合候选；见[策略架构](docs/STRATEGY_ARCHITECTURE.md)和[术语对照](docs/STRATEGY_TERMINOLOGY.md) |
+| Wheel 轮转策略 | 管理卖出 Put 后接股、卖出 Call 后交股的轮转分支；启用后仍需符合身份与交割证据要求，归属不明确时需要人工确认；见[轮转策略说明](docs/WHEEL_STRATEGY_PRD.md) |
+| 平仓建议 | 查看已有持仓的平仓评估，不自动平仓；见[Close Advice](docs/CLOSE_ADVICE_CONTRACT.md) |
+| 决策简报与提醒 | 查看最近成功扫描、候选变化和数据缺口；见[报告与通知规则](docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md) |
+| 候选解释与决策历史 | 解释已有扫描的候选排序、未入选原因，查询明确关联的结果；见[工具说明](docs/TOOL_REFERENCE.md)和[决策历史](docs/DECISION_HISTORY.md) |
+| 期权账本 | 查询开仓、平仓、指派和行权记录；写入与修复需要预览和确认；见[账本架构](docs/LEDGER_ARCHITECTURE.md)和[修账指南](docs/OPTION_POSITIONS_REPAIR.md) |
+| 期权现金流与绩效 | 查询期间期权净现金流及开仓批次现金结果；两种口径不能相加，也不能当作包含股票盈亏的账户总回报；见[绩效说明](docs/OPTION_PERFORMANCE_DESIGN.md) |
+| 指派压力测试 | 模拟所选账户的全部未平仓卖出 Put / Call 同时指派，查看资产、资金覆盖和潜在负债；不执行实际交易，也不修改账本；入口为 `om portfolio assignment-scenario` |
+| 可选 Holdings 来源 | 为全局持仓风险补充同机 Portfolio Management 中的非富途资产；默认关闭，不替代富途账户数据；见[配置指南](CONFIGURATION_GUIDE.md) |
+| 离线研究与归档 | 收集证据、复核已有样本；写入归档需显式授权；见[Agent Handbook](docs/AGENT_WIKI.md) |
+
+### 开发者与脚本集成
+
+`om-agent` 是供外部 Agent 和脚本调用的结构化工具入口，与 OM 的 Bot 功能不同。查看当前版本实际公开的工具和参数：
+
+```bash
+"$HOME/.local/bin/om-agent" spec
+```
+
+调用前检查工具声明的输入参数、风险级别、副作用与确认要求。`read_only=true` 表示不修改产品事实或配置，不一定表示不会生成本地报告或缓存。
+
+- [Tool Reference](docs/TOOL_REFERENCE.md)：工具分类与调用说明。
+- [Agent Integration](docs/AGENT_INTEGRATION.md)：结构化输出和集成约定。
+- [产品架构](docs/PRODUCT_ARCHITECTURE.md)、[系统架构](docs/ARCHITECTURE.md)：模块职责与调用链。
+- [共享 API 索引](docs/API_INDEX.md)：可复用入口与事实归属。
+- [策略核心与离线验收](docs/candidate_strategy.md)：策略规则、可复用核心与样本复核；设计目标不应直接当作已发布能力。
+
+## 配置、数据与操作边界
+
+普通使用优先通过菜单修改配置。需要排错或备份时，再查看这些位置：
+
+| 内容 | 位置或管理方式 |
+|---|---|
+| 配置原文件 | 运行目录中的 `config.yaml` |
+| 美股／港股运行配置 | 自动生成的 `config.us.json` / `config.hk.json`，不作为日常手工编辑入口 |
+| Bot 运行配置 | 向导默认生成 `resolved/config.bot.json` |
+| 普通设置 | 运行目录中的 `options-monitor.env`，或显式选择的设置文件 |
+| 密钥 | macOS Keychain / Linux systemd 加密凭证；使用 `om secrets` 管理 |
+| 期权交易与持仓事实 | 运行目录下 `output_shared/state/option_positions.sqlite3` |
+| 每次扫描结果 | 运行目录下 `output_runs/<run_id>/` |
+| 共享报告与账户输出 | 运行目录下 `output_shared/`、`output_accounts/<account>/` |
+
+向导会在 `~/.config/options-monitor/runtime-root` 记住运行目录。高级使用中，显式配置路径和有效的 `OM_RUNTIME_ROOT` 会优先于这条记录；操作前应确认目标实例。
+
+期权账本以本地 SQLite 中的交易事件及其持仓投影为准，Feishu 不作为期权持仓事实源。账户现金与股票持仓来自对应富途账户；富途读取失败时，不用其他持仓来源冒充完整账户数据。
+
+不同操作的边界不同：
+
+- **读取已有结果：** 不会因为查询而重新扫描或发送通知。
+- **扫描：** 会连接外部数据源并保存本地结果；`--no-send` 只表示不发通知，不表示不写文件。
+- **修改配置或账本：** 核对账户、文件和记录目标，再按具体命令预览、确认。不存在所有命令通用的写入参数。
+- **通知、服务、删除与修复：** 可能影响外部接收人、持续运行的任务或历史证据，操作前必须确认精确范围。
+
+配置细节见[配置指南](CONFIGURATION_GUIDE.md)和[配置生成规则](CONFIGS.md)；密钥管理见[密钥存储](docs/SECRET_STORAGE.md)。
+
+## 部署、升级与其他文档
+
+- [安装指南](docs/INSTALL.md)：macOS、Linux、固定版本与源码安装。
+- [首次运行指南](docs/GETTING_STARTED.md)：外部接入、可选功能与服务确认。
+- [部署指南](DEPLOY.md)与[Linux / Mac 部署](docs/DEPLOY_LINUX_MAC.md)：服务、运行目录和平台要求。
+- [运行手册](RUNBOOK.md)：状态检查、排错与恢复。
+- [发布流程](docs/RELEASE_PROCESS.md)：已发布版本的升级条件与回滚边界。
+- [完整文档索引](docs/INDEX.md)：按主题查找其他文档。
+
+旧配置升级前，先阅读[开关迁移说明](CONFIGURATION_GUIDE.md#配置开关迁移)，预览迁移并核对通知意图，不要直接套用新配置覆盖旧数据。macOS 的基本服务管理不代表所有自动升级协调能力都已具备，部署前应查看当前平台说明。
 
 ## 风险提示
 
-本项目只做监控、筛选、报告、提醒和人工复盘，不构成投资建议。任何下单前都应自行复核价格、流动性、费用、保证金、仓位暴露、事件风险和数据新鲜度。
-
-旧配置升级前请阅读[开关迁移说明](CONFIGURATION_GUIDE.md#配置开关迁移)，运行
-`om config migrate-switches` 预览，核对通知意图及已退休字段后再显式应用。
+OM 提供监控、筛选、报告和复盘辅助，不构成投资建议。任何下单前，都应自行核对价格、流动性、费用、资金要求、持股覆盖、仓位暴露、事件风险和数据新鲜度。候选、收益估算、平仓评估和压力测试都不能替代你的交易判断。
