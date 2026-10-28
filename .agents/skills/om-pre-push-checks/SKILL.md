@@ -9,6 +9,8 @@ Use the general `pre-push-checks` workflow when available to establish base, com
 
 Choose the smallest tests that would fail for the changed behavior. Include the public CLI, Tool Gateway, persistence, or renderer when its contract changes, plus affected consumers of shared contracts. Run Ruff for changed Python paths; use repository-wide Ruff or pytest only when the scope or a required gate calls for it. Verify documentation references against their owners and run `git diff --check` for the outgoing patch.
 
+For changes that cross a workflow, repository, persistence or external-client boundary, select a real-adapter test with a mocked external client before accepting the implementation slice. Assert the permitted calls, fields and record isolation, including forbidden-call counters recorded before raising: a caller may catch that exception. Reuse existing applicable tests and retain independent QA; this does not require adapter tests for documentation-only changes or start a new development phase during delivery.
+
 Before push, check the dependency graph against the exact outgoing tree with `./.venv/bin/python scripts/generate_dependency_graph.py --check`. If it is stale, run the generator with the same interpreter, review its output diff, include the generated files in the change, and rerun `--check`. In a worktree without `.venv`, use the validated project interpreter.
 
 Before commit, check the exact staged index, including partially staged files:
