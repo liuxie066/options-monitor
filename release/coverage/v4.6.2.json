@@ -1,0 +1,112 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.2",
+  "base": {
+    "tag": "v4.6.1",
+    "commit": "e04cda3b850315a31c40ac63772540b3cd414a9f"
+  },
+  "reviewed_head": "750cf3175623c04693541c0a0d4d363760115471",
+  "commits": [
+    {
+      "sha": "d923cbaf52b6b8f156025458fec34e803223bfb7",
+      "subject": "chore(gateflow): accept reviewed R1 diagnostics plan"
+    },
+    {
+      "sha": "ebd2d3b84ec2fa3c356befee0a16a4973f9e45e0",
+      "subject": "docs(delivery): accept R1 evidence and adapter boundary guidance"
+    },
+    {
+      "sha": "4646d418c032488a7ab23f874ca4bd7f20fd8e09",
+      "subject": "feat(ci): accept isolated regression phase diagnostics"
+    },
+    {
+      "sha": "fe10d718d2328af3cd6838b97c0ba5da3a90091c",
+      "subject": "chore(gateflow): accept R1 aggregate deepreview"
+    },
+    {
+      "sha": "82ec2f28ad2f5561460c23d34bbb5438288b7529",
+      "subject": "fix(ci): distinguish native subtest timing reports"
+    },
+    {
+      "sha": "0c634cbd657da5aa9eee39c9c5ab839e53267d5d",
+      "subject": "Merge pull request #943 from liuxie066/feat/ci-duration-diagnostics-r1"
+    },
+    {
+      "sha": "750cf3175623c04693541c0a0d4d363760115471",
+      "subject": "feat(ci): require exact-commit checks for every release entry (#944)"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "CI 增加独立的 setup/call/teardown 耗时诊断，正确区分原生子测试报告，保留原分片和覆盖门禁；完善交付阶段证据与真实适配器验证指引（#943）。",
+      "commits": [
+        "ebd2d3b84ec2fa3c356befee0a16a4973f9e45e0",
+        "4646d418c032488a7ab23f874ca4bd7f20fd8e09",
+        "82ec2f28ad2f5561460c23d34bbb5438288b7529",
+        "0c634cbd657da5aa9eee39c9c5ab839e53267d5d"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "统一自动、标签及手动发布入口，在同一提交的完整 Guardrails 和最新完整 CodeQL 检查通过后才发布；核对标签与产物身份，失败后读回结果，避免复用旧成功或跨重跑证据（#944）。",
+      "commits": [
+        "750cf3175623c04693541c0a0d4d363760115471"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "d923cbaf52b6b8f156025458fec34e803223bfb7",
+      "reason": "仅记录已接受的 Gateflow 计划或评审检查点，无独立产品、配置或运行行为变化；对应实现已在 #943 发布说明中覆盖。"
+    },
+    {
+      "commit": "fe10d718d2328af3cd6838b97c0ba5da3a90091c",
+      "reason": "仅记录已接受的 Gateflow 计划或评审检查点，无独立产品、配置或运行行为变化；对应实现已在 #943 发布说明中覆盖。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "d923cbaf52b6b8f156025458fec34e803223bfb7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/943"
+      ]
+    },
+    {
+      "commit": "ebd2d3b84ec2fa3c356befee0a16a4973f9e45e0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/943"
+      ]
+    },
+    {
+      "commit": "4646d418c032488a7ab23f874ca4bd7f20fd8e09",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/943"
+      ]
+    },
+    {
+      "commit": "fe10d718d2328af3cd6838b97c0ba5da3a90091c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/943"
+      ]
+    },
+    {
+      "commit": "82ec2f28ad2f5561460c23d34bbb5438288b7529",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/943"
+      ]
+    },
+    {
+      "commit": "0c634cbd657da5aa9eee39c9c5ab839e53267d5d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/943"
+      ]
+    },
+    {
+      "commit": "750cf3175623c04693541c0a0d4d363760115471",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/944"
+      ]
+    }
+  ]
+}
