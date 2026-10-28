@@ -28,16 +28,19 @@ def test_put_uses_stock_spot_cash_at_strike_and_candidate_net_premium():
     assert "symbol_concentration_after_existing_puts" not in fields
 
 
-def test_cc_and_put_share_mixed_existing_scenario():
+def test_cc_and_put_separate_mixed_existing_assignments_by_direction():
     ctx = context(positions=[option("put", strike=8), option("call", strike=12)])
     put = portfolio_concentration_fields(candidate(), mode="put", risk_ctx=ctx)
     call = portfolio_concentration_fields(candidate(strike=12), mode="call", risk_ctx=ctx)
-    assert (
-        put["symbol_concentration_after_existing_assignments"]
-        == call["symbol_concentration_after_existing_assignments"]
-        == round(1000 / 10400, 6)
-    )
-    assert call["symbol_concentration_after"] == 0
+    assert put["symbol_concentration_current"] == call["symbol_concentration_current"] == 0.1
+    assert put["symbol_concentration_after_existing_assignments"] == round(2000 / 10200, 6)
+    assert call["symbol_concentration_after_existing_assignments"] == 0
+    assert put["symbol_concentration_after"] == round(3000 / 10450, 6)
+    # Two Call deliveries against 100 shares preserve the signed short-stock scenario.
+    assert call["symbol_concentration_after"] == round(-1000 / 10450, 6)
+    for result in (put, call):
+        assert result["portfolio_nav_after_existing_assignments_cny"] == 10200
+        assert result["portfolio_nav_after_candidate_assignment_cny"] == 10450
 
 
 def test_current_and_existing_independent_of_missing_candidate_premium():
