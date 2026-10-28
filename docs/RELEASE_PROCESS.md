@@ -569,3 +569,15 @@ git push origin "v${VERSION}"
 - `./om-agent spec` 输出是否正常
 - 示例配置是否仍能通过 `./om config validate`
 - Tool Gateway/tool 合同测试是否通过
+
+## 同提交发布检查契约
+
+三个项目发布入口（main 的 VERSION 变化、`v*` tag、手动 Release from VERSION）统一调用 Guardrails 编排。原生 `checks`、8 片 × 4 worker 完整回归及同 run/attempt 清单校验全部成功后，唯一 publisher 才可运行。原 focused 发布测试已包含于完整发现，独立 smoke、metadata、dependency graph、spec 与解压归档验证继续保留；不再提供跳过回归的 publisher 输入。
+
+所有 checkout、VERSION、归档和发布目标绑定 `github.sha`。已有 tag 必须剥离到该提交；tag 入口不允许缺失 tag，main/manual 可在同一提交创建 tag。publisher 在变更前再次核验，发布后读回公开 Release、tag 和三个既有上传资产；同仓同 tag 的 publisher job 串行且不自动取消。
+
+发布还要求项目明确声明的默认 CodeQL 来源：本仓库 workflow `273127082`、路径 `dynamic/github-code-scanning/codeql`、事件 `dynamic`、分支 `main`、同 SHA；最新 run（按 run_number/id）当前 attempt 必须完整包含成功的 `Analyze (actions)` 和 `Analyze (python)`。显示名 `Push on main` 不是身份判断依据。不得回退旧成功 run，也不得拼接不同 attempt；缺语言或部分重跑须完整重跑该工作流。读取错误和不完整数据关闭发布入口；未开始或排队可在原 15 分钟预算内等待，publisher 总超时 25 分钟。普通 PR/main 非发布 CI 不额外等待这个观察器。
+
+只有实际 publisher runner 的内建 `GITHUB_TOKEN` 增加 `actions: read`，用于只读 Actions run/job API；reusable caller 声明权限上限，所有其它运行任务仍显式 `contents: read`。不新增 token、不读取管理员规则、不改 default CodeQL setup，也不允许取消或修改 CI。它是项目检查契约，不是动态平台规则或人类发布授权的替代。
+
+CodeQL 跨工作流观察不是原子锁：最终读回后外部重跑或强制移动 tag 仍可能发生，后验核查不能撤销已经公开的内容。原 `softprops/action-gh-release@v3` 的内部重试和既有资产更新语义保留；本编排不承诺一次 HTTP 写入。action 失败或结果不确定时仍执行只读验收，不自动再次调用 action、删资产或撤回 Release；缺失/无法核实标为 unknown/incomplete，先核实再人工决定恢复。本次只用合成读取与结构测试，未实际发布；历史 tag 上没有此代码的 workflow 也不受新契约追溯保护。
