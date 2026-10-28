@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 import strategy_completion_oracle as oracle
 
+from domain.domain.short_vol_assessment import CANDIDATE_POSITION_SIZING_BASIS
+
 FIXTURE = json.loads((Path(__file__).parent / "fixtures/strategy_completion_baseline.json").read_text())
 
 
@@ -50,6 +52,8 @@ def _checked_current_projection(value, *, clock, delta):
         "policy_max_abs_delta": 0.4,
     }
     if isinstance(value, dict):
+        if value.get("position_sizing_basis") is not None:
+            assert value["position_sizing_basis"] == CANDIDATE_POSITION_SIZING_BASIS
         for key, expected in additions.items():
             if key in value:
                 assert value[key] == expected, key
@@ -68,17 +72,23 @@ def _checked_current_projection(value, *, clock, delta):
 
 
 def _historical_input_variant(value, *, delta):
-    """Copy the old expected output with the one deliberately changed synthetic input.
+    """Copy archived output with the approved synthetic input and sizing basis changes.
 
     The historical generator imported helpers whose Delta was unavailable. Current
-    helpers supply signed 0.3, so the default gate stays enabled. Only existing
-    Delta display/fact fields change; neither archived bytes nor other facts do.
+    helpers supply signed 0.3, so the default gate stays enabled. The candidate
+    sizing basis now identifies directional scenarios; these fixtures have no
+    opposite-direction assignments, so all numeric sizing facts stay compared.
+    Archived bytes remain unchanged.
     """
     if isinstance(value, dict):
         if "delta" in value:
             assert value["delta"] is None
+        if value.get("position_sizing_basis") is not None:
+            assert value["position_sizing_basis"] == "non_option_net_assets_before_assignment_fees.v2"
         return {key: (None if value.get("candidate_count") == 0 else delta)
-                if key == "delta" else _historical_input_variant(child, delta=delta)
+                if key == "delta" else CANDIDATE_POSITION_SIZING_BASIS
+                if key == "position_sizing_basis" and child is not None
+                else _historical_input_variant(child, delta=delta)
                 for key, child in value.items()}
     if isinstance(value, list):
         return [_historical_input_variant(child, delta=delta) for child in value]
@@ -88,8 +98,9 @@ def _historical_input_variant(value, *, delta):
 @pytest.mark.parametrize("change", [
     {"delta": 0.4001}, {"delta_source": None}, {"delta_unit": "percent"},
     {"delta_reason_code": "delta_source_unverified"}, {"policy_max_abs_delta": None},
+    {"position_sizing_basis": "non_option_net_assets_before_assignment_fees.v2"},
 ])
-def test_oracle_projection_does_not_hide_delta_contract_regressions(change):
+def test_oracle_projection_does_not_hide_contract_regressions(change):
     row = {"delta": 0.3, "delta_source": "opend_market_snapshot.option_delta",
            "delta_unit": "fraction", "delta_reason_code": None, "policy_max_abs_delta": 0.4,
            "decision_now_utc": oracle.old.NOW.isoformat(), **change}

@@ -2092,10 +2092,14 @@ def test_unscoped_call_unavailability_still_blocks_empty_family(reason):
 
 @pytest.mark.parametrize("render", [render_full_brief, render_fixed_report, render_fixed_report_card_markdown, render_query_brief])
 @pytest.mark.parametrize("family", ["sell_put", "covered_call"])
-def test_position_sizing_in_shared_report_views(render, family) -> None:
+@pytest.mark.parametrize("basis", [
+    "non_option_net_assets_before_assignment_fees.v2",
+    "directional_non_option_net_assets_before_assignment_fees.v3",
+])
+def test_position_sizing_in_shared_report_views(render, family, basis) -> None:
     brief = _brief()
     for candidate in brief["candidates"][family]:
-        candidate["metrics"].update(symbol_concentration_current=0.08, position_sizing_basis="non_option_net_assets_before_assignment_fees.v2", symbol_concentration_after_existing_assignments=0.2, symbol_concentration_after=0.23)
+        candidate["metrics"].update(symbol_concentration_current=0.08, position_sizing_basis=basis, symbol_concentration_after_existing_assignments=0.2, symbol_concentration_after=0.23)
     message = render(brief)
     assert "Position Sizing：" in message
     assert "Position Sizing（" not in message

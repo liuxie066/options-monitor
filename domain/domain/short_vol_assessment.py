@@ -4,10 +4,11 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from domain.domain.symbol_identity import canonical_symbol, symbol_currency
-from domain.domain.portfolio_assignment_scenario import POSITION_SIZING_BASIS, project_non_option_assignment_assets
+from domain.domain.portfolio_assignment_scenario import project_non_option_assignment_assets
 
 
 ShortVolMode = Literal["put", "call"]
+CANDIDATE_POSITION_SIZING_BASIS = "directional_non_option_net_assets_before_assignment_fees.v3"
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ def portfolio_concentration_fields(
         position
         for position in risk_ctx.assignment_positions or ()
         if canonical_symbol(position.get("symbol")) == symbol
+        and str(position.get("option_type") or "").strip().lower() == mode
     ]
     existing = project_non_option_assignment_assets(
         accounts=accounts, portfolio_evidence=evidence, option_positions=positions
@@ -81,7 +83,7 @@ def portfolio_concentration_fields(
     nav = _float(baseline.get("net_assets_cny"))
     return {
         **({"position_sizing_quote_recovery": evidence["quote_recovery"]} if evidence.get("quote_recovery") else {}),
-        "position_sizing_basis": POSITION_SIZING_BASIS,
+        "position_sizing_basis": CANDIDATE_POSITION_SIZING_BASIS,
         "symbol_concentration_current": current,
         "symbol_concentration_after_existing_assignments": existing_weight,
         "symbol_concentration_after": after_weight,

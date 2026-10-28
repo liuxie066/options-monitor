@@ -10,6 +10,7 @@ import pytest
 
 from domain.domain.canonical_schema import normalize_processor_row
 from domain.domain.daily_decision_brief import diff_daily_decision_briefs
+from domain.domain.short_vol_assessment import CANDIDATE_POSITION_SIZING_BASIS
 from src.application.daily_decision_brief_renderer import render_full_brief
 from src.application.ledger.api import open_position_ledger, resolve_position_data_config_path
 from src.application.opening_candidate_snapshot import seal_opening_candidate_snapshot
@@ -76,10 +77,12 @@ def test_single_account_sizing_survives_real_decision_seal_and_brief(tmp_path, m
     assert len(enriched) == 1
     expected = [round(50_000 / 850_000, 6), round(100_000 / 850_000, 6), round(150000/(850000+50000-10000/.14+1400),6)]
     if mode == "call":
-        expected[2] = round(50000 / (850000 - 50000 + 10000 / .14 + 1400), 6)
+        expected[1] = expected[0]
+        expected[2] = 0.0
     assert [enriched.iloc[0][key] for key in SIZING_KEYS] == expected
     assert [decisions[0]["normalized_input"][key] for key in SIZING_KEYS] == expected
     assert decisions[0]["normalized_input"]["position_sizing_quote_recovery"] == recovery_proof
+    assert decisions[0]["normalized_input"]["position_sizing_basis"] == CANDIDATE_POSITION_SIZING_BASIS
     summary = normalize_processor_row(summary_fn(enriched, "NVDA"))
     assert [summary[key] for key in SIZING_KEYS] == expected
     seal_opening_candidate_snapshot(
@@ -121,8 +124,10 @@ def test_single_account_sizing_survives_real_decision_seal_and_brief(tmp_path, m
     assert brief["account"] == "lx"
     candidate = brief["candidates"]["sell_put" if mode == "put" else "covered_call"][0]
     assert [candidate["metrics"][key] for key in SIZING_KEYS] == expected
+    assert candidate["metrics"]["position_sizing_basis"] == CANDIDATE_POSITION_SIZING_BASIS
     assert "Position Sizing：" in render_full_brief(brief)
-    assert f"当前 5.9% · 指派后 11.8% · 再卖 1 张指派后 {18.1 if mode == 'put' else 5.7}%" in render_full_brief(brief)
+    assert ("当前 5.9% · 指派后 11.8% · 再卖 1 张指派后 18.1%" if mode == "put"
+            else "当前 5.9% · 指派后 5.9% · 再卖 1 张指派后 0.0%") in render_full_brief(brief)
     # Display-only changes must not create a new candidate notification.
     updated = deepcopy(brief)
     updated["revision"] += 1

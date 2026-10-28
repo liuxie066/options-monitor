@@ -121,11 +121,14 @@ OM 测试不代替 PM 服务端验收或目标环境的接口支持证据。
 - 来源自由文本及清单不能证明实际持仓真实性；PM 记录管理负责真实性，人工券商批准名单也不能替代。
 - OpenD 未识别证券类型不能静默忽略。只有证实某 MMF 仓位与已计入现金的同一资产一致后，才可由适配 owner 去重。
 
-## Position Sizing v2：统一非期权净资产口径
+## Position Sizing：统一非期权净资产与候选方向情景
 
 账户指派查询新增 `position_sizing`，与 CSP / CC 候选共用 domain 指派变换。
 原查询的费用、总资产权重与负债字段维持原语义；新净资产权重显式为指派费用前，不能与旧 gross 权重混用。
-账户查询纳入所选账户全部 open short Put/Call；候选仅纳入本账户目标标的全部已有 short Put/Call，再增加候选一张。
+账户查询纳入所选账户全部 open short Put/Call，继续使用 v2 口径。
+候选仅纳入本账户目标标的同方向已有合约，再增加候选一张：CSP 仅 short Put，CC 仅 short Call，
+两个方向不相互抵消。候选方向筛选由 `short_vol_assessment.py::portfolio_concentration_fields` 持有，
+共享指派变换保持同时支持 Put/Call。这是冻结现价下同方向全部指派的极端交付情景，不是最大亏损测算。
 
 冻结现货价 P 与 FX 后，`Q_after = Q + put_shares - call_shares`，
 `delta_cash = -sum(put_strike * shares) + sum(call_strike * shares) + candidate_net_premium`，
@@ -146,7 +149,8 @@ prepared portfolio context 在封存前一次收集报价、资产与来源证�
 普通股票统一按现价重估，不用平均成本。非富途交割必须有对应券商现金基线；缺失资产、报价或 FX 显式不可用。
 负现金和负股数保留；净资产非正不出比例。候选开仓资金与 CC 覆盖仍保留富途执行账户约束。
 
-候选字段 `position_sizing_basis=non_option_net_assets_before_assignment_fees.v2` 标明口径；
+候选字段 `position_sizing_basis=directional_non_option_net_assets_before_assignment_fees.v3` 标明方向口径；
+账户查询 `position_sizing.basis=non_option_net_assets_before_assignment_fees.v2` 保留全部指派口径。
 当前、已有指派后、加候选后对应三个浓度与净资产字段。旧封存结果不修改、仅按历史口径展示。
 
 ### 股票证据资格复用
