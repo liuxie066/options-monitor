@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from domain.domain.portfolio_assignment_scenario import POSITION_SIZING_BASIS
+from domain.domain.short_vol_assessment import CANDIDATE_POSITION_SIZING_BASIS
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1507,7 +1508,9 @@ def _candidate_metric_details(
     details = [" · ".join(parts)] if parts else []
     if family in {"sell_put", "covered_call"}:
         sizing = []
-        is_current_basis = values.get("position_sizing_basis") == POSITION_SIZING_BASIS
+        is_current_basis = values.get("position_sizing_basis") in {
+            POSITION_SIZING_BASIS, CANDIDATE_POSITION_SIZING_BASIS,
+        }
         labels = (
             (("当前", "symbol_concentration_current"),
              ("指派后", "symbol_concentration_after_existing_assignments"),

@@ -519,8 +519,10 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 
 ### Position Sizing（单账户 CSP / CC）
 
-三个比例使用同一逻辑账户的冻结资产证据：当前仓位；该标的已有 Short Put/Call 全部指派后；
-再卖该候选一张并全部指派后。股票按同一现货价格计市值，现金按行权价同时增减，使用实际合约乘数。
+三个比例使用同一逻辑账户的冻结资产证据：当前仓位；该标的已有同方向 Short Option 全部指派后；
+再卖该候选一张并同方向全部指派后。CSP 仅模拟 Short Put，CC 仅模拟 Short Call，两个方向不相互抵消。
+这是冻结现价下的极端交付情景，不是股价压力测试或最大亏损测算。
+股票按同一现货价格计市值，现金按行权价同时增减，使用实际合约乘数。
 分母为有符号的非期权净资产（现金、MMF 与非期权持仓，包含负现金），每个场景重新计算：
 `N_after = N_before + delta_shares * spot + delta_cash`。
 已有权利金已在现金中，不重复添加；候选只添加一次扣除开仓费用后的净权利金。三个场景统一为指派费用前。
@@ -529,8 +531,9 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 普通股票采用冻结现价和 FX，不以平均成本补值。计算由 `domain/domain/portfolio_assignment_scenario.py` 持有；
 `short_vol_assessment.py` 选择场景，摘要、开仓快照与 Brief 透传，不重新取价。
 字段为 `symbol_concentration_current`、`symbol_concentration_after_existing_assignments`、
-`symbol_concentration_after`，以 `position_sizing_basis` 标明新口径，并保留三个场景的净资产分母。
-已有封存快照不修改，旧 `symbol_concentration_after_existing_puts` 仅按历史口径展示。
+`symbol_concentration_after`，候选以 `position_sizing_basis=directional_non_option_net_assets_before_assignment_fees.v3`
+标明方向隔离口径，并保留三个场景的净资产分母。
+已有封存快照不修改，v2 及旧 `symbol_concentration_after_existing_puts` 仍按历史口径展示。
 
 展示位置是 CSP / CC 候选指标，使用“Position Sizing：当前 · 指派后 · 再卖 1 张指派后”，
 不增加括号说明或休市报价估值行；计算口径和报价证据仍保留在快照中。事件仍在独立回执区。缺失显示暂不可用，可信零值显示 0%，

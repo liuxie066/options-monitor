@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -6,6 +7,11 @@ from domain.domain.portfolio_assignment_scenario import (
     POSITION_SIZING_BASIS,
     project_assignment_scenario,
     project_non_option_assignment_assets,
+)
+from domain.domain.short_vol_assessment import (
+    CANDIDATE_POSITION_SIZING_BASIS,
+    ShortVolPortfolioContext,
+    portfolio_concentration_fields,
 )
 from test_portfolio_assignment_scenario import _evidence, _quote
 
@@ -50,6 +56,75 @@ def option(kind, *, strike=8, account="lx", broker="富途", multiplier=100):
         "currency": "CNY",
         "expiration_ymd": "2026-12-18",
     }
+
+
+@pytest.mark.parametrize("mode,existing_value,candidate_value", [("put", 4000, 5000), ("call", 2000, 1000)])
+@pytest.mark.parametrize("same_direction", [False, True])
+def test_candidate_sizing_only_assigns_its_own_direction(mode, existing_value, candidate_value, same_direction):
+    same = option(mode, strike=8 if mode == "put" else 12)
+    opposite = option("call" if mode == "put" else "put", strike=15)
+    positions = [same] if same_direction else []
+    row = {**same, "net_income_cny": 50}
+
+    def calculate(options):
+        return portfolio_concentration_fields(row, mode=mode, risk_ctx=ShortVolPortfolioContext(
+            nav_cny=None, stock_value_cny_by_symbol={}, short_put_assignment_cny_by_symbol={},
+            short_put_assignment_total_cny=None,
+            account="lx", portfolio_evidence=evidence(shares=300), assignment_positions=tuple(options),
+        ))
+
+    result = calculate(positions)
+    assert result["position_sizing_basis"] == CANDIDATE_POSITION_SIZING_BASIS
+    assert result["symbol_concentration_current"] == 0.25
+    assert result["symbol_concentration_after_existing_assignments"] == (
+        round(existing_value / 12200, 6) if same_direction else 0.25
+    )
+    assert result["symbol_concentration_after"] == round(
+        (candidate_value if same_direction else existing_value) / (12450 if same_direction else 12250), 6
+    )
+    # Opposite-direction failures and other scopes must not change this scenario.
+    assert calculate([*positions, opposite, {**opposite, "multiplier": 0, "state_warning": "unsettled"},
+                      {**same, "account": "sy"}, {**same, "symbol": "AAPL"}]) == result
+
+
+@pytest.mark.parametrize("mode", ["put", "call"])
+@pytest.mark.parametrize("problem", [
+    {"multiplier": 0}, {"state_warning": "unsettled"}, {"lifecycle_state": "conflict"},
+    {"pending_close_contracts_by_lot": {"lot": 1}}, {"reserved_contracts_by_lot": {"lot": 1}},
+])
+def test_directional_sizing_preserves_same_direction_evidence_failures(mode, problem):
+    result = portfolio_concentration_fields(
+        {**option(mode), "net_income_cny": 50}, mode=mode,
+        risk_ctx=ShortVolPortfolioContext(nav_cny=None, stock_value_cny_by_symbol={},
+                                         short_put_assignment_cny_by_symbol={}, short_put_assignment_total_cny=None,
+                                         account="lx", portfolio_evidence=evidence(shares=300),
+                                         assignment_positions=({**option(mode), **problem},)),
+    )
+    assert result["symbol_concentration_current"] == 0.25
+    assert result["symbol_concentration_after_existing_assignments"] is None
+    assert result["symbol_concentration_after"] is None
+    assert result["concentration_unavailable_reason"]
+
+
+@pytest.mark.parametrize("mode", ["put", "call"])
+def test_directional_sizing_unknown_positions_premium_and_nonpositive_assets(mode):
+    row = {**option(mode, strike=8 if mode == "put" else 12), "net_income_cny": 50}
+    context = ShortVolPortfolioContext(nav_cny=None, stock_value_cny_by_symbol={},
+                                       short_put_assignment_cny_by_symbol={}, short_put_assignment_total_cny=None,
+                                       account="lx", portfolio_evidence=evidence(shares=300))
+    unknown = portfolio_concentration_fields(row, mode=mode, risk_ctx=context)
+    assert unknown["symbol_concentration_current"] == 0.25
+    assert unknown["symbol_concentration_after_existing_assignments"] is None
+    assert unknown["symbol_concentration_after"] is None
+    context = replace(context, assignment_positions=())
+    missing_premium = portfolio_concentration_fields({**row, "net_income_cny": None}, mode=mode, risk_ctx=context)
+    assert missing_premium["symbol_concentration_after_existing_assignments"] == 0.25
+    assert missing_premium["symbol_concentration_after"] is None
+    context = replace(context, portfolio_evidence=evidence(cash=-4000, shares=300))
+    nonpositive = portfolio_concentration_fields(row, mode=mode, risk_ctx=context)
+    assert all(nonpositive[key] is None for key in (
+        "symbol_concentration_current", "symbol_concentration_after_existing_assignments", "symbol_concentration_after",
+    ))
 
 
 @pytest.mark.parametrize("kind,expected_net,expected_stock", [("put", 10200, 2000), ("call", 9800, 0)])
