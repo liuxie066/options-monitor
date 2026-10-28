@@ -1,0 +1,46 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.3",
+  "base": {
+    "tag": "v4.6.2",
+    "commit": "a87d4a232cd191ea760391e4981dbfb25bb5d6dc"
+  },
+  "reviewed_head": "fd99f2eb08d44bb047a9a81de5ae522e7bb105d8",
+  "commits": [
+    {
+      "sha": "20d9afb52ff013cac09d0bc043c314985f7e0f3b",
+      "subject": "fix(gateway): keep Futu diagnostics out of JSON responses"
+    },
+    {
+      "sha": "fd99f2eb08d44bb047a9a81de5ae522e7bb105d8",
+      "subject": "Merge pull request #946 from liuxie066/codex/candidates-gateway-json"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "修复 OpenD 连接及断开日志混入 Tool Gateway JSON，确保候选查询响应可整体解析；保留文件与自定义日志，明确未监控标的可直接使用策略默认值查询及 Hermes 会话工具刷新方式（#946）。",
+      "commits": [
+        "20d9afb52ff013cac09d0bc043c314985f7e0f3b",
+        "fd99f2eb08d44bb047a9a81de5ae522e7bb105d8"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "20d9afb52ff013cac09d0bc043c314985f7e0f3b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/946",
+        "docs/TOOL_REFERENCE.md"
+      ]
+    },
+    {
+      "commit": "fd99f2eb08d44bb047a9a81de5ae522e7bb105d8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/946",
+        "docs/TOOL_REFERENCE.md"
+      ]
+    }
+  ]
+}
