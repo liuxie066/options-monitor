@@ -30,6 +30,13 @@ class DurationDiagnostics:
         self.errors = set()
 
     def capture(self, report):
+        # pytest 9 forwards native subtests through this same hook, including
+        # xdist deserialization. Their work is already inside the parent's call
+        # duration; they are not another node phase. Keep original failure
+        # bookkeeping untouched and never discard a duplicate ordinary report.
+        # CI pins pytest 9; a local older pytest has no native subtest type.
+        if isinstance(report, getattr(pytest, "SubtestReport", ())):
+            return
         if report.when not in {"setup", "call", "teardown"}:
             self.errors.add("unknown_phase")
             return

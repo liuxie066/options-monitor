@@ -321,3 +321,44 @@ def test_capture_exception_is_isolated_and_sanitized(tmp_path, monkeypatch, caps
     assert not payload["complete"]
     assert "capture_failed" in payload["errors"]
     assert "private" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("fail_subtest", [False, True])
+def test_real_xdist_native_unittest_subtests_are_not_duplicate_phases(
+    tmp_path, monkeypatch, fail_subtest,
+):
+    (tmp_path / "test_subtest.py").write_text(
+        "import unittest\n"
+        "class Synthetic(unittest.TestCase):\n"
+        "    def test_values(self):\n"
+        "        for value in (1, 2):\n"
+        "            with self.subTest(value=value):\n"
+        f"                self.assertTrue(value != 2 if {fail_subtest!r} else True)\n"
+    )
+    originals = []
+    for enabled in (False, True):
+        monkeypatch.setenv("CI_DURATION_DIAGNOSTICS", "1" if enabled else "0")
+        result, receipt = _run(tmp_path, 0, count=1)
+        assert (result.returncode != 0) is fail_subtest
+        originals.append(receipt)
+    assert originals[0] == originals[1]
+    diagnostic = json.loads((tmp_path / "durations.json").read_text())
+    assert [sample["phase"] for sample in diagnostic["samples"]] == ["setup", "call", "teardown"]
+    assert diagnostic["complete"] is (not fail_subtest)
+    assert diagnostic["errors"] == (["suite_unsuccessful"] if fail_subtest else [])
+    if fail_subtest:
+        with pytest.raises(ValueError):
+            manifest.verify([receipt], count=1, revision="abc")
+    else:
+        assert manifest.verify([receipt], count=1, revision="abc") == 1
+
+
+def test_duration_capture_without_native_pytest_subtest_type(tmp_path, monkeypatch):
+    _, owner, session = _diagnostic_receipt(tmp_path, monkeypatch)
+    monkeypatch.delattr(pytest, "SubtestReport")
+    for phase in ("setup", "call", "teardown"):
+        _report(owner, phase)
+    owner.pytest_sessionfinish(session, 0)
+    diagnostic = json.loads((tmp_path / "durations.json").read_text())
+    assert diagnostic["complete"] is True
+    assert len(diagnostic["samples"]) == 3
