@@ -19,6 +19,7 @@ import logging
 from numbers import Integral
 from pathlib import Path
 import random
+import sys
 import time
 from typing import Any, Callable, Iterable, Mapping
 
@@ -264,9 +265,16 @@ def inspect_futu_sdk_earnings_calendar_capability(
 def _ensure_futu_api_importable() -> None:
     try:
         import futu  # noqa: F401
-        return
     except Exception as exc:
         raise ModuleNotFoundError("No module named 'futu'") from exc
+    # Futu binds a stdout handler at import. Keep SDK diagnostics off JSON stdout,
+    # including disconnect logs from workers that outlive a tool's deadline.
+    # Preserve file sinks and operator-installed custom streams.
+    for handler in logging.getLogger("FTConsoleLog").handlers:
+        if (isinstance(handler, logging.StreamHandler)
+                and not isinstance(handler, logging.FileHandler)
+                and (handler.stream is sys.stdout or handler.stream is sys.__stdout__)):
+            handler.setStream(sys.stderr)
 
 
 def _wait_for_futu_context(context: Any, *, host: str, port: int, deadline: float | None = None, cancelled: Callable[[], bool] | None = None) -> Any:

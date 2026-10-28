@@ -249,6 +249,11 @@ Long Option 完全排除。工具是纯读；业务 `status=partial|unavailable`
 字符串行权价、裸 put/call、买入/平仓策略及规范化后的重复查询。调用者不能填写
 account、config_key、路径、runtime root 或 OpenD endpoint。
 
+标的不必已加入监控配置。未配置标的使用现有策略默认值，行情路由仅复用该市场唯一的有效
+OpenD endpoint；必要配置缺失或路由冲突时返回 `unable`。不要把
+`symbol_config_read` 的 `found=false` 当成查询禁令，也不要为一次查询直接编辑生成的
+`config.us.json` / `config.hk.json`。
+
 结果按输入顺序给出 `results`：每项 `outcome=found/none/unable`，并独立保留
 `coverage.status=complete/partial/unavailable`；`none` 只用于完整评估且无合格合约，
 部分数据下找到候选仍可为 `found`。`effective_filters` 包含行权价上下界与 DTE，
@@ -265,6 +270,12 @@ account、config_key、路径、runtime root 或 OpenD endpoint。
 在途 SDK 调用不保证硬中断。Bot 对整批市场授权后才执行，详见
 [Bot 合同](BOT_DESIGN.md#指定标的卖出开仓候选)。Hermes bridge 位于其所属环境，按 OM manifest
 自动发现只读工具并添加 `om_` 前缀。桥接的离线 schema/JSON 转发验收不替代真实 MCP 握手和远端部署验收。
+
+OM 升级不会自动刷新已建立的 Hermes 会话工具清单。若旧会话没有 `om_option_candidates`，
+在实际使用的 Hermes 会话执行 `/reload-mcp`，完成其确认步骤后核对工具可见；不要仅凭另一
+主机或新起的桥进程能列出工具，就判定原会话已恢复。验收还应通过 MCP 调用标准查询，并
+将完整返回文本解析为单个 OM JSON envelope。OpenD 控制台诊断写入 stderr，不能混入结果
+stdout；休市时 `unable/market_closed` 是有效的不可评估结果，不是“没有符合条件的期权”。
 
 ### 候选解释
 

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import sys
+import io
+import json
+import logging
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -78,6 +82,69 @@ def _build(capability):
     return gateway.build_ready_futu_broker_gateway(
         host="test-opend", port=11119, expected_account_ids=["123"], trd_env="REAL",
     )
+
+
+@pytest.mark.parametrize("capability", ["quote", "broker", "trade_push"])
+def test_agent_json_keeps_sdk_connection_and_late_logs_on_stderr(sdk, monkeypatch, capsys, capability):
+    from src.interfaces.agent import cli
+
+    # Futu binds its console handler at import, before the tool starts.
+    logger = logging.getLogger("FTConsoleLog")
+    handler = logging.StreamHandler(sys.stdout)
+    monkeypatch.setattr(logger, "handlers", [handler])
+    monkeypatch.setattr(logger, "level", logging.INFO)
+    monkeypatch.setattr(logger, "disabled", False)
+    monkeypatch.setattr(logger, "propagate", False)
+    _, context_type = sdk
+    original = context_type._init_connect_sync
+
+    def connect(self):
+        logger.info("SDK connection ready")
+        return original(self)
+
+    monkeypatch.setattr(context_type, "_init_connect_sync", connect)
+    expected = {"ok": True, "data": {"outcome": "unable", "reason_codes": ["market_closed"]}}
+
+    def execute(*args):
+        context = _build(capability)
+        context.close()
+        logger.info("SDK connection closed")
+        return expected
+
+    monkeypatch.setattr(cli, "execute_tool", execute)
+    assert cli.main(["run", "--tool", "option_candidates"]) == 0
+    # A timed-out SDK worker can finish after the JSON has already been emitted.
+    worker = threading.Thread(target=logger.info, args=("SDK late disconnect",))
+    worker.start()
+    worker.join()
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == expected
+    assert all(text in captured.err for text in ("connection ready", "connection closed", "late disconnect"))
+
+
+def test_sdk_console_routing_preserves_file_and_custom_handlers(sdk, monkeypatch, tmp_path, capsys):
+    logger = logging.getLogger("FTConsoleLog")
+    custom = io.StringIO()
+    console = logging.StreamHandler(sys.stdout)
+    custom_handler = logging.StreamHandler(custom)
+    file_handler = logging.FileHandler(tmp_path / "sdk.log")
+    handlers = [console, custom_handler, file_handler]
+    monkeypatch.setattr(logger, "handlers", handlers)
+    monkeypatch.setattr(logger, "level", logging.INFO)
+    monkeypatch.setattr(logger, "disabled", False)
+    monkeypatch.setattr(logger, "propagate", False)
+    try:
+        context = _build("quote")
+        context.close()
+        logger.info("diagnostic retained")
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "diagnostic retained" in captured.err
+        assert custom.getvalue() == "diagnostic retained\n"
+        assert (tmp_path / "sdk.log").read_text() == "diagnostic retained\n"
+        assert logger.handlers == handlers
+    finally:
+        file_handler.close()
 
 
 @pytest.mark.parametrize("capability", ["quote", "broker", "trade_push"])
