@@ -302,12 +302,10 @@ def test_release_workflow_runs_required_control_plane_suites() -> None:
         "tests/test_setup_check.py",
         "tests/test_cli_operator_commands.py",
     )
-    workflows = (root / ".github" / "workflows" / "_release-reusable.yml",)
-
-    for workflow in workflows:
-        text = workflow.read_text(encoding="utf-8")
-        for suite in required_suites:
-            assert suite in text, f"{workflow.name} is missing required suite {suite}"
+    text = (root / ".github/workflows/guardrails.yml").read_text()
+    assert "-m pytest -vv -n 4 --dist loadfile" in text
+    for suite in required_suites:
+        assert list(root.glob(suite)), f"missing full-discovery suite {suite}"
 
 
 def test_required_pr_and_release_guardrail_verifies_complete_distributed_suite() -> None:
@@ -362,7 +360,7 @@ def test_required_pr_and_release_guardrail_verifies_complete_distributed_suite()
     assert 'test "$PLAN_RESULT" = skipped' in gate
     assert 'if [ "$EVENT_NAME" = pull_request ]; then' in gate
     plan_job = text.split("\n  plan:", 1)[1].split("\n  checks:", 1)[0]
-    assert "if: github.event_name == 'push'" in plan_job
+    assert "if: github.event_name != 'pull_request'" in plan_job
     assert 'test "$CHECKS_RESULT" = success' in gate
     assert 'test "$REGRESSION_RESULT" = success' in gate
     assert 'test "$REGRESSION_RESULT" = skipped' in gate
@@ -391,9 +389,10 @@ def test_release_workflow_gates_python_runtime() -> None:
     text = workflow.read_text(encoding="utf-8")
     assert "actions/setup-node" not in text
     assert "npm ci" not in text
-    assert "tests/test_bot_python_runtime.py" in text
+    guardrails = (root / ".github/workflows/guardrails.yml").read_text()
+    assert "-m pytest -vv -n 4 --dist loadfile" in guardrails
     for suite in required_suites:
-        assert suite in text, f"{workflow.name} is missing Python Bot suite {suite}"
+        assert list(root.glob(suite)), f"missing full-discovery suite {suite}"
 
 
 def test_release_workflow_verifies_extracted_archive_before_publish() -> None:
@@ -428,11 +427,11 @@ def test_version_release_reuses_successful_guardrails_without_duplicate_regressi
     assert 'git diff --quiet "${BEFORE_SHA}" "${GITHUB_SHA}" -- VERSION' in guardrails
     assert 'if [[ "${DIFF_STATUS}" -ne 1 ]]' in guardrails
     assert "uses: ./.github/workflows/_release-reusable.yml" in guardrails
-    assert "run_regression_gates: false" in guardrails
-    assert reusable.count("if: ${{ inputs.run_regression_gates }}") == 3
-    assert "default: true" in reusable
+    assert "run_regression_gates" not in guardrails + reusable
+    assert "./.github/workflows/guardrails.yml" in manual
+    assert "-m pytest" not in reusable
     assert "\n  push:" not in manual
-    assert "run_regression_gates: true" in manual
+    assert "run_regression_gates" not in manual
 
 
 def _run_release_preflight_with_fake_python(
