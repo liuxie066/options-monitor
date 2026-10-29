@@ -405,7 +405,7 @@ PM 的持仓同步合同，不建设下单系统，也不自动变更生产账�
 |---|---|---|
 | 来源接收 | adapter 与 `trades/inbox.py` 负责来源绑定、原始证据、重复和冲突隔离；SDK 回调持久接收后返回 | 处理领取绑定已保存的具体版本；冲突不能被普通处理、重复跳过或重试覆盖 |
 | 成交与批次分配 | `trades/intake.py`、`resolver.py` 及指派股票出售的 `positions/workflows.py` 经 `ledger/api.py` 应用规范化事实；必要身份、合约与数量先验证 | 一个身份只应用一次经济量；普通股票保留 PM 刷新分支；无法安全分配时保留证据与欠项，不伪造持仓或成功关系 |
-| 订单费用 | `trades/order_fee_sync.py` 查询并校验整单证据，`ledger/order_fee_migration.py` 持有费用更新事务 | actual／estimate／missing 分别保留；整单数量、币种与金额守恒，重启后可从本地欠项恢复 |
+| 订单费用 | `trades/order_fee_sync.py` 查询并校验整单证据，`ledger/order_fee_migration.py` 持有费用更新事务；`ledger/order_fee_allocation.py` 经 `ledger/api.py` 提供显式用户确认均摊 | actual／estimate／missing 分别保留；整单数量、币种与金额守恒，重启后可从本地欠项恢复。人工两腿均摊保留操作人提交的整单实收快照和用户批准，不伪称券商逐腿实收；自动组合门禁不变，参见[修账流程](OPTION_POSITIONS_REPAIR.md#场景-h已核验组合订单实收总费用用户明确确认两腿均摊) |
 | 汇率及人民币换算 | 来源适配保留币对、来源有效时间、抓取时间及证据；`cash_conversion.py` 与 `ledger/cash_conversion_migration.py` 按统一口径冻结或补证 | 原币事实与人民币换算分别判定完整性；缺汇率保持 pending，补费用不等于补汇率完成 |
 | 策略关系及生命周期 | Combo reconciliation、Wheel intent/companion 和 lifecycle 各自拥有判断；正式采用由 Ledger 写入边界最终验证 | 关系具有明确证据及数量，采用时仍满足对应条件；普通 CSP/CC 不依赖组合匹配成功 |
 | 通知与其他交付 | 既有普通平仓和生命周期 outbox 仍由 Ledger 与其 dispatcher 持有；其余普通回执由 trades 的持久结果和发送路径负责；PM 刷新保留一次性提示合同 | 成交提交、费用补证、策略采用与通知确认分别可查询；发送失败不重做成交；历史导入不生成可投递的新意图 |

@@ -291,6 +291,60 @@ apply 后的效果：
 
 ---
 
+### 场景 H：已核验组合订单实收总费用，用户明确确认两腿均摊
+
+自动 `fees-sync` 仍拒绝无法证明逐腿分配的组合订单。仅当操作人已独立核验
+OpenD 整单实收费用、完整两腿成交，且用户明确批准均摊时，使用显式入口：
+
+```bash
+./om trade-events --runtime-root <runtime> fees-allocate \
+  --request <private-request.json> --dry-run --format json
+./om trade-events --runtime-root <runtime> fees-allocate \
+  --request <same-private-request.json> \
+  --expected-input-hash <preview-input-hash> \
+  --backup-dir <new-private-backup-directory> --confirm --format json
+```
+
+请求使用 `confirmed_order_fee_allocation.v1`，包含以下字段；不接受未知字段。
+所有请求、快照与备份包含账户和成交信息，须私有保存，不提交到 GitHub。
+
+| 字段 | 内容 |
+| --- | --- |
+| `request_id`、`actor`、`authorization_ref`、`reason` | 唯一请求标识、操作人、用户明确确认的引用和原因，均不能为空 |
+| `method` | `equal` |
+| `account`、`futu_account_id`、`order_id`、`currency` | 小写账户、无精度损失的物理账户 ID 字符串、精确订单 ID、原币币种 |
+| `expected_total_fee` | 已核验的整单实际费用，正数、精确到分；两等份也必须精确到分 |
+| `targets` | 恰好两项 `{event_id, before_sha256}`，对应完整未作废订单组 |
+| `evidence` | 下述操作人核验的结构化 OpenD 快照 |
+
+`evidence` 包含 `observed_at_ms`、`account`、`futu_account_id`、`environment=REAL`、
+`day`（香港日期），以及三个对象：
+
+- `order`：`order_id`、`currency`、`order_status=FILLED_ALL`、`dealt_qty`、
+  `combo_legs`。两腿各有 `code`、`trd_side`、`qty_ratio=1`。
+- `deals`：两条成交，各有 `deal_id`、`order_id`、`code`、`trd_side`、`qty`、
+  `price`、`create_time`。
+- `fee`：`order_id`、`fee_amount`、`fee_details`；明细为 `[名称, 金额]` 列表，合计须等于整单费用。
+
+该命令不联网，不认证提交文件的来源或时效，也不替操作人核验券商原始记录。
+结构化腿字段须由 SDK 对象属性提取或经操作人核对转录，不解析 `ComboLeg(...)` 字符串。
+只支持两条完整、未拆分且等量的期权 open/close 成交；身份、方向、价格、数量、原始时间、
+币种和完整组成员必须与快照一致。其他 actual 费用、冲突、缺项及既有投影漂移会阻断。
+
+预览使用只读事务，不初始化库。input hash 绑定目标库、请求、完整事件/投影/已保存汇率输入，
+提交时在 writer lock 和 SQLite 写事务内重查。首次写入前在新私有目录创建一致 SQLite 备份，
+验证完整性并保存哈希；两条费用、现有费用审计及投影在同一事务内提交，随后独立连接回读。
+无新费用事件，不重复扣费，也不修改成交价量、时间、归属或到期日。
+
+持久 provenance 使用 `source=operator_allocated_order_fee` 和用户确认引用，保留原始整单费用、
+提交快照、证据哈希及完整分配。`basis=actual` 表示已知实际整单支出的经授权分配，
+**不表示券商独立报告了每腿费用**。费用字段为正数，费用现金流为负数；收益统计沿用原有实际费用规则。
+同金额、同时间且有效的历史换算保留；缺少其他费用或汇率时仍明确报缺证据。
+
+同一请求与预览 hash 重试，须验证两条当前 JSON 与原审计完全匹配才返回 `no_op`，
+不会再写审计或创建备份。提交后读回失败时保留原请求和 hash，核实提交状态；不能新建请求盲重放。
+代码回退不会撤销已写费用。备份恢复须另行确认停写窗口并处理备份之后的新数据，本入口不自动恢复。
+
 ## 3. 修完后怎么验
 
 最小验证顺序：
