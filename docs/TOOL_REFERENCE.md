@@ -130,6 +130,31 @@ symbol 页不附全账户期间总额。旧服务未返回新字段时，期间�
 - `portfolio_query`
 - `portfolio_assignment_scenario`
 
+账户事实必须通过对应工具取得，保留账户、来源、币种和数据时间；不能用记忆、旧回答或自行推算补齐。
+`portfolio_query` 返回 PM 的记录，不等同于券商实时资金。其 `scope` 是实际 HTTP 查询范围；
+PM v1 部分响应不回传账户，因此 `assessment.scope_binding=request` 不声称独立验证了响应账户。
+响应中出现与请求矛盾的账户时，适配器返回错误，不把其他账户的数据重新标成请求账户。
+
+普通 PM 查询新增 `coverage` 与 `assessment`。`assessment.status=reported_facts_only`
+只支持引用 `supported_claims` 中的数据源报告事实；`unable` 表示当前账户结论无法判断。
+外层 `ok=true` 只表示调用成功。缺少完整记录数、局部失败、缺少有效时间或来源标记过期时，
+原始记录仍保留用于诊断，但不能当成完整、当前账户事实。`freshness.observed_at_utc` 是来源时间，
+`retrieved_at_utc` 是读取时间，不能刷新旧事实；时效政策由 PM 数据集负责，不混用券商现金 TTL。
+`full_report` 的完整性只针对报告摘要，不代表完整持仓清单；分布和历史查询也只覆盖所请求的视图。
+
+`portfolio_query(view=cash)` 包含 cash 与 MMF，`amount` / `by_currency` 保留 PM 原始持仓数量和
+声明币种，不证明货基赎回价值、可提现余额或可交易资金。未返回券商、币种等字段就标注未观测；
+不能按港股持仓猜测现金为 HKD，也不能因加总相等而断言不存在重复资产。资产占比优先读取
+`distribution` / `overview`，不从历史答案或不完整明细拼凑总额。
+
+CSP 现金担保与余量使用 `query_cash_headroom`。其 `assessment.supported_claims`
+复用现有现金快照、占用完整性与汇率资格；原币可用不代表 CNY 合计可用。
+`query_cash_headroom` 与 `get_portfolio_context` 均要求显式非空账户，不从默认账户推断。
+前者是现金余量，后者是资金/持仓上下文；都不是新合约的完整开仓批准。
+`option_positions_read` 是本地账本，不单独证明券商当前仓位；`portfolio_assignment_scenario`
+只模拟已有合约全部指派。`option_candidates` 的合约合格也不代表账户能卖。
+没有同账户的有效完整开仓能力证据时，回答“无法判断账户能否加仓”，不能手算一个可卖张数代替。
+
 ### Wheel 生命周期
 
 - `wheel_end`

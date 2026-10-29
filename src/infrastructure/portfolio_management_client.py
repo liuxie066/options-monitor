@@ -141,7 +141,9 @@ class PortfolioManagementClient:
             path = _VIEW_PATHS[view]
         except KeyError as exc:
             raise PortfolioManagementConfigError(f"unsupported portfolio view: {view}") from exc
-        return self._request("GET", path, query=query, timeout=timeout)
+        response = self._request("GET", path, query=query, timeout=timeout)
+        _validate_view_account_scope(response, query or {})
+        return response
 
     def read_capital_facts(
         self,
@@ -294,6 +296,48 @@ class PortfolioManagementClient:
                 details=decoded.get("details") if isinstance(decoded.get("details"), dict) else None,
             )
         return decoded
+
+
+def _validate_view_account_scope(response: Mapping[str, Any], query: Mapping[str, Any]) -> None:
+    """Reject contradictory account evidence; absent echoes do not prove identity.
+
+    PM v1 cash/holdings responses need not echo their account. Their scope remains
+    bound to the HTTP request, not an independently verified response identity.
+    """
+    requested = {
+        label.strip().lower()
+        for label in str(query.get("accounts") or query.get("account") or "").split(",")
+        if label.strip()
+    }
+    if not requested:
+        return
+    mismatch_message = (
+        "portfolio view account scope mismatch: PM 返回的账户证据与请求范围不一致或格式无效，结果已拒绝。"
+        "原因未知；这不证明请求账户不存在、用户账户名写错或余额为零。"
+    )
+
+    def check(value: Any) -> None:
+        if isinstance(value, Mapping):
+            if "account" in value:
+                account = value["account"]
+                if not isinstance(account, str) or account.strip().lower() not in requested:
+                    raise PortfolioManagementProtocolError(mismatch_message)
+            if "accounts" in value:
+                accounts = value["accounts"]
+                # Asset distribution uses {account: quantity}; other views use
+                # a list of account labels. Both must stay inside the request.
+                if not isinstance(accounts, (list, Mapping)) or any(
+                    not isinstance(account, str) or account.strip().lower() not in requested
+                    for account in accounts
+                ):
+                    raise PortfolioManagementProtocolError(mismatch_message)
+            for item in value.values():
+                check(item)
+        elif isinstance(value, list):
+            for item in value:
+                check(item)
+
+    check(response)
 
 
 def _response_header(response: Any, name: str) -> str:

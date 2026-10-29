@@ -298,7 +298,9 @@ OPTION_CANDIDATES_TOOL = build_agent_tool(
         "Answer found/none/unable from each result; partial means at least, never none. Show up to 3 concise rows per query: expiry/DTE, strike, "
         "reference sell limit, single-contract net premium, PERIOD net return. Explain reasons and acquisition/sale obligation. "
         "For none/unable include effective_filters strike range and DTE, main exclusions/gaps. Null bounds mean unbounded; null filters mean config unknown. "
-        "Reference limit is not guaranteed executable; account checks not evaluated. Evidence may be omitted under output budget; narrowing is a fresh query."
+        "Reference limit is not guaranteed executable; account checks not evaluated. 合约符合条件不代表账户能卖。"
+        "Never infer account capacity from candidate status, PM balances or earlier answers; without valid account capacity evidence say 无法判断账户能否加仓. "
+        "Evidence may be omitted under output budget; narrowing is a fresh query."
     ),
     requires=("runtime_config", "opend_quotes"),
     capabilities=("live_option_candidates", "read_only"),

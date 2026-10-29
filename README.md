@@ -288,6 +288,8 @@ OM · 决策简报 · [你的账户标签]
 
 调用前检查工具声明的输入参数、风险级别、副作用与确认要求。`read_only=true` 表示不修改产品事实或配置，不一定表示不会生成本地报告或缓存。
 
+查询账户时，保留工具返回的账户、来源、数据时间与完整性。PM 现金记录不等同于券商购买力；现金余量和合约筛选结果也不能单独证明账户能加仓。证据缺失、过期或账户冲突时，应明确说明无法判断，不能猜测币种或可卖张数。具体边界见[账户工具说明](docs/TOOL_REFERENCE.md#持仓现金与组合)。
+
 - [Tool Reference](docs/TOOL_REFERENCE.md)：工具分类与调用说明。
 - [Agent Integration](docs/AGENT_INTEGRATION.md)：结构化输出和集成约定。
 - [产品架构](docs/PRODUCT_ARCHITECTURE.md)、[系统架构](docs/ARCHITECTURE.md)：模块职责与调用链。
