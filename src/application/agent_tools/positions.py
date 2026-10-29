@@ -1142,7 +1142,9 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
     catalog_summary="读取授权账户的期权持仓、交易事件与最近平仓记录。",
     description=(
         "Read local option position lots, trade events, lot history, assigned-stock lots, or projection "
-        "inspection state. For current exposure use action=list and status=open; preserve account and currency. "
+        "inspection state. For locally recorded open exposure use action=list and status=open; preserve account and currency. "
+        "Local lots do not prove current broker holdings, cash availability, or capacity for additional shorts. "
+        "Do not infer missing cash_secured_amount, market_price or margin_state, or treat absent observations as zero. "
         "For canonical trade history use action=events: each page contains 1-20 rows in stable descending "
         "trade-time order, and next_cursor continues the same signed snapshot without repeating filters. "
         "Do not silently clamp a request above 20: disclose the per-page limit and offer pagination. "
