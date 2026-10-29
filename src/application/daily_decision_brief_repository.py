@@ -37,6 +37,7 @@ from src.infrastructure.decision_history_sqlite import DecisionHistoryStore, Dec
 
 CURRENT_INDEX_SCHEMA_VERSION = "daily_decision_brief_current_index.v1"
 DELIVERY_STATE_SCHEMA_VERSION = "daily_decision_brief_delivery.v2"
+DELIVERY_STATE_V3 = "daily_decision_brief_delivery.v3"
 DELIVERY_RECOVERY_SCHEMA_VERSION = "daily_decision_brief_delivery_recovery.v1"
 
 _MARKET_RE = re.compile(r"^[A-Z0-9_-]+$")
@@ -107,6 +108,7 @@ def persist_daily_decision_brief_success(
     *,
     base: Path,
     brief: Mapping[str, Any],
+    recovery_intent: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Persist one reliable successful brief without making a delivery decision."""
 
@@ -124,7 +126,9 @@ def persist_daily_decision_brief_success(
     lock_path = state_dir / f"daily_decision_brief.{market}.lock"
     with _exclusive_lock(lock_path):
         current_path = _current_path(base_path, account, market)
-        normalized, previous = _append_decision(base=base_path, source=source, successful=True)
+        normalized, previous = _append_decision(
+            base=base_path, source=source, successful=True, recovery_intent=recovery_intent,
+        )
         revision = int(normalized["revision"])
         revision_path = _revision_path(base_path, account, market, market_date, revision)
         run_brief_path = (
@@ -185,7 +189,8 @@ def persist_daily_decision_brief_success(
         }
 
 
-def _append_decision(*, base: Path, source: Mapping[str, Any], successful: bool) -> tuple[dict[str, Any], dict[str, Any] | None]:
+def _append_decision(*, base: Path, source: Mapping[str, Any], successful: bool,
+                     recovery_intent: Mapping[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, Any] | None]:
     candidate = dict(source)
     candidate.update(account=_normalize_account(source.get("account")), market=_normalize_market(source.get("market")),
                      market_trading_date=_normalize_market_date(source.get("market_trading_date")), revision=0)
@@ -203,7 +208,13 @@ def _append_decision(*, base: Path, source: Mapping[str, Any], successful: bool)
 
     legacy = any(paths.account_state_dir(base, original["account"]).glob(f"daily_decision_brief.{original['market']}.*.r*.json"))
     try:
-        stored, previous = DecisionHistoryStore(history_path(base)).append(original, successful=successful, build=build, legacy_present=legacy)
+        # Delivery provenance belongs to the persistence input, not the domain Brief.
+        # The existing SQLite transaction commits it together with the successful
+        # revision, so a crash before delivery-state binding cannot lose its source.
+        history_input = dict(original)
+        if recovery_intent is not None:
+            history_input["notification_recovery_intent"] = deepcopy(dict(recovery_intent))
+        stored, previous = DecisionHistoryStore(history_path(base)).append(history_input, successful=successful, build=build, legacy_present=legacy)
         return stored, normalize_persisted_daily_decision_brief(previous) if previous else None
     except (DecisionHistoryError, OSError) as exc:
         raise DailyDecisionBriefStateError(str(exc)) from exc
@@ -223,6 +234,38 @@ def _history_raw(*, base: Path, account: str, market: str, market_date: str | No
     except (DecisionHistoryError, OSError) as exc:
         raise DailyDecisionBriefStateError(str(exc)) from exc
     return row["payload"] if row else _MISSING
+
+
+def read_daily_decision_brief_recovery_source(
+    *, base: Path, account: str, market: str, market_trading_date: str,
+    scheduled_target_market: str, original_failure_key: str, original_failure_digest: str,
+) -> dict[str, Any]:
+    """Read the first committed scheduled recovery intent, never infer from latest."""
+    account, market, day = (_normalize_account(account), _normalize_market(market),
+                            _normalize_market_date(market_trading_date))
+    store = DecisionHistoryStore(history_path(Path(base).resolve()))
+    previous = None
+    try:
+        for revision in store.revisions(account=account, market=market, market_date=day):
+            row = store.get(account=account, market=market, market_date=day, revision=revision, successful=True)
+            if row is None:
+                continue
+            brief = normalize_persisted_daily_decision_brief(row["payload"])
+            intent = row["input"].get("notification_recovery_intent")
+            if (isinstance(intent, Mapping)
+                    and intent.get("scheduled_target_market") == scheduled_target_market
+                    and intent.get("original_failure_key") == original_failure_key
+                    and intent.get("original_failure_digest") == original_failure_digest):
+                return {
+                    "available": True, "brief": brief, "previous_successful_brief": previous,
+                    "recovery_intent": deepcopy(dict(intent)),
+                    "current_revision": brief["revision"], "current_brief_digest": daily_brief_digest(brief),
+                    "current_candidate_identities": sorted(_candidate_identity_set(brief)),
+                }
+            previous = brief
+    except (DecisionHistoryError, OSError) as exc:
+        raise DailyDecisionBriefStateError(str(exc)) from exc
+    return {"available": False}
 
 
 def record_daily_decision_brief_candidates(
@@ -521,7 +564,7 @@ def prepare_daily_decision_brief_delivery(
     date_norm = _normalize_market_date(market_trading_date)
     run_id_norm = _normalize_run_id(run_id)
     kind_norm = str(delivery_kind or "").strip().lower()
-    if kind_norm not in {"fixed_report", "fixed_failure", "candidate_alert"}:
+    if kind_norm not in {"fixed_report", "fixed_failure", "fixed_recovery_report", "candidate_alert"}:
         raise ValueError("delivery_kind must be fixed_report, fixed_failure, or candidate_alert")
     source_kind_norm = str(source_kind or "").strip().lower()
     if source_kind_norm not in {"successful_brief", "scan_failure"}:
@@ -597,7 +640,7 @@ def prepare_daily_decision_brief_delivery(
     target_norm: str | None = None
     if kind_norm.startswith("fixed_"):
         target_norm = _normalize_scheduled_target(scheduled_target_market, market_date=date_norm)
-        delivery_key = _fixed_delivery_key(
+        delivery_key = (_recovery_delivery_key if kind_norm == "fixed_recovery_report" else _fixed_delivery_key)(
             market=market_norm,
             market_date=date_norm,
             account=account_norm,
@@ -653,7 +696,23 @@ def prepare_daily_decision_brief_delivery(
             market=market_norm,
         )
         day = _delivery_day(state, date_norm)
-        if kind_norm.startswith("fixed_"):
+        if kind_norm == "fixed_recovery_report":
+            existing = day.get("recovery_reports", {}).get(target_norm)
+            if not existing:
+                raise DailyDecisionBriefStateError("recovery binding is missing")
+            if any(existing.get(k) != envelope.get(k) for k in ("delivery_key", "revision", "source_digest", "candidate_identities", "render_context")):
+                raise DailyDecisionBriefStateError("recovery binding does not match prepared source")
+            if existing["status"] == "pending" and prepared_at >= existing["cutoff_utc"]:
+                return {"prepared": False, "reason": "expired", "envelope": None}
+            if not existing.get("rendered_message"):
+                if existing["status"] != "pending":
+                    return {"prepared": False, "reason": "already_final", "envelope": None}
+                persisted = {**existing, **envelope}
+                prepared = True
+            else:
+                persisted, prepared = _resolve_prepared_envelope(existing=existing, candidate=envelope, allow_pending_upgrade=False, preserve_attempt_metadata=True)
+            day["recovery_reports"][target_norm] = persisted
+        elif kind_norm.startswith("fixed_"):
             existing = day["fixed_reports"].get(target_norm)
             persisted, prepared = _resolve_prepared_envelope(
                 existing=existing,
@@ -771,6 +830,7 @@ def read_confirmed_attribution_render_context(
     confirmed = []
     for day in (result.get("state") or {}).get("days", {}).values():
         envelopes = [*(day.get("fixed_reports") or {}).values(),
+                     *(day.get("recovery_reports") or {}).values(),
                      *(day.get("candidate_delivery_history") or [])]
         if day.get("candidate_delivery"):
             envelopes.append(day["candidate_delivery"])
@@ -793,6 +853,7 @@ def read_retryable_daily_decision_brief_delivery(
     market: str,
     market_trading_date: str,
     read_scope: DailyBriefReadScope | None = None,
+    now_utc: datetime | str | None = None,
 ) -> dict[str, Any]:
     """Return the next exact pending/ambiguous envelope without mutation."""
 
@@ -805,13 +866,17 @@ def read_retryable_daily_decision_brief_delivery(
         return {**result, "reason": "no_delivery_day", "envelope": None}
     fixed = [day["fixed_reports"][key] for key in sorted(day["fixed_reports"])]
     candidate = day.get("candidate_delivery")
-    envelopes = fixed + ([candidate] if isinstance(candidate, Mapping) else [])
+    recoveries = [item for _, item in sorted(day.get("recovery_reports", {}).items()) if item.get("rendered_message")]
+    envelopes = fixed + recoveries + ([candidate] if isinstance(candidate, Mapping) else [])
     ambiguous = [item for item in envelopes if item.get("status") == "ambiguous"]
     if ambiguous:
         return {**result, "reason": "ambiguous", "envelope": ambiguous[0]}
     pending_fixed = [item for item in fixed if item.get("status") == "pending"]
     if pending_fixed:
         return {**result, "reason": "pending_fixed", "envelope": pending_fixed[0]}
+    pending_recovery = [item for item in recoveries if item["status"] == "pending" and _coerce_utc_iso(now_utc) < item["cutoff_utc"]]
+    if pending_recovery:
+        return {**result, "reason": "pending_recovery", "envelope": pending_recovery[0]}
     if (
         isinstance(candidate, Mapping)
         and candidate.get("status") == "pending"
@@ -912,6 +977,10 @@ def record_daily_decision_brief_delivery_attempt(
         envelope["last_attempt_at_utc"] = attempted_at
         if ambiguous:
             envelope["status"] = "ambiguous"
+        elif envelope["delivery_kind"] == "fixed_recovery_report" and envelope.get("attempt_prior_status") == "pending":
+            envelope["status"] = "pending"
+        if envelope["delivery_kind"] == "fixed_recovery_report":
+            envelope["attempt_prior_status"] = None
         _persist_json(delivery_path, state)
         return {
             "updated": True,
@@ -1060,6 +1129,8 @@ def reconcile_daily_decision_brief_delivery_resolution(
             would_change = status != "pending"
             if not dry_run:
                 envelope["status"] = "pending"
+                if envelope["delivery_kind"] == "fixed_recovery_report":
+                    envelope["attempt_prior_status"] = None
                 envelope["last_attempt_at_utc"] = resolved_at
                 envelope["confirmed_at_utc"] = None
         if would_change and not dry_run:
@@ -1089,9 +1160,11 @@ def _mark_delivery_envelope_confirmed(
     confirmed_at: str,
 ) -> None:
     envelope["status"] = "confirmed"
+    if envelope["delivery_kind"] == "fixed_recovery_report":
+        envelope["attempt_prior_status"] = None
     envelope["last_attempt_at_utc"] = confirmed_at
     envelope["confirmed_at_utc"] = confirmed_at
-    if envelope["delivery_kind"] not in {"fixed_report", "candidate_alert"}:
+    if envelope["delivery_kind"] not in {"fixed_report", "fixed_recovery_report", "candidate_alert"}:
         return
     revision = int(envelope["revision"])
     via = str(envelope["delivery_kind"])
@@ -1139,7 +1212,7 @@ def expire_daily_decision_brief_delivery_day(
         if not day:
             return {"updated": False, "reason": "no_delivery_day", "path": delivery_path}
         changed = False
-        envelopes = list(day["fixed_reports"].values())
+        envelopes = list(day["fixed_reports"].values()) + list(day.get("recovery_reports", {}).values())
         if isinstance(day.get("candidate_delivery"), Mapping):
             envelopes.append(day["candidate_delivery"])
         for envelope in envelopes:
@@ -1285,6 +1358,11 @@ def read_combo_candidate_exposures(
         envelopes.extend(
             dict(item)
             for item in (delivery_day.get("fixed_reports") or {}).values()
+            if isinstance(item, Mapping)
+        )
+        envelopes.extend(
+            dict(item)
+            for item in (delivery_day.get("recovery_reports") or {}).values()
             if isinstance(item, Mapping)
         )
         candidate = delivery_day.get("candidate_delivery")
@@ -1617,7 +1695,7 @@ def _normalize_delivery_state(
 ) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise DailyDecisionBriefStateError(f"daily brief delivery state is not an object: {path}")
-    if raw.get("schema_version") != DELIVERY_STATE_SCHEMA_VERSION:
+    if raw.get("schema_version") not in {DELIVERY_STATE_SCHEMA_VERSION, DELIVERY_STATE_V3}:
         raise DailyDecisionBriefStateError(f"unsupported daily brief delivery schema: {path}")
     try:
         state_account = _normalize_account(raw.get("account"))
@@ -1664,6 +1742,9 @@ def _normalize_delivery_state(
                 expected_candidate=False,
                 successful_sources=successful_sources,
             )
+
+        if any(item["delivery_kind"] == "fixed_recovery_report" for item in fixed.values()):
+            raise DailyDecisionBriefStateError("recovery cannot replace an original fixed report")
 
         pending: dict[str, Any] = {}
         for raw_identity, raw_pending in sorted(pending_raw.items()):
@@ -1717,7 +1798,7 @@ def _normalize_delivery_state(
                 raise DailyDecisionBriefStateError(f"daily brief alerted candidate is invalid: {path}: {exc}") from exc
             delivery_key = str(raw_alerted.get("delivery_key") or "").strip()
             via = str(raw_alerted.get("via") or "").strip().lower()
-            if not delivery_key or via not in {"fixed_report", "candidate_alert", "legacy_delivery"}:
+            if not delivery_key or via not in {"fixed_report", "fixed_recovery_report", "candidate_alert", "legacy_delivery"}:
                 raise DailyDecisionBriefStateError(f"daily brief alerted candidate metadata is invalid: {path}: {identity}")
             source_brief = _validate_successful_revision_source(
                 base=base,
@@ -1788,6 +1869,10 @@ def _normalize_delivery_state(
             raise DailyDecisionBriefStateError(
                 f"daily brief current candidate delivery duplicates history: {path}: {market_date}"
             )
+        recovery_raw = raw_day.get("recovery_reports", {})
+        if not isinstance(recovery_raw, Mapping) or (recovery_raw and raw["schema_version"] != DELIVERY_STATE_V3):
+            raise DailyDecisionBriefStateError("invalid recovery collection")
+        recoveries = {target: _normalize_recovery(item, target=target, fixed=fixed, base=base, path=path, account=account, market=market, market_date=market_date, successful_sources=successful_sources) for target, item in recovery_raw.items()}
         days[market_date] = {
             "fixed_reports": fixed,
             "pending_candidates": pending,
@@ -1795,13 +1880,15 @@ def _normalize_delivery_state(
             "candidate_delivery": candidate,
             "candidate_delivery_history": history,
         }
+        if raw["schema_version"] == DELIVERY_STATE_V3:
+            days[market_date]["recovery_reports"] = recoveries
         if set(pending) & set(alerted):
             raise DailyDecisionBriefStateError(
                 f"daily brief candidate cannot be both pending and alerted: {path}: {market_date}"
             )
 
     return {
-        "schema_version": DELIVERY_STATE_SCHEMA_VERSION,
+        "schema_version": raw["schema_version"],
         "account": account,
         "market": market,
         "days": days,
@@ -1828,7 +1915,7 @@ def _normalize_delivery_envelope(
     if status not in {"pending", "ambiguous", "confirmed", "expired_unconfirmed"}:
         raise DailyDecisionBriefStateError(f"daily brief delivery status is invalid: {path}")
     delivery_kind = str(envelope.get("delivery_kind") or "").strip().lower()
-    valid_kinds = {"candidate_alert"} if expected_candidate else {"fixed_report", "fixed_failure"}
+    valid_kinds = {"candidate_alert"} if expected_candidate else {"fixed_report", "fixed_failure", "fixed_recovery_report"}
     if delivery_kind not in valid_kinds:
         raise DailyDecisionBriefStateError(f"daily brief delivery kind is invalid: {path}")
     source_kind = str(envelope.get("source_kind") or "").strip().lower()
@@ -1955,7 +2042,7 @@ def _normalize_delivery_envelope(
             raise DailyDecisionBriefStateError(f"fixed delivery target is invalid: {path}: {exc}") from exc
         if target_norm != expected_target:
             raise DailyDecisionBriefStateError(f"fixed delivery target does not match its state key: {path}")
-        expected_key = _fixed_delivery_key(
+        expected_key = (_recovery_delivery_key if delivery_kind == "fixed_recovery_report" else _fixed_delivery_key)(
             market=market,
             market_date=market_date,
             account=account,
@@ -1964,6 +2051,7 @@ def _normalize_delivery_envelope(
     if delivery_key != expected_key:
         raise DailyDecisionBriefStateError(f"daily brief delivery key mismatch: {path}")
     return {
+        **({k: envelope.get(k) for k in ("cutoff_utc", "original_failure_key", "original_failure_digest", "diff", "render_limits", "bound_at_utc", "attempt_prior_status")} if delivery_kind == "fixed_recovery_report" else {}),
         "status": status,
         "delivery_kind": delivery_kind,
         "source_kind": source_kind,
@@ -2073,6 +2161,8 @@ def _locked_delivery_envelope(
             (item for item in day["fixed_reports"].values() if item["delivery_key"] == key_norm),
             None,
         )
+        if envelope is None:
+            envelope = next((item for item in day.get("recovery_reports", {}).values() if item.get("delivery_key") == key_norm and item.get("rendered_message")), None)
         candidate = day.get("candidate_delivery")
         if envelope is None and isinstance(candidate, Mapping) and candidate.get("delivery_key") == key_norm:
             envelope = candidate
@@ -2209,6 +2299,311 @@ def _fixed_delivery_key(
     scheduled_target_market: str,
 ) -> str:
     return f"option-report:{market}:{market_date}:{account}:{scheduled_target_market}"
+
+
+def _recovery_delivery_key(*, market: str, market_date: str, account: str, scheduled_target_market: str) -> str:
+    return f"option-report-recovery:{market}:{market_date}:{account}:{scheduled_target_market}"
+
+
+def _normalize_recovery(
+    raw: Any,
+    *,
+    target: str,
+    fixed: Mapping[str, Any],
+    base: Path,
+    path: Path,
+    account: str,
+    market: str,
+    market_date: str,
+    successful_sources: _SuccessfulRevisionSources,
+) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        raise DailyDecisionBriefStateError("invalid recovery binding")
+    try:
+        normalized_target = _normalize_scheduled_target(target, market_date=market_date)
+        if target != normalized_target or raw.get("scheduled_target_market") != target:
+            raise ValueError("target mismatch")
+        cutoff = _normalize_required_utc_iso(raw.get("cutoff_utc"), field="cutoff_utc")
+        bound = _normalize_required_utc_iso(raw.get("bound_at_utc"), field="bound_at_utc")
+        if raw.get("cutoff_utc") != cutoff or raw.get("bound_at_utc") != bound:
+            raise ValueError("noncanonical recovery time")
+        revision = _normalize_revision(raw.get("revision"))
+        digest = _normalize_sha256(raw.get("source_digest"), field="source_digest")
+        ids = _normalize_candidate_identities(raw.get("candidate_identities"), account=account, market=market)
+        if not all(isinstance(raw.get(k), Mapping) for k in ("render_context", "diff", "render_limits")):
+            raise ValueError("rebuild inputs invalid")
+        if raw.get("attempt_prior_status") not in (None, "pending", "ambiguous"):
+            raise ValueError("attempt prior status invalid")
+        if not (datetime.fromisoformat(target).astimezone(timezone.utc).isoformat() < bound < cutoff):
+            raise ValueError("binding time invalid")
+    except (ValueError, TypeError) as exc:
+        raise DailyDecisionBriefStateError(f"invalid recovery binding: {exc}") from exc
+    original = fixed.get(target)
+    if (
+        not original
+        or original.get("delivery_kind") != "fixed_failure"
+        or original.get("status") != "confirmed"
+        or raw.get("original_failure_key") != original.get("delivery_key")
+        or raw.get("original_failure_digest") != original.get("source_digest")
+    ):
+        raise DailyDecisionBriefStateError("recovery original failure mismatch")
+    source = _validate_successful_revision_source(
+        base=base,
+        account=account,
+        market=market,
+        market_trading_date=market_date,
+        revision=revision,
+        source_digest=digest,
+        successful_sources=successful_sources,
+    )
+    if (
+        source.get("status") not in {"ready", "degraded"}
+        or source.get("actionability") == "blocked"
+        or not set(ids).issubset(_candidate_identity_set(source))
+    ):
+        raise DailyDecisionBriefStateError("recovery source is not eligible")
+    try:
+        _validate_optional_combo_render_context(raw["render_context"], brief=source, candidate_identities=ids)
+    except ValueError as exc:
+        raise DailyDecisionBriefStateError(f"recovery render context invalid: {exc}") from exc
+    try:
+        generated = _normalize_required_utc_iso(source.get("generated_at_utc"), field="generated_at_utc")
+    except ValueError as exc:
+        raise DailyDecisionBriefStateError(f"recovery source time invalid: {exc}") from exc
+    if (
+        generated
+        <= max(datetime.fromisoformat(target).astimezone(timezone.utc).isoformat(), original["first_prepared_at_utc"])
+        or generated > bound
+    ):
+        raise DailyDecisionBriefStateError("recovery source is stale")
+    if (
+        raw.get("delivery_kind") != "fixed_recovery_report"
+        or raw.get("source_kind") != "successful_brief"
+        or raw.get("delivery_key")
+        != _recovery_delivery_key(
+            market=market, market_date=market_date, account=account, scheduled_target_market=target
+        )
+    ):
+        raise DailyDecisionBriefStateError("recovery identity mismatch")
+    if raw.get("source_reference") is not None or raw.get("source_run_id") != source.get("run_id"):
+        raise DailyDecisionBriefStateError("recovery source identity mismatch")
+    if raw.get("rendered_message"):
+        return _normalize_delivery_envelope(
+            raw,
+            base=base,
+            path=path,
+            account=account,
+            market=market,
+            market_date=market_date,
+            expected_target=target,
+            expected_candidate=False,
+            successful_sources=successful_sources,
+        )
+    if raw.get("status") not in {"pending", "expired_unconfirmed"} or any(
+        raw.get(k) is not None
+        for k in (
+            "rendered_message",
+            "message_sha256",
+            "rendered_transport",
+            "rendered_transport_sha256",
+            "first_prepared_at_utc",
+            "last_attempt_at_utc",
+            "confirmed_at_utc",
+            "confirmed_attribution_route_key",
+            "attempt_prior_status",
+        )
+    ):
+        raise DailyDecisionBriefStateError("unrendered recovery is invalid")
+    return dict(raw)
+
+
+def bind_daily_decision_brief_recovery_report(
+    *,
+    base: Path,
+    account: str,
+    market: str,
+    market_trading_date: str,
+    scheduled_target_market: str,
+    cutoff_utc: datetime | str,
+    revision: int,
+    brief_digest: str,
+    candidate_identities: list[str] | tuple[str, ...] = (),
+    render_context: Mapping[str, Any] | None = None,
+    diff: Mapping[str, Any] | None = None,
+    render_limits: Mapping[str, Any] | None = None,
+    now_utc: datetime | str | None = None,
+) -> dict[str, Any]:
+    base = Path(base).resolve()
+    account, market, date = (
+        _normalize_account(account),
+        _normalize_market(market),
+        _normalize_market_date(market_trading_date),
+    )
+    target = _normalize_scheduled_target(scheduled_target_market, market_date=date)
+    now, cutoff = _coerce_utc_iso(now_utc), _normalize_required_utc_iso(cutoff_utc, field="cutoff_utc")
+    if not datetime.fromisoformat(target).astimezone(timezone.utc).isoformat() < now < cutoff:
+        return {"available": False, "reason": "outside_window", "recovery": None}
+    path = _delivery_path(base, account, market)
+    lock = paths.account_state_dir(base, account) / f"daily_decision_brief.{market}.lock"
+    with _exclusive_lock(lock):
+        state = _load_or_create_delivery_state(base=base, path=path, account=account, market=market)
+        day = state["days"].get(date)
+        original = day and day["fixed_reports"].get(target)
+        if not original or original["delivery_kind"] != "fixed_failure" or original["status"] != "confirmed":
+            return {"available": False, "reason": "original_failure_not_confirmed", "recovery": None}
+        existing = day.get("recovery_reports", {}).get(target)
+        if existing:
+            return {"available": False, "reason": "already_bound", "recovery": dict(existing)}
+        source = _validate_successful_revision_source(
+            base=base,
+            account=account,
+            market=market,
+            market_trading_date=date,
+            revision=_normalize_revision(revision),
+            source_digest=_normalize_sha256(brief_digest, field="brief_digest"),
+        )
+        ids = _normalize_candidate_identities(candidate_identities, account=account, market=market)
+        record = {
+            "status": "pending",
+            "delivery_kind": "fixed_recovery_report",
+            "source_kind": "successful_brief",
+            "revision": _normalize_revision(revision),
+            "source_run_id": source.get("run_id"),
+            "source_digest": brief_digest,
+            "source_reference": None,
+            "delivery_key": _recovery_delivery_key(
+                market=market, market_date=date, account=account, scheduled_target_market=target
+            ),
+            "scheduled_target_market": target,
+            "original_failure_key": original["delivery_key"],
+            "original_failure_digest": original["source_digest"],
+            "cutoff_utc": cutoff,
+            "bound_at_utc": now,
+            "candidate_identities": ids,
+            "render_context": dict(render_context or {}),
+            "diff": dict(diff or {}),
+            "render_limits": dict(render_limits or {}),
+            "attempt_prior_status": None,
+        }
+        _normalize_recovery(
+            record,
+            target=target,
+            fixed=day["fixed_reports"],
+            base=base,
+            path=path,
+            account=account,
+            market=market,
+            market_date=date,
+            successful_sources={},
+        )
+        state["schema_version"] = DELIVERY_STATE_V3
+        day.setdefault("recovery_reports", {})[target] = record
+        _persist_json(path, state)
+        return {"available": True, "reason": "bound", "recovery": dict(record)}
+
+
+def read_daily_decision_brief_recovery_report(
+    *,
+    base: Path,
+    account: str,
+    market: str,
+    market_trading_date: str,
+    now_utc: datetime | str | None = None,
+    read_scope: DailyBriefReadScope | None = None,
+) -> dict[str, Any]:
+    date = _normalize_market_date(market_trading_date)
+    state = read_daily_decision_brief_delivery_state(base=base, account=account, market=market, read_scope=read_scope)
+    result = {"available": False, "recovery": None, "brief": None, "brief_digest": None, "candidate_identities": []}
+    if not state.get("available"):
+        return {**result, "reason": state.get("reason")}
+    day = state["state"]["days"].get(date, {})
+    for _, item in sorted(day.get("recovery_reports", {}).items()):
+        if (
+            item["status"] == "pending"
+            and not item.get("rendered_message")
+            and _coerce_utc_iso(now_utc) < item["cutoff_utc"]
+        ):
+            brief = _validate_successful_revision_source(
+                base=Path(base).resolve(),
+                account=_normalize_account(account),
+                market=_normalize_market(market),
+                market_trading_date=date,
+                revision=item["revision"],
+                source_digest=item["source_digest"],
+            )
+            return {
+                "available": True,
+                "reason": "ok",
+                "recovery": dict(item),
+                "brief": brief,
+                "brief_digest": item["source_digest"],
+                "candidate_identities": item["candidate_identities"],
+            }
+    return {**result, "reason": "none"}
+
+
+def expire_daily_decision_brief_recovery_reports(
+    *, base: Path, account: str, market: str, market_trading_date: str, now_utc: datetime | str | None = None
+) -> dict[str, Any]:
+    base = Path(base).resolve()
+    account, market, date = (
+        _normalize_account(account),
+        _normalize_market(market),
+        _normalize_market_date(market_trading_date),
+    )
+    path = _delivery_path(base, account, market)
+    lock = paths.account_state_dir(base, account) / f"daily_decision_brief.{market}.lock"
+    with _exclusive_lock(lock):
+        if not path.exists():
+            return {"updated": False, "reason": "not_found"}
+        state = _load_or_create_delivery_state(base=base, path=path, account=account, market=market)
+        changed = False
+        for item in state["days"].get(date, {}).get("recovery_reports", {}).values():
+            if item["status"] == "pending" and _coerce_utc_iso(now_utc) >= item["cutoff_utc"]:
+                item["status"] = "expired_unconfirmed"
+                changed = True
+        if changed:
+            _persist_json(path, state)
+        return {"updated": changed, "reason": "expired" if changed else "none"}
+
+
+def begin_daily_decision_brief_recovery_attempt(
+    *,
+    base: Path,
+    account: str,
+    market: str,
+    market_trading_date: str,
+    delivery_key: str,
+    source_digest: str,
+    message_sha256: str,
+    transport_idempotency_key: str,
+    attempted_at_utc: datetime | str | None = None,
+) -> dict[str, Any]:
+    now = _coerce_utc_iso(attempted_at_utc)
+    with _locked_delivery_envelope(
+        base=base,
+        account=account,
+        market=market,
+        market_trading_date=market_trading_date,
+        delivery_key=delivery_key,
+        source_digest=source_digest,
+        message_sha256=message_sha256,
+        transport_idempotency_key=transport_idempotency_key,
+    ) as (state, _day, envelope, path):
+        if envelope["delivery_kind"] != "fixed_recovery_report":
+            raise DailyDecisionBriefStateError("not a recovery delivery")
+        status = envelope["status"]
+        if status in {"confirmed", "expired_unconfirmed"}:
+            return {"started": False, "reason": "already_final", "envelope": dict(envelope)}
+        if status == "pending" and now >= envelope["cutoff_utc"]:
+            envelope["status"] = "expired_unconfirmed"
+            _persist_json(path, state)
+            return {"started": False, "reason": "expired", "envelope": dict(envelope)}
+        envelope["attempt_prior_status"] = status
+        envelope["status"] = "ambiguous"
+        envelope["last_attempt_at_utc"] = now
+        _persist_json(path, state)
+        return {"started": True, "reason": "started", "envelope": dict(envelope)}
 
 
 def _candidate_delivery_key(
@@ -2452,6 +2847,11 @@ __all__ = [
     "DELIVERY_RECOVERY_SCHEMA_VERSION",
     "DELIVERY_STATE_SCHEMA_VERSION",
     "DailyDecisionBriefStateError",
+    "bind_daily_decision_brief_recovery_report",
+    "begin_daily_decision_brief_recovery_attempt",
+    "expire_daily_decision_brief_recovery_reports",
+    "read_daily_decision_brief_recovery_report",
+    "read_daily_decision_brief_recovery_source",
     "classify_retryable_daily_decision_brief_payload",
     "list_daily_decision_brief_revisions",
     "persist_daily_decision_brief_success",
@@ -2492,7 +2892,7 @@ def query_daily_brief_receipts(*, base: Path, account: str, market: str, query: 
             raise ValueError("daily_brief_run_plan_invalid")
     rows = []
     for day in result["state"]["days"].values():
-        envelopes = list((day.get("fixed_reports") or {}).values()) + list(day.get("candidate_delivery_history") or [])
+        envelopes = list((day.get("fixed_reports") or {}).values()) + list((day.get("recovery_reports") or {}).values()) + list(day.get("candidate_delivery_history") or [])
         if day.get("candidate_delivery"):
             envelopes.append(day["candidate_delivery"])
         for item in envelopes:
@@ -2502,12 +2902,15 @@ def query_daily_brief_receipts(*, base: Path, account: str, market: str, query: 
                 raise ValueError("daily_brief_run_content_mismatch")
             event = receipt_event(source="daily_brief", event_id=item["delivery_key"], account=account, market=market,
                 kind="monitor" if item["delivery_kind"] == "candidate_alert" else "scheduled",
-                occurred=item.get("first_prepared_at_utc"), recorded=item.get("last_attempt_at_utc"),
-                revision=item.get("revision"), body=item["rendered_message"], delivery=item.get("status"),
+                occurred=item.get("first_prepared_at_utc") or item.get("bound_at_utc"), recorded=item.get("last_attempt_at_utc"),
+                revision=item.get("revision"), body=item.get("rendered_message"), delivery=item.get("status"),
                 business_result={"delivery_kind": item["delivery_kind"], "source_kind": item["source_kind"],
                                  "source_reference": item.get("source_reference")},
                 run_id=query.get("run_id") if selected_key else (item.get("render_context") or {}).get("run_id"),
                 diagnostic_code="scan_failure" if item["delivery_kind"] == "fixed_failure" else None)
+            if item["delivery_kind"] == "fixed_recovery_report" and not item.get("rendered_message"):
+                event["receipt_body"] = None
+                event["body_provenance"] = "unavailable"
             if receipt_matches(event, query):
                 rows.append(event)
     return rows

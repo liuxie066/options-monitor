@@ -409,3 +409,16 @@ def test_scheduled_session_slots_follow_breaks_and_partial_days() -> None:
     assert morning[-1].isoformat() == "2026-09-01T03:59:00+00:00"
     assert afternoon[0].isoformat() == "2026-09-01T05:00:00+00:00"
     assert whole[-1].isoformat() == "2026-09-01T07:59:00+00:00"
+
+
+def test_recovery_cutoff_uses_fixed_reports_not_candidate_checks():
+    from src.application.scan_scheduler import daily_brief_recovery_cutoff
+    schedule = _hk_schedule_cfg(breaks=[{'start': '12:00', 'end': '13:00'}])
+    assert daily_brief_recovery_cutoff(schedule_cfg=schedule, scheduled_target_market='2026-10-29T11:00:00+08:00') == '2026-10-29T05:00:00+00:00'
+    assert daily_brief_recovery_cutoff(schedule_cfg=schedule, scheduled_target_market='2026-10-29T15:50:00+08:00') == '2026-10-29T08:00:00+00:00'
+
+
+def test_recovery_cutoff_honors_send_gate():
+    from src.application.scan_scheduler import daily_brief_recovery_cutoff
+    schedule = _hk_schedule_cfg(breaks=[], gates=[{'type': 'before', 'timezone': 'Asia/Shanghai', 'time': '15:55'}])
+    assert daily_brief_recovery_cutoff(schedule_cfg=schedule, scheduled_target_market='2026-10-29T15:50:00+08:00') == '2026-10-29T07:55:00+00:00'

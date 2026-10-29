@@ -21,6 +21,12 @@ from src.application.opend_utils import normalize_underlier
 from src.application.option_chain_fetching import classify_option_chain_error
 from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway, retry_futu_gateway_call, check_fetch_control
 from src.infrastructure.futu_dataframe import futu_dataframe_records
+from src.infrastructure.opend_retcodes import classify_opend_error
+
+
+@dataclass(frozen=True)
+class OpenDUnderlierObservation(OpeningUnderlierObservation):
+    fetch_diagnostics: list[dict[str, Any]] = field(default_factory=list)
 
 
 def trading_calendar_dates(receipt: Any, *, start: date, end: date) -> list[str]:
@@ -333,11 +339,10 @@ def get_underlier_observations_opend(
     rate_limited_call: Callable[..., Any] = rate_limited_opend_call,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    diagnostics: list[dict[str, Any]] | None = None,
 ) -> dict[str, OpeningUnderlierObservation]:
     """Fetch exact run-scoped underlier observations in bounded batches."""
     check_fetch_control(deadline, cancelled)
-    controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
-
     codes = list(
         dict.fromkeys(
             code
@@ -348,55 +353,110 @@ def get_underlier_observations_opend(
     batch_size = max(1, int(snapshot_batch_size))
     observations: dict[str, OpeningUnderlierObservation] = {}
 
-    def _limited(call: Callable[[], Any]) -> Any:
+    def _limited(call: Callable[[], Any], endpoint_stop: float) -> Any:
         kwargs = snapshot_limit.call_kwargs()
-        if stop_monotonic is not None:
-            remaining = stop_monotonic - monotonic()
-            if remaining <= 0:
-                raise TimeoutError("underlier observation deadline reached")
-            kwargs["max_wait_sec"] = min(float(kwargs["max_wait_sec"]), remaining)
+        remaining = endpoint_stop - monotonic()
+        if remaining <= 0:
+            raise TimeoutError("underlier observation deadline reached")
+        kwargs["max_wait_sec"] = min(float(kwargs["max_wait_sec"]), remaining)
 
         def _call_before_deadline() -> Any:
-            if stop_monotonic is not None and monotonic() >= stop_monotonic:
+            if monotonic() >= endpoint_stop:
                 raise TimeoutError("underlier observation deadline reached")
             check_fetch_control(deadline, cancelled)
             try:
                 return call()
             finally:
                 check_fetch_control(deadline, cancelled)
+                if monotonic() >= endpoint_stop:
+                    raise TimeoutError("underlier observation deadline reached")
 
         return rate_limited_call(
             base_dir=Path(base_dir),
             endpoint="market_snapshot",
             **kwargs,
-            **controls,
+            deadline=endpoint_stop,
+            cancelled=cancelled,
             call=_call_before_deadline,
         )
+
+    def _fetch(endpoint: str, batch: list[str], endpoint_diagnostics: list[dict[str, Any]]) -> Any:
+        started = monotonic()
+        endpoint_stop = min(
+            value for value in (started + 30.0, deadline, stop_monotonic)
+            if value is not None
+        )
+        evidence: dict[str, Any] = {
+            "endpoint": endpoint,
+            "attempts": 0,
+            "errors": [],
+            "stop_reason": "success",
+        }
+        retry_diagnostics: dict[str, Any] = {}
+
+        def _attempt() -> Any:
+            def _provider_call() -> Any:
+                evidence["attempts"] += 1
+                try:
+                    return getattr(gateway, endpoint)(batch)
+                except Exception as exc:
+                    evidence["errors"].append({
+                        "attempt": evidence["attempts"],
+                        "error_code": classify_option_chain_error(exc),
+                        "error_class": type(exc).__name__,
+                        "message": str(exc),
+                    })
+                    raise
+
+            return _limited(_provider_call, endpoint_stop)
+
+        try:
+            return retry_futu_gateway_call(
+                endpoint,
+                _attempt,
+                retry_max_attempts=2,
+                retry_time_budget_sec=30.0,
+                deadline=endpoint_stop,
+                cancelled=cancelled,
+                quiet=True,
+                diagnostics=retry_diagnostics,
+            )
+        except Exception as exc:
+            evidence.update(
+                error_code=classify_option_chain_error(exc),
+                error_class=type(exc).__name__,
+                message=str(exc),
+            )
+            if cancelled is not None and cancelled():
+                evidence["stop_reason"] = "cancelled"
+            elif deadline is not None and monotonic() >= deadline:
+                evidence["stop_reason"] = "deadline"
+            elif stop_monotonic is not None and monotonic() >= stop_monotonic:
+                evidence["stop_reason"] = "stop_monotonic"
+            elif monotonic() >= endpoint_stop:
+                evidence["stop_reason"] = "time_budget"
+            elif retry_diagnostics.get("retry_count", 0) >= 1:
+                evidence["stop_reason"] = "max_attempts"
+            elif classify_opend_error(exc).is_retryable:
+                evidence["stop_reason"] = "time_budget"
+            else:
+                evidence["stop_reason"] = "non_retryable"
+            check_fetch_control(deadline, cancelled)
+            return None
+        finally:
+            evidence["elapsed_sec"] = max(0.0, monotonic() - started)
+            endpoint_diagnostics.append(evidence)
+            if diagnostics is not None:
+                diagnostics.extend({**evidence, "symbol": code} for code in batch)
 
     for start in range(0, len(codes), batch_size):
         check_fetch_control(deadline, cancelled)
         if stop_monotonic is not None and monotonic() >= stop_monotonic:
             break
         batch = codes[start : start + batch_size]
-        snapshot: Any = None
-        market_state: Any = None
-        try:
-            snapshot = _limited(lambda batch0=batch: gateway.get_snapshot(batch0))
-        except TimeoutError:
-            if controls:
-                raise
-        except Exception:
-            check_fetch_control(deadline, cancelled)
-        if stop_monotonic is None or monotonic() < stop_monotonic:
-            try:
-                market_state = _limited(
-                    lambda batch0=batch: gateway.get_market_state(batch0)
-                )
-            except TimeoutError:
-                if controls:
-                    raise
-            except Exception:
-                check_fetch_control(deadline, cancelled)
+        endpoint_diagnostics: list[dict[str, Any]] = []
+        snapshot = _fetch("get_snapshot", batch, endpoint_diagnostics)
+        market_state = _fetch("get_market_state", batch, endpoint_diagnostics)
         observed_at = now_utc()
         expected_codes = frozenset(batch)
         snapshot_rows = _provider_rows_by_code(
@@ -408,12 +468,16 @@ def get_underlier_observations_opend(
             expected_codes=expected_codes,
         )
         for code in batch:
-            observations[code] = normalize_underlier_observation(
+            observation = normalize_underlier_observation(
                 code=code,
                 market=market,
                 snapshot_row=snapshot_rows.get(code),
                 market_state_row=market_state_rows.get(code),
                 now_utc=observed_at,
+            )
+            observations[code] = OpenDUnderlierObservation(
+                **observation.to_dict(),
+                fetch_diagnostics=[{**item, "symbol": code} for item in endpoint_diagnostics],
             )
     return observations
 
