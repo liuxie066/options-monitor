@@ -95,11 +95,13 @@ class TradeCashFact:
         return f"{self.fact_kind}:{self.source_event_id or self.effective_at_ms}"
 
 
-def cash_facts_for_trade_event(event: TradeEvent) -> list[TradeCashFact]:
+def cash_facts_for_trade_event(event: TradeEvent, *, fee_mode: str = "actual") -> list[TradeCashFact]:
+    if fee_mode not in {"actual", "simulated"}:
+        raise ValueError("fee_mode must be actual or simulated")
     if event.event_type == "open":
         facts = _option_trade_cash_facts(event)
     elif event.event_type in CLOSE_EVENT_TYPES:
-        facts = [*_option_trade_cash_facts(event), *_stock_settlement_cash_facts(event)]
+        facts = [*_option_trade_cash_facts(event), *_stock_settlement_cash_facts(event, fee_mode=fee_mode)]
     else:
         return []
     conversions = event.raw_payload.get("cash_conversions") if isinstance(event.raw_payload, dict) else None
@@ -237,7 +239,7 @@ def _option_amount(event: TradeEvent) -> tuple[Decimal | None, str | None]:
     return (gross if positive else -gross), None
 
 
-def _stock_settlement_cash_facts(event: TradeEvent) -> list[TradeCashFact]:
+def _stock_settlement_cash_facts(event: TradeEvent, *, fee_mode: str = "actual") -> list[TradeCashFact]:
     if event.event_type not in {"assignment", "exercise"}:
         return []
     raw = event.raw_payload.get("stock_settlement") if isinstance(event.raw_payload, dict) else None
@@ -277,7 +279,8 @@ def _stock_settlement_cash_facts(event: TradeEvent) -> list[TradeCashFact]:
         provenance=raw.get("fee_provenance"),
         compatibility_amount=raw.get("fees", 0),
     )
-    fee_amount = -fee.amount if fee.basis == FeeBasis.ACTUAL and fee.amount is not None and currency else None
+    allowed = fee.basis == FeeBasis.ACTUAL or (fee_mode == "simulated" and fee.basis == FeeBasis.ESTIMATED)
+    fee_amount = -fee.amount if allowed and fee.amount is not None and currency else None
     fee_reason = None if fee_amount is not None else fee.reason or "stock settlement fee is unavailable"
     return [
         TradeCashFact(

@@ -79,6 +79,12 @@
 
 ## 兼容、退役与尚未实现
 
+### 普通 CSP 离线研究评价（未发布）
+
+`om_strategy_core.evaluation` 是离线评价公开入口，领域实现在 `domain/domain/performance/strategy_evaluation.py`。提供合格市场/FX 投影、NAV 与指标、利息分红、情景和同条件差额；既有费用、事件投影和现金归约仍复用原 owner。调用者传入显式持仓、市场原件和时点，不读取生产配置、账本或行情。缺失保留 incomplete，不把快照近似称为真实成交。
+
+`tests/test_strategy_evaluation_owner.py` 直接验证该 facade 的期权负债/接股情景、300秒接收近似、连续日息、除息权利/派息幂等及 FX 不足。该三文件 owner 补丁由 OB 的 `prepare_om_performance.py` 按 Git 基线与外部摘要构建固定 wheel；不要复制金融实现到 OB。此段说明源码能力，不宣称当前发行版本或线上服务已具备。
+
 | 状态 | 入口 / 材料 | 新功能去向 |
 | --- | --- | --- |
 | 兼容，只修不增 | `src/application/notify_symbols.py` 的旧正文格式、旧 `python -m src.application.*` 人工入口 | 正文进入 Daily Brief；人工入口使用 `./om`，工具使用 `./om-agent`。完整冻结范围见 [Compatibility Freeze](COMPATIBILITY_FREEZE.md)。 |
