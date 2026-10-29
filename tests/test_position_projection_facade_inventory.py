@@ -279,6 +279,13 @@ def test_full_projection_calls_are_explicitly_classified() -> None:
                 "shadow_replay_position_lot_snapshot",
                 "project_trade_events",
             ): 1,
+            # Read-only stored-lot parity precondition on the same transaction
+            # snapshot; publication still uses the canonical runtime facade.
+            (
+                "src/application/ledger/order_fee_allocation.py",
+                "_prepare",
+                "project_stored_trade_events_to_position_lots",
+            ): 1,
             (
                 "src/application/ledger/position_projection_migration.py",
                 "_verify_from_conn",
