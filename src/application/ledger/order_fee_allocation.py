@@ -17,6 +17,7 @@ from domain.domain.ledger.fees import FeeBasis
 from domain.domain.money import canonical_decimal_text
 from domain.domain.trade_execution import execution_instant_milliseconds, futu_execution_time
 from domain.domain.trade_account_identity import extract_visible_account_fields
+from domain.domain.trade_contract_identity import normalize_position_effect, normalize_trade_side
 from src.infrastructure.performance_evidence_sqlite import PerformanceEvidenceSQLiteRepository
 from .event_codec import stored_trade_event_to_ledger_event
 from .order_fee_migration import (
@@ -292,13 +293,15 @@ def _prepare(conn: sqlite3.Connection, repo: Any, request: dict[str, Any]) -> tu
         if deal is None or deal["deal_id"] in matched_deals:
             raise ValueError("each target must consume a distinct broker deal")
         matched_deals.add(deal["deal_id"])
+        if normalize_position_effect(deal["trd_side"]) != event.event_type:
+            raise ValueError("broker deal position effect is unproven or conflicts with target")
         instant = futu_execution_time(deal)
         if (instant["errors"] or execution_instant_milliseconds(instant["occurred_at_utc"]) != event.event_time_ms
                 or request["evidence"]["observed_at_ms"] < event.event_time_ms
                 or str(raw.get("code") or "") != deal["code"]
                 or _number(deal["qty"], "deal qty") != event.contracts
                 or _number(deal["price"], "deal price") != event.price
-                or ("buy" if deal["trd_side"] in {"BUY", "BUY_BACK"} else "sell") != execution_trade_side(event)
+                or normalize_trade_side(deal["trd_side"]) != execution_trade_side(event)
                 or raw.get("trd_side", deal["trd_side"]) != deal["trd_side"]):
             raise ValueError("broker deal economics or execution identity conflicts")
         before = fee_fact_for_event(event)

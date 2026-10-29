@@ -43,7 +43,8 @@ def _business(path: Path, table: str) -> list[tuple]:
         return conn.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
 
 
-def _fixture(tmp_path: Path, *, additional_gap: bool = False, duplicate_source: bool = False, db_name: str = "ledger.sqlite3"):
+def _fixture(tmp_path: Path, *, additional_gap: bool = False, duplicate_source: bool = False,
+             long_open_from_close: bool = False, generic_side: str | None = None, db_name: str = "ledger.sqlite3"):
     repo = SQLiteOptionPositionsRepository(tmp_path / db_name)
 
     def trade(identity, at, price, *, expiration="2025-09-29", account="qa", kind="open", order=None, deal=None, fee="3.2", basis="actual"):
@@ -76,7 +77,12 @@ def _fixture(tmp_path: Path, *, additional_gap: bool = False, duplicate_source: 
             trade(TARGETS[0], AT, "1.8" if duplicate_source else "0.4", kind="open" if duplicate_source else "close", order="qa-order-11", deal="qa-deal-close", basis="estimated"),
             trade(TARGETS[1], AT, "1.8", expiration="2025-10-30", order="qa-order-11", deal="qa-deal-open", basis="estimated"),
             trade("qa-other-account", AT, "1", account="qb")]
+    if generic_side is not None:
+        index = 1 if generic_side == "BUY" else 2
+        data[index] = replace(data[index], raw_payload={**data[index].raw_payload, "trd_side": generic_side})
     broker_data = deepcopy(data[1:3])
+    if long_open_from_close:
+        data[1] = replace(data[1], event_type="open", lot_id="lot-qa-false-long-open", target_lot_id=None)
     if duplicate_source:
         raw = {**data[2].raw_payload, "source_deal_id": data[1].raw_payload["source_deal_id"], "code": data[1].raw_payload["code"]}
         data[2] = replace(data[2], raw_payload=raw)
@@ -312,3 +318,23 @@ def test_qa_retry_requires_same_request_and_complete_durable_audit(tmp_path, dri
     with pytest.raises(ValueError, match="conflicts|drift"):
         api.apply_confirmed_order_fee_allocation(repo, request=retry_request, expected_input_hash=preview["input_hash"], backup_dir=tmp_path / "no-extra-backup")
     assert _events(repo.db_path) == before and not (tmp_path / "no-extra-backup").exists()
+
+
+def test_qa_buy_back_short_close_cannot_prove_a_canonical_long_open(tmp_path):
+    repo, request = _fixture(tmp_path, long_open_from_close=True)
+    before = _events(repo.db_path)
+    event, diagnostics = stored_trade_event_to_ledger_event(json.loads(before[TARGETS[0]]))
+    assert not diagnostics and event.event_type == "open" and event.position_side == "long"
+    assert request["evidence"]["deals"][0]["trd_side"] == "BUY_BACK"
+    with pytest.raises(ValueError, match="position effect"):
+        api.prepare_confirmed_order_fee_allocation(repo, request=request)
+    assert _events(repo.db_path) == before
+
+
+@pytest.mark.parametrize("side", ["BUY", "SELL"])
+def test_qa_generic_buy_sell_cannot_supply_missing_open_close_evidence(tmp_path, side):
+    repo, request = _fixture(tmp_path, generic_side=side)
+    before = _events(repo.db_path)
+    with pytest.raises(ValueError, match="position effect"):
+        api.prepare_confirmed_order_fee_allocation(repo, request=request)
+    assert _events(repo.db_path) == before

@@ -421,3 +421,30 @@ def test_same_physical_order_across_account_labels_is_ambiguous(fixture):
     run_position_projection_forced_full(repo)
     with pytest.raises(ValueError, match="conflicting account labels"):
         allocation.prepare_confirmed_order_fee_allocation(repo, request=request)
+
+
+@pytest.mark.parametrize("target,broker_side", [("close", "BUY_BACK"), ("close", "BUY"), ("new", "SELL")])
+def test_broker_position_effect_must_be_proven_and_match_target(fixture, tmp_path, target, broker_side):
+    previous, request = fixture
+    repo = SQLiteOptionPositionsRepository(tmp_path / "effect.sqlite3")
+    for eid, raw in _snapshot(previous).items():
+        event = TradeEvent.from_dict(json.loads(raw))
+        if eid == target:
+            event = replace(event, raw_payload={**event.raw_payload, "trd_side": broker_side})
+            if broker_side == "BUY_BACK":
+                # A long opening buy has the same direction as a short closing buy.
+                event = replace(event, event_type="open", lot_id="lot-mismatched-long", target_lot_id=None)
+        repo.upsert_trade_event(event)
+    run_position_projection_forced_full(repo)
+    before = _snapshot(repo)
+    request["targets"] = [{"event_id": eid, "before_sha256": hashlib.sha256(before[eid].encode()).hexdigest()} for eid in ("close", "new")]
+    code = OLD_CODE if target == "close" else NEW_CODE
+    for row in (*request["evidence"]["deals"], *request["evidence"]["order"]["combo_legs"]):
+        if row["code"] == code:
+            row["trd_side"] = broker_side
+    with pytest.raises(ValueError, match="position effect"):
+        allocation.prepare_confirmed_order_fee_allocation(repo, request=request)
+    with pytest.raises(ValueError, match="position effect"):
+        allocation.apply_confirmed_order_fee_allocation(repo, request=request,
+            expected_input_hash="0" * 64, backup_dir=tmp_path / "must-not-exist")
+    assert _snapshot(repo) == before and not (tmp_path / "must-not-exist").exists()
