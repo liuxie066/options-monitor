@@ -1,12 +1,12 @@
-# Portfolio Exposure 全部指派后分布：Holdings 来源与估值设计
+# Portfolio Exposure 指派情景分布：Holdings 来源与估值设计
 
 状态：来源与估值设计于 2026-10-01 实现；2026-10-09 按用户确认的简化规则移除人工券商名单门禁。本文件描述源码目标，不声称当前运行环境已采用。
 
 ## 目标、边界与成功信号
 
-目标：同一组账户的“全部未平短期权假设被指派”分布，以富途账户事实和 OM 期权账本为基线；现有 portfolio.holdings.enabled 只决定是否补充 PM Holdings 中明确为非富途来源的资产。富途资产直接用富途 OpenD 行情估值。
+目标：同一组账户按“仅全部未平 short Put”“仅全部未平 short Call”或“全部未平 short Put/Call”假设被指派后的分布，以富途账户事实和 OM 期权账本为基线；现有 portfolio.holdings.enabled 只决定是否补充 PM Holdings 中明确为非富途来源的资产。富途资产直接用富途 OpenD 行情估值。
 
-非目标：不改变真实持仓、期权账本或 PM Holdings；不执行真实指派、转账、交易、飞书写入、服务升级；不把独立 Feishu 读取接入此查询；不加入 Long Option；不新建用户输入参数或第二个业务开关。
+非目标：不改变真实持仓、期权账本或 PM Holdings；不执行真实指派、转账、交易、飞书写入、服务升级；不把独立 Feishu 读取接入此查询；不加入 Long Option；除情景选择参数外不增加业务开关。
 
 | ID | 可观察成功信号 |
 | --- | --- |
@@ -15,7 +15,7 @@
 | S3 | 富途现有股票与富途期权假设指派新增股票的同一标的使用同次 OpenD 报价；缺价、异常、失效报价和外汇证据不会由 PM 报价静默替代。 |
 | S4 | 非富途现金进入资产分布，但不被视为富途期权指派可动用的现金/MMF；非富途期权的资金变化也不进入富途覆盖。现金按账户、券商、币种保留正负值后计算总资产与负债；组合及分账户 CNY 净额都只表示经济汇总。 |
 | S5 | 只对纳入计算的资产判断估值质量；被排除的 PM 富途副本缺价不拖低情景质量。来源、账户、报价时间和不完整原因可回读。 |
-| S6 | 现有 CLI/Tool Gateway 账户输入、预览/确认/回读门及只读查询边界保持；开关两态、PM 故障、账户隔离和部分结果均有行为验证。 |
+| S6 | CLI/Tool Gateway 保留账户输入，增加可选情景参数；预览/确认/回读门及只读查询边界保持；开关两态、PM 故障、账户隔离和部分结果均有行为验证。 |
 
 ## 当前实现入口与约束
 
@@ -40,7 +40,7 @@
 | PM 券商识别 | 复用 PM src/app/holdings_validation.py::holding_broker_scope 与 OM option_position_identity.py::normalize_broker 的已有规则；规范化空白/大小写后，以 futu、moomoo 或富途开头的名称归为富途，空值、既有泛称和 manual 归为 unknown。PM 按既有自由文本合同分类，并在 scoped 响应回传完整原始 broker 清单；OM 按账户接收全部明确为非富途的响应行，并复用客户端分类与完整性校验；富途副本与 unknown 不纳入。新增具体来源不要求人工批准。OM 归一化函数还用于账本身份，扩充别名须验证消费者。 |
 | PM scoped 报价及 FX | 复用 PM 现有 pricing/cache、pricing/fx、portfolio_read_service；只为 non_futu 行暴露报价来源、取数时间、缓存状态及 FX 独立来源/时间/失效状态。上游市场时刻仅在字段语义核实并保留时单独标注，不把 fetched_at 冒充市场成交时间，也不把是否有市场时刻作为所有资产的 complete 门槛；all 的公开响应及估值规则保持原合同。 |
 | 资金覆盖与分布现金口径 | 复用 OM domain/domain/portfolio_assignment_scenario.py 的现金投影；按账户、券商、币种保留原币种起始现金、指派变化和终局有符号值。富途 cash_coverage 仅汇总富途现金与富途期权，分布总资产/负债先按有符号币种桶折成 CNY 后计算，再做 by_code/by_category 净额摘要。 |
-| 公开来源与覆盖文案 | 复用 OM src/application/agent_tools/portfolio.py 的 output_contract 和 src/application/portfolio_assignment_scenario.py 的文本渲染；更正静态来源标签及全部券商指派数与富途资金覆盖的范围说明，不新增输入。 |
+| 公开来源与覆盖文案 | 复用 OM src/application/agent_tools/portfolio.py 的 output_contract 和 src/application/portfolio_assignment_scenario.py 的文本渲染；情景参数与所选假设明确回显，区分全部券商指派数与富途资金覆盖的范围。 |
 
 ## 选定方案
 
@@ -125,9 +125,13 @@ OM 测试不代替 PM 服务端验收或目标环境的接口支持证据。
 
 账户指派查询新增 `position_sizing`，与 CSP / CC 候选共用 domain 指派变换。
 原查询的费用、总资产权重与负债字段维持原语义；新净资产权重显式为指派费用前，不能与旧 gross 权重混用。
-账户查询纳入所选账户全部 open short Put/Call，继续使用 v2 口径。
+账户查询按 `scenario=short_put|short_call|all_short` 选择所选账户的 open short，默认全部 Put/Call，继续使用 v2 净资产口径。
+`select_assignment_positions` 统一持有账户、open/short、方向和可选标的筛选；
+应用层据此采集所需行情，账户投影将同一筛选结果用于费用、资金、分布及 `position_sizing`。
+未选方向不产生假设交割或费用，也不估算剩余期权市值；零匹配保留原始非期权资产基线。
+返回结构沿用 v1，`scope.scenario` 明示所选假设，快照身份包含情景选择。
 候选仅纳入本账户目标标的同方向已有合约，再增加候选一张：CSP 仅 short Put，CC 仅 short Call，
-两个方向不相互抵消。候选方向筛选由 `short_vol_assessment.py::portfolio_concentration_fields` 持有，
+两个方向不相互抵消。候选通过 `short_vol_assessment.py::portfolio_concentration_fields` 调用同一筛选函数并限定目标标的，
 共享指派变换保持同时支持 Put/Call。这是冻结现价下同方向全部指派的极端交付情景，不是最大亏损测算。
 
 冻结现货价 P 与 FX 后，`Q_after = Q + put_shares - call_shares`，
@@ -150,7 +154,7 @@ prepared portfolio context 在封存前一次收集报价、资产与来源证�
 负现金和负股数保留；净资产非正不出比例。候选开仓资金与 CC 覆盖仍保留富途执行账户约束。
 
 候选字段 `position_sizing_basis=directional_non_option_net_assets_before_assignment_fees.v3` 标明方向口径；
-账户查询 `position_sizing.basis=non_option_net_assets_before_assignment_fees.v2` 保留全部指派口径。
+账户查询 `position_sizing.basis=non_option_net_assets_before_assignment_fees.v2` 保留非期权净资产公式，由 `scope.scenario` 区分指派范围。
 当前、已有指派后、加候选后对应三个浓度与净资产字段。旧封存结果不修改、仅按历史口径展示。
 
 ### 股票证据资格复用

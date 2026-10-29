@@ -7,6 +7,7 @@ from domain.domain.portfolio_assignment_scenario import (
     POSITION_SIZING_BASIS,
     project_assignment_scenario,
     project_non_option_assignment_assets,
+    select_assignment_positions,
 )
 from domain.domain.short_vol_assessment import (
     CANDIDATE_POSITION_SIZING_BASIS,
@@ -160,6 +161,67 @@ def test_equal_strike_spot_conserves_assets_and_query_reuses_projection():
         accounts=["lx"], portfolio_evidence=evidence(), option_positions=opts
     )
     assert out["position_sizing"]["net_assets_cny"] == "10000.00"
+
+
+@pytest.mark.parametrize("scenario,types,shares,cash,net,scope", [
+    ("short_put", ["put"], "200", "8200.00", "10200.00", "all_open_short_put_assigned"),
+    ("short_call", ["call"], "0", "10200.00", "10200.00", "all_open_short_call_assigned"),
+    ("all_short", ["put", "call"], "100", "9400.00", "10400.00", "all_open_short_put_and_call_assigned"),
+])
+def test_account_scenarios_share_selection_and_sizing(scenario, types, shares, cash, net, scope):
+    positions = [option("put", strike=8), option("call", strike=12)]
+    selected = select_assignment_positions(positions, accounts=["lx"], scenario=scenario)
+    out = project_assignment_scenario(
+        accounts=["lx"], portfolio_evidence=evidence(), option_positions=positions, snapshot={}, scenario=scenario,
+    )
+    assert out["scope"]["scenario"] == scope
+    assert [row["option_type"] for row in out["assignments"]] == types
+    assert [row["option_type"] for row in out["fee_summary"]["items"]] == types
+    assert out["summary"]["assignment_count"] == len(types)
+    assert out["summary"]["short_put_count"] == types.count("put")
+    assert out["summary"]["short_call_count"] == types.count("call")
+    assert out["position_changes"][0]["ending_shares"] == shares
+    assert out["cash_coverage"]["ending_cash_gross_cny"] == cash
+    assert out["account_breakdown"][0]["put_assignment_outflow_cny"] == ("800.00" if "put" in types else "0.00")
+    assert out["expiration_ladder"][0]["assignments"] == len(types)
+    assert out["position_sizing"] == project_non_option_assignment_assets(
+        accounts=["lx"], portfolio_evidence=evidence(), option_positions=selected,
+    )
+    assert out["position_sizing"]["stock_shares_by_symbol"]["NVDA"] == shares
+    assert out["position_sizing"]["net_assets_cny"] == net
+    if scenario == "all_short":
+        assert out == project_assignment_scenario(
+            accounts=["lx"], portfolio_evidence=evidence(), option_positions=positions, snapshot={},
+        )
+
+
+@pytest.mark.parametrize("kind", ["put", "call"])
+def test_scenario_excludes_opposite_failures_but_preserves_selected_failures(kind):
+    opposite = "call" if kind == "put" else "put"
+    selected = option(kind)
+    kwargs = dict(accounts=["lx"], portfolio_evidence=evidence(), snapshot={}, scenario=f"short_{kind}")
+    expected = project_assignment_scenario(option_positions=[selected], **kwargs)
+    assert project_assignment_scenario(option_positions=[
+        selected, {**option(opposite), "symbol": "AAPL", "multiplier": 0, "state_warning": "unsettled"},
+        option(kind, account="sy"), {**selected, "side": "long"}, {**selected, "status": "closed"},
+    ], **kwargs) == expected
+    failed = project_assignment_scenario(option_positions=[{**selected, "multiplier": 0}], **kwargs)
+    assert failed["status"] == "partial"
+    assert failed["position_sizing"]["net_assets_cny"] is None
+
+
+def test_empty_direction_keeps_baseline_and_does_not_mask_missing_account_evidence():
+    kwargs = dict(accounts=["lx"], option_positions=[option("call")], snapshot={}, scenario="short_put")
+    out = project_assignment_scenario(portfolio_evidence=evidence(), **kwargs)
+    assert out["status"] == "complete"
+    assert out["assignments"] == []
+    assert out["cash_coverage"]["ending_cash_net_estimated_cny"] == "9000.00"
+    assert out["position_sizing"]["net_assets_cny"] == "10000.00"
+    bad = evidence()
+    bad["status"] = "unavailable"
+    failed = project_assignment_scenario(portfolio_evidence=bad, **kwargs)
+    assert failed["status"] == "unavailable"
+    assert failed["position_sizing"]["net_assets_cny"] is None
 
 
 def test_signed_assets_greater_than_one_and_nonpositive_denominator():

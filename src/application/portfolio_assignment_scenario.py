@@ -14,6 +14,8 @@ from typing import Any, Mapping, Sequence
 from domain.domain.portfolio_assignment_scenario import (
     PORTFOLIO_EVIDENCE_VERSION,
     project_assignment_scenario,
+    select_assignment_positions,
+    validate_assignment_scenario,
 )
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.symbol_identity import canonical_symbol
@@ -171,6 +173,7 @@ def _snapshot_payload(
     portfolio_evidence: Mapping[str, Any],
     options_observed_at: str,
     runtime_config_name: str,
+    scenario: str = "all_short",
 ) -> dict[str, Any]:
     portfolio_snapshot = (
         portfolio_evidence.get("snapshot") if isinstance(portfolio_evidence.get("snapshot"), Mapping) else {}
@@ -213,6 +216,7 @@ def _snapshot_payload(
         json.dumps(
             {
                 "accounts": list(accounts),
+                "scenario": scenario,
                 "portfolio_snapshot_id": portfolio_snapshot.get("snapshot_id"),
                 "pm_snapshot_id": portfolio_evidence.get("pm_snapshot_id"),
                 "pm_observed_at": pm_observed_at,
@@ -229,6 +233,7 @@ def _snapshot_payload(
     ).hexdigest()[:20]
     return {
         "snapshot_id": f"assignment-{digest}",
+        "scenario": scenario,
         "observed_at": options_observed_at,
         "portfolio_snapshot_id": portfolio_snapshot.get("snapshot_id"),
         "pm_snapshot_id": portfolio_evidence.get("pm_snapshot_id"),
@@ -709,6 +714,7 @@ def _futu_holdings(
 
 def query_portfolio_assignment_scenario(
     accounts: Sequence[str],
+    *, scenario: str = "all_short",
 ) -> dict[str, Any]:
     """Read one current snapshot and return the assignment scenario.
 
@@ -716,6 +722,10 @@ def query_portfolio_assignment_scenario(
     events or mutates portfolio holdings.
     """
 
+    try:
+        validate_assignment_scenario(scenario)
+    except ValueError as exc:
+        raise AssignmentScenarioInputError(str(exc)) from exc
     normalized_accounts = normalize_assignment_accounts(accounts)
     options_observed_at = datetime.now(timezone.utc).isoformat()
     try:
@@ -733,13 +743,18 @@ def query_portfolio_assignment_scenario(
             portfolio_evidence=evidence,
             options_observed_at=options_observed_at,
             runtime_config_name="unknown",
+            scenario=scenario,
         )
         return project_assignment_scenario(
             accounts=normalized_accounts,
             portfolio_evidence=evidence,
             option_positions=[],
             snapshot=snapshot,
+            scenario=scenario,
         )
+    option_positions = select_assignment_positions(
+        option_positions, accounts=normalized_accounts, scenario=scenario,
+    )
     runtime_root = Path(runtime_config_name).parent if Path(runtime_config_name).is_absolute() else repo_base()
     futu_contexts: dict[str, dict[str, Any]] = {}
     futu_error: str | None = None
@@ -778,12 +793,14 @@ def query_portfolio_assignment_scenario(
         portfolio_evidence=evidence,
         options_observed_at=options_observed_at,
         runtime_config_name=runtime_config_name,
+        scenario=scenario,
     )
     return project_assignment_scenario(
         accounts=normalized_accounts,
         portfolio_evidence=evidence,
         option_positions=option_positions,
         snapshot=snapshot,
+        scenario=scenario,
     )
 
 
@@ -984,6 +1001,11 @@ def render_assignment_scenario_text(result: Mapping[str, Any]) -> str:
         "",
         f"- 状态：{result.get('status')}",
         f"- 账户：{', '.join(scope.get('accounts') or [])}",
+        "- 指派假设：" + {
+            "all_open_short_put_assigned": "仅全部未平 short Put 被指派",
+            "all_open_short_call_assigned": "仅全部未平 short Call 被指派",
+            "all_open_short_put_and_call_assigned": "全部未平 short Put 和 short Call 被指派",
+        }.get(scope.get("scenario"), "全部未平 short Put 和 short Call 被指派"),
         f"- PM 非富途补充：{'启用' if supplement.get('enabled') else '关闭'}（{supplement.get('status', 'disabled')}）；纳入 {supplement.get('included_rows', 0)} 行，排除 {excluded} 行",
         (
             f"- 全部券商指派：{summary.get('assignment_count', 0)} 笔"
