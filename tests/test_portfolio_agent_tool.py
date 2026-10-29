@@ -612,6 +612,24 @@ def test_supported_pm_view_shapes_keep_source_facts_qualified(monkeypatch, view,
         assert result["data"]["coverage"]["complete_for"] == "report_summary"
 
 
+@pytest.mark.parametrize("declared_count", [None, 2])
+@pytest.mark.parametrize("grouped", [False, True])
+def test_returned_holdings_do_not_establish_source_completeness(monkeypatch, declared_count, grouped):
+    source = {key: value for key, value in _cash_evidence().items()
+              if key in {"success", "freshness", "retrieved_at_utc"}}
+    rows = [{"code": "SYNTHETIC", "account": "sample"}]
+    source.update({"by_market": {"US": rows}} if grouped else {"holdings": rows})
+    if declared_count is not None:
+        source["count"] = declared_count
+    result = _cash_gateway(monkeypatch, source,
+                           {"view": "holdings", "account": "sample", "group_by_market": grouped})
+    observed = bot_tools.model_observation("portfolio_query", result)
+    assert observed["ok"] is True
+    assert observed["data"]["coverage"]["status"] != "complete"
+    assert observed["data"]["assessment"]["supported_claims"] == []
+    assert "PM_QUERY_INCOMPLETE" in observed["data"]["assessment"]["reason_codes"]
+
+
 @pytest.mark.parametrize("tool", ["query_cash_headroom", "get_portfolio_context"])
 @pytest.mark.parametrize("selector", [{}, {"account": ""}, {"account": " "}, {"account": "sample other"}])
 def test_broker_account_tools_reject_missing_or_blank_scope_before_handler(monkeypatch, tool, selector):
