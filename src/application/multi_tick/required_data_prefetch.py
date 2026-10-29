@@ -35,8 +35,10 @@ from src.application.opend_fetch_config import resolve_opend_batch_config, resol
 from src.application.opend_fetch_config import OpenDEndpointRateLimit
 from src.application import opend_utils
 from src.application.opend_market_snapshot_fetching import (
+    OpenDUnderlierObservation,
     get_underlier_observations_opend,
 )
+from src.application.option_chain_fetching import classify_option_chain_error
 from src.application.opening_quote_evidence import normalize_underlier_observation
 from src.application.opend_symbol_fetching import fetch_symbol
 from src.application.opend_symbol_outputs import (
@@ -201,6 +203,25 @@ def _prefill_spot_observation_cache(
 ]:
     identities: dict[PlanningIdentityKey, RequiredDataPlanningIdentity] = {}
     identity_failed_symbols: set[str] = set()
+
+    def _unavailable(
+        identity: RequiredDataPlanningIdentity,
+        diagnostics: list[dict[str, Any]],
+    ) -> OpenDUnderlierObservation:
+        observation = normalize_underlier_observation(
+            code=identity.provider_code,
+            market=identity.market,
+            snapshot_row=None,
+            market_state_row=None,
+        )
+        return OpenDUnderlierObservation(
+            **observation.to_dict(),
+            fetch_diagnostics=[
+                {**item, "symbol": identity.provider_code} for item in diagnostics
+                if item.get("symbol", identity.provider_code) == identity.provider_code
+            ],
+        )
+
     for merged_cfg in symbol_cfgs:
         source_cfgs = merged_cfg.get("_prefetch_source_symbol_cfgs")
         items = (
@@ -255,22 +276,24 @@ def _prefill_spot_observation_cache(
     for (_source, host, port), binding_identities in sorted(by_binding.items()):
         if stop_monotonic is not None and time.monotonic() >= stop_monotonic:
             break
+        started = time.monotonic()
         try:
             gateway = futu_gateway.build_ready_futu_quote_gateway(
                 host=host,
                 port=port,
                 is_option_chain_cache_enabled=False,
             )
-        except Exception:
+        except Exception as exc:
             for identity in binding_identities:
-                spot_observation_cache[identity.cache_key] = (
-                    normalize_underlier_observation(
-                        code=identity.provider_code,
-                        market=identity.market,
-                        snapshot_row=None,
-                        market_state_row=None,
-                    )
-                )
+                spot_observation_cache[identity.cache_key] = _unavailable(identity, [{
+                    "endpoint": "build_ready_futu_quote_gateway",
+                    "error_code": classify_option_chain_error(exc),
+                    "error_class": type(exc).__name__,
+                    "message": str(exc),
+                    "attempts": 1,
+                    "elapsed_sec": max(0.0, time.monotonic() - started),
+                    "stop_reason": "gateway_error",
+                }])
             continue
         try:
             by_market: dict[str, list[RequiredDataPlanningIdentity]] = {}
@@ -282,6 +305,8 @@ def _prefill_spot_observation_cache(
                     and time.monotonic() >= stop_monotonic
                 ):
                     break
+                diagnostics: list[dict[str, Any]] = []
+                started = time.monotonic()
                 try:
                     observations = get_underlier_observations_opend(
                         gateway,
@@ -291,15 +316,20 @@ def _prefill_spot_observation_cache(
                         snapshot_limit=snapshot_limit,
                         snapshot_batch_size=snapshot_batch_size,
                         stop_monotonic=stop_monotonic,
+                        diagnostics=diagnostics,
                     )
-                except Exception:
+                except Exception as exc:
+                    diagnostics.append({
+                        "endpoint": "get_underlier_observations_opend",
+                        "error_code": classify_option_chain_error(exc),
+                        "error_class": type(exc).__name__,
+                        "message": str(exc),
+                        "attempts": 0,
+                        "elapsed_sec": max(0.0, time.monotonic() - started),
+                        "stop_reason": "observation_error",
+                    })
                     observations = {
-                        identity.provider_code: normalize_underlier_observation(
-                            code=identity.provider_code,
-                            market=identity.market,
-                            snapshot_row=None,
-                            market_state_row=None,
-                        )
+                        identity.provider_code: _unavailable(identity, diagnostics)
                         for identity in market_identities
                     }
                 for identity in market_identities:
@@ -311,6 +341,19 @@ def _prefill_spot_observation_cache(
                 gateway.close()
             except Exception:
                 pass
+    # Cache skipped demand as unavailable so planning cannot start an unbounded fetch.
+    for identity in identities.values():
+        if identity.cache_key not in spot_observation_cache:
+            stopped = stop_monotonic is not None and time.monotonic() >= stop_monotonic
+            spot_observation_cache[identity.cache_key] = _unavailable(identity, [{
+                "endpoint": "get_underlier_observations_opend",
+                "attempts": 0,
+                "elapsed_sec": 0.0,
+                "error_code": "TRANSIENT" if stopped else "UNDERLIER_OBSERVATION_MISSING",
+                "error_class": "TimeoutError" if stopped else None,
+                "message": "underlier observation deadline reached" if stopped else "underlier observation missing",
+                "stop_reason": "stop_monotonic" if stopped else "missing_observation",
+            }])
     return identities, identity_failed_symbols
 
 

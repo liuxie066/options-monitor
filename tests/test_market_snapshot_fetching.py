@@ -179,14 +179,17 @@ def test_underlier_observations_attempt_endpoints_independently(
 
 def test_underlier_observations_stop_before_next_endpoint_or_chunk(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     calls: list[tuple[str, list[str]]] = []
     max_waits: list[float] = []
-    ticks = iter([0.0, 0.0, 0.0, 2.0, 2.0])
+    now = [0.0]
+    monkeypatch.setattr("src.infrastructure.futu_gateway.time.monotonic", lambda: now[0])
 
     class Gateway:
         def get_snapshot(self, codes):  # type: ignore[no-untyped-def]
             calls.append(("snapshot", list(codes)))
+            now[0] = 2.0
             return pd.DataFrame([{"code": codes[0], "last_price": 1.0}])
 
         def get_market_state(self, codes):  # type: ignore[no-untyped-def]
@@ -199,7 +202,7 @@ def test_underlier_observations_stop_before_next_endpoint_or_chunk(
         batch_size=1,
         base_dir=tmp_path,
         stop_monotonic=1.0,
-        monotonic=lambda: next(ticks),
+        monotonic=lambda: now[0],
         rate_limited_call=lambda **kwargs: (
             max_waits.append(float(kwargs["max_wait_sec"])),
             kwargs["call"](),
@@ -214,9 +217,11 @@ def test_underlier_observations_stop_before_next_endpoint_or_chunk(
 
 def test_underlier_observations_do_not_call_provider_after_rate_limit_deadline(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     now = [0.0]
     calls: list[str] = []
+    monkeypatch.setattr("src.infrastructure.futu_gateway.time.monotonic", lambda: now[0])
 
     class Gateway:
         def get_snapshot(self, _codes):  # type: ignore[no-untyped-def]
