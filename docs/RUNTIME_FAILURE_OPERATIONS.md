@@ -39,6 +39,8 @@ SDK 的 `_init_connect_sync` / `_wait_reconnect` 钩子进入异步连接，后�
 
 `notification_perception_read` 默认读取当前审计文件末尾 1 MiB，超过部分明确标为 partial。历史查询同时传入 `start_utc` 和 `end_utc`（ISO-8601 UTC），按当前及 `audit_events.YYYYMMDD.NNNNNN.jsonl` 段逐行扫描，单次最多 64 MiB；超预算、损坏和缺失均标明覆盖不完整。请求的审计文件缺失时，窗口覆盖为 partial、完整窗口总数未知；已存在的普通空文件则可给出 complete 和精确零结果。分页必须带原查询参数与返回游标；活动文件追加允许继续，源文件被替换或轮转须重新查询。
 
+`candidate_filter_explain(run_selector=latest_notification)` 同样读取当前及保留审计段，在最多 64 个来源、64 MiB 内按通知内层 `created_at_utc` 的本地日期定位，再校验账户、会话和已确认投递的原始 `source_run_id`。单日相关记录上限为 5000，独立于公开预览的 50 条和分页签名能力；其它日期不占这 5000 条。外层审计时间及段文件日期不裁掉合法的内层日期匹配。已知缺失、损坏、读取期间变化或超限会阻断确定性结论；找不到合格来源且请求日期早于最早保留段时，仍报告审计证据不完整。较新的合格投递若来源引用无效，或其快照缺失，不回退到旧来源；保留对应来源错误及已解析的 run ID。完整且无匹配的窗口才报告无通知来源。
+
 历史页保留最大起始偏移 5000；下一偏移按公开结果缩减至 6500 字节后的实际返回条数计算。若仍有匹配记录、但下一偏移超过该上限，当前页保留已返回证据并标为 partial，`continuation_status=pagination_limit`，不再提供 `next_cursor`，同时提示缩小时间窗口或过滤范围。`has_more=true` 表示仍有未返回记录，不保证还能续页；原有损坏或读取停止原因仍保留。偏移 5000 的合法末页和完整空结果不因此被截断；该偏移上限不是新增的结果总条数限制。
 
 `./om service drift --output <路径>` 显式导出完整 JSON 明细，文件权限为私有。只读状态查询不会自行创建明细文件。`runtime_status` 将普通 service drift 和检查失败汇总为 `SERVICE_DRIFT`，缺失必需单元时保留优先的 `SERVICE_DRIFT_REQUIRED_UNIT_MISSING` 告警。
@@ -59,7 +61,9 @@ SDK 的 `_init_connect_sync` / `_wait_reconnect` 钩子进入异步连接，后�
 
 OpenD 已自行产生按日期分片的 `.ftlog`/`.logs` 文件。部署侧保留建议是 7 天且仅处理已关闭的已知后缀；启用自动清理前仍需确认实际文件命名、进程打开状态和证据保留期。不要对活动 OpenD 日志使用 `copytruncate`。审计段、备份与历史 run 的删除期也须单独确定并授权。
 
-仓库提供 `deploy/logrotate/options-monitor.conf.in` 作为普通 runtime `.log` 文件模板。部署时需按 service profile 填入 runtime root 和用户，并安排小时级 logrotate 调用；该模板不处理正在写入的审计段或 OpenD 自身日志。审计写入锁拒绝超过 64 MiB 的单条记录，避免单条记录突破段上限。
+仓库的可选 `deploy/logrotate/options-monitor.conf.in` 仅匹配 `logs/closed/*.log` 中已经关闭的归档；由操作人员确认描述符已关闭后放入数量有界、可重复使用的文件名槽位。模板不搬运日志，也不清理持续新增的时间戳文件名。launchd 的 `*.out.log` / `*.err.log` 是常驻进程持有的描述符，不能使用 rename/create 轮转：改名后进程仍会写旧 inode。不要把活动 stdout/stderr、审计段或 OpenD 日志移入 `closed/`。此模板不限制活动 launchd 日志大小；该场景需另行采用能重开描述符的写入或收集方案。
+
+部署时按 service profile 填入 runtime root 和用户，并安排小时级 logrotate 调用。`create` 保留空占位文件，`ifempty` 让一次性归档在无新写入时仍按小时继续轮转、压缩和淘汰；会产生空段，每个槽位保留最多 168 段，实际时间跨度依赖调用频率。该模板不处理正在写入的审计段或 OpenD 自身日志。审计写入锁拒绝超过 64 MiB 的单条记录，避免单条记录突破段上限。
 
 新生成的 `service.profile.json` 为各 OpenD service 记录 `host`/`port`。受控升级重启 OpenD 后，服务健康检查用现有 watchdog 子进程对该端点做一次无 `--ensure` 的只读登录态探测，35 秒超时；端点缺失或登录失效均使健康检查失败。同版本升级返回 `already_current`；清理默认 `dry_run`，重复预览不会删除文件。
 

@@ -27,8 +27,8 @@ MAX_OUTPUT_BYTES = 9000
 MAX_PROJECT_OUTPUT_BYTES = 24000
 REDACTION_VERSION = "project-lines-v1"
 _EXCLUDED = {".git", "node_modules", "__pycache__", ".venv", ".ruff_cache", ".pytest_cache", "dist", "build", "reviews", "plans", "gateflow", "credentials", "secrets", "sessions", "memory", "cache"}
-_TOP = {"docs", "src", "domain", "agent-runtime"}
-_PROJECT_ROOT_ORDER = ("src", "domain", "agent-runtime", "docs", "configs")
+_TOP = {"docs", "src", "domain"}
+_PROJECT_ROOT_ORDER = ("src", "domain", "docs", "configs")
 _PROJECT_TRAVERSAL_VERSION = "project-navigation-v3"
 _SUFFIXES = {".md", ".txt", ".py", ".ts", ".tsx", ".js", ".jsx", ".json", ".yaml", ".yml", ".toml", ".rst", ".css", ".html", ".sh"}
 

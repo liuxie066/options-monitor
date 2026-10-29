@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from src.interfaces.cli.main import parse_args
 from src.interfaces.cli import portfolio_ops
 
@@ -72,7 +73,7 @@ def test_assignment_scenario_cli_json_and_text_share_application_result(
     monkeypatch.setattr(
         portfolio_ops,
         "query_portfolio_assignment_scenario",
-        lambda accounts: calls.append(list(accounts)) or _result(),
+        lambda accounts, *, scenario: calls.append((list(accounts), scenario)) or _result(),
     )
 
     json_args = parse_args(
@@ -93,4 +94,33 @@ def test_assignment_scenario_cli_json_and_text_share_application_result(
     assert "仅富途期权资金覆盖" in rendered
     assert "富途 CSP 指派需求" in rendered
     assert "现金 + MMF：1000.00" in rendered
-    assert calls == [["lx", "sy"], ["lx", "sy"]]
+    assert calls == [(["lx", "sy"], "all_short"), (["lx", "sy"], "all_short")]
+
+
+@pytest.mark.parametrize("scenario,label", [
+    ("short_put", "仅全部未平 short Put 被指派"),
+    ("short_call", "仅全部未平 short Call 被指派"),
+    ("all_short", "全部未平 short Put 和 short Call 被指派"),
+])
+def test_assignment_scenario_cli_forwards_and_renders_assumption(monkeypatch, capsys, scenario, label):
+    def query(accounts, *, scenario):
+        assert accounts == ["lx"]
+        assert scenario == expected_scenario
+        result = _result()
+        result["scope"]["scenario"] = {
+            "short_put": "all_open_short_put_assigned",
+            "short_call": "all_open_short_call_assigned",
+            "all_short": "all_open_short_put_and_call_assigned",
+        }[scenario]
+        return result
+
+    expected_scenario = scenario
+    monkeypatch.setattr(portfolio_ops, "query_portfolio_assignment_scenario", query)
+    args = parse_args(["portfolio", "assignment-scenario", "--accounts", "lx", "--scenario", scenario])
+    assert portfolio_ops.handle_portfolio_command(args) == 0
+    assert f"指派假设：{label}" in capsys.readouterr().out
+
+
+def test_assignment_scenario_cli_rejects_unknown_assumption():
+    with pytest.raises(SystemExit):
+        parse_args(["portfolio", "assignment-scenario", "--accounts", "lx", "--scenario", "put"])

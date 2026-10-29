@@ -1252,6 +1252,170 @@ def test_option_positions_cli_lifecycle_reconcile_dry_run_then_apply_discovery(
     assert len(repo.list_trade_lifecycle_cases()) == 1
 
 
+def _lifecycle_reconcile_public_fixture(tmp_path: Path, monkeypatch):
+    from domain.domain.option_lifecycle import expiration_observation_start_ms
+    from src.application.ledger.api import inspect_ledger_stores, record_manual_position_open
+
+    runtime_root = tmp_path / "runtime"
+    db = runtime_root / "output_shared" / "state" / "option_positions.sqlite3"
+    data = tmp_path / "data.json"
+    data.write_text("{}\n", encoding="utf-8")
+    env = tmp_path / "empty.env"
+    env.write_text("", encoding="utf-8")
+    monkeypatch.setenv("OM_ENV_FILE", str(env))
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db)
+    record_manual_position_open(
+        repo, broker="futu", account="qa815", symbol="NVDA", option_type="put",
+        side="short", contracts=1, currency="USD", strike=100, multiplier=100,
+        expiration_ymd="2026-08-21", premium_per_share=2,
+        opened_at_ms=1787200000000, request_id="reconcile-input-open",
+    )
+    inspection = inspect_ledger_stores(data, runtime_root=runtime_root)
+    assert inspection["summary"]["candidate_count"] == 1
+    assert inspection["active"]["sqlite_path"] == str(db)
+    assert repo.count_trade_events() == repo.count_position_lots() == 1
+    observed = expiration_observation_start_ms("2026-08-21", "US")
+    assert observed is not None
+    return repo, [
+        "option-positions", "--data-config", str(data), "--runtime-root", str(runtime_root),
+        "lifecycle", "reconcile", "--account", "qa815", "--observed-at-ms", str(observed),
+        "--format", "json",
+    ]
+
+
+def _lifecycle_business_snapshot(repo) -> dict[str, list[str]]:
+    with repo._connect() as conn:
+        tables = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall()
+        return {
+            name: sorted(
+                json.dumps(dict(row), sort_keys=True, default=str)
+                for row in conn.execute('SELECT * FROM "' + name.replace('"', '""') + '"')
+            )
+            for (name,) in tables
+        }
+
+
+@pytest.mark.parametrize("write_flags", [("--apply", "--confirm"), ("--dry-run",)])
+@pytest.mark.parametrize("input_name", ["evidence", "config"])
+@pytest.mark.parametrize("kind,content", [
+    ("missing", None), ("malformed", b"{broken json"), ("array", b"[]"),
+    ("scalar", b"null"), ("utf8", b"\xff"),
+])
+def test_lifecycle_reconcile_invalid_inputs_leave_business_state_unchanged(
+    tmp_path: Path, monkeypatch, capsys, write_flags, input_name, kind, content,
+) -> None:
+    from src.interfaces.cli.main import main
+
+    repo, argv = _lifecycle_reconcile_public_fixture(tmp_path, monkeypatch)
+    evidence = tmp_path / "evidence.json"
+    if input_name == "config":
+        evidence.write_text("{}\n", encoding="utf-8")
+    invalid = tmp_path / f"{input_name}.json"
+    if content is not None:
+        invalid.write_bytes(content)
+    argv += ["--evidence-json", str(evidence), *write_flags]
+    if input_name == "config":
+        argv += ["--config", str(invalid)]
+    before = _lifecycle_business_snapshot(repo)
+    assert before["trade_lifecycle_cases"] == before["trade_lifecycle_case_targets"] == []
+    if kind == "missing":
+        with pytest.raises(FileNotFoundError):
+            main(argv, discover_local=False)
+    elif kind in {"array", "scalar"}:
+        with pytest.raises(SystemExit, match="expected JSON object"):
+            main(argv, discover_local=False)
+    else:
+        assert main(argv, discover_local=False) == 2
+    output = capsys.readouterr().out
+    if output:
+        payload = json.loads(output)
+        assert payload["ok"] is False
+        assert payload["error"]["code"] == "CONFIG_ERROR"
+        assert payload.get("operation") != "lifecycle_reconcile"
+    after = _lifecycle_business_snapshot(repo)
+    (tmp_path / "input-failure-readback.json").write_text(
+        json.dumps({"argv": argv, "before": before, "after": after, "stdout": output}, indent=2),
+        encoding="utf-8",
+    )
+    assert after == before
+
+
+@pytest.mark.parametrize("with_evidence,config_content", [
+    (False, None), (False, "missing"), (False, "{broken"), (False, "[]"), (False, "{}"),
+    (True, None), (True, "{}"),
+])
+def test_lifecycle_reconcile_public_controls_preserve_discovery_and_receipts(
+    tmp_path: Path, monkeypatch, capsys, with_evidence, config_content,
+) -> None:
+    from src.interfaces.cli.main import main
+
+    repo, argv = _lifecycle_reconcile_public_fixture(tmp_path, monkeypatch)
+    if with_evidence:
+        evidence = tmp_path / "evidence.json"
+        evidence.write_text("{}\n", encoding="utf-8")
+        argv += ["--evidence-json", str(evidence)]
+    if config_content is not None:
+        config = tmp_path / "config.json"
+        if config_content != "missing":
+            config.write_text(config_content, encoding="utf-8")
+        argv += ["--config", str(config)]
+    initial = _lifecycle_business_snapshot(repo)
+    receipts = []
+    for flags, dry_run, expected_write in [
+        ([], True, False), (["--dry-run"], True, False),
+        (["--apply", "--confirm"], False, True), (["--apply", "--confirm"], False, False),
+    ]:
+        before = _lifecycle_business_snapshot(repo)
+        assert main([*argv, *flags], discover_local=False) == 0
+        receipt = json.loads(capsys.readouterr().out)
+        receipts.append(receipt)
+        after = _lifecycle_business_snapshot(repo)
+        assert receipt["operation"] == "lifecycle_reconcile"
+        assert receipt["mode"] == ("dry_run" if dry_run else "apply")
+        assert receipt["dry_run"] is dry_run
+        assert receipt["write_applied"] is expected_write
+        assert receipt["audit_id"]
+        assert "append-only" in receipt["rollback_hint"]
+        assert receipt["ledger_store"]["sqlite_path"] == str(repo.db_path)
+        if with_evidence:
+            assert receipt["reconciliation"]["status"] == "needs_review"
+            assert "evidence_id_missing" in receipt["reconciliation"]["reason_codes"]
+        else:
+            assert receipt["reconciliation"] is None
+        if dry_run:
+            assert len(receipt["discovery"]["would_create_case_ids"]) == 1
+            assert receipt["discovery"]["created_case_ids"] == []
+        else:
+            assert len(receipt["discovery"]["created_case_ids"]) == int(expected_write)
+            assert len(after["trade_lifecycle_cases"]) == len(after["trade_lifecycle_case_targets"]) == 1
+            assert receipt["read_models"][0]["lifecycle_state"] == "settlement_pending"
+        if not expected_write:
+            assert after == before
+        for table in ("trade_events", "position_lots", "trade_lifecycle_evidence",
+                      "trade_lifecycle_allocations", "trade_lifecycle_source_consumptions"):
+            assert after[table] == initial[table]
+    (tmp_path / "control-receipts.json").write_text(json.dumps(receipts, indent=2), encoding="utf-8")
+
+
+@pytest.mark.parametrize("flags,message", [
+    (["--apply"], "use --confirm or --yes"),
+    (["--confirm"], "requires --apply together"),
+    (["--apply", "--confirm", "--dry-run"], "--dry-run cannot be combined"),
+])
+def test_lifecycle_reconcile_input_preflight_preserves_write_controls(
+    tmp_path: Path, monkeypatch, flags, message,
+) -> None:
+    from src.interfaces.cli.main import main
+
+    repo, argv = _lifecycle_reconcile_public_fixture(tmp_path, monkeypatch)
+    before = _lifecycle_business_snapshot(repo)
+    with pytest.raises(SystemExit, match=message):
+        main([*argv, "--evidence-json", str(tmp_path / "missing.json"), *flags], discover_local=False)
+    assert _lifecycle_business_snapshot(repo) == before
+
+
 def test_option_positions_cli_reconcile_due_preview_does_not_build_gateways(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -11,6 +11,9 @@ import pytest
 from src.application import service_cleanup as cleanup
 
 
+_PYTHON_RUNTIME_MARKER = b"# Python Bot fixture\n"
+
+
 def test_path_size_counts_links_without_following_them(tmp_path: Path) -> None:
     root = tmp_path / 'tree'
     nested = root / 'nested'
@@ -150,6 +153,9 @@ def test_cleanup_preserves_plan_bytes_and_safe_targets(
         release = releases / version
         release.mkdir(parents=True)
         (release / 'VERSION').write_text(version)
+        marker = release / "src/application/bot/runtime.py"
+        marker.parent.mkdir(parents=True)
+        marker.write_bytes(_PYTHON_RUNTIME_MARKER)
         (release / 'payload').write_bytes(b'x' * 20)
     current = tmp_path / 'current'
     current.symlink_to(releases / '1.2.0')
@@ -186,8 +192,8 @@ def test_cleanup_preserves_plan_bytes_and_safe_targets(
         return
 
     assert out['ok'] is True
-    assert out['estimated_freed_bytes'] == 25 + 30 + 40
-    assert out['freed_bytes'] == (95 if confirm else 0)
+    assert out['estimated_freed_bytes'] == 25 + len(_PYTHON_RUNTIME_MARKER) + 30 + 40
+    assert out['freed_bytes'] == (95 + len(_PYTHON_RUNTIME_MARKER) if confirm else 0)
     assert out['output_runs_plan_sha256'] == preview['output_runs_plan_sha256']
     assert (releases / '1.0.0').exists() is not confirm
     assert (runs / 'old').exists() is not confirm
@@ -205,6 +211,9 @@ def test_cleanup_single_release_does_not_require_decodable_version(tmp_path: Pat
     active.mkdir(parents=True)
     version = active / 'VERSION'
     version.write_bytes(b'\xff')
+    marker = active / "src/application/bot/runtime.py"
+    marker.parent.mkdir(parents=True)
+    marker.write_bytes(_PYTHON_RUNTIME_MARKER)
     current = tmp_path / 'current'
     current.symlink_to(active)
 
@@ -220,3 +229,206 @@ def test_cleanup_single_release_does_not_require_decodable_version(tmp_path: Pat
     assert result['operations'] == []
     assert current.resolve() == active
     assert version.read_bytes() == b'\xff'
+
+
+def _transition_layout(root):
+    releases = root / 'releases'
+    for version in ('1.0.0', '1.1.0', '1.2.0', '1.3.0'):
+        release = releases / version
+        release.mkdir(parents=True)
+        (release / 'VERSION').write_text(version)
+        marker = release / "src/application/bot/runtime.py"
+        marker.parent.mkdir(parents=True)
+        marker.write_bytes(_PYTHON_RUNTIME_MARKER)
+    current = root / 'current'
+    current.symlink_to(releases / '1.3.0')
+    return current, releases, root / 'runtime'
+
+
+def _hold_transition(current, releases, runtime, connection):
+    from src.application.service_upgrade import _UpgradeLock
+
+    try:
+        with _UpgradeLock(Path(runtime) / 'locks/upgrade.lock'):
+            link = Path(current)
+            link.unlink()
+            link.symlink_to(Path(releases) / '1.0.0')
+            connection.send('switched')
+            assert connection.poll(20)
+            assert connection.recv() == 'release'
+    finally:
+        connection.close()
+
+
+def _pause_cleanup(current, releases, runtime, connection):
+    original = cleanup._release_dirs
+
+    def inventory(path):
+        connection.send('inventory')
+        assert connection.poll(20)
+        assert connection.recv() == 'release'
+        return original(path)
+
+    cleanup._release_dirs = inventory
+    try:
+        result = cleanup.service_cleanup(
+            repo_root=current, releases_root=releases, runtime_root=runtime, confirm=True,
+        )
+        connection.send(result)
+    finally:
+        cleanup._release_dirs = original
+        connection.close()
+
+
+def _stop_fixture_process(process, connection):
+    if process.is_alive():
+        process.terminate()
+        process.join(5)
+    if process.is_alive():
+        process.kill()
+        process.join(5)
+    connection.close()
+    assert not process.is_alive()
+    process.close()
+
+
+def test_confirmed_cleanup_contends_with_real_transition_and_rereads_current(tmp_path):
+    import multiprocessing
+
+    current, releases, runtime = _transition_layout(tmp_path)
+    context = multiprocessing.get_context('spawn')
+    parent, child = context.Pipe()
+    process = context.Process(target=_hold_transition, args=(current, releases, runtime, child))
+    process.start()
+    child.close()
+    try:
+        assert parent.poll(20) and parent.recv() == 'switched'
+        receipt = runtime / 'upgrade_status.json'
+        receipt.write_bytes(b'{"status":"holder"}')
+        pid = runtime / 'locks/upgrade.lock'
+        pid_before = pid.read_bytes()
+        guard = runtime / 'locks/upgrade.lock.guard'
+        inode = guard.stat().st_ino
+        result = cleanup.service_cleanup(
+            repo_root=current, releases_root=releases, runtime_root=runtime, confirm=True,
+        )
+        assert result['ok'] is False and result['status'] == 'upgrade_locked'
+        assert result['schema_version'] == 1 and result['confirmed'] is True
+        assert result['changed'] is False and result['deleted_paths'] == result['operations'] == []
+        assert len(list(releases.iterdir())) == 4
+        assert current.resolve() == releases / '1.0.0'
+        assert receipt.read_bytes() == b'{"status":"holder"}' and pid.read_bytes() == pid_before
+        preview = cleanup.service_cleanup(repo_root=current, releases_root=releases, runtime_root=runtime)
+        assert preview['ok'] and preview['status'] == 'dry_run'
+        assert len(list(releases.iterdir())) == 4
+        assert guard.stat().st_ino == inode
+        parent.send('release')
+        process.join(10)
+        assert process.exitcode == 0
+        retry = cleanup.service_cleanup(
+            repo_root=current, releases_root=releases, runtime_root=runtime, confirm=True,
+        )
+        assert retry['ok'] and retry['status'] == 'cleaned'
+        assert current.resolve().is_dir() and (releases / '1.0.0').is_dir()
+        assert {p.name for p in releases.iterdir()} == {'1.0.0', '1.3.0'}
+        assert receipt.read_bytes() == b'{"status":"holder"}'
+        assert guard.stat().st_ino == inode and not pid.exists()
+    finally:
+        _stop_fixture_process(process, parent)
+
+
+def test_cleanup_holds_transition_guard_before_inventory_through_deletion(tmp_path):
+    import multiprocessing
+
+    from src.application.service_upgrade import _UpgradeLock
+
+    current, releases, runtime = _transition_layout(tmp_path)
+    context = multiprocessing.get_context('spawn')
+    parent, child = context.Pipe()
+    process = context.Process(target=_pause_cleanup, args=(current, releases, runtime, child))
+    process.start()
+    child.close()
+    try:
+        assert parent.poll(20) and parent.recv() == 'inventory'
+        with pytest.raises(RuntimeError, match='upgrade lock already exists'):
+            with _UpgradeLock(runtime / 'locks/upgrade.lock'):
+                pytest.fail('transition must not enter while cleanup observes/deletes')
+        assert len(list(releases.iterdir())) == 4
+        parent.send('release')
+        assert parent.poll(20)
+        assert parent.recv()['ok']
+        process.join(10)
+        assert process.exitcode == 0
+        assert current.resolve() == releases / '1.3.0' and current.resolve().is_dir()
+        assert len(list(releases.iterdir())) == 2
+        with _UpgradeLock(runtime / 'locks/upgrade.lock'):
+            pass
+    finally:
+        _stop_fixture_process(process, parent)
+
+
+def test_cleanup_preview_and_invalid_root_do_not_acquire_guard(tmp_path, monkeypatch):
+    current, releases, runtime = _transition_layout(tmp_path)
+    assert cleanup.service_cleanup(repo_root=current, releases_root=releases, runtime_root=runtime)['ok']
+    assert not runtime.exists()
+    def forbidden(*args, **kwargs):
+        pytest.fail('invalid repo root must be rejected before guard acquisition')
+    monkeypatch.setattr(cleanup, 'single_instance_lock', forbidden)
+    result = cleanup.service_cleanup(repo_root=releases, runtime_root=runtime, confirm=True)
+    assert result['status'] == 'repo_root_not_symlink' and not runtime.exists()
+
+
+def test_cleanup_lock_io_failure_is_zero_effect(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    current, releases, runtime = _transition_layout(tmp_path)
+    @contextmanager
+    def denied(*args, **kwargs):
+        raise PermissionError('fixture denied')
+        yield
+    monkeypatch.setattr(cleanup, 'single_instance_lock', denied)
+    result = cleanup.service_cleanup(
+        repo_root=current, releases_root=releases, runtime_root=runtime, confirm=True,
+    )
+    assert result['status'] == 'cleanup_failed' and result['ok'] is False
+    assert result['changed'] is False and result['deleted_paths'] == result['operations'] == []
+    assert len(list(releases.iterdir())) == 4 and not runtime.exists()
+
+
+@pytest.mark.parametrize('error', [OSError('inventory failed'), KeyboardInterrupt('cancelled')])
+def test_cleanup_body_error_propagates_and_releases_guard(tmp_path, monkeypatch, error):
+    from src.application.service_upgrade import _UpgradeLock
+
+    current, releases, runtime = _transition_layout(tmp_path)
+    inventory = cleanup._release_dirs
+    def fail(path):
+        raise error
+    monkeypatch.setattr(cleanup, '_release_dirs', fail)
+    with pytest.raises(type(error)) as raised:
+        cleanup.service_cleanup(repo_root=current, releases_root=releases, runtime_root=runtime, confirm=True)
+    assert raised.value is error
+    assert len(list(releases.iterdir())) == 4
+    with _UpgradeLock(runtime / 'locks/upgrade.lock'):
+        pass
+    monkeypatch.setattr(cleanup, '_release_dirs', inventory)
+    assert cleanup.service_cleanup(
+        repo_root=current, releases_root=releases, runtime_root=runtime, confirm=True,
+    )['ok']
+
+
+def test_cleanup_default_guard_identity_preserves_omitted_runtime_output_root(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    current, releases, runtime = _transition_layout(tmp_path)
+    captured = []
+    from src.application.file_locks import single_instance_lock
+    @contextmanager
+    def isolated(path, **kwargs):
+        captured.append(path)
+        with single_instance_lock(runtime / 'locks/upgrade.lock.guard', **kwargs):
+            yield
+    monkeypatch.setattr(cleanup, 'single_instance_lock', isolated)
+    result = cleanup.service_cleanup(repo_root=current, releases_root=releases, confirm=True, cleanup_output_runs=True)
+    assert result['ok'] and result['runtime_root'] is None
+    assert captured == [Path('/var/lib/options-monitor/locks/upgrade.lock.guard')]
+    assert result['output_runs_cleanup']['root'] == str(tmp_path / 'output_runs')

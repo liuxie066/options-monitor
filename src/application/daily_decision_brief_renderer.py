@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from domain.domain.portfolio_assignment_scenario import POSITION_SIZING_BASIS
+from domain.domain.short_vol_assessment import CANDIDATE_POSITION_SIZING_BASIS
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -113,6 +114,10 @@ def build_daily_brief_user_view(
         phase_line = phase
         if scheduled_batch and delivery_kind not in {"candidate_alert", "query"}:
             phase_line += f" · {scheduled_batch} 批次"
+    recovery_scan = _parse_datetime(ctx.get("recovery_scan_at_utc"))
+    if delivery_kind == "fixed_report" and ctx.get("recovery_original_target") and recovery_scan:
+        user_tz = _safe_zoneinfo(str(ctx.get("user_timezone") or "Asia/Shanghai"))
+        phase_line = f"{scheduled_batch} 批次恢复补报 · {recovery_scan.astimezone(user_tz).strftime('%H:%M')} 扫描"
 
     candidate_views, candidate_omissions, selected_candidate_rows = _candidate_views(
         brief,
@@ -399,7 +404,7 @@ def render_fixed_failure(
             f"状态｜{phase}",
             f"市场｜{_MARKET_LABELS.get(market, '市场')}",
             "结论｜本轮策略扫描未形成可靠结果，无法生成正常报告。",
-            "后续｜下一计划扫描会继续尝试。",
+            "后续｜下一计划扫描会继续尝试；本批次有效期内恢复后补发完整报告。",
         ]
     )
 
@@ -1507,7 +1512,9 @@ def _candidate_metric_details(
     details = [" · ".join(parts)] if parts else []
     if family in {"sell_put", "covered_call"}:
         sizing = []
-        is_current_basis = values.get("position_sizing_basis") == POSITION_SIZING_BASIS
+        is_current_basis = values.get("position_sizing_basis") in {
+            POSITION_SIZING_BASIS, CANDIDATE_POSITION_SIZING_BASIS,
+        }
         labels = (
             (("当前", "symbol_concentration_current"),
              ("指派后", "symbol_concentration_after_existing_assignments"),
@@ -2029,13 +2036,13 @@ def _strategy_data_gap_reminders(
             continue
         if (
             _lower(item.get("outcome")) == "success_empty"
-            and reason in {"no_expirations", "no_contract_rows"}
+            and reason in {"no_expirations", "no_contract_rows", "no_feasible_strikes"}
         ):
-            detail = (
-                "本轮未发现可用到期日"
-                if reason == "no_expirations"
-                else "本轮未找到可扫描合约"
-            )
+            detail = {
+                "no_expirations": "本轮未发现可用到期日",
+                "no_contract_rows": "本轮未找到可扫描合约",
+                "no_feasible_strikes": "本轮无可行开仓行权价",
+            }[reason]
             reminders.append(
                 f"{symbol} {family}：{detail}，已按零候选完成（非操作建议）"
             )

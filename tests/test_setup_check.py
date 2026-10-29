@@ -9,11 +9,6 @@ import pytest
 from src.application.setup import run_setup_check
 
 
-def _write_executable(path: Path, text: str) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    path.chmod(0o755)
-    return path
 
 
 def _minimal_repo(tmp_path: Path) -> Path:
@@ -24,18 +19,15 @@ def _minimal_repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _stub_toolchain(monkeypatch, node: Path, npm: Path) -> None:
-    """Pin ``node``/``npm`` lookups to the fake executables and hide ``uv``."""
-    monkeypatch.setattr(
-        "src.application.setup.check.shutil.which",
-        lambda name: {"node": str(node), "npm": str(npm), "uv": None}.get(name),
-    )
+def _stub_toolchain(monkeypatch) -> None:
+    """No optional installer or retired Node toolchain is available."""
+    monkeypatch.setattr("src.application.setup.check.shutil.which", lambda _name: None)
 
-
-def _prepare_pi_setup_root(tmp_path: Path, *, context_window_tokens: int = 24_000) -> tuple[Path, Path, Path]:
+def _prepare_python_setup_root(tmp_path: Path, *, context_window_tokens: int = 24_000) -> Path:
     root = tmp_path / "repo"
     (root / "src").mkdir(parents=True)
-    (root / "agent-runtime" / "node_modules").mkdir(parents=True)
+    (root / "src/application/bot").mkdir(parents=True)
+    (root / "src/application/bot/runtime.py").write_text("# Python Bot fixture\n", encoding="utf-8")
     (root / "om").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     (root / "VERSION").write_text("9.9.9\n", encoding="utf-8")
     runtime = tmp_path / "runtime"
@@ -50,13 +42,7 @@ def _prepare_pi_setup_root(tmp_path: Path, *, context_window_tokens: int = 24_00
     )
     state = runtime / "output_shared" / "state"
     state.mkdir(parents=True)
-    fake_bin = tmp_path / "bin"
-    node = _write_executable(
-        fake_bin / "node",
-        "#!/usr/bin/env bash\nif [[ \"${1:-}\" == \"--version\" ]]; then echo v22.19.0; fi\n",
-    )
-    npm = _write_executable(fake_bin / "npm", "#!/usr/bin/env bash\nexit 0\n")
-    return root, node, npm
+    return root
 
 
 def test_setup_check_is_read_only_and_reports_missing_config(tmp_path: Path) -> None:
@@ -208,11 +194,11 @@ def test_setup_check_reports_earnings_calendar_sdk_capability(monkeypatch, tmp_p
     assert "10.9.6908" in capability["hint"]
 
 
-def test_setup_check_reports_pi_runtime_context_and_session_without_writes(monkeypatch, tmp_path: Path) -> None:
-    root, node, npm = _prepare_pi_setup_root(tmp_path)
+def test_setup_check_reports_python_runtime_context_and_session_without_writes(monkeypatch, tmp_path: Path) -> None:
+    root = _prepare_python_setup_root(tmp_path)
     runtime = tmp_path / "runtime"
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
-    _stub_toolchain(monkeypatch, node, npm)
+    _stub_toolchain(monkeypatch)
     before = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*"))
 
     out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
@@ -230,13 +216,13 @@ def test_setup_check_reports_pi_runtime_context_and_session_without_writes(monke
 
 
 def test_setup_check_rejects_invalid_model_context(monkeypatch, tmp_path: Path) -> None:
-    root, node, npm = _prepare_pi_setup_root(tmp_path, context_window_tokens=4_096)
+    root = _prepare_python_setup_root(tmp_path, context_window_tokens=4_096)
     config_path = tmp_path / "runtime" / "resolved" / "config.bot.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
     config["bot"]["llm"]["max_output_tokens"] = 4_096
     config_path.write_text(json.dumps(config), encoding="utf-8")
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    _stub_toolchain(monkeypatch, node, npm)
+    _stub_toolchain(monkeypatch)
 
     out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
     checks = {item["name"]: item for item in out["checks"]}
@@ -245,11 +231,11 @@ def test_setup_check_rejects_invalid_model_context(monkeypatch, tmp_path: Path) 
     assert checks["bot.model_context"]["value"]["error"] == "invalid_bot_config"
 
 
-def test_setup_check_reports_missing_or_unwritable_pi_session_parent(monkeypatch, tmp_path: Path) -> None:
-    root, node, npm = _prepare_pi_setup_root(tmp_path)
+def test_setup_check_reports_missing_or_unwritable_bot_session_parent(monkeypatch, tmp_path: Path) -> None:
+    root = _prepare_python_setup_root(tmp_path)
     missing_audit = tmp_path / "missing" / "state" / "inbound_control.sqlite3"
     monkeypatch.setenv("OM_INBOUND_AUDIT_DB", str(missing_audit))
-    _stub_toolchain(monkeypatch, node, npm)
+    _stub_toolchain(monkeypatch)
 
     missing = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
     missing_check = {item["name"]: item for item in missing["checks"]}["bot.session_path"]
@@ -269,21 +255,21 @@ def test_setup_check_reports_missing_or_unwritable_pi_session_parent(monkeypatch
     unwritable_check = {item["name"]: item for item in unwritable["checks"]}["bot.session_path"]
     assert unwritable_check["status"] == "warn"
     assert unwritable_check["value"]["parent_exists"] is True
-    assert not (existing_parent / "pi_sessions.sqlite3").exists()
+    assert not (existing_parent / "inbound_control.sqlite3").exists()
 
 
-def test_setup_check_rejects_symlinked_pi_session_parent_without_resolving_or_writing(
+def test_setup_check_rejects_symlinked_bot_session_parent_without_resolving_or_writing(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    root, node, npm = _prepare_pi_setup_root(tmp_path)
+    root = _prepare_python_setup_root(tmp_path)
     physical_parent = tmp_path / "physical-state"
     physical_parent.mkdir()
     lexical_parent = tmp_path / "linked-state"
     lexical_parent.symlink_to(physical_parent, target_is_directory=True)
     audit_db = lexical_parent / "inbound_control.sqlite3"
     monkeypatch.setenv("OM_INBOUND_AUDIT_DB", str(audit_db))
-    _stub_toolchain(monkeypatch, node, npm)
+    _stub_toolchain(monkeypatch)
 
     out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
     check = {item["name"]: item for item in out["checks"]}["bot.session_path"]
@@ -292,7 +278,7 @@ def test_setup_check_rejects_symlinked_pi_session_parent_without_resolving_or_wr
     assert check["value"]["parent"] == str(lexical_parent)
     assert check["value"]["session_path"] == str(lexical_parent / "inbound_control.sqlite3")
     assert check["value"]["parent_is_symlink"] is True
-    assert not (physical_parent / "pi_sessions.sqlite3").exists()
+    assert not (physical_parent / "inbound_control.sqlite3").exists()
 
 
 def test_setup_check_reports_stale_runtime_config_and_schedule_readiness(monkeypatch, tmp_path: Path) -> None:

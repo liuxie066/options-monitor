@@ -12,7 +12,7 @@ from src.application.bot import channel_facade
 from src.application.bot.host_store import BotHostStore
 from src.application.inbound import feishu_ws
 from src.application.inbound.feishu import prepare_feishu_analysis_control
-from tests.bot_pi_test_support import ModelTurn, run_contract
+from tests.bot_test_support import ModelTurn, run_contract
 from tests.test_inbound_feishu_ws import _message_payload
 
 
@@ -149,7 +149,8 @@ def test_receiver_cancels_before_paused_model_and_queue_preserves_deadline(monke
     def handler(payload, **kwargs):
         received.append((payload["event"]["message"]["message_id"], kwargs["received_monotonic"], time.monotonic()))
         out = original_handler(payload, **kwargs)
-        if payload["event"]["message"]["message_id"] == "cancel":
+        # Keep the client alive until both queued deliveries finish; stop does not drain.
+        if payload["event"]["message"]["message_id"] == "cancel" and sum(row[0] == "cancel" for row in received) == 2:
             done.set()
         return out
 
@@ -482,3 +483,109 @@ def test_analysis_control_deadline_rolls_back_before_commit(
     assert store.run_record("active")["admission_state"] == "open"
     assert InboundAuditStore(settings.audit_db).find_by_message(
         channel="feishu:analysis_control", message_id="expired-control") is None
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+@pytest.mark.parametrize("preflight", [False, True])
+def test_claimed_cancel_and_replace_use_original_target_once(
+    tmp_path, monkeypatch, example_config_path, replacement, preflight,
+):
+    from src.application.bot.control import inbound_service
+    from src.application.bot.contracts import AppResult
+    from src.application.bot.control.settings import BotSettings
+    from src.application.inbound.feishu import handle_feishu_payload
+
+    settings, contract, session, store = _open_run(tmp_path, example_config_path)
+    event = _message_payload(text="取消当前分析，改为调查风险" if replacement else "取消分析", message_id="claimed-cancel")
+    if preflight:
+        first = _preflight(event, settings)
+        assert first["target_run_id"] == "active"
+        with sqlite3.connect(settings.audit_db) as conn:
+            conn.execute("UPDATE bot_runs SET status='cancelled' WHERE run_id='active'")
+        store.start_run("later", contract=contract, session_key=session)
+    calls = []
+    def bot(**kwargs):
+        assert store.is_cancel_requested("active")
+        calls.append(kwargs["user_message"])
+        return AppResult(ok=True, status="answered", user_response="replacement result")
+    monkeypatch.setattr(inbound_service, "run_channel_request", bot)
+    kwargs = dict(config_path=settings.config_path, audit_db=settings.audit_db,
+                  bot_config_path=settings.bot_config_path, allowed_senders=settings.allowed_senders,
+                  bot_settings=BotSettings(enabled=True))
+    first = handle_feishu_payload(event, **kwargs)
+    assert first["ok"], first
+    assert store.is_cancel_requested("active")
+    if not preflight:
+        with sqlite3.connect(settings.audit_db) as conn:
+            conn.execute("UPDATE bot_runs SET status='cancelled' WHERE run_id='active'")
+        store.start_run("later", contract=contract, session_key=session)
+    replay = handle_feishu_payload(event, **kwargs)
+    assert replay["ok"] and replay["meta"]["idempotent_replay"]
+    assert not store.is_cancel_requested("later")
+    assert calls == (["调查风险"] if replacement else [])
+    rows = InboundAuditStore(settings.audit_db).list_recent()
+    assert len(rows) == 2
+    assert all(row["execution_state"] == "completed" for row in rows)
+    ordinary = next(row for row in rows if row["channel"] == "feishu")
+    assert ordinary["raw_text"] == ("取消当前分析，改为调查风险" if replacement else "取消分析")
+    assert "execution_token" not in json.dumps(first)
+
+
+@pytest.mark.parametrize("fault", ["none", "missing_proof", "token", "command", "sender", "conversation", "text", "authorization", "missing_row", "completed", "incomplete"])
+def test_cancellation_claim_proof_is_checked_inside_original_transaction(
+    tmp_path, example_config_path, fault,
+):
+    from dataclasses import replace
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.bot.config_scope import resolve_replay_authorization
+    from src.application.bot.control.audit import build_command_id, utc_now_iso
+    from src.application.bot.control import inbound_service
+    from src.application.inbound.feishu import feishu_payload_to_inbound_request
+
+    settings, _, _, host = _open_run(tmp_path, example_config_path)
+    request = feishu_payload_to_inbound_request(_message_payload(text="取消分析", message_id="proof"),
+        config_path=settings.config_path, audit_db=settings.audit_db, bot_config_path=settings.bot_config_path)
+    request = inbound_service._normalize_request(request)
+    request = replace(request, replay_authorization=resolve_replay_authorization(request))
+    command_id = build_command_id(channel=request.channel, sender_id=request.sender_id,
+                                  message_id=request.message_id, text=request.text)
+    record = inbound_service._audit_record(request=request, command_id=command_id, created_at=utc_now_iso(),
+        command=None, control=None, decision="processing", response={"ok": False})
+    audit = InboundAuditStore(settings.audit_db)
+    claim = audit.claim_message(record)
+    proof = dict(claim_command_id=command_id, claim_token=claim["token"])
+    if fault == "missing_proof":
+        proof = {}
+    elif fault == "token":
+        proof["claim_token"] = "wrong"
+    elif fault == "command":
+        proof["claim_command_id"] = "wrong"
+    elif fault == "sender":
+        request = replace(request, sender_id="ou_2")
+    elif fault == "conversation":
+        request = replace(request, conversation_id="other-chat")
+    elif fault == "text":
+        request = replace(request, text="停止分析")
+    elif fault == "authorization":
+        request = replace(request, replay_authorization={"scope": "wrong"})
+    elif fault == "missing_row":
+        with sqlite3.connect(settings.audit_db) as conn:
+            conn.execute("DELETE FROM inbound_command_audit WHERE command_id=?", (command_id,))
+    elif fault == "completed":
+        assert audit.complete_message(record, claim["token"])
+    elif fault == "incomplete":
+        assert audit.interrupt_message(command_id=command_id, token=claim["token"], response={"ok": False})
+    before = audit.list_recent()
+    if fault in {"token", "command", "sender", "conversation", "text", "authorization", "missing_row"}:
+        with pytest.raises(AgentToolError, match="analysis control"):
+            channel_facade.cancel_channel_analysis(request=request, audit_store=audit, **proof)
+    else:
+        outcome = channel_facade.cancel_channel_analysis(request=request, audit_store=audit, **proof)
+        assert outcome["status"] == ("cancelled" if fault == "none" else "already_processed")
+    assert host.is_cancel_requested("active") is (fault == "none")
+    if fault != "none":
+        assert audit.list_recent() == before
+    else:
+        # The cancellation transaction never finalizes or rotates the main execution claim.
+        main = next(row for row in audit.list_recent() if row["channel"] == "feishu")
+        assert main == before[0]

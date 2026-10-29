@@ -260,6 +260,70 @@ def test_storage_gc_preview_cli_has_only_runtime_root(monkeypatch, tmp_path: Pat
             )
 
 
+@pytest.mark.parametrize("envelope", [False, True])
+@pytest.mark.parametrize("research,top_status,usable", [
+    ({"status": "data_unavailable"}, "partial_data", False),
+    ({"status": "complete"}, "partial_data", True),
+    ({"status": "complete"}, "complete", True),
+    ({}, "partial_data", True),
+])
+def test_storage_cli_rejects_unavailable_research_history(
+    storage_disk_capacity, monkeypatch, tmp_path: Path, capsys, research, top_status, usable, envelope,
+) -> None:
+    import sqlite3
+    from src.application.research import storage_baseline, historical_cleanup
+    from src.interfaces.cli.main import main
+    from tests.test_research_storage_baseline import _tree_identity
+
+    root = tmp_path / "runtime"
+    ledger = root / "output_shared/state/option_positions.sqlite3"
+    ledger.parent.mkdir(parents=True)
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE TABLE proof_row(id INTEGER PRIMARY KEY)")
+        conn.commit()
+        with ledger.open("xb") as handle:
+            handle.write(conn.serialize())
+    finally:
+        conn.close()
+    observed_at = datetime(2030, 2, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(storage_baseline, "_utc_now", lambda _fn: observed_at)
+    monkeypatch.setattr(historical_cleanup, "_utc_now", lambda _fn: observed_at)
+    history = tmp_path / "history.json"
+    payload = {"schema_version": storage_baseline.SCHEMA_VERSION, "status": top_status,
+        "identity": {"runtime_root": str(root), "observed_at_utc": "2030-01-02T00:00:00+00:00"},
+        "sqlite": {"status": "data_unavailable" if top_status == "partial_data" else "complete"},
+        "research_storage": {"unique_declared_bytes": 0, **research}}
+    with history.open("x", encoding="utf-8") as handle:
+        json.dump({"tool_name": "research.storage-baseline", "data": payload} if envelope else payload, handle)
+    inventory = tmp_path / "lifecycle.json"
+    with inventory.open("x", encoding="utf-8") as handle:
+        json.dump({}, handle)
+    before = _tree_identity(root)
+    history_before = history.read_bytes()
+    for command in ("storage-baseline", "storage-cleanup-preview"):
+        args = ["research", command, "--runtime-root", str(root), "--history-report", str(history)]
+        if command == "storage-cleanup-preview":
+            args.extend(["--lifecycle-inventory", str(inventory)])
+        assert main(args) == 0
+        response = json.loads(capsys.readouterr().out)
+        assert response["ok"] is True
+        data = response["data"]
+        if command == "storage-baseline":
+            assert data["status"] == "complete"
+            growth = data["research_storage"]["growth"]
+            assert growth["status"] == ("complete" if usable else "insufficient_history")
+            assert growth["forecast_90d_additional_bytes"] == (0 if usable else None)
+            assert growth["rejected_reports"] == ([] if usable else [{"report": "history.json", "reason": "research_storage_incomplete"}])
+        else:
+            assert data["gates"]["space_forecast"]["status"] == ("pass" if usable else "blocked")
+            assert data["preview_ready"] is False
+            assert data["candidates"] == []
+            assert data["safety"]["actual_cleanup_authorized"] is False
+        assert _tree_identity(root) == before
+        assert history.read_bytes() == history_before
+
+
 def test_storage_cli_real_owners_after_expired_candidate_relocation(storage_disk_capacity, monkeypatch, tmp_path: Path, capsys) -> None:
     from src.application.research import storage_baseline
     from src.interfaces.cli.main import main
@@ -1654,6 +1718,13 @@ def test_research_collect_preserves_account_failure_through_outputs(
             "no_notification_content", None, id="no-content",
         ),
         pytest.param((1, 0, 0, 0), {"delivery_mode": "none"}, "outer_delivery_disabled", None, id="outer-disabled"),
+        pytest.param((2, 2, 1, 1), {"delivery_mode": "none"}, "sent_partial", "NOTIFICATION_PARTIAL_FAILURE", id="outer-none-partial"),
+        pytest.param((1, 1, 0, 1), {"delivery_mode": "none"}, "send_failed_or_unconfirmed", "NOTIFICATION_DELIVERY_FAILED", id="outer-none-failed"),
+        pytest.param((1, 1, 0, 0), {"delivery_mode": "none", "ambiguous_send_count": 1}, "send_failed_or_unconfirmed", "NOTIFICATION_DELIVERY_FAILED", id="outer-none-unconfirmed"),
+        pytest.param((1, 1, 1, 0), {"delivery_mode": "none"}, "sent", None, id="outer-none-confirmed"),
+        pytest.param((1, 0, 1, 0), {"delivery_mode": "none"}, "sent", None, id="outer-none-confirmed-without-attempt-count"),
+        pytest.param((1, 0, 0, 0), {"delivery_mode": "none", "no_send": True}, "outer_delivery_disabled", None, id="outer-none-no-send-zero"),
+        pytest.param((0, 0, 0, 0), {"delivery_mode": "none", "should_run_scan": False}, "outer_delivery_disabled", None, id="outer-none-skip-zero"),
         pytest.param(
             (0, 0, 0, 0), {"route_configured": False, "should_notify": False, "reason": "not_sent"},
             "not_sent", None, id="no-intent-no-route",

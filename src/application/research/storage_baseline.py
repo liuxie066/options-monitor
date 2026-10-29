@@ -526,6 +526,13 @@ def _gc_file_inventory(
                         path=relpath,
                     )
                 )
+            elif _gc_manifest_is_protected(relpath, retained_run_ids=retained_run_ids):
+                blockers.append(
+                    _gc_blocker(
+                        reason="protected_manifest_symlink_not_followed",
+                        path=relpath,
+                    )
+                )
     return (
         sorted(rows, key=lambda item: str(item["path"])),
         blockers,
@@ -1954,6 +1961,9 @@ def _growth_and_forecast(
         research = payload.get("research_storage")
         if not isinstance(identity, dict) or not isinstance(research, dict):
             rejected.append({"report": path.name, "reason": "shape_invalid"})
+            continue
+        if "status" in research and research["status"] != "complete":
+            rejected.append({"report": path.name, "reason": "research_storage_incomplete"})
             continue
         try:
             report_root = Path(str(identity.get("runtime_root") or "")).resolve()

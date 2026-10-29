@@ -91,6 +91,7 @@
 ### 候选与 symbol
 
 - `scan_opportunities`
+- `option_candidates`
 - `candidate_rank_explain`
 - `candidate_filter_explain`
 - `symbol_resolve`
@@ -113,6 +114,11 @@ symbol 页不附全账户期间总额。旧服务未返回新字段时，期间�
 实际日均未了结占用本金含跨期持仓，仅按已发生时间加权，不作为收益率分母。
 现金保留原币，各现金指标的 CNY 总额只消费已落库 `cash_conversion.v1` 证据；不查当前汇率。
 成交附带费用随成交时间入期，迟到更正重述原期间；有独立事实时间的新扣费/退款才按独立时间入期。
+`actual_fee_missing` / `fee_estimated` 表示本次账本快照缺少所需实际费用证据，
+不能单独证明正在同步、同步失败或重建丢失；受影响的实际净额保持不可用，不以估算补齐。
+只有独立、当前的同步证据支持时才可称“手续费待同步”，失败或长期异常仍需明确保留。
+输入哈希变化不能证明重建主体、丢失原因或必须重建/backfill。
+`freshness.as_of` 表示统计截止，不是费用同步时间；`/income` 按此标签显示原值。
 正股交易、指派/行权交割现金、PnL 和行情刷新不属于该报告。HTTP 外层保持 v1。
 纯领域离线接口及冻结证据限制见[离线合同](OPTION_CASHFLOW_OFFLINE_CONTRACT.md)。
 
@@ -123,6 +129,31 @@ symbol 页不附全账户期间总额。旧服务未返回新字段时，期间�
 - `get_portfolio_context`
 - `portfolio_query`
 - `portfolio_assignment_scenario`
+
+账户事实必须通过对应工具取得，保留账户、来源、币种和数据时间；不能用记忆、旧回答或自行推算补齐。
+`portfolio_query` 返回 PM 的记录，不等同于券商实时资金。其 `scope` 是实际 HTTP 查询范围；
+PM v1 部分响应不回传账户，因此 `assessment.scope_binding=request` 不声称独立验证了响应账户。
+响应中出现与请求矛盾的账户时，适配器返回错误，不把其他账户的数据重新标成请求账户。
+
+普通 PM 查询新增 `coverage` 与 `assessment`。`assessment.status=reported_facts_only`
+只支持引用 `supported_claims` 中的数据源报告事实；`unable` 表示当前账户结论无法判断。
+外层 `ok=true` 只表示调用成功。缺少完整记录数、局部失败、缺少有效时间或来源标记过期时，
+原始记录仍保留用于诊断，但不能当成完整、当前账户事实。`freshness.observed_at_utc` 是来源时间，
+`retrieved_at_utc` 是读取时间，不能刷新旧事实；时效政策由 PM 数据集负责，不混用券商现金 TTL。
+`full_report` 的完整性只针对报告摘要，不代表完整持仓清单；分布和历史查询也只覆盖所请求的视图。
+
+`portfolio_query(view=cash)` 包含 cash 与 MMF，`amount` / `by_currency` 保留 PM 原始持仓数量和
+声明币种，不证明货基赎回价值、可提现余额或可交易资金。未返回券商、币种等字段就标注未观测；
+不能按港股持仓猜测现金为 HKD，也不能因加总相等而断言不存在重复资产。资产占比优先读取
+`distribution` / `overview`，不从历史答案或不完整明细拼凑总额。
+
+CSP 现金担保与余量使用 `query_cash_headroom`。其 `assessment.supported_claims`
+复用现有现金快照、占用完整性与汇率资格；原币可用不代表 CNY 合计可用。
+`query_cash_headroom` 与 `get_portfolio_context` 均要求显式非空账户，不从默认账户推断。
+前者是现金余量，后者是资金/持仓上下文；都不是新合约的完整开仓批准。
+`option_positions_read` 是本地账本，不单独证明券商当前仓位；`portfolio_assignment_scenario`
+只模拟已有合约全部指派。`option_candidates` 的合约合格也不代表账户能卖。
+没有同账户的有效完整开仓能力证据时，回答“无法判断账户能否加仓”，不能手算一个可卖张数代替。
 
 ### Wheel 生命周期
 
@@ -200,7 +231,8 @@ root 来源及每个 JSONL 文件的 `ok`、`missing`、`valid_empty`、`tail_on
   --input-json '{"accounts":["lx","sy"]}'
 ```
 
-该工具只有 `accounts` 一个业务入参。富途 OpenD 的股票和现金（含 MMF）是底仓；
+该工具必填 `accounts`，可选 `scenario=short_put|short_call|all_short`（默认 `all_short`），
+分别假设仅全部未平 short Put、仅全部未平 short Call、全部未平 short Put/Call 被指派。富途 OpenD 的股票和现金（含 MMF）是底仓；
 `portfolio.holdings.enabled=true` 时只补充 PM Holdings 中明确为非富途来源的资产，
 PM 的富途股票、现金和 MMF 副本不计入。OM SQLite 的 open short put/call lot 提供指派输入，
 富途 OpenD 市场快照提供股票及期权标的现价；PM 仅在 Holdings 开启时补充非富途资产。
@@ -211,6 +243,9 @@ Long Option 完全排除。工具是纯读；业务 `status=partial|unavailable`
 
 结果新增 `position_sizing`：统一以指派费用前的非期权净资产计算 `net_assets_cny` 与
 `weight_of_net_assets_by_symbol`，与 CSP / CC 候选使用同一股数和现金变换。
+指派明细、费用、资金覆盖、分布和 `position_sizing` 均使用所选情景的同一组合约；
+未选方向不产生假设交割或费用，剩余期权市值仍不纳入报告。
+CLI 使用 `./om portfolio assignment-scenario --accounts lx --scenario short_put`。
 原 `distribution` 的总资产权重、费用与负债语义保留；证据缺失或净资产非正时新比例为 null。
 
 ### 查询运行历史
@@ -226,6 +261,51 @@ Long Option 完全排除。工具是纯读；业务 `status=partial|unavailable`
 未显式传路径时，这两个工具按 `OM_RUNTIME_ROOT` 定位 `output_runs` 和 `logs`，
 未配置时才回退到 repo root。
 
+### 指定标的卖出开仓候选
+
+`option_candidates` 查询当前合约条件，入口为 Tool Gateway 和 Bot；历史过滤原因仍用
+`candidate_filter_explain`。输入只有 `queries`，1–5 项，每项必填 `symbol` 和
+`strategy`（仅 `short_put` / `short_call`）。标的接受代码别名，例如 `00700`、
+`HK.00700`、`0700.HK`、`US.NVDA`；中文名称由对话层先唯一校准，不作为结构化输入。
+
+```bash
+./om-agent run --tool option_candidates \
+  --input-json '{"queries":[{"symbol":"0700.HK","strategy":"short_put","strike":370,"dte":[7,90]},{"symbol":"NVDA","strategy":"short_call"}]}'
+```
+
+可选 `strike` 为有限正数，`dte=[min,max]` 为整数闭区间，`1≤min≤max≤365`。
+省略时继承有效配置/策略默认值；显式参数只覆盖本次查询。拒绝 null、额外字段、
+字符串行权价、裸 put/call、买入/平仓策略及规范化后的重复查询。调用者不能填写
+account、config_key、路径、runtime root 或 OpenD endpoint。
+
+标的不必已加入监控配置。未配置标的使用现有策略默认值，行情路由仅复用该市场唯一的有效
+OpenD endpoint；必要配置缺失或路由冲突时返回 `unable`。不要把
+`symbol_config_read` 的 `found=false` 当成查询禁令，也不要为一次查询直接编辑生成的
+`config.us.json` / `config.hk.json`。
+
+结果按输入顺序给出 `results`：每项 `outcome=found/none/unable`，并独立保留
+`coverage.status=complete/partial/unavailable`；`none` 只用于完整评估且无合格合约，
+部分数据下找到候选仍可为 `found`。`effective_filters` 包含行权价上下界与 DTE，
+无界端点为 null，配置不可用时整个 filters 为 null。每项最多展示 3 个候选，含合约、
+到期日、行权价、参考卖价、单份净权利金、期间净收益率和履约义务；`displayed/omitted`
+说明展示量。整体 `completion` 单独说明完成程度，输出超限时可将 evidence 置为 null 或压缩候选。
+
+仅筛合约，不检查账户现金、股票覆盖、成本底线或集中度。财报不淘汰合约，只展示查询日
+至到期日内事件及 `days_before_expiry`；同日事件不判断日内先后，缺失时明确“财报信息不完整”。
+参考卖价不保证成交，费用及净收益是估算。查询不写账本、配置、正式报告或通知；
+既有行情缓存和共享限频记录仍可能更新，FX 查询固定 `write_cache=False`。
+
+应用总响应预算至多 60 秒，并受 Host 剩余预算限制；超时保留已完成结果，未完成项保留原因，
+在途 SDK 调用不保证硬中断。Bot 对整批市场授权后才执行，详见
+[Bot 合同](BOT_DESIGN.md#指定标的卖出开仓候选)。Hermes bridge 位于其所属环境，按 OM manifest
+自动发现只读工具并添加 `om_` 前缀。桥接的离线 schema/JSON 转发验收不替代真实 MCP 握手和远端部署验收。
+
+OM 升级不会自动刷新已建立的 Hermes 会话工具清单。若旧会话没有 `om_option_candidates`，
+在实际使用的 Hermes 会话执行 `/reload-mcp`，完成其确认步骤后核对工具可见；不要仅凭另一
+主机或新起的桥进程能列出工具，就判定原会话已恢复。验收还应通过 MCP 调用标准查询，并
+将完整返回文本解析为单个 OM JSON envelope。OpenD 控制台诊断写入 stderr，不能混入结果
+stdout；休市时 `unable/market_closed` 是有效的不可评估结果，不是“没有符合条件的期权”。
+
 ### 候选解释
 
 ```bash
@@ -235,6 +315,8 @@ Long Option 完全排除。工具是纯读；业务 `status=partial|unavailable`
 ./om-agent run --tool candidate_filter_explain \
   --input-json '{"run_id":"<run-id>","account":"lx","symbol":"NVDA"}'
 ```
+
+普通 CSP/CC 的新策略记录区分 `risk_delta`（超过上限）和 `risk_delta_unavailable`（来源、时间、数值等不可验证），保留具体原因。delta 是硬门槛，不是 rank driver；历史记录不得凭新默认补造阈值或来源。
 
 两者读取已有 artifact，不重跑扫描；运行根路径按显式 `runtime_root`、
 `OM_RUNTIME_ROOT`、repo fallback 的顺序解析。

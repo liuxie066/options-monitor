@@ -1,6 +1,11 @@
 name: Guardrails
 
 on:
+  workflow_call:
+    inputs:
+      release_tag:
+        required: true
+        type: string
   push:
     branches: [main]
   pull_request:
@@ -11,21 +16,29 @@ permissions:
 
 jobs:
   plan:
-    if: github.event_name == 'push'
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       release_tag: ${{ steps.release.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - name: Resolve VERSION release
         id: release
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
           BEFORE_SHA: ${{ github.event.before }}
         run: |
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            echo "tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [[ -z "${BEFORE_SHA}" || "${BEFORE_SHA}" =~ ^0+$ ]]; then
             echo "::notice::Skipping automatic release for an initial push without a comparison base"
             exit 0
@@ -47,12 +60,15 @@ jobs:
 
   checks:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           # The public surface check compares against the merge base of the pull
           # request, which a single-commit checkout cannot resolve honestly.
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Set up Python
@@ -103,6 +119,8 @@ jobs:
     needs: plan
     if: ${{ always() && !cancelled() && (github.event_name == 'pull_request' || needs.plan.outputs.release_tag != '') }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -111,6 +129,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -132,6 +151,7 @@ jobs:
         env:
           PYTHONPATH: .github/ci
           CI_SHARD: ${{ matrix.shard }}
+          CI_DURATION_DIAGNOSTICS: '1'
         run: |
           ./.venv/bin/python -m pytest -vv -n 4 --dist loadfile --max-worker-restart=0 --durations=25 \
             -p pytest_shard --ci-shard "$CI_SHARD" --ci-shard-count 8 \
@@ -149,12 +169,24 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Preserve phase duration diagnostics
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-durations-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/regression/durations.json
+          if-no-files-found: warn
+          retention-days: 7
+
   guardrails:
     # Keep the existing required check name. A failed/cancelled dependency or
     # an incomplete union must never become a successful (or skipped) gate.
     needs: [plan, checks, regression]
     if: ${{ always() }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       release_tag: ${{ needs.plan.outputs.release_tag }}
     steps:
@@ -180,6 +212,8 @@ jobs:
       - name: Checkout
         if: ${{ github.event_name == 'pull_request' || needs.plan.outputs.release_tag != '' }}
         uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
       - name: Download regression receipts
         if: ${{ github.event_name == 'pull_request' || needs.plan.outputs.release_tag != '' }}
         uses: actions/download-artifact@v4
@@ -194,11 +228,10 @@ jobs:
 
   release:
     needs: guardrails
-    if: github.event_name == 'push' && needs.guardrails.outputs.release_tag != ''
+    if: github.event_name != 'pull_request' && needs.guardrails.outputs.release_tag != ''
     permissions:
       contents: write
+      actions: read
     uses: ./.github/workflows/_release-reusable.yml
     with:
       tag: ${{ needs.guardrails.outputs.release_tag }}
-      target_commitish: ${{ github.sha }}
-      run_regression_gates: false

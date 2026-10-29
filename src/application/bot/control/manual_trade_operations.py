@@ -5,6 +5,7 @@ from domain.domain.trade_contract_identity import require_option_multiplier
 import re
 from dataclasses import asdict, is_dataclass
 from typing import Any, Mapping, cast
+from types import SimpleNamespace
 
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.symbol_identity import canonical_symbol
@@ -19,12 +20,18 @@ from src.application.bot.control.operation_lifecycle import (
     resolve_pending_operation_or_raise,
 )
 from src.application.bot.control.operation_policy import enforce_trade_write_allowed
-from src.application.bot.control.operation_signature import hash_operation_payload
+from src.application.bot.control.operation_signature import hash_operation_payload, verify_operation_signature
 from src.application.bot.control.operation_store import InboundOperationStore
 from src.application.bot.control.operation_status_text import operation_candidate_hint, operation_candidate_summary_lines
 from src.application.bot.control.permission_request import build_permission_request
 from src.application.ledger.api import (
     open_position_ledger_from_runtime_config,
+    open_position_query_ledger_from_data_config,
+    trade_event_log,
+    project_trade_event_log,
+    trade_event_application_payload,
+    record_manual_position_open,
+    record_manual_assignment,
     preview_lifecycle_expire_close,
     record_lifecycle_expire_close,
 )
@@ -300,6 +307,8 @@ def _payload_with_manual_request_id(
     payload: dict[str, Any],
     request_id: str,
 ) -> dict[str, Any]:
+    if payload.get("operation_type") == "manual_expiry":
+        return {**payload, "request_id": str(request_id)}
     if payload.get("operation_type") not in {"manual_open", "manual_assignment"}:
         return payload
     out = dict(payload)
@@ -353,7 +362,10 @@ def _preview_and_save_expiry_batch(
     store: InboundOperationStore,
     ttl_seconds: int,
 ) -> dict[str, Any]:
-    prepared = [_prepare_operation_preview(payload) for payload in payloads]
+    prepared = [
+        _prepare_operation_preview(_payload_with_manual_request_id(payload, f"{command_id}:{index}"))
+        for index, payload in enumerate(payloads, start=1)
+    ]
     operations: list[dict[str, Any]] = []
     for index, (payload, preview) in enumerate(prepared, start=1):
         operation_id = f"{command_id}:{index}"
@@ -388,15 +400,23 @@ def _confirm_operation(*, operation_id: str | None, request: BotInboundRequest, 
     batch_operation_ids = _pending_expiry_batch_operation_ids(operation_id=operation_id, request=request, store=store)
     if batch_operation_ids:
         results: list[dict[str, Any]] = []
+        already_applied_count = 0
         for child_operation_id in batch_operation_ids:
             try:
-                results.append(_confirm_operation(operation_id=child_operation_id, request=request, store=store))
+                child = store.get(child_operation_id) or {}
+                if child.get("status") == "applied":
+                    results.append(_recover_operation(child, request=request, store=store, operation_resolution={}))
+                    already_applied_count += 1
+                else:
+                    results.append(_confirm_operation(operation_id=child_operation_id, request=request, store=store))
             except AgentToolError as exc:
                 raise AgentToolError(
                     code=exc.code,
-                    message=f"批量确认部分完成：已写入 {len(results)}/{len(batch_operation_ids)} 笔；{child_operation_id} 失败：{exc.message}",
-                    hint="请使用 /pending 查看仍待确认的记录。",
-                    details={"command_id": operation_id, "applied_count": len(results), "failed_operation_id": child_operation_id},
+                    message=f"批量确认未全部完成：已核实 {len(results)}/{len(batch_operation_ids)} 笔；{child_operation_id}：{exc.message}",
+                    hint="请按各 child operation_id 核对；已过期或已取消的记录不能由本次确认补写。",
+                    details={"command_id": operation_id, "applied_count": len(results) - already_applied_count,
+                             "already_applied_count": already_applied_count, "total_count": len(batch_operation_ids),
+                             "failed_operation_id": child_operation_id},
                 ) from exc
         return build_response(
             tool_name="inbound.manual_trade",
@@ -406,9 +426,10 @@ def _confirm_operation(*, operation_id: str | None, request: BotInboundRequest, 
                 "operation_ids": batch_operation_ids,
                 "operation_type": "manual_expiry",
                 "status": "applied",
-                "applied_count": len(results),
+                "applied_count": len(results) - already_applied_count,
+                "already_applied_count": already_applied_count,
                 "operations": [dict(result.get("data") or {}) for result in results],
-                "response_text": f"已批量确认 {len(results)} 笔期权到期失效记录，已写入账本。\ncommand_id: {operation_id}",
+                "response_text": f"本次确认或恢复 {len(results) - already_applied_count} 笔，此前完成 {already_applied_count} 笔；全部 {len(results)} 笔已核实写账。\ncommand_id: {operation_id}",
             },
             meta={"audit_db": mask_path(store.path)},
         )
@@ -419,6 +440,8 @@ def _confirm_operation(*, operation_id: str | None, request: BotInboundRequest, 
         allow_expired=False,
         action="确认",
     )
+    if operation.get("status") != "previewed":
+        return _recover_operation(operation, request=request, store=store, operation_resolution=operation_resolution)
     confirmed = confirm_previewed_operation_or_raise(
         operation_id=operation_id,
         operation=operation,
@@ -434,7 +457,6 @@ def _confirm_operation(*, operation_id: str | None, request: BotInboundRequest, 
     payload = confirmed.payload
     try:
         preview = _preview_operation(payload)
-        result = _apply_operation(payload)
     except AgentToolError as exc:
         store.mark_failed(operation_id, result={"operation_id": operation_id, "status": "failed", "error": exc.code, "message": exc.message})
         raise
@@ -442,8 +464,144 @@ def _confirm_operation(*, operation_id: str | None, request: BotInboundRequest, 
         failed = {"operation_id": operation_id, "status": "failed", "error": type(exc).__name__, "message": str(exc)}
         store.mark_failed(operation_id, result=failed)
         raise AgentToolError(code="INTERNAL_ERROR", message="manual trade operation failed before ledger write could be confirmed", details=failed) from exc
-    store.mark_applied(operation_id, result=result)
-    text = render_manual_trade_response("applied", operation_id, payload, preview=preview, result=result)
+    try:
+        result = _apply_operation(payload)
+    except AgentToolError:
+        # Preserve the application error, but do not treat it as proof of rollback.
+        raise
+    except Exception as exc:
+        raise _unverified_operation_error(operation_id) from exc
+    try:
+        if not store.mark_applied(
+            operation_id, result=result, expected_payload_hash=confirmed.payload_hash,
+            expected_statuses=("confirmed",),
+        ):
+            raise RuntimeError("operation changed before result persistence")
+    except Exception as exc:
+        raise _unverified_operation_error(operation_id) from exc
+    return _applied_operation_response(
+        operation_id, payload=payload, payload_hash=confirmed.payload_hash,
+        preview=preview, result=result, store=store, operation_resolution=operation_resolution,
+    )
+
+
+def _unverified_operation_error(operation_id: str) -> AgentToolError:
+    return AgentToolError(
+        code="NEEDS_CLARIFICATION",
+        message="交易写账结果待核实；失败回执不代表未写账，请勿重复记录。",
+        hint=f"请使用 /confirm trade {operation_id} 核对原操作。",
+        details={"operation_id": operation_id, "reason": "ledger_result_unverified"},
+    )
+
+
+def _recover_operation(
+    operation: dict[str, Any], *, request: BotInboundRequest, store: InboundOperationStore,
+    operation_resolution: dict[str, Any],
+) -> dict[str, Any]:
+    operation_id = str(operation["operation_id"])
+    payload = dict(operation["payload"])
+    payload_hash = hash_operation_payload(payload)
+    if payload_hash != operation.get("payload_hash"):
+        raise AgentToolError(code="PERMISSION_DENIED", message="交易预览内容已变化，拒绝恢复回执。")
+    verify_operation_signature(operation)
+    if (operation.get("channel") != request.channel or operation.get("sender_id") != request.sender_id
+            or str(operation.get("conversation_id") or "") != str(request.conversation_id or "")):
+        raise AgentToolError(code="PERMISSION_DENIED", message="只能在原对话核对交易记录。")
+    config = payload.get("config") or {}
+    if ((request.config_path and request.config_path != config.get("config_path"))
+            or (request.config_key and request.config_key != config.get("config_key"))):
+        raise AgentToolError(code="PERMISSION_DENIED", message="请在原配置范围核对交易记录。")
+    if not operation.get("confirmed_at"):
+        raise _unverified_operation_error(operation_id)
+    try:
+        proof = _read_committed_operation_result(operation)
+        if not proof:
+            raise _unverified_operation_error(operation_id)
+        result = operation.get("result") if operation.get("status") == "applied" else proof
+        if operation.get("status") != "applied" and not store.mark_applied(
+            operation_id, result=result, expected_payload_hash=payload_hash,
+            expected_statuses=(str(operation["status"]),),
+        ):
+            raise _unverified_operation_error(operation_id)
+    except Exception as exc:
+        raise _unverified_operation_error(operation_id) from exc
+    return _applied_operation_response(
+        operation_id, payload=payload, payload_hash=payload_hash,
+        preview=operation.get("preview") or {}, result=result, store=store,
+        operation_resolution=operation_resolution,
+    )
+
+
+def _read_committed_operation_result(operation: dict[str, Any]) -> dict[str, Any] | None:
+    payload = operation["payload"]
+    args = payload.get("arguments") or {}
+    operation_type = payload["operation_type"]
+    request_id = str(args.get("request_id") or payload.get("request_id") or "").strip()
+    # Legacy closes/expiries have no operation identity; economics cannot prove ownership.
+    if not request_id or request_id != operation["operation_id"]:
+        return None
+    _data_config, repo, _cfg = _open_repo_for_payload(payload, read_only=True)
+    try:
+        events = trade_event_log(repo)
+        projection = project_trade_event_log(events)
+        if projection.has_errors:
+            return None
+        effective = {
+            event.event_id: trade_event_application_payload(event.to_dict())
+            for event in projection.ledger_projection.effective_cash_events
+        }
+        marker = f"manual-operation:{request_id}:{operation['payload_hash']}"
+        matches = [event for event in events if (
+            marker in (event.get("raw_payload") or {}).get("evidence_ids", [])
+            if operation_type == "manual_expiry"
+            else (event.get("raw_payload") or {}).get("manual_request_id") == request_id
+        )]
+        expected_type = {"manual_open": "open", "manual_assignment": "assignment", "manual_expiry": "expire_close"}.get(operation_type)
+        if not expected_type or not matches or any(event["event_id"] not in effective for event in matches):
+            return None
+        matches = [effective[event["event_id"]] for event in matches]
+        expected_contracts = int(args.get("contracts") or args.get("contracts_to_close") or 0)
+        if sum(int(event.get("contracts") or 0) for event in matches) != expected_contracts:
+            return None
+        for event in matches:
+            if event.get("event_type") != expected_type:
+                return None
+            for field in ("broker", "account", "symbol", "option_type", "expiration_ymd"):
+                if args.get(field) is not None and str(event.get(field) or "").lower() != str(args[field]).lower():
+                    return None
+            if args.get("strike") is not None and float(event.get("strike")) != float(args["strike"]):
+                return None
+        # This read-only evidence protocol exposes no writer: canonical commands
+        # can only validate their existing-request branch against this snapshot.
+        readback_repo = SimpleNamespace(
+            list_trade_events=lambda: events,
+            count_position_lots=lambda: len(repo.list_position_lots()),
+            list_position_lots=repo.list_position_lots,
+        )
+        if operation_type == "manual_open":
+            readback = record_manual_position_open(readback_repo, **args).to_payload()
+            if readback["result"].get("created") is not False:
+                return None
+            event = matches[0]
+            for field, argument in (("price", "premium_per_share"), ("multiplier", "multiplier"), ("trade_time_ms", "opened_at_ms")):
+                if args.get(argument) is not None and float(event.get(field)) != float(args[argument]):
+                    return None
+        elif operation_type == "manual_assignment":
+            readback = record_manual_assignment(readback_repo, **_application_args(args))
+            if not readback.get("idempotent_duplicate"):
+                return None
+        return {"mode": "applied", "recovered": True, "event_ids": [event["event_id"] for event in matches]}
+    finally:
+        close = getattr(repo, "close", None)
+        if callable(close):
+            close()
+
+
+def _applied_operation_response(
+    operation_id: str, *, payload: dict[str, Any], payload_hash: str,
+    preview: dict[str, Any], result: dict[str, Any], store: InboundOperationStore,
+    operation_resolution: dict[str, Any],
+) -> dict[str, Any]:
     return build_response(
         tool_name="inbound.manual_trade",
         ok=True,
@@ -452,11 +610,11 @@ def _confirm_operation(*, operation_id: str | None, request: BotInboundRequest, 
             **operation_resolution,
             "operation_type": payload["operation_type"],
             "status": "applied",
-            "payload_hash": confirmed.payload_hash,
+            "payload_hash": payload_hash,
             "payload": payload,
             "preview": preview,
             "result": result,
-            "response_text": text,
+            "response_text": render_manual_trade_response("applied", operation_id, payload, preview=preview, result=result),
         },
         meta={"audit_db": mask_path(store.path)},
     )
@@ -471,17 +629,11 @@ def _pending_expiry_batch_operation_ids(
     command_id = str(operation_id or "").strip()
     if not command_id or store.get(command_id) is not None:
         return []
-    pending = store.list_pending_operations(
-        channel=request.channel,
-        sender_id=request.sender_id,
+    children = store.list_expiry_batch_operations(
+        command_id=command_id, channel=request.channel, sender_id=request.sender_id,
         conversation_id=request.conversation_id,
-        operation_types={"manual_expiry"},
     )
-    return list(
-        reversed(
-            [str(item["operation_id"]) for item in pending if str(item.get("command_id") or "") == command_id]
-        )
-    )
+    return [str(item["operation_id"]) for item in children]
 
 
 def _cancel_operation(*, operation_id: str | None, request: BotInboundRequest, store: InboundOperationStore) -> dict[str, Any]:
@@ -559,6 +711,7 @@ def _resolve_manual_trade_operation(
         not_found_message="找不到待确认的交易记录。",
         not_found_hint="请检查 operation_id，或重新发送记录交易命令。",
         candidate_hint=_manual_trade_candidate_hint,
+        recoverable_statuses=frozenset({"confirmed", "running", "failed"}) if action == "确认" else frozenset(),
     )
 
 
@@ -824,6 +977,10 @@ def _preview_operation(payload: dict[str, Any]) -> dict[str, Any]:
         raise _manual_close_error(exc) from exc
     except ValueError as exc:
         raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+    finally:
+        close = getattr(repo, "close", None)
+        if callable(close):
+            close()
     return _json_safe(out)
 
 
@@ -847,7 +1004,8 @@ def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
                 repo,
                 **args,
                 case_id=None,
-                evidence_ids=[],
+                evidence_ids=[f"manual-operation:{payload['request_id']}:{hash_operation_payload(payload)}"]
+                if payload.get("request_id") else [],
             )
         else:
             raise AgentToolError(code="INPUT_ERROR", message=f"unsupported operation_type: {payload.get('operation_type')}")
@@ -855,19 +1013,26 @@ def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
         raise _manual_close_error(exc) from exc
     except ValueError as exc:
         raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+    finally:
+        close = getattr(repo, "close", None)
+        if callable(close):
+            close()
     return _json_safe(out)
 
 
-def _open_repo_for_payload(payload: dict[str, Any]) -> tuple[Any, Any, dict[str, Any]]:
+def _open_repo_for_payload(payload: dict[str, Any], *, read_only: bool = False) -> tuple[Any, Any, dict[str, Any]]:
     raw_config = payload.get("config")
     config = cast(dict[str, Any], raw_config) if isinstance(raw_config, dict) else {}
     config_key = str(config.get("config_key") or "").strip().lower() or None
     config_path, cfg = load_runtime_config(config_key=config_key, config_path=config.get("config_path"))
-    data_config, repo = open_position_ledger_from_runtime_config(
-        base=repo_base(),
-        cfg=cfg,
-        config_path=config_path,
-    )
+    if read_only:
+        data_config, repo = open_position_query_ledger_from_data_config(
+            base=repo_base(), cfg=cfg, config_path=config_path, data_config=None,
+        )
+    else:
+        data_config, repo = open_position_ledger_from_runtime_config(
+            base=repo_base(), cfg=cfg, config_path=config_path,
+        )
     return data_config, repo, cfg
 
 

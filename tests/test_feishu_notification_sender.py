@@ -52,6 +52,7 @@ def _fallback_envelope():
     return fallback_text, render_feishu_notification_card(
         markdown="# 决策简报\n\n| 标的 | 建议 |\n|---|---|\n| NVDA | CSP |",
         fallback_text=fallback_text,
+        fallback_open_id="ou_1",
     )
 
 
@@ -146,6 +147,41 @@ def test_normalize_feishu_app_send_output_marks_failed_on_feishu_code() -> None:
     assert "feishu_msg" not in out
     assert "response_tail" not in out
     assert "denied-tail" not in repr(out)
+
+
+@pytest.mark.parametrize(
+    ("configured_open_id", "credential_present", "expected"),
+    [
+        ('  ou_fixture_"\\中  ', False, 'ou_fixture_"\\中'),
+        ("ou_fixture_with_credential", True, "ou_fixture_with_credential"),
+        (None, False, ""),
+    ],
+    ids=["recipient-without-credential", "recipient-with-credential", "recipient-unconfigured"],
+)
+def test_resolve_feishu_bot_send_target_reads_only_recipient_metadata(
+    monkeypatch, configured_open_id, credential_present, expected,
+) -> None:
+    from types import SimpleNamespace
+
+    from src.application import notification_delivery_adapter as service
+    from src.application import secret_resolver as secrets
+
+    def forbidden_secret_resolution(*args, **kwargs):
+        raise AssertionError("target preparation must not resolve sender secret")
+
+    monkeypatch.setattr(secrets, "_secret", forbidden_secret_resolution)
+    monkeypatch.setattr(
+        secrets, "resolve_secret_status",
+        lambda *args, **kwargs: SimpleNamespace(configured=credential_present),
+    )
+    if configured_open_id is None:
+        monkeypatch.delenv("OM_FEISHU_BOT_USER_OPEN_ID", raising=False)
+    else:
+        monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", configured_open_id)
+
+    assert service.resolve_feishu_bot_send_target(
+        notifications={"target": "ou_config_must_not_replace_canonical_recipient"},
+    ) == expected
 
 
 def test_send_feishu_app_message_uses_bot_user_open_id_when_target_empty(monkeypatch, tmp_path: Path) -> None:
@@ -849,3 +885,45 @@ def test_feishu_and_wechat_receive_identical_canonical_markdown(monkeypatch, tmp
     )
 
     assert captured == {"feishu": canonical_markdown, "wechat": canonical_markdown}
+
+
+@pytest.mark.parametrize('ambiguous', [False, True])
+def test_large_frozen_fallback_is_sendable_only_after_definite_card_rejection(monkeypatch, tmp_path: Path, ambiguous: bool) -> None:
+    from copy import deepcopy
+    from src.application import notification_delivery_adapter as service
+    from src.application.channels.feishu_notification_renderer import render_feishu_notification_card
+    from src.infrastructure import feishu_bot
+    from src.infrastructure.feishu_bitable import FeishuPermanentError
+
+    _bind_feishu_bot(monkeypatch)
+    text = '\n\n'.join('中文🙂"\\' * 12 for _ in range(700))
+    envelope = render_feishu_notification_card(markdown='card', fallback_text=text, fallback_open_id='ou_1')
+    original = deepcopy(envelope)
+    requests = []
+
+    def reject_card(**kwargs):
+        if ambiguous:
+            kwargs['log_fn']({'category': 'transient', 'attempt': 1, 'http_status': 500})
+        raise FeishuPermanentError('explicit card rejection', code=230001, response={'http_status': 400})
+
+    def http(method, url, payload, **kwargs):
+        requests.append(payload)
+        assert len(json.dumps(payload, ensure_ascii=False).encode()) <= feishu_bot.FEISHU_POST_REQUEST_BUDGET_BYTES
+        return {'code': 0, 'data': {'message_id': 'fixture-post'}}
+
+    monkeypatch.setattr(service, 'send_message', reject_card)
+    monkeypatch.setattr(feishu_bot, 'with_tenant_token_retry', lambda _app, _secret, send: send('fixture-token'))
+    monkeypatch.setattr(service, 'send_post_message', lambda **kwargs: feishu_bot.send_post_message(**kwargs, http_json_fn=http))
+    key = service.build_notification_transport_key('fixture-logical-key')
+    result = _send_card(tmp_path, envelope, text, key)
+    assert envelope == original
+    assert result['fallback_used'] is (not ambiguous)
+    assert result['delivery_confirmed'] is (not ambiguous)
+    assert len(requests) == (0 if ambiguous else 1)
+    if not ambiguous:
+        assert requests[0]['uuid'] == key + ':fallback'
+        assert requests[0] == feishu_bot.build_post_message_payload(
+            open_id='ou_1', markdown=envelope['fallback']['markdown'], uuid=key + ':fallback',
+        )
+    else:
+        assert result['ambiguous_send'] is True

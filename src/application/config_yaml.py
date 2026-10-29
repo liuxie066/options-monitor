@@ -828,7 +828,9 @@ def market_user_config_fingerprint(user_config: dict[str, Any], *, market: str) 
     return {**identity, "sha256": hashlib.sha256(body).hexdigest()}
 
 
-def _yaml_rebuild_command(*, config_path: Path, market: str, output_path: Path | None = None) -> str:
+def _yaml_rebuild_command(
+    *, config_path: Path, market: str, system_path: Path | None = None, output_path: Path | None = None,
+) -> str:
     command = [
         "./om",
         "config",
@@ -840,6 +842,8 @@ def _yaml_rebuild_command(*, config_path: Path, market: str, output_path: Path |
         "--config-yaml",
         str(config_path),
     ]
+    if system_path is not None:
+        command.extend(["--system-config", str(system_path)])
     if output_path is not None:
         command.extend(["--output", str(output_path)])
     return " ".join(shlex.quote(part) for part in command)
@@ -906,6 +910,7 @@ def _build_yaml_generated_metadata(
         "rebuild_command": _yaml_rebuild_command(
             config_path=yaml_path,
             market=market,
+            system_path=system_path,
             output_path=output_path,
         ),
     }
@@ -999,6 +1004,7 @@ def build_yaml_runtime_config_file(
     cfg[GENERATED_KEY]["rebuild_command"] = _yaml_rebuild_command(
         config_path=Path(meta["config_yaml_path"]),
         market=normalized_market,
+        system_path=Path(meta["system_config_path"]) if meta["system_config_ref"] != DEFAULT_CONFIG_REF else None,
         output_path=output_path,
     )
 

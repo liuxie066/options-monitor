@@ -58,12 +58,13 @@ def _write_upgrade_release_skeleton(path: Path, version: str) -> None:
     (path / "constraints.txt").write_text("-c constraints/runtime.txt\n", encoding="utf-8")
     (path / "requirements" / "runtime.txt").write_text("", encoding="utf-8")
     (path / "constraints" / "runtime.txt").write_text("", encoding="utf-8")
-    (path / "agent-runtime").mkdir(exist_ok=True)
-    (path / "agent-runtime" / "package-lock.json").write_text('{"lockfileVersion":3}\n', encoding="utf-8")
+    bot = path / "src/application/bot"
+    bot.mkdir(parents=True, exist_ok=True)
+    for package in (path / "src", path / "src/application", bot):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    (bot / "host.py").write_text("# Isolated Python Bot host fixture\n", encoding="utf-8")
+    (bot / "runtime.py").write_text("# Isolated Python Bot runtime fixture\n", encoding="utf-8")
     (path / "scripts").mkdir(exist_ok=True)
-    smoke = path / "scripts" / "pi_runtime_smoke.sh"
-    smoke.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-    smoke.chmod(0o755)
 
 
 def _write_systemd_units_from_bundle(bundle: dict, systemd_root: Path, *, skip: set[str] | None = None) -> None:
@@ -92,9 +93,6 @@ def _create_fake_venv_python_at(venv_dir: Path) -> None:
 
 
 def _fake_git_cache_materialize(command: list[str], *, version: str = "1.0.1") -> subprocess.CompletedProcess | None:
-    pi_runtime = _fake_pi_runtime_prepare(command)
-    if pi_runtime is not None:
-        return pi_runtime
     if command[:3] == ["git", "clone", "--mirror"]:
         Path(command[-1]).mkdir(parents=True, exist_ok=True)
         return subprocess.CompletedProcess(command, 0, stdout="mirrored\n", stderr="")
@@ -119,31 +117,15 @@ def _fake_git_cache_materialize(command: list[str], *, version: str = "1.0.1") -
     return None
 
 
-def _fake_pi_runtime_prepare(command: list[str]) -> subprocess.CompletedProcess | None:
-    if command == ["node", "--version"]:
-        return subprocess.CompletedProcess(command, 0, stdout="v22.19.0\n", stderr="")
-    if command == ["npm", "--version"]:
-        return subprocess.CompletedProcess(command, 0, stdout="10.8.2\n", stderr="")
-    if command[:2] == ["npm", "ci"] or command[:2] == ["bash", "scripts/pi_runtime_smoke.sh"]:
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
-    return None
 
 
-def _stub_pi_storage_readiness(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    import src.application.service_upgrade as service_upgrade_module
-
-    monkeypatch.setattr(
-        service_upgrade_module,
-        "_pi_storage_readiness",
-        lambda **_kwargs: {"ok": True, "stores": []},
-    )
 
 
 def _fake_release_target_query(
     command: list[str],
     *,
     tags: tuple[str, ...] = ("1.0.0", "1.0.1"),
-    remote_url: str = "https://example.invalid/repo.git",
+    remote_url: str = "https://github.com/example/options-monitor.git",
 ) -> subprocess.CompletedProcess | None:
     if command[:3] == ["git", "config", "--get"]:
         return subprocess.CompletedProcess(command, 0, stdout=f"{remote_url}\n", stderr="")
@@ -164,6 +146,43 @@ def _fake_release_target_query(
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
     return None
 
+
+
+def _mock_published_releases(monkeypatch, *, tags=("v1.0.0", "v1.0.1", "v2.0.0"),
+                             repository="example/options-monitor"):
+    """Opt-in HTTP fixtures: exact known URLs, no unplanned request or live HTTP."""
+    import copy
+    import src.application.release_target as release_target
+
+    base = f"https://api.github.com/repos/{repository}"
+    responses = {}
+    calls = []
+    for release_id, tag in enumerate(tags, start=1):
+        responses[f"{base}/releases/tags/{tag}"] = {
+            "id": release_id, "tag_name": tag, "draft": False, "published_at": "2026-10-25T00:00:00Z",
+        }
+        responses[f"{base}/releases/{release_id}/assets?per_page=100&page=1"] = [
+            {"name": name, "state": "uploaded", "size": 1}
+            for name in ("VERSION", "om-agent-spec.json", f"options-monitor-{tag}.tar.gz")
+        ]
+
+    def get(url, *, timeout):
+        calls.append((url, timeout))
+        if url not in responses:
+            raise AssertionError(f"unplanned GitHub request: {url}")
+        value = responses[url]
+        if isinstance(value, Exception):
+            raise value
+        return copy.deepcopy(value)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("live HTTP transport is forbidden")
+
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(release_target, "build_opener", unexpected)
+    monkeypatch.setattr(release_target, "_github_get_json", get)
+    return responses, calls
 
 def _install_complete_systemd_bundle(bundle: dict, systemd_root: Path) -> None:
     systemd_root.mkdir(parents=True, exist_ok=True)
@@ -606,7 +625,7 @@ def _synthetic_drift_context(monkeypatch, tmp_path: Path, *, target="systemd", s
         monkeypatch.setattr(drift, name, fail(name))
     for name in (
         "default_systemd_deploy_user", "_opend_service_plans_from_authoring_config",
-        "_legacy_opend_service_plan", "_bot_credential_name", "_systemd_secret_bindings",
+        "_legacy_opend_service_plan", "_systemd_secret_bindings",
     ):
         monkeypatch.setattr(deploy, name, fail(name))
     bundle = _render_bundle(

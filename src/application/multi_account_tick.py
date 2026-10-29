@@ -15,6 +15,7 @@ from src.infrastructure.io_utils import (
 from src.infrastructure.run_log import RunLogger
 from src.application.account_config import build_account_portfolio_source_plan, resolve_configured_accounts
 from src.application.config_sections import resolve_watchlist_config
+from src.application.symbol_mutations import split_symbol_whitelist
 from src.application.config_validator import (
     validate_config,
     validate_retired_symbol_worker_config,
@@ -239,6 +240,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument('--opend-phone-verify-continue', action='store_true', help='Clear OpenD phone-verify pending pause and continue running.')
     ap.add_argument('--allow-stale-config', action='store_true', help='Emergency override: skip generated runtime config freshness checks.')
     args = ap.parse_args(argv)
+    symbols_arg = ",".join(str(item) for item in args.symbols) if args.symbols is not None else None
+    try:
+        split_symbol_whitelist(symbols_arg)
+    except ValueError as exc:
+        ap.error(str(exc))
 
     set_debug(bool(getattr(args, 'debug', False)))
 
@@ -246,8 +252,6 @@ def main(argv: list[str] | None = None) -> int:
     experience = bool(getattr(args, 'experience', False))
     smoke = bool(getattr(args, 'smoke', False))
     force_mode = bool(getattr(args, 'force', False))
-    symbols_arg = ",".join(str(item) for item in (getattr(args, 'symbols', None) or []) if str(item).strip()) or None
-
     repo_root = Path(__file__).resolve().parents[2]
     runtime_resolution = resolve_runtime_root(repo_root=repo_root)
     base = runtime_resolution.runtime_root

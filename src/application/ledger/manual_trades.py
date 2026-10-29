@@ -13,6 +13,7 @@ from domain.domain.ledger.position_fields import (
     build_close_patch_contract,
     build_open_adjustment_patch_contract,
     build_position_lot_fields,
+    decode_position_lot_patch,
     effective_expiration_ymd,
     effective_multiplier,
     effective_strike,
@@ -28,6 +29,7 @@ from domain.domain.ledger.position_fields import (
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import canonical_contract_symbol, derive_trade_side, require_option_multiplier
 from src.application.ledger.position_projection_runtime import (
+    PositionProjectionEventSnapshot,
     run_position_projection_in_transaction,
 )
 from src.application.ledger.current_decision_projection import (
@@ -45,7 +47,8 @@ from src.application.ledger.lot_resolver import (
     contract_key_from_lot_fields,
     lot_contract_value,
 )
-from src.application.ledger.repository import with_sqlite_repo_transaction
+from src.application.ledger.event_codec import stored_trade_event_to_ledger_event, valid_void_target_event_id
+from src.application.ledger.repository import with_sqlite_repo_transaction, with_sqlite_repo_writer_lock
 
 
 def _canonical_trade_symbol(value: Any) -> str:
@@ -403,7 +406,14 @@ def existing_manual_close_event_result(
         target_source_event_id=target_source_event_id,
         close_reason=str(close_reason or ""),
     )
-    return _existing_trade_event_result(repo, event_id=event_id, lot_id=str(lot_id))
+    result = _existing_trade_event_result(repo, event_id=event_id, lot_id=str(lot_id))
+    if result is not None:
+        candidate = getattr(repo, "primary_repo", repo)
+        if any(valid_void_target_event_id(row) == event_id for row in candidate.list_trade_events()):
+            raise ValueError(
+                f"manual close request was voided and is not applied: event_id={event_id}"
+            )
+    return result
 
 
 def _manual_adjust_event_id(
@@ -420,6 +430,7 @@ def _manual_adjust_event_id(
     lot_id: str,
     target_source_event_id: str,
     patch: PositionLotPatch,
+    revision: dict[str, Any],
 ) -> str:
     stable_patch = {key: value for key, value in patch.to_dict().items() if key != "last_action_at"}
     return _stable_manual_event_id(
@@ -438,6 +449,7 @@ def _manual_adjust_event_id(
             "record_id": str(lot_id or "").strip(),
             "target_source_event_id": str(target_source_event_id or "").strip(),
             "patch": stable_patch,
+            "revision": revision,
         },
     )
 
@@ -597,92 +609,100 @@ def persist_manual_close_event(
     close_reason: str,
     as_of_ms: int | None = None,
 ) -> LedgerWriteResult:
-    incoming_identity = _lot_identity(fields)
-    if not normalize_broker(incoming_identity["broker"]):
-        raise ValueError(f"position lot missing broker: {lot_id}")
-    normalized_close_price = normalize_trade_price(close_price, "close_price")
-    fields = assert_position_lot_target_matches_current_state(
-        repo,
-        lot_id=lot_id,
-        fields=fields,
-        operation="manual_close",
-    )
-    identity = _lot_identity(fields)
-    broker = normalize_broker(identity["broker"])
-    multiplier = require_option_multiplier(fields.get("multiplier"))
-    strike = (
-        float(identity["strike"])
-        if identity["strike"] is not None
-        else effective_strike(fields)
-    )
-    target_source_event_id = str(
-        fields.get("open_event_id") or fields.get("source_event_id") or ""
-    ).strip()
-    normalized_account = normalize_account(identity["account"])
-    canonical_symbol = _canonical_trade_symbol(identity["symbol"])
-    expiration_ymd = identity["expiration_ymd"] or effective_expiration_ymd(fields)
-    currency = normalize_currency(fields.get("currency"))
-    event_id = _manual_close_event_id(
-        broker=broker,
-        account=normalized_account,
-        symbol=canonical_symbol,
-        option_type=str(identity["option_type"] or ""),
-        side="buy" if identity["position_side"] == "short" else "sell",
-        contracts_to_close=int(contracts_to_close),
-        close_price=normalized_close_price,
-        strike=(float(strike) if strike is not None else None),
-        multiplier=require_option_multiplier(multiplier),
-        expiration_ymd=expiration_ymd,
-        currency=currency,
-        lot_id=str(lot_id),
-        target_source_event_id=target_source_event_id,
-        close_reason=str(close_reason or ""),
-    )
-    existing_result = _existing_trade_event_result(repo, event_id=event_id, lot_id=str(lot_id))
-    if existing_result is not None:
-        return existing_result
-    close_patch_contract = build_close_patch_contract(
-        fields,
-        contracts_to_close=int(contracts_to_close),
-        close_price=normalized_close_price,
-        close_reason=close_reason,
-        as_of_ms=as_of_ms,
-    )
-    close_patch = close_patch_contract.to_dict()
-    event = TradeEvent(
-        event_id=event_id,
-        event_type="close",
-        event_time_ms=int(as_of_ms or now_ms()),
-        contract_key=ContractKey.from_values(
+    with with_sqlite_repo_writer_lock(repo):
+        incoming_identity = _lot_identity(fields)
+        if not normalize_broker(incoming_identity["broker"]):
+            raise ValueError(f"position lot missing broker: {lot_id}")
+        normalized_close_price = normalize_trade_price(close_price, "close_price")
+        fields = assert_position_lot_target_matches_current_state(
+            repo,
+            lot_id=lot_id,
+            fields=fields,
+            operation="manual_close",
+        )
+        identity = _lot_identity(fields)
+        broker = normalize_broker(identity["broker"])
+        multiplier = require_option_multiplier(fields.get("multiplier"))
+        strike = (
+            float(identity["strike"])
+            if identity["strike"] is not None
+            else effective_strike(fields)
+        )
+        target_source_event_id = str(
+            fields.get("open_event_id") or fields.get("source_event_id") or ""
+        ).strip()
+        normalized_account = normalize_account(identity["account"])
+        canonical_symbol = _canonical_trade_symbol(identity["symbol"])
+        expiration_ymd = identity["expiration_ymd"] or effective_expiration_ymd(fields)
+        currency = normalize_currency(fields.get("currency"))
+        event_id = _manual_close_event_id(
             broker=broker,
             account=normalized_account,
-            underlying_symbol=canonical_symbol,
+            symbol=canonical_symbol,
             option_type=str(identity["option_type"] or ""),
+            side="buy" if identity["position_side"] == "short" else "sell",
+            contracts_to_close=int(contracts_to_close),
+            close_price=normalized_close_price,
             strike=(float(strike) if strike is not None else None),
+            multiplier=require_option_multiplier(multiplier),
             expiration_ymd=expiration_ymd,
-        ),
-        contracts=int(contracts_to_close),
-        price=float(normalized_close_price),
-        currency=currency,
-        source="cli_manual_close",
-        multiplier=require_option_multiplier(multiplier),
-        target_lot_id=str(lot_id),
-        raw_payload={
-            "source": "om option-positions",
-            "source_type": "manual_trade_event",
-            "mode": "manual_close",
-            "record_id": str(lot_id),
-            "target_lot_id": str(lot_id),
-            "side": "buy" if identity["position_side"] == "short" else "sell",
-            "close_target_source_event_id": target_source_event_id,
-            "close_target_account": normalized_account,
-            "close_target_broker": broker,
-            "close_reason": str(close_reason or ""),
-            "idempotency_key": event_id,
-            "projected_patch": close_patch,
-        },
-    )
-    return persist_trade_event_object(repo, event)
+            currency=currency,
+            lot_id=str(lot_id),
+            target_source_event_id=target_source_event_id,
+            close_reason=str(close_reason or ""),
+        )
+        existing_result = existing_manual_close_event_result(
+            repo,
+            lot_id=lot_id,
+            fields=fields,
+            contracts_to_close=contracts_to_close,
+            close_price=normalized_close_price,
+            close_reason=close_reason,
+        )
+        if existing_result is not None:
+            return existing_result
+        close_patch_contract = build_close_patch_contract(
+            fields,
+            contracts_to_close=int(contracts_to_close),
+            close_price=normalized_close_price,
+            close_reason=close_reason,
+            as_of_ms=as_of_ms,
+        )
+        close_patch = close_patch_contract.to_dict()
+        event = TradeEvent(
+            event_id=event_id,
+            event_type="close",
+            event_time_ms=int(as_of_ms or now_ms()),
+            contract_key=ContractKey.from_values(
+                broker=broker,
+                account=normalized_account,
+                underlying_symbol=canonical_symbol,
+                option_type=str(identity["option_type"] or ""),
+                strike=(float(strike) if strike is not None else None),
+                expiration_ymd=expiration_ymd,
+            ),
+            contracts=int(contracts_to_close),
+            price=float(normalized_close_price),
+            currency=currency,
+            source="cli_manual_close",
+            multiplier=require_option_multiplier(multiplier),
+            target_lot_id=str(lot_id),
+            raw_payload={
+                "source": "om option-positions",
+                "source_type": "manual_trade_event",
+                "mode": "manual_close",
+                "record_id": str(lot_id),
+                "target_lot_id": str(lot_id),
+                "side": "buy" if identity["position_side"] == "short" else "sell",
+                "close_target_source_event_id": target_source_event_id,
+                "close_target_account": normalized_account,
+                "close_target_broker": broker,
+                "close_reason": str(close_reason or ""),
+                "idempotency_key": event_id,
+                "projected_patch": close_patch,
+            },
+        )
+        return persist_trade_event_object(repo, event)
 
 
 def _build_manual_adjust_event(
@@ -691,6 +711,7 @@ def _build_manual_adjust_event(
     lot_id: str,
     fields: dict[str, Any],
     current_fields: dict[str, Any] | None = None,
+    event_rows: Sequence[dict[str, Any]],
     contracts: int | None = None,
     strike: float | None = None,
     expiration_ymd: str | None = None,
@@ -714,6 +735,10 @@ def _build_manual_adjust_event(
     target_source_event_id = str(
         fields.get("open_event_id") or fields.get("source_event_id") or ""
     ).strip()
+    event_time_ms = max(
+        int(as_of_ms or now_ms()),
+        max((int(row.get("event_time_ms") or 0) for row in event_rows), default=0) + 1,
+    )
     patch_contract = build_open_adjustment_patch_contract(
         fields,
         contracts=contracts,
@@ -726,9 +751,35 @@ def _build_manual_adjust_event(
         leg_role=leg_role,
         strategy_group_id=strategy_group_id,
         strategy_snapshot=strategy_snapshot,
-        as_of_ms=as_of_ms,
+        as_of_ms=event_time_ms,
     )
     patch = patch_contract.to_dict()
+    voided_event_ids = {valid_void_target_event_id(row) for row in event_rows}
+    previous_adjustment = next((
+        row for row in reversed(event_rows)
+        if row.get("event_type") == "adjust" and row.get("target_lot_id") == str(lot_id)
+        and row.get("event_id") not in voided_event_ids
+    ), None)
+    if previous_adjustment is not None:
+        previous_event, diagnostics = stored_trade_event_to_ledger_event(previous_adjustment)
+        if previous_event is not None and not diagnostics:
+            previous_patch = decode_position_lot_patch(previous_event.raw_payload.get("patch"))
+            if (
+                {key: value for key, value in previous_patch.to_dict().items() if key != "last_action_at"}
+                == {key: value for key, value in patch.items() if key != "last_action_at"}
+            ):
+                return previous_event, previous_patch
+    lot_event_ids = {target_source_event_id} | {
+        str(row["event_id"]) for row in event_rows if row.get("target_lot_id") == str(lot_id)
+    }
+    # Voids can restore an earlier last_event_id; retain that committed revision too.
+    revision = {
+        "last_event_id": str(fields.get("last_event_id") or target_source_event_id),
+        "void_event_ids": sorted(
+            str(row["event_id"]) for row in event_rows
+            if valid_void_target_event_id(row) in lot_event_ids
+        ),
+    }
     current_multiplier = require_option_multiplier(fields.get("multiplier"))
     event_id = _manual_adjust_event_id(
         broker=normalize_broker(identity["broker"]),
@@ -747,11 +798,12 @@ def _build_manual_adjust_event(
         lot_id=str(lot_id),
         target_source_event_id=target_source_event_id,
         patch=patch_contract,
+        revision=revision,
     )
     event = TradeEvent(
         event_id=event_id,
         event_type="adjust",
-        event_time_ms=int(as_of_ms or now_ms()),
+        event_time_ms=event_time_ms,
         contract_key=ContractKey.from_values(
             broker=normalize_broker(identity["broker"]),
             account=normalize_account(identity["account"]),
@@ -803,30 +855,37 @@ def persist_manual_adjust_event(
     strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
 ) -> LedgerWriteResult:
-    event, patch_contract = _build_manual_adjust_event(
-        repo,
-        lot_id=lot_id,
-        fields=fields,
-        contracts=contracts,
-        strike=strike,
-        expiration_ymd=expiration_ymd,
-        premium_per_share=premium_per_share,
-        multiplier=multiplier,
-        opened_at_ms=opened_at_ms,
-        strategy=strategy,
-        leg_role=leg_role,
-        strategy_group_id=strategy_group_id,
-        strategy_snapshot=strategy_snapshot,
-        as_of_ms=as_of_ms,
-    )
-    existing_result = _existing_trade_event_result(repo, event_id=event.event_id, lot_id=str(lot_id))
-    if existing_result is not None:
-        return existing_result.with_details(patch=patch_contract.to_dict())
-    return (
-        persist_trade_event_object(repo, event)
-        .with_lot_id(str(lot_id))
-        .with_details(patch=patch_contract.to_dict())
-    )
+    def _run(sqlite_repo: Any, conn: Any | None) -> LedgerWriteResult:
+        if conn is None:
+            raise TypeError("manual adjustment requires SQLite transaction authority")
+        rows = sqlite_repo.get_position_lots_by_ids((str(lot_id),), conn=conn)
+        if not rows:
+            raise ValueError(f"manual adjustment target lot not found: {lot_id}")
+        event_snapshot = PositionProjectionEventSnapshot.capture(sqlite_repo, conn=conn)
+        event, patch_contract = _build_manual_adjust_event(
+            sqlite_repo,
+            lot_id=lot_id,
+            fields=fields,
+            current_fields=dict(rows[0]["fields"]),
+            event_rows=event_snapshot.events,
+            contracts=contracts,
+            strike=strike,
+            expiration_ymd=expiration_ymd,
+            premium_per_share=premium_per_share,
+            multiplier=multiplier,
+            opened_at_ms=opened_at_ms,
+            strategy=strategy,
+            leg_role=leg_role,
+            strategy_group_id=strategy_group_id,
+            strategy_snapshot=strategy_snapshot,
+            as_of_ms=as_of_ms,
+        )
+        return _persist_manual_adjust_events_in_transaction(
+            sqlite_repo, conn, [(str(lot_id), event, patch_contract)],
+            event_snapshot=event_snapshot,
+        )[0]
+
+    return with_sqlite_repo_transaction(repo, _run, require_projection_publication=True)
 
 
 def persist_manual_adjust_events(
@@ -874,6 +933,7 @@ def persist_manual_adjust_events(
                     "manual adjustment batch target fields changed since preflight: "
                     f"{lot_id}"
                 )
+        event_snapshot = PositionProjectionEventSnapshot.capture(sqlite_repo, conn=conn)
         desired_group_ids = {
             str(item.get("strategy_group_id") or "").strip()
             for _lot_id, _fields, item in validated
@@ -895,7 +955,7 @@ def persist_manual_adjust_events(
                 # second lot unnoticed. Both checks stay -- a pre-shape row is still
                 # only visible to the SQL.
                 bindings = resolve_lot_group_bindings(
-                    sqlite_repo.list_trade_events(conn=conn)
+                    event_snapshot.events
                 )
                 for record_id in sorted(bindings):
                     if record_id in seen_lot_ids:
@@ -912,6 +972,7 @@ def persist_manual_adjust_events(
                     f"position lot: record_id={collision['record_id']}"
                 )
 
+        event_rows = event_snapshot.events
         prepared: list[tuple[str, TradeEvent, PositionLotPatch]] = []
         for lot_id, fields, item in validated:
             current_fields = current_by_lot_id[lot_id]
@@ -920,48 +981,62 @@ def persist_manual_adjust_events(
                 lot_id=lot_id,
                 fields=fields,
                 current_fields=current_fields,
+                event_rows=event_rows,
                 **item,
             )
             prepared.append((lot_id, event, patch_contract))
 
-        decision_fence = capture_trade_event_decision_projection_fence(
-            sqlite_repo,
-            conn=conn,
+        return _persist_manual_adjust_events_in_transaction(
+            sqlite_repo, conn, prepared, event_snapshot=event_snapshot,
         )
-        runtime = run_position_projection_in_transaction(
-            sqlite_repo,
-            [event for _lot_id, event, _patch_contract in prepared],
-            conn=conn,
-            mode="fast_if_safe",
-        )
-        decision_projection = _finish_trade_event_decision_projection(
-            sqlite_repo,
-            conn=conn,
-            fence=decision_fence,
-            events=[event for _lot_id, event, _patch_contract in prepared],
-            created_flags=runtime.created_flags,
-        )
-        diagnostics = projection_diagnostics_summary(runtime.diagnostics)
-        out: list[LedgerWriteResult] = []
-        for (lot_id, event, patch_contract), created in zip(
-            prepared,
-            runtime.created_flags,
-            strict=True,
-        ):
-            payload = {
-                "event_id": event.event_id,
-                "record_id": lot_id,
-                "created": created,
-                "position_lot_count": int(runtime.position_lot_count),
-                **diagnostics,
-                "patch": patch_contract.to_dict(),
-                "decision_projection": decision_projection,
-            }
-            out.append(LedgerWriteResult.from_payload(payload))
-        return out
 
     return with_sqlite_repo_transaction(
         repo,
         _run,
         require_projection_publication=True,
     )
+
+
+def _persist_manual_adjust_events_in_transaction(
+    sqlite_repo: Any,
+    conn: Any,
+    prepared: Sequence[tuple[str, TradeEvent, PositionLotPatch]],
+    *,
+    event_snapshot: PositionProjectionEventSnapshot,
+) -> list[LedgerWriteResult]:
+    decision_fence = capture_trade_event_decision_projection_fence(
+        sqlite_repo,
+        conn=conn,
+    )
+    runtime = run_position_projection_in_transaction(
+        sqlite_repo,
+        [event for _lot_id, event, _patch_contract in prepared],
+        conn=conn,
+        mode="fast_if_safe",
+        event_snapshot=event_snapshot,
+    )
+    decision_projection = _finish_trade_event_decision_projection(
+        sqlite_repo,
+        conn=conn,
+        fence=decision_fence,
+        events=[event for _lot_id, event, _patch_contract in prepared],
+        created_flags=runtime.created_flags,
+    )
+    diagnostics = projection_diagnostics_summary(runtime.diagnostics)
+    out: list[LedgerWriteResult] = []
+    for (lot_id, event, patch_contract), created in zip(
+        prepared,
+        runtime.created_flags,
+        strict=True,
+    ):
+        payload = {
+            "event_id": event.event_id,
+            "record_id": lot_id,
+            "created": created,
+            "position_lot_count": int(runtime.position_lot_count),
+            **diagnostics,
+            "patch": patch_contract.to_dict(),
+            "decision_projection": decision_projection,
+        }
+        out.append(LedgerWriteResult.from_payload(payload))
+    return out

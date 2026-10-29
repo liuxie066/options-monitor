@@ -6,6 +6,7 @@ from typing import Any, Callable
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.notification_pipeline import preview_notification
 from src.application.scan_pipeline import run_scan
+from src.application.symbol_mutations import split_symbol_whitelist
 
 
 def add_operator_commands(subparsers: Any) -> None:
@@ -46,7 +47,8 @@ def handle_operator_command(
     preview_notification_fn: Callable[..., dict[str, Any]] = preview_notification,
 ) -> dict[str, Any]:
     if args.command == "scan":
-        symbols = [s.strip().upper() for s in str(args.symbols or "").split(",") if s.strip()] or None
+        items = split_symbol_whitelist(args.symbols)
+        symbols = [item.upper() for item in items] if items is not None else None
         return run_scan_fn(
             config_key=args.config_key,
             config_path=args.config_path,

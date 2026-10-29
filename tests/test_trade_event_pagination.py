@@ -625,6 +625,7 @@ def test_public_page_facade_never_loads_full_event_collection() -> None:
             return {
                 "rows": [],
                 "snapshot_max_ingest_seq": 0,
+                "snapshot_order_revision": "0" * 64,
                 "has_more": False,
                 "total_count": None,
                 "last_trade_time_ms": None,
@@ -643,6 +644,7 @@ def test_public_page_facade_never_loads_full_event_collection() -> None:
         {
             "limit": 10,
             "snapshot_max_ingest_seq": None,
+            "snapshot_order_revision": None,
             "last_trade_time_ms": None,
             "last_event_id": None,
             "authorized_accounts": ("lx", "sy"),

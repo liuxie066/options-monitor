@@ -33,6 +33,19 @@ def normalize_symbol_read(value: Any, *, config: dict[str, Any] | None = None) -
     return normalize_symbol(str(value or ""), config=config)
 
 
+def split_symbol_whitelist(symbols_arg: str | None) -> list[str] | None:
+    """Split explicit comma-separated scope, keeping omission distinct from empty."""
+    if symbols_arg is None:
+        return None
+    items = [item.strip() for item in str(symbols_arg).split(",") if item.strip()]
+    if not items:
+        raise ValueError(
+            "--symbols must include at least one non-empty symbol; "
+            "omit --symbols to scan the configured watchlist"
+        )
+    return items
+
+
 def ensure_symbols_list(
     cfg: dict[str, Any],
     *,

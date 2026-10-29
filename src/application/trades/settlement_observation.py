@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from domain.domain.lifecycle_allocation import resolve_allocations
 from domain.domain.option_lifecycle import pending_close_quantities
+from domain.domain.symbol_identity import canonical_symbol, looks_like_option_contract_label
 from src.application.ledger.api import (
     latest_trade_lifecycle_settlement_evidence,
     lifecycle_case_coherent_facts,
@@ -588,21 +589,34 @@ def collect_broker_settlement_observation(
     )
     if order_ambiguous:
         extra_incomplete.add("anchor_order_classification_ambiguous")
-    stock_candidates = [
-        candidate
-        for item in list(history_deals.get("rows") or [])
-        for candidate in [
-            _stock_settlement_candidate(
-                item,
-                lifecycle_case=lifecycle_case,
-                account=account,
-                futu_account_id=account_id,
-                timezone=timezone,
-                settlement_deadline_ms=deadline_ms,
+    stock_candidates = []
+    for item in list(history_deals.get("rows") or []):
+        candidate = _stock_settlement_candidate(
+            item,
+            lifecycle_case=lifecycle_case,
+            account=account,
+            futu_account_id=account_id,
+            timezone=timezone,
+            settlement_deadline_ms=deadline_ms,
+        )
+        if candidate is None:
+            continue
+        if any(
+            receipt.get("status") != "complete"
+            for receipt in (history_deals, history_orders)
+        ):
+            raise SettlementObservationDataError(
+                "stock settlement requires complete history_deals and history_orders"
             )
-        ]
-        if candidate is not None
-    ]
+        stock_normal_order, stock_order_ambiguous = _normal_order_facts(
+            order_rows,
+            anchor_order_id=str(candidate.get("order_id") or ""),
+        )
+        if stock_normal_order or stock_order_ambiguous:
+            raise SettlementObservationDataError(
+                "stock settlement requires its own unambiguous broker automatic order"
+            )
+        stock_candidates.append(candidate)
     option_position_absent = not any(
         _row_matches_option_contract(
             item,
@@ -1070,14 +1084,17 @@ def _stock_settlement_candidate(
     timezone: ZoneInfo,
     settlement_deadline_ms: int,
 ) -> dict[str, Any] | None:
-    code = str(
-        row.get("code")
-        or row.get("stock_code")
-        or row.get("symbol")
-        or ""
-    ).strip().upper()
+    code = next(
+        (value for key in ("code", "stock_code", "symbol")
+         if (value := str(row.get(key) or "").strip())),
+        "",
+    )
     symbol = str(lifecycle_case.get("symbol") or "").strip().upper()
-    if code and symbol and code.split(".", 1)[-1] != symbol.split(".", 1)[-1]:
+    if looks_like_option_contract_label(code):
+        return None
+    stock_symbol = canonical_symbol(code)
+    case_symbol = canonical_symbol(symbol)
+    if stock_symbol and case_symbol and stock_symbol != case_symbol:
         return None
     deal_id = str(
         row.get("deal_id")
@@ -1158,6 +1175,9 @@ def _stock_settlement_candidate(
         )
     if quantity % multiplier != 0:
         return None
+    if not stock_symbol or not case_symbol:
+        # An otherwise matching row with unknown identity is not evidence of no settlement.
+        raise SettlementObservationDataError("stock settlement symbol must establish a known stock identity")
     source_event_id = (
         f"futu:{account}:{futu_account_id}:{deal_id}"
     )

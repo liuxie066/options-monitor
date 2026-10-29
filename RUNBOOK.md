@@ -52,12 +52,42 @@ cd "$REPO_ROOT"
 - 服务化部署时，所有运行产物应位于 `runtime_root`，而不是 release 目录；详见 `DEPLOY.md`
 - `tick-cron` 是正式定时入口，负责锁、超时和触发证据；`run tick` 只用于明确的人工运行
 
+
+`./om status` 默认文本及 `--journal-summary` 显示 `tick: scheduled=… status=… reason=…`。
+`scheduled` 仅表示有效 service profile 中包含当前市场的 systemd Tick timer 或 launchd Tick label，
+不证明主机 timer 此刻已启用；仅有市场配置、手动 service 或另一市场 timer 不算计划 Tick 适用。
+适用而缺少 current Tick 完成证据时保留 `unknown/TICK_EVIDENCE_MISSING` 并纳入摘要警告，
+不能用新鲜 `last_run` 替代；未配置时保留 unknown 明细，但不单因此降级。
+合法跳过沿用既有 wrapper 完成回执，单独的 skipped last_run 或一次退出 0 不能证明完成。
+查询成功的 CLI 退出码仍为 0，业务健康须结合摘要及 Tick 原因码判断。
+
+扫描范围：`run tick`、`run tick-cron`、`scan-pipeline` 和 `scan` 省略
+`--symbols` 时扫描配置中的完整标的列表。显式传入 `--symbols ""`、纯空白或
+`--symbols ",,,"` 会在读取扫描配置、预取或创建报告之前报参数错误，不会退化为全量。
+合法列表继续使用 `--symbols NVDA,AMD`；`run tick` / `run tick-cron` 也支持
+`--symbols NVDA AMD`（两个参数）。有效标的旁的空片段仍被忽略，如 `NVDA,,AMD`。
+Tool Gateway 的 `scan_opportunities` 省略 `symbols` 或传入 `[]` 仍表示未筛选；
+非空列表若仅含空片段则返回 `INPUT_ERROR`。
+
 服务化环境的只读巡检：
 
 ```bash
 ./om service status --profile-path /var/lib/options-monitor/service.profile.json --include-service-status
 ./om-agent run --tool runtime_status --input-json '{"profile_path":"/var/lib/options-monitor/service.profile.json"}'
 ```
+
+### 入站服务无法调和
+
+`om service drift` 默认只读预览；仍声明启用的 Feishu WS / WeChat 服务若无法渲染，
+预览和 `--confirm` 都会在修改 unit/profile 或停服前报错，status 的 drift 汇总显示 error。
+即使 profile 的 `services` 为空，入站 `enabled` 意图仍须校验；缺元数据不代表退役。
+
+先核对目标 runtime 的 `service.profile.json`：双市场须有对应入站 `config_key`；
+WeChat 须有显式 allowlist，或 profile 指向的 YAML 中有效的
+`inbound.wechat_clawbot.allowed_senders`。单市场仍自动选择该市场。
+核实原部署意图并通过受控配置/部署流程修复后，再预览 drift；不要通过删除启用声明消除错误。
+真正退役必须明确取消 enabled 和 services 中的声明，并先核对退役预览。
+launchd 的确认应用仍不受支持。
 
 ## 命令副作用总表（先看这个）
 
@@ -134,6 +164,16 @@ Agent 优先使用只读入口：
 ./om-agent run --tool runtime_status --input-json '{"profile_path":"/var/lib/options-monitor/service.profile.json"}'
 ```
 
+`healthcheck` 检查当前开仓扫描前置条件；休市时仍返回未就绪和非零退出码。
+查看 typed `opend_quote_readiness_*` 的 `value.required_fields.results`，区分
+`option_fields_ok`、`scan_prerequisites_ok` 和 `underlier_observation.reason_code`；
+`market_closed` 不表示期权字段缺失，也不应通过放宽开仓门禁消除。
+
+Linux 普通 shell 不继承 systemd unit 的凭证上下文。后端上下文不可用时，通知凭证检查
+报告无法验证（公共配置另有缺失时仍报错），不能据此认定运行服务缺少凭证。
+应结合实际 unit 的凭证交付元数据和服务状态核对；不要导出凭证值或改用 env 后端来让检查通过。
+无法验证的检查仍阻止 readiness 通过，服务运行也不证明通知已经送达。
+
 人工直接查看文件时，再用下面三步：
 
 1. 查看是否在跑：
@@ -190,6 +230,9 @@ Daily Brief 是普通调度通知的权威读取面。普通 scan / Tick 不再�
 ## 维护入口（手动）
 
 运行产物清理：
+
+日志清理保留固定服务输出 `*.out.log`、`*.err.log`，即使 mtime 很旧或服务定义已缺失；
+文件仍可能被 launchd 的进程描述符引用。其余过期普通 `.log` 文件按预览清理。
 
 ```bash
 REPO_ROOT="$HOME/apps/options-monitor/current"

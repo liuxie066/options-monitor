@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from tests.cash_evidence_helpers import cash_portfolio
+from candidate_evidence_helpers import delta_evidence
 
 from pathlib import Path
 from typing import Any
@@ -541,6 +542,7 @@ def _run_wheel_scan_failure_capture(
                     "spread_ratio": 0.0667,
                     "iv_rv_ratio": 1.4,
                     "iv_minus_rv": 0.12,
+                    **delta_evidence(mode="call", observed_at="2026-09-08T14:00:00+00:00"),
                     "earnings_evidence_status": "ready",
                     "earnings_reason_code": None,
                     "earnings_policy_version": "earnings_near_expiry.v1",
@@ -763,6 +765,7 @@ def _run_full_symbol_capture(
     scenario: str,
     account_holds_symbol: bool = True,
     combo_enabled: bool | None = None,
+    success_empty_reason: str = "no_contract_rows",
 ) -> dict[str, list[str] | int]:
     """Run the real watchlist/symbol/status/sealing chain with frozen adapters."""
 
@@ -890,7 +893,7 @@ def _run_full_symbol_capture(
             evidence.update(
                 {
                     "source_outcome": "success_empty",
-                    "reason_code": "no_contract_rows",
+                    "reason_code": success_empty_reason,
                 }
             )
         return evidence
@@ -1732,15 +1735,70 @@ def test_default_pipeline_enforces_combo_capture_contract(
     assert snapshot["opening_status"] == opening_status
 
 
-def test_real_success_empty_reason_is_projected_once_into_sealed_bundle(monkeypatch, tmp_path):
+@pytest.mark.parametrize("reason", ["no_expirations", "no_contract_rows", "no_feasible_strikes"])
+def test_real_success_empty_reason_is_projected_once_into_sealed_bundle(monkeypatch, tmp_path, reason):
     from src.application.candidate_snapshot_manifest import load_candidate_snapshot_bundle
+    from src.application.opening_candidate_snapshot import candidate_universe_summary
+    from src.application.tool_execution import execute_tool
+
     _run_full_symbol_capture(monkeypatch, tmp_path, market="US", symbol="TOST", variant="sp_lc",
-                             scenario="success_empty", opening_mode="put", combo_enabled=False)
+                             scenario="success_empty", opening_mode="put", combo_enabled=False,
+                             success_empty_reason=reason)
     bundle = load_candidate_snapshot_bundle(base=tmp_path, run_id=RUN_ID, account="lx")
     status = bundle["status_index"]["items"][0]
     assert status["reason"] == "no_candidate"
-    assert status["reason_code"] == "no_contract_rows"
-    assert bundle["owners"]["opening"]["scope_results"][0]["reason_code"] == "no_contract_rows"
+    assert status["reason_code"] == reason
+    opening = bundle["owners"]["opening"]
+    assert opening["scope_results"][0]["reason_code"] == reason
+    assert opening["opening_status"] == "no_candidate"
+    assert opening["ranked_candidates"] == []
+    assert candidate_universe_summary(opening) == {"status": "complete", "affected_scopes": []}
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("public explanation must read sealed evidence without rescanning")
+
+    monkeypatch.setattr("src.application.opening_candidate_snapshot.evaluate_opening_candidate_policy", forbidden)
+    response = execute_tool("candidate_filter_explain", {
+        "runtime_root": str(tmp_path), "run_id": RUN_ID, "account": "lx",
+        "symbol": "TOST", "function": "sell_put",
+    })
+    assert response["ok"] is True
+    function = response["data"]["functions"][0]
+    assert function["status"] == "completed"
+    assert function["rejection_reason_counts"] == {}
+    assert function["events"][0]["rule"] == reason
+    assert function["events"][0]["is_rejection"] is False
+
+
+@pytest.mark.parametrize("status,reason", [
+    ("unavailable", "provider_incomplete"), ("failed", "unknown_source_reason"),
+])
+def test_pipeline_public_read_preserves_unavailable_empty_evidence(monkeypatch, tmp_path, status, reason):
+    from src.application.candidate_snapshot_manifest import load_candidate_snapshot_bundle
+    from src.application.opening_candidate_snapshot import candidate_universe_summary
+    from src.application.tool_execution import execute_tool
+
+    _run_default_capture(
+        monkeypatch, tmp_path,
+        symbols=[_symbol_config("NVDA", market="US", combo_enabled=False)],
+        statuses=[_status("NVDA", "put", status, reason=reason)],
+    )
+    bundle = load_candidate_snapshot_bundle(base=tmp_path, run_id=RUN_ID, account="lx")
+    opening = bundle["owners"]["opening"]
+    assert opening["opening_status"] == "data_unavailable"
+    assert opening["scope_results"][0]["reason_code"] == reason
+    assert candidate_universe_summary(opening) == {
+        "status": "partial",
+        "affected_scopes": [{"symbol": "NVDA", "strategy_mode": "put", "reason_code": reason}],
+    }
+    response = execute_tool("candidate_filter_explain", {
+        "runtime_root": str(tmp_path), "run_id": RUN_ID, "account": "lx",
+        "symbol": "NVDA", "function": "sell_put",
+    })
+    assert response["ok"] is True
+    function = response["data"]["functions"][0]
+    assert function["status"] == status
+    assert function["events"][0]["rule"] == reason
 
 
 def test_cc_lp_owner_aggregates_not_applicable_and_failed_without_caller_override(monkeypatch, tmp_path):

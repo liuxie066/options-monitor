@@ -23,6 +23,7 @@ from src.application.ledger.api import (
     zero_option_fee_lifecycle_reason,
 )
 from src.infrastructure.futu_gateway import FutuGatewayRateLimitError
+from src.application.trades.order_fee_timing import fee_timing_phase
 from src.application.ledger.api import option_contract_identity as _contract
 
 
@@ -110,6 +111,7 @@ def sync_order_fees(
     max_orders: int | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
     target_identity: Sequence[str] | None = None,
+    timing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run canonical ledger selection, normalized provider admission, and enrichment."""
 
@@ -117,6 +119,8 @@ def sync_order_fees(
     if not account_value:
         raise ValueError("fee sync account is required")
     target = _target_identity(target_identity)
+    # A range may contain many batches; bounded diagnostics describe one target only.
+    timing = timing if target is not None else None
     if target is None:
         start = int(start_ms or 0)
         end = int(end_exclusive_ms or 0)
@@ -205,13 +209,14 @@ def sync_order_fees(
                 else:
                     provider_call_count += 1
                 try:
-                    terminal_rows, terminal_diagnostics = provider.fetch_terminal_orders(
-                        futu_account_id=futu_account_id,
-                        order_ids=order_ids,
-                        start=query_start,
-                        end=query_end,
-                        **({"exact": True} if target is not None else {}),
-                    )
+                    with fee_timing_phase(timing, "terminal_query"):
+                        terminal_rows, terminal_diagnostics = provider.fetch_terminal_orders(
+                            futu_account_id=futu_account_id,
+                            order_ids=order_ids,
+                            start=query_start,
+                            end=query_end,
+                            **({"exact": True} if target is not None else {}),
+                        )
                 except Exception as exc:
                     provider_issues.extend(
                         _issue(
@@ -241,10 +246,11 @@ def sync_order_fees(
                 else:
                     provider_call_count += 1
                 try:
-                    fee_rows, fee_diagnostics = provider.fetch_order_fees(
-                        futu_account_id=futu_account_id,
-                        order_ids=admitted_ids,
-                    )
+                    with fee_timing_phase(timing, "fee_query"):
+                        fee_rows, fee_diagnostics = provider.fetch_order_fees(
+                            futu_account_id=futu_account_id,
+                            order_ids=admitted_ids,
+                        )
                 except Exception as exc:
                     provider_issues.extend(
                         _issue(
@@ -303,16 +309,17 @@ def sync_order_fees(
                         }
                     )
 
-    migration = enrich_order_fees(
-        repo,
-        account=account_value,
-        start_ms=start,
-        end_exclusive_ms=end,
-        actual_fees=actual,
-        apply=apply,
-        applied_at_ms=int(observed_at_ms),
-        target_identity=target,
-    )
+    with fee_timing_phase(timing, "ledger_enrichment"):
+        migration = enrich_order_fees(
+            repo,
+            account=account_value,
+            start_ms=start,
+            end_exclusive_ms=end,
+            actual_fees=actual,
+            apply=apply,
+            applied_at_ms=int(observed_at_ms),
+            target_identity=target,
+        )
     issues = _dedupe_issues(
         [*selection_issues, *provider_issues, *migration.get("unresolved", [])]
     )

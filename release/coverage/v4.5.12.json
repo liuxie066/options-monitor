@@ -1,0 +1,120 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.5.12",
+  "base": {
+    "tag": "v4.5.11",
+    "commit": "88e361b0bac7645ea795b7d66eff232ac509b64c"
+  },
+  "reviewed_head": "72645562af5bb20746b08b5d82ea8b309a15ecd9",
+  "commits": [
+    {
+      "sha": "88197c41d733362947a0c7073021d8e435721156",
+      "subject": "fix(ledger): close ten ledger and recovery correctness issues"
+    },
+    {
+      "sha": "72645562af5bb20746b08b5d82ea8b309a15ecd9",
+      "subject": "Merge pull request #935: fix ten ledger and recovery issues"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "成交分页游标绑定同事务内的排序修订证据，时间纠正后拒绝旧游标，保留普通追加的快照边界；旧版游标需重新查询（#652）。",
+      "commits": [
+        "88197c41d733362947a0c7073021d8e435721156",
+        "72645562af5bb20746b08b5d82ea8b309a15ecd9"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "费用估算按券商、逻辑账户、物理账户及成交身份分组，身份不足保持待核实，保留同账户合法拆单（#660）。",
+      "commits": [
+        "88197c41d733362947a0c7073021d8e435721156",
+        "72645562af5bb20746b08b5d82ea8b309a15ecd9"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "实际费用组在写事务内重新准入并核对完整成员快照，证据变化时原子回滚费用与审计（#661）。",
+      "commits": [
+        "88197c41d733362947a0c7073021d8e435721156",
+        "72645562af5bb20746b08b5d82ea8b309a15ecd9"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "历史正股库存忽略合法未来目标的撤销，保留完整控制图校验、非法关系拒绝及账户隔离（#667）。",
+      "commits": [
+        "88197c41d733362947a0c7073021d8e435721156",
+        "72645562af5bb20746b08b5d82ea8b309a15ecd9"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "手工调整身份绑定已提交修订并按事务提交顺序生效，往返调整生成新事件，同目标有效重试保持幂等；复用事务内投影快照并保持既有读取预算（#669）。",
+      "commits": [
+        "88197c41d733362947a0c7073021d8e435721156",
+        "72645562af5bb20746b08b5d82ea8b309a15ecd9"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "预览、落账、API、工作流和 CLI 统一拒绝已撤销的手工平仓请求，保留有效平仓的幂等重试（#673）。",
+      "commits": [
+        "88197c41d733362947a0c7073021d8e435721156",
+        "72645562af5bb20746b08b5d82ea8b309a15ecd9"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "成交意图匹配按成交时点排除已取消或过期的竞争者，保留真实重叠、晚到取消、错单及数量保护（#675）。",
+      "commits": [
+        "88197c41d733362947a0c7073021d8e435721156",
+        "72645562af5bb20746b08b5d82ea8b309a15ecd9"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "Wheel Call/Put 取消重试核验原取消仍有效，原取消已撤销时要求新请求，避免误报取消成功（#680）。",
+      "commits": [
+        "88197c41d733362947a0c7073021d8e435721156",
+        "72645562af5bb20746b08b5d82ea8b309a15ecd9"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "清理保守保留固定服务标准输出与错误日志路径，避免删除仍被进程持有的日志（#727）。",
+      "commits": [
+        "88197c41d733362947a0c7073021d8e435721156",
+        "72645562af5bb20746b08b5d82ea8b309a15ecd9"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "中断操作仅凭原签名作用域、稳定身份及有效账本证据恢复回执，不重复落账；批次核验全部成员，无法证明的结果保持待核实（#746）。",
+      "commits": [
+        "88197c41d733362947a0c7073021d8e435721156",
+        "72645562af5bb20746b08b5d82ea8b309a15ecd9"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "88197c41d733362947a0c7073021d8e435721156",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/935",
+        "docs/LEDGER_ARCHITECTURE.md",
+        "docs/INBOUND_CONTROL.md"
+      ]
+    },
+    {
+      "commit": "72645562af5bb20746b08b5d82ea8b309a15ecd9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/935",
+        "docs/LEDGER_ARCHITECTURE.md",
+        "docs/INBOUND_CONTROL.md"
+      ]
+    }
+  ]
+}

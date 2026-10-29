@@ -16,19 +16,24 @@ and Bot design are defined in [ARCHITECTURE.md](ARCHITECTURE.md) and
 autonomous Agent. Internal Bot projects a pure-read subset from the same
 canonical registry.
 
-The `portfolio` toolset contains three pure-read tools. `portfolio_query` lets the
-same `om_chat` Bot read portfolio-management `health`, `accounts`, `overview`,
+The Tool Gateway exposes the canonical pure-read portfolio tools defined in
+[`portfolio.TOOLS`](../src/application/agent_tools/portfolio.py).
+`portfolio_query` reads portfolio-management `health`, `accounts`, `overview`,
 `holdings`, `cash`, `nav`, `distribution`, and `full_report` views over a GET-only
-loopback HTTP boundary. The two primary bridge tools keep independent accounting
-routes but return explicit unavailable states: option performance no longer owns
-option PnL, and its net cash flow excludes assignment/stock cash required by a
-combined cash equation. They do not synthesize those missing authorities from
-the four option-performance metrics. The old `portfolio_capital_bridge`
-has been removed because it mixed total assets with legacy option cash
-semantics. None of the current tools exposes portfolio writes, accepts endpoint
-arguments, or adds a second Scene/Agent. The toolset is optional and defaults
-off for internal Bot projection; `./om-agent` continues to expose all three
-canonical tools independently of this Bot setting.
+loopback HTTP boundary, subject to `portfolio_management.enabled`.
+`portfolio_pnl_bridge` reads portfolio capital facts while option PnL remains
+explicitly unavailable. `portfolio_cash_bridge` is unavailable until authoritative
+portfolio cash facts and combined option/assignment lifecycle cash are available.
+The four option-performance metrics do not supply these missing authorities;
+option net cash flow excludes the assignment/stock cash needed for a combined
+cash equation. These tools expose no portfolio writes or endpoint arguments.
+
+Internal `om_chat` projects only the fixed read-tool list in
+[`om_chat.scene.json`](../src/application/bot/om_chat.scene.json).
+That list currently excludes the portfolio tools, including `portfolio_query`.
+Enabling `portfolio_management.enabled` does not add them to the Scene, and there
+is no Bot toolset activation flag. Tool Gateway availability and internal Bot
+projection are separate boundaries.
 
 ## Deterministic Control
 
@@ -70,22 +75,31 @@ Bot must not:
 
 ## Configuration
 
-The canonical authoring shape is:
+The canonical authoring example for `config.yaml` declares the model profile it
+selects:
 
 ```yaml
-assistant:
+bot:
   enabled: true
-  bot:
-    enabled: true
   active_model: deepseek-default
+  models:
+    deepseek-default:
+      provider: deepseek
+      model: deepseek-chat
+      api_key_env: DEEPSEEK_API_KEY
+      context_window_tokens: 24000
+      max_output_tokens: 2048
 ```
 
-The scene selects canonical read tools; portfolio queries require the existing
-`portfolio_management.enabled` integration. No additional Bot toolset flag is needed.
-
 `bot.models` and `bot.active_model` resolve the provider used by
-Bot. `assistant.planner`, `assistant.agent_loop`, and per-scene channel
-allowlists are not runtime authorities.
+Bot. `api_key_env` names an environment variable; it is not a key value.
+`./om config build-bot --dry-run` validates this authoring structure without
+contacting the provider or verifying credential availability. Real model runs
+require separate configuration and authorization.
+
+The retired top-level `assistant` key is rejected, including the old
+`assistant.planner` and `assistant.agent_loop` shapes. Per-scene channel
+allowlists are not supported runtime controls.
 
 ## Verification
 

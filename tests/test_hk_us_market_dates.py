@@ -64,7 +64,7 @@ def test_close_read_entry_uses_one_anchor_across_markets_and_host_zones(monkeypa
             return ANCHOR
     monkeypatch.setattr(close_read, "datetime", Clock)
     monkeypatch.setattr(close_read, "assert_quality_allows", lambda *args, **kwargs: None)
-    monkeypatch.setattr(close_read, "_resolve_sources", lambda *args, **kwargs: [SimpleNamespace(generated_at_utc=ANCHOR.isoformat(), run_id=None, path=tmp_path / "synthetic.csv")])
+    monkeypatch.setattr(close_read, "_resolve_sources", lambda *args, **kwargs: [SimpleNamespace(generated_at_utc=ANCHOR.isoformat(), run_id=None, path=tmp_path / "synthetic.csv", accounts=["lx"], markets=["US", "HK"])])
     monkeypatch.setattr(close_read, "_read_rows", lambda source: [
         {"symbol": "NVDA", "expiration": "2026-10-09", "account": "lx"},
         {"symbol": "0700.HK", "expiration": "2026-10-09", "account": "lx"},

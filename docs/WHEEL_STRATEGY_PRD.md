@@ -1000,6 +1000,8 @@ replenishment_cash_remainder
 multiplier、费用、币种或本金锚缺失时返回 `data_unavailable`；硬条件完整但无合约通过时返回
 `no_candidate`。
 
+Call/Put 的经济金额必须使用同一币种：候选与来源批次币种经去除首尾空白、统一大小写后缺失或不一致时，分别返回 `currency_unavailable` / `currency_mismatch`，不生成候选或容量声明。Call 来源币种由正股事实提供；不猜测历史币种、不在此隐式换汇，也不改变费用事实的单位契约。
+
 `domain/domain/risk_capacity.py` 是唯一生产 Put 现金 allocator。它消费同一冻结事实集：物理账户 cash
 authority、`cash_by_currency`、已有 cash-secured positions、active Wheel Put intents、当前 ordinary CSP
 最终推荐 claims、当前 Wheel Put claims 和冻结 FX。为保持 A14 和普通 CSP 既有行为，ordinary CSP 最终
@@ -1471,7 +1473,7 @@ Agent `wheel_activation` 使用相同的 `expected_source_sha256`、`apply`、`c
 
 recover preview 必须在构造 writer 前使用既有只读连接；缺库/缺 schema 不创建目录、schema 或迁移。hash 绑定解析后的 ledger 路径与文件身份、账户/市场、canonical 指派/来源 lot/open、void 和相关后续事实、历史激活窗口、已有 Wheel 事实及计划事件内容；不包含当前时钟或无关扫描日志。事务内先识别同一确定性事件的相同 payload 并返回 no-effect（自身新增事实不得使成功后的重试失效），不同 payload 冲突；首次追加前重算 hash。恢复不会刷新已有创建事件证据；后续补证需独立受控修复，不能声称本次恢复会自动解除阻塞。
 
-具体阻塞原因通过现有投影 reason_codes、扫描 scope/snapshot、Brief service 到 renderer 保留；至少分别验证真实 writer 的未知乘数来源与未知交割费用路径，以及共享 companion 的两个调用入口。生产恢复使用升级后的正式 CLI 读取明确的远端 runtime 路径，只追加授权事件，不触发补发。
+具体阻塞原因通过现有投影 reason_codes、扫描 scope/snapshot、Brief service 到 renderer 保留；至少分别验证真实 writer 的未知乘数来源与未知交割费用路径，以及共享 companion 的两个调用入口。Call/Put 扫描均在候选计算与容量声明前消费 canonical 分支的证据阻塞原因，不能仅凭 trusted、数量可用或 phase 放行；option_open/intent_pending 有合法剩余覆盖且无阻塞原因时仍可扫描，既有生命周期、完整性、监控和数量门禁优先级保持。生产恢复使用升级后的正式 CLI 读取明确的远端 runtime 路径，只追加授权事件，不触发补发。
 
 
 ## Wheel 候选拒绝分类与简报状态

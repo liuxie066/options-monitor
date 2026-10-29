@@ -754,7 +754,7 @@ def test_fee_sync_rejects_quantity_mismatch_before_fee_query(tmp_path: Path) -> 
 
 
 def test_formula_migration_groups_split_close_by_writer_order_group() -> None:
-    from src.application.ledger.order_fee_migration import _formula_option_groups
+    from src.application.ledger.order_fee_migration import _formula_option_groups, _unit_identity
 
     events = tuple(
         _trade_event(
@@ -768,7 +768,9 @@ def test_formula_migration_groups_split_close_by_writer_order_group() -> None:
         for index in (1, 2)
     )
 
-    assert _formula_option_groups(events) == {"deal:close-both": events}
+    assert _formula_option_groups(events) == {
+        _unit_identity("writer", ("富途", "lx", "", "close-both")): events,
+    }
 
 
 def test_non_futu_event_stays_missing_and_never_reaches_provider(tmp_path: Path) -> None:

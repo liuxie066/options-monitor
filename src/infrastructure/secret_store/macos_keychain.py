@@ -20,6 +20,9 @@ from src.application.secret_store.registry import require_credential_spec
 
 KEYCHAIN_SERVICE = "options-monitor"
 SECURITY_COMMAND = "/usr/bin/security"
+# Apple SecBase.h: errSecItemNotFound=-25300; security returns OSStatus,
+# and Darwin wait(2) exposes its low eight bits. Do not mask other exit codes.
+KEYCHAIN_ITEM_NOT_FOUND_EXIT = (-25300) & 0xFF
 MAX_KEYCHAIN_SECRET_BYTES = 64 * 1024
 KEYCHAIN_PASSWORD_PROMPT = b"password data for new item:"
 KEYCHAIN_PASSWORD_CONFIRM_PROMPT = b"retype password for new item:"
@@ -154,8 +157,10 @@ class MacOSKeychain:
             )
         except OSError as exc:
             raise SecretBackendUnavailable("macOS Keychain is unavailable") from exc
-        if int(result.returncode) != 0:
+        if int(result.returncode) == KEYCHAIN_ITEM_NOT_FOUND_EXIT:
             return None
+        if int(result.returncode) != 0:
+            raise SecretBackendUnavailable("macOS Keychain lookup failed")
         value = str(result.stdout or "").strip()
         if len(value.encode("utf-8")) > MAX_KEYCHAIN_SECRET_BYTES:
             raise SecretBackendUnavailable("macOS Keychain credential is unexpectedly large")
@@ -175,6 +180,8 @@ class MacOSKeychain:
             )
         except OSError as exc:
             raise SecretBackendUnavailable("macOS Keychain is unavailable") from exc
+        if int(result.returncode) not in (0, KEYCHAIN_ITEM_NOT_FOUND_EXIT):
+            raise SecretBackendUnavailable("macOS Keychain status is unavailable")
         return SecretStatus(
             logical_name=logical_name,
             configured=int(result.returncode) == 0,
@@ -209,7 +216,7 @@ class MacOSKeychain:
             raise SecretProvisioningError("macOS Keychain delete failed") from exc
         if int(result.returncode) == 0:
             return True
-        if not self.status(logical_name).configured:
+        if int(result.returncode) == KEYCHAIN_ITEM_NOT_FOUND_EXIT:
             return False
         raise SecretProvisioningError(f"macOS Keychain delete failed for {logical_name}")
 

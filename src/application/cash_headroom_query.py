@@ -292,7 +292,8 @@ def query_sell_put_cash(
         "kind": "source_snapshot" if snapshot["source_observed_at"] else "source_unknown",
         "reason_codes": snapshot["reason_codes"],
     }
-    if not cash_snapshot_is_usable(portfolio):
+    cash_usable = cash_snapshot_is_usable(portfolio)
+    if not cash_usable:
         cash_by_ccy = {}
         cash_avail_usd = cash_avail_cny = cash_avail_total_cny = None
         cash_free_usd = cash_free_cny = cash_free_total_cny = None
@@ -330,6 +331,24 @@ def query_sell_put_cash(
         'cash_secured_unavailable_by_symbol': cash_secured_unavailable_by_symbol,
         'cash_secured_unavailable_reason': cash_secured_unavailable_reason,
         'cash_secured_usage_reliable': cash_secured_reliable,
+        'assessment': {
+            'status': 'cash_headroom_only' if cash_usable and cash_secured_reliable else 'unable',
+            'reason_codes': list(snapshot['reason_codes'])
+            + ([cash_secured_unavailable_reason] if cash_secured_unavailable_reason else [])
+            + (['CNY_CONVERSION_INCOMPLETE'] if missing_cny_rates else []),
+            'supported_claims': (
+                (['cash_available_by_currency'] if cash_usable else [])
+                + (['cash_secured_total_by_ccy'] if cash_secured_reliable else [])
+                + (['cash_free_total_cny'] if cash_usable and cash_secured_reliable and not missing_cny_rates
+                   and cash_free_total_cny is not None else [])
+            ),
+            'unsupported_claims': ['additional_short_contracts', 'covered_call_stock_cover', 'order_approval'],
+            'guidance': (
+                '只引用 supported_claims 中的已验证指标，保留账户、原币和 cash_snapshot.source_observed_at。'
+                '缺失或过期时无法判断，不以 PM 余额、历史答案或自行估算补齐。'
+                '现金余量不等于完整开仓能力；未评估候选合约、共享预留、股票覆盖及集中度，不能据此承诺可卖张数。'
+            ),
+        },
     }
 
     if output_format == 'json':

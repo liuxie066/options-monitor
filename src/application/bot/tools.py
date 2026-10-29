@@ -70,7 +70,7 @@ def build_tool_payload(
         except (TypeError, ValueError) as exc:
             return None, str(exc)
     trusted_fixed = dict(fixed_input or {})
-    if trusted_fixed.get("read_generation"):
+    if tool_name != "option_candidates" and trusted_fixed.get("read_generation"):
         trusted_fixed, route_error = _route_read_market(tool_name, explicit_payload, trusted_fixed)
         if route_error:
             return None, route_error
@@ -213,6 +213,7 @@ def call_read_tool(
     now_ms: int | None = None,
     deadline_monotonic: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    trusted_input: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if tool_name not in allowed_tools:
         return _tool_error(tool_name, "POLICY_ERROR", "tool is outside the Host allowlist")
@@ -223,6 +224,9 @@ def call_read_tool(
         return _tool_error(tool_name, "POLICY_ERROR", f"tool is not pure read-only: {tool_name}")
     if not is_active_bot_read_tool(tool_name):
         return _tool_error(tool_name, "POLICY_ERROR", f"tool is unavailable in Bot: {tool_name}")
+    if tool_name == "option_candidates":
+        return _call_option_candidates(payload, trusted_input=trusted_input,
+                                       deadline=deadline_monotonic, cancelled=cancelled)
     if tool_name == "option_performance_report" and now_ms is not None:
         from src.application.agent_tools.materialization_impl import (
             option_performance_report_now_ms,
@@ -245,6 +249,66 @@ def call_read_tool(
         with scheduled_tasks_query_context(deadline_monotonic=deadline_monotonic, cancelled=cancelled):
             return execute_tool(tool_name, payload)
     return execute_tool(tool_name, payload)
+
+
+def _call_option_candidates(payload, *, trusted_input, deadline, cancelled):
+    from src.application.agent_tool_config import DEFAULT_CONFIGS, repo_base
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.bot.config_scope import BotConfigScopeError, resolve_trusted_config_scope
+    from src.application.bot.model_config import load_bot_read_scope
+    from src.application.option_candidates import normalize_queries, option_candidates_context
+    from src.application.runtime_paths import resolve_runtime_root
+
+    def denied(message):
+        return _tool_error("option_candidates", "PERMISSION_DENIED", message)
+
+    fixed = trusted_input or {}
+    if not all(fixed.get(key) for key in ("read_generation", "read_markets", "bot_config_path", "config_key", "config_path")):
+        return denied("trusted Bot read authorization is unavailable")
+    try:
+        markets, generation = load_bot_read_scope(config_path=fixed["bot_config_path"], primary_market=fixed["config_key"])
+    except Exception:
+        return denied("trusted Bot read authorization is unavailable")
+    if generation != fixed["read_generation"] or sorted(markets) != fixed["read_markets"]:
+        return denied("trusted Bot read authorization changed; stop this turn")
+    try:
+        queries = normalize_queries(payload)
+    except AgentToolError as exc:
+        return _tool_error("option_candidates", exc.code, exc.message)
+    except (ValueError, TypeError) as exc:
+        return _tool_error("option_candidates", "INPUT_ERROR", str(exc))
+    requested = {query["market"].lower() for query in queries}
+    if not requested or not requested <= markets:
+        return denied("requested market is outside the trusted Bot read scope")
+    try:
+        runtime_root = resolve_runtime_root(repo_root=repo_base()).runtime_root.resolve()
+        primary_path = Path(fixed["config_path"]).resolve()
+    except (AgentToolError, OSError, RuntimeError, ValueError):
+        return denied("trusted Bot runtime root is unavailable")
+    if primary_path.parent != runtime_root:
+        return denied("channel config and runtime data roots differ")
+    config_paths: dict[str, str] = {}
+    for market in sorted(requested):
+        path = primary_path if market == fixed["config_key"] else runtime_root / DEFAULT_CONFIGS[market]
+        if path.resolve().parent != runtime_root:
+            return denied("selected market config and runtime data roots differ")
+        try:
+            actual, canonical, _authority = resolve_trusted_config_scope(config_key=None, config_path=str(path))
+        except BotConfigScopeError as exc:
+            if exc.reason not in {"config_missing", "config_stale", "config_unreadable"}:
+                return denied("selected market config identity is unavailable")
+            config_paths[market] = str(path.resolve())
+            continue
+        except (OSError, RuntimeError, ValueError):
+            config_paths[market] = str(path.resolve())
+            continue
+        if actual != market:
+            return denied("selected market config identity differs from the requested market")
+        config_paths[market] = canonical
+    with option_candidates_context(deadline=deadline, cancelled=cancelled,
+                                   config_paths=config_paths, runtime_root=runtime_root):
+        response = execute_tool("option_candidates", payload)
+    return {**response, "host_scope": {"tool": "option_candidates", "markets": sorted(requested)}}
 
 
 def tool_descriptions(
@@ -654,7 +718,7 @@ def model_observation(tool_name: str, response: dict[str, Any]) -> dict[str, Any
             if not isinstance(row, dict):
                 continue
             row.setdefault("outcomes", {
-                "usable_scan_result": row.get("scanned"),
+                "usable_scan_result": None,
                 "pipeline_completed_successfully": row.get("ran_pipeline"),
             })
             row.pop("scanned", None)

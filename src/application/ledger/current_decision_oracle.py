@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from domain.domain.option_lifecycle import pending_close_quantities
+
 from .current_decision_assigned_stock import (
     compact_assigned_stock_view,
 )
@@ -43,18 +45,12 @@ def _oracle_assigned_stock_report(
     now_ms: int,
 ) -> dict[str, Any]:
     from src.application.ledger.event_codec import import_stored_trade_events
-    from src.application.ledger.event_codec import valid_void_target_event_id
+    from src.application.ledger.assigned_stock_projection import _select_assigned_stock_trade_rows
     from src.application.ledger.publisher import (
         project_stored_trade_events_to_position_lots,
     )
 
-    event_rows = [
-        dict(item)
-        for item in rows.get("trade_events") or []
-        if int(item.get("event_time_ms") or item.get("trade_time_ms") or 0)
-        <= now_ms
-        or valid_void_target_event_id(item) is not None
-    ]
+    event_rows = _select_assigned_stock_trade_rows(rows, now_ms, account=account)
     events, _diagnostics = import_stored_trade_events(event_rows)
     projected = project_stored_trade_events_to_position_lots(event_rows)
     from src.application.ledger.assigned_stock_projection import (
@@ -153,6 +149,11 @@ def _oracle_lifecycle_case_facts(
             else None
         )
         try:
+            pending_close = pending_close_quantities(
+                facts["case_allocations"],
+                facts["trade_events"],
+                void_event_ids=facts["effective_void_event_ids"],
+            )
             compact_model = derive_lifecycle_read_model(
                 expiration_ymd=str(lifecycle_case.get("expiration_ymd") or ""),
                 market=str(
@@ -168,6 +169,7 @@ def _oracle_lifecycle_case_facts(
                 accepted_option_close_contracts_by_lot=dict(
                     case_resolution.get("effective_reservations_by_lot") or {}
                 ),
+                pending_close_contracts_by_lot=pending_close,
                 now_ms=now_ms,
                 observation_start_ms_override=(
                     int(lifecycle_case["observation_start_ms"])
@@ -189,6 +191,7 @@ def _oracle_lifecycle_case_facts(
             "lifecycle_case_id": case_id,
             "resolved_contracts_by_lot": compact_model.resolved_contracts_by_lot,
             "remaining_contracts_by_lot": compact_model.remaining_contracts_by_lot,
+            "pending_close_contracts_by_lot": pending_close,
             "resolved_contracts_by_terminal_type": (
                 compact_model.resolved_contracts_by_terminal_type
             ),

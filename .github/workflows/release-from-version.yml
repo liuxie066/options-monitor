@@ -9,11 +9,15 @@ permissions:
 jobs:
   resolve-tag:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
 
       - name: Resolve release metadata
         id: meta
@@ -26,8 +30,7 @@ jobs:
     needs: resolve-tag
     permissions:
       contents: write
-    uses: ./.github/workflows/_release-reusable.yml
+      actions: read
+    uses: ./.github/workflows/guardrails.yml
     with:
-      tag: ${{ needs.resolve-tag.outputs.tag }}
-      target_commitish: ${{ github.sha }}
-      run_regression_gates: true
+      release_tag: ${{ needs.resolve-tag.outputs.tag }}

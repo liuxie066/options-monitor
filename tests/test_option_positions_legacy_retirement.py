@@ -1044,6 +1044,7 @@ def test_remaining_ledger_coordination_locks_have_reviewed_owners():
         "src/application/trades/resolver.py": {"resolve_trade_deal"},
         "src/application/trades/auto_intake.py": {
             "recover_trade_intake_receipts", "main", "_reconcile_source_completion",
+            "_process_payload._record_lookup_evidence",
         },
         "src/application/positions/workflows.py": {"execute_broker_assigned_stock_sale"},
         "src/application/bot/control/attribution_operations.py": {"_finish_attribution_operation"},

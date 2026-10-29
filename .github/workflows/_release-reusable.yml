@@ -6,14 +6,6 @@ on:
       tag:
         required: true
         type: string
-      target_commitish:
-        required: false
-        type: string
-        default: ""
-      run_regression_gates:
-        required: false
-        type: boolean
-        default: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -21,12 +13,21 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
+    concurrency:
+      group: release-${{ github.repository }}-${{ inputs.tag }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
     permissions:
       contents: write
+      actions: read
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Set up Python
@@ -39,17 +40,8 @@ jobs:
           bash scripts/install_agent_plugin.sh
           ./.venv/bin/pip install pytest
 
-      - name: Python Bot release gate
-        if: ${{ inputs.run_regression_gates }}
-        run: |
-          ./.venv/bin/python -m pytest tests/test_bot_python_runtime.py
-          ./.venv/bin/python -m pytest \
-            tests/test_bot_phase1.py \
-            tests/test_bot_conversation_memory.py \
-            tests/test_bot_p1_eval.py \
-            tests/test_install_script.py \
-            tests/test_release_test_plan.py \
-            tests/bot_eval/test_answer_quality.py
+      - name: Validate source identity
+        run: ./.venv/bin/python .github/ci/release_checks.py identity
 
       - name: Validate release metadata
         run: |
@@ -57,27 +49,6 @@ jobs:
           ./.venv/bin/python scripts/release_check.py --tag "${{ inputs.tag }}" --require-current-taxonomy --require-delta-coverage --render-notes-out /tmp/release-notes.md
           ./.venv/bin/python scripts/generate_dependency_graph.py --check
           ./om-agent spec > /tmp/om-agent-spec.json
-
-      - name: Smoke and plugin tests
-        if: ${{ inputs.run_regression_gates }}
-        run: |
-          ./.venv/bin/python tests/run_smoke.py
-          ./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
-          ./.venv/bin/python -m pytest tests/test_release_check.py tests/test_release_delta_coverage.py tests/test_release_version_recommendation.py tests/test_version_check.py
-          ./.venv/bin/python -m pytest tests/test_research.py tests/test_research_archive.py
-
-      - name: Configuration and control-plane release gate
-        if: ${{ inputs.run_regression_gates }}
-        run: |
-          ./.venv/bin/python -m pytest \
-            tests/test_config_yaml.py \
-            tests/test_config_template_inheritance.py \
-            tests/test_config_authoring_transaction.py \
-            tests/test_runtime_config_identity.py \
-            tests/*/test_service_deploy_*.py \
-            tests/test_inbound_control.py \
-            tests/test_setup_check.py \
-            tests/test_cli_operator_commands.py
 
       - name: Build source archive
         run: |
@@ -91,14 +62,22 @@ jobs:
           cd "${ARCHIVE_ROOT}"
           "${CHECKOUT_PYTHON}" -c 'import src.application.bot.host; import src.application.bot.runtime'
 
+      - name: Require current CodeQL and tag evidence
+        run: ./.venv/bin/python .github/ci/release_checks.py before-publish
+
       - name: Publish release
+        id: publish
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.tag }}
           name: ${{ inputs.tag }}
-          target_commitish: ${{ inputs.target_commitish || github.sha }}
+          target_commitish: ${{ github.sha }}
           body_path: /tmp/release-notes.md
           files: |
             options-monitor-${{ inputs.tag }}.tar.gz
             /tmp/om-agent-spec.json
             VERSION
+
+      - name: Read back publication outcome
+        if: ${{ always() && (steps.publish.outcome == 'success' || steps.publish.outcome == 'failure') }}
+        run: ./.venv/bin/python .github/ci/release_checks.py readback

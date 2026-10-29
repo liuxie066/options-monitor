@@ -133,7 +133,8 @@ class _Change:
 class _Unit:
     identity: str
     changes: tuple[_Change, ...]
-    settlement_observation: ActualOrderFee | None = None
+    observation: ActualOrderFee | None = None
+    group_snapshot: tuple[tuple[str, str], ...] = ()
 
 
 def stock_settlement_fee_context(event: TradeEvent) -> dict[str, Any] | None:
@@ -293,14 +294,15 @@ def _build_units(
     actual_fees: Sequence[ActualOrderFee],
     applied_at_ms: int,
     target_identity: tuple[str, str, str, str] | None = None,
+    conn: Any = None,
 ) -> tuple[
     tuple[_Unit, ...],
     tuple[dict[str, Any], ...],
     tuple[dict[str, Any], ...],
     dict[str, dict[str, int]],
 ]:
-    trade_rows = repo.list_position_projection_event_rows()
-    stock_rows = repo.list_assigned_stock_events()
+    trade_rows = repo.list_position_projection_event_rows(conn=conn)
+    stock_rows = repo.list_assigned_stock_events(conn=conn)
     trade_events: list[TradeEvent] = []
     trade_event_json: dict[str, str] = {}
     unresolved: list[dict[str, Any]] = []
@@ -523,7 +525,11 @@ def _build_units(
                 _Unit(
                     identity=_unit_identity("actual", observation.identity),
                     changes=tuple(changes),
-                    settlement_observation=observation if settlement_group else None,
+                    observation=observation,
+                    group_snapshot=tuple(sorted(
+                        (_event_id(row), trade_event_json[row.event_id] if isinstance(row, TradeEvent) else _json(row))
+                        for row in rows
+                    )),
                 )
             )
         else:
@@ -826,6 +832,13 @@ def _estimated_option_changes(
     ordered = sorted(events, key=lambda item: (item.event_time_ms, item.event_id))
     if any(normalize_broker(item.contract_key.broker) != "富途" for item in ordered):
         return [], "unsupported_broker_fee_schedule"
+    for event in ordered:
+        raw = event.raw_payload or {}
+        if (raw.get("source_deal_id") or raw.get("broker_deal_completion")) and _order_identity(
+            event.contract_key.broker, event.contract_key.account,
+            raw.get("futu_account_id"), raw.get("source_deal_id"),
+        ) is None:
+            return [], "source_deal_fee_identity_missing"
     first = ordered[0]
     comparable = {
         option_fee_input_identity(item)
@@ -1152,22 +1165,25 @@ def _apply_unit(
     unit: _Unit,
     *,
     applied_at_ms: int,
+    resolve_pending_fee_fx: bool = True,
 ) -> dict[str, Any]:
     if conn is None:
         raise TypeError("fee enrichment requires SQLite transaction authority")
-    if unit.settlement_observation is not None:
-        rebuilt, issues, _, _ = _build_units(
-            repo, account=unit.settlement_observation.account, start_ms=None, end_exclusive_ms=None,
-            actual_fees=(unit.settlement_observation,), applied_at_ms=applied_at_ms,
-            target_identity=unit.settlement_observation.identity,
+    if unit.observation is not None:
+        rebuilt, _, _, _ = _build_units(
+            repo, account=unit.observation.account, start_ms=None, end_exclusive_ms=None,
+            actual_fees=(unit.observation,), applied_at_ms=applied_at_ms,
+            target_identity=unit.observation.identity, conn=conn,
         )
-        if issues or len(rebuilt) != 1 or rebuilt[0].changes != unit.changes:
-            raise ValueError("stock settlement order changed after admission")
-    fx_payload = load_cash_fx_payload(repo, conn=conn)
-    unit = replace(unit, changes=tuple(
-        _fill_pending_fee_fx(change, fx_payload=fx_payload, applied_at_ms=applied_at_ms)
-        for change in unit.changes
-    ))
+        # Rebuilt units passed admission; diagnostics may describe other namespaces.
+        if len(rebuilt) != 1 or rebuilt[0] != unit:
+            raise ValueError("fee order group changed after admission")
+    if resolve_pending_fee_fx:
+        fx_payload = load_cash_fx_payload(repo, conn=conn)
+        unit = replace(unit, changes=tuple(
+            _fill_pending_fee_fx(change, fx_payload=fx_payload, applied_at_ms=applied_at_ms)
+            for change in unit.changes
+        ))
     accounts = sorted({change.account for change in unit.changes})
     option_changed = any(change.event_kind in {"option_trade", "stock_settlement"} for change in unit.changes)
     fence = (
@@ -1536,14 +1552,21 @@ def _formula_option_groups(
         if event.event_type not in {"open", "close"}:
             continue
         raw_payload = event.raw_payload or {}
-        source_deal_id = str(
-            raw_payload.get("source_deal_id") or raw_payload.get("fee_order_group_id") or ""
-        ).strip()
-        key = (
-            f"deal:{source_deal_id}"
-            if source_deal_id and (event.event_type == "close" or raw_payload.get("broker_deal_completion"))
-            else f"event:{event.event_id}"
-        )
+        source_deal_id = str(raw_payload.get("source_deal_id") or "").strip()
+        writer_group_id = str(raw_payload.get("fee_order_group_id") or "").strip()
+        key = f"event:{event.event_id}"
+        if event.event_type == "close" or raw_payload.get("broker_deal_completion"):
+            identity = _order_identity(
+                event.contract_key.broker, event.contract_key.account,
+                raw_payload.get("futu_account_id"), source_deal_id,
+            )
+            if source_deal_id and identity is not None:
+                key = _unit_identity("deal", identity)
+            elif not source_deal_id and not raw_payload.get("broker_deal_completion") and writer_group_id:
+                key = _unit_identity("writer", (
+                    normalize_broker(event.contract_key.broker), event.contract_key.account,
+                    str(raw_payload.get("futu_account_id") or "").strip(), writer_group_id,
+                ))
         grouped.setdefault(key, []).append(event)
     return {key: tuple(value) for key, value in grouped.items()}
 

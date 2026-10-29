@@ -1,0 +1,62 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.1",
+  "base": {
+    "tag": "v4.6.0",
+    "commit": "452a9e9ac87775cc50ab06a8e3ee7436df0563e4"
+  },
+  "reviewed_head": "73407935d9fdd48089bd086107469e0da24918a6",
+  "commits": [
+    {
+      "sha": "961019abe511d623a7cedd79c7a39edbf8b056fd",
+      "subject": "fix(sizing): isolate CSP and CC assignment scenarios"
+    },
+    {
+      "sha": "dbbacfbf8bc98b987a94db0556055ac7f03445ca",
+      "subject": "test(sizing): align mixed assignments with directional scenarios"
+    },
+    {
+      "sha": "73407935d9fdd48089bd086107469e0da24918a6",
+      "subject": "Merge pull request #941 from liuxie066/codex/directional-position-sizing"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "候选指派后占比按同账户、同标的及同方向持仓独立计算：CSP 只计已有 short put，CC 只计已有 short call，再加入一张候选；反方向不再抵消，保留有符号股票和现金及历史情景兼容（#941）。",
+      "commits": [
+        "961019abe511d623a7cedd79c7a39edbf8b056fd",
+        "73407935d9fdd48089bd086107469e0da24918a6"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "dbbacfbf8bc98b987a94db0556055ac7f03445ca",
+      "reason": "仅更新混合持仓测试为独立方向指派预期，保留有符号空头股票断言，无额外生产行为变化。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "961019abe511d623a7cedd79c7a39edbf8b056fd",
+      "references": [
+        "docs/candidate_strategy.md",
+        "https://github.com/liuxie066/options-monitor/pull/941"
+      ]
+    },
+    {
+      "commit": "dbbacfbf8bc98b987a94db0556055ac7f03445ca",
+      "references": [
+        "docs/candidate_strategy.md",
+        "https://github.com/liuxie066/options-monitor/pull/941"
+      ]
+    },
+    {
+      "commit": "73407935d9fdd48089bd086107469e0da24918a6",
+      "references": [
+        "docs/candidate_strategy.md",
+        "https://github.com/liuxie066/options-monitor/pull/941"
+      ]
+    }
+  ]
+}

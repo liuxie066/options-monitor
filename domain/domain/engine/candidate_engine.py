@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING
 from typing import Any, Literal
 
+from domain.domain.candidate_defaults import DEFAULT_MAX_ABS_DELTA, validate_max_abs_delta
 from domain.domain.fee_calc import estimate_futu_option_sell_fee
 from domain.domain.strategy_identity import candidate_ranking_profile
 from domain.domain.trade_contract_identity import contract_share_quantity, require_option_multiplier
@@ -62,6 +63,10 @@ REJECT_RETURN_NET_INCOME = "return_net_income"
 REJECT_RETURN_NET_PREMIUM_CNY = "return_net_premium_cny"
 REJECT_RISK_OPEN_INTEREST = "risk_open_interest"
 REJECT_RISK_VOLUME = "risk_volume"
+REJECT_RISK_DELTA = "risk_delta"
+REJECT_RISK_DELTA_UNAVAILABLE = "risk_delta_unavailable"
+_MAX_ABS_DELTA_UNSET = object()
+
 REJECT_RISK_SPREAD = "risk_spread"
 REJECT_RISK_IV_RV_RATIO = "risk_iv_rv_ratio"
 REJECT_RISK_IV_MINUS_RV = "risk_iv_minus_rv"
@@ -87,6 +92,8 @@ CANDIDATE_REJECT_REASONS: tuple[str, ...] = (
     REJECT_RISK_OPEN_INTEREST,
     REJECT_RISK_VOLUME,
     REJECT_RISK_SPREAD,
+    REJECT_RISK_DELTA,
+    REJECT_RISK_DELTA_UNAVAILABLE,
     REJECT_RISK_IV_RV_RATIO,
     REJECT_RISK_IV_MINUS_RV,
     REJECT_RISK_EARNINGS_UNAVAILABLE,
@@ -357,6 +364,43 @@ def _tick_ceiling(value: float, tick: float) -> float:
     return float(units * tick_decimal)
 
 
+def validate_opening_quote_freshness(
+    raw: dict[str, Any],
+    *,
+    now_utc: Any = None,
+    max_snapshot_age_seconds: int = 300,
+) -> None:
+    """Require a fresh snapshot receipt before relying on any contract outcome."""
+
+    # The 300-second acquisition-freshness window is owned by the decision
+    # moment, not the fetch moment: re-evaluate it here against the real
+    # decision clock instead of trusting the fetch-time ``ready`` snapshot.
+    snapshot_received = _parse_decision_time(raw.get("snapshot_received_at_utc"))
+    if snapshot_received is None:
+        raise CandidateCalculationError(
+            REJECT_EVIDENCE_UNAVAILABLE,
+            "OpenD option snapshot receipt timestamp is missing or invalid",
+            metric_value={"snapshot_received_at_utc": raw.get("snapshot_received_at_utc")},
+            threshold="present UTC receipt",
+        )
+    decision_now = _decision_now(now_utc)
+    snapshot_age = (decision_now - snapshot_received).total_seconds()
+    if snapshot_age < 0:
+        raise CandidateCalculationError(
+            REJECT_EVIDENCE_UNAVAILABLE,
+            "OpenD option snapshot receipt is in the future",
+            metric_value={"snapshot_age_seconds": snapshot_age},
+            threshold=">= 0",
+        )
+    if snapshot_age > int(max_snapshot_age_seconds):
+        raise CandidateCalculationError(
+            REJECT_EVIDENCE_UNAVAILABLE,
+            "OpenD option snapshot is stale relative to the decision moment",
+            metric_value={"snapshot_age_seconds": snapshot_age},
+            threshold=int(max_snapshot_age_seconds),
+        )
+
+
 def validate_opening_contract_evidence(
     raw: dict[str, Any] | Any,
     *,
@@ -408,33 +452,10 @@ def validate_opening_contract_evidence(
             threshold="ready",
         )
 
-    # The 300-second acquisition-freshness window is owned by the decision
-    # moment, not the fetch moment: re-evaluate it here against the real
-    # decision clock instead of trusting the fetch-time ``ready`` snapshot.
-    snapshot_received = _parse_decision_time(raw.get("snapshot_received_at_utc"))
-    if snapshot_received is None:
-        raise CandidateCalculationError(
-            REJECT_EVIDENCE_UNAVAILABLE,
-            "OpenD option snapshot receipt timestamp is missing or invalid",
-            metric_value={"snapshot_received_at_utc": raw.get("snapshot_received_at_utc")},
-            threshold="present UTC receipt",
-        )
     decision_now = _decision_now(now_utc)
-    snapshot_age = (decision_now - snapshot_received).total_seconds()
-    if snapshot_age < 0:
-        raise CandidateCalculationError(
-            REJECT_EVIDENCE_UNAVAILABLE,
-            "OpenD option snapshot receipt is in the future",
-            metric_value={"snapshot_age_seconds": snapshot_age},
-            threshold=">= 0",
-        )
-    if snapshot_age > int(max_snapshot_age_seconds):
-        raise CandidateCalculationError(
-            REJECT_EVIDENCE_UNAVAILABLE,
-            "OpenD option snapshot is stale relative to the decision moment",
-            metric_value={"snapshot_age_seconds": snapshot_age},
-            threshold=int(max_snapshot_age_seconds),
-        )
+    validate_opening_quote_freshness(
+        raw, now_utc=decision_now, max_snapshot_age_seconds=max_snapshot_age_seconds,
+    )
 
     spot_observed_text = _first_text(raw, "spot_observed_at_utc")
     spot_observed = _parse_decision_time(spot_observed_text)
@@ -695,8 +716,65 @@ def calculate_opening_candidate_metrics(
     return out
 
 
+def _delta_qualification_rejects(row: dict[str, Any], *, mode: StrategyMode, max_abs_delta: Any) -> list[dict[str, Any]]:
+    cap = validate_max_abs_delta(
+        row.get("policy_max_abs_delta", DEFAULT_MAX_ABS_DELTA)
+        if max_abs_delta is _MAX_ABS_DELTA_UNSET else max_abs_delta
+    )
+    if cap is None:
+        return []
+    raw = row.get("delta")
+    try:
+        value = float(raw) if not isinstance(raw, bool) and isinstance(raw, (int, float)) else None
+    except OverflowError:
+        value = None
+    numeric = value is not None and math.isfinite(value)
+    value = value if numeric else None
+    reason = None
+    if _first_text(row, "delta_source") != "opend_market_snapshot.option_delta":
+        reason = "delta_source_unverified"
+    elif _first_text(row, "delta_unit") != "fraction":
+        reason = "delta_unit_invalid"
+    elif _first_text(row, "delta_reason_code"):
+        reason = _first_text(row, "delta_reason_code")
+    elif not numeric:
+        reason = "delta_missing_or_nonfinite"
+    elif abs(value) > 1:
+        reason = "delta_out_of_range"
+    elif (mode == "put" and value > 0) or (mode == "call" and value < 0):
+        reason = "delta_sign_mismatch"
+    elif _first_text(row, "option_type").lower() != mode:
+        reason = "delta_direction_mismatch"
+    else:
+        decision = _parse_decision_time(row.get("decision_now_utc"))
+        received = _parse_decision_time(row.get("snapshot_received_at_utc"))
+        if decision is None:
+            reason = "delta_decision_time_unavailable"
+        elif received is None:
+            reason = "delta_snapshot_receipt_unavailable"
+        else:
+            age = (decision - received).total_seconds()
+            if age < 0:
+                reason = "delta_snapshot_receipt_future"
+            elif age > 300:
+                reason = "delta_snapshot_receipt_stale"
+    rejects: list[dict[str, Any]] = []
+    if reason or abs(value) > cap:
+        _reject(rejects, stage=STAGE_RISK_FILTER,
+                reason=REJECT_RISK_DELTA_UNAVAILABLE if reason else REJECT_RISK_DELTA,
+                message="Delta evidence is unavailable" if reason else "absolute Delta exceeds configured maximum",
+                metric_value={"delta": value, "reason_code": reason,
+                              "source": _first_text(row, "delta_source") or None,
+                              "unit": _first_text(row, "delta_unit") or None,
+                              "snapshot_received_at_utc": _first_text(row, "snapshot_received_at_utc") or None,
+                              "decision_now_utc": _first_text(row, "decision_now_utc") or None},
+                threshold=cap)
+    return rejects
+
+
 def opening_qualification_rejects(
     row: dict[str, Any], *, mode: StrategyMode | str, min_net_premium_cny: float | None,
+    max_abs_delta: Any = _MAX_ABS_DELTA_UNSET,
 ) -> list[dict[str, Any]]:
     """Shared capacity, required value and earnings-evidence invariants."""
     mode_norm = normalize_strategy_mode(mode)
@@ -762,6 +840,7 @@ def opening_qualification_rejects(
             metric_value=earnings_evidence["metric_value"],
             threshold="ready",
         )
+    rejects.extend(_delta_qualification_rejects(src, mode=mode_norm, max_abs_delta=max_abs_delta))
     return rejects
 
 
@@ -771,7 +850,7 @@ def merge_opening_rejects(policy: list[dict[str, Any]], shared: list[dict[str, A
         REJECT_HARD_DTE, REJECT_HARD_STRIKE, REJECT_HARD_CAPACITY_PUT, REJECT_HARD_CAPACITY_CALL,
         REJECT_RETURN_ANNUALIZED, REJECT_INPUT_MISSING, REJECT_RETURN_NET_PREMIUM_CNY,
         REJECT_RISK_SPREAD, REJECT_RISK_IV_RV_RATIO, REJECT_RISK_IV_MINUS_RV,
-        REJECT_RISK_EARNINGS_UNAVAILABLE, REJECT_RISK_EARNINGS_EVENT,
+        REJECT_RISK_EARNINGS_UNAVAILABLE, REJECT_RISK_EARNINGS_EVENT, REJECT_RISK_DELTA_UNAVAILABLE, REJECT_RISK_DELTA,
     )
     merged = [normalize_candidate_reject(item) for item in policy]
     for item in shared:
@@ -796,11 +875,17 @@ def evaluate_opening_candidate_policy(
     min_iv_rv_ratio: float | None = None,
     min_iv_minus_rv: float | None = None,
     max_spread_ratio: float | None = None,
+    max_abs_delta: Any = _MAX_ABS_DELTA_UNSET,
     require_earnings_evidence: bool = True,
     reject_known_earnings: bool = True,
     apply_default_call_strike_cap: bool = True,
+    check_capacity: bool = True,
 ) -> dict[str, Any]:
-    """Evaluate the common formal opening gates owned by Candidate Engine."""
+    """Evaluate formal opening gates; queries may skip capacity and expose conditions.
+
+    ``check_capacity=False`` leaves contract gates intact and adds their numeric
+    evidence to the decision. Earnings policy remains independently controlled.
+    """
 
     mode_norm = normalize_strategy_mode(mode)
     src = dict(raw) if isinstance(raw, dict) else {}
@@ -918,9 +1003,10 @@ def evaluate_opening_candidate_policy(
         )
 
     qualification = opening_qualification_rejects(
-        src, mode=mode_norm, min_net_premium_cny=resolved_min_net_premium_cny,
+        src, mode=mode_norm, min_net_premium_cny=resolved_min_net_premium_cny, max_abs_delta=max_abs_delta,
     )
-    rejects.extend(item for item in qualification if item["reason"] in (REJECT_HARD_CAPACITY_PUT, REJECT_HARD_CAPACITY_CALL))
+    if check_capacity:
+        rejects.extend(item for item in qualification if item["reason"] in (REJECT_HARD_CAPACITY_PUT, REJECT_HARD_CAPACITY_CALL))
 
     annualized = _first_float(
         src,
@@ -1000,7 +1086,8 @@ def evaluate_opening_candidate_policy(
                 threshold="no pending event within six calendar days of expiration",
             )
 
-    return build_candidate_decision(
+    rejects.extend(item for item in qualification if item["reason"] in (REJECT_RISK_DELTA, REJECT_RISK_DELTA_UNAVAILABLE))
+    decision = build_candidate_decision(
         mode=mode_norm,
         symbol=str(src.get("symbol") or ""),
         contract_symbol=str(src.get("contract_symbol") or src.get("option_symbol") or ""),
@@ -1008,6 +1095,50 @@ def evaluate_opening_candidate_policy(
         rejects=rejects,
         normalized_input=src,
     )
+    if not check_capacity:
+        # Project this evaluation's rejects and resolved bounds, never rerun policy.
+        rejected_reasons = {item["reason"] for item in rejects}
+        resolved_max_abs_delta = validate_max_abs_delta(
+            src.get("policy_max_abs_delta", DEFAULT_MAX_ABS_DELTA)
+            if max_abs_delta is _MAX_ABS_DELTA_UNSET else max_abs_delta
+        )
+        delta = _first_float(src, "delta")
+        delta_unavailable = REJECT_RISK_DELTA_UNAVAILABLE in rejected_reasons
+        conditions: list[dict[str, Any]] = []
+        for name, actual, lower, upper, reason in (
+            ("dte", dte, resolved_min_dte, resolved_max_dte, REJECT_HARD_DTE),
+            ("strike", strike, effective_min_strike, effective_max_strike, REJECT_HARD_STRIKE),
+            ("annualized_net_return", annualized, resolved_min_annualized_return, None, REJECT_RETURN_ANNUALIZED),
+            ("net_premium_cny", net_premium_cny, resolved_min_net_premium_cny, None, REJECT_RETURN_NET_PREMIUM_CNY),
+            ("spread_ratio", spread_ratio, None, resolved_max_spread_ratio, REJECT_RISK_SPREAD),
+            ("iv_rv_ratio", iv_rv_ratio, resolved_min_iv_rv_ratio, None, REJECT_RISK_IV_RV_RATIO),
+            ("iv_minus_rv", iv_minus_rv, resolved_min_iv_minus_rv, None, REJECT_RISK_IV_MINUS_RV),
+            ("abs_delta", abs(delta) if delta is not None and not delta_unavailable else None,
+             None, resolved_max_abs_delta, REJECT_RISK_DELTA_UNAVAILABLE if delta_unavailable else REJECT_RISK_DELTA),
+        ):
+            if lower is None and upper is None:
+                continue
+            if lower is not None and upper is not None:
+                required = {"operator": "between", "value": [lower, upper]}
+            elif lower is not None:
+                required = {"operator": "gte", "value": lower}
+            else:
+                required = {"operator": "lte", "value": upper}
+            status = "unknown" if actual is None else "fail" if reason in rejected_reasons else "pass"
+            reason_code = None if status == "pass" else reason
+            if name == "net_premium_cny" and actual is None:
+                reason_code = "net_premium_cny_unavailable"
+            conditions.append(
+                {
+                    "name": name,
+                    "status": status,
+                    "actual": actual,
+                    "required": required,
+                    "reason_code": reason_code,
+                }
+            )
+        decision["conditions"] = conditions
+    return decision
 
 
 def _evaluate_earnings_policy_evidence(src: Mapping[str, Any]) -> dict[str, Any]:

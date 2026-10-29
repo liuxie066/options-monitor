@@ -5,6 +5,7 @@ import json
 import math
 import os
 import platform
+import re
 import shutil
 import shlex
 import subprocess
@@ -18,7 +19,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.bot.pi_migration import assert_pi_storage_ready
 from src.application.file_locks import single_instance_lock
 from src.application.release_target import compare_versions, parse_version, resolve_upgrade_target
 from src.application.runtime_config_freshness import (
@@ -32,7 +32,6 @@ from src.application.service_drift import (
     normalize_service_activation_policy,
     service_drift,
 )
-from src.application.service_cleanup import pi_session_database_paths
 from src.infrastructure.io_utils import parse_last_json_obj
 
 _CHILD_ENV_PASSTHROUGH_NAMES = {
@@ -401,12 +400,6 @@ class RuntimePrepareError(RuntimeError):
         self.runtime_prepare = runtime_prepare
 
 
-class _PiRuntimePrepareError(RuntimeError):
-    def __init__(self, message: str, *, details: dict[str, Any]) -> None:
-        super().__init__(message)
-        self.details = details
-
-
 class ServiceTransitionError(RuntimeError):
     def __init__(self, message: str, *, status: str, remediation: list[str] | None = None) -> None:
         super().__init__(message)
@@ -653,7 +646,7 @@ def _resolve_upgrade_remote_url(
     except Exception as exc:
         errors.append(f"current_release: {exc}")
     try:
-        return _cache_remote_url(cache_root=cache_root, remote_name=remote_name, run_cmd=run_cmd)
+        return _cache_remote_url(cache_root=cache_root, remote_name="origin", run_cmd=run_cmd)
     except Exception as exc:
         errors.append(f"upgrade_cache: {exc}")
     raise RuntimeError(
@@ -686,7 +679,27 @@ def _version_check_for_upgrade(
             "error": str(exc),
             "source": "release_target",
         }
+    try:
+        remote_url = (
+            _cache_remote_url(cache_root=cache_root, remote_name="origin", run_cmd=run_cmd)
+            if _cache_repo_path(cache_root).exists()
+            else _resolve_upgrade_remote_url(
+                repo_root=repo_root, cache_root=cache_root, remote_name=remote_name, run_cmd=run_cmd,
+            )
+        )
+    except Exception:
+        return {
+            "ok": False, "current_version": current_version, "latest_version": None,
+            "update_available": False, "remote_name": remote_name, "checked_at": utc_now_iso(now_fn),
+            "release_tag": None, "selected_tag": None, "target_source": None,
+            "cache_repo": str(_cache_repo_path(cache_root)), "cache_fetched": False,
+            "tag_count": 0, "highest_tag_seen": None, "source": "release_target",
+            "message": ("版本检查失败：无法确定升级来源（cache origin unavailable）"
+                        if _cache_repo_path(cache_root).exists() else "版本检查失败：无法确定升级来源"),
+            "error": "upgrade_source_unavailable",
+        }
     resolved = resolve_upgrade_target(
+        remote_url=remote_url,
         current_version=current_version,
         repo_root=repo_root,
         cache_root=cache_root,
@@ -727,6 +740,7 @@ def _materialize_release_from_git_cache(
 
     cache_repo.parent.mkdir(parents=True, exist_ok=True)
     if cache_repo.exists():
+        _cache_remote_url(cache_root=cache_root, remote_name="origin", run_cmd=run_cmd)
         _run_required(
             ["git", f"--git-dir={cache_repo}", "fetch", "--tags", "--prune", "origin"],
             cwd=None,
@@ -737,7 +751,7 @@ def _materialize_release_from_git_cache(
         out["fetched"] = True
     else:
         _run_required(
-            ["git", "clone", "--mirror", remote_url, str(cache_repo)],
+            ["git", "clone", "--mirror", "--origin", "origin", remote_url, str(cache_repo)],
             cwd=None,
             run_cmd=run_cmd,
             operations=operations,
@@ -1945,112 +1959,16 @@ def _venv_python(venv_dir: Path) -> Path:
     return venv_dir / "bin" / "python"
 
 
-def _node_version_tuple(raw: str) -> tuple[int, int, int] | None:
-    parts = str(raw or "").strip().removeprefix("v").split(".")
-    if len(parts) != 3 or not all(part.isdigit() for part in parts):
-        return None
-    return int(parts[0]), int(parts[1]), int(parts[2])
-
-
-def _ensure_pi_runtime(
+def _ensure_bot_runtime(
     target_dir: Path,
     run_cmd: Callable[..., Any],
     operations: list[dict[str, Any]],
-    *,
-    previous_dir: Path | None = None,
 ) -> dict[str, Any]:
-    # Old releases still need their own Pi preparation when explicitly selected for rollback.
-    if (target_dir / "src/application/bot/runtime.py").is_file():
-        _run_required([str(target_dir / ".venv/bin/python"), "-c",
-                       "import src.application.bot.host; import src.application.bot.runtime"],
-                      cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=30)
-        return {"runtime": "python", "ok": True}
-    package_lock = target_dir / "agent-runtime" / "package-lock.json"
-    smoke_script = target_dir / "scripts" / "pi_runtime_smoke.sh"
-    details: dict[str, Any] = {
-        "node_version": None,
-        "npm_version": None,
-        "package_lock_sha256": None,
-        "install_strategy": "npm_ci",
-        "reused_from": None,
-    }
-    try:
-        details["package_lock_sha256"] = hashlib.sha256(package_lock.read_bytes()).hexdigest()
-        if not smoke_script.is_file():
-            raise RuntimeError(f"Pi runtime smoke script is missing: {smoke_script}")
-
-        node_result = _run_required(
-            ["node", "--version"],
-            cwd=target_dir,
-            run_cmd=run_cmd,
-            operations=operations,
-            timeout=30,
-        )
-        node_version = str(node_result.get("stdout") or "").strip()
-        details["node_version"] = node_version
-        parsed_node = _node_version_tuple(node_version)
-        if parsed_node is None or parsed_node < (22, 19, 0):
-            raise RuntimeError(f"Node >= 22.19.0 is required; observed={node_version or 'unusable'}")
-
-        npm_result = _run_required(
-            ["npm", "--version"],
-            cwd=target_dir,
-            run_cmd=run_cmd,
-            operations=operations,
-            timeout=30,
-        )
-        details["npm_version"] = str(npm_result.get("stdout") or "").strip() or None
-        previous_lock = (previous_dir / "agent-runtime" / "package-lock.json") if previous_dir else None
-        previous_modules = (previous_dir / "agent-runtime" / "node_modules") if previous_dir else None
-        if (
-            previous_lock is not None
-            and previous_modules is not None
-            and previous_lock.is_file()
-            and previous_modules.is_dir()
-            and hashlib.sha256(previous_lock.read_bytes()).hexdigest() == details["package_lock_sha256"]
-        ):
-            target_modules = target_dir / "agent-runtime" / "node_modules"
-            if target_modules.is_symlink():
-                target_modules.unlink()
-            elif target_modules.exists():
-                shutil.rmtree(target_modules)
-            shutil.copytree(previous_modules, target_modules, symlinks=True)
-            details["install_strategy"] = "reuse_previous"
-            details["reused_from"] = str(previous_modules)
-        else:
-            _run_required(
-                [
-                    "npm",
-                    "ci",
-                    "--omit=dev",
-                    "--ignore-scripts",
-                    "--prefer-offline",
-                    "--no-audit",
-                    "--prefix",
-                    "agent-runtime",
-                ],
-                cwd=target_dir,
-                run_cmd=run_cmd,
-                operations=operations,
-                timeout=1200,
-            )
-        _run_required(
-            [
-                "bash",
-                "scripts/pi_runtime_smoke.sh",
-                "--root",
-                str(target_dir),
-                "--python",
-                str(_release_python(target_dir)),
-            ],
-            cwd=target_dir,
-            run_cmd=run_cmd,
-            operations=operations,
-            timeout=180,
-        )
-        return details
-    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-        raise _PiRuntimePrepareError(str(exc), details=details) from exc
+    readiness = _runtime_readiness(release_dir=target_dir)
+    _run_required([str(target_dir / ".venv/bin/python"), "-c",
+                   "import src.application.bot.host; import src.application.bot.runtime"],
+                  cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=30)
+    return readiness
 
 
 def _dependency_context(*, include_server: bool, python_spec: str, installer_mode: str) -> dict[str, Any]:
@@ -2210,11 +2128,11 @@ def _link_release_venv(*, target_dir: Path, shared_venv: Path) -> None:
 def _ensure_release_runtime(
     *,
     target_dir: Path,
-    previous_dir: Path | None = None,
     cache_root: Path | None = None,
     run_cmd: Callable[..., Any],
     operations: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    _runtime_readiness(release_dir=target_dir)
     cache = cache_root or default_upgrade_cache_root(target_dir)
     release_venv = target_dir / ".venv"
     release_python = _release_python(target_dir)
@@ -2362,18 +2280,11 @@ def _ensure_release_runtime(
                 "from pathlib import Path; import sys; assert Path(sys.executable).exists(); import src.application.multi_account_tick",
             ]
         )
-        runtime_prepare["pi_runtime"] = _ensure_pi_runtime(
-            target_dir,
-            run_cmd,
-            operations,
-            previous_dir=previous_dir,
-        )
+        runtime_prepare["bot_runtime"] = _ensure_bot_runtime(target_dir, run_cmd, operations)
         runtime_prepare["ended_at"] = utc_now_iso()
         runtime_prepare["duration_seconds"] = round(time.monotonic() - started, 3)
         return runtime_prepare
     except RuntimeError as exc:
-        if isinstance(exc, _PiRuntimePrepareError):
-            runtime_prepare["pi_runtime"] = exc.details
         if not runtime_prepare["venv_reused"]:
             shutil.rmtree(build_venv, ignore_errors=True)
             shutil.rmtree(shared_venv, ignore_errors=True)
@@ -2471,14 +2382,9 @@ def service_upgrade_verify(
     upgrade_status = load_upgrade_status(runtime_root=runtime) or {}
     services = _compact_service_health(upgrade_status.get("service_health"), profile=profile)
     try:
-        pi_storage_readiness = _pi_storage_readiness(
-            runtime_root=runtime,
-            repo_root=repo_link,
-            runtime_dir=repo / "agent-runtime",
-            release_dirs=(repo,),
-        )
+        runtime_readiness = _runtime_readiness(release_dir=repo)
     except ServiceTransitionError as exc:
-        pi_storage_readiness = {
+        runtime_readiness = {
             "ok": False,
             "status": exc.status,
             "error": str(exc),
@@ -2490,8 +2396,8 @@ def service_upgrade_verify(
     config_ok = all(bool(item.get("ok")) for item in configs.values()) if configs else False
     service_ok = bool(services.get("ok", True))
     upgrade_ok = not _upgrade_status_failed(upgrade_status)
-    pi_storage_ok = pi_storage_readiness.get("ok") is True
-    ok = bool(current_version) and update_ok and config_ok and service_ok and upgrade_ok and pi_storage_ok
+    runtime_ok = runtime_readiness.get("ok") is True
+    ok = bool(current_version) and update_ok and config_ok and service_ok and upgrade_ok and runtime_ok
     return {
         "ok": ok,
         "status": "ok" if ok else "attention_required",
@@ -2511,7 +2417,7 @@ def service_upgrade_verify(
         },
         "config": configs,
         "services": services,
-        "pi_storage_readiness": pi_storage_readiness,
+        "runtime_readiness": runtime_readiness,
         "upgrade": _compact_upgrade_status(upgrade_status),
     }
 
@@ -2682,55 +2588,14 @@ def _switch_current_symlink(*, current_link: Path, target_dir: Path) -> None:
     os.replace(tmp_link, current_link)
 
 
-def _pi_storage_readiness(
-    *,
-    runtime_root: Path,
-    repo_root: Path,
-    runtime_dir: Path,
-    release_dirs: tuple[Path, ...],
-) -> dict[str, Any]:
-    if (runtime_dir.parent / "src/application/bot/runtime.py").is_file():
-        # The Python runtime never opens or converts legacy Pi storage.
-        return {"ok": True, "stores": [], "runtime": "python"}
-    stores: list[dict[str, Any]] = []
-    for pi_db in pi_session_database_paths(
-        runtime_root=runtime_root,
-        repo_root=repo_root,
-        release_dirs=release_dirs,
-    ):
-        try:
-            readiness = assert_pi_storage_ready(pi_db, runtime_dir)
-        except Exception as exc:
-            raise ServiceTransitionError(
-                f"Pi Session storage {pi_db} is not ready for runtime "
-                f"{runtime_dir}: {type(exc).__name__}: {exc}",
-                status="pi_storage_not_ready",
-                remediation=[
-                    "keep Agent ingress stopped",
-                    "run the explicit Pi migration preview/apply with the selected source and target runtimes",
-                    "verify every published migration receipt before retrying the release transition",
-                ],
-            ) from exc
-        if not isinstance(readiness, dict) or readiness.get("ok") is not True:
-            raise ServiceTransitionError(
-                f"Pi Session storage {pi_db} readiness rejected runtime "
-                f"{runtime_dir}",
-                status="pi_storage_not_ready",
-                remediation=[
-                    "keep Agent ingress stopped",
-                    "resolve the reported Pi runtime, store, or migration receipt mismatch",
-                ],
-            )
-        stores.append({**readiness, "pi_db": str(pi_db)})
-    return {"ok": True, "stores": stores}
-
-
-def _pi_storage_has_published_receipt(readiness: dict[str, Any]) -> bool:
-    stores = readiness.get("stores")
-    return isinstance(stores, list) and any(
-        isinstance(item, dict) and item.get("receipt_phase") == "published"
-        for item in stores
-    )
+def _runtime_readiness(*, release_dir: Path) -> dict[str, Any]:
+    if not (release_dir / "src/application/bot/runtime.py").is_file():
+        raise ServiceTransitionError(
+            f"Unsupported Bot runtime in release: {release_dir}; a Python Bot release is required",
+            status="unsupported_runtime",
+            remediation=["select a release containing the Python Bot runtime; legacy runtime execution is retired"],
+        )
+    return {"ok": True, "runtime": "python"}
 
 
 # The public drift CLI recaptures timer state; compensation needs the original
@@ -2854,7 +2719,6 @@ def _compensate_service_transition(
     *,
     repo_link: Path,
     previous_dir: Path,
-    transition_dir: Path,
     runtime_root: Path,
     previous_profile: dict[str, Any],
     config_commit: dict[str, Any],
@@ -2866,15 +2730,10 @@ def _compensate_service_transition(
 ) -> dict[str, Any]:
     errors: list[str] = []
     symlink_restored = False
-    pi_storage_readiness: dict[str, Any] = {}
+    runtime_readiness: dict[str, Any] = {}
     config_restore: dict[str, Any] = {"ok": True, "status": "skipped", "restored": [], "errors": []}
     try:
-        pi_storage_readiness = _pi_storage_readiness(
-            runtime_root=runtime_root,
-            repo_root=repo_link,
-            runtime_dir=previous_dir / "agent-runtime",
-            release_dirs=(repo_link.resolve(), previous_dir, transition_dir),
-        )
+        runtime_readiness = _runtime_readiness(release_dir=previous_dir)
     except ServiceTransitionError as exc:
         return {
             "ok": False,
@@ -2884,7 +2743,7 @@ def _compensate_service_transition(
             "service_reconcile": {},
             "restarted_services": [],
             "service_health": {},
-            "pi_storage_readiness": {},
+            "runtime_readiness": {},
             "remediation": exc.remediation,
             "errors": [str(exc)],
         }
@@ -2936,7 +2795,7 @@ def _compensate_service_transition(
         "service_reconcile": restored.get("service_reconcile", {}),
         "restarted_services": restored.get("restarted_services", []),
         "service_health": restored.get("service_health", {}),
-        "pi_storage_readiness": pi_storage_readiness,
+        "runtime_readiness": runtime_readiness,
         "remediation": remediation,
         "errors": errors,
     }
@@ -3002,7 +2861,7 @@ def service_upgrade(
         target = (
             _version_text(str(target_version or ""))
             if lock_error is not None
-            else _version_text(str(check.get("latest_version") or ""))
+            else _version_text(str(check.get("latest_version") or "")) if check.get("ok") is True else ""
         )
         tag = _tag_text(target) if target else None
         operations: list[dict[str, Any]] = []
@@ -3032,6 +2891,7 @@ def service_upgrade(
                 **status_base,
                 "ok": False,
                 "status": "no_target_version",
+                "check": check,
                 "changed": False,
                 "message": check.get("message") or "没有可升级版本。",
                 "operations": operations,
@@ -3101,7 +2961,7 @@ def service_upgrade(
             else f"reuse existing release dir {target_dir}",
             f"prepare release runtime at {target_dir / '.venv'}",
             f"validate {target_dir}",
-            "verify every inventoried Pi Session store against the target runtime",
+            "verify the target contains the supported Python Bot runtime",
             f"switch {repo_link} -> {target_dir}",
             "reconcile service drift from current release",
             (
@@ -3127,11 +2987,10 @@ def service_upgrade(
                     status_base["preserved_activation_units"] = sorted(
                         preserved_activation_states
                     )
-                pi_storage_readiness = _pi_storage_readiness(
-                    runtime_root=runtime,
-                    repo_root=repo_link,
-                    runtime_dir=Path(__file__).resolve().parents[2] / "agent-runtime",
-                    release_dirs=(repo, target_dir),
+                runtime_readiness = (
+                    _runtime_readiness(release_dir=target_dir)
+                    if target_dir.exists()
+                    else {"ok": True, "status": "pending_materialization"}
                 )
             except ServiceTransitionError as exc:
                 return {
@@ -3158,7 +3017,7 @@ def service_upgrade(
                 "warnings": warnings,
                 "planned_operations": planned,
                 "version_check": check,
-                "pi_storage_readiness": pi_storage_readiness,
+                "runtime_readiness": runtime_readiness,
                 "operations": operations,
             }
         if lock_error is None and not repo_root_is_symlink:
@@ -3187,7 +3046,7 @@ def service_upgrade(
         post_switch_runtime_config_validate: list[dict[str, Any]] = []
         service_reconcile: dict[str, Any] = {}
         service_health: dict[str, Any] = {}
-        pi_storage_readiness: dict[str, Any] = {}
+        runtime_readiness: dict[str, Any] = {}
         compensation: dict[str, Any] = {}
         restarted: list[str] = []
         try:
@@ -3250,7 +3109,6 @@ def service_upgrade(
             )
             runtime_prepare = _ensure_release_runtime(
                 target_dir=target_dir,
-                previous_dir=previous_dir,
                 cache_root=cache,
                 run_cmd=run_cmd,
                 operations=operations,
@@ -3284,6 +3142,7 @@ def service_upgrade(
                 operations=operations,
                 timeout=120,
             )
+            runtime_readiness = _runtime_readiness(release_dir=target_dir)
             runtime_config_prepare = _prepare_runtime_configs_for_release(
                 previous_dir=previous_dir,
                 target_dir=target_dir,
@@ -3292,12 +3151,7 @@ def service_upgrade(
                 run_cmd=run_cmd,
                 operations=operations,
             )
-            pi_storage_readiness = _pi_storage_readiness(
-                runtime_root=runtime,
-                repo_root=repo_link,
-                runtime_dir=target_dir / "agent-runtime",
-                release_dirs=(repo, target_dir),
-            )
+            runtime_readiness = _runtime_readiness(release_dir=target_dir)
             _switch_current_symlink(current_link=repo_link, target_dir=target_dir)
             symlink_switched = True
             runtime_config_commit = _commit_prepared_runtime_configs(
@@ -3351,7 +3205,6 @@ def service_upgrade(
                 compensation = _compensate_service_transition(
                     repo_link=repo_link,
                     previous_dir=previous_dir,
-                    transition_dir=target_dir,
                     runtime_root=runtime,
                     previous_profile=pre_upgrade_profile,
                     config_commit=runtime_config_commit,
@@ -3381,7 +3234,7 @@ def service_upgrade(
                 "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
                 "service_reconcile": service_reconcile,
                 "service_health": service_health,
-                "pi_storage_readiness": pi_storage_readiness,
+                "runtime_readiness": runtime_readiness,
                 "restarted_services": exc.restarted_services,
                 "restart_failed_services": exc.failed_services,
                 "manual_remediation": remediation,
@@ -3394,14 +3247,11 @@ def service_upgrade(
                 write_upgrade_status(runtime_root=runtime, payload=out)
             return out
         except Exception as exc:
-            compensation_needed = symlink_switched or _pi_storage_has_published_receipt(
-                pi_storage_readiness
-            )
+            compensation_needed = symlink_switched
             if compensation_needed:
                 compensation = _compensate_service_transition(
                     repo_link=repo_link,
                     previous_dir=previous_dir,
-                    transition_dir=target_dir,
                     runtime_root=runtime,
                     previous_profile=pre_upgrade_profile,
                     config_commit=runtime_config_commit,
@@ -3437,7 +3287,7 @@ def service_upgrade(
                 "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
                 "service_reconcile": service_reconcile,
                 "service_health": service_health,
-                "pi_storage_readiness": pi_storage_readiness,
+                "runtime_readiness": runtime_readiness,
                 "compensation": compensation,
                 "error": f"{type(exc).__name__}: {exc}",
                 **({"remediation": remediation} if remediation else {}),
@@ -3459,9 +3309,10 @@ def service_upgrade(
                     "runtime_config_status": runtime_config_prepare.get("status"),
                 }
             else:
-                from src.application.service_cleanup import service_cleanup
+                # The outer transition guard covers both cleanup calls and terminal publication.
+                from src.application.service_cleanup import _service_cleanup_under_transition_lock
 
-                cleanup_plan = service_cleanup(
+                cleanup_plan = _service_cleanup_under_transition_lock(
                     repo_root=repo_link,
                     releases_root=releases,
                     runtime_root=runtime,
@@ -3488,7 +3339,7 @@ def service_upgrade(
                         "reason": "cleanup-after-upgrade requires at least keep_releases retained releases",
                     }
                 else:
-                    cleanup_result = service_cleanup(
+                    cleanup_result = _service_cleanup_under_transition_lock(
                         repo_root=repo_link,
                         releases_root=releases,
                         runtime_root=runtime,
@@ -3517,13 +3368,53 @@ def service_upgrade(
             "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
             "service_reconcile": service_reconcile,
             "service_health": service_health,
-            "pi_storage_readiness": pi_storage_readiness,
+            "runtime_readiness": runtime_readiness,
             "restarted_services": restarted,
             **({"post_upgrade_cleanup": cleanup_result} if cleanup_result is not None else {}),
             "operations": operations,
         }
         write_upgrade_status(runtime_root=runtime, payload=out)
         return out
+
+
+def _validate_rollback_target(*, target: str, releases_root: Path) -> Path:
+    match = re.fullmatch(
+        r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+        r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?",
+        target,
+    )
+    if match is None or any(
+        token.isdecimal() and len(token) > 1 and token.startswith("0")
+        for token in (match.group(1) or "").split(".")
+    ):
+        raise ServiceTransitionError(
+            f"rollback target is not a canonical supported version: {target!r}",
+            status="rollback_target_invalid",
+            remediation=["Select MAJOR.MINOR.PATCH with an optional canonical prerelease; do not supply a path."],
+        )
+    try:
+        target_dir = (releases_root / target).resolve()
+        if target_dir == releases_root or not target_dir.is_relative_to(releases_root):
+            raise ValueError("resolved rollback target must remain strictly inside releases_root")
+        if not target_dir.exists():
+            raise ServiceTransitionError(
+                f"rollback release directory is missing: {target_dir}",
+                status="rollback_target_missing",
+                remediation=["Select an existing released version inside releases_root."],
+            )
+        if not target_dir.is_dir():
+            raise ValueError("rollback target is not a directory")
+        if _read_version(target_dir) != target:
+            raise ValueError("rollback target VERSION does not exactly match the selected version")
+    except ServiceTransitionError:
+        raise
+    except (OSError, UnicodeError, RuntimeError, ValueError) as exc:
+        raise ServiceTransitionError(
+            f"invalid rollback release {target!r}: {exc}",
+            status="rollback_target_invalid",
+            remediation=["Select an in-root release directory with a readable VERSION matching the selected version."],
+        ) from exc
+    return target_dir
 
 
 def service_rollback(
@@ -3595,25 +3486,32 @@ def service_rollback(
                     status_witness=status_witness, profile_witness=profile_witness, payload=out,
                 )
             return out
-        target_dir = releases / target
-        if lock_error is None and not target_dir.exists():
-            out = {
-                **status_base,
-                "ok": False,
-                "status": "rollback_target_missing",
-                "changed": False,
-                "target_dir": str(target_dir),
-                "operations": operations,
-            }
-            if confirm:
-                write_upgrade_status(runtime_root=runtime, payload=out)
-            else:
-                _publish_early_upgrade_preview_status(
-                    runtime_root=runtime, repo_root=repo_root, baseline=preview_baseline,
-                    status_witness=status_witness, profile_witness=profile_witness, payload=out,
-                    missing_target_dir=target_dir if target else None,
-                )
-            return out
+        if lock_error is None:
+            try:
+                target_dir = _validate_rollback_target(target=target, releases_root=releases)
+            except ServiceTransitionError as exc:
+                out = {
+                    **status_base,
+                    "ok": False,
+                    "status": exc.status,
+                    "changed": False,
+                    "error": str(exc),
+                    "remediation": exc.remediation,
+                    "operations": operations,
+                }
+                if exc.status == "rollback_target_missing":
+                    out["target_dir"] = str(releases / target)
+                if confirm:
+                    write_upgrade_status(runtime_root=runtime, payload=out)
+                elif exc.status == "rollback_target_missing":
+                    _publish_early_upgrade_preview_status(
+                        runtime_root=runtime, repo_root=repo_root, baseline=preview_baseline,
+                        status_witness=status_witness, profile_witness=profile_witness, payload=out,
+                        missing_target_dir=releases / target,
+                    )
+                return out
+        else:
+            target_dir = releases / target
         previous_profile = _load_service_profile(runtime)
         preserved_activation_states: dict[str, dict[str, str]] = {}
         if not confirm:
@@ -3630,12 +3528,7 @@ def service_rollback(
                     status_base["preserved_activation_units"] = sorted(
                         preserved_activation_states
                     )
-                pi_storage_readiness = _pi_storage_readiness(
-                    runtime_root=runtime,
-                    repo_root=repo_link,
-                    runtime_dir=target_dir / "agent-runtime",
-                    release_dirs=(repo, target_dir),
-                )
+                runtime_readiness = _runtime_readiness(release_dir=target_dir)
             except ServiceTransitionError as exc:
                 return {
                     **status_base,
@@ -3657,7 +3550,7 @@ def service_rollback(
                 "warnings": [] if repo_root_is_symlink else ["confirmed rollback requires repo_root to be a current symlink"],
                 "planned_operations": [
                     f"stage and validate runtime configs with {target_dir}",
-                    "verify every inventoried Pi Session store against the rollback runtime",
+                    "verify the rollback target contains the supported Python Bot runtime",
                     f"switch {repo_link} -> {target_dir}",
                     "commit the staged runtime config bundle",
                     "reconcile service drift for the rollback release",
@@ -3668,7 +3561,7 @@ def service_rollback(
                     ),
                     "restart and health-check long-running services" if restart_services else "skip service restart",
                 ],
-                "pi_storage_readiness": pi_storage_readiness,
+                "runtime_readiness": runtime_readiness,
                 "operations": operations,
             }
 
@@ -3678,7 +3571,7 @@ def service_rollback(
         post_switch_runtime_config_validate: list[dict[str, str]] = []
         service_reconcile: dict[str, Any] = {}
         service_health: dict[str, Any] = {}
-        pi_storage_readiness: dict[str, Any] = {}
+        runtime_readiness: dict[str, Any] = {}
         compensation: dict[str, Any] = {}
         restarted: list[str] = []
         try:
@@ -3706,6 +3599,7 @@ def service_rollback(
                         "ok": True,
                     }
                 )
+            runtime_readiness = _runtime_readiness(release_dir=target_dir)
             runtime_config_prepare = _prepare_runtime_configs_for_release(
                 previous_dir=repo,
                 target_dir=target_dir,
@@ -3714,12 +3608,7 @@ def service_rollback(
                 run_cmd=run_cmd,
                 operations=operations,
             )
-            pi_storage_readiness = _pi_storage_readiness(
-                runtime_root=runtime,
-                repo_root=repo_link,
-                runtime_dir=target_dir / "agent-runtime",
-                release_dirs=(repo, target_dir),
-            )
+            runtime_readiness = _runtime_readiness(release_dir=target_dir)
             _switch_current_symlink(current_link=repo_link, target_dir=target_dir)
             symlink_switched = True
             runtime_config_commit = _commit_prepared_runtime_configs(
@@ -3792,14 +3681,11 @@ def service_rollback(
                     remediation=[str(item) for item in service_health.get("remediation") or []],
                 )
         except Exception as exc:
-            compensation_needed = symlink_switched or _pi_storage_has_published_receipt(
-                pi_storage_readiness
-            )
+            compensation_needed = symlink_switched
             if compensation_needed:
                 compensation = _compensate_service_transition(
                     repo_link=repo_link,
                     previous_dir=repo,
-                    transition_dir=target_dir,
                     runtime_root=runtime,
                     previous_profile=previous_profile,
                     config_commit=runtime_config_commit,
@@ -3837,7 +3723,7 @@ def service_rollback(
                 "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
                 "service_reconcile": service_reconcile,
                 "service_health": service_health,
-                "pi_storage_readiness": pi_storage_readiness,
+                "runtime_readiness": runtime_readiness,
                 "compensation": compensation,
                 "error": f"{type(exc).__name__}: {exc}",
                 **({"remediation": remediation} if remediation else {}),
@@ -3857,7 +3743,7 @@ def service_rollback(
             "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
             "service_reconcile": service_reconcile,
             "service_health": service_health,
-            "pi_storage_readiness": pi_storage_readiness,
+            "runtime_readiness": runtime_readiness,
             "restarted_services": restarted,
             "operations": operations,
         }

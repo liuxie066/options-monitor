@@ -619,6 +619,7 @@ def test_position_lot_patch_accepts_first_class_stock_lot_link() -> None:
 
 def test_wheel_candidate_uses_batch_cost_floor_and_lifecycle_pnl() -> None:
     batch = {
+        "currency": "USD",
         "shares_remaining": 100,
         "remaining_stock_cost_basis": 10_010,
         "realized_sell_put_net_pnl": 240,
@@ -626,6 +627,7 @@ def test_wheel_candidate_uses_batch_cost_floor_and_lifecycle_pnl() -> None:
         "realized_prior_stock_sale_net_pnl": 0,
     }
     candidate = {
+        "currency": "USD",
         "symbol": "NVDA",
         "contract_symbol": "NVDA-CALL-102",
         "strike": 102,
@@ -673,6 +675,64 @@ def test_wheel_candidate_rank_uses_lifecycle_pnl_before_covered_call_ties() -> N
     )
 
     assert higher_lifecycle["sort_tuple"] < lower_lifecycle["sort_tuple"]
+
+
+@pytest.mark.parametrize(("batch_fields", "candidate_fields", "reason"), [
+    ({"currency": "USD"}, {"currency": "USD"}, None),
+    ({"currency": "HKD"}, {"currency": "HKD"}, None),
+    ({"currency": " usd "}, {"currency": "uSd"}, None),
+    ({"currency": "hkd "}, {"currency": " hKd"}, None),
+    ({"currency": "USD"}, {"currency": "HKD"}, "currency_mismatch"),
+    ({"currency": "HKD"}, {"currency": "USD"}, "currency_mismatch"),
+    ({"currency": None}, {"currency": "USD"}, "currency_unavailable"),
+    ({"currency": ""}, {"currency": "USD"}, "currency_unavailable"),
+    ({"currency": " "}, {"currency": "USD"}, "currency_unavailable"),
+    ({"currency": "USD"}, {"currency": None}, "currency_unavailable"),
+    ({"currency": "USD"}, {"currency": ""}, "currency_unavailable"),
+    ({"currency": "USD"}, {"currency": " "}, "currency_unavailable"),
+    ({"currency": None}, {"currency": None}, "currency_unavailable"),
+    ({}, {"currency": "USD"}, "currency_unavailable"),
+    ({"currency": "USD"}, {}, "currency_unavailable"),
+    ({}, {}, "currency_unavailable"),
+])
+def test_wheel_call_requires_same_currency_before_economic_arithmetic(batch_fields, candidate_fields, reason):
+    batch = {"shares_remaining": 100, "remaining_stock_cost_basis": 10_010,
+        "realized_sell_put_net_pnl": 240, "realized_prior_call_net_pnl": 100,
+        "realized_prior_stock_sale_net_pnl": 0, **batch_fields}
+    candidate = {"strike": 102, "spot": 100, "delta": .31, "multiplier": 100,
+        "net_income": 190, **candidate_fields}
+    before = (dict(batch), dict(candidate))
+    result = evaluate_wheel_call_candidate(
+        batch, candidate, {"min_abs_delta": .25, "max_abs_delta": .35},
+        {"basis": "estimated", "amount": 15}, 1,
+    )
+    assert (batch, candidate) == before
+    assert result.get("currency") == candidate.get("currency")
+    if reason is None:
+        assert result["accepted"] and result["wheel_candidate_status"] == "accepted"
+        assert result["reason_codes"] == []
+        assert result["projected_lifecycle_net_pnl_if_called"] == 705
+        assert result["projected_remaining_stock_sale_net_pnl_at_strike"] == 175
+    else:
+        assert not result["accepted"] and result["wheel_candidate_status"] == "data_unavailable"
+        assert result["reason_codes"] == [reason]
+        assert "projected_lifecycle_net_pnl_if_called" not in result
+        assert "projected_remaining_stock_sale_net_pnl_at_strike" not in result
+        assert "candidate_call_net_premium" not in result
+
+
+def test_wheel_call_currency_reason_combines_with_existing_unavailable_facts():
+    result = evaluate_wheel_call_candidate(
+        {"currency": "USD", "shares_remaining": 100, "remaining_stock_cost_basis": 10_010,
+         "realized_sell_put_net_pnl": 240, "realized_prior_call_net_pnl": 100,
+         "realized_prior_stock_sale_net_pnl": 0},
+        {"currency": "HKD", "strike": 102, "spot": None, "delta": .31,
+         "multiplier": 100, "net_income": 190},
+        {"min_abs_delta": .25, "max_abs_delta": .35}, {"basis": "estimated", "amount": 15}, 0,
+    )
+    assert result["reason_codes"] == ["contracts_unavailable", "currency_mismatch", "spot_unavailable"]
+    assert not result["accepted"] and result["wheel_candidate_status"] == "data_unavailable"
+    assert "projected_lifecycle_net_pnl_if_called" not in result
 
 
 def test_void_removes_intent_and_linkage_rejection_from_standalone_projections() -> None:

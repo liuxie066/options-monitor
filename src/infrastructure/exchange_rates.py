@@ -18,6 +18,7 @@ import json
 import math
 from pathlib import Path
 import sys
+from time import monotonic
 from typing import Any, Callable, Mapping
 from urllib import request as urllib_request
 from zoneinfo import ZoneInfo
@@ -200,7 +201,21 @@ def _parse_sina(text: str) -> dict[str, float] | None:
     return _validated_rates({pair: row["rate"] for pair, row in quotes.items()})
 
 
-def fetch_market_exchange_rates(timeout_sec: float = 8.0) -> dict[str, Any] | None:
+def _check_fx_budget(
+    deadline: float | None, cancelled: Callable[[], bool] | None,
+) -> float | None:
+    if cancelled is not None and cancelled():
+        raise TimeoutError("FX fetch cancelled")
+    remaining = None if deadline is None else deadline - monotonic()
+    if remaining is not None and remaining <= 0:
+        raise TimeoutError("FX fetch deadline exceeded")
+    return remaining
+
+
+def fetch_market_exchange_rates(
+    timeout_sec: float = 8.0, *, deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, Any] | None:
     """Fetch both sources and choose the newest verified quote per pair."""
     observed = _utc_now()
     errors: list[str] = []
@@ -209,18 +224,32 @@ def fetch_market_exchange_rates(timeout_sec: float = 8.0) -> dict[str, Any] | No
         (TENCENT_EXCHANGE_RATE_SOURCE, _TENCENT_URL, None),
         (SINA_EXCHANGE_RATE_SOURCE, _SINA_URL, _SINA_HEADERS),
     ):
+        remaining = _check_fx_budget(deadline, cancelled)
+        timeout = timeout_sec if remaining is None else min(timeout_sec, 8.0, remaining)
         try:
-            raw = _http_get(url, headers=headers, timeout_sec=timeout_sec)
-            observed = _utc_now()
-            candidates = _parse_provider_quotes(raw, source=source, observed_at=observed)
-            if not candidates:
-                errors.append(f"{source}:invalid")
-            for pair, row in candidates.items():
-                previous = chosen.get(pair)
-                if previous is None or row["quote_at_utc"] > previous["quote_at_utc"]:
-                    chosen[pair] = row
+            raw = _http_get(url, headers=headers, timeout_sec=timeout)
         except Exception as exc:
             errors.append(f"{source}:{type(exc).__name__}")
+            _check_fx_budget(deadline, cancelled)
+            continue
+        # A transport timeout may fall back; our control TimeoutError must not.
+        _check_fx_budget(deadline, cancelled)
+        observed = _utc_now()
+        try:
+            candidates = _parse_provider_quotes(raw, source=source, observed_at=observed)
+        except Exception as exc:
+            errors.append(f"{source}:{type(exc).__name__}")
+            _check_fx_budget(deadline, cancelled)
+            continue
+        _check_fx_budget(deadline, cancelled)
+        if not candidates:
+            errors.append(f"{source}:invalid")
+        for pair, row in candidates.items():
+            previous = chosen.get(pair)
+            if previous is None or row["quote_at_utc"] > previous["quote_at_utc"]:
+                chosen[pair] = row
+        _check_fx_budget(deadline, cancelled)
+    _check_fx_budget(deadline, cancelled)
     if not chosen:
         _warn(None, f"[WARN] market FX fetch failed: {'; '.join(errors)}")
         return None
@@ -321,25 +350,40 @@ def verified_exchange_rate_pairs(payload: Any, *, observed_at: datetime) -> dict
 
 def current_exchange_rate_snapshot(
     *, cache_path: Path, now: datetime | None = None, write_cache: bool = True,
+    deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """One request's verified quotes and purpose states; no invented quote times."""
+    _check_fx_budget(deadline, cancelled)
     path = Path(cache_path).resolve()
+    _check_fx_budget(deadline, cancelled)
     cached = _read_cache(path)
-    fetched = fetch_market_exchange_rates()
+    _check_fx_budget(deadline, cancelled)
+    fetched = (
+        fetch_market_exchange_rates()
+        if deadline is None and cancelled is None
+        else fetch_market_exchange_rates(deadline=deadline, cancelled=cancelled)
+    )
+    _check_fx_budget(deadline, cancelled)
     evaluated = (now or _utc_now()).astimezone(timezone.utc)
     selected = _verified_pairs(cached, now=evaluated)
     for pair, row in _verified_pairs(fetched, now=evaluated).items():
         selected[pair] = _newer_pair(selected.get(pair), row)
+    _check_fx_budget(deadline, cancelled)
     if write_cache and selected:
         path.parent.mkdir(parents=True, exist_ok=True)
         # A stable lock file protects the read/merge/write across processes.
         with path.with_suffix(path.suffix + ".lock").open("a+") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             try:
-                latest = _verified_pairs(_read_cache(path), now=evaluated)
+                _check_fx_budget(deadline, cancelled)
+                latest_cache = _read_cache(path)
+                _check_fx_budget(deadline, cancelled)
+                latest = _verified_pairs(latest_cache, now=evaluated)
                 for pair, row in selected.items():
                     latest[pair] = _newer_pair(latest.get(pair), row)
+                _check_fx_budget(deadline, cancelled)
                 atomic_write_json(path, {"schema_version": 2, "pairs": latest}, sort_keys=True)
+                _check_fx_budget(deadline, cancelled)
                 selected = latest
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
@@ -352,6 +396,7 @@ def current_exchange_rate_snapshot(
             "display_eligible": quality in {"fresh", "holiday_carried"},
             "capacity_eligible": quality in {"fresh", "holiday_carried"},
         }
+    _check_fx_budget(deadline, cancelled)
     return {
         "schema_version": 2,
         "evaluated_at_utc": evaluated.isoformat(),

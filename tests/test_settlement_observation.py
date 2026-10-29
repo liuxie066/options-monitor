@@ -101,6 +101,8 @@ def _repo_with_pending_case(
     seed_anchor: bool = True,
     second_open_lot: bool = False,
     calendar_rows: list[dict[str, str]] | None = None,
+    symbol: str = "NVDA",
+    market: str = "US",
 ) -> tuple[
     SQLiteOptionPositionsRepository,
     dict,
@@ -113,7 +115,7 @@ def _repo_with_pending_case(
     contract = opening_event.contract_key if opening_event is not None else ContractKey.from_values(
         broker="futu",
         account="lx",
-        underlying_symbol="NVDA",
+        underlying_symbol=symbol,
         option_type="put",
         strike=100,
         expiration_ymd=EXPIRATION_YMD,
@@ -128,7 +130,7 @@ def _repo_with_pending_case(
             contract_key=contract,
             contracts=1,
             price=2,
-            currency="USD",
+            currency="HKD" if market == "HK" else "USD",
             source="test",
             multiplier=100,
             lot_id="lot-1",
@@ -136,13 +138,13 @@ def _repo_with_pending_case(
                 "fields": {
                     "broker": "futu",
                     "account": "lx",
-                    "symbol": "NVDA",
+                    "symbol": symbol,
                     "option_type": "put",
                     "side": "short",
                     "contracts": 1,
                     "contracts_open": 1,
                     "contracts_closed": 0,
-                    "currency": "USD",
+                    "currency": "HKD" if market == "HK" else "USD",
                     "strike": 100,
                     "expiration_ymd": EXPIRATION_YMD,
                     "multiplier": 100,
@@ -163,13 +165,13 @@ def _repo_with_pending_case(
             21,
             16,
             0,
-            tzinfo=ZoneInfo("America/New_York"),
+            tzinfo=ZoneInfo("Asia/Hong_Kong" if market == "HK" else "America/New_York"),
         ).timestamp()
         * 1000
     )
     observation_start_ms = expiration_observation_start_ms(
         EXPIRATION_YMD,
-        "US",
+        market,
     )
     assert observation_start_ms is not None
     case_id = discover_lifecycle_cases(
@@ -188,7 +190,7 @@ def _repo_with_pending_case(
         "evidence_type": "option_zero_price_close",
         "account": "lx",
         "futu_account_id": "1001",
-        "symbol": "NVDA",
+        "symbol": symbol,
         "option_type": contract.option_type,
         "position_side": "short",
         "strike": int(contract.strike),
@@ -221,7 +223,7 @@ def _repo_with_pending_case(
         )
     policy = build_lifecycle_timing_policy(
         case_id=case_id,
-        market="US",
+        market=market,
         expiration_ymd=EXPIRATION_YMD,
         contract_metadata={
             "settlement_style": "physical",
@@ -847,6 +849,9 @@ class _Gateway:
             ]
         )
         self.history_deal_queries: list[dict] = []
+        self.history_order_rows = [
+            {"order_id": "option-order-1", "is_broker_auto": True}
+        ]
         self.history_order_queries: list[dict] = []
         self.position_queries: list[dict] = []
         self.calendar_queries: list[dict] = []
@@ -857,14 +862,7 @@ class _Gateway:
 
     def get_history_orders(self, **kwargs: object) -> dict:
         self.history_order_queries.append(dict(kwargs))
-        return _complete_receipt(
-            [
-                {
-                    "order_id": "option-order-1",
-                    "is_broker_auto": True,
-                }
-            ]
-        )
+        return _complete_receipt(self.history_order_rows)
 
     def get_positions_with_receipt(
         self,
@@ -1403,15 +1401,156 @@ def _stock_settlement_deal(
         "trd_side": "BUY",
         "trade_time_ms": trade_time_ms,
     }
-    if order_id is not None:
-        row["order_id"] = order_id
+    row["order_id"] = order_id if order_id is not None else f"stock-order:{deal_id}"
     return row
 
 
 def _settlement_gateway(*stock_rows: dict) -> _Gateway:
-    return _Gateway(
+    gateway = _Gateway(
         history_deals=[dict(_OPTION_CLOSE_DEAL), *stock_rows]
     )
+    gateway.history_order_rows.extend(
+        {"order_id": order_id, "is_broker_auto": True}
+        for order_id in dict.fromkeys(row.get("order_id") for row in stock_rows)
+        if order_id
+    )
+    return gateway
+
+
+_STOCK_SOURCE_FAILURES = [
+    "client", "manual", "api", "app", "missing-id", "unmatched", "duplicate",
+    "unknown", "normal-type", "option-id-only", "explicit-not-auto",
+    *[
+        f"{source}:{field}"
+        for source in ("history_deals", "history_orders")
+        for field in (
+            "coverage_complete", "pagination_complete", "stale", "fallback_cache",
+            "retcode", "error",
+        )
+    ],
+]
+
+
+def _stock_source_failure_gateway(now_ms: int, failure: str, ordering: str) -> _Gateway:
+    bad = _stock_settlement_deal("unqualified", trade_time_ms=now_ms - 2)
+    valid = _stock_settlement_deal("qualified", trade_time_ms=now_ms - 2)
+    rows = (
+        [bad] if ordering == "only"
+        else [valid, bad] if ordering == "valid-first" else [bad, valid]
+    )
+    gateway = _settlement_gateway(*rows)
+    stock_order = next(
+        row for row in gateway.history_order_rows if row["order_id"] == bad["order_id"]
+    )
+    if failure in {"client", "manual", "api", "app", "unknown"}:
+        stock_order.pop("is_broker_auto")
+        stock_order["order_origin"] = failure
+    elif failure == "normal-type":
+        stock_order.pop("is_broker_auto")
+        stock_order["order_type"] = "NORMAL"
+    elif failure == "explicit-not-auto":
+        stock_order["is_broker_auto"] = False
+    elif failure == "missing-id":
+        bad.pop("order_id")
+    elif failure in {"unmatched", "option-id-only"}:
+        gateway.history_order_rows.remove(stock_order)
+        if failure == "option-id-only":
+            # An automatic option anchor cannot prove the stock order's origin.
+            assert gateway.history_order_rows[0]["is_broker_auto"] is True
+    elif failure == "duplicate":
+        gateway.history_order_rows.append(dict(stock_order))
+    else:
+        source, field = failure.split(":")
+        original_query = getattr(gateway, f"get_{source}")
+
+        def incomplete_query(**kwargs):
+            receipt = original_query(**kwargs)
+            # Raw gateway status cannot override the canonical receipt contract.
+            receipt["status"] = "complete"
+            receipt[field] = {
+                "coverage_complete": False, "pagination_complete": False,
+                "stale": True, "fallback_cache": True, "retcode": -1,
+                "error": "source incomplete with rows still present",
+            }[field]
+            assert receipt["rows"]
+            return receipt
+
+        setattr(gateway, f"get_{source}", incomplete_query)
+    return gateway
+
+
+@pytest.mark.parametrize("failure", _STOCK_SOURCE_FAILURES)
+@pytest.mark.parametrize("ordering", ["only", "valid-first", "invalid-first"])
+def test_stock_source_admission_rejects_entire_collect_before_due_writes(
+    tmp_path: Path, isolated_settlement_identity, failure: str, ordering: str,
+) -> None:
+    repo, case, policy, _ = _repo_with_pending_case(tmp_path)
+    cid = case["case_id"]
+    now_ms = policy["settlement_deadline_ms"] + 1
+    gateway = _stock_source_failure_gateway(now_ms, failure, ordering)
+    collector = build_settlement_observation_collector(
+        repo=repo, gateway=gateway, futu_account_id="1001", now_ms_fn=lambda: now_ms,
+    )
+    before = _settlement_economic_snapshot(repo, cid)
+    read_model = lifecycle_case_read_model(repo, case_id=cid, now_ms=now_ms)
+    with pytest.raises(SettlementObservationDataError, match="stock settlement requires"):
+        collector(case, read_model)
+    outcome = collector.collect_outcome(case, read_model)
+    assert (outcome.kind, outcome.error_class, outcome.observation) == (
+        "unknown_error", "case_data", None,
+    )
+    result = reconcile_due_lifecycle_cases(
+        repo, account="lx", now_ms=now_ms, apply_changes=True, observation_collector=collector,
+    )
+    rejected = result["results"][0]
+    assert (rejected["status"], rejected["failure_class"], rejected["write_status"]) == (
+        "needs_review", "case_data", "not_attempted",
+    )
+    assert rejected["reason_codes"] == ["settlement_observation_data_invalid"]
+    assert _settlement_economic_snapshot(repo, cid) == before
+
+
+@pytest.mark.parametrize("automatic", [
+    {"is_broker_auto": True}, {"order_origin": "broker_auto"},
+    {"source": "expiry"}, {"order_source": "settlement"},
+])
+def test_stock_own_automatic_order_with_id_preview_apply_and_replay(
+    tmp_path: Path, isolated_settlement_identity, automatic: dict,
+) -> None:
+    repo, case, policy, _ = _repo_with_pending_case(tmp_path)
+    cid = case["case_id"]
+    now_ms = policy["settlement_deadline_ms"] + 1
+    _bootstrap_current_decision_shadow(repo, now_ms=now_ms)
+    stock = _stock_settlement_deal("automatic", trade_time_ms=now_ms - 2)
+    gateway = _settlement_gateway(stock)
+    gateway.history_order_rows = [
+        {"order_id": "option-order-1", "order_origin": "manual"},
+        {"order_id": stock["order_id"], **automatic},
+    ]
+    collector = build_settlement_observation_collector(
+        repo=repo, gateway=gateway, futu_account_id="1001", now_ms_fn=lambda: now_ms,
+    )
+    observation = collector(case, lifecycle_case_read_model(repo, case_id=cid, now_ms=now_ms))
+    assert observation["complete"] is False
+    assert observation["stock_settlement_candidates"][0]["order_id"] == stock["order_id"]
+    before = _settlement_economic_snapshot(repo, cid)
+    reconcile_lifecycle_close_reason(
+        repo, case_id=cid, now_ms=now_ms, observation=observation, apply_changes=False,
+    )
+    assert _settlement_economic_snapshot(repo, cid) == before
+    applied = reconcile_due_lifecycle_cases(
+        repo, account="lx", now_ms=now_ms, apply_changes=True, observation_collector=collector,
+    )
+    assert applied["results"][0]["poll_settlement_results"][0]["status"] == "applied"
+    after = _settlement_economic_snapshot(repo, cid)
+    assert len([row for row in after["events"] if row["event_type"] == "assignment"]) == 1
+    assert len(after["allocations"]) == 1
+    assert len(after["claims"]) == len(before["claims"]) + 1
+    retry = reconcile_due_lifecycle_cases(
+        repo, account="lx", now_ms=now_ms + 1, apply_changes=True, observation_collector=collector,
+    )
+    assert retry["results"] == []
+    assert _settlement_economic_snapshot(repo, cid) == after
 
 
 @pytest.fixture
@@ -1473,13 +1612,13 @@ def isolated_settlement_quantity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert forbidden_calls == []
 
 
-def _quantity_candidate(row: dict) -> dict | None:
+def _quantity_candidate(row: dict, *, symbol: str = "NVDA") -> dict | None:
     from src.application.trades.settlement_observation import _stock_settlement_candidate
 
     return _stock_settlement_candidate(
         row,
         lifecycle_case={
-            "case_id": "quantity-case", "symbol": "NVDA", "option_type": "put",
+            "case_id": "quantity-case", "symbol": symbol, "option_type": "put",
             "position_side": "short", "strike": 100, "multiplier": 100,
             "observation_start_ms": 1000,
         },
@@ -1618,6 +1757,213 @@ def _settlement_economic_snapshot(repo: SQLiteOptionPositionsRepository, case_id
         "claims": repo.list_trade_lifecycle_source_consumptions(case_id=case_id),
         "outbox": repo.list_trade_lifecycle_notifications(case_id=case_id),
     }
+
+
+@pytest.fixture
+def isolated_settlement_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import socket
+    import subprocess
+    from urllib.parse import unquote, urlsplit
+
+    from src.application import config_loader, secret_store
+    from src.application.trades import lifecycle_outbox
+
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    monkeypatch.setenv("OM_ENV_FILE", str(tmp_path / "unused.env"))
+    monkeypatch.setenv("OM_SECRET_BACKEND", "env")
+    forbidden_calls: list[str] = []
+
+    def forbidden(*_args, **_kwargs):
+        forbidden_calls.append("external boundary")
+        raise AssertionError("settlement identity test reached an external boundary")
+
+    for owner, name in (
+        (socket.socket, "connect"), (socket, "create_connection"), (subprocess, "Popen"),
+        (config_loader, "load_config"), (config_loader, "resolve_data_config_path"),
+        (secret_store, "default_secret_provider"), (lifecycle_outbox, "dispatch_notification_batch_once"),
+    ):
+        monkeypatch.setattr(owner, name, forbidden)
+    original_connect = sqlite3.connect
+
+    def isolated_connect(database, *args, **kwargs):
+        value = str(database)
+        target = Path(unquote(urlsplit(value).path) if value.startswith("file:") else value).resolve()
+        if not target.is_relative_to(tmp_path.resolve()):
+            forbidden_calls.append("SQLite outside fixture")
+            raise AssertionError("settlement identity test reached SQLite outside fixture")
+        return original_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", isolated_connect)
+    yield
+    assert forbidden_calls == []
+
+
+@pytest.mark.parametrize(
+    ("identity", "symbol"),
+    [
+        ({"code": "US.NVDA"}, "NVDA"), ({"code": "NVDA.US"}, "NVDA"),
+        ({"stock_code": "US.NVDA"}, "NVDA"), ({"symbol": " nvda "}, "NVDA"),
+        ({"code": " ", "stock_code": "US.NVDA"}, "NVDA"),
+        ({"code": "", "stock_code": " ", "symbol": "NVDA"}, "NVDA"),
+        ({"code": "HK.00700"}, "0700.HK"), ({"code": "0700.HK"}, "0700.HK"),
+        ({"stock_code": "00700.HK"}, "0700.HK"), ({"symbol": "TCH"}, "0700.HK"),
+    ],
+)
+def test_settlement_stock_identity_valid_spellings(identity: dict, symbol: str) -> None:
+    row = _stock_settlement_deal("identity", trade_time_ms=1500)
+    row.pop("code")
+    row.update(identity)
+    before = deepcopy(row)
+    candidate = _quantity_candidate(row, symbol=symbol)
+    assert candidate is not None and candidate["symbol"] == symbol
+    assert candidate["source_event_id"] == "futu:lx:1001:identity"
+    assert candidate["stock_qty"] == 100
+    assert all(candidate["raw"][key] == value for key, value in identity.items())
+    assert row == before
+
+
+@pytest.mark.parametrize("code", ["US.NVDA260821P100000", "NVDA260821P100000", "HK.TCH260821P100000", "TCH260821P100000"])
+def test_settlement_stock_identity_excludes_option_instrument(code: str) -> None:
+    row = {**_stock_settlement_deal("option", trade_time_ms=1500), "code": code}
+    assert _quantity_candidate(row, symbol="0700.HK" if "TCH" in code else "NVDA") is None
+
+
+def test_settlement_stock_identity_preserves_nonblank_precedence() -> None:
+    row = {**_stock_settlement_deal("identity", trade_time_ms=1500), "code": "US.MSFT", "symbol": "NVDA"}
+    assert _quantity_candidate(row) is None
+    row["code"] = " "
+    assert _quantity_candidate(row)["symbol"] == "NVDA"
+    row["code"] = "HK.NVDA"
+    with pytest.raises(SettlementObservationDataError, match="known stock identity"):
+        _quantity_candidate(row)
+
+
+def test_settlement_stock_identity_keeps_query_scope_and_requires_known_case() -> None:
+    row = _stock_settlement_deal("query-scope", trade_time_ms=1500)
+    row.pop("acc_id")
+    assert _quantity_candidate(row)["futu_account_id"] == "1001"
+    with pytest.raises(SettlementObservationDataError, match="known stock identity"):
+        _quantity_candidate(row, symbol="")
+
+
+@pytest.mark.parametrize("changes", [{"acc_id": "other"}, {"trd_side": "SELL"}, {"price": "99"},
+    {"trade_time_ms": 999}, {"trade_time_ms": 2001}, {"qty": 0}, {"qty": 99}])
+def test_settlement_stock_identity_keeps_independent_exclusions(changes: dict) -> None:
+    row = _stock_settlement_deal("unknown", trade_time_ms=1500)
+    row.pop("code")
+    row.update(changes)
+    assert _quantity_candidate(row) is None
+
+
+@pytest.mark.parametrize("identity", [{}, {"code": " ", "stock_code": "", "symbol": ""}, {"code": "HK.NVDA"}])
+@pytest.mark.parametrize("ordering", ["only", "valid-first", "unknown-first"])
+def test_settlement_stock_identity_unknown_blocks_due_before_write(
+    tmp_path: Path, isolated_settlement_identity, identity: dict, ordering: str,
+) -> None:
+    repo, case, policy, _ = _repo_with_pending_case(tmp_path)
+    cid = case["case_id"]
+    now = policy["settlement_deadline_ms"] + 1
+    row = _stock_settlement_deal("unknown", trade_time_ms=now - 2)
+    row.pop("code")
+    row.update(identity)
+    valid = _stock_settlement_deal("valid", trade_time_ms=now - 2)
+    rows = [row] if ordering == "only" else [valid, row] if ordering == "valid-first" else [row, valid]
+    collector = build_settlement_observation_collector(repo=repo, gateway=_settlement_gateway(*rows),
+        futu_account_id="1001", now_ms_fn=lambda: now)
+    before = _settlement_economic_snapshot(repo, cid)
+    read_model = lifecycle_case_read_model(repo, case_id=cid, now_ms=now)
+    with pytest.raises(SettlementObservationDataError, match="known stock identity"):
+        collector(case, read_model)
+    outcome = collector.collect_outcome(case, read_model)
+    assert (outcome.kind, outcome.error_class, outcome.observation) == ("unknown_error", "case_data", None)
+    result = reconcile_due_lifecycle_cases(repo, account="lx", now_ms=now, apply_changes=True, observation_collector=collector)
+    failure = result["results"][0]
+    assert (failure["status"], failure["failure_class"], failure["failure_stage"], failure["write_status"]) == (
+        "needs_review", "case_data", "provider_observation_input", "not_attempted")
+    assert failure["reason_codes"] == ["settlement_observation_data_invalid"]
+    assert _settlement_economic_snapshot(repo, cid) == before
+    assert repo.list_trade_lifecycle_attempt_audits(case_id=cid) == []
+
+
+@pytest.mark.parametrize("quantity", [100.5, "NaN"])
+def test_settlement_stock_identity_retains_quantity_error_before_due_write(
+    tmp_path: Path, isolated_settlement_identity, quantity,
+) -> None:
+    repo, case, policy, _ = _repo_with_pending_case(tmp_path)
+    now = policy["settlement_deadline_ms"] + 1
+    row = {**_stock_settlement_deal("quantity", trade_time_ms=now - 2), "qty": quantity}
+    collector = build_settlement_observation_collector(repo=repo, gateway=_settlement_gateway(row),
+        futu_account_id="1001", now_ms_fn=lambda: now)
+    before = _settlement_economic_snapshot(repo, case["case_id"])
+    with pytest.raises(SettlementObservationDataError, match="finite whole number"):
+        collector(case, lifecycle_case_read_model(repo, case_id=case["case_id"], now_ms=now))
+    result = reconcile_due_lifecycle_cases(repo, account="lx", now_ms=now, apply_changes=True, observation_collector=collector)
+    assert result["results"][0]["write_status"] == "not_attempted"
+    assert result["results"][0]["failure_class"] == "case_data"
+    assert _settlement_economic_snapshot(repo, case["case_id"]) == before
+
+
+@pytest.mark.parametrize(("market", "symbol", "code"), [("US", "NVDA", "US.NVDA"), ("HK", "0700.HK", "HK.00700")])
+def test_settlement_stock_identity_correction_retries_once(
+    tmp_path: Path, isolated_settlement_identity, market: str, symbol: str, code: str,
+) -> None:
+    option_code = "HK.TCH260821P100000" if market == "HK" else OPTION_CODE
+    repo, case, policy, _ = _repo_with_pending_case(tmp_path, symbol=symbol, market=market, option_code=option_code)
+    cid = case["case_id"]
+    now = policy["settlement_deadline_ms"] + 1
+    _bootstrap_current_decision_shadow(repo, now_ms=now)
+    row = _stock_settlement_deal("corrected-identity", trade_time_ms=now - 2)
+    row.pop("code")
+    gateway = _settlement_gateway(row)
+    gateway.history_deal_rows[0]["code"] = option_code
+    collector = build_settlement_observation_collector(repo=repo, gateway=gateway, futu_account_id="1001", now_ms_fn=lambda: now)
+    before = _settlement_economic_snapshot(repo, cid)
+    rejected = reconcile_due_lifecycle_cases(repo, account="lx", now_ms=now, apply_changes=True, observation_collector=collector)
+    assert rejected["results"][0]["write_status"] == "not_attempted"
+    assert _settlement_economic_snapshot(repo, cid) == before
+    row["code"] = code
+    row["qty"] = -100.0
+    applied = reconcile_due_lifecycle_cases(repo, account="lx", now_ms=now, apply_changes=True, observation_collector=collector)
+    assert applied["results"][0]["poll_settlement_results"][0]["status"] == "applied"
+    after = _settlement_economic_snapshot(repo, cid)
+    assignments = [event for event in after["events"] if event["event_type"] == "assignment"]
+    assert len(assignments) == len(after["allocations"]) == 1
+    assert assignments[0]["raw_payload"]["stock_settlement"]["symbol"] == symbol
+    assert assignments[0]["raw_payload"]["stock_settlement"]["shares"] == 100
+    assert len(after["claims"]) == len(before["claims"]) + 1
+    readback = lifecycle_case_read_model(repo, case_id=cid, now_ms=now)
+    assert (readback["reason_state"], readback["close_reason"], readback["remaining_contracts_by_lot"]) == (
+        "resolved", "assignment", {"lot-1": 0})
+    retry = reconcile_due_lifecycle_cases(repo, account="lx", now_ms=now + 1, apply_changes=True, observation_collector=collector)
+    assert retry["results"] == []
+    assert _settlement_economic_snapshot(repo, cid) == after
+
+
+@pytest.mark.parametrize(("market", "symbol", "code"), [
+    ("US", "NVDA", "US.MSFT"), ("US", "NVDA", "HK.00700"),
+    ("HK", "0700.HK", "9992.HK"), ("HK", "0700.HK", "HK.09992"), ("HK", "0700.HK", "POP"),
+    ("HK", "0700.HK", "US.TCH"), ("US", "NVDA", None),
+])
+def test_settlement_stock_identity_known_other_or_empty_keeps_valid_zero(
+    tmp_path: Path, isolated_settlement_identity, market: str, symbol: str, code: str | None,
+) -> None:
+    option_code = "HK.TCH260821P100000" if market == "HK" else OPTION_CODE
+    repo, case, policy, _ = _repo_with_pending_case(tmp_path, symbol=symbol, market=market, option_code=option_code)
+    now = policy["settlement_deadline_ms"] + 1
+    _bootstrap_current_decision_shadow(repo, now_ms=now)
+    rows = [] if code is None else [{**_stock_settlement_deal("other", trade_time_ms=now - 2), "code": code, "qty": 100.5}]
+    gateway = _settlement_gateway(*rows)
+    gateway.history_order_rows = gateway.history_order_rows[:1]
+    gateway.history_deal_rows[0]["code"] = option_code
+    collector = build_settlement_observation_collector(repo=repo, gateway=gateway, futu_account_id="1001", now_ms_fn=lambda: now)
+    observation = collector(case, lifecycle_case_read_model(repo, case_id=case["case_id"], now_ms=now))
+    assert observation["complete"] is True
+    assert observation["stock_settlement_candidates"] == []
+    result = reconcile_due_lifecycle_cases(repo, account="lx", now_ms=now, apply_changes=True, observation_collector=collector)
+    assert result["results"][0]["write_result"]["status"] == "applied"
+    readback = lifecycle_case_read_model(repo, case_id=case["case_id"], now_ms=now)
+    assert readback["close_reason"] == "expiration_no_settlement"
+    assert not any(event["event_type"] == "assignment" for event in repo.list_trade_events())
 
 
 @pytest.mark.parametrize(
@@ -1766,8 +2112,9 @@ def test_unrelated_fractional_stock_keeps_complete_zero_observation(
     assert isolated_settlement_quantity
 
 
-def test_invalid_stock_quantity_runtime_records_error_and_backoff_without_terminal(
-    tmp_path: Path, isolated_settlement_quantity,
+@pytest.mark.parametrize("failure", ["quantity", *_STOCK_SOURCE_FAILURES])
+def test_invalid_stock_input_runtime_records_error_and_backoff_without_terminal(
+    tmp_path: Path, isolated_settlement_quantity, failure: str,
 ) -> None:
     from src.application.trades.inbox import get_settlement_attempt_state
 
@@ -1776,7 +2123,10 @@ def test_invalid_stock_quantity_runtime_records_error_and_backoff_without_termin
     now_ms = int(policy["settlement_deadline_ms"]) + 1
     _bootstrap_current_decision_shadow(repo, now_ms=now_ms)
     row = {**_stock_settlement_deal("runtime-quantity", trade_time_ms=now_ms - 2), "qty": 100.5}
-    gateway = _settlement_gateway(row)
+    gateway = (
+        _settlement_gateway(row) if failure == "quantity"
+        else _stock_source_failure_gateway(now_ms, failure, "valid-first")
+    )
     collector = build_settlement_observation_collector(
         repo=repo, gateway=gateway, futu_account_id="1001", now_ms_fn=lambda: now_ms, source_id="lx",
     )

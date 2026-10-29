@@ -570,3 +570,123 @@ def test_correction_requires_explicit_superseding_evidence_and_is_auditable(
         assert conn.execute(
             "SELECT COUNT(*) FROM cash_conversion_correction_audit"
         ).fetchone()[0] == 4
+
+
+def _allocated_sale_ledger(tmp_path: Path):
+    from src.application.ledger import api
+    from src.application.ledger.manual_trades import persist_manual_open_event
+    from src.application.positions.assigned_stock_view import build_assigned_stock_view
+
+    db_path, repo = _positions_db(tmp_path)
+    for strike in (100, 110):
+        persist_manual_open_event(
+            repo, broker="富途", account="lx", symbol="NVDA", option_type="put",
+            side="short", contracts=1, currency="USD", strike=strike, multiplier=100,
+            expiration_ymd="2026-08-21", premium_per_share=2,
+            opened_at_ms=EVENT_MS - 2000,
+        )
+        lot = next(row for row in repo.list_position_lots()
+                   if row["fields"]["contract_key"]["strike"] == str(strike))
+        api.record_manual_assignment(
+            repo, lot_id=lot["record_id"], contracts_to_close=1,
+            stock_side="buy", stock_qty=100, stock_price=strike,
+            as_of_ms=EVENT_MS - 1000,
+        )
+    lots = build_assigned_stock_view(repo, as_of_ms=EVENT_MS)["assigned_stock_lots"]
+    sale = {
+        **_sale_event("allocated-sale", EVENT_MS), "shares": 200, "fees": 2,
+        "side": "sell", "source": "manual", "target_stock_lot_id": lots[0]["stock_lot_id"],
+        "fee_provenance": {"basis": "actual", "source": "test", "amount": "2"},
+    }
+    sale["sale_allocations"] = [
+        {**sale, "stock_event_id": f"allocated-sale:allocation:{i}", "shares": 100,
+         "fees": 1, "target_stock_lot_id": lot["stock_lot_id"],
+         "fee_provenance": {"basis": "actual", "source": "test", "amount": "1"}}
+        for i, lot in enumerate(lots, 1)
+    ]
+    assert api.record_assigned_stock_event(repo, sale_event=sale)["created"]
+    return db_path, repo
+
+
+def test_allocated_sale_backfill_and_correction_reach_projection_and_audit(tmp_path):
+    from src.application.positions.assigned_stock_view import build_assigned_stock_view
+
+    db_path, repo = _allocated_sale_ledger(tmp_path)
+    evidence_repo = PerformanceEvidenceSQLiteRepository(db_path)
+    before = repo.list_assigned_stock_events()
+    old_fact = _import_rate(evidence_repo)
+    preview = _backfill(repo, evidence_repo)
+    assert repo.list_assigned_stock_events() == before
+    assert {item.event_id for item in preview.changes
+            if item.event_kind == "assigned_stock_event"} == {"allocated-sale"}
+    assert sum(item.event_kind == "assigned_stock_event" for item in preview.changes) == 6
+    applied = _backfill(repo, evidence_repo, apply=True)
+    assert applied.changed_event_count == preview.changed_event_count
+    report = build_assigned_stock_view(repo, as_of_ms=MIGRATION_MS)
+    assert len(report["assigned_stock_sale_rows"]) == 2
+    for row in report["assigned_stock_sale_rows"]:
+        conversions = row["cash_conversions"]
+        assert conversions["assigned_stock_sale_cash_gross"]["amount_cny"] == "75600"
+        assert conversions["assigned_stock_sale_fee_cash"]["amount_cny"] == "-7.2"
+    assert _backfill(repo, evidence_repo, apply=True).migrated_conversion_count == 0
+    before_correction = repo.list_assigned_stock_events()
+    corrected_fact = _import_rate(
+        evidence_repo, rate="7.0", source="manual_correction", source_id="corrected",
+        supersedes_fact_id=old_fact,
+    )
+    correction_preview = _correct(repo, evidence_repo)
+    assert repo.list_assigned_stock_events() == before_correction
+    assert sum(item.event_kind == "assigned_stock_event" for item in correction_preview.changes) == 6
+    _correct(repo, evidence_repo, apply=True)
+    assert _correct(repo, evidence_repo, apply=True).migrated_conversion_count == 0
+    for row in build_assigned_stock_view(repo, as_of_ms=MIGRATION_MS)["assigned_stock_sale_rows"]:
+        assert row["cash_conversions"]["assigned_stock_sale_cash_gross"]["amount_cny"] == "73500"
+        assert all(c["rate_evidence_fact_id"] == corrected_fact for c in row["cash_conversions"].values())
+    with connect_ledger_fixture(db_path) as conn:
+        audits = conn.execute(
+            "SELECT cash_fact_id, previous_conversion_json, new_conversion_json "
+            "FROM cash_conversion_correction_audit WHERE event_id='allocated-sale'"
+        ).fetchall()
+    assert len(audits) == 6
+    for audit in audits:
+        previous, current = json.loads(audit[1]), json.loads(audit[2])
+        assert previous["cash_fact_id"] == current["cash_fact_id"] == audit[0]
+        assert previous["rate_evidence_fact_id"] == old_fact
+        assert current["rate_evidence_fact_id"] == corrected_fact
+
+
+def test_allocated_sale_missing_fx_stays_pending_without_writes(tmp_path):
+    db_path, repo = _allocated_sale_ledger(tmp_path)
+    evidence = PerformanceEvidenceSQLiteRepository(db_path)
+    evidence.import_envelope(
+        {"schema_version": "option_performance_evidence.v1", "valuation_marks": [], "fx_rates": []},
+        apply=True, migrated_at_ms=MIGRATION_MS,
+    )
+    before = repo.list_assigned_stock_events()
+    result = _backfill(repo, evidence, apply=True)
+    assert result.migrated_conversion_count == 0
+    assert sum(item["event_kind"] == "assigned_stock_event" for item in result.unresolved) == 6
+    assert repo.list_assigned_stock_events() == before
+
+
+def test_allocated_sale_backfill_audit_failure_rolls_back_parent_and_children(tmp_path):
+    db_path, repo = _allocated_sale_ledger(tmp_path)
+    evidence = PerformanceEvidenceSQLiteRepository(db_path)
+    evidence.import_envelope(
+        {"schema_version": "option_performance_evidence.v1", "valuation_marks": [], "fx_rates": []},
+        apply=True, migrated_at_ms=MIGRATION_MS,
+    )
+    _backfill(repo, evidence, apply=True)
+    _import_rate(evidence)
+    before = repo.list_assigned_stock_events()
+    before_trades = repo.list_trade_events()
+    with connect_ledger_fixture(db_path) as conn:
+        conn.execute("CREATE TRIGGER reject_allocated_conversion BEFORE INSERT ON cash_conversion_backfill_audit "
+                     "WHEN NEW.cash_fact_id LIKE '%:allocation:2' "
+                     "BEGIN SELECT RAISE(ABORT, 'isolated migration failure'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="isolated migration failure"):
+        _backfill(repo, evidence, apply=True)
+    assert repo.list_assigned_stock_events() == before
+    assert repo.list_trade_events() == before_trades
+    with connect_ledger_fixture(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM cash_conversion_backfill_audit").fetchone()[0] == 0

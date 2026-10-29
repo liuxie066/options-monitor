@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import errno
 import json
+from pathlib import Path
 
 import pytest
 
@@ -77,3 +79,56 @@ def test_secret_cli_delete_requires_explicit_confirmation() -> None:
     args = parse_args(["secrets", "delete", LLM_DEEPSEEK_API_KEY])
     with pytest.raises(AgentToolError, match="requires --confirm"):
         run_store_command(args, provisioner_factory=lambda **_kwargs: memory)
+
+
+@pytest.mark.parametrize("backend", ["systemd", "auto"])
+@pytest.mark.parametrize("output_format", ["json", "text"])
+@pytest.mark.parametrize("state", ["denied", "io", "missing", "valid"])
+def test_secret_cli_real_systemd_status_classifies_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    backend: str, output_format: str, state: str,
+) -> None:
+    import src.infrastructure.secret_store.factory as factory
+    from src.interfaces.cli.main import main
+
+    monkeypatch.setattr(factory, "_platform_name", lambda value=None: "linux")
+    monkeypatch.setenv("OM_SECRET_BACKEND", "auto")
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+    monkeypatch.delenv("OM_ENV_FILE", raising=False)
+    monkeypatch.delenv("OM_RUNTIME_ROOT", raising=False)
+    target = tmp_path / "om-llm-deepseek-api-key"
+    if state == "valid":
+        target.write_text("synthetic-value-must-not-be-read")
+    original_lstat = Path.lstat
+
+    def injected_lstat(path, *args, **kwargs):
+        if path == target and state in {"denied", "io"}:
+            raise OSError(errno.EACCES if state == "denied" else errno.EIO, "private-path-and-value")
+        return original_lstat(path, *args, **kwargs)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("status must not read/decrypt credentials")
+
+    from src.infrastructure.secret_store.systemd_credentials import SystemdCredentialProvider
+    monkeypatch.setattr(SystemdCredentialProvider, "get", forbidden)
+    monkeypatch.setattr(Path, "lstat", injected_lstat)
+    argv = ["secrets", "status", LLM_DEEPSEEK_API_KEY, "--backend", backend,
+            "--store-root", str(tmp_path), "--format", output_format]
+    if state in {"denied", "io"}:
+        with pytest.raises(AgentToolError) as caught:
+            run_store_command(parse_args(argv))
+        assert caught.value.code == "CONFIG_ERROR"
+    assert main(argv) == (2 if state in {"denied", "io"} else 0)
+    output = capsys.readouterr()
+    assert "private-path-and-value" not in output.out + output.err
+    assert "synthetic-value-must-not-be-read" not in output.out + output.err
+    assert "Traceback" not in output.out + output.err
+    if state in {"denied", "io"}:
+        payload = json.loads(output.out)
+        assert payload["ok"] is False
+        assert payload["error"]["code"] == "CONFIG_ERROR"
+        assert str(tmp_path) not in output.out
+    elif output_format == "json":
+        payload = json.loads(output.out)
+        assert payload["summary"]["configured_count"] == (1 if state == "valid" else 0)
+        assert payload["summary"]["values_exposed"] is False

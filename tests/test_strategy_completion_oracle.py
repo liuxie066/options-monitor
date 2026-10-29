@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 import strategy_completion_oracle as oracle
 
+from domain.domain.short_vol_assessment import CANDIDATE_POSITION_SIZING_BASIS
+
 FIXTURE = json.loads((Path(__file__).parent / "fixtures/strategy_completion_baseline.json").read_text())
 
 
@@ -33,17 +35,78 @@ def test_real_steps_match_pre_amendment_source(case, actual):
             assert decision["normalized_input"]["decision_now_utc"] == clock
             assert decision["opening_decision"]["normalized_input"]["decision_now_utc"] == clock
 
-    def without_recorded_clock(value):
-        if isinstance(value, dict):
-            if "decision_now_utc" in value:
-                assert value["decision_now_utc"] == clock
-            return {k: without_recorded_clock(v) for k, v in value.items() if k != "decision_now_utc"}
-        if isinstance(value, list):
-            return [without_recorded_clock(v) for v in value]
-        return value
+    signed_delta = -0.3 if case.startswith("put_") else 0.3
+    observed = _checked_current_projection(observed, clock=clock, delta=signed_delta)
+    expected = _historical_input_variant(FIXTURE["cases"][case], delta=signed_delta)
+    # Every original business field and candidate/reject order remains compared.
+    assert observed == expected
 
-    # The immutable pre-clock oracle still compares every original business field.
-    assert without_recorded_clock(observed) == FIXTURE["cases"][case]
+
+def _checked_current_projection(value, *, clock, delta):
+    """Assert the new contract before projecting only fields absent in the old oracle."""
+    additions = {
+        "decision_now_utc": clock,
+        "delta_source": "opend_market_snapshot.option_delta",
+        "delta_unit": "fraction",
+        "delta_reason_code": None,
+        "policy_max_abs_delta": 0.4,
+    }
+    if isinstance(value, dict):
+        if value.get("position_sizing_basis") is not None:
+            assert value["position_sizing_basis"] == CANDIDATE_POSITION_SIZING_BASIS
+        for key, expected in additions.items():
+            if key in value:
+                assert value[key] == expected, key
+        if "delta" in value:
+            assert value["delta"] == (None if value.get("candidate_count") == 0 else delta)
+        if "decision_now_utc" in value:
+            # Actual scan/decision facts must carry qualified current-source evidence.
+            assert all(key in value for key in ("delta", "delta_source", "delta_unit", "delta_reason_code"))
+        if value.get("reason") in {"risk_delta", "risk_delta_unavailable"}:
+            pytest.fail("qualified synthetic 0.3 must pass the enabled default Delta gate")
+        return {key: _checked_current_projection(child, clock=clock, delta=delta)
+                for key, child in value.items() if key not in additions}
+    if isinstance(value, list):
+        return [_checked_current_projection(child, clock=clock, delta=delta) for child in value]
+    return value
+
+
+def _historical_input_variant(value, *, delta):
+    """Copy archived output with the approved synthetic input and sizing basis changes.
+
+    The historical generator imported helpers whose Delta was unavailable. Current
+    helpers supply signed 0.3, so the default gate stays enabled. The candidate
+    sizing basis now identifies directional scenarios; these fixtures have no
+    opposite-direction assignments, so all numeric sizing facts stay compared.
+    Archived bytes remain unchanged.
+    """
+    if isinstance(value, dict):
+        if "delta" in value:
+            assert value["delta"] is None
+        if value.get("position_sizing_basis") is not None:
+            assert value["position_sizing_basis"] == "non_option_net_assets_before_assignment_fees.v2"
+        return {key: (None if value.get("candidate_count") == 0 else delta)
+                if key == "delta" else CANDIDATE_POSITION_SIZING_BASIS
+                if key == "position_sizing_basis" and child is not None
+                else _historical_input_variant(child, delta=delta)
+                for key, child in value.items()}
+    if isinstance(value, list):
+        return [_historical_input_variant(child, delta=delta) for child in value]
+    return value
+
+
+@pytest.mark.parametrize("change", [
+    {"delta": 0.4001}, {"delta_source": None}, {"delta_unit": "percent"},
+    {"delta_reason_code": "delta_source_unverified"}, {"policy_max_abs_delta": None},
+    {"position_sizing_basis": "non_option_net_assets_before_assignment_fees.v2"},
+])
+def test_oracle_projection_does_not_hide_contract_regressions(change):
+    row = {"delta": 0.3, "delta_source": "opend_market_snapshot.option_delta",
+           "delta_unit": "fraction", "delta_reason_code": None, "policy_max_abs_delta": 0.4,
+           "decision_now_utc": oracle.old.NOW.isoformat(), **change}
+    with pytest.raises(AssertionError):
+        _checked_current_projection(row, clock=oracle.old.NOW.isoformat(), delta=0.3)
+
 
 
 @pytest.mark.parametrize(

@@ -40,6 +40,7 @@ env-file 不是合并进生成快照的配置层；它在进程启动或工具�
 - per-symbol 策略 override 放在 `markets.<market>.overrides.<symbol>`；
 - US 调度 override 放在 `markets.us.schedule`，例如通过 `gates` 设置北京时间截止点；
 - YAML 中使用 `covered_call`，生成的内部 runtime / CSV / trace key 仍可能是 `sell_call`；
+- 普通 `sell_put` / `covered_call` 的 `max_abs_delta` 省略默认 `0.40`；显式 `null` 关闭该门槛，有限 `[0,1]` 数字覆盖。旧配置省略字段也启用新默认，详见 [配置指南](CONFIGURATION_GUIDE.md#市场与-symbol-override)。
 - `combo_yield` 是当前开仓策略 key；旧 `yield_enhancement` 只在明确兼容边界读取；
 - `portfolio_management.enabled` 是全局、默认关闭的 PM 集成开关，控制 PM 只读工具、
   Holdings 开启时的补充来源和成交后的持仓刷新提示；不要放在 `markets.*` 下；
@@ -136,6 +137,8 @@ Symbol 扫描在受支持的 `scan-pipeline` 主线程中串行执行，以保�
 
 `config build` 会写 `_generated` 来源与指纹。新生成的 YAML 市场快照按下面的市场输入指纹判定新鲜度；旧快照仍按完整文件 SHA 检查，需显式重建才能采用新语义。`tick` / `tick-cron` 拒绝过期或无效快照。
 
+构建时若显式传入 `--system-config <path>`，新生成的重建提示会保留该系统来源以及 YAML、市场和输出路径；未指定时继续使用内置默认值。已有快照中的旧提示不会自动改写，需携带原 `--system-config` 路径显式重建一次，才能更新提示并保留原系统参数。
+
 ### 市场配置新鲜度：按实际依赖判定
 
 #### 目标、边界与验收
@@ -163,6 +166,16 @@ Bot runtime JSON 的有效性与激活流程保持现有合同；非 YAML 来源
 现在 `resolve_yaml_runtime_config` 从一次 YAML 读取构建市场输入并记录原始与 effective 两种指纹；公共 checker 按下述协议比较。
 
 `config_authoring_transaction.py::publish_yaml_config_generation` 已支持多市场生成、来源 SHA 冲突检测、备份与失败恢复。
+apply 在持有配置锁、形成全部实际目标后，先复用访问身份校验，再创建本次备份和事务 manifest。
+校验覆盖 YAML、选中市场快照及启用生成的 Bot 快照：已有文件须属于当前部署用户，替换探针须保持 uid/gid，
+特殊 mode、自定义原文件或继承探针 ACL、身份检查 I/O 失败均拒绝本次发布；请由原部署用户处理，不自动迁移权限。
+不存在的新目标沿用现有创建身份；dry-run 不创建身份探针。已有 pending recovery 仍先执行，已完成的恢复写入会如实报告，
+因此新发布被拒绝不等于整个调用零写入；此校验不保证阻止绕过锁的管理员并发改权。
+未完成事务恢复时，先校验全部 journal 内容，再在首次修改目标前核对该事务的完整目标集合。
+目标只能保持记录的修改前或修改后字节；原先不存在的目标也允许仍然缺席，原先存在但缺失的目标仍拒绝恢复。
+独立 build 等操作产生第三状态或目标不可读时，以 `CONFIG_TRANSACTION_RECOVERY_REQUIRED`
+和 `target_state_validation` 阶段拒绝，保留该事务的全部目标及 journal，供操作者核对；先前事务或当前发布已发生的写入仍如实保留在回执中。
+该检查不为独立 build 加锁，也不保证检查后没有并发改写。
 聊天模型切换经 `bot/control/model_operations.py` 调用该事务；CLI 模型 add/use 经 `write_model_config_update` 只写 YAML。
 补齐 CLI 联动不能覆盖手动编辑 YAML，且仍要求助手操作重建无关市场，因此不作为本次方向。
 

@@ -282,7 +282,7 @@ def run_symbol_monitoring(
     def _capture_required_data_csv_bytes(csv_bytes: bytes) -> None:
         nonlocal required_data_frame
         try:
-            required_data_frame = pd.read_csv(io.BytesIO(csv_bytes), converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
+            required_data_frame = pd.read_csv(io.BytesIO(csv_bytes), float_precision="round_trip", converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
         except (pd.errors.ParserError, pd.errors.EmptyDataError, UnicodeDecodeError) as exc:
             raise FrozenRequiredDataUnavailable(symbol=symbol, reason="required_data_invalid") from exc
 

@@ -342,6 +342,8 @@ def _risk_change_view(value: Mapping[str, Any]) -> dict[str, Any]:
         "reason_code": value.get("reason_code"),
         "reliable": bool(value.get("reliable")),
         "evidence_chain_id": value.get("evidence_chain_id"),
+        **({"evidence_snapshot_hash": value["evidence_snapshot_hash"]}
+           if "evidence_snapshot_hash" in value else {}),
         "nearest_event": dict(nearest) if nearest else None,
         "expiration_relations": {
             str(key): dict(item)

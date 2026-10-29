@@ -1,4 +1,4 @@
-"""Pure projection for the all-open-short-options-assigned stress scenario."""
+"""Pure projection for open-short-options assignment scenarios."""
 
 from __future__ import annotations
 
@@ -20,6 +20,12 @@ from domain.domain.symbol_identity import canonical_symbol
 
 SCHEMA_VERSION = "portfolio.assignment_scenario.v1"
 PORTFOLIO_EVIDENCE_VERSION = "portfolio.valuation_evidence.v1"
+ASSIGNMENT_SCENARIOS = ("short_put", "short_call", "all_short")
+_SCENARIO_SCOPE = {
+    "short_put": "all_open_short_put_assigned",
+    "short_call": "all_open_short_call_assigned",
+    "all_short": "all_open_short_put_and_call_assigned",
+}
 _MONEY = Decimal("0.01")
 _NATIVE_MONEY = Decimal("0.000001")
 _RATE = Decimal("0.000001")
@@ -50,6 +56,31 @@ def _integer(value: Any) -> int | None:
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def validate_assignment_scenario(scenario: str) -> None:
+    if scenario not in ASSIGNMENT_SCENARIOS:
+        raise ValueError(f"scenario must be one of: {', '.join(ASSIGNMENT_SCENARIOS)}")
+
+
+def select_assignment_positions(
+    option_positions: Sequence[Mapping[str, Any]], *, accounts: Sequence[str],
+    scenario: str = "all_short", symbol: str | None = None,
+) -> list[Mapping[str, Any]]:
+    """Select open shorts for both account scenarios and candidate sizing."""
+    validate_assignment_scenario(scenario)
+    selected_accounts = {_text(account).lower() for account in accounts}
+    option_types = {"put", "call"} if scenario == "all_short" else {scenario.removeprefix("short_")}
+    selected_symbol = canonical_symbol(symbol) if symbol is not None else None
+    return [
+        row for row in option_positions
+        if isinstance(row, Mapping)
+        and _text(row.get("account")).lower() in selected_accounts
+        and _text(row.get("status")).lower() == "open"
+        and _text(row.get("side")).lower() == "short"
+        and _text(row.get("option_type")).lower() in option_types
+        and (symbol is None or canonical_symbol(row.get("symbol")) == selected_symbol)
+    ]
 
 
 def _money(value: Decimal | int | float | None) -> str | None:
@@ -498,14 +529,18 @@ def project_assignment_scenario(
     portfolio_evidence: Mapping[str, Any],
     option_positions: Sequence[Mapping[str, Any]],
     snapshot: Mapping[str, Any],
+    scenario: str = "all_short",
 ) -> dict[str, Any]:
-    """Project all open short puts/calls as physically assigned.
+    """Project the selected open short puts/calls as physically assigned.
 
     The function has no I/O and never reads or mutates ledgers. Long options are
     intentionally outside both its input contract and its output.
     """
 
     normalized_accounts = list(dict.fromkeys(_text(item).lower() for item in accounts if _text(item)))
+    selected_positions = select_assignment_positions(
+        option_positions, accounts=normalized_accounts, scenario=scenario,
+    )
     unavailable, partial, warnings, evidence_quality = _portfolio_evidence_quality(
         accounts=normalized_accounts,
         portfolio_evidence=portfolio_evidence,
@@ -629,9 +664,9 @@ def project_assignment_scenario(
     put_outflow = _ZERO
     call_inflow = _ZERO
     known_fees = _ZERO
-    fees_complete = True
-    all_fees_complete = True
-    assignment_cash_complete = True
+    fees_complete = not unavailable
+    all_fees_complete = not unavailable
+    assignment_cash_complete = not unavailable
     cash_adjustments: dict[tuple[str, str, str], dict[str, Any]] = {}
     unknown_cash_buckets: set[tuple[str, str, str]] = set()
     expiry_accumulator: dict[str, dict[str, Any]] = defaultdict(
@@ -643,20 +678,6 @@ def project_assignment_scenario(
             "assignments": 0,
         }
     )
-
-    selected_positions: list[Mapping[str, Any]] = []
-    for row in option_positions:
-        if not isinstance(row, Mapping):
-            continue
-        if _text(row.get("account")).lower() not in normalized_accounts:
-            continue
-        if _text(row.get("status")).lower() != "open":
-            continue
-        if _text(row.get("side")).lower() != "short":
-            continue
-        if _text(row.get("option_type")).lower() not in {"put", "call"}:
-            continue
-        selected_positions.append(row)
 
     capacity_fx_complete = True
     if isinstance(capacity_fx, Mapping):
@@ -960,12 +981,12 @@ def project_assignment_scenario(
     account_cash: dict[str, dict[str, Any]] = {
         account: {
             "opening_cash_mmf_cny": _ZERO,
-            "opening_complete": True,
+            "opening_complete": not unavailable,
             "put_outflow_cny": _ZERO,
             "call_inflow_cny": _ZERO,
             "known_fees_cny": _ZERO,
-            "fees_complete": True,
-            "cash_complete": True,
+            "fees_complete": not unavailable,
+            "cash_complete": not unavailable,
             "cash_components": [],
         }
         for account in normalized_accounts
@@ -1293,12 +1314,12 @@ def project_assignment_scenario(
             )
 
     return {
-        "position_sizing": project_non_option_assignment_assets(accounts=normalized_accounts, portfolio_evidence=portfolio_evidence, option_positions=option_positions),
+        "position_sizing": project_non_option_assignment_assets(accounts=normalized_accounts, portfolio_evidence=portfolio_evidence, option_positions=selected_positions),
         "schema_version": SCHEMA_VERSION,
         "status": status,
         "scope": {
             "accounts": normalized_accounts,
-            "scenario": "all_open_short_put_and_call_assigned",
+            "scenario": _SCENARIO_SCOPE[scenario],
             "report_name": "指派后资产分布（不含 Long Option）",
             "reporting_currency": "CNY",
             "include_mmf_as_cash": True,
@@ -1372,7 +1393,10 @@ def project_assignment_scenario(
 
 
 __all__ = [
+    "ASSIGNMENT_SCENARIOS",
     "PORTFOLIO_EVIDENCE_VERSION",
     "SCHEMA_VERSION",
     "project_assignment_scenario",
+    "select_assignment_positions",
+    "validate_assignment_scenario",
 ]

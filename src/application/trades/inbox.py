@@ -170,9 +170,15 @@ def enqueue_trade_payload(
     repo: Any = None,
     delivery_purpose: str | None = None,
     adapter_version: str = LEGACY_ADAPTER_VERSION,
+    underlying_conflict_errors: list[str] | None = None,
 ) -> str:
     """Persist every source version before any economic use; never clear conflicts."""
     authoritative = adapter_version in TRADE_INTAKE_ADAPTER_VERSIONS.values()
+    if underlying_conflict_errors and not (
+        source == "lookup" and adapter_version == TRADE_INTAKE_ADAPTER_VERSIONS["lookup"]
+        and repo is not None and broker_deal_key
+    ):
+        raise ValueError("underlying review requires an authoritative bound lookup")
     if authoritative and repo is None:
         raise ValueError("authoritative trade source requires the ledger writer lock")
     if authoritative:
@@ -254,6 +260,15 @@ def enqueue_trade_payload(
                 broker_deal_key=canonical_key,
                 adapter_version=raw_adapter_version,
             ) or new_evidence
+        # The config-aware lookup decision is durable; later receptions retain evidence,
+        # but may not turn this review into status-missing and then reopen it on OK.
+        if (row["status"] == "identity_needs_review"
+                and row["result_reason"] == "broker_underlying_symbol_conflict"):
+            return inbox_id
+        if underlying_conflict_errors and (
+            row["status"] == "conflict" and row["result_reason"] != "broker_deal_status_missing"
+        ):
+            return inbox_id
         if canonical_key:
             from domain.domain.trade_execution import conflicting_execution_associations
             original_content = execution_content(original_json)
@@ -287,12 +302,15 @@ def enqueue_trade_payload(
                     execution_source_revision(json.loads(item[0])) for item in evidence
                 )
             )
-            conflict = any(
+            conflict = _has_source_economic_conflict(evidence_content) or any(
                 _economic_values_conflict(item.get("economic"), content.get("economic"))
                 or conflicting_execution_associations(item, content)
                 for item in evidence_content
             )
             applied_conflicts = applied_execution_association_conflicts(repo, canonical_key, content)
+            if (underlying_conflict_errors and row["status"] == "handled"
+                    and not (source_identity_conflict or conflict or applied_conflicts or status_conflict or status_missing or stale_revision)):
+                return inbox_id
             if source_identity_conflict or conflict or applied_conflicts or status_conflict or status_missing or stale_revision:
                 reason = ("broker_source_identity_conflict" if source_identity_conflict else
                           "broker_economic_payload_conflict" if conflict else
@@ -305,7 +323,8 @@ def enqueue_trade_payload(
                     payload_version = payload_version + 1, claim_id = NULL, claim_until_ms = NULL,
                     updated_at_ms = ?, last_error = ?,
                     result_status = 'conflict', result_reason = ?
-                    WHERE inbox_id = ? AND (status != 'conflict' OR ?)""", (now_ms, reason, reason, inbox_id, int(new_evidence)),
+                    WHERE inbox_id = ? AND (status != 'conflict' OR ? OR result_reason IS NOT ?)""",
+                    (now_ms, reason, reason, inbox_id, int(new_evidence), reason),
                 )
             elif (
                 row["status"] == "conflict"
@@ -329,10 +348,10 @@ def enqueue_trade_payload(
             elif str(row["economic_payload_hash"] or "") != original_hash:
                 conn.execute("UPDATE trade_inbox SET economic_payload_hash = ? WHERE inbox_id = ?",
                              (original_hash, inbox_id))
-            if not source_identity_conflict and not conflict and not applied_conflicts and any(
-                value is not None and name not in known_before
-                for name, value in content.get("associations", {}).items()
-            ):
+            if (not (underlying_conflict_errors and row["status"] == "handled")
+                    and not source_identity_conflict and not conflict and not applied_conflicts
+                    and any(value is not None and name not in known_before
+                            for name, value in content.get("associations", {}).items())):
                 prior_effect = _has_persisted_execution(repo, canonical_key, payload)
                 suppress_delivery = prior_effect is not False or (
                     row["result_status"] == "skipped" and row["result_reason"] == "not_option_deal"
@@ -350,6 +369,18 @@ def enqueue_trade_payload(
                        status = 'pending'
                        WHERE inbox_id = ? AND status IN ('pending', 'handled')""",
                     (now_ms, suppress_delivery, inbox_id),
+                )
+            if underlying_conflict_errors and row["status"] != "handled":
+                # This update and both raw sources are one Inbox transaction. A prior
+                # worker's claim must fail its existing commit-scope revalidation.
+                conn.execute(
+                    """UPDATE trade_inbox SET status = 'identity_needs_review',
+                       payload_version = payload_version + 1, claim_id = NULL, claim_until_ms = NULL,
+                       updated_at_ms = ?, last_error = ?, result_status = 'unresolved',
+                       result_reason = 'broker_underlying_symbol_conflict'
+                       WHERE inbox_id = ? AND (status = 'pending' OR
+                         (status = 'conflict' AND result_reason = 'broker_deal_status_missing'))""",
+                    (now_ms, json.dumps(underlying_conflict_errors, ensure_ascii=False), inbox_id),
                 )
     return inbox_id
 
@@ -1349,6 +1380,24 @@ def list_unclaimed_trade_payload_refresh_intents(
     limit: int = 100,
 ) -> list[dict[str, str]]:
     """Read completed live stock hints that have never entered the PM call boundary."""
+    return _list_trade_payload_refresh_intents(path, account_mapping=account_mapping, limit=limit)
+
+
+def list_pending_trade_payload_refresh_handoffs(
+    path: str | Path, *, account_mapping: Mapping[str, str], limit: int = 100,
+    after_inbox_id: str | None = None,
+) -> list[dict[str, str]]:
+    """Replay only new durable handoffs, never legacy attempted-only records."""
+    return _list_trade_payload_refresh_intents(
+        path, account_mapping=account_mapping, limit=limit, pending_handoff=True,
+        after_inbox_id=after_inbox_id,
+    )
+
+
+def _list_trade_payload_refresh_intents(
+    path: str | Path, *, account_mapping: Mapping[str, str], limit: int,
+    pending_handoff: bool = False, after_inbox_id: str | None = None,
+) -> list[dict[str, str]]:
     inbox_path = Path(path)
     allowed = {str(key).strip(): str(value).strip().lower()
                for key, value in account_mapping.items() if str(key).strip() and str(value).strip()}
@@ -1357,13 +1406,29 @@ def list_unclaimed_trade_payload_refresh_intents(
     out: list[dict[str, str]] = []
     with closing(sqlite3.connect(f"{inbox_path.resolve().as_uri()}?mode=ro", uri=True)) as conn:
         conn.row_factory = sqlite3.Row
+        if pending_handoff and "portfolio_refresh_handoff_request_id" not in {
+            row["name"] for row in conn.execute("PRAGMA table_info(trade_inbox)")
+        }:
+            return []
+        eligibility = (
+            "portfolio_refresh_handoff_request_id IS NOT NULL "
+            "AND portfolio_refresh_accepted_at_ms IS NULL"
+            if pending_handoff else "portfolio_refresh_attempted_at_ms IS NULL"
+        )
+        after = (
+            "AND (received_at_ms, inbox_id) > "
+            "(SELECT received_at_ms, inbox_id FROM trade_inbox WHERE inbox_id = ?)"
+            if after_inbox_id is not None else ""
+        )
+        seen: set[tuple[str, str]] = set()
         rows = conn.execute(
-            """SELECT * FROM trade_inbox WHERE status = 'handled' AND delivery_purpose = 'live'
+            f"""SELECT * FROM trade_inbox WHERE status = 'handled' AND delivery_purpose = 'live'
                  AND source IN ('push', 'backfill')
                  AND COALESCE(json_extract(result_json, '$.receipt_suppression_reason'), '') != 'reconciled_from_ledger'
                  AND portfolio_refresh_intent_json IS NOT NULL
-                 AND portfolio_refresh_attempted_at_ms IS NULL
+                 AND {eligibility} {after}
                ORDER BY received_at_ms, inbox_id""",
+            (after_inbox_id,) if after_inbox_id is not None else (),
         )
         for row in rows:
             payload = json.loads(row["payload_json"])
@@ -1375,6 +1440,12 @@ def list_unclaimed_trade_payload_refresh_intents(
                 continue
             if _trade_source_evidence_observation(conn, row)[1]:
                 continue
+            if pending_handoff:
+                intent["request_id"] = str(row["portfolio_refresh_handoff_request_id"])
+                identity = (intent["account"], intent["request_id"])
+                if identity in seen:
+                    continue
+                seen.add(identity)
             out.append({"inbox_id": str(row["inbox_id"]), **intent})
             if len(out) >= max(1, int(limit)):
                 break
@@ -1390,7 +1461,10 @@ def claim_trade_payload_refresh_intent(
     with closing(_connect(inbox_path)) as conn:
         with conn:
             _ensure_schema(conn)
-            return _claim_trade_payload_refresh_intent(conn, inbox_id=inbox_id)
+            intent = _claim_trade_payload_refresh_intent(conn, inbox_id=inbox_id)
+            if intent is not None:
+                _bind_portfolio_refresh_handoff(conn, inbox_ids=(inbox_id,), intent=intent)
+            return intent
 
 
 def claim_trade_payload_refresh_intents(
@@ -1406,13 +1480,42 @@ def claim_trade_payload_refresh_intents(
     if not identifiers:
         return None
     first_intent = None
+    claimed_ids = []
     with closing(_connect(Path(path))) as conn, conn:
         _ensure_schema(conn)
         for inbox_id in identifiers:
             intent = _claim_trade_payload_refresh_intent(conn, inbox_id=inbox_id, account=account)
-            if first_intent is None and intent is not None:
-                first_intent = intent
+            if intent is not None:
+                claimed_ids.append(inbox_id)
+                if first_intent is None:
+                    first_intent = intent
+        if first_intent is not None:
+            _bind_portfolio_refresh_handoff(conn, inbox_ids=claimed_ids, intent=first_intent)
     return first_intent
+
+
+def _bind_portfolio_refresh_handoff(
+    conn: sqlite3.Connection, *, inbox_ids: Iterable[str], intent: Mapping[str, str],
+) -> None:
+    conn.executemany(
+        "UPDATE trade_inbox SET portfolio_refresh_handoff_request_id = ? WHERE inbox_id = ?",
+        [(intent["request_id"], str(inbox_id)) for inbox_id in inbox_ids],
+    )
+
+
+def accept_trade_payload_refresh_handoff(
+    path: str | Path, *, account: str, request_id: str,
+) -> None:
+    """Absorb a validated durable acceptance; an attempted timestamp alone is insufficient."""
+    with closing(_connect(Path(path))) as conn, conn:
+        _ensure_schema(conn)
+        conn.execute(
+            """UPDATE trade_inbox SET portfolio_refresh_accepted_at_ms = ?
+               WHERE portfolio_refresh_handoff_request_id = ?
+                 AND json_extract(portfolio_refresh_intent_json, '$.account') = ?
+                 AND portfolio_refresh_accepted_at_ms IS NULL""",
+            (int(time.time() * 1000), request_id, account),
+        )
 
 
 def _claim_trade_payload_refresh_intent(
@@ -3092,6 +3195,7 @@ _READ_SCHEMA_COLUMNS = {
     "trade_inbox": """inbox_id source deal_id broker_deal_key identity_status payload_json
         economic_payload_hash status attempt_count received_at_ms updated_at_ms last_error
         result_status result_reason portfolio_refresh_intent_json portfolio_refresh_attempted_at_ms
+        portfolio_refresh_handoff_request_id portfolio_refresh_accepted_at_ms
         next_attempt_at_ms payload_version claim_id claim_until_ms claim_owner result_json
         receipt_json receipt_recovery_allowed delivery_purpose""".split(),
     "trade_inbox_evidence": """inbox_id source payload_hash payload_json received_at_ms
@@ -3284,6 +3388,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         "portfolio_refresh_attempted_at_ms",
         "INTEGER",
     )
+    # Nullable additions deliberately leave legacy attempted outcomes unreplayable.
+    _add_column_if_missing(conn, "trade_inbox", "portfolio_refresh_handoff_request_id", "TEXT")
+    _add_column_if_missing(conn, "trade_inbox", "portfolio_refresh_accepted_at_ms", "INTEGER")
     # Economic retry due time must survive metadata/enrichment updates to updated_at_ms.
     retry_deadline_missing = "next_attempt_at_ms" not in {
         row["name"] for row in conn.execute("PRAGMA table_info(trade_inbox)")}
@@ -3477,6 +3584,20 @@ def _inbox_execution_content(source_key: str, payload: dict[str, Any]) -> dict[s
 
 def _has_source_identity_conflict(contents: Iterable[Mapping[str, Any]]) -> bool:
     return any("invalid:source_execution_identity" in item.get("errors", ()) for item in contents)
+
+
+def _has_source_economic_conflict(contents: Iterable[Mapping[str, Any]]) -> bool:
+    known: dict[str, set[str]] = {"quantity": set(), "price": set()}
+    for item in contents:
+        if any(error.startswith(("invalid:quantity:", "invalid:price:")) for error in item.get("errors", ())):
+            return True
+        for field, values in known.items():
+            value = (item.get("economic") or {}).get(field)
+            if value not in (None, ""):
+                values.add(value)
+                if len(values) > 1:
+                    return True
+    return False
 
 
 def _economic_values_conflict(left: Any, right: Any) -> bool:
@@ -3948,6 +4069,8 @@ __all__ = [
     "SettlementAttemptClaimOwnershipLost",
     "claim_trade_payload_refresh_intent",
     "claim_trade_payload_refresh_intents",
+    "list_pending_trade_payload_refresh_handoffs",
+    "accept_trade_payload_refresh_handoff",
     "enqueue_trade_payload",
     "claim_settlement_provider_batch",
     "complete_settlement_attempt",

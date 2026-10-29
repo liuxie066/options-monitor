@@ -524,6 +524,9 @@ def test_public_cash_entries_share_reader_policy(tmp_path, monkeypatch, entry, c
     if entry in {"cash_cli", "cash_tool"}:
         assert result["cash_available_cny"] == (100 if case == "fresh" else None)
         assert result["cash_free_cny"] == (70 if case == "fresh" else None)
+        assert result["assessment"]["status"] == ("cash_headroom_only" if case == "fresh" else "unable")
+        assert ("cash_free_total_cny" in result["assessment"]["supported_claims"]) is (case == "fresh")
+        assert "additional_short_contracts" in result["assessment"]["unsupported_claims"]
     if entry == "cash_tool":
         assert cache.read_bytes() == before
         assert calls == [] or calls[0]["write_cache"] is False
@@ -535,7 +538,7 @@ def test_portfolio_tool_rejects_retired_per_call_cash_ttl():
     from src.application.tool_execution import execute_tool, build_tool_manifest
     spec = next(tool for tool in build_tool_manifest()["tools"] if tool["name"] == "get_portfolio_context")
     assert "ttl_sec" not in spec["input_schema"]
-    result = execute_tool("get_portfolio_context", {"ttl_sec": 0})
+    result = execute_tool("get_portfolio_context", {"account": "lx", "ttl_sec": 0})
     assert result["ok"] is False
     assert result["error"]["code"] == "INPUT_ERROR"
     assert "runtime.portfolio_context_ttl_sec" in result["error"]["message"]

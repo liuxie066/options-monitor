@@ -154,7 +154,7 @@ def test_projection_runtime_facade_modes_are_fully_inventoried() -> None:
             ): 1,
             (
                 "src/application/ledger/manual_trades.py",
-                "persist_manual_adjust_events>_run",
+                "_persist_manual_adjust_events_in_transaction",
                 "'fast_if_safe'",
             ): 1,
             (
@@ -278,6 +278,13 @@ def test_full_projection_calls_are_explicitly_classified() -> None:
                 "src/application/ledger/migration.py",
                 "shadow_replay_position_lot_snapshot",
                 "project_trade_events",
+            ): 1,
+            # Read-only stored-lot parity precondition on the same transaction
+            # snapshot; publication still uses the canonical runtime facade.
+            (
+                "src/application/ledger/order_fee_allocation.py",
+                "_prepare",
+                "project_stored_trade_events_to_position_lots",
             ): 1,
             (
                 "src/application/ledger/position_projection_migration.py",

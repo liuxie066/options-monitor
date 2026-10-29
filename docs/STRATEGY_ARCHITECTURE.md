@@ -86,7 +86,7 @@ V1 的 `staggered_expiry_pair`（Put 早到期、Call 晚到期）已从候选�
 Funding Put：
 
 - 使用 CSP 自己的 DTE 窗口和接货 strike 边界。
-- 在组合构造前先复用完整 CSP underwriting 候选；现金、事件、收益、IV/RV、流动性及愿意接货边界均不得因 Long Call 而放宽。
+- 在组合构造前复用 CSP underwriting 的现金、事件、收益、IV/RV、流动性及愿意接货边界，不因 Long Call 而放宽。普通 CSP/CC 新增的 `max_abs_delta` 上限不进入 Combo funding 路径；Combo 保留自身 delta 规则。
 - 财报事件与 CSP/CC 共用同一 `expiry-6天..expiry` 自然日硬窗口；第 7 天及更早仅作软语境，不单设 Combo 窗口。
 - Combo Yield 自己启用时即可独立构造 Funding Put，不依赖 CSP step 是否启用或成功。
 

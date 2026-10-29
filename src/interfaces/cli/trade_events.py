@@ -9,10 +9,13 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from src.application.ledger.api import (
+    apply_confirmed_order_fee_allocation,
     ledger_store_payload,
     open_futu_time_repair_store,
+    open_order_fee_allocation_store,
     open_position_ledger_from_runtime_config as resolve_option_positions_repo,
     resolve_position_data_config_path,
+    prepare_confirmed_order_fee_allocation,
 )
 from src.application.account_config import resolve_account_broker_binding_sets
 from src.application.agent_tool_config import load_runtime_config
@@ -154,11 +157,18 @@ def main(argv: list[str] | None = None) -> int:
         help=argparse.SUPPRESS,
     )
 
+    p_allocate = sub.add_parser("fees-allocate", help="preview or apply operator-confirmed equal allocation of an actual two-leg order fee")
+    p_allocate.add_argument("--request", required=True)
+    p_allocate.add_argument("--expected-input-hash")
+    p_allocate.add_argument("--backup-dir")
+    p_allocate.add_argument("--format", choices=["json"], default="json")
+    _add_write_flags(p_allocate, high_risk=True)
+
     args = parser.parse_args(argv)
     write_controls: dict[str, dict[str, bool]] = {}
     if args.cmd == "replay":
         write_controls[args.cmd] = _resolve_write_control(args, command_name="trade-events replay", high_risk=False)
-    elif args.cmd in {"void", "repair", "fees-sync", "repair-futu-times"}:
+    elif args.cmd in {"void", "repair", "fees-sync", "repair-futu-times", "fees-allocate"}:
         write_controls[args.cmd] = _resolve_write_control(args, command_name=f"trade-events {args.cmd}", high_risk=True)
     base = Path(__file__).resolve().parents[3]
     if args.cmd == "fees-sync":
@@ -176,6 +186,25 @@ def main(argv: list[str] | None = None) -> int:
         )
         if guard is None:
             return 2
+    if args.cmd == "fees-allocate":
+        should_apply = write_controls[args.cmd]["write_requested"]
+        try:
+            request = json.loads(Path(args.request).read_text(encoding="utf-8"))
+            repo, ledger_store = open_order_fee_allocation_store(data_config=data_config_path, runtime_root=_runtime_root_arg(args))
+            payload = (apply_confirmed_order_fee_allocation(repo, request=request,
+                expected_input_hash=args.expected_input_hash, backup_dir=args.backup_dir)
+                if should_apply else prepare_confirmed_order_fee_allocation(repo, request=request))
+        except (ValueError, OSError, sqlite3.Error, TypeError) as exc:
+            _print_json({"mode": "blocked", "write_applied": False, "error": str(exc)})
+            return 2
+        rollback_hint = "retain the private ledger backup; restore requires a stopped-write window and subsequent-data reconciliation"
+        payload = {**payload, "ledger_store": ledger_store, "dry_run": not should_apply, "rollback_hint": rollback_hint}
+        if payload.get("write_applied") is not None:
+            payload = attach_write_contract(payload, dry_run=not should_apply,
+                write_applied=payload["write_applied"], backup_path=(payload.get("backup") or {}).get("path"),
+                rollback_hint=rollback_hint)
+        _print_json(payload)
+        return 2 if payload.get("durable_readback") is False or payload.get("mode") == "not_applied" else 0
     if args.cmd == "repair-futu-times":
         try:
             request = json.loads(Path(args.request).read_text(encoding="utf-8"))

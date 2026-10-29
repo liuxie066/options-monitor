@@ -206,6 +206,12 @@ allocation net 替代，不改变数量、事件身份或已平仓状态。缺�
 快照中完成校验，再在一个 writer 事务内写入；失败整批回滚，已有同 hash 回执支持重试。
 预览采用同一校验且只读，提交仍在事务内重查。
 
+普通扫描的账户仓位缓存及共享缓存切片除了 TTL、账户和券商校验，还要求缓存与本次读取的
+当前可信快照各自具有非空且完全相等的 canonical `decision_state_fingerprint`。缺失或不匹配
+沿用既有刷新和失败回退；合法空仓仍可命中。指纹使用既有全局及账户事实范围，不缩窄为
+账户局部版本。本次加载复用同一个当前观察，不承诺观察之后并发写入的全扫描原子性；
+已封存的 prepared context 继续按独立回执契约读取。
+
 费用沿用 `FeeFact` 的实际、估计与缺失语义及 `enrich_order_fees()` 的受控补证合同。
 订单引用与费用分组按 `broker_account_id + external_order_namespace + external_order_id`
 隔离；订单 ID 命名空间须经验证，不能默认与成交 ID 命名空间相同。
@@ -399,7 +405,7 @@ PM 的持仓同步合同，不建设下单系统，也不自动变更生产账�
 |---|---|---|
 | 来源接收 | adapter 与 `trades/inbox.py` 负责来源绑定、原始证据、重复和冲突隔离；SDK 回调持久接收后返回 | 处理领取绑定已保存的具体版本；冲突不能被普通处理、重复跳过或重试覆盖 |
 | 成交与批次分配 | `trades/intake.py`、`resolver.py` 及指派股票出售的 `positions/workflows.py` 经 `ledger/api.py` 应用规范化事实；必要身份、合约与数量先验证 | 一个身份只应用一次经济量；普通股票保留 PM 刷新分支；无法安全分配时保留证据与欠项，不伪造持仓或成功关系 |
-| 订单费用 | `trades/order_fee_sync.py` 查询并校验整单证据，`ledger/order_fee_migration.py` 持有费用更新事务 | actual／estimate／missing 分别保留；整单数量、币种与金额守恒，重启后可从本地欠项恢复 |
+| 订单费用 | `trades/order_fee_sync.py` 查询并校验整单证据，`ledger/order_fee_migration.py` 持有费用更新事务；`ledger/order_fee_allocation.py` 经 `ledger/api.py` 提供显式用户确认均摊 | actual／estimate／missing 分别保留；整单数量、币种与金额守恒，重启后可从本地欠项恢复。人工两腿均摊保留操作人提交的整单实收快照和用户批准，不伪称券商逐腿实收；自动组合门禁不变，参见[修账流程](OPTION_POSITIONS_REPAIR.md#场景-h已核验组合订单实收总费用用户明确确认两腿均摊) |
 | 汇率及人民币换算 | 来源适配保留币对、来源有效时间、抓取时间及证据；`cash_conversion.py` 与 `ledger/cash_conversion_migration.py` 按统一口径冻结或补证 | 原币事实与人民币换算分别判定完整性；缺汇率保持 pending，补费用不等于补汇率完成 |
 | 策略关系及生命周期 | Combo reconciliation、Wheel intent/companion 和 lifecycle 各自拥有判断；正式采用由 Ledger 写入边界最终验证 | 关系具有明确证据及数量，采用时仍满足对应条件；普通 CSP/CC 不依赖组合匹配成功 |
 | 通知与其他交付 | 既有普通平仓和生命周期 outbox 仍由 Ledger 与其 dispatcher 持有；其余普通回执由 trades 的持久结果和发送路径负责；PM 刷新保留一次性提示合同 | 成交提交、费用补证、策略采用与通知确认分别可查询；发送失败不重做成交；历史导入不生成可投递的新意图 |
@@ -470,10 +476,12 @@ outbox 接受此验证回调，不自行重建归属计算。新 kind 仅可走�
 PM 刷新沿既有 `portfolio_management` 开关、apply、首次 Futu push/backfill 股票
 资格生成，只发送账户与稳定 request ID。处理结果与刷新意图在同一 Inbox 事务保存，
 先于 processed 状态更新；接管处理不能丢掉尚未认领的意图。监听恢复同时读取已处理
-成交中尚未认领的提示，按原来源和物理账户核对资格。Inbox 认领后，在锁外尝试一次；普通
-期权成交不触发 PM，历史文件导入不触发 PM。原请求超时、结果未知或进程在认领后
-崩溃时不自动重发，仍由 PM 的既有全量同步兜底。不能把 PM 提示当成普通成交通知
-增加重试；返回 accepted 只证明 PM 收到提示，不证明持仓已同步。
+成交中尚未认领的提示，按原来源和物理账户核对资格。新认领同事务固定交接 request ID，
+在锁外调用 PM durable 接收端；未确认的新交接由 listener 按相同账户／ID 恢复。
+PM 持久幂等接收后保存确认；历史 attempted-only 结果不明记录保持不动，不自动补发。
+普通期权成交和历史文件导入不触发 PM。accepted 只证明 PM 持久收到提示，不证明持仓
+已同步；PM 用最新事实全量重读收敛，跨系统写入不承诺恰好一次。详见
+[Futu 同步合同](FUTU_TRADE_HOLDINGS_SYNC.md)。
 
 汇率按经济事件发生时点转换后的 `Asia/Shanghai` 自然日归属，同一日期、同一币对
 使用同一汇率，与美股交易日或接收日期无关。晚接收成交和晚到实际费用仍使用原经济
@@ -588,7 +596,7 @@ Inbox 留存各来源版本与冲突输入；费用恢复从 Ledger 的订单欠
 | V1 已领取，V2 冲突先登记；另测提交后才登记 V2 | 前者拒绝自动采用 V1，后者保留原经济结果与冲突；多进程和人工重放不能绕过共享边界 |
 | 领取者退出或旧令牌失效后返回 | 新领取可从持久结果恢复，旧令牌不能提交或回写；Ledger 已提交时不重复应用 |
 | 合约基础字段相同，仅乘数或交割规格不同 | 公共平仓目标选择与写入不消费另一规格的 lot；不支持的形状保留证据 |
-| 普通股票首次 push、重复 push、批量 backfill，或 PM 认领后超时/崩溃 | 沿现有条件触发一次提示，批量每账户至多一次；不重试 PM、不生成期权事件；accepted 不冒充同步完成 |
+| 普通股票首次 push、重复 push、批量 backfill，或 PM 认领后超时/崩溃 | 沿现有条件生成提示，批量每账户一个稳定交接；仅重试未确认的新交接，历史 attempted-only 不补发；不生成期权事件，accepted 不冒充同步完成 |
 | 历史文件首次导入普通平仓，随后重导入并重启 dispatcher | 无新的可投递意图，离线 sender 零调用；既有实时 pending/unknown 平仓的唯一 owner 与状态保留 |
 | 普通非 outbox 回执在 Ledger 提交后、发送前、发送后分别崩溃 | 原经济量不变；可证明未调用时安全恢复，结果不明时保持 unknown；旧回执缺证据不能补发 |
 | 自动重试达到上限后重启，再执行受控本地恢复 | 暂停原因可见，可从保存的版本重新处理；不依赖 provider 返回旧成交，不清冲突、不换成交键 |
@@ -1373,6 +1381,8 @@ CNY 金额继续通过读取校验。上述订单证据路径修正后必须独�
 
 ## 读取语义
 
+账本只读检查的 `trade_event_count` / `position_lot_count` 在对应表缺失或无法读取时保留 `None`（store inspect JSON 为 `null`）；表存在且为空时才为 `0`。健康检查对不可用计数沿用警告；公开运行状态沿用省略未知字段的契约，文本显示 `-`，不补成零。计数可读不代表完整 schema 有效或获准写入，既有多账本歧义检查仍按正行数判断。
+
 运行时风险、Close Advice、Performance 和 Agent tools 从 canonical read model 读取：
 
 - 单 lot 查询保留真实开仓、费用、策略快照和生命周期字段；
@@ -1404,7 +1414,12 @@ Agent 通过 `option_positions_read action=events` 分页读取 canonical `trade
 `trade_time_ms DESC, event_id DESC` 的 keyset cursor，并始终限制在该序号边界内。因此新增事件
 不会插入正在进行的结果流，分页条数可以在 1–20 之间变化，也不会导致已返回成员重复。
 
-这个 snapshot 冻结的是成员集合、筛选字段和排序字段，不是整行 JSON 的历史版本。事件成员
+这个 snapshot 冻结成员集合与筛选字段；排序字段修订后必须重新开始，不保存整行 JSON 的历史版本。
+v2 cursor 在同一 SQLite 读事务中绑定 ingest fence 内、匹配筛选与授权范围的时间修订事件排序键摘要。
+续页发现摘要变化时明确返回 `invalid_cursor` 并要求重新查询，不返回错误的 `snapshot_exhausted`。
+普通追加（包括 fence 外事件的时间修复）、其他查询范围的修复、修复回滚和 no-op 不改变该摘要；
+已存在修订的事件仍可开始新的完整分页。缺少修订证明的旧版 cursor 明确拒绝，重查结果可能重叠。
+摘要读取复用修复事务内持久化的 provenance，不新增分页状态或另一套排序规则。事件成员
 不可删除，`ingest_seq`、事件身份、账户、市场、position effect 和合约筛选字段不可修改；交易
 时间只允许上述 OpenD 证据约束的原位修正，其他时间更新仍不可变。价格等不参与查询的补充字段
 仍可按现有账本语义更新。完整 TradeEvent 的编码与验证继续

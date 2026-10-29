@@ -237,6 +237,9 @@ class RequiredDataFetchPlanBundle:
         }
         if self.underlier_observation is not None:
             payload["underlier_observation"] = self.underlier_observation.to_dict()
+            diagnostics = getattr(self.underlier_observation, "fetch_diagnostics", None)
+            if diagnostics:
+                payload["spot_observation_diagnostics"] = list(diagnostics)
         return payload
 
 
@@ -760,6 +763,9 @@ def _merge_same_side_plans(side_plans: list[OptionSideFetchPlan]) -> list[Option
         plans = grouped.get(option_type) or []
         if not plans:
             continue
+        active_plans = [plan for plan in plans if plan.explicit_expirations]
+        if active_plans:
+            plans = active_plans
         if len(plans) == 1:
             merged.append(plans[0])
             continue
@@ -1406,6 +1412,37 @@ def build_required_data_fetch_plan(
                 spot_reference=spot_reference,
             )
         )
+    # A spot-clipped opening window can be empty even with valid config.
+    # Keep its configured bounds as evidence, but give it no fetch demand.
+    for index, plan in enumerate(side_plans):
+        strike_window = plan.strike_window
+        if (
+            strike_window.min_strike is not None
+            and strike_window.max_strike is not None
+            and strike_window.min_strike > strike_window.max_strike
+        ):
+            source_prefix = strike_window.source.rsplit(".", 1)[0]
+            config = {
+                "sell_put": sell_put_cfg,
+                "sell_call": sell_call_cfg,
+                "wheel.put": wheel_put_cfg,
+                "wheel.call": wheel_call_cfg,
+                "combo_yield.call": dict(resolved_combo_yield_cfg.get("call") or {}),
+            }[source_prefix]
+            configured_min = _safe_float(config.get("min_strike"))
+            configured_max = _safe_float(config.get("max_strike"))
+            side_plans[index] = replace(
+                plan,
+                explicit_expirations=[],
+                strike_window=StrikeWindowPlan(
+                    min_strike=configured_min,
+                    max_strike=configured_max,
+                    base_min_strike=configured_min,
+                    base_max_strike=configured_max,
+                    source=f"{source_prefix}.no_feasible_strikes",
+                ),
+                planning_reason=f"{source_prefix} has no opening strikes at current spot",
+            )
     side_plans.extend(position_side_plans)
     side_plans = _merge_same_side_plans(side_plans)
     projected_expirations = _unique_preserve_order(
@@ -1424,7 +1461,14 @@ def build_required_data_fetch_plan(
     elif spot_observation_error is not None:
         projection_outcome = "provider_error"
     elif side_plans and not projected_expirations:
-        projection_outcome = "projection_empty"
+        projection_outcome = (
+            "success_empty"
+            if all(
+                all(source.endswith(".no_feasible_strikes") for source in plan.strike_window.source.split("+"))
+                for plan in side_plans
+            )
+            else "projection_empty"
+        )
     else:
         projection_outcome = "success_rows"
     require_realized_volatility = bool(

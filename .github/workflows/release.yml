@@ -9,6 +9,7 @@ jobs:
   release:
     permissions:
       contents: write
-    uses: ./.github/workflows/_release-reusable.yml
+      actions: read
+    uses: ./.github/workflows/guardrails.yml
     with:
-      tag: ${{ github.ref_name }}
+      release_tag: ${{ github.ref_name }}

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.config_defaults import default_config
 from src.application.config_authoring_transaction import (
     config_source_sha256,
     locked_config_authoring,
@@ -17,6 +20,7 @@ from src.application.config_authoring_transaction import (
 from src.application.config_yaml import resolve_yaml_runtime_config
 from src.application.runtime_config_freshness import GENERATED_KEY, check_runtime_config_freshness
 import src.application.config_authoring_transaction as transaction_module
+from src.interfaces.cli.config_ops import add_config_commands, handle_config_command
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -64,6 +68,349 @@ def _publish_locked(lock, source: Path, doc: dict, runtime_root: Path, **kwargs)
     )
 
 
+def _simulate_unsafe_target(monkeypatch: pytest.MonkeyPatch, target: Path, violation: str) -> None:
+    original_stat = Path.stat
+    original_run = subprocess.run
+    original_listxattr = getattr(os, "listxattr", None)
+    probe_for_target = False
+
+    def simulated_stat(path: Path, *args, **kwargs):
+        result = original_stat(path, *args, **kwargs)
+        if path == target:
+            values = list(result)
+            if violation == "uid":
+                values[4] += 1
+            elif violation == "gid":
+                values[5] += 1
+            elif violation == "special_mode":
+                values[0] |= 0o1000
+            return os.stat_result(values)
+        return result
+
+    def acl_names(candidate, *, follow_symlinks=True):
+        nonlocal probe_for_target
+        path = Path(candidate)
+        if not path.name.startswith(".om-owner-"):
+            probe_for_target = path == target
+        if path == target and violation == "acl_io":
+            raise OSError("fixture ACL query unavailable")
+        if (path == target and violation == "acl") or (
+            path.name.startswith(".om-owner-") and probe_for_target and violation == "probe_acl"
+        ):
+            return ["system.posix_acl_access"]
+        if path != target and not path.name.startswith(".om-owner-") and original_listxattr is not None:
+            return original_listxattr(candidate, follow_symlinks=follow_symlinks)
+        return []
+
+    def simulated_run(args, *positional, **kwargs):
+        if args[:2] == ["ls", "-lde"]:
+            if Path(args[2]) == target and violation == "acl_process":
+                raise subprocess.CalledProcessError(
+                    1, args, output="", stderr="fixture ACL query unavailable",
+                )
+            names = acl_names(args[2])
+            return subprocess.CompletedProcess(args, 0, "file\n" + (" acl\n" if names else ""), "")
+        return original_run(args, *positional, **kwargs)
+
+    if violation == "acl_process":
+        monkeypatch.setattr(transaction_module, "sys", argparse.Namespace(platform="darwin"))
+    monkeypatch.setattr(Path, "stat", simulated_stat)
+    monkeypatch.setattr(transaction_module.subprocess, "run", simulated_run)
+    monkeypatch.setattr(transaction_module.os, "listxattr", acl_names, raising=False)
+
+
+@pytest.mark.parametrize("target_name", ["config.yaml", "config.us.json", "config.hk.json", "resolved/config.bot.json"])
+@pytest.mark.parametrize("violation", ["uid", "gid", "special_mode", "acl", "probe_acl", "acl_io", "acl_process"])
+def test_regular_publisher_rejects_unsafe_fresh_target_before_any_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target_name: str, violation: str,
+) -> None:
+    source = tmp_path / "config.yaml"
+    doc = _config_doc()
+    _write_yaml(source, doc)
+    for name in ("config.us.json", "config.hk.json", "resolved/config.bot.json"):
+        path = tmp_path / name
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(b'{"old":true}\n')
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    _simulate_unsafe_target(monkeypatch, tmp_path / target_name, violation)
+    writes = []
+    atomic_write = transaction_module._atomic_write_bytes
+
+    def record_write(path, payload):
+        writes.append(path)
+        return atomic_write(path, payload)
+
+    monkeypatch.setattr(transaction_module, "_atomic_write_bytes", record_write)
+    io_failure = violation in {"acl_io", "acl_process"}
+    with pytest.raises(AgentToolError if io_failure else ValueError) as failure:
+        _publish(source, doc, tmp_path, markets=["us", "hk"], apply=True)
+
+    if io_failure:
+        assert failure.value.code == "CONFIG_WRITE_FAILED"
+        assert failure.value.details["stage"] == "target_preflight"
+        assert failure.value.details["write_applied"] is False
+        assert isinstance(failure.value.__cause__, (OSError, subprocess.CalledProcessError))
+        if violation == "acl_process":
+            assert isinstance(failure.value.__cause__, subprocess.CalledProcessError)
+            assert failure.value.__cause__.stderr == "fixture ACL query unavailable"
+            assert "CalledProcessError" in failure.value.details["error"]
+        else:
+            assert "ACL query unavailable" in failure.value.details["error"]
+    else:
+        assert any(text in str(failure.value) for text in ("deployment", "special config mode", "ACL"))
+    assert writes == []
+    assert {path: path.read_bytes() for path in before} == before
+    assert {path for path in tmp_path.rglob("*") if path.is_file()} == {
+        *before, tmp_path / "output_shared/state/config_authoring.lock",
+    }
+    assert not (tmp_path / "output_shared/state/config_authoring_transactions").exists()
+    assert not list(tmp_path.rglob(".om-owner-*"))
+
+
+def test_regular_publisher_rejects_probe_io_failure_before_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "config.yaml"
+    doc = _config_doc()
+    _write_yaml(source, doc)
+    before = source.read_bytes()
+
+    def unavailable_probe(*args, **kwargs):
+        raise PermissionError("fixture identity probe unavailable")
+
+    monkeypatch.setattr(transaction_module.tempfile, "NamedTemporaryFile", unavailable_probe)
+    with pytest.raises(AgentToolError) as failure:
+        _publish(source, doc, tmp_path, markets=["us", "hk"], apply=True)
+
+    assert failure.value.code == "CONFIG_WRITE_FAILED"
+    assert failure.value.details["stage"] == "target_preflight"
+    assert failure.value.details["write_applied"] is False
+    assert failure.value.details["backup_write_applied"] is False
+    assert failure.value.details["transaction_write_applied"] is False
+    assert failure.value.details["targets"] == []
+    assert isinstance(failure.value.__cause__, PermissionError)
+    assert "identity probe unavailable" in failure.value.details["error"]
+    assert source.read_bytes() == before
+    assert not list(tmp_path.glob("config.yaml.bak.*"))
+    assert not list(tmp_path.rglob("manifest.json"))
+    assert not (tmp_path / "config.us.json").exists()
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_regular_publisher_validates_exact_targets_once_under_live_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: bool,
+) -> None:
+    source = tmp_path / "authoring" / "config.yaml"
+    source.parent.mkdir()
+    doc = _config_doc()
+    _write_yaml(source, doc)
+    runtime_root = tmp_path / "runtime"
+    targets = [runtime_root / name for name in ("config.us.json", "config.hk.json", "resolved/config.bot.json")]
+    if existing:
+        for path in targets:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'{"old":true}\n')
+    identities = {path: (path.stat().st_uid, path.stat().st_gid, path.stat().st_mode)
+                  for path in [source, *targets] if path.exists()}
+    validate = transaction_module.validate_config_target_access_identity
+    calls = []
+    with locked_config_authoring(runtime_root=runtime_root) as lock:
+        def validate_targets(paths):
+            assert lock.handle is not None and not lock.handle.closed
+            assert not list(source.parent.glob("config.yaml.bak.*"))
+            assert not list(runtime_root.rglob("manifest.json"))
+            calls.append(paths)
+            validate(paths)
+
+        monkeypatch.setattr(transaction_module, "validate_config_target_access_identity", validate_targets)
+        result = _publish_locked(lock, source, doc, runtime_root, markets=["us", "hk"])
+
+    assert calls == [[*targets, source]]
+    assert result["write_applied"] is True and result["recovered_transactions"] == []
+    assert Path(result["backup_path"]).read_bytes() == source.read_bytes()
+    for path, sha in [(source, result["source_revision"]["after_sha256"]),
+                      *((path, result["markets"][market]["sha256"]) for path, market in zip(targets, ["us", "hk"])),
+                      (targets[-1], result["bot"]["sha256"])]:
+        assert config_source_sha256(path) == sha
+    assert identities == {path: (path.stat().st_uid, path.stat().st_gid, path.stat().st_mode) for path in identities}
+    assert not list(tmp_path.rglob(".om-owner-*"))
+
+
+def test_regular_publisher_ignores_unselected_targets_and_disabled_bot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "config.yaml"
+    doc = _config_doc()
+    _write_yaml(source, doc)
+    bot = tmp_path / "resolved/config.bot.json"
+    bot.parent.mkdir()
+    bot.write_bytes(b"untouched bot")
+    hk = tmp_path / "config.hk.json"
+    hk.write_bytes(b"untouched hk")
+    _simulate_unsafe_target(monkeypatch, bot, "uid")
+    validate = transaction_module.validate_config_target_access_identity
+    calls = []
+
+    def validate_targets(paths):
+        calls.append(paths)
+        validate(paths)
+
+    monkeypatch.setattr(transaction_module, "validate_config_target_access_identity", validate_targets)
+    result = _publish(source, doc, tmp_path, markets=["us"], include_bot=False, apply=True)
+    assert calls == [[], [tmp_path / "config.us.json", source]]
+    assert result["write_applied"] is True and result["bot"] is None
+    assert bot.read_bytes() == b"untouched bot" and hk.read_bytes() == b"untouched hk"
+
+
+@pytest.mark.parametrize("violation", ["gid", "acl_io", "acl_process"])
+def test_regular_publisher_reports_completed_recovery_before_new_identity_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, violation: str,
+) -> None:
+    source = tmp_path / "config.yaml"
+    doc = _config_doc()
+    _write_yaml(source, doc)
+    before = source.read_bytes()
+    source_sha = config_source_sha256(source)
+    runtime = tmp_path / "config.us.json"
+    runtime.write_bytes(b'{"old":true}\n')
+    manifest = _pending_transaction(
+        runtime_root=tmp_path, source=source, before_source_sha=source_sha, after_source_sha="f" * 64,
+        targets=[{"role": "runtime_us", "path": runtime, "payload": b'{"pending":true}\n'}],
+        audit_id="recover-before-new-identity-failure",
+    )
+    runtime.write_bytes(b'{"pending":true}\n')
+    hk = tmp_path / "config.hk.json"
+    hk.write_bytes(b'{"untouched":true}\n')
+    _simulate_unsafe_target(monkeypatch, hk, violation)
+
+    with pytest.raises(AgentToolError) as failure:
+        _publish(source, doc, tmp_path, markets=["us", "hk"], apply=True)
+
+    assert failure.value.code == "CONFIG_WRITE_FAILED"
+    if violation == "gid":
+        assert isinstance(failure.value.__cause__, ValueError)
+        assert "uid/gid" in failure.value.details["error"]
+    else:
+        assert failure.value.details["stage"] == "target_preflight"
+        assert failure.value.details["backup_write_applied"] is False
+        assert failure.value.details["transaction_write_applied"] is False
+        assert failure.value.details["targets"] == []
+        preflight_error = failure.value.__cause__
+        assert isinstance(preflight_error, AgentToolError)
+        assert preflight_error.code == "CONFIG_WRITE_FAILED"
+        if violation == "acl_process":
+            assert isinstance(preflight_error.__cause__, subprocess.CalledProcessError)
+            assert preflight_error.__cause__.stderr == "fixture ACL query unavailable"
+            assert "CalledProcessError" in failure.value.details["error"]
+        else:
+            assert isinstance(preflight_error.__cause__, OSError)
+            assert "ACL query unavailable" in failure.value.details["error"]
+    assert failure.value.details["write_applied"] is True
+    recovered = failure.value.details["recovered_transactions"]
+    assert len(recovered) == 1 and recovered[0]["audit_id"] == "recover-before-new-identity-failure"
+    assert recovered[0]["mode"] == "roll_back"
+    assert runtime.read_bytes() == b'{"old":true}\n'
+    assert hk.read_bytes() == b'{"untouched":true}\n' and source.read_bytes() == before
+    assert not manifest.exists() and not list(tmp_path.rglob("manifest.json"))
+    assert not list(tmp_path.glob("config.yaml.bak.*"))
+    assert not list(tmp_path.rglob(".om-owner-*"))
+
+
+def test_cli_preserves_config_error_for_new_target_identity_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    import src.interfaces.cli.main as cli
+
+    source = tmp_path / "config.yaml"
+    doc = _config_doc()
+    doc["bot"] = {"active_model": "first", "models": {
+        name: {"provider": "openai", "model": "fixture-model", "api_key_env": "FIXTURE_KEY",
+               "context_window_tokens": 24000, "max_output_tokens": 2048}
+        for name in ("first", "second")
+    }}
+    _write_yaml(source, doc)
+    before = source.read_bytes()
+    _simulate_unsafe_target(monkeypatch, source, "uid")
+
+    rc = cli.main(["assistant", "model", "use", "second", "--config-yaml", str(source), "--apply"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc != 0 and payload["ok"] is False
+    assert payload["error"]["code"] == "CONFIG_ERROR"
+    assert "deployment user" in payload["error"]["message"]
+    assert source.read_bytes() == before
+    assert not list(tmp_path.glob("config.yaml.bak.*"))
+    assert not list(tmp_path.rglob("manifest.json"))
+
+
+@pytest.mark.parametrize("entrypoint", ["model", "account", "feature"])
+@pytest.mark.parametrize("io_failure", ["probe_permission", "acl_io", "acl_process"])
+def test_cli_reports_target_preflight_io_failure_without_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+    entrypoint: str, io_failure: str,
+) -> None:
+    import src.interfaces.cli.main as cli
+
+    source = tmp_path / "config.yaml"
+    doc = _config_doc()
+    doc["bot"] = {"active_model": "first", "models": {
+        name: {"provider": "openai", "model": "fixture-model", "api_key_env": "FIXTURE_KEY",
+               "context_window_tokens": 24000, "max_output_tokens": 2048}
+        for name in ("first", "second")
+    }}
+    _write_yaml(source, doc)
+    for name in ("config.us.json", "config.hk.json", "resolved/config.bot.json"):
+        target = tmp_path / name
+        target.parent.mkdir(exist_ok=True)
+        target.write_bytes(b'{"old":true}\n')
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    revision = config_source_sha256(source)
+    commands = {
+        "model": ["assistant", "model", "use", "second", "--config-yaml", str(source), "--apply"],
+        "account": ["accounts", "edit", "--market", "us", "--account-label", "lx",
+                    "--futu-port", "11112", "--config-yaml", str(source), "--apply", "--confirm"],
+        "feature": ["close-advice", "configure", "--enabled", "false", "--config-yaml", str(source),
+                    "--apply", "--confirm", "--expected-source-sha256", revision],
+    }
+    if io_failure == "probe_permission":
+        def unavailable_probe(*args, **kwargs):
+            raise PermissionError("fixture identity probe unavailable")
+
+        monkeypatch.setattr(transaction_module.tempfile, "NamedTemporaryFile", unavailable_probe)
+    else:
+        _simulate_unsafe_target(monkeypatch, source, io_failure)
+
+    def forbidden_write(*args, **kwargs):
+        pytest.fail("target identity preflight must finish before backup, manifest or replacement")
+
+    for name in ("_create_human_backup", "_prepare_transaction_manifest", "_atomic_write_bytes"):
+        monkeypatch.setattr(transaction_module, name, forbidden_write)
+
+    rc = cli.main(commands[entrypoint])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert rc != 0 and payload["ok"] is False
+    assert payload["error"]["code"] == "CONFIG_WRITE_FAILED"
+    details = payload["error"]["details"]
+    assert details["stage"] == "target_preflight"
+    assert details["write_applied"] is False
+    assert details["backup_write_applied"] is False
+    assert details["transaction_write_applied"] is False
+    assert details["backup_path"] is None
+    assert details["targets"] == [] and details["recovered_transactions"] == []
+    assert ("PermissionError" if io_failure == "probe_permission" else
+            "OSError" if io_failure == "acl_io" else "CalledProcessError") in details["error"]
+    assert "Traceback" not in captured.out + captured.err
+    assert {path: path.read_bytes() for path in before} == before
+    assert {path for path in tmp_path.rglob("*") if path.is_file()} == {
+        *before, tmp_path / "output_shared/state/config_authoring.lock",
+    }
+    assert not (tmp_path / "output_shared/state/config_authoring_transactions").exists()
+    assert not list(tmp_path.glob("config.yaml.bak.*"))
+    assert not list(tmp_path.rglob(".om-owner-*"))
+
+
 def _pending_transaction(
     *,
     runtime_root: Path,
@@ -83,6 +430,240 @@ def _pending_transaction(
     )
     transaction_module._set_manifest_phase(manifest, "committing")
     return manifest
+
+
+def _build_recovery_runtime(source: Path, target: Path, *, independent: bool = False) -> None:
+    parser = argparse.ArgumentParser()
+    add_config_commands(parser.add_subparsers(dest="command", required=True))
+    argv = ["config", "build", "--source", "yaml", "--market", "us",
+            "--config-yaml", str(source), "--output", str(target)]
+    if independent:
+        system = default_config()
+        system["defaults"]["runtime"]["portfolio_context_ttl_sec"] = 77
+        system_path = target.parent / "independent-system.json"
+        system_path.write_text(json.dumps(system), encoding="utf-8")
+        argv.extend(["--system-config", str(system_path)])
+    result = handle_config_command(parser.parse_args(argv), repo_base_fn=lambda: REPO_ROOT)
+    assert result["ok"] and result["write_applied"]
+
+
+def _target_state_manifest(
+    tmp_path: Path, mode: str, *, before_exists: bool = True, role: str = "runtime_us",
+) -> Path:
+    source = tmp_path / "config.yaml"
+    _write_yaml(source, _config_doc())
+    before_sha = config_source_sha256(source)
+    after_doc = _config_doc()
+    after_doc["markets"]["us"]["symbols"].append("AMD")
+    staged_source = tmp_path / "retained-after.yaml"
+    _write_yaml(staged_source, after_doc)
+    after_bytes = staged_source.read_bytes()
+    after_sha = config_source_sha256(staged_source)
+    target = tmp_path / "generated 配置.json"
+    if before_exists:
+        _build_recovery_runtime(source, target)
+    desired, _ = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=staged_source)
+    transaction_module._retarget_runtime_metadata(
+        desired, repo_root=REPO_ROOT, source_path=source, source_sha=after_sha,
+        output_path=target, market="us",
+    )
+    earlier = tmp_path / "earlier.json"
+    earlier.write_bytes(b'{"before":"quote \\" and slash \\\\"}\n')
+    earlier_desired = '{"after":"空格 Unicode"}\n'.encode()
+    manifest = _pending_transaction(
+        runtime_root=tmp_path, source=source, before_source_sha=before_sha, after_source_sha=after_sha,
+        targets=[
+            {"role": "earlier_runtime", "path": earlier, "payload": earlier_desired},
+            {"role": "config_yaml", "path": source, "payload": after_bytes, "source": True},
+            {"role": role, "path": target, "payload": transaction_module._json_bytes(desired)},
+        ],
+        audit_id="target-states",
+    )
+    if mode == "roll_forward":
+        source.write_bytes(after_bytes)
+    else:
+        earlier.write_bytes(earlier_desired)
+    return manifest
+
+
+def _recovery_snapshot(manifest_path: Path) -> dict[Path, bytes | None]:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    paths = [Path(item["path"]) for item in manifest["targets"]]
+    paths.extend(manifest_path.parent.iterdir())
+    return {path: path.read_bytes() if path.is_file() else None for path in paths}
+
+
+def _block_recovery_effects(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    calls: list[str] = []
+
+    def block(operation: str):
+        def fail(*_args, **_kwargs):
+            calls.append(operation)
+            raise OSError(f"blocked recovery {operation}")
+        return fail
+
+    monkeypatch.setattr(transaction_module, "_atomic_write_bytes", block("write"))
+    monkeypatch.setattr(Path, "unlink", block("unlink"))
+    monkeypatch.setattr(transaction_module.shutil, "rmtree", block("cleanup"))
+    return calls
+
+
+@pytest.mark.parametrize("mode", ["roll_back", "roll_forward"])
+@pytest.mark.parametrize("before_exists", [False, True])
+@pytest.mark.parametrize("role", ["runtime_us", "runtime_hk", "bot"])
+def test_recovery_target_state_rejects_independent_build_before_first_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, before_exists: bool, role: str,
+) -> None:
+    manifest_path = _target_state_manifest(tmp_path, mode, before_exists=before_exists, role=role)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    target = Path(manifest["targets"][-1]["path"])
+    _build_recovery_runtime(Path(manifest["source_path"]), target, independent=True)
+    observed = config_source_sha256(target)
+    assert observed not in {manifest["targets"][-1]["before_sha256"], manifest["targets"][-1]["after_sha256"]}
+    before = _recovery_snapshot(manifest_path)
+    calls = _block_recovery_effects(monkeypatch)
+
+    with pytest.raises(AgentToolError) as exc:
+        transaction_module._recover_incomplete_transactions(state_root=tmp_path / "output_shared" / "state")
+
+    assert exc.value.code == "CONFIG_TRANSACTION_RECOVERY_REQUIRED"
+    assert exc.value.details["stage"] == "target_state_validation"
+    assert exc.value.details["manifest"] == str(manifest_path)
+    assert str(target) in exc.value.details["error"]
+    assert observed in exc.value.details["error"]
+    assert str(manifest_path) in exc.value.hint
+    assert exc.value.details["write_applied"] is False
+    audit = exc.value.details["recovered_transactions"][0]
+    assert audit["mode"] == mode
+    assert audit["targets"] == []
+    assert audit["write_applied"] is False and audit["cleanup"] is False
+    assert audit["source_revision"] == {
+        "before_sha256": manifest["before_source_sha256"], "after_sha256": manifest["after_source_sha256"],
+    }
+    assert calls == []
+    assert _recovery_snapshot(manifest_path) == before
+
+
+@pytest.mark.parametrize("failure", ["unreadable", "directory", "missing_existing"])
+@pytest.mark.parametrize("mode", ["roll_back", "roll_forward"])
+def test_recovery_target_state_read_failure_preserves_every_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, failure: str,
+) -> None:
+    manifest_path = _target_state_manifest(tmp_path, mode)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    target = Path(manifest["targets"][-1]["path"])
+    if failure != "unreadable":
+        target.rename(tmp_path / "retained-original-runtime.json")
+        if failure == "directory":
+            target.mkdir()
+    before = _recovery_snapshot(manifest_path)
+    calls = _block_recovery_effects(monkeypatch)
+    original_read = Path.read_bytes
+
+    def fail_read(path: Path) -> bytes:
+        if path == target:
+            raise PermissionError(f"injected unreadable target: {path}")
+        return original_read(path)
+
+    with monkeypatch.context() as patch:
+        if failure == "unreadable":
+            patch.setattr(Path, "read_bytes", fail_read)
+        with pytest.raises(AgentToolError) as exc:
+            transaction_module._recover_transaction(manifest_path)
+    assert exc.value.details["stage"] == "target_state_validation"
+    assert str(target) in exc.value.details["error"]
+    assert exc.value.details["write_applied"] is False
+    assert exc.value.details["recovered_transactions"][0]["targets"] == []
+    assert calls == [] and _recovery_snapshot(manifest_path) == before
+    if failure == "directory":
+        assert target.is_dir()
+
+
+@pytest.mark.parametrize("mode", ["roll_back", "roll_forward"])
+@pytest.mark.parametrize("before_exists,state", [(True, "before"), (True, "after"), (True, "equal"),
+                                                 (False, "absent"), (False, "after")])
+def test_recovery_target_state_allows_known_states(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, before_exists: bool, state: str,
+) -> None:
+    manifest_path = _target_state_manifest(tmp_path, mode, before_exists=before_exists)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    last = manifest["targets"][-1]
+    target = Path(last["path"])
+    if state == "after":
+        target.write_bytes(Path(last["desired_path"]).read_bytes())
+    elif state == "equal":
+        payload = target.read_bytes()
+        Path(last["desired_path"]).write_bytes(payload)
+        last["after_sha256"] = transaction_module._bytes_sha256(payload)
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    # Put earlier targets in the recovered state so the last target's action is observed.
+    for item in manifest["targets"][:-1]:
+        artifact = item["backup_path"] if mode == "roll_back" else item["desired_path"]
+        Path(item["path"]).write_bytes(Path(artifact).read_bytes())
+    before = _recovery_snapshot(manifest_path)
+    calls = _block_recovery_effects(monkeypatch)
+    with pytest.raises(AgentToolError) as exc:
+        transaction_module._recover_transaction(manifest_path)
+    expected = "cleanup"
+    if mode == "roll_forward" and state in {"before", "absent"}:
+        expected = "write"
+    elif mode == "roll_back" and state == "after":
+        expected = "write" if before_exists else "unlink"
+    assert calls == [expected]
+    assert exc.value.details["stage"] == ("cleanup" if expected == "cleanup" else "target")
+    assert _recovery_snapshot(manifest_path) == before
+
+
+@pytest.mark.parametrize("mode", ["roll_back", "roll_forward"])
+def test_regular_publisher_rejects_independent_build_during_recovery(tmp_path: Path, mode: str) -> None:
+    manifest_path = _target_state_manifest(tmp_path, mode)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    source = Path(manifest["source_path"])
+    target = Path(manifest["targets"][-1]["path"])
+    _build_recovery_runtime(source, target, independent=True)
+    before = _recovery_snapshot(manifest_path)
+    with pytest.raises(AgentToolError) as exc:
+        _publish(source, _config_doc(), tmp_path, markets=["us"], include_bot=False, apply=True)
+    assert exc.value.code == "CONFIG_TRANSACTION_RECOVERY_REQUIRED"
+    assert exc.value.details["stage"] == "target_state_validation"
+    assert exc.value.details["write_applied"] is False
+    assert _recovery_snapshot(manifest_path) == before
+
+
+def test_current_publish_compensation_preserves_independent_build_and_prior_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "config.yaml"
+    _write_yaml(source, _config_doc())
+    before_source = source.read_bytes()
+    target = tmp_path / "config.us.json"
+    _build_recovery_runtime(source, target)
+    after_doc = _config_doc()
+    after_doc["markets"]["us"]["symbols"].append("AMD")
+    original_write = transaction_module._atomic_write_bytes
+    independent: list[bytes] = []
+
+    def fail_source(path: Path, payload: bytes) -> None:
+        if path == source:
+            _build_recovery_runtime(source, target, independent=True)
+            independent.append(target.read_bytes())
+            raise OSError("injected source commit failure after independent build")
+        original_write(path, payload)
+
+    monkeypatch.setattr(transaction_module, "_atomic_write_bytes", fail_source)
+    with pytest.raises(AgentToolError) as exc:
+        _publish(source, after_doc, tmp_path, markets=["us"], include_bot=False, apply=True)
+    assert exc.value.code == "CONFIG_WRITE_FAILED"
+    assert exc.value.details["stage"] == "commit"
+    assert exc.value.details["write_applied"] is True
+    assert exc.value.details["recovery_error"] is not None
+    assert any(effect["write_applied"] is True for effect in exc.value.details["targets"])
+    audit = exc.value.details["recovered_transactions"][0]
+    assert audit["mode"] == "roll_back"
+    assert audit["targets"] == [] and audit["write_applied"] is False and audit["cleanup"] is False
+    assert len(independent) == 1 and target.read_bytes() == independent[0]
+    assert source.read_bytes() == before_source
+    assert Path(exc.value.details["transaction_manifest"]).exists()
 
 
 def test_config_authoring_rejects_stale_preview_without_writes(tmp_path: Path) -> None:
@@ -248,7 +829,9 @@ def test_config_authoring_bot_only_edit_still_invalidates_preview_sha(tmp_path: 
     assert not list(tmp_path.glob("config.yaml.bak.*"))
 
 
-def test_config_authoring_dry_run_creates_no_state_and_does_not_recover(tmp_path: Path) -> None:
+def test_config_authoring_dry_run_creates_no_state_and_does_not_recover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
 
     source = tmp_path / "config.yaml"
     before_doc = _config_doc()
@@ -266,6 +849,11 @@ def test_config_authoring_dry_run_creates_no_state_and_does_not_recover(tmp_path
         audit_id="dry-run-pending",
     )
     before_state = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*"))
+
+    def forbidden_probe(paths):
+        pytest.fail("dry-run must not probe target access identity")
+
+    monkeypatch.setattr(transaction_module, "validate_config_target_access_identity", forbidden_probe)
 
     result = _publish(
         source, before_doc, tmp_path, markets=["us"], include_bot=False, apply=False,
@@ -355,7 +943,7 @@ def test_regular_publisher_preserves_first_recovery_when_later_manifest_read_fai
         targets=[{"role": "second", "path": second, "payload": b'{"new":2}\n'}],
         audit_id="b-read-failure",
     )
-    first.write_bytes(b'{"partially-committed":1}\n')
+    first.write_bytes(b'{"new":1}\n')
     original_read_manifest = transaction_module._read_manifest
     second_reads = 0
 
@@ -462,7 +1050,7 @@ def test_regular_publisher_allows_safe_source_outside_runtime_root_during_recove
         ],
         audit_id="outside-source-recovery",
     )
-    runtime.write_bytes(b'{"partially-committed":true}\n')
+    runtime.write_bytes(b'{"pending":true}\n')
     changed = _config_doc()
     changed["markets"]["us"]["symbols"].append("FUTU")
 

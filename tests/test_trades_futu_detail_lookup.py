@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.application.trades.futu_detail_lookup import enrich_trade_push_payload_with_account_id
 
 _GATEWAY_TARGET = (
@@ -25,6 +27,71 @@ def test_enrich_trade_push_payload_keeps_existing_account_id() -> None:
     out = _enrich(payload, ["456"])
     assert out.payload == payload
     assert out.diagnostics["matched_via"] == "payload"
+
+
+@pytest.mark.parametrize("key", ["underlying_symbol", "owner_symbol", "owner_stock_code",
+    "owner_stock_code_full", "underlying_stock_code", "owner_code", "underlying_code"])
+@pytest.mark.parametrize("order_only", [False, True])
+def test_explicit_underlying_conflict_preserves_source(monkeypatch, key, order_only):
+    payload = {"futu_account_id": "123", "deal_id": "d", "order_id": "o", key: "US.NVDA"}
+    row = {"acc_id": "123", "deal_id": "d", "order_id": "o", "owner_stock_code": "US.AAPL"}
+    class Gateway:
+        def get_deal_list(self, **_):
+            return [] if order_only else [row]
+        def get_order_list(self, **_):
+            return [row]
+        def close(self):
+            pass
+    _install_gateway(monkeypatch, Gateway)
+    out = _enrich(payload, ["123"])
+    assert out.payload == payload
+    assert out.diagnostics["underlying_conflicts"]["errors"] == [
+        "invalid:instrument_ref.symbol:source_underlying_conflict"]
+    evidence = out.diagnostics["underlying_lookup_evidence" if order_only else "deal_lookup_evidence"]
+    assert evidence[key] == "US.NVDA"
+    assert evidence["_futu_underlying_lookup_row" if order_only else "_futu_detail_lookup_row"] == row
+
+
+@pytest.mark.parametrize("source,query,aliases", [
+    ({"underlying_symbol": "US.NVDA"}, " nvda ", {}),
+    ({"underlying_symbol": "POP"}, "HK.09992", {}),
+    ({"underlying_symbol": "CHIP"}, "US.NVDA", {"CHIP": "NVDA"}),
+    ({"underlying_symbol": "US.CNC"}, "US.NVDA", {"US.CNC": "NVDA"}),
+    ({"code": "US.NVDA261218P00100000"}, "US.AAPL", {}),
+    ({"stock_name": "NVDA"}, "US.AAPL", {}),
+    ({"symbol": "NVDA"}, "US.AAPL", {}),
+    ({"underlying_symbol": "US.NVDA261218P00100000"}, "US.AAPL", {}),
+])
+def test_underlying_guard_preserves_equivalence_and_lower_confidence_correction(monkeypatch, source, query, aliases):
+    from tests.test_trades_lookup_economics import _gateway
+    payload = {"futu_account_id": "123", "deal_id": "d", "order_id": "o", **source}
+    _gateway(monkeypatch, {"acc_id": "123", "deal_id": "d", "order_id": "o", "owner_stock_code": query})
+    result = enrich_trade_push_payload_with_account_id(payload, host="example.invalid", port=1,
+        futu_account_ids=["123"], symbol_aliases=aliases)
+    assert "underlying_conflicts" not in result.diagnostics
+    assert result.diagnostics["matched_via"] == "deal_lookup_by_acc_id"
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("query,aliases,blocked", [
+    ("US.NVDA", {"CHIP": "AAPL"}, False),
+    ("US.AAPL", {"CHIP": "AAPL"}, True),
+    ("US.AAPL", {"NVDA": "AAPL"}, True),
+])
+def test_underlying_guard_uses_standard_canonical_instrument(monkeypatch, nested, query, aliases, blocked):
+    from tests.test_trades_lookup_economics import _gateway, _payload
+    from src.application.trades.normalizer import normalize_trade_deal
+    raw = _payload(qty="1", price="2.50", underlying_symbol="US.NVDA")
+    execution = normalize_trade_deal(raw, futu_account_mapping={"123": "synthetic"},
+                                    allow_opend_refresh=False).execution_input
+    payload = {**raw, "execution_input": execution} if nested else {**execution,
+        "deal_id": raw["deal_id"], "order_id": raw["order_id"], "futu_account_id": "123"}
+    payload["underlying_symbol"] = "CHIP"
+    _gateway(monkeypatch, {"acc_id": "123", "deal_id": raw["deal_id"], "order_id": raw["order_id"],
+        "owner_stock_code": query, "qty": "1", "price": "2.50"})
+    result = enrich_trade_push_payload_with_account_id(payload, host="example.invalid", port=1,
+        futu_account_ids=["123"], symbol_aliases=aliases)
+    assert bool(result.diagnostics.get("underlying_conflicts")) is blocked
 
 
 def test_enrich_trade_push_payload_normalizes_existing_nonstandard_account_id() -> None:

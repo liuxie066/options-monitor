@@ -12,7 +12,7 @@ from src.application.bot.host import run_contract
 from src.application.bot.scene import build_scene_manifest
 from src.application.bot.service import prepare_contract
 from src.application.receipt_query import receipt_event
-from tests.bot_pi_test_support import _TEST_MODEL
+from tests.bot_test_support import _TEST_MODEL
 
 DEAL_ID = "7258806397173991645"  # Sanitized historical fixture, never a live lookup.
 BODY = "成交未记录：exception:OperationalError。保留的历史回执没有更具体的异常原因。"

@@ -986,3 +986,11 @@ def test_cc_lp_gap_does_not_hold_historical_sp_lc_candidate():
     assert reconcile_daily_decision_brief_evidence(previous, current)["actions"] == []
     current["data_gaps"][0]["variant"] = "sp_lc"
     assert len(reconcile_daily_decision_brief_evidence(previous, current)["actions"]) == 1
+
+
+def test_recovery_report_precedes_candidates_but_fixed_point_takes_over():
+    arguments = dict(ran_scan=True, pipeline_reliable=True, pending_candidate_identities=['candidate'], recovery_due=True)
+    assert decide_daily_brief_notification(**arguments, fixed_due=False)['action'] == 'fixed_recovery_report'
+    assert decide_daily_brief_notification(**arguments, fixed_due=True)['action'] == 'fixed_report'
+    arguments['pipeline_reliable'] = False
+    assert decide_daily_brief_notification(**arguments, fixed_due=False)['action'] == 'none'

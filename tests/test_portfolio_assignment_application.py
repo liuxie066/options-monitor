@@ -244,6 +244,79 @@ def test_query_assignment_scenario_reads_only_open_short_underlyings(monkeypatch
     assert result["snapshot"]["runtime_config"] == "config.us.json"
 
 
+@pytest.mark.parametrize("scenario,expected_codes,expected_types", [
+    ("short_put", ["NVDA"], ["put"]),
+    ("short_call", ["AAPL"], ["call"]),
+    ("all_short", ["AAPL", "NVDA"], ["put", "call"]),
+])
+def test_directional_query_collects_only_selected_option_quotes(monkeypatch, scenario, expected_codes, expected_types):
+    from test_assignment_position_sizing import option
+
+    _patch_positions(monkeypatch, [
+        {**option("put"), "currency": "USD"},
+        {**option("call"), "symbol": "AAPL", "currency": "USD"},
+    ])
+    seen = []
+
+    def read_quotes(codes, **kwargs):
+        seen.append(list(codes))
+        return [_futu_quote(code, 10) for code in codes], []
+
+    monkeypatch.setattr(application, "_read_futu_quotes", read_quotes)
+    monkeypatch.setattr(application, "read_portfolio_valuation_evidence", lambda **kwargs: pytest.fail("PM disabled"))
+    out = application.query_portfolio_assignment_scenario(["lx"], scenario=scenario)
+    assert seen == [expected_codes]
+    assert [row["option_type"] for row in out["assignments"]] == expected_types
+    assert set(out["snapshot"]["quote_observed_at_by_code"]) == set(expected_codes)
+    assert out["snapshot"]["scenario"] == scenario
+
+
+def test_directional_query_keeps_stock_valuation_for_unassigned_call(monkeypatch):
+    from test_assignment_position_sizing import option
+
+    context = cash_portfolio({
+        "source_observed_at": "2026-07-24T01:00:00Z",
+        "cash_by_currency": {"CNY": 10000},
+        "cash_balance_reliable": True,
+        "position_snapshot_input": {"rows": [{
+            "instrument_ref": {"asset_type": "stock", "market": "US", "symbol": "AAPL", "currency": "USD"},
+            "position_side": "long", "quantity": "100",
+        }], "errors": []},
+    })
+    _patch_positions(monkeypatch, [
+        {**option("put"), "currency": "USD"},
+        {**option("call"), "symbol": "AAPL", "currency": "USD"},
+    ], futu_context=context)
+
+    def read_quotes(codes, **kwargs):
+        assert codes == ["AAPL", "NVDA"]
+        return [_futu_quote(code, 10) for code in codes], []
+
+    monkeypatch.setattr(application, "_read_futu_quotes", read_quotes)
+    out = application.query_portfolio_assignment_scenario(["lx"], scenario="short_put")
+    assert [row["symbol"] for row in out["assignments"]] == ["NVDA"]
+    assert out["position_sizing"]["stock_shares_by_symbol"] == {"AAPL": "100", "NVDA": "100"}
+
+
+@pytest.mark.parametrize("scenario", ["put", "", None, ["short_put"]])
+def test_invalid_assignment_scenario_fails_before_reads(monkeypatch, scenario):
+    monkeypatch.setattr(application, "_load_runtime_and_positions", lambda *args: pytest.fail("unexpected ledger read"))
+    with pytest.raises(application.AssignmentScenarioInputError, match="scenario must be"):
+        application.query_portfolio_assignment_scenario(["lx"], scenario=scenario)
+
+
+def test_snapshot_identifies_empty_direction_and_ledger_failure_keeps_assumption(monkeypatch):
+    _patch_positions(monkeypatch, [])
+    put = application.query_portfolio_assignment_scenario(["lx"], scenario="short_put")
+    call = application.query_portfolio_assignment_scenario(["lx"], scenario="short_call")
+    assert put["snapshot"]["snapshot_id"] != call["snapshot"]["snapshot_id"]
+    monkeypatch.setattr(application, "_load_runtime_and_positions", lambda *args: (_ for _ in ()).throw(RuntimeError("ledger down")))
+    failed = application.query_portfolio_assignment_scenario(["lx"], scenario="short_call")
+    assert failed["status"] == "unavailable"
+    assert failed["scope"]["scenario"] == "all_open_short_call_assigned"
+    assert failed["snapshot"]["scenario"] == "short_call"
+
+
 def test_query_uses_one_fx_observation_for_all_requested_futu_accounts(monkeypatch):
     observation = {
         "source": "tencent_quote",
@@ -1311,3 +1384,41 @@ def test_quote_recovery_preserves_non_futu_holdings_and_closed_market_quotes(siz
     assert result["holdings"][-1] == holding
     assert result["quotes"][-1] == quote
     assert evidence == before
+
+
+@pytest.mark.parametrize("entry", ["query", "agent_bot"])
+def test_ledger_read_failure_keeps_account_cash_unknown_through_public_consumers(monkeypatch, entry):
+    import sqlite3
+    from src.application.bot.tools import model_observation
+    from src.application.tool_execution import execute_tool
+
+    def failed_ledger(_accounts):
+        raise sqlite3.OperationalError("synthetic assignment ledger unavailable")
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("ledger failure must not fetch portfolio/provider evidence")
+
+    monkeypatch.setattr(application, "_load_runtime_and_positions", failed_ledger)
+    monkeypatch.setattr(application, "fetch_futu_portfolio_context", forbidden)
+    monkeypatch.setattr(application, "read_portfolio_valuation_evidence", forbidden)
+    monkeypatch.setattr(application, "_read_futu_quotes", forbidden)
+    if entry == "query":
+        result = application.query_portfolio_assignment_scenario(["lx", "sy"])
+    else:
+        response = execute_tool("portfolio_assignment_scenario", {"accounts": ["lx", "sy"]})
+        assert response["ok"] is True  # Transport success is not business availability.
+        observation = model_observation("portfolio_assignment_scenario", response)
+        assert observation["ok"] is True
+        result = observation["data"]
+    assert result["status"] == "unavailable"
+    assert result["cash_coverage"]["ending_cash_net_estimated_cny"] is None
+    assert [row["account"] for row in result["account_breakdown"]] == ["lx", "sy"]
+    for account in result["account_breakdown"]:
+        assert account["opening_cash_mmf_cny"] is None
+        assert account["ending_cash_gross_cny"] is None
+        assert account["ending_cash_net_estimated_cny"] is None
+        assert account["funding_gap_cny"] is None
+        assert account["fees_complete"] is False
+    assert result["fee_summary"]["status"] == "partial"
+    assert result["fee_summary"]["total_fees_cny"] is None
+    assert any("synthetic assignment ledger unavailable" in warning for warning in result["warnings"])

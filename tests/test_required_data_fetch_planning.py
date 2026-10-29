@@ -1761,3 +1761,155 @@ def test_explicit_non_ready_position_requirement_remains_excluded(
     )
 
     assert plan.side_plans == []
+
+
+@pytest.mark.parametrize("side,spot,held_strike,infeasible", [
+    ("put", 125.0, 90.0, False),
+    ("put", 120.0, 90.0, False),
+    ("put", 119.99, 90.0, True),
+    ("put", 100.0, 90.0, True),
+    ("call", 108.0, 120.0, False),
+    ("call", 110.0, 120.0, False),
+    ("call", 110.01, 120.0, True),
+    ("call", 111.0, 120.0, True),
+])
+@pytest.mark.parametrize("held", [False, True])
+def test_spot_crossed_opening_window_does_not_poison_position_demand(
+    monkeypatch, tmp_path, side, spot, held_strike, infeasible, held,
+):
+    from src.application.required_data_plan_identity import build_required_data_expected_fetch_contract
+
+    _patch_position_plan_sources(monkeypatch, spot_reference=spot)
+    _stub_discovery(monkeypatch, ["2026-08-21"], spot=spot)
+    config = {"enabled": True, "min_dte": 7, "max_dte": 45,
+              "min_strike": 120 if side == "put" else 105,
+              "max_strike": 130 if side == "put" else 110}
+    plan = _plan(
+        tmp_path, want_put=side == "put", want_call=side == "call",
+        sell_put_cfg=config if side == "put" else {"enabled": False},
+        sell_call_cfg=config if side == "call" else {"enabled": False},
+        position_requirements=[{
+            "planning_status": "ready", "option_type": side,
+            "expiration": "2026-08-21", "strike": held_strike,
+        }] if held else [],
+    )
+    contract = build_required_data_expected_fetch_contract(
+        symbol="NVDA", fetch_plan=plan.to_debug_dict(),
+        source="futu", host="127.0.0.1", port=11111,
+    )
+    assert plan.expiration_discovery.outcome == "success_rows"
+    assert plan.expiration_discovery.reason_code is None
+    assert "2026-08-21" in plan.expiration_discovery.expirations
+    expected_outcome = "success_empty" if infeasible and not held else "success_rows"
+    assert contract["coverage_policy"]["projection_outcome"] == expected_outcome
+    assert plan.projection_outcome == expected_outcome
+    side_plan = plan.side_plans[0]
+    if infeasible and not held:
+        assert plan.merged_specs == []
+        assert plan.projected_expirations == []
+        assert side_plan.strike_window.source.endswith(".no_feasible_strikes")
+    elif held:
+        assert side_plan.required_exact_strikes_by_expiration == {"2026-08-21": [held_strike]}
+        assert plan.merged_specs[0].explicit_expirations == ["2026-08-21"]
+        if infeasible:
+            assert side_plan.strike_window.source == "close_advice.position_requirements"
+            assert side_plan.strike_window.min_strike == held_strike
+            assert side_plan.strike_window.max_strike == held_strike
+            assert side_plan.strike_window.base_min_strike is None
+            assert side_plan.strike_window.base_max_strike is None
+
+
+@pytest.mark.parametrize("side", ["put", "call"])
+def test_infeasible_opening_side_preserves_healthy_opposite_side(monkeypatch, tmp_path, side):
+    from src.application.required_data_plan_identity import build_required_data_expected_fetch_contract
+
+    _patch_position_plan_sources(monkeypatch, spot_reference=100 if side == "put" else 111)
+    _stub_discovery(monkeypatch, ["2026-08-21"], spot=100 if side == "put" else 111)
+    plan = _plan(
+        tmp_path, want_put=True, want_call=True,
+        sell_put_cfg={"enabled": True, "min_dte": 7, "max_dte": 45,
+                      "min_strike": 120 if side == "put" else 90, "max_strike": 130},
+        sell_call_cfg={"enabled": True, "min_dte": 7, "max_dte": 45,
+                       "min_strike": 105, "max_strike": 110 if side == "call" else 130},
+    )
+    build_required_data_expected_fetch_contract(
+        symbol="NVDA", fetch_plan=plan.to_debug_dict(), source="futu", host="127.0.0.1", port=11111,
+    )
+    assert plan.projection_outcome == "success_rows"
+    assert plan.merged_specs[0].option_types == (("call",) if side == "put" else ("put",))
+    assert plan.projected_expirations == ["2026-08-21"]
+
+
+@pytest.mark.parametrize("mutation", ["boundary", "inverted", "missing_spot", "unready_spot", "discovery_error", "exact_strike"])
+def test_empty_opening_proof_cannot_bypass_strict_expected_contract(monkeypatch, tmp_path, mutation):
+    from src.application.required_data_plan_identity import build_required_data_expected_fetch_contract
+
+    _patch_position_plan_sources(monkeypatch, spot_reference=100)
+    plan = _plan(tmp_path, sell_put_cfg={
+        "enabled": True, "min_dte": 7, "max_dte": 45, "min_strike": 120, "max_strike": 130,
+    }).to_debug_dict()
+    window = plan["side_plans"][0]["strike_window"]
+    if mutation == "boundary":
+        window["base_min_strike"] = window["min_strike"] = 100
+        plan["side_plans"][0]["min_strike"] = 100
+    elif mutation == "inverted":
+        window["base_max_strike"] = 110
+    elif mutation == "missing_spot":
+        plan["spot_reference"] = None
+    elif mutation == "unready_spot":
+        plan["underlier_observation"]["status"] = "market_closed"
+    elif mutation == "discovery_error":
+        plan["expiration_discovery"]["outcome"] = "provider_error"
+    else:
+        plan["side_plans"][0]["required_exact_strikes_by_expiration"] = {"2026-08-21": [90]}
+    with pytest.raises(ValueError):
+        build_required_data_expected_fetch_contract(
+            symbol="NVDA", fetch_plan=plan, source="futu", host="127.0.0.1", port=11111,
+        )
+
+
+@pytest.mark.parametrize("side", ["put", "call"])
+def test_pipeline_empty_opening_plan_publishes_real_header_only_receipt(monkeypatch, tmp_path, side):
+    import json
+    from src.application import required_data_steps
+    from src.application.opend_symbol_outputs import REQUIRED_DATA_COLUMNS
+
+    _patch_position_plan_sources(monkeypatch, spot_reference=100 if side == "put" else 111)
+    plan = _plan(
+        tmp_path, want_put=side == "put", want_call=side == "call",
+        sell_put_cfg={"enabled": side == "put", "min_dte": 7, "max_dte": 45,
+                      "min_strike": 120, "max_strike": 130},
+        sell_call_cfg={"enabled": side == "call", "min_dte": 7, "max_dte": 45,
+                       "min_strike": 105, "max_strike": 110},
+    )
+
+    def forbidden(**_kwargs):
+        pytest.fail("empty opening demand must not execute a provider request")
+
+    monkeypatch.setattr(required_data_steps, "execute_required_data_opend", forbidden)
+    root = tmp_path / "empty-openings"
+    evidence = required_data_steps.ensure_required_data(
+        py="offline-not-executed", base=tmp_path, symbol="NVDA", required_data_dir=root,
+        limit_expirations=0, want_put=side == "put", want_call=side == "call",
+        timeout_sec=None, is_scheduled=False, fetch_source="futu", fetch_plan=plan,
+        source_producer_run_id="empty-opening-run",
+    )
+    assert evidence is not None
+    raw = json.loads((root / "raw" / "NVDA_required_data.json").read_text())
+    assert raw["rows"] == []
+    assert raw["meta"]["source_outcome"] == "success_empty"
+    assert raw["meta"]["reason_code"] == "no_feasible_strikes"
+    assert plan.expiration_discovery.outcome == "success_rows"
+    assert plan.expiration_discovery.expirations
+    csv = root / "parsed" / "NVDA_required_data.csv"
+    assert csv.read_text().strip() == ",".join(REQUIRED_DATA_COLUMNS)
+    from src.application.opend_symbol_outputs import validate_required_data_payload_candidate
+    from src.application.required_data_plan_identity import build_required_data_expected_fetch_contract
+    from src.application.source_receipts import SourceReceiptError
+
+    contract = build_required_data_expected_fetch_contract(
+        symbol="NVDA", fetch_plan=plan.to_debug_dict(), source="futu", host="127.0.0.1", port=11111,
+    )
+    raw["meta"]["reason_code"] = "no_expirations"
+    with pytest.raises(SourceReceiptError):
+        validate_required_data_payload_candidate(payload=raw, expected_fetch_contract=contract)

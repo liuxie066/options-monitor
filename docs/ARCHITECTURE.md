@@ -344,9 +344,11 @@ receipts, and event review/replay flows. Both route writes through
 For a first-seen Futu stock or ETF deal, trade intake may emit a post-settlement
 account refresh hint to the separately installed portfolio-management service.
 The hint contains no position delta: PM owns the full Futu holdings reread,
-persistence, scheduling, concurrency, and retry policy. OM only records whether
-the hint request was accepted or failed; acceptance is not synchronization
-evidence. The root `portfolio_management.enabled` switch gates this hint and all
+persistence, scheduling, concurrency, and retry policy. OM durably binds new
+handoffs to a stable account/request identity in the existing trade Inbox and
+retries unacknowledged handoffs on listener recovery. The dedicated durable
+receiver endpoint deduplicates admission; legacy attempted-only records remain
+untouched. Durable acceptance is not synchronization evidence. The root `portfolio_management.enabled` switch gates this hint and all
 other production PM callers.
 
 ## Close Advice Flow

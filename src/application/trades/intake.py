@@ -11,6 +11,7 @@ from src.application.trades.deal_identity import broker_deal_key, broker_deal_ke
 from src.application.trades.inbox import TradePayloadClaimLost
 from src.application.trades.state import is_durable_processed_deal, lookup_deal_state_entry
 from src.application.trades.lifecycle import (
+    LifecycleContextReadError,
     lifecycle_deal_economic_hash,
 )
 from src.infrastructure.io_utils import utc_now
@@ -623,13 +624,16 @@ def process_trade_payload(
     except TradePayloadClaimLost:
         raise
     except Exception as exc:
+        context_read_failed = isinstance(exc, LifecycleContextReadError) and not resolve_returned
         result_dict = _exception_result_dict(
-            exc,
+            exc.cause if context_read_failed else exc,
             payload=effective_payload,
             deal=deal,
-            stage="resolve" if not resolve_returned else "post_resolve",
+            stage="lifecycle_context_read" if context_read_failed else "resolve" if not resolve_returned else "post_resolve",
             retryable=not resolve_returned,
         )
+        if context_read_failed:
+            result_dict["diagnostics"]["write_outcome"] = "not_started"
         if portfolio_refresh_intent is not None:
             result_dict["portfolio_refresh_intent"] = portfolio_refresh_intent
 

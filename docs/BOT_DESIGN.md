@@ -1,14 +1,40 @@
 # Bot / Python runtime / Scene v7
 
-本轮目标是解释 OM 策略、分析已记录的报错、说明标的被过滤的原因，并支持连续对话、个人记忆和只读工具调用。本文描述开发中的源码合同；是否已发布、是否部署以及真实模型的效果需要分别验证。
+Bot 支持解释 OM 策略、分析已记录的报错、说明历史过滤原因和查询当前卖出开仓候选，并提供连续对话、个人记忆和只读工具调用。本文描述开发中的源码合同；是否已发布、是否部署以及真实模型的效果需要分别验证。
 
 ## 调用链
 
 渠道鉴权与去重 → `channel_facade.py` → `local_harness.py` → `host.py` → `runtime.py`。
 
-`runtime.py` 直接使用现有 Python Chat Completions / Responses 适配器。没有历史上下文的首轮使用原生 `tool_choice=required` 要求一次工具调用；已有上下文的追问由模型判断是否需要重读。Host 校验参数和固定范围，调用原有 OM 工具，返回脱敏结果；模型随后直接给出正文。没有 Pi 子进程、IPC、答案提交工具、claims、证据编号准入或目录激活步骤。
+`runtime.py` 直接使用现有 Python Chat Completions / Responses 适配器。没有历史上下文的首轮默认使用原生 `tool_choice=required` 要求一次工具调用；Host 对独立数字+P/C 简写或完整 put/call 词片段（如“腾讯put”“NVDA call”“卖put”）显式允许先澄清；明确的解释、过滤原因和报错查询仍优先读取，工具名单本身不改变默认值。已有上下文的追问由模型判断是否需要重读。Host 校验参数和固定范围，调用原有 OM 工具，返回脱敏结果；模型随后直接给出正文。没有 Pi 子进程、IPC、答案提交工具、claims、证据编号准入或目录激活步骤。
 
-工具由现有 registry 与各领域 `TOOLS` 定义；Scene 直接列出 7 个工具：`project_context`、`project_files`、`candidate_filter_explain`、`runtime_runs`、`runtime_logs`、`runtime_status`、`receipt_read`。渠道场景按身份追加 `bot_memory`。不再按 toolset 展开工具，也不构造目录 catalog、snapshot 或 hash。工具仍拥有账户、配置、历史快照、分页和真实状态判断；Bot 不重新计算历史筛选结果。
+工具由现有 registry 与各领域 `TOOLS` 定义；Scene 按 [`om_chat.scene.json`](../src/application/bot/om_chat.scene.json) 的 `tool_selection.names` 固定清单投影只读工具。渠道场景按身份追加 `bot_memory`。不再按 toolset 展开工具，也不构造目录 catalog、snapshot 或 hash。工具仍拥有账户、配置、历史快照、分页和真实状态判断；Bot 不重新计算历史筛选结果。
+
+## 指定标的卖出开仓候选
+
+`option_candidates` 接受 1–5 项标准 `queries`；参数、结果和业务边界见
+[工具合同](TOOL_REFERENCE.md#指定标的卖出开仓候选)。它查询当前合约，Bot 不复制筛选或排名。
+`short put` / “卖 put”对应 `short_put`，`short call` / “卖 call”对应 `short_call`。
+独立的 `370P/370p`、`230C/230c`、`230.5c` 只表示行权价和期权类型；只有用户当前表达或
+明确适用于本查询的上下文包含卖出动作，才生成卖出开仓参数。没有方向先问买入还是卖出，
+不调用工具；买入、平仓、否定、类型/行权价冲突和标的对应不明需说明限制或澄清。
+不从完整合约代码或更长标识截取简写，不从助手建议推定方向，不补造到期日或展开笛卡尔积。
+
+Host 的窄简写检测只放开首轮澄清，不解析方向或生成工具参数；普通策略/报错问题仍要求首轮读取。
+对话语义由 scene 提示和模型处理，脚本模型用例证明允许零调用澄清及标准 JSON 接入，
+不代表对任意自然语言的确定性意图拦截或真实模型效果。
+
+`build_tool_payload` 对该工具只构造公共参数，不套用旧单市场路由。
+Host 把 `manifest.fixed_tool_input` 单独传给 `call_read_tool(trusted_input=...)`；
+该边界复核 `read_generation/read_markets`，用应用 `normalize_queries` 规范化整批，并校验配置身份。
+任一市场越权、身份冲突或可信上下文缺失，整次返回 `PERMISSION_DENIED`，不执行允许部分。
+配置缺失/过期仍绑定明确路径，由应用返回对应项 unavailable，不改用其他市场。
+可信配置以小写市场到配置路径的映射、固定 `runtime_root`、deadline 和 cancelled，经
+`option_candidates_context` 传入执行层；模型不能填写这些值。CLI 直接执行工具不要求 Bot 授权上下文。
+
+`observation.host_scope` 对该工具记录已验证的 `markets` 数组，旧工具继续使用单个 market/account。
+共享 `read_execution.bounded_call/check_run/RunStopped` 保留 Bot runtime 兼容导入，
+worker 显式复制 ContextVar；应用在自身预算内保留已完成结果，超时不等于远端 SDK 已取消。
 
 ## 上下文与记忆
 
@@ -18,11 +44,11 @@
 
 ## 完成与失败
 
-默认最多 16 次模型调用、12 次工具调用，总计 180 秒，预留 45 秒回答。工具额度耗尽或连续读取失败后关闭工具，要求模型说明已知结果和缺口。正文达到输出上限最多续写一次；取得工具结果后遇到模型异常，预算允许时尝试一次最终回答。
+默认最多 16 次模型调用、12 次工具调用，总计 180 秒，预留 45 秒回答。工具额度耗尽或连续失败批次达到场景限额（默认 3 批）后关闭工具，要求模型说明已知结果和缺口。一次模型响应中的非空工具批次全部失败才累计一次；其中任一结果成功则重置连续失败批次，但不会重新开启已因独立额度或结束条件关闭的工具。正文达到输出上限最多续写一次；取得工具结果后遇到模型异常，预算允许时尝试一次最终回答。
 
 未知工具、非法参数和跨范围参数不能执行。工具失败保持失败，过大的结果要求缩小范围，不当作有效空结果。项目源码一次最多读取 300 行；读取 cursor 自带下一位置，后续请求无需重复 start_line。模型观察不包含配置或内容摘要 hash，避免把完整性元数据误当业务原因；Host 和工具 owner 仍保留这些校验。取消或超时后的模型/读取结果不能保存答案；已运行的读取线程可能持续到自身超时，但没有提交回答的权限。
 
-运行诊断把 `ran_scan` / `ran_pipeline` 写入标志投影为 `usable_scan_result` / `pipeline_completed_successfully`，避免把失败结果误读成流程从未调用。`account_metrics` 与 `run_audit` 是独立记录；除非单条记录明确给出关系，运行 ID、顺序和时间接近均不构成因果链。
+运行诊断保留 `ran_scan` 的扫描尝试语义；`usable_scan_result` 仅由同运行、账户和市场的完整校验封存证据决定：至少一个范围完成为 true（包括零候选及部分成功），已验证但没有完成范围为 false，仅有指标记录时为 null。Bot 不从扫描尝试或预期范围推断结果可用。指标诊断行补充封存结果时，以 `usable_scan_result_source=validated_candidate_bundle` 标明该字段来源；它不改变指标原因、时间或记录间的因果关系。`pipeline_completed_successfully` 仍保留原指标值，封存运行记录没有该信息时保持 null。`account_metrics` 与 `run_audit` 是独立记录；除非单条记录明确给出关系，运行 ID、顺序和时间接近均不构成因果链。
 
 ### 成交回执的市场参数纠错（本次实现设计）
 
@@ -44,13 +70,13 @@
 
 非目标：不改 Control、交易/账本写入、通知、券商连接，也不把行情或标的代码当成真实指派证明。不让模型决定授权。旧单市场配置默认维持单市场。
 
-现状与依据：渠道入口只接受一个 `config_key` 或 `config_path`，`resolve_trusted_config_scope` 校验身份和新鲜度；Scene 把它作为全部工具的固定输入，Host 遇到冲突拒绝。`bot.default_market_scope=all` 仅是 Control 默认市场语义，不是 Bot 读权限。现有 `receipt_read` 有 market 字段，`trade_attribution_read` 和 `option_positions_read` 有 config_key；后者是纯读工具但尚未放入 Scene。`symbol_market` 已提供标的身份判断。个人记忆当前以 sender 和单配置权限隔离，旧会话不能在授权扩张或撤销后直接继承。
+现状与依据：渠道入口只接受一个 `config_key` 或 `config_path`，`resolve_trusted_config_scope` 校验身份和新鲜度；Scene 将主配置作为 Host 的可信输入，普通工具按请求选择获准市场，候选批量按各项标的确定市场集合。`bot.default_market_scope=all` 仅是 Control 默认市场语义，不是 Bot 读权限。现有 `receipt_read` 有 market 字段，`trade_attribution_read` 和 `option_positions_read` 有 config_key；后者在 Scene 中仅开放 events 查询。`symbol_market` 已提供标的身份判断。个人记忆当前以 sender 和单配置权限隔离，旧会话不能在授权扩张或撤销后直接继承。
 
 选择的合同：
 
 1. 在经验证的独立 `config.bot.json` 的 `bot` 中增加显式 `read_markets: [us, hk]`；缺省为渠道原有单市场。只接受无重复的 `us`/`hk` 非空列表，必须包含渠道主市场；列表形状非法时配置验证失败，遗漏主市场时该渠道请求无法启动。主市场快照提供市场和账户身份，不提供读权限。渠道从同一运行目录解析另一个标准市场文件，不接受模型路径；每次选中后核验文件身份、新鲜度、账户集合及其与实际数据 runtime root 的对应关系。当前 allowlist 用户可配置双市场，生产启用仍遵守配置变更授权。
 2. 渠道把市场集合和 Bot 配置代际传入 Host 的可信合同。Host 根据顶层 `config_key`/`market`/`symbol` 和嵌套 `query.symbol` 选择目标市场并拒绝冲突；各工具 owner 规范化筛选并校验 cursor 绑定的查询条件。`symbol_market` 的大写值转为小写比较。省略时单市场沿用原行为，双市场且无可判定标的的查询要求明确市场，不能默选 US。Host 只为选中市场注入可信配置，工具 owner 仍作最终验证；模型永远不能传 `config_path`。
-3. Host 对目标市场及顶层/嵌套账户一起校验；同名 `lx` 只有在该市场配置包含 `lx` 时可读。成功构造工具 payload 后产生的工具观察附独立的 Host 路由标签（实际 market/account/tool）；输入被 Host 拒绝时没有这类标签。保留工具自身来源，不能把 Host 标签写成券商证明。回答说明本地 ledger、归属记录还是回执及分页覆盖；空、缺失、失败和未授权各自明确。跨市场一次只读一个目标，不合并两份记录为单一事实。
+3. Host 对目标市场及顶层/嵌套账户一起校验；同名 `lx` 只有在该市场配置包含 `lx` 时可读。成功构造工具 payload 后产生的工具观察附独立的 Host 路由标签（实际 market/account/tool）；输入被 Host 拒绝时没有这类标签。保留工具自身来源，不能把 Host 标签写成券商证明。回答说明本地 ledger、归属记录还是回执及分页覆盖；空、缺失、失败和未授权各自明确。普通工具每次只读一个市场；`option_candidates` 的批量授权按上文单独处理，不合并不同查询的事实。
 4. Scene 加入已有 `option_positions_read` 的 `events` 查询，限制可见字段为只读必要筛选；暂不开放 `list`，因为它的共享账本读取尚无市场谓词。现有事件投影补 `event_type`，据此区分本地 assignment 与普通 close，不把它称为券商确认。`trade_attribution_read` 保留独立入口并在现有 owner 增加规范化 `symbol` 筛选，分页前过滤。用户说「被指派」时按 HK 标的定位并分别核验可用证据；缺账户时仅在可信 HK 配置有唯一账户时可默认，否则请用户给账户。未读尽分页只能报告已查页，不能作否定结论。旧 `receipt_read` 的完整 ID 和不降级广泛查询规则继续适用。
 5. 会话键和个人记忆 owner 绑定渠道、sender、conversation、主配置身份与 Bot 配置代际；取消分析先按当前会话键定位，再按可信渠道身份匹配并取消旧代际的活跃运行。代际取已校验 assistant 文件的规范路径、完整字节 SHA-256、`_generated.generated_at` 及文件 `mtime_ns`；受控构建的 A→B→A 得到新代际。渠道只从可信 assistant 路径生成并写入合同，`session_key_for_contract` 和 `scope_from_contract` 从同一路径重算并比对，不能信任模型或序列化字段。业务证据记忆在现有 `account_scope` 使用 `us:lx`/`hk:lx`，只从工具的可信实际市场和账户生成。每次重建 Bot 配置（包括版本升级）都会隔离旧会话和个人记忆，即使 `read_markets` 未变；旧数据保留但不自动迁移。每次工具读取前以及回答/outbox 持久化前复核代际，变化即中止本轮，不返回旧授权下的结果。不可读取的配置、冲突、撤权和工具异常均失败关闭，不以空结果返回。
 
@@ -81,13 +107,19 @@
 
 交易、账本、配置、通知与服务操作仍由原有业务模块和 deterministic Control 管理。模型没有修改这些状态的工具。既有渠道权限、去重、取消、Host 租约、outbox 和真实数据保持独立。
 
-普通安装与新版升级仅需要 Python。回滚到旧发布仍要核验旧 Pi 存储和旧运行时；历史迁移说明见 [Pi legacy storage](PI_AGENT_CORE_INTEGRATION.md)。
+普通安装、受控升级与回滚仅支持 Python Bot 目标；旧 Node/Pi 发布在依赖安装、服务切换或运行时数据写入前被明确拒绝。当前代码不再提供 Pi 执行、存储转换或反向转换入口，不需要安装 Node 或 Pi 包。
+
+旧 `pi_sessions.sqlite3`、迁移回执、备份和未知历史目录作为历史数据保留；新版不读取、重写、删除或自动转换这些数据，也不依据旧 Pi 回执决定 release 清理。未知历史目录及备份默认保留；含 `output_shared` 历史状态的 Python 发布目录也不自动删除。保留旧发布不等于允许重新激活旧 Node 运行时。
+
+`om bot migrate --host-db ...` 仅检查或迁移现有 Host schema，保留显式 `--dry-run` / `--apply` 和 apply 前 writer 停止要求；不再接受 `--pi-db`，也不导入旧 Pi 会话。 已完成的历史回执保持原样；未完成且含旧 Pi 清单的混合迁移会在打开数据库前拒绝，保留现场并要求操作者恢复，不能由新版直接标记为完成。
 
 ## 原消息重放与待发回复权限
 
 普通入站缓存由 `bot.config_scope` 和 inbound audit owner 绑定可信渠道、用户、会话、有效运行配置内容（包含账户集合）、规范配置路径与 Bot 读取代际；双市场还包含获准的另一市场配置。规范路径别名保持同一身份，运行配置内容或 Bot 配置代际改变则不能沿用旧结果。重放先核验当前 sender，再核验 scope，之后才能解析原回答；作用域缺失、不可读取或不匹配时返回 `CHANNEL_NOT_READY`，保留原成功响应并要求发送新消息，不重新执行原业务。旧无绑定记录保留但不猜测补绑。合法请求的审计查找失败明确报错，runtime 注释只以原响应 CAS 更新已录入结果，不覆盖原成功缓存；新合法失败仍正常保存。
 
-Feishu 和 Wechat reply outbox 冻结上述权限、原接收上下文与发送配置路由。每次 claim 前和实际发送前重新核验当前权限与 scope；拒绝或缺证据返回 `authorization_blocked`，不当作空队列或 provider 成功。claim 前只延后现有下次尝试时间，不增加 attempt、延长 provider 窗口或改写冻结正文；claim 后本地阻塞保留已有 attempt fence、UUID、窗口及 UNKNOWN，不把未调用 provider 说成未知送达。已拒绝的队首延期，使其他合法回复可以继续。Feishu 的 no-reply 门禁保持；Wechat public poll 在禁回复时仍可能重试已有待发，是本次未修的既有调用入口缺口，另待范围批准。stop、过期、取消及可靠 fallback 沿原 owner 处理。
+Feishu 和 Wechat reply outbox 冻结上述权限、原接收上下文与发送配置路由。每次 claim 前和实际发送前重新核验当前权限与 scope；拒绝或缺证据返回 `authorization_blocked`，不当作空队列或 provider 成功。claim 前只延后现有下次尝试时间，不增加 attempt、延长 provider 窗口或改写冻结正文；claim 后本地阻塞保留已有 attempt fence、UUID、窗口及 UNKNOWN，不把未调用 provider 说成未知送达。已拒绝的队首延期，使其他合法回复可以继续。Feishu 的 no-reply 门禁保持；Wechat public poll 在禁回复时于待发重试的审计与队列初始化前返回 `reply_disabled`，不 claim 或改写已有待发记录；重新启用后沿用原发送标识和当前权限校验重试。stop、过期、取消及可靠 fallback 沿原 owner 处理。
+
+Wechat getupdates 返回可解析的非零顶层状态码且未显式 `ok=true` 时，poll 返回 `POLL_FAILED`，不消费该响应的消息或更新游标；保留空对象、合法无顶层状态的嵌套响应及已有状态码优先级。serve 对显式失败结果记录固定错误日志，新的错误与日志不包含 provider 原文、游标或 token，原 HTTP 异常日志路径不变。待发重试仍先于 getupdates，因此启用回复时不能把失败响应后的零消费理解为整个轮询没有先前重试效果。
 
 生产 Feishu reader 重读最初绑定的 env/credential env 来源，文件缺失、不可读、异常或删除名单键不会复用它原先写入进程的旧名单；Wechat 配置来源每次从已验证 Bot 配置读取。显式 CLI 或进程名单仍按该明确来源生效，其值变化或重启才改变授权。即时公开的工具权限引导与 sender 拒绝保持原区别：未授权 sender 仍静默；合法 sender 的新结果在 scope 暂不可用时可沿同一原路由即时回复一次，仅限新录入且新入队的正文。该例外不会使旧 cache、outbox 冲突或待发重试取得权限证明。历史未绑定待发消息不自动补送或迁移；恢复合法同 scope 后，原已绑定回复才可按既有窗口重试。
 

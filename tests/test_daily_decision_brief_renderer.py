@@ -602,7 +602,12 @@ def test_candidate_alert_renders_only_selected_wheel_branch() -> None:
         assert "NVDA｜Wheel Call" not in message
 
 
-def test_success_empty_warning_is_embedded_without_failure_wording() -> None:
+@pytest.mark.parametrize("reason,detail", [
+    ("no_expirations", "本轮未发现可用到期日"),
+    ("no_contract_rows", "本轮未找到可扫描合约"),
+    ("no_feasible_strikes", "本轮无可行开仓行权价"),
+])
+def test_success_empty_warning_is_embedded_without_failure_wording(reason: str, detail: str) -> None:
     brief = _brief()
     brief["status"] = "degraded"
     brief["data_gaps"].append(
@@ -611,7 +616,7 @@ def test_success_empty_warning_is_embedded_without_failure_wording() -> None:
             "symbol": "NVDA",
             "strategy_family": "sell_put",
             "outcome": "success_empty",
-            "reason": "no_expirations",
+            "reason": reason,
             "severity": "warning",
             "actionable": False,
         }
@@ -628,7 +633,7 @@ def test_success_empty_warning_is_embedded_without_failure_wording() -> None:
     )
 
     reminder = (
-        "NVDA CSP：本轮未发现可用到期日，"
+        f"NVDA CSP：{detail}，"
         "已按零候选完成（非操作建议）"
     )
     assert reminder in view["reminders"]
@@ -2087,10 +2092,14 @@ def test_unscoped_call_unavailability_still_blocks_empty_family(reason):
 
 @pytest.mark.parametrize("render", [render_full_brief, render_fixed_report, render_fixed_report_card_markdown, render_query_brief])
 @pytest.mark.parametrize("family", ["sell_put", "covered_call"])
-def test_position_sizing_in_shared_report_views(render, family) -> None:
+@pytest.mark.parametrize("basis", [
+    "non_option_net_assets_before_assignment_fees.v2",
+    "directional_non_option_net_assets_before_assignment_fees.v3",
+])
+def test_position_sizing_in_shared_report_views(render, family, basis) -> None:
     brief = _brief()
     for candidate in brief["candidates"][family]:
-        candidate["metrics"].update(symbol_concentration_current=0.08, position_sizing_basis="non_option_net_assets_before_assignment_fees.v2", symbol_concentration_after_existing_assignments=0.2, symbol_concentration_after=0.23)
+        candidate["metrics"].update(symbol_concentration_current=0.08, position_sizing_basis=basis, symbol_concentration_after_existing_assignments=0.2, symbol_concentration_after=0.23)
     message = render(brief)
     assert "Position Sizing：" in message
     assert "Position Sizing（" not in message

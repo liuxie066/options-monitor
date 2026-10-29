@@ -8,6 +8,8 @@ from hashlib import sha256
 import json
 import math
 from pathlib import Path
+from time import monotonic
+from types import MappingProxyType
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -69,13 +71,19 @@ def fetch_market_earnings_calendar(
     scan_at_utc: datetime,
     expirations_by_underlier: Mapping[str, Iterable[str]],
     now_fn: Callable[[], datetime] | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    on_interval: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Fetch one market calendar and project its coverage to exact expiries."""
 
+    _check_earnings_budget(deadline, cancelled)
     market_norm = str(market or "").strip().upper()
     if market_norm not in _MARKET_TIMEZONES:
         raise ValueError(f"unsupported earnings calendar market: {market}")
     scan_at = _aware_utc(scan_at_utc)
+    if earnings_calendar_scan_date(market_norm, scan_at) != scan_date:
+        raise ValueError("earnings calendar scan date mismatch")
     normalized_expirations = _normalize_expirations(
         market=market_norm,
         expirations_by_underlier=expirations_by_underlier,
@@ -88,7 +96,7 @@ def fetch_market_earnings_calendar(
     if not all_expirations:
         raise ValueError("earnings calendar requires at least one exact expiration")
     max_expiration = max(all_expirations)
-    if max_expiration < scan_date:
+    if min(all_expirations) < scan_date:
         raise ValueError("earnings calendar expiration precedes scan date")
 
     observed_now = now_fn or (lambda: datetime.now(timezone.utc))
@@ -99,71 +107,162 @@ def fetch_market_earnings_calendar(
         scan_date,
         max_expiration,
     ):
+        _check_earnings_budget(deadline, cancelled)
         observed_at = _iso_utc(observed_now())
+        normalized_rows: list[dict[str, Any]] = []
         if unsupported_reason is not None:
-            intervals.append(
-                _unavailable_interval(
-                    interval_start,
-                    interval_end,
-                    observed_at=observed_at,
-                    reason_code=unsupported_reason,
-                    error="OpenD earnings calendar capability is unavailable",
+            interval = _unavailable_interval(
+                interval_start, interval_end, observed_at=observed_at,
+                reason_code=unsupported_reason,
+                error="OpenD earnings calendar capability is unavailable",
+            )
+        else:
+            try:
+                raw = gateway.get_earnings_calendar(
+                    market=market_norm,
+                    begin_date=interval_start.isoformat(),
+                    end_date=interval_end.isoformat(),
                 )
-            )
-            continue
-        try:
-            raw = gateway.get_earnings_calendar(
-                market=market_norm,
-                begin_date=interval_start.isoformat(),
-                end_date=interval_end.isoformat(),
-            )
-            normalized_rows = _normalize_provider_rows(
-                raw,
-                market=market_norm,
-                interval_start=interval_start,
-                interval_end=interval_end,
-            )
-        except FutuGatewayCapabilityUnavailableError as exc:
-            unsupported_reason = str(
-                exc.reason_code or "opend_earnings_calendar_unsupported"
-            )
-            intervals.append(
-                _unavailable_interval(
-                    interval_start,
-                    interval_end,
-                    observed_at=observed_at,
-                    reason_code=unsupported_reason,
-                    error=str(exc),
+            except FutuGatewayCapabilityUnavailableError as exc:
+                unsupported_reason = str(
+                    exc.reason_code or "opend_earnings_calendar_unsupported"
                 )
-            )
-            continue
-        except Exception as exc:
-            intervals.append(
-                _unavailable_interval(
-                    interval_start,
-                    interval_end,
-                    observed_at=observed_at,
+                interval = _unavailable_interval(
+                    interval_start, interval_end, observed_at=observed_at,
+                    reason_code=unsupported_reason, error=str(exc),
+                )
+            except Exception as exc:
+                interval = _unavailable_interval(
+                    interval_start, interval_end, observed_at=observed_at,
                     reason_code="opend_earnings_calendar_interval_failed",
                     error=f"{type(exc).__name__}: {exc}",
                 )
-            )
-            continue
-
-        result_hash = _payload_hash(normalized_rows)
-        intervals.append(
-            {
-                "start": interval_start.isoformat(),
-                "end": interval_end.isoformat(),
-                "status": "ok",
-                "reason_code": None,
-                "error": None,
-                "observed_at_utc": observed_at,
-                "row_count": len(normalized_rows),
-                "result_hash": result_hash,
-            }
-        )
+            else:
+                # Control signals stay outside the provider-error fallback.
+                _check_earnings_budget(deadline, cancelled)
+                try:
+                    normalized_rows = _normalize_provider_rows(
+                        raw, market=market_norm,
+                        interval_start=interval_start, interval_end=interval_end,
+                    )
+                except Exception as exc:
+                    interval = _unavailable_interval(
+                        interval_start, interval_end, observed_at=observed_at,
+                        reason_code="opend_earnings_calendar_interval_failed",
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                else:
+                    interval = {
+                        "start": interval_start.isoformat(),
+                        "end": interval_end.isoformat(),
+                        "status": "ok",
+                        "reason_code": None,
+                        "error": None,
+                        "observed_at_utc": observed_at,
+                        "row_count": len(normalized_rows),
+                        "result_hash": _payload_hash(normalized_rows),
+                    }
+        _check_earnings_budget(deadline, cancelled)
+        intervals.append(interval)
         events.extend(normalized_rows)
+        if on_interval is not None:
+            target_events = [
+                row for row in normalized_rows
+                if row["security"] in normalized_expirations
+            ]
+            handoff = {
+                **interval, "source": "opend", "market": market_norm,
+                "scan_date": scan_date.isoformat(),
+                "events": tuple(MappingProxyType(dict(row)) for row in target_events),
+            }
+            if interval["status"] == "ok":
+                handoff.update(row_count=len(target_events), result_hash=_payload_hash(target_events))
+            _check_earnings_budget(deadline, cancelled)
+            on_interval(MappingProxyType(handoff))
 
+    _check_earnings_budget(deadline, cancelled)
+    snapshot = _build_earnings_calendar_snapshot(
+        market=market_norm, scan_date=scan_date, scan_at_utc=scan_at,
+        normalized_expirations=normalized_expirations, intervals=intervals, events=events,
+    )
+    _check_earnings_budget(deadline, cancelled)
+    return snapshot
+
+
+def _check_earnings_budget(
+    deadline: float | None, cancelled: Callable[[], bool] | None,
+) -> None:
+    if cancelled is not None and cancelled():
+        raise TimeoutError("earnings calendar cancelled")
+    if deadline is not None and monotonic() >= deadline:
+        raise TimeoutError("earnings calendar deadline exceeded")
+
+
+def earnings_calendar_snapshot_from_intervals(
+    *,
+    market: str,
+    scan_date: date,
+    scan_at_utc: datetime,
+    expirations_by_underlier: Mapping[str, Iterable[str]],
+    intervals: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Project collected handoffs; uncompleted intervals remain explicit gaps.
+
+    The caller must keep handoffs scoped to one trusted gateway/request. Duplicate
+    intervals retain the first success, so a later failure cannot erase evidence.
+    """
+    market_norm = str(market or "").strip().upper()
+    if earnings_calendar_scan_date(market_norm, scan_at_utc) != scan_date:
+        raise ValueError("earnings calendar scan date mismatch")
+    normalized = _normalize_expirations(
+        market=market_norm, expirations_by_underlier=expirations_by_underlier,
+    )
+    expirations = [expiry for values in normalized.values() for expiry in values]
+    if not expirations or min(expirations) < scan_date:
+        raise ValueError("earnings calendar requires exact expirations on or after scan date")
+    expected = earnings_calendar_intervals(scan_date, max(expirations))
+    expected_keys = {(start.isoformat(), end.isoformat()) for start, end in expected}
+    collected: dict[tuple[str, str], tuple[dict[str, Any], list[dict[str, Any]]]] = {}
+    for handoff in intervals:
+        if (handoff.get("source"), handoff.get("market"), handoff.get("scan_date")) != (
+            "opend", market_norm, scan_date.isoformat(),
+        ):
+            raise ValueError("earnings calendar interval identity mismatch")
+        key = (handoff.get("start"), handoff.get("end"))
+        if key not in expected_keys:
+            raise ValueError("earnings calendar interval is outside requested partition")
+        interval = {k: v for k, v in handoff.items() if k not in {"source", "market", "scan_date", "events"}}
+        events = [dict(event) for event in handoff["events"]]
+        previous = collected.get(key)
+        if previous is None or previous[0]["status"] != "ok":
+            collected[key] = (interval, events)
+    interval_rows: list[dict[str, Any]] = []
+    event_rows: list[dict[str, Any]] = []
+    for start, end in expected:
+        pair = collected.get((start.isoformat(), end.isoformat()))
+        if pair is None:
+            interval_rows.append(_unavailable_interval(
+                start, end, observed_at=_iso_utc(scan_at_utc),
+                reason_code="earnings_calendar_interval_not_completed",
+                error="Earnings calendar interval was not completed",
+            ))
+        else:
+            interval_rows.append(pair[0])
+            event_rows.extend(pair[1])
+    return _build_earnings_calendar_snapshot(
+        market=market_norm, scan_date=scan_date, scan_at_utc=scan_at_utc,
+        normalized_expirations=normalized, intervals=interval_rows, events=event_rows,
+    )
+
+
+def _build_earnings_calendar_snapshot(
+    *, market: str, scan_date: date, scan_at_utc: datetime,
+    normalized_expirations: Mapping[str, list[date]],
+    intervals: list[dict[str, Any]], events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    market_norm = market
+    scan_at = _aware_utc(scan_at_utc)
+    max_expiration = max(expiry for values in normalized_expirations.values() for expiry in values)
     events = _deduplicate_events(events)
     snapshot: dict[str, Any] = {
         "schema_version": EARNINGS_CALENDAR_SCHEMA_VERSION,
@@ -718,11 +817,16 @@ def _candidate_earnings_from_snapshot(
         identity = resolve_symbol_identity(symbol)
         if identity is None or identity.market != market:
             raise ValueError("symbol market mismatch")
-        projection = _project_earnings_for_expiry(
-            snapshot,
-            underlier_code=identity.futu_code,
-            expiration=str(expiration or "").strip(),
+        expiration_key = _strict_date(
+            str(expiration or "").strip(), field="expiration",
+        ).isoformat()
+        projection = (
+            snapshot["evidence_by_underlier"].get(identity.futu_code, {}).get(expiration_key)
         )
+        if not isinstance(projection, Mapping):
+            raise ValueError("earnings calendar stored projection mismatch")
+        # The loader validated every stored projection; keep each result independently mutable.
+        projection = deepcopy(projection)
     except Exception as exc:
         return _candidate_earnings_unavailable(
             "earnings_calendar_candidate_identity_invalid",

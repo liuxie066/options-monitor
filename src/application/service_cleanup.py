@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from functools import cmp_to_key
 import shutil
@@ -11,42 +12,9 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from src.application.bot.pi_migration import (
-    pi_migration_receipt_path,
-    read_pi_migration_receipt,
-    retained_pi_runtime_paths,
-)
-from src.application.settings import build_effective_env
+from src.application.agent_tool_contracts import AgentToolError
+from src.application.file_locks import single_instance_lock
 from src.application.version_check import compare_versions
-
-
-_PI_SESSION_STATE_RELATIVE_PATH = Path("output_shared/state")
-
-
-def pi_session_database_paths(
-    *,
-    runtime_root: Path,
-    repo_root: Path,
-    release_dirs: tuple[Path, ...] = (),
-) -> tuple[Path, ...]:
-    effective = build_effective_env(repo_root=repo_root)
-    audit_raw = effective.get("OM_INBOUND_AUDIT_DB").strip()
-    audit_db = (
-        Path(audit_raw).expanduser()
-        if audit_raw
-        else runtime_root
-        / _PI_SESSION_STATE_RELATIVE_PATH
-        / "inbound_control.sqlite3"
-    )
-    if not audit_db.is_absolute():
-        audit_db = repo_root / audit_db
-    active_db = audit_db.absolute().with_name("pi_sessions.sqlite3")
-    candidates = [active_db]
-    for release_dir in release_dirs:
-        candidate = (release_dir / _PI_SESSION_STATE_RELATIVE_PATH / "pi_sessions.sqlite3").absolute()
-        if candidate.exists() or pi_migration_receipt_path(candidate).exists():
-            candidates.append(candidate)
-    return tuple(dict.fromkeys(candidates))
 
 
 def _default_releases_root(repo_root: Path) -> Path:
@@ -120,35 +88,6 @@ def _release_dirs(releases_root: Path) -> list[Path]:
         return dirs
     versioned = [(path, _release_version(path)) for path in dirs]
     return [path for path, _version in sorted(versioned, key=cmp_to_key(_compare_release_dirs_desc))]
-
-
-def _pi_retained_releases(
-    *,
-    runtime_root: Path,
-    repo_root: Path,
-    releases: list[Path],
-) -> tuple[list[Path], list[dict[str, Any]]]:
-    receipts: list[dict[str, Any]] = []
-    retained_runtimes: list[Path] = []
-    for pi_db in pi_session_database_paths(
-        runtime_root=runtime_root,
-        repo_root=repo_root,
-        release_dirs=tuple(releases),
-    ):
-        receipt = read_pi_migration_receipt(pi_db)
-        if receipt is None:
-            continue
-        receipts.append(receipt)
-        retained_runtimes.extend(path.expanduser().resolve() for path in retained_pi_runtime_paths(receipt))
-    retained = [
-        release.resolve()
-        for release in releases
-        if any(
-            runtime_dir == release.resolve() or runtime_dir.is_relative_to(release.resolve())
-            for runtime_dir in retained_runtimes
-        )
-    ]
-    return retained, receipts
 
 
 def _safe_child(path: Path, *, parent: Path) -> bool:
@@ -343,6 +282,10 @@ def _runtime_log_cleanup_plan(
         if item.suffix != ".log":
             protected_logs.append(_set_result_item(kind="runtime_log", path=item, root=logs_root, reason="non_log_file"))
             continue
+        # shortcut: retain fixed service outputs until closed descriptors can be verified.
+        if item.name.endswith((".out.log", ".err.log")):
+            protected_logs.append(_set_result_item(kind="runtime_log", path=item, root=logs_root, reason="service_output_log"))
+            continue
         try:
             mtime = _mtime_utc(item)
         except OSError:
@@ -446,10 +389,63 @@ def service_cleanup(
     run_cmd: Callable[..., Any] = subprocess.run,
     now: datetime | None = None,
 ) -> dict[str, Any]:
+    arguments = locals()
+    # Preserve early validation without creating a runtime lock for invalid roots.
+    if not confirm or not Path(repo_root).expanduser().is_symlink():
+        return _service_cleanup_under_transition_lock(**arguments)
+
+    runtime = Path(runtime_root).expanduser().resolve() if runtime_root else Path("/var/lib/options-monitor")
+    with ExitStack() as guard:
+        try:
+            guard.enter_context(single_instance_lock(
+                runtime / "locks/upgrade.lock.guard",
+                busy_message="service cleanup requires the upgrade/rollback transition guard",
+            ))
+        except (AgentToolError, OSError) as exc:
+            if isinstance(exc, AgentToolError) and exc.code != "RESOURCE_BUSY":
+                raise
+            repo_link = Path(repo_root).expanduser()
+            releases = Path(releases_root).expanduser().resolve() if releases_root else _default_releases_root(repo_link)
+            return {
+                "schema_version": 1,
+                "confirmed": True,
+                "repo_root": str(repo_link),
+                "releases_root": str(releases),
+                "runtime_root": str(runtime) if runtime_root else None,
+                "keep_releases": max(2, int(keep_releases or 2)),
+                "ok": False,
+                "status": "upgrade_locked" if isinstance(exc, AgentToolError) else "cleanup_failed",
+                "reason": str(exc),
+                "changed": False,
+                "deleted_paths": [],
+                "operations": [],
+            }
+        return _service_cleanup_under_transition_lock(**arguments)
+
+
+def _service_cleanup_under_transition_lock(
+    *,
+    repo_root: str | Path,
+    releases_root: str | Path | None = None,
+    runtime_root: str | Path | None = None,
+    keep_releases: int = 2,
+    include_apt_cache: bool = False,
+    journal_vacuum_size: str | None = None,
+    cleanup_downloads: bool = False,
+    cleanup_pip_cache: bool = False,
+    cleanup_output_runs: bool = False,
+    output_runs_keep_days: int = 14,
+    output_runs_keep_count: int = 200,
+    cleanup_runtime_logs: bool = False,
+    runtime_logs_keep_days: int = 14,
+    expected_output_runs_plan_sha256: str | None = None,
+    confirm: bool = False,
+    run_cmd: Callable[..., Any] = subprocess.run,
+    now: datetime | None = None,
+) -> dict[str, Any]:
     repo_link = Path(repo_root).expanduser()
     releases = Path(releases_root).expanduser().resolve() if releases_root else _default_releases_root(repo_link)
     runtime = Path(runtime_root).expanduser().resolve() if runtime_root else None
-    pi_runtime = runtime or Path("/var/lib/options-monitor")
     keep_count = max(2, int(keep_releases or 2))
     base = {
         "schema_version": 1,
@@ -480,23 +476,12 @@ def service_cleanup(
             "changed": False,
         }
 
-    pi_retained: list[Path] = []
-    pi_receipts: list[dict[str, Any]] = []
-    try:
-        pi_retained, pi_receipts = _pi_retained_releases(
-            runtime_root=pi_runtime,
-            repo_root=repo_link,
-            releases=releases_list,
-        )
-    except Exception as exc:
-        return {
-            **base,
-            "ok": False,
-            "status": "pi_retention_unresolved",
-            "reason": f"Pi migration receipt cannot be validated: {type(exc).__name__}: {exc}",
-            "active_release": str(active_release),
-            "changed": False,
-        }
+    # Historical runtime/state containers remain operator-owned; never auto-delete them.
+    retained_legacy = [
+        path.resolve() for path in releases_list
+        if not (path / "src/application/bot/runtime.py").is_file()
+        or (path / "output_shared").exists() or (path / "output_shared").is_symlink()
+    ]
 
     kept: list[Path] = [active_release]
     for release in releases_list:
@@ -505,7 +490,7 @@ def service_cleanup(
         if len(kept) >= keep_count:
             break
         kept.append(release.resolve())
-    kept.extend(path for path in pi_retained if path not in kept)
+    kept.extend(path for path in retained_legacy if path not in kept)
     kept_set = {path.resolve() for path in kept}
     delete_releases = [path for path in releases_list if path.resolve() not in kept_set]
 
@@ -722,7 +707,7 @@ def service_cleanup(
         "user overlay config",
         "active release",
         "rollback release",
-        "Pi migration retained release runtime",
+        "unrecognized historical release runtime",
     ]
     failures = [
         item
@@ -745,8 +730,7 @@ def service_cleanup(
         "changed": changed,
         "active_release": str(active_release),
         "kept_releases": [{"path": str(path), "version": path.name} for path in kept],
-        "pi_retained_releases": [{"path": str(path), "version": path.name} for path in pi_retained],
-        "pi_migration_receipt_phases": [receipt.get("phase") for receipt in pi_receipts],
+        "retained_legacy_releases": [{"path": str(path), "version": path.name} for path in retained_legacy],
         "delete_releases": release_items,
         "cache_dirs": cache_items,
         "output_runs_cleanup": output_runs_cleanup,

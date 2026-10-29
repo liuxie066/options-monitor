@@ -38,6 +38,8 @@ from src.application.daily_decision_brief_renderer import (
 )
 from src.application.daily_decision_brief_repository import (
     DailyBriefReadScope,
+    begin_daily_decision_brief_recovery_attempt,
+    bind_daily_decision_brief_recovery_report,
     classify_retryable_daily_decision_brief_payload,
     confirm_daily_decision_brief_delivery_v2,
     persist_daily_decision_brief_success,
@@ -48,6 +50,9 @@ from src.application.daily_decision_brief_repository import (
     read_daily_decision_brief_delivery_state,
     read_confirmed_attribution_render_context,
     read_daily_decision_brief_fixed_recovery,
+    read_daily_decision_brief_recovery_report,
+    read_daily_decision_brief_recovery_source,
+    expire_daily_decision_brief_recovery_reports,
     read_latest_daily_decision_brief,
     read_retryable_daily_decision_brief_delivery,
     record_daily_decision_brief_candidates,
@@ -66,7 +71,10 @@ from src.application.multi_tick_finalization import (
 )
 from src.application.notification_delivery_route import notifications_enabled, resolve_notification_delivery_route, notification_reminder_route_key
 from src.application.notification_delivery_adapter import (
+    build_notification_transport_key,
+    normalize_notification_delivery_result,
     notification_target_reference,
+    resolve_feishu_bot_send_target,
     select_notification_delivery_adapter,
 )
 from src.application.scheduled_notification import (
@@ -76,6 +84,7 @@ from src.application.scheduled_notification import (
 )
 from src.application.system_alerts import report_system_meta_signal
 from src.infrastructure.io_utils import read_json, utc_now
+from src.application.scan_scheduler import daily_brief_recovery_cutoff
 
 
 @dataclass(frozen=True)
@@ -509,10 +518,44 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             raise SystemExit(f"[CONFIG_ERROR] {err}") from err
 
         def _send_with_route_notifications(**kwargs: Any) -> Any:
-            return delivery_adapter.send_fn(
-                **kwargs,
-                notifications=notify_route.get("notifications") or {},
-            )
+            recovery_identity = None
+            for account, lifecycle in daily_brief_prep.lifecycles_by_account.items():
+                envelope = lifecycle.get("envelope") or {}
+                if (envelope.get("delivery_kind") == "fixed_recovery_report"
+                        and build_notification_transport_key(str(envelope["delivery_key"])) == kwargs.get("idempotency_key")):
+                    recovery_identity = {
+                        "base": request.base, "account": account, "market": lifecycle["market"],
+                        "market_trading_date": lifecycle["market_trading_date"],
+                        "delivery_key": envelope["delivery_key"], "source_digest": envelope["source_digest"],
+                        "message_sha256": envelope["message_sha256"],
+                        "transport_idempotency_key": kwargs["idempotency_key"],
+                    }
+                    started = begin_daily_decision_brief_recovery_attempt(
+                        **recovery_identity, attempted_at_utc=utc_now(),
+                    )
+                    if not started.get("started"):
+                        raise RuntimeError(f"recovery delivery blocked: {started.get('reason')}")
+                    break
+            try:
+                sent = delivery_adapter.send_fn(
+                    **kwargs,
+                    notifications=notify_route.get("notifications") or {},
+                )
+                if recovery_identity is not None:
+                    result = normalize_notification_delivery_result(sent, normalize_fn=delivery_adapter.normalize_fn)
+                    if not result.get("delivery_confirmed"):
+                        record_daily_decision_brief_delivery_attempt(
+                            **recovery_identity,
+                            ambiguous=bool(result.get("ambiguous_send") or result.get("duplicate_risk") or result.get("command_ok")),
+                            attempted_at_utc=utc_now(),
+                        )
+                return sent
+            except Exception:
+                if recovery_identity is not None:
+                    record_daily_decision_brief_delivery_attempt(
+                        **recovery_identity, ambiguous=True, attempted_at_utc=utc_now(),
+                    )
+                raise
 
         execution = execute_per_account_delivery(
             delivery_batch=delivery_batch,
@@ -923,16 +966,24 @@ def _prepare_daily_brief_notification(
                 if not market_date:
                     continue
                 with daily_brief_timing_scope(runlog=request.runlog, account=account, market=market):
-                    read_scope = DailyBriefReadScope(base=request.base, account=account, market=market)
+                    read_scope = _daily_brief_delivery_read_scope(request, account, market, market_date)
                     retry = read_retryable_daily_decision_brief_delivery(
                         base=request.base,
                         account=account,
                         market=market,
                         market_trading_date=market_date,
                         read_scope=read_scope,
+                        now_utc=utc_now(),
                     )
                     envelope = retry.get("envelope")
-                    if not isinstance(envelope, dict):
+                    if not isinstance(envelope, dict) or (
+                        envelope.get("delivery_kind") == "candidate_alert"
+                        and envelope.get("status") == "pending"
+                    ):
+                        recovery_report = read_daily_decision_brief_recovery_report(
+                            base=request.base, account=account, market=market,
+                            market_trading_date=market_date, now_utc=utc_now(), read_scope=read_scope,
+                        )
                         rebuilt = _rebuild_daily_brief_delivery(
                             request=request,
                             account=account,
@@ -941,14 +992,20 @@ def _prepare_daily_brief_notification(
                             scheduler=scheduler,
                             daily_limits=daily_limits,
                             read_scope=read_scope,
-                        )
-                        envelope = rebuilt.get("envelope")
-                        if isinstance(envelope, dict):
-                            retry = {
-                                **retry,
-                                "reason": "rebuilt_from_persisted_brief",
-                                "envelope": envelope,
-                            }
+                            recovery_report=recovery_report if recovery_report.get("available") else None,
+                        ) if recovery_report.get("available") or not isinstance(envelope, dict) else {}
+                        rebuilt_envelope = rebuilt.get("envelope")
+                        if isinstance(rebuilt_envelope, dict):
+                            read_scope = DailyBriefReadScope(base=request.base, account=account, market=market)
+                            retry = read_retryable_daily_decision_brief_delivery(
+                                base=request.base,
+                                account=account,
+                                market=market,
+                                market_trading_date=market_date,
+                                read_scope=read_scope,
+                                now_utc=utc_now(),
+                            )
+                            envelope = retry.get("envelope")
                     if not isinstance(envelope, dict):
                         continue
                     retired_classification = classify_retryable_daily_decision_brief_payload(
@@ -1012,13 +1069,26 @@ def _prepare_daily_brief_notification(
                 blocked_retry_classification: str | None = None
                 blocked_market_date = _daily_brief_market_date(scheduler)
                 if scheduled_trigger and not multi_market and blocked_market_date:
-                    read_scope = DailyBriefReadScope(base=request.base, account=account, market=markets[0])
+                    read_scope = _daily_brief_delivery_read_scope(request, account, markets[0], blocked_market_date)
+                    if not request.no_send:
+                        recovery_report = read_daily_decision_brief_recovery_report(
+                            base=request.base, account=account, market=markets[0],
+                            market_trading_date=blocked_market_date, now_utc=utc_now(), read_scope=read_scope,
+                        )
+                        if recovery_report.get("available"):
+                            _rebuild_daily_brief_delivery(
+                                request=request, account=account, market=markets[0],
+                                market_date=blocked_market_date, scheduler=scheduler, daily_limits=daily_limits,
+                                recovery_report=recovery_report,
+                            )
+                            read_scope = DailyBriefReadScope(base=request.base, account=account, market=markets[0])
                     retry_before_writes = read_retryable_daily_decision_brief_delivery(
                         base=request.base,
                         account=account,
                         market=markets[0],
                         market_trading_date=blocked_market_date,
                         read_scope=read_scope,
+                        now_utc=utc_now(),
                     )
                     envelope_before_writes = retry_before_writes.get("envelope")
                     if not isinstance(envelope_before_writes, dict):
@@ -1084,11 +1154,22 @@ def _prepare_daily_brief_notification(
                     )
                     scan_outcomes_by_account[account] = scan_outcomes_by_account.get(account, True) and pipeline_reliable
                     pending: list[str] = []
+                    candidate_record_reason: str | None = None
                     persisted: dict[str, Any] | None = None
                     diff: dict[str, Any] = {}
                     failure_source: tuple[str, str] | None = None
+                    recovery_due = False
                     if pipeline_reliable:
-                        persisted = persist_daily_decision_brief_success(base=request.base, brief=brief)
+                        intent = None
+                        if (scheduled_trigger and not fixed_target and not request.no_send
+                                and blocked_retry_envelope is None and scheduler.get("in_run_window") is True):
+                            intent = _daily_brief_recovery_intent(
+                                request=request, account=account, market=market, scheduler=scheduler,
+                                brief=brief, daily_limits=daily_limits,
+                            )
+                        persisted = persist_daily_decision_brief_success(
+                            base=request.base, brief=brief, **({"recovery_intent": intent} if intent else {}),
+                        )
                         previous = persisted.get("previous_successful_brief")
                         if (
                             isinstance(previous, dict)
@@ -1105,7 +1186,9 @@ def _prepare_daily_brief_notification(
                                 brief_digest=str(persisted["current_brief_digest"]),
                                 candidate_identities=persisted["current_candidate_identities"],
                             )
-                            pending = list(recorded["pending_candidate_identities"])
+                            candidate_record_reason = str(recorded["reason"])
+                            if recorded["applied"]:
+                                pending = list(recorded["pending_candidate_identities"])
                         if fixed_target and blocked_retry_envelope is None and not request.no_send:
                             record_daily_decision_brief_fixed_recovery(
                                 base=request.base,
@@ -1116,6 +1199,13 @@ def _prepare_daily_brief_notification(
                                 revision=int(persisted["current_revision"]),
                                 brief_digest=str(persisted["current_brief_digest"]),
                                 candidate_identities=persisted["current_candidate_identities"],
+                            )
+                        if (scheduled_trigger and not fixed_target and not request.no_send
+                                and blocked_retry_envelope is None and candidate_record_reason != "stale_revision"
+                                and scheduler.get("in_run_window") is True):
+                            recovery_due = _bind_daily_brief_recovery(
+                                request=request, account=account, market=market,
+                                market_date=str(persisted["brief"]["market_trading_date"]),
                             )
                         if scheduled_trigger:
                             commit_started = monotonic()
@@ -1148,11 +1238,25 @@ def _prepare_daily_brief_notification(
                             pipeline_reliable=pipeline_reliable,
                             fixed_due=bool(fixed_target),
                             pending_candidate_identities=pending,
+                            recovery_due=recovery_due,
                         )
                         if scheduled_trigger
                         else {"action": "none", "reason": "non_scheduled_snapshot_only"}
                     )
+                    if candidate_record_reason == "stale_revision" and not fixed_target:
+                        decision = {"action": "none", "reason": "stale_candidate_revision"}
                     action = str(decision["action"])
+                    if recovery_due:
+                        recovery_report = read_daily_decision_brief_recovery_report(
+                            base=request.base, account=account, market=market,
+                            market_trading_date=str(brief["market_trading_date"]), now_utc=utc_now(),
+                        )
+                        if recovery_report.get("available"):
+                            _rebuild_daily_brief_delivery(
+                                request=request, account=account, market=market,
+                                market_date=str(brief["market_trading_date"]), scheduler=scheduler,
+                                daily_limits=daily_limits, recovery_report=recovery_report,
+                            )
                     existing_retry = None
                     if scheduled_trigger and not multi_market:
                         existing_retry = blocked_retry or read_retryable_daily_decision_brief_delivery(
@@ -1160,6 +1264,7 @@ def _prepare_daily_brief_notification(
                             account=account,
                             market=market,
                             market_trading_date=str(brief["market_trading_date"]),
+                            now_utc=utc_now(),
                         )
                     existing_envelope = existing_retry.get("envelope") if isinstance(existing_retry, dict) else None
                     pending_delivery_status = (
@@ -1199,26 +1304,10 @@ def _prepare_daily_brief_notification(
                                 request, persisted["brief"], account=account, market=market,
                             ))
                             identities = persisted["current_candidate_identities"] if action == "fixed_report" else pending
-                            rendered_combo_rows = select_rendered_combo_candidate_rows(
-                                persisted["brief"],
-                                delivery_kind=action,
-                                candidate_identities=identities,
-                                diff=diff,
-                                limits=daily_limits,
-                            )
-                            rendered_combo_identities = combo_candidate_identities_for_rendered_rows(
-                                persisted["brief"],
-                                rendered_combo_rows,
-                            )
-                            render_context.update(
-                                combo_exposure_render_context(
-                                    derive_combo_candidate_exposures(
-                                        persisted["brief"],
-                                        candidate_identities=rendered_combo_identities,
-                                    )
-                                )
-                            )
-                            render_context["rendered_combo_candidate_identities"] = rendered_combo_identities
+                            render_context.update(_daily_brief_candidate_render_context(
+                                persisted["brief"], delivery_kind=action, candidate_identities=identities,
+                                diff=diff, limits=daily_limits,
+                            ))
                             if action == "fixed_report":
                                 message = render_fixed_report(
                                     persisted["brief"],
@@ -1249,6 +1338,7 @@ def _prepare_daily_brief_notification(
                                 render_feishu_notification_card(
                                     markdown=card_markdown,
                                     fallback_text=message,
+                                    fallback_open_id=resolve_feishu_bot_send_target(notifications=request.base_cfg.get("notifications")),
                                 )
                                 if feishu_card_delivery
                                 else None
@@ -1278,6 +1368,7 @@ def _prepare_daily_brief_notification(
                             account=account,
                             market=market,
                             market_trading_date=str(brief["market_trading_date"]),
+                            now_utc=utc_now(),
                         )
                         envelope = retry.get("envelope")
                         if isinstance(envelope, dict):
@@ -1319,6 +1410,7 @@ def _prepare_daily_brief_notification(
                             "decision_reason": decision["reason"],
                             "fixed_target": fixed_target or None,
                             "pending_candidate_count": len(pending),
+                            "candidate_record_reason": candidate_record_reason,
                             "pending_delivery_status": pending_delivery_status,
                             "retry_reason": retry.get("reason") if isinstance(retry, dict) else None,
                             "selected_delivery_kind": (
@@ -1393,6 +1485,129 @@ def _daily_brief_result_value(result: Any, field: str) -> Any:
     return result.get(field) if isinstance(result, dict) else getattr(result, field, None)
 
 
+def _daily_brief_delivery_read_scope(
+    request: TickNotificationRequest, account: str, market: str, market_date: str,
+) -> DailyBriefReadScope:
+    scope = DailyBriefReadScope(base=request.base, account=account, market=market)
+    state = scope.delivery_state(base=request.base, account=account, market=market)
+    day = (state.get("state") or {}).get("days", {}).get(market_date, {})
+    if not request.no_send and any(
+        item.get("delivery_kind") == "fixed_failure" and item.get("status") == "confirmed"
+        and target not in day.get("recovery_reports", {})
+        for target, item in day.get("fixed_reports", {}).items()
+    ):
+        if _bind_daily_brief_recovery(request=request, account=account, market=market, market_date=market_date):
+            scope = DailyBriefReadScope(base=request.base, account=account, market=market)
+            state = scope.delivery_state(base=request.base, account=account, market=market)
+            day = (state.get("state") or {}).get("days", {}).get(market_date, {})
+    if not request.no_send and day.get("recovery_reports"):
+        expired = expire_daily_decision_brief_recovery_reports(
+            base=request.base, account=account, market=market, market_trading_date=market_date, now_utc=utc_now(),
+        )
+        if expired.get("updated"):
+            return DailyBriefReadScope(base=request.base, account=account, market=market)
+    return scope
+
+
+def _daily_brief_candidate_render_context(
+    brief: Mapping[str, Any], *, delivery_kind: str, candidate_identities: list[str],
+    diff: Mapping[str, Any], limits: Any,
+) -> dict[str, Any]:
+    rows = select_rendered_combo_candidate_rows(
+        brief, delivery_kind=delivery_kind, candidate_identities=candidate_identities, diff=diff, limits=limits,
+    )
+    identities = combo_candidate_identities_for_rendered_rows(brief, rows)
+    return {
+        **combo_exposure_render_context(derive_combo_candidate_exposures(brief, candidate_identities=identities)),
+        "rendered_combo_candidate_identities": identities,
+    }
+
+
+def _daily_brief_recovery_intent(
+    *, request: TickNotificationRequest, account: str, market: str, scheduler: dict[str, Any],
+    brief: dict[str, Any], daily_limits: Any,
+) -> dict[str, Any] | None:
+    market_date = str(brief["market_trading_date"])
+    state = read_daily_decision_brief_delivery_state(base=request.base, account=account, market=market)
+    day = (state.get("state") or {}).get("days", {}).get(market_date, {})
+    schedule = request.base_cfg.get(request.scheduler_schedule_key) or {}
+    now = utc_now()
+    now_dt = now if isinstance(now, datetime) else datetime.fromisoformat(now.replace("Z", "+00:00"))
+    for target, failure in sorted(day.get("fixed_reports", {}).items(), reverse=True):
+        if (failure.get("delivery_kind") != "fixed_failure" or failure.get("status") != "confirmed"
+                or target in day.get("recovery_reports", {})):
+            continue
+        cutoff = daily_brief_recovery_cutoff(schedule_cfg=schedule, scheduled_target_market=target)
+        generated = datetime.fromisoformat(str(brief["generated_at_utc"]).replace("Z", "+00:00"))
+        failure_at = datetime.fromisoformat(failure["first_prepared_at_utc"])
+        if not max(datetime.fromisoformat(target), failure_at) < generated <= now_dt < datetime.fromisoformat(cutoff):
+            continue
+        context = _daily_brief_render_context(request, scheduler_decision=scheduler)
+        context.update({
+            "scheduled_target_market": target,
+            "recovery_original_target": target,
+            "recovery_scan_at_utc": brief["generated_at_utc"],
+            "recovery_card_delivery": (
+                str(_notification_perception_route_hint(request.base_cfg).get("provider") or "").strip().lower()
+                == FEISHU_APP_NOTIFICATION_PROVIDER
+            ),
+            "recovery_fallback_open_id": resolve_feishu_bot_send_target(notifications=request.base_cfg.get("notifications")),
+        })
+        context.update(_daily_brief_attribution_context(request, brief, account=account, market=market))
+        return {
+            "scheduled_target_market": target, "cutoff_utc": cutoff,
+            "bound_at_utc": now_dt.astimezone(timezone.utc).isoformat(),
+            "scheduled_scan_target_market": request.scheduled_scan_targets_by_account[account],
+            "original_failure_key": failure["delivery_key"], "original_failure_digest": failure["source_digest"],
+            "render_context": context, "render_limits": dict(daily_limits),
+        }
+    return None
+
+
+def _bind_daily_brief_recovery(
+    *, request: TickNotificationRequest, account: str, market: str, market_date: str,
+) -> bool:
+    state = read_daily_decision_brief_delivery_state(base=request.base, account=account, market=market)
+    day = (state.get("state") or {}).get("days", {}).get(market_date, {})
+    for target, failure in sorted(day.get("fixed_reports", {}).items(), reverse=True):
+        if (failure.get("delivery_kind") != "fixed_failure" or failure.get("status") != "confirmed"
+                or target in day.get("recovery_reports", {})):
+            continue
+        persisted = read_daily_decision_brief_recovery_source(
+            base=request.base, account=account, market=market, market_trading_date=market_date,
+            scheduled_target_market=target, original_failure_key=failure["delivery_key"],
+            original_failure_digest=failure["source_digest"],
+        )
+        if not persisted.get("available"):
+            continue
+        intent = persisted["recovery_intent"]
+        brief = persisted["brief"]
+        previous = persisted.get("previous_successful_brief")
+        diff = diff_daily_decision_briefs(previous, brief) if previous else {}
+        identities = persisted["current_candidate_identities"]
+        context = dict(intent["render_context"])
+        context.update(_daily_brief_candidate_render_context(
+            brief, delivery_kind="fixed_report", candidate_identities=identities,
+            diff=diff, limits=intent["render_limits"],
+        ))
+        bound = bind_daily_decision_brief_recovery_report(
+            base=request.base, account=account, market=market, market_trading_date=market_date,
+            scheduled_target_market=target, cutoff_utc=intent["cutoff_utc"],
+            revision=int(persisted["current_revision"]), brief_digest=str(persisted["current_brief_digest"]),
+            candidate_identities=identities, render_context=context, diff=diff, render_limits=intent["render_limits"],
+            now_utc=intent["bound_at_utc"],
+        )
+        # Materialize the intent's original binding time, then apply the real
+        # current cutoff before any reader can select a newly rebuilt payload.
+        if bound.get("available"):
+            expire_daily_decision_brief_recovery_reports(
+                base=request.base, account=account, market=market,
+                market_trading_date=market_date, now_utc=utc_now(),
+            )
+        return bool(bound.get("available"))
+    return False
+
+
 def _rebuild_daily_brief_delivery(
     *,
     request: TickNotificationRequest,
@@ -1403,11 +1618,19 @@ def _rebuild_daily_brief_delivery(
     daily_limits: Any,
     fixed_recovery: Mapping[str, Any] | None = None,
     read_scope: DailyBriefReadScope | None = None,
+    recovery_report: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Recreate only the missing envelope from the canonical persisted Brief."""
 
     if request.no_send:
         return {"envelope": None, "reason": "no_send"}
+    supplement = recovery_report
+    if supplement is None:
+        supplement = read_daily_decision_brief_recovery_report(
+            base=request.base, account=account, market=market, market_trading_date=market_date,
+            now_utc=utc_now(), read_scope=read_scope,
+        )
+    recovering_report = bool(supplement.get("available"))
     recovery_result = (
         dict(fixed_recovery)
         if isinstance(fixed_recovery, Mapping)
@@ -1420,15 +1643,16 @@ def _rebuild_daily_brief_delivery(
         )
     )
     recovering_fixed = bool(recovery_result.get("available"))
-    latest = (
-        recovery_result
-        if recovering_fixed
-        else read_latest_daily_decision_brief(
+    if recovering_report:
+        latest = supplement
+    elif recovering_fixed:
+        latest = recovery_result
+    else:
+        latest = read_latest_daily_decision_brief(
             base=request.base,
             account=account,
             market=market,
         )
-    )
     brief = latest.get("brief")
     if (
         not latest.get("available")
@@ -1446,21 +1670,31 @@ def _rebuild_daily_brief_delivery(
     )
     state = delivery_state.get("state") if delivery_state.get("available") else None
     day = state.get("days", {}).get(market_date, {}) if isinstance(state, dict) else {}
+    if not recovering_report and not recovering_fixed:
+        expired_source = any(
+            item.get("status") == "expired_unconfirmed" and item.get("revision") == brief.get("revision")
+            and item.get("source_digest") == latest.get("brief_digest")
+            for item in day.get("recovery_reports", {}).values()
+        )
+        if expired_source:
+            return {"envelope": None, "reason": "recovery_window_expired"}
     pending = sorted((day.get("pending_candidates") or {}).keys()) if isinstance(day, dict) else []
-    recovery = recovery_result.get("recovery")
+    recovery = supplement.get("recovery") if recovering_report else recovery_result.get("recovery")
     fixed_target = (
         str(recovery.get("scheduled_target_market") or "").strip()
-        if recovering_fixed and isinstance(recovery, Mapping)
+        if (recovering_report or recovering_fixed) and isinstance(recovery, Mapping)
         else str(scheduler.get("scheduled_target_market") or "").strip()
     )
-    action = "fixed_report" if fixed_target else ("candidate_alert" if pending else "none")
+    action = "fixed_recovery_report" if recovering_report else "fixed_report" if fixed_target else ("candidate_alert" if pending else "none")
     if action == "none":
         return {"envelope": None, "reason": "no_delivery_due"}
-    identities = list(latest.get("candidate_identities") or []) if action == "fixed_report" else pending
-    render_context = _daily_brief_render_context(request, scheduler_decision=scheduler)
-    render_context.update(_daily_brief_attribution_context(
-        request, brief, account=account, market=market, read_scope=read_scope,
-    ))
+    full_report = action in {"fixed_report", "fixed_recovery_report"}
+    identities = list(latest.get("candidate_identities") or []) if full_report else pending
+    render_context = {} if recovering_report else _daily_brief_render_context(request, scheduler_decision=scheduler)
+    if not recovering_report:
+        render_context.update(_daily_brief_attribution_context(
+            request, brief, account=account, market=market, read_scope=read_scope,
+        ))
     diff: dict[str, Any] = {}
     if action == "fixed_report":
         revision_result = list_daily_decision_brief_revisions(
@@ -1484,27 +1718,15 @@ def _rebuild_daily_brief_delivery(
             ).get("brief")
             if isinstance(previous, dict):
                 diff = diff_daily_decision_briefs(previous, brief)
-    rendered_combo_rows = select_rendered_combo_candidate_rows(
-        brief,
-        delivery_kind=action,
-        candidate_identities=identities,
-        diff=diff,
-        limits=daily_limits,
-    )
-    rendered_combo_identities = combo_candidate_identities_for_rendered_rows(
-        brief,
-        rendered_combo_rows,
-    )
-    render_context.update(
-        combo_exposure_render_context(
-            derive_combo_candidate_exposures(
-                brief,
-                candidate_identities=rendered_combo_identities,
-            )
-        )
-    )
-    render_context["rendered_combo_candidate_identities"] = rendered_combo_identities
-    if action == "fixed_report":
+    if recovering_report:
+        render_context = dict(recovery["render_context"])
+        daily_limits = dict(recovery["render_limits"])
+        diff = dict(recovery["diff"])
+    else:
+        render_context.update(_daily_brief_candidate_render_context(
+            brief, delivery_kind=action, candidate_identities=identities, diff=diff, limits=daily_limits,
+        ))
+    if full_report:
         message = render_fixed_report(brief, diff=diff, limits=daily_limits, context=render_context)
         card_markdown = render_fixed_report_card_markdown(
             brief,
@@ -1524,6 +1746,8 @@ def _rebuild_daily_brief_delivery(
         str(_notification_perception_route_hint(request.base_cfg).get("provider") or "").strip().lower()
         == FEISHU_APP_NOTIFICATION_PROVIDER
     )
+    if recovering_report:
+        feishu_card_delivery = bool(render_context["recovery_card_delivery"])
     prepared = prepare_daily_decision_brief_delivery(
         base=request.base,
         account=account,
@@ -1538,11 +1762,18 @@ def _rebuild_daily_brief_delivery(
         candidate_identities=identities,
         rendered_message=message,
         rendered_transport=(
-            render_feishu_notification_card(markdown=card_markdown, fallback_text=message)
+            render_feishu_notification_card(
+                markdown=card_markdown, fallback_text=message,
+                fallback_open_id=(
+                    render_context.get("recovery_fallback_open_id") if recovering_report
+                    else resolve_feishu_bot_send_target(notifications=request.base_cfg.get("notifications"))
+                ),
+            )
             if feishu_card_delivery
             else None
         ),
         render_context=render_context,
+        prepared_at_utc=utc_now(),
     )
     return {"envelope": prepared.get("envelope"), "reason": "rebuilt"}
 
