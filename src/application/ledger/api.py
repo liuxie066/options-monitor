@@ -3,6 +3,11 @@ from __future__ import annotations
 from domain.domain.ledger.events import lot_id_for_open_event
 from .option_allocation import allocate_broker_option_execution
 from .futu_time_repair import apply_futu_time_repair, prepare_futu_time_repair, open_futu_time_repair_store
+from .order_fee_allocation import (
+    apply_confirmed_order_fee_allocation,
+    open_order_fee_allocation_store,
+    prepare_confirmed_order_fee_allocation,
+)
 
 from src.application.ledger.commands import (
     accept_option_close_evidence,
@@ -458,6 +463,9 @@ __all__ = [
     "open_option_execution_preview_repo",
     "verify_trade_receipt_projection",
     "prepare_futu_time_repair",
+    "apply_confirmed_order_fee_allocation",
+    "open_order_fee_allocation_store",
+    "prepare_confirmed_order_fee_allocation",
     "apply_futu_time_repair", "open_futu_time_repair_store",
     "write_trade_attribution_decision",
     "read_trade_attribution_decision",

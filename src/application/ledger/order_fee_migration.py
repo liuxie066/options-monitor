@@ -1165,6 +1165,7 @@ def _apply_unit(
     unit: _Unit,
     *,
     applied_at_ms: int,
+    resolve_pending_fee_fx: bool = True,
 ) -> dict[str, Any]:
     if conn is None:
         raise TypeError("fee enrichment requires SQLite transaction authority")
@@ -1177,11 +1178,12 @@ def _apply_unit(
         # Rebuilt units passed admission; diagnostics may describe other namespaces.
         if len(rebuilt) != 1 or rebuilt[0] != unit:
             raise ValueError("fee order group changed after admission")
-    fx_payload = load_cash_fx_payload(repo, conn=conn)
-    unit = replace(unit, changes=tuple(
-        _fill_pending_fee_fx(change, fx_payload=fx_payload, applied_at_ms=applied_at_ms)
-        for change in unit.changes
-    ))
+    if resolve_pending_fee_fx:
+        fx_payload = load_cash_fx_payload(repo, conn=conn)
+        unit = replace(unit, changes=tuple(
+            _fill_pending_fee_fx(change, fx_payload=fx_payload, applied_at_ms=applied_at_ms)
+            for change in unit.changes
+        ))
     accounts = sorted({change.account for change in unit.changes})
     option_changed = any(change.event_kind in {"option_trade", "stock_settlement"} for change in unit.changes)
     fence = (
