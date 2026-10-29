@@ -196,7 +196,8 @@ PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_assi
 `authoritative_option_pnl_source_unavailable` 和
 `combined_option_assignment_cash_source_required`，不会从期权净现金流推导替代值。
 
-`portfolio_assignment_scenario` 只接受 `accounts`。它从富途 OpenD 取得股票、现金
+`portfolio_assignment_scenario` 必填 `accounts`，可选 `scenario`：`short_put` 仅指派全部未平 short Put，
+`short_call` 仅指派全部未平 short Call，`all_short`（默认）指派全部未平 short Put/Call。它从富途 OpenD 取得股票、现金
 （含 MMF）和股票现价，富途余额及报价估值共用同次 OM 市场汇率观测；仅当
 `portfolio.holdings.enabled=true` 时补充 PM Holdings 中明确为非富途来源的资产，
 排除 PM 的富途股票、现金和 MMF 副本。OM canonical SQLite `position_lots` 提供

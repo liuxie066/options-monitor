@@ -101,7 +101,7 @@ def test_portfolio_query_disabled_never_opens_transport(monkeypatch) -> None:
     assert calls == []
 
 
-def test_assignment_scenario_tool_has_accounts_only_contract(monkeypatch) -> None:
+def test_assignment_scenario_tool_has_optional_scenario_contract(monkeypatch) -> None:
     expected = {
         "schema_version": "portfolio.assignment_scenario.v1",
         "status": "complete",
@@ -112,14 +112,14 @@ def test_assignment_scenario_tool_has_accounts_only_contract(monkeypatch) -> Non
     monkeypatch.setattr(
         portfolio,
         "query_portfolio_assignment_scenario",
-        lambda accounts: {**expected, "scope": {**expected["scope"], "accounts": list(accounts)}},
+        lambda accounts, *, scenario: {**expected, "scope": {**expected["scope"], "accounts": list(accounts)}},
     )
     definition = _tool("portfolio_assignment_scenario")
 
     assert definition.is_pure_read() is True
     assert definition.safe_default_input == {}
     assert definition.input_json_schema()["required"] == ["accounts"]
-    assert definition.bot_input_fields == ("accounts",)
+    assert definition.bot_input_fields == ("accounts", "scenario")
     assert definition.output_contract["source_label"] == (
         "Futu account + OM SQLite position_lots; PM non-Futu Holdings optional"
     )
@@ -132,6 +132,28 @@ def test_assignment_scenario_tool_has_accounts_only_contract(monkeypatch) -> Non
 
     with pytest.raises(AgentToolError, match="accepts only accounts"):
         definition.call({"accounts": ["lx"], "price": 123})
+
+
+@pytest.mark.parametrize("scenario", ["short_put", "short_call", "all_short"])
+def test_assignment_tool_forwards_assumption(monkeypatch, scenario):
+    from src.application.bot.tools import build_tool_payload
+
+    calls = []
+    monkeypatch.setattr(portfolio, "query_portfolio_assignment_scenario", lambda accounts, **kwargs: (
+        calls.append((accounts, kwargs)) or {"warnings": []}
+    ))
+    payload, error = build_tool_payload(
+        "portfolio_assignment_scenario", {"accounts": ["lx"], "scenario": scenario}, fixed_input={},
+    )
+    assert error is None
+    _tool("portfolio_assignment_scenario").call(payload)
+    assert calls == [(["lx"], {"scenario": scenario})]
+
+
+def test_assignment_tool_rejects_unknown_assumption(monkeypatch):
+    monkeypatch.setattr(portfolio, "query_portfolio_assignment_scenario", lambda *args, **kwargs: pytest.fail("unexpected read"))
+    with pytest.raises(AgentToolError):
+        _tool("portfolio_assignment_scenario").call({"accounts": ["lx"], "scenario": "put"})
 
 
 def test_portfolio_query_preserves_payload_and_adds_evidence_metadata(monkeypatch) -> None:

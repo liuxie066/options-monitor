@@ -231,7 +231,8 @@ root 来源及每个 JSONL 文件的 `ok`、`missing`、`valid_empty`、`tail_on
   --input-json '{"accounts":["lx","sy"]}'
 ```
 
-该工具只有 `accounts` 一个业务入参。富途 OpenD 的股票和现金（含 MMF）是底仓；
+该工具必填 `accounts`，可选 `scenario=short_put|short_call|all_short`（默认 `all_short`），
+分别假设仅全部未平 short Put、仅全部未平 short Call、全部未平 short Put/Call 被指派。富途 OpenD 的股票和现金（含 MMF）是底仓；
 `portfolio.holdings.enabled=true` 时只补充 PM Holdings 中明确为非富途来源的资产，
 PM 的富途股票、现金和 MMF 副本不计入。OM SQLite 的 open short put/call lot 提供指派输入，
 富途 OpenD 市场快照提供股票及期权标的现价；PM 仅在 Holdings 开启时补充非富途资产。
@@ -242,6 +243,9 @@ Long Option 完全排除。工具是纯读；业务 `status=partial|unavailable`
 
 结果新增 `position_sizing`：统一以指派费用前的非期权净资产计算 `net_assets_cny` 与
 `weight_of_net_assets_by_symbol`，与 CSP / CC 候选使用同一股数和现金变换。
+指派明细、费用、资金覆盖、分布和 `position_sizing` 均使用所选情景的同一组合约；
+未选方向不产生假设交割或费用，剩余期权市值仍不纳入报告。
+CLI 使用 `./om portfolio assignment-scenario --accounts lx --scenario short_put`。
 原 `distribution` 的总资产权重、费用与负债语义保留；证据缺失或净资产非正时新比例为 null。
 
 ### 查询运行历史

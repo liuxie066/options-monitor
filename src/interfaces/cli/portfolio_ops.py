@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 
+from domain.domain.portfolio_assignment_scenario import ASSIGNMENT_SCENARIOS
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.portfolio_assignment_scenario import (
     AssignmentScenarioInputError,
@@ -20,13 +21,17 @@ def add_portfolio_commands(subparsers) -> None:
     commands = parser.add_subparsers(dest="portfolio_command", required=True)
     scenario = commands.add_parser(
         "assignment-scenario",
-        help="project all open short puts and calls as assigned",
+        help="project selected open short options as assigned",
     )
     scenario.add_argument(
         "--accounts",
         nargs="+",
         required=True,
         help="OM account labels, for example: --accounts lx sy",
+    )
+    scenario.add_argument(
+        "--scenario", choices=ASSIGNMENT_SCENARIOS, default="all_short",
+        help="assignment assumption (default: all_short)",
     )
     scenario.add_argument(
         "--format",
@@ -43,7 +48,7 @@ def handle_portfolio_command(args: argparse.Namespace) -> int:
             message=f"unsupported portfolio command: {args.portfolio_command}",
         )
     try:
-        result = query_portfolio_assignment_scenario(args.accounts)
+        result = query_portfolio_assignment_scenario(args.accounts, scenario=args.scenario)
     except AssignmentScenarioInputError as exc:
         raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
     if args.format == "json":

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from domain.domain.symbol_identity import canonical_symbol, symbol_currency
-from domain.domain.portfolio_assignment_scenario import project_non_option_assignment_assets
+from domain.domain.portfolio_assignment_scenario import project_non_option_assignment_assets, select_assignment_positions
 
 
 ShortVolMode = Literal["put", "call"]
@@ -37,12 +37,10 @@ def portfolio_concentration_fields(
     evidence = risk_ctx.portfolio_evidence or {}
     accounts = [account] if account else []
     baseline = project_non_option_assignment_assets(accounts=accounts, portfolio_evidence=evidence, option_positions=[])
-    positions = [
-        position
-        for position in risk_ctx.assignment_positions or ()
-        if canonical_symbol(position.get("symbol")) == symbol
-        and str(position.get("option_type") or "").strip().lower() == mode
-    ]
+    positions = select_assignment_positions(
+        risk_ctx.assignment_positions or (), accounts=accounts,
+        scenario=f"short_{mode}", symbol=symbol,
+    )
     existing = project_non_option_assignment_assets(
         accounts=accounts, portfolio_evidence=evidence, option_positions=positions
     )

@@ -4,6 +4,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any
 
+from domain.domain.portfolio_assignment_scenario import ASSIGNMENT_SCENARIOS
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tools.base import AgentTool, build_agent_tool
@@ -404,12 +405,12 @@ def _validate_bridge_input(payload: dict[str, Any]) -> None:
 
 
 def _validate_assignment_scenario_input(payload: dict[str, Any]) -> None:
-    unsupported = sorted(set(payload).difference({"accounts"}))
+    unsupported = sorted(set(payload).difference({"accounts", "scenario"}))
     if unsupported:
         raise AgentToolError(
             code="INPUT_ERROR",
             message=(
-                "portfolio_assignment_scenario accepts only accounts; "
+                "portfolio_assignment_scenario accepts only accounts and scenario; "
                 f"unsupported fields: {', '.join(unsupported)}"
             ),
         )
@@ -417,7 +418,9 @@ def _validate_assignment_scenario_input(payload: dict[str, Any]) -> None:
 
 def _portfolio_assignment_scenario(payload: dict[str, Any]):
     try:
-        result = query_portfolio_assignment_scenario(payload.get("accounts") or [])
+        result = query_portfolio_assignment_scenario(
+            payload.get("accounts") or [], scenario=payload.get("scenario", "all_short"),
+        )
     except AssignmentScenarioInputError as exc:
         raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
     return result, list(result.get("warnings") or []), {}
@@ -604,8 +607,8 @@ PORTFOLIO_ASSIGNMENT_SCENARIO_TOOL = build_agent_tool(
     name="portfolio_assignment_scenario",
     catalog_summary="读取组合归属情景与现金影响。",
     description=(
-        "Project the current CNY asset distribution and funding coverage if every open short put and "
-        "short call in the selected accounts were physically assigned. MMF is cash; long options are "
+        "Project the current CNY asset distribution and funding coverage if the selected open shorts "
+        "were physically assigned: short_put, short_call or all_short (default). MMF is cash; long options are "
         "excluded; the operation is read-only and does not write assignment events."
         " Read status, account_breakdown, snapshot, cash_coverage and warnings before giving a conclusion. "
         "partial/unavailable evidence cannot establish full-account funding coverage. Preserve missing "
@@ -636,6 +639,12 @@ PORTFOLIO_ASSIGNMENT_SCENARIO_TOOL = build_agent_tool(
             "maxItems": 20,
             "required": True,
             "description": "Required OM account labels; normalized to lowercase and de-duplicated.",
+        },
+        "scenario": {
+            "type": "string",
+            "enum": list(ASSIGNMENT_SCENARIOS),
+            "default": "all_short",
+            "description": "Assign only short puts, only short calls, or all open shorts (default).",
         },
     },
     handler=_portfolio_assignment_scenario,
@@ -678,7 +687,7 @@ PORTFOLIO_ASSIGNMENT_SCENARIO_TOOL = build_agent_tool(
             "Long options are excluded and are neither valued nor retained in this report.",
         ],
     },
-    bot_input_fields=("accounts",),
+    bot_input_fields=("accounts", "scenario"),
 )
 
 TOOLS: tuple[AgentTool, ...] = (

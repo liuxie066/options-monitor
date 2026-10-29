@@ -131,7 +131,9 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert assignment_scenario["requires_confirm"] is False
     assert assignment_scenario["side_effects"] == []
     assert assignment_scenario["safe_default_input"] == {}
-    assert set(assignment_scenario["input_schema"]) == {"accounts"}
+    assert set(assignment_scenario["input_schema"]) == {"accounts", "scenario"}
+    assert assignment_scenario["input_schema"]["scenario"]["enum"] == ["short_put", "short_call", "all_short"]
+    assert assignment_scenario["input_schema"]["scenario"]["default"] == "all_short"
     assert assignment_scenario["input_json_schema"]["required"] == ["accounts"]
     assert assignment_scenario["output_contract"]["schema_version"] == ("portfolio.assignment_scenario.v1")
     operation_timeline = _tool(spec, "operation_timeline")
