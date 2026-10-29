@@ -237,6 +237,9 @@ class RequiredDataFetchPlanBundle:
         }
         if self.underlier_observation is not None:
             payload["underlier_observation"] = self.underlier_observation.to_dict()
+            diagnostics = getattr(self.underlier_observation, "fetch_diagnostics", None)
+            if diagnostics:
+                payload["spot_observation_diagnostics"] = list(diagnostics)
         return payload
 
 

@@ -358,6 +358,32 @@ def _scheduled_report_targets(
     ]
 
 
+def daily_brief_recovery_cutoff(*, schedule_cfg: dict, scheduled_target_market: str) -> str:
+    """Return the original report's same-day replacement/send-window boundary."""
+    target = datetime.fromisoformat(scheduled_target_market)
+    if target.tzinfo is None:
+        raise ValueError("scheduled report target must include a timezone")
+    market_tz = ZoneInfo(str(schedule_cfg.get('timezone') or 'America/New_York'))
+    target = target.astimezone(market_tz)
+    run_start, run_end, breaks = _resolve_run_window(schedule_cfg)
+    run_points = schedule_cfg.get('run_points')
+    if not isinstance(run_points, dict) or not run_points:
+        run_points = {'start_plus_min': 10, 'hourly_minute': 0, 'end_minus_min': 10}
+    gates = schedule_cfg.get('gates') if isinstance(schedule_cfg.get('gates'), list) else []
+    reports = _scheduled_report_targets(
+        now_market=target, market_tz=market_tz, run_start=run_start,
+        run_end=run_end, breaks=breaks, run_points=run_points, gates=gates,
+    )
+    start = _market_session_dt(target, market_tz, run_start)
+    boundaries = [_market_session_dt(target, market_tz, run_end)]
+    boundaries.extend(report for report in reports if report > target)
+    boundaries.extend(
+        cutoff for gate in gates if isinstance(gate, dict)
+        if (cutoff := _gate_cutoff_dt(gate=gate, window_start_dt=start)) is not None
+    )
+    return to_iso(min(boundaries))
+
+
 def _scheduled_candidate_check_targets(
     *,
     now_market: datetime,

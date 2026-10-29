@@ -133,6 +133,7 @@ def decide_daily_brief_notification(
     fixed_due: bool,
     pending_candidate_identities: list[str] | tuple[str, ...],
     retryable_envelope_kind: str | None = None,
+    recovery_due: bool = False,
 ) -> dict[str, Any]:
     """Choose the one allowed Daily Brief delivery action for this tick."""
 
@@ -154,6 +155,8 @@ def decide_daily_brief_notification(
         }
     if not pipeline_reliable:
         return {"action": "none", "reason": "nonfixed_scan_failed"}
+    if recovery_due:
+        return {"action": "fixed_recovery_report", "reason": "confirmed_failure_recovered"}
     if pending_candidate_identities:
         return {"action": "candidate_alert", "reason": "pending_candidates"}
     return {"action": "none", "reason": "no_pending_candidates"}

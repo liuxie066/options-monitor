@@ -114,6 +114,10 @@ def build_daily_brief_user_view(
         phase_line = phase
         if scheduled_batch and delivery_kind not in {"candidate_alert", "query"}:
             phase_line += f" · {scheduled_batch} 批次"
+    recovery_scan = _parse_datetime(ctx.get("recovery_scan_at_utc"))
+    if delivery_kind == "fixed_report" and ctx.get("recovery_original_target") and recovery_scan:
+        user_tz = _safe_zoneinfo(str(ctx.get("user_timezone") or "Asia/Shanghai"))
+        phase_line = f"{scheduled_batch} 批次恢复补报 · {recovery_scan.astimezone(user_tz).strftime('%H:%M')} 扫描"
 
     candidate_views, candidate_omissions, selected_candidate_rows = _candidate_views(
         brief,
@@ -400,7 +404,7 @@ def render_fixed_failure(
             f"状态｜{phase}",
             f"市场｜{_MARKET_LABELS.get(market, '市场')}",
             "结论｜本轮策略扫描未形成可靠结果，无法生成正常报告。",
-            "后续｜下一计划扫描会继续尝试。",
+            "后续｜下一计划扫描会继续尝试；本批次有效期内恢复后补发完整报告。",
         ]
     )
 
