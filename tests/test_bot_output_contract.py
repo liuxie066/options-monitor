@@ -114,8 +114,12 @@ def test_scene_visible_read_tools_have_closed_s8_output_contracts():
     assert portfolio.resolve_output_contract({"view": "health"})["coverage"] == "point"
     holdings = portfolio.resolve_output_contract({"view": "holdings", "account": "lx"})
     assert holdings["evidence_type"] == "collection"
-    assert holdings["coverage"] == "primary_rows"
+    assert holdings["coverage"] == "source_declared"
     assert holdings["primary_rows"] == "holdings"
+    # Returned rows alone cannot establish that the source query is complete.
+    for field in ("source", "scope", "freshness", "coverage", "assessment"):
+        assert field in holdings["fact_fields"]
+        assert field in holdings["model_value_fields"]
     grouped_holdings = portfolio.resolve_output_contract(
         {"view": "holdings", "account": "lx", "group_by_market": True}
     )

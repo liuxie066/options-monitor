@@ -13,7 +13,7 @@ from src.application.agent_tools.runtime_helpers import as_float
 from src.application.pipeline_context import load_portfolio_context
 from src.application.agent_tool_config import load_runtime_config
 from src.application.config_loader import load_config as load_runtime_pipeline_config
-from src.application.agent_tool_contracts import mask_path
+from src.application.agent_tool_contracts import AgentToolError, mask_path
 from src.application.agent_tools.runtime_helpers import normalize_broker
 from src.application.cash_headroom_query import query_sell_put_cash
 from src.application.agent_tool_config import repo_base
@@ -25,6 +25,12 @@ from src.application.pipeline_watchlist import run_watchlist_pipeline_default
 
 def _mask_path_str(value: Any) -> str:
     return mask_path(value) or "..."
+
+
+def _validate_explicit_account(payload: dict[str, Any]) -> None:
+    account = payload.get("account")
+    if not isinstance(account, str) or not account or any(char.isspace() for char in account):
+        raise AgentToolError(code="INPUT_ERROR", message="An explicit non-blank account label is required")
 
 
 def _query_cash_headroom_tool(
@@ -82,6 +88,7 @@ _CASH_HEADROOM_OUTPUT_CONTRACT = {
     "source_label": "OM cash headroom query",
     "result_shape": "scalar",
     "fact_fields": [
+        "assessment", "freshness", "market", "portfolio_source_name",
         "account",
         "cash_secured_used_cny",
         "cash_available_total_cny",
@@ -98,6 +105,7 @@ _CASH_HEADROOM_OUTPUT_CONTRACT = {
         "cny_conversion_missing_rates",
     ],
     "model_value_fields": [
+        "assessment", "freshness", "market", "portfolio_source_name",
         "account",
         "cash_secured_used_cny",
         "cash_available_total_cny",
@@ -152,7 +160,16 @@ SCAN_OPPORTUNITIES_TOOL = build_agent_tool(
 QUERY_CASH_HEADROOM_TOOL = build_agent_tool(
     name="query_cash_headroom",
     catalog_summary="读取账户现金头寸与可用空间。",
-    description="Return sell-put cash usage and available/free cash summary.",
+    description=(
+        "Return sell-put cash usage and available/free cash summary from the canonical broker cash and OM ledger owners. "
+        "账户现金担保问题必须查询本工具，不能用 PM cash/货基、旧回答或自行推算代替。"
+        "account and market scope must match the user's request; clarify missing scope. "
+        "Check assessment.supported_claims, cash_snapshot, cash_secured_usage_reliable and cny_conversion_complete. "
+        "Quote only supported non-null metrics at cash_snapshot.source_observed_at; as_of_utc is evaluation time. "
+        "Unavailable/stale evidence means 无法判断, not zero. Missing FX leaves CNY totals unknown, even if native currency is available. "
+        "This is cash headroom, not full account capacity: no candidate-specific maximum contracts, stock cover, "
+        "shared reservations or concentration approval. 合约符合条件不代表账户能卖。"
+    ),
     requires=("runtime_config", "sqlite_data_config", "opend"),
     capabilities=("cash_query", "read_only"),
     input_schema={
@@ -162,6 +179,8 @@ QUERY_CASH_HEADROOM_TOOL = build_agent_tool(
         "account": {
             "type": "string",
             "required": True,
+            "minLength": 1,
+            "pattern": r"^\S+$",
             "description": "Account label required by the portfolio cash source, for example lx or sy",
         },
         "broker": "optional broker name, preferred public field",
@@ -169,6 +188,7 @@ QUERY_CASH_HEADROOM_TOOL = build_agent_tool(
         "no_exchange_rates": "optional bool",
     },
     handler=_query_cash_headroom_tool,
+    input_validator=_validate_explicit_account,
     pure_read=True,
     safe_default_input={},
     examples=(
@@ -181,7 +201,12 @@ QUERY_CASH_HEADROOM_TOOL = build_agent_tool(
 
 GET_PORTFOLIO_CONTEXT_TOOL = build_agent_tool(
     name="get_portfolio_context",
-    description="Read Futu portfolio context using the shared account cash policy.",
+    description=(
+        "Read Futu portfolio context using the shared account cash policy. Select the user's explicit account; "
+        "never infer its balance or substitute another account. Consume cash_snapshot and position evidence "
+        "qualification at their source times; unavailable evidence cannot establish current funds or stock cover. "
+        "This context is not approval to sell an additional option."
+    ),
     requires=("runtime_config", "opend"),
     capabilities=("portfolio_context", "read_only"),
     side_effects=("writes_local_cache",),
@@ -189,11 +214,13 @@ GET_PORTFOLIO_CONTEXT_TOOL = build_agent_tool(
         "config_key": "us|hk",
         "config_path": "optional explicit config path",
         "data_config": "optional explicit data config path",
-        "account": "optional account label",
+        "account": {"type": "string", "required": True, "minLength": 1, "pattern": r"^\S+$",
+                    "description": "Explicit user-selected account; no default account inference"},
         "broker": "optional broker name, preferred public field",
         "timeout_sec": "optional int",
     },
     handler=_get_portfolio_context_tool,
+    input_validator=_validate_explicit_account,
     read_only=True,
     risk_level="local_write",
     safe_default_input={},

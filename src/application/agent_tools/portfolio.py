@@ -7,6 +7,7 @@ from typing import Any
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tools.base import AgentTool, build_agent_tool
+from src.application.agent_tools.portfolio_query_evidence import portfolio_query_evidence
 from src.application.portfolio_cash_bridge import build_portfolio_cash_bridge
 from src.application.portfolio_assignment_scenario import (
     AssignmentScenarioInputError,
@@ -173,29 +174,7 @@ def _portfolio_query(payload: dict[str, Any]):
 
     freshness, warning = _validate_pm_freshness(response.get("freshness"))
     data["freshness"] = freshness
-    if view == "holdings" and bool(payload.get("group_by_market", False)):
-        by_market = data.get("by_market")
-        groups = by_market if isinstance(by_market, dict) else {}
-        included_count = sum(
-            len(rows)
-            for rows in groups.values()
-            if isinstance(rows, list)
-        )
-        declared_count = data.get("count")
-        total_count = (
-            declared_count
-            if isinstance(declared_count, int) and not isinstance(declared_count, bool)
-            else included_count
-        )
-        complete = included_count == total_count
-        data["coverage"] = {
-            "status": "complete" if complete else "partial",
-            "complete_for": "full_query" if complete else "requested_page",
-            "included_count": included_count,
-            "total_count": total_count,
-            "omitted_count": max(0, total_count - included_count),
-            "has_more": not complete,
-        }
+    data["coverage"], data["assessment"] = portfolio_query_evidence(view, data, scope, payload)
     return data, ([warning] if warning else []), {}
 
 
@@ -279,8 +258,8 @@ def _portfolio_query_output_contract(payload: dict[str, Any]) -> dict[str, Any]:
             **base,
             "evidence_type": "collection",
             "coverage": "source_declared",
-            "fact_fields": ["success", "count", "by_market", "retrieved_at_utc"],
-            "model_value_fields": ["success", "count", "by_market", "retrieved_at_utc"],
+            "fact_fields": ["success", "count", "by_market", "retrieved_at_utc", "source", "scope", "freshness", "coverage", "assessment"],
+            "model_value_fields": ["success", "count", "by_market", "retrieved_at_utc", "source", "scope", "freshness", "coverage", "assessment"],
         }
     elif view == "distribution":
         primary_rows = "by_asset" if bool(payload.get("by_asset", False)) else "by_type"
@@ -297,10 +276,11 @@ def _portfolio_query_output_contract(payload: dict[str, Any]) -> dict[str, Any]:
         )
     if collection is not None:
         primary_rows, model_fields = collection
+        model_fields = (*model_fields, "source", "scope", "freshness", "coverage", "assessment")
         return {
             **base,
             "evidence_type": "collection",
-            "coverage": "primary_rows",
+            "coverage": "source_declared",
             "primary_rows": primary_rows,
             "fact_fields": list(model_fields),
             "model_value_fields": list(model_fields),
@@ -316,6 +296,7 @@ def _portfolio_query_output_contract(payload: dict[str, Any]) -> dict[str, Any]:
             "top_holdings",
             "distribution",
             "retrieved_at_utc",
+            "source", "scope", "freshness", "coverage", "assessment",
         )
     return {
         **base,
@@ -445,7 +426,24 @@ def _portfolio_assignment_scenario(payload: dict[str, Any]):
 PORTFOLIO_QUERY_TOOL = build_agent_tool(
     name="portfolio_query",
     catalog_summary="通过权威接口读取组合账户与资产数据。",
-    description="Read portfolio-management account, holdings, cash, NAV, distribution, or report data through its same-host loopback HTTP API.",
+    description=(
+        "Read portfolio-management account, holdings, cash, NAV, distribution, or report data through its "
+        "same-host loopback HTTP API. 账户事实必须先查询，不能用记忆、旧回答或自行推理补齐。"
+        "按用户明确指定的 account/accounts 查询；缺失或有歧义先澄清，不默认个人账户。"
+        "Use assessment together with scope, source, freshness and coverage: ok=true only means the call "
+        "succeeded. assessment.status=unable means evidence cannot support a current account conclusion; "
+        "say 无法判断 and identify the gap. reported_facts_only permits only source-reported facts at "
+        "observed_at_utc, not current broker balances or trading capacity. retrieved_at_utc is retrieval "
+        "time, not the financial observation time. scope_binding=request is not an independent account echo. "
+        "Preserve returned currencies, units and asset types. Never infer broker, currency, absent balances, "
+        "duplicates, or the cause of a difference from instrument market, amount, name or arithmetic. "
+        "When the cause is unobserved, say 原因未知; do not propose speculative causes. "
+        "cash includes MMF and source holding quantities, not buying power or verified redemption value. "
+        "For allocation use distribution/overview instead of reconstructing totals from memory or partial rows. "
+        "For trading-capacity questions, state: 无法判断账户能否加仓；本次仅查询 PM 记录。 "
+        "PM cash and option_candidates cannot establish whether an account can sell more contracts. "
+        "Use portfolio_assignment_scenario only for existing-lot assignment stress; it is not new-trade approval."
+    ),
     requires=("portfolio-management loopback HTTP API",),
     capabilities=("portfolio_read", "cross_product_read", "read_only"),
     input_schema={
@@ -481,9 +479,10 @@ PORTFOLIO_QUERY_TOOL = build_agent_tool(
         "schema_version": "portfolio_query.output.v1",
         "evidence_type": "mixed",
         "bounded_projection": "contract_fields",
-        "coverage": "unknown",
+        "coverage": "source_declared",
         "freshness": "source_declared",
         "pagination": {"mode": "none"},
+        "fact_fields": ["source", "scope", "freshness", "coverage", "assessment"],
         "freshness_fields": [
             "freshness.status",
             "freshness.trust_status",
@@ -608,6 +607,10 @@ PORTFOLIO_ASSIGNMENT_SCENARIO_TOOL = build_agent_tool(
         "Project the current CNY asset distribution and funding coverage if every open short put and "
         "short call in the selected accounts were physically assigned. MMF is cash; long options are "
         "excluded; the operation is read-only and does not write assignment events."
+        " Read status, account_breakdown, snapshot, cash_coverage and warnings before giving a conclusion. "
+        "partial/unavailable evidence cannot establish full-account funding coverage. Preserve missing "
+        "values; do not replace them with PM cash, another account, old answers or inferred FX. "
+        "This evaluates existing lots, not whether an additional candidate can be sold."
     ),
     requires=(
         "portfolio-management valuation evidence loopback API",
