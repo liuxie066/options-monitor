@@ -1,0 +1,318 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.4",
+  "base": {
+    "tag": "v4.6.3",
+    "commit": "7212050f108ba60ec189146b65ebbf4527445959"
+  },
+  "reviewed_head": "66e8ebed62519605e4cd5a2048994fa886d45c40",
+  "commits": [
+    {
+      "sha": "200c974d763785392c612ca41a6b02a249b25c24",
+      "subject": "docs(readme): gateflow accept onboarding plan"
+    },
+    {
+      "sha": "59491f4a1175ec3e669db6a850ed3442a1c72bf4",
+      "subject": "docs(readme): guide Mac users through first scan and brief"
+    },
+    {
+      "sha": "77b6620b365e6846fc0f357254a96383d723454c",
+      "subject": "docs(readme): gateflow accept aggregate review"
+    },
+    {
+      "sha": "beb88ea59988d5ea2b648a0cc9884bbacc64fdb8",
+      "subject": "docs(readme): sync main for protected merge"
+    },
+    {
+      "sha": "39bf478eb28beb7bf792205cd2bb24d7f435d259",
+      "subject": "Merge pull request #947 from liuxie066/codex/readme-first-scan-20261028"
+    },
+    {
+      "sha": "99056dba8469f79eb1255437023c1ffbef9cf3c2",
+      "subject": "chore(gateflow): accept plan for manual order fee allocation"
+    },
+    {
+      "sha": "f892cb91c5c148e6f8136958ef6a41671ff35e4d",
+      "subject": "feat(ledger): add confirmed equal allocation of order fees"
+    },
+    {
+      "sha": "67797b240622e90e662d46056d6335cc94affe9a",
+      "subject": "fix(ledger): require explicit broker effects for fee allocation"
+    },
+    {
+      "sha": "5ffc3946b91900cf731dd3a03a52d1d8b084229b",
+      "subject": "chore(gateflow): accept manual order fee allocation deepreview"
+    },
+    {
+      "sha": "e02f22a8b21501d222ced1c506cae81ad8d26961",
+      "subject": "fix(agent): qualify account evidence and prevent unsupported capacity claims"
+    },
+    {
+      "sha": "a618767a965175e4d40aa529a30cd2e7c22f448e",
+      "subject": "test(ledger): classify fee allocation parity replay"
+    },
+    {
+      "sha": "f701ab25776c6c1cf09efb544cd560099e0d56cf",
+      "subject": "test(agent): verify source-qualified holdings coverage"
+    },
+    {
+      "sha": "e56936b889769db098ff3587424ffb4ff052785a",
+      "subject": "Merge pull request #950 from liuxie066/codex/account-evidence-contract"
+    },
+    {
+      "sha": "213ef6844b78b8d3249e6ffdc8e06648df73499b",
+      "subject": "chore(ledger): merge main for fee allocation validation"
+    },
+    {
+      "sha": "f5f47ca8212ca254ea1229d4360db4064749c888",
+      "subject": "Merge pull request #949 from liuxie066/codex/manual-order-fee-allocation"
+    },
+    {
+      "sha": "ba421b5713f1715c4e7be0bc74f1c69a36083ac2",
+      "subject": "fix(notifications): retry transient data failures and deliver recovery briefs"
+    },
+    {
+      "sha": "a452ada87142f164f4978ffdcda8e6c7683b9e3f",
+      "subject": "feat(portfolio): add directional assignment scenarios"
+    },
+    {
+      "sha": "043aeb94c31e3db98c4620d3faff4f142fddc285",
+      "subject": "Merge pull request #951 from liuxie066/fix-brief-recovery"
+    },
+    {
+      "sha": "12595017189f70deb3b260e81e40d58fd5336e8e",
+      "subject": "chore(portfolio): merge main for scenario validation"
+    },
+    {
+      "sha": "6021782af4e7407263a584c6903bf80613cc4e8c",
+      "subject": "Merge pull request #952 from liuxie066/codex/assignment-scenarios"
+    },
+    {
+      "sha": "7dc974bf0e5091625160456f2efcc5fa4fb641a3",
+      "subject": "feat: add offline CSP evaluation owner"
+    },
+    {
+      "sha": "43667cc7ecde508661b54e2b760b0b8e7eb64649",
+      "subject": "Merge remote-tracking branch 'origin/main' into codex/ob-v1-evaluation-owner"
+    },
+    {
+      "sha": "66e8ebed62519605e4cd5a2048994fa886d45c40",
+      "subject": "Merge pull request #953: offline CSP evaluation owner"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Breaking Changes",
+      "text": "账户上下文工具 get_portfolio_context 现要求显式非空账户，省略账户的旧调用不再使用配置默认值；账户证据保留来源、时点、完整性和可支持结论，缺失或冲突不推断为零。（#950）。",
+      "commits": [
+        "e02f22a8b21501d222ced1c506cae81ad8d26961",
+        "f701ab25776c6c1cf09efb544cd560099e0d56cf",
+        "e56936b889769db098ff3587424ffb4ff052785a"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "新增已核验组合订单实收总手续费的用户确认两腿均摊入口，保留人工分配与券商证据区别，执行前预览、备份并核验幂等，不增加费用事件。（#949）。",
+      "commits": [
+        "f892cb91c5c148e6f8136958ef6a41671ff35e4d",
+        "67797b240622e90e662d46056d6335cc94affe9a",
+        "a618767a965175e4d40aa529a30cd2e7c22f448e",
+        "213ef6844b78b8d3249e6ffdc8e06648df73499b",
+        "f5f47ca8212ca254ea1229d4360db4064749c888"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "组合指派查询新增仅 short Put、仅 short Call 或全部 short 情景，默认全部；账户报告和候选复用领域投影。（#952）。",
+      "commits": [
+        "a452ada87142f164f4978ffdcda8e6c7683b9e3f",
+        "12595017189f70deb3b260e81e40d58fd5336e8e",
+        "6021782af4e7407263a584c6903bf80613cc4e8c"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "公开离线 CSP 评估门面，统一净值、收益回撤、利息分红、接股情景及同条件差额；模型手续费须显式选择 simulated，默认 actual 不变。（#953）。",
+      "commits": [
+        "7dc974bf0e5091625160456f2efcc5fa4fb641a3",
+        "43667cc7ecde508661b54e2b760b0b8e7eb64649",
+        "66e8ebed62519605e4cd5a2048994fa886d45c40"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "重排 Mac 首次使用说明，明确扫描、简报查询的市场选择及零候选、数据不足和旧快照的阅读方式。（#947）。",
+      "commits": [
+        "59491f4a1175ec3e669db6a850ed3442a1c72bf4",
+        "beb88ea59988d5ea2b648a0cc9884bbacc64fdb8",
+        "39bf478eb28beb7bf792205cd2bb24d7f435d259"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "行情快照与市场状态临时失败有限重试；固定失败简报确认后，在有效期内使用首次可靠扫描来源恢复完整简报，冻结身份与内容，保留未知发送结果；首次恢复绑定写入投递状态 v3，回滚须使用兼容读取器。（#951）。",
+      "commits": [
+        "ba421b5713f1715c4e7be0bc74f1c69a36083ac2",
+        "043aeb94c31e3db98c4620d3faff4f142fddc285"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "200c974d763785392c612ca41a6b02a249b25c24",
+      "reason": "Empty plan/review acceptance checkpoint; no source, public contract, configuration or runtime behavior changes. The associated feature is described by its implementation commits."
+    },
+    {
+      "commit": "77b6620b365e6846fc0f357254a96383d723454c",
+      "reason": "Empty plan/review acceptance checkpoint; no source, public contract, configuration or runtime behavior changes. The associated feature is described by its implementation commits."
+    },
+    {
+      "commit": "99056dba8469f79eb1255437023c1ffbef9cf3c2",
+      "reason": "Empty plan/review acceptance checkpoint; no source, public contract, configuration or runtime behavior changes. The associated feature is described by its implementation commits."
+    },
+    {
+      "commit": "5ffc3946b91900cf731dd3a03a52d1d8b084229b",
+      "reason": "Empty plan/review acceptance checkpoint; no source, public contract, configuration or runtime behavior changes. The associated feature is described by its implementation commits."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "200c974d763785392c612ca41a6b02a249b25c24",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/947"
+      ]
+    },
+    {
+      "commit": "59491f4a1175ec3e669db6a850ed3442a1c72bf4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/947"
+      ]
+    },
+    {
+      "commit": "77b6620b365e6846fc0f357254a96383d723454c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/947"
+      ]
+    },
+    {
+      "commit": "beb88ea59988d5ea2b648a0cc9884bbacc64fdb8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/947"
+      ]
+    },
+    {
+      "commit": "39bf478eb28beb7bf792205cd2bb24d7f435d259",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/947"
+      ]
+    },
+    {
+      "commit": "99056dba8469f79eb1255437023c1ffbef9cf3c2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/949"
+      ]
+    },
+    {
+      "commit": "f892cb91c5c148e6f8136958ef6a41671ff35e4d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/949"
+      ]
+    },
+    {
+      "commit": "67797b240622e90e662d46056d6335cc94affe9a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/949"
+      ]
+    },
+    {
+      "commit": "5ffc3946b91900cf731dd3a03a52d1d8b084229b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/949"
+      ]
+    },
+    {
+      "commit": "e02f22a8b21501d222ced1c506cae81ad8d26961",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/950"
+      ]
+    },
+    {
+      "commit": "a618767a965175e4d40aa529a30cd2e7c22f448e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/949"
+      ]
+    },
+    {
+      "commit": "f701ab25776c6c1cf09efb544cd560099e0d56cf",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/950"
+      ]
+    },
+    {
+      "commit": "e56936b889769db098ff3587424ffb4ff052785a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/950"
+      ]
+    },
+    {
+      "commit": "213ef6844b78b8d3249e6ffdc8e06648df73499b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/949"
+      ]
+    },
+    {
+      "commit": "f5f47ca8212ca254ea1229d4360db4064749c888",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/949"
+      ]
+    },
+    {
+      "commit": "ba421b5713f1715c4e7be0bc74f1c69a36083ac2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/951"
+      ]
+    },
+    {
+      "commit": "a452ada87142f164f4978ffdcda8e6c7683b9e3f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/952"
+      ]
+    },
+    {
+      "commit": "043aeb94c31e3db98c4620d3faff4f142fddc285",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/951"
+      ]
+    },
+    {
+      "commit": "12595017189f70deb3b260e81e40d58fd5336e8e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/952"
+      ]
+    },
+    {
+      "commit": "6021782af4e7407263a584c6903bf80613cc4e8c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/952"
+      ]
+    },
+    {
+      "commit": "7dc974bf0e5091625160456f2efcc5fa4fb641a3",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/953"
+      ]
+    },
+    {
+      "commit": "43667cc7ecde508661b54e2b760b0b8e7eb64649",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/953"
+      ]
+    },
+    {
+      "commit": "66e8ebed62519605e4cd5a2048994fa886d45c40",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/953"
+      ]
+    }
+  ]
+}
