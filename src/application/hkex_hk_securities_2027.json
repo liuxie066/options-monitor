@@ -1,0 +1,49 @@
+{
+  "market": "HK",
+  "venue": "HKEX_SEHK_SECURITIES",
+  "timezone": "Asia/Hong_Kong",
+  "coverage_start": "2027-01-01",
+  "coverage_end": "2027-12-31",
+  "schedule_basis": "HKEX circular explicitly closes the securities market on Saturdays, Sundays and the listed public holidays; three listed half-days remain trading sessions.",
+  "weekend_closed": [
+    5,
+    6
+  ],
+  "closed_dates": [
+    "2027-01-01",
+    "2027-02-08",
+    "2027-02-09",
+    "2027-03-26",
+    "2027-03-29",
+    "2027-04-05",
+    "2027-05-13",
+    "2027-06-09",
+    "2027-07-01",
+    "2027-09-16",
+    "2027-10-01",
+    "2027-10-08",
+    "2027-12-27"
+  ],
+  "half_days": [
+    "2027-02-05",
+    "2027-12-24",
+    "2027-12-31"
+  ],
+  "limits": [
+    "Scheduled securities-market sessions; does not claim future ad-hoc suspensions/unscheduled closures.",
+    "For HK underlying-stock close-to-close RV sessions, not settlement/stock-connect/derivative-expiry calendars.",
+    "Half-day counts as one completed daily close session.",
+    "Only this full documented calendar year is evidenced; no extrapolation to 2028."
+  ],
+  "schema_version": "hkex_hk_securities_calendar.v1",
+  "dataset_version": "HKEX_CT07726_2027_v1",
+  "source": {
+    "publisher": "The Stock Exchange of Hong Kong Limited / HKEX",
+    "document_id": "CT/077/26",
+    "title": "Hong Kong Securities Market Holiday Schedule for Year 2027",
+    "published_at": "2026-06-01",
+    "url": "https://www.hkex.com.hk/Services/Circulars-and-Notices/Participant-and-Members-Circulars/SEHK/2026/SEHK_CT_077_2026Jun01162846?sc_lang=en",
+    "pdf_sha256": "dce85f7ecb6b130341de740868a88a9fdc5f098d4445e1b5980147af528e95d0",
+    "retrieved_at_utc": "2026-10-30T05:24:02Z"
+  }
+}

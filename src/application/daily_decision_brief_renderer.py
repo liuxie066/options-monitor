@@ -1936,6 +1936,9 @@ def _fixed_report_error_reminders(
         if reason == "opening_candidate_strategy_partial_data":
             if _lower(item.get("reason_code")) == "option_close_settlement_pending":
                 continue
+            if _lower(item.get("reason_code")) == "term_matched_rv_unavailable":
+                reminders.append(_rv_gap_reminder(item))
+                continue
             detail = _PARTIAL_DATA_REASON_TEXT.get(
                 _lower(item.get("reason_code"))
             )
@@ -2008,7 +2011,7 @@ def _strategy_data_gap_reminders(
     brief: Mapping[str, Any],
 ) -> list[str]:
     reminders = _settlement_pending_reminders(brief)
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, ...]] = set()
     for item in brief.get("data_gaps") or []:
         if not isinstance(item, Mapping):
             continue
@@ -2031,6 +2034,12 @@ def _strategy_data_gap_reminders(
             or _lower(item.get("severity")) != "warning"
             or item.get("actionable") is not False
         ):
+            continue
+        if reason == "opening_candidate_strategy_partial_data" and _lower(item.get("reason_code")) == "term_matched_rv_unavailable":
+            identity = (symbol, family, reason, _lower(item.get("expiration")), _lower(item.get("rv_reason")))
+            if identity not in seen:
+                reminders.append(_rv_gap_reminder(item))
+                seen.add(identity)
             continue
         if identity in seen:
             continue
@@ -2063,6 +2072,34 @@ def _strategy_data_gap_reminders(
             )
         seen.add(identity)
     return reminders
+
+
+def _rv_gap_reminder(item: Mapping[str, Any]) -> str:
+    symbol = _upper(item.get("symbol")) or "相关标的"
+    family = _STRATEGY_LABELS.get(_lower(item.get("strategy_family")), "策略")
+    expiry = str(item.get("expiration") or "").strip()
+    reason = _lower(item.get("rv_reason"))
+    labels = {
+        "calendar_coverage_incomplete": "交易日历覆盖不足",
+        "calendar_source_conflict": "交易日历来源冲突",
+        "calendar_source_integrity_error": "交易日历来源校验失败",
+        "trading_calendar_empty": "交易日历为空",
+        "future_trading_sessions_missing": "剩余交易日证据缺失",
+        "historical_calendar_horizon_insufficient": "历史交易日覆盖不足",
+        "qfq_history_session_gap": "前复权收盘价缺少交易日",
+        "term_matched_returns_insufficient": "期限匹配的收益率样本不足",
+    }
+    cause = labels.get(reason)
+    if reason.startswith("trading_calendar_error:"):
+        cause = "交易日历查询失败"
+    elif reason.startswith("qfq_history_error:"):
+        cause = "前复权历史行情查询失败"
+    if not cause:
+        cause = "原因未识别" if reason else "原因未提供"
+    detail = _PARTIAL_DATA_REASON_TEXT["term_matched_rv_unavailable"]
+    if expiry:
+        return f"{symbol} {family}：{expiry} 到期，{detail}（{cause}），候选结果不完整"
+    return f"{symbol} {family}：{detail}，候选结果不完整（到期日未标明；{cause}）"
 
 
 def _capacity_views(
