@@ -680,6 +680,26 @@
       "module": "src/infrastructure/pi_agent_process.py",
       "name": "run_pi_migration_bridge",
       "reason": "Pi execution and storage conversion are fully retired. The Python Bot owns current sessions; upgrade and rollback accept only Python Bot releases. Historical stores, backups and receipts remain operator-owned and are not converted or executed."
+    },
+    {
+      "module": "domain/domain/performance/strategy_evaluation.py",
+      "name": "compare_evaluations",
+      "reason": "Backtest summaries and strategy comparisons moved to OptionBench scripts/csp_metrics.py. OM retains valuation and cash facts only; callers must use OB. Historical fixed wheels remain unchanged."
+    },
+    {
+      "module": "domain/domain/performance/strategy_evaluation.py",
+      "name": "compare_evaluations_v2",
+      "reason": "Backtest summaries and strategy comparisons moved to OptionBench scripts/csp_metrics.py. OM retains valuation and cash facts only; callers must use OB. Historical fixed wheels remain unchanged."
+    },
+    {
+      "module": "domain/domain/performance/strategy_evaluation.py",
+      "name": "summarize_evaluation",
+      "reason": "Backtest summaries and strategy comparisons moved to OptionBench scripts/csp_metrics.py. OM retains valuation and cash facts only; callers must use OB. Historical fixed wheels remain unchanged."
+    },
+    {
+      "module": "domain/domain/performance/strategy_evaluation.py",
+      "name": "summarize_evaluation_v2",
+      "reason": "Backtest summaries and strategy comparisons moved to OptionBench scripts/csp_metrics.py. OM retains valuation and cash facts only; callers must use OB. Historical fixed wheels remain unchanged."
     }
   ]
 }

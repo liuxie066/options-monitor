@@ -79,13 +79,13 @@
 
 ## 兼容、退役与尚未实现
 
-### 普通 CSP 离线估值与评价兼容入口
+### 普通 CSP 离线估值与现金入口
 
 `om_strategy_core.evaluation` 是离线估值与现金基础公开入口，领域实现在 `domain/domain/performance/strategy_evaluation.py`。合格市场/FX 投影、NAV、利息分红和情景估值继续由 OM 维护；既有费用、事件投影和现金归约仍复用原 owner。调用者传入显式持仓、市场原件和时点，不读取生产配置、账本或行情。缺失保留 incomplete，不把快照近似称为真实成交。
 
 `tests/test_strategy_evaluation_owner.py` 直接验证该 facade 的期权负债/接股情景、300秒接收近似、连续日息、除息权利/派息幂等及 FX 不足。OB 使用 `prepare_om_performance.py` 固定 Git 来源构建 wheel；旧三文件 overlay 环境仍是历史固定输入，不应改写。策略、费用、市场/FX 资格和现金基础不迁入 OB。此段说明源码能力，不宣称当前发行版本或线上服务已具备。
 
-`summarize_evaluation` / `compare_evaluations` 及其 `_v2` 接口保留为冻结兼容实现，既有行为与 `tests/test_strategy_evaluation_six_metrics.py` 不变。2026-10-30 起，新回测指标与比较的唯一维护位置为 OptionBench 的 csp_metrics 模块；OB 不调用这些旧汇总函数，OM 不反向依赖 OB。迁移保持总收益、回撤/时长、最差日/月、现金流稳定性及模拟接股风险口径；期权收入不抵减接股成本，费用只计一次，缺失按指标报告不足。OM 生产绩效及期间现金流 owner 不受影响。
+`summarize_evaluation` / `compare_evaluations` 及其 `_v2` 接口、专用辅助代码与公式测试已从当前 OM 源码移除，不提供兼容转发。调用方须使用 OptionBench 的 csp_metrics 模块，公式回归由 OB 维护；OM 不反向依赖 OB。`tests/test_strategy_evaluation_owner.py` 验证退役接口不可用以及估值/现金基础仍可用。历史固定 wheel 和报告不改写；需要旧接口的外部调用方必须迁移或继续使用其显式固定的历史版本。OM 生产绩效及期间现金流 owner 不受影响。
 
 | 状态 | 入口 / 材料 | 新功能去向 |
 | --- | --- | --- |

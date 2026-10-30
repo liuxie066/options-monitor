@@ -14,6 +14,19 @@ from om_strategy_core.evaluation import (
 )
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["summarize_evaluation", "summarize_evaluation_v2", "compare_evaluations", "compare_evaluations_v2"],
+)
+def test_backtest_metrics_are_not_exported_or_implemented_in_om(name):
+    from domain.domain.performance import strategy_evaluation as domain_owner
+    from om_strategy_core import evaluation as public_owner
+
+    for module in (public_owner, domain_owner):
+        assert name not in module.__all__
+        assert not hasattr(module, name)
+
+
 def test_public_owner_values_put_liability_and_assignment_without_mutation():
     positions = {
         "cash_by_currency": {"USD": "10000"},

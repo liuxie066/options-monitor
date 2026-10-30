@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1306 (`src`: 574, `domain`: 98, `scripts`: 16, `tests`: 614)
-- Internal import edges: 11353 total, 4037 production/script edges excluding tests
+- Python files scanned: 1305 (`src`: 574, `domain`: 98, `scripts`: 16, `tests`: 613)
+- Internal import edges: 11356 total, 4037 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -51,11 +51,11 @@ flowchart LR
   scripts -->|1| tests
   storage -->|1| domain
   tests -->|5557| application
-  tests -->|669| domain
+  tests -->|671| domain
   tests -->|2| domain_services
   tests -->|372| infrastructure
   tests -->|409| interfaces
-  tests -->|8| om_strategy_core
+  tests -->|9| om_strategy_core
   tests -->|31| scripts
   tests -->|77| storage
 ```
@@ -89,12 +89,12 @@ flowchart LR
 | from | to | imports |
 |---|---|---|
 | tests | application | 5557 |
-| tests | domain | 669 |
+| tests | domain | 671 |
 | tests | interfaces | 409 |
 | tests | infrastructure | 372 |
 | tests | storage | 77 |
 | tests | scripts | 31 |
-| tests | om_strategy_core | 8 |
+| tests | om_strategy_core | 9 |
 | tests | domain_services | 2 |
 
 ## Compressed Production Package Graph
