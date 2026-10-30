@@ -9,6 +9,7 @@ from src.application import opend_market_snapshot_fetching as snapshots
 from src.application import required_data_planning as planning
 from src.application.multi_tick import required_data_prefetch as prefetch
 from src.application.opend_fetch_config import OpenDEndpointRateLimit
+from src.application.opening_quote_evidence import OpeningUnderlierObservation
 from src.infrastructure import futu_gateway
 
 
@@ -106,7 +107,7 @@ def test_transient_retry_recovers_inside_limiter_and_preserves_error(tmp_path, c
     assert len(gateway.limits) == 3
     for code, observation in observations.items():
         assert observation.status == "ready"
-        evidence = next(item for item in observation.to_dict()["fetch_diagnostics"] if item["endpoint"] == endpoint)
+        evidence = next(item for item in observation.fetch_diagnostics if item["endpoint"] == endpoint)
         assert evidence["symbol"] == code
         assert evidence["attempts"] == 2
         assert evidence["elapsed_sec"] == pytest.approx(1.8)
@@ -137,6 +138,15 @@ def test_exhausted_snapshot_does_not_prevent_market_state_retry(tmp_path, clock)
     assert state["attempts"] == 2
     assert state["stop_reason"] == "success"
     assert len(gateway.calls) == 4
+
+
+@pytest.mark.parametrize("snapshot", [[], [(0, ConnectionError("reset"))], [(0, [])]])
+def test_bulk_observation_serializes_only_business_contract(tmp_path, clock, snapshot):
+    observation = fetch(tmp_path, Gateway(clock, snapshot=snapshot))["US.NVDA"]
+    payload = observation.to_dict()
+    assert payload == OpeningUnderlierObservation.from_mapping(payload).to_dict()
+    assert observation.fetch_diagnostics
+    assert "fetch_diagnostics" not in payload
 
 
 @pytest.mark.parametrize("error", [RuntimeError("not logged in"), ValueError("invalid request")])
@@ -317,7 +327,8 @@ def test_prefill_and_required_data_debug_preserve_retry_evidence(tmp_path, clock
     assert not bundle.spot_observation_complete
     assert bundle.projection_outcome == "provider_error"
     assert debug["spot_observation_diagnostics"] == cache[identity.cache_key].fetch_diagnostics
-    assert debug["underlier_observation"]["fetch_diagnostics"][0]["error_class"] == "ConnectionError"
+    assert "fetch_diagnostics" not in debug["underlier_observation"]
+    assert debug["spot_observation_diagnostics"][0]["error_class"] == "ConnectionError"
     assert gateway.closed
 
 

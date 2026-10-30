@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timezone
 from pathlib import Path
 import time
@@ -27,6 +27,10 @@ from src.infrastructure.opend_retcodes import classify_opend_error
 @dataclass(frozen=True)
 class OpenDUnderlierObservation(OpeningUnderlierObservation):
     fetch_diagnostics: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        # Provider diagnostics travel separately from the frozen business contract.
+        return {item.name: getattr(self, item.name) for item in fields(OpeningUnderlierObservation)}
 
 
 def trading_calendar_dates(receipt: Any, *, start: date, end: date) -> list[str]:
