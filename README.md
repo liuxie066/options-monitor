@@ -278,7 +278,7 @@ OM · 决策简报 · [你的账户标签]
 | 可选 Holdings 来源 | 为全局持仓风险补充同机 Portfolio Management 中的非富途资产；默认关闭，不替代富途账户数据；见[配置指南](CONFIGURATION_GUIDE.md) |
 | 离线研究与归档 | 收集证据、复核已有样本；写入归档需显式授权；见[Agent Handbook](docs/AGENT_WIKI.md) |
 
-离线研究的 `om_strategy_core.evaluation` 还提供显式 v2 CSP 六项评价：总收益、每日回撤、回撤时长、最差单日/完整月、期权现金流稳定性、实际接股浮亏及成本占用。旧 v1 保留，缺资料按指标报告不足；这是离线计算接口，不是完整车轮或线上交易功能，详见 [API Index](docs/API_INDEX.md)。
+离线研究的 `om_strategy_core.evaluation` 提供估值、市场/FX 资格和规范现金基础。summarize/compare 的 v1/v2 接口保留为冻结兼容实现；回测收益、回撤、现金流稳定性、模拟接股风险及策略比较的新实现与维护归 OptionBench 的 csp_metrics 模块，OM 不反向依赖 OB。缺资料仍按指标报告不足；这不是完整车轮或线上交易功能，详见 [API Index](docs/API_INDEX.md)。
 
 ### 开发者与脚本集成
 

@@ -1,4 +1,7 @@
-"""Public offline evaluation facade; financial rules remain owned by domain."""
+"""Offline valuation/cash facade; summarize/compare v1/v2 are frozen compatibility.
+
+New backtest metrics are maintained by OptionBench, without an OM dependency on OB.
+"""
 
 from domain.domain.performance.strategy_evaluation import (
     EvaluationBook,
