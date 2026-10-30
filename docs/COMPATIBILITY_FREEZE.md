@@ -1,7 +1,7 @@
 # 兼容面冻结反馈
 
 - **状态**：当前约束
-- **更新时间**：2026-10-06
+- **更新时间**：2026-10-30
 
 本文冻结仍在使用、但不再承接新功能的兼容入口。冻结不是立即删除：bug、数据正确性、安全、
 幂等和 readback 可以修；新字段、新命令、新策略和新 schema 必须进入 canonical owner。只有退出
@@ -15,6 +15,7 @@
 
 | 冻结面 | 允许 | 新功能 owner | 退出证据 |
 |---|---|---|---|
+| `om_strategy_core.evaluation` 的 summarize/compare v1/v2 汇总接口 | 保留已公开行为、历史 schema 与兼容回归；不新增指标或依赖 OB | 新回测汇总和策略比较进入 OptionBench 的 csp_metrics 模块；OM 继续维护估值、市场/FX 资格、费用及现金基础 | 旧固定 wheel、外部调用和公开合同完成独立退役前保留，不因 OB 迁移直接删除 |
 | `notify_symbols.py`、legacy renderer、`alert_engine.py` 用户正文投影 | 修手工兼容入口的渲染崩溃、错字、漏字段和 alert 误报；不增加新正文能力 | scheduled 与 preview 用户正文进入 Daily Brief service / repository / renderer | 普通 tick 已不再写 `symbols_notification.txt` / `symbols_alerts.txt`；待 `--stage-only alert|notify` 和 direct module caller 清零后删除 legacy 实现 |
 | lifecycle / position projection / current decision / cash conversion / order fee migration 与 `ledger.api` migration re-export | 修 inventory、verify、apply、幂等、replay、readback 和旧事实对账 | 日常能力进入 `ledger.commands`、`ledger.queries`、projection；cash / fee 新语义在写入时形成 canonical provenance | 生产 inventory / pending 为零，CLI 已直连 migration owner，`ledger.api` 不再有 caller 后移除 re-export |
 | ignored OI / volume flags、`OM_SECRET_BACKEND=env`、旧 credential env、`--config-path` alias、service credential migration | 保持旧调用可解析；修显式兼容路径 | 策略参数进入 Candidate Engine + YAML；secret 进入 Keychain / systemd credentials；参数使用现行 canonical 名称 | 运行诊断、CI、生产 unit、文档和 caller 均不再使用后删除；不得借兼容入口增加新 secret 或参数 |

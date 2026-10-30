@@ -79,13 +79,13 @@
 
 ## 兼容、退役与尚未实现
 
-### 普通 CSP 离线研究评价（未发布）
+### 普通 CSP 离线估值与评价兼容入口
 
-`om_strategy_core.evaluation` 是离线评价公开入口，领域实现在 `domain/domain/performance/strategy_evaluation.py`。提供合格市场/FX 投影、NAV 与指标、利息分红、情景和同条件差额；既有费用、事件投影和现金归约仍复用原 owner。调用者传入显式持仓、市场原件和时点，不读取生产配置、账本或行情。缺失保留 incomplete，不把快照近似称为真实成交。
+`om_strategy_core.evaluation` 是离线估值与现金基础公开入口，领域实现在 `domain/domain/performance/strategy_evaluation.py`。合格市场/FX 投影、NAV、利息分红和情景估值继续由 OM 维护；既有费用、事件投影和现金归约仍复用原 owner。调用者传入显式持仓、市场原件和时点，不读取生产配置、账本或行情。缺失保留 incomplete，不把快照近似称为真实成交。
 
-`tests/test_strategy_evaluation_owner.py` 直接验证该 facade 的期权负债/接股情景、300秒接收近似、连续日息、除息权利/派息幂等及 FX 不足。该三文件 owner 补丁由 OB 的 `prepare_om_performance.py` 按 Git 基线与外部摘要构建固定 wheel；不要复制金融实现到 OB。此段说明源码能力，不宣称当前发行版本或线上服务已具备。
+`tests/test_strategy_evaluation_owner.py` 直接验证该 facade 的期权负债/接股情景、300秒接收近似、连续日息、除息权利/派息幂等及 FX 不足。OB 使用 `prepare_om_performance.py` 固定 Git 来源构建 wheel；旧三文件 overlay 环境仍是历史固定输入，不应改写。策略、费用、市场/FX 资格和现金基础不迁入 OB。此段说明源码能力，不宣称当前发行版本或线上服务已具备。
 
-显式 v2 入口 `summarize_evaluation_v2` / `compare_evaluations_v2` 保留 v1，提供总收益、每日回撤及自然日恢复时长、最差单日/完整月、期权现金流稳定性与实际接股浮亏/成本占用。期权收入不抵减接股成本，交割费只计一次；不足按指标独立标记，现金路径停止或对账不足不能认证完整现金流。`tests/test_strategy_evaluation_six_metrics.py` 覆盖这些合同。调用方传入实际接股批次及调整覆盖；未知或未支持调整不输出确定派生浮亏，不实现 CC 接续或读取生产状态。
+`summarize_evaluation` / `compare_evaluations` 及其 `_v2` 接口保留为冻结兼容实现，既有行为与 `tests/test_strategy_evaluation_six_metrics.py` 不变。2026-10-30 起，新回测指标与比较的唯一维护位置为 OptionBench 的 csp_metrics 模块；OB 不调用这些旧汇总函数，OM 不反向依赖 OB。迁移保持总收益、回撤/时长、最差日/月、现金流稳定性及模拟接股风险口径；期权收入不抵减接股成本，费用只计一次，缺失按指标报告不足。OM 生产绩效及期间现金流 owner 不受影响。
 
 | 状态 | 入口 / 材料 | 新功能去向 |
 | --- | --- | --- |

@@ -1,4 +1,9 @@
-"""Offline portfolio economics on explicit frozen facts; no clocks or I/O."""
+"""Offline portfolio economics on explicit frozen facts; no clocks or I/O.
+
+summarize_evaluation/compare_evaluations (v1/v2) are frozen compatibility;
+new backtest metrics are maintained in OptionBench scripts/csp_metrics.py.
+Valuation, market/FX qualification and cash facts remain owned here.
+"""
 
 from __future__ import annotations
 
