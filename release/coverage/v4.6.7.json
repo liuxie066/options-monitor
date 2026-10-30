@@ -1,0 +1,116 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.7",
+  "base": {
+    "tag": "v4.6.6",
+    "commit": "2ff8514b39af8341ecbb63cfbb98129d4c43b48b"
+  },
+  "reviewed_head": "f9c24a960c4b16242e2feeb4d1bf5270f8c22d13",
+  "commits": [
+    {
+      "sha": "18eadd7befe8e82e5f080c5b37c86bfc5b82c2cd",
+      "subject": "fix(rv): qualify HK cross-year calendar evidence"
+    },
+    {
+      "sha": "d3e38dba911a9b515ffdc5762f8bb7f22f8de585",
+      "subject": "docs(readme): add Star History chart"
+    },
+    {
+      "sha": "4e76d4d00b92c0a0d2665e95df87cc130a54f3df",
+      "subject": "test(rv): isolate adjustment enums at SDK boundary"
+    },
+    {
+      "sha": "d554bc7d612544a9296bcf3352a086ba40378520",
+      "subject": "Merge pull request #962 from liuxie066/codex/readme-star-history"
+    },
+    {
+      "sha": "b06068f2aded2b06684c74cf608df3f6a95c0ad5",
+      "subject": "docs(readme): add Discord community guidance"
+    },
+    {
+      "sha": "3d3a45df622502377a8e770efdfc09de765353fc",
+      "subject": "Merge pull request #963 from liuxie066/codex/readme-community"
+    },
+    {
+      "sha": "bd549defbb4afd76efdc3001a033067f07960b13",
+      "subject": "chore(rv): integrate main and document calendar correction"
+    },
+    {
+      "sha": "f9c24a960c4b16242e2feeb4d1bf5270f8c22d13",
+      "subject": "Merge pull request #961 from liuxie066/codex/hk-cross-year-rv"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "README 增加 Discord 社区反馈说明及 Star History 图表，明确由维护者统一提交代码变更。（#962、#963）。",
+      "commits": [
+        "d3e38dba911a9b515ffdc5762f8bb7f22f8de585",
+        "d554bc7d612544a9296bcf3352a086ba40378520",
+        "b06068f2aded2b06684c74cf608df3f6a95c0ad5",
+        "3d3a45df622502377a8e770efdfc09de765353fc"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "港股跨年到期的期限匹配 RV 使用经核验的 HKEX 2027 年证券交易日历补齐未来交易日证据；来源冲突或覆盖不足仍明确保留，并在简报中定位具体到期档与原因，不影响已有正常期限。（#961）。",
+      "commits": [
+        "18eadd7befe8e82e5f080c5b37c86bfc5b82c2cd",
+        "4e76d4d00b92c0a0d2665e95df87cc130a54f3df",
+        "bd549defbb4afd76efdc3001a033067f07960b13",
+        "f9c24a960c4b16242e2feeb4d1bf5270f8c22d13"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "18eadd7befe8e82e5f080c5b37c86bfc5b82c2cd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/961"
+      ]
+    },
+    {
+      "commit": "d3e38dba911a9b515ffdc5762f8bb7f22f8de585",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/962"
+      ]
+    },
+    {
+      "commit": "4e76d4d00b92c0a0d2665e95df87cc130a54f3df",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/961"
+      ]
+    },
+    {
+      "commit": "d554bc7d612544a9296bcf3352a086ba40378520",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/962"
+      ]
+    },
+    {
+      "commit": "b06068f2aded2b06684c74cf608df3f6a95c0ad5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/963"
+      ]
+    },
+    {
+      "commit": "3d3a45df622502377a8e770efdfc09de765353fc",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/963"
+      ]
+    },
+    {
+      "commit": "bd549defbb4afd76efdc3001a033067f07960b13",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/961"
+      ]
+    },
+    {
+      "commit": "f9c24a960c4b16242e2feeb4d1bf5270f8c22d13",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/961"
+      ]
+    }
+  ]
+}
