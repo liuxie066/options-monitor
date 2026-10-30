@@ -15,7 +15,6 @@
 
 | 冻结面 | 允许 | 新功能 owner | 退出证据 |
 |---|---|---|---|
-| `om_strategy_core.evaluation` 的 summarize/compare v1/v2 汇总接口 | 保留已公开行为、历史 schema 与兼容回归；不新增指标或依赖 OB | 新回测汇总和策略比较进入 OptionBench 的 csp_metrics 模块；OM 继续维护估值、市场/FX 资格、费用及现金基础 | 旧固定 wheel、外部调用和公开合同完成独立退役前保留，不因 OB 迁移直接删除 |
 | `notify_symbols.py`、legacy renderer、`alert_engine.py` 用户正文投影 | 修手工兼容入口的渲染崩溃、错字、漏字段和 alert 误报；不增加新正文能力 | scheduled 与 preview 用户正文进入 Daily Brief service / repository / renderer | 普通 tick 已不再写 `symbols_notification.txt` / `symbols_alerts.txt`；待 `--stage-only alert|notify` 和 direct module caller 清零后删除 legacy 实现 |
 | lifecycle / position projection / current decision / cash conversion / order fee migration 与 `ledger.api` migration re-export | 修 inventory、verify、apply、幂等、replay、readback 和旧事实对账 | 日常能力进入 `ledger.commands`、`ledger.queries`、projection；cash / fee 新语义在写入时形成 canonical provenance | 生产 inventory / pending 为零，CLI 已直连 migration owner，`ledger.api` 不再有 caller 后移除 re-export |
 | ignored OI / volume flags、`OM_SECRET_BACKEND=env`、旧 credential env、`--config-path` alias、service credential migration | 保持旧调用可解析；修显式兼容路径 | 策略参数进入 Candidate Engine + YAML；secret 进入 Keychain / systemd credentials；参数使用现行 canonical 名称 | 运行诊断、CI、生产 unit、文档和 caller 均不再使用后删除；不得借兼容入口增加新 secret 或参数 |
@@ -63,3 +62,7 @@ account 子进程配置权威只绑定
 - `provider_chat_completion_payload_options` 无消费者，已移除。两个 Python HTTP 请求实现由 `src/application/bot/runtime.py` 使用，必须保留；URL resolver 仍供诊断使用。
 
 删除资格以当前消费者为准。原审计基线中 Python HTTP 实现无调用者，但合并前最新 main 已引入 Bot Python runtime，因此本次不删除这些实现。普通 scheduled 正文仍由 Daily Brief 负责，Tick 兼容正文链的退役不属于本批。
+
+## 回测指标退役（2026-10-30）
+
+用户要求不再保留旧兼容实现。当前源码移除 summarize/compare 的 v1/v2 公开接口及专用辅助代码，不提供转发或 OM → OB 依赖。调用方使用 OptionBench 的 csp_metrics 模块；公式测试随 owner 归 OB，OM 保留估值、市场/FX 资格、费用及规范现金基础测试。退役记录见 `docs/public_surface_retirements.json`。历史固定 wheel、锁和报告保持原件，不作为当前源码的兼容实现。
