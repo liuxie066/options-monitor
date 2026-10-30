@@ -817,6 +817,20 @@ def _contract_scope_reason_code(scope: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _contract_scope_rv_reason(scope: Mapping[str, Any]) -> str | None:
+    for reject in scope.get("rejects") or []:
+        if not isinstance(reject, Mapping):
+            continue
+        value = reject.get("metric_value")
+        if not isinstance(value, Mapping) or value.get("reason_code") != "term_matched_rv_unavailable":
+            continue
+        details = value.get("metric_value")
+        raw = details.get("reason") if isinstance(details, Mapping) else None
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return None
+
+
 def candidate_universe_summary(
     snapshot: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -899,8 +913,10 @@ def candidate_universe_summary(
         mode = _mode(raw.get("strategy_mode"))
         key = (symbol, mode)
         reason_code = _contract_scope_reason_code(raw) or sorted(unresolved_reasons)[0]
+        rv_reason = _contract_scope_rv_reason(raw) if reason_code == "term_matched_rv_unavailable" else None
         contract_gaps.setdefault(key, []).append({
             "symbol": symbol, "strategy_mode": mode, "reason_code": reason_code,
+            **({"rv_reason": rv_reason} if rv_reason else {}),
             **({"scope": "contract", "contract_symbol": raw["contract_symbol"],
                 "expiration": raw.get("expiration")} if raw.get("contract_symbol") else {}),
         })
@@ -909,7 +925,7 @@ def candidate_universe_summary(
         strategy_gap = affected_by_scope.get(key)
         detailed_by_contract = {}
         for gap in sorted(contract_gaps.get(key, []), key=lambda item: item["reason_code"]):
-            detailed_by_contract.setdefault((gap.get("contract_symbol"), gap.get("expiration")), gap)
+            detailed_by_contract.setdefault((gap.get("contract_symbol"), gap.get("expiration"), gap.get("rv_reason")), gap)
         detailed = list(detailed_by_contract.values())
         if strategy_gap and (not detailed or strategy_gap["reason_code"] not in _GENERIC_STRATEGY_GAP_REASONS):
             affected.append(strategy_gap)

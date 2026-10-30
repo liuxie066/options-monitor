@@ -926,7 +926,7 @@ def _load_opening_candidate_families(
                 "scope": affected.get("scope", "strategy"),
                 "direction": mode,
                 "candidate_owner": "opening",
-                **{key: affected[key] for key in ("contract_symbol", "expiration") if affected.get(key)},
+                **{key: affected[key] for key in ("contract_symbol", "expiration", "rv_reason") if affected.get(key)},
                 "strategy_family": family,
                 "symbol": str(affected.get("symbol") or ""),
                 "severity": "warning",
@@ -2979,7 +2979,7 @@ def _dedupe_gaps(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             _text(safe.get("symbol")).upper(),
             _text(safe.get("strategy_family")).lower(),
             _text(safe.get("reason")).lower(),
-            *(_text(safe.get(key)) for key in ("scope", "direction", "candidate_owner", "variant", "contract_symbol", "expiration", "wheel_branch_id")),
+            *(_text(safe.get(key)) for key in ("scope", "direction", "candidate_owner", "variant", "contract_symbol", "expiration", "rv_reason", "wheel_branch_id")),
         )
         key = (
             repr(correlation)

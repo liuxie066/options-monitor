@@ -2563,7 +2563,7 @@ def test_partial_frozen_scope_warns_without_erasing_valid_candidate(
         and item.get("reason_code") == "term_matched_rv_unavailable"
         for item in brief["data_gaps"]
     )
-    assert "AAPL CC｜期限匹配的已实现波动率（RV）证据不可用，候选结果不完整" in (
+    assert "AAPL CC｜2026-08-21 到期，期限匹配的已实现波动率（RV）证据不可用（原因未提供），候选结果不完整" in (
         render_full_brief(brief)
     )
 

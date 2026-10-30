@@ -420,7 +420,7 @@ max_new_contracts = floor(shares_available_for_cover / multiplier)
 
 CSP 与 CC 使用完全相同的正式 RV：
 
-1. 数据只认 OpenD 前复权（QFQ）已完成日线和 OpenD 交易日历；
+1. 已完成前复权（QFQ）日线和历史／当年交易日由 OpenD 提供；有完整权威来源证据的未来 HK 计划交易日按下述规则补齐；
 2. 计算从扫描时点到到期日剩余的交易 session 数；
 3. `lookback = max(20, remaining_trading_sessions)`；
 4. 使用已完成收盘价的对数收益；
@@ -430,13 +430,31 @@ CSP 与 CC 使用完全相同的正式 RV：
 RV20 / RV60 / RV120 只保留为诊断字段，不加权生成正式 RV。历史不足时不可用，
 不回退其他窗口，也不重新归一化。
 
-OpenD 未来交易日历仅覆盖扫描市场日期所在年的 12 月 31 日；超出该范围的 expiry
-明确标记 `calendar_coverage_incomplete`，同批范围内的 expiry 继续计算。覆盖边界不以
-最后返回的交易日推断，因此周末、节假日到期不会仅因当日无交易 session 被拒绝。
-日历状态只表示实际请求区间的取数结果；目标期限和支持区间分别记录为 `requested_end`
-和 `coverage_end`，混合期限的 RV 总体状态仍为 `partial`。
+现有 OpenD 连接可能成功返回空的跨年交易日历，或将混合范围截在当年；空返回不能证明
+未来全年休市。历史／当年前缀与未来范围分别查询，未来查询异常不影响已有健康期限。
+HK 正股在2026扫描时，未来2027计划交易日可使用随代码版本携带的 HKEX/SEHK 通告
+[CT/077/26](https://www.hkex.com.hk/Services/Circulars-and-Notices/Participant-and-Members-Circulars/SEHK/2026/SEHK_CT_077_2026Jun01162846?sc_lang=en)
+补齐。该通告明确列出2027全年周末和假期休市规则、3个半日市；半日市计一个日线 session，
+不据此推断上午／下午方向。它用于正股收盘序列，不把期权到期表、公众假期表或普通工作日
+单独当作完整交易日证明，也不替代历史实际行情。
+
+源快照记录通告版本、发布日期、原始 PDF 摘要和适用范围；RV 的 `trading_calendar`
+保留各来源、数据摘要与覆盖证据，不把 HKEX 计划日标成 OpenD 实际返回。来源冲突、
+源损坏、未来查询异常及2028等未覆盖期限分别保留明确缺口，同批健康期限继续计算。
+原始 OpenD 日历缓存与补齐结果分开，后续年份的历史日仍须由 OpenD 证明。
+无新增运行时 HTTP、自动更新器或配置开关；交易所修订或新年度数据需另行审核更新。
+年度计划日历不能预测临时休市。
+
+覆盖边界不以最后返回的交易日推断，因此周末、节假日到期不会仅因当日无交易 session
+被拒绝。日历顶层 `status=ok` 只表示历史／当年前缀取数有效，不代表全部目标期限已覆盖；
+目标期限和连续支持区间分别记录为 `requested_end` 和 `coverage_end`。单个期限不可用时，
+其 `term_matched_rv_status=data_unavailable` 并保留真实原因，RV 总体状态为 `partial`。
 未知交易日类型（包括 SDK 的 `N/A`）使日历证据不可用，不能当作休市日丢弃。
-全天、半日交易及既有空类型、`TRADING` 输入保持兼容；明确的 `NON_TRADING` 不计入 session。
+历史／当年前缀的全天、半日交易及既有空类型、`TRADING` 输入保持兼容；明确的
+`NON_TRADING` 不计入 session。
+未来来源核对保留原始日期和日类型，矛盾或未知类型不通过日期去重消失。
+Daily Brief 的 RV 缺口提醒保留具体到期日与原因，同到期档多个行权价合并展示；
+不同到期档或原因分别保留，不能将局部缺口表述为所有期限 RV 均不可用。
 
 日线缓存按 `market + symbol + QFQ` 持久化共享：
 
