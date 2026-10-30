@@ -1,0 +1,72 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.5",
+  "base": {
+    "tag": "v4.6.4",
+    "commit": "3794eea3b65934820644262d1fc5bb324d1a65ed"
+  },
+  "reviewed_head": "e8229456427654603535fa3c5f887eb379935619",
+  "commits": [
+    {
+      "sha": "a1e341c4dab62c7279b115ac87653ead5eb5566c",
+      "subject": "feat(performance): add six-metric CSP evaluation v2"
+    },
+    {
+      "sha": "854efc67e068ea8101bdbb37e94c4930c20e1854",
+      "subject": "Merge pull request #955 from liuxie066/codex/csp-six-metrics"
+    },
+    {
+      "sha": "14b1e864caa5dd3e59d64d3c7836a5278c19e408",
+      "subject": "fix(opend): keep underlier diagnostics outside the observation contract"
+    },
+    {
+      "sha": "e8229456427654603535fa3c5f887eb379935619",
+      "subject": "Merge pull request #956 from liuxie066/codex/underlier-observation-contract-fix"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "离线 CSP 评估新增六项指标：总收益、每日最大回撤、最长回撤天数、最差单日与完整月、期权净现金流稳定性、实际接股浮亏与占用；保留 v1 兼容，资料不足不推断为零，比较不自动评分。（#955）。",
+      "commits": [
+        "a1e341c4dab62c7279b115ac87653ead5eb5566c",
+        "854efc67e068ea8101bdbb37e94c4930c20e1854"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复批量标的行情诊断字段混入业务观测合同导致港美股策略扫描被误拒绝的问题；保留独立诊断与严格行情一致性校验。",
+      "commits": [
+        "14b1e864caa5dd3e59d64d3c7836a5278c19e408",
+        "e8229456427654603535fa3c5f887eb379935619"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "a1e341c4dab62c7279b115ac87653ead5eb5566c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/955"
+      ]
+    },
+    {
+      "commit": "854efc67e068ea8101bdbb37e94c4930c20e1854",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/955"
+      ]
+    },
+    {
+      "commit": "14b1e864caa5dd3e59d64d3c7836a5278c19e408",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/956"
+      ]
+    },
+    {
+      "commit": "e8229456427654603535fa3c5f887eb379935619",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/956"
+      ]
+    }
+  ]
+}
