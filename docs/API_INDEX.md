@@ -85,6 +85,8 @@
 
 `tests/test_strategy_evaluation_owner.py` 直接验证该 facade 的期权负债/接股情景、300秒接收近似、连续日息、除息权利/派息幂等及 FX 不足。该三文件 owner 补丁由 OB 的 `prepare_om_performance.py` 按 Git 基线与外部摘要构建固定 wheel；不要复制金融实现到 OB。此段说明源码能力，不宣称当前发行版本或线上服务已具备。
 
+显式 v2 入口 `summarize_evaluation_v2` / `compare_evaluations_v2` 保留 v1，提供总收益、每日回撤及自然日恢复时长、最差单日/完整月、期权现金流稳定性与实际接股浮亏/成本占用。期权收入不抵减接股成本，交割费只计一次；不足按指标独立标记，现金路径停止或对账不足不能认证完整现金流。`tests/test_strategy_evaluation_six_metrics.py` 覆盖这些合同。调用方传入实际接股批次及调整覆盖；未知或未支持调整不输出确定派生浮亏，不实现 CC 接续或读取生产状态。
+
 | 状态 | 入口 / 材料 | 新功能去向 |
 | --- | --- | --- |
 | 兼容，只修不增 | `src/application/notify_symbols.py` 的旧正文格式、旧 `python -m src.application.*` 人工入口 | 正文进入 Daily Brief；人工入口使用 `./om`，工具使用 `./om-agent`。完整冻结范围见 [Compatibility Freeze](COMPATIBILITY_FREEZE.md)。 |

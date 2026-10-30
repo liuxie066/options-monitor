@@ -278,6 +278,8 @@ OM · 决策简报 · [你的账户标签]
 | 可选 Holdings 来源 | 为全局持仓风险补充同机 Portfolio Management 中的非富途资产；默认关闭，不替代富途账户数据；见[配置指南](CONFIGURATION_GUIDE.md) |
 | 离线研究与归档 | 收集证据、复核已有样本；写入归档需显式授权；见[Agent Handbook](docs/AGENT_WIKI.md) |
 
+离线研究的 `om_strategy_core.evaluation` 还提供显式 v2 CSP 六项评价：总收益、每日回撤、回撤时长、最差单日/完整月、期权现金流稳定性、实际接股浮亏及成本占用。旧 v1 保留，缺资料按指标报告不足；这是离线计算接口，不是完整车轮或线上交易功能，详见 [API Index](docs/API_INDEX.md)。
+
 ### 开发者与脚本集成
 
 `om-agent` 是供外部 Agent 和脚本调用的结构化工具入口，与 OM 的 Bot 功能不同。查看当前版本实际公开的工具和参数：
