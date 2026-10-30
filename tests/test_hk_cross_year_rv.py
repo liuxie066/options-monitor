@@ -172,9 +172,22 @@ def test_run_cache_recomputes_provenance_across_reuse_extension_and_year(tmp_pat
     assert cache["calendar"]["trading_year"] == 2027
 
 
-def test_real_quote_adapter_uses_only_mocked_calendar_and_qfq_operations(tmp_path, monkeypatch):
+@pytest.mark.parametrize("sdk_enums_available", [True, False], ids=["sdk-enums", "no-sdk-enums"])
+def test_real_quote_adapter_uses_only_mocked_calendar_and_qfq_operations(tmp_path, monkeypatch, sdk_enums_available):
+    import sys
+    from types import SimpleNamespace
+
     from src.infrastructure import futu_gateway
 
+    # Bind SDK presence explicitly: installed Futu enums differ from canonical owner inputs.
+    fake_futu = SimpleNamespace()
+    if sdk_enums_available:
+        fake_futu = SimpleNamespace(
+            KLType=SimpleNamespace(K_DAY="K_DAY"),
+            AuType=SimpleNamespace(QFQ="qfq", HFQ="hfq"),
+            KL_FIELD=SimpleNamespace(DATE_TIME="1", CLOSE="3"),
+        )
+    monkeypatch.setitem(sys.modules, "futu", fake_futu)
     fixture = CalendarQuoteFixture()
     forbidden = {"broker": 0, "network": 0}
 
@@ -199,7 +212,12 @@ def test_real_quote_adapter_uses_only_mocked_calendar_and_qfq_operations(tmp_pat
     gateway.backend._quote_client = QuoteSDK()
     result = fetch(gateway, tmp_path)
     assert result.term_matched[JAN].status == "ok" and len(fixture.calendar_calls) == 2
-    assert fixture.history_calls and all(call["autype"] == "QFQ" for call in fixture.history_calls)
+    expected_autype = "qfq" if sdk_enums_available else "QFQ"
+    expected_fields = ["1", "3"] if sdk_enums_available else ["time_key", "close"]
+    assert fixture.history_calls and all(
+        call["autype"] == expected_autype and call["ktype"] == "K_DAY" and call["fields"] == expected_fields
+        for call in fixture.history_calls
+    )
     assert forbidden == {"broker": 0, "network": 0}
 
 
