@@ -340,3 +340,13 @@ OM · 决策简报 · [你的账户标签]
 ## 风险提示
 
 OM 提供监控、筛选、报告和复盘辅助，不构成投资建议。任何下单前，都应自行核对价格、流动性、费用、资金要求、持股覆盖、仓位暴露、事件风险和数据新鲜度。候选、收益估算、平仓评估和压力测试都不能替代你的交易判断。
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=liuxie066%2Foptions-monitor&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=liuxie066/options-monitor&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=liuxie066/options-monitor&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=liuxie066/options-monitor&type=date&legend=top-left" />
+ </picture>
+</a>
