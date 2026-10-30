@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 4.6.6 - 2026-10-30
+
+### Breaking Changes
+- 回测汇总与策略比较迁由 OptionBench 维护，移除 OM 的 summarize_evaluation、summarize_evaluation_v2、compare_evaluations、compare_evaluations_v2 公开接口及专用实现，不提供兼容转发；调用方须迁移或显式固定历史包。保留估值、市场/FX 资格、费用及规范现金基础，历史 wheel、锁和报告不改写。（#958、#959）。
+
 ## 4.6.5 - 2026-10-30
 
 ### New Features

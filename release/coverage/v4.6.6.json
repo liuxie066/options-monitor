@@ -1,0 +1,66 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.6",
+  "base": {
+    "tag": "v4.6.5",
+    "commit": "da8030dc853c74608c20c1ab602719eda1cd0cde"
+  },
+  "reviewed_head": "56fd75de150bf71412c9a7080a63f1850e1f238a",
+  "commits": [
+    {
+      "sha": "7dda26d6c1c6276d6071000f7304ffd121bf5949",
+      "subject": "docs(evaluation): freeze legacy summaries and clarify OptionBench ownership"
+    },
+    {
+      "sha": "2774d2cb8527fc82068b41ef0c779b419152a06a",
+      "subject": "Merge pull request #958 from liuxie066/codex/ob-evaluation-compatibility"
+    },
+    {
+      "sha": "8d7c3ae9e0dac628c10c57a4b353fff7475c5499",
+      "subject": "refactor(evaluation): retire backtest summaries and comparisons"
+    },
+    {
+      "sha": "56fd75de150bf71412c9a7080a63f1850e1f238a",
+      "subject": "Merge pull request #959 from liuxie066/codex/remove-om-evaluation-metrics"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Breaking Changes",
+      "text": "回测汇总与策略比较迁由 OptionBench 维护，移除 OM 的 summarize_evaluation、summarize_evaluation_v2、compare_evaluations、compare_evaluations_v2 公开接口及专用实现，不提供兼容转发；调用方须迁移或显式固定历史包。保留估值、市场/FX 资格、费用及规范现金基础，历史 wheel、锁和报告不改写。（#958、#959）。",
+      "commits": [
+        "7dda26d6c1c6276d6071000f7304ffd121bf5949",
+        "2774d2cb8527fc82068b41ef0c779b419152a06a",
+        "8d7c3ae9e0dac628c10c57a4b353fff7475c5499",
+        "56fd75de150bf71412c9a7080a63f1850e1f238a"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "7dda26d6c1c6276d6071000f7304ffd121bf5949",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/958"
+      ]
+    },
+    {
+      "commit": "2774d2cb8527fc82068b41ef0c779b419152a06a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/958"
+      ]
+    },
+    {
+      "commit": "8d7c3ae9e0dac628c10c57a4b353fff7475c5499",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/959"
+      ]
+    },
+    {
+      "commit": "56fd75de150bf71412c9a7080a63f1850e1f238a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/959"
+      ]
+    }
+  ]
+}
