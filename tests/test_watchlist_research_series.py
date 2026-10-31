@@ -592,6 +592,7 @@ def test_storage_does_not_silently_skip_unreadable_budget_directory(tmp_path, mo
             raise PermissionError("cannot count research installation")
         return original(path)
 
-    monkeypatch.setattr(group.os, "scandir", denied)
-    with pytest.raises(PermissionError, match="cannot count research installation"):
-        group._storage(root, [root], {"max_bytes": 100_000, "min_free_bytes": 1})
+    with monkeypatch.context() as scoped:
+        scoped.setattr(group.os, "scandir", denied)
+        with pytest.raises(PermissionError, match="cannot count research installation"):
+            group._storage(root, [root], {"max_bytes": 100_000, "min_free_bytes": 1})

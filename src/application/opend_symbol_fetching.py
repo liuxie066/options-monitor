@@ -65,8 +65,6 @@ from src.application.option_chain_fetching import (
     OptionChainFetchRequest, fetch_option_chains,
 )
 from src.application.short_vol_metrics import RealizedVolatilitySnapshot, fetch_realized_volatility_snapshot
-from src.application.research.prescreen import start_capture
-from src.application.research.option_quote_capture import _json_safe
 from src.infrastructure.futu_dataframe import futu_dataframe_records
 
 
@@ -625,6 +623,9 @@ def fetch_symbol_request(
         "spot_market_state_requested_codes": 0,
     }
     today = _resolve_request_trading_date(value=request.trading_date, market=u.market)
+    from src.application.research.prescreen import start_capture
+    from src.application.research.option_quote_capture import _json_safe
+
     prescreen = start_capture(request=request, underlier_code=u.code, trading_date=today.isoformat())
     identity = (str(effective_base_dir.resolve()), host, int(port), u.market, u.code, today.isoformat())
     enumeration_meta: dict[str, Any] = {"expiration_enumeration_complete": False, "enumeration_complete": False, "query_scope_validated": False} if query_mode else {}

@@ -42,7 +42,6 @@ from src.application.required_data_plan_identity import (
 from src.application.required_data_snapshot import (
     resolve_frozen_required_data_csv_bytes,
 )
-from src.application.research.prescreen import publish_scan_prescreen
 
 
 def ensure_required_data(
@@ -236,6 +235,8 @@ def ensure_required_data(
                 **filter_opend_fetch_kwargs(opend_fetch_config),
             )
         ]
+
+    from src.application.research.prescreen import publish_scan_prescreen
 
     try:
         if fetch_plan is None and len(requests) == 1:

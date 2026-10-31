@@ -18,7 +18,6 @@ from src.application.opend_symbol_chain_fetching import prune_chain_cache
 from src.application.opend_symbol_outputs import append_metrics_json, save_outputs
 from src.application.required_data_observability import extract_fetch_payload_metrics
 from src.application.runtime_paths import resolve_runtime_root
-from src.application.research.prescreen import publish_scan_prescreen
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -170,6 +169,8 @@ def main() -> None:
             )
         )
         if args.research_run_id is not None:
+            from src.application.research.prescreen import publish_scan_prescreen
+
             publish_scan_prescreen(
                 producer_root=output_root, producer_run_id=args.research_run_id,
                 payload=payload, fetch_plan=research_plan,
