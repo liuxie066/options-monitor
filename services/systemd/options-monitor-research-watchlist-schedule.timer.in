@@ -1,0 +1,12 @@
+[Unit]
+Description=Wake the approved research schedule; the CLI enforces its safe windows
+
+[Timer]
+OnCalendar=*-*-* *:*:00 UTC
+AccuracySec=1s
+RandomizedDelaySec=0
+Persistent=false
+Unit={{SERVICE_UNIT}}
+
+[Install]
+WantedBy=timers.target

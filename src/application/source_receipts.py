@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import uuid
 from collections.abc import Callable, Iterable, Mapping
@@ -21,7 +22,7 @@ _required_text = required_text
 # this module no longer exposes the retired Position Advice source-manifest or
 # snapshot-adoption control plane.
 SOURCE_RECEIPT_SCHEMA = "position_advice_source_receipt.v1"
-SOURCE_MAX_AGE_SECONDS = {"quotes": 1800}
+SOURCE_MAX_AGE_SECONDS = {"quotes": 1800, "research_supplemental": 1800}
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -77,6 +78,7 @@ def publish_source_receipt(
     completed_at: str,
     producer_policy_hash: str,
     before_receipt_commit: Callable[[Mapping[str, Any]], None] | None = None,
+    private_files: bool = False,
 ) -> dict[str, Any]:
     """Publish an immutable quote payload first and its receipt last."""
 
@@ -85,7 +87,7 @@ def publish_source_receipt(
     receipt_path = _safe_new_relative_path(root, receipt_relpath)
     if payload_path == receipt_path:
         raise ValueError("payload and receipt paths must differ")
-    _write_once_or_verify(payload_path, bytes(payload_bytes))
+    _write_once_or_verify(payload_path, bytes(payload_bytes), private_files=private_files)
     payload_hash = sha256_bytes(bytes(payload_bytes))
     kind = _source_kind(source_kind)
     observed_at = _timestamp(source_observed_at, "source_observed_at")
@@ -133,12 +135,10 @@ def publish_source_receipt(
         now=_parse_timestamp(receipt["completed_at"]),
         require_fresh=False,
     )
-    receipt_bytes = (
-        json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    ).encode("utf-8")
+    receipt_bytes = (json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
     if before_receipt_commit is not None:
         before_receipt_commit(dict(receipt))
-    _write_once_or_verify(receipt_path, receipt_bytes)
+    _write_once_or_verify(receipt_path, receipt_bytes, private_files=private_files)
     return receipt
 
 
@@ -292,7 +292,7 @@ def safe_existing_relative_path(root: Path, relpath: Any) -> Path:
 
 def _source_kind(value: Any) -> str:
     kind = str(value or "").strip()
-    if kind != "quotes":
+    if kind not in SOURCE_MAX_AGE_SECONDS:
         raise ValueError(f"unsupported source kind: {value}")
     return kind
 
@@ -401,22 +401,28 @@ def _safe_new_relative_path(root: Path, relpath: Any) -> Path:
     return destination
 
 
-def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+def _atomic_write_bytes(path: Path, payload: bytes, *, private_files: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp.{uuid.uuid4().hex}")
     try:
-        temporary.write_bytes(payload)
+        if private_files:
+            with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as stream:
+                stream.write(payload)
+        else:
+            temporary.write_bytes(payload)
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def _write_once_or_verify(path: Path, payload: bytes) -> None:
+def _write_once_or_verify(path: Path, payload: bytes, *, private_files: bool = False) -> None:
     if path.exists():
         if path.is_symlink() or path.read_bytes() != payload:
             raise SourceReceiptError("source receipt destination conflicts")
+        if private_files and path.stat().st_mode & 0o077:
+            raise SourceReceiptError("private source receipt permissions required")
         return
-    _atomic_write_bytes(path, payload)
+    _atomic_write_bytes(path, payload, private_files=private_files)
 
 
 __all__ = [

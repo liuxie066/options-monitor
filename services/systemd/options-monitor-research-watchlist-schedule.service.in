@@ -1,0 +1,20 @@
+[Unit]
+Description=Run an approved fixed or recurring watchlist research schedule
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User={{USER}}
+UMask=0077
+WorkingDirectory={{SOURCE_ROOT}}
+Environment="PYTHONPATH={{SOURCE_ROOT}}" "PYTHONDONTWRITEBYTECODE=1" "PYTHONNOUSERSITE=1" "HOME={{SDK_HOME}}"
+ExecStart="{{PYTHON}}" -B -m src.interfaces.cli.main research watchlist-schedule-run --schedule "{{SCHEDULE_FILE}}" --expected-schedule-sha256 {{SCHEDULE_SHA256}} --archive-root "{{ARCHIVE_ROOT}}" --budget-root "{{DATA_BUDGET_ROOT}}" --budget-root "{{INSTALL_BUDGET_ROOT}}" --runtime-root "{{OM_RUNTIME_ROOT}}" --prune-root "{{OM_PRUNE_ROOT}}" --opend-host {{OPEND_HOST}} --opend-port {{OPEND_PORT}} --confirm
+TimeoutStartSec={{TIMEOUT_SECONDS}}
+Restart=no
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths={{ARCHIVE_ROOT}} {{SDK_HOME}}
+InaccessiblePaths={{OM_RUNTIME_ROOT}} {{OM_CONFIG_ROOT}} {{OM_PRUNE_ROOT}}

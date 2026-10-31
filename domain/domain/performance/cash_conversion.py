@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import datetime, timezone
 from decimal import Decimal, DecimalException
 from typing import Any, Mapping
 from dataclasses import replace
 from zoneinfo import ZoneInfo
 
-from domain.domain.fx_quote_policy import CALENDAR_EVIDENCE, quote_quality
+from domain.domain.fx_quote_policy import CALENDAR_EVIDENCE, quote_quality, quote_session_start
+from domain.domain.decision_state_fingerprint import canonical_sha256
 
 from domain.domain.performance.models import (
     canonical_decimal_text,
@@ -21,14 +23,236 @@ from domain.domain.performance.models import (
 )
 
 
+OPEND_EXCHANGE_RATE_SOURCE = "opend_account_funds_conversion"
+TENCENT_EXCHANGE_RATE_SOURCE = "tencent_quote"
+SINA_EXCHANGE_RATE_SOURCE = "sina_quote"
+_REQUIRED_RATES = ("USDCNY", "HKDCNY")
+
+
+def _valid_rate(raw: Any) -> float | None:
+    if isinstance(raw, bool):
+        return None
+    try:
+        number = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and 0 < number < 1000 else None
+
+
+def _strict_timestamp(raw: Any) -> datetime | None:
+    if not isinstance(raw, str):
+        return None
+    try:
+        value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return value.astimezone(timezone.utc) if value.tzinfo is not None else None
+
+
+def _verified_pair(row: Any, *, now: datetime) -> dict[str, Any] | None:
+    if not isinstance(row, Mapping):
+        return None
+    source = row.get("source")
+    rate = _valid_rate(row.get("rate"))
+    quoted = _strict_timestamp(row.get("quote_at_utc"))
+    observed = _strict_timestamp(row.get("observed_at_utc"))
+    if (
+        source not in {TENCENT_EXCHANGE_RATE_SOURCE, SINA_EXCHANGE_RATE_SOURCE}
+        or rate is None
+        or quoted is None
+        or observed is None
+        or quoted > observed
+        or observed > now
+        or quote_session_start(quoted) is None
+    ):
+        return None
+    return {
+        "rate": rate,
+        "source": source,
+        "quote_at_utc": quoted.isoformat(),
+        "observed_at_utc": observed.isoformat(),
+    }
+
+
+def _verified_pairs(payload: Any, *, now: datetime) -> dict[str, dict[str, Any]]:
+    if not isinstance(payload, Mapping):
+        return {}
+    pairs = payload.get("pairs")
+    if isinstance(pairs, Mapping):
+        return {
+            pair: verified
+            for pair in _REQUIRED_RATES
+            if (verified := _verified_pair(pairs.get(pair), now=now)) is not None
+        }
+    # Older observations qualify only when each pair has its own source time.
+    source = payload.get("source")
+    rates = payload.get("rates")
+    timestamps = payload.get("quote_timestamps")
+    observed = payload.get("observed_at")
+    if not isinstance(rates, Mapping) or not isinstance(timestamps, Mapping):
+        return {}
+    return {
+        pair: verified
+        for pair in _REQUIRED_RATES
+        if (
+            verified := _verified_pair(
+                {
+                    "rate": rates.get(pair),
+                    "source": source,
+                    "quote_at_utc": timestamps.get(pair),
+                    "observed_at_utc": observed,
+                },
+                now=now,
+            )
+        )
+        is not None
+    }
+
+
+def verified_exchange_rate_pairs(payload: Any, *, observed_at: datetime) -> dict[str, dict[str, Any]]:
+    """Original provider evidence, independent of its eligibility today."""
+    return _verified_pairs(payload, now=observed_at)
+
+
+def cash_fx_observation_facts(
+    observation: Mapping[str, Any],
+    *,
+    observed_at_ms: int,
+    observation_status: str = "ready",
+) -> tuple[FXRateFact, ...]:
+    pairs = verified_exchange_rate_pairs(
+        observation,
+        observed_at=datetime.fromtimestamp(observed_at_ms / 1000, tz=timezone.utc),
+    )
+    facts = []
+    for pair, row in pairs.items():
+        effective = int(_strict_timestamp(row["quote_at_utc"]).timestamp() * 1000)
+        captured = int(_strict_timestamp(row["observed_at_utc"]).timestamp() * 1000)
+        provider = row["source"]
+        facts.append(
+            FXRateFact(
+                fact_id=None,
+                base_currency=pair[:3],
+                quote_currency="CNY",
+                rate=row["rate"],
+                rate_kind="spot",
+                effective_at_ms=effective,
+                observed_at_ms=captured,
+                source="realtime_snapshot",
+                source_id=f"verified_quote:{provider}:{pair}:{effective}:{captured}",
+                quality={"provider_source": provider, "source_timestamp_verified": True},
+                raw=dict(row),
+            )
+        )
+    if not facts:
+        raise ValueError("FX evidence has no pair with verified source and quote time")
+    return tuple(facts)
+
+
+class RunFXError(RuntimeError):
+    pass
+
+
+def decode_run_fx_snapshot(raw: bytes, *, run_id: str) -> tuple[dict[str, Any], str]:
+    try:
+        envelope = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise RunFXError("sealed FX artifact is invalid") from exc
+    if not isinstance(envelope, dict) or envelope.get("schema_version") != 1 or envelope.get("run_id") != run_id:
+        raise RunFXError("sealed FX artifact identity mismatch")
+    snapshot = envelope.get("snapshot")
+    digest = envelope.get("snapshot_sha256")
+    if (
+        not isinstance(snapshot, dict)
+        or not isinstance(snapshot.get("pairs"), dict)
+        or not isinstance(digest, str)
+        or canonical_sha256(snapshot) != digest
+    ):
+        raise RunFXError("sealed FX artifact hash mismatch")
+    return snapshot, digest
+
+
+def project_run_fx_facts(raw: bytes, *, run_id: str) -> dict[str, Any]:
+    """Project one sealed native observation with its own historical clock, without I/O."""
+    if not isinstance(run_id, str) or not run_id or run_id.strip() != run_id:
+        raise RunFXError("sealed FX projection requires an explicit run id")
+    snapshot, digest = decode_run_fx_snapshot(raw, run_id=run_id)
+    return _project_fx_observation(snapshot, run_id=run_id, digest=digest)
+
+
+def project_candidate_fx_facts(raw: bytes, *, run_id: str) -> dict[str, Any]:
+    """Use an anchored candidate's embedded observation; do not reconstruct a run artifact."""
+    if not isinstance(run_id, str) or not run_id or run_id.strip() != run_id:
+        raise RunFXError("sealed FX projection requires an explicit run id")
+    try:
+        candidate = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise RunFXError("sealed candidate FX artifact is invalid") from exc
+    if (
+        not isinstance(candidate, dict)
+        or candidate.get("schema_version") != "opening_candidate_snapshot.v3"
+        or candidate.get("run_id") != run_id
+        or not isinstance(candidate.get("dependencies"), list)
+        or not isinstance(candidate.get("capacity_fx_evidence"), dict)
+    ):
+        raise RunFXError("sealed candidate FX identity mismatch")
+    evidence = candidate["capacity_fx_evidence"]
+    snapshot = evidence.get("observation")
+    digest = evidence.get("observation_sha256")
+    reference = evidence.get("run_fx_snapshot_sha256")
+    dependencies = [
+        row.get("sha256") for row in candidate["dependencies"] if isinstance(row, dict) and row.get("kind") == "fx"
+    ]
+    if (
+        not isinstance(snapshot, dict)
+        or not isinstance(snapshot.get("pairs"), dict)
+        or not isinstance(digest, str)
+        or canonical_sha256(snapshot) != digest
+        or evidence.get("evaluated_at_utc") != snapshot.get("evaluated_at_utc")
+        or not isinstance(reference, str)
+        or len(reference) != 64
+        or any(c not in "0123456789abcdef" for c in reference)
+        or dependencies != [reference]
+    ):
+        raise RunFXError("sealed candidate FX observation binding mismatch")
+    return {
+        **_project_fx_observation(snapshot, run_id=run_id, digest=digest),
+        "source_kind": "candidate_snapshot",
+        "run_fx_snapshot_sha256": reference,
+        "run_fx_artifact_verification": "reference_only",
+    }
+
+
+def _project_fx_observation(snapshot: dict[str, Any], *, run_id: str, digest: str) -> dict[str, Any]:
+    evaluated = _strict_timestamp(snapshot.get("evaluated_at_utc"))
+    if evaluated is None:
+        raise RunFXError("sealed FX artifact requires a zoned evaluation time")
+    pairs = verified_exchange_rate_pairs(snapshot, observed_at=evaluated)
+    # Verify at the original microsecond before projecting to the owner's millisecond API.
+    facts = (
+        cash_fx_observation_facts(
+            {"pairs": pairs},
+            observed_at_ms=math.ceil(evaluated.timestamp() * 1000),
+        )
+        if pairs
+        else ()
+    )
+    missing = [pair for pair in _REQUIRED_RATES if pair not in pairs]
+    return {
+        "schema_version": "om.run-fx-projection.v1",
+        "run_id": run_id,
+        "snapshot_sha256": digest,
+        "evaluated_at_utc": snapshot["evaluated_at_utc"],
+        "status": "incomplete" if missing else "complete",
+        "missing_pairs": missing,
+        "facts": [fact.normalized_payload() for fact in facts],
+    }
+
+
 MAX_BOOKING_RATE_DISTANCE_MS = 24 * 60 * 60 * 1000
 MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS = 7 * 24 * 60 * 60 * 1000
-HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD = (
-    "historical_business_day_fx_carry_forward"
-)
-OFFICIAL_CARRY_FORWARD_SOURCES = frozenset(
-    {"pbc_central_parity", "manual_correction"}
-)
+HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD = "historical_business_day_fx_carry_forward"
+OFFICIAL_CARRY_FORWARD_SOURCES = frozenset({"pbc_central_parity", "manual_correction"})
 FOREIGN_METHODS = {
     "booking_fx_snapshot",
     "historical_fx_evidence_backfill",
@@ -83,36 +307,63 @@ def select_cash_fx_rate(
     daily snapshots remain readable; new bookings never use a future quote.
     """
     day = cash_fx_date(at_ms)
-    matching = [fact for fact in facts if fact.base_currency == normalize_currency(base_currency) and fact.quote_currency == "CNY"]
+    matching = [
+        fact
+        for fact in facts
+        if fact.base_currency == normalize_currency(base_currency) and fact.quote_currency == "CNY"
+    ]
     official = [fact for fact in matching if fact.source in OFFICIAL_CARRY_FORWARD_SOURCES]
     same_day = [fact for fact in official if cash_fx_date(fact.effective_at_ms) == day]
     if same_day:
-        return select_fx_rate(same_day, base_currency=base_currency, at_ms=max(fact.effective_at_ms for fact in same_day), max_staleness_ms=MAX_BOOKING_RATE_DISTANCE_MS)
+        return select_fx_rate(
+            same_day,
+            base_currency=base_currency,
+            at_ms=max(fact.effective_at_ms for fact in same_day),
+            max_staleness_ms=MAX_BOOKING_RATE_DISTANCE_MS,
+        )
     carried = [
-        fact for fact in official
+        fact
+        for fact in official
         if fact.quality.get("official") is True
         and isinstance(fact.quality.get("carry_forward_dates"), (list, tuple))
         and day in fact.quality["carry_forward_dates"]
     ]
     if carried:
-        return select_fx_rate(carried, base_currency=base_currency, at_ms=int(at_ms), max_staleness_ms=MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS)
+        return select_fx_rate(
+            carried,
+            base_currency=base_currency,
+            at_ms=int(at_ms),
+            max_staleness_ms=MAX_HISTORICAL_CARRY_FORWARD_DISTANCE_MS,
+        )
     # Later-effective corrections cannot revoke the quote for an earlier cash event.
     # Official same-day and explicitly carried evidence retain their rules above.
     superseded = {
-        fact.supersedes_fact_id for fact in matching
-        if fact.supersedes_fact_id and fact.effective_at_ms <= int(at_ms)
+        fact.supersedes_fact_id for fact in matching if fact.supersedes_fact_id and fact.effective_at_ms <= int(at_ms)
     }
-    market = [fact for fact in matching if fact.fact_id not in superseded and market_cash_fx_quality(fact, at_ms=at_ms) in {"fresh", "holiday_carried"}]
+    market = [
+        fact
+        for fact in matching
+        if fact.fact_id not in superseded and market_cash_fx_quality(fact, at_ms=at_ms) in {"fresh", "holiday_carried"}
+    ]
     if not market:
         return EvidenceSelection(None, "missing", int(at_ms), reason="no verified quote eligible at cash event time")
-    selected = max(market, key=lambda fact: (
-        fact.effective_at_ms,
-        fact.quality.get("provider_source", fact.source) == "tencent_quote",
-        fact.quality.get("cash_fx_policy") != DAILY_CASH_FX_POLICY,
-        -fact.observed_at_ms,
-        str(fact.fact_id),
-    ))
-    return EvidenceSelection(selected, "selected", int(at_ms), staleness_ms=int(at_ms) - selected.effective_at_ms, reason=MARKET_CASH_FX_METHOD)
+    selected = max(
+        market,
+        key=lambda fact: (
+            fact.effective_at_ms,
+            fact.quality.get("provider_source", fact.source) == "tencent_quote",
+            fact.quality.get("cash_fx_policy") != DAILY_CASH_FX_POLICY,
+            -fact.observed_at_ms,
+            str(fact.fact_id),
+        ),
+    )
+    return EvidenceSelection(
+        selected,
+        "selected",
+        int(at_ms),
+        staleness_ms=int(at_ms) - selected.effective_at_ms,
+        reason=MARKET_CASH_FX_METHOD,
+    )
 
 
 def market_cash_fx_quality(fact: FXRateFact, *, at_ms: int) -> str:
@@ -140,19 +391,9 @@ def cash_conversion_identity(
     rate_source_id: str,
     effective_at_ms: int,
 ) -> dict[str, Any]:
-    amount = quantize_money(
-        to_decimal(native_amount, field_name="native_amount")
-    )
-    rate = (
-        to_decimal(fx_rate, field_name="fx_rate")
-        if fx_rate is not None
-        else None
-    )
-    converted = (
-        quantize_money(to_decimal(amount_cny, field_name="amount_cny"))
-        if amount_cny is not None
-        else None
-    )
+    amount = quantize_money(to_decimal(native_amount, field_name="native_amount"))
+    rate = to_decimal(fx_rate, field_name="fx_rate") if fx_rate is not None else None
+    converted = quantize_money(to_decimal(amount_cny, field_name="amount_cny")) if amount_cny is not None else None
     return {
         "cash_fact_id": str(cash_fact_id),
         "native_amount": canonical_decimal_text(
@@ -160,16 +401,8 @@ def cash_conversion_identity(
             field_name="native_amount",
         ),
         "native_currency": normalize_currency(native_currency),
-        "fx_rate": (
-            canonical_decimal_text(rate, field_name="fx_rate")
-            if rate is not None
-            else None
-        ),
-        "amount_cny": (
-            canonical_decimal_text(converted, field_name="amount_cny")
-            if converted is not None
-            else None
-        ),
+        "fx_rate": (canonical_decimal_text(rate, field_name="fx_rate") if rate is not None else None),
+        "amount_cny": (canonical_decimal_text(converted, field_name="amount_cny") if converted is not None else None),
         "rate_source_id": str(rate_source_id or "").strip(),
         "effective_at_ms": int(effective_at_ms),
     }
@@ -216,16 +449,10 @@ def _validate_observed_cash_conversion(
     effective_at_ms: int,
 ) -> tuple[Decimal | None, str | None]:
     try:
-        expected_amount = quantize_money(
-            to_decimal(native_amount, field_name="native_amount")
-        )
+        expected_amount = quantize_money(to_decimal(native_amount, field_name="native_amount"))
         expected_currency = normalize_currency(native_currency)
-        amount = quantize_money(
-            to_decimal(conversion.get("native_amount"), field_name="native_amount")
-        )
-        amount_cny = quantize_money(
-            to_decimal(conversion.get("amount_cny"), field_name="amount_cny")
-        )
+        amount = quantize_money(to_decimal(conversion.get("native_amount"), field_name="native_amount"))
+        amount_cny = quantize_money(to_decimal(conversion.get("amount_cny"), field_name="amount_cny"))
         rate = (
             to_decimal(conversion.get("fx_rate"), field_name="fx_rate")
             if conversion.get("fx_rate") is not None
@@ -262,12 +489,7 @@ def _validate_observed_cash_conversion(
         if method != "zero_identity" or rate is not None or amount_cny != 0:
             return None, "zero_identity_mismatch"
     elif expected_currency == "CNY":
-        if (
-            method != "cny_identity"
-            or rate != Decimal(1)
-            or amount_cny != amount
-            or rate_source != "identity"
-        ):
+        if method != "cny_identity" or rate != Decimal(1) or amount_cny != amount or rate_source != "identity":
             return None, "cny_identity_mismatch"
     else:
         if method not in FOREIGN_METHODS or not rate_source:
@@ -300,7 +522,9 @@ def _validate_observed_cash_conversion(
         )
         if method == MARKET_CASH_FX_METHOD:
             quoted = datetime.fromtimestamp(rate_timestamp_ms / 1000, tz=timezone.utc)
-            quality, _ = quote_quality(quoted, at=datetime.fromtimestamp(conversion_effective_at_ms / 1000, tz=timezone.utc))
+            quality, _ = quote_quality(
+                quoted, at=datetime.fromtimestamp(conversion_effective_at_ms / 1000, tz=timezone.utc)
+            )
             if (
                 rate_source not in _MARKET_FX_SOURCES
                 or not str(conversion.get("rate_evidence_fact_id") or "").strip()
@@ -324,9 +548,7 @@ def _validate_observed_cash_conversion(
         rate_source_id=rate_source_id,
         effective_at_ms=conversion_effective_at_ms,
     )
-    if str(conversion.get("conversion_id") or "").strip() != cash_conversion_id(
-        identity
-    ):
+    if str(conversion.get("conversion_id") or "").strip() != cash_conversion_id(identity):
         return None, "conversion_id_mismatch"
     return amount_cny, None
 

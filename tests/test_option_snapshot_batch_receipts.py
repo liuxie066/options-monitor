@@ -126,7 +126,7 @@ def test_batch_receipts_are_shared_only_by_returned_batch(monkeypatch, tmp_path,
         assert set(frame[RECEIVE]) == {"provider-receive"}
 
 
-def test_request_window_contains_retry_and_rate_wait(tmp_path, clock):
+def test_actual_batch_receipts_distinguish_retry_from_successful_quote(tmp_path, clock):
     gateway = Gateway(clock, [(2, TimeoutError("synthetic")), (3, _rows("A"))])
 
     def retry(_name, call, **_kwargs):
@@ -138,8 +138,13 @@ def test_request_window_contains_retry_and_rate_wait(tmp_path, clock):
 
     result = _fetch(tmp_path, gateway, ["A"], retry_call=retry)
     assert result.complete and result.opend_call_count == 2
-    assert result.snap_map["A"][REQUEST] == _iso(0)
+    assert result.snap_map["A"][REQUEST] == _iso(11)
     assert result.snap_map["A"][RECEIVE] == _iso(14)
+    assert result.requested_at_utc == _iso(4)
+    assert [(r["requested_at_utc"], r["received_at_utc"], r["status"]) for r in result.batch_receipts] == [
+        (_iso(4), _iso(6), "failed"), (_iso(11), _iso(14), "received"),
+    ]
+    assert result.batch_receipts[0]["error_code"] == "TimeoutError"
 
 
 @pytest.mark.parametrize("fallback_count", [1, 2])
@@ -162,6 +167,7 @@ def test_partial_then_fallback_preserves_first_receipt(monkeypatch, tmp_path, cl
         assert result.snap_map[code][REQUEST] == _iso(11 + 12 * i)
         assert result.snap_map[code][RECEIVE] == _iso(13 + 12 * i)
     assert result.received_at_utc == _iso(13 + 12 * (fallback_count - 1))
+    assert [r["stage"] for r in result.batch_receipts] == ["market_snapshot", *["market_snapshot_fallback"] * fallback_count]
 
 
 @pytest.mark.parametrize("failure", [[], [{"last_price": 3}], TimeoutError("synthetic")])
