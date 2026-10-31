@@ -75,6 +75,37 @@ def test_cli_forwards_explicit_trading_date_to_fetch_request(monkeypatch) -> Non
     assert request.include_realized_volatility is True
 
 
+@pytest.mark.parametrize("failed", [False, True])
+def test_subprocess_research_original_published_before_save_even_on_failure(monkeypatch, tmp_path, failed):
+    from tests.test_research_prescreen import run_fetch
+
+    payload, calls = run_fetch(tmp_path, monkeypatch, failure=failed)
+    plan = {"symbol": "NVDA", "side_plans": []}
+    def save(*args, **kwargs):
+        assert len(list(tmp_path.rglob("receipt.json"))) == 1
+        return Path("raw"), Path("csv")
+    _stub_cli(monkeypatch, [
+        "--symbols", "NVDA", "--research-run-id", "synthetic-run",
+        "--research-fetch-plan-json", json.dumps(plan), "--output-root", str(tmp_path), "--quiet",
+    ], fetch=lambda _: payload, save_outputs=save)
+    if failed:
+        with pytest.raises(SystemExit, match="1"):
+            _mod().main()
+    else:
+        _mod().main()
+    assert len(calls) == 1
+    stored = json.loads(next(tmp_path.rglob("payload.json")).read_bytes())
+    assert stored["capture"]["chain"] == payload["meta"]["research_prescreen"]["chain"]
+    assert stored["fetch_plan"] == plan
+
+
+def test_cli_partial_research_binding_rejected_before_fetch(monkeypatch):
+    captured = _stub_cli(monkeypatch, ["--symbols", "NVDA", "--research-run-id", "run"])
+    with pytest.raises(SystemExit, match="2"):
+        _mod().main()
+    assert captured == []
+
+
 @pytest.mark.parametrize(
     ("status", "last_price"),
     [("ready", 180.0), ("data_unavailable", None)],

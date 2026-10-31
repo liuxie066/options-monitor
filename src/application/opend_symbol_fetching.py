@@ -65,6 +65,9 @@ from src.application.option_chain_fetching import (
     OptionChainFetchRequest, fetch_option_chains,
 )
 from src.application.short_vol_metrics import RealizedVolatilitySnapshot, fetch_realized_volatility_snapshot
+from src.application.research.prescreen import start_capture
+from src.application.research.option_quote_capture import _json_safe
+from src.infrastructure.futu_dataframe import futu_dataframe_records
 
 
 def to_float(v):
@@ -622,6 +625,7 @@ def fetch_symbol_request(
         "spot_market_state_requested_codes": 0,
     }
     today = _resolve_request_trading_date(value=request.trading_date, market=u.market)
+    prescreen = start_capture(request=request, underlier_code=u.code, trading_date=today.isoformat())
     identity = (str(effective_base_dir.resolve()), host, int(port), u.market, u.code, today.isoformat())
     enumeration_meta: dict[str, Any] = {"expiration_enumeration_complete": False, "enumeration_complete": False, "query_scope_validated": False} if query_mode else {}
     rv_snapshot = RealizedVolatilitySnapshot(status="skipped", reason="not_requested")
@@ -697,6 +701,7 @@ def fetch_symbol_request(
                 "symbol": symbol, "underlier_code": u.code, "spot": spot,
                 "expiration_count": 0, "expirations": [], "rows": [],
                 "meta": {**enumeration_meta, "source": "opend", "status": "error",
+                         "research_prescreen": prescreen,
                          "source_outcome": "not_attempted", "reason_code": underlier_observation.reason_code,
                          "error_code": underlier_observation.reason_code,
                          "underlier_observation": underlier_observation.to_dict(),
@@ -725,6 +730,16 @@ def fetch_symbol_request(
         # Reuse the fetched DataFrame when available to avoid records <-> DataFrame round trips.
         raw_chain = chain_bundle.frame
         chain: pd.DataFrame = raw_chain if isinstance(raw_chain, pd.DataFrame) else pd.DataFrame(chain_bundle.rows or [])
+        prescreen["missing_reasons"].remove("chain_not_attempted")
+        try:
+            prescreen["chain"] = _json_safe({
+                "rows": futu_dataframe_records(chain),
+                "available_expirations": chain_bundle.expirations_all,
+                "requested_expirations": chain_bundle.expirations_pick,
+                "meta": chain_bundle.fetch_meta,
+            })
+        except Exception as capture_error:
+            prescreen["missing_reasons"].append("chain_capture_error:" + type(capture_error).__name__)
         if chain.empty:
             fetch_meta = dict(chain_bundle.fetch_meta or {})
             status = str(fetch_meta.get('status') or 'error')
@@ -762,6 +777,7 @@ def fetch_symbol_request(
                 'expirations': [],
                 'rows': [],
                 'meta': {
+                    'research_prescreen': prescreen,
                     "fetch_diagnostics": fetch_diagnostics,
                 **enumeration_meta,
                     # Query scope is validated above; per-expiry statuses attest coverage.
@@ -881,6 +897,21 @@ def fetch_symbol_request(
         if cache is not None:
             cache.record_phase("snapshot", phase_started)
         phase_name, phase_started = "normalization", time.monotonic()
+        prescreen["missing_reasons"].remove("snapshots_not_attempted")
+        try:
+            prescreen["snapshots"] = _json_safe({
+                "requested_codes": sorted(snapshot_result.requested_codes),
+                "returned_codes": sorted(snapshot_result.returned_codes),
+                "missing_codes": sorted(snapshot_result.missing_codes),
+                "unexpected_codes": sorted(snapshot_result.unexpected_codes),
+                "complete": snapshot_result.complete,
+                "rows": list(snapshot_result.snap_map.values()),
+                "batch_receipts": snapshot_result.batch_receipts,
+                "provider_responses": snapshot_result.provider_responses,
+                "errors": snapshot_result.errors,
+            })
+        except Exception as capture_error:
+            prescreen["missing_reasons"].append("snapshot_capture_error:" + type(capture_error).__name__)
         snap_map = snapshot_result.snap_map
         snapshot_errors = snapshot_result.errors
         snapshot_fallback_filled = snapshot_result.fallback_filled
@@ -1079,6 +1110,7 @@ def fetch_symbol_request(
             'expirations': expirations,
             'rows': rows,
             'meta': {
+                'research_prescreen': prescreen,
                 "fetch_diagnostics": fetch_diagnostics,
                 **enumeration_meta,
                 'query_scope_validated': True,
@@ -1135,6 +1167,7 @@ def fetch_symbol_request(
             'expirations': [],
             'rows': [],
             'meta': {
+                'research_prescreen': prescreen,
                 'source': 'opend',
                 'host': host,
                 'port': port,
@@ -1152,6 +1185,7 @@ def fetch_symbol_request(
         }
 
     finally:
+        prescreen["completed_at_utc"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         if cache is not None:
             if phase_name is not None:
                 cache.record_phase(phase_name, phase_started)

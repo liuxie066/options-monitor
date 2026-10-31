@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from collections.abc import Mapping
+from typing import Any
+from zoneinfo import ZoneInfo
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+import hashlib
+import json
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.fx_quote_policy import CALENDAR_EVIDENCE, quote_quality
 from domain.domain.ledger.cash_facts import cash_facts_for_trade_event
 from domain.domain.money import quantize_money, to_decimal
+from domain.domain.option_lifecycle import INSTRUMENT_POLICY_REGISTRY
+from domain.domain.symbol_identity import symbol_market
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.performance.cash_conversion import (
     HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD,
@@ -82,11 +90,175 @@ def _cross_rate(facts, currency, base_currency, at_ms):
     return _rate(facts, currency, at_ms)[0] / _rate(facts, base_currency, at_ms)[0]
 
 
+def trading_calendar_dates(receipt: Any, *, start: date, end: date) -> list[str]:
+    if not isinstance(receipt, Mapping) or (
+        receipt.get("retcode") != 0
+        or receipt.get("coverage_complete") is not True
+        or receipt.get("pagination_complete") is not True
+        or receipt.get("page_count") != 1
+    ):
+        raise ValueError("calendar receipt incomplete")
+    dates: set[str] = set()
+    rows = receipt.get("rows")
+    if hasattr(rows, "to_dict"):
+        rows = rows.to_dict("records")
+    if not isinstance(rows, list) or any(not isinstance(row, Mapping) for row in rows):
+        raise ValueError("provider rows invalid")
+    for row in rows:
+        raw = row.get("time") or row.get("date") or row.get("trade_date")
+        kind = str(row.get("trade_date_type") or "").strip().upper()
+        if not isinstance(raw, str) or kind not in {"WHOLE", "MORNING", "AFTERNOON"}:
+            raise ValueError("calendar row invalid")
+        day = date.fromisoformat(raw)
+        if day.isoformat() != raw or not start <= day <= end:
+            raise ValueError("calendar date outside request")
+        dates.add(raw)
+    if not dates:
+        raise ValueError("calendar returned no trading dates")
+    return sorted(dates)
+
+
+def _closed_calendar(calendar, market):
+    if isinstance(calendar, dict) and calendar.get("schema_version") == "om.legacy-normalized-calendar.v1":
+        if (
+            set(calendar) != {"schema_version", "snapshot_original", "source_observed_at_utc", "native_receipt_status"}
+            or calendar["native_receipt_status"] != "not_retained"
+        ):
+            raise ValueError("legacy calendar must disclose missing native receipt")
+        original = calendar["snapshot_original"]
+        if (
+            not isinstance(original, dict)
+            or set(original) != {"raw_json", "sha256"}
+            or not isinstance(original["raw_json"], str)
+        ):
+            raise ValueError("legacy calendar original missing")
+        if hashlib.sha256(original["raw_json"].encode()).hexdigest() != original["sha256"]:
+            raise ValueError("legacy calendar original hash differs")
+        snapshot = json.loads(original["raw_json"])
+        fields = {
+            "schema_version",
+            "market",
+            "market_calendar_version",
+            "coverage_start",
+            "coverage_end",
+            "trading_sessions",
+            "observed_at_utc",
+            "source_receipt_sha256",
+            "content_sha256",
+        }
+        if (
+            not isinstance(snapshot, dict)
+            or set(snapshot) != fields
+            or snapshot["schema_version"] != "sell_put_top1_market_calendar_snapshot.v2"
+            or snapshot["market"] != market
+        ):
+            raise ValueError("invalid legacy calendar snapshot")
+        _text(snapshot["market_calendar_version"], "legacy calendar version")
+        if (
+            snapshot["observed_at_utc"] != calendar["source_observed_at_utc"]
+            or canonical_sha256({k: v for k, v in snapshot.items() if k != "content_sha256"})
+            != snapshot["content_sha256"]
+        ):
+            raise ValueError("legacy calendar content/time differs")
+        _text(snapshot["observed_at_utc"], "legacy calendar observed time")
+        start, end = (date.fromisoformat(_text(snapshot[k], k)) for k in ("coverage_start", "coverage_end"))
+        sessions = snapshot["trading_sessions"]
+        if not isinstance(sessions, list) or not sessions:
+            raise ValueError("legacy calendar sessions missing")
+        days = []
+        for row in sessions:
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"trading_date", "trade_date_type"}
+                or row["trade_date_type"] not in {"WHOLE", "MORNING", "AFTERNOON"}
+            ):
+                raise ValueError("invalid legacy calendar session")
+            day = date.fromisoformat(_text(row["trading_date"], "legacy trading date"))
+            if day.isoformat() != row["trading_date"] or not start <= day <= end:
+                raise ValueError("legacy calendar date outside coverage")
+            days.append(row["trading_date"])
+        if days != sorted(set(days)):
+            raise ValueError("legacy calendar dates not ordered and unique")
+        # Verify the historical publisher's normalized digest; this is not a provider response.
+        normalized = dict(
+            schema_version="sell_put_top1_market_calendar_source_receipt.v1",
+            source="futu.request_trading_days",
+            market=market,
+            coverage_start=snapshot["coverage_start"],
+            coverage_end=snapshot["coverage_end"],
+            trading_sessions=sessions,
+        )
+        if canonical_sha256(normalized) != snapshot["source_receipt_sha256"]:
+            raise ValueError("legacy calendar normalized digest differs")
+        return (
+            start,
+            end,
+            calendar["source_observed_at_utc"],
+            [dict(time=r["trading_date"], trade_date_type=r["trade_date_type"]) for r in sessions],
+        )
+    if not isinstance(calendar, dict) or set(calendar) != {"start", "end", "source_observed_at_utc", "receipt"}:
+        raise ValueError("invalid closed market calendar")
+    start, end = (date.fromisoformat(calendar[k]) for k in ("start", "end"))
+    receipt = calendar["receipt"]
+    if (
+        not isinstance(receipt, dict)
+        or type(receipt.get("retcode")) is not int
+        or type(receipt.get("page_count")) is not int
+    ):
+        raise ValueError("invalid closed market calendar receipt")
+    days = trading_calendar_dates(receipt, start=start, end=end)
+    if len(days) != len(receipt["rows"]):
+        raise ValueError("duplicate closed market calendar date")
+    return start, end, calendar["source_observed_at_utc"], receipt["rows"]
+
+
+def _closed_market_observation(carry, identity, at_ms):
+    if not isinstance(carry, dict) or set(carry) != {"schema_version", "observation_at_ms", "calendars"}:
+        raise ValueError("invalid closed market carry schema")
+    if carry["schema_version"] != "om.closed-market-carry.v1" or not isinstance(carry["calendars"], dict):
+        raise ValueError("invalid closed market carry version/calendars")
+    market = symbol_market(identity)
+    if market not in {"HK", "US"} or market not in carry["calendars"]:
+        raise ValueError("closed market calendar missing for asset")
+    original = _integer(carry["observation_at_ms"], "carry observation", minimum=1)
+    if original >= at_ms:
+        raise ValueError("closed market carry must follow original observation")
+    start, end, source_time, rows = _closed_calendar(carry["calendars"][market], market)
+    known = datetime.fromisoformat(source_time.replace("Z", "+00:00"))
+    if known.utcoffset() is None or known.timestamp() * 1000 > at_ms:
+        raise ValueError("closed market calendar not known at valuation")
+    policy = INSTRUMENT_POLICY_REGISTRY[f"{market}:standard_equity_option"]
+    zone = ZoneInfo(policy["timezone"])
+    observed = datetime.fromtimestamp(original / 1000, zone)
+    target = datetime.fromtimestamp(at_ms / 1000, zone).date()
+    if not start <= observed.date() < target <= end:
+        raise ValueError("closed market calendar coverage insufficient")
+    days = [(r.get("time") or r.get("date") or r.get("trade_date")) for r in rows]
+    if observed.date().isoformat() not in days or any(
+        observed.date().isoformat() < day <= target.isoformat() for day in days
+    ):
+        raise ValueError("closed market carry crosses a trading day")
+    row = next(
+        r for r in rows if (r.get("time") or r.get("date") or r.get("trade_date")) == observed.date().isoformat()
+    )
+    key = (
+        "half_trade_session_close"
+        if str(row["trade_date_type"]).strip().upper() == "MORNING"
+        else "last_trade_session_close"
+    )
+    close = datetime.combine(observed.date(), datetime.strptime(policy[key], "%H:%M:%S").time(), zone)
+    if not close - timedelta(minutes=5) <= observed <= close:
+        raise ValueError("closed market carry requires a close observation")
+    return original
+
+
 def _market(market, at_ms):
     _integer(at_ms, "at_ms", minimum=1)
-    if not isinstance(market, dict) or set(market) != {"stocks", "options", "fx"}:
+    carry = market.get("closed_market_carry") if isinstance(market, dict) else None
+    fields = {"stocks", "options", "fx"} | ({"closed_market_carry"} if carry is not None else set())
+    if not isinstance(market, dict) or set(market) != fields:
         raise ValueError("market must contain exactly stocks/options/fx")
-    if any(not isinstance(market[key], list) for key in market):
+    if any(not isinstance(market[key], list) for key in ("stocks", "options", "fx")):
         raise ValueError("market values must be lists")
     chosen = {}
     for kind, identity in (("stocks", "symbol"), ("options", "contract_id")):
@@ -99,6 +271,7 @@ def _market(market, at_ms):
                 raise ValueError(f"invalid {kind} mark schema")
             row = dict(raw)
             row[identity] = _text(row[identity], identity)
+            use_at = at_ms if carry is None else _closed_market_observation(carry, row[identity], at_ms)
             row["currency"] = _currency(row["currency"])
             _text(row["source"], "source")
             available, until = (_integer(row[key], key, minimum=1) for key in ("available_at_ms", "valid_until_ms"))
@@ -122,7 +295,9 @@ def _market(market, at_ms):
             if conflict in seen and seen[conflict] != prices:
                 raise ValueError(f"conflicting {kind} mark: {key}")
             seen[conflict] = prices
-            if available <= at_ms <= until:
+            if carry is not None and not available <= use_at <= until:
+                raise ValueError("closed market original mark was not eligible at observation")
+            if available <= use_at <= until:
                 previous = rows.get(key)
                 if previous is None or (stamp, available, row["source"]) > (
                     previous["available_at_ms"]
@@ -174,16 +349,18 @@ def legacy_market(*, market: dict, base_currency: str, at_ms: int) -> dict:
 
 
 def decision_exchange_rates(*, fx: list[dict], at_ms: int) -> dict:
-    """Project qualified facts in the legacy input directions without inverse round trips."""
+    """Project qualified facts using the live legacy scalar arithmetic."""
     _integer(at_ms, "at_ms", minimum=1)
     facts = _fx_facts(fx)
     rates, gaps = {}, set()
-    for field, source, target in (
-        ("usd_per_cny", "CNY", "USD"),
-        ("cny_per_hkd", "HKD", "CNY"),
+    for field, currency in (
+        ("usd_per_cny", "USD"),
+        ("cny_per_hkd", "HKD"),
     ):
         try:
-            rates[field] = float(_cross_rate(facts, source, target, at_ms))
+            rate = float(_rate(facts, currency, at_ms)[0])
+            # Live inputs invert the float quote, not its Decimal reciprocal.
+            rates[field] = 1.0 / rate if field == "usd_per_cny" else rate
         except IncompleteCashError as exc:
             gaps.add(str(exc))
     return {

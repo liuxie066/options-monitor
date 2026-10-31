@@ -12,10 +12,15 @@ This module is intentionally minimal; expand only as needed.
 from __future__ import annotations
 
 from domain.domain.currency_conversion import CurrencyConverter, ExchangeRates
+from domain.domain.performance.cash_conversion import (
+    _valid_rate,
+    _strict_timestamp,
+    _verified_pair,
+    _verified_pairs,
+)
 from datetime import datetime, timedelta, timezone
 import fcntl
 import json
-import math
 from pathlib import Path
 import sys
 from time import monotonic
@@ -34,16 +39,6 @@ SINA_EXCHANGE_RATE_SOURCE = "sina_quote"
 
 _REQUIRED_RATES = ("USDCNY", "HKDCNY")
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
-
-
-def _valid_rate(raw: Any) -> float | None:
-    if isinstance(raw, bool):
-        return None
-    try:
-        number = float(raw)
-    except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) and 0 < number < 1000 else None
 
 
 # 腾讯主源：单次请求取 USDCNY + HKDCNY，`~` 分隔，字段 [3] 为现价。
@@ -85,7 +80,7 @@ def _read_cache(path: Path) -> dict | None:
         p = Path(path).resolve()
         if not p.exists() or p.stat().st_size <= 0:
             return None
-        obj = json.loads(p.read_text(encoding='utf-8'))
+        obj = json.loads(p.read_text(encoding="utf-8"))
         return obj if isinstance(obj, dict) else None
     except Exception:
         return None
@@ -104,7 +99,8 @@ def get_cached_exchange_rates(
     if max_age_hours is not None:
         now = _utc_now()
         pairs = {
-            pair: row for pair, row in pairs.items()
+            pair: row
+            for pair, row in pairs.items()
             if now - _strict_timestamp(row["quote_at_utc"]) <= timedelta(hours=max_age_hours)
         }
     return _legacy_projection({"pairs": pairs}, purpose=None) if pairs else None
@@ -140,7 +136,10 @@ def _validated_rates(value: Any) -> dict[str, float] | None:
 
 
 def _parse_provider_quotes(
-    payload: str, *, source: str, observed_at: datetime,
+    payload: str,
+    *,
+    source: str,
+    observed_at: datetime,
 ) -> dict[str, dict[str, Any]]:
     """Parse only the two known wire layouts; each pair stands on its own."""
     observed = observed_at.astimezone(timezone.utc)
@@ -170,9 +169,9 @@ def _parse_provider_quotes(
             if len(fields[17].strip()) != 10 or len(fields[0].strip()) != 8:
                 continue
             try:
-                quoted = datetime.strptime(
-                    f"{fields[17].strip()} {fields[0].strip()}", "%Y-%m-%d %H:%M:%S"
-                ).replace(tzinfo=_SHANGHAI)
+                quoted = datetime.strptime(f"{fields[17].strip()} {fields[0].strip()}", "%Y-%m-%d %H:%M:%S").replace(
+                    tzinfo=_SHANGHAI
+                )
             except ValueError:
                 continue
         else:
@@ -202,7 +201,8 @@ def _parse_sina(text: str) -> dict[str, float] | None:
 
 
 def _check_fx_budget(
-    deadline: float | None, cancelled: Callable[[], bool] | None,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
 ) -> float | None:
     if cancelled is not None and cancelled():
         raise TimeoutError("FX fetch cancelled")
@@ -213,8 +213,11 @@ def _check_fx_budget(
 
 
 def fetch_market_exchange_rates(
-    timeout_sec: float = 8.0, *, deadline: float | None = None,
+    timeout_sec: float = 8.0,
+    *,
+    deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    request_get: Callable[..., str] | None = None,
 ) -> dict[str, Any] | None:
     """Fetch both sources and choose the newest verified quote per pair."""
     observed = _utc_now()
@@ -227,7 +230,7 @@ def fetch_market_exchange_rates(
         remaining = _check_fx_budget(deadline, cancelled)
         timeout = timeout_sec if remaining is None else min(timeout_sec, 8.0, remaining)
         try:
-            raw = _http_get(url, headers=headers, timeout_sec=timeout)
+            raw = (request_get or _http_get)(url, headers=headers, timeout_sec=timeout)
         except Exception as exc:
             errors.append(f"{source}:{type(exc).__name__}")
             _check_fx_budget(deadline, cancelled)
@@ -265,70 +268,14 @@ def fetch_market_exchange_rates(
     }
 
 
-def _strict_timestamp(raw: Any) -> datetime | None:
-    if not isinstance(raw, str):
-        return None
-    try:
-        value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return value.astimezone(timezone.utc) if value.tzinfo is not None else None
-
-
-def _verified_pair(row: Any, *, now: datetime) -> dict[str, Any] | None:
-    if not isinstance(row, Mapping):
-        return None
-    source = row.get("source")
-    rate = _valid_rate(row.get("rate"))
-    quoted = _strict_timestamp(row.get("quote_at_utc"))
-    observed = _strict_timestamp(row.get("observed_at_utc"))
-    if (
-        source not in {TENCENT_EXCHANGE_RATE_SOURCE, SINA_EXCHANGE_RATE_SOURCE}
-        or rate is None or quoted is None or observed is None
-        or quoted > observed or observed > now or quote_session_start(quoted) is None
-    ):
-        return None
-    return {
-        "rate": rate,
-        "source": source,
-        "quote_at_utc": quoted.isoformat(),
-        "observed_at_utc": observed.isoformat(),
-    }
-
-
-def _verified_pairs(payload: Any, *, now: datetime) -> dict[str, dict[str, Any]]:
-    if not isinstance(payload, Mapping):
-        return {}
-    pairs = payload.get("pairs")
-    if isinstance(pairs, Mapping):
-        return {
-            pair: verified
-            for pair in _REQUIRED_RATES
-            if (verified := _verified_pair(pairs.get(pair), now=now)) is not None
-        }
-    # Older observations qualify only when each pair has its own source time.
-    source = payload.get("source")
-    rates = payload.get("rates")
-    timestamps = payload.get("quote_timestamps")
-    observed = payload.get("observed_at")
-    if not isinstance(rates, Mapping) or not isinstance(timestamps, Mapping):
-        return {}
-    return {
-        pair: verified
-        for pair in _REQUIRED_RATES
-        if (verified := _verified_pair({
-            "rate": rates.get(pair), "source": source,
-            "quote_at_utc": timestamps.get(pair), "observed_at_utc": observed,
-        }, now=now)) is not None
-    }
-
-
 def _newer_pair(existing: dict[str, Any] | None, candidate: dict[str, Any]) -> dict[str, Any]:
     if existing is None or candidate["quote_at_utc"] > existing["quote_at_utc"]:
         return candidate
-    if (candidate["quote_at_utc"] == existing["quote_at_utc"]
-            and candidate["source"] == TENCENT_EXCHANGE_RATE_SOURCE
-            and existing["source"] != TENCENT_EXCHANGE_RATE_SOURCE):
+    if (
+        candidate["quote_at_utc"] == existing["quote_at_utc"]
+        and candidate["source"] == TENCENT_EXCHANGE_RATE_SOURCE
+        and existing["source"] != TENCENT_EXCHANGE_RATE_SOURCE
+    ):
         return candidate
     return existing
 
@@ -349,8 +296,13 @@ def verified_exchange_rate_pairs(payload: Any, *, observed_at: datetime) -> dict
 
 
 def current_exchange_rate_snapshot(
-    *, cache_path: Path, now: datetime | None = None, write_cache: bool = True,
-    deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
+    *,
+    cache_path: Path,
+    now: datetime | None = None,
+    write_cache: bool = True,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    request_get: Callable[..., str] | None = None,
 ) -> dict[str, Any]:
     """One request's verified quotes and purpose states; no invented quote times."""
     _check_fx_budget(deadline, cancelled)
@@ -360,8 +312,10 @@ def current_exchange_rate_snapshot(
     _check_fx_budget(deadline, cancelled)
     fetched = (
         fetch_market_exchange_rates()
-        if deadline is None and cancelled is None
-        else fetch_market_exchange_rates(deadline=deadline, cancelled=cancelled)
+        if deadline is None and cancelled is None and request_get is None
+        else fetch_market_exchange_rates(
+            deadline=deadline, cancelled=cancelled, **({"request_get": request_get} if request_get is not None else {})
+        )
     )
     _check_fx_budget(deadline, cancelled)
     evaluated = (now or _utc_now()).astimezone(timezone.utc)
@@ -392,7 +346,9 @@ def current_exchange_rate_snapshot(
         row = selected.get(pair)
         quality, reason = _pair_quality(row, now=evaluated)
         pairs[pair] = {
-            **(row or {}), "quality": quality, "reason": reason,
+            **(row or {}),
+            "quality": quality,
+            "reason": reason,
             "display_eligible": quality in {"fresh", "holiday_carried"},
             "capacity_eligible": quality in {"fresh", "holiday_carried"},
         }
@@ -407,17 +363,20 @@ def current_exchange_rate_snapshot(
 
 
 def _legacy_projection(
-    snapshot: Mapping[str, Any], *, purpose: str | None = "capacity", now: datetime | None = None,
+    snapshot: Mapping[str, Any],
+    *,
+    purpose: str | None = "capacity",
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     pairs = snapshot.get("pairs") or {}
     rates = (
         rates_for_purpose(snapshot, purpose=purpose, now=now)
-        if purpose is not None else {pair: row["rate"] for pair, row in pairs.items()}
+        if purpose is not None
+        else {pair: row["rate"] for pair, row in pairs.items()}
     )
     sources = {row.get("source") for row in pairs.values() if isinstance(row, Mapping) and row.get("source")}
     timestamps = {
-        pair: row["quote_at_utc"] for pair, row in pairs.items()
-        if isinstance(row, Mapping) and row.get("quote_at_utc")
+        pair: row["quote_at_utc"] for pair, row in pairs.items() if isinstance(row, Mapping) and row.get("quote_at_utc")
     }
     return {
         "schema_version": 2,
@@ -434,7 +393,10 @@ def _legacy_projection(
 
 
 def rates_for_purpose(
-    snapshot: Mapping[str, Any], *, purpose: str, now: datetime | None = None,
+    snapshot: Mapping[str, Any],
+    *,
+    purpose: str,
+    now: datetime | None = None,
 ) -> dict[str, float]:
     """Recheck time-sensitive eligibility without refreshing a sealed quote."""
     if purpose not in {"display", "capacity"}:
@@ -453,7 +415,10 @@ def rates_for_purpose(
 
 
 def project_exchange_rate_snapshot(
-    snapshot: Mapping[str, Any], *, purpose: str, now: datetime | None = None,
+    snapshot: Mapping[str, Any],
+    *,
+    purpose: str,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     """Project one quote snapshot for a consumer without fetching or changing it."""
     if purpose not in {"display", "capacity"}:
@@ -465,7 +430,9 @@ def project_exchange_rate_snapshot(
         row = verified.get(pair)
         quality, reason = _pair_quality(row, now=evaluated)
         pairs[pair] = {
-            **(row or {}), "quality": quality, "reason": reason,
+            **(row or {}),
+            "quality": quality,
+            "reason": reason,
             "display_eligible": quality in {"fresh", "holiday_carried"},
             "capacity_eligible": quality in {"fresh", "holiday_carried"},
         }
@@ -495,7 +462,9 @@ def get_exchange_rates_or_fetch_latest(
             atomic_write_json(write_through_path, snapshot, sort_keys=True)
         except OSError as exc:
             _warn(log, f"[WARN] FX run copy unavailable: {exc}")
-    return _legacy_projection(snapshot) if any(snapshot["pairs"][pair].get("rate") for pair in _REQUIRED_RATES) else None
+    return (
+        _legacy_projection(snapshot) if any(snapshot["pairs"][pair].get("rate") for pair in _REQUIRED_RATES) else None
+    )
 
 
 def load_exchange_rate_info(
@@ -520,16 +489,16 @@ def _extract_usdcny_from_rates(obj: dict | None) -> float | None:
     if not obj:
         return None
     # Try new nested schema
-    rates_map = obj.get('rates')
+    rates_map = obj.get("rates")
     if isinstance(rates_map, dict):
-        usdcny = rates_map.get('USDCNY')
+        usdcny = rates_map.get("USDCNY")
         if usdcny is not None:
             try:
                 return float(usdcny)
             except Exception:
                 return None
     # Legacy top-level
-    usdcny = obj.get('USDCNY')
+    usdcny = obj.get("USDCNY")
     if usdcny is not None:
         try:
             return float(usdcny)
@@ -562,12 +531,16 @@ def get_usd_per_cny_exchange_rate(base_dir: Path) -> float | None:
 
 def capacity_currency_converter(fx_snapshot: Mapping[str, Any]) -> Any:
     """Recheck the sealed quote on use; historical facts cannot fund new trades."""
+
     def convert(amount: float, source: str, target: str) -> float | None:
         rates = rates_for_purpose(fx_snapshot, purpose="capacity")
         usdcny = rates.get("USDCNY")
-        converter = CurrencyConverter(ExchangeRates(
-            usd_per_cny=1 / usdcny if usdcny else None,
-            cny_per_hkd=rates.get("HKDCNY"),
-        ))
+        converter = CurrencyConverter(
+            ExchangeRates(
+                usd_per_cny=1 / usdcny if usdcny else None,
+                cny_per_hkd=rates.get("HKDCNY"),
+            )
+        )
         return converter.convert(amount, from_ccy=source, to_ccy=target)
+
     return convert

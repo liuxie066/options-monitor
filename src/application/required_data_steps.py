@@ -42,6 +42,7 @@ from src.application.required_data_plan_identity import (
 from src.application.required_data_snapshot import (
     resolve_frozen_required_data_csv_bytes,
 )
+from src.application.research.prescreen import publish_scan_prescreen
 
 
 def ensure_required_data(
@@ -242,6 +243,10 @@ def ensure_required_data(
                 base=base,
                 request=requests[0],
             )
+            publish_scan_prescreen(
+                producer_root=required_data_dir, producer_run_id=producer_run_id,
+                payload=merged_payload, fetch_plan=fetch_plan_payload,
+            )
             payloads = [merged_payload]
         else:
             payloads = []
@@ -249,6 +254,10 @@ def ensure_required_data(
                 payload = execute_required_data_opend(
                     base=base,
                     request=request,
+                )
+                publish_scan_prescreen(
+                    producer_root=required_data_dir, producer_run_id=producer_run_id,
+                    payload=payload, fetch_plan=fetch_plan_payload,
                 )
                 if _payload_fetch_status(payload) != "ok":
                     raise RuntimeError(

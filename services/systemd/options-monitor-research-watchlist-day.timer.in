@@ -1,0 +1,14 @@
+[Unit]
+Description=Finite discovery and observation times for one approved research day
+
+[Timer]
+OnCalendar={{DISCOVERY_AT_UTC}}
+OnCalendar={{HK_OBSERVATION_AT_UTC}}
+OnCalendar={{US_OBSERVATION_AT_UTC}}
+AccuracySec=1s
+RandomizedDelaySec=0
+Persistent=false
+Unit={{SERVICE_UNIT}}
+
+[Install]
+WantedBy=timers.target

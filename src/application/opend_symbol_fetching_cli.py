@@ -18,6 +18,7 @@ from src.application.opend_symbol_chain_fetching import prune_chain_cache
 from src.application.opend_symbol_outputs import append_metrics_json, save_outputs
 from src.application.required_data_observability import extract_fetch_payload_metrics
 from src.application.runtime_paths import resolve_runtime_root
+from src.application.research.prescreen import publish_scan_prescreen
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -73,7 +74,20 @@ def main() -> None:
     ap.add_argument("--history-kline-max-calls", type=int, default=60, help="Shared history-K max calls per window")
     ap.add_argument("--include-realized-volatility", action="store_true", help="Fetch underlier daily K-line and attach RV fields")
     ap.add_argument("--output-root", default=None, help="Output root containing raw/ and parsed/ (default: output_shared/required_data)")
+    ap.add_argument("--research-run-id", default=None, help="Bind market-only research originals to the parent scan")
+    ap.add_argument("--research-fetch-plan-json", default=None, help="Parent owner's resolved fetch plan JSON")
     args = ap.parse_args()
+
+    research_plan = None
+    if args.research_run_id is not None or args.research_fetch_plan_json is not None:
+        if not args.research_run_id or args.research_fetch_plan_json is None or args.output_root is None:
+            ap.error("research capture requires run ID, owner plan and explicit output root")
+        try:
+            research_plan = json.loads(args.research_fetch_plan_json)
+        except ValueError as exc:
+            ap.error(f"invalid research fetch plan: {exc}")
+        if not isinstance(research_plan, dict):
+            ap.error("research fetch plan must be an object")
 
     opt_types = {s.strip().lower() for s in str(args.option_types or "").split(",") if s.strip()}
     want_put = ("put" in opt_types) if opt_types else True
@@ -155,6 +169,11 @@ def main() -> None:
                 include_realized_volatility=bool(args.include_realized_volatility),
             )
         )
+        if args.research_run_id is not None:
+            publish_scan_prescreen(
+                producer_root=output_root, producer_run_id=args.research_run_id,
+                payload=payload, fetch_plan=research_plan,
+            )
         raw_path, csv_path = save_outputs(base, sym, payload, output_root=output_root)
         try:
             meta = payload.get("meta") or {}
