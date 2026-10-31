@@ -48,6 +48,54 @@ When deepreview is explicitly requested or prescribed by an explicitly invoked w
 | Human CLI Entry | `./om` |
 | Detailed Agent Handbook | `docs/AGENT_WIKI.md` |
 
+## Task Execution and Lessons
+
+1. Before work, confirm the latest user requirements and authorization; read only the relevant design/contracts and matching entries in [LESSONS.md](LESSONS.md). Resolve material conflicts before implementation.
+2. Define user-observable acceptance conditions first, including expected results and relevant failure states; keep plans proportional to the task.
+3. Before editing, trace the actual entry point and call chain, find similar implementations and the canonical owner, and identify affected callers, tests, fixtures, config and docs.
+4. For bugs, reproduce when practical, then add a regression test that detects the old failure before fixing the owner. If reproduction is unavailable, state the evidence gap and how the fix will be checked.
+5. Validate in proportion to the impact using Quality and Delivery below; preserve required gates, and explicitly identify checks not run and why.
+6. Update the owning documentation in the same change when behavior or interfaces change. Finish with behavior changes, validation evidence and unresolved issues; report progress or blockers during longer work.
+7. After rework, assess whether the cause merits a reusable lesson. Prefer a regression test or automated check where possible; record only evidenced lessons with trigger, cause, next check and evidence. Update an existing lesson instead of duplicating it; keep task diaries out of this file.
+
+## Read by Task
+
+Use [Docs Index](docs/INDEX.md) to locate the current owner; this table is a starting point, not a requirement to read every document.
+
+| Task | Read first |
+|---|---|
+| Product scope / user journey | [README](README.md), [Product Architecture](docs/PRODUCT_ARCHITECTURE.md); relevant PRD from the index |
+| Implementation / shared calculations | Relevant design, [Architecture](docs/ARCHITECTURE.md), [API Index](docs/API_INDEX.md); module ownership below |
+| Configuration / first run | [Install](docs/INSTALL.md), [Getting Started](docs/GETTING_STARTED.md), [Config Contract](CONFIGS.md) |
+| Bug / runtime investigation | Relevant [lessons](LESSONS.md), [Agent Handbook §8](docs/AGENT_WIKI.md#8-common-investigation-playbooks), [Runbook](RUNBOOK.md); bind the target before runtime reads |
+| Tests / verification | [Tests Guide](tests/README.md), [Agent Handbook §9](docs/AGENT_WIKI.md#9-verification-matrix), relevant test fixtures |
+| Delivery / release / upgrade | Shared Delivery skill, [Release Process](docs/RELEASE_PROCESS.md); [Deploy](DEPLOY.md) for deployment only, within explicit authorization |
+
+## Verified Development Commands
+
+Run from the repository root. Python **>=3.12** is required by [pyproject.toml](pyproject.toml); dependency installation below matches [CI](.github/workflows/guardrails.yml) and [Install](docs/INSTALL.md#manual-install).
+
+```bash
+python3.12 -m venv .venv
+./.venv/bin/pip install --upgrade pip
+./.venv/bin/pip install -r requirements/dev.txt -c constraints/dev.txt
+```
+
+Do not recreate an existing environment unless needed. The launchers and Makefile select Python via `scripts/python_runtime.sh`; isolated worktrees can use `OM_PYTHON=/absolute/path/to/python3.12` with verified dependencies.
+
+| Purpose | Command / boundary |
+|---|---|
+| CLI help / tool schema | `./om help`; `./om-agent spec` |
+| Start interactive CLI | `./om` in a terminal; first-run wizard: `./om setup init`. Inspect the selected runtime target first; saving configuration, scanning and services retain their authorization gates |
+| Preview runtime config build | `./om config build --source yaml --market <us-or-hk> --config-yaml <isolated-config.yaml> --output <isolated-runtime.json> --dry-run`; replace placeholders with the actual scope. Writing requires the appropriate target authorization; see [Config Contract](CONFIGS.md) |
+| Build strategy-core wheel | `./.venv/bin/python -m pip wheel --no-deps . -w <temporary-wheel-directory>`; this packages only the reusable strategy core, not the whole OM application. See [strategy-core contract](docs/candidate_strategy.md) |
+| Focused regression | `./.venv/bin/python -m pytest <relevant-test-paths> -q`; select by [Tests Guide](tests/README.md) |
+| Full automatic test discovery | `make test` (`make test-all` is an alias) |
+| Lint / standalone smoke | `make lint`; `make smoke` |
+| Documentation / tracking / sensitive artifacts | `./.venv/bin/python scripts/guardrails_check.py --check-doc-wording --check-runtime-config-tracking --check-sensitive-artifacts`; `git diff --check` |
+
+Test/lint/smoke targets are defined in [Makefile](Makefile); CI retains full regression discovery across shards. OM runs directly from Python source; release source archives and publishing checks belong to [Release Process](docs/RELEASE_PROCESS.md), not the wheel build above. These are command references, not permission to install, scan, publish or change a running instance.
+
 ## Entry Point Ladder
 
 Use the highest-level safe entry point available:

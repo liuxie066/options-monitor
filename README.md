@@ -340,3 +340,21 @@ OM · 决策简报 · [你的账户标签]
 ## 风险提示
 
 OM 提供监控、筛选、报告和复盘辅助，不构成投资建议。任何下单前，都应自行核对价格、流动性、费用、资金要求、持股覆盖、仓位暴露、事件风险和数据新鲜度。候选、收益估算、平仓评估和压力测试都不能替代你的交易判断。
+
+## Community
+
+使用中遇到问题、对报告有疑问，或想提个新点子，都欢迎到 [Discord 社区](https://discord.gg/uTzDRVnut)交流。我们在这里集中收集反馈。
+
+本仓库不接受外部 Pull Request，代码变更由维护者统一提交。需要修复问题或新增功能，请先在 Discord 描述具体场景，由维护者跟进。
+
+如果 OM 让期权监控省心了一点，欢迎点个 ⭐，让更多人发现它。
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=liuxie066%2Foptions-monitor&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=liuxie066/options-monitor&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=liuxie066/options-monitor&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=liuxie066/options-monitor&type=date&legend=top-left" />
+ </picture>
+</a>
