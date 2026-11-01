@@ -7,9 +7,12 @@ _BRIEF_ENTRYPOINTS = (
     'assemble_daily_decision_briefs(',
     'persist_daily_decision_brief_success(',
     'prepare_daily_decision_brief_delivery(',
-    'render_fixed_report(',
-    'render_candidate_alert(',
-    'render_fixed_failure(',
+    '(render_fixed_report if feishu_card_delivery else render_fixed_report_text)(',
+    '(render_candidate_alert if feishu_card_delivery else render_candidate_alert_text)(',
+    '(render_fixed_failure if feishu_card_delivery else render_fixed_failure_text)(',
+    'render_fixed_report_card_blocks(',
+    'render_candidate_alert_card_blocks(',
+    'render_feishu_notification_card(',
     'build_per_account_delivery_batch(',
 )
 
