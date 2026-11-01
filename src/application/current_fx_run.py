@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from domain.domain.performance.cash_conversion import RunFXError, decode_run_fx_snapshot as _decode
 from src.application.payload_helpers import canonical_json_bytes_lines
 from src.application.tick_run_workspace import (
     AccountRunConfigError,
@@ -19,22 +19,11 @@ from src.infrastructure.exchange_rates import current_exchange_rate_snapshot
 RUN_FX_NAME = "current_exchange_rates.v1.json"
 
 
-class RunFXError(RuntimeError):
-    pass
-
-
-def _decode(raw: bytes, *, run_id: str) -> tuple[dict[str, Any], str]:
-    try:
-        envelope = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, ValueError) as exc:
-        raise RunFXError("sealed FX artifact is invalid") from exc
-    if not isinstance(envelope, dict) or envelope.get("schema_version") != 1 or envelope.get("run_id") != run_id:
-        raise RunFXError("sealed FX artifact identity mismatch")
-    snapshot = envelope.get("snapshot")
-    digest = envelope.get("snapshot_sha256")
-    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("pairs"), dict) or not isinstance(digest, str) or canonical_sha256(snapshot) != digest:
-        raise RunFXError("sealed FX artifact hash mismatch")
-    return snapshot, digest
+def encode_run_fx_snapshot(snapshot: dict[str, Any], *, run_id: str) -> bytes:
+    """Seal the owner's observation without changing its times or pair qualification."""
+    return canonical_json_bytes_lines(
+        {"schema_version": 1, "run_id": run_id, "snapshot_sha256": canonical_sha256(snapshot), "snapshot": snapshot}
+    )
 
 
 def load_run_fx_snapshot(*, base: Path, run_id: str) -> tuple[dict[str, Any], str]:
@@ -55,17 +44,12 @@ def seal_run_fx_snapshot(*, base: Path, run_id: str) -> tuple[dict[str, Any], st
     snapshot = current_exchange_rate_snapshot(
         cache_path=Path(base).resolve() / "output_shared" / "state" / "rate_cache.json",
     )
-    digest = canonical_sha256(snapshot)
-    payload: Mapping[str, Any] = {
-        "schema_version": 1,
-        "run_id": run_id,
-        "snapshot_sha256": digest,
-        "snapshot": snapshot,
-    }
     try:
         write_run_state_bytes_once_safely(
-            base=base, run_id=run_id, name=RUN_FX_NAME,
-            payload=canonical_json_bytes_lines(payload),
+            base=base,
+            run_id=run_id,
+            name=RUN_FX_NAME,
+            payload=encode_run_fx_snapshot(snapshot, run_id=run_id),
         )
     except AccountRunConfigError as exc:
         raise RunFXError("sealed FX artifact conflicts with this run") from exc

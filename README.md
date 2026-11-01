@@ -266,7 +266,7 @@ OM · 决策简报 · [你的账户标签]
 | 期权现金流与绩效 | 查询期间期权净现金流及开仓批次现金结果；两种口径不能相加，也不能当作包含股票盈亏的账户总回报；见[绩效说明](docs/OPTION_PERFORMANCE_DESIGN.md) |
 | 指派压力测试 | 模拟所选账户仅卖出 Put、仅卖出 Call 或全部未平仓卖出期权被指派（默认全部），查看资产、资金覆盖和潜在负债；通过 `om portfolio assignment-scenario --scenario short_put\|short_call\|all_short` 选择假设；不执行实际交易，也不修改账本 |
 | 可选 Holdings 来源 | 为全局持仓风险补充同机 Portfolio Management 中的非富途资产；默认关闭，不替代富途账户数据；见[配置指南](CONFIGURATION_GUIDE.md) |
-| 离线研究与归档 | 收集证据、复核已有样本；写入归档需显式授权；见[Agent Handbook](docs/AGENT_WIKI.md) |
+| 离线研究与归档 | 收集证据、复核已有样本；支持独立名单范围、日终及附属资料持续采集和压缩交付，详见[研究采集合同](docs/RESEARCH_WATCHLIST_SCOPE.md)；写入归档需显式授权 |
 
 离线研究的 `om_strategy_core.evaluation` 提供估值、市场/FX 资格和规范现金基础。summarize/compare 的 v1/v2 接口及指标实现已从当前源码移除；回测收益、回撤、现金流稳定性、模拟接股风险及策略比较由 OptionBench 的 csp_metrics 模块维护，OM 不反向依赖 OB。缺资料仍按指标报告不足；这不是完整车轮或线上交易功能，详见 [API Index](docs/API_INDEX.md)。
 
@@ -330,3 +330,21 @@ OM · 决策简报 · [你的账户标签]
 ## 风险提示
 
 OM 提供监控、筛选、报告和复盘辅助，不构成投资建议。任何下单前，都应自行核对价格、流动性、费用、资金要求、持股覆盖、仓位暴露、事件风险和数据新鲜度。候选、收益估算、平仓评估和压力测试都不能替代你的交易判断。
+
+## Community
+
+使用中遇到问题、对报告有疑问，或想提个新点子，都欢迎到 [Discord 社区](https://discord.gg/uTzDRVnut)交流。我们在这里集中收集反馈。
+
+本仓库不接受外部 Pull Request，代码变更由维护者统一提交。需要修复问题或新增功能，请先在 Discord 描述具体场景，由维护者跟进。
+
+如果 OM 让期权监控省心了一点，欢迎点个 ⭐，让更多人发现它。
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=liuxie066%2Foptions-monitor&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=liuxie066/options-monitor&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=liuxie066/options-monitor&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=liuxie066/options-monitor&type=date&legend=top-left" />
+ </picture>
+</a>

@@ -13,6 +13,7 @@ from domain.domain.ledger.fees import FeeComponent
 from domain.domain.money import quantize_money, to_decimal
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.performance.cash_conversion import (
+    cash_fx_observation_facts,
     MARKET_CASH_FX_METHOD,
     market_cash_fx_quality,
     DAILY_CASH_FX_METHOD,
@@ -26,7 +27,7 @@ from domain.domain.performance.cash_conversion import (
     select_cash_fx_rate,
 )
 from domain.domain.performance.models import FXRateFact
-from src.infrastructure.exchange_rates import verified_exchange_rate_pairs, get_cached_exchange_rates
+from src.infrastructure.exchange_rates import get_cached_exchange_rates
 from src.infrastructure.performance_evidence_sqlite import PerformanceEvidenceSQLiteRepository
 
 
@@ -53,34 +54,6 @@ def load_cash_fx_payload(repo: Any, *, conn: Any | None = None, persist: bool = 
         # Invalid FX evidence must leave CNY pending, without rejecting native cash.
         rates = ()
     return {"fx_rate_facts": rates}
-
-
-def cash_fx_observation_facts(
-    observation: Mapping[str, Any],
-    *,
-    observed_at_ms: int,
-    observation_status: str = "ready",
-) -> tuple[FXRateFact, ...]:
-    pairs = verified_exchange_rate_pairs(
-        observation, observed_at=datetime.fromtimestamp(observed_at_ms / 1000, tz=timezone.utc),
-    )
-    facts = []
-    for pair, row in pairs.items():
-        effective = _payload_timestamp_ms({"timestamp": row["quote_at_utc"]})
-        captured = _payload_timestamp_ms({"timestamp": row["observed_at_utc"]})
-        provider = row["source"]
-        facts.append(FXRateFact(
-            fact_id=None,
-            base_currency=pair[:3], quote_currency="CNY", rate=row["rate"], rate_kind="spot",
-            effective_at_ms=effective, observed_at_ms=captured,
-            source="realtime_snapshot",
-            source_id=f"verified_quote:{provider}:{pair}:{effective}:{captured}",
-            quality={"provider_source": provider, "source_timestamp_verified": True},
-            raw=dict(row),
-        ))
-    if not facts:
-        raise ValueError("FX evidence has no pair with verified source and quote time")
-    return tuple(facts)
 
 
 def attach_trade_event_cash_conversions(
@@ -150,9 +123,12 @@ def attach_assigned_stock_sale_cash_conversions(
     out["cash_conversions"] = conversions
     if "sale_allocations" in out:
         from domain.domain.assigned_stock import assigned_stock_sale_allocations
+
         out["sale_allocations"] = [
             attach_assigned_stock_sale_cash_conversions(
-                item, fx_payload=fx_payload, observed_at_ms=observed_at_ms,
+                item,
+                fx_payload=fx_payload,
+                observed_at_ms=observed_at_ms,
             )
             for item in assigned_stock_sale_allocations(out)
         ]
@@ -178,7 +154,11 @@ def build_cash_conversion(
     evidence_selection = isinstance(fx_payload, Mapping) and "fx_rate_facts" in fx_payload
     selected_rate = None
     if evidence_selection:
-        selection = select_cash_fx_rate(tuple(fact for fact in fx_payload["fx_rate_facts"] if fact.observed_at_ms <= int(observed_at_ms)), base_currency=native_currency, at_ms=int(effective_at_ms))
+        selection = select_cash_fx_rate(
+            tuple(fact for fact in fx_payload["fx_rate_facts"] if fact.observed_at_ms <= int(observed_at_ms)),
+            base_currency=native_currency,
+            at_ms=int(effective_at_ms),
+        )
         selected_rate = selection.fact
         fx_payload = None
         method = MARKET_CASH_FX_METHOD
@@ -213,7 +193,11 @@ def build_cash_conversion(
         conversion_method = "cny_identity"
         conversion_rate_source = "identity"
     else:
-        rates = fx_payload.get("rates") if isinstance(fx_payload, Mapping) and isinstance(fx_payload.get("rates"), Mapping) else {}
+        rates = (
+            fx_payload.get("rates")
+            if isinstance(fx_payload, Mapping) and isinstance(fx_payload.get("rates"), Mapping)
+            else {}
+        )
         try:
             rate = to_decimal(rates.get(f"{native_currency}CNY"), field_name="cash conversion FX rate")
             if rate <= 0:
@@ -224,8 +208,10 @@ def build_cash_conversion(
         if rate is not None and rate_timestamp_ms is None:
             rate = None
             missing_reason = f"{native_currency}CNY booking FX timestamp unavailable"
-        if rate is not None and conversion_method != MARKET_CASH_FX_METHOD and abs(rate_timestamp_ms - int(effective_at_ms)) > int(
-            max_rate_distance_ms
+        if (
+            rate is not None
+            and conversion_method != MARKET_CASH_FX_METHOD
+            and abs(rate_timestamp_ms - int(effective_at_ms)) > int(max_rate_distance_ms)
         ):
             rate = None
             missing_reason = f"{native_currency}CNY booking FX outside 24h event window"
@@ -252,13 +238,16 @@ def build_cash_conversion(
         "rate_evidence_fact_id": str(rate_evidence_fact_id or "").strip() or None,
         "rate_timestamp": rate_timestamp,
         "observed_at_ms": int(observed_at_ms),
-        "missing_reason": None if status == "observed" else missing_reason or f"{native_currency}CNY booking FX unavailable",
+        "missing_reason": None
+        if status == "observed"
+        else missing_reason or f"{native_currency}CNY booking FX unavailable",
     }
     if conversion_method == DAILY_CASH_FX_METHOD:
         result.update(fx_policy=DAILY_CASH_FX_POLICY, cash_fx_date=cash_fx_date(effective_at_ms))
     if conversion_method == MARKET_CASH_FX_METHOD and isinstance(selected_rate, FXRateFact):
         result.update(
-            source_timestamp_verified=True, fx_calendar=dict(CALENDAR_EVIDENCE),
+            source_timestamp_verified=True,
+            fx_calendar=dict(CALENDAR_EVIDENCE),
             rate_quote_quality=market_cash_fx_quality(selected_rate, at_ms=int(effective_at_ms)),
         )
     if isinstance(selected_rate, FXRateFact):

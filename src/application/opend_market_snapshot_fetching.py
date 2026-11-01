@@ -7,6 +7,8 @@ from pathlib import Path
 import time
 from typing import Any, Callable, Mapping
 
+from domain.domain.performance.strategy_evaluation import trading_calendar_dates
+
 from src.application.opening_quote_evidence import (
     OpeningUnderlierObservation,
     normalize_underlier_observation,
@@ -31,34 +33,6 @@ class OpenDUnderlierObservation(OpeningUnderlierObservation):
     def to_dict(self) -> dict[str, Any]:
         # Provider diagnostics travel separately from the frozen business contract.
         return {item.name: getattr(self, item.name) for item in fields(OpeningUnderlierObservation)}
-
-
-def trading_calendar_dates(receipt: Any, *, start: date, end: date) -> list[str]:
-    if not isinstance(receipt, Mapping) or (
-        receipt.get("retcode") != 0
-        or receipt.get("coverage_complete") is not True
-        or receipt.get("pagination_complete") is not True
-        or receipt.get("page_count") != 1
-    ):
-        raise ValueError("calendar receipt incomplete")
-    dates: set[str] = set()
-    rows = receipt.get("rows")
-    if hasattr(rows, "to_dict"):
-        rows = rows.to_dict("records")
-    if not isinstance(rows, list) or any(not isinstance(row, Mapping) for row in rows):
-        raise ValueError("provider rows invalid")
-    for row in rows:
-        raw = row.get("time") or row.get("date") or row.get("trade_date")
-        kind = str(row.get("trade_date_type") or "").strip().upper()
-        if not isinstance(raw, str) or kind not in {"WHOLE", "MORNING", "AFTERNOON"}:
-            raise ValueError("calendar row invalid")
-        day = date.fromisoformat(raw)
-        if day.isoformat() != raw or not start <= day <= end:
-            raise ValueError("calendar date outside request")
-        dates.add(raw)
-    if not dates:
-        raise ValueError("calendar returned no trading dates")
-    return sorted(dates)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -121,6 +95,8 @@ class MarketSnapshotFetchResult:
     requested_at_utc: str | None = None
     received_at_utc: str | None = None
     code_receipts: dict[str, tuple[str | None, str | None]] = field(default_factory=dict)
+    batch_receipts: tuple[dict[str, Any], ...] = ()
+    provider_responses: tuple[dict[str, Any], ...] = ()
 
     @property
     def requested_codes_count(self) -> int:
@@ -137,6 +113,38 @@ class MarketSnapshotFetchResult:
     @property
     def unexpected_codes_count(self) -> int:
         return len(self.unexpected_codes)
+
+
+def _record_snapshot_call(gateway, codes, receipts, *, stage, batch_start, provider_responses):
+    receipt = {
+        "stage": stage,
+        "batch_start": batch_start,
+        "requested_codes": list(codes),
+        "provider_call_started": True,
+        "requested_at_utc": datetime.now(timezone.utc).isoformat(),
+        "received_at_utc": None,
+        "status": "failed",
+        "error_code": None,
+    }
+    receipts.append(receipt)
+    try:
+        result = gateway.get_snapshot(codes)
+        receipt["received_at_utc"] = datetime.now(timezone.utc).isoformat()
+        receipt["status"] = "empty" if result is None or result.empty else "received"
+        response = {"batch_receipt_index": len(receipts) - 1, "rows": None, "capture_error": None}
+        provider_responses.append(response)
+        try:
+            response["rows"] = [] if result is None else futu_dataframe_records(result)
+        except Exception as exc:
+            # Capturing extra provider fields must not change the quote owner's result.
+            response["capture_error"] = type(exc).__name__
+        return result
+    except BaseException as exc:
+        receipt["error_code"] = type(exc).__name__
+        raise
+    finally:
+        if receipt["received_at_utc"] is None:
+            receipt["received_at_utc"] = datetime.now(timezone.utc).isoformat()
 
 
 def get_spot_opend(
@@ -162,6 +170,7 @@ def get_spot_opend(
         snapshot_max_calls=snapshot_max_calls,
     ).market_snapshot
     try:
+
         def _call_snapshot() -> Any:
             _increment_metric(metrics, "spot_snapshot_opend_calls")
             _increment_metric(metrics, "spot_snapshot_requested_codes")
@@ -256,6 +265,7 @@ def get_underlier_observation_opend(
     snapshot_row: dict[str, Any] | None = None
     market_state_row: dict[str, Any] | None = None
     try:
+
         def _snapshot_call() -> Any:
             _increment_metric(metrics, "spot_snapshot_opend_calls")
             _increment_metric(metrics, "spot_snapshot_requested_codes")
@@ -287,6 +297,7 @@ def get_underlier_observation_opend(
         )
 
     try:
+
         def _market_state_call() -> Any:
             _increment_metric(metrics, "spot_market_state_opend_calls")
             _increment_metric(metrics, "spot_market_state_requested_codes")
@@ -347,13 +358,7 @@ def get_underlier_observations_opend(
 ) -> dict[str, OpeningUnderlierObservation]:
     """Fetch exact run-scoped underlier observations in bounded batches."""
     check_fetch_control(deadline, cancelled)
-    codes = list(
-        dict.fromkeys(
-            code
-            for raw_code in underlier_codes
-            if (code := str(raw_code or "").strip().upper())
-        )
-    )
+    codes = list(dict.fromkeys(code for raw_code in underlier_codes if (code := str(raw_code or "").strip().upper())))
     batch_size = max(1, int(snapshot_batch_size))
     observations: dict[str, OpeningUnderlierObservation] = {}
 
@@ -386,10 +391,7 @@ def get_underlier_observations_opend(
 
     def _fetch(endpoint: str, batch: list[str], endpoint_diagnostics: list[dict[str, Any]]) -> Any:
         started = monotonic()
-        endpoint_stop = min(
-            value for value in (started + 30.0, deadline, stop_monotonic)
-            if value is not None
-        )
+        endpoint_stop = min(value for value in (started + 30.0, deadline, stop_monotonic) if value is not None)
         evidence: dict[str, Any] = {
             "endpoint": endpoint,
             "attempts": 0,
@@ -404,12 +406,14 @@ def get_underlier_observations_opend(
                 try:
                     return getattr(gateway, endpoint)(batch)
                 except Exception as exc:
-                    evidence["errors"].append({
-                        "attempt": evidence["attempts"],
-                        "error_code": classify_option_chain_error(exc),
-                        "error_class": type(exc).__name__,
-                        "message": str(exc),
-                    })
+                    evidence["errors"].append(
+                        {
+                            "attempt": evidence["attempts"],
+                            "error_code": classify_option_chain_error(exc),
+                            "error_class": type(exc).__name__,
+                            "message": str(exc),
+                        }
+                    )
                     raise
 
             return _limited(_provider_call, endpoint_stop)
@@ -643,11 +647,9 @@ def fetch_option_snapshots(
     snapshot_errors: list[dict[str, Any]] = []
     batch_requested_at: list[datetime] = []
     batch_received_at: list[datetime] = []
-    requested_code_order = tuple(dict.fromkeys(
-        code
-        for raw_code in option_codes
-        if (code := str(raw_code or "").strip())
-    ))
+    requested_code_order = tuple(
+        dict.fromkeys(code for raw_code in option_codes if (code := str(raw_code or "").strip()))
+    )
     requested_codes = frozenset(requested_code_order)
     code_receipts: dict[str, tuple[str | None, str | None]] = {}
     if snapshot_cache is not None:
@@ -667,13 +669,17 @@ def fetch_option_snapshots(
     batch_size = max(1, batch_size)
     keep_columns = list(SNAPSHOT_KEEP_COLUMNS)
     opend_call_count = 0
+    batch_receipts: list[dict[str, Any]] = []
+    provider_responses: list[dict[str, Any]] = []
 
     for start in range(0, len(missing_order), batch_size):
         check_fetch_control(deadline, cancelled)
         batch = list(missing_order[start : start + batch_size])
         requested_at = datetime.now(timezone.utc)
         batch_requested_at.append(requested_at)
+        receipt_start = len(batch_receipts)
         try:
+
             def _call_snapshot(batch0: list[str] = batch) -> Any:
                 def _gateway_snapshot_call() -> Any:
                     nonlocal opend_call_count
@@ -683,7 +689,14 @@ def fetch_option_snapshots(
                         calls["market_snapshot"] = calls.get("market_snapshot", 0) + 1
                     check_fetch_control(deadline, cancelled)
                     try:
-                        result = gateway.get_snapshot(batch0)
+                        result = _record_snapshot_call(
+                            gateway,
+                            batch0,
+                            batch_receipts,
+                            stage="market_snapshot",
+                            batch_start=start,
+                            provider_responses=provider_responses,
+                        )
                     finally:
                         check_fetch_control(deadline, cancelled)
                     return result
@@ -721,6 +734,19 @@ def fetch_option_snapshots(
                 }
             )
             snap = None
+        if len(batch_receipts) == receipt_start:
+            batch_receipts.append(
+                {
+                    "stage": "market_snapshot",
+                    "batch_start": start,
+                    "requested_codes": batch,
+                    "provider_call_started": False,
+                    "requested_at_utc": None,
+                    "received_at_utc": None,
+                    "status": "failed",
+                    "error_code": "PROVIDER_NOT_CALLED",
+                }
+            )
         received_at = datetime.now(timezone.utc)
         batch_received_at.append(received_at)
         if snap is None or snap.empty:
@@ -731,8 +757,8 @@ def fetch_option_snapshots(
             continue
 
         for record in records:
-            record["snapshot_requested_at_utc"] = requested_at.isoformat()
-            record["snapshot_received_at_utc"] = received_at.isoformat()
+            record["snapshot_requested_at_utc"] = batch_receipts[-1]["requested_at_utc"]
+            record["snapshot_received_at_utc"] = batch_receipts[-1]["received_at_utc"]
         _merge_snapshot_records(
             records=records,
             requested_codes=requested_codes,
@@ -740,7 +766,7 @@ def fetch_option_snapshots(
             duplicate_codes=duplicate_codes,
             snap_map=snap_map,
             code_receipts=code_receipts,
-            receipt=(batch_requested_at[-1].isoformat(), batch_received_at[-1].isoformat()),
+            receipt=(batch_receipts[-1]["requested_at_utc"], batch_receipts[-1]["received_at_utc"]),
         )
 
     fallback_filled = 0
@@ -755,6 +781,8 @@ def fetch_option_snapshots(
                 fallback_requested_at,
                 fallback_received_at,
             ) = _fallback_fetch_missing_snapshots(
+                batch_receipts=batch_receipts,
+                provider_responses=provider_responses,
                 missing_codes=missing,
                 gateway=gateway,
                 snapshot_limit=snapshot_limit,
@@ -787,6 +815,11 @@ def fetch_option_snapshots(
     received_times = [value.isoformat() for value in batch_received_at]
     requested_times.extend(r[0] for r in code_receipts.values() if r[0])
     received_times.extend(r[1] for r in code_receipts.values() if r[1])
+    if batch_receipts:
+        requested_times = [r["requested_at_utc"] for r in batch_receipts if r["requested_at_utc"]]
+        received_times = [r["received_at_utc"] for r in batch_receipts if r["received_at_utc"]]
+        requested_times.extend(r[0] for r in code_receipts.values() if r[0])
+        received_times.extend(r[1] for r in code_receipts.values() if r[1])
     if snapshot_cache is not None:
         for code, row in snap_map.items():
             if code not in snapshot_cache:
@@ -817,10 +850,7 @@ def fetch_option_snapshots(
             {
                 "stage": "market_snapshot_completeness",
                 "error_code": "SNAPSHOT_DUPLICATE_CODES",
-                "message": (
-                    "provider returned duplicate rows for "
-                    f"{len(duplicate_codes)} requested snapshot codes"
-                ),
+                "message": (f"provider returned duplicate rows for {len(duplicate_codes)} requested snapshot codes"),
                 "duplicate_codes": sorted(duplicate_codes),
             }
         )
@@ -839,6 +869,8 @@ def fetch_option_snapshots(
         requested_at_utc=min(requested_times, default=None),
         received_at_utc=max(received_times, default=None),
         code_receipts=code_receipts,
+        batch_receipts=tuple(batch_receipts),
+        provider_responses=tuple(provider_responses),
     )
 
 
@@ -849,11 +881,7 @@ def keep_snapshot_record_columns(snap: Any, keep_columns: list[str]) -> tuple[li
         return [], []
     records: list[dict[str, Any]] = []
     try:
-        records = [
-            dict(rec)
-            for rec in futu_dataframe_records(snap[keep])
-            if isinstance(rec, dict)
-        ]
+        records = [dict(rec) for rec in futu_dataframe_records(snap[keep]) if isinstance(rec, dict)]
     except Exception:
         try:
             for row in snap.to_dict("records"):
@@ -914,6 +942,8 @@ def _fallback_fetch_missing_snapshots(
     returned_codes: set[str],
     duplicate_codes: set[str],
     code_receipts: dict[str, tuple[str | None, str | None]],
+    batch_receipts: list[dict[str, Any]],
+    provider_responses: list[dict[str, Any]],
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
     diagnostics: dict[str, Any] | None = None,
@@ -948,7 +978,9 @@ def _fallback_fetch_missing_snapshots(
         batch = allowed[start : start + batch_size]
         requested_at = datetime.now(timezone.utc)
         fallback_requested_at.append(requested_at)
+        receipt_start = len(batch_receipts)
         try:
+
             def _call_fallback_snapshot(batch0: list[str] = batch) -> Any:
                 def _gateway_fallback_snapshot_call() -> Any:
                     nonlocal opend_call_count
@@ -958,7 +990,14 @@ def _fallback_fetch_missing_snapshots(
                         calls["market_snapshot"] = calls.get("market_snapshot", 0) + 1
                     check_fetch_control(deadline, cancelled)
                     try:
-                        result = gateway.get_snapshot(batch0)
+                        result = _record_snapshot_call(
+                            gateway,
+                            batch0,
+                            batch_receipts,
+                            stage="market_snapshot_fallback",
+                            batch_start=start,
+                            provider_responses=provider_responses,
+                        )
                     finally:
                         check_fetch_control(deadline, cancelled)
                     return result
@@ -986,6 +1025,19 @@ def _fallback_fetch_missing_snapshots(
             )
         except Exception as exc:
             check_fetch_control(deadline, cancelled)
+            if len(batch_receipts) == receipt_start:
+                batch_receipts.append(
+                    {
+                        "stage": "market_snapshot_fallback",
+                        "batch_start": start,
+                        "requested_codes": batch,
+                        "provider_call_started": False,
+                        "requested_at_utc": None,
+                        "received_at_utc": None,
+                        "status": "failed",
+                        "error_code": "PROVIDER_NOT_CALLED",
+                    }
+                )
             snapshot_errors.append(
                 {
                     "stage": "market_snapshot_fallback",
@@ -1029,8 +1081,8 @@ def _fallback_fetch_missing_snapshots(
             continue
 
         for record in records:
-            record["snapshot_requested_at_utc"] = requested_at.isoformat()
-            record["snapshot_received_at_utc"] = received_at.isoformat()
+            record["snapshot_requested_at_utc"] = batch_receipts[-1]["requested_at_utc"]
+            record["snapshot_received_at_utc"] = batch_receipts[-1]["received_at_utc"]
         batch_codes = set(batch)
         filled_before = len(batch_codes.intersection(snap_map))
         _merge_snapshot_records(
@@ -1040,7 +1092,7 @@ def _fallback_fetch_missing_snapshots(
             duplicate_codes=duplicate_codes,
             snap_map=snap_map,
             code_receipts=code_receipts,
-            receipt=(fallback_requested_at[-1].isoformat(), fallback_received_at[-1].isoformat()),
+            receipt=(batch_receipts[-1]["requested_at_utc"], batch_receipts[-1]["received_at_utc"]),
         )
         filled_after = len(batch_codes.intersection(snap_map))
         filled_count += max(0, filled_after - filled_before)

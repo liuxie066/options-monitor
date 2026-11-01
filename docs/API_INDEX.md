@@ -1,5 +1,31 @@
 # 共享能力与 API 索引
 
+2026-10-31 研究部署状态：固定研发包 `f0d46fbf…` 已在 `liuxie-incus` 独立安装并完成两市场Linux隔离、正式启动和独立回读，timer均enabled/active，11月2日起持续采集，当前新增真实观察0。总应用请求预算301次/日、研究占用/余量2GiB/2GiB；旧包原件保留，生产OM未改。下文各入口的“本地开发/未部署”是原切片记录，当前部署边界与真实数据待验项以[研究合同文首](RESEARCH_WATCHLIST_SCOPE.md)为准；不能当作正式OM版本已发布。
+
+研究附属原件输入：`watchlist_series.build_watchlist_series` 可选消费外部摘要绑定的
+`research.market-ancillary.v1` manifest；CLI `research watchlist-series-plan` 使用成对的
+`--ancillary/--expected-ancillary-sha256`，每日请求 v1/v2 使用可选 `ancillary` 引用。校验后原字节进入准备、各分片和导出，
+本接口只交接已有文件，不认证来源用途或覆盖。后续本地每日任务可显式配置 `ancillary_capture`，
+由 `research.market_ancillary` 在原报价点之前受控调用既有 FX／rehab owner，并将原件交入同一 manifest；
+两源FX、一次preflight及每标的一次rehab独立计量；已按新补充单批准的301次/日总预算部署，不自动扩大范围。
+详见[显式附属原件](RESEARCH_WATCHLIST_SCOPE.md#显式附属资料原件2026-10-31本地增量未部署)。
+
+封存 FX 离线投影（本地开发、未发布）：`om_strategy_core.evaluation.project_run_fx_facts(raw, run_id=...)`。唯一纯实现位于 `domain/domain/performance/cash_conversion.py`，复用原来源/session 规则及事实构造；`src.application.current_fx_run._decode`、`src.application.cash_conversion.cash_fx_observation_facts` 和 infrastructure pair 验证继续引用同一 owner。公开入口检查封存身份/摘要和原始带时区时刻，不取当前行情、不读写文件；源投影成功不证明后续决策/日终用途资格或期间覆盖。回归见 `tests/test_native_fx_projection.py`。
+
+候选内嵌FX投影（本地开发、未发布）：同一facade的`project_candidate_fx_facts(raw, run_id=...)`直接消费`opening_candidate_snapshot.v3`原字节，校验候选身份、嵌套观察摘要/时刻及FX依赖引用，再共用上述币对资格及事实投影。结果的`run_fx_artifact_verification=reference_only`仅证明引用关系，不证明原run FX封存文件已取得；不构造替代封存包、不重算策略、不联网，实际用途资格仍由调用方委托原owner核验。
+
+决策FX标量：`om_strategy_core.evaluation.decision_exchange_rates(fx=..., at_ms=...)`先按原owner选择合格事实，再按线上输入计算顺序生成float标量（USD为float原报价的倒数）。不先求Decimal倒数后转换，避免与封存线上标量出现末位差异；调用方可继续精确核对，不扩大容差。回归见`tests/test_strategy_evaluation_owner.py::test_decision_fx_matches_live_float_input_direction`。
+
+每日研究编排：`src/application/research/watchlist_day.py::run_watchlist_day`，CLI `om research watchlist-day-run`。消费有外部摘要的每日请求与显式上一日准备目录，复用 discovery/scope/plan/collect；v1 读冻结日历，v2 在首次准备时经同一发现网关查询显式 HK/US 日历范围并冻结回执，计入发现预算，重复触发不重查。默认预览，未部署。名单来自冻结导出，不选择实时配置或 latest；详见[研究合同](RESEARCH_WATCHLIST_SCOPE.md#每日准备与日历维护本地开发未部署)。
+
+持续自动执行：同模块 `run_watchlist_schedule`，CLI `om research watchlist-schedule-run`，旧 v1 绑定有限请求清单；长期 v2 无结束日期，自动冻结每日请求/日历并接续已验证 tracking，漏日显式记录。独立 timer 仅在批准窗口进入原 owner，三交易日仅首轮验收。默认预览，模板未安装。原 `research archive watchlist-export` 支持可选 `--object-root`，原件按 SHA 共用 gzip，保留原外部摘要，未清理源归档；详见[长期循环与压缩](RESEARCH_WATCHLIST_SCOPE.md#长期循环与压缩导出)。
+
+完整日归档：同模块 `pack_watchlist_day` / `restore_watchlist_day`，CLI `research archive watchlist-day-pack` / `watchlist-day-restore`；结束窗口后锁定每日目录，共享 gzip 对象，外部摘要认证后恢复到全新目录，保留 limiter 和空目录。显式 schedule v3 接入窗口外自动封存与压缩源接续，原 watchlist-export 可临时恢复压缩源后导出。旧 v1/v2 不变，不清理源副本、不进入生产 archive pull/prune；见[封存与恢复](RESEARCH_WATCHLIST_SCOPE.md#完整日源归档封存与恢复)。
+
+本地开发中的监控范围研究采集：`src/application/research/watchlist_scope.py::build_watchlist_scope`，CLI 为 `om research watchlist-scope`。仅消费固定摘要的离线窗口/链原件，5% 扩展、累计跟踪与分片；未部署，不代表名单发现覆盖已完整。全分片计划/采集/导出分别由 `src/application/research/watchlist_series.py::build_watchlist_series`、`src/application/research/watchlist_series.py::collect_watchlist_series`、`src/application/research/watchlist_series.py::export_watchlist_series` 维护，共用显式预算和限流。入口和限制见 [研究清单合同](RESEARCH_WATCHLIST_SCOPE.md)。
+
+独立研究链发现：`src/application/research/watchlist_discovery.py::discover_watchlist`，CLI `om research watchlist-discover`。固定离线名单、窗口和预算，复用 OM 到期及链 owner 请求 0—90 天完整静态链，再交回上述 5% 清单；默认只预览，未部署，不代表报价/生命周期证据完整。
+
 新增功能涉及共享数据或计算时，先按业务词查本页，再读对应入口、契约及直接调用者。这里只记录可复用入口和责任边界；参数、类型、公式、TTL、舍入及错误码由源码和契约维护。
 
 本页覆盖当前核心共享能力，不是全部函数或 HTTP endpoint 清单。Python 入口供项目内部开发；人工操作用 `./om`，结构化操作用 `./om-agent`。完整 Tool schema、权限和副作用从现有 `./om-agent spec` 查询，参见 [Tool Reference](TOOL_REFERENCE.md)。运行环境采用哪个实现，仍须按 [Docs Index](INDEX.md) 核验实际版本和证据。
@@ -45,6 +71,7 @@
 | 固定失败简报恢复补报 | `src/application/daily_decision_brief_repository.py::bind_daily_decision_brief_recovery_report`、`read_daily_decision_brief_recovery_source`、`read_daily_decision_brief_recovery_report`、`begin_daily_decision_brief_recovery_attempt`；截止计算 `src/application/scan_scheduler.py::daily_brief_recovery_cutoff` | 原失败已确认后，成功历史事务保留首次合格计划扫描的恢复输入，投递状态据此绑定不可变修订；冻结完整报告精确重试。明确未送达的补报到下一固定点／发送窗口结束时失效，未知结果保留原身份。v3 保留全部回执，旧 v2 读取器不兼容；不新增调度或 broker 查询。 | [通知合同](OPTION_NOTIFICATION_EXPERIENCE_PRD.md#721-失败后的恢复补报)、[回滚边界](RELEASE_PROCESS.md#daily-brief-投递状态兼容边界)；`tests/test_daily_decision_brief_recovery_flow.py`、`tests/test_daily_decision_brief_recovery_repository.py` |
 | Tick 同 key claim/reclaim 与终态身份 | `domain/storage/repositories/state_repo.py::claim_idempotency_record`、`write_idempotency_record`；编排终态 `src/application/tick_run_context.py::complete_tick_idempotency` | 首次 claim、过期/死 PID 恢复及 Tick 终态写入共用稳定 sibling 文件锁；终态仅允许与当前持久 claim 完全匹配的非空 run_id，无法证明身份时拒绝覆盖。原有 key/时间桶、PID/超时策略不变；不承诺跨 key 或外部投递恰好一次。其他 scope 写入语义不变。 | `tests/test_phase3_audit_idempotency_hooks.py`、`tests/test_tick_run_context.py`、`tests/test_multi_account_tick.py` |
 | 单腿开仓、candidate、收益、filter/rank | `domain/domain/engine/candidate_engine.py::calculate_opening_candidate_metrics`、`domain/domain/engine/candidate_engine.py::evaluate_opening_candidate_policy`、`domain/domain/engine/candidate_engine.py::rank_candidate_rows` | 规范化 OpenD 输入进入同一开仓计算、策略判定与排序；bid/ask、乘数、匹配波动率、价格取整和缺失语义保持原合同。普通 CSP/CC 的 delta 来源验证和上限硬筛由同一策略判定 owner 执行，不加入排序；组合策略仍进入其既有策略 owner。 | [候选策略](candidate_strategy.md)、[策略架构](STRATEGY_ARCHITECTURE.md)；`tests/test_candidate_engine_phase2_contract.py`、`tests/test_candidate_engine_parity.py` |
+| 期限匹配 RV、跨年交易日历、HKEX 证券市场日历 | `src/application/short_vol_metrics.py::fetch_realized_volatility_snapshot`；离线来源 `src/application/hkex_hk_securities_2027.json` | 历史已完成前复权日线和当年交易日仍由 OpenD 提供；HK 正股的未来2027计划交易日可由版本化 HKEX CT/077/26 证券市场通告补齐，保留文档摘要、覆盖、来源及合成输入摘要。半日市计一个日线 session；来源冲突、损坏、查询异常和未覆盖年份按到期档保留缺口，不替换 RV 公式或外推日历。 | [期限匹配 RV](candidate_strategy.md#7-期限匹配-rv)；`tests/test_short_vol_metrics.py`、`tests/test_short_vol_provider_evidence.py`；候选缺口由 `opening_candidate_snapshot.py::candidate_universe_summary` 传至 Daily Brief |
 | 可安装策略核心、replaceable template、policy identity | `om_strategy_core::{resolve_strategy,calculate_metrics,calculate_constraints,evaluate_candidates}`；早期容量 `calculate_capacity`，已评价集合 `rank_candidates` / `explain_rank`；实现 `domain/domain/strategy_core.py` | 普通 CSP/CC 纯计算；代码内有限版本模板替换政策，资格与财务指标共享。应用先合并配置并冻结事实；扫描的 `decision_now_utc` 随规范化输入封存，离线指标入口读取它或校验显式时间一致；旧快照缺失时不可自动恢复历史时钟。新执行精确查找实现，封存历史读取不要求实现仍存在。运行身份由 `om_strategy_core.identity::runtime_identity` 验证；不含回测、外部模板加载或 Combo 新入口。 | [核心边界](candidate_strategy.md#21-可复用-csp--cc-核心)；`tests/test_strategy_core.py`、`tests/test_strategy_core_package.py` |
 | 离线样本一致性、封存复算 | `src/application/strategy_sample_verify.py::verify_sample`；同名 module CLI | 只读指定 run/account；复用封存 owner、`candidate_scanning.calculation_rejection`、`sell_put_cash.sell_put_opening_capacity`、`pipeline_context.apply_sell_put_fx_status` 与策略核心，输出指标、完整拒绝、排序、张数逐项差异和证据缺口；容量不可用单列原标签核对；无行情、时钟或参数补值。分阶段一致不代表生产验收或收益评估。 | [离线验收](candidate_strategy.md#15-离线样本一致性验收)；`tests/test_strategy_sample_verify.py` |
 | 指定标的卖出开仓查询、option_candidates、批量候选 | 注册 `src/application/agent_tools/candidate.py::OPTION_CANDIDATES_TOOL`；应用 `src/application/option_candidates.py::normalize_queries`、`option_candidates_tool`、`option_candidates_context` | 最多 5 项严格标准查询，复用 Candidate Engine；仅筛合约，不判断账户容量，财报只作注释。Bot 在 `bot.tools.call_read_tool` 整批校验可信市场和配置，未授权零行情调用；共享有界执行归 `src/application/read_execution.py`。 | [工具合同](TOOL_REFERENCE.md#指定标的卖出开仓候选)、[Bot](BOT_DESIGN.md#指定标的卖出开仓候选)；`tests/test_bot_option_candidates.py`、`tests/test_bot_read_execution.py`、`tests/test_candidate_engine_contract_only.py` |
@@ -89,6 +116,10 @@
 `om_strategy_core.evaluation` 是离线估值与现金基础公开入口，领域实现在 `domain/domain/performance/strategy_evaluation.py`。合格市场/FX 投影、NAV、利息分红和情景估值继续由 OM 维护；既有费用、事件投影和现金归约仍复用原 owner。调用者传入显式持仓、市场原件和时点，不读取生产配置、账本或行情。缺失保留 incomplete，不把快照近似称为真实成交。
 
 `tests/test_strategy_evaluation_owner.py` 直接验证该 facade 的期权负债/接股情景、300秒接收近似、连续日息、除息权利/派息幂等及 FX 不足。OB 使用 `prepare_om_performance.py` 固定 Git 来源构建 wheel；旧三文件 overlay 环境仍是历史固定输入，不应改写。策略、费用、市场/FX 资格和现金基础不迁入 OB。此段说明源码能力，不宣称当前发行版本或线上服务已具备。
+
+本地新增显式休市估值合同：市场对象可附 `closed_market_carry`，包含版本 `om.closed-market-carry.v1`、原观察毫秒及按市场固定的原生日历回执。`legacy_market` / `value_portfolio` 验证原观察为最后交易日的收盘观察、其报价当时有效、日历在本次估值时已知且覆盖完整、到估值日之间没有遗漏交易日；日历不要求早于原报价，原价和原有效/接收/失效时间保留，FX 仍按估值时点选择。原 `trading_calendar_dates` 移至 `domain/domain/performance/strategy_evaluation.py`，行情模块保持同名显式导入，避免维护第二套回执解析。`tests/test_closed_market_valuation.py` 覆盖开市缺价、跨漏采日、原价失效、日历可知时间及缺口、半日市和夏令时。本地变更未发布或部署，OB 回测指标不回迁。
+
+2026-10-31 用户另行接受历史封存OM规范化日历及原始回执未留存限制。`closed_market_carry.calendars[market]` 可显式使用 `om.legacy-normalized-calendar.v1`，绑定 `snapshot_original.raw_json/sha256`、与原件一致的 `source_observed_at_utc` 和 `native_receipt_status=not_retained`。同一owner核验旧 `sell_put_top1_market_calendar_snapshot.v2` 的原字节、内容及旧publisher规范化来源摘要，仍检查市场、交易时段、覆盖和可知时间；不重建券商回执，不改变原生日历合同，不补齐缺失行情。OB报告须保留来源限制；本地开发overlay尚未发布或部署。
 
 `summarize_evaluation` / `compare_evaluations` 及其 `_v2` 接口、专用辅助代码与公式测试已从当前 OM 源码移除，不提供兼容转发。调用方须使用 OptionBench 的 csp_metrics 模块，公式回归由 OB 维护；OM 不反向依赖 OB。`tests/test_strategy_evaluation_owner.py` 验证退役接口不可用以及估值/现金基础仍可用。历史固定 wheel 和报告不改写；需要旧接口的外部调用方必须迁移或继续使用其显式固定的历史版本。OM 生产绩效及期间现金流 owner 不受影响。
 
