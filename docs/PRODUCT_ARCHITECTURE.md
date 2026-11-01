@@ -219,7 +219,7 @@ system defaults
   -> src.interfaces.cli.main
   -> application use cases
 
-./om-agent
+./om tools (compatible: ./om-agent)
   -> src.interfaces.agent.cli
   -> tool_execution
   -> application use cases
@@ -234,6 +234,7 @@ Feishu / WeChat / Inbound
 边界：
 
 - CLI / Tool Gateway / Inbound Bot 是入口和控制面，不拥有业务规则。
+- 推荐入口统一为 `om`：业务命令、`om tools` 结构化调用、`om bot` 自然语言助手；`om agent` / `om assistant` 保留 Bot 兼容语义。网关复用原解析、环境与权限，不经过人工实例自动发现。持仓评估默认人工展示，`--format json` 保留原业务 JSON；其他命令保留原有格式，详见 [Tool Reference](TOOL_REFERENCE.md#参数环境与输出兼容)。
 - Tool Gateway 工具默认应优先读现有证据；写路径必须受 preview / confirm / env gate 控制。
 - 配置默认值应集中在配置层，不应散落到策略实现里形成第二套控制面。
 

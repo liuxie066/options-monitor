@@ -20,7 +20,7 @@ Rules:
 - `src/application` must not import `scripts`.
 - `scripts/` is reserved for operational wrappers, release helpers, diagnostics,
   and one-off tools that delegate into `src` or `domain`.
-- Public behavior should enter through `./om`, `./om-agent`, or
+- Public behavior should enter through `./om` (including `./om tools`; compatible `./om-agent`), or
   documented `python -m src.application...` entry points.
 
 ## Optional capabilities and providers
@@ -126,9 +126,11 @@ against its canonical owner by object identity. Validate the contract with:
 
 ## Main Entry Points
 
-`./om` is the human CLI. It forwards to `src.interfaces.cli.main`.
+`./om` is the recommended public CLI. Business commands forward to
+`src.interfaces.cli.main`; `./om tools` delegates directly to the existing gateway.
 
-`./om-agent` is the structured Tool Gateway CLI. It forwards to
+`./om tools` is the structured Tool Gateway CLI (`./om-agent` remains compatible,
+including account mutation commands). Both forward to
 `src.interfaces.agent.cli`, where tool execution is routed through:
 
 ```text
@@ -146,7 +148,7 @@ for compatibility re-exports and shared helpers such as config/contracts; they
 must not own tool implementations. The legacy
 `src.application.agent_tool_handlers` switchboard has been removed.
 
-`./om bot ...` is the local/eval entry for the read-only Bot. Channel
+`./om bot ...` (compatible aliases `om agent` / `om assistant`) is the local/eval entry for the read-only Bot. Channel
 Bot is read-first and may request deterministic Control previews. Both are part
 of the human CLI surface, not the Tool Gateway manifest:
 

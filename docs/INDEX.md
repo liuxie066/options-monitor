@@ -94,7 +94,7 @@
 - [Agent Handbook](AGENT_WIKI.md)：本地 agent 的任务 playbook、模块地图和验证矩阵。
 - [Session Summary](SESSION_SUMMARY.md)：仅在显式 handoff 时使用的模板。
 
-`./om-agent spec` 是公开工具清单的运行时权威。Tool Reference 不复制每个工具的完整 schema。
+`./om tools spec`（兼容 `./om-agent spec`）是公开工具清单的运行时权威。Tool Reference 不复制每个工具的完整 schema。
 
 ## 运维、修复与发布
 

@@ -125,7 +125,7 @@ om daily-brief latest
 - `om wheel`：沿用账户层激活和策略确认。
 - Combo：沿用 `symbols edit` 的 yield_enhancement 高级配置，无第二套总开关。
 
-账本、交易审核、研究、诊断包和升级等高级入口仍在 `om help all`。结构化工具供 Agent 或脚本使用，见 `om-agent spec`。
+账本、交易审核、研究、诊断包和升级等高级入口仍在 `om help all`。统一推荐 `om`：结构化工具见 `om tools spec`，自然语言助手用 `om bot`；`om-agent` 以及 Bot 的 `om agent` / `om assistant` 别名保留兼容。
 
 ## 5. 可选：Feishu long-connection
 

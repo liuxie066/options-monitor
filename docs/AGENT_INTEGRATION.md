@@ -1,8 +1,14 @@
 # Tool Gateway Integration
 
-The public Tool Gateway launcher is `./om-agent`.
+The public Tool Gateway launcher is `./om tools`.
 
-`./om-agent` is a structured local tool-call entrypoint for external agents,
+`./om-agent` remains a compatible launcher for every public subcommand and option,
+including `spec`, `run`, `add-account`, `edit-account`, and `remove-account`.
+`om agent` and `om assistant` remain aliases of the natural-language `om bot`;
+they are not Tool Gateway entrypoints. Environment selection and output/exit-code
+rules are documented in [Tool Reference](TOOL_REFERENCE.md#参数环境与输出兼容).
+
+`./om tools` is a structured local tool-call entrypoint for external agents,
 scripts, Codex, or operators. It is not OM's autonomous/project
 Agent, and it should not own multi-step planning or message conversation
 state. Current entry and layer terminology is defined in
@@ -11,9 +17,9 @@ state. Current entry and layer terminology is defined in
 
 It exposes a stable JSON contract intended for local machine usage:
 
-- `./om-agent add-account --market us|hk --account-label <label> --account-type futu --dry-run`
-- `./om-agent spec`
-- `./om-agent run --tool <name> --input-json '<json>'`
+- `./om tools add-account --market us|hk --account-label <label> --account-type futu --dry-run`
+- `./om tools spec`
+- `./om tools run --tool <name> --input-json '<json>'`
 
 Capability boundaries, risk classes, Inbound Bot exposure, and
 verification rules are maintained in
@@ -22,7 +28,7 @@ This document only describes integration contracts and invocation patterns.
 
 也支持：
 
-- `./om-agent run --tool <name> --input-file payload.json`
+- `./om tools run --tool <name> --input-file payload.json`
 
 其中 `--input-file` 会覆盖 `--input-json`。
 
@@ -105,10 +111,10 @@ links and excluded resources remain `PERMISSION_DENIED`. Missing resources remai
 `READ_ERROR`, while no search match is a successful result with explicit coverage.
 
 ```bash
-./om-agent run --tool project_context --input-json '{"config_key":"us"}'
-./om-agent run --tool project_files --input-json '{"action":"search","query":"wheel","relative_name":"src"}'
-./om-agent run --tool project_files --input-json '{"action":"read","relative_name":"docs/ARCHITECTURE.md","start_line":1,"max_lines":80}'
-./om-agent run --tool project_files --input-json '{"resource":"run","action":"list","config_key":"us","account":"lx"}'
+./om tools run --tool project_context --input-json '{"config_key":"us"}'
+./om tools run --tool project_files --input-json '{"action":"search","query":"wheel","relative_name":"src"}'
+./om tools run --tool project_files --input-json '{"action":"read","relative_name":"docs/ARCHITECTURE.md","start_line":1,"max_lines":80}'
+./om tools run --tool project_files --input-json '{"resource":"run","action":"list","config_key":"us","account":"lx"}'
 ```
 
 Roots come from trusted project/runtime resolvers; the Bot cannot supply paths
@@ -141,7 +147,7 @@ execution; aggregate tools without an account retain their existing defaults.
 For “Wheel 有没有正常激活？”, use the existing read-only status tool:
 
 ```bash
-./om-agent run --tool runtime_status --input-json '{"config_key":"us","accounts":["lx"],"view":"wheel_activation"}'
+./om tools run --tool runtime_status --input-json '{"config_key":"us","accounts":["lx"],"view":"wheel_activation"}'
 ```
 
 `view` defaults to `summary`. The `wheel_activation` view compares the selected
@@ -165,23 +171,23 @@ an output limitation.
 Use the launcher as a local command tool. Typical pattern:
 
 ```bash
-./om-agent spec
-./om-agent run --tool version_check --input-json '{"remote_name":"origin"}'
-./om-agent run --tool version_update --input-json '{"bump":"patch"}'
-./om-agent run --tool config_validate --input-json '{"config_key":"us"}'
-./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
-./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
-./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'
-./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"lx"}'
-./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"sy"}'
-./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'
-./om-agent run --tool option_performance_report --input-json '{"config_key":"us","account":"lx","period":"mtd"}'
-./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"list","account":"lx","status":"open"}'
-./om-agent run --tool close_advice_read --input-json '{"config_key":"us","query":{"option_type":"put","side":"short"}}'
-PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_query --input-json '{"view":"overview","accounts":["lx","sy"]}'
-PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_pnl_bridge --input-json '{"period":"mtd","as_of_month":"2026-07","accounts":["lx","sy"]}'
-PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_cash_bridge --input-json '{"period":"mtd","as_of_month":"2026-07","accounts":["lx","sy"]}'
-PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_assignment_scenario --input-json '{"accounts":["lx","sy"]}'
+./om tools spec
+./om tools run --tool version_check --input-json '{"remote_name":"origin"}'
+./om tools run --tool version_update --input-json '{"bump":"patch"}'
+./om tools run --tool config_validate --input-json '{"config_key":"us"}'
+./om tools run --tool runtime_status --input-json '{"config_key":"us"}'
+./om tools run --tool healthcheck --input-json '{"config_key":"us"}'
+./om tools run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'
+./om tools run --tool query_cash_headroom --input-json '{"config_key":"us","account":"lx"}'
+./om tools run --tool query_cash_headroom --input-json '{"config_key":"us","account":"sy"}'
+./om tools run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'
+./om tools run --tool option_performance_report --input-json '{"config_key":"us","account":"lx","period":"mtd"}'
+./om tools run --tool option_positions_read --input-json '{"config_key":"us","action":"list","account":"lx","status":"open"}'
+./om tools run --tool close_advice_read --input-json '{"config_key":"us","query":{"option_type":"put","side":"short"}}'
+PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om tools run --tool portfolio_query --input-json '{"view":"overview","accounts":["lx","sy"]}'
+PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om tools run --tool portfolio_pnl_bridge --input-json '{"period":"mtd","as_of_month":"2026-07","accounts":["lx","sy"]}'
+PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om tools run --tool portfolio_cash_bridge --input-json '{"period":"mtd","as_of_month":"2026-07","accounts":["lx","sy"]}'
+PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om tools run --tool portfolio_assignment_scenario --input-json '{"accounts":["lx","sy"]}'
 ```
 
 `portfolio_query` 是同机 portfolio-management 的纯读适配器。它只发送 GET，
@@ -215,7 +221,7 @@ CSP 担保占用和剩余可用现金，并支持按账户和币种折算到 CNY
 如果 payload 很长，优先用：
 
 ```bash
-./om-agent run --tool close_advice_read --input-file payload.json
+./om tools run --tool close_advice_read --input-file payload.json
 ```
 
 ## Kimi Code
@@ -227,8 +233,8 @@ Use the same launcher contract. Kimi Code only needs a local command invocation 
 Use the same launcher contract as Claude Code. For first-pass troubleshooting, prefer:
 
 ```bash
-./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
-./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
+./om tools run --tool runtime_status --input-json '{"config_key":"us"}'
+./om tools run --tool healthcheck --input-json '{"config_key":"us"}'
 ```
 
 For MacBook-side Codex diagnosis of online quality or candidate-scan behavior,
@@ -263,7 +269,7 @@ Use `./om bot handle` when a remote messaging gateway needs to send user text in
 ./om bot handle --text '/positions sy' --sender ou_xxx --channel feishu --message-id msg_xxx
 ```
 
-This is a controlled Inbound Bot message entrypoint, not an `./om-agent`
+This is a controlled Inbound Bot message entrypoint, not an `./om tools`
 tool and not a shell bridge. It performs sender allowlist checks, message
 idempotency, and SQLite audit. Explicit commands and pending-operation replies
 enter deterministic Control; every other message enters the single read-first
@@ -322,7 +328,7 @@ When `inbound.feishu_ws.ack_reaction` is configured, an independent bounded ACK 
 
 ## Service Deployment
 
-Treat `./om-agent` as a local Tool Gateway command.
+Treat `./om tools` as a local Tool Gateway command.
 
 Recommended environment:
 
@@ -336,8 +342,8 @@ Recommended environment:
 Recommended first commands:
 
 ```bash
-./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
-./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
+./om tools run --tool healthcheck --input-json '{"config_key":"us"}'
+./om tools run --tool runtime_status --input-json '{"config_key":"us"}'
 ```
 
 Use `runtime_status` when you only want to inspect existing runtime files. It does not run a pipeline, send
@@ -357,7 +363,7 @@ notifications, or write state. It summarizes:
 If the production layout uses non-default paths, pass them explicitly:
 
 ```bash
-./om-agent run --tool runtime_status --input-json '{
+./om tools run --tool runtime_status --input-json '{
   "profile_path": "/var/lib/options-monitor/service.profile.json"
 }'
 ```
@@ -374,7 +380,7 @@ Default service safety posture:
 
 ## `spec` 的行为说明
 
-`./om-agent spec` 输出的是当前环境下的 tool manifest。
+`./om tools spec` 输出的是当前环境下的 tool manifest。
 
 工具定义里的 `risk_level`、`requires_confirm`、`requires_env` 和
 `safe_default_input` 是代码声明，不会因为环境变量而改写。环境只会改变

@@ -107,6 +107,8 @@ SQLite ledger position_lots
 - 账本选择：`symbols`、`lot_ids`、`contracts`（symbol/option_type/expiration/strike）可选，提供多类选择时取交集；全部省略则选择该账户及配置券商的 open short Put/Call，最多 100 笔。账本缺失或不可信不当作空持仓。
 - 临时输入：`positions` 列表最多 100 笔，每笔必需 input_id、input_as_of_utc、symbol、option_type、expiration、strike；可提供 contracts_open、multiplier、currency、premium、opened_at。缺少数量、成本或费用等证据仍显示已知诊断，不产生支持不足的结论。账户/券商绑定到请求配置；不接受 lot_id/record_id，不写 ledger。
 
+人工 CLI 默认展示合约、原数据时间、评估模式、净兑现比例、剩余最高年化、资金分母、结论及原因；缺失指标显示不可用。追加 `--format json` 保留原业务 JSON 对象，`om tools run --tool position_advice_evaluate --input-file <JSON>`（兼容 `om-agent run`）保留工具 envelope。`success`、`partial`、合法空行、`disabled` 和 `unavailable` 都是完成请求，退出 0；输入或执行错误退出 2。部分与不可评估不会转换为合法空结果。历史参考单列历史结论；hold 仅说明现有策略未触发平仓条件。
+
 多个标的使用已配置且唯一的行情路由；非 watchlist 标的只在可解析到唯一有效路由时评估。行情链发现可能返回额外合约，但只评估所选持仓，不运行开仓候选策略。每次主动请求使用独立目录：`output_shared/position_advice_requests/<request_id>/`，其内部保留 `output_runs/<request_id>/required_data` 与封存报告；不会覆盖调度 latest。主动入口不发送通知，不更新 Daily Brief。显式选择的 runtime root 优先；没有选择实例时，使用所加载配置的父目录，账本、质量门禁和请求报告保持同一实例范围。
 
 ### 行情时效与休市

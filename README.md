@@ -291,11 +291,17 @@ om plugins uninstall position-advice        # 预览；加 --confirm 才移除
 
 ### 开发者与脚本集成
 
-`om-agent` 是供外部 Agent 和脚本调用的结构化工具入口，与 OM 的 Bot 功能不同。查看当前版本实际公开的工具和参数：
+统一使用 `om`：业务操作用任务命令，结构化集成用 `om tools`，自然语言助手用 `om bot`。`om-agent` 保留全部旧命令与参数；`om agent`、`om assistant` 继续作为 Bot 兼容别名。
 
 ```bash
-"$HOME/.local/bin/om-agent" spec
+om tools spec
+om tools run --tool position_advice_evaluate --input-file request.json
+om position-advice evaluate --request-file request.json
+om position-advice evaluate --request-file request.json --format json
+om bot run --text "评价一下我的持仓"
 ```
+
+持仓建议默认人工展示，脚本追加 `--format json` 取得原业务 JSON。其他业务命令保留各自原有格式，网关始终输出 JSON manifest/envelope；详见[参数、环境与输出兼容规则](docs/TOOL_REFERENCE.md#参数环境与输出兼容)。上述持仓请求须先准备自己的配置、账户与持仓 JSON，不自动选择实例。自然语言 Bot 的工具范围由其 Scene 决定，不等同于网关主动评估。
 
 调用前检查工具声明的输入参数、风险级别、副作用与确认要求。`read_only=true` 表示不修改产品事实或配置，不一定表示不会生成本地报告或缓存。
 

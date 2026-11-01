@@ -43,7 +43,7 @@ def request(**fields):
 def call_cli(tmp_path, capsys, payload, *extra):
     source = tmp_path / "request.json"
     source.write_text(json.dumps(payload), encoding="utf-8")
-    status = cli.main(["position-advice", "evaluate", "--request-file", str(source), *extra])
+    status = cli.main(["position-advice", "evaluate", "--request-file", str(source), "--format", "json", *extra])
     return status, json.loads(capsys.readouterr().out)
 
 
@@ -168,7 +168,7 @@ def test_closed_ledger_unavailable_preserves_contract_expiration_and_dte(tmp_pat
 def test_cli_bad_request_file_returns_input_error(tmp_path, capsys, body):
     source = tmp_path / "invalid.json"
     source.write_text(body)
-    status = cli.main(["position-advice", "evaluate", "--request-file", str(source)])
+    status = cli.main(["position-advice", "evaluate", "--request-file", str(source), "--format", "json"])
     envelope = json.loads(capsys.readouterr().out)
     assert status != 0 and not envelope["ok"]
     assert envelope["error"]["code"] == "INPUT_ERROR"

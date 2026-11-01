@@ -453,6 +453,7 @@ print_next_steps() {
   else
     printf '%s\n' "$(quote "${CURRENT_LINK}/om")"
   fi
+  printf '任务帮助：om help；结构化工具：om tools spec；自然语言助手：om bot --help。om-agent 保留兼容。\n'
 }
 
 bundle_platform() {

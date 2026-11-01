@@ -22,6 +22,8 @@ def command_guide() -> str:
 日常管理（按任务选择）
   om status                          查看运行状态；按需指定 --config-key us/hk
   om daily-brief latest              查看已有决策简报
+  om scan --help                     扫描机会；保留现有参数和输出
+  om position-advice evaluate --help 主动评估持仓；默认人工展示，--format json 输出业务 JSON
   om symbols list                    查看单市场标的；双市场时指定 --market
   om symbols add --help              新增标的；编辑和删除见 om symbols --help
   om accounts list                   查看账户映射；新增、编辑、删除见 om accounts --help
@@ -41,8 +43,10 @@ def command_guide() -> str:
   om settings --help                 查看设置来源
   om help all                        查看全部顶层命令
 
-结构化工具给外部 Agent/脚本使用：om-agent spec；om-agent run --tool <name> --input-json '<json>'。
-om bot 是 OM 自身的消息与问答功能；assistant 保留兼容。Feishu 接入用 om channel feishu，inbound 保留兼容。
+结构化工具给外部 Agent/脚本使用：om tools spec；om tools run --tool <name> --input-file request.json。
+om-agent 的 spec/run/add-account/edit-account/remove-account 全部保留兼容，推荐 om tools。
+om bot 是自然语言助手：om bot run --text "评价一下我的持仓"；om agent、om assistant 是 bot 的兼容别名。
+Feishu 接入用 om channel feishu，inbound 保留兼容。
 
 在交互式终端直接运行 om，可按首次安装或日常管理选择任务；写入操作遵循各命令的预览和确认要求。
 """

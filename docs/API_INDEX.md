@@ -28,7 +28,7 @@
 
 新增功能涉及共享数据或计算时，先按业务词查本页，再读对应入口、契约及直接调用者。这里只记录可复用入口和责任边界；参数、类型、公式、TTL、舍入及错误码由源码和契约维护。
 
-本页覆盖当前核心共享能力，不是全部函数或 HTTP endpoint 清单。Python 入口供项目内部开发；人工操作用 `./om`，结构化操作用 `./om-agent`。完整 Tool schema、权限和副作用从现有 `./om-agent spec` 查询，参见 [Tool Reference](TOOL_REFERENCE.md)。运行环境采用哪个实现，仍须按 [Docs Index](INDEX.md) 核验实际版本和证据。
+本页覆盖当前核心共享能力，不是全部函数或 HTTP endpoint 清单。Python 入口供项目内部开发；人工操作用 `./om`，结构化操作用 `./om tools`。完整 Tool schema、权限和副作用从现有 `./om tools spec` 查询，参见 [Tool Reference](TOOL_REFERENCE.md)。运行环境采用哪个实现，仍须按 [Docs Index](INDEX.md) 核验实际版本和证据。
 
 ## 如何复用
 
@@ -138,7 +138,7 @@
 
 | 状态 | 入口 / 材料 | 新功能去向 |
 | --- | --- | --- |
-| 兼容，只修不增 | `src/application/notify_symbols.py` 的旧正文格式、旧 `python -m src.application.*` 人工入口 | 正文进入 Daily Brief；人工入口使用 `./om`，工具使用 `./om-agent`。完整冻结范围见 [Compatibility Freeze](COMPATIBILITY_FREEZE.md)。 |
+| 兼容，只修不增 | `src/application/notify_symbols.py` 的旧正文格式、旧 `python -m src.application.*` 人工入口 | 正文进入 Daily Brief；人工入口使用 `./om`，工具使用 `./om tools`。完整冻结范围见 [Compatibility Freeze](COMPATIBILITY_FREEZE.md)。 |
 | 兼容，迁移用途 | ledger migration/backfill 及 `ledger.api` 中相应 re-export | 仅承担旧事实 inventory/preview/apply/verify；日常能力扩展现有 commands/queries，通过 application facade 访问。 |
 | 已退役 | Removed: `scripts/send_if_needed*.py` | 不作为通知入口；当前入口见 [Agent Handbook](AGENT_WIKI.md)。 |
 | 批准目标与实现仍有差异 | [订单领域设计 §4.3](ORDER_DOMAIN_MODEL_DESIGN.md) 中的扁平身份目标 | 当前 `PositionLot` 仍含 `contract_key`；新增调用不能把设计目标当成已提供的 API，也不能擦除已批准目标。 |
