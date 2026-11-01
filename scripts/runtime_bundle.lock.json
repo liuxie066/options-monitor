@@ -678,7 +678,7 @@
         "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-aarch64-apple-darwin-install_only.tar.gz",
         "version": "3.12.16"
       },
-      "runner": "macos-14"
+      "runner": "macos-15"
     },
     "macos-x86_64": {
       "minimum_system": "macOS 14.0",
