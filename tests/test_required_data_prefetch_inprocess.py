@@ -790,7 +790,12 @@ def test_prefetch_fails_closed_before_gateway_for_symbol_without_demand(
 
     assert gateway_calls == []
     assert finalizer_calls == []
-    assert list(tmp_path.glob("shared_required/**/receipt.json")) == []
+    assert list(tmp_path.glob("shared_required/source_receipts/quotes/**/receipt.json")) == []
+    research = list(tmp_path.glob("shared_required/source_receipts/research_watchlist/**/payload.json"))
+    assert len(research) == 1
+    assert json.loads(research[0].read_bytes())["plan"] == {
+        "planning_status": "not_attempted", "symbols": [{"symbol": "AAPL"}],
+    }
 
 
 def test_prefetch_required_data_inprocess_reuses_gateways(tmp_path: Path, monkeypatch) -> None:
@@ -988,7 +993,8 @@ def test_inprocess_artifact_failure_does_not_poison_healthy_gateway(
     assert result["quote_receipts"] == {}
 
 
-def test_prefetch_required_data_subprocess_mode_preserves_existing_dispatch(tmp_path: Path, monkeypatch, caplog) -> None:
+@pytest.mark.parametrize("run_id", [None, "research-scan"])
+def test_prefetch_required_data_subprocess_mode_preserves_existing_dispatch(tmp_path: Path, monkeypatch, caplog, run_id) -> None:
     from src.application.opening_quote_evidence import OpeningUnderlierObservation
 
     watchlist = [
@@ -1056,6 +1062,7 @@ def test_prefetch_required_data_subprocess_mode_preserves_existing_dispatch(tmp_
     result = _prefetch(
         tmp_path,
         cfg={"runtime": {"prefetch": {"execution_mode": "subprocess", "max_workers": 2}}},
+        producer_run_id=run_id,
     )
 
     assert result["execution_mode"] == "subprocess"
@@ -1073,6 +1080,11 @@ def test_prefetch_required_data_subprocess_mode_preserves_existing_dispatch(tmp_
         assert "--snapshot-fallback-batch-size" in cmd
         assert "--trading-date" in cmd
         assert "--underlier-observation-json" in cmd
+        assert ("--research-run-id" in cmd) is (run_id is not None)
+        if run_id is not None:
+            assert cmd[cmd.index("--research-run-id") + 1] == run_id
+            plan = json.loads(cmd[cmd.index("--research-fetch-plan-json") + 1])
+            assert plan["symbol"] == getattr(intent, "symbol")
         observation = json.loads(
             cmd[cmd.index("--underlier-observation-json") + 1]
         )
@@ -1728,7 +1740,7 @@ def test_inprocess_multi_spec_executes_each_exact_request_and_finalizes_once(
     assert len(merge_calls) == 1
     assert len(finalize_calls) == 1
     assert len(save_calls) == 1
-    assert len(list(cold_required.rglob("receipt.json"))) == 1
+    assert len(list((cold_required / "source_receipts" / "quotes").rglob("receipt.json"))) == 1
     cold_raw = json.loads(
         (cold_required / "raw" / "0700.HK_required_data.json").read_text(
             encoding="utf-8"
@@ -1831,7 +1843,7 @@ def test_inprocess_multi_spec_executes_each_exact_request_and_finalizes_once(
     assert len(merge_calls) == 1
     assert len(finalize_calls) == 1
     assert len(save_calls) == 1
-    assert len(list(shared_required.rglob("receipt.json"))) == 1
+    assert len(list((shared_required / "source_receipts" / "quotes").rglob("receipt.json"))) == 1
 
     raw = json.loads(
         (shared_required / "raw" / "0700.HK_required_data.json").read_text(
@@ -1920,7 +1932,7 @@ def test_inprocess_empty_put_rv_demand_is_carried_by_single_active_call_request(
     assert fetch_calls[0]["gateway"] is gateway
     assert len(finalize_calls) == 1
     assert len(save_calls) == 1
-    assert len(list(shared_required.rglob("receipt.json"))) == 1
+    assert len(list((shared_required / "source_receipts" / "quotes").rglob("receipt.json"))) == 1
 
     fetch_plan = result["global_required_data_plan"]["symbols"][0][
         "fetch_plan"
@@ -2019,7 +2031,8 @@ def test_inprocess_multi_spec_preserves_nested_connection_failure_for_gateway(
     assert result["fetched_ok"] == 0
     assert result["errors"] == 1
     assert result["quote_receipts"] == {}
-    assert [path for path in shared_required.rglob("*") if path.is_file()] == []
+    assert [path for path in shared_required.rglob("*") if path.is_file() and "research_watchlist" not in path.parts] == []
+    assert len(list(shared_required.glob("source_receipts/research_watchlist/**/receipt.json"))) == 2
 
 
 @pytest.mark.parametrize("conflicting", [False, True])
@@ -2068,7 +2081,8 @@ def test_inprocess_multi_spec_duplicate_child_contract_fails_without_receipt(
     assert result["fetched_ok"] == 0
     assert result["errors"] == 1
     assert result["quote_receipts"] == {}
-    assert [path for path in shared_required.rglob("*") if path.is_file()] == []
+    assert [path for path in shared_required.rglob("*") if path.is_file() and "research_watchlist" not in path.parts] == []
+    assert len(list(shared_required.glob("source_receipts/research_watchlist/**/receipt.json"))) == 2
 
 
 def test_subprocess_multi_spec_fails_before_execution_or_publication(
@@ -2123,7 +2137,8 @@ def test_subprocess_multi_spec_fails_before_execution_or_publication(
     assert result["audit"][0]["error_code"] == (
         "REQUIRED_DATA_MULTI_SPEC_SUBPROCESS_UNSUPPORTED"
     )
-    assert [path for path in shared_required.rglob("*") if path.is_file()] == []
+    assert [path for path in shared_required.rglob("*") if path.is_file() and "research_watchlist" not in path.parts] == []
+    assert len(list(shared_required.glob("source_receipts/research_watchlist/**/receipt.json"))) == 2
 
 
 def test_prefetch_zero_symbols_uses_normal_summary_shape(tmp_path: Path, monkeypatch) -> None:
@@ -2545,7 +2560,7 @@ def test_prefetch_refetches_stale_strict_cache_before_publishing_current_receipt
     receipt_path = shared_required / result["quote_receipts"]["0700.HK"]
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert receipt["producer_run_id"] == "run-after-stale"
-    assert len(list(shared_required.rglob("receipt.json"))) == 1
+    assert len(list((shared_required / "source_receipts" / "quotes").rglob("receipt.json"))) == 1
 
 
 def test_prefetch_mixed_legacy_cache_and_fresh_partial_only_receipts_success(

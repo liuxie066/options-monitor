@@ -1137,6 +1137,8 @@ def _fetch_one_inprocess(
     expected_fetch_contract: dict[str, Any] | None = None,
     producer_run_id: str | None = None,
 ) -> dict[str, Any]:
+    from src.application.research.prescreen import publish_scan_prescreen
+
     symbol = str(symbol_cfg.get('symbol')).strip()
     if not symbol:
         payload = normalize_tool_execution_payload(
@@ -1290,6 +1292,11 @@ def _fetch_one_inprocess(
                     raise RuntimeError(
                         "required-data provider returned an invalid child payload"
                     )
+                if producer_run_id and (child_payload.get("meta") or {}).get("research_prescreen") is not None:
+                    publish_scan_prescreen(
+                        producer_root=shared_required, producer_run_id=producer_run_id,
+                        payload=child_payload, fetch_plan=fetch_plan.to_debug_dict(),
+                    )
                 child_meta = child_payload.get("meta")
                 child_meta = child_meta if isinstance(child_meta, dict) else {}
                 if str(child_meta.get("status") or "").strip().lower() != "ok":
@@ -1321,6 +1328,11 @@ def _fetch_one_inprocess(
                     payloads=child_payloads,
                 )
         provider_payload = payload0 if isinstance(payload0, dict) else None
+        if fetch_plan is None:
+            publish_scan_prescreen(
+                producer_root=shared_required, producer_run_id=producer_run_id,
+                payload=payload0, fetch_plan=None,
+            )
         raw_meta = payload0.get('meta')
         meta = raw_meta if isinstance(raw_meta, dict) else {}
         ok = str(meta.get('status') or '').strip().lower() == 'ok'
@@ -1966,6 +1978,12 @@ def _prefetch_required_data_unlocked(
     symbols = [str(it.get('symbol')).strip() for it in syms if str(it.get('symbol')).strip()]
     symbol_plan = build_prefetch_symbol_plan(syms)
     fetch_syms = symbol_plan.symbol_cfgs
+    from src.application.research.prescreen import publish_watchlist_plan
+
+    publish_watchlist_plan(
+        producer_root=shared_required, producer_run_id=producer_run_id,
+        plan={"planning_status": "not_attempted", "symbols": [{"symbol": symbol} for symbol in sorted(set(symbols))]},
+    )
 
     raw_dir = (shared_required / 'raw').resolve()
     parsed_dir = (shared_required / 'parsed').resolve()
@@ -2015,6 +2033,13 @@ def _prefetch_required_data_unlocked(
         not in {"success_rows", "success_empty"}
     ]
     if invalid_plan_symbols:
+        publish_watchlist_plan(
+            producer_root=shared_required, producer_run_id=producer_run_id,
+            plan={"planning_status": "incomplete", "symbols": [
+                {"symbol": symbol_cfg["symbol"], "fetch_plan": fetch_plan_cache[id(symbol_cfg)].to_debug_dict()}
+                for symbol_cfg in fetch_syms
+            ]},
+        )
         raise RuntimeError(
             "global required-data plan incomplete; discovery or projection failed for: "
             + ", ".join(invalid_plan_symbols)
@@ -2030,6 +2055,10 @@ def _prefetch_required_data_unlocked(
         symbol_cfgs=fetch_syms,
         fetch_plans_by_config_id=fetch_plan_cache,
         expected_contracts_by_config_id=expected_contract_cache,
+    )
+    publish_watchlist_plan(
+        producer_root=shared_required, producer_run_id=producer_run_id,
+        plan=global_required_data_plan,
     )
     if not bool(global_required_data_plan["planning_complete"]):
         failed_symbols = [
@@ -2176,6 +2205,11 @@ def _prefetch_required_data_unlocked(
         trading_date = fetch_kwargs.get("trading_date")
         if isinstance(trading_date, str) and trading_date:
             cmd.extend(['--trading-date', trading_date])
+        if producer_run_id:
+            cmd.extend([
+                '--research-run-id', producer_run_id,
+                '--research-fetch-plan-json', json.dumps(_get_fetch_plan(symbol_cfg).to_debug_dict()),
+            ])
 
         payload = exec_service.execute(
             ToolExecutionIntent(

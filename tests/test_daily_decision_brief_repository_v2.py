@@ -93,6 +93,86 @@ def _persist(tmp_path: Path, *, run_id: str = "run-1", actions: list[dict] | Non
     )
 
 
+def test_absent_and_corrupt_history_remain_explicitly_unavailable(tmp_path):
+    from src.application import daily_decision_brief_repository as repo
+    from src.infrastructure.decision_history_sqlite import history_path
+
+    result = repo.read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")
+    assert result["available"] is False and result["reason"] == "state_invalid"
+    assert result["error"] == "history_missing"
+    assert list(tmp_path.iterdir()) == []
+    database = history_path(tmp_path)
+    database.parent.mkdir(parents=True)
+    database.write_bytes(b"corrupt history")
+    result = repo.read_latest_daily_decision_brief(base=tmp_path, account="lx", market="US")
+    assert result["available"] is False and result["reason"] == "state_invalid"
+    assert database.read_bytes() == b"corrupt history"
+
+
+def test_exact_run_reader_ignores_later_current_and_preserves_failure(tmp_path):
+    from src.application import daily_decision_brief_repository as repo
+
+    first = _persist(tmp_path, run_id="first")
+    _persist(tmp_path, run_id="newer", actions=[_action()])
+    failed = repo.persist_daily_decision_brief_failure(
+        base=tmp_path, brief=_brief(run_id="failed", status="blocked", actionability="blocked"),
+    )
+    read = lambda run: repo.read_run_daily_decision_brief(base=tmp_path, account="lx", market="US", run_id=run)
+    assert read("first")["brief"]["run_id"] == "first"
+    assert read("first")["brief"]["revision"] == first["current_revision"]
+    assert read("first")["brief"]["actions"] == []
+    assert read("failed")["reason"] == "scan_failed"
+    assert read("failed")["brief"] == failed
+    assert read("absent")["reason"] == "not_found"
+    assert read("absent")["brief"] is None
+
+
+@pytest.mark.parametrize("mutation", ["missing_export", "missing_history", "bad_json", "bad_utf8", "other_run", "digest", "revision", "account", "market", "history_digest", "history_identity", "bad_database"])
+def test_exact_run_reader_rejects_missing_or_swapped_sources(tmp_path, mutation):
+    from src.application import daily_decision_brief_repository as repo
+    from src.infrastructure.decision_history_sqlite import history_path
+
+    stored = _persist(tmp_path)
+    path = stored["paths"]["run_brief"]
+    original = json.loads(path.read_text())
+    _persist(tmp_path, run_id="other", actions=[_action()])
+    if mutation == "missing_export":
+        path.unlink()
+    elif mutation == "missing_history":
+        delete_history_revision(tmp_path, revision=original["revision"])
+    elif mutation == "bad_json":
+        path.write_text("{")
+    elif mutation == "bad_utf8":
+        path.write_bytes(b"\xff")
+    elif mutation == "bad_database":
+        history_path(tmp_path).write_bytes(b"broken")
+    elif mutation.startswith("history_"):
+        changed = {**original, "strategy_summary": "swapped"} if mutation == "history_digest" else {**original, "run_id": "swapped"}
+        replace_history_payload(tmp_path, changed, revision=original["revision"])
+    else:
+        changed = dict(original)
+        field, value = {
+            "other_run": ("run_id", "other"), "digest": ("strategy_summary", "swapped"),
+            "revision": ("revision", original["revision"] + 1),
+            "account": ("account", "sy"), "market": ("market", "HK"),
+        }[mutation]
+        changed[field] = value
+        path.write_text(json.dumps(changed))
+    result = repo.read_run_daily_decision_brief(base=tmp_path, account="lx", market="US", run_id="run-1")
+    assert result["available"] is False
+    assert result["brief"] is None
+    assert result["reason"] == ("not_found" if mutation in {"missing_export", "missing_history"} else "state_invalid")
+
+
+def test_exact_run_reader_on_empty_root_is_read_only(tmp_path):
+    from src.application.daily_decision_brief_repository import read_run_daily_decision_brief
+
+    assert read_run_daily_decision_brief(base=tmp_path, account="lx", market="US", run_id="absent")["reason"] == "not_found"
+    assert list(tmp_path.iterdir()) == []
+    with pytest.raises(ValueError, match="run_id"):
+        read_run_daily_decision_brief(base=tmp_path, account="lx", market="US", run_id="../other")
+
+
 def _record_candidates(tmp_path: Path, **overrides: object) -> dict:
     """Record delivery candidates for the ``lx``/``US`` market date this module uses.
 

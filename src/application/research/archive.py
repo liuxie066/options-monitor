@@ -25,6 +25,17 @@ from src.application.required_data_blobs import (
 
 
 SCHEMA_VERSION = "research_archive.v2"
+
+
+def archive_series_export(*, series_dir: Path, expected_plan_sha256: str, cutoff: str, output_dir: Path):
+    """Export only an explicit local series; never enter remote pull/prune."""
+    from src.application.research.observation_series import export_series
+
+    return export_series(
+        series_dir=series_dir, expected_plan_sha256=expected_plan_sha256, cutoff=cutoff, output_dir=output_dir
+    )
+
+
 DEFAULT_REMOTE = "prod"
 DEFAULT_REMOTE_RUNTIME_ROOT = "/var/lib/options-monitor"
 DEFAULT_REMOTE_REPO_ROOT = "/opt/options-monitor/current"
@@ -197,6 +208,7 @@ for rel in ("output_shared/research", "output_shared/required_data", "logs"):
     paths[rel] = {"exists": path.exists(), "is_dir": path.is_dir()}
 print(json.dumps({"runtime_root": str(runtime), "runs_root": str(runs_root), "source_host": socket.getfqdn(), "runs": runs, "paths": paths}))
 """.strip()
+
 
 def archive_root_for(repo_root: Path, *, remote: str = DEFAULT_REMOTE, archive_root: str | Path | None = None) -> Path:
     base = repo_root.resolve()

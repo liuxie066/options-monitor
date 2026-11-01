@@ -208,7 +208,14 @@ def readback(api, tag, sha):
     if (not isinstance(release, dict) or release.get("tag_name") != tag
             or release.get("draft") is not False or not _positive(release.get("id"))):
         raise EvidenceError("publication outcome unknown or incomplete")
-    required = {f"options-monitor-{tag}.tar.gz", "om-agent-spec.json", "VERSION"}
+    base = Path(__file__).resolve().parents[2]
+    policy = json.loads((base / "scripts/runtime_bundle.lock.json").read_text())
+    platforms = policy["release_platforms"]
+    if not platforms or len(set(platforms)) != len(platforms) or any(p not in policy["platforms"] for p in platforms):
+        raise EvidenceError("invalid qualified runtime platform policy")
+    runtime_assets = {f"options-monitor-{tag}-{platform}.tar.gz{suffix}"
+                      for platform in platforms for suffix in ("", ".sha256", ".manifest.json", ".qualification.json")}
+    required = {f"options-monitor-{tag}.tar.gz", "om-agent-spec.json", "VERSION"} | runtime_assets
     assets, ids = [], set()
     for page in range(1, 11):
         batch = api.get(f"/releases/{release['id']}/assets?per_page=100&page={page}")
@@ -227,6 +234,17 @@ def readback(api, tag, sha):
         matches = [a for a in assets if a.get("name") == name]
         if len(matches) != 1 or matches[0].get("state") != "uploaded" or not _positive(matches[0].get("size")):
             raise EvidenceError("publication outcome unknown or incomplete")
+        if name in runtime_assets:
+            digest = matches[0].get("digest", "")
+            if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                raise EvidenceError("runtime publication digest unavailable")
+            local = Path("runtime-bundles") / name
+            if local.is_file():
+                import hashlib
+                with local.open("rb") as stream:
+                    expected_digest = "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
+                if digest != expected_digest:
+                    raise EvidenceError("runtime publication digest mismatch")
     check_tag(api, tag, sha, allow_missing=False)
 
 

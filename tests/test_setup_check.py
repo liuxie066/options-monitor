@@ -87,8 +87,8 @@ def test_setup_check_separates_starter_placeholder_from_optional_bot(monkeypatch
     assert "REPLACE_WITH_FUTU_ACCOUNT_ID" in checks["config.us"]["message"]
     assert "om setup init" not in out["next_steps"]
     assert any("om accounts edit --market us" in step for step in out["next_steps"])
-    assert checks["bot.model_context"]["status"] == "warn"
-    assert checks["bot.session_path"]["status"] == "warn"
+    assert checks["bot.model_context"]["status"] == "info"
+    assert checks["bot.session_path"]["status"] == "info"
 
 
 def test_first_run_account_repair_and_symbol_add_keep_one_market_ready(monkeypatch, tmp_path: Path) -> None:
@@ -227,19 +227,20 @@ def test_setup_check_rejects_invalid_model_context(monkeypatch, tmp_path: Path) 
     out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
     checks = {item["name"]: item for item in out["checks"]}
 
-    assert checks["bot.model_context"]["status"] == "warn"
+    assert checks["bot.model_context"]["status"] == "error"
     assert checks["bot.model_context"]["value"]["error"] == "invalid_bot_config"
 
 
 def test_setup_check_reports_missing_or_unwritable_bot_session_parent(monkeypatch, tmp_path: Path) -> None:
     root = _prepare_python_setup_root(tmp_path)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
     missing_audit = tmp_path / "missing" / "state" / "inbound_control.sqlite3"
     monkeypatch.setenv("OM_INBOUND_AUDIT_DB", str(missing_audit))
     _stub_toolchain(monkeypatch)
 
     missing = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
     missing_check = {item["name"]: item for item in missing["checks"]}["bot.session_path"]
-    assert missing_check["status"] == "warn"
+    assert missing_check["status"] == "error"
     assert missing_check["value"]["parent_exists"] is False
     assert not missing_audit.parent.exists()
 
@@ -253,7 +254,7 @@ def test_setup_check_reports_missing_or_unwritable_bot_session_parent(monkeypatc
     )
     unwritable = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
     unwritable_check = {item["name"]: item for item in unwritable["checks"]}["bot.session_path"]
-    assert unwritable_check["status"] == "warn"
+    assert unwritable_check["status"] == "error"
     assert unwritable_check["value"]["parent_exists"] is True
     assert not (existing_parent / "inbound_control.sqlite3").exists()
 
@@ -263,6 +264,7 @@ def test_setup_check_rejects_symlinked_bot_session_parent_without_resolving_or_w
     tmp_path: Path,
 ) -> None:
     root = _prepare_python_setup_root(tmp_path)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
     physical_parent = tmp_path / "physical-state"
     physical_parent.mkdir()
     lexical_parent = tmp_path / "linked-state"
@@ -274,7 +276,7 @@ def test_setup_check_rejects_symlinked_bot_session_parent_without_resolving_or_w
     out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
     check = {item["name"]: item for item in out["checks"]}["bot.session_path"]
 
-    assert check["status"] == "warn"
+    assert check["status"] == "error"
     assert check["value"]["parent"] == str(lexical_parent)
     assert check["value"]["session_path"] == str(lexical_parent / "inbound_control.sqlite3")
     assert check["value"]["parent_is_symlink"] is True
@@ -363,3 +365,251 @@ def test_cli_setup_init_requires_confirmation_when_noninteractive(monkeypatch, c
     assert rc == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["error"]["code"] == "CONFIRMATION_REQUIRED"
+
+
+@pytest.mark.parametrize("bot", [{"enabled": False, "llm": {"context_window_tokens": "broken"}}])
+def test_disabled_bot_skips_model_and_session_checks(monkeypatch, tmp_path, bot):
+    root = _prepare_python_setup_root(tmp_path)
+    runtime = tmp_path / "runtime"
+    config_path = runtime / "resolved/config.bot.json"
+    if bot is None:
+        config_path.unlink()
+    else:
+        config_path.write_text(json.dumps({"bot": bot}))
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
+    monkeypatch.setenv("OM_INBOUND_AUDIT_DB", str(tmp_path / "absent/state/audit.db"))
+    monkeypatch.setattr("src.application.setup.check.load_bot_llm_config",
+                        lambda **kw: pytest.fail("disabled Bot must not validate a model"))
+    out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["bot.model_context"]["status"] == "info"
+    assert checks["bot.session_path"]["status"] == "info"
+    assert "hint" not in checks["bot.model_context"] and "hint" not in checks["bot.session_path"]
+    assert not out["summary"]["bot_ready"]
+    assert not (tmp_path / "absent").exists()
+
+
+@pytest.mark.parametrize("content", ['{"bot":{"enabled":true}}', '{broken'])
+def test_setup_check_keeps_broken_bot_as_error(monkeypatch, tmp_path, content):
+    root = _prepare_python_setup_root(tmp_path)
+    runtime = tmp_path / "runtime"
+    (runtime / "resolved/config.bot.json").write_text(content)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
+    out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["bot.model_context"]["status"] == "error"
+    assert out["summary"]["ok"] is False and not out["summary"]["bot_ready"]
+
+
+def test_setup_check_reports_corrupt_authoring_without_hiding_it(monkeypatch, tmp_path):
+    root = _minimal_repo(tmp_path)
+    (root / "config.yaml").write_text("markets: [")
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(root))
+    out = run_setup_check(repo_root=root, include_local_env_file=False)
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["config.authoring"]["status"] == "error"
+    assert out["summary"]["ok"] is False
+
+
+@pytest.mark.parametrize("case", [
+    "missing", "corrupt_snapshot", "disabled_snapshot", "stale_source", "conflicting_model",
+    "corrupt_authoring", "corrupt_metadata", "wrong_source_identity",
+    "disabled_missing", "disabled_corrupt_snapshot", "valid",
+])
+def test_setup_facade_honors_authoring_bot_intent(monkeypatch, tmp_path, capsys, case):
+    import socket
+    import yaml
+
+    import src.interfaces.cli.main as cli
+    from src.application.config_yaml import build_yaml_bot_config_file
+    from src.application.config_yaml_init import init_yaml_config
+
+    repo = Path(__file__).resolve().parents[1]
+    source = tmp_path / "config.yaml"
+    snapshot = tmp_path / "resolved/config.bot.json"
+    init_yaml_config(
+        repo_root=repo, output_config_yaml_path=source, runtime_output_dir=tmp_path,
+        bot_output_config_path=snapshot, markets=["us"], us_symbols=["AAPL"],
+        account_label="review", futu_acc_id="123456",
+    )
+    document = yaml.safe_load(source.read_text())
+    disabled = case.startswith("disabled_") and case != "disabled_snapshot"
+    document["bot"] = {"enabled": not disabled, "llm": {
+        "provider": "ollama", "model": "local-test", "base_url": "http://127.0.0.1:11434/v1",
+        "context_window_tokens": 24000, "max_output_tokens": 2048,
+    }}
+    source.write_text(yaml.safe_dump(document))
+    build_yaml_bot_config_file(repo_root=repo, config_path=source, output_config_path=snapshot)
+    if case in {"missing", "disabled_missing"}:
+        snapshot.unlink()
+    elif case in {"corrupt_snapshot", "disabled_corrupt_snapshot"}:
+        snapshot.write_text("{broken")
+    elif case == "corrupt_authoring":
+        source.write_text("markets: [")
+        snapshot.write_text('{"bot":{"enabled":false}}')
+    elif case in {"disabled_snapshot", "conflicting_model", "corrupt_metadata", "wrong_source_identity"}:
+        payload = json.loads(snapshot.read_text())
+        if case == "disabled_snapshot":
+            payload["bot"]["enabled"] = False
+        elif case == "conflicting_model":
+            payload["bot"]["llm"]["model"] = "other-model"
+        elif case == "corrupt_metadata":
+            payload["_generated"] = None
+        else:
+            payload["_resolved"]["config_yaml_path"] = "/another-instance/config.yaml"
+        snapshot.write_text(json.dumps(payload))
+    elif case == "stale_source":
+        source.write_text(source.read_text() + "\n# source changed after publication\n")
+    (tmp_path / "output_shared/state").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    monkeypatch.setattr(socket.socket, "connect", lambda *a, **kw: pytest.fail("setup must stay offline"))
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+    rc = cli.main(["setup", "check", "--market", "us", "--no-local-env-file"])
+    response = json.loads(capsys.readouterr().out)
+    checks = {item["name"]: item for item in response["data"]["checks"]}
+    if disabled:
+        assert rc == 0 and response["ok"] is True
+        assert checks["bot.model_context"]["status"] == "info"
+        assert checks["bot.session_path"]["status"] == "info"
+        assert "hint" not in checks["bot.model_context"]
+    elif case == "valid":
+        assert rc == 0 and response["ok"] is True
+        assert checks["bot.model_context"]["status"] == "ok"
+        assert checks["bot.session_path"]["status"] == "ok"
+        assert response["data"]["summary"]["bot_ready"] is True
+    else:
+        assert rc != 0 and response["ok"] is False
+        assert checks["bot.model_context"]["status"] == "error"
+        assert checks["bot.model_context"]["value"]["error"]
+        assert "build-bot" in checks["bot.model_context"]["hint"]
+        assert response["data"]["summary"]["bot_ready"] is False
+        assert "disabled" not in checks["bot.session_path"]["message"]
+    assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+def test_setup_check_missing_runtime_only_bot_is_not_explicitly_disabled(monkeypatch, tmp_path):
+    root = _prepare_python_setup_root(tmp_path)
+    runtime = tmp_path / "runtime"
+    (runtime / "resolved/config.bot.json").unlink()
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
+    out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["bot.model_context"]["status"] == "error"
+    assert not out["summary"]["ok"]
+
+
+@pytest.mark.parametrize("damage", [None, "missing_python", "corrupt_manifest", "missing_manifest", "checksum", "platform"])
+def test_setup_facade_declared_bundle_has_no_source_fallback(monkeypatch, tmp_path, capsys, damage):
+    import src.interfaces.cli.main as cli
+    from src.application import runtime_bundle as bundle
+    from test_runtime_bundle import miniature
+
+    root = tmp_path / "bundle"
+    manifest = miniature(root, platform_name=bundle.current_platform())
+    (root / "src").mkdir()
+    if damage == "missing_python":
+        (root / bundle.PYTHON).unlink()
+    elif damage == "corrupt_manifest":
+        (root / bundle.MANIFEST).write_text("{broken")
+    elif damage == "missing_manifest":
+        (root / bundle.MANIFEST).unlink()
+    elif damage == "checksum":
+        (root / "om").write_text("changed")
+    elif damage == "platform":
+        manifest["platform"] = "linux-x86_64" if bundle.current_platform() != "linux-x86_64" else "macos-arm64"
+        (root / bundle.MANIFEST).write_text(json.dumps(manifest))
+    # Even an explicit interpreter override cannot repair a broken declared artifact.
+    monkeypatch.setenv("OM_PYTHON", os.sys.executable)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "instance"))
+    monkeypatch.setenv("OM_UPGRADE_INSTALLER", "uv")
+    monkeypatch.setattr(cli, "repo_base", lambda: root)
+    _stub_toolchain(monkeypatch)
+
+    rc = cli.main(["setup", "check", "--market", "us", "--no-local-env-file"])
+    response = json.loads(capsys.readouterr().out)
+    checks = {item["name"]: item for item in response["data"]["checks"]}
+    assert checks["install.runtime_bundle"]["status"] == ("error" if damage else "ok")
+    assert "install.venv" not in checks and "upgrade.uv" not in checks
+    assert checks["upgrade.runtime_bundle"]["status"] == "info"
+    install_text = json.dumps([
+        {key: c[key] for key in ("message", "hint") if key in c}
+        for c in checks.values() if c["name"].startswith(("install.", "upgrade."))
+    ])
+    for source_hint in ("system python", ".venv", "pip install", "Install uv", "pip fallback"):
+        assert source_hint not in install_text
+    if damage:
+        assert rc != 0 and response["ok"] is False
+
+
+@pytest.mark.parametrize("repo_default", [False, True])
+def test_setup_check_retains_runtime_only_instance_ownership(monkeypatch, tmp_path, repo_default):
+    root = _prepare_python_setup_root(tmp_path)
+    runtime = tmp_path / "runtime"
+    (root / "config.bot.json").write_text('{"bot":{"enabled":false}}')
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
+    if repo_default:
+        monkeypatch.setattr("src.application.setup.check.resolve_runtime_root", lambda **kw: type(
+            "Resolution", (), {"runtime_root": root, "source": "repo_default"},
+        )())
+    out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
+    check = next(c for c in out["checks"] if c["name"] == "bot.model_context")
+    assert check["status"] == ("info" if repo_default else "ok")
+    assert check["value"]["config_path"] == str(root / "config.bot.json" if repo_default else runtime / "resolved/config.bot.json")
+
+
+def test_setup_check_source_venv_and_override_diagnostics_remain_compatible(monkeypatch, tmp_path):
+    root = _minimal_repo(tmp_path)
+    venv = root / ".venv/bin"
+    venv.mkdir(parents=True)
+    (venv / "python").write_text("source interpreter fixture")
+    monkeypatch.setenv("OM_PYTHON", os.sys.executable)
+    out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["install.venv"]["status"] == "ok"
+    assert checks["install.venv"]["value"]["python"] == os.sys.executable
+    assert "install.runtime_bundle" not in checks
+    assert "upgrade.uv" in checks
+
+
+def test_real_bundled_setup_entrypoint_uses_private_runtime_without_source_tools(tmp_path):
+    """Opt-in offline reuse of an existing native archive, without reinstalling it."""
+    import subprocess
+
+    from src.application import runtime_bundle as bundle
+    from src.application.config_yaml_init import init_yaml_config
+
+    archive_env = os.environ.get("OM_TEST_RUNTIME_BUNDLE")
+    if not archive_env:
+        pytest.skip("requires an existing native archive; no build, download or install")
+    archive = Path(archive_env).resolve()
+    original_manifest = json.loads(archive.with_name(archive.name + ".manifest.json").read_text())
+    root = tmp_path / "中文 运行包"
+    manifest = bundle.materialize_bundle(archive, root, expected_tag=original_manifest["tag"])
+    # Exercise this repair with the existing private runtime, not the archive's older setup module.
+    module = "src/application/setup/check.py"
+    (root / module).write_bytes((Path(__file__).resolve().parents[1] / module).read_bytes())
+    manifest["files"][module] = bundle.sha256(root / module)
+    (root / bundle.MANIFEST).write_text(json.dumps(manifest))
+    instance = tmp_path / "instance"
+    init_yaml_config(
+        repo_root=root, output_config_yaml_path=instance / "config.yaml", runtime_output_dir=instance,
+        bot_output_config_path=instance / "resolved/config.bot.json", markets=["us"],
+        us_symbols=["AAPL"], account_label="review", futu_acc_id="123456",
+    )
+    before = {p.relative_to(instance): p.read_bytes() for p in instance.rglob("*") if p.is_file()}
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "home"), "OM_RUNTIME_ROOT": str(instance),
+           "OM_SECRET_BACKEND": "env", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1"}
+    result = subprocess.run(
+        [str(root / "om"), "setup", "check", "--market", "us", "--no-local-env-file"],
+        cwd=root, env=env, text=True, capture_output=True, timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    response = json.loads(result.stdout)
+    checks = {item["name"]: item for item in response["data"]["checks"]}
+    assert response["ok"] is True
+    assert checks["install.runtime_bundle"]["status"] == "ok"
+    assert checks["install.runtime_bundle"]["value"]["python"] == str(root / bundle.PYTHON)
+    assert "install.venv" not in checks and "upgrade.uv" not in checks
+    assert checks["bot.model_context"]["status"] == "info"
+    assert {p.relative_to(instance): p.read_bytes() for p in instance.rglob("*") if p.is_file()} == before

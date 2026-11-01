@@ -240,3 +240,32 @@ def test_update_local_version_auto_retry_at_target_is_noop_without_remote(tmp_pa
     assert out["status"] == "already_at_target"
     assert out["write"]["changed"] is False
     assert out["write"]["already_at_target"] is True
+
+
+def test_bundled_version_checks_published_release_without_git(tmp_path, monkeypatch):
+    from src.application import runtime_bundle
+    (tmp_path / 'VERSION').write_text('1.2.3\n')
+    (tmp_path / 'om.runtime.json').write_text('{}')
+    monkeypatch.setattr(runtime_bundle, 'load_manifest', lambda base: {'repository': runtime_bundle.REPOSITORY})
+    calls = []
+    def published(tag, *, repository):
+        calls.append((tag, repository))
+        return dict(tag_name='v1.2.4', draft=False, prerelease=False)
+    result = check_version_update(base_dir=tmp_path, release_resolver=published,
+                                  run_cmd=lambda *a, **k: pytest.fail('Git called by bundled install'))
+    assert result['ok'] and result['update_available'] and result['release_tag'] == 'v1.2.4'
+    assert calls == [('latest', runtime_bundle.REPOSITORY)]
+
+
+def test_broken_declared_manifest_is_version_failure_without_git(tmp_path):
+    (tmp_path / 'VERSION').write_text('1.2.3\n')
+    (tmp_path / 'runtime').mkdir()
+    result = check_version_update(base_dir=tmp_path, run_cmd=lambda *a, **k: pytest.fail('Git fallback'))
+    assert result['ok'] is False and result['latest_version'] is None
+
+
+def test_dangling_bundle_marker_is_not_source_install(tmp_path):
+    (tmp_path / 'VERSION').write_text('1.2.3\n')
+    (tmp_path / 'om.runtime.json').symlink_to(tmp_path / 'missing')
+    result = check_version_update(base_dir=tmp_path, run_cmd=lambda *a, **k: pytest.fail('Git fallback'))
+    assert result['ok'] is False

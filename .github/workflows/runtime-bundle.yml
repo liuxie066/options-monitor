@@ -1,0 +1,73 @@
+name: Runtime bundle qualification (no publication)
+
+on:
+  workflow_call:
+    inputs:
+      release-platforms-only:
+        type: boolean
+        default: false
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'scripts/build_runtime_bundle.py'
+      - 'scripts/runtime_bundle.lock.json'
+      - 'scripts/install.sh'
+      - 'scripts/python_runtime.sh'
+      - 'src/application/runtime_bundle.py'
+      - 'requirements/**'
+      - 'constraints/**'
+      - '.github/workflows/runtime-bundle.yml'
+      - 'tests/test_runtime_bundle*'
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - id: matrix
+        env:
+          RELEASE_ONLY: ${{ inputs.release-platforms-only }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          lock = json.load(open('scripts/runtime_bundle.lock.json'))
+          names = lock['release_platforms'] if os.environ.get('RELEASE_ONLY') == 'true' else list(lock['platforms'])
+          assert names and len(set(names)) == len(names)
+          print('matrix=' + json.dumps({'include': [{'platform': n, 'runner': lock['platforms'][n]['runner']} for n in names]}))
+          PY
+  build:
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Build and actually relocate full runtime
+        env:
+          EXPECT_PLATFORM: ${{ matrix.platform }}
+        run: |
+          python -c 'import os; from src.application.runtime_bundle import current_platform; assert current_platform() == os.environ["EXPECT_PLATFORM"]'
+          python scripts/build_runtime_bundle.py --output "$RUNNER_TEMP/bundles" --cache "$RUNNER_TEMP/bundle-cache" --require-clean
+      - name: Exercise installer without user Git or Python
+        run: |
+          python -m pip install pytest
+          OM_TEST_RUNTIME_BUNDLE="$(find "$RUNNER_TEMP/bundles" -name '*.tar.gz' -print -quit)" python -m pytest tests/test_runtime_bundle_install.py -q
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-bundle-${{ matrix.platform }}
+          path: ${{ runner.temp }}/bundles/*
+          if-no-files-found: error
