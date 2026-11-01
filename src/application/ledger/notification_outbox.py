@@ -100,6 +100,7 @@ OUTBOX_STATUSES = frozenset(
         "unknown",
         "suppressed",
         "batched",
+        "partial",
     }
 )
 CLAIM_LEASE_MS = 5 * 60 * 1000
@@ -193,6 +194,8 @@ def enqueue_combo_pair_success_in_transaction(
 
 def _combo_receipt_route_matches(payload: dict[str, Any], route: dict[str, Any]) -> bool:
     binding = payload.get("receipt_route") or {}
+    if route.get("provider") == "fanout":
+        route = {**route, "attribution_route_key": route.get("account_route_keys", {}).get(payload.get("account"))}
     return all(binding.get(key) and binding[key] == route.get(key) for key in (
         "provider", "channel", "target_fingerprint", "route_fingerprint", "attribution_route_key"
     ))
@@ -575,7 +578,7 @@ def _normalized_accounts(values: Iterable[str] | None) -> set[str] | None:
 
 
 
-def validate_notification_batch_route(route: dict[str, Any]) -> dict[str, str]:
+def validate_notification_batch_route(route: dict[str, Any]) -> dict[str, Any]:
     snapshot = build_notification_batch_route(
         provider=str(route.get("provider") or ""),
         channel=str(route.get("channel") or ""),
@@ -587,6 +590,8 @@ def validate_notification_batch_route(route: dict[str, Any]) -> dict[str, str]:
             raise ValueError("notification batch route fingerprint mismatch")
     if route.get("attribution_route_key"):
         snapshot["attribution_route_key"] = str(route["attribution_route_key"])
+    if route.get("provider") == "fanout":
+        snapshot["account_route_keys"] = dict(route.get("account_route_keys") or {})
     return snapshot
 
 
@@ -594,6 +599,8 @@ def validate_notification_batch_route(route: dict[str, Any]) -> dict[str, str]:
 def _batch_is_active(batch: dict[str, Any]) -> bool:
     status = str(batch.get("status") or "").strip().lower()
     return status in {"pending", "claimed", "send_started"} or (
+        status == "partial" and bool((batch.get("provider_receipt") or {}).get("has_retryable_children"))
+    ) or (
         status == "explicit_failed"
         and int(batch.get("attempt_count") or 0) < MAX_ATTEMPTS
     )
@@ -658,6 +665,8 @@ def _eligible_unbound_notifications(
             )
         ):
             continue
+        if route.get("provider") == "fanout" and account not in route.get("account_route_keys", {}):
+            continue
         if row["transition_type"] == "combo_pair_confirmed":
             if validate_combo_pair is None:
                 continue
@@ -710,7 +719,7 @@ def plan_notification_batch(
              and _batch_combo_scope_matches(batch, route=route_snapshot, accounts=account_values)),
             None,
         )
-        if active is not None:
+        if active is not None and route_snapshot["provider"] != "fanout":
             return {
                 "status": "active_batch",
                 "reason": "route_has_active_batch",
@@ -732,6 +741,9 @@ def plan_notification_batch(
                 "batch": None,
                 "candidate_count": 0,
             }
+        if route_snapshot["provider"] == "fanout":
+            account = rows[0]["payload"]["account"]
+            rows = [row for row in rows if row["payload"]["account"] == account]
         # A successful pair gets its own receipt, outside close-result aggregation.
         if rows[0]["transition_type"] == "combo_pair_confirmed":
             rows = rows[:1]
@@ -916,6 +928,13 @@ def recover_stale_notification_batches(
                 and started_at > 0
                 and started_at <= stale_before
             ):
+                if batch.get("provider") == "fanout":
+                    # Child claims, including a crash during send, are recovered by fanout.
+                    reclaimed += int(sqlite_repo.compare_and_set_trade_lifecycle_notification_batch(
+                        batch_id=batch["batch_id"], expected_status="send_started", new_status="pending",
+                        expected_claim_id=str(batch.get("claim_id") or ""),
+                        fields={"next_attempt_at_ms": current, "last_error": "fanout_projection_recovery"}, conn=conn))
+                    continue
                 changed = (
                     sqlite_repo.compare_and_set_trade_lifecycle_notification_batch(
                         batch_id=batch["batch_id"],
@@ -994,18 +1013,22 @@ def claim_next_notification_batch(
             batch
             for batch in batches
             if str(batch.get("status") or "")
-            in {"pending", "explicit_failed"}
+            in {"pending", "explicit_failed", "partial"}
             and (account_values is None or all(
                 member["payload"].get("account") in account_values
                 for member in batch["payload"]["members"]
             ))
-            and _batch_combo_scope_matches(batch, route=route or {}, accounts=account_values)
-            and int(batch.get("attempt_count") or 0) < MAX_ATTEMPTS
+            and ((batch.get("provider_receipt") or {}).get("fanout_id")
+                 or _batch_combo_scope_matches(batch, route=route or {}, accounts=account_values))
+            and (batch.get("provider") == "fanout" or int(batch.get("attempt_count") or 0) < MAX_ATTEMPTS)
+            and (batch["status"] != "partial" or (batch.get("provider_receipt") or {}).get("has_retryable_children"))
             and (
                 batch.get("next_attempt_at_ms") is None
                 or int(batch.get("next_attempt_at_ms") or 0) <= current
             )
         ]
+        if route and route.get("provider") == "fanout":
+            candidates.sort(key=lambda batch: (int(batch.get("next_attempt_at_ms") or 0), batch["created_at_ms"], batch["batch_id"]))
         for batch in candidates:
             route_batches = (
                 batches
@@ -1082,7 +1105,7 @@ def mark_notification_batch_send_started(
             raise ValueError("notification batch claim lost before send_started")
         combo_members = [member for member in current["payload"]["members"]
                          if member["transition_type"] == "combo_pair_confirmed"]
-        if any(validate_combo_pair is None or not validate_combo_pair(sqlite_repo, member["payload"], conn=conn)
+        if not (current.get("provider_receipt") or {}).get("fanout_id") and any(validate_combo_pair is None or not validate_combo_pair(sqlite_repo, member["payload"], conn=conn)
                or not _combo_receipt_route_matches(member["payload"], route or {})
                for member in combo_members):
             sqlite_repo.compare_and_set_trade_lifecycle_notification_batch(
@@ -1096,8 +1119,14 @@ def mark_notification_batch_send_started(
             )
             return sqlite_repo.get_trade_lifecycle_notification_batch(batch_id, conn=conn)
         frozen = _frozen_receipt(current, render_message=render_message)
+        if current.get("provider") == "fanout":
+            from src.application.notification_fanout import notification_fanout_id
+            accounts = {member["payload"]["account"] for member in current["payload"]["members"]}
+            if len(accounts) != 1:
+                raise ValueError("fanout batches require one account")
+            frozen["fanout_id"] = notification_fanout_id(account=next(iter(accounts)), logical_key="lifecycle:" + batch_id)
         attempts = int(current.get("attempt_count") or 0) + 1
-        if attempts > MAX_ATTEMPTS:
+        if current.get("provider") != "fanout" and attempts > MAX_ATTEMPTS:
             raise ValueError(
                 "notification batch attempt budget exhausted"
             )
@@ -1151,6 +1180,8 @@ def complete_notification_batch_attempt(
         "accepted",
         "explicit_failed",
         "unknown",
+        "partial",
+        "pending",
     }:
         raise ValueError(
             "unsupported notification batch delivery outcome"
@@ -1177,6 +1208,8 @@ def complete_notification_batch_attempt(
             )
         attempts = int(batch.get("attempt_count") or 0)
         retryable_failure = (
+            bool(provider_receipt and provider_receipt.get("has_retryable_children"))
+            or
             outcome_value == "explicit_failed"
             and attempts < MAX_ATTEMPTS
         )
@@ -1189,6 +1222,8 @@ def complete_notification_batch_attempt(
             next_attempt_at_ms = (
                 current + BATCH_RETRY_BACKOFF_MS[backoff_index]
             )
+            if provider_receipt and provider_receipt.get("next_attempt_at_ms") is not None:
+                next_attempt_at_ms = max(current + 60_000, int(provider_receipt["next_attempt_at_ms"]))
         error_value = str(error or "").strip() or None
         fields = {
             "provider_message_id": (
@@ -1451,7 +1486,7 @@ def reconcile_notification_batch(
 
 def _preserve_frozen_receipt(row: dict[str, Any], provider: dict[str, Any] | None) -> dict[str, Any]:
     previous = row.get("provider_receipt") or {}
-    return {**dict(provider or {}), **{key: previous[key] for key in ("rendered_message", "message_sha256") if key in previous}}
+    return {**dict(provider or {}), **{key: previous[key] for key in ("rendered_message", "message_sha256", "fanout_id") if key in previous}}
 
 
 

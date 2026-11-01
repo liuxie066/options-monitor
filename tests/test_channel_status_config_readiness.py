@@ -14,6 +14,11 @@ from src.application.channels import status as channel_status
 from src.interfaces.cli.channel_ops import handle_channel_command
 
 
+@pytest.fixture(autouse=True)
+def installed_transports(monkeypatch):
+    monkeypatch.setattr(channel_status, "channel_plugin_installed", lambda _: True)
+
+
 def _save(path: Path, value: object) -> None:
     with path.open("x", encoding="utf-8") as stream:
         json.dump(value, stream)
@@ -143,7 +148,7 @@ def test_wechat_valid_and_legacy_config_status_remains_compatible(tmp_path, monk
 
 
 @pytest.mark.parametrize("kind", ["missing", "malformed", "valid"])
-def test_feishu_config_loading_keeps_existing_availability(tmp_path, monkeypatch, kind):
+def test_feishu_config_error_is_unavailable(tmp_path, monkeypatch, kind):
     monkeypatch.setattr(config_loader, "default_bot_config_path", lambda **_: tmp_path / "absent-default.json")
     monkeypatch.setattr(channel_status, "resolve_secret_status", lambda *a, **kw: SimpleNamespace(configured=True))
     config = tmp_path / "synthetic.bot.json"
@@ -158,6 +163,6 @@ def test_feishu_config_loading_keeps_existing_availability(tmp_path, monkeypatch
         environ={"OM_FEISHU_BOT_APP_ID": "synthetic-app", "OM_FEISHU_BOT_USER_OPEN_ID": "synthetic-user"},
     )
     feishu = result["data"]["channels"]["feishu"]
-    assert feishu["available"] is True
+    assert feishu["available"] is (kind != "malformed")
     assert feishu["credentials_configured"] is True
     assert ("config_error" in feishu) is (kind == "malformed")

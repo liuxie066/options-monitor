@@ -572,6 +572,12 @@ true 也不补装。首次安装可用 `scripts/install.sh --with-position-advic
 不构建券商连接或读取凭据。失败时不切换当前实例，不删除复用的缓存环境，也不修改
 旧实例的安装或配置。
 
+消息渠道采用相同边界：源码升级分别保留 `om-feishu-channel-plugin` 与
+`om-wechat-channel-plugin` 的实际安装选择，纳入目标包源码哈希并在切换前检查版本及导入。
+旧内置渠道按有效配置及明确选择的收信服务迁移，不从凭据推断启用；插件化版本主动卸载后保持缺包。
+渠道安装不写配置、不启用收发、不发送探测消息。运行包无法保留所选消息包时在切换前拒绝，
+不自动切换安装形态。首次迁移仍须由下文的新升级控制器驱动。
+
 上述 pip/uv 依赖安装和缓存保留用于源码 release。运行包的固定依赖清单不支持向内置环境追加可选包；
 目标为运行包且需要保留 pip 安装的 PM、Longbridge 或 Position Advice 时，在切换 `current` 前拒绝升级并保留当前实例。
 
@@ -586,7 +592,7 @@ true 也不补装。首次安装可用 `scripts/install.sh --with-position-advic
 
 首次进入包含本修复的版本时，须由**含修复的新升级控制器**驱动旧实例。旧 release 的
 `om update apply`（含自动升级 timer）仍执行旧代码，不会提前加载目标 release 的本段逻辑；
-直接用它升级不能保证 PM/Longbridge/Position Advice 保留。发布后的迁移须先将已核验的新 release 源码
+直接用它升级不能保证 PM、Longbridge、Position Advice 或消息渠道保留。发布后的迁移须先将已核验的新 release 源码
 放入独立目录，以依赖兼容的 Python 环境运行其中的 `om update apply`，显式传入旧实例的
 `--repo-root <current-symlink>`、`--runtime-root <runtime-root>` 和目标版本，先预览再确认。
 该控制器会从旧实例环境读取安装状态，并从旧有效配置识别内置 PM/Position Advice；不要先切换 `current`

@@ -846,6 +846,109 @@ def read_confirmed_attribution_render_context(
     return context
 
 
+def read_daily_brief_fanout_children(
+    *, base: Path, account: str, market: str, market_trading_date: str | None = None,
+) -> list[dict[str, Any]]:
+    """Project shared delivery facts without treating a partial parent as sent."""
+    from src.application.notification_fanout import list_notification_fanouts
+
+    children = []
+    for fanout in list_notification_fanouts(base=base, account=account, logical_key_prefix="daily-brief:"):
+        for child in fanout["children"]:
+            metadata = child["spec"]["metadata"]
+            if metadata.get("market") != market:
+                continue
+            if market_trading_date and metadata.get("market_trading_date") != market_trading_date:
+                continue
+            children.append({**child, "fanout_id": fanout["fanout_id"],
+                "logical_key": fanout["logical_key"], "created_at_ms": fanout["created_at_ms"]})
+    return children
+
+
+def read_confirmed_fanout_attribution_context(
+    *, base: Path, account: str, market: str, identity_key: str,
+) -> dict[str, Any]:
+    confirmed = [child for child in read_daily_brief_fanout_children(base=base, account=account, market=market)
+        if child["identity_key"] == identity_key and child["delivery_confirmed"]
+        and child["spec"]["metadata"].get("delivery_kind") != "fixed_failure"]
+    if not confirmed:
+        return {}
+    latest = max(confirmed, key=lambda child: (child["confirmed_at_ms"], child["child_id"]))
+    return dict(latest["spec"]["metadata"].get("render_context") or {})
+
+
+def read_daily_brief_fanout_recovery_source(
+    *, base: Path, account: str, market: str, market_trading_date: str,
+    after_utc: str, before_utc: str,
+) -> dict[str, Any] | None:
+    """Select the earliest committed successful source in the original window."""
+    after = datetime.fromisoformat(after_utc.replace("Z", "+00:00"))
+    before = datetime.fromisoformat(before_utc.replace("Z", "+00:00"))
+    revisions = list_daily_decision_brief_revisions(base=base, account=account, market=market,
+        market_trading_date=market_trading_date)
+    for revision in revisions["revisions"]:
+        result = read_daily_decision_brief(base=base, account=account, market=market,
+            market_trading_date=market_trading_date, revision=revision)
+        if not result.get("available"):
+            raise DailyDecisionBriefStateError("fanout recovery source unavailable")
+        brief = result["brief"]
+        generated = datetime.fromisoformat(brief["generated_at_utc"].replace("Z", "+00:00"))
+        if after < generated < before:
+            return {"brief": brief, "current_candidate_identities": sorted(_candidate_identity_set(brief)),
+                "current_revision": brief["revision"], "current_brief_digest": daily_brief_digest(brief)}
+    return None
+
+
+def record_daily_brief_fanout_plan(*, base: Path, account: str, market: str, run_id: str,
+                                  fanouts: list[dict[str, Any]]) -> None:
+    """Retain exact run-to-child content references; child facts own outcomes."""
+    from domain.storage.json_io import atomic_write_private_json
+    from src.application.receipt_query import receipt_digest
+
+    path = paths.run_account_state_dir(base, _normalize_run_id(run_id), _normalize_account(account)) / (
+        f"daily_decision_brief_fanout_plan.{_normalize_market(market)}.json")
+    entries = [{"fanout_id": item["fanout_id"], "child_id": child["child_id"],
+        "spec_digest": receipt_digest(child["spec"])} for item in fanouts for child in item["children"]]
+    atomic_write_private_json(path, {"account": account, "market": market, "run_id": run_id, "children": entries})
+
+
+def _query_daily_brief_fanout_receipts(*, base, account, market, query):
+    from src.application.receipt_query import read_receipt_json, receipt_digest, receipt_event, receipt_matches
+
+    children = read_daily_brief_fanout_children(base=base, account=account, market=market)
+    selected = None
+    if query.get("run_id"):
+        run_id = _normalize_run_id(query["run_id"])
+        path = paths.run_account_state_dir(base, run_id, account) / f"daily_decision_brief_fanout_plan.{market}.json"
+        if path.exists():
+            plan = read_receipt_json(path)
+            if any(plan.get(key) != value for key, value in (("account", account), ("market", market), ("run_id", run_id))):
+                raise ValueError("daily_brief_run_scope_mismatch")
+            selected = {entry["child_id"]: entry for entry in plan["children"]}
+            retained = {child["child_id"]: child for child in children}
+            for child_id, entry in selected.items():
+                child = retained.get(child_id)
+                if (child is None or child["fanout_id"] != entry["fanout_id"]
+                        or receipt_digest(child["spec"]) != entry["spec_digest"]):
+                    raise ValueError("daily_brief_run_content_mismatch")
+    rows = []
+    for child in children:
+        metadata = child["spec"]["metadata"]
+        if selected is not None and child["child_id"] not in selected:
+            continue
+        event = receipt_event(source="daily_brief", event_id=child["child_id"], account=account, market=market,
+            kind="monitor" if metadata["delivery_kind"] == "candidate_alert" else "scheduled",
+            occurred=child["created_at_ms"], recorded=child.get("confirmed_at_ms"), revision=metadata.get("revision"),
+            body=child["spec"]["message"], delivery=child["status"],
+            run_id=query.get("run_id") if selected is not None else metadata.get("run_id"),
+            business_result={"delivery_kind": metadata["delivery_kind"], "fanout_id": child["fanout_id"],
+                "route_id": child["route_id"], "identity_key": child["identity_key"],
+                "source_digest": metadata.get("source_digest")})
+        if receipt_matches(event, query):
+            rows.append(event)
+    return rows, selected is not None
+
+
 def read_retryable_daily_decision_brief_delivery(
     *,
     base: Path,
@@ -886,6 +989,26 @@ def read_retryable_daily_decision_brief_delivery(
     if isinstance(candidate, Mapping) and candidate.get("status") == "pending":
         return {**result, "reason": "stale_candidate_envelope", "envelope": None}
     return {**result, "reason": "none", "envelope": None}
+
+
+def list_pending_legacy_daily_brief_deliveries(
+    *, base: Path, account: str, market: str, market_trading_date: str,
+    now_utc: datetime | str | None = None,
+) -> list[dict[str, Any]]:
+    """Select original envelopes independently; ambiguous siblings never retry."""
+    result = read_daily_decision_brief_delivery_state(base=base, account=account, market=market)
+    if not result.get("available"):
+        if result.get("reason") == "state_invalid":
+            raise DailyDecisionBriefStateError("legacy daily brief delivery state invalid")
+        return []
+    day = result["state"]["days"].get(_normalize_market_date(market_trading_date), {})
+    envelopes = [*day.get("fixed_reports", {}).values(), *day.get("recovery_reports", {}).values()]
+    candidate = day.get("candidate_delivery")
+    if candidate and set(candidate["candidate_identities"]).issubset(day.get("pending_candidates", {})):
+        envelopes.append(candidate)
+    now = _coerce_utc_iso(now_utc)
+    return [dict(envelope) for envelope in envelopes if envelope["status"] == "pending"
+        and (envelope["delivery_kind"] != "fixed_recovery_report" or now < envelope["cutoff_utc"])]
 
 
 def classify_retryable_daily_decision_brief_payload(
@@ -1418,6 +1541,17 @@ def read_combo_candidate_exposures(
             if isinstance(item, Mapping)
         )
 
+    fanout_children = read_daily_brief_fanout_children(base=base_path, account=account_norm,
+        market=market_norm, market_trading_date=date_norm)
+    for child in fanout_children:
+        metadata = child["spec"]["metadata"]
+        if metadata["delivery_kind"] != "fixed_failure":
+            envelopes.append({"status": child["status"], "source_kind": "successful_brief",
+                "delivery_key": child["child_id"], **{key: metadata.get(key) for key in
+                    ("revision", "source_digest", "render_context")}})
+    delivery_available = delivery_result.get("available") is True or (
+        delivery_result.get("reason") == "not_found" and bool(fanout_children))
+
     out_by_id: dict[str, dict[str, Any]] = {}
     invalid_revisions: list[int] = []
     for revision in listed["revisions"]:
@@ -1460,9 +1594,9 @@ def read_combo_candidate_exposures(
             out_by_id[str(item["candidate_exposure_id"])] = item
     return {
         "available": True,
-        "reason": "partial" if invalid_revisions or not delivery_result.get("available") else "ok",
-        "complete": not invalid_revisions and delivery_result.get("available") is True,
-        "delivery_available": delivery_result.get("available") is True,
+        "reason": "partial" if invalid_revisions or not delivery_available else "ok",
+        "complete": not invalid_revisions and delivery_available,
+        "delivery_available": delivery_available,
         "account": account_norm,
         "market": market_norm,
         "market_trading_date": date_norm,
@@ -2904,11 +3038,16 @@ __all__ = [
     "read_daily_decision_brief",
     "read_daily_decision_brief_delivery_state",
     "read_confirmed_attribution_render_context",
+    "read_confirmed_fanout_attribution_context",
+    "read_daily_brief_fanout_children",
+    "read_daily_brief_fanout_recovery_source",
+    "record_daily_brief_fanout_plan",
     "read_daily_decision_brief_fixed_recovery",
     "read_combo_candidate_exposures",
     "read_latest_daily_decision_brief",
     "read_run_daily_decision_brief",
     "read_retryable_daily_decision_brief_delivery",
+    "list_pending_legacy_daily_brief_deliveries",
     "record_daily_decision_brief_candidates",
     "record_daily_decision_brief_fixed_recovery",
     "validate_daily_decision_brief_delivery_identity",
@@ -2918,9 +3057,14 @@ __all__ = [
 def query_daily_brief_receipts(*, base: Path, account: str, market: str, query: dict[str, Any]) -> list[dict[str, Any]]:
     """Query retained delivery envelopes, including fixed failures, independently of run plans."""
     from src.application.receipt_query import read_receipt_json, receipt_event, receipt_matches
+    fanout_rows, fanout_plan = _query_daily_brief_fanout_receipts(base=base, account=account, market=market, query=query)
+    if fanout_plan or (query.get("run_id") and fanout_rows):
+        return fanout_rows
     path = _delivery_path(Path(base).resolve(), _normalize_account(account), _normalize_market(market))
     result = read_daily_decision_brief_delivery_state(base=base, account=account, market=market, bounded=True)
     if not result.get("available"):
+        if result.get("reason") == "not_found" and fanout_rows:
+            return fanout_rows
         raise ValueError("daily_brief_" + str(result.get("reason")))
     selected_key = None
     selected_envelope = None
@@ -2935,7 +3079,7 @@ def query_daily_brief_receipts(*, base: Path, account: str, market: str, query: 
         selected_key = selected_envelope.get("delivery_key")
         if not selected_key:
             raise ValueError("daily_brief_run_plan_invalid")
-    rows = []
+    rows = list(fanout_rows)
     for day in result["state"]["days"].values():
         envelopes = list((day.get("fixed_reports") or {}).values()) + list((day.get("recovery_reports") or {}).values()) + list(day.get("candidate_delivery_history") or [])
         if day.get("candidate_delivery"):

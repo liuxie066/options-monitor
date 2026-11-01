@@ -99,7 +99,9 @@ def query_lifecycle_receipts(path: Path, *, accounts: list[str], query: dict[str
                     body=body, business_result=payload, delivery=row["status"],
                     symbol=query.get("symbol") or payload.get("symbol"), deal_id=query.get("deal_id") or str(payload.get("deal_id") or "") or None,
                     run_id=payload.get("run_id"), diagnostic_code=payload.get("reason"),
-                    related={"case_id": row.get("case_id"), "members": [member.get("outbox_id") for member in payload.get("members", [])]})
+                    related={"case_id": row.get("case_id"), "members": [member.get("outbox_id") for member in payload.get("members", [])],
+                             "fanout_id": provider.get("fanout_id"), "delivery_children": provider.get("children"),
+                             "has_retryable_children": provider.get("has_retryable_children")})
                 event["accounts"] = sorted(labels)
                 if receipt_matches(event, query):
                     results.append(event)

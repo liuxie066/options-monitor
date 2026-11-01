@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "om-feishu-channel-plugin"
+version = "0.1.0"
+description = "Optional Feishu message transport for options-monitor"
+requires-python = ">=3.12"
+dependencies = ["lark-oapi"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["om_feishu_channel", "om_feishu_channel.*"]
+namespaces = false

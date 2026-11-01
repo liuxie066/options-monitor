@@ -158,6 +158,8 @@ def _starter_yaml_payload(
         "markets": markets,
         "symbol_defaults": {"fetch": {"host": futu_host, "port": futu_port}},
         "notifications": {"enabled": False},
+        "channels": {name: {"enabled": False, "receive_enabled": False, "notify_enabled": False}
+                     for name in ("feishu", "wechat_clawbot")},
         "bot": {'enabled': False, 'context_window_messages': 8, 'active_model': 'deepseek-default', 'models': {'deepseek-default': {'provider': 'deepseek', 'base_url': 'https://api.deepseek.com', 'model': 'deepseek-v4-pro', 'api_key_env': 'DEEPSEEK_API_KEY', 'confidence_min': 0.75, 'timeout_seconds': 90, 'context_window_tokens': 1000000}}},
         "inbound": {
             "feishu_ws": {

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.channels import plugins
 from src.application.config_validator import validate_bot_config
 from src.application.config_yaml import default_yaml_bot_config_path
 
@@ -54,6 +55,16 @@ def load_bot_config(
     return path, payload
 
 
+def require_inbound_channel(channel: str, bot_config_path: str | None = None) -> None:
+    """Recheck current channel authority; cached serve settings cannot enable it."""
+    channel = plugins.canonical_channel(channel)
+    if not plugins.channel_plugin_installed(channel):
+        raise AgentToolError(code="CHANNEL_PLUGIN_NOT_INSTALLED", message=f"{channel} channel plugin is not installed")
+    _, config = load_bot_config(config_path=bot_config_path, missing_ok=not bool(bot_config_path))
+    if not plugins.channel_activity_enabled(config, channel, activity="receive"):
+        raise AgentToolError(code="CHANNEL_RECEIVE_DISABLED", message=f"{channel} inbound channel is disabled")
+
+
 def _repo_root(raw: str | Path | None) -> Path:
     if raw is not None and str(raw).strip():
         return Path(raw).expanduser().resolve()
@@ -84,4 +95,4 @@ def _validate_loaded_bot_config(payload: dict[str, Any], *, path: Path) -> None:
         ) from exc
 
 
-__all__ = ["default_bot_config_path", "load_bot_config"]
+__all__ = ["default_bot_config_path", "load_bot_config", "require_inbound_channel"]

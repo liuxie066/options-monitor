@@ -74,10 +74,12 @@ export PATH="$HOME/.local/bin:$PATH"
 
 如果需要换 wrapper 目录，用 `--bin-dir PATH`。如果目标目录里已有未知来源的 `om` / `om-agent`，installer 会拒绝覆盖；确认要接管时才使用 `--force-cli-wrapper`。
 
-运行包已包含公开运行功能所需依赖，关闭的可选功能不要求配置凭证。仅在源码安装需要 Feishu long-connection、远端 inbound 或服务端依赖时，加 `--with-server`：
+运行包包含基础运行依赖，关闭的可选功能不要求配置凭证。源码安装服务端依赖可加
+`--with-server`；飞书收发另加 `--with-feishu`，微信收发另加 `--with-wechat`。
+例如安装含飞书消息能力的源码实例：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash -s -- --source --with-server
+curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash -s -- --source --with-server --with-feishu
 ```
 
 ## 官方可选插件
@@ -156,6 +158,24 @@ PM 默认关闭。安装后设置全局 `portfolio_management.enabled: true`；�
 
 安装器也支持 `--with-position-advice`；安装不启用，需在配置中明确开启 `close_advice.enabled`。缺包不影响核心扫描启动及历史报告读取。开发/CI 的 `requirements/dev.txt` 安装此包并保留全部策略测试；缺包启动由隔离子进程覆盖。受控升级保留实际安装选择，并为旧内置建议已启用的实例迁移安装；主动卸载保持卸载。首次迁移仍须使用新升级控制器，见[升级流程](RELEASE_PROCESS.md)。
 
+## 可选消息渠道
+
+飞书与微信分别安装，也可均不安装。每个包包括收发传输；核心 CLI、本地扫描、报告和历史读取
+不要求消息包。Feishu Bitable 数据集成独立于消息插件。
+当前仅支持源码安装；安装器使用 `--source --with-feishu` / `--source --with-wechat`，
+两者可同时选择。也可使用实例的 Python 从源码根目录安装或移除：
+
+```bash
+./.venv/bin/python -m pip install ./plugins/feishu-channel
+./.venv/bin/python -m pip install ./plugins/wechat-channel
+./.venv/bin/python -m pip uninstall om-feishu-channel-plugin om-wechat-channel-plugin
+```
+
+安装不启用；按 [配置契约](../CONFIGS.md#消息渠道) 设置各渠道总开关、收信与主动通知。
+开发依赖安装两包，以保留完整回归；基础 server 依赖不再强制安装飞书 SDK。
+缺包与配置关闭是不同状态，`om channel status` 分别展示。选择了消息插件的升级必须保留安装选择，
+固定运行包无法追加可选包时在切换前拒绝；首次迁移仍使用含修复的新升级控制器。
+
 ## macOS
 
 macOS 提供本地手动运行和 LaunchAgent 入口；运行包资格按上表和实际宿主回执确认，不由入口存在推断。
@@ -186,7 +206,7 @@ om setup check
 如果这台 Mac 要跑 Feishu long-connection inbound：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash -s -- --source --with-server
+curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash -s -- --source --with-server --with-feishu
 ```
 
 本地手动运行可以继续使用 repo 内忽略文件：
@@ -246,7 +266,7 @@ om setup check
 如果这台服务器要跑 Feishu long-connection inbound：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash -s -- --source --with-server
+curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash -s -- --source --with-server --with-feishu
 ```
 
 生产服务 env-file 推荐放在：

@@ -7,6 +7,7 @@ from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tool_registry import get_tool_definition
+from src.application.bot.control.config_loader import require_inbound_channel
 from src.application.settings import build_effective_env
 from src.application.tool_allowlist import PURE_READ_TOOLS
 
@@ -143,9 +144,10 @@ def _truthy_env(name: str, explicit: bool | None) -> bool:
 class ReplyAuthorizationError(ValueError):
     """A local authorization block is not an ambiguous provider outcome."""
 
-    def __init__(self, message: str, *, provider_attempted: bool = False):
+    def __init__(self, message: str, *, provider_attempted: bool = False, error_code: str | None = None):
         super().__init__(message)
         self.provider_attempted = provider_attempted
+        self.error_code = error_code
 
 
 def check_reply_authorization(record: dict[str, Any], *, channel: str,
@@ -157,6 +159,7 @@ def check_reply_authorization(record: dict[str, Any], *, channel: str,
     from src.application.bot.control.contracts import BotInboundRequest
 
     try:
+        require_inbound_channel(channel, bot_config_path)
         frozen = json.loads(record.get("authorization_json") or "null")
         if not isinstance(frozen, dict) or frozen.get("channel") != channel:
             raise ValueError("reply identity unavailable")
@@ -196,7 +199,8 @@ def check_reply_authorization(record: dict[str, Any], *, channel: str,
         if not frozen.get("scope") or any(frozen.get(key) != value for key, value in current.items()):
             raise ValueError("reply authority changed")
     except (AgentToolError, OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
-        raise ReplyAuthorizationError("reply authorization unavailable") from exc
+        raise ReplyAuthorizationError("reply authorization unavailable",
+            error_code=exc.code if isinstance(exc, AgentToolError) else None) from exc
 
 
 def reply_authorization_predicate(check: Callable[[dict[str, Any]], None]) -> Callable[[dict[str, Any]], bool]:

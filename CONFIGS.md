@@ -68,6 +68,51 @@ env-file 不是合并进生成快照的配置层；它在进程启动或工具�
 Close Advice 详细固定规则见
 [Close Advice Contract](docs/CLOSE_ADVICE_CONTRACT.md)。
 
+### 消息渠道
+
+飞书与微信各为一个可选安装包，包内同时提供收信和发信能力。配置只在根层
+`channels.feishu` / `channels.wechat_clawbot` 定义，并复制到市场与 Bot 生成快照；
+不使用服务配置或环境变量作为第二套启停开关。每个渠道有三个布尔值：
+`enabled` 总开关、`receive_enabled` 收信及原会话回复、`notify_enabled` 主动通知。
+显式 `channels` 中省略的渠道和字段均为关闭；安装不启用。新初始化配置全部关闭。
+旧配置无 `channels` 时保留原有显式调用和通知开关语义，不从凭据推断新渠道启用。
+
+`notifications.enabled` 仍是主动通知总停止开关，不控制已授权的原会话回复。
+主动通知可用 `notifications.routes` 按账户选择多个目标：
+
+```yaml
+channels:
+  feishu: {enabled: true, receive_enabled: true, notify_enabled: true}
+  wechat_clawbot: {enabled: true, receive_enabled: false, notify_enabled: true}
+notifications:
+  enabled: true
+  routes:
+    - id: feishu-main
+      provider: feishu_app
+      target: ou_example
+      accounts: [your_account]
+    - id: wechat-main
+      provider: wechat_clawbot
+      target: wechat:default:ops
+      accounts: [your_account]
+```
+
+`accounts` 必须是已配置账户。route id 唯一，同账户的实际目标不能重复。
+未配置 `routes` 保留旧单目标；显式 `routes: []` 不发送且不回退。
+旧单目标发送失败或缺少配置也不会凭遗留凭据改投另一平台。
+全局 OpenD 告警使用已配置账户的通知路由，相同实际目标只接收一次。
+常驻监听器在通知尝试前读取绑定实例的最新通知授权；停用或删除目标会暂停旧失败任务，
+恢复后仅续发原来明确失败的目标，不增加目标、不重新执行业务。
+显式飞书 route 的 `target` 是实际接收 open_id；旧单目标仍使用
+`OM_FEISHU_BOT_USER_OPEN_ID`。各目标独立保存冻结正文和回执，只重试明确失败的目标，
+成功、已接受或结果未知的目标不自动重发。配置变更不会给既有事件新增目标或修改其冻结正文。
+关闭渠道保留待处理记录，重新开启前须检查原有恢复预览。
+`om channel configure` 仅切换开关时保持离线；提供 App ID、接收人、允许发送人或微信
+目标时，进入既有连接设置预览及确认流程，不静默忽略参数。连接设置不覆盖显式多目标
+`notifications.routes`，此时须单独配置路由。首次写入 `channels` 会保留同一运行目录
+绑定的 service profile 中明确选择的另一收信渠道，并将该 profile 版本纳入确认摘要；
+已有 `channels` 后只以根层开关为准，authoring 中明确关闭的收信选择优先。
+
 ### Portfolio Exposure 的 Holdings 来源配置
 
 `portfolio.holdings.enabled` 是“全部指派后分布”的 PM 非富途资产补充开关，默认关闭。关闭时查询不读取 PM；开启时以账户配置的直接券商股票、现金与 OM 期权账本为基线，仅从 PM `holdings_scope=non_futu` 估值证据补充同账户非富途资产。PM 的富途副本及同账户已直接读取的长桥镜像不重复计入；其他 PM 现金只参与资产分布，不增加直接券商的期权资金覆盖。

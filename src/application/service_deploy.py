@@ -16,6 +16,7 @@ from src.application.account_config import (
     accounts_from_config,
     build_account_runtime_plan,
 )
+from src.application.bot.control.config_loader import require_inbound_channel
 from src.application.config_yaml import (
     load_yaml_config_file,
     resolve_yaml_bot_config,
@@ -2495,7 +2496,31 @@ def service_status_from_profile(
         else:
             name = str(item or "").strip()
         if name:
-            normalized_services.append({"name": name})
+            service: dict[str, Any] = {"name": name}
+            channel = {
+                "options-monitor-feishu-ws.service": "feishu",
+                "com.options-monitor.feishu-ws": "feishu",
+                "options-monitor-wechat-clawbot.service": "wechat_clawbot",
+                "com.options-monitor.wechat-clawbot": "wechat_clawbot",
+            }.get(name)
+            if channel:
+                from src.application.agent_tool_contracts import AgentToolError
+
+                feature = profile.get("feishu_ws" if channel == "feishu" else channel) or {}
+                bot_config_path = feature.get("bot_config_path") or profile.get("bot_config_path")
+                if not bot_config_path and profile.get("repo_root"):
+                    from src.application.bot.control.config_loader import default_bot_config_path
+                    bot_config_path = str(default_bot_config_path(repo_root=profile["repo_root"]))
+                try:
+                    require_inbound_channel(channel, bot_config_path)
+                    if channel == "feishu":
+                        from src.infrastructure.feishu_ws_client import is_feishu_ws_sdk_available
+                        if not is_feishu_ws_sdk_available():
+                            raise AgentToolError(code="CHANNEL_DEPENDENCY_MISSING", message="Feishu WebSocket SDK is missing")
+                    service["channel_readiness"] = {"ok": True, "channel": channel}
+                except AgentToolError as exc:
+                    service["channel_readiness"] = {"ok": False, "channel": channel, "error_code": exc.code}
+            normalized_services.append(service)
     out = {
         "provider": provider,
         "runtime_root": profile.get("runtime_root"),

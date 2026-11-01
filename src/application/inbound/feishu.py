@@ -7,7 +7,7 @@ from typing import Any, Callable, cast
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.bot.control.contracts import BotInboundRequest
-from src.application.bot.control.policy import check_sender_allowed
+from src.application.bot.control.policy import check_sender_allowed, require_inbound_channel
 from src.application.payload_helpers import as_dict as _dict
 from src.application.payload_helpers import first_text as _first_text
 
@@ -18,9 +18,11 @@ def prepare_feishu_ack_target(
     payload: dict[str, Any],
     *,
     allowed_senders: str | None,
+    bot_config_path: str | None = None,
 ) -> dict[str, Any]:
     """Return a side-effect-free target for a best-effort Feishu ACK."""
 
+    require_inbound_channel("feishu", bot_config_path)
     event_type = _extract_event_type(payload)
     if event_type != "im.message.receive_v1":
         return {"ready": False, "reason": "unsupported_event"}
@@ -61,6 +63,7 @@ def prepare_feishu_analysis_control(
     from src.application.bot.control.audit import InboundAuditStore
     from src.application.bot.channel_facade import analysis_control_replacement, cancel_channel_analysis
 
+    require_inbound_channel("feishu", bot_config_path)
     if _extract_event_type(payload) != "im.message.receive_v1":
         return None
     try:
@@ -93,6 +96,11 @@ def handle_feishu_payload(
     bot_reply_options: dict[str, Any] | None = None,
     received_monotonic: float | None = None,
 ) -> dict[str, Any]:
+    try:
+        require_inbound_channel("feishu", bot_config_path)
+    except AgentToolError as exc:
+        from src.application.agent_tool_contracts import build_error_payload
+        return build_response(tool_name="inbound.feishu", ok=False, error=build_error_payload(exc))
     received_monotonic = time.monotonic() if received_monotonic is None else received_monotonic
     event_type = _extract_event_type(payload)
     if event_type and event_type != "im.message.receive_v1":

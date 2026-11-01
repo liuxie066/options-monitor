@@ -150,6 +150,7 @@ class LifecycleReceiptBatchDispatcher:
         poll_interval_sec: float = 1.0,
         now_ms_fn: Callable[[], int] | None = None,
         log_fn: Callable[[str], None] | None = None,
+        authorize_account: Callable[[str], bool] | None = None,
     ) -> None:
         accounts = sorted(
             {
@@ -173,6 +174,7 @@ class LifecycleReceiptBatchDispatcher:
             lambda: int(time.time() * 1000)
         )
         self._log_fn = log_fn
+        self._authorize_account = authorize_account
         self._stop_event = threading.Event()
         self._state_lock = threading.Lock()
         self._poll_lock = threading.Lock()
@@ -239,13 +241,15 @@ class LifecycleReceiptBatchDispatcher:
     def _run_once_locked(self) -> dict[str, Any]:
         attempted_at_ms = int(self._now_ms_fn())
         try:
+            accounts = tuple(account for account in self._allowed_accounts
+                             if self._authorize_account is None or self._authorize_account(account))
             result = dispatch_notification_batch_once(
                 self._repo,
                 route=self._route,
                 send_fn=self._send_fn,
                 now_ms=attempted_at_ms,
-                allowed_accounts=self._allowed_accounts,
-            )
+                allowed_accounts=accounts,
+            ) if accounts else {"status": "idle", "reason": "delivery_authorization_closed", "batch": None}
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             with self._state_lock:

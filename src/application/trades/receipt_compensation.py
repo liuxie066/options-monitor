@@ -23,8 +23,10 @@ from src.application.notification_delivery_adapter import (
 )
 from src.application.notification_delivery_route import (
     resolve_notification_delivery_route,
+    resolve_notification_delivery_routes,
     notifications_enabled,
 )
+from src.application.notification_fanout_delivery import send_notification_fanout, uses_proactive_fanout
 from src.application.notification_shells import render_receipt
 from src.application.trade_time_format import format_trade_time_beijing
 from src.application.trades.deal_identity import (
@@ -85,6 +87,7 @@ def compensate_trade_intake_receipts(
         if managed is not None:
             return {**managed, "dry_run": True}
         plan = _build_plan(
+            base=base,
             config=config,
             source=source,
             repo=repo,
@@ -107,6 +110,7 @@ def compensate_trade_intake_receipts(
         if managed is not None:
             return {**managed, "dry_run": False}
         plan = _build_plan(
+            base=base,
             config=config,
             source=source,
             repo=repo,
@@ -247,6 +251,7 @@ def _select_source(
 
 def _build_plan(
     *,
+    base: Path | None = None,
     config: dict[str, Any],
     source: dict[str, Any],
     repo: Any,
@@ -301,7 +306,13 @@ def _build_plan(
     )
     message = _build_message(account=account_value, members=members)
 
-    route = route_resolver(config=config)
+    routes = (resolve_notification_delivery_routes(config=config, account=account_value, base=base)
+              if uses_proactive_fanout(config) else None)
+    if routes == []:
+        raise ValueError("receipt compensation has no enabled routes")
+    if routes is not None:
+        routes.sort(key=lambda item: item["route_id"])
+    route = routes[0] if routes is not None else route_resolver(config=config)
     route = dict(route) if isinstance(route, dict) else {}
     route_snapshot = build_notification_batch_route(
         provider=str(route.get("provider") or ""),
@@ -322,6 +333,8 @@ def _build_plan(
             "route_fingerprint",
         )
     }
+    public_routes = [{key: item[key] for key in ("route_id", "provider", "channel", "identity_key")}
+                     for item in sorted(routes or [], key=lambda item: item["route_id"])]
     payload_hash = _payload_hash(
         {
             "schema_version": COMPENSATION_SCHEMA_VERSION,
@@ -332,6 +345,7 @@ def _build_plan(
             "members": members,
             "message": message,
             "route": public_route,
+            **({"routes": public_routes} if routes is not None else {}),
             "transport_idempotency_key": transport_key,
         }
     )
@@ -351,6 +365,7 @@ def _build_plan(
         "message_sha256": hashlib.sha256(message.encode("utf-8")).hexdigest(),
         "payload_hash": payload_hash,
         "route": public_route,
+        **({"routes": public_routes, "_delivery_routes": routes, "_config": config} if routes is not None else {}),
         "transport_idempotency_key": transport_key,
         "state_path": str(state_path),
         "audit_path": str(audit_path),
@@ -716,6 +731,22 @@ def _execute_plan(
     now_fn: Callable[[], str],
 ) -> dict[str, Any]:
     record_path = Path(plan["record_path"])
+    if "_delivery_routes" in plan:
+        from src.application.notification_fanout import notification_fanout_id
+        if record_path.exists():
+            _existing_record_result(plan, record_path=record_path)
+        else:
+            _write_json_exclusive(record_path, {**_public_plan(plan), "status": "prepared",
+                "fanout_id": notification_fanout_id(account=plan["account"], logical_key="compensation:" + plan["compensation_id"]),
+                "delivery_confirmed": False, "created_at": now_fn()})
+        receipt = send_notification_fanout(base=base, config=plan["_config"], account=plan["account"],
+            logical_key="compensation:" + plan["compensation_id"], message=plan["message"],
+            routes=plan["_delivery_routes"], send_fn=send_fn, normalize_fn=normalize_fn,
+            adapter_selector=adapter_selector)
+        final = {**_public_plan(plan), **receipt, "updated_at": now_fn()}
+        atomic_write_json(record_path, final, sort_keys=True)
+        _append_audit(plan, phase="receipt_compensation_fanout", outcome=receipt)
+        return {**final, "ok": receipt["delivery_confirmed"], "dry_run": False, "write_applied": True}
     if record_path.exists():
         return _existing_record_result(plan, record_path=record_path)
 
@@ -862,6 +893,8 @@ def _existing_record_result(
     prior_status = str(existing.get("status") or "unknown").strip().lower()
     confirmed = bool(existing.get("delivery_confirmed")) and bool(
         str(existing.get("message_id") or "").strip()
+        or (existing.get("fanout_id") and existing.get("children")
+            and all(child.get("delivery_confirmed") is True for child in existing["children"]))
     )
     return {
         "ok": confirmed,

@@ -14,9 +14,11 @@ from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.bot.control.llm_model_profiles import add_model_profile_to_config, parse_model_profiles, switch_active_model_profile
 from src.application.channels.wechat_clawbot.binding import connect_wechat_clawbot_target
+from src.application.channels.plugins import canonical_channel, channel_activity_enabled
 from src.application.config_authoring_transaction import config_source_sha256
 from src.application.config_env import env_source_sha256, feature_env_path, write_feature_env
-from src.application.config_features import feature_document, publish_feature_document
+from src.application.config_features import feature_document, publish_feature_document, legacy_channel_receivers, validate_channel_connection_setup
+from src.application.config_primitives import file_sha256
 from src.application.config_yaml import load_yaml_config_file, resolve_yaml_config_path
 from src.application.config_yaml_holdings import set_yaml_holdings_inclusion
 from src.application.llm_provider_registry import provider_catalog_payload
@@ -57,13 +59,21 @@ def add_feature_configure_parser(subparsers: Any, feature: str) -> None:
         parser.add_argument("--max-output-tokens", type=int, default=None)
         parser.add_argument("--replace", action="store_true")
     elif feature == "channel":
-        parser.add_argument("--provider", choices=("feishu_app", "wechat_clawbot"), default=None)
+        parser.epilog = ("Channel controls example: om channel configure --provider feishu_app "
+                         "--enabled true --receive-enabled true --notify-enabled false. "
+                         "Controls preserve notifications.enabled (global emergency stop) and existing routes. "
+                         "Interactive mode without switch flags runs connection setup.")
+        parser.add_argument("--provider", choices=("feishu", "feishu_app", "wechat_clawbot"), default=None)
+        parser.add_argument("--receive-enabled", type=parse_enabled, default=None,
+                            help="allow inbound messages and replies when the channel master is on")
+        parser.add_argument("--notify-enabled", type=parse_enabled, default=None,
+                            help="allow proactive notifications when channel and global masters are on")
         parser.add_argument("--app-id", default=None)
         parser.add_argument("--recipient", default=None, help="Feishu open_id notification recipient")
         parser.add_argument("--allowed-senders", default=None)
         parser.add_argument("--target", default=None, help="existing WeChat binding target")
-        parser.add_argument("--label", default="default")
-        parser.add_argument("--binding-name", default="ops")
+        parser.add_argument("--label", default=None)
+        parser.add_argument("--binding-name", default=None)
     elif feature == "holdings":
         parser.add_argument("--service-url", default=None)
         parser.add_argument("--enable-pm", action="store_true", help="include global PM integration in the same Holdings config publication")
@@ -86,7 +96,11 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
     root = Path(args.runtime_root).expanduser().resolve() if getattr(args, "runtime_root", None) else source.parent
     revision = config_source_sha256(source)
     doc = load_yaml_config_file(source)
-    interactive = bool(getattr(args, "interactive", False) or getattr(args, "enabled", None) is None)
+    channel_flags = {key: getattr(args, key) for key in ("receive_enabled", "notify_enabled")
+                     if getattr(args, key, None) is not None} if feature == "channel" else {}
+    channel_controls = feature == "channel" and ("channels" in doc or bool(channel_flags))
+    interactive = bool(getattr(args, "interactive", False) or (
+        getattr(args, "enabled", None) is None and not channel_flags))
     if interactive and not input_is_tty():
         raise AgentToolError(code="INPUT_ERROR", message="configure requires a terminal or explicit --enabled and feature flags")
     if getattr(args, "apply", False) and not interactive and (
@@ -101,6 +115,9 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
     env_path = feature_env_path(root, explicit_env)
     env_revision = env_source_sha256(env_path)
     ordinary = build_effective_env(environ={}, env_file=env_path).values
+    legacy_receivers: set[str] = set()
+    migration_profile = None
+    channel_setup = False
 
     def ask(prompt: str, default: str = "") -> str:
         value = input_fn(prompt + (f" [{default}]" if default else "") + ": ").strip()
@@ -116,7 +133,19 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
         return yes(question)
 
     def channel_resume_preview(after: dict) -> dict:
-        if feature != "channel" or notifications_enabled(doc) or not notifications_enabled(after):
+        if feature != "channel":
+            return {}
+        if migration_profile and (
+            not Path(migration_profile["path"]).is_file()
+            or file_sha256(Path(migration_profile["path"])) != migration_profile["sha256"]
+        ):
+            raise AgentToolError(code="STALE_PREVIEW", message="legacy channel service profile changed after preview")
+        resuming = notifications_enabled(after) and not notifications_enabled(doc)
+        if channel_controls:
+            resuming = resuming or (notifications_enabled(after) and any(
+                channel_activity_enabled(after, name, "notify") and not channel_activity_enabled(doc, name, "notify")
+                for name in ("feishu", "wechat_clawbot")))
+        if not resuming and not migration_profile:
             return {}
         effect = {
             "pending_receipts": "resume_on_next_scheduled_run",
@@ -125,15 +154,17 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
             "notice": "重新开启后，后续调度会恢复 pending / explicit_failed 待处理回执，包括关闭期间积累的记录；已确认送达的回执不会重复发送。",
         }
         identity = {"config_yaml": str(source), "runtime_root": str(root), "source_sha256": revision,
-                    "config_doc": after, "notification_resume": effect}
+                    "config_doc": after, "notification_resume": effect if resuming else None,
+                    "legacy_service_profile": migration_profile}
         digest = sha256(json.dumps(identity, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
         if not interactive and getattr(args, "apply", False):
             expected = getattr(args, "expected_preview_sha256", None)
             if not expected:
-                raise AgentToolError(code="CONFIRMATION_REQUIRED", message="enabling notifications resumes pending receipts; apply requires --expected-preview-sha256 from its preview")
+                raise AgentToolError(code="CONFIRMATION_REQUIRED", message="channel activation/migration apply requires --expected-preview-sha256 from its preview")
             if expected != digest:
                 raise AgentToolError(code="STALE_PREVIEW", message="notification enablement differs from the confirmed preview")
-        return {"notification_resume": effect, "preview_sha256": digest}
+        return {"preview_sha256": digest, **({"notification_resume": effect} if resuming else {}),
+                **({"legacy_service_profile": migration_profile} if migration_profile else {})}
 
     def publish(after: dict, *, title: str) -> dict:
         nonlocal revision, doc
@@ -150,10 +181,15 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
         elif feature == "channel":
             preview["requested_setting"]["route"] = {key: (after.get("notifications") or {}).get(key)
                                                         for key in ("provider", "channel", "target")}
+            if channel_controls:
+                preview["requested_setting"].update(
+                    channel=canonical_channel(provider),
+                    controls=after["channels"][canonical_channel(provider)],
+                    notifications_enabled=notifications_enabled(after))
         if (after.get("portfolio_management") or {}) != (doc.get("portfolio_management") or {}):
             preview["requested_setting"] = {"feature": "portfolio-management", "enabled": True,
                                              "scope": "global PM integration"}
-        if resume_preview:
+        if resume_preview.get("notification_resume"):
             title = resume_preview["notification_resume"]["notice"] + " 确认开启？"
         if not preview_confirm(preview, title):
             return preview
@@ -218,7 +254,7 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
 
     try:
         enabled = getattr(args, "enabled", None)
-        if enabled is None:
+        if enabled is None and not channel_controls:
             from src.application.config_yaml_holdings import holdings_included
             bot_config = doc.get("bot") if isinstance(doc.get("bot"), dict) else {}
             bot = bot_config
@@ -229,7 +265,38 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
             enabled = parse_enabled(ask(f"启用 {feature}（true/false）", str(current_enabled).lower()))
         credential = None
         extras: dict[str, Any] = {}
-        after = feature_document(doc, feature=feature, enabled=enabled) if feature != "holdings" and (feature != "channel" or not enabled) else doc
+        after = feature_document(doc, feature=feature, enabled=enabled) if feature != "holdings" and (feature != "channel" or not enabled) and not channel_controls else doc
+        if channel_controls:
+            provider = getattr(args, "provider", None) or (ask("通道（feishu_app / wechat_clawbot）") if interactive else "")
+            if not provider:
+                raise AgentToolError(code="INPUT_ERROR", message="--provider is required for channel controls")
+            if enabled is None and interactive:
+                current = ((doc.get("channels") or {}).get(canonical_channel(provider)) or {}).get("enabled") is True
+                enabled = parse_enabled(ask("启用此通道（true/false）", str(current).lower()))
+            connection_fields = ("app_id", "recipient", "allowed_senders", "target", "label", "binding_name")
+            supplied = {key for key in connection_fields if getattr(args, key, None) is not None}
+            channel_setup = bool(supplied) or (interactive and enabled is True and not channel_flags and getattr(args, "enabled", None) is None)
+            if provider == "feishu":
+                provider = "feishu_app"
+            unsupported = supplied & ({"target", "label", "binding_name"} if provider == "feishu_app" else {"app_id", "recipient"})
+            if unsupported:
+                raise AgentToolError(code="INPUT_ERROR", message=f"unsupported {provider} setup flags: {', '.join(sorted(unsupported))}")
+            if channel_setup:
+                if enabled is False:
+                    raise AgentToolError(code="INPUT_ERROR", message="connection setup cannot be combined with --enabled false; disable with switch flags only")
+                validate_channel_connection_setup(doc, provider)
+                if interactive:
+                    current_controls = ((doc.get("channels") or {}).get(canonical_channel(provider)) or {})
+                    for key, prompt in (("receive_enabled", "接收消息及回复"), ("notify_enabled", "主动通知")):
+                        if key not in channel_flags:
+                            channel_flags[key] = parse_enabled(ask(prompt + "（true/false）", str(current_controls.get(key) is True).lower()))
+            if "channels" not in doc:
+                legacy_receivers, migration_profile = legacy_channel_receivers(config_path=source, runtime_root=root)
+            after = feature_document(doc, feature=feature, enabled=enabled,
+                                     values={"provider": provider, **channel_flags}, legacy_receive_channels=legacy_receivers)
+            enabled = after["channels"][canonical_channel(provider)]["enabled"]
+            if channel_setup and enabled is not True:
+                raise AgentToolError(code="INPUT_ERROR", message="connection setup resolves to --enabled false; pass --enabled true or use switch flags only")
         if feature == "bot" and enabled:
             profiles = parse_model_profiles((doc.get("bot") or {}).get("models"))
             if interactive:
@@ -259,9 +326,11 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
             result = publish(after, title="保存 Bot 模型并启用？")
             if result["write_applied"] and profile.credential_name:
                 credential = provision(profile.credential_name)
-        elif feature == "channel" and enabled:
-            provider = getattr(args, "provider", None) or (ask("通知通道（feishu_app / wechat_clawbot）") if interactive else "")
-            values = {"provider": provider}
+        elif feature == "channel" and (channel_setup or (not channel_controls and enabled)):
+            provider = provider if channel_controls else (getattr(args, "provider", None) or (ask("通知通道（feishu_app / wechat_clawbot）") if interactive else ""))
+            if provider == "feishu":
+                provider = "feishu_app"
+            values = {"provider": provider, **channel_flags, **({"configure_connection": True} if channel_controls else {})}
             if provider == "feishu_app":
                 updates = {}
                 for attr, key, prompt in (("app_id", "OM_FEISHU_BOT_APP_ID", "飞书 App ID"),
@@ -275,7 +344,7 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
                     if not value:
                         raise AgentToolError(code="INPUT_ERROR", message=f"{key} is required")
                     updates[key] = value
-                after = feature_document(doc, feature=feature, enabled=True, values=values)
+                after = feature_document(doc, feature=feature, enabled=enabled, values=values, legacy_receive_channels=legacy_receivers)
                 # Validate the enablement confirmation before the separately authorized env write.
                 channel_resume_preview(after)
                 extras["env"] = save_env(updates)
@@ -285,7 +354,7 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
                 if result["write_applied"]:
                     credential = provision("feishu.bot.app_secret")
             elif provider == "wechat_clawbot":
-                label = getattr(args, "label", "default")
+                label = getattr(args, "label", None) or "default"
                 if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", label):
                     raise AgentToolError(code="INPUT_ERROR", message="invalid WeChat state label")
                 state = root / "output_shared" / "state" / "channels" / "wechat_clawbot" / label
@@ -293,7 +362,7 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
                 if not target and interactive and yes("开始微信扫码登录并绑定？此步会联系微信并保存绑定"):
                     try:
                         connected = wechat_connector(base=root, label=label, state_dir=str(state),
-                                                     name=getattr(args, "binding_name", "ops"),
+                                                     name=getattr(args, "binding_name", None) or "ops",
                                                      progress_fn=lambda event: output_fn(json.dumps(event, ensure_ascii=False)))
                     except KeyboardInterrupt:
                         completed.append({"stage": "wechat_binding", "status": "interrupted", "write_applied": None,
@@ -306,8 +375,11 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
                 if not target:
                     raise AgentToolError(code="INPUT_ERROR", message="--target is required; bind with om channel wechat-clawbot connect")
                 from src.application.channels.wechat_clawbot.state import load_wechat_clawbot_binding, resolve_wechat_clawbot_target
-                if resolve_wechat_clawbot_target(target, notifications={"wechat_clawbot_label": label}).label != label:
+                resolved_target = resolve_wechat_clawbot_target(target, notifications={"wechat_clawbot_label": label})
+                if resolved_target.label != label:
                     raise AgentToolError(code="INPUT_ERROR", message="WeChat target label differs from the selected state label")
+                if getattr(args, "binding_name", None) and resolved_target.binding_name != args.binding_name:
+                    raise AgentToolError(code="INPUT_ERROR", message="WeChat --binding-name differs from --target")
                 values.update(target=target, wechat_clawbot_label=label, wechat_clawbot_state_dir=str(state))
                 binding = load_wechat_clawbot_binding(base=root, target=target, notifications=values)
                 allowed = getattr(args, "allowed_senders", None)
@@ -316,7 +388,7 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
                     allowed = ask("允许与 Bot 对话的微信用户（逗号分隔）", existing_allowed or f"wechat:{binding.to_user_id}")
                 if allowed is not None:
                     values["allowed_senders"] = allowed
-                after = feature_document(doc, feature=feature, enabled=True, values=values)
+                after = feature_document(doc, feature=feature, enabled=enabled, values=values, legacy_receive_channels=legacy_receivers)
                 result = publish(after, title="启用此微信通知绑定？")
             else:
                 raise AgentToolError(code="INPUT_ERROR", message="--provider must be feishu_app or wechat_clawbot")
