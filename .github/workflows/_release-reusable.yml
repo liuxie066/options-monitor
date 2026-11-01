@@ -50,6 +50,9 @@ jobs:
       - name: Validate source identity
         run: ./.venv/bin/python .github/ci/release_checks.py identity
 
+      - name: Build official plugin wheels and catalog
+        run: ./.venv/bin/python scripts/build_plugin_wheels.py --output plugin-wheels
+
       - name: Validate release metadata
         run: |
           chmod +x ./om-agent
@@ -79,6 +82,9 @@ jobs:
       - name: Verify runtime publication set
         run: ./.venv/bin/python scripts/release_check.py --tag "${{ inputs.tag }}" --bundle-dir runtime-bundles
 
+      - name: Verify official plugin publication set
+        run: ./.venv/bin/python scripts/build_plugin_wheels.py --output plugin-wheels --verify-only
+
       - name: Require current CodeQL and tag evidence
         run: ./.venv/bin/python .github/ci/release_checks.py before-publish
 
@@ -95,6 +101,7 @@ jobs:
             /tmp/om-agent-spec.json
             VERSION
             runtime-bundles/*
+            plugin-wheels/*
 
       - name: Read back publication outcome
         if: ${{ always() && (steps.publish.outcome == 'success' || steps.publish.outcome == 'failure') }}
