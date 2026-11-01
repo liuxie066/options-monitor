@@ -42,7 +42,7 @@
 
 ## 产品与策略
 
-- [Product Architecture](PRODUCT_ARCHITECTURE.md)：产品域、模块责任和依赖。
+- [Product Architecture](PRODUCT_ARCHITECTURE.md)：目标用户、核心任务、产品约束、待确认取舍，以及产品域、模块责任和依赖。
 - [Strategy Architecture](STRATEGY_ARCHITECTURE.md)：Cash-Secured Put (CSP)、Covered Call (CC)、Combo Yield 的开仓边界。
 - [Strategy Terminology](STRATEGY_TERMINOLOGY.md)：OM 内部策略命名与金融专业术语（Bullish Risk Reversal、Collar、Wheel 等）的对照。
 - [Candidate Strategy](candidate_strategy.md)：当前候选筛选、排序和 trace。
@@ -115,6 +115,12 @@
 
 - [AI Decision Advice retirement](AI_DECISION_ADVICE_DESIGN.md)：已退役能力和残留兼容边界。
 这些文件保留用于解释历史决策，不逐段更新成当前实现。
+
+## 开发流程
+
+- [Agent Manual](../AGENTS.md)：任务执行规则、按任务阅读入口、已核对的开发命令及权限边界。
+- [Tests Guide](../tests/README.md)：测试分层、运行与维护约定；验证选择见 [Agent Handbook §9](AGENT_WIKI.md#9-verification-matrix)。
+- [开发经验](../LESSONS.md)：经证据支持的复用教训与维护模板；不作为当前业务合同或运行事实的替代。
 
 ## 工作流证据
 

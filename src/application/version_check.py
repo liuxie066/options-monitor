@@ -233,6 +233,7 @@ def check_version_update(
     remote_name: str = "origin",
     run_cmd=None,
     now_fn=None,
+    release_resolver=None,
 ) -> dict[str, Any]:
     base = (base_dir or repo_base()).resolve()
     checked_at = _checked_at(now_fn)
@@ -252,14 +253,26 @@ def check_version_update(
         }
 
     run_cmd = run_cmd or subprocess.run
+    bundled = any(p.exists() or p.is_symlink() for p in (base / "om.runtime.json", base / "runtime"))
     try:
-        proc = run_cmd(
-            ["git", "ls-remote", "--tags", "--refs", remote_name],
-            cwd=str(base),
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        if bundled:
+            from src.application.runtime_bundle import load_manifest, resolve_release
+            manifest = load_manifest(base)
+            release = (release_resolver or resolve_release)("latest", repository=manifest["repository"])
+            tag = release["tag_name"]
+            if (not tag.startswith("v") or not VERSION_RE.fullmatch(tag[1:])
+                    or release.get("draft") is not False or release.get("prerelease") is not False):
+                raise ValueError("expected a published stable release")
+            tags = [(tag[1:], tag)]
+        else:
+            proc = run_cmd(
+                ["git", "ls-remote", "--tags", "--refs", remote_name],
+                cwd=str(base),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            tags = parse_release_tags(str(proc.stdout or ""))
     except subprocess.CalledProcessError as exc:
         stderr = str(exc.stderr or exc.stdout or exc).strip()
         error = stderr or f"git ls-remote failed for remote {remote_name}"
@@ -287,7 +300,6 @@ def check_version_update(
             "error": str(exc),
         }
 
-    tags = parse_release_tags(str(proc.stdout or ""))
     if not tags:
         return {
             "current_version": current_version,

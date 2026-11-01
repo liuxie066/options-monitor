@@ -40,7 +40,14 @@ from src.application.source_receipts import (
 )
 
 
-_OBSERVED_AT = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+_OBSERVED_AT = ""
+
+
+@pytest.fixture(autouse=True)
+def _fresh_quote_time() -> None:
+    # Keep plan identity stable within a test, independent of collection duration.
+    global _OBSERVED_AT
+    _OBSERVED_AT = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def test_consumer_csv_projection_equal_frame_skips_cell_fallback(
@@ -148,8 +155,10 @@ def _fetch_plan(
     symbol: str,
     *,
     outcome: str = "success_rows",
-    observed_at: str = _OBSERVED_AT,
+    observed_at: str | None = None,
 ) -> dict:
+    if observed_at is None:
+        observed_at = _OBSERVED_AT
     success_rows = outcome == "success_rows"
     expirations = ["2026-08-28"] if success_rows else []
     side_plan = {
@@ -279,9 +288,9 @@ def _publish_quote(
     symbol: str = "3690.HK",
     canonical_blob: bool = False,
 ) -> None:
-    fetch_plan = _fetch_plan(symbol)
-    contract = _expected_contract(symbol, fetch_plan=fetch_plan)
     observed_at = _OBSERVED_AT
+    fetch_plan = _fetch_plan(symbol, observed_at=observed_at)
+    contract = _expected_contract(symbol, fetch_plan=fetch_plan)
     term_hash = hashlib.sha256(
         f"fixture:{symbol}:2026-08-28".encode()
     ).hexdigest()

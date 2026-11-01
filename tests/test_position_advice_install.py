@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -30,6 +31,20 @@ fi
 ''' + needle)
         python.write_text(text)
     return env
+
+
+def test_advice_install_requires_source_before_bundle_download(tmp_path):
+    env = _advice_installer_env(tmp_path)
+    prefix = tmp_path / "apps/options-monitor"
+    script = Path(__file__).resolve().parents[1] / "scripts/install.sh"
+    result = subprocess.run(
+        ["bash", str(script), "--version", "v9.9.9", "--prefix", str(prefix),
+         "--with-position-advice"], env=env, text=True, capture_output=True,
+    )
+    assert result.returncode != 0
+    assert "--with-position-advice requires explicit --source mode" in result.stderr
+    assert not prefix.exists()
+    assert not Path(env["FAKE_ADVICE_INSTALL_LOG"]).exists()
 
 
 @pytest.mark.parametrize("args,installed", [

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 4.6.7 - 2026-10-30
+
+### Improvements
+- README 增加 Discord 社区反馈说明及 Star History 图表，明确由维护者统一提交代码变更。（#962、#963）。
+
+### Bug Fixes
+- 港股跨年到期的期限匹配 RV 使用经核验的 HKEX 2027 年证券交易日历补齐未来交易日证据；来源冲突或覆盖不足仍明确保留，并在简报中定位具体到期档与原因，不影响已有正常期限。（#961）。
+
 ## 4.6.6 - 2026-10-30
 
 ### Breaking Changes
@@ -3663,7 +3671,7 @@
 ## 1.2.270 - 2026-06-14
 
 ### Changed
-- Added a Claude/OpenClaw supplement preference to address the operator as `棒棒的liuxie`.
+- Added a maintainer-specific form of address to the Claude/OpenClaw development supplement.
 
 ## 1.2.269 - 2026-06-14
 

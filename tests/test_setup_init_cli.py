@@ -45,9 +45,12 @@ def test_interactive_setup_has_no_default_account_label(tmp_path):
 
     def answer(prompt):
         prompts.append(prompt)
-        return next(answers)
+        try:
+            return next(answers)
+        except StopIteration:
+            raise EOFError()
 
-    with pytest.raises(AgentToolError, match="账户标签必填"):
+    with pytest.raises(AgentToolError, match="未写入"):
         run_setup_init(args, repo_base_fn=lambda: tmp_path, input_is_tty=lambda: True,
                        input_fn=answer, user_home=tmp_path / "home")
     assert "无默认值" in prompts[-1]
@@ -157,7 +160,7 @@ def test_setup_init_preview_and_cancel_leave_target_untouched(tmp_path: Path) ->
     assert "仅预览，未写入" in preview
     assert not target.exists()
 
-    answers = iter(("us", "", "", "REAL", "mine", "123456", "AAPL", "csp", "100", "", "no"))
+    answers = iter(("us", "", "", "REAL", "mine", "manual", "123456", "AAPL", "csp", "100", "", "no"))
     interactive_args = parse_args(["setup", "init", "--output-dir", str(target)])
     cancelled, applied = run_setup_init(
         interactive_args,
@@ -187,7 +190,7 @@ def test_setup_init_preview_explains_higher_priority_env(monkeypatch, tmp_path: 
 def test_setup_init_confirmed_writes_and_reads_back_starter(tmp_path: Path, capsys) -> None:
     target = tmp_path / "config"
     args = parse_args(["setup", "init", "--output-dir", str(target), "--market", "us"])
-    answers = iter(("", "", "", "REAL", "mine", "123456", "AAPL", "csp", "100", "", "yes"))
+    answers = iter(("", "", "", "REAL", "mine", "manual", "123456", "AAPL", "csp", "100", "", "yes"))
 
     def answer(prompt: str) -> str:
         if prompt.startswith("确认写入"):
@@ -335,3 +338,207 @@ def test_setup_init_failure_preserves_modified_created_file(monkeypatch, tmp_pat
     assert (target / "config.us.json").read_text() == "modified after publish\n"
     assert not (target / "config.yaml").exists()
     assert not record.exists()
+
+
+def test_setup_init_retries_each_field_and_keeps_valid_draft(tmp_path, capsys):
+    target = tmp_path / "runtime"
+    args = parse_args(["setup", "init", "--output-dir", str(target)])
+    answers = iter((
+        "xx", "us", "", "abc", "0", "65536", "11112", "paper", "SIMULATE",
+        "bad label!", "mine", "manual", "abc", "987654", "0700.HK", "AAPL TSLA",
+        "unknown", "both", "nan", "0", "100", "110", "90", "50", "40", "60",
+        "csp", "200", "", "no",
+    ))
+    prompts = []
+    previews = []
+    from src.application.config_yaml_init import init_yaml_config
+
+    def preview(**kwargs):
+        previews.append(kwargs)
+        return init_yaml_config(**kwargs)
+
+    def answer(prompt):
+        prompts.append(prompt)
+        return next(answers)
+
+    output, applied = run_setup_init(args, repo_base_fn=lambda: tmp_path,
+                                    init_config_fn=preview, input_fn=answer,
+                                    input_is_tty=lambda: True, user_home=tmp_path / "home")
+    assert not applied and "未写入" in output
+    assert not target.exists() and not (tmp_path / "home").exists()
+    assert len(previews) == 1
+    draft = previews[0]
+    assert draft["account_label"] == "mine"
+    assert draft["futu_acc_id"] == "987654" and draft["futu_port"] == 11112
+    assert draft["trd_env"] == "SIMULATE" and draft["us_symbols"] == ["AAPL", "TSLA"]
+    assert draft["symbol_policies"]["AAPL"] == {
+        "strategy": "both", "csp_max_strike": "100", "csp_min_strike": "90",
+        "cc_min_strike": "50", "cc_max_strike": "60",
+    }
+    assert sum("账户标签" in p for p in prompts) == 2
+    assert sum("富途账户 ID" in p for p in prompts) == 2
+    rendered = capsys.readouterr().out
+    assert "USD" in rendered and "不是最大亏损" in rendered
+    assert "987654" not in rendered
+
+
+@pytest.mark.parametrize("interrupt", [EOFError, KeyboardInterrupt])
+def test_setup_init_cancel_during_retry_has_no_writes(tmp_path, interrupt):
+    args = parse_args(["setup", "init", "--output-dir", str(tmp_path / "runtime")])
+    answers = iter(("bad",))
+
+    def answer(_prompt):
+        try:
+            return next(answers)
+        except StopIteration:
+            raise interrupt()
+
+    with pytest.raises(AgentToolError, match="未写入"):
+        run_setup_init(args, input_fn=answer, input_is_tty=lambda: True,
+                       repo_base_fn=lambda: tmp_path, user_home=tmp_path / "home")
+    assert not (tmp_path / "runtime").exists() and not (tmp_path / "home").exists()
+
+
+def test_setup_init_hk_retries_prices_and_can_clear_prefilled_optional_bound(tmp_path, capsys):
+    target = tmp_path / "runtime"
+    args = parse_args(["setup", "init", "--output-dir", str(target), "--market", "hk",
+                       "--hk-symbol", "0700.HK", "--symbol-strategy", "0700.HK=cc",
+                       "--cc-min-strike", "0700.HK=400", "--cc-max-strike", "0700.HK=500"])
+    answers = iter(("", "", "", "REAL", "mine", "manual", "123456", "", "", "-1", "inf", "", "-", "yes"))
+    output, applied = run_setup_init(args, input_fn=lambda _: next(answers), input_is_tty=lambda: True,
+                                    repo_base_fn=lambda: tmp_path, user_home=tmp_path / "home")
+    assert applied
+    policy = yaml.safe_load((target / "config.yaml").read_text())["markets"]["hk"]["overrides"]["0700.HK"]
+    assert policy == {"sell_put": {"enabled": False}, "covered_call": {"enabled": True, "min_strike": 400.0}}
+    assert "HKD 港元" in capsys.readouterr().out
+    assert "已写入并回读" in output
+
+
+@pytest.mark.parametrize("option,value,error", [
+    ("futu_acc_id", "abc", "digits only"), ("futu_port", 0, "between 1 and 65535"),
+    ("symbol_strategy", ["AAPL=invalid"], "strategy csp"),
+    ("csp_max_strike", ["AAPL=nan"], "positive number"),
+])
+def test_noninteractive_setup_invalid_input_never_prompts(tmp_path, option, value, error):
+    args = parse_args(["setup", "init", "--output-dir", str(tmp_path / "runtime"), "--market", "us",
+                       "--account-label", "mine", "--us-symbol", "AAPL", "--symbol-strategy", "AAPL=csp",
+                       "--csp-max-strike", "AAPL=100", "--dry-run"])
+    setattr(args, option, value)
+    with pytest.raises(AgentToolError, match=error):
+        run_setup_init(args, input_is_tty=lambda: True, input_fn=lambda _: pytest.fail("must not prompt"),
+                       repo_base_fn=lambda: tmp_path, user_home=tmp_path / "home")
+    assert not (tmp_path / "runtime").exists() and not (tmp_path / "home").exists()
+
+
+@pytest.mark.parametrize("market,symbol,environment", [("us", "AAPL", "REAL"), ("hk", "0700.HK", "SIMULATE")])
+@pytest.mark.parametrize("confirmation", ["yes", "no"])
+def test_setup_selector_endpoint_change_keeps_draft_and_requires_final_confirmation(
+    tmp_path, monkeypatch, capsys, market, symbol, environment, confirmation,
+):
+    from src.application.config_yaml_init import init_yaml_config
+    from src.interfaces.cli import account_selection
+
+    target, home = tmp_path / "runtime", tmp_path / "home"
+    selected_id = "987654321"
+    answers = iter((market, "first.example", "11112", environment, "mine",
+                    "second.example", "22222", symbol, "csp", "100", "", confirmation))
+    selections, previews, writes = [], [], []
+    approved = False
+
+    def select(**kwargs):
+        assert not target.exists() and not home.exists()
+        selections.append({key: value for key, value in kwargs.items() if key != "input_fn"})
+        return account_selection.AccountSelection("change_endpoint") if len(selections) == 1 else (
+            account_selection.AccountSelection("selected", selected_id, "metadata_matched", "ok")
+        )
+
+    def preview(**kwargs):
+        assert not target.exists() and not home.exists()
+        previews.append(kwargs)
+        return init_yaml_config(**kwargs)
+
+    def publish(**kwargs):
+        assert approved, "selecting an account does not authorize writing the draft"
+        writes.append(kwargs)
+        return create_starter_config(**kwargs)
+
+    def answer(prompt):
+        nonlocal approved
+        response = next(answers)
+        if prompt.startswith("确认写入"):
+            assert len(previews) == 1 and writes == []
+            assert not target.exists() and not home.exists()
+            approved = response == "yes"
+        return response
+
+    monkeypatch.setattr(account_selection, "select_account", select)
+    output, applied = run_setup_init(
+        parse_args(["setup", "init", "--output-dir", str(target)]),
+        repo_base_fn=lambda: tmp_path, input_is_tty=lambda: True, input_fn=answer,
+        user_home=home, init_config_fn=preview, create_config_fn=publish,
+    )
+    assert selections == [
+        {"host": "first.example", "port": 11112, "market": market, "trd_env": environment},
+        {"host": "second.example", "port": 22222, "market": market, "trd_env": environment},
+    ]
+    assert len(previews) == 1
+    draft = previews[0]
+    assert draft["account_label"] == "mine" and draft["markets"] == [market]
+    assert draft["trd_env"] == environment and draft["futu_acc_id"] == selected_id
+    assert (draft["futu_host"], draft["futu_port"]) == ("second.example", 22222)
+    assert selected_id not in capsys.readouterr().out + output
+    assert applied is (confirmation == "yes")
+    if applied:
+        assert len(writes) == 1
+        document = yaml.safe_load((target / "config.yaml").read_text())
+        assert document["accounts"]["mine"]["futu_account_id"] == selected_id
+        assert document["accounts"]["mine"]["futu"] == {
+            "host": "second.example", "port": 22222, "trd_env": environment,
+        }
+        assert list(document["markets"]) == [market]
+        assert (target / f"config.{market}.json").is_file()
+        assert (home / ".config/options-monitor/runtime-root").read_text() == str(target) + "\n"
+    else:
+        assert writes == [] and "未写入" in output
+        assert not target.exists() and not home.exists()
+        assert not list(tmp_path.iterdir())
+
+
+def test_setup_cancelled_selector_never_previews_or_writes(tmp_path, monkeypatch):
+    from src.interfaces.cli import account_selection
+
+    target, home = tmp_path / "runtime", tmp_path / "home"
+    answers = iter(("us", "", "", "REAL", "mine"))
+    calls = []
+
+    def select(**kwargs):
+        calls.append(kwargs)
+        return account_selection.AccountSelection("cancelled")
+
+    def unexpected_preview_or_write(**_kwargs):
+        pytest.fail("cancelled selection must not preview or publish a draft")
+
+    monkeypatch.setattr(account_selection, "select_account", select)
+    output, applied = run_setup_init(
+        parse_args(["setup", "init", "--output-dir", str(target)]),
+        repo_base_fn=lambda: tmp_path, input_is_tty=lambda: True, input_fn=lambda _: next(answers),
+        user_home=home, init_config_fn=unexpected_preview_or_write, create_config_fn=unexpected_preview_or_write,
+    )
+    assert len(calls) == 1 and calls[0]["market"] == "us" and calls[0]["trd_env"] == "REAL"
+    assert not applied and "未写入" in output and "草稿未保存" in output
+    assert not target.exists() and not home.exists()
+    assert not list(tmp_path.iterdir())
+
+
+def test_setup_explicit_id_retains_validated_manual_prompt_without_selector(tmp_path, monkeypatch):
+    from src.interfaces.cli import account_selection
+
+    monkeypatch.setattr(account_selection, "select_account", lambda **kw: pytest.fail("explicit ID must not discover"))
+    target, home = tmp_path / "runtime", tmp_path / "home"
+    answers = iter(("us", "", "", "REAL", "mine", "", "AAPL", "csp", "100", "", "no"))
+    output, applied = run_setup_init(
+        parse_args(["setup", "init", "--output-dir", str(target), "--futu-acc-id", "123456"]),
+        repo_base_fn=lambda: tmp_path, input_is_tty=lambda: True, input_fn=lambda _: next(answers), user_home=home,
+    )
+    assert not applied and "未写入" in output
+    assert not target.exists() and not home.exists()

@@ -840,12 +840,15 @@ notification token around Close Advice.
 - Read tool: `notification_perception_read`
 
 Notification text should remain Markdown-friendly and operationally direct. The
-business renderer owns one canonical flat Markdown string. Scheduled Feishu App
-Daily Brief delivery also persists a digest-verified Card JSON 2.0 transport
-projection of that same decision view; retries must reuse the frozen envelope
-and logical idempotency key. WeChat ClawBot sends the canonical flat string
-unchanged through `text_item.text`. Channel adapters may select the persisted
-transport projection but must not independently recalculate business content.
+business renderer owns the shared structured user view and channel presentation.
+Scheduled Feishu App Daily Brief delivery persists digest-verified Card JSON 2.0
+with separate Markdown elements and explicit spacing (renderer v3), plus the
+existing bounded post fallback. WeChat ClawBot sends the plain-text projection
+with section headings and blank lines through `text_item.text`. Both projections
+preserve the same facts, candidate order and metric meanings. New preparation and
+recovery construction select the appropriate projection; retries reuse the exact
+frozen message, transport and logical idempotency key, including historical v1/v2
+envelopes. Channel adapters must not parse Markdown or recalculate business content.
 
 Scheduled ordinary delivery and `preview_notification` have one renderer authority: Daily Decision Brief. The read-only preview accepts `account`, `market`, `date`, and `revision`, reads persisted successful Daily Brief state through the same query owner as `daily_decision_brief_read`, and reports `authority=daily_decision_brief` with `delivery_evidence=false`. Preview never scans, sends, changes delivery state, or accepts legacy alert/change text and paths. Direct legacy renderer and manual stage-only output remain compatibility-only and cannot be used as a scheduled fallback.
 

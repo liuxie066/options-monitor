@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 from threading import Event, Thread
 
@@ -62,6 +63,12 @@ for arg in "$@"; do
   dest="$arg"
 done
 mkdir -p "$dest/requirements" "$dest/constraints" "$dest/src/application/bot" "$dest/scripts" "$dest/plugins/portfolio-management"
+mkdir -p "$dest/.agents/skills/private" "$dest/src/nested" "$dest/.git"
+printf 'Private developer instructions\n' > "$dest/AGENTS.md"
+printf 'Private developer instructions\n' > "$dest/CLAUDE.md"
+printf 'Private developer instructions\n' > "$dest/src/nested/AGENTS.md"
+printf 'Private developer skill\n' > "$dest/.agents/skills/private/SKILL.md"
+printf 'Git metadata required by update\n' > "$dest/.git/config"
 : > "$dest/src/__init__.py"
 : > "$dest/src/application/__init__.py"
 : > "$dest/src/application/bot/__init__.py"
@@ -165,6 +172,7 @@ def _run_installer(tmp_path: Path, *args: str, env: dict[str, str] | None = None
     cmd = [
         "bash",
         str(script),
+        "--source",
         "--version",
         "v9.9.9",
         "--prefix",
@@ -192,6 +200,7 @@ def _run_installer_without_version(
         [
             "bash",
             str(script),
+        "--source",
             "--prefix",
             str(tmp_path / "apps" / "options-monitor"),
             *args,
@@ -226,6 +235,45 @@ def test_with_dev_installs_target_release_package_from_unrelated_cwd(monkeypatch
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert log.read_text() == "target release\n"
+
+
+def test_install_excludes_developer_instructions_from_legacy_tag(tmp_path: Path) -> None:
+    result = _run_installer(tmp_path)
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    release = tmp_path / "apps/options-monitor/current"
+    assert not (release / "AGENTS.md").exists()
+    assert not (release / "CLAUDE.md").exists()
+    assert not (release / "src/nested/AGENTS.md").exists()
+    assert not (release / ".agents").exists()
+    assert (release / ".git/config").is_file()
+    assert (release / "src/application/bot/runtime.py").is_file()
+    assert (release / "om").is_file()
+    assert (release / "om-agent").is_file()
+
+
+@pytest.mark.parametrize("bare_archive", [False, True], ids=["release", "upgrade-cache"])
+def test_source_archive_excludes_developer_instructions(tmp_path: Path, bare_archive: bool) -> None:
+    repo = tmp_path / "source"
+    repo.mkdir()
+    for name in ("AGENTS.md", "CLAUDE.md", "src/nested/AGENTS.md", ".agents/skills/private/SKILL.md",
+                 "src/application/bot/runtime.py", "om", "om-agent", "VERSION", "docs/INSTALL.md"):
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture\n", encoding="utf-8")
+    shutil.copy2(ROOT / ".gitattributes", repo / ".gitattributes")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    tree = subprocess.check_output(["git", "-C", str(repo), "write-tree"], text=True).strip()
+    archive = tmp_path / "source.tar"
+    git = ["git", f"--git-dir={repo / '.git'}"] if bare_archive else ["git", "-C", str(repo)]
+    subprocess.run([*git, "archive", "--format=tar", "-o", str(archive), tree], check=True)
+
+    with tarfile.open(archive) as source:
+        names = set(source.getnames())
+    assert not any(Path(name).name in {"AGENTS.md", "CLAUDE.md", ".agents"} for name in names)
+    assert not any(".agents/" in name for name in names)
+    assert {"src/application/bot/runtime.py", "om", "om-agent", "VERSION", "docs/INSTALL.md"} <= names
 
 
 def _transaction_fault_tools(tmp_path: Path, env: dict[str, str]) -> None:
@@ -366,11 +414,13 @@ def test_install_script_creates_user_cli_wrappers_by_default(tmp_path: Path) -> 
     assert om.exists()
     assert om_agent.exists()
     assert "options-monitor managed wrapper" in om.read_text(encoding="utf-8")
-    assert f'exec "{prefix}/current/om" "$@"' in om.read_text(encoding="utf-8")
-    assert f'exec "{prefix}/current/om-agent" "$@"' in om_agent.read_text(encoding="utf-8")
+    assert f"exec '{prefix}/current/om' \"$@\"" in om.read_text(encoding="utf-8")
+    assert f"exec '{prefix}/current/om-agent' \"$@\"" in om_agent.read_text(encoding="utf-8")
     assert subprocess.check_output([str(om), "doctor"], text=True).strip() == "fake om doctor"
     assert subprocess.check_output([str(om_agent), "spec"], text=True).strip() == "fake om-agent spec"
-    assert "Warning:" in result.stdout
+    assert "Warning:" not in result.stdout
+    assert "setup init" not in result.stdout
+    assert "运行 OM（首次配置或继续使用）" in result.stdout
 
 
 def test_install_script_reinstall_current_release_is_idempotent(tmp_path: Path) -> None:
@@ -544,8 +594,8 @@ def test_install_script_no_install_cli_skips_wrappers(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert not (tmp_path / "home" / ".local" / "bin" / "om").exists()
-    assert "cd " in result.stdout
-    assert "./om setup check" in result.stdout
+    assert "current/om" in result.stdout
+    assert "setup init" not in result.stdout
 
 
 def test_python_install_stages_private_target_without_changing_production(
@@ -575,6 +625,7 @@ def test_python_install_stages_private_target_without_changing_production(
         [
             "bash",
             str(ROOT / "scripts" / "install.sh"),
+            "--source",
             "--version",
             "v9.9.9",
             "--prefix",
@@ -654,7 +705,8 @@ def test_install_script_custom_bin_dir_uses_path_without_warning(tmp_path: Path)
     assert (bin_dir / "om").exists()
     assert (bin_dir / "om-agent").exists()
     assert "Warning:" not in result.stdout
-    assert "  om setup check" in result.stdout
+    assert str(bin_dir / "om") in result.stdout
+    assert "setup init" not in result.stdout
 
 
 def test_install_script_rejects_incompatible_explicit_python(tmp_path: Path) -> None:
@@ -1001,3 +1053,39 @@ def test_install_transaction_guard_preserves_already_installed_and_active_force_
     assert forced.returncode != 0 and "refusing --force for the active current release" in forced.stderr
     assert os.readlink(current) == initial and _wrapper_state(tmp_path) == before
     assert not (tmp_path / "transaction.log").exists()
+
+
+@pytest.mark.parametrize('location', ['default', 'record', 'env'])
+def test_install_managed_instance_guard_binds_profile_to_current(tmp_path, location):
+    # Exercise the actual installer guard with real stdlib Python, without installing.
+    source = (ROOT / 'scripts/install.sh').read_text().split('while [ "$#" -gt 0 ]; do')[0]
+    prefix = tmp_path / 'app'
+    old = prefix / 'releases/old'
+    old.mkdir(parents=True)
+    (prefix / 'current').symlink_to(old)
+    home = tmp_path / 'home'
+    home.mkdir()
+    runtime = home / 'Library/Application Support/options-monitor' if location == 'default' else tmp_path / 'chosen runtime'
+    runtime.mkdir(parents=True)
+    (runtime / 'service.profile.json').write_text(json.dumps({'repo_root': str(prefix / 'current')}))
+    env = dict(os.environ, HOME=str(home), TEST_PREFIX=str(prefix), TEST_PYTHON=sys.executable)
+    env.pop('OM_RUNTIME_ROOT', None)
+    if location == 'record':
+        record = home / '.config/options-monitor/runtime-root'
+        record.parent.mkdir(parents=True)
+        record.write_text(str(runtime) + '\n')
+    if location == 'env': env['OM_RUNTIME_ROOT'] = str(runtime)
+    command = source + '\nPREFIX="$TEST_PREFIX"; CURRENT_LINK="$PREFIX/current"; PYTHON_BIN="$TEST_PYTHON"; OS_NAME=Darwin; guard_managed_instance\n'
+    proc = subprocess.run(['/bin/bash', '-c', command], env=env, capture_output=True, text=True)
+    assert proc.returncode != 0 and 'managed instance detected' in proc.stderr
+    assert (prefix / 'current').resolve() == old
+
+
+def test_installer_quote_roundtrips_unicode_spaces_apostrophes_and_dollars(tmp_path):
+    source = (ROOT / 'scripts/install.sh').read_text().split('while [ "$#" -gt 0 ]; do')[0]
+    value = "中文 命令 'quoted' $prefix"
+    quoted = subprocess.run(['/bin/bash', '-c', source + '\nquote "$1"', 'quote-test', value],
+                            capture_output=True, text=True, check=True).stdout
+    roundtrip = subprocess.run(['/bin/bash', '-c', 'printf "%s" ' + quoted],
+                               capture_output=True, text=True, check=True).stdout
+    assert roundtrip == value

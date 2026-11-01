@@ -11,11 +11,16 @@ from src.application.daily_decision_brief_renderer import (
     build_daily_brief_user_view,
     render_candidate_alert,
     render_candidate_alert_card_markdown,
+    render_candidate_alert_card_blocks,
+    render_candidate_alert_text,
     render_daily_brief_lifecycle,
     render_delta_brief,
     render_fixed_failure,
     render_fixed_report,
     render_fixed_report_card_markdown,
+    render_fixed_report_card_blocks,
+    render_fixed_report_text,
+    render_fixed_failure_text,
     render_full_brief,
     render_query_brief,
     resolve_daily_brief_render_limits,
@@ -367,7 +372,8 @@ def test_candidate_metrics_show_own_capacity(render, family, contracts) -> None:
     brief["capacity"] = {family: {"contracts_available": 999}}
 
     message = render(brief, context=_scheduled_context())
-    metric_line = next(line for line in message.splitlines() if line.startswith("指标｜"))
+    prefix = "权利金 " if render is render_fixed_report_card_markdown else "指标｜"
+    metric_line = next(line for line in message.splitlines() if line.startswith(prefix))
 
     expected = f"最多 {contracts} 手" if contracts is not None else "最多手数暂不可用"
     assert metric_line.endswith(expected)
@@ -592,6 +598,7 @@ def test_candidate_alert_renders_only_selected_wheel_branch() -> None:
 
     for message in (
         render_candidate_alert(brief, [identity], context=_scheduled_context()),
+        render_candidate_alert_text(brief, [identity], context=_scheduled_context()),
         render_candidate_alert_card_markdown(
             brief,
             [identity],
@@ -1726,11 +1733,8 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
     assert "### 策略候选" not in message
     assert "**MSFT｜CSP｜08-21 $400 Put（策略排序 1）**" in message
     assert "**NVDA｜CSP｜08-21 $100 Put（策略排序 2）**" in message
-    assert (
-        "指标｜权利金 $5.25 · 门槛年化 18.1% · Delta -0.24 · 32 天 · "
-        "预计净收入 $480.00"
-        in message
-    )
+    assert "**预计净收入 $480.00**\n权利金 $5.25 · 最多 2 手" in message
+    assert "32 天 · Delta -0.24 · 门槛年化 18.1%" in message
     assert "## CC" in message
     assert "**AAPL｜CC｜08-21 $250 Call（策略排序 1）**" in message
     assert "| 优先 | 标的 | Put 侧 | Call 侧 | 收益 |" not in message
@@ -1738,12 +1742,10 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
     assert "**TSLA｜组合增强（策略排序 1）**" in message
     assert "Put｜08-21 $300 Put｜推荐卖出 $3.45" in message
     assert "Call｜09-18 $400 Call｜推荐买入 $1.05" in message
-    assert "指标｜门槛年化 15.4% · 长 Call Delta 暂不可用 · 预计净收入 $620.00" in message
-    assert (
-        "\n\n事件｜CSP #1（MSFT）、CSP #2（NVDA）、"
-        "CC #1（AAPL）、组合增强 #1（TSLA）："
-        in message
-    )
+    assert "**预计净收入 $620.00**\n长 Call Delta 暂不可用 · 门槛年化 15.4%" in message
+    assert "\n\n## 事件\n" in message
+    assert "MSFT｜CSP｜08-21 $400 Put（策略排序 1）" in message.split("## 事件", 1)[1]
+    assert "TSLA｜组合增强｜08-21 $300 Put / 09-18 $400 Call（策略排序 1）" in message
     assert "**1｜NVDA｜CSP｜08-21 $100 Put｜建议平仓**" in message
     assert "参考｜买回参考价 $0.35 · 预计锁定损益 +$285.00" in message
     assert "净兑现比例 92.5%" in message
@@ -1825,7 +1827,7 @@ def test_candidate_alert_card_keeps_single_candidate_compact_and_events_explicit
     assert "### 新增策略候选" in message
     assert "**MSFT｜CSP｜08-21 $400 Put（策略排序 1）**" in message
     assert "| 优先 | 合约 |" not in message
-    assert "\n\n事件｜CSP #1（MSFT）：" in message
+    assert "\n\n## 事件\nMSFT｜CSP｜08-21 $400 Put（策略排序 1）：" in message
     assert message.count("执行前需要再次检查") == 1
     assert "## 持仓" not in message
     assert "现金总额（折CNY）｜暂不可用" in message
@@ -2103,7 +2105,8 @@ def test_position_sizing_in_shared_report_views(render, family, basis) -> None:
     message = render(brief)
     assert "Position Sizing：" in message
     assert "Position Sizing（" not in message
-    assert "当前 8.0% · 指派后 20.0% · 再卖 1 张指派后 23.0%" in message
+    separator = "\n" if render is render_fixed_report_card_markdown else " · "
+    assert separator.join(["当前 8.0%", "指派后 20.0%", "再卖 1 张指派后 23.0%"]) in message
 
 
 def test_csp_position_sizing_unknown_zero_estimated_and_alert_views() -> None:
@@ -2116,7 +2119,8 @@ def test_csp_position_sizing_unknown_zero_estimated_and_alert_views() -> None:
         message = render(brief, [identity])
         assert "Position Sizing：" in message
         assert "Position Sizing（" not in message
-        assert "当前 0.0% · 指派后 120.0% · 再卖 1 张指派后 暂不可用" in message
+        separator = "\n" if render is render_candidate_alert_card_markdown else " · "
+        assert separator.join(["当前 0.0%", "指派后 120.0%", "再卖 1 张指派后 暂不可用"]) in message
         assert "stock_value_estimated_from_avg_cost" not in message
     legacy = render_full_brief(_brief())
     assert "Position Sizing：" in legacy
@@ -2148,3 +2152,280 @@ def test_candidate_sizing_omits_carried_quote_details(render, family):
     assert "休市沿用最近交易时段报价" not in message
     assert "最早报价" not in message
     assert candidate["metrics"] == original_metrics
+
+
+def _plain_card_content(markdown: str) -> str:
+    """Compare channel content while retaining line and block boundaries."""
+    lines = []
+    for line in markdown.splitlines():
+        if line.startswith("#"):
+            line = "【" + line.lstrip("# ") + "】"
+        lines.append(line.replace("**", ""))
+    return "\n".join(lines)
+
+
+@pytest.mark.parametrize("state", ["normal", "empty", "blocked", "planning", "wheel", "reminder"])
+def test_fixed_blocks_and_plain_text_share_content_and_compact_sections(state) -> None:
+    brief = _brief()
+    if state == "normal":
+        for rows in brief["candidates"].values():
+            for row in rows:
+                row["event_risk"] = _render_event_risk("confirmed_none")
+    elif state == "empty":
+        brief["candidates"] = {}
+    elif state == "blocked":
+        brief["actionability"] = "blocked"
+    elif state == "planning":
+        brief["actionability"] = "planning_only"
+    elif state == "wheel":
+        brief["wheel_batches"] = [{
+            "symbol": "3690.HK", "direction": "call", "shares_remaining": 500,
+            "status": "ready", "reason_code": "no_candidate", "recommended_contracts": 0,
+        }]
+    else:
+        brief["data_gaps"] = [{"scope": "strategy", "strategy_family": "sell_put", "reason": "strategy_step_failed"}]
+    brief["attribution_pending"] = [{
+        "symbol": "3690.HK", "expiration": "2026-11-27", "strike": 80,
+        "option_type": "call", "execution_key": "private-execution-id",
+    }]
+    original = deepcopy(brief)
+    blocks = render_fixed_report_card_blocks(brief, context=_scheduled_context())
+    card = render_fixed_report_card_markdown(brief, context=_scheduled_context())
+    text = render_fixed_report_text(brief, context=_scheduled_context())
+    assert card == "\n\n".join(blocks)
+    assert text == _plain_card_content(card)
+    assert blocks and all(block.strip() == block and block for block in blocks)
+    assert "状态｜10:00 批次 · 美股\n数据｜美东 10:03 / 北京 22:03" in blocks[0]
+    assert "3690.HK 2026-11-27 80 CALL" in text
+    assert "private-execution-id" not in text
+    assert not any(token in text for token in ("#", "**", "\u200b"))
+    assert brief == original
+    assert_mobile_flat_markdown(card)
+    _assert_no_internal_leak(text)
+    if state == "blocked":
+        assert "无法形成可靠决策" in text
+        assert "MSFT" not in text
+        assert not any(block.startswith("## 资金") for block in blocks)
+    else:
+        assert any(block.startswith("## 持仓\n汇总｜") for block in blocks)
+        assert any(block.startswith("## 资金\n现金总额") for block in blocks)
+    if state == "empty":
+        assert "## CSP\n暂无合适合约" in blocks
+        assert "## CC\n暂无合适合约" in blocks
+        assert "## 组合增强\n暂无合适合约" in blocks
+        assert "## 事件" not in card
+    elif state == "planning":
+        assert "仅供规划参考" in text
+    elif state == "wheel":
+        assert "## Wheel" in blocks
+        assert "【Wheel】" in text
+        assert "500 股" in text
+    elif state == "reminder":
+        assert "提醒｜" in text
+
+
+@pytest.mark.parametrize("family", ["sell_put", "covered_call", "combo_yield"])
+@pytest.mark.parametrize("zero", [False, True])
+def test_candidate_blocks_group_raw_metrics_and_preserve_zero_unknown(family, zero, monkeypatch) -> None:
+    from src.application import daily_decision_brief_renderer as renderer
+
+    brief = _brief()
+    row = brief["candidates"][family][0]
+    row["metrics"] = {
+        "mid": 0 if zero else 5.25,
+        "period_net_return": 0 if zero else 0.013,
+        "net_income": 0 if zero else -12.5,
+        "delta": 0 if zero else -0.24,
+        "call_delta": 0 if zero else None,
+        "dte": 0 if zero else 32,
+        "annualized_net_return_on_cash_basis": 0 if zero else 0.181,
+        "annualized_net_premium_return": 0 if zero else 0.126,
+        "annualized_net_credit_yield": 0 if zero else 0.154,
+    }
+    row["capacity"] = {"contracts_available": 0 if zero else None}
+    brief["candidates"] = {family: [row]}
+    # New channels must consume raw structured fields, never legacy detail prose.
+    monkeypatch.setattr(renderer, "_candidate_metric_details", lambda *a, **k: ["legacy-poison"])
+    blocks = render_fixed_report_card_blocks(brief)
+    candidate = next(block for block in blocks if block.startswith("**" + row["symbol"]))
+    lines = candidate.splitlines()
+    assert "策略排序 1" in lines[0]
+    assert "legacy-poison" not in candidate
+    assert ("**持有期净收益 0.0% · 预计净收入 $0.00**" if zero else
+            "**持有期净收益 1.3% · 预计净收入 -$12.50**") in lines
+    assert ("0 天" if zero else "32 天") in candidate
+    assert "门槛年化 " in candidate
+    quote = next(line for line in lines if line.startswith("权利金 "))
+    assert ("权利金 $0.00" if zero else "权利金 $5.25") in quote
+    if family == "combo_yield":
+        assert ("长 Call Delta 0.00" if zero else "长 Call Delta 暂不可用") in candidate
+        assert "Delta -0.24" not in candidate
+        assert "Put｜08-21 $300 Put｜推荐卖出 $3.45" in candidate
+        assert "Call｜09-18 $400 Call｜推荐买入 $1.05" in candidate
+    else:
+        assert quote.endswith("最多 0 手" if zero else "最多手数暂不可用")
+        assert "Position Sizing：当前 暂不可用\n指派后 暂不可用\n再卖 1 张指派后 暂不可用" in candidate
+    text = render_fixed_report_text(brief)
+    assert "legacy-poison" not in text
+    assert text == _plain_card_content("\n\n".join(blocks))
+
+
+def test_event_block_groups_normal_but_identifies_abnormal_contracts_and_actual_ranks() -> None:
+    brief = _brief()
+    for rows in brief["candidates"].values():
+        for row in rows:
+            row["event_risk"] = _render_event_risk("confirmed_none")
+    rows = brief["candidates"]["sell_put"]
+    rows[0]["rank"] = 7
+    rows[0]["event_risk"] = _render_event_risk("confirmed_event", date="2026-08-05")
+    rows[1]["rank"] = 3
+    rows[1]["event_risk"] = _render_event_risk("unknown")
+    diff = {"changes": [{"change_type": "candidate_added", "action": _nvda_candidate_action()}]}
+    blocks = render_fixed_report_card_blocks(brief, diff=diff)
+    candidate_blocks = [block for block in blocks if block.startswith("**") and "｜CSP｜" in block.splitlines()[0]]
+    assert candidate_blocks[0].startswith("**NVDA｜CSP｜08-21 $100 Put（策略排序 3）**")
+    assert candidate_blocks[1].startswith("**MSFT｜CSP｜08-21 $400 Put（策略排序 7）**")
+    event = next(block for block in blocks if block.startswith("## 事件\n"))
+    assert "NVDA｜CSP｜08-21 $100 Put（策略排序 3）：事件数据不完整" in event
+    assert "MSFT｜CSP｜08-21 $400 Put（策略排序 7）：预计 8 月 5 日发布财报" in event
+    assert "CC、组合增强：已确认到期前无近期重要事件" in event
+    assert event.count("已确认到期前无近期重要事件") == 1
+    assert "#1" not in event
+    assert "AAPL" not in event and "TSLA" not in event
+    assert all("预计 8 月" not in block for block in candidate_blocks)
+
+
+def test_alert_blocks_follow_selected_identities_order_and_preserve_ranks_and_omissions() -> None:
+    brief = _brief()
+    brief["candidate_index"] = []
+    identities = []
+    for rank, symbol in ((8, "PDD"), (4, "FUTU"), (9, "MSFT"), (2, "NVDA")):
+        row = _candidate(rank=rank, symbol=symbol, option_type="put", expiration="2026-08-21", strike=100, capacity=0)
+        identity = build_daily_brief_candidate_identity(account="lx", market="US", symbol=symbol, strategy_family="sell_put")
+        identities.append(identity)
+        brief["candidate_index"].append({"identity": identity, "symbol": symbol, "strategy_family": "sell_put", "representative": row, "contract_count": 1})
+    selected = [identities[1], identities[0], identities[2], identities[3]]
+    blocks = render_candidate_alert_card_blocks(brief, selected)
+    card = render_candidate_alert_card_markdown(brief, selected)
+    text = render_candidate_alert_text(brief, selected)
+    assert card == "\n\n".join(blocks)
+    assert text == _plain_card_content(card)
+    candidates = [block for block in blocks if block.startswith("**")]
+    assert [block.splitlines()[0] for block in candidates] == [
+        "**FUTU｜CSP｜08-21 $100 Put（策略排序 4）**",
+        "**PDD｜CSP｜08-21 $100 Put（策略排序 8）**",
+        "**MSFT｜CSP｜08-21 $100 Put（策略排序 9）**",
+    ]
+    assert "另有 1 个新增候选未展开" in text
+    assert "NVDA" not in text
+    assert "【持仓】" not in text and "## CC" not in card
+    event = next(block for block in blocks if block.startswith("## 事件\n"))
+    assert "FUTU｜CSP｜08-21 $100 Put（策略排序 4）" in event
+    assert "PDD｜CSP｜08-21 $100 Put（策略排序 8）" in event
+    assert "#1" not in event
+    assert_mobile_flat_markdown(card)
+    for render in (render_candidate_alert_card_blocks, render_candidate_alert_text):
+        with pytest.raises(ValueError, match="absent"):
+            render(brief, ["missing-identity"])
+
+
+def test_fact_review_blocks_share_content_without_becoming_trade_advice(monkeypatch) -> None:
+    from src.application import daily_decision_brief_renderer as renderer
+
+    view = build_daily_brief_user_view(_brief(), delivery_kind="fixed_report")
+    view["positions"] = [{
+        "display_kind": "fact_review", "title": "PDD · CSP · 08-21 $100 Put",
+        "status": "需核查", "details": ["持仓事实证据不完整"],
+    }]
+    view["position_total"] = view["position_actionable_total"] = view["position_review_total"] = 1
+    monkeypatch.setattr(renderer, "build_daily_brief_user_view", lambda *a, **k: view)
+    blocks = render_fixed_report_card_blocks({})
+    text = render_fixed_report_text({})
+    assert "## 持仓事实核查（非交易建议）" in blocks
+    assert "核查原因｜持仓事实证据不完整" in text
+    assert "当前没有需要交易处理的持仓" in text
+    assert "建议平仓" not in text
+    assert text == _plain_card_content("\n\n".join(blocks))
+
+
+def test_failure_plain_text_preserves_legacy_content_and_markdown() -> None:
+    brief = _brief()
+    markdown = render_fixed_failure(brief, context=_scheduled_context())
+    assert markdown == "\n".join([
+        "# OM · 决策简报 · lx", "\u200b", "状态｜数据异常 · 10:00 批次失败", "市场｜美股",
+        "结论｜本轮策略扫描未形成可靠结果，无法生成正常报告。",
+        "后续｜下一计划扫描会继续尝试；本批次有效期内恢复后补发完整报告。",
+    ])
+    text = render_fixed_failure_text(brief, context=_scheduled_context())
+    assert text == _plain_card_content(markdown.replace("\u200b", ""))
+    assert not any(token in text for token in ("#", "**", "\u200b"))
+
+
+@pytest.mark.parametrize("render", [
+    render_fixed_report_card_blocks, render_candidate_alert_card_blocks,
+    render_fixed_report_text, render_candidate_alert_text, render_fixed_failure_text,
+])
+def test_new_render_apis_keep_account_scoped_phase_observability(render) -> None:
+    from src.application.multi_tick_audit import daily_brief_timing_scope
+
+    events = []
+
+    class Runlog:
+        def safe_event(self, event, status, **kwargs):
+            events.append((event, status, kwargs))
+
+    args = (_brief(), []) if render in (render_candidate_alert_card_blocks, render_candidate_alert_text) else (_brief(),)
+    with daily_brief_timing_scope(runlog=Runlog(), account="sy", market="US"):
+        render(*args)
+    phases = [(status, fields["data"]) for event, status, fields in events
+              if event == "daily_brief_phase" and fields["data"].get("operation") == render.__name__]
+    assert [status for status, _ in phases] == ["start", "ok"]
+    assert all(data["phase"] == "render" and data["account"] == "sy" and data["market"] == "US"
+               for _, data in phases)
+
+
+@pytest.mark.parametrize('alert', [False, True])
+def test_wechat_text_retains_length_budget_and_plain_truncation_notice(alert: bool) -> None:
+    brief = _brief()
+    identities = []
+    brief['candidate_index'] = []
+    rows = []
+    for n in range(3):
+        symbol = f'LONG{n}' + 'X' * 5000
+        row = _candidate(rank=n+1, symbol=symbol, option_type='put', expiration='2026-08-21', strike=100+n, capacity=1)
+        rows.append(row)
+        identity = f'oversized-render-fixture-{n}'
+        identities.append(identity)
+        brief['candidate_index'].append({'identity': identity, 'symbol': symbol, 'strategy_family': 'sell_put', 'representative': row, 'contract_count': 1})
+    brief['candidates'] = {'sell_put': rows, 'covered_call': [], 'combo_yield': []}
+    text = render_candidate_alert_text(brief, identities) if alert else render_fixed_report_text(brief)
+    assert len(text) <= 12_000
+    assert text.endswith('… 消息已按总长度上限截断；完整结构化简报仍保存在审计记录中。')
+    assert not any(line.startswith(('#', '- ')) for line in text.splitlines())
+    assert '**' not in text and '\u200b' not in text
+
+
+@pytest.mark.parametrize('alert', [False, True])
+def test_mixed_event_family_scopes_normal_conclusion_to_confirmed_contract(alert: bool) -> None:
+    brief = _brief()
+    identities = []
+    brief['candidate_index'] = []
+    rows = brief['candidates']['sell_put']
+    for n, row in enumerate(rows):
+        row['event_risk'] = _render_event_risk('unknown' if n == 0 else 'confirmed_none')
+        identity = build_daily_brief_candidate_identity(account='lx', market='US', symbol=row['symbol'], strategy_family='sell_put')
+        identities.append(identity)
+        brief['candidate_index'].append({'identity': identity, 'symbol': row['symbol'], 'strategy_family': 'sell_put', 'representative': row, 'contract_count': 1})
+    brief['candidates'] = {'sell_put': rows, 'covered_call': [], 'combo_yield': []}
+    if alert:
+        card = render_candidate_alert_card_markdown(brief, identities)
+        text = render_candidate_alert_text(brief, identities)
+    else:
+        card = render_fixed_report_card_markdown(brief)
+        text = render_fixed_report_text(brief)
+    for message in (card, text):
+        event = message.split('事件', 1)[1]
+        assert 'MSFT｜CSP｜08-21 $400 Put（策略排序 1）' in event
+        assert 'NVDA｜CSP｜08-21 $100 Put（策略排序 2）' in event
+        assert 'CSP：已确认' not in event
+        assert '无法' in event and '已确认' in event

@@ -255,11 +255,18 @@ def ensure_required_data(
         ]
 
     requests = [replace(request, market_data_provider=market_data_provider) for request in requests]
+
+    from src.application.research.prescreen import publish_scan_prescreen
+
     try:
         if fetch_plan is None and len(requests) == 1:
             merged_payload = execute_required_data_opend(
                 base=base,
                 request=requests[0],
+            )
+            publish_scan_prescreen(
+                producer_root=required_data_dir, producer_run_id=producer_run_id,
+                payload=merged_payload, fetch_plan=fetch_plan_payload,
             )
             payloads = [merged_payload]
         else:
@@ -268,6 +275,10 @@ def ensure_required_data(
                 payload = execute_required_data_opend(
                     base=base,
                     request=request,
+                )
+                publish_scan_prescreen(
+                    producer_root=required_data_dir, producer_run_id=producer_run_id,
+                    payload=payload, fetch_plan=fetch_plan_payload,
                 )
                 if _payload_fetch_status(payload) != "ok":
                     raise RuntimeError(

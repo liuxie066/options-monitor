@@ -274,7 +274,7 @@ VERSION="$(cat VERSION)"
 - `release/coverage/v<version>.json` 完整覆盖上一稳定 tag 以来的所有 commit 和目标版本所有
   Changelog 条目，并为每个 commit 附有有效 design evidence
 - README 与 Agent / Tool Gateway 文档没有明显过期命令
-- 通用版本检查读取远端 `origin` 的 Git tags 并比较本地 `VERSION`；`om update` 的升级检查还要求下述完整已发布 Release 资格
+- 源码安装的通用版本检查读取远端 `origin` 的 Git tags；声明运行包的安装从清单绑定仓库查询已发布稳定 Release，不依赖宿主 Git。两者均比较本地版本，升级还须满足对应发布资产资格
 
 ---
 
@@ -288,7 +288,10 @@ VERSION="$(cat VERSION)"
 - 使用完整 Git 历史验证 commit-to-release-note coverage，不接受漏项、无理由排除或审阅后夹带代码
 - 渲染只包含目标版本的 Release Notes
 - 重新校验 release metadata / coverage，并验证最终 source archive 中的 Python Bot runtime
+- 等待拟发布平台运行包构建/搬迁资格任务，核对精确资产集合和来源身份
 - 发布对应 GitHub Release
+
+源码归档使用仓库 `.gitattributes` 的 `export-ignore`，排除 `AGENTS.md`、`CLAUDE.md` 和 `.agents/` 等开发指令。升级的 Git cache archive 使用同一规则；只有包含该规则的 tag 才会在归档时排除这些文件，历史 tag 不会被追溯修改。显式 `--source` 安装对新安装目录另行执行排除，覆盖旧 tag，详见 [Install](INSTALL.md)。
 
 因此常规发布只需要把版本元数据改好，通过 Pull Request 合入 `main`；不需要再手动补打上同名 tag。
 自动 release job 复用同一次 `Guardrails` 已通过的回归结果，不重复运行同一批 Python Bot
@@ -298,6 +301,31 @@ VERSION="$(cat VERSION)"
 审阅与发布前检查，再从 GitHub Actions 手动运行 `Release from VERSION`。手动入口使用当前
 `main` 的 `VERSION` 和提交 SHA，并以完整模式重新执行 metadata、coverage、测试、归档和发布步骤；
 不得用它跳过失败门禁或从未审阅的提交补发 tag。
+
+### 完整运行包的发布资格
+
+当前源码新增完整运行包构建、校验、安装和同类型升级分支；本次变更尚未发布。现有源码 Release 的成功记录不证明运行包资产已存在，也不证明新增平台已合格。运行包未完成下述资格前，不作为已可用的默认稳定安装承诺；面向用户的依赖说明由 [INSTALL](INSTALL.md#运行包资格与源码安装) 持有。
+
+构建 owner 为 `scripts/build_runtime_bundle.py`，使用 `scripts/runtime_bundle.lock.json` 固定各平台 CPython、运行/构建依赖来源与 SHA-256，输出：
+
+- `options-monitor-<tag>-<platform>.tar.gz`、同名 `.sha256` 摘要文件；源码资产名 `options-monitor-<tag>.tar.gz` 保持独立。
+- 同名 `.manifest.json` 与 `.qualification.json` 构建证据。包内 `om.runtime.json` 记录 schema、仓库、VERSION/tag/commit、平台、Python 来源/版本/摘要、依赖固定版本、文件清单摘要及许可路径。包中不含用户配置、密钥、报告或账本。
+
+仅构建和本地自检，不发布的命令为：
+
+```bash
+./.venv/bin/python scripts/build_runtime_bundle.py --output <artifact-dir> --cache <build-cache-dir> --require-clean
+```
+
+发布构建要求干净且对应目标 commit 的源码。构建端可使用 Git/构建依赖；终端用户运行包无需系统 Python、Git、pip 或 Homebrew。源码复制边界排除所有层级的 `AGENTS.md`、`CLAUDE.md` 和 `.agents/` 开发指令。归档不含链接或特殊文件；校验版本元数据、清单、全部文件摘要与真实解包内容一致。保留第三方许可，不把开发 venv 复制成运行包。
+
+资格必须使用真实包：移除原解释器/源码 staging 后，搬迁至含中文和空格的新路径，执行 help、Tool Gateway spec、核心/原生/服务端/Bot 依赖导入及私有解释器子进程。自检不得连接 OpenD、模型或通知，不启动服务或写业务数据。只有实际执行回执才能证明该宿主和平台通过；锁文件中的最低 OS 兼容声明、mock 归档、某一平台的通过，均不能替代其他目标的执行。
+
+`macos-arm64` 开发包已在 macOS 27.0.1 arm64 完成实际构建、搬迁及无用户 Python/Git/Homebrew 的安装验证；尚未发布。`macos-x86_64`、`linux-x86_64` 仍待实际回执；不能据此宣称所有 macOS 或 Linux 发行版已支持，最低 OS 声明也不等于最低版本实机验收。`scripts/runtime_bundle.lock.json` 的 `release_platforms` 当前只列 `macos-arm64`，其余为候选；拟发布集合不是通过证明。
+
+`.github/workflows/runtime-bundle.yml` 已配置不发布的原生构建/搬迁及无用户 Git/Python 的安装验证；release reusable workflow 依赖该 workflow 的拟发布平台任务，再下载同次产物并调用 `scripts/release_check.py --bundle-dir` 核对精确资产集合。`src/application/runtime_bundle.py::validate_publication_set` 绑定 tag、commit、平台、归档摘要、清单与实际资格回执，拒绝 dirty 构建和多余/缺失资产。源码中的工作流接线不等于 CI 已执行或 GitHub 资产已发布；发布收口仍需上述任务与上传回读证据。
+
+真实新手走查 U12 仍待参与者：须由未熟悉项目的人完成安装、账户选择和首份结果阅读，记录卡点及实际终态。Agent 的输入驱动 QA、mock SDK 或包自检只能证明各自技术边界，不能替代该验收。
 
 ### 发布工作区收口
 
@@ -326,13 +354,13 @@ git branch -d <exact-local-branch>
 
 ## 远端自动升级
 
-远端升级只消费已经发布成功的 GitHub Release tag，不追 `main`。自动和显式目标都要求精确
+远端升级只消费已经发布成功的 GitHub Release tag，不追 `main`，不因用户要求升级而补做发布。源码安装的自动和显式目标都要求精确
 `tag_name`、非 draft、有效的发布时间，以及三个精确命名的上传资产：`VERSION`、
 `om-agent-spec.json`、`options-monitor-<release_tag>.tar.gz`（例如 `options-monitor-v1.2.3.tar.gz`）。
 三个资产必须均为 `state=uploaded` 且 `size>0`；GitHub 自动生成的源码下载链接不算上传资产。
 这是发布资格 metadata 检查，不验证资产内容、digest 或其与现有 Git archive 的对应关系；源码物化仍走原有镜像归档流程。
 
-自动检查仍选择最高 SemVer Git tag；最高 tag 只有标签、为 draft 或资产未上传完整时，检查失败，
+源码安装的自动检查仍选择最高 SemVer Git tag；最高 tag 只有标签、为 draft 或资产未上传完整时，检查失败，
 不会自动回退到旧版本。可显式指定另一个合格版本；确认执行时在锁内重新验证，即使目标目录已存在也不能绕过。
 网络、超时、权限、限流、非法 metadata 或资产分页失败均关闭升级入口，不把不可用解释为没有新版本。
 HTTP 404 表示 Release 未找到或不可访问，不能据此断言私库资源不存在。
@@ -344,6 +372,8 @@ GitHub 来源取自当前 checkout remote；已有升级镜像时以镜像对应
 否则读取 `GITHUB_TOKEN`。私库可能需要对目标仓库具备 Contents-read 权限的 token，默认 token 不保证有权限；
 不会借用 Git/SSH 凭据或新增认证配置流程。token 和 HTTPS userinfo 不写入诊断，HTTP 不自动跟随 redirect。
 每次请求超时最多 10 秒，一次资格校验使用 30 秒 monotonic 预算、在每次请求前后检查，不自动重试。
+
+运行包分支从已安装 `om.runtime.json` 绑定仓库和平台，使用 GitHub 稳定 Release 查询及精确命名运行包，不走 Git 镜像或依赖安装。下载验证 HTTPS 和 digest/摘要，解包后验证清单身份及完整文件摘要，并用私有解释器自检；声明运行包但损坏时不得回退系统 Python。现有目标也不能跳过验证；bundle→bundle、source→原源码路径，不隐式切换类型。缺资产、校验失败或不支持平台时失败关闭升级入口。
 
 推荐部署布局：
 
@@ -416,7 +446,7 @@ confirmed 升级/回滚先取得该 guard，再绑定 current、版本、profile
   --runtime-root /var/lib/options-monitor
 ```
 
-确认升级时才会从本机 git cache materialize release、在新 release 内准备 `.venv`、安装 runtime/server 依赖、校验新目录、从 profile 记录的 YAML authoring source 重建并校验 runtime config、切换 `current` symlink，补齐当前 release 新增的缺失 service/timer，并按升级前 `service.profile.json` 重启长期运行的 service：
+确认升级时才会物化目标版本：源码安装从本机 git cache 提取、准备 `.venv` 并安装 runtime/server 依赖；运行包下载、验证资产并使用随包解释器。随后仍校验新目录、从 profile 记录的 YAML authoring source 重建并校验 runtime config、切换 `current` symlink，并按现有受控服务流程对账及读回。生产执行仍须明确授权：
 
 ```bash
 ./om update apply \
@@ -437,7 +467,11 @@ profile 更新保留原账号声明，不把渲染默认值变成退役归属证
 
 升级会根据 `/var/lib/options-monitor/service.profile.json` 里的 `markets` / `config_paths` 重建 runtime config。profile 必须记录 `config_authoring.source=yaml` 和 `config_authoring.config_yaml`，升级时执行 `./om config build --source yaml --config-yaml <path>` 重建对应 market 的 runtime config。旧 profile 缺少 YAML authoring source 时会 fail closed；直接建立 `config.yaml`，再执行 `service render --config-yaml <path>`。切换 symlink 前缺失来源或 rebuild/validate 失败时会在 `upgrade_status.json` 写入 remediation。切换 symlink 后会再用 current symlink 重建/校验一次，保证 tick 看到的 runtime config freshness 与当前代码一致。
 
-切换 symlink 后会执行 service drift reconcile：当前 release 的 `render_service_bundle()` 是期望状态，旧 profile 只提供账号、市场、env file、deploy user、Feishu WS、auto-upgrade 和已显式收编的 Feishu Agent credential 等部署意图。reconcile 会写入缺失的 systemd unit/profile 和 profile-owned helper/drop-in、修复 helper 模式、`daemon-reload`，并启用缺失 timer 或 credential oneshot。credential oneshot 还要求 `Result=success`。升级流程随后会用 reconcile 后的 profile 重启长期 service，并检查 `is-active` / `is-enabled`；Feishu WS 还会额外执行 `./om inbound feishu-ws --check`。`./om service drift --runtime-root /var/lib/options-monitor` 是同一逻辑的只读检查，`--confirm` 才会应用修复。
+systemd 目标切换 symlink 后会执行 service drift reconcile：当前 release 的 `render_service_bundle()` 是期望状态，旧 profile 只提供账号、市场、env file、deploy user、Feishu WS、auto-upgrade 和已显式收编的 Feishu Agent credential 等部署意图。reconcile 会写入缺失的 systemd unit/profile 和 profile-owned helper/drop-in、修复 helper 模式、`daemon-reload`，并启用缺失 timer 或 credential oneshot。credential oneshot 还要求 `Result=success`。升级流程随后会用 reconcile 后的 profile 重启长期 service，并检查 `is-active` / `is-enabled`；Feishu WS 还会额外执行 `./om inbound feishu-ws --check`。`./om service drift --runtime-root /var/lib/options-monitor` 是同一逻辑的只读检查，`--confirm` 才会应用修复。
+
+launchd 目标走同一升级事务中的平台分支：先读取原 loaded/enabled 状态，核对归属及目标定义，已加载任务须 bootout 并读回缺席后才加载目标；保留暂停状态，失败补偿使用原快照。未知归属、目标能力不足或服务回读失败必须明确失败。该源码路径和 fake-manager 测试不证明原生 launchd 服务升级已验收，仍需另行授权的目标环境证据。
+
+**launchd 自升级边界：** 运行中的 `com.options-monitor.upgrade` 仅在完整 plist 与目标定义逐字节一致、入口为稳定 `repo_root/om` 时保留，让瞬时控制器完成本次升级和失败补偿。其他已加载任务仍须卸载、确认旧进程退出、发布目标定义并重新加载；最终读回核对完整定义、实例和启停状态。控制器定义变化、退役或入口不稳定会在切换前返回 `SERVICE_UPGRADE_BUSY`，须待该任务空闲后重试。隔离管理器已覆盖自动升级和失败补偿，原生 launchd 执行仍待实机验收；不由源码测试推断所有平台兼容。
 
 `--no-restart-services` 只跳过长期 service 的 restart 和后续 health check，不会关闭 timer activation drift 修复。维护窗口如果已经显式暂停某个 timer，应同时传 `--preserve-activation-state`。升级器会在切换 symlink 前快照既有 systemd timer；原本 inactive、disabled 或 masked 的 timer 可以更新 unit/profile 并执行 `daemon-reload`，但不会执行 `enable --now`、`start`、`restart` 或 `unmask`。升级失败补偿复用这同一份快照。显式 rollback 也在切换 symlink 前采集一次快照，作为切换前的 fail-fast 闸门和结果中 `preserved_activation_units` 的来源；切换后由回滚目标 release 自己的 `om service drift --confirm` 重新采集快照并执行对账，两份快照不一致时在结果中记录差异。新增 timer 没有旧运行态，仍按 release 期望状态安装和激活。
 
@@ -500,13 +534,13 @@ liuxie ALL=(root) NOPASSWD: /usr/bin/systemctl restart options-monitor-feishu-ws
 
 如果 release/config 已切换成功但服务重启失败，升级状态会写成 `upgraded_restart_failed`，并记录 `symlink_switched=true`、`config_rebuilt`、`restart_failed_services` 和 `manual_remediation`。这种部分成功状态不会让自动升级 unit 因已知的服务重启权限问题反复 failed；按 remediation 手工重启服务并补齐 sudoers 即可。
 
-升级默认把下载缓存放在 `repo_root` 同级的 `_cache/`，也可用 `OM_UPGRADE_CACHE_ROOT` 或 `--cache-root` 覆盖。代码物料使用 `_cache/git/options-monitor.git`：首次 `git clone --mirror --origin origin`，后续 `git fetch --tags --prune origin`，再用 `git archive` 解包到目标 release，因此不会每次重新 clone 完整 tag 工作树。release 目录不保留 `.git`；后续 `update check` 和确认升级会在当前 release 不是 git checkout 时从 `_cache/git/options-monitor.git` 读取 remote 与 release tags。
+升级默认把下载缓存放在 `repo_root` 同级的 `_cache/`，也可用 `OM_UPGRADE_CACHE_ROOT` 或 `--cache-root` 覆盖。以下 Git/venv/uv 规则仅用于源码安装；运行包使用上文清单和资产物化分支。源码物料使用 `_cache/git/options-monitor.git`：首次 `git clone --mirror --origin origin`，后续 `git fetch --tags --prune origin`，再用 `git archive` 解包到目标 release，因此不会每次重新 clone 完整 tag 工作树。源码 release 目录不保留 `.git`；后续 `update check` 和确认升级会在当前 release 不是 git checkout 时从 `_cache/git/options-monitor.git` 读取 remote 与 release tags。
 
 缓存内部固定使用 `origin`；`--remote-name` 只选择当前 Git checkout 的来源 URL。已有缓存缺少非空 `remote.origin.url` 时检查和物料提取会拒绝继续，不会猜测其他 remote。先人工核对缓存来源，再恢复其 `origin` 配置；程序不自动重命名或重建缓存。
 
 Release runtime 依赖安装默认使用 `OM_UPGRADE_INSTALLER=auto`：先检测宿主机 PATH 上的 `uv`，可用时把当前运行中的 Python 3.12+ `sys.executable` 传给 `uv venv --python`，再执行 `uv pip install -p .venv/bin/python ...`；不可用或 auto 模式下 uv 安装失败时回退到原 pip 流程。升级流程不会自动安装 uv；需要加速时应在宿主机安装一次。可用 `OM_UPGRADE_INSTALLER=pip` 强制旧流程，或 `OM_UPGRADE_INSTALLER=uv` 强制 uv 且失败即中止升级。依赖下载缓存默认复用 `_cache/uv` 和 `_cache/pip`；只配置了 `PIP_INDEX_URL` 时，升级会把它映射为 uv 命令的 `UV_INDEX_URL`。
 
-确认升级时，用当前 release 的 `.venv/bin/python` 隔离读取 `om-pm-plugin`、`longbridge`
+确认升级时，用当前 release 声明的 Python 隔离读取 `om-pm-plugin`、`longbridge`
 与 `om-position-advice-plugin`
 安装元数据。已安装的 PM 扩展从目标 release 的 `plugins/portfolio-management` 安装，
 Position Advice 从目标 `plugins/position-advice` 安装，Longbridge SDK 按目标
@@ -529,6 +563,10 @@ true 也不补装。首次安装可用 `scripts/install.sh --with-position-advic
 一致并能经核心加载（Position Advice 包含策略和解释 API），验证 Longbridge SDK 导入；
 不构建券商连接或读取凭据。失败时不切换当前实例，不删除复用的缓存环境，也不修改
 旧实例的安装或配置。
+
+上述依赖安装和缓存保留用于源码 release。运行包的固定依赖清单不支持追加可选包；
+目标为运行包且需要保留 PM、Longbridge 或 Position Advice 时，在切换 `current` 前拒绝升级并保留当前实例，
+不把校验基础运行包成功视为可选能力已迁移。
 
 首次进入包含本修复的版本时，须由**含修复的新升级控制器**驱动旧实例。旧 release 的
 `om update apply`（含自动升级 timer）仍执行旧代码，不会提前加载目标 release 的本段逻辑；

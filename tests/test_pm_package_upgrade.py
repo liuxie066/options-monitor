@@ -10,6 +10,7 @@ import sys
 import pytest
 
 from src.application import service_upgrade as upgrade
+from src.application import runtime_bundle
 from tests.service_deploy_test_support import (
     _create_fake_venv_python_at,
     _write_runtime_target_with_server_deps,
@@ -93,6 +94,74 @@ def _upgrade(transition, runner):
         cache_root=current.parent / "cache", target_version="1.0.1", confirm=True,
         restart_services=False, run_cmd=runner,
     )
+
+
+def _bundled_runtime(release: Path) -> None:
+    python = release / runtime_bundle.PYTHON
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\nexit 0\n")
+    python.chmod(0o755)
+    for name in ("om", "om-agent"):
+        (release / name).write_text("#!/bin/sh\nexit 0\n")
+    version = (release / "VERSION").read_text().strip()
+    platform_name = runtime_bundle.current_platform()
+    manifest = {
+        "schema_version": 1, "kind": "options-monitor-runtime", "version": version,
+        "tag": f"v{version}", "commit": "a" * 40, "repository": runtime_bundle.REPOSITORY,
+        "platform": platform_name, "minimum_system": runtime_bundle.MINIMUM_SYSTEMS[platform_name],
+        "python": {
+            "executable": runtime_bundle.PYTHON, "version": "3.12.12", "sha256": "b" * 64,
+            "source_url": "https://github.com/astral-sh/python-build-standalone/releases/download/test/python.tar.gz",
+        },
+        "dependencies": {"fixture": "1.0.0"},
+        "files": {path.relative_to(release).as_posix(): runtime_bundle.sha256(path)
+                  for path in release.rglob("*") if path.is_file()},
+    }
+    (release / runtime_bundle.MANIFEST).write_text(json.dumps(manifest))
+
+
+@pytest.mark.parametrize("advice", [False, True])
+@pytest.mark.parametrize("pm,lb", [(False, False), (True, False), (False, True), (True, True)])
+def test_bundle_optional_selection_blocks_before_switch(monkeypatch, transition, pm, lb, advice):
+    previous, target, current, events = transition
+    for release in (previous, target):
+        _bundled_runtime(release)
+    monkeypatch.setattr(upgrade, "_materialize_runtime_bundle", lambda **_: {"method": "fixture"})
+    validations = []
+    monkeypatch.setattr(runtime_bundle, "validate_runtime", lambda root: validations.append(root) or {"ok": True})
+    runner = OfflineRuntime(previous, installed=pm, longbridge=lb)
+    probes = []
+
+    def bundled_runner(command, **kwargs):
+        if command[:3] == [str(previous / runtime_bundle.PYTHON), "-I", "-c"]:
+            probes.append(command)
+            return subprocess.CompletedProcess(command, 0, json.dumps([pm, lb, advice]), "")
+        return runner(command, **kwargs)
+
+    result = _upgrade(transition, bundled_runner)
+
+    assert len(probes) == 1, json.dumps(result, indent=2)
+    assert not runner.pm_installs and not runner.lb_installs
+    if pm or lb or advice:
+        assert not result["ok"], result
+        assert "RuntimePrepareError" in result["error"]
+        assert "runtime bundle cannot preserve optional packages" in result["error"]
+        for selected, name in ((pm, "om-pm-plugin"), (lb, "longbridge"), (advice, "om-position-advice-plugin")):
+            assert (name in result["error"]) is selected
+        assert result["runtime_prepare"]["installer"] == "runtime_bundle"
+        assert not result["symlink_switched"] and not result["changed"]
+        assert current.resolve() == previous
+        assert events == []
+        assert validations == []
+        receipt = upgrade.load_upgrade_status(runtime_root=current.parent / "runtime")
+        assert receipt["ok"] is False and receipt["symlink_switched"] is False
+    else:
+        assert result["ok"], result
+        assert current.resolve() == target
+        assert validations == [target]
+        assert result["runtime_prepare"]["installer"] == "runtime_bundle"
+    runtime_bundle.load_manifest(target, verify_files=True)
+    assert not any("install" in command for command in runner.commands)
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -273,7 +342,7 @@ def test_legacy_builtin_pm_migrates_from_effective_profile_config(transition, en
                 {"portfolio_management": {"enabled": enabled}})
     config.write_text(json.dumps(document))
     (runtime / "service.profile.json").write_text(json.dumps({
-        "markets": ["us"], "config_paths": {"us": str(config)},
+        "service_provider": "systemd", "markets": ["us"], "config_paths": {"us": str(config)},
     }))
     # A repo-local decoy must not override the effective service profile.
     (previous / "config.us.json").write_text(json.dumps({"portfolio_management": {"enabled": not enabled}}))
@@ -420,12 +489,13 @@ def test_unchanged_selected_packages_reuse_cache_and_still_validate(transition):
     assert any("load_portfolio_management_client_class" in " ".join(command) for command in runner.commands)
 
 
+@pytest.mark.parametrize("advice", [False, True])
 @pytest.mark.parametrize("pm,lb", [(False, False), (True, False), (False, True), (True, True)])
-def test_current_runtime_probe_reads_metadata_without_importing_packages(transition, pm, lb):
+def test_current_runtime_probe_reads_metadata_without_importing_packages(transition, pm, lb, advice):
     previous, target, current, events = transition
     site = current.parent / "probe-site"
     site.mkdir()
-    for name, installed in (("om-pm-plugin", pm), ("longbridge", lb)):
+    for name, installed in (("om-pm-plugin", pm), ("longbridge", lb), ("om-position-advice-plugin", advice)):
         if installed:
             metadata = site / (name.replace("-", "_") + "-0.1.0.dist-info")
             metadata.mkdir()
@@ -438,10 +508,11 @@ def test_current_runtime_probe_reads_metadata_without_importing_packages(transit
             "sys.path[:] = [p for p in sys.path if 'site-packages' not in p]\n"
             f"sys.path.insert(0, {str(site)!r})\n" + command[3] +
             "assert 'om_pm_plugin' not in sys.modules and 'longbridge' not in sys.modules\n"
+            "assert 'om_position_advice_plugin' not in sys.modules\n"
         )
         return subprocess.run([sys.executable, "-I", "-c", code], **kwargs)
 
-    assert upgrade._installed_optional_packages(previous_dir=previous, run_cmd=run_fixture_python, operations=[]) == (pm, lb, False)
+    assert upgrade._installed_optional_packages(previous_dir=previous, run_cmd=run_fixture_python, operations=[]) == (pm, lb, advice)
 
 
 @pytest.mark.parametrize("expected,installed,broken,ok", [

@@ -87,7 +87,7 @@ def test_legacy_builtin_migration_uses_effective_enablement(advice_transition, e
     config = runtime / ("selected.json" if profile else "config.hk.json")
     config.write_text(json.dumps({"close_advice": {"enabled": enabled}}))
     if profile:
-        (runtime / "service.profile.json").write_text(json.dumps({"config_paths": {"us": str(config)}}))
+        (runtime / "service.profile.json").write_text(json.dumps({"service_provider": "systemd", "config_paths": {"us": str(config)}}))
     (previous / "config.us.json").write_text(json.dumps({"close_advice": {"enabled": not enabled}}))
     runner = AdviceRuntime(previous, installed=False)
     result = _upgrade(advice_transition, runner)
@@ -105,7 +105,7 @@ def test_unknown_legacy_config_blocks_before_preparation(advice_transition, cont
     config = runtime / "selected.json"
     if contents is not None:
         config.write_text(contents)
-    (runtime / "service.profile.json").write_text(json.dumps({"config_paths": {"us": str(config)}}))
+    (runtime / "service.profile.json").write_text(json.dumps({"service_provider": "systemd", "config_paths": {"us": str(config)}}))
     runner = AdviceRuntime(previous, installed=False)
     result = _upgrade(advice_transition, runner)
     assert not result["ok"]

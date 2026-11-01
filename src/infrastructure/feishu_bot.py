@@ -200,13 +200,9 @@ def send_message(
 
     request_path = "/open-apis/im/v1/messages?receive_id_type=open_id"
     url = f"https://open.feishu.cn{request_path}"
-    payload: dict[str, Any] = {
-        "receive_id": open_id_value,
-        "msg_type": msg_type_value,
-        "content": json.dumps(content_value, ensure_ascii=False),
-    }
-    if uuid:
-        payload["uuid"] = str(uuid)
+    payload = build_message_payload(
+        open_id=open_id_value, msg_type=msg_type_value, content=content_value, uuid=uuid,
+    )
 
     request_body_bytes = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
     if request_body_bytes > FEISHU_SEND_REQUEST_BUDGET_BYTES:
@@ -327,6 +323,20 @@ def _post_md_paragraphs(markdown: str) -> list[list[dict[str, str]]]:
     if not paragraphs:
         paragraphs.append([{"tag": "md", "text": markdown}])
     return paragraphs
+
+
+def build_message_payload(
+    *, open_id: str, msg_type: str, content: dict[str, Any], uuid: str | None = None,
+) -> dict[str, Any]:
+    """Canonical send body shared by preparation budgeting and the actual sender."""
+    payload = {
+        "receive_id": str(open_id or "").strip(),
+        "msg_type": msg_type,
+        "content": json.dumps(content, ensure_ascii=False),
+    }
+    if uuid:
+        payload["uuid"] = str(uuid)
+    return payload
 
 
 def build_post_message_payload(*, open_id: str, markdown: str, uuid: str | None = None) -> dict[str, Any]:

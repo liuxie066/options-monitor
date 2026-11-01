@@ -9,7 +9,12 @@ from typing import Any
 
 from src.application.opend_utils import normalize_underlier
 from src.application.opend_market_snapshot_fetching import get_underlier_observation_opend
-from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
+from src.infrastructure.futu_gateway import (
+    FUTU_ACCOUNT_CANDIDATE_LIMIT,
+    FutuGatewayError,
+    build_futu_gateway,
+    build_ready_futu_quote_gateway,
+)
 from src.infrastructure.opend_watchdog import port_open, run_watchdog_check
 
 
@@ -24,6 +29,32 @@ REQUIRED_SNAPSHOT_COLS = [
     "option_delta",
     "option_contract_multiplier",
 ]
+
+
+def discover_account_candidates(
+    *, host: str, port: int, market: str, trd_env: str,
+    max_candidates: int = FUTU_ACCOUNT_CANDIDATE_LIMIT,
+) -> dict[str, Any]:
+    """Query only this endpoint's metadata after the caller obtains consent.
+
+    Candidates carry actual IDs for selection/configuration in memory. Never
+    render/serialize this payload to logs or support output. A match is not a
+    funds/positions check or final doctor validation; no facts are cached.
+    """
+    gateway = None
+    try:
+        gateway = build_futu_gateway(host=host, port=port, is_option_chain_cache_enabled=False)
+        return gateway.get_account_candidates(
+            trd_env=trd_env, expected_market=market, max_candidates=max_candidates,
+        )
+    except Exception as exc:
+        return {
+            "status": "unavailable", "candidates": [],
+            "error_code": exc.code if isinstance(exc, FutuGatewayError) else "UNKNOWN",
+        }
+    finally:
+        if gateway is not None:
+            gateway.close()
 
 
 @dataclass(frozen=True)
