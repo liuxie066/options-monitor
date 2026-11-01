@@ -269,3 +269,23 @@ def test_current_operational_docs_do_not_reintroduce_ambiguous_python_bootstrap(
     assert "./om run trade-intake --config ... --mode apply --yes" in (
         ROOT / "RUNBOOK.md"
     ).read_text(encoding="utf-8")
+
+
+def test_bundle_precedes_venv_and_python_but_explicit_override_still_wins(tmp_path):
+    repo = tmp_path / 'repo'
+    bundled = _write_fake_python(repo / 'runtime/python/bin/python3', version='3.12.16')
+    _write_fake_python(repo / '.venv/bin/python', version='3.11.9')
+    env = _runtime_env(tmp_path / 'none')
+    assert _selector('om_select_repo_python', repo, env, label='bundle').stdout.strip() == str(bundled)
+    fallback = _write_fake_python(tmp_path / 'override', version='3.12.3')
+    env['OM_PYTHON'] = str(fallback)
+    assert _selector('om_select_repo_python', repo, env, label='override').stdout.strip() == str(fallback)
+
+
+def test_declared_missing_bundle_cannot_fall_back_to_working_venv(tmp_path):
+    repo = tmp_path / 'repo'
+    _write_fake_python(repo / '.venv/bin/python', version='3.12.4')
+    (repo / 'om.runtime.json').write_text('{}')
+    env = _runtime_env(tmp_path / 'none')
+    result = _selector('om_select_repo_python', repo, env, label='broken')
+    assert result.returncode != 0 and 'declared bundle runtime' in result.stderr

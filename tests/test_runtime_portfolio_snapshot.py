@@ -11,6 +11,7 @@ from tests.cash_evidence_helpers import cash_portfolio
 
 from domain.domain.decision_state_fingerprint import canonical_json_bytes as decision_json_bytes
 from tests import test_required_data_snapshot as required_data_fixture
+from tests.test_required_data_snapshot import _fresh_quote_time as _fresh_quote_time
 from src.application.required_data_snapshot import (
     load_required_data_snapshot_manifest_snapshot,
     seal_required_data_snapshot,

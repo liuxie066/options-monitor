@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Any, Callable
 
 from src.application.secret_store import credential_specs
@@ -46,17 +47,76 @@ om bot 是 OM 自身的消息与问答功能；assistant 保留兼容。Feishu �
 """
 
 
+def _home_state() -> tuple[Path, dict[str, Any] | None]:
+    from src.application.agent_tool_config import repo_base
+    from src.application.agent_tools.runtime_status_impl import read_onboarding_status
+    from src.application.config_yaml import load_yaml_config_file, resolve_yaml_config_path
+
+    source = resolve_yaml_config_path(None, repo_root=repo_base())
+    if not source.is_file():
+        return source, None
+    return source, read_onboarding_status(base=source.parent, document=load_yaml_config_file(source))
+
+
+def _print_home_status(state: dict[str, Any]) -> None:
+    print("\nOM")
+    for scope in state["scopes"]:
+        attempt = scope["attempt"]
+        label = {"sealed": "已有封存结果", "attempted": "已尝试，终态未知",
+                 "completed": "完成" if attempt.get("result_status") == "ready" else "完成，部分数据不可用",
+                 "failed": "失败", "not_found": "尚未扫描", "unknown": "未知"}[attempt["status"]]
+        print(f"  {scope['account']} · {scope['market']} · 最近扫描：{label}"
+              + (f" · {attempt['as_of']}" if attempt.get("as_of") else ""))
+        if attempt.get("reason"):
+            print(f"    扫描证据：{attempt['reason']}")
+        if scope["brief_available"]:
+            old = "（较早结果，非最近尝试）" if attempt.get("run_id") != scope["brief_run_id"] else ""
+            print(f"    可读简报数据时间：{scope['brief_time'] or '未知'}{old}")
+        else:
+            if scope["brief_reason"] == "not_found":
+                print("    可读简报：暂无可读结果（尚未生成或来源已清理）")
+            elif scope.get("brief_error") == "history_missing":
+                print("    可读简报：暂无可读结果（历史来源不存在）"
+                      + ("；已有扫描证据，请在其他管理中排查。" if attempt["status"] != "not_found" else ""))
+            else:
+                print(f"    可读简报：来源不可用（{scope['brief_reason']}）；可在其他管理中排查。")
+    print("  自动运行：未知；可在其他管理中查看服务实际状态。")
+    print("  1  查看决策简报\n  2  重新扫描\n  3  修改关注标的与策略边界\n  4  其他管理与可选功能\n  0  退出")
+
+
 def interactive_home(run: Callable[[list[str]], int], *, input_fn: Callable[[str], str] = input) -> int:
     from src.application.agent_tool_contracts import AgentToolError
-    from src.interfaces.cli.journeys import daily_management
+    from src.application.agent_tool_config import repo_base
+    from src.interfaces.cli.journeys import _instance_run, daily_management, manual_scan, manage_symbols
 
     while True:
-        sys.stdout.write("\nOptions Monitor\n  1  首次安装或继续引导\n  2  日常管理\n  3  命令与高级功能\n  0  退出\n")
         try:
+            try:
+                source, state = _home_state()
+            except (AgentToolError, OSError, ValueError) as exc:
+                print(f"实例配置或运行证据读取失败：{exc}；不会重建已有配置。")
+                print("修复入口：om doctor --help；om config --help；om help all。")
+                return 2
+            if state is None:
+                sys.stdout.write("\nOptions Monitor\n  1  首次安装或继续引导\n  2  日常管理\n  3  命令与高级功能\n  0  退出\n")
+            else:
+                _print_home_status(state)
             choice = input_fn("请选择：").strip()
             if choice == "0":
                 return 0
-            if choice == "1":
+            if state is not None:
+                scoped_run = lambda argv: _instance_run(run, argv, source=source, repo_root=repo_base())
+                if choice == "1":
+                    scoped_run(["daily-brief", "latest"])
+                elif choice == "2":
+                    manual_scan(scoped_run, source, input_fn=input_fn)
+                elif choice == "3":
+                    manage_symbols(scoped_run, source, input_fn=input_fn)
+                elif choice == "4":
+                    daily_management(run, source=source, input_fn=input_fn)
+                else:
+                    print("请选择菜单中的编号。")
+            elif choice == "1":
                 run(["setup", "init"])
             elif choice == "2":
                 daily_management(run, input_fn=input_fn)
