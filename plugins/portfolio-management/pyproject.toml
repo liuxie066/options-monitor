@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "om-pm-plugin"
+version = "0.1.0"
+description = "Optional Portfolio Management capability for options-monitor"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["om_pm_plugin", "om_pm_plugin.*"]
+namespaces = false

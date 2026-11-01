@@ -1918,11 +1918,18 @@ def _command_error(result: dict[str, Any]) -> str:
     return f"{command}: {detail}" if command else detail
 
 
-def _pip_install_commands(venv_python: Path) -> list[tuple[list[str], int]]:
-    return [
+def _pip_install_commands(
+    venv_python: Path, *, include_pm: bool = False, include_longbridge: bool = False,
+) -> list[tuple[list[str], int]]:
+    commands = [
         ([str(venv_python), "-m", "pip", "install", "-U", "pip"], 600),
         ([str(venv_python), "-m", "pip", "install", "-r", "requirements.txt", "-c", "constraints.txt"], 1200),
     ]
+    if include_pm:
+        commands.append(([str(venv_python), "-m", "pip", "install", "./plugins/portfolio-management"], 600))
+    if include_longbridge:
+        commands.append(([str(venv_python), "-m", "pip", "install", "-r", "requirements/longbridge.txt"], 600))
+    return commands
 
 
 def _uv_install_commands(
@@ -1931,6 +1938,8 @@ def _uv_install_commands(
     venv_dir: Path,
     include_server: bool,
     bootstrap_python: str,
+    include_pm: bool = False,
+    include_longbridge: bool = False,
 ) -> list[tuple[list[str], int]]:
     commands: list[tuple[list[str], int]] = [
         (["uv", "venv", "--python", bootstrap_python, str(venv_dir)], 300),
@@ -1953,6 +1962,12 @@ def _uv_install_commands(
                 1200,
             )
         )
+    if include_pm:
+        commands.append((["uv", "pip", "install", "-p", str(venv_python), "./plugins/portfolio-management"], 600))
+    if include_longbridge:
+        commands.append(([
+            "uv", "pip", "install", "-p", str(venv_python), "-r", "requirements/longbridge.txt",
+        ], 600))
     return commands
 
 
@@ -1984,13 +1999,15 @@ def _run_pip_runtime_prepare(
     commands: list[list[str]],
     env: dict[str, str],
     bootstrap_python: str,
+    include_pm: bool = False,
+    include_longbridge: bool = False,
 ) -> None:
     if not venv_python.exists():
         command = [bootstrap_python, "-m", "venv", str(venv_dir)]
         _run_required(command, cwd=target_dir, run_cmd=run_cmd, operations=operations, env=env, timeout=300)
         operations[-1]["runtime_prepare_installer"] = "pip"
         commands.append(command)
-    pip_commands = _pip_install_commands(venv_python)
+    pip_commands = _pip_install_commands(venv_python, include_pm=include_pm, include_longbridge=include_longbridge)
     if include_server:
         pip_commands.append(
             (
@@ -2052,9 +2069,14 @@ def _ensure_bot_runtime(
     return readiness
 
 
-def _dependency_context(*, include_server: bool, python_spec: str, installer_mode: str) -> dict[str, Any]:
+def _dependency_context(
+    *, include_server: bool, python_spec: str, installer_mode: str,
+    include_pm: bool = False, include_longbridge: bool = False,
+) -> dict[str, Any]:
     return {
         "include_server": bool(include_server),
+        **({"include_pm": True} if include_pm else {}),
+        **({"include_longbridge": True} if include_longbridge else {}),
         "installer_mode": installer_mode,
         "python_implementation": sys.implementation.name,
         "python_spec": python_spec,
@@ -2071,6 +2093,8 @@ def _dependency_hash(
     include_server: bool,
     python_spec: str | None = None,
     installer_mode: str = "auto",
+    include_pm: bool = False,
+    include_longbridge: bool = False,
 ) -> str:
     digest = hashlib.sha256()
     selected_python_spec = python_spec or f"{sys.version_info.major}.{sys.version_info.minor}"
@@ -2078,10 +2102,14 @@ def _dependency_hash(
         include_server=include_server,
         python_spec=selected_python_spec,
         installer_mode=installer_mode,
+        include_pm=include_pm,
+        include_longbridge=include_longbridge,
     )
     digest.update(json.dumps(context, sort_keys=True).encode("utf-8"))
     digest.update(b"\n")
-    for path in _dependency_files(target_dir, include_server=include_server):
+    for path in _dependency_files(
+        target_dir, include_server=include_server, include_pm=include_pm, include_longbridge=include_longbridge,
+    ):
         try:
             rel = path.relative_to(target_dir)
             label = rel.as_posix()
@@ -2096,7 +2124,9 @@ def _dependency_hash(
     return digest.hexdigest()[:16]
 
 
-def _dependency_files(target_dir: Path, *, include_server: bool) -> list[Path]:
+def _dependency_files(
+    target_dir: Path, *, include_server: bool, include_pm: bool = False, include_longbridge: bool = False,
+) -> list[Path]:
     roots = [target_dir / "requirements.txt", target_dir / "constraints.txt"]
     if include_server:
         roots.extend(
@@ -2105,6 +2135,8 @@ def _dependency_files(target_dir: Path, *, include_server: bool) -> list[Path]:
                 target_dir / "constraints" / "server.txt",
             ]
         )
+    if include_longbridge:
+        roots.append(target_dir / "requirements/longbridge.txt")
     seen: set[Path] = set()
     ordered: list[Path] = []
 
@@ -2123,6 +2155,10 @@ def _dependency_files(target_dir: Path, *, include_server: bool) -> list[Path]:
 
     for root in roots:
         visit(root)
+    if include_pm:
+        package = target_dir / "plugins" / "portfolio-management"
+        ordered.append(package / "pyproject.toml")
+        ordered.extend(sorted((package / "src").rglob("*.py")))
     return ordered
 
 
@@ -2206,16 +2242,113 @@ def _link_release_venv(*, target_dir: Path, shared_venv: Path) -> None:
     release_venv.symlink_to(shared_venv, target_is_directory=True)
 
 
+def _installed_optional_packages(
+    *, previous_dir: Path, run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> tuple[bool, bool]:
+    python = _release_python(previous_dir)
+    if not python.exists():
+        return False, False
+    # Query this instance, without importing the plugin or inheriting PYTHONPATH.
+    code = (
+        "import importlib.metadata as m, json\n"
+        "installed = []\n"
+        "for name in ('om-pm-plugin', 'longbridge'):\n"
+        "    try: m.distribution(name)\n"
+        "    except m.PackageNotFoundError: installed.append(False)\n"
+        "    else: installed.append(True)\n"
+        "print(json.dumps(installed))\n"
+    )
+    result = _run_required(
+        [str(python), "-I", "-c", code], cwd=previous_dir,
+        run_cmd=run_cmd, operations=operations, timeout=30,
+    )
+    try:
+        installed = json.loads(result["stdout"])
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("could not determine installed optional packages in current runtime") from exc
+    if not isinstance(installed, list) or len(installed) != 2 or any(type(item) is not bool for item in installed):
+        raise RuntimeError("current runtime optional package probe did not return two booleans")
+    return installed[0], installed[1]
+
+
+def _legacy_pm_enabled(*, previous_dir: Path, runtime_root: Path) -> bool:
+    if (previous_dir / "plugins/portfolio-management/pyproject.toml").is_file():
+        return False
+    if not (previous_dir / "src/infrastructure/portfolio_management_client.py").is_file():
+        return False
+    from src.application.portfolio_management import portfolio_management_enabled
+
+    profile = _load_service_profile(runtime_root)
+    for market in _verify_markets(runtime_root=runtime_root, profile=profile):
+        path = _runtime_config_path_for_market(market=market, runtime_root=runtime_root, profile=profile)
+        try:
+            config = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(config, dict):
+                raise ValueError("runtime config must be an object")
+            if portfolio_management_enabled(config):
+                return True
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"could not determine legacy PM integration from {path}") from exc
+    return False
+
+
+def _validate_optional_runtime(
+    *, target_dir: Path, include_pm: bool, include_longbridge: bool,
+    run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> None:
+    code = (
+        "import importlib.metadata as m, sys, tomllib\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "try: dist = m.distribution('om-pm-plugin')\n"
+        "except m.PackageNotFoundError: dist = None\n"
+        "if sys.argv[2] == 'true':\n"
+        "    assert dist is not None, 'installed PM package lost during upgrade'\n"
+        "    spec = tomllib.loads((Path(sys.argv[1]) / 'plugins/portfolio-management/pyproject.toml').read_text())\n"
+        "    assert dist.version == spec['project']['version'], 'PM package version differs from target release'\n"
+        "    from src.application.portfolio_management import load_portfolio_management_client_class\n"
+        "    load_portfolio_management_client_class()\n"
+        "else:\n"
+        "    assert dist is None, 'PM package unexpectedly installed in cached runtime'\n"
+        "try: lb = m.distribution('longbridge')\n"
+        "except m.PackageNotFoundError: lb = None\n"
+        "if sys.argv[3] == 'true':\n"
+        "    assert lb is not None, 'installed Longbridge SDK lost during upgrade'\n"
+        "    from longbridge.openapi import Config, TradeContext\n"
+        "else:\n"
+        "    assert lb is None, 'Longbridge SDK unexpectedly installed in cached runtime'\n"
+    )
+    _run_required(
+        [str(_release_python(target_dir)), "-I", "-c", code, str(target_dir),
+         json.dumps(include_pm), json.dumps(include_longbridge)],
+        cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=30,
+    )
+
+
 def _ensure_release_runtime(
     *,
     target_dir: Path,
     cache_root: Path | None = None,
     run_cmd: Callable[..., Any],
     operations: list[dict[str, Any]],
+    include_pm: bool = False,
+    include_longbridge: bool = False,
 ) -> dict[str, Any]:
     _runtime_readiness(release_dir=target_dir)
     if _is_runtime_bundle(target_dir):
         runtime_bundle.load_manifest(target_dir, verify_files=True)
+        selected = [name for name, enabled in (
+            ("om-pm-plugin", include_pm), ("longbridge", include_longbridge),
+        ) if enabled]
+        if selected:
+            # Installing source extras would invalidate the bundle's pinned inventory.
+            raise RuntimePrepareError(
+                "runtime bundle cannot preserve optional packages: " + ", ".join(selected)
+                + "; optional package installation is supported only by source releases; current remains unchanged",
+                runtime_prepare={
+                    "installer": "runtime_bundle", "unsupported_optional_packages": selected,
+                },
+            )
         result = runtime_bundle.validate_runtime(target_dir)
         if result.get("ok") is not True:
             raise RuntimePrepareError("bundled runtime validation failed", runtime_prepare=result)
@@ -2234,8 +2367,13 @@ def _ensure_release_runtime(
         include_server=include_server,
         python_spec=python_spec,
         installer_mode=mode,
+        include_pm=include_pm,
+        include_longbridge=include_longbridge,
     )
-    dependency_context = _dependency_context(include_server=include_server, python_spec=python_spec, installer_mode=mode)
+    dependency_context = _dependency_context(
+        include_server=include_server, python_spec=python_spec, installer_mode=mode,
+        include_pm=include_pm, include_longbridge=include_longbridge,
+    )
     shared_venv = _shared_venv_path(cache, dependency_hash)
     build_venv = _shared_venv_build_path(shared_venv)
     build_python = _venv_python(build_venv)
@@ -2290,6 +2428,8 @@ def _ensure_release_runtime(
                 venv_dir=build_venv,
                 include_server=include_server,
                 bootstrap_python=bootstrap_python,
+                include_pm=include_pm,
+                include_longbridge=include_longbridge,
             )
             commands.extend(command for command, _timeout in uv_commands)
             try:
@@ -2321,6 +2461,8 @@ def _ensure_release_runtime(
                     commands=commands,
                     env=install_env,
                     bootstrap_python=bootstrap_python,
+                    include_pm=include_pm,
+                    include_longbridge=include_longbridge,
                 )
         else:
             if mode == "uv":
@@ -2337,6 +2479,8 @@ def _ensure_release_runtime(
                 commands=commands,
                 env=install_env,
                 bootstrap_python=bootstrap_python,
+                include_pm=include_pm,
+                include_longbridge=include_longbridge,
             )
 
         if not runtime_prepare["venv_reused"]:
@@ -2368,6 +2512,10 @@ def _ensure_release_runtime(
             ]
         )
         runtime_prepare["bot_runtime"] = _ensure_bot_runtime(target_dir, run_cmd, operations)
+        _validate_optional_runtime(
+            target_dir=target_dir, include_pm=include_pm, include_longbridge=include_longbridge,
+            run_cmd=run_cmd, operations=operations,
+        )
         runtime_prepare["ended_at"] = utc_now_iso()
         runtime_prepare["duration_seconds"] = round(time.monotonic() - started, 3)
         return runtime_prepare
@@ -3227,11 +3375,17 @@ def service_upgrade(
                     "operations": operations,
                 },
             )
+            include_pm, include_longbridge = _installed_optional_packages(
+                previous_dir=previous_dir, run_cmd=run_cmd, operations=operations,
+            )
+            include_pm = include_pm or _legacy_pm_enabled(previous_dir=previous_dir, runtime_root=runtime)
             runtime_prepare = _ensure_release_runtime(
                 target_dir=target_dir,
                 cache_root=cache,
                 run_cmd=run_cmd,
                 operations=operations,
+                include_pm=include_pm,
+                include_longbridge=include_longbridge,
             )
             write_upgrade_status(
                 runtime_root=runtime,

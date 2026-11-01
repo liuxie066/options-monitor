@@ -13,6 +13,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from domain.domain.strategy_core import ResolvedStrategy
+from src.application.prefilters import covered_call_capacity_binding, stock_matches_capacity_binding
 from domain.domain.candidate_defaults import (
     DEFAULT_SELL_CALL_WINDOW,
     resolve_candidate_liquidity,
@@ -87,20 +88,9 @@ def run_sell_call_scan_and_summarize(
             mode="call", cfg=resolved_strategy.config, symbol=symbol,
             portfolio_ctx=portfolio_ctx, resolved_strategy=resolved_strategy,
         )
-    portfolio_source = str(
-        (portfolio_ctx or {}).get("portfolio_source_name")
-        if isinstance(portfolio_ctx, dict)
-        else ""
-    ).strip().lower()
-    authority = (
-        portfolio_ctx.get("capacity_authority")
-        if isinstance(portfolio_ctx, dict)
-        and isinstance(portfolio_ctx.get("capacity_authority"), dict)
-        else {}
-    )
+    authority = covered_call_capacity_binding(portfolio_ctx or {})
     if not demo_capacity and (
-        portfolio_source != "futu"
-        or str(authority.get("status") or "").strip().lower() != "available"
+        str(authority.get("status") or "").strip().lower() != "available"
     ):
         return _empty_sell_call_result(
             symbol=symbol,
@@ -114,6 +104,12 @@ def run_sell_call_scan_and_summarize(
             symbol_cfg=symbol_cfg,
             status="not_applicable",
             reason="stock_context_missing",
+        )
+
+    if not demo_capacity and not stock_matches_capacity_binding(stock, portfolio_ctx or {}, symbol=symbol):
+        return _empty_sell_call_result(
+            symbol=symbol, symbol_cfg=symbol_cfg, status="unavailable",
+            reason="physical_account_capacity_stock_identity_mismatch",
         )
 
     shares_total = 0
@@ -227,7 +223,8 @@ def run_sell_call_scan_and_summarize(
         shares_locked=int(locked),
         capacity_facts=({"capacity_source": "demo_scenario"} if demo_capacity else {
             "capacity_identity_hash": stock.get("capacity_identity_hash"),
-            "futu_account_id": stock.get("futu_account_id"),
+            **({"broker_id": authority["broker_id"], "broker_account_id": authority["broker_account_id"]}
+               if authority["broker_id"] != "futu" else {"futu_account_id": stock.get("futu_account_id")}),
             "capacity_trd_env": stock.get("trd_env"),
             "capacity_market": stock.get("market"),
             "capacity_source_observed_at": stock.get("source_observed_at"),

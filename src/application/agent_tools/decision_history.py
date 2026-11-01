@@ -3,12 +3,12 @@ import hashlib
 import hmac
 from time import monotonic
 
-from src.application.account_config import accounts_from_config, build_account_runtime_plan
+from src.application.account_config import accounts_from_config, account_decision_scope
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tools.base import build_agent_tool
 from src.application.agent_tools.project import _QUERY_CONTEXT
-from src.application.decision_history import read_decision_history
+from src.application.decision_history import read_decision_history, history_scope_is_proven
 from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.secret_store import INBOUND_OPERATION_HMAC_KEY, SecretError, resolve_secret
@@ -32,12 +32,12 @@ def _read(payload):
     market = str(payload.get("market") or "").upper()
     if account not in accounts or market.lower() != infer_runtime_config_market(config=cfg, config_key=payload.get("config_key"), config_path=path):
         raise AgentToolError(code="SCOPE_DENIED", message="账户或市场不在当前授权范围。")
-    binding = build_account_runtime_plan(cfg, account=account)
-    scope = {"futu_account_id": binding.futu_account_id, "trade_env": binding.futu_trd_env}
-    for field in scope:
-        if payload.get(field) and payload[field] != scope[field]:
+    scope = account_decision_scope(cfg, account=account)
+    selectors = {"broker_id": scope.get("broker_id", "futu"), **scope}
+    for field in ("broker_id", "broker_account_id", "futu_account_id", "trade_env"):
+        if payload.get(field) and payload[field] != selectors.get(field):
             raise AgentToolError(code="SCOPE_DENIED", message="物理账户或交易环境不在当前授权范围。")
-    if not scope["futu_account_id"] or scope["trade_env"] not in {"REAL", "SIMULATE"}:
+    if not history_scope_is_proven(scope):
         raise AgentToolError(code="SCOPE_UNPROVEN", message="无法确认物理账户和实盘/模拟身份，请补充有效账户配置。")
     authority = content_hash({"config": str(path.resolve()), "scope": scope, "identity": {k: payload.get(k) for k in
         ("authenticated_channel", "authenticated_sender_id", "authenticated_conversation_id", "authority_scope")}})
@@ -58,7 +58,7 @@ def _read(payload):
     return result, [], {"read_only": True}
 
 
-_FIELDS = ("account", "market", "start_date", "end_date", "symbol", "futu_account_id", "trade_env", "cursor")
+_FIELDS = ("account", "market", "start_date", "end_date", "symbol", "futu_account_id", "broker_id", "broker_account_id", "trade_env", "cursor")
 _INPUT = {field: {"type": "string", "minLength": 1, "maxLength": 8192 if field == "cursor" else 128} for field in _FIELDS}
 for _field in ("account", "market", "start_date", "end_date"):
     _INPUT[_field]["required"] = True

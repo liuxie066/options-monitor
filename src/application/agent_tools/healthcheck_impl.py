@@ -410,6 +410,29 @@ def run_healthcheck_tool(
             "trade_intake_enabled": trade_intake_enabled,
             "futu_account_ids": [mask_account_id(x) for x in mapped_ids],
         }
+        if account_type == "longbridge":
+            from src.application.account_config import resolve_account_longbridge_settings
+            from src.infrastructure.longbridge_gateway import credential_binding_fingerprint
+
+            settings = resolve_account_longbridge_settings(cfg, account=account)
+            try:
+                bound = credential_binding_fingerprint(settings, environ=effective_env.values) == settings.get("credential_binding_sha256")
+            except ValueError:
+                bound = False
+            identity = {"broker_account_id": mask_account_id(settings["account_id"]),
+                        "binding_method": "user_confirmed_credentials_sha256", "broker_echoed": False,
+                        "credential_binding_valid": bound}
+            mapping_preview[account].pop("futu_account_ids")
+            mapping_preview[account].update(identity)
+            primary_preview[account].update(identity, ready=bound, asset_api_verified=False)
+            if not bound:
+                error = f"{account}: longbridge credential/account binding is missing or does not match current credentials"
+                mapping_errors.append(error)
+                primary_errors.append(error)
+            checks.append({"name": f"longbridge_asset_readiness_{account}", "status": "skipped",
+                           "message": "Longbridge asset API readiness is unverified; this check validates credential binding only",
+                           "value": {"account": account, **identity, "asset_api_verified": False}})
+            continue
         if not mapped_ids:
             mapping_errors.append(f"{account}: missing account_settings.{account}.futu.account_id")
             primary_errors.append(f"{account}: missing account_settings.{account}.futu.account_id")
@@ -446,7 +469,7 @@ def run_healthcheck_tool(
         }
     )
     if mapping_errors:
-        warnings.append("Use `./om-agent add-account --account-type futu` and complete the account settings.")
+        warnings.append("Complete the configured broker account settings in config.yaml and rebuild the runtime snapshots.")
     elif any(str(value) == "user1" for value in accounts):
         warnings.append("You are still using the starter account label 'user1'; rename it before long-term use if this is not intentional.")
 
@@ -823,6 +846,8 @@ def run_healthcheck_tool(
                 **({"trade_intake_enabled": primary.get("trade_intake_enabled")} if primary.get("trade_intake_enabled") is not None else {}),
                 **({"futu_account_ids": primary.get("futu_account_ids")} if primary.get("futu_account_ids") is not None else {}),
                 **({"opend": primary.get("opend")} if primary.get("opend") is not None else {}),
+                **({key: primary[key] for key in ("broker_account_id", "binding_method", "broker_echoed", "credential_binding_valid", "asset_api_verified")}
+                   if account_type == "longbridge" else {}),
             },
         }
 

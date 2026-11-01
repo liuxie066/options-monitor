@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from collections.abc import Mapping
+import json
 from pathlib import Path
+import re
 from typing import Any, Callable
 
 from domain.domain.daily_decision_brief import daily_brief_compatible_digests
@@ -55,12 +58,23 @@ def _unresolved_import_rejections(reports: list[dict[str, Any]]) -> list[dict[st
     return list(unresolved.values())
 
 
+def history_scope_is_proven(scope: dict[str, Any]) -> bool:
+    if not isinstance(scope, Mapping):
+        return False
+    if scope.get("broker_id", "futu") == "futu":
+        return bool(scope.get("futu_account_id")) and scope.get("trade_env") in {"REAL", "SIMULATE"}
+    return (scope.get("broker_id") == "longbridge" and bool(scope.get("broker_account_id"))
+            and "futu_account_id" not in scope and scope.get("trade_env") == "REAL"
+            and isinstance(scope.get("credential_binding_sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", scope["credential_binding_sha256"]) is not None)
+
+
 def read_decision_history(*, base: Path, account: str, market: str, scope: dict[str, str],
                           start_date: str, end_date: str, cursor_key: Callable[[], str],
                           symbol: str | None = None, limit: int = 10, cursor: str | None = None,
                           reference: dict[str, Any] | None = None, authority: str = "",
                           cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
-    if not scope.get("futu_account_id") or scope.get("trade_env") not in {"REAL", "SIMULATE"}:
+    if not history_scope_is_proven(scope):
         raise ValueError("history_scope_unproven")
     if (date.fromisoformat(start_date).isoformat() != start_date or date.fromisoformat(end_date).isoformat() != end_date
             or date.fromisoformat(start_date) > date.fromisoformat(end_date)):
@@ -110,13 +124,20 @@ def read_decision_history(*, base: Path, account: str, market: str, scope: dict[
             after = int(state["after"]) if state else 0
             where = "account=? AND market=? AND market_date>=? AND market_date<=? AND id<=?"
             params: list[Any] = [account, market, start_date, end_date, ceiling]
+            # One scope validator owns both API admission and historical gap detection.
+            conn.create_function("history_scope_proven", 1,
+                                 lambda raw: int(history_scope_is_proven(json.loads(raw))), deterministic=True)
             unknown = conn.execute("SELECT COUNT(*) FROM decisions WHERE " + where +
-                " AND (json_extract(scope_json,'$.futu_account_id') IS NULL OR json_extract(scope_json,'$.futu_account_id')=''"
-                " OR COALESCE(json_extract(scope_json,'$.trade_env'),'') NOT IN ('REAL','SIMULATE'))", params).fetchone()[0]
+                " AND history_scope_proven(scope_json)=0", params).fetchone()[0]
             if unknown:
                 result["missing"].append({"reason": "historical_scope_unproven", "count": unknown})
-            where += " AND json_extract(scope_json,'$.futu_account_id')=? AND json_extract(scope_json,'$.trade_env')=?"
-            params.extend([scope["futu_account_id"], scope["trade_env"]])
+            if scope.get("broker_id") == "longbridge":
+                where += " AND scope_hash=?"
+                params.append(content_hash(scope))
+            else:
+                where += (" AND COALESCE(json_extract(scope_json,'$.broker_id'),'futu')='futu'"
+                          " AND json_extract(scope_json,'$.futu_account_id')=? AND json_extract(scope_json,'$.trade_env')=?")
+                params.extend([scope["futu_account_id"], scope["trade_env"]])
             if symbol:
                 where += " AND EXISTS(SELECT 1 FROM json_tree(decisions.payload_json) WHERE key='symbol' AND upper(value)=?)"
                 params.append(symbol)

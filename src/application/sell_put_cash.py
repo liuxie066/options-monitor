@@ -21,6 +21,7 @@ from domain.domain.cash_secured_utils import (
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.trade_contract_identity import require_option_multiplier
 from domain.domain import strategy_core
+from domain.domain.risk_capacity import broker_capacity_binding
 from src.infrastructure.exchange_rates import CurrencyConverter
 from src.application.portfolio_context_service import cash_snapshot_is_usable
 from src.application.cash_totals import sum_by_currency_to_cny
@@ -387,7 +388,14 @@ def enrich_sell_put_candidates_with_cash(
         if isinstance(portfolio_ctx, dict)
         else pd.NA
     )
-    df_sp_lab['futu_account_id'] = capacity_authority.get("futu_account_id", pd.NA)
+    binding = broker_capacity_binding(portfolio_ctx)
+    # Keep the legacy Futu column only for its own provider, never alias another broker.
+    if binding.get("broker_id") == "longbridge":
+        df_sp_lab['broker_id'] = binding["broker_id"]
+        df_sp_lab['broker_account_id'] = binding["broker_account_id"]
+        df_sp_lab = df_sp_lab.drop(columns=["futu_account_id"], errors="ignore")
+    else:
+        df_sp_lab['futu_account_id'] = capacity_authority.get("futu_account_id", pd.NA)
     df_sp_lab['capacity_trd_env'] = capacity_authority.get("trd_env", pd.NA)
     df_sp_lab['capacity_market'] = capacity_authority.get("market", pd.NA)
     df_sp_lab['capacity_source_observed_at'] = portfolio_ctx.get("cash_source_observed_at", pd.NA) if isinstance(portfolio_ctx, dict) else pd.NA

@@ -60,6 +60,8 @@ from src.application.close_advice_required_data import (
     resolve_bound_close_advice_required_data_plan_snapshot,
 )
 from src.application.source_receipts import sha256_bytes
+from src.application.market_data_provider import resolve_market_data_provider
+from src.application.required_data_snapshot import assert_required_data_source
 from src.application.required_data_snapshot import (
     FrozenRequiredDataBatch,
     FrozenRequiredDataUnavailable,
@@ -1018,6 +1020,7 @@ def _validate_frozen_symbols(
     batch: FrozenRequiredDataBatch,
     symbols: set[str],
     expected_manifest_sha256: str,
+    expected_source: str = "opend",
 ) -> tuple[
     dict[str, dict[str, Any]],
     dict[str, str],
@@ -1032,6 +1035,7 @@ def _validate_frozen_symbols(
                 symbol_provenance,
                 symbol_csv_bytes,
             ) = batch.resolve(symbol)
+            assert_required_data_source(symbol_provenance, expected_source=expected_source, symbol=symbol)
             if (
                 str(symbol_provenance.get("manifest_sha256") or "")
                 != expected_manifest_sha256
@@ -1207,6 +1211,9 @@ def run_close_advice(
         if bound_plan is None:
             raise CloseAdviceRequiredDataPlanError("close-advice required-data plan is unavailable")
         frozen_plan, frozen_plan_path, frozen_plan_bytes = bound_plan
+        selected_source = resolve_market_data_provider(config).name
+        if frozen_plan.get("market_data_provider", "opend") != selected_source:
+            raise CloseAdviceRequiredDataPlanError("close-advice market-data provider changed")
         frozen_plan_sha256 = sha256_bytes(frozen_plan_bytes)
         market_dates = {
             market: date.fromisoformat(frozen_plan["as_of_market_dates"][market]) for market in ("US", "HK")
@@ -1287,6 +1294,7 @@ def run_close_advice(
             batch=frozen_required_data_batch,
             symbols=symbols_to_validate,
             expected_manifest_sha256=str(frozen_manifest_sha256),
+            expected_source=selected_source,
         )
         quotes = _load_frozen_required_data_quotes(
             csv_bytes_by_symbol=frozen_csv_bytes_by_symbol,
@@ -1514,6 +1522,7 @@ def run_close_advice(
             batch=revalidated_batch,
             symbols=symbols_to_validate,
             expected_manifest_sha256=str(frozen_manifest_sha256),
+            expected_source=selected_source,
         )
         if unavailable_now != frozen_symbol_unavailable:
             raise RequiredDataSnapshotError("required-data symbol authority changed during Close Advice")

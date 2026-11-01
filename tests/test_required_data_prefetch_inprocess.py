@@ -685,11 +685,13 @@ def test_prefetch_fetches_earnings_once_per_market_for_shared_symbols(
         "build_ready_futu_quote_gateway",
         build_earnings_gateway,
     )
+    from src.application.market_data_provider import provider_by_name, prefetch_market_earnings_calendars
     monkeypatch.setattr(
-        mod,
-        "prefetch_market_earnings_calendars",
+        provider_by_name("opend"),
+        "prefetch_earnings_calendars",
         earnings_mod.prefetch_market_earnings_calendars,
     )
+    monkeypatch.setattr(mod, "prefetch_market_earnings_calendars", prefetch_market_earnings_calendars)
     _patch_success_finalizer(monkeypatch)
     monkeypatch.setattr(
         mod,

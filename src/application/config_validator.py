@@ -23,6 +23,7 @@ from src.application.account_config import (
     normalize_account_label,
     normalize_accounts,
     parse_lossless_integer,
+    normalize_longbridge_account_settings,
 )
 from src.application.config_sections import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
 from src.application.llm_provider_registry import resolve_output_reservation, supported_llm_providers
@@ -1112,6 +1113,12 @@ def validate_config(cfg: dict):
         die('ai_decision_advice is retired and must be removed')
 
     portfolio = cfg.get('portfolio')
+    market_data = cfg.get('market_data', {})
+    if not isinstance(market_data, dict):
+        die('market_data must be an object')
+    _reject_unknown_keys(market_data, {'provider'}, 'market_data')
+    if market_data.get('provider', 'opend') != 'opend':
+        die('market_data.provider currently supports opend only')
     if isinstance(portfolio, dict):
         if 'source_by_account' in portfolio:
             die('portfolio.source_by_account is retired')
@@ -1446,6 +1453,15 @@ def validate_config(cfg: dict):
                 die(f'account_settings.{account}.trade_intake_enabled must be a boolean')
             if 'holdings_account' in raw_value:
                 die(f'account_settings.{account}.holdings_account is retired')
+            if acct_type == 'longbridge':
+                if raw_value.get('trade_intake_enabled') is True:
+                    die(f'account_settings.{account}.trade_intake_enabled is unsupported for longbridge')
+                if 'futu' in raw_value:
+                    die(f'account_settings.{account}.futu is invalid for longbridge')
+                try:
+                    normalize_longbridge_account_settings(raw_value.get('longbridge'))
+                except ValueError as exc:
+                    die(f'account_settings.{account}: {exc}')
             if acct_type == 'futu':
                 futu_cfg = raw_value.get('futu')
                 if not isinstance(futu_cfg, dict):

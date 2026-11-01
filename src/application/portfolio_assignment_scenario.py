@@ -21,6 +21,8 @@ from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.symbol_identity import canonical_symbol
 from domain.domain.expiration_dates import MARKET_TIMEZONES
 from domain.domain.option_position_identity import normalize_broker, normalize_currency
+from domain.domain.risk_capacity import broker_capacity_binding
+from src.application.account_config import resolve_account_type
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.required_data_snapshot import FrozenRequiredDataBatch, FrozenRequiredDataUnavailable
 from src.application.opening_quote_evidence import normalize_underlier_observation, OPENING_UNDERLIER_OBSERVATION_SCHEMA
@@ -43,11 +45,16 @@ from src.infrastructure.portfolio_management_client import (
 from src.application.payload_helpers import parse_utc as _iso_datetime
 from src.application.portfolio_context_service import load_account_portfolio_context, cash_snapshot_is_usable, portfolio_position_snapshot_errors
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context, infer_futu_portfolio_settings
-from src.application.futu_quote_routing import resolve_futu_quote_route
+from src.application.market_data_provider import (
+    resolve_market_data_provider,
+    resolve_quote_route as resolve_futu_quote_route,
+    open_quote_gateway as build_ready_futu_quote_gateway,
+    get_underlier_observations as get_underlier_observations_opend,
+    get_trading_days_with_receipt,
+)
 from src.application.opend_fetch_config import DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT, resolve_opend_fetch_limits
-from src.application.opend_market_snapshot_fetching import get_underlier_observations_opend, trading_calendar_dates
+from src.application.opend_market_snapshot_fetching import trading_calendar_dates
 from src.application.opend_utils import normalize_underlier
-from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
 from src.infrastructure.exchange_rates import (
     current_exchange_rate_snapshot,
     exchange_rate_observation_status,
@@ -185,7 +192,11 @@ def _snapshot_payload(
     pm_observed_at = portfolio_evidence.get("pm_observed_at")
     pm_time = _iso_datetime(pm_observed_at)
     options_time = _iso_datetime(options_observed_at)
+    broker_observed_at = portfolio_evidence.get("broker_observed_at_by_account") or {}
     futu_observed_at = portfolio_evidence.get("futu_observed_at_by_account") or {}
+    broker_metadata = ({"broker_observed_at_by_account": broker_observed_at,
+                        "direct_broker_bindings": portfolio_evidence.get("direct_broker_bindings")}
+                       if broker_observed_at else {})
     quote_observed_at = {
         canonical_symbol(row.get("code")): row.get("observed_at")
         for row in portfolio_evidence.get("quotes") or []
@@ -194,6 +205,7 @@ def _snapshot_payload(
     source_times = [value for value in (portfolio_time, pm_time, options_time) if value is not None]
     if isinstance(futu_observed_at, Mapping):
         source_times.extend(value for raw in futu_observed_at.values() if (value := _iso_datetime(raw)) is not None)
+    source_times.extend(value for raw in broker_observed_at.values() if (value := _iso_datetime(raw)) is not None)
     source_times.extend(value for raw in quote_observed_at.values() if (value := _iso_datetime(raw)) is not None)
     max_skew = (max(source_times) - min(source_times)).total_seconds() if len(source_times) >= 2 else None
     option_identity = [
@@ -221,6 +233,7 @@ def _snapshot_payload(
                 "pm_snapshot_id": portfolio_evidence.get("pm_snapshot_id"),
                 "pm_observed_at": pm_observed_at,
                 "futu_observed_at_by_account": futu_observed_at,
+                **broker_metadata,
                 "quote_observed_at_by_code": quote_observed_at,
                 "fx_observation": portfolio_evidence.get("fx_observation"),
                 "options_observed_at": options_observed_at,
@@ -240,6 +253,7 @@ def _snapshot_payload(
         "pm_observed_at": pm_observed_at,
         "portfolio_observed_at": portfolio_observed_at,
         "futu_observed_at_by_account": futu_observed_at,
+        **broker_metadata,
         "quote_observed_at_by_code": quote_observed_at,
         "fx_observation": portfolio_evidence.get("fx_observation"),
         "holdings_sources": portfolio_evidence.get("holdings_sources") or [],
@@ -298,12 +312,17 @@ def _read_futu_quotes(
     contexts: Mapping[str, Mapping[str, Any]],
     fx_observation: Mapping[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Read one OpenD price per Futu symbol using the scenario FX observation."""
+    """Read market prices for Futu symbols using the scenario FX observation."""
 
     if not codes:
         return [], []
+    provider = resolve_market_data_provider(runtime_config)
+    # Keep the default module patchpoints' original call signatures.
+    provider_kwargs = {} if provider.name == "opend" else {"market_data_provider": provider.name}
     route = resolve_futu_quote_route(runtime_config)
     if route.status == "missing":
+        if provider.name != "opend":
+            return [], [f"{provider.name} quote route unavailable"]
         endpoints = {
             (str(settings.get("host") or "").strip(), str(settings.get("port") or "").strip())
             for account in contexts
@@ -339,7 +358,7 @@ def _read_futu_quotes(
     closed_market_calendars = {}
     try:
         gateway = build_ready_futu_quote_gateway(
-            host=str(host), port=int(port), is_option_chain_cache_enabled=False
+            host=str(host), port=int(port), is_option_chain_cache_enabled=False, **provider_kwargs
         )
         for market in {item.market for item in underliers.values()}:
             market_codes = [item.code for item in underliers.values() if item.market == market]
@@ -351,6 +370,7 @@ def _read_futu_quotes(
                     base_dir=repo_base(),
                     snapshot_limit=resolve_opend_fetch_limits(dict(runtime_config)).market_snapshot,
                     snapshot_batch_size=DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT,
+                    **provider_kwargs,
                 )
             )
             if any(observed.market == market and observed.status == "market_closed"
@@ -361,8 +381,8 @@ def _read_futu_quotes(
                 end = local_now.date()
                 start = end - timedelta(days=7)
                 try:
-                    receipt = gateway.get_trading_days_with_receipt(
-                        market=market, start=start.isoformat(), end=end.isoformat())
+                    receipt = get_trading_days_with_receipt(
+                        gateway, market=market, start=start.isoformat(), end=end.isoformat(), **provider_kwargs)
                     dates = trading_calendar_dates(receipt, start=start, end=end)
                     completed = [day for day in dates if day < end.isoformat()
                                  or local_now.time() >= time(9, 30)]
@@ -422,6 +442,7 @@ def _read_futu_quotes(
         quotes.append(_valuation_quote(
             code, underlier.currency, price, rate, observed_at, underlier.market,
             is_stale=is_stale, calendar=calendar if closure_verified else None,
+            source="futu_opend_market_snapshot" if provider.name == "opend" else f"{provider.name}_market_snapshot",
         ))
     return quotes, warnings
 
@@ -430,14 +451,15 @@ def _dated_quote_warning(code: str, observed_at: str) -> str:
     return f"{code}: Futu quote is dated ({observed_at})"
 
 
-def _valuation_quote(code, currency, price, rate, observed_at, market, *, is_stale=False, calendar=None):
+def _valuation_quote(code, currency, price, rate, observed_at, market, *, is_stale=False, calendar=None,
+                     source="futu_opend_market_snapshot"):
     return {
         "code": code,
         "currency": currency,
         "price_native": str(price),
         "price_cny": str(price * rate) if rate is not None else None,
         "exchange_rate_to_cny": str(rate) if rate is not None else None,
-        "source": "futu_opend_market_snapshot",
+        "source": source,
         "observed_at": observed_at,
         "is_stale": is_stale,
         "market": market,
@@ -477,15 +499,17 @@ def recover_position_sizing_quotes(
     if not run_id or quotes.manifest.get("run_id") != run_id or not quotes.require_fresh:
         return context
     now = datetime.now(timezone.utc)
-    if _futu_context_error(account, context, now_utc=now):
+    if _broker_context_error(account, context, now_utc=now):
         return context
+    provider = resolve_market_data_provider(runtime_config)
+    quote_source = "futu_opend_market_snapshot" if provider.name == "opend" else f"{provider.name}_market_snapshot"
     route = resolve_futu_quote_route(runtime_config)
     if not route.ok:
         return context
     replacements = {}
     refs = {}
     for old in stale:
-        if old.get("source") != "futu_opend_market_snapshot":
+        if old.get("source") != quote_source:
             return context
         code = old["code"]
         try:
@@ -494,7 +518,7 @@ def recover_position_sizing_quotes(
             return context
         contract = entry["expected_fetch_contract"]
         binding = contract.get("fetch_binding") or {}
-        if (binding.get("source"), binding.get("host"), binding.get("port")) != ("opend", route.host, route.port):
+        if (binding.get("source"), binding.get("host"), binding.get("port")) != (provider.name, route.host, route.port):
             return context
         raw = contract.get("fetch_plan", {}).get("underlier_observation") or {}
         underlier = normalize_underlier(code, base_dir=repo_base())
@@ -532,10 +556,11 @@ def recover_position_sizing_quotes(
             rate,
             observed.observed_at_utc,
             underlier.market,
+            source=quote_source,
         )
         refs[code] = {key: entry[key] for key in ("snapshot_id", "receipt_relpath", "receipt_hash", "payload_sha256")}
     for quote in evidence["quotes"]:
-        if quote["code"] in replacements or quote.get("source") != "futu_opend_market_snapshot":
+        if quote["code"] in replacements or quote.get("source") != quote_source:
             continue
         observed_at = _iso_datetime(quote.get("observed_at"))
         if quote.get("valuation_quality") != "closed_market_carried" and (
@@ -543,7 +568,7 @@ def recover_position_sizing_quotes(
         ):
             return context
     updated_quotes = [replacements.get(q["code"], q) for q in evidence["quotes"]]
-    holdings, issues = _futu_holdings(account, context, {q["code"]: q for q in updated_quotes}, now_utc=now)
+    holdings, issues = _broker_holdings(account, context, {q["code"]: q for q in updated_quotes}, now_utc=now)
     if issues:
         return context
     proof = {
@@ -554,12 +579,16 @@ def recover_position_sizing_quotes(
         "quotes": list(replacements.values()),
         "source_receipts": refs,
     }
+    direct_key = (account, normalize_broker(broker_capacity_binding(context).get("broker_id")))
     recovered = {
         **evidence,
         "status": "complete",
         "warnings": [],
         "quotes": updated_quotes,
-        "holdings": holdings + [h for h in evidence["holdings"] if normalize_broker(h.get("broker")) != "富途"],
+        "holdings": holdings + [
+            h for h in evidence["holdings"]
+            if (str(h.get("account") or "").strip().lower(), normalize_broker(h.get("broker"))) != direct_key
+        ],
         "freshness": {**freshness, "status": "fresh", "trust_status": "trusted", "reason_codes": []},
         "snapshot": {**evidence["snapshot"], "snapshot_id": f"sizing-{canonical_sha256(proof)}"},
         "quote_recovery": proof,
@@ -567,12 +596,14 @@ def recover_position_sizing_quotes(
     return {**context, "position_sizing_evidence": recovered}
 
 
-def _futu_evidence(
+def _broker_evidence(
     accounts: Sequence[str],
     contexts: Mapping[str, Mapping[str, Any]],
     *,
     now_utc: datetime | None = None,
 ) -> dict[str, Any]:
+    sources = sorted({broker_capacity_binding(context).get("broker_id", "unknown") for context in contexts.values()})
+    source = sources[0] if len(sources) == 1 else "broker"
     observed = {
         account: (context.get("position_snapshot_input") or {}).get("observed_at_utc")
         for account, context in contexts.items()
@@ -580,7 +611,7 @@ def _futu_evidence(
     now = now_utc or datetime.now(timezone.utc)
     errors = {
         account: portfolio_position_snapshot_errors(context, account=account, now_utc=now)
-        + ([] if cash_snapshot_is_usable(context) else ["FUTU_CASH_SNAPSHOT_UNAVAILABLE"])
+        + ([] if cash_snapshot_is_usable(context) else ["FUTU_CASH_SNAPSHOT_UNAVAILABLE" if context.get("portfolio_source_name") == "futu" else "BROKER_CASH_SNAPSHOT_UNAVAILABLE"])
         for account, context in contexts.items()
     }
     invalid_accounts = sorted(account for account, reasons in errors.items() if reasons)
@@ -600,12 +631,13 @@ def _futu_evidence(
             "status": "unknown" if invalid_accounts else "fresh",
             "trust_status": "partial" if invalid_accounts else "trusted",
             "observed_at_utc": observed_at,
-            "dataset_ids": ["futu.positions", "futu.cash", "futu.market_snapshot"],
+            "dataset_ids": (["futu.positions", "futu.cash", "futu.market_snapshot"] if sources == ["futu"] else
+                            [f"{provider}.{kind}" for provider in sources for kind in ("positions", "cash")] + ["shared.market_quotes"]),
             "reason_codes": sorted({reason for reasons in errors.values() for reason in reasons}),
         },
         "retrieved_at_utc": now.isoformat(),
         "scope": {"accounts": list(accounts), "reporting_currency": "CNY"},
-        "snapshot": {"snapshot_id": f"futu-{snapshot_id}", "observed_at": observed_at},
+        "snapshot": {"snapshot_id": f"{source}-{snapshot_id}", "observed_at": observed_at},
         "holdings": [],
         "quotes": [],
         "account_status": [
@@ -613,67 +645,102 @@ def _futu_evidence(
             for account in accounts
         ],
         "warnings": [
-            f"{account}: Futu portfolio evidence unavailable ({', '.join(errors[account])})"
+            f"{account}: {'Futu' if contexts[account].get('portfolio_source_name') == 'futu' else broker_capacity_binding(contexts[account]).get('broker_id', 'unknown')} portfolio evidence unavailable ({', '.join(errors[account])})"
             for account in invalid_accounts
         ],
     }
 
 
-def _futu_context_error(
+def _broker_context_error(
     account: str, context: Mapping[str, Any], *, now_utc: datetime | None = None,
 ) -> str | None:
+    binding = broker_capacity_binding(context)
+    if not binding or binding.get("status") != "available":
+        return f"{account}: broker capacity authority unavailable"
+    source = "Futu" if binding["broker_id"] == "futu" else binding["broker_id"]
     cash = context.get("cash_by_currency")
     snapshot = context.get("position_snapshot_input")
     if not isinstance(cash, Mapping) or not isinstance(snapshot, Mapping) or not isinstance(snapshot.get("rows"), list):
-        return f"{account}: Futu cash or stock snapshot is missing"
+        return f"{account}: {source} cash or stock snapshot is missing"
     if not cash_snapshot_is_usable(context):
-        return f"{account}: Futu cash snapshot is incomplete"
+        return f"{account}: {source} cash snapshot is incomplete"
     errors = portfolio_position_snapshot_errors(
         context, account=account, now_utc=now_utc or datetime.now(timezone.utc),
     )
     if errors:
-        return f"{account}: Futu stock snapshot unavailable ({', '.join(errors)})"
+        return f"{account}: {source} stock snapshot unavailable ({', '.join(errors)})"
     return None
 
 
-def _futu_holdings(
-    account: str,
-    context: Mapping[str, Any],
-    quotes: Mapping[str, Mapping[str, Any]],
-    *, now_utc: datetime | None = None,
+def _broker_cash_holdings(
+    account: str, context: Mapping[str, Any], *, for_capacity: bool = False,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    if issue := _futu_context_error(account, context, now_utc=now_utc):
-        raise ValueError(issue)
+    source = broker_capacity_binding(context)["broker_id"]
+    broker = normalize_broker(source)
+    label = "Futu" if source == "futu" else source
     cash = context["cash_by_currency"]
-    snapshot = context["position_snapshot_input"]
     rows: list[dict[str, Any]] = []
     warnings: list[str] = []
     fx = context.get("exchange_rates")
     rates = fx.get("rates") if isinstance(fx, Mapping) else None
+    valuation_missing = False
+    cash_source = "futu_cash_including_mmf" if source == "futu" else "longbridge_available_cash"
+    if source == "longbridge" and not for_capacity:
+        fact = context.get("cash_valuation")
+        if (isinstance(fact, Mapping) and fact.get("status") == "available"
+                and fact.get("source") == "longbridge.account_balance.total_cash"
+                and fact.get("scope") == "physical_account_aggregate"
+                and fact.get("additive_with_cash_by_currency") is False
+                and fact.get("errors") == [] and _amount(fact.get("amount")) is not None
+                and normalize_currency(fact.get("currency"))
+                and fact.get("source_observed_at") == context.get("cash_source_observed_at")
+                and fact.get("source_observed_at")):
+            cash = {fact["currency"]: fact["amount"]}
+            cash_source = fact["source"]
+        else:
+            valuation_missing = True
+            warnings.append(f"{account}: Longbridge total cash assets are unverified; available cash supports conservative coverage only")
     for currency, raw_amount in cash.items():
         code = normalize_currency(currency)
         amount = _amount(raw_amount)
         if not code or amount is None:
-            raise ValueError(f"{account}: Futu cash row has invalid currency or amount")
+            raise ValueError(f"{account}: {label} cash row has invalid currency or amount")
         rate = Decimal(1) if code == "CNY" else _amount(rates.get(f"{code}CNY") if isinstance(rates, Mapping) else None)
         if rate is None or rate <= 0:
-            warnings.append(f"{account}/{code}: Futu cash FX evidence missing")
+            warnings.append(f"{account}/{code}: {label} cash FX evidence missing")
             rate = None
         rows.append(
             {
                 "account": account,
-                "broker": "富途",
+                "broker": broker,
                 "code": f"{code}-CASH",
                 "asset_type": "cash",
                 "currency": code,
                 "quantity": str(amount),
                 "market_value_cny": str(amount * rate) if rate is not None else None,
-                "source": "futu_cash_including_mmf",
+                "source": cash_source,
+                **({"asset_balance_status": "unavailable"} if valuation_missing else {}),
             }
         )
+    return rows, warnings
+
+
+def _broker_holdings(
+    account: str,
+    context: Mapping[str, Any],
+    quotes: Mapping[str, Mapping[str, Any]],
+    *, now_utc: datetime | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    if issue := _broker_context_error(account, context, now_utc=now_utc):
+        raise ValueError(issue)
+    source = broker_capacity_binding(context)["broker_id"]
+    broker = normalize_broker(source)
+    label = "Futu" if source == "futu" else source
+    snapshot = context["position_snapshot_input"]
+    rows, warnings = _broker_cash_holdings(account, context)
     for position in snapshot["rows"]:
         if not isinstance(position, Mapping) or not isinstance(position.get("instrument_ref"), Mapping):
-            raise ValueError(f"{account}: Futu position snapshot row is invalid")
+            raise ValueError(f"{account}: {label} position snapshot row is invalid")
         instrument = position["instrument_ref"]
         if instrument.get("asset_type") != "stock":
             continue
@@ -681,7 +748,7 @@ def _futu_holdings(
         shares = _amount(position.get("quantity"))
         side = position.get("position_side")
         if not code or shares is None or shares <= 0 or side not in {"long", "short"}:
-            raise ValueError(f"{account}: Futu stock side, symbol or quantity is invalid")
+            raise ValueError(f"{account}: {label} stock side, symbol or quantity is invalid")
         if side == "short":
             shares = -shares
         currency = normalize_currency(instrument.get("currency"))
@@ -699,17 +766,23 @@ def _futu_holdings(
         rows.append(
             {
                 "account": account,
-                "broker": "富途",
+                "broker": broker,
                 "code": code,
                 "name": source_row.get("stock_name") if isinstance(source_row, Mapping) else code,
                 "asset_type": "stock",
                 "currency": currency,
                 "quantity": str(shares),
                 "market_value_cny": str(shares * price_cny) if price_cny is not None else None,
-                "source": "futu_positions",
+                "source": f"{source}_positions",
             }
         )
     return rows, warnings
+
+
+# Historical imports remain supported; the implementation is broker-neutral.
+_futu_context_error = _broker_context_error
+_futu_holdings = _broker_holdings
+_futu_evidence = _broker_evidence
 
 
 def query_portfolio_assignment_scenario(
@@ -769,10 +842,13 @@ def query_portfolio_assignment_scenario(
         capacity_fx = project_exchange_rate_snapshot(fx_snapshot, purpose="capacity")
     except Exception:
         fx_observation = None
+    provider = "futu"
     try:
         for account in normalized_accounts:
+            provider = resolve_account_type(runtime_config, account=account)
             futu_contexts[account] = load_account_portfolio_context(
-                runtime_config=runtime_config, market="富途", portfolio_source="futu",
+                runtime_config=runtime_config, market="富途" if provider == "futu" else provider,
+                portfolio_source=provider,
                 state_dir=runtime_root / "output_accounts" / account / "state",
                 log=lambda _: None, fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
                 exchange_rate_cache_path=runtime_root / "output_shared" / "state" / "rate_cache.json",
@@ -781,7 +857,7 @@ def query_portfolio_assignment_scenario(
                 exchange_rate_observation=fx_observation,
             )
     except Exception as exc:
-        futu_error = f"Futu portfolio read failed: {exc}"
+        futu_error = f"{'Futu' if provider == 'futu' else provider} portfolio read failed: {exc}"
     evidence = collect_assignment_portfolio_evidence(
         accounts=normalized_accounts, runtime_config=runtime_config, futu_contexts=futu_contexts,
         option_positions=option_positions, fx_observation=fx_observation, capacity_fx=capacity_fx,
@@ -815,22 +891,27 @@ def collect_assignment_portfolio_evidence(
     """Collect valuation once at the account preparation boundary, without cache writes."""
     normalized_accounts = normalize_assignment_accounts(accounts)
     evaluated_at = datetime.now(timezone.utc)
+    if not futu_error and set(futu_contexts) != set(normalized_accounts):
+        futu_error = "Broker portfolio account scope is incomplete"
     if not futu_error:
         for account, context in futu_contexts.items():
-            if issue := _futu_context_error(account, context, now_utc=evaluated_at):
+            if issue := _broker_context_error(account, context, now_utc=evaluated_at):
                 futu_error = issue
                 break
     codes = {
         canonical_symbol(row.get("symbol"))
         for row in option_positions
         if normalize_broker(row.get("broker")) == "富途"
+        or normalize_broker(row.get("broker")) == normalize_broker(
+            broker_capacity_binding(futu_contexts.get(str(row.get("account") or "").strip().lower(), {})).get("broker_id")
+        )
     }
     if not futu_error:
         for context in futu_contexts.values():
             snapshot = context.get("position_snapshot_input")
             if isinstance(snapshot, Mapping):
                 for row in snapshot.get("rows") or []:
-                    if isinstance(row, Mapping) and isinstance(row.get("instrument_ref"), Mapping):
+                    if isinstance(row, Mapping) and isinstance(row.get("instrument_ref"), Mapping) and row["instrument_ref"].get("asset_type") == "stock":
                         codes.add(canonical_symbol(row["instrument_ref"].get("symbol")))
     codes.update(canonical_symbol(code) for code in supplemental_codes)
     supplemental_codes = sorted(code for code in codes if code)
@@ -840,7 +921,7 @@ def collect_assignment_portfolio_evidence(
         evidence = _unavailable_evidence(
             futu_error,
             accounts=normalized_accounts,
-            reason_code="FUTU_PORTFOLIO_UNAVAILABLE",
+            reason_code="FUTU_PORTFOLIO_UNAVAILABLE" if all(context.get("portfolio_source_name") == "futu" for context in futu_contexts.values()) else "BROKER_PORTFOLIO_UNAVAILABLE",
         )
     else:
         include_pm = (
@@ -848,7 +929,7 @@ def collect_assignment_portfolio_evidence(
             and isinstance(runtime_config["portfolio"].get("holdings"), Mapping)
             and runtime_config["portfolio"]["holdings"].get("enabled") is True
         )
-        evidence = _futu_evidence(normalized_accounts, futu_contexts, now_utc=evaluated_at)
+        evidence = _broker_evidence(normalized_accounts, futu_contexts, now_utc=evaluated_at)
         observed_rates = fx_observation.get("rates") if isinstance(fx_observation, Mapping) else None
         evidence["fx_rates_to_cny"] = dict(observed_rates) if isinstance(observed_rates, Mapping) else {}
         capacity_rates = capacity_fx.get("rates") if isinstance(capacity_fx, Mapping) else None
@@ -919,29 +1000,40 @@ def collect_assignment_portfolio_evidence(
             evaluated_at = datetime.now(timezone.utc)
             for account, context in futu_contexts.items():
                 try:
-                    rows, issues = _futu_holdings(account, context, quotes, now_utc=evaluated_at)
+                    rows, issues = _broker_holdings(account, context, quotes, now_utc=evaluated_at)
                 except ValueError as exc:
                     evidence = _unavailable_evidence(
                         str(exc),
                         accounts=normalized_accounts,
-                        reason_code="FUTU_PORTFOLIO_INVALID",
+                        reason_code="FUTU_PORTFOLIO_INVALID" if context.get("portfolio_source_name") == "futu" else "BROKER_PORTFOLIO_INVALID",
                     )
                     break
                 holdings.extend(rows)
                 warnings.extend(issues)
             else:
+                direct_bindings = {account: broker_capacity_binding(context) for account, context in futu_contexts.items()}
+                direct_keys = {(account, normalize_broker(binding["broker_id"])) for account, binding in direct_bindings.items()}
+                pm_included = pm_excluded = 0
                 if include_pm and pm_status is not None:
                     for row in pm_holdings:
                         if not isinstance(row, Mapping):
                             warnings.append("PM holding row is invalid; skipped")
                             continue
+                        key = (str(row.get("account") or "").strip().lower(), normalize_broker(row.get("broker")))
+                        if key in direct_keys:
+                            pm_excluded += 1
+                            continue
+                        if not key[0] or not key[1]:
+                            warnings.append("PM holding account or broker identity is missing")
                         holdings.append(dict(row))
+                        pm_included += 1
                 evidence["holdings"] = holdings
-                evidence["holdings_sources"] = ["futu"] + (["pm_non_futu"] if include_pm and pm_status is not None else [])
+                evidence["holdings_sources"] = sorted({binding["broker_id"] for binding in direct_bindings.values()}) + (["pm_non_futu"] if include_pm and pm_status is not None else [])
                 evidence["pm_supplement"] = {
                     "enabled": include_pm,
                     "status": pm_status or ("missing" if include_pm else "disabled"),
-                    "included_rows": len(pm_holdings),
+                    "included_rows": pm_included,
+                    **({"excluded_direct_broker_rows": pm_excluded} if pm_excluded else {}),
                     "holding_counts": pm_counts,
                     "broker_inventory": pm_inventory,
                     "freshness": pm_quality,
@@ -959,7 +1051,17 @@ def collect_assignment_portfolio_evidence(
                     }
                 evidence["futu_observed_at_by_account"] = {
                     account: context.get("source_observed_at") for account, context in futu_contexts.items()
+                    if direct_bindings[account]["broker_id"] == "futu"
                 }
+                if any(binding["broker_id"] != "futu" for binding in direct_bindings.values()):
+                    evidence["direct_broker_bindings"] = direct_bindings
+                    evidence["capacity_cash_holdings"] = [
+                        row for account, context in futu_contexts.items()
+                        for row in _broker_cash_holdings(account, context, for_capacity=True)[0]
+                    ]
+                    evidence["broker_observed_at_by_account"] = {
+                        account: context.get("source_observed_at") for account, context in futu_contexts.items()
+                    }
 
     evidence["cash_snapshots"] = {account: context.get("cash_snapshot") for account, context in futu_contexts.items()}
     return evidence
@@ -995,6 +1097,8 @@ def render_assignment_scenario_text(result: Mapping[str, Any]) -> str:
         count.get("excluded_futu", 0) + count.get("excluded_unknown_broker", 0)
         for count in pm_counts.values() if isinstance(count, Mapping)
     )
+    excluded += supplement.get("excluded_direct_broker_rows", 0)
+    broker_coverage = any(source not in {"futu", "pm_non_futu"} for source in snapshot.get("holdings_sources", []))
     sizing = result.get("position_sizing") or {}
     lines = [
         "# 指派后资产分布（不含 Long Option）",
@@ -1013,11 +1117,11 @@ def render_assignment_scenario_text(result: Mapping[str, Any]) -> str:
             f"CC {summary.get('short_call_count', 0)}）"
         ),
         "",
-        "## 仅富途期权资金覆盖（跨账户、币种 CNY 经济汇总）",
+        "## 券商期权资金覆盖（跨账户、币种 CNY 经济汇总）" if broker_coverage else "## 仅富途期权资金覆盖（跨账户、币种 CNY 经济汇总）",
         "",
         *( ["- 资金能力汇率：不可用"] if cash.get("fx_status") == "unavailable" else [] ),
-        f"- 现金 + MMF：{cash.get('available_cash_and_mmf_cny') or '-'}",
-        f"- 富途 CSP 指派需求：{cash.get('gross_put_requirement_cny') or '-'}",
+        f"- {'可用现金（保守覆盖）' if broker_coverage else '现金 + MMF'}：{cash.get('available_cash_and_mmf_cny') or '-'}",
+        f"- {'券商' if broker_coverage else '富途'} CSP 指派需求：{cash.get('gross_put_requirement_cny') or '-'}",
         f"- CC 回款：{cash.get('call_assignment_inflow_cny') or '-'}",
         f"- 指派后净现金（估算）：{cash.get('ending_cash_net_estimated_cny') or '-'}",
         f"- 终局资金缺口：{cash.get('terminal_funding_gap_cny') or '-'}",

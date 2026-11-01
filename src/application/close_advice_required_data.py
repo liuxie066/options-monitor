@@ -36,6 +36,7 @@ from src.infrastructure.io_utils import atomic_write_json
 from src.application.payload_helpers import required_text
 from src.application.opend_utils import normalize_underlier
 from src.application.opend_market_snapshot_fetching import trading_calendar_dates
+from src.application.market_data_provider import resolve_market_data_provider, provider_by_name, market_data_source
 from functools import partial
 
 
@@ -79,10 +80,10 @@ def enrich_close_advice_required_data_plan(
     gateway_factory: Any = None,
 ) -> dict[str, Any]:
     """Seal independent calendar and post-prefetch market-state observations."""
-    if gateway_factory is None:
-        from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
-        gateway_factory = build_ready_futu_quote_gateway
     plan = load_close_advice_required_data_plan(path=plan_path, expected_run_id=expected_run_id)
+    provider = provider_by_name(plan.get("market_data_provider", "opend"))
+    if gateway_factory is None:
+        gateway_factory = provider.open_quote_gateway
     groups: dict[tuple[str, str, int, int], list[dict[str, Any]]] = {}
     for account in plan["accounts"].values():
         for requirement in account.get("requirements") or []:
@@ -113,8 +114,8 @@ def enrich_close_advice_required_data_plan(
         gateway = None
         try:
             gateway = gateway_factory(host=host, port=port)
-            response = gateway.get_trading_days_with_receipt(
-                market=market, start=start.isoformat(), end=end.isoformat()
+            response = provider.get_trading_days_with_receipt(
+                gateway, market=market, start=start.isoformat(), end=end.isoformat()
             )
             dates = trading_calendar_dates(response, start=start, end=end)
             calendar.update({
@@ -142,7 +143,7 @@ def enrich_close_advice_required_data_plan(
                 states_by_symbol[symbol] = None
                 try:
                     code = normalize_underlier(symbol).code
-                    state_rows = _provider_rows(gateway.get_market_state([code]))
+                    state_rows = _provider_rows(provider.get_market_state(gateway, [code]))
                     received = datetime.now(timezone.utc)
                     matching = [row for row in state_rows if str(row.get("code") or "") == code]
                     if len(matching) == 1:
@@ -167,7 +168,7 @@ def enrich_close_advice_required_data_plan(
 def enrich_close_advice_required_data_plan_bounded(
     *, plan_path: Path, expected_run_id: str, python: Path, repo_root: Path,
 ) -> str | None:
-    """Keep a stalled OpenD call from blocking the tick indefinitely."""
+    """Keep a stalled market-data call from blocking the tick indefinitely."""
     try:
         subprocess.run(
             [str(python), "-m", "src.application.close_advice_required_data", str(plan_path), expected_run_id],
@@ -380,6 +381,7 @@ def build_close_advice_required_data_plan(
 
     payload = {
         "schema_version": CLOSE_ADVICE_REQUIRED_DATA_PLAN_SCHEMA,
+        "market_data_provider": resolve_market_data_provider(base_config).name,
         "run_id": run_id_norm,
         "run_started_at_utc": _utc_iso(run_started_at_utc),
         "as_of_market_dates": {market: day.isoformat() for market, day in market_dates.items()},
@@ -423,8 +425,9 @@ def resolve_position_fetch_binding(
             port = _positive_int(fetch_cfg.get("port"))
             if not (raw_source and host and port is not None):
                 return None, "required_data_symbol_config_missing"
-            source = normalize_fetch_source(raw_source)
-            if not is_futu_fetch_source(source):
+            provider = resolve_market_data_provider(base_config).name
+            source = normalize_fetch_source(market_data_source(provider, raw_source))
+            if provider == "opend" and not is_futu_fetch_source(source):
                 return None, "required_data_symbol_source_unsupported"
             binding_payload = {
                 "source": source,

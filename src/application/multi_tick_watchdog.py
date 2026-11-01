@@ -6,6 +6,29 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import Any, Callable
 
+from src.application.account_config import build_account_portfolio_source_plan, resolve_futu_account_ids
+from src.application.futu_portfolio_context import infer_futu_portfolio_settings
+from src.application.market_data_provider import resolve_market_data_provider
+
+
+def required_opend_probes(base_cfg, accounts, *, resolve_watchlist_config, is_futu_fetch_source):
+    """Quote selection and broker authority are independent capability requirements."""
+    probes = set()
+    if resolve_market_data_provider(base_cfg).name == "opend":
+        for sym in resolve_watchlist_config(base_cfg):
+            fetch = (sym or {}).get("fetch") or {}
+            if is_futu_fetch_source(fetch.get("source")):
+                probes.add((str(fetch.get("host") or "127.0.0.1"),
+                            int(fetch.get("port") or 11111), "quote", (), "REAL"))
+    for account in accounts:
+        if build_account_portfolio_source_plan(base_cfg, account=account).primary_source != "futu":
+            continue
+        settings = infer_futu_portfolio_settings(base_cfg, account=account)
+        probes.add((str(settings.get("host") or "127.0.0.1"), int(settings.get("port") or 11111),
+                    "broker", tuple(sorted(resolve_futu_account_ids(base_cfg, account=account))),
+                    str(settings.get("trd_env") or "REAL")))
+    return sorted(probes)
+
 
 @dataclass(frozen=True)
 class MultiTickWatchdogOutcome:
@@ -42,17 +65,9 @@ def run_multi_tick_watchdog(
     runlog.safe_event("watchdog", "start")
     audit_fn("tool_call", "opend_watchdog_start", tool_name="opend_watchdog")
     try:
-        need_opend = False
-        ports = set()
-        for sym in resolve_watchlist_config(base_cfg):
-            fetch = (sym or {}).get("fetch") or {}
-            if is_futu_fetch_source(fetch.get("source")):
-                need_opend = True
-                host = fetch.get("host") or "127.0.0.1"
-                port = fetch.get("port") or 11111
-                ports.add((str(host), int(port)))
-
-        if need_opend:
+        probes = required_opend_probes(base_cfg, accounts,
+            resolve_watchlist_config=resolve_watchlist_config, is_futu_fetch_source=is_futu_fetch_source)
+        if probes:
             unhealthy = None
             wd_cfg = (base_cfg or {}).get("watchdog") or {}
             retry_enabled = bool(wd_cfg.get("retry_enabled", True))
@@ -66,8 +81,10 @@ def run_multi_tick_watchdog(
             watchdog_timeout_sec = (
                 int(retry_timeout_sec) + _BASE_WATCHDOG_TIMEOUT_SEC if retry_enabled else _BASE_WATCHDOG_TIMEOUT_SEC
             )
-            for host, port in sorted(ports):
+            for host, port, capability, account_ids, trd_env in probes:
                 try:
+                    broker_binding = ({"expected_account_ids": list(account_ids), "trd_env": trd_env}
+                                      if capability == "broker" else {})
                     wd0 = run_opend_watchdog(
                         vpy=vpy,
                         base=base,
@@ -79,7 +96,8 @@ def run_multi_tick_watchdog(
                         retry_interval_sec=retry_interval_sec,
                         retry_timeout_sec=retry_timeout_sec,
                         success_threshold=success_threshold,
-                        required_capability="quote",
+                        required_capability=capability,
+                        **broker_binding,
                     )
                     if isinstance(wd0, dict):
                         payload0 = wd0

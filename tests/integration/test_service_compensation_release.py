@@ -240,6 +240,7 @@ def test_public_upgrade_does_not_claim_rollback_of_incompatible_config(monkeypat
     monkeypatch.setattr(upgrade, "_materialize_release_from_git_cache", lambda **_: {
         "status": "reused", "target_dir": str(new)})
     monkeypatch.setattr(upgrade, "_ensure_release_runtime", lambda **_: {"status": "ready"})
+    monkeypatch.setattr(upgrade, "_installed_optional_packages", lambda **_: (False, False))
     monkeypatch.setattr(upgrade, "_run_required", lambda *_a, **_k: None)
     monkeypatch.setattr(upgrade, "_prepare_runtime_configs_for_release", lambda **_: {"status": "prepared"})
     monkeypatch.setattr(upgrade, "_commit_prepared_runtime_configs", lambda **_: commit)

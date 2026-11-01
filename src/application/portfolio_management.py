@@ -102,15 +102,26 @@ def resolve_portfolio_management_client(
         return client
     if not portfolio_management_enabled(config):
         return PORTFOLIO_MANAGEMENT_DISABLED
-    from src.infrastructure.portfolio_management_client import (
-        PortfolioManagementClient,
-    )
+    return load_portfolio_management_client_class()(urlopen_fn=urlopen_fn)
 
-    return PortfolioManagementClient(urlopen_fn=urlopen_fn)
+
+def load_portfolio_management_client_class() -> Any:
+    """Load only an explicitly installed package; never add bundled source paths."""
+    from importlib import import_module
+
+    from src.application.portfolio_management_contract import PortfolioManagementUnavailableError
+
+    try:
+        return import_module("om_pm_plugin").PortfolioManagementClient
+    except ImportError as exc:
+        raise PortfolioManagementUnavailableError(
+            "PORTFOLIO_MANAGEMENT_UNAVAILABLE: optional package om-pm-plugin "
+            "is not installed or could not be imported"
+        ) from exc
 
 
 def portfolio_management_failure_code(exc: Exception) -> str:
-    from src.infrastructure.portfolio_management_client import (
+    from src.application.portfolio_management_contract import (
         PortfolioManagementConfigError,
         PortfolioManagementHTTPError,
         PortfolioManagementProtocolError,

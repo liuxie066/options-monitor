@@ -225,6 +225,8 @@ def upgrade_instance(installed, monkeypatch, tmp_path):
         if len(command) > 2 and command[1:3] == ['service', 'drift']:
             result = drift.service_drift(repo_root=current, runtime_root=args['runtime_root'], confirm=True, run_cmd=manager)
             return subprocess.CompletedProcess(command, 0, json.dumps({'ok': True, 'tool_name': 'service.drift', 'data': result}), '')
+        if len(command) == 4 and command[:3] == [str(old / runtime_bundle.PYTHON), '-I', '-c']:
+            return subprocess.CompletedProcess(command, 0, '[false, false]', '')
         if '-I' in command:
             request = json.loads(Path(command[-1]).read_text())
             result = drift.service_drift(repo_root=current, runtime_root=args['runtime_root'],

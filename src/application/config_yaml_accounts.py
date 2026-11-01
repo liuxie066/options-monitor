@@ -163,7 +163,7 @@ def _add_account(
         if any(value is not None for value in (futu_acc_id, futu_host, futu_port, trd_env, market_label, enabled, trade_intake_enabled)):
             raise AgentToolError(code="INPUT_ERROR", message="linking an existing account to a market must preserve its mapping; use accounts edit separately")
         members.append(account)
-        return {"action": "add", "account_type": "futu", "accounts": list(members),
+        return {"action": "add", "account_type": accounts[account].get("type", ACCOUNT_TYPE_FUTU), "accounts": list(members),
                 "linked_existing_account": True, "shared_symbols": list(config_doc["markets"][market]["symbols"]),
                 "changed_paths": [f"markets.{market}.accounts[]"], **_masked_account_details(accounts[account])}
     setting = _build_account_setting(
@@ -333,6 +333,17 @@ def _build_account_setting(
         elif current is None:
             futu["trd_env"] = "REAL"
         setting["futu"] = futu
+        return setting
+
+    if account_type == "longbridge":
+        if not isinstance(existing.get("longbridge"), dict):
+            raise AgentToolError(code="INPUT_ERROR", message="Configure a Longbridge account in config.yaml before linking or editing it")
+        if any(value is not None for value in (futu_acc_id, futu_host, futu_port, trd_env)):
+            raise AgentToolError(code="INPUT_ERROR", message="Futu connection fields do not apply to Longbridge accounts")
+        if trade_intake_enabled:
+            raise AgentToolError(code="INPUT_ERROR", message="Longbridge trade intake is not supported")
+        setting["longbridge"] = deepcopy(existing["longbridge"])
+        setting["trade_intake_enabled"] = False
         return setting
 
     raise AgentToolError(code="CONFIG_ERROR", message=f"unsupported account type: {account_type}")

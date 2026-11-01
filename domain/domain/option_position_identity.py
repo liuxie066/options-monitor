@@ -68,6 +68,8 @@ def normalize_broker(value: str | None) -> str:
     }
     if compact in futu_aliases or compact.startswith("futu"):
         return "富途"
+    if compact in {"长桥", "長橋", "长桥证券", "長橋證券", "longbridge", "longport"}:
+        return "长桥"
     return raw
 
 

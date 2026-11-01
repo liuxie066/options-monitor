@@ -261,7 +261,8 @@ def test_cc_step_uses_injected_cost_floor_and_policy(frozen_scan):
     result = run_sell_call_scan_and_summarize(
         symbol="NVDA", symbol_cfg={}, cc={"strategy": "insurance_underwriting", "min_strike": 200},
         stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 80},
-        portfolio_ctx={"filters": {"account": "lx"}, "portfolio_source_name": "futu", "capacity_authority": {"status": "available"}},
+        portfolio_ctx={"filters": {"account": "lx"}, "portfolio_source_name": "futu", "capacity_authority": {"status": "available", "source": "opend", "futu_account_id": "123",
+            "logical_account": "lx", "trd_env": "REAL", "market": "us"}},
         locked_shares_status="available", locked_shares_by_symbol={}, locked_shares_unavailable_by_symbol={},
         required_data_dir=frozen_scan, required_data_frame=pd.DataFrame([_quote(strike=120)]),
         exchange_rate_converter=CONVERTER, resolved_strategy=strategy,
@@ -291,7 +292,8 @@ def test_cc_cost_policy_steps_decision_snapshot_and_restoration(frozen_scan, mul
         symbol="NVDA", symbol_cfg={},
         cc={"strategy": "insurance_underwriting", "min_strike_cost_multiplier": 9.0 if injected else multiplier},
         stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 100},
-        portfolio_ctx={"filters": {"account": "lx"}, "portfolio_source_name": "futu", "capacity_authority": {"status": "available"}},
+        portfolio_ctx={"filters": {"account": "lx"}, "portfolio_source_name": "futu", "capacity_authority": {"status": "available", "source": "opend", "futu_account_id": "123",
+            "logical_account": "lx", "trd_env": "REAL", "market": "us"}},
         locked_shares_status="available", locked_shares_by_symbol={}, locked_shares_unavailable_by_symbol={},
         required_data_dir=frozen_scan, required_data_frame=pd.DataFrame([_quote(strike=strike)]),
         exchange_rate_converter=CONVERTER, resolved_strategy=policy if injected else None,
@@ -328,7 +330,7 @@ def test_cc_cost_policy_steps_decision_snapshot_and_restoration(frozen_scan, mul
     if accepted:
         fallback, _ = _snapshot_decisions(
             {"call": finals}, statuses=[_scan_status("NVDA", "call", "completed")],
-            account="lx", market="US", futu_account_id="fixture", risk_policy_hash="a" * 64,
+            account="lx", market="US", authority={"futu_account_id": "fixture"}, risk_policy_hash="a" * 64,
             candidate_evaluations=None,
         )
         assert fallback[0]["opening_decision"]["accepted"]
@@ -391,7 +393,7 @@ def test_snapshot_scope_binds_identity_including_uppercase_market(change):
     # Scope rejection happens before policy re-evaluation or any persistent effect.
     with pytest.raises(OpeningCandidateSnapshotError):
         _snapshot_decisions({"put": [row]}, statuses=[{"symbol": "NVDA", "strategy_mode": "put"}],
-                            account="lx", market="US", futu_account_id="fixture", risk_policy_hash="a" * 64,
+                            account="lx", market="US", authority={"futu_account_id": "fixture"}, risk_policy_hash="a" * 64,
                             candidate_evaluations=None)
 
 
@@ -404,7 +406,7 @@ def test_snapshot_fallback_uses_resolved_policy_and_hashes_identity():
     row = attach_strategy_identity(_candidate(contract_symbol="NVDA-P", period_return=.005), strategy)
     records, _ = _snapshot_decisions(
         {"put": [row]}, statuses=[{"symbol": "NVDA", "strategy_mode": "put"}],
-        account="lx", market="US", futu_account_id="fixture", risk_policy_hash="a" * 64, candidate_evaluations=None,
+        account="lx", market="US", authority={"futu_account_id": "fixture"}, risk_policy_hash="a" * 64, candidate_evaluations=None,
     )
     record = records[0]
     assert record["opening_decision"]["accepted"]
@@ -493,7 +495,8 @@ def test_provider_normalization_to_scan_underwriting_and_sealed_delta(
         run_sell_call_scan_and_summarize(
             **common, cc=cfg, stock={"shares": 100, "can_sell_qty": 100, "avg_cost": 80},
             portfolio_ctx={"filters": {"account": "lx"}, "portfolio_source_name": "futu",
-                           "capacity_authority": {"status": "available"}},
+                           "capacity_authority": {"status": "available", "source": "opend", "futu_account_id": "123",
+            "logical_account": "lx", "trd_env": "REAL", "market": "us"}},
             locked_shares_status="available", locked_shares_by_symbol={}, locked_shares_unavailable_by_symbol={},
         )
     assert len(decisions) == 1

@@ -901,6 +901,17 @@ def resolve_frozen_required_data(
     return validated
 
 
+def assert_required_data_source(
+    evidence: Mapping[str, Any], *, expected_source: str, symbol: str,
+) -> None:
+    """A valid frozen receipt does not authorize reuse after a provider switch."""
+    contract = evidence.get("expected_fetch_contract") or {}
+    source = (contract.get("fetch_binding") or {}).get("source")
+    if source != normalize_fetch_source(expected_source):
+        raise FrozenRequiredDataUnavailable(symbol=symbol, reason="receipt_or_payload_mismatch",
+                                            detail="required-data provider source mismatch")
+
+
 def resolve_frozen_required_data_csv_bytes(
     *,
     manifest_path: Path,

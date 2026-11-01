@@ -26,6 +26,11 @@ def attach_trade_results(result: dict[str, Any], *, ledger_path, scope, account)
                 origins.append((row, candidate, entry))
     if not origins:
         return
+    if scope.get("broker_id", "futu") != "futu":
+        for _row, _candidate, entry in origins:
+            entry.update(status="unavailable", label="结果不可用", reason="unsupported_broker_trade_linkage")
+        result["status"] = "partial"
+        return
     try:
         snapshot = open_trade_reconciliation_evidence_repo(ledger_path).read_decision_history_evidence(account=account)
         events = snapshot["trade_events"]
