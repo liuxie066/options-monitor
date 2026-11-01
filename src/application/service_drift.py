@@ -17,13 +17,13 @@ from src.application.service_deploy import (
     DEFAULT_SECRET_CREDENTIAL_HELPER,
     DEFAULT_SECRET_CREDENTIAL_DELIVERY,
     DEFAULT_SECRET_CREDENTIAL_STORE_ROOT,
-    DEFAULT_ACCOUNTS,
-    DEFAULT_MARKETS,
-    DEFAULT_TIMEOUT_SECONDS,
     FEISHU_AGENT_CREDENTIAL_DROPIN,
     FEISHU_AGENT_CREDENTIAL_SERVICE,
     SECRET_CREDENTIAL_DROPIN,
     load_service_profile,
+    render_service_bundle_from_profile as _expected_bundle_from_profile,
+    _bundle_profile,
+    _service_names_from_profile,
     managed_systemd_unit_names,
     normalize_secret_credential_delivery,
     render_service_bundle,
@@ -71,6 +71,10 @@ def _normalize_preserved_activation_states(
     out: dict[str, dict[str, str]] = {}
     for raw_name, raw_state in raw_states.items():
         name = str(raw_name or "").strip()
+        if name.startswith("com.options-monitor.") and isinstance(raw_state, dict):
+            if raw_state.get("state") in {"absent", "running", "loaded-idle", "loaded-not-running"} and isinstance(raw_state.get("enabled"), bool):
+                out[name] = {"state": raw_state["state"], "enabled": raw_state["enabled"]}
+            continue
         if not name.endswith(".timer") or not isinstance(raw_state, dict):
             continue
         state = {
@@ -1478,192 +1482,6 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _expected_bundle_from_profile(
-    profile: dict[str, Any],
-    *,
-    provider: str,
-    repo_root: Path,
-    runtime_root: Path,
-) -> dict[str, Any]:
-    config_paths_raw = profile.get("config_paths")
-    config_paths = config_paths_raw if isinstance(config_paths_raw, dict) else {}
-    opend_raw = profile.get("opend")
-    opend = opend_raw if isinstance(opend_raw, dict) else {}
-    feishu_ws_raw = profile.get("feishu_ws")
-    feishu_ws = feishu_ws_raw if isinstance(feishu_ws_raw, dict) else {}
-    wechat_clawbot_raw = profile.get("wechat_clawbot")
-    wechat_clawbot = wechat_clawbot_raw if isinstance(wechat_clawbot_raw, dict) else {}
-    quality_monitoring_raw = profile.get("quality_monitoring")
-    quality_monitoring = quality_monitoring_raw if isinstance(quality_monitoring_raw, dict) else {}
-    feishu_agent_credential_raw = profile.get("feishu_agent_credential")
-    feishu_agent_credential = (
-        feishu_agent_credential_raw
-        if isinstance(feishu_agent_credential_raw, dict)
-        else {}
-    )
-    secret_credentials_raw = profile.get("secret_credentials")
-    secret_credentials = secret_credentials_raw if isinstance(secret_credentials_raw, dict) else {}
-    services = _service_names_from_profile(profile)
-    include_auto_upgrade = bool(
-        isinstance(profile.get("auto_upgrade"), dict)
-        and profile["auto_upgrade"].get("enabled")
-        or "options-monitor-upgrade.timer" in services
-        or "com.options-monitor.upgrade" in services
-    )
-    include_feishu_ws = bool(
-        feishu_ws.get("enabled")
-        or "options-monitor-feishu-ws.service" in services
-        or "com.options-monitor.feishu-ws" in services
-    )
-    include_wechat_clawbot = bool(
-        wechat_clawbot.get("enabled")
-        or "options-monitor-wechat-clawbot.service" in services
-        or "com.options-monitor.wechat-clawbot" in services
-    )
-    include_opend = bool(
-        opend.get("enabled")
-        or "options-monitor-opend.service" in services
-        or "com.options-monitor.opend" in services
-    )
-    include_quality_monitoring = bool(
-        quality_monitoring.get("enabled")
-        or any(name.startswith("options-monitor-quality-") for name in services)
-    )
-    include_feishu_agent_credential = bool(
-        feishu_agent_credential.get("enabled")
-        or FEISHU_AGENT_CREDENTIAL_SERVICE in services
-    )
-    include_secret_credentials = bool(secret_credentials.get("enabled"))
-    market_values = _profile_markets(profile)
-    feishu_ws_config_key = str(feishu_ws.get("config_key") or "").strip() or None
-    wechat_clawbot_config_key = str(wechat_clawbot.get("config_key") or "").strip() or None
-    wechat_clawbot_allowed_senders = str(wechat_clawbot.get("allowed_senders") or "").strip() or None
-    accounts = _profile_accounts(profile)
-    opend_root, opend_executable = _profile_opend_render_values(opend)
-    render_kwargs: dict[str, Any] = {
-        "target": provider,
-        "repo_root": repo_root,
-        "runtime_root": runtime_root,
-        "accounts": accounts,
-        "markets": market_values,
-        "config_paths": {str(key): str(value) for key, value in config_paths.items() if str(value or "").strip()},
-        "config_yaml": _profile_config_yaml(profile),
-        "env_file": profile.get("env_file"),
-        "deploy_user": profile.get("deploy_user"),
-        "deploy_home": profile.get("deploy_home"),
-        "use_default_deploy_user": False,
-        "timeout_seconds": profile.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS),
-        "include_auto_upgrade": include_auto_upgrade,
-        "include_opend": include_opend,
-        "opend_root": opend_root,
-        "opend_executable": opend_executable,
-        "include_feishu_ws": include_feishu_ws,
-        "feishu_ws_config_key": feishu_ws_config_key,
-        "include_wechat_clawbot": include_wechat_clawbot,
-        "wechat_clawbot_config_key": wechat_clawbot_config_key,
-        "wechat_clawbot_label": str(wechat_clawbot.get("label") or "default"),
-        "wechat_clawbot_allowed_senders": wechat_clawbot_allowed_senders,
-        "include_quality_monitoring": include_quality_monitoring,
-        "include_feishu_agent_credential": include_feishu_agent_credential,
-        "include_secret_credentials": include_secret_credentials,
-        "feature_aware_credentials": secret_credentials.get("binding_policy") == "enabled-consumers-v1",
-        "secret_credential_delivery": (
-            secret_credentials.get("delivery")
-            or DEFAULT_SECRET_CREDENTIAL_DELIVERY
-        ),
-        "secret_credential_store_root": (
-            secret_credentials.get("store_root")
-            or DEFAULT_SECRET_CREDENTIAL_STORE_ROOT
-        ),
-        "feishu_agent_credential_helper_path": (
-            feishu_agent_credential.get("helper_path")
-            or DEFAULT_FEISHU_AGENT_CREDENTIAL_HELPER
-        ),
-        "feishu_agent_credential_store": (
-            feishu_agent_credential.get("agent_store")
-            or DEFAULT_FEISHU_AGENT_CREDENTIAL_STORE
-        ),
-        "feishu_holdings_credential_store": (
-            feishu_agent_credential.get("holdings_store")
-            or DEFAULT_FEISHU_HOLDINGS_CREDENTIAL_STORE
-        ),
-        "feishu_agent_credential_env_file": (
-            feishu_agent_credential.get("runtime_env_file")
-            or DEFAULT_FEISHU_AGENT_CREDENTIAL_ENV_FILE
-        ),
-        "include_content": True,
-    }
-    bundle = render_service_bundle(**render_kwargs)
-    expected_profile = _bundle_profile(bundle)
-    if include_opend:
-        previous_services_raw = opend.get("services")
-        previous_services = previous_services_raw if isinstance(previous_services_raw, list) else []
-        previous_accounts = {
-            str(item.get("account") or "").strip()
-            for item in previous_services if isinstance(item, dict)
-        }
-        rendered_accounts = {
-            str(item.get("account") or "").strip()
-            for item in (expected_profile.get("opend") or {}).get("services", [])
-        }
-        missing_accounts = (previous_accounts & set(accounts)) - rendered_accounts
-        if missing_accounts:
-            raise ValueError(
-                "OpenD root is missing for previously managed accounts: "
-                + ", ".join(sorted(missing_accounts))
-            )
-    if provider == "systemd":
-        # Rendering defaults must not become persisted retirement ownership.
-        if "accounts" in profile:
-            expected_profile["accounts"] = profile["accounts"]
-        else:
-            expected_profile.pop("accounts", None)
-        for item in bundle.get("files", []):
-            if item.get("kind") == "service_profile":
-                item["content"] = json.dumps(expected_profile, ensure_ascii=False, indent=2) + "\n"
-    return bundle
-
-
-def _profile_opend_render_values(opend: dict[str, Any]) -> tuple[str | None, str | None]:
-    services_raw = opend.get("services")
-    services = [item for item in services_raw if isinstance(item, dict)] if isinstance(services_raw, list) else []
-    if not services or not any(str(item.get("account") or "").strip() for item in services):
-        root = str(opend.get("root") or "").strip() or None
-        executable = str(opend.get("executable") or "").strip() or None
-        return root, executable
-
-    relative_executables: list[str] = []
-    absolute_executables: list[str] = []
-    for item in services:
-        root_raw = str(item.get("root") or "").strip()
-        executable_raw = str(item.get("executable") or "").strip()
-        if not root_raw or not executable_raw:
-            continue
-        root_path = Path(root_raw)
-        executable_path = Path(executable_raw)
-        absolute_executables.append(executable_raw)
-        try:
-            relative_executables.append(str(executable_path.relative_to(root_path)))
-        except ValueError:
-            relative_executables.append("")
-    if relative_executables and all(relative_executables) and len(set(relative_executables)) == 1:
-        return None, relative_executables[0]
-    if absolute_executables and len(absolute_executables) == len(services) and len(set(absolute_executables)) == 1:
-        return None, absolute_executables[0]
-    return None, None
-
-
-def _bundle_profile(bundle: dict[str, Any]) -> dict[str, Any]:
-    for item in bundle.get("files", []):
-        if isinstance(item, dict) and item.get("kind") == "service_profile":
-            try:
-                payload = json.loads(str(item.get("content") or "{}"))
-            except Exception:
-                return {}
-            return payload if isinstance(payload, dict) else {}
-    return {}
-
-
 def _expected_profile_content(bundle: dict[str, Any]) -> str:
     for item in bundle.get("files", []):
         if isinstance(item, dict) and item.get("kind") == "service_profile":
@@ -1732,55 +1550,6 @@ def _service_name_for_file(item: dict[str, Any], *, provider: str) -> str:
         return Path(str(item.get("install_path") or item.get("relative_path") or "")).name
     install_path = str(item.get("install_path") or "")
     return Path(install_path).name.removesuffix(".plist")
-
-
-def _service_names_from_profile(profile: dict[str, Any]) -> list[str]:
-    services = profile.get("services")
-    raw_items = services if isinstance(services, list) else []
-    out: list[str] = []
-    for item in raw_items:
-        if isinstance(item, dict):
-            name = str(item.get("name") or item.get("label") or "").strip()
-        else:
-            name = str(item or "").strip()
-        if name and name not in out:
-            out.append(name)
-    return sorted(out)
-
-
-def _profile_accounts(profile: dict[str, Any]) -> list[str]:
-    values = profile.get("accounts")
-    if isinstance(values, list):
-        out = [str(item).strip() for item in values if str(item).strip()]
-        if out:
-            return out
-    return list(DEFAULT_ACCOUNTS)
-
-
-def _profile_markets(profile: dict[str, Any]) -> list[str]:
-    values = profile.get("markets")
-    if isinstance(values, list):
-        out = [str(item).strip().lower() for item in values if str(item).strip().lower() in {"us", "hk"}]
-        if out:
-            return sorted(set(out), key=out.index)
-    config_paths = profile.get("config_paths")
-    if isinstance(config_paths, dict):
-        out = [str(key).strip().lower() for key in config_paths if str(key).strip().lower() in {"us", "hk"}]
-        if out:
-            return sorted(set(out), key=out.index)
-    services = " ".join(_service_names_from_profile(profile))
-    inferred = [market for market in DEFAULT_MARKETS if f"-{market}" in services or f".{market}" in services]
-    return inferred or list(DEFAULT_MARKETS)
-
-
-def _profile_config_yaml(profile: dict[str, Any]) -> str | None:
-    raw_authoring = profile.get("config_authoring")
-    authoring = raw_authoring if isinstance(raw_authoring, dict) else {}
-    if str(authoring.get("source") or "").strip().lower() == "yaml":
-        config_yaml = str(authoring.get("config_yaml") or "").strip()
-        if config_yaml:
-            return config_yaml
-    return None
 
 
 def _installed_units(*, provider: str, expected_files: dict[str, dict[str, Any]], ctx: dict[str, Any]) -> list[str]:
@@ -2213,6 +1982,18 @@ def _apply_service_drift(
     run_cmd: Callable[..., Any],
 ) -> dict[str, Any]:
     provider = str(ctx["provider"])
+    if provider == "launchd":
+        from src.application.service_lifecycle import reconcile_launchd_services
+        result = reconcile_launchd_services(
+            profile=ctx["profile"], repo_root=ctx["repo_root"], runtime_root=ctx["runtime_root"],
+            run_cmd=run_cmd, confirm=True,
+            preserved_activation_states=ctx.get("preserved_activation_states") or None,
+        )
+        operations.extend(result["operations"])
+        if result["ok"]:
+            ctx["profile"] = load_service_profile(ctx["profile_path"])
+            ctx["profile_on_disk"] = dict(ctx["profile"])
+        return result
     if provider != "systemd":
         return {
             "changed": False,

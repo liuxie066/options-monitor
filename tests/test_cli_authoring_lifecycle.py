@@ -269,7 +269,7 @@ def test_interactive_setup_default_directory_explicit_identity_and_optouts(tmp_p
     target = tmp_path / "default-runtime"
     monkeypatch.setattr(setup_ops, "_default_setup_dir", lambda: target)
     prompts = []
-    answers = iter(["us", "127.0.0.2", "11112", environment, "mine", "12345", "NVDA", "csp", "100", "", "yes"])
+    answers = iter(["us", "127.0.0.2", "11112", environment, "mine", "manual", "12345", "NVDA", "csp", "100", "", "yes"])
 
     def answer(prompt: str) -> str:
         prompts.append(prompt)
@@ -289,21 +289,47 @@ def test_interactive_setup_default_directory_explicit_identity_and_optouts(tmp_p
     assert generated["account_settings"]["mine"]["futu"]["trd_env"] == environment
 
 
-@pytest.mark.parametrize("answers,error", [(["us", "", "", "", "mine", "12345"], "requires REAL or SIMULATE"),
-                                          (["us", "", "", "REAL", "mine", ""], "requires a Futu account ID")])
-def test_interactive_setup_does_not_accept_missing_identity(tmp_path: Path, answers: list[str], error: str) -> None:
+@pytest.mark.parametrize("answers,field,error,interrupt", [
+    (["us", "", "", ""], "账户环境", "trd_env must be REAL or SIMULATE", EOFError),
+    (["us", "", "", "REAL", "mine", "manual", ""], "富途账户 ID", "账户 ID 为必填数字", KeyboardInterrupt),
+])
+def test_interactive_setup_does_not_accept_missing_identity(
+    tmp_path: Path, capsys, answers: list[str], field: str, error: str, interrupt: type[BaseException],
+) -> None:
     target = tmp_path / "runtime"
+    home = tmp_path / "home"
     values = iter(answers)
-    with pytest.raises(AgentToolError, match=error):
+    prompts = []
+
+    def answer(prompt: str) -> str:
+        prompts.append(prompt)
+        try:
+            return next(values)
+        except StopIteration:
+            assert prompt.startswith(field)
+            assert prompt == prompts[-2]  # Retry the missing field, retaining earlier accepted inputs.
+            raise interrupt()
+
+    def unexpected_preview_or_write(**_kwargs):
+        pytest.fail("a draft with missing identity must not reach preview or publication")
+
+    with pytest.raises(AgentToolError, match="cancelled before preview.*未写入") as caught:
         run_setup_init(parse_args(["setup", "init", "--output-dir", str(target)]), repo_base_fn=lambda: REPO,
-                       user_home=tmp_path / "home", input_is_tty=lambda: True, input_fn=lambda _: next(values))
+                       user_home=home, input_is_tty=lambda: True, input_fn=answer,
+                       init_config_fn=unexpected_preview_or_write, create_config_fn=unexpected_preview_or_write)
+    assert caught.value.code == "INPUT_ERROR"
+    assert error in capsys.readouterr().out
+    assert len(prompts) == len(answers) + 1
+    assert sum(prompt.startswith(field) for prompt in prompts) == 2
     assert not target.exists()
+    assert not home.exists()  # No runtime-root record or other user configuration was published.
+    assert not list(tmp_path.iterdir())
 
 
-@pytest.mark.parametrize("cancel_at", range(11))
+@pytest.mark.parametrize("cancel_at", range(12))
 def test_first_install_cancel_before_confirmation_never_publishes(tmp_path: Path, cancel_at: int) -> None:
     target = tmp_path / "runtime"
-    answers = ["us", "", "", "REAL", "lx", "12345", "NVDA", "csp", "100", "", "yes"]
+    answers = ["us", "", "", "REAL", "lx", "manual", "12345", "NVDA", "csp", "100", "", "yes"]
     index = 0
 
     def answer(_prompt: str) -> str:
@@ -315,7 +341,7 @@ def test_first_install_cancel_before_confirmation_never_publishes(tmp_path: Path
         return value
 
     args = parse_args(["setup", "init", "--output-dir", str(target)])
-    if cancel_at == 10:
+    if cancel_at == 11:
         output, applied = run_setup_init(args, repo_base_fn=lambda: REPO, user_home=tmp_path / "home",
                                          input_is_tty=lambda: True, input_fn=answer)
         assert not applied and "已取消" in output

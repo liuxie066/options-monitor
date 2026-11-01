@@ -18,6 +18,7 @@ import shlex
 import stat
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -26,8 +27,11 @@ from src.application.config_primitives import configured_markets
 from src.application.config_yaml import load_yaml_config_file, resolve_yaml_bot_config
 from src.application.runtime_config_freshness import check_runtime_config_freshness, check_runtime_config_identity
 from src.application.secret_store import credential_spec
-from src.application.service_deploy import load_service_profile, render_service_bundle
-from src.application.service_drift import _expected_bundle_from_profile
+from src.application.service_deploy import (
+    load_service_profile,
+    render_service_bundle,
+    render_service_bundle_from_profile as _expected_bundle_from_profile,
+)
 from src.application.write_contract import attach_write_contract
 
 _SERVICE_NAME = re.compile(r"options-monitor-[a-z0-9][a-z0-9.-]*\.(service|timer)\Z")
@@ -265,7 +269,7 @@ def _run(command: list[str], run_cmd: Callable[..., Any], *, mutation: bool = Fa
                 "error": type(exc).__name__}
 
 
-def _query(name: str, *, target: str, uid: int, content: str, run_cmd: Callable[..., Any]) -> dict[str, Any]:
+def _query(name: str, *, target: str, uid: int, content: str, run_cmd: Callable[..., Any], include_program: bool = False) -> dict[str, Any]:
     if target == "systemd":
         result = _run(["systemctl", "show", name, "--property=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,Environment", "--no-pager"], run_cmd)
         values = dict(line.split("=", 1) for line in result.get("stdout", "").splitlines() if "=" in line)
@@ -299,9 +303,12 @@ def _query(name: str, *, target: str, uid: int, content: str, run_cmd: Callable[
     is_disabled = bool(re.search(r'"' + re.escape(name) + r'"\s*=>\s*true', disabled.get("stdout", "")))
     path_match = re.search(r"(?m)^\s*path = (.+)$", result.get("stdout", ""))
     runtime_match = re.search(r"(?m)^\s*OM_RUNTIME_ROOT => (.+)$", result.get("stdout", ""))
+    program_match = re.search(r"(?m)^\s*program = (.+)$", result.get("stdout", ""))
     return {"name": name, "state": state, "enabled": not is_disabled if disabled["ok"] else None,
             "definition_path": path_match.group(1).strip() if path_match else None,
             "runtime_root": runtime_match.group(1).strip() if runtime_match else None,
+            **({"program": program_match.group(1).strip() if program_match else None,
+                "pid": int(running.group(0).split("=")[1]) if result["ok"] and running else None} if include_program else {}),
             "probe": {key: value for key, value in result.items() if key not in {"stdout", "stderr"}}}
 
 
@@ -777,3 +784,168 @@ def service_lifecycle(
     finally:
         os.close(descriptor)
     return attach_write_contract(out, dry_run=False, write_applied=out["changed"], rollback_hint="Use the reported backups only after a fresh preview; re-read service state before retrying.")
+
+
+def launchd_upgrade_state(
+    *, profile: dict[str, Any], repo_root: Path, runtime_root: Path,
+    run_cmd: Callable[..., Any],
+) -> dict[str, Any]:
+    """Read the existing instance before a release switch or launchd reload."""
+    if platform.system() != "Darwin" or profile.get("service_provider") != "launchd":
+        _error("SERVICE_PLATFORM_UNSUPPORTED", "launchd upgrade requires macOS")
+    user = _identity("launchd", profile.get("deploy_user"), os.geteuid())
+    repo, runtime = Path(os.path.abspath(repo_root)), Path(runtime_root).absolute()
+    _same_scope(profile, runtime=runtime, repo=repo, target="launchd")
+    if Path(profile.get("deploy_home") or user.pw_dir) != Path(user.pw_dir):
+        _error("SERVICE_IDENTITY_MISMATCH", "launchd home must belong to the current user")
+    _owned_instance(runtime, runtime / "config.yaml", user, None, source_required=False)
+    root = Path(user.pw_dir) / "Library" / "LaunchAgents"
+    _no_links(root)
+    if root.exists() and (root.stat().st_uid != user.pw_uid or root.stat().st_mode & 0o022):
+        _error("SERVICE_IDENTITY_MISMATCH", "LaunchAgents directory must belong to the current user")
+    bundle = _expected_bundle_from_profile(profile, provider="launchd", repo_root=repo, runtime_root=runtime)
+    files = _managed_files(bundle, target="launchd", unit_root=root, runtime=runtime, repo=repo)
+    desired = _units(files, "launchd")
+    desired_names = {item["name"] for item in desired}
+    old_names = {str(item.get("name") if isinstance(item, dict) else item) for item in profile.get("services", [])}
+    persisted = load_service_profile(runtime / "service.profile.json") or {}
+    _same_scope(persisted, runtime=runtime, repo=repo, target="launchd")
+    old_names.update(str(item.get("name") if isinstance(item, dict) else item) for item in persisted.get("services", []))
+    # Inspect retired definitions too: they must not leave workers from the old release.
+    retired = []
+    for name in sorted(old_names - desired_names):
+        if not _LAUNCH_LABEL.fullmatch(name):
+            _error("SERVICE_PATH_UNSAFE", "invalid recorded launchd label", name=name)
+        path = root / (name + ".plist")
+        fact = _file_fact(path)
+        if not fact["exists"]:
+            _error("SERVICE_DEFINITION_MISSING", "cannot establish retired service ownership", path=str(path))
+        content = path.read_text()
+        _unit_scope(path, content, target="launchd", runtime=runtime, repo=repo)
+        retired.append({"name": name, "path": str(path), "content": content, "startup": True})
+        files.append({"path": str(path), "kind": "launchd_plist", "content": content, "before": fact, "remove": True})
+    for item in files:
+        fact = item["before"]
+        if fact["exists"] and (fact["uid"] != user.pw_uid or fact["mode"] & 0o022):
+            _error("SERVICE_IDENTITY_MISMATCH", "managed launchd files must belong to the current user", path=item["path"])
+    states = {}
+    retained = set()
+    for unit in desired + retired:
+        row = _query(unit["name"], target="launchd", uid=user.pw_uid, content=unit["content"], run_cmd=run_cmd, include_program=True)
+        if row["state"] == "unknown" or row["enabled"] is None:
+            _error("SERVICE_STATE_UNKNOWN", "cannot reconcile unknown launchd state", service=unit["name"])
+        if row["state"] != "absent":
+            installed = Path(unit["path"])
+            if not installed.is_file():
+                _error("SERVICE_DEFINITION_MISSING", "loaded launchd definition is missing", service=unit["name"])
+            old = plistlib.loads(installed.read_bytes())
+            if (row["definition_path"] != unit["path"] or row["runtime_root"] != str(runtime)
+                    or row.get("program") != old["ProgramArguments"][0]):
+                _error("SERVICE_INSTANCE_CONFLICT", "loaded launchd job does not match this instance", service=unit["name"])
+        if unit["name"] == "com.options-monitor.upgrade" and row["state"] == "running":
+            # The transient controller must survive its own upgrade and compensation.
+            if (unit["name"] not in desired_names
+                    or installed.read_bytes() != unit["content"].encode()
+                    or old["ProgramArguments"][0] != str(repo / "om")):
+                _error("SERVICE_UPGRADE_BUSY", "running launchd upgrade controller requires an unchanged definition and stable repo_root/om entry; retry while the job is idle")
+            retained.add(unit["name"])
+        states[unit["name"]] = row
+    return {"user": user, "root": root, "files": files, "units": desired,
+            "retired": retired, "states": states, "bundle": bundle, "retained": retained}
+
+
+def reconcile_launchd_services(
+    *, profile: dict[str, Any], repo_root: Path, runtime_root: Path,
+    run_cmd: Callable[..., Any], confirm: bool = False,
+    preserved_activation_states: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Reload with the target renderer; retain loaded/disabled state, including on compensation."""
+    context = launchd_upgrade_state(profile=profile, repo_root=repo_root, runtime_root=runtime_root, run_cmd=run_cmd)
+    user, root = context["user"], context["root"]
+    states, files = context["states"], context["files"]
+    out: dict[str, Any] = {"ok": True, "changed": False, "before": states, "after": {},
+                           "operations": [], "errors": [], "restarted_services": []}
+    if not confirm:
+        return out
+    desired_states = preserved_activation_states or states
+    _mkdir(root, uid=user.pw_uid, gid=user.pw_gid)
+    lock = root / ".options-monitor-launchd-lifecycle.lock"
+    _no_links(lock)
+    descriptor = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != user.pw_uid or info.st_mode & 0o022:
+            _error("SERVICE_IDENTITY_MISMATCH", "unsafe lifecycle lock")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            _error("SERVICE_BUSY", "another operation owns the launchd lifecycle lock")
+        for item in files:
+            if _file_fact(Path(item["path"])) != item["before"]:
+                _error("STALE_PREVIEW", "launchd definitions changed before reconciliation")
+        for unit in context["units"] + context["retired"]:
+            name = unit["name"]
+            row = _query(name, target="launchd", uid=user.pw_uid, content=unit["content"], run_cmd=run_cmd, include_program=True)
+            if row != states[name]:
+                _error("STALE_PREVIEW", "launchd state changed before reconciliation", service=name)
+        def command(parts: list[str]) -> None:
+            result = _run(["launchctl", *parts], run_cmd, mutation=True)
+            out["operations"].append(result)
+            out["changed"] = True
+            if not result["ok"]:
+                _error("SERVICE_OPERATION_FAILED", "launchd mutation failed or has an ambiguous outcome", command=parts)
+        for unit in context["units"] + context["retired"]:
+            name = unit["name"]
+            if name in context["retained"]:
+                continue
+            if states[name]["state"] != "absent":
+                command(["bootout", f"gui/{user.pw_uid}/{name}"])
+                row = _query(name, target="launchd", uid=user.pw_uid, content=unit["content"], run_cmd=run_cmd, include_program=True)
+                if row["state"] != "absent":
+                    _error("SERVICE_READBACK_FAILED", "old launchd worker remains loaded", service=name)
+                pid = states[name].get("pid")
+                if pid:
+                    for attempt in range(20):
+                        exited = _run(["ps", "-p", str(pid), "-o", "pid="], run_cmd)
+                        if exited.get("returncode") == 1 and not exited.get("stdout", "").strip() and not exited.get("stderr", "").strip():
+                            break
+                        if exited.get("returncode") != 0 or attempt == 19:
+                            _error("SERVICE_READBACK_FAILED", "old launchd process exit could not be verified", service=name, pid=pid)
+                        time.sleep(0.5)
+        for item in files:
+            path = Path(item["path"])
+            if item["kind"] == "launchd_plist" and path.stem in context["retained"]:
+                continue
+            if item.get("remove"):
+                path.unlink()
+            else:
+                _mkdir(path.parent, uid=user.pw_uid, gid=user.pw_gid)
+                _atomic_file(path, item["content"].encode(), mode=0o600 if item["kind"] == "service_profile" else 0o644,
+                             uid=user.pw_uid, gid=user.pw_gid)
+            out["changed"] = True
+        for unit in context["units"]:
+            name = unit["name"]
+            wanted = desired_states.get(name, {"state": "absent", "enabled": True})
+            if name not in context["retained"] and wanted["state"] != "absent":
+                if states[name]["enabled"] is False:
+                    command(["enable", f"gui/{user.pw_uid}/{name}"])
+                command(["bootstrap", f"gui/{user.pw_uid}", unit["path"]])
+                out["restarted_services"].append(name)
+            if name not in context["retained"] and (wanted["enabled"] != states[name]["enabled"] or (wanted["enabled"] is False and wanted["state"] != "absent")):
+                command(["enable" if wanted["enabled"] else "disable", f"gui/{user.pw_uid}/{name}"])
+            row = _query(name, target="launchd", uid=user.pw_uid, content=unit["content"], run_cmd=run_cmd, include_program=True)
+            out["after"][name] = row
+            keep_alive = bool(plistlib.loads(unit["content"].encode()).get("KeepAlive"))
+            valid_states = {"absent"} if wanted["state"] == "absent" else ({"running"} if keep_alive else {"running", "loaded-idle"})
+            if (Path(unit["path"]).read_bytes() != unit["content"].encode()
+                    or row["state"] not in valid_states or row["enabled"] != wanted["enabled"] or (
+                    row["state"] != "absent" and (row["definition_path"] != unit["path"]
+                    or row["runtime_root"] != str(runtime_root)
+                    or row.get("program") != plistlib.loads(unit["content"].encode())["ProgramArguments"][0]))):
+                _error("SERVICE_READBACK_FAILED", "target launchd definition or activation readback mismatch", service=name)
+    except (OSError, AgentToolError, KeyboardInterrupt) as exc:
+        out.update(ok=False)
+        out["errors"].append(f"{type(exc).__name__}: {exc}")
+    finally:
+        os.close(descriptor)
+    return out

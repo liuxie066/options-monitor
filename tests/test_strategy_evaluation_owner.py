@@ -136,3 +136,23 @@ def test_decision_fx_public_scalar_owner_does_not_accept_missing_qualification()
     assert result["status"] == "incomplete"
     assert result["exchange_rates"] == {}
     assert set(result["gaps"]) == {"fx:USD:1000", "fx:HKD:1000"}
+
+
+@pytest.mark.parametrize("usdcny", [6.6675, 7.12, 7.2, 7.15, 6.83])
+def test_decision_fx_matches_live_float_input_direction(usdcny):
+    from datetime import datetime, timezone
+
+    from domain.domain.performance.cash_conversion import cash_fx_observation_facts
+
+    at = "2026-10-27T13:40:00+00:00"
+    at_ms = int(datetime.fromisoformat(at).astimezone(timezone.utc).timestamp() * 1000)
+    snapshot = {
+        "pairs": {
+            pair: dict(rate=value, source="tencent_quote", quote_at_utc=at, observed_at_utc=at)
+            for pair, value in (("USDCNY", usdcny), ("HKDCNY", 0.8500221006))
+        }
+    }
+    facts = [f.normalized_payload() for f in cash_fx_observation_facts(snapshot, observed_at_ms=at_ms)]
+    result = decision_exchange_rates(fx=facts, at_ms=at_ms)
+    assert result["status"] == "complete"
+    assert result["exchange_rates"] == {"usd_per_cny": 1.0 / usdcny, "cny_per_hkd": 0.8500221006}

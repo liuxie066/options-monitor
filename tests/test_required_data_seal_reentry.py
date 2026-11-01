@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import json
 from pathlib import Path
 
@@ -11,13 +11,11 @@ from src.application.required_data_snapshot import (
     seal_required_data_snapshot,
 )
 from tests.test_required_data_snapshot import (
+    _fresh_quote_time as _fresh_quote_time,
     _publish_empty_quote,
     _summary,
     _workspace,
 )
-
-
-_SEALED_AT = datetime.now(timezone.utc)
 
 
 def _empty_summary(*symbols: str) -> dict:
@@ -32,7 +30,7 @@ def _seal(
     root: Path,
     manifest_path: Path,
     summary: dict,
-    sealed_at: datetime = _SEALED_AT,
+    sealed_at: datetime | None = None,
     close_plan_path: Path | None = None,
 ) -> dict:
     return seal_required_data_snapshot(
@@ -64,7 +62,8 @@ def test_identical_reseal_adopts_exact_manifest_bytes_and_hash(
         root=root,
         manifest_path=manifest_path,
         summary=summary,
-        sealed_at=_SEALED_AT + timedelta(hours=2),
+        sealed_at=datetime.fromisoformat(first["sealed_at_utc"].replace("Z", "+00:00"))
+        + timedelta(hours=2),
     )
 
     assert second == first

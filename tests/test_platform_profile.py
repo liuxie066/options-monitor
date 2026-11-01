@@ -17,6 +17,8 @@ def test_linux_platform_profile_defaults() -> None:
     assert profile.default_runtime_root == Path("/var/lib/options-monitor")
     assert profile.default_env_file == Path("/etc/options-monitor/options-monitor.env")
     assert any("Python 3.12" in hint for hint in profile.prerequisite_hints)
+    assert "not prerequisites" in profile.prerequisite_hints[0]
+    assert "--source" in profile.prerequisite_hints[1]
 
 
 def test_macos_platform_profile_defaults() -> None:
@@ -28,6 +30,8 @@ def test_macos_platform_profile_defaults() -> None:
     assert profile.default_runtime_root == Path("/Users/om/Library/Application Support/options-monitor")
     assert profile.default_env_file == Path("/Users/om/Library/Application Support/options-monitor/options-monitor.env")
     assert any("Python 3.12" in hint for hint in profile.prerequisite_hints)
+    assert "Homebrew are not prerequisites" in profile.prerequisite_hints[0]
+    assert "Homebrew is one optional source" in profile.prerequisite_hints[1]
 
 
 def test_service_target_runtime_root_defaults() -> None:
