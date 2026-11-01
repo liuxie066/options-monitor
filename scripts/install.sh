@@ -686,6 +686,9 @@ else
   if [ "$SOURCE_INSTALL" -eq 1 ]; then
     printf '[install] cloning %s at %s\n' "$REPO_URL" "$TAG"
     git clone --depth 1 --branch "$TAG" "$REPO_URL" "$tmp_dir"
+    # Clone does not honor export-ignore; also protect installs of older tags.
+    find "$tmp_dir" -name .git -prune -o \
+      \( -name AGENTS.md -o -name CLAUDE.md -o -name .agents \) -prune -exec rm -rf {} +
     printf '[install] creating virtualenv\n'
     "$PYTHON_BIN" -m venv "$tmp_dir/.venv"
     "$tmp_dir/.venv/bin/pip" install -U pip

@@ -42,6 +42,8 @@ def copy_source(source: Path, target: Path) -> None:
     for name in sorted(set(names)):
         if not name or (name not in SOURCE_FILES and name.split("/")[0] not in SOURCE_DIRS):
             continue
+        if {"AGENTS.md", "CLAUDE.md", ".agents"}.intersection(Path(name).parts):
+            continue
         if not re.fullmatch(r"[A-Za-z0-9_./+@-]+", name) or ".." in Path(name).parts:
             raise RuntimeBundleError(f"source filename cannot be safely bootstrapped: {name}")
         src = source / name

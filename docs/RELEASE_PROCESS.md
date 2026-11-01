@@ -291,6 +291,8 @@ VERSION="$(cat VERSION)"
 - 等待拟发布平台运行包构建/搬迁资格任务，核对精确资产集合和来源身份
 - 发布对应 GitHub Release
 
+源码归档使用仓库 `.gitattributes` 的 `export-ignore`，排除 `AGENTS.md`、`CLAUDE.md` 和 `.agents/` 等开发指令。升级的 Git cache archive 使用同一规则；只有包含该规则的 tag 才会在归档时排除这些文件，历史 tag 不会被追溯修改。显式 `--source` 安装对新安装目录另行执行排除，覆盖旧 tag，详见 [Install](INSTALL.md)。
+
 因此常规发布只需要把版本元数据改好，通过 Pull Request 合入 `main`；不需要再手动补打上同名 tag。
 自动 release job 复用同一次 `Guardrails` 已通过的回归结果，不重复运行同一批 Python Bot
 测试。普通开发提交因为不修改 `VERSION`，不会进入 release job。
@@ -315,7 +317,7 @@ VERSION="$(cat VERSION)"
 ./.venv/bin/python scripts/build_runtime_bundle.py --output <artifact-dir> --cache <build-cache-dir> --require-clean
 ```
 
-发布构建要求干净且对应目标 commit 的源码。构建端可使用 Git/构建依赖；终端用户运行包无需系统 Python、Git、pip 或 Homebrew。归档不含链接或特殊文件；校验版本元数据、清单、全部文件摘要与真实解包内容一致。保留第三方许可，不把开发 venv 复制成运行包。
+发布构建要求干净且对应目标 commit 的源码。构建端可使用 Git/构建依赖；终端用户运行包无需系统 Python、Git、pip 或 Homebrew。源码复制边界排除所有层级的 `AGENTS.md`、`CLAUDE.md` 和 `.agents/` 开发指令。归档不含链接或特殊文件；校验版本元数据、清单、全部文件摘要与真实解包内容一致。保留第三方许可，不把开发 venv 复制成运行包。
 
 资格必须使用真实包：移除原解释器/源码 staging 后，搬迁至含中文和空格的新路径，执行 help、Tool Gateway spec、核心/原生/服务端/Bot 依赖导入及私有解释器子进程。自检不得连接 OpenD、模型或通知，不启动服务或写业务数据。只有实际执行回执才能证明该宿主和平台通过；锁文件中的最低 OS 兼容声明、mock 归档、某一平台的通过，均不能替代其他目标的执行。
 

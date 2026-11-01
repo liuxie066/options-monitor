@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 from threading import Event, Thread
 
@@ -62,6 +63,12 @@ for arg in "$@"; do
   dest="$arg"
 done
 mkdir -p "$dest/requirements" "$dest/constraints" "$dest/src/application/bot" "$dest/scripts"
+mkdir -p "$dest/.agents/skills/private" "$dest/src/nested" "$dest/.git"
+printf 'Private developer instructions\n' > "$dest/AGENTS.md"
+printf 'Private developer instructions\n' > "$dest/CLAUDE.md"
+printf 'Private developer instructions\n' > "$dest/src/nested/AGENTS.md"
+printf 'Private developer skill\n' > "$dest/.agents/skills/private/SKILL.md"
+printf 'Git metadata required by update\n' > "$dest/.git/config"
 : > "$dest/src/__init__.py"
 : > "$dest/src/application/__init__.py"
 : > "$dest/src/application/bot/__init__.py"
@@ -203,6 +210,45 @@ def _installed_baseline(tmp_path: Path) -> tuple[dict[str, str], subprocess.Comp
     """Install the v9.9.9 baseline release the release-switch tests start from."""
     env = _installer_env(tmp_path)
     return env, _run_installer(tmp_path, env=env)
+
+
+def test_install_excludes_developer_instructions_from_legacy_tag(tmp_path: Path) -> None:
+    result = _run_installer(tmp_path)
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    release = tmp_path / "apps/options-monitor/current"
+    assert not (release / "AGENTS.md").exists()
+    assert not (release / "CLAUDE.md").exists()
+    assert not (release / "src/nested/AGENTS.md").exists()
+    assert not (release / ".agents").exists()
+    assert (release / ".git/config").is_file()
+    assert (release / "src/application/bot/runtime.py").is_file()
+    assert (release / "om").is_file()
+    assert (release / "om-agent").is_file()
+
+
+@pytest.mark.parametrize("bare_archive", [False, True], ids=["release", "upgrade-cache"])
+def test_source_archive_excludes_developer_instructions(tmp_path: Path, bare_archive: bool) -> None:
+    repo = tmp_path / "source"
+    repo.mkdir()
+    for name in ("AGENTS.md", "CLAUDE.md", "src/nested/AGENTS.md", ".agents/skills/private/SKILL.md",
+                 "src/application/bot/runtime.py", "om", "om-agent", "VERSION", "docs/INSTALL.md"):
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture\n", encoding="utf-8")
+    shutil.copy2(ROOT / ".gitattributes", repo / ".gitattributes")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    tree = subprocess.check_output(["git", "-C", str(repo), "write-tree"], text=True).strip()
+    archive = tmp_path / "source.tar"
+    git = ["git", f"--git-dir={repo / '.git'}"] if bare_archive else ["git", "-C", str(repo)]
+    subprocess.run([*git, "archive", "--format=tar", "-o", str(archive), tree], check=True)
+
+    with tarfile.open(archive) as source:
+        names = set(source.getnames())
+    assert not any(Path(name).name in {"AGENTS.md", "CLAUDE.md", ".agents"} for name in names)
+    assert not any(".agents/" in name for name in names)
+    assert {"src/application/bot/runtime.py", "om", "om-agent", "VERSION", "docs/INSTALL.md"} <= names
 
 
 def _transaction_fault_tools(tmp_path: Path, env: dict[str, str]) -> None:

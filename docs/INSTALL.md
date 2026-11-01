@@ -41,6 +41,8 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 
 安装器始终安装已发布版本，不安装 `main` 上尚未发布的改动；新 CLI 参数以所安装版本的 `om setup init --help` 为准。
 
+产品运行包在构建时排除仓库开发指令 `AGENTS.md`、`CLAUDE.md` 和 `.agents/`（含嵌套目录），避免安装产品时将维护者的私人称呼和开发约定加载到用户 Agent。显式 `--source` 安装在 clone 后执行相同排除，也覆盖旧 tag；仅源码安装保留 Git 元数据供版本检查与升级使用。重复安装的已安装快路径不清理已有文件，开发者直接 clone 的工作区也不受影响。
+
 安装输出会明确打印解析到的 release tag，例如：
 
 ```text

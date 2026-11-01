@@ -1,6 +1,7 @@
 """Artifact boundary regression tests; all inputs and effects are isolated."""
 import io
 import json
+import subprocess
 import tarfile
 from pathlib import Path
 
@@ -11,6 +12,24 @@ from src.application import runtime_bundle as bundle
 ROOT = Path(__file__).resolve().parents[1]
 TAG = "v1.2.3"
 SHA = "a" * 40
+
+
+def test_bundle_source_excludes_developer_instructions(tmp_path):
+    from scripts.build_runtime_bundle import copy_source
+
+    source = tmp_path / 'source'
+    source.mkdir()
+    subprocess.run(['git', 'init', '-q', str(source)], check=True)
+    private = ['AGENTS.md', 'CLAUDE.md', '.agents/skills/private/SKILL.md',
+               'src/nested/AGENTS.md', 'docs/CLAUDE.md', 'src/.agents/private/SKILL.md']
+    product = ['om', 'om-agent', 'VERSION', 'src/application/bot/runtime.py', 'docs/INSTALL.md']
+    for name in private + product:
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('fixture\n')
+    target = tmp_path / 'product'
+    copy_source(source, target)
+    assert sorted(p.relative_to(target).as_posix() for p in target.rglob('*') if p.is_file()) == sorted(product)
 
 
 def miniature(root, platform_name="macos-arm64"):
