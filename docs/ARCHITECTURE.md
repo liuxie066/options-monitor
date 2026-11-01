@@ -205,7 +205,7 @@ Remote messages intentionally separate channel transport from application
 execution. The current CLI namespace remains `./om bot ...`:
 
 ```text
-Feishu / future channels
+Feishu / WeChat optional channel transports
 -> src.application.channels.ChannelService
 -> src.application.inbound.feishu(_ws)
 -> sender allowlist / idempotency
@@ -221,6 +221,23 @@ Inbound control and outbound notifications are capabilities of the
 same channel model. `src.application.inbound` should stay thin: extract channel
 payloads, enforce channel-specific receive/reply mechanics, and build the
 transport request.
+`src.application.channels.plugins` lazily loads separately installed Feishu/WeChat
+network leaves. Core retains pure payload builders, rendering/history validation,
+permissions and persistence; Feishu Bitable does not depend on either message package.
+Root channel controls are shared by generated market/Bot config. Each actual inbound
+and reply attempt checks current receive authority; proactive sends also require the
+channel notify flag and global notification opt-in.
+
+`notification_delivery_route.resolve_notification_delivery_routes` selects account-bound
+destinations. `notification_fanout` freezes target identity, body/envelope and independent
+child obligations above adapters; business owners retain a reference and project aggregate
+partial/confirmed/unknown state. Delivery-only retries skip confirmed/accepted/unknown
+children and do not repeat ledger or business effects. Long-running producers reread only
+current delivery authorization from their bound generated config before attempts; business
+inputs and frozen targets remain unchanged. Global operational alerts project configured
+account routes and deduplicate actual destinations, preserving exact account authorization
+per child. No alert automatically falls back to another platform, including legacy routing.
+Legacy single-target histories remain readable.
 `BotInboundRequest`, the inbound audit row, and the pending-operation store form
 the deterministic Control boundary. Protocol command parsing, bound permission
 responses, sender allowlist checks, previews, confirmations, applies, and

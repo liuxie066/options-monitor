@@ -10,6 +10,9 @@ from typing import Any, Callable, Mapping
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER, WECHAT_CLAWBOT_NOTIFICATION_PROVIDER
 from src.application.agent_tool_contracts import build_response, mask_path as default_mask_path
 from src.application.bot.control.audit import default_audit_db_path
+from src.application.bot.control.config_loader import default_bot_config_path
+from src.application.channels.plugins import channel_activity_enabled, channel_plugin_installed
+from src.application.runtime_paths import runtime_root_scope
 from src.application.secret_resolver import (
     DEFAULT_FEISHU_BOT_ALLOWED_OPEN_IDS_ENV,
     DEFAULT_FEISHU_BOT_APP_ID_ENV,
@@ -65,6 +68,11 @@ def build_channel_status(
     raw_payload = dict(payload or {})
     runtime = _runtime_root(raw_payload, base=base, runtime_root=runtime_root)
     merged_payload, profile_meta = _merge_service_profile_payload(raw_payload, base=base, runtime_root=runtime)
+    if _bot_config_path_from_payload(merged_payload)[0] is None:
+        with runtime_root_scope(runtime):
+            bot_config_path = default_bot_config_path(repo_root=base)
+        if bot_config_path.is_file():
+            merged_payload["bot_config_path"] = str(bot_config_path)
     if profile_meta is not None and profile_meta.get("path"):
         profile_meta = {**profile_meta, "path": mask_path(profile_meta.get("path"))}
     env = dict(os.environ if environ is None else environ)
@@ -104,6 +112,7 @@ def build_channel_status(
 
 def _summary(channels: dict[str, dict[str, Any]]) -> dict[str, Any]:
     return {
+        "installed_channels": sorted(name for name, status in channels.items() if status.get("installed")),
         "configured_channels": sorted(name for name, status in channels.items() if bool(status.get("configured"))),
         "available_channels": sorted(name for name, status in channels.items() if bool(status.get("available"))),
         "feishu_available": bool(channels.get(FEISHU_CHANNEL, {}).get("available")),
@@ -184,6 +193,7 @@ def _feishu_channel_health(
         "reply_enabled": _config_bool_or_default(inbound.get("reply_enabled"), default=True),
         "max_reply_chars": _int_or_default(inbound.get("max_reply_chars"), default=3500),
     }
+    _apply_channel_controls(out, cfg, FEISHU_CHANNEL, config_error=config_error)
     if config_error:
         out["config_error"] = config_error
     if credential_error:
@@ -263,6 +273,7 @@ def _wechat_clawbot_channel_health(
         "poll_interval_sec": _float_or_default(inbound.get("poll_interval_sec"), default=3.0),
         "timeout_sec": _int_or_default(inbound.get("timeout_sec"), default=20),
     }
+    _apply_channel_controls(out, cfg, WECHAT_CLAWBOT_NOTIFICATION_PROVIDER, config_error=config_error)
     if config_error:
         out["config_error"] = config_error
     if state_error:
@@ -272,6 +283,25 @@ def _wechat_clawbot_channel_health(
     if service_status_error:
         out["service_status_error"] = service_status_error
     return out
+
+
+def _apply_channel_controls(out: dict[str, Any], config: dict[str, Any], channel: str,
+                            *, config_error: str | None) -> None:
+    explicit = "channels" in config
+    selected = _dict(_dict(config.get("channels")).get(channel))
+    installed = channel_plugin_installed(channel)
+    master = selected.get("enabled") is True if explicit else True
+    receive = selected.get("receive_enabled") is True if explicit else True
+    notify = selected.get("notify_enabled") is True if explicit else channel_activity_enabled(config, channel, "notify")
+    ready = installed and out["available"] and not config_error
+    receive_available = bool(ready and channel_activity_enabled(config, channel, "receive"))
+    # Bot config owns transport controls; the market delivery owner also checks
+    # notifications.enabled before any proactive send.
+    notify_available = bool(ready and channel_activity_enabled(config, channel, "notify"))
+    out.update(installed=installed, controls_explicit=explicit, enabled=master, master_enabled=master,
+               receive_enabled=receive, notify_enabled=notify,
+               available=receive_available or notify_available,
+               reply_enabled=receive_available and out["reply_enabled"])
 
 
 def _service_statuses_from_payload(

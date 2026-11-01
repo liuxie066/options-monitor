@@ -534,3 +534,64 @@ def test_manual_apply_rechecks_inbox_takeover_after_preview_under_shared_lock(tm
     assert result[0]["status"] == "inbox_managed"
     assert result[0]["inbox_receipts"][0]["current_result_key"] == "recorded"
     assert not Path(preview["record_path"]).exists()
+
+
+def test_compensation_fanout_preview_binds_sender_recipient_set_and_only_retries_failed(tmp_path, monkeypatch):
+    from domain.domain.multi_tick import notification_route_identity_hash
+    from src.application import notification_fanout
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "fixture-app")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "fixture-secret")
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "legacy")
+    clock = [2_000_000_000.0]
+    monkeypatch.setattr(notification_fanout.time, "time", lambda: clock[0])
+    sources, repo = _fixture(tmp_path)
+    config = {"notifications": {"enabled": True, "routes": [
+        {"id": target, "provider": "feishu_app", "target": target, "accounts": [ACCOUNT]}
+        for target in ("A", "B", "C")]}}
+    calls = []
+    def send(**kwargs):
+        target = kwargs["target"]
+        calls.append(kwargs)
+        if target == "B" and sum(call["target"] == "B" for call in calls) == 1:
+            return {"delivery_confirmed": False, "explicit_pre_acceptance_failure": True}
+        if target == "C":
+            return {"delivery_confirmed": False, "ambiguous_send": True}
+        return {"delivery_confirmed": True, "message_id": "fixture-" + target,
+                "attribution_route_key": notification_route_identity_hash(provider="feishu_app",
+                    channel="feishu_app", sender="fixture-app", recipient=target)}
+    arguments = dict(config=config, send_fn=send, normalize_fn=lambda send_result: send_result)
+    preview = _call(tmp_path, sources, repo, **arguments)
+    assert len(preview["routes"]) == 3 and not calls
+    assert not Path(preview["record_path"]).exists()
+    before = repo.list_trade_events()
+    config["notifications"]["routes"][1]["target"] = "changed"
+    with pytest.raises(ValueError, match="changed after dry-run"):
+        _call(tmp_path, sources, repo, **arguments, apply_changes=True, expected_payload_hash=preview["payload_hash"])
+    assert not calls
+    config["notifications"]["routes"][1]["target"] = "B"
+    first = _call(tmp_path, sources, repo, **arguments, apply_changes=True, expected_payload_hash=preview["payload_hash"])
+    assert first["status"] == "partial" and first["has_retryable_children"]
+    clock[0] += 61
+    second = _call(tmp_path, sources, repo, **arguments, apply_changes=True, expected_payload_hash=preview["payload_hash"])
+    assert [call["target"] for call in calls] == ["A", "B", "C", "B"]
+    assert second["status"] == "partial" and not second["has_retryable_children"]
+    assert repo.list_trade_events() == before
+
+
+def test_confirmed_fanout_compensation_preview_uses_children_not_one_message_id(tmp_path, monkeypatch):
+    from domain.domain.multi_tick import notification_route_identity_hash
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "fixture-app")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "fixture-secret")
+    sources, repo = _fixture(tmp_path)
+    config = {"notifications": {"enabled": True, "routes": [
+        {"id": "one", "provider": "feishu_app", "target": "one", "accounts": [ACCOUNT]}]}}
+    def send(**kwargs):
+        return {"delivery_confirmed": True, "message_id": "fixture-child",
+                "attribution_route_key": notification_route_identity_hash(provider="feishu_app",
+                    channel="feishu_app", sender="fixture-app", recipient="one")}
+    kwargs = dict(config=config, send_fn=send, normalize_fn=lambda send_result: send_result)
+    preview = _call(tmp_path, sources, repo, **kwargs)
+    applied = _call(tmp_path, sources, repo, **kwargs, apply_changes=True, expected_payload_hash=preview["payload_hash"])
+    assert applied["delivery_confirmed"] and applied["message_id"] is None
+    repeated = _call(tmp_path, sources, repo, **kwargs)
+    assert repeated["delivery_confirmed"] and repeated["suppression_reason"] == "already_confirmed"

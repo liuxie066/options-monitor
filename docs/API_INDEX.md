@@ -96,6 +96,15 @@
 
 ## 账本、简报与策略工作流
 
+消息渠道的可选包加载与启停控制由 `src.application.channels.plugins` 负责；
+`src.application.bot.control.config_loader.require_inbound_channel` 读取当前收信配置并检查启用状态。
+回复身份与权限仍由 `src.application.bot.control.policy` 校验。
+`notification_delivery_route.resolve_notification_delivery_routes` 按账户选择并绑定实际发送/接收身份；
+`notification_fanout.prepare_notification_fanout` / `dispatch_notification_fanout` 负责冻结正文、
+独立目标 claim、回执、失败重试和 unknown 保护。业务 owner 保留父事件并引用投递事实，
+不得通过重新执行业务写入恢复通知。契约见 [消息渠道配置](../CONFIGS.md#消息渠道)，
+核心控制回归见 `tests/test_channel_plugin_controls.py`。Bitable 数据客户端与消息包独立。
+
 这些入口状态均为**现行**。读取、领域投影和写入仍是不同动作；模块存在公共函数不代表可以绕过工作流直接写生产数据。
 
 | 能力 / 检索词 | 推荐源码入口 | 使用边界与责任归属 | 契约与共享测试 |

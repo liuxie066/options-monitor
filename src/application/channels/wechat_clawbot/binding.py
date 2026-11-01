@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
+from src.application.bot.control.policy import require_inbound_channel
 from src.application.channels.wechat_clawbot.ilink_client import DEFAULT_ILINK_BASE_URL, WechatClawbotClient
 from src.application.channels.wechat_clawbot.message import (
     extract_first_string,
@@ -141,10 +142,12 @@ def bind_wechat_clawbot_target(
     state_dir: str | None = None,
     timeout_sec: int = 20,
     client_factory: ClientFactory = WechatClawbotClient,
+    bot_config_path: str | None = None,
 ) -> dict[str, Any]:
     binding_name = str(name or "").strip()
     if not binding_name:
         raise AgentToolError(code="INPUT_ERROR", message="binding name is required")
+    require_inbound_channel("wechat_clawbot", bot_config_path)
     store = _state_store(base=base, label=label, state_dir=state_dir)
     state = _load_store_json(store.load_state, default={})
     bot_token = str(state.get("bot_token") or "").strip()
@@ -155,7 +158,9 @@ def bind_wechat_clawbot_target(
         base_url=str(state.get("base_url") or DEFAULT_ILINK_BASE_URL),
         timeout=timeout_sec,
     )
+    require_inbound_channel("wechat_clawbot", bot_config_path)
     response = client.get_updates(get_updates_buf=str(state.get("get_updates_buf") or ""))
+    require_inbound_channel("wechat_clawbot", bot_config_path)
     new_buf = extract_first_string(response, ("get_updates_buf", "getUpdatesBuf"))
 
     expected_text = str(match_text or "").strip()
@@ -450,6 +455,7 @@ def connect_wechat_clawbot_target(
     client_factory: ClientFactory = WechatClawbotClient,
     progress_fn: ProgressFn | None = None,
     sleep_fn: SleepFn = time.sleep,
+    bot_config_path: str | None = None,
 ) -> dict[str, Any]:
     binding_name = str(name or "").strip()
     if not binding_name:
@@ -542,6 +548,7 @@ def connect_wechat_clawbot_target(
             state_dir=state_dir,
             timeout_sec=timeout_sec,
             client_factory=client_factory,
+            bot_config_path=bot_config_path,
         )
         last_bind_out = bind_out
         if bool(bind_out.get("ok")):

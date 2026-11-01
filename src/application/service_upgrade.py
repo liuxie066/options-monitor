@@ -1922,6 +1922,8 @@ def _command_error(result: dict[str, Any]) -> str:
 def _pip_install_commands(
     venv_python: Path, *, include_pm: bool = False, include_longbridge: bool = False,
     include_position_advice: bool = False,
+    include_feishu: bool = False,
+    include_wechat: bool = False,
 ) -> list[tuple[list[str], int]]:
     commands = [
         ([str(venv_python), "-m", "pip", "install", "-U", "pip"], 600),
@@ -1931,6 +1933,9 @@ def _pip_install_commands(
         commands.append(([str(venv_python), "-m", "pip", "install", "./plugins/portfolio-management"], 600))
     if include_position_advice:
         commands.append(([str(venv_python), "-m", "pip", "install", "./plugins/position-advice"], 600))
+    for selected, package in ((include_feishu, "feishu-channel"), (include_wechat, "wechat-channel")):
+        if selected:
+            commands.append(([str(venv_python), "-m", "pip", "install", f"./plugins/{package}"], 600))
     if include_longbridge:
         commands.append(([str(venv_python), "-m", "pip", "install", "-r", "requirements/longbridge.txt"], 600))
     return commands
@@ -1945,6 +1950,8 @@ def _uv_install_commands(
     include_pm: bool = False,
     include_longbridge: bool = False,
     include_position_advice: bool = False,
+    include_feishu: bool = False,
+    include_wechat: bool = False,
 ) -> list[tuple[list[str], int]]:
     commands: list[tuple[list[str], int]] = [
         (["uv", "venv", "--python", bootstrap_python, str(venv_dir)], 300),
@@ -1971,6 +1978,9 @@ def _uv_install_commands(
         commands.append((["uv", "pip", "install", "-p", str(venv_python), "./plugins/portfolio-management"], 600))
     if include_position_advice:
         commands.append((["uv", "pip", "install", "-p", str(venv_python), "./plugins/position-advice"], 600))
+    for selected, package in ((include_feishu, "feishu-channel"), (include_wechat, "wechat-channel")):
+        if selected:
+            commands.append((["uv", "pip", "install", "-p", str(venv_python), f"./plugins/{package}"], 600))
     if include_longbridge:
         commands.append(([
             "uv", "pip", "install", "-p", str(venv_python), "-r", "requirements/longbridge.txt",
@@ -2009,6 +2019,8 @@ def _run_pip_runtime_prepare(
     include_pm: bool = False,
     include_longbridge: bool = False,
     include_position_advice: bool = False,
+    include_feishu: bool = False,
+    include_wechat: bool = False,
 ) -> None:
     if not venv_python.exists():
         command = [bootstrap_python, "-m", "venv", str(venv_dir)]
@@ -2018,6 +2030,7 @@ def _run_pip_runtime_prepare(
     pip_commands = _pip_install_commands(
         venv_python, include_pm=include_pm, include_longbridge=include_longbridge,
         include_position_advice=include_position_advice,
+        include_feishu=include_feishu, include_wechat=include_wechat,
     )
     if include_server:
         pip_commands.append(
@@ -2084,12 +2097,16 @@ def _dependency_context(
     *, include_server: bool, python_spec: str, installer_mode: str,
     include_pm: bool = False, include_longbridge: bool = False,
     include_position_advice: bool = False,
+    include_feishu: bool = False,
+    include_wechat: bool = False,
 ) -> dict[str, Any]:
     return {
         "include_server": bool(include_server),
         **({"include_pm": True} if include_pm else {}),
         **({"include_position_advice": True} if include_position_advice else {}),
         **({"include_longbridge": True} if include_longbridge else {}),
+        **({"include_feishu": True} if include_feishu else {}),
+        **({"include_wechat": True} if include_wechat else {}),
         "installer_mode": installer_mode,
         "python_implementation": sys.implementation.name,
         "python_spec": python_spec,
@@ -2109,6 +2126,8 @@ def _dependency_hash(
     include_pm: bool = False,
     include_longbridge: bool = False,
     include_position_advice: bool = False,
+    include_feishu: bool = False,
+    include_wechat: bool = False,
 ) -> str:
     digest = hashlib.sha256()
     selected_python_spec = python_spec or f"{sys.version_info.major}.{sys.version_info.minor}"
@@ -2119,12 +2138,14 @@ def _dependency_hash(
         include_pm=include_pm,
         include_longbridge=include_longbridge,
         include_position_advice=include_position_advice,
+        include_feishu=include_feishu, include_wechat=include_wechat,
     )
     digest.update(json.dumps(context, sort_keys=True).encode("utf-8"))
     digest.update(b"\n")
     for path in _dependency_files(
         target_dir, include_server=include_server, include_pm=include_pm, include_longbridge=include_longbridge,
         include_position_advice=include_position_advice,
+        include_feishu=include_feishu, include_wechat=include_wechat,
     ):
         try:
             rel = path.relative_to(target_dir)
@@ -2143,6 +2164,8 @@ def _dependency_hash(
 def _dependency_files(
     target_dir: Path, *, include_server: bool, include_pm: bool = False, include_longbridge: bool = False,
     include_position_advice: bool = False,
+    include_feishu: bool = False,
+    include_wechat: bool = False,
 ) -> list[Path]:
     roots = [target_dir / "requirements.txt", target_dir / "constraints.txt"]
     if include_server:
@@ -2172,7 +2195,10 @@ def _dependency_files(
 
     for root in roots:
         visit(root)
-    for selected, name in ((include_pm, "portfolio-management"), (include_position_advice, "position-advice")):
+    for selected, name in (
+        (include_pm, "portfolio-management"), (include_position_advice, "position-advice"),
+        (include_feishu, "feishu-channel"), (include_wechat, "wechat-channel"),
+    ):
         if selected:
             package = target_dir / "plugins" / name
             ordered.append(package / "pyproject.toml")
@@ -2287,6 +2313,162 @@ def _installed_optional_packages(
     if not isinstance(installed, list) or len(installed) != 3 or any(type(item) is not bool for item in installed):
         raise RuntimeError("current runtime optional package probe did not return three booleans")
     return installed[0], installed[1], installed[2]
+
+
+def _message_package_selection(
+    *, previous_dir: Path, runtime_root: Path, run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> tuple[bool, bool]:
+    plugin_aware = (previous_dir / "src/application/channels/plugins.py").is_file()
+    legacy = [
+        not plugin_aware and not (previous_dir / f"plugins/{package}/pyproject.toml").is_file()
+        and (previous_dir / implementation).is_file()
+        for package, implementation in (
+            ("feishu-channel", "src/infrastructure/feishu_bot.py"),
+            ("wechat-channel", "src/application/channels/wechat_clawbot/ilink_client.py"),
+        )
+    ]
+    # Releases predating channel implementations carry no channel selection to migrate.
+    if not plugin_aware and not any(legacy) and not any(
+        (previous_dir / f"plugins/{package}/pyproject.toml").is_file()
+        for package in ("feishu-channel", "wechat-channel")
+    ):
+        return False, False
+    python = _release_python(previous_dir)
+    if not python.exists():
+        raise RuntimeError("could not determine installed message packages: current Python is missing")
+    code = (
+        "import importlib.metadata as m, json\n"
+        "installed = []\n"
+        "for name in ('om-feishu-channel-plugin', 'om-wechat-channel-plugin'):\n"
+        "    try: m.distribution(name)\n"
+        "    except m.PackageNotFoundError: installed.append(False)\n"
+        "    else: installed.append(True)\n"
+        "print(json.dumps(installed))\n"
+    )
+    result = _run_required(
+        [str(python), "-I", "-c", code], cwd=previous_dir,
+        run_cmd=run_cmd, operations=operations, timeout=30,
+    )
+    try:
+        installed = json.loads(result["stdout"])
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("could not determine installed message packages in current runtime") from exc
+    if not isinstance(installed, list) or len(installed) != 2 or any(type(item) is not bool for item in installed):
+        raise RuntimeError("current runtime message package probe did not return two booleans")
+    if any(legacy):
+        enabled = _legacy_message_channels_enabled(runtime_root=runtime_root)
+        installed = [present or (builtin and active) for present, builtin, active in zip(installed, legacy, enabled)]
+    return installed[0], installed[1]
+
+
+def _legacy_message_channels_enabled(*, runtime_root: Path) -> tuple[bool, bool]:
+    from src.application.channels.plugins import channel_activity_enabled
+    from domain.domain.multi_tick import resolve_notification_route_from_config
+
+    profile_path = runtime_root / "service.profile.json"
+    try:
+        profile = json.loads(profile_path.read_text()) if profile_path.exists() else {}
+        if not isinstance(profile, dict):
+            raise ValueError("service profile must be an object")
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"could not determine legacy message channels from {profile_path}") from exc
+    paths = {
+        _runtime_config_path_for_market(market=market, runtime_root=runtime_root, profile=profile)
+        for market in _verify_markets(runtime_root=runtime_root, profile=profile)
+    }
+    bot = _bot_config_path_from_profile(profile=profile, runtime_root=runtime_root)
+    if bot:
+        paths.add(Path(bot).expanduser().resolve())
+    configs = []
+    for path in sorted(paths):
+        try:
+            config = json.loads(path.read_text())
+            if not isinstance(config, dict):
+                raise ValueError("runtime config must be an object")
+            configs.append(config)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"could not determine legacy message channels from {path}") from exc
+    enabled = []
+    service_names = {
+        str(item.get("name", "") if isinstance(item, dict) else item)
+        for item in profile.get("services", [])
+    }
+    for channel, profile_key, unit in (
+        ("feishu", "feishu_ws", "feishu-ws"), ("wechat_clawbot", "wechat_clawbot", "wechat-clawbot"),
+    ):
+        section = profile.get(profile_key, {})
+        receive = isinstance(section, dict) and section.get("enabled") is True or bool(
+            service_names & {f"options-monitor-{unit}.service", f"com.options-monitor.{unit}"}
+        )
+        selected_configs = configs
+        if isinstance(section, dict) and section.get("config_key"):
+            selected_path = _runtime_config_path_for_market(
+                market=section["config_key"], runtime_root=runtime_root, profile=profile,
+            )
+            selected_configs = [json.loads(selected_path.read_text())]
+        active = receive and (not selected_configs or any(
+            channel_activity_enabled(config, channel, activity="receive") for config in selected_configs
+        ))
+        active = active or any(
+            "channels" in config and channel_activity_enabled(config, channel, activity="receive")
+            for config in configs
+        )
+        for config in configs:
+            notifications = config.get("notifications", {})
+            if not isinstance(notifications, dict):
+                raise RuntimeError("could not determine legacy message channels: notifications must be an object")
+            if "enabled" in notifications and type(notifications["enabled"]) is not bool:
+                raise RuntimeError("could not determine legacy message channels: notifications.enabled must be a boolean")
+            if not notifications.get("enabled", True):
+                continue
+            # Only a declared notification section carries legacy outbound intent.
+            if not notifications:
+                continue
+            provider = resolve_notification_route_from_config(config=config)["provider"]
+            if provider == ("feishu_app" if channel == "feishu" else "wechat_clawbot"):
+                legacy_config = {**config, "notifications": {**notifications,
+                    "enabled": notifications.get("enabled", True)}}
+                active = active or channel_activity_enabled(legacy_config, channel, activity="notify")
+        enabled.append(bool(active))
+    return enabled[0], enabled[1]
+
+
+def _validate_message_runtime(
+    *, target_dir: Path, include_feishu: bool, include_wechat: bool,
+    run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> None:
+    if not any((include_feishu, include_wechat)) and not (
+        target_dir / "src/application/channels/plugins.py"
+    ).is_file():
+        return
+    code = (
+        "import importlib.metadata as m, json, sys, tomllib\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "from src.application.channels.plugins import load_channel_plugin\n"
+        "for channel, package, name, selected in (\n"
+        "    ('feishu', 'feishu-channel', 'om-feishu-channel-plugin', json.loads(sys.argv[2])),\n"
+        "    ('wechat_clawbot', 'wechat-channel', 'om-wechat-channel-plugin', json.loads(sys.argv[3]))):\n"
+        "    try: dist = m.distribution(name)\n"
+        "    except m.PackageNotFoundError: dist = None\n"
+        "    if selected:\n"
+        "        assert dist is not None, name + ' lost during upgrade'\n"
+        "        spec = tomllib.loads((Path(sys.argv[1]) / 'plugins' / package / 'pyproject.toml').read_text())\n"
+        "        assert dist.version == spec['project']['version'], name + ' version differs from target release'\n"
+        "        load_channel_plugin(channel)\n"
+        "        if channel == 'feishu':\n"
+        "            load_channel_plugin(channel, module='bot')\n"
+        "            load_channel_plugin(channel, module='ws_client')\n"
+        "            import lark_oapi\n"
+        "        else: load_channel_plugin(channel, module='ilink_client')\n"
+        "    else:\n"
+        "        assert dist is None, name + ' unexpectedly installed in cached runtime'\n"
+    )
+    _run_required(
+        [str(_release_python(target_dir)), "-I", "-c", code, str(target_dir),
+         json.dumps(include_feishu), json.dumps(include_wechat)],
+        cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=30,
+    )
 
 
 def _managed_plugin_selection(release_dir: Path) -> list[str]:
@@ -2462,6 +2644,8 @@ def _ensure_release_runtime(
     include_pm: bool = False,
     include_longbridge: bool = False,
     include_position_advice: bool = False,
+    include_feishu: bool = False,
+    include_wechat: bool = False,
 ) -> dict[str, Any]:
     _runtime_readiness(release_dir=target_dir)
     if _is_runtime_bundle(target_dir):
@@ -2469,6 +2653,7 @@ def _ensure_release_runtime(
         selected = [name for name, enabled in (
             ("om-pm-plugin", include_pm), ("longbridge", include_longbridge),
             ("om-position-advice-plugin", include_position_advice),
+            ("om-feishu-channel-plugin", include_feishu), ("om-wechat-channel-plugin", include_wechat),
         ) if enabled]
         if selected:
             # Installing source extras would invalidate the bundle's pinned inventory.
@@ -2500,11 +2685,13 @@ def _ensure_release_runtime(
         include_pm=include_pm,
         include_longbridge=include_longbridge,
         include_position_advice=include_position_advice,
+        include_feishu=include_feishu, include_wechat=include_wechat,
     )
     dependency_context = _dependency_context(
         include_server=include_server, python_spec=python_spec, installer_mode=mode,
         include_pm=include_pm, include_longbridge=include_longbridge,
         include_position_advice=include_position_advice,
+        include_feishu=include_feishu, include_wechat=include_wechat,
     )
     shared_venv = _shared_venv_path(cache, dependency_hash)
     build_venv = _shared_venv_build_path(shared_venv)
@@ -2563,6 +2750,7 @@ def _ensure_release_runtime(
                 include_pm=include_pm,
                 include_longbridge=include_longbridge,
                 include_position_advice=include_position_advice,
+                include_feishu=include_feishu, include_wechat=include_wechat,
             )
             commands.extend(command for command, _timeout in uv_commands)
             try:
@@ -2597,6 +2785,7 @@ def _ensure_release_runtime(
                     include_pm=include_pm,
                     include_longbridge=include_longbridge,
                     include_position_advice=include_position_advice,
+                    include_feishu=include_feishu, include_wechat=include_wechat,
                 )
         else:
             if mode == "uv":
@@ -2616,6 +2805,7 @@ def _ensure_release_runtime(
                 include_pm=include_pm,
                 include_longbridge=include_longbridge,
                 include_position_advice=include_position_advice,
+                include_feishu=include_feishu, include_wechat=include_wechat,
             )
 
         if not runtime_prepare["venv_reused"]:
@@ -2650,6 +2840,10 @@ def _ensure_release_runtime(
         _validate_optional_runtime(
             target_dir=target_dir, include_pm=include_pm, include_longbridge=include_longbridge,
             include_position_advice=include_position_advice,
+            run_cmd=run_cmd, operations=operations,
+        )
+        _validate_message_runtime(
+            target_dir=target_dir, include_feishu=include_feishu, include_wechat=include_wechat,
             run_cmd=run_cmd, operations=operations,
         )
         runtime_prepare["ended_at"] = utc_now_iso()
@@ -3523,6 +3717,9 @@ def service_upgrade(
             include_position_advice = "position-advice" not in managed_plugins and (
                 include_position_advice or _legacy_position_advice_enabled(previous_dir=previous_dir, runtime_root=runtime)
             )
+            include_feishu, include_wechat = _message_package_selection(
+                previous_dir=previous_dir, runtime_root=runtime, run_cmd=run_cmd, operations=operations,
+            )
             runtime_prepare = _ensure_release_runtime(
                 target_dir=target_dir,
                 cache_root=cache,
@@ -3531,6 +3728,7 @@ def service_upgrade(
                 include_pm=include_pm,
                 include_longbridge=include_longbridge,
                 include_position_advice=include_position_advice,
+                include_feishu=include_feishu, include_wechat=include_wechat,
             )
             _preserve_managed_plugins(
                 target_dir=target_dir, selected=managed_plugins, run_cmd=run_cmd, operations=operations,

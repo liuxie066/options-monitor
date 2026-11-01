@@ -24,6 +24,10 @@ class PollCancelled(BaseException):
 
 
 def _case(tmp_path: Path, monkeypatch, responses, *, blocked_requests=()):
+    # Poll transport failures have an isolated, valid legacy control source.
+    # No config artifact is created by the poll (the original assertions remain).
+    monkeypatch.setattr("src.application.bot.control.config_loader.load_bot_config",
+        lambda **kwargs: (tmp_path / "absent-bot.json", {}))
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     store = WechatClawbotStateStore(state_dir)

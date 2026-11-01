@@ -93,7 +93,7 @@ def send_feishu_app_message(
     idempotency_key: str | None = None,
     transport_envelope: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    del base, target
+    del base
     resolved_channel = str(channel or "").strip().lower()
     if resolved_channel != FEISHU_APP_NOTIFICATION_PROVIDER:
         raise ValueError(f"unsupported notification provider for feishu app sender: {channel}")
@@ -103,7 +103,8 @@ def send_feishu_app_message(
     if missing:
         raise ValueError("Feishu bot env missing required fields: " + ", ".join(missing))
 
-    receive_id = bot_cfg.user_open_id
+    receive_id = (str(target or "").strip() if (notifications or {}).get("_explicit_route_target") is True
+                  else bot_cfg.user_open_id)
     if not receive_id:
         raise ValueError("Feishu bot user open_id is required")
     if receive_id_type != "open_id":

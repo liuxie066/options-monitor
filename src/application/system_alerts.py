@@ -12,24 +12,19 @@ from pathlib import Path
 
 from domain.domain.multi_tick import (
     DEFAULT_NOTIFICATION_PROVIDER,
-    FEISHU_APP_NOTIFICATION_PROVIDER,
-    WECHAT_CLAWBOT_NOTIFICATION_PROVIDER,
 )
 from domain.storage.repositories import state_repo
 from domain.storage.json_io import atomic_write_private_json as atomic_write_json
-from src.application.channels.wechat_clawbot.state import (
-    default_wechat_clawbot_state_root,
-    load_wechat_clawbot_binding,
-    load_wechat_clawbot_state,
-)
-from src.application.channels.wechat_clawbot.state_store import WechatClawbotStateStore
 from src.application.notification_delivery_adapter import (
     normalize_notification_delivery_result,
     select_notification_delivery_adapter,
 )
-from src.application.notification_delivery_route import notifications_enabled, resolve_notification_delivery_route
+from src.application.notification_delivery_route import (
+    notifications_enabled, resolve_notification_delivery_route, resolve_notification_delivery_routes,
+)
+from src.application.notification_fanout_delivery import send_notification_fanout, uses_proactive_fanout
 from src.application.notification_shells import render_system_notice
-from src.application.secret_resolver import resolve_feishu_bot_config
+from src.application.account_config import accounts_from_config
 
 _MAX_INCIDENTS = 512
 _SILENCE_SECONDS = 600
@@ -94,43 +89,33 @@ def _fingerprint(unit: str, market: str, account: str, failure_code: str, stage:
     return hashlib.sha256(json.dumps(fields, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
-def _fallback_route(base: Path, primary_provider: str) -> dict | None:
-    if primary_provider == WECHAT_CLAWBOT_NOTIFICATION_PROVIDER:
-        bot = resolve_feishu_bot_config(notifications={})
-        if bot.send_missing_fields:
-            return None
-        return {"provider": FEISHU_APP_NOTIFICATION_PROVIDER, "channel": FEISHU_APP_NOTIFICATION_PROVIDER,
-                "target": bot.user_open_id, "notifications": {}}
-    if primary_provider == FEISHU_APP_NOTIFICATION_PROVIDER:
-        root = default_wechat_clawbot_state_root(base)
-        targets = []
-        for state_dir in root.iterdir() if root.is_dir() else ():
-            if state_dir.is_symlink() or not state_dir.is_dir():
-                continue
-            label = state_dir.name
-            try:
-                load_wechat_clawbot_state(base=base, label=label, notifications={})
-                bindings = WechatClawbotStateStore(state_dir).load_bindings().get("bindings", {})
-                for name in bindings if isinstance(bindings, dict) else ():
-                    target = f"wechat:{label}:{name}"
-                    try:
-                        load_wechat_clawbot_binding(base=base, target=target, notifications={})
-                    except (OSError, ValueError):
-                        continue
-                    else:
-                        targets.append(target)
-            except (OSError, ValueError):
-                continue
-        if len(targets) == 1:
-            return {"provider": WECHAT_CLAWBOT_NOTIFICATION_PROVIDER,
-                    "channel": WECHAT_CLAWBOT_NOTIFICATION_PROVIDER, "target": targets[0], "notifications": {}}
-    return None
-
-
-def _send(base: Path, config: dict | None, message: str, key: str) -> dict:
-    if not notifications_enabled(config):
+def _send(base: Path, config: dict | None, message: str, key: str, *, account: str = "") -> dict:
+    if not notifications_enabled(config) and not uses_proactive_fanout(config):
         return {"delivery_confirmed": False, "provider": None, "fallback_used": False,
                 "attempted": False, "reason": "notifications_disabled"}
+    if uses_proactive_fanout(config):
+        routes = None
+        if account == "all" and (config or {}).get("notifications", {}).get("routes"):
+            # Project global operational notices onto configured account routes;
+            # "all" is never a wildcard for account-specific business messages.
+            labels = accounts_from_config(config, fallback=())
+            if not labels and notifications_enabled(config):
+                return {"delivery_confirmed": False, "provider": None, "fallback_used": False,
+                        "attempted": False, "reason": "system_alert_scope_unavailable"}
+            routes = []
+            identities = set()
+            for label in labels:
+                for selected in resolve_notification_delivery_routes(config=config, account=label, base=base):
+                    if selected["identity_key"] not in identities:
+                        identities.add(selected["identity_key"])
+                        routes.append(selected)
+        delivery = send_notification_fanout(base=base, config=config, account=account, routes=routes,
+            logical_key="system-alert:" + key, message=message,
+            adapter_selector=select_notification_delivery_adapter)
+        delivery["fanout_status"] = delivery.pop("status")
+        if not delivery.get("attempted") and delivery.get("has_retryable_children"):
+            delivery["reason"] = "notifications_disabled"
+        return delivery
     try:
         route = resolve_notification_delivery_route(config=config or {})
     except Exception:
@@ -138,6 +123,9 @@ def _send(base: Path, config: dict | None, message: str, key: str) -> dict:
         provider = notifications.get("provider") if isinstance(notifications, dict) else None
         route = {"provider": provider or DEFAULT_NOTIFICATION_PROVIDER, "target": None}
     primary_provider = str(route.get("provider") or "")
+    if route.get("enabled") is False:
+        return {"delivery_confirmed": False, "provider": primary_provider, "fallback_used": False,
+                "attempted": False, "reason": "notifications_disabled"}
 
     def attempt(selected: dict, delivery_key: str, *, fallback_used: bool) -> dict:
         adapter = select_notification_delivery_adapter(selected.get("provider"))
@@ -154,32 +142,20 @@ def _send(base: Path, config: dict | None, message: str, key: str) -> dict:
 
     if str(route.get("target") or "").strip():
         try:
-            primary = attempt(route, key, fallback_used=False)
-            if primary["delivery_confirmed"] or not primary["explicit_pre_acceptance_failure"]:
-                return primary
+            return attempt(route, key, fallback_used=False)
         except ValueError as exc:
-            if not str(exc).startswith(("Feishu bot env missing required fields:",
-                                         "Feishu bot user open_id is required",
-                                         "WeChat ClawBot bot_token is missing",
-                                         "WeChat ClawBot binding not found:",
-                                         "WeChat ClawBot binding is incomplete:")):
-                return {"delivery_confirmed": False, "provider": primary_provider,
-                        "fallback_used": False, "attempted": True}
+            missing = str(exc).startswith(("Feishu bot env missing required fields:",
+                                           "Feishu bot user open_id is required",
+                                           "WeChat ClawBot bot_token is missing",
+                                           "WeChat ClawBot binding not found:",
+                                           "WeChat ClawBot binding is incomplete:"))
+            return {"delivery_confirmed": False, "provider": primary_provider,
+                    "fallback_used": False, "attempted": not missing}
         except Exception:
             return {"delivery_confirmed": False, "provider": primary_provider,
                     "fallback_used": False, "attempted": True}
-    try:
-        fallback = _fallback_route(base, primary_provider)
-        if fallback is not None:
-            fallback_key = hashlib.sha256((key + ":fallback:" + fallback["provider"]).encode()).hexdigest()
-            try:
-                return attempt(fallback, fallback_key, fallback_used=True)
-            except Exception:
-                return {"delivery_confirmed": False, "provider": fallback["provider"],
-                        "fallback_used": True, "attempted": True}
-    except Exception:
-        pass
-    return {"delivery_confirmed": False, "provider": None, "fallback_used": False, "attempted": False}
+    return {"delivery_confirmed": False, "provider": primary_provider,
+            "fallback_used": False, "attempted": False}
 
 
 def _audit_delivery(base: Path, *, run_id: str, incident: dict, recovery: bool = False) -> None:
@@ -247,7 +223,7 @@ def report_system_failure(
         now = datetime.now(timezone.utc)
         previous = state.get(key)
         active = isinstance(previous, dict) and previous.get("status") == "failed"
-        if active and notifications_enabled(config):
+        if active and notifications_enabled(config) and previous.get("delivery") != "disabled":
             try:
                 prior = datetime.fromisoformat(str(previous.get("last_attempt_at") or previous["reserved_at"]))
                 if (now - prior).total_seconds() < max(1, silence_seconds):
@@ -272,7 +248,7 @@ def report_system_failure(
                 ("first_error_at", first_error_at), ("opend_login_state", opend_login_state)),
     )
     try:
-        delivery = _send(base, config, message, hashlib.sha256((key + incident_at).encode()).hexdigest())
+        delivery = _send(base, config, message, hashlib.sha256((key + incident_at).encode()).hexdigest(), **({"account": account} if uses_proactive_fanout(config) else {}))
     except Exception:
         delivery = {"delivery_confirmed": False, "provider": None, "fallback_used": False, "attempted": False}
     with _state_lock(path):
@@ -306,11 +282,11 @@ def report_system_recovery(
             previous = {"status": "failed", "reserved_at": datetime.now(timezone.utc).isoformat()}
         if not isinstance(previous, dict):
             return "no_incident"
-        retry = previous.get("status") == "recovered" and previous.get("recovery_delivery") == "unknown" and (notify or disabled)
+        retry = previous.get("status") == "recovered" and (previous.get("recovery_delivery") == "unknown" or (previous.get("recovery_delivery") == "disabled" and uses_proactive_fanout(config))) and (notify or disabled)
         if previous.get("status") != "failed" and not retry:
             return "no_incident"
         now = datetime.now(timezone.utc)
-        if retry and notify:
+        if retry and notify and previous.get("recovery_delivery") != "disabled":
             try:
                 last_attempt = datetime.fromisoformat(str(previous["recovery_last_attempt_at"]))
                 if (now - last_attempt).total_seconds() < _SILENCE_SECONDS:
@@ -333,7 +309,7 @@ def report_system_recovery(
     message = message or render_system_notice(component=unit, status="✅ 已恢复", fields=(("market", market), ("account", account), ("failure_code", failure_code), ("stage", stage)))
     try:
         recovery_key = hashlib.sha256((key + incident_at + "-recovery").encode()).hexdigest()
-        delivery = _send(base, config, message, recovery_key)
+        delivery = _send(base, config, message, recovery_key, **({"account": account} if uses_proactive_fanout(config) else {}))
     except Exception:
         delivery = {"delivery_confirmed": False, "provider": None, "fallback_used": False, "attempted": False}
     confirmed = delivery["delivery_confirmed"]
@@ -345,14 +321,21 @@ def report_system_recovery(
                 state[key].setdefault("failure_" + field, state[key].get(field))
                 state[key][field] = delivery[field]
             state[key].setdefault("failure_delivery", state[key].get("delivery"))
-            state[key]["delivery"] = "confirmed" if confirmed else "unconfirmed" if delivery["attempted"] else "journal"
-            state[key]["recovery_delivery"] = "confirmed" if confirmed else "unknown"
+            state[key]["delivery"] = "disabled" if delivery.get("reason") == "notifications_disabled" else "confirmed" if confirmed else "unconfirmed" if delivery["attempted"] else "journal"
+            state[key]["recovery_delivery"] = "disabled" if delivery.get("reason") == "notifications_disabled" else "confirmed" if confirmed else "unknown"
             state[key]["recovery_delivery_confirmed"] = confirmed
             state[key]["recovery_fallback_used"] = delivery["fallback_used"]
             state[key]["recovery_provider"] = delivery["provider"]
+            for field in ("fanout_id", "children", "has_retryable_children", "fanout_status"):
+                if field in delivery:
+                    state[key]["recovery_" + field] = delivery[field]
             atomic_write_json(path, state)
     _audit_delivery(base, run_id=str(previous.get("run_id") or ""),
                     incident={**previous, **delivery}, recovery=True)
+    if delivery.get("reason") == "notifications_disabled":
+        retire_system_failure(base=base, unit=unit, market=market, account=account,
+                              failure_code="SYSTEM_RECOVERY_DELIVERY_UNCONFIRMED", stage="recovery_delivery")
+        return "suppressed"
     try:
         report_system_meta_signal(
             base=base, unit=unit, market=market, account=account,
@@ -418,7 +401,7 @@ def report_system_meta_signal(
                                       fields=(("market", market), ("account", account),
                                               ("failure_code", failure_code), ("stage", stage), ("reason", reason)))
         try:
-            delivery = _send(base, config, notice, hashlib.sha256((key + str(state[key].get("reserved_at") or now) + ("-recovery" if not degraded else "")).encode()).hexdigest())
+            delivery = _send(base, config, notice, hashlib.sha256((key + str(state[key].get("reserved_at") or now) + ("-recovery" if not degraded else "")).encode()).hexdigest(), **({"account": account} if uses_proactive_fanout(config) else {}))
         except Exception:
             delivery = {"delivery_confirmed": False, "provider": None, "fallback_used": False, "attempted": False}
         with _state_lock(path):

@@ -107,7 +107,7 @@ def observe_combo_confirmation_receipt_route(
     if account not in scope["allowed_accounts"]:
         return {"route_available": False, "reason": "account_receipt_disabled"}
     try:
-        route = resolve_trade_lifecycle_notification_batch_route(config=dict(config), base=runtime_root)
+        route = resolve_trade_lifecycle_notification_batch_route(config=dict(config), base=runtime_root, account=account)
         return {key: route.get(key) for key in (
             "route_available", "provider", "channel", "target_fingerprint",
             "route_fingerprint", "attribution_route_key",
