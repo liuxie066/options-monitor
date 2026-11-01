@@ -90,6 +90,9 @@ jobs:
         run: |
           ./.venv/bin/python -m ruff check .
 
+      - name: Qualify official plugin Release assets
+        run: ./.venv/bin/python scripts/build_plugin_wheels.py --output "$RUNNER_TEMP/plugin-wheels"
+
       - name: Guardrails checks
         run: |
           ./.venv/bin/python scripts/guardrails_check.py --check-doc-wording --check-runtime-config-tracking --check-sensitive-artifacts

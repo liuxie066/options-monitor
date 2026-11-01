@@ -69,6 +69,20 @@ Longbridge opening candidates use `opening_candidate_snapshot.v4` with explicit
 `broker_id`, `broker_account_id` and user-binding provenance. Readers retain
 Futu v1/v2/v3 semantics; a Longbridge ID is never stored as `futu_account_id`.
 
+Official distribution is owned by `plugin_release.py` (versioned wheels and
+catalog), `plugin_distribution.py` (preview/install/uninstall) and the stdlib-only
+`plugin_runtime.py` (fixed identities, receipt validation and lazy import).
+`om plugins` consumes only the exact host version's official Release assets.
+Managed files live outside the immutable code inventory, scoped to the resolved
+code root pinned at process startup; a current-symlink switch cannot rebind an
+existing process to the target's plugins. Runtime/account selection does not
+change package selection. Core
+startup registers a lazy finder without importing plugins or contacting services.
+Upgrade stages and validates target wheels before switching the current release.
+Rollback validates the target's existing managed selection and actual loading
+before staging configuration or switching; it neither downloads nor migrates plugins.
+Existing environment/pip installations retain their separate ownership.
+
 The scope is installed optional packages plus builtin provider adapters. There
 is no marketplace, dynamic third-party code discovery, hot unloading or new
 trading/transaction synchronization API. Installing a package does not enable

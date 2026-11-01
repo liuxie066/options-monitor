@@ -18,9 +18,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from src.application import runtime_bundle
+from src.application import plugin_distribution, runtime_bundle
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.file_locks import single_instance_lock
+from src.application.plugin_runtime import PLUGINS, read_managed_plugin
 from src.application.release_target import compare_versions, parse_version, resolve_upgrade_target
 from src.application.runtime_config_freshness import (
     GENERATED_KEY,
@@ -2288,8 +2289,79 @@ def _installed_optional_packages(
     return installed[0], installed[1], installed[2]
 
 
+def _managed_plugin_selection(release_dir: Path) -> list[str]:
+    selected = []
+    for plugin_id in PLUGINS:
+        try:
+            if read_managed_plugin(release_dir, plugin_id) is not None:
+                selected.append(plugin_id)
+        except ValueError as exc:
+            raise ServiceTransitionError(
+                f"invalid managed plugin {plugin_id} in {release_dir}: {exc}",
+                status="managed_plugin_invalid",
+            ) from exc
+    return selected
+
+
+def _preserve_managed_plugins(
+    *, target_dir: Path, selected: list[str], run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> None:
+    # A failed earlier attempt must not resurrect a subsequently removed plugin.
+    unexpected = set(_managed_plugin_selection(target_dir)) - set(selected)
+    if unexpected:
+        raise ServiceTransitionError(
+            "target release has unselected managed plugins: " + ", ".join(sorted(unexpected))
+            + "; remove them explicitly from the target release before retrying",
+            status="managed_plugin_selection_mismatch",
+        )
+    for plugin_id in selected:
+        result = plugin_distribution.install_plugin(
+            plugin_id, repo_root=target_dir, confirm=True, python_executable=_release_python(target_dir),
+        )
+        operations.append({"operation": "preserve_managed_plugin", **result})
+    _validate_target_managed_plugins(
+        target_dir=target_dir, selected=selected, run_cmd=run_cmd, operations=operations,
+    )
+
+
+def _validate_target_managed_plugins(
+    *, target_dir: Path, selected: list[str], run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> None:
+    if not selected:
+        return
+    # Exercise the target's ordinary finder/loaders, not the previous store or staged import path.
+    code = (
+        "import importlib, json, sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import src\n"
+        "from src.application.plugin_runtime import PLUGINS, plugin_store, read_managed_plugin\n"
+        "root = Path(sys.argv[1]).resolve()\n"
+        "version = (root / 'VERSION').read_text().strip()\n"
+        "for plugin_id in json.loads(sys.argv[2]):\n"
+        "    receipt = read_managed_plugin(root, plugin_id)\n"
+        "    assert receipt is not None, 'managed plugin missing from target release'\n"
+        "    assert receipt['version'] == version, 'managed wheel version differs from target OM release'\n"
+        "    module = PLUGINS[plugin_id]['module']\n"
+        "    plugin = importlib.import_module(module)\n"
+        "    expected = plugin_store(root) / plugin_id / 'site' / module / '__init__.py'\n"
+        "    assert Path(plugin.__file__).resolve() == expected.resolve(), 'plugin did not load from target store'\n"
+        "    if plugin_id == 'pm':\n"
+        "        from src.application.portfolio_management import load_portfolio_management_client_class\n"
+        "        assert callable(load_portfolio_management_client_class())\n"
+        "    else:\n"
+        "        from domain.domain.close_advice import require_position_advice_plugin\n"
+        "        require_position_advice_plugin()\n"
+    )
+    _run_required(
+        [str(_release_python(target_dir)), "-I", "-c", code, str(target_dir), json.dumps(selected)],
+        cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=30,
+    )
+
+
 def _legacy_pm_enabled(*, previous_dir: Path, runtime_root: Path) -> bool:
-    if (previous_dir / "plugins/portfolio-management/pyproject.toml").is_file():
+    if ((previous_dir / "src/application/plugin_runtime.py").is_file()
+            or (previous_dir / "plugins/portfolio-management/pyproject.toml").is_file()):
         return False
     if not (previous_dir / "src/infrastructure/portfolio_management_client.py").is_file():
         return False
@@ -2311,7 +2383,8 @@ def _legacy_pm_enabled(*, previous_dir: Path, runtime_root: Path) -> bool:
 
 def _legacy_position_advice_enabled(*, previous_dir: Path, runtime_root: Path) -> bool:
     # A plugin-aware release with no installed distribution represents removal.
-    if (previous_dir / "plugins/position-advice/pyproject.toml").is_file():
+    if ((previous_dir / "src/application/plugin_runtime.py").is_file()
+            or (previous_dir / "plugins/position-advice/pyproject.toml").is_file()):
         return False
     if not (previous_dir / "domain/domain/close_advice.py").is_file():
         return False
@@ -3286,6 +3359,7 @@ def service_upgrade(
             if not target_dir.exists()
             else f"reuse existing release dir {target_dir}",
             f"verify bundled interpreter and dependencies at {target_dir}" if bundled else f"prepare release runtime at {target_dir / '.venv'}",
+            "preserve validated managed plugin selection using exact target release wheels and verify target loading",
             f"validate {target_dir}",
             "verify the target contains the supported Python Bot runtime",
             f"switch {repo_link} -> {target_dir}",
@@ -3301,6 +3375,7 @@ def service_upgrade(
             planned.append(f"cleanup old releases after successful upgrade, keep {status_base['cleanup_keep_releases']} releases")
         if not confirm:
             try:
+                _managed_plugin_selection(previous_dir)
                 if (preserve_activation_state or pre_upgrade_profile.get("service_provider") == "launchd") and pre_upgrade_profile:
                     preserved_activation_states = (
                         capture_preserved_timer_activation_states(
@@ -3378,6 +3453,7 @@ def service_upgrade(
         try:
             if lock_error is not None:
                 raise lock_error
+            managed_plugins = _managed_plugin_selection(previous_dir)
             if (preserve_activation_state or pre_upgrade_profile.get("service_provider") == "launchd") and pre_upgrade_profile:
                 preserved_activation_states = (
                     capture_preserved_timer_activation_states(
@@ -3441,9 +3517,11 @@ def service_upgrade(
             include_pm, include_longbridge, include_position_advice = _installed_optional_packages(
                 previous_dir=previous_dir, run_cmd=run_cmd, operations=operations,
             )
-            include_pm = include_pm or _legacy_pm_enabled(previous_dir=previous_dir, runtime_root=runtime)
-            include_position_advice = include_position_advice or _legacy_position_advice_enabled(
-                previous_dir=previous_dir, runtime_root=runtime,
+            include_pm = "pm" not in managed_plugins and (
+                include_pm or _legacy_pm_enabled(previous_dir=previous_dir, runtime_root=runtime)
+            )
+            include_position_advice = "position-advice" not in managed_plugins and (
+                include_position_advice or _legacy_position_advice_enabled(previous_dir=previous_dir, runtime_root=runtime)
             )
             runtime_prepare = _ensure_release_runtime(
                 target_dir=target_dir,
@@ -3453,6 +3531,9 @@ def service_upgrade(
                 include_pm=include_pm,
                 include_longbridge=include_longbridge,
                 include_position_advice=include_position_advice,
+            )
+            _preserve_managed_plugins(
+                target_dir=target_dir, selected=managed_plugins, run_cmd=run_cmd, operations=operations,
             )
             write_upgrade_status(
                 runtime_root=runtime,
@@ -3885,6 +3966,7 @@ def service_rollback(
                     status_base["preserved_activation_units"] = sorted(
                         preserved_activation_states
                     )
+                _managed_plugin_selection(target_dir)
                 runtime_readiness = _runtime_readiness(release_dir=target_dir)
             except ServiceTransitionError as exc:
                 return {
@@ -3906,6 +3988,7 @@ def service_rollback(
                 "target_dir": str(target_dir),
                 "warnings": [] if repo_root_is_symlink else ["confirmed rollback requires repo_root to be a current symlink"],
                 "planned_operations": [
+                    "validate the rollback target's installed managed plugins using its interpreter",
                     f"stage and validate runtime configs with {target_dir}",
                     "verify the rollback target contains the supported Python Bot runtime",
                     f"switch {repo_link} -> {target_dir}",
@@ -3957,6 +4040,10 @@ def service_rollback(
                     }
                 )
             runtime_readiness = _runtime_readiness(release_dir=target_dir)
+            _validate_target_managed_plugins(
+                target_dir=target_dir, selected=_managed_plugin_selection(target_dir),
+                run_cmd=run_cmd, operations=operations,
+            )
             runtime_config_prepare = _prepare_runtime_configs_for_release(
                 previous_dir=repo,
                 target_dir=target_dir,
