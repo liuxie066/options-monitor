@@ -102,6 +102,11 @@ om_select_repo_python() {
     return
   fi
 
+  if [[ -e "$repo_root/om.runtime.json" || -L "$repo_root/om.runtime.json" || -e "$repo_root/runtime" || -L "$repo_root/runtime" ]]; then
+    _om_validate_python_candidate "$repo_root/runtime/python/bin/python3" "declared bundle runtime"
+    return
+  fi
+
   if [[ -e "$repo_venv" || -L "$repo_venv" ]]; then
     _om_validate_python_candidate "$repo_python" "repo .venv"
     return

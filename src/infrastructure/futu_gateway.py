@@ -32,6 +32,7 @@ from src.infrastructure.futu_dataframe import futu_dataframe_records
 LOG = logging.getLogger(__name__)
 
 FUTU_QUERY_CONNECT_TIMEOUT_SEC = 8.0
+FUTU_ACCOUNT_CANDIDATE_LIMIT = 20
 
 FUTU_EARNINGS_CALENDAR_MIN_VERSION = "10.9.6908"
 FUTU_EARNINGS_CALENDAR_CAPABILITY = "get_earnings_calendar"
@@ -749,9 +750,15 @@ class FutuGateway:
     port: int
     _closed_client_ids: set[int] = field(default_factory=set, init=False, repr=False)
 
-    def _raise_mapped(self, exc: Exception, *, action: str) -> None:
+    def _raise_mapped(self, exc: Exception, *, action: str, redact_errors: bool = False) -> None:
         mapped = _map_error(exc, action=action)
+        if redact_errors:
+            # Account-list SDK failures may embed complete account IDs.
+            mapped.args = (f"{action} failed (code={mapped.code})",)
+            mapped.raw_error = None
         LOG.error("[futu_gateway] %s code=%s error=%s", action, getattr(mapped, "code", "UNKNOWN"), mapped)
+        if redact_errors:
+            raise mapped from None
         raise mapped
 
     def close(self) -> None:
@@ -782,7 +789,7 @@ class FutuGateway:
             self._raise_mapped(exc, action="ensure_quote_client")
         raise AssertionError("unreachable")
 
-    def _trade_client(self) -> Any:
+    def _trade_client(self, *, redact_errors: bool = False) -> Any:
         try:
             ensure = getattr(self.backend, "_ensure_trade_client", None)
             if callable(ensure):
@@ -790,7 +797,7 @@ class FutuGateway:
             _, trade = self.backend._ensure_clients()
             return trade
         except Exception as exc:
-            self._raise_mapped(exc, action="ensure_trade_client")
+            self._raise_mapped(exc, action="ensure_trade_client", redact_errors=redact_errors)
         raise AssertionError("unreachable")
 
     def ensure_quote_ready(self, *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
@@ -870,6 +877,76 @@ class FutuGateway:
             self._raise_mapped(exc, action="ensure_broker_ready")
         raise AssertionError("unreachable")
 
+    def _account_metadata_rows(self, *, check_ready: bool = False) -> list[dict[str, Any]]:
+        trade = self._trade_client(redact_errors=True)
+        try:
+            if check_ready:
+                state = self.client._unwrap(trade.get_global_state())
+                if not isinstance(state, dict):
+                    raise FutuGatewayError("OpenD global state unavailable")
+                if state.get("program_status_type") != "READY":
+                    raise FutuGatewayTransientError("OpenD is not ready")
+                if state.get("trd_logined") is not True:
+                    raise FutuGatewayAuthExpiredError("OpenD trade not logged in")
+            data = self.client._unwrap(trade.get_acc_list())
+            if check_ready:
+                return _FutuAPIClient._rows(data, strict=True)
+            return self.client._rows(data)
+        except Exception as exc:
+            self._raise_mapped(exc, action="get_account_metadata", redact_errors=True)
+        raise AssertionError("unreachable")
+
+    def get_account_candidates(
+        self, *, trd_env: str, expected_market: str,
+        max_candidates: int = FUTU_ACCOUNT_CANDIDATE_LIMIT,
+    ) -> dict[str, Any]:
+        """Read one bounded metadata selection; full IDs are for in-memory use only.
+
+        No asset queries, unlock, retry, quote context, or account cache. The SDK
+        returns its account list in one response; only the result size is capped.
+        """
+        environment = _normalize_trade_environment(trd_env)
+        market = str(expected_market or "").strip().upper()
+        if (environment not in {"REAL", "SIMULATE"} or market not in {"US", "HK"}
+                or isinstance(max_candidates, bool) or not isinstance(max_candidates, int)
+                or not 1 <= max_candidates <= FUTU_ACCOUNT_CANDIDATE_LIMIT):
+            raise FutuGatewayError("get_account_candidates failed: invalid selection scope or limit")
+        rows = self._account_metadata_rows(check_ready=True)
+        candidates: list[dict[str, Any]] = []
+        permission_unknown_count = 0
+        identity_unknown_count = 0
+        matched_count = 0
+        for row in rows:
+            if _normalize_trade_environment(row.get("trd_env") or row.get("env")) != environment:
+                continue
+            permission = _account_supports_market(row, market)
+            if permission is None:
+                permission_unknown_count += 1
+                continue
+            if not permission:
+                continue
+            account_id = _normalize_observed_account_id(row.get("acc_id"))
+            if not account_id:
+                identity_unknown_count += 1
+                continue
+            matched_count += 1
+            if len(candidates) < max_candidates:
+                candidates.append({
+                    "account_id": account_id,
+                    "masked_account_id": _mask_account_id(account_id),
+                    "acc_type": _account_type(row.get("acc_type")),
+                    "sim_acc_type": _account_type(row.get("sim_acc_type")),
+                })
+        status = ("ok" if candidates else "empty" if not rows else
+                  "permission_unavailable" if permission_unknown_count else
+                  "identity_unavailable" if identity_unknown_count else "no_match")
+        return {
+            "status": status, "trd_env": environment, "market": market,
+            "candidates": candidates, "truncated": matched_count > max_candidates,
+            "permission_unknown_count": permission_unknown_count,
+            "identity_unknown_count": identity_unknown_count,
+        }
+
     def get_account_metadata(
         self,
         *,
@@ -879,7 +956,6 @@ class FutuGateway:
     ) -> dict[str, Any]:
         """Read one redacted account-list match without querying account assets."""
 
-        trade = self._trade_client()
         expected = _normalize_observed_account_id(expected_account_id)
         environment = _normalize_trade_environment(trd_env)
         market = str(expected_market or "").strip().upper()
@@ -888,22 +964,14 @@ class FutuGateway:
                 "get_account_metadata failed: account identity is incomplete"
             )
         try:
-            rows = self.client._rows(self.client._unwrap(trade.get_acc_list()))
-
-            def supports_market(row: Mapping[str, Any]) -> bool:
-                raw = row.get("trdmarket_auth")
-                values = raw if isinstance(raw, (list, tuple, set)) else [raw]
-                return any(
-                    str(value or "").strip().upper() in {market, f"TrdMarket.{market}".upper()}
-                    for value in values
-                )
+            rows = self._account_metadata_rows()
 
             eligible = [
                 row
                 for row in rows
                 if _normalize_trade_environment(row.get("trd_env") or row.get("env"))
                 == environment
-                and supports_market(row)
+                and _account_supports_market(row, market) is True
             ]
             matched = next(
                 (
@@ -930,7 +998,7 @@ class FutuGateway:
                 "same_type_count": same_type_count,
             }
         except Exception as exc:
-            self._raise_mapped(exc, action="get_account_metadata")
+            self._raise_mapped(exc, action="get_account_metadata", redact_errors=True)
         raise AssertionError("unreachable")
 
     def get_option_expiration_dates(self, code: str) -> Any:
@@ -1294,6 +1362,23 @@ def _normalize_trade_environment(value: Any) -> str:
     if "." in raw:
         raw = raw.rsplit(".", 1)[-1]
     return raw
+
+
+def _account_supports_market(row: Mapping[str, Any], market: str) -> bool | None:
+    raw = row.get("trdmarket_auth")
+    values = raw if isinstance(raw, (list, tuple, set)) else [raw]
+    normalized = {str(value or "").strip().upper() for value in values}
+    if normalized & {market, f"TRDMARKET.{market}"}:
+        return True
+    known = {"HK", "US", "CN", "HKCC", "FUTURES", "SG", "JP", "AU", "MY", "CA"}
+    known |= {f"TRDMARKET.{value}" for value in known}
+    return False if normalized <= known else None
+
+
+def _account_type(value: Any) -> str | None:
+    # Only SDK type labels belong in menus; never echo arbitrary provider text.
+    raw = str(value or "").strip().upper().rsplit(".", 1)[-1]
+    return raw if raw in {"CASH", "MARGIN", "OPTION", "STOCK", "FUTURES"} else None
 
 
 def _mask_account_id(value: str) -> str:

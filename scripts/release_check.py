@@ -59,6 +59,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="optional release delta manifest path; requires --require-delta-coverage",
     )
+    parser.add_argument("--bundle-dir", type=Path, help="verify complete qualified runtime publication artifacts")
     return parser.parse_args()
 
 
@@ -98,6 +99,12 @@ def main() -> int:
             )
         except ReleaseDeltaCoverageError as exc:
             raise SystemExit(f"[RELEASE_ERROR] {exc.reason_code}: {exc.message}") from exc
+
+    if args.bundle_dir:
+        import subprocess
+        from src.application.runtime_bundle import validate_publication_set
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=base, text=True).strip()
+        validate_publication_set(base, args.bundle_dir, tag=f"v{version}", commit=commit)
 
     if args.render_notes_out:
         out_path = Path(args.render_notes_out).expanduser().resolve()

@@ -36,6 +36,105 @@ def _reject_run_logger(*_args, **_kwargs):
     raise AssertionError("run logger must not start")
 
 
+def test_execute_tick_validation_failure_cannot_reuse_stale_global(monkeypatch, tmp_path):
+    from src.application import multi_account_tick as mod
+
+    config = tmp_path / "config.us.json"
+    _write_market_config(config, "us", [])
+    _patch_config_bootstrap(monkeypatch, mod)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setattr(mod, "_CURRENT_RUN_ID", "old-success")
+    monkeypatch.setattr(mod, "RunLogger", _reject_run_logger)
+    result = mod.execute_tick(["--config", str(config), "--accounts", "unknown", "--no-send"])
+
+    assert result.rc == 2
+    assert result.run_created is False
+    assert result.run_id is None
+    assert result.accounts == ()
+    assert result.runtime_root == (tmp_path / "runtime").resolve()
+    assert result.config_path == config.resolve()
+    assert result.market == "US"
+    assert "invalid account scope" in result.error
+    assert mod.current_run_id() == "old-success"
+    assert not result.runtime_root.exists()
+
+
+def test_execute_tick_interleaved_invocations_keep_their_own_identity(monkeypatch, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from src.application import multi_account_tick as mod
+
+    configs = [tmp_path / "config.us.json", tmp_path / "config.hk.json"]
+    for config, market, account in zip(configs, ("us", "hk"), ("lx", "sy")):
+        _write_market_config(config, market, [])
+        data = json.loads(config.read_text())
+        data["accounts"] = [account]
+        config.write_text(json.dumps(data))
+    barrier = threading.Barrier(2)
+    sequence_lock = threading.Lock()
+    issued = []
+
+    class Log:
+        def __init__(self, _base):
+            with sequence_lock:
+                self.run_id = f"run-{len(issued)}"
+                issued.append(self.run_id)
+        def safe_event(self, *_args, **_kwargs):
+            pass
+
+    def guard(request):
+        barrier.wait(timeout=10)
+        return SimpleNamespace(should_continue=False, return_code=3 if request.market_config == "hk" else 0)
+
+    _patch_runtime_bootstrap(monkeypatch, mod, tmp_path / "runtime", Log, guard)
+    invocation = threading.local()
+    monkeypatch.setattr(mod, "resolve_runtime_root", lambda **_kw: SimpleNamespace(runtime_root=invocation.root, source="fixture"))
+    monkeypatch.setattr(mod.state_repo, "claim_idempotency_record", lambda *_a, **_kw: {"claimed": True})
+
+    def execute(config):
+        invocation.root = tmp_path / config.stem
+        return mod.execute_tick([
+            "--config", str(config), "--market-config", config.stem.split(".")[-1], "--no-send",
+        ])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(execute, configs))
+    assert len(set(item.run_id for item in results)) == 2
+    assert {item.run_id for item in results} == set(issued)
+    for result, config, market, account, rc in zip(results, configs, ("US", "HK"), ("lx", "sy"), (0, 3)):
+        assert result.run_created is True
+        assert result.rc == rc
+        assert result.market == market
+        assert result.accounts == (account,)
+        assert result.config_path == config.resolve()
+        assert result.runtime_root == (tmp_path / config.stem).resolve()
+    assert sum(item.run_id == mod.current_run_id() for item in results) == 1
+
+
+@pytest.mark.parametrize("failure", [OSError, KeyboardInterrupt])
+def test_execute_tick_keeps_created_run_on_runtime_failure(monkeypatch, tmp_path, failure):
+    from src.application import multi_account_tick as mod
+
+    config = tmp_path / "config.us.json"
+    _write_market_config(config, "us", [])
+
+    class Log:
+        run_id = "current-failed"
+        def __init__(self, _base):
+            pass
+        def safe_event(self, *_a, **_kw):
+            pass
+
+    def guard(_request):
+        raise failure("local fixture failure")
+
+    _patch_runtime_bootstrap(monkeypatch, mod, tmp_path / "runtime", Log, guard)
+    result = mod.execute_tick(["--config", str(config), "--no-send"])
+    assert result.rc == (130 if failure is KeyboardInterrupt else 2)
+    assert result.run_created is True
+    assert result.run_id == "current-failed"
+    assert result.error == ("运行已取消" if failure is KeyboardInterrupt else "local fixture failure")
+
+
 def _patch_config_bootstrap(monkeypatch, mod, *, schedule_market: str = "") -> None:
     """Stub the runtime config bootstrap every artifact-free tick case reaches."""
     monkeypatch.setattr(mod, "resolve_config_contract", lambda *_args, **_kwargs: {})
@@ -1326,7 +1425,8 @@ def test_terminal_idempotency_write_failure_is_not_silently_swallowed(monkeypatc
 
 
 @pytest.mark.parametrize("completed", [True, False])
-def test_experience_history_failure_keeps_scan_outcome(monkeypatch, tmp_path, completed):
+@pytest.mark.parametrize("entry", ["main", "execute_tick"])
+def test_experience_history_failure_keeps_scan_outcome(monkeypatch, tmp_path, completed, entry):
     from zoneinfo import ZoneInfo
     from domain.domain.engine import SchedulerDecisionView
     from src.application import multi_account_tick as mod
@@ -1368,7 +1468,15 @@ def test_experience_history_failure_keeps_scan_outcome(monkeypatch, tmp_path, co
     history = tmp_path / "runtime/output_shared/state/tick_metrics_history.json"
     history.parent.mkdir(parents=True)
     history.write_bytes(b"broken")
-    assert mod.main(["--config", str(config), "--accounts", "lx", "--experience", "--no-send"]) == (0 if completed else 2)
+    result = getattr(mod, entry)(["--config", str(config), "--accounts", "lx", "--experience", "--no-send"])
+    if entry == "execute_tick":
+        assert result.run_created is True
+        assert result.run_id == "experience-history"
+        assert result.experience is True
+        assert result.experience_completed is completed
+        assert result.market == "US"
+        result = result.rc
+    assert result == (0 if completed else 2)
     assert history.read_bytes() == b"broken"
     assert any(e["step"] == "finalize" and e["status"] == "degraded"
                and e["data"]["action"] == "append_tick_metrics_history" for e in events)

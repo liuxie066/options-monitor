@@ -10,7 +10,13 @@ from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.setup import run_setup_check
 from src.application.config_yaml_init import _normalize_markets, _normalize_symbols, init_yaml_config
-from src.application.config_yaml_init import create_starter_config
+from src.application.config_yaml_init import (
+    DEFAULT_FUTU_ACCOUNT_ID, _normalize_account_label, _normalize_futu_account_id, create_starter_config,
+)
+from src.application.account_config import parse_lossless_integer
+from src.application.config_primitives import normalize_config_market, normalize_trd_env
+from src.application.config_yaml_symbols import _positive_strike, symbol_strategy_override
+from src.interfaces.cli.field_prompt import prompt_field
 from src.application.platform_profile import current_platform_profile
 from src.application.runtime_paths import read_runtime_root_record, runtime_root_record_path
 from src.application.settings import build_effective_env
@@ -72,20 +78,47 @@ def symbol_policies_from_args(
             for name, values in fields.items() if symbol in values
         }
         if interactive:
-            current = policy.get("symbol_strategy") or "必填"
-            entered = input_fn(f"{symbol} 策略 [csp/cc/both] [{current}]: ").strip().lower()
-            if entered:
-                policy["symbol_strategy"] = entered
-            strategy = policy.get("symbol_strategy")
+            current = policy.get("symbol_strategy") or ""
+            strategy = prompt_field(
+                f"{symbol} 策略：现金担保卖出认沽 CSP / 备兑卖出看涨 CC / 两类 both [{current or '必填'}]: ",
+                default=current, validate=_setup_strategy, input_fn=input_fn,
+            )
+            policy["symbol_strategy"] = strategy
+            currency = "HKD 港元" if symbol.endswith(".HK") else "USD 美元"
+            print(f"{symbol} 行权价单位：{currency}／股；这是合约筛选边界，"
+                  "不是最大亏损、资金保证或股票覆盖证明。")
             for side, enabled in (("csp", strategy in {"csp", "both"}), ("cc", strategy in {"cc", "both"})):
                 if not enabled:
+                    for bound in ("min", "max"):
+                        policy.pop(f"{side}_{bound}_strike", None)
                     continue
-                for bound in (("max", "min") if side == "csp" else ("min", "max")):
-                    name = f"{side}_{bound}_strike"
-                    current_value = policy.get(name) or ("必填" if (side, bound) in {("csp", "max"), ("cc", "min")} else "可选")
-                    entered = input_fn(f"{symbol} {side.upper()} {bound} strike [{current_value}]: ").strip()
-                    if entered:
-                        policy[name] = entered
+                required, optional = ("max", "min") if side == "csp" else ("min", "max")
+                name = f"{side}_{required}_strike"
+                meaning = "你愿意接货的最高行权价" if side == "csp" else "你愿意卖出股票的最低行权价"
+                policy[name] = prompt_field(
+                    f"{symbol} {side.upper()} {meaning}（{currency}）[{policy.get(name) or '必填'}]: ",
+                    default=policy.get(name, ""),
+                    validate=lambda raw, label=name: _validated_strike(raw, label=label), input_fn=input_fn,
+                )
+                name = f"{side}_{optional}_strike"
+
+                def validate_optional(raw: str) -> str | None:
+                    value = _validated_strike(raw, label=name) if raw and raw != "-" else None
+                    symbol_strategy_override(strategy=side, **{
+                        f"{side}_{required}_strike": policy[f"{side}_{required}_strike"], name: value,
+                    })
+                    return value
+
+                value = prompt_field(
+                    f"{symbol} {side.upper()} 是否进一步限制行权价区间？"
+                    f"{'最低' if optional == 'min' else '最高'}行权价（{currency}，留空保留，- 不限制）"
+                    f"[{policy.get(name) or '可选'}]: ",
+                    default=policy.get(name, ""), validate=validate_optional, input_fn=input_fn,
+                )
+                if value is not None:
+                    policy[name] = value
+                else:
+                    policy.pop(name, None)
         if not policy.get("symbol_strategy"):
             raise AgentToolError(code="INPUT_ERROR", message=f"{symbol} requires --symbol-strategy SYMBOL=csp|cc|both")
         policies[symbol] = {
@@ -93,6 +126,40 @@ def symbol_policies_from_args(
             **{name: value for name, value in policy.items() if name != "symbol_strategy"},
         }
     return policies
+
+
+def _setup_strategy(raw: str) -> str:
+    mode = {"1": "csp", "2": "cc", "3": "both"}.get(raw.lower(), raw.lower())
+    symbol_strategy_override(
+        strategy=mode, csp_max_strike=1 if mode in {"csp", "both"} else None,
+        cc_min_strike=1 if mode in {"cc", "both"} else None,
+    )
+    return mode
+
+
+def _validated_strike(raw: str, *, label: str) -> str:
+    _positive_strike(raw, label=label)
+    return raw
+
+
+def _setup_host(raw: str) -> str:
+    if not raw or any(char.isspace() for char in raw):
+        raise ValueError("OpenD 地址不能为空或包含空白")
+    return raw
+
+
+def _setup_port(raw: str) -> int:
+    port = parse_lossless_integer(raw)
+    if port is None or not 1 <= port <= 65535:
+        raise ValueError("OpenD 端口必须是 1–65535 的整数")
+    return port
+
+
+def _setup_account_id(raw: str) -> str:
+    account_id = _normalize_futu_account_id(raw)
+    if account_id == DEFAULT_FUTU_ACCOUNT_ID:
+        raise ValueError("富途账户 ID 必填（数字）")
+    return account_id
 
 
 def add_setup_commands(subparsers: Any) -> None:
@@ -166,37 +233,56 @@ def run_setup_init(
     if interactive:
         try:
             selected_default = markets[0] if markets and len(markets) == 1 and markets[0] in {"us", "hk"} else "us"
-            raw_market = input_fn(f"首次配置市场 [us/hk] [{selected_default}]: ").strip().lower() or selected_default
-            if raw_market not in {"us", "hk"}:
-                raise AgentToolError(code="INPUT_ERROR", message="interactive setup selects one market: us or hk")
+            raw_market = prompt_field(
+                f"首次配置市场 [us/hk] [{selected_default}]: ", default=selected_default,
+                validate=normalize_config_market, input_fn=input_fn,
+            )
             markets = [raw_market]
-            futu_host = input_fn(f"OpenD 地址 [{futu_host}]: ").strip() or futu_host
-            raw_port = input_fn(f"OpenD 端口 [{futu_port}]: ").strip()
-            if raw_port:
-                try:
-                    futu_port = int(raw_port)
-                except ValueError as exc:
-                    raise AgentToolError(code="INPUT_ERROR", message="OpenD port must be an integer") from exc
-            trd_env = input_fn(f"账户环境 REAL（真实）/SIMULATE（测试）[{trd_env or '必填'}]: ").strip().upper() or trd_env
-            account_label = input_fn(f"账户标签（自定义，必填）[{account_label or '无默认值'}]: ").strip() or account_label
-            if not account_label or not account_label.strip():
-                raise AgentToolError(code="INPUT_ERROR", message="账户标签必填，请填写自己的账户标签（--account-label）")
-            futu_acc_id = input_fn("富途账户 ID（数字，必填）: ").strip() or futu_acc_id
-            if not futu_acc_id:
-                raise AgentToolError(code="INPUT_ERROR", message="interactive setup requires a Futu account ID")
-            if not trd_env:
-                raise AgentToolError(code="INPUT_ERROR", message="interactive setup requires REAL or SIMULATE")
+            futu_host = prompt_field(f"OpenD 地址 [{futu_host}]: ", default=futu_host,
+                                     validate=_setup_host, input_fn=input_fn)
+            futu_port = prompt_field(f"OpenD 端口 [{futu_port}]: ", default=str(futu_port),
+                                     validate=_setup_port, input_fn=input_fn)
+            trd_env = prompt_field(
+                f"账户环境 REAL（真实）/SIMULATE（测试）[{trd_env or '必填'}]: ",
+                default=trd_env or "", validate=normalize_trd_env, input_fn=input_fn,
+            )
+            account_label = prompt_field(
+                f"账户标签（自定义，必填）[{account_label or '无默认值'}]: ",
+                default=account_label or "", validate=_normalize_account_label, input_fn=input_fn,
+            )
+            if futu_acc_id:
+                futu_acc_id = prompt_field(
+                    "富途账户 ID（数字，必填，手工填写后待验证）: ", default=futu_acc_id,
+                    validate=_setup_account_id, input_fn=input_fn,
+                )
+            else:
+                from src.interfaces.cli.account_selection import select_account
+
+                while True:
+                    selection = select_account(host=futu_host, port=futu_port, market=raw_market,
+                                               trd_env=trd_env, input_fn=input_fn)
+                    if selection.action == "cancelled":
+                        return "已退出账户选择；未写入，当前草稿未保存。\n", False
+                    if selection.action == "selected":
+                        futu_acc_id = selection.account_id
+                        break
+                    futu_host = prompt_field(f"OpenD 地址 [{futu_host}]: ", default=futu_host,
+                                             validate=_setup_host, input_fn=input_fn)
+                    futu_port = prompt_field(f"OpenD 端口 [{futu_port}]: ", default=str(futu_port),
+                                             validate=_setup_port, input_fn=input_fn)
             for market in _normalize_markets(markets):
-                current = ", ".join(symbols[market] or []) or "必填"
-                entered = input_fn(f"{market.upper()} 监控标的（逗号或空格分隔）[{current}]: ").strip()
-                if entered:
-                    symbols[market] = entered.replace(",", " ").split()
+                current = ", ".join(symbols[market] or [])
+                symbols[market] = prompt_field(
+                    f"{market.upper()} 监控标的（逗号或空格分隔）[{current or '必填'}]: ", default=current,
+                    validate=lambda raw: _normalize_symbols(raw.replace(",", " ").split(), market=market),
+                    input_fn=input_fn,
+                )
             selected_markets = _normalize_markets(markets)
             symbol_policies = symbol_policies_from_args(
                 args, symbols=symbols, markets=selected_markets, interactive=True, input_fn=input_fn,
             )
         except (EOFError, KeyboardInterrupt) as exc:
-            raise AgentToolError(code="INPUT_ERROR", message="setup init cancelled before preview") from exc
+            raise AgentToolError(code="INPUT_ERROR", message="setup init cancelled before preview；未写入，当前草稿未保存") from exc
     else:
         selected_markets = _normalize_markets(markets)
         symbol_policies = symbol_policies_from_args(args, symbols=symbols, markets=selected_markets)
@@ -246,6 +332,8 @@ def run_setup_init(
                 f"CC={'on' if call['enabled'] else 'off'}"
                 f" min_strike={call.get('min_strike', '-')} max_strike={call.get('max_strike', '-')}"
             )
+    lines.append("CSP max_strike：愿意接货的最高行权价；CC min_strike：愿意卖出股票的最低行权价。")
+    lines.append("价格按市场币种／股：US=USD 美元，HK=HKD 港元；这是合约筛选边界，不是最大亏损、资金保证或股票覆盖证明。")
     lines.append(f"OpenD：{preview['futu_host']}:{preview['futu_port']} · 环境：{preview['trd_env']}（尚未验证登录与账户）")
     if not trd_env:
         lines.append("账户环境尚未确认；当前仅按 REAL 生成预览，写入前必须选择 REAL/SIMULATE。")
