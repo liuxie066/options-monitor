@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -97,6 +98,22 @@ from domain.storage.repositories import state_repo
 
 
 _CURRENT_RUN_ID: str | None = None
+
+
+@dataclass(frozen=True)
+class TickExecutionResult:
+    """Invocation-local identity; absent fields were not validated/bound yet."""
+
+    rc: int = 2
+    run_created: bool = False
+    run_id: str | None = None
+    runtime_root: Path | None = None
+    config_path: Path | None = None
+    accounts: tuple[str, ...] = ()
+    market: str | None = None
+    experience: bool = False
+    experience_completed: bool = False
+    error: str | None = None
 
 
 def current_run_id() -> str | None:
@@ -225,7 +242,11 @@ def _opening_chain_warmup_context(
     }
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    _on_execution: Callable[[TickExecutionResult], None] | None = None,
+) -> int:
     ap = argparse.ArgumentParser(description='Multi-account tick with per-account notifications')
     ap.add_argument('--config', required=True)
     ap.add_argument('--accounts', nargs='+', default=None)
@@ -259,6 +280,11 @@ def main(argv: list[str] | None = None) -> int:
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
         cfg_path = (repo_root / cfg_path).resolve()
+    execution = TickExecutionResult(
+        runtime_root=base.resolve(), config_path=cfg_path.resolve(), experience=experience,
+    )
+    if _on_execution is not None:
+        _on_execution(execution)
     contract_info = resolve_config_contract(
         cfg_path,
         str(getattr(args, 'market_config', 'auto') or 'auto'),
@@ -306,6 +332,12 @@ def main(argv: list[str] | None = None) -> int:
         validate_config(deepcopy(base_cfg))
     else:
         validate_retired_symbol_worker_config(base_cfg)
+    execution = replace(
+        execution,
+        market=str(schedule_contract_info.get('market') or base_cfg.get('_generated', {}).get('market') or '').upper() or None,
+    )
+    if _on_execution is not None:
+        _on_execution(execution)
     try:
         for configured_account in resolve_configured_accounts(base_cfg):
             build_account_portfolio_source_plan(base_cfg, account=configured_account)
@@ -316,6 +348,9 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         raise SystemExit(f"[CONFIG_ERROR] invalid account scope: {exc}") from exc
     args.default_account = _resolve_default_account(args.default_account, args.accounts)
+    execution = replace(execution, accounts=tuple(args.accounts))
+    if _on_execution is not None:
+        _on_execution(execution)
     trigger_context = build_trigger_context()
     if experience:
         try:
@@ -339,6 +374,8 @@ def main(argv: list[str] | None = None) -> int:
     global _CURRENT_RUN_ID
     _CURRENT_RUN_ID = runlog.run_id  # pyright: ignore[reportConstantRedefinition]
     run_id = runlog.run_id
+    if _on_execution is not None:
+        _on_execution(replace(execution, run_created=True, run_id=run_id))
 
     syms0 = resolve_watchlist_config(base_cfg)
     src_counts: dict[str, int] = {}
@@ -846,6 +883,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         if experience_ok:
             audit_helper.guard_mark_success()
+        if _on_execution is not None:
+            _on_execution(replace(execution, run_created=True, run_id=run_id, experience_completed=experience_ok))
         return 0 if experience_ok else 2
 
     post_delivery_sidecars_finished = False
@@ -918,4 +957,26 @@ def run_tick(argv: list[str] | None = None) -> int:
     return int(multi_tick_main(list(argv or [])))
 
 
-__all__ = ['main', 'multi_tick_main', 'run_tick', 'current_run_id', '_CURRENT_RUN_ID']
+def execute_tick(argv: list[str] | None = None) -> TickExecutionResult:
+    """Run the same tick entry with a reference captured inside this invocation."""
+    result = TickExecutionResult()
+
+    def observe(value: TickExecutionResult) -> None:
+        nonlocal result
+        result = value
+
+    try:
+        rc = main(list(argv or []), _on_execution=observe)
+    except SystemExit as exc:
+        if result.runtime_root is None:
+            raise
+        rc = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 2)
+        return replace(result, rc=rc, error=str(exc) if rc else None)
+    except KeyboardInterrupt:
+        return replace(result, rc=130, error="运行已取消")
+    except Exception as exc:
+        return replace(result, rc=2, error=str(exc))
+    return replace(result, rc=int(rc))
+
+
+__all__ = ['main', 'multi_tick_main', 'run_tick', 'execute_tick', 'TickExecutionResult', 'current_run_id', '_CURRENT_RUN_ID']

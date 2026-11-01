@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.application.agent_tool_contracts import AgentToolError
+from src.application.config_primitives import configured_markets
 from src.application.config_defaults import DEFAULT_CONFIG_REF, default_config_sha256
 from src.application.config_primitives import file_sha256 as _file_sha256
 from src.application.config_primitives import path_for_metadata as _path_for_metadata
@@ -25,6 +27,25 @@ RUNTIME_CONFIG_MARKET_BY_NAME = {
     "config.us.json": "us",
     "config.hk.json": "hk",
 }
+
+
+def configured_runtime_markets(runtime_root: Path) -> list[str]:
+    """Authoring declares the expected snapshots; missing snapshots are not disabled markets."""
+    source = runtime_root / "config.yaml"
+    if source.exists() or source.is_symlink():
+        try:
+            document = load_yaml_config_file(source)
+        except (OSError, UnicodeError) as exc:
+            raise AgentToolError(code="CONFIG_ERROR", message="cannot read config.yaml") from exc
+        markets = configured_markets(document)
+        declared = document.get("markets")
+        if not markets or not isinstance(declared, dict) or set(markets) != set(declared):
+            raise AgentToolError(code="CONFIG_ERROR", message="config.yaml markets must configure us and/or hk objects")
+        return markets
+    # Existing runtime-only installations remain readable, with normal load/identity gates.
+    return [market for market in ("us", "hk")
+            if (runtime_root / f"config.{market}.json").exists()
+            or (runtime_root / f"config.{market}.json").is_symlink()]
 
 
 class RuntimeConfigFreshnessError(Exception):
@@ -692,6 +713,7 @@ __all__ = [
     "build_rebuild_command",
     "check_runtime_config_identity",
     "check_runtime_config_freshness",
+    "configured_runtime_markets",
     "ensure_runtime_config_identity",
     "ensure_runtime_config_freshness",
     "format_runtime_config_freshness_error",

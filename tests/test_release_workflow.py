@@ -150,8 +150,9 @@ def test_tag_movement_or_missing_blocks_tag_entrance():
 def test_publication_readback_requires_all_assets_and_exact_tag():
     class API:
         def __init__(self):
-            self.assets = [dict(id=i, name=n, state="uploaded", size=10) for i, n in enumerate(
-                [f"options-monitor-{TAG}.tar.gz", "om-agent-spec.json", "VERSION"], 1)]
+            self.assets = [dict(id=i, name=n, state="uploaded", size=10, digest="sha256:" + "a"*64) for i, n in enumerate(
+                [f"options-monitor-{TAG}.tar.gz", "om-agent-spec.json", "VERSION"] +
+                [f"options-monitor-{TAG}-macos-arm64.tar.gz{suffix}" for suffix in ("", ".sha256", ".manifest.json", ".qualification.json")], 1)]
         def get(self, path, **kwargs):
             if "/assets?" in path:
                 return self.assets
@@ -230,3 +231,20 @@ def test_request_completion_after_deadline_cannot_pass():
                             open_url=lambda *a, **k: io.BytesIO(b'{}'))
     with pytest.raises(checks.EvidenceError, match='deadline'):
         api.get('/actions/runs/10')
+
+
+def test_runtime_candidate_workflow_never_publishes_and_release_waits_for_qualified_set():
+    workflow = yaml.load((ROOT / '.github/workflows/runtime-bundle.yml').read_text(), Loader=yaml.BaseLoader)
+    assert workflow['permissions'] == {'contents': 'read'}
+    assert set(workflow['on']) == {'workflow_call', 'workflow_dispatch', 'pull_request'}
+    text = str(workflow)
+    assert 'softprops/action-gh-release' not in text and 'gh release' not in text
+    assert 'release_platforms' in text and 'runtime_bundle.lock.json' in text
+    assert '--require-clean' in text and 'OM_TEST_RUNTIME_BUNDLE' in text
+    release = workflows()['_release-reusable.yml']['jobs']
+    assert release['release']['needs'] == 'bundles'
+    assert release['bundles']['with']['release-platforms-only'] == 'true'
+    steps = release['release']['steps']
+    assert any('--bundle-dir runtime-bundles' in s.get('run', '') for s in steps)
+    publish = next(s for s in steps if s.get('id') == 'publish')
+    assert 'runtime-bundles/*' in publish['with']['files']

@@ -5,6 +5,61 @@ import pytest
 from src.application import futu_doctor
 
 
+def test_discovery_facade_forwards_exact_endpoint_scope_and_limit_and_closes(monkeypatch):
+    calls = []
+
+    class Gateway:
+        def get_account_candidates(self, **kwargs):
+            calls.append(kwargs)
+            return {"status": "ok", "candidates": [{"account_id": "912340001"}]}
+
+        def close(self):
+            calls.append("closed")
+
+    def build(**kwargs):
+        calls.append(kwargs)
+        return Gateway()
+
+    monkeypatch.setattr(futu_doctor, "build_futu_gateway", build)
+    result = futu_doctor.discover_account_candidates(
+        host="synthetic-endpoint", port=12345, market="hk", trd_env="REAL", max_candidates=3,
+    )
+    assert result["candidates"][0]["account_id"] == "912340001"
+    assert calls == [
+        {"host": "synthetic-endpoint", "port": 12345, "is_option_chain_cache_enabled": False},
+        {"trd_env": "REAL", "expected_market": "hk", "max_candidates": 3}, "closed",
+    ]
+
+
+def test_discovery_facade_failure_is_sanitized_and_closed(monkeypatch, capsys):
+    from src.infrastructure.futu_gateway import FutuGatewayAuthExpiredError
+
+    closed = []
+
+    class Gateway:
+        def get_account_candidates(self, **kwargs):
+            raise FutuGatewayAuthExpiredError("login expired 912340001")
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(futu_doctor, "build_futu_gateway", lambda **kwargs: Gateway())
+    result = futu_doctor.discover_account_candidates(host="synthetic", port=12345, market="us", trd_env="REAL")
+    assert result == {"status": "unavailable", "candidates": [], "error_code": "AUTH_EXPIRED"}
+    assert closed == [True]
+    assert "912340001" not in str(result) + capsys.readouterr().out
+
+
+def test_discovery_facade_factory_failure_does_not_escape_raw_error(monkeypatch):
+    def build(**kwargs):
+        raise RuntimeError("unexpected SDK error account 912340001")
+
+    monkeypatch.setattr(futu_doctor, "build_futu_gateway", build)
+    assert futu_doctor.discover_account_candidates(
+        host="synthetic", port=12345, market="us", trd_env="REAL",
+    ) == {"status": "unavailable", "candidates": [], "error_code": "UNKNOWN"}
+
+
 def test_required_option_fields_uses_gateway(monkeypatch) -> None:
     calls: list[list[str]] = []
 

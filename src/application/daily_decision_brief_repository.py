@@ -1228,6 +1228,50 @@ def expire_daily_decision_brief_delivery_day(
         }
 
 
+def read_run_daily_decision_brief(
+    *, base: Path, account: str, market: str, run_id: str,
+) -> dict[str, Any]:
+    """Read only this run, reconciling a success export with immutable history.
+
+    Failures are retained in history without a success export. Missing success
+    exports/history never fall back to current or another run's revision.
+    """
+    base = Path(base).resolve()
+    account = _normalize_account(account)
+    market = _normalize_market(market)
+    run_id = _normalize_run_id(run_id)
+    path = paths.run_account_state_dir(base, run_id, account) / f"daily_decision_brief.{market}.json"
+    unavailable = {"available": False, "brief": None, "path": path}
+    try:
+        if not history_path(base).exists():
+            return {**unavailable, "reason": "not_found"}
+        row = DecisionHistoryStore(history_path(base)).get(account=account, market=market, run_id=run_id)
+        if row is None:
+            return {**unavailable, "reason": "not_found"}
+        brief = _normalize_persisted_brief(row["payload"], path=history_path(base), account=account, market=market)
+        if row["successful"]:
+            exported = _read_json_strict(path)
+            if exported is _MISSING:
+                return {**unavailable, "reason": "not_found"}
+            exported = _normalize_persisted_brief(exported, path=path, account=account, market=market)
+            if (exported["run_id"], exported["market_trading_date"], exported["revision"]) != (
+                run_id, brief["market_trading_date"], brief["revision"],
+            ):
+                raise DailyDecisionBriefStateError(f"daily brief run export identity mismatch: {path}")
+            _validate_successful_revision_source(
+                base=base, account=account, market=market,
+                market_trading_date=brief["market_trading_date"], revision=int(brief["revision"]),
+                source_digest=daily_brief_digest(exported),
+            )
+    except (DailyDecisionBriefStateError, DecisionHistoryError, OSError, UnicodeError) as exc:
+        return {**unavailable, "reason": "state_invalid", "error": str(exc)}
+    return {
+        "available": True, "reason": "ok" if row["successful"] else "scan_failed",
+        "brief": brief, "brief_digest": daily_brief_digest(brief),
+        "path": path if row["successful"] else history_path(base),
+    }
+
+
 def read_latest_daily_decision_brief(*, base: Path, account: str, market: str) -> dict[str, Any]:
     base_path = Path(base).resolve()
     account_norm = _normalize_account(account)
@@ -2863,6 +2907,7 @@ __all__ = [
     "read_daily_decision_brief_fixed_recovery",
     "read_combo_candidate_exposures",
     "read_latest_daily_decision_brief",
+    "read_run_daily_decision_brief",
     "read_retryable_daily_decision_brief_delivery",
     "record_daily_decision_brief_candidates",
     "record_daily_decision_brief_fixed_recovery",

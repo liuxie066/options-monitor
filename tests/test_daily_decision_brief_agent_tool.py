@@ -303,3 +303,73 @@ def test_shared_notification_preview_history_contract_and_examples():
         validate_daily_brief_query_input(example["input"])
     with pytest.raises(AgentToolError, match="market is required"):
         PREVIEW_NOTIFICATION_TOOL.call({"account": "lx", "date": "2026-07-19", "revision": 0})
+
+
+@pytest.mark.parametrize("markets", [["us"], ["hk"], ["us", "hk"]])
+def test_default_brief_scope_uses_authoring_markets_without_writes(tmp_path, markets):
+    from src.application.config_yaml_init import init_yaml_config
+    from src.application.agent_tools.daily_brief import read_daily_brief_view
+    from src.application.daily_decision_brief_repository import persist_daily_decision_brief_success
+
+    init_yaml_config(account_label="mine", futu_acc_id="123456", repo_root=Path(__file__).resolve().parents[1],
+                     output_config_yaml_path=tmp_path / "config.yaml", runtime_output_dir=tmp_path,
+                     bot_output_config_path=tmp_path / "resolved/config.bot.json", markets=markets,
+                     us_symbols=["AAPL"], hk_symbols=["0700.HK"])
+    for market in markets:
+        brief = {**_brief(), "account": "mine", "market": market.upper()}
+        persist_daily_decision_brief_success(base=tmp_path, brief=brief)
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    data = read_daily_brief_view(base=tmp_path)
+    assert data["reason"] == "ok"
+    assert {(item["query"]["account"], item["query"]["market"]) for item in data["sections"]} == {
+        ("mine", market.upper()) for market in markets
+    }
+    assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("failure", ["missing", "corrupt", "stale", "identity", "source_corrupt", "market_invalid"])
+def test_default_brief_scope_does_not_skip_configured_errors(tmp_path, failure):
+    import json
+    import yaml
+    from src.application.config_yaml_init import init_yaml_config
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.agent_tools.daily_brief import read_daily_brief_view
+
+    source = tmp_path / "config.yaml"
+    init_yaml_config(account_label="mine", futu_acc_id="123456", repo_root=Path(__file__).resolve().parents[1],
+                     output_config_yaml_path=source, runtime_output_dir=tmp_path,
+                     bot_output_config_path=tmp_path / "resolved/config.bot.json", markets=["us", "hk"],
+                     us_symbols=["AAPL"], hk_symbols=["0700.HK"])
+    snapshot = tmp_path / "config.hk.json"
+    if failure == "missing":
+        snapshot.unlink()
+    elif failure == "corrupt":
+        snapshot.write_text("{")
+    elif failure in {"stale", "market_invalid"}:
+        document = yaml.safe_load(source.read_text())
+        document["markets"]["hk"] = None if failure == "market_invalid" else {
+            **document["markets"]["hk"], "symbols": ["0005.HK"],
+        }
+        source.write_text(yaml.safe_dump(document))
+    elif failure == "source_corrupt":
+        source.write_text("markets: [")
+    else:
+        document = json.loads(snapshot.read_text())
+        document["_generated"]["market"] = "us"
+        snapshot.write_text(json.dumps(document))
+    with pytest.raises(AgentToolError) as error:
+        read_daily_brief_view(base=tmp_path)
+    assert error.value.code == "CONFIG_ERROR"
+
+
+def test_default_brief_scope_keeps_existing_runtime_only_layout(tmp_path):
+    from src.application.config_yaml_init import init_yaml_config
+    from src.application.agent_tools.daily_brief import read_daily_brief_view
+    runtime = tmp_path / "runtime"
+    init_yaml_config(account_label="mine", futu_acc_id="123456", repo_root=Path(__file__).resolve().parents[1],
+                     output_config_yaml_path=tmp_path / "authoring/config.yaml", runtime_output_dir=runtime,
+                     bot_output_config_path=runtime / "resolved/config.bot.json", markets=["hk"], hk_symbols=["0700.HK"])
+    data = read_daily_brief_view(base=runtime)
+    assert len(data["sections"]) == 1
+    assert data["sections"][0]["query"]["market"] == "HK"
+    assert data["reason"] == "not_found"

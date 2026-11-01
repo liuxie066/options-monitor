@@ -15,6 +15,9 @@ from src.application.daily_decision_brief_repository import (
     read_latest_daily_decision_brief,
 )
 from src.application.runtime_paths import resolve_runtime_root
+from src.application.runtime_config_freshness import (
+    RuntimeConfigFreshnessError, configured_runtime_markets, ensure_runtime_config_freshness,
+)
 
 
 _MARKETS = ("US", "HK")
@@ -118,7 +121,7 @@ def read_daily_brief_view(
             now_utc=now,
         )
 
-    scopes = _enabled_daily_brief_scopes(account=account_norm, market=market_norm)
+    scopes = _enabled_daily_brief_scopes(base=base, account=account_norm, market=market_norm)
     sections = [
         _read_single_daily_brief_view(
             base=base,
@@ -207,11 +210,22 @@ def _read_single_daily_brief_view(
     }
 
 
-def _enabled_daily_brief_scopes(*, account: str | None, market: str | None) -> list[tuple[str, str]]:
-    markets = (market,) if market is not None else _MARKETS
+def _enabled_daily_brief_scopes(*, base: Path, account: str | None, market: str | None) -> list[tuple[str, str]]:
+    markets = (market,) if market is not None else tuple(
+        item.upper() for item in configured_runtime_markets(base)
+    ) or _MARKETS
     scopes: set[tuple[str, str]] = set()
     for market_name in markets:
-        _path, cfg = load_runtime_config(config_key=market_name.lower(), expected_market=market_name.lower())
+        path, cfg = load_runtime_config(
+            config_key=market_name.lower(), config_path=base / f"config.{market_name.lower()}.json",
+            expected_market=market_name.lower(),
+        )
+        try:
+            ensure_runtime_config_freshness(
+                cfg, repo_root=repo_base(), market=market_name.lower(), runtime_config_path=path,
+            )
+        except RuntimeConfigFreshnessError as exc:
+            raise AgentToolError(code="CONFIG_ERROR", message=str(exc), details=exc.result) from exc
         accounts = [str(item or "").strip().lower() for item in cfg.get("accounts") or []]
         for account_name in accounts:
             if account_name and (account is None or account_name == account):
