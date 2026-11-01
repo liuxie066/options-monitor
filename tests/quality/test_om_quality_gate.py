@@ -80,6 +80,24 @@ def test_gate_is_inactive_before_onboarding(monkeypatch, tmp_path: Path) -> None
     assert_quality_allows("close_advice", service=_service(tmp_path, _payload(blocked=True)))
 
 
+def test_quality_rejection_crosses_runtime_scope_with_traceback(monkeypatch, tmp_path):
+    from src.application.runtime_paths import resolve_runtime_root, runtime_root_scope
+
+    monkeypatch.setenv("OM_QUALITY_ONBOARDED", "true")
+    service = _service(tmp_path, _payload(blocked=True))
+    outer, inner = tmp_path / "outer", tmp_path / "inner"
+    with runtime_root_scope(outer):
+        with pytest.raises(QualityGateBlocked) as error:
+            with runtime_root_scope(inner):
+                assert_quality_allows("close_advice", account="lx", market="us", service=service)
+        assert resolve_runtime_root(repo_root=tmp_path).runtime_root == outer
+
+    assert error.value.consumer == "close_advice"
+    assert error.value.reason_code == "POSITION_DIVERGENCE_PERSISTENT"
+    assert error.value.blocked_by == ("OM-POS-002",)
+    assert error.value.__traceback__ is not None
+
+
 def test_gate_blocks_only_matching_account_after_onboarding(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("OM_QUALITY_ONBOARDED", "true")
     payload = _payload(blocked=True)

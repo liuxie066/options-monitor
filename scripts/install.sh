@@ -8,6 +8,7 @@ PYTHON_BIN="${PYTHON:-}"
 SOURCE_INSTALL=0
 WITH_SERVER=0
 WITH_DEV=0
+WITH_POSITION_ADVICE=0
 FORCE=0
 INSTALL_CLI=1
 BIN_DIR="${HOME}/.local/bin"
@@ -43,6 +44,7 @@ Options:
   --force-cli-wrapper  Overwrite existing non-options-monitor wrapper files.
   --with-server        Also install requirements/server.txt.
   --with-dev           Also install requirements/dev.txt (source mode only).
+  --with-position-advice Install the optional Position Advice package (source mode only; does not enable it).
   --force              Recreate an inactive target release directory if it exists.
   -h, --help           Show this help.
 EOF
@@ -206,7 +208,7 @@ resolve_latest_release_tag() {
 
 install_optional_requirements() {
   release_dir="$1"
-  if [ "$WITH_SERVER" -ne 1 ] && [ "$WITH_DEV" -ne 1 ]; then
+  if [ "$WITH_SERVER" -ne 1 ] && [ "$WITH_DEV" -ne 1 ] && [ "$WITH_POSITION_ADVICE" -ne 1 ]; then
     return 0
   fi
   pip_bin="${release_dir}/.venv/bin/pip"
@@ -217,6 +219,8 @@ install_optional_requirements() {
   fi
   if [ "$WITH_DEV" -eq 1 ]; then
     "$pip_bin" install -r "$release_dir/requirements/dev.txt" -c "$release_dir/constraints/dev.txt"
+  elif [ "$WITH_POSITION_ADVICE" -eq 1 ]; then
+    "$pip_bin" install ./plugins/position-advice
   fi
   )
 }
@@ -454,6 +458,7 @@ preflight_bundle_tools() {
   [ -z "$missing" ] || die "missing bundle installation tools:$missing"
   BUNDLE_PLATFORM="$(bundle_platform)"
   [ "$WITH_DEV" -eq 0 ] || die "--with-dev requires explicit --source mode"
+  [ "$WITH_POSITION_ADVICE" -eq 0 ] || die "--with-position-advice requires explicit --source mode"
   # Check the pinned artifact floor before executing any bundled binary.
   case "$BUNDLE_PLATFORM" in
     macos-*)
@@ -565,6 +570,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --with-server)
       WITH_SERVER=1
+      shift
+      ;;
+    --with-position-advice)
+      WITH_POSITION_ADVICE=1
       shift
       ;;
     --with-dev)

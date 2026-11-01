@@ -405,7 +405,9 @@ other production PM callers.
 
 ## Close Advice Flow
 
-Close advice keeps deterministic policy in `domain.domain.close_advice`.
+The optional `om-position-advice-plugin` owns the deterministic policy and reason
+presentation. `domain.domain.close_advice` retains the input contract, lazy
+evaluation facade and safe notification/completeness helpers.
 `src.application.close_advice_runner` assembles option-position inputs, required
 data quotes, quality flags, Futu fee estimates, rows, and output files around
 that domain logic.
@@ -417,9 +419,15 @@ preserves those decisions, including fail-closed `not_evaluable` rows,
 and publishes CSV/text reports plus their integrity manifest. The Close Advice
 state and evidence contract is documented in
 `docs/CLOSE_ADVICE_CONTRACT.md`.
-Scheduled Tick is the only current report producer. Agent callers use
-`close_advice_read`, which accepts current/default reports only when their
-manifest and every CSV row bind the same sealed snapshot and Close Advice plan.
+Scheduled Tick and `position_advice_evaluate` use the same sealed runner.
+The active service selects ledger holdings or temporary manual inputs and writes
+only request-scoped reports without notifications. Current conclusions require
+fresh coherent quotes, continuous market state and realtime quote rights; closed
+sessions use compatible sealed historical references without changing their DTE.
+`close_advice_read` remains a report reader and accepts current/default reports
+only when their manifest and every CSV row bind the same sealed snapshot and
+Close Advice plan. Installation does not enable the existing `close_advice.enabled`
+switch; missing or disabled packages leave ordinary scans and history reading available.
 
 ## Config And Runtime State
 

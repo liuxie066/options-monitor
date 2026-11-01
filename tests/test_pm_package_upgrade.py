@@ -33,7 +33,7 @@ class OfflineRuntime:
         self.lb_installs = []
         self.pm_validation_fails = False
         self.lb_validation_fails = False
-        self.probe_output = json.dumps([installed, longbridge])
+        self.probe_output = json.dumps([installed, longbridge, False])
         self.uv_fails = False
 
     def __call__(self, command, **kwargs):
@@ -120,8 +120,9 @@ def _bundled_runtime(release: Path) -> None:
     (release / runtime_bundle.MANIFEST).write_text(json.dumps(manifest))
 
 
+@pytest.mark.parametrize("advice", [False, True])
 @pytest.mark.parametrize("pm,lb", [(False, False), (True, False), (False, True), (True, True)])
-def test_bundle_optional_selection_blocks_before_switch(monkeypatch, transition, pm, lb):
+def test_bundle_optional_selection_blocks_before_switch(monkeypatch, transition, pm, lb, advice):
     previous, target, current, events = transition
     for release in (previous, target):
         _bundled_runtime(release)
@@ -134,18 +135,18 @@ def test_bundle_optional_selection_blocks_before_switch(monkeypatch, transition,
     def bundled_runner(command, **kwargs):
         if command[:3] == [str(previous / runtime_bundle.PYTHON), "-I", "-c"]:
             probes.append(command)
-            return subprocess.CompletedProcess(command, 0, json.dumps([pm, lb]), "")
+            return subprocess.CompletedProcess(command, 0, json.dumps([pm, lb, advice]), "")
         return runner(command, **kwargs)
 
     result = _upgrade(transition, bundled_runner)
 
     assert len(probes) == 1, json.dumps(result, indent=2)
     assert not runner.pm_installs and not runner.lb_installs
-    if pm or lb:
+    if pm or lb or advice:
         assert not result["ok"], result
         assert "RuntimePrepareError" in result["error"]
         assert "runtime bundle cannot preserve optional packages" in result["error"]
-        for selected, name in ((pm, "om-pm-plugin"), (lb, "longbridge")):
+        for selected, name in ((pm, "om-pm-plugin"), (lb, "longbridge"), (advice, "om-position-advice-plugin")):
             assert (name in result["error"]) is selected
         assert result["runtime_prepare"]["installer"] == "runtime_bundle"
         assert not result["symlink_switched"] and not result["changed"]
@@ -160,6 +161,7 @@ def test_bundle_optional_selection_blocks_before_switch(monkeypatch, transition,
         assert validations == [target]
         assert result["runtime_prepare"]["installer"] == "runtime_bundle"
     runtime_bundle.load_manifest(target, verify_files=True)
+    assert not any("install" in command for command in runner.commands)
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -487,12 +489,13 @@ def test_unchanged_selected_packages_reuse_cache_and_still_validate(transition):
     assert any("load_portfolio_management_client_class" in " ".join(command) for command in runner.commands)
 
 
+@pytest.mark.parametrize("advice", [False, True])
 @pytest.mark.parametrize("pm,lb", [(False, False), (True, False), (False, True), (True, True)])
-def test_current_runtime_probe_reads_metadata_without_importing_packages(transition, pm, lb):
+def test_current_runtime_probe_reads_metadata_without_importing_packages(transition, pm, lb, advice):
     previous, target, current, events = transition
     site = current.parent / "probe-site"
     site.mkdir()
-    for name, installed in (("om-pm-plugin", pm), ("longbridge", lb)):
+    for name, installed in (("om-pm-plugin", pm), ("longbridge", lb), ("om-position-advice-plugin", advice)):
         if installed:
             metadata = site / (name.replace("-", "_") + "-0.1.0.dist-info")
             metadata.mkdir()
@@ -505,10 +508,11 @@ def test_current_runtime_probe_reads_metadata_without_importing_packages(transit
             "sys.path[:] = [p for p in sys.path if 'site-packages' not in p]\n"
             f"sys.path.insert(0, {str(site)!r})\n" + command[3] +
             "assert 'om_pm_plugin' not in sys.modules and 'longbridge' not in sys.modules\n"
+            "assert 'om_position_advice_plugin' not in sys.modules\n"
         )
         return subprocess.run([sys.executable, "-I", "-c", code], **kwargs)
 
-    assert upgrade._installed_optional_packages(previous_dir=previous, run_cmd=run_fixture_python, operations=[]) == (pm, lb)
+    assert upgrade._installed_optional_packages(previous_dir=previous, run_cmd=run_fixture_python, operations=[]) == (pm, lb, advice)
 
 
 @pytest.mark.parametrize("expected,installed,broken,ok", [

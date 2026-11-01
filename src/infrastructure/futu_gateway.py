@@ -1051,6 +1051,32 @@ class FutuGateway:
             self._raise_mapped(exc, action="get_market_state")
         raise AssertionError("unreachable")
 
+    def get_quote_rights(self, *, market: str) -> dict[str, Any]:
+        """Read quote-only SDK capabilities, discarding all user information."""
+        market = str(market).strip().upper()
+        if market not in {"US", "HK"}:
+            raise ValueError("quote rights require US or HK market")
+        unavailable = {"status": "unavailable", "market": market,
+                       "underlier_right": "UNKNOWN", "option_right": "UNKNOWN"}
+        try:
+            response = self._quote_client().get_user_info()
+            if not isinstance(response, tuple) or len(response) != 2 or response[0] != 0:
+                return unavailable
+            payload = response[1]
+            if not isinstance(payload, Mapping):
+                return unavailable
+            allowed = {"LV1", "LV2", "LV3", "BMP", "NO", "SF"}
+            def right(key: str) -> str:
+                value = str(payload.get(key) or "").strip().upper()
+                return value if value in allowed else "UNKNOWN"
+            prefix = market.lower()
+            return {"status": "ok", "market": market,
+                    "underlier_right": right(f"{prefix}_qot_right"),
+                    "option_right": right(f"{prefix}_option_qot_right")}
+        except Exception:
+            # SDK errors can contain credentials; no raw payload crosses this boundary.
+            return unavailable
+
     def get_positions(self, **kwargs: Any) -> Any:
         try:
             return self.client.get_positions(**kwargs)

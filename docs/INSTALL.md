@@ -116,6 +116,18 @@ PM 默认关闭。安装后设置全局 `portfolio_management.enabled: true`；�
 [升级流程](RELEASE_PROCESS.md)；首次迁移必须使用含修复的新控制器，旧版自动升级器不能
 自行获得目标 release 中的修复。
 
+## 可选持仓建议
+
+运行依赖默认不安装持仓建议包。目前仅支持源码安装；默认运行包不支持追加该包，
+`--with-position-advice` 须配合 `--source`。使用该实例的 Python 从源码根目录安装：
+
+```bash
+./.venv/bin/python -m pip install ./plugins/position-advice
+./.venv/bin/python -m pip uninstall om-position-advice-plugin
+```
+
+安装器也支持 `--with-position-advice`；安装不启用，需在配置中明确开启 `close_advice.enabled`。缺包不影响核心扫描启动及历史报告读取。开发/CI 的 `requirements/dev.txt` 安装此包并保留全部策略测试；缺包启动由隔离子进程覆盖。受控升级保留实际安装选择，并为旧内置建议已启用的实例迁移安装；主动卸载保持卸载。首次迁移仍须使用新升级控制器，见[升级流程](RELEASE_PROCESS.md)。
+
 ## macOS
 
 macOS 提供本地手动运行和 LaunchAgent 入口；运行包资格按上表和实际宿主回执确认，不由入口存在推断。

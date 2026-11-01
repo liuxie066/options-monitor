@@ -46,6 +46,9 @@ class OpenDMarketDataProvider:
     def get_market_state(self, gateway, codes):
         return gateway.get_market_state(codes)
 
+    def get_quote_rights(self, gateway, *, market):
+        return gateway.get_quote_rights(market=market)
+
     def discover_option_expirations(self, *args, **kwargs):
         from src.application.opend_symbol_chain_fetching import discover_option_expirations
         return discover_option_expirations(*args, **kwargs)
@@ -115,6 +118,10 @@ def get_trading_days_with_receipt(gateway, *, market_data_provider="opend", **kw
 
 def get_market_state(gateway, codes, *, market_data_provider="opend"):
     return provider_by_name(market_data_provider).get_market_state(gateway, codes)
+
+
+def get_quote_rights(gateway, *, market, market_data_provider="opend"):
+    return provider_by_name(market_data_provider).get_quote_rights(gateway, market=market)
 
 
 def get_underlier_observation(*args, market_data_provider="opend", **kwargs):

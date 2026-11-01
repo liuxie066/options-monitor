@@ -31,6 +31,13 @@ def add_operator_commands(subparsers: Any) -> None:
         "close-advice",
     )
 
+    advice = subparsers.add_parser("position-advice", help="持仓评估与建议")
+    advice_sub = advice.add_subparsers(dest="position_advice_command", required=True)
+    assess = advice_sub.add_parser("evaluate", help="评估账本选择或临时持仓，不写账本、不通知")
+    assess.add_argument("--config-key", choices=("us", "hk"))
+    assess.add_argument("--config-path")
+    assess.add_argument("--request-file", required=True, help="JSON: account plus symbols/lot_ids/contracts, or positions")
+
     notify = subparsers.add_parser("notify", help="notification helpers")
     notify_sub = notify.add_subparsers(dest="notify_command", required=True)
     preview = notify_sub.add_parser("preview", help="preview a persisted Daily Decision Brief")
@@ -66,6 +73,27 @@ def handle_operator_command(
             code="INPUT_ERROR",
             message="close-advice only supports scheduled feature configuration",
         )
+
+    if args.command == "position-advice":
+        import json
+        from pathlib import Path
+        from src.application.agent_tools.close_advice import POSITION_ADVICE_EVALUATE_TOOL
+
+        try:
+            request_path = Path(args.request_file)
+            if request_path.stat().st_size > 262144:
+                raise ValueError("position advice request must not exceed 256 KiB")
+            payload = json.loads(request_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("position advice request must be a JSON object")
+            if args.config_key:
+                payload["config_key"] = args.config_key
+            if args.config_path:
+                payload["config_path"] = args.config_path
+            result, _warnings, _metadata = POSITION_ADVICE_EVALUATE_TOOL.call(payload)
+            return result
+        except (OSError, ValueError) as exc:
+            raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
 
     if args.command == "notify" and args.notify_command == "preview":
         return preview_notification_fn(

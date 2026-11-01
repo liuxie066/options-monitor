@@ -247,7 +247,7 @@ OM · 决策简报 · [你的账户标签]
 
 首次向导中的手动扫描默认不发送通知；通知和后台服务还需要单独配置与验证。普通手动扫描也不会自动发送计划普通通知。
 
-新的平仓建议（Close Advice）由计划扫描生成。读取旧报告、开启功能或完成一次手动扫描，都不能直接视为已经生成新建议。生成条件与读取入口见[平仓建议说明](docs/CLOSE_ADVICE_CONTRACT.md)。
+持仓建议需要安装可选包并启用 `close_advice.enabled`，可随计划扫描生成，也可通过 `om position-advice evaluate --request-file <JSON>` 主动评估账本选择或临时输入的多笔 short Put/Call。读取旧报告与开启功能不会自动生成新建议；休市只显示兼容历史参考或不可用，不发送新的平仓提醒。见[持仓建议说明](docs/CLOSE_ADVICE_CONTRACT.md)。
 
 ## 更多能力与文档
 
@@ -259,7 +259,7 @@ OM · 决策简报 · [你的账户标签]
 | 指定标的合约查询 | 查询指定标的的卖出 Put / Call 合约；**该入口只评估合约，不判断账户现金、持股覆盖、成本底线或集中度**；见[工具说明](docs/TOOL_REFERENCE.md#指定标的卖出开仓候选) |
 | Combo Yield | 查看组合候选；见[策略架构](docs/STRATEGY_ARCHITECTURE.md)和[术语对照](docs/STRATEGY_TERMINOLOGY.md) |
 | Wheel 轮转策略 | 管理卖出 Put 后接股、卖出 Call 后交股的轮转分支；启用后仍需符合身份与交割证据要求，归属不明确时需要人工确认；见[轮转策略说明](docs/WHEEL_STRATEGY_PRD.md) |
-| 平仓建议 | 查看已有持仓的平仓评估，不自动平仓；见[Close Advice](docs/CLOSE_ADVICE_CONTRACT.md) |
+| 持仓评估与建议 | 可选包支持主动评估账本或临时多笔 short Put/Call，扫描时复用同一规则；展示指标、持有／平仓依据及休市历史参考，不自动平仓；见[Position Advice](docs/CLOSE_ADVICE_CONTRACT.md) |
 | 决策简报与提醒 | 查看最近成功扫描、候选变化和数据缺口；见[报告与通知规则](docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md) |
 | 候选解释与决策历史 | 解释已有扫描的候选排序、未入选原因，查询明确关联的结果；见[工具说明](docs/TOOL_REFERENCE.md)和[决策历史](docs/DECISION_HISTORY.md) |
 | 期权账本 | 查询开仓、平仓、指派和行权记录；写入与修复需要预览和确认；见[账本架构](docs/LEDGER_ARCHITECTURE.md)和[修账指南](docs/OPTION_POSITIONS_REPAIR.md) |

@@ -540,30 +540,40 @@ liuxie ALL=(root) NOPASSWD: /usr/bin/systemctl restart options-monitor-feishu-ws
 
 Release runtime 依赖安装默认使用 `OM_UPGRADE_INSTALLER=auto`：先检测宿主机 PATH 上的 `uv`，可用时把当前运行中的 Python 3.12+ `sys.executable` 传给 `uv venv --python`，再执行 `uv pip install -p .venv/bin/python ...`；不可用或 auto 模式下 uv 安装失败时回退到原 pip 流程。升级流程不会自动安装 uv；需要加速时应在宿主机安装一次。可用 `OM_UPGRADE_INSTALLER=pip` 强制旧流程，或 `OM_UPGRADE_INSTALLER=uv` 强制 uv 且失败即中止升级。依赖下载缓存默认复用 `_cache/uv` 和 `_cache/pip`；只配置了 `PIP_INDEX_URL` 时，升级会把它映射为 uv 命令的 `UV_INDEX_URL`。
 
-确认升级时，用当前 release 声明的 Python 隔离读取 `om-pm-plugin` 与 `longbridge`
+确认升级时，用当前 release 声明的 Python 隔离读取 `om-pm-plugin`、`longbridge`
+与 `om-position-advice-plugin`
 安装元数据。已安装的 PM 扩展从目标 release 的 `plugins/portfolio-management` 安装，
-Longbridge SDK 按目标 `requirements/longbridge.txt` 安装；pip、uv 及其回退使用同一选择。
-安装选择与配置启用独立：未安装或主动卸载的包不会自动补装。唯一迁移例外是旧 release
+Position Advice 从目标 `plugins/position-advice` 安装，Longbridge SDK 按目标
+`requirements/longbridge.txt` 安装；pip、uv 及其回退使用同一选择。
+安装选择与配置启用独立：未安装或主动卸载的包不会自动补装。内置能力迁移例外是旧 release
 没有 PM 插件 `pyproject.toml`、仍有内置 PM 客户端时，沿 service profile 的有效 runtime
 配置路径（无 profile 路径时使用 runtime root）读取既有 PM 开关，含受支持的旧别名；
 已启用则安装新扩展，保持原能力。无法读取所需证据时中止，不把未知状态当作未安装。
 
-安装选择参与现有依赖缓存哈希；选择 PM 时另纳入其 `pyproject.toml` 和 Python 源码，
-选择 Longbridge 时纳入其依赖文件。切换 `current` 前，对新建或复用的目标环境检查包
-存在状态，验证 PM 版本与目标 release 一致并能经核心加载，验证 Longbridge SDK 导入；
+旧 release 没有 Position Advice 插件 `pyproject.toml`、仍有内置
+`domain/domain/close_advice.py` 时，按同一有效 runtime 配置路径读取布尔值
+`close_advice.enabled`；已启用才迁移安装。没有有效市场配置，或所需配置缺失、损坏、
+开关类型不正确时，在准备依赖和切换配置前中止。插件化版本主动卸载后，即使开关仍为
+true 也不补装。首次安装可用 `scripts/install.sh --with-position-advice`，开发依赖也包含
+该包；普通 runtime 依赖不包含它。安装不改写或启用 `close_advice.enabled`。
+
+安装选择参与现有依赖缓存哈希；选择 PM 或 Position Advice 时另纳入相应包的
+`pyproject.toml` 和 Python 源码，选择 Longbridge 时纳入其依赖文件。切换 `current` 前，
+对新建或复用的目标环境检查包存在状态，验证 PM、Position Advice 版本与目标 release
+一致并能经核心加载（Position Advice 包含策略和解释 API），验证 Longbridge SDK 导入；
 不构建券商连接或读取凭据。失败时不切换当前实例，不删除复用的缓存环境，也不修改
 旧实例的安装或配置。
 
 上述依赖安装和缓存保留用于源码 release。运行包的固定依赖清单不支持追加可选包；
-目标为运行包且需要保留 PM 或 Longbridge 时，在切换 `current` 前拒绝升级并保留当前实例，
+目标为运行包且需要保留 PM、Longbridge 或 Position Advice 时，在切换 `current` 前拒绝升级并保留当前实例，
 不把校验基础运行包成功视为可选能力已迁移。
 
 首次进入包含本修复的版本时，须由**含修复的新升级控制器**驱动旧实例。旧 release 的
 `om update apply`（含自动升级 timer）仍执行旧代码，不会提前加载目标 release 的本段逻辑；
-直接用它升级不能保证 PM/Longbridge 保留。发布后的迁移须先将已核验的新 release 源码
+直接用它升级不能保证 PM/Longbridge/Position Advice 保留。发布后的迁移须先将已核验的新 release 源码
 放入独立目录，以依赖兼容的 Python 环境运行其中的 `om update apply`，显式传入旧实例的
 `--repo-root <current-symlink>`、`--runtime-root <runtime-root>` 和目标版本，先预览再确认。
-该控制器会从旧实例环境读取安装状态，并从旧有效配置识别内置 PM；不要先切换 `current`
+该控制器会从旧实例环境读取安装状态，并从旧有效配置识别内置 PM/Position Advice；不要先切换 `current`
 或先删除旧环境。本变更未回写已发布版本的升级器，也未验证旧自动升级链路的首次迁移。
 
 release 清理默认 dry-run，不删除文件：
