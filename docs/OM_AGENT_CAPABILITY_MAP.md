@@ -8,11 +8,12 @@ and Bot design are defined in [ARCHITECTURE.md](ARCHITECTURE.md) and
 
 | Surface | Entry | Authority |
 |---|---|---|
-| Tool Gateway | `./om-agent` | `src/application/agent_tool_registry.py` |
+| Tool Gateway | `./om tools`（兼容 `./om-agent`） | `src/application/agent_tool_registry.py` |
 | Deterministic Control | `./om bot handle` | explicit command parser, pending-operation store, and `inbound_control.py` |
 | Bot | free-form text through `./om bot handle` or `./om bot run` | Bot Service + Host + `om_chat` Agent; channel runs may request Control previews |
 
-`./om-agent` exposes structured JSON tools to external Agents. It is not OM's
+`./om tools` exposes structured JSON tools to external Agents. `om agent` and
+`om assistant` are compatible aliases of `om bot`. The gateway is not OM's
 autonomous Agent. Internal Bot projects a pure-read subset from the same
 canonical registry.
 
@@ -104,7 +105,7 @@ allowlists are not supported runtime controls.
 ## Verification
 
 ```bash
-./om-agent spec
+./om tools spec
 ./om bot commands
 ./om bot capabilities
 ./om bot llm-check

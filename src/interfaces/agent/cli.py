@@ -16,9 +16,8 @@ def dumps_json(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="options-monitor public local Tool Gateway tools")
-    sub = parser.add_subparsers(dest="command", required=True)
+def add_gateway_commands(parser: argparse.ArgumentParser, *, command_dest: str = "command") -> None:
+    sub = parser.add_subparsers(dest=command_dest, required=True)
     sub.add_parser("spec", help="print public tool manifest")
 
     run_parser = sub.add_parser("run", help="run one public tool and print JSON envelope")
@@ -59,14 +58,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     remove_account_parser.add_argument("--rebuild-runtime-root", default=None)
     remove_account_parser.add_argument("--dry-run", action="store_true", help="validate and preview the mutation without writing")
     remove_account_parser.add_argument("--confirm", action="store_true", help="required with OM_AGENT_ENABLE_WRITE_TOOLS=true for writes")
+
+
+def parse_args(argv: list[str] | None = None, *, prog: str | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog=prog, description="options-monitor public local Tool Gateway tools")
+    add_gateway_commands(parser)
     return parser.parse_args(argv)
 
 
 def _load_input_payload(args: argparse.Namespace) -> dict:
-    if args.input_file:
-        return json.loads(Path(args.input_file).read_text(encoding="utf-8"))
-    raw = str(args.input_json or "{}").strip() or "{}"
-    return json.loads(raw)
+    try:
+        if args.input_file:
+            payload = json.loads(Path(args.input_file).read_text(encoding="utf-8"))
+        else:
+            raw = str(args.input_json or "{}").strip() or "{}"
+            payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise ValueError("tool input must be a JSON object")
+        return payload
+    except (OSError, ValueError) as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
 
 
 def _enforce_account_write_gate(args: argparse.Namespace) -> None:
@@ -104,11 +115,11 @@ def _bootstrap_runtime_env_from_args(args: argparse.Namespace) -> None:
     )
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, discover_local: bool = False, prog: str | None = None) -> int:
     actual_argv = list(sys.argv[1:] if argv is None else argv)
-    if argv is None and _should_bootstrap_process_env(actual_argv):
+    if (argv is None or discover_local) and _should_bootstrap_process_env(actual_argv):
         bootstrap_process_env(repo_root=repo_base(), include_local_env_file=True)
-    args = parse_args(actual_argv)
+    args = parse_args(actual_argv, prog=prog)
     _bootstrap_runtime_env_from_args(args)
     if args.command == "spec":
         sys.stdout.write(dumps_json(build_tool_manifest()))

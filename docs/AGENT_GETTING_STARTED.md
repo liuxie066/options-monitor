@@ -29,10 +29,10 @@ python3.12 -m venv .venv
 ## 2. 查看 Tool Gateway 工具清单
 
 ```bash
-./om-agent spec
+./om tools spec
 ```
 
-这会输出工具 manifest（JSON）。
+这会输出工具 manifest（JSON）。`om-agent` 的全部公开命令和参数继续兼容；新调用推荐 `om tools`。环境、权限及输出规则见 [Tool Reference](TOOL_REFERENCE.md#参数环境与输出兼容)。
 
 ---
 
@@ -62,13 +62,13 @@ python3.12 -m venv .venv
 
 ```bash
 ./om doctor --config-key us
-./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
+./om tools run --tool healthcheck --input-json '{"config_key":"us"}'
 ```
 
 如果你想先确认“配置本身是否合法”，优先跑：
 
 ```bash
-./om-agent run --tool config_validate --input-json '{"config_key":"us"}'
+./om tools run --tool config_validate --input-json '{"config_key":"us"}'
 ```
 
 如果你配置了本地 env-file，先跑 settings 诊断确认普通设置和写入开关，再用只显示状态的 secrets 诊断确认凭据：
@@ -88,7 +88,7 @@ healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap
 如果要显式指定配置路径：
 
 ```bash
-./om-agent run --tool healthcheck --input-json '{"config_path":"config.us.json"}'
+./om tools run --tool healthcheck --input-json '{"config_path":"config.us.json"}'
 ```
 
 ---
@@ -99,9 +99,9 @@ healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap
 ./om status --config-key us
 ./om runs --limit 10
 ./om logs --run-id <run-id> --lines 50
-./om-agent run --tool runtime_runs --input-json '{"limit":10}'
-./om-agent run --tool runtime_logs --input-json '{"run_id":"<run-id>","kind":"tool","lines":50}'
-./om-agent run --tool manage_symbols --input-json '{"config_key":"us","action":"list"}'
+./om tools run --tool runtime_runs --input-json '{"limit":10}'
+./om tools run --tool runtime_logs --input-json '{"run_id":"<run-id>","kind":"tool","lines":50}'
+./om tools run --tool manage_symbols --input-json '{"config_key":"us","action":"list"}'
 ```
 
 ---
@@ -117,7 +117,7 @@ healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap
 ./om research archive verify --remote prod
 ```
 
-Research 不属于 `./om-agent` manifest，也不能修改 runtime config、交易状态或通知，但它不是统一的“零写入”命令组：`collect --no-write-outputs`、archive inventory 和 archive verify 是只读；archive pull 只有显式 `--write` 才拉取并写入本地归档。执行前应查看具体子命令的 `--help` 和输出参数。线上调度系统的状态需要通过 `scheduler_evidence` 或 `--scheduler-evidence-json` 传入。
+Research 不属于 `./om tools` manifest，也不能修改 runtime config、交易状态或通知，但它不是统一的“零写入”命令组：`collect --no-write-outputs`、archive inventory 和 archive verify 是只读；archive pull 只有显式 `--write` 才拉取并写入本地归档。执行前应查看具体子命令的 `--help` 和输出参数。线上调度系统的状态需要通过 `scheduler_evidence` 或 `--scheduler-evidence-json` 传入。
 
 `archive verify` 只报告当前本地结构，不刷新或覆盖 `pull --write` 保存的来源校验证据。远端清理仍需匹配该来源证据，并重新检查当前两端内容；缺少证据时，应针对预期 SSH 来源重新执行 `archive pull --write`。
 

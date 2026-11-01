@@ -37,6 +37,7 @@ def _run(code: str) -> None:
 
 @pytest.mark.parametrize("entry,args", [
     ("src.interfaces.cli.main", ["help"]),
+    ("src.interfaces.cli.main", ["tools", "spec"]),
     ("src.interfaces.agent.cli", ["spec"]),
 ])
 def test_core_public_startup_without_advice(entry, args):

@@ -32,7 +32,7 @@
 | 直接命令 | 仅有 `om symbols add NVDA` 不构成有效新增；缺策略或必填边界时拒绝 | 用户明确否定不附加参数的新增 |
 | 可选接入 | 通知、Bot LLM、常驻服务逐项询问、允许跳过；跳过显示未启用 | 用户选择“逐项询问、允许跳过” |
 | 凭证 | 终端隐藏输入或系统凭据存储；不通过 Agent 对话框或命令参数传入密钥 | 用户要求避免在 Agent 输入框输入 |
-| 命名 | 人工产品统一为 `om bot`；`om-agent` 仍为外部 Agent/脚本的结构化 Tool Gateway | 用户：“收敛到 om bot” |
+| 命名 | 对外统一推荐 `om`；业务用任务命令，结构化网关用 `om tools`，自然语言助手用 `om bot`；`om-agent`、`om agent`、`om assistant` 保留对应旧语义 | CLI 统一任务；既有“收敛到 om bot”只限定助手名称 |
 | 帮助与列表 | 保留面向人的 help 和高级命令；不增加等同帮助的全局 ls；领域 list 服务真实查看任务 | 用户要求 human help、保留高级配置 |
 | Holdings | 保留 Holdings 配置命令；不再作为账户类型，不回填富途账户数据或账本 | 用户：“增加holdings的配置命令”“退役external_holdings账户相关的代码” |
 | Portfolio Exposure | 始终可用；Holdings 默认关闭，关闭时评估富途，开启后纳入其他来源；显示已观测 broker、market、来源与时间，不声称完整覆盖 | 功能配置会话及其实现会话的后续用户确认 |
@@ -135,6 +135,15 @@ flowchart TD
 
 ## 6. 命令全集的推荐归属
 
+统一入口的调用与输出规则：
+
+- 人工按业务任务调用 `om scan`、`om position-advice evaluate --request-file request.json`；程序使用 `om tools spec`、`om tools run --tool position_advice_evaluate --input-file request.json`。`om bot run --text "评价一下我的持仓"` 是自然语言助手，`om agent` / `om assistant` 兼容 Bot。
+- `om tools` 接入完整现有网关，包括 `spec/run/add-account/edit-account/remove-account`；`om-agent` 继续有效，解析、配置与环境选择、权限、预览确认、审计和业务服务共用，不改名工具或 JSON 字段。详细环境选择见 [Tool Reference](TOOL_REFERENCE.md#参数环境与输出兼容)。
+- 支持双格式的业务命令使用局部 `--format text|json`。本轮只将持仓建议默认切为人工展示，脚本追加 `--format json` 取得原业务 JSON；网关保留原 JSON envelope。其他命令保留既有格式，不批量改变默认值或将已有 `--format` 改成全局开关。
+- 持仓建议先校验命令参数，再加载实例环境；启动配置错误和业务错误均遵循已选格式（默认/text 为人工失败说明，json 为原错误 envelope），退出码为 2。非法格式、缺必填项及未知选项仍由 argparse 拒绝。
+- 持仓人工展示合约、数据时间、评估模式、关键指标、结论和原因，区分成功、部分、合法空结果、不可评估和执行失败。历史参考保留原时间，不能成为当前平仓建议；hold 仅表示本策略未触发平仓条件。请求完成为 0、执行/输入失败为 2，部分结果及不可评估须检查业务状态，不以 0 冒充所有持仓可评估。
+- help/spec 不连接券商或写业务状态；主动评估只沿用独立请求报告，不写账本、不发通知、不覆盖计划报告。可选插件关闭或缺包的状态明确可见，核心仍可启动。不要求内部每个工具都有新业务命令，不新增插件框架。
+
 本表的命令归属已纳入本轮确认范围；“高级保留”表示完整帮助可发现、默认任务导航按需引导，不代表退役。本轮保留旧入口兼容，不设自动删除日期或版本。
 
 | 当前顶层 | 建议处置 / 推荐入口 | 依据与限制 |
@@ -142,8 +151,10 @@ flowchart TD
 | healthcheck | 高级保留 | 就绪检查有独立消费者；不把所有健康检查等同 doctor |
 | doctor | 保留 | 人的故障定位入口，给出具体下一步 |
 | support | 高级保留 | 收集脱敏支持材料，区别于状态查询 |
-| assistant | 人工推荐迁入 bot，旧入口兼容后退役 | 逐子命令保持行为、输出及权限，不做盲目整组重定向 |
+| assistant / agent | 人工推荐 bot，旧入口继续兼容 | 保持 Bot 行为、输出及权限，不作为网关别名 |
 | bot | 保留并补齐 | 统一模型、问答、控制、任务与审计的人工入口 |
+| tools | 统一推荐的结构化网关 | 复用 om-agent 的所有公开子命令与参数，保留原兼容入口 |
+| position-advice | 持仓主动评估 | 默认人工展示；--format json 保留原业务 JSON，不新增策略计算 |
 | inbound | 建议归 channel，原入口保留兼容 | Feishu 事件/长连接与微信传输归同一职责；服务调用方需迁移 |
 | status | 保留 | 汇总已有运行证据及下一步 |
 | runs | 保留 | 查询业务运行历史；区别于 bot runs |

@@ -17,7 +17,8 @@ def test_noninteractive_home_shows_global_command_and_advanced_entry(monkeypatch
     assert "通知通道" in output
     assert "Bot LLM" in output
     assert "om symbols list" in output
-    assert "om-agent spec" in output
+    assert "om tools spec" in output
+    assert "om-agent" in output
     assert "om help all" in output
     assert "om config init" not in output
     assert "om service --help" in output

@@ -92,7 +92,7 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 ```
 
 PM 默认关闭。安装后设置全局 `portfolio_management.enabled: true`；卸载前关闭 PM
-及 `portfolio.holdings.enabled`。未安装时 `om help`、`om-agent spec` 与非 PM 功能可正常
+及 `portfolio.holdings.enabled`。未安装时 `om help`、`om tools spec` 与非 PM 功能可正常
 加载；启用但缺包的 PM 请求返回 `PORTFOLIO_MANAGEMENT_UNAVAILABLE`。详情见
 [配置契约](../CONFIGS.md#可选能力与长桥账户)。
 

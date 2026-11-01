@@ -21,7 +21,7 @@ def execute_tool(tool_name: str, payload: dict[str, Any] | None = None) -> dict[
         err = AgentToolError(
             code="INPUT_ERROR",
             message=f"unknown tool: {tool_name}",
-            hint="Call `om-agent spec` to inspect supported tools.",
+            hint="Call `om tools spec` to inspect supported tools (`om-agent spec` remains compatible).",
         )
         return build_response(tool_name=str(tool_name or ""), ok=False, error=build_error_payload(err))
 

@@ -131,7 +131,7 @@ om symbols edit YOUR_SYMBOL --set sell_put.enabled=false
 om symbols rm YOUR_SYMBOL
 ```
 
-将 `YOUR_SYMBOL` 和 `YOUR_MAX_STRIKE` 换成自己的标的与 CSP 行权价上限。新增时必须选 `--strategy csp|cc|both`：CSP 必须给 `--csp-max-strike`，CC 必须给 `--cc-min-strike`；可选 `--csp-min-strike`、`--cc-max-strike`。`NVDA` 会识别为 US，`0700.HK` 会识别为 HK；`--market` 可省略，但显式指定时必须与标的一致。只配置一个市场时，`list` 可省略 `--market`；多个市场时需指定。新增标的只覆盖明确选择的策略开关与行权价边界，其余设置继承现有默认配置。`edit --set` 修改 `markets.<market>.overrides.<symbol>` 下的相对路径；列表值使用 JSON 写法，例如 `--set 'accounts=["lx"]'`。高级单项设置也可用 `om config symbol set --help`。删除市场最后一个标的会被配置验证拒绝。Agent 的结构化入口是 `om-agent run --tool manage_symbols`，其写入门禁另见 [Tool Reference](docs/TOOL_REFERENCE.md)。
+将 `YOUR_SYMBOL` 和 `YOUR_MAX_STRIKE` 换成自己的标的与 CSP 行权价上限。新增时必须选 `--strategy csp|cc|both`：CSP 必须给 `--csp-max-strike`，CC 必须给 `--cc-min-strike`；可选 `--csp-min-strike`、`--cc-max-strike`。`NVDA` 会识别为 US，`0700.HK` 会识别为 HK；`--market` 可省略，但显式指定时必须与标的一致。只配置一个市场时，`list` 可省略 `--market`；多个市场时需指定。新增标的只覆盖明确选择的策略开关与行权价边界，其余设置继承现有默认配置。`edit --set` 修改 `markets.<market>.overrides.<symbol>` 下的相对路径；列表值使用 JSON 写法，例如 `--set 'accounts=["lx"]'`。高级单项设置也可用 `om config symbol set --help`。删除市场最后一个标的会被配置验证拒绝。Agent 的结构化入口是 `om tools run --tool manage_symbols`，其写入门禁另见 [Tool Reference](docs/TOOL_REFERENCE.md)。
 
 ## Portfolio Exposure 的 Holdings 来源配置
 
@@ -215,7 +215,7 @@ runtime snapshot：
   --output config.us.json
 ```
 
-`./om-agent add-account` / `edit-account` / `remove-account` 是受控账户入口；
+`./om tools add-account` / `edit-account` / `remove-account` 是受控账户入口；
 先 `--dry-run` 检查候选改动，再通过 `OM_AGENT_ENABLE_WRITE_TOOLS=true`
 与 `--confirm` 写入精确目标。
 
@@ -382,9 +382,9 @@ service profile 应记录这些显式路径。升级时缺少 YAML authoring sou
 ```bash
 ./om config validate --source yaml --market us
 ./om config validate --config-path config.us.json --market us
-./om-agent run --tool config_validate --input-json '{"config_key":"us"}'
-./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
-./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
+./om tools run --tool config_validate --input-json '{"config_key":"us"}'
+./om tools run --tool healthcheck --input-json '{"config_key":"us"}'
+./om tools run --tool runtime_status --input-json '{"config_key":"us"}'
 ```
 
 ## 独立 Feishu Holdings 上下文导出

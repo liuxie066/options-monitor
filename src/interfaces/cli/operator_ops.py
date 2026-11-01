@@ -37,6 +37,7 @@ def add_operator_commands(subparsers: Any) -> None:
     assess.add_argument("--config-key", choices=("us", "hk"))
     assess.add_argument("--config-path")
     assess.add_argument("--request-file", required=True, help="JSON: account plus symbols/lot_ids/contracts, or positions")
+    assess.add_argument("--format", choices=("text", "json"), default="text", help="人工展示（默认）或原业务 JSON；其他命令保留各自默认格式")
 
     notify = subparsers.add_parser("notify", help="notification helpers")
     notify_sub = notify.add_subparsers(dest="notify_command", required=True)
@@ -77,7 +78,7 @@ def handle_operator_command(
     if args.command == "position-advice":
         import json
         from pathlib import Path
-        from src.application.agent_tools.close_advice import POSITION_ADVICE_EVALUATE_TOOL
+        from src.application.tool_execution import execute_tool
 
         try:
             request_path = Path(args.request_file)
@@ -90,10 +91,12 @@ def handle_operator_command(
                 payload["config_key"] = args.config_key
             if args.config_path:
                 payload["config_path"] = args.config_path
-            result, _warnings, _metadata = POSITION_ADVICE_EVALUATE_TOOL.call(payload)
-            return result
         except (OSError, ValueError) as exc:
             raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+        result = execute_tool("position_advice_evaluate", payload)
+        if not result["ok"]:
+            raise AgentToolError(**result["error"])
+        return result["data"]
 
     if args.command == "notify" and args.notify_command == "preview":
         return preview_notification_fn(
