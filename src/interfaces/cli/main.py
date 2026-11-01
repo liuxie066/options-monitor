@@ -265,7 +265,7 @@ def _main(argv: list[str] | None = None) -> int:
                 repo_base_fn=repo_base,
             ))
 
-        if args.command in {"scan", "close-advice", "notify"}:
+        if args.command in {"scan", "close-advice", "position-advice", "notify"}:
             return _print(handle_operator_command(
                 args,
                 run_scan_fn=run_scan,

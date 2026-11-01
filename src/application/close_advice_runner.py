@@ -7,7 +7,7 @@ from io import BytesIO
 import json
 import math
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -59,6 +59,9 @@ from src.application.close_advice_required_data import (
     close_advice_market_date,
     resolve_bound_close_advice_required_data_plan_snapshot,
 )
+from src.application.position_advice_inputs import advice_position_key, position_economics_sha256, aware_time
+from src.application.position_advice_evidence import current_position_advice_evidence, QUOTE_RIGHTS_FIELDS
+from src.application.position_advice_plugin import position_advice_plugin_status, require_position_advice_plugin, PositionAdviceUnavailableError
 from src.application.source_receipts import sha256_bytes
 from src.application.market_data_provider import resolve_market_data_provider
 from src.application.required_data_snapshot import assert_required_data_source
@@ -72,6 +75,15 @@ from src.application.symbol_aliases import load_runtime_symbol_aliases
 OUTPUT_COLUMNS = [
     "account",
     "position_lot_id",
+    "input_source",
+    "input_id",
+    "input_as_of_utc",
+    "position_economics_sha256",
+    "market_data_provider",
+    "assessment_mode",
+    "current_actionable",
+    "assessment_as_of_utc",
+    *QUOTE_RIGHTS_FIELDS,
     "strategy_group_id",
     "leg_role",
     "source_stock_lot_id",
@@ -662,6 +674,9 @@ def _position_to_input(
         CloseAdviceInput(
             account=normalize_account(pos.get("account")),
             position_lot_id=str(pos.get("lot_id") or pos.get("record_id") or "").strip() or None,
+            input_source=str(pos.get("input_source") or "ledger"),
+            input_id=pos.get("input_id"),
+            input_as_of_utc=pos.get("input_as_of_utc"),
             symbol=_norm_symbol(pos.get("symbol")),
             option_type=_norm_option_type(pos.get("option_type")),
             side=str(pos.get("side") or "").strip().lower(),
@@ -959,10 +974,10 @@ def _frozen_position_plan_reasons(
     account: str,
     base_dir: Path,
 ) -> tuple[
-    dict[tuple[str, str, str, str], str],
+    dict[str, str],
     set[str],
 ]:
-    reasons: dict[tuple[str, str, str, str], str] = {}
+    reasons: dict[str, str] = {}
     symbols_to_validate: set[str] = set()
     requirements: dict[str, dict[str, Any]] = {}
     requirement_reasons: dict[str, str] = {}
@@ -988,16 +1003,20 @@ def _frozen_position_plan_reasons(
         )
         if not all(key):
             continue
-        lot_id = str(position.get("lot_id") or position.get("record_id") or "").strip()
+        lot_id = advice_position_key(position)
         if plan is None or account_status == "unavailable":
-            reasons[key] = "close_advice_plan_unavailable"
+            reasons[lot_id] = "close_advice_plan_unavailable"
             continue
         requirement = requirements.get(lot_id)
         if requirement is None:
-            reasons[key] = "required_data_position_not_planned"
+            reasons[lot_id] = "required_data_position_not_planned"
             continue
-        if str(requirement.get("quote_key") or "") != "|".join(key):
-            reasons[key] = "required_data_position_not_planned"
+        if (str(requirement.get("quote_key") or "") != "|".join(key)
+            or requirement.get("position_economics_sha256") != position_economics_sha256(position)
+            or (requirement.get("input_source") or "ledger") != (position.get("input_source") or "ledger")
+            or (position.get("input_source") == "user_provided" and
+                aware_time(requirement.get("input_as_of_utc")) != aware_time(position.get("input_as_of_utc")))):
+            reasons[lot_id] = "required_data_position_not_planned"
             continue
         planning_reason = (
             requirement_reasons.get(lot_id)
@@ -1007,7 +1026,7 @@ def _frozen_position_plan_reasons(
             str(requirement.get("planning_status") or "ready") != "ready"
             or planning_reason
         ):
-            reasons[key] = (
+            reasons[lot_id] = (
                 planning_reason or "required_data_position_not_planned"
             )
             continue
@@ -1101,11 +1120,19 @@ def _apply_required_data_row_provenance(
     requirements_by_lot: dict[str, dict[str, Any]],
     provenance_by_symbol: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
+    row["input_source"] = position.get("input_source") or "ledger"
+    row["input_id"] = position.get("input_id")
+    input_time = aware_time(position.get("input_as_of_utc"))
+    row["input_as_of_utc"] = input_time.isoformat() if input_time else None
+    row["position_economics_sha256"] = position_economics_sha256(position)
+    row.setdefault("assessment_mode", "unavailable")
+    row.setdefault("current_actionable", False)
+    row.setdefault("assessment_as_of_utc", None)
     row["quote_mode"] = "frozen_snapshot"
     row["required_data_snapshot_plan_id"] = str((frozen_manifest or {}).get("plan_id") or "") or None
     row["required_data_snapshot_manifest_sha256"] = frozen_manifest_sha256
     row["close_advice_required_data_plan_sha256"] = frozen_plan_sha256
-    lot_id = str(position.get("lot_id") or position.get("record_id") or "").strip()
+    lot_id = advice_position_key(position)
     requirement = requirements_by_lot.get(lot_id) or {}
     binding = requirement.get("fetch_binding") if isinstance(requirement.get("fetch_binding"), dict) else {}
     row["required_data_requirement_id"] = str(requirement.get("requirement_id") or "") or None
@@ -1143,6 +1170,7 @@ def run_close_advice(
     account: str | None = None,
     context_override: Mapping[str, Any] | None = None,
     required_data_snapshot_manifest_sha256: str | None = None,
+    now_utc: datetime | None = None,
 ) -> dict[str, Any]:
     advice_cfg_raw = config.get("close_advice") if isinstance(config, dict) else {}
     advice_cfg = advice_cfg_raw if isinstance(advice_cfg_raw, dict) else {}
@@ -1172,6 +1200,26 @@ def run_close_advice(
             "notification_text": "",
         }
 
+    plugin_status = position_advice_plugin_status(config)
+    if plugin_status == "available":
+        try:
+            require_position_advice_plugin()
+        except PositionAdviceUnavailableError:
+            plugin_status = "unavailable"
+    if plugin_status != "available":
+        report_manifest = publish_close_advice_report_status(
+            output_dir=output_dir, status="failed", run_id=required_data_snapshot_run_id,
+            quote_mode=quote_mode, reason="position_advice_plugin_unavailable",
+        )
+        _write_csv(csv_path, [])
+        atomic_write_text(text_path, "", encoding="utf-8")
+        return {"enabled": True, "status": "unavailable", "reason": "position_advice_plugin_unavailable",
+                "rows": 0, "notify_rows": 0, "report_manifest": report_manifest,
+                "csv": str(csv_path), "text": str(text_path), "notification_text": ""}
+
+    decision_now = now_utc or datetime.now(timezone.utc)
+    if decision_now.tzinfo is None:
+        raise ValueError("position advice decision time must be timezone-aware")
     publish_close_advice_report_status(
         output_dir=output_dir,
         status="pending",
@@ -1243,15 +1291,21 @@ def run_close_advice(
     positions = positions if isinstance(positions, list) else []
     positions = _filter_positions_by_markets(positions, markets_to_run)
     positions = [pos for pos in positions if isinstance(pos, dict) and _is_supported_short_option(pos)]
+    if len({pos.get("input_source") or "ledger" for pos in positions}) > 1:
+        raise ValueError("manual and ledger position modes are exclusive per account")
     seen_lots: set[tuple[str, str]] = set()
     for pos in positions:
         account_key = normalize_account(pos.get("account"))
-        lot_id = str(pos.get("lot_id") or pos.get("record_id") or "").strip()
-        if not account_key or not lot_id:
-            continue
+        if not account_norm or account_key != account_norm:
+            raise ValueError("close_advice position context account mismatch")
+        if pos.get("input_source") == "user_provided" and (pos.get("lot_id") or pos.get("record_id")):
+            raise ValueError("manual advice must not contain ledger lot identity")
+        lot_id = advice_position_key(pos)
+        if not lot_id:
+            raise ValueError("close_advice position context identity missing")
         key = (account_key, lot_id)
         if key in seen_lots:
-            raise ValueError("close_advice position context has duplicate account/lot_id")
+            raise ValueError("close_advice position context has duplicate account/position identity")
         seen_lots.add(key)
     position_entries = [
         (
@@ -1267,10 +1321,7 @@ def run_close_advice(
         pos for pos, lifecycle_state, _dte in position_entries if lifecycle_state in {"active", "unknown"}
     ]
     quote_positions = [pos for pos, lifecycle_state, _dte in position_entries if lifecycle_state == "active"]
-    frozen_plan_reasons: dict[
-        tuple[str, str, str, str],
-        str,
-    ] = {}
+    frozen_plan_reasons: dict[str, str] = {}
     frozen_provenance: dict[str, dict[str, Any]] = {}
     frozen_requirements_by_lot: dict[str, dict[str, Any]] = {}
     frozen_requirements_by_lot, _requirement_reasons, _account_status = account_requirement_index(
@@ -1318,8 +1369,9 @@ def run_close_advice(
             position.get("strike"),
             base_dir=Path(base_dir),
         )
-        if all(key) and key not in frozen_plan_reasons and key[0] in frozen_symbol_unavailable:
-            frozen_plan_reasons[key] = frozen_symbol_unavailable[key[0]]
+        position_key = advice_position_key(position)
+        if all(key) and position_key not in frozen_plan_reasons and key[0] in frozen_symbol_unavailable:
+            frozen_plan_reasons[position_key] = frozen_symbol_unavailable[key[0]]
     covered_keys = set(quotes)
     expirations_by_symbol: dict[str, set[str]] = {}
     for symbol, _option_type, expiration, _strike in covered_keys:
@@ -1338,10 +1390,13 @@ def run_close_advice(
         expirations_by_symbol,
         base_dir=Path(base_dir),
     )
-    issue_reasons = {
-        **coverage_reasons,
-        **frozen_plan_reasons,
-    }
+    issue_reasons = dict(coverage_reasons)
+    for position in quote_positions:
+        reason = frozen_plan_reasons.get(advice_position_key(position))
+        if reason:
+            key = _quote_key(position.get("symbol"), position.get("option_type"),
+                             _position_expiration(position), position.get("strike"), base_dir=Path(base_dir))
+            issue_reasons[key] = reason
     issue_details = coverage_details
 
     rows: list[dict[str, Any]] = []
@@ -1376,6 +1431,7 @@ def run_close_advice(
                 requirements_by_lot=frozen_requirements_by_lot,
                 provenance_by_symbol=frozen_provenance,
             )
+            row["market_data_provider"] = frozen_plan.get("market_data_provider", "opend")
             status = str(row.get("evaluation_status") or "unknown").strip().lower() or "unknown"
             evaluation_status_counts[status] = evaluation_status_counts.get(status, 0) + 1
             rows.append(row)
@@ -1383,7 +1439,7 @@ def run_close_advice(
 
         key = _quote_key(pos0.get("symbol"), pos0.get("option_type"), exp, pos0.get("strike"), base_dir=Path(base_dir))
         quote = quotes.get(key)
-        lot_id = str(pos0.get("lot_id") or pos0.get("record_id") or "").strip()
+        lot_id = advice_position_key(pos0)
         market = _market_for_symbol(pos0.get("symbol"))
         calendar_evidence, snapshot_aligned = _close_advice_calendar_evidence(
             requirement=frozen_requirements_by_lot.get(lot_id),
@@ -1403,6 +1459,18 @@ def run_close_advice(
             pos=pos0,
             quote=quote,
         )
+        observation, observation_flags = current_position_advice_evidence(
+            position=pos0, quote=quote, requirement=frozen_requirements_by_lot.get(lot_id),
+            market=market, now_utc=decision_now,
+        )
+        row.update(observation)
+        row["market_data_provider"] = frozen_plan.get("market_data_provider", "opend")
+        if observation_flags:
+            row = _mark_not_evaluable(
+                row, evaluation_status="not_evaluable", quote_status="not_evaluable",
+                reason="当前行情的时效、连续交易状态或实时权限证据不足：" + ";".join(observation_flags),
+            )
+            row = _with_extra_flags(row, observation_flags)
         row["position_lifecycle_state"] = lifecycle_state
         row.update(calendar_evidence)
         row = _apply_required_data_row_provenance(
@@ -1423,8 +1491,8 @@ def run_close_advice(
                 quote_status="not_evaluable",
                 reason="当前缺少同次封存且市场日期一致的行情与日历证据",
             )
-        row = _with_extra_flags(row, _quote_observability_flags(key, quote, issue_reasons))
-        issue_reason = str(issue_reasons.get(key) or "").strip()
+        issue_reason = str(frozen_plan_reasons.get(lot_id) or coverage_reasons.get(key) or "").strip()
+        row = _with_extra_flags(row, _quote_observability_flags(key, quote, {key: issue_reason}))
         if issue_reason.startswith("required_data_") or issue_reason == "close_advice_plan_unavailable":
             row = _mark_not_evaluable(
                 row,
@@ -1449,6 +1517,14 @@ def run_close_advice(
         evaluation_status_counts[status] = evaluation_status_counts.get(status, 0) + 1
         rows.append(row)
 
+    for row in rows:
+        row["current_actionable"] = bool(
+            row.get("current_actionable") and row.get("evaluation_status") == "priced"
+            and row.get("decision_evidence_status") == "complete"
+            and row.get("recommendation_state") in {"close", "hold"}
+        )
+        if not row["current_actionable"]:
+            row["assessment_mode"] = "unavailable"
     rows = sort_advice_rows(rows)
     max_items_raw = safe_int(advice_cfg.get("max_items_per_account"))
     max_items = 5 if max_items_raw is None else max_items_raw
@@ -1589,7 +1665,7 @@ def run_close_advice(
         if binding_id:
             frozen_binding_ids.add(binding_id)
     for position in quote_positions:
-        lot_id = str(position.get("lot_id") or position.get("record_id") or "").strip()
+        lot_id = advice_position_key(position)
         requirement = frozen_requirements_by_lot.get(lot_id)
         key = _quote_key(
             position.get("symbol"),
@@ -1600,6 +1676,7 @@ def run_close_advice(
         )
         if (
             requirement is not None
+            and lot_id not in frozen_plan_reasons
             and str(requirement.get("planning_status") or "") == "ready"
             and all(key)
             and key in covered_keys

@@ -5255,12 +5255,12 @@ def transition_case(monkeypatch, tmp_path):
                 assert Path(command[0]) == current.resolve() / ".venv/bin/python"
                 assert Path(kwargs["cwd"]) == current.resolve()
                 assert "m.distribution(name)" in command[3]
-                return result(stdout="[false, false]\n")
-            if len(command) == 7 and command[1:3] == ["-I", "-c"]:
+                return result(stdout="[false, false, false]\n")
+            if len(command) == 8 and command[1:3] == ["-I", "-c"]:
                 target = Path(command[4])
                 assert Path(command[0]) == target / ".venv/bin/python"
                 assert Path(kwargs["cwd"]) == target
-                assert command[5:] == ["false", "false"]
+                assert command[5:] == ["false", "false", "false"]
                 assert "load_portfolio_management_client_class" in command[3]
                 assert current.resolve() != target
                 return result()

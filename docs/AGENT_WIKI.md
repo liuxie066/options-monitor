@@ -768,9 +768,9 @@ unconfirmed record is also frozen and must not be automatically resent.
 
 ### Close Advice
 
-- Domain policy: `domain/domain/close_advice.py`
+- Optional policy package: `plugins/position-advice/`; core contract/facade: `domain/domain/close_advice.py`
 - Runner/I/O assembly: `src/application/close_advice_runner.py`
-- Recommended agent entry: `close_advice_read`
+- Agent entries: `close_advice_read` for existing reports; `position_advice_evaluate` for active assessment
 - Contract: `docs/CLOSE_ADVICE_CONTRACT.md`
 
 Core domain functions:
@@ -784,9 +784,12 @@ short calls. It returns only `close`, `hold`, or `not_evaluable`. The runner
 loads sealed position/quote facts, preserves fail-closed rows, and formats the
 report; it does not pair opening candidates or make replacement decisions.
 
-Only scheduled Tick produces current Close Advice reports. Agent callers use
-`close_advice_read`; the retired `prepare_close_advice_inputs`, `close_advice`,
-and `get_close_advice` tools no longer provide a mutable generation path.
+Scheduled Tick and active `position_advice_evaluate` share the sealed evaluator.
+Active requests accept ledger selectors or temporary manual positions, materialize
+isolated request reports, and never notify or write the ledger. Closed-session
+references retain their original snapshot date/DTE and cannot be current advice.
+`close_advice_read` only reads reports; the retired `prepare_close_advice_inputs`,
+`close_advice`, and `get_close_advice` tools remain retired.
 
 Scheduled Tick runs use one immutable required-data barrier for Close Advice:
 

@@ -168,6 +168,7 @@ CSP 现金担保与余量使用 `query_cash_headroom`。其 `assessment.supporte
 ### Close Advice
 
 - `close_advice_read`
+- `position_advice_evaluate`：按需行情及隔离请求报告，不写账本或发送通知
 
 ### 通知
 
@@ -403,9 +404,19 @@ stdout；休市时 `unable/market_closed` 是有效的不可评估结果，不�
   --input-json '{"config_key":"us","query":{"option_type":"put","side":"short"}}'
 ```
 
-`close_advice_read` 不刷新持仓或行情，也不生成新建议。当前报告只能由计划 Tick 的 sealed required-data 路径产出；显式历史路径中的非 sealed 行会投影为 `not_evaluable`。
+`close_advice_read` 不刷新持仓或行情，也不生成新建议。调度与主动评估均使用同一 sealed required-data 路径；显式历史路径中的非 sealed 行会投影为 `not_evaluable`。
 新报告只支持 short put/call，并仅返回 `close`、`hold` 或
 `not_evaluable`。它不生成新仓、roll、replace 或 reallocate 建议。
+
+主动评估（需安装持仓建议可选包并启用）：
+
+```bash
+./om-agent run --tool position_advice_evaluate \
+  --input-json '{"config_key":"us","account":"sample","symbols":["NVDA","AAPL"]}'
+./om position-advice evaluate --config-key us --request-file /path/to/request.json
+```
+
+手工请求示例：`{"account":"sample","positions":[{"input_id":"manual-1","input_as_of_utc":"2026-10-30T15:00:00Z","symbol":"NVDA","option_type":"put","expiration":"2026-12-18","strike":100,"contracts_open":1,"multiplier":100,"currency":"USD","premium":2}]}`。请填写自己的持仓事实与时间；此示例不是有效行情。休市参考保留原始 DTE/价格；没有兼容封存记录时不可用。该工具显式声明行情读取与本地报告写入，属于本地物化能力，不是 pure-read；业务账本与通知无写入。
 
 ### Daily Brief
 

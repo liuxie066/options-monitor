@@ -32,7 +32,7 @@ class OfflineRuntime:
         self.lb_installs = []
         self.pm_validation_fails = False
         self.lb_validation_fails = False
-        self.probe_output = json.dumps([installed, longbridge])
+        self.probe_output = json.dumps([installed, longbridge, False])
         self.uv_fails = False
 
     def __call__(self, command, **kwargs):
@@ -441,7 +441,7 @@ def test_current_runtime_probe_reads_metadata_without_importing_packages(transit
         )
         return subprocess.run([sys.executable, "-I", "-c", code], **kwargs)
 
-    assert upgrade._installed_optional_packages(previous_dir=previous, run_cmd=run_fixture_python, operations=[]) == (pm, lb)
+    assert upgrade._installed_optional_packages(previous_dir=previous, run_cmd=run_fixture_python, operations=[]) == (pm, lb, False)
 
 
 @pytest.mark.parametrize("expected,installed,broken,ok", [
