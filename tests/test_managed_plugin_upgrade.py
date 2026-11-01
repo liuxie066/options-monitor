@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import sys
 from types import SimpleNamespace
+import venv
 
 import pytest
 
@@ -72,13 +73,23 @@ def _inventory(path: Path):
             for p in path.rglob("*") if p.is_file() and "__pycache__" not in p.parts}
 
 
-def _python_proxy(executable: Path):
-    executable.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+def _python_proxy(executable: Path, runtime_python: Path):
+    executable.write_text(f'#!/bin/sh\nexec {shlex.quote(str(runtime_python))} "$@"\n')
     executable.chmod(0o755)
 
 
+@pytest.fixture(scope="module")
+def managed_python(tmp_path_factory):
+    # CI installs development plugins into its controller environment. Targets
+    # model fresh runtime environments, so their real subprocesses must not
+    # inherit that package ownership from sys.executable.
+    environment = tmp_path_factory.mktemp("managed-target-python")
+    venv.EnvBuilder(with_pip=False).create(environment)
+    return environment / "bin/python"
+
+
 @pytest.fixture(params=["source", "bundle"])
-def managed_transition(monkeypatch, transition, request):
+def managed_transition(monkeypatch, transition, request, managed_python):
     previous, target, current, events = transition
     for release in (previous, target):
         _release_code(release)
@@ -88,7 +99,7 @@ def managed_transition(monkeypatch, transition, request):
             # Published bundles contain core/runtime files, never plugin source packages.
             shutil.rmtree(release / "plugins")
             _bundled_runtime(release)
-            _python_proxy(release / runtime_bundle.PYTHON)
+            _python_proxy(release / runtime_bundle.PYTHON, managed_python)
             manifest_path = release / runtime_bundle.MANIFEST
             manifest = json.loads(manifest_path.read_text())
             manifest["files"][runtime_bundle.PYTHON] = runtime_bundle.sha256(release / runtime_bundle.PYTHON)
@@ -165,7 +176,7 @@ def managed_transition(monkeypatch, transition, request):
             return subprocess.CompletedProcess(command, 0, offline.probe_output, "")
         result = offline(command, **kwargs)
         if command[:3] == [sys.executable, "-m", "venv"] or command[:2] == ["uv", "venv"]:
-            _python_proxy(Path(command[-1]) / "bin/python")
+            _python_proxy(Path(command[-1]) / "bin/python", managed_python)
         return result
 
     def run(*, confirm=True):
@@ -384,11 +395,11 @@ def test_partial_target_install_can_retry_without_touching_previous_store(manage
 
 
 @pytest.fixture
-def managed_rollback(managed_transition, monkeypatch):
+def managed_rollback(managed_transition, monkeypatch, managed_python):
     ctx = managed_transition
     commands = []
     if not ctx.bundled:
-        _python_proxy(upgrade._release_python(ctx.previous))
+        _python_proxy(upgrade._release_python(ctx.previous), managed_python)
 
     def runner(command, **kwargs):
         if "-c" in command and "read_managed_plugin" in command[command.index("-c") + 1]:
