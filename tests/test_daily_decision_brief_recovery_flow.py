@@ -72,7 +72,7 @@ def test_recovery_sends_full_report_once_and_preserves_failed_receipt(recovery, 
     assert supplement["delivery_kind"] == "fixed_recovery_report"
     assert supplement["delivery_key"].startswith("option-report-recovery:US:")
     assert "22:00 批次恢复补报 · 22:30 扫描" in calls[-1]["message"]
-    assert "## 持仓" in calls[-1]["message"] and "## 资金" in calls[-1]["message"]
+    assert "【持仓】" in calls[-1]["message"] and "【资金】" in calls[-1]["message"]
     assert _day(tmp_path)["fixed_reports"][FIXED_TARGET] == original
     assert IDENTITY in _day(tmp_path)["alerted_candidates"]
     clock["now"] = "2026-07-21T14:40:30+00:00"
@@ -94,8 +94,8 @@ def test_continued_failure_no_send_and_manual_do_not_create_recovery(recovery, t
 
 def test_render_crash_rebuilds_bound_revision_without_scan(recovery, monkeypatch, tmp_path):
     clock, _, calls, _ = recovery
-    renderer = mod.render_fixed_report
-    monkeypatch.setattr(mod, "render_fixed_report", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("render crash")))
+    renderer = mod.render_fixed_report_text
+    monkeypatch.setattr(mod, "render_fixed_report_text", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("render crash")))
     restored = _request(tmp_path, run_id="bound", fixed=False)
     with pytest.raises(RuntimeError, match="render crash"):
         mod.run_tick_notification_flow(restored.request)
@@ -105,7 +105,7 @@ def test_render_crash_rebuilds_bound_revision_without_scan(recovery, monkeypatch
     newer = {**_brief(base=tmp_path, run_id="newer", candidate=False), "generated_at_utc": clock["now"]}
     persisted = repo.persist_daily_decision_brief_success(base=tmp_path, brief=newer)
     assert persisted["current_revision"] > bound["revision"]
-    monkeypatch.setattr(mod, "render_fixed_report", renderer)
+    monkeypatch.setattr(mod, "render_fixed_report_text", renderer)
     forbidden = []
 
     def forbid(**kwargs):
@@ -122,14 +122,14 @@ def test_render_crash_rebuilds_bound_revision_without_scan(recovery, monkeypatch
 @pytest.mark.parametrize("render_crash", [True, False])
 def test_next_fixed_report_replaces_expired_recovery(recovery, monkeypatch, tmp_path, render_crash):
     clock, _, calls, _ = recovery
-    renderer = mod.render_fixed_report
+    renderer = mod.render_fixed_report_text
     if render_crash:
         monkeypatch.setattr(
-            mod, "render_fixed_report", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("render crash"))
+            mod, "render_fixed_report_text", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("render crash"))
         )
         with pytest.raises(RuntimeError):
             mod.run_tick_notification_flow(_request(tmp_path, run_id="bind", fixed=False).request)
-        monkeypatch.setattr(mod, "render_fixed_report", renderer)
+        monkeypatch.setattr(mod, "render_fixed_report_text", renderer)
     else:
         _patch_sender(
             monkeypatch,
@@ -205,11 +205,11 @@ def test_cutoff_is_rechecked_immediately_before_provider(recovery, monkeypatch, 
 
 def test_expired_unrendered_binding_cannot_resurrect_as_candidate_delivery(recovery, monkeypatch, tmp_path):
     clock, _, calls, _ = recovery
-    renderer = mod.render_fixed_report
-    monkeypatch.setattr(mod, "render_fixed_report", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("render crash")))
+    renderer = mod.render_fixed_report_text
+    monkeypatch.setattr(mod, "render_fixed_report_text", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("render crash")))
     with pytest.raises(RuntimeError):
         mod.run_tick_notification_flow(_request(tmp_path, run_id="unrendered", fixed=False).request)
-    monkeypatch.setattr(mod, "render_fixed_report", renderer)
+    monkeypatch.setattr(mod, "render_fixed_report_text", renderer)
     clock["now"] = "2026-07-21T15:00:00+00:00"
     mod.run_tick_notification_flow(_request(tmp_path, run_id="late-delivery-only", delivery_only=True).request)
     assert len(calls) == 1
@@ -262,7 +262,7 @@ def test_reliable_empty_result_still_sends_full_recovery(recovery, tmp_path):
     assert mod.run_tick_notification_flow(_request(tmp_path, run_id="empty-recovery", fixed=False).request) == 0
     assert len(calls) == 2
     assert "恢复补报" in calls[-1]["message"]
-    assert "## 持仓" in calls[-1]["message"] and "## 资金" in calls[-1]["message"]
+    assert "【持仓】" in calls[-1]["message"] and "【资金】" in calls[-1]["message"]
     assert _recovery(tmp_path)["candidate_identities"] == []
     assert _recovery(tmp_path)["status"] == "confirmed"
 

@@ -29,10 +29,13 @@ from src.application.cron_runtime import apply_notify_results_to_tick_metrics, b
 from src.application.daily_decision_brief_renderer import (
     build_attribution_reminder_context,
     render_candidate_alert,
-    render_candidate_alert_card_markdown,
+    render_candidate_alert_card_blocks,
+    render_candidate_alert_text,
     render_fixed_failure,
+    render_fixed_failure_text,
     render_fixed_report,
-    render_fixed_report_card_markdown,
+    render_fixed_report_card_blocks,
+    render_fixed_report_text,
     resolve_daily_brief_render_limits,
     select_rendered_combo_candidate_rows,
 )
@@ -1279,7 +1282,7 @@ def _prepare_daily_brief_notification(
                     ):
                         render_context = _daily_brief_render_context(request, scheduler_decision=scheduler)
                         if action == "fixed_failure":
-                            message = render_fixed_failure(
+                            message = (render_fixed_failure if feishu_card_delivery else render_fixed_failure_text)(
                                 brief,
                                 context=render_context,
                             )
@@ -1309,34 +1312,39 @@ def _prepare_daily_brief_notification(
                                 diff=diff, limits=daily_limits,
                             ))
                             if action == "fixed_report":
-                                message = render_fixed_report(
+                                message = (render_fixed_report if feishu_card_delivery else render_fixed_report_text)(
                                     persisted["brief"],
                                     diff=diff,
                                     limits=daily_limits,
                                     context=render_context,
                                 )
-                                card_markdown = render_fixed_report_card_markdown(
-                                    persisted["brief"],
-                                    diff=diff,
-                                    limits=daily_limits,
-                                    context=render_context,
-                                )
+                                card_blocks = []
+                                if feishu_card_delivery:
+                                    card_blocks = render_fixed_report_card_blocks(
+                                        persisted["brief"],
+                                        diff=diff,
+                                        limits=daily_limits,
+                                        context=render_context,
+                                    )
                             else:
-                                message = render_candidate_alert(
+                                message = (render_candidate_alert if feishu_card_delivery else render_candidate_alert_text)(
                                     persisted["brief"],
                                     identities,
                                     limits=daily_limits,
                                     context=render_context,
                                 )
-                                card_markdown = render_candidate_alert_card_markdown(
-                                    persisted["brief"],
-                                    identities,
-                                    limits=daily_limits,
-                                    context=render_context,
-                                )
+                                card_blocks = []
+                                if feishu_card_delivery:
+                                    card_blocks = render_candidate_alert_card_blocks(
+                                        persisted["brief"],
+                                        identities,
+                                        limits=daily_limits,
+                                        context=render_context,
+                                    )
                             rendered_transport = (
                                 render_feishu_notification_card(
-                                    markdown=card_markdown,
+                                    markdown="\n\n".join(card_blocks),
+                                    markdown_blocks=card_blocks,
                                     fallback_text=message,
                                     fallback_open_id=resolve_feishu_bot_send_target(notifications=request.base_cfg.get("notifications")),
                                 )
@@ -1726,28 +1734,36 @@ def _rebuild_daily_brief_delivery(
         render_context.update(_daily_brief_candidate_render_context(
             brief, delivery_kind=action, candidate_identities=identities, diff=diff, limits=daily_limits,
         ))
-    if full_report:
-        message = render_fixed_report(brief, diff=diff, limits=daily_limits, context=render_context)
-        card_markdown = render_fixed_report_card_markdown(
-            brief,
-            diff=diff,
-            limits=daily_limits,
-            context=render_context,
-        )
-    else:
-        message = render_candidate_alert(brief, identities, limits=daily_limits, context=render_context)
-        card_markdown = render_candidate_alert_card_markdown(
-            brief,
-            identities,
-            limits=daily_limits,
-            context=render_context,
-        )
     feishu_card_delivery = (
         str(_notification_perception_route_hint(request.base_cfg).get("provider") or "").strip().lower()
         == FEISHU_APP_NOTIFICATION_PROVIDER
     )
     if recovering_report:
         feishu_card_delivery = bool(render_context["recovery_card_delivery"])
+    if full_report:
+        message = (render_fixed_report if feishu_card_delivery else render_fixed_report_text)(
+            brief, diff=diff, limits=daily_limits, context=render_context,
+        )
+        card_blocks = []
+        if feishu_card_delivery:
+            card_blocks = render_fixed_report_card_blocks(
+                brief,
+                diff=diff,
+                limits=daily_limits,
+                context=render_context,
+            )
+    else:
+        message = (render_candidate_alert if feishu_card_delivery else render_candidate_alert_text)(
+            brief, identities, limits=daily_limits, context=render_context,
+        )
+        card_blocks = []
+        if feishu_card_delivery:
+            card_blocks = render_candidate_alert_card_blocks(
+                brief,
+                identities,
+                limits=daily_limits,
+                context=render_context,
+            )
     prepared = prepare_daily_decision_brief_delivery(
         base=request.base,
         account=account,
@@ -1763,7 +1779,7 @@ def _rebuild_daily_brief_delivery(
         rendered_message=message,
         rendered_transport=(
             render_feishu_notification_card(
-                markdown=card_markdown, fallback_text=message,
+                markdown="\n\n".join(card_blocks), markdown_blocks=card_blocks, fallback_text=message,
                 fallback_open_id=(
                     render_context.get("recovery_fallback_open_id") if recovering_report
                     else resolve_feishu_bot_send_target(notifications=request.base_cfg.get("notifications"))
