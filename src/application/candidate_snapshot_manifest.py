@@ -9,7 +9,7 @@ from domain.domain.decision_state_fingerprint import canonical_sha256
 from src.application.candidate_snapshot_contract import (
     CandidateSnapshotContractError,
     assert_current_candidate_artifact_boundary,
-    current_candidate_owner_schema,
+    is_current_candidate_owner_schema,
     required_text,
     sha256_text,
     utc_timestamp,
@@ -84,10 +84,6 @@ _BASE_OWNER_FILES = {
 _OWNER_FILES_V1 = {**_BASE_OWNER_FILES, "wheel": WHEEL_CANDIDATE_SNAPSHOT_FILE_V1}
 _OWNER_FILES_V3 = {**_BASE_OWNER_FILES, "wheel": WHEEL_CANDIDATE_SNAPSHOT_FILE_V2}
 _OWNER_FILES_CURRENT = {**_BASE_OWNER_FILES, "wheel": WHEEL_CANDIDATE_SNAPSHOT_FILE}
-_OWNER_SCHEMAS_CURRENT = {
-    owner: current_candidate_owner_schema(owner)
-    for owner in _OWNER_FILES_CURRENT
-}
 _KNOWN_MANIFEST_FILES = (
     CANDIDATE_SNAPSHOT_MANIFEST_V1_FILE,
     "candidate_snapshot_manifest.v2.json",
@@ -452,7 +448,7 @@ def publish_candidate_snapshot_manifest(
             account=account_norm,
             owner=owner,
         )
-        if snapshot.get("schema_version") != _OWNER_SCHEMAS_CURRENT[owner]:
+        if not is_current_candidate_owner_schema(owner, snapshot.get("schema_version")):
             raise CandidateSnapshotManifestError(
                 f"candidate owner snapshot schema mismatch: {owner}"
             )
@@ -559,7 +555,6 @@ def validate_candidate_snapshot_manifest(
         if schema != CANDIDATE_SNAPSHOT_MANIFEST_V4_SCHEMA:
             raise CandidateSnapshotManifestError("candidate snapshot manifest schema mismatch")
         owner_files = _OWNER_FILES_CURRENT
-        owner_schemas = _OWNER_SCHEMAS_CURRENT
         if item.get("run_id") != expected_run_id:
             raise CandidateSnapshotManifestError("candidate snapshot manifest run mismatch")
         if item.get("account") != expected_account:
@@ -630,7 +625,7 @@ def validate_candidate_snapshot_manifest(
             owner = str(entry.get("candidate_owner") or "")
             if owner not in owner_files:
                 raise CandidateSnapshotManifestError("candidate manifest owner is invalid")
-            if entry.get("schema_version") != owner_schemas[owner]:
+            if not is_current_candidate_owner_schema(owner, entry.get("schema_version")):
                 if owner == "wheel":
                     raise CandidateSnapshotManifestError("artifact_version_mismatch")
                 raise CandidateSnapshotManifestError("candidate manifest owner schema mismatch")

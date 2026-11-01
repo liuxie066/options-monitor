@@ -920,7 +920,7 @@ def _resolve_context_source_binding(
     source_name = str(
         context.get("portfolio_source_name") or plan.primary_source
     ).strip().lower()
-    if source_name != "futu":
+    if source_name != plan.primary_source:
         raise PreparedPortfolioContextError(
             "prepared portfolio context source is not allowed by account config"
         )

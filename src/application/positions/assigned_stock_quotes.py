@@ -6,11 +6,14 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from domain.domain.ledger.position_fields import norm_symbol
-from src.application.futu_quote_routing import resolve_futu_quote_route
+from src.application.market_data_provider import (
+    resolve_market_data_provider,
+    resolve_quote_route as resolve_futu_quote_route,
+    open_quote_gateway as build_ready_futu_quote_gateway,
+    get_stock_spot as get_spot_opend,
+)
 from src.application.opend_fetch_config import resolve_opend_fetch_limits
-from src.application.opend_market_snapshot_fetching import get_spot_opend
 from src.application.opend_utils import normalize_underlier
-from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
 
 
 @dataclass(frozen=True)
@@ -78,9 +81,12 @@ def refresh_assigned_stock_quote_snapshots(
         diagnostics["status"] = "skipped_no_open_assigned_stock"
         return AssignedStockQuoteRefreshResult([], diagnostics, [])
 
-    quote_route = resolve_futu_quote_route(
-        dict(cfg) if isinstance(cfg, Mapping) else {}
-    )
+    config = dict(cfg) if isinstance(cfg, Mapping) else {}
+    provider = resolve_market_data_provider(config)
+    provider_kwargs = {} if provider.name == "opend" else {"market_data_provider": provider.name}
+    quote_source = "opend_realtime" if provider.name == "opend" else f"{provider.name}_realtime"
+    diagnostics["quote_source"] = quote_source
+    quote_route = resolve_futu_quote_route(config)
     explicit_override = host is not None or port is not None
     if host is not None and port is not None:
         effective_host = str(host).strip()
@@ -126,6 +132,7 @@ def refresh_assigned_stock_quote_snapshots(
             host=effective_host,
             port=effective_port,
             is_option_chain_cache_enabled=False,
+            **provider_kwargs,
         )
     except Exception as exc:
         diagnostics["status"] = "source_unavailable"
@@ -155,6 +162,7 @@ def refresh_assigned_stock_quote_snapshots(
                     snapshot_window_sec=limits.window_sec,
                     snapshot_max_calls=limits.max_calls,
                     errors=errors,
+                    **provider_kwargs,
                 )
             except Exception as exc:
                 errors.append(
@@ -174,7 +182,7 @@ def refresh_assigned_stock_quote_snapshots(
                     "symbol": symbol,
                     "spot": float(spot),
                     "quote_time_ms": int(now_ms()),
-                    "quote_source": "opend_realtime",
+                    "quote_source": quote_source,
                     "quote_status": "fresh",
                 }
             )

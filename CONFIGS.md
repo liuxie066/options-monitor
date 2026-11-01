@@ -45,7 +45,7 @@ env-file 不是合并进生成快照的配置层；它在进程启动或工具�
 - `portfolio_management.enabled` 是全局、默认关闭的 PM 集成开关，控制 PM 只读工具、
   Holdings 开启时的补充来源和成交后的持仓刷新提示；不要放在 `markets.*` 下；
 - `portfolio.holdings.enabled` 控制指派后分布是否补充 PM Holdings 中明确为非富途来源的资产，
-  默认关闭；富途股票、现金、MMF 和股票现价取自 OpenD，PM 的富途副本不重复计入。
+  默认关闭；账户资产取自配置的券商 provider，富途股票、现金/MMF 取自 OpenD。PM 的富途副本及同账户已直接读取的长桥镜像不重复计入。
   开启预览展示 PM 原始来源清单；开启后按账户自动纳入明确为非富途的资产，不保存券商批准名单；
 - 旧 `trade_intake.holdings_sync.enabled` 只保留一个版本的迁移读取，旧队列、重试、
   超时和状态目录参数不再生效；
@@ -70,13 +70,82 @@ Close Advice 详细固定规则见
 
 ### Portfolio Exposure 的 Holdings 来源配置
 
-`portfolio.holdings.enabled` 是“全部指派后分布”的 PM 非富途资产补充开关，默认关闭。关闭时查询不读取 PM；开启时以富途 OpenD 股票、现金（含 MMF）和 OM 期权账本为基线，仅从 PM `holdings_scope=non_futu` 估值证据补充同账户非富途资产。PM 的富途股票、现金和 MMF 副本不会参与报价、估值或分布。PM 非富途现金计入资产分布，但不增加富途期权资金覆盖。
+`portfolio.holdings.enabled` 是“全部指派后分布”的 PM 非富途资产补充开关，默认关闭。关闭时查询不读取 PM；开启时以账户配置的直接券商股票、现金与 OM 期权账本为基线，仅从 PM `holdings_scope=non_futu` 估值证据补充同账户非富途资产。PM 的富途副本及同账户已直接读取的长桥镜像不重复计入；其他 PM 现金只参与资产分布，不增加直接券商的期权资金覆盖。
 
 开启前运行 `om config holdings set --enabled true` 预览。预检向 PM 读取完整原始 Holdings 切片的来源清单，展示每个账户的 broker 原文、`futu/non_futu/unknown` 分类、行数、纳入/排除数量与读取时间。成功读取且零合格行、无 unknown 和 unsupported 时为 `ready_empty`。来源清单用于解释数据，不保存为人工批准名单；开启后自动纳入同账户全部明确为非富途的资产，新增券商或来源名称变化不需要重新确认。
 
 apply 仍需 `--confirm`、预览的源 SHA 与预览摘要，经现有配置事务生成 YAML、所有已配置市场快照和 Bot 快照、备份并读回。PM 失败、旧版响应、未知来源或估值质量不完整时禁止开启；关闭不依赖 PM。旧配置中的 `portfolio.holdings.approved_non_futu_brokers` 已退役，加载时忽略，重新配置 Holdings 时移除。配置只允许全局设置，不允许市场覆盖。
 
 `portfolio_management.enabled` 仍控制更广的 PM 集成，不能代替此开关。配置切换不执行交易、指派、账本、PM Holdings 或 Feishu 写入；生产配置发布与部署另行授权。
+
+## 可选能力与长桥账户
+
+行情和账户资产分别选择。`market_data.provider` 默认 `opend`，当前只有此内置实现；
+长桥账户仍可使用 OpenD 行情，不要求切换行情来源。`portfolio.source` 的兼容默认仍为
+`futu`；长桥或富途/长桥混合账户须设置 `auto`，按账户类型路由，显式来源与类型冲突时报错。
+
+YAML 示例（凭据值只放所选实例的 env-file）：
+
+```yaml
+market_data:
+  provider: opend
+portfolio:
+  source: auto
+portfolio_management:
+  enabled: false
+accounts:
+  lb:
+    type: longbridge
+    longbridge:
+      account_id: "YOUR_LONGBRIDGE_ACCOUNT"
+      credentials_env_prefix: OM_LB
+      region: ap
+      trd_env: REAL
+      credential_binding_sha256: "<离线预览产生的64位小写十六进制指纹>"
+markets:
+  us:
+    accounts: [lb]
+    symbols: [NVDA]
+```
+
+长桥依赖单独安装，见 [Install](docs/INSTALL.md#可选-pm-与长桥依赖)。适配器仅支持 AP
+数据中心的 REAL 账户，读取 `stock_positions` 与 `account_balance`；AP 账户可有 US/HK
+证券，数据中心与证券市场是两个维度。不支持 US 数据中心、模拟账户、下单或成交同步。
+旧账户 CLI 可编辑、移除或链接已在 YAML 定义的长桥账户；新增长桥映射在 YAML 配置后经
+既有 build 生成，不把长桥账号填入富途数字 ID 字段。
+
+环境变量为 `OM_LB_APP_KEY`、`OM_LB_APP_SECRET`、`OM_LB_ACCESS_TOKEN`（前缀由配置决定）。
+长桥预览、资产读取与缓存指纹复验共用有效环境：`OM_ENV_FILE` 选择的 env-file 覆盖进程
+环境，不把 secret 注入全局 `os.environ`；这是长桥显式环境凭据契约，不改变其他服务的
+secret backend 策略。healthcheck 使用其所选的有效环境；内部调用显式传入 `environ`
+时，该映射作为完整快照，不再叠加进程环境或另一个 env-file。
+SDK 的 endpoint、模拟环境及日志路径 override 不受支持；有效环境或 SDK 实际继承的进程
+环境出现这些非空 override 均拒绝连接，不能用 env-file 空值遮蔽进程 override。
+长桥资产响应不回显唯一物理账号，`account_channel` 是账户类型。用户须明确确认这组
+凭据属于配置的账号；在已设置 `OM_ENV_FILE` 或安全载入上述环境变量的解释器中运行离线预览：
+
+```bash
+./.venv/bin/python -m src.infrastructure.longbridge_gateway \
+  --account-id YOUR_LONGBRIDGE_ACCOUNT --credentials-env-prefix OM_LB
+```
+
+此命令不连接券商、不载入 SDK、不修改配置，只返回绑定指纹及非 secret 的绑定说明。
+确认账号后将 `credential_binding_sha256` 写入 YAML，经既有配置事务生成快照。指纹绑定
+凭据、账号、数据中心和环境；读取与缓存消费均核验当前凭据，凭据变化或缺失使旧绑定
+失效，重新确认并生成指纹后才可参与容量计算。证据明确标注用户绑定、`broker_echoed=false`，
+不把用户填写的账号称为券商回显。缺失指纹可读取展示，但资金/覆盖不可用。
+
+现金容量使用分币种 `available_cash`，保留负数，不使用融资、购买力，也不把冻结/待交收
+现金当作可用资金。资产估值另用 `total_cash` 与其币种的证据，不把可用现金和总现金
+重复相加。证券类型、可卖股数、身份、金额、完整性或时效不满足契约时保留明确缺口，
+不填零或回退另一券商。期权持仓的完整合约身份尚未接入长桥，此类范围请求显式不可用。
+`healthcheck` 验证长桥当前凭据绑定，资产 API 的实际可用性仍标为未验证（skipped），
+不因离线绑定有效就报告真实账户已就绪。
+
+PM 安装与启用分开：`om-pm-plugin` 未安装且 PM 关闭时 OM 正常启动；安装后配置
+`portfolio_management.enabled: true` 才启用。开启但缺包返回
+`PORTFOLIO_MANAGEMENT_UNAVAILABLE`，不伪造空资产。卸载前关闭 PM 及其 Holdings 补充；
+如保留启用配置，PM 请求明确不可用，其余能力不因导入可选包而无法启动。
 
 ## Symbol 并发配置
 

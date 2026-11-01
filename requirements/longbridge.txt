@@ -1,0 +1,2 @@
+# Optional read-only holdings/cash adapter; never required by default OM installs.
+longbridge==5.3.0

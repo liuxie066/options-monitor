@@ -378,6 +378,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retry-timeout-sec", type=float, default=25.0)
     parser.add_argument("--success-threshold", type=int, default=2)
     parser.add_argument("--required-capability", choices=("quote", "broker", "both"), default="both")
+    parser.add_argument("--expected-account-id", action="append", default=[])
+    parser.add_argument("--trd-env", default="REAL")
     return parser
 
 
@@ -392,6 +394,8 @@ def main(argv: list[str] | None = None) -> int:
         retry_timeout_sec=float(args.retry_timeout_sec),
         success_threshold=int(args.success_threshold),
         required_capability=args.required_capability,
+        **({"expected_account_ids": args.expected_account_id, "trd_env": args.trd_env}
+           if args.required_capability == "broker" else {}),
     )
     _emit(h, bool(args.json))
     return 0 if h.ok else 2

@@ -22,7 +22,7 @@ from src.application.multi_tick.opend_guard import (
     send_opend_recovery_notice,
 )
 from src.application.multi_tick.project_guard import admit_project_run, apply_project_load_shed
-from src.application.multi_tick_watchdog import run_multi_tick_watchdog
+from src.application.multi_tick_watchdog import run_multi_tick_watchdog, required_opend_probes
 from src.application.tick_account_execution import resolve_default_account
 from src.infrastructure.external_services import run_opend_watchdog
 from src.infrastructure.io_utils import parse_last_json_obj, utc_now
@@ -131,7 +131,13 @@ def run_tick_guard_flow(request: TickGuardRequest) -> TickGuardOutcome:
     schedule_cfg = base_cfg.get("schedule", {}) or {}
     bj_tz = ZoneInfo(schedule_cfg.get("beijing_timezone", "Asia/Shanghai"))
 
-    phone_verify_pending = request.is_opend_phone_verify_pending_fn(request.base)
+    # Leave probe/config errors to the fail-closed watchdog boundary below.
+    try:
+        needs_opend = bool(required_opend_probes(base_cfg, accounts,
+            resolve_watchlist_config=resolve_watchlist_config, is_futu_fetch_source=is_futu_fetch_source))
+    except Exception:
+        needs_opend = False
+    phone_verify_pending = needs_opend and request.is_opend_phone_verify_pending_fn(request.base)
     if phone_verify_pending and not request.opend_phone_verify_continue:
         request.audit_helper.audit("guard", "opend_phone_verify_pending", status="error",
                                    error_code="OPEND_NEEDS_PHONE_VERIFY")

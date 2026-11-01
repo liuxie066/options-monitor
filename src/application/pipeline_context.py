@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Mapping
 
 from src.application.runtime_paths import resolve_runtime_root
-from src.application.account_config import accounts_from_config, build_account_portfolio_source_plan
+from src.application.account_config import accounts_from_config, build_account_portfolio_source_plan, resolve_account_broker
 from src.application.config_loader import resolve_data_config_path
 from src.application.positions.context_builder import (
     STRATEGY_FAMILY_SOURCE,
@@ -447,8 +447,8 @@ def build_pipeline_context(
 
     portfolio_cfg = cfg.get('portfolio', {}) or {}
     data_config = resolve_data_config_path(base=base, data_config=portfolio_cfg.get('data_config'))
-    broker = portfolio_cfg.get('broker') or '富途'
     account = portfolio_cfg.get('account')
+    broker = resolve_account_broker(cfg, account=account)
     portfolio_source = build_account_portfolio_source_plan(
         cfg,
         account=(str(account) if account else None),

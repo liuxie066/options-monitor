@@ -1268,7 +1268,7 @@ def _validate_quote_cache_metadata_binding(
         or str(metadata.get("symbol") or "").strip().upper()
         != str(symbol or "").strip().upper()
         or str(metadata.get("market") or "").strip().upper() != expected_market
-        or str(metadata.get("source") or "").strip().lower() != "opend"
+        or str(metadata.get("source") or "").strip().lower() != _normalize_fetch_source(raw_meta.get("source"))
         or not str(metadata.get("source_run_id") or "").strip()
         or str(metadata.get("csv_sha256") or "") != sha256_bytes(csv.read_bytes())
         or not _same_datetime(
@@ -1551,7 +1551,7 @@ def save_outputs(
         publish_quote_cache_metadata(
             csv_path=csv_path,
             symbol=symbol,
-            source="opend",
+            source=_normalize_fetch_source((meta or {}).get("source")),
             source_run_id=source_run_id,
             observed_at=observed_at,
         )
@@ -1623,7 +1623,7 @@ def _publish_final_quote_cache_metadata(
     return publish_quote_cache_metadata(
         csv_path=csv_path,
         symbol=symbol,
-        source="opend",
+        source=_normalize_fetch_source(meta.get("source")),
         source_run_id=source_run_id,
         observed_at=observed_at,
     )
@@ -2095,7 +2095,8 @@ def publish_required_data_quote_snapshot(
     bundle_hash = canonical_sha256(bundle)
     run_key = canonical_sha256({"producer_run_id": run_id})
     symbol_key = canonical_sha256({"symbol": symbol_norm})
-    source_native_id = f"opend-required-data:{symbol_norm}:{bundle_hash}"
+    source = str(contract["fetch_binding"]["source"])
+    source_native_id = f"{source}-required-data:{symbol_norm}:{bundle_hash}"
     snapshot_key = source_snapshot_id(
         source_kind="quotes",
         source_native_id=source_native_id,
@@ -2162,7 +2163,7 @@ def publish_required_data_quote_snapshot(
         source_kind="quotes",
         producer_schema_version=REQUIRED_DATA_QUOTE_SNAPSHOT_SCHEMA,
         producer_run_id=run_id,
-        broker="futu",
+        broker="futu" if source == "opend" else None,
         included_markets=[market],
         source_native_id=source_native_id,
         source_observed_at=source_observed_at,
@@ -2198,6 +2199,7 @@ def find_fresh_required_data_quote_receipts(
     producer_root: Path,
     symbols: list[str],
     now: datetime | str | None = None,
+    expected_source: str = "opend",
 ) -> dict[str, str]:
     """Discover the newest valid immutable receipt per symbol without refreshing it."""
 
@@ -2233,7 +2235,7 @@ def find_fresh_required_data_quote_receipts(
                 expected_source_kind="quotes",
             )
             native_id = str(receipt.get("source_native_id") or "")
-            if not native_id.startswith("opend-required-data:"):
+            if not native_id.startswith(f"{_normalize_fetch_source(expected_source)}-required-data:"):
                 continue
             symbol = native_id.split(":", 2)[1].strip().upper()
             if symbol not in expected:

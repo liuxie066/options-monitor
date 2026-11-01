@@ -199,12 +199,14 @@ install_optional_requirements() {
   fi
   pip_bin="${release_dir}/.venv/bin/pip"
   [ -x "$pip_bin" ] || die "cannot install optional requirements; pip is missing: $pip_bin"
+  (cd "$release_dir"
   if [ "$WITH_SERVER" -eq 1 ]; then
     "$pip_bin" install -r "$release_dir/requirements/server.txt" -c "$release_dir/constraints/server.txt"
   fi
   if [ "$WITH_DEV" -eq 1 ]; then
     "$pip_bin" install -r "$release_dir/requirements/dev.txt" -c "$release_dir/constraints/dev.txt"
   fi
+  )
 }
 
 write_cli_wrapper() {

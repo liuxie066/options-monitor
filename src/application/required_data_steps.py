@@ -8,7 +8,9 @@ Goal: minimal/no behavior change.
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import replace
 import json
+from domain.domain.fetch_source import normalize_fetch_source
 from typing import Any, Callable
 
 from src.application import pipeline_fetch_models
@@ -42,6 +44,9 @@ from src.application.required_data_plan_identity import (
 from src.application.required_data_snapshot import (
     resolve_frozen_required_data_csv_bytes,
 )
+from src.application.market_data_provider import market_data_source
+from src.application.required_data_snapshot import assert_required_data_source
+from src.application.close_advice_quote_cache import quote_cache_metadata_path, validate_quote_cache_metadata
 
 
 def ensure_required_data(
@@ -69,12 +74,14 @@ def ensure_required_data(
     required_data_snapshot_manifest: Path | None = None,
     required_data_snapshot_run_id: str | None = None,
     required_data_csv_bytes_sink_fn: Callable[[bytes], None] | None = None,
+    market_data_provider: str = "opend",
 ) -> dict[str, Any] | None:
     sym = symbol
     parsed = (required_data_dir / 'parsed' / f"{sym}_required_data.csv").resolve()
 
     if not (want_put or want_call):
         return None
+    fetch_source = normalize_fetch_source(market_data_source(market_data_provider, fetch_source))
     if required_data_snapshot_manifest is not None:
         evidence, csv_bytes = resolve_frozen_required_data_csv_bytes(
             manifest_path=required_data_snapshot_manifest,
@@ -82,11 +89,12 @@ def ensure_required_data(
             symbol=sym,
             required_data_root=required_data_dir,
         )
+        assert_required_data_source(evidence, expected_source=fetch_source, symbol=sym)
         if required_data_csv_bytes_sink_fn is not None:
             required_data_csv_bytes_sink_fn(csv_bytes)
         return evidence
 
-    src = 'opend'
+    src = fetch_source
     producer_run_id = str(source_producer_run_id or "").strip()
     if producer_run_id and fetch_plan is None:
         raise SourceReceiptError(
@@ -140,8 +148,18 @@ def ensure_required_data(
     # - read-model shows previous fetch status=error
     # - min_dte is requested but existing required_data doesn't reach that DTE.
     if parsed.exists() and parsed.stat().st_size > 0:
-        should_refetch = False
+        # Provenance belongs to the published metadata/read model; do not reopen
+        # raw fetch artifacts from pipeline orchestration. Legacy loose CSVs
+        # without provenance belonged only to OpenD.
+        should_refetch = (
+            not validate_quote_cache_metadata(csv_path=parsed, symbol=sym,
+                expected_source=fetch_source, require_freshness=False).get("ok")
+            if quote_cache_metadata_path(parsed).exists() or fetch_source != "opend"
+            else False
+        )
         if isinstance(fetch_current, dict):
+            if normalize_fetch_source(fetch_current.get("source")) != fetch_source:
+                should_refetch = True
             if str(fetch_current.get('status') or '').lower() == 'error':
                 should_refetch = True
 
@@ -236,6 +254,7 @@ def ensure_required_data(
             )
         ]
 
+    requests = [replace(request, market_data_provider=market_data_provider) for request in requests]
     try:
         if fetch_plan is None and len(requests) == 1:
             merged_payload = execute_required_data_opend(

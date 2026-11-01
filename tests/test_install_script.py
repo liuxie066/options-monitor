@@ -61,7 +61,7 @@ dest=""
 for arg in "$@"; do
   dest="$arg"
 done
-mkdir -p "$dest/requirements" "$dest/constraints" "$dest/src/application/bot" "$dest/scripts"
+mkdir -p "$dest/requirements" "$dest/constraints" "$dest/src/application/bot" "$dest/scripts" "$dest/plugins/portfolio-management"
 : > "$dest/src/__init__.py"
 : > "$dest/src/application/__init__.py"
 : > "$dest/src/application/bot/__init__.py"
@@ -71,6 +71,9 @@ printf '9.9.%s\n' "${FAKE_RELEASE_PATCH:-9}" > "$dest/VERSION"
 : > "$dest/constraints.txt"
 : > "$dest/requirements/server.txt"
 : > "$dest/constraints/server.txt"
+printf './plugins/portfolio-management\n' > "$dest/requirements/dev.txt"
+: > "$dest/constraints/dev.txt"
+printf 'target release\n' > "$dest/plugins/portfolio-management/package-fixture"
 cat > "$dest/om" <<'SH'
 #!/usr/bin/env bash
 printf 'fake om %s\\n' "$*"
@@ -122,6 +125,9 @@ if [[ "${1:-}" == "-m" && "${2:-}" == "venv" ]]; then
   mkdir -p "$venv/bin"
   cat > "$venv/bin/pip" <<'SH'
 #!/usr/bin/env bash
+if [[ "$*" == *"/requirements/dev.txt"* ]]; then
+  cat ./plugins/portfolio-management/package-fixture > "${FAKE_DEV_INSTALL_LOG:?}" || exit 34
+fi
 exit 0
 SH
   cat > "$venv/bin/python" <<'SH'
@@ -201,6 +207,25 @@ def _installed_baseline(tmp_path: Path) -> tuple[dict[str, str], subprocess.Comp
     """Install the v9.9.9 baseline release the release-switch tests start from."""
     env = _installer_env(tmp_path)
     return env, _run_installer(tmp_path, env=env)
+
+
+@pytest.mark.parametrize("decoy", [False, True])
+def test_with_dev_installs_target_release_package_from_unrelated_cwd(monkeypatch, tmp_path, decoy):
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    if decoy:
+        package = caller / "plugins/portfolio-management"
+        package.mkdir(parents=True)
+        (package / "package-fixture").write_text("wrong caller package\n")
+    monkeypatch.chdir(caller)
+    env = _installer_env(tmp_path)
+    log = tmp_path / "dev-install.log"
+    env["FAKE_DEV_INSTALL_LOG"] = str(log)
+
+    result = _run_installer(tmp_path, "--with-dev", env=env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert log.read_text() == "target release\n"
 
 
 def _transaction_fault_tools(tmp_path: Path, env: dict[str, str]) -> None:

@@ -33,7 +33,7 @@ class OpenDUnderlierObservation(OpeningUnderlierObservation):
         return {item.name: getattr(self, item.name) for item in fields(OpeningUnderlierObservation)}
 
 
-def trading_calendar_dates(receipt: Any, *, start: date, end: date) -> list[str]:
+def trading_calendar_dates(receipt: Any, *, start: date, end: date, allow_empty: bool = False) -> list[str]:
     if not isinstance(receipt, Mapping) or (
         receipt.get("retcode") != 0
         or receipt.get("coverage_complete") is not True
@@ -56,7 +56,7 @@ def trading_calendar_dates(receipt: Any, *, start: date, end: date) -> list[str]
         if day.isoformat() != raw or not start <= day <= end:
             raise ValueError("calendar date outside request")
         dates.add(raw)
-    if not dates:
+    if not dates and not allow_empty:
         raise ValueError("calendar returned no trading dates")
     return sorted(dates)
 

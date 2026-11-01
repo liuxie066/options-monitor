@@ -23,6 +23,58 @@ Rules:
 - Public behavior should enter through `./om`, `./om-agent`, or
   documented `python -m src.application...` entry points.
 
+## Optional capabilities and providers
+
+OM keeps strategy, ledger, evidence qualification and risk calculations in core.
+External capabilities enter through three boundaries:
+
+```mermaid
+flowchart LR
+  OM[OM application] --> MD[market_data_provider]
+  OM --> BP[broker_provider]
+  OM --> PM[portfolio_management]
+  MD --> OpenD[OpenD market data]
+  BP --> Futu[Futu holdings and cash]
+  BP --> LB[Longbridge holdings and cash]
+  PM --> PKG[optional om-pm-plugin package]
+  PKG --> HTTP[PM HTTP service]
+```
+
+- Market data uses `market_data.provider` (default/current builtin: `opend`).
+  Required-data planning, prefetch, ordinary scan fetches and interactive option
+  queries resolve the same capability owner. Provider failures retain their
+  failure, timeout and cancellation semantics; selection does not grant broker
+  account access. Legacy standalone OpenD subprocess commands remain OpenD-specific.
+  Selected provider source identity also binds required-data plans, cache metadata,
+  frozen consumers and quote receipts; switching providers invalidates prior data.
+  Non-OpenD status snapshots use the canonical `market_data` capability and retain
+  the actual provider in `payload.source`, without a fallback status label.
+  Default OpenD evidence retains its historical source aliases and receipt format.
+  Tick readiness probes OpenD quotes only when selected, and checks each actual
+  Futu broker independently with its account/environment binding. Phone-verification
+  state gates only runs needing either capability. The tick trading-day query uses
+  the selected provider; unavailable calendars retain the existing unknown-day policy.
+- Broker assets use `account_settings.<account>.type` in generated config
+  (`accounts.<account>.type` in YAML). `portfolio.source: auto` selects `futu` or
+  `longbridge` for that account. Explicit mismatches fail without another broker
+  fallback. Generic identity comes from `risk_capacity.broker_capacity_binding`;
+  existing OpenD v1 identity and historical candidate snapshots remain valid.
+- PM transport lives in the separately installed `om-pm-plugin` package under
+  `plugins/portfolio-management`; core owns its shared exceptions and evidence
+  validators in `portfolio_management_contract.py`. Disabled PM never loads the
+  package. Missing enabled integration reports `PORTFOLIO_MANAGEMENT_UNAVAILABLE`;
+  OM help, tool schema and unrelated capabilities remain importable.
+
+Longbridge opening candidates use `opening_candidate_snapshot.v4` with explicit
+`broker_id`, `broker_account_id` and user-binding provenance. Readers retain
+Futu v1/v2/v3 semantics; a Longbridge ID is never stored as `futu_account_id`.
+
+The scope is installed optional packages plus builtin provider adapters. There
+is no marketplace, dynamic third-party code discovery, hot unloading or new
+trading/transaction synchronization API. Installing a package does not enable
+it or change runtime configuration. See [installation](INSTALL.md) and
+[configuration](../CONFIGS.md#可选能力与长桥账户).
+
 ## Python Export Contract And Static Gate
 
 Every module that defines `__all__` owns a literal list containing only names

@@ -51,6 +51,40 @@ export PATH="$HOME/.local/bin:$PATH"
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash -s -- --with-server
 ```
 
+## 可选 PM 与长桥依赖
+
+使用**运行该 OM 实例的 Python 环境**安装；以下从源码根目录示例，不会开启配置、
+写入凭据或连接外部服务。PM 包随源码提供，未发布到插件市场。
+
+```bash
+./.venv/bin/python -m pip install ./plugins/portfolio-management
+./.venv/bin/python -m pip uninstall om-pm-plugin
+```
+
+PM 默认关闭。安装后设置全局 `portfolio_management.enabled: true`；卸载前关闭 PM
+及 `portfolio.holdings.enabled`。未安装时 `om help`、`om-agent spec` 与非 PM 功能可正常
+加载；启用但缺包的 PM 请求返回 `PORTFOLIO_MANAGEMENT_UNAVAILABLE`。详情见
+[配置契约](../CONFIGS.md#可选能力与长桥账户)。
+
+长桥资产适配使用独立 SDK 依赖，默认运行依赖不安装它：
+
+```bash
+./.venv/bin/python -m pip install -r requirements/longbridge.txt
+```
+
+富途/OpenD 行情仍使用既有依赖。长桥 SDK 不在模块导入或 provider 选择时自动载入；
+仅真实读取长桥资产时需要。SDK 安装不完成账号凭据绑定，也不证明连接和数据权限可用。
+
+开发与 CI 的 `requirements/dev.txt` 显式安装 PM 扩展，保留全部 PM 自动发现回归；
+缺包状态由隔离子进程验证，不跳过这些测试。
+
+`install.sh --with-dev` 始终从下载的 release 根目录安装这些依赖，不使用调用目录中的
+同名插件。正常 service upgrade 保留当前实例实际安装的 PM 扩展和 Longbridge SDK，
+与配置是否启用无关；未安装或主动卸载的包不会因配置仍启用而补装。首次从内置 PM 的
+旧版迁移时，仅为有效旧配置已启用的 PM 安装扩展。缓存及切换前校验见
+[升级流程](RELEASE_PROCESS.md)；首次迁移必须使用含修复的新控制器，旧版自动升级器不能
+自行获得目标 release 中的修复。
+
 ## macOS
 
 macOS 是一等支持平台，适合本地手动运行或轻量常驻运行。长期无人值守仍优先推荐 Linux。

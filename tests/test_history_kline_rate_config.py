@@ -385,15 +385,17 @@ def test_required_data_reuse_avoids_history_fetch(acquisition, monkeypatch, froz
     parsed.parent.mkdir(parents=True)
     content = b"symbol,dte\nNVDA,28\n"
     parsed.write_bytes(content)
+    frozen_evidence = {"synthetic_frozen_read": True,
+                       "expected_fetch_contract": {"fetch_binding": {"source": "opend"}}}
     if frozen:
         monkeypatch.setattr(steps, "resolve_frozen_required_data_csv_bytes",
-                            lambda **_k: ({"synthetic_frozen_read": True}, content))
+                            lambda **_k: (frozen_evidence, content))
     result = steps.ensure_required_data(py=sys.executable, base=acquisition.base, symbol="NVDA",
         required_data_dir=root, limit_expirations=1, want_put=True, want_call=False,
         timeout_sec=10, is_scheduled=False, min_dte=10,
         required_data_snapshot_manifest=root / "manifest.json" if frozen else None,
         opend_fetch_config=config.opend_fetch_kwargs(_runtime(True)))
-    assert result == ({"synthetic_frozen_read": True} if frozen else None)
+    assert result == (frozen_evidence if frozen else None)
     assert not acquisition.requests
     assert not acquisition.provider.calls
     assert not acquisition.writes

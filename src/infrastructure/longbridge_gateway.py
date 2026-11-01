@@ -1,0 +1,153 @@
+"""Read-only Longbridge SDK boundary; importing this module never loads the SDK."""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import hmac
+import json
+import os
+import re
+from collections.abc import Callable, Mapping
+from typing import Any
+
+from src.application.settings import build_effective_env
+
+
+ACCOUNT_IDENTITY_ERROR = "longbridge_account_identity_unverified"
+
+
+def _credentials(settings: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, str]:
+    prefix = str(settings.get("credentials_env_prefix") or "")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", prefix):
+        raise ValueError("longbridge credentials_env_prefix must be an environment name prefix")
+    credentials = {}
+    for field in ("app_key", "app_secret", "access_token"):
+        name = f"{prefix}_{field.upper()}"
+        value = environ.get(name)
+        if not value or not value.strip():
+            raise ValueError(f"longbridge credential environment variable missing: {name}")
+        credentials[field] = value
+    return credentials
+
+
+def _fingerprint(settings: Mapping[str, Any], credentials: Mapping[str, str]) -> str:
+    if not isinstance(settings.get("account_id"), str) or not settings["account_id"].strip():
+        raise ValueError("longbridge account_id must be a nonempty string")
+    payload = {"schema_version": "longbridge.credential_account_binding.v1", **credentials,
+               **{key: settings[key] for key in ("account_id", "region", "trd_env")}}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                                    ensure_ascii=False).encode()).hexdigest()
+
+
+def credential_binding_fingerprint(
+    settings: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
+) -> str:
+    """Offline preview only; never prints credentials, imports SDK or contacts API."""
+    if settings.get("region") != "ap" or settings.get("trd_env") != "REAL":
+        raise ValueError("longbridge binding preview currently requires ap/REAL")
+    env = build_effective_env().values if environ is None else environ
+    return _fingerprint(settings, _credentials(settings, env))
+
+
+class LongbridgeGateway:
+    """Only assets are exposed. No orders, executions, subscriptions or token writes."""
+
+    def __init__(
+        self, settings: Mapping[str, Any], *, client: Any = None,
+        context_factory: Callable[..., Any] | None = None,
+        environ: Mapping[str, str] | None = None,
+    ) -> None:
+        if settings.get("region") != "ap":
+            raise ValueError("longbridge region must be ap for this asset adapter")
+        if settings.get("trd_env") != "REAL":
+            raise ValueError("longbridge asset adapter currently supports REAL only")
+        # Explicit mappings are caller-owned snapshots, including healthcheck's env-file selection.
+        env = build_effective_env().values if environ is None else environ
+        expected = settings.get("credential_binding_sha256")
+        self.bound_account_id = None
+        self.identity_error = ACCOUNT_IDENTITY_ERROR
+        self.account_identity_evidence = {
+            "schema_version": "longbridge.account_identity.v1", "status": "unverified",
+            "binding_method": "user_confirmed_credentials_sha256", "broker_echoed": False,
+            "account_id": None, "credential_binding_sha256": None,
+        }
+        credentials = None
+        if expected is not None:
+            try:
+                credentials = _credentials(settings, env)
+                actual = _fingerprint(settings, credentials)
+                if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+                    self.identity_error = "longbridge_credential_binding_invalid"
+                elif not hmac.compare_digest(expected, actual):
+                    self.identity_error = "longbridge_credential_binding_mismatch"
+                else:
+                    self.bound_account_id = settings["account_id"]
+                    self.identity_error = None
+                    self.account_identity_evidence.update(status="user_bound", account_id=self.bound_account_id,
+                                                          credential_binding_sha256=actual)
+            except ValueError:
+                self.identity_error = "longbridge_binding_credentials_unavailable"
+        if client is not None:
+            self._client = client
+            self._owned = False
+            return
+        credentials = credentials or _credentials(settings, env)
+        # SDK defaults can inherit endpoint, paper and logging overrides from env.
+        # Reject those overrides rather than silently changing the configured scope.
+        if any(env.get(name) or os.environ.get(name) for name in (
+            "LONGBRIDGE_HTTP_URL", "LONGBRIDGE_TRADE_WS_URL",
+            "LONGBRIDGE_PAPERTRADING", "LONGBRIDGE_LOG_PATH",
+        )):
+            raise ValueError("longbridge SDK endpoint/paper/log environment overrides are unsupported")
+        if context_factory is None:
+            try:
+                from longbridge.openapi import Config, TradeContext
+            except ImportError as exc:
+                raise RuntimeError("longbridge SDK missing; install requirements/longbridge.txt separately") from exc
+            config = Config.from_apikey(
+                **credentials, http_url="https://openapi.longbridge.com",
+                enable_papertrading=False, enable_print_quote_packages=False,
+            )
+            self._client = TradeContext(config)
+        else:
+            self._client = context_factory(**credentials, enable_papertrading=False)
+        self._owned = True
+
+    def account_balance(self) -> Any:
+        return self._client.account_balance()
+
+    def stock_positions(self) -> Any:
+        return self._client.stock_positions()
+
+    def close(self) -> None:
+        if self._owned:
+            close = getattr(self._client, "close", None)
+            if callable(close):
+                close()
+            self._client = None
+
+    # The current public SDK has no account-profile identity query. account_channel
+    # is an account *type*. Never turn configured account_id into observed identity.
+    @property
+    def observed_account_id(self) -> None:
+        return None
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Preview a user-confirmed Longbridge credential/account binding offline")
+    parser.add_argument("--account-id", required=True)
+    parser.add_argument("--credentials-env-prefix", required=True)
+    parser.add_argument("--region", choices=["ap"], default="ap")
+    parser.add_argument("--trd-env", choices=["REAL"], default="REAL")
+    args = parser.parse_args()
+    try:
+        fingerprint = credential_binding_fingerprint(vars(args))
+    except ValueError as exc:
+        parser.error(str(exc))
+    print(json.dumps({"credential_binding_sha256": fingerprint, "account_id": args.account_id,
+        "region": args.region, "trd_env": args.trd_env, "broker_echoed": False,
+        "binding_method": "user_confirmed_credentials_sha256"}))
+
+
+if __name__ == "__main__":
+    main()

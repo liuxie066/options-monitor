@@ -63,6 +63,7 @@ RESOLVED_KEY = "_resolved"
 YAML_MARKET_USER_FINGERPRINT_KIND = "yaml-market-user-v1"
 
 PASSTHROUGH_KEYS = {
+    "market_data",
     "alert_policy",
     "close_advice",
     "notifications",
@@ -258,6 +259,12 @@ def _normalize_account_setting(raw: Any, *, account: str, path: str) -> dict[str
     if "holdings_account" in item:
         raise AgentToolError(code="CONFIG_ERROR", message=f"{path}.holdings_account is retired")
     item["type"] = str(item.get("type") or "futu").strip().lower()
+    if item["type"] == "longbridge":
+        from src.application.account_config import normalize_longbridge_account_settings
+        try:
+            item["longbridge"] = normalize_longbridge_account_settings(item.get("longbridge"))
+        except ValueError as exc:
+            raise AgentToolError(code="CONFIG_ERROR", message=f"{path}: {exc}") from exc
     return item
 
 

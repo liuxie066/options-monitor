@@ -10,7 +10,8 @@ from typing import Any
 
 from domain.domain.daily_decision_brief import normalize_persisted_daily_decision_brief
 from domain.storage import paths
-from src.application.account_config import build_account_runtime_plan, normalize_account_label
+from src.application.account_config import account_decision_scope, normalize_account_label
+from src.application.decision_history import history_scope_is_proven
 from src.application.candidate_snapshot_manifest import CandidateSnapshotManifestError, load_candidate_snapshot_bundle
 from src.application.tick_run_workspace import AccountRunConfigError, account_run_config_path, load_published_account_run_config, read_account_run_state_bytes_safely
 from src.infrastructure.decision_history_sqlite import DecisionHistoryStore, DecisionHistoryError, content_hash, history_path
@@ -50,9 +51,8 @@ def _verified_source(base: Path, path: Path, account: str, market: str) -> dict[
     from src.application.futu_quote_routing import runtime_config_market
     if runtime_config_market(cfg) != market:
         raise ValueError("source_market_mismatch")
-    binding = build_account_runtime_plan(cfg, account=account)
-    scope = {"futu_account_id": binding.futu_account_id, "trade_env": binding.futu_trd_env}
-    if not scope["futu_account_id"] or scope["trade_env"] not in {"REAL", "SIMULATE"}:
+    scope = account_decision_scope(cfg, account=account)
+    if not history_scope_is_proven(scope):
         raise ValueError("historical_scope_unproven")
     if raw.get("decision_scope") and raw["decision_scope"] != scope:
         raise ValueError("historical_scope_conflict")

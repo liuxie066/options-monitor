@@ -8,6 +8,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from src.infrastructure.io_utils import (
     utc_now,
@@ -87,6 +88,8 @@ from src.application.tick_scheduler_context import (
 )
 from src.application.experience_mode import validate_experience_request
 from src.application.futu_quote_routing import resolve_futu_quote_route
+from src.application.market_data_provider import resolve_market_data_provider
+from src.application.opend_market_snapshot_fetching import trading_calendar_dates
 from src.infrastructure.external_services import (
     run_opend_watchdog,
     run_scan_scheduler_cli,
@@ -141,6 +144,24 @@ def _is_trading_day_guard_for_market(cfg: dict[str, Any], market: str) -> tuple[
     None means guard check failed and caller should continue without blocking.
     """
     market_used = str(market or "").strip().upper() or "US"
+    provider = resolve_market_data_provider(cfg)
+    if provider.name != "opend":
+        gateway = None
+        try:
+            route = provider.resolve_quote_route(cfg, market=market_used)
+            if not route.ok or route.host is None or route.port is None:
+                return None, market_used
+            day = datetime.now(ZoneInfo({"US": "America/New_York", "HK": "Asia/Hong_Kong"}.get(
+                market_used, "UTC"))).date()
+            gateway = provider.open_quote_gateway(host=str(route.host), port=int(route.port))
+            response = provider.get_trading_days_with_receipt(
+                gateway, market=market_used, start=day.isoformat(), end=day.isoformat())
+            return day.isoformat() in trading_calendar_dates(response, start=day, end=day, allow_empty=True), market_used
+        except Exception:
+            return None, market_used
+        finally:
+            if gateway is not None:
+                gateway.close()
     route = resolve_futu_quote_route(cfg, market=market_used)
     if not route.ok or route.host is None or route.port is None:
         return None, market_used
