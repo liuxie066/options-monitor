@@ -15,7 +15,7 @@ from typing import Any, Callable, Mapping, cast
 
 from src.application.bot.control.config_loader import load_bot_config
 from src.application.bot.control.audit import InboundAuditStore
-from src.application.bot.control.policy import (ReplyAuthorizationError, check_reply_authorization, reply_authorization_predicate)
+from src.application.bot.control.policy import (ReplyAuthorizationError, check_reply_authorization, reply_authorization_predicate, require_inbound_channel)
 from src.application.bot.control.settings import DEFAULT_CONTEXT_WINDOW_MESSAGES, BotSettings, BotLlmSettings
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER
@@ -243,6 +243,7 @@ def check_feishu_ws_settings(
     config_ok = True
     error: dict[str, Any] | None = None
     try:
+        require_inbound_channel("feishu", settings.bot_config_path)
         settings.validate_for_serve()
     except AgentToolError as err:
         config_ok = False
@@ -275,6 +276,10 @@ def handle_feishu_ws_event(
     react_in_handler: bool = True,
     received_monotonic: float | None = None,
 ) -> dict[str, Any]:
+    try:
+        require_inbound_channel("feishu", settings.bot_config_path)
+    except AgentToolError as exc:
+        return build_response(tool_name="inbound.feishu_ws", ok=False, error=build_error_payload(exc))
     event_ref = _event_ref(payload)
     handler_started = time.monotonic()
     received_monotonic = handler_started if received_monotonic is None else received_monotonic
@@ -295,6 +300,10 @@ def handle_feishu_ws_event(
     service = channel_service or build_feishu_inbound_channel_service()
 
     stage_started = time.monotonic()
+    try:
+        require_inbound_channel("feishu", settings.bot_config_path)
+    except AgentToolError as exc:
+        return build_response(tool_name="inbound.feishu_ws", ok=False, error=build_error_payload(exc))
     inbound = service.handle_inbound(
         FEISHU_APP_NOTIFICATION_PROVIDER,
         payload,
@@ -376,6 +385,7 @@ def serve_feishu_ws(
     start_client_fn: StartClientFn = start_feishu_ws_client,
     lock_path: str | os.PathLike[str] | None = None,
 ) -> None:
+    require_inbound_channel("feishu", settings.bot_config_path)
     settings.validate_for_serve()
     with _single_instance_lock(lock_path):
         business_worker = _FeishuWsWorker(
@@ -403,6 +413,11 @@ def serve_feishu_ws(
             with coordinator_lock:
                 if not coordinator_accepting:
                     return
+                try:
+                    require_inbound_channel("feishu", settings.bot_config_path)
+                except AgentToolError as exc:
+                    LOG.warning("Feishu event blocked: %s", exc.code)
+                    return
                 event_ref = _event_ref(payload)
                 preflight_started = time.monotonic()
                 ack_target: dict[str, Any] | None = None
@@ -411,7 +426,8 @@ def serve_feishu_ws(
                     try:
                         ack_target = prepare_feishu_ack_target(
                             payload,
-                            allowed_senders=settings.allowed_senders,
+                            allowed_senders=settings.current_allowed_senders(),
+                            bot_config_path=settings.bot_config_path,
                         )
                         ack_reason = (
                             "ready"
@@ -430,7 +446,7 @@ def serve_feishu_ws(
                 analysis_control_failed = False
                 try:
                     prepare_feishu_analysis_control(payload,
-                        allowed_senders=settings.allowed_senders, config_key=settings.config_key,
+                        allowed_senders=settings.current_allowed_senders(), config_key=settings.config_key,
                         config_path=settings.config_path, audit_db=settings.audit_db,
                         bot_config_path=settings.bot_config_path,
                         received_monotonic=received_monotonic)
@@ -477,6 +493,7 @@ def serve_feishu_ws(
                 )
 
         try:
+            require_inbound_channel("feishu", settings.bot_config_path)
             start_client_fn(
                 app_id=settings.app_id,
                 app_secret=settings.app_secret,
@@ -701,11 +718,13 @@ class _FeishuAckWorker:
             status = "sent"
             error_type = ""
             try:
+                require_inbound_channel("feishu", self._settings.bot_config_path)
                 self._reaction_fn(
                     app_id=self._settings.app_id,
                     app_secret=self._settings.app_secret,
                     message_id=job.message_id,
                     emoji_type=job.emoji_type,
+                    before_send=lambda: require_inbound_channel("feishu", self._settings.bot_config_path),
                 )
             except Exception as exc:
                 status = "failed"
@@ -731,6 +750,10 @@ def _maybe_react(
     reaction_fn: ReactionFn,
     send_reaction: bool = True,
 ) -> dict[str, Any]:
+    try:
+        require_inbound_channel("feishu", settings.bot_config_path)
+    except AgentToolError as exc:
+        return {"attempted": False, "ok": False, "reason": exc.code.lower(), "error_code": exc.code}
     data = _inbound_message_data(inbound)
     if data is None:
         return {"attempted": False, "ok": True, "reason": "not_message"}
@@ -753,12 +776,16 @@ def _maybe_react(
         return {"attempted": False, "ok": True, "reason": "transport_managed"}
 
     try:
+        require_inbound_channel("feishu", settings.bot_config_path)
         api_response = reaction_fn(
             app_id=settings.app_id,
             app_secret=settings.app_secret,
             message_id=message_id,
             emoji_type=emoji_type,
+            before_send=lambda: require_inbound_channel("feishu", settings.bot_config_path),
         )
+    except AgentToolError as exc:
+        return {"attempted": False, "ok": False, "reason": exc.code.lower(), "error_code": exc.code}
     except Exception as exc:
         return {
             "attempted": True,
@@ -784,6 +811,10 @@ def _maybe_reply(
     settings: FeishuWsSettings,
     reply_fn: ReplyFn,
 ) -> dict[str, Any]:
+    try:
+        require_inbound_channel("feishu", settings.bot_config_path)
+    except AgentToolError as exc:
+        return {"attempted": False, "ok": False, "reason": exc.code.lower(), "error_code": exc.code}
     decision = decide_inbound_reply(
         inbound,
         reply_enabled=settings.reply_enabled,
@@ -870,7 +901,8 @@ def _maybe_reply(
         if outbox is not None and delivery_key:
             outbox.mark_reply_failed(delivery_key, error="authorization_blocked", retryable=True,
                                     attempt_count=claimed["attempt_count"])
-        return {"attempted": blocked.provider_attempted, "ok": False, "reason": "authorization_blocked", "delivery_key": delivery_key}
+        return {"attempted": blocked.provider_attempted, "ok": False, "reason": "authorization_blocked", "delivery_key": delivery_key,
+                **({"error_code": blocked.error_code} if blocked.error_code else {})}
     except Exception as exc:
         if outbox is not None and delivery_key:
             outbox.mark_reply_failed(
@@ -936,6 +968,10 @@ def _maybe_reply(
 def _retry_pending_feishu_reply(
     *, settings: FeishuWsSettings, reply_fn: ReplyFn, stop_requested: threading.Event | None = None,
 ) -> dict[str, Any]:
+    try:
+        require_inbound_channel("feishu", settings.bot_config_path)
+    except AgentToolError as exc:
+        return {"attempted": False, "ok": False, "reason": exc.code.lower(), "error_code": exc.code}
     if not settings.reply_enabled:
         return {"attempted": False, "reason": "reply_disabled"}
     if not (settings.app_id and settings.app_secret):
@@ -969,7 +1005,8 @@ def _retry_pending_feishu_reply(
     except ReplyAuthorizationError as blocked:
         store.mark_reply_failed(delivery_key, error="authorization_blocked", retryable=True,
                                 attempt_count=record["attempt_count"])
-        return {"attempted": blocked.provider_attempted, "ok": False, "reason": "authorization_blocked", "delivery_key": delivery_key}
+        return {"attempted": blocked.provider_attempted, "ok": False, "reason": "authorization_blocked", "delivery_key": delivery_key,
+                **({"error_code": blocked.error_code} if blocked.error_code else {})}
     except Exception as exc:
         store.mark_reply_failed(
             delivery_key,
@@ -1061,7 +1098,7 @@ def _deliver_feishu_reply(
                 before_send=before_send,
             )
         except ReplyAuthorizationError as blocked:
-            raise ReplyAuthorizationError(str(blocked), provider_attempted=True) from blocked
+            raise ReplyAuthorizationError(str(blocked), provider_attempted=True, error_code=blocked.error_code) from blocked
         return {"api_response": api_response, "fallback_used": True}
 
 
@@ -1088,9 +1125,16 @@ def _call_feishu_reply_transport(
         "uuid": uuid,
         "reply_in_thread": bool(envelope.get("reply_in_thread")),
     }
-    if before_send is not None:
-        before_send()
-        common["before_send"] = before_send
+    def authorize_send() -> None:
+        try:
+            require_inbound_channel("feishu", settings.bot_config_path)
+        except AgentToolError as exc:
+            raise ReplyAuthorizationError("reply channel unavailable", error_code=exc.code) from exc
+        if before_send is not None:
+            before_send()
+
+    authorize_send()
+    common["before_send"] = authorize_send
     if msg_type == "text":
         text = str(content.get("text") or "")
         if not text.strip():

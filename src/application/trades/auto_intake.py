@@ -1093,6 +1093,7 @@ def main(argv: list[str] | None = None) -> int:
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
     cfg = load_config(base=base, config_path=cfg_path, is_scheduled=False, log=_log)
+    cfg["config_source_path"] = str(cfg_path.resolve())
     if args.action != "listen":
         from src.application.trades.attribution import run_attribution_admin
         try:

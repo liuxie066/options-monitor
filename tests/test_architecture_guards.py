@@ -549,7 +549,8 @@ def test_bot_tool_names_are_registry_or_inbound_surfaces() -> None:
 
 def _assert_feishu_transport_policy_boundary(source: str) -> None:
     policy = "src.application.bot.control.policy"
-    reply_api = {"ReplyAuthorizationError", "check_reply_authorization", "reply_authorization_predicate"}
+    reply_api = {"ReplyAuthorizationError", "check_reply_authorization", "reply_authorization_predicate",
+                 "require_inbound_channel"}
     forbidden = {"check_sender_allowed", "enforce_sender_allowed", "_parse_allowed_entries"}
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
@@ -634,6 +635,7 @@ def test_feishu_ws_transport_does_not_own_allowlist_policy() -> None:
     assert {name.removeprefix("src.application.bot.control.policy.") for name in ws_imports
             if name.startswith("src.application.bot.control.policy.")} == {
         "ReplyAuthorizationError", "check_reply_authorization", "reply_authorization_predicate",
+        "require_inbound_channel",
     }
     assert "src.application.bot.control.policy.check_sender_allowed" in adapter_imports
     assert "check_sender_allowed(" in adapter_text

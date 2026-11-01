@@ -9,7 +9,9 @@ from typing import Any, Callable, cast
 from domain.domain.multi_tick import resolve_notification_route_from_config
 from src.application.notification_delivery_route import (
     notifications_enabled, resolve_notification_delivery_route, notification_reminder_route_key,
+    resolve_notification_delivery_routes,
 )
+from src.application.notification_fanout_delivery import send_notification_fanout, uses_proactive_fanout
 from src.application.trade_time_format import format_trade_time_beijing
 from src.application.notification_delivery_adapter import (
     build_notification_transport_key,
@@ -31,6 +33,7 @@ from src.application.system_alerts import report_system_meta_signal
 MAX_LIFECYCLE_BATCH_DISPLAY_ITEMS = 12
 
 
+
 def send_trade_intake_receipt(
     *,
     base: Path,
@@ -49,7 +52,7 @@ def send_trade_intake_receipt(
     inbox_id: str | None = None,
     inbox_claim: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if not notifications_enabled(config):
+    if not notifications_enabled(config) and not uses_proactive_fanout(config):
         return {"enabled": False, "status": "skipped", "reason": "notifications_disabled",
                 "delivery_confirmed": False, "message_id": None}
     cfg = dict(receipt_config or {})
@@ -71,6 +74,39 @@ def send_trade_intake_receipt(
             "delivery_confirmed": False,
             "message_id": None,
         }
+
+    if uses_proactive_fanout(config):
+        account = str(result.get("account") or (payload or {}).get("internal_account")
+                      or (payload or {}).get("account") or getattr(deal, "internal_account", "") or "").strip().lower()
+        identity = str(broker_deal_key(deal) or _deal_id(deal, result, payload) or "").strip()
+        if not account or not identity:
+            return {"status": "skipped", "reason": "skipped_missing_deal_identity",
+                    "delivery_confirmed": False}
+        revision = (result.get("receipt_result_key") or result.get("resolution_revision")
+                    or result.get("revision") or canonical_payload_hash(
+                        {key: result.get(key) for key in ("status", "reason", "action")}))
+        logical_key = f"trade-receipt:{inbox_id or identity}:{revision}"
+        message = build_trade_intake_receipt_message(deal=deal, result=result, payload=payload)
+        attempt = None
+        if inbox_path is not None and inbox_id:
+            from src.application.notification_fanout import notification_fanout_id
+            from src.application.trades.inbox import begin_trade_receipt_attempt
+            attempt = begin_trade_receipt_attempt(inbox_path, inbox_id=inbox_id, message=message,
+                route={"fanout_id": notification_fanout_id(account=account, logical_key=logical_key)},
+                claim=inbox_claim, result_key=result.get("receipt_result_key"))
+            if not attempt["claimed"]:
+                return {"enabled": True, "status": "skipped", "reason": "durable_receipt_" + attempt["status"],
+                        "delivery_confirmed": attempt["status"] == "sent"}
+            message = attempt["message"]
+        receipt = send_notification_fanout(base=base, config=config, account=account,
+            logical_key=logical_key, message=message, send_fn=send_fn, normalize_fn=normalize_fn,
+            adapter_selector=adapter_selector)
+        receipt.update(reason=decision["reason"], target_set=bool(receipt.get("children")))
+        if attempt is not None:
+            from src.application.trades.inbox import finish_trade_receipt_attempt
+            finish_trade_receipt_attempt(inbox_path, inbox_id=inbox_id,
+                attempt_id=attempt["attempt_id"], result=receipt)
+        return receipt
 
     route = resolve_notification_delivery_route(config=config or {}, route_resolver=route_resolver)
     provider = route.get("provider")
@@ -477,10 +513,27 @@ def resolve_trade_lifecycle_notification_batch_route(
     *,
     config: dict[str, Any] | None,
     base: Path | None = None,
+    account: str | None = None,
     route_resolver: Callable[..., dict[str, Any]] = (
         resolve_notification_route_from_config
     ),
 ) -> dict[str, Any]:
+    if uses_proactive_fanout(config):
+        # The dispatcher owns logical batches; the fanout owns physical recipients.
+        from src.application.account_config import accounts_from_config
+        accounts = sorted(set(accounts_from_config(config or {}, fallback=())) | {
+            label for item in (config or {}).get("notifications", {}).get("routes", [])
+            for label in item.get("accounts", [])} | ({account} if account else set()))
+        identities = [(account, route["identity_key"])
+            for account in accounts for route in resolve_notification_delivery_routes(
+                config=config, account=account, base=base)]
+        account_keys = {label: canonical_payload_hash({"recipients": sorted(identity for owner, identity in identities
+                        if owner == label)}) for label in accounts if any(owner == label for owner, _ in identities)}
+        return {**build_notification_batch_route(provider="fanout", channel="fanout",
+                    target="proactive-account-routes"), "route_available": bool(account_keys.get(account)) if account is not None else bool(identities),
+                "account_route_keys": account_keys,
+                "attribution_route_key": account_keys.get(account) if account is not None
+                    else canonical_payload_hash({"recipients": sorted(identities)})}
     route = resolve_notification_delivery_route(
         config=config or {},
         route_resolver=route_resolver,
@@ -596,11 +649,17 @@ def send_trade_lifecycle_outbox_payload(
     ),
 ) -> dict[str, Any]:
     if not notifications_enabled(config):
+        if uses_proactive_fanout(config):
+            return {"status": "pending", "has_retryable_children": True, "attempted": False,
+                    "delivery_confirmed": False, "reason": "notifications_disabled"}
         return {"status": "explicit_failed", "explicit_pre_acceptance_failure": True,
                 "error": "notifications are disabled", "delivery_confirmed": False,
                 "classification_evidence": {"preflight": "notifications_disabled"}}
     cfg = dict(receipt_config or {})
     if cfg.get("enabled", True) is False:
+        if uses_proactive_fanout(config):
+            return {"status": "pending", "has_retryable_children": True, "attempted": False,
+                    "delivery_confirmed": False, "reason": "receipt_disabled"}
         return {
             "status": "explicit_failed",
             "explicit_pre_acceptance_failure": True,
@@ -609,6 +668,29 @@ def send_trade_lifecycle_outbox_payload(
                 "preflight": "receipt_disabled"
             },
         }
+    if uses_proactive_fanout(config):
+        is_batch = payload.get("schema_version") == BATCH_RENDERER_VERSION and isinstance(payload.get("members"), list)
+        members = payload["members"] if is_batch else [{"payload": payload}]
+        accounts = {str(member["payload"].get("account") or "").strip().lower() for member in members}
+        if len(accounts) != 1 or "" in accounts:
+            raise ValueError("proactive lifecycle batches require one account")
+        account = next(iter(accounts))
+        logical_key = "lifecycle:" + str(payload.get("batch_id") or canonical_payload_hash(payload))
+        from src.application.notification_fanout import notification_fanout_id, read_notification_fanout
+        existing = read_notification_fanout(base=base,
+            fanout_id=notification_fanout_id(account=account, logical_key=logical_key))
+        if existing is None and any(member["payload"].get("transition_type") == "combo_pair_confirmed"
+                                    for member in members):
+            route = resolve_trade_lifecycle_notification_batch_route(config=config, base=base, account=account)
+            if any(member["payload"].get("receipt_route", {}).get("attribution_route_key")
+                   != route.get("attribution_route_key") for member in members):
+                return {"status": "explicit_failed", "explicit_pre_acceptance_failure": True,
+                        "delivery_confirmed": False, "error": "Combo receipt route binding changed"}
+        message = payload.get("_frozen_message") or (build_trade_lifecycle_notification_batch_message(payload)
+            if is_batch else build_trade_lifecycle_notification_message(payload))
+        return send_notification_fanout(base=base, config=config, account=account,
+            logical_key=logical_key, message=message, send_fn=send_fn, normalize_fn=normalize_fn,
+            adapter_selector=adapter_selector, max_attempts=3, retry_delays_ms=(60_000, 300_000))
     route = resolve_trade_lifecycle_notification_batch_route(
         config=config or {},
         route_resolver=route_resolver,
@@ -977,6 +1059,8 @@ def _receipt_needs_retry(state: dict[str, Any] | None, deal_id: str | None) -> b
         return True
     if bool(receipt.get("delivery_confirmed")):
         return False
+    if receipt.get("fanout_id"):
+        return receipt.get("has_retryable_children") is True
     status = str(receipt.get("status") or "").strip().lower()
     if status in {"unconfirmed", "outbox_managed"}:
         return False
@@ -991,6 +1075,8 @@ def _receipt_delivery_is_ambiguous(
 ) -> bool:
     receipt = _stored_receipt(state, deal_id)
     if not receipt or bool(receipt.get("delivery_confirmed")):
+        return False
+    if receipt.get("fanout_id") and receipt.get("has_retryable_children"):
         return False
     status = str(receipt.get("status") or "").strip().lower()
     return (

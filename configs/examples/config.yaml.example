@@ -1,6 +1,16 @@
 notifications:
   enabled: false
 
+channels:
+  feishu:
+    enabled: false
+    receive_enabled: false
+    notify_enabled: false
+  wechat_clawbot:
+    enabled: false
+    receive_enabled: false
+    notify_enabled: false
+
 accounts:
   lx:
     type: futu

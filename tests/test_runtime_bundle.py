@@ -50,6 +50,26 @@ def miniature(root, platform_name="macos-arm64"):
     return manifest
 
 
+def test_core_bundle_selfcheck_does_not_require_message_sdk(tmp_path, monkeypatch):
+    root = tmp_path / "core-bundle"
+    miniature(root, platform_name=bundle.current_platform())
+    commands = []
+
+    def offline_runner(command, **kwargs):
+        commands.append(command)
+        assert "lark_oapi" not in " ".join(command)
+        assert "om_feishu_channel" not in " ".join(command)
+        assert "om_wechat_channel" not in " ".join(command)
+        return subprocess.CompletedProcess(command, 0, "{}" if command[-1] == "spec" else "", "")
+
+    monkeypatch.setattr(bundle.subprocess, "run", offline_runner)
+    result = bundle.validate_runtime(root)
+    assert result["ok"]
+    assert len(commands) == 3
+    assert "import pandas,numpy,yaml,futu,jsonschema" in commands[0][2]
+    assert commands[1:] == [[str(root / "om"), "help"], [str(root / "om-agent"), "spec"]]
+
+
 def archive_root(root, archive):
     with tarfile.open(archive, "w:gz") as tar:
         for p in root.rglob("*"):

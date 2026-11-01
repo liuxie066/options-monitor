@@ -223,14 +223,14 @@ def validate_runtime(root: Path) -> dict:
                "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1", "PYTHONUTF8": "1"}
         commands = [
             [str(root / PYTHON), "-c", "import sys,ssl,sqlite3,ctypes,subprocess,importlib.metadata as m; "
-             "import pandas,numpy,yaml,futu,jsonschema,lark_oapi; "
+             "import pandas,numpy,yaml,futu,jsonschema; "
              "import src.application.bot.host,src.application.bot.runtime; "
              "assert sys.version.split()[0] == " + repr(manifest["python"]["version"]) + "; "
              "expected=" + repr(manifest["dependencies"]) + "; "
              "assert all(m.version(n)==v for n,v in expected.items()); "
              "assert int(pandas.Series([1,2]).sum())==3; "
              "assert sqlite3.connect(':memory:').execute('select 1').fetchone()==(1,); "
-             "subprocess.run([sys.executable,'-c','import ssl,sqlite3,pandas,futu,lark_oapi'],check=True)"],
+             "subprocess.run([sys.executable,'-c','import ssl,sqlite3,pandas,futu'],check=True)"],
             [str(root / "om"), "help"], [str(root / "om-agent"), "spec"],
         ]
         for command in commands:

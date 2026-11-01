@@ -359,6 +359,9 @@ def test_status_reads_native_receipts_before_outer_mode(
         repo_root=root, market="us", config_path=root / "configs/examples/config.yaml.example",
     )
     config["notifications"] = {"enabled": True, "provider": "wechat_clawbot", "channel": "wechat_clawbot", "target": "clawbot:fixture"}
+    config["channels"] = {"wechat_clawbot": {
+        "enabled": True, "receive_enabled": False, "notify_enabled": True,
+    }}
     config_path = tmp_path / "config.us.json"
     write(config_path, config)
     bot_path = tmp_path / "config.bot.json"

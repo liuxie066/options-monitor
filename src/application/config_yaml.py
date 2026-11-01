@@ -63,6 +63,7 @@ RESOLVED_KEY = "_resolved"
 YAML_MARKET_USER_FINGERPRINT_KIND = "yaml-market-user-v1"
 
 PASSTHROUGH_KEYS = {
+    "channels",
     "market_data",
     "alert_policy",
     "close_advice",
@@ -92,7 +93,7 @@ ROOT_KEYS = {
     *PASSTHROUGH_KEYS,
     *BOT_AUTHORING_KEYS,
 }
-MARKET_KEYS = {"accounts", "features", "overrides", "symbols", *PASSTHROUGH_KEYS}
+MARKET_KEYS = {"accounts", "features", "overrides", "symbols", *PASSTHROUGH_KEYS} - {"channels"}
 WRITE_GATE_KEYS = {"write_gates", "write_permissions", "writes", "feishu_write", "feishu_writes"}
 COVERED_CALL_AUTHORING_KEY = "covered_call"
 SELL_CALL_LEGACY_AUTHORING_KEY = STRATEGY_COVERED_CALL
@@ -814,6 +815,15 @@ def yaml_to_market_user_config(raw_cfg: dict[str, Any], *, market: str) -> dict[
     out["accounts"] = accounts
     out["account_settings"] = account_settings
     out["symbols"] = runtime_symbols
+    notifications = out.get("notifications")
+    if isinstance(notifications, dict) and "routes" in notifications:
+        from src.application.config_validator import validate_notification_routes_config
+
+        validate_notification_routes_config({"accounts": list(account_defs)}, notifications)
+        notifications["routes"] = [
+            {**route, "accounts": [a for a in route["accounts"] if a in accounts]}
+            for route in notifications["routes"] if any(a in accounts for a in route["accounts"])
+        ]
     try:
         return normalize_portfolio_management_config(
             out,
@@ -1158,6 +1168,8 @@ def resolve_yaml_bot_config(
             "bot_models": bot_model_meta,
         },
     }
+    if "channels" in raw_cfg:
+        cfg["channels"] = deepcopy(raw_cfg["channels"])
     meta = {
         "source_format": "yaml",
         "config_yaml_path": str(yaml_path),
