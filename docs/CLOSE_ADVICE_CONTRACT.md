@@ -119,7 +119,7 @@ SQLite ledger position_lots
 
 ### 可选安装
 
-`om-position-advice-plugin` 是独立安装包：`pip install ./plugins/position-advice`，卸载用 `pip uninstall om-position-advice-plugin`。安装不启用；仍由现有 `close_advice.enabled` 开关控制，无新插件注册中心。缺包或关闭时核心可以启动、扫描，已有报告继续可读。既有内置建议能力迁移时保留明确启用意图；已进入可选包版本后的主动卸载不被升级静默补装。安装和受控升级细节见 Install 与 Release Process。
+`om-position-advice-plugin` 是独立安装包。官方分发入口为 `om plugins install position-advice` 预览、追加 `--confirm` 安装；卸载用 `om plugins uninstall position-advice --confirm`。插件须来自精确匹配的 OM Release；本分发路径尚未发布，旧 Release 缺资产时明确失败。源码开发仍可使用原环境的 pip 安装或卸载 `plugins/position-advice`。安装不启用；仍由现有 `close_advice.enabled` 开关控制，无新插件注册中心。缺包或关闭时核心可以启动、扫描，已有报告继续可读。既有内置建议能力迁移时保留明确启用意图；已进入可选包版本后的主动卸载不被升级静默补装。详见[官方可选插件](INSTALL.md#官方可选插件)和[受控升级](RELEASE_PROCESS.md)。
 
 保留的是通用安全能力：
 

@@ -31,6 +31,7 @@ def command_guide() -> str:
   om bot configure                   配置或关闭 Bot；模型管理用 om bot model
   om holdings configure              开启全局持仓风险中的可选 Holdings 来源
   om close-advice configure           开关平仓建议，保留历史结果
+  om plugins list                    查看官方可选插件；安装与卸载见 om plugins --help
   om wheel --help                    Wheel 激活与策略确认；Combo 用 symbols edit 的高级字段
   om doctor --help                   排查运行问题
   om run --help                      手动运行任务

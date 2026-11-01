@@ -302,6 +302,14 @@ VERSION="$(cat VERSION)"
 `main` 的 `VERSION` 和提交 SHA，并以完整模式重新执行 metadata、coverage、测试、归档和发布步骤；
 不得用它跳过失败门禁或从未审阅的提交补发 tag。
 
+### 官方可选插件资产
+
+包含本分发功能的 Release 由 `scripts/build_plugin_wheels.py` 在临时源码副本中构建 PM、持仓建议两个纯 Python wheel；源项目版本不被修改，官方 wheel 版本跟随 OM VERSION。产物为两个版本化 `py3-none-any.whl`、`om-plugins.json` 和 `om-plugins.md`，清单及兼容说明绑定精确 OM 版本、tag、commit、Python >=3.12、文件大小和 SHA-256。不存在插件市场或第三方包发现。
+
+PR qualification 构建并校验上述资产；release reusable workflow 构建、上传同一组资产，发布回读逐文件验证摘要、catalog、METADATA、WHEEL、RECORD 及兼容说明。校验 owner 为 `src/application/plugin_release.py`，不会安装或发布。源码接线和本地构建成功不证明 GitHub Release 已提供资产；本路径尚未发布，必须以实际上传与回读结果为准。
+
+用户从 README 的[官方可选插件](INSTALL.md#官方可选插件)进入 `om plugins`。安装仅消费当前稳定版本对应的官方资产，预览不创建持久安装，确认安装不启用配置或改变服务。普通用户不必下载源码或向运行包内部 pip 安装。
+
 ### 完整运行包的发布资格
 
 当前源码新增完整运行包构建、校验、安装和同类型升级分支；本次变更尚未发布。现有源码 Release 的成功记录不证明运行包资产已存在，也不证明新增平台已合格。运行包未完成下述资格前，不作为已可用的默认稳定安装承诺；面向用户的依赖说明由 [INSTALL](INSTALL.md#运行包资格与源码安装) 持有。
@@ -564,9 +572,17 @@ true 也不补装。首次安装可用 `scripts/install.sh --with-position-advic
 不构建券商连接或读取凭据。失败时不切换当前实例，不删除复用的缓存环境，也不修改
 旧实例的安装或配置。
 
-上述依赖安装和缓存保留用于源码 release。运行包的固定依赖清单不支持追加可选包；
-目标为运行包且需要保留 PM、Longbridge 或 Position Advice 时，在切换 `current` 前拒绝升级并保留当前实例，
-不把校验基础运行包成功视为可选能力已迁移。
+上述 pip/uv 依赖安装和缓存保留用于源码 release。运行包的固定依赖清单不支持向内置环境追加可选包；
+目标为运行包且需要保留 pip 安装的 PM、Longbridge 或 Position Advice 时，在切换 `current` 前拒绝升级并保留当前实例。
+
+`om plugins` 托管的 PM、Position Advice 独立于 pip 选择，支持源码和运行包各自的同类型升级。
+升级先校验旧代码实例的托管 receipt，再从目标 Release 安装精确配套 wheel，使用目标解释器验证，
+成功后才允许切换 `current`、配置和服务。选择与功能开关独立，主动卸载保持卸载；坏 receipt、
+缺目标资产或导入失败会中止，旧安装不被删除。外部插件目录不写入运行包 inventory 或依赖缓存。
+回滚保留回滚目标原有的安装选择，不下载、安装或迁移插件。确认回滚时，在暂存配置、切换
+`current` 和操作服务之前，以目标解释器校验目标已有托管插件的 receipt 和实际加载；
+坏 receipt 或导入失败会中止，即使选择不重启服务也不能跳过。预览只校验本地 receipt，不加载插件。
+长桥仍是独立 SDK，不在这两个官方插件中；基础运行包自检不能替代其迁移资格。
 
 首次进入包含本修复的版本时，须由**含修复的新升级控制器**驱动旧实例。旧 release 的
 `om update apply`（含自动升级 timer）仍执行旧代码，不会提前加载目标 release 的本段逻辑；

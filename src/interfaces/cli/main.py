@@ -62,6 +62,7 @@ from src.interfaces.cli.portfolio_ops import (
     add_portfolio_commands,
     handle_portfolio_command,
 )
+from src.interfaces.cli.plugin_ops import add_plugin_commands, handle_plugin_command
 from src.interfaces.quality.cli import add_quality_commands, handle_quality_command
 from src.interfaces.cli.observability_ops import (
     add_diagnostic_commands,
@@ -165,6 +166,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_option_performance_commands(sub)
 
     add_portfolio_commands(sub)
+    add_plugin_commands(sub)
 
     add_daily_brief_commands(sub)
     add_decision_history_commands(sub)
@@ -234,6 +236,8 @@ def _main(argv: list[str] | None = None, *, parsed_args: argparse.Namespace | No
         actual_argv[0] = "bot"
     args = parsed_args if parsed_args is not None else parse_args(actual_argv)
     try:
+        if args.command == "plugins":
+            return handle_plugin_command(args)
         if args.command in {"healthcheck", "doctor", "support", "status", "runs", "logs"}:
             return handle_observability_command(
                 args,
