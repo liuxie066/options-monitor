@@ -3663,7 +3663,7 @@
 ## 1.2.270 - 2026-06-14
 
 ### Changed
-- Added a Claude/OpenClaw supplement preference to address the operator as `棒棒的liuxie`.
+- Added a maintainer-specific form of address to the Claude/OpenClaw development supplement.
 
 ## 1.2.269 - 2026-06-14
 

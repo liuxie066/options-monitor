@@ -290,6 +290,8 @@ VERSION="$(cat VERSION)"
 - 重新校验 release metadata / coverage，并验证最终 source archive 中的 Python Bot runtime
 - 发布对应 GitHub Release
 
+源码归档使用仓库 `.gitattributes` 的 `export-ignore`，排除 `AGENTS.md`、`CLAUDE.md` 和 `.agents/` 等开发指令。升级的 Git cache archive 使用同一规则；只有包含该规则的 tag 才会在归档时排除这些文件，历史 tag 不会被追溯修改。安装器对新安装目录另行执行排除，覆盖安装旧 tag 的情况，详见 [Install](INSTALL.md)。
+
 因此常规发布只需要把版本元数据改好，通过 Pull Request 合入 `main`；不需要再手动补打上同名 tag。
 自动 release job 复用同一次 `Guardrails` 已通过的回归结果，不重复运行同一批 Python Bot
 测试。普通开发提交因为不修改 `VERSION`，不会进入 release job。
