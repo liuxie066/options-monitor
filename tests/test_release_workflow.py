@@ -1,5 +1,6 @@
 """Release evidence tests with synthetic API responses, never publication."""
 import copy
+import hashlib
 import importlib.util
 import io
 import json
@@ -8,6 +9,8 @@ from urllib.error import HTTPError
 
 import pytest
 import yaml
+
+from plugin_release_helpers import publication
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("release_checks", ROOT / ".github/ci/release_checks.py")
@@ -147,12 +150,17 @@ def test_tag_movement_or_missing_blocks_tag_entrance():
         checks.check_tag(API(), TAG, SHA, allow_missing=False)
 
 
-def test_publication_readback_requires_all_assets_and_exact_tag():
+def test_publication_readback_requires_all_assets_and_exact_tag(tmp_path):
+    catalog = publication(tmp_path)
     class API:
         def __init__(self):
             self.assets = [dict(id=i, name=n, state="uploaded", size=10, digest="sha256:" + "a"*64) for i, n in enumerate(
                 [f"options-monitor-{TAG}.tar.gz", "om-agent-spec.json", "VERSION"] +
                 [f"options-monitor-{TAG}-macos-arm64.tar.gz{suffix}" for suffix in ("", ".sha256", ".manifest.json", ".qualification.json")], 1)]
+            for name in ["om-plugins.json", "om-plugins.md"] + [e["asset"] for e in catalog["plugins"]]:
+                data = (tmp_path / name).read_bytes()
+                self.assets.append(dict(id=len(self.assets) + 1, name=name, state="uploaded", size=len(data),
+                                        digest="sha256:" + hashlib.sha256(data).hexdigest()))
         def get(self, path, **kwargs):
             if "/assets?" in path:
                 return self.assets
@@ -160,10 +168,60 @@ def test_publication_readback_requires_all_assets_and_exact_tag():
                 return dict(id=1, tag_name=TAG, draft=False)
             return {"ref": f"refs/tags/{TAG}", "object": {"type": "commit", "sha": SHA}}
     api = API()
-    checks.readback(api, TAG, SHA)
+    checks.readback(api, TAG, SHA, plugin_dir=tmp_path)
     api.assets.pop()
     with pytest.raises(checks.EvidenceError):
-        checks.readback(api, TAG, SHA)
+        checks.readback(api, TAG, SHA, plugin_dir=tmp_path)
+
+
+@pytest.mark.parametrize("asset_index", range(4))
+@pytest.mark.parametrize("damage", ["missing", "digest_missing", "digest_mismatch", "size", "duplicate", "pending"])
+def test_plugin_readback_requires_published_bytes_for_every_new_asset(tmp_path, asset_index, damage):
+    catalog = publication(tmp_path)
+    names = ["om-plugins.json", "om-plugins.md"] + [e["asset"] for e in catalog["plugins"]]
+    assets = [dict(id=i, name=n, state="uploaded", size=10, digest="sha256:" + "a" * 64) for i, n in enumerate(
+        [f"options-monitor-{TAG}.tar.gz", "om-agent-spec.json", "VERSION"] +
+        [f"options-monitor-{TAG}-macos-arm64.tar.gz{suffix}" for suffix in ("", ".sha256", ".manifest.json", ".qualification.json")], 1)]
+    for name in names:
+        data = (tmp_path / name).read_bytes()
+        assets.append(dict(id=len(assets) + 1, name=name, state="uploaded", size=len(data),
+                           digest="sha256:" + hashlib.sha256(data).hexdigest()))
+
+    class API:
+        def get(self, path, **kwargs):
+            if "/assets?" in path:
+                return assets
+            if "/releases/tags/" in path:
+                return dict(id=1, tag_name=TAG, draft=False)
+            return {"ref": f"refs/tags/{TAG}", "object": {"type": "commit", "sha": SHA}}
+
+    checks.readback(API(), TAG, SHA, plugin_dir=tmp_path)
+    asset = next(a for a in assets if a["name"] == names[asset_index])
+    if damage == "missing":
+        assets.remove(asset)
+    elif damage == "digest_missing":
+        del asset["digest"]
+    elif damage == "digest_mismatch":
+        asset["digest"] = "sha256:" + "b" * 64
+    elif damage == "size":
+        asset["size"] += 1
+    elif damage == "duplicate":
+        assets.append(dict(asset, id=100))
+    else:
+        asset["state"] = "new"
+    with pytest.raises(checks.EvidenceError):
+        checks.readback(API(), TAG, SHA, plugin_dir=tmp_path)
+
+
+def test_readback_cannot_skip_missing_or_wrong_commit_local_set(tmp_path):
+    class API:
+        def get(self, *args, **kwargs):
+            pytest.fail("local set must be validated before remote evidence")
+    with pytest.raises(checks.EvidenceError, match="local plugin"):
+        checks.readback(API(), TAG, SHA, plugin_dir=tmp_path)
+    publication(tmp_path, commit="b" * 40)
+    with pytest.raises(checks.EvidenceError, match="local plugin"):
+        checks.readback(API(), TAG, SHA, plugin_dir=tmp_path)
 
 
 def workflows():

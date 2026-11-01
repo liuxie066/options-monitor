@@ -10,6 +10,7 @@ from domain.domain.multi_tick import resolve_notification_route_from_config
 from src.application.notification_delivery_route import (
     notifications_enabled, resolve_notification_delivery_route, notification_reminder_route_key,
     resolve_notification_delivery_routes,
+    notification_delivery_route_is_current,
 )
 from src.application.notification_fanout_delivery import send_notification_fanout, uses_proactive_fanout
 from src.application.trade_time_format import format_trade_time_beijing
@@ -31,6 +32,24 @@ from src.application.system_alerts import report_system_meta_signal
 
 
 MAX_LIFECYCLE_BATCH_DISPLAY_ITEMS = 12
+
+
+def trade_receipt_delivery_is_current(
+    *, base: Path, config: dict[str, Any] | None, account: str,
+    route: dict[str, Any] | None = None,
+) -> bool:
+    """Authorize the original legacy destination without migrating its obligation."""
+    if not (config or {}).get("config_source_path"):
+        return True
+    route = route or resolve_notification_delivery_route(config=config)
+    identity = route.get("attribution_route_key") or notification_reminder_route_key(config=config, base=base)
+    if not identity or not account:
+        return False
+    try:
+        return notification_delivery_route_is_current(config=config, account=account,
+            recipient={"provider": route.get("provider"), "identity_key": identity}, base=base)
+    except Exception:
+        return False
 
 
 
@@ -131,6 +150,12 @@ def send_trade_intake_receipt(
         return {"enabled": True, "status": "skipped", "reason": "skipped_missing_deal_identity",
                 "delivery_confirmed": False, "message_id": None}
 
+    account = str(result.get("account") or (payload or {}).get("internal_account")
+                  or (payload or {}).get("account") or getattr(deal, "internal_account", "") or "").strip().lower()
+    if not trade_receipt_delivery_is_current(base=base, config=config, account=account, route=route):
+        return {"enabled": False, "status": "skipped", "reason": "delivery_authorization_closed",
+                "attempted": False, "delivery_confirmed": False, "message_id": None}
+
     message = build_trade_intake_receipt_message(deal=deal, result=result, payload=payload)
     attempt = None
     transport_key = None
@@ -142,6 +167,9 @@ def send_trade_intake_receipt(
         else:
             resolved_send_fn = send_fn
             resolved_normalize_fn = normalize_fn
+        if not trade_receipt_delivery_is_current(base=base, config=config, account=account, route=route):
+            return {"enabled": False, "status": "skipped", "reason": "delivery_authorization_closed",
+                    "attempted": False, "delivery_confirmed": False, "message_id": None}
         if inbox_path is not None and inbox_id:
             from src.application.trades.inbox import begin_trade_receipt_attempt
             attempt = begin_trade_receipt_attempt(
@@ -696,6 +724,12 @@ def send_trade_lifecycle_outbox_payload(
         route_resolver=route_resolver,
         base=base,
     )
+    members = payload.get("members", []) if payload.get("schema_version") == BATCH_RENDERER_VERSION else [{"payload": payload}]
+    accounts = {str(member["payload"].get("account") or "").strip().lower() for member in members}
+    if not accounts or not all(trade_receipt_delivery_is_current(
+            base=base, config=config, account=account, route=route) for account in accounts):
+        return {"status": "pending", "attempted": False, "delivery_confirmed": False,
+                "reason": "delivery_authorization_closed"}
     target = route.get("target")
     if not bool(route.get("route_available")):
         return {
@@ -796,6 +830,10 @@ def send_trade_lifecycle_outbox_payload(
     }
     if is_batch:
         send_kwargs["idempotency_key"] = batch_id
+    if not all(trade_receipt_delivery_is_current(
+            base=base, config=config, account=account, route=route) for account in accounts):
+        return {"status": "pending", "attempted": False, "delivery_confirmed": False,
+                "reason": "delivery_authorization_closed"}
     send_result = resolved_send_fn(
         **send_kwargs,
     )

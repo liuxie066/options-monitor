@@ -253,6 +253,20 @@ OM · 决策简报 · [你的账户标签]
 可按账户选择一个或多个通知目标，各目标独立记录回执和重试。均不安装也可使用本地扫描与报告。
 见[安装消息渠道](docs/INSTALL.md#可选消息渠道)及[配置契约](CONFIGS.md#消息渠道)。
 
+## 可选插件：下载、安装与移除
+
+包含插件分发功能的官方 Release 会附带 PM、持仓建议的 wheel、`om-plugins.json` 清单和 `om-plugins.md` 兼容说明。插件与 OM 版本精确配套，无需下载整套源码寻找目录。此分发路径尚未发布；旧 Release 没有对应资产时，安装会明确失败。
+
+```bash
+om plugins list
+om plugins install position-advice          # 预览对应版本、资产和安装目录
+om plugins install position-advice --confirm
+om plugins install pm --confirm
+om plugins uninstall position-advice        # 预览；加 --confirm 才移除
+```
+
+源码版与完整运行包共用该入口。安装不启用功能：PM 仍需配置 `portfolio_management.enabled`，持仓建议仍需配置 `close_advice.enabled`；安装、移除都不自动重启服务。已有 pip 安装继续由原 Python 环境管理。完整步骤与升级保留规则见[官方可选插件](docs/INSTALL.md#官方可选插件)。
+
 ## 更多能力与文档
 
 以下功能不必在第一次使用时全部配置。按需要选择对应说明。

@@ -870,7 +870,8 @@ def test_repair_connection_setup_migrates_only_bound_explicit_receiver(tmp_path,
     for target in applied["verified_targets"]:
         doc = yaml.safe_load(Path(target).read_text()) if str(target).endswith(".yaml") else json.loads(Path(target).read_text())
         assert doc["channels"] == expected
-        assert doc["inbound"]["wechat_clawbot"]["allowed_senders"] == "wechat:qa-user"
+        if Path(target) == path or str(target) == applied["bot"]["output_config_path"]:
+            assert doc["inbound"]["wechat_clawbot"]["allowed_senders"] == "wechat:qa-user"
     monkeypatch.setattr(config_loader.plugins, "channel_plugin_installed", lambda _: True)
     bot = applied["bot"]["output_config_path"]
     config_loader.require_inbound_channel("wechat_clawbot", bot)
@@ -908,8 +909,11 @@ def test_repair_feishu_setup_flags_preview_env_cas_then_real_generation(tmp_path
     args.expected_env_sha256 = preview["env"]["source_revision"]["before_sha256"]
     applied = run()
     assert applied["env"]["verified"] is True and applied["result"]["restart_performed"] is False
-    assert "OM_FEISHU_BOT_APP_ID=qa-setup-app" in env_path.read_text()
-    assert "OM_FEISHU_BOT_USER_OPEN_ID=ou_setup" in env_path.read_text()
+    from src.application.settings import build_effective_env
+    env = build_effective_env(environ={}, env_file=env_path).values
+    assert env["OM_FEISHU_BOT_APP_ID"] == "qa-setup-app"
+    assert env["OM_FEISHU_BOT_USER_OPEN_ID"] == "ou_setup"
+    assert env["OM_FEISHU_BOT_ALLOWED_OPEN_IDS"] == "ou_setup_sender"
     for target in applied["result"]["verified_targets"]:
         doc = yaml.safe_load(Path(target).read_text()) if str(target).endswith(".yaml") else json.loads(Path(target).read_text())
         assert doc["channels"] == {"feishu": switches(True, True, False), "wechat_clawbot": switches()}
@@ -943,10 +947,91 @@ def test_repair_public_positions_preview_does_not_touch_failed_delivery(tmp_path
     calls = []
     monkeypatch.setattr(maintenance_receipt, "select_notification_delivery_adapter", forbidden(calls, "preview adapter"))
     monkeypatch.setattr(auto_close, "load_config", lambda **_: cfg)
-    assert option_positions.main(["auto-close-expired", "--runtime-root", str(tmp_path),
-        "--config", str(path), "--accounts", "alpha", "--quiet", *preview_flags]) == 0
-    preview = json.loads((tmp_path / "output_shared/state/auto_close_expired.json").read_text())
-    assert preview["status"] == "dry_run" and preview["summary"]["applied_closed"] == 0
+    args = ["auto-close-expired", "--runtime-root", str(tmp_path),
+        "--config", str(path), "--accounts", "alpha", "--quiet", *preview_flags]
+    output_path = tmp_path / "output_shared/state/auto_close_expired.json"
+    if "--apply" in preview_flags:
+        with pytest.raises(SystemExit, match="--dry-run cannot be combined"):
+            option_positions.main(args)
+        assert not output_path.exists()
+    else:
+        assert option_positions.main(args) == 0
+        preview = json.loads(output_path.read_text())
+        assert preview["status"] == "dry_run" and preview["summary"]["applied_closed"] == 0
     assert owner.read_notification_fanout(base=tmp_path, fanout_id=seeded["fanout_id"]) == frozen
     assert all(p.read_bytes() == data for p, data in protected.items())
     assert repo.list_trade_events() == events and calls == []
+
+
+@pytest.mark.parametrize("disk_state", ["disabled", "missing"])
+@pytest.mark.parametrize("family", ["intake", "lifecycle"])
+def test_repair_legacy_receipt_bound_disk_authority_never_uses_cached_enablement(
+        tmp_path, family, disk_state):
+    from src.application.trades import receipt
+    path = tmp_path / "config.us.json"
+    cached = {"config_source_path": str(path), "notifications": {
+        "enabled": True, "provider": "feishu_app", "channel": "feishu_app"}}
+    if disk_state == "disabled":
+        path.write_text(json.dumps({"notifications": {"enabled": False}}))
+    before = deepcopy(cached)
+    calls = []
+    reject = forbidden(calls, "legacy transport after authority closed")
+    if family == "intake":
+        result = receipt.send_trade_intake_receipt(base=tmp_path, config=cached, receipt_config={},
+            apply_changes=True, state=None, deal=SimpleNamespace(deal_id="qa-one", internal_account="alpha"),
+            result={"account": "alpha", "status": "failed", "reason": "qa"}, payload={"account": "alpha"},
+            send_fn=reject, normalize_fn=identity)
+    else:
+        result = receipt.send_trade_lifecycle_outbox_payload(base=tmp_path, config=cached, receipt_config={},
+            payload={"account": "alpha", "transition_type": "needs_review", "_frozen_message": "qa lifecycle"},
+            send_fn=reject, normalize_fn=identity)
+    assert calls == []
+    assert not result.get("delivery_confirmed")
+    assert cached == before
+
+
+@pytest.mark.parametrize("provider", ["feishu_app", "wechat_clawbot"])
+def test_repair_setup_omitted_master_never_silently_discards_connection_fields(tmp_path, provider):
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.channels.wechat_clawbot.state_store import WechatClawbotStateStore
+    from src.application.settings import build_effective_env
+    from src.interfaces.cli import main, feature_ops
+    path, _ = authoring(tmp_path, channel_controls={"feishu": switches(), "wechat_clawbot": switches()})
+    flags = ["--app-id", "qa-app", "--recipient", "ou_qa", "--allowed-senders", "ou_sender"]
+    if provider == "wechat_clawbot":
+        state = tmp_path / "output_shared/state/channels/wechat_clawbot/named"
+        WechatClawbotStateStore(state).save_bindings({"bindings": {"ops": {
+            "to_user_id": "qa-user", "context_token": "qa-context"}}})
+        flags = ["--target", "wechat:named:ops", "--label", "named", "--binding-name", "ops",
+            "--allowed-senders", "wechat:qa-user"]
+    args = main.parse_args(["channel", "configure", "--config-yaml", str(path),
+        "--provider", provider, "--receive-enabled", "true", *flags])
+    calls = []
+    def run():
+        return feature_ops.run_feature_configure(args, repo_base_fn=lambda: ROOT, input_is_tty=lambda: False,
+            secret_runner=forbidden(calls, "secret"), wechat_connector=forbidden(calls, "QR/network"))
+    before = path.read_bytes()
+    try:
+        preview = run()
+    except AgentToolError as exc:
+        assert exc.code == "INPUT_ERROR"
+        assert "enabled" in str(exc).lower() or "master" in str(exc).lower()
+        assert path.read_bytes() == before and not (tmp_path / "options-monitor.env").exists()
+    else:
+        assert path.read_bytes() == before
+        args.apply = args.confirm = True
+        args.expected_source_sha256 = preview["result"]["source_revision"]["before_sha256"]
+        args.expected_preview_sha256 = preview["result"].get("preview_sha256")
+        if "env" in preview:
+            args.expected_env_sha256 = preview["env"]["source_revision"]["before_sha256"]
+        assert run()["status"] == "configured"
+        doc = yaml.safe_load(path.read_text())
+        if provider == "feishu_app":
+            env = build_effective_env(environ={}, env_file=tmp_path / "options-monitor.env").values
+            assert env["OM_FEISHU_BOT_APP_ID"] == "qa-app"
+            assert env["OM_FEISHU_BOT_USER_OPEN_ID"] == "ou_qa"
+            assert env["OM_FEISHU_BOT_ALLOWED_OPEN_IDS"] == "ou_sender"
+        else:
+            assert doc["notifications"]["target"] == "wechat:named:ops"
+            assert doc["inbound"]["wechat_clawbot"]["allowed_senders"] == "wechat:qa-user"
+    assert calls == []

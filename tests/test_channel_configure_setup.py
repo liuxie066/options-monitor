@@ -215,6 +215,33 @@ def test_setup_plus_disabled_master_is_explicitly_rejected(starter, provider, fl
     assert not (starter.parent / "options-monitor.env").exists()
 
 
+@pytest.mark.parametrize("activity_flag", [False, True])
+@pytest.mark.parametrize("provider,flags", [
+    ("feishu_app", ["--app-id", "qa-app", "--recipient", "ou_qa", "--allowed-senders", "ou_sender"]),
+    ("wechat_clawbot", ["--target", "wechat:default:ops", "--allowed-senders", "wechat:user"]),
+])
+def test_omitted_master_off_rejects_setup_before_effects(starter, monkeypatch, provider, flags, activity_flag):
+    from src.interfaces.cli import feature_ops
+    from src.application.channels.wechat_clawbot import state
+
+    calls = []
+    def forbidden(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("disabled setup must reject before effects or binding reads")
+    monkeypatch.setattr(feature_ops, "write_feature_env", forbidden)
+    monkeypatch.setattr(feature_ops, "publish_feature_document", forbidden)
+    monkeypatch.setattr(state, "load_wechat_clawbot_binding", forbidden)
+    before = starter.read_bytes()
+    switches = ["--receive-enabled", "true"] if activity_flag else []
+    with pytest.raises(AgentToolError, match="INPUT_ERROR.*--enabled false"):
+        run(command(starter, "--provider", provider, *switches, *flags),
+            input_is_tty=lambda: True, input_fn=lambda _: "", output_fn=lambda _: None,
+            secret_runner=forbidden, wechat_connector=forbidden)
+    assert calls == []
+    assert starter.read_bytes() == before
+    assert not (starter.parent / "options-monitor.env").exists()
+
+
 def test_setup_cannot_replace_other_platform_route(starter):
     doc = yaml.safe_load(starter.read_text())
     doc["notifications"].update(provider="feishu_app", channel="feishu_app")

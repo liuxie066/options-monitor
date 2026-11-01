@@ -295,6 +295,8 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
             after = feature_document(doc, feature=feature, enabled=enabled,
                                      values={"provider": provider, **channel_flags}, legacy_receive_channels=legacy_receivers)
             enabled = after["channels"][canonical_channel(provider)]["enabled"]
+            if channel_setup and enabled is not True:
+                raise AgentToolError(code="INPUT_ERROR", message="connection setup resolves to --enabled false; pass --enabled true or use switch flags only")
         if feature == "bot" and enabled:
             profiles = parse_model_profiles((doc.get("bot") or {}).get("models"))
             if interactive:

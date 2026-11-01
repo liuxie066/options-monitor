@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1390 (`src`: 599, `domain`: 98, `scripts`: 17, `tests`: 672)
-- Internal import edges: 12295 total, 4364 production/script edges excluding tests
+- Python files scanned: 1399 (`src`: 603, `domain`: 98, `scripts`: 18, `tests`: 676)
+- Internal import edges: 12369 total, 4379 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -33,28 +33,29 @@ flowchart LR
   storage["domain.storage"]
   application -->|721| domain
   application -->|4| domain_services
-  application -->|209| infrastructure
+  application -->|210| infrastructure
   application -->|2| om_strategy_core
   application -->|60| storage
   domain_services -->|6| domain
   domain_services -->|2| storage
   infrastructure -->|15| application
   infrastructure -->|9| domain
-  interfaces -->|234| application
+  interfaces -->|237| application
   interfaces -->|4| domain
   interfaces -->|6| infrastructure
   om_strategy_core -->|9| domain
-  scripts -->|69| application
+  scripts -->|70| application
   scripts -->|5| domain
   scripts -->|7| infrastructure
   scripts -->|2| interfaces
   scripts -->|1| tests
+  src -->|1| application
   storage -->|1| domain
-  tests -->|6042| application
-  tests -->|698| domain
+  tests -->|6080| application
+  tests -->|699| domain
   tests -->|2| domain_services
-  tests -->|407| infrastructure
-  tests -->|449| interfaces
+  tests -->|409| infrastructure
+  tests -->|464| interfaces
   tests -->|12| om_strategy_core
   tests -->|32| scripts
   tests -->|77| storage
@@ -65,9 +66,9 @@ flowchart LR
 | from | to | imports |
 |---|---|---|
 | application | domain | 721 |
-| interfaces | application | 234 |
-| application | infrastructure | 209 |
-| scripts | application | 69 |
+| interfaces | application | 237 |
+| application | infrastructure | 210 |
+| scripts | application | 70 |
 | application | storage | 60 |
 | infrastructure | application | 15 |
 | infrastructure | domain | 9 |
@@ -81,6 +82,7 @@ flowchart LR
 | application | om_strategy_core | 2 |
 | domain_services | storage | 2 |
 | scripts | interfaces | 2 |
+| src | application | 1 |
 | storage | domain | 1 |
 | scripts | tests | 1 |
 
@@ -88,10 +90,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 6042 |
-| tests | domain | 698 |
-| tests | interfaces | 449 |
-| tests | infrastructure | 407 |
+| tests | application | 6080 |
+| tests | domain | 699 |
+| tests | interfaces | 464 |
+| tests | infrastructure | 409 |
 | tests | storage | 77 |
 | tests | scripts | 32 |
 | tests | om_strategy_core | 12 |
@@ -104,13 +106,13 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | from | to | imports |
 |---|---|---|
 | src.application | domain.domain | 302 |
+| src.interfaces | src.application | 186 |
 | src.application.ledger | domain.domain | 184 |
-| src.interfaces | src.application | 183 |
-| src.application | src.infrastructure | 143 |
+| src.application | src.infrastructure | 144 |
 | src.application.ledger | domain.domain.ledger | 76 |
 | src.application.trades | domain.domain | 67 |
 | src.application.research | src.application | 59 |
-| scripts | src.application | 56 |
+| scripts | src.application | 57 |
 | src.application.trades | src.application | 51 |
 | src.application | domain.storage | 47 |
 | src.application | src.application.ledger | 42 |
@@ -189,7 +191,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 137 |
+| src.application.agent_tool_contracts | 138 |
 | domain.domain.symbol_identity | 102 |
 | src.application.payload_helpers | 102 |
 | src.application.ledger.api | 94 |
@@ -215,9 +217,9 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.multi_tick.required_data_prefetch | 38 |
 | src.application.agent_tools.runtime_status_impl | 36 |
 | src.application.pipeline_watchlist | 33 |
+| src.interfaces.cli.main | 33 |
 | src.application.daily_decision_brief_service | 32 |
 | src.application.ledger.queries | 32 |
-| src.interfaces.cli.main | 32 |
 | src.application.multi_account_tick | 31 |
 | src.interfaces.cli.option_positions | 31 |
 | src.application.agent_tools.positions | 30 |

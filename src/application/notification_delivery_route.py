@@ -112,7 +112,8 @@ def notification_delivery_route_is_current(
     if not channel_activity_enabled(config, str(provider), activity="notify"):
         return False
     routes = resolve_notification_delivery_routes(config=config, account=account, base=base)
-    return any(route["route_id"] == recipient.get("route_id")
+    # Legacy receipts have no route ID; their exact sender/recipient still must match.
+    return any(("route_id" not in recipient or route["route_id"] == recipient["route_id"])
                and route["identity_key"] == recipient.get("identity_key") for route in routes)
 
 

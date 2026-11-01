@@ -82,11 +82,39 @@ export PATH="$HOME/.local/bin:$PATH"
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash -s -- --source --with-server --with-feishu
 ```
 
+## 官方可选插件
+
+官方插件固定为 `pm`（PM 接入）和 `position-advice`（持仓评估与建议）。包含本分发功能的 Release 提供两个 `py3-none-any.whl`、`om-plugins.json` 和 `om-plugins.md`，绑定精确 OM 版本、tag、commit、Python >=3.12 及资产摘要。该路径尚未发布；不能假定旧 Release 已有这些资产，也不会退回下载其他版本或第三方包。
+
+源码版与完整运行包使用同一入口；添加插件时无需另行使用 pip、Git 或安装系统 Python：
+
+```bash
+om plugins list
+om plugins list --format json
+om plugins install pm                         # 默认只预览
+om plugins install pm --confirm
+om plugins install position-advice --confirm
+om plugins uninstall pm                      # 默认只预览
+om plugins uninstall pm --confirm
+```
+
+`list` 只读本地状态，不联网。安装从当前 OM 版本的官方稳定 Release 获取清单，确认后仅下载所选 wheel；校验资产摘要、大小、包元数据、RECORD 和隔离导入，再原子发布安装目录。缺资产、版本不配套或校验失败会中止，不修改配置和已有安装。
+
+文件位于代码目录同级 `.om-plugins/<代码绝对路径摘要>/<插件名>/`，与运行包的不可变文件清单分离。安装选择属于这个 OM 代码实例，改变账户或运行目录不改变安装选择；新代码路径需由受控升级迁移选择。进程固定使用启动时的物理代码目录，切换 `current` 不会让旧进程改读新版本插件。直接搬迁代码后应重新检查安装状态。请以该实例实际运行用户执行安装和卸载，插件目录为该用户私有，不要用 sudo 改变归属。
+
+安装不等于启用：PM 仍由 `portfolio_management.enabled` 控制，持仓建议仍由 `close_advice.enabled` 控制。命令不改配置、凭据、账本、历史报告或服务；已加载插件的进程需另行重启，新进程按需加载。损坏的托管安装可先明确卸载再重装。受控升级在切换前安装并校验目标版本的已选插件，目标资产缺失会保留当前实例；见[升级流程](RELEASE_PROCESS.md)。
+
+卸载先将安装原子移出加载目录，再清理文件；移出失败保留原安装，清理失败则明确显示已卸载及残留目录（JSON 为 `cleanup_pending`、`retained_directory`），这些残留不会被加载，不应误认作仍已安装。
+
+回滚使用目标版本原有的插件选择，确认时先校验其 receipt 和实际加载，再暂存配置和切换代码；失败保留当前实例，不下载或迁移插件。仅预览时不加载插件。
+
+已有 pip 安装会显示 `python_environment`，不由此命令覆盖或删除；先用原环境卸载，再改用官方托管路径。如果后来又通过开发依赖安装了同名 pip 包，托管卸载会明确拒绝，须先移除 pip 包，避免移除托管副本后又加载另一份。以下源码开发方式仍保留：源码包版本目前是 `0.1.0`，官方 wheel 版本跟随 OM VERSION，二者不能互作兼容凭据。
+
 ## 可选 PM 与长桥依赖
 
-可选 PM、长桥依赖目前仅支持源码安装（安装器使用 `--source`）；默认运行包不支持追加这些依赖。
+PM 普通安装见[官方可选插件](#官方可选插件)。以下 pip 开发方式及长桥 SDK 仅用于源码安装（安装器使用 `--source`）；不要向默认运行包的内置环境追加依赖。
 使用**运行该 OM 实例的 Python 环境**安装；以下从源码根目录示例，不会开启配置、
-写入凭据或连接外部服务。PM 包随源码提供，未发布到插件市场。
+写入凭据或连接外部服务。PM 源码包随仓库提供。
 
 ```bash
 ./.venv/bin/python -m pip install ./plugins/portfolio-management
@@ -113,15 +141,15 @@ PM 默认关闭。安装后设置全局 `portfolio_management.enabled: true`；�
 `install.sh --with-dev` 始终从下载的 release 根目录安装这些依赖，不使用调用目录中的
 同名插件。源码 service upgrade 保留当前实例实际安装的 PM 扩展和 Longbridge SDK，
 与配置是否启用无关；未安装或主动卸载的包不会因配置仍启用而补装。首次从内置 PM 的
-旧版迁移时，仅为有效旧配置已启用的 PM 安装扩展。若目标是运行包且需要保留这些依赖，
-升级在切换前拒绝，保留当前实例，不会静默丢失插件。缓存及切换前校验见
+旧版迁移时，仅为有效旧配置已启用的 PM 安装扩展。若目标是运行包且需要保留 pip 安装的插件或长桥 SDK，
+升级在切换前拒绝；通过 `om plugins` 托管的 PM、持仓建议另走官方资产迁移路径。缓存及切换前校验见
 [升级流程](RELEASE_PROCESS.md)；首次迁移必须使用含修复的新控制器，旧版自动升级器不能
 自行获得目标 release 中的修复。
 
 ## 可选持仓建议
 
-运行依赖默认不安装持仓建议包。目前仅支持源码安装；默认运行包不支持追加该包，
-`--with-position-advice` 须配合 `--source`。使用该实例的 Python 从源码根目录安装：
+运行依赖默认不安装持仓建议包。普通安装见[官方可选插件](#官方可选插件)，支持源码版与完整运行包。以下仅为源码开发方式，
+安装器 `--with-position-advice` 须配合 `--source`。使用该实例的 Python 从源码根目录安装：
 
 ```bash
 ./.venv/bin/python -m pip install ./plugins/position-advice

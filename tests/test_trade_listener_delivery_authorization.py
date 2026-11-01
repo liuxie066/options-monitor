@@ -234,3 +234,112 @@ def test_global_plan_children_authorize_frozen_actual_account_without_all_wildca
     paused = send_notification_fanout(**args)
     assert [call["target"] for call in calls] == ["A", "B", "A"]
     assert [child["attempt_count"] for child in paused["children"]] == [2, 1]
+
+
+@pytest.mark.parametrize("family", ["callback", "dispatcher"])
+@pytest.mark.parametrize("change", ["master", "notify", "emergency", "removed", "rotated", "account_removed"])
+@pytest.mark.parametrize("outcome", ["explicit_failed", "confirmed", "unknown"])
+def test_legacy_live_listener_keeps_original_obligation_and_pauses_before_budget(
+        listener_lab, monkeypatch, family, change, outcome):
+    lab = listener_lab
+    lab.doc.pop("channels")
+    monkeypatch.setattr(receipt, "report_system_meta_signal", lambda **_kwargs: None)
+    lab.doc["notifications"] = {"enabled": True, "provider": "feishu_app"}
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "B")
+    lab.publish(lab.doc)
+    context = _inbox_context(lab)
+    intent = notification_outbox.build_notification_intent(case_id="legacy-case", transition_type="needs_review",
+        resolution_revision=1, transition_key="legacy-review", state_fingerprint="fixture",
+        payload={"account": "lx", "symbol": "NVDA", "transition_type": "needs_review", "market": "US"})
+    notification_outbox.enqueue_notification_intent(lab.repo, intent)
+    lab.clock[0] += 11
+
+    def send(**kwargs):
+        lab.calls.append(deepcopy(kwargs))
+        if len(lab.calls) == 1:
+            return {"explicit_pre_acceptance_failure": True} if outcome == "explicit_failed" else (
+                {"ambiguous_send": True} if outcome == "unknown" else
+                {"delivery_confirmed": True, "message_id": "confirmed"})
+        return {"delivery_confirmed": True, "message_id": "resumed"}
+
+    monkeypatch.setattr(auto_intake, "send_trade_intake_receipt", partial(
+        receipt.send_trade_intake_receipt, send_fn=send, normalize_fn=lambda send_result: send_result))
+    monkeypatch.setattr(auto_intake, "send_trade_lifecycle_outbox_payload", partial(
+        receipt.send_trade_lifecycle_outbox_payload, send_fn=send, normalize_fn=lambda send_result: send_result))
+    loaded = []
+    load = auto_intake.load_config
+
+    def load_once(**kwargs):
+        cfg = load(**kwargs)
+        cfg["config_source_path"] = str(lab.application / "wrong-runtime.json")
+        loaded.append(cfg)
+        return cfg
+
+    monkeypatch.setattr(auto_intake, "load_config", load_once)
+
+    def run_source(**kwargs):
+        startup = kwargs["cfg"]
+        frozen_cfg = deepcopy(startup)
+        assert "channels" not in startup and "routes" not in startup["notifications"]
+        dispatcher = lab.dispatchers[0]
+
+        def emit():
+            result = kwargs["receipt_callback"](context) if family == "callback" else dispatcher.run_once()
+            assert result["status"] != "error", result
+            return result
+
+        def obligation():
+            if family == "callback":
+                return inbox.read_trade_payload(context["inbox_path"], inbox_id=context["inbox_id"])["receipt"]
+            return lab.repo.list_trade_lifecycle_notification_batches()[0]
+
+        emit()
+        assert len(lab.calls) == 1
+        original = deepcopy(obligation())
+        attempts = original["attempt_count"]
+        assert attempts == 1
+        changed = deepcopy(lab.doc)
+        changed["channels"] = {"feishu": {"enabled": True, "receive_enabled": False, "notify_enabled": True}}
+        changed["notifications"]["routes"] = [{"id": "migrated-B", "provider": "feishu_app",
+                                                "target": "B", "accounts": ["lx"]}]
+        if change == "master":
+            changed["channels"]["feishu"]["enabled"] = False
+        elif change == "notify":
+            changed["channels"]["feishu"]["notify_enabled"] = False
+        elif change == "emergency":
+            changed["notifications"]["enabled"] = False
+        elif change == "removed":
+            changed["notifications"]["routes"] = []
+        elif change == "rotated":
+            changed["notifications"]["routes"][0]["target"] = "new-B"
+        else:
+            changed["notifications"]["routes"][0]["accounts"] = ["sy"]
+        changed["markets"]["us"]["symbols"] = ["AAPL"]
+        lab.publish(changed)
+        lab.clock[0] += 601
+        emit()
+        assert len(lab.calls) == 1
+        assert obligation() == original
+        restored = deepcopy(lab.doc)
+        restored["channels"] = {"feishu": {"enabled": True, "receive_enabled": False, "notify_enabled": True}}
+        restored["notifications"]["routes"] = [
+            {"id": "migrated-B", "provider": "feishu_app", "target": "B", "accounts": ["lx"]},
+            {"id": "new-D", "provider": "feishu_app", "target": "D", "accounts": ["lx"]}]
+        lab.publish(restored)
+        lab.clock[0] += 601
+        emit()
+        assert len(lab.calls) == (2 if outcome == "explicit_failed" else 1)
+        if outcome == "explicit_failed":
+            assert lab.calls[0] == lab.calls[1]
+            assert obligation()["attempt_count"] == 2
+        else:
+            assert obligation() == original
+        assert startup == frozen_cfg and loaded == [startup]
+        assert startup["config_source_path"] == str((lab.runtime / "config.us.json").resolve())
+        assert lab.repo.list_trade_events() == lab.repo.list_position_lots() == []
+        assert not list(lab.application.glob("**/*fanout*.sqlite3"))
+        return 0
+
+    monkeypatch.setattr(auto_intake, "_run_listener_source_loop", run_source)
+    assert auto_intake.main(["--config", str(lab.runtime / "config.us.json"), "--runtime-root", str(lab.runtime),
+                             "--mode", "apply", "--confirm"]) == 0

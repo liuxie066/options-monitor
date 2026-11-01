@@ -85,6 +85,7 @@ from src.application.trades.settlement_observation import (
     build_settlement_observation_collector,
 )
 from src.application.trades.receipt import (
+    trade_receipt_delivery_is_current,
     resolve_trade_lifecycle_notification_batch_route,
     send_trade_lifecycle_outbox_payload,
     send_trade_intake_receipt,
@@ -1905,6 +1906,8 @@ def _build_lifecycle_receipt_batch_dispatcher(
         ),
         poll_interval_sec=1.0,
         log_fn=_log,
+        authorize_account=(None if route.get("provider") == "fanout" else
+            lambda account: trade_receipt_delivery_is_current(base=base, config=cfg, account=account, route=route)),
     )
     return dispatcher, dispatcher.snapshot
 
