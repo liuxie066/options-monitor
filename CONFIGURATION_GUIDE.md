@@ -4,13 +4,13 @@
 
 ## 需要维护什么
 
-普通安装只需要三类配置：
+人工配置与生成快照的职责如下：
 
 | 文件 / 来源 | 内容 |
 |---|---|
 | `config.yaml` | 账户、市场、symbols、策略与非 secret 行为 override |
-| Keychain / systemd credentials | secrets、provider credential；逻辑名和迁移见 `docs/SECRET_STORAGE.md` |
-| env-file | 非秘密本机设置和写入开关；`OM_SECRET_BACKEND=env` 仅为显式兼容 |
+| Keychain / systemd credentials | 固定注册表内的秘密；逻辑名和迁移见 [Secret Storage](docs/SECRET_STORAGE.md) |
+| env-file | 非秘密本机设置和写入开关；`OM_SECRET_BACKEND=env` 仅为显式兼容，长桥凭据另遵循 [CONFIGS](CONFIGS.md#可选能力与长桥账户) |
 | 生成快照 | `config.us.json`、`config.hk.json`、`resolved/config.bot.json` |
 
 期权仓位不需要 Bitable：
@@ -19,7 +19,7 @@
 <runtime_root>/output_shared/state/option_positions.sqlite3
 ```
 
-开仓扫描的账户现金和股票持仓只读取对应富途账户，期权账本以本地 SQLite 为准；扫描不读取 Feishu Holdings 计算全局风险。独立的 Feishu 持仓上下文导出命令仍可使用该表。
+开仓扫描的账户现金和股票持仓读取所配置券商的对应账户；支持富途及长桥的股票/现金范围，缺失或不完整证据不回填为零。期权账本以本地 SQLite 为准；扫描不读取 Feishu Holdings 计算全局风险。独立的 Feishu 持仓上下文导出命令仍可使用该表。
 
 ## 初始化
 
@@ -121,7 +121,7 @@ portfolio_management:
 
 ## 维护监控标的
 
-人工入口是 `om symbols`：`list` 查看 YAML 中该市场的清单，`add`、`rm`、`edit` 默认只预览；确认后追加 `--apply`，会校验并发布 YAML 与运行快照。未指定 `--config-yaml` 时使用当前运行目录中的 `config.yaml`；操作另一实例须显式指定文件。生成的 `config.us.json` / `config.hk.json` 不是此命令的输入或写入目标。
+人工入口是 `om symbols`：`list` 查看 YAML 中该市场的清单，`add`、`rm`、`edit` 默认只预览；确认后追加 `--apply`，会校验并发布 YAML 与运行快照。未指定 `--config-yaml` 时使用当前运行目录中的 `config.yaml`；操作另一实例须显式指定文件。不能把生成的 `config.us.json` / `config.hk.json` 作为 authoring 输入；它们由该命令的配置事务重建。
 
 ```bash
 om symbols list --market us
@@ -135,18 +135,22 @@ om symbols rm YOUR_SYMBOL
 
 ## Portfolio Exposure 的 Holdings 来源配置
 
-Portfolio Exposure 沿用“所有未平仓卖出期权均被指派”的情景口径。情景以富途 OpenD 的
-股票和现金（含 MMF）为底，OM `position_lots` 提供未平仓卖出期权。开启
+Portfolio Exposure 默认沿用“所有未平仓卖出期权均被指派”的情景口径，也可显式选择
+`short_put` 或 `short_call`。情景按账户配置的券商读取股票和现金：富途经 OpenD（含 MMF），
+长桥经独立账户适配器。OM `position_lots` 提供未平仓卖出期权。开启
 `portfolio.holdings.enabled` 后，仅补充 PM Holdings 中券商明确为非富途的资产；PM 中
-富途股票、现金和 MMF 副本全部排除。来源不明的 PM 行不纳入并标记结果为 partial。
-富途股票及期权标的价格取自 OpenD 市场快照；汇率使用同次情景的 OM 市场汇率观测。
+富途副本及同账户已直接读取的长桥镜像排除。来源不明的 PM 行不纳入并标记结果为 partial。
+股票及期权标的价格取自配置的行情能力；汇率使用同次情景的 OM 市场汇率观测。
 休市价或报价缺失会标记 partial，不以 PM 报价回退。Holdings 关闭时查询不依赖 PM；
-缺少富途底仓时结果为 unavailable。
+直接券商底仓的资格按账户与券商分别核验；同账户另一券商的期权仍保留可证实的指派变化，
+但缺该券商基线时，起始/终局股数、净资产及依赖它们的权重未知，不能按零计算。
 开启预检以已配置 OM 账户为范围，要求 PM `non_futu` 估值证据新鲜可信，并展示完整原始
-broker 清单、分类和行数。成功读取但没有合格非富途资产可显示 `ready_empty`。预览将非富途
-broker 原文集合按账户写入待发布配置；apply 重读 PM，集合变化会在写入前拒绝。
-查询遇旧配置缺集合或新 broker 值会暂停整份 PM 补充并标 partial。不把 Holdings 写入
-Futu 账户资金、持仓或 OM 期权账本。`portfolio_management.enabled` 控制全局 PM 集成，
+broker 清单、分类和行数。成功读取但没有合格非富途资产可显示 `ready_empty`。不保存券商批准名单；
+apply 重读并验证 PM scoped 来源质量。查询遇来源清单缺失、不一致或无法分类时拒绝该 PM 补充，
+保留已核验的直接券商基线并标 partial。不把 PM 补充现金计入直接券商的期权资金覆盖，
+也不把 Holdings 写入券商资金、持仓或 OM 期权账本。长桥现金估值、费用及身份限制见
+[情景设计](docs/PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md#券商与-pm-可选能力扩展2026-11-01)。
+`portfolio_management.enabled` 控制全局 PM 集成，
 `portfolio.holdings.enabled` 只控制此情景补充。PM 尚未开启时，用 `--enable-pm` 将两个设置
 纳入同一次预览、确认和配置发布；预检失败或取消不会先留下已开启的 PM。关闭 Holdings 保留 PM 集成。
 PM 不可用时仍可预览开启目标，但 apply 会拒绝；关闭无需 PM 预检。
@@ -190,7 +194,8 @@ Linux/macOS `scan-pipeline` 主线程中的 `runtime.symbol_timeout_sec` 能真�
 
 ## 账户
 
-账户类型为 `futu`：
+账户类型支持 `futu`，以及仅接入 AP 数据中心 REAL 账户股票/现金的 `longbridge`。
+长桥需要独立插件、凭据与账号绑定；不支持长桥成交同步、下单或完整期权持仓读取，详见 [CONFIGS](CONFIGS.md#可选能力与长桥账户)。
 
 ### `futu`
 
@@ -389,7 +394,7 @@ service profile 应记录这些显式路径。升级时缺少 YAML authoring sou
 
 ## 独立 Feishu Holdings 上下文导出
 
-使用独立的 Feishu Holdings 上下文导出命令时，通过 env-file 提供 App credential 与 holdings table 引用。`portfolio.runtime.json` 只在必须替换默认 env 名等兼容场景使用。开仓扫描不使用此数据源。
+使用独立的 Feishu Holdings 上下文导出命令时，env-file 提供 App ID、holdings table 引用等非秘密设置，App Secret 使用 [Secret Storage](docs/SECRET_STORAGE.md)；旧 env 凭据仅用于显式兼容。`portfolio.runtime.json` 只在必须替换默认 env 名等兼容场景使用。开仓扫描不使用此数据源。
 
 它不能配置：
 

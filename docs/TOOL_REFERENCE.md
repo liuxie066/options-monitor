@@ -243,12 +243,14 @@ root 来源及每个 JSONL 文件的 `ok`、`missing`、`valid_empty`、`tail_on
 ```
 
 该工具必填 `accounts`，可选 `scenario=short_put|short_call|all_short`（默认 `all_short`），
-分别假设仅全部未平 short Put、仅全部未平 short Call、全部未平 short Put/Call 被指派。富途 OpenD 的股票和现金（含 MMF）是底仓；
+分别假设仅全部未平 short Put、仅全部未平 short Call、全部未平 short Put/Call 被指派。按账户所选券商的股票和现金作为底仓（富途经 OpenD，含 MMF；长桥走独立适配器）；
 `portfolio.holdings.enabled=true` 时只补充 PM Holdings 中明确为非富途来源的资产，
-PM 的富途股票、现金和 MMF 副本不计入。OM SQLite 的 open short put/call lot 提供指派输入，
-富途 OpenD 市场快照提供股票及期权标的现价；PM 仅在 Holdings 开启时补充非富途资产。
+PM 的富途副本及同账户已直接读取的长桥镜像不计入。OM SQLite 的 open short put/call lot 提供指派输入，
+配置的行情能力提供股票及期权标的现价；PM 仅在 Holdings 开启时补充非富途资产。
 启用通过 `om config holdings set` 预检 PM scoped 来源质量；查询自动纳入所请求账户的合格非富途资产，
-不保存券商批准名单。来源清单缺失、不一致或 broker 无法分类时拒绝该 PM 补充，保留富途基线并标 `partial`。
+不保存券商批准名单。来源清单缺失、不一致或 broker 无法分类时拒绝该 PM 补充，保留已核验的直接券商基线并标 `partial`。
+PM 补充现金不增加直接券商期权资金覆盖；缺少同账户、同券商完整基线时，起始/终局股数、净资产及依赖权重未知。
+长桥现金估值、费用及身份限制见[情景设计](PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md#券商与-pm-可选能力扩展2026-11-01)。
 输出 `portfolio.assignment_scenario.v1`，主资金口径为 CNY，
 Long Option 完全排除。工具是纯读；业务 `status=partial|unavailable` 仍可处于成功的 Tool Gateway envelope 中，调用方必须同时检查 envelope `ok` 和业务 `data.status`。
 

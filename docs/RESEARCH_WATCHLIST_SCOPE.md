@@ -2,7 +2,7 @@
 
 当前长期方案：`watchlist-schedule-run` 支持无 end_date 的 `research.watchlist-schedule.v2`，前三个交易日仅首轮验收，之后继续积累，不逐三日续期。旧有限日请求、有限 schedule v1 和模板用法保留，不能作为长期运行默认结束条件。
 
-2026-10-31 获批研究部署：固定研发包 `f0d46fbf48261177ede3a36adc64f2d3714079351e843b5c8397b7113bfeaf9b` 已在 `liuxie-incus` 独立安装；716份源码、离线依赖、两市场真实Linux隔离、正式启动和独立回读通过，研究timer均enabled/active。FX及公司行动提前300秒供给、报价仍每日一次，总预算301次应用请求/日。11月2日起无结束日期运行，当前真实观察0；研究占用988,672,000字节、余量3,147,141,120字节，符合2GiB/2GiB边界。新归档使用批准数据根内 `archive/{hk,us}/ancillary-f0d46fbf4826/`，避免覆盖旧不可变schedule；旧包及原件保留，生产OM未改。这是独立研究包部署，不是OM发布版本；下文“本地开发/未部署”保留各切片原验收时点，不代表当前部署状态。真实首三交易日与来源用途/覆盖尚未验收。
+2026-10-31 获批研究部署：固定研发包 `f0d46fbf48261177ede3a36adc64f2d3714079351e843b5c8397b7113bfeaf9b` 已在 `liuxie-incus` 独立安装；716份源码、离线依赖、两市场真实Linux隔离、正式启动和独立回读通过，部署验收时研究timer均enabled/active。FX及公司行动提前300秒供给、报价仍每日一次，总预算301次应用请求/日。计划11月2日起无结束日期运行，部署验收时真实观察0；当时研究占用988,672,000字节、余量3,147,141,120字节，符合2GiB/2GiB边界。新归档使用批准数据根内 `archive/{hk,us}/ancillary-f0d46fbf4826/`，避免覆盖旧不可变schedule；旧包及原件保留，生产OM未改。这是独立研究包部署，不是OM发布版本；下文“本地开发/未部署”保留各切片原验收时点，不代表当前部署状态。该部署记录不证明后续运行态或采集量；真实首三交易日与来源用途/覆盖须另行回读验收。
 
 每日编排入口：`om research watchlist-day-run --request <固定请求.json> --expected-request-sha256 <摘要> --day-dir <独立每日目录> --budget-root <研究计量根> --runtime-root <生产runtime隔离边界> --prune-root <清理边界> --opend-host <端点> --opend-port <端口>`。默认只预览；`--confirm` 仍只执行该日显式安全窗口允许的发现/观察，不启动扫描。当前由获批独立研究schedule调用，不属于生产扫描服务。
 
@@ -10,9 +10,13 @@
 
 `previous_day` 为 null 或 `{path,request_sha256}`：绝对路径指上一日的 `prepared/`，核验其 `day.json` 和全部固定原件后承接 tracking。前驱缺失不隐式改选更旧记录；也不能同时提供另一份 previous_tracking。新名单版本必须由 owner 重新导出并用于后续日期，不在运行时偷读实时监控配置。
 
-每日期独立准备目录及 archive，首次执行发现并固定计划，后续触发只核验原件并复用已有多片 collector。在发现窗口内首次准备前，以 OM instrument policy 的市场时区核对名单标的的当地日期与请求日期；错配直接拒绝，预览及确认模式都不查询行情、不创建每日目录。后续采集复用原计划，不以其他市场已跨午夜为由拒绝。重复触发不重做发现或抢已有 claim；漏窗保存 missed，中断标 abandoned 且不自动重放；没有资产则保存 no_observable_scope 与发现缺口。独立调度应覆盖发现窗口与每市场观察窗口，具体 timer/路径/配额须在启用单中批准；本轮没有启用调度。导出仍使用原 `research archive watchlist-export`，OB 通过显式日包集合验包，不导入 OM runtime。
+每日期独立准备目录及 archive，首次执行发现并固定计划，后续触发只核验原件并复用已有多片 collector。在发现窗口内首次准备前，以 OM instrument policy 的市场时区核对名单标的的当地日期与请求日期；错配直接拒绝，预览及确认模式都不查询行情、不创建每日目录。后续采集复用原计划，不以其他市场已跨午夜为由拒绝。重复触发不重做发现或抢已有 claim；漏窗保存 missed，中断标 abandoned 且不自动重放；没有资产则保存 no_observable_scope 与发现缺口。独立调度应覆盖发现窗口与每市场观察窗口，具体 timer/路径/配额须在启用单中批准，获批部署范围见文首。导出仍使用原 `research archive watchlist-export`，OB 通过显式日包集合验包，不导入 OM runtime。
 
-状态：隔离开发，未部署。`watchlist-scope` 只读取显式导出的离线文件，不连接 OpenD，不读账户配置或账本；daily/discovery/collect 的真实行情请求另受 confirm、安全窗口与预算控制。
+## 开发切片记录（早于文首部署验收）
+
+以下保留各切片开发时的“未部署”边界；部署状态以文首的带日期记录为准，不表示当前实时状态。
+
+切片原始状态：隔离开发，未部署。`watchlist-scope` 只读取显式导出的离线文件，不连接 OpenD，不读账户配置或账本；daily/discovery/collect 的真实行情请求另受 confirm、安全窗口与预算控制。
 
 独立调度模板为 [每日 service](../services/systemd/options-monitor-research-watchlist-day.service.in) 和 [每日 timer](../services/systemd/options-monitor-research-watchlist-day.timer.in)。它们是安装前的文本模板，不是已安装服务。每个获批日期各渲染一对唯一名称的 unit：冻结该日 request 原件和外部 SHA，填入固定安装 Python/source、已有用户、独立日目录、SDK HOME、完整预算根及生产隔离目录。`ExecStart` 只调用本节的每日入口，禁止改成完整扫描入口；真实安装前还要先运行去掉 `--confirm` 的同一命令预览。
 

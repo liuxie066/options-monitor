@@ -21,7 +21,7 @@ OM 面向自己做交易决策的期权投资者，支持富途账户及长桥�
 
 #### 选择安装方式
 
-完整运行包自带私有 Python 和依赖，用户不需要预装 Python、Git 或 Homebrew。它要求目标已发布版本有本机平台的合格资产；本次新增运行包路径尚未发布，平台实际资格也不能由源码或 mock 测试推断。安装方式和验收状态以[安装指南](docs/INSTALL.md#运行包资格与源码安装)为准。
+完整运行包自带私有 Python 和依赖，用户不需要预装 Python、Git 或 Homebrew。它要求目标已发布版本有本机平台的合格资产。v4.6.9 已提供 Apple Silicon Mac（`macos-arm64`）运行包；Intel Mac 和 Linux 请显式选择源码安装，不能从源码或 mock 测试推断运行包资格。安装方式和验收状态以[安装指南](docs/INSTALL.md#运行包资格与源码安装)为准。
 
 尚无合格运行包时，可以显式选择源码安装，另行准备 **Python 3.12+ 和 Git**。Homebrew 只是 Mac 上准备源码依赖的一种可选方式，不是 OM 的必装组件；安装器不会自动从运行包退回源码安装。
 
@@ -56,6 +56,15 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 
 以下命令使用安装器创建的完整路径，不需要先配置 `PATH`。需要指定版本或安装目录时，见[安装指南](docs/INSTALL.md)。
 
+v4.6.9 新安装默认只有 OpenD 行情插件。本节使用富途账户，进入向导前先预览并确认安装富途券商插件；安装本身不连接账户，也不启用配置：
+
+```bash
+"$HOME/.local/bin/om" plugins install broker-futu
+"$HOME/.local/bin/om" plugins install broker-futu --confirm
+```
+
+v4.6.8 的富途适配仍在核心内，不执行这两条命令。
+
 ### 3. 用向导配置账户并扫描
 
 运行一次：
@@ -64,7 +73,7 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 "$HOME/.local/bin/om"
 ```
 
-无配置时选择“首次安装或继续引导”；也可直接运行 `om setup init`。已有配置时首页展示账户、市场、最近扫描尝试和可读简报时间，保留已有配置。向导显示默认配置与运行目录，无需手动编辑 JSON 文件。以下流程说明当前源码能力，已安装版本以自身帮助和菜单为准。
+无配置时选择“首次安装或继续引导”；也可直接运行 `om setup init`。已有配置时首页展示账户、市场、最近扫描尝试和可读简报时间，保留已有配置。向导显示默认配置与运行目录，无需手动编辑 JSON 文件。命令和菜单以所安装版本的帮助为准；安装器不会把主分支新增功能装入旧版本。
 
 #### 填写必要信息
 
@@ -255,7 +264,7 @@ OM · 决策简报 · [你的账户标签]
 
 ## 可选插件：下载、安装与移除
 
-包含 Provider 插件功能的官方 Release 会附带 OpenD 行情、富途券商、长桥券商、PM、持仓建议、飞书、微信七个 wheel、`om-plugins.json` 清单和 `om-plugins.md` 兼容说明。插件与 OM 版本精确配套，无需下载整套源码寻找目录。此分发路径尚未发布；旧 Release 没有对应资产时，安装会明确失败。
+v4.6.9 已发布 OpenD 行情、富途券商、长桥券商、PM、持仓建议、飞书、微信七个官方插件 wheel，以及 `om-plugins.json` 清单和 `om-plugins.md` 兼容说明。v4.6.8 只提供其中后四个插件；各版本实际可安装的插件以对应 Release 清单为准。插件与 OM 版本精确配套，无需下载整套源码寻找目录；缺少对应资产时安装会明确失败。
 
 ```bash
 om plugins list
@@ -267,7 +276,7 @@ om plugins install wechat --confirm
 om plugins uninstall position-advice        # 预览；加 --confirm 才移除
 ```
 
-正常安装默认包含 `market-opend` 行情插件；券商插件可以一个也不装，按账户需要安装 `broker-futu` 或 `broker-longbridge`，也可同时安装。行情至少需要一个，托管卸载会拒绝移除最后一个有效行情插件。缺券商时，行情分析与历史查询仍可用，当前账户持仓、现金和容量明确不可用。
+从 v4.6.9 起，新安装默认包含 `market-opend` 行情插件；券商插件可以一个也不装，按账户需要安装 `broker-futu` 或 `broker-longbridge`，也可同时安装。行情至少需要一个，托管卸载会拒绝移除最后一个有效行情插件。缺券商时，行情分析与历史查询仍可用，当前账户持仓、现金和容量明确不可用。
 
 源码版与完整运行包共用该入口。飞书 SDK 自动复用或按发布约束安装到插件专属目录，无需用户手动安装；微信无第三方依赖。安装不启用功能：PM 仍需配置 `portfolio_management.enabled`，持仓建议仍需配置 `close_advice.enabled`，消息渠道仍需配置收信、通知开关与目标；安装、移除都不自动重启服务。已有 pip 安装继续由原 Python 环境管理。完整步骤与升级保留规则见[官方可选插件](docs/INSTALL.md#官方可选插件)。
 
