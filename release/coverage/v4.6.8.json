@@ -1,0 +1,582 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.8",
+  "base": {
+    "tag": "v4.6.7",
+    "commit": "aff08cae0c435ef3aa86487ea4952514fabbe266"
+  },
+  "reviewed_head": "9894cd6e5a9f0bfc56e3115d00d1342eda2e1d08",
+  "commits": [
+    {
+      "sha": "d7da0db3ecc830b3fadfdce9e07b1afca085eb33",
+      "subject": "docs(workflow): establish sustainable Codex development workflow"
+    },
+    {
+      "sha": "454832c14a1a60b63f056cc6d4c6435925bd69ca",
+      "subject": "Merge pull request #965 from liuxie066/codex/development-workflow-docs"
+    },
+    {
+      "sha": "92b5e97ccb6d7f59d54ea203f7792b73f6181fba",
+      "subject": "feat(research): collect reusable watchlist samples with bounded continuous scheduling"
+    },
+    {
+      "sha": "559bda0f522af5c62fb2d68b4ba58910cb1ea139",
+      "subject": "chore(research): integrate current main and regenerate dependency graph"
+    },
+    {
+      "sha": "70d306f423d93a471d11dbdf4fda8e90f31e2eda",
+      "subject": "fix(research): preserve startup import boundaries and scoped mocks"
+    },
+    {
+      "sha": "329c9b8403dd745281ae3a54aa5c56bff98d3646",
+      "subject": "Merge pull request #966 from liuxie066/codex/watchlist-research-collection"
+    },
+    {
+      "sha": "6a0476ce6d445f93a5abf811775d4d1beec3cce7",
+      "subject": "feat(onboarding): simplify installation and first-run guidance"
+    },
+    {
+      "sha": "6298939abc196412f8e3b13aa13d3c7d8fa690c2",
+      "subject": "merge(onboarding): integrate latest main and regenerate dependency graph"
+    },
+    {
+      "sha": "08413f130288f366f5e17d2a992255f121360b1e",
+      "subject": "feat(providers): separate optional PM and add Longbridge assets"
+    },
+    {
+      "sha": "56c5329da5b1fa56fe9bdeb411532c9af3a8a2c5",
+      "subject": "Merge pull request #967 from liuxie066/codex/simple-install-onboarding"
+    },
+    {
+      "sha": "307bb0e12403ab51e39158fb011e3a640757040d",
+      "subject": "fix(install): exclude private developer instructions from product"
+    },
+    {
+      "sha": "efcc599226569713c1f7fd98f5f25700dd95b293",
+      "subject": "merge(install): integrate main and cover runtime bundle instructions"
+    },
+    {
+      "sha": "c351749c834c8658d4cad80e095036a38f82d986",
+      "subject": "Merge pull request #969 from liuxie066/codex/product-install-instructions"
+    },
+    {
+      "sha": "77d028922d3e0092bcf3f3c393dd2a5c3a4762dd",
+      "subject": "feat(notifications): improve Feishu and WeChat brief formatting"
+    },
+    {
+      "sha": "c109e49332a82fb2b1953512c0a41c529d2de1fe",
+      "subject": "merge(notifications): integrate main and refresh dependency graph"
+    },
+    {
+      "sha": "77ac5e40d583ca0cbd832c9a0b0c49d95176c1c9",
+      "subject": "feat(advice): add optional on-demand position assessments"
+    },
+    {
+      "sha": "ab7fc25012f8d7572a0aa4d142177d378808aab9",
+      "subject": "test(notifications): align recovery and ownership guards with channel renderers"
+    },
+    {
+      "sha": "dec9b59b3a0af8e854b728fac540542ca745fea6",
+      "subject": "Merge pull request #970 from liuxie066/codex/brief-channel-format-preview"
+    },
+    {
+      "sha": "0249d0801fb7a601a4dce790e6f6bb12664c0a5a",
+      "subject": "merge(providers): integrate main and preserve optional runtime safety"
+    },
+    {
+      "sha": "857ee776b57a35f4913a3121ef08212b20290b3b",
+      "subject": "Merge pull request #968 from liuxie066/codex/provider-plugins-20261101"
+    },
+    {
+      "sha": "702d7c0120f2ab55a8b8ce9917d64a966bf985ed",
+      "subject": "merge(advice): integrate provider and main installation changes"
+    },
+    {
+      "sha": "51400bb5eeefa8a52bb04e1c889a80ad0d1cf803",
+      "subject": "merge(advice): record merged provider dependency from main"
+    },
+    {
+      "sha": "311e2ebd3ade7d36e3daaf15d4bd175d07a6a2e6",
+      "subject": "Merge pull request #971 from liuxie066/codex/position-advice-20261101"
+    },
+    {
+      "sha": "af0a9446b1f51ddbc242f5d6f9aa60187cc29fe5",
+      "subject": "feat(plugins): distribute official optional capabilities"
+    },
+    {
+      "sha": "4e1b3d5a60612eee12ff6a529d091ea038d8b696",
+      "subject": "test(plugins): isolate target interpreters from controller packages"
+    },
+    {
+      "sha": "2ef0ee3841ccf4fbb98608ec3b2d2973270c46bf",
+      "subject": "Merge pull request #972: official optional plugin distribution"
+    },
+    {
+      "sha": "1b857a7725d8dfe978c5752c2735f5640565ab60",
+      "subject": "feat(channels): make Feishu and WeChat optional message plugins"
+    },
+    {
+      "sha": "3211e0bb54dbd16f2020058d5de67420ee57f2ec",
+      "subject": "fix(channels): enforce current authorization and integrate plugin distribution"
+    },
+    {
+      "sha": "6c1654dab7fc481c5c395abdbc21fa309a14d9ce",
+      "subject": "ci(runtime): migrate ARM qualification off retired macOS 14 runner"
+    },
+    {
+      "sha": "91fd7b0a19ad3c97bd74bbf511761cc7d9bcc2cb",
+      "subject": "feat(cli): unify OM entry points and human position advice output"
+    },
+    {
+      "sha": "1358a9568d4c5c2b91f628fbe1895824480f0a6b",
+      "subject": "Merge pull request #973 from liuxie066/codex/message-channel-plugins-20261101"
+    },
+    {
+      "sha": "d0a8cac4dd42dcaa87b34ff70c93607c2b2fc215",
+      "subject": "merge(cli): integrate official plugin distribution"
+    },
+    {
+      "sha": "d5d9d9e217dc9eab72aaf40fef3efa984305de93",
+      "subject": "merge(cli): integrate optional message channel plugins"
+    },
+    {
+      "sha": "6a764790c599538c67f2ba5311c0aedc029602b2",
+      "subject": "Merge pull request #974 from liuxie066/codex/om-cli-unification-20261101"
+    },
+    {
+      "sha": "fb8a0b822cfe091ebea16c6de70943b708eb16ea",
+      "subject": "feat(plugins): distribute Feishu and WeChat through official catalog"
+    },
+    {
+      "sha": "86f05821ce8e9cc99aed566d7ae919a9e04917c6",
+      "subject": "Merge pull request #975 from liuxie066/codex/channel-plugin-distribution-20261102"
+    },
+    {
+      "sha": "8726208706ceb0b2e5cbfeae9588857d90114b63",
+      "subject": "fix(release): close review findings across research and delivery"
+    },
+    {
+      "sha": "6a09388621b683876f03dcef996c2145573528e1",
+      "subject": "merge(release): integrate official channel plugin distribution"
+    },
+    {
+      "sha": "be8e2b6c54ea5ed7b0f467ac08297a45f6dcf174",
+      "subject": "fix(release): support pip-free Feishu SDK staging"
+    },
+    {
+      "sha": "488595c1b970d6775da4cf0ea5ba14534c0e1b97",
+      "subject": "fix(release): declare SDK validation runtime dependency"
+    },
+    {
+      "sha": "18a81e622f2acf7ee051855403b39e4074186a9f",
+      "subject": "test(release): allow resolved interpreter architecture probe"
+    },
+    {
+      "sha": "9894cd6e5a9f0bfc56e3115d00d1342eda2e1d08",
+      "subject": "Merge pull request #976 from liuxie066/codex/release-4.6.8-review-20261102"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "新增名单研究的每日准备、持续采集、续跑与限定导出，封存筛选前合约、日终观察及 FX/公司行动来源；缺失覆盖明确保留，参数比较继续由 OptionBench 负责。（#966）。",
+      "commits": [
+        "92b5e97ccb6d7f59d54ea203f7792b73f6181fba",
+        "559bda0f522af5c62fb2d68b4ba58910cb1ea139",
+        "70d306f423d93a471d11dbdf4fda8e90f31e2eda",
+        "329c9b8403dd745281ae3a54aa5c56bff98d3646"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "增加包含私有 Python 和应用依赖的运行包及首次使用引导，保留源码安装、显式账户选择和配置校验；真实新手走查、最低 OS 与原生服务验收仍单独记录。（#967）。",
+      "commits": [
+        "6a0476ce6d445f93a5abf811775d4d1beec3cce7",
+        "6298939abc196412f8e3b13aa13d3c7d8fa690c2",
+        "56c5329da5b1fa56fe9bdeb411532c9af3a8a2c5"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "PM 改为可选扩展，行情与券商资产来源独立；新增用户绑定的长桥股票/现金证据，沿用统一容量与风险计算，未知数据不推断为零，不包含下单或成交同步。（#968）。",
+      "commits": [
+        "08413f130288f366f5e17d2a992255f121360b1e",
+        "0249d0801fb7a601a4dce790e6f6bb12664c0a5a",
+        "857ee776b57a35f4913a3121ef08212b20290b3b"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "新增可选持仓建议扩展，支持主动评估账本持仓或临时 short Put/Call 输入；复用封存行情和既有止盈策略，休市仅提供可核验历史参考，独立保存报告、不落账或发通知。（#971）。",
+      "commits": [
+        "77ac5e40d583ca0cbd832c9a0b0c49d95176c1c9",
+        "702d7c0120f2ab55a8b8ce9917d64a966bf985ed",
+        "51400bb5eeefa8a52bb04e1c889a80ad0d1cf803",
+        "311e2ebd3ade7d36e3daaf15d4bd175d07a6a2e6"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "新增官方 PM/持仓建议/飞书/微信配套 wheel、清单与兼容说明，通过 om plugins 预览、确认安装或卸载；安装与启用分离，升级前校验配套版本及实际加载，回滚保留目标已有选择。（#972、#975）。",
+      "commits": [
+        "af0a9446b1f51ddbc242f5d6f9aa60187cc29fe5",
+        "4e1b3d5a60612eee12ff6a529d091ea038d8b696",
+        "2ef0ee3841ccf4fbb98608ec3b2d2973270c46bf",
+        "fb8a0b822cfe091ebea16c6de70943b708eb16ea",
+        "86f05821ce8e9cc99aed566d7ae919a9e04917c6"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "飞书与微信消息传输拆为可选包，支持独立控制收信、会话回复和主动通知，以及账户多目标投递；冻结各目标内容与回执，仅重试明确失败目标，不跨平台回退或重发未知结果。（#973）。",
+      "commits": [
+        "1b857a7725d8dfe978c5752c2735f5640565ab60",
+        "3211e0bb54dbd16f2020058d5de67420ee57f2ec",
+        "6c1654dab7fc481c5c395abdbc21fa309a14d9ce",
+        "1358a9568d4c5c2b91f628fbe1895824480f0a6b"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "飞书简报采用分块卡片、微信采用纯文本，突出收益与收入并独立展示事件；保留候选排序、缺失与零值、长度保护及已冻结消息的原 transport。（#970）。",
+      "commits": [
+        "77d028922d3e0092bcf3f3c393dd2a5c3a4762dd",
+        "c109e49332a82fb2b1953512c0a41c529d2de1fe",
+        "ab7fc25012f8d7572a0aa4d142177d378808aab9",
+        "dec9b59b3a0af8e854b728fac540542ca745fea6"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "统一推荐 om 入口：结构化工具使用 om tools，自然语言助手使用 om bot；保留 om-agent 及 Bot 别名。持仓建议默认人工展示，追加 --format json 获取业务 JSON，启动与业务错误遵循所选格式。（#974）。",
+      "commits": [
+        "91fd7b0a19ad3c97bd74bbf511761cc7d9bcc2cb",
+        "d0a8cac4dd42dcaa87b34ff70c93607c2b2fc215",
+        "d5d9d9e217dc9eab72aaf40fef3efa984305de93",
+        "6a764790c599538c67f2ba5311c0aedc029602b2"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "飞书源码插件安装支持没有 pip 的 uv 环境，SDK 仍按发布约束独立暂存和验证，失败不激活插件或修改核心环境。（#976）。",
+      "commits": [
+        "be8e2b6c54ea5ed7b0f467ac08297a45f6dcf174",
+        "488595c1b970d6775da4cf0ea5ba14534c0e1b97",
+        "9894cd6e5a9f0bfc56e3115d00d1342eda2e1d08"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "安装与发布归档排除维护者 Agent 指令，运行包同时排除嵌套指令文件；保留开发仓库和既有用户安装，不追溯改写历史 tag。（#969）。",
+      "commits": [
+        "307bb0e12403ab51e39158fb011e3a640757040d",
+        "efcc599226569713c1f7fd98f5f25700dd95b293",
+        "c351749c834c8658d4cad80e095036a38f82d986"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复研究采集默认连接的观察窗口接线和中断回执，保持已封存日终态、冷热导出一致与休市零槽；闭市估值按严格期权市场及合格报价选择，不被过期候选误拒绝。（#976）。",
+      "commits": [
+        "8726208706ceb0b2e5cbfeae9588857d90114b63",
+        "9894cd6e5a9f0bfc56e3115d00d1342eda2e1d08"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "指派情景严格要求同账户、同券商完整基线，缺失的终局股数、净资产与权重保持未知，并修正纯富途来源说明。（#976）。",
+      "commits": [
+        "8726208706ceb0b2e5cbfeae9588857d90114b63",
+        "9894cd6e5a9f0bfc56e3115d00d1342eda2e1d08"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "补报来源与成功历史一同冻结，人工、no_send 或通知关闭的历史不提升；同 run 重放复用原始投递输入，保留真正输入冲突。（#976）。",
+      "commits": [
+        "8726208706ceb0b2e5cbfeae9588857d90114b63",
+        "9894cd6e5a9f0bfc56e3115d00d1342eda2e1d08"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复微信首次扫码绑定的配置顺序、失败收信响应与敏感传输错误；旧 Bot 快照一同事务发布和回读，同一实体的符号链接路径去重并保留失败补偿与重试。（#976）。",
+      "commits": [
+        "8726208706ceb0b2e5cbfeae9588857d90114b63",
+        "9894cd6e5a9f0bfc56e3115d00d1342eda2e1d08"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "d7da0db3ecc830b3fadfdce9e07b1afca085eb33",
+      "reason": "PR #965 仅完善开发任务、文档阅读和经验证经验的维护规则；不改变用户命令、策略、配置、运行时或部署行为。"
+    },
+    {
+      "commit": "454832c14a1a60b63f056cc6d4c6435925bd69ca",
+      "reason": "PR #965 仅完善开发任务、文档阅读和经验证经验的维护规则；不改变用户命令、策略、配置、运行时或部署行为。"
+    },
+    {
+      "commit": "6a09388621b683876f03dcef996c2145573528e1",
+      "reason": "仅整合已分别映射的 PR975 与修复分支，并按现有 generator 解决依赖图冲突；没有额外业务行为。"
+    },
+    {
+      "commit": "18a81e622f2acf7ee051855403b39e4074186a9f",
+      "reason": "仅修复离线 QA 对同一物理解释器 file 架构探测的允许规则及其反例测试，不改变用户命令、配置或 runtime 行为。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "d7da0db3ecc830b3fadfdce9e07b1afca085eb33",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/965"
+      ]
+    },
+    {
+      "commit": "454832c14a1a60b63f056cc6d4c6435925bd69ca",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/965"
+      ]
+    },
+    {
+      "commit": "92b5e97ccb6d7f59d54ea203f7792b73f6181fba",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/966"
+      ]
+    },
+    {
+      "commit": "559bda0f522af5c62fb2d68b4ba58910cb1ea139",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/966"
+      ]
+    },
+    {
+      "commit": "70d306f423d93a471d11dbdf4fda8e90f31e2eda",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/966"
+      ]
+    },
+    {
+      "commit": "329c9b8403dd745281ae3a54aa5c56bff98d3646",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/966"
+      ]
+    },
+    {
+      "commit": "6a0476ce6d445f93a5abf811775d4d1beec3cce7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/967"
+      ]
+    },
+    {
+      "commit": "6298939abc196412f8e3b13aa13d3c7d8fa690c2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/967"
+      ]
+    },
+    {
+      "commit": "08413f130288f366f5e17d2a992255f121360b1e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/968"
+      ]
+    },
+    {
+      "commit": "56c5329da5b1fa56fe9bdeb411532c9af3a8a2c5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/967"
+      ]
+    },
+    {
+      "commit": "307bb0e12403ab51e39158fb011e3a640757040d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/969"
+      ]
+    },
+    {
+      "commit": "efcc599226569713c1f7fd98f5f25700dd95b293",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/969"
+      ]
+    },
+    {
+      "commit": "c351749c834c8658d4cad80e095036a38f82d986",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/969"
+      ]
+    },
+    {
+      "commit": "77d028922d3e0092bcf3f3c393dd2a5c3a4762dd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/970"
+      ]
+    },
+    {
+      "commit": "c109e49332a82fb2b1953512c0a41c529d2de1fe",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/970"
+      ]
+    },
+    {
+      "commit": "77ac5e40d583ca0cbd832c9a0b0c49d95176c1c9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/971"
+      ]
+    },
+    {
+      "commit": "ab7fc25012f8d7572a0aa4d142177d378808aab9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/970"
+      ]
+    },
+    {
+      "commit": "dec9b59b3a0af8e854b728fac540542ca745fea6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/970"
+      ]
+    },
+    {
+      "commit": "0249d0801fb7a601a4dce790e6f6bb12664c0a5a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/968"
+      ]
+    },
+    {
+      "commit": "857ee776b57a35f4913a3121ef08212b20290b3b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/968"
+      ]
+    },
+    {
+      "commit": "702d7c0120f2ab55a8b8ce9917d64a966bf985ed",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/971"
+      ]
+    },
+    {
+      "commit": "51400bb5eeefa8a52bb04e1c889a80ad0d1cf803",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/971"
+      ]
+    },
+    {
+      "commit": "311e2ebd3ade7d36e3daaf15d4bd175d07a6a2e6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/971"
+      ]
+    },
+    {
+      "commit": "af0a9446b1f51ddbc242f5d6f9aa60187cc29fe5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/972"
+      ]
+    },
+    {
+      "commit": "4e1b3d5a60612eee12ff6a529d091ea038d8b696",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/972"
+      ]
+    },
+    {
+      "commit": "2ef0ee3841ccf4fbb98608ec3b2d2973270c46bf",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/972"
+      ]
+    },
+    {
+      "commit": "1b857a7725d8dfe978c5752c2735f5640565ab60",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/973"
+      ]
+    },
+    {
+      "commit": "3211e0bb54dbd16f2020058d5de67420ee57f2ec",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/973"
+      ]
+    },
+    {
+      "commit": "6c1654dab7fc481c5c395abdbc21fa309a14d9ce",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/973"
+      ]
+    },
+    {
+      "commit": "91fd7b0a19ad3c97bd74bbf511761cc7d9bcc2cb",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/974"
+      ]
+    },
+    {
+      "commit": "1358a9568d4c5c2b91f628fbe1895824480f0a6b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/973"
+      ]
+    },
+    {
+      "commit": "d0a8cac4dd42dcaa87b34ff70c93607c2b2fc215",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/974"
+      ]
+    },
+    {
+      "commit": "d5d9d9e217dc9eab72aaf40fef3efa984305de93",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/974"
+      ]
+    },
+    {
+      "commit": "6a764790c599538c67f2ba5311c0aedc029602b2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/974"
+      ]
+    },
+    {
+      "commit": "fb8a0b822cfe091ebea16c6de70943b708eb16ea",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/975"
+      ]
+    },
+    {
+      "commit": "86f05821ce8e9cc99aed566d7ae919a9e04917c6",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/975"
+      ]
+    },
+    {
+      "commit": "8726208706ceb0b2e5cbfeae9588857d90114b63",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/976"
+      ]
+    },
+    {
+      "commit": "6a09388621b683876f03dcef996c2145573528e1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/976"
+      ]
+    },
+    {
+      "commit": "be8e2b6c54ea5ed7b0f467ac08297a45f6dcf174",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/976"
+      ]
+    },
+    {
+      "commit": "488595c1b970d6775da4cf0ea5ba14534c0e1b97",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/976"
+      ]
+    },
+    {
+      "commit": "18a81e622f2acf7ee051855403b39e4074186a9f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/976"
+      ]
+    },
+    {
+      "commit": "9894cd6e5a9f0bfc56e3115d00d1342eda2e1d08",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/976"
+      ]
+    }
+  ]
+}
