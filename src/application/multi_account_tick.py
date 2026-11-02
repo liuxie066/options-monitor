@@ -116,6 +116,7 @@ class TickExecutionResult:
     market: str | None = None
     experience: bool = False
     experience_completed: bool = False
+    scheduler_skipped_accounts: tuple[str, ...] = ()
     error: str | None = None
 
 
@@ -465,6 +466,13 @@ def main(
 
     tick_metrics: dict[str, Any] = {}
 
+    def publish_scheduler_skips(accounts: tuple[str, ...]) -> None:
+        if _on_execution is not None and not experience:
+            _on_execution(replace(
+                execution, run_created=True, run_id=run_id,
+                scheduler_skipped_accounts=accounts,
+            ))
+
     def publish_completion(account_outcomes, rc, *, inner_run_id, accounts):
         wrapper_run_id = str(os.environ.get("OM_TICK_CRON_RUN_ID") or "").strip()
         if (not wrapper_run_id or Path(wrapper_run_id).name != wrapper_run_id or wrapper_run_id in {".", ".."}
@@ -688,6 +696,10 @@ def main(
                 ),
             )
             complete_tick_idempotency(status='skipped', message=str(reason_global or 'scheduler_skip_no_scan'))
+            publish_scheduler_skips(tuple(
+                account for account in account_ids
+                if scan_decision_by_account.get(account, {}).get("should_run") is False
+            ))
             return 0
         warmup_context = _opening_chain_warmup_context(
             trigger_kind=trigger_kind,
@@ -723,6 +735,11 @@ def main(
                 trigger_kind=trigger_kind,
             )
         )
+        if notification_rc == 0:
+            publish_scheduler_skips(tuple(
+                account for account in account_ids
+                if scan_decision_by_account.get(account, {}).get("should_run") is False
+            ))
         if notification_rc != 0 or warmup_context is None or smoke:
             return notification_rc
         try:
@@ -957,6 +974,13 @@ def main(
         audit_helper.guard_mark_failure("TICK_COMPLETION_RECEIPT_FAILED", "completion_receipt")
         runlog.safe_event("completion_receipt", "error", error_code="TICK_COMPLETION_RECEIPT_FAILED", message=str(exc)[:240])
         return 2
+    if rc == 0:
+        publish_scheduler_skips(tuple(
+            row["account"] for row in account_execution.account_metrics
+            if row.get("account") in account_ids
+            and row.get("scan_outcome") == "scheduler_skipped"
+            and row.get("ran_scan") is False and row.get("ran_pipeline") is False
+        ))
     return rc
 
 
