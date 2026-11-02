@@ -1582,7 +1582,7 @@ def test_fixed_report_card_compacts_status_and_hides_non_error_gaps() -> None:
     assert "## 提醒" not in message
     assert "提醒｜" not in message
     assert "GOOGL CSP：本轮部分数据不可用" not in message
-    assert "事件数据不完整，无法排除近期重要事件；下单前复核。" in message
+    assert "事件数据不完整，\n无法排除近期重要事件；\n下单前复核。" in message
     assert "当前无法确认没有重要事件" not in message
 
 
@@ -1827,7 +1827,7 @@ def test_candidate_alert_card_keeps_single_candidate_compact_and_events_explicit
     assert "### 新增策略候选" in message
     assert "**MSFT｜CSP｜08-21 $400 Put（策略排序 1）**" in message
     assert "| 优先 | 合约 |" not in message
-    assert "\n\n## 事件\nMSFT｜CSP｜08-21 $400 Put（策略排序 1）：" in message
+    assert "\n\n## 事件\n\n**MSFT｜CSP｜08-21 $400 Put（策略排序 1）**\n" in message
     assert message.count("执行前需要再次检查") == 1
     assert "## 持仓" not in message
     assert "现金总额（折CNY）｜暂不可用" in message
@@ -2282,14 +2282,30 @@ def test_event_block_groups_normal_but_identifies_abnormal_contracts_and_actual_
     rows[1]["event_risk"] = _render_event_risk("unknown")
     diff = {"changes": [{"change_type": "candidate_added", "action": _nvda_candidate_action()}]}
     blocks = render_fixed_report_card_blocks(brief, diff=diff)
-    candidate_blocks = [block for block in blocks if block.startswith("**") and "｜CSP｜" in block.splitlines()[0]]
+    candidate_blocks = [block for block in blocks[:blocks.index("## 事件")] if block.startswith("**") and "｜CSP｜" in block.splitlines()[0]]
     assert candidate_blocks[0].startswith("**NVDA｜CSP｜08-21 $100 Put（策略排序 3）**")
     assert candidate_blocks[1].startswith("**MSFT｜CSP｜08-21 $400 Put（策略排序 7）**")
-    event = next(block for block in blocks if block.startswith("## 事件\n"))
-    assert "NVDA｜CSP｜08-21 $100 Put（策略排序 3）：事件数据不完整" in event
-    assert "MSFT｜CSP｜08-21 $400 Put（策略排序 7）：预计 8 月 5 日发布财报" in event
-    assert "CC、组合增强：已确认到期前无近期重要事件" in event
+    event_blocks = blocks[blocks.index("## 事件") + 1:]
+    event = "\n\n".join(event_blocks)
+    assert event_blocks[0].startswith("**NVDA｜CSP｜08-21 $100 Put（策略排序 3）**\n事件数据不完整")
+    assert event_blocks[1].startswith("**MSFT｜CSP｜08-21 $400 Put（策略排序 7）**\n预计 8 月 5 日发布财报")
+    assert event_blocks[2] == "**CC**\n**组合增强**\n已确认到期前无近期重要事件；\n下单前复核报价。"
     assert event.count("已确认到期前无近期重要事件") == 1
+    from src.application.channels.feishu_notification_renderer import render_feishu_notification_card
+
+    envelope = render_feishu_notification_card(
+        markdown="\n\n".join(blocks), markdown_blocks=blocks,
+        fallback_text=render_fixed_report(brief, diff=diff), fallback_open_id="ou_preview",
+    )
+    elements = envelope["transport"]["content"]["body"]["elements"]
+    event_index = blocks.index("## 事件")
+    for offset in range(3):
+        element = elements[event_index + 1 + offset]
+        assert element["content"] == event_blocks[offset]
+        assert element["margin"] == "12px 0px 0px 0px"
+    text = render_fixed_report_text(brief, diff=diff)
+    assert "【事件】\n\nNVDA｜CSP" in text
+    assert "执行前需要重新确认事件窗口和报价。\n\nCC\n组合增强\n" in text
     assert "#1" not in event
     assert "AAPL" not in event and "TSLA" not in event
     assert all("预计 8 月" not in block for block in candidate_blocks)
@@ -2310,7 +2326,7 @@ def test_alert_blocks_follow_selected_identities_order_and_preserve_ranks_and_om
     text = render_candidate_alert_text(brief, selected)
     assert card == "\n\n".join(blocks)
     assert text == _plain_card_content(card)
-    candidates = [block for block in blocks if block.startswith("**")]
+    candidates = [block for block in blocks[:blocks.index("## 事件")] if block.startswith("**")]
     assert [block.splitlines()[0] for block in candidates] == [
         "**FUTU｜CSP｜08-21 $100 Put（策略排序 4）**",
         "**PDD｜CSP｜08-21 $100 Put（策略排序 8）**",
@@ -2319,7 +2335,8 @@ def test_alert_blocks_follow_selected_identities_order_and_preserve_ranks_and_om
     assert "另有 1 个新增候选未展开" in text
     assert "NVDA" not in text
     assert "【持仓】" not in text and "## CC" not in card
-    event = next(block for block in blocks if block.startswith("## 事件\n"))
+    event_blocks = blocks[blocks.index("## 事件") + 1:]
+    event = "\n\n".join(event_blocks)
     assert "FUTU｜CSP｜08-21 $100 Put（策略排序 4）" in event
     assert "PDD｜CSP｜08-21 $100 Put（策略排序 8）" in event
     assert "#1" not in event
@@ -2429,3 +2446,35 @@ def test_mixed_event_family_scopes_normal_conclusion_to_confirmed_contract(alert
         assert 'NVDA｜CSP｜08-21 $100 Put（策略排序 2）' in event
         assert 'CSP：已确认' not in event
         assert '无法' in event and '已确认' in event
+
+
+@pytest.mark.parametrize("markdown", [False, True])
+def test_event_groups_separate_contracts_and_explanation_clauses(markdown: bool) -> None:
+    from src.application.daily_decision_brief_renderer import _render_candidate_event_card
+
+    identities = [
+        "3690.HK｜CSP｜01-28 HK$70 Put（策略排序 1）",
+        "9992.HK｜CSP｜01-28 HK$132.5 Put（策略排序 2）",
+        "0700.HK｜CSP｜01-28 HK$380 Put（策略排序 3）",
+        "0700.HK｜组合增强｜01-28 HK$390 Put / 01-28 HK$470 Call（策略排序 1）",
+    ]
+    normal = "已确认到期前无近期重要事件；下单前复核报价。"
+    csp = "预计 11 月 18 日发布财报，早于当前 Put 到期日，位于到期前 6 个自然日硬窗口之外，不触发财报过滤；执行前仍需复核事件和报价。"
+    combo = csp.replace("早于当前 Put 到期日", "早于当前 Put 到期日、早于当前 Call 到期日")
+    rows = [
+        {"family": "sell_put" if n < 3 else "combo_yield", "event_identity": identity,
+         "event_normal": n < 2, "event_line": (normal, normal, csp, combo)[n]}
+        for n, identity in enumerate(identities)
+    ]
+    groups = _render_candidate_event_card(rows, compact=True, markdown=markdown)
+    assert len(groups) == 3
+    for n, identity in enumerate(identities[:2]):
+        assert groups[0].splitlines()[n] == (f"**{identity}**" if markdown else identity)
+    for group, expected, labels in zip(groups, (normal, csp, combo), (2, 1, 1)):
+        body = group.splitlines()[labels:]
+        assert "".join(body) == expected
+        assert len(body) >= 2
+    assert "硬窗口之外，\n不触发财报过滤；\n执行前" in groups[1]
+    assert "早于当前 Call 到期日" in groups[2]
+    if not markdown:
+        assert "**" not in "\n".join(groups)
