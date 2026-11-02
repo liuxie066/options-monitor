@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+from src.application.notification_delivery_adapter import build_notification_transport_key
+
 import hashlib
 import json
 from pathlib import Path
@@ -58,7 +60,7 @@ def _fallback_envelope():
 
 def _send_card(tmp_path: Path, envelope: dict, fallback_text: str, idempotency_key: str) -> dict:
     """Send one rich card through the app sender and normalize the receipt."""
-    from src.application import notification_delivery_adapter as service
+    from src.application.channels import feishu_notification as service
 
     return service.normalize_feishu_app_send_output(
         send_result=service.send_feishu_app_message(
@@ -163,7 +165,7 @@ def test_resolve_feishu_bot_send_target_reads_only_recipient_metadata(
 ) -> None:
     from types import SimpleNamespace
 
-    from src.application import notification_delivery_adapter as service
+    from src.application.channels import feishu_notification as service
     from src.application import secret_resolver as secrets
 
     def forbidden_secret_resolution(*args, **kwargs):
@@ -185,7 +187,7 @@ def test_resolve_feishu_bot_send_target_reads_only_recipient_metadata(
 
 
 def test_send_feishu_app_message_uses_bot_user_open_id_when_target_empty(monkeypatch, tmp_path: Path) -> None:
-    from src.application import notification_delivery_adapter as service
+    from src.application.channels import feishu_notification as service
 
     _bind_feishu_bot(monkeypatch)
     captured: dict[str, str] = {}
@@ -214,7 +216,7 @@ def test_send_feishu_app_message_uses_bot_user_open_id_when_target_empty(monkeyp
 
 
 def test_send_feishu_app_message_ignores_config_target_for_bot_channel(monkeypatch, tmp_path: Path) -> None:
-    from src.application import notification_delivery_adapter as service
+    from src.application.channels import feishu_notification as service
 
     _bind_feishu_bot(monkeypatch, "ou_bot")
     captured: dict[str, str] = {}
@@ -620,7 +622,7 @@ def test_select_notification_delivery_adapter_rejects_unknown_provider() -> None
 
 
 def test_feishu_size_preflight_error_preserves_local_diagnostics(monkeypatch, tmp_path: Path) -> None:
-    from src.application import notification_delivery_adapter as service
+    from src.application.channels import feishu_notification as service
     from src.infrastructure.feishu_bitable import FeishuPermanentError
 
     _bind_feishu_bot(monkeypatch)
@@ -675,7 +677,7 @@ def test_send_feishu_card_uses_interactive_transport_and_preserves_logical_key(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from src.application import notification_delivery_adapter as service
+    from src.application.channels import feishu_notification as service
 
     _bind_feishu_bot(monkeypatch)
     fallback_text, envelope = _fallback_envelope()
@@ -718,7 +720,7 @@ def test_send_feishu_card_falls_back_once_on_safe_permanent_rejection(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from src.application import notification_delivery_adapter as service
+    from src.application.channels import feishu_notification as service
     from src.infrastructure.feishu_bitable import FeishuPermanentError
 
     _bind_feishu_bot(monkeypatch)
@@ -755,7 +757,7 @@ def test_send_feishu_card_does_not_fallback_after_ambiguous_failure(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from src.application import notification_delivery_adapter as service
+    from src.application.channels import feishu_notification as service
     from src.infrastructure.feishu_bitable import FeishuPermanentError
 
     _bind_feishu_bot(monkeypatch)
@@ -794,7 +796,7 @@ def test_send_feishu_card_does_not_change_uuid_after_transient_then_rejection(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from src.application import notification_delivery_adapter as service
+    from src.application.channels import feishu_notification as service
     from src.infrastructure.feishu_bitable import FeishuPermanentError
 
     _bind_feishu_bot(monkeypatch)
@@ -834,7 +836,7 @@ def test_send_feishu_card_does_not_change_uuid_after_transient_then_rejection(
 
 
 def test_feishu_and_wechat_receive_identical_canonical_markdown(monkeypatch, tmp_path: Path) -> None:
-    from src.application import notification_delivery_adapter as service
+    from src.application.channels import feishu_notification as service
     from src.application.channels.wechat_clawbot.notification import send_wechat_clawbot_message
 
     canonical_markdown = '# 决策简报\n\n> 中文 "quote" 🙂\n\n- **NVDA**\n  - 合约: 1'
@@ -890,7 +892,7 @@ def test_feishu_and_wechat_receive_identical_canonical_markdown(monkeypatch, tmp
 @pytest.mark.parametrize('ambiguous', [False, True])
 def test_large_frozen_fallback_is_sendable_only_after_definite_card_rejection(monkeypatch, tmp_path: Path, ambiguous: bool) -> None:
     from copy import deepcopy
-    from src.application import notification_delivery_adapter as service
+    from src.application.channels import feishu_notification as service
     from src.application.channels.feishu_notification_renderer import render_feishu_notification_card
     from src.infrastructure import feishu_bot
     from src.infrastructure.feishu_bitable import FeishuPermanentError
@@ -914,7 +916,7 @@ def test_large_frozen_fallback_is_sendable_only_after_definite_card_rejection(mo
     monkeypatch.setattr(service, 'send_message', reject_card)
     monkeypatch.setattr(feishu_bot, 'with_tenant_token_retry', lambda _app, _secret, send: send('fixture-token'))
     monkeypatch.setattr(service, 'send_post_message', lambda **kwargs: feishu_bot.send_post_message(**kwargs, http_json_fn=http))
-    key = service.build_notification_transport_key('fixture-logical-key')
+    key = build_notification_transport_key('fixture-logical-key')
     result = _send_card(tmp_path, envelope, text, key)
     assert envelope == original
     assert result['fallback_used'] is (not ambiguous)

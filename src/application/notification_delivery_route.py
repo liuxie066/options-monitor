@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Any, Callable
 from pathlib import Path
 
-from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER, resolve_notification_route_from_config, notification_route_identity_hash
-from src.application.notification_delivery_adapter import resolve_feishu_bot_send_target
+from domain.domain.multi_tick import resolve_notification_route_from_config, notification_route_identity_hash
+from src.application.notification_delivery_adapter import build_notification_channel_registry
 from src.application.channels.plugins import channel_activity_enabled
 from src.application.runtime_config_paths import read_json_object_or_empty
 
@@ -36,8 +36,9 @@ def resolve_notification_delivery_route(
     target = route.get("target")
     if not channel_activity_enabled(config, str(provider), activity="notify"):
         return {**route, "enabled": False, "disabled_reason": "channel_notify_disabled", "target": None}
-    if provider == FEISHU_APP_NOTIFICATION_PROVIDER:
-        target = resolve_feishu_bot_send_target(notifications=notifications)
+    adapter = build_notification_channel_registry().require(provider)
+    if adapter.resolve_target_fn is not None:
+        target = adapter.resolve_target_fn(target=target, notifications=notifications)
     return {
         **route,
         "enabled": True,
@@ -123,37 +124,14 @@ def notification_reminder_route_key(*, config: dict[str, Any], base: Path) -> st
         if not notifications_enabled(config):
             return None
         route = resolve_notification_route_from_config(config=config)
-        identity = {key: route.get(key) for key in ("provider", "channel")}
-        if route["provider"] == FEISHU_APP_NOTIFICATION_PROVIDER:
-            from src.application.secret_resolver import resolve_feishu_bot_config
-            bot = resolve_feishu_bot_config(metadata_only=True)
-            recipient = (route.get("target") if route["notifications"].get("_explicit_route_target")
-                         else bot.user_open_id)
-            if not bot.app_id or not recipient:
-                return None
-            identity.update(sender=bot.app_id, recipient=recipient)
-        elif route["provider"] == "wechat_clawbot":
-            from src.application.channels.wechat_clawbot.state import (
-                resolve_wechat_clawbot_target, resolve_wechat_clawbot_state_dir,
-            )
-            from src.application.channels.wechat_clawbot.state_store import WechatClawbotStateStore
-            target = resolve_wechat_clawbot_target(route["target"], notifications=route["notifications"])
-            state_dir = resolve_wechat_clawbot_state_dir(
-                base=base, label=target.label, notifications=route["notifications"])
-            with WechatClawbotStateStore(state_dir).read_directory() as store:
-                binding = store.safe_bindings().get(target.binding_name) or {}
-                sender_scope = store.sender_directory_scope()
-            if sender_scope is None:
-                return None
-            if (not isinstance(binding.get("to_user_id"), str) or not binding["to_user_id"].strip()
-                    or any(binding.get(key) is not None and not isinstance(binding[key], str)
-                           for key in ("group_id", "chat_key"))):
-                return None
-            identity.update(sender=[target.label, *sender_scope],
-                recipient=[binding.get(key) for key in ("to_user_id", "group_id", "chat_key")])
-        else:
+        adapter = build_notification_channel_registry().require(route["provider"])
+        if adapter.resolve_identity_fn is None:
             return None
-        return notification_route_identity_hash(**identity)
+        identity = adapter.resolve_identity_fn(base=base, route=route)
+        if identity is None:
+            return None
+        return notification_route_identity_hash(
+            provider=route.get("provider"), channel=route.get("channel"), **identity)
     except Exception:
         # Unknown routing evidence cannot establish who already saw a reminder.
         return None

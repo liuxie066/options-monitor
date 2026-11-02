@@ -2775,7 +2775,7 @@ def _validate_optional_runtime(
         "    assert advice is not None, 'installed Position Advice package lost during upgrade'\n"
         "    spec = tomllib.loads((Path(sys.argv[1]) / 'plugins/position-advice/pyproject.toml').read_text())\n"
         "    assert advice.version == spec['project']['version'], 'Position Advice package version differs from target release'\n"
-        "    from domain.domain.close_advice import require_position_advice_plugin\n"
+        "    from src.application.position_advice_plugin import require_position_advice_plugin\n"
         "    require_position_advice_plugin()\n"
         "else:\n"
         "    assert advice is None, 'Position Advice package unexpectedly installed in cached runtime'\n"

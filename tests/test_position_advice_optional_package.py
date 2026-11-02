@@ -80,7 +80,7 @@ from importlib.metadata import version
 import src.application.position_advice_plugin as boundary
 assert version("om-position-advice-plugin")
 def forbidden(*args, **kwargs): raise AssertionError("disabled package was probed")
-boundary.find_spec = forbidden
+boundary.plugin_installed = forbidden
 for config in (None, {}, {"close_advice": {"enabled": False}}):
     assert boundary.position_advice_plugin_status(config) == "disabled"
 assert "om_position_advice_plugin" not in sys.modules

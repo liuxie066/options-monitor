@@ -19,7 +19,7 @@ def test_omission_and_explicit_disable_avoid_credentials(monkeypatch):
     import src.application.notification_delivery_route as mod
     assert not notifications_enabled({})
     assert not notifications_enabled({"notifications": {"provider": "feishu_app"}})
-    monkeypatch.setattr(mod, "resolve_feishu_bot_send_target", forbidden)
+    monkeypatch.setattr(mod, "build_notification_channel_registry", forbidden)
     route = resolve_notification_delivery_route(config=DISABLED, route_resolver=forbidden)
     assert route["enabled"] is False and route["disabled_reason"] == "notifications_disabled"
 

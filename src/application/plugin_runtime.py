@@ -44,18 +44,28 @@ class PluginUnavailableError(RuntimeError):
     code = "PLUGIN_UNAVAILABLE"
 
 
+def expected_plugin_version(plugin_id: str, *, repo_root: Path | None = None) -> str:
+    root = Path(repo_root).resolve() if repo_root is not None else code_root()
+    project = root / "plugins" / PLUGINS[plugin_id]["source"] / "pyproject.toml"
+    return (tomllib.loads(project.read_text())["project"]["version"] if project.is_file()
+            else (root / "VERSION").read_text().strip())
+
+
+def _environment_version_matches(plugin_id: str) -> bool:
+    return importlib.metadata.version(PLUGINS[plugin_id]["distribution"]) == expected_plugin_version(plugin_id)
+
+
 def plugin_installed(plugin_id: str) -> bool:
     """Inspect installation identity without importing the package or any SDK."""
     item = PLUGINS[plugin_id]
     root = code_root()
     try:
         if read_managed_plugin(root, plugin_id) is not None:
-            return True
-        version = importlib.metadata.version(item["distribution"])
-        project = root / "plugins" / item["source"] / "pyproject.toml"
-        expected = (tomllib.loads(project.read_text())["project"]["version"] if project.is_file()
-                    else (root / "VERSION").read_text().strip())
-        return version == expected and importlib.util.find_spec(item["module"]) is not None
+            cached = sys.modules.get(item["module"])
+            selected = plugin_store(root) / plugin_id / "site" / item["module"] / "__init__.py"
+            # A cached pip owner must not silently impersonate a managed selection.
+            return cached is None or getattr(cached, "__file__", None) == str(selected)
+        return _environment_version_matches(plugin_id) and importlib.util.find_spec(item["module"]) is not None
     except (OSError, ValueError, ImportError, KeyError):
         return False
 
@@ -205,7 +215,22 @@ class _OfficialPluginFinder(importlib.abc.MetaPathFinder):
         except ValueError as exc:
             raise ImportError(f"Official plugin {match} is invalid; use om plugins list") from exc
         if receipt is None:
-            return None
+            # Ask the remaining importers, preserving absent and editable-package discovery.
+            spec = None
+            for finder in sys.meta_path:
+                if isinstance(finder, _OfficialPluginFinder):
+                    continue
+                spec = finder.find_spec(fullname, path, target)
+                if spec is not None:
+                    break
+            if spec is None:
+                return None
+            try:
+                if not _environment_version_matches(match):
+                    raise ValueError("plugin version mismatch")
+            except (OSError, ValueError, ImportError, KeyError) as exc:
+                raise ImportError(f"Official plugin {match} is incompatible; use om plugins list") from exc
+            return spec
         if receipt.get("dependency_files"):
             dependencies = str(plugin_store(root) / match / "dependencies")
             if dependencies not in sys.path:

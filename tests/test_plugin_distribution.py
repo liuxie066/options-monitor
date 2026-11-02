@@ -495,6 +495,21 @@ def test_environment_availability_requires_matching_metadata_and_module(official
     assert not runtime.plugin_installed("market-opend")
 
 
+def test_cached_environment_owner_cannot_impersonate_managed_installation(official, monkeypatch):
+    from types import ModuleType
+
+    root, _, _, _ = official
+    distribution.install_plugin("pm", confirm=True)
+    cached = ModuleType("om_pm_plugin")
+    cached.__file__ = "/fixture/python-environment/om_pm_plugin/__init__.py"
+    monkeypatch.setitem(sys.modules, "om_pm_plugin", cached)
+    assert runtime.read_managed_plugin(root, "pm") is not None
+    assert not runtime.plugin_installed("pm")
+    with pytest.raises(runtime.PluginUnavailableError):
+        runtime.require_plugin("pm")
+    assert sys.modules["om_pm_plugin"] is cached
+
+
 @pytest.mark.parametrize("confirm", [False, True])
 def test_damaged_last_market_is_removable_for_repair(official, confirm):
     root, _, _, _ = official

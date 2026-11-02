@@ -23,7 +23,6 @@ from domain.domain.close_advice import (
     DECISION_EVIDENCE_NOT_EVALUABLE,
     RECOMMENDATION_NOT_EVALUABLE,
     STRICT_CLOSE_POLICY_VERSION,
-    evaluate_close_advice,
     safe_float,
     safe_int,
     select_close_advice_notification_rows,
@@ -61,7 +60,7 @@ from src.application.close_advice_required_data import (
 )
 from src.application.position_advice_inputs import advice_position_key, position_economics_sha256, aware_time
 from src.application.position_advice_evidence import current_position_advice_evidence, QUOTE_RIGHTS_FIELDS
-from src.application.position_advice_plugin import position_advice_plugin_status, require_position_advice_plugin, PositionAdviceUnavailableError
+from src.application.position_advice_plugin import evaluate_close_advice, position_advice_plugin_status, require_position_advice_plugin, PositionAdviceUnavailableError
 from src.application.source_receipts import sha256_bytes
 from src.application.market_data_provider import resolve_market_data_provider
 from src.application.required_data_snapshot import assert_required_data_source

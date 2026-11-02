@@ -228,7 +228,7 @@ def test_explicit_channels_without_routes_disabled_scan_never_resolves_credentia
     cfg["channels"] = {channel: flags}
     def forbidden(**kwargs):
         pytest.fail("disabled channel resolved sender credentials")
-    monkeypatch.setattr(routes, "resolve_feishu_bot_send_target", forbidden)
+    monkeypatch.setattr(routes, "build_notification_channel_registry", forbidden)
     monkeypatch.setattr(plugins, "channel_plugin_installed", forbidden)
     req = _request(flow.base, run_id="disabled-single", config=cfg)
     assert mod.run_tick_notification_flow(req.request) == 0
@@ -249,7 +249,7 @@ def test_single_route_explicit_channel_disable_pauses_frozen_retry_without_crede
     cfg["channels"]["feishu"]["enabled"] = False
     def forbidden(**kwargs):
         pytest.fail("disabled continuation resolved sender credentials")
-    monkeypatch.setattr(routes, "resolve_feishu_bot_send_target", forbidden)
+    monkeypatch.setattr(routes, "build_notification_channel_registry", forbidden)
     mod.run_tick_notification_flow(_request(flow.base, run_id="paused-single", delivery_only=True, config=cfg).request)
     assert len(flow.calls) == 1 and fanouts(flow)[0]["children"][0]["attempt_count"] == 1
 
