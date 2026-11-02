@@ -14,6 +14,7 @@ def is_feishu_ws_sdk_available() -> bool:
     if not channel_plugin_installed("feishu"):
         return False
     try:
+        load_channel_plugin("feishu")
         import lark_oapi  # noqa: F401
     except Exception:
         return False

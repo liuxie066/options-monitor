@@ -1,6 +1,12 @@
 # Optional WeChat message transport
 
-Install into the Python environment running OM, from the OM source root:
+For ordinary installation use `om plugins install wechat` to preview and
+`om plugins install wechat --confirm` to install the exact matching official
+Release package. Installation does not enable the channel. See
+[official installation](../../docs/INSTALL.md#官方可选插件); source capability does
+not imply that a matching Release asset has been published.
+
+For source development, install into the Python environment running OM:
 
 ```sh
 python -m pip install ./plugins/wechat-channel

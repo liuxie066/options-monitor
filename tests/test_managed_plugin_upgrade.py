@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import shlex
@@ -13,10 +15,11 @@ from types import SimpleNamespace
 import venv
 
 import pytest
+from packaging.requirements import Requirement
 
 from src.application import plugin_distribution as distribution, runtime_bundle, service_upgrade as upgrade
 from src.application.plugin_runtime import PLUGINS, plugin_store, read_managed_plugin
-from tests.plugin_release_helpers import wheel_files, write_wheel
+from tests.plugin_release_helpers import copy_channel_core, wheel_files, write_wheel
 from tests.test_pm_package_upgrade import OfflineRuntime, _bundled_runtime, transition
 
 
@@ -24,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _publication(version: str, *, broken: str | None = None):
-    """Real, dependency-free fixture wheels with verified METADATA/RECORD/digests."""
+    """Real plugin sources with verified wheel METADATA/RECORD/digests."""
     catalog = {"schema_version": 1, "repository": runtime_bundle.REPOSITORY,
                "om_version": version, "tag": f"v{version}", "commit": "a" * 40, "plugins": []}
     assets = {}
@@ -62,6 +65,7 @@ def _release_code(release: Path):
         destination = release / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / name, destination)
+    copy_channel_core(ROOT, release)
     for item in PLUGINS.values():
         destination = release / "plugins" / item["source"] / "pyproject.toml"
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -74,8 +78,20 @@ def _inventory(path: Path):
 
 
 def _python_proxy(executable: Path, runtime_python: Path):
+    executable.parent.mkdir(parents=True, exist_ok=True)
     executable.write_text(f'#!/bin/sh\nexec {shlex.quote(str(runtime_python))} "$@"\n')
     executable.chmod(0o755)
+
+
+def _offline_import(command, **kwargs):
+    assert command[1:3] == ["-I", "-c"], "only isolated import checks may execute"
+    prelude = (
+        "import socket, urllib.request\n"
+        "def forbidden(*args, **kwargs): raise AssertionError('network during import validation')\n"
+        "socket.socket.connect = socket.socket.connect_ex = forbidden\n"
+        "urllib.request.urlopen = forbidden\n"
+    )
+    return subprocess.run([*command[:3], prelude + command[3], *command[4:]], **kwargs)
 
 
 @pytest.fixture(scope="module")
@@ -85,6 +101,51 @@ def managed_python(tmp_path_factory):
     # inherit that package ownership from sys.executable.
     environment = tmp_path_factory.mktemp("managed-target-python")
     venv.EnvBuilder(with_pip=False).create(environment)
+    # Use the API model by default; an explicit site exercises the real SDK closure.
+    sdk_site = os.environ.get("OM_CHANNEL_TEST_SDK_SITE")
+    if not sdk_site:
+        sdk = tmp_path_factory.mktemp("managed-sdk-api")
+        files = {
+            "lark_oapi/__init__.py": (
+                "from types import SimpleNamespace\n"
+                "def forbidden(*args, **kwargs): raise AssertionError('SDK call during validation')\n"
+                "ws = SimpleNamespace(Client=forbidden)\n"
+                "EventDispatcherHandler = SimpleNamespace(builder=forbidden)\n"
+            ),
+            "lark_oapi/core/__init__.py": "",
+            "lark_oapi/core/enum.py": "class LogLevel:\n    INFO = 1\n",
+            "lark_oapi-1.6.5.dist-info/METADATA": "Name: lark-oapi\nVersion: 1.6.5\n",
+        }
+        for name, contents in files.items():
+            path = sdk / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(contents)
+        (sdk / "lark_oapi-1.6.5.dist-info/RECORD").write_text(
+            "".join(f"{name},,\n" for name in files)
+        )
+        sdk_site = str(sdk)
+    site = next((environment / "lib").glob("python*/site-packages"))
+    pending, checked = ["lark-oapi", "packaging"], set()
+    while pending:
+        name = pending.pop()
+        if name.lower().replace("_", "-") in checked:
+            continue
+        checked.add(name.lower().replace("_", "-"))
+        dist = (next(importlib.metadata.Distribution.discover(name=name, path=[sdk_site]), None)
+                if name != "packaging" else importlib.metadata.distribution(name))
+        assert dist is not None, f"SDK dependency missing: {name} in {sdk_site}"
+        assert dist.files, f"SDK dependency has no file inventory: {name}"
+        for path in dist.files:
+            if ".." in path.parts or path.suffix == ".pyc":
+                continue
+            source, destination = Path(dist.locate_file(path)), site / path
+            if source.is_file():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+        for declaration in dist.requires or ():
+            requirement = Requirement(declaration)
+            if requirement.marker is None or requirement.marker.evaluate({"extra": ""}):
+                pending.append(requirement.name)
     return environment / "bin/python"
 
 
@@ -93,6 +154,7 @@ def managed_transition(monkeypatch, transition, request, managed_python):
     previous, target, current, events = transition
     for release in (previous, target):
         _release_code(release)
+        _python_proxy(release / ".venv/bin/python", managed_python)
     bundled = request.param == "bundle"
     if bundled:
         for release in (previous, target):
@@ -138,9 +200,10 @@ def managed_transition(monkeypatch, transition, request, managed_python):
         if run_state["upgrading"]:
             assert command[0] == str(upgrade._release_python(target)), "staged validation must use target Python"
             assert command[4] == str(target)
-            staged_commands.append(command)
-            events.append("managed_staged_validate")
-        return subprocess.run(command, **kwargs)
+            if "validate_plugin_import" in command[3]:
+                staged_commands.append(command)
+                events.append("managed_staged_validate")
+        return _offline_import(command, **kwargs)
 
     monkeypatch.setattr(distribution, "subprocess", SimpleNamespace(run=staged_import, TimeoutExpired=subprocess.TimeoutExpired))
     runtime = current.parent / "runtime"
@@ -163,6 +226,8 @@ def managed_transition(monkeypatch, transition, request, managed_python):
 
     monkeypatch.setattr(upgrade, "_switch_current_symlink", switch)
     offline = OfflineRuntime(previous, installed=False)
+    offline.message_packages = [False, False]
+    target_interpreter = {"python": managed_python}
     validation_commands = []
 
     def runner(command, **kwargs):
@@ -171,12 +236,16 @@ def managed_transition(monkeypatch, transition, request, managed_python):
             validation_commands.append(command)
             events.append("managed_validate")
             # Run the actual isolated target import check, with the validated test interpreter.
-            return subprocess.run(command, **kwargs)
+            return _offline_import(command, **kwargs)
+        if command[0] == str(upgrade._release_python(previous)) and "-c" in command and (
+            "om-feishu-channel-plugin" in command[command.index("-c") + 1]
+        ):
+            return subprocess.CompletedProcess(command, 0, json.dumps(offline.message_packages), "")
         if bundled and command[0] == str(previous / runtime_bundle.PYTHON):
             return subprocess.CompletedProcess(command, 0, offline.probe_output, "")
         result = offline(command, **kwargs)
         if command[:3] == [sys.executable, "-m", "venv"] or command[:2] == ["uv", "venv"]:
-            _python_proxy(Path(command[-1]) / "bin/python", managed_python)
+            _python_proxy(Path(command[-1]) / "bin/python", target_interpreter["python"])
         return result
 
     def run(*, confirm=True):
@@ -190,21 +259,26 @@ def managed_transition(monkeypatch, transition, request, managed_python):
             run_state["upgrading"] = False
 
     def install(plugin_id, root=previous):
-        return distribution.install_plugin(plugin_id, repo_root=root, confirm=True)
+        return distribution.install_plugin(plugin_id, repo_root=root, confirm=True,
+                                           python_executable=upgrade._release_python(root))
 
     return SimpleNamespace(previous=previous, target=target, current=current, events=events, runtime=runtime,
                            config=config, profile=profile, requests=requests, releases=releases, downloads=downloads,
                            offline=offline, validation_commands=validation_commands, run=run, install=install,
-                           bundled=bundled, staged_commands=staged_commands)
+                           bundled=bundled, staged_commands=staged_commands, target_interpreter=target_interpreter)
 
 
-@pytest.mark.parametrize("selected", [(), ("pm",), ("position-advice",), tuple(PLUGINS)])
+@pytest.mark.parametrize("selected", [(), ("pm",), ("position-advice",), ("feishu",), ("wechat",),
+                                     ("feishu", "wechat"), tuple(PLUGINS)])
 @pytest.mark.parametrize("enabled", [False, True])
 def test_managed_selection_rotates_wheels_independently_of_config(managed_transition, selected, enabled):
     ctx = managed_transition
     for plugin_id in selected:
         ctx.install(plugin_id)
-    ctx.config.write_text(json.dumps({"portfolio_management": {"enabled": enabled}, "close_advice": {"enabled": enabled}}))
+    ctx.config.write_text(json.dumps({"portfolio_management": {"enabled": enabled}, "close_advice": {"enabled": enabled},
+                                     "channels": {name: {"enabled": enabled, "receive_enabled": enabled,
+                                                         "notify_enabled": enabled}
+                                                  for name in ("feishu", "wechat_clawbot")}}))
     old_store = _inventory(plugin_store(ctx.previous))
     old_bundle = _inventory(ctx.target) if ctx.bundled else None
     config_before, profile_before = ctx.config.read_bytes(), ctx.profile.read_bytes()
@@ -236,6 +310,8 @@ def test_managed_selection_rotates_wheels_independently_of_config(managed_transi
         assert ctx.requests == []
     assert not ctx.offline.pm_installs
     assert not any("./plugins/position-advice" in cmd for cmd in ctx.offline.commands)
+    assert not any(f"./plugins/{name}-channel" in cmd for cmd in ctx.offline.commands
+                   for name in ("feishu", "wechat"))
     if ctx.bundled:
         assert _inventory(ctx.target) == old_bundle
         runtime_bundle.load_manifest(ctx.target, verify_files=True)
@@ -244,21 +320,170 @@ def test_managed_selection_rotates_wheels_independently_of_config(managed_transi
         assert result["runtime_prepare"]["dependency_hash"] == expected
         assert not result["runtime_prepare"]["dependency_context"].get("include_pm")
         assert not result["runtime_prepare"]["dependency_context"].get("include_position_advice")
+        assert not result["runtime_prepare"]["dependency_context"].get("include_feishu")
+        assert not result["runtime_prepare"]["dependency_context"].get("include_wechat")
+
+
+@pytest.mark.parametrize("plugin_id", ["feishu", "wechat"])
+@pytest.mark.parametrize("other_pip", [False, True])
+def test_managed_channels_exclude_source_flags_without_losing_other_pip_selection(
+    managed_transition, plugin_id, other_pip,
+):
+    ctx = managed_transition
+    ctx.install(plugin_id)
+    # The managed choice wins over duplicate metadata, while the other pip choice survives.
+    ctx.offline.message_packages = [plugin_id == "feishu" or other_pip, plugin_id == "wechat" or other_pip]
+    before = _inventory(plugin_store(ctx.previous))
+    config_before, profile_before = ctx.config.read_bytes(), ctx.profile.read_bytes()
+
+    result = ctx.run()
+
+    assert _inventory(plugin_store(ctx.previous)) == before
+    assert ctx.config.read_bytes() == config_before and ctx.profile.read_bytes() == profile_before
+    if ctx.bundled and other_pip:
+        assert not result["ok"] and not result["symlink_switched"]
+        assert ctx.current.resolve() == ctx.previous
+        assert not ctx.validation_commands
+        assert "configs" not in ctx.events and "services" not in ctx.events
+        return
+    assert result["ok"], result
+    assert ctx.current.resolve() == ctx.target
+    assert read_managed_plugin(ctx.target, plugin_id) is not None
+    other = "wechat" if plugin_id == "feishu" else "feishu"
+    assert read_managed_plugin(ctx.target, other) is None
+    for name in ("feishu", "wechat"):
+        commands = [cmd for cmd in ctx.offline.commands if "install" in cmd and f"./plugins/{name}-channel" in cmd]
+        assert bool(commands) is (name == other and other_pip)
+    assert ctx.events.index("managed_validate") < ctx.events.index("configs") < ctx.events.index("switch")
+
+
+@pytest.mark.parametrize("plugin_id,module", [("feishu", "ws_client"), ("wechat", "ilink_client")])
+def test_target_channel_exports_are_validated_even_when_package_root_imports(managed_transition, plugin_id, module):
+    ctx = managed_transition
+    ctx.install(plugin_id)
+    ctx.install(plugin_id, ctx.target)
+    directory = plugin_store(ctx.target) / plugin_id
+    entry = PLUGINS[plugin_id]["module"] + f"/{module}.py"
+    (directory / "site" / entry).write_text("# root imports but the transport API is missing\n")
+    path = directory / "receipt.json"
+    receipt = json.loads(path.read_text())
+    receipt["files"][entry] = runtime_bundle.sha256(directory / "site" / entry)
+    path.write_text(json.dumps(receipt))
+    assert read_managed_plugin(ctx.target, plugin_id) is not None
+    before = _inventory(plugin_store(ctx.previous))
+    config_before, profile_before = ctx.config.read_bytes(), ctx.profile.read_bytes()
+
+    result = ctx.run()
+
+    assert not result["ok"] and not result["symlink_switched"] and not result["changed"]
+    assert ctx.current.resolve() == ctx.previous
+    assert _inventory(plugin_store(ctx.previous)) == before
+    assert ctx.config.read_bytes() == config_before and ctx.profile.read_bytes() == profile_before
+    assert ctx.validation_commands
+    assert all(event not in ctx.events for event in ("configs", "switch", "services", "restart", "health"))
+
+
+def test_missing_target_sdk_blocks_previously_installed_managed_feishu_before_switch(managed_transition, tmp_path):
+    ctx = managed_transition
+    ctx.install("feishu")
+    ctx.install("feishu", ctx.target)
+    environment = tmp_path / "target-without-sdk"
+    venv.EnvBuilder(with_pip=False).create(environment)
+    python = environment / "bin/python"
+    ctx.target_interpreter["python"] = python
+    if ctx.bundled:
+        _python_proxy(upgrade._release_python(ctx.target), python)
+        path = ctx.target / runtime_bundle.MANIFEST
+        manifest = json.loads(path.read_text())
+        manifest["files"][runtime_bundle.PYTHON] = runtime_bundle.sha256(ctx.target / runtime_bundle.PYTHON)
+        path.write_text(json.dumps(manifest))
+    before = _inventory(plugin_store(ctx.previous))
+    config_before, profile_before = ctx.config.read_bytes(), ctx.profile.read_bytes()
+
+    result = ctx.run()
+
+    assert not result["ok"] and not result["symlink_switched"] and not result["changed"]
+    assert ctx.current.resolve() == ctx.previous
+    assert _inventory(plugin_store(ctx.previous)) == before
+    assert ctx.config.read_bytes() == config_before and ctx.profile.read_bytes() == profile_before
+    assert ctx.validation_commands
+    assert "lark_oapi" in result["operations"][-1]["stderr"]
+    assert all(event not in ctx.events for event in ("configs", "switch", "services", "restart", "health"))
+
+
+@pytest.mark.parametrize("dependency_install_fails", [False, True])
+def test_fresh_target_missing_sdk_stages_dependencies_without_source_install(
+    managed_transition, managed_python, monkeypatch, tmp_path, dependency_install_fails,
+):
+    ctx = managed_transition
+    ctx.install("feishu")
+    environment = tmp_path / "fresh-target"
+    venv.EnvBuilder(with_pip=False).create(environment)
+    python = environment / "bin/python"
+    ctx.target_interpreter["python"] = python
+    if ctx.bundled:
+        _python_proxy(upgrade._release_python(ctx.target), python)
+        path = ctx.target / runtime_bundle.MANIFEST
+        manifest = json.loads(path.read_text())
+        manifest["files"][runtime_bundle.PYTHON] = runtime_bundle.sha256(ctx.target / runtime_bundle.PYTHON)
+        path.write_text(json.dumps(manifest))
+    before = _inventory(plugin_store(ctx.previous))
+    config_before, profile_before = ctx.config.read_bytes(), ctx.profile.read_bytes()
+    sdk_site = next((managed_python.parent.parent / "lib").glob("python*/site-packages"))
+    original = distribution.subprocess.run
+    installations = []
+
+    def offline_install(command, **kwargs):
+        if command[1:4] == ["-I", "-m", "pip"]:
+            assert command[0] == str(upgrade._release_python(ctx.target))
+            assert "--isolated" in command
+            destination = Path(command[command.index("--target") + 1])
+            assert destination.is_relative_to(plugin_store(ctx.target))
+            assert not destination.is_relative_to(ctx.target)
+            assert Path(command[command.index("-c") + 1]) == ctx.target / "constraints/runtime-bundle.txt"
+            installations.append(command)
+            if dependency_install_fails:
+                return subprocess.CompletedProcess(command, 1, "", "offline dependency installation failed")
+            shutil.copytree(sdk_site, destination, ignore=shutil.ignore_patterns("__pycache__"))
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return original(command, **kwargs)
+
+    monkeypatch.setattr(distribution, "subprocess", SimpleNamespace(run=offline_install,
+                                                                  TimeoutExpired=subprocess.TimeoutExpired))
+
+    result = ctx.run()
+
+    assert _inventory(plugin_store(ctx.previous)) == before
+    assert ctx.config.read_bytes() == config_before and ctx.profile.read_bytes() == profile_before
+    assert bool(installations) is (not ctx.bundled)
+    assert not any("./plugins/feishu-channel" in cmd for cmd in ctx.offline.commands)
+    if ctx.bundled or dependency_install_fails:
+        assert not result["ok"] and not result["symlink_switched"] and not result["changed"]
+        assert ctx.current.resolve() == ctx.previous
+        assert read_managed_plugin(ctx.target, "feishu") is None
+        assert all(event not in ctx.events for event in ("configs", "switch", "services", "restart", "health"))
+    else:
+        assert result["ok"], result
+        assert ctx.current.resolve() == ctx.target
+        assert "lark_oapi/__init__.py" in read_managed_plugin(ctx.target, "feishu")["dependency_files"]
+        assert ctx.events.index("managed_validate") < ctx.events.index("configs") < ctx.events.index("switch")
 
 
 @pytest.mark.parametrize("failure", ["receipt", "missing_wheel", "digest", "import", "target_loader", "target_version"])
-def test_managed_failures_leave_previous_store_config_and_services_untouched(managed_transition, failure):
+@pytest.mark.parametrize("plugin_id", ["pm", "feishu", "wechat"])
+def test_managed_failures_leave_previous_store_config_and_services_untouched(managed_transition, failure, plugin_id):
     ctx = managed_transition
-    ctx.install("pm")
+    ctx.install(plugin_id)
+    prefix = PLUGINS[plugin_id]["distribution"].replace("-", "_") + "-"
     if failure == "receipt":
-        (plugin_store(ctx.previous) / "pm/receipt.json").write_text("{invalid")
+        (plugin_store(ctx.previous) / plugin_id / "receipt.json").write_text("{invalid")
     elif failure == "missing_wheel":
-        ctx.releases["v1.0.1"]["assets"] = [a for a in ctx.releases["v1.0.1"]["assets"] if not a["name"].startswith("om_pm_")]
+        ctx.releases["v1.0.1"]["assets"] = [a for a in ctx.releases["v1.0.1"]["assets"] if not a["name"].startswith(prefix)]
     elif failure == "digest":
-        url = next(url for url in ctx.downloads if "/v1.0.1/om_pm_" in url)
+        url = next(url for url in ctx.downloads if f"/v1.0.1/{prefix}" in url)
         ctx.downloads[url] += b"corrupted download"
     elif failure == "import":
-        release, data = _publication("1.0.1", broken="pm")
+        release, data = _publication("1.0.1", broken=plugin_id)
         ctx.releases["v1.0.1"] = release
         ctx.downloads.update(data)
     elif failure == "target_loader":
@@ -269,8 +494,8 @@ def test_managed_failures_leave_previous_store_config_and_services_untouched(man
             manifest["files"]["src/__init__.py"] = runtime_bundle.sha256(ctx.target / "src/__init__.py")
             path.write_text(json.dumps(manifest))
     elif failure == "target_version":
-        ctx.install("pm", ctx.target)
-        path = plugin_store(ctx.target) / "pm/receipt.json"
+        ctx.install(plugin_id, ctx.target)
+        path = plugin_store(ctx.target) / plugin_id / "receipt.json"
         receipt = json.loads(path.read_text())
         receipt["version"] = "0.1.0"  # valid file inventory, incompatible host/wheel version
         path.write_text(json.dumps(receipt))
@@ -407,7 +632,7 @@ def managed_rollback(managed_transition, monkeypatch, managed_python):
             assert command[4] == str(ctx.previous)
             commands.append(command)
             ctx.events.append("managed_validate")
-            return subprocess.run(command, **kwargs)
+            return _offline_import(command, **kwargs)
         return ctx.offline(command, **kwargs)
 
     def rollback(*, confirm=True, restart_services=False):
@@ -479,7 +704,31 @@ def test_managed_rollback_preview_rejects_bad_target_receipt_without_loading(man
     assert upgrade.upgrade_status_path(ctx.runtime).read_bytes() == status_before
 
 
-@pytest.mark.parametrize("selected", [(), ("pm",), ("position-advice",), tuple(PLUGINS)])
+@pytest.mark.parametrize("plugin_id", ["pm", "position-advice"])
+def test_managed_rollback_to_release_before_shared_import_validator(managed_rollback, plugin_id):
+    rollback, ctx = managed_rollback, managed_rollback.ctx
+    ctx.install(plugin_id)
+    assert ctx.run()["ok"]
+    owner = ctx.previous / "src/application/plugin_runtime.py"
+    owner.write_text(owner.read_text() + "\ndel validate_plugin_import\n")
+    if ctx.bundled:
+        path = ctx.previous / runtime_bundle.MANIFEST
+        manifest = json.loads(path.read_text())
+        manifest["files"]["src/application/plugin_runtime.py"] = runtime_bundle.sha256(owner)
+        path.write_text(json.dumps(manifest))
+    ctx.events.clear()
+    ctx.requests.clear()
+
+    result = rollback.run()
+
+    assert result["ok"], result
+    assert ctx.current.resolve() == ctx.previous
+    assert ctx.requests == []
+    assert ctx.events.index("managed_validate") < ctx.events.index("configs") < ctx.events.index("switch")
+
+
+@pytest.mark.parametrize("selected", [(), ("pm",), ("position-advice",), ("feishu",), ("wechat",),
+                                     ("feishu", "wechat"), tuple(PLUGINS)])
 @pytest.mark.parametrize("restart_services", [False, True])
 def test_managed_rollback_validates_only_target_selection_without_migrating(managed_rollback, selected, restart_services):
     rollback, ctx = managed_rollback, managed_rollback.ctx

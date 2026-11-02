@@ -1,6 +1,6 @@
 """Official release add-ons: inspect, preview, install and remove without pip.
 
-Only the two dependency-free wheels from the exact installed OM release are
+Only the four fixed wheels from the exact installed OM release are
 accepted. No configuration, service or broker operation belongs to this owner.
 """
 from __future__ import annotations
@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import hashlib
 import importlib.metadata
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -122,6 +123,51 @@ def _extract_wheel(wheel: Path, site: Path, *, module: str) -> dict[str, str]:
     return files
 
 
+def _prepare_feishu_sdk(root: Path, staged: Path, *, python_executable: Path | None = None) -> dict[str, str]:
+    python = str(python_executable or sys.executable)
+    probe = (
+        "import importlib.util,sys\n"
+        "sys.path.insert(0,sys.argv[1])\n"
+        "if importlib.util.find_spec('lark_oapi') is None: sys.exit(42)\n"
+        "from src.application.plugin_runtime import validate_feishu_sdk\n"
+        "validate_feishu_sdk()\n"
+    )
+    try:
+        result = subprocess.run([python, "-I", "-c", probe, str(root)], capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            return {}
+        if result.returncode != 42:
+            raise ValueError("existing Feishu SDK is incompatible; installation was not changed")
+        if (root / "om.runtime.json").exists():
+            raise ValueError("bundled Feishu SDK is unavailable; repair the runtime bundle before installing")
+        constraints = root / "constraints/runtime-bundle.txt"
+        if not constraints.is_file():
+            raise ValueError("Feishu SDK installation requires the release dependency constraints")
+        dependencies = staged / "dependencies"
+        env = dict(os.environ, PYTHONNOUSERSITE="1", PYTHONDONTWRITEBYTECODE="1")
+        for name in ("PYTHONPATH", "PYTHONHOME", "PIP_TARGET", "PIP_PREFIX", "PIP_USER"):
+            env.pop(name, None)
+        result = subprocess.run(
+            [python, "-I", "-m", "pip", "--isolated", "install", "--disable-pip-version-check", "--no-input",
+             "--no-compile", "--only-binary=:all:", "--target", str(dependencies),
+             "-c", str(constraints), "lark-oapi"],
+            capture_output=True, text=True, timeout=300, env=env,
+        )
+        if result.returncode:
+            raise ValueError("Feishu SDK dependency installation failed; installation was not changed")
+        files = {}
+        for path in dependencies.rglob("*"):
+            if path.is_symlink():
+                raise ValueError("Feishu SDK dependencies must not contain links")
+            if path.is_file():
+                files[path.relative_to(dependencies).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+        if "lark_oapi/__init__.py" not in files:
+            raise ValueError("Feishu SDK dependency installation is incomplete")
+        return files
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Feishu SDK preparation timed out; installation was not changed") from exc
+
+
 def _validate_import(root: Path, staged: Path, plugin_id: str, *, python_executable: Path | None = None) -> None:
     # A fresh process verifies the actual adapter without calls to PM/OpenD.
     module = PLUGINS[plugin_id]["module"]
@@ -134,10 +180,13 @@ def _validate_import(root: Path, staged: Path, plugin_id: str, *, python_executa
         "    except importlib.metadata.PackageNotFoundError: pass\n"
         "    else: raise RuntimeError('target Python environment already owns this plugin')\n"
         "sys.path.insert(0,root)\n"
+        "dependencies=Path(site).parent/'dependencies'\n"
+        "if dependencies.is_dir(): sys.path.append(str(dependencies))\n"
         "package=Path(site)/module\n"
         "spec=importlib.util.spec_from_file_location(module,package/'__init__.py',submodule_search_locations=[str(package)])\n"
         "obj=importlib.util.module_from_spec(spec);sys.modules[module]=obj;spec.loader.exec_module(obj)\n"
-        "assert callable(obj.PortfolioManagementClient) if module=='om_pm_plugin' else callable(obj.evaluate_close_advice) and callable(obj.format_close_advice_reason)\n"
+        "from src.application.plugin_runtime import PLUGINS,validate_plugin_import\n"
+        "validate_plugin_import(next(key for key,item in PLUGINS.items() if item['module']==module))\n"
     )
     try:
         result = subprocess.run([str(python_executable or sys.executable), "-I", "-c", script, str(root), str(staged / "site"), module,
@@ -175,6 +224,9 @@ def install_plugin(plugin_id: str, *, repo_root: Path | None = None, confirm: bo
                    "asset": entry["asset"], "sha256": entry["sha256"],
                    "directory": str(plugin_store(root) / plugin_id), "enabled_changed": False,
                    "note": "安装不启用功能，不重启服务；确认后供新进程加载"}
+        if plugin_id == "feishu":
+            preview["dependencies"] = ["lark-oapi"]
+            preview["note"] += "；复用可用飞书 SDK，源码版缺 SDK 时按发布约束下载至插件专属目录"
         if not confirm:
             return preview
         url, digest, size = _published_asset(release, entry["asset"])
@@ -195,11 +247,15 @@ def install_plugin(plugin_id: str, *, repo_root: Path | None = None, confirm: bo
                 site = staged / "site"
                 site.mkdir(parents=True)
                 files = _extract_wheel(work / entry["asset"], site, module=entry["module"])
+                dependency_files = (_prepare_feishu_sdk(root, staged, python_executable=python_executable)
+                                    if plugin_id == "feishu" else {})
                 record = {"schema_version": 1, "plugin_id": plugin_id, "repo_root": str(root),
                           "om_version": version, "version": entry["version"], "distribution": entry["distribution"],
                           "module": entry["module"], "wheel_sha256": entry["sha256"], "files": files,
                           "release_tag": catalog["tag"], "commit": catalog["commit"],
                           "installed_at_utc": datetime.now(timezone.utc).isoformat()}
+                if dependency_files:
+                    record["dependency_files"] = dependency_files
                 (staged / "receipt.json").write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
                 _validate_import(root, staged, plugin_id, python_executable=python_executable)
                 staged.rename(target)
