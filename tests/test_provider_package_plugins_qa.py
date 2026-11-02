@@ -63,6 +63,13 @@ def dependency_site(work):
 
 # This prelude runs before importing OM or pip. The audit log survives caught
 # exceptions, so a swallowed forbidden operation still fails the parent test.
+OFFLINE_PIP = '''
+# Offline pip sessions need no host telemetry (lsb_release/rustc subprocesses).
+import importlib.util
+if importlib.util.find_spec("pip") is not None:
+    import pip._internal.network.session as qa_pip_session
+    qa_pip_session.user_agent = lambda: "om-offline-provider-qa"
+'''
 GUARD = r'''
 import importlib.abc, json, os, socket, sys, urllib.request
 from pathlib import Path
@@ -115,9 +122,7 @@ sys.addaudithook(audit)
 # inventories, user site, or a source checkout as an accidental import root.
 sys.path[:] = [p for p in sys.path if p and "site-packages" not in p and "dist-packages" not in p]
 sys.path[:0] = json.loads(sys.argv[2])
-# Offline pip sessions need no host telemetry (lsb_release/rustc subprocesses).
-import pip._internal.network.session as qa_pip_session
-qa_pip_session.user_agent = lambda: "om-offline-provider-qa"
+''' + OFFLINE_PIP + r'''
 class NoRealSDK(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if fullname.split(".")[0] in {"futu", "longbridge"}:
@@ -176,7 +181,7 @@ def no_host_effects(monkeypatch, tmp_path):
         # Keep its argv and import roots intact; inject the same effect guard.
         prelude = GUARD.split("# Do not inherit", 1)[0].replace(
             "scratch = Path(sys.argv[1]).resolve()", f"scratch = Path({str(tmp_path)!r}).resolve()"
-        )
+        ) + OFFLINE_PIP
         env = {"PATH": os.defpath, "HOME": str(tmp_path), "TMPDIR": str(tmp_path),
                "OM_SECRET_BACKEND": "env", "OM_RUNTIME_ROOT": str(tmp_path / "runtime"),
                "PYTHONDONTWRITEBYTECODE": "1"}
@@ -422,6 +427,25 @@ def test_qa_pip_session_skips_host_probes_without_allowing_subprocesses(sandbox)
     ''', success=False)
     assert evidence["returncode"] == 0, evidence
     assert evidence["attempts"] == [{"kind": "forbidden", "detail": "subprocess.Popen"}]
+
+
+def test_qa_reused_pip_session_skips_host_probes(without_longbridge_python):
+    from tests import test_managed_plugin_upgrade as support
+
+    result = support._offline_import([str(without_longbridge_python), "-I", "-c", '''
+import sys
+import pip._internal.network.session as session
+from pip._vendor import distro
+distro.name = forbidden("pip host telemetry")
+original_platform = sys.platform
+try:
+    sys.platform = "linux"
+    with session.PipSession() as client:
+        assert client.headers["User-Agent"] == "om-offline-provider-qa"
+finally:
+    sys.platform = original_platform
+'''], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
 
 def test_qa_harness_removes_environment_plugins_and_real_sdk(sandbox):
