@@ -640,6 +640,10 @@ def _broker_evidence(
         "snapshot": {"snapshot_id": f"{source}-{snapshot_id}", "observed_at": observed_at},
         "holdings": [],
         "quotes": [],
+        "direct_broker_bindings": {
+            account: broker_capacity_binding(context)
+            for account, context in contexts.items() if not errors[account]
+        },
         "account_status": [
             {"account": account, "status": "partial" if account in invalid_accounts else "complete"}
             for account in accounts
@@ -1054,7 +1058,6 @@ def collect_assignment_portfolio_evidence(
                     if direct_bindings[account]["broker_id"] == "futu"
                 }
                 if any(binding["broker_id"] != "futu" for binding in direct_bindings.values()):
-                    evidence["direct_broker_bindings"] = direct_bindings
                     evidence["capacity_cash_holdings"] = [
                         row for account, context in futu_contexts.items()
                         for row in _broker_cash_holdings(account, context, for_capacity=True)[0]

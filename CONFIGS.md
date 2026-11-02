@@ -28,6 +28,8 @@ env-file 不是合并进生成快照的配置层；它在进程启动或工具�
 
 生成后的 runtime JSON 是“本次运行读取的快照”，不是另一套 authoring source。不要一边编辑 `config.yaml`，一边手改 JSON。
 
+同实例根目录已有兼容 `config.bot.json` 时，YAML 配置事务把它与 `resolved/config.bot.json` 一并列入预览、发布和失败补偿；配置入口成功后逐一回读。保留原默认路径优先级及显式路径消费者，避免发布新快照后仍消费旧开关；没有旧文件时不新建兼容副本。
+
 人工维护监控清单使用 `om symbols list|add|rm|edit --market us|hk`；写命令默认预览，`--apply` 经既有配置事务发布 YAML、已配置市场和 Bot 的快照。无显式 `--config-yaml` 时，YAML 默认位置跟随当前运行目录（`OM_RUNTIME_ROOT`、用户记录、repo 回退）；显式 `--config-yaml` 可选择另一实例。外部 Agent 使用 `om-agent run --tool manage_symbols`，其输入和写入门禁由 `om-agent spec` 定义。两类入口不直接写生成的 JSON。
 
 ## `config.yaml`

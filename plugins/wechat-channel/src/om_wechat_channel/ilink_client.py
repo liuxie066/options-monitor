@@ -26,22 +26,25 @@ def http_json(
 ) -> dict[str, Any]:
     data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=data, method=str(method or "GET").upper(), headers=headers or {})
+    error = None
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
-        try:
-            body = exc.read().decode("utf-8", errors="replace")
-        except Exception:
-            body = ""
-        raise WechatClawbotError(f"iLink HTTP error {getattr(exc, 'code', None)}: {body[-500:]}") from exc
+        error = f"iLink HTTP error {exc.code}"
+        exc.close()
     except (urllib.error.URLError, socket.timeout) as exc:
-        raise WechatClawbotError(f"iLink network error: {type(exc).__name__}: {exc}") from exc
+        error = f"iLink network error: {type(exc).__name__}"
+    # Raise outside the handler so response bodies/reasons cannot leak via a chain.
+    if error:
+        raise WechatClawbotError(error)
 
     try:
         parsed = json.loads(body or "{}")
     except Exception as exc:
-        raise WechatClawbotError(f"iLink returned invalid JSON: {body[-500:]}") from exc
+        error = f"iLink returned invalid JSON ({type(exc).__name__})"
+    if error:
+        raise WechatClawbotError(error)
     if not isinstance(parsed, dict):
         raise WechatClawbotError("iLink JSON response must be an object")
     return parsed

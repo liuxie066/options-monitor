@@ -146,11 +146,16 @@ def _prepare_feishu_sdk(root: Path, staged: Path, *, python_executable: Path | N
             raise ValueError("Feishu SDK installation requires the release dependency constraints")
         dependencies = staged / "dependencies"
         env = dict(os.environ, PYTHONNOUSERSITE="1", PYTHONDONTWRITEBYTECODE="1")
-        for name in ("PYTHONPATH", "PYTHONHOME", "PIP_TARGET", "PIP_PREFIX", "PIP_USER"):
-            env.pop(name, None)
+        for name in list(env):
+            if name in {"PYTHONPATH", "PYTHONHOME"} or name.startswith(("PIP_", "UV_")):
+                env.pop(name)
+        uv = shutil.which("uv")
+        installer = ([uv, "--no-config", "--no-cache", "--no-python-downloads", "pip", "install", "--python", python,
+                      "--only-binary", ":all:", "--link-mode", "copy"] if uv else
+                     [python, "-I", "-m", "pip", "--isolated", "install", "--disable-pip-version-check",
+                      "--no-input", "--no-compile", "--only-binary=:all:"])
         result = subprocess.run(
-            [python, "-I", "-m", "pip", "--isolated", "install", "--disable-pip-version-check", "--no-input",
-             "--no-compile", "--only-binary=:all:", "--target", str(dependencies),
+            [*installer, "--target", str(dependencies),
              "-c", str(constraints), "lark-oapi"],
             capture_output=True, text=True, timeout=300, env=env,
         )

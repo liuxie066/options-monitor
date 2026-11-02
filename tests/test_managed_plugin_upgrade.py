@@ -423,8 +423,9 @@ def test_missing_target_sdk_blocks_previously_installed_managed_feishu_before_sw
 
 
 @pytest.mark.parametrize("dependency_install_fails", [False, True])
+@pytest.mark.parametrize("installer", ["pip", "uv"])
 def test_fresh_target_missing_sdk_stages_dependencies_without_source_install(
-    managed_transition, managed_python, monkeypatch, tmp_path, dependency_install_fails,
+    managed_transition, managed_python, monkeypatch, tmp_path, dependency_install_fails, installer,
 ):
     ctx = managed_transition
     ctx.install("feishu")
@@ -443,11 +444,16 @@ def test_fresh_target_missing_sdk_stages_dependencies_without_source_install(
     sdk_site = next((managed_python.parent.parent / "lib").glob("python*/site-packages"))
     original = distribution.subprocess.run
     installations = []
+    monkeypatch.setattr(distribution.shutil, "which", lambda name: "/tools/uv" if installer == "uv" else None)
 
     def offline_install(command, **kwargs):
-        if command[1:4] == ["-I", "-m", "pip"]:
-            assert command[0] == str(upgrade._release_python(ctx.target))
-            assert "--isolated" in command
+        if "--target" in command:
+            if installer == "uv":
+                assert command[:6] == ["/tools/uv", "--no-config", "--no-cache", "--no-python-downloads", "pip", "install"]
+                assert command[command.index("--python") + 1] == str(upgrade._release_python(ctx.target))
+            else:
+                assert command[:4] == [str(upgrade._release_python(ctx.target)), "-I", "-m", "pip"]
+                assert "--isolated" in command
             destination = Path(command[command.index("--target") + 1])
             assert destination.is_relative_to(plugin_store(ctx.target))
             assert not destination.is_relative_to(ctx.target)
