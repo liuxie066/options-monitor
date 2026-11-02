@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.trade_execution import (
-    canonical_trade_execution_content, execution_economic_content, execution_identity_from_input,
+    canonical_trade_execution_content, execution_economic_content, execution_event_action, execution_identity_from_input,
     execution_instant_milliseconds, ledger_execution_event_set_is_complete,
     require_same_execution_content, structured_deal_keys_from_ledger_event,
 )
@@ -94,7 +94,7 @@ def ordinary_attribution_basis(
         option_keys = set()
         by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for event in events:
-            if event.get("event_type") not in {"open", "close"}:
+            if execution_event_action([event]) not in {"open", "close"}:
                 continue
             for key in structured_deal_keys_from_ledger_event(dict(event), include_legacy_execution_identity=True):
                 if key.startswith("execution:"):
