@@ -147,3 +147,29 @@ def test_cli_default_executor_to_repository_and_renderer_without_external_effect
     assert "运行 facade-run" in output
     assert "本轮暂无符合条件的候选" in output
     assert "本次结果来源不可用" not in output
+
+
+@pytest.mark.parametrize("kind,rc,skipped,expected", [
+    ("missing", 0, ("lx",), 0),
+    ("missing", 0, ("sy",), 2),
+    ("missing", 0, (), 2),
+    ("missing", 7, ("lx",), 7),
+    ("corrupt", 0, ("lx",), 2),
+    ("failed", 0, ("lx",), 2),
+])
+def test_scheduler_skip_only_exempts_missing_result_for_exact_successful_account(
+    monkeypatch, tmp_path, capsys, kind, rc, skipped, expected,
+):
+    if kind == "corrupt":
+        saved = repo.persist_daily_decision_brief_success(base=tmp_path, brief=_brief("current"))
+        saved["paths"]["run_brief"].write_text("{")
+    elif kind == "failed":
+        repo.persist_daily_decision_brief_failure(
+            base=tmp_path, brief=_brief("current", status="blocked", actionability="blocked"),
+        )
+    monkeypatch.setattr(run_ops, "execute_tick", lambda _argv: _result(
+        tmp_path, rc=rc, scheduler_skipped_accounts=skipped,
+    ))
+    assert _dispatch() == expected
+    output = capsys.readouterr().out
+    assert ("调度跳过" in output) is (expected == 0)
