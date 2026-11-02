@@ -22,7 +22,7 @@ from src.infrastructure.feishu_bot import (
 
 
 FEISHU_NOTIFICATION_ENVELOPE_SCHEMA_VERSION = "feishu-proactive-notification.v1"
-FEISHU_NOTIFICATION_RENDERER_VERSION = "3"
+FEISHU_NOTIFICATION_RENDERER_VERSION = "4"
 FEISHU_NOTIFICATION_CONTENT_BUDGET_BYTES = 24 * 1024
 FEISHU_NOTIFICATION_MAX_CHARS = 12_000
 # Production compacts every logical key to om-<32 hex>; fallback appends :fallback.
@@ -161,7 +161,7 @@ def _card_transport(rendered: str, sanitized_blocks: list[str]) -> dict[str, Any
                         "element_id": f"notification_{index}",
                         "content": block,
                         "text_size": "normal",
-                        "margin": "0px 0px 0px 0px" if index == 1 else "12px 0px 0px 0px",
+                        "margin": "12px 0px 0px 0px" if index > 1 and block.startswith("## ") else "0px 0px 0px 0px",
                     }
                     for index, block in enumerate(rendered_blocks, start=1)
                 ]
@@ -205,7 +205,7 @@ def normalize_feishu_notification_envelope(
     elements = body.get("elements")
     render_meta = _mapping(envelope.get("render_meta"))
     version = str(render_meta.get("renderer_version") or "")
-    if version not in {"1", "2", "3"}:
+    if version not in {"1", "2", "3", "4"}:
         raise ValueError("Feishu notification renderer version is invalid")
     if not isinstance(elements, list) or not elements:
         raise ValueError("Feishu notification card must contain Markdown elements")
@@ -215,12 +215,15 @@ def normalize_feishu_notification_envelope(
     for index, raw in enumerate(elements, start=1):
         element = _mapping(raw)
         block = str(element.get("content") or "").strip()
-        expected_id = f"notification_{index}" if version == "3" else "notification_body"
+        expected_id = f"notification_{index}" if version in {"3", "4"} else "notification_body"
         if element.get("tag") != "markdown" or element.get("element_id") != expected_id or not block:
             raise ValueError("Feishu notification Markdown element is invalid")
-        if version == "3" and (
+        if version in {"3", "4"} and (
             element.get("text_size") != "normal"
-            or element.get("margin") != ("0px 0px 0px 0px" if index == 1 else "12px 0px 0px 0px")
+            or element.get("margin") != (
+                "12px 0px 0px 0px" if index > 1 and (version == "3" or block.startswith("## "))
+                else "0px 0px 0px 0px"
+            )
         ):
             raise ValueError("Feishu notification Markdown element spacing is invalid")
         blocks.append(block)
@@ -232,7 +235,7 @@ def normalize_feishu_notification_envelope(
     fallback_markdown = str(fallback.get("markdown") or "").strip()
     if str(fallback.get("msg_type") or "") != "post" or not fallback_markdown:
         raise ValueError("Feishu notification fallback transport is invalid")
-    if version in {"2", "3"}:
+    if version in {"2", "3", "4"}:
         if str(render_meta.get("fallback_sha256") or "") != _sha256(fallback_markdown):
             raise ValueError("Feishu notification fallback transport digest mismatch")
         # The receiver is private routing metadata; retain its exact JSON byte cost, not its value.
@@ -252,7 +255,7 @@ def normalize_feishu_notification_envelope(
     if bool(render_meta.get("markdown_table_detected")) != has_markdown_table(markdown):
         raise ValueError("Feishu notification table detection metadata mismatch")
 
-    if version == "3":
+    if version in {"3", "4"}:
         receiver_bytes = int(render_meta.get("fallback_receive_id_json_bytes") or 0)
         size = _primary_request_bytes(transport, "") + receiver_bytes - 2
         if size != int(render_meta.get("primary_request_body_bytes") or 0):

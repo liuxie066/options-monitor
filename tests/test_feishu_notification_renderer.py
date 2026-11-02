@@ -113,7 +113,7 @@ def test_notification_bounds_complete_serialized_fallback_before_freeze(fallback
     assert feishu_request_body_bytes(build_post_message_payload(open_id=receiver, markdown=fallback, uuid=uuid)) > FEISHU_POST_REQUEST_BUDGET_BYTES
     envelope = render_feishu_notification_card(markdown='# 测试', fallback_text=fallback, fallback_open_id=receiver)
     assert envelope['text'] == fallback.strip()
-    assert envelope['render_meta']['renderer_version'] == '3'
+    assert envelope['render_meta']['renderer_version'] == '4'
     assert envelope['render_meta']['fallback_truncated'] is True
     bounded = envelope['fallback']['markdown']
     assert bounded != fallback.strip()
@@ -190,16 +190,21 @@ def test_notification_refuses_identity_overhead_that_cannot_fit_notice() -> None
 
 def test_multi_block_card_preserves_order_and_explicit_spacing() -> None:
     from src.application.channels.feishu_notification_renderer import render_feishu_notification_card
-    blocks = ['# 决策简报', '## CSP', '**PDD｜11-27 $78 Put**\n收益｜3.2%', '## 事件\n数据不完整']
+    blocks = ['# 决策简报', '## CSP', '**PDD｜11-27 $78 Put**\n收益｜3.2%',
+              '## CC\n暂无合适合约', '## 组合增强\n暂无合适合约', '## Wheel', 'Wheel 明细',
+              '## 事件', 'PDD｜11-18 财报', '## 持仓\n共 10 条', '## 资金\n现金总额｜¥100,000']
     envelope = render_feishu_notification_card(
         markdown='\n\n'.join(blocks), markdown_blocks=blocks,
         fallback_text='备用正文', fallback_open_id='ou_fixture',
     )
     elements = envelope['transport']['content']['body']['elements']
     assert [item['content'] for item in elements] == blocks
-    assert [item['element_id'] for item in elements] == [f'notification_{n}' for n in range(1, 5)]
-    assert elements[0]['margin'] == '0px 0px 0px 0px'
-    assert all(item['margin'] == '12px 0px 0px 0px' for item in elements[1:])
+    assert [item['element_id'] for item in elements] == [f'notification_{n}' for n in range(1, len(blocks) + 1)]
+    assert [item['margin'] for item in elements] == [
+        '0px 0px 0px 0px', '12px 0px 0px 0px', '0px 0px 0px 0px',
+        '12px 0px 0px 0px', '12px 0px 0px 0px', '12px 0px 0px 0px', '0px 0px 0px 0px',
+        '12px 0px 0px 0px', '0px 0px 0px 0px', '12px 0px 0px 0px', '12px 0px 0px 0px',
+    ]
     assert envelope['render_meta']['rendered_content_bytes'] == len('\n\n'.join(blocks).encode())
 
 
@@ -228,7 +233,7 @@ def test_multi_block_validation_checks_all_elements(mutation: str) -> None:
     elif mutation == 'bytes':
         envelope['render_meta']['rendered_content_bytes'] -= 1
     else:
-        envelope['render_meta']['renderer_version'] = '4'
+        envelope['render_meta']['renderer_version'] = 'unknown'
     with pytest.raises(ValueError):
         normalize_feishu_notification_envelope(envelope)
 
@@ -259,7 +264,8 @@ def test_multi_block_bounds_complete_primary_request_with_json_overhead(content:
     assert normalize_feishu_notification_envelope(envelope) == envelope
 
 
-def test_frozen_v2_single_element_is_read_back_without_changes() -> None:
+@pytest.mark.parametrize('version', ['2', '3'])
+def test_frozen_legacy_card_is_read_back_without_changes(version: str) -> None:
     import hashlib
     import json
     from src.application.channels.feishu_notification_renderer import feishu_notification_envelope_sha256, normalize_feishu_notification_envelope
@@ -267,6 +273,13 @@ def test_frozen_v2_single_element_is_read_back_without_changes() -> None:
     transport = {'msg_type': 'interactive', 'content': {'schema': '2.0', 'body': {'elements': [
         {'tag': 'markdown', 'element_id': 'notification_body', 'content': '# 旧简报\n\n原文', 'text_size': 'normal'},
     ]}}}
+    if version == '3':
+        transport['content']['body']['elements'] = [
+            {'tag': 'markdown', 'element_id': 'notification_1', 'content': '# 旧简报',
+             'text_size': 'normal', 'margin': '0px 0px 0px 0px'},
+            {'tag': 'markdown', 'element_id': 'notification_2', 'content': '原文',
+             'text_size': 'normal', 'margin': '12px 0px 0px 0px'},
+        ]
     fallback = '旧备用正文'
     def digest(value):
         return hashlib.sha256(value.encode()).hexdigest()
@@ -277,7 +290,7 @@ def test_frozen_v2_single_element_is_read_back_without_changes() -> None:
         'text': fallback, 'render_mode': 'card_markdown_v2', 'transport': transport,
         'fallback': {'msg_type': 'post', 'markdown': fallback},
         'render_meta': {
-            'renderer_version': '2', 'card_schema': '2.0', 'source_chars': 9,
+            'renderer_version': version, 'card_schema': '2.0', 'source_chars': 9,
             'source_sha256': digest('# 旧简报\n\n原文'),
             'rendered_sha256': digest(canonical(transport)),
             'rendered_content_bytes': len('# 旧简报\n\n原文'.encode()),
@@ -289,5 +302,10 @@ def test_frozen_v2_single_element_is_read_back_without_changes() -> None:
             )),
         },
     }
+    if version == '3':
+        from src.infrastructure.feishu_bot import build_message_payload
+        envelope['render_meta']['primary_request_body_bytes'] = feishu_request_body_bytes(build_message_payload(
+            open_id='ou_old', msg_type='interactive', content=transport['content'], uuid='om-' + '0' * 32,
+        ))
     assert normalize_feishu_notification_envelope(envelope) == envelope
     assert feishu_notification_envelope_sha256(envelope) == digest(canonical(envelope))
