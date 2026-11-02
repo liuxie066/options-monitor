@@ -222,7 +222,8 @@ def prepare_portfolio_contexts(
                     "manifest_path": str(existing_path),
                     "manifest_sha256": existing_digest,
                 }
-    python = Path(python_executable or sys.executable).resolve()
+    # Preserve virtualenv symlinks: resolving them selects the base interpreter.
+    python = Path(os.path.abspath(python_executable or sys.executable))
     expected_run_state_dir = base_path / "output_runs" / run_id_norm / "state"
     supplied_run_state_dir = Path(
         os.path.abspath(str(Path(shared_state_dir).expanduser()))
