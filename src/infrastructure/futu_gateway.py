@@ -301,7 +301,11 @@ def _wait_for_futu_context(context: Any, *, host: str, port: int, deadline: floa
         raise
 
 
-def build_futu_quote_context(*, host: str, port: int, deadline: float | None = None, cancelled: Callable[[], bool] | None = None) -> Any:
+def build_futu_quote_context(
+    *, host: str, port: int, deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    before_request: Callable[[], None] | None = None,
+) -> Any:
     """Create a quote context with bounded handshake and reconnect waits."""
 
     check_fetch_control(deadline, cancelled)
@@ -309,10 +313,14 @@ def build_futu_quote_context(*, host: str, port: int, deadline: float | None = N
     import futu
 
     check_fetch_control(deadline, cancelled)
+    if before_request is not None:
+        before_request()
     reachable = port_open(host, port)
     check_fetch_control(deadline, cancelled)
     if not reachable:
         raise FutuGatewayUnreachableError(f"OpenD unreachable: {host}:{port}")
+    if before_request is not None:
+        before_request()
     context = futu.OpenQuoteContext(host=host, port=port, is_async_connect=True)
     return _wait_for_futu_context(context, host=host, port=port, deadline=deadline, cancelled=cancelled)
 
@@ -363,10 +371,15 @@ class _FutuAPIBackend:
         self._quote_client = None
         self._trade_client = None
 
-    def _ensure_quote_client(self, *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None) -> Any:
+    def _ensure_quote_client(
+        self, *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
+        before_request: Callable[[], None] | None = None,
+    ) -> Any:
         check_fetch_control(deadline, cancelled)
         if self._quote_client is None:
             controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+            if before_request is not None:
+                controls["before_request"] = before_request
             self._quote_client = build_futu_quote_context(host=self.host, port=self.port, **controls)
             LOG.info(
                 "futu_sdk_client_created event=client_created capability=quote host=%s port=%s",
@@ -772,12 +785,17 @@ class FutuGateway:
             except Exception:
                 pass
 
-    def _quote_client(self, *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None) -> Any:
+    def _quote_client(
+        self, *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
+        before_request: Callable[[], None] | None = None,
+    ) -> Any:
         check_fetch_control(deadline, cancelled)
         try:
             ensure = getattr(self.backend, "_ensure_quote_client", None)
             if callable(ensure):
                 controls = {"deadline": deadline, "cancelled": cancelled} if isinstance(self.backend, _FutuAPIBackend) and (deadline is not None or cancelled is not None) else {}
+                if isinstance(self.backend, _FutuAPIBackend) and before_request is not None:
+                    controls["before_request"] = before_request
                 quote = ensure(**controls)
                 check_fetch_control(deadline, cancelled)
                 return quote
@@ -800,10 +818,22 @@ class FutuGateway:
             self._raise_mapped(exc, action="ensure_trade_client", redact_errors=redact_errors)
         raise AssertionError("unreachable")
 
-    def ensure_quote_ready(self, *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
+    def ensure_quote_ready(
+        self,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+        before_request: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
+        check_fetch_control(deadline, cancelled)
+        if before_request is not None:
+            before_request()
+            controls["before_request"] = before_request
         quote = self._quote_client(**controls)
         check_fetch_control(deadline, cancelled)
+        if before_request is not None:
+            before_request()
         try:
             ret, state = quote.get_global_state()
             check_fetch_control(deadline, cancelled)
@@ -1464,8 +1494,10 @@ def retry_futu_gateway_call(
     if no_retry or int(retry_max_attempts) <= 1:
         try:
             result = fn()
-        finally:
+        except Exception:
             check_fetch_control(deadline, cancelled)
+            raise
+        check_fetch_control(deadline, cancelled)
         return result
 
     t0 = time.monotonic()
@@ -1480,10 +1512,8 @@ def retry_futu_gateway_call(
         if diagnostics is not None and attempt > 1:
             diagnostics["retry_count"] = diagnostics.get("retry_count", 0) + 1
         try:
-            try:
-                result = fn()
-            finally:
-                check_fetch_control(deadline, cancelled)
+            result = fn()
+            check_fetch_control(deadline, cancelled)
             return result
         except Exception as exc:
             check_fetch_control(deadline, cancelled)

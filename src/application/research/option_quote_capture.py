@@ -342,6 +342,7 @@ def collect_option_quotes(
             **({"rate_limited_call": rate_limited_call} if rate_limited_call is not None else {}),
         )
     except Exception as exc:
+        result = getattr(exc, "partial_result", None)
         execution_error = type(exc).__name__
     except BaseException as exc:
         result = getattr(exc, "partial_result", None)

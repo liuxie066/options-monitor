@@ -7,7 +7,7 @@ from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from domain.domain.daily_decision_brief import (
     RETIRED_DAILY_BRIEF_FIELDS,
@@ -32,7 +32,7 @@ from src.application.channels.feishu_notification_renderer import (
 from src.application.file_locks import exclusive_lock as _shared_exclusive_lock
 from src.application.multi_tick_audit import daily_brief_phase
 from src.infrastructure.io_utils import utc_now as _utc_now_iso
-from src.infrastructure.decision_history_sqlite import DecisionHistoryStore, DecisionHistoryError, history_path
+from src.infrastructure.decision_history_sqlite import DecisionHistoryStore, DecisionHistoryError, content_hash, history_path
 
 
 CURRENT_INDEX_SCHEMA_VERSION = "daily_decision_brief_current_index.v1"
@@ -109,6 +109,7 @@ def persist_daily_decision_brief_success(
     base: Path,
     brief: Mapping[str, Any],
     recovery_intent: Mapping[str, Any] | None = None,
+    recovery_intent_factory: Callable[[], Mapping[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
     """Persist one reliable successful brief without making a delivery decision."""
 
@@ -128,6 +129,7 @@ def persist_daily_decision_brief_success(
         current_path = _current_path(base_path, account, market)
         normalized, previous = _append_decision(
             base=base_path, source=source, successful=True, recovery_intent=recovery_intent,
+            recovery_intent_factory=recovery_intent_factory,
         )
         revision = int(normalized["revision"])
         revision_path = _revision_path(base_path, account, market, market_date, revision)
@@ -190,7 +192,9 @@ def persist_daily_decision_brief_success(
 
 
 def _append_decision(*, base: Path, source: Mapping[str, Any], successful: bool,
-                     recovery_intent: Mapping[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, Any] | None]:
+                     recovery_intent: Mapping[str, Any] | None = None,
+                     recovery_intent_factory: Callable[[], Mapping[str, Any] | None] | None = None,
+                     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     candidate = dict(source)
     candidate.update(account=_normalize_account(source.get("account")), market=_normalize_market(source.get("market")),
                      market_trading_date=_normalize_market_date(source.get("market_trading_date")), revision=0)
@@ -212,9 +216,22 @@ def _append_decision(*, base: Path, source: Mapping[str, Any], successful: bool,
         # The existing SQLite transaction commits it together with the successful
         # revision, so a crash before delivery-state binding cannot lose its source.
         history_input = dict(original)
-        if recovery_intent is not None:
-            history_input["notification_recovery_intent"] = deepcopy(dict(recovery_intent))
-        stored, previous = DecisionHistoryStore(history_path(base)).append(history_input, successful=successful, build=build, legacy_present=legacy)
+        store = DecisionHistoryStore(history_path(base))
+        existing = (store.get(account=original["account"], market=original["market"], run_id=original["run_id"])
+                    if store.path.exists() else None)
+        if existing is not None:
+            original_input = dict(existing["input"])
+            original_input.pop("notification_recovery_intent", None)
+            if content_hash(original_input) != content_hash(original) or existing["successful"] != int(successful):
+                raise DecisionHistoryError("history_run_conflict")
+            # Intent absence is frozen too; a replay must never observe current delivery state.
+            history_input = existing["input"]
+        else:
+            if recovery_intent_factory is not None:
+                recovery_intent = recovery_intent_factory()
+            if recovery_intent is not None:
+                history_input["notification_recovery_intent"] = deepcopy(dict(recovery_intent))
+        stored, previous = store.append(history_input, successful=successful, build=build, legacy_present=legacy)
         return stored, normalize_persisted_daily_decision_brief(previous) if previous else None
     except (DecisionHistoryError, OSError) as exc:
         raise DailyDecisionBriefStateError(str(exc)) from exc
@@ -879,23 +896,32 @@ def read_confirmed_fanout_attribution_context(
 
 def read_daily_brief_fanout_recovery_source(
     *, base: Path, account: str, market: str, market_trading_date: str,
-    after_utc: str, before_utc: str,
+    after_utc: str, before_utc: str, original_failure_child_id: str, original_failure_spec_digest: str,
 ) -> dict[str, Any] | None:
-    """Select the earliest committed successful source in the original window."""
+    """Select the earliest committed intent for this exact confirmed failure."""
     after = datetime.fromisoformat(after_utc.replace("Z", "+00:00"))
     before = datetime.fromisoformat(before_utc.replace("Z", "+00:00"))
-    revisions = list_daily_decision_brief_revisions(base=base, account=account, market=market,
-        market_trading_date=market_trading_date)
-    for revision in revisions["revisions"]:
-        result = read_daily_decision_brief(base=base, account=account, market=market,
-            market_trading_date=market_trading_date, revision=revision)
-        if not result.get("available"):
-            raise DailyDecisionBriefStateError("fanout recovery source unavailable")
-        brief = result["brief"]
-        generated = datetime.fromisoformat(brief["generated_at_utc"].replace("Z", "+00:00"))
-        if after < generated < before:
-            return {"brief": brief, "current_candidate_identities": sorted(_candidate_identity_set(brief)),
-                "current_revision": brief["revision"], "current_brief_digest": daily_brief_digest(brief)}
+    store = DecisionHistoryStore(history_path(Path(base).resolve()))
+    account, market, day = (_normalize_account(account), _normalize_market(market),
+        _normalize_market_date(market_trading_date))
+    try:
+        for revision in store.revisions(account=account, market=market, market_date=day):
+            row = store.get(account=account, market=market, market_date=day, revision=revision, successful=True)
+            if row is None:
+                continue
+            intent = row["input"].get("notification_recovery_intent") or {}
+            for recovery in intent.get("fanout_recoveries", []):
+                if (recovery["original_failure_child_id"] != original_failure_child_id
+                        or recovery["original_failure_spec_digest"] != original_failure_spec_digest):
+                    continue
+                brief = normalize_persisted_daily_decision_brief(row["payload"])
+                generated = datetime.fromisoformat(brief["generated_at_utc"].replace("Z", "+00:00"))
+                if after < generated < min(before, datetime.fromisoformat(recovery["cutoff_utc"])):
+                    return {"brief": brief, "recovery_intent": deepcopy(recovery),
+                        "current_candidate_identities": sorted(_candidate_identity_set(brief)),
+                        "current_revision": brief["revision"], "current_brief_digest": daily_brief_digest(brief)}
+    except (DecisionHistoryError, OSError) as exc:
+        raise DailyDecisionBriefStateError(str(exc)) from exc
     return None
 
 

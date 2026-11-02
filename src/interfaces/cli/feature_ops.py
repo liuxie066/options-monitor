@@ -13,7 +13,10 @@ from typing import Any, Callable
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.bot.control.llm_model_profiles import add_model_profile_to_config, parse_model_profiles, switch_active_model_profile
+from src.application.bot.control.config_loader import default_bot_config_path
 from src.application.channels.wechat_clawbot.binding import connect_wechat_clawbot_target
+from src.application.channels.wechat_clawbot.ilink_client import WechatClawbotError
+from src.application.channels.wechat_clawbot.state_store import WechatClawbotStateStore
 from src.application.channels.plugins import canonical_channel, channel_activity_enabled
 from src.application.config_authoring_transaction import config_source_sha256
 from src.application.config_env import env_source_sha256, feature_env_path, write_feature_env
@@ -359,16 +362,33 @@ def run_feature_configure(args: argparse.Namespace, *, repo_base_fn: Callable[[]
                     raise AgentToolError(code="INPUT_ERROR", message="invalid WeChat state label")
                 state = root / "output_shared" / "state" / "channels" / "wechat_clawbot" / label
                 target = getattr(args, "target", None)
-                if not target and interactive and yes("开始微信扫码登录并绑定？此步会联系微信并保存绑定"):
+                if not target and interactive:
+                    if not yes("开始微信扫码登录并绑定？此步会联系微信并保存绑定，不启用运行时收信"):
+                        return {"ok": True, "feature": feature, "status": "cancelled", "completed_steps": completed}
+                    bot_config_path = str(default_bot_config_path(repo_root=root))
+                    binding_name = getattr(args, "binding_name", None) or "ops"
+                    step = {"stage": "wechat_binding", "status": "incomplete", "write_applied": None,
+                            "state_dir": str(state), "bot_config_path": bot_config_path,
+                            "next_step": "Inspect saved login and binding before retrying; configuration is published separately"}
+                    completed.append(step)
                     try:
                         connected = wechat_connector(base=root, label=label, state_dir=str(state),
-                                                     name=getattr(args, "binding_name", None) or "ops",
+                                                     name=binding_name, bot_config_path=bot_config_path,
+                                                     setup_authorized=True,
                                                      progress_fn=lambda event: output_fn(json.dumps(event, ensure_ascii=False)))
-                    except KeyboardInterrupt:
-                        completed.append({"stage": "wechat_binding", "status": "interrupted", "write_applied": None,
-                                          "state_dir": str(state), "next_step": "Inspect channel bindings before retrying"})
+                    except (EOFError, KeyboardInterrupt):
+                        step["status"] = "interrupted"
                         raise
-                    completed.append({"wechat_binding": connected})
+                    except WechatClawbotError as exc:
+                        raise AgentToolError(code="WECHAT_CONNECTION_ERROR", message=str(exc)) from exc
+                    finally:
+                        store = WechatClawbotStateStore(state)
+                        try:
+                            step["readback"] = {"login_saved": bool(store.load_state().get("bot_token")),
+                                                "binding_saved": binding_name in store.safe_bindings()}
+                        except (OSError, ValueError):
+                            step["readback"] = {"status": "unavailable"}
+                    step.update(wechat_binding=connected, status="bound" if connected.get("ok") else "incomplete")
                     if not connected.get("ok"):
                         return {"ok": False, "status": "binding_incomplete", "completed_steps": completed}
                     target = (connected.get("data") or {}).get("target")

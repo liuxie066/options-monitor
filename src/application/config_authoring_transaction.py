@@ -450,32 +450,32 @@ def _prepare_generation(
             }
 
         if include_bot:
-            output_path = runtime_root / "resolved" / "config.bot.json"
+            bot_paths = [runtime_root / "resolved" / "config.bot.json"]
+            legacy_bot = runtime_root / "config.bot.json"
+            if legacy_bot.exists() and legacy_bot.resolve() != bot_paths[0].resolve():
+                bot_paths.append(legacy_bot)
             cfg, _meta = resolve_yaml_bot_config(
                 repo_root=repo_root,
                 config_path=staged_source,
             )
-            _retarget_bot_metadata(
-                cfg,
-                repo_root=repo_root,
-                source_path=source_path,
-                source_sha=source_sha,
-                output_path=output_path,
-            )
-            payload = _json_bytes(cfg)
-            target_payloads.append(
-                {
-                    "role": "bot",
-                    "path": output_path,
-                    "payload": payload,
-                    "source": False,
-                }
-            )
-            bot_result = {
-                "ok": True,
-                "output_config_path": str(output_path),
-                "sha256": _bytes_sha256(payload),
-            }
+            for output_path in bot_paths:
+                _retarget_bot_metadata(
+                    cfg,
+                    repo_root=repo_root,
+                    source_path=source_path,
+                    source_sha=source_sha,
+                    output_path=output_path,
+                )
+                payload = _json_bytes(cfg)
+                target_payloads.append(
+                    {"role": "bot" if output_path == bot_paths[0] else "bot_legacy",
+                     "path": output_path, "payload": payload, "source": False}
+                )
+                output = {"ok": True, "output_config_path": str(output_path), "sha256": _bytes_sha256(payload)}
+                if bot_result is None:
+                    bot_result = output
+                else:
+                    bot_result.setdefault("additional_outputs", []).append(output)
     return {
         "markets": market_results,
         "bot": bot_result,

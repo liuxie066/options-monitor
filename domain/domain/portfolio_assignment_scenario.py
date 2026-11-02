@@ -89,10 +89,11 @@ def _direct_broker_baselines(portfolio_evidence: Mapping[str, Any]) -> set[tuple
         return set()
     # Application seals these bindings only after validating the cash capacity and complete stock scope.
     return {
-        (account, "长桥") for account, binding in bindings.items()
-        if isinstance(binding, Mapping) and binding.get("broker_id") == "longbridge"
+        (account, normalize_broker(binding["broker_id"])) for account, binding in bindings.items()
+        if isinstance(binding, Mapping) and binding.get("broker_id") in {"futu", "longbridge"}
         and binding.get("logical_account") == account and binding.get("status") == "available"
-        and binding.get("broker_account_id") and binding.get("trd_env") == "REAL"
+        and binding.get("broker_account_id")
+        and binding.get("trd_env") in ({"REAL", "SIMULATE"} if binding["broker_id"] == "futu" else {"REAL"})
         and binding.get("market") in {"us", "hk"}
     }
 
@@ -443,6 +444,7 @@ def project_non_option_assignment_assets(
     stock_shares: dict[str, Decimal] = {}
     direct_baselines = _direct_broker_baselines(portfolio_evidence)
     cash_brokers: set[tuple[str, str]] = set()
+    unknown_stock_symbols: set[str] = set()
     rates = portfolio_evidence.get("fx_rates_to_cny")
     explicit_rates = isinstance(rates, Mapping)
     for holding in holdings:
@@ -455,7 +457,7 @@ def project_non_option_assignment_assets(
         broker = normalize_broker(holding.get("broker")) or _text(holding.get("broker"))
         if holding.get("asset_balance_status") == "unavailable":
             reasons.append(f"{account}/{broker}:cash_asset_balance_unavailable")
-        if _asset_category(holding) == "cash":
+        if _asset_category(holding) == "cash" and not unavailable and not partial:
             cash_brokers.add((account, broker))
         symbol = canonical_symbol(holding.get("code"))
         quantity = _decimal(holding.get("quantity"))
@@ -512,8 +514,12 @@ def project_non_option_assignment_assets(
         rate = Decimal(1) if currency == "CNY" else (_positive(rates.get(f"{currency}CNY")) if explicit_rates else quoted_rate)
         if explicit_rates:
             spot = native * rate if native is not None and rate is not None else None
-        if (broker == "长桥" and (account, broker) not in direct_baselines) or (broker not in {"富途", "长桥"} and (account, broker) not in cash_brokers):
+        if ((broker in {"富途", "长桥"} and (account, broker) not in direct_baselines)
+                or (broker not in {"富途", "长桥"} and (account, broker) not in cash_brokers)):
             reasons.append(f"{account}/{broker}:terminal_baseline_missing")
+            if symbol:
+                unknown_stock_symbols.add(symbol)
+                stock_values.setdefault(symbol, _ZERO)
         if position.get("state_warning"):
             reasons.append(f"{symbol}:option_state_warning")
         if position.get("lifecycle_state") == "conflict" or position.get("reason_state") == "conflict":
@@ -536,7 +542,10 @@ def project_non_option_assignment_assets(
         "basis": POSITION_SIZING_BASIS,
         "net_assets_cny": _money(net) if complete else None,
         "stock_value_cny_by_symbol": {code: _money(value) if complete else None for code, value in stock_values.items()},
-        "stock_shares_by_symbol": {code: _quantity(value) for code, value in stock_shares.items()},
+        "stock_shares_by_symbol": {
+            code: None if code in unknown_stock_symbols else _quantity(stock_shares[code])
+            for code in sorted(stock_shares.keys() | unknown_stock_symbols)
+        },
         "weight_of_net_assets_by_symbol": {code: _rate(value / net) if complete and net > 0 else None for code, value in stock_values.items()},
         "unavailable_reasons": _dedupe_warnings(reasons + (["non_positive_net_assets"] if complete and net <= 0 else [])),
     }
@@ -577,7 +586,7 @@ def project_assignment_scenario(
     direct_baselines = _direct_broker_baselines(portfolio_evidence)
 
     def has_baseline(account: str, broker: str) -> bool:
-        return broker == "富途" or (account, broker) in direct_baselines
+        return (account, broker) in direct_baselines
 
     cash_rows: list[dict[str, Any]] = []
     security_groups: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -795,7 +804,7 @@ def project_assignment_scenario(
             spot_native = spot_cny = exchange_rate = None
             distribution_incomplete = True
             partial = True
-            warnings.append(f"{account}/{broker}/{symbol}: non-Futu terminal baseline unavailable")
+            warnings.append(f"{account}/{broker}/{symbol}: terminal baseline unavailable")
             unknown_cash_buckets.add((account, broker, currency))
         if spot_cny is None:
             distribution_incomplete = True
@@ -960,8 +969,8 @@ def project_assignment_scenario(
     for key in sorted(changes):
         change = changes[key]
         existing = security_groups.get(key)
-        opening_shares = existing["opening_shares"] if existing else _ZERO
         baseline_available = has_baseline(key[0], key[1])
+        opening_shares = (existing["opening_shares"] if existing else _ZERO) if baseline_available else None
         ending_shares = (
             opening_shares + change["put_assigned_shares"] - change["call_assigned_shares"]
             if baseline_available else None
@@ -974,7 +983,7 @@ def project_assignment_scenario(
             ending_value = ending_shares * spot_cny
         opening_value = (
             existing["opening_market_value_cny"]
-            if existing and existing["opening_value_complete"]
+            if existing and existing["opening_value_complete"] and baseline_available
             else (opening_shares * spot_cny if spot_cny is not None and baseline_available else None)
         )
         category = existing["category"] if existing else "stock"
@@ -1403,7 +1412,7 @@ def project_assignment_scenario(
             "basis": "cross_account_cny_economic_coverage",
             "operational_note": (
                 "Longbridge 仅使用可用现金作保守覆盖，不代表完整现金资产；不证明跨账户或跨币种资金可调拨。"
-                if direct_baselines else
+                if any(broker == "长桥" for _, broker in direct_baselines) else
                 "仅汇总富途账户的 CNY 经济金额；不证明跨账户或跨币种资金可调拨。"
             ),
         },

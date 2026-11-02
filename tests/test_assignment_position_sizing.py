@@ -17,11 +17,11 @@ from domain.domain.short_vol_assessment import (
 from test_portfolio_assignment_scenario import _evidence, _quote
 
 
-def evidence(*, cash=9000, shares=100, price=10):
+def evidence(*, cash=9000, shares=100, price=10, account="lx"):
     return _evidence(
         holdings=[
             {
-                "account": "lx",
+                "account": account,
                 "broker": "富途",
                 "code": "CNY",
                 "asset_type": "cash",
@@ -30,7 +30,7 @@ def evidence(*, cash=9000, shares=100, price=10):
                 "market_value_cny": cash,
             },
             {
-                "account": "lx",
+                "account": account,
                 "broker": "富途",
                 "code": "NVDA",
                 "asset_type": "us_stock",
@@ -40,6 +40,7 @@ def evidence(*, cash=9000, shares=100, price=10):
             },
         ],
         quotes=[_quote("NVDA", currency="CNY", price=price, cny_price=price, fx=1)],
+        accounts=[account],
     )
 
 

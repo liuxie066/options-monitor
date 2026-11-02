@@ -120,15 +120,25 @@ def _record_snapshot_call(gateway, codes, receipts, *, stage, batch_start, provi
         "stage": stage,
         "batch_start": batch_start,
         "requested_codes": list(codes),
-        "provider_call_started": True,
-        "requested_at_utc": datetime.now(timezone.utc).isoformat(),
+        "provider_call_started": False,
+        "requested_at_utc": None,
         "received_at_utc": None,
         "status": "failed",
         "error_code": None,
     }
     receipts.append(receipt)
+
+    def before_request():
+        receipt["provider_call_started"] = True
+        receipt["requested_at_utc"] = datetime.now(timezone.utc).isoformat()
+
     try:
-        result = gateway.get_snapshot(codes)
+        guarded_request = getattr(gateway, "get_snapshot_with_request_hook", None)
+        if callable(guarded_request):
+            result = guarded_request(codes, before_request=before_request)
+        else:
+            before_request()
+            result = gateway.get_snapshot(codes)
         receipt["received_at_utc"] = datetime.now(timezone.utc).isoformat()
         receipt["status"] = "empty" if result is None or result.empty else "received"
         response = {"batch_receipt_index": len(receipts) - 1, "rows": None, "capture_error": None}
@@ -143,7 +153,7 @@ def _record_snapshot_call(gateway, codes, receipts, *, stage, batch_start, provi
         receipt["error_code"] = type(exc).__name__
         raise
     finally:
-        if receipt["received_at_utc"] is None:
+        if receipt["provider_call_started"] and receipt["received_at_utc"] is None:
             receipt["received_at_utc"] = datetime.now(timezone.utc).isoformat()
 
 
@@ -640,7 +650,7 @@ def fetch_option_snapshots(
     snapshot_cache: dict[str, Any] | None = None,
     diagnostics: dict[str, Any] | None = None,
 ) -> MarketSnapshotFetchResult:
-    """Keep each option's batch receipt; result bounds include cached receipts and all attempts."""
+    """Keep batch receipts, including partial_result on propagated failures or cancellation."""
     check_fetch_control(deadline, cancelled)
     controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     snap_map: dict[str, dict[str, Any]] = {}
@@ -668,27 +678,85 @@ def fetch_option_snapshots(
     batch_size = int(snapshot_batch_size) if snapshot_batch_size else DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT
     batch_size = max(1, batch_size)
     keep_columns = list(SNAPSHOT_KEEP_COLUMNS)
-    opend_call_count = 0
     batch_receipts: list[dict[str, Any]] = []
     provider_responses: list[dict[str, Any]] = []
 
-    for start in range(0, len(missing_order), batch_size):
-        check_fetch_control(deadline, cancelled)
-        batch = list(missing_order[start : start + batch_size])
-        requested_at = datetime.now(timezone.utc)
-        batch_requested_at.append(requested_at)
-        receipt_start = len(batch_receipts)
-        try:
+    fallback_filled = fallback_failed = 0
 
-            def _call_snapshot(batch0: list[str] = batch) -> Any:
-                def _gateway_snapshot_call() -> Any:
-                    nonlocal opend_call_count
-                    opend_call_count += 1
-                    if diagnostics is not None:
-                        calls = diagnostics.setdefault("opend_calls", {})
-                        calls["market_snapshot"] = calls.get("market_snapshot", 0) + 1
-                    check_fetch_control(deadline, cancelled)
-                    try:
+    def build_result(*, completed: bool) -> MarketSnapshotFetchResult:
+        requested_times = [value.isoformat() for value in batch_requested_at]
+        received_times = [value.isoformat() for value in batch_received_at]
+        requested_times.extend(r[0] for r in code_receipts.values() if r[0])
+        received_times.extend(r[1] for r in code_receipts.values() if r[1])
+        if batch_receipts:
+            requested_times = [r["requested_at_utc"] for r in batch_receipts if r["requested_at_utc"]]
+            received_times = [r["received_at_utc"] for r in batch_receipts if r["received_at_utc"]]
+            requested_times.extend(r[0] for r in code_receipts.values() if r[0])
+            received_times.extend(r[1] for r in code_receipts.values() if r[1])
+        returned_code_set = frozenset(returned_codes)
+        missing_codes = frozenset(requested_codes.difference(snap_map))
+        unexpected_codes = frozenset(returned_code_set.difference(requested_codes))
+        if unexpected_codes:
+            snapshot_errors.append(
+                {
+                    "stage": "market_snapshot_completeness",
+                    "error_code": "SNAPSHOT_UNEXPECTED_CODES",
+                    "message": f"provider returned {len(unexpected_codes)} unrequested snapshot codes",
+                    "unexpected_codes": sorted(unexpected_codes),
+                }
+            )
+        if missing_codes:
+            snapshot_errors.append(
+                {
+                    "stage": "market_snapshot_completeness",
+                    "error_code": "SNAPSHOT_COVERAGE_INCOMPLETE",
+                    "message": f"missing {len(missing_codes)} requested snapshot codes after fallback",
+                    "missing_codes": sorted(missing_codes),
+                }
+            )
+        if duplicate_codes:
+            snapshot_errors.append(
+                {
+                    "stage": "market_snapshot_completeness",
+                    "error_code": "SNAPSHOT_DUPLICATE_CODES",
+                    "message": (f"provider returned duplicate rows for {len(duplicate_codes)} requested snapshot codes"),
+                    "duplicate_codes": sorted(duplicate_codes),
+                }
+            )
+
+        return MarketSnapshotFetchResult(
+            snap_map=snap_map,
+            errors=snapshot_errors,
+            requested_codes=requested_codes,
+            returned_codes=returned_code_set,
+            missing_codes=missing_codes,
+            unexpected_codes=unexpected_codes,
+            complete=completed and not missing_codes and not duplicate_codes,
+            fallback_filled=fallback_filled,
+            fallback_failed=fallback_failed,
+            opend_call_count=sum(r["provider_call_started"] for r in batch_receipts),
+            requested_at_utc=min(requested_times, default=None),
+            received_at_utc=max(received_times, default=None),
+            code_receipts=code_receipts,
+            batch_receipts=tuple(batch_receipts),
+            provider_responses=tuple(provider_responses),
+        )
+
+    try:
+        for start in range(0, len(missing_order), batch_size):
+            check_fetch_control(deadline, cancelled)
+            batch = list(missing_order[start : start + batch_size])
+            requested_at = datetime.now(timezone.utc)
+            batch_requested_at.append(requested_at)
+            receipt_start = len(batch_receipts)
+            try:
+
+                def _call_snapshot(batch0: list[str] = batch) -> Any:
+                    def _gateway_snapshot_call() -> Any:
+                        if diagnostics is not None:
+                            calls = diagnostics.setdefault("opend_calls", {})
+                            calls["market_snapshot"] = calls.get("market_snapshot", 0) + 1
+                        check_fetch_control(deadline, cancelled)
                         result = _record_snapshot_call(
                             gateway,
                             batch0,
@@ -697,181 +765,125 @@ def fetch_option_snapshots(
                             batch_start=start,
                             provider_responses=provider_responses,
                         )
-                    finally:
                         check_fetch_control(deadline, cancelled)
-                    return result
+                        return result
 
-                return rate_limited_call(
-                    base_dir=base_dir,
-                    endpoint="market_snapshot",
-                    **snapshot_limit.call_kwargs(),
-                    **controls,
+                    return rate_limited_call(
+                        base_dir=base_dir,
+                        endpoint="market_snapshot",
+                        **snapshot_limit.call_kwargs(),
+                        **controls,
+                        **({"diagnostics": diagnostics} if diagnostics is not None else {}),
+                        call=_gateway_snapshot_call,
+                    )
+
+                snap = retry_call(
+                    "get_market_snapshot(batch)",
+                    _call_snapshot,
+                    no_retry=no_retry,
+                    retry_max_attempts=retry_max_attempts,
+                    retry_time_budget_sec=retry_time_budget_sec,
+                    retry_base_delay_sec=retry_base_delay_sec,
+                    retry_max_delay_sec=retry_max_delay_sec,
+                    quiet=True,
                     **({"diagnostics": diagnostics} if diagnostics is not None else {}),
-                    call=_gateway_snapshot_call,
+                    **controls,
                 )
+            except Exception as exc:
+                check_fetch_control(deadline, cancelled)
+                snapshot_errors.append(
+                    {
+                        "stage": "market_snapshot",
+                        "batch_start": start,
+                        "batch_size": len(batch),
+                        "error_code": classify_error(exc),
+                        "message": str(exc),
+                    }
+                )
+                snap = None
+            if len(batch_receipts) == receipt_start:
+                batch_receipts.append(
+                    {
+                        "stage": "market_snapshot",
+                        "batch_start": start,
+                        "requested_codes": batch,
+                        "provider_call_started": False,
+                        "requested_at_utc": None,
+                        "received_at_utc": None,
+                        "status": "failed",
+                        "error_code": "PROVIDER_NOT_CALLED",
+                    }
+                )
+            received_at = datetime.now(timezone.utc)
+            batch_received_at.append(received_at)
+            if snap is None or snap.empty:
+                continue
 
-            snap = retry_call(
-                "get_market_snapshot(batch)",
-                _call_snapshot,
-                no_retry=no_retry,
-                retry_max_attempts=retry_max_attempts,
-                retry_time_budget_sec=retry_time_budget_sec,
-                retry_base_delay_sec=retry_base_delay_sec,
-                retry_max_delay_sec=retry_max_delay_sec,
-                quiet=True,
-                **({"diagnostics": diagnostics} if diagnostics is not None else {}),
-                **controls,
-            )
-        except Exception as exc:
-            check_fetch_control(deadline, cancelled)
-            snapshot_errors.append(
-                {
-                    "stage": "market_snapshot",
-                    "batch_start": start,
-                    "batch_size": len(batch),
-                    "error_code": classify_error(exc),
-                    "message": str(exc),
-                }
-            )
-            snap = None
-        if len(batch_receipts) == receipt_start:
-            batch_receipts.append(
-                {
-                    "stage": "market_snapshot",
-                    "batch_start": start,
-                    "requested_codes": batch,
-                    "provider_call_started": False,
-                    "requested_at_utc": None,
-                    "received_at_utc": None,
-                    "status": "failed",
-                    "error_code": "PROVIDER_NOT_CALLED",
-                }
-            )
-        received_at = datetime.now(timezone.utc)
-        batch_received_at.append(received_at)
-        if snap is None or snap.empty:
-            continue
+            records, keep = keep_snapshot_record_columns(snap, keep_columns)
+            if not keep:
+                continue
 
-        records, keep = keep_snapshot_record_columns(snap, keep_columns)
-        if not keep:
-            continue
-
-        for record in records:
-            record["snapshot_requested_at_utc"] = batch_receipts[-1]["requested_at_utc"]
-            record["snapshot_received_at_utc"] = batch_receipts[-1]["received_at_utc"]
-        _merge_snapshot_records(
-            records=records,
-            requested_codes=requested_codes,
-            returned_codes=returned_codes,
-            duplicate_codes=duplicate_codes,
-            snap_map=snap_map,
-            code_receipts=code_receipts,
-            receipt=(batch_receipts[-1]["requested_at_utc"], batch_receipts[-1]["received_at_utc"]),
-        )
-
-    fallback_filled = 0
-    fallback_failed = 0
-    if requested_code_order and int(snapshot_fallback_max_codes) > 0:
-        missing = [code for code in requested_code_order if code not in snap_map]
-        if missing:
-            (
-                fallback_filled,
-                fallback_failed,
-                fallback_opend_calls,
-                fallback_requested_at,
-                fallback_received_at,
-            ) = _fallback_fetch_missing_snapshots(
-                batch_receipts=batch_receipts,
-                provider_responses=provider_responses,
-                missing_codes=missing,
-                gateway=gateway,
-                snapshot_limit=snapshot_limit,
-                base_dir=base_dir,
-                snap_map=snap_map,
-                snapshot_errors=snapshot_errors,
-                max_fallback_codes=snapshot_fallback_max_codes,
-                fallback_batch_size=snapshot_fallback_batch_size,
-                keep_columns=keep_columns,
-                no_retry=no_retry,
-                retry_max_attempts=retry_max_attempts,
-                retry_time_budget_sec=retry_time_budget_sec,
-                retry_base_delay_sec=retry_base_delay_sec,
-                retry_max_delay_sec=retry_max_delay_sec,
-                retry_call=retry_call,
-                rate_limited_call=rate_limited_call,
+            for record in records:
+                record["snapshot_requested_at_utc"] = batch_receipts[-1]["requested_at_utc"]
+                record["snapshot_received_at_utc"] = batch_receipts[-1]["received_at_utc"]
+            _merge_snapshot_records(
+                records=records,
                 requested_codes=requested_codes,
                 returned_codes=returned_codes,
                 duplicate_codes=duplicate_codes,
+                snap_map=snap_map,
                 code_receipts=code_receipts,
-                diagnostics=diagnostics,
-                **controls,
+                receipt=(batch_receipts[-1]["requested_at_utc"], batch_receipts[-1]["received_at_utc"]),
             )
-            opend_call_count += fallback_opend_calls
-            batch_requested_at.extend(fallback_requested_at)
-            batch_received_at.extend(fallback_received_at)
 
-    check_fetch_control(deadline, cancelled)
-    requested_times = [value.isoformat() for value in batch_requested_at]
-    received_times = [value.isoformat() for value in batch_received_at]
-    requested_times.extend(r[0] for r in code_receipts.values() if r[0])
-    received_times.extend(r[1] for r in code_receipts.values() if r[1])
-    if batch_receipts:
-        requested_times = [r["requested_at_utc"] for r in batch_receipts if r["requested_at_utc"]]
-        received_times = [r["received_at_utc"] for r in batch_receipts if r["received_at_utc"]]
-        requested_times.extend(r[0] for r in code_receipts.values() if r[0])
-        received_times.extend(r[1] for r in code_receipts.values() if r[1])
+        if requested_code_order and int(snapshot_fallback_max_codes) > 0:
+            missing = [code for code in requested_code_order if code not in snap_map]
+            if missing:
+                (
+                    fallback_filled,
+                    fallback_failed,
+                    _,
+                    fallback_requested_at,
+                    fallback_received_at,
+                ) = _fallback_fetch_missing_snapshots(
+                    batch_receipts=batch_receipts,
+                    provider_responses=provider_responses,
+                    missing_codes=missing,
+                    gateway=gateway,
+                    snapshot_limit=snapshot_limit,
+                    base_dir=base_dir,
+                    snap_map=snap_map,
+                    snapshot_errors=snapshot_errors,
+                    max_fallback_codes=snapshot_fallback_max_codes,
+                    fallback_batch_size=snapshot_fallback_batch_size,
+                    keep_columns=keep_columns,
+                    no_retry=no_retry,
+                    retry_max_attempts=retry_max_attempts,
+                    retry_time_budget_sec=retry_time_budget_sec,
+                    retry_base_delay_sec=retry_base_delay_sec,
+                    retry_max_delay_sec=retry_max_delay_sec,
+                    retry_call=retry_call,
+                    rate_limited_call=rate_limited_call,
+                    requested_codes=requested_codes,
+                    returned_codes=returned_codes,
+                    duplicate_codes=duplicate_codes,
+                    code_receipts=code_receipts,
+                    diagnostics=diagnostics,
+                    **controls,
+                )
+                batch_requested_at.extend(fallback_requested_at)
+                batch_received_at.extend(fallback_received_at)
+
+        check_fetch_control(deadline, cancelled)
+    except BaseException as exc:
+        exc.partial_result = build_result(completed=False)
+        raise
+
     if snapshot_cache is not None:
         for code, row in snap_map.items():
             if code not in snapshot_cache:
                 snapshot_cache[code] = (dict(row), *code_receipts[code])
-    returned_code_set = frozenset(returned_codes)
-    missing_codes = frozenset(requested_codes.difference(snap_map))
-    unexpected_codes = frozenset(returned_code_set.difference(requested_codes))
-    if unexpected_codes:
-        snapshot_errors.append(
-            {
-                "stage": "market_snapshot_completeness",
-                "error_code": "SNAPSHOT_UNEXPECTED_CODES",
-                "message": f"provider returned {len(unexpected_codes)} unrequested snapshot codes",
-                "unexpected_codes": sorted(unexpected_codes),
-            }
-        )
-    if missing_codes:
-        snapshot_errors.append(
-            {
-                "stage": "market_snapshot_completeness",
-                "error_code": "SNAPSHOT_COVERAGE_INCOMPLETE",
-                "message": f"missing {len(missing_codes)} requested snapshot codes after fallback",
-                "missing_codes": sorted(missing_codes),
-            }
-        )
-    if duplicate_codes:
-        snapshot_errors.append(
-            {
-                "stage": "market_snapshot_completeness",
-                "error_code": "SNAPSHOT_DUPLICATE_CODES",
-                "message": (f"provider returned duplicate rows for {len(duplicate_codes)} requested snapshot codes"),
-                "duplicate_codes": sorted(duplicate_codes),
-            }
-        )
-
-    return MarketSnapshotFetchResult(
-        snap_map=snap_map,
-        errors=snapshot_errors,
-        requested_codes=requested_codes,
-        returned_codes=returned_code_set,
-        missing_codes=missing_codes,
-        unexpected_codes=unexpected_codes,
-        complete=not missing_codes and not duplicate_codes,
-        fallback_filled=fallback_filled,
-        fallback_failed=fallback_failed,
-        opend_call_count=opend_call_count,
-        requested_at_utc=min(requested_times, default=None),
-        received_at_utc=max(received_times, default=None),
-        code_receipts=code_receipts,
-        batch_receipts=tuple(batch_receipts),
-        provider_responses=tuple(provider_responses),
-    )
+    return build_result(completed=True)
 
 
 def keep_snapshot_record_columns(snap: Any, keep_columns: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
@@ -989,17 +1001,15 @@ def _fallback_fetch_missing_snapshots(
                         calls = diagnostics.setdefault("opend_calls", {})
                         calls["market_snapshot"] = calls.get("market_snapshot", 0) + 1
                     check_fetch_control(deadline, cancelled)
-                    try:
-                        result = _record_snapshot_call(
-                            gateway,
-                            batch0,
-                            batch_receipts,
-                            stage="market_snapshot_fallback",
-                            batch_start=start,
-                            provider_responses=provider_responses,
-                        )
-                    finally:
-                        check_fetch_control(deadline, cancelled)
+                    result = _record_snapshot_call(
+                        gateway,
+                        batch0,
+                        batch_receipts,
+                        stage="market_snapshot_fallback",
+                        batch_start=start,
+                        provider_responses=provider_responses,
+                    )
+                    check_fetch_control(deadline, cancelled)
                     return result
 
                 return rate_limited_call(
