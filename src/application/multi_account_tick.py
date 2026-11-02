@@ -89,7 +89,7 @@ from src.application.tick_scheduler_context import (
 )
 from src.application.experience_mode import validate_experience_request
 from src.application.futu_quote_routing import resolve_futu_quote_route
-from src.application.market_data_provider import resolve_market_data_provider
+from src.application.market_data_provider import require_market_data_provider
 from src.application.opend_market_snapshot_fetching import trading_calendar_dates
 from src.infrastructure.external_services import (
     run_opend_watchdog,
@@ -162,7 +162,7 @@ def _is_trading_day_guard_for_market(cfg: dict[str, Any], market: str) -> tuple[
     None means guard check failed and caller should continue without blocking.
     """
     market_used = str(market or "").strip().upper() or "US"
-    provider = resolve_market_data_provider(cfg)
+    provider = require_market_data_provider(cfg)
     if provider.name != "opend":
         gateway = None
         try:

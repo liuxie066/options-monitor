@@ -44,13 +44,16 @@ def test_channel_core_fixture_copies_real_sources_and_imports_offline(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-def test_exact_four_official_plugins_and_dependency_metadata(artifacts):
+def test_exact_seven_official_plugins_and_dependency_metadata(artifacts):
     directory, catalog = artifacts
     assert {e["id"]: (e["distribution"], e["module"]) for e in catalog["plugins"]} == {
         "pm": ("om-pm-plugin", "om_pm_plugin"),
         "position-advice": ("om-position-advice-plugin", "om_position_advice_plugin"),
         "feishu": ("om-feishu-channel-plugin", "om_feishu_channel"),
         "wechat": ("om-wechat-channel-plugin", "om_wechat_channel"),
+        "market-opend": ("om-market-opend-plugin", "om_market_opend"),
+        "broker-futu": ("om-broker-futu-plugin", "om_broker_futu"),
+        "broker-longbridge": ("om-broker-longbridge-plugin", "om_broker_longbridge"),
     }
     for entry in catalog["plugins"]:
         path = directory / entry["asset"]
@@ -64,15 +67,15 @@ def test_exact_four_official_plugins_and_dependency_metadata(artifacts):
     assert release.verify_publication(directory, tag="v1.2.3") == catalog
 
 
-@pytest.mark.parametrize("plugin_id", ["pm", "position-advice", "feishu", "wechat"])
+@pytest.mark.parametrize("plugin_id", [item[0] for item in release.OFFICIAL_PLUGINS])
 def test_catalog_requires_every_official_plugin(artifacts, plugin_id):
     directory, catalog = artifacts
     entry = next(e for e in catalog["plugins"] if e["id"] == plugin_id)
     (directory / entry["asset"]).unlink()
-    with pytest.raises(ValueError, match="exactly four wheels"):
+    with pytest.raises(ValueError, match="exactly the official wheels"):
         release.verify_publication(directory, tag="v1.2.3")
     catalog["plugins"].remove(entry)
-    with pytest.raises(ValueError, match="exactly the four official plugins"):
+    with pytest.raises(ValueError, match="exactly the official plugins"):
         release.validate_catalog(catalog, om_version="1.2.3")
 
 
@@ -192,7 +195,7 @@ def test_wheel_metadata_is_authoritative(artifacts, filename, old, new):
         release.validate_wheel(path, entry)
 
 
-@pytest.mark.parametrize("plugin_id", ["pm", "position-advice", "feishu", "wechat"])
+@pytest.mark.parametrize("plugin_id", [item[0] for item in release.OFFICIAL_PLUGINS])
 @pytest.mark.parametrize("headers", [
     "", "Requires-Dist: lark-oapi\n", "Requires-Dist: pandas\n",
     "Requires-Dist: lark-oapi==1.6.5\n", "Requires-Dist: lark-oapi[extra]\n",
@@ -301,7 +304,7 @@ def test_isolated_build_versions_source_copy_without_network(tmp_path, monkeypat
     monkeypatch.setattr(release.subprocess, "run", pip_wheel)
     output = tmp_path / "output"
     catalog = release.build(source=source, output=output)
-    assert len(calls) == 4 and all(not p.exists() for p in calls)
+    assert len(calls) == 7 and all(not p.exists() for p in calls)
     assert release.verify_publication(output, tag="v1.2.3", commit="a" * 40) == catalog
     assert {p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()} == originals
     assert "Source/pip" in (output / release.NOTES).read_text()
@@ -309,7 +312,7 @@ def test_isolated_build_versions_source_copy_without_network(tmp_path, monkeypat
         release.build(source=source, output=output)
 
 
-@pytest.mark.parametrize("plugin_id", ["pm", "position-advice", "feishu", "wechat"])
+@pytest.mark.parametrize("plugin_id", [item[0] for item in release.OFFICIAL_PLUGINS])
 @pytest.mark.parametrize("damage", ["dependency", "extra"])
 def test_build_rejects_source_dependency_or_extras_changes(tmp_path, monkeypatch, plugin_id, damage):
     source = tmp_path / "source"

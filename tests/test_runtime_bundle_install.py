@@ -88,14 +88,72 @@ def test_shell_bootstrap_checksum_failure_has_no_runtime_or_wrapper_effect(tmp_p
     assert not log.exists() and not (tmp_path / '中文 命令/om').exists()
 
 
-def test_actual_runtime_bundle_installs_and_runs_without_git_python_pip_or_homebrew(tmp_path):
+
+def offline_plugin_assets(tmp_path, archive, manifest, monkeypatch):
+    """Build real wheels offline with the artifact's own pinned build dependencies."""
+    from types import SimpleNamespace
+    from src.application import plugin_release
+    build_host = tmp_path / 'wheel-build-host'
+    build_host.mkdir()
+    with tarfile.open(archive, 'r:gz') as tar:
+        members = [m for m in tar.getmembers() if m.name.startswith('runtime/python/')]
+        tar.extractall(build_host, members=members, filter='data')
+    python = build_host / 'runtime/python/bin/python3'
+    assert python.is_file()
+    def build_wheel(command, **kwargs):
+        assert command[1:5] == ['-m', 'pip', 'wheel', '--no-deps']
+        return subprocess.run([str(python), *command[1:], '--no-build-isolation', '--no-index'], **kwargs)
+    assets = tmp_path / 'official-plugin-assets'
+    with monkeypatch.context() as patch:
+        patch.setattr(plugin_release, 'subprocess', SimpleNamespace(run=build_wheel, check_output=subprocess.check_output))
+        catalog = plugin_release.build(source=ROOT, output=assets)
+    assert catalog['om_version'] == manifest['version'] and catalog['commit'] == manifest['commit']
+    base = f"https://github.com/{catalog['repository']}/releases/download/{manifest['tag']}/"
+    published = [p for p in assets.iterdir() if p.name != plugin_release.NOTES]
+    release = dict(tag_name=manifest['tag'], draft=False, prerelease=False, assets=[
+        dict(name=p.name, state='uploaded', size=p.stat().st_size,
+             digest='sha256:'+hashlib.sha256(p.read_bytes()).hexdigest(), browser_download_url=base+p.name)
+        for p in published
+    ])
+    release_path = assets / 'release.json'
+    release_path.write_text(json.dumps(release))
+    routes = {base+p.name: str(p) for p in published}
+    routes[f"https://api.github.com/repos/{catalog['repository']}/releases/tags/{manifest['tag']}"] = str(release_path)
+    sandbox = tmp_path / 'offline-transport'
+    sandbox.mkdir()
+    (sandbox / 'routes.json').write_text(json.dumps(routes))
+    (sandbox / 'sitecustomize.py').write_text("""
+import io,json,socket,urllib.request
+from pathlib import Path
+base=Path(__file__).parent
+routes=json.loads((base/'routes.json').read_text())
+class Response(io.BytesIO):
+    def __init__(self,url,data):
+        super().__init__(data)
+        self.url=url
+    def geturl(self): return self.url
+def offline(request,**kwargs):
+    url=request if isinstance(request,str) else request.full_url
+    assert url in routes, 'unexpected network request: '+url
+    with (base/'requests.jsonl').open('a') as log: log.write(json.dumps(url)+'\\n')
+    return Response(url,Path(routes[url]).read_bytes())
+def forbidden(*args,**kwargs): raise AssertionError('real network forbidden during bundle qualification')
+urllib.request.urlopen=offline
+socket.socket.connect=socket.socket.connect_ex=forbidden
+""")
+    return sandbox
+
+
+def test_actual_runtime_bundle_installs_and_runs_without_git_python_pip_or_homebrew(tmp_path, monkeypatch):
     value = os.environ.get('OM_TEST_RUNTIME_BUNDLE')
     if not value:
         pytest.skip('requires actual assembled native bundle; ordinary tests do not fabricate qualification')
     archive = Path(value).resolve()
     manifest = json.loads(archive.with_name(archive.name + '.manifest.json').read_text())
     tag = manifest['tag']
+    sandbox = offline_plugin_assets(tmp_path, archive, manifest, monkeypatch)
     env, log = installer_env(tmp_path, archive, tag=tag)
+    env['PYTHONPATH'] = str(sandbox)
     state = Path(env['HOME']) / 'existing instance'
     state.mkdir()
     (state / 'config.yaml').write_text('# untouched configuration\n')
@@ -113,6 +171,15 @@ def test_actual_runtime_bundle_installs_and_runs_without_git_python_pip_or_homeb
     assert (prefix / 'current').resolve() == prefix / 'releases' / tag
     assert not (prefix / 'current/.venv').exists()
     assert not (prefix / 'current/config.yaml').exists()
+    from src.application.plugin_runtime import read_managed_plugin
+    receipt = read_managed_plugin(prefix / 'current', 'market-opend')
+    assert receipt and receipt['repo_root'] == str((prefix / 'current').resolve())
+    assert receipt['version'] == manifest['version']
+    assert read_managed_plugin(prefix / 'current', 'broker-futu') is None
+    assert read_managed_plugin(prefix / 'current', 'broker-longbridge') is None
+    requests = [json.loads(row) for row in (sandbox / 'requests.jsonl').read_text().splitlines()]
+    assert len(requests) == 3 and requests[-1].endswith('.whl')
+    assert '/om_market_opend_plugin-' in requests[-1]
     for entry, command in [('om', 'help'), ('om-agent', 'spec')]:
         proc = subprocess.run([str(tmp_path / '中文 命令' / entry), command], env=env,
                               capture_output=True, text=True, timeout=180)
@@ -129,6 +196,7 @@ def test_actual_runtime_bundle_installs_and_runs_without_git_python_pip_or_homeb
     repeated = install(tmp_path, env, tag)
     assert repeated.returncode == 0, repeated.stdout + repeated.stderr
     assert os.readlink(prefix / 'current') == before and not log.exists()
+    assert len((sandbox / 'requests.jsonl').read_text().splitlines()) == 3
     force = subprocess.run(['/bin/bash', env['TEST_INSTALLER'], '--version', tag, '--prefix', str(prefix),
                             '--bin-dir', str(tmp_path / '中文 命令'), '--force'], env=env, capture_output=True, text=True)
     assert force.returncode != 0 and 'active current release' in force.stderr

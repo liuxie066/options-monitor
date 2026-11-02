@@ -84,7 +84,7 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 
 ## 官方可选插件
 
-官方插件固定为 `pm`（PM 接入）、`position-advice`（持仓评估与建议）、`feishu`（飞书收发）和 `wechat`（微信收发）。包含本分发功能的 Release 提供四个 `py3-none-any.whl`、`om-plugins.json` 和 `om-plugins.md`，绑定精确 OM 版本、tag、commit、Python >=3.12 及资产摘要。该路径尚未发布；不能假定旧 Release 已有这些资产，也不会退回下载其他版本的插件。
+官方插件固定为 `market-opend`（OpenD 行情）、`broker-futu`（富途账户）、`broker-longbridge`（长桥账户）、`pm`（PM 接入）、`position-advice`（持仓评估与建议）、`feishu`（飞书收发）和 `wechat`（微信收发）。包含本分发功能的 Release 提供七个 `py3-none-any.whl`、`om-plugins.json` 和 `om-plugins.md`，绑定精确 OM 版本、tag、commit、Python >=3.12 及资产摘要。该路径尚未发布；不能假定旧 Release 已有这些资产，也不会退回下载其他版本的插件。
 
 源码版与完整运行包使用同一入口；添加插件时无需另行使用 pip、Git 或安装系统 Python：
 
@@ -96,9 +96,15 @@ om plugins install pm --confirm
 om plugins install position-advice --confirm
 om plugins install feishu --confirm
 om plugins install wechat --confirm
+om plugins install broker-futu --confirm        # 按账户需要安装
+om plugins install broker-longbridge --confirm  # 先满足长桥 SDK 前提
 om plugins uninstall pm                      # 默认只预览
 om plugins uninstall pm --confirm
 ```
+
+正常新安装默认安装 `market-opend`，不默认安装任何券商包。账户可分别选富途或长桥，行情来源独立选择；安装不改变配置。托管卸载不允许移除最后一个有效行情插件，券商可以全部移除。手工 pip 移除行情后，配置、诊断和历史入口仍可启动，但取行情必须先恢复所选插件。
+
+长桥 SDK 沿用 `requirements/longbridge.txt` 的显式前提；托管安装和升级切换前会验证 SDK，缺失时拒绝并给出提示。源码安装器可用 `--with-broker-futu` 或 `--with-broker-longbridge`；后者同时安装固定 SDK 依赖。运行包缺 SDK 时不能向其内部补包。
 
 `list` 只读本地状态，不联网。安装从当前 OM 版本的官方稳定 Release 获取清单，确认后仅下载所选 wheel；校验资产摘要、大小、包元数据、RECORD 和隔离导入，再原子发布安装目录。缺资产、版本不配套或校验失败会中止，不修改配置和已有安装。
 
@@ -137,16 +143,16 @@ PM 默认关闭。安装后设置全局 `portfolio_management.enabled: true`；�
 ```
 
 富途/OpenD 行情仍使用既有依赖。长桥 SDK 不在模块导入或 provider 选择时自动载入；
-仅真实读取长桥资产时需要。SDK 安装不完成账号凭据绑定，也不证明连接和数据权限可用。
+`broker-longbridge` 的托管安装及升级验证也要求 SDK 可用。SDK 安装不完成账号凭据绑定，也不证明连接和数据权限可用。
 
-开发与 CI 的 `requirements/dev.txt` 显式安装 PM 扩展，保留全部 PM 自动发现回归；
+开发与 CI 的 `requirements/dev.txt` 显式安装七个本地插件包，保留全部自动发现回归；
 缺包状态由隔离子进程验证，不跳过这些测试。
 
 `install.sh --with-dev` 始终从下载的 release 根目录安装这些依赖，不使用调用目录中的
 同名插件。源码 service upgrade 保留当前实例实际安装的 PM 扩展和 Longbridge SDK，
 与配置是否启用无关；未安装或主动卸载的包不会因配置仍启用而补装。首次从内置 PM 的
 旧版迁移时，仅为有效旧配置已启用的 PM 安装扩展。若目标是运行包且需要保留 pip 安装的插件或长桥 SDK，
-升级在切换前拒绝；通过 `om plugins` 托管的 PM、持仓建议、飞书和微信另走官方资产迁移路径。缓存及切换前校验见
+升级在切换前拒绝；通过 `om plugins` 托管的能力另走官方资产迁移路径。缓存及切换前校验见
 [升级流程](RELEASE_PROCESS.md)；首次迁移必须使用含修复的新控制器，旧版自动升级器不能
 自行获得目标 release 中的修复。
 
@@ -321,6 +327,7 @@ git checkout <release-tag>
 python3.12 -m venv .venv
 ./.venv/bin/pip install -U pip
 ./.venv/bin/pip install -r requirements.txt -c constraints.txt
+./.venv/bin/pip install ./plugins/market-opend
 ```
 
 如果已有 `.venv` 是 Python 3.10/3.11 或已损坏，launcher 会明确失败而不会绕到 shell 的其他 `python3`。确认该目录只包含可重建依赖后再重建：
@@ -330,6 +337,7 @@ rm -rf .venv
 python3.12 -m venv .venv
 ./.venv/bin/pip install -U pip
 ./.venv/bin/pip install -r requirements.txt -c constraints.txt
+./.venv/bin/pip install ./plugins/market-opend
 ```
 
 临时诊断或恢复时可以显式指定兼容解释器：

@@ -555,9 +555,19 @@ class _WindowGateway:
         return self.get_snapshot_with_request_hook(codes)
 
     def get_snapshot_with_request_hook(self, codes, *, before_request=None):
-        def request():
+        def mark_request():
+            requested = _now(self.clock)
+            if not self.start <= requested < self.end:
+                raise ValueError("provider_request_outside_window")
             if before_request is not None:
                 before_request()
+            self.calls[-1]["requested_at_utc"] = _stamp(requested)
+
+        def request():
+            guarded_request = getattr(self.gateway, "get_snapshot_with_request_hook", None)
+            if callable(guarded_request):
+                return guarded_request(codes, before_request=mark_request)
+            mark_request()
             return self.gateway.get_snapshot(codes)
 
         return self._call("market_snapshot", list(codes), request)
@@ -567,9 +577,15 @@ class _WindowGateway:
             requested = _now(self.clock)
             if not self.start <= requested < self.end:
                 raise ValueError("provider_request_outside_window")
+            return requested
+
+        def on_request():
+            requested = before_request()
             self.calls[-1]["requested_at_utc"] = _stamp(requested)
 
-        return self._call("quote_preflight", [], lambda: self.gateway.ensure_quote_ready(before_request=before_request))
+        return self._call("quote_preflight", [], lambda: self.gateway.ensure_quote_ready(
+            before_request=before_request, on_request=on_request,
+        ))
 
     def _call(self, endpoint, codes, callback):
         requested = _now(self.clock)
@@ -578,7 +594,7 @@ class _WindowGateway:
         call = {
             "endpoint": endpoint,
             "codes": list(codes),
-            "requested_at_utc": _stamp(requested),
+            "requested_at_utc": None,
             "received_at_utc": None,
             "status": "started",
         }
@@ -592,9 +608,12 @@ class _WindowGateway:
             raise
         finally:
             received = _now(self.clock)
-            call["received_at_utc"] = _stamp(received)
-            if received < requested or received >= self.end:
-                call["status"] = "received_outside_window"
+            if call["requested_at_utc"] is not None:
+                call["received_at_utc"] = _stamp(received)
+                if received < _utc(call["requested_at_utc"]) or received >= self.end:
+                    call["status"] = "received_outside_window"
+            else:
+                self.calls.remove(call)
 
     def close(self):
         # The series owner closes after both option and underlier capture.

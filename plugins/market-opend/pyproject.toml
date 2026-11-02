@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "om-market-opend-plugin"
+version = "0.1.0"
+description = "OpenD market data capability for options-monitor"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["om_market_opend", "om_market_opend.*"]
+namespaces = false

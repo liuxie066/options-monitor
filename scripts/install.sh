@@ -11,6 +11,8 @@ WITH_DEV=0
 WITH_POSITION_ADVICE=0
 WITH_FEISHU=0
 WITH_WECHAT=0
+WITH_BROKER_FUTU=0
+WITH_BROKER_LONGBRIDGE=0
 FORCE=0
 INSTALL_CLI=1
 BIN_DIR="${HOME}/.local/bin"
@@ -49,6 +51,8 @@ Options:
   --with-position-advice Install the optional Position Advice package (source mode only; does not enable it).
   --with-feishu        Install the optional Feishu message package (source mode only; does not enable it).
   --with-wechat        Install the optional WeChat message package (source mode only; does not enable it).
+  --with-broker-futu   Install the optional Futu broker package (source mode only; does not enable account access).
+  --with-broker-longbridge Install the pinned Longbridge SDK and broker package (source mode only).
   --force              Recreate an inactive target release directory if it exists.
   -h, --help           Show this help.
 EOF
@@ -221,12 +225,15 @@ resolve_latest_release_tag() {
 
 install_optional_requirements() {
   release_dir="$1"
-  if [ "$WITH_SERVER" -ne 1 ] && [ "$WITH_DEV" -ne 1 ] && [ "$WITH_POSITION_ADVICE" -ne 1 ] && [ "$WITH_FEISHU" -ne 1 ] && [ "$WITH_WECHAT" -ne 1 ]; then
+  if [ "$WITH_SERVER" -ne 1 ] && [ "$WITH_DEV" -ne 1 ] && [ "$WITH_POSITION_ADVICE" -ne 1 ] && [ "$WITH_FEISHU" -ne 1 ] && [ "$WITH_WECHAT" -ne 1 ] && [ "$WITH_BROKER_FUTU" -ne 1 ] && [ "$WITH_BROKER_LONGBRIDGE" -ne 1 ]; then
     return 0
   fi
   pip_bin="${release_dir}/.venv/bin/pip"
   [ -x "$pip_bin" ] || die "cannot install optional requirements; pip is missing: $pip_bin"
   (cd "$release_dir"
+  if [ "$WITH_BROKER_LONGBRIDGE" -eq 1 ]; then
+    "$pip_bin" install -r "$release_dir/requirements/longbridge.txt"
+  fi
   if [ "$WITH_SERVER" -eq 1 ]; then
     "$pip_bin" install -r "$release_dir/requirements/server.txt" -c "$release_dir/constraints/server.txt"
   fi
@@ -242,8 +249,43 @@ install_optional_requirements() {
     if [ "$WITH_WECHAT" -eq 1 ]; then
       "$pip_bin" install ./plugins/wechat-channel
     fi
+    if [ "$WITH_BROKER_FUTU" -eq 1 ]; then
+      "$pip_bin" install ./plugins/broker-futu
+    fi
+    if [ "$WITH_BROKER_LONGBRIDGE" -eq 1 ]; then
+      "$pip_bin" install ./plugins/broker-longbridge
+    fi
   fi
   )
+}
+
+install_default_market() {
+  release_dir="$1"
+  # Historical releases have no provider packages; their builtin contract stays intact.
+  [ -f "$release_dir/src/application/plugin_runtime.py" ] || return 0
+  if [ -f "$release_dir/om.runtime.json" ]; then
+    market_python="$release_dir/runtime/python/bin/python3"
+  else
+    market_python="$release_dir/.venv/bin/python"
+  fi
+  (cd "$release_dir" && PYTHONDONTWRITEBYTECODE=1 "$market_python" -c '
+import importlib.metadata as m
+from pathlib import Path
+import sys
+from src.application.plugin_runtime import PLUGINS, require_plugin, validate_plugin_import
+if "market-opend" not in PLUGINS:
+    sys.exit(0)
+from src.application.plugin_distribution import install_plugin
+try:
+    m.distribution(PLUGINS["market-opend"]["distribution"])
+except m.PackageNotFoundError:
+    install_plugin("market-opend", repo_root=Path.cwd(), confirm=True, python_executable=Path(sys.executable))
+require_plugin("market-opend")
+validate_plugin_import("market-opend")
+for selected, plugin in ((sys.argv[1], "broker-futu"), (sys.argv[2], "broker-longbridge")):
+    if selected == "1":
+        validate_plugin_import(plugin)
+' "$WITH_BROKER_FUTU" "$WITH_BROKER_LONGBRIDGE")
 }
 
 
@@ -483,6 +525,8 @@ preflight_bundle_tools() {
   [ "$WITH_POSITION_ADVICE" -eq 0 ] || die "--with-position-advice requires explicit --source mode"
   [ "$WITH_FEISHU" -eq 0 ] || die "--with-feishu requires explicit --source mode"
   [ "$WITH_WECHAT" -eq 0 ] || die "--with-wechat requires explicit --source mode"
+  [ "$WITH_BROKER_FUTU" -eq 0 ] || die "--with-broker-futu requires explicit --source mode"
+  [ "$WITH_BROKER_LONGBRIDGE" -eq 0 ] || die "--with-broker-longbridge requires explicit --source mode"
   # Check the pinned artifact floor before executing any bundled binary.
   case "$BUNDLE_PLATFORM" in
     macos-*)
@@ -608,6 +652,14 @@ while [ "$#" -gt 0 ]; do
       WITH_WECHAT=1
       shift
       ;;
+    --with-broker-futu)
+      WITH_BROKER_FUTU=1
+      shift
+      ;;
+    --with-broker-longbridge)
+      WITH_BROKER_LONGBRIDGE=1
+      shift
+      ;;
     --with-dev)
       WITH_DEV=1
       shift
@@ -702,6 +754,7 @@ if [ "$ALREADY_INSTALLED" -eq 1 ]; then
   [ "$installed_version" = "${TAG#v}" ] \
     || die "active release VERSION mismatch; expected=${TAG#v}; observed=${installed_version:-missing}"
   run_bot_smoke "$TARGET_DIR"
+  install_default_market "$TARGET_DIR"
 else
   initial_current_existed=0
   initial_current_target=""
@@ -762,6 +815,7 @@ else
   fi
   mv "$tmp_dir" "$TARGET_DIR"
   if [ "$SOURCE_INSTALL" -eq 0 ]; then PYTHON_BIN="$TARGET_DIR/runtime/python/bin/python3"; fi
+  install_default_market "$TARGET_DIR"
 
   if [ "$INSTALL_CLI" -eq 1 ]; then
     if ! mv -f "$staged_om_wrapper" "${BIN_DIR}/om"; then

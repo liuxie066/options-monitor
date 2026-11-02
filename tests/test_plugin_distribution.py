@@ -19,7 +19,7 @@ import pytest
 
 from src.application import plugin_distribution as distribution, plugin_runtime as runtime
 from src.interfaces.cli import main as cli
-from tests.plugin_release_helpers import copy_channel_core
+from tests.plugin_release_helpers import copy_channel_core, copy_provider_core, provider_test_dependencies
 
 SOURCE = Path(__file__).resolve().parents[1]
 VERSION = "9.9.9"
@@ -82,6 +82,7 @@ def plugin_python(tmp_path_factory):
     venv.EnvBuilder(with_pip=False).create(environment)
     site = next((environment / "lib").glob("python*/site-packages"))
     shutil.copytree(Path(importlib.util.find_spec("packaging").origin).parent, site / "packaging")
+    provider_test_dependencies(site)
     return environment / "bin/python"
 
 
@@ -96,6 +97,7 @@ def official(tmp_path, monkeypatch, plugin_python):
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(SOURCE / rel, target)
     copy_channel_core(SOURCE, root)
+    copy_provider_core(SOURCE, root)
     (root / "domain").symlink_to(SOURCE / "domain", target_is_directory=True)
     for item in runtime.PLUGINS.values():
         target = root / "plugins" / item["source"]
@@ -190,9 +192,16 @@ def test_cli_install_real_adapter_receipt_idempotency_and_uninstall(official, ca
     elif plugin_id == "position-advice":
         from domain.domain.close_advice import require_position_advice_plugin
         assert require_position_advice_plugin() is module
-    else:
+    elif plugin_id in {"feishu", "wechat"}:
         from src.application.channels.plugins import load_channel_plugin
         assert load_channel_plugin(plugin_id) is module
+    else:
+        assert runtime.require_plugin(plugin_id) is module
+    if plugin_id == "market-opend":
+        for confirm in (False, True):
+            with pytest.raises(ValueError, match="last valid market"):
+                distribution.uninstall_plugin(plugin_id, confirm=confirm)
+        return
     assert cli.main(["plugins", "uninstall", plugin_id, "--format", "json"]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "preview"
     assert runtime.read_managed_plugin(root, plugin_id)
@@ -354,7 +363,7 @@ def test_mixed_environment_package_requires_owner_cleanup_before_managed_uninsta
     item = runtime.PLUGINS[plugin_id]
     environment = tmp_path / "python-environment"
     shutil.copytree(SOURCE / "plugins" / item["source"] / "src" / item["module"], environment / item["module"])
-    metadata = environment / (item["module"] + "-0.1.0.dist-info")
+    metadata = environment / (item["distribution"].replace("-", "_") + "-0.1.0.dist-info")
     metadata.mkdir()
     (metadata / "METADATA").write_text(f"Metadata-Version: 2.4\nName: {item['distribution']}\nVersion: 0.1.0\n")
     monkeypatch.syspath_prepend(str(environment))
@@ -452,6 +461,97 @@ def test_missing_sdk_never_mutates_or_extends_runtime_bundle(official, monkeypat
     with pytest.raises(ValueError, match="bundled Feishu SDK"):
         distribution._prepare_feishu_sdk(root, staged)
     assert list(staged.iterdir()) == []
+
+
+def test_available_checks_do_not_import_plugin_or_sdk(official, monkeypatch):
+    root, _, _, _ = official
+    distribution.install_plugin("broker-longbridge", confirm=True)
+    def missing_distribution(name):
+        raise runtime.importlib.metadata.PackageNotFoundError(name)
+    monkeypatch.setattr(runtime.importlib.metadata, "version", missing_distribution)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("availability imported a package")
+    monkeypatch.setattr(runtime.importlib, "import_module", forbidden)
+    assert runtime.plugin_installed("broker-longbridge")
+    assert not runtime.plugin_installed("broker-futu")
+    (runtime.plugin_store(root) / "broker-longbridge" / "receipt.json").write_text("{}")
+    assert not runtime.plugin_installed("broker-longbridge")
+    with pytest.raises(runtime.PluginUnavailableError, match="om plugins install broker-longbridge") as caught:
+        runtime.require_plugin("broker-longbridge")
+    assert caught.value.code == "PLUGIN_UNAVAILABLE"
+
+
+def test_environment_availability_requires_matching_metadata_and_module(official, monkeypatch):
+    root, _, _, _ = official
+    project = root / "plugins/market-opend/pyproject.toml"
+    project.write_text('[project]\nversion="0.1.0"\n')
+    monkeypatch.setattr(runtime.importlib.metadata, "version", lambda _: "0.1.0")
+    monkeypatch.setattr(runtime.importlib.util, "find_spec", lambda _: object())
+    assert runtime.plugin_installed("market-opend")
+    monkeypatch.setattr(runtime.importlib.metadata, "version", lambda _: "0.0.1")
+    assert not runtime.plugin_installed("market-opend")
+    monkeypatch.setattr(runtime.importlib.metadata, "version", lambda _: "0.1.0")
+    monkeypatch.setattr(runtime.importlib.util, "find_spec", lambda _: None)
+    assert not runtime.plugin_installed("market-opend")
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+def test_damaged_last_market_is_removable_for_repair(official, confirm):
+    root, _, _, _ = official
+    distribution.install_plugin("market-opend", confirm=True)
+    package = runtime.plugin_store(root) / "market-opend/site/om_market_opend/__init__.py"
+    package.write_text("raise ImportError('damaged')\n")
+    result = distribution.uninstall_plugin("market-opend", confirm=confirm)
+    assert result["status"] == ("uninstalled" if confirm else "preview")
+    assert package.exists() is (not confirm)
+
+
+def test_last_market_rechecked_inside_uninstall_lock(official, monkeypatch):
+    root, _, _, _ = official
+    distribution.install_plugin("market-opend", confirm=True)
+    check, calls = distribution._check_market_removal, []
+    def changing_inventory(root, plugin_id):
+        calls.append(plugin_id)
+        # The preview had another valid market; it disappeared before the lock.
+        if len(calls) > 1:
+            check(root, plugin_id)
+    monkeypatch.setattr(distribution, "_check_market_removal", changing_inventory)
+    with pytest.raises(ValueError, match="last valid market"):
+        distribution.uninstall_plugin("market-opend", confirm=True)
+    assert calls == ["market-opend", "market-opend"]
+    assert runtime.read_managed_plugin(root, "market-opend")
+
+
+@pytest.mark.parametrize("sdk", ["missing", "incompatible"])
+@pytest.mark.parametrize("bundle", [False, True])
+def test_longbridge_managed_install_requires_explicit_sdk_without_mutating_runtime(
+    official, plugin_python, tmp_path, monkeypatch, sdk, bundle,
+):
+    root, _, _, _ = official
+    if bundle:
+        from tests.test_pm_package_upgrade import _bundled_runtime
+        _bundled_runtime(root)
+    # A fresh temporary interpreter with core numeric dependencies and no SDK.
+    environment = tmp_path / "sdk-check"
+    venv.EnvBuilder(with_pip=False).create(environment)
+    site = next((environment / "lib").glob("python*/site-packages"))
+    provider_test_dependencies(site)
+    if sdk == "missing":
+        shutil.rmtree(site / "longbridge")
+        shutil.rmtree(site / "longbridge-5.3.0.dist-info")
+    else:
+        (site / "longbridge-5.3.0.dist-info/METADATA").write_text('Name: longbridge\nVersion: 0.0.0\n')
+    from types import SimpleNamespace
+    original_run = subprocess.run
+    def run(command, **kwargs):
+        assert "pip" not in command, "Longbridge install must never acquire SDK implicitly"
+        return original_run([str(environment / "bin/python"), *command[1:]], **kwargs)
+    monkeypatch.setattr(distribution, "subprocess", SimpleNamespace(run=run, TimeoutExpired=subprocess.TimeoutExpired))
+    before = {p.relative_to(root): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+    with pytest.raises(ValueError, match="requirements/longbridge.txt"):
+        distribution.install_plugin("broker-longbridge", confirm=True)
+    assert runtime.read_managed_plugin(root, "broker-longbridge") is None
+    assert {p.relative_to(root): p.read_bytes() for p in root.rglob('*') if p.is_file()} == before
 
 
 @pytest.mark.parametrize("uv_available", [False, True])

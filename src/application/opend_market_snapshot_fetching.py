@@ -21,6 +21,7 @@ from src.application.opend_fetch_config import (
 )
 from src.application.opend_utils import normalize_underlier
 from src.application.option_chain_fetching import classify_option_chain_error
+from src.application.plugin_runtime import PluginUnavailableError
 from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway, retry_futu_gateway_call, check_fetch_control
 from src.infrastructure.futu_dataframe import futu_dataframe_records
 from src.infrastructure.opend_retcodes import classify_opend_error
@@ -789,6 +790,8 @@ def fetch_option_snapshots(
                     **({"diagnostics": diagnostics} if diagnostics is not None else {}),
                     **controls,
                 )
+            except PluginUnavailableError:
+                raise
             except Exception as exc:
                 check_fetch_control(deadline, cancelled)
                 snapshot_errors.append(
@@ -1033,6 +1036,8 @@ def _fallback_fetch_missing_snapshots(
                 **({"diagnostics": diagnostics} if diagnostics is not None else {}),
                 **controls,
             )
+        except PluginUnavailableError:
+            raise
         except Exception as exc:
             check_fetch_control(deadline, cancelled)
             if len(batch_receipts) == receipt_start:

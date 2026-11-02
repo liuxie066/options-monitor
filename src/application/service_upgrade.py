@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import math
@@ -22,6 +23,7 @@ from src.application import plugin_distribution, runtime_bundle
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.file_locks import single_instance_lock
 from src.application.plugin_runtime import PLUGINS, read_managed_plugin
+
 from src.application.release_target import compare_versions, parse_version, resolve_upgrade_target
 from src.application.runtime_config_freshness import (
     GENERATED_KEY,
@@ -35,6 +37,8 @@ from src.application.service_drift import (
     service_drift,
 )
 from src.infrastructure.io_utils import parse_last_json_obj
+
+PROVIDER_PLUGINS = ("market-opend", "broker-futu", "broker-longbridge")
 
 _CHILD_ENV_PASSTHROUGH_NAMES = {
     "ANTHROPIC_API_KEY",
@@ -1924,6 +1928,7 @@ def _pip_install_commands(
     include_position_advice: bool = False,
     include_feishu: bool = False,
     include_wechat: bool = False,
+    provider_plugins: tuple[str, ...] = (),
 ) -> list[tuple[list[str], int]]:
     commands = [
         ([str(venv_python), "-m", "pip", "install", "-U", "pip"], 600),
@@ -1936,6 +1941,8 @@ def _pip_install_commands(
     for selected, package in ((include_feishu, "feishu-channel"), (include_wechat, "wechat-channel")):
         if selected:
             commands.append(([str(venv_python), "-m", "pip", "install", f"./plugins/{package}"], 600))
+    for plugin_id in provider_plugins:
+        commands.append(([str(venv_python), "-m", "pip", "install", "./plugins/" + PLUGINS[plugin_id]["source"]], 600))
     if include_longbridge:
         commands.append(([str(venv_python), "-m", "pip", "install", "-r", "requirements/longbridge.txt"], 600))
     return commands
@@ -1952,6 +1959,7 @@ def _uv_install_commands(
     include_position_advice: bool = False,
     include_feishu: bool = False,
     include_wechat: bool = False,
+    provider_plugins: tuple[str, ...] = (),
 ) -> list[tuple[list[str], int]]:
     commands: list[tuple[list[str], int]] = [
         (["uv", "venv", "--python", bootstrap_python, str(venv_dir)], 300),
@@ -1981,6 +1989,8 @@ def _uv_install_commands(
     for selected, package in ((include_feishu, "feishu-channel"), (include_wechat, "wechat-channel")):
         if selected:
             commands.append((["uv", "pip", "install", "-p", str(venv_python), f"./plugins/{package}"], 600))
+    for plugin_id in provider_plugins:
+        commands.append((["uv", "pip", "install", "-p", str(venv_python), "./plugins/" + PLUGINS[plugin_id]["source"]], 600))
     if include_longbridge:
         commands.append(([
             "uv", "pip", "install", "-p", str(venv_python), "-r", "requirements/longbridge.txt",
@@ -2021,6 +2031,7 @@ def _run_pip_runtime_prepare(
     include_position_advice: bool = False,
     include_feishu: bool = False,
     include_wechat: bool = False,
+    provider_plugins: tuple[str, ...] = (),
 ) -> None:
     if not venv_python.exists():
         command = [bootstrap_python, "-m", "venv", str(venv_dir)]
@@ -2030,7 +2041,7 @@ def _run_pip_runtime_prepare(
     pip_commands = _pip_install_commands(
         venv_python, include_pm=include_pm, include_longbridge=include_longbridge,
         include_position_advice=include_position_advice,
-        include_feishu=include_feishu, include_wechat=include_wechat,
+        include_feishu=include_feishu, include_wechat=include_wechat, provider_plugins=provider_plugins,
     )
     if include_server:
         pip_commands.append(
@@ -2099,6 +2110,7 @@ def _dependency_context(
     include_position_advice: bool = False,
     include_feishu: bool = False,
     include_wechat: bool = False,
+    provider_plugins: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     return {
         "include_server": bool(include_server),
@@ -2107,6 +2119,7 @@ def _dependency_context(
         **({"include_longbridge": True} if include_longbridge else {}),
         **({"include_feishu": True} if include_feishu else {}),
         **({"include_wechat": True} if include_wechat else {}),
+        **({"provider_plugins": sorted(provider_plugins)} if provider_plugins else {}),
         "installer_mode": installer_mode,
         "python_implementation": sys.implementation.name,
         "python_spec": python_spec,
@@ -2128,6 +2141,7 @@ def _dependency_hash(
     include_position_advice: bool = False,
     include_feishu: bool = False,
     include_wechat: bool = False,
+    provider_plugins: tuple[str, ...] = (),
 ) -> str:
     digest = hashlib.sha256()
     selected_python_spec = python_spec or f"{sys.version_info.major}.{sys.version_info.minor}"
@@ -2138,14 +2152,14 @@ def _dependency_hash(
         include_pm=include_pm,
         include_longbridge=include_longbridge,
         include_position_advice=include_position_advice,
-        include_feishu=include_feishu, include_wechat=include_wechat,
+        include_feishu=include_feishu, include_wechat=include_wechat, provider_plugins=provider_plugins,
     )
     digest.update(json.dumps(context, sort_keys=True).encode("utf-8"))
     digest.update(b"\n")
     for path in _dependency_files(
         target_dir, include_server=include_server, include_pm=include_pm, include_longbridge=include_longbridge,
         include_position_advice=include_position_advice,
-        include_feishu=include_feishu, include_wechat=include_wechat,
+        include_feishu=include_feishu, include_wechat=include_wechat, provider_plugins=provider_plugins,
     ):
         try:
             rel = path.relative_to(target_dir)
@@ -2166,6 +2180,7 @@ def _dependency_files(
     include_position_advice: bool = False,
     include_feishu: bool = False,
     include_wechat: bool = False,
+    provider_plugins: tuple[str, ...] = (),
 ) -> list[Path]:
     roots = [target_dir / "requirements.txt", target_dir / "constraints.txt"]
     if include_server:
@@ -2198,6 +2213,7 @@ def _dependency_files(
     for selected, name in (
         (include_pm, "portfolio-management"), (include_position_advice, "position-advice"),
         (include_feishu, "feishu-channel"), (include_wechat, "wechat-channel"),
+        *((True, PLUGINS[key]["source"]) for key in provider_plugins),
     ):
         if selected:
             package = target_dir / "plugins" / name
@@ -2471,6 +2487,136 @@ def _validate_message_runtime(
     )
 
 
+def _provider_catalog_supported(release_dir: Path) -> bool:
+    path = release_dir / "src/application/plugin_runtime.py"
+    if not path.is_file():
+        return False
+    try:
+        tree = ast.parse(path.read_text())
+        value = next(node.value for node in tree.body if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == "PLUGINS" for target in node.targets))
+        catalog = ast.literal_eval(value)
+        present = set(PROVIDER_PLUGINS) & set(catalog)
+        if not present:
+            legacy = set(PLUGINS) - set(PROVIDER_PLUGINS)
+            if set(catalog) != legacy or any(
+                any(catalog[key].get(field) != PLUGINS[key][field] for field in ("distribution", "module"))
+                for key in legacy
+            ):
+                raise ValueError("unrecognized legacy plugin catalog")
+            return False
+        if present != set(PROVIDER_PLUGINS) or any(
+            any(catalog[key].get(field) != PLUGINS[key][field] for field in ("distribution", "module"))
+            for key in PROVIDER_PLUGINS
+        ):
+            raise ValueError("incomplete provider catalog")
+        return True
+    except (OSError, ValueError, SyntaxError, StopIteration, TypeError, AttributeError) as exc:
+        raise RuntimeError(f"could not determine provider package support from {path}") from exc
+
+
+def _provider_upgrade_selection(
+    *, previous_dir: Path, target_dir: Path, runtime_root: Path, managed: list[str],
+    run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> tuple[list[str], tuple[str, ...]]:
+    if not _provider_catalog_supported(target_dir):
+        return managed, ()
+    if _provider_catalog_supported(previous_dir):
+        code = (
+            "import importlib.metadata as m,json\n"
+            "selected=[]\n"
+            f"for key,name in {[(key, PLUGINS[key]['distribution']) for key in PROVIDER_PLUGINS]!r}:\n"
+            "    try: m.distribution(name)\n"
+            "    except m.PackageNotFoundError: pass\n"
+            "    else: selected.append(key)\n"
+            "print(json.dumps(selected))\n"
+        )
+        result = _run_required([str(_release_python(previous_dir)), "-I", "-c", code],
+                               cwd=previous_dir, run_cmd=run_cmd, operations=operations, timeout=30)
+        try:
+            selected = json.loads(result["stdout"])
+            if (not isinstance(selected, list) or any(key not in PROVIDER_PLUGINS for key in selected)
+                    or len(set(selected)) != len(selected)):
+                raise ValueError("invalid provider selection")
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError("could not determine installed provider packages in current runtime") from exc
+        pip_selected = tuple(key for key in selected if key not in managed)
+        if "market-opend" not in {*managed, *pip_selected}:
+            raise RuntimeError("current runtime has no market package; use om plugins install market-opend --confirm")
+        return managed, pip_selected
+
+    from src.application.account_config import accounts_from_config, resolve_account_type
+
+    selected = {"market-opend"}
+    profile = _load_service_profile(runtime_root)
+    markets = _verify_markets(runtime_root=runtime_root, profile=profile)
+    if not markets:
+        raise RuntimeError("could not determine legacy broker selection: no effective runtime configs")
+    for market in markets:
+        path = _runtime_config_path_for_market(market=market, runtime_root=runtime_root, profile=profile)
+        try:
+            config = json.loads(path.read_text())
+            if not isinstance(config, dict):
+                raise ValueError("runtime config must be an object")
+            for account in accounts_from_config(config):
+                selected.add("broker-" + resolve_account_type(config, account=account))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"could not determine legacy broker selection from {path}") from exc
+    return list(dict.fromkeys([*managed, *(key for key in PROVIDER_PLUGINS if key in selected)])), ()
+
+
+def _validate_provider_runtime(
+    *, target_dir: Path, selected: tuple[str, ...], run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> None:
+    if not _provider_catalog_supported(target_dir):
+        return
+    code = (
+        "import importlib.metadata as m,json,sys,tomllib\n"
+        "from pathlib import Path\n"
+        "sys.dont_write_bytecode=True\n"
+        "sys.path.insert(0,sys.argv[1])\n"
+        "from src.application.plugin_runtime import PLUGINS,validate_plugin_import\n"
+        f"for key in {PROVIDER_PLUGINS!r}:\n"
+        "    item=PLUGINS[key]\n"
+        "    try: dist=m.distribution(item['distribution'])\n"
+        "    except m.PackageNotFoundError: dist=None\n"
+        "    if key in json.loads(sys.argv[2]):\n"
+        "        assert dist is not None, key+' lost during upgrade'\n"
+        "        project=Path(sys.argv[1])/'plugins'/item['source']/'pyproject.toml'\n"
+        "        assert dist.version == tomllib.loads(project.read_text())['project']['version'], key+' version mismatch'\n"
+        "        validate_plugin_import(key)\n"
+        "    else: assert dist is None, key+' unexpectedly installed in cached runtime'\n"
+    )
+    _run_required([str(_release_python(target_dir)), "-I", "-c", code, str(target_dir), json.dumps(selected)],
+                  cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=30)
+
+
+def _validate_rollback_pip_providers(
+    *, target_dir: Path, managed: list[str], run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> None:
+    if not _provider_catalog_supported(target_dir):
+        return
+    # Inspect the target environment itself; rollback never reconstructs or installs a selection.
+    code = (
+        "import importlib.metadata as m,json,sys\n"
+        "sys.dont_write_bytecode=True\n"
+        "sys.path.insert(0,sys.argv[1])\n"
+        "from src.application.plugin_runtime import PLUGINS,plugin_installed,validate_plugin_import\n"
+        "managed=json.loads(sys.argv[2])\n"
+        "market=any(PLUGINS[key].get('kind')=='market' for key in managed)\n"
+        f"for key in {PROVIDER_PLUGINS!r}:\n"
+        "    if key in managed: continue\n"
+        "    try: m.distribution(PLUGINS[key]['distribution'])\n"
+        "    except m.PackageNotFoundError: continue\n"
+        "    assert plugin_installed(key), key+' unavailable or incompatible in rollback target'\n"
+        "    validate_plugin_import(key)\n"
+        "    market=market or PLUGINS[key].get('kind')=='market'\n"
+        "assert market, 'rollback target has no valid market package; use om plugins install market-opend --confirm'\n"
+    )
+    _run_required([str(_release_python(target_dir)), "-I", "-c", code, str(target_dir), json.dumps(managed)],
+                  cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=30)
+
+
 def _managed_plugin_selection(release_dir: Path) -> list[str]:
     selected = []
     for plugin_id in PLUGINS:
@@ -2652,6 +2798,7 @@ def _ensure_release_runtime(
     include_position_advice: bool = False,
     include_feishu: bool = False,
     include_wechat: bool = False,
+    provider_plugins: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     _runtime_readiness(release_dir=target_dir)
     if _is_runtime_bundle(target_dir):
@@ -2661,6 +2808,7 @@ def _ensure_release_runtime(
             ("om-position-advice-plugin", include_position_advice),
             ("om-feishu-channel-plugin", include_feishu), ("om-wechat-channel-plugin", include_wechat),
         ) if enabled]
+        selected.extend(PLUGINS[key]["distribution"] for key in provider_plugins)
         if selected:
             # Installing source extras would invalidate the bundle's pinned inventory.
             raise RuntimePrepareError(
@@ -2691,13 +2839,13 @@ def _ensure_release_runtime(
         include_pm=include_pm,
         include_longbridge=include_longbridge,
         include_position_advice=include_position_advice,
-        include_feishu=include_feishu, include_wechat=include_wechat,
+        include_feishu=include_feishu, include_wechat=include_wechat, provider_plugins=provider_plugins,
     )
     dependency_context = _dependency_context(
         include_server=include_server, python_spec=python_spec, installer_mode=mode,
         include_pm=include_pm, include_longbridge=include_longbridge,
         include_position_advice=include_position_advice,
-        include_feishu=include_feishu, include_wechat=include_wechat,
+        include_feishu=include_feishu, include_wechat=include_wechat, provider_plugins=provider_plugins,
     )
     shared_venv = _shared_venv_path(cache, dependency_hash)
     build_venv = _shared_venv_build_path(shared_venv)
@@ -2756,7 +2904,7 @@ def _ensure_release_runtime(
                 include_pm=include_pm,
                 include_longbridge=include_longbridge,
                 include_position_advice=include_position_advice,
-                include_feishu=include_feishu, include_wechat=include_wechat,
+                include_feishu=include_feishu, include_wechat=include_wechat, provider_plugins=provider_plugins,
             )
             commands.extend(command for command, _timeout in uv_commands)
             try:
@@ -2791,7 +2939,7 @@ def _ensure_release_runtime(
                     include_pm=include_pm,
                     include_longbridge=include_longbridge,
                     include_position_advice=include_position_advice,
-                    include_feishu=include_feishu, include_wechat=include_wechat,
+                    include_feishu=include_feishu, include_wechat=include_wechat, provider_plugins=provider_plugins,
                 )
         else:
             if mode == "uv":
@@ -2811,7 +2959,7 @@ def _ensure_release_runtime(
                 include_pm=include_pm,
                 include_longbridge=include_longbridge,
                 include_position_advice=include_position_advice,
-                include_feishu=include_feishu, include_wechat=include_wechat,
+                include_feishu=include_feishu, include_wechat=include_wechat, provider_plugins=provider_plugins,
             )
 
         if not runtime_prepare["venv_reused"]:
@@ -2852,6 +3000,7 @@ def _ensure_release_runtime(
             target_dir=target_dir, include_feishu=include_feishu, include_wechat=include_wechat,
             run_cmd=run_cmd, operations=operations,
         )
+        _validate_provider_runtime(target_dir=target_dir, selected=provider_plugins, run_cmd=run_cmd, operations=operations)
         runtime_prepare["ended_at"] = utc_now_iso()
         runtime_prepare["duration_seconds"] = round(time.monotonic() - started, 3)
         return runtime_prepare
@@ -3728,6 +3877,10 @@ def service_upgrade(
             )
             include_feishu = include_feishu and "feishu" not in managed_plugins
             include_wechat = include_wechat and "wechat" not in managed_plugins
+            managed_plugins, provider_plugins = _provider_upgrade_selection(
+                previous_dir=previous_dir, target_dir=target_dir, runtime_root=runtime, managed=managed_plugins,
+                run_cmd=run_cmd, operations=operations,
+            )
             runtime_prepare = _ensure_release_runtime(
                 target_dir=target_dir,
                 cache_root=cache,
@@ -3737,6 +3890,7 @@ def service_upgrade(
                 include_longbridge=include_longbridge,
                 include_position_advice=include_position_advice,
                 include_feishu=include_feishu, include_wechat=include_wechat,
+                provider_plugins=provider_plugins,
             )
             _preserve_managed_plugins(
                 target_dir=target_dir, selected=managed_plugins, run_cmd=run_cmd, operations=operations,
@@ -4194,7 +4348,7 @@ def service_rollback(
                 "target_dir": str(target_dir),
                 "warnings": [] if repo_root_is_symlink else ["confirmed rollback requires repo_root to be a current symlink"],
                 "planned_operations": [
-                    "validate the rollback target's installed managed plugins using its interpreter",
+                    "validate the rollback target's managed plugins and pip-owned providers using its interpreter",
                     f"stage and validate runtime configs with {target_dir}",
                     "verify the rollback target contains the supported Python Bot runtime",
                     f"switch {repo_link} -> {target_dir}",
@@ -4246,8 +4400,13 @@ def service_rollback(
                     }
                 )
             runtime_readiness = _runtime_readiness(release_dir=target_dir)
+            managed_plugins = _managed_plugin_selection(target_dir)
             _validate_target_managed_plugins(
-                target_dir=target_dir, selected=_managed_plugin_selection(target_dir),
+                target_dir=target_dir, selected=managed_plugins,
+                run_cmd=run_cmd, operations=operations,
+            )
+            _validate_rollback_pip_providers(
+                target_dir=target_dir, managed=managed_plugins,
                 run_cmd=run_cmd, operations=operations,
             )
             runtime_config_prepare = _prepare_runtime_configs_for_release(

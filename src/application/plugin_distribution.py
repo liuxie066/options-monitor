@@ -1,6 +1,6 @@
 """Official release add-ons: inspect, preview, install and remove without pip.
 
-Only the four fixed wheels from the exact installed OM release are
+Only the fixed official wheels from the exact installed OM release are
 accepted. No configuration, service or broker operation belongs to this owner.
 """
 from __future__ import annotations
@@ -127,6 +127,7 @@ def _prepare_feishu_sdk(root: Path, staged: Path, *, python_executable: Path | N
     python = str(python_executable or sys.executable)
     probe = (
         "import importlib.util,sys\n"
+        "sys.dont_write_bytecode=True\n"
         "sys.path.insert(0,sys.argv[1])\n"
         "if importlib.util.find_spec('lark_oapi') is None: sys.exit(42)\n"
         "from src.application.plugin_runtime import validate_feishu_sdk\n"
@@ -184,6 +185,7 @@ def _validate_import(root: Path, staged: Path, plugin_id: str, *, python_executa
         "    try: importlib.metadata.distribution(distribution)\n"
         "    except importlib.metadata.PackageNotFoundError: pass\n"
         "    else: raise RuntimeError('target Python environment already owns this plugin')\n"
+        "sys.dont_write_bytecode=True\n"
         "sys.path.insert(0,root)\n"
         "dependencies=Path(site).parent/'dependencies'\n"
         "if dependencies.is_dir(): sys.path.append(str(dependencies))\n"
@@ -200,7 +202,9 @@ def _validate_import(root: Path, staged: Path, plugin_id: str, *, python_executa
     except subprocess.TimeoutExpired as exc:
         raise ValueError("plugin import validation timed out; installation was not changed") from exc
     if result.returncode:
-        raise ValueError("plugin import validation failed; installation was not changed")
+        guidance = ("; install requirements/longbridge.txt in the source runtime first; immutable bundles are not modified"
+                    if plugin_id == "broker-longbridge" else "")
+        raise ValueError("plugin import validation failed; installation was not changed" + guidance)
 
 
 def install_plugin(plugin_id: str, *, repo_root: Path | None = None, confirm: bool = False,
@@ -232,6 +236,8 @@ def install_plugin(plugin_id: str, *, repo_root: Path | None = None, confirm: bo
         if plugin_id == "feishu":
             preview["dependencies"] = ["lark-oapi"]
             preview["note"] += "；复用可用飞书 SDK，源码版缺 SDK 时按发布约束下载至插件专属目录"
+        elif plugin_id == "broker-longbridge":
+            preview["note"] += "；须预先安装 requirements/longbridge.txt 的 SDK，不修改运行包内置环境"
         if not confirm:
             return preview
         url, digest, size = _published_asset(release, entry["asset"])
@@ -268,6 +274,24 @@ def install_plugin(plugin_id: str, *, repo_root: Path | None = None, confirm: bo
         return {**preview, "status": "installed", "changed": True, "restart_required": True}
 
 
+def _check_market_removal(root: Path, plugin_id: str) -> None:
+    if PLUGINS[plugin_id].get("kind") != "market":
+        return
+    valid = []
+    for row in list_plugins(repo_root=root)["plugins"]:
+        candidate = row["id"]
+        if PLUGINS[candidate].get("kind") != "market" or row["status"] != "installed":
+            continue
+        try:
+            if read_managed_plugin(root, candidate):
+                _validate_import(root, plugin_store(root) / candidate, candidate)
+            valid.append(candidate)
+        except ValueError:
+            continue
+    if valid == [plugin_id]:
+        raise ValueError("cannot remove the last valid market provider; install another market plugin first")
+
+
 def uninstall_plugin(plugin_id: str, *, repo_root: Path | None = None, confirm: bool = False) -> dict:
     if plugin_id not in PLUGINS:
         raise ValueError("unknown official plugin")
@@ -284,12 +308,14 @@ def uninstall_plugin(plugin_id: str, *, repo_root: Path | None = None, confirm: 
         return {"ok": True, "status": "not_installed", "changed": False, "plugin": plugin_id}
     if not target.is_dir():
         raise ValueError("plugin path is not a directory; installation was not changed")
+    _check_market_removal(root, plugin_id)
     preview = {"ok": True, "status": "preview", "changed": False, "plugin": plugin_id,
                "directory": str(target), "enabled_changed": False,
                "note": "仅移除插件文件；配置、账本及历史报告保留，已有进程需单独重启"}
     if not confirm:
         return preview
     with exclusive_private_file_lock(store / ".lock"):
+        _check_market_removal(root, plugin_id)
         if target.is_dir() and not target.is_symlink():
             removed = store / f".removed-{plugin_id}-{uuid.uuid4().hex}"
             # Rename is the uninstall commit point; cleanup cannot leave a

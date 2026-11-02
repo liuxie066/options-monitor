@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "om-broker-futu-plugin"
+version = "0.1.0"
+description = "Optional Futu broker adapter for options-monitor"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["om_broker_futu", "om_broker_futu.*"]
+namespaces = false

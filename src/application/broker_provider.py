@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Callable, Mapping, Protocol
 
 from src.application.account_config import build_account_portfolio_source_plan
+from src.application.plugin_runtime import require_plugin
 
 
 class BrokerPortfolioProvider(Protocol):
@@ -16,8 +17,7 @@ def resolve_broker_portfolio_provider(
 ) -> BrokerPortfolioProvider:
     provider = build_account_portfolio_source_plan(config, account=account).primary_source
     if provider == "futu":
-        return futu_provider
+        return require_plugin("broker-futu").resolve_portfolio_provider(futu_provider)
     if provider == "longbridge":
-        from src.application.longbridge_portfolio_context import fetch_longbridge_portfolio_context
-        return fetch_longbridge_portfolio_context
+        return require_plugin("broker-longbridge").resolve_portfolio_provider()
     raise ValueError(f"unsupported broker portfolio provider: {provider}")

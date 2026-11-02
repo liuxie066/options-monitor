@@ -70,7 +70,7 @@ def validate_catalog(data, *, om_version: str) -> dict:
         raise ValueError("invalid official plugin catalog identity or OM version mismatch")
     entries = data.get("plugins")
     if not isinstance(entries, list) or len(entries) != len(OFFICIAL_PLUGINS):
-        raise ValueError("catalog must contain exactly the four official plugins")
+        raise ValueError("catalog must contain exactly the official plugins")
     for entry in entries:
         _validate_entry(entry, version)
     if {e["id"] for e in entries} != {p[0] for p in OFFICIAL_PLUGINS}:
@@ -163,8 +163,9 @@ def compatibility_notes(catalog: dict) -> str:
     return (f"# Official plugins for options-monitor {catalog['om_version']}\n\n"
             f"Requires exactly OM {catalog['om_version']} (tag `{catalog['tag']}`, "
             f"commit `{catalog['commit']}`) and Python >=3.12.\n"
-            "Four pure Python wheels (`py3-none-any`). Feishu declares `lark-oapi`; "
-            "PM, position-advice and WeChat have no dependencies. "
+            "Seven pure Python wheels (`py3-none-any`). Feishu declares `lark-oapi`; "
+            "the other packages declare no dependencies. Provider packages reuse the runtime Futu SDK; "
+            "broker-longbridge requires the separately installed SDK from requirements/longbridge.txt. "
             "Install only with the matching OM release; other OM versions are incompatible.\n\n"
             "Official Release wheel versions follow OM VERSION. Source/pip packages may retain "
             "their own project version (currently 0.1.0); that source version is distinct from "
@@ -182,7 +183,7 @@ def verify_publication(directory: Path, *, tag: str, commit: str | None = None) 
         if commit is not None and catalog["commit"] != commit:
             raise ValueError("plugin publication commit mismatch")
         if {p.name for p in directory.glob("*.whl")} != {e["asset"] for e in catalog["plugins"]}:
-            raise ValueError("plugin publication must contain exactly four wheels")
+            raise ValueError("plugin publication must contain exactly the official wheels")
         for entry in catalog["plugins"]:
             validate_wheel(directory / entry["asset"], entry)
         if (directory / NOTES).read_text() != compatibility_notes(catalog):
