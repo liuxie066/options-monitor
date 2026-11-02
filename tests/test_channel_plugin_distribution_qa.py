@@ -100,7 +100,8 @@ distribution.runtime_bundle.urlopen = fetch
 actual_run = subprocess.run
 def offline_run(command, **kwargs):
     command = list(command)
-    if command == ['file', '-b', sys.executable]:
+    if command in (['file', '-b', sys.executable],
+                   ['file', '-b', str(Path(sys.executable).resolve())]):
         return actual_run(command, **kwargs)
     if (len(command) == 17 and command == [__import__('shutil').which('uv'),
             '--no-config', '--no-cache', '--no-python-downloads', 'pip', 'install', '--python', sys.executable,
@@ -453,6 +454,9 @@ def test_driver_allows_only_exact_file_and_uv_commands(tmp_path, monkeypatch):
     file_command = ['file', '-b', sys.executable]
     run(file_command)
     assert calls == [file_command]
+    resolved_command = ['file', '-b', str(Path(sys.executable).resolve())]
+    run(resolved_command)
+    assert calls[-1] == resolved_command
     uv_command = [shutil.which('uv'), '--no-config', '--no-cache', '--no-python-downloads', 'pip', 'install',
                   '--python', sys.executable, '--only-binary', ':all:', '--link-mode', 'copy',
                   '--target', str(tmp_path/'dependencies'), '-c',
@@ -468,4 +472,4 @@ def test_driver_allows_only_exact_file_and_uv_commands(tmp_path, monkeypatch):
     for command in invalid:
         with pytest.raises(AssertionError, match='unexpected subprocess'):
             run(command)
-    assert len(calls) == 2 and len(rejected) == len(invalid)
+    assert len(calls) == 3 and len(rejected) == len(invalid)
