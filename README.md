@@ -11,7 +11,26 @@ OM 面向自己做交易决策的期权投资者，支持富途账户及长桥�
 - **第一次使用：** 按下面的 Mac 入门步骤完成准备、安装、扫描和结果查看。
 - **已经安装：** 跳到[日常使用](#日常使用)。
 - **使用 Linux、固定版本或源码安装：** 见[安装指南](docs/INSTALL.md)。
-- **需要高级功能或开发集成：** 见[更多能力与文档](#更多能力与文档)。
+- **先了解功能：** 见[主要功能](#主要功能)；选择数据来源和扩展见[插件与接入](#插件与接入)。
+- **需要开发集成或详细文档：** 见[更多能力与文档](#更多能力与文档)。
+
+## 主要功能
+
+| 功能 | 能做什么 | 使用说明 |
+|---|---|---|
+| CSP / CC 候选筛选 | 结合账户条件筛选现金担保卖出 Put、备兑卖出 Call 的开仓候选 | [策略架构](docs/STRATEGY_ARCHITECTURE.md) |
+| 指定标的合约查询 | 查询指定标的的卖出 Put / Call 合约；只评估合约，不判断账户现金、持股覆盖、成本底线或集中度 | [合约查询](docs/TOOL_REFERENCE.md#指定标的卖出开仓候选) |
+| Combo Yield | 查看组合候选及策略含义 | [策略架构](docs/STRATEGY_ARCHITECTURE.md)、[术语对照](docs/STRATEGY_TERMINOLOGY.md) |
+| Wheel 轮转策略 | 管理卖出 Put 后接股、卖出 Call 后交股的轮转分支；需启用，仍受身份与交割证据约束，归属不明确时需人工确认 | [轮转策略](docs/WHEEL_STRATEGY_PRD.md) |
+| 持仓评估与建议 | 评估账本或临时输入的多笔 short Put / Call，扫描时复用同一规则；展示指标、持有／平仓依据及休市历史参考，不自动平仓；需安装并启用 `position-advice` 插件 | [持仓建议](docs/CLOSE_ADVICE_CONTRACT.md) |
+| 决策简报与提醒 | 查看最近成功扫描、候选变化和数据缺口；发送消息需安装并配置对应渠道插件 | [报告与通知规则](docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md) |
+| 候选解释与决策历史 | 解释已有扫描的排序、未入选原因，查询明确关联的结果 | [工具参考](docs/TOOL_REFERENCE.md)、[决策历史](docs/DECISION_HISTORY.md) |
+| 期权账本 | 查询开仓、平仓、指派和行权记录；写入与修复需要预览和确认 | [账本架构](docs/LEDGER_ARCHITECTURE.md)、[修账指南](docs/OPTION_POSITIONS_REPAIR.md) |
+| 期权现金流与绩效 | 查询期间期权净现金流及开仓批次现金结果；两种口径不能相加，也不能当作包含股票盈亏的账户总回报 | [绩效说明](docs/OPTION_PERFORMANCE_DESIGN.md) |
+| 指派压力测试 | 模拟所选账户仅卖出 Put、仅卖出 Call 或全部未平仓卖出期权被指派（默认全部），查看资产、资金覆盖和潜在负债；不执行实际交易，也不修改账本 | [指派情景](docs/PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md)；命令为 `om portfolio assignment-scenario --scenario short_put\|short_call\|all_short` |
+| 离线研究与归档 | 收集证据、复核已有样本，支持独立名单范围、日终及附属资料持续采集和压缩交付；写入归档需显式授权 | [研究采集](docs/RESEARCH_WATCHLIST_SCOPE.md)、[Agent Handbook](docs/AGENT_WIKI.md) |
+
+账户相关功能需要对应券商的数据与权限；行情、券商、消息渠道及可选扩展的安装选择见[插件与接入](#插件与接入)。
 
 ## 在 Mac 上完成第一次扫描
 
@@ -178,6 +197,45 @@ OM · 决策简报 · [你的账户标签]
 
 第一次使用的完成标准是：**你能确认扫描的是自己的目标账户，知道结果使用什么时间的数据，并能区分合格候选、零候选和数据不足。** 不要求一定出现候选，也不要求同时启用通知、Bot 或后台服务。
 
+## 插件与接入
+
+OM 通过插件接入行情、券商账户和消息渠道，并提供可选的持仓建议与 Portfolio Management（PM）集成。按账户和使用需求选择，无需全部安装；行情来源与券商账户分别配置。
+
+下表适用于 v4.6.9 起的插件划分。新安装默认包含 OpenD 行情，不默认安装券商插件。
+
+| 类别 | 插件 | 用途与安装选择 | 文档 |
+|---|---|---|---|
+| 行情 | `market-opend` | 通过 OpenD 获取行情；新安装默认包含，仍需准备并登录 OpenD | [OpenD 接入](docs/GETTING_STARTED.md#3-完成外部接入) |
+| 券商 | `broker-futu` | 接入富途账户；使用富途账户数据时安装 | [首次扫描](#在-mac-上完成第一次扫描) |
+| 券商 | `broker-longbridge` | 接入长桥 AP/REAL 股票、现金，参与账户容量与风险计算；需 SDK 前提并明确绑定凭据与账号，暂不支持下单、成交同步或完整期权持仓身份 | [长桥接入](CONFIGS.md#可选能力与长桥账户)、[SDK 前提](docs/INSTALL.md#可选-pm-与长桥依赖) |
+| 持仓建议 | `position-advice` | 评估已有卖出 Put / Call，提供持有或平仓依据；按需安装并启用 | [持仓建议](docs/CLOSE_ADVICE_CONTRACT.md) |
+| 资产补充 | `pm` | 接入同机 PM，为全局持仓风险补充非富途资产；已直接读取的同账户券商镜像不重复计入，PM 现金不增加券商开仓容量；默认关闭，按需安装并启用 | [PM 安装](docs/INSTALL.md#可选-pm-与长桥依赖)、[配置指南](CONFIGURATION_GUIDE.md) |
+| 消息 | `feishu` | 飞书消息收发、简报与提醒；按需安装，分别配置收信和主动通知 | [消息渠道](CONFIGS.md#消息渠道) |
+| 消息 | `wechat` | 微信消息收发、简报与提醒；按需安装，分别配置收信和主动通知 | [消息渠道](CONFIGS.md#消息渠道) |
+
+券商插件可同时安装，也可均不安装。缺券商时，行情分析与历史查询仍可用，当前账户持仓、现金和容量明确不可用。行情至少需要一个，托管卸载会拒绝移除最后一个有效行情插件。
+
+### 查看、安装和移除
+
+源码版与完整运行包共用以下入口。以持仓建议插件为例：
+
+```bash
+om plugins list                              # 查看本地安装状态
+om plugins install position-advice           # 预览
+om plugins install position-advice --confirm # 确认安装
+om plugins uninstall position-advice         # 预览移除；加 --confirm 才执行
+```
+
+**安装不等于启用。** PM 仍需配置 `portfolio_management.enabled`，持仓建议仍需配置 `close_advice.enabled`，消息渠道仍需配置收信、通知开关与目标。安装、移除不修改配置、凭据或账本，也不自动重启服务。
+
+各版本实际可安装的插件以对应 Release 清单为准，插件与 OM 版本精确配套；缺少对应资产时明确失败。v4.6.8 仅提供 PM、持仓建议、飞书和微信四个插件，不能安装表中的三个行情／券商插件。已有 pip 安装继续由原 Python 环境管理。
+
+| 想了解什么 | 文档 |
+|---|---|
+| 官方插件安装、SDK 依赖和版本兼容 | [官方插件指南](docs/INSTALL.md#官方可选插件) |
+| 消息渠道的安装与配置 | [安装消息渠道](docs/INSTALL.md#可选消息渠道)、[渠道配置](CONFIGS.md#消息渠道) |
+| 升级时保留插件选择与回滚 | [发布与升级流程](docs/RELEASE_PROCESS.md) |
+
 ## 日常使用
 
 打开任务菜单：
@@ -262,45 +320,7 @@ OM · 决策简报 · [你的账户标签]
 可按账户选择一个或多个通知目标，各目标独立记录回执和重试。均不安装也可使用本地扫描与报告。
 见[安装消息渠道](docs/INSTALL.md#可选消息渠道)及[配置契约](CONFIGS.md#消息渠道)。
 
-## 可选插件：下载、安装与移除
-
-v4.6.9 已发布 OpenD 行情、富途券商、长桥券商、PM、持仓建议、飞书、微信七个官方插件 wheel，以及 `om-plugins.json` 清单和 `om-plugins.md` 兼容说明。v4.6.8 只提供其中后四个插件；各版本实际可安装的插件以对应 Release 清单为准。插件与 OM 版本精确配套，无需下载整套源码寻找目录；缺少对应资产时安装会明确失败。
-
-```bash
-om plugins list
-om plugins install position-advice          # 预览对应版本、资产和安装目录
-om plugins install position-advice --confirm
-om plugins install pm --confirm
-om plugins install feishu --confirm
-om plugins install wechat --confirm
-om plugins uninstall position-advice        # 预览；加 --confirm 才移除
-```
-
-从 v4.6.9 起，新安装默认包含 `market-opend` 行情插件；券商插件可以一个也不装，按账户需要安装 `broker-futu` 或 `broker-longbridge`，也可同时安装。行情至少需要一个，托管卸载会拒绝移除最后一个有效行情插件。缺券商时，行情分析与历史查询仍可用，当前账户持仓、现金和容量明确不可用。
-
-源码版与完整运行包共用该入口。飞书 SDK 自动复用或按发布约束安装到插件专属目录，无需用户手动安装；微信无第三方依赖。安装不启用功能：PM 仍需配置 `portfolio_management.enabled`，持仓建议仍需配置 `close_advice.enabled`，消息渠道仍需配置收信、通知开关与目标；安装、移除都不自动重启服务。已有 pip 安装继续由原 Python 环境管理。完整步骤与升级保留规则见[官方可选插件](docs/INSTALL.md#官方可选插件)。
-
 ## 更多能力与文档
-
-以下功能不必在第一次使用时全部配置。按需要选择对应说明。
-
-| 能力 | 用途与说明 |
-|---|---|
-| CSP / CC 候选筛选 | 结合账户条件筛选卖出开仓候选；见[策略架构](docs/STRATEGY_ARCHITECTURE.md) |
-| 指定标的合约查询 | 查询指定标的的卖出 Put / Call 合约；**该入口只评估合约，不判断账户现金、持股覆盖、成本底线或集中度**；见[工具说明](docs/TOOL_REFERENCE.md#指定标的卖出开仓候选) |
-| Combo Yield | 查看组合候选；见[策略架构](docs/STRATEGY_ARCHITECTURE.md)和[术语对照](docs/STRATEGY_TERMINOLOGY.md) |
-| Wheel 轮转策略 | 管理卖出 Put 后接股、卖出 Call 后交股的轮转分支；启用后仍需符合身份与交割证据要求，归属不明确时需要人工确认；见[轮转策略说明](docs/WHEEL_STRATEGY_PRD.md) |
-| 持仓评估与建议 | 可选包支持主动评估账本或临时多笔 short Put/Call，扫描时复用同一规则；展示指标、持有／平仓依据及休市历史参考，不自动平仓；见[Position Advice](docs/CLOSE_ADVICE_CONTRACT.md) |
-| 决策简报与提醒 | 查看最近成功扫描、候选变化和数据缺口；见[报告与通知规则](docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md) |
-| 候选解释与决策历史 | 解释已有扫描的候选排序、未入选原因，查询明确关联的结果；见[工具说明](docs/TOOL_REFERENCE.md)和[决策历史](docs/DECISION_HISTORY.md) |
-| 期权账本 | 查询开仓、平仓、指派和行权记录；写入与修复需要预览和确认；见[账本架构](docs/LEDGER_ARCHITECTURE.md)和[修账指南](docs/OPTION_POSITIONS_REPAIR.md) |
-| 期权现金流与绩效 | 查询期间期权净现金流及开仓批次现金结果；两种口径不能相加，也不能当作包含股票盈亏的账户总回报；见[绩效说明](docs/OPTION_PERFORMANCE_DESIGN.md) |
-| 指派压力测试 | 模拟所选账户仅卖出 Put、仅卖出 Call 或全部未平仓卖出期权被指派（默认全部），查看资产、资金覆盖和潜在负债；通过 `om portfolio assignment-scenario --scenario short_put\|short_call\|all_short` 选择假设；不执行实际交易，也不修改账本 |
-| 券商与行情来源 | 长桥 AP/REAL 股票、现金可参与账户容量与风险计算；凭据与账号须由用户明确绑定，暂不支持长桥下单、成交同步或完整期权持仓身份。行情独立选择，当前来源为 `market-opend` 插件；见[配置契约](CONFIGS.md#可选能力与长桥账户) |
-| 可选 PM 与 Holdings 来源 | PM 为可独立安装、卸载的 `om-pm-plugin`，默认关闭，安装后仍需配置启用。可为全局持仓风险补充同机 PM 中的非富途资产；已直接读取的同账户券商镜像不重复计入，PM 现金不增加券商开仓容量；见[安装指南](docs/INSTALL.md#可选-pm-与长桥依赖)和[配置指南](CONFIGURATION_GUIDE.md) |
-| 离线研究与归档 | 收集证据、复核已有样本；支持独立名单范围、日终及附属资料持续采集和压缩交付，详见[研究采集合同](docs/RESEARCH_WATCHLIST_SCOPE.md)；写入归档需显式授权 |
-
-离线研究的 `om_strategy_core.evaluation` 提供估值、市场/FX 资格和规范现金基础。summarize/compare 的 v1/v2 接口及指标实现已从当前源码移除；回测收益、回撤、现金流稳定性、模拟接股风险及策略比较由 OptionBench 的 csp_metrics 模块维护，OM 不反向依赖 OB。缺资料仍按指标报告不足；这不是完整车轮或线上交易功能，详见 [API Index](docs/API_INDEX.md)。
 
 ### 开发者与脚本集成
 
@@ -320,11 +340,15 @@ om bot run --text "评价一下我的持仓"
 
 查询账户时，保留工具返回的账户、来源、数据时间与完整性。PM 现金记录不等同于券商购买力；现金余量和合约筛选结果也不能单独证明账户能加仓。证据缺失、过期或账户冲突时，应明确说明无法判断，不能猜测币种或可卖张数。具体边界见[账户工具说明](docs/TOOL_REFERENCE.md#持仓现金与组合)。
 
-- [Tool Reference](docs/TOOL_REFERENCE.md)：工具分类与调用说明。
-- [Agent Integration](docs/AGENT_INTEGRATION.md)：结构化输出和集成约定。
-- [产品架构](docs/PRODUCT_ARCHITECTURE.md)、[系统架构](docs/ARCHITECTURE.md)：模块职责与调用链。
-- [共享 API 索引](docs/API_INDEX.md)：可复用入口与事实归属。
-- [策略核心与离线验收](docs/candidate_strategy.md)：策略规则、可复用核心与样本复核；设计目标不应直接当作已发布能力。
+| 想了解什么 | 文档 |
+|---|---|
+| 工具分类、输入输出与风险声明 | [工具参考](docs/TOOL_REFERENCE.md) |
+| Agent 和脚本的结构化接入约定 | [集成指南](docs/AGENT_INTEGRATION.md) |
+| 产品范围、模块职责与调用链 | [产品架构](docs/PRODUCT_ARCHITECTURE.md)、[系统架构](docs/ARCHITECTURE.md) |
+| 共享入口与事实归属 | [共享 API 索引](docs/API_INDEX.md) |
+| 可复用策略核心与样本复核 | [策略核心与离线验收](docs/candidate_strategy.md)；设计目标不应直接当作已发布能力 |
+
+离线研究的 `om_strategy_core.evaluation` 提供估值、市场/FX 资格和规范现金基础。summarize/compare 的 v1/v2 接口及指标实现已从当前源码移除；回测收益、回撤、现金流稳定性、模拟接股风险及策略比较由 OptionBench 的 csp_metrics 模块维护，OM 不反向依赖 OB。缺资料仍按指标报告不足；这不是完整车轮或线上交易功能，详见 [API Index](docs/API_INDEX.md)。
 
 ## 配置、数据与操作边界
 
@@ -356,12 +380,15 @@ om bot run --text "评价一下我的持仓"
 
 ## 部署、升级与其他文档
 
-- [安装指南](docs/INSTALL.md)：macOS、Linux、固定版本与源码安装。
-- [首次运行指南](docs/GETTING_STARTED.md)：外部接入、可选功能与服务确认。
-- [部署指南](DEPLOY.md)与[Linux / Mac 部署](docs/DEPLOY_LINUX_MAC.md)：服务、运行目录和平台要求。
-- [运行手册](RUNBOOK.md)：状态检查、排错与恢复。
-- [发布流程](docs/RELEASE_PROCESS.md)：已发布版本的升级条件与回滚边界。
-- [完整文档索引](docs/INDEX.md)：按主题查找其他文档。
+| 想做什么 | 文档 |
+|---|---|
+| 安装 OM，选择平台、版本和安装方式 | [安装指南](docs/INSTALL.md) |
+| 完成首次配置、外部接入与扫描 | [首次运行指南](docs/GETTING_STARTED.md) |
+| 管理账户、策略、通知与密钥 | [配置指南](CONFIGURATION_GUIDE.md)、[配置生成规则](CONFIGS.md)、[密钥管理](docs/SECRET_STORAGE.md) |
+| 部署后台服务和确认运行目录 | [部署指南](DEPLOY.md)、[Linux / Mac 部署](docs/DEPLOY_LINUX_MAC.md) |
+| 查看状态、排错与恢复 | [运行手册](RUNBOOK.md) |
+| 了解已发布版本的升级条件与回滚边界 | [发布与升级流程](docs/RELEASE_PROCESS.md) |
+| 查找其他主题 | [完整文档索引](docs/INDEX.md) |
 
 旧配置升级前，先阅读[开关迁移说明](CONFIGURATION_GUIDE.md#配置开关迁移)，预览迁移并核对通知意图，不要直接套用新配置覆盖旧数据。运行包及 macOS 服务升级的源码能力不等于目标平台已经验收；发布资格和实际环境验证见[发布与升级流程](docs/RELEASE_PROCESS.md)。
 
