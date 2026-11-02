@@ -72,6 +72,11 @@ Futu v1/v2/v3 semantics; a Longbridge ID is never stored as `futu_account_id`.
 Official distribution is owned by `plugin_release.py` (versioned wheels and
 catalog), `plugin_distribution.py` (preview/install/uninstall) and the stdlib-only
 `plugin_runtime.py` (fixed identities, receipt validation and lazy import).
+The fixed IDs are `pm`, `position-advice`, `feishu` and `wechat`. Feishu alone
+declares the SDK dependency; source hosts missing it stage constrained packages
+inside the managed plugin, while immutable bundles reuse their locked SDK.
+Dependency inventories are verified before loading, and existing environment
+packages retain import precedence. SDK API/dependency checks never start clients.
 `om plugins` consumes only the exact host version's official Release assets.
 Managed files live outside the immutable code inventory, scoped to the resolved
 code root pinned at process startup; a current-symlink switch cannot rebind an

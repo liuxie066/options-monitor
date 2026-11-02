@@ -28,6 +28,7 @@ MAX_WHEEL_MEMBERS = 1000
 MAX_WHEEL_BYTES = 20 * 1024 * 1024
 OFFICIAL_PLUGINS = tuple((key, item["distribution"], item["module"], item["source"])
                          for key, item in PLUGINS.items())
+_DEPENDENCIES = {"feishu": ["lark-oapi"]}
 
 
 def _package_version(version: str) -> str:
@@ -69,7 +70,7 @@ def validate_catalog(data, *, om_version: str) -> dict:
         raise ValueError("invalid official plugin catalog identity or OM version mismatch")
     entries = data.get("plugins")
     if not isinstance(entries, list) or len(entries) != len(OFFICIAL_PLUGINS):
-        raise ValueError("catalog must contain exactly the two official plugins")
+        raise ValueError("catalog must contain exactly the four official plugins")
     for entry in entries:
         _validate_entry(entry, version)
     if {e["id"] for e in entries} != {p[0] for p in OFFICIAL_PLUGINS}:
@@ -133,7 +134,8 @@ def validate_wheel(path: Path, entry: dict) -> None:
             if (len(metadata.get_all("Name", [])) != 1 or normalized_name != entry["distribution"]
                     or metadata.get_all("Version") != [entry["version"]]
                     or metadata.get_all("Requires-Python") != [entry["requires_python"]]
-                    or metadata.get_all("Requires-Dist") or metadata.get_all("Provides-Extra")):
+                    or metadata.get_all("Requires-Dist", []) != _DEPENDENCIES.get(entry["id"], [])
+                    or metadata.get_all("Provides-Extra")):
                 raise ValueError("plugin wheel metadata or dependency mismatch")
             if (headers.get_all("Wheel-Version") != ["1.0"]
                     or headers.get_all("Root-Is-Purelib") != ["true"]
@@ -161,7 +163,8 @@ def compatibility_notes(catalog: dict) -> str:
     return (f"# Official plugins for options-monitor {catalog['om_version']}\n\n"
             f"Requires exactly OM {catalog['om_version']} (tag `{catalog['tag']}`, "
             f"commit `{catalog['commit']}`) and Python >=3.12.\n"
-            "Pure Python wheels (`py3-none-any`), no package dependencies. "
+            "Four pure Python wheels (`py3-none-any`). Feishu declares `lark-oapi`; "
+            "PM, position-advice and WeChat have no dependencies. "
             "Install only with the matching OM release; other OM versions are incompatible.\n\n"
             "Official Release wheel versions follow OM VERSION. Source/pip packages may retain "
             "their own project version (currently 0.1.0); that source version is distinct from "
@@ -179,7 +182,7 @@ def verify_publication(directory: Path, *, tag: str, commit: str | None = None) 
         if commit is not None and catalog["commit"] != commit:
             raise ValueError("plugin publication commit mismatch")
         if {p.name for p in directory.glob("*.whl")} != {e["asset"] for e in catalog["plugins"]}:
-            raise ValueError("plugin publication must contain exactly two wheels")
+            raise ValueError("plugin publication must contain exactly four wheels")
         for entry in catalog["plugins"]:
             validate_wheel(directory / entry["asset"], entry)
         if (directory / NOTES).read_text() != compatibility_notes(catalog):
@@ -214,7 +217,8 @@ def build(*, source: Path, output: Path) -> dict:
             text = (original / "pyproject.toml").read_text()
             project = tomllib.loads(text)["project"]
             if (project["name"] != distribution or project["requires-python"] != ">=3.12"
-                    or project.get("dependencies") != []):
+                    or project.get("dependencies") != _DEPENDENCIES.get(plugin_id, [])
+                    or project.get("optional-dependencies")):
                 raise ValueError("plugin source metadata differs from official contract")
             text, count = re.subn(r'(?m)^version\s*=\s*"[^"]+"\s*$', f'version = "{version}"', text)
             if count != 1 or tomllib.loads(text)["project"]["version"] != version:

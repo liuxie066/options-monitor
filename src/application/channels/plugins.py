@@ -35,7 +35,8 @@ def load_channel_plugin(channel: str, module: str | None = None) -> ModuleType:
     distribution, root = CHANNEL_PACKAGES[channel]
     if not channel_plugin_installed(channel):
         raise AgentToolError(code="CHANNEL_PLUGIN_NOT_INSTALLED",
-            message=f"{channel} channel requires optional package {distribution}")
+            message=f"{channel} channel requires optional package {distribution}",
+            hint=f"运行 om plugins install {'feishu' if channel == 'feishu' else 'wechat'} 预览安装；确认后加 --confirm，安装不启用")
     # An installed package's broken dependencies are genuine failures, not absence.
     return importlib.import_module(root + (f".{module}" if module else ""))
 

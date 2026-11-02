@@ -892,6 +892,7 @@ def test_feishu_ws_check_reports_missing_sdk() -> None:
     assert out["ok"] is False
     assert out["error"]["code"] == "CONFIG_ERROR"
     assert out["data"]["settings"]["sdk_available"] is False
+    assert "om plugins install feishu --confirm" in out["error"]["hint"]
 
 
 def test_feishu_ws_check_requires_config_scope() -> None:

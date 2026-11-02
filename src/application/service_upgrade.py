@@ -2517,6 +2517,7 @@ def _validate_target_managed_plugins(
         "from pathlib import Path\n"
         "sys.path.insert(0, sys.argv[1])\n"
         "import src\n"
+        "from src.application import plugin_runtime\n"
         "from src.application.plugin_runtime import PLUGINS, plugin_store, read_managed_plugin\n"
         "root = Path(sys.argv[1]).resolve()\n"
         "version = (root / 'VERSION').read_text().strip()\n"
@@ -2528,12 +2529,17 @@ def _validate_target_managed_plugins(
         "    plugin = importlib.import_module(module)\n"
         "    expected = plugin_store(root) / plugin_id / 'site' / module / '__init__.py'\n"
         "    assert Path(plugin.__file__).resolve() == expected.resolve(), 'plugin did not load from target store'\n"
-        "    if plugin_id == 'pm':\n"
+        "    if hasattr(plugin_runtime, 'validate_plugin_import'):\n"
+        "        plugin_runtime.validate_plugin_import(plugin_id)\n"
+        # Historical rollback targets predate the shared four-plugin validator.
+        "    elif plugin_id == 'pm':\n"
         "        from src.application.portfolio_management import load_portfolio_management_client_class\n"
         "        assert callable(load_portfolio_management_client_class())\n"
-        "    else:\n"
+        "    elif plugin_id == 'position-advice':\n"
         "        from domain.domain.close_advice import require_position_advice_plugin\n"
         "        require_position_advice_plugin()\n"
+        "    else:\n"
+        "        raise ImportError('target release lacks channel plugin validation')\n"
     )
     _run_required(
         [str(_release_python(target_dir)), "-I", "-c", code, str(target_dir), json.dumps(selected)],
@@ -3720,6 +3726,8 @@ def service_upgrade(
             include_feishu, include_wechat = _message_package_selection(
                 previous_dir=previous_dir, runtime_root=runtime, run_cmd=run_cmd, operations=operations,
             )
+            include_feishu = include_feishu and "feishu" not in managed_plugins
+            include_wechat = include_wechat and "wechat" not in managed_plugins
             runtime_prepare = _ensure_release_runtime(
                 target_dir=target_dir,
                 cache_root=cache,

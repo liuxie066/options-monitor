@@ -84,7 +84,7 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 
 ## 官方可选插件
 
-官方插件固定为 `pm`（PM 接入）和 `position-advice`（持仓评估与建议）。包含本分发功能的 Release 提供两个 `py3-none-any.whl`、`om-plugins.json` 和 `om-plugins.md`，绑定精确 OM 版本、tag、commit、Python >=3.12 及资产摘要。该路径尚未发布；不能假定旧 Release 已有这些资产，也不会退回下载其他版本或第三方包。
+官方插件固定为 `pm`（PM 接入）、`position-advice`（持仓评估与建议）、`feishu`（飞书收发）和 `wechat`（微信收发）。包含本分发功能的 Release 提供四个 `py3-none-any.whl`、`om-plugins.json` 和 `om-plugins.md`，绑定精确 OM 版本、tag、commit、Python >=3.12 及资产摘要。该路径尚未发布；不能假定旧 Release 已有这些资产，也不会退回下载其他版本的插件。
 
 源码版与完整运行包使用同一入口；添加插件时无需另行使用 pip、Git 或安装系统 Python：
 
@@ -94,15 +94,19 @@ om plugins list --format json
 om plugins install pm                         # 默认只预览
 om plugins install pm --confirm
 om plugins install position-advice --confirm
+om plugins install feishu --confirm
+om plugins install wechat --confirm
 om plugins uninstall pm                      # 默认只预览
 om plugins uninstall pm --confirm
 ```
 
 `list` 只读本地状态，不联网。安装从当前 OM 版本的官方稳定 Release 获取清单，确认后仅下载所选 wheel；校验资产摘要、大小、包元数据、RECORD 和隔离导入，再原子发布安装目录。缺资产、版本不配套或校验失败会中止，不修改配置和已有安装。
 
+飞书插件依赖 `lark-oapi`，用户无需另行安装 SDK。确认安装时复用目标解释器中已验证可用的 SDK，不强制降级；源码版缺 SDK 时，使用该实例的 pip 按 `constraints/runtime-bundle.txt` 下载到插件专属 `dependencies/` 目录，保留文件摘要并验证实际 SDK API 和依赖兼容性。安装失败不启用插件、不改源码 venv。此步骤需要可访问 Python 包索引；预览不执行。运行包复用其已锁定的 SDK，缺失或损坏时拒绝安装，不向不可变运行包补包。微信无第三方依赖。
+
 文件位于代码目录同级 `.om-plugins/<代码绝对路径摘要>/<插件名>/`，与运行包的不可变文件清单分离。安装选择属于这个 OM 代码实例，改变账户或运行目录不改变安装选择；新代码路径需由受控升级迁移选择。进程固定使用启动时的物理代码目录，切换 `current` 不会让旧进程改读新版本插件。直接搬迁代码后应重新检查安装状态。请以该实例实际运行用户执行安装和卸载，插件目录为该用户私有，不要用 sudo 改变归属。
 
-安装不等于启用：PM 仍由 `portfolio_management.enabled` 控制，持仓建议仍由 `close_advice.enabled` 控制。命令不改配置、凭据、账本、历史报告或服务；已加载插件的进程需另行重启，新进程按需加载。损坏的托管安装可先明确卸载再重装。受控升级在切换前安装并校验目标版本的已选插件，目标资产缺失会保留当前实例；见[升级流程](RELEASE_PROCESS.md)。
+安装不等于启用：PM 仍由 `portfolio_management.enabled` 控制，持仓建议仍由 `close_advice.enabled` 控制；消息渠道仍使用 `channels.feishu`、`channels.wechat_clawbot` 的总开关、收信和通知开关。命令不改配置、凭据、账本、历史报告或服务；已加载插件的进程需另行重启，新进程按需加载。损坏的托管安装可先明确卸载再重装。受控升级在切换前安装并校验目标版本的已选插件，目标资产缺失会保留当前实例；见[升级流程](RELEASE_PROCESS.md)。
 
 卸载先将安装原子移出加载目录，再清理文件；移出失败保留原安装，清理失败则明确显示已卸载及残留目录（JSON 为 `cleanup_pending`、`retained_directory`），这些残留不会被加载，不应误认作仍已安装。
 
@@ -142,7 +146,7 @@ PM 默认关闭。安装后设置全局 `portfolio_management.enabled: true`；�
 同名插件。源码 service upgrade 保留当前实例实际安装的 PM 扩展和 Longbridge SDK，
 与配置是否启用无关；未安装或主动卸载的包不会因配置仍启用而补装。首次从内置 PM 的
 旧版迁移时，仅为有效旧配置已启用的 PM 安装扩展。若目标是运行包且需要保留 pip 安装的插件或长桥 SDK，
-升级在切换前拒绝；通过 `om plugins` 托管的 PM、持仓建议另走官方资产迁移路径。缓存及切换前校验见
+升级在切换前拒绝；通过 `om plugins` 托管的 PM、持仓建议、飞书和微信另走官方资产迁移路径。缓存及切换前校验见
 [升级流程](RELEASE_PROCESS.md)；首次迁移必须使用含修复的新控制器，旧版自动升级器不能
 自行获得目标 release 中的修复。
 
@@ -162,8 +166,9 @@ PM 默认关闭。安装后设置全局 `portfolio_management.enabled: true`；�
 
 飞书与微信分别安装，也可均不安装。每个包包括收发传输；核心 CLI、本地扫描、报告和历史读取
 不要求消息包。Feishu Bitable 数据集成独立于消息插件。
-当前仅支持源码安装；安装器使用 `--source --with-feishu` / `--source --with-wechat`，
-两者可同时选择。也可使用实例的 Python 从源码根目录安装或移除：
+源码版与运行包均可通过[官方可选插件](#官方可选插件)安装 `feishu`、`wechat`，两者可同时选择。
+以下源码开发方式仍保留：安装器使用 `--source --with-feishu` / `--source --with-wechat`，
+也可使用实例的 Python 从源码根目录安装或移除：
 
 ```bash
 ./.venv/bin/python -m pip install ./plugins/feishu-channel
@@ -174,7 +179,8 @@ PM 默认关闭。安装后设置全局 `portfolio_management.enabled: true`；�
 安装不启用；按 [配置契约](../CONFIGS.md#消息渠道) 设置各渠道总开关、收信与主动通知。
 开发依赖安装两包，以保留完整回归；基础 server 依赖不再强制安装飞书 SDK。
 缺包与配置关闭是不同状态，`om channel status` 分别展示。选择了消息插件的升级必须保留安装选择，
-固定运行包无法追加可选包时在切换前拒绝；首次迁移仍使用含修复的新升级控制器。
+托管选择通过目标版本官方资产保留；pip 安装的消息包不能直接迁移进固定运行包，切换前拒绝。
+首次迁移仍使用含修复的新升级控制器。
 
 ## macOS
 
