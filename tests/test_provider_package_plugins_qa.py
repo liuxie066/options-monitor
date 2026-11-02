@@ -91,7 +91,8 @@ def audit(event, args):
         forbidden(event)()
     if event == "open" and isinstance(args[0], (str, bytes, os.PathLike)):
         path = Path(os.fsdecode(args[0])).resolve()
-        if path == evidence_path:
+        # pip uses the null device on Linux; it does not persist user data.
+        if path in {evidence_path, Path(os.devnull)}:
             return
         mode = args[1] or ""
         flags = args[2] or 0
@@ -385,6 +386,19 @@ def test_qa_harness_records_caught_network_and_write_attempts(sandbox):
     assert attempts[:2] == ["socket.create_connection", "urlopen"]
     assert attempts[2].startswith("write outside scratch:")
     assert not (sandbox.work.parent / "qa-must-not-write").exists()
+
+
+def test_qa_harness_allows_null_sink_but_blocks_external_writes(sandbox):
+    outside = sandbox.work.parent / "qa-null-must-not-write"
+    _, evidence = sandbox.run('''
+        with open(os.devnull, "w") as stream:
+            stream.write("discarded")
+        try: Path(sys.argv[3]).write_text("must never be written")
+        except AssertionError: pass
+    ''', arguments=(outside,), success=False)
+    assert evidence["returncode"] == 0, evidence
+    assert evidence["attempts"] == [{"kind": "forbidden", "detail": "write outside scratch: " + str(outside.resolve())}]
+    assert not outside.exists()
 
 
 def test_qa_harness_removes_environment_plugins_and_real_sdk(sandbox):
