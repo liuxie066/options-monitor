@@ -12,26 +12,45 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import venv
 import zipfile
 
 import pytest
 
 from src.application import plugin_distribution as distribution, plugin_runtime as runtime
 from src.interfaces.cli import main as cli
+from tests.plugin_release_helpers import copy_channel_core
 
 SOURCE = Path(__file__).resolve().parents[1]
 VERSION = "9.9.9"
 
 
+def write_test_sdk(site, *, requirement=""):
+    """Contract-only SDK fixture; real wheel acceptance is a separate offline QA."""
+    content = {
+        "lark_oapi/__init__.py": "from . import ws\nclass EventDispatcherHandler:\n    @staticmethod\n    def builder(*args): raise AssertionError('must not construct a dispatcher')\n",
+        "lark_oapi/ws/__init__.py": "class Client:\n    def __init__(self,*args,**kwargs): raise AssertionError('must not connect')\n",
+        "lark_oapi/core/__init__.py": "",
+        "lark_oapi/core/enum.py": "class LogLevel:\n    INFO=1\n",
+        "lark_oapi-1.6.5.dist-info/METADATA": "Metadata-Version: 2.4\nName: lark-oapi\nVersion: 1.6.5\n" + requirement,
+    }
+    for name, text in content.items():
+        path = site / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+
 def make_wheel(folder, plugin_id, *, extra=None, code_override=None):
     item = runtime.PLUGINS[plugin_id]
     module = item["module"]
-    metadata = f"{module}-{VERSION}.dist-info"
+    distribution_name = item["distribution"].replace("-", "_")
+    metadata = f"{distribution_name}-{VERSION}.dist-info"
     files = {path.relative_to(SOURCE / "plugins" / item["source"] / "src").as_posix(): path.read_bytes()
              for path in (SOURCE / "plugins" / item["source"] / "src" / module).rglob("*.py")}
     if code_override is not None:
         files[f"{module}/__init__.py"] = code_override.encode()
-    files[f"{metadata}/METADATA"] = f"Metadata-Version: 2.4\nName: {item['distribution']}\nVersion: {VERSION}\nRequires-Python: >=3.12\n".encode()
+    requirement = "Requires-Dist: lark-oapi\n" if plugin_id == "feishu" else ""
+    files[f"{metadata}/METADATA"] = f"Metadata-Version: 2.4\nName: {item['distribution']}\nVersion: {VERSION}\nRequires-Python: >=3.12\n{requirement}".encode()
     files[f"{metadata}/WHEEL"] = b"Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
     files.update(extra or {})
     record = io.StringIO()
@@ -41,7 +60,7 @@ def make_wheel(folder, plugin_id, *, extra=None, code_override=None):
         writer.writerow([name, "sha256=" + digest, len(data)])
     writer.writerow([f"{metadata}/RECORD", "", ""])
     files[f"{metadata}/RECORD"] = record.getvalue().encode()
-    asset = f"{module}-{VERSION}-py3-none-any.whl"
+    asset = f"{distribution_name}-{VERSION}-py3-none-any.whl"
     path = folder / asset
     with zipfile.ZipFile(path, "w") as archive:
         for name, data in files.items():
@@ -51,8 +70,17 @@ def make_wheel(folder, plugin_id, *, extra=None, code_override=None):
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "size": path.stat().st_size}
 
 
+@pytest.fixture(scope="module")
+def plugin_python(tmp_path_factory):
+    environment = tmp_path_factory.mktemp("plugin-target-python")
+    venv.EnvBuilder(with_pip=False).create(environment)
+    site = next((environment / "lib").glob("python*/site-packages"))
+    shutil.copytree(Path(importlib.util.find_spec("packaging").origin).parent, site / "packaging")
+    return environment / "bin/python"
+
+
 @pytest.fixture
-def official(tmp_path, monkeypatch):
+def official(tmp_path, monkeypatch, plugin_python):
     root = tmp_path / "release"
     root.mkdir()
     (root / "VERSION").write_text(VERSION)
@@ -61,6 +89,7 @@ def official(tmp_path, monkeypatch):
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(SOURCE / rel, target)
+    copy_channel_core(SOURCE, root)
     (root / "domain").symlink_to(SOURCE / "domain", target_is_directory=True)
     for item in runtime.PLUGINS.values():
         target = root / "plugins" / item["source"]
@@ -98,6 +127,17 @@ def official(tmp_path, monkeypatch):
     monkeypatch.setattr(distribution, "code_root", lambda: root)
     monkeypatch.setattr(runtime, "code_root", lambda: root)
     monkeypatch.setattr(distribution, "_environment_version", lambda _: None)
+    # Only dependency acquisition is replaced. Probes/imports use fresh real Python processes.
+    from types import SimpleNamespace
+    original_run = subprocess.run
+    def offline_pip(command, **kwargs):
+        if "--target" in command and "lark-oapi" in command:
+            write_test_sdk(Path(command[command.index("--target") + 1]))
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[1:3] == ["-I", "-c"]:
+            command = [str(plugin_python), *command[1:]]
+        return original_run(command, **kwargs)
+    monkeypatch.setattr(distribution, "subprocess", SimpleNamespace(run=offline_pip, TimeoutExpired=subprocess.TimeoutExpired))
     monkeypatch.setattr(cli, "repo_base", lambda: root)
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "isolated-runtime"))
     for key in ("OM_ENV_FILE",):
@@ -141,9 +181,12 @@ def test_cli_install_real_adapter_receipt_idempotency_and_uninstall(official, ca
     if plugin_id == "pm":
         from src.application.portfolio_management import load_portfolio_management_client_class
         assert load_portfolio_management_client_class() is module.PortfolioManagementClient
-    else:
+    elif plugin_id == "position-advice":
         from domain.domain.close_advice import require_position_advice_plugin
         assert require_position_advice_plugin() is module
+    else:
+        from src.application.channels.plugins import load_channel_plugin
+        assert load_channel_plugin(plugin_id) is module
     assert cli.main(["plugins", "uninstall", plugin_id, "--format", "json"]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "preview"
     assert runtime.read_managed_plugin(root, plugin_id)
@@ -340,3 +383,66 @@ assert Path(sys.modules['om_pm_plugin'].__file__).is_relative_to(plugin_store(pr
 '''
     result = subprocess.run([sys.executable, "-I", "-c", script, str(current), str(root), str(other)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_feishu_preview_does_not_prepare_sdk_or_change_activation(official, monkeypatch):
+    root, _, _, _ = official
+    def forbidden(*args, **kwargs):
+        pytest.fail("preview must not acquire dependencies or import SDK")
+    monkeypatch.setattr(distribution, "_prepare_feishu_sdk", forbidden)
+    result = distribution.install_plugin("feishu")
+    assert result["dependencies"] == ["lark-oapi"] and result["enabled_changed"] is False
+    assert not runtime.plugin_store(root).exists()
+
+
+def test_managed_sdk_visible_to_fresh_readiness_and_corruption_rejected(official, plugin_python):
+    root, _, _, _ = official
+    distribution.install_plugin("feishu", confirm=True)
+    receipt = runtime.read_managed_plugin(root, "feishu")
+    assert "lark_oapi/__init__.py" in receipt["dependency_files"]
+    code = "import sys;sys.path.insert(0,sys.argv[1]);from src.infrastructure.feishu_ws_client import is_feishu_ws_sdk_available;assert is_feishu_ws_sdk_available()"
+    result = subprocess.run([str(plugin_python), "-I", "-c", code, str(root)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    sdk = runtime.plugin_store(root) / "feishu/dependencies/lark_oapi/__init__.py"
+    sdk.write_text("raise RuntimeError('corrupt SDK')\n")
+    with pytest.raises(ValueError, match="inventory"):
+        runtime.read_managed_plugin(root, "feishu")
+    assert distribution.list_plugins()["plugins"][2]["status"] == "invalid"
+    assert distribution.uninstall_plugin("feishu", confirm=True)["status"] == "uninstalled"
+    assert not sdk.exists()
+
+
+@pytest.mark.parametrize("failure", ["install", "import", "requirements", "timeout"])
+def test_sdk_failure_has_no_active_plugin_and_leaves_existing_environment_untouched(official, monkeypatch, failure):
+    root, _, _, _ = official
+    original = distribution.subprocess.run
+    def broken(command, **kwargs):
+        if "--target" in command:
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(command, 300)
+            if failure == "install":
+                return subprocess.CompletedProcess(command, 1, "", "offline install failed")
+            site = Path(command[command.index("--target") + 1])
+            write_test_sdk(site, requirement="Requires-Dist: om-impossible-sdk-dependency>=999\n" if failure == "requirements" else "")
+            if failure == "import":
+                (site / "lark_oapi/core/enum.py").unlink()
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return original(command, **kwargs)
+    monkeypatch.setattr(distribution.subprocess, "run", broken)
+    before = {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    with pytest.raises(ValueError):
+        distribution.install_plugin("feishu", confirm=True)
+    assert runtime.read_managed_plugin(root, "feishu") is None
+    assert before == {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file() and p.suffix != ".pyc"}
+
+
+def test_missing_sdk_never_mutates_or_extends_runtime_bundle(official, monkeypatch):
+    root, _, _, _ = official
+    # This explicit bundle marker is enough to enforce the no-pip boundary.
+    (root / "om.runtime.json").write_text("{}")
+    monkeypatch.setattr(distribution, "_catalog", lambda *args: (_ for _ in ()).throw(AssertionError("not used")))
+    staged = root.parent / "staged"
+    staged.mkdir()
+    with pytest.raises(ValueError, match="bundled Feishu SDK"):
+        distribution._prepare_feishu_sdk(root, staged)
+    assert list(staged.iterdir()) == []

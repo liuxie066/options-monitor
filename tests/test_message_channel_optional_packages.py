@@ -106,6 +106,7 @@ try:
 except AgentToolError as exc:
     assert exc.code == "CHANNEL_PLUGIN_NOT_INSTALLED"
     assert {distribution!r} in str(exc)
+    assert "om plugins install" in exc.hint
 else:
     raise AssertionError("absent transport was accepted")
 assert "om_feishu_channel" not in sys.modules

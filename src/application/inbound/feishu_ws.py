@@ -254,7 +254,7 @@ def check_feishu_ws_settings(
             AgentToolError(
                 code="CONFIG_ERROR",
                 message="Feishu WebSocket SDK is missing",
-                hint="Install requirements/server.txt before running ./om inbound feishu-ws.",
+                hint="运行 om plugins list 检查安装；用 om plugins install feishu --confirm 安装渠道。已有安装的 SDK 故障按安装指南修复。",
             )
         )
     return build_response(
