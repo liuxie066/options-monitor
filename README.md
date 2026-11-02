@@ -27,7 +27,7 @@ OM 面向自己做交易决策的期权投资者，支持富途账户及长桥�
 | 候选解释与决策历史 | 解释已有扫描的排序、未入选原因，查询明确关联的结果 | [工具参考](docs/TOOL_REFERENCE.md)、[决策历史](docs/DECISION_HISTORY.md) |
 | 期权账本 | 查询开仓、平仓、指派和行权记录；写入与修复需要预览和确认 | [账本架构](docs/LEDGER_ARCHITECTURE.md)、[修账指南](docs/OPTION_POSITIONS_REPAIR.md) |
 | 期权现金流与绩效 | 查询期间期权净现金流及开仓批次现金结果；两种口径不能相加，也不能当作包含股票盈亏的账户总回报 | [绩效说明](docs/OPTION_PERFORMANCE_DESIGN.md) |
-| 指派压力测试 | 模拟所选账户仅卖出 Put、仅卖出 Call 或全部未平仓卖出期权被指派（默认全部），查看资产、资金覆盖和潜在负债；不执行实际交易，也不修改账本 | [指派情景](docs/PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md)；命令为 `om portfolio assignment-scenario --scenario short_put\|short_call\|all_short` |
+| 指派压力测试 | 模拟所选账户仅卖出 Put、仅卖出 Call 或全部未平仓卖出期权被指派（默认全部），查看资产、资金覆盖和潜在负债；不执行实际交易，也不修改账本 | [指派情景](docs/PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md) |
 | 离线研究与归档 | 收集证据、复核已有样本，支持独立名单范围、日终及附属资料持续采集和压缩交付；写入归档需显式授权 | [研究采集](docs/RESEARCH_WATCHLIST_SCOPE.md)、[Agent Handbook](docs/AGENT_WIKI.md) |
 
 账户相关功能需要对应券商的数据与权限；行情、券商、消息渠道及可选扩展的安装选择见[插件与接入](#插件与接入)。
@@ -199,7 +199,7 @@ OM · 决策简报 · [你的账户标签]
 
 ## 插件与接入
 
-OM 通过插件接入行情、券商账户和消息渠道，并提供可选的持仓建议与 Portfolio Management（PM）集成。按账户和使用需求选择，无需全部安装；行情来源与券商账户分别配置。
+OM 通过插件接入行情、券商账户和消息渠道，并提供可选的持仓建议与 Portfolio Management 集成。按账户和使用需求选择，无需全部安装；行情来源与券商账户分别配置。
 
 下表适用于 v4.6.9 起的插件划分。新安装默认包含 OpenD 行情，不默认安装券商插件。
 
@@ -209,7 +209,7 @@ OM 通过插件接入行情、券商账户和消息渠道，并提供可选的�
 | 券商 | `broker-futu` | 接入富途账户；使用富途账户数据时安装 | [首次扫描](#在-mac-上完成第一次扫描) |
 | 券商 | `broker-longbridge` | 接入长桥 AP/REAL 股票、现金，参与账户容量与风险计算；需 SDK 前提并明确绑定凭据与账号，暂不支持下单、成交同步或完整期权持仓身份 | [长桥接入](CONFIGS.md#可选能力与长桥账户)、[SDK 前提](docs/INSTALL.md#可选-pm-与长桥依赖) |
 | 持仓建议 | `position-advice` | 评估已有卖出 Put / Call，提供持有或平仓依据；按需安装并启用 | [持仓建议](docs/CLOSE_ADVICE_CONTRACT.md) |
-| 资产补充 | `pm` | 接入同机 PM，为全局持仓风险补充非富途资产；已直接读取的同账户券商镜像不重复计入，PM 现金不增加券商开仓容量；默认关闭，按需安装并启用 | [PM 安装](docs/INSTALL.md#可选-pm-与长桥依赖)、[配置指南](CONFIGURATION_GUIDE.md) |
+| 资产补充 | Portfolio Management（安装标识：`pm`） | 接入同机 Portfolio Management，为全局持仓风险补充非富途资产；已直接读取的同账户券商镜像不重复计入，Portfolio Management 现金不增加券商开仓容量；默认关闭，按需安装并启用 | [Portfolio Management 安装](docs/INSTALL.md#可选-pm-与长桥依赖)、[配置指南](CONFIGURATION_GUIDE.md) |
 | 消息 | `feishu` | 飞书消息收发、简报与提醒；按需安装，分别配置收信和主动通知 | [消息渠道](CONFIGS.md#消息渠道) |
 | 消息 | `wechat` | 微信消息收发、简报与提醒；按需安装，分别配置收信和主动通知 | [消息渠道](CONFIGS.md#消息渠道) |
 
@@ -226,9 +226,9 @@ om plugins install position-advice --confirm # 确认安装
 om plugins uninstall position-advice         # 预览移除；加 --confirm 才执行
 ```
 
-**安装不等于启用。** PM 仍需配置 `portfolio_management.enabled`，持仓建议仍需配置 `close_advice.enabled`，消息渠道仍需配置收信、通知开关与目标。安装、移除不修改配置、凭据或账本，也不自动重启服务。
+**安装不等于启用。** Portfolio Management 仍需配置 `portfolio_management.enabled`，持仓建议仍需配置 `close_advice.enabled`，消息渠道仍需配置收信、通知开关与目标。安装、移除不修改配置、凭据或账本，也不自动重启服务。
 
-各版本实际可安装的插件以对应 Release 清单为准，插件与 OM 版本精确配套；缺少对应资产时明确失败。v4.6.8 仅提供 PM、持仓建议、飞书和微信四个插件，不能安装表中的三个行情／券商插件。已有 pip 安装继续由原 Python 环境管理。
+各版本实际可安装的插件以对应 Release 清单为准，插件与 OM 版本精确配套；缺少对应资产时明确失败。v4.6.8 仅提供 Portfolio Management、持仓建议、飞书和微信四个插件，不能安装表中的三个行情／券商插件。已有 pip 安装继续由原 Python 环境管理。
 
 | 想了解什么 | 文档 |
 |---|---|
@@ -338,7 +338,7 @@ om bot run --text "评价一下我的持仓"
 
 调用前检查工具声明的输入参数、风险级别、副作用与确认要求。`read_only=true` 表示不修改产品事实或配置，不一定表示不会生成本地报告或缓存。
 
-查询账户时，保留工具返回的账户、来源、数据时间与完整性。PM 现金记录不等同于券商购买力；现金余量和合约筛选结果也不能单独证明账户能加仓。证据缺失、过期或账户冲突时，应明确说明无法判断，不能猜测币种或可卖张数。具体边界见[账户工具说明](docs/TOOL_REFERENCE.md#持仓现金与组合)。
+查询账户时，保留工具返回的账户、来源、数据时间与完整性。Portfolio Management 现金记录不等同于券商购买力；现金余量和合约筛选结果也不能单独证明账户能加仓。证据缺失、过期或账户冲突时，应明确说明无法判断，不能猜测币种或可卖张数。具体边界见[账户工具说明](docs/TOOL_REFERENCE.md#持仓现金与组合)。
 
 | 想了解什么 | 文档 |
 |---|---|
