@@ -343,6 +343,7 @@ def test_actual_message_version_and_import_validation(
     message_transition, channel, package, module, expected, installed, version, broken, ok,
 ):
     previous, target, current, events = message_transition
+    shutil.copyfile(ROOT / "src/application/plugin_runtime.py", target / "src/application/plugin_runtime.py")
     site = current.parent / "isolated-site"
     site.mkdir()
     if installed:

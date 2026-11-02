@@ -5,16 +5,15 @@ Importing this module never imports an SDK or enables a channel.
 from __future__ import annotations
 
 import importlib
-import importlib.util
 from types import ModuleType
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.plugin_runtime import PLUGINS, plugin_installed
 
-CHANNEL_PACKAGES = {
-    "feishu": ("om-feishu-channel-plugin", "om_feishu_channel"),
-    "wechat_clawbot": ("om-wechat-channel-plugin", "om_wechat_channel"),
-}
+CHANNEL_PLUGIN_IDS = {"feishu": "feishu", "wechat_clawbot": "wechat"}
+CHANNEL_PACKAGES = {channel: (PLUGINS[key]["distribution"], PLUGINS[key]["module"])
+                    for channel, key in CHANNEL_PLUGIN_IDS.items()}
 CHANNEL_FLAGS = frozenset({"enabled", "receive_enabled", "notify_enabled"})
 
 
@@ -26,8 +25,7 @@ def canonical_channel(channel: str) -> str:
 
 
 def channel_plugin_installed(channel: str) -> bool:
-    _, module = CHANNEL_PACKAGES[canonical_channel(channel)]
-    return importlib.util.find_spec(module) is not None
+    return plugin_installed(CHANNEL_PLUGIN_IDS[canonical_channel(channel)])
 
 
 def load_channel_plugin(channel: str, module: str | None = None) -> ModuleType:

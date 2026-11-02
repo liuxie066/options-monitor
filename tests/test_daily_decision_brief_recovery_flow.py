@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.application.channels import feishu_notification as feishu_transport
+
 from dataclasses import replace
 
 import pytest
@@ -239,8 +241,8 @@ def test_recovery_uses_actual_feishu_adapter_and_frozen_card(recovery, monkeypat
         fallback.append(kwargs)
         raise AssertionError("unexpected fallback")
 
-    monkeypatch.setattr(adapter, "send_message", send_message)
-    monkeypatch.setattr(adapter, "send_post_message", forbid_fallback)
+    monkeypatch.setattr(feishu_transport, "send_message", send_message)
+    monkeypatch.setattr(feishu_transport, "send_post_message", forbid_fallback)
     assert (
         mod.run_tick_notification_flow(
             _request(tmp_path, run_id="real-adapter", fixed=False, config=_feishu_config()).request

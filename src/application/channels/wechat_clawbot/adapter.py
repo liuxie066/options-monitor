@@ -6,6 +6,7 @@ from typing import Any
 from domain.domain.multi_tick import WECHAT_CLAWBOT_NOTIFICATION_PROVIDER
 from src.application.channels.contracts import ChannelCapabilities
 from src.application.channels.service import ChannelAdapter, ChannelRegistry, ChannelService, NormalizeFn, SendFn
+from src.application.channels.wechat_clawbot import notification
 
 
 def _handle_wechat_clawbot_message(payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
@@ -19,6 +20,8 @@ def build_wechat_clawbot_channel_adapter(
     normalize_fn: NormalizeFn | None = None,
     failure_stage: str = "send_wechat_clawbot_message",
 ) -> ChannelAdapter:
+    send_fn = notification.send_wechat_clawbot_message_process if send_fn is None else send_fn
+    normalize_fn = notification.normalize_wechat_clawbot_send_output if normalize_fn is None else normalize_fn
     return ChannelAdapter(
         channel=WECHAT_CLAWBOT_NOTIFICATION_PROVIDER,
         capabilities=ChannelCapabilities(
@@ -32,6 +35,8 @@ def build_wechat_clawbot_channel_adapter(
         normalize_fn=normalize_fn,
         inbound_fn=_handle_wechat_clawbot_message,
         failure_stage=failure_stage,
+        resolve_target_fn=notification.resolve_wechat_clawbot_notification_target,
+        resolve_identity_fn=notification.resolve_wechat_clawbot_notification_identity,
     )
 
 

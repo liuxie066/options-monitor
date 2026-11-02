@@ -5,6 +5,8 @@ Otherwise use installed distributions, as in CI. Never load plugin source trees.
 """
 from __future__ import annotations
 
+from src.application.channels import feishu_notification as feishu_transport
+
 import argparse
 from copy import deepcopy
 import hashlib
@@ -360,7 +362,7 @@ def test_actual_feishu_sender_uses_explicit_target_not_environment(tmp_path, mon
     cfg = route_config("explicit")
     route, = resolve_notification_delivery_routes(config=cfg, account="alpha", base=tmp_path)
     sent = []
-    monkeypatch.setattr(adapter, "send_post_message", lambda **kw: sent.append(kw) or
+    monkeypatch.setattr(feishu_transport, "send_post_message", lambda **kw: sent.append(kw) or
         {"code": 0, "data": {"message_id": "qa-confirmed"}})
     result = adapter.send_feishu_app_message(base=tmp_path, channel=route["channel"], target=route["target"],
         notifications=route["notifications"], message="private alpha", idempotency_key="qa-frozen")
@@ -819,7 +821,7 @@ def test_repair_opend_global_public_path_real_installed_facade_mock_http(tmp_pat
         return {"code": 0, "data": {"message_id": f"qa-{len(http)}"}}
 
     monkeypatch.setattr(feishu_bot, "with_tenant_token_retry", lambda app, secret, send: send("qa-token"))
-    monkeypatch.setattr(adapter, "send_post_message", partial(feishu_bot.send_post_message, http_json_fn=send_http))
+    monkeypatch.setattr(feishu_transport, "send_post_message", partial(feishu_bot.send_post_message, http_json_fn=send_http))
     cfg = route_config("shared", account="alpha")
     cfg["accounts"] = ["alpha", "beta"]
     cfg["notifications"]["opend_alert_after_consecutive_failures"] = 1

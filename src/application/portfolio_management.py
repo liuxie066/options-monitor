@@ -110,8 +110,11 @@ def load_portfolio_management_client_class() -> Any:
     from importlib import import_module
 
     from src.application.portfolio_management_contract import PortfolioManagementUnavailableError
+    from src.application.plugin_runtime import plugin_installed
 
     try:
+        if not plugin_installed("pm"):
+            raise ImportError("PM package is absent or incompatible; use om plugins list")
         return import_module("om_pm_plugin").PortfolioManagementClient
     except ImportError as exc:
         raise PortfolioManagementUnavailableError(

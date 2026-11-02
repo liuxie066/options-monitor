@@ -291,7 +291,7 @@ def test_validation_executes_installed_package_against_target_core(
 ):
     previous, target, current, events = transition
     root = Path(__file__).resolve().parents[1]
-    for name in ("portfolio_management.py", "portfolio_management_contract.py"):
+    for name in ("portfolio_management.py", "portfolio_management_contract.py", "plugin_runtime.py"):
         shutil.copyfile(root / "src/application" / name, target / "src/application" / name)
     site = current.parent / "isolated-site"
     site.mkdir()

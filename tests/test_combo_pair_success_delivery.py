@@ -5,6 +5,8 @@ import socket
 
 import pytest
 
+from src.application.channels import feishu_notification as feishu_transport
+
 from src.application.futu_portfolio_context import build_futu_position_snapshot
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.trades import attribution, auto_intake, receipt
@@ -276,7 +278,7 @@ def test_feishu_offline_adapter_success_has_stable_identity_and_actual_route(tmp
         user_open_id="offline-recipient",
         credential_missing_fields=[],
     )
-    monkeypatch.setattr(adapter, "resolve_feishu_bot_config", lambda *a, **kw: fake)
+    monkeypatch.setattr(feishu_transport, "resolve_feishu_bot_config", lambda *a, **kw: fake)
     routekey = notification_route_identity_hash(
         provider="feishu_app", channel="feishu_app", sender=fake.app_id, recipient=fake.user_open_id
     )
@@ -289,7 +291,7 @@ def test_feishu_offline_adapter_success_has_stable_identity_and_actual_route(tmp
         http.append(kw)
         return {"code": 0, "data": {"message_id": "offline-feishu-combo"}}
 
-    monkeypatch.setattr(adapter, "send_post_message", post)
+    monkeypatch.setattr(feishu_transport, "send_post_message", post)
 
     def deliver(payload):
         return receipt.send_trade_lifecycle_outbox_payload(

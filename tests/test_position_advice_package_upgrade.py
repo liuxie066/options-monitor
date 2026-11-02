@@ -174,6 +174,8 @@ def test_pre_switch_validation_executes_actual_import_and_version_check(
     previous, target, current, events = advice_transition
     shutil.copytree(ROOT / "domain", target / "domain", dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns("__pycache__"))
+    for name in ("position_advice_plugin.py", "plugin_runtime.py"):
+        shutil.copyfile(ROOT / "src/application" / name, target / "src/application" / name)
     site = current.parent / "isolated-site"
     site.mkdir()
     if installed:

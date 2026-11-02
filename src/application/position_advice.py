@@ -11,7 +11,8 @@ import sqlite3
 from typing import Any
 from uuid import uuid4
 
-from domain.domain.close_advice import CloseAdviceInput, evaluate_close_advice
+from domain.domain.close_advice import CloseAdviceInput
+from src.application.position_advice_plugin import evaluate_close_advice
 from domain.domain.expiration_dates import expiration_market_date
 from domain.domain.option_position_identity import normalize_account
 from domain.domain.symbol_identity import symbol_market

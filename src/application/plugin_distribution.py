@@ -15,12 +15,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import tomllib
 import uuid
 import zipfile
 
 from src.application import runtime_bundle
-from src.application.plugin_runtime import PLUGINS, code_root, plugin_store, read_managed_plugin
+from src.application.plugin_runtime import PLUGINS, code_root, expected_plugin_version, plugin_store, read_managed_plugin
 from src.infrastructure.private_storage import ensure_private_directory, exclusive_private_file_lock
 
 
@@ -49,10 +48,7 @@ def list_plugins(*, repo_root: Path | None = None) -> dict:
         try:
             receipt = read_managed_plugin(root, key)
             environment_version = _environment_version(key)
-            project = root / "plugins" / item["source"] / "pyproject.toml"
-            expected = (_version(root) if receipt else
-                        tomllib.loads(project.read_text())["project"]["version"]
-                        if environment_version is not None and project.is_file() else "")
+            expected = _version(root) if receipt else expected_plugin_version(key, repo_root=root)
             installed_version = receipt["version"] if receipt else environment_version
             rows.append({"id": key, "distribution": item["distribution"], "installed": installed_version is not None,
                          "version": installed_version, "compatible": installed_version == expected if installed_version else None,

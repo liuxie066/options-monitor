@@ -730,10 +730,15 @@ def test_managed_rollback_to_release_before_shared_import_validator(managed_roll
     # This target predates provider packages and the shared validator.
     shutil.rmtree(plugin_store(ctx.previous) / "market-opend")
     owner.write_text(subprocess.check_output(["git", "show", "86f0582:src/application/plugin_runtime.py"], cwd=ROOT, text=True) + "\ndel validate_plugin_import\n")
+    # Keep the historical loader coherent with its historical runtime API.
+    pm_owner = ctx.previous / "src/application/portfolio_management.py"
+    pm_owner.write_text(subprocess.check_output(
+        ["git", "show", "86f0582:src/application/portfolio_management.py"], cwd=ROOT, text=True))
     if ctx.bundled:
         path = ctx.previous / runtime_bundle.MANIFEST
         manifest = json.loads(path.read_text())
         manifest["files"]["src/application/plugin_runtime.py"] = runtime_bundle.sha256(owner)
+        manifest["files"]["src/application/portfolio_management.py"] = runtime_bundle.sha256(pm_owner)
         path.write_text(json.dumps(manifest))
     ctx.events.clear()
     ctx.requests.clear()

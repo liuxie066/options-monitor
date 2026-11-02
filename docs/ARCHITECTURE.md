@@ -92,6 +92,15 @@ code root pinned at process startup; a current-symlink switch cannot rebind an
 existing process to the target's plugins. Runtime/account selection does not
 change package selection. Core
 startup registers a lazy finder without importing plugins or contacting services.
+Managed inventory and environment distribution/version admission share
+`plugin_runtime`; source checkouts use each package's project version, and hosts
+without package sources use `VERSION`. Discovery of an absent package stays empty;
+importable unowned or incompatible packages are rejected before execution.
+Application PM/advice/channel loaders also check admission for cached modules;
+a cached environment owner cannot impersonate a selected managed package. Restart
+with the intended installation instead of silently rebinding a running process.
+Standalone domain-only advice keeps its offline policy API contract without a
+host dependency; OM application evaluations and upgrade probes use the host gate.
 Upgrade stages and validates target wheels before switching the current release.
 Rollback validates the target's existing managed selection and actual loading,
 plus pip-owned Providers and SDK prerequisites when the target supports Provider packages,
@@ -234,7 +243,14 @@ Feishu / WeChat optional channel transports
 
 `src.application.channels` owns channel capability registration and dispatch, so
 Inbound control and outbound notifications are capabilities of the
-same channel model. `src.application.inbound` should stay thin: extract channel
+same channel model. Each official builder supplies outbound transport, response
+normalization and target/sender/recipient resolution through `ChannelAdapter`.
+Feishu-specific fallback and receipt interpretation live in
+`channels/feishu_notification.py`; WeChat binding interpretation lives in its
+channel owner. Shared delivery keeps fixed composition and compatibility exports;
+shared routes keep authorization, account selection, duplicate checks and identity
+hashing. Actual send receipts bind the identity used during sending, not a later
+identity lookup. `src.application.inbound` should stay thin: extract channel
 payloads, enforce channel-specific receive/reply mechanics, and build the
 transport request.
 `src.application.channels.plugins` lazily loads separately installed Feishu/WeChat

@@ -44,6 +44,13 @@ def install_plugin(plugin_id, *, repo_root, confirm, python_executable):
 ''')
     for key in ("broker-futu", "broker-longbridge"):
         item = plugin_runtime.PLUGINS[key]
+        project = Path("plugins") / item["source"] / "pyproject.toml"
+        (fixture / project).parent.mkdir(parents=True)
+        shutil.copyfile(ROOT / project, fixture / project)
+        version = plugin_runtime.expected_plugin_version(key, repo_root=ROOT)
+        info = fixture / (item["distribution"].replace("-", "_") + f"-{version}.dist-info")
+        info.mkdir()
+        (info / "METADATA").write_text(f"Name: {item['distribution']}\nVersion: {version}\n")
         module = fixture / item["module"]
         module.mkdir()
         (module / "__init__.py").write_text('''

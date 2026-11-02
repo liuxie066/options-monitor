@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.application.channels import feishu_notification as feishu_transport
+
 from src.application.channels.wechat_clawbot import notification as wechat
 from src.application.channels.wechat_clawbot.state import (
     WechatClawbotState, resolve_wechat_clawbot_state_dir,
@@ -285,9 +287,9 @@ def test_real_feishu_sender_and_process_use_single_frozen_bot_identity_even_duri
                                        response={"http_status": 400, "feishu_code": 230001})
         return {"code": 0, "data": {"message_id": f"fixture-{kind}"}}
 
-    monkeypatch.setattr(adapter, "resolve_feishu_bot_config", resolve_bot)
-    monkeypatch.setattr(adapter, "send_message", lambda **kwargs: transport("card", kwargs))
-    monkeypatch.setattr(adapter, "send_post_message", lambda **kwargs: transport("post", kwargs))
+    monkeypatch.setattr(feishu_transport, "resolve_feishu_bot_config", resolve_bot)
+    monkeypatch.setattr(feishu_transport, "send_message", lambda **kwargs: transport("card", kwargs))
+    monkeypatch.setattr(feishu_transport, "send_post_message", lambda **kwargs: transport("post", kwargs))
     message, card = _fallback_envelope()
     process = adapter.send_feishu_app_message_process(
         base=tmp_path, channel="feishu_app", target="unused-authoring-hint", message=message,

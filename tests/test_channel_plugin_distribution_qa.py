@@ -216,6 +216,8 @@ def qa(tmp_path, qa_python):
     for directory in ('src', 'domain', 'om_strategy_core', 'constraints'):
         shutil.copytree(ROOT/directory, root/directory, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     shutil.copy2(ROOT/'VERSION', root/'VERSION')
+    (root/'requirements').mkdir()
+    shutil.copy2(ROOT/'requirements/longbridge.txt', root/'requirements/longbridge.txt')
     for name in ('om', 'om-agent'):
         shutil.copy2(ROOT/name, root/name)
     for item in plugin_runtime.PLUGINS.values():
@@ -279,12 +281,21 @@ def test_real_cli_install_preview_confirm_idempotency_uninstall(qa, key):
         assert receipt['dependency_files']
         assert len(Path(env['QA_PIP']).read_text().splitlines()) == 1
         assert run({'probe': True})['available']
-    assert command(run, 'uninstall', key)['status'] == 'preview'
-    assert plugin_runtime.read_managed_plugin(root, key)
-    assert command(run, 'uninstall', key, True)['status'] == 'uninstalled'
-    assert command(run, 'uninstall', key, True)['status'] == 'not_installed'
-    assert run({'probe': True})['available'] is False
-    assert inventory(root) == before
+    if plugin_runtime.PLUGINS[key].get('kind') == 'market':
+        installed = inventory(root)
+        for confirm in (False, True):
+            error = command(run, 'uninstall', key, confirm, expected=2)['error']
+            assert error['code'] == 'PLUGIN_ERROR'
+            assert 'last valid market provider' in error['message']
+            assert plugin_runtime.read_managed_plugin(root, key) == receipt
+            assert inventory(root) == installed
+    else:
+        assert command(run, 'uninstall', key)['status'] == 'preview'
+        assert plugin_runtime.read_managed_plugin(root, key)
+        assert command(run, 'uninstall', key, True)['status'] == 'uninstalled'
+        assert command(run, 'uninstall', key, True)['status'] == 'not_installed'
+        assert run({'probe': True})['available'] is False
+        assert inventory(root) == before
 
 
 @pytest.mark.parametrize('selection', [(), ('feishu',), ('wechat',), ('feishu', 'wechat')])

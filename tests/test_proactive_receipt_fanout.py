@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.application.channels import feishu_notification as feishu_transport
+
 from domain.domain.multi_tick import notification_route_identity_hash
 
 from src.application import notification_fanout as fanout
@@ -206,7 +208,7 @@ def test_system_alert_fanout_never_falls_back_and_resumes_disabled_obligation(tm
 
 def test_feishu_explicit_route_honors_target_legacy_keeps_env(tmp_path, controls, monkeypatch):
     calls = []
-    monkeypatch.setattr(adapter, "send_post_message", lambda **kwargs: calls.append(kwargs) or {"code": 0, "data": {"message_id": "fixture"}})
+    monkeypatch.setattr(feishu_transport, "send_post_message", lambda **kwargs: calls.append(kwargs) or {"code": 0, "data": {"message_id": "fixture"}})
     for notifications in ({}, {"_explicit_route_target": True}):
         adapter.send_feishu_app_message(base=tmp_path, channel="feishu_app", target="route-user", message="fixture", notifications=notifications)
     assert [call["open_id"] for call in calls] == ["legacy-user", "route-user"]
@@ -304,7 +306,7 @@ def test_explicit_channels_without_routes_all_off_never_resolves_credentials(tmp
     config, _ = controls
     config["notifications"] = {"enabled": True, "provider": "feishu_app", "target": "legacy-target"}
     config["channels"]["feishu"]["notify_enabled"] = False
-    monkeypatch.setattr(routing, "resolve_feishu_bot_send_target", lambda **_: pytest.fail("disabled credentials"))
+    monkeypatch.setattr(routing, "build_notification_channel_registry", lambda **_: pytest.fail("disabled credentials"))
     if family == "inbox":
         path, key, kwargs = _inbox_receipt(tmp_path, config)
         result = receipt.send_trade_intake_receipt(**kwargs)
