@@ -446,3 +446,38 @@ def test_missing_sdk_never_mutates_or_extends_runtime_bundle(official, monkeypat
     with pytest.raises(ValueError, match="bundled Feishu SDK"):
         distribution._prepare_feishu_sdk(root, staged)
     assert list(staged.iterdir()) == []
+
+
+@pytest.mark.parametrize("uv_available", [False, True])
+def test_sdk_installer_targets_private_stage_and_exact_python(official, monkeypatch, plugin_python, uv_available):
+    root, _, _, _ = official
+    staged = root.parent / "sdk-staging"
+    staged.mkdir()
+    monkeypatch.setattr(distribution.shutil, "which", lambda name: "/tools/uv" if uv_available else None)
+    monkeypatch.setenv("UV_PREFIX", "/must-not-write")
+    monkeypatch.setenv("UV_NO_DEPS", "1")
+    monkeypatch.setenv("PIP_TARGET", "/must-not-write")
+    calls = []
+    original = distribution.subprocess.run
+    def acquire(command, **kwargs):
+        if "--target" in command:
+            calls.append((command, kwargs))
+        return original(command, **kwargs)
+    monkeypatch.setattr(distribution.subprocess, "run", acquire)
+    before = {p.relative_to(plugin_python.parent.parent): p.read_bytes()
+              for p in plugin_python.parent.parent.rglob("*") if p.is_file()}
+    files = distribution._prepare_feishu_sdk(root, staged, python_executable=plugin_python)
+    assert "lark_oapi/__init__.py" in files
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    if uv_available:
+        assert command[:6] == ["/tools/uv", "--no-config", "--no-cache", "--no-python-downloads", "pip", "install"]
+        assert command[command.index("--python") + 1] == str(plugin_python)
+        assert command[command.index("--link-mode") + 1] == "copy"
+    else:
+        assert command[:6] == [str(plugin_python), "-I", "-m", "pip", "--isolated", "install"]
+    assert command[command.index("--target") + 1] == str(staged / "dependencies")
+    assert command[command.index("-c") + 1] == str(root / "constraints/runtime-bundle.txt")
+    assert not any(name.startswith(("UV_", "PIP_")) for name in kwargs["env"])
+    assert before == {p.relative_to(plugin_python.parent.parent): p.read_bytes()
+                      for p in plugin_python.parent.parent.rglob("*") if p.is_file()}
