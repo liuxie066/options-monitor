@@ -8,3 +8,6 @@ setuptools>=77
 ./plugins/position-advice
 ./plugins/feishu-channel
 ./plugins/wechat-channel
+./plugins/market-opend
+./plugins/broker-futu
+./plugins/broker-longbridge

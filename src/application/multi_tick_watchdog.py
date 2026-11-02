@@ -8,13 +8,14 @@ from typing import Any, Callable
 
 from src.application.account_config import build_account_portfolio_source_plan, resolve_futu_account_ids
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings
-from src.application.market_data_provider import resolve_market_data_provider
+from src.application.market_data_provider import require_market_data_provider
+from src.application.plugin_runtime import plugin_installed
 
 
 def required_opend_probes(base_cfg, accounts, *, resolve_watchlist_config, is_futu_fetch_source):
     """Quote selection and broker authority are independent capability requirements."""
     probes = set()
-    if resolve_market_data_provider(base_cfg).name == "opend":
+    if require_market_data_provider(base_cfg).name == "opend":
         for sym in resolve_watchlist_config(base_cfg):
             fetch = (sym or {}).get("fetch") or {}
             if is_futu_fetch_source(fetch.get("source")):
@@ -22,6 +23,8 @@ def required_opend_probes(base_cfg, accounts, *, resolve_watchlist_config, is_fu
                             int(fetch.get("port") or 11111), "quote", (), "REAL"))
     for account in accounts:
         if build_account_portfolio_source_plan(base_cfg, account=account).primary_source != "futu":
+            continue
+        if not plugin_installed("broker-futu"):
             continue
         settings = infer_futu_portfolio_settings(base_cfg, account=account)
         probes.add((str(settings.get("host") or "127.0.0.1"), int(settings.get("port") or 11111),

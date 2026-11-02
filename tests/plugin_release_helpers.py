@@ -3,11 +3,47 @@ import base64
 import csv
 import hashlib
 import io
+import importlib.util
 import json
+from pathlib import Path
 import shutil
 from zipfile import ZipFile
 
 from src.application import plugin_release as release
+
+
+def copy_provider_core(source, target):
+    """Use real transport imports while keeping SDK calls forbidden in fixtures."""
+    names = ["requirements/longbridge.txt", "src/infrastructure/futu_gateway.py",
+             "src/infrastructure/futu_dataframe.py", "src/infrastructure/opend_retcodes.py",
+             "src/infrastructure/net_port.py", "src/infrastructure/longbridge_gateway.py"]
+    for package in ("src/application/settings", "src/application/secret_store"):
+        names.extend(path.relative_to(source).as_posix() for path in (source / package).rglob("*.py"))
+    for name in names:
+        destination = target / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source / name, destination)
+
+
+def provider_test_dependencies(site):
+    """Expose only core numeric dependencies, never ambient installed plugin owners."""
+    for name in ("numpy", "pandas", "dateutil", "six", "pytz", "tzdata"):
+        spec = importlib.util.find_spec(name)
+        if spec is None:
+            continue
+        source = Path(spec.origin)
+        source = source.parent if spec.submodule_search_locations else source
+        destination = site / (name if spec.submodule_search_locations else source.name)
+        if not destination.exists():
+            destination.symlink_to(source, target_is_directory=source.is_dir())
+    for name, data in {
+        "longbridge/__init__.py": "",
+        "longbridge/openapi.py": "class Config:\n    def __init__(self,*a,**k): raise AssertionError('SDK construction forbidden')\nclass TradeContext:\n    def __init__(self,*a,**k): raise AssertionError('SDK connection forbidden')\n",
+        "longbridge-5.3.0.dist-info/METADATA": "Name: longbridge\nVersion: 5.3.0\n",
+    }.items():
+        path = site / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(data)
 
 
 def copy_channel_core(source, target):

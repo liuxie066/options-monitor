@@ -304,7 +304,7 @@ VERSION="$(cat VERSION)"
 
 ### 官方可选插件资产
 
-包含本分发功能的 Release 由 `scripts/build_plugin_wheels.py` 在临时源码副本中构建 PM、持仓建议、飞书、微信四个纯 Python wheel；源项目版本不被修改，官方 wheel 版本跟随 OM VERSION。产物为四个版本化 `py3-none-any.whl`、`om-plugins.json` 和 `om-plugins.md`，清单及兼容说明绑定精确 OM 版本、tag、commit、Python >=3.12、文件大小和 SHA-256。不存在插件市场或第三方包发现。
+包含本分发功能的 Release 由 `scripts/build_plugin_wheels.py` 在临时源码副本中构建 PM、持仓建议、飞书、微信、OpenD 行情、富途券商、长桥券商七个纯 Python wheel；源项目版本不被修改，官方 wheel 版本跟随 OM VERSION。产物为七个版本化 `py3-none-any.whl`、`om-plugins.json` 和 `om-plugins.md`，清单及兼容说明绑定精确 OM 版本、tag、commit、Python >=3.12、文件大小和 SHA-256。不存在插件市场或第三方包发现。
 
 PR qualification 构建并校验上述资产；release reusable workflow 构建、上传同一组资产，发布回读逐文件验证摘要、catalog、METADATA、WHEEL、RECORD 及兼容说明。校验 owner 为 `src/application/plugin_release.py`，不会安装或发布。源码接线和本地构建成功不证明 GitHub Release 已提供资产；本路径尚未发布，必须以实际上传与回读结果为准。
 
@@ -588,7 +588,9 @@ true 也不补装。首次安装可用 `scripts/install.sh --with-position-advic
 回滚保留回滚目标原有的安装选择，不下载、安装或迁移插件。确认回滚时，在暂存配置、切换
 `current` 和操作服务之前，以目标解释器校验目标已有托管插件的 receipt 和实际加载；
 坏 receipt 或导入失败会中止，即使选择不重启服务也不能跳过。预览只校验本地 receipt，不加载插件。
-长桥仍是独立 SDK，不在这四个官方插件中；基础运行包自检不能替代其迁移资格。
+`market-opend`、`broker-futu`、`broker-longbridge` 也使用同一官方管理路径；长桥 SDK 仍是显式独立前提，基础运行包自检不能替代其迁移资格。
+
+Provider 首次迁移由下述新控制器驱动：旧固定目录尚无 `market-opend` 时，准备默认行情及有效账户配置所需的券商插件；无法读取必要配置时中止。已支持 Provider 插件的实例以实际安装选择为准，残留账户配置或 SDK 不会使主动卸载的券商复活。目标资产、导入、SDK 和默认行情在切换前校验，失败保留 current。历史四插件回滚保留目标原合同，不向其补装 Provider 包。
 
 首次进入包含本修复的版本时，须由**含修复的新升级控制器**驱动旧实例。旧 release 的
 `om update apply`（含自动升级 timer）仍执行旧代码，不会提前加载目标 release 的本段逻辑；

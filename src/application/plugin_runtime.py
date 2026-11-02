@@ -14,12 +14,16 @@ import json
 from pathlib import Path
 import re
 import sys
+import tomllib
 
 PLUGINS = {
     "pm": {"distribution": "om-pm-plugin", "module": "om_pm_plugin", "source": "portfolio-management"},
     "position-advice": {"distribution": "om-position-advice-plugin", "module": "om_position_advice_plugin", "source": "position-advice"},
     "feishu": {"distribution": "om-feishu-channel-plugin", "module": "om_feishu_channel", "source": "feishu-channel"},
     "wechat": {"distribution": "om-wechat-channel-plugin", "module": "om_wechat_channel", "source": "wechat-channel"},
+    "market-opend": {"distribution": "om-market-opend-plugin", "module": "om_market_opend", "source": "market-opend", "kind": "market"},
+    "broker-futu": {"distribution": "om-broker-futu-plugin", "module": "om_broker_futu", "source": "broker-futu"},
+    "broker-longbridge": {"distribution": "om-broker-longbridge-plugin", "module": "om_broker_longbridge", "source": "broker-longbridge"},
 }
 
 # A running process must not rebind to another release when current is switched.
@@ -34,6 +38,40 @@ def plugin_store(repo_root: Path) -> Path:
     root = Path(repo_root).resolve()
     identity = hashlib.sha256(str(root).encode()).hexdigest()[:24]
     return root.parent / ".om-plugins" / identity
+
+
+class PluginUnavailableError(RuntimeError):
+    code = "PLUGIN_UNAVAILABLE"
+
+
+def plugin_installed(plugin_id: str) -> bool:
+    """Inspect installation identity without importing the package or any SDK."""
+    item = PLUGINS[plugin_id]
+    root = code_root()
+    try:
+        if read_managed_plugin(root, plugin_id) is not None:
+            return True
+        version = importlib.metadata.version(item["distribution"])
+        project = root / "plugins" / item["source"] / "pyproject.toml"
+        expected = (tomllib.loads(project.read_text())["project"]["version"] if project.is_file()
+                    else (root / "VERSION").read_text().strip())
+        return version == expected and importlib.util.find_spec(item["module"]) is not None
+    except (OSError, ValueError, ImportError, KeyError):
+        return False
+
+
+def require_plugin(plugin_id: str):
+    """Load an installed capability lazily; never fall back to repository sources."""
+    if plugin_installed(plugin_id):
+        try:
+            return importlib.import_module(PLUGINS[plugin_id]["module"])
+        except (ImportError, OSError, RuntimeError) as exc:
+            raise PluginUnavailableError(
+                f"Plugin {plugin_id} cannot load; check om plugins list and use om plugins install {plugin_id} --confirm"
+            ) from exc
+    raise PluginUnavailableError(
+        f"Plugin {plugin_id} is unavailable; use om plugins install {plugin_id} --confirm"
+    )
 
 
 def _validate_inventory(site: Path, files: dict) -> None:
@@ -103,6 +141,21 @@ def validate_plugin_import(plugin_id: str) -> None:
         validate_feishu_sdk()
     elif plugin_id == "wechat":
         assert callable(importlib.import_module(module + ".ilink_client").WechatClawbotClient)
+    elif plugin_id == "market-opend":
+        assert callable(plugin.OpenDMarketDataProvider)
+    elif plugin_id == "broker-futu":
+        assert callable(plugin.resolve_portfolio_provider) and callable(plugin.build_ready_broker_gateway)
+    elif plugin_id == "broker-longbridge":
+        assert callable(plugin.LongbridgeGateway) and callable(plugin.resolve_portfolio_provider)
+        try:
+            from longbridge.openapi import Config, TradeContext
+            requirement = (code_root() / "requirements/longbridge.txt").read_text()
+            pin = next(line.strip().split("==", 1)[1] for line in requirement.splitlines()
+                       if line.strip().startswith("longbridge=="))
+            if importlib.metadata.version("longbridge") != pin or not (callable(Config) and callable(TradeContext)):
+                raise ImportError("incompatible Longbridge SDK")
+        except (ImportError, OSError, StopIteration) as exc:
+            raise ImportError("Longbridge SDK unavailable or incompatible; install requirements/longbridge.txt in the source runtime; immutable bundles are not modified") from exc
 
 
 def read_managed_plugin(repo_root: Path, plugin_id: str) -> dict | None:

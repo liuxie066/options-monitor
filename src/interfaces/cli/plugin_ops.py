@@ -11,7 +11,7 @@ from src.application.plugin_runtime import PLUGINS
 
 
 def add_plugin_commands(subparsers: Any) -> None:
-    parser = subparsers.add_parser("plugins", help="官方可选插件：查看、安装和卸载；安装不启用")
+    parser = subparsers.add_parser("plugins", help="官方插件：查看、安装和卸载；行情至少一个，券商可不安装")
     sub = parser.add_subparsers(dest="plugin_command", required=True)
     listing = sub.add_parser("list", help="离线查看此 OM 代码实例的插件安装状态")
     listing.add_argument("--format", choices=("text", "json"), default="text")

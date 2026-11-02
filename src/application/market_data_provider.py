@@ -1,4 +1,4 @@
-"""Builtin market-data capability boundary; no provider discovery or live I/O on selection.
+"""Installed market-data capability boundary; no provider discovery or live I/O on selection.
 
 Implementations return the existing opening quote, underlier, expiration and
 earnings evidence contracts unchanged. Provider choice never grants broker
@@ -7,67 +7,54 @@ account access or changes freshness, retry, cancellation or resource budgets.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from om_market_opend import OpenDMarketDataProvider
 
 
-class OpenDMarketDataProvider:
+__all__ = [
+    "OpenDMarketDataProvider",
+    "resolve_market_data_provider",
+    "require_market_data_provider",
+    "provider_by_name",
+    "market_data_source",
+    "fetch_symbol_request",
+    "fetch_symbol",
+    "open_quote_gateway",
+    "resolve_quote_route",
+    "get_stock_spot",
+    "get_trading_days_with_receipt",
+    "get_market_state",
+    "get_quote_rights",
+    "get_underlier_observation",
+    "discover_option_expirations",
+    "get_underlier_observations",
+    "fetch_option_chains",
+    "prefetch_market_earnings_calendars",
+]
+
+
+class _OpenDProviderFacade:
     name = "opend"
 
-    def resolve_quote_route(self, config, **kwargs):
-        from src.application.futu_quote_routing import resolve_futu_quote_route
-        return resolve_futu_quote_route(config, **kwargs)
+    def load(self):
+        from src.application.plugin_runtime import require_plugin
+        return require_plugin("market-opend").OpenDMarketDataProvider()
 
-    def open_quote_gateway(self, **kwargs):
-        from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
-        return build_ready_futu_quote_gateway(**kwargs)
-
-    def get_pooled_quote_gateway(self, pool, **kwargs):
-        return pool.get_gateway(**kwargs)
-
-    def fetch_symbol_request(self, request, **kwargs):
-        from src.application.opend_symbol_fetching import fetch_symbol_request
-        return fetch_symbol_request(request, **kwargs)
-
-    def get_underlier_observations(self, *args, **kwargs):
-        from src.application.opend_market_snapshot_fetching import get_underlier_observations_opend
-        return get_underlier_observations_opend(*args, **kwargs)
-
-    def get_underlier_observation(self, *args, **kwargs):
-        from src.application.opend_market_snapshot_fetching import get_underlier_observation
-        return get_underlier_observation(*args, **kwargs)
-
-    def get_stock_spot(self, *args, **kwargs):
-        from src.application.opend_market_snapshot_fetching import get_spot_opend
-        return get_spot_opend(*args, **kwargs)
-
-    def get_trading_days_with_receipt(self, gateway, **kwargs):
-        return gateway.get_trading_days_with_receipt(**kwargs)
-
-    def get_market_state(self, gateway, codes):
-        return gateway.get_market_state(codes)
-
-    def get_quote_rights(self, gateway, *, market):
-        return gateway.get_quote_rights(market=market)
-
-    def discover_option_expirations(self, *args, **kwargs):
-        from src.application.opend_symbol_chain_fetching import discover_option_expirations
-        return discover_option_expirations(*args, **kwargs)
-
-    def fetch_option_chains(self, **kwargs):
-        from src.application.option_chain_fetching import fetch_option_chains
-        return fetch_option_chains(**kwargs)
-
-    def fetch_earnings_calendar(self, **kwargs):
-        from src.application.earnings_calendar import fetch_market_earnings_calendar
-        return fetch_market_earnings_calendar(**kwargs)
-
-    def prefetch_earnings_calendars(self, **kwargs):
-        from src.application.earnings_calendar import prefetch_market_earnings_calendars
-        return prefetch_market_earnings_calendars(**kwargs)
+    def __getattr__(self, name):
+        return getattr(self.load(), name)
 
 
-# A fixed builtin table. Tests may replace it with isolated implementations.
-_BUILTIN_PROVIDERS = {"opend": OpenDMarketDataProvider()}
+def __getattr__(name):
+    if name == "OpenDMarketDataProvider":
+        from src.application.plugin_runtime import require_plugin
+        return require_plugin("market-opend").OpenDMarketDataProvider
+    raise AttributeError(name)
+
+
+# Fixed identity table; tests may inject isolated providers here.
+_BUILTIN_PROVIDERS = {"opend": _OpenDProviderFacade()}
 
 
 def resolve_market_data_provider(config: Mapping[str, Any] | None = None):
@@ -78,6 +65,12 @@ def resolve_market_data_provider(config: Mapping[str, Any] | None = None):
     if not isinstance(name, str) or name not in _BUILTIN_PROVIDERS:
         raise ValueError(f"unsupported market_data.provider: {name!r}")
     return _BUILTIN_PROVIDERS[name]
+
+
+def require_market_data_provider(config: Mapping[str, Any] | None = None):
+    """Admit a live operation without making historical identity reads import plugins."""
+    provider = resolve_market_data_provider(config)
+    return provider.load() if isinstance(provider, _OpenDProviderFacade) else provider
 
 
 def provider_by_name(name: str):

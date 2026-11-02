@@ -305,6 +305,9 @@ def build_futu_quote_context(*, host: str, port: int, deadline: float | None = N
     """Create a quote context with bounded handshake and reconnect waits."""
 
     check_fetch_control(deadline, cancelled)
+    from src.application.plugin_runtime import require_plugin
+
+    require_plugin("market-opend")
     _ensure_futu_api_importable()
     import futu
 
@@ -321,6 +324,9 @@ def build_futu_trade_context(
     *, host: str, port: int, is_encrypt: bool | None = None,
     on_init_connect_error: Callable[[str], None] | None = None,
 ) -> Any:
+    from src.application.plugin_runtime import require_plugin
+
+    require_plugin("broker-futu")
     _ensure_futu_api_importable()
     import futu
 
@@ -365,6 +371,9 @@ class _FutuAPIBackend:
 
     def _ensure_quote_client(self, *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None) -> Any:
         check_fetch_control(deadline, cancelled)
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("market-opend")
         if self._quote_client is None:
             controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
             self._quote_client = build_futu_quote_context(host=self.host, port=self.port, **controls)
@@ -376,6 +385,9 @@ class _FutuAPIBackend:
         return self._quote_client
 
     def _ensure_trade_client(self) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("broker-futu")
         if self._trade_client is None:
             self._trade_client = build_futu_trade_context(host=self.host, port=self.port)
             LOG.info(
@@ -398,6 +410,9 @@ class _FutuAPIClient:
         self.is_option_chain_cache_enabled = bool(is_option_chain_cache_enabled)
 
     def _quote(self) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("market-opend")
         ensure = getattr(self.backend, "_ensure_quote_client", None)
         if callable(ensure):
             return ensure()
@@ -405,6 +420,9 @@ class _FutuAPIClient:
         return quote
 
     def _trade(self) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("broker-futu")
         ensure = getattr(self.backend, "_ensure_trade_client", None)
         if callable(ensure):
             return ensure()
@@ -751,6 +769,10 @@ class FutuGateway:
     _closed_client_ids: set[int] = field(default_factory=set, init=False, repr=False)
 
     def _raise_mapped(self, exc: Exception, *, action: str, redact_errors: bool = False) -> None:
+        from src.application.plugin_runtime import PluginUnavailableError
+
+        if isinstance(exc, PluginUnavailableError):
+            raise exc
         mapped = _map_error(exc, action=action)
         if redact_errors:
             # Account-list SDK failures may embed complete account IDs.
@@ -774,6 +796,9 @@ class FutuGateway:
 
     def _quote_client(self, *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None) -> Any:
         check_fetch_control(deadline, cancelled)
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("market-opend")
         try:
             ensure = getattr(self.backend, "_ensure_quote_client", None)
             if callable(ensure):
@@ -790,6 +815,9 @@ class FutuGateway:
         raise AssertionError("unreachable")
 
     def _trade_client(self, *, redact_errors: bool = False) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("broker-futu")
         try:
             ensure = getattr(self.backend, "_ensure_trade_client", None)
             if callable(ensure):
@@ -1013,6 +1041,9 @@ class FutuGateway:
         raise AssertionError("unreachable")
 
     def get_option_chain(self, *, is_force_refresh: bool = False, **kwargs: Any) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("market-opend")
         try:
             return self.client.get_option_chain(is_force_refresh=is_force_refresh, **kwargs)
         except TypeError as exc:
@@ -1027,6 +1058,9 @@ class FutuGateway:
         raise AssertionError("unreachable")
 
     def get_snapshot(self, codes: Iterable[str]) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("market-opend")
         try:
             return self.client.get_snapshot(code_list=list(codes))
         except Exception as exc:
@@ -1034,6 +1068,9 @@ class FutuGateway:
         raise AssertionError("unreachable")
 
     def get_stock_basicinfo(self, *, market: str, codes: Iterable[str]) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("market-opend")
         try:
             return self.client.get_stock_basicinfo(
                 market=str(market),
@@ -1045,6 +1082,9 @@ class FutuGateway:
         raise AssertionError("unreachable")
 
     def get_market_state(self, codes: Iterable[str]) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("market-opend")
         try:
             return self.client.get_market_state(code_list=list(codes))
         except Exception as exc:
@@ -1053,6 +1093,9 @@ class FutuGateway:
 
     def get_quote_rights(self, *, market: str) -> dict[str, Any]:
         """Read quote-only SDK capabilities, discarding all user information."""
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("market-opend")
         market = str(market).strip().upper()
         if market not in {"US", "HK"}:
             raise ValueError("quote rights require US or HK market")
@@ -1078,6 +1121,9 @@ class FutuGateway:
             return unavailable
 
     def get_positions(self, **kwargs: Any) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("broker-futu")
         try:
             return self.client.get_positions(**kwargs)
         except Exception as exc:
@@ -1085,6 +1131,9 @@ class FutuGateway:
         raise AssertionError("unreachable")
 
     def get_account_balance(self, **kwargs: Any) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("broker-futu")
         try:
             return self.client.get_account_balance(**kwargs)
         except Exception as exc:
@@ -1092,6 +1141,9 @@ class FutuGateway:
         raise AssertionError("unreachable")
 
     def get_funds(self, **kwargs: Any) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("broker-futu")
         try:
             return self.client.get_funds(**kwargs)
         except Exception as exc:
@@ -1099,6 +1151,9 @@ class FutuGateway:
         raise AssertionError("unreachable")
 
     def get_order_list(self, **kwargs: Any) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("broker-futu")
         try:
             return self.client.get_order_list(**kwargs)
         except Exception as exc:
@@ -1106,6 +1161,9 @@ class FutuGateway:
         raise AssertionError("unreachable")
 
     def get_order_list_with_receipt(self, **kwargs: Any) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("broker-futu")
         try:
             return self.client.get_order_list_with_receipt(**kwargs)
         except Exception as exc:
@@ -1113,6 +1171,9 @@ class FutuGateway:
         raise AssertionError("unreachable")
 
     def get_deal_list(self, **kwargs: Any) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("broker-futu")
         try:
             return self.client.get_deal_list(**kwargs)
         except Exception as exc:
@@ -1120,6 +1181,9 @@ class FutuGateway:
         raise AssertionError("unreachable")
 
     def get_history_orders(self, **kwargs: Any) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("broker-futu")
         try:
             return self.client.get_history_orders(**kwargs)
         except Exception as exc:
@@ -1127,6 +1191,9 @@ class FutuGateway:
         raise AssertionError("unreachable")
 
     def get_history_deals(self, **kwargs: Any) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("broker-futu")
         try:
             return self.client.get_history_deals(**kwargs)
         except Exception as exc:
@@ -1134,6 +1201,9 @@ class FutuGateway:
         raise AssertionError("unreachable")
 
     def get_order_fees(self, **kwargs: Any) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("broker-futu")
         try:
             return self.client.get_order_fees(**kwargs)
         except Exception as exc:
@@ -1141,6 +1211,9 @@ class FutuGateway:
         raise AssertionError("unreachable")
 
     def get_trading_days(self, **kwargs: Any) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("market-opend")
         try:
             params = dict(kwargs)
             if "market" in params:
@@ -1151,6 +1224,9 @@ class FutuGateway:
         raise AssertionError("unreachable")
 
     def get_positions_with_receipt(self, **kwargs: Any) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("broker-futu")
         try:
             return self.client.get_positions_with_receipt(**kwargs)
         except Exception as exc:
@@ -1164,6 +1240,9 @@ class FutuGateway:
         self,
         **kwargs: Any,
     ) -> Any:
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("market-opend")
         try:
             params = dict(kwargs)
             if "market" in params:
@@ -1214,6 +1293,9 @@ class FutuGateway:
             kwargs["sort_type"] = sort_type
         if filter_list is not None:
             kwargs["filter_list"] = filter_list
+        from src.application.plugin_runtime import require_plugin
+
+        require_plugin("market-opend")
         try:
             return self.client.get_earnings_calendar(**kwargs)
         except FutuGatewayCapabilityUnavailableError:
@@ -1334,24 +1416,15 @@ def build_ready_futu_broker_gateway(
     backend_cls: Any | None = None,
     client_cls: Any | None = None,
 ) -> FutuGateway:
-    """Build a gateway and verify only broker identity/readiness."""
+    """Lazy compatibility facade for the optional Futu broker package."""
+    from src.application.plugin_runtime import require_plugin
 
-    gateway = build_futu_gateway(
-        host=host,
-        port=port,
+    return require_plugin("broker-futu").build_ready_broker_gateway(
+        expected_account_ids=expected_account_ids, trd_env=trd_env,
+        host=host, port=port,
         is_option_chain_cache_enabled=is_option_chain_cache_enabled,
-        backend_cls=backend_cls,
-        client_cls=client_cls,
+        backend_cls=backend_cls, client_cls=client_cls,
     )
-    try:
-        gateway.ensure_broker_ready(
-            expected_account_ids=expected_account_ids,
-            trd_env=trd_env,
-        )
-        return gateway
-    except BaseException:
-        gateway.close()
-        raise
 
 
 def _normalize_required_account_ids(values: Iterable[str]) -> set[str]:

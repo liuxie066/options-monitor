@@ -25,7 +25,7 @@ from src.application.config_sections import (
 )
 from src.application.config_profiles import apply_profiles
 from src.application.market_data_provider import (
-    resolve_market_data_provider, provider_by_name, market_data_source,
+    resolve_market_data_provider, require_market_data_provider, provider_by_name, market_data_source,
     get_underlier_observations as get_underlier_observations_opend,
     fetch_option_chains, prefetch_market_earnings_calendars,
 )
@@ -1971,6 +1971,7 @@ def prefetch_required_data(
     producer_run_id: str | None = None,
     scan_at_utc: datetime | None = None,
 ) -> dict[str, Any]:
+    require_market_data_provider(cfg)
     with exclusive_private_file_lock(
         Path(base) / "output_shared" / "state" / "required_data_prefetch.lock"
     ):

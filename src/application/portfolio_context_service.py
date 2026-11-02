@@ -18,6 +18,7 @@ from src.application.account_config import (
     resolve_account_type, resolve_account_longbridge_settings, resolve_account_broker,
 )
 from src.application.broker_provider import resolve_broker_portfolio_provider
+from src.application.plugin_runtime import PluginUnavailableError
 from src.application.config_defaults import cash_snapshot_ttl_sec
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings, _runtime_market
 from src.infrastructure.exchange_rates import exchange_rate_observation_status, project_exchange_rate_snapshot, shared_exchange_rate_cache_path
@@ -271,6 +272,12 @@ def load_account_portfolio_context(
         result["exchange_rate_status"] = exchange_rate_observation_status(result["exchange_rates"])
         return result
 
+    try:
+        provider = resolve_broker_portfolio_provider(config, account=account, futu_provider=fetch_futu_portfolio_context_fn)
+    except PluginUnavailableError as exc:
+        log(f"[CTX] broker portfolio unavailable: {exc}")
+        return evaluate({"cash_provider_error": type(exc).__name__, "errors": [str(exc)]}, "unavailable")
+
     if ttl is None:
         return evaluate({}, "unavailable")
     trusted_cached_cash = None
@@ -305,12 +312,14 @@ def load_account_portfolio_context(
     if exchange_rate_observation is not _FX_NOT_PROVIDED:
         kwargs["exchange_rate_observation"] = exchange_rate_observation
     try:
-        provider = resolve_broker_portfolio_provider(config, account=account, futu_provider=fetch_futu_portfolio_context_fn)
         context = provider(**kwargs)
         if not isinstance(context, dict):
             raise ValueError("portfolio response is not an object")
     except (TimeoutError, CancelledError):
         raise
+    except PluginUnavailableError as exc:
+        log(f"[WARN] broker portfolio unavailable: {exc}")
+        return evaluate({"cash_provider_error": type(exc).__name__, "errors": [str(exc)]}, "unavailable")
     except Exception as exc:
         log(f"[WARN] portfolio cash provider unavailable: {exc}")
         if trusted_cached_cash is not None:

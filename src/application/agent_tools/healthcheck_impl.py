@@ -19,6 +19,7 @@ from src.application.secret_resolver import (
 )
 from src.application.service_deploy import load_service_profile, service_status_from_profile
 from src.application.payload_helpers import as_dict as _dict
+from src.application import plugin_runtime
 
 
 def _quote_probe_message(probe: dict[str, Any], *, ready: bool) -> str:
@@ -120,6 +121,15 @@ def run_healthcheck_tool(
     checks: list[dict[str, Any]] = []
     validate_runtime_config(cfg, allow_empty_symbols=True)
     checks.append({"name": "runtime_config", "status": "ok", "message": "config validation passed"})
+
+    market_plugin = "market-" + str(_dict(cfg.get("market_data")).get("provider", "opend"))
+    market_installed = plugin_runtime.plugin_installed(market_plugin)
+    checks.append({
+        "name": "market_plugin", "status": "ok" if market_installed else "error",
+        "message": (f"market plugin available: {market_plugin}" if market_installed else
+                    f"required market plugin missing; om plugins install {market_plugin} --confirm"),
+        "value": {"plugin_id": market_plugin, "installed": market_installed},
+    })
 
     accounts = normalize_accounts(payload.get("accounts"), fallback=tuple(accounts_from_config(cfg)))
     checks.append(
@@ -410,6 +420,17 @@ def run_healthcheck_tool(
             "trade_intake_enabled": trade_intake_enabled,
             "futu_account_ids": [mask_account_id(x) for x in mapped_ids],
         }
+        broker_plugin = "broker-" + account_type
+        installed = plugin_runtime.plugin_installed(broker_plugin)
+        primary_preview[account].update(plugin_id=broker_plugin,
+                                        status="available" if installed else "plugin_not_installed")
+        if not installed:
+            checks.append({
+                "name": f"broker_plugin_{account}", "status": "skipped", "required": False,
+                "message": f"optional broker unavailable; om plugins install {broker_plugin} --confirm",
+                "value": {"account": account, "plugin_id": broker_plugin, "ready": False},
+            })
+            continue
         if account_type == "longbridge":
             from src.application.account_config import resolve_account_longbridge_settings
             from src.infrastructure.longbridge_gateway import credential_binding_fingerprint
@@ -477,6 +498,8 @@ def run_healthcheck_tool(
     opend_endpoints: dict[str, dict[str, Any]] = {}
     for account in accounts:
         acc_view = account_views[account]
+        if primary_preview[account]["status"] == "plugin_not_installed":
+            continue
         runtime_plan = acc_view.runtime_plan
         if acc_view.account_type == "futu":
             host = str(getattr(runtime_plan, "futu_host", "") or "").strip()
@@ -513,7 +536,9 @@ def run_healthcheck_tool(
     quote_global_state: dict[str, Any] = {}
     quote_required_fields: dict[str, Any] = {}
     quote_telnet: dict[str, Any] = {}
-    if quote_route.ok:
+    if not market_installed:
+        quote_message = f"required market plugin missing: {market_plugin}"
+    elif quote_route.ok:
         quote_symbols = list(
             dict.fromkeys(
                 str(member.symbol or "").strip().upper()
@@ -756,6 +781,8 @@ def run_healthcheck_tool(
     for account in accounts:
         if account_views[account].account_type != "futu":
             continue
+        if primary_preview[account]["status"] == "plugin_not_installed":
+            continue
         binding = broker_bindings.get(account)
         broker_ready = False
         value: dict[str, Any] = {"account": account}
@@ -842,11 +869,13 @@ def run_healthcheck_tool(
             "primary": {
                 "source": (primary_source or None),
                 "ok": bool(primary_ok),
+                "plugin_id": primary.get("plugin_id"),
+                "status": primary.get("status"),
                 **({"trade_source": primary.get("trade_source")} if primary.get("trade_source") is not None else {}),
                 **({"trade_intake_enabled": primary.get("trade_intake_enabled")} if primary.get("trade_intake_enabled") is not None else {}),
                 **({"futu_account_ids": primary.get("futu_account_ids")} if primary.get("futu_account_ids") is not None else {}),
                 **({"opend": primary.get("opend")} if primary.get("opend") is not None else {}),
-                **({key: primary[key] for key in ("broker_account_id", "binding_method", "broker_echoed", "credential_binding_valid", "asset_api_verified")}
+                **({key: primary[key] for key in ("broker_account_id", "binding_method", "broker_echoed", "credential_binding_valid", "asset_api_verified") if key in primary}
                    if account_type == "longbridge" else {}),
             },
         }
@@ -856,7 +885,7 @@ def run_healthcheck_tool(
         item for item in checks
         if item["status"] == "error" and not bool(item.get("summary_excluded"))
     ]
-    skipped = [item for item in checks if item["status"] == "skipped"]
+    skipped = [item for item in checks if item["status"] == "skipped" and item.get("required", True)]
     return (
         {
             "config": {

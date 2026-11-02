@@ -255,7 +255,7 @@ OM · 决策简报 · [你的账户标签]
 
 ## 可选插件：下载、安装与移除
 
-包含插件分发功能的官方 Release 会附带 PM、持仓建议、飞书、微信四个 wheel、`om-plugins.json` 清单和 `om-plugins.md` 兼容说明。插件与 OM 版本精确配套，无需下载整套源码寻找目录。此分发路径尚未发布；旧 Release 没有对应资产时，安装会明确失败。
+包含 Provider 插件功能的官方 Release 会附带 OpenD 行情、富途券商、长桥券商、PM、持仓建议、飞书、微信七个 wheel、`om-plugins.json` 清单和 `om-plugins.md` 兼容说明。插件与 OM 版本精确配套，无需下载整套源码寻找目录。此分发路径尚未发布；旧 Release 没有对应资产时，安装会明确失败。
 
 ```bash
 om plugins list
@@ -266,6 +266,8 @@ om plugins install feishu --confirm
 om plugins install wechat --confirm
 om plugins uninstall position-advice        # 预览；加 --confirm 才移除
 ```
+
+正常安装默认包含 `market-opend` 行情插件；券商插件可以一个也不装，按账户需要安装 `broker-futu` 或 `broker-longbridge`，也可同时安装。行情至少需要一个，托管卸载会拒绝移除最后一个有效行情插件。缺券商时，行情分析与历史查询仍可用，当前账户持仓、现金和容量明确不可用。
 
 源码版与完整运行包共用该入口。飞书 SDK 自动复用或按发布约束安装到插件专属目录，无需用户手动安装；微信无第三方依赖。安装不启用功能：PM 仍需配置 `portfolio_management.enabled`，持仓建议仍需配置 `close_advice.enabled`，消息渠道仍需配置收信、通知开关与目标；安装、移除都不自动重启服务。已有 pip 安装继续由原 Python 环境管理。完整步骤与升级保留规则见[官方可选插件](docs/INSTALL.md#官方可选插件)。
 
@@ -285,7 +287,7 @@ om plugins uninstall position-advice        # 预览；加 --confirm 才移除
 | 期权账本 | 查询开仓、平仓、指派和行权记录；写入与修复需要预览和确认；见[账本架构](docs/LEDGER_ARCHITECTURE.md)和[修账指南](docs/OPTION_POSITIONS_REPAIR.md) |
 | 期权现金流与绩效 | 查询期间期权净现金流及开仓批次现金结果；两种口径不能相加，也不能当作包含股票盈亏的账户总回报；见[绩效说明](docs/OPTION_PERFORMANCE_DESIGN.md) |
 | 指派压力测试 | 模拟所选账户仅卖出 Put、仅卖出 Call 或全部未平仓卖出期权被指派（默认全部），查看资产、资金覆盖和潜在负债；通过 `om portfolio assignment-scenario --scenario short_put\|short_call\|all_short` 选择假设；不执行实际交易，也不修改账本 |
-| 券商与行情来源 | 长桥 AP/REAL 股票、现金可参与账户容量与风险计算；凭据与账号须由用户明确绑定，暂不支持长桥下单、成交同步或完整期权持仓身份。行情独立选择，当前内置来源为 OpenD；见[配置契约](CONFIGS.md#可选能力与长桥账户) |
+| 券商与行情来源 | 长桥 AP/REAL 股票、现金可参与账户容量与风险计算；凭据与账号须由用户明确绑定，暂不支持长桥下单、成交同步或完整期权持仓身份。行情独立选择，当前来源为 `market-opend` 插件；见[配置契约](CONFIGS.md#可选能力与长桥账户) |
 | 可选 PM 与 Holdings 来源 | PM 为可独立安装、卸载的 `om-pm-plugin`，默认关闭，安装后仍需配置启用。可为全局持仓风险补充同机 PM 中的非富途资产；已直接读取的同账户券商镜像不重复计入，PM 现金不增加券商开仓容量；见[安装指南](docs/INSTALL.md#可选-pm-与长桥依赖)和[配置指南](CONFIGURATION_GUIDE.md) |
 | 离线研究与归档 | 收集证据、复核已有样本；支持独立名单范围、日终及附属资料持续采集和压缩交付，详见[研究采集合同](docs/RESEARCH_WATCHLIST_SCOPE.md)；写入归档需显式授权 |
 

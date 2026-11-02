@@ -40,7 +40,7 @@ flowchart LR
   PKG --> HTTP[PM HTTP service]
 ```
 
-- Market data uses `market_data.provider` (default/current builtin: `opend`).
+- Market data uses `market_data.provider` (default/current package: `market-opend`, provider `opend`).
   Required-data planning, prefetch, ordinary scan fetches and interactive option
   queries resolve the same capability owner. Provider failures retain their
   failure, timeout and cancellation semantics; selection does not grant broker
@@ -51,13 +51,16 @@ flowchart LR
   the actual provider in `payload.source`, without a fallback status label.
   Default OpenD evidence retains its historical source aliases and receipt format.
   Tick readiness probes OpenD quotes only when selected, and checks each actual
-  Futu broker independently with its account/environment binding. Phone-verification
+  installed Futu broker independently with its account/environment binding. Phone-verification
   state gates only runs needing either capability. The tick trading-day query uses
   the selected provider; unavailable calendars retain the existing unknown-day policy.
 - Broker assets use `account_settings.<account>.type` in generated config
   (`accounts.<account>.type` in YAML). `portfolio.source: auto` selects `futu` or
   `longbridge` for that account. Explicit mismatches fail without another broker
-  fallback. Generic identity comes from `risk_capacity.broker_capacity_binding`;
+  fallback. The optional `broker-futu` and `broker-longbridge` packages own account
+  access; zero broker packages is valid. Current portfolio loading checks package
+  availability before accepting caches. Missing capability stays unavailable, while
+  market analysis and historical evidence readers remain available. Generic identity comes from `risk_capacity.broker_capacity_binding`;
   existing OpenD v1 identity and historical candidate snapshots remain valid.
 - PM transport lives in the separately installed `om-pm-plugin` package under
   `plugins/portfolio-management`; core owns its shared exceptions and evidence
@@ -72,7 +75,13 @@ Futu v1/v2/v3 semantics; a Longbridge ID is never stored as `futu_account_id`.
 Official distribution is owned by `plugin_release.py` (versioned wheels and
 catalog), `plugin_distribution.py` (preview/install/uninstall) and the stdlib-only
 `plugin_runtime.py` (fixed identities, receipt validation and lazy import).
-The fixed IDs are `pm`, `position-advice`, `feishu` and `wechat`. Feishu alone
+The fixed IDs are `pm`, `position-advice`, `feishu`, `wechat`, `market-opend`,
+`broker-futu` and `broker-longbridge`. Normal installation includes `market-opend`
+and no broker. At least one valid market package must remain; managed removal of
+the last valid market package is rejected. Configuration/diagnostics/history can
+start without it, but live quote consumers cannot. Longbridge retains its explicit
+pinned SDK prerequisite; missing SDK rejects installation/upgrade validation without
+modifying immutable bundles. Feishu alone
 declares the SDK dependency; source hosts missing it stage constrained packages
 inside the managed plugin, while immutable bundles reuse their locked SDK.
 Dependency inventories are verified before loading, and existing environment
@@ -88,7 +97,8 @@ Rollback validates the target's existing managed selection and actual loading
 before staging configuration or switching; it neither downloads nor migrates plugins.
 Existing environment/pip installations retain their separate ownership.
 
-The scope is installed optional packages plus builtin provider adapters. There
+The scope is fixed installed capability packages and shared core transport/normalization.
+OpenD market installation never grants Futu account access. There
 is no marketplace, dynamic third-party code discovery, hot unloading or new
 trading/transaction synchronization API. Installing a package does not enable
 it or change runtime configuration. See [installation](INSTALL.md) and
