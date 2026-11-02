@@ -18,7 +18,7 @@
 
 ## 开始使用
 
-- [README](../README.md)：产品定位、五分钟开始、常用入口和安全边界。
+- [README](../README.md)：产品定位、Mac 首次扫描、常用入口和安全边界。
 - [Install](INSTALL.md)：Python 要求、安装器、release 目录和 wrapper。
 - [Getting Started](GETTING_STARTED.md)：安装后的首次配置、检查和首跑。
 - [Deploy](../DEPLOY.md)：部署入口和目录契约。

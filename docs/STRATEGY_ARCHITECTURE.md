@@ -49,7 +49,7 @@ CSP 的核心目标是：在愿意以合适价格接货、但不主动追求接�
 
 CC 的核心目标是：在愿意以合适价格卖出正股、但不主动追求被叫走的前提下，按 `mid` 挂限价等待，用整个周期的净权利金增强持股收益。
 
-架构上，OpenD 物理账户持仓与 SQLite short-call 锁定共同构成覆盖事实；Candidate Engine 负责唯一的正式过滤与排序。成本底线、召回区间、当前市值收益口径、混合持股归属和收益接近时优先更高 strike 的规范见 [CSP / CC 候选策略合同](candidate_strategy.md#6-cc)。
+架构上，所选券商的同一物理账户持仓与 SQLite short-call 锁定共同构成覆盖事实；富途使用 OpenD，长桥使用独立股票/现金适配器，缺少期权身份等必要证据时保留不可用。Candidate Engine 负责唯一的正式过滤与排序。成本底线、召回区间、当前市值收益口径、混合持股归属和收益接近时优先更高 strike 的规范见 [CSP / CC 候选策略合同](candidate_strategy.md#6-cc)。
 
 ## Combo Yield
 
