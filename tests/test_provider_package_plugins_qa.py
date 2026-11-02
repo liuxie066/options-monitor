@@ -115,6 +115,9 @@ sys.addaudithook(audit)
 # inventories, user site, or a source checkout as an accidental import root.
 sys.path[:] = [p for p in sys.path if p and "site-packages" not in p and "dist-packages" not in p]
 sys.path[:0] = json.loads(sys.argv[2])
+# Offline pip sessions need no host telemetry (lsb_release/rustc subprocesses).
+import pip._internal.network.session as qa_pip_session
+qa_pip_session.user_agent = lambda: "om-offline-provider-qa"
 class NoRealSDK(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if fullname.split(".")[0] in {"futu", "longbridge"}:
@@ -399,6 +402,26 @@ def test_qa_harness_allows_null_sink_but_blocks_external_writes(sandbox):
     assert evidence["returncode"] == 0, evidence
     assert evidence["attempts"] == [{"kind": "forbidden", "detail": "write outside scratch: " + str(outside.resolve())}]
     assert not outside.exists()
+
+
+def test_qa_pip_session_skips_host_probes_without_allowing_subprocesses(sandbox):
+    _, evidence = sandbox.run('''
+        import pip._internal.network.session as session
+        from pip._vendor import distro
+        distro.name = forbidden("pip host telemetry")
+        original_platform = sys.platform
+        try:
+            sys.platform = "linux"
+            with session.PipSession() as client:
+                assert client.headers["User-Agent"] == "om-offline-provider-qa"
+        finally:
+            sys.platform = original_platform
+        import subprocess
+        try: subprocess.run([sys.executable, "-c", "pass"], check=True)
+        except AssertionError: pass
+    ''', success=False)
+    assert evidence["returncode"] == 0, evidence
+    assert evidence["attempts"] == [{"kind": "forbidden", "detail": "subprocess.Popen"}]
 
 
 def test_qa_harness_removes_environment_plugins_and_real_sdk(sandbox):
