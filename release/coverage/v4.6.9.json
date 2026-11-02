@@ -1,0 +1,154 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.9",
+  "base": {
+    "tag": "v4.6.8",
+    "commit": "f5e1a8a8a6f67c3bf28f8bc847589bcd7618951c"
+  },
+  "reviewed_head": "20a64426a6346990bc2b4af6573617ce174af6c2",
+  "commits": [
+    {
+      "sha": "8ab4be2c84497dcf2dda8de5056619cc150a9e97",
+      "subject": "feat(plugins): extract market and broker capability packages"
+    },
+    {
+      "sha": "0fc0ecaa5a3cb6a4cae4cc991931deb8ad4137f9",
+      "subject": "chore(plugins): integrate current main before provider acceptance"
+    },
+    {
+      "sha": "7969c610cbc67f55fae5e2ec0bde7fd5b695cd69",
+      "subject": "fix(tick): preserve successful scheduler skips in CLI results"
+    },
+    {
+      "sha": "d2cd9fc7afec30b152b87fa6651f900ad29db16f",
+      "subject": "fix(providers): preserve rollback readiness and physical request evidence"
+    },
+    {
+      "sha": "0c0b0d4cffe549f4f6bb3e3b2ee44165e30477ca",
+      "subject": "test(plugins): allow null output sink in isolated QA guard"
+    },
+    {
+      "sha": "6c5c3a29a772f83fee0c6e1a9fbfb72cbaa117ce",
+      "subject": "test(plugins): isolate pip host telemetry in offline QA"
+    },
+    {
+      "sha": "25245a8ee7e6393ef1b23d5fff3f6fe0b08cc850",
+      "subject": "Merge pull request #978 from liuxie066/codex/fix-scheduler-skip-exit-20261102"
+    },
+    {
+      "sha": "6ca304dcf40229542d4a94ab6d07fab7ef3818a0",
+      "subject": "test(plugins): share offline pip setup across QA entry points"
+    },
+    {
+      "sha": "90c1f28b29322b5729ee49a989e1a28db10d5732",
+      "subject": "chore(plugins): integrate current scheduler skip contract"
+    },
+    {
+      "sha": "20a64426a6346990bc2b4af6573617ce174af6c2",
+      "subject": "Merge pull request #979 from liuxie066/codex/provider-package-plugins-20261102"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "OpenD 行情、富途券商及长桥券商拆为独立官方插件：新安装默认仅装行情，券商按账户需要选择零到多个；缺券商时当前资产和容量明确不可用，行情分析与历史查询仍可用。托管卸载保留至少一个有效行情插件，升级保留实际安装选择。",
+      "commits": [
+        "8ab4be2c84497dcf2dda8de5056619cc150a9e97",
+        "0fc0ecaa5a3cb6a4cae4cc991931deb8ad4137f9",
+        "90c1f28b29322b5729ee49a989e1a28db10d5732",
+        "20a64426a6346990bc2b4af6573617ce174af6c2"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "升级回滚前校验目标 Provider 插件及 SDK；缺失行情插件或 SDK 时不生成虚假的实际行情请求回执，研究采集明确失败而非部分完成。（#979）。",
+      "commits": [
+        "d2cd9fc7afec30b152b87fa6651f900ad29db16f"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "定时扫描合法跳过时保留成功结果，CLI 不再将休市、非运行时点或重复时点误报为失败；真正缺失行情能力仍返回失败。（#978）。",
+      "commits": [
+        "7969c610cbc67f55fae5e2ec0bde7fd5b695cd69",
+        "25245a8ee7e6393ef1b23d5fff3f6fe0b08cc850"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "0c0b0d4cffe549f4f6bb3e3b2ee44165e30477ca",
+      "reason": "仅修正隔离 QA 的离线 pip/空输出环境兼容，保留测试守卫，无用户或运行时行为变化。"
+    },
+    {
+      "commit": "6c5c3a29a772f83fee0c6e1a9fbfb72cbaa117ce",
+      "reason": "仅修正隔离 QA 的离线 pip/空输出环境兼容，保留测试守卫，无用户或运行时行为变化。"
+    },
+    {
+      "commit": "6ca304dcf40229542d4a94ab6d07fab7ef3818a0",
+      "reason": "仅修正隔离 QA 的离线 pip/空输出环境兼容，保留测试守卫，无用户或运行时行为变化。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "8ab4be2c84497dcf2dda8de5056619cc150a9e97",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/979"
+      ]
+    },
+    {
+      "commit": "0fc0ecaa5a3cb6a4cae4cc991931deb8ad4137f9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/979"
+      ]
+    },
+    {
+      "commit": "7969c610cbc67f55fae5e2ec0bde7fd5b695cd69",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/978"
+      ]
+    },
+    {
+      "commit": "d2cd9fc7afec30b152b87fa6651f900ad29db16f",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/979"
+      ]
+    },
+    {
+      "commit": "0c0b0d4cffe549f4f6bb3e3b2ee44165e30477ca",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/979"
+      ]
+    },
+    {
+      "commit": "6c5c3a29a772f83fee0c6e1a9fbfb72cbaa117ce",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/979"
+      ]
+    },
+    {
+      "commit": "25245a8ee7e6393ef1b23d5fff3f6fe0b08cc850",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/978"
+      ]
+    },
+    {
+      "commit": "6ca304dcf40229542d4a94ab6d07fab7ef3818a0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/979"
+      ]
+    },
+    {
+      "commit": "90c1f28b29322b5729ee49a989e1a28db10d5732",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/979"
+      ]
+    },
+    {
+      "commit": "20a64426a6346990bc2b4af6573617ce174af6c2",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/979"
+      ]
+    }
+  ]
+}
