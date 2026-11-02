@@ -977,6 +977,20 @@ def _render_candidate_event_card(
     compact: bool = False,
     markdown: bool = True,
 ) -> list[str]:
+    if markdown:
+        by_symbol: dict[str, list[str]] = {}
+        for item in candidates:
+            summaries = item.get("event_summary", ["事件数据不完整"])
+            if not summaries:
+                continue
+            symbol = str(item.get("symbol") or "未知标的")
+            values = by_symbol.setdefault(symbol, [])
+            for summary in summaries:
+                if summary not in values:
+                    values.append(summary)
+        return [f"{symbol}｜{'；'.join(values)}" for symbol, values in by_symbol.items()] or [
+            "已确认到期前无近期重要事件。"
+        ]
     grouped: dict[str, list[str]] = {}
     mixed_families = {item.get("family") for item in candidates if not item.get("event_normal")}
     for item in candidates:
@@ -1117,6 +1131,7 @@ def _candidate_views(
                         "event_identity": f"{symbol} · {_STRATEGY_LABELS[family]} · {put_contract} / {call_contract}（{choice}）",
                         "event_normal": _lower((row.get("event_risk") or {}).get("user_state")) == "confirmed_none"
                         if isinstance(row.get("event_risk"), Mapping) else False,
+                        "event_summary": _candidate_event_summary(row),
                         "details": [
                             *_candidate_metric_details(row, family=family, market=market),
                             _candidate_event_line(row, family=family),
@@ -1157,6 +1172,7 @@ def _candidate_views(
                     "event_identity": f"{symbol} · {_STRATEGY_LABELS[family]} · {contract}（{choice}）",
                     "event_normal": _lower((row.get("event_risk") or {}).get("user_state")) == "confirmed_none"
                     if isinstance(row.get("event_risk"), Mapping) else False,
+                    "event_summary": _candidate_event_summary(row),
                     "details": [
                         *_candidate_metric_details(row, family=family, market=market),
                         _candidate_event_line(row, family=family),
@@ -1644,6 +1660,22 @@ def _combo_return_card(candidate: Mapping[str, Any], *, market: str) -> str:
     if net_income is not None:
         parts.append(f"净收入 {_money(net_income, market=market)}")
     return " · ".join(parts) or "—"
+
+
+def _candidate_event_summary(candidate: Mapping[str, Any]) -> list[str]:
+    risk = candidate.get("event_risk") if isinstance(candidate.get("event_risk"), Mapping) else {}
+    state = _lower(risk.get("user_state"))
+    if state == "confirmed_none":
+        return []
+    if state != "confirmed_event":
+        return ["事件数据不完整"]
+    summaries = []
+    for event in risk.get("events") or [risk.get("nearest_event")]:
+        event = event if isinstance(event, Mapping) else {}
+        label = _EVENT_TYPE_LABELS.get(_lower(event.get("event_type")))
+        event_date = _event_date_label(event.get("event_date"), compact=True)
+        summaries.append(f"{event_date} {label}" if event_date and label else "事件数据不完整")
+    return summaries
 
 
 def _candidate_event_line(candidate: Mapping[str, Any], *, family: str) -> str:
@@ -2543,7 +2575,7 @@ def _event_label(event: Mapping[str, Any]) -> str:
     return f"{event_date}{verb}"
 
 
-def _event_date_label(value: Any) -> str:
+def _event_date_label(value: Any, *, compact: bool = False) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
@@ -2551,7 +2583,7 @@ def _event_date_label(value: Any) -> str:
         parsed = datetime.fromisoformat(text[:10])
     except ValueError:
         return ""
-    return f"{parsed.month} 月 {parsed.day} 日"
+    return parsed.strftime("%m-%d") if compact else f"{parsed.month} 月 {parsed.day} 日"
 
 
 def _event_expiry_relation_text(
