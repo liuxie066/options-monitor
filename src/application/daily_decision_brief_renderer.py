@@ -924,9 +924,11 @@ def _render_user_view_blocks(
             blocks.append(summary)
     blocks.extend(wheel_blocks())
     if candidates:
-        events = _render_candidate_event_card(candidates, compact=projection == "fixed_report")
+        events = _render_candidate_event_card(
+            candidates, compact=projection == "fixed_report", markdown=markdown,
+        )
         if events:
-            blocks.append("\n".join([heading("事件"), *events]))
+            blocks.extend([heading("事件"), *events])
     blocks.extend(f"补充｜{note}" for note in view.get("candidate_omissions") or [])
 
     if projection != "candidate_alert":
@@ -973,6 +975,7 @@ def _render_candidate_event_card(
     candidates: list[Mapping[str, Any]],
     *,
     compact: bool = False,
+    markdown: bool = True,
 ) -> list[str]:
     grouped: dict[str, list[str]] = {}
     mixed_families = {item.get("family") for item in candidates if not item.get("event_normal")}
@@ -991,7 +994,13 @@ def _render_candidate_event_card(
         labels = grouped.setdefault(event_line, [])
         if label not in labels:
             labels.append(label)
-    return [f"{'、'.join(labels)}：{event_line}" for event_line, labels in grouped.items()]
+    return [
+        "\n".join([
+            *[f"**{label}**" if markdown else label for label in labels],
+            event_line.replace("，", "，\n").replace("；", "；\n"),
+        ])
+        for event_line, labels in grouped.items()
+    ]
 
 
 def _compact_fixed_report_event(value: str) -> str:
