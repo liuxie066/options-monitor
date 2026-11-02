@@ -4,11 +4,7 @@ from test_assignment_position_sizing import evidence, option
 
 
 def context(*, cash=9000, shares=100, positions=(), account="lx"):
-    data = evidence(cash=cash, shares=shares)
-    for row in data["holdings"]:
-        row["account"] = account
-    data["scope"]["accounts"] = [account]
-    data["account_status"] = [{"account": account, "status": "complete"}]
+    data = evidence(cash=cash, shares=shares, account=account)
     return ShortVolPortfolioContext(
         None, {}, {}, 0, account=account, portfolio_evidence=data, assignment_positions=tuple(positions)
     )

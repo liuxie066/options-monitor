@@ -13,6 +13,7 @@ def _evidence(
     warnings=None,
     freshness_status="fresh",
     trust_status="trusted",
+    accounts=("lx",),
 ):
     return {
         "schema_version": "portfolio.valuation_evidence.v1",
@@ -30,14 +31,20 @@ def _evidence(
             "reason_codes": [],
         },
         "retrieved_at_utc": "2026-07-24T01:00:01+00:00",
-        "scope": {"accounts": ["lx"], "reporting_currency": "CNY"},
+        "scope": {"accounts": list(accounts), "reporting_currency": "CNY"},
         "snapshot": {
             "snapshot_id": "valuation-test",
             "observed_at": "2026-07-24T01:00:00+00:00",
         },
         "holdings": list(holdings or []),
         "quotes": list(quotes or []),
-        "account_status": [{"account": "lx", "status": status}],
+        # Explicit sealed cash/stock baselines also cover verified empty holdings.
+        "direct_broker_bindings": {
+            account: {"broker_id": "futu", "logical_account": account, "status": "available",
+                      "broker_account_id": f"fixture-{account}", "trd_env": "REAL", "market": "us"}
+            for account in accounts
+        },
+        "account_status": [{"account": account, "status": status} for account in accounts],
         "warnings": list(warnings or []),
     }
 
@@ -513,9 +520,7 @@ def test_cross_account_economic_net_keeps_local_funding_gap():
     lx_cash = _holding("CNY-CASH", "现金", "cash", quantity=-100, market_value_cny=-100)
     sy_cash = _holding("CNY-CASH", "现金", "cash", quantity=100, market_value_cny=100)
     sy_cash["account"] = "sy"
-    evidence = _evidence(holdings=[lx_cash, sy_cash])
-    evidence["scope"]["accounts"] = ["lx", "sy"]
-    evidence["account_status"].append({"account": "sy", "status": "complete"})
+    evidence = _evidence(holdings=[lx_cash, sy_cash], accounts=["lx", "sy"])
     result = project_assignment_scenario(
         accounts=["lx", "sy"],
         portfolio_evidence=evidence,
@@ -603,8 +608,7 @@ def test_partial_cash_preserves_known_account_without_zeroing_unknown_account():
     unknown = _holding("CNY-CASH", "现金", "cash", quantity=100, market_value_cny=None)
     known = _holding("CNY-CASH", "现金", "cash", quantity=5000, market_value_cny=5000)
     known["account"] = "sy"
-    evidence = _evidence(holdings=[unknown, known], status="partial")
-    evidence["scope"]["accounts"] = ["lx", "sy"]
+    evidence = _evidence(holdings=[unknown, known], status="partial", accounts=["lx", "sy"])
     result = project_assignment_scenario(
         accounts=["lx", "sy"], portfolio_evidence=evidence,
         option_positions=[], snapshot=_snapshot(),

@@ -426,7 +426,7 @@ def collect_watchlist_series(
                 ancillary_dir=ancillary_dir,
                 confirm=True,
                 clock=clock,
-                gateway_factory=gateway_factory or quote.build_ready_futu_quote_gateway,
+                gateway_factory=gateway_factory,
                 snapshot_limiter_root=archive_root / "limiter",
                 rate_limited_call=budgeted_call,
             )

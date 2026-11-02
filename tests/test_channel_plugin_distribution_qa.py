@@ -9,6 +9,7 @@ import hashlib
 from importlib.metadata import Distribution
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -99,7 +100,17 @@ distribution.runtime_bundle.urlopen = fetch
 actual_run = subprocess.run
 def offline_run(command, **kwargs):
     command = list(command)
-    if command[1:3] == ['-I', '-c']:
+    if command in (['file', '-b', sys.executable],
+                   ['file', '-b', str(Path(sys.executable).resolve())]):
+        return actual_run(command, **kwargs)
+    if (len(command) == 17 and command == [__import__('shutil').which('uv'),
+            '--no-config', '--no-cache', '--no-python-downloads', 'pip', 'install', '--python', sys.executable,
+            '--only-binary', ':all:', '--link-mode', 'copy', '--target', command[13],
+            '-c', str(root/'constraints/runtime-bundle.txt'), 'lark-oapi']):
+        staging = Path(command[13])
+        with open(os.environ['QA_PIP'], 'a') as out: out.write(json.dumps(command)+'\n')
+        command += ['--offline', '--no-index', '--find-links', os.environ['QA_WHEELHOUSE']]
+    elif command[1:3] == ['-I', '-c']:
         command[3] = os.environ['QA_GUARD']+'\n'+command[3]
     elif command[1:4] == ['-I', '-m', 'pip']:
         staging = Path(command[command.index('--target')+1])
@@ -145,17 +156,27 @@ def inventory(path):
             for p in path.rglob('*') if p.is_file() and '__pycache__' not in p.parts}
 
 
-@pytest.fixture(scope='module')
-def qa_python(tmp_path_factory):
+@pytest.fixture(scope='module', params=[True, False], ids=['with-pip', 'uv-no-pip'])
+def qa_python(tmp_path_factory, request):
     environment = tmp_path_factory.mktemp('channel-qa-python')
-    venv.EnvBuilder(with_pip=True, system_site_packages=False).create(environment)
+    if request.param:
+        venv.EnvBuilder(with_pip=True, system_site_packages=False).create(environment)
+    else:
+        assert re.search(r'^packaging(?:[<>=!~;\s]|$)',
+                         (ROOT/'requirements/runtime.txt').read_text(), re.MULTILINE), (
+                             'pip-free QA requires packaging to be an explicit core runtime dependency')
+        uv = shutil.which('uv')
+        assert uv, 'real uv is required for pip-free QA'
+        subprocess.run([uv, '--no-config', '--no-python-downloads', 'venv', '--offline',
+                        '--python', sys.executable, str(environment)], check=True,
+                       capture_output=True, text=True)
     python = environment/'bin/python'
     site = next((environment/'lib').glob('python*/site-packages'))
     # Reuse core dependencies, while retaining genuine absence of all plugin owners/SDK.
     excluded = {v['module'] for v in plugin_runtime.PLUGINS.values()}
     excluded |= {v['distribution'].replace('-', '_') for v in plugin_runtime.PLUGINS.values()}
     # Prefer the supplied runtime closure to the controller's older dev dependencies.
-    # lark itself is still excluded: missing SDK acquisition remains a real pip path.
+    # lark itself stays excluded so SDK acquisition uses the real offline installer.
     dependency_sites = [SDK, *(Path(entry) for entry in sys.path if entry.endswith('/site-packages'))]
     packages = (package for entry in dependency_sites for package in entry.iterdir())
     distributions = {p.name.removesuffix('.dist-info').rsplit('-', 1)[0].lower() for p in site.glob('*.dist-info')}
@@ -166,6 +187,8 @@ def qa_python(tmp_path_factory):
                 continue
             distributions.add(name)
         if (package.name.endswith('.pth') or package.name.startswith(('__editable__', 'lark_oapi'))
+                or (not request.param and (package.name in {'pip', 'setuptools', 'pkg_resources', '_distutils_hack', 'distutils-precedence.pth'}
+                    or package.name.startswith(('pip-', 'setuptools-'))))
                 or any(package.name == name or package.name.startswith(name+'-') for name in excluded)
                 or (site/package.name).exists()):
             continue
@@ -175,6 +198,12 @@ def qa_python(tmp_path_factory):
         "assert not any(d.metadata['Name'] in " + repr([v['distribution'] for v in plugin_runtime.PLUGINS.values()]) +
         " for d in importlib.metadata.distributions())"], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+    if not request.param:
+        result = subprocess.run([str(python), '-I', '-c',
+            "import importlib.util;assert all(importlib.util.find_spec(n) is None for n in ('pip','setuptools','pkg_resources'));"
+            "from packaging.requirements import Requirement;assert Requirement('lark-oapi').name == 'lark-oapi'"],
+            capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
     assert 'include-system-site-packages = false' in (environment/'pyvenv.cfg').read_text()
     return python
 
@@ -399,3 +428,48 @@ for attempt in attempts:
     assert result.returncode == 0, result.stderr
     assert {json.loads(line)['attempt'] for line in counter.read_text().splitlines()} == {
         'socket.create_connection', 'SDK.Client.__init__', 'SDK.dispatcher.builder'}
+
+
+def test_driver_allows_only_exact_file_and_uv_commands(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    calls, rejected = [], []
+    def actual_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0)
+    def forbidden(label):
+        def fail():
+            rejected.append(label)
+            raise AssertionError(label)
+        return fail
+
+    monkeypatch.setenv('QA_PIP', str(tmp_path/'pip.jsonl'))
+    monkeypatch.setenv('QA_WHEELHOUSE', str(WHEELHOUSE))
+    namespace = dict(Path=Path, sys=sys, os=os, json=json, root=tmp_path,
+                     actual_run=actual_run, forbidden=forbidden)
+    function = 'def offline_run' + DRIVER.split('def offline_run', 1)[1].split(
+        'distribution.subprocess.run =', 1)[0]
+    exec(function, namespace)
+    run = namespace['offline_run']
+    file_command = ['file', '-b', sys.executable]
+    run(file_command)
+    assert calls == [file_command]
+    resolved_command = ['file', '-b', str(Path(sys.executable).resolve())]
+    run(resolved_command)
+    assert calls[-1] == resolved_command
+    uv_command = [shutil.which('uv'), '--no-config', '--no-cache', '--no-python-downloads', 'pip', 'install',
+                  '--python', sys.executable, '--only-binary', ':all:', '--link-mode', 'copy',
+                  '--target', str(tmp_path/'dependencies'), '-c',
+                  str(tmp_path/'constraints/runtime-bundle.txt'), 'lark-oapi']
+    run(uv_command)
+    assert calls[-1] == [*uv_command, '--offline', '--no-index', '--find-links', str(WHEELHOUSE)]
+    assert json.loads((tmp_path/'pip.jsonl').read_text()) == uv_command
+    invalid = [file_command[:-1], [*file_command, 'extra'],
+               ['file', '-b', '/other/python'], ['/usr/bin/file', '-b', sys.executable],
+               uv_command[:-1], [*uv_command, '--extra'],
+               [*uv_command[:6], '--wrong-python', *uv_command[7:]],
+               [*uv_command[:15], '/other/constraints.txt', 'lark-oapi']]
+    for command in invalid:
+        with pytest.raises(AssertionError, match='unexpected subprocess'):
+            run(command)
+    assert len(calls) == 3 and len(rejected) == len(invalid)

@@ -157,14 +157,16 @@ def _daily_brief_day_fanouts(request, account, market, market_date):
 
 
 def _daily_brief_fanout_spec(request, route, brief, *, kind, identities, diff, scheduler,
-                             limits, source=None, cutoff=None, original_target=None):
-    context = _daily_brief_render_context(request, scheduler_decision=scheduler)
+                             limits, source=None, cutoff=None, original_target=None, recovery_intent=None):
+    context = (dict(recovery_intent["render_context"]) if recovery_intent is not None
+        else _daily_brief_render_context(request, scheduler_decision=scheduler))
     if original_target:
         context.update(scheduled_target_market=original_target, recovery_original_target=original_target,
             recovery_scan_at_utc=brief["generated_at_utc"])
     if kind != "fixed_failure":
-        previous = read_confirmed_fanout_attribution_context(base=request.base, account=brief["account"],
-            market=brief["market"], identity_key=route["identity_key"])
+        previous = (recovery_intent["previous_attribution_context"] if recovery_intent is not None
+            else read_confirmed_fanout_attribution_context(base=request.base, account=brief["account"],
+                market=brief["market"], identity_key=route["identity_key"]))
         context.update(build_attribution_reminder_context(brief, previous_context=previous))
         context["attribution_route_key"] = route["identity_key"]
         context.update(_daily_brief_candidate_render_context(brief,
@@ -256,7 +258,40 @@ def _prepare_daily_brief_fanout(request, account, market, scheduler, brief, pers
             deliveries=deliveries, retry_policy=FanoutRetryPolicy(2, (1000,)), now_ms=_fanout_now_ms())
 
 
+def _daily_brief_fanout_recovery_intent(request, account, market, scheduler, brief, limits):
+    """Bind eligible scan provenance in the successful history transaction."""
+    from src.application.receipt_query import receipt_digest
+
+    generated = datetime.fromisoformat(brief["generated_at_utc"].replace("Z", "+00:00"))
+    now = datetime.fromtimestamp(_fanout_now_ms() / 1000, timezone.utc)
+    recoveries = []
+    for child in read_daily_brief_fanout_children(base=request.base, account=account, market=market,
+            market_trading_date=brief["market_trading_date"]):
+        meta = child["spec"]["metadata"]
+        if meta["delivery_kind"] != "fixed_failure" or not child["delivery_confirmed"]:
+            continue
+        target = meta["scheduled_target_market"]
+        cutoff = daily_brief_recovery_cutoff(schedule_cfg=request.base_cfg.get(request.scheduler_schedule_key) or {},
+            scheduled_target_market=target)
+        after = max(datetime.fromisoformat(target),
+            datetime.fromtimestamp(child["confirmed_at_ms"] / 1000, timezone.utc))
+        if not after < generated <= now < datetime.fromisoformat(cutoff):
+            continue
+        recoveries.append({"original_failure_child_id": child["child_id"],
+            "original_failure_spec_digest": receipt_digest(child["spec"]),
+            "scheduled_target_market": target, "cutoff_utc": cutoff,
+            "scheduled_scan_target_market": request.scheduled_scan_targets_by_account[account],
+            "render_context": _daily_brief_render_context(request, scheduler_decision=scheduler),
+            "render_limits": dict(limits),
+            "previous_attribution_context": read_confirmed_fanout_attribution_context(
+                base=request.base, account=account, market=market,
+                identity_key=child["identity_key"])})
+    return {"fanout_recoveries": recoveries} if recoveries else None
+
+
 def _prepare_daily_brief_fanout_recoveries(request, account, market, market_date, scheduler, limits):
+    from src.application.receipt_query import receipt_digest
+
     if request.no_send or not notifications_enabled(request.base_cfg):
         return
     now_ms = _fanout_now_ms()
@@ -277,14 +312,20 @@ def _prepare_daily_brief_fanout_recoveries(request, account, market, market_date
         after = max(datetime.fromisoformat(target),
             datetime.fromtimestamp(child["created_at_ms"] / 1000, timezone.utc))
         source = read_daily_brief_fanout_recovery_source(base=request.base, account=account, market=market,
-            market_trading_date=market_date, after_utc=after.isoformat(), before_utc=cutoff)
+            market_trading_date=market_date, after_utc=after.isoformat(), before_utc=cutoff,
+            original_failure_child_id=child["child_id"], original_failure_spec_digest=receipt_digest(child["spec"]))
         if source is None or datetime.fromisoformat(source["brief"]["generated_at_utc"]).timestamp() * 1000 > now_ms:
+            continue
+        intent = source["recovery_intent"]
+        cutoff = min(datetime.fromisoformat(cutoff), datetime.fromisoformat(intent["cutoff_utc"])).isoformat()
+        if now_ms >= int(datetime.fromisoformat(cutoff).timestamp() * 1000):
             continue
         recipient = child["spec"]["recipient"]
         route = {**recipient, "notifications": recipient["transport_options"]}
         spec = _daily_brief_fanout_spec(request, route, source["brief"], kind="fixed_recovery_report",
-            identities=source["current_candidate_identities"], diff={}, scheduler=scheduler, limits=limits,
-            source=source, cutoff=cutoff, original_target=target)
+            identities=source["current_candidate_identities"], diff={}, scheduler=scheduler,
+            limits=intent["render_limits"], source=source, cutoff=cutoff, original_target=target,
+            recovery_intent=intent)
         prepare_notification_fanout(base=request.base, account=account, logical_key=key,
             deliveries=[spec], retry_policy=FanoutRetryPolicy(2, (1000,)), now_ms=now_ms)
 
@@ -1530,15 +1571,20 @@ def _prepare_daily_brief_notification(
                     failure_source: tuple[str, str] | None = None
                     recovery_due = False
                     if pipeline_reliable:
-                        intent = None
-                        if (scheduled_trigger and not explicit_routes and not fixed_target and not request.no_send
-                                and blocked_retry_envelope is None and scheduler.get("in_run_window") is True):
-                            intent = _daily_brief_recovery_intent(
-                                request=request, account=account, market=market, scheduler=scheduler,
-                                brief=brief, daily_limits=daily_limits,
-                            )
+                        def recovery_intent():
+                            if (scheduled_trigger and explicit_routes and not fixed_target and not request.no_send
+                                    and notifications_enabled(request.base_cfg) and scheduler.get("in_run_window") is True):
+                                return _daily_brief_fanout_recovery_intent(
+                                    request, account, market, scheduler, brief, daily_limits)
+                            if (scheduled_trigger and not explicit_routes and not fixed_target and not request.no_send
+                                    and blocked_retry_envelope is None and scheduler.get("in_run_window") is True):
+                                return _daily_brief_recovery_intent(
+                                    request=request, account=account, market=market, scheduler=scheduler,
+                                    brief=brief, daily_limits=daily_limits,
+                                )
+                            return None
                         persisted = persist_daily_decision_brief_success(
-                            base=request.base, brief=brief, **({"recovery_intent": intent} if intent else {}),
+                            base=request.base, brief=brief, recovery_intent_factory=recovery_intent,
                         )
                         previous = persisted.get("previous_successful_brief")
                         if (

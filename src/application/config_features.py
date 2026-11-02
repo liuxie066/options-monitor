@@ -53,6 +53,8 @@ def publish_feature_document(*, repo_root: Path, config_path: Path, config_doc: 
         targets.extend((Path(item["output_config_path"]), item["sha256"])
                        for item in transaction["markets"].values())
         targets.append((Path(transaction["bot"]["output_config_path"]), transaction["bot"]["sha256"]))
+        targets.extend((Path(item["output_config_path"]), item["sha256"])
+                       for item in transaction["bot"].get("additional_outputs", []))
         for path, expected in targets:
             try:
                 if sha256(path.read_bytes()).hexdigest() != expected:

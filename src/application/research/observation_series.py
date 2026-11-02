@@ -552,7 +552,15 @@ class _WindowGateway:
         self.gateway, self.start, self.end, self.clock, self.calls = gateway, start, end, clock, calls
 
     def get_snapshot(self, codes):
-        return self._call("market_snapshot", list(codes), lambda: self.gateway.get_snapshot(codes))
+        return self.get_snapshot_with_request_hook(codes)
+
+    def get_snapshot_with_request_hook(self, codes, *, before_request=None):
+        def request():
+            if before_request is not None:
+                before_request()
+            return self.gateway.get_snapshot(codes)
+
+        return self._call("market_snapshot", list(codes), request)
 
     def ensure_quote_ready(self):
         def before_request():

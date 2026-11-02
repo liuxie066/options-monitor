@@ -76,7 +76,7 @@ om doctor --config-key us
 om channel configure
 ```
 
-选择 Feishu App 或 WeChat ClawBot。Feishu 表单分别收集 App ID、通知接收人的 open_id、Bot 入站允许名单，隐藏录入 App Secret。微信通过现有扫码绑定流程确认目标；绑定状态和路由保存分别报告。配置不会自动发送测试消息。
+选择 Feishu App 或 WeChat ClawBot。Feishu 表单分别收集 App ID、通知接收人的 open_id、Bot 入站允许名单，隐藏录入 App Secret。微信先明确确认扫码登录并绑定所选实例，首次设置不要求预先启用运行时收信；绑定状态和路由保存分别报告。取消或失败时回读已保存的登录与绑定，配置仍单独发布。配置不会自动发送测试消息。
 
 显式关闭通知后，定时通知、交易与维护回执、系统告警跳过外部发送。旧配置未写 `notifications.enabled` 时保持原有启用语义。Bot 对用户主动消息的回复受 Bot 自身开关和入站权限控制。已有历史回执保留；配置命令自身不重放消息。
 
