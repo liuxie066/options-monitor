@@ -62,6 +62,7 @@ def validate_feishu_sdk() -> None:
     """Check the SDK's actual consumer APIs and effective dependencies, without connecting."""
     import lark_oapi as lark
     from lark_oapi.core.enum import LogLevel
+    from packaging.requirements import Requirement
 
     if not (callable(lark.ws.Client) and callable(lark.EventDispatcherHandler.builder)
             and hasattr(LogLevel, "INFO")):
@@ -75,11 +76,6 @@ def validate_feishu_sdk() -> None:
         checked.add(normalized)
         dist = importlib.metadata.distribution(name)
         for declared in dist.requires or []:
-            try:
-                from packaging.requirements import Requirement
-            except ImportError:
-                # Source installations already require pip; bundled runtimes include packaging.
-                from pip._vendor.packaging.requirements import Requirement
             req = Requirement(declared)
             if req.marker and not req.marker.evaluate({"extra": ""}):
                 continue

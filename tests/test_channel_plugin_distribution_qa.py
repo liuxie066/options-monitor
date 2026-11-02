@@ -9,6 +9,7 @@ import hashlib
 from importlib.metadata import Distribution
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -160,6 +161,9 @@ def qa_python(tmp_path_factory, request):
     if request.param:
         venv.EnvBuilder(with_pip=True, system_site_packages=False).create(environment)
     else:
+        assert re.search(r'^packaging(?:[<>=!~;\s]|$)',
+                         (ROOT/'requirements/runtime.txt').read_text(), re.MULTILINE), (
+                             'pip-free QA requires packaging to be an explicit core runtime dependency')
         uv = shutil.which('uv')
         assert uv, 'real uv is required for pip-free QA'
         subprocess.run([uv, '--no-config', '--no-python-downloads', 'venv', '--offline',
@@ -195,7 +199,8 @@ def qa_python(tmp_path_factory, request):
     assert result.returncode == 0, result.stderr
     if not request.param:
         result = subprocess.run([str(python), '-I', '-c',
-            "import importlib.util;assert all(importlib.util.find_spec(n) is None for n in ('pip','setuptools','pkg_resources'))"],
+            "import importlib.util;assert all(importlib.util.find_spec(n) is None for n in ('pip','setuptools','pkg_resources'));"
+            "from packaging.requirements import Requirement;assert Requirement('lark-oapi').name == 'lark-oapi'"],
             capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
     assert 'include-system-site-packages = false' in (environment/'pyvenv.cfg').read_text()

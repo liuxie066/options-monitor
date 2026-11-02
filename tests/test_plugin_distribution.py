@@ -25,6 +25,12 @@ SOURCE = Path(__file__).resolve().parents[1]
 VERSION = "9.9.9"
 
 
+def test_feishu_dependency_validator_is_available_in_core_source_runtime():
+    from packaging.requirements import Requirement
+    requirements = (SOURCE / "requirements/runtime.txt").read_text().splitlines()
+    assert "packaging" in {Requirement(line).name for line in requirements if line and not line.startswith("#")}
+
+
 def write_test_sdk(site, *, requirement=""):
     """Contract-only SDK fixture; real wheel acceptance is a separate offline QA."""
     content = {
