@@ -588,6 +588,7 @@ true 也不补装。首次安装可用 `scripts/install.sh --with-position-advic
 回滚保留回滚目标原有的安装选择，不下载、安装或迁移插件。确认回滚时，在暂存配置、切换
 `current` 和操作服务之前，以目标解释器校验目标已有托管插件的 receipt 和实际加载；
 坏 receipt 或导入失败会中止，即使选择不重启服务也不能跳过。预览只校验本地 receipt，不加载插件。
+对于支持 Provider 包的回滚目标，还以目标解释器校验其 pip 安装的 Provider、行情可用性和所需 SDK；缺失或不兼容时不切换、不补装。历史内置 Provider 目标沿用原合同。
 `market-opend`、`broker-futu`、`broker-longbridge` 也使用同一官方管理路径；长桥 SDK 仍是显式独立前提，基础运行包自检不能替代其迁移资格。
 
 Provider 首次迁移由下述新控制器驱动：旧固定目录尚无 `market-opend` 时，准备默认行情及有效账户配置所需的券商插件；无法读取必要配置时中止。已支持 Provider 插件的实例以实际安装选择为准，残留账户配置或 SDK 不会使主动卸载的券商复活。目标资产、导入、SDK 和默认行情在切换前校验，失败保留 current。历史四插件回滚保留目标原合同，不向其补装 Provider 包。

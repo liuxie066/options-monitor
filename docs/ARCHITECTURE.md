@@ -93,7 +93,8 @@ existing process to the target's plugins. Runtime/account selection does not
 change package selection. Core
 startup registers a lazy finder without importing plugins or contacting services.
 Upgrade stages and validates target wheels before switching the current release.
-Rollback validates the target's existing managed selection and actual loading
+Rollback validates the target's existing managed selection and actual loading,
+plus pip-owned Providers and SDK prerequisites when the target supports Provider packages,
 before staging configuration or switching; it neither downloads nor migrates plugins.
 Existing environment/pip installations retain their separate ownership.
 

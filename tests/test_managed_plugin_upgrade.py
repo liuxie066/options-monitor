@@ -953,3 +953,86 @@ def test_source_upgrade_preserves_previous_interpreter_pip_provider_selection(
     for key in upgrade.PROVIDER_PLUGINS:
         assert (new_site / PLUGINS[key]["module"]).exists() is (key in selected)
     assert ctx.requests == []
+
+
+@pytest.mark.parametrize("case", ["healthy-market", "healthy-futu", "healthy-brokers", "missing-sdk", "incompatible-sdk",
+                                 "broken-market-export", "broken-futu-export", "broken-longbridge-export", "missing-market", "legacy-four"])
+def test_pip_provider_rollback_qualifies_actual_target_before_switch(transition, monkeypatch, tmp_path, case):
+    previous, active, current, events = transition
+    for root in (previous, active):
+        _release_code(root)
+    current.unlink()
+    current.symlink_to(active, target_is_directory=True)
+    environment = tmp_path / "rollback-target-python"
+    venv.EnvBuilder(with_pip=True).create(environment)
+    python = environment / "bin/python"
+    site = next((environment / "lib").glob("python*/site-packages"))
+    provider_test_dependencies(site)
+    _python_proxy(upgrade._release_python(previous), python)
+    selected = ["market-opend"]
+    if case == "healthy-futu":
+        selected.append("broker-futu")
+    elif case != "healthy-market":
+        selected.extend(("broker-futu", "broker-longbridge"))
+    if case in ("missing-market", "legacy-four"):
+        selected.remove("market-opend")
+    assets = tmp_path / "pip-wheels"
+    assets.mkdir()
+    for key in selected:
+        item = PLUGINS[key]
+        source = ROOT / "plugins" / item["source"] / "src"
+        files = wheel_files(item["distribution"], item["module"], "0.1.0")
+        files.update({path.relative_to(source).as_posix(): path.read_bytes()
+                      for path in (source / item["module"]).rglob("*.py")})
+        wheel = assets / (item["distribution"].replace("-", "_") + "-0.1.0-py3-none-any.whl")
+        write_wheel(wheel, files)
+        subprocess.run([str(python), "-I", "-m", "pip", "--isolated", "install", "--no-index", "--no-deps",
+                        "--no-compile", str(wheel)], check=True, capture_output=True, text=True)
+    if case in ("missing-sdk", "legacy-four"):
+        shutil.rmtree(site / "longbridge")
+        shutil.rmtree(site / "longbridge-5.3.0.dist-info")
+    elif case == "incompatible-sdk":
+        (site / "longbridge-5.3.0.dist-info/METADATA").write_text("Name: longbridge\nVersion: 0.0.0\n")
+    elif case.startswith("broken-"):
+        key = {"broken-market-export": "market-opend", "broken-futu-export": "broker-futu",
+               "broken-longbridge-export": "broker-longbridge"}[case]
+        (site / PLUGINS[key]["module"] / "__init__.py").write_text("# installed package lacks its capability exports\n")
+    if case == "legacy-four":
+        (previous / "src/application/plugin_runtime.py").write_text(subprocess.check_output(
+            ["git", "show", "86f0582:src/application/plugin_runtime.py"], cwd=ROOT, text=True))
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    config = runtime / "config.us.json"
+    config.write_text(json.dumps({"accounts": ["different-current-account"], "account_settings": {
+        "different-current-account": {"type": "longbridge"}}}))
+    # A rollback validates target ownership, never borrows the current release's selections/config.
+    monkeypatch.setattr(distribution, "install_plugin", lambda *a, **kw: pytest.fail("rollback installed a package"))
+    monkeypatch.setattr(runtime_bundle, "urlopen", lambda *a, **kw: pytest.fail("rollback downloaded an asset"))
+    monkeypatch.setattr(upgrade, "_provider_upgrade_selection", lambda **kw: pytest.fail("rollback migrated selections"))
+    before = _inventory(previous), _inventory(active), config.read_bytes(), _inventory(environment)
+    commands = []
+    def run(command, **kwargs):
+        assert command[0] == str(upgrade._release_python(previous)), "controller/current interpreter used"
+        assert command[1:3] == ["-I", "-c"], "rollback must only qualify, never install"
+        commands.append(command)
+        events.append("provider_validate")
+        return _offline_import(command, **kwargs)
+    result = upgrade.service_rollback(repo_root=current, runtime_root=runtime, releases_root=previous.parent,
+                                      to_version="1.0.0", confirm=True, restart_services=False, run_cmd=run)
+    healthy = case.startswith("healthy-") or case == "legacy-four"
+    assert result["ok"] is healthy, result
+    assert current.resolve() == (previous if healthy else active)
+    assert (_inventory(previous), _inventory(active), config.read_bytes(), _inventory(environment)) == before
+    if case == "legacy-four":
+        assert commands == []
+    else:
+        assert commands, "pip-owned target providers were never validated"
+    if healthy:
+        assert result["status"] == "rolled_back"
+        if case != "legacy-four":
+            assert events.index("provider_validate") < events.index("configs")
+    else:
+        assert not result["changed"] and not result["symlink_switched"]
+        assert "configs" not in events
+        if "sdk" in case:
+            assert "requirements/longbridge.txt" in json.dumps(result)

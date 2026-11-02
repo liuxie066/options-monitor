@@ -2591,6 +2591,32 @@ def _validate_provider_runtime(
                   cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=30)
 
 
+def _validate_rollback_pip_providers(
+    *, target_dir: Path, managed: list[str], run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> None:
+    if not _provider_catalog_supported(target_dir):
+        return
+    # Inspect the target environment itself; rollback never reconstructs or installs a selection.
+    code = (
+        "import importlib.metadata as m,json,sys\n"
+        "sys.dont_write_bytecode=True\n"
+        "sys.path.insert(0,sys.argv[1])\n"
+        "from src.application.plugin_runtime import PLUGINS,plugin_installed,validate_plugin_import\n"
+        "managed=json.loads(sys.argv[2])\n"
+        "market=any(PLUGINS[key].get('kind')=='market' for key in managed)\n"
+        f"for key in {PROVIDER_PLUGINS!r}:\n"
+        "    if key in managed: continue\n"
+        "    try: m.distribution(PLUGINS[key]['distribution'])\n"
+        "    except m.PackageNotFoundError: continue\n"
+        "    assert plugin_installed(key), key+' unavailable or incompatible in rollback target'\n"
+        "    validate_plugin_import(key)\n"
+        "    market=market or PLUGINS[key].get('kind')=='market'\n"
+        "assert market, 'rollback target has no valid market package; use om plugins install market-opend --confirm'\n"
+    )
+    _run_required([str(_release_python(target_dir)), "-I", "-c", code, str(target_dir), json.dumps(managed)],
+                  cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=30)
+
+
 def _managed_plugin_selection(release_dir: Path) -> list[str]:
     selected = []
     for plugin_id in PLUGINS:
@@ -4322,7 +4348,7 @@ def service_rollback(
                 "target_dir": str(target_dir),
                 "warnings": [] if repo_root_is_symlink else ["confirmed rollback requires repo_root to be a current symlink"],
                 "planned_operations": [
-                    "validate the rollback target's installed managed plugins using its interpreter",
+                    "validate the rollback target's managed plugins and pip-owned providers using its interpreter",
                     f"stage and validate runtime configs with {target_dir}",
                     "verify the rollback target contains the supported Python Bot runtime",
                     f"switch {repo_link} -> {target_dir}",
@@ -4374,8 +4400,13 @@ def service_rollback(
                     }
                 )
             runtime_readiness = _runtime_readiness(release_dir=target_dir)
+            managed_plugins = _managed_plugin_selection(target_dir)
             _validate_target_managed_plugins(
-                target_dir=target_dir, selected=_managed_plugin_selection(target_dir),
+                target_dir=target_dir, selected=managed_plugins,
+                run_cmd=run_cmd, operations=operations,
+            )
+            _validate_rollback_pip_providers(
+                target_dir=target_dir, managed=managed_plugins,
                 run_cmd=run_cmd, operations=operations,
             )
             runtime_config_prepare = _prepare_runtime_configs_for_release(

@@ -66,6 +66,8 @@ class LongbridgeGateway: pass
     for name in ("python3", "python3.12"):
         path = tmp_path / "fake-bin" / name
         content = path.read_text().replace('#!/usr/bin/env bash\nif [[ "$*"', '#!/usr/bin/env bash\nprintf "pip:%s\\n" "$*" >> "$PROVIDER_TRACE"\nif [[ "$*"')
+        # The fake venv must not inherit optional packages from the test interpreter.
+        content = content.replace('exec "${FAKE_REAL_PYTHON:?}" "$@"', 'exec "${FAKE_REAL_PYTHON:?}" -S "$@"')
         path.write_text(content)
     env.update(PROVIDER_FIXTURE=str(fixture), PROVIDER_TRACE=str(tmp_path / "providers.log"))
     return env

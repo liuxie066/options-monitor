@@ -581,7 +581,15 @@ class _FutuAPIClient:
         return self._unwrap(self._quote().get_option_chain(**kwargs))
 
     def get_snapshot(self, **kwargs: Any) -> Any:
-        return self._unwrap(self._quote().get_market_snapshot(**kwargs))
+        return self.get_snapshot_with_request_hook(**kwargs)
+
+    def get_snapshot_with_request_hook(
+        self, *, before_request: Callable[[], None] | None = None, **kwargs: Any,
+    ) -> Any:
+        snapshot = self._quote().get_market_snapshot
+        if before_request is not None:
+            before_request()
+        return self._unwrap(snapshot(**kwargs))
 
     def get_stock_basicinfo(self, **kwargs: Any) -> Any:
         return self._unwrap(self._quote().get_stock_basicinfo(**kwargs))
@@ -852,16 +860,34 @@ class FutuGateway:
         deadline: float | None = None,
         cancelled: Callable[[], bool] | None = None,
         before_request: Callable[[], None] | None = None,
+        on_request: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
+        from src.application.plugin_runtime import require_plugin
+
         controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
         check_fetch_control(deadline, cancelled)
+        require_plugin("market-opend")
         if before_request is not None:
             before_request()
-            controls["before_request"] = before_request
+
+        def native_request():
+            if before_request is not None:
+                before_request()
+            if on_request is not None:
+                on_request()
+
+        if isinstance(self.backend, _FutuAPIBackend):
+            if before_request is not None or on_request is not None:
+                controls["before_request"] = native_request
+        elif on_request is not None:
+            # Injected backends own initialization; retain their existing pre-connect guard.
+            on_request()
         quote = self._quote_client(**controls)
         check_fetch_control(deadline, cancelled)
         if before_request is not None:
             before_request()
+        if on_request is not None:
+            on_request()
         try:
             ret, state = quote.get_global_state()
             check_fetch_control(deadline, cancelled)
@@ -1088,11 +1114,23 @@ class FutuGateway:
         raise AssertionError("unreachable")
 
     def get_snapshot(self, codes: Iterable[str]) -> Any:
+        return self.get_snapshot_with_request_hook(codes)
+
+    def get_snapshot_with_request_hook(
+        self, codes: Iterable[str], *, before_request: Callable[[], None] | None = None,
+    ) -> Any:
         from src.application.plugin_runtime import require_plugin
 
         require_plugin("market-opend")
         try:
-            return self.client.get_snapshot(code_list=list(codes))
+            code_list = list(codes)
+            guarded_request = getattr(self.client, "get_snapshot_with_request_hook", None)
+            if callable(guarded_request):
+                return guarded_request(code_list=code_list, before_request=before_request)
+            snapshot = self.client.get_snapshot
+            if before_request is not None:
+                before_request()
+            return snapshot(code_list=code_list)
         except Exception as exc:
             self._raise_mapped(exc, action="get_snapshot")
         raise AssertionError("unreachable")

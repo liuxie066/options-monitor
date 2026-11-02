@@ -466,6 +466,9 @@ def test_missing_sdk_never_mutates_or_extends_runtime_bundle(official, monkeypat
 def test_available_checks_do_not_import_plugin_or_sdk(official, monkeypatch):
     root, _, _, _ = official
     distribution.install_plugin("broker-longbridge", confirm=True)
+    def missing_distribution(name):
+        raise runtime.importlib.metadata.PackageNotFoundError(name)
+    monkeypatch.setattr(runtime.importlib.metadata, "version", missing_distribution)
     def forbidden(*args, **kwargs):
         raise AssertionError("availability imported a package")
     monkeypatch.setattr(runtime.importlib, "import_module", forbidden)
