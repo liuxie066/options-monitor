@@ -285,6 +285,10 @@ def _display_tick_result(result: TickExecutionResult) -> int:
             base=result.runtime_root, account=account, market=result.market, run_id=result.run_id,
         )
         if not data["available"]:
+            if (result.rc == 0 and data["reason"] == "not_found"
+                    and account in result.scheduler_skipped_accounts):
+                sys.stdout.write(f"账户 {account}｜{result.market}｜本次调度跳过，无需生成新扫描结果。\n")
+                continue
             complete = False
             sys.stdout.write(f"账户 {account}｜{result.market}｜本次结果来源不可用（{data['reason']}）。\n")
             continue
