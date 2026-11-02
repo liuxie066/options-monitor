@@ -11,7 +11,10 @@ src/application/config_defaults.py::DEFAULT_CONFIG
   -> generated runtime snapshots
 
 env-file
-  -> runtime secrets, machine settings, and write gates
+  -> machine settings, write gates, and explicit credential compatibility
+
+Keychain / systemd credentials
+  -> registered runtime secrets
 ```
 
 env-file 不是合并进生成快照的配置层；它在进程启动或工具执行时装入有效环境，
@@ -21,7 +24,7 @@ env-file 不是合并进生成快照的配置层；它在进程启动或工具�
 |---|---|---:|
 | `DEFAULT_CONFIG` | 系统默认值 | 否 |
 | `config.yaml` | accounts、markets、symbols、非 secret override | 是 |
-| env-file | secrets、本机设置、写入开关 | 是，且不提交 |
+| env-file | 非秘密本机设置、写入开关；长桥及显式兼容凭据见下文 | 是，且不提交 |
 | `config.us.json` / `config.hk.json` | 市场运行快照 | 否，由 build 生成 |
 | `resolved/config.bot.json` | Bot 运行快照 | 否，由 build-bot 生成 |
 | `portfolio.runtime.json` | 少数 external holdings env 名兼容 | 通常不需要 |
@@ -444,13 +447,11 @@ git diff --check
 
 ## Secrets 与本机设置
 
-env-file 保存：
-
-- Feishu App / webhook 等凭证；
-- LLM provider API key；
-- external holdings 表引用；
-- Tool Gateway 写入开关；
-- 其他不应进入 Git 的机器级设置。
+env-file 默认保存非秘密本机设置、external holdings 表引用和 Tool Gateway 写入开关。
+固定注册表中的 LLM API key、Feishu App Secret 和入站操作密钥使用 Keychain / systemd credentials，
+见 [Secret Storage](docs/SECRET_STORAGE.md)；`OM_SECRET_BACKEND=env` 仅用于显式兼容。
+长桥按[有效环境凭据合同](#可选能力与长桥账户)读取专属前缀的凭据，不属于固定逻辑名注册表。
+含秘密的兼容 env-file 仍须限制权限，不得作为普通配置分享。
 
 Linux 推荐：
 

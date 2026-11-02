@@ -304,15 +304,15 @@ VERSION="$(cat VERSION)"
 
 ### 官方可选插件资产
 
-包含本分发功能的 Release 由 `scripts/build_plugin_wheels.py` 在临时源码副本中构建 PM、持仓建议、飞书、微信、OpenD 行情、富途券商、长桥券商七个纯 Python wheel；源项目版本不被修改，官方 wheel 版本跟随 OM VERSION。产物为七个版本化 `py3-none-any.whl`、`om-plugins.json` 和 `om-plugins.md`，清单及兼容说明绑定精确 OM 版本、tag、commit、Python >=3.12、文件大小和 SHA-256。不存在插件市场或第三方包发现。
+从 v4.6.9 起，Release 由 `scripts/build_plugin_wheels.py` 在临时源码副本中构建 PM、持仓建议、飞书、微信、OpenD 行情、富途券商、长桥券商七个纯 Python wheel；源项目版本不被修改，官方 wheel 版本跟随 OM VERSION。产物为七个版本化 `py3-none-any.whl`、`om-plugins.json` 和 `om-plugins.md`，清单及兼容说明绑定精确 OM 版本、tag、commit、Python >=3.12、文件大小和 SHA-256。不存在插件市场或第三方包发现。
 
-PR qualification 构建并校验上述资产；release reusable workflow 构建、上传同一组资产，发布回读逐文件验证摘要、catalog、METADATA、WHEEL、RECORD 及兼容说明。校验 owner 为 `src/application/plugin_release.py`，不会安装或发布。源码接线和本地构建成功不证明 GitHub Release 已提供资产；本路径尚未发布，必须以实际上传与回读结果为准。
+PR qualification 构建并校验上述资产；release reusable workflow 构建、上传同一组资产，发布回读逐文件验证摘要、catalog、METADATA、WHEEL、RECORD 及兼容说明。校验 owner 为 `src/application/plugin_release.py`，不会安装或发布。v4.6.9 已正式发布七个 wheel 及清单；v4.6.8 仅发布其中 PM、持仓建议、飞书、微信四个 wheel。每次发布仍须以目标 tag 的实际上传与回读结果为准，不能从源码接线或本地构建推断发布成功。用户可用范围由[安装指南](INSTALL.md#官方可选插件)维护。
 
 用户从 README 的[官方可选插件](INSTALL.md#官方可选插件)进入 `om plugins`。安装仅消费当前稳定版本对应的官方资产，预览不创建持久安装，确认安装不启用配置或改变服务。普通用户不必下载源码或向运行包内部 pip 安装。
 
 ### 完整运行包的发布资格
 
-当前源码新增完整运行包构建、校验、安装和同类型升级分支；本次变更尚未发布。现有源码 Release 的成功记录不证明运行包资产已存在，也不证明新增平台已合格。运行包未完成下述资格前，不作为已可用的默认稳定安装承诺；面向用户的依赖说明由 [INSTALL](INSTALL.md#运行包资格与源码安装) 持有。
+完整运行包构建、校验、安装和同类型升级路径已随 v4.6.8 发布，正式运行包仅提供 `macos-arm64`。每个新版本和新增平台仍须满足下述资格；源码 Release 成功不证明运行包已发布。面向用户的依赖及实际平台资格由 [INSTALL](INSTALL.md#运行包资格与源码安装) 持有。
 
 构建 owner 为 `scripts/build_runtime_bundle.py`，使用 `scripts/runtime_bundle.lock.json` 固定各平台 CPython、运行/构建依赖来源与 SHA-256，输出：
 
@@ -329,7 +329,7 @@ PR qualification 构建并校验上述资产；release reusable workflow 构建�
 
 资格必须使用真实包：移除原解释器/源码 staging 后，搬迁至含中文和空格的新路径，执行 help、Tool Gateway spec、核心/原生/服务端/Bot 依赖导入及私有解释器子进程。自检不得连接 OpenD、模型或通知，不启动服务或写业务数据。只有实际执行回执才能证明该宿主和平台通过；锁文件中的最低 OS 兼容声明、mock 归档、某一平台的通过，均不能替代其他目标的执行。
 
-`macos-arm64` 开发包已在 macOS 27.0.1 arm64 完成实际构建、搬迁及无用户 Python/Git/Homebrew 的安装验证；尚未发布。`macos-x86_64`、`linux-x86_64` 仍待实际回执；不能据此宣称所有 macOS 或 Linux 发行版已支持，最低 OS 声明也不等于最低版本实机验收。`scripts/runtime_bundle.lock.json` 的 `release_platforms` 当前只列 `macos-arm64`，其余为候选；拟发布集合不是通过证明。
+v4.6.9 的正式 `macos-arm64` 产物在 macOS 15.8.2 arm64 完成上述搬迁与自检，回执随 Release 发布。`macos-x86_64`、`linux-x86_64` 未随该版本发布正式运行包；CI 资格任务不能代替正式资产或最低 OS 实机验收。`scripts/runtime_bundle.lock.json` 的 `release_platforms` 当前只列 `macos-arm64`，发布仍需逐次核对实际回执与资产集合。
 
 `.github/workflows/runtime-bundle.yml` 已配置不发布的原生构建/搬迁及无用户 Git/Python 的安装验证；release reusable workflow 依赖该 workflow 的拟发布平台任务，再下载同次产物并调用 `scripts/release_check.py --bundle-dir` 核对精确资产集合。`src/application/runtime_bundle.py::validate_publication_set` 绑定 tag、commit、平台、归档摘要、清单与实际资格回执，拒绝 dirty 构建和多余/缺失资产。源码中的工作流接线不等于 CI 已执行或 GitHub 资产已发布；发布收口仍需上述任务与上传回读证据。
 

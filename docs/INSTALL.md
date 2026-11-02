@@ -8,15 +8,15 @@ OM 使用 **Python 3.12 或更高版本**。完整运行包携带私有解释器
 
 ## 运行包资格与源码安装
 
-下述默认运行包路径已进入当前源码，但本次变更尚未发布，不能假定最新 Release 已提供对应资产。平台名只是构建/选择目标；实际解包搬迁、自检和宿主系统回执通过后，才能将该版本、平台列为合格。已有本机开发包实测，其他平台和最低系统版本资格仍需分别取证，不声称所有 macOS/Linux 版本受支持。
+v4.6.9 已正式发布 `macos-arm64` 运行包。以下按[该版本实际 Release 资产](https://github.com/liuxie066/options-monitor/releases/tag/v4.6.9)及其 `.qualification.json` 回执列示；后续版本须核对各自资产，不能只看源码中的平台名或 VERSION。运行包自检不证明券商连接、服务运行或通知投递可用。
 
 | 构建目标 | 实际运行包资格 |
 |---|---|
-| `macos-arm64` | 开发包在 macOS 27.0.1 arm64 通过构建、搬迁及无用户依赖安装；尚未发布 |
-| `macos-x86_64` | 候选 CI 目标，尚无实际支持回执 |
-| `linux-x86_64` | 候选 CI 目标，尚无实际支持回执 |
+| `macos-arm64` | v4.6.9 已发布；正式产物在 macOS 15.8.2 arm64 完成解包搬迁、依赖导入、help 与 Tool Gateway spec 自检 |
+| `macos-x86_64` | v4.6.9 未提供正式运行包；使用显式源码安装 |
+| `linux-x86_64` | v4.6.9 未提供正式运行包；使用显式源码安装 |
 
-当前锁文件的拟发布集合仅含 `macos-arm64`；其他两项是资格矩阵候选，不代表随本次 Release 提供。拟发布也不等于任务已通过或资产已发布。
+当前锁文件的 `release_platforms` 仅含 `macos-arm64`。其他两项的 CI 构建或资格任务不等于正式运行包已发布；最低 OS 兼容声明也不等于该最低版本实机通过，不承诺所有 macOS/Linux 版本。
 
 默认安装要求目标稳定 Release 有精确匹配的 `options-monitor-<tag>-<platform>.tar.gz` 及可信 SHA-256。安装端需要 shell、HTTPS 下载工具 `curl`、`tar`、`awk`、`sed` 和 `sha256sum` 或 `shasum`，会先检查缺失工具。没有合格资产、摘要不符或平台不匹配会失败，不会自动安装编译器、Homebrew 或切换源码路径。发布证据要求见[运行包发布资格](RELEASE_PROCESS.md#完整运行包的发布资格)。
 
@@ -27,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 bash /tmp/options-monitor-install.sh --source
 ```
 
-这仍只安装已发布版本，不包含尚未发布的引导能力。固定版本追加 `--version <release-tag>`；开发 checkout 见 [Manual Install](#manual-install)。Homebrew 只是准备源码依赖的可选途径，运行包用户不需要它。
+这仍只安装已发布版本，不包含 `main` 上尚未发布的改动。固定版本追加 `--version <release-tag>`；开发 checkout 见 [Manual Install](#manual-install)。Homebrew 只是准备源码依赖的可选途径，运行包用户不需要它。
 
 ## Quick Install
 
@@ -84,7 +84,7 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 
 ## 官方可选插件
 
-官方插件固定为 `market-opend`（OpenD 行情）、`broker-futu`（富途账户）、`broker-longbridge`（长桥账户）、`pm`（PM 接入）、`position-advice`（持仓评估与建议）、`feishu`（飞书收发）和 `wechat`（微信收发）。包含本分发功能的 Release 提供七个 `py3-none-any.whl`、`om-plugins.json` 和 `om-plugins.md`，绑定精确 OM 版本、tag、commit、Python >=3.12 及资产摘要。该路径尚未发布；不能假定旧 Release 已有这些资产，也不会退回下载其他版本的插件。
+v4.6.9 已正式提供 `market-opend`（OpenD 行情）、`broker-futu`（富途账户）、`broker-longbridge`（长桥账户）、`pm`（PM 接入）、`position-advice`（持仓评估与建议）、`feishu`（飞书收发）和 `wechat`（微信收发）七个 `py3-none-any.whl`，以及 `om-plugins.json`、`om-plugins.md`。v4.6.8 只提供其中后四个插件。实际可用项以所安装版本的正式 Release 清单为准；不能向 v4.6.8 安装这三个 Provider 插件。清单绑定精确 OM 版本、tag、commit、Python >=3.12 及资产摘要；缺资产时拒绝，不退回其他版本。
 
 源码版与完整运行包使用同一入口；添加插件时无需另行使用 pip、Git 或安装系统 Python：
 
@@ -96,13 +96,18 @@ om plugins install pm --confirm
 om plugins install position-advice --confirm
 om plugins install feishu --confirm
 om plugins install wechat --confirm
-om plugins install broker-futu --confirm        # 按账户需要安装
-om plugins install broker-longbridge --confirm  # 先满足长桥 SDK 前提
 om plugins uninstall pm                      # 默认只预览
 om plugins uninstall pm --confirm
 ```
 
-正常新安装默认安装 `market-opend`，不默认安装任何券商包。账户可分别选富途或长桥，行情来源独立选择；安装不改变配置。托管卸载不允许移除最后一个有效行情插件，券商可以全部移除。手工 pip 移除行情后，配置、诊断和历史入口仍可启动，但取行情必须先恢复所选插件。
+以下 Provider 插件命令与默认选择从 v4.6.9 起提供，不能用于旧版：
+
+```bash
+om plugins install broker-futu --confirm        # 按账户需要安装
+om plugins install broker-longbridge --confirm  # 先满足长桥 SDK 前提
+```
+
+这些版本的新安装默认安装 `market-opend`，不默认安装任何券商包。账户可分别选富途或长桥，行情来源独立选择；安装不改变配置。托管卸载不允许移除最后一个有效行情插件，券商可以全部移除。手工 pip 移除行情后，配置、诊断和历史入口仍可启动，但取行情必须先恢复所选插件。
 
 长桥 SDK 沿用 `requirements/longbridge.txt` 的显式前提；托管安装和升级切换前会验证 SDK，缺失时拒绝并给出提示。源码安装器可用 `--with-broker-futu` 或 `--with-broker-longbridge`；后者同时安装固定 SDK 依赖。运行包缺 SDK 时不能向其内部补包。
 

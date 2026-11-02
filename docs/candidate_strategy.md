@@ -36,7 +36,7 @@
 
 每个账户、市场和 run 使用同一条流水线：
 
-1. 应用层一次性收集并冻结 OpenD 行情、合约、事件、持仓、现金、汇率和账本事实；
+1. 应用层一次性收集并冻结 OpenD 行情、合约、事件、汇率、所选券商的账户持仓/现金及本地账本事实；
 2. Candidate Engine 执行召回后的归一化、硬筛、容量计算和正式排序；
 3. 生成不可变、可校验、已封存的账户级 opening decision snapshot；
 4. Agent 和通知只消费该快照，不重新筛选或平行排序。
@@ -89,7 +89,7 @@ CC 成本底价倍数 `min_strike_cost_multiplier` 在已有配置合并后冻�
 配置（默认 `1.02`），参与有效参数哈希和 `custom` 判定。扫描与 underwriting
 消费同一冻结值；注入策略优先于旧 CC 配置。身份传输、恢复及重排均校验该参数，
 缺失或非正有限数值的 resolved 身份拒绝消费；不影响无策略身份的 legacy 快照。
-内置 `csp_baseline@0.1.0` / `cc_baseline@0.1.0` 委托既有规则。
+当前内置 `csp_baseline@0.2.0` / `cc_baseline@0.2.0` 委托既有规则；旧身份的读取与执行边界见 §3.5。
 冻结的 `StrategyTemplate` 描述符绑定约束、筛选、排序和解释；新增源码模板只需
 实现并加入 core 的有限查找表，OM 消费者无需新增分支。没有公开注册 API、
 外部模块加载器或生产切换配置。参数模式仍是 `InsuranceUnderwritingConfig`。
@@ -185,7 +185,7 @@ sell_limit = ceil(raw_mid / price_tick) * price_tick
 - 交割物必须是普通股票；`NON_STANDARD` 合约直接拒绝，类型未知则不可用。
 - multiplier 必须由同一合约的 chain 与 snapshot 绑定并一致。
 - multiplier 缺失或冲突时只阻断该合约；不按标的缓存猜测，也不默认 `100`。
-- 候选 ID 必须包含逻辑账户、物理 `futu_account_id`、市场、策略和合约身份。
+- 候选 ID 必须包含逻辑账户、物理券商账户、市场、策略和合约身份；富途使用 `futu_account_id`，长桥使用独立的 `broker_id` / `broker_account_id` 及凭据绑定，不伪造富途身份。
 
 ### 3.4 可选观察字段
 
@@ -271,13 +271,13 @@ annualized_net_return = period_net_return * 365 / DTE
 
 ### 5.3 现金担保能力
 
-- 只在同一物理 Futu 账户内计算，不跨物理账户聚合。
+- 只在同一物理券商账户内计算，不跨物理账户或券商聚合。
 - 先使用合约同币种资金；不足部分再按 OpenD 汇率折算其他币种资金。
 - 不对跨币种资金增加 `0.95` 或其他通用安全折扣。
 - 跨币种汇率从 `observed_at` 起最长有效 24 小时；时间缺失或超过 24 小时即为 stale。
 - stale / missing FX 对应的外币资金不参与覆盖；同币种资金仍可使用。只有确实需要该外币
   才能达到一张合约时，候选因资金证据不足 fail closed。
-- 保留当前现金组成：明确的分币种 cash 加 OpenD `fund_assets`。
+- 富途保留明确的分币种 cash 加 OpenD `fund_assets`；长桥使用分币种 `available_cash`，不将 `total_cash`、融资或购买力叠加为容量。身份与完整性限制见 [CONFIGS](../CONFIGS.md#可选能力与长桥账户)。
 - 已知限制：OpenD `fund_assets` 是聚合基金资产，无法区分普通基金与货币基金；本策略接受当前口径。
 - 已有开放 Short Put 先按 gross `strike * multiplier` 扣除担保占用，不抵扣历史权利金。到期日和随后一个自然日仍计入，以覆盖指派结算窗口；自到期后第二个自然日起，过期 lot 可继续保留在生命周期视图中，但不再作为当前期权担保占用。
 - 不额外读取或扣除待成交挂单、`frozen_cash`；操作员负责避免候选间重复使用。
@@ -345,9 +345,9 @@ recall_max = min(configured_max_strike, recall_min * 1.20)
 - 保持现有 DTE 配置窗口。
 - spot 缺失时 fail closed。
 - `recall_max < recall_min` 表示当前没有可行窗口，返回等待，不改写边界。
-- OM `avg_cost` 的唯一定义是平均成本价，直接映射同一物理账户、同一 symbol 的 OpenD `average_cost`。
+- OM `avg_cost` 表示同一物理账户、同一 symbol 的平均成本价；富途映射 OpenD `average_cost`，长桥映射其股票持仓 `cost_price`。
 - OpenD `cost_price` / `diluted_cost` 是摊薄成本口径，不得写入或回退为 OM `avg_cost`。
-- OpenD `average_cost` 缺失时成本上下文 fail closed；不跨账户平均。
+- 相应券商的平均成本证据缺失时成本上下文 fail closed；不跨账户平均。
 
 ### 6.2 收益口径
 
@@ -364,12 +364,12 @@ annualized_net_premium_return = period_net_premium_return * 365 / DTE
 
 ### 6.3 覆盖能力
 
-- 持仓事实来自同一物理 Futu 账户的 OpenD `qty`、`can_sell_qty`、`average_cost` 和 currency；其中 `average_cost` 映射为 OM `avg_cost`。
+- 持仓事实来自同一物理券商账户。富途使用 OpenD `qty`、`can_sell_qty`、`average_cost` 和 currency；长桥使用股票数量、`available_quantity`、`cost_price` 和币种，缺失可卖数量或成本不能推算补齐。
 - symbol 配置可以在多账户间共用；当前账户未持有该 symbol 时，该 CC scope 以 `covered_call_underlying_not_held` 正常跳过，不会将其他已完成 scope 降级为 `data_unavailable`。
 - 若当前账户的 CC scope 全部因未持股而跳过，账户级结果是合法的 `no_candidate`；持仓上下文缺失或损坏仍为 `data_unavailable`。
 - 单个标的因待结算、行情或其他局部证据缺失而受阻时，只保护该标的容量；其他标的继续筛选和排序。存在合格候选时策略为 `candidates_found`，其他标的已完成但无候选时为 `partial_data`，缺口保留具体 symbol；全部不可用或共享持仓上下文缺失仍为 `data_unavailable`。
 - 已开放 Short Call 的股票锁定来自权威 SQLite option-position ledger。
-- OpenD 持仓与 SQLite short-call 锁定无法一致解释时 fail closed。
+- 券商持仓与 SQLite short-call 锁定无法一致解释时 fail closed；长桥完整期权身份尚未接入，不能将缺失期权证据视为零。
 - 不跨账户借用股票，也不默认 multiplier。
 
 ```text
@@ -378,7 +378,7 @@ max_new_contracts = floor(shares_available_for_cover / multiplier)
 ```
 
 - `max_new_contracts >= 1` 才可进入候选。
-- 不另行扫描待成交挂单；OpenD `can_sell_qty` 作为券商当前可卖事实。
+- 不另行扫描待成交挂单；所选券商的可卖数量作为当前可卖事实。
 - 交割物就是普通股票。
 
 普通持股与 CSP 指派股混合且无法归属时，股票仍可按账户总量判断覆盖能力，
@@ -545,7 +545,7 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 `N_after = N_before + delta_shares * spot + delta_cash`。
 已有权利金已在现金中，不重复添加；候选只添加一次扣除开仓费用后的净权利金。三个场景统一为指派费用前。
 
-资产源沿用 `portfolio.holdings.enabled`：富途基线，开启后补充经批准的 PM 非富途资产，排除 PM 富途副本。
+资产源沿用 `portfolio.holdings.enabled`：经身份与完整性验证的直接券商基线，开启后补充同账户 PM 非富途资产，并排除直接券商的同范围 PM 镜像。未知基线不能按零初始化；详见 [指派情景合同](PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md)。
 普通股票采用冻结现价和 FX，不以平均成本补值。计算由 `domain/domain/portfolio_assignment_scenario.py` 持有；
 `short_vol_assessment.py` 选择场景，摘要、开仓快照与 Brief 透传，不重新取价。
 字段为 `symbol_concentration_current`、`symbol_concentration_after_existing_assignments`、
@@ -557,7 +557,7 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 不增加括号说明或休市报价估值行；计算口径和报价证据仍保留在快照中。事件仍在独立回执区。缺失显示暂不可用，可信零值显示 0%，
 负仓位与超过 100% 的仓位保持原值；净资产非正时比例不可用。期权证据缺失不影响可确认的当前仓位；
 候选净权利金缺失只影响第三项。排序统一消费第三项，保持原方向、优先级与缺失值顺序；
-不新增集中度硬门槛，富途执行资金容量和 CC 实物覆盖仍由原 owner 计算。
+不新增集中度硬门槛，各券商执行资金容量和 CC 实物覆盖仍由原 owner 计算。
 
 - concentration 只在跨 symbol 且收益接近时参与选择，不变成硬风险门槛。
 - 美股和港股使用同一套公式、状态和失败范围；市场配置窗口、费用表、时区和交易日历分别取对应市场事实。
@@ -602,14 +602,14 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 | C02 | CSP 显式 `min_strike` 继续作为更严格下界 | §5.1 |
 | C03 | CC 最低卖价为 `max(min_strike, avg_cost*1.02)` | §6.1 |
 | C04 | CC 召回最小值再与 spot 取大，最大值为其上方 20% 并受 configured max 限制 | §6.1 |
-| C05 | 现金、持仓和锁定全部按物理 Futu 账户隔离 | §5.3、§6.3 |
+| C05 | 现金、持仓和锁定全部按物理券商账户隔离 | §5.3、§6.3 |
 | C06 | CSP 先用同币种现金，不足部分按新鲜 OpenD 汇率折算其他币种 | §5.3 |
 | C07 | 跨币种资金不保留 0.95 或其他安全折扣 | §5.3 |
-| C08 | 现金组成保留当前 `cash_by_currency + fund_assets` 口径，货币基金算入 | §5.3 |
+| C08 | 富途使用 `cash_by_currency + fund_assets`；长桥使用 `available_cash` | §5.3 |
 | C09 | 已有 Short Put 在到期后一日缓冲期结束前按 gross strike notional 占用担保 | §5.3 |
 | C10 | 不考虑 CSP 待成交挂单或 frozen cash，候选共享资金不可相加 | §5.3 |
 | C11 | 每张候选按一张合约计算，最大张数用资金或股票整除 multiplier | §5.3、§6.3 |
-| C12 | CC 使用 OpenD qty/can_sell_qty 和 SQLite 已开放 Short Call 锁定 | §6.3 |
+| C12 | CC 使用所选券商股票/可卖数量和 SQLite 已开放 Short Call 锁定 | §6.3 |
 | C13 | 普通持股与指派股混合可用于账户级覆盖，但无法归属时不算批次 Wheel 收益 | §6.3 |
 | C14 | 交割物是普通股票，不支持裸 Call 或非标准交割 | §3.3、§6.3 |
 | C15 | 组合集中度延续当前 NAV 口径，按当前市值且货币基金计入 | §10 |
@@ -657,7 +657,7 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 | A02 | 失败按账户、symbol、expiry、contract 的最小范围传播 | §9 |
 | A03 | 每个账户/run 即使空结果也封存包含 scope_results 的不可变 snapshot | §9 |
 | A04 | Candidate Engine 是唯一正式过滤/排序所有者 | §2 |
-| A05 | Candidate ID 包含逻辑账户和物理 futu_account_id | §3.3 |
+| A05 | Candidate ID 包含逻辑账户和对应物理券商账户身份 | §3.3 |
 | A06 | Agent 查询必须给 account；省略 run 只能取最新 seal/hash 有效 snapshot | §9 |
 | A07 | 开仓候选与已有持仓处置彻底分离，不生成 replacement/reallocate | §10 |
 | A08 | Combo Yield 只共享标准化证据，保留独立策略和 snapshot | §2 |
@@ -693,22 +693,22 @@ hash 有效的 snapshot；不允许调用方传任意文件系统路径。
 - 期限匹配 RV 是 Candidate Engine 唯一正式 RV；RV20/60/120 和旧加权值只保留为
   诊断或离线 shadow 对照，不进入正式 decision；
 - CSP / CC 的计算、硬筛和排序由 Candidate Engine 唯一所有；
-- 现金、汇率、持仓与锁定能力绑定物理 Futu 账户，OpenD FX 最长有效 24 小时，
+- 现金、持仓与锁定能力绑定物理券商账户，OpenD FX 最长有效 24 小时，
   无 `0.95` haircut；
-- 每个账户/run 封存不可变 `opening_candidate_snapshot.v3`，并由最后发布的
+- 每个账户/run 封存不可变 opening snapshot（富途 v3、长桥 v4），并由最后发布的
   `candidate_snapshot_manifest.v4` 绑定完整 owner/scope；Agent 和 Daily Brief 只通过
   terminal manifest gate 读取同一封存事实，不会挽救未完成运行中的单个 owner；
 - yfinance、旧事件 resolver、旧开仓评分、runtime 候选 CSV 权威路径和重复候选
   artifact 已退出当前开仓路径；JSONL 只保留为当前决策追踪证据，历史候选文件只在
   research/archive/shadow 的受限元数据分类边界中识别且不再解析。
 
-当前标准扫描只写一套可执行合同：
+当前标准扫描按 owner 与券商身份写入以下可执行合同：
 
 | 角色 | 当前 schema / 文件 |
 |---|---|
 | 单范围终态 | `strategy_scan_status.v3` / `*_scan_status.v3.json` |
 | 账户终态索引 | `strategy_scan_status_index.v5` / `strategy_scan_status_index.v5.json` |
-| Opening owner | `opening_candidate_snapshot.v3` / `opening_candidate_snapshot.json` |
+| Opening owner | 富途 `opening_candidate_snapshot.v3` / 长桥 `opening_candidate_snapshot.v4`，文件均为 `opening_candidate_snapshot.json` |
 | Combo Yield owner | `combo_yield_candidate_snapshot.v4` / `combo_yield_candidate_snapshot.json` |
 | CC+LP owner | `cc_lp_candidate_snapshot.v4` / `cc_lp_candidate_snapshot.json` |
 | Wheel owner | `wheel_candidate_snapshot.v3` / `wheel_candidate_snapshot.v3.json` |
