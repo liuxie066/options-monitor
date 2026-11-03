@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1328 (`src`: 583, `domain`: 98, `scripts`: 16, `tests`: 627)
-- Internal import edges: 11582 total, 4155 production/script edges excluding tests
+- Python files scanned: 1330 (`src`: 583, `domain`: 98, `scripts`: 16, `tests`: 629)
+- Internal import edges: 11590 total, 4156 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -50,10 +50,10 @@ flowchart LR
   scripts -->|2| interfaces
   scripts -->|1| tests
   storage -->|1| domain
-  tests -->|5633| application
+  tests -->|5638| application
   tests -->|681| domain
   tests -->|2| domain_services
-  tests -->|380| infrastructure
+  tests -->|382| infrastructure
   tests -->|416| interfaces
   tests -->|12| om_strategy_core
   tests -->|31| scripts
@@ -88,10 +88,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 5633 |
+| tests | application | 5638 |
 | tests | domain | 681 |
 | tests | interfaces | 416 |
-| tests | infrastructure | 380 |
+| tests | infrastructure | 382 |
 | tests | storage | 77 |
 | tests | scripts | 31 |
 | tests | om_strategy_core | 12 |
@@ -193,14 +193,14 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.payload_helpers | 101 |
 | domain.domain.symbol_identity | 98 |
 | src.application.ledger.api | 92 |
-| src.application.agent_tool_config | 77 |
+| src.application.agent_tool_config | 74 |
 | domain.domain.trade_contract_identity | 73 |
 | domain.domain.decision_state_fingerprint | 62 |
 | src.application.account_config | 61 |
 | src.infrastructure.io_utils | 57 |
 | domain.domain.option_position_identity | 57 |
 | domain.domain.ledger.position_fields | 53 |
-| src.application.runtime_paths | 44 |
+| src.application.runtime_paths | 47 |
 | domain.domain.trade_execution | 40 |
 | src.infrastructure.futu_gateway | 37 |
 | domain.domain.ledger.events | 34 |

@@ -15,6 +15,10 @@ from src.application.settings import build_effective_env
 _command_runtime_root: ContextVar[RuntimeRootResolution | None] = ContextVar("command_runtime_root", default=None)
 
 
+def repo_base() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
 @contextmanager
 def runtime_root_scope(runtime_root: str | Path | None, *, source: str = "argument") -> Iterator[None]:
     """Bind nested consumers to the instance explicitly selected by the caller."""

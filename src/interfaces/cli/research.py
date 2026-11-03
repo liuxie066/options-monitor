@@ -5,9 +5,10 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
-from src.application.agent_tool_config import repo_base
-from src.application.agent_tool_contracts import AgentToolError, build_response
+from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
 from src.application.research import run_research_collect
+from src.application.runtime_paths import repo_base
+from src.interfaces.cli.command_environment import command_environment
 
 
 def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
@@ -630,3 +631,26 @@ def handle_research_command(
             )
         return build_response(tool_name=f"research.archive.{args.archive_command}", ok=bool(data.get("ok")), data=data)
     raise AgentToolError(code="INPUT_ERROR", message=f"unsupported research command: {args.research_command}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the existing research commands without loading unrelated live commands."""
+    import sys
+
+    parser = argparse.ArgumentParser(prog="om")
+    add_research_commands(parser.add_subparsers(dest="command", required=True))
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    try:
+        with command_environment(arguments, repo_root=repo_base(), discover_local=argv is None):
+            result = handle_research_command(parser.parse_args(arguments))
+    except AgentToolError as exc:
+        result = build_response(tool_name="om", ok=False, error=build_error_payload(exc))
+    except ValueError as exc:
+        error = AgentToolError(code="CONFIG_ERROR", message=str(exc))
+        result = build_response(tool_name="om", ok=False, error=build_error_payload(error))
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result.get("ok", True) else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

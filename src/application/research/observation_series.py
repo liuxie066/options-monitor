@@ -36,7 +36,10 @@ IMPLEMENTATION_SOURCES = tuple(
         | {
             "src/application/research/observation_series.py",
             "src/application/research/archive.py",
+            "src/application/research/__init__.py",
+            "src/application/runtime_paths.py",
             "src/interfaces/cli/research.py",
+            "src/interfaces/cli/command_environment.py",
             "src/interfaces/cli/main.py",
             "domain/domain/option_lifecycle.py",
             "domain/domain/performance/strategy_evaluation.py",

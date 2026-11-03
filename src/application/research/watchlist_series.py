@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import fcntl
 import gzip
 import io
+import logging
 import math
 import os
 from pathlib import Path
@@ -274,21 +275,27 @@ def _storage(archive_root, budget_roots, budget):
         if not root.is_dir():
             raise ValueError("existing research budget root required")
 
-        def unreadable(error):
-            raise error
-
         # Installation roots contain venv links: count each link itself, never its target.
-        # Unlike rglob, walk must fail when a private subtree cannot be accounted for.
-        for parent, directories, files in os.walk(root, followlinks=False, onerror=unreadable):
-            for path in (Path(parent), *(Path(parent) / name for name in directories + files)):
-                info = path.lstat()
-                key = (info.st_dev, info.st_ino)
-                if key in inodes:
-                    continue
-                if stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
-                    logical += info.st_size
+        # scandir preserves unreadable-tree errors and avoids Path/lstat work per entry.
+        pending = [os.fspath(root)]
+        while pending:
+            parent = pending.pop()
+            info = os.lstat(parent)
+            key = (info.st_dev, info.st_ino)
+            if key not in inodes:
                 allocated += info.st_blocks * 512
                 inodes.add(key)
+            with os.scandir(parent) as entries:
+                for entry in entries:
+                    info = entry.stat(follow_symlinks=False)
+                    key = (info.st_dev, info.st_ino)
+                    if key not in inodes:
+                        if stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                            logical += info.st_size
+                        allocated += info.st_blocks * 512
+                        inodes.add(key)
+                    if stat.S_ISDIR(info.st_mode):
+                        pending.append(entry.path)
     # Small gzip files still consume allocation blocks; sparse files must retain the logical ceiling.
     used = max(logical, allocated)
     free = shutil.disk_usage(archive_root if archive_root.exists() else archive_root.parent).free
@@ -305,6 +312,40 @@ def _lock(root):
         yield
     finally:
         os.close(descriptor)
+
+
+@contextmanager
+def _shared_gateway_factory(factory):
+    gateway = None
+    interrupted = False
+
+    class BorrowedGateway:
+        def __getattr__(self, name):
+            return getattr(gateway, name)
+
+        def close(self):
+            # The group owns the connection through all shards, including failures.
+            pass
+
+    def borrow(**kwargs):
+        nonlocal gateway
+        if gateway is None:
+            gateway = factory(**kwargs)
+        return BorrowedGateway()
+
+    try:
+        yield borrow
+    except BaseException:
+        interrupted = True
+        raise
+    finally:
+        if gateway is not None:
+            try:
+                gateway.close()
+            except BaseException as exc:
+                logging.getLogger(__name__).warning("Shared research gateway cleanup failed: %s", type(exc).__name__)
+                if not interrupted and not isinstance(exc, Exception):
+                    raise
 
 
 def collect_watchlist_series(
@@ -324,6 +365,7 @@ def collect_watchlist_series(
     gateway_factory=None,
     ancillary_file=None,
     expected_ancillary_sha256=None,
+    prepare_only=False,
 ):
     plan_dir, archive_root = series._path(plan_dir), series._path(archive_root)
     raw, plan = _load(plan_dir, expected_plan_sha256)
@@ -338,7 +380,9 @@ def collect_watchlist_series(
         return {"status": "preview", "provider_called": False, "storage": storage, "slots": plan["slots"]}
     series._private_dir(archive_root)
     results = []
-    with _lock(archive_root):
+    with _lock(archive_root), _shared_gateway_factory(
+        gateway_factory or quote.build_ready_futu_quote_gateway
+    ) as shared_gateway:
         ancillary_dir = plan_dir / "scope"
         if ancillary:
             # Freeze one combined input before any shard is initialized; never amend a past observation.
@@ -377,6 +421,8 @@ def collect_watchlist_series(
                 prune_roots,
                 ancillary_dir,
             )
+        if prepare_only:
+            return {"status": "prepared", "provider_called": False, "watchlist_series_sha256": expected_plan_sha256}
         for batch in plan["batches"]:
             batch_id = batch["batch_id"]
             derived = {**safe, "series_plan_sha256": batch["series_plan_sha256"]}
@@ -426,7 +472,7 @@ def collect_watchlist_series(
                 ancillary_dir=ancillary_dir,
                 confirm=True,
                 clock=clock,
-                gateway_factory=gateway_factory or quote.build_ready_futu_quote_gateway,
+                gateway_factory=shared_gateway,
                 snapshot_limiter_root=archive_root / "limiter",
                 rate_limited_call=budgeted_call,
             )

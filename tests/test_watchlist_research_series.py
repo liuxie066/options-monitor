@@ -18,9 +18,10 @@ from test_watchlist_research_scope import inputs, row, chain, run, save  # noqa:
 
 
 @pytest.fixture
-def planned(inputs, monkeypatch):
+def planned(inputs, monkeypatch, request):
     root, _ = inputs
-    chain(inputs, [row(80 + x / 1000) for x in range(201)])
+    contract_count = getattr(request, "param", 201)
+    chain(inputs, [row(80 + x / 1000) for x in range(contract_count)])
     run(inputs, output=root / "scope")
     save(
         root,
@@ -46,7 +47,12 @@ def planned(inputs, monkeypatch):
     save(
         root,
         "budget.json",
-        {"schema_version": group.BUDGET_SCHEMA, "max_calls_per_slot": 6, "max_bytes": 100_000_000, "min_free_bytes": 1},
+        {
+            "schema_version": group.BUDGET_SCHEMA,
+            "max_calls_per_slot": 20 if hasattr(request, "param") else 6,
+            "max_bytes": 100_000_000,
+            "min_free_bytes": 1,
+        },
     )
     build = dict(
         scope_dir=root / "scope",

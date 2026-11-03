@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from src.application.agent_tool_config import repo_base
+from src.application.runtime_paths import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 
 

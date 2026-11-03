@@ -557,6 +557,9 @@ class _FutuAPIClient:
     def get_market_state(self, **kwargs: Any) -> Any:
         return self._unwrap(self._quote().get_market_state(**kwargs))
 
+    def get_rehab(self, **kwargs: Any) -> Any:
+        return self._unwrap(self._quote().get_rehab(**kwargs))
+
     def get_positions(self, **kwargs: Any) -> Any:
         return self._unwrap(
             self._trade().position_list_query(**self._trade_kwargs(kwargs))
@@ -981,6 +984,13 @@ class FutuGateway:
             return self.client.get_market_state(code_list=list(codes))
         except Exception as exc:
             self._raise_mapped(exc, action="get_market_state")
+        raise AssertionError("unreachable")
+
+    def get_rehab(self, *, code: str) -> Any:
+        try:
+            return self.client.get_rehab(code=code)
+        except Exception as exc:
+            self._raise_mapped(exc, action="get_rehab")
         raise AssertionError("unreachable")
 
     def get_positions(self, **kwargs: Any) -> Any:
