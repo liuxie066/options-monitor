@@ -22,6 +22,7 @@ from src.application.ledger.current_decision_assigned_stock import (
     compact_assigned_stock_view,
 )
 from src.application.ledger.external_event_key import (
+    broker_deal_completion_payload,
     execution_identity_from_input,
     futu_compatibility_source_key,
 )
@@ -1018,7 +1019,11 @@ def record_zero_price_option_close_atomically(
         evidence_id = str(anchor["evidence_id"])
         rows: list[dict[str, Any]] = []
         events: list[Any] = []
-        for lot_id, quantity in sorted(dict(anchor["target_contracts_by_lot"]).items()):
+        targets = sorted(dict(anchor["target_contracts_by_lot"]).items())
+        source_payload = dict(base_event.raw_payload or {})
+        source_payload.setdefault("quantity", base_event.contracts)
+        source_deal_id = str(source_payload.get("source_deal_id") or "").strip()
+        for split_index, (lot_id, quantity) in enumerate(targets, start=1):
             allocation_id = allocation_id_for(
                 case_id=case_id, evidence_id=evidence_id, target_lot_id=lot_id,
             )
@@ -1042,7 +1047,14 @@ def record_zero_price_option_close_atomically(
                 contracts=int(quantity),
                 target_lot_id=lot_id,
                 raw_payload={
-                    **dict(base_event.raw_payload or {}),
+                    **source_payload,
+                    "broker_deal_completion": broker_deal_completion_payload(
+                        source_deal_id=source_deal_id,
+                        expected_contracts=base_event.contracts,
+                        split_count=len(targets),
+                        split_index=split_index,
+                        allocated_contracts=int(quantity),
+                    ),
                     "schema_version": "lifecycle_terminal_event.v2",
                     "record_id": lot_id,
                     "target_lot_id": lot_id,
@@ -1051,7 +1063,7 @@ def record_zero_price_option_close_atomically(
                     "case_id": case_id,
                     "evidence_id": evidence_id,
                     "allocation_id": allocation_id,
-                    "contracts": int(quantity),
+                    "contracts": base_event.contracts,
                     "source_event_id": anchor["source_event_id"],
                 },
             ))

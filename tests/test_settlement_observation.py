@@ -5041,6 +5041,67 @@ def _repo_with_projected_pending_close(tmp_path):
     return repo, case, policy
 
 
+def test_identified_multilot_pending_close_resolves_expiration_and_replays(tmp_path):
+    from domain.domain.trade_execution import ledger_execution_event_set_is_complete
+
+    repo, case, policy, anchor_ms = _repo_with_pending_case(
+        tmp_path, seed_anchor=False, second_open_lot=True,
+    )
+    deal = normalize_trade_deal({
+        "schema_version": "trade_execution.v1", "status": "OK",
+        "broker_account_ref": {"broker_id": "futu", "external_account_id": "1001",
+                               "environment": "REAL", "broker_account_id": "futu:REAL:1001",
+                               "account_label": "lx"},
+        "instrument_ref": {"asset_type": "option", "market": "US", "symbol": "NVDA",
+                           "option_type": "put", "strike": "100", "multiplier": "100",
+                           "expiration_ymd": EXPIRATION_YMD, "currency": "USD"},
+        "external_id_namespace": "futu.deal", "external_execution_id": "option-close-1",
+        "external_order_namespace": "futu.order", "external_order_id": "option-order-1",
+        "side": "buy", "position_effect": "close", "quantity": "2", "price": "0",
+        "currency": "USD", "code": OPTION_CODE,
+        "occurred_at_utc": datetime.fromtimestamp(anchor_ms / 1000, ZoneInfo("UTC")).isoformat(),
+    })
+    applied = resolve_trade_deal(deal, repo=repo, state={}, apply_changes=True)
+    assert applied.status == "applied", applied
+    pending = [row for row in repo.list_trade_events() if row["event_type"] == "close"]
+    assert len(pending) == 2 and ledger_execution_event_set_is_complete(pending)
+    pending_by_lot = {row["target_lot_id"]: row for row in pending}
+    gateway = _Gateway(history_deals=[{
+        "deal_id": "option-close-1", "acc_id": "1001", "code": OPTION_CODE,
+        "price": "0", "qty": 2,
+    }])
+    now_ms = int(policy["settlement_deadline_ms"])
+    before_events = repo.list_trade_events()
+    observation = _collect_broker_observation(
+        repo, lifecycle_case=repo.get_trade_lifecycle_case(case["case_id"]),
+        case_id=case["case_id"], gateway=gateway, now_ms=now_ms,
+    )
+    assert observation["complete"] is True
+
+    resolved = reconcile_lifecycle_close_reason(
+        repo, case_id=case["case_id"], now_ms=now_ms,
+        observation=observation, apply_changes=True,
+    )
+
+    assert resolved["decision"]["close_reason"] == "expiration_no_settlement"
+    events = repo.list_trade_events()
+    replacements = [row for row in events if row["event_type"] == "expire_close"]
+    assert len(replacements) == 2 and ledger_execution_event_set_is_complete(replacements)
+    for row in replacements:
+        prior = pending_by_lot[row["target_lot_id"]]
+        assert row["raw_payload"]["pending_close_event_id"] == prior["event_id"]
+        assert row["raw_payload"]["broker_deal_completion"] == prior["raw_payload"]["broker_deal_completion"]
+        assert row["raw_payload"]["execution_input"] == prior["raw_payload"]["execution_input"]
+    assert len([row for row in events if row["event_type"] == "void"]) == 2
+    assert all(repo.get_position_lot_fields(lot_id)["contracts_open"] == 0 for lot_id in ("lot-1", "lot-2"))
+    assert events != before_events
+
+    replay = resolve_trade_deal(deal, repo=repo, state={}, apply_changes=True)
+
+    assert (replay.status, replay.reason) == ("skipped", "ledger_recorded")
+    assert repo.list_trade_events() == events
+
+
 def test_projected_pending_close_resolves_through_batch_runtime_once(tmp_path):
     repo, case, policy = _repo_with_projected_pending_close(tmp_path)
     case_id = case["case_id"]

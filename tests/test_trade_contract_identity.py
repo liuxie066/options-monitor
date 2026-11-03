@@ -459,6 +459,134 @@ def test_split_order_enrichment_cas_failure_rolls_back_whole_execution(tmp_path,
     assert repo.list_trade_lifecycle_notifications() == notifications
 
 
+def _identified_zero_price_close_fixture(tmp_path, lot_contracts, *, option_type="put", source_shape="standard"):
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    for index, contracts in enumerate(lot_contracts):
+        opening = normalize_trade_deal({
+            **_execution_input(f"zero-close-open-{index}", option_type=option_type),
+            "quantity": str(contracts),
+        })
+        assert record_normalized_trade_event(repo, opening).created
+    if source_shape == "futu":
+        close = normalize_trade_deal({
+            "futu_account_id": "123", "trd_env": "REAL", "broker_account_id": "futu:REAL:123",
+            "external_id_namespace": "futu.deal", "deal_id": "zero-price-close",
+            "external_order_namespace": "futu.order", "order_id": "order-zero-price-close",
+            "code": f"US.NVDA260918{option_type[0].upper()}100000",
+            "trd_side": "BUY_BACK", "qty": sum(lot_contracts), "price": 0,
+            "create_time": "2026-09-18 20:30:00", "multiplier": 100, "currency": "USD",
+        }, futu_account_mapping={"123": "lx"}, allow_opend_refresh=False)
+    else:
+        close = normalize_trade_deal({
+            **_execution_input("zero-price-close", effect="close", option_type=option_type),
+            "side": "buy", "quantity": str(sum(lot_contracts)), "price": "0",
+            "occurred_at_utc": "2026-09-19T00:30:00Z",
+        })
+    assert not close.execution_input["errors"]
+    return repo, close
+
+
+@pytest.mark.parametrize("source_shape", ["standard", "futu"])
+@pytest.mark.parametrize("lot_contracts", [(3,), (1, 2), (1, 1, 1)])
+@pytest.mark.parametrize("option_type", ["put", "call"])
+def test_identified_zero_price_close_preserves_complete_split_and_replay(
+    tmp_path, lot_contracts, option_type, source_shape,
+):
+    repo, deal = _identified_zero_price_close_fixture(
+        tmp_path, lot_contracts, option_type=option_type, source_shape=source_shape,
+    )
+    original_execution = deepcopy(deal.execution_input)
+    expected = {row["record_id"]: row["fields"]["contracts_open"] for row in repo.list_position_lots()}
+    before_events = repo.list_trade_events()
+
+    result = resolve_trade_deal(deal, repo=repo, state={}, apply_changes=True)
+
+    assert (result.status, result.action, result.reason) == ("applied", "lifecycle", "close_reason_pending")
+    events = repo.list_trade_events()
+    closes = sorted((row for row in events if row["event_type"] == "close"), key=lambda row: row["target_lot_id"])
+    assert len(events) == len(before_events) + len(expected)
+    assert {row["target_lot_id"]: row["contracts"] for row in closes} == expected
+    assert len(result.operations) == len(expected)
+    for index, row in enumerate(closes, start=1):
+        raw = row["raw_payload"]
+        assert raw["close_type"] == "cause_pending"
+        assert raw["execution_id"] == execution_identity_from_input(original_execution)
+        assert raw["execution_input"] == original_execution
+        assert raw["broker_deal_completion"] == {
+            "source_deal_id": deal.deal_id,
+            "expected_contracts": sum(lot_contracts),
+            "split_count": len(expected),
+            "split_index": index,
+            "allocated_contracts": expected[row["target_lot_id"]],
+        }
+    assert ledger_execution_event_set_is_complete(closes)
+    if len(closes) > 1:
+        assert not ledger_execution_event_set_is_complete(closes[:-1])
+    assert all(row["fields"]["contracts_open"] == 0 for row in repo.list_position_lots())
+    assert deal.execution_input == original_execution
+    assert len(repo.list_trade_lifecycle_cases()) == 1
+    assert len(repo.list_trade_lifecycle_evidence()) == 1
+    assert len(repo.list_trade_lifecycle_source_consumptions()) == 1
+    assert len(repo.list_trade_lifecycle_allocations()) == len(expected)
+    before_replay = {
+        "events": events, "lots": repo.list_position_lots(),
+        "cases": repo.list_trade_lifecycle_cases(), "evidence": repo.list_trade_lifecycle_evidence(),
+        "claims": repo.list_trade_lifecycle_source_consumptions(),
+        "allocations": repo.list_trade_lifecycle_allocations(),
+        "notifications": repo.list_trade_lifecycle_notifications(),
+    }
+
+    replay = resolve_trade_deal(deal, repo=repo, state={}, apply_changes=True)
+
+    assert replay.status == "skipped" and replay.reason == "ledger_recorded"
+    assert repo.list_trade_events() == before_replay["events"]
+    assert repo.list_position_lots() == before_replay["lots"]
+    assert repo.list_trade_lifecycle_cases() == before_replay["cases"]
+    assert repo.list_trade_lifecycle_evidence() == before_replay["evidence"]
+    assert repo.list_trade_lifecycle_source_consumptions() == before_replay["claims"]
+    assert repo.list_trade_lifecycle_allocations() == before_replay["allocations"]
+    assert repo.list_trade_lifecycle_notifications() == before_replay["notifications"]
+
+
+def test_identified_zero_price_split_close_rolls_back_after_second_write_and_retries(tmp_path, monkeypatch):
+    repo, deal = _identified_zero_price_close_fixture(tmp_path, (1, 1, 1))
+    before_events = repo.list_trade_events()
+    before_lots = repo.list_position_lots()
+    before_notifications = repo.list_trade_lifecycle_notifications()
+    original_upsert = SQLiteOptionPositionsRepository.upsert_trade_event
+    closes_written = []
+
+    def fail_after_second_close(self, event, **kwargs):
+        result = original_upsert(self, event, **kwargs)
+        if event.event_type == "close":
+            closes_written.append(event.event_id)
+            if len(closes_written) == 2:
+                raise RuntimeError("synthetic failure after second lifecycle close")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(SQLiteOptionPositionsRepository, "upsert_trade_event", fail_after_second_close)
+        with pytest.raises(RuntimeError, match="synthetic failure after second lifecycle close"):
+            resolve_trade_deal(deal, repo=repo, state={}, apply_changes=True)
+
+    assert len(closes_written) == 2
+    assert repo.list_trade_events() == before_events
+    assert repo.list_position_lots() == before_lots
+    assert repo.list_trade_lifecycle_cases() == []
+    assert repo.list_trade_lifecycle_evidence() == []
+    assert repo.list_trade_lifecycle_source_consumptions() == []
+    assert repo.list_trade_lifecycle_allocations() == []
+    assert repo.list_trade_lifecycle_notifications() == before_notifications
+
+    retry = resolve_trade_deal(deal, repo=repo, state={}, apply_changes=True)
+
+    assert retry.status == "applied" and retry.reason == "close_reason_pending"
+    closes = [row for row in repo.list_trade_events() if row["event_type"] == "close"]
+    assert len(closes) == 3 and ledger_execution_event_set_is_complete(closes)
+    assert all(row["fields"]["contracts_open"] == 0 for row in repo.list_position_lots())
+    assert len(repo.list_trade_lifecycle_allocations()) == 3
+
+
 def _direct_split_close_fixture(tmp_path, *, namespace="futu.deal", standard=True):
     def normalize(payload):
         deal = normalize_trade_deal(payload)
@@ -757,6 +885,31 @@ def _complete_split_rows(*, quantities=(1, 1), legacy=False):
             "raw_payload": raw,
         })
     return rows
+
+
+@pytest.mark.parametrize("mutation", [
+    None, "missing_source_quantity", "source_quantity_mismatch", "allocation_quantity_mismatch",
+    "missing_split_member", "duplicate_split_index",
+])
+def test_lifecycle_split_completion_distinguishes_source_and_allocation_quantities(mutation):
+    rows = _complete_split_rows(quantities=(1, 2))
+    for row in rows:
+        row["raw_payload"].pop("close_target_resolution")
+        row["raw_payload"].update(schema_version="lifecycle_terminal_event.v2", contracts=3)
+    if mutation == "missing_source_quantity":
+        for row in rows:
+            row["raw_payload"].pop("qty")
+            row["raw_payload"].pop("contracts")
+    elif mutation == "source_quantity_mismatch":
+        rows[0]["raw_payload"]["contracts"] = 1
+    elif mutation == "allocation_quantity_mismatch":
+        rows[0]["raw_payload"]["broker_deal_completion"]["allocated_contracts"] = 2
+    elif mutation == "missing_split_member":
+        rows.pop()
+    elif mutation == "duplicate_split_index":
+        rows[1]["raw_payload"]["broker_deal_completion"]["split_index"] = 1
+
+    assert ledger_execution_event_set_is_complete(rows) is (mutation is None)
 
 
 def test_close_allocation_primitive_does_not_weaken_broker_source_proof():

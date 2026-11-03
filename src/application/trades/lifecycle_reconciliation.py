@@ -1340,8 +1340,14 @@ def _terminal_event(
     }
     return replace(
         event, fees=prior_pending_event.fees,
-        raw_payload={**event.raw_payload, **retained,
-                     "pending_close_event_id": prior_pending_event.event_id},
+        raw_payload={
+            **event.raw_payload, **retained,
+            "contracts": (
+                prior_raw["broker_deal_completion"]["expected_contracts"]
+                if prior_raw.get("broker_deal_completion") else contracts
+            ),
+            "pending_close_event_id": prior_pending_event.event_id,
+        },
     )
 
 

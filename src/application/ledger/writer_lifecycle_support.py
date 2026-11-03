@@ -1098,12 +1098,15 @@ def _validate_lifecycle_event_allocation_plan(
         ):
             raise ValueError("lifecycle allocation and terminal event mismatch")
         raw_payload = dict(event.raw_payload or {})
+        completion = raw_payload.get("broker_deal_completion") or {}
+        source_contracts = int(completion.get("expected_contracts") or 0) if completion else contracts
         if (
             str(raw_payload.get("case_id") or "").strip() != case_id
             or str(raw_payload.get("evidence_id") or "").strip() != evidence_id
             or str(raw_payload.get("allocation_id") or "").strip()
             != str(allocation.get("allocation_id") or "").strip()
-            or int(raw_payload.get("contracts") or 0) != contracts
+            or int(raw_payload.get("contracts") or 0) != source_contracts
+            or (completion and int(completion.get("allocated_contracts") or 0) != contracts)
         ):
             raise ValueError("lifecycle terminal event provenance mismatch")
         allocated_total += contracts
