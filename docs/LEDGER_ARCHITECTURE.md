@@ -80,6 +80,14 @@ Combo group/role 时回退完整历史投影。已终结成员不在活动续算
 历史补录仍须通过完整候选投影校验；早于开仓或与当时目标身份冲突的关闭会被拒绝。
 同一请求标识重试返回原事件，重新传入时间不会修改既有事实。
 
+券商零价期权平仓跨多个 lot 时，每个 `cause_pending` 事件携带同一原始成交身份及完整
+`broker_deal_completion`，按稳定 lot 顺序记录拆分序号、整笔成交数量和逐 lot 分配数量。
+事件顶层 `contracts` 与拆分证明中的 `allocated_contracts` 是逐 lot 数量，载荷中的
+`contracts`、`qty` / `quantity` 和原始 `execution_input` 保留整笔成交数量；完整性校验
+分别核对两者，不能将逐 lot 数量误作原成交总量。整组关闭、
+生命周期证据与分配同事务提交，重复成交不新增经济效果，中途失败全部回滚。
+后续到期、指派或行权确认沿用原拆分证明；本修复不自动恢复历史失败成交或改写已有到期关闭。
+
 标准成交与持仓输入分别由 `domain/domain/trade_execution.py`、`position_snapshot.py`
 定义。OpenD 接收与明确的逐笔 JSONL 文件共用成交处理入口；CSV 和其他券商适配器
 尚未实现。存储复用 SQLite、Inbox、Ledger facade、投影和费用补证路径。
