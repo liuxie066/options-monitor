@@ -12,7 +12,7 @@ from src.application.portfolio_management import (
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.runtime_config_freshness import RuntimeConfigIdentityError, ensure_runtime_config_identity
 from src.application.runtime_config_paths import absolutize_portfolio_data_config
-from src.application.runtime_paths import resolve_runtime_root
+from src.application.runtime_paths import repo_base, resolve_runtime_root
 from src.application.settings import build_effective_env
 
 
@@ -20,10 +20,6 @@ DEFAULT_CONFIGS = {
     "us": "config.us.json",
     "hk": "config.hk.json",
 }
-
-
-def repo_base() -> Path:
-    return Path(__file__).resolve().parents[2]
 
 
 def resolve_runtime_config_path(

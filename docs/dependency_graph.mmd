@@ -9,7 +9,7 @@ flowchart LR
   scripts["scripts"] -->|57| src_application["src.application"]
   src_application_trades["src.application.trades"] -->|51| src_application["src.application"]
   src_application["src.application"] -->|47| domain_storage["domain.storage"]
-  src_infrastructure["src.infrastructure"] -->|44| src_application["src.application"]
+  src_infrastructure["src.infrastructure"] -->|45| src_application["src.application"]
   src_application["src.application"] -->|42| src_application_ledger["src.application.ledger"]
   domain_domain["domain.domain"] -->|33| domain_domain_ledger["domain.domain.ledger"]
   src_application["src.application"] -->|33| domain_domain_engine["domain.domain.engine"]

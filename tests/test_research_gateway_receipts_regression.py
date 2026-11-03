@@ -223,7 +223,8 @@ def test_series_zero_physical_calls_persist_failed_status(planned, monkeypatch, 
         monkeypatch.setattr(plugin_runtime, "require_plugin", require)
     result = group.collect_watchlist_series(**{**args, "gateway_factory": factory}, confirm=True)
     attempts = sorted(args["archive_root"].rglob("attempt.json"))
-    assert len(attempts) == len(closed) == len(result["batches"]) == len(plan["batches"])
+    assert len(attempts) == len(result["batches"]) == len(plan["batches"])
+    assert len(closed) == 1
     assert not state.calls
     for path in attempts:
         attempt = json.loads(path.read_bytes())
@@ -633,10 +634,13 @@ def test_multishard_default_readiness_stays_inside_window(planned, monkeypatch, 
     if mode in {"port_closed", "cancel_port", "cancel_handshake", "cancel_readiness", "not_ready"}:
         assert all(attempt["status"] == "partial" and attempt["provider_calls"] for attempt in data)
     if mode == "ready":
-        assert len(contexts) == len(plan["batches"])
+        assert len(contexts) == 1
         assert len(state.calls) == 2 * len(plan["batches"])
         assert all(attempt["quote_package_status"] == "complete" for attempt in data)
-        assert sum(len(attempt["provider_calls"]) for attempt in data) == 3 * len(plan["batches"])
+        calls = [call for attempt in data for call in attempt["provider_calls"]]
+        assert sum(call["endpoint"] == "quote_preflight" for call in calls) == 1
+        assert sum(call["endpoint"] == "market_snapshot" for call in calls) == 2 * len(plan["batches"])
+        assert len(calls) == 1 + 2 * len(plan["batches"])
     if mode == "cancel_snapshot":
         quotes_path = attempts[0].parent / "quotes/quotes.json"
         captured = json.loads(quotes_path.read_bytes())
@@ -669,7 +673,7 @@ def test_multishard_explicit_factory_keeps_its_readiness_contract(planned):
         return gateway
 
     result = group.collect_watchlist_series(**{**args, "gateway_factory": injected}, confirm=True)
-    assert len(closed) == len(plan["batches"])
+    assert len(closed) == 1
     assert len(state.calls) == 2 * len(plan["batches"])
     assert all(
         call["endpoint"] == "market_snapshot"

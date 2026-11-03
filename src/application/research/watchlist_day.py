@@ -1049,18 +1049,38 @@ def run_watchlist_day(
                 clock=clock,
                 gateway_factory=gateway_factory,
             )
+            if outcome["manifest_sha256"] is not None:
+                supplemental = {
+                    "ancillary_file": day_dir / "market-ancillary/manifest.json",
+                    "expected_ancillary_sha256": outcome["manifest_sha256"],
+                }
             if now < series._utc(slot["expected_at_utc"]):
+                if supplemental:
+                    # Freeze all shard inputs while the lead window is still open.
+                    # prepare_only never claims observations, even if preparation runs past T.
+                    group.collect_watchlist_series(
+                        plan_dir=prepared / "plan",
+                        expected_plan_sha256=manifest["watchlist_series_sha256"],
+                        safe_window_file=prepared / "safe-window.json",
+                        expected_safe_window_sha256=manifest["safe_window_sha256"],
+                        archive_root=day_dir / "archive",
+                        budget_roots=budget_roots,
+                        runtime_root=runtime_root,
+                        prune_roots=prune_roots,
+                        host=host,
+                        port=port,
+                        confirm=True,
+                        clock=clock,
+                        gateway_factory=gateway_factory,
+                        prepare_only=True,
+                        **supplemental,
+                    )
                 return {
                     "status": "prepared_and_checked",
                     "date": request["date"],
                     "manifest": manifest,
                     "ancillary_capture": outcome,
                     "collection": None,
-                }
-            if outcome["manifest_sha256"] is not None:
-                supplemental = {
-                    "ancillary_file": day_dir / "market-ancillary/manifest.json",
-                    "expected_ancillary_sha256": outcome["manifest_sha256"],
                 }
         result = group.collect_watchlist_series(
             plan_dir=prepared / "plan",

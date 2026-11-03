@@ -90,7 +90,9 @@ def test_daily_automatic_sources_before_quotes_export_originals(acquisition):
     result = daily.run_watchlist_day(**args, confirm=True)
     assert result["ancillary_capture"]["status"] == "captured" and len(state.http) == 2
     assert [c[0] for c in state.calls].count("rehab") == 1
-    assert not (args["day_dir"] / "archive").exists()
+    assert (args["day_dir"] / "archive/watchlist-series.json").exists()
+    assert not list((args["day_dir"] / "archive").glob("batches/*/observations/*/claim"))
+    assert not [call for call in state.calls if call[0] == "snapshot"]
     originals = args["day_dir"] / "market-ancillary"
     frozen = {p.name: p.read_bytes() for p in originals.glob("*.json")}
     daily.run_watchlist_day(**args, confirm=True)

@@ -4,6 +4,14 @@
 
 2026-10-31 获批研究部署：固定研发包 `f0d46fbf48261177ede3a36adc64f2d3714079351e843b5c8397b7113bfeaf9b` 已在 `liuxie-incus` 独立安装；716份源码、离线依赖、两市场真实Linux隔离、正式启动和独立回读通过，部署验收时研究timer均enabled/active。FX及公司行动提前300秒供给、报价仍每日一次，总预算301次应用请求/日。计划11月2日起无结束日期运行，部署验收时真实观察0；当时研究占用988,672,000字节、余量3,147,141,120字节，符合2GiB/2GiB边界。新归档使用批准数据根内 `archive/{hk,us}/ancillary-f0d46fbf4826/`，避免覆盖旧不可变schedule；旧包及原件保留，生产OM未改。这是独立研究包部署，不是OM发布版本；下文“本地开发/未部署”保留各切片原验收时点，不代表当前部署状态。该部署记录不证明后续运行态或采集量；真实首三交易日与来源用途/覆盖须另行回读验收。
 
+### 采集窗口与公司行动适配
+
+`FutuGateway.get_rehab`及内部quote client转发SDK响应并沿用错误映射，只初始化行情连接；收到响应或空表均不认证公司行动覆盖完整。每日runner在附属资料窗口内取得manifest后提前初始化全部分片归档，`prepare_only`不建立观察claim、不连接行情，即使准备跨过T也不采样。原60秒观察槽仍由同一collector执行，并继续逐请求检查时点、持久预算、限流和磁盘余量。
+
+同次多片采集按原顺序共享一条行情连接，最后统一关闭；默认连接的就绪检查仍由观察collector在窗口守卫内执行并记录真实请求，仅成功后在本组复用就绪结果，失败或取消不缓存成功。显式注入的factory继续自行负责就绪。公司行动沿用行情插件准入，缺包时不建立连接。不跨市场或跨进程复用，不增加重试或请求额度。共享连接owner记录普通关闭错误而保留已持久化结果；已有异常时，关闭错误不得覆盖原异常。容量计量改用`scandir`，仍计硬链接一次、计符号链接自身且不跟随，并保留不可读目录错误。研究systemd模板使用同一CLI模块的轻量入口`python -B -m src.interfaces.cli.research research watchlist-schedule-run ...`，参数、确认和原JSON信封保持；通用`om research`入口仍可使用。
+
+回归见`tests/test_research_collection_window.py`与`tests/test_futu_gateway_rehab.py`：真实collector覆盖完整多片分母、提前归档无请求/无claim、连接清理异常、预算及真实gateway适配；仅替换SDK传输验证非空/空载荷和错误映射。合成传输与时钟不能证明供应商时延或历史数据完整，实际验收须核对正常窗口内的请求、全部合约及附属原件；systemd成功不能替代采集证据，漏过的历史观察不补写或覆盖。
+
 每日编排入口：`om research watchlist-day-run --request <固定请求.json> --expected-request-sha256 <摘要> --day-dir <独立每日目录> --budget-root <研究计量根> --runtime-root <生产runtime隔离边界> --prune-root <清理边界> --opend-host <端点> --opend-port <端口>`。默认只预览；`--confirm` 仍只执行该日显式安全窗口允许的发现/观察，不启动扫描。当前由获批独立研究schedule调用，不属于生产扫描服务。
 
 请求 `research.watchlist-day-request.v1` 包含固定 `date`、`previous_day` 与 `scan_input/calendar/policy/discovery_budget/observation_budget/discovery_window/observation_window` 七份 `{path,sha256}` 引用。名单输入为已导出的 `research.watchlist-scan-input.v1`；不读取生产配置或选择 latest。两份安全窗口均为原 `research.safe-window.v1`、绑定原 scan-input SHA；仅在派生输入及新计划生成后重绑摘要，时间区间不变。发现窗口必须早于观察窗口，预算分别沿用原发现/多片 owner，并使用同一组明确研究计量目录。

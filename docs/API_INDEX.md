@@ -9,6 +9,7 @@
 由 `research.market_ancillary` 在原报价点之前受控调用既有 FX／rehab owner，并将原件交入同一 manifest；
 两源FX、一次preflight及每标的一次rehab独立计量；已按新补充单批准的301次/日总预算部署，不自动扩大范围。
 详见[显式附属原件](RESEARCH_WATCHLIST_SCOPE.md#显式附属资料原件2026-10-31本地增量未部署)。
+研究采集适配与窗口：`FutuGateway.get_rehab`连接原SDK行情接口；每日runner在资料lead窗口预建归档，多片collector按原预算共享行情连接，容量计量保留原边界并减少遍历开销。研究服务使用轻量`src.interfaces.cli.research`模块入口；[修复合同](RESEARCH_WATCHLIST_SCOPE.md#采集窗口与公司行动适配)及`tests/test_research_collection_window.py`、`tests/test_futu_gateway_rehab.py`维护接入与时点边界。
 
 封存 FX 离线投影（已包含于 v4.6.8 源码）：`om_strategy_core.evaluation.project_run_fx_facts(raw, run_id=...)`。唯一纯实现位于 `domain/domain/performance/cash_conversion.py`，复用原来源/session 规则及事实构造；`src.application.current_fx_run._decode`、`src.application.cash_conversion.cash_fx_observation_facts` 和 infrastructure pair 验证继续引用同一 owner。公开入口检查封存身份/摘要和原始带时区时刻，不取当前行情、不读写文件；源投影成功不证明后续决策/日终用途资格或期间覆盖。回归见 `tests/test_native_fx_projection.py`。
 

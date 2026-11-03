@@ -36,7 +36,10 @@ IMPLEMENTATION_SOURCES = tuple(
         | {
             "src/application/research/observation_series.py",
             "src/application/research/archive.py",
+            "src/application/research/__init__.py",
+            "src/application/runtime_paths.py",
             "src/interfaces/cli/research.py",
+            "src/interfaces/cli/command_environment.py",
             "src/interfaces/cli/main.py",
             "domain/domain/option_lifecycle.py",
             "domain/domain/performance/strategy_evaluation.py",
@@ -1027,6 +1030,7 @@ def collect_series(
     confirm: bool = False,
     clock=None,
     gateway_factory=None,
+    ensure_quote_ready: bool = False,
     snapshot_limiter_root: Path | None = None,
     rate_limited_call=None,
 ) -> dict:
@@ -1099,7 +1103,7 @@ def collect_series(
             try:
                 gateway = (gateway_factory or build_futu_gateway)(host=host, port=port)
                 wrapper = _WindowGateway(gateway, start=start, end=end, clock=clock, calls=calls)
-                if gateway_factory is None:
+                if gateway_factory is None or ensure_quote_ready:
                     wrapper.ensure_quote_ready()
                 single_plan = {
                     "schema_version": quote.PLAN_SCHEMA,
