@@ -99,7 +99,7 @@ systemd 与 launchd 均支持在预览后通过 `--confirm` 应用调和；该�
 | `./om run tick --config ... --no-send` | 是 | 可能 | 否 | 会写本地运行产物，但禁发通知 |
 | `./om run tick --config ...` | 是 | 可能 | 否 | 人工扫描入口；普通 Tick 通知只由 cron trigger 发送 |
 | `./om run tick-cron --market ... --config ...` | 是 | 可能 | 是 | 正式定时扫描/通知入口 |
-| `./om run trade-intake --config ... --mode apply --yes` | 是 | 可能 | 是 | 会写 canonical ledger、intake 状态；启用 PM 和 `holdings_sync` 时可能提交持久化刷新请求，接收成功不等于持仓同步完成；默认发送入账回执 |
+| `./om run trade-intake --config ... --mode apply --yes` | 是 | 可能 | 是 | 会写 canonical ledger、intake 状态；`portfolio_management.enabled` 为 true 且符合成交来源、类型与去重条件时，可能向 PM 提交持久化刷新请求；接收成功不等于持仓同步完成；默认发送入账回执 |
 | `./om run trade-intake --config ... --reconcile-state --dry-run` | 否 | 否 | 否 | 默认逐一核对所有启用账户的独立 state；可用 `--account lx` 缩小范围 |
 | `./om run trade-intake --config ... --reconcile-state --account lx --apply` | 是 | 否 | 否 | 只更新指定账户 intake state；输出对应 backup path，执行前必须先看 dry-run |
 | `./om option-positions auto-close-expired --config ... --apply --yes` | 是 | 否 | 是 | 专用过期自动平仓入口；先跑 `--dry-run`；需要静默时加 `--no-send` |
