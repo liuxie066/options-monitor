@@ -1,0 +1,73 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.12",
+  "base": {
+    "tag": "v4.6.11",
+    "commit": "e4093eeffd0995252c1b7709403962a383276caa"
+  },
+  "reviewed_head": "13de3dfbc1c437a01cb066d37aa00f5cc987ce3a",
+  "commits": [
+    {
+      "sha": "87361376731b799b64e650dccf6bc79fafa50da8",
+      "subject": "fix(sizing): preserve virtualenv interpreter for portfolio workers"
+    },
+    {
+      "sha": "6388827e7ea82dc35801f69a6e29719f238e3fc7",
+      "subject": "fix(notifications): compact Feishu sections and merge event summaries"
+    },
+    {
+      "sha": "7bb26510fbde5cf27b9acc43dec0809706fe2179",
+      "subject": "Merge pull request #990 from liuxie066/codex/feishu-compact-spacing"
+    },
+    {
+      "sha": "cd3da621d335d3605423ab442b72545005642abc",
+      "subject": "chore(sizing): merge main for required CI validation"
+    },
+    {
+      "sha": "13de3dfbc1c437a01cb066d37aa00f5cc987ce3a",
+      "subject": "Merge pull request #989 from liuxie066/codex/position-sizing-worker-venv"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "飞书简报仅在一级栏目之间留白，收紧栏目内部间距，并按标的合并、去重财报与除息事件摘要；历史冻结消息保持原排版。（#990）。",
+      "commits": [
+        "6388827e7ea82dc35801f69a6e29719f238e3fc7",
+        "7bb26510fbde5cf27b9acc43dec0809706fe2179"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复仓位准备子进程解析 Python 符号链接后丢失虚拟环境、无法加载已安装 PM 插件，导致 Position Sizing 持续不可用的问题；保留完整资产证据校验。（#989）。",
+      "commits": [
+        "87361376731b799b64e650dccf6bc79fafa50da8",
+        "cd3da621d335d3605423ab442b72545005642abc",
+        "13de3dfbc1c437a01cb066d37aa00f5cc987ce3a"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "87361376731b799b64e650dccf6bc79fafa50da8",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/989", "docs/PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md"]
+    },
+    {
+      "commit": "6388827e7ea82dc35801f69a6e29719f238e3fc7",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/990", "docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md"]
+    },
+    {
+      "commit": "7bb26510fbde5cf27b9acc43dec0809706fe2179",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/990", "docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md"]
+    },
+    {
+      "commit": "cd3da621d335d3605423ab442b72545005642abc",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/989", "docs/PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md"]
+    },
+    {
+      "commit": "13de3dfbc1c437a01cb066d37aa00f5cc987ce3a",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/989", "docs/PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md"]
+    }
+  ]
+}
