@@ -15,6 +15,7 @@ from domain.domain.performance.models import (
 )
 from domain.domain.portfolio_scope import portfolio_scope_id
 from domain.services import adapt_option_positions_context
+from src.application.account_config import resolve_account_broker
 from src.infrastructure.exchange_rates import (
     exchange_rate_observation_status,
     get_exchange_rates_or_fetch_latest,
@@ -751,7 +752,7 @@ def prepare_option_positions_contexts(
                 continue
             portfolio = configs[account].get("portfolio")
             portfolio = portfolio if isinstance(portfolio, Mapping) else {}
-            broker = normalize_broker(portfolio.get("broker") or "富途")
+            broker = normalize_broker(resolve_account_broker(configs[account], account=account))
             accounts_by_broker.setdefault(broker, []).append(account)
             records_by_account[account] = records
 
@@ -1074,7 +1075,7 @@ def _load_prepared_option_positions_context_artifacts(
         and isinstance(expected_runtime_config.get("portfolio"), Mapping)
         else {}
     )
-    expected_broker = normalize_broker(portfolio.get("broker") or "富途")
+    expected_broker = normalize_broker(resolve_account_broker(expected_runtime_config or {}, account=account))
     configured_account = normalize_account(portfolio.get("account"))
     if configured_account and configured_account != account:
         raise PreparedOptionPositionsContextError(

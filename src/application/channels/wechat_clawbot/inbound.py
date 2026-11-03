@@ -18,7 +18,7 @@ from src.application.agent_tool_contracts import AgentToolError, build_error_pay
 from src.application.bot.control.audit import InboundAuditStore
 from src.application.bot.control.contracts import BotInboundRequest
 from src.application.bot.control.policy import (check_sender_allowed, check_reply_authorization,
-                                              ReplyAuthorizationError, reply_authorization_predicate)
+                                              ReplyAuthorizationError, reply_authorization_predicate, require_inbound_channel)
 from src.application.channels.reply_decision import (
     decide_inbound_reply,
     inbound_command_id as _inbound_command_id,
@@ -204,6 +204,7 @@ def check_wechat_clawbot_serve_settings(settings: WechatClawbotServeSettings) ->
     ok = True
     error: dict[str, Any] | None = None
     try:
+        require_inbound_channel("wechat_clawbot", settings.bot_config_path)
         settings.validate_for_serve()
     except AgentToolError as err:
         ok = False
@@ -232,6 +233,10 @@ def handle_wechat_clawbot_message(
     bot_reply_options: dict[str, Any] | None = None,
     received_monotonic: float | None = None,
 ) -> dict[str, Any]:
+    try:
+        require_inbound_channel("wechat_clawbot", bot_config_path)
+    except AgentToolError as exc:
+        return build_response(tool_name="inbound.wechat_clawbot", ok=False, error=build_error_payload(exc))
     received_monotonic = time.monotonic() if received_monotonic is None else received_monotonic
     text = message_text(payload)
     if not text:
@@ -360,6 +365,7 @@ def poll_wechat_clawbot_once(
     channel_service: ChannelService | None = None,
     execute_tool_fn: ExecuteToolFn | None = None,
 ) -> dict[str, Any]:
+    require_inbound_channel("wechat_clawbot", bot_config_path)
     store = _state_store(base=base, label=label, state_dir=state_dir)
     state = _load_store_json(store.load_state, default={})
     bot_token = str(state.get("bot_token") or "").strip()
@@ -374,7 +380,9 @@ def poll_wechat_clawbot_once(
         allowed_senders_fn=current_allowlist, config_key=config_key, config_path=config_path,
         bot_config_path=bot_config_path, transport_identity=sender_identity)
     allowed_senders = current_allowlist()
+    require_inbound_channel("wechat_clawbot", bot_config_path)
     response = client.get_updates(get_updates_buf=cursor_before)
+    require_inbound_channel("wechat_clawbot", bot_config_path)
     provider_code = response_code(response)
     if provider_code not in (None, 0) and not response_success(response):
         return build_response(
@@ -408,6 +416,7 @@ def poll_wechat_clawbot_once(
     reply_count = 0
 
     for message in messages:
+        require_inbound_channel("wechat_clawbot", bot_config_path)
         inbound_kwargs: dict[str, Any] = {
             "base": base,
             "label": label,
@@ -424,11 +433,13 @@ def poll_wechat_clawbot_once(
             inbound_kwargs["execute_tool_fn"] = execute_tool_fn
         expired = time.monotonic() >= received_monotonic + 180
         typing_status = ({"attempted": False, "ok": True, "reason": "budget_exhausted"} if expired else
-                         _maybe_start_typing(message=message, client=client, allowed_senders=allowed_senders))
+                         _maybe_start_typing(message=message, client=client, allowed_senders=allowed_senders, bot_config_path=bot_config_path))
         binding_refresh: dict[str, Any] = {"attempted": False, "updated_count": 0, "reason": "not_started"}
         try:
+            require_inbound_channel("wechat_clawbot", bot_config_path)
             inbound = service.handle_inbound(WECHAT_CLAWBOT_NOTIFICATION_PROVIDER, message, **inbound_kwargs)
             data = _dict(inbound.get("data"))
+            require_inbound_channel("wechat_clawbot", bot_config_path)
             binding_refresh = _refresh_bound_context_from_inbound(
                 base=base,
                 route=binding_refresh_route,
@@ -446,6 +457,7 @@ def poll_wechat_clawbot_once(
                 bot_config_path=bot_config_path, transport_identity=sender_identity,
             )
             _record_reply_receipt(inbound=inbound, audit_db=audit_db, reply_status=reply_status)
+            require_inbound_channel("wechat_clawbot", bot_config_path)
             reply_binding_refresh = _refresh_bound_context_from_reply(
                 base=base,
                 inbound=inbound,
@@ -457,7 +469,7 @@ def poll_wechat_clawbot_once(
             if bool(reply_binding_refresh.get("attempted")):
                 binding_refresh = reply_binding_refresh
         finally:
-            stop_status = _maybe_stop_typing(message=message, client=client, typing_status=typing_status)
+            stop_status = _maybe_stop_typing(message=message, client=client, typing_status=typing_status, bot_config_path=bot_config_path)
             typing_status = {**typing_status, "stop": stop_status}
         if data.get("kind") == "message":
             processed_count += 1
@@ -482,6 +494,7 @@ def poll_wechat_clawbot_once(
         state=state,
         client=client,
         interval_sec=keepalive_interval_sec,
+        bot_config_path=bot_config_path,
     )
     keepalive_state_changed = bool(keepalive_status.pop("_state_changed", False))
 
@@ -655,11 +668,13 @@ def serve_wechat_clawbot(
     lock_path: str | os.PathLike[str] | None = None,
     stop_after_batches: int | None = None,
 ) -> None:
+    require_inbound_channel("wechat_clawbot", settings.bot_config_path)
     settings.validate_for_serve()
     batches = 0
     with _single_instance_lock(lock_path):
         while True:
             try:
+                require_inbound_channel("wechat_clawbot", settings.bot_config_path)
                 result = poll_once_fn(
                     base=settings.base,
                     label=settings.label,
@@ -691,7 +706,12 @@ def _maybe_keepalive_bound_context(
     state: dict[str, Any],
     client: WechatClawbotClient,
     interval_sec: float,
+    bot_config_path: str | None = None,
 ) -> dict[str, Any]:
+    try:
+        require_inbound_channel("wechat_clawbot", bot_config_path)
+    except AgentToolError as exc:
+        return {"attempted": False, "ok": False, "reason": exc.code.lower(), "error_code": exc.code}
     interval = max(0.0, float(interval_sec or 0.0))
     if interval <= 0:
         return {"attempted": False, "ok": True, "reason": "disabled"}
@@ -739,12 +759,15 @@ def _maybe_keepalive_bound_context(
     last_error: str | None = None
     for name, to_user_id, context_token in targets:
         try:
+            require_inbound_channel("wechat_clawbot", bot_config_path)
             response = client.get_config(ilink_user_id=to_user_id, context_token=context_token)
             if response_success(response):
                 ok_count += 1
                 continue
             failures.append(name)
             last_error = f"{name}: provider_response_code={response_code(response)}"
+        except AgentToolError as exc:
+            return {"attempted": bool(ok_count or failures), "ok": False, "reason": exc.code.lower(), "error_code": exc.code}
         except Exception as exc:
             failures.append(name)
             last_error = f"{name}: {type(exc).__name__}"
@@ -847,6 +870,7 @@ def _maybe_start_typing(
     message: dict[str, Any],
     client: WechatClawbotClient,
     allowed_senders: str | None,
+    bot_config_path: str | None = None,
 ) -> dict[str, Any]:
     to_user_id = message_user_id(message)
     context_token = message_context_token(message)
@@ -856,6 +880,7 @@ def _maybe_start_typing(
     if not sender_decision.allowed:
         return {"attempted": False, "ok": True, "reason": sender_decision.reason}
     try:
+        require_inbound_channel("wechat_clawbot", bot_config_path)
         config_response = client.get_config(ilink_user_id=to_user_id, context_token=context_token)
         typing_ticket = extract_first_string(config_response, ("typing_ticket", "typingTicket"))
         if not typing_ticket:
@@ -864,7 +889,10 @@ def _maybe_start_typing(
                 "ok": False,
                 "reason": "missing_typing_ticket",
             }
+        require_inbound_channel("wechat_clawbot", bot_config_path)
         typing_response = client.send_typing(ilink_user_id=to_user_id, typing_ticket=typing_ticket, status=1)
+    except AgentToolError as exc:
+        return {"attempted": False, "ok": False, "reason": exc.code.lower(), "error_code": exc.code}
     except Exception as exc:
         return {
             "attempted": True,
@@ -885,6 +913,7 @@ def _maybe_stop_typing(
     message: dict[str, Any],
     client: WechatClawbotClient,
     typing_status: dict[str, Any],
+    bot_config_path: str | None = None,
 ) -> dict[str, Any]:
     if not (typing_status.get("attempted") and typing_status.get("typing_ticket")):
         return {"attempted": False, "ok": True, "reason": "not_started"}
@@ -892,11 +921,14 @@ def _maybe_stop_typing(
     if not to_user_id:
         return {"attempted": False, "ok": True, "reason": "missing_user_id"}
     try:
+        require_inbound_channel("wechat_clawbot", bot_config_path)
         response = client.send_typing(
             ilink_user_id=to_user_id,
             typing_ticket=str(typing_status.get("typing_ticket") or ""),
             status=2,
         )
+    except AgentToolError as exc:
+        return {"attempted": False, "ok": False, "reason": exc.code.lower(), "error_code": exc.code}
     except Exception as exc:
         return {
             "attempted": True,
@@ -923,6 +955,10 @@ def _maybe_reply(
     config_key: str | None = None, config_path: str | None = None,
     bot_config_path: str | None = None, transport_identity: str | None = None,
 ) -> dict[str, Any]:
+    try:
+        require_inbound_channel("wechat_clawbot", bot_config_path)
+    except AgentToolError as exc:
+        return {"attempted": False, "ok": False, "reason": exc.code.lower(), "error_code": exc.code}
     decision = decide_inbound_reply(
         inbound,
         reply_enabled=reply_enabled,
@@ -955,6 +991,10 @@ def _maybe_reply(
                 current_allowed_senders=allowed_senders_fn or (lambda: None), config_key=config_key,
                 config_path=config_path, bot_config_path=bot_config_path, transport_identity=transport_identity,
                 allow_unscoped=bool(record.get("live_unscoped")))
+        try:
+            require_inbound_channel("wechat_clawbot", bot_config_path)
+        except AgentToolError as exc:
+            raise ReplyAuthorizationError("reply channel unavailable", error_code=exc.code) from exc
         api_response = client.send_text_message(
             to_user_id=frozen.get("to_user_id", to_user_id),
             context_token=frozen.get("context_token", context_token),
@@ -962,10 +1002,11 @@ def _maybe_reply(
             group_id=frozen.get("group_id", message_group_id(message) or None),
             client_id=_outbox_client_id(delivery_key),
         )
-    except ReplyAuthorizationError:
+    except ReplyAuthorizationError as blocked:
         if outbox is not None and delivery_key:
             outbox.mark_reply_failed(delivery_key, error="authorization_blocked", retryable=True)
-        return {"attempted": False, "ok": False, "reason": "authorization_blocked", "delivery_key": delivery_key}
+        return {"attempted": False, "ok": False, "reason": "authorization_blocked", "delivery_key": delivery_key,
+                **({"error_code": blocked.error_code} if blocked.error_code else {})}
     except Exception as exc:
         if outbox is not None and delivery_key:
             outbox.mark_reply_failed(delivery_key, error=type(exc).__name__, retryable=True)
@@ -1050,6 +1091,10 @@ def _retry_pending_wechat_reply(
     config_key: str | None = None, config_path: str | None = None,
     bot_config_path: str | None = None, transport_identity: str | None = None,
 ) -> dict[str, Any]:
+    try:
+        require_inbound_channel("wechat_clawbot", bot_config_path)
+    except AgentToolError as exc:
+        return {"attempted": False, "ok": False, "reason": exc.code.lower(), "error_code": exc.code}
     if not reply_enabled:
         return {"attempted": False, "ok": True, "reason": "reply_disabled"}
 
@@ -1076,9 +1121,10 @@ def _retry_pending_wechat_reply(
             client_id=_outbox_client_id(delivery_key),
         )
         ok = response_success(api_response)
-    except ReplyAuthorizationError:
+    except ReplyAuthorizationError as blocked:
         store.mark_reply_failed(delivery_key, error="authorization_blocked", retryable=True)
-        return {"attempted": False, "ok": False, "reason": "authorization_blocked", "delivery_key": delivery_key}
+        return {"attempted": False, "ok": False, "reason": "authorization_blocked", "delivery_key": delivery_key,
+                **({"error_code": blocked.error_code} if blocked.error_code else {})}
     except Exception as exc:
         store.mark_reply_failed(delivery_key, error=type(exc).__name__, retryable=True)
         return {"attempted": True, "ok": False, "reason": "reply_failed", "delivery_key": delivery_key}

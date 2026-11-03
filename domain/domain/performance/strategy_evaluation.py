@@ -17,7 +17,7 @@ from domain.domain.fx_quote_policy import CALENDAR_EVIDENCE, quote_quality
 from domain.domain.ledger.cash_facts import cash_facts_for_trade_event
 from domain.domain.money import quantize_money, to_decimal
 from domain.domain.option_lifecycle import INSTRUMENT_POLICY_REGISTRY
-from domain.domain.symbol_identity import symbol_market
+from domain.domain.symbol_identity import OPTION_CODE_RE, symbol_market
 from domain.domain.option_position_identity import normalize_currency
 from domain.domain.performance.cash_conversion import (
     HISTORICAL_BUSINESS_DAY_FX_CARRY_FORWARD_METHOD,
@@ -90,7 +90,7 @@ def _cross_rate(facts, currency, base_currency, at_ms):
     return _rate(facts, currency, at_ms)[0] / _rate(facts, base_currency, at_ms)[0]
 
 
-def trading_calendar_dates(receipt: Any, *, start: date, end: date) -> list[str]:
+def trading_calendar_dates(receipt: Any, *, start: date, end: date, allow_empty: bool = False) -> list[str]:
     if not isinstance(receipt, Mapping) or (
         receipt.get("retcode") != 0
         or receipt.get("coverage_complete") is not True
@@ -113,7 +113,7 @@ def trading_calendar_dates(receipt: Any, *, start: date, end: date) -> list[str]
         if day.isoformat() != raw or not start <= day <= end:
             raise ValueError("calendar date outside request")
         dates.add(raw)
-    if not dates:
+    if not dates and not allow_empty:
         raise ValueError("calendar returned no trading dates")
     return sorted(dates)
 
@@ -212,12 +212,11 @@ def _closed_calendar(calendar, market):
     return start, end, calendar["source_observed_at_utc"], receipt["rows"]
 
 
-def _closed_market_observation(carry, identity, at_ms):
+def _closed_market_observation(carry, market, at_ms):
     if not isinstance(carry, dict) or set(carry) != {"schema_version", "observation_at_ms", "calendars"}:
         raise ValueError("invalid closed market carry schema")
     if carry["schema_version"] != "om.closed-market-carry.v1" or not isinstance(carry["calendars"], dict):
         raise ValueError("invalid closed market carry version/calendars")
-    market = symbol_market(identity)
     if market not in {"HK", "US"} or market not in carry["calendars"]:
         raise ValueError("closed market calendar missing for asset")
     original = _integer(carry["observation_at_ms"], "carry observation", minimum=1)
@@ -271,7 +270,14 @@ def _market(market, at_ms):
                 raise ValueError(f"invalid {kind} mark schema")
             row = dict(raw)
             row[identity] = _text(row[identity], identity)
-            use_at = at_ms if carry is None else _closed_market_observation(carry, row[identity], at_ms)
+            use_at = at_ms
+            if carry is not None:
+                if kind == "options":
+                    contract = OPTION_CODE_RE.fullmatch(row[identity])
+                    asset_market = contract["market"] if contract else None
+                else:
+                    asset_market = symbol_market(row[identity])
+                use_at = _closed_market_observation(carry, asset_market, at_ms)
             row["currency"] = _currency(row["currency"])
             _text(row["source"], "source")
             available, until = (_integer(row[key], key, minimum=1) for key in ("available_at_ms", "valid_until_ms"))
@@ -295,8 +301,6 @@ def _market(market, at_ms):
             if conflict in seen and seen[conflict] != prices:
                 raise ValueError(f"conflicting {kind} mark: {key}")
             seen[conflict] = prices
-            if carry is not None and not available <= use_at <= until:
-                raise ValueError("closed market original mark was not eligible at observation")
             if available <= use_at <= until:
                 previous = rows.get(key)
                 if previous is None or (stamp, available, row["source"]) > (
@@ -307,6 +311,8 @@ def _market(market, at_ms):
                     previous["source"],
                 ):
                     rows[key] = row
+        if carry is not None and any(key[:2] not in rows for key in seen):
+            raise ValueError("closed market original mark was not eligible at observation")
         chosen[kind] = rows
     return chosen, _fx_facts(market["fx"])
 

@@ -18,7 +18,7 @@
 
 ## 开始使用
 
-- [README](../README.md)：产品定位、五分钟开始、常用入口和安全边界。
+- [README](../README.md)：产品定位、Mac 首次扫描、常用入口和安全边界。
 - [Install](INSTALL.md)：Python 要求、安装器、release 目录和 wrapper。
 - [Getting Started](GETTING_STARTED.md)：安装后的首次配置、检查和首跑。
 - [Deploy](../DEPLOY.md)：部署入口和目录契约。
@@ -94,7 +94,7 @@
 - [Agent Handbook](AGENT_WIKI.md)：本地 agent 的任务 playbook、模块地图和验证矩阵。
 - [Session Summary](SESSION_SUMMARY.md)：仅在显式 handoff 时使用的模板。
 
-`./om-agent spec` 是公开工具清单的运行时权威。Tool Reference 不复制每个工具的完整 schema。
+`./om tools spec`（兼容 `./om-agent spec`）是公开工具清单的运行时权威。Tool Reference 不复制每个工具的完整 schema。
 
 ## 运维、修复与发布
 

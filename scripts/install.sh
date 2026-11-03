@@ -5,8 +5,14 @@ REPO_URL="https://github.com/liuxie066/options-monitor.git"
 PREFIX="${HOME}/apps/options-monitor"
 VERSION=""
 PYTHON_BIN="${PYTHON:-}"
+SOURCE_INSTALL=0
 WITH_SERVER=0
 WITH_DEV=0
+WITH_POSITION_ADVICE=0
+WITH_FEISHU=0
+WITH_WECHAT=0
+WITH_BROKER_FUTU=0
+WITH_BROKER_LONGBRIDGE=0
 FORCE=0
 INSTALL_CLI=1
 BIN_DIR="${HOME}/.local/bin"
@@ -22,8 +28,9 @@ Installs the latest GitHub release, or one pinned options-monitor release, into:
   <prefix>/releases/<version>
   <prefix>/current -> <prefix>/releases/<version>
 
-The installer requires Python 3.12. It downloads code, installs
-locked Python dependencies, verifies the Bot runtime, updates current, and
+The default installer downloads a complete, checksum-verified runtime bundle.
+It requires curl, tar and sha256sum or shasum, but no Git, Python or pip.
+It verifies the runtime, updates current, and
 by default creates user-level CLI wrappers. It does not write runtime config,
 write env secrets, start services, create timers, connect to OpenD, send Feishu
 messages, or touch SQLite state.
@@ -33,13 +40,19 @@ Options:
                         Default: latest published GitHub release, never main.
   --prefix PATH        Install root. Default: $HOME/apps/options-monitor.
   --repo-url URL       Git repository URL.
+  --source             Explicit legacy source installation; requires Git and Python >=3.12.
   --python PATH        Python executable for venv creation. Default: python3.12, then compatible python3.
   --install-cli        Create user-level om and om-agent wrappers. Default.
   --no-install-cli     Do not create user-level CLI wrappers.
   --bin-dir PATH       Wrapper directory. Default: $HOME/.local/bin.
   --force-cli-wrapper  Overwrite existing non-options-monitor wrapper files.
   --with-server        Also install requirements/server.txt.
-  --with-dev           Also install requirements/dev.txt.
+  --with-dev           Also install requirements/dev.txt (source mode only).
+  --with-position-advice Install the optional Position Advice package (source mode only; does not enable it).
+  --with-feishu        Install the optional Feishu message package (source mode only; does not enable it).
+  --with-wechat        Install the optional WeChat message package (source mode only; does not enable it).
+  --with-broker-futu   Install the optional Futu broker package (source mode only; does not enable account access).
+  --with-broker-longbridge Install the pinned Longbridge SDK and broker package (source mode only).
   --force              Recreate an inactive target release directory if it exists.
   -h, --help           Show this help.
 EOF
@@ -110,11 +123,29 @@ check_python_runtime() {
 
 run_bot_smoke() {
   release_dir="$1"
-  (cd "$release_dir" && "$release_dir/.venv/bin/python" -c 'import src.application.bot.host; import src.application.bot.runtime')
+  if [ -e "$release_dir/om.runtime.json" ] || [ -e "$release_dir/runtime" ]; then
+    PYTHON_BIN="$release_dir/runtime/python/bin/python3"
+    [ -x "$PYTHON_BIN" ] || die "declared bundled Python is missing: $PYTHON_BIN"
+    (cd "$release_dir" && PYTHONDONTWRITEBYTECODE=1 "$PYTHON_BIN" -c 'import sys; from pathlib import Path; from src.application.runtime_bundle import load_manifest, current_platform, validate_runtime; load_manifest(Path.cwd(), expected_tag=sys.argv[1], expected_platform=current_platform(), verify_files=True); validate_runtime(Path.cwd())' "$TAG")
+  else
+    [ "$SOURCE_INSTALL" -eq 1 ] || die "runtime manifest missing; source mode must be explicit"
+    (cd "$release_dir" && "$release_dir/.venv/bin/python" -c 'import src.application.bot.host; import src.application.bot.runtime')
+    validate_feishu="$WITH_FEISHU"
+    validate_wechat="$WITH_WECHAT"
+    if [ "$WITH_DEV" -eq 1 ]; then
+      if [ -f "$release_dir/plugins/feishu-channel/pyproject.toml" ]; then validate_feishu=1; fi
+      if [ -f "$release_dir/plugins/wechat-channel/pyproject.toml" ]; then validate_wechat=1; fi
+    fi
+    if [ "$validate_feishu" -eq 1 ] || [ "$validate_wechat" -eq 1 ]; then
+      (cd "$release_dir" && "$release_dir/.venv/bin/python" -c 'import subprocess,sys; from pathlib import Path; from src.application.service_upgrade import _validate_message_runtime; _validate_message_runtime(target_dir=Path.cwd(), include_feishu=sys.argv[1]=="1", include_wechat=sys.argv[2]=="1", run_cmd=subprocess.run, operations=[])' "$validate_feishu" "$validate_wechat")
+    fi
+  fi
 }
 
 quote() {
-  printf '%q' "$1"
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
 }
 
 normalize_dir_path() {
@@ -194,17 +225,102 @@ resolve_latest_release_tag() {
 
 install_optional_requirements() {
   release_dir="$1"
-  if [ "$WITH_SERVER" -ne 1 ] && [ "$WITH_DEV" -ne 1 ]; then
+  if [ "$WITH_SERVER" -ne 1 ] && [ "$WITH_DEV" -ne 1 ] && [ "$WITH_POSITION_ADVICE" -ne 1 ] && [ "$WITH_FEISHU" -ne 1 ] && [ "$WITH_WECHAT" -ne 1 ] && [ "$WITH_BROKER_FUTU" -ne 1 ] && [ "$WITH_BROKER_LONGBRIDGE" -ne 1 ]; then
     return 0
   fi
   pip_bin="${release_dir}/.venv/bin/pip"
   [ -x "$pip_bin" ] || die "cannot install optional requirements; pip is missing: $pip_bin"
+  (cd "$release_dir"
+  if [ "$WITH_BROKER_LONGBRIDGE" -eq 1 ]; then
+    "$pip_bin" install -r "$release_dir/requirements/longbridge.txt"
+  fi
   if [ "$WITH_SERVER" -eq 1 ]; then
     "$pip_bin" install -r "$release_dir/requirements/server.txt" -c "$release_dir/constraints/server.txt"
   fi
   if [ "$WITH_DEV" -eq 1 ]; then
     "$pip_bin" install -r "$release_dir/requirements/dev.txt" -c "$release_dir/constraints/dev.txt"
+  else
+    if [ "$WITH_POSITION_ADVICE" -eq 1 ]; then
+      "$pip_bin" install ./plugins/position-advice
+    fi
+    if [ "$WITH_FEISHU" -eq 1 ]; then
+      "$pip_bin" install ./plugins/feishu-channel
+    fi
+    if [ "$WITH_WECHAT" -eq 1 ]; then
+      "$pip_bin" install ./plugins/wechat-channel
+    fi
+    if [ "$WITH_BROKER_FUTU" -eq 1 ]; then
+      "$pip_bin" install ./plugins/broker-futu
+    fi
+    if [ "$WITH_BROKER_LONGBRIDGE" -eq 1 ]; then
+      "$pip_bin" install ./plugins/broker-longbridge
+    fi
   fi
+  )
+}
+
+install_default_market() {
+  release_dir="$1"
+  # Historical releases have no provider packages; their builtin contract stays intact.
+  [ -f "$release_dir/src/application/plugin_runtime.py" ] || return 0
+  if [ -f "$release_dir/om.runtime.json" ]; then
+    market_python="$release_dir/runtime/python/bin/python3"
+  else
+    market_python="$release_dir/.venv/bin/python"
+  fi
+  (cd "$release_dir" && PYTHONDONTWRITEBYTECODE=1 "$market_python" -c '
+import importlib.metadata as m
+from pathlib import Path
+import sys
+from src.application.plugin_runtime import PLUGINS, require_plugin, validate_plugin_import
+if "market-opend" not in PLUGINS:
+    sys.exit(0)
+from src.application.plugin_distribution import install_plugin
+try:
+    m.distribution(PLUGINS["market-opend"]["distribution"])
+except m.PackageNotFoundError:
+    install_plugin("market-opend", repo_root=Path.cwd(), confirm=True, python_executable=Path(sys.executable))
+require_plugin("market-opend")
+validate_plugin_import("market-opend")
+for selected, plugin in ((sys.argv[1], "broker-futu"), (sys.argv[2], "broker-longbridge")):
+    if selected == "1":
+        validate_plugin_import(plugin)
+' "$WITH_BROKER_FUTU" "$WITH_BROKER_LONGBRIDGE")
+}
+
+
+guard_managed_instance() {
+  [ -L "$CURRENT_LINK" ] || return 0
+  "$PYTHON_BIN" - "$PREFIX" "$CURRENT_LINK" "$OS_NAME" <<'PYGUARD'
+import json, os, sys
+from pathlib import Path
+prefix, current = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
+home = Path.home()
+roots = [prefix / 'shared', prefix / 'runtime', current]
+if sys.argv[3] == 'Darwin':
+    roots.append(home / 'Library/Application Support/options-monitor')
+else:
+    roots.append(Path('/var/lib/options-monitor'))
+if os.environ.get('OM_RUNTIME_ROOT'):
+    roots.append(Path(os.environ['OM_RUNTIME_ROOT']))
+record = home / '.config/options-monitor/runtime-root'
+if record.exists():
+    value = record.read_text().strip()
+    if not value or not Path(value).is_absolute():
+        raise SystemExit('install.sh: cannot bind runtime-root record; preserve current and inspect the record')
+    roots.append(Path(value))
+for root in roots:
+    profile = root / 'service.profile.json'
+    if not profile.exists():
+        continue
+    try:
+        data = json.loads(profile.read_text())
+        owner = Path(data['repo_root']).resolve()
+    except (OSError, ValueError, KeyError, TypeError):
+        raise SystemExit(f'install.sh: cannot bind service profile: {profile}; preserving current')
+    if owner == current or owner.is_relative_to(prefix / 'releases') or owner == prefix / 'current':
+        raise SystemExit(f'install.sh: managed instance detected: {profile}; use om service upgrade')
+PYGUARD
 }
 
 write_cli_wrapper() {
@@ -224,7 +340,7 @@ write_cli_wrapper() {
 #!/usr/bin/env bash
 # options-monitor managed wrapper
 # target-prefix: $PREFIX
-exec "$target" "\$@"
+exec $(quote "$target") "\$@"
 EOF
   chmod +x "$tmp_wrapper"
   mv "$tmp_wrapper" "$wrapper_path"
@@ -244,7 +360,7 @@ stage_cli_wrapper() {
 #!/usr/bin/env bash
 # options-monitor managed wrapper
 # target-prefix: $PREFIX
-exec "$target" "\$@"
+exec $(quote "$target") "\$@"
 EOF
   chmod +x "$staged_path"
 }
@@ -372,54 +488,117 @@ bin_dir_in_path() {
 }
 
 print_next_steps() {
-  printf '\n[install] installed options-monitor %s\n' "$TAG"
-  printf '[install] current -> %s\n\n' "$TARGET_DIR"
-  printf '[install] Python Bot imports verified\n\n'
+  printf '\nOM %s 已安装，程序检查通过。\n' "$TAG"
+  printf '下一步：运行 OM（首次配置或继续使用）。\n  '
   if [ "$INSTALL_CLI" -eq 1 ]; then
-    printf '[install] CLI wrappers installed in %s\n\n' "$(quote "$BIN_DIR")"
-  fi
-  printf 'Next steps:\n'
-  if [ "$INSTALL_CLI" -eq 1 ]; then
-    if bin_dir_in_path; then
-      printf '  om setup check\n'
-    else
-      printf '  export PATH=%s:"$PATH"\n' "$(quote "$BIN_DIR")"
-      printf '  om setup check\n'
-    fi
+    printf '%s\n' "$(quote "${BIN_DIR}/om")"
   else
-    printf '  cd %s\n' "$(quote "$CURRENT_LINK")"
-    printf '  ./om setup check\n'
+    printf '%s\n' "$(quote "${CURRENT_LINK}/om")"
   fi
-  case "$OS_NAME" in
-    Darwin)
-      printf '\nmacOS service env-file, if you later render launchd services:\n'
-      printf '  mkdir -p "$HOME/Library/Application Support/options-monitor"\n'
-      printf '  cp -n configs/examples/options-monitor.env.example "$HOME/Library/Application Support/options-monitor/options-monitor.env"\n'
-      if [ "$INSTALL_CLI" -eq 1 ]; then
-        printf '  om settings doctor --env-file "$HOME/Library/Application Support/options-monitor/options-monitor.env"\n'
-      else
-        printf '  ./om settings doctor --env-file "$HOME/Library/Application Support/options-monitor/options-monitor.env"\n'
-      fi
+  printf '任务帮助：om help；结构化工具：om tools spec；自然语言助手：om bot --help。om-agent 保留兼容。\n'
+}
+
+bundle_platform() {
+  case "${OS_NAME}-$(uname -m)" in
+    Darwin-arm64|Darwin-aarch64) printf 'macos-arm64' ;;
+    Darwin-x86_64) printf 'macos-x86_64' ;;
+    Linux-x86_64) printf 'linux-x86_64' ;;
+    *) die "unsupported runtime platform: ${OS_NAME}-$(uname -m); no source fallback (use --source explicitly)" ;;
+  esac
+}
+
+preflight_bundle_tools() {
+  missing=""
+  for tool in curl tar awk sed; do
+    command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+  done
+  if command -v sha256sum >/dev/null 2>&1; then
+    CHECKSUM_TOOL=sha256sum
+  elif command -v shasum >/dev/null 2>&1; then
+    CHECKSUM_TOOL=shasum
+  else
+    missing="$missing sha256sum-or-shasum"
+  fi
+  [ -z "$missing" ] || die "missing bundle installation tools:$missing"
+  BUNDLE_PLATFORM="$(bundle_platform)"
+  [ "$WITH_DEV" -eq 0 ] || die "--with-dev requires explicit --source mode"
+  [ "$WITH_POSITION_ADVICE" -eq 0 ] || die "--with-position-advice requires explicit --source mode"
+  [ "$WITH_FEISHU" -eq 0 ] || die "--with-feishu requires explicit --source mode"
+  [ "$WITH_WECHAT" -eq 0 ] || die "--with-wechat requires explicit --source mode"
+  [ "$WITH_BROKER_FUTU" -eq 0 ] || die "--with-broker-futu requires explicit --source mode"
+  [ "$WITH_BROKER_LONGBRIDGE" -eq 0 ] || die "--with-broker-longbridge requires explicit --source mode"
+  # Check the pinned artifact floor before executing any bundled binary.
+  case "$BUNDLE_PLATFORM" in
+    macos-*)
+      command -v sw_vers >/dev/null 2>&1 || die "cannot determine macOS version"
+      system_version="$(sw_vers -productVersion)"
+      system_major="${system_version%%.*}"
+      case "$system_major" in ''|*[!0-9]*) die "cannot determine macOS version" ;; esac
+      [ "$system_major" -ge 14 ] || die "runtime bundle requires macOS >= 14.0; observed=$system_version"
       ;;
-    Linux)
-      printf '\nLinux production env-file, if you later render systemd services:\n'
-      printf '  sudo install -d -m 700 /etc/options-monitor\n'
-      printf '  sudo test -f /etc/options-monitor/options-monitor.env || sudo install -m 600 configs/examples/options-monitor.env.example /etc/options-monitor/options-monitor.env\n'
-      if [ "$INSTALL_CLI" -eq 1 ]; then
-        printf '  om settings doctor --env-file /etc/options-monitor/options-monitor.env\n'
-      else
-        printf '  ./om settings doctor --env-file /etc/options-monitor/options-monitor.env\n'
+    linux-*)
+      command -v getconf >/dev/null 2>&1 || die "getconf is required to verify glibc >= 2.28"
+      libc_version="$(getconf GNU_LIBC_VERSION 2>/dev/null)" || die "runtime bundle requires glibc >= 2.28; musl is unsupported"
+      case "$libc_version" in 'glibc '*) libc_version="${libc_version#glibc }" ;; *) die "cannot determine glibc version" ;; esac
+      libc_major="${libc_version%%.*}"
+      libc_minor="${libc_version#*.}"
+      libc_minor="${libc_minor%%.*}"
+      case "$libc_major:$libc_minor" in *[!0-9:]*|:|*:) die "cannot determine glibc version" ;; esac
+      if [ "$libc_major" -lt 2 ] || { [ "$libc_major" -eq 2 ] && [ "$libc_minor" -lt 28 ]; }; then
+        die "runtime bundle requires glibc >= 2.28; observed=$libc_version"
       fi
       ;;
   esac
-  if [ "$INSTALL_CLI" -eq 1 ] && ! bin_dir_in_path; then
-    printf '\nWarning: %s is not in PATH for this shell. Add it to your shell profile to keep using om directly.\n' "$(quote "$BIN_DIR")"
+}
+
+stage_bundle() {
+  slug="$(github_repo_slug_from_url "$REPO_URL")" || die "bundle installation requires a GitHub repository URL"
+  [ "$slug" = liuxie066/options-monitor ] || die "unsupported bundle repository: $slug"
+  case "$TAG" in *-*) die "bundle installation requires a published stable version" ;; esac
+  name="options-monitor-${TAG}-${BUNDLE_PLATFORM}.tar.gz"
+  url="https://github.com/${slug}/releases/download/${TAG}/${name}"
+  mkdir -p "$tmp_dir"
+  archive="$tmp_dir/.download.tar.gz"
+  checksum_file="$tmp_dir/.download.sha256"
+  curl --proto '=https' --tlsv1.2 -fsSL --retry 2 "$url.sha256" -o "$checksum_file" \
+    || die "published runtime bundle unavailable for $BUNDLE_PLATFORM; no source fallback"
+  expected="$(awk -v name="$name" 'NF == 2 && $2 == name && length($1) == 64 && $1 !~ /[^0-9a-f]/ { print $1 }' "$checksum_file")"
+  [ "${#expected}" -eq 64 ] || die "invalid runtime asset checksum"
+  curl --proto '=https' --tlsv1.2 -fsSL --retry 2 "$url" -o "$archive" || die "runtime bundle download failed"
+  if [ "$CHECKSUM_TOOL" = sha256sum ]; then
+    actual="$(sha256sum "$archive" | awk '{print $1}')"
+  else
+    actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
   fi
-  printf '\nCreate runtime config and env-file only after reviewing setup output.\n'
+  [ "$actual" = "$expected" ] || die "runtime bundle SHA256 mismatch"
+  # No interpreter is available yet. The build contract forbids links and special files.
+  tar -tzf "$archive" > "$tmp_dir/.archive-paths" || die "invalid runtime archive"
+  awk '
+    $0 !~ /^[A-Za-z0-9_.\/+@() -]+$/ || /^\// { exit 1 }
+    { n=split($0,p,"/"); for(i=1;i<=n;i++) if(p[i]==".." || p[i]==".") exit 1; if(seen[$0]++) exit 1 }
+  ' "$tmp_dir/.archive-paths" || die "unsafe runtime archive path"
+  tar -tvzf "$archive" > "$tmp_dir/.archive-types" || die "invalid runtime archive"
+  awk 'substr($0,1,1)!="-" && substr($0,1,1)!="d" { exit 1 }' "$tmp_dir/.archive-types" \
+    || die "runtime archive links/special files are forbidden"
+  tar -xOzf "$archive" om.runtime.json > "$tmp_dir/.runtime-manifest" || die "runtime manifest missing"
+  manifest_platform="$(sed -n 's/^[[:space:]]*"platform"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$tmp_dir/.runtime-manifest")"
+  manifest_minimum="$(sed -n 's/^[[:space:]]*"minimum_system"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$tmp_dir/.runtime-manifest")"
+  [ "$manifest_platform" = "$BUNDLE_PLATFORM" ] || die "runtime manifest platform mismatch"
+  case "$BUNDLE_PLATFORM:$manifest_minimum" in
+    macos-*:macOS\ 14.0) ;;
+    linux-x86_64:'glibc 2.28; optional services require systemd and systemd-creds') ;;
+    *) die "runtime bundle minimum_system differs from this installer; use the matching release installer" ;;
+  esac
+  tar -xzf "$archive" -C "$tmp_dir" || die "runtime bundle extraction failed"
+  rm -f "$archive" "$checksum_file" "$tmp_dir/.archive-paths" "$tmp_dir/.archive-types" "$tmp_dir/.runtime-manifest"
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --source)
+      SOURCE_INSTALL=1
+      shift
+      ;;
     --version)
       [ "$#" -ge 2 ] || die "--version requires a value"
       VERSION="$2"
@@ -461,6 +640,26 @@ while [ "$#" -gt 0 ]; do
       WITH_SERVER=1
       shift
       ;;
+    --with-position-advice)
+      WITH_POSITION_ADVICE=1
+      shift
+      ;;
+    --with-feishu)
+      WITH_FEISHU=1
+      shift
+      ;;
+    --with-wechat)
+      WITH_WECHAT=1
+      shift
+      ;;
+    --with-broker-futu)
+      WITH_BROKER_FUTU=1
+      shift
+      ;;
+    --with-broker-longbridge)
+      WITH_BROKER_LONGBRIDGE=1
+      shift
+      ;;
     --with-dev)
       WITH_DEV=1
       shift
@@ -479,25 +678,23 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-if [ -z "$VERSION" ] || [ "$VERSION" = "latest" ]; then
+if [ "$SOURCE_INSTALL" -eq 1 ]; then
+  if [ -z "$PYTHON_BIN" ]; then
+    if command -v python3.12 >/dev/null 2>&1; then PYTHON_BIN="python3.12"; else PYTHON_BIN="python3"; fi
+  fi
+  command -v git >/dev/null 2>&1 || die "$(missing_git_message)"
+  command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "$(missing_python_message)"
+  check_python_runtime
+else
+  preflight_bundle_tools
+fi
+if [ -z "$VERSION" ] || [ "$VERSION" = latest ]; then
   TAG="$(resolve_latest_release_tag)"
   printf '[install] resolved latest release: %s\n' "$TAG"
 else
   TAG="$(normalize_tag "$VERSION")"
 fi
 validate_tag "$TAG"
-
-if [ -z "$PYTHON_BIN" ]; then
-  if command -v python3.12 >/dev/null 2>&1; then
-    PYTHON_BIN="python3.12"
-  else
-    PYTHON_BIN="python3"
-  fi
-fi
-
-command -v git >/dev/null 2>&1 || die "$(missing_git_message)"
-command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "$(missing_python_message)"
-check_python_runtime
 
 PREFIX_PARENT="$(dirname "$PREFIX")"
 mkdir -p "$PREFIX_PARENT"
@@ -514,6 +711,7 @@ mkdir -p "$RELEASES_DIR"
 if { [ -e "$CURRENT_LINK" ] || [ -L "$CURRENT_LINK" ]; } && [ ! -L "$CURRENT_LINK" ]; then
   die "current path exists and is not a symlink: $CURRENT_LINK"
 fi
+
 
 ALREADY_INSTALLED=0
 REPLACE_INACTIVE_TARGET=0
@@ -556,6 +754,7 @@ if [ "$ALREADY_INSTALLED" -eq 1 ]; then
   [ "$installed_version" = "${TAG#v}" ] \
     || die "active release VERSION mismatch; expected=${TAG#v}; observed=${installed_version:-missing}"
   run_bot_smoke "$TARGET_DIR"
+  install_default_market "$TARGET_DIR"
 else
   initial_current_existed=0
   initial_current_target=""
@@ -580,17 +779,23 @@ else
   trap 'exit 143' TERM
   rm -rf "$tmp_dir"
 
-  printf '[install] cloning %s at %s\n' "$REPO_URL" "$TAG"
-  git clone --depth 1 --branch "$TAG" "$REPO_URL" "$tmp_dir"
-
-  printf '[install] creating virtualenv\n'
-  "$PYTHON_BIN" -m venv "$tmp_dir/.venv"
-  "$tmp_dir/.venv/bin/pip" install -U pip
-  "$tmp_dir/.venv/bin/pip" install -r "$tmp_dir/requirements.txt" -c "$tmp_dir/constraints.txt"
-
-  install_optional_requirements "$tmp_dir"
+  if [ "$SOURCE_INSTALL" -eq 1 ]; then
+    printf '[install] cloning %s at %s\n' "$REPO_URL" "$TAG"
+    git clone --depth 1 --branch "$TAG" "$REPO_URL" "$tmp_dir"
+    # Clone does not honor export-ignore; also protect installs of older tags.
+    find "$tmp_dir" -name .git -prune -o \
+      \( -name AGENTS.md -o -name CLAUDE.md -o -name .agents \) -prune -exec rm -rf {} +
+    printf '[install] creating virtualenv\n'
+    "$PYTHON_BIN" -m venv "$tmp_dir/.venv"
+    "$tmp_dir/.venv/bin/pip" install -U pip
+    "$tmp_dir/.venv/bin/pip" install -r "$tmp_dir/requirements.txt" -c "$tmp_dir/constraints.txt"
+    install_optional_requirements "$tmp_dir"
+  else
+    stage_bundle
+  fi
 
   run_bot_smoke "$tmp_dir"
+  guard_managed_instance
 
   if [ "$INSTALL_CLI" -eq 1 ]; then
     stage_cli_wrapper "om" "${CURRENT_LINK}/om" "$tmp_dir/om" "$staged_om_wrapper"
@@ -609,6 +814,8 @@ else
     rm -rf "$TARGET_DIR"
   fi
   mv "$tmp_dir" "$TARGET_DIR"
+  if [ "$SOURCE_INSTALL" -eq 0 ]; then PYTHON_BIN="$TARGET_DIR/runtime/python/bin/python3"; fi
+  install_default_market "$TARGET_DIR"
 
   if [ "$INSTALL_CLI" -eq 1 ]; then
     if ! mv -f "$staged_om_wrapper" "${BIN_DIR}/om"; then

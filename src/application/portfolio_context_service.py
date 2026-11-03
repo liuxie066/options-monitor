@@ -7,13 +7,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from domain.domain.risk_capacity import evaluate_cash_snapshot
+from domain.domain.risk_capacity import evaluate_cash_snapshot, broker_capacity_binding
 from domain.domain.position_snapshot import (
     normalize_persisted_position_snapshot_input,
     position_snapshot_scope_errors,
 )
 from src.application.runtime_paths import resolve_runtime_root
-from src.application.account_config import build_account_portfolio_source_plan, resolve_futu_account_ids
+from src.application.account_config import (
+    build_account_portfolio_source_plan, resolve_futu_account_ids,
+    resolve_account_type, resolve_account_longbridge_settings, resolve_account_broker,
+)
+from src.application.broker_provider import resolve_broker_portfolio_provider
+from src.application.plugin_runtime import PluginUnavailableError
 from src.application.config_defaults import cash_snapshot_ttl_sec
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings, _runtime_market
 from src.infrastructure.exchange_rates import exchange_rate_observation_status, project_exchange_rate_snapshot, shared_exchange_rate_cache_path
@@ -115,6 +120,21 @@ def cash_snapshot_is_usable(context: Mapping[str, Any]) -> bool:
 
 
 def _expected_capacity_authority(config: Mapping[str, Any], *, account: str | None) -> dict[str, Any]:
+    if resolve_account_type(dict(config), account=account) == "longbridge":
+        settings = resolve_account_longbridge_settings(config, account=account)
+        from src.infrastructure.longbridge_gateway import credential_binding_fingerprint
+
+        fingerprint = None
+        try:
+            current = credential_binding_fingerprint(settings)
+            if current == settings.get("credential_binding_sha256"):
+                fingerprint = current
+        except ValueError:
+            pass
+        return {"logical_account": str(account or "").strip().lower(),
+                "broker_id": "longbridge", "broker_account_id": settings["account_id"],
+                "credential_binding_sha256": fingerprint,
+                "trd_env": settings["trd_env"], "market": _runtime_market(config, fallback="CNY")}
     try:
         ids = resolve_futu_account_ids(config, account=account)
         settings = infer_futu_portfolio_settings(config, account=account)
@@ -166,11 +186,10 @@ def portfolio_position_snapshot_errors(
     max_age_seconds: int = 300, market: str | None = None,
 ) -> list[str]:
     """Adapt current or frozen account evidence to the canonical holdings contract."""
-    authority = context.get("capacity_authority")
+    authority = broker_capacity_binding(context)
     snapshot = context.get("position_snapshot_input")
-    if (context.get("portfolio_source_name") != "futu"
-            or not isinstance(authority, Mapping) or authority.get("status") != "available"
-            or not authority.get("futu_account_id") or not authority.get("trd_env")
+    if (authority.get("status") != "available"
+            or not authority.get("broker_account_id") or not authority.get("trd_env")
             or not isinstance(snapshot, Mapping)):
         return ["position_snapshot_authority_unavailable"]
     if context.get("position_refresh_error"):
@@ -193,7 +212,8 @@ def portfolio_position_snapshot_errors(
             return ["position_snapshot_evaluation_time_invalid"]
         return position_snapshot_scope_errors(
             snapshot, account_label=account_value,
-            external_account_id=authority["futu_account_id"], environment=str(authority["trd_env"]),
+            external_account_id=authority["broker_account_id"], environment=str(authority["trd_env"]),
+            broker_id=authority["broker_id"],
             market=str(market or authority.get("market") or ""), asset_type=asset_type,
             now_utc=now_utc, max_age_seconds=max_age_seconds,
         )
@@ -220,7 +240,7 @@ def load_account_portfolio_context(
 ) -> dict[str, Any]:
     config = runtime_config or {}
     port_path = (state_dir / "portfolio_context.json").resolve()
-    build_account_portfolio_source_plan(config, account=account, portfolio_source=portfolio_source)
+    source_plan = build_account_portfolio_source_plan(config, account=account, portfolio_source=portfolio_source)
     ttl = None
     try:
         ttl = cash_snapshot_ttl_sec(config)
@@ -252,6 +272,12 @@ def load_account_portfolio_context(
         result["exchange_rate_status"] = exchange_rate_observation_status(result["exchange_rates"])
         return result
 
+    try:
+        provider = resolve_broker_portfolio_provider(config, account=account, futu_provider=fetch_futu_portfolio_context_fn)
+    except PluginUnavailableError as exc:
+        log(f"[CTX] broker portfolio unavailable: {exc}")
+        return evaluate({"cash_provider_error": type(exc).__name__, "errors": [str(exc)]}, "unavailable")
+
     if ttl is None:
         return evaluate({}, "unavailable")
     trusted_cached_cash = None
@@ -277,7 +303,7 @@ def load_account_portfolio_context(
         if cash_snapshot_is_usable(result) and account_valid and errors:
             trusted_cached_cash = result
     kwargs: dict[str, Any] = {
-        "cfg": config, "account": account, "market": str(market), "base_currency": str((config.get("portfolio") or {}).get("base_currency") or "CNY"),
+        "cfg": config, "account": account, "market": resolve_account_broker(config, account=account) if source_plan.primary_source != "futu" else str(market), "base_currency": str((config.get("portfolio") or {}).get("base_currency") or "CNY"),
         "write_cache": write_cache,
         "exchange_rate_cache_path": exchange_rate_cache_path or shared_exchange_rate_cache_path(resolve_runtime_root(repo_root=Path(__file__).resolve().parents[2]).runtime_root),
     }
@@ -286,23 +312,27 @@ def load_account_portfolio_context(
     if exchange_rate_observation is not _FX_NOT_PROVIDED:
         kwargs["exchange_rate_observation"] = exchange_rate_observation
     try:
-        context = fetch_futu_portfolio_context_fn(**kwargs)
+        context = provider(**kwargs)
         if not isinstance(context, dict):
             raise ValueError("portfolio response is not an object")
     except (TimeoutError, CancelledError):
         raise
+    except PluginUnavailableError as exc:
+        log(f"[WARN] broker portfolio unavailable: {exc}")
+        return evaluate({"cash_provider_error": type(exc).__name__, "errors": [str(exc)]}, "unavailable")
     except Exception as exc:
         log(f"[WARN] portfolio cash provider unavailable: {exc}")
         if trusted_cached_cash is not None:
             return {**trusted_cached_cash, "position_refresh_error": type(exc).__name__}
         return evaluate({"cash_provider_error": type(exc).__name__}, "unavailable")
-    result = evaluate(context, "futu_direct")
-    if not _validate_portfolio_context_account(result, requested_account=account, log=log, source="futu_direct"):
-        raise ValueError("futu_direct account mismatch")
+    direct_source = source_plan.primary_source + "_direct"
+    result = evaluate(context, direct_source)
+    if not _validate_portfolio_context_account(result, requested_account=account, log=log, source=direct_source):
+        raise ValueError(f"{direct_source} account mismatch")
     errors = position_errors(result)
     if errors and isinstance(result.get("position_snapshot_input"), dict):
         result["position_snapshot_input"]["errors"] = errors
     if write_cache:
         atomic_write_json(port_path, result)
-    log(f"[CTX] portfolio_context source=futu_direct account={account or '-'}")
+    log(f"[CTX] portfolio_context source={direct_source} account={account or '-'}")
     return result

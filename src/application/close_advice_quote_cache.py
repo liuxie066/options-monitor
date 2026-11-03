@@ -8,6 +8,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
+from domain.domain.fetch_source import normalize_fetch_source
 from src.infrastructure.io_utils import atomic_write_json
 
 
@@ -46,7 +47,7 @@ def publish_quote_cache_metadata(
     run_id = str(source_run_id or "").strip()
     if not symbol_norm or market not in _MARKET_TIMEZONES:
         raise ValueError("quote cache symbol or market is invalid")
-    if source_norm != "opend":
+    if not source_norm or source_norm != normalize_fetch_source(source_norm):
         raise ValueError("quote cache source is not authoritative")
     if not run_id:
         raise ValueError("quote cache source_run_id is required")
@@ -76,7 +77,10 @@ def validate_quote_cache_metadata(
     symbol: str,
     max_age_sec: int = DEFAULT_QUOTE_MAX_AGE_SEC,
     now: datetime | str | None = None,
+    expected_source: str = "opend",
+    require_freshness: bool = True,
 ) -> dict[str, Any]:
+    """Validate byte/source binding; Close Advice additionally requires freshness."""
     path = Path(csv_path).resolve()
     metadata_path = quote_cache_metadata_path(path)
     base = {
@@ -99,7 +103,7 @@ def validate_quote_cache_metadata(
     if payload.get("symbol") != symbol_norm or payload.get("market") != market:
         return {**base, "reason": "quote_provenance_scope_mismatch"}
     source = str(payload.get("source") or "").strip().lower()
-    if source != "opend":
+    if source != normalize_fetch_source(expected_source):
         return {**base, "reason": "quote_provenance_source_invalid"}
     if not str(payload.get("source_run_id") or "").strip():
         return {**base, "reason": "quote_provenance_run_missing"}
@@ -111,9 +115,9 @@ def validate_quote_cache_metadata(
     except ValueError:
         return {**base, "reason": "quote_provenance_time_invalid"}
     age_sec = (now_value - observed).total_seconds()
-    if age_sec < -300:
+    if require_freshness and age_sec < -300:
         return {**base, "reason": "quote_observed_in_future"}
-    if age_sec > max(0, int(max_age_sec)):
+    if require_freshness and age_sec > max(0, int(max_age_sec)):
         return {**base, "reason": "quote_cache_stale", "age_sec": age_sec}
     market_tz = _MARKET_TIMEZONES.get(market)
     expected_session = (
@@ -123,7 +127,7 @@ def validate_quote_cache_metadata(
     )
     if payload.get("market_session_date") != expected_session:
         return {**base, "reason": "quote_market_session_invalid"}
-    if market_tz is not None and expected_session != now_value.astimezone(
+    if require_freshness and market_tz is not None and expected_session != now_value.astimezone(
         market_tz
     ).date().isoformat():
         return {**base, "reason": "quote_market_session_stale"}

@@ -49,6 +49,18 @@ def test_get_rehab_preserves_provider_payload(rehab_gateway, container, rows):
     assert gateway.backend._trade_client is None
 
 
+def test_get_rehab_rejects_missing_market_plugin_before_transport(rehab_gateway, monkeypatch):
+    from src.application import plugin_runtime
+
+    gateway, transport = rehab_gateway
+    monkeypatch.setattr(plugin_runtime, "plugin_installed", lambda _plugin_id: False)
+    with pytest.raises(plugin_runtime.PluginUnavailableError, match="market-opend"):
+        gateway.get_rehab(code="US.AAPL")
+    assert transport.connections == []
+    assert transport.calls == []
+    assert gateway.backend._trade_client is None
+
+
 @pytest.mark.parametrize("rows", [[], [{"code": "US.AAPL", "ex_div_date": "2026-10-30", "split_ratio": 2.0}]])
 def test_corporate_action_response_uses_real_gateway(rehab_gateway, rows):
     gateway, transport = rehab_gateway

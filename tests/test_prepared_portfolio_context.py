@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 from types import SimpleNamespace
+import venv
 
 import pytest
 
@@ -249,6 +250,77 @@ def _write_worker_request(
         ),
         encoding="utf-8",
     )
+
+
+@pytest.mark.parametrize("interpreter_source", ["explicit", "relative", "default"])
+def test_prepared_workers_keep_virtualenv_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interpreter_source: str,
+) -> None:
+    venv_dir = tmp_path / "worker venv"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(venv_dir)
+    python = venv_dir / "bin" / "python"
+    site_packages = Path(
+        subprocess.check_output(
+            [str(python), "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+            text=True,
+        ).strip()
+    )
+    plugin_path = site_packages / "om_pm_plugin.py"
+    plugin_path.write_text('MARKER = "virtualenv-only-pm-plugin"\n', encoding="utf-8")
+    overrides = {}
+    if interpreter_source == "default":
+        monkeypatch.setattr("src.application.prepared_portfolio_context.sys.executable", str(python))
+    elif interpreter_source == "relative":
+        monkeypatch.chdir(tmp_path)
+        overrides["python_executable"] = python.relative_to(tmp_path)
+    else:
+        overrides["python_executable"] = python
+
+    worker_cwd = tmp_path / "worker cwd"
+    worker_cwd.mkdir()
+    probes = []
+
+    def _capture(command, **kwargs):
+        probe = subprocess.run(
+            [
+                command[0],
+                "-I",
+                "-B",
+                "-c",
+                "import json, sys, om_pm_plugin; "
+                "print(json.dumps({'prefix': sys.prefix, 'plugin_path': om_pm_plugin.__file__, "
+                "'marker': om_pm_plugin.MARKER}))",
+            ],
+            cwd=kwargs["cwd"],
+            env=kwargs["env"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        probes.append(probe)
+        return _CompletedWorker(command, **kwargs)
+
+    shared, states = _state_dirs(tmp_path, "run-venv")
+    manifests = _prepare(
+        tmp_path,
+        shared,
+        states,
+        "run-venv",
+        repo_root=worker_cwd,
+        popen_factory=_capture,
+        **overrides,
+    )
+
+    assert len(probes) == 2, manifests
+    for probe in probes:
+        assert probe.returncode == 0, probe.stdout + probe.stderr
+        observation = json.loads(probe.stdout)
+        assert Path(observation["prefix"]).resolve() == venv_dir.resolve()
+        assert Path(observation["plugin_path"]).resolve() == plugin_path.resolve()
+        assert observation["marker"] == "virtualenv-only-pm-plugin"
+    assert all(manifest["status"] == "ready" for manifest in manifests.values())
 
 
 def test_prepare_promotes_only_valid_worker_payloads(tmp_path: Path) -> None:

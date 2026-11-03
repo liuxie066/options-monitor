@@ -6,7 +6,7 @@
 
 本节汇总产品背景；具体功能的需求和验收由对应 PRD / 合同维护，文档中的目标不等于目标环境已经实现或启用。
 
-- **目标用户：** 使用富途账户、自行做交易决策的期权投资者，在自己的 macOS / Linux 环境安装和运行 OM；不是只服务于开发者个人账户。依据：[README](../README.md)、[安装指南](INSTALL.md)。
+- **目标用户：** 使用富途账户或接入长桥股票、现金、自行做交易决策的期权投资者，在自己的 macOS / Linux 环境安装和运行 OM；不是只服务于开发者个人账户。依据：[README](../README.md)、[安装指南](INSTALL.md)。
 - **首次使用：** 完成一个账户、一个市场和用户自选标的的配置，运行一次扫描，能区分有效候选、合法无候选、证据不足与执行失败，并找到下一步。通知、Bot 和常驻服务可以跳过。依据：[CLI 产品合同](CLI_REFACTOR_PRD.md)。
 - **日常使用：** 监控 CSP / CC / Combo Yield 开仓机会，查看持仓与平仓建议、期权现金流及风险；按需管理账户、标的、通知和运行状态。五个产品域及实现位置见下文；策略范围见 [Strategy Architecture](STRATEGY_ARCHITECTURE.md)。
 - **模拟账户体验：** 用户显式选择的手动体验使用演示容量，结果不代表账户可执行能力；不发送通知或写入权威金融状态。依据：[体验模式产品合同](FUTU_SIMULATE_ACCOUNT_EXPERIENCE_PRD.md)。
@@ -18,7 +18,7 @@
 | OM 辅助监控与决策，不替用户下单或保证收益；扫描会连接外部数据源并保存结果 | [README](../README.md) |
 | 账户名、标的和策略经济边界由用户明确填写；不以开发者个人账户或示例标的作为默认配置 | [CLI 产品合同](CLI_REFACTOR_PRD.md) |
 | 缺失、过期、部分数据和有效零结果分别表达；不猜测价格、现金、币种或可卖张数 | [证据来源索引](INDEX.md)、[账户工具说明](TOOL_REFERENCE.md#持仓现金与组合) |
-| 交易事件及持仓投影由本地 SQLite 账本拥有，券商事实由对应 OpenD / 富途账户提供；保留差异，不用其他来源冒充完整账户数据 | [Ledger Architecture](LEDGER_ARCHITECTURE.md)、[成交与持仓同步](FUTU_TRADE_HOLDINGS_SYNC.md) |
+| 交易事件及持仓投影由本地 SQLite 账本拥有，券商事实由所选券商适配器提供（富途经 OpenD，长桥限已接入的股票、现金范围）；保留差异，不用其他来源冒充完整账户数据 | [Ledger Architecture](LEDGER_ARCHITECTURE.md)、[成交与持仓同步](FUTU_TRADE_HOLDINGS_SYNC.md) |
 | 期间期权现金流、开仓批次结果和包含股票盈亏的账户总回报保持不同口径 | [Option Performance Design](OPTION_PERFORMANCE_DESIGN.md) |
 | 配置保存、外部连接、扫描、通知送达和服务运行分别验收；通知、真实账本写入、服务与升级按各自预览、授权和回读边界执行 | [CLI 产品合同](CLI_REFACTOR_PRD.md)、[Agent Manual](../AGENTS.md) |
 
@@ -54,7 +54,7 @@
 横向支撑能力
   -> 行情 / RV / event risk / portfolio context / ledger context
   -> candidate trace / output_runs evidence / SQLite / reports
-  -> OpenD/Futu / Feishu / exchange-rate adapters
+  -> OpenD/Futu / Longbridge / Feishu / exchange-rate adapters
   -> deterministic domain rules
 ```
 
@@ -219,7 +219,7 @@ system defaults
   -> src.interfaces.cli.main
   -> application use cases
 
-./om-agent
+./om tools (compatible: ./om-agent)
   -> src.interfaces.agent.cli
   -> tool_execution
   -> application use cases
@@ -234,6 +234,7 @@ Feishu / WeChat / Inbound
 边界：
 
 - CLI / Tool Gateway / Inbound Bot 是入口和控制面，不拥有业务规则。
+- 推荐入口统一为 `om`：业务命令、`om tools` 结构化调用、`om bot` 自然语言助手；`om agent` / `om assistant` 保留 Bot 兼容语义。网关复用原解析、环境与权限，不经过人工实例自动发现。持仓评估默认人工展示，`--format json` 保留原业务 JSON；其他命令保留原有格式，详见 [Tool Reference](TOOL_REFERENCE.md#参数环境与输出兼容)。
 - Tool Gateway 工具默认应优先读现有证据；写路径必须受 preview / confirm / env gate 控制。
 - 配置默认值应集中在配置层，不应散落到策略实现里形成第二套控制面。
 

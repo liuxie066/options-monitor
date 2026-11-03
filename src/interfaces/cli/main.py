@@ -62,6 +62,7 @@ from src.interfaces.cli.portfolio_ops import (
     add_portfolio_commands,
     handle_portfolio_command,
 )
+from src.interfaces.cli.plugin_ops import add_plugin_commands, handle_plugin_command
 from src.interfaces.quality.cli import add_quality_commands, handle_quality_command
 from src.interfaces.cli.observability_ops import (
     add_diagnostic_commands,
@@ -126,10 +127,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if argv[:2] == ["config", "build-assistant"]:
             argv[1] = "build-bot"
         argv = ["--bot-config" if arg == "--assistant-config" else arg for arg in argv]
-    parser = argparse.ArgumentParser(prog="om", description="options-monitor operator CLI; use `om help` for tasks, `om-agent spec` for structured tools")
+    parser = argparse.ArgumentParser(prog="om", description="options-monitor CLI; use `om help` for tasks, `om tools spec` for structured tools; agent/assistant alias bot")
     sub = parser.add_subparsers(dest="command", required=True)
+    from src.interfaces.agent.cli import add_gateway_commands
 
     add_diagnostic_commands(sub)
+    add_gateway_commands(sub.add_parser("tools", help="结构化 Tool Gateway（om-agent 兼容入口）"), command_dest="tools_command")
 
 
     add_bot_commands(sub)
@@ -163,6 +166,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_option_performance_commands(sub)
 
     add_portfolio_commands(sub)
+    add_plugin_commands(sub)
 
     add_daily_brief_commands(sub)
     add_decision_history_commands(sub)
@@ -183,7 +187,17 @@ def _print(payload: dict[str, Any]) -> int:
     return 0 if payload.get("ok", True) else 2
 
 
-def _main(argv: list[str] | None = None) -> int:
+def _print_error(err: AgentToolError, args: argparse.Namespace | None = None) -> int:
+    payload = build_response(tool_name="om", ok=False, error=build_error_payload(err))
+    if args is not None and args.command == "position-advice" and args.format == "text":
+        from src.interfaces.cli.position_advice import render_position_advice
+
+        sys.stdout.write(render_position_advice(payload))
+        return 2
+    return _print(payload)
+
+
+def _main(argv: list[str] | None = None, *, parsed_args: argparse.Namespace | None = None) -> int:
     actual_argv = list(sys.argv[1:] if argv is None else argv)
     if not actual_argv:
         if sys.stdin.isatty() and sys.stdout.isatty():
@@ -220,8 +234,10 @@ def _main(argv: list[str] | None = None) -> int:
         return int(run_symbols_cli(actual_argv[1:]))
     if actual_argv and actual_argv[0] == "assistant":
         actual_argv[0] = "bot"
-    args = parse_args(actual_argv)
+    args = parsed_args if parsed_args is not None else parse_args(actual_argv)
     try:
+        if args.command == "plugins":
+            return handle_plugin_command(args)
         if args.command in {"healthcheck", "doctor", "support", "status", "runs", "logs"}:
             return handle_observability_command(
                 args,
@@ -265,12 +281,18 @@ def _main(argv: list[str] | None = None) -> int:
                 repo_base_fn=repo_base,
             ))
 
-        if args.command in {"scan", "close-advice", "notify"}:
-            return _print(handle_operator_command(
+        if args.command in {"scan", "close-advice", "position-advice", "notify"}:
+            result = handle_operator_command(
                 args,
                 run_scan_fn=run_scan,
                 preview_notification_fn=preview_notification,
-            ))
+            )
+            if args.command == "position-advice" and args.format == "text":
+                from src.interfaces.cli.position_advice import render_position_advice
+
+                sys.stdout.write(render_position_advice(result))
+                return 0
+            return _print(result)
 
         if args.command == "channel":
             result = handle_channel_command(args, repo_base_fn=repo_base)
@@ -387,23 +409,31 @@ def _main(argv: list[str] | None = None) -> int:
         if args.command == "run":
             return handle_run_command(args, run_tick_fn=run_tick, run_tick_cron_fn=run_tick_cron)
     except AgentToolError as err:
-        return _print(build_response(tool_name="om", ok=False, error=build_error_payload(err)))
+        return _print_error(err, args)
 
     raise SystemExit(f"unsupported command: {args.command}")
 
 
 def main(argv: list[str] | None = None, *, discover_local: bool = False) -> int:
+    actual_argv = list(sys.argv[1:] if argv is None else argv)
+    if actual_argv[:1] == ["tools"]:
+        from src.interfaces.agent.cli import main as gateway_main
+
+        # The gateway owns its existing env policy, independent of operator discovery.
+        return gateway_main(actual_argv[1:], discover_local=argv is None or discover_local, prog="om tools")
+    # Validate the advice output contract before runtime discovery can fail.
+    args = parse_args(actual_argv) if actual_argv[:1] == ["position-advice"] else None
     try:
         with command_environment(
             list(sys.argv[1:] if argv is None else argv), repo_root=repo_base(),
             discover_local=argv is None or discover_local,
         ):
-            return _main(argv)
+            return _main(argv, parsed_args=args)
     except AgentToolError as err:
-        return _print(build_response(tool_name="om", ok=False, error=build_error_payload(err)))
+        return _print_error(err, args)
     except ValueError as exc:
         err = AgentToolError(code="CONFIG_ERROR", message=str(exc))
-        return _print(build_response(tool_name="om", ok=False, error=build_error_payload(err)))
+        return _print_error(err, args)
 
 
 if __name__ == "__main__":

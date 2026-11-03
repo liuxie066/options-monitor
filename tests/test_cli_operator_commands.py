@@ -597,7 +597,7 @@ def test_bot_capabilities_command_renders_capability_catalog(capsys) -> None:
     assert "upgrade_now (立即升级): risk=preview_admin direct_executable=false" in text
 
 
-def test_legacy_agent_command_alias_is_hidden_but_supported(capsys) -> None:
+def test_legacy_agent_alias_is_documented_without_duplicate_commands(capsys) -> None:
     import src.interfaces.cli.main as cli
 
     with pytest.raises(SystemExit) as exc:
@@ -606,8 +606,10 @@ def test_legacy_agent_command_alias_is_hidden_but_supported(capsys) -> None:
 
     assert exc.value.code == 0
     assert "bot" in help_text
-    assert "assistant" not in help_text
-    assert " agent " not in help_text
+    assert "agent/assistant alias bot" in help_text
+    commands = help_text.split("{", 1)[1].split("}", 1)[0].split(",")
+    assert "assistant" not in commands
+    assert "agent" not in commands
 
     rc = cli.main(["agent", "commands"])
     payload = _read_json_output(capsys)

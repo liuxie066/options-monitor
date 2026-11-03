@@ -3,14 +3,18 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from src.application.channels.plugins import channel_plugin_installed, load_channel_plugin
+
 
 FeishuWsEventCallback = Callable[[dict[str, Any]], None]
-
-LOG = logging.getLogger(__name__)
+LOG = logging.getLogger("om_feishu_channel.ws_client")
 
 
 def is_feishu_ws_sdk_available() -> bool:
+    if not channel_plugin_installed("feishu"):
+        return False
     try:
+        load_channel_plugin("feishu")
         import lark_oapi  # noqa: F401
     except Exception:
         return False
@@ -24,30 +28,10 @@ def start_feishu_ws_client(
     on_event: FeishuWsEventCallback,
     log_level: str = "info",
 ) -> None:
-    try:
-        import lark_oapi as lark
-        from lark_oapi.core.enum import LogLevel
-    except Exception as exc:
-        raise RuntimeError("lark-oapi is required for Feishu long-connection inbound") from exc
-
-    def _on_message(event: Any) -> None:
-        try:
-            on_event(feishu_event_model_to_payload(event))
-        except Exception:
-            LOG.exception("failed to enqueue Feishu WebSocket event")
-
-    handler = (
-        lark.EventDispatcherHandler.builder("", "")
-        .register_p2_im_message_receive_v1(_on_message)
-        .build()
+    return load_channel_plugin("feishu", module="ws_client").start_feishu_ws_client(
+        app_id=app_id, app_secret=app_secret, on_event=on_event, log_level=log_level,
+        event_to_payload_fn=feishu_event_model_to_payload,
     )
-    client = lark.ws.Client(
-        app_id=app_id,
-        app_secret=app_secret,
-        event_handler=handler,
-        log_level=_sdk_log_level(log_level, LogLevel),
-    )
-    client.start()
 
 
 def feishu_event_model_to_payload(event: Any) -> dict[str, Any]:

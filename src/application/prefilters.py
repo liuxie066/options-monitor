@@ -8,6 +8,8 @@ Goal: keep process_symbol small. Prefilters must be best-effort and never raise.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from domain.domain.risk_capacity import broker_capacity_binding
+from domain.domain.symbol_identity import canonical_symbol
 from src.application.portfolio_context_service import portfolio_position_snapshot_errors
 
 
@@ -19,6 +21,37 @@ class PrefilterResult:
     cc: dict
     stock: dict | None
     call_skip_reason: str | None = None
+
+
+def covered_call_capacity_binding(context: dict) -> dict:
+    """Keep the Futu CC contract; require explicit binding for Longbridge."""
+    if str(context.get("portfolio_source_name") or "").strip().lower() == "futu":
+        authority = context.get("capacity_authority")
+        return {**authority, "broker_id": "futu"} if isinstance(authority, dict) else {}
+    return broker_capacity_binding(context)
+
+
+def stock_matches_capacity_binding(stock: dict, context: dict, *, symbol: str) -> bool:
+    """Bind stock capacity to the same physical account as the portfolio."""
+    binding = covered_call_capacity_binding(context)
+    if binding.get("broker_id") == "futu":
+        return str(binding.get("status") or "").strip().lower() == "available"
+    if binding.get("status") != "available" or any(not binding.get(key) for key in (
+        "broker_id", "broker_account_id", "logical_account", "trd_env", "market",
+    )):
+        return False
+    broker = binding["broker_id"]
+    expected = {
+        "account": binding["logical_account"], "trd_env": binding["trd_env"],
+        "market": binding["market"], "capacity_authority_status": "available",
+        "capacity_identity_hash": context.get("capacity_identity_hash"),
+        "symbol": canonical_symbol(symbol),
+        "broker_id": broker, "broker_account_id": binding["broker_account_id"],
+    }
+    if broker == "longbridge" and "futu_account_id" in stock:
+        return False
+    return all(value is not None and stock.get(key) == value
+               for key, value in expected.items())
 
 
 def apply_prefilters(
@@ -41,18 +74,10 @@ def apply_prefilters(
             call_skip_reason = "covered_call_portfolio_context_unavailable"
         else:
             try:
-                authority = portfolio_ctx.get("capacity_authority")
-                portfolio_source = str(
-                    portfolio_ctx.get("portfolio_source_name") or ""
-                ).strip().lower()
-                authority_status = str(
-                    authority.get("status") if isinstance(authority, dict) else ""
-                ).strip().lower()
+                authority = covered_call_capacity_binding(portfolio_ctx)
                 stock_context_available = not portfolio_position_snapshot_errors(portfolio_ctx)
                 if (
-                    portfolio_source != "futu"
-                    or not isinstance(authority, dict)
-                    or authority_status != "available"
+                    authority.get("status") != "available"
                     or not stock_context_available
                 ):
                     want_call = False
@@ -67,7 +92,8 @@ def apply_prefilters(
                         call_skip_reason = "covered_call_underlying_not_held"
                     else:
                         raw_stock = stocks_by_symbol.get(symbol)
-                        if isinstance(raw_stock, dict) and raw_stock:
+                        if (isinstance(raw_stock, dict) and raw_stock
+                                and stock_matches_capacity_binding(raw_stock, portfolio_ctx, symbol=symbol)):
                             stock = raw_stock
                         else:
                             want_call = False

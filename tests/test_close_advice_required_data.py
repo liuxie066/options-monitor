@@ -9,6 +9,8 @@ from typing import NamedTuple
 import pandas as pd
 import pytest
 
+from src.application.close_advice_required_data import close_advice_market_date
+
 
 def _config(
     *,
@@ -185,6 +187,10 @@ def test_plan_uses_market_local_date_and_seals_independent_calendar(tmp_path: Pa
             assert codes == ["US.NVDA"]
             return [{"code": "US.NVDA", "market_state": "MORNING"}]
 
+        def get_quote_rights(self, *, market):
+            return {"status": "ok", "market": market, "underlier_right": "LV1", "option_right": "LV2",
+                    "user_id": "private-user", "web_key": "private-secret"}
+
         def close(self):
             pass
 
@@ -197,6 +203,11 @@ def test_plan_uses_market_local_date_and_seals_independent_calendar(tmp_path: Pa
     assert requirement["trading_calendar_status"] == "ok"
     assert json.loads(requirement["trading_calendar_dates"]) == ["2026-07-28", "2026-08-28"]
     assert requirement["market_state_after_snapshot"] == "MORNING"
+    assert requirement["quote_rights_status"] == "ok"
+    assert requirement["quote_rights_underlier"] == "LV1"
+    assert requirement["quote_rights_option"] == "LV2"
+    assert requirement["quote_rights_received_at_utc"]
+    assert "private-" not in path.read_text()
 
 
 def test_calendar_rejects_missing_session_type() -> None:
@@ -617,6 +628,10 @@ def _frozen_workspace(
     quote_ask: float = 2.1,
     quote_delta: float = -0.3,
     calendar_days: list[str] | None = None,
+    quote_fields: dict | None = None,
+    quote_rights: dict | None = None,
+    market_state: str = "MORNING",
+    manual_positions: list[dict] | None = None,
 ) -> _FrozenWorkspace:
     from src.application.ledger import api as ledger_api
     from src.application.close_advice_required_data import (
@@ -731,7 +746,8 @@ def _frozen_workspace(
         account_configs={"lx": config},
         base_config=config,
         markets_to_run=["US"],
-        position_records_by_account={"lx": position_records},
+        position_records_by_account={"lx": [] if manual_positions is not None else position_records},
+        manual_positions_by_account={"lx": manual_positions} if manual_positions is not None else None,
     )
     plan_path = state_dir / PLAN_FILE_NAME
     publish_close_advice_required_data_plan(
@@ -902,8 +918,17 @@ def _frozen_workspace(
                 "term_matched_rv_input_session_count": term_lookback + 1,
                 "term_matched_rv_input_hash": term_input_hash,
                 "delta": quote_delta,
+                "snapshot_requested_at_utc": observed_at.isoformat(),
                 "snapshot_received_at_utc": completed_at.isoformat(),
+                "spot_observed_at_utc": observed_at.isoformat(),
+                "market_state": "MORNING",
+                "underlier_observation_status": "ready",
+                "underlier_sec_status": "NORMAL",
+                "underlier_suspension": False,
+                "option_sec_status": "NORMAL",
+                "option_suspension": False,
                 "multiplier": 100,
+                **(quote_fields or {}),
             }
         ],
     }
@@ -942,25 +967,31 @@ def _frozen_workspace(
             "discovery_status": "complete",
         }
     ]
-    if calendar_days is not None:
-        class Gateway:
-            def get_trading_days_with_receipt(self, **_kwargs):
-                return {
-                    "retcode": 0, "coverage_complete": True, "pagination_complete": True,
-                    "page_count": 1,
-                    "rows": [{"time": day, "trade_date_type": "WHOLE"} for day in calendar_days],
-                }
+    class Gateway:
+        def get_trading_days_with_receipt(self, **_kwargs):
+            if calendar_days is None:
+                raise RuntimeError("isolated fixture has no calendar evidence")
+            return {
+                "retcode": 0, "coverage_complete": True, "pagination_complete": True,
+                "page_count": 1,
+                "rows": [{"time": day, "trade_date_type": "WHOLE"} for day in calendar_days],
+            }
 
-            def get_market_state(self, _codes):
-                return [{"code": "US.NVDA", "market_state": "MORNING"}]
+        def get_quote_rights(self, *, market):
+            return quote_rights if quote_rights is not None else {
+                "market": market, "status": "ok", "underlier_right": "LV1", "option_right": "LV2",
+            }
 
-            def close(self):
-                pass
+        def get_market_state(self, _codes):
+            return [{"code": "US.NVDA", "market_state": market_state}]
 
-        enrich_close_advice_required_data_plan(
-            plan_path=plan_path, expected_run_id=run_id,
-            gateway_factory=lambda **_kwargs: Gateway(),
-        )
+        def close(self):
+            pass
+
+    enrich_close_advice_required_data_plan(
+        plan_path=plan_path, expected_run_id=run_id,
+        gateway_factory=lambda **_kwargs: Gateway(),
+    )
     manifest_path = state_dir / "required_data_snapshot_manifest.json"
     seal_required_data_snapshot(
         manifest_path=manifest_path,
@@ -976,12 +1007,10 @@ def _frozen_workspace(
         },
         close_advice_required_data_plan_path=plan_path,
     )
-    context = build_context(
-        position_records,
-        broker="富途",
-        account="lx",
-        observed_at=started,
-    )
+    context = ({"filters": {"account": "lx"}, "open_positions_min": manual_positions}
+               if manual_positions is not None else build_context(
+                   position_records, broker="富途", account="lx", observed_at=started,
+               ))
     context_path = account_state / "option_positions_context.json"
     context_path.write_text(
         json.dumps(context),
@@ -1043,8 +1072,178 @@ def test_frozen_v3_missing_calendar_uses_delta_only_when_conclusive(
 
     assert result["snapshot_authority"] == "valid"
     assert row["trading_calendar_status"] == "unavailable"
-    assert row["trading_calendar_reason"] == "calendar_plan_not_enriched"
+    assert row["trading_calendar_reason"] == "calendar_unavailable:RuntimeError"
     assert row["recommendation_state"] == expected
+
+
+def _manual_position(*, input_id="manual-1", account="lx", as_of=None):
+    return {
+        "input_source": "user_provided", "input_id": input_id,
+        "input_as_of_utc": (as_of or datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat(),
+        "account": account, "broker": "富途", "symbol": "NVDA", "option_type": "put",
+        "side": "short", "strike": 100, "expiration": "2026-12-18",
+        "contracts_open": 1, "multiplier": 100, "currency": "USD", "premium": 2,
+    }
+
+
+def test_manual_plan_preserves_input_identity_without_ledger_conversion(monkeypatch):
+    from src.application import close_advice_required_data as owner
+
+    monkeypatch.setattr(owner, "position_lot_risk_view", lambda *_args, **_kw: pytest.fail("manual is not ledger input"))
+    manual = _manual_position(as_of=datetime(2026, 7, 29, tzinfo=timezone.utc))
+    config = _config(account="lx")
+    plan = _plan(account_configs={"lx": config}, base_config=config,
+                 position_records_by_account={}, manual_positions_by_account={"lx": [manual]})
+    index, _, _ = owner.account_requirement_index(payload=plan, account="lx")
+    assert set(index) == {"user:manual-1"}
+    requirement = index["user:manual-1"]
+    assert requirement["input_id"] == "manual-1"
+    assert requirement["input_source"] == "user_provided"
+    assert requirement["position_lot_id"] is None
+    assert requirement["input_as_of_utc"] == manual["input_as_of_utc"]
+    assert requirement["position_economics_sha256"]
+    assert owner.account_requirement_index(payload=plan, account="sy")[0] == {}
+
+
+@pytest.mark.parametrize("bad", ["duplicate", "account", "broker", "fake_lot"])
+def test_manual_plan_rejects_identity_collisions_and_scope_leaks(bad):
+    from src.application.close_advice_required_data import CloseAdviceRequiredDataPlanError
+
+    manual = _manual_position()
+    positions = [manual]
+    if bad == "duplicate":
+        positions.append(dict(manual))
+    elif bad == "fake_lot":
+        manual["lot_id"] = "fabricated"
+    else:
+        manual[bad] = "sy" if bad == "account" else "长桥"
+    config = _config(account="lx")
+    with pytest.raises(CloseAdviceRequiredDataPlanError):
+        _plan(account_configs={"lx": config}, base_config=config,
+              position_records_by_account={}, manual_positions_by_account={"lx": positions})
+
+
+def test_optional_package_absence_skips_planning_and_runner_before_inputs(monkeypatch, tmp_path):
+    from src.application import close_advice_required_data as planner, close_advice_runner as runner
+
+    monkeypatch.setattr(planner, "position_advice_plugin_status", lambda _cfg: "unavailable")
+    monkeypatch.setattr(runner, "position_advice_plugin_status", lambda _cfg: "unavailable")
+    config = _config(account="lx")
+    plan = _plan(account_configs={"lx": config}, base_config=config,
+                 position_records_by_account={"lx": [_position(account="lx", lot_id="lot")]})
+    assert plan["summary"]["requirements_total"] == 0
+    assert plan["accounts"]["lx"]["planning_errors"][0]["reason"] == "position_advice_plugin_unavailable"
+    result = runner.run_close_advice(config=config, context_path=tmp_path / "missing.json",
+                                    required_data_root=tmp_path / "missing", output_dir=tmp_path / "out", base_dir=tmp_path)
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "position_advice_plugin_unavailable"
+    assert result["rows"] == result["notify_rows"] == 0
+
+
+@pytest.mark.parametrize("manual", [False, True])
+def test_sealed_runner_current_manual_and_ledger_share_policy(tmp_path, manual):
+    from src.application.close_advice_runner import run_close_advice
+
+    started = datetime.now(timezone.utc) - timedelta(seconds=10)
+    expiration = (close_advice_market_date(started, "US") + timedelta(days=14)).isoformat()
+    holding = {**_manual_position(as_of=started - timedelta(seconds=5)), "expiration": expiration}
+    frozen = _frozen_workspace(
+        tmp_path, run_started_at_utc=started, quote_expiration=expiration,
+        quote_ask=0.1, quote_delta=-0.3, manual_positions=[holding] if manual else None,
+    )
+    result = run_close_advice(**frozen.run_kwargs(tmp_path))
+    row = pd.read_csv(frozen.output_dir / "close_advice.csv").iloc[0]
+    assert result["snapshot_authority"] == "valid"
+    assert row["assessment_mode"] == "current"
+    assert bool(row["current_actionable"])
+    assert row["recommendation_state"] == "close"
+    assert row["market_data_provider"] == "opend"
+    assert row["position_economics_sha256"]
+    assert row["net_capture_ratio"] > 0.8
+    if manual:
+        assert pd.isna(row["position_lot_id"])
+        assert row["input_id"] == "manual-1"
+        assert row["input_source"] == "user_provided"
+    else:
+        assert row["position_lot_id"] == "lot-lx"
+        assert row["input_source"] == "ledger"
+
+
+@pytest.mark.parametrize("failure", ["rights_option", "rights_underlier", "closed", "stale", "missing_time", "manual_after_snapshot"])
+def test_sealed_runner_blocks_current_but_retains_financial_diagnostics(tmp_path, failure):
+    from src.application.close_advice_runner import run_close_advice
+
+    started = datetime.now(timezone.utc) - timedelta(seconds=10)
+    expiration = (close_advice_market_date(started, "US") + timedelta(days=14)).isoformat()
+    kwargs = {}
+    if failure.startswith("rights_"):
+        scope = failure.removeprefix("rights_")
+        kwargs["quote_rights"] = {"status": "ok", "market": "US", "option_right": "LV1",
+                                 "underlier_right": "LV1", f"{scope}_right": "BMP"}
+    elif failure == "closed":
+        kwargs["market_state"] = "CLOSED"
+    elif failure == "missing_time":
+        kwargs["quote_fields"] = {"spot_observed_at_utc": None}
+    elif failure == "stale":
+        kwargs["quote_fields"] = {"spot_observed_at_utc": (started - timedelta(seconds=400)).isoformat()}
+    else:
+        kwargs["manual_positions"] = [{**_manual_position(as_of=started + timedelta(seconds=5)), "expiration": expiration}]
+    frozen = _frozen_workspace(tmp_path, run_started_at_utc=started, quote_expiration=expiration,
+                               quote_ask=0.1, quote_delta=-0.3, **kwargs)
+    result = run_close_advice(**frozen.run_kwargs(tmp_path))
+    row = pd.read_csv(frozen.output_dir / "close_advice.csv").iloc[0]
+    assert result["snapshot_authority"] == "valid"
+    assert row["assessment_mode"] == "unavailable"
+    assert not row["current_actionable"]
+    assert row["recommendation_state"] == "not_evaluable"
+    assert result["notify_rows"] == 0
+    assert row["net_capture_ratio"] > 0.8
+    assert row["estimated_pnl_if_close_net"] > 0
+    assert row["remaining_max_annualized_return"] >= 0
+
+
+def test_same_contract_manual_inputs_keep_independent_identity_and_economics(tmp_path):
+    from src.application.close_advice_runner import run_close_advice
+
+    started = datetime.now(timezone.utc) - timedelta(seconds=10)
+    expiration = (close_advice_market_date(started, "US") + timedelta(days=14)).isoformat()
+    holding = {**_manual_position(as_of=started - timedelta(seconds=5)), "expiration": expiration}
+    second = {**holding, "input_id": "manual-2"}
+    frozen = _frozen_workspace(tmp_path, run_started_at_utc=started, quote_expiration=expiration,
+                               quote_ask=0.1, quote_delta=-0.3, manual_positions=[holding, second])
+    # Change one input after planning: the other holding has the same quote key
+    # but must retain its own qualified evidence rather than inherit this gap.
+    changed = {**holding, "premium": 1.5}
+    result = run_close_advice(**frozen.run_kwargs(tmp_path, context_override={
+        "filters": {"account": "lx"}, "open_positions_min": [changed, second],
+    }))
+    rows = pd.read_csv(frozen.output_dir / "close_advice.csv").set_index("input_id")
+    assert rows.loc["manual-1", "recommendation_state"] == "not_evaluable"
+    assert rows.loc["manual-2", "recommendation_state"] == "close"
+    assert rows.loc["manual-2", "assessment_mode"] == "current"
+    assert result["quote_fetch_diagnostics"]["position_requirements_validated"] == 1
+    assert rows["position_lot_id"].isna().all()
+
+
+@pytest.mark.parametrize("failure", ["duplicate", "account", "fake_lot"])
+def test_sealed_runner_rejects_invalid_manual_context_before_evaluating(tmp_path, failure):
+    from src.application.close_advice_runner import run_close_advice
+
+    started = datetime.now(timezone.utc) - timedelta(seconds=10)
+    holding = _manual_position(as_of=started - timedelta(seconds=5))
+    frozen = _frozen_workspace(tmp_path, run_started_at_utc=started,
+                               quote_expiration=holding["expiration"], manual_positions=[holding])
+    positions = [dict(holding)]
+    if failure == "duplicate":
+        positions.append(dict(holding))
+    elif failure == "account":
+        positions[0]["account"] = "sy"
+    else:
+        positions[0]["lot_id"] = "fake"
+    with pytest.raises(ValueError):
+        run_close_advice(**frozen.run_kwargs(tmp_path, context_override={
+            "filters": {"account": "lx"}, "open_positions_min": positions,
+        }))
 
 
 def test_frozen_close_advice_reads_only_sealed_snapshot(

@@ -127,16 +127,18 @@ def dispatch_notification_batch_once(
     try:
         receipt = send_fn(dict(started["payload"]))
     except Exception as exc:
+        outcome = "pending" if route_snapshot["provider"] == "fanout" else "unknown"
         completed = complete_notification_batch_attempt(
             repo,
             batch_id=batch_id,
             claim_id=claim_id,
-            outcome="unknown",
+            outcome=outcome,
+            provider_receipt={"has_retryable_children": True} if outcome == "pending" else None,
             now_ms=now_ms,
             error=f"{type(exc).__name__}: {exc}",
         )
         return {
-            "status": "unknown",
+            "status": outcome,
             "planning": planned,
             "recovery": recovery,
             "batch": completed,
@@ -148,6 +150,8 @@ def dispatch_notification_batch_once(
         provider_status == "confirmed"
     ):
         outcome = "confirmed"
+    elif route_snapshot["provider"] == "fanout" and provider_status in {"partial", "pending", "in_progress"}:
+        outcome = "pending" if provider_status == "in_progress" else provider_status
     elif provider_status == "accepted":
         outcome = "accepted"
     elif bool(receipt.get("explicit_pre_acceptance_failure")):

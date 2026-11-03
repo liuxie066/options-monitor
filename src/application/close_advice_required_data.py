@@ -23,12 +23,14 @@ from domain.domain.trade_contract_identity import (
     normalize_contract_expiration,
     normalize_contract_option_type,
 )
+from src.application.position_advice_plugin import position_advice_plugin_status
 from src.application.config_profiles import apply_profiles
 from src.application.config_sections import (
     resolve_templates_config,
     resolve_watchlist_config,
 )
 from src.application.ledger.api import position_lot_risk_view
+from src.application.position_advice_inputs import advice_position_key, position_economics_sha256
 from src.application.pipeline_watchlist import (
     resolve_watchlist_item_runtime_config,
 )
@@ -36,6 +38,7 @@ from src.infrastructure.io_utils import atomic_write_json
 from src.application.payload_helpers import required_text
 from src.application.opend_utils import normalize_underlier
 from src.application.opend_market_snapshot_fetching import trading_calendar_dates
+from src.application.market_data_provider import resolve_market_data_provider, provider_by_name, market_data_source
 from functools import partial
 
 
@@ -79,10 +82,10 @@ def enrich_close_advice_required_data_plan(
     gateway_factory: Any = None,
 ) -> dict[str, Any]:
     """Seal independent calendar and post-prefetch market-state observations."""
-    if gateway_factory is None:
-        from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
-        gateway_factory = build_ready_futu_quote_gateway
     plan = load_close_advice_required_data_plan(path=plan_path, expected_run_id=expected_run_id)
+    provider = provider_by_name(plan.get("market_data_provider", "opend"))
+    if gateway_factory is None:
+        gateway_factory = provider.open_quote_gateway
     groups: dict[tuple[str, str, int, int], list[dict[str, Any]]] = {}
     for account in plan["accounts"].values():
         for requirement in account.get("requirements") or []:
@@ -104,17 +107,13 @@ def enrich_close_advice_required_data_plan(
             "trading_calendar_request_end": end.isoformat(),
             "trading_calendar_status": "unavailable",
         }
-        if end.year != start.year:
-            calendar["trading_calendar_reason"] = "calendar_cross_year_unsupported"
-            for requirement in requirements:
-                requirement.update(calendar)
-                requirement["trading_calendar_expiration"] = requirement["expiration"]
-            continue
         gateway = None
         try:
             gateway = gateway_factory(host=host, port=port)
-            response = gateway.get_trading_days_with_receipt(
-                market=market, start=start.isoformat(), end=end.isoformat()
+            if end.year != start.year:
+                raise ValueError("calendar_cross_year_unsupported")
+            response = provider.get_trading_days_with_receipt(
+                gateway, market=market, start=start.isoformat(), end=end.isoformat()
             )
             dates = trading_calendar_dates(response, start=start, end=end)
             calendar.update({
@@ -130,10 +129,26 @@ def enrich_close_advice_required_data_plan(
                 },
             })
         except Exception as exc:
-            calendar["trading_calendar_reason"] = f"calendar_unavailable:{type(exc).__name__}"
+            calendar["trading_calendar_reason"] = ("calendar_cross_year_unsupported" if end.year != start.year
+                                                   else f"calendar_unavailable:{type(exc).__name__}")
+        rights = {"quote_rights_status": "unavailable", "quote_rights_market": market,
+                  "quote_rights_underlier": "UNKNOWN", "quote_rights_option": "UNKNOWN"}
+        if gateway is not None:
+            try:
+                response = provider.get_quote_rights(gateway, market=market)
+                if isinstance(response, Mapping) and response.get("market") == market:
+                    allowed = {"LV1", "LV2", "LV3", "BMP", "NO", "SF"}
+                    rights["quote_rights_status"] = "ok" if response.get("status") == "ok" else "unavailable"
+                    for scope in ("underlier", "option"):
+                        value = str(response.get(f"{scope}_right") or "").upper()
+                        rights[f"quote_rights_{scope}"] = value if value in allowed else "UNKNOWN"
+            except Exception:
+                pass
+        rights["quote_rights_received_at_utc"] = _utc_iso(datetime.now(timezone.utc))
         states_by_symbol: dict[str, tuple[str, str] | None] = {}
         for requirement in requirements:
             requirement.update(calendar)
+            requirement.update(rights)
             requirement["trading_calendar_expiration"] = requirement["expiration"]
             if gateway is None:
                 continue
@@ -142,7 +157,7 @@ def enrich_close_advice_required_data_plan(
                 states_by_symbol[symbol] = None
                 try:
                     code = normalize_underlier(symbol).code
-                    state_rows = _provider_rows(gateway.get_market_state([code]))
+                    state_rows = _provider_rows(provider.get_market_state(gateway, [code]))
                     received = datetime.now(timezone.utc)
                     matching = [row for row in state_rows if str(row.get("code") or "") == code]
                     if len(matching) == 1:
@@ -167,7 +182,7 @@ def enrich_close_advice_required_data_plan(
 def enrich_close_advice_required_data_plan_bounded(
     *, plan_path: Path, expected_run_id: str, python: Path, repo_root: Path,
 ) -> str | None:
-    """Keep a stalled OpenD call from blocking the tick indefinitely."""
+    """Keep a stalled market-data call from blocking the tick indefinitely."""
     try:
         subprocess.run(
             [str(python), "-m", "src.application.close_advice_required_data", str(plan_path), expected_run_id],
@@ -190,6 +205,7 @@ def build_close_advice_required_data_plan(
     position_records_by_account: Mapping[str, list[dict[str, Any]]],
     unavailable_by_account: Mapping[str, str] | None = None,
     blocked_markets_by_account: Mapping[str, Mapping[str, str]] | None = None,
+    manual_positions_by_account: Mapping[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     run_id_norm = _required_text(run_id, "run_id")
     market_dates = {
@@ -236,6 +252,13 @@ def build_close_advice_required_data_plan(
                 "planning_errors": [],
             }
             continue
+        if position_advice_plugin_status(config) != "available":
+            accounts[account] = {
+                "close_advice_enabled": True, "status": "unavailable", "requirements": [],
+                "planning_errors": [{"reason": "position_advice_plugin_unavailable",
+                                     "position_lot_id": None, "quote_key": None}],
+            }
+            continue
         if account in unavailable:
             accounts[account] = {
                 "close_advice_enabled": True,
@@ -259,33 +282,50 @@ def build_close_advice_required_data_plan(
             else {}
         )
         expected_broker = normalize_broker(portfolio_cfg.get("broker"))
+        if (manual_positions_by_account or {}).get(account) and position_records_by_account.get(account):
+            raise CloseAdviceRequiredDataPlanError("manual and ledger position modes are exclusive per account")
+        positions: list[dict[str, Any]] = []
         for record in position_records_by_account.get(account, []):
             try:
                 view = position_lot_risk_view(record)
-                market_hint = str(
-                    symbol_market(view.canonical_underlying_symbol) or ""
-                ).upper()
+                market_hint = str(symbol_market(view.canonical_underlying_symbol) or "").upper()
                 if market_hint not in market_dates:
                     continue
                 as_of_date = market_dates[market_hint]
                 view = position_lot_risk_view(record, as_of_date=as_of_date)
+                if not view.fields or not view.is_open or int(view.contracts_open or 0) <= 0:
+                    continue
+                if normalize_account(view.account) != account:
+                    continue
+                if expected_broker and normalize_broker(view.broker) != expected_broker:
+                    continue
+                positions.append(view.as_open_position_min(as_of_date=as_of_date))
             except Exception:
                 continue
-            if not view.fields or not view.is_open or int(view.contracts_open or 0) <= 0:
-                continue
-            if normalize_account(view.account) != account:
-                continue
-            if expected_broker and normalize_broker(view.broker) != expected_broker:
-                continue
-            position = view.as_open_position_min(as_of_date=as_of_date)
+        for position in (manual_positions_by_account or {}).get(account, []):
+            if (position.get("input_source") != "user_provided"
+                or not str(position.get("input_id") or "").strip()
+                or position.get("lot_id") or position.get("record_id")
+                or normalize_account(position.get("account")) != account
+                or (expected_broker and normalize_broker(position.get("broker")) != expected_broker)):
+                raise CloseAdviceRequiredDataPlanError("manual position identity/account/broker mismatch")
+            positions.append(dict(position))
+        seen_positions: set[str] = set()
+        for position in positions:
+            position_key = advice_position_key(position)
+            if position_key in seen_positions:
+                raise CloseAdviceRequiredDataPlanError("duplicate advice position identity")
+            if position_key:
+                seen_positions.add(position_key)
             if str(position.get("side") or "").strip().lower() != "short":
                 continue
             symbol = canonical_symbol(position.get("symbol")) or str(
                 position.get("symbol") or ""
             ).strip().upper()
             market = str(symbol_market(symbol) or "").strip().upper()
-            if market_allow and market not in market_allow:
+            if market not in market_dates or (market_allow and market not in market_allow):
                 continue
+            as_of_date = market_dates[market]
             expiration = normalize_contract_expiration(
                 position.get("expiration_ymd")
                 or position.get("expiration"),
@@ -306,11 +346,13 @@ def build_close_advice_required_data_plan(
                 expiration_date = None
             if expiration_date is None or expiration_date <= as_of_date:
                 continue
-            if not (lot_id and symbol and option_type in {"put", "call"} and strike):
+            if not (position_key and symbol and option_type in {"put", "call"} and strike):
                 errors.append(
                     {
                         "reason": "required_data_position_identity_invalid",
                         "position_lot_id": lot_id or None,
+                        "input_source": position.get("input_source") or "ledger",
+                        "input_id": position.get("input_id"),
                         "quote_key": None,
                     }
                 )
@@ -336,12 +378,18 @@ def build_close_advice_required_data_plan(
                     {
                         "reason": blocked_reason,
                         "position_lot_id": lot_id,
+                        "input_source": position.get("input_source") or "ledger",
+                        "input_id": position.get("input_id"),
                         "quote_key": quote_key,
                     }
                 )
                 continue
             requirement: dict[str, Any] = {
-                "position_lot_id": lot_id,
+                "position_lot_id": lot_id or None,
+                "input_source": position.get("input_source") or "ledger",
+                "input_id": position.get("input_id"),
+                "input_as_of_utc": _utc_iso(position["input_as_of_utc"]) if isinstance(position.get("input_as_of_utc"), datetime) else position.get("input_as_of_utc"),
+                "position_economics_sha256": position_economics_sha256(position),
                 "market": market,
                 "symbol": symbol,
                 "option_type": option_type,
@@ -367,6 +415,8 @@ def build_close_advice_required_data_plan(
                     {
                         "reason": binding_error,
                         "position_lot_id": lot_id,
+                        "input_source": position.get("input_source") or "ledger",
+                        "input_id": position.get("input_id"),
                         "quote_key": quote_key,
                         "requirement_id": requirement["requirement_id"],
                     }
@@ -380,6 +430,7 @@ def build_close_advice_required_data_plan(
 
     payload = {
         "schema_version": CLOSE_ADVICE_REQUIRED_DATA_PLAN_SCHEMA,
+        "market_data_provider": resolve_market_data_provider(base_config).name,
         "run_id": run_id_norm,
         "run_started_at_utc": _utc_iso(run_started_at_utc),
         "as_of_market_dates": {market: day.isoformat() for market, day in market_dates.items()},
@@ -423,8 +474,9 @@ def resolve_position_fetch_binding(
             port = _positive_int(fetch_cfg.get("port"))
             if not (raw_source and host and port is not None):
                 return None, "required_data_symbol_config_missing"
-            source = normalize_fetch_source(raw_source)
-            if not is_futu_fetch_source(source):
+            provider = resolve_market_data_provider(base_config).name
+            source = normalize_fetch_source(market_data_source(provider, raw_source))
+            if provider == "opend" and not is_futu_fetch_source(source):
                 return None, "required_data_symbol_source_unsupported"
             binding_payload = {
                 "source": source,
@@ -723,10 +775,12 @@ def account_requirement_index(
     for item in list(raw.get("requirements") or []):
         if not isinstance(item, Mapping):
             continue
-        lot_id = str(item.get("position_lot_id") or "").strip()
+        lot_id = advice_position_key({**item, "lot_id": item.get("position_lot_id")})
         if not lot_id:
             continue
         requirement = dict(item)
+        if lot_id in requirements:
+            raise CloseAdviceRequiredDataPlanError("duplicate advice requirement identity")
         requirements[lot_id] = requirement
         reason = str(requirement.get("planning_reason") or "").strip()
         if reason:
@@ -734,7 +788,7 @@ def account_requirement_index(
     for item in list(raw.get("planning_errors") or []):
         if not isinstance(item, Mapping):
             continue
-        lot_id = str(item.get("position_lot_id") or "").strip()
+        lot_id = advice_position_key({**item, "lot_id": item.get("position_lot_id")})
         reason = str(item.get("reason") or "").strip()
         if lot_id and reason:
             reasons.setdefault(lot_id, reason)
@@ -755,6 +809,10 @@ def _requirement_id(
         {
             "account": account,
             "position_lot_id": requirement.get("position_lot_id"),
+            "input_source": requirement.get("input_source"),
+            "input_id": requirement.get("input_id"),
+            "input_as_of_utc": requirement.get("input_as_of_utc"),
+            "position_economics_sha256": requirement.get("position_economics_sha256"),
             "quote_key": requirement.get("quote_key"),
             "requires_realized_volatility": bool(
                 requirement.get("requires_realized_volatility")

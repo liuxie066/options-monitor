@@ -2,6 +2,35 @@
 
 状态：来源与估值设计于 2026-10-01 实现；2026-10-09 按用户确认的简化规则移除人工券商名单门禁。本文件描述源码目标，不声称当前运行环境已采用。
 
+## 券商与 PM 可选能力扩展（2026-11-01）
+
+当前账户基线按配置的 broker provider 读取：富途走既有 OpenD adapter，长桥走
+`longbridge_portfolio_context.py`。本文后续的富途现金/MMF细则继续约束富途路径；
+长桥基线使用以下独立口径，不能套用富途费用或将长桥资产混入富途资金桶。
+
+富途和长桥都必须由同账户、同券商的完整现金与股票范围证据取得基线资格。切换账户 provider 后，账本中另一券商的期权仍保留可证实的指派变化；缺少该券商基线时，起始/终局股数、净资产及依赖它们的权重未知，不能把未观察基线当作零。
+
+- 长桥身份采用明确确认的凭据/账号指纹，标明用户绑定、非券商回显。持仓/现金缓存
+  消费重验当前凭据，跨账户、券商、环境、市场、过期或部分证据不能取得完整基线资格。
+- 长桥 `cash_by_currency` 是有符号可用现金，只服务容量。`cash_valuation` 来自
+  `account_balance.total_cash` 与其币种，是整个物理账户的现金估值；禁止与前者相加。
+  缺总现金估值仍可展示合格容量，但净资产和依赖它的风险比例标为不完整。
+- 股票保留同一物理账户的 US/HK 完整范围，避免把另一市场持仓漏出账户风险分母；报价由配置的行情能力提供。成本价不代替现价；可卖数量
+  或证券类型不明会保留缺口。长桥期权持仓完整合约身份尚未接入，相关 scope 不可用。
+- OM 账本继续持有期权事实，不新增长桥成交同步。长桥相关指派按账户/券商隔离；
+  无可靠费用表时费用未知，不能套富途规则或默认零，因此含该费用的终值可为 partial。
+- PM 补充仍请求 scoped `non_futu` 证据；直接读取的长桥与 PM 同账户、规范化券商
+  相同的镜像行排除，防止重复。其他账户或其他券商不跨域去重。
+- PM HTTP transport 从核心移到独立安装包 `om-pm-plugin`。PM 与 Holdings 开关关闭时
+  不载入插件、不请求服务；开启缺包明确不可用，保留已核验的直接券商基线并标记缺口。
+
+归属：`broker_provider.py` 选择、`portfolio_context_service.py` 资格、
+`risk_capacity.broker_capacity_binding` 身份、现有领域情景函数计算。没有第二套容量或估值引擎。
+独立包安装及绑定步骤见 [Install](INSTALL.md#可选-pm-与长桥依赖) 和
+[Config](../CONFIGS.md#可选能力与长桥账户)。验证入口增加
+`tests/test_broker_assignment_evidence.py`、`tests/test_longbridge_portfolio_context.py` 和
+`tests/test_broker_provider.py`；离线通过不代替真实账户验收。
+
 ## 目标、边界与成功信号
 
 目标：同一组账户按“仅全部未平 short Put”“仅全部未平 short Call”或“全部未平 short Put/Call”假设被指派后的分布，以富途账户事实和 OM 期权账本为基线；现有 portfolio.holdings.enabled 只决定是否补充 PM Holdings 中明确为非富途来源的资产。富途资产直接用富途 OpenD 行情估值。

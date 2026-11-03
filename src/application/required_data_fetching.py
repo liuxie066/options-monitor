@@ -6,7 +6,8 @@ from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 
-from src.application.opend_symbol_fetching import FetchSymbolRequest, fetch_symbol_request
+from src.application.opend_symbol_fetching import FetchSymbolRequest
+from src.application.market_data_provider import fetch_symbol_request
 from src.application.opend_symbol_outputs import save_outputs
 from src.application.opend_fetch_config import filter_opend_fetch_kwargs
 from src.application.expiration_normalization import normalize_expiration_ymd
@@ -51,6 +52,7 @@ class RequiredDataFetchRequest:
     include_realized_volatility: bool = False
     no_retry: bool = False
     trading_date: str | None = None
+    market_data_provider: str = "opend"
 
 
 def execute_required_data_opend(*, base: Path, request: RequiredDataFetchRequest) -> dict[str, object]:
@@ -62,6 +64,7 @@ def execute_required_data_opend(*, base: Path, request: RequiredDataFetchRequest
     return fetch_symbol_request(
         FetchSymbolRequest(
             symbol=request.symbol,
+            market_data_provider=request.market_data_provider,
             limit_expirations=int(request.limit_expirations),
             host=str(request.host),
             port=int(request.port),
@@ -247,7 +250,7 @@ def merge_required_data_payloads(*, symbol: str, payloads: list[dict[str, object
         "expirations": sorted(expirations),
         "rows": rows,
         "meta": {
-            "source": "opend",
+            "source": _common_provider_meta_value(meta_items, "source"),
             "request_count": len(payloads),
             "requests": meta_items,
             "underlier_observation": underlier_observation,

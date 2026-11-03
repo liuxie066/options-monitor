@@ -1,0 +1,148 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.10",
+  "base": {
+    "tag": "v4.6.9",
+    "commit": "0496a39243158069a4c524788f52dc710f382016"
+  },
+  "reviewed_head": "554d7bb508acdbf0aeefe0fa42aa22e5c33b087e",
+  "commits": [
+    {
+      "sha": "04a38004b641ce3fdd22c9bfe16595940324f3e1",
+      "subject": "fix(notifications): separate event entries for readable briefs"
+    },
+    {
+      "sha": "734e5a4936579a63f337dbae3b1166d997780519",
+      "subject": "test(ci): allow full dependency scan under parallel regression load"
+    },
+    {
+      "sha": "fbf3772829bd37569aebc14434285ed803d95559",
+      "subject": "chore(integration): merge main before notification layout delivery"
+    },
+    {
+      "sha": "f50a696d39363e11dac9033b8f67ca9606ad9dde",
+      "subject": "Merge pull request #981 from liuxie066/codex/brief-event-layout"
+    },
+    {
+      "sha": "a3421b9b00dcc689de2423986374e36bbc277d1d",
+      "subject": "docs(readme): correct linked public contracts for v4.6.9"
+    },
+    {
+      "sha": "374e2a924657c39582200f46c96ce5074a62738e",
+      "subject": "chore(integration): merge main before documentation delivery"
+    },
+    {
+      "sha": "7fe681a8431a220fcf333787a7aae14ce808cac8",
+      "subject": "fix(ledger): recognize settled executions in ordinary attribution"
+    },
+    {
+      "sha": "a29c1da023206b5d378325c96dd450db9e3ac792",
+      "subject": "Merge pull request #982 from liuxie066/codex/docs-release-status-20261102"
+    },
+    {
+      "sha": "deadb9a6545623d7f201002bce0686168663feb0",
+      "subject": "chore(integration): merge main before attribution delivery"
+    },
+    {
+      "sha": "554d7bb508acdbf0aeefe0fa42aa22e5c33b087e",
+      "subject": "Merge pull request #983 from liuxie066/codex/fix-ordinary-settlement-attribution-20261102"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "简报事件按组独立留白，合约标识与事件说明分行；飞书加粗合约、微信用空行分隔，保留财报日期、到期关系和过滤结论。",
+      "commits": [
+        "04a38004b641ce3fdd22c9bfe16595940324f3e1",
+        "fbf3772829bd37569aebc14434285ed803d95559",
+        "f50a696d39363e11dac9033b8f67ca9606ad9dde"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "README 及关联文档同步已发布能力、插件安装边界与公开命令，区分源码、发布资产和实际运行状态。（#982）。",
+      "commits": [
+        "a3421b9b00dcc689de2423986374e36bbc277d1d",
+        "374e2a924657c39582200f46c96ce5074a62738e",
+        "a29c1da023206b5d378325c96dd450db9e3ac792"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复已完成到期结算的历史成交被误判未入账、阻塞普通 CSP/CC 自动归属的问题；继续校验成交身份、经济内容、完整分配及当前账户证据。（#983）。",
+      "commits": [
+        "7fe681a8431a220fcf333787a7aae14ce808cac8",
+        "deadb9a6545623d7f201002bce0686168663feb0",
+        "554d7bb508acdbf0aeefe0fa42aa22e5c33b087e"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "734e5a4936579a63f337dbae3b1166d997780519",
+      "reason": "仅放宽依赖图完整扫描测试在并行负载下的超时预算，保留完整扫描与断言，不改变用户或运行时行为。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "04a38004b641ce3fdd22c9bfe16595940324f3e1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/981"
+      ]
+    },
+    {
+      "commit": "fbf3772829bd37569aebc14434285ed803d95559",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/981"
+      ]
+    },
+    {
+      "commit": "f50a696d39363e11dac9033b8f67ca9606ad9dde",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/981"
+      ]
+    },
+    {
+      "commit": "734e5a4936579a63f337dbae3b1166d997780519",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/981"
+      ]
+    },
+    {
+      "commit": "a3421b9b00dcc689de2423986374e36bbc277d1d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/982"
+      ]
+    },
+    {
+      "commit": "374e2a924657c39582200f46c96ce5074a62738e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/982"
+      ]
+    },
+    {
+      "commit": "a29c1da023206b5d378325c96dd450db9e3ac792",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/982"
+      ]
+    },
+    {
+      "commit": "7fe681a8431a220fcf333787a7aae14ce808cac8",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/983"
+      ]
+    },
+    {
+      "commit": "deadb9a6545623d7f201002bce0686168663feb0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/983"
+      ]
+    },
+    {
+      "commit": "554d7bb508acdbf0aeefe0fa42aa22e5c33b087e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/983"
+      ]
+    }
+  ]
+}

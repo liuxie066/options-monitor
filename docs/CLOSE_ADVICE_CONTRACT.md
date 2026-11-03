@@ -1,6 +1,6 @@
 # Close Advice Contract
 
-本文前半部记录当前工作区的 `remaining_yield_capture.v3` 策略；后半部保留 v2 和 v3 的设计过程作为历史资料。运行规则以前半部及代码为准。
+本文前半部记录持仓评估与建议（Position Advice）的现行契约及 `remaining_yield_capture.v3` 策略；后半部保留 v2 和 v3 的设计过程作为历史资料。运行规则以前半部及代码为准。
 
 Close Advice 判断已有 short Put / short Call 是否值得提前买回：净兑现至少 80% 开仓净权利金，且继续持有到期归零所能多取得的最高期权收益年化不超过 10% 时考虑提示平仓；临期远价外的仓位优先持有。OM 接受 Put 接股及 Covered Call 交股；指派本身不是提前平仓理由。
 
@@ -8,7 +8,7 @@ Close Advice 判断已有 short Put / short Call 是否值得提前买回：净�
 
 ## 决策状态
 
-`recommendation_state` 是唯一决策状态：
+`recommendation_state` 是当前建议状态；休市历史参考另用 `reference_recommendation_state` 保留当时结论，不充当当前建议：
 
 | 状态 | 含义 | 进入日常提醒 |
 |---|---|---:|
@@ -16,7 +16,7 @@ Close Advice 判断已有 short Put / short Call 是否值得提前买回：净�
 | `hold` | 必需经济数据有效，但经济性条件未通过，或满足临期远价外持有例外 | 否 |
 | `not_evaluable` | 持仓、日期、双边报价或手续费证据不完整/不一致 | 否 |
 
-新报告不再生成 `tier`、`tier_label`、`exit_state` 或 `close_action` 等平行状态。读取旧报告时，如果没有明确的 `recommendation_state`，或 `policy_version` 不是当前版本，读取面不猜测旧字段的含义，而是保守投影为 `not_evaluable`。Daily Brief 同样只接受当前版本且决策指标完整的 `close` 行。
+新报告不再生成 `tier`、`tier_label`、`exit_state` 或 `close_action` 等平行状态。读取旧报告时，如果没有明确的 `recommendation_state`，或 `policy_version` 不是当前版本，读取面不猜测旧字段的含义，而是保守投影为 `not_evaluable`。Daily Brief 同样只接受当前版本、当前时点证据有效且决策指标完整的 `close` 行。`hold` 仅表示这一止盈规则没有触发平仓，不代表对持仓整体风险的认可。
 
 ## 剩余收益止盈策略
 
@@ -60,7 +60,7 @@ remaining_max_annualized_return
 
 可评估行必须具备：
 
-- 账户和稳定的 `position_lot_id`；
+- 账户和输入身份：账本持仓使用稳定 `position_lot_id`；临时手工输入使用 `input_source=user_provided`、独立 `input_id` 与带时区的 `input_as_of_utc`，不生成账本 lot；
 - option type、short side、strike、合约数、multiplier、currency；
 - 开仓权利金、到期日；开仓日期若缺失不阻断新公式，若提供但非法或与到期日矛盾则不可评估；
 - 同一份封存行情中的 spot、bid 和 ask；
@@ -94,11 +94,32 @@ SQLite ledger position_lots
   -> Daily Brief selects only current-policy, priced, complete-evidence CLOSE rows with decision metrics
 ```
 
-调度 Tick 是当前报告的唯一生产入口，使用 run-scoped required-data plan 和封存 snapshot。Runner 必须同时取得 run ID、snapshot manifest 和该 manifest 绑定的 Close Advice plan；任一缺失或变更都在发布前失败关闭。评估期间不得修复 cache、回退到 last price 或重新请求 OpenD。每行报告保留 plan、binding、snapshot、receipt、payload hash 和观测时间，用于追溯决策输入。
+调度 Tick 与主动评估入口复用相同 runner、版本化 evaluator、费用 owner、run-scoped required-data plan 和封存 snapshot。Runner 必须同时取得 run ID、snapshot manifest 和该 manifest 绑定的 Close Advice plan；任一缺失或变更都在发布前失败关闭。评估期间不得修复 cache、回退到 last price 或重新请求 OpenD。每行报告保留 plan、binding、snapshot、receipt、payload hash 和观测时间，用于追溯决策输入。
 
 当前报告的 manifest 必须声明 `quote_mode=frozen_snapshot`、非空 `run_id`、snapshot manifest SHA-256 和 Close Advice plan SHA-256。每个 CSV 数据行的 `quote_mode` 及两个 SHA-256 必须与 manifest 完全一致；任一行不一致会使整份当前报告不可读。零行报告仍可有效，但报告级绑定必须完整。
 
-Agent 只保留 `close_advice_read`。默认路径与 `run_id` 路径只读取通过上述 sealed 校验的报告，不刷新持仓、不拉取行情、不生成建议。显式 `report_path` 可用于查看历史字节；缺少完整 sealed provenance 或与 manifest 不一致的历史行一律投影为 `not_evaluable`。
+`close_advice_read` 继续只读已有报告。默认路径与 `run_id` 路径只读取通过上述 sealed 校验的报告，不刷新持仓、不拉取行情、不生成建议。显式 `report_path` 可用于查看历史字节；缺少完整 sealed provenance 或与 manifest 不一致的历史行一律投影为 `not_evaluable`。
+
+### 主动评估与两种输入
+
+`position_advice_evaluate` Tool 与 `om position-advice evaluate --request-file <JSON>` 调用同一服务。请求必须明确配置与账户；两种模式互斥：
+
+- 账本选择：`symbols`、`lot_ids`、`contracts`（symbol/option_type/expiration/strike）可选，提供多类选择时取交集；全部省略则选择该账户及配置券商的 open short Put/Call，最多 100 笔。账本缺失或不可信不当作空持仓。
+- 临时输入：`positions` 列表最多 100 笔，每笔必需 input_id、input_as_of_utc、symbol、option_type、expiration、strike；可提供 contracts_open、multiplier、currency、premium、opened_at。缺少数量、成本或费用等证据仍显示已知诊断，不产生支持不足的结论。账户/券商绑定到请求配置；不接受 lot_id/record_id，不写 ledger。
+
+人工 CLI 默认展示合约、原数据时间、评估模式、净兑现比例、剩余最高年化、资金分母、结论及原因；缺失指标显示不可用。追加 `--format json` 保留原业务 JSON 对象，`om tools run --tool position_advice_evaluate --input-file <JSON>`（兼容 `om-agent run`）保留工具 envelope。`success`、`partial`、合法空行、`disabled` 和 `unavailable` 都是完成请求，退出 0；输入或执行错误退出 2。部分与不可评估不会转换为合法空结果。历史参考单列历史结论；hold 仅说明现有策略未触发平仓条件。
+
+多个标的使用已配置且唯一的行情路由；非 watchlist 标的只在可解析到唯一有效路由时评估。行情链发现可能返回额外合约，但只评估所选持仓，不运行开仓候选策略。每次主动请求使用独立目录：`output_shared/position_advice_requests/<request_id>/`，其内部保留 `output_runs/<request_id>/required_data` 与封存报告；不会覆盖调度 latest。主动入口不发送通知，不更新 Daily Brief。显式选择的 runtime root 优先；没有选择实例时，使用所加载配置的父目录，账本、质量门禁和请求报告保持同一实例范围。
+
+### 行情时效与休市
+
+行情按需取快照，不持续订阅。快照请求成功不等于实时：封存标的与期权各自的行情权限、观测时间与市场状态，只有双侧为已确认实时权限、报价/标的时间相容且未超过共享 300 秒窗口、同市场日期、连续交易状态一致、期权自身证券状态为 NORMAL 且明确未停牌、快照后的独立状态仍可交易时，才能产生 `assessment_mode=current`。最近成交时间不能证明 bid/ask 更新时间。未知、延迟、权限不足、旧快照或状态冲突均为不可评估；保留可见指标与原因。
+
+午休、盘前盘后、周末及假日等已知非连续状态，只搜索经过报告 hash/封存绑定校验、原始评估资格完整且与账户/券商/提供方/合约/数量/成本匹配的最近报告。保留原时点的 spot、bid/ask、DTE、日历与指标，标为 `historical_reference`；当前 recommendation 为 not_evaluable，当时结论放在 reference_recommendation_state，不产生新平仓通知。手工输入的持仓事实时间必须不晚于参考快照；到期日、过期或没有兼容记录时明确不可用。不会混合盘后标的价格与日间期权 ask，也不会把周五报价套用周日 DTE。旧报告缺少新资格证据时仍可只读，但不自动升级为合格历史参考。
+
+### 可选安装
+
+`om-position-advice-plugin` 是独立安装包。官方分发入口为 `om plugins install position-advice` 预览、追加 `--confirm` 安装；卸载用 `om plugins uninstall position-advice --confirm`。插件须来自精确匹配的 OM Release；v4.6.8 已提供正式 wheel，其他版本须核对各自清单，缺资产时明确失败。源码开发仍可使用原环境的 pip 安装或卸载 `plugins/position-advice`。安装不启用；仍由现有 `close_advice.enabled` 开关控制，无新插件注册中心。缺包或关闭时核心可以启动、扫描，已有报告继续可读。既有内置建议能力迁移时保留明确启用意图；已进入可选包版本后的主动卸载不被升级静默补装。详见[官方可选插件](INSTALL.md#官方可选插件)和[受控升级](RELEASE_PROCESS.md)。
 
 保留的是通用安全能力：
 
@@ -114,10 +135,12 @@ Agent 只保留 `close_advice_read`。默认路径与 `run_id` 路径只读取�
 
 | 组件 | 责任 |
 |---|---|
-| `domain/domain/close_advice.py` | 固定阈值、公式、状态、指标完整性和排序 |
+| `domain/domain/close_advice.py` / `plugins/position-advice` | 核心输入合同、安全读取/排序/通知资格与懒加载门面；可选包执行唯一版本化策略及结论文案 |
 | `src/application/close_advice_required_data.py` | 为 active short Put/Call 计划精确合约行情，并封存独立交易日日历与市场状态 |
 | `src/application/close_advice_runner.py` | 装配已封存输入、费用估算、CSV/文本/审计输出 |
 | `src/application/daily_decision_brief_service.py` | 仅投影当前版本且证据完整的 `close` 为日常提醒 |
+| `src/application/position_advice.py` / `position_advice_history.py` | 主动选择、隔离请求编排与兼容历史参考，不新增财务公式 |
+| `src/application/position_advice_evidence.py` | 调度与主动评估共用的时效、时段、行情权限资格 |
 | `src/application/agent_tools/close_advice_read_impl.py` | 只读已有报告，不重新评估 |
 
 Close Advice 只是建议，不写 trade event，不修改 position lot，不向 broker 下单。

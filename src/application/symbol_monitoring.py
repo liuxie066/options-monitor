@@ -11,6 +11,8 @@ import pandas as pd
 
 from domain.domain.sell_call_config import resolve_effective_sell_call_min_strike
 from domain.domain.symbol_identity import symbol_market
+from src.application.market_data_provider import resolve_market_data_provider, market_data_source
+from src.application.required_data_snapshot import assert_required_data_source
 from src.application.opend_symbol_outputs import SUCCESS_EMPTY_REASON_CODES
 from src.application.strategy_scan_failures import append_strategy_scan_failure
 from src.application.opend_fetch_config import opend_discovery_kwargs, opend_fetch_kwargs
@@ -286,7 +288,8 @@ def run_symbol_monitoring(
         except (pd.errors.ParserError, pd.errors.EmptyDataError, UnicodeDecodeError) as exc:
             raise FrozenRequiredDataUnavailable(symbol=symbol, reason="required_data_invalid") from exc
 
-    if not frozen_required_data:
+    market_data_provider = resolve_market_data_provider(runtime_config).name
+    if not frozen_required_data and market_data_provider == "opend":
         try:
             deps.apply_multiplier_cache_fn(
                 base=inputs.base,
@@ -304,6 +307,7 @@ def run_symbol_monitoring(
     fetch_plan = None
     if not frozen_required_data:
         fetch_plan = build_required_data_fetch_plan(
+            market_data_provider=market_data_provider,
             base=inputs.base,
             required_data_dir=inputs.required_data_dir,
             symbol=symbol,
@@ -353,6 +357,7 @@ def run_symbol_monitoring(
             "fetch_plan": fetch_plan,
             "report_dir": inputs.report_dir,
             "opend_fetch_config": fetch_request_kwargs,
+            "market_data_provider": market_data_provider,
             "source_producer_run_id": (
                 inputs.source_producer_run_id
             ),
@@ -375,6 +380,8 @@ def run_symbol_monitoring(
             quote_evidence, csv_bytes = inputs.required_data_snapshot_batch.resolve(
                 symbol
             )
+            assert_required_data_source(quote_evidence, symbol=symbol,
+                expected_source=market_data_source(market_data_provider, str(fetch_cfg.get("source") or "opend")))
             _capture_required_data_csv_bytes(csv_bytes)
         else:
             quote_evidence = deps.ensure_required_data_fn(

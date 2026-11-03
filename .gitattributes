@@ -1,0 +1,4 @@
+# Repository development instructions are not part of the installed OM product.
+AGENTS.md export-ignore
+CLAUDE.md export-ignore
+.agents export-ignore

@@ -885,6 +885,7 @@ def _run_full_symbol_capture(
         required_calls.append(str(kwargs["symbol"]))
         evidence: dict[str, Any] = {
             "snapshot_id": "quote-1",
+            "expected_fetch_contract": {"fetch_binding": {"source": "opend"}},
             "receipt_relpath": "quotes/quote-1/receipt.json",
             "source_outcome": "success_rows",
             "reason_code": None,

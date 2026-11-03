@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import math
+import re
 from typing import Any, Callable, Mapping, Sequence
 
 from domain.domain.trade_contract_identity import contract_share_quantity, require_option_multiplier
@@ -1034,27 +1035,53 @@ def _consistent_pools(
     return out
 
 
+def broker_capacity_binding(context: Mapping[str, Any]) -> dict[str, Any]:
+    """Read explicit broker identity; retain the existing OpenD v1 representation."""
+    authority = context.get("capacity_authority")
+    if not isinstance(authority, Mapping):
+        return {}
+    provider = context.get("portfolio_source_name")
+    if provider == "futu" and authority.get("source") == "opend":
+        return {"broker_id": "futu", "broker_account_id": authority.get("futu_account_id"),
+                **{key: authority.get(key) for key in ("logical_account", "trd_env", "market", "status")}}
+    if (provider == "longbridge" and authority.get("source") == "longbridge"
+            and authority.get("schema_version") == "physical_account_capacity_authority.v2"
+            and authority.get("broker_id") == "longbridge"
+            and authority.get("binding_method") == "user_confirmed_credentials_sha256"
+            and authority.get("broker_echoed") is False
+            and isinstance(authority.get("credential_binding_sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", authority["credential_binding_sha256"])):
+        return {key: authority.get(key) for key in
+                ("broker_id", "broker_account_id", "logical_account", "trd_env", "market", "status",
+                 "credential_binding_sha256", "binding_method", "broker_echoed")}
+    return {}
+
+
 def evaluate_cash_snapshot(
     context: Mapping[str, Any], *, expected_authority: Mapping[str, Any],
     evaluated_at: datetime, max_age_sec: Any,
 ) -> dict[str, Any]:
     """Evaluate cash evidence only; clocks, config and I/O belong to the caller."""
     reasons: set[str] = set()
-    if context.get("portfolio_source_name") != "futu":
+    expected_broker = expected_authority.get("broker_id", "futu")
+    if context.get("portfolio_source_name") != expected_broker:
         reasons.add("CASH_SOURCE_INVALID")
-    authority = context.get("capacity_authority")
-    authority = authority if isinstance(authority, Mapping) else {}
-    fields = ("logical_account", "futu_account_id", "trd_env", "market")
-    if (authority.get("source") != "opend" or authority.get("status") != "available"
+    authority = broker_capacity_binding(context)
+    expected = {**expected_authority, "broker_id": expected_broker,
+                "broker_account_id": expected_authority.get("broker_account_id") if expected_broker != "futu" else expected_authority.get("futu_account_id")}
+    fields = ("logical_account", "broker_id", "broker_account_id", "trd_env", "market")
+    if expected_broker == "longbridge":
+        fields += ("credential_binding_sha256",)
+    if (authority.get("status") != "available"
             or expected_authority.get("trd_env") not in {"REAL", "SIMULATE"}
             or expected_authority.get("market") not in {"us", "hk"}
-            or any(not expected_authority.get(key) or authority.get(key) != expected_authority[key]
+            or any(not expected.get(key) or authority.get(key) != expected[key]
                    for key in fields)):
         reasons.add("CASH_IDENTITY_MISMATCH")
     filters = context.get("filters")
     if (not isinstance(filters, Mapping)
             or filters.get("account") != expected_authority.get("logical_account")
-            or context.get("source_account_identifiers") != [expected_authority.get("futu_account_id")]):
+            or context.get("source_account_identifiers") != [expected["broker_account_id"]]):
         reasons.add("CASH_IDENTITY_MISMATCH")
     amounts = context.get("cash_by_currency")
     if not isinstance(amounts, Mapping) or not amounts:

@@ -38,7 +38,8 @@ def test_real_early_phase_calls_core_before_underwriting(frozen_scan, monkeypatc
             **common, cc={'strategy': 'insurance_underwriting', 'min_dte': 'ignored', 'max_strike': 'ignored'},
             stock={'shares': 250, 'can_sell_qty': 200, 'avg_cost': 80},
             portfolio_ctx={'filters': {'account': 'lx'}, 'portfolio_source_name': 'futu',
-                           'capacity_authority': {'status': 'available'}},
+                           'capacity_authority': {"status": "available", "source": "opend", "futu_account_id": "123",
+            "logical_account": "lx", "trd_env": "REAL", "market": "us"}},
             locked_shares_status='available', locked_shares_by_symbol={'NVDA': 100},
             locked_shares_unavailable_by_symbol={}, required_data_frame=pd.DataFrame([_quote()]))
         assert len(calls) == 1 and isinstance(calls[0][0], core.CallCapacityInputs)

@@ -16,7 +16,8 @@ def test_dependency_graph_generator_check_passes() -> None:
         cwd=ROOT,
         capture_output=True,
         text=True,
-        timeout=30,
+        # The full-repo AST scan shares CI CPUs with other xdist workers.
+        timeout=120,
     )
 
     assert proc.returncode == 0, proc.stderr or proc.stdout

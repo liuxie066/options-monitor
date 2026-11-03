@@ -11,7 +11,14 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  bundles:
+    uses: ./.github/workflows/runtime-bundle.yml
+    with:
+      release-platforms-only: true
+    permissions:
+      contents: read
   release:
+    needs: bundles
     runs-on: ubuntu-latest
     timeout-minutes: 25
     concurrency:
@@ -43,6 +50,9 @@ jobs:
       - name: Validate source identity
         run: ./.venv/bin/python .github/ci/release_checks.py identity
 
+      - name: Build official plugin wheels and catalog
+        run: ./.venv/bin/python scripts/build_plugin_wheels.py --output plugin-wheels
+
       - name: Validate release metadata
         run: |
           chmod +x ./om-agent
@@ -62,6 +72,19 @@ jobs:
           cd "${ARCHIVE_ROOT}"
           "${CHECKOUT_PYTHON}" -c 'import src.application.bot.host; import src.application.bot.runtime'
 
+      - name: Download qualified runtime artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-bundle-*
+          path: runtime-bundles
+          merge-multiple: true
+
+      - name: Verify runtime publication set
+        run: ./.venv/bin/python scripts/release_check.py --tag "${{ inputs.tag }}" --bundle-dir runtime-bundles
+
+      - name: Verify official plugin publication set
+        run: ./.venv/bin/python scripts/build_plugin_wheels.py --output plugin-wheels --verify-only
+
       - name: Require current CodeQL and tag evidence
         run: ./.venv/bin/python .github/ci/release_checks.py before-publish
 
@@ -77,6 +100,8 @@ jobs:
             options-monitor-${{ inputs.tag }}.tar.gz
             /tmp/om-agent-spec.json
             VERSION
+            runtime-bundles/*
+            plugin-wheels/*
 
       - name: Read back publication outcome
         if: ${{ always() && (steps.publish.outcome == 'success' || steps.publish.outcome == 'failure') }}

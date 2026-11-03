@@ -1211,6 +1211,7 @@ def trade_attribution_capacity_check(
     """Verify booked positions; Wheel additionally requires account coverage."""
     from datetime import datetime, timezone
     from domain.domain.position_snapshot import position_snapshot_scope_errors
+    from domain.domain.risk_capacity import broker_capacity_binding
     from domain.domain.symbol_identity import symbol_market
 
     reasons: set[str] = set()
@@ -1218,10 +1219,15 @@ def trade_attribution_capacity_check(
     snapshot = portfolio.get("position_snapshot_input") or {}
     ref = fact.get("broker_account_ref") or {}
     market = str(symbol_market(fact["contract_key"]["underlying_symbol"]) or "").lower()
-    authority = portfolio.get("capacity_authority") or {}
+    authority = broker_capacity_binding(portfolio)
+    if ref.get("broker_id") == "futu":
+        # Ledger callers supply qualified snapshot scope without cash-source metadata.
+        legacy = portfolio.get("capacity_authority") or {}
+        authority = {**legacy, "broker_id": "futu", "broker_account_id": legacy.get("futu_account_id")}
     if (observation.get("error") or authority.get("status") != "available"
             or authority.get("logical_account") != fact["account"]
-            or authority.get("futu_account_id") != ref.get("external_account_id")
+            or authority.get("broker_account_id") != ref.get("external_account_id")
+            or authority.get("broker_id") != ref.get("broker_id")
             or authority.get("trd_env") != ref.get("environment") or authority.get("market") != market):
         reasons.add("capacity_authority_unavailable")
     pooled_cash = fact["contract_key"]["option_type"] == "put"
@@ -1231,6 +1237,7 @@ def trade_attribution_capacity_check(
             reasons.update(position_snapshot_scope_errors(snapshot, account_label=fact["account"],
                 environment=str(ref.get("environment") or ""), market=required_market, asset_type=asset,
                 external_account_id=ref.get("external_account_id"),
+                broker_id=ref.get("broker_id"),
                 now_utc=datetime.fromtimestamp(now_ms / 1000, timezone.utc), max_age_seconds=60))
     if reasons:
         return {"status": "unavailable", "reason_codes": sorted(reasons), "evidence_complete": False}

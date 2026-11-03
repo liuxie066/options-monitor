@@ -1,7 +1,9 @@
 # Secret Storage
 
-options-monitor 通过固定逻辑名读取秘密，业务代码不直接读取秘密环境变量。真实值不得写入
-YAML、JSON、JSONL、命令参数、日志、support bundle 或聊天记录。
+本文的固定逻辑名注册表覆盖 LLM、Feishu 与入站操作密钥；这些消费方通过 secret store 读取，
+不直接读取秘密环境变量。长桥使用独立的[有效环境凭据与账号绑定合同](../CONFIGS.md#可选能力与长桥账户)，
+WeChat 登录及收件窗口凭据保存在其私有绑定目录，二者不属于此注册表。
+真实值不得写入人工配置、命令参数、日志、support bundle 或聊天记录；WeChat 的本地认证状态属于秘密文件，不能作为普通配置分享。
 
 ## 逻辑凭据
 

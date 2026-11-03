@@ -157,7 +157,7 @@ def _seal_closed_days(archive_root, runtime_root, prune_roots, clock, budget_roo
 def export_watchlist_series(*, series_dir, expected_plan_sha256, cutoff, output_dir, object_root=None):
     """Dispatch sealed-day restoration above the ordinary shard exporter."""
     root = series._path(series_dir)
-    if not root.exists() and root.name == "archive" and _seal_dir(root.parent).exists():
+    if root.name == "archive" and _seal_dir(root.parent).exists():
         return export_sealed_watchlist_day(
             day_dir=root.parent,
             expected_plan_sha256=expected_plan_sha256,
@@ -862,11 +862,16 @@ def run_watchlist_day(
     }
     if not confirm:
         return preview
-    if not prepared.exists() and _seal_dir(day_dir).exists():
-        _load_day(prepared, expected_request_sha256)
-        return {"status": "sealed", "provider_called": False, "date": request["date"]}
-    series._private_dir(day_dir)
-    with group._lock(day_dir):
+    seal_dir = _seal_dir(day_dir)
+    lock_root = seal_dir if not day_dir.exists() and seal_dir.exists() else day_dir
+    series._private_dir(lock_root)
+    with group._lock(lock_root):
+        # An interrupted seal must finish publication before collection can reenter.
+        if seal_dir.exists():
+            sealed, objects = _sealed_day(day_dir, expected_request_sha256)
+            for record in sealed["files"]:
+                group._object_bytes(objects, record)
+            return {"status": "sealed", "provider_called": False, "date": request["date"]}
         if (day_dir / "missed.json").exists():
             _, missed = series._read(day_dir / "missed.json")
             if missed.get("request_sha256") != expected_request_sha256:
@@ -1023,11 +1028,11 @@ def run_watchlist_day(
                 "manifest": manifest,
                 "reason": "retain_discovery_and_scope_gaps_no_quote_denominator_known",
             }
+        _, plan = group._load(prepared / "plan", manifest["watchlist_series_sha256"])
         supplemental = {}
-        if capture_policy is not None:
+        if capture_policy is not None and plan["slots"]:
             from src.application.research.market_ancillary import capture_market_ancillary, with_underliers
 
-            _, plan = group._load(prepared / "plan", manifest["watchlist_series_sha256"])
             now = series._now(clock)
             # A daily request has one market/slot; multiple slots need their own immutable manifests.
             if len(plan["slots"]) != 1:

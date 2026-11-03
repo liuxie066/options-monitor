@@ -291,6 +291,20 @@ def render_fixed_report(
     return _render_user_view(view, projection="fixed_report")
 
 
+@daily_brief_phase("render", operation="render_fixed_report_card_blocks")
+def render_fixed_report_card_blocks(
+    brief: Mapping[str, Any],
+    *,
+    diff: Mapping[str, Any] | None = None,
+    limits: Mapping[str, Any] | None = None,
+    context: Mapping[str, Any] | None = None,
+) -> list[str]:
+    view = build_daily_brief_user_view(
+        brief, diff=diff, delivery_kind="fixed_report", limits=limits, context=context,
+    )
+    return _render_user_view_blocks(view, projection="fixed_report")
+
+
 @daily_brief_phase("render", operation="render_fixed_report_card_markdown")
 def render_fixed_report_card_markdown(
     brief: Mapping[str, Any],
@@ -299,14 +313,25 @@ def render_fixed_report_card_markdown(
     limits: Mapping[str, Any] | None = None,
     context: Mapping[str, Any] | None = None,
 ) -> str:
+    return "\n\n".join(render_fixed_report_card_blocks(
+        brief, diff=diff, limits=limits, context=context,
+    ))
+
+
+@daily_brief_phase("render", operation="render_fixed_report_text")
+def render_fixed_report_text(
+    brief: Mapping[str, Any],
+    *,
+    diff: Mapping[str, Any] | None = None,
+    limits: Mapping[str, Any] | None = None,
+    context: Mapping[str, Any] | None = None,
+) -> str:
     view = build_daily_brief_user_view(
-        brief,
-        diff=diff,
-        delivery_kind="fixed_report",
-        limits=limits,
-        context=context,
+        brief, diff=diff, delivery_kind="fixed_report", limits=limits, context=context,
     )
-    return _render_user_view_card(view, projection="fixed_report")
+    return _bounded_message("\n\n".join(_render_user_view_blocks(
+        view, projection="fixed_report", markdown=False,
+    )), plain_text=True)
 
 
 @daily_brief_phase("render", operation="render_candidate_alert")
@@ -317,6 +342,17 @@ def render_candidate_alert(
     limits: Mapping[str, Any] | None = None,
     context: Mapping[str, Any] | None = None,
 ) -> str:
+    view = _candidate_alert_user_view(brief, candidate_identities, limits=limits, context=context)
+    return _render_user_view(view, projection="candidate_alert")
+
+
+def _candidate_alert_user_view(
+    brief: Mapping[str, Any],
+    candidate_identities: Iterable[str],
+    *,
+    limits: Mapping[str, Any] | None,
+    context: Mapping[str, Any] | None,
+) -> dict[str, Any]:
     filtered, omitted = _candidate_alert_brief(brief, candidate_identities)
     alert_limits = dict(limits or {})
     alert_limits["max_candidates_per_strategy"] = _DEFAULT_MAX_CANDIDATES
@@ -330,7 +366,19 @@ def render_candidate_alert(
         view["candidate_omissions"] = [
             f"另有 {omitted} 个新增候选未展开，可随时查询“期权监控”查看最新结果"
         ]
-    return _render_user_view(view, projection="candidate_alert")
+    return view
+
+
+@daily_brief_phase("render", operation="render_candidate_alert_card_blocks")
+def render_candidate_alert_card_blocks(
+    brief: Mapping[str, Any],
+    candidate_identities: Iterable[str],
+    *,
+    limits: Mapping[str, Any] | None = None,
+    context: Mapping[str, Any] | None = None,
+) -> list[str]:
+    view = _candidate_alert_user_view(brief, candidate_identities, limits=limits, context=context)
+    return _render_user_view_blocks(view, projection="candidate_alert")
 
 
 @daily_brief_phase("render", operation="render_candidate_alert_card_markdown")
@@ -341,20 +389,23 @@ def render_candidate_alert_card_markdown(
     limits: Mapping[str, Any] | None = None,
     context: Mapping[str, Any] | None = None,
 ) -> str:
-    filtered, omitted = _candidate_alert_brief(brief, candidate_identities)
-    alert_limits = dict(limits or {})
-    alert_limits["max_candidates_per_strategy"] = _DEFAULT_MAX_CANDIDATES
-    view = build_daily_brief_user_view(
-        filtered,
-        delivery_kind="candidate_alert",
-        limits=alert_limits,
-        context=context,
-    )
-    if omitted:
-        view["candidate_omissions"] = [
-            f"另有 {omitted} 个新增候选未展开，可随时查询“期权监控”查看最新结果"
-        ]
-    return _render_user_view_card(view, projection="candidate_alert")
+    return "\n\n".join(render_candidate_alert_card_blocks(
+        brief, candidate_identities, limits=limits, context=context,
+    ))
+
+
+@daily_brief_phase("render", operation="render_candidate_alert_text")
+def render_candidate_alert_text(
+    brief: Mapping[str, Any],
+    candidate_identities: Iterable[str],
+    *,
+    limits: Mapping[str, Any] | None = None,
+    context: Mapping[str, Any] | None = None,
+) -> str:
+    view = _candidate_alert_user_view(brief, candidate_identities, limits=limits, context=context)
+    return _bounded_message("\n\n".join(_render_user_view_blocks(
+        view, projection="candidate_alert", markdown=False,
+    )), plain_text=True)
 
 
 def select_rendered_combo_candidate_rows(
@@ -389,24 +440,37 @@ def render_fixed_failure(
     *,
     context: Mapping[str, Any] | None = None,
 ) -> str:
+    title, lines = _fixed_failure_lines(failure, context=context)
+    return _bounded_markdown([f"# {title}", _VISIBLE_BLANK_LINE, *lines])
+
+
+@daily_brief_phase("render", operation="render_fixed_failure_text")
+def render_fixed_failure_text(
+    failure: Mapping[str, Any],
+    *,
+    context: Mapping[str, Any] | None = None,
+) -> str:
+    title, lines = _fixed_failure_lines(failure, context=context)
+    return _bounded_message("\n".join([f"【{title}】", "", *lines]), plain_text=True)
+
+
+def _fixed_failure_lines(
+    failure: Mapping[str, Any],
+    *,
+    context: Mapping[str, Any] | None,
+) -> tuple[str, list[str]]:
     market = _upper(failure.get("market"))
     account = _lower(failure.get("account")) or "-"
     batch = _scheduled_batch_label(
-        dict(context or {}),
-        market=market,
-        display_in_user_timezone=True,
+        dict(context or {}), market=market, display_in_user_timezone=True,
     )
     phase = f"数据异常 · {batch} 批次失败" if batch else "数据异常 · 本轮批次失败"
-    return _bounded_markdown(
-        [
-            f"# OM · 决策简报 · {account}",
-            _VISIBLE_BLANK_LINE,
-            f"状态｜{phase}",
-            f"市场｜{_MARKET_LABELS.get(market, '市场')}",
-            "结论｜本轮策略扫描未形成可靠结果，无法生成正常报告。",
-            "后续｜下一计划扫描会继续尝试；本批次有效期内恢复后补发完整报告。",
-        ]
-    )
+    return f"OM · 决策简报 · {account}", [
+        f"状态｜{phase}",
+        f"市场｜{_MARKET_LABELS.get(market, '市场')}",
+        "结论｜本轮策略扫描未形成可靠结果，无法生成正常报告。",
+        "后续｜下一计划扫描会继续尝试；本批次有效期内恢复后补发完整报告。",
+    ]
 
 
 def render_query_brief(
@@ -772,214 +836,183 @@ def _render_user_view_card(
     *,
     projection: str,
 ) -> str:
-    lines = [
-        f"# OM · 决策简报 · {view['account']}",
-        "",
-        f"状态｜{view['phase_line']}",
-        f"市场｜{view['market_label']}",
+    return "\n\n".join(_render_user_view_blocks(view, projection=projection))
+
+
+def _render_user_view_blocks(
+    view: Mapping[str, Any],
+    *,
+    projection: str,
+    markdown: bool = True,
+) -> list[str]:
+    def heading(title: str, level: int = 2) -> str:
+        return f"{'#' * level} {title}" if markdown else f"【{title}】"
+
+    def emphasis(title: str) -> str:
+        return f"**{title}**" if markdown else title
+
+    blocks = ["\n".join([
+        heading(f"OM · 决策简报 · {view['account']}", 1),
+        f"状态｜{view['phase_line']} · {view['market_label']}",
         f"数据｜{_strip_display_label(view['data_as_of'], '数据截至：')}",
-    ]
-    lines.extend(_attribution_review_lines(view))
-    planning_notice = str(view.get("planning_notice") or "")
-    if planning_notice:
-        lines.extend(["", f"提示｜{planning_notice}"])
-    if bool(view.get("blocked")):
-        lines.extend(
-            [
-                "",
-                f"结论｜{view.get('blocked_summary') or '本轮关键数据不可用，暂时无法形成可靠决策。'}",
-                "后续｜系统将在后续批次自动重新评估。",
-            ]
-        )
-        if projection == "fixed_report" and view.get("wheel_batches"):
-            lines.extend(["", "## Wheel"])
-            for item in view["wheel_batches"]:
-                lines.extend(["", f"**{_flat_title(item['title'])}**"])
-                lines.extend(_flat_field_line(detail) for detail in item.get("details") or [])
-        return "\n".join(lines).strip()
+    ])]
+    attribution = _attribution_review_lines(view)
+    if attribution:
+        blocks.append("\n".join(attribution))
+    if view.get("planning_notice"):
+        blocks.append(f"提示｜{view['planning_notice']}")
+
+    def wheel_blocks() -> list[str]:
+        rows = [item for item in view.get("wheel_batches") or [] if isinstance(item, Mapping)]
+        if not rows:
+            return []
+        return [heading("Wheel"), *[
+            "\n".join([emphasis(_flat_title(item['title'])), *[
+                _flat_field_line(detail) for detail in item.get("details") or []
+            ]]) for item in rows
+        ]]
+
+    if view.get("blocked"):
+        blocks.append("\n".join([
+            f"结论｜{view.get('blocked_summary') or '本轮关键数据不可用，暂时无法形成可靠决策。'}",
+            "后续｜系统将在后续批次自动重新评估。",
+        ]))
+        if projection == "fixed_report":
+            blocks.extend(wheel_blocks())
+        return blocks
 
     changes = [str(item) for item in view.get("change_summaries") or [] if str(item).strip()]
     if changes:
-        lines.extend(["", "变化｜" + "；".join(changes) + "。"])
+        blocks.append("变化｜" + "；".join(changes) + "。")
 
     candidates = [item for item in view.get("candidates") or [] if isinstance(item, Mapping)]
-    candidate_families = {str(item.get("family") or "") for item in candidates}
     visible_families = (
-        {"sell_put", "covered_call", "combo_yield"}
-        if projection == "fixed_report"
-        else candidate_families
+        {"sell_put", "covered_call", "combo_yield"} if projection == "fixed_report"
+        else {item.get("family") for item in candidates}
     )
     if not visible_families and not view.get("wheel_batches"):
-        lines.extend(["", "## 策略候选"])
-        lines.append(str(view.get("candidate_empty_summary") or "本轮暂无符合条件的候选。"))
-    else:
-        candidate_heading = "新增策略候选" if projection == "candidate_alert" else ""
-        for family in ("sell_put", "covered_call", "combo_yield"):
-            if family not in visible_families:
-                continue
-            family_rows = [item for item in candidates if item.get("family") == family]
-            lines.extend(
-                _render_candidate_family_card(
-                    family,
-                    family_rows,
-                    candidate_heading=candidate_heading,
-                    empty_summary=view["candidate_empty_by_family"][family],
-                )
-            )
+        blocks.append(heading("策略候选") + "\n" + str(view.get("candidate_empty_summary") or "本轮暂无符合条件的候选。"))
+    for family in ("sell_put", "covered_call", "combo_yield"):
+        if family not in visible_families:
+            continue
+        rows = [item for item in candidates if item.get("family") == family]
+        family_heading = heading(_STRATEGY_LABELS[family])
+        blocks.append(family_heading if rows else family_heading + "\n" + view["candidate_empty_by_family"][family])
+        if rows and projection == "candidate_alert":
+            blocks.append(heading("新增策略候选", 3))
+        for item in rows:
+            lines = [emphasis(_flat_title(item['title']))]
+            lines.extend(_flat_field_line(leg) for leg in item.get("legs") or [])
+            fields = item.get("metric_fields") or {}
+            for keys, strong in (
+                (("period", "income"), True),
+                (("quote", "capacity"), False),
+                (("dte", "delta", "annualized"), False),
+            ):
+                parts = [str(fields[key]) for key in keys if fields.get(key)]
+                if parts:
+                    line = " · ".join(parts)
+                    lines.append(emphasis(line) if strong else line)
+            sizing = fields.get("sizing") or []
+            if sizing:
+                lines.append("Position Sizing：" + sizing[0])
+                lines.extend(sizing[1:])
+            blocks.append("\n".join(lines))
     if projection == "fixed_report" and not candidates:
         summary = str(view.get("candidate_empty_summary") or "")
         if summary and summary != "本轮暂无符合条件的候选。":
-            lines.extend(["", summary])
-    wheel_batches = [
-        item for item in view.get("wheel_batches") or [] if isinstance(item, Mapping)
-    ]
-    if wheel_batches:
-        lines.extend(["", "## Wheel"])
-        for item in wheel_batches:
-            lines.extend(["", f"**{_flat_title(item['title'])}**"])
-            lines.extend(_flat_field_line(detail) for detail in item.get("details") or [])
+            blocks.append(summary)
+    blocks.extend(wheel_blocks())
     if candidates:
-        event_lines = _render_candidate_event_card(
-            candidates,
-            compact=projection == "fixed_report",
+        events = _render_candidate_event_card(
+            candidates, compact=projection == "fixed_report", markdown=markdown,
         )
-        if event_lines:
-            lines.extend(["", *event_lines])
-    for note in view.get("candidate_omissions") or []:
-        lines.append(f"补充｜{note}")
+        if events:
+            blocks.extend([heading("事件"), *events])
+    blocks.extend(f"补充｜{note}" for note in view.get("candidate_omissions") or [])
 
     if projection != "candidate_alert":
-        lines.extend(["", "## 持仓"])
-        position_rows = [
-            item
-            for item in view.get("positions") or []
-            if isinstance(item, Mapping)
-        ]
+        position_rows = [item for item in view.get("positions") or [] if isinstance(item, Mapping)]
         positions, fact_reviews = _partition_position_views(position_rows)
-        lines.append(
-            _position_summary(
-                view,
-                visible_actionable_count=len(position_rows),
-            )
-        )
-        if positions:
-            # design 15.5: itemized list, same visual form as candidates.
-            for index, item in enumerate(positions, start=1):
-                lines.extend(
-                    [
-                        "",
-                        f"**{index}｜{_flat_title(item.get('holding'))}｜{item.get('status')}**",
-                    ]
-                )
-                facts = [
-                    f"买回参考价 {_table_cell(item.get('close_ask'))}"
-                    if item.get("close_ask") not in (None, "")
-                    else "",
-                    f"预计锁定损益 {_table_cell(item.get('realized_if_close'))}"
-                    if item.get("realized_if_close") not in (None, "")
-                    else "",
-                    f"净兑现比例 {_table_cell(item.get('net_capture'))}"
-                    if item.get("net_capture") not in (None, "")
-                    else "",
-                    f"剩余最高年化 {_table_cell(item.get('remaining_annualized'))}"
-                    if item.get("remaining_annualized") not in (None, "")
-                    else "",
-                    _table_cell(item.get("capital_basis"))
-                    if item.get("capital_basis") not in (None, "")
-                    else "",
-                ]
-                facts = [fact for fact in facts if fact]
-                if facts:
-                    lines.append("参考｜" + " · ".join(facts))
+        blocks.append(heading("持仓") + "\n" + _position_summary(view, visible_actionable_count=len(position_rows)))
+        for index, item in enumerate(positions, start=1):
+            lines = [emphasis(f"{index}｜{_flat_title(item.get('holding'))}｜{item.get('status')}")]
+            facts = []
+            for label, key in (
+                ("买回参考价", "close_ask"),
+                ("预计锁定损益", "realized_if_close"),
+                ("净兑现比例", "net_capture"),
+                ("剩余最高年化", "remaining_annualized"),
+                ("", "capital_basis"),
+            ):
+                if item.get(key) not in (None, ""):
+                    facts.append(f"{label} {_table_cell(item[key])}".strip())
+            if facts:
+                lines.append("参考｜" + " · ".join(facts))
+            blocks.append("\n".join(lines))
         if fact_reviews:
-            lines.extend(
-                [
-                    "",
-                    "## 持仓事实核查（非交易建议）",
-                ]
-            )
+            blocks.append(heading("持仓事实核查（非交易建议）"))
             for item in fact_reviews:
-                lines.extend(
-                    [
-                        "",
-                        f"**{_flat_title(item['title'])}｜{item['status']}**",
-                    ]
-                )
-                for detail in item.get("details") or []:
-                    lines.append(f"核查原因｜{detail}")
+                blocks.append("\n".join([
+                    emphasis(f"{_flat_title(item['title'])}｜{item['status']}"),
+                    *[f"核查原因｜{detail}" for detail in item.get("details") or []],
+                ]))
 
     funds = [str(item) for item in view.get("funds") or [] if str(item).strip()]
-    lines.extend(["", "## 资金"])
-    if funds:
-        lines.extend(_flat_field_line(item) for item in funds)
-    else:
-        lines.append("资金数据暂不可用。")
-
+    blocks.append(heading("资金") + "\n" + (
+        "\n".join(_flat_field_line(item) for item in funds) if funds else "资金数据暂不可用。"
+    ))
     reminder_key = "fixed_report_reminders" if projection == "fixed_report" else "reminders"
     reminders = [str(item) for item in view.get(reminder_key) or [] if str(item).strip()]
     if reminders:
-        if projection == "fixed_report":
-            lines.extend(["", *(f"提醒｜{item}" for item in reminders)])
-        else:
-            lines.extend(["", "## 提醒"])
-            lines.extend(f"提醒｜{item}" for item in reminders)
-    return "\n".join(lines).strip()
-
-
-def _render_candidate_family_card(
-    family: str,
-    rows: list[Mapping[str, Any]],
-    *,
-    candidate_heading: str = "策略候选",
-    empty_summary: str = "暂无合适合约",
-) -> list[str]:
-    heading = _STRATEGY_LABELS.get(family, family)
-    lines = ["", f"## {heading}"]
-    if not rows:
-        lines.append(empty_summary)
-    if rows and candidate_heading:
-        lines.extend(["", f"### {candidate_heading}"])
-    for item in rows:
-        lines.extend(
-            [
-                "",
-                f"**{_flat_title(item.get('title'))}**",
-                *[
-                    _flat_field_line(leg)
-                    for leg in item.get("legs") or []
-                    if str(leg).strip()
-                ],
-                *[
-                    f"{_candidate_detail_label(detail)}｜{detail}"
-                    for detail in item.get("details") or []
-                    if str(detail) != str(item.get("event_line") or "")
-                ],
-            ]
-        )
-    return lines
+        if projection != "fixed_report":
+            blocks.append(heading("提醒"))
+        blocks.append("\n".join(f"提醒｜{item}" for item in reminders))
+    return blocks
 
 
 def _render_candidate_event_card(
     candidates: list[Mapping[str, Any]],
     *,
     compact: bool = False,
+    markdown: bool = True,
 ) -> list[str]:
+    if markdown:
+        by_symbol: dict[str, list[str]] = {}
+        for item in candidates:
+            summaries = item.get("event_summary", ["事件数据不完整"])
+            if not summaries:
+                continue
+            symbol = str(item.get("symbol") or "未知标的")
+            values = by_symbol.setdefault(symbol, [])
+            for summary in summaries:
+                if summary not in values:
+                    values.append(summary)
+        return [f"{symbol}｜{'；'.join(values)}" for symbol, values in by_symbol.items()] or [
+            "已确认到期前无近期重要事件。"
+        ]
     grouped: dict[str, list[str]] = {}
-    family_counts: dict[str, int] = {}
+    mixed_families = {item.get("family") for item in candidates if not item.get("event_normal")}
     for item in candidates:
-        family = str(item.get("family") or "")
-        family_counts[family] = family_counts.get(family, 0) + 1
-        label = (
-            f"{_STRATEGY_LABELS.get(family, family)} #{family_counts[family]}"
-            f"（{item.get('symbol') or '未知标的'}）"
-        )
         event_line = str(item.get("event_line") or "").strip()
         if compact:
             event_line = _compact_fixed_report_event(event_line)
-        if event_line:
-            grouped.setdefault(event_line, []).append(label)
+        if not event_line:
+            continue
+        # Only confirmed normal conclusions can omit individual contract identities.
+        label = (
+            _STRATEGY_LABELS.get(str(item.get("family")), "候选")
+            if item.get("event_normal") and item.get("family") not in mixed_families
+            else _flat_title(item.get("event_identity"))
+        )
+        labels = grouped.setdefault(event_line, [])
+        if label not in labels:
+            labels.append(label)
     return [
-        f"事件｜{'、'.join(labels)}：{event_line}"
+        "\n".join([
+            *[f"**{label}**" if markdown else label for label in labels],
+            event_line.replace("，", "，\n").replace("；", "；\n"),
+        ])
         for event_line, labels in grouped.items()
     ]
 
@@ -1094,6 +1127,11 @@ def _candidate_views(
                         "candidate_id": str(row.get("candidate_id") or "") or None,
                         "title": f"{symbol} · {_STRATEGY_LABELS[family]}（{choice}）",
                         "legs": [put_leg, call_leg],
+                        "metric_fields": _candidate_metric_fields(row, family=family, market=market),
+                        "event_identity": f"{symbol} · {_STRATEGY_LABELS[family]} · {put_contract} / {call_contract}（{choice}）",
+                        "event_normal": _lower((row.get("event_risk") or {}).get("user_state")) == "confirmed_none"
+                        if isinstance(row.get("event_risk"), Mapping) else False,
+                        "event_summary": _candidate_event_summary(row),
                         "details": [
                             *_candidate_metric_details(row, family=family, market=market),
                             _candidate_event_line(row, family=family),
@@ -1130,6 +1168,11 @@ def _candidate_views(
                     "symbol": symbol,
                     "candidate_id": str(row.get("candidate_id") or "") or None,
                     "title": (f"{symbol} · {_STRATEGY_LABELS[family]} · {contract}（{choice}）"),
+                    "metric_fields": _candidate_metric_fields(row, family=family, market=market),
+                    "event_identity": f"{symbol} · {_STRATEGY_LABELS[family]} · {contract}（{choice}）",
+                    "event_normal": _lower((row.get("event_risk") or {}).get("user_state")) == "confirmed_none"
+                    if isinstance(row.get("event_risk"), Mapping) else False,
+                    "event_summary": _candidate_event_summary(row),
                     "details": [
                         *_candidate_metric_details(row, family=family, market=market),
                         _candidate_event_line(row, family=family),
@@ -1451,24 +1494,24 @@ def _wheel_reason_text(value: Any) -> str:
     }.get(reason, reason or "当前等待下一轮评估")
 
 
-def _candidate_metric_details(
+def _candidate_metric_fields(
     candidate: Mapping[str, Any],
     *,
     family: str,
     market: str,
-) -> list[str]:
+) -> dict[str, Any]:
     metrics = candidate.get("metrics")
     values = metrics if isinstance(metrics, Mapping) else {}
-    parts: list[str] = []
+    fields: dict[str, Any] = {}
     mid = _number(values.get("mid"))
     bid = _number(values.get("bid"))
     ask = _number(values.get("ask"))
     if mid is not None:
-        parts.append(f"权利金 {_money(mid, market=market)}")
+        fields["quote"] = f"权利金 {_money(mid, market=market)}"
     elif bid is not None or ask is not None:
         bid_text = _money(bid, market=market) if bid is not None else "-"
         ask_text = _money(ask, market=market) if ask is not None else "-"
-        parts.append(f"Bid/Ask {bid_text}/{ask_text}")
+        fields["quote"] = f"Bid/Ask {bid_text}/{ask_text}"
 
     # design 15.5: period (non-annualized) net return is the primary metric;
     # the annualized value stays as an explicit "门槛年化" gate label.
@@ -1480,7 +1523,7 @@ def _candidate_metric_details(
     if period is None:
         period = _number(values.get("period_net_return"))
     if period is not None:
-        parts.append(f"持有期净收益 {_percent(period)}")
+        fields["period"] = f"持有期净收益 {_percent(period)}"
     annualized_key = {
         "sell_put": "annualized_net_return_on_cash_basis",
         "covered_call": "annualized_net_premium_return",
@@ -1488,28 +1531,27 @@ def _candidate_metric_details(
     }.get(family)
     annualized = _number(values.get(annualized_key)) if annualized_key else None
     if annualized is not None:
-        parts.append(f"门槛年化 {_percent(annualized)}")
+        fields["annualized"] = f"门槛年化 {_percent(annualized)}"
     if family == "combo_yield":
         delta = _number(values.get("call_delta"))
-        parts.append(
+        fields["delta"] = (
             f"长 Call Delta {delta:.2f}" if delta is not None else "长 Call Delta 暂不可用"
         )
     else:
         delta = _number(values.get("delta"))
         if delta is not None:
-            parts.append(f"Delta {delta:.2f}")
+            fields["delta"] = f"Delta {delta:.2f}"
     dte = _number(values.get("dte"))
     if dte is not None:
-        parts.append(f"{max(0, int(dte))} 天")
+        fields["dte"] = f"{max(0, int(dte))} 天"
     net_income = _number(values.get("net_income"))
     if net_income is not None:
-        parts.append(f"预计净收入 {_money(net_income, market=market)}")
+        fields["income"] = f"预计净收入 {_money(net_income, market=market)}"
     if family in {"sell_put", "covered_call"}:
         contracts = _capacity_contracts(candidate)
-        parts.append(
+        fields["capacity"] = (
             f"最多 {contracts} 手" if contracts is not None else "最多手数暂不可用"
         )
-    details = [" · ".join(parts)] if parts else []
     if family in {"sell_put", "covered_call"}:
         sizing = []
         is_current_basis = values.get("position_sizing_basis") in {
@@ -1527,7 +1569,23 @@ def _candidate_metric_details(
         for label, key in labels:
             value = _number(values.get(key))
             sizing.append(f"{label} {_percent(value) if value is not None else '暂不可用'}")
-        details.append("Position Sizing：" + " · ".join(sizing))
+        fields["sizing"] = sizing
+    return fields
+
+
+def _candidate_metric_details(
+    candidate: Mapping[str, Any],
+    *,
+    family: str,
+    market: str,
+) -> list[str]:
+    fields = _candidate_metric_fields(candidate, family=family, market=market)
+    parts = [fields[key] for key in (
+        "quote", "period", "annualized", "delta", "dte", "income", "capacity",
+    ) if fields.get(key)]
+    details = [" · ".join(parts)] if parts else []
+    if fields.get("sizing"):
+        details.append("Position Sizing：" + " · ".join(fields["sizing"]))
     return details
 
 
@@ -1602,6 +1660,22 @@ def _combo_return_card(candidate: Mapping[str, Any], *, market: str) -> str:
     if net_income is not None:
         parts.append(f"净收入 {_money(net_income, market=market)}")
     return " · ".join(parts) or "—"
+
+
+def _candidate_event_summary(candidate: Mapping[str, Any]) -> list[str]:
+    risk = candidate.get("event_risk") if isinstance(candidate.get("event_risk"), Mapping) else {}
+    state = _lower(risk.get("user_state"))
+    if state == "confirmed_none":
+        return []
+    if state != "confirmed_event":
+        return ["事件数据不完整"]
+    summaries = []
+    for event in risk.get("events") or [risk.get("nearest_event")]:
+        event = event if isinstance(event, Mapping) else {}
+        label = _EVENT_TYPE_LABELS.get(_lower(event.get("event_type")))
+        event_date = _event_date_label(event.get("event_date"), compact=True)
+        summaries.append(f"{event_date} {label}" if event_date and label else "事件数据不完整")
+    return summaries
 
 
 def _candidate_event_line(candidate: Mapping[str, Any], *, family: str) -> str:
@@ -2501,7 +2575,7 @@ def _event_label(event: Mapping[str, Any]) -> str:
     return f"{event_date}{verb}"
 
 
-def _event_date_label(value: Any) -> str:
+def _event_date_label(value: Any, *, compact: bool = False) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
@@ -2509,7 +2583,7 @@ def _event_date_label(value: Any) -> str:
         parsed = datetime.fromisoformat(text[:10])
     except ValueError:
         return ""
-    return f"{parsed.month} 月 {parsed.day} 日"
+    return parsed.strftime("%m-%d") if compact else f"{parsed.month} 月 {parsed.day} 日"
 
 
 def _event_expiry_relation_text(
@@ -2814,10 +2888,15 @@ def _upper(value: Any) -> str:
 
 
 def _bounded_markdown(lines: list[str]) -> str:
-    message = "\n".join(lines).strip()
+    return _bounded_message("\n".join(lines))
+
+
+def _bounded_message(message: str, *, plain_text: bool = False) -> str:
+    message = message.strip()
     if len(message) <= _MAX_MESSAGE_CHARS:
         return message
-    marker = "\n\n- … 消息已按总长度上限截断；完整结构化简报仍保存在审计记录中。"
+    prefix = "\n\n" if plain_text else "\n\n- "
+    marker = prefix + "… 消息已按总长度上限截断；完整结构化简报仍保存在审计记录中。"
     return message[: _MAX_MESSAGE_CHARS - len(marker)].rstrip() + marker
 
 
@@ -2827,12 +2906,17 @@ __all__ = [
     "resolve_daily_brief_render_limits",
     "render_blocked_brief",
     "render_candidate_alert",
+    "render_candidate_alert_card_blocks",
     "render_candidate_alert_card_markdown",
+    "render_candidate_alert_text",
     "render_daily_brief_lifecycle",
     "render_delta_brief",
     "render_fixed_failure",
+    "render_fixed_failure_text",
     "render_fixed_report",
+    "render_fixed_report_card_blocks",
     "render_fixed_report_card_markdown",
+    "render_fixed_report_text",
     "render_full_brief",
     "render_query_brief",
     "render_recovery_brief",

@@ -318,10 +318,19 @@ def _lock(root):
 def _shared_gateway_factory(factory):
     gateway = None
     interrupted = False
+    ready = False
+    readiness = None
 
     class BorrowedGateway:
         def __getattr__(self, name):
             return getattr(gateway, name)
+
+        def ensure_quote_ready(self, **kwargs):
+            nonlocal ready, readiness
+            if not ready:
+                readiness = gateway.ensure_quote_ready(**kwargs)
+                ready = True
+            return readiness
 
         def close(self):
             # The group owns the connection through all shards, including failures.
@@ -381,7 +390,7 @@ def collect_watchlist_series(
     series._private_dir(archive_root)
     results = []
     with _lock(archive_root), _shared_gateway_factory(
-        gateway_factory or quote.build_ready_futu_quote_gateway
+        gateway_factory or series.build_futu_gateway
     ) as shared_gateway:
         ancillary_dir = plan_dir / "scope"
         if ancillary:
@@ -473,6 +482,7 @@ def collect_watchlist_series(
                 confirm=True,
                 clock=clock,
                 gateway_factory=shared_gateway,
+                ensure_quote_ready=gateway_factory is None,
                 snapshot_limiter_root=archive_root / "limiter",
                 rate_limited_call=budgeted_call,
             )

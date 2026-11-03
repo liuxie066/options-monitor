@@ -19,6 +19,8 @@ class ChannelAdapter:
     normalize_fn: NormalizeFn | None = None
     inbound_fn: InboundFn | None = None
     failure_stage: str = "send_message"
+    resolve_target_fn: Callable[..., Any] | None = None
+    resolve_identity_fn: Callable[..., Any] | None = None
 
 
 class ChannelRegistry:

@@ -28,6 +28,7 @@ from src.application.close_advice_report_manifest import (
     read_close_advice_report_snapshot,
 )
 from src.application.payload_helpers import as_float_or_none as _float_or_none
+from src.application.close_advice_report_manifest import normalize_close_advice_report_value as _normalize_public_value
 
 
 CLOSE_ADVICE_CSV = "close_advice.csv"
@@ -791,6 +792,19 @@ def _public_row(row: dict[str, Any]) -> dict[str, Any]:
     decision_fields = _decision_fields_for_read(row)
     keys = (
         "account",
+        "input_source",
+        "input_id",
+        "input_as_of_utc",
+        "assessment_mode",
+        "current_actionable",
+        "assessment_as_of_utc",
+        "market_data_provider",
+        "position_economics_sha256",
+        "quote_rights_status",
+        "quote_rights_market",
+        "quote_rights_underlier",
+        "quote_rights_option",
+        "quote_rights_received_at_utc",
         "position_lot_id",
         "quote_mode",
         "required_data_snapshot_plan_id",
@@ -1003,57 +1017,6 @@ def _source_payload(sources: list[_Source], *, mask_path: Callable[[Any], str | 
         "paths": [mask_path(source.path) for source in sources],
     }
 
-
-_NUMERIC_PUBLIC_FIELDS = frozenset(
-    {
-        "strike",
-        "contracts_open",
-        "premium",
-        "close_mid",
-        "bid",
-        "ask",
-        "dte",
-        "delta",
-        "remaining_trading_sessions",
-        "remaining_trading_sessions_min",
-        "remaining_trading_sessions_max",
-        "original_dte",
-        "remaining_term_ratio",
-        "spot",
-        "multiplier",
-        "spread_ratio",
-        "opening_gross_credit",
-        "estimated_open_fee",
-        "opening_net_credit",
-        "estimated_close_fee",
-        "all_in_close_cost",
-        "net_capture_ratio",
-        "capital_basis",
-        "remaining_max_annualized_return",
-        "close_cost_ratio",
-        "estimated_pnl_if_close_net",
-    }
-)
-
-_BOOLEAN_PUBLIC_FIELDS = frozenset({"is_otm"})
-
-
-def _normalize_public_value(key: str, value: Any) -> Any:
-    text = str(value).strip() if value is not None else ""
-    if not text:
-        return None
-    if text.lower() in {"nan", "none", "null"}:
-        return None
-    if key in _BOOLEAN_PUBLIC_FIELDS:
-        if text.lower() in {"true", "1", "yes"}:
-            return True
-        if text.lower() in {"false", "0", "no"}:
-            return False
-        return text
-    if key not in _NUMERIC_PUBLIC_FIELDS:
-        return text
-    number = _float_or_none(text)
-    return number if number is not None else text
 
 
 def _float_equal(left: Any, right: float) -> bool:

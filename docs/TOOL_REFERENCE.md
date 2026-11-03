@@ -1,11 +1,11 @@
 # Tool Reference
 
-本文说明如何发现和安全调用 `om-agent` Tool Gateway。它不手工复制每个工具的完整 schema。
+本文说明如何发现和安全调用 `om tools` Tool Gateway。它不手工复制每个工具的完整 schema。`om-agent` 保留为兼容入口，复用同一解析和执行实现。
 
 运行时权威：
 
 ```bash
-./om-agent spec
+./om tools spec
 ```
 
 源码权威：
@@ -14,36 +14,46 @@
 - `src/application/agent_tools/*`
 - `src/application/tool_execution.py`
 
-## `om` 与 `om-agent`
+## 统一入口 `om`
 
 | 入口 | 受众 | 作用 |
 |---|---|---|
 | `./om` | 人工操作者 | 配置、扫描、账本、研究、服务和运维 workflow |
-| `./om-agent` | 外部 agent、脚本、结构化集成 | JSON manifest 与单工具 JSON envelope |
-| `./om bot`（兼容 `assistant`） | 消息入口与 Bot | Control / Bot，不属于 Tool Gateway |
+| `./om tools`（兼容 `./om-agent`） | 外部 agent、脚本、结构化集成 | JSON manifest、单工具 JSON envelope、账户配置命令 |
+| `./om bot`（兼容 `agent`、`assistant`） | 消息入口与自然语言助手 | Control / Bot，不属于 Tool Gateway |
 
-人工命令可用 `om help` 按场景查找，完整参数用 `om <命令> --help`。例如 `om symbols add YOUR_SYMBOL --strategy csp --csp-max-strike YOUR_MAX_STRIKE` 默认预览并从标的识别市场，追加 `--apply` 后通过 YAML 配置事务重建快照；应先把占位符换成自己的标的和行权价上限。`om-agent run --tool manage_symbols` 是同一配置源的结构化 Agent 入口。两者均不应直接编辑生成的 JSON。
+人工命令可用 `om help` 按场景查找，完整参数用 `om <命令> --help`。例如 `om symbols add YOUR_SYMBOL --strategy csp --csp-max-strike YOUR_MAX_STRIKE` 默认预览并从标的识别市场，追加 `--apply` 后通过 YAML 配置事务重建快照；应先把占位符换成自己的标的和行权价上限。`om tools run --tool manage_symbols` 是同一配置源的结构化 Agent 入口。两者均不应直接编辑生成的 JSON。
 
-`om-agent` 不维护对话状态，不负责多步规划，也不是自动交易 Agent。
+`om tools` 不维护对话状态，不负责多步规划，也不是自动交易 Agent。`om agent` 是 Bot 兼容别名，不能用来调用 Tool Gateway。
+
+### 参数、环境与输出兼容
+
+`om tools` 完整承接 `om-agent` 的 `spec`、`run`、`add-account`、`edit-account`、`remove-account`，原子命令参数不变，可用 `om tools <子命令> --help` 查询。`run --input-file` 覆盖 `--input-json`；输入须为 JSON 对象，坏 JSON、不可读文件或非对象返回 `INPUT_ERROR` envelope 和退出码 2。参数错误由 argparse 报到 stderr、退出码 2；工具成功为 0、失败为 2，stdout 只输出原 manifest/envelope。
+
+网关直接进入 `src/interfaces/agent/cli.py`，不经过人工命令的 `command_environment`。进程调用保留原网关环境引导：`run --env-file` 显式加载；未传该参数且未传 `--no-local-env-file` 时按原规则加载 `OM_ENV_FILE` 或代码根目录的 `.env/options-monitor.env`。`--no-local-env-file` 跳过自动引导，显式 `--env-file` 仍加载；它不会清除已存在的进程设置或 `OM_ENV_FILE`。密钥是否可从 env 文件读取仍由原 secret backend 决定。
+
+实例选择由原 `resolve_runtime_root` 负责（显式作用域、有效 `OM_RUNTIME_ROOT`、用户记录、代码目录）；配置请求中的 `config_path` 优先于 `config_key` 默认路径，相对配置及输入文件相对调用 cwd，env 文件相对代码根目录。账户和市场仍由工具 schema、配置身份与既有业务 owner 校验；`om tools` 不另选账户、市场或实例。账户增改删保留 `--config-yaml/--config-path`、`--rebuild-runtime-root` 和原配置发布/审计流程；默认写操作仍需 `OM_AGENT_ENABLE_WRITE_TOOLS=true` 与 `--confirm`，`--dry-run` 只预览。
+
+人工命令使用各领域原有格式与退出码；新增双格式的命令使用局部 `--format text|json`，不添加全局格式开关。`om position-advice evaluate` 默认人工展示；`--format json` 返回原 `position_advice.output.v1` 业务对象，`om tools run --tool position_advice_evaluate` 返回含该对象的原 envelope。成功、部分结果、合法空结果、插件未启用/不可用均完成请求并退出 0，行内不可评估保留原因；执行失败为 2，不能只凭退出码判断所有持仓都可评估。
 
 ## Manifest
 
 查看完整 manifest：
 
 ```bash
-./om-agent spec
+./om tools spec
 ```
 
 只列工具名：
 
 ```bash
-./om-agent spec | jq -r '.tools[].name'
+./om tools spec | jq -r '.tools[].name'
 ```
 
 查看一个工具的 schema、示例和风险：
 
 ```bash
-./om-agent spec |
+./om tools spec |
   jq '.tools[] | select(.name == "runtime_status")'
 ```
 
@@ -168,6 +178,7 @@ CSP 现金担保与余量使用 `query_cash_headroom`。其 `assessment.supporte
 ### Close Advice
 
 - `close_advice_read`
+- `position_advice_evaluate`：按需行情及隔离请求报告，不写账本或发送通知
 
 ### 通知
 
@@ -182,7 +193,7 @@ CSP 现金担保与余量使用 `query_cash_headroom`。其 `assessment.supporte
 ### 健康检查
 
 ```bash
-./om-agent run --tool healthcheck \
+./om tools run --tool healthcheck \
   --input-json '{"config_key":"us"}'
 ```
 
@@ -196,14 +207,14 @@ warning，但不会创建数据库、迁移 schema 或重建 projection。Tool G
 本地 checkout：
 
 ```bash
-./om-agent run --tool runtime_status \
+./om tools run --tool runtime_status \
   --input-json '{"config_key":"us"}'
 ```
 
 生产 release：
 
 ```bash
-./om-agent run --tool runtime_status \
+./om tools run --tool runtime_status \
   --input-json '{"config_path":"/var/lib/options-monitor/config.us.json"}'
 ```
 
@@ -215,7 +226,7 @@ shared `last_run.json.run_id` 与所选 run 相同时才会回退 shared 计数�
 ### 通知感知证据
 
 ```bash
-./om-agent run --tool notification_perception_read \
+./om tools run --tool notification_perception_read \
   --input-json '{"runtime_root":"/var/lib/options-monitor","limit":10}'
 ```
 
@@ -227,17 +238,19 @@ root 来源及每个 JSONL 文件的 `ok`、`missing`、`valid_empty`、`tail_on
 ### 指派后资产分布
 
 ```bash
-./om-agent run --tool portfolio_assignment_scenario \
+./om tools run --tool portfolio_assignment_scenario \
   --input-json '{"accounts":["lx","sy"]}'
 ```
 
 该工具必填 `accounts`，可选 `scenario=short_put|short_call|all_short`（默认 `all_short`），
-分别假设仅全部未平 short Put、仅全部未平 short Call、全部未平 short Put/Call 被指派。富途 OpenD 的股票和现金（含 MMF）是底仓；
+分别假设仅全部未平 short Put、仅全部未平 short Call、全部未平 short Put/Call 被指派。按账户所选券商的股票和现金作为底仓（富途经 OpenD，含 MMF；长桥走独立适配器）；
 `portfolio.holdings.enabled=true` 时只补充 PM Holdings 中明确为非富途来源的资产，
-PM 的富途股票、现金和 MMF 副本不计入。OM SQLite 的 open short put/call lot 提供指派输入，
-富途 OpenD 市场快照提供股票及期权标的现价；PM 仅在 Holdings 开启时补充非富途资产。
+PM 的富途副本及同账户已直接读取的长桥镜像不计入。OM SQLite 的 open short put/call lot 提供指派输入，
+配置的行情能力提供股票及期权标的现价；PM 仅在 Holdings 开启时补充非富途资产。
 启用通过 `om config holdings set` 预检 PM scoped 来源质量；查询自动纳入所请求账户的合格非富途资产，
-不保存券商批准名单。来源清单缺失、不一致或 broker 无法分类时拒绝该 PM 补充，保留富途基线并标 `partial`。
+不保存券商批准名单。来源清单缺失、不一致或 broker 无法分类时拒绝该 PM 补充，保留已核验的直接券商基线并标 `partial`。
+PM 补充现金不增加直接券商期权资金覆盖；缺少同账户、同券商完整基线时，起始/终局股数、净资产及依赖权重未知。
+长桥现金估值、费用及身份限制见[情景设计](PORTFOLIO_ASSIGNMENT_SCENARIO_DESIGN.md#券商与-pm-可选能力扩展2026-11-01)。
 输出 `portfolio.assignment_scenario.v1`，主资金口径为 CNY，
 Long Option 完全排除。工具是纯读；业务 `status=partial|unavailable` 仍可处于成功的 Tool Gateway envelope 中，调用方必须同时检查 envelope `ok` 和业务 `data.status`。
 
@@ -251,10 +264,10 @@ CLI 使用 `./om portfolio assignment-scenario --accounts lx --scenario short_pu
 ### 查询运行历史
 
 ```bash
-./om-agent run --tool runtime_runs \
+./om tools run --tool runtime_runs \
   --input-json '{"limit":10}'
 
-./om-agent run --tool runtime_logs \
+./om tools run --tool runtime_logs \
   --input-json '{"run_id":"<run-id>","kind":"tool","lines":50}'
 ```
 
@@ -269,7 +282,7 @@ CLI 使用 `./om portfolio assignment-scenario --accounts lx --scenario short_pu
 `HK.00700`、`0700.HK`、`US.NVDA`；中文名称由对话层先唯一校准，不作为结构化输入。
 
 ```bash
-./om-agent run --tool option_candidates \
+./om tools run --tool option_candidates \
   --input-json '{"queries":[{"symbol":"0700.HK","strategy":"short_put","strike":370,"dte":[7,90]},{"symbol":"NVDA","strategy":"short_call"}]}'
 ```
 
@@ -309,10 +322,10 @@ stdout；休市时 `unable/market_closed` 是有效的不可评估结果，不�
 ### 候选解释
 
 ```bash
-./om-agent run --tool candidate_rank_explain \
+./om tools run --tool candidate_rank_explain \
   --input-json '{"run_id":"<run-id>","account":"lx","mode":"put","top_n":5}'
 
-./om-agent run --tool candidate_filter_explain \
+./om tools run --tool candidate_filter_explain \
   --input-json '{"run_id":"<run-id>","account":"lx","symbol":"NVDA"}'
 ```
 
@@ -329,7 +342,7 @@ stdout；休市时 `unable/market_closed` 是有效的不可评估结果，不�
 ### 扫描
 
 ```bash
-./om-agent run --tool scan_opportunities \
+./om tools run --tool scan_opportunities \
   --input-json '{"config_key":"us","symbols":["NVDA"],"top_n":5}'
 ```
 
@@ -338,13 +351,13 @@ stdout；休市时 `unable/market_closed` 是有效的不可评估结果，不�
 ### 现金与持仓
 
 ```bash
-./om-agent run --tool query_cash_headroom \
+./om tools run --tool query_cash_headroom \
   --input-json '{"config_key":"us","account":"lx"}'
 
-./om-agent run --tool option_positions_read \
+./om tools run --tool option_positions_read \
   --input-json '{"config_key":"us","action":"list","account":"lx","status":"open"}'
 
-./om-agent run --tool option_positions_read \
+./om tools run --tool option_positions_read \
   --input-json '{"config_key":"us","action":"events","account":"lx","position_effect":"close","limit":5}'
 ```
 
@@ -383,14 +396,14 @@ stdout；休市时 `unable/market_closed` 是有效的不可评估结果，不�
 继续读取示例：
 
 ```bash
-./om-agent run --tool option_positions_read \
+./om tools run --tool option_positions_read \
   --input-json '{"config_key":"us","cursor":"<next_cursor>","limit":5}'
 ```
 
 ### Option Performance
 
 ```bash
-./om-agent run --tool option_performance_report \
+./om tools run --tool option_performance_report \
   --input-json '{"config_key":"us","account":"lx","period":"mtd"}'
 ```
 
@@ -399,18 +412,28 @@ stdout；休市时 `unable/market_closed` 是有效的不可评估结果，不�
 读取由计划 Tick 生成的 sealed 报告：
 
 ```bash
-./om-agent run --tool close_advice_read \
+./om tools run --tool close_advice_read \
   --input-json '{"config_key":"us","query":{"option_type":"put","side":"short"}}'
 ```
 
-`close_advice_read` 不刷新持仓或行情，也不生成新建议。当前报告只能由计划 Tick 的 sealed required-data 路径产出；显式历史路径中的非 sealed 行会投影为 `not_evaluable`。
+`close_advice_read` 不刷新持仓或行情，也不生成新建议。调度与主动评估均使用同一 sealed required-data 路径；显式历史路径中的非 sealed 行会投影为 `not_evaluable`。
 新报告只支持 short put/call，并仅返回 `close`、`hold` 或
 `not_evaluable`。它不生成新仓、roll、replace 或 reallocate 建议。
+
+主动评估（需安装持仓建议可选包并启用）：
+
+```bash
+./om tools run --tool position_advice_evaluate \
+  --input-json '{"config_key":"us","account":"sample","symbols":["NVDA","AAPL"]}'
+./om position-advice evaluate --config-key us --request-file /path/to/request.json
+```
+
+手工请求示例：`{"account":"sample","positions":[{"input_id":"manual-1","input_as_of_utc":"2026-10-30T15:00:00Z","symbol":"NVDA","option_type":"put","expiration":"2026-12-18","strike":100,"contracts_open":1,"multiplier":100,"currency":"USD","premium":2}]}`。请填写自己的持仓事实与时间；此示例不是有效行情。休市参考保留原始 DTE/价格；没有兼容封存记录时不可用。该工具显式声明行情读取与本地报告写入，属于本地物化能力，不是 pure-read；业务账本与通知无写入。
 
 ### Daily Brief
 
 ```bash
-./om-agent run --tool daily_decision_brief_read \
+./om tools run --tool daily_decision_brief_read \
   --input-json '{"account":"lx","market":"US"}'
 ```
 
@@ -421,7 +444,7 @@ stdout；休市时 `unable/market_closed` 是有效的不可评估结果，不�
 只读 list：
 
 ```bash
-./om-agent run --tool manage_symbols \
+./om tools run --tool manage_symbols \
   --input-json '{"config_key":"us","action":"list"}'
 ```
 
@@ -432,7 +455,7 @@ stdout；休市时 `unable/market_closed` 是有效的不可评估结果，不�
 调用：
 
 ```bash
-./om-agent run --tool <tool-name> --input-json '<json>'
+./om tools run --tool <tool-name> --input-json '<json>'
 ```
 
 成功或失败都返回结构化 envelope，常见字段包括：

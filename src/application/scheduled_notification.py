@@ -136,6 +136,30 @@ class PerAccountSendExecution:
 
 NOTIFY_SEND_MAX_ATTEMPTS = 2
 NOTIFY_SEND_RETRY_DELAYS_SEC: tuple[float, ...] = (1.0,)
+
+
+def dispatch_scheduled_notification_fanout(
+    *, base, fanout_id: str, config: dict[str, Any], send_fn: Callable[..., Any],
+    now_ms: int | None = None, can_send_fn: Callable[..., bool] | None = None,
+) -> dict[str, Any]:
+    """Continue frozen child obligations; current switches do not consume attempts.
+
+    ``send_fn`` receives the shared owner's frozen spec and transport key. It is
+    deliberately one provider attempt: the durable child owns the retry budget.
+    """
+    from src.application.channels.plugins import channel_activity_enabled
+    from src.application.notification_delivery_route import notifications_enabled
+    from src.application.notification_fanout import dispatch_notification_fanout
+
+    def allowed(spec):
+        return (notifications_enabled(config)
+            and channel_activity_enabled(config, spec["recipient"]["provider"], "notify")
+            and (can_send_fn is None or can_send_fn(spec)))
+
+    return dispatch_notification_fanout(base=base, fanout_id=fanout_id, send_fn=send_fn,
+        now_ms=now_ms, can_send_fn=allowed)
+
+
 NOTIFY_SEND_RETRYABLE_ERROR_CODES = {"SEND_FAILED", "SEND_EXCEPTION", "SEND_UNCONFIRMED"}
 
 
@@ -477,6 +501,8 @@ def send_account_message_with_retry(
             upstream_message_id=record.get("upstream_message_id"),
             local_receipt_id=record.get("local_receipt_id"),
         )
+        if record.get("ambiguous_send") or record.get("duplicate_risk"):
+            will_retry = False
         record["will_retry"] = bool(will_retry)
         attempt_records.append(record)
         final_record = record

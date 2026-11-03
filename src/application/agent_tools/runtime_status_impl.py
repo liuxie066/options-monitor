@@ -3520,6 +3520,67 @@ __all__ = [
 ]
 
 
+def read_onboarding_status(*, base: Path, document: dict[str, Any]) -> dict[str, Any]:
+    """Small local-evidence projection; opening the menu never runs diagnostics."""
+    from src.application.agent_tools.project_reader import ProjectReaderError
+    from src.application.agent_tools.project_runs import discover_runs
+    from src.application.daily_decision_brief_repository import read_latest_daily_decision_brief, read_run_daily_decision_brief
+    from src.application.runtime_paths import RuntimeRootResolution
+    from src.application.account_config import normalize_accounts
+    from src.application.config_primitives import configured_markets
+
+    root = Path(base).resolve()
+    markets = configured_markets(document)
+    if not markets or set(markets) != set(document.get("markets") or {}):
+        raise AgentToolError(code="CONFIG_ERROR", message="config.yaml markets must configure us and/or hk objects")
+    scopes = []
+    for market in markets:
+        settings = document["markets"][market]
+        try:
+            accounts = normalize_accounts(settings.get("accounts"), strict=True)
+        except ValueError as exc:
+            raise AgentToolError(code="CONFIG_ERROR", message=f"{market} accounts: {exc}") from exc
+        declared = document.get("accounts")
+        if not isinstance(declared, dict) or any(not isinstance(declared.get(account), dict) for account in accounts):
+            raise AgentToolError(code="CONFIG_ERROR", message=f"{market} account mapping is missing")
+        for account in accounts:
+            attempt: dict[str, Any] = {"status": "unknown", "as_of": None}
+            try:
+                discovered = discover_runs(
+                    runtime_root=RuntimeRootResolution(root, "argument"), market=market,
+                    authorized_accounts=accounts, account=account, limit=1,
+                )
+                if discovered["unverified_newer_count"]:
+                    attempt["reason"] = "较新尝试的证据不完整"
+                elif discovered["entries"]:
+                    entry = discovered["entries"][0]
+                    attempt = {"status": "sealed" if entry.get("terminal") is True else "attempted",
+                               "as_of": entry.get("as_of"), "run_id": entry["run_id"],
+                               "reason": entry.get("reason_description")}
+                    result = read_run_daily_decision_brief(base=root, account=account, market=market,
+                                                          run_id=entry["run_id"])
+                    if result["available"]:
+                        attempt["status"] = "failed" if result["reason"] == "scan_failed" else "completed"
+                        attempt["result_status"] = result["brief"]["status"]
+                    elif result["reason"] != "not_found":
+                        attempt["reason"] = "本次简报来源不可用：" + result["reason"]
+                elif not discovered["coverage"]["has_more"]:
+                    attempt["status"] = "not_found"
+            except ProjectReaderError as exc:
+                if exc.code == "not_found" and not (root / "output_runs").exists():
+                    attempt["status"] = "not_found"
+                else:
+                    attempt["reason"] = exc.code
+            brief = read_latest_daily_decision_brief(base=root, account=account, market=market)
+            scopes.append({"account": account, "market": market.upper(), "attempt": attempt,
+                           "brief_available": brief["available"], "brief_reason": brief["reason"],
+                           "brief_error": brief.get("error"),
+                           "brief_time": (brief.get("brief") or {}).get("data_as_of_utc"),
+                           "brief_run_id": (brief.get("brief") or {}).get("run_id")})
+    # A saved service profile proves intended configuration, never activation.
+    return {"scopes": scopes, "automatic_running": "unknown"}
+
+
 def query_run_receipts(*, base: Path, accounts: list[str], query: dict[str, Any]) -> list[dict[str, Any]]:
     """Read retained account run facts, never confuse scheduler status with delivery."""
     from domain.storage.repositories.run_repo import list_retained_run_ids, get_run_account_state_dir

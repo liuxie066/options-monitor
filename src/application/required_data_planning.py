@@ -14,13 +14,13 @@ from domain.domain.candidate_defaults import (
 )
 from domain.domain.fetch_source import normalize_fetch_source
 from src.application import opend_utils
-from src.application.opend_market_snapshot_fetching import (
-    get_underlier_observation as get_underlier_spot,
+from src.application.market_data_provider import (
+    get_underlier_observation as get_underlier_spot, discover_option_expirations,
+    market_data_source,
 )
 from src.application.opening_quote_evidence import OpeningUnderlierObservation
 from src.application.opend_symbol_chain_fetching import (
     OptionExpirationDiscoveryResult,
-    discover_option_expirations,
     list_option_expirations,
 )
 from src.application.combo_yield_config import (
@@ -261,10 +261,11 @@ def _resolve_underlier_observation(
     snapshot_max_wait_sec: float = 30.0,
     snapshot_window_sec: float = 30.0,
     snapshot_max_calls: int = 60,
+    market_data_provider: str = "opend",
 ) -> OpeningUnderlierObservation | None:
     try:
         observed = get_underlier_spot(
-            symbol,
+            symbol, market_data_provider=market_data_provider,
             host=host,
             port=port,
             base_dir=base_dir,
@@ -1126,7 +1127,9 @@ def build_required_data_fetch_plan(
     expiration_window_sec: float = 30.0,
     expiration_max_calls: int = 60,
     planning_identity: RequiredDataPlanningIdentity | None = None,
+    market_data_provider: str = "opend",
 ) -> RequiredDataFetchPlanBundle:
+    fetch_source = market_data_source(market_data_provider, fetch_source)
     assert_strategy_config_resolved(symbol_cfg)
     if planning_identity is not None:
         underlier = opend_utils.normalize_underlier(symbol, base_dir=base)
@@ -1259,7 +1262,7 @@ def build_required_data_fetch_plan(
             )
         else:
             underlier_observation = _resolve_underlier_observation(
-                symbol=symbol,
+                symbol=symbol, market_data_provider=market_data_provider,
                 host=fetch_host,
                 port=fetch_port,
                 base_dir=base,
@@ -1295,7 +1298,7 @@ def build_required_data_fetch_plan(
             discovery_cache_key = None
     if expiration_discovery is None:
         expiration_discovery = discover_option_expirations(
-            symbol,
+            symbol, market_data_provider=market_data_provider,
             source=fetch_source,
             host=fetch_host,
             port=fetch_port,

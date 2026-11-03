@@ -24,8 +24,10 @@ from domain.domain.engine.candidate_engine import (
 from domain.domain.strategy_core import evaluate_candidates, validate_strategy_identity, rank_candidates, explain_rank, decision_time_from_input
 from domain.domain.strategy_identity import candidate_ranking_profile, validate_strategy_identity as validate_stored_identity
 from domain.domain.symbol_identity import symbol_market
+from domain.domain.risk_capacity import broker_capacity_binding
 from src.application.candidate_snapshot_contract import (
     CandidateSnapshotContractError,
+    OPENING_BROKER_SNAPSHOT_SCHEMA,
     assert_current_candidate_artifact_boundary,
     validate_candidate_run_mode,
 )
@@ -186,7 +188,7 @@ def seal_opening_candidate_snapshot(
         final_candidates,
         statuses=statuses,
         account=account_norm,
-        futu_account_id=str(authority["futu_account_id"]),
+        authority=authority,
         market=market_norm,
         risk_policy_hash=policy_hash,
         candidate_evaluations=candidate_evaluations,
@@ -196,7 +198,7 @@ def seal_opening_candidate_snapshot(
         modes=modes,
         decision_index=decision_index,
         account=account_norm,
-        futu_account_id=str(authority["futu_account_id"]),
+        authority=authority,
         market=market_norm,
     )
     accepted_decision_ids = {
@@ -209,6 +211,8 @@ def seal_opening_candidate_snapshot(
         raise OpeningCandidateSnapshotError(
             "accepted opening decisions and final candidates do not match"
         )
+    if authority.get("broker_id") == "longbridge" and authority["status"] != "available" and ranked:
+        raise OpeningCandidateSnapshotError("unavailable broker authority cannot admit candidates")
     strategy_results = _strategy_results(
         modes=modes,
         statuses=statuses,
@@ -224,10 +228,15 @@ def seal_opening_candidate_snapshot(
     seal_time = _timestamp(sealed_at or datetime.now(timezone.utc))
 
     payload: dict[str, Any] = {
-        "schema_version": OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
+        "schema_version": (OPENING_BROKER_SNAPSHOT_SCHEMA if authority.get("broker_id") == "longbridge"
+                           else OPENING_CANDIDATE_SNAPSHOT_SCHEMA),
         "run_id": run_id_norm,
         "account": account_norm,
-        "futu_account_id": authority["futu_account_id"],
+        **({"broker_id": authority["broker_id"], "broker_account_id": authority["broker_account_id"],
+            "capacity_authority_status": authority["status"],
+            **{key: authority.get(key) for key in ("credential_binding_sha256", "binding_method", "broker_echoed")}}
+           if authority.get("broker_id") == "longbridge"
+           else {"futu_account_id": authority["futu_account_id"]}),
         "trade_env": authority["trd_env"],
         "market": market_norm,
         "strategy_modes": modes,
@@ -397,7 +406,7 @@ def validate_opening_candidate_snapshot(
     require_current_contract: bool = False,
 ) -> None:
     item = dict(payload or {})
-    if item.get("schema_version") != OPENING_CANDIDATE_SNAPSHOT_SCHEMA:
+    if item.get("schema_version") not in {OPENING_CANDIDATE_SNAPSHOT_SCHEMA, OPENING_BROKER_SNAPSHOT_SCHEMA}:
         raise OpeningCandidateSnapshotError("opening candidate snapshot schema mismatch")
     if item.get("run_id") != expected_run_id:
         raise OpeningCandidateSnapshotError("opening candidate snapshot run mismatch")
@@ -408,6 +417,8 @@ def validate_opening_candidate_snapshot(
     except CandidateSnapshotContractError as exc:
         raise OpeningCandidateSnapshotError(str(exc)) from exc
     if mode_fields["scan_mode"] == "experience":
+        if item.get("schema_version") == OPENING_BROKER_SNAPSHOT_SCHEMA:
+            raise OpeningCandidateSnapshotError("broker snapshot requires standard mode")
         from src.application.experience_candidate_snapshot import (
             ExperienceCandidateSnapshotError,
             validate_experience_candidate_owner,
@@ -436,19 +447,24 @@ def validate_opening_candidate_snapshot(
     _timestamp(item.get("sealed_at_utc"))
     if item.get("opening_status") not in OPENING_STATUSES:
         raise OpeningCandidateSnapshotError("opening candidate snapshot status is invalid")
+    broker_snapshot = item["schema_version"] == OPENING_BROKER_SNAPSHOT_SCHEMA
+    if broker_snapshot:
+        if item.get("broker_id") != "longbridge" or "futu_account_id" in item:
+            raise OpeningCandidateSnapshotError("broker snapshot identity is invalid")
+        identity = {"status": item.get("capacity_authority_status"),
+                    "schema_version": "physical_account_capacity_authority.v2",
+                    "broker_id": item.get("broker_id"), "broker_account_id": item.get("broker_account_id"),
+                    "source": "longbridge",
+                    **{key: item.get(key) for key in ("credential_binding_sha256", "binding_method", "broker_echoed")}}
+    else:
+        if item.get("broker_id", "futu") != "futu" or "broker_account_id" in item:
+            raise OpeningCandidateSnapshotError("legacy snapshot identity is invalid")
+        identity = {"futu_account_id": item.get("futu_account_id"), "source": "opend"}
     authority = _physical_account(
-        {
-            "status": "available",
-            "logical_account": item.get("account"),
-            "futu_account_id": item.get("futu_account_id"),
-            "trd_env": item.get("trade_env"),
-            "market": item.get("market"),
-            "source": "opend",
-        },
-        account=expected_account,
-        market=_market(item.get("market")),
+        {"status": "available", **identity, "logical_account": item.get("account"),
+         "trd_env": item.get("trade_env"), "market": item.get("market")},
+        account=expected_account, market=_market(item.get("market")),
     )
-    _ = authority
     dependencies = _dependencies(item.get("dependencies") or [])
     if _dependency_hash(dependencies, "required_data") != item.get(
         "required_data_manifest_sha256"
@@ -495,6 +511,8 @@ def validate_opening_candidate_snapshot(
             [dict(row.get("normalized_input") or {}) for row in decisions if row.get("strategy_mode") == strategy_mode],
             mode=_mode(strategy_mode), account=expected_account, market=_market(item.get("market")),
         )
+    if broker_snapshot and authority["status"] != "available" and ranked:
+        raise OpeningCandidateSnapshotError("unavailable broker authority cannot admit candidates")
     candidate_ids = [str(row.get("candidate_id") or "") for row in decisions]
     if any(not value for value in candidate_ids) or len(candidate_ids) != len(set(candidate_ids)):
         raise OpeningCandidateSnapshotError("opening candidate identities are invalid")
@@ -509,6 +527,8 @@ def validate_opening_candidate_snapshot(
         # candidate-id record for read-only ranked projections. New seals use
         # the complete opening_candidate_decision.v1 contract below.
         if decision.get("schema_version") != "opening_candidate_decision.v1":
+            if broker_snapshot:
+                raise OpeningCandidateSnapshotError("broker snapshot requires complete candidate decisions")
             continue
         mode = _mode(decision.get("strategy_mode"))
         normalized = decision.get("normalized_input")
@@ -542,7 +562,7 @@ def validate_opening_candidate_snapshot(
             )
         if candidate_id != _bound_candidate_id(
             account=expected_account,
-            futu_account_id=str(item.get("futu_account_id") or ""),
+            authority=authority,
             market=_market(item.get("market")),
             mode=mode,
             normalized=normalized,
@@ -995,7 +1015,7 @@ def _snapshot_decisions(
     *,
     statuses: Iterable[Mapping[str, Any]],
     account: str,
-    futu_account_id: str,
+    authority: Mapping[str, Any],
     market: str,
     risk_policy_hash: str,
     candidate_evaluations: (
@@ -1105,7 +1125,7 @@ def _snapshot_decisions(
                 )
             candidate_id = _bound_candidate_id(
                 account=account,
-                futu_account_id=futu_account_id,
+                authority=authority,
                 market=market,
                 mode=mode,
                 normalized=normalized,
@@ -1135,7 +1155,7 @@ def _ranked_candidates(
     modes: list[str],
     decision_index: Mapping[tuple[str, str, str, str], Mapping[str, Any]],
     account: str,
-    futu_account_id: str,
+    authority: Mapping[str, Any],
     market: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     combined: list[dict[str, Any]] = []
@@ -1184,7 +1204,7 @@ def _ranked_candidates(
                 )
             candidate_id = _bound_candidate_id(
                 account=account,
-                futu_account_id=futu_account_id,
+                authority=authority,
                 market=market,
                 mode=mode,
                 normalized=ranked_row,
@@ -1231,7 +1251,9 @@ def _strategy_results(
             mode=mode,
         )
         partial_reasons = _CLEAN_NO_CANDIDATE_REASONS | {"partial_data"}
-        if counts:
+        if authority.get("broker_id") == "longbridge" and authority.get("status") != "available":
+            status = "data_unavailable"
+        elif counts:
             # Fully evaluated candidates remain usable when another symbol is
             # blocked. Scope completeness is reported separately.
             status = "candidates_found"
@@ -1525,21 +1547,38 @@ def _physical_account(
     authority_status = str(item.get("status") or "").strip().lower()
     if authority_status not in {"available", "unavailable"}:
         raise OpeningCandidateSnapshotError("physical account authority status is invalid")
-    if str(item.get("source") or "").lower() != "opend":
-        raise OpeningCandidateSnapshotError("physical OpenD account authority is unavailable")
+    broker = item.get("broker_id", "futu")
+    if broker == "longbridge":
+        binding = broker_capacity_binding({"portfolio_source_name": broker, "capacity_authority": item})
+        if (
+            item.get("source") != "longbridge"
+            or item.get("schema_version") != "physical_account_capacity_authority.v2"
+            or "futu_account_id" in item
+            or (authority_status == "available" and not binding)
+        ):
+            raise OpeningCandidateSnapshotError("physical broker account authority is unavailable")
+        # Missing proof is publishable diagnostic evidence, never usable capacity.
+        account_id = item.get("broker_account_id")
+        if authority_status == "available" or account_id is not None:
+            account_id = _required_text(account_id, "broker_account_id")
+        identity = {"broker_id": broker, "broker_account_id": account_id}
+    else:
+        if broker != "futu" or str(item.get("source") or "").lower() != "opend":
+            raise OpeningCandidateSnapshotError("physical OpenD account authority is unavailable")
+        identity = {"futu_account_id": _required_text(item.get("futu_account_id"), "futu_account_id")}
+
     if str(item.get("logical_account") or "").lower() != account:
         raise OpeningCandidateSnapshotError("physical account logical binding mismatch")
     authority_market = _market(item.get("market"))
     if authority_market != market:
         raise OpeningCandidateSnapshotError("physical account market binding mismatch")
-    futu_account_id = _required_text(item.get("futu_account_id"), "futu_account_id")
     trd_env = _required_text(item.get("trd_env"), "trade_env").upper()
     if trd_env not in {"REAL", "SIMULATE"}:
         raise OpeningCandidateSnapshotError("physical account trade environment is invalid")
     return {
         **item,
         "logical_account": account,
-        "futu_account_id": futu_account_id,
+        **identity,
         "trd_env": trd_env,
         "market": market,
     }
@@ -1548,16 +1587,20 @@ def _physical_account(
 def _bound_candidate_id(
     *,
     account: str,
-    futu_account_id: str,
+    authority: Mapping[str, Any],
     market: str,
     mode: str,
     normalized: Mapping[str, Any],
 ) -> str:
     return canonical_sha256(
         {
-            "schema": "opening_candidate_identity.v1",
+            **({"schema": "opening_candidate_identity.v2",
+                "broker_id": authority["broker_id"], "broker_account_id": authority["broker_account_id"],
+                "trade_env": authority["trd_env"], "capacity_authority_status": authority["status"],
+                "credential_binding_sha256": authority.get("credential_binding_sha256")}
+               if authority.get("broker_id") == "longbridge"
+               else {"schema": "opening_candidate_identity.v1", "futu_account_id": authority["futu_account_id"]}),
             "account": account,
-            "futu_account_id": futu_account_id,
             "market": market,
             "strategy_mode": mode,
             "symbol": str(normalized.get("symbol") or "").upper(),

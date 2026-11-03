@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import math
@@ -18,8 +19,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from src.application import plugin_distribution, runtime_bundle
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.file_locks import single_instance_lock
+from src.application.plugin_runtime import PLUGINS, read_managed_plugin
+
 from src.application.release_target import compare_versions, parse_version, resolve_upgrade_target
 from src.application.runtime_config_freshness import (
     GENERATED_KEY,
@@ -33,6 +37,8 @@ from src.application.service_drift import (
     service_drift,
 )
 from src.infrastructure.io_utils import parse_last_json_obj
+
+PROVIDER_PLUGINS = ("market-opend", "broker-futu", "broker-longbridge")
 
 _CHILD_ENV_PASSTHROUGH_NAMES = {
     "ANTHROPIC_API_KEY",
@@ -679,6 +685,23 @@ def _version_check_for_upgrade(
             "error": str(exc),
             "source": "release_target",
         }
+    if _is_runtime_bundle(repo_root):
+        try:
+            manifest = runtime_bundle.load_manifest(repo_root, expected_platform=runtime_bundle.current_platform())
+            if target_version:
+                release = runtime_bundle.resolve_release(_tag_text(target_version), repository=manifest["repository"])
+                tag = release["tag_name"]
+                latest = _version_text(tag)
+                return {"ok": True, "current_version": current_version, "latest_version": latest,
+                        "release_tag": tag, "selected_tag": tag, "update_available": compare_versions(current_version, latest) < 0,
+                        "source": "runtime_bundle", "target_source": "runtime_bundle", "checked_at": utc_now_iso(now_fn)}
+            from src.application.version_check import check_version_update
+            return {**check_version_update(base_dir=repo_root, remote_name=remote_name, run_cmd=run_cmd, now_fn=now_fn),
+                    "source": "runtime_bundle", "target_source": "runtime_bundle"}
+        except (runtime_bundle.RuntimeBundleError, OSError, ValueError) as exc:
+            return {"ok": False, "current_version": current_version, "latest_version": None,
+                    "update_available": False, "error": str(exc), "source": "runtime_bundle",
+                    "message": "版本检查失败：运行包发布信息不可用"}
     try:
         remote_url = (
             _cache_remote_url(cache_root=cache_root, remote_name="origin", run_cmd=run_cmd)
@@ -795,6 +818,25 @@ def _materialize_release_from_git_cache(
     return out
 
 
+def _materialize_runtime_bundle(*, current_dir: Path, tag: str, target_dir: Path) -> dict[str, Any]:
+    manifest = runtime_bundle.load_manifest(current_dir, expected_platform=runtime_bundle.current_platform())
+    if target_dir.exists():
+        runtime_bundle.load_manifest(target_dir, expected_tag=tag, expected_platform=manifest["platform"], verify_files=True)
+        return {"method": "reuse_existing_runtime_bundle", "target_dir": str(target_dir), "tag": tag}
+    release = runtime_bundle.resolve_release(tag, repository=manifest["repository"])
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".om-upgrade-bundle-", dir=target_dir.parent) as temporary:
+        stage = Path(temporary)
+        archive = runtime_bundle.download_bundle(release, stage / "bundle.tar.gz", platform_name=manifest["platform"])
+        unpacked = stage / "release"
+        runtime_bundle.materialize_bundle(archive, unpacked, expected_tag=tag, expected_platform=manifest["platform"])
+        result = runtime_bundle.validate_runtime(unpacked)
+        if result.get("ok") is not True:
+            raise RuntimePrepareError("bundled runtime validation failed", runtime_prepare=result)
+        os.rename(unpacked, target_dir)
+    return {"method": "runtime_bundle", "target_dir": str(target_dir), "tag": tag, "platform": manifest["platform"]}
+
+
 def _major_upgrade_blocked(*, current_version: str, target_version: str, allow_major: bool) -> bool:
     if allow_major:
         return False
@@ -823,8 +865,12 @@ def _restart_services_from_loaded_profile(
         return []
     provider = str(profile.get("service_provider") or "").strip().lower()
     restarted: list[str] = []
-    if provider != "systemd":
+    if provider == "launchd":
+        # The target drift owner has already booted out and reloaded every loaded
+        # job. A second kickstart would rerun scheduled financial jobs.
         return restarted
+    if provider != "systemd":
+        raise ServiceTransitionError("unsupported service provider", status="unsupported_service_provider", remediation=[])
     command_prefix, command_source = _restart_command_policy(profile)
     failed: list[str] = []
     command_by_service: dict[str, list[str]] = {}
@@ -860,14 +906,34 @@ def _post_upgrade_service_health(
     if not profile:
         return {"ok": True, "status": "skipped", "reason": "service_profile_missing", "checks": [], "failed_checks": []}
     provider = str(profile.get("service_provider") or "").strip().lower()
-    if provider != "systemd":
-        return {"ok": True, "status": "skipped", "reason": f"unsupported_provider:{provider or 'missing'}", "checks": [], "failed_checks": []}
+    if provider not in {"systemd", "launchd"}:
+        return {"ok": False, "status": "unsupported", "reason": f"unsupported_provider:{provider or 'missing'}", "checks": [], "failed_checks": []}
 
     services = _restart_service_names(profile)
     checks: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
+    if provider == "launchd":
+        from src.application.service_lifecycle import launchd_upgrade_state
+        try:
+            observed = launchd_upgrade_state(profile=profile, repo_root=repo_root,
+                runtime_root=Path(profile["runtime_root"]), run_cmd=run_cmd)
+            expected = profile.get("_launchd_expected_states") or {}
+            for unit in observed["units"]:
+                name = unit["name"]
+                row = observed["states"][name]
+                wanted = expected.get(name)
+                valid = (row["state"] != "loaded-not-running"
+                         and Path(unit["path"]).read_bytes() == unit["content"].encode())
+                if wanted:
+                    valid = valid and ((row["state"] == "absent") == (wanted["state"] == "absent")) and row["enabled"] == wanted["enabled"]
+                checks.append({"service": name, "check": "launchd-definition-activation", "ok": valid})
+            failed.extend(row for row in checks if not row["ok"])
+            services = [unit["name"] for unit in observed["units"] if observed["states"][unit["name"]]["state"] == "running"]
+        except (AgentToolError, OSError, ValueError) as exc:
+            return {"ok": False, "status": "error", "provider": provider, "checks": [],
+                    "failed_checks": [{"check": "launchd-readback", "ok": False, "error": str(exc)}]}
 
-    for service_name in services:
+    for service_name in (services if provider == "systemd" else []):
         for action in ("is-active", "is-enabled"):
             command = ["systemctl", action, service_name]
             result = _run_command(command, cwd=None, run_cmd=run_cmd, timeout=30)
@@ -951,16 +1017,17 @@ def _post_upgrade_service_health(
         if not public["ok"]:
             failed.append(public)
 
-    if "options-monitor-feishu-ws.service" in services:
+    feishu_service = "com.options-monitor.feishu-ws" if provider == "launchd" else "options-monitor-feishu-ws.service"
+    if feishu_service in services:
         command = _feishu_ws_check_command(profile=profile, repo_root=repo_root)
         env = _child_env_from_profile(profile)
         result = _run_command(command, cwd=repo_root, run_cmd=run_cmd, env=env, timeout=60)
         result["operation"] = "post_upgrade_service_health"
         result["check"] = "feishu-ws-check"
-        result["service"] = "options-monitor-feishu-ws.service"
+        result["service"] = feishu_service
         operations.append(result)
         public = {
-            "service": "options-monitor-feishu-ws.service",
+            "service": feishu_service,
             "check": "feishu-ws-check",
             "ok": bool(result.get("ok")),
             "stdout": str(result.get("stdout") or "").strip(),
@@ -970,16 +1037,17 @@ def _post_upgrade_service_health(
         if not result.get("ok"):
             failed.append(public)
 
-    if "options-monitor-wechat-clawbot.service" in services:
+    wechat_service = "com.options-monitor.wechat-clawbot" if provider == "launchd" else "options-monitor-wechat-clawbot.service"
+    if wechat_service in services:
         command = _wechat_clawbot_check_command(profile=profile, repo_root=repo_root)
         env = _child_env_from_profile(profile)
         result = _run_command(command, cwd=repo_root, run_cmd=run_cmd, env=env, timeout=60)
         result["operation"] = "post_upgrade_service_health"
         result["check"] = "wechat-clawbot-check"
-        result["service"] = "options-monitor-wechat-clawbot.service"
+        result["service"] = wechat_service
         operations.append(result)
         public = {
-            "service": "options-monitor-wechat-clawbot.service",
+            "service": wechat_service,
             "check": "wechat-clawbot-check",
             "ok": bool(result.get("ok")),
             "stdout": str(result.get("stdout") or "").strip(),
@@ -1146,7 +1214,10 @@ def _service_health_remediation(
         if service_name.endswith(".service"):
             remediation.append(f"manual_enable: sudo systemctl enable --now {service_name}")
             remediation.append(f"manual_restart: sudo systemctl restart {service_name}")
-    if any(item.get("check") == "feishu-ws-check" for item in failed_checks):
+    if any(item.get("check") == "feishu-ws-check" for item in failed_checks) and (profile or {}).get("service_provider") == "launchd":
+        command = _feishu_ws_check_command(profile=profile or {}, repo_root=repo_root or Path((profile or {}).get("repo_root") or "."))
+        remediation.append("manual_check: " + shlex.join(command))
+    elif any(item.get("check") == "feishu-ws-check" for item in failed_checks):
         env_file = str((profile or {}).get("env_file") or "").strip()
         if env_file:
             command = f"manual_check: sudo -n ./om inbound feishu-ws --check --env-file {shlex.quote(env_file)}"
@@ -1284,6 +1355,14 @@ def capture_preserved_timer_activation_states(
     profile: dict[str, Any],
     run_cmd: Callable[..., Any] = subprocess.run,
 ) -> dict[str, dict[str, str]]:
+    if profile.get("service_provider") == "launchd":
+        from src.application.service_lifecycle import launchd_upgrade_state
+        try:
+            observed = launchd_upgrade_state(profile=profile, repo_root=repo_root,
+                                            runtime_root=runtime_root, run_cmd=run_cmd)
+        except (AgentToolError, OSError, ValueError) as exc:
+            raise ServiceTransitionError(str(exc), status="service_activation_snapshot_failed", remediation=["inspect launchd identity, definitions and manager state before retrying"]) from exc
+        return {name: {"state": row["state"], "enabled": row["enabled"]} for name, row in observed["states"].items()}
     observed = service_drift(
         repo_root=repo_root,
         runtime_root=runtime_root,
@@ -1844,11 +1923,29 @@ def _command_error(result: dict[str, Any]) -> str:
     return f"{command}: {detail}" if command else detail
 
 
-def _pip_install_commands(venv_python: Path) -> list[tuple[list[str], int]]:
-    return [
+def _pip_install_commands(
+    venv_python: Path, *, include_pm: bool = False, include_longbridge: bool = False,
+    include_position_advice: bool = False,
+    include_feishu: bool = False,
+    include_wechat: bool = False,
+    provider_plugins: tuple[str, ...] = (),
+) -> list[tuple[list[str], int]]:
+    commands = [
         ([str(venv_python), "-m", "pip", "install", "-U", "pip"], 600),
         ([str(venv_python), "-m", "pip", "install", "-r", "requirements.txt", "-c", "constraints.txt"], 1200),
     ]
+    if include_pm:
+        commands.append(([str(venv_python), "-m", "pip", "install", "./plugins/portfolio-management"], 600))
+    if include_position_advice:
+        commands.append(([str(venv_python), "-m", "pip", "install", "./plugins/position-advice"], 600))
+    for selected, package in ((include_feishu, "feishu-channel"), (include_wechat, "wechat-channel")):
+        if selected:
+            commands.append(([str(venv_python), "-m", "pip", "install", f"./plugins/{package}"], 600))
+    for plugin_id in provider_plugins:
+        commands.append(([str(venv_python), "-m", "pip", "install", "./plugins/" + PLUGINS[plugin_id]["source"]], 600))
+    if include_longbridge:
+        commands.append(([str(venv_python), "-m", "pip", "install", "-r", "requirements/longbridge.txt"], 600))
+    return commands
 
 
 def _uv_install_commands(
@@ -1857,6 +1954,12 @@ def _uv_install_commands(
     venv_dir: Path,
     include_server: bool,
     bootstrap_python: str,
+    include_pm: bool = False,
+    include_longbridge: bool = False,
+    include_position_advice: bool = False,
+    include_feishu: bool = False,
+    include_wechat: bool = False,
+    provider_plugins: tuple[str, ...] = (),
 ) -> list[tuple[list[str], int]]:
     commands: list[tuple[list[str], int]] = [
         (["uv", "venv", "--python", bootstrap_python, str(venv_dir)], 300),
@@ -1879,6 +1982,19 @@ def _uv_install_commands(
                 1200,
             )
         )
+    if include_pm:
+        commands.append((["uv", "pip", "install", "-p", str(venv_python), "./plugins/portfolio-management"], 600))
+    if include_position_advice:
+        commands.append((["uv", "pip", "install", "-p", str(venv_python), "./plugins/position-advice"], 600))
+    for selected, package in ((include_feishu, "feishu-channel"), (include_wechat, "wechat-channel")):
+        if selected:
+            commands.append((["uv", "pip", "install", "-p", str(venv_python), f"./plugins/{package}"], 600))
+    for plugin_id in provider_plugins:
+        commands.append((["uv", "pip", "install", "-p", str(venv_python), "./plugins/" + PLUGINS[plugin_id]["source"]], 600))
+    if include_longbridge:
+        commands.append(([
+            "uv", "pip", "install", "-p", str(venv_python), "-r", "requirements/longbridge.txt",
+        ], 600))
     return commands
 
 
@@ -1910,13 +2026,23 @@ def _run_pip_runtime_prepare(
     commands: list[list[str]],
     env: dict[str, str],
     bootstrap_python: str,
+    include_pm: bool = False,
+    include_longbridge: bool = False,
+    include_position_advice: bool = False,
+    include_feishu: bool = False,
+    include_wechat: bool = False,
+    provider_plugins: tuple[str, ...] = (),
 ) -> None:
     if not venv_python.exists():
         command = [bootstrap_python, "-m", "venv", str(venv_dir)]
         _run_required(command, cwd=target_dir, run_cmd=run_cmd, operations=operations, env=env, timeout=300)
         operations[-1]["runtime_prepare_installer"] = "pip"
         commands.append(command)
-    pip_commands = _pip_install_commands(venv_python)
+    pip_commands = _pip_install_commands(
+        venv_python, include_pm=include_pm, include_longbridge=include_longbridge,
+        include_position_advice=include_position_advice,
+        include_feishu=include_feishu, include_wechat=include_wechat, provider_plugins=provider_plugins,
+    )
     if include_server:
         pip_commands.append(
             (
@@ -1951,7 +2077,14 @@ def _check_uv_available(*, target_dir: Path, run_cmd: Callable[..., Any], operat
     return bool(result.get("ok"))
 
 
+def _is_runtime_bundle(root: Path) -> bool:
+    return (root / "om.runtime.json").exists() or (root / "runtime").exists()
+
+
 def _release_python(target_dir: Path) -> Path:
+    if _is_runtime_bundle(target_dir):
+        manifest = runtime_bundle.load_manifest(target_dir)
+        return target_dir / manifest["python"]["executable"]
     return target_dir / ".venv" / "bin" / "python"
 
 
@@ -1965,15 +2098,28 @@ def _ensure_bot_runtime(
     operations: list[dict[str, Any]],
 ) -> dict[str, Any]:
     readiness = _runtime_readiness(release_dir=target_dir)
-    _run_required([str(target_dir / ".venv/bin/python"), "-c",
+    _run_required([str(_release_python(target_dir)), "-c",
                    "import src.application.bot.host; import src.application.bot.runtime"],
                   cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=30)
     return readiness
 
 
-def _dependency_context(*, include_server: bool, python_spec: str, installer_mode: str) -> dict[str, Any]:
+def _dependency_context(
+    *, include_server: bool, python_spec: str, installer_mode: str,
+    include_pm: bool = False, include_longbridge: bool = False,
+    include_position_advice: bool = False,
+    include_feishu: bool = False,
+    include_wechat: bool = False,
+    provider_plugins: tuple[str, ...] = (),
+) -> dict[str, Any]:
     return {
         "include_server": bool(include_server),
+        **({"include_pm": True} if include_pm else {}),
+        **({"include_position_advice": True} if include_position_advice else {}),
+        **({"include_longbridge": True} if include_longbridge else {}),
+        **({"include_feishu": True} if include_feishu else {}),
+        **({"include_wechat": True} if include_wechat else {}),
+        **({"provider_plugins": sorted(provider_plugins)} if provider_plugins else {}),
         "installer_mode": installer_mode,
         "python_implementation": sys.implementation.name,
         "python_spec": python_spec,
@@ -1990,6 +2136,12 @@ def _dependency_hash(
     include_server: bool,
     python_spec: str | None = None,
     installer_mode: str = "auto",
+    include_pm: bool = False,
+    include_longbridge: bool = False,
+    include_position_advice: bool = False,
+    include_feishu: bool = False,
+    include_wechat: bool = False,
+    provider_plugins: tuple[str, ...] = (),
 ) -> str:
     digest = hashlib.sha256()
     selected_python_spec = python_spec or f"{sys.version_info.major}.{sys.version_info.minor}"
@@ -1997,10 +2149,18 @@ def _dependency_hash(
         include_server=include_server,
         python_spec=selected_python_spec,
         installer_mode=installer_mode,
+        include_pm=include_pm,
+        include_longbridge=include_longbridge,
+        include_position_advice=include_position_advice,
+        include_feishu=include_feishu, include_wechat=include_wechat, provider_plugins=provider_plugins,
     )
     digest.update(json.dumps(context, sort_keys=True).encode("utf-8"))
     digest.update(b"\n")
-    for path in _dependency_files(target_dir, include_server=include_server):
+    for path in _dependency_files(
+        target_dir, include_server=include_server, include_pm=include_pm, include_longbridge=include_longbridge,
+        include_position_advice=include_position_advice,
+        include_feishu=include_feishu, include_wechat=include_wechat, provider_plugins=provider_plugins,
+    ):
         try:
             rel = path.relative_to(target_dir)
             label = rel.as_posix()
@@ -2015,7 +2175,13 @@ def _dependency_hash(
     return digest.hexdigest()[:16]
 
 
-def _dependency_files(target_dir: Path, *, include_server: bool) -> list[Path]:
+def _dependency_files(
+    target_dir: Path, *, include_server: bool, include_pm: bool = False, include_longbridge: bool = False,
+    include_position_advice: bool = False,
+    include_feishu: bool = False,
+    include_wechat: bool = False,
+    provider_plugins: tuple[str, ...] = (),
+) -> list[Path]:
     roots = [target_dir / "requirements.txt", target_dir / "constraints.txt"]
     if include_server:
         roots.extend(
@@ -2024,6 +2190,8 @@ def _dependency_files(target_dir: Path, *, include_server: bool) -> list[Path]:
                 target_dir / "constraints" / "server.txt",
             ]
         )
+    if include_longbridge:
+        roots.append(target_dir / "requirements/longbridge.txt")
     seen: set[Path] = set()
     ordered: list[Path] = []
 
@@ -2042,6 +2210,15 @@ def _dependency_files(target_dir: Path, *, include_server: bool) -> list[Path]:
 
     for root in roots:
         visit(root)
+    for selected, name in (
+        (include_pm, "portfolio-management"), (include_position_advice, "position-advice"),
+        (include_feishu, "feishu-channel"), (include_wechat, "wechat-channel"),
+        *((True, PLUGINS[key]["source"]) for key in provider_plugins),
+    ):
+        if selected:
+            package = target_dir / "plugins" / name
+            ordered.append(package / "pyproject.toml")
+            ordered.extend(sorted((package / "src").rglob("*.py")))
     return ordered
 
 
@@ -2125,14 +2302,526 @@ def _link_release_venv(*, target_dir: Path, shared_venv: Path) -> None:
     release_venv.symlink_to(shared_venv, target_is_directory=True)
 
 
+def _installed_optional_packages(
+    *, previous_dir: Path, run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> tuple[bool, bool, bool]:
+    python = _release_python(previous_dir)
+    if not python.exists():
+        return False, False, False
+    # Query this instance, without importing the plugin or inheriting PYTHONPATH.
+    code = (
+        "import importlib.metadata as m, json\n"
+        "installed = []\n"
+        "for name in ('om-pm-plugin', 'longbridge', 'om-position-advice-plugin'):\n"
+        "    try: m.distribution(name)\n"
+        "    except m.PackageNotFoundError: installed.append(False)\n"
+        "    else: installed.append(True)\n"
+        "print(json.dumps(installed))\n"
+    )
+    result = _run_required(
+        [str(python), "-I", "-c", code], cwd=previous_dir,
+        run_cmd=run_cmd, operations=operations, timeout=30,
+    )
+    try:
+        installed = json.loads(result["stdout"])
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("could not determine installed optional packages in current runtime") from exc
+    if not isinstance(installed, list) or len(installed) != 3 or any(type(item) is not bool for item in installed):
+        raise RuntimeError("current runtime optional package probe did not return three booleans")
+    return installed[0], installed[1], installed[2]
+
+
+def _message_package_selection(
+    *, previous_dir: Path, runtime_root: Path, run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> tuple[bool, bool]:
+    plugin_aware = (previous_dir / "src/application/channels/plugins.py").is_file()
+    legacy = [
+        not plugin_aware and not (previous_dir / f"plugins/{package}/pyproject.toml").is_file()
+        and (previous_dir / implementation).is_file()
+        for package, implementation in (
+            ("feishu-channel", "src/infrastructure/feishu_bot.py"),
+            ("wechat-channel", "src/application/channels/wechat_clawbot/ilink_client.py"),
+        )
+    ]
+    # Releases predating channel implementations carry no channel selection to migrate.
+    if not plugin_aware and not any(legacy) and not any(
+        (previous_dir / f"plugins/{package}/pyproject.toml").is_file()
+        for package in ("feishu-channel", "wechat-channel")
+    ):
+        return False, False
+    python = _release_python(previous_dir)
+    if not python.exists():
+        raise RuntimeError("could not determine installed message packages: current Python is missing")
+    code = (
+        "import importlib.metadata as m, json\n"
+        "installed = []\n"
+        "for name in ('om-feishu-channel-plugin', 'om-wechat-channel-plugin'):\n"
+        "    try: m.distribution(name)\n"
+        "    except m.PackageNotFoundError: installed.append(False)\n"
+        "    else: installed.append(True)\n"
+        "print(json.dumps(installed))\n"
+    )
+    result = _run_required(
+        [str(python), "-I", "-c", code], cwd=previous_dir,
+        run_cmd=run_cmd, operations=operations, timeout=30,
+    )
+    try:
+        installed = json.loads(result["stdout"])
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("could not determine installed message packages in current runtime") from exc
+    if not isinstance(installed, list) or len(installed) != 2 or any(type(item) is not bool for item in installed):
+        raise RuntimeError("current runtime message package probe did not return two booleans")
+    if any(legacy):
+        enabled = _legacy_message_channels_enabled(runtime_root=runtime_root)
+        installed = [present or (builtin and active) for present, builtin, active in zip(installed, legacy, enabled)]
+    return installed[0], installed[1]
+
+
+def _legacy_message_channels_enabled(*, runtime_root: Path) -> tuple[bool, bool]:
+    from src.application.channels.plugins import channel_activity_enabled
+    from domain.domain.multi_tick import resolve_notification_route_from_config
+
+    profile_path = runtime_root / "service.profile.json"
+    try:
+        profile = json.loads(profile_path.read_text()) if profile_path.exists() else {}
+        if not isinstance(profile, dict):
+            raise ValueError("service profile must be an object")
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"could not determine legacy message channels from {profile_path}") from exc
+    paths = {
+        _runtime_config_path_for_market(market=market, runtime_root=runtime_root, profile=profile)
+        for market in _verify_markets(runtime_root=runtime_root, profile=profile)
+    }
+    bot = _bot_config_path_from_profile(profile=profile, runtime_root=runtime_root)
+    if bot:
+        paths.add(Path(bot).expanduser().resolve())
+    configs = []
+    for path in sorted(paths):
+        try:
+            config = json.loads(path.read_text())
+            if not isinstance(config, dict):
+                raise ValueError("runtime config must be an object")
+            configs.append(config)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"could not determine legacy message channels from {path}") from exc
+    enabled = []
+    service_names = {
+        str(item.get("name", "") if isinstance(item, dict) else item)
+        for item in profile.get("services", [])
+    }
+    for channel, profile_key, unit in (
+        ("feishu", "feishu_ws", "feishu-ws"), ("wechat_clawbot", "wechat_clawbot", "wechat-clawbot"),
+    ):
+        section = profile.get(profile_key, {})
+        receive = isinstance(section, dict) and section.get("enabled") is True or bool(
+            service_names & {f"options-monitor-{unit}.service", f"com.options-monitor.{unit}"}
+        )
+        selected_configs = configs
+        if isinstance(section, dict) and section.get("config_key"):
+            selected_path = _runtime_config_path_for_market(
+                market=section["config_key"], runtime_root=runtime_root, profile=profile,
+            )
+            selected_configs = [json.loads(selected_path.read_text())]
+        active = receive and (not selected_configs or any(
+            channel_activity_enabled(config, channel, activity="receive") for config in selected_configs
+        ))
+        active = active or any(
+            "channels" in config and channel_activity_enabled(config, channel, activity="receive")
+            for config in configs
+        )
+        for config in configs:
+            notifications = config.get("notifications", {})
+            if not isinstance(notifications, dict):
+                raise RuntimeError("could not determine legacy message channels: notifications must be an object")
+            if "enabled" in notifications and type(notifications["enabled"]) is not bool:
+                raise RuntimeError("could not determine legacy message channels: notifications.enabled must be a boolean")
+            if not notifications.get("enabled", True):
+                continue
+            # Only a declared notification section carries legacy outbound intent.
+            if not notifications:
+                continue
+            provider = resolve_notification_route_from_config(config=config)["provider"]
+            if provider == ("feishu_app" if channel == "feishu" else "wechat_clawbot"):
+                legacy_config = {**config, "notifications": {**notifications,
+                    "enabled": notifications.get("enabled", True)}}
+                active = active or channel_activity_enabled(legacy_config, channel, activity="notify")
+        enabled.append(bool(active))
+    return enabled[0], enabled[1]
+
+
+def _validate_message_runtime(
+    *, target_dir: Path, include_feishu: bool, include_wechat: bool,
+    run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> None:
+    if not any((include_feishu, include_wechat)) and not (
+        target_dir / "src/application/channels/plugins.py"
+    ).is_file():
+        return
+    code = (
+        "import importlib.metadata as m, json, sys, tomllib\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "from src.application.channels.plugins import load_channel_plugin\n"
+        "for channel, package, name, selected in (\n"
+        "    ('feishu', 'feishu-channel', 'om-feishu-channel-plugin', json.loads(sys.argv[2])),\n"
+        "    ('wechat_clawbot', 'wechat-channel', 'om-wechat-channel-plugin', json.loads(sys.argv[3]))):\n"
+        "    try: dist = m.distribution(name)\n"
+        "    except m.PackageNotFoundError: dist = None\n"
+        "    if selected:\n"
+        "        assert dist is not None, name + ' lost during upgrade'\n"
+        "        spec = tomllib.loads((Path(sys.argv[1]) / 'plugins' / package / 'pyproject.toml').read_text())\n"
+        "        assert dist.version == spec['project']['version'], name + ' version differs from target release'\n"
+        "        load_channel_plugin(channel)\n"
+        "        if channel == 'feishu':\n"
+        "            load_channel_plugin(channel, module='bot')\n"
+        "            load_channel_plugin(channel, module='ws_client')\n"
+        "            import lark_oapi\n"
+        "        else: load_channel_plugin(channel, module='ilink_client')\n"
+        "    else:\n"
+        "        assert dist is None, name + ' unexpectedly installed in cached runtime'\n"
+    )
+    _run_required(
+        [str(_release_python(target_dir)), "-I", "-c", code, str(target_dir),
+         json.dumps(include_feishu), json.dumps(include_wechat)],
+        cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=30,
+    )
+
+
+def _provider_catalog_supported(release_dir: Path) -> bool:
+    path = release_dir / "src/application/plugin_runtime.py"
+    if not path.is_file():
+        return False
+    try:
+        tree = ast.parse(path.read_text())
+        value = next(node.value for node in tree.body if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == "PLUGINS" for target in node.targets))
+        catalog = ast.literal_eval(value)
+        present = set(PROVIDER_PLUGINS) & set(catalog)
+        if not present:
+            legacy = set(PLUGINS) - set(PROVIDER_PLUGINS)
+            if set(catalog) != legacy or any(
+                any(catalog[key].get(field) != PLUGINS[key][field] for field in ("distribution", "module"))
+                for key in legacy
+            ):
+                raise ValueError("unrecognized legacy plugin catalog")
+            return False
+        if present != set(PROVIDER_PLUGINS) or any(
+            any(catalog[key].get(field) != PLUGINS[key][field] for field in ("distribution", "module"))
+            for key in PROVIDER_PLUGINS
+        ):
+            raise ValueError("incomplete provider catalog")
+        return True
+    except (OSError, ValueError, SyntaxError, StopIteration, TypeError, AttributeError) as exc:
+        raise RuntimeError(f"could not determine provider package support from {path}") from exc
+
+
+def _provider_upgrade_selection(
+    *, previous_dir: Path, target_dir: Path, runtime_root: Path, managed: list[str],
+    run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> tuple[list[str], tuple[str, ...]]:
+    if not _provider_catalog_supported(target_dir):
+        return managed, ()
+    if _provider_catalog_supported(previous_dir):
+        code = (
+            "import importlib.metadata as m,json\n"
+            "selected=[]\n"
+            f"for key,name in {[(key, PLUGINS[key]['distribution']) for key in PROVIDER_PLUGINS]!r}:\n"
+            "    try: m.distribution(name)\n"
+            "    except m.PackageNotFoundError: pass\n"
+            "    else: selected.append(key)\n"
+            "print(json.dumps(selected))\n"
+        )
+        result = _run_required([str(_release_python(previous_dir)), "-I", "-c", code],
+                               cwd=previous_dir, run_cmd=run_cmd, operations=operations, timeout=30)
+        try:
+            selected = json.loads(result["stdout"])
+            if (not isinstance(selected, list) or any(key not in PROVIDER_PLUGINS for key in selected)
+                    or len(set(selected)) != len(selected)):
+                raise ValueError("invalid provider selection")
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError("could not determine installed provider packages in current runtime") from exc
+        pip_selected = tuple(key for key in selected if key not in managed)
+        if "market-opend" not in {*managed, *pip_selected}:
+            raise RuntimeError("current runtime has no market package; use om plugins install market-opend --confirm")
+        return managed, pip_selected
+
+    from src.application.account_config import accounts_from_config, resolve_account_type
+
+    selected = {"market-opend"}
+    profile = _load_service_profile(runtime_root)
+    markets = _verify_markets(runtime_root=runtime_root, profile=profile)
+    if not markets:
+        raise RuntimeError("could not determine legacy broker selection: no effective runtime configs")
+    for market in markets:
+        path = _runtime_config_path_for_market(market=market, runtime_root=runtime_root, profile=profile)
+        try:
+            config = json.loads(path.read_text())
+            if not isinstance(config, dict):
+                raise ValueError("runtime config must be an object")
+            for account in accounts_from_config(config):
+                selected.add("broker-" + resolve_account_type(config, account=account))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"could not determine legacy broker selection from {path}") from exc
+    return list(dict.fromkeys([*managed, *(key for key in PROVIDER_PLUGINS if key in selected)])), ()
+
+
+def _validate_provider_runtime(
+    *, target_dir: Path, selected: tuple[str, ...], run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> None:
+    if not _provider_catalog_supported(target_dir):
+        return
+    code = (
+        "import importlib.metadata as m,json,sys,tomllib\n"
+        "from pathlib import Path\n"
+        "sys.dont_write_bytecode=True\n"
+        "sys.path.insert(0,sys.argv[1])\n"
+        "from src.application.plugin_runtime import PLUGINS,validate_plugin_import\n"
+        f"for key in {PROVIDER_PLUGINS!r}:\n"
+        "    item=PLUGINS[key]\n"
+        "    try: dist=m.distribution(item['distribution'])\n"
+        "    except m.PackageNotFoundError: dist=None\n"
+        "    if key in json.loads(sys.argv[2]):\n"
+        "        assert dist is not None, key+' lost during upgrade'\n"
+        "        project=Path(sys.argv[1])/'plugins'/item['source']/'pyproject.toml'\n"
+        "        assert dist.version == tomllib.loads(project.read_text())['project']['version'], key+' version mismatch'\n"
+        "        validate_plugin_import(key)\n"
+        "    else: assert dist is None, key+' unexpectedly installed in cached runtime'\n"
+    )
+    _run_required([str(_release_python(target_dir)), "-I", "-c", code, str(target_dir), json.dumps(selected)],
+                  cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=30)
+
+
+def _validate_rollback_pip_providers(
+    *, target_dir: Path, managed: list[str], run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> None:
+    if not _provider_catalog_supported(target_dir):
+        return
+    # Inspect the target environment itself; rollback never reconstructs or installs a selection.
+    code = (
+        "import importlib.metadata as m,json,sys\n"
+        "sys.dont_write_bytecode=True\n"
+        "sys.path.insert(0,sys.argv[1])\n"
+        "from src.application.plugin_runtime import PLUGINS,plugin_installed,validate_plugin_import\n"
+        "managed=json.loads(sys.argv[2])\n"
+        "market=any(PLUGINS[key].get('kind')=='market' for key in managed)\n"
+        f"for key in {PROVIDER_PLUGINS!r}:\n"
+        "    if key in managed: continue\n"
+        "    try: m.distribution(PLUGINS[key]['distribution'])\n"
+        "    except m.PackageNotFoundError: continue\n"
+        "    assert plugin_installed(key), key+' unavailable or incompatible in rollback target'\n"
+        "    validate_plugin_import(key)\n"
+        "    market=market or PLUGINS[key].get('kind')=='market'\n"
+        "assert market, 'rollback target has no valid market package; use om plugins install market-opend --confirm'\n"
+    )
+    _run_required([str(_release_python(target_dir)), "-I", "-c", code, str(target_dir), json.dumps(managed)],
+                  cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=30)
+
+
+def _managed_plugin_selection(release_dir: Path) -> list[str]:
+    selected = []
+    for plugin_id in PLUGINS:
+        try:
+            if read_managed_plugin(release_dir, plugin_id) is not None:
+                selected.append(plugin_id)
+        except ValueError as exc:
+            raise ServiceTransitionError(
+                f"invalid managed plugin {plugin_id} in {release_dir}: {exc}",
+                status="managed_plugin_invalid",
+            ) from exc
+    return selected
+
+
+def _preserve_managed_plugins(
+    *, target_dir: Path, selected: list[str], run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> None:
+    # A failed earlier attempt must not resurrect a subsequently removed plugin.
+    unexpected = set(_managed_plugin_selection(target_dir)) - set(selected)
+    if unexpected:
+        raise ServiceTransitionError(
+            "target release has unselected managed plugins: " + ", ".join(sorted(unexpected))
+            + "; remove them explicitly from the target release before retrying",
+            status="managed_plugin_selection_mismatch",
+        )
+    for plugin_id in selected:
+        result = plugin_distribution.install_plugin(
+            plugin_id, repo_root=target_dir, confirm=True, python_executable=_release_python(target_dir),
+        )
+        operations.append({"operation": "preserve_managed_plugin", **result})
+    _validate_target_managed_plugins(
+        target_dir=target_dir, selected=selected, run_cmd=run_cmd, operations=operations,
+    )
+
+
+def _validate_target_managed_plugins(
+    *, target_dir: Path, selected: list[str], run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> None:
+    if not selected:
+        return
+    # Exercise the target's ordinary finder/loaders, not the previous store or staged import path.
+    code = (
+        "import importlib, json, sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import src\n"
+        "from src.application import plugin_runtime\n"
+        "from src.application.plugin_runtime import PLUGINS, plugin_store, read_managed_plugin\n"
+        "root = Path(sys.argv[1]).resolve()\n"
+        "version = (root / 'VERSION').read_text().strip()\n"
+        "for plugin_id in json.loads(sys.argv[2]):\n"
+        "    receipt = read_managed_plugin(root, plugin_id)\n"
+        "    assert receipt is not None, 'managed plugin missing from target release'\n"
+        "    assert receipt['version'] == version, 'managed wheel version differs from target OM release'\n"
+        "    module = PLUGINS[plugin_id]['module']\n"
+        "    plugin = importlib.import_module(module)\n"
+        "    expected = plugin_store(root) / plugin_id / 'site' / module / '__init__.py'\n"
+        "    assert Path(plugin.__file__).resolve() == expected.resolve(), 'plugin did not load from target store'\n"
+        "    if hasattr(plugin_runtime, 'validate_plugin_import'):\n"
+        "        plugin_runtime.validate_plugin_import(plugin_id)\n"
+        # Historical rollback targets predate the shared four-plugin validator.
+        "    elif plugin_id == 'pm':\n"
+        "        from src.application.portfolio_management import load_portfolio_management_client_class\n"
+        "        assert callable(load_portfolio_management_client_class())\n"
+        "    elif plugin_id == 'position-advice':\n"
+        "        from domain.domain.close_advice import require_position_advice_plugin\n"
+        "        require_position_advice_plugin()\n"
+        "    else:\n"
+        "        raise ImportError('target release lacks channel plugin validation')\n"
+    )
+    _run_required(
+        [str(_release_python(target_dir)), "-I", "-c", code, str(target_dir), json.dumps(selected)],
+        cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=30,
+    )
+
+
+def _legacy_pm_enabled(*, previous_dir: Path, runtime_root: Path) -> bool:
+    if ((previous_dir / "src/application/plugin_runtime.py").is_file()
+            or (previous_dir / "plugins/portfolio-management/pyproject.toml").is_file()):
+        return False
+    if not (previous_dir / "src/infrastructure/portfolio_management_client.py").is_file():
+        return False
+    from src.application.portfolio_management import portfolio_management_enabled
+
+    profile = _load_service_profile(runtime_root)
+    for market in _verify_markets(runtime_root=runtime_root, profile=profile):
+        path = _runtime_config_path_for_market(market=market, runtime_root=runtime_root, profile=profile)
+        try:
+            config = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(config, dict):
+                raise ValueError("runtime config must be an object")
+            if portfolio_management_enabled(config):
+                return True
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"could not determine legacy PM integration from {path}") from exc
+    return False
+
+
+def _legacy_position_advice_enabled(*, previous_dir: Path, runtime_root: Path) -> bool:
+    # A plugin-aware release with no installed distribution represents removal.
+    if ((previous_dir / "src/application/plugin_runtime.py").is_file()
+            or (previous_dir / "plugins/position-advice/pyproject.toml").is_file()):
+        return False
+    if not (previous_dir / "domain/domain/close_advice.py").is_file():
+        return False
+    profile = _load_service_profile(runtime_root)
+    markets = _verify_markets(runtime_root=runtime_root, profile=profile)
+    if not markets:
+        raise RuntimeError(
+            f"could not determine legacy Position Advice integration: no effective runtime configs in {runtime_root}"
+        )
+    for market in markets:
+        path = _runtime_config_path_for_market(market=market, runtime_root=runtime_root, profile=profile)
+        try:
+            config = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(config, dict):
+                raise ValueError("runtime config must be an object")
+            advice = config.get("close_advice", {})
+            if not isinstance(advice, dict) or type(advice.get("enabled", False)) is not bool:
+                raise ValueError("close_advice.enabled must be a boolean")
+            if advice.get("enabled", False):
+                return True
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"could not determine legacy Position Advice integration from {path}") from exc
+    return False
+
+
+def _validate_optional_runtime(
+    *, target_dir: Path, include_pm: bool, include_longbridge: bool, include_position_advice: bool = False,
+    run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> None:
+    code = (
+        "import importlib.metadata as m, sys, tomllib\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "try: dist = m.distribution('om-pm-plugin')\n"
+        "except m.PackageNotFoundError: dist = None\n"
+        "if sys.argv[2] == 'true':\n"
+        "    assert dist is not None, 'installed PM package lost during upgrade'\n"
+        "    spec = tomllib.loads((Path(sys.argv[1]) / 'plugins/portfolio-management/pyproject.toml').read_text())\n"
+        "    assert dist.version == spec['project']['version'], 'PM package version differs from target release'\n"
+        "    from src.application.portfolio_management import load_portfolio_management_client_class\n"
+        "    load_portfolio_management_client_class()\n"
+        "else:\n"
+        "    assert dist is None, 'PM package unexpectedly installed in cached runtime'\n"
+        "try: lb = m.distribution('longbridge')\n"
+        "except m.PackageNotFoundError: lb = None\n"
+        "if sys.argv[3] == 'true':\n"
+        "    assert lb is not None, 'installed Longbridge SDK lost during upgrade'\n"
+        "    from longbridge.openapi import Config, TradeContext\n"
+        "else:\n"
+        "    assert lb is None, 'Longbridge SDK unexpectedly installed in cached runtime'\n"
+        "try: advice = m.distribution('om-position-advice-plugin')\n"
+        "except m.PackageNotFoundError: advice = None\n"
+        "if sys.argv[4] == 'true':\n"
+        "    assert advice is not None, 'installed Position Advice package lost during upgrade'\n"
+        "    spec = tomllib.loads((Path(sys.argv[1]) / 'plugins/position-advice/pyproject.toml').read_text())\n"
+        "    assert advice.version == spec['project']['version'], 'Position Advice package version differs from target release'\n"
+        "    from src.application.position_advice_plugin import require_position_advice_plugin\n"
+        "    require_position_advice_plugin()\n"
+        "else:\n"
+        "    assert advice is None, 'Position Advice package unexpectedly installed in cached runtime'\n"
+    )
+    _run_required(
+        [str(_release_python(target_dir)), "-I", "-c", code, str(target_dir),
+         json.dumps(include_pm), json.dumps(include_longbridge), json.dumps(include_position_advice)],
+        cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=30,
+    )
+
+
 def _ensure_release_runtime(
     *,
     target_dir: Path,
     cache_root: Path | None = None,
     run_cmd: Callable[..., Any],
     operations: list[dict[str, Any]],
+    include_pm: bool = False,
+    include_longbridge: bool = False,
+    include_position_advice: bool = False,
+    include_feishu: bool = False,
+    include_wechat: bool = False,
+    provider_plugins: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     _runtime_readiness(release_dir=target_dir)
+    if _is_runtime_bundle(target_dir):
+        runtime_bundle.load_manifest(target_dir, verify_files=True)
+        selected = [name for name, enabled in (
+            ("om-pm-plugin", include_pm), ("longbridge", include_longbridge),
+            ("om-position-advice-plugin", include_position_advice),
+            ("om-feishu-channel-plugin", include_feishu), ("om-wechat-channel-plugin", include_wechat),
+        ) if enabled]
+        selected.extend(PLUGINS[key]["distribution"] for key in provider_plugins)
+        if selected:
+            # Installing source extras would invalidate the bundle's pinned inventory.
+            raise RuntimePrepareError(
+                "runtime bundle cannot preserve optional packages: " + ", ".join(selected)
+                + "; optional package installation is supported only by source releases; current remains unchanged",
+                runtime_prepare={
+                    "installer": "runtime_bundle", "unsupported_optional_packages": selected,
+                },
+            )
+        result = runtime_bundle.validate_runtime(target_dir)
+        if result.get("ok") is not True:
+            raise RuntimePrepareError("bundled runtime validation failed", runtime_prepare=result)
+        return {**result, "installer": "runtime_bundle", "python": str(_release_python(target_dir))}
     cache = cache_root or default_upgrade_cache_root(target_dir)
     release_venv = target_dir / ".venv"
     release_python = _release_python(target_dir)
@@ -2147,8 +2836,17 @@ def _ensure_release_runtime(
         include_server=include_server,
         python_spec=python_spec,
         installer_mode=mode,
+        include_pm=include_pm,
+        include_longbridge=include_longbridge,
+        include_position_advice=include_position_advice,
+        include_feishu=include_feishu, include_wechat=include_wechat, provider_plugins=provider_plugins,
     )
-    dependency_context = _dependency_context(include_server=include_server, python_spec=python_spec, installer_mode=mode)
+    dependency_context = _dependency_context(
+        include_server=include_server, python_spec=python_spec, installer_mode=mode,
+        include_pm=include_pm, include_longbridge=include_longbridge,
+        include_position_advice=include_position_advice,
+        include_feishu=include_feishu, include_wechat=include_wechat, provider_plugins=provider_plugins,
+    )
     shared_venv = _shared_venv_path(cache, dependency_hash)
     build_venv = _shared_venv_build_path(shared_venv)
     build_python = _venv_python(build_venv)
@@ -2203,6 +2901,10 @@ def _ensure_release_runtime(
                 venv_dir=build_venv,
                 include_server=include_server,
                 bootstrap_python=bootstrap_python,
+                include_pm=include_pm,
+                include_longbridge=include_longbridge,
+                include_position_advice=include_position_advice,
+                include_feishu=include_feishu, include_wechat=include_wechat, provider_plugins=provider_plugins,
             )
             commands.extend(command for command, _timeout in uv_commands)
             try:
@@ -2234,6 +2936,10 @@ def _ensure_release_runtime(
                     commands=commands,
                     env=install_env,
                     bootstrap_python=bootstrap_python,
+                    include_pm=include_pm,
+                    include_longbridge=include_longbridge,
+                    include_position_advice=include_position_advice,
+                    include_feishu=include_feishu, include_wechat=include_wechat, provider_plugins=provider_plugins,
                 )
         else:
             if mode == "uv":
@@ -2250,6 +2956,10 @@ def _ensure_release_runtime(
                 commands=commands,
                 env=install_env,
                 bootstrap_python=bootstrap_python,
+                include_pm=include_pm,
+                include_longbridge=include_longbridge,
+                include_position_advice=include_position_advice,
+                include_feishu=include_feishu, include_wechat=include_wechat, provider_plugins=provider_plugins,
             )
 
         if not runtime_prepare["venv_reused"]:
@@ -2281,6 +2991,16 @@ def _ensure_release_runtime(
             ]
         )
         runtime_prepare["bot_runtime"] = _ensure_bot_runtime(target_dir, run_cmd, operations)
+        _validate_optional_runtime(
+            target_dir=target_dir, include_pm=include_pm, include_longbridge=include_longbridge,
+            include_position_advice=include_position_advice,
+            run_cmd=run_cmd, operations=operations,
+        )
+        _validate_message_runtime(
+            target_dir=target_dir, include_feishu=include_feishu, include_wechat=include_wechat,
+            run_cmd=run_cmd, operations=operations,
+        )
+        _validate_provider_runtime(target_dir=target_dir, selected=provider_plugins, run_cmd=run_cmd, operations=operations)
         runtime_prepare["ended_at"] = utc_now_iso()
         runtime_prepare["duration_seconds"] = round(time.monotonic() - started, 3)
         return runtime_prepare
@@ -2636,10 +3356,14 @@ try:
     if reconcile.get("summary", {}).get("ok") is not True or reconcile.get("apply_errors"):
         result["remediation"].extend(upgrade._service_reconcile_remediation(reconcile))
         raise RuntimeError("restored service reconciliation did not succeed")
+    if profile.get("service_provider") == "launchd":
+        profile = {**profile, "_launchd_expected_states": request["preserved_activation_states"]}
     if request["restart_services"]:
         phase = "restore restart"
         result["restarted_services"] = upgrade._restart_services_from_loaded_profile(
             profile=profile, run_cmd=subprocess.run, operations=result["operations"])
+        if profile.get("service_provider") == "launchd":
+            result["restarted_services"] = list((reconcile.get("applied") or {}).get("restarted_services") or [])
         phase = "restore health"
         result["service_health"] = upgrade._post_upgrade_service_health(
             profile=profile, repo_root=root, run_cmd=subprocess.run,
@@ -2801,6 +3525,28 @@ def _compensate_service_transition(
     }
 
 
+def _preflight_service_transition(
+    *, profile: dict[str, Any], target_dir: Path, restart_services: bool,
+    snapshot: dict[str, Any], run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> None:
+    if not profile:
+        return
+    provider = profile.get("service_provider")
+    if provider not in {"systemd", "launchd"}:
+        raise ServiceTransitionError("unsupported service upgrade provider", status="unsupported_service_provider", remediation=[])
+    if provider == "launchd":
+        if not restart_services and any(row["state"] != "absent" for row in snapshot.values()):
+            raise ServiceTransitionError("loaded launchd workers require controlled reconciliation", status="service_restart_required", remediation=["retry with service restart enabled"])
+        probe = ("from pathlib import Path; import sys; "
+                 "from src.application.service_lifecycle import launchd_upgrade_state, reconcile_launchd_services; "
+                 "from src.application.service_deploy import load_service_profile; import subprocess; "
+                 "launchd_upgrade_state(profile=load_service_profile(Path(sys.argv[1])/'service.profile.json'), "
+                 "repo_root=Path(sys.argv[2]), runtime_root=Path(sys.argv[1]), run_cmd=subprocess.run)")
+        _run_required([str(_release_python(target_dir)), "-c", probe,
+                       str(profile["runtime_root"]), str(profile["repo_root"])],
+                      cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=60)
+
+
 def service_upgrade(
     *,
     repo_root: str | Path,
@@ -2955,11 +3701,14 @@ def service_upgrade(
         pre_upgrade_profile = _load_service_profile(runtime)
         preserved_activation_states: dict[str, dict[str, str]] = {}
         warnings = [] if repo_root_is_symlink else ["confirmed upgrade requires repo_root to be a current symlink"]
+        bundled = _is_runtime_bundle(repo)
         planned = [
+            f"download and validate runtime bundle {tag} into {target_dir}" if bundled else
             f"materialize {tag} into {target_dir} from git cache {cache / 'git' / 'options-monitor.git'}"
             if not target_dir.exists()
             else f"reuse existing release dir {target_dir}",
-            f"prepare release runtime at {target_dir / '.venv'}",
+            f"verify bundled interpreter and dependencies at {target_dir}" if bundled else f"prepare release runtime at {target_dir / '.venv'}",
+            "preserve validated managed plugin selection using exact target release wheels and verify target loading",
             f"validate {target_dir}",
             "verify the target contains the supported Python Bot runtime",
             f"switch {repo_link} -> {target_dir}",
@@ -2975,7 +3724,8 @@ def service_upgrade(
             planned.append(f"cleanup old releases after successful upgrade, keep {status_base['cleanup_keep_releases']} releases")
         if not confirm:
             try:
-                if preserve_activation_state and pre_upgrade_profile:
+                _managed_plugin_selection(previous_dir)
+                if (preserve_activation_state or pre_upgrade_profile.get("service_provider") == "launchd") and pre_upgrade_profile:
                     preserved_activation_states = (
                         capture_preserved_timer_activation_states(
                             repo_root=repo_link,
@@ -3052,7 +3802,8 @@ def service_upgrade(
         try:
             if lock_error is not None:
                 raise lock_error
-            if preserve_activation_state and pre_upgrade_profile:
+            managed_plugins = _managed_plugin_selection(previous_dir)
+            if (preserve_activation_state or pre_upgrade_profile.get("service_provider") == "launchd") and pre_upgrade_profile:
                 preserved_activation_states = (
                     capture_preserved_timer_activation_states(
                         repo_root=repo_link,
@@ -3075,24 +3826,29 @@ def service_upgrade(
                     }
                 )
             releases.mkdir(parents=True, exist_ok=True)
-            remote_url = (
-                ""
-                if target_dir.exists()
-                else _resolve_upgrade_remote_url(
-                    repo_root=repo,
-                    cache_root=cache,
-                    remote_name=remote_name,
-                    run_cmd=run_cmd,
+            if target_dir.exists() and bundled != _is_runtime_bundle(target_dir):
+                raise ServiceTransitionError("target installation kind differs from current", status="installation_kind_mismatch", remediation=[])
+            if bundled:
+                release_materialize = _materialize_runtime_bundle(current_dir=repo, tag=str(tag), target_dir=target_dir)
+            else:
+                remote_url = (
+                    ""
+                    if target_dir.exists()
+                    else _resolve_upgrade_remote_url(
+                        repo_root=repo,
+                        cache_root=cache,
+                        remote_name=remote_name,
+                        run_cmd=run_cmd,
+                    )
                 )
-            )
-            release_materialize = _materialize_release_from_git_cache(
-                remote_url=remote_url,
-                tag=str(tag),
-                target_dir=target_dir,
-                cache_root=cache,
-                run_cmd=run_cmd,
-                operations=operations,
-            )
+                release_materialize = _materialize_release_from_git_cache(
+                    remote_url=remote_url,
+                    tag=str(tag),
+                    target_dir=target_dir,
+                    cache_root=cache,
+                    run_cmd=run_cmd,
+                    operations=operations,
+                )
             write_upgrade_status(
                 runtime_root=runtime,
                 payload={
@@ -3107,11 +3863,37 @@ def service_upgrade(
                     "operations": operations,
                 },
             )
+            include_pm, include_longbridge, include_position_advice = _installed_optional_packages(
+                previous_dir=previous_dir, run_cmd=run_cmd, operations=operations,
+            )
+            include_pm = "pm" not in managed_plugins and (
+                include_pm or _legacy_pm_enabled(previous_dir=previous_dir, runtime_root=runtime)
+            )
+            include_position_advice = "position-advice" not in managed_plugins and (
+                include_position_advice or _legacy_position_advice_enabled(previous_dir=previous_dir, runtime_root=runtime)
+            )
+            include_feishu, include_wechat = _message_package_selection(
+                previous_dir=previous_dir, runtime_root=runtime, run_cmd=run_cmd, operations=operations,
+            )
+            include_feishu = include_feishu and "feishu" not in managed_plugins
+            include_wechat = include_wechat and "wechat" not in managed_plugins
+            managed_plugins, provider_plugins = _provider_upgrade_selection(
+                previous_dir=previous_dir, target_dir=target_dir, runtime_root=runtime, managed=managed_plugins,
+                run_cmd=run_cmd, operations=operations,
+            )
             runtime_prepare = _ensure_release_runtime(
                 target_dir=target_dir,
                 cache_root=cache,
                 run_cmd=run_cmd,
                 operations=operations,
+                include_pm=include_pm,
+                include_longbridge=include_longbridge,
+                include_position_advice=include_position_advice,
+                include_feishu=include_feishu, include_wechat=include_wechat,
+                provider_plugins=provider_plugins,
+            )
+            _preserve_managed_plugins(
+                target_dir=target_dir, selected=managed_plugins, run_cmd=run_cmd, operations=operations,
             )
             write_upgrade_status(
                 runtime_root=runtime,
@@ -3152,6 +3934,10 @@ def service_upgrade(
                 operations=operations,
             )
             runtime_readiness = _runtime_readiness(release_dir=target_dir)
+            _preflight_service_transition(
+                profile=pre_upgrade_profile, target_dir=target_dir, restart_services=restart_services,
+                snapshot=preserved_activation_states, run_cmd=run_cmd, operations=operations,
+            )
             _switch_current_symlink(current_link=repo_link, target_dir=target_dir)
             symlink_switched = True
             runtime_config_commit = _commit_prepared_runtime_configs(
@@ -3179,11 +3965,15 @@ def service_upgrade(
                         remediation=_service_reconcile_remediation(service_reconcile),
                     )
             restart_profile = _load_service_profile(runtime) or pre_upgrade_profile
+            if restart_profile.get("service_provider") == "launchd":
+                restart_profile = {**restart_profile, "_launchd_expected_states": preserved_activation_states}
             restarted = (
                 _restart_services_from_loaded_profile(profile=restart_profile, run_cmd=run_cmd, operations=operations)
                 if restart_services
                 else []
             )
+            if restart_profile.get("service_provider") == "launchd":
+                restarted = list((service_reconcile.get("applied") or {}).get("restarted_services") or [])
             service_health = (
                 _post_upgrade_service_health(
                     profile=restart_profile,
@@ -3512,11 +4302,19 @@ def service_rollback(
                 return out
         else:
             target_dir = releases / target
+        if _is_runtime_bundle(repo) != _is_runtime_bundle(target_dir):
+            return {**status_base, "ok": False, "status": "installation_kind_mismatch", "changed": False, "operations": operations}
+        if _is_runtime_bundle(repo):
+            try:
+                runtime_bundle.load_manifest(target_dir, expected_tag=_tag_text(target),
+                    expected_platform=runtime_bundle.current_platform(), verify_files=True)
+            except runtime_bundle.RuntimeBundleError as exc:
+                return {**status_base, "ok": False, "status": "invalid_runtime_bundle", "error": str(exc), "changed": False, "operations": operations}
         previous_profile = _load_service_profile(runtime)
         preserved_activation_states: dict[str, dict[str, str]] = {}
         if not confirm:
             try:
-                if preserve_activation_state and previous_profile:
+                if (preserve_activation_state or previous_profile.get("service_provider") == "launchd") and previous_profile:
                     preserved_activation_states = (
                         capture_preserved_timer_activation_states(
                             repo_root=repo_link,
@@ -3528,6 +4326,7 @@ def service_rollback(
                     status_base["preserved_activation_units"] = sorted(
                         preserved_activation_states
                     )
+                _managed_plugin_selection(target_dir)
                 runtime_readiness = _runtime_readiness(release_dir=target_dir)
             except ServiceTransitionError as exc:
                 return {
@@ -3549,6 +4348,7 @@ def service_rollback(
                 "target_dir": str(target_dir),
                 "warnings": [] if repo_root_is_symlink else ["confirmed rollback requires repo_root to be a current symlink"],
                 "planned_operations": [
+                    "validate the rollback target's managed plugins and pip-owned providers using its interpreter",
                     f"stage and validate runtime configs with {target_dir}",
                     "verify the rollback target contains the supported Python Bot runtime",
                     f"switch {repo_link} -> {target_dir}",
@@ -3577,7 +4377,7 @@ def service_rollback(
         try:
             if lock_error is not None:
                 raise lock_error
-            if preserve_activation_state and previous_profile:
+            if (preserve_activation_state or previous_profile.get("service_provider") == "launchd") and previous_profile:
                 preserved_activation_states = (
                     capture_preserved_timer_activation_states(
                         repo_root=repo_link,
@@ -3600,6 +4400,15 @@ def service_rollback(
                     }
                 )
             runtime_readiness = _runtime_readiness(release_dir=target_dir)
+            managed_plugins = _managed_plugin_selection(target_dir)
+            _validate_target_managed_plugins(
+                target_dir=target_dir, selected=managed_plugins,
+                run_cmd=run_cmd, operations=operations,
+            )
+            _validate_rollback_pip_providers(
+                target_dir=target_dir, managed=managed_plugins,
+                run_cmd=run_cmd, operations=operations,
+            )
             runtime_config_prepare = _prepare_runtime_configs_for_release(
                 previous_dir=repo,
                 target_dir=target_dir,
@@ -3609,6 +4418,10 @@ def service_rollback(
                 operations=operations,
             )
             runtime_readiness = _runtime_readiness(release_dir=target_dir)
+            _preflight_service_transition(
+                profile=previous_profile, target_dir=target_dir, restart_services=restart_services,
+                snapshot=preserved_activation_states, run_cmd=run_cmd, operations=operations,
+            )
             _switch_current_symlink(current_link=repo_link, target_dir=target_dir)
             symlink_switched = True
             runtime_config_commit = _commit_prepared_runtime_configs(
@@ -3655,6 +4468,8 @@ def service_rollback(
                             "reconcile": child_snapshot,
                         }
             rollback_profile = _load_service_profile(runtime) or previous_profile
+            if rollback_profile.get("service_provider") == "launchd":
+                rollback_profile = {**rollback_profile, "_launchd_expected_states": preserved_activation_states}
             restarted = (
                 _restart_services_from_loaded_profile(
                     profile=rollback_profile,
@@ -3664,6 +4479,8 @@ def service_rollback(
                 if restart_services
                 else []
             )
+            if rollback_profile.get("service_provider") == "launchd":
+                restarted = list((service_reconcile.get("applied") or {}).get("restarted_services") or [])
             service_health = (
                 _post_upgrade_service_health(
                     profile=rollback_profile,

@@ -19,6 +19,7 @@ from src.application.bot.control.operation_lifecycle import (
     resolve_pending_operation_or_raise,
 )
 from src.application.bot.control.operation_policy import enforce_upgrade_write_allowed
+from src.application.bot.control.policy import require_inbound_channel
 from src.application.bot.control.operation_signature import hash_operation_payload, verify_operation_signature
 from src.application.bot.control.operation_store import InboundOperationStore
 from src.application.bot.control.operation_status_text import cannot_repeat_message, operation_candidate_hint, user_facing_operation_status
@@ -26,7 +27,7 @@ from src.application.service_upgrade import _load_service_profile as _read_upgra
 from src.application.service_upgrade import compare_versions, default_releases_root, default_upgrade_cache_root, service_upgrade, service_upgrade_check
 from src.application.settings import build_effective_env
 from src.application.secret_resolver import resolve_feishu_bot_config
-from src.infrastructure.feishu_bot import reply_text_message
+from src.infrastructure.feishu_bot import reply_message as reply_text_message
 from src.application.payload_helpers import optional_text as _optional_text
 
 
@@ -526,6 +527,14 @@ def _dispatch_final_receipt_outbox(
     if str(existing.get("status") or "") == "sent":
         receipt = existing.get("receipt")
         return receipt if isinstance(receipt, dict) else {"attempted": False, "ok": True, "reason": "already_sent"}
+    item = existing.get("payload") or {}
+    target = item.get("receipt_target") or {}
+    channel = str(target.get("channel") or "").strip().lower()
+    if item.get("enabled", True) and channel in {"feishu", "wechat", "wechat_clawbot"}:
+        try:
+            require_inbound_channel(channel, target.get("bot_config_path"))
+        except AgentToolError as exc:
+            return {"attempted": False, "ok": False, "reason": exc.code.lower(), "error_code": exc.code}
     claimed = store.claim_outbox(outbox_id)
     if claimed is None:
         return {
@@ -658,6 +667,11 @@ def _send_final_receipt(
     if not enabled:
         return {"attempted": False, "ok": True, "reason": "disabled"}
     channel = str(receipt_target.get("channel") or "").strip().lower()
+    if channel in {"feishu", "wechat", "wechat_clawbot"}:
+        try:
+            require_inbound_channel(channel, receipt_target.get("bot_config_path"))
+        except AgentToolError as exc:
+            return {"attempted": False, "ok": False, "reason": exc.code.lower(), "error_code": exc.code}
     text = render_upgrade_response(status=status, operation_id=operation_id, payload=payload, preview=preview, result=result)
     if channel == "feishu":
         return _send_feishu_final_receipt(
@@ -699,13 +713,17 @@ def _send_feishu_final_receipt(
     max_attempts = len(_FINAL_RECEIPT_RETRY_DELAYS_SECONDS) + 1
     for attempt in range(1, max_attempts + 1):
         try:
+            require_inbound_channel("feishu", receipt_target.get("bot_config_path"))
             api_response = reply_fn(
                 app_id=bot.app_id,
                 app_secret=bot.app_secret,
                 message_id=message_id,
                 text=text,
                 uuid=f"{operation_id}:upgrade-final",
+                before_send=lambda: require_inbound_channel("feishu", receipt_target.get("bot_config_path")),
             )
+        except AgentToolError as exc:
+            return {"attempted": bool(failures), "ok": False, "reason": exc.code.lower(), "error_code": exc.code}
         except Exception as exc:
             failures.append({"attempt": attempt, "error": f"{type(exc).__name__}: {exc}"})
             if attempt < max_attempts:
@@ -758,6 +776,7 @@ def _send_wechat_final_receipt(
     max_attempts = len(_FINAL_RECEIPT_RETRY_DELAYS_SECONDS) + 1
     for attempt in range(1, max_attempts + 1):
         try:
+            require_inbound_channel("wechat_clawbot", receipt_target.get("bot_config_path"))
             api_response = wechat_reply_fn(
                 base=base,
                 label=label,
@@ -767,7 +786,10 @@ def _send_wechat_final_receipt(
                 group_id=group_id,
                 text=text,
                 idempotency_key=f"{operation_id}:upgrade-final",
+                before_send=lambda: require_inbound_channel("wechat_clawbot", receipt_target.get("bot_config_path")),
             )
+        except AgentToolError as exc:
+            return {"attempted": bool(failures), "ok": False, "reason": exc.code.lower(), "error_code": exc.code}
         except Exception as exc:
             failures.append({"attempt": attempt, "error": f"{type(exc).__name__}: {exc}"})
             if attempt < max_attempts:

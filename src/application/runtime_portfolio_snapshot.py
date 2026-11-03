@@ -39,6 +39,7 @@ from src.application.combo_yield_candidate_snapshot import (
 )
 from src.application.opening_candidate_snapshot import (
     OPENING_CANDIDATE_SNAPSHOT_SCHEMA,
+    OPENING_BROKER_SNAPSHOT_SCHEMA,
     OpeningCandidateSnapshotError,
     validate_opening_candidate_snapshot,
 )
@@ -1942,7 +1943,7 @@ def _validate_candidate_reference(
             _fail("REFERENCE_HASH_INVALID", "candidate owner content hash mismatch")
         try:
             if reference["candidate_owner"] == "opening":
-                if reference["schema_version"] != OPENING_CANDIDATE_SNAPSHOT_SCHEMA:
+                if reference["schema_version"] not in {OPENING_CANDIDATE_SNAPSHOT_SCHEMA, OPENING_BROKER_SNAPSHOT_SCHEMA}:
                     raise OpeningCandidateSnapshotError("opening schema mismatch")
                 validate_opening_candidate_snapshot(
                     owner_payload,
@@ -2009,7 +2010,7 @@ def _validate_candidate_reference(
             _fail("CHOSEN_RESULTS_INVALID", f"{owner} owner scopes differ from chosen results")
         if any(
             str(owner_payload.get("market") or "").strip().upper() != scope["market"]
-            or actual_by_key[key].get("candidate_owner") != owner
+            or actual_by_key[key].get("candidate_owner", "opening" if owner == "opening" else None) != owner
             or actual_by_key[key].get("status") != status_by_owner_scope[(owner, *key)]
             for key, scope in expected_by_key.items()
         ):

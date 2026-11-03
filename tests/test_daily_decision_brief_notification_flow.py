@@ -337,6 +337,11 @@ def test_fixed_scan_persists_commits_then_sends_full_and_confirms(monkeypatch, t
     assert set(state["days"][MARKET_DATE]["alerted_candidates"]) == {IDENTITY}
     assert calls[0]["idempotency_key"] == build_notification_transport_key(envelope["delivery_key"])
     assert "transport_envelope" not in calls[0]
+    assert "【CSP】" in calls[0]["message"]
+    assert "\n\n" in calls[0]["message"]
+    assert "**" not in calls[0]["message"] and "# OM" not in calls[0]["message"]
+    assert "\u200b" not in calls[0]["message"]
+    assert calls[0]["message"] == envelope["rendered_message"]
     assert bundle.commits == [{"lx": FIXED_TARGET}]
 
 
@@ -368,12 +373,14 @@ def test_feishu_fixed_scan_persists_and_sends_exact_card_transport(monkeypatch, 
     assert transport["text"] == envelope["rendered_message"]
     assert transport["render_meta"]["markdown_table_detected"] is False
     assert calls[0]["transport_envelope"] == transport
-    card_markdown = transport["transport"]["content"]["body"]["elements"][0]["content"]
+    elements = transport["transport"]["content"]["body"]["elements"]
+    assert len(elements) > 1
+    card_markdown = "\n\n".join(element["content"] for element in elements)
     assert "| 优先 | 合约 | 权利金 / 净收入 | 年化 | 风险 / 容量 |" not in card_markdown
     if candidate:
         assert "**NVDA｜CSP｜08-21 $100 Put（策略排序 1）**" in card_markdown
-        assert "指标｜权利金 $1.20" in card_markdown
-        assert "指标｜权利金 $1.20 · 最多 1 手" in card_markdown
+        assert "权利金 $1.20 · 最多 1 手" in card_markdown
+        assert "## 事件" in card_markdown
     else:
         assert "## CSP\n暂无合适合约" in card_markdown
     assert "## CC\n暂无合适合约" in card_markdown
@@ -706,11 +713,11 @@ def test_fixed_report_without_candidates_still_contains_positions_and_funds(monk
     prep = mod._prepare_daily_brief_notification(bundle.request)
     message = prep.lifecycles_by_account["lx"]["envelope"]["rendered_message"]
 
-    assert "## CSP\n暂无合适合约" in message
-    assert "## CC\n暂无合适合约" in message
-    assert "## 组合增强\n暂无合适合约" in message
-    assert "## 持仓" in message
-    assert "## 资金" in message
+    assert "【CSP】\n暂无合适合约" in message
+    assert "【CC】\n暂无合适合约" in message
+    assert "【组合增强】\n暂无合适合约" in message
+    assert "【持仓】" in message
+    assert "【资金】" in message
     assert "现金总额｜$100,000.00" in message
 
 
@@ -1138,14 +1145,14 @@ def test_delivery_only_rebuilds_missing_envelope_from_committed_brief(
     tmp_path: Path,
 ) -> None:
     from src.application.daily_decision_brief_renderer import (
-        render_fixed_report as actual_render_fixed_report,
+        render_fixed_report_text as actual_render_fixed_report_text,
     )
 
     _patch_assembler(monkeypatch)
     first = _request(tmp_path, run_id="render-crash")
     monkeypatch.setattr(
         mod,
-        "render_fixed_report",
+        "render_fixed_report_text",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("render failed")),
     )
     with pytest.raises(RuntimeError, match="render failed"):
@@ -1183,7 +1190,7 @@ def test_delivery_only_rebuilds_missing_envelope_from_committed_brief(
         market="US",
     )["brief"]["revision"] == 1
 
-    monkeypatch.setattr(mod, "render_fixed_report", actual_render_fixed_report)
+    monkeypatch.setattr(mod, "render_fixed_report_text", actual_render_fixed_report_text)
     calls: list[dict] = []
     _patch_sender(monkeypatch, calls=calls)
     retry = _request(tmp_path, run_id="delivery-recovery", delivery_only=True)
@@ -1901,3 +1908,32 @@ def test_feishu_large_fallback_is_frozen_and_retried_without_rerender(monkeypatc
     assert mod.run_tick_notification_flow(again.request) == 0
     assert calls[0]['transport_envelope'] == frozen
     assert calls[0]['message'] == text
+
+
+@pytest.mark.parametrize('kind', ['fixed', 'candidate_alert', 'failure'])
+def test_wechat_prepares_plain_text_without_feishu_projection(monkeypatch, tmp_path: Path, kind: str) -> None:
+    _patch_assembler(monkeypatch, blocked=kind == 'failure')
+    calls = []
+    _patch_sender(monkeypatch, calls=calls)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('WeChat preparation must not build a Feishu projection')
+
+    monkeypatch.setattr(mod, 'render_fixed_report_card_blocks', forbidden)
+    monkeypatch.setattr(mod, 'render_candidate_alert_card_blocks', forbidden)
+    bundle = _request(tmp_path, run_id=f'plain-{kind}', fixed=kind != 'candidate_alert', pipeline_ok=kind != 'failure')
+    assert mod.run_tick_notification_flow(bundle.request) == (1 if kind == 'failure' else 0)
+    assert len(calls) == 1
+    message = calls[0]['message']
+    assert message.startswith('【OM · 决策简报 · lx】')
+    assert '**' not in message and '\u200b' not in message
+    assert not any(line.startswith('#') for line in message.splitlines())
+    assert 'transport_envelope' not in calls[0]
+    if kind == 'failure':
+        assert '本轮策略扫描未形成可靠结果' in message
+        assert '恢复后补发完整报告' in message
+    else:
+        assert '【CSP】' in message and '权利金 $1.20' in message
+        assert '【事件】' in message and '最多 1 手' in message
+        if kind == 'fixed':
+            assert '【持仓】' in message and '【资金】' in message

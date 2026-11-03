@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "om-wechat-channel-plugin"
+version = "0.1.0"
+description = "Optional WeChat iLink transport for options-monitor"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["om_wechat_channel", "om_wechat_channel.*"]
+namespaces = false

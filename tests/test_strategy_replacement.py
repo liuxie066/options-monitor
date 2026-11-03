@@ -77,7 +77,8 @@ def _run(root, mode, strategy, *, reverse=False, portfolio=None):
                 **common, cc={'strategy': 'insurance_underwriting'},
                 stock={'shares': 200, 'can_sell_qty': 200, 'avg_cost': 80},
                 portfolio_ctx={'filters': {'account': 'lx'}, 'portfolio_source_name': 'futu',
-                               'capacity_authority': {'status': 'available'}},
+                               'capacity_authority': {"status": "available", "source": "opend", "futu_account_id": "123",
+            "logical_account": "lx", "trd_env": "REAL", "market": "us"}},
                 locked_shares_status='available', locked_shares_by_symbol={'NVDA': 100},
                 locked_shares_unavailable_by_symbol={}))
     return finals, decisions, summaries
@@ -129,7 +130,7 @@ def test_replacement_real_steps_summary_seal_load_explanation_and_restore(frozen
     for execute in (lambda: core.evaluate_candidates(finals, strategy=strategy),
                     lambda: core.rank_candidates(finals, mode=mode),
                     lambda: _snapshot_decisions({mode: []}, statuses=[_scan_status(s, mode, 'completed') for s in ('NVDA', 'MSFT')],
-                        account='lx', market='US', futu_account_id='fixture', risk_policy_hash='a'*64,
+                        account='lx', market='US', authority={'futu_account_id': 'fixture'}, risk_policy_hash='a'*64,
                         candidate_evaluations={mode: decisions})):
         with pytest.raises(ValueError, match='unavailable strategy template'):
             execute()

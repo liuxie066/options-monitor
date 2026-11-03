@@ -4,3 +4,10 @@ pytest-xdist
 ruff
 jsonschema>=4.23,<5
 setuptools>=77
+./plugins/portfolio-management
+./plugins/position-advice
+./plugins/feishu-channel
+./plugins/wechat-channel
+./plugins/market-opend
+./plugins/broker-futu
+./plugins/broker-longbridge

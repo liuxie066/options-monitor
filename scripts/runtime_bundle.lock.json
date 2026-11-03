@@ -1,0 +1,808 @@
+{
+  "build_dependencies": [
+    "packaging",
+    "setuptools",
+    "wheel"
+  ],
+  "dependencies": {
+    "PyYAML": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+          "sha256": "ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc",
+          "url": "https://files.pythonhosted.org/packages/8b/9d/b3589d3877982d4f2329302ef98a8026e7f4443c765c46cfecc8858c6b4b/pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl"
+        },
+        "macos-arm64": {
+          "filename": "pyyaml-6.0.3-cp312-cp312-macosx_11_0_arm64.whl",
+          "sha256": "fc09d0aa354569bc501d4e787133afc08552722d3ab34836a80547331bb5d4a0",
+          "url": "https://files.pythonhosted.org/packages/89/a0/6cf41a19a1f2f3feab0e9c0b74134aa2ce6849093d5517a0c550fe37a648/pyyaml-6.0.3-cp312-cp312-macosx_11_0_arm64.whl"
+        },
+        "macos-x86_64": {
+          "filename": "pyyaml-6.0.3-cp312-cp312-macosx_10_13_x86_64.whl",
+          "sha256": "7f047e29dcae44602496db43be01ad42fc6f1cc0d8cd6c83d342306c32270196",
+          "url": "https://files.pythonhosted.org/packages/d1/33/422b98d2195232ca1826284a76852ad5a86fe23e31b009c9886b2d0fb8b2/pyyaml-6.0.3-cp312-cp312-macosx_10_13_x86_64.whl"
+        }
+      },
+      "license": "MIT",
+      "version": "6.0.3"
+    },
+    "anyio": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "anyio-4.15.1-py3-none-any.whl",
+          "sha256": "6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101",
+          "url": "https://files.pythonhosted.org/packages/12/b8/4bd346e22b28902df4d651910f5242c28d84e4a5c2435ca5c3f797ed7e2e/anyio-4.15.1-py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "anyio-4.15.1-py3-none-any.whl",
+          "sha256": "6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101",
+          "url": "https://files.pythonhosted.org/packages/12/b8/4bd346e22b28902df4d651910f5242c28d84e4a5c2435ca5c3f797ed7e2e/anyio-4.15.1-py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "anyio-4.15.1-py3-none-any.whl",
+          "sha256": "6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101",
+          "url": "https://files.pythonhosted.org/packages/12/b8/4bd346e22b28902df4d651910f5242c28d84e4a5c2435ca5c3f797ed7e2e/anyio-4.15.1-py3-none-any.whl"
+        }
+      },
+      "license": "MIT",
+      "version": "4.15.1"
+    },
+    "attrs": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "attrs-26.1.0-py3-none-any.whl",
+          "sha256": "c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309",
+          "url": "https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "attrs-26.1.0-py3-none-any.whl",
+          "sha256": "c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309",
+          "url": "https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "attrs-26.1.0-py3-none-any.whl",
+          "sha256": "c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309",
+          "url": "https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl"
+        }
+      },
+      "license": "MIT",
+      "version": "26.1.0"
+    },
+    "certifi": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "certifi-2026.10.23-py3-none-any.whl",
+          "sha256": "e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1",
+          "url": "https://files.pythonhosted.org/packages/32/d1/a3652fe2c19134d0d15922177821d863cbd7e842d53a21bbe7e8e3a1b5ac/certifi-2026.10.23-py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "certifi-2026.10.23-py3-none-any.whl",
+          "sha256": "e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1",
+          "url": "https://files.pythonhosted.org/packages/32/d1/a3652fe2c19134d0d15922177821d863cbd7e842d53a21bbe7e8e3a1b5ac/certifi-2026.10.23-py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "certifi-2026.10.23-py3-none-any.whl",
+          "sha256": "e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1",
+          "url": "https://files.pythonhosted.org/packages/32/d1/a3652fe2c19134d0d15922177821d863cbd7e842d53a21bbe7e8e3a1b5ac/certifi-2026.10.23-py3-none-any.whl"
+        }
+      },
+      "license": "MPL-2.0",
+      "version": "2026.10.23"
+    },
+    "charset-normalizer": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "charset_normalizer-3.5.2-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+          "sha256": "3d31298449090ab8d47b7b1b2a555ff73cac7ed438a08b7ac160980c7ebed649",
+          "url": "https://files.pythonhosted.org/packages/7f/c5/38806a25ab5e65fc178f39affeda20858efafede2fce1ffc2556cfc9fe73/charset_normalizer-3.5.2-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl"
+        },
+        "macos-arm64": {
+          "filename": "charset_normalizer-3.5.2-cp312-cp312-macosx_10_13_universal2.whl",
+          "sha256": "ed2a239c0ea213acc1908150a3037257083c7c083128f1a4cec2ec4b97dca491",
+          "url": "https://files.pythonhosted.org/packages/e7/c8/693809898870237d82785a03f3b2b58fe4c9f14669f84a7d4e623c92a59e/charset_normalizer-3.5.2-cp312-cp312-macosx_10_13_universal2.whl"
+        },
+        "macos-x86_64": {
+          "filename": "charset_normalizer-3.5.2-cp312-cp312-macosx_10_13_universal2.whl",
+          "sha256": "ed2a239c0ea213acc1908150a3037257083c7c083128f1a4cec2ec4b97dca491",
+          "url": "https://files.pythonhosted.org/packages/e7/c8/693809898870237d82785a03f3b2b58fe4c9f14669f84a7d4e623c92a59e/charset_normalizer-3.5.2-cp312-cp312-macosx_10_13_universal2.whl"
+        }
+      },
+      "license": "MIT",
+      "version": "3.5.2"
+    },
+    "futu-api": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "futu_api-10.12.7208.tar.gz",
+          "sha256": "82569750374a2ec4fafa56492edf41b15e59123dc3e4dfa25d9f071769811803",
+          "url": "https://files.pythonhosted.org/packages/e7/c7/99560f45bc062eb634710ad1fefdeaaffa5d51d6e19a40cfcb5edceecb9b/futu_api-10.12.7208.tar.gz"
+        },
+        "macos-arm64": {
+          "filename": "futu_api-10.12.7208.tar.gz",
+          "sha256": "82569750374a2ec4fafa56492edf41b15e59123dc3e4dfa25d9f071769811803",
+          "url": "https://files.pythonhosted.org/packages/e7/c7/99560f45bc062eb634710ad1fefdeaaffa5d51d6e19a40cfcb5edceecb9b/futu_api-10.12.7208.tar.gz"
+        },
+        "macos-x86_64": {
+          "filename": "futu_api-10.12.7208.tar.gz",
+          "sha256": "82569750374a2ec4fafa56492edf41b15e59123dc3e4dfa25d9f071769811803",
+          "url": "https://files.pythonhosted.org/packages/e7/c7/99560f45bc062eb634710ad1fefdeaaffa5d51d6e19a40cfcb5edceecb9b/futu_api-10.12.7208.tar.gz"
+        }
+      },
+      "license": "Apache License 2.0",
+      "version": "10.12.7208"
+    },
+    "h11": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "h11-0.16.0-py3-none-any.whl",
+          "sha256": "63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86",
+          "url": "https://files.pythonhosted.org/packages/04/4b/29cac41a4d98d144bf5f6d33995617b185d14b22401f75ca86f384e87ff1/h11-0.16.0-py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "h11-0.16.0-py3-none-any.whl",
+          "sha256": "63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86",
+          "url": "https://files.pythonhosted.org/packages/04/4b/29cac41a4d98d144bf5f6d33995617b185d14b22401f75ca86f384e87ff1/h11-0.16.0-py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "h11-0.16.0-py3-none-any.whl",
+          "sha256": "63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86",
+          "url": "https://files.pythonhosted.org/packages/04/4b/29cac41a4d98d144bf5f6d33995617b185d14b22401f75ca86f384e87ff1/h11-0.16.0-py3-none-any.whl"
+        }
+      },
+      "license": "MIT",
+      "version": "0.16.0"
+    },
+    "httpcore": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "httpcore-1.0.9-py3-none-any.whl",
+          "sha256": "2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55",
+          "url": "https://files.pythonhosted.org/packages/7e/f5/f66802a942d491edb555dd61e3a9961140fd64c90bce1eafd741609d334d/httpcore-1.0.9-py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "httpcore-1.0.9-py3-none-any.whl",
+          "sha256": "2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55",
+          "url": "https://files.pythonhosted.org/packages/7e/f5/f66802a942d491edb555dd61e3a9961140fd64c90bce1eafd741609d334d/httpcore-1.0.9-py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "httpcore-1.0.9-py3-none-any.whl",
+          "sha256": "2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55",
+          "url": "https://files.pythonhosted.org/packages/7e/f5/f66802a942d491edb555dd61e3a9961140fd64c90bce1eafd741609d334d/httpcore-1.0.9-py3-none-any.whl"
+        }
+      },
+      "license": "BSD-3-Clause",
+      "version": "1.0.9"
+    },
+    "httpx": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "httpx-0.28.1-py3-none-any.whl",
+          "sha256": "d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad",
+          "url": "https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "httpx-0.28.1-py3-none-any.whl",
+          "sha256": "d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad",
+          "url": "https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "httpx-0.28.1-py3-none-any.whl",
+          "sha256": "d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad",
+          "url": "https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl"
+        }
+      },
+      "license": "BSD-3-Clause",
+      "version": "0.28.1"
+    },
+    "idna": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "idna-3.20-py3-none-any.whl",
+          "sha256": "ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c",
+          "url": "https://files.pythonhosted.org/packages/58/a2/bb081bab032533a855d44de1d56f8e8426114ff1ba5d1f07a438a0a654f8/idna-3.20-py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "idna-3.20-py3-none-any.whl",
+          "sha256": "ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c",
+          "url": "https://files.pythonhosted.org/packages/58/a2/bb081bab032533a855d44de1d56f8e8426114ff1ba5d1f07a438a0a654f8/idna-3.20-py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "idna-3.20-py3-none-any.whl",
+          "sha256": "ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c",
+          "url": "https://files.pythonhosted.org/packages/58/a2/bb081bab032533a855d44de1d56f8e8426114ff1ba5d1f07a438a0a654f8/idna-3.20-py3-none-any.whl"
+        }
+      },
+      "license": "BSD-3-Clause",
+      "version": "3.20"
+    },
+    "jsonschema": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "jsonschema-4.26.0-py3-none-any.whl",
+          "sha256": "d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce",
+          "url": "https://files.pythonhosted.org/packages/69/90/f63fb5873511e014207a475e2bb4e8b2e570d655b00ac19a9a0ca0a385ee/jsonschema-4.26.0-py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "jsonschema-4.26.0-py3-none-any.whl",
+          "sha256": "d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce",
+          "url": "https://files.pythonhosted.org/packages/69/90/f63fb5873511e014207a475e2bb4e8b2e570d655b00ac19a9a0ca0a385ee/jsonschema-4.26.0-py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "jsonschema-4.26.0-py3-none-any.whl",
+          "sha256": "d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce",
+          "url": "https://files.pythonhosted.org/packages/69/90/f63fb5873511e014207a475e2bb4e8b2e570d655b00ac19a9a0ca0a385ee/jsonschema-4.26.0-py3-none-any.whl"
+        }
+      },
+      "license": "MIT",
+      "version": "4.26.0"
+    },
+    "jsonschema-specifications": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "jsonschema_specifications-2025.9.1-py3-none-any.whl",
+          "sha256": "98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe",
+          "url": "https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "jsonschema_specifications-2025.9.1-py3-none-any.whl",
+          "sha256": "98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe",
+          "url": "https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "jsonschema_specifications-2025.9.1-py3-none-any.whl",
+          "sha256": "98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe",
+          "url": "https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl"
+        }
+      },
+      "license": "MIT",
+      "version": "2025.9.1"
+    },
+    "lark-oapi": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "lark_oapi-1.6.5-py3-none-any.whl",
+          "sha256": "a56fa548aebdae9c36ef0114fbbc6e5d004eb2e15398e11cf88a5737f0cf8641",
+          "url": "https://files.pythonhosted.org/packages/40/28/a425593c6de71b80ad642ed8e624468a2848ea0e4ad7cb32a8380941fd7f/lark_oapi-1.6.5-py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "lark_oapi-1.6.5-py3-none-any.whl",
+          "sha256": "a56fa548aebdae9c36ef0114fbbc6e5d004eb2e15398e11cf88a5737f0cf8641",
+          "url": "https://files.pythonhosted.org/packages/40/28/a425593c6de71b80ad642ed8e624468a2848ea0e4ad7cb32a8380941fd7f/lark_oapi-1.6.5-py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "lark_oapi-1.6.5-py3-none-any.whl",
+          "sha256": "a56fa548aebdae9c36ef0114fbbc6e5d004eb2e15398e11cf88a5737f0cf8641",
+          "url": "https://files.pythonhosted.org/packages/40/28/a425593c6de71b80ad642ed8e624468a2848ea0e4ad7cb32a8380941fd7f/lark_oapi-1.6.5-py3-none-any.whl"
+        }
+      },
+      "license": "MIT",
+      "version": "1.6.5"
+    },
+    "numpy": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "numpy-2.5.4-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+          "sha256": "fbde6962867ee75b48b0ee29b2b9372ec5d617799dbaf38e82dc0596f2f7738a",
+          "url": "https://files.pythonhosted.org/packages/43/a3/c799c62e19c337e6d3770b08e475887fb30ce8477d3c09efca6b2f0228a6/numpy-2.5.4-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
+        },
+        "macos-arm64": {
+          "filename": "numpy-2.5.4-cp312-cp312-macosx_14_0_arm64.whl",
+          "sha256": "9cb18a327b49c5c337f972b03682f6a49855525faaf3c0d3e9c96cd0fd8880a8",
+          "url": "https://files.pythonhosted.org/packages/31/2f/5ea3570fcb8ccd0882bea99436a513b2c85dad8f774a2057849130a8fb99/numpy-2.5.4-cp312-cp312-macosx_14_0_arm64.whl"
+        },
+        "macos-x86_64": {
+          "filename": "numpy-2.5.4-cp312-cp312-macosx_14_0_x86_64.whl",
+          "sha256": "aec3fc4b32ff82421274f5d205c559c51c840c8df66a78efd7f3612dd005a26a",
+          "url": "https://files.pythonhosted.org/packages/34/f2/b4fc1bafca03868220b5eaf729d2f21ebd7d7b151c0f9e144fe212bbca35/numpy-2.5.4-cp312-cp312-macosx_14_0_x86_64.whl"
+        }
+      },
+      "license": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+      "version": "2.5.4"
+    },
+    "packaging": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "packaging-26.3-py3-none-any.whl",
+          "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c",
+          "url": "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "packaging-26.3-py3-none-any.whl",
+          "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c",
+          "url": "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "packaging-26.3-py3-none-any.whl",
+          "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c",
+          "url": "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl"
+        }
+      },
+      "license": "Apache-2.0 OR BSD-2-Clause",
+      "version": "26.3"
+    },
+    "pandas": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "pandas-3.0.2-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl",
+          "sha256": "ef8b27695c3d3dc78403c9a7d5e59a62d5464a7e1123b4e0042763f7104dc74f",
+          "url": "https://files.pythonhosted.org/packages/c4/a8/3a61a721472959ab0ce865ef05d10b0d6bfe27ce8801c99f33d4fa996e65/pandas-3.0.2-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl"
+        },
+        "macos-arm64": {
+          "filename": "pandas-3.0.2-cp312-cp312-macosx_11_0_arm64.whl",
+          "sha256": "970762605cff1ca0d3f71ed4f3a769ea8f85fc8e6348f6e110b8fea7e6eb5a14",
+          "url": "https://files.pythonhosted.org/packages/35/d0/4831af68ce30cc2d03c697bea8450e3225a835ef497d0d70f31b8cdde965/pandas-3.0.2-cp312-cp312-macosx_11_0_arm64.whl"
+        },
+        "macos-x86_64": {
+          "filename": "pandas-3.0.2-cp312-cp312-macosx_10_13_x86_64.whl",
+          "sha256": "232a70ebb568c0c4d2db4584f338c1577d81e3af63292208d615907b698a0f18",
+          "url": "https://files.pythonhosted.org/packages/f3/b0/c20bd4d6d3f736e6bd6b55794e9cd0a617b858eaad27c8f410ea05d953b7/pandas-3.0.2-cp312-cp312-macosx_10_13_x86_64.whl"
+        }
+      },
+      "license": "BSD 3-Clause License\n         \n         Copyright (c) 2008-2011, AQR Capital Management, LLC, Lambda Foundry, Inc. and PyData Development Team\n         All rights reserved.\n         \n         Copyright (c) 2011-2026, Open source contributors.\n         \n         Redistribution and use in source and binary forms, with or without\n         modification, are permitted provided that the following conditions are met:\n         \n         * Redistributions of source code must retain the above copyright notice, this\n           list of conditions and the following disclaimer.\n         \n         * Redistributions in binary form must reproduce the above copyright notice,\n           this list of conditions and the following disclaimer in the documentation\n           and/or other materials provided with the distribution.\n         \n         * Neither the name of the copyright holder nor the names of its\n           contributors may be used to endorse or promote products derived from\n           this software without specific prior written permission.\n         \n         THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS \"AS IS\"\n         AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE\n         IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE\n         DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE\n         FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL\n         DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR\n         SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER\n         CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,\n         OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE\n         OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n         Copyright (c) 2010-2019 Keith Goodman\n         Copyright (c) 2019 Bottleneck Developers\n         All rights reserved.\n         \n         Redistribution and use in source and binary forms, with or without\n         modification, are permitted provided that the following conditions are met:\n         \n             * Redistributions of source code must retain the above copyright notice,\n               this list of conditions and the following disclaimer.\n         \n             * Redistributions in binary form must reproduce the above copyright\n               notice, this list of conditions and the following disclaimer in the\n               documentation and/or other materials provided with the distribution.\n         \n         THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS \"AS IS\"\n         AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE\n         IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE\n         ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE\n         LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR\n         CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF\n         SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS\n         INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN\n         CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)\n         ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE\n         POSSIBILITY OF SUCH DAMAGE.Copyright 2017- Paul Ganssle <paul@ganssle.io>\n         Copyright 2017- dateutil contributors (see AUTHORS file)\n         \n            Licensed under the Apache License, Version 2.0 (the \"License\");\n            you may not use this file except in compliance with the License.\n            You may obtain a copy of the License at\n         \n                http://www.apache.org/licenses/LICENSE-2.0\n         \n            Unless required by applicable law or agreed to in writing, software\n            distributed under the License is distributed on an \"AS IS\" BASIS,\n            WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n            See the License for the specific language governing permissions and\n            limitations under the License.\n         \n         The above license applies to all contributions after 2017-12-01, as well as\n         all contributions that have been re-licensed (see AUTHORS file for the list of\n         contributors who have re-licensed their code).\n         --------------------------------------------------------------------------------\n         dateutil - Extensions to the standard Python datetime module.\n         \n         Copyright (c) 2003-2011 - Gustavo Niemeyer <gustavo@niemeyer.net>\n         Copyright (c) 2012-2014 - Tomi Pievil\u00e4inen <tomi.pievilainen@iki.fi>\n         Copyright (c) 2014-2016 - Yaron de Leeuw <me@jarondl.net>\n         Copyright (c) 2015-     - Paul Ganssle <paul@ganssle.io>\n         Copyright (c) 2015-     - dateutil contributors (see AUTHORS file)\n         \n         All rights reserved.\n         \n         Redistribution and use in source and binary forms, with or without\n         modification, are permitted provided that the following conditions are met:\n         \n             * Redistributions of source code must retain the above copyright notice,\n               this list of conditions and the following disclaimer.\n             * Redistributions in binary form must reproduce the above copyright notice,\n               this list of conditions and the following disclaimer in the documentation\n               and/or other materials provided with the distribution.\n             * Neither the name of the copyright holder nor the names of its\n               contributors may be used to endorse or promote products derived from\n               this software without specific prior written permission.\n         \n         THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS\n         \"AS IS\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT\n         LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR\n         A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR\n         CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,\n         EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,\n         PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR\n         PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF\n         LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING\n         NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS\n         SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n         \n         The above BSD License Applies to all code, even that also covered by Apache 2.0.# MIT License\n         \n         Copyright (c) 2019 Hadley Wickham; RStudio; and Evan Miller\n         \n         Permission is hereby granted, free of charge, to any person obtaining a copy\n         of this software and associated documentation files (the \"Software\"), to deal\n         in the Software without restriction, including without limitation the rights\n         to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n         copies of the Software, and to permit persons to whom the Software is\n         furnished to do so, subject to the following conditions:\n         \n         The above copyright notice and this permission notice shall be included in all\n         copies or substantial portions of the Software.\n         \n         THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n         IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n         FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n         AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n         LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n         OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n         SOFTWARE.\n         Based on http://opensource.org/licenses/MIT\n         \n         This is a template. Complete and ship as file LICENSE the following 2\n         lines (only)\n         \n         YEAR:\n         COPYRIGHT HOLDER:\n         \n         and specify as\n         \n         License: MIT + file LICENSE\n         \n         Copyright (c) <YEAR>, <COPYRIGHT HOLDER>\n         \n         Permission is hereby granted, free of charge, to any person obtaining\n         a copy of this software and associated documentation files (the\n         \"Software\"), to deal in the Software without restriction, including\n         without limitation the rights to use, copy, modify, merge, publish,\n         distribute, sublicense, and/or sell copies of the Software, and to\n         permit persons to whom the Software is furnished to do so, subject to\n         the following conditions:\n         \n         The above copyright notice and this permission notice shall be\n         included in all copies or substantial portions of the Software.\n         \n         THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND,\n         EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF\n         MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND\n         NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE\n         LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION\n         OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION\n         WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.\n         The MIT License\n         \n         Copyright (c) 2008-     Attractive Chaos <attractor@live.co.uk>\n         \n         Permission is hereby granted, free of charge, to any person obtaining\n         a copy of this software and associated documentation files (the\n         \"Software\"), to deal in the Software without restriction, including\n         without limitation the rights to use, copy, modify, merge, publish,\n         distribute, sublicense, and/or sell copies of the Software, and to\n         permit persons to whom the Software is furnished to do so, subject to\n         the following conditions:\n         \n         The above copyright notice and this permission notice shall be\n         included in all copies or substantial portions of the Software.\n         \n         THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND,\n         EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF\n         MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND\n         NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS\n         BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN\n         ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN\n         CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n         SOFTWARE.musl as a whole is licensed under the following standard MIT license:\n         \n         ----------------------------------------------------------------------\n         Copyright \u00a9 2005-2020 Rich Felker, et al.\n         \n         Permission is hereby granted, free of charge, to any person obtaining\n         a copy of this software and associated documentation files (the\n         \"Software\"), to deal in the Software without restriction, including\n         without limitation the rights to use, copy, modify, merge, publish,\n         distribute, sublicense, and/or sell copies of the Software, and to\n         permit persons to whom the Software is furnished to do so, subject to\n         the following conditions:\n         \n         The above copyright notice and this permission notice shall be\n         included in all copies or substantial portions of the Software.\n         \n         THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND,\n         EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF\n         MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.\n         IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY\n         CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,\n         TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE\n         SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.\n         ----------------------------------------------------------------------\n         \n         Authors/contributors include:\n         \n         A. Wilcox\n         Ada Worcester\n         Alex Dowad\n         Alex Suykov\n         Alexander Monakov\n         Andre McCurdy\n         Andrew Kelley\n         Anthony G. Basile\n         Aric Belsito\n         Arvid Picciani\n         Bartosz Brachaczek\n         Benjamin Peterson\n         Bobby Bingham\n         Boris Brezillon\n         Brent Cook\n         Chris Spiegel\n         Cl\u00e9ment Vasseur\n         Daniel Micay\n         Daniel Sabogal\n         Daurnimator\n         David Carlier\n         David Edelsohn\n         Denys Vlasenko\n         Dmitry Ivanov\n         Dmitry V. Levin\n         Drew DeVault\n         Emil Renner Berthing\n         Fangrui Song\n         Felix Fietkau\n         Felix Janda\n         Gianluca Anzolin\n         Hauke Mehrtens\n         He X\n         Hiltjo Posthuma\n         Isaac Dunham\n         Jaydeep Patil\n         Jens Gustedt\n         Jeremy Huntwork\n         Jo-Philipp Wich\n         Joakim Sindholt\n         John Spencer\n         Julien Ramseier\n         Justin Cormack\n         Kaarle Ritvanen\n         Khem Raj\n         Kylie McClain\n         Leah Neukirchen\n         Luca Barbato\n         Luka Perkov\n         M Farkas-Dyck (Strake)\n         Mahesh Bodapati\n         Markus Wichmann\n         Masanori Ogino\n         Michael Clark\n         Michael Forney\n         Mikhail Kremnyov\n         Natanael Copa\n         Nicholas J. Kain\n         orc\n         Pascal Cuoq\n         Patrick Oppenlander\n         Petr Hosek\n         Petr Skocik\n         Pierre Carrier\n         Reini Urban\n         Rich Felker\n         Richard Pennington\n         Ryan Fairfax\n         Samuel Holland\n         Segev Finer\n         Shiz\n         sin\n         Solar Designer\n         Stefan Kristiansson\n         Stefan O'Rear\n         Szabolcs Nagy\n         Timo Ter\u00e4s\n         Trutz Behn\n         Valentin Ochs\n         Will Dietz\n         William Haddon\n         William Pitcock\n         \n         Portions of this software are derived from third-party works licensed\n         under terms compatible with the above MIT license:\n         \n         The TRE regular expression implementation (src/regex/reg* and\n         src/regex/tre*) is Copyright \u00a9 2001-2008 Ville Laurikari and licensed\n         under a 2-clause BSD license (license text in the source files). The\n         included version has been heavily modified by Rich Felker in 2012, in\n         the interests of size, simplicity, and namespace cleanliness.\n         \n         Much of the math library code (src/math/* and src/complex/*) is\n         Copyright \u00a9 1993,2004 Sun Microsystems or\n         Copyright \u00a9 2003-2011 David Schultz or\n         Copyright \u00a9 2003-2009 Steven G. Kargl or\n         Copyright \u00a9 2003-2009 Bruce D. Evans or\n         Copyright \u00a9 2008 Stephen L. Moshier or\n         Copyright \u00a9 2017-2018 Arm Limited\n         and labelled as such in comments in the individual source files. All\n         have been licensed under extremely permissive terms.\n         \n         The ARM memcpy code (src/string/arm/memcpy.S) is Copyright \u00a9 2008\n         The Android Open Source Project and is licensed under a two-clause BSD\n         license. It was taken from Bionic libc, used on Android.\n         \n         The AArch64 memcpy and memset code (src/string/aarch64/*) are\n         Copyright \u00a9 1999-2019, Arm Limited.\n         \n         The implementation of DES for crypt (src/crypt/crypt_des.c) is\n         Copyright \u00a9 1994 David Burren. It is licensed under a BSD license.\n         \n         The implementation of blowfish crypt (src/crypt/crypt_blowfish.c) was\n         originally written by Solar Designer and placed into the public\n         domain. The code also comes with a fallback permissive license for use\n         in jurisdictions that may not recognize the public domain.\n         \n         The smoothsort implementation (src/stdlib/qsort.c) is Copyright \u00a9 2011\n         Valentin Ochs and is licensed under an MIT-style license.\n         \n         The x86_64 port was written by Nicholas J. Kain and is licensed under\n         the standard MIT terms.\n         \n         The mips and microblaze ports were originally written by Richard\n         Pennington for use in the ellcc project. The original code was adapted\n         by Rich Felker for build system and code conventions during upstream\n         integration. It is licensed under the standard MIT terms.\n         \n         The mips64 port was contributed by Imagination Technologies and is\n         licensed under the standard MIT terms.\n         \n         The powerpc port was also originally written by Richard Pennington,\n         and later supplemented and integrated by John Spencer. It is licensed\n         under the standard MIT terms.\n         \n         All other files which have no copyright comments are original works\n         produced specifically for use as part of this library, written either\n         by Rich Felker, the main author of the library, or by one or more\n         contibutors listed above. Details on authorship of individual files\n         can be found in the git version control history of the project. The\n         omission of copyright and license comments in each file is in the\n         interest of source tree size.\n         \n         In addition, permission is hereby granted for all public header files\n         (include/* and arch/*/bits/*) and crt files intended to be linked into\n         applications (crt/*, ldso/dlstart.c, and arch/*/crt_arch.h) to omit\n         the copyright notice and permission notice otherwise required by the\n         license, and to use these files without any requirement of\n         attribution. These files include substantial contributions from:\n         \n         Bobby Bingham\n         John Spencer\n         Nicholas J. Kain\n         Rich Felker\n         Richard Pennington\n         Stefan Kristiansson\n         Szabolcs Nagy\n         \n         all of whom have explicitly granted such permission.\n         \n         This file previously contained text expressing a belief that most of\n         the files covered by the above exception were sufficiently trivial not\n         to be subject to copyright, resulting in confusion over whether it\n         negated the permissions granted in the license. In the spirit of\n         permissive licensing, and of not having licensing issues being an\n         obstacle to adoption, that text has been removed.Copyright (c) 2005-2023, NumPy Developers.\n         All rights reserved.\n         \n         Redistribution and use in source and binary forms, with or without\n         modification, are permitted provided that the following conditions are\n         met:\n         \n             * Redistributions of source code must retain the above copyright\n                notice, this list of conditions and the following disclaimer.\n         \n             * Redistributions in binary form must reproduce the above\n                copyright notice, this list of conditions and the following\n                disclaimer in the documentation and/or other materials provided\n                with the distribution.\n         \n             * Neither the name of the NumPy Developers nor the names of any\n                contributors may be used to endorse or promote products derived\n                from this software without specific prior written permission.\n         \n         THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS\n         \"AS IS\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT\n         LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR\n         A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT\n         OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,\n         SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT\n         LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,\n         DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY\n         THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT\n         (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE\n         OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n                                          Apache License\n                                    Version 2.0, January 2004\n                                 http://www.apache.org/licenses/\n         \n            TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION\n         \n            1. Definitions.\n         \n               \"License\" shall mean the terms and conditions for use, reproduction,\n               and distribution as defined by Sections 1 through 9 of this document.\n         \n               \"Licensor\" shall mean the copyright owner or entity authorized by\n               the copyright owner that is granting the License.\n         \n               \"Legal Entity\" shall mean the union of the acting entity and all\n               other entities that control, are controlled by, or are under common\n               control with that entity. For the purposes of this definition,\n               \"control\" means (i) the power, direct or indirect, to cause the\n               direction or management of such entity, whether by contract or\n               otherwise, or (ii) ownership of fifty percent (50%) or more of the\n               outstanding shares, or (iii) beneficial ownership of such entity.\n         \n               \"You\" (or \"Your\") shall mean an individual or Legal Entity\n               exercising permissions granted by this License.\n         \n               \"Source\" form shall mean the preferred form for making modifications,\n               including but not limited to software source code, documentation\n               source, and configuration files.\n         \n               \"Object\" form shall mean any form resulting from mechanical\n               transformation or translation of a Source form, including but\n               not limited to compiled object code, generated documentation,\n               and conversions to other media types.\n         \n               \"Work\" shall mean the work of authorship, whether in Source or\n               Object form, made available under the License, as indicated by a\n               copyright notice that is included in or attached to the work\n               (an example is provided in the Appendix below).\n         \n               \"Derivative Works\" shall mean any work, whether in Source or Object\n               form, that is based on (or derived from) the Work and for which the\n               editorial revisions, annotations, elaborations, or other modifications\n               represent, as a whole, an original work of authorship. For the purposes\n               of this License, Derivative Works shall not include works that remain\n               separable from, or merely link (or bind by name) to the interfaces of,\n               the Work and Derivative Works thereof.\n         \n               \"Contribution\" shall mean any work of authorship, including\n               the original version of the Work and any modifications or additions\n               to that Work or Derivative Works thereof, that is intentionally\n               submitted to Licensor for inclusion in the Work by the copyright owner\n               or by an individual or Legal Entity authorized to submit on behalf of\n               the copyright owner. For the purposes of this definition, \"submitted\"\n               means any form of electronic, verbal, or written communication sent\n               to the Licensor or its representatives, including but not limited to\n               communication on electronic mailing lists, source code control systems,\n               and issue tracking systems that are managed by, or on behalf of, the\n               Licensor for the purpose of discussing and improving the Work, but\n               excluding communication that is conspicuously marked or otherwise\n               designated in writing by the copyright owner as \"Not a Contribution.\"\n         \n               \"Contributor\" shall mean Licensor and any individual or Legal Entity\n               on behalf of whom a Contribution has been received by Licensor and\n               subsequently incorporated within the Work.\n         \n            2. Grant of Copyright License. Subject to the terms and conditions of\n               this License, each Contributor hereby grants to You a perpetual,\n               worldwide, non-exclusive, no-charge, royalty-free, irrevocable\n               copyright license to reproduce, prepare Derivative Works of,\n               publicly display, publicly perform, sublicense, and distribute the\n               Work and such Derivative Works in Source or Object form.\n         \n            3. Grant of Patent License. Subject to the terms and conditions of\n               this License, each Contributor hereby grants to You a perpetual,\n               worldwide, non-exclusive, no-charge, royalty-free, irrevocable\n               (except as stated in this section) patent license to make, have made,\n               use, offer to sell, sell, import, and otherwise transfer the Work,\n               where such license applies only to those patent claims licensable\n               by such Contributor that are necessarily infringed by their\n               Contribution(s) alone or by combination of their Contribution(s)\n               with the Work to which such Contribution(s) was submitted. If You\n               institute patent litigation against any entity (including a\n               cross-claim or counterclaim in a lawsuit) alleging that the Work\n               or a Contribution incorporated within the Work constitutes direct\n               or contributory patent infringement, then any patent licenses\n               granted to You under this License for that Work shall terminate\n               as of the date such litigation is filed.\n         \n            4. Redistribution. You may reproduce and distribute copies of the\n               Work or Derivative Works thereof in any medium, with or without\n               modifications, and in Source or Object form, provided that You\n               meet the following conditions:\n         \n               (a) You must give any other recipients of the Work or\n                   Derivative Works a copy of this License; and\n         \n               (b) You must cause any modified files to carry prominent notices\n                   stating that You changed the files; and\n         \n               (c) You must retain, in the Source form of any Derivative Works\n                   that You distribute, all copyright, patent, trademark, and\n                   attribution notices from the Source form of the Work,\n                   excluding those notices that do not pertain to any part of\n                   the Derivative Works; and\n         \n               (d) If the Work includes a \"NOTICE\" text file as part of its\n                   distribution, then any Derivative Works that You distribute must\n                   include a readable copy of the attribution notices contained\n                   within such NOTICE file, excluding those notices that do not\n                   pertain to any part of the Derivative Works, in at least one\n                   of the following places: within a NOTICE text file distributed\n                   as part of the Derivative Works; within the Source form or\n                   documentation, if provided along with the Derivative Works; or,\n                   within a display generated by the Derivative Works, if and\n                   wherever such third-party notices normally appear. The contents\n                   of the NOTICE file are for informational purposes only and\n                   do not modify the License. You may add Your own attribution\n                   notices within Derivative Works that You distribute, alongside\n                   or as an addendum to the NOTICE text from the Work, provided\n                   that such additional attribution notices cannot be construed\n                   as modifying the License.\n         \n               You may add Your own copyright statement to Your modifications and\n               may provide additional or different license terms and conditions\n               for use, reproduction, or distribution of Your modifications, or\n               for any such Derivative Works as a whole, provided Your use,\n               reproduction, and distribution of the Work otherwise complies with\n               the conditions stated in this License.\n         \n            5. Submission of Contributions. Unless You explicitly state otherwise,\n               any Contribution intentionally submitted for inclusion in the Work\n               by You to the Licensor shall be under the terms and conditions of\n               this License, without any additional terms or conditions.\n               Notwithstanding the above, nothing herein shall supersede or modify\n               the terms of any separate license agreement you may have executed\n               with Licensor regarding such Contributions.\n         \n            6. Trademarks. This License does not grant permission to use the trade\n               names, trademarks, service marks, or product names of the Licensor,\n               except as required for reasonable and customary use in describing the\n               origin of the Work and reproducing the content of the NOTICE file.\n         \n            7. Disclaimer of Warranty. Unless required by applicable law or\n               agreed to in writing, Licensor provides the Work (and each\n               Contributor provides its Contributions) on an \"AS IS\" BASIS,\n               WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or\n               implied, including, without limitation, any warranties or conditions\n               of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A\n               PARTICULAR PURPOSE. You are solely responsible for determining the\n               appropriateness of using or redistributing the Work and assume any\n               risks associated with Your exercise of permissions under this License.\n         \n            8. Limitation of Liability. In no event and under no legal theory,\n               whether in tort (including negligence), contract, or otherwise,\n               unless required by applicable law (such as deliberate and grossly\n               negligent acts) or agreed to in writing, shall any Contributor be\n               liable to You for damages, including any direct, indirect, special,\n               incidental, or consequential damages of any character arising as a\n               result of this License or out of the use or inability to use the\n               Work (including but not limited to damages for loss of goodwill,\n               work stoppage, computer failure or malfunction, or any and all\n               other commercial damages or losses), even if such Contributor\n               has been advised of the possibility of such damages.\n         \n            9. Accepting Warranty or Additional Liability. While redistributing\n               the Work or Derivative Works thereof, You may choose to offer,\n               and charge a fee for, acceptance of support, warranty, indemnity,\n               or other liability obligations and/or rights consistent with this\n               License. However, in accepting such obligations, You may act only\n               on Your own behalf and on Your sole responsibility, not on behalf\n               of any other Contributor, and only if You agree to indemnify,\n               defend, and hold each Contributor harmless for any liability\n               incurred by, or claims asserted against, such Contributor by reason\n               of your accepting any such warranty or additional liability.\n         \n            END OF TERMS AND CONDITIONS\n         \n         \n         Copyright (c) Donald Stufft and individual contributors.\n         All rights reserved.\n         \n         Redistribution and use in source and binary forms, with or without\n         modification, are permitted provided that the following conditions are met:\n         \n             1. Redistributions of source code must retain the above copyright notice,\n                this list of conditions and the following disclaimer.\n         \n             2. Redistributions in binary form must reproduce the above copyright\n                notice, this list of conditions and the following disclaimer in the\n                documentation and/or other materials provided with the distribution.\n         \n         THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS \"AS IS\" AND\n         ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED\n         WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE\n         DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE\n         FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL\n         DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR\n         SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER\n         CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,\n         OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE\n         OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.A. HISTORY OF THE SOFTWARE\n         ==========================\n         \n         Python was created in the early 1990s by Guido van Rossum at Stichting\n         Mathematisch Centrum (CWI, see https://www.cwi.nl) in the Netherlands\n         as a successor of a language called ABC.  Guido remains Python's\n         principal author, although it includes many contributions from others.\n         \n         In 1995, Guido continued his work on Python at the Corporation for\n         National Research Initiatives (CNRI, see https://www.cnri.reston.va.us)\n         in Reston, Virginia where he released several versions of the\n         software.\n         \n         In May 2000, Guido and the Python core development team moved to\n         BeOpen.com to form the BeOpen PythonLabs team.  In October of the same\n         year, the PythonLabs team moved to Digital Creations, which became\n         Zope Corporation.  In 2001, the Python Software Foundation (PSF, see\n         https://www.python.org/psf/) was formed, a non-profit organization\n         created specifically to own Python-related Intellectual Property.\n         Zope Corporation was a sponsoring member of the PSF.\n         \n         All Python releases are Open Source (see https://opensource.org for\n         the Open Source Definition).  Historically, most, but not all, Python\n         releases have also been GPL-compatible; the table below summarizes\n         the various releases.\n         \n             Release         Derived     Year        Owner       GPL-\n                             from                                compatible? (1)\n         \n             0.9.0 thru 1.2              1991-1995   CWI         yes\n             1.3 thru 1.5.2  1.2         1995-1999   CNRI        yes\n             1.6             1.5.2       2000        CNRI        no\n             2.0             1.6         2000        BeOpen.com  no\n             1.6.1           1.6         2001        CNRI        yes (2)\n             2.1             2.0+1.6.1   2001        PSF         no\n             2.0.1           2.0+1.6.1   2001        PSF         yes\n             2.1.1           2.1+2.0.1   2001        PSF         yes\n             2.1.2           2.1.1       2002        PSF         yes\n             2.1.3           2.1.2       2002        PSF         yes\n             2.2 and above   2.1.1       2001-now    PSF         yes\n         \n         Footnotes:\n         \n         (1) GPL-compatible doesn't mean that we're distributing Python under\n             the GPL.  All Python licenses, unlike the GPL, let you distribute\n             a modified version without making your changes open source.  The\n             GPL-compatible licenses make it possible to combine Python with\n             other software that is released under the GPL; the others don't.\n         \n         (2) According to Richard Stallman, 1.6.1 is not GPL-compatible,\n             because its license has a choice of law clause.  According to\n             CNRI, however, Stallman's lawyer has told CNRI's lawyer that 1.6.1\n             is \"not incompatible\" with the GPL.\n         \n         Thanks to the many outside volunteers who have worked under Guido's\n         direction to make these releases possible.\n         \n         \n         B. TERMS AND CONDITIONS FOR ACCESSING OR OTHERWISE USING PYTHON\n         ===============================================================\n         \n         Python software and documentation are licensed under the\n         Python Software Foundation License Version 2.\n         \n         Starting with Python 3.8.6, examples, recipes, and other code in\n         the documentation are dual licensed under the PSF License Version 2\n         and the Zero-Clause BSD license.\n         \n         Some software incorporated into Python is under different licenses.\n         The licenses are listed with code falling under that license.\n         \n         \n         PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2\n         --------------------------------------------\n         \n         1. This LICENSE AGREEMENT is between the Python Software Foundation\n         (\"PSF\"), and the Individual or Organization (\"Licensee\") accessing and\n         otherwise using this software (\"Python\") in source or binary form and\n         its associated documentation.\n         \n         2. Subject to the terms and conditions of this License Agreement, PSF hereby\n         grants Licensee a nonexclusive, royalty-free, world-wide license to reproduce,\n         analyze, test, perform and/or display publicly, prepare derivative works,\n         distribute, and otherwise use Python alone or in any derivative version,\n         provided, however, that PSF's License Agreement and PSF's notice of copyright,\n         i.e., \"Copyright (c) 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010,\n         2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023 Python Software Foundation;\n         All Rights Reserved\" are retained in Python alone or in any derivative version\n         prepared by Licensee.\n         \n         3. In the event Licensee prepares a derivative work that is based on\n         or incorporates Python or any part thereof, and wants to make\n         the derivative work available to others as provided herein, then\n         Licensee hereby agrees to include in any such work a brief summary of\n         the changes made to Python.\n         \n         4. PSF is making Python available to Licensee on an \"AS IS\"\n         basis.  PSF MAKES NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR\n         IMPLIED.  BY WAY OF EXAMPLE, BUT NOT LIMITATION, PSF MAKES NO AND\n         DISCLAIMS ANY REPRESENTATION OR WARRANTY OF MERCHANTABILITY OR FITNESS\n         FOR ANY PARTICULAR PURPOSE OR THAT THE USE OF PYTHON WILL NOT\n         INFRINGE ANY THIRD PARTY RIGHTS.\n         \n         5. PSF SHALL NOT BE LIABLE TO LICENSEE OR ANY OTHER USERS OF PYTHON\n         FOR ANY INCIDENTAL, SPECIAL, OR CONSEQUENTIAL DAMAGES OR LOSS AS\n         A RESULT OF MODIFYING, DISTRIBUTING, OR OTHERWISE USING PYTHON,\n         OR ANY DERIVATIVE THEREOF, EVEN IF ADVISED OF THE POSSIBILITY THEREOF.\n         \n         6. This License Agreement will automatically terminate upon a material\n         breach of its terms and conditions.\n         \n         7. Nothing in this License Agreement shall be deemed to create any\n         relationship of agency, partnership, or joint venture between PSF and\n         Licensee.  This License Agreement does not grant permission to use PSF\n         trademarks or trade name in a trademark sense to endorse or promote\n         products or services of Licensee, or any third party.\n         \n         8. By copying, installing or otherwise using Python, Licensee\n         agrees to be bound by the terms and conditions of this License\n         Agreement.\n         \n         \n         BEOPEN.COM LICENSE AGREEMENT FOR PYTHON 2.0\n         -------------------------------------------\n         \n         BEOPEN PYTHON OPEN SOURCE LICENSE AGREEMENT VERSION 1\n         \n         1. This LICENSE AGREEMENT is between BeOpen.com (\"BeOpen\"), having an\n         office at 160 Saratoga Avenue, Santa Clara, CA 95051, and the\n         Individual or Organization (\"Licensee\") accessing and otherwise using\n         this software in source or binary form and its associated\n         documentation (\"the Software\").\n         \n         2. Subject to the terms and conditions of this BeOpen Python License\n         Agreement, BeOpen hereby grants Licensee a non-exclusive,\n         royalty-free, world-wide license to reproduce, analyze, test, perform\n         and/or display publicly, prepare derivative works, distribute, and\n         otherwise use the Software alone or in any derivative version,\n         provided, however, that the BeOpen Python License is retained in the\n         Software, alone or in any derivative version prepared by Licensee.\n         \n         3. BeOpen is making the Software available to Licensee on an \"AS IS\"\n         basis.  BEOPEN MAKES NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR\n         IMPLIED.  BY WAY OF EXAMPLE, BUT NOT LIMITATION, BEOPEN MAKES NO AND\n         DISCLAIMS ANY REPRESENTATION OR WARRANTY OF MERCHANTABILITY OR FITNESS\n         FOR ANY PARTICULAR PURPOSE OR THAT THE USE OF THE SOFTWARE WILL NOT\n         INFRINGE ANY THIRD PARTY RIGHTS.\n         \n         4. BEOPEN SHALL NOT BE LIABLE TO LICENSEE OR ANY OTHER USERS OF THE\n         SOFTWARE FOR ANY INCIDENTAL, SPECIAL, OR CONSEQUENTIAL DAMAGES OR LOSS\n         AS A RESULT OF USING, MODIFYING OR DISTRIBUTING THE SOFTWARE, OR ANY\n         DERIVATIVE THEREOF, EVEN IF ADVISED OF THE POSSIBILITY THEREOF.\n         \n         5. This License Agreement will automatically terminate upon a material\n         breach of its terms and conditions.\n         \n         6. This License Agreement shall be governed by and interpreted in all\n         respects by the law of the State of California, excluding conflict of\n         law provisions.  Nothing in this License Agreement shall be deemed to\n         create any relationship of agency, partnership, or joint venture\n         between BeOpen and Licensee.  This License Agreement does not grant\n         permission to use BeOpen trademarks or trade names in a trademark\n         sense to endorse or promote products or services of Licensee, or any\n         third party.  As an exception, the \"BeOpen Python\" logos available at\n         http://www.pythonlabs.com/logos.html may be used according to the\n         permissions granted on that web page.\n         \n         7. By copying, installing or otherwise using the software, Licensee\n         agrees to be bound by the terms and conditions of this License\n         Agreement.\n         \n         \n         CNRI LICENSE AGREEMENT FOR PYTHON 1.6.1\n         ---------------------------------------\n         \n         1. This LICENSE AGREEMENT is between the Corporation for National\n         Research Initiatives, having an office at 1895 Preston White Drive,\n         Reston, VA 20191 (\"CNRI\"), and the Individual or Organization\n         (\"Licensee\") accessing and otherwise using Python 1.6.1 software in\n         source or binary form and its associated documentation.\n         \n         2. Subject to the terms and conditions of this License Agreement, CNRI\n         hereby grants Licensee a nonexclusive, royalty-free, world-wide\n         license to reproduce, analyze, test, perform and/or display publicly,\n         prepare derivative works, distribute, and otherwise use Python 1.6.1\n         alone or in any derivative version, provided, however, that CNRI's\n         License Agreement and CNRI's notice of copyright, i.e., \"Copyright (c)\n         1995-2001 Corporation for National Research Initiatives; All Rights\n         Reserved\" are retained in Python 1.6.1 alone or in any derivative\n         version prepared by Licensee.  Alternately, in lieu of CNRI's License\n         Agreement, Licensee may substitute the following text (omitting the\n         quotes): \"Python 1.6.1 is made available subject to the terms and\n         conditions in CNRI's License Agreement.  This Agreement together with\n         Python 1.6.1 may be located on the internet using the following\n         unique, persistent identifier (known as a handle): 1895.22/1013.  This\n         Agreement may also be obtained from a proxy server on the internet\n         using the following URL: http://hdl.handle.net/1895.22/1013\".\n         \n         3. In the event Licensee prepares a derivative work that is based on\n         or incorporates Python 1.6.1 or any part thereof, and wants to make\n         the derivative work available to others as provided herein, then\n         Licensee hereby agrees to include in any such work a brief summary of\n         the changes made to Python 1.6.1.\n         \n         4. CNRI is making Python 1.6.1 available to Licensee on an \"AS IS\"\n         basis.  CNRI MAKES NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR\n         IMPLIED.  BY WAY OF EXAMPLE, BUT NOT LIMITATION, CNRI MAKES NO AND\n         DISCLAIMS ANY REPRESENTATION OR WARRANTY OF MERCHANTABILITY OR FITNESS\n         FOR ANY PARTICULAR PURPOSE OR THAT THE USE OF PYTHON 1.6.1 WILL NOT\n         INFRINGE ANY THIRD PARTY RIGHTS.\n         \n         5. CNRI SHALL NOT BE LIABLE TO LICENSEE OR ANY OTHER USERS OF PYTHON\n         1.6.1 FOR ANY INCIDENTAL, SPECIAL, OR CONSEQUENTIAL DAMAGES OR LOSS AS\n         A RESULT OF MODIFYING, DISTRIBUTING, OR OTHERWISE USING PYTHON 1.6.1,\n         OR ANY DERIVATIVE THEREOF, EVEN IF ADVISED OF THE POSSIBILITY THEREOF.\n         \n         6. This License Agreement will automatically terminate upon a material\n         breach of its terms and conditions.\n         \n         7. This License Agreement shall be governed by the federal\n         intellectual property law of the United States, including without\n         limitation the federal copyright law, and, to the extent such\n         U.S. federal law does not apply, by the law of the Commonwealth of\n         Virginia, excluding Virginia's conflict of law provisions.\n         Notwithstanding the foregoing, with regard to derivative works based\n         on Python 1.6.1 that incorporate non-separable material that was\n         previously distributed under the GNU General Public License (GPL), the\n         law of the Commonwealth of Virginia shall govern this License\n         Agreement only as to issues arising under or with respect to\n         Paragraphs 4, 5, and 7 of this License Agreement.  Nothing in this\n         License Agreement shall be deemed to create any relationship of\n         agency, partnership, or joint venture between CNRI and Licensee.  This\n         License Agreement does not grant permission to use CNRI trademarks or\n         trade name in a trademark sense to endorse or promote products or\n         services of Licensee, or any third party.\n         \n         8. By clicking on the \"ACCEPT\" button where indicated, or by copying,\n         installing or otherwise using Python 1.6.1, Licensee agrees to be\n         bound by the terms and conditions of this License Agreement.\n         \n                 ACCEPT\n         \n         \n         CWI LICENSE AGREEMENT FOR PYTHON 0.9.0 THROUGH 1.2\n         --------------------------------------------------\n         \n         Copyright (c) 1991 - 1995, Stichting Mathematisch Centrum Amsterdam,\n         The Netherlands.  All rights reserved.\n         \n         Permission to use, copy, modify, and distribute this software and its\n         documentation for any purpose and without fee is hereby granted,\n         provided that the above copyright notice appear in all copies and that\n         both that copyright notice and this permission notice appear in\n         supporting documentation, and that the name of Stichting Mathematisch\n         Centrum or CWI not be used in advertising or publicity pertaining to\n         distribution of the software without specific, written prior\n         permission.\n         \n         STICHTING MATHEMATISCH CENTRUM DISCLAIMS ALL WARRANTIES WITH REGARD TO\n         THIS SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND\n         FITNESS, IN NO EVENT SHALL STICHTING MATHEMATISCH CENTRUM BE LIABLE\n         FOR ANY SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES\n         WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN\n         ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT\n         OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.\n         \n         ZERO-CLAUSE BSD LICENSE FOR CODE IN THE PYTHON DOCUMENTATION\n         ----------------------------------------------------------------------\n         \n         Permission to use, copy, modify, and/or distribute this software for any\n         purpose with or without fee is hereby granted.\n         \n         THE SOFTWARE IS PROVIDED \"AS IS\" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH\n         REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY\n         AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,\n         INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM\n         LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR\n         OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR\n         PERFORMANCE OF THIS SOFTWARE.\n         Copyright (c) 2014, Al Sweigart\n         All rights reserved.\n         \n         Redistribution and use in source and binary forms, with or without\n         modification, are permitted provided that the following conditions are met:\n         \n         * Redistributions of source code must retain the above copyright notice, this\n           list of conditions and the following disclaimer.\n         \n         * Redistributions in binary form must reproduce the above copyright notice,\n           this list of conditions and the following disclaimer in the documentation\n           and/or other materials provided with the distribution.\n         \n         * Neither the name of the {organization} nor the names of its\n           contributors may be used to endorse or promote products derived from\n           this software without specific prior written permission.\n         \n         THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS \"AS IS\"\n         AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE\n         IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE\n         DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE\n         FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL\n         DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR\n         SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER\n         CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,\n         OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE\n         OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.Copyright (c) 2017 Anthony Sottile\n         \n         Permission is hereby granted, free of charge, to any person obtaining a copy\n         of this software and associated documentation files (the \"Software\"), to deal\n         in the Software without restriction, including without limitation the rights\n         to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n         copies of the Software, and to permit persons to whom the Software is\n         furnished to do so, subject to the following conditions:\n         \n         The above copyright notice and this permission notice shall be included in\n         all copies or substantial portions of the Software.\n         \n         THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n         IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n         FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n         AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n         LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n         OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN\n         THE SOFTWARE.Copyright (c) 2015-2019 Jared Hobbs\n         \n         Permission is hereby granted, free of charge, to any person obtaining a copy of\n         this software and associated documentation files (the \"Software\"), to deal in\n         the Software without restriction, including without limitation the rights to\n         use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies\n         of the Software, and to permit persons to whom the Software is furnished to do\n         so, subject to the following conditions:\n         \n         The above copyright notice and this permission notice shall be included in all\n         copies or substantial portions of the Software.\n         \n         THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n         IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n         FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n         AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n         LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n         OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n         SOFTWARE.Developed by ESN, an Electronic Arts Inc. studio.\n         Copyright (c) 2014, Electronic Arts Inc.\n         All rights reserved.\n         \n         Redistribution and use in source and binary forms, with or without\n         modification, are permitted provided that the following conditions are met:\n         * Redistributions of source code must retain the above copyright\n         notice, this list of conditions and the following disclaimer.\n         * Redistributions in binary form must reproduce the above copyright\n         notice, this list of conditions and the following disclaimer in the\n         documentation and/or other materials provided with the distribution.\n         * Neither the name of ESN, Electronic Arts Inc. nor the\n         names of its contributors may be used to endorse or promote products\n         derived from this software without specific prior written permission.\n         \n         THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS \"AS IS\" AND\n         ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED\n         WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE\n         DISCLAIMED. IN NO EVENT SHALL ELECTRONIC ARTS INC. BE LIABLE\n         FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES\n         (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;\n         LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND\n         ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT\n         (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS\n         SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n         \n         ----\n         \n         Portions of code from MODP_ASCII - Ascii transformations (upper/lower, etc)\n         https://github.com/client9/stringencoders\n         \n           Copyright 2005, 2006, 2007\n           Nick Galbreath -- nickg [at] modp [dot] com\n           All rights reserved.\n         \n           Redistribution and use in source and binary forms, with or without\n           modification, are permitted provided that the following conditions are\n           met:\n         \n             Redistributions of source code must retain the above copyright\n             notice, this list of conditions and the following disclaimer.\n         \n             Redistributions in binary form must reproduce the above copyright\n             notice, this list of conditions and the following disclaimer in the\n             documentation and/or other materials provided with the distribution.\n         \n             Neither the name of the modp.com nor the names of its\n             contributors may be used to endorse or promote products derived from\n             this software without specific prior written permission.\n         \n           THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS\n           \"AS IS\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT\n           LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR\n           A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT\n           OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,\n           SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT\n           LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,\n           DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY\n           THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT\n           (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE\n           OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n         \n           This is the standard \"new\" BSD license:\n           http://www.opensource.org/licenses/bsd-license.php\n         \n         https://github.com/client9/stringencoders/blob/cfd5c1507325ae497ea9bacdacba12c0ffd79d30/COPYING\n         \n         ----\n         \n         Numeric decoder derived from from TCL library\n         https://opensource.apple.com/source/tcl/tcl-14/tcl/license.terms\n          * Copyright (c) 1988-1993 The Regents of the University of California.\n          * Copyright (c) 1994 Sun Microsystems, Inc.\n         \n           This software is copyrighted by the Regents of the University of\n           California, Sun Microsystems, Inc., Scriptics Corporation, ActiveState\n           Corporation and other parties.  The following terms apply to all files\n           associated with the software unless explicitly disclaimed in\n           individual files.\n         \n           The authors hereby grant permission to use, copy, modify, distribute,\n           and license this software and its documentation for any purpose, provided\n           that existing copyright notices are retained in all copies and that this\n           notice is included verbatim in any distributions. No written agreement,\n           license, or royalty fee is required for any of the authorized uses.\n           Modifications to this software may be copyrighted by their authors\n           and need not follow the licensing terms described here, provided that\n           the new terms are clearly indicated on the first page of each file where\n           they apply.\n         \n           IN NO EVENT SHALL THE AUTHORS OR DISTRIBUTORS BE LIABLE TO ANY PARTY\n           FOR DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES\n           ARISING OUT OF THE USE OF THIS SOFTWARE, ITS DOCUMENTATION, OR ANY\n           DERIVATIVES THEREOF, EVEN IF THE AUTHORS HAVE BEEN ADVISED OF THE\n           POSSIBILITY OF SUCH DAMAGE.\n         \n           THE AUTHORS AND DISTRIBUTORS SPECIFICALLY DISCLAIM ANY WARRANTIES,\n           INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY,\n           FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.  THIS SOFTWARE\n           IS PROVIDED ON AN \"AS IS\" BASIS, AND THE AUTHORS AND DISTRIBUTORS HAVE\n           NO OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR\n           MODIFICATIONS.\n         \n           GOVERNMENT USE: If you are acquiring this software on behalf of the\n           U.S. government, the Government shall have only \"Restricted Rights\"\n           in the software and related documentation as defined in the Federal\n           Acquisition Regulations (FARs) in Clause 52.227.19 (c) (2).  If you\n           are acquiring the software on behalf of the Department of Defense, the\n           software shall be classified as \"Commercial Computer Software\" and the\n           Government shall have only \"Restricted Rights\" as defined in Clause\n           252.227-7013 (c) (1) of DFARs.  Notwithstanding the foregoing, the\n           authors grant the U.S. Government and others acting in its behalf\n           permission to use and distribute the software in accordance with the\n           terms specified in this license.",
+      "version": "3.0.2"
+    },
+    "protobuf": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "protobuf-7.36.2-cp310-abi3-manylinux2014_x86_64.whl",
+          "sha256": "89f23aa53c24553a2416fd4fd1ec06f74fa42b14b546d8883128813f775bbfd2",
+          "url": "https://files.pythonhosted.org/packages/db/f3/3996583dd2906297a637af12114deddf7658af6e683fedb83be061983fb5/protobuf-7.36.2-cp310-abi3-manylinux2014_x86_64.whl"
+        },
+        "macos-arm64": {
+          "filename": "protobuf-7.36.2-cp310-abi3-macosx_10_9_universal2.whl",
+          "sha256": "cbc70b17ee27e28894c7fee8bb04be1abead49e936bc70eb60052531eee2079e",
+          "url": "https://files.pythonhosted.org/packages/32/72/98342feb672507c8f3a69e34b4fa8961f608edba5c1a48a6f47156d92cb5/protobuf-7.36.2-cp310-abi3-macosx_10_9_universal2.whl"
+        },
+        "macos-x86_64": {
+          "filename": "protobuf-7.36.2-cp310-abi3-macosx_10_9_universal2.whl",
+          "sha256": "cbc70b17ee27e28894c7fee8bb04be1abead49e936bc70eb60052531eee2079e",
+          "url": "https://files.pythonhosted.org/packages/32/72/98342feb672507c8f3a69e34b4fa8961f608edba5c1a48a6f47156d92cb5/protobuf-7.36.2-cp310-abi3-macosx_10_9_universal2.whl"
+        }
+      },
+      "license": "3-Clause BSD License",
+      "version": "7.36.2"
+    },
+    "pycryptodome": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "pycryptodome-4.2.0-cp39-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+          "sha256": "76777686de3a354c41710727988c2284448d5db9bd82e5ddb9a9b6710d17d9df",
+          "url": "https://files.pythonhosted.org/packages/18/88/33df6b1176b63aed427745696d88ed38f7877104cf0f6004ee9ad600f897/pycryptodome-4.2.0-cp39-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
+        },
+        "macos-arm64": {
+          "filename": "pycryptodome-4.2.0-cp39-abi3-macosx_10_9_universal2.whl",
+          "sha256": "3e430168f767ecec60c1f850df4abbd0b9f94786b9cc8041a00e976f6d5190c6",
+          "url": "https://files.pythonhosted.org/packages/41/4c/954a9a1451f7bcc89d66db39bf6499ef5701e8ff35b6c898c659a7ec8546/pycryptodome-4.2.0-cp39-abi3-macosx_10_9_universal2.whl"
+        },
+        "macos-x86_64": {
+          "filename": "pycryptodome-4.2.0-cp39-abi3-macosx_10_9_x86_64.whl",
+          "sha256": "aea22120791b4534a27e39fc01d91265a249ba72dbd682a8a5c1adee475d5483",
+          "url": "https://files.pythonhosted.org/packages/6e/84/23f8013dce07cbc8c8b9ed878972294230a1edc49a6b64d271c77c878c29/pycryptodome-4.2.0-cp39-abi3-macosx_10_9_x86_64.whl"
+        }
+      },
+      "license": "BSD-2-Clause AND Unlicense AND MIT",
+      "version": "4.2.0"
+    },
+    "python-dateutil": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "python_dateutil-3.0.0-py2.py3-none-any.whl",
+          "sha256": "3c79630202e4152c6add678446984236efe4f57e84d8e892aab0637bab82e9fd",
+          "url": "https://files.pythonhosted.org/packages/5a/17/cebee01d1c0c1441174cf0456ddc91b280d79acb65340c05e41d77866ee8/python_dateutil-3.0.0-py2.py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "python_dateutil-3.0.0-py2.py3-none-any.whl",
+          "sha256": "3c79630202e4152c6add678446984236efe4f57e84d8e892aab0637bab82e9fd",
+          "url": "https://files.pythonhosted.org/packages/5a/17/cebee01d1c0c1441174cf0456ddc91b280d79acb65340c05e41d77866ee8/python_dateutil-3.0.0-py2.py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "python_dateutil-3.0.0-py2.py3-none-any.whl",
+          "sha256": "3c79630202e4152c6add678446984236efe4f57e84d8e892aab0637bab82e9fd",
+          "url": "https://files.pythonhosted.org/packages/5a/17/cebee01d1c0c1441174cf0456ddc91b280d79acb65340c05e41d77866ee8/python_dateutil-3.0.0-py2.py3-none-any.whl"
+        }
+      },
+      "license": "Dual License",
+      "version": "3.0.0"
+    },
+    "referencing": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "referencing-0.37.0-py3-none-any.whl",
+          "sha256": "381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231",
+          "url": "https://files.pythonhosted.org/packages/2c/58/ca301544e1fa93ed4f80d724bf5b194f6e4b945841c5bfd555878eea9fcb/referencing-0.37.0-py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "referencing-0.37.0-py3-none-any.whl",
+          "sha256": "381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231",
+          "url": "https://files.pythonhosted.org/packages/2c/58/ca301544e1fa93ed4f80d724bf5b194f6e4b945841c5bfd555878eea9fcb/referencing-0.37.0-py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "referencing-0.37.0-py3-none-any.whl",
+          "sha256": "381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231",
+          "url": "https://files.pythonhosted.org/packages/2c/58/ca301544e1fa93ed4f80d724bf5b194f6e4b945841c5bfd555878eea9fcb/referencing-0.37.0-py3-none-any.whl"
+        }
+      },
+      "license": "MIT",
+      "version": "0.37.0"
+    },
+    "requests": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "requests-2.34.2-py3-none-any.whl",
+          "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0",
+          "url": "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "requests-2.34.2-py3-none-any.whl",
+          "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0",
+          "url": "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "requests-2.34.2-py3-none-any.whl",
+          "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0",
+          "url": "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl"
+        }
+      },
+      "license": "Apache-2.0",
+      "version": "2.34.2"
+    },
+    "requests-toolbelt": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "requests_toolbelt-1.0.0-py2.py3-none-any.whl",
+          "sha256": "cccfdd665f0a24fcf4726e690f65639d272bb0637b9b92dfd91a5568ccf6bd06",
+          "url": "https://files.pythonhosted.org/packages/3f/51/d4db610ef29373b879047326cbf6fa98b6c1969d6f6dc423279de2b1be2c/requests_toolbelt-1.0.0-py2.py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "requests_toolbelt-1.0.0-py2.py3-none-any.whl",
+          "sha256": "cccfdd665f0a24fcf4726e690f65639d272bb0637b9b92dfd91a5568ccf6bd06",
+          "url": "https://files.pythonhosted.org/packages/3f/51/d4db610ef29373b879047326cbf6fa98b6c1969d6f6dc423279de2b1be2c/requests_toolbelt-1.0.0-py2.py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "requests_toolbelt-1.0.0-py2.py3-none-any.whl",
+          "sha256": "cccfdd665f0a24fcf4726e690f65639d272bb0637b9b92dfd91a5568ccf6bd06",
+          "url": "https://files.pythonhosted.org/packages/3f/51/d4db610ef29373b879047326cbf6fa98b6c1969d6f6dc423279de2b1be2c/requests_toolbelt-1.0.0-py2.py3-none-any.whl"
+        }
+      },
+      "license": "Apache 2.0",
+      "version": "1.0.0"
+    },
+    "rpds-py": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "rpds_py-2026.9.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+          "sha256": "addeda51556dac7c1a2f14cda62db8b621cd12afba3091d03a96c72932387eab",
+          "url": "https://files.pythonhosted.org/packages/1d/6d/b26eb1e75395925b3a142ed351cbed2ec8212f5c9d937aee3df32c701baa/rpds_py-2026.9.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+        },
+        "macos-arm64": {
+          "filename": "rpds_py-2026.9.1-cp312-cp312-macosx_11_0_arm64.whl",
+          "sha256": "e21c1429e205828ea886a2293a4a2c8e01f4c25d9893ca330e97a6cf73f52e7b",
+          "url": "https://files.pythonhosted.org/packages/90/81/ac6a0d064982251856ce009c9e1dd51a34110b3c055aa7d1aad18b4899a3/rpds_py-2026.9.1-cp312-cp312-macosx_11_0_arm64.whl"
+        },
+        "macos-x86_64": {
+          "filename": "rpds_py-2026.9.1-cp312-cp312-macosx_10_12_x86_64.whl",
+          "sha256": "50906f5aea24b5a865cbd0a589698288631d9f3a54c3a937c83aefa95a0d14af",
+          "url": "https://files.pythonhosted.org/packages/5d/34/a828586ea3329fbb50895b50e9cf98ca3d924a9f41a0b26d443bff1b3794/rpds_py-2026.9.1-cp312-cp312-macosx_10_12_x86_64.whl"
+        }
+      },
+      "license": "MIT",
+      "version": "2026.9.1"
+    },
+    "setuptools": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "setuptools-84.2.1-py3-none-any.whl",
+          "sha256": "ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2",
+          "url": "https://files.pythonhosted.org/packages/ef/55/6dc6d6bb953bdfc52519a0059592c52b6e3b8ad51cf8256dffceb55b0610/setuptools-84.2.1-py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "setuptools-84.2.1-py3-none-any.whl",
+          "sha256": "ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2",
+          "url": "https://files.pythonhosted.org/packages/ef/55/6dc6d6bb953bdfc52519a0059592c52b6e3b8ad51cf8256dffceb55b0610/setuptools-84.2.1-py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "setuptools-84.2.1-py3-none-any.whl",
+          "sha256": "ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2",
+          "url": "https://files.pythonhosted.org/packages/ef/55/6dc6d6bb953bdfc52519a0059592c52b6e3b8ad51cf8256dffceb55b0610/setuptools-84.2.1-py3-none-any.whl"
+        }
+      },
+      "license": "MIT",
+      "version": "84.2.1"
+    },
+    "simplejson": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "simplejson-4.2.0-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl",
+          "sha256": "8c1e156ad810704994439719b9c03694e267052d4938ca188d91a1769d6f742b",
+          "url": "https://files.pythonhosted.org/packages/2d/29/fb579920d8ec86ebb1f9a8cc8c9d17f3dcdb32a885dbd8332d21aa855575/simplejson-4.2.0-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl"
+        },
+        "macos-arm64": {
+          "filename": "simplejson-4.2.0-cp312-cp312-macosx_11_0_arm64.whl",
+          "sha256": "c490ec62ed1b66a27afd5085e743e7f93b745c515257373de8433f4d51e5c3bb",
+          "url": "https://files.pythonhosted.org/packages/27/ec/bad733020b3eef7e8414385fdfd4ba6afd5b8a56a0c4eb4eaa21be380f2a/simplejson-4.2.0-cp312-cp312-macosx_11_0_arm64.whl"
+        },
+        "macos-x86_64": {
+          "filename": "simplejson-4.2.0-cp312-cp312-macosx_10_13_x86_64.whl",
+          "sha256": "f458e7a2dd3d1b8b90dc12900c9e5a0f8b863fa7b02286fee13086962244f70a",
+          "url": "https://files.pythonhosted.org/packages/4d/cf/b1fc78e122ab98a2bae6fd6d66dec18d1ed436cafb875278f4d9e7677cbd/simplejson-4.2.0-cp312-cp312-macosx_10_13_x86_64.whl"
+        }
+      },
+      "license": "MIT OR AFL-2.1",
+      "version": "4.2.0"
+    },
+    "six": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "six-1.17.0-py2.py3-none-any.whl",
+          "sha256": "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274",
+          "url": "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "six-1.17.0-py2.py3-none-any.whl",
+          "sha256": "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274",
+          "url": "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "six-1.17.0-py2.py3-none-any.whl",
+          "sha256": "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274",
+          "url": "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl"
+        }
+      },
+      "license": "MIT",
+      "version": "1.17.0"
+    },
+    "typing_extensions": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "typing_extensions-4.16.0-py3-none-any.whl",
+          "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+          "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "typing_extensions-4.16.0-py3-none-any.whl",
+          "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+          "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "typing_extensions-4.16.0-py3-none-any.whl",
+          "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+          "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl"
+        }
+      },
+      "license": "PSF-2.0",
+      "version": "4.16.0"
+    },
+    "tzdata": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "tzdata-2026.6-py2.py3-none-any.whl",
+          "sha256": "0a10eec6e13ef16b627fabed9a5f2ba61a62b1c67f327305f4e7e412a70b4aec",
+          "url": "https://files.pythonhosted.org/packages/0a/66/9a06c2227fedfd4919f0eaaa8b94377d9730882a7e4f95823c9a331ab5e1/tzdata-2026.6-py2.py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "tzdata-2026.6-py2.py3-none-any.whl",
+          "sha256": "0a10eec6e13ef16b627fabed9a5f2ba61a62b1c67f327305f4e7e412a70b4aec",
+          "url": "https://files.pythonhosted.org/packages/0a/66/9a06c2227fedfd4919f0eaaa8b94377d9730882a7e4f95823c9a331ab5e1/tzdata-2026.6-py2.py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "tzdata-2026.6-py2.py3-none-any.whl",
+          "sha256": "0a10eec6e13ef16b627fabed9a5f2ba61a62b1c67f327305f4e7e412a70b4aec",
+          "url": "https://files.pythonhosted.org/packages/0a/66/9a06c2227fedfd4919f0eaaa8b94377d9730882a7e4f95823c9a331ab5e1/tzdata-2026.6-py2.py3-none-any.whl"
+        }
+      },
+      "license": "Apache-2.0",
+      "version": "2026.6"
+    },
+    "urllib3": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "urllib3-2.8.0-py3-none-any.whl",
+          "sha256": "0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3",
+          "url": "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "urllib3-2.8.0-py3-none-any.whl",
+          "sha256": "0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3",
+          "url": "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "urllib3-2.8.0-py3-none-any.whl",
+          "sha256": "0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3",
+          "url": "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl"
+        }
+      },
+      "license": "MIT",
+      "version": "2.8.0"
+    },
+    "websockets": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "websockets-15.0.1-cp312-cp312-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+          "sha256": "64dee438fed052b52e4f98f76c5790513235efaa1ef7f3f2192c392cd7c91b65",
+          "url": "https://files.pythonhosted.org/packages/14/8f/aa61f528fba38578ec553c145857a181384c72b98156f858ca5c8e82d9d3/websockets-15.0.1-cp312-cp312-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+        },
+        "macos-arm64": {
+          "filename": "websockets-15.0.1-cp312-cp312-macosx_11_0_arm64.whl",
+          "sha256": "0701bc3cfcb9164d04a14b149fd74be7347a530ad3bbf15ab2c678a2cd3dd9a2",
+          "url": "https://files.pythonhosted.org/packages/3d/69/1a681dd6f02180916f116894181eab8b2e25b31e484c5d0eae637ec01f7c/websockets-15.0.1-cp312-cp312-macosx_11_0_arm64.whl"
+        },
+        "macos-x86_64": {
+          "filename": "websockets-15.0.1-cp312-cp312-macosx_10_13_x86_64.whl",
+          "sha256": "592f1a9fe869c778694f0aa806ba0374e97648ab57936f092fd9d87f8bc03665",
+          "url": "https://files.pythonhosted.org/packages/f4/71/809a0f5f6a06522af902e0f2ea2757f71ead94610010cf570ab5c98e99ed/websockets-15.0.1-cp312-cp312-macosx_10_13_x86_64.whl"
+        }
+      },
+      "license": "BSD-3-Clause",
+      "version": "15.0.1"
+    },
+    "wheel": {
+      "artifacts": {
+        "linux-x86_64": {
+          "filename": "wheel-0.48.0-py3-none-any.whl",
+          "sha256": "3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab",
+          "url": "https://files.pythonhosted.org/packages/2e/29/69cfbb602cd91690c55d38ba9fe53e6a7e76a6fa647bf38f19c138d25449/wheel-0.48.0-py3-none-any.whl"
+        },
+        "macos-arm64": {
+          "filename": "wheel-0.48.0-py3-none-any.whl",
+          "sha256": "3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab",
+          "url": "https://files.pythonhosted.org/packages/2e/29/69cfbb602cd91690c55d38ba9fe53e6a7e76a6fa647bf38f19c138d25449/wheel-0.48.0-py3-none-any.whl"
+        },
+        "macos-x86_64": {
+          "filename": "wheel-0.48.0-py3-none-any.whl",
+          "sha256": "3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab",
+          "url": "https://files.pythonhosted.org/packages/2e/29/69cfbb602cd91690c55d38ba9fe53e6a7e76a6fa647bf38f19c138d25449/wheel-0.48.0-py3-none-any.whl"
+        }
+      },
+      "license": "MIT",
+      "version": "0.48.0"
+    }
+  },
+  "platforms": {
+    "linux-x86_64": {
+      "minimum_system": "glibc 2.28; optional services require systemd and systemd-creds",
+      "python": {
+        "filename": "cpython-3.12.16+20261026-x86_64-unknown-linux-gnu-install_only.tar.gz",
+        "release": "20261026",
+        "sha256": "6a79e922e50006b601f29e688407659da1c2b86ebcd4e9c7254cf234be8b89de",
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-x86_64-unknown-linux-gnu-install_only.tar.gz",
+        "version": "3.12.16"
+      },
+      "runner": "ubuntu-22.04"
+    },
+    "macos-arm64": {
+      "minimum_system": "macOS 14.0",
+      "python": {
+        "filename": "cpython-3.12.16+20261026-aarch64-apple-darwin-install_only.tar.gz",
+        "release": "20261026",
+        "sha256": "fbf4afef53c2a6b72bb741bc06d5671a9dfaf87bd84e5aa73ac9b3d0d589f14e",
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-aarch64-apple-darwin-install_only.tar.gz",
+        "version": "3.12.16"
+      },
+      "runner": "macos-15"
+    },
+    "macos-x86_64": {
+      "minimum_system": "macOS 14.0",
+      "python": {
+        "filename": "cpython-3.12.16+20261026-x86_64-apple-darwin-install_only.tar.gz",
+        "release": "20261026",
+        "sha256": "a962e47df522889eaa7ff0d6a56203f1079f68aabb65ffdbe8455f362bc769f3",
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-x86_64-apple-darwin-install_only.tar.gz",
+        "version": "3.12.16"
+      },
+      "runner": "macos-15-intel"
+    }
+  },
+  "python_licenses": [
+    {
+      "filename": "LICENSE",
+      "sha256": "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE"
+    },
+    {
+      "filename": "LICENSE.bdb.txt",
+      "sha256": "3bdff06e69991c94664f2ef5c5f8096f60b7dbec071756ea6cc26b445e06ec5b",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE.bdb.txt"
+    },
+    {
+      "filename": "LICENSE.bzip2.txt",
+      "sha256": "1f38bbc7caacafd65169276d759c0d88c991b753b643ce35d0e45ea1971dd441",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE.bzip2.txt"
+    },
+    {
+      "filename": "LICENSE.cpython.txt",
+      "sha256": "86e61415828a8b5b06ec8d024e6f086ce155a8b85fd0c419c0ba4dc004e74fdd",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE.cpython.txt"
+    },
+    {
+      "filename": "LICENSE.expat.txt",
+      "sha256": "122f2c27000472a201d337b9b31f7eb2b52d091b02857061a8880371612d9534",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE.expat.txt"
+    },
+    {
+      "filename": "LICENSE.libX11.txt",
+      "sha256": "2daec087a88e7c9b8082557cdeebad5bbb8155a4137472f0b22e269cd99d0c1e",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE.libX11.txt"
+    },
+    {
+      "filename": "LICENSE.libXau.txt",
+      "sha256": "56abe29bb1d9806a9e04fa9f80fed2c0f18027594df3f098148d814aef6bddfa",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE.libXau.txt"
+    },
+    {
+      "filename": "LICENSE.libedit.txt",
+      "sha256": "29cea33c32bbc9785142386377915612a2fa786482c46843383384aded2e09b1",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE.libedit.txt"
+    },
+    {
+      "filename": "LICENSE.libffi.txt",
+      "sha256": "deaf3a42effb551a5b140fa9afefed183a27f1341c6d1bf430d106a5e6931fc0",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE.libffi.txt"
+    },
+    {
+      "filename": "LICENSE.liblzma.txt",
+      "sha256": "9a4062de0a2c388a98cf35a35d348b62fa97c838a71c3c28ee1a2d7d0a565b02",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE.liblzma.txt"
+    },
+    {
+      "filename": "LICENSE.libuuid.txt",
+      "sha256": "122ee1f7e258f2c3c0e538a75c037684f420454bf3850ddc74ce750bbf5fe86b",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE.libuuid.txt"
+    },
+    {
+      "filename": "LICENSE.libxcb.txt",
+      "sha256": "c5ffbfeaa501071ceeb97b7de2c0d703fdaa35de01c0fb6cbac1c28453a3e9fd",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE.libxcb.txt"
+    },
+    {
+      "filename": "LICENSE.mpdecimal.txt",
+      "sha256": "669512af7219f58be03a398766d7c9da11a3b3df9d3f05cb74c5ceca25c8da3b",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE.mpdecimal.txt"
+    },
+    {
+      "filename": "LICENSE.ncurses.txt",
+      "sha256": "87a4c4442337b8968ef956031c406b74f9cb7149b7ba87311bdaba534816201c",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE.ncurses.txt"
+    },
+    {
+      "filename": "LICENSE.openssl-3.txt",
+      "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE.openssl-3.txt"
+    },
+    {
+      "filename": "LICENSE.sqlite.txt",
+      "sha256": "38bef3d28b24f145ea293bd3b6eb4b20396982abc8303128fb493986ea5bc719",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE.sqlite.txt"
+    },
+    {
+      "filename": "LICENSE.tcl.txt",
+      "sha256": "c0a69a2bfd757361ec7e6143973b103c90409316b49e9c88db26ad6388e79f16",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE.tcl.txt"
+    },
+    {
+      "filename": "LICENSE.tix.txt",
+      "sha256": "3ac5cdd0bef6c43ce34c6a7ced452081d9e5a0bf94082b9f9147d23ec9e214f5",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE.tix.txt"
+    },
+    {
+      "filename": "LICENSE.zlib-ng.txt",
+      "sha256": "6c9f0d975b41afaa34d22f55bb8986ce69e5cb7ad327cb2b28820cd425edf5ee",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE.zlib-ng.txt"
+    },
+    {
+      "filename": "LICENSE.zlib.txt",
+      "sha256": "818922b2620f12801a12bf78e399644a30990e66824abd8ca8ec24d451d6f92c",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE.zlib.txt"
+    },
+    {
+      "filename": "LICENSE.zstd.txt",
+      "sha256": "7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8",
+      "url": "https://raw.githubusercontent.com/astral-sh/python-build-standalone/fa506e0858ac9f2cc5b289c137b888a2aa24d1ee/LICENSE.zstd.txt"
+    }
+  ],
+  "python_source": "astral-sh/python-build-standalone",
+  "python_source_commit": "fa506e0858ac9f2cc5b289c137b888a2aa24d1ee",
+  "release_platforms": [
+    "macos-arm64"
+  ],
+  "schema_version": 1
+}

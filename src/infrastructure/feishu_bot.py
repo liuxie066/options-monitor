@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from typing import Any, Callable
-from urllib.parse import quote
 
+from src.application.channels.plugins import load_channel_plugin
 from src.infrastructure.feishu_bitable import FeishuPermanentError, http_json, with_tenant_token_retry
 
 
@@ -48,68 +47,19 @@ def reply_message(
     reply_in_thread: bool | None = None,
     http_json_fn: HttpJsonFn = http_json,
 ) -> dict[str, Any]:
-    message_id_value = str(message_id or "").strip()
-    msg_type_value = str(msg_type or "").strip()
-    if not message_id_value:
-        raise ValueError("message_id is required")
-    if msg_type_value not in _FEISHU_REPLY_MESSAGE_TYPES:
-        raise ValueError(f"unsupported Feishu reply msg_type: {msg_type_value or '<empty>'}")
-
-    content_value = dict(content) if isinstance(content, dict) else None
-    if content_value is None and msg_type_value == "text":
-        text_value = str(text or "").strip()
-        if not text_value:
-            raise ValueError("text is required")
-        content_value = {"text": text_value}
-    if not content_value:
-        raise ValueError("content is required")
-
-    url = f"https://open.feishu.cn/open-apis/im/v1/messages/{quote(message_id_value, safe='')}/reply"
-    payload: dict[str, Any] = {
-        "msg_type": msg_type_value,
-        "content": json.dumps(content_value, ensure_ascii=False),
-    }
-    if uuid:
-        payload["uuid"] = str(uuid)
-    if reply_in_thread is not None:
-        payload["reply_in_thread"] = bool(reply_in_thread)
-
-    request_body_bytes = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
-    if request_body_bytes > FEISHU_REPLY_REQUEST_BUDGET_BYTES:
-        canonical_content = json.dumps(
-            content_value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        raise FeishuPermanentError(
-            "feishu reply request exceeds local byte budget",
-            response={
-                "local_error_code": FEISHU_REPLY_TOO_LARGE,
-                "http_status": None,
-                "feishu_code": None,
-                "http_attempts": [],
-                "request_body_bytes": request_body_bytes,
-                "request_body_budget_bytes": FEISHU_REPLY_REQUEST_BUDGET_BYTES,
-                "content_sha256": hashlib.sha256(canonical_content.encode("utf-8")).hexdigest(),
-            },
-        )
-
-    def _send(tenant_token: str) -> dict[str, Any]:
-        if before_send is not None:
-            before_send()
-        return http_json_fn(
-            "POST",
-            url,
-            payload,
-            headers={
-                "Authorization": f"Bearer {tenant_token}",
-                "Content-Type": "application/json; charset=utf-8",
-            },
-            retry_max_attempts=1,
-        )
-
-    return with_tenant_token_retry(app_id, app_secret, _send)
+    return load_channel_plugin("feishu", module="bot").reply_message(
+        app_id=app_id,
+        app_secret=app_secret,
+        before_send=before_send,
+        message_id=message_id,
+        msg_type=msg_type,
+        content=content,
+        text=text,
+        uuid=uuid,
+        reply_in_thread=reply_in_thread,
+        http_json_fn=http_json_fn,
+        token_retry_fn=with_tenant_token_retry,
+    )
 
 
 def reply_text_message(
@@ -140,40 +90,17 @@ def add_message_reaction(
     app_secret: str,
     message_id: str,
     emoji_type: str,
+    before_send: Callable[[], None] | None = None,
     http_json_fn: HttpJsonFn = http_json,
 ) -> dict[str, Any]:
-    message_id_value = str(message_id or "").strip()
-    emoji_type_value = str(emoji_type or "").strip()
-    if not (any(char.islower() for char in emoji_type_value) and any(char.isupper() for char in emoji_type_value)):
-        emoji_type_value = emoji_type_value.upper()
-    if not message_id_value:
-        raise ValueError("message_id is required")
-    if not emoji_type_value:
-        raise ValueError("emoji_type is required")
-
-    url = f"https://open.feishu.cn/open-apis/im/v1/messages/{quote(message_id_value, safe='')}/reactions"
-    payload = {"reaction_type": {"emoji_type": emoji_type_value}}
-
-    def _send(tenant_token: str) -> dict[str, Any]:
-        return http_json_fn(
-            "POST",
-            url,
-            payload,
-            headers={
-                "Authorization": f"Bearer {tenant_token}",
-                "Content-Type": "application/json; charset=utf-8",
-            },
-            timeout=2,
-            retry_max_attempts=1,
-        )
-
-    return with_tenant_token_retry(
-        app_id,
-        app_secret,
-        _send,
-        token_timeout=2,
-        token_retry_max_attempts=1,
-        token_lock_timeout=0.0,
+    return load_channel_plugin("feishu", module="bot").add_message_reaction(
+        app_id=app_id,
+        app_secret=app_secret,
+        message_id=message_id,
+        emoji_type=emoji_type,
+        before_send=before_send,
+        http_json_fn=http_json_fn,
+        token_retry_fn=with_tenant_token_retry,
     )
 
 
@@ -188,62 +115,17 @@ def send_message(
     log_fn: Callable[[dict[str, Any]], Any] | None = None,
     http_json_fn: HttpJsonFn = http_json,
 ) -> dict[str, Any]:
-    open_id_value = str(open_id or "").strip()
-    msg_type_value = str(msg_type or "").strip()
-    content_value = dict(content) if isinstance(content, dict) else {}
-    if not open_id_value:
-        raise ValueError("open_id is required")
-    if msg_type_value not in _FEISHU_SEND_MESSAGE_TYPES:
-        raise ValueError(f"unsupported Feishu send msg_type: {msg_type_value or '<empty>'}")
-    if not content_value:
-        raise ValueError("content is required")
-
-    request_path = "/open-apis/im/v1/messages?receive_id_type=open_id"
-    url = f"https://open.feishu.cn{request_path}"
-    payload: dict[str, Any] = {
-        "receive_id": open_id_value,
-        "msg_type": msg_type_value,
-        "content": json.dumps(content_value, ensure_ascii=False),
-    }
-    if uuid:
-        payload["uuid"] = str(uuid)
-
-    request_body_bytes = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
-    if request_body_bytes > FEISHU_SEND_REQUEST_BUDGET_BYTES:
-        canonical_content = json.dumps(
-            content_value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        raise FeishuPermanentError(
-            "feishu send request exceeds local byte budget",
-            response={
-                "local_error_code": FEISHU_SEND_TOO_LARGE,
-                "http_status": None,
-                "feishu_code": None,
-                "http_attempts": [],
-                "request_body_bytes": request_body_bytes,
-                "request_body_budget_bytes": FEISHU_SEND_REQUEST_BUDGET_BYTES,
-                "content_sha256": hashlib.sha256(canonical_content.encode("utf-8")).hexdigest(),
-            },
-        )
-
-    def _send(tenant_token: str) -> dict[str, Any]:
-        return http_json_fn(
-            "POST",
-            url,
-            payload,
-            headers={
-                "Authorization": f"Bearer {tenant_token}",
-                "Content-Type": "application/json; charset=utf-8",
-            },
-            retry_max_attempts=(3 if uuid else 1),
-            log_fn=log_fn,
-            log_success_attempts=bool(log_fn),
-        )
-
-    return with_tenant_token_retry(app_id, app_secret, _send)
+    return load_channel_plugin("feishu", module="bot").send_message(
+        app_id=app_id,
+        app_secret=app_secret,
+        open_id=open_id,
+        msg_type=msg_type,
+        content=content,
+        uuid=uuid,
+        log_fn=log_fn,
+        http_json_fn=http_json_fn,
+        token_retry_fn=with_tenant_token_retry,
+    )
 
 
 def send_text_message(
@@ -256,38 +138,16 @@ def send_text_message(
     log_fn: Callable[[dict[str, Any]], Any] | None = None,
     http_json_fn: HttpJsonFn = http_json,
 ) -> dict[str, Any]:
-    open_id_value = str(open_id or "").strip()
-    text_value = str(text or "").strip()
-    if not open_id_value:
-        raise ValueError("open_id is required")
-    if not text_value:
-        raise ValueError("text is required")
-
-    request_path = "/open-apis/im/v1/messages?receive_id_type=open_id"
-    url = f"https://open.feishu.cn{request_path}"
-    payload = {
-        "receive_id": open_id_value,
-        "msg_type": "text",
-        "content": json.dumps({"text": text_value}, ensure_ascii=False),
-    }
-    if uuid:
-        payload["uuid"] = str(uuid)
-
-    def _send(tenant_token: str) -> dict[str, Any]:
-        return http_json_fn(
-            "POST",
-            url,
-            payload,
-            headers={
-                "Authorization": f"Bearer {tenant_token}",
-                "Content-Type": "application/json; charset=utf-8",
-            },
-            retry_max_attempts=(3 if uuid else 1),
-            log_fn=log_fn,
-            log_success_attempts=bool(log_fn),
-        )
-
-    return with_tenant_token_retry(app_id, app_secret, _send)
+    return load_channel_plugin("feishu", module="bot").send_text_message(
+        app_id=app_id,
+        app_secret=app_secret,
+        open_id=open_id,
+        text=text,
+        uuid=uuid,
+        log_fn=log_fn,
+        http_json_fn=http_json_fn,
+        token_retry_fn=with_tenant_token_retry,
+    )
 
 
 FEISHU_POST_REQUEST_BUDGET_BYTES = 28 * 1024
@@ -329,6 +189,20 @@ def _post_md_paragraphs(markdown: str) -> list[list[dict[str, str]]]:
     return paragraphs
 
 
+def build_message_payload(
+    *, open_id: str, msg_type: str, content: dict[str, Any], uuid: str | None = None,
+) -> dict[str, Any]:
+    """Canonical send body shared by preparation budgeting and the actual sender."""
+    payload = {
+        "receive_id": str(open_id or "").strip(),
+        "msg_type": msg_type,
+        "content": json.dumps(content, ensure_ascii=False),
+    }
+    if uuid:
+        payload["uuid"] = str(uuid)
+    return payload
+
+
 def build_post_message_payload(*, open_id: str, markdown: str, uuid: str | None = None) -> dict[str, Any]:
     """Canonical post body shared by preparation budgeting and the actual sender."""
     payload = {
@@ -363,44 +237,13 @@ def send_post_message(
     log_fn: Callable[[dict[str, Any]], Any] | None = None,
     http_json_fn: HttpJsonFn = http_json,
 ) -> dict[str, Any]:
-    open_id_value = str(open_id or "").strip()
-    markdown_value = str(markdown or "").strip()
-    if not open_id_value:
-        raise ValueError("open_id is required")
-    if not markdown_value:
-        raise ValueError("markdown is required")
-
-    request_path = "/open-apis/im/v1/messages?receive_id_type=open_id"
-    url = f"https://open.feishu.cn{request_path}"
-    payload = build_post_message_payload(open_id=open_id_value, markdown=markdown_value, uuid=uuid)
-    request_body_bytes = feishu_request_body_bytes(payload)
-    if request_body_bytes > FEISHU_POST_REQUEST_BUDGET_BYTES:
-        raise FeishuPermanentError(
-            "feishu post request exceeds local byte budget",
-            response={
-                "local_error_code": FEISHU_POST_TOO_LARGE,
-                "http_status": None,
-                "feishu_code": None,
-                "http_attempts": [],
-                "request_body_bytes": request_body_bytes,
-                "request_body_budget_bytes": FEISHU_POST_REQUEST_BUDGET_BYTES,
-                "normalized_markdown_chars": len(markdown_value),
-                "normalized_markdown_sha256": hashlib.sha256(markdown_value.encode("utf-8")).hexdigest(),
-            },
-        )
-
-    def _send(tenant_token: str) -> dict[str, Any]:
-        return http_json_fn(
-            "POST",
-            url,
-            payload,
-            headers={
-                "Authorization": f"Bearer {tenant_token}",
-                "Content-Type": "application/json; charset=utf-8",
-            },
-            retry_max_attempts=(3 if uuid else 1),
-            log_fn=log_fn,
-            log_success_attempts=bool(log_fn),
-        )
-
-    return with_tenant_token_retry(app_id, app_secret, _send)
+    return load_channel_plugin("feishu", module="bot").send_post_message(
+        app_id=app_id,
+        app_secret=app_secret,
+        open_id=open_id,
+        markdown=markdown,
+        uuid=uuid,
+        log_fn=log_fn,
+        http_json_fn=http_json_fn,
+        token_retry_fn=with_tenant_token_retry,
+    )

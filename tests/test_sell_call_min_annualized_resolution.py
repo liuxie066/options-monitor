@@ -14,7 +14,8 @@ VPY = Path(sys.executable)
 def _available_portfolio_ctx() -> dict:
     return {
         'portfolio_source_name': 'futu',
-        'capacity_authority': {'status': 'available'},
+        'capacity_authority': {"status": "available", "source": "opend", "futu_account_id": "123",
+            "logical_account": "lx", "trd_env": "REAL", "market": "us"},
     }
 
 

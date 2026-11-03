@@ -83,6 +83,21 @@ def select_assignment_positions(
     ]
 
 
+def _direct_broker_baselines(portfolio_evidence: Mapping[str, Any]) -> set[tuple[str, str]]:
+    bindings = portfolio_evidence.get("direct_broker_bindings")
+    if not isinstance(bindings, Mapping):
+        return set()
+    # Application seals these bindings only after validating the cash capacity and complete stock scope.
+    return {
+        (account, normalize_broker(binding["broker_id"])) for account, binding in bindings.items()
+        if isinstance(binding, Mapping) and binding.get("broker_id") in {"futu", "longbridge"}
+        and binding.get("logical_account") == account and binding.get("status") == "available"
+        and binding.get("broker_account_id")
+        and binding.get("trd_env") in ({"REAL", "SIMULATE"} if binding["broker_id"] == "futu" else {"REAL"})
+        and binding.get("market") in {"us", "hk"}
+    }
+
+
 def _money(value: Decimal | int | float | None) -> str | None:
     resolved = _decimal(value)
     if resolved is None:
@@ -210,6 +225,8 @@ def _fee_fact(
                 "fee_native": None,
                 "fee_cny": None,
                 "reason": "unsupported_broker_fee_schedule",
+                "calculator": None,
+                "source": None,
             },
             None,
             False,
@@ -425,7 +442,9 @@ def project_non_option_assignment_assets(
     net = _ZERO
     stock_values: dict[str, Decimal] = {}
     stock_shares: dict[str, Decimal] = {}
+    direct_baselines = _direct_broker_baselines(portfolio_evidence)
     cash_brokers: set[tuple[str, str]] = set()
+    unknown_stock_symbols: set[str] = set()
     rates = portfolio_evidence.get("fx_rates_to_cny")
     explicit_rates = isinstance(rates, Mapping)
     for holding in holdings:
@@ -436,7 +455,9 @@ def project_non_option_assignment_assets(
             continue
         account = _text(holding.get("account")).lower()
         broker = normalize_broker(holding.get("broker")) or _text(holding.get("broker"))
-        if _asset_category(holding) == "cash":
+        if holding.get("asset_balance_status") == "unavailable":
+            reasons.append(f"{account}/{broker}:cash_asset_balance_unavailable")
+        if _asset_category(holding) == "cash" and not unavailable and not partial:
             cash_brokers.add((account, broker))
         symbol = canonical_symbol(holding.get("code"))
         quantity = _decimal(holding.get("quantity"))
@@ -493,8 +514,12 @@ def project_non_option_assignment_assets(
         rate = Decimal(1) if currency == "CNY" else (_positive(rates.get(f"{currency}CNY")) if explicit_rates else quoted_rate)
         if explicit_rates:
             spot = native * rate if native is not None and rate is not None else None
-        if broker != "富途" and (account, broker) not in cash_brokers:
+        if ((broker in {"富途", "长桥"} and (account, broker) not in direct_baselines)
+                or (broker not in {"富途", "长桥"} and (account, broker) not in cash_brokers)):
             reasons.append(f"{account}/{broker}:terminal_baseline_missing")
+            if symbol:
+                unknown_stock_symbols.add(symbol)
+                stock_values.setdefault(symbol, _ZERO)
         if position.get("state_warning"):
             reasons.append(f"{symbol}:option_state_warning")
         if position.get("lifecycle_state") == "conflict" or position.get("reason_state") == "conflict":
@@ -517,7 +542,10 @@ def project_non_option_assignment_assets(
         "basis": POSITION_SIZING_BASIS,
         "net_assets_cny": _money(net) if complete else None,
         "stock_value_cny_by_symbol": {code: _money(value) if complete else None for code, value in stock_values.items()},
-        "stock_shares_by_symbol": {code: _quantity(value) for code, value in stock_shares.items()},
+        "stock_shares_by_symbol": {
+            code: None if code in unknown_stock_symbols else _quantity(stock_shares[code])
+            for code in sorted(stock_shares.keys() | unknown_stock_symbols)
+        },
         "weight_of_net_assets_by_symbol": {code: _rate(value / net) if complete and net > 0 else None for code, value in stock_values.items()},
         "unavailable_reasons": _dedupe_warnings(reasons + (["non_positive_net_assets"] if complete and net <= 0 else [])),
     }
@@ -554,6 +582,11 @@ def project_assignment_scenario(
     quotes = _quote_map(
         [row for row in (portfolio_evidence.get("quotes") or []) if isinstance(row, Mapping)]
     )
+
+    direct_baselines = _direct_broker_baselines(portfolio_evidence)
+
+    def has_baseline(account: str, broker: str) -> bool:
+        return (account, broker) in direct_baselines
 
     cash_rows: list[dict[str, Any]] = []
     security_groups: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -616,6 +649,24 @@ def project_assignment_scenario(
     starting_cash = _ZERO
     cash_complete = not unavailable
     cash_components: list[dict[str, Any]] = []
+    capacity_cash_rows = cash_rows
+    if "capacity_cash_holdings" in portfolio_evidence:
+        capacity_cash_rows = []
+        raw_capacity_cash = portfolio_evidence["capacity_cash_holdings"]
+        if not isinstance(raw_capacity_cash, list) or not raw_capacity_cash:
+            cash_complete = False
+            raw_capacity_cash = []
+        for row in raw_capacity_cash:
+            if not isinstance(row, Mapping):
+                cash_complete = False
+                continue
+            account, broker = _text(row.get("account")).lower(), normalize_broker(row.get("broker"))
+            quantity, value = _decimal(row.get("quantity")), _decimal(row.get("market_value_cny"))
+            if account not in normalized_accounts or not has_baseline(account, broker) or quantity is None:
+                cash_complete = False
+                continue
+            capacity_cash_rows.append({**row, "account": account, "broker": broker,
+                                       "quantity_decimal": quantity, "market_value_decimal": value})
     cash_buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in cash_rows:
         currency = normalize_currency(row.get("currency")) or _text(row.get("currency")).upper()
@@ -626,11 +677,14 @@ def project_assignment_scenario(
         )
         bucket["quantity_native"] += row["quantity_decimal"]
         value = row["market_value_decimal"]
-        if value is None:
+        if value is None or row.get("asset_balance_status") == "unavailable":
             bucket["complete"] = False
         else:
             bucket["opening_value_cny"] += value
-        if row["broker"] == "富途":
+    for row in capacity_cash_rows:
+        currency = normalize_currency(row.get("currency"))
+        value = row["market_value_decimal"]
+        if has_baseline(row["account"], row["broker"]):
             if value is None:
                 cash_complete = False
             else:
@@ -683,12 +737,12 @@ def project_assignment_scenario(
     if isinstance(capacity_fx, Mapping):
         required_currencies = {
             normalize_currency(row.get("currency"))
-            for row in cash_rows
-            if row["broker"] == "富途" and row["quantity_decimal"] != 0
+            for row in capacity_cash_rows
+            if has_baseline(row["account"], row["broker"]) and row["quantity_decimal"] != 0
         } | {
             normalize_currency(row.get("currency"))
             for row in selected_positions
-            if normalize_broker(row.get("broker")) == "富途"
+            if has_baseline(_text(row.get("account")).lower(), normalize_broker(row.get("broker")))
         }
         capacity_fx_complete = all(
             currency == "CNY" or _positive(capacity_fx.get(f"{currency}CNY")) is not None
@@ -702,6 +756,7 @@ def project_assignment_scenario(
         account = _text(option.get("account")).lower()
         broker = normalize_broker(option.get("broker")) or _text(option.get("broker"))
         is_futu = broker == "富途"
+        baseline_available = has_baseline(account, broker)
         symbol = canonical_symbol(option.get("symbol"))
         option_type = _text(option.get("option_type")).lower()
         state_warning = _text(option.get("state_warning"))
@@ -725,15 +780,15 @@ def project_assignment_scenario(
         ):
             warnings.append(f"option[{index}]: required assignment inputs missing; row skipped")
             partial = True
-            if is_futu:
+            if baseline_available:
                 assignment_cash_complete = False
             all_fees_complete = False
-            if is_futu:
+            if baseline_available:
                 fees_complete = False
             continue
 
-        quote = quotes.get(symbol) if is_futu else None
-        if is_futu:
+        quote = quotes.get(symbol) if baseline_available else None
+        if baseline_available:
             spot_native, _quoted_cny, _quoted_rate, quote_error = _quote_values(
                 quote, expected_currency=currency,
             )
@@ -749,7 +804,7 @@ def project_assignment_scenario(
             spot_native = spot_cny = exchange_rate = None
             distribution_incomplete = True
             partial = True
-            warnings.append(f"{account}/{broker}/{symbol}: non-Futu terminal baseline unavailable")
+            warnings.append(f"{account}/{broker}/{symbol}: terminal baseline unavailable")
             unknown_cash_buckets.add((account, broker, currency))
         if spot_cny is None:
             distribution_incomplete = True
@@ -813,15 +868,15 @@ def project_assignment_scenario(
             **fee_fact,
         }
         fee_items.append(fee_item)
-        if fee_cny is not None and is_futu:
+        if fee_cny is not None and baseline_available:
             known_fees += fee_cny
         if not fee_complete:
             all_fees_complete = False
-            if is_futu:
+            if baseline_available:
                 fees_complete = False
             partial = True
 
-        if is_futu:
+        if baseline_available:
             if principal_cny is not None:
                 if option_type == "put":
                     put_outflow += principal_cny
@@ -914,13 +969,13 @@ def project_assignment_scenario(
     for key in sorted(changes):
         change = changes[key]
         existing = security_groups.get(key)
-        opening_shares = existing["opening_shares"] if existing else _ZERO
-        is_futu = key[1] == "富途"
+        baseline_available = has_baseline(key[0], key[1])
+        opening_shares = (existing["opening_shares"] if existing else _ZERO) if baseline_available else None
         ending_shares = (
             opening_shares + change["put_assigned_shares"] - change["call_assigned_shares"]
-            if is_futu else None
+            if baseline_available else None
         )
-        spot_cny = change.get("spot_cny") if is_futu else None
+        spot_cny = change.get("spot_cny") if baseline_available else None
         if spot_cny is None or ending_shares is None:
             ending_value = None
             distribution_incomplete = True
@@ -928,8 +983,8 @@ def project_assignment_scenario(
             ending_value = ending_shares * spot_cny
         opening_value = (
             existing["opening_market_value_cny"]
-            if existing and existing["opening_value_complete"]
-            else (opening_shares * spot_cny if spot_cny is not None and is_futu else None)
+            if existing and existing["opening_value_complete"] and baseline_available
+            else (opening_shares * spot_cny if spot_cny is not None and baseline_available else None)
         )
         category = existing["category"] if existing else "stock"
         security_groups[key] = {
@@ -991,7 +1046,7 @@ def project_assignment_scenario(
         }
         for account in normalized_accounts
     }
-    for component, row in zip(cash_components, (item for item in cash_rows if item["broker"] == "富途")):
+    for component, row in zip(cash_components, (item for item in capacity_cash_rows if has_baseline(item["account"], item["broker"]))):
         bucket = account_cash[component["account"]]
         bucket["cash_components"].append(component)
         value = row["market_value_decimal"]
@@ -1000,7 +1055,7 @@ def project_assignment_scenario(
         else:
             bucket["opening_cash_mmf_cny"] += value
     for assignment, fee_item in zip(assignment_rows, fee_items):
-        if assignment["broker"] != "富途":
+        if not has_baseline(assignment["account"], assignment["broker"]):
             continue
         bucket = account_cash[assignment["account"]]
         principal_cny = _decimal(assignment.get("principal_cny"))
@@ -1356,6 +1411,8 @@ def project_assignment_scenario(
             ),
             "basis": "cross_account_cny_economic_coverage",
             "operational_note": (
+                "Longbridge 仅使用可用现金作保守覆盖，不代表完整现金资产；不证明跨账户或跨币种资金可调拨。"
+                if any(broker == "长桥" for _, broker in direct_baselines) else
                 "仅汇总富途账户的 CNY 经济金额；不证明跨账户或跨币种资金可调拨。"
             ),
         },

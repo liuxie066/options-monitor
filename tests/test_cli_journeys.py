@@ -23,10 +23,10 @@ def _answers(*values):
 
 
 @pytest.fixture
-def source(tmp_path):
+def source(tmp_path, request):
     root = tmp_path / "runtime"
     init_yaml_config(account_label="lx", repo_root=REPO, output_config_yaml_path=root / "config.yaml", runtime_output_dir=root,
-                     markets=["us"], us_symbols=["NVDA"], futu_acc_id="12345", trd_env="REAL", dry_run=False,
+                     markets=["us"], us_symbols=["NVDA"], futu_acc_id="12345", trd_env=getattr(request, "param", "REAL"), dry_run=False,
                      symbol_policies={"NVDA": {"strategy": "csp", "csp_max_strike": 100}})
     return root / "config.yaml"
 
@@ -140,7 +140,7 @@ def test_first_install_all_optional_skipped_is_saved_not_ready(tmp_path, environ
     def init(args, **kwargs):
         return run_setup_init(args, user_home=tmp_path / "home", **kwargs)
     calls = []
-    replies = _answers("us", "", "", environment, "one", "12345", "NVDA", "csp", "100", "", "yes",
+    replies = _answers("us", "", "", environment, "one", "manual", "12345", "NVDA", "csp", "100", "", "yes",
                        "n", "n", "n", "n", "n")
     assert first_install(args, lambda argv: calls.append(argv) or 0, input_fn=replies,
                          base_init=init, repo_base_fn=lambda: REPO) == 0
@@ -153,6 +153,7 @@ def test_first_install_all_optional_skipped_is_saved_not_ready(tmp_path, environ
     assert "OpenD 连接未验证" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("source", ["SIMULATE"], indirect=True)
 def test_first_install_resume_preserves_source_and_experience_no_send(source):
     before = source.read_bytes()
     args = cli.parse_args(["setup", "init", "--output-dir", str(source.parent)])
@@ -206,20 +207,24 @@ def test_explicit_environment_preserves_separate_runtime_and_its_provenance(tmp_
         assert resolved.source == "env:OM_RUNTIME_ROOT"
 
 
-def test_first_install_records_rejected_experience_and_continues(source, capsys):
-    from src.application.experience_mode import validate_experience_request
+def test_first_install_records_failed_scan_returns_nonzero_and_never_offers_real_experience(source, capsys):
     args = cli.parse_args(["setup", "init", "--output-dir", str(source.parent)])
-    def rejected_run(argv):
-        assert "--force" in argv and "--no-send" in argv and "--experience" in argv
-        runtime = json.loads((source.parent / "config.us.json").read_text())
-        try:
-            validate_experience_request(config=runtime, accounts=list(runtime["accounts"]), no_send=True,
-                                        smoke=False, trigger_context={}, opend_phone_verify_continue=False)
-        except ValueError as exc:
-            raise SystemExit(str(exc)) from exc
-        raise AssertionError("REAL account must reject experience before provider access")
-    assert first_install(args, rejected_run, input_fn=_answers("y", "n", "n", "n", "y", "y", "n")) == 0
-    assert "首次运行失败" in capsys.readouterr().out
+    prompts = []
+    answers = iter(("y", "n", "n", "n", "y", "continue", "n"))
+    def answer(prompt):
+        prompts.append(prompt)
+        return next(answers)
+    calls = []
+    def failed_run(argv):
+        calls.append(argv)
+        assert "--force" in argv and "--no-send" in argv and "--experience" not in argv
+        raise SystemExit("SCAN_FAILED")
+    before = source.read_bytes()
+    assert first_install(args, failed_run, input_fn=answer) == 2
+    assert len(calls) == 1 and not any("使用 SIMULATE" in prompt for prompt in prompts)
+    assert source.read_bytes() == before
+    output = capsys.readouterr().out
+    assert "首次运行失败" in output and "尚未解决：首次扫描" in output
 
 
 def test_daily_manual_run_forces_one_no_send_scan(source):
@@ -227,6 +232,47 @@ def test_daily_manual_run_forces_one_no_send_scan(source):
     assert daily_management(lambda argv: calls.append(argv) or 0, source=source,
                             input_fn=_answers("5", "run", "y", "n", "0")) == 0
     assert calls == [["run", "tick", "--config", str(source.parent / "config.us.json"), "--no-send", "--force"]]
+
+
+def test_first_install_retries_failed_scan_only_after_fresh_consent(source, capsys):
+    args = cli.parse_args(["setup", "init", "--output-dir", str(source.parent)])
+    calls, prompts = [], []
+    answers = iter(("y", "n", "n", "n", "y", "retry", "y", "n"))
+    def answer(prompt):
+        prompts.append(prompt)
+        return next(answers)
+    def run(argv):
+        calls.append(argv)
+        return 2 if len(calls) == 1 else 0
+    before = source.read_bytes()
+    assert first_install(args, run, input_fn=answer) == 0
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert sum("现在手动运行一次" in prompt for prompt in prompts) == 2
+    assert all("--no-send" in call and "--force" in call for call in calls)
+    assert source.read_bytes() == before
+    output = capsys.readouterr().out
+    assert "首次运行失败" in output and "尚未解决" not in output
+
+
+def test_first_install_retry_then_skip_keeps_unresolved_failure(source, capsys):
+    args = cli.parse_args(["setup", "init", "--output-dir", str(source.parent)])
+    calls = []
+    assert first_install(args, lambda argv: calls.append(argv) or 2,
+                         input_fn=_answers("y", "n", "n", "n", "y", "retry", "n", "n")) == 2
+    assert len(calls) == 1
+    assert "尚未解决：首次扫描" in capsys.readouterr().out
+
+
+def test_first_install_doctor_retry_success_clears_only_that_failure(source, capsys):
+    args = cli.parse_args(["setup", "init", "--output-dir", str(source.parent)])
+    calls = []
+    def run(argv):
+        calls.append(argv)
+        return 2 if len(calls) == 1 else 0
+    assert first_install(args, run,
+                         input_fn=_answers("y", "y", "retry", "n", "n", "n", "n")) == 0
+    assert [call[0] for call in calls] == ["doctor", "doctor"]
+    assert "尚未解决" not in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("provenance", ["config", "env", "record"])

@@ -1066,11 +1066,14 @@ def begin_trade_receipt_attempt(path: str | Path, *, inbox_id: str,
         frozen = envelope["receipts"][key]
         if result_key is not None and result_key != key:
             raise TradePayloadClaimLost("trade receipt result superseded")
-        if frozen.get("status") not in {"pending", "failed"} or frozen.get("stop_reason"):
+        fanout = route.get("fanout_id")
+        continuation = (fanout and frozen.get("route", {}).get("fanout_id") == fanout
+                        and (not frozen.get("result") or frozen["result"].get("has_retryable_children")))
+        if (frozen.get("status") not in {"pending", "failed"} and not continuation) or frozen.get("stop_reason"):
             return {**frozen, "claimed": False}
         if frozen.get("route") is not None and frozen["route"] != route:
             frozen["stop_reason"] = "route_changed_requires_review"
-        elif int(frozen.get("attempt_count", 0)) >= 20:
+        elif not fanout and int(frozen.get("attempt_count", 0)) >= 20:
             frozen["stop_reason"] = "notification_attempts_exhausted"
         elif int(frozen.get("next_attempt_at_ms", 0)) > now_ms:
             return {**frozen, "claimed": False}
@@ -1083,6 +1086,8 @@ def begin_trade_receipt_attempt(path: str | Path, *, inbox_id: str,
             frozen.update(status="unknown", attempt_id=uuid.uuid4().hex, attempted_at_ms=now_ms,
                           attempt_count=int(frozen.get("attempt_count", 0)) + 1,
                           route=frozen.get("route", route), message=frozen.get("message", message))
+            if fanout:
+                frozen["fanout_id"] = fanout
             frozen.pop("result", None)
         conn.execute("UPDATE trade_inbox SET receipt_json = ?, updated_at_ms = ? WHERE inbox_id = ?",
                      (json.dumps(envelope, ensure_ascii=False), now_ms, inbox_id))
@@ -1105,12 +1110,13 @@ def finish_trade_receipt_attempt(path: str | Path, *, inbox_id: str, attempt_id:
         if frozen.get("result") is not None:
             return
         status = ("sent" if result.get("delivery_confirmed") else
+                  "failed" if result.get("has_retryable_children") else
                   "failed" if result.get("explicit_pre_acceptance_failure") else "unknown")
         now_ms = int(time.time() * 1000)
         frozen.update(result=result, status=status)
         if status == "failed":
             frozen["next_attempt_at_ms"] = now_ms + 60_000
-            if int(frozen.get("attempt_count", 0)) >= 20:
+            if not frozen.get("fanout_id") and int(frozen.get("attempt_count", 0)) >= 20:
                 frozen["stop_reason"] = "notification_attempts_exhausted"
         conn.execute("UPDATE trade_inbox SET receipt_json = ?, updated_at_ms = ? WHERE inbox_id = ?",
                      (json.dumps(envelope, ensure_ascii=False), now_ms, inbox_id))
@@ -1151,7 +1157,8 @@ def list_trade_receipt_recovery_rows(path: str | Path, *, account_ids: Iterable[
             if needs_readback and item["next_attempt_at_ms"] > now_ms:
                 continue
             if not needs_readback and receipt:
-                if receipt.get("status") not in {"pending", "failed"} or receipt.get("stop_reason"):
+                crashed_fanout = receipt.get("fanout_id") and not receipt.get("result")
+                if (receipt.get("status") not in {"pending", "failed"} and not crashed_fanout) or receipt.get("stop_reason"):
                     continue
                 if int(receipt.get("next_attempt_at_ms", 0)) > now_ms:
                     continue
@@ -4160,7 +4167,9 @@ def query_trade_receipts(path: str | Path, *, accounts: list[str], query: dict[s
                 deal_id=str(row.get("deal_id") or saved.get("deal_id") or "") or None,
                 symbol=saved.get("symbol") or payload.get("symbol") or business.get("symbol") or (execution.get("instrument_ref") or {}).get("symbol"),
                 run_id=business.get("run_id"), diagnostic_code=business.get("reason"),
-                related={"superseded_by": receipt.get("superseded_by")})
+                related={"superseded_by": receipt.get("superseded_by"),
+                         "fanout_id": receipt.get("fanout_id"),
+                         "delivery_children": (receipt.get("result") or {}).get("children")})
             if receipt_matches(row_event, query):
                 result.append(row_event)
     if skipped_unlinkable:

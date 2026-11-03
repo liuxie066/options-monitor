@@ -85,6 +85,10 @@ def test_cancel_targets_active_read_generation_after_bot_change(tmp_path, monkey
         assistant.write_text(json.dumps({"bot": {"enabled": False}}))
     elif bot_state == "unavailable":
         assistant.unlink()
+        # Keep channel authority available while testing unavailable model/read config.
+        # The channel-config failure boundary has its own fail-closed regression.
+        monkeypatch.setattr("src.application.bot.control.config_loader.load_bot_config",
+            lambda **kwargs: (assistant, {}))
     outcome = _preflight(_message_payload(text="取消分析", message_id="cancel-" + bot_state), settings)
     assert outcome["status"] == "cancelled" and outcome["target_run_id"] == "active"
     assert store.is_cancel_requested("active")

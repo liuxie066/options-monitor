@@ -87,7 +87,7 @@ WeChat 须有显式 allowlist，或 profile 指向的 YAML 中有效的
 `inbound.wechat_clawbot.allowed_senders`。单市场仍自动选择该市场。
 核实原部署意图并通过受控配置/部署流程修复后，再预览 drift；不要通过删除启用声明消除错误。
 真正退役必须明确取消 enabled 和 services 中的声明，并先核对退役预览。
-launchd 的确认应用仍不受支持。
+systemd 与 launchd 均支持在预览后通过 `--confirm` 应用调和；该操作会修改服务文件和运行状态，须有对应部署授权。实现支持不等于已在目标主机完成原生部署验收。
 
 ## 命令副作用总表（先看这个）
 
@@ -99,7 +99,7 @@ launchd 的确认应用仍不受支持。
 | `./om run tick --config ... --no-send` | 是 | 可能 | 否 | 会写本地运行产物，但禁发通知 |
 | `./om run tick --config ...` | 是 | 可能 | 否 | 人工扫描入口；普通 Tick 通知只由 cron trigger 发送 |
 | `./om run tick-cron --market ... --config ...` | 是 | 可能 | 是 | 正式定时扫描/通知入口 |
-| `./om run trade-intake --config ... --mode apply --yes` | 是 | 否 | 是 | 会写 canonical ledger、intake 状态；启用 `holdings_sync` 时异步触发 PM 绝对持仓同步，并默认发送入账回执 |
+| `./om run trade-intake --config ... --mode apply --yes` | 是 | 可能 | 是 | 会写 canonical ledger、intake 状态；启用 PM 和 `holdings_sync` 时可能提交持久化刷新请求，接收成功不等于持仓同步完成；默认发送入账回执 |
 | `./om run trade-intake --config ... --reconcile-state --dry-run` | 否 | 否 | 否 | 默认逐一核对所有启用账户的独立 state；可用 `--account lx` 缩小范围 |
 | `./om run trade-intake --config ... --reconcile-state --account lx --apply` | 是 | 否 | 否 | 只更新指定账户 intake state；输出对应 backup path，执行前必须先看 dry-run |
 | `./om option-positions auto-close-expired --config ... --apply --yes` | 是 | 否 | 是 | 专用过期自动平仓入口；先跑 `--dry-run`；需要静默时加 `--no-send` |

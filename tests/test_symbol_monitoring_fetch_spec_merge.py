@@ -239,6 +239,7 @@ def test_frozen_symbol_consumer_skips_market_planning_and_multiplier_writes(
                 {
                     "snapshot_id": "snapshot-1",
                     "receipt_relpath": "receipt.json",
+                        "expected_fetch_contract": {"fetch_binding": {"source": "opend"}},
                 },
                 ("symbol,option_type,multiplier,chain_multiplier,snapshot_multiplier\n"
                  f"NVDA,put,{raw_multiplier},{raw_multiplier},{raw_multiplier}\n").encode(),
@@ -1317,7 +1318,8 @@ def test_frozen_symbol_capture_preserves_delta_override_boundary(tmp_path, thres
 
     batch = mod.FrozenRequiredDataBatch(
         manifest={}, manifest_bytes=b"{}",
-        entries={"NVDA": ({"snapshot_id": "snapshot-delta", "receipt_relpath": "receipt.json"}, csv)},
+        entries={"NVDA": ({"snapshot_id": "snapshot-delta", "receipt_relpath": "receipt.json",
+                           "expected_fetch_contract": {"fetch_binding": {"source": "opend"}}}, csv)},
         unavailable={}, require_fresh=False,
     )
     mod.run_symbol_monitoring(

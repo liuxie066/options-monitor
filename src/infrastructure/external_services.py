@@ -255,6 +255,8 @@ def run_opend_watchdog(
     retry_timeout_sec: float = 25.0,
     success_threshold: int = 2,
     required_capability: str = "both",
+    expected_account_ids: list[str] | None = None,
+    trd_env: str = "REAL",
 ) -> subprocess.CompletedProcess[Any] | dict[str, Any]:
     command = [
         str(vpy), "-m", "src.infrastructure.opend_watchdog", "--json",
@@ -268,6 +270,10 @@ def run_opend_watchdog(
         command.append("--ensure")
     if retry_enabled:
         command.append("--retry-enabled")
+    if required_capability == "broker":
+        command.extend(["--trd-env", trd_env])
+        for account_id in expected_account_ids or []:
+            command.extend(["--expected-account-id", str(account_id)])
     try:
         return run_command(command, cwd=base, capture_output=True, text=True, timeout_sec=timeout_sec)
     except subprocess.TimeoutExpired as exc:

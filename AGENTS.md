@@ -44,7 +44,7 @@ When deepreview is explicitly requested or prescribed by an explicitly invoked w
 | Canonical Configs | `config.yaml` is the human authoring source; `config.us.json` / `config.hk.json` are generated runtime snapshots |
 | Reports | `output/`, `output_accounts/<account>/`, `output_shared/`, `output_runs/<run_id>/` |
 | Process Artifacts | `docs/reviews/`, `docs/plans/`, `docs/gateflow/` are gitignored consumables; never `git add -f` them into the repo |
-| Local Tool Gateway Entry | `./om-agent` |
+| Local Tool Gateway Entry | `./om tools` (`./om-agent` compatible) |
 | Human CLI Entry | `./om` |
 | Detailed Agent Handbook | `docs/AGENT_WIKI.md` |
 
@@ -85,7 +85,7 @@ Do not recreate an existing environment unless needed. The launchers and Makefil
 
 | Purpose | Command / boundary |
 |---|---|
-| CLI help / tool schema | `./om help`; `./om-agent spec` |
+| CLI help / tool schema | `./om help`; `./om tools spec` |
 | Start interactive CLI | `./om` in a terminal; first-run wizard: `./om setup init`. Inspect the selected runtime target first; saving configuration, scanning and services retain their authorization gates |
 | Preview runtime config build | `./om config build --source yaml --market <us-or-hk> --config-yaml <isolated-config.yaml> --output <isolated-runtime.json> --dry-run`; replace placeholders with the actual scope. Writing requires the appropriate target authorization; see [Config Contract](CONFIGS.md) |
 | Build strategy-core wheel | `./.venv/bin/python -m pip wheel --no-deps . -w <temporary-wheel-directory>`; this packages only the reusable strategy core, not the whole OM application. See [strategy-core contract](docs/candidate_strategy.md) |
@@ -100,7 +100,7 @@ Test/lint/smoke targets are defined in [Makefile](Makefile); CI retains full reg
 
 Use the highest-level safe entry point available:
 
-1. `./om-agent` for structured JSON tools and read-first diagnostics. It is the local Tool Gateway, not OM's autonomous Agent.
+1. `./om tools` (`./om-agent` compatible) for structured JSON tools and read-first diagnostics. It is the local Tool Gateway, not OM's autonomous Agent. `om agent` / `om assistant` alias `om bot`.
 2. `./om` for human/operator CLI workflows.
 3. `./.venv/bin/python -m src.application.<module>` only when no public facade exists.
 4. `./.venv/bin/python scripts/...` only for compatibility or operational wrappers.

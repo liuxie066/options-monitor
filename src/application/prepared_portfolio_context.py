@@ -21,6 +21,8 @@ from src.application.account_config import (
 )
 from src.application.config_loader import resolve_data_config_path
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context
+from src.application.broker_provider import resolve_broker_portfolio_provider
+from src.application.plugin_runtime import PluginUnavailableError
 from src.application.portfolio_assignment_scenario import prepare_position_sizing_evidence
 from src.application.portfolio_context_service import (
     load_account_portfolio_context,
@@ -220,7 +222,8 @@ def prepare_portfolio_contexts(
                     "manifest_path": str(existing_path),
                     "manifest_sha256": existing_digest,
                 }
-    python = Path(python_executable or sys.executable).resolve()
+    # Preserve virtualenv symlinks: resolving them selects the base interpreter.
+    python = Path(os.path.abspath(python_executable or sys.executable))
     expected_run_state_dir = base_path / "output_runs" / run_id_norm / "state"
     supplied_run_state_dir = Path(
         os.path.abspath(str(Path(shared_state_dir).expanduser()))
@@ -480,6 +483,15 @@ def _load_prepared_portfolio_context_artifacts(
     expected_manifest_sha256: str | None = None,
     expected_runtime_config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    # Current execution supplies config; offline historical readers validate frozen receipts only.
+    if expected_runtime_config is not None:
+        try:
+            resolve_broker_portfolio_provider(
+                dict(expected_runtime_config), account=expected_account,
+                futu_provider=fetch_futu_portfolio_context,
+            )
+        except PluginUnavailableError as exc:
+            raise PreparedPortfolioContextError(str(exc)) from exc
     path = Path(os.path.abspath(str(Path(manifest_path).expanduser())))
     run_id_expected = _required_text(expected_run_id, "expected_run_id")
     account_expected = _required_text(
@@ -660,7 +672,7 @@ def load_prepared_portfolio_context(
     expected_manifest_sha256: str | None = None,
     expected_runtime_config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Load the existing payload-only facade from a validated receipt."""
+    """Read frozen evidence; supplying runtime config also requires the current broker."""
 
     return _load_prepared_portfolio_context_artifacts(
         manifest_path=manifest_path,
@@ -726,6 +738,9 @@ def run_worker(request_path: Path) -> int:
             account=account,
         )
         source = source_plan.requested_source
+        resolve_broker_portfolio_provider(
+            cfg, account=account, futu_provider=fetch_futu_portfolio_context,
+        )
         fx_hash = request.get("fx_snapshot_sha256")
         if fx_hash is not None:
             fx_snapshot, sealed_hash = load_run_fx_snapshot(base=base, run_id=run_id)
@@ -774,7 +789,7 @@ def run_worker(request_path: Path) -> int:
             "portfolio_source_account": source_account,
             "logs": logs[-20:],
         }
-    except AccountRunConfigError as exc:
+    except (AccountRunConfigError, PluginUnavailableError) as exc:
         result = {
             "schema_version": _RESULT_SCHEMA,
             "token": token,
@@ -784,7 +799,7 @@ def run_worker(request_path: Path) -> int:
             "account_config_sha256": str(
                 request.get("account_config_sha256") or ""
             ).strip().lower(),
-            "reason": exc.reason,
+            "reason": exc.reason if isinstance(exc, AccountRunConfigError) else str(exc),
             "error_type": type(exc).__name__,
             "error_code": exc.code,
             "logs": logs[-20:],
@@ -920,7 +935,7 @@ def _resolve_context_source_binding(
     source_name = str(
         context.get("portfolio_source_name") or plan.primary_source
     ).strip().lower()
-    if source_name != "futu":
+    if source_name != plan.primary_source:
         raise PreparedPortfolioContextError(
             "prepared portfolio context source is not allowed by account config"
         )

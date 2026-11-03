@@ -1,4 +1,5 @@
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from threading import Event
@@ -239,6 +240,104 @@ def test_periodic_reconciliation_writes_one_ordinary_decision(tmp_path, monkeypa
     assert len(repo.list_trade_events())==2
     assert observations[0]["ordinary_history_start_ms"] <= FILL
     assert "ordinary_history_start_ms" not in observations[1]
+
+
+def _settled_history(repo, context, event_type):
+    opening = _execution(key="historical-open", occurred=FILL-2*86_400_000, strike=40)
+    opening["instrument_ref"].update(symbol="TCOM", expiration_ymd="2026-07-30")
+    _persist(repo, opening)
+    closing = deepcopy(opening)
+    closing.update(external_execution_id="historical-close", external_order_id="order-historical-close",
+                   side="buy", position_effect="close", price="0", occurred_at_utc=_iso(FILL-86_400_000))
+    closing = normalize_execution_input(closing)
+    contract = ContractKey.from_values(broker="futu", account="lx", underlying_symbol="TCOM",
+                                      option_type="put", strike=40, expiration_ymd="2026-07-30")
+    original = TradeEvent(event_id="historical-close", event_type="close", event_time_ms=FILL-86_400_000,
+        contract_key=contract, contracts=1, price=0, currency="USD", multiplier=100, source="futu",
+        target_lot_id="lot-historical-open", raw_payload={"side": "buy", "execution_input": closing,
+            "execution_id": execution_identity_from_input(closing), "order_id": closing["external_order_id"],
+            "close_type": "cause_pending", "case_id": "historical-case"})
+    persist_trade_event_object(repo, original)
+    terminal = replace(original, event_id="historical-settled", event_type=event_type,
+        raw_payload={**original.raw_payload, "close_type": event_type,
+                     "pending_close_event_id": original.event_id})
+    with repo._writer_connection(begin_immediate=True) as conn:
+        repo.upsert_trade_event(replace(original, event_id="void-historical-close", event_type="void",
+                                       target_event_id=original.event_id, raw_payload={}), conn=conn)
+        repo.upsert_trade_event(terminal, conn=conn, replacing_pending_close_event_id=original.event_id)
+    evidence = context["capacity_observation"]["ordinary_evidence"]
+    start, _ = ordinary_attribution_window({"contract_key": {"underlying_symbol": "TCOM"},
+                                           "event_time_ms": FILL-86_400_000})
+    evidence["window_start_ms"] = start
+    evidence["history"]["window_start_utc"] = _iso(start)
+    evidence["executions"].insert(0, closing)
+    account = evidence["history"]["account_results"][0]
+    account.update(covered_start_utc=_iso(start), row_count=2, accepted_row_count=2)
+    for name in ("current_orders", "history_orders"):
+        evidence[name]["rows"].append({"order_id": closing["external_order_id"],
+            "status": "terminal_with_fill", "dealt_qty": "1", "created_at_ms": FILL-86_400_000})
+    return terminal
+
+
+@pytest.mark.parametrize("event_type", ["expire_close", "assignment", "exercise"])
+def test_settled_execution_history_allows_periodic_ordinary_apply_and_retry(tmp_path, monkeypatch, event_type):
+    repo, context = _scope(tmp_path, monkeypatch)
+    _settled_history(repo, context, event_type)
+    before = repo.list_trade_events()
+    target = next(row for row in _view(repo, context)["rows"] if row["open_event_id"] == "fill")
+    assert target["selected_candidate_id"] == "ordinary", target
+    assert target["ordinary_basis"]
+    args = _args(repo, context)
+    assert not apply_trade_attribution(repo, **args, apply_changes=False)["write_applied"]
+    assert repo.list_trade_events() == before
+    monkeypatch.setattr("src.application.wheel.capacity.observe_trade_attribution_capacity",
+                        lambda **_: deepcopy(context["capacity_observation"]))
+    monkeypatch.setattr(attribution, "read_attribution_combo_evidence", lambda *a, **kw: context["combo_evidence"])
+    monkeypatch.setattr("src.application.trades.inbox.cache_trade_attribution_result", lambda *a, **kw: 0)
+    reconcile = dict(config=context["config"], account="lx", market="us", runtime_root=tmp_path,
+                     inbox_path=tmp_path/"inbox.sqlite3", combo_mode="confirm")
+    first = attribution.reconcile_trade_attribution_account(repo, **reconcile)
+    assert first["ordinary"] == 1 and not first["errors"], first
+    after = repo.list_trade_events()
+    assert [event for event in after if event["event_type"] != "adjust"] == before
+    assert len(after) == len(before) + 1
+    second = attribution.reconcile_trade_attribution_account(repo, **reconcile)
+    assert second["ordinary"] == 0 and not second["errors"], second
+    assert repo.list_trade_events() == after
+    target = next(row for row in _view(repo, context)["rows"] if row["open_event_id"] == "fill")
+    assert target["status"] == "ordinary" and target["origin"] == "rule"
+
+
+@pytest.mark.parametrize("change", ["voided", "missing_execution", "changed_content", "wrong_account",
+                                   "missing_broker_row", "incomplete_allocation"])
+def test_settled_history_does_not_bypass_evidence_guards(tmp_path, monkeypatch, change):
+    repo, context = _scope(tmp_path, monkeypatch)
+    terminal = _settled_history(repo, context, "expire_close")
+    rows = read_trade_attribution_snapshot(repo, account="lx", market="us")
+    event = next(row for row in rows["trade_events"] if row["event_id"] == terminal.event_id)
+    evidence = context["capacity_observation"]["ordinary_evidence"]
+    if change == "voided":
+        rows["trade_events"].append(replace(terminal, event_id="void-terminal", event_type="void",
+                                           target_event_id=terminal.event_id, raw_payload={}).to_dict())
+    elif change == "missing_execution":
+        event["raw_payload"] = {}
+    elif change == "changed_content":
+        event["raw_payload"]["execution_input"]["price"] = "1"
+    elif change == "wrong_account":
+        event["contract_key"]["account"] = "sy"
+    elif change == "missing_broker_row":
+        evidence["executions"].pop(0)
+        evidence["history"]["account_results"][0].update(row_count=1, accepted_row_count=1)
+    else:
+        event["raw_payload"]["broker_deal_completion"] = {
+            "split_count": 2, "split_index": 1, "expected_contracts": 2, "allocated_contracts": 1}
+    if change == "wrong_account":
+        with pytest.raises(ValueError, match="target_contract_mismatch"):
+            build_trade_attribution_view(rows, now_ms=NOW, **context)
+        return
+    target = next(row for row in build_trade_attribution_view(rows, now_ms=NOW, **context)["rows"]
+                  if row["open_event_id"] == "fill")
+    assert target["ordinary_basis"] is None and target["selected_candidate_id"] is None, target
 
 
 def _add_window_execution(repo, context, execution, *, snapshot_quantity=None):

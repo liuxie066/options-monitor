@@ -29,10 +29,13 @@ from src.application.cron_runtime import apply_notify_results_to_tick_metrics, b
 from src.application.daily_decision_brief_renderer import (
     build_attribution_reminder_context,
     render_candidate_alert,
-    render_candidate_alert_card_markdown,
+    render_candidate_alert_card_blocks,
+    render_candidate_alert_text,
     render_fixed_failure,
+    render_fixed_failure_text,
     render_fixed_report,
-    render_fixed_report_card_markdown,
+    render_fixed_report_card_blocks,
+    render_fixed_report_text,
     resolve_daily_brief_render_limits,
     select_rendered_combo_candidate_rows,
 )
@@ -58,6 +61,11 @@ from src.application.daily_decision_brief_repository import (
     record_daily_decision_brief_candidates,
     record_daily_decision_brief_delivery_attempt,
     record_daily_decision_brief_fixed_recovery,
+    read_daily_brief_fanout_children,
+    read_confirmed_fanout_attribution_context,
+    read_daily_brief_fanout_recovery_source,
+    record_daily_brief_fanout_plan,
+    list_pending_legacy_daily_brief_deliveries,
 )
 from src.application.daily_decision_brief_service import assemble_daily_decision_briefs
 from src.application.multi_tick.misc import _safe_runlog_data, parse_hhmm
@@ -69,7 +77,12 @@ from src.application.multi_tick_finalization import (
     finalize_no_account_notification,
     failed_scan_accounts,
 )
-from src.application.notification_delivery_route import notifications_enabled, resolve_notification_delivery_route, notification_reminder_route_key
+from src.application.notification_delivery_route import notifications_enabled, resolve_notification_delivery_route, notification_reminder_route_key, resolve_notification_delivery_routes
+from src.application.notification_fanout import (
+    FanoutRetryPolicy, prepare_notification_fanout, read_notification_fanout,
+    list_notification_fanouts, notification_fanout_id,
+)
+from src.application.notification_fanout_delivery import uses_proactive_fanout
 from src.application.notification_delivery_adapter import (
     build_notification_transport_key,
     normalize_notification_delivery_result,
@@ -81,6 +94,7 @@ from src.application.scheduled_notification import (
     PreparedPerAccountMessages,
     build_per_account_delivery_batch,
     execute_per_account_delivery,
+    dispatch_scheduled_notification_fanout,
 )
 from src.application.system_alerts import report_system_meta_signal
 from src.infrastructure.io_utils import read_json, utc_now
@@ -127,6 +141,377 @@ class DailyBriefNotificationPreparation:
     multi_market_delivery_unsupported: bool = False
     blocked_error_code: str | None = None
     scan_outcomes_by_account: dict[str, bool] = field(default_factory=dict)
+    fanout_ids: tuple[str, ...] = ()
+    legacy_deliveries: tuple[dict[str, Any], ...] = ()
+
+
+def _fanout_now_ms() -> int:
+    value = utc_now()
+    now = value if isinstance(value, datetime) else datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return int(now.timestamp() * 1000)
+
+
+def _daily_brief_day_fanouts(request, account, market, market_date):
+    return list_notification_fanouts(base=request.base, account=account,
+        logical_key_prefix=f"daily-brief:{market}:{market_date}:")
+
+
+def _daily_brief_fanout_spec(request, route, brief, *, kind, identities, diff, scheduler,
+                             limits, source=None, cutoff=None, original_target=None, recovery_intent=None):
+    context = (dict(recovery_intent["render_context"]) if recovery_intent is not None
+        else _daily_brief_render_context(request, scheduler_decision=scheduler))
+    if original_target:
+        context.update(scheduled_target_market=original_target, recovery_original_target=original_target,
+            recovery_scan_at_utc=brief["generated_at_utc"])
+    if kind != "fixed_failure":
+        previous = (recovery_intent["previous_attribution_context"] if recovery_intent is not None
+            else read_confirmed_fanout_attribution_context(base=request.base, account=brief["account"],
+                market=brief["market"], identity_key=route["identity_key"]))
+        context.update(build_attribution_reminder_context(brief, previous_context=previous))
+        context["attribution_route_key"] = route["identity_key"]
+        context.update(_daily_brief_candidate_render_context(brief,
+            delivery_kind="candidate_alert" if kind == "candidate_alert" else "fixed_report",
+            candidate_identities=identities, diff=diff, limits=limits))
+    card = route["provider"] == FEISHU_APP_NOTIFICATION_PROVIDER
+    blocks = []
+    if kind == "fixed_failure":
+        message = (render_fixed_failure if card else render_fixed_failure_text)(brief, context=context)
+    elif kind == "candidate_alert":
+        message = (render_candidate_alert if card else render_candidate_alert_text)(brief, identities,
+            context=context, limits=limits)
+        if card:
+            blocks = render_candidate_alert_card_blocks(brief, identities, context=context, limits=limits)
+    else:
+        message = (render_fixed_report if card else render_fixed_report_text)(brief,
+            context=context, limits=limits, diff=diff)
+        if card:
+            blocks = render_fixed_report_card_blocks(brief, context=context, limits=limits, diff=diff)
+    envelope = render_feishu_notification_card(markdown="\n\n".join(blocks) or message,
+        markdown_blocks=blocks or [message], fallback_text=message,
+        fallback_open_id=route["target"]) if card else None
+    # Secrets stay in the transport's credential owner. Only binding locators
+    # and provider selection are frozen alongside the final rendered envelope.
+    options = {key: value for key, value in route["notifications"].items()
+        if key in {"enabled", "provider", "channel", "target", "_explicit_route_target",
+                   "wechat_clawbot_label", "wechat_clawbot_state_dir"}}
+    return {"recipient": {**{key: route[key] for key in
+        ("route_id", "provider", "channel", "target", "identity_key")}, "transport_options": options},
+        "message": message, "transport_envelope": envelope,
+        "metadata": {"account": brief["account"], "market": brief["market"], "market_trading_date": brief["market_trading_date"],
+            "run_id": request.run_id, "delivery_kind": kind,
+            "scheduled_target_market": original_target or scheduler.get("scheduled_target_market"),
+            "candidate_identities": identities, "render_context": context,
+            "revision": (source or {}).get("current_revision"),
+            "source_digest": (source or {}).get("current_brief_digest"),
+            "source_reference": (source or {}).get("source_reference"),
+            "generated_at_utc": brief["generated_at_utc"], "cutoff_utc": cutoff}}
+
+
+def _prepare_daily_brief_fanout(request, account, market, scheduler, brief, persisted, diff, limits, reliable):
+    market_date = str(brief["market_trading_date"])
+    fixed_target = str(scheduler.get("scheduled_target_market") or "")
+    if scheduler.get("in_run_window") is not True or not notifications_enabled(request.base_cfg):
+        return
+    prefix = f"daily-brief:{market}:{market_date}:"
+    key = prefix + ("fixed:" + fixed_target if fixed_target else "candidate:" + str(brief["revision"]))
+    existing = read_notification_fanout(base=request.base,
+        fanout_id=notification_fanout_id(account=account, logical_key=key))
+    if existing is not None:
+        return  # The old recipient set and content survive configuration changes.
+    legacy = read_daily_decision_brief_delivery_state(base=request.base, account=account, market=market)
+    if legacy.get("reason") == "state_invalid":
+        raise ValueError("daily_brief_legacy_delivery_state_invalid")
+    day = (legacy.get("state") or {}).get("days", {}).get(market_date, {})
+    if fixed_target and fixed_target in day.get("fixed_reports", {}):
+        return  # Introducing routes never backfills an existing legacy report.
+    if not fixed_target:
+        _prepare_daily_brief_fanout_recoveries(request, account, market, market_date, scheduler, limits)
+    if not reliable and not fixed_target:
+        return
+    routes = resolve_notification_delivery_routes(config=request.base_cfg, account=account,
+        base=(request.repo_root or request.base).resolve())
+    children = read_daily_brief_fanout_children(base=request.base, account=account, market=market,
+        market_trading_date=market_date)
+    deliveries = []
+    legacy_owned = set(day.get("alerted_candidates", {}))
+    for envelope in [*day.get("fixed_reports", {}).values(), *day.get("recovery_reports", {}).values(),
+                     *([day["candidate_delivery"]] if day.get("candidate_delivery") else [])]:
+        legacy_owned.update(envelope.get("candidate_identities", []))
+    for route in routes:
+        identities = list((persisted or {}).get("current_candidate_identities", []))
+        kind = "fixed_report" if reliable else "fixed_failure"
+        if not fixed_target:
+            # Existing obligations already own these candidates, including
+            # unknown siblings: a new scan cannot recreate their send effect.
+            owned = set(legacy_owned)
+            for child in children:
+                if child["identity_key"] == route["identity_key"]:
+                    owned.update(child["spec"]["metadata"].get("candidate_identities", []))
+            identities = [identity for identity in identities if identity not in owned]
+            if not identities:
+                continue
+            kind = "candidate_alert"
+        deliveries.append(_daily_brief_fanout_spec(request, route, brief, kind=kind,
+            identities=identities, diff=diff, scheduler=scheduler, limits=limits, source=persisted))
+    if deliveries:
+        prepare_notification_fanout(base=request.base, account=account, logical_key=key,
+            deliveries=deliveries, retry_policy=FanoutRetryPolicy(2, (1000,)), now_ms=_fanout_now_ms())
+
+
+def _daily_brief_fanout_recovery_intent(request, account, market, scheduler, brief, limits):
+    """Bind eligible scan provenance in the successful history transaction."""
+    from src.application.receipt_query import receipt_digest
+
+    generated = datetime.fromisoformat(brief["generated_at_utc"].replace("Z", "+00:00"))
+    now = datetime.fromtimestamp(_fanout_now_ms() / 1000, timezone.utc)
+    recoveries = []
+    for child in read_daily_brief_fanout_children(base=request.base, account=account, market=market,
+            market_trading_date=brief["market_trading_date"]):
+        meta = child["spec"]["metadata"]
+        if meta["delivery_kind"] != "fixed_failure" or not child["delivery_confirmed"]:
+            continue
+        target = meta["scheduled_target_market"]
+        cutoff = daily_brief_recovery_cutoff(schedule_cfg=request.base_cfg.get(request.scheduler_schedule_key) or {},
+            scheduled_target_market=target)
+        after = max(datetime.fromisoformat(target),
+            datetime.fromtimestamp(child["confirmed_at_ms"] / 1000, timezone.utc))
+        if not after < generated <= now < datetime.fromisoformat(cutoff):
+            continue
+        recoveries.append({"original_failure_child_id": child["child_id"],
+            "original_failure_spec_digest": receipt_digest(child["spec"]),
+            "scheduled_target_market": target, "cutoff_utc": cutoff,
+            "scheduled_scan_target_market": request.scheduled_scan_targets_by_account[account],
+            "render_context": _daily_brief_render_context(request, scheduler_decision=scheduler),
+            "render_limits": dict(limits),
+            "previous_attribution_context": read_confirmed_fanout_attribution_context(
+                base=request.base, account=account, market=market,
+                identity_key=child["identity_key"])})
+    return {"fanout_recoveries": recoveries} if recoveries else None
+
+
+def _prepare_daily_brief_fanout_recoveries(request, account, market, market_date, scheduler, limits):
+    from src.application.receipt_query import receipt_digest
+
+    if request.no_send or not notifications_enabled(request.base_cfg):
+        return
+    now_ms = _fanout_now_ms()
+    for child in read_daily_brief_fanout_children(base=request.base, account=account, market=market,
+            market_trading_date=market_date):
+        meta = child["spec"]["metadata"]
+        if meta["delivery_kind"] != "fixed_failure" or not child["delivery_confirmed"]:
+            continue
+        target = meta["scheduled_target_market"]
+        cutoff = daily_brief_recovery_cutoff(schedule_cfg=request.base_cfg.get(request.scheduler_schedule_key) or {},
+            scheduled_target_market=target)
+        if now_ms >= int(datetime.fromisoformat(cutoff).timestamp() * 1000):
+            continue
+        key = f"daily-brief:{market}:{market_date}:recovery:{child['child_id']}"
+        if read_notification_fanout(base=request.base,
+                fanout_id=notification_fanout_id(account=account, logical_key=key)):
+            continue
+        after = max(datetime.fromisoformat(target),
+            datetime.fromtimestamp(child["created_at_ms"] / 1000, timezone.utc))
+        source = read_daily_brief_fanout_recovery_source(base=request.base, account=account, market=market,
+            market_trading_date=market_date, after_utc=after.isoformat(), before_utc=cutoff,
+            original_failure_child_id=child["child_id"], original_failure_spec_digest=receipt_digest(child["spec"]))
+        if source is None or datetime.fromisoformat(source["brief"]["generated_at_utc"]).timestamp() * 1000 > now_ms:
+            continue
+        intent = source["recovery_intent"]
+        cutoff = min(datetime.fromisoformat(cutoff), datetime.fromisoformat(intent["cutoff_utc"])).isoformat()
+        if now_ms >= int(datetime.fromisoformat(cutoff).timestamp() * 1000):
+            continue
+        recipient = child["spec"]["recipient"]
+        route = {**recipient, "notifications": recipient["transport_options"]}
+        spec = _daily_brief_fanout_spec(request, route, source["brief"], kind="fixed_recovery_report",
+            identities=source["current_candidate_identities"], diff={}, scheduler=scheduler,
+            limits=intent["render_limits"], source=source, cutoff=cutoff, original_target=target,
+            recovery_intent=intent)
+        prepare_notification_fanout(base=request.base, account=account, logical_key=key,
+            deliveries=[spec], retry_policy=FanoutRetryPolicy(2, (1000,)), now_ms=now_ms)
+
+
+def _continue_legacy_daily_brief_deliveries(request, deliveries):
+    """Resume the original owner so transport keys, retry budget and facts stay intact."""
+    from src.application.channels.plugins import channel_plugin_installed
+
+    result = {"sent_accounts": [], "failures": [], "attempt_count": 0, "confirmed_count": 0, "blocked": []}
+    dnd = evaluate_dnd_quiet_hours(
+        quiet_hours=(request.base_cfg.get("notifications") or {}).get("quiet_hours_beijing"),
+        no_send=request.no_send, now_bj_time=datetime.now(timezone.utc).astimezone(request.bj_tz).time(),
+        parse_hhmm_fn=parse_hhmm)
+    if request.no_send or dnd.get("is_quiet") or not notifications_enabled(request.base_cfg):
+        return result
+    for lifecycle in deliveries:
+        account = lifecycle["account"]
+        envelope = lifecycle["envelope"]
+        if classify_retryable_daily_decision_brief_payload(base=request.base, account=account,
+                market=lifecycle["market"], market_trading_date=lifecycle["market_trading_date"],
+                envelope=envelope) != "clean":
+            result["failures"].append({"account": account, "error_code": "legacy_ai_payload_retired"})
+            continue
+        identity = (envelope.get("render_context") or {}).get("attribution_route_key")
+        routes = resolve_notification_delivery_routes(config=request.base_cfg, account=account,
+            base=(request.repo_root or request.base).resolve())
+        route = next((route for route in routes if identity and route["identity_key"] == identity), None)
+        if route is None:
+            result["blocked"].append({"account": account, "delivery_key": envelope["delivery_key"],
+                "reason": "legacy_route_unproven" if not identity else "route_disabled_or_changed"})
+            if not identity and routes:
+                result["failures"].append({"account": account, "delivery_key": envelope["delivery_key"],
+                    "error_code": "LEGACY_ROUTE_UNPROVEN"})
+            continue
+        if not channel_plugin_installed(route["provider"]):
+            result["failures"].append({"account": account, "error_code": "CHANNEL_PLUGIN_NOT_INSTALLED"})
+            continue
+        adapter = select_notification_delivery_adapter(route["provider"])
+        common = {"base": request.base, "account": account, "market": lifecycle["market"],
+            "market_trading_date": lifecycle["market_trading_date"], "delivery_key": envelope["delivery_key"],
+            "source_digest": envelope["source_digest"], "message_sha256": envelope["message_sha256"],
+            "transport_idempotency_key": build_notification_transport_key(envelope["delivery_key"])}
+
+        def send(**kwargs):
+            if envelope["delivery_kind"] == "fixed_recovery_report":
+                started = begin_daily_decision_brief_recovery_attempt(**common, attempted_at_utc=utc_now())
+                if not started.get("started"):
+                    raise RuntimeError(f"recovery delivery blocked: {started.get('reason')}")
+            try:
+                sent = normalize_notification_delivery_result(
+                    adapter.send_fn(**kwargs, notifications=route["notifications"]), normalize_fn=adapter.normalize_fn)
+            except Exception:
+                if envelope["delivery_kind"] == "fixed_recovery_report":
+                    record_daily_decision_brief_delivery_attempt(**common, attempted_at_utc=utc_now(), ambiguous=True)
+                raise
+            if sent.get("delivery_confirmed") and sent.get("attribution_route_key") != identity:
+                sent = {**sent, "delivery_confirmed": False, "ambiguous_send": True}
+            if envelope["delivery_kind"] == "fixed_recovery_report" and not sent.get("delivery_confirmed"):
+                record_daily_decision_brief_delivery_attempt(**common, attempted_at_utc=utc_now(),
+                    ambiguous=bool(sent.get("ambiguous_send") or sent.get("duplicate_risk") or sent.get("command_ok")))
+            return sent
+
+        _decision, batch, _reason = build_per_account_delivery_batch(account_messages={account: envelope["rendered_message"]},
+            channel=route["channel"], target=route["target"])
+        execution = execute_per_account_delivery(delivery_batch=batch, base=(request.repo_root or request.base).resolve(),
+            run_id=request.run_id, runlog=request.runlog, audit_fn=request.audit_helper.audit,
+            safe_data_fn=_safe_runlog_data, failure_fields_builder=build_failure_audit_fields,
+            send_fn=send, normalize_fn=adapter.normalize_fn, failure_stage=adapter.failure_stage,
+            idempotency_keys_by_account={account: envelope["delivery_key"]},
+            transport_envelopes_by_account={account: envelope["rendered_transport"]}
+                if envelope.get("rendered_transport") is not None else {})
+        preparation = DailyBriefNotificationPreparation(
+            prepared_messages=PreparedPerAccountMessages({account: envelope["rendered_message"]}, True, False),
+            lifecycles_by_account={account: lifecycle}, delivery_keys_by_account={account: envelope["delivery_key"]},
+            markets=(lifecycle["market"],))
+        confirmed, failures = _confirm_daily_brief_execution(request=request, preparation=preparation, execution=execution)
+        result["sent_accounts"].extend(confirmed)
+        result["confirmed_count"] += len(confirmed)
+        result["failures"].extend(execution.notify_failures)
+        result["failures"].extend(failures)
+        result["attempt_count"] += sum(int(send.get("attempts", 0)) for send in execution.send_results)
+    return result
+
+
+def _deliver_daily_brief_fanouts(request, preparation, complete_tick):
+    from src.application.channels.plugins import channel_plugin_installed
+    from src.application.notification_delivery_route import notification_delivery_route_is_current
+
+    if preparation.multi_market_delivery_unsupported:
+        _record_daily_brief_multi_market_failure(request, preparation)
+        complete_tick(status="unsupported_failed", ok=False,
+            error_code="daily_brief_multi_market_delivery_unsupported")
+        return 2
+    blocked = []
+    def allowed(spec):
+        if request.no_send:
+            return False
+        recipient = spec["recipient"]
+        if not channel_plugin_installed(recipient["provider"]):
+            blocked.append({"account": spec["metadata"]["account"],
+                "route_id": recipient["route_id"], "error_code": "CHANNEL_PLUGIN_NOT_INSTALLED"})
+            return False
+        if not notification_delivery_route_is_current(config=request.base_cfg,
+                account=spec["metadata"]["account"],
+                recipient=recipient, base=(request.repo_root or request.base).resolve()):
+            return False
+        cutoff = spec["metadata"].get("cutoff_utc")
+        if cutoff:
+            current_cutoff = daily_brief_recovery_cutoff(
+                schedule_cfg=request.base_cfg.get(request.scheduler_schedule_key) or {},
+                scheduled_target_market=spec["metadata"]["scheduled_target_market"])
+            deadline = min(datetime.fromisoformat(cutoff), datetime.fromisoformat(current_cutoff))
+            if _fanout_now_ms() >= int(deadline.timestamp() * 1000):
+                return False
+        dnd = evaluate_dnd_quiet_hours(
+            quiet_hours=(request.base_cfg.get("notifications") or {}).get("quiet_hours_beijing"),
+            no_send=request.no_send,
+            now_bj_time=datetime.now(timezone.utc).astimezone(request.bj_tz).time(), parse_hhmm_fn=parse_hhmm)
+        return not dnd.get("is_quiet")
+
+    def send(*, spec, idempotency_key):
+        recipient = spec["recipient"]
+        adapter = select_notification_delivery_adapter(recipient["provider"])
+        kwargs = dict(base=(request.repo_root or request.base).resolve(),
+            channel=recipient["channel"], target=recipient["target"], message=spec["message"],
+            notifications=recipient["transport_options"], idempotency_key=idempotency_key)
+        if spec["transport_envelope"] is not None:
+            kwargs["transport_envelope"] = spec["transport_envelope"]
+        return normalize_notification_delivery_result(adapter.send_fn(**kwargs), normalize_fn=adapter.normalize_fn)
+
+    summaries = []
+    before = {}
+    plans_by_account = {}
+    for fanout_id in preparation.fanout_ids:
+        snapshot = read_notification_fanout(base=request.base, fanout_id=fanout_id)
+        before[fanout_id] = snapshot
+        plans_by_account.setdefault(snapshot["account"], []).append(snapshot)
+    for account, fanouts in plans_by_account.items():
+        record_daily_brief_fanout_plan(base=request.base, account=account, market=preparation.markets[0],
+            run_id=request.run_id, fanouts=fanouts)
+    for fanout_id in preparation.fanout_ids:
+        summaries.append(dispatch_scheduled_notification_fanout(base=request.base, fanout_id=fanout_id,
+            config=request.base_cfg, send_fn=send, now_ms=_fanout_now_ms(), can_send_fn=allowed))
+    for item in summaries:
+        blocked.extend({"account": item["account"], "child_id": child["child_id"],
+            "error_code": "NOTIFICATION_ROUTE_UNAVAILABLE", "reason": child["reason"]}
+            for child in item.get("blocked_children", []) if child["reason"] != "route_disabled_or_changed")
+    request.tick_metrics["notification_fanouts"] = summaries
+    request.tick_metrics["notification_config_failures"] = blocked
+    attempted_count = sum(child["attempt_count"] for item in summaries for child in item["children"]) - sum(
+        child["attempt_count"] for item in before.values() for child in item["children"])
+    confirmed_count = sum(child["delivery_confirmed"] for item in summaries for child in item["children"]) - sum(
+        child["delivery_confirmed"] for item in before.values() for child in item["children"])
+    failed = [item for item in summaries if item["status"] in {"partial", "unknown", "explicit_failed"}]
+    sent = sorted({item["account"] for item in summaries if item["delivery_confirmed"]})
+    failures = [{"account": item["account"], "fanout_id": item["fanout_id"],
+        "status": item["status"], "has_retryable_children": item["has_retryable_children"]} for item in failed]
+    failures.extend(blocked)
+    legacy = _continue_legacy_daily_brief_deliveries(request, preparation.legacy_deliveries)
+    request.tick_metrics["legacy_notification_deliveries"] = legacy
+    sent = sorted(set(sent) | set(legacy["sent_accounts"]))
+    failures.extend(legacy["failures"])
+    attempted_count += legacy["attempt_count"]
+    confirmed_count += legacy["confirmed_count"]
+    request.runlog.safe_event("notify_fanout", "error" if failures else "ok", data={
+        "statuses": [item["status"] for item in summaries],
+        "has_retryable_children": any(item["has_retryable_children"] for item in summaries)})
+    _run_post_delivery_sidecars_best_effort(request)
+    if request.delivery_only:
+        complete_tick(status="failed" if failures else "completed", ok=not failures,
+            message="NOTIFY_FAILED" if failures else "delivery_only_fanout")
+        return 1 if failures else 0
+    summary = build_notify_summary(sent_accounts=sent, notify_failures=failures,
+        total_accounts=len({item["account"] for item in summaries}),
+        send_attempted_count=attempted_count, send_confirmed_count=confirmed_count)
+    apply_notify_results_to_tick_metrics(tick_metrics=request.tick_metrics, no_send=request.no_send,
+        sent_accounts=sent, notify_failures=failures, notify_summary=summary)
+    state_repo.write_tick_metrics(request.base, request.run_id, request.tick_metrics)
+    rc = finalize_multi_tick_run(base=request.base, run_id=request.run_id, runlog=request.runlog,
+        results=request.results, tick_metrics=request.tick_metrics, no_send=request.no_send,
+        sent_accounts=sent, notify_failures=failures, notify_summary=summary, channel=None, target=None,
+        state_repo=state_repo, read_json_fn=read_json, shared_state_dir_getter=state_repo.shared_state_dir,
+        utc_now_fn=utc_now, audit_fn=request.audit_helper.audit, safe_data_fn=_safe_runlog_data, on_success=lambda: None)
+    complete_tick(status="completed" if rc == 0 else "failed", ok=rc == 0,
+        message=None if rc == 0 else "NOTIFY_FAILED")
+    return int(rc)
 
 
 def run_tick_notification_flow(request: TickNotificationRequest) -> int:
@@ -248,6 +633,9 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             status="completed",
             message=reason,
         )
+
+    if uses_proactive_fanout(request.base_cfg):
+        return _deliver_daily_brief_fanouts(request, daily_brief_prep, complete_tick)
 
     request.runlog.safe_event(
         "notify",
@@ -954,6 +1342,29 @@ def _prepare_daily_brief_notification(
     lifecycle_audit: list[dict[str, Any]] = []
     blocked_error_code: str | None = None
     daily_limits = resolve_daily_brief_render_limits(_daily_brief_limits(request.base_cfg))
+    explicit_routes = uses_proactive_fanout(request.base_cfg)
+    fanout_ids: list[str] = []
+    legacy_deliveries: list[dict[str, Any]] = []
+
+    if request.delivery_only and explicit_routes:
+        for account in _daily_brief_request_accounts(request):
+            scheduler = _daily_brief_scheduler_decision(request, account)
+            if scheduler.get("in_run_window") is not True:
+                continue
+            market_date = _daily_brief_market_date(scheduler)
+            if not market_date:
+                continue
+            _prepare_daily_brief_fanout_recoveries(request, account, markets[0], market_date, scheduler, daily_limits)
+            fanout_ids.extend(item["fanout_id"] for item in _daily_brief_day_fanouts(request, account, markets[0], market_date))
+            legacy_deliveries.extend({"account": account, "market": markets[0], "market_trading_date": market_date,
+                "envelope": envelope} for envelope in list_pending_legacy_daily_brief_deliveries(
+                    base=request.base, account=account, market=markets[0], market_trading_date=market_date, now_utc=utc_now()))
+        return DailyBriefNotificationPreparation(
+            prepared_messages=PreparedPerAccountMessages({}, False, False),
+            lifecycles_by_account={}, delivery_keys_by_account={}, markets=markets,
+            fanout_ids=tuple(fanout_ids),
+            legacy_deliveries=tuple(legacy_deliveries),
+        )
 
     if request.delivery_only:
         if not multi_market:
@@ -1068,7 +1479,7 @@ def _prepare_daily_brief_notification(
                 blocked_retry_envelope: dict[str, Any] | None = None
                 blocked_retry_classification: str | None = None
                 blocked_market_date = _daily_brief_market_date(scheduler)
-                if scheduled_trigger and not multi_market and blocked_market_date:
+                if scheduled_trigger and not explicit_routes and not multi_market and blocked_market_date:
                     read_scope = _daily_brief_delivery_read_scope(request, account, markets[0], blocked_market_date)
                     if not request.no_send:
                         recovery_report = read_daily_decision_brief_recovery_report(
@@ -1160,15 +1571,20 @@ def _prepare_daily_brief_notification(
                     failure_source: tuple[str, str] | None = None
                     recovery_due = False
                     if pipeline_reliable:
-                        intent = None
-                        if (scheduled_trigger and not fixed_target and not request.no_send
-                                and blocked_retry_envelope is None and scheduler.get("in_run_window") is True):
-                            intent = _daily_brief_recovery_intent(
-                                request=request, account=account, market=market, scheduler=scheduler,
-                                brief=brief, daily_limits=daily_limits,
-                            )
+                        def recovery_intent():
+                            if (scheduled_trigger and explicit_routes and not fixed_target and not request.no_send
+                                    and notifications_enabled(request.base_cfg) and scheduler.get("in_run_window") is True):
+                                return _daily_brief_fanout_recovery_intent(
+                                    request, account, market, scheduler, brief, daily_limits)
+                            if (scheduled_trigger and not explicit_routes and not fixed_target and not request.no_send
+                                    and blocked_retry_envelope is None and scheduler.get("in_run_window") is True):
+                                return _daily_brief_recovery_intent(
+                                    request=request, account=account, market=market, scheduler=scheduler,
+                                    brief=brief, daily_limits=daily_limits,
+                                )
+                            return None
                         persisted = persist_daily_decision_brief_success(
-                            base=request.base, brief=brief, **({"recovery_intent": intent} if intent else {}),
+                            base=request.base, brief=brief, recovery_intent_factory=recovery_intent,
                         )
                         previous = persisted.get("previous_successful_brief")
                         if (
@@ -1189,7 +1605,7 @@ def _prepare_daily_brief_notification(
                             candidate_record_reason = str(recorded["reason"])
                             if recorded["applied"]:
                                 pending = list(recorded["pending_candidate_identities"])
-                        if fixed_target and blocked_retry_envelope is None and not request.no_send:
+                        if not explicit_routes and fixed_target and blocked_retry_envelope is None and not request.no_send:
                             record_daily_decision_brief_fixed_recovery(
                                 base=request.base,
                                 account=account,
@@ -1200,14 +1616,14 @@ def _prepare_daily_brief_notification(
                                 brief_digest=str(persisted["current_brief_digest"]),
                                 candidate_identities=persisted["current_candidate_identities"],
                             )
-                        if (scheduled_trigger and not fixed_target and not request.no_send
+                        if (scheduled_trigger and not explicit_routes and not fixed_target and not request.no_send
                                 and blocked_retry_envelope is None and candidate_record_reason != "stale_revision"
                                 and scheduler.get("in_run_window") is True):
                             recovery_due = _bind_daily_brief_recovery(
                                 request=request, account=account, market=market,
                                 market_date=str(persisted["brief"]["market_trading_date"]),
                             )
-                        if scheduled_trigger:
+                        if scheduled_trigger and not explicit_routes:
                             commit_started = monotonic()
                             try:
                                 _commit_scan_target_after_brief(
@@ -1231,6 +1647,27 @@ def _prepare_daily_brief_notification(
                             brief=brief,
                             result=result,
                         )
+
+                    if explicit_routes:
+                        if scheduled_trigger and not request.no_send:
+                            _prepare_daily_brief_fanout(
+                                request, account, market, scheduler, persisted["brief"] if persisted else brief,
+                                persisted or {"current_brief_digest": failure_source[1],
+                                    "source_reference": failure_source[0]}, diff, daily_limits, pipeline_reliable,
+                            )
+                            fanout_ids.extend(item["fanout_id"] for item in _daily_brief_day_fanouts(
+                                request, account, market, str(brief["market_trading_date"])))
+                            legacy_deliveries.extend({"account": account, "market": market,
+                                "market_trading_date": str(brief["market_trading_date"]), "envelope": envelope}
+                                for envelope in list_pending_legacy_daily_brief_deliveries(base=request.base,
+                                    account=account, market=market, market_trading_date=str(brief["market_trading_date"]), now_utc=utc_now()))
+                        if scheduled_trigger and pipeline_reliable:
+                            _commit_scan_target_after_brief(request, account=account, target=scan_targets[account],
+                                brief_digest=str(persisted["current_brief_digest"]))
+                        lifecycle_audit.append({"account": account, "market": market,
+                            "market_trading_date": str(brief["market_trading_date"]),
+                            "pipeline_reliable": pipeline_reliable, "fanout": True})
+                        continue
 
                     decision = (
                         decide_daily_brief_notification(
@@ -1279,7 +1716,7 @@ def _prepare_daily_brief_notification(
                     ):
                         render_context = _daily_brief_render_context(request, scheduler_decision=scheduler)
                         if action == "fixed_failure":
-                            message = render_fixed_failure(
+                            message = (render_fixed_failure if feishu_card_delivery else render_fixed_failure_text)(
                                 brief,
                                 context=render_context,
                             )
@@ -1309,34 +1746,39 @@ def _prepare_daily_brief_notification(
                                 diff=diff, limits=daily_limits,
                             ))
                             if action == "fixed_report":
-                                message = render_fixed_report(
+                                message = (render_fixed_report if feishu_card_delivery else render_fixed_report_text)(
                                     persisted["brief"],
                                     diff=diff,
                                     limits=daily_limits,
                                     context=render_context,
                                 )
-                                card_markdown = render_fixed_report_card_markdown(
-                                    persisted["brief"],
-                                    diff=diff,
-                                    limits=daily_limits,
-                                    context=render_context,
-                                )
+                                card_blocks = []
+                                if feishu_card_delivery:
+                                    card_blocks = render_fixed_report_card_blocks(
+                                        persisted["brief"],
+                                        diff=diff,
+                                        limits=daily_limits,
+                                        context=render_context,
+                                    )
                             else:
-                                message = render_candidate_alert(
+                                message = (render_candidate_alert if feishu_card_delivery else render_candidate_alert_text)(
                                     persisted["brief"],
                                     identities,
                                     limits=daily_limits,
                                     context=render_context,
                                 )
-                                card_markdown = render_candidate_alert_card_markdown(
-                                    persisted["brief"],
-                                    identities,
-                                    limits=daily_limits,
-                                    context=render_context,
-                                )
+                                card_blocks = []
+                                if feishu_card_delivery:
+                                    card_blocks = render_candidate_alert_card_blocks(
+                                        persisted["brief"],
+                                        identities,
+                                        limits=daily_limits,
+                                        context=render_context,
+                                    )
                             rendered_transport = (
                                 render_feishu_notification_card(
-                                    markdown=card_markdown,
+                                    markdown="\n\n".join(card_blocks),
+                                    markdown_blocks=card_blocks,
                                     fallback_text=message,
                                     fallback_open_id=resolve_feishu_bot_send_target(notifications=request.base_cfg.get("notifications")),
                                 )
@@ -1469,6 +1911,8 @@ def _prepare_daily_brief_notification(
         multi_market_delivery_unsupported=multi_market,
         blocked_error_code=blocked_error_code,
         scan_outcomes_by_account=scan_outcomes_by_account,
+        fanout_ids=tuple(dict.fromkeys(fanout_ids)),
+        legacy_deliveries=tuple(legacy_deliveries),
     )
 
 
@@ -1726,28 +2170,36 @@ def _rebuild_daily_brief_delivery(
         render_context.update(_daily_brief_candidate_render_context(
             brief, delivery_kind=action, candidate_identities=identities, diff=diff, limits=daily_limits,
         ))
-    if full_report:
-        message = render_fixed_report(brief, diff=diff, limits=daily_limits, context=render_context)
-        card_markdown = render_fixed_report_card_markdown(
-            brief,
-            diff=diff,
-            limits=daily_limits,
-            context=render_context,
-        )
-    else:
-        message = render_candidate_alert(brief, identities, limits=daily_limits, context=render_context)
-        card_markdown = render_candidate_alert_card_markdown(
-            brief,
-            identities,
-            limits=daily_limits,
-            context=render_context,
-        )
     feishu_card_delivery = (
         str(_notification_perception_route_hint(request.base_cfg).get("provider") or "").strip().lower()
         == FEISHU_APP_NOTIFICATION_PROVIDER
     )
     if recovering_report:
         feishu_card_delivery = bool(render_context["recovery_card_delivery"])
+    if full_report:
+        message = (render_fixed_report if feishu_card_delivery else render_fixed_report_text)(
+            brief, diff=diff, limits=daily_limits, context=render_context,
+        )
+        card_blocks = []
+        if feishu_card_delivery:
+            card_blocks = render_fixed_report_card_blocks(
+                brief,
+                diff=diff,
+                limits=daily_limits,
+                context=render_context,
+            )
+    else:
+        message = (render_candidate_alert if feishu_card_delivery else render_candidate_alert_text)(
+            brief, identities, limits=daily_limits, context=render_context,
+        )
+        card_blocks = []
+        if feishu_card_delivery:
+            card_blocks = render_candidate_alert_card_blocks(
+                brief,
+                identities,
+                limits=daily_limits,
+                context=render_context,
+            )
     prepared = prepare_daily_decision_brief_delivery(
         base=request.base,
         account=account,
@@ -1763,7 +2215,7 @@ def _rebuild_daily_brief_delivery(
         rendered_message=message,
         rendered_transport=(
             render_feishu_notification_card(
-                markdown=card_markdown, fallback_text=message,
+                markdown="\n\n".join(card_blocks), markdown_blocks=card_blocks, fallback_text=message,
                 fallback_open_id=(
                     render_context.get("recovery_fallback_open_id") if recovering_report
                     else resolve_feishu_bot_send_target(notifications=request.base_cfg.get("notifications"))
