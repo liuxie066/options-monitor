@@ -121,6 +121,7 @@
 - [Agent Manual](../AGENTS.md)：任务执行规则、按任务阅读入口、已核对的开发命令及权限边界。
 - [Tests Guide](../tests/README.md)：测试分层、运行与维护约定；验证选择见 [Agent Handbook §9](AGENT_WIKI.md#9-verification-matrix)。
 - [开发经验](../LESSONS.md)：经证据支持的复用教训与维护模板；不作为当前业务合同或运行事实的替代。
+- [合并后增量巡检](CODE_HEALTH_REVIEW.md)：已合并改动的检查、持久每日调度、本地修复与独立审核，以及报告续跑和交付授权边界。
 
 ## 工作流证据
 

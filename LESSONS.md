@@ -13,8 +13,8 @@
 
 - 触发条件：新增定时研究采集、供应商方法或合约分片，尤其是60秒固定窗口。
 - 错误原因：公司行动测试的fake gateway自行提供了`get_rehab`，真实`FutuGateway`却缺方法；分片测试时钟不推进，未暴露CLI启动、目录计量、归档初始化及逐片连接累计耗尽窗口。两个缺陷分别表现为方法调用`AttributeError`与末片`deadline_expired`。
-- 下次检查方式：用真实gateway/client、仅替换SDK传输验证方法和错误映射；用完整分母通过真实planner/collector/limiter，显式计入连接和供应商时延；验证准备阶段无请求/无claim，重放不重复采集，线上再按回执核对应采与实采。
-- 证据：`tests/test_futu_gateway_rehab.py`、`tests/test_research_collection_window.py`；当前限制与修复边界见`docs/RESEARCH_WATCHLIST_SCOPE.md`的采集窗口与公司行动适配。
+- 下次检查方式：用真实gateway/client、仅替换SDK传输验证方法和错误映射；用完整分母通过真实planner/collector/limiter，显式计入连接和供应商时延；验证准备阶段无请求/无claim，重放不重复采集，线上再按回执核对应采与实采。对旧实现做定向对照时核对实际失败断言：连接数不符合预期只能证明连接复用有判别力，不能据此宣称复现了deadline故障。
+- 证据：`tests/test_futu_gateway_rehab.py`、`tests/test_research_collection_window.py`，尤其是`test_full_market_roster_finishes_in_sixty_second_slot`的采集结果与连接数分别断言；适配与共享连接修复见PR #992。当前限制与修复边界见`docs/RESEARCH_WATCHLIST_SCOPE.md`的采集窗口与公司行动适配。
 
 ## 条目模板
 
