@@ -4,32 +4,59 @@
 
 安装不会创建 runtime config，不会写 env secrets，不会启动 systemd/launchd，也不会连接 OpenD、Feishu 或修改 SQLite 状态。默认会创建用户级 `om` / `om-agent` wrapper，方便从任意目录启动。
 
-整个仓库要求 **Python 3.12 或更高版本**。`om`、`om-agent`、installer、release preflight 和 service upgrade 都会在执行前验证解释器，不再静默接受 macOS 自带的旧 `python3`。
+OM 使用 **Python 3.12 或更高版本**。完整运行包携带私有解释器和运行依赖，不要求用户安装系统 Python、Git 或 Homebrew；源码安装另有前置条件。富途 OpenD 是独立程序，仍需用户按官方说明安装、登录，运行包不包含它。
+
+## 运行包资格与源码安装
+
+v4.6.9 已正式发布 `macos-arm64` 运行包。以下按[该版本实际 Release 资产](https://github.com/liuxie066/options-monitor/releases/tag/v4.6.9)及其 `.qualification.json` 回执列示；后续版本须核对各自资产，不能只看源码中的平台名或 VERSION。运行包自检不证明券商连接、服务运行或通知投递可用。
+
+| 构建目标 | 实际运行包资格 |
+|---|---|
+| `macos-arm64` | v4.6.9 已发布；正式产物在 macOS 15.8.2 arm64 完成解包搬迁、依赖导入、help 与 Tool Gateway spec 自检 |
+| `macos-x86_64` | v4.6.9 未提供正式运行包；使用显式源码安装 |
+| `linux-x86_64` | v4.6.9 未提供正式运行包；使用显式源码安装 |
+
+当前锁文件的 `release_platforms` 仅含 `macos-arm64`。其他两项的 CI 构建或资格任务不等于正式运行包已发布；最低 OS 兼容声明也不等于该最低版本实机通过，不承诺所有 macOS/Linux 版本。
+
+默认安装要求目标稳定 Release 有精确匹配的 `options-monitor-<tag>-<platform>.tar.gz` 及可信 SHA-256。安装端需要 shell、HTTPS 下载工具 `curl`、`tar`、`awk`、`sed` 和 `sha256sum` 或 `shasum`，会先检查缺失工具。没有合格资产、摘要不符或平台不匹配会失败，不会自动安装编译器、Homebrew 或切换源码路径。发布证据要求见[运行包发布资格](RELEASE_PROCESS.md#完整运行包的发布资格)。
+
+尚无合格资产时，若选择源码安装，须自己准备 **Git、Python 3.12+ 和 venv 支持**，并显式指定：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh -o /tmp/options-monitor-install.sh
+bash /tmp/options-monitor-install.sh --source
+```
+
+这仍只安装已发布版本，不包含 `main` 上尚未发布的改动。固定版本追加 `--version <release-tag>`；开发 checkout 见 [Manual Install](#manual-install)。Homebrew 只是准备源码依赖的可选途径，运行包用户不需要它。
 
 ## Quick Install
 
-普通安装默认解析并安装最新 GitHub release，不安装浮动 `main` 分支：
+确认目标版本已有本机平台合格运行包后，默认解析并安装最新稳定 GitHub Release，不安装浮动 `main`：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash
 
-"$HOME/.local/bin/om" setup init
+"$HOME/.local/bin/om"
 ```
 
 安装器始终安装已发布版本，不安装 `main` 上尚未发布的改动；新 CLI 参数以所安装版本的 `om setup init --help` 为准。
 
+产品运行包在构建时排除仓库开发指令 `AGENTS.md`、`CLAUDE.md` 和 `.agents/`（含嵌套目录），避免安装产品时将维护者的私人称呼和开发约定加载到用户 Agent。显式 `--source` 安装在 clone 后执行相同排除，也覆盖旧 tag；仅源码安装保留 Git 元数据供版本检查与升级使用。重复安装的已安装快路径不清理已有文件，开发者直接 clone 的工作区也不受影响。
+
 安装输出会明确打印解析到的 release tag，例如：
 
 ```text
-[install] resolved latest release: v1.2.118
+[install] resolved latest release: v<version>
 ```
 
 需要复现、回滚或固定生产版本时，使用可审计的两步安装并显式指定 release tag：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh -o /tmp/options-monitor-install.sh
-bash /tmp/options-monitor-install.sh --version v1.2.118 --prefix "$HOME/apps/options-monitor"
+bash /tmp/options-monitor-install.sh --version "<qualified-release-tag>" --prefix "$HOME/apps/options-monitor"
 ```
+
+将占位 tag 换成已确认有本机平台合格运行包的已发布版本，不代表任一历史版本已补发运行包。
 
 安装脚本默认把 wrapper 写到 `$HOME/.local/bin`。如果该目录不在 `PATH`，安装输出会提示：
 
@@ -40,22 +67,137 @@ export PATH="$HOME/.local/bin:$PATH"
 如果不想创建全局命令，加 `--no-install-cli`；此时使用 fallback：
 
 ```bash
-"$HOME/apps/options-monitor/current/om" setup check
+"$HOME/apps/options-monitor/current/om"
 ```
+
+安装完成后只打印实际入口的 shell 引用命令：有 wrapper 时使用实际 `--bin-dir` 下的 `om`，否则使用 `current/om`，兼容中文与空格路径。它进入统一首页，不强制追加 `setup init`，也不自动启动向导或连接券商。
 
 如果需要换 wrapper 目录，用 `--bin-dir PATH`。如果目标目录里已有未知来源的 `om` / `om-agent`，installer 会拒绝覆盖；确认要接管时才使用 `--force-cli-wrapper`。
 
-如果需要 Feishu long-connection、远端 inbound 或服务端依赖，安装时加 `--with-server`：
+运行包包含基础运行依赖，关闭的可选功能不要求配置凭证。源码安装服务端依赖可加
+`--with-server`；飞书收发另加 `--with-feishu`，微信收发另加 `--with-wechat`。
+例如安装含飞书消息能力的源码实例：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash -s -- --with-server
+curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash -s -- --source --with-server --with-feishu
 ```
+
+## 官方可选插件
+
+v4.6.9 已正式提供 `market-opend`（OpenD 行情）、`broker-futu`（富途账户）、`broker-longbridge`（长桥账户）、`pm`（PM 接入）、`position-advice`（持仓评估与建议）、`feishu`（飞书收发）和 `wechat`（微信收发）七个 `py3-none-any.whl`，以及 `om-plugins.json`、`om-plugins.md`。v4.6.8 只提供其中后四个插件。实际可用项以所安装版本的正式 Release 清单为准；不能向 v4.6.8 安装这三个 Provider 插件。清单绑定精确 OM 版本、tag、commit、Python >=3.12 及资产摘要；缺资产时拒绝，不退回其他版本。
+
+源码版与完整运行包使用同一入口；添加插件时无需另行使用 pip、Git 或安装系统 Python：
+
+```bash
+om plugins list
+om plugins list --format json
+om plugins install pm                         # 默认只预览
+om plugins install pm --confirm
+om plugins install position-advice --confirm
+om plugins install feishu --confirm
+om plugins install wechat --confirm
+om plugins uninstall pm                      # 默认只预览
+om plugins uninstall pm --confirm
+```
+
+以下 Provider 插件命令与默认选择从 v4.6.9 起提供，不能用于旧版：
+
+```bash
+om plugins install broker-futu --confirm        # 按账户需要安装
+om plugins install broker-longbridge --confirm  # 先满足长桥 SDK 前提
+```
+
+这些版本的新安装默认安装 `market-opend`，不默认安装任何券商包。账户可分别选富途或长桥，行情来源独立选择；安装不改变配置。托管卸载不允许移除最后一个有效行情插件，券商可以全部移除。手工 pip 移除行情后，配置、诊断和历史入口仍可启动，但取行情必须先恢复所选插件。
+
+长桥 SDK 沿用 `requirements/longbridge.txt` 的显式前提；托管安装和升级切换前会验证 SDK，缺失时拒绝并给出提示。源码安装器可用 `--with-broker-futu` 或 `--with-broker-longbridge`；后者同时安装固定 SDK 依赖。运行包缺 SDK 时不能向其内部补包。
+
+`list` 只读本地状态，不联网。安装从当前 OM 版本的官方稳定 Release 获取清单，确认后仅下载所选 wheel；校验资产摘要、大小、包元数据、RECORD 和隔离导入，再原子发布安装目录。缺资产、版本不配套或校验失败会中止，不修改配置和已有安装。
+
+飞书插件依赖 `lark-oapi`，用户无需另行安装 SDK。确认安装时复用目标解释器中已验证可用的 SDK，不强制降级；源码版缺 SDK 时，优先使用可用的 uv（无需目标 venv 内有 pip），否则使用该实例的 pip，按 `constraints/runtime-bundle.txt` 下载到插件专属 `dependencies/` 目录，保留文件摘要并验证实际 SDK API 和依赖兼容性。依赖校验使用核心运行依赖 `packaging`，不依赖 pip 内部模块。安装失败不启用插件、不改源码 venv。此步骤需要可访问 Python 包索引；预览不执行。运行包复用其已锁定的 SDK，缺失或损坏时拒绝安装，不向不可变运行包补包。微信无第三方依赖。
+
+文件位于代码目录同级 `.om-plugins/<代码绝对路径摘要>/<插件名>/`，与运行包的不可变文件清单分离。安装选择属于这个 OM 代码实例，改变账户或运行目录不改变安装选择；新代码路径需由受控升级迁移选择。进程固定使用启动时的物理代码目录，切换 `current` 不会让旧进程改读新版本插件。直接搬迁代码后应重新检查安装状态。请以该实例实际运行用户执行安装和卸载，插件目录为该用户私有，不要用 sudo 改变归属。
+
+安装不等于启用：PM 仍由 `portfolio_management.enabled` 控制，持仓建议仍由 `close_advice.enabled` 控制；消息渠道仍使用 `channels.feishu`、`channels.wechat_clawbot` 的总开关、收信和通知开关。命令不改配置、凭据、账本、历史报告或服务；已加载插件的进程需另行重启，新进程按需加载。损坏的托管安装可先明确卸载再重装。受控升级在切换前安装并校验目标版本的已选插件，目标资产缺失会保留当前实例；见[升级流程](RELEASE_PROCESS.md)。
+
+卸载先将安装原子移出加载目录，再清理文件；移出失败保留原安装，清理失败则明确显示已卸载及残留目录（JSON 为 `cleanup_pending`、`retained_directory`），这些残留不会被加载，不应误认作仍已安装。
+
+回滚使用目标版本原有的插件选择，确认时先校验其 receipt 和实际加载，再暂存配置和切换代码；失败保留当前实例，不下载或迁移插件。仅预览时不加载插件。
+
+已有 pip 安装会显示 `python_environment`，不由此命令覆盖或删除；先用原环境卸载，再改用官方托管路径。如果后来又通过开发依赖安装了同名 pip 包，托管卸载会明确拒绝，须先移除 pip 包，避免移除托管副本后又加载另一份。以下源码开发方式仍保留：源码包版本目前是 `0.1.0`，官方 wheel 版本跟随 OM VERSION，二者不能互作兼容凭据。
+
+## 可选 PM 与长桥依赖
+
+PM 普通安装见[官方可选插件](#官方可选插件)。以下 pip 开发方式及长桥 SDK 仅用于源码安装（安装器使用 `--source`）；不要向默认运行包的内置环境追加依赖。
+使用**运行该 OM 实例的 Python 环境**安装；以下从源码根目录示例，不会开启配置、
+写入凭据或连接外部服务。PM 源码包随仓库提供。
+
+```bash
+./.venv/bin/python -m pip install ./plugins/portfolio-management
+./.venv/bin/python -m pip uninstall om-pm-plugin
+```
+
+PM 默认关闭。安装后设置全局 `portfolio_management.enabled: true`；卸载前关闭 PM
+及 `portfolio.holdings.enabled`。未安装时 `om help`、`om tools spec` 与非 PM 功能可正常
+加载；启用但缺包的 PM 请求返回 `PORTFOLIO_MANAGEMENT_UNAVAILABLE`。详情见
+[配置契约](../CONFIGS.md#可选能力与长桥账户)。
+
+长桥资产适配使用独立 SDK 依赖，默认运行依赖不安装它：
+
+```bash
+./.venv/bin/python -m pip install -r requirements/longbridge.txt
+```
+
+富途/OpenD 行情仍使用既有依赖。长桥 SDK 不在模块导入或 provider 选择时自动载入；
+`broker-longbridge` 的托管安装及升级验证也要求 SDK 可用。SDK 安装不完成账号凭据绑定，也不证明连接和数据权限可用。
+
+开发与 CI 的 `requirements/dev.txt` 显式安装七个本地插件包，保留全部自动发现回归；
+缺包状态由隔离子进程验证，不跳过这些测试。
+
+`install.sh --with-dev` 始终从下载的 release 根目录安装这些依赖，不使用调用目录中的
+同名插件。源码 service upgrade 保留当前实例实际安装的 PM 扩展和 Longbridge SDK，
+与配置是否启用无关；未安装或主动卸载的包不会因配置仍启用而补装。首次从内置 PM 的
+旧版迁移时，仅为有效旧配置已启用的 PM 安装扩展。若目标是运行包且需要保留 pip 安装的插件或长桥 SDK，
+升级在切换前拒绝；通过 `om plugins` 托管的能力另走官方资产迁移路径。缓存及切换前校验见
+[升级流程](RELEASE_PROCESS.md)；首次迁移必须使用含修复的新控制器，旧版自动升级器不能
+自行获得目标 release 中的修复。
+
+## 可选持仓建议
+
+运行依赖默认不安装持仓建议包。普通安装见[官方可选插件](#官方可选插件)，支持源码版与完整运行包。以下仅为源码开发方式，
+安装器 `--with-position-advice` 须配合 `--source`。使用该实例的 Python 从源码根目录安装：
+
+```bash
+./.venv/bin/python -m pip install ./plugins/position-advice
+./.venv/bin/python -m pip uninstall om-position-advice-plugin
+```
+
+安装器也支持 `--with-position-advice`；安装不启用，需在配置中明确开启 `close_advice.enabled`。缺包不影响核心扫描启动及历史报告读取。开发/CI 的 `requirements/dev.txt` 安装此包并保留全部策略测试；缺包启动由隔离子进程覆盖。受控升级保留实际安装选择，并为旧内置建议已启用的实例迁移安装；主动卸载保持卸载。首次迁移仍须使用新升级控制器，见[升级流程](RELEASE_PROCESS.md)。
+
+## 可选消息渠道
+
+飞书与微信分别安装，也可均不安装。每个包包括收发传输；核心 CLI、本地扫描、报告和历史读取
+不要求消息包。Feishu Bitable 数据集成独立于消息插件。
+源码版与运行包均可通过[官方可选插件](#官方可选插件)安装 `feishu`、`wechat`，两者可同时选择。
+以下源码开发方式仍保留：安装器使用 `--source --with-feishu` / `--source --with-wechat`，
+也可使用实例的 Python 从源码根目录安装或移除：
+
+```bash
+./.venv/bin/python -m pip install ./plugins/feishu-channel
+./.venv/bin/python -m pip install ./plugins/wechat-channel
+./.venv/bin/python -m pip uninstall om-feishu-channel-plugin om-wechat-channel-plugin
+```
+
+安装不启用；按 [配置契约](../CONFIGS.md#消息渠道) 设置各渠道总开关、收信与主动通知。
+开发依赖安装两包，以保留完整回归；基础 server 依赖不再强制安装飞书 SDK。
+缺包与配置关闭是不同状态，`om channel status` 分别展示。选择了消息插件的升级必须保留安装选择，
+托管选择通过目标版本官方资产保留；pip 安装的消息包不能直接迁移进固定运行包，切换前拒绝。
+首次迁移仍使用含修复的新升级控制器。
 
 ## macOS
 
-macOS 是一等支持平台，适合本地手动运行或轻量常驻运行。长期无人值守仍优先推荐 Linux。
+macOS 提供本地手动运行和 LaunchAgent 入口；运行包资格按上表和实际宿主回执确认，不由入口存在推断。
 
-前置依赖：
+以下前置条件仅用于显式源码安装，运行包不需要这些步骤：
 
 ```bash
 xcode-select --install
@@ -64,7 +206,7 @@ python3.12 --version
 
 Python 需要 3.12 或更高版本。
 
-如果使用 Homebrew：
+已有 Homebrew 时可用下列方式准备源码依赖；也可使用其他受信来源，无需为 OM 运行包安装 Homebrew：
 
 ```bash
 brew install python@3.12 git
@@ -73,7 +215,7 @@ brew install python@3.12 git
 安装代码：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash -s -- --source
 
 om setup check
 ```
@@ -81,7 +223,7 @@ om setup check
 如果这台 Mac 要跑 Feishu long-connection inbound：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash -s -- --with-server
+curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash -s -- --source --with-server --with-feishu
 ```
 
 本地手动运行可以继续使用 repo 内忽略文件：
@@ -119,9 +261,9 @@ om service render \
 
 ## Linux
 
-Linux 是推荐的生产长期运行平台。
+Linux 提供 systemd 部署入口；运行包只按精确平台和版本验收，不把构建目标当作全部发行版支持承诺。
 
-前置依赖以 Debian/Ubuntu 为例：
+仅源码安装的前置依赖以 Debian/Ubuntu 为例；运行包无需安装系统 Python/Git：
 
 ```bash
 sudo apt-get update
@@ -133,7 +275,7 @@ Python 需要 3.12 或更高版本；较旧发行版请先启用提供 Python 3.
 安装代码：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash -s -- --source
 
 om setup check
 ```
@@ -141,7 +283,7 @@ om setup check
 如果这台服务器要跑 Feishu long-connection inbound：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash -s -- --with-server
+curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash -s -- --source --with-server --with-feishu
 ```
 
 生产服务 env-file 推荐放在：
@@ -190,6 +332,7 @@ git checkout <release-tag>
 python3.12 -m venv .venv
 ./.venv/bin/pip install -U pip
 ./.venv/bin/pip install -r requirements.txt -c constraints.txt
+./.venv/bin/pip install ./plugins/market-opend
 ```
 
 如果已有 `.venv` 是 Python 3.10/3.11 或已损坏，launcher 会明确失败而不会绕到 shell 的其他 `python3`。确认该目录只包含可重建依赖后再重建：
@@ -199,6 +342,7 @@ rm -rf .venv
 python3.12 -m venv .venv
 ./.venv/bin/pip install -U pip
 ./.venv/bin/pip install -r requirements.txt -c constraints.txt
+./.venv/bin/pip install ./plugins/market-opend
 ```
 
 临时诊断或恢复时可以显式指定兼容解释器：
@@ -224,6 +368,9 @@ $HOME/apps/options-monitor/
   releases/
     <resolved-release-tag>/
       .venv/
+      # 源码安装使用 .venv；运行包改为：
+      om.runtime.json
+      runtime/python/bin/python3
       om
       om-agent
 
@@ -232,7 +379,9 @@ $HOME/.local/bin/
   om-agent  -> wrapper execs $HOME/apps/options-monitor/current/om-agent
 ```
 
-升级时安装新 tag，再切换 `current` symlink。长期运行服务应使用 `current` 作为 repo root。
+运行包与源码安装共用该目录及 wrapper 布局；两种解释器目录不是同时必需。解释器选择先检查显式 `OM_PYTHON`，再检查已声明运行包，然后是已有 `.venv` 和系统候选。声明运行包但解释器或清单损坏时明确失败，不偷用系统 Python。
+
+初装不接管活动实例；检测到活动部署时使用[受控升级](RELEASE_PROCESS.md#远端自动升级)，不要用安装命令代替服务升级。升级在自身事务内物化新版本并切换 `current`，源码保持原路径，运行包使用已校验资产，不隐含转换安装类型。长期运行服务应使用 `current` 作为 repo root。
 用户级 wrapper 指向 `current`，所以升级后 `om` / `om-agent` 会自动跟随新的 release。
 
 在 `current` 实际切换前发生可恢复失败或收到 INT/TERM，安装器会恢复原有 wrapper，原本没有入口则移除本次新建入口；切换完成后保留新入口。恢复或清理失败会非零退出，并报告尚存备份的路径。已发布的失败 release 保留，普通重试仍拒绝已有 inactive target；确认后可沿用 `--force` 重建，活动 release 仍拒绝 `--force`。
@@ -243,10 +392,8 @@ $HOME/.local/bin/
 
 installer 允许做：
 
-- clone repo
-- checkout 最新或指定的 GitHub release tag
-- 创建 `.venv`
-- 安装 Python requirements
+- 下载并校验目标稳定 Release 的运行包，在独占 staging 解包、自检并发布 release 目录
+- 显式 `--source` 时 clone/checkout 目标 Release、创建 `.venv`、安装 requirements
 - 更新 `current` symlink
 - 创建或更新带 marker 的用户级 `om` / `om-agent` wrapper（除非传 `--no-install-cli`）
 - 输出下一步命令
@@ -264,5 +411,7 @@ installer 禁止做：
 安装完成后的下一步是：
 
 ```bash
-om setup check
+"$HOME/.local/bin/om"
 ```
+
+无配置时进入首次配置；软件安装成功不代表账户连接或首次扫描完成。完整步骤见[首次运行指南](GETTING_STARTED.md)。

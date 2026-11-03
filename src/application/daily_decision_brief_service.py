@@ -746,11 +746,10 @@ def assemble_daily_decision_brief(
         now_ms=int(effective_now.timestamp() * 1000),
         capacity_observation={"portfolio": portfolio_context} if portfolio_context else None,
     )
-    from src.application.account_config import build_account_runtime_plan
+    from src.application.account_config import account_decision_scope
 
-    runtime_plan = build_account_runtime_plan(dict(config_map), account=account_norm)
     brief_payload = {
-        "decision_scope": {"futu_account_id": runtime_plan.futu_account_id, "trade_env": runtime_plan.futu_trd_env},
+        "decision_scope": account_decision_scope(dict(config_map), account=account_norm),
         "schema_version": DAILY_DECISION_BRIEF_SCHEMA_VERSION,
         "attribution_pending": attribution_pending,
         "attribution_read_error": attribution_read_error,
@@ -926,7 +925,7 @@ def _load_opening_candidate_families(
                 "scope": affected.get("scope", "strategy"),
                 "direction": mode,
                 "candidate_owner": "opening",
-                **{key: affected[key] for key in ("contract_symbol", "expiration") if affected.get(key)},
+                **{key: affected[key] for key in ("contract_symbol", "expiration", "rv_reason") if affected.get(key)},
                 "strategy_family": family,
                 "symbol": str(affected.get("symbol") or ""),
                 "severity": "warning",
@@ -2979,7 +2978,7 @@ def _dedupe_gaps(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             _text(safe.get("symbol")).upper(),
             _text(safe.get("strategy_family")).lower(),
             _text(safe.get("reason")).lower(),
-            *(_text(safe.get(key)) for key in ("scope", "direction", "candidate_owner", "variant", "contract_symbol", "expiration", "wheel_branch_id")),
+            *(_text(safe.get(key)) for key in ("scope", "direction", "candidate_owner", "variant", "contract_symbol", "expiration", "rv_reason", "wheel_branch_id")),
         )
         key = (
             repr(correlation)

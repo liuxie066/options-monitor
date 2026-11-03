@@ -20,8 +20,99 @@ Rules:
 - `src/application` must not import `scripts`.
 - `scripts/` is reserved for operational wrappers, release helpers, diagnostics,
   and one-off tools that delegate into `src` or `domain`.
-- Public behavior should enter through `./om`, `./om-agent`, or
+- Public behavior should enter through `./om` (including `./om tools`; compatible `./om-agent`), or
   documented `python -m src.application...` entry points.
+
+## Optional capabilities and providers
+
+OM keeps strategy, ledger, evidence qualification and risk calculations in core.
+External capabilities enter through three boundaries:
+
+```mermaid
+flowchart LR
+  OM[OM application] --> MD[market_data_provider]
+  OM --> BP[broker_provider]
+  OM --> PM[portfolio_management]
+  MD --> OpenD[OpenD market data]
+  BP --> Futu[Futu holdings and cash]
+  BP --> LB[Longbridge holdings and cash]
+  PM --> PKG[optional om-pm-plugin package]
+  PKG --> HTTP[PM HTTP service]
+```
+
+- Market data uses `market_data.provider` (default/current package: `market-opend`, provider `opend`).
+  Required-data planning, prefetch, ordinary scan fetches and interactive option
+  queries resolve the same capability owner. Provider failures retain their
+  failure, timeout and cancellation semantics; selection does not grant broker
+  account access. Legacy standalone OpenD subprocess commands remain OpenD-specific.
+  Selected provider source identity also binds required-data plans, cache metadata,
+  frozen consumers and quote receipts; switching providers invalidates prior data.
+  Non-OpenD status snapshots use the canonical `market_data` capability and retain
+  the actual provider in `payload.source`, without a fallback status label.
+  Default OpenD evidence retains its historical source aliases and receipt format.
+  Tick readiness probes OpenD quotes only when selected, and checks each actual
+  installed Futu broker independently with its account/environment binding. Phone-verification
+  state gates only runs needing either capability. The tick trading-day query uses
+  the selected provider; unavailable calendars retain the existing unknown-day policy.
+- Broker assets use `account_settings.<account>.type` in generated config
+  (`accounts.<account>.type` in YAML). `portfolio.source: auto` selects `futu` or
+  `longbridge` for that account. Explicit mismatches fail without another broker
+  fallback. The optional `broker-futu` and `broker-longbridge` packages own account
+  access; zero broker packages is valid. Current portfolio loading checks package
+  availability before accepting caches. Missing capability stays unavailable, while
+  market analysis and historical evidence readers remain available. Generic identity comes from `risk_capacity.broker_capacity_binding`;
+  existing OpenD v1 identity and historical candidate snapshots remain valid.
+- PM transport lives in the separately installed `om-pm-plugin` package under
+  `plugins/portfolio-management`; core owns its shared exceptions and evidence
+  validators in `portfolio_management_contract.py`. Disabled PM never loads the
+  package. Missing enabled integration reports `PORTFOLIO_MANAGEMENT_UNAVAILABLE`;
+  OM help, tool schema and unrelated capabilities remain importable.
+
+Longbridge opening candidates use `opening_candidate_snapshot.v4` with explicit
+`broker_id`, `broker_account_id` and user-binding provenance. Readers retain
+Futu v1/v2/v3 semantics; a Longbridge ID is never stored as `futu_account_id`.
+
+Official distribution is owned by `plugin_release.py` (versioned wheels and
+catalog), `plugin_distribution.py` (preview/install/uninstall) and the stdlib-only
+`plugin_runtime.py` (fixed identities, receipt validation and lazy import).
+The fixed IDs are `pm`, `position-advice`, `feishu`, `wechat`, `market-opend`,
+`broker-futu` and `broker-longbridge`. Normal installation includes `market-opend`
+and no broker. At least one valid market package must remain; managed removal of
+the last valid market package is rejected. Configuration/diagnostics/history can
+start without it, but live quote consumers cannot. Longbridge retains its explicit
+pinned SDK prerequisite; missing SDK rejects installation/upgrade validation without
+modifying immutable bundles. Feishu alone
+declares the SDK dependency; source hosts missing it stage constrained packages
+inside the managed plugin, while immutable bundles reuse their locked SDK.
+Dependency inventories are verified before loading, and existing environment
+packages retain import precedence. SDK API/dependency checks never start clients.
+`om plugins` consumes only the exact host version's official Release assets.
+Managed files live outside the immutable code inventory, scoped to the resolved
+code root pinned at process startup; a current-symlink switch cannot rebind an
+existing process to the target's plugins. Runtime/account selection does not
+change package selection. Core
+startup registers a lazy finder without importing plugins or contacting services.
+Managed inventory and environment distribution/version admission share
+`plugin_runtime`; source checkouts use each package's project version, and hosts
+without package sources use `VERSION`. Discovery of an absent package stays empty;
+importable unowned or incompatible packages are rejected before execution.
+Application PM/advice/channel loaders also check admission for cached modules;
+a cached environment owner cannot impersonate a selected managed package. Restart
+with the intended installation instead of silently rebinding a running process.
+Standalone domain-only advice keeps its offline policy API contract without a
+host dependency; OM application evaluations and upgrade probes use the host gate.
+Upgrade stages and validates target wheels before switching the current release.
+Rollback validates the target's existing managed selection and actual loading,
+plus pip-owned Providers and SDK prerequisites when the target supports Provider packages,
+before staging configuration or switching; it neither downloads nor migrates plugins.
+Existing environment/pip installations retain their separate ownership.
+
+The scope is fixed installed capability packages and shared core transport/normalization.
+OpenD market installation never grants Futu account access. There
+is no marketplace, dynamic third-party code discovery, hot unloading or new
+trading/transaction synchronization API. Installing a package does not enable
+it or change runtime configuration. See [installation](INSTALL.md) and
+[configuration](../CONFIGS.md#可选能力与长桥账户).
 
 ## Python Export Contract And Static Gate
 
@@ -60,9 +151,11 @@ against its canonical owner by object identity. Validate the contract with:
 
 ## Main Entry Points
 
-`./om` is the human CLI. It forwards to `src.interfaces.cli.main`.
+`./om` is the recommended public CLI. Business commands forward to
+`src.interfaces.cli.main`; `./om tools` delegates directly to the existing gateway.
 
-`./om-agent` is the structured Tool Gateway CLI. It forwards to
+`./om tools` is the structured Tool Gateway CLI (`./om-agent` remains compatible,
+including account mutation commands). Both forward to
 `src.interfaces.agent.cli`, where tool execution is routed through:
 
 ```text
@@ -80,7 +173,7 @@ for compatibility re-exports and shared helpers such as config/contracts; they
 must not own tool implementations. The legacy
 `src.application.agent_tool_handlers` switchboard has been removed.
 
-`./om bot ...` is the local/eval entry for the read-only Bot. Channel
+`./om bot ...` (compatible aliases `om agent` / `om assistant`) is the local/eval entry for the read-only Bot. Channel
 Bot is read-first and may request deterministic Control previews. Both are part
 of the human CLI surface, not the Tool Gateway manifest:
 
@@ -137,7 +230,7 @@ Remote messages intentionally separate channel transport from application
 execution. The current CLI namespace remains `./om bot ...`:
 
 ```text
-Feishu / future channels
+Feishu / WeChat optional channel transports
 -> src.application.channels.ChannelService
 -> src.application.inbound.feishu(_ws)
 -> sender allowlist / idempotency
@@ -150,9 +243,33 @@ Feishu / future channels
 
 `src.application.channels` owns channel capability registration and dispatch, so
 Inbound control and outbound notifications are capabilities of the
-same channel model. `src.application.inbound` should stay thin: extract channel
+same channel model. Each official builder supplies outbound transport, response
+normalization and target/sender/recipient resolution through `ChannelAdapter`.
+Feishu-specific fallback and receipt interpretation live in
+`channels/feishu_notification.py`; WeChat binding interpretation lives in its
+channel owner. Shared delivery keeps fixed composition and compatibility exports;
+shared routes keep authorization, account selection, duplicate checks and identity
+hashing. Actual send receipts bind the identity used during sending, not a later
+identity lookup. `src.application.inbound` should stay thin: extract channel
 payloads, enforce channel-specific receive/reply mechanics, and build the
 transport request.
+`src.application.channels.plugins` lazily loads separately installed Feishu/WeChat
+network leaves. Core retains pure payload builders, rendering/history validation,
+permissions and persistence; Feishu Bitable does not depend on either message package.
+Root channel controls are shared by generated market/Bot config. Each actual inbound
+and reply attempt checks current receive authority; proactive sends also require the
+channel notify flag and global notification opt-in.
+
+`notification_delivery_route.resolve_notification_delivery_routes` selects account-bound
+destinations. `notification_fanout` freezes target identity, body/envelope and independent
+child obligations above adapters; business owners retain a reference and project aggregate
+partial/confirmed/unknown state. Delivery-only retries skip confirmed/accepted/unknown
+children and do not repeat ledger or business effects. Long-running producers reread only
+current delivery authorization from their bound generated config before attempts; business
+inputs and frozen targets remain unchanged. Global operational alerts project configured
+account routes and deduplicate actual destinations, preserving exact account authorization
+per child. No alert automatically falls back to another platform, including legacy routing.
+Legacy single-target histories remain readable.
 `BotInboundRequest`, the inbound audit row, and the pending-operation store form
 the deterministic Control boundary. Protocol command parsing, bound permission
 responses, sender allowlist checks, previews, confirmations, applies, and
@@ -353,7 +470,9 @@ other production PM callers.
 
 ## Close Advice Flow
 
-Close advice keeps deterministic policy in `domain.domain.close_advice`.
+The optional `om-position-advice-plugin` owns the deterministic policy and reason
+presentation. `domain.domain.close_advice` retains the input contract, lazy
+evaluation facade and safe notification/completeness helpers.
 `src.application.close_advice_runner` assembles option-position inputs, required
 data quotes, quality flags, Futu fee estimates, rows, and output files around
 that domain logic.
@@ -365,9 +484,15 @@ preserves those decisions, including fail-closed `not_evaluable` rows,
 and publishes CSV/text reports plus their integrity manifest. The Close Advice
 state and evidence contract is documented in
 `docs/CLOSE_ADVICE_CONTRACT.md`.
-Scheduled Tick is the only current report producer. Agent callers use
-`close_advice_read`, which accepts current/default reports only when their
-manifest and every CSV row bind the same sealed snapshot and Close Advice plan.
+Scheduled Tick and `position_advice_evaluate` use the same sealed runner.
+The active service selects ledger holdings or temporary manual inputs and writes
+only request-scoped reports without notifications. Current conclusions require
+fresh coherent quotes, continuous market state and realtime quote rights; closed
+sessions use compatible sealed historical references without changing their DTE.
+`close_advice_read` remains a report reader and accepts current/default reports
+only when their manifest and every CSV row bind the same sealed snapshot and
+Close Advice plan. Installation does not enable the existing `close_advice.enabled`
+switch; missing or disabled packages leave ordinary scans and history reading available.
 
 ## Config And Runtime State
 

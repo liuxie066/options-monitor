@@ -422,6 +422,7 @@ def test_initialization_failure_closes_owned_context(monkeypatch, failure):
 def test_trade_push_listener_detects_auth_while_constructor_blocks(monkeypatch) -> None:
     from src.infrastructure.futu_trade_push import TradeIntakeAuthRequired
 
+    workers = _track_listener_workers(monkeypatch)
     release_constructor = threading.Event()
 
     _install_fake_sdk(
@@ -437,6 +438,9 @@ def test_trade_push_listener_detects_auth_while_constructor_blocks(monkeypatch) 
         assert caught.value.error_code == "OPEND_NEEDS_PHONE_VERIFY"
     finally:
         release_constructor.set()
+        for worker in workers:
+            worker.join(2)
+            assert not worker.is_alive(), "initializer outlived its fake SDK"
 
     assert list(sdk_logger.handlers) == handlers_before
 
@@ -444,6 +448,7 @@ def test_trade_push_listener_detects_auth_while_constructor_blocks(monkeypatch) 
 def test_trade_push_listener_cancels_blocked_constructor_and_removes_handler(monkeypatch) -> None:
     from src.infrastructure.futu_trade_push import TradeIntakeStartCancelled
 
+    workers = _track_listener_workers(monkeypatch)
     release_constructor = threading.Event()
 
     _install_fake_sdk(monkeypatch, _blocking_context(release_constructor))
@@ -461,6 +466,9 @@ def test_trade_push_listener_cancels_blocked_constructor_and_removes_handler(mon
         raise AssertionError("expected cancelled construction")
     finally:
         release_constructor.set()
+        for worker in workers:
+            worker.join(2)
+            assert not worker.is_alive(), "initializer outlived its fake SDK"
 
     assert list(sdk_logger.handlers) == handlers_before
 

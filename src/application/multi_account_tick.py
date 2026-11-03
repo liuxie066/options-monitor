@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import json
 import os
 import sys
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from src.infrastructure.io_utils import (
     utc_now,
@@ -87,6 +89,8 @@ from src.application.tick_scheduler_context import (
 )
 from src.application.experience_mode import validate_experience_request
 from src.application.futu_quote_routing import resolve_futu_quote_route
+from src.application.market_data_provider import require_market_data_provider
+from src.application.opend_market_snapshot_fetching import trading_calendar_dates
 from src.infrastructure.external_services import (
     run_opend_watchdog,
     run_scan_scheduler_cli,
@@ -97,6 +101,23 @@ from domain.storage.repositories import state_repo
 
 
 _CURRENT_RUN_ID: str | None = None
+
+
+@dataclass(frozen=True)
+class TickExecutionResult:
+    """Invocation-local identity; absent fields were not validated/bound yet."""
+
+    rc: int = 2
+    run_created: bool = False
+    run_id: str | None = None
+    runtime_root: Path | None = None
+    config_path: Path | None = None
+    accounts: tuple[str, ...] = ()
+    market: str | None = None
+    experience: bool = False
+    experience_completed: bool = False
+    scheduler_skipped_accounts: tuple[str, ...] = ()
+    error: str | None = None
 
 
 def current_run_id() -> str | None:
@@ -141,6 +162,24 @@ def _is_trading_day_guard_for_market(cfg: dict[str, Any], market: str) -> tuple[
     None means guard check failed and caller should continue without blocking.
     """
     market_used = str(market or "").strip().upper() or "US"
+    provider = require_market_data_provider(cfg)
+    if provider.name != "opend":
+        gateway = None
+        try:
+            route = provider.resolve_quote_route(cfg, market=market_used)
+            if not route.ok or route.host is None or route.port is None:
+                return None, market_used
+            day = datetime.now(ZoneInfo({"US": "America/New_York", "HK": "Asia/Hong_Kong"}.get(
+                market_used, "UTC"))).date()
+            gateway = provider.open_quote_gateway(host=str(route.host), port=int(route.port))
+            response = provider.get_trading_days_with_receipt(
+                gateway, market=market_used, start=day.isoformat(), end=day.isoformat())
+            return day.isoformat() in trading_calendar_dates(response, start=day, end=day, allow_empty=True), market_used
+        except Exception:
+            return None, market_used
+        finally:
+            if gateway is not None:
+                gateway.close()
     route = resolve_futu_quote_route(cfg, market=market_used)
     if not route.ok or route.host is None or route.port is None:
         return None, market_used
@@ -225,7 +264,11 @@ def _opening_chain_warmup_context(
     }
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    _on_execution: Callable[[TickExecutionResult], None] | None = None,
+) -> int:
     ap = argparse.ArgumentParser(description='Multi-account tick with per-account notifications')
     ap.add_argument('--config', required=True)
     ap.add_argument('--accounts', nargs='+', default=None)
@@ -259,6 +302,11 @@ def main(argv: list[str] | None = None) -> int:
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
         cfg_path = (repo_root / cfg_path).resolve()
+    execution = TickExecutionResult(
+        runtime_root=base.resolve(), config_path=cfg_path.resolve(), experience=experience,
+    )
+    if _on_execution is not None:
+        _on_execution(execution)
     contract_info = resolve_config_contract(
         cfg_path,
         str(getattr(args, 'market_config', 'auto') or 'auto'),
@@ -306,6 +354,12 @@ def main(argv: list[str] | None = None) -> int:
         validate_config(deepcopy(base_cfg))
     else:
         validate_retired_symbol_worker_config(base_cfg)
+    execution = replace(
+        execution,
+        market=str(schedule_contract_info.get('market') or base_cfg.get('_generated', {}).get('market') or '').upper() or None,
+    )
+    if _on_execution is not None:
+        _on_execution(execution)
     try:
         for configured_account in resolve_configured_accounts(base_cfg):
             build_account_portfolio_source_plan(base_cfg, account=configured_account)
@@ -316,6 +370,9 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         raise SystemExit(f"[CONFIG_ERROR] invalid account scope: {exc}") from exc
     args.default_account = _resolve_default_account(args.default_account, args.accounts)
+    execution = replace(execution, accounts=tuple(args.accounts))
+    if _on_execution is not None:
+        _on_execution(execution)
     trigger_context = build_trigger_context()
     if experience:
         try:
@@ -339,6 +396,8 @@ def main(argv: list[str] | None = None) -> int:
     global _CURRENT_RUN_ID
     _CURRENT_RUN_ID = runlog.run_id  # pyright: ignore[reportConstantRedefinition]
     run_id = runlog.run_id
+    if _on_execution is not None:
+        _on_execution(replace(execution, run_created=True, run_id=run_id))
 
     syms0 = resolve_watchlist_config(base_cfg)
     src_counts: dict[str, int] = {}
@@ -406,6 +465,13 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     tick_metrics: dict[str, Any] = {}
+
+    def publish_scheduler_skips(accounts: tuple[str, ...]) -> None:
+        if _on_execution is not None and not experience:
+            _on_execution(replace(
+                execution, run_created=True, run_id=run_id,
+                scheduler_skipped_accounts=accounts,
+            ))
 
     def publish_completion(account_outcomes, rc, *, inner_run_id, accounts):
         wrapper_run_id = str(os.environ.get("OM_TICK_CRON_RUN_ID") or "").strip()
@@ -630,6 +696,10 @@ def main(argv: list[str] | None = None) -> int:
                 ),
             )
             complete_tick_idempotency(status='skipped', message=str(reason_global or 'scheduler_skip_no_scan'))
+            publish_scheduler_skips(tuple(
+                account for account in account_ids
+                if scan_decision_by_account.get(account, {}).get("should_run") is False
+            ))
             return 0
         warmup_context = _opening_chain_warmup_context(
             trigger_kind=trigger_kind,
@@ -665,6 +735,11 @@ def main(argv: list[str] | None = None) -> int:
                 trigger_kind=trigger_kind,
             )
         )
+        if notification_rc == 0:
+            publish_scheduler_skips(tuple(
+                account for account in account_ids
+                if scan_decision_by_account.get(account, {}).get("should_run") is False
+            ))
         if notification_rc != 0 or warmup_context is None or smoke:
             return notification_rc
         try:
@@ -846,6 +921,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         if experience_ok:
             audit_helper.guard_mark_success()
+        if _on_execution is not None:
+            _on_execution(replace(execution, run_created=True, run_id=run_id, experience_completed=experience_ok))
         return 0 if experience_ok else 2
 
     post_delivery_sidecars_finished = False
@@ -897,6 +974,13 @@ def main(argv: list[str] | None = None) -> int:
         audit_helper.guard_mark_failure("TICK_COMPLETION_RECEIPT_FAILED", "completion_receipt")
         runlog.safe_event("completion_receipt", "error", error_code="TICK_COMPLETION_RECEIPT_FAILED", message=str(exc)[:240])
         return 2
+    if rc == 0:
+        publish_scheduler_skips(tuple(
+            row["account"] for row in account_execution.account_metrics
+            if row.get("account") in account_ids
+            and row.get("scan_outcome") == "scheduler_skipped"
+            and row.get("ran_scan") is False and row.get("ran_pipeline") is False
+        ))
     return rc
 
 
@@ -918,4 +1002,26 @@ def run_tick(argv: list[str] | None = None) -> int:
     return int(multi_tick_main(list(argv or [])))
 
 
-__all__ = ['main', 'multi_tick_main', 'run_tick', 'current_run_id', '_CURRENT_RUN_ID']
+def execute_tick(argv: list[str] | None = None) -> TickExecutionResult:
+    """Run the same tick entry with a reference captured inside this invocation."""
+    result = TickExecutionResult()
+
+    def observe(value: TickExecutionResult) -> None:
+        nonlocal result
+        result = value
+
+    try:
+        rc = main(list(argv or []), _on_execution=observe)
+    except SystemExit as exc:
+        if result.runtime_root is None:
+            raise
+        rc = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 2)
+        return replace(result, rc=rc, error=str(exc) if rc else None)
+    except KeyboardInterrupt:
+        return replace(result, rc=130, error="运行已取消")
+    except Exception as exc:
+        return replace(result, rc=2, error=str(exc))
+    return replace(result, rc=int(rc))
+
+
+__all__ = ['main', 'multi_tick_main', 'run_tick', 'execute_tick', 'TickExecutionResult', 'current_run_id', '_CURRENT_RUN_ID']

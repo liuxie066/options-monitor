@@ -230,7 +230,7 @@ DeepSeek 逻辑凭据。运行数据清理与密钥删除必须分别授权，�
 
 ```ini
 User=liuxie
-Environment="HOME=/home/om"
+Environment="HOME=/home/liuxie"
 Environment="OM_RUNTIME_ROOT=/var/lib/options-monitor"
 ```
 

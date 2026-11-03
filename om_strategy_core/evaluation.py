@@ -1,5 +1,7 @@
 """Offline valuation/cash facade; backtest metrics are owned by OptionBench."""
 
+from domain.domain.performance.cash_conversion import project_candidate_fx_facts, project_run_fx_facts
+
 from domain.domain.performance.strategy_evaluation import (
     EvaluationBook,
     IncompleteCashError,
@@ -14,6 +16,8 @@ from domain.domain.performance.strategy_evaluation import (
 )
 
 __all__ = [
+    "project_candidate_fx_facts",
+    "project_run_fx_facts",
     "EvaluationBook",
     "IncompleteCashError",
     "value_portfolio",

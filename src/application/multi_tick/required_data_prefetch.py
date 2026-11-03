@@ -24,10 +24,14 @@ from src.application.config_sections import (
     resolve_watchlist_config,
 )
 from src.application.config_profiles import apply_profiles
+from src.application.market_data_provider import (
+    resolve_market_data_provider, require_market_data_provider, provider_by_name, market_data_source,
+    get_underlier_observations as get_underlier_observations_opend,
+    fetch_option_chains, prefetch_market_earnings_calendars,
+)
 from src.application.account_run import build_account_runtime_config
 from src.application.earnings_calendar import (
     earnings_calendar_scan_date,
-    prefetch_market_earnings_calendars,
 )
 from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinator
 from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinatorResult
@@ -36,11 +40,10 @@ from src.application.opend_fetch_config import OpenDEndpointRateLimit
 from src.application import opend_utils
 from src.application.opend_market_snapshot_fetching import (
     OpenDUnderlierObservation,
-    get_underlier_observations_opend,
 )
 from src.application.option_chain_fetching import classify_option_chain_error
 from src.application.opening_quote_evidence import normalize_underlier_observation
-from src.application.opend_symbol_fetching import fetch_symbol
+from src.application.market_data_provider import fetch_symbol
 from src.application.opend_symbol_outputs import (
     finalize_required_data_quote_candidate,
     find_fresh_required_data_quote_receipts,
@@ -80,7 +83,6 @@ from src.application.required_data_prefetch_planning import (
 )
 from src.application.option_chain_fetching import (
     OptionChainFetchRequest,
-    fetch_option_chains,
 )
 from src.application.combo_yield_config import (
     derive_combo_yield_policy,
@@ -162,6 +164,7 @@ def _planning_identity_key(
     symbol_cfg: dict[str, Any],
     *,
     base: Path,
+    market_data_provider: str = "opend",
 ) -> PlanningIdentityKey:
     fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
     source, _decision = resolve_symbol_fetch_source(fetch_cfg)
@@ -171,7 +174,7 @@ def _planning_identity_key(
     )
     return (
         underlier.symbol.upper(),
-        source,
+        market_data_source(market_data_provider, source),
         str(fetch_cfg.get("host") or "127.0.0.1").strip().lower(),
         _to_int(fetch_cfg.get("port") or 11111, 11111),
     )
@@ -182,9 +185,10 @@ def _planning_identity_for_symbol_cfg(
     *,
     base: Path,
     identities: dict[PlanningIdentityKey, RequiredDataPlanningIdentity],
+    market_data_provider: str = "opend",
 ) -> RequiredDataPlanningIdentity | None:
     try:
-        return identities.get(_planning_identity_key(symbol_cfg, base=base))
+        return identities.get(_planning_identity_key(symbol_cfg, base=base, market_data_provider=market_data_provider))
     except Exception:
         return None
 
@@ -197,6 +201,7 @@ def _prefill_spot_observation_cache(
     snapshot_batch_size: int,
     spot_observation_cache: dict[tuple[Any, ...], Any],
     stop_monotonic: float | None = None,
+    market_data_provider: str = "opend",
 ) -> tuple[
     dict[PlanningIdentityKey, RequiredDataPlanningIdentity],
     set[str],
@@ -238,8 +243,9 @@ def _prefill_spot_observation_cache(
                 continue
             fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
             source, _decision = resolve_symbol_fetch_source(fetch_cfg)
-            if not is_futu_fetch_source(source):
+            if market_data_provider == "opend" and not is_futu_fetch_source(source):
                 continue
+            source = market_data_source(market_data_provider, source)
             try:
                 identity = freeze_required_data_planning_identity(
                     base=base,
@@ -278,7 +284,7 @@ def _prefill_spot_observation_cache(
             break
         started = time.monotonic()
         try:
-            gateway = futu_gateway.build_ready_futu_quote_gateway(
+            gateway = provider_by_name(market_data_provider).open_quote_gateway(
                 host=host,
                 port=port,
                 is_option_chain_cache_enabled=False,
@@ -311,6 +317,7 @@ def _prefill_spot_observation_cache(
                     observations = get_underlier_observations_opend(
                         gateway,
                         [item.provider_code for item in market_identities],
+                        market_data_provider=market_data_provider,
                         market=market,
                         base_dir=base,
                         snapshot_limit=snapshot_limit,
@@ -368,12 +375,14 @@ def _build_prefetch_fetch_plan(
     planning_identities: (
         dict[PlanningIdentityKey, RequiredDataPlanningIdentity] | None
     ) = None,
+    market_data_provider: str = "opend",
 ) -> RequiredDataFetchPlanBundle:
     source_cfgs = symbol_cfg.get("_prefetch_source_symbol_cfgs")
     if isinstance(source_cfgs, list) and len(source_cfgs) > 1:
         bundles = [
             _build_single_prefetch_fetch_plan(
                 item,
+                market_data_provider=market_data_provider,
                 base=base,
                 shared_required=shared_required,
                 opend_fetch_cfg=opend_fetch_cfg,
@@ -381,6 +390,7 @@ def _build_prefetch_fetch_plan(
                 spot_observation_cache=spot_observation_cache,
                 planning_identity=_planning_identity_for_symbol_cfg(
                     item,
+                    market_data_provider=market_data_provider,
                     base=base,
                     identities=planning_identities or {},
                 ),
@@ -534,6 +544,7 @@ def _build_prefetch_fetch_plan(
             )
     return _build_single_prefetch_fetch_plan(
         symbol_cfg,
+        market_data_provider=market_data_provider,
         base=base,
         shared_required=shared_required,
         opend_fetch_cfg=opend_fetch_cfg,
@@ -541,6 +552,7 @@ def _build_prefetch_fetch_plan(
         spot_observation_cache=spot_observation_cache,
         planning_identity=_planning_identity_for_symbol_cfg(
             symbol_cfg,
+            market_data_provider=market_data_provider,
             base=base,
             identities=planning_identities or {},
         ),
@@ -556,6 +568,7 @@ def _build_single_prefetch_fetch_plan(
     expiration_discovery_cache: dict[tuple[Any, ...], Any] | None = None,
     spot_observation_cache: dict[tuple[Any, ...], Any] | None = None,
     planning_identity: RequiredDataPlanningIdentity | None = None,
+    market_data_provider: str = "opend",
 ) -> RequiredDataFetchPlanBundle:
     symbol = str(symbol_cfg.get("symbol") or "").strip()
     fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
@@ -581,6 +594,7 @@ def _build_single_prefetch_fetch_plan(
     snapshot_cfg = _as_dict(opend_fetch_cfg.get("market_snapshot"))
     expiration_cfg = _as_dict(opend_fetch_cfg.get("option_expiration"))
     return build_required_data_fetch_plan(
+        market_data_provider=market_data_provider,
         base=base,
         required_data_dir=shared_required,
         symbol=symbol,
@@ -803,9 +817,11 @@ def _fetch_symbol_for_required_data_request(
     base: Path,
     gateway: Any,
     batch_cfg: Any,
+    market_data_provider: str = "opend",
 ) -> dict[str, Any]:
     return fetch_symbol(
         request.symbol,
+        market_data_provider=market_data_provider,
         limit_expirations=request.limit_expirations,
         host=request.host,
         port=request.port,
@@ -885,18 +901,12 @@ def _global_required_data_plan_summary(
     for symbol_cfg in symbol_cfgs:
         fetch_plan = fetch_plans_by_config_id[id(symbol_cfg)]
         fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
-        binding_source, _binding_decision = resolve_symbol_fetch_source(
-            fetch_cfg
-        )
-        binding_payload = build_required_data_fetch_binding(
-            source=binding_source,
-            host=str(fetch_cfg.get("host") or "127.0.0.1").strip(),
-            port=_to_int(fetch_cfg.get("port") or 11111, 11111),
-        )
         expected_fetch_contract = (
             (expected_contracts_by_config_id or {}).get(id(symbol_cfg))
             or _expected_fetch_contract(symbol_cfg, fetch_plan)
         )
+        binding_payload = dict(expected_fetch_contract["fetch_binding"])
+        binding_source = binding_payload["source"]
         expirations = sorted({
             str(expiration)
             for side_plan in fetch_plan.side_plans
@@ -978,9 +988,11 @@ def _global_required_data_plan_summary(
 def _expected_fetch_contract(
     symbol_cfg: dict[str, Any],
     fetch_plan: RequiredDataFetchPlanBundle,
+    market_data_provider: str = "opend",
 ) -> dict[str, Any]:
     fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
     source, _decision = resolve_symbol_fetch_source(fetch_cfg)
+    source = market_data_source(market_data_provider, source)
     return build_required_data_expected_fetch_contract(
         symbol=str(symbol_cfg.get("symbol") or fetch_plan.symbol),
         fetch_plan=fetch_plan.to_debug_dict(),
@@ -1003,7 +1015,7 @@ def _publish_planned_success_empty(
 ) -> dict[str, Any]:
     symbol = str(symbol_cfg.get("symbol") or "").strip()
     fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
-    source, _decision = resolve_symbol_fetch_source(fetch_cfg)
+    source = str(expected_fetch_contract["fetch_binding"]["source"])
     discovery = fetch_plan.expiration_discovery
     empty_reason = required_data_planned_empty_reason(fetch_plan.to_debug_dict())
     if (
@@ -1024,7 +1036,7 @@ def _publish_planned_success_empty(
         "expirations": [],
         "rows": [],
         "meta": {
-            "source": "opend",
+            "source": source,
             "host": host,
             "port": port,
             "status": "ok",
@@ -1110,7 +1122,8 @@ def _publish_planned_success_empty(
     payload["payload"] = payload0
     if quote_receipt_relpath is not None:
         payload["quote_source_receipt"] = quote_receipt_relpath
-    source_snapshot = adapt_opend_tool_payload(payload)
+    source_snapshot = adapt_opend_tool_payload(payload, **(
+        {"market_data_provider": source} if source != "opend" else {}))
     payload["source_snapshot"] = source_snapshot
     try:
         state_repo.append_source_snapshot_event(base, source_snapshot)
@@ -1136,20 +1149,24 @@ def _fetch_one_inprocess(
     fetch_plan: RequiredDataFetchPlanBundle | None = None,
     expected_fetch_contract: dict[str, Any] | None = None,
     producer_run_id: str | None = None,
+    market_data_provider: str = "opend",
 ) -> dict[str, Any]:
+    from src.application.research.prescreen import publish_scan_prescreen
+
     symbol = str(symbol_cfg.get('symbol')).strip()
     if not symbol:
         payload = normalize_tool_execution_payload(
             tool_name='required_data_prefetch',
             symbol='',
-            source='unknown',
+            source=market_data_provider,
             limit_exp=0,
             status='error',
             ok=False,
             message='empty_symbol',
             returncode=None,
         )
-        source_snapshot = adapt_opend_tool_payload(payload)
+        source_snapshot = adapt_opend_tool_payload(payload, **(
+            {"market_data_provider": market_data_provider} if market_data_provider != "opend" else {}))
         payload["source_snapshot"] = source_snapshot
         try:
             state_repo.append_source_snapshot_event(base, source_snapshot)
@@ -1166,6 +1183,7 @@ def _fetch_one_inprocess(
 
     fetch_cfg = (symbol_cfg.get('fetch') or {}) if isinstance(symbol_cfg, dict) else {}
     src, _decision = resolve_symbol_fetch_source(fetch_cfg)
+    src = market_data_source(market_data_provider, src)
     limit_exp = _prefetch_limit_expirations(symbol_cfg, fetch_plan)
     host = str(fetch_cfg.get('host') or '127.0.0.1')
     port = _to_int(fetch_cfg.get('port') or 11111, 11111)
@@ -1185,7 +1203,7 @@ def _fetch_one_inprocess(
                 fetch_plan=fetch_plan,
                 expected_fetch_contract=(
                     expected_fetch_contract
-                    or _expected_fetch_contract(symbol_cfg, fetch_plan)
+                    or _expected_fetch_contract(symbol_cfg, fetch_plan, market_data_provider)
                 ),
                 producer_run_id=producer_run_id,
                 execution_mode="inprocess_short_circuit",
@@ -1194,7 +1212,7 @@ def _fetch_one_inprocess(
             raise RuntimeError(
                 "scheduled fetch plan is not executable"
             )
-        gateway = _gateway_pool.get_gateway(host=host, port=port, chain_cache=True)
+        gateway = provider_by_name(market_data_provider).get_pooled_quote_gateway(_gateway_pool, host=host, port=port, chain_cache=True)
         if fetch_plan is None:
             rv_fetch_kwargs = (
                 {
@@ -1213,6 +1231,7 @@ def _fetch_one_inprocess(
             )
             payload0 = fetch_symbol(
                 symbol,
+                market_data_provider=market_data_provider,
                 limit_expirations=limit_exp,
                 host=host,
                 port=port,
@@ -1282,6 +1301,7 @@ def _fetch_one_inprocess(
                     )
                 child_payload = _fetch_symbol_for_required_data_request(
                     request=request,
+                    market_data_provider=market_data_provider,
                     base=base,
                     gateway=gateway,
                     batch_cfg=batch_cfg,
@@ -1289,6 +1309,11 @@ def _fetch_one_inprocess(
                 if not isinstance(child_payload, dict):
                     raise RuntimeError(
                         "required-data provider returned an invalid child payload"
+                    )
+                if producer_run_id and (child_payload.get("meta") or {}).get("research_prescreen") is not None:
+                    publish_scan_prescreen(
+                        producer_root=shared_required, producer_run_id=producer_run_id,
+                        payload=child_payload, fetch_plan=fetch_plan.to_debug_dict(),
                     )
                 child_meta = child_payload.get("meta")
                 child_meta = child_meta if isinstance(child_meta, dict) else {}
@@ -1321,6 +1346,11 @@ def _fetch_one_inprocess(
                     payloads=child_payloads,
                 )
         provider_payload = payload0 if isinstance(payload0, dict) else None
+        if fetch_plan is None:
+            publish_scan_prescreen(
+                producer_root=shared_required, producer_run_id=producer_run_id,
+                payload=payload0, fetch_plan=None,
+            )
         raw_meta = payload0.get('meta')
         meta = raw_meta if isinstance(raw_meta, dict) else {}
         ok = str(meta.get('status') or '').strip().lower() == 'ok'
@@ -1336,7 +1366,7 @@ def _fetch_one_inprocess(
         if contract is None:
             if fetch_plan is None:
                 raise RuntimeError("required-data expected fetch contract is missing")
-            contract = _expected_fetch_contract(symbol_cfg, fetch_plan)
+            contract = _expected_fetch_contract(symbol_cfg, fetch_plan, market_data_provider)
         validate_required_data_payload_candidate(
             payload=payload0,
             expected_fetch_contract=contract,
@@ -1424,7 +1454,8 @@ def _fetch_one_inprocess(
             payload["payload"] = provider_payload
         if classify_opend_error({"message": message}).is_rate_limit:
             payload['error_code'] = 'RATE_LIMIT'
-    source_snapshot = adapt_opend_tool_payload(payload)
+    source_snapshot = adapt_opend_tool_payload(payload, **(
+        {"market_data_provider": market_data_provider} if market_data_provider != "opend" else {}))
     payload["source_snapshot"] = source_snapshot
     try:
         state_repo.append_source_snapshot_event(base, source_snapshot)
@@ -1575,6 +1606,7 @@ def _warm_required_data_chain_cache_inprocess(
             account_configs=account_configs,
             prepared_portfolio_contexts={},
         )
+        market_data_provider = resolve_market_data_provider(union_cfg).name
         profiles = resolve_templates_config(union_cfg)
         symbol_plan = build_prefetch_symbol_plan(
             [
@@ -1589,6 +1621,7 @@ def _warm_required_data_chain_cache_inprocess(
         spot_observation_cache: dict[tuple[Any, ...], Any] = {}
         shared_required = Path(base) / "output_shared" / "required_data"
         planning_identities, identity_failed = _prefill_spot_observation_cache(
+            market_data_provider=market_data_provider,
             symbol_cfgs=symbol_plan.symbol_cfgs,
             base=base,
             opend_fetch_cfg=opend_fetch_cfg,
@@ -1618,6 +1651,7 @@ def _warm_required_data_chain_cache_inprocess(
             try:
                 fetch_plan = _build_prefetch_fetch_plan(
                     symbol_cfg,
+                    market_data_provider=market_data_provider,
                     base=base,
                     shared_required=shared_required,
                     opend_fetch_cfg=opend_fetch_cfg,
@@ -1690,12 +1724,14 @@ def _warm_required_data_chain_cache_inprocess(
                 publish_progress()
                 break
             try:
-                gateway = gateway_pool.get_gateway(
+                gateway = provider_by_name(market_data_provider).get_pooled_quote_gateway(
+                    gateway_pool,
                     host=request.host,
                     port=request.port,
                     chain_cache=True,
                 )
                 result = fetch_option_chains(
+                    market_data_provider=market_data_provider,
                     gateway=gateway,
                     request=OptionChainFetchRequest(
                         symbol=request.symbol,
@@ -1935,6 +1971,7 @@ def prefetch_required_data(
     producer_run_id: str | None = None,
     scan_at_utc: datetime | None = None,
 ) -> dict[str, Any]:
+    require_market_data_provider(cfg)
     with exclusive_private_file_lock(
         Path(base) / "output_shared" / "state" / "required_data_prefetch.lock"
     ):
@@ -1961,11 +1998,18 @@ def _prefetch_required_data_unlocked(
     producer_run_id: str | None = None,
     scan_at_utc: datetime | None = None,
 ) -> dict[str, Any]:
+    market_data_provider = resolve_market_data_provider(cfg).name
     profiles = resolve_templates_config(cfg)
     syms = [apply_profiles(it, profiles) for it in resolve_watchlist_config(cfg) if it.get('symbol')]
     symbols = [str(it.get('symbol')).strip() for it in syms if str(it.get('symbol')).strip()]
     symbol_plan = build_prefetch_symbol_plan(syms)
     fetch_syms = symbol_plan.symbol_cfgs
+    from src.application.research.prescreen import publish_watchlist_plan
+
+    publish_watchlist_plan(
+        producer_root=shared_required, producer_run_id=producer_run_id,
+        plan={"planning_status": "not_attempted", "symbols": [{"symbol": symbol} for symbol in sorted(set(symbols))]},
+    )
 
     raw_dir = (shared_required / 'raw').resolve()
     parsed_dir = (shared_required / 'parsed').resolve()
@@ -1977,12 +2021,15 @@ def _prefetch_required_data_unlocked(
     opend_fetch_cfg = _resolve_opend_fetch_cfg(cfg)
     batch_cfg = resolve_opend_batch_config(cfg)
     execution_mode = _resolve_execution_mode(cfg)
+    if execution_mode == "subprocess" and market_data_provider != "opend":
+        raise ValueError("subprocess market data supports only opend")
     option_chain_fetch_cfg = opend_fetch_cfg["option_chain"]
     snapshot_fetch_cfg = opend_fetch_cfg["market_snapshot"]
     expiration_fetch_cfg = opend_fetch_cfg["option_expiration"]
     expiration_discovery_cache: dict[tuple[Any, ...], Any] = {}
     spot_observation_cache: dict[tuple[Any, ...], Any] = {}
     planning_identities, _identity_failed = _prefill_spot_observation_cache(
+        market_data_provider=market_data_provider,
         symbol_cfgs=fetch_syms,
         base=base,
         opend_fetch_cfg=opend_fetch_cfg,
@@ -1997,6 +2044,7 @@ def _prefetch_required_data_unlocked(
     fetch_plan_cache: dict[int, RequiredDataFetchPlanBundle] = {
         id(symbol_cfg): _build_prefetch_fetch_plan(
             symbol_cfg,
+            market_data_provider=market_data_provider,
             base=base,
             shared_required=shared_required,
             opend_fetch_cfg=opend_fetch_cfg,
@@ -2015,6 +2063,13 @@ def _prefetch_required_data_unlocked(
         not in {"success_rows", "success_empty"}
     ]
     if invalid_plan_symbols:
+        publish_watchlist_plan(
+            producer_root=shared_required, producer_run_id=producer_run_id,
+            plan={"planning_status": "incomplete", "symbols": [
+                {"symbol": symbol_cfg["symbol"], "fetch_plan": fetch_plan_cache[id(symbol_cfg)].to_debug_dict()}
+                for symbol_cfg in fetch_syms
+            ]},
+        )
         raise RuntimeError(
             "global required-data plan incomplete; discovery or projection failed for: "
             + ", ".join(invalid_plan_symbols)
@@ -2023,6 +2078,7 @@ def _prefetch_required_data_unlocked(
         id(symbol_cfg): _expected_fetch_contract(
             symbol_cfg,
             fetch_plan_cache[id(symbol_cfg)],
+            market_data_provider,
         )
         for symbol_cfg in fetch_syms
     }
@@ -2030,6 +2086,10 @@ def _prefetch_required_data_unlocked(
         symbol_cfgs=fetch_syms,
         fetch_plans_by_config_id=fetch_plan_cache,
         expected_contracts_by_config_id=expected_contract_cache,
+    )
+    publish_watchlist_plan(
+        producer_root=shared_required, producer_run_id=producer_run_id,
+        plan=global_required_data_plan,
     )
     if not bool(global_required_data_plan["planning_complete"]):
         failed_symbols = [
@@ -2045,6 +2105,7 @@ def _prefetch_required_data_unlocked(
 
     earnings_scan_at_utc = scan_at_utc or datetime.now(timezone.utc)
     earnings_calendar = prefetch_market_earnings_calendars(
+        market_data_provider=market_data_provider,
         market_requests=_earnings_calendar_market_requests(
             symbol_cfgs=fetch_syms,
             fetch_plans_by_config_id=fetch_plan_cache,
@@ -2176,6 +2237,11 @@ def _prefetch_required_data_unlocked(
         trading_date = fetch_kwargs.get("trading_date")
         if isinstance(trading_date, str) and trading_date:
             cmd.extend(['--trading-date', trading_date])
+        if producer_run_id:
+            cmd.extend([
+                '--research-run-id', producer_run_id,
+                '--research-fetch-plan-json', json.dumps(_get_fetch_plan(symbol_cfg).to_debug_dict()),
+            ])
 
         payload = exec_service.execute(
             ToolExecutionIntent(
@@ -2250,6 +2316,7 @@ def _prefetch_required_data_unlocked(
             return _fetch_one(symbol_cfg)
         return _fetch_one_inprocess(
             symbol_cfg,
+            market_data_provider=market_data_provider,
             base=base,
             shared_required=shared_required,
             opend_fetch_cfg=opend_fetch_cfg,
@@ -2348,5 +2415,6 @@ def _prefetch_required_data_unlocked(
         'quote_receipts': find_fresh_required_data_quote_receipts(
             producer_root=shared_required,
             symbols=symbols,
+            expected_source=market_data_provider,
         ),
     }

@@ -971,6 +971,8 @@ def test_close_advice_quality_gate_blocks_only_affected_account_market(
                 "quality_gate_blocked:POSITION_CONTRACT_TERMS_DRIFT"
             ),
             "position_lot_id": "lot-lx",
+            "input_source": "ledger",
+            "input_id": None,
             "quote_key": "NVDA|put|2026-08-28|100.000000",
         }
     ]
@@ -1083,6 +1085,8 @@ def test_close_advice_barrier_fails_closed_without_target_quality_dataset(
         {
             "reason": "quality_gate_blocked:QUALITY_DATASET_UNAVAILABLE",
             "position_lot_id": "lot-lx",
+            "input_source": "ledger",
+            "input_id": None,
             "quote_key": "NVDA|put|2026-08-28|100.000000",
         }
     ]

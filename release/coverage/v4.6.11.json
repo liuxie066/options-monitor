@@ -1,0 +1,130 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.11",
+  "base": {
+    "tag": "v4.6.10",
+    "commit": "e2c19f06a74a3272b8cdf409359b9a10837110d5"
+  },
+  "reviewed_head": "83f673b8d9b11a3adaed3ea0d0771fb7d964b7c7",
+  "commits": [
+    {
+      "sha": "171897546e50212892499aa5f13f58d9112aba50",
+      "subject": "docs(readme): clarify capabilities and plugin navigation"
+    },
+    {
+      "sha": "23d2910c7eb6a1979d971227feac6bc3226f80ae",
+      "subject": "Merge pull request #985 from liuxie066/codex/readme-plugins-20261102"
+    },
+    {
+      "sha": "b6e75cb4b6dc11c236bb0a134e0ffc28e0ccb56a",
+      "subject": "docs(readme): simplify scenario link and expand Portfolio Management"
+    },
+    {
+      "sha": "add3097ce39d2be5adbad2f09aacfc9f5f74d89e",
+      "subject": "Merge pull request #986 from liuxie066/codex/readme-labels-20261102"
+    },
+    {
+      "sha": "148faee83c557fd760460dc3ed02a0a18f6dde74",
+      "subject": "refactor(plugins): unify admission and channel ownership"
+    },
+    {
+      "sha": "fe6f18c19168f83a4b4269f3917c857d2032a06e",
+      "subject": "merge(plugins): sync main before integration"
+    },
+    {
+      "sha": "825bddc485685da95877ee485308c1a0c374c221",
+      "subject": "merge(plugins): unify admission and channel ownership (#987)"
+    },
+    {
+      "sha": "83f673b8d9b11a3adaed3ea0d0771fb7d964b7c7",
+      "subject": "test(prefetch): isolate market admission mock"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "七个官方插件统一版本、安装归属与加载准入校验，复用缓存加载器，避免插件列表与实际加载采用不同规则。（#987）。",
+      "commits": [
+        "148faee83c557fd760460dc3ed02a0a18f6dde74",
+        "fe6f18c19168f83a4b4269f3917c857d2032a06e",
+        "825bddc485685da95877ee485308c1a0c374c221"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "飞书与微信适配器统一负责消息传输、输入规范化及目标和发送者身份；共享路由保留账户隔离、幂等和重试契约。（#987）。",
+      "commits": [
+        "148faee83c557fd760460dc3ed02a0a18f6dde74",
+        "fe6f18c19168f83a4b4269f3917c857d2032a06e",
+        "825bddc485685da95877ee485308c1a0c374c221"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "README 简化场景入口并补全插件与 Portfolio Management 导航，方便查找安装和使用说明。（#985、#986）。",
+      "commits": [
+        "171897546e50212892499aa5f13f58d9112aba50",
+        "23d2910c7eb6a1979d971227feac6bc3226f80ae",
+        "b6e75cb4b6dc11c236bb0a134e0ffc28e0ccb56a",
+        "add3097ce39d2be5adbad2f09aacfc9f5f74d89e"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "83f673b8d9b11a3adaed3ea0d0771fb7d964b7c7",
+      "reason": "移除测试在动态行情门面上的多余 mock，避免清理后残留绑定方法；保留全部断言和完整测试发现，不修改生产代码或用户行为。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "171897546e50212892499aa5f13f58d9112aba50",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/985"
+      ]
+    },
+    {
+      "commit": "23d2910c7eb6a1979d971227feac6bc3226f80ae",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/985"
+      ]
+    },
+    {
+      "commit": "b6e75cb4b6dc11c236bb0a134e0ffc28e0ccb56a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/986"
+      ]
+    },
+    {
+      "commit": "add3097ce39d2be5adbad2f09aacfc9f5f74d89e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/986"
+      ]
+    },
+    {
+      "commit": "148faee83c557fd760460dc3ed02a0a18f6dde74",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/987"
+      ]
+    },
+    {
+      "commit": "fe6f18c19168f83a4b4269f3917c857d2032a06e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/987"
+      ]
+    },
+    {
+      "commit": "825bddc485685da95877ee485308c1a0c374c221",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/987"
+      ]
+    },
+    {
+      "commit": "83f673b8d9b11a3adaed3ea0d0771fb7d964b7c7",
+      "references": [
+        "docs/ARCHITECTURE.md",
+        "https://github.com/liuxie066/options-monitor/pull/987"
+      ]
+    }
+  ]
+}

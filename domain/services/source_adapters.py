@@ -8,29 +8,34 @@ from domain.domain.fetch_source import is_futu_fetch_source
 from domain.domain.tool_boundary import SCHEMA_KIND_TOOL_EXECUTION, validate_schema_payload
 
 
-def adapt_opend_tool_payload(payload: dict[str, Any] | Any) -> dict[str, Any]:
+def adapt_opend_tool_payload(
+    payload: dict[str, Any] | Any, *, market_data_provider: str = "opend",
+) -> dict[str, Any]:
     src = validate_schema_payload((payload if isinstance(payload, dict) else {}), kind=SCHEMA_KIND_TOOL_EXECUTION)
     ok = bool(src.get("ok"))
     source_norm = str(src.get("source") or "").strip().lower()
+    if market_data_provider != "opend" and source_norm != market_data_provider:
+        raise ValueError("market-data snapshot provider source mismatch")
     # fallback_used is an audit/status flag for non-primary source snapshots.
     # It does not mean the runtime automatically downgraded from Futu/OpenD to Yahoo.
-    fallback_used = bool(source_norm and not is_futu_fetch_source(source_norm))
+    fallback_used = bool(source_norm and not is_futu_fetch_source(source_norm)) if market_data_provider == "opend" else False
     status_norm = ("ok" if ok and (not fallback_used) else ("fallback" if ok else "error"))
     message = str(src.get("message") or "").strip()
     failure = (
         classify_failure(
             error_code=str(src.get("error_code") or "TOOL_EXEC_FAILED"),
             message=message,
-            upstream="opend",
+            upstream=market_data_provider,
         )
         if not ok
         else None
     )
     return normalize_source_snapshot(
-        source_name="opend",
+        source_name="opend" if market_data_provider == "opend" else "market_data",
         status=status_norm,
         as_of_utc=str(src.get("finished_at_utc") or src.get("started_at_utc") or ""),
         payload={
+            **({"source": source_norm} if market_data_provider != "opend" else {}),
             "symbol": str(src.get("symbol") or "").upper(),
             "tool_name": str(src.get("tool_name") or ""),
             "idempotency_key": str(src.get("idempotency_key") or ""),

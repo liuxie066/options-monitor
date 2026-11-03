@@ -23,6 +23,7 @@ from src.application.account_config import (
     normalize_account_label,
     normalize_accounts,
     parse_lossless_integer,
+    normalize_longbridge_account_settings,
 )
 from src.application.config_sections import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
 from src.application.llm_provider_registry import resolve_output_reservation, supported_llm_providers
@@ -146,6 +147,7 @@ INLINE_SECRET_CONFIG_SUFFIXES = (
     '_secret',
 )
 NOTIFICATION_CONFIG_KEYS = {
+    'routes',
     'cash_footer_accounts',
     'channel',
     'daily_brief',
@@ -610,7 +612,7 @@ def _validate_bot_config(cfg: dict) -> None:
 
 
 def validate_bot_config(cfg: dict) -> None:
-    allowed = {'bot', 'inbound', '_generated', '_resolved'}
+    allowed = {'bot', 'inbound', 'channels', '_generated', '_resolved'}
     unsupported = sorted(str(key) for key in cfg.keys() if str(key) not in allowed)
     if unsupported:
         die(
@@ -619,7 +621,56 @@ def validate_bot_config(cfg: dict) -> None:
             + '; use config.bot.json, not config.<market>.json'
         )
     _validate_inbound_config(cfg)
+    _validate_channels_config(cfg)
     _validate_bot_config(cfg)
+
+
+def _validate_channels_config(cfg: dict) -> None:
+    if 'channels' not in cfg:
+        return
+    channels = cfg['channels']
+    if not isinstance(channels, dict):
+        die('channels must be an object')
+    _reject_unknown_keys(channels, {'feishu', 'wechat_clawbot'}, 'channels')
+    for name, value in channels.items():
+        if not isinstance(value, dict):
+            die(f'channels.{name} must be an object')
+        _reject_unknown_keys(value, {'enabled', 'receive_enabled', 'notify_enabled'}, f'channels.{name}')
+        for key, flag in value.items():
+            if not isinstance(flag, bool):
+                die(f'channels.{name}.{key} must be a boolean')
+
+
+def validate_notification_routes_config(cfg: dict, notifications: dict) -> None:
+    if 'routes' not in notifications:
+        return
+    routes = notifications['routes']
+    if not isinstance(routes, list):
+        die('notifications.routes must be an array')
+    known_accounts = set(accounts_from_config(cfg))
+    ids, destinations = set(), set()
+    for route in routes:
+        if not isinstance(route, dict):
+            die('notifications.routes entries must be objects')
+        _reject_unknown_keys(route, {'id', 'provider', 'target', 'accounts'}, 'notifications.routes')
+        for field in ('id', 'provider', 'target'):
+            if not isinstance(route.get(field), str) or not route[field].strip() or route[field] != route[field].strip():
+                die(f'notifications.routes.{field} must be a non-empty trimmed string')
+        if route['id'] in ids:
+            die('notifications.routes contains duplicate id')
+        ids.add(route['id'])
+        if route['provider'] not in {'feishu_app', 'wechat_clawbot'}:
+            die('notifications.routes.provider must be feishu_app or wechat_clawbot')
+        accounts = route.get('accounts')
+        if (not isinstance(accounts, list) or not accounts
+                or any(not isinstance(a, str) or a not in known_accounts for a in accounts)
+                or len(accounts) != len(set(accounts))):
+            die('notifications.routes.accounts must contain unique configured account labels')
+        for account in accounts:
+            destination = (account, route['provider'], route['target'])
+            if destination in destinations:
+                die('notifications.routes contains duplicate account destination')
+            destinations.add(destination)
 
 
 def _validate_opening_strategy_config(cfg: dict, path: str) -> None:
@@ -1112,6 +1163,12 @@ def validate_config(cfg: dict):
         die('ai_decision_advice is retired and must be removed')
 
     portfolio = cfg.get('portfolio')
+    market_data = cfg.get('market_data', {})
+    if not isinstance(market_data, dict):
+        die('market_data must be an object')
+    _reject_unknown_keys(market_data, {'provider'}, 'market_data')
+    if market_data.get('provider', 'opend') != 'opend':
+        die('market_data.provider currently supports opend only')
     if isinstance(portfolio, dict):
         if 'source_by_account' in portfolio:
             die('portfolio.source_by_account is retired')
@@ -1232,13 +1289,14 @@ def validate_config(cfg: dict):
                 validate_rate_limit_object(raw, f'runtime.opend_rate_limits.{endpoint}')
 
     _validate_inbound_config(cfg)
-
+    _validate_channels_config(cfg)
     _validate_bot_config(cfg)
 
     notifications = cfg.get('notifications') or {}
     if notifications and not isinstance(notifications, dict):
         die('notifications must be an object')
     if isinstance(notifications, dict) and notifications:
+        validate_notification_routes_config(cfg, notifications)
         unknown_notification_keys = sorted(
             str(key)
             for key in notifications
@@ -1446,6 +1504,15 @@ def validate_config(cfg: dict):
                 die(f'account_settings.{account}.trade_intake_enabled must be a boolean')
             if 'holdings_account' in raw_value:
                 die(f'account_settings.{account}.holdings_account is retired')
+            if acct_type == 'longbridge':
+                if raw_value.get('trade_intake_enabled') is True:
+                    die(f'account_settings.{account}.trade_intake_enabled is unsupported for longbridge')
+                if 'futu' in raw_value:
+                    die(f'account_settings.{account}.futu is invalid for longbridge')
+                try:
+                    normalize_longbridge_account_settings(raw_value.get('longbridge'))
+                except ValueError as exc:
+                    die(f'account_settings.{account}: {exc}')
             if acct_type == 'futu':
                 futu_cfg = raw_value.get('futu')
                 if not isinstance(futu_cfg, dict):

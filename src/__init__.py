@@ -16,3 +16,8 @@ if sys.version_info < (3, 12):
         f"options-monitor requires Python >= 3.12; executable={sys.executable}; observed={observed}. "
         "Recreate .venv with Python 3.12 or use a supported launcher with OM_PYTHON."
     )
+
+# One lazy, fixed-package finder also covers scheduler and direct Python entries.
+from src.application.plugin_runtime import register_plugin_finder
+
+register_plugin_finder()

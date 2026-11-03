@@ -8,6 +8,8 @@
 
 `./om logs --kind service` 在文件目录为空时会提示查看 systemd journal。具体故障可用 `journalctl -p err -u options-monitor-tick-hk.service`（或 `us`）；服务单元的 ERROR 行采用 systemd 可解析的级别前缀。渲染后的 tick unit 超时比 CLI 的 `--timeout` 多 300 秒，并有 30 秒停止宽限；只有受控升级后生产 unit 才会变化。
 
+合法调度跳过不要求产生本次扫描简报：CLI 使用同次执行返回的逐账户跳过事实，显示调度跳过并保留成功退出；不从历史简报或 `no_daily_brief_delivery` 推断成功。没有合法跳过证据的结果缺失、损坏结果以及执行非零仍返回失败。跳过也不等于完成扫描或业务恢复，不补造 wrapper 完成回执。
+
 ## OpenD 查询连接与重试
 
 共享 Futu gateway、watchdog 的 global-state 查询和交易推送监听器使用同一有界连接入口。

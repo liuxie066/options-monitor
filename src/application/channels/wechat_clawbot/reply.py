@@ -28,6 +28,7 @@ def reply_wechat_clawbot_text(
     timeout_sec: int = 20,
     idempotency_key: str | None = None,
     client_factory: ClientFactory = WechatClawbotClient,
+    before_send: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     if not str(to_user_id or "").strip() or not str(context_token or "").strip():
         return {"attempted": False, "ok": False, "reason": "missing_reply_context"}
@@ -43,6 +44,8 @@ def reply_wechat_clawbot_text(
     base_url = str(state.get("base_url") or DEFAULT_ILINK_BASE_URL).strip() or DEFAULT_ILINK_BASE_URL
     client = client_factory(bot_token=bot_token, base_url=base_url, timeout=timeout_sec)
     client_id = _idempotent_client_id(idempotency_key_text)
+    if before_send is not None:
+        before_send()
     api_response = client.send_text_message(
         to_user_id=str(to_user_id),
         context_token=str(context_token),

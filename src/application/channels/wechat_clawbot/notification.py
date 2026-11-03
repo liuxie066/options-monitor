@@ -23,6 +23,31 @@ from src.application.channels.wechat_clawbot.state_store import WechatClawbotSta
 ClientFactory = Callable[..., WechatClawbotClient]
 
 
+def resolve_wechat_clawbot_notification_target(
+    *, target: str, notifications: dict[str, Any],
+) -> str:
+    return target
+
+
+def resolve_wechat_clawbot_notification_identity(
+    *, base: Path, route: dict[str, Any],
+) -> dict[str, Any] | None:
+    target = resolve_wechat_clawbot_target(route["target"], notifications=route["notifications"])
+    state_dir = resolve_wechat_clawbot_state_dir(
+        base=base, label=target.label, notifications=route["notifications"])
+    with WechatClawbotStateStore(state_dir).read_directory() as store:
+        binding = store.safe_bindings().get(target.binding_name) or {}
+        sender_scope = store.sender_directory_scope()
+    if sender_scope is None:
+        return None
+    if (not isinstance(binding.get("to_user_id"), str) or not binding["to_user_id"].strip()
+            or any(binding.get(key) is not None and not isinstance(binding[key], str)
+                   for key in ("group_id", "chat_key"))):
+        return None
+    return {"sender": [target.label, *sender_scope],
+            "recipient": [binding.get(key) for key in ("to_user_id", "group_id", "chat_key")]}
+
+
 def _response_code(response: dict[str, Any]) -> int | None:
     top_level = response_code(response)
     if top_level is not None:

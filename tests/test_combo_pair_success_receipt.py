@@ -71,6 +71,27 @@ def test_raw_config_receipt_route_matches_normalized_dispatch_scope(tmp_path):
     assert config == before
 
 
+def test_combo_confirmation_route_binds_only_its_account_destinations(tmp_path, monkeypatch):
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "fixture-app")
+    config = _route_config()
+    config["accounts"].append("paper2")
+    config["account_settings"]["paper2"] = deepcopy(config["account_settings"]["paper"])
+    config["account_settings"]["paper2"]["futu"]["account_id"] = "9002"
+    config["channels"] = {"feishu": {"enabled": True, "notify_enabled": True}}
+    config["notifications"] = {"enabled": True, "routes": [
+        {"id": account, "provider": "feishu_app", "target": "ou_" + account, "accounts": [account]}
+        for account in config["accounts"]]}
+    batch_route = receipt.resolve_trade_lifecycle_notification_batch_route(config=config, base=tmp_path)
+    identities = []
+    for account in config["accounts"]:
+        observed = attribution.observe_combo_confirmation_receipt_route(
+            config=config, account=account, runtime_root=tmp_path)
+        assert observed["route_available"] is True
+        assert observed["attribution_route_key"] == batch_route["account_route_keys"][account]
+        identities.append(observed["attribution_route_key"])
+    assert identities[0] != identities[1]
+
+
 @pytest.mark.parametrize("disabled", ["receipt", "intake", "account", "all_disabled_mapping", "unknown", "missing_accounts"])
 def test_receipt_scope_never_uses_legacy_or_injected_sources_to_authorize(tmp_path, monkeypatch, disabled):
     config = _route_config()

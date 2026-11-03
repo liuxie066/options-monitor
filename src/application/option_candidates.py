@@ -27,15 +27,17 @@ from src.application.config_profiles import apply_profiles
 from src.application.config_sections import resolve_templates_config, resolve_watchlist_config
 from src.application.covered_call_strategy_risk import resolve_covered_call_underwriting_config
 from src.application.earnings_calendar import earnings_calendar_scan_date
-from src.application.futu_quote_routing import resolve_futu_quote_route
-from src.application.opend_symbol_fetching import FetchSymbolRequest, fetch_symbol_request
+from src.application.market_data_provider import (
+    resolve_market_data_provider, provider_by_name,
+    open_quote_gateway as build_ready_futu_quote_gateway, fetch_symbol_request,
+)
+from src.application.opend_symbol_fetching import FetchSymbolRequest
 from src.application.opening_quote_evidence import normalize_underlier_observation
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.runtime_config_freshness import RuntimeConfigFreshnessError, ensure_runtime_config_freshness
 from src.application.sell_put_strategy_risk import resolve_sell_put_underwriting_config
 from src.application.symbol_calibration import calibrate_symbol
 from src.infrastructure.exchange_rates import current_exchange_rate_snapshot, rates_for_purpose
-from src.infrastructure.futu_gateway import build_ready_futu_quote_gateway
 
 LOG = logging.getLogger(__name__)
 
@@ -127,6 +129,7 @@ class PreparedQuery:
     filters: dict
     endpoint: tuple[str, int]
     query_date: date
+    market_data_provider: str = "opend"
 
 
 def _prepare(query: dict, context: QueryContext, now: datetime) -> PreparedQuery:
@@ -169,14 +172,15 @@ def _prepare(query: dict, context: QueryContext, now: datetime) -> PreparedQuery
         raise ValueError("configured strike range reversed")
     if not (1 <= policy.min_dte <= policy.max_dte <= 365):
         raise AgentToolError(code="QUERY_RANGE_EXCEEDED", message="configured DTE outside query resource bounds")
-    route = resolve_futu_quote_route(config, config_key=market, symbol=symbol)
+    provider = resolve_market_data_provider(config)
+    route = provider.resolve_quote_route(config, config_key=market, symbol=symbol)
     if not route.ok:
         raise ValueError(f"quote_route_{route.status}")
     filters = {"strike": query.get("strike"), "min_strike": policy.min_strike, "max_strike": policy.max_strike,
                "dte": [policy.min_dte, policy.max_dte],
                "strike_source": "request" if "strike" in query else "config",
                "dte_source": "request" if "dte" in query else "config"}
-    return PreparedQuery(query, policy, filters, (route.host, route.port), earnings_calendar_scan_date(query["market"], now))
+    return PreparedQuery(query, policy, filters, (route.host, route.port), earnings_calendar_scan_date(query["market"], now), provider.name)
 
 
 def _empty_result(query: dict, index: int, now: datetime) -> dict:
@@ -208,7 +212,7 @@ def _in_scope(row: dict, prepared: PreparedQuery) -> bool:
             and (cfg.max_strike is None or row["strike"] <= cfg.max_strike))
 
 
-def _candidate(row: dict, decision: dict, mode: str) -> dict:
+def _candidate(row: dict, decision: dict, mode: str, *, source: str = "opend") -> dict:
     evidence_fields = {
         "underlying_price": "spot", "bid": "bid", "ask": "ask", "mid": "mid", "last": "last_price",
         "spread_ratio": "spread_ratio", "iv": "implied_volatility", "term_matched_rv": "term_matched_rv",
@@ -225,7 +229,7 @@ def _candidate(row: dict, decision: dict, mode: str) -> dict:
             "reasons": [f"净收益{row['period_net_return']:.2%}；波动率溢价{row['iv_minus_rv']:.1%}"],
             "earnings": {"coverage": "unavailable", "events": [], "omitted_events": 0},
             "evidence": {**{key: row.get(source) for key, source in evidence_fields.items()},
-                "iv_source": "opend", "annualized_net_return": row.get("annualized_net_return", row.get("annualized_net_premium_return")),
+                "iv_source": source, "annualized_net_return": row.get("annualized_net_return", row.get("annualized_net_premium_return")),
                 "conditions": decision.get("conditions", [])}}
 
 
@@ -296,7 +300,7 @@ def _evaluate(prepared: PreparedQuery, bundle: dict, fx: dict, index: int, now: 
             min_iv_minus_rv=cfg.min_iv_minus_rv, max_spread_ratio=cfg.max_spread_ratio, max_abs_delta=cfg.max_abs_delta,
             check_capacity=False, require_earnings_evidence=False, reject_known_earnings=False)
         if decision["accepted"]:
-            row["_candidate"] = _candidate(row, decision, mode)
+            row["_candidate"] = _candidate(row, decision, mode, source=prepared.market_data_provider)
             matched.append(row)
         elif any(item["reason"] == "risk_delta_unavailable" for item in decision["rejects"]):
             unknown += 1
@@ -398,7 +402,7 @@ def option_candidates_tool(payload: dict[str, Any]) -> tuple[dict, list[str], di
 
     def work() -> None:
         gateways, bundles = {}, {}
-        fetch_cache = QueryFetchCache()
+        fetch_caches = {}
         fx = None
         try:
             # Configuration is resolved once before deciding which requests can share facts.
@@ -425,14 +429,15 @@ def option_candidates_tool(payload: dict[str, Any]) -> tuple[dict, list[str], di
                 item = prepared[index]
                 with lock:
                     preliminary[index]["reason_codes"] = ["budget_exhausted"]
-                key = (*item.endpoint, query["symbol"], item.query_date)
+                key = (item.market_data_provider, *item.endpoint, query["symbol"], item.query_date)
                 if key not in bundles:
-                    peers = [peer for peer in prepared.values() if (*peer.endpoint, peer.query["symbol"], peer.query_date) == key]
-                    if item.endpoint not in gateways:
+                    peers = [peer for peer in prepared.values() if (peer.market_data_provider, *peer.endpoint, peer.query["symbol"], peer.query_date) == key]
+                    connection_key = (item.market_data_provider, *item.endpoint)
+                    if connection_key not in gateways:
                         check()
                         connect_start = time.monotonic()
                         try:
-                            gateway = build_ready_futu_quote_gateway(host=item.endpoint[0], port=item.endpoint[1],
+                            gateway = build_ready_futu_quote_gateway(market_data_provider=item.market_data_provider, host=item.endpoint[0], port=item.endpoint[1],
                                 is_option_chain_cache_enabled=True, deadline=work_deadline, cancelled=cancelled)
                         except Exception:
                             check()
@@ -440,14 +445,14 @@ def option_candidates_tool(payload: dict[str, Any]) -> tuple[dict, list[str], di
                             result.update(effective_filters=item.filters, reason_codes=["quote_connection_unavailable"])
                             publish(index, result)
                             continue
-                        gateways[item.endpoint] = gateway
+                        gateways[connection_key] = gateway
                         diagnostics["connection_ms"] = diagnostics.get("connection_ms", 0) + round((time.monotonic() - connect_start) * 1000)
                         check()
                     request = FetchSymbolRequest(symbol=query["symbol"], host=item.endpoint[0], port=item.endpoint[1],
-                        base_dir=runtime, gateway=gateways[item.endpoint], option_types=",".join(sorted({peer.query["strategy"].removeprefix("short_") for peer in peers})),
+                        base_dir=runtime, gateway=gateways[connection_key], market_data_provider=item.market_data_provider, option_types=",".join(sorted({peer.query["strategy"].removeprefix("short_") for peer in peers})),
                         min_dte=min(peer.config.min_dte for peer in peers), max_dte=max(peer.config.max_dte for peer in peers),
                         include_realized_volatility=True, chain_cache=True,
-                        deadline=work_deadline, cancelled=cancelled, query_cache=fetch_cache,
+                        deadline=work_deadline, cancelled=cancelled, query_cache=fetch_caches.setdefault(item.market_data_provider, QueryFetchCache()),
                         query_filters=[{"option_type": peer.query["strategy"].removeprefix("short_"),
                                         "min_strike": peer.config.min_strike, "max_strike": peer.config.max_strike,
                                         "min_dte": peer.config.min_dte, "max_dte": peer.config.max_dte} for peer in peers])
@@ -482,8 +487,8 @@ def option_candidates_tool(payload: dict[str, Any]) -> tuple[dict, list[str], di
         except TimeoutError:
             pass
         finally:
-            diagnostics["fact_reuse_hits"] = fetch_cache.reuse_hits
-            diagnostics["fetch"] = fetch_cache.diagnostics
+            diagnostics["fact_reuse_hits"] = sum(cache.reuse_hits for cache in fetch_caches.values())
+            diagnostics["fetch"] = {name: cache.diagnostics for name, cache in fetch_caches.items()}
             LOG.info("option_candidates diagnostic=%s", diagnostics)
             for gateway in gateways.values():
                 try:
@@ -530,12 +535,10 @@ def option_candidates_tool(payload: dict[str, Any]) -> tuple[dict, list[str], di
 
 
 def _earnings_key(prepared: PreparedQuery) -> tuple:
-    return (*prepared.endpoint, prepared.query["market"], prepared.query_date)
+    return (*prepared.endpoint, prepared.query["market"], prepared.query_date, prepared.market_data_provider)
 
 
 def _collect_earnings(prepared, results, gateways, requests, intervals, lock, closed, deadline, cancelled):
-    from src.application.earnings_calendar import fetch_market_earnings_calendar
-
     groups: dict[tuple, dict[str, set[str]]] = {}
     for index, item in prepared.items():
         code = calibrate_symbol(item.query["symbol"]).futu_code
@@ -565,7 +568,7 @@ def _collect_earnings(prepared, results, gateways, requests, intervals, lock, cl
                 copied["events"] = [dict(event) for event in observation["events"]]
                 intervals[group].append(copied)
 
-        fetch_market_earnings_calendar(gateway=gateways[key[:2]], **request,
+        provider_by_name(key[4]).fetch_earnings_calendar(gateway=gateways[(key[4], *key[:2])], **request,
                                       deadline=deadline, cancelled=cancelled, on_interval=accept)
 
 

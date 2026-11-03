@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
+from src.application.bot.control.policy import require_inbound_channel
 from src.application.channels.wechat_clawbot.ilink_client import DEFAULT_ILINK_BASE_URL, WechatClawbotClient
 from src.application.channels.wechat_clawbot.message import (
     extract_first_string,
@@ -15,7 +16,9 @@ from src.application.channels.wechat_clawbot.message import (
     message_id,
     message_text,
     message_user_id,
+    response_code,
     response_message_id,
+    response_success,
 )
 from src.application.channels.wechat_clawbot.state import (
     DEFAULT_WECHAT_CLAWBOT_LABEL,
@@ -45,6 +48,18 @@ def _load_store_json(load_fn: Callable[..., dict[str, Any]], *, default: dict[st
         return load_fn(default=default)
     except ValueError as exc:
         raise AgentToolError(code="STATE_ERROR", message=str(exc)) from exc
+
+
+def _require_binding_authority(bot_config_path: str | None, *, setup_authorized: bool) -> None:
+    """Setup consent permits binding only; normal polling/replies keep their guard."""
+    if setup_authorized is True and not str(bot_config_path or "").strip():
+        raise AgentToolError(code="INPUT_ERROR", message="authorized binding setup requires an explicit Bot config path")
+    try:
+        require_inbound_channel("wechat_clawbot", bot_config_path)
+    except AgentToolError as exc:
+        # The selected instance must still pass plugin presence and config validation.
+        if setup_authorized is not True or exc.code != "CHANNEL_RECEIVE_DISABLED":
+            raise
 
 
 def start_wechat_clawbot_qrcode(
@@ -141,10 +156,13 @@ def bind_wechat_clawbot_target(
     state_dir: str | None = None,
     timeout_sec: int = 20,
     client_factory: ClientFactory = WechatClawbotClient,
+    bot_config_path: str | None = None,
+    setup_authorized: bool = False,
 ) -> dict[str, Any]:
     binding_name = str(name or "").strip()
     if not binding_name:
         raise AgentToolError(code="INPUT_ERROR", message="binding name is required")
+    _require_binding_authority(bot_config_path, setup_authorized=setup_authorized)
     store = _state_store(base=base, label=label, state_dir=state_dir)
     state = _load_store_json(store.load_state, default={})
     bot_token = str(state.get("bot_token") or "").strip()
@@ -155,7 +173,18 @@ def bind_wechat_clawbot_target(
         base_url=str(state.get("base_url") or DEFAULT_ILINK_BASE_URL),
         timeout=timeout_sec,
     )
+    _require_binding_authority(bot_config_path, setup_authorized=setup_authorized)
     response = client.get_updates(get_updates_buf=str(state.get("get_updates_buf") or ""))
+    _require_binding_authority(bot_config_path, setup_authorized=setup_authorized)
+    provider_code = response_code(response)
+    if provider_code not in (None, 0) and not response_success(response):
+        return build_response(
+            tool_name="wechat_clawbot.bind",
+            ok=False,
+            data={"label": label, "state_dir": str(store.state_dir), "binding_name": binding_name},
+            error={"code": "POLL_FAILED", "message": "WeChat ClawBot getupdates failed"},
+            meta={"provider_response_code": provider_code},
+        )
     new_buf = extract_first_string(response, ("get_updates_buf", "getUpdatesBuf"))
 
     expected_text = str(match_text or "").strip()
@@ -450,12 +479,16 @@ def connect_wechat_clawbot_target(
     client_factory: ClientFactory = WechatClawbotClient,
     progress_fn: ProgressFn | None = None,
     sleep_fn: SleepFn = time.sleep,
+    bot_config_path: str | None = None,
+    setup_authorized: bool = False,
 ) -> dict[str, Any]:
     binding_name = str(name or "").strip()
     if not binding_name:
         raise AgentToolError(code="INPUT_ERROR", message="binding name is required")
     expected_text = str(match_text or "").strip() or f"bind {binding_name}"
     sleep_interval = max(0.0, float(poll_interval_sec or 0.0))
+    if setup_authorized is True:
+        _require_binding_authority(bot_config_path, setup_authorized=setup_authorized)
 
     qrcode_out = start_wechat_clawbot_qrcode(
         base=base,
@@ -542,6 +575,8 @@ def connect_wechat_clawbot_target(
             state_dir=state_dir,
             timeout_sec=timeout_sec,
             client_factory=client_factory,
+            bot_config_path=bot_config_path,
+            setup_authorized=setup_authorized,
         )
         last_bind_out = bind_out
         if bool(bind_out.get("ok")):
@@ -571,6 +606,7 @@ def connect_wechat_clawbot_target(
                 data={"label": label, "state_dir": resolved_state_dir, "binding_name": binding_name, "match_text": expected_text},
                 warnings=list(bind_out.get("warnings") or []),
                 error=error or {"code": "BINDING_ERROR", "message": "failed to bind WeChat ClawBot target"},
+                meta=dict(bind_out.get("meta") or {}),
             )
         if time.monotonic() >= bind_deadline:
             last_data = last_bind_out.get("data") if isinstance(last_bind_out.get("data"), dict) else {}

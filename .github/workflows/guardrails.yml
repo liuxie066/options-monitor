@@ -9,7 +9,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, 'codex/**']
 
 permissions:
   contents: read
@@ -89,6 +89,9 @@ jobs:
       - name: Lint
         run: |
           ./.venv/bin/python -m ruff check .
+
+      - name: Qualify official plugin Release assets
+        run: ./.venv/bin/python scripts/build_plugin_wheels.py --output "$RUNNER_TEMP/plugin-wheels"
 
       - name: Guardrails checks
         run: |

@@ -3,10 +3,15 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
+from domain.domain.daily_decision_brief import effective_daily_brief_actionability
+from src.application.daily_decision_brief_renderer import render_query_brief
+from src.application.daily_decision_brief_repository import read_run_daily_decision_brief
 from src.application.multi_account_tick import run_tick
+from src.application.multi_account_tick import TickExecutionResult, execute_tick
 from src.application.tick_cron import run_tick_cron
 from src.application.service_failure_alert import alert_failed_service, check_trade_intake_heartbeat
 
@@ -204,7 +209,11 @@ def handle_run_command(
     run_trade_intake_fn: Callable[[list[str]], int] | None = None,
 ) -> int:
     if args.run_command == "tick":
-        return int(run_tick_fn(_tick_argv(args)))
+        if run_tick_fn is not run_tick:
+            return int(run_tick_fn(_tick_argv(args)))
+        result = execute_tick(_tick_argv(args))
+        display_rc = _display_tick_result(result)
+        return result.rc if args.smoke else display_rc
 
     if args.run_command == "tick-cron":
         out = run_tick_cron_fn(
@@ -246,3 +255,51 @@ def handle_run_command(
         )
 
     raise AgentToolError(code="INPUT_ERROR", message=f"unsupported run command: {args.run_command}")
+
+
+def _display_tick_result(result: TickExecutionResult) -> int:
+    """Keep execution failures; unreadable/unfinished human results also fail."""
+    if not result.run_created:
+        sys.stdout.write(f"本次未创建运行（退出码 {result.rc}）。\n")
+        if result.error:
+            sys.stdout.write(result.error + "\n")
+        return result.rc or 2
+    state = "执行结束" if result.rc == 0 else "执行失败／未完成"
+    sys.stdout.write(f"本次{state}｜运行 {result.run_id}｜退出码 {result.rc}\n")
+    if result.error:
+        sys.stdout.write(result.error + "\n")
+    if result.experience:
+        state = "完成" if result.rc == 0 and result.experience_completed else "失败／未完成"
+        sys.stdout.write(
+            f"模拟体验{state}｜账户 {', '.join(result.accounts)}｜市场 {result.market or '未知'}\n"
+            "体验结果使用模拟假设，不代表真实账户容量；本次不生成普通决策简报。\n"
+        )
+        return result.rc or (0 if result.experience_completed else 2)
+    if result.runtime_root is None or result.run_id is None or result.market is None:
+        sys.stdout.write("本次结果来源不可用：运行范围未完整绑定。\n")
+        return result.rc or 2
+    now = datetime.now(timezone.utc)
+    complete = bool(result.accounts)
+    for account in result.accounts:
+        data = read_run_daily_decision_brief(
+            base=result.runtime_root, account=account, market=result.market, run_id=result.run_id,
+        )
+        if not data["available"]:
+            if (result.rc == 0 and data["reason"] == "not_found"
+                    and account in result.scheduler_skipped_accounts):
+                sys.stdout.write(f"账户 {account}｜{result.market}｜本次调度跳过，无需生成新扫描结果。\n")
+                continue
+            complete = False
+            sys.stdout.write(f"账户 {account}｜{result.market}｜本次结果来源不可用（{data['reason']}）。\n")
+            continue
+        brief = dict(data["brief"])
+        brief["actionability"] = effective_daily_brief_actionability(brief, now_utc=now)
+        if data["reason"] == "scan_failed":
+            complete = False
+            brief["actionability"] = "blocked"
+            sys.stdout.write(f"账户 {account}｜本次扫描失败。\n")
+        elif brief.get("status") == "degraded":
+            sys.stdout.write(f"账户 {account}｜本次部分数据不可用，候选结果不完整；请查看简报缺口。\n")
+        sys.stdout.write(render_query_brief(brief, context={"query_time_utc": now.isoformat()}).rstrip() + "\n")
+    sys.stdout.write("阅读提示｜多个 CSP 候选共享现金，最多手数不能相加；年化非收益承诺，估算非成交，请自行复核。\n")
+    return result.rc or (0 if complete else 2)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import platform
 import re
@@ -13,11 +14,14 @@ from typing import Any, Iterable
 
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError
+from src.application import runtime_bundle
+from src.application.bot.control.config_loader import load_bot_config
+from src.application.config_yaml import load_yaml_config_file, resolve_yaml_bot_config
 from src.application.config_yaml_init import DEFAULT_FUTU_ACCOUNT_ID
-from src.application.config_yaml import load_yaml_config_file
 from src.application.platform_profile import PlatformProfile, current_platform_profile
 from src.application.bot.model_config import ModelSettings, load_bot_llm_config
 from src.application.runtime_config_readiness import evaluate_runtime_config_readiness
+from src.application.runtime_config_freshness import configured_runtime_markets
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.settings import build_effective_env, diagnose_effective_settings
 from src.infrastructure.futu_gateway import inspect_futu_sdk_earnings_calendar_capability
@@ -59,14 +63,29 @@ def run_setup_check(
         {"repo_root": str(root), "version": version or None},
     )
 
-    venv_python = root / ".venv" / "bin" / "python"
-    add(
-        "install.venv",
-        "ok" if venv_python.exists() else "warn",
-        "repo-local virtualenv is present" if venv_python.exists() else "repo-local virtualenv is missing; om will fall back to system python",
-        {"python": sys.executable, "repo_venv_python": str(venv_python)},
-        hint="Run scripts/install.sh or create .venv and install requirements.txt with constraints.txt." if not venv_python.exists() else None,
-    )
+    bundle_declared = any(path.exists() or path.is_symlink() for path in (root / runtime_bundle.MANIFEST, root / "runtime"))
+    bundle_repair = "Reinstall a verified complete runtime bundle with scripts/install.sh."
+    if bundle_declared:
+        try:
+            manifest = runtime_bundle.load_manifest(
+                root, expected_platform=runtime_bundle.current_platform(), verify_files=True,
+            )
+        except runtime_bundle.RuntimeBundleError as exc:
+            add("install.runtime_bundle", "error", str(exc), hint=bundle_repair)
+        else:
+            add("install.runtime_bundle", "ok", "declared runtime bundle is valid", {
+                "python": sys.executable, "bundled_python": str(root / manifest["python"]["executable"]),
+                "version": manifest["version"], "platform": manifest["platform"],
+            })
+    else:
+        venv_python = root / ".venv" / "bin" / "python"
+        add(
+            "install.venv",
+            "ok" if venv_python.exists() else "warn",
+            "repo-local virtualenv is present" if venv_python.exists() else "repo-local virtualenv is missing; om will fall back to system python",
+            {"python": sys.executable, "repo_venv_python": str(venv_python)},
+            hint="Run scripts/install.sh or create .venv and install requirements.txt with constraints.txt." if not venv_python.exists() else None,
+        )
 
     runtime_imports = ["pandas", "futu"]
     missing_deps = [name for name in runtime_imports if importlib.util.find_spec(name) is None]
@@ -75,7 +94,7 @@ def run_setup_check(
         "ok" if not missing_deps else "error",
         "required Python imports are available" if not missing_deps else "required Python imports are missing",
         {"missing": missing_deps, "checked": runtime_imports} if missing_deps else {"checked": runtime_imports},
-        hint="./.venv/bin/pip install -r requirements.txt -c constraints.txt" if missing_deps else None,
+        hint=(bundle_repair if bundle_declared else "./.venv/bin/pip install -r requirements.txt -c constraints.txt") if missing_deps else None,
     )
 
     earnings_calendar_capability = inspect_futu_sdk_earnings_calendar_capability()
@@ -93,7 +112,8 @@ def run_setup_check(
         hint=(
             None
             if earnings_calendar_supported
-            else f"Install futu-api>={minimum_futu_version} and use an OpenD build that supports get_earnings_calendar."
+            else (bundle_repair + " Use an OpenD build that supports get_earnings_calendar." if bundle_declared
+                  else f"Install futu-api>={minimum_futu_version} and use an OpenD build that supports get_earnings_calendar.")
         ),
     )
 
@@ -106,7 +126,7 @@ def run_setup_check(
             "lark_oapi": server_deps_available,
             "needed_for": ["inbound.feishu_ws", "service render --include-feishu-ws"],
         },
-        hint="./.venv/bin/pip install -r requirements/server.txt -c constraints/server.txt" if not server_deps_available else None,
+        hint=(bundle_repair if bundle_declared else "./.venv/bin/pip install -r requirements/server.txt -c constraints/server.txt") if not server_deps_available else None,
     )
 
     effective_env = build_effective_env(
@@ -115,7 +135,11 @@ def run_setup_check(
         include_local_env_file=include_local_env_file,
     )
     runtime = resolve_runtime_root(repo_root=root, environ=effective_env.values, user_home=Path.home())
-    configured_markets = _configured_markets(runtime.runtime_root)
+    try:
+        configured_markets = configured_runtime_markets(runtime.runtime_root)
+    except AgentToolError as exc:
+        configured_markets = []
+        add("config.authoring", "error", exc.message)
     selected_markets = _normalize_markets(markets) if markets is not None else configured_markets or ["us", "hk"]
 
     repo_bot_config = root / "config.bot.json"
@@ -125,10 +149,42 @@ def run_setup_check(
         if runtime.source == "repo_default" and repo_bot_config.exists()
         else resolved_bot_config
     )
-    model_raw, model_error = load_bot_llm_config(
-        config_path=bot_config,
-        require_config=False,
-    )
+    source_path = runtime.runtime_root / "config.yaml"
+    bot_disabled = False
+    model_raw, model_error = None, None
+    try:
+        expected_bot_config = None
+        if source_path.exists() or source_path.is_symlink():
+            authoring = load_yaml_config_file(source_path)
+            # An explicit source opt-out does not need a generated snapshot or model.
+            bot_disabled = isinstance(authoring.get("bot"), dict) and authoring["bot"].get("enabled") is False
+            if not bot_disabled:
+                expected_bot_config, _ = resolve_yaml_bot_config(repo_root=root, config_path=source_path)
+                bot_disabled = expected_bot_config["bot"].get("enabled") is False
+        if not bot_disabled:
+            bot_document = json.loads(bot_config.read_text(encoding="utf-8"))
+            if expected_bot_config is None:
+                bot_disabled = (isinstance(bot_document, dict)
+                                and isinstance(bot_document.get("bot"), dict)
+                                and bot_document["bot"].get("enabled") is False)
+            if not bot_disabled:
+                _, validated_bot = load_bot_config(config_path=bot_config, repo_root=root)
+                if expected_bot_config is not None:
+                    # Compare owner-resolved content and source identity; generation time is not freshness.
+                    generated = validated_bot.get("_generated")
+                    generation_matches = isinstance(generated, dict) and all(
+                        generated.get(key) == value for key, value in expected_bot_config["_generated"].items()
+                        if key != "generated_at"
+                    )
+                    if not generation_matches or any(validated_bot.get(key) != expected_bot_config.get(key)
+                                                     for key in ("bot", "inbound", "_resolved")):
+                        model_error = "stale_bot_config"
+        if not bot_disabled and model_error is None:
+            model_raw, model_error = load_bot_llm_config(config_path=bot_config, require_config=True)
+    except FileNotFoundError:
+        model_error = "bot_config_not_found"
+    except (AgentToolError, OSError, UnicodeError, ValueError, SystemExit):
+        model_error = "invalid_bot_config"
     model_settings: ModelSettings | None = None
     if model_raw is not None and model_error is None:
         try:
@@ -138,61 +194,71 @@ def run_setup_check(
     model_context_ok = model_settings is not None
     add(
         "bot.model_context",
-        "ok" if model_context_ok else "warn",
-        "active Bot model context is valid" if model_context_ok else "active Bot model context is missing or invalid",
+        "info" if bot_disabled else ("ok" if model_context_ok else "error"),
+        "Bot is disabled; model check skipped" if bot_disabled else ("active Bot model context is valid" if model_context_ok else "active Bot model context is missing or invalid"),
         {
             "config_path": str(bot_config),
             "context_window_tokens": model_settings.context_window_tokens if model_settings else None,
             "max_output_tokens": model_settings.max_output_tokens if model_settings else None,
-            "error": model_error or (None if model_settings else "model_context_missing"),
+            "error": None if bot_disabled else model_error or (None if model_settings else "model_context_missing"),
         },
-        hint=None if model_context_ok else "Build or fix the resolved Bot config with a valid context_window_tokens value.",
-    )
-
-    audit_raw = str(effective_env.values.get("OM_INBOUND_AUDIT_DB") or "").strip()
-    audit_db = Path(audit_raw).expanduser() if audit_raw else runtime.runtime_root / "output_shared" / "state" / "inbound_control.sqlite3"
-    if not audit_db.is_absolute():
-        audit_db = root / audit_db
-    audit_db = private_path(audit_db)
-    session_path = audit_db
-    session_parent = session_path.parent
-    session_parent_is_symlink = session_parent.is_symlink()
-    session_parent_ok = (
-        session_parent.is_dir()
-        and not session_parent_is_symlink
-        and os.access(session_parent, os.W_OK | os.X_OK)
-    )
-    add(
-        "bot.session_path",
-        "ok" if session_parent_ok else "warn",
-        "Bot Host parent exists and is writable" if session_parent_ok else "Bot Host parent is missing or not writable",
-        {
-            "host_audit_db": str(audit_db),
-            "session_path": str(session_path),
-            "parent": str(session_parent),
-            "parent_exists": session_parent.is_dir(),
-            "parent_is_symlink": session_parent_is_symlink,
-            "session_exists": session_path.exists(),
-        },
-        hint=None if session_parent_ok else f"Create and grant write access to the Session parent: {session_parent}",
-    )
-    installer_mode = str(effective_env.values.get("OM_UPGRADE_INSTALLER") or "auto").strip().lower()
-    if installer_mode not in {"auto", "uv", "pip"}:
-        installer_mode = "auto"
-    uv_path = shutil.which("uv")
-    add(
-        "upgrade.uv",
-        "ok" if uv_path else ("warn" if installer_mode == "uv" else "info"),
-        "uv is available for service upgrade dependency installation" if uv_path else "uv is not available; service upgrade will use pip fallback",
-        {"installer_mode": installer_mode, "uv_path": uv_path, "cache_env": {"UV_CACHE_DIR": effective_env.values.get("UV_CACHE_DIR")}},
-        hint=(
-            "Install uv on the remote host or set OM_UPGRADE_INSTALLER=pip before running service upgrade."
-            if not uv_path and installer_mode == "uv"
-            else "Install uv on the remote host to speed up service upgrade dependency installation."
-            if not uv_path
-            else None
+        hint=None if bot_disabled or model_context_ok else (
+            f"Fix config.yaml if needed, then preview: om config build-bot --source yaml"
+            f" --config-yaml {shlex.quote(str(source_path))} --output {shlex.quote(str(bot_config))} --dry-run"
         ),
     )
+
+    session_parent_ok = False
+    if bot_disabled:
+        add("bot.session_path", "info", "Bot is disabled; session path check skipped")
+    else:
+        audit_raw = str(effective_env.values.get("OM_INBOUND_AUDIT_DB") or "").strip()
+        audit_db = Path(audit_raw).expanduser() if audit_raw else runtime.runtime_root / "output_shared" / "state" / "inbound_control.sqlite3"
+        if not audit_db.is_absolute():
+            audit_db = root / audit_db
+        audit_db = private_path(audit_db)
+        session_path = audit_db
+        session_parent = session_path.parent
+        session_parent_is_symlink = session_parent.is_symlink()
+        session_parent_ok = (
+            session_parent.is_dir()
+            and not session_parent_is_symlink
+            and os.access(session_parent, os.W_OK | os.X_OK)
+        )
+        add(
+            "bot.session_path",
+            "ok" if session_parent_ok else "error",
+            "Bot Host parent exists and is writable" if session_parent_ok else "Bot Host parent is missing or not writable",
+            {
+                "host_audit_db": str(audit_db),
+                "session_path": str(session_path),
+                "parent": str(session_parent),
+                "parent_exists": session_parent.is_dir(),
+                "parent_is_symlink": session_parent_is_symlink,
+                "session_exists": session_path.exists(),
+            },
+            hint=None if session_parent_ok else f"Create and grant write access to the Session parent: {session_parent}",
+        )
+    if bundle_declared:
+        add("upgrade.runtime_bundle", "info", "runtime bundle upgrades use verified complete runtime artifacts")
+    else:
+        installer_mode = str(effective_env.values.get("OM_UPGRADE_INSTALLER") or "auto").strip().lower()
+        if installer_mode not in {"auto", "uv", "pip"}:
+            installer_mode = "auto"
+        uv_path = shutil.which("uv")
+        add(
+            "upgrade.uv",
+            "ok" if uv_path else ("warn" if installer_mode == "uv" else "info"),
+            "uv is available for service upgrade dependency installation" if uv_path else "uv is not available; service upgrade will use pip fallback",
+            {"installer_mode": installer_mode, "uv_path": uv_path, "cache_env": {"UV_CACHE_DIR": effective_env.values.get("UV_CACHE_DIR")}},
+            hint=(
+                "Install uv on the remote host or set OM_UPGRADE_INSTALLER=pip before running service upgrade."
+                if not uv_path and installer_mode == "uv"
+                else "Install uv on the remote host to speed up service upgrade dependency installation."
+                if not uv_path
+                else None
+            ),
+        )
 
     settings = diagnose_effective_settings(
         repo_root=root,
@@ -365,21 +431,6 @@ def _normalize_markets(markets: Iterable[str] | None) -> list[str]:
         if item in {"us", "hk"} and item not in out:
             out.append(item)
     return out or ["us", "hk"]
-
-
-def _configured_markets(runtime_root: Path) -> list[str]:
-    source = runtime_root / "config.yaml"
-    if source.is_file():
-        try:
-            document = load_yaml_config_file(source)
-            market_doc = document.get("markets")
-            if isinstance(market_doc, dict):
-                configured = [market for market in ("us", "hk") if market in market_doc]
-                if configured:
-                    return configured
-        except (AgentToolError, OSError, UnicodeError):
-            pass
-    return [market for market in ("us", "hk") if (runtime_root / f"config.{market}.json").is_file()]
 
 
 def _read_text(path: Path) -> str:

@@ -26,6 +26,42 @@ class _BrokerClient:
         return list(value)
 
 
+@pytest.mark.parametrize("market", ["US", "HK"])
+@pytest.mark.parametrize("right", ["LV1", "LV2", "LV3", "BMP", "NO", "N/A"])
+def test_quote_rights_use_only_quote_context_and_discard_user_data(market, right):
+    from types import SimpleNamespace
+    from src.infrastructure.futu_gateway import FutuGateway
+
+    class Backend:
+        def _ensure_quote_client(self):
+            return SimpleNamespace(get_user_info=lambda: (0, {
+                f"{market.lower()}_qot_right": right,
+                f"{market.lower()}_option_qot_right": "LV2",
+                "user_id": "private-user", "web_key": "private-secret",
+            }))
+
+        def _ensure_trade_client(self):
+            pytest.fail("quote rights must not open a trade client")
+
+    gateway = FutuGateway(host="isolated.invalid", port=1, backend=Backend(), client=None)
+    assert gateway.get_quote_rights(market=market) == {
+        "status": "ok", "market": market,
+        "underlier_right": "UNKNOWN" if right == "N/A" else right, "option_right": "LV2",
+    }
+
+
+@pytest.mark.parametrize("response", [(1, "private-secret"), (0, []), {"user_id": "private-user"}])
+def test_quote_rights_incompatible_sdk_responses_are_unavailable(response):
+    from types import SimpleNamespace
+    from src.infrastructure.futu_gateway import FutuGateway
+
+    backend = SimpleNamespace(_ensure_quote_client=lambda: SimpleNamespace(get_user_info=lambda: response))
+    gateway = FutuGateway(host="isolated.invalid", port=1, backend=backend, client=None)
+    assert gateway.get_quote_rights(market="US") == {
+        "status": "unavailable", "market": "US", "underlier_right": "UNKNOWN", "option_right": "UNKNOWN",
+    }
+
+
 
 @pytest.mark.parametrize("keys,initial,expected_calls", [
     ([b"a", b"a"], None, 2),

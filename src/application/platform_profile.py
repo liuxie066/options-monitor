@@ -53,8 +53,8 @@ def current_platform_profile(*, system: str | None = None, home: str | Path | No
             default_env_file=Path("/etc/options-monitor/options-monitor.env"),
             local_env_file=local_env_file,
             prerequisite_hints=(
-                "Install git, Python 3.12+, and Python 3.12 venv support before running scripts/install.sh.",
-                "Use --with-server when this host will run Feishu long-connection inbound.",
+                "Qualified runtime bundles include Python and dependencies; Git, system Python and Homebrew are not prerequisites.",
+                "Only scripts/install.sh --source needs Git, Python 3.12+ and venv support; add --with-server for Feishu long-connection source installs.",
             ),
             service_notes=(
                 "Linux production services are rendered for systemd.",
@@ -73,8 +73,8 @@ def current_platform_profile(*, system: str | None = None, home: str | Path | No
             default_env_file=runtime_root / "options-monitor.env",
             local_env_file=local_env_file,
             prerequisite_hints=(
-                "Install Apple Command Line Tools with xcode-select --install and install Python 3.12+ through Homebrew.",
-                "Use --with-server when this Mac will run Feishu long-connection inbound.",
+                "Qualified runtime bundles include Python and dependencies; Git, system Python and Homebrew are not prerequisites.",
+                "Only scripts/install.sh --source needs Git, Python 3.12+ and venv support; Homebrew is one optional source of these tools. Add --with-server for Feishu long-connection source installs.",
             ),
             service_notes=(
                 "Mac long-running jobs are rendered for launchd.",

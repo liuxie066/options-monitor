@@ -19,7 +19,7 @@ def test_omission_and_explicit_disable_avoid_credentials(monkeypatch):
     import src.application.notification_delivery_route as mod
     assert not notifications_enabled({})
     assert not notifications_enabled({"notifications": {"provider": "feishu_app"}})
-    monkeypatch.setattr(mod, "resolve_feishu_bot_send_target", forbidden)
+    monkeypatch.setattr(mod, "build_notification_channel_registry", forbidden)
     route = resolve_notification_delivery_route(config=DISABLED, route_resolver=forbidden)
     assert route["enabled"] is False and route["disabled_reason"] == "notifications_disabled"
 
@@ -27,7 +27,6 @@ def test_omission_and_explicit_disable_avoid_credentials(monkeypatch):
 def test_system_alert_cannot_fallback_when_disabled(tmp_path, monkeypatch):
     import src.application.system_alerts as mod
     monkeypatch.setattr(mod, "resolve_notification_delivery_route", forbidden)
-    monkeypatch.setattr(mod, "_fallback_route", forbidden)
     result = mod._send(tmp_path, DISABLED, "fixture", "fixture-key")
     assert result["attempted"] is False and result["delivery_confirmed"] is False
 
@@ -36,7 +35,6 @@ def test_disabled_system_alert_records_failure_and_recovery_without_delivery_fai
     import json
     import src.application.system_alerts as mod
     monkeypatch.setattr(mod, "resolve_notification_delivery_route", forbidden)
-    monkeypatch.setattr(mod, "_fallback_route", forbidden)
     fields = dict(base=tmp_path, config=DISABLED, unit="fixture.service", market="us", account="lx",
                   failure_code="FIXTURE_FAILURE", stage="heartbeat")
     assert mod.report_system_failure(**fields, run_id="fixture", rc=1, first_error_at="fixture",

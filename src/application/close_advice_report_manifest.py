@@ -13,6 +13,7 @@ from typing import Any
 from domain.domain.ledger.position_fields import normalize_account
 from domain.domain.symbol_identity import symbol_market
 from src.infrastructure.io_utils import atomic_write_json
+from src.application.payload_helpers import as_float_or_none
 
 
 CLOSE_ADVICE_REPORT_SCHEMA = "close_advice_report.v1"
@@ -335,4 +336,59 @@ __all__ = [
     "publish_close_advice_report_status",
     "read_close_advice_report_snapshot",
     "validate_close_advice_report_manifest",
+    "normalize_close_advice_report_value",
 ]
+
+
+# CSV-backed public readers share field types with active JSON assessments.
+
+_NUMERIC_PUBLIC_FIELDS = frozenset(
+    {
+        "strike",
+        "contracts_open",
+        "premium",
+        "close_mid",
+        "bid",
+        "ask",
+        "dte",
+        "delta",
+        "remaining_trading_sessions",
+        "remaining_trading_sessions_min",
+        "remaining_trading_sessions_max",
+        "original_dte",
+        "remaining_term_ratio",
+        "spot",
+        "multiplier",
+        "spread_ratio",
+        "opening_gross_credit",
+        "estimated_open_fee",
+        "opening_net_credit",
+        "estimated_close_fee",
+        "all_in_close_cost",
+        "net_capture_ratio",
+        "capital_basis",
+        "remaining_max_annualized_return",
+        "close_cost_ratio",
+        "estimated_pnl_if_close_net",
+    }
+)
+
+_BOOLEAN_PUBLIC_FIELDS = frozenset({"is_otm"})
+
+
+def normalize_close_advice_report_value(key: str, value: Any) -> Any:
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        return None
+    if (key in _NUMERIC_PUBLIC_FIELDS or key in _BOOLEAN_PUBLIC_FIELDS or key == "current_actionable") and text.lower() in {"nan", "none", "null"}:
+        return None
+    if key in _BOOLEAN_PUBLIC_FIELDS or key == "current_actionable":
+        if text.lower() in {"true", "1", "yes"}:
+            return True
+        if text.lower() in {"false", "0", "no"}:
+            return False
+        return text
+    if key not in _NUMERIC_PUBLIC_FIELDS:
+        return text
+    number = as_float_or_none(text)
+    return number if number is not None else text

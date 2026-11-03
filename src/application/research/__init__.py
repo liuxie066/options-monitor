@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from src.application.agent_tool_config import repo_base
+from src.application.runtime_paths import repo_base
 
 
 def research_tool(

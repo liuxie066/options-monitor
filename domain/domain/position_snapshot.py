@@ -175,10 +175,13 @@ def position_snapshot_scope_errors(
     payload: Mapping[str, Any], *, account_label: str, environment: str, market: str,
     asset_type: str, now_utc: datetime, external_account_id: str | None = None,
     max_age_seconds: int = 300,
+    broker_id: str | None = None,
 ) -> list[str]:
     snapshot = normalize_position_snapshot_input(payload)
     errors = list(snapshot["errors"])
     account = snapshot["broker_account_ref"]
+    if broker_id is not None and account["broker_id"] != broker_id:
+        errors.append("snapshot_broker_mismatch")
     if account["account_label"] != account_label.lower():
         errors.append("snapshot_account_mismatch")
     if external_account_id is not None and account["external_account_id"] != external_account_id:

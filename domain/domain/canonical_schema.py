@@ -9,7 +9,7 @@ CANONICAL_SCHEMA_VERSION_V1 = "3.0"
 SCHEMA_KIND_PROCESSOR_OUTPUT = "processor_output"
 SCHEMA_KIND_SOURCE_SNAPSHOT = "source_snapshot"
 
-_ALLOWED_SOURCE_NAMES = {"opend", "holdings", "option_positions"}
+_ALLOWED_SOURCE_NAMES = {"opend", "market_data", "holdings", "option_positions"}
 _ALLOWED_SOURCE_STATUS = {"ok", "fallback", "error"}
 
 
@@ -205,6 +205,8 @@ def normalize_source_snapshot(
     source_norm = str(source_name or "").strip().lower()
     if source_norm not in _ALLOWED_SOURCE_NAMES:
         raise ValueError(f"unsupported source_name: {source_name}")
+    if source_norm == "market_data" and not str((payload or {}).get("source") or "").strip():
+        raise ValueError("market-data snapshot requires provider source")
 
     status_norm = str(status or "").strip().lower() or "error"
     if status_norm not in _ALLOWED_SOURCE_STATUS:

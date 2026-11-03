@@ -16,6 +16,7 @@ from src.application.notification_delivery_adapter import (
     select_notification_delivery_adapter,
 )
 from src.application.notification_delivery_route import notifications_enabled, resolve_notification_delivery_route
+from src.application.notification_fanout_delivery import send_notification_fanout, uses_proactive_fanout
 from src.application.notification_shells import render_receipt
 from src.application.trade_time_format import format_iso_time_beijing
 from src.infrastructure.io_utils import utc_now as _utc_now
@@ -65,7 +66,7 @@ def send_auto_close_receipt(
     route_resolver: Callable[..., dict[str, Any]] = resolve_notification_route_from_config,
     adapter_selector: Callable[[Any], Any] = select_notification_delivery_adapter,
 ) -> dict[str, Any]:
-    if not notifications_enabled(config):
+    if not notifications_enabled(config) and not uses_proactive_fanout(config):
         out = {"enabled": False, "status": "skipped", "reason": "notifications_disabled",
                "delivery_confirmed": False, "message_id": None}
         _attach_receipt_identity(out, receipt_key=receipt_key, receipt_key_fields=receipt_key_fields)
@@ -87,6 +88,28 @@ def send_auto_close_receipt(
             "message_id": None,
         }
         _attach_receipt_identity(out, receipt_key=receipt_key, receipt_key_fields=receipt_key_fields)
+        return out
+
+    if uses_proactive_fanout(config):
+        identity = build_auto_close_receipt_identity(config=config, result=result)
+        message = build_auto_close_receipt_message(result=result, dry_run=dry_run)
+        from src.application.notification_fanout import notification_fanout_id, read_notification_fanout
+        account = str(result.get("account") or "")
+        key = receipt_key or identity["receipt_key"]
+        fanout_id = notification_fanout_id(account=account, logical_key="maintenance:" + str(key))
+        previous = read_notification_fanout(base=base, fanout_id=fanout_id)
+        if previous is not None:
+            message = previous["children"][0]["spec"]["message"]
+        persist_auto_close_receipt_state(base=base, account=account, result=result,
+            receipt={"status": "pending", "receipt_key": key, "rendered_message": message,
+                "fanout_id": fanout_id})
+        out = send_notification_fanout(base=base, config=config,
+            account=account, logical_key="maintenance:" + str(key),
+            message=message, send_fn=send_fn, normalize_fn=normalize_fn, adapter_selector=adapter_selector)
+        out.update(reason=decision["reason"], rendered_message=message,
+                   message_sha256=sha256(message.encode()).hexdigest(), updated_at=_utc_now())
+        _attach_receipt_identity(out, receipt_key=receipt_key or identity["receipt_key"],
+                                 receipt_key_fields=receipt_key_fields or identity["receipt_key_fields"])
         return out
 
     route = resolve_notification_delivery_route(config=config or {}, route_resolver=route_resolver)
@@ -180,6 +203,38 @@ def safe_send_auto_close_receipt(
 ) -> dict[str, Any]:
     try:
         receipt_config = resolve_auto_close_receipt_config_from_runtime_config(config)
+        is_preview = dry_run or str(result.get("mode") or "").strip().lower() == "dry_run"
+        notification_permitted = not is_preview or decide_auto_close_receipt(
+            receipt_config=receipt_config, dry_run=dry_run, result=result,
+        )["should_send"]
+        continuations = []
+        if (uses_proactive_fanout(config) and notifications_enabled(config)
+                and receipt_config["enabled"] and notification_permitted):
+            from src.application.notification_fanout import list_notification_fanouts
+            account = str(result.get("account") or "")
+            pending = list_notification_fanouts(base=base, account=account, logical_key_prefix="maintenance:")
+            state_path = _auto_close_receipt_state_path(base=base, account=account)
+            state = _load_auto_close_receipt_state(state_path)
+            known = {item["fanout_id"] for item in pending}
+            for key, entry in state["receipts"].items():
+                saved = entry.get("receipt") or {}
+                if saved.get("fanout_id") and saved["fanout_id"] not in known and saved.get("status") == "pending":
+                    pending.append({"account": account, "logical_key": "maintenance:" + key,
+                        "has_retryable_children": True, "children": [{"spec": {"message": saved["rendered_message"]}}]})
+            for previous in pending:
+                if previous.get("has_retryable_children") or any(
+                        child["status"] == "send_started" for child in previous["children"]):
+                    continued = send_notification_fanout(base=base, config=config,
+                        account=previous["account"], logical_key=previous["logical_key"],
+                        message=previous["children"][0]["spec"]["message"],
+                        adapter_selector=select_notification_delivery_adapter)
+                    continuations.append(continued)
+                    entry = state["receipts"].get(previous["logical_key"].removeprefix("maintenance:"))
+                    if entry:
+                        entry["receipt"].update(continued)
+                        entry["updated_at_utc"] = _utc_now()
+            if continuations:
+                atomic_write_json(state_path, state)
         identity = build_auto_close_receipt_identity(config=config, result=result)
         prior_receipt = _load_prior_auto_close_receipt(
             base=base,
@@ -196,12 +251,15 @@ def safe_send_auto_close_receipt(
             receipt_key=_optional_str(identity.get("receipt_key")),
             receipt_key_fields=identity.get("receipt_key_fields") if isinstance(identity.get("receipt_key_fields"), dict) else None,
         )
-        persist_auto_close_receipt_state(
-            base=base,
-            account=_optional_str(result.get("account")),
-            result=result,
-            receipt=receipt,
-        )
+        if notification_permitted:
+            persist_auto_close_receipt_state(
+                base=base,
+                account=_optional_str(result.get("account")),
+                result=result,
+                receipt=receipt,
+            )
+        if continuations:
+            receipt["delivery_continuations"] = continuations
         return receipt
     except Exception as exc:
         return {
@@ -617,6 +675,7 @@ def query_maintenance_receipts(*, base: Path, account: str, query: dict[str, Any
             revision=item.get("updated_at_utc"), body=receipt.get("rendered_message"), business_result=summary,
             delivery=receipt.get("status"), confirmed=bool(receipt.get("delivery_confirmed")),
             diagnostic_code=receipt.get("error_code"))
+        event["related"] = {"fanout_id": receipt.get("fanout_id"), "delivery_children": receipt.get("children")}
         if receipt_matches(event, query):
             rows.append(event)
     return rows

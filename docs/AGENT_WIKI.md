@@ -18,7 +18,7 @@ Primary entry points:
 
 | Need | Entry |
 |---|---|
-| Structured tool call / JSON response | `./om-agent` Tool Gateway |
+| Structured tool call / JSON response | `./om tools` Tool Gateway |
 | Local or remote message handling | `./om bot handle` Inbound Bot |
 | Human/operator command | `./om` |
 | Runtime tick | `./om run tick ...` |
@@ -27,7 +27,11 @@ Primary entry points:
 
 Entrypoint rule:
 
-- Use `./om-agent` for structured local JSON tool calls, manifest checks, and
+`./om tools` shares every gateway command and option with the compatible `./om-agent`
+launcher. `om agent` / `om assistant` alias `om bot`, not the gateway. See
+[environment and output rules](TOOL_REFERENCE.md#参数环境与输出兼容).
+
+- Use `./om tools` for structured local JSON tool calls, manifest checks, and
   read-first diagnostics.
 - Use `./om bot handle` for local or remote messages. This is the
   Inbound Bot surface.
@@ -50,14 +54,14 @@ git status --short
 rg -n "<user keyword>" README.md docs AGENTS.md src domain tests
 ```
 
-Read only the relevant sections of this handbook. Use `./om-agent spec` when tool discovery or a manifest contract is part of the question.
+Read only the relevant sections of this handbook. Use `./om tools spec` when tool discovery or a manifest contract is part of the question.
 
 For live quality or runtime questions, first bind the host, effective config/runtime root, market, account scope, and evidence time. Local artifacts do not establish remote production state. The `us` and `lx` values below are examples, not defaults; use the selected environment and inspect existing state before choosing additional readiness checks:
 
 ```bash
-./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
-./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
-./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'
+./om tools run --tool runtime_status --input-json '{"config_key":"us"}'
+./om tools run --tool healthcheck --input-json '{"config_key":"us"}'
+./om tools run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'
 ```
 
 Do not run tick, send notifications, mutate positions, sync Feishu, or deploy unless the user explicitly asks for that side effect.
@@ -82,7 +86,7 @@ The additive `futu_routing_audit.v1` result is read-only and contains masked acc
 For explicit Control operation diagnosis, read the durable operation timeline:
 
 ```bash
-./om-agent run --tool operation_timeline --input-json '{"limit":10}'
+./om tools run --tool operation_timeline --input-json '{"limit":10}'
 ```
 
 Bot sessions, runs, and model/tool events are owned by the Bot Host
@@ -109,7 +113,7 @@ Use the lowest-risk tool that can answer the question.
 ## 4. Research Workflow
 
 Research is an independent offline evidence module. It is not Inbound Bot
-core, not an `./om-agent` tool, and not an online AI product feature. The
+core, not an `./om tools` tool, and not an online AI product feature. The
 online/Linux side collects redacted evidence. MacBook Codex reads the handoff and
 helps diagnose quality issues, ledger problems, and candidate behavior.
 
@@ -687,9 +691,9 @@ Primary read entry points:
 ./om option-performance report --config-key us --account lx --period mtd
 ./om option-performance report --config-key us --account lx --period ytd --as-of-date 2026-07-17
 ./om option-performance cash-conversion backfill --config-key us --account lx --start-date 2026-04-01 --end-date 2026-07-24
-./om-agent run --tool option_performance_report --input-json '{"config_key":"us","account":"lx","period":"mtd"}'
-PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_pnl_bridge --input-json '{"period":"mtd","as_of_month":"2026-07","accounts":["lx","sy"]}'
-PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om-agent run --tool portfolio_cash_bridge --input-json '{"period":"mtd","as_of_month":"2026-07","accounts":["lx","sy"]}'
+./om tools run --tool option_performance_report --input-json '{"config_key":"us","account":"lx","period":"mtd"}'
+PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om tools run --tool portfolio_pnl_bridge --input-json '{"period":"mtd","as_of_month":"2026-07","accounts":["lx","sy"]}'
+PORTFOLIO_SERVICE_URL=http://127.0.0.1:8765 ./om tools run --tool portfolio_cash_bridge --input-json '{"period":"mtd","as_of_month":"2026-07","accounts":["lx","sy"]}'
 ```
 
 The report has four metrics only: `option_net_cashflow`,
@@ -768,9 +772,9 @@ unconfirmed record is also frozen and must not be automatically resent.
 
 ### Close Advice
 
-- Domain policy: `domain/domain/close_advice.py`
+- Optional policy package: `plugins/position-advice/`; core contract/facade: `domain/domain/close_advice.py`
 - Runner/I/O assembly: `src/application/close_advice_runner.py`
-- Recommended agent entry: `close_advice_read`
+- Agent entries: `close_advice_read` for existing reports; `position_advice_evaluate` for active assessment
 - Contract: `docs/CLOSE_ADVICE_CONTRACT.md`
 
 Core domain functions:
@@ -784,9 +788,12 @@ short calls. It returns only `close`, `hold`, or `not_evaluable`. The runner
 loads sealed position/quote facts, preserves fail-closed rows, and formats the
 report; it does not pair opening candidates or make replacement decisions.
 
-Only scheduled Tick produces current Close Advice reports. Agent callers use
-`close_advice_read`; the retired `prepare_close_advice_inputs`, `close_advice`,
-and `get_close_advice` tools no longer provide a mutable generation path.
+Scheduled Tick and active `position_advice_evaluate` share the sealed evaluator.
+Active requests accept ledger selectors or temporary manual positions, materialize
+isolated request reports, and never notify or write the ledger. Closed-session
+references retain their original snapshot date/DTE and cannot be current advice.
+`close_advice_read` only reads reports; the retired `prepare_close_advice_inputs`,
+`close_advice`, and `get_close_advice` tools remain retired.
 
 Scheduled Tick runs use one immutable required-data barrier for Close Advice:
 
@@ -837,12 +844,15 @@ notification token around Close Advice.
 - Read tool: `notification_perception_read`
 
 Notification text should remain Markdown-friendly and operationally direct. The
-business renderer owns one canonical flat Markdown string. Scheduled Feishu App
-Daily Brief delivery also persists a digest-verified Card JSON 2.0 transport
-projection of that same decision view; retries must reuse the frozen envelope
-and logical idempotency key. WeChat ClawBot sends the canonical flat string
-unchanged through `text_item.text`. Channel adapters may select the persisted
-transport projection but must not independently recalculate business content.
+business renderer owns the shared structured user view and channel presentation.
+Scheduled Feishu App Daily Brief delivery persists digest-verified Card JSON 2.0
+with separate Markdown elements and explicit spacing (renderer v3), plus the
+existing bounded post fallback. WeChat ClawBot sends the plain-text projection
+with section headings and blank lines through `text_item.text`. Both projections
+preserve the same facts, candidate order and metric meanings. New preparation and
+recovery construction select the appropriate projection; retries reuse the exact
+frozen message, transport and logical idempotency key, including historical v1/v2
+envelopes. Channel adapters must not parse Markdown or recalculate business content.
 
 Scheduled ordinary delivery and `preview_notification` have one renderer authority: Daily Decision Brief. The read-only preview accepts `account`, `market`, `date`, and `revision`, reads persisted successful Daily Brief state through the same query owner as `daily_decision_brief_read`, and reports `authority=daily_decision_brief` with `delivery_evidence=false`. Preview never scans, sends, changes delivery state, or accepts legacy alert/change text and paths. Direct legacy renderer and manual stage-only output remain compatibility-only and cannot be used as a scheduled fallback.
 
@@ -886,7 +896,7 @@ Do not weaken production config validation to make local tests pass. Fix the con
 - Write permission gate: `src/application/agent_tools/permissions.py`
 - Contracts: `src/application/agent_tool_contracts.py`
 - Config helpers: `src/application/agent_tool_config.py`, `src/application/config_yaml_init.py`, `src/application/config_yaml_accounts.py`
-- CLI: `src/interfaces/agent/cli.py` -> `./om-agent`
+- CLI: `src/interfaces/agent/cli.py` -> `./om tools`
 
 When adding or changing a tool, put the implementation and manifest metadata in
 the owning `agent_tools` domain module, then update focused tests and docs
@@ -1048,7 +1058,7 @@ For type checking, prefer the narrow touched path first. Reuse passing checks on
 - `docs/AGENT_WIKI.md`: this task manual and code ownership map.
 - `docs/ARCHITECTURE.md`: current system architecture and entry boundaries.
 - `docs/INBOUND_CONTROL.md`: controlled channel message entry boundary.
-- `docs/TOOL_REFERENCE.md`: public `om-agent` Tool Gateway contract and examples.
+- `docs/TOOL_REFERENCE.md`: public `om tools` Tool Gateway contract and examples.
 - `docs/AGENT_INTEGRATION.md`: Tool Gateway JSON envelope and integration contract.
 - `README.md`: human-facing product overview plus common operator commands.
 - `RUNBOOK.md`: production cron, maintenance, and emergency operations.
@@ -1114,8 +1124,8 @@ Read surfaces:
 ```bash
 ./om daily-brief latest [--account lx] [--market US|HK] [--json]
 ./om daily-brief day --account lx --market US|HK --date YYYY-MM-DD [--revision N] [--json]
-./om-agent run --tool daily_decision_brief_read --input-json '{}'
-./om-agent run --tool daily_decision_brief_read --input-json '{"account":"lx","market":"US"}'
+./om tools run --tool daily_decision_brief_read --input-json '{}'
+./om tools run --tool daily_decision_brief_read --input-json '{"account":"lx","market":"US"}'
 ```
 
 ### Market identity and relative expiration

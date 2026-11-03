@@ -104,7 +104,7 @@ def quality_consumer_telemetry_snapshot() -> dict[str, Any]:
     }
 
 
-@dataclass(frozen=True)
+@dataclass
 class QualityGateBlocked(RuntimeError):
     consumer: str
     reason_code: str

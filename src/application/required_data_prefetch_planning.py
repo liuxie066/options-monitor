@@ -14,6 +14,7 @@ from domain.domain.candidate_defaults import (
     resolve_candidate_window,
 )
 from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetch_source
+from src.application.market_data_provider import market_data_source, resolve_market_data_provider
 from src.application.strategy_policy import (
     SELL_CALL_FAMILY,
     SELL_PUT_FAMILY,
@@ -179,7 +180,7 @@ def merge_close_advice_requirements_into_prefetch_config(
             continue
         candidate_indexes_by_symbol.setdefault(symbol, []).append(index)
         candidate_routes_by_symbol.setdefault(symbol, set()).add(
-            _candidate_binding_tuple(item)
+            _candidate_binding_tuple(item, provider=resolve_market_data_provider(candidate_config).name)
         )
 
     diagnostics: list[dict[str, Any]] = []
@@ -306,7 +307,8 @@ def merge_wheel_requirements_into_prefetch_config(
         if isinstance(item, dict)
     ]
     by_route = {
-        (_symbol_key(str(item.get("symbol") or "")), _candidate_binding_tuple(item)): item
+        (_symbol_key(str(item.get("symbol") or "")),
+         _candidate_binding_tuple(item, provider=resolve_market_data_provider(base_config).name)): item
         for item in items
     }
     normalized_allow = (
@@ -399,11 +401,12 @@ def merge_wheel_requirements_into_prefetch_config(
 
 def _candidate_binding_tuple(
     symbol_cfg: dict[str, Any],
+    *, provider: str = "opend",
 ) -> tuple[str, str, int]:
     fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
     source, _decision = resolve_symbol_fetch_source(fetch_cfg)
     return (
-        source,
+        market_data_source(provider, source),
         _physical_host(fetch_cfg.get("host") or "127.0.0.1"),
         _to_int(fetch_cfg.get("port") or 11111, 11111),
     )
@@ -704,7 +707,7 @@ def estimate_prefetch_option_chain_calls(
 ) -> int:
     fetch_cfg = _as_dict((symbol_cfg or {}).get("fetch"))
     source, _decision = resolve_symbol_fetch_source(fetch_cfg)
-    if not is_futu_fetch_source(source):
+    if fetch_plan is None and not is_futu_fetch_source(source):
         return 0
     if fetch_plan is not None:
         side_plans = list(getattr(fetch_plan, "side_plans", []) or [])

@@ -14,7 +14,8 @@ from src.application.symbol_mutations import normalize_symbol_read, split_symbol
 
 DEFAULT_ACCOUNTS = ("user1",)
 ACCOUNT_TYPE_FUTU = "futu"
-ACCOUNT_TYPES = (ACCOUNT_TYPE_FUTU,)
+ACCOUNT_TYPE_LONGBRIDGE = "longbridge"
+ACCOUNT_TYPES = (ACCOUNT_TYPE_FUTU, ACCOUNT_TYPE_LONGBRIDGE)
 _ACCOUNT_LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
@@ -198,6 +199,8 @@ def account_settings_from_config(config: dict[str, Any] | None) -> dict[str, dic
         if "bitable" in item:
             raise ValueError(f"account_settings.{account}.bitable is retired")
         normalized: dict[str, Any] = {"type": acct_type}
+        if acct_type == ACCOUNT_TYPE_LONGBRIDGE:
+            normalized["longbridge"] = normalize_longbridge_account_settings(item.get("longbridge"))
         market = str(item.get("market") or "").strip().lower()
         if market in {"us", "hk"}:
             normalized["market"] = market
@@ -231,6 +234,52 @@ def account_settings_from_config(config: dict[str, Any] | None) -> dict[str, dic
                 normalized["futu"] = futu_out
         out[account] = normalized
     return out
+
+
+def normalize_longbridge_account_settings(value: Any) -> dict[str, str]:
+    """Keep credentials out of authoring config and bind one broker account."""
+    if not isinstance(value, Mapping):
+        raise ValueError("longbridge settings must be an object")
+    allowed = {"account_id", "credentials_env_prefix", "region", "trd_env", "credential_binding_sha256"}
+    if set(value) - allowed:
+        raise ValueError("longbridge settings contain unsupported keys")
+    account_id = value.get("account_id")
+    prefix = value.get("credentials_env_prefix")
+    if not isinstance(account_id, str) or not account_id.strip():
+        raise ValueError("longbridge.account_id must be a non-empty string")
+    if not isinstance(prefix, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]*", prefix):
+        raise ValueError("longbridge.credentials_env_prefix must be an uppercase environment prefix")
+    region = value.get("region", "ap")
+    environment = value.get("trd_env", "REAL")
+    if region != "ap":
+        raise ValueError("longbridge.region currently supports ap only")
+    if environment != "REAL":
+        raise ValueError("longbridge.trd_env currently supports REAL only")
+    result = {"account_id": account_id.strip(), "credentials_env_prefix": prefix,
+              "region": region, "trd_env": environment}
+    if "credential_binding_sha256" in value:
+        fingerprint = value["credential_binding_sha256"]
+        if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            raise ValueError("longbridge.credential_binding_sha256 must contain 64 lowercase hexadecimal characters")
+        result["credential_binding_sha256"] = fingerprint
+    return result
+
+
+def resolve_account_longbridge_settings(config: Mapping[str, Any], *, account: str | None) -> dict[str, str]:
+    settings = account_settings_from_config(dict(config))
+    item = settings.get(str(account or "").strip().lower(), {})
+    if item.get("type") != ACCOUNT_TYPE_LONGBRIDGE:
+        raise ValueError("account is not a longbridge account")
+    return dict(item["longbridge"])
+
+
+def resolve_account_broker(config: Mapping[str, Any], *, account: str | None) -> str:
+    portfolio = config.get("portfolio")
+    portfolio = portfolio if isinstance(portfolio, Mapping) else {}
+    account = account or portfolio.get("account")
+    if resolve_account_type(dict(config), account=account) == ACCOUNT_TYPE_LONGBRIDGE:
+        return "长桥"
+    return str(portfolio.get("broker") or "富途")
 
 
 def resolve_account_type(config: dict[str, Any] | None, *, account: str | None) -> str:
@@ -272,6 +321,8 @@ def resolve_account_futu_settings(config: Mapping[str, Any] | Any, *, account: s
 
 
 def resolve_futu_account_ids(config: Mapping[str, Any] | Any, *, account: str | None) -> list[str]:
+    if account and resolve_account_type(dict(config) if isinstance(config, Mapping) else {}, account=account) != ACCOUNT_TYPE_FUTU:
+        return []
     futu_cfg = resolve_account_futu_settings(config, account=account)
     account_id = str(futu_cfg.get("account_id") or "").strip()
     mapped_ids = _resolve_trade_intake_mapping_futu_account_ids(config, account=account)
@@ -461,6 +512,17 @@ def build_account_runtime_plan(config: dict[str, Any] | None, *, account: str) -
     )
 
 
+def account_decision_scope(config: dict[str, Any] | None, *, account: str) -> dict[str, Any]:
+    """Configured physical identity for immutable decisions, preserving Futu history."""
+    if resolve_account_type(config, account=account) == ACCOUNT_TYPE_LONGBRIDGE:
+        settings = resolve_account_longbridge_settings(config, account=account)
+        return {"broker_id": "longbridge", "broker_account_id": settings["account_id"],
+                "trade_env": settings["trd_env"],
+                "credential_binding_sha256": settings.get("credential_binding_sha256")}
+    plan = build_account_runtime_plan(config, account=account)
+    return {"futu_account_id": plan.futu_account_id, "trade_env": plan.futu_trd_env}
+
+
 def resolve_portfolio_source(config: dict[str, Any] | None, *, account: str | None) -> str:
     cfg = config if isinstance(config, dict) else {}
     portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
@@ -481,6 +543,8 @@ def normalize_portfolio_source(value: str | None) -> str:
         return "auto"
     if raw in ("futu", "opend"):
         return "futu"
+    if raw == ACCOUNT_TYPE_LONGBRIDGE:
+        return raw
     raise ValueError(f"unsupported account portfolio source: {value}")
 
 
@@ -496,11 +560,13 @@ def build_account_portfolio_source_plan(
     requested_source = normalize_portfolio_source(
         portfolio_source if portfolio_source is not None else resolve_portfolio_source(cfg, account=account_key)
     )
+    if requested_source not in {"auto", account_type}:
+        raise ValueError(f"portfolio source {requested_source} does not match account type {account_type}")
     return AccountPortfolioSourcePlan(
         account=account_key,
         account_type=account_type,
         requested_source=requested_source,
-        primary_source="futu",
+        primary_source=account_type,
     )
 
 
@@ -608,6 +674,7 @@ def build_account_runtime_config(
     cfg["config_source_path"] = str(Path(cfg_path).resolve())
     cfg.setdefault("portfolio", {})
     cfg["portfolio"]["account"] = str(account).strip().lower()
+    cfg["portfolio"]["broker"] = resolve_account_broker(cfg, account=account)
     whitelist = _symbol_whitelist(symbols_arg, cfg=cfg)
     try:
         symbols = resolve_watchlist_config(cfg)

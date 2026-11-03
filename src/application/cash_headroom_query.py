@@ -18,6 +18,7 @@ from domain.domain.cash_secured_utils import (
 )
 from src.application.cash_totals import sum_by_currency_to_cny as _sum_by_currency_to_cny
 from src.application.config_loader import normalize_portfolio_broker_config, resolve_data_config_path
+from src.application.account_config import resolve_account_type, resolve_account_broker
 from src.infrastructure.exchange_rates import (
     get_exchange_rates_or_fetch_latest,
 )
@@ -151,6 +152,10 @@ def query_sell_put_cash(
     base = (base_dir or Path(__file__).resolve().parents[2]).resolve()
 
     runtime_cfg = _load_runtime_config(base=base, config=config, runtime_config=runtime_config)
+    if resolve_account_type(runtime_cfg, account=account) == "longbridge":
+        # The historical market argument defaults to Futu. Resolve cash and
+        # ledger collateral from the same configured broker for this account.
+        market = resolve_account_broker(runtime_cfg, account=account)
     data_config_path = resolve_data_config_path(base=base, data_config=data_config)
 
     out_dir_path = Path(out_dir)

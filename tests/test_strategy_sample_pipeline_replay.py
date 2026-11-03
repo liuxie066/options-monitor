@@ -175,6 +175,7 @@ def _produce_pipeline_sample(tmp_path, monkeypatch, *, stale=False, prepared_mar
     class FrozenBatch:
         def resolve(self, symbol):
             return {"snapshot_id": "quote-" + symbol, "receipt_relpath": f"quotes/{symbol}/receipt.json",
+                    "expected_fetch_contract": {"fetch_binding": {"source": "opend"}},
                     "source_outcome": "success_rows", "reason_code": None}, rows_by_symbol[symbol]
 
     monkeypatch.setattr(pipeline_watchlist, "resolve_frozen_required_data_csv_bytes_batch", lambda **kw: FrozenBatch())

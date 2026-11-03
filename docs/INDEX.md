@@ -18,7 +18,7 @@
 
 ## 开始使用
 
-- [README](../README.md)：产品定位、五分钟开始、常用入口和安全边界。
+- [README](../README.md)：产品定位、Mac 首次扫描、常用入口和安全边界。
 - [Install](INSTALL.md)：Python 要求、安装器、release 目录和 wrapper。
 - [Getting Started](GETTING_STARTED.md)：安装后的首次配置、检查和首跑。
 - [Deploy](../DEPLOY.md)：部署入口和目录契约。
@@ -42,7 +42,7 @@
 
 ## 产品与策略
 
-- [Product Architecture](PRODUCT_ARCHITECTURE.md)：产品域、模块责任和依赖。
+- [Product Architecture](PRODUCT_ARCHITECTURE.md)：目标用户、核心任务、产品约束、待确认取舍，以及产品域、模块责任和依赖。
 - [Strategy Architecture](STRATEGY_ARCHITECTURE.md)：Cash-Secured Put (CSP)、Covered Call (CC)、Combo Yield 的开仓边界。
 - [Strategy Terminology](STRATEGY_TERMINOLOGY.md)：OM 内部策略命名与金融专业术语（Bullish Risk Reversal、Collar、Wheel 等）的对照。
 - [Candidate Strategy](candidate_strategy.md)：当前候选筛选、排序和 trace。
@@ -94,7 +94,7 @@
 - [Agent Handbook](AGENT_WIKI.md)：本地 agent 的任务 playbook、模块地图和验证矩阵。
 - [Session Summary](SESSION_SUMMARY.md)：仅在显式 handoff 时使用的模板。
 
-`./om-agent spec` 是公开工具清单的运行时权威。Tool Reference 不复制每个工具的完整 schema。
+`./om tools spec`（兼容 `./om-agent spec`）是公开工具清单的运行时权威。Tool Reference 不复制每个工具的完整 schema。
 
 ## 运维、修复与发布
 
@@ -115,6 +115,13 @@
 
 - [AI Decision Advice retirement](AI_DECISION_ADVICE_DESIGN.md)：已退役能力和残留兼容边界。
 这些文件保留用于解释历史决策，不逐段更新成当前实现。
+
+## 开发流程
+
+- [Agent Manual](../AGENTS.md)：任务执行规则、按任务阅读入口、已核对的开发命令及权限边界。
+- [Tests Guide](../tests/README.md)：测试分层、运行与维护约定；验证选择见 [Agent Handbook §9](AGENT_WIKI.md#9-verification-matrix)。
+- [开发经验](../LESSONS.md)：经证据支持的复用教训与维护模板；不作为当前业务合同或运行事实的替代。
+- [合并后增量巡检](CODE_HEALTH_REVIEW.md)：已合并改动的检查、持久每日调度、本地修复与独立审核，以及报告续跑和交付授权边界。
 
 ## 工作流证据
 

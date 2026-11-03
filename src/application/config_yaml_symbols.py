@@ -72,6 +72,49 @@ def _positive_strike(raw: Any, *, label: str) -> float:
     return value
 
 
+def validate_symbol_policy_fields(
+    settings: dict[str, Any], *, label: str, required_bound: str | None = None,
+    check_range: bool = True,
+) -> None:
+    """Validate a form draft with the authoring policy's existing rules.
+
+    The form supplies required_bound once that field has been asked. Final
+    authoring validation always supplies it for every changed enabled side.
+    A form may defer range comparison until both bounds have been asked;
+    final authoring validation always checks the complete range.
+    """
+    from src.application.config_validator import _validate_optional_bool
+
+    try:
+        _validate_optional_bool(settings, "enabled", label)
+    except SystemExit as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+    if required_bound and settings.get("enabled") and settings.get(required_bound) is None:
+        raise AgentToolError(code="INPUT_ERROR", message=f"{label} requires {required_bound}")
+    bounds = {
+        bound: _positive_strike(settings[bound], label=f"{label} {bound}")
+        for bound in ("min_strike", "max_strike") if settings.get(bound) is not None
+    }
+    if check_range and bounds.get("min_strike", 0) > bounds.get("max_strike", math.inf):
+        raise AgentToolError(code="INPUT_ERROR", message=f"{label} min strike exceeds max strike")
+
+
+def read_yaml_symbol_policy(
+    *, repo_root: Path, market: str, symbol: str, config_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Read the effective authoring policy, including inherited templates."""
+    document = load_yaml_config_file(resolve_yaml_config_path(config_path, repo_root=repo_root))
+    calibration = require_calibrated_symbol(symbol, config=document, error_factory=_input_error)
+    market = normalize_config_market(market)
+    if str(calibration.market).lower() != market:
+        raise _input_error(f"symbol belongs to {calibration.market}, not {market}")
+    policy = _effective_symbol(repo_root=repo_root, document=document, market=market,
+                               symbol=str(calibration.canonical_symbol))
+    if policy is None:
+        raise _input_error(f"symbol not found: {calibration.canonical_symbol}")
+    return policy
+
+
 def set_yaml_symbol_config(
     *,
     repo_root: Path,
@@ -358,16 +401,7 @@ def _validate_changed_symbol(*, repo_root: Path, before: dict[str, Any], after: 
             if not settings.get("enabled"):
                 continue
             enabled_count += 1
-            if settings.get(required) is None:
-                raise AgentToolError(code="INPUT_ERROR", message=f"{symbol} {label} requires {required}")
-            bounds: dict[str, float] = {}
-            for bound in ("min_strike", "max_strike"):
-                raw = settings.get(bound)
-                if raw is None:
-                    continue
-                bounds[bound] = _positive_strike(raw, label=f"{symbol} {label} {bound}")
-            if bounds.get("min_strike", 0) > bounds.get("max_strike", math.inf):
-                raise AgentToolError(code="INPUT_ERROR", message=f"{symbol} {label} min strike exceeds max strike")
+            validate_symbol_policy_fields(settings, label=f"{symbol} {label}", required_bound=required)
         previous_symbols = _source_symbol_keys(before["markets"][market]["symbols"], path=f"markets.{market}.symbols")
         if symbol not in previous_symbols and not enabled_count:
             raise AgentToolError(code="INPUT_ERROR", message="new symbol requires CSP or CC with its strike bound")
@@ -720,4 +754,4 @@ def _input_error(message: str) -> AgentToolError:
     return AgentToolError(code="INPUT_ERROR", message=message)
 
 
-__all__ = ["mutate_yaml_symbol_config", "set_yaml_symbol_config"]
+__all__ = ["mutate_yaml_symbol_config", "set_yaml_symbol_config", "read_yaml_symbol_policy", "validate_symbol_policy_fields"]

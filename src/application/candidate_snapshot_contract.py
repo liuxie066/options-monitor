@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 
+OPENING_BROKER_SNAPSHOT_SCHEMA = "opening_candidate_snapshot.v4"
+
+
 REQUIRED_CANDIDATE_DEPENDENCIES = frozenset(
     {"required_data", "portfolio", "ledger", "fx", "earnings_rv"}
 )
@@ -80,7 +83,6 @@ def assert_current_candidate_artifact_boundary(
             raise CandidateSnapshotContractError("artifact_version_mismatch")
 
         for owner, filename in _CURRENT_CANDIDATE_OWNER_FILES.items():
-            expected_schema = _CURRENT_CANDIDATE_OWNER_SCHEMAS[owner]
             path = state_dir / filename
             if not (path.exists() or path.is_symlink()):
                 continue
@@ -92,9 +94,9 @@ def assert_current_candidate_artifact_boundary(
                 raise CandidateSnapshotContractError(
                     "artifact_version_mismatch"
                 ) from exc
-            if not isinstance(payload, Mapping) or payload.get(
-                "schema_version"
-            ) != expected_schema:
+            if not isinstance(payload, Mapping) or not is_current_candidate_owner_schema(
+                owner, payload.get("schema_version")
+            ):
                 raise CandidateSnapshotContractError("artifact_version_mismatch")
 
         manifest_path = state_dir / _CURRENT_CANDIDATE_MANIFEST_FILE
@@ -147,13 +149,20 @@ def candidate_run_mode_fields(
 
 
 def current_candidate_owner_schema(owner: Any) -> str:
-    """Return the only schema a current writer may publish for one owner."""
+    """Return the default schema (including experience mode) for one owner."""
 
     owner_norm = required_text(owner, "candidate owner").lower()
     try:
         return _CURRENT_CANDIDATE_OWNER_SCHEMAS[owner_norm]
     except KeyError as exc:
         raise CandidateSnapshotContractError("candidate owner is invalid") from exc
+
+
+def is_current_candidate_owner_schema(owner: str, schema: Any) -> bool:
+    """Opening v4 adds explicit broker identity; existing owner schemas remain frozen."""
+    return schema == current_candidate_owner_schema(owner) or (
+        owner == "opening" and schema == OPENING_BROKER_SNAPSHOT_SCHEMA
+    )
 
 
 def validate_candidate_run_mode(payload: Mapping[str, Any]) -> dict[str, Any]:

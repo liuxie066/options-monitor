@@ -65,6 +65,7 @@ from src.application.option_chain_fetching import (
     OptionChainFetchRequest, fetch_option_chains,
 )
 from src.application.short_vol_metrics import RealizedVolatilitySnapshot, fetch_realized_volatility_snapshot
+from src.infrastructure.futu_dataframe import futu_dataframe_records
 
 
 def to_float(v):
@@ -366,6 +367,7 @@ class FetchSymbolRequest:
     query_cache: QueryFetchCache | None = None
     deadline: float | None = None
     cancelled: Callable[[], bool] | None = None
+    market_data_provider: str = "opend"
 
     @property
     def effective_base_dir(self) -> Path:
@@ -389,10 +391,11 @@ class FetchSymbolRequest:
         )
 
 
-def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, underlier_observation: dict[str, Any] | None = None, fetch_spot_if_missing: bool = True, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, trading_date: str | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False, freshness_policy: str = 'cache_first', max_wait_sec: float = 90.0, option_chain_window_sec: float = 30.0, option_chain_max_calls: int = 10, snapshot_max_wait_sec: float = 30.0, snapshot_window_sec: float = 30.0, snapshot_max_calls: int = 60, expiration_max_wait_sec: float = 30.0, expiration_window_sec: float = 30.0, expiration_max_calls: int = 60, history_kline_max_wait_sec: float = 30.0, history_kline_window_sec: float = 30.0, history_kline_max_calls: int = 60, gateway: Any = None, snapshot_batch_size: int | None = None, snapshot_fallback_max_codes: int = 100, snapshot_fallback_batch_size: int = 20, include_realized_volatility: bool = False) -> dict[str, Any]:
-    return fetch_symbol_request(
+def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, underlier_observation: dict[str, Any] | None = None, fetch_spot_if_missing: bool = True, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, trading_date: str | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False, freshness_policy: str = 'cache_first', max_wait_sec: float = 90.0, option_chain_window_sec: float = 30.0, option_chain_max_calls: int = 10, snapshot_max_wait_sec: float = 30.0, snapshot_window_sec: float = 30.0, snapshot_max_calls: int = 60, expiration_max_wait_sec: float = 30.0, expiration_window_sec: float = 30.0, expiration_max_calls: int = 60, history_kline_max_wait_sec: float = 30.0, history_kline_window_sec: float = 30.0, history_kline_max_calls: int = 60, gateway: Any = None, snapshot_batch_size: int | None = None, snapshot_fallback_max_codes: int = 100, snapshot_fallback_batch_size: int = 20, include_realized_volatility: bool = False, market_data_provider: str = "opend", fetch_symbol_request_fn: Callable[..., dict[str, Any]] | None = None) -> dict[str, Any]:
+    return (fetch_symbol_request_fn or fetch_symbol_request)(
         FetchSymbolRequest(
             symbol=symbol,
+            market_data_provider=market_data_provider,
             limit_expirations=limit_expirations,
             host=host,
             port=port,
@@ -622,6 +625,10 @@ def fetch_symbol_request(
         "spot_market_state_requested_codes": 0,
     }
     today = _resolve_request_trading_date(value=request.trading_date, market=u.market)
+    from src.application.research.prescreen import start_capture
+    from src.application.research.option_quote_capture import _json_safe
+
+    prescreen = start_capture(request=request, underlier_code=u.code, trading_date=today.isoformat())
     identity = (str(effective_base_dir.resolve()), host, int(port), u.market, u.code, today.isoformat())
     enumeration_meta: dict[str, Any] = {"expiration_enumeration_complete": False, "enumeration_complete": False, "query_scope_validated": False} if query_mode else {}
     rv_snapshot = RealizedVolatilitySnapshot(status="skipped", reason="not_requested")
@@ -697,6 +704,7 @@ def fetch_symbol_request(
                 "symbol": symbol, "underlier_code": u.code, "spot": spot,
                 "expiration_count": 0, "expirations": [], "rows": [],
                 "meta": {**enumeration_meta, "source": "opend", "status": "error",
+                         "research_prescreen": prescreen,
                          "source_outcome": "not_attempted", "reason_code": underlier_observation.reason_code,
                          "error_code": underlier_observation.reason_code,
                          "underlier_observation": underlier_observation.to_dict(),
@@ -725,6 +733,16 @@ def fetch_symbol_request(
         # Reuse the fetched DataFrame when available to avoid records <-> DataFrame round trips.
         raw_chain = chain_bundle.frame
         chain: pd.DataFrame = raw_chain if isinstance(raw_chain, pd.DataFrame) else pd.DataFrame(chain_bundle.rows or [])
+        prescreen["missing_reasons"].remove("chain_not_attempted")
+        try:
+            prescreen["chain"] = _json_safe({
+                "rows": futu_dataframe_records(chain),
+                "available_expirations": chain_bundle.expirations_all,
+                "requested_expirations": chain_bundle.expirations_pick,
+                "meta": chain_bundle.fetch_meta,
+            })
+        except Exception as capture_error:
+            prescreen["missing_reasons"].append("chain_capture_error:" + type(capture_error).__name__)
         if chain.empty:
             fetch_meta = dict(chain_bundle.fetch_meta or {})
             status = str(fetch_meta.get('status') or 'error')
@@ -762,6 +780,7 @@ def fetch_symbol_request(
                 'expirations': [],
                 'rows': [],
                 'meta': {
+                    'research_prescreen': prescreen,
                     "fetch_diagnostics": fetch_diagnostics,
                 **enumeration_meta,
                     # Query scope is validated above; per-expiry statuses attest coverage.
@@ -881,6 +900,21 @@ def fetch_symbol_request(
         if cache is not None:
             cache.record_phase("snapshot", phase_started)
         phase_name, phase_started = "normalization", time.monotonic()
+        prescreen["missing_reasons"].remove("snapshots_not_attempted")
+        try:
+            prescreen["snapshots"] = _json_safe({
+                "requested_codes": sorted(snapshot_result.requested_codes),
+                "returned_codes": sorted(snapshot_result.returned_codes),
+                "missing_codes": sorted(snapshot_result.missing_codes),
+                "unexpected_codes": sorted(snapshot_result.unexpected_codes),
+                "complete": snapshot_result.complete,
+                "rows": list(snapshot_result.snap_map.values()),
+                "batch_receipts": snapshot_result.batch_receipts,
+                "provider_responses": snapshot_result.provider_responses,
+                "errors": snapshot_result.errors,
+            })
+        except Exception as capture_error:
+            prescreen["missing_reasons"].append("snapshot_capture_error:" + type(capture_error).__name__)
         snap_map = snapshot_result.snap_map
         snapshot_errors = snapshot_result.errors
         snapshot_fallback_filled = snapshot_result.fallback_filled
@@ -1079,6 +1113,7 @@ def fetch_symbol_request(
             'expirations': expirations,
             'rows': rows,
             'meta': {
+                'research_prescreen': prescreen,
                 "fetch_diagnostics": fetch_diagnostics,
                 **enumeration_meta,
                 'query_scope_validated': True,
@@ -1135,6 +1170,7 @@ def fetch_symbol_request(
             'expirations': [],
             'rows': [],
             'meta': {
+                'research_prescreen': prescreen,
                 'source': 'opend',
                 'host': host,
                 'port': port,
@@ -1152,6 +1188,7 @@ def fetch_symbol_request(
         }
 
     finally:
+        prescreen["completed_at_utc"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         if cache is not None:
             if phase_name is not None:
                 cache.record_phase(phase_name, phase_started)
