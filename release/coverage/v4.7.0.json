@@ -1,0 +1,119 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.7.0",
+  "base": {
+    "tag": "v4.6.12",
+    "commit": "e3caea0dcef8cf9eb39a73a1c13a7bf7616979c8"
+  },
+  "reviewed_head": "d812e5c9bce2123addf49d1c59c6be6ec2203d03",
+  "commits": [
+    {
+      "sha": "739e7b330c50f08972fd5bcd06f030198a1bbc99",
+      "subject": "fix(research): preserve collection windows and corporate action queries"
+    },
+    {
+      "sha": "ff77074e65166dbf2fbcfbbde00ec3d898ecc634",
+      "subject": "chore(research): integrate main and preserve guarded request receipts"
+    },
+    {
+      "sha": "5f3e28e39b0bb54649ecd219acb1143a4e782c33",
+      "subject": "test(trades): finish cancelled listener workers before SDK teardown"
+    },
+    {
+      "sha": "f0d9a951ba9bb6732a7028b95cab6891313ca90d",
+      "subject": "fix(research): preserve collection windows and corporate action queries (#992)"
+    },
+    {
+      "sha": "973552db2e57f3e1dd37cec8366ae1dc0af09631",
+      "subject": "feat(maintenance): add daily review and local repair workflow"
+    },
+    {
+      "sha": "8845a1483a97b6716b351dd2502b83097467ee35",
+      "subject": "Merge pull request #993 from liuxie066/codex/code-health-review-20261103"
+    },
+    {
+      "sha": "345e892e6f6b38299434fac33e864d428705aa67",
+      "subject": "fix(ledger): preserve execution proof for zero-price split closes"
+    },
+    {
+      "sha": "04cd0d6cecb3570aa402f9dcf793c6fd5a65884b",
+      "subject": "chore(merge): sync main for zero-price close repair"
+    },
+    {
+      "sha": "d812e5c9bce2123addf49d1c59c6be6ec2203d03",
+      "subject": "Merge pull request #994 from liuxie066/codex/fix-zero-price-multilot-close-20261103"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "新增合并后增量巡检与独立本地修复流程，持久化续跑位置、检查报告和回归审核证据；定时启用及远端交付仍需明确授权。（#993）。",
+      "commits": [
+        "973552db2e57f3e1dd37cec8366ae1dc0af09631",
+        "8845a1483a97b6716b351dd2502b83097467ee35"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复研究采集真实富途适配器缺少公司行动接口、准备开销和重复连接挤占固定采集窗口的问题；准备阶段不请求行情，保留原请求预算、时限及失败回执。（#992）。",
+      "commits": [
+        "739e7b330c50f08972fd5bcd06f030198a1bbc99",
+        "ff77074e65166dbf2fbcfbbde00ec3d898ecc634",
+        "f0d9a951ba9bb6732a7028b95cab6891313ca90d"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复券商零价期权平仓跨多个持仓批次时被误判为重复成交的问题；补齐拆分证明并区分原成交数量与逐批分配数量，保持整组回滚、重复处理幂等及后续到期确认。（#994）。",
+      "commits": [
+        "345e892e6f6b38299434fac33e864d428705aa67",
+        "04cd0d6cecb3570aa402f9dcf793c6fd5a65884b",
+        "d812e5c9bce2123addf49d1c59c6be6ec2203d03"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "5f3e28e39b0bb54649ecd219acb1143a4e782c33",
+      "reason": "Test-only teardown waits for cancelled listener workers before restoring the SDK monkeypatch; no production code, configuration, runtime, or operator behavior changes."
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "739e7b330c50f08972fd5bcd06f030198a1bbc99",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/992", "docs/RESEARCH_WATCHLIST_SCOPE.md"]
+    },
+    {
+      "commit": "ff77074e65166dbf2fbcfbbde00ec3d898ecc634",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/992", "docs/RESEARCH_WATCHLIST_SCOPE.md"]
+    },
+    {
+      "commit": "5f3e28e39b0bb54649ecd219acb1143a4e782c33",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/992"]
+    },
+    {
+      "commit": "f0d9a951ba9bb6732a7028b95cab6891313ca90d",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/992", "docs/RESEARCH_WATCHLIST_SCOPE.md"]
+    },
+    {
+      "commit": "973552db2e57f3e1dd37cec8366ae1dc0af09631",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/993", "docs/CODE_HEALTH_REVIEW.md"]
+    },
+    {
+      "commit": "8845a1483a97b6716b351dd2502b83097467ee35",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/993", "docs/CODE_HEALTH_REVIEW.md"]
+    },
+    {
+      "commit": "345e892e6f6b38299434fac33e864d428705aa67",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/994", "docs/LEDGER_ARCHITECTURE.md"]
+    },
+    {
+      "commit": "04cd0d6cecb3570aa402f9dcf793c6fd5a65884b",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/994", "docs/LEDGER_ARCHITECTURE.md"]
+    },
+    {
+      "commit": "d812e5c9bce2123addf49d1c59c6be6ec2203d03",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/994", "docs/LEDGER_ARCHITECTURE.md"]
+    }
+  ]
+}
