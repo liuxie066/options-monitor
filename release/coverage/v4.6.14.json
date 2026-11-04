@@ -1,0 +1,111 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.14",
+  "base": {
+    "tag": "v4.6.13",
+    "commit": "f80640522e43412da43f9086c720708889707b85"
+  },
+  "reviewed_head": "21851d6662409d0b988a64fb6718c8fcff9ff581",
+  "commits": [
+    {
+      "sha": "bd339d4998bee1b535342454182a0c73bcad96b9",
+      "subject": "docs(maintenance): unify issue intake and correct PM gate wording"
+    },
+    {
+      "sha": "565d9c7dd0010483c9ebf8e519793224231e2b28",
+      "subject": "Merge pull request #997 from liuxie066/codex/issue-intake-20261103"
+    },
+    {
+      "sha": "7a6e23643fb566076f94d48ea7609015954780a6",
+      "subject": "feat(maintenance): process issues in the daily review task"
+    },
+    {
+      "sha": "761941ea2778d36aba81189860ec2ecf702344c5",
+      "subject": "Merge pull request #998 from liuxie066/codex/daily-issue-processing-20261103"
+    },
+    {
+      "sha": "59492abd6bdbe29126cc529f41a23ebc5d249adc",
+      "subject": "feat(position-advice): add short-put roll-down candidates"
+    },
+    {
+      "sha": "21851d6662409d0b988a64fb6718c8fcff9ff581",
+      "subject": "feat(position-advice): merge short-put roll-down queries (#999)"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Position Advice 新增 Short Put 向下移仓主动查询：处理价内、平值及价外幅度不超过 5% 的单个持仓批次，寻找同标的、同张数、严格价外且降低 strike 的替代合约；要求明确最大到期日、双腿扣费后净收现金，按完整新期限的净增现金年化比较，保留行情覆盖与隔离报告，不下单、不改账本、不通知。（#999）。",
+      "commits": [
+        "59492abd6bdbe29126cc529f41a23ebc5d249adc",
+        "21851d6662409d0b988a64fb6718c8fcff9ff581"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "每日增量巡检接入已有 issue：读取完整讨论、更正及关联 PR，独立保存 issue 进度；无新提交时仍可复核，每轮最多复核 3 条、推进 1 条本地修复，保留证据与交付草稿，外发仍须授权。（#998）。",
+      "commits": [
+        "7a6e23643fb566076f94d48ea7609015954780a6",
+        "761941ea2778d36aba81189860ec2ecf702344c5"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "统一 issue 与使用反馈的手动复核、查重和交付流程，并更正成交入账后触发 PM 刷新的配置说明，以 `portfolio_management.enabled` 及成交来源、类型、去重条件为准。（#997）。",
+      "commits": [
+        "bd339d4998bee1b535342454182a0c73bcad96b9",
+        "565d9c7dd0010483c9ebf8e519793224231e2b28"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复富途股票期权有效合约单位被可选指数乘数字段的 `N/A` 连带作废的问题；缺失证券状态继续保留为数据不可用，乘数冲突仍拒绝。（#999）。",
+      "commits": [
+        "59492abd6bdbe29126cc529f41a23ebc5d249adc",
+        "21851d6662409d0b988a64fb6718c8fcff9ff581"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "bd339d4998bee1b535342454182a0c73bcad96b9",
+      "references": [
+        "docs/CODE_HEALTH_REVIEW.md#issue-与使用反馈处理",
+        "https://github.com/liuxie066/options-monitor/pull/997"
+      ]
+    },
+    {
+      "commit": "565d9c7dd0010483c9ebf8e519793224231e2b28",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/997"
+      ]
+    },
+    {
+      "commit": "7a6e23643fb566076f94d48ea7609015954780a6",
+      "references": [
+        "docs/CODE_HEALTH_REVIEW.md#issue-与使用反馈处理",
+        "https://github.com/liuxie066/options-monitor/pull/998"
+      ]
+    },
+    {
+      "commit": "761941ea2778d36aba81189860ec2ecf702344c5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/998"
+      ]
+    },
+    {
+      "commit": "59492abd6bdbe29126cc529f41a23ebc5d249adc",
+      "references": [
+        "docs/CLOSE_ADVICE_CONTRACT.md#short-put-向下移仓主动查询",
+        "https://github.com/liuxie066/options-monitor/pull/999"
+      ]
+    },
+    {
+      "commit": "21851d6662409d0b988a64fb6718c8fcff9ff581",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/999"
+      ]
+    }
+  ]
+}
