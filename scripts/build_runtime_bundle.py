@@ -21,8 +21,16 @@ from src.application.runtime_bundle import (
     download_verified, materialize_bundle, safe_extract, sha256, validate_runtime,
 )
 
-SOURCE_DIRS = {"src", "domain", "om_strategy_core", "scripts", "configs", "contracts", "services", "requirements", "constraints", "docs", "deploy"}
-SOURCE_FILES = {"om", "om-agent", "VERSION", "LICENSE", "CHANGELOG.md", "README.md", "RUNBOOK.md", "DEPLOY.md", "CONFIGS.md", "CONFIGURATION_GUIDE.md", "SECURITY.md", "pyproject.toml", "requirements.txt", "constraints.txt"}
+SOURCE_DIRS = {"src", "domain", "om_strategy_core", "configs", "contracts", "services", "requirements", "constraints", "docs", "deploy"}
+SOURCE_FILES = {
+    "om", "om-agent", "VERSION", "LICENSE", "CHANGELOG.md", "README.md", "RUNBOOK.md", "DEPLOY.md",
+    "CONFIGS.md", "CONFIGURATION_GUIDE.md", "SECURITY.md", "pyproject.toml", "requirements.txt", "constraints.txt",
+    "scripts/install.sh", "scripts/install_agent_plugin.sh", "scripts/python_runtime.sh",
+}
+EXCLUDED_DOCS = {
+    "docs/CODE_HEALTH_REVIEW.md", "docs/DECISION_HISTORY.md", "docs/DECISION_HISTORY_PRD.md",
+    "docs/AGENT_GETTING_STARTED.md", "docs/AGENT_INTEGRATION.md", "docs/AGENT_WIKI.md",
+}
 
 
 def run(argv, **kwargs):
@@ -41,6 +49,8 @@ def copy_source(source: Path, target: Path) -> None:
     names = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=source).decode().split("\0")
     for name in sorted(set(names)):
         if not name or (name not in SOURCE_FILES and name.split("/")[0] not in SOURCE_DIRS):
+            continue
+        if name in EXCLUDED_DOCS or name.startswith("docs/reviews/"):
             continue
         if {"AGENTS.md", "CLAUDE.md", ".agents"}.intersection(Path(name).parts):
             continue
