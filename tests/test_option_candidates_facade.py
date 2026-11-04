@@ -37,7 +37,8 @@ def test_prepare_inheritance_overrides_defaults_and_known_route(configured, tmp_
     query = app.normalize_queries({'queries': [{'symbol': 'US.NVDA', 'strategy': 'short_put'}]})[0]
     item = app._prepare(query, context, now)
     assert item.filters == {'strike': None, 'min_strike': 95, 'max_strike': 100, 'dte': [7, 45],
-                            'strike_source': 'config', 'dte_source': 'config'}
+                            'strike_source': 'config', 'dte_source': 'config',
+                            'max_abs_delta': 0.4, 'max_abs_delta_source': 'config'}
     explicit = app._prepare({**query, 'strike': 120, 'dte': [1, 90]}, context, now)
     assert explicit.filters['min_strike'] == explicit.filters['max_strike'] == 120
     assert explicit.filters['dte'] == [1, 90]
@@ -49,9 +50,11 @@ def test_prepare_inheritance_overrides_defaults_and_known_route(configured, tmp_
 
 
 @pytest.mark.parametrize('symbol', ['NVDA', 'SNXX'])
-def test_cli_facade_reaches_real_fetch_policy_and_bounded_envelope(configured, monkeypatch, tmp_path, capsys, symbol):
+@pytest.mark.parametrize('closed', [False, True])
+def test_cli_facade_reaches_real_fetch_policy_and_bounded_envelope(configured, monkeypatch, tmp_path, capsys, symbol, closed):
     # Keep provider quotes and receipt clocks inside a known FX trading session.
-    now = datetime(2026, 1, 5, 15, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 5, 22 if closed else 15, tzinfo=timezone.utc)
+    source = now.replace(hour=21) if closed else now
 
     class Clock(datetime):
         @classmethod
@@ -61,6 +64,7 @@ def test_cli_facade_reaches_real_fetch_policy_and_bounded_envelope(configured, m
     monkeypatch.setattr(app, '_now', lambda: now)
     monkeypatch.setattr(snapshots, 'datetime', Clock)
     monkeypatch.setattr(quotes, 'datetime', Clock)
+    monkeypatch.setattr(fetch, 'datetime', Clock)
     day = app.earnings_calendar_scan_date('US', now)
     monkeypatch.setattr(fetch, 'get_trading_date', lambda market: day)
     expiry = (day + timedelta(days=30)).isoformat()
@@ -71,7 +75,7 @@ def test_cli_facade_reaches_real_fetch_policy_and_bounded_envelope(configured, m
         def get_snapshot(self, codes):
             calls.append(('snapshot', codes))
             if codes == [f'US.{symbol}']:
-                return pd.DataFrame([{'code': f'US.{symbol}', 'last_price': 110, 'update_time': now.isoformat(),
+                return pd.DataFrame([{'code': f'US.{symbol}', 'last_price': 110, 'update_time': source.isoformat(),
                                       'sec_status': 'NORMAL', 'suspension': False}])
             return pd.DataFrame([{'code': value, 'bid_price': 3, 'ask_price': 3.1, 'last_price': 3,
                                   'update_time': now.isoformat(), 'sec_status': 'NORMAL', 'suspension': False,
@@ -79,7 +83,11 @@ def test_cli_facade_reaches_real_fetch_policy_and_bounded_envelope(configured, m
                                   'option_implied_volatility': 30, 'option_delta': -.3} for value in codes])
 
         def get_market_state(self, codes):
-            return pd.DataFrame([{'code': value, 'market_state': 'MORNING'} for value in codes])
+            return pd.DataFrame([{'code': value, 'market_state': 'CLOSED' if closed else 'MORNING'} for value in codes])
+
+        def get_trading_days_with_receipt(self, **kwargs):
+            return {'retcode': 0, 'coverage_complete': True, 'pagination_complete': True, 'page_count': 1,
+                    'rows': [{'time': value, 'trade_date_type': 'WHOLE'} for value in ('2026-01-05', '2026-01-06')]}
 
         def get_option_expiration_dates(self, underlier):
             return pd.DataFrame([{'strike_time': expiry}])
@@ -101,8 +109,9 @@ def test_cli_facade_reaches_real_fetch_policy_and_bounded_envelope(configured, m
     monkeypatch.setattr(app, 'build_ready_futu_quote_gateway', lambda **kw: Gateway())
     monkeypatch.setattr(fetch, 'fetch_realized_volatility_snapshot', lambda *a, **kw:
                         RealizedVolatilitySnapshot(status='ok', term_matched={expiry: term}))
+    fx_at = now.replace(hour=17) if closed else now
     monkeypatch.setattr(app, 'current_exchange_rate_snapshot', lambda **kw: {'pairs': {'USDCNY': {
-        'rate': 7.2, 'source': 'tencent_quote', 'quote_at_utc': now.isoformat(), 'observed_at_utc': now.isoformat()}}})
+        'rate': 7.2, 'source': 'tencent_quote', 'quote_at_utc': fx_at.isoformat(), 'observed_at_utc': now.isoformat()}}})
     monkeypatch.setenv('OM_RUNTIME_ROOT', str(tmp_path))
     payload = {'queries': [{'symbol': symbol, 'strategy': 'short_put', 'strike': 100}]}
     with app.option_candidates_context(runtime_root=tmp_path):
@@ -114,6 +123,7 @@ def test_cli_facade_reaches_real_fetch_policy_and_bounded_envelope(configured, m
     assert result['symbol'] == symbol
     assert result['effective_filters']['dte'] == ([7, 45] if symbol == 'NVDA' else [7, 60])
     assert result['coverage']['status'] == 'complete'
+    assert result['data_quality']['mode'] == ('closed_market_reference' if closed else 'live')
     candidate = result['candidates'][0]
     assert candidate['contract'] == code and candidate['multiplier'] == 100
     assert candidate['evidence']['iv'] == .30

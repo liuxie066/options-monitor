@@ -22,7 +22,7 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, cast
 
@@ -49,6 +49,7 @@ from src.application.opend_market_snapshot_fetching import (
     MarketSnapshotFetchResult,
     fetch_option_snapshots,
     get_underlier_observation_opend,
+    trading_calendar_dates,
 )
 from src.application.opend_normalize import normalize_opend_option_type
 from src.application.opening_quote_evidence import (
@@ -365,6 +366,7 @@ class FetchSymbolRequest:
     trading_date: str | None = None
     query_filters: list[dict[str, Any]] | None = None
     query_cache: QueryFetchCache | None = None
+    allow_closed_market_reference: bool = False
     deadline: float | None = None
     cancelled: Callable[[], bool] | None = None
     market_data_provider: str = "opend"
@@ -553,6 +555,45 @@ def _fetch_query_chain(
     return SymbolOptionChainResult(result.rows, all_expirations, selected, metrics, result.frame)
 
 
+def _closed_market_reference(request: FetchSymbolRequest, observation: OpeningUnderlierObservation,
+                             gateway: Any, now: datetime) -> dict[str, Any]:
+    """Bind a just-fetched closed snapshot to its latest provider trading date."""
+    from domain.domain.opening_quote_policy import resolve_closed_market_reference
+    from domain.domain.expiration_dates import expiration_market_date
+
+    today = expiration_market_date(now, observation.market)
+    if today is None:
+        raise ValueError("closed_market_invalid_market")
+    source = datetime.fromisoformat(str(observation.observed_at_utc).replace("Z", "+00:00"))
+    if source.tzinfo is None or source > now:
+        raise ValueError("closed_market_source_time_invalid")
+    source_day = expiration_market_date(source, observation.market)
+    start, end = min(source_day, today) - timedelta(days=1), today + timedelta(days=14)
+    controls = {"deadline": request.deadline, "cancelled": request.cancelled}
+    receipt = rate_limited_opend_call(
+        base_dir=request.effective_base_dir, endpoint="trading_days",
+        **request.limits.history_kline.call_kwargs(), **controls,
+        call=lambda: gateway.get_trading_days_with_receipt(
+            market=observation.market, start=start.isoformat(), end=end.isoformat()),
+    )
+    dates = trading_calendar_dates(receipt, start=start, end=end)
+    rows = receipt["rows"]
+    if hasattr(rows, "to_dict"):
+        rows = rows.to_dict("records")
+    sessions = {}
+    for row in rows:
+        day = row.get("time") or row.get("date") or row.get("trade_date")
+        kind = str(row["trade_date_type"]).strip().upper()
+        if day in sessions and sessions[day] != kind:
+            raise ValueError("closed_market_calendar_conflict")
+        sessions[day] = kind
+    calendar = {"request_start": start.isoformat(), "request_end": end.isoformat(),
+                "sessions": {day: sessions[day] for day in dates},
+                "coverage_complete": True, "pagination_complete": True}
+    reference = resolve_closed_market_reference(observation=observation.to_dict(), calendar=calendar, now_utc=now)
+    return {**reference, "calendar": calendar}
+
+
 def fetch_symbol_request(
     request: FetchSymbolRequest,
     *,
@@ -699,14 +740,24 @@ def fetch_symbol_request(
         if cache is not None:
             cache.record_phase("underlier", phase_started)
         phase_name = None
-        if query_mode and underlier_observation.status != "ready":
+        closed_market_reference = None
+        reference_error = None
+        if request.allow_closed_market_reference and query_mode and underlier_observation.status == "market_closed":
+            try:
+                closed_market_reference = _closed_market_reference(
+                    request, underlier_observation, gateway, datetime.now(timezone.utc))
+            except TimeoutError:
+                raise
+            except Exception as exc:
+                reference_error = str(exc) if isinstance(exc, ValueError) else "closed_market_calendar_unavailable"
+        if query_mode and underlier_observation.status != "ready" and closed_market_reference is None:
             return {
                 "symbol": symbol, "underlier_code": u.code, "spot": spot,
                 "expiration_count": 0, "expirations": [], "rows": [],
                 "meta": {**enumeration_meta, "source": "opend", "status": "error",
                          "research_prescreen": prescreen,
-                         "source_outcome": "not_attempted", "reason_code": underlier_observation.reason_code,
-                         "error_code": underlier_observation.reason_code,
+                         "source_outcome": "not_attempted", "reason_code": reference_error or underlier_observation.reason_code,
+                         "error_code": reference_error or underlier_observation.reason_code,
                          "underlier_observation": underlier_observation.to_dict(),
                          "fetch_diagnostics": fetch_diagnostics},
             }
@@ -785,6 +836,7 @@ def fetch_symbol_request(
                 **enumeration_meta,
                     # Query scope is validated above; per-expiry statuses attest coverage.
                     'query_scope_validated': query_mode or source_outcome == 'success_empty',
+                    **({'closed_market_reference': closed_market_reference} if closed_market_reference else {}),
                     'source': 'opend',
                     'host': host,
                     'port': port,
@@ -861,7 +913,8 @@ def fetch_symbol_request(
                 rv_snapshot = fetch_realized_volatility_snapshot(
                     gateway,
                     underlier_code=u.code,
-                    trading_day=today,
+                    trading_day=(date.fromisoformat(closed_market_reference["reference_date"])
+                                 if closed_market_reference else today),
                     market=u.market,
                     expirations=expirations,
                     base_dir=effective_base_dir,
@@ -953,6 +1006,7 @@ def fetch_symbol_request(
                 underlier_observation=underlier_observation,
                 snapshot_requested_at_utc=(srow or {}).get("snapshot_requested_at_utc"),
                 snapshot_received_at_utc=(srow or {}).get("snapshot_received_at_utc"),
+                **({"closed_market_reference": closed_market_reference} if closed_market_reference else {}),
             )
             last_price = option_observation.last_price
             bid = option_observation.bid
@@ -1034,6 +1088,9 @@ def fetch_symbol_request(
                 else:
                     row['otm_pct'] = (strike - spot) / spot
 
+            if closed_market_reference:
+                row["closed_market_reference"] = closed_market_reference
+                row["reference_dte"] = (_as_date(exp) - date.fromisoformat(closed_market_reference["reference_date"])).days
             rows.append(row)
 
         fetch_result_meta = chain_bundle.fetch_meta or {}
@@ -1117,6 +1174,7 @@ def fetch_symbol_request(
                 "fetch_diagnostics": fetch_diagnostics,
                 **enumeration_meta,
                 'query_scope_validated': True,
+                **({'closed_market_reference': closed_market_reference} if closed_market_reference else {}),
                 'source': 'opend',
                 'host': host,
                 'port': port,

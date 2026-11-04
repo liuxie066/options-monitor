@@ -284,10 +284,12 @@ CLI 使用 `./om portfolio assignment-scenario --accounts lx --scenario short_pu
 
 ```bash
 ./om tools run --tool option_candidates \
-  --input-json '{"queries":[{"symbol":"0700.HK","strategy":"short_put","strike":370,"dte":[7,90]},{"symbol":"NVDA","strategy":"short_call"}]}'
+  --input-json '{"queries":[{"symbol":"NVDA","strategy":"short_put","max_abs_delta":0.25,"dte":[7,60]},{"symbol":"NVDA","strategy":"short_call","max_abs_delta":0.25,"dte":[7,60]}]}'
 ```
 
-可选 `strike` 为有限正数，`dte=[min,max]` 为整数闭区间，`1≤min≤max≤365`。
+可选 `strike` 为有限正数，`dte=[min,max]` 为整数闭区间，`1≤min≤max≤365`；
+`max_abs_delta` 为 `[0,1]` 内的有限数字，按 `|Delta| ≤ 上限` 筛选 Put 和 Call。
+同时查询两种方向时，为同一标的各提交一项 `short_put`、`short_call`，行情事实共用。
 省略时继承有效配置/策略默认值；显式参数只覆盖本次查询。拒绝 null、额外字段、
 字符串行权价、裸 put/call、买入/平仓策略及规范化后的重复查询。调用者不能填写
 account、config_key、路径、runtime root 或 OpenD endpoint。
@@ -299,9 +301,10 @@ OpenD endpoint；必要配置缺失或路由冲突时返回 `unable`。不要把
 
 结果按输入顺序给出 `results`：每项 `outcome=found/none/unable`，并独立保留
 `coverage.status=complete/partial/unavailable`；`none` 只用于完整评估且无合格合约，
-部分数据下找到候选仍可为 `found`。`effective_filters` 包含行权价上下界与 DTE，
+部分数据下找到候选仍可为 `found`。`effective_filters` 包含行权价上下界、DTE 和
+`max_abs_delta` 及其 `max_abs_delta_source=request/config`；
 无界端点为 null，配置不可用时整个 filters 为 null。每项最多展示 3 个候选，含合约、
-到期日、行权价、参考卖价、单份净权利金、期间净收益率和履约义务；`displayed/omitted`
+到期日、行权价、Delta、参考卖价、单份净权利金、期间净收益率和履约义务；`displayed/omitted`
 说明展示量。整体 `completion` 单独说明完成程度，输出超限时可将 evidence 置为 null 或压缩候选。
 
 仅筛合约，不检查账户现金、股票覆盖、成本底线或集中度。财报不淘汰合约，只展示查询日
@@ -318,7 +321,20 @@ OM 升级不会自动刷新已建立的 Hermes 会话工具清单。若旧会话
 在实际使用的 Hermes 会话执行 `/reload-mcp`，完成其确认步骤后核对工具可见；不要仅凭另一
 主机或新起的桥进程能列出工具，就判定原会话已恢复。验收还应通过 MCP 调用标准查询，并
 将完整返回文本解析为单个 OM JSON envelope。OpenD 控制台诊断写入 stderr，不能混入结果
-stdout；休市时 `unable/market_closed` 是有效的不可评估结果，不是“没有符合条件的期权”。
+stdout。
+
+休市时按需读取富途快照，并以完整交易日历核验正股源日期属于最近有效交易日；支持收盘后、
+周末、节假日及港股午休，下一常规时段开市即停止沿用。`data_quality.mode=closed_market_reference`
+表示“休市参考”，同时返回 `reference_date`、`underlying_observed_at` 和 `valid_until`；
+`evaluated_at` 仅表示本次评估时间，不替代源时间；候选 `snapshot_received_at` 保留本次快照接收时间。
+期权快照仍须在本次决策前 300 秒内取得，
+bid/ask、Delta、IV 没有独立源时间，不能宣称为精确收盘价或保证成交价。
+
+每个合约仍核验身份、乘数、最小价位、证券状态及双边报价。休市 bid 为零或报价缺失时保留
+数据缺口，不以最新成交价补齐；Delta 缺失也不能判断满足上限。`none` 仍只用于完整评估后的
+空结果。`dte` 按查询当天筛选；候选 `reference_dte`、年化和 term-matched RV 绑定参考行情日期，
+避免跨日后仅因时间缩短而提高参考年化。财报展示区间仍从查询当天起算。
+普通计划扫描不采用本查询的休市资格，继续要求实时证据。
 
 ### 候选解释
 

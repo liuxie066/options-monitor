@@ -289,6 +289,7 @@ def normalize_option_observation(
     snapshot_received_at_utc: Any = None,
     now_utc: datetime | None = None,
     max_age_seconds: int = OPENING_QUOTE_MAX_AGE_SECONDS,
+    closed_market_reference: Mapping[str, Any] | None = None,
 ) -> OpeningOptionObservation:
     chain = dict(chain_row)
     snapshot = dict(snapshot_row or {})
@@ -417,14 +418,28 @@ def normalize_option_observation(
 
     unavailable: list[str] = []
     ineligible: list[str] = []
-    if underlier_observation.status == "market_closed":
+    reference_valid = False
+    if closed_market_reference is not None:
+        from domain.domain.opening_quote_policy import resolve_closed_market_reference
+        try:
+            reference = resolve_closed_market_reference(
+                observation=underlier_observation.to_dict(),
+                calendar=closed_market_reference["calendar"], now_utc=decision_at,
+            )
+            reference_valid = reference == {key: closed_market_reference.get(key) for key in reference}
+        except (KeyError, TypeError, ValueError):
+            pass
+    if underlier_observation.status == "market_closed" and closed_market_reference is None:
         status = "market_closed"
         reason_codes = ("market_closed",)
     else:
-        if underlier_observation.status != "ready":
+        if underlier_observation.status != "ready" and not reference_valid:
             unavailable.append("underlier_observation_unavailable")
         if not contract_symbol or snapshot_code != contract_symbol:
             unavailable.append("option_snapshot_identity_mismatch")
+        snapshot_owner = _text(snapshot.get("stock_owner")).upper()
+        if snapshot_owner and snapshot_owner != _text(expected_owner).upper():
+            unavailable.append("option_snapshot_owner_mismatch")
         if standard_type in _MISSING_ENUM_VALUES or standard_type is None:
             unavailable.append("option_standard_type_missing")
         elif standard_type != "STANDARD":
@@ -460,12 +475,12 @@ def normalize_option_observation(
         elif bid < 0:
             unavailable.append("option_bid_missing_or_invalid")
         elif bid == 0:
-            # OpenD explicitly returning zero bid means the market currently
-            # has no executable buy side. With all other identity/quote/state
-            # evidence complete this is a valid ineligible state, not a
-            # missing-evidence failure. Missing, non-finite, or negative bid
-            # values still fail closed as data_unavailable.
-            ineligible.append("option_no_current_bid")
+            # A closed snapshot cannot prove whether the buy side was withdrawn
+            # after the session. Preserve that gap instead of ruling it out.
+            if closed_market_reference is not None:
+                unavailable.append("closed_market_bid_unavailable")
+            else:
+                ineligible.append("option_no_current_bid")
         if ask is None or ask <= 0 or (bid is not None and ask < bid):
             unavailable.append("option_ask_missing_or_invalid")
         if snapshot_received is None:
