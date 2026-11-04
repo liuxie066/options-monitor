@@ -1,4 +1,4 @@
-"""Bounded, contract-only live opening queries using the canonical candidate owners."""
+"""Bounded contract queries using live or verified closed-market snapshots."""
 from __future__ import annotations
 
 from collections import Counter
@@ -20,7 +20,8 @@ from domain.domain.engine.candidate_engine import (
     CandidateCalculationError, calculate_opening_candidate_metrics,
     evaluate_opening_candidate_policy, rank_candidate_rows, validate_opening_quote_freshness,
 )
-from domain.domain.candidate_defaults import resolve_candidate_liquidity
+from domain.domain.candidate_defaults import resolve_candidate_liquidity, validate_max_abs_delta
+from domain.domain.opening_quote_policy import resolve_closed_market_reference
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.config_profiles import apply_profiles
@@ -53,6 +54,7 @@ QUERY_INPUT_SCHEMA = {
                 "symbol": {"type": "string", "minLength": 1, "maxLength": 32},
                 "strategy": {"type": "string", "enum": ["short_put", "short_call"]},
                 "strike": {"type": "number", "minimum": 0},
+                "max_abs_delta": {"type": "number", "minimum": 0, "maximum": 1},
                 "dte": {"type": "array", "minItems": 2, "maxItems": 2,
                         "items": {"type": "integer", "minimum": 1, "maximum": 365}},
             },
@@ -88,7 +90,13 @@ def normalize_queries(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 query["strike"] = float(strike)
         if "dte" in raw and raw["dte"][0] > raw["dte"][1]:
             errors.append({"path": f"queries[{index}].dte", "expected": "inclusive ascending range"})
-        key = (query["symbol"], query["strategy"], query.get("strike"), tuple(query.get("dte", [])))
+        if "max_abs_delta" in raw:
+            try:
+                query["max_abs_delta"] = validate_max_abs_delta(raw["max_abs_delta"])
+            except ValueError:
+                errors.append({"path": f"queries[{index}].max_abs_delta", "expected": "finite number within [0, 1]"})
+        key = (query["symbol"], query["strategy"], query.get("strike"), tuple(query.get("dte", [])),
+               query.get("max_abs_delta"))
         if key in seen:
             errors.append({"path": f"queries[{index}]", "expected": "unique normalized query"})
         seen.add(key)
@@ -165,6 +173,8 @@ def _prepare(query: dict, context: QueryContext, now: datetime) -> PreparedQuery
         policy = replace(policy, min_strike=query["strike"], max_strike=query["strike"])
     if "dte" in query:
         policy = replace(policy, min_dte=query["dte"][0], max_dte=query["dte"][1])
+    if "max_abs_delta" in query:
+        policy = replace(policy, max_abs_delta=query["max_abs_delta"])
     for bound in (policy.min_strike, policy.max_strike):
         if bound is not None and (not math.isfinite(bound) or bound <= 0):
             raise ValueError("configured strike must be positive finite")
@@ -179,7 +189,9 @@ def _prepare(query: dict, context: QueryContext, now: datetime) -> PreparedQuery
     filters = {"strike": query.get("strike"), "min_strike": policy.min_strike, "max_strike": policy.max_strike,
                "dte": [policy.min_dte, policy.max_dte],
                "strike_source": "request" if "strike" in query else "config",
-               "dte_source": "request" if "dte" in query else "config"}
+               "dte_source": "request" if "dte" in query else "config",
+               "max_abs_delta": policy.max_abs_delta,
+               "max_abs_delta_source": "request" if "max_abs_delta" in query else "config"}
     return PreparedQuery(query, policy, filters, (route.host, route.port), earnings_calendar_scan_date(query["market"], now), provider.name)
 
 
@@ -187,7 +199,7 @@ def _empty_result(query: dict, index: int, now: datetime) -> dict:
     return {"query_index": index, "symbol": query["symbol"], "strategy": query["strategy"],
             "market": query["market"], "currency": "HKD" if query["market"] == "HK" else "USD",
             "query_date": earnings_calendar_scan_date(query["market"], now).isoformat(),
-            "evaluated_at": None, "effective_filters": None,
+            "evaluated_at": None, "effective_filters": None, "data_quality": None,
             "outcome": "unable", "coverage": {"status": "unavailable", "enumeration_complete": False,
                 "discovered": None, "evaluated": 0, "matched": 0, "excluded": 0, "unassessed": None},
             "displayed": 0, "omitted": 0, "candidates": [], "reason_codes": ["not_started"],
@@ -222,7 +234,10 @@ def _candidate(row: dict, decision: dict, mode: str, *, source: str = "opend") -
         "estimated_full_sell_fees": "estimated_full_sell_fees",
     }
     return {"contract": row["contract_symbol"], "expiry": row["expiration"], "dte": row["dte"],
-            "strike": row["strike"], "sell_limit": row["sell_limit"], "multiplier": row["multiplier"],
+            "strike": row["strike"], "delta": row.get("delta"),
+            "reference_dte": row.get("reference_dte", row["dte"]),
+            "snapshot_received_at": row.get("snapshot_received_at_utc"),
+            "sell_limit": row["sell_limit"], "multiplier": row["multiplier"],
             "net_premium": row["net_income"], "period_net_return": row["period_net_return"],
             "obligation": ({"kind": "net_acquisition_price", "price": row["breakeven"]} if mode == "put" else
                            {"kind": "sale_price", "price": row["strike"], "above_spot_ratio": row["strike_above_spot_pct"]}),
@@ -266,7 +281,26 @@ def _evaluate(prepared: PreparedQuery, bundle: dict, fx: dict, index: int, now: 
     if earnings_calendar_scan_date(query["market"], now) != prepared.query_date:
         market_reason = "date_changed"
     elif market.status != "ready":
-        market_reason = market.reason_code or "market_unavailable"
+        if market.status == "market_closed" and meta.get("closed_market_reference"):
+            provided = meta["closed_market_reference"]
+            try:
+                reference = resolve_closed_market_reference(
+                    observation=market.to_dict(), calendar=provided["calendar"], now_utc=now)
+                if any(provided.get(key) != value for key, value in reference.items()):
+                    raise ValueError("closed_market_reference_mismatch")
+            except (KeyError, TypeError, ValueError) as exc:
+                market_reason = str(exc) if isinstance(exc, ValueError) else "closed_market_calendar_unavailable"
+        else:
+            market_reason = meta.get("reason_code") or market.reason_code or "market_unavailable"
+    is_reference = market.status == "market_closed" and not market_reason
+    result["data_quality"] = {
+        "mode": "closed_market_reference" if is_reference else "live" if market.status == "ready" else "unavailable",
+        "market_state": market.market_state,
+        "underlying_observed_at": market.observed_at_utc,
+        "reference_date": (meta.get("closed_market_reference") or {}).get("reference_date") if is_reference else None,
+        "valid_until": (meta.get("closed_market_reference") or {}).get("valid_until_utc") if is_reference else None,
+        "notice": "休市参考；非实时可成交报价，bid/ask、Delta、IV 无独立源时间。" if is_reference else None,
+    }
     reasons, excluded = Counter(), Counter()
     matched, unknown = [], 0
     rates = rates_for_purpose(fx, purpose="capacity", now=now)
@@ -284,7 +318,8 @@ def _evaluate(prepared: PreparedQuery, bundle: dict, fx: dict, index: int, now: 
             continue
         try:
             validate_opening_quote_freshness(raw, now_utc=now)
-            metrics = calculate_opening_candidate_metrics(raw, mode=mode, cny_per_currency_unit=rate, now_utc=now)
+            metrics = calculate_opening_candidate_metrics(raw, mode=mode, cny_per_currency_unit=rate, now_utc=now,
+                                                           allow_closed_market_reference=is_reference)
         except CandidateCalculationError as exc:
             # Affirmative ineligibility is distinct from missing/stale evidence.
             if exc.reason in {"contract_ineligible", "policy_rejected", "option_non_standard", "net_premium_non_positive", "net_cash_basis_non_positive"}:
@@ -451,7 +486,7 @@ def option_candidates_tool(payload: dict[str, Any]) -> tuple[dict, list[str], di
                     request = FetchSymbolRequest(symbol=query["symbol"], host=item.endpoint[0], port=item.endpoint[1],
                         base_dir=runtime, gateway=gateways[connection_key], market_data_provider=item.market_data_provider, option_types=",".join(sorted({peer.query["strategy"].removeprefix("short_") for peer in peers})),
                         min_dte=min(peer.config.min_dte for peer in peers), max_dte=max(peer.config.max_dte for peer in peers),
-                        include_realized_volatility=True, chain_cache=True,
+                        include_realized_volatility=True, chain_cache=True, allow_closed_market_reference=True,
                         deadline=work_deadline, cancelled=cancelled, query_cache=fetch_caches.setdefault(item.market_data_provider, QueryFetchCache()),
                         query_filters=[{"option_type": peer.query["strategy"].removeprefix("short_"),
                                         "min_strike": peer.config.min_strike, "max_strike": peer.config.max_strike,
@@ -466,7 +501,9 @@ def option_candidates_tool(payload: dict[str, Any]) -> tuple[dict, list[str], di
                 else:
                     diagnostics["bundle_reuse_hits"] = diagnostics.get("bundle_reuse_hits", 0) + 1
                 bundle = bundles[key]
-                if fx is None and any(_in_scope(row, item) for row in bundle.get("rows", [])) and _underlier_at(bundle, _now()).status == "ready":
+                if fx is None and any(_in_scope(row, item) for row in bundle.get("rows", [])) and (
+                    _underlier_at(bundle, _now()).status == "ready" or bundle.get("meta", {}).get("closed_market_reference")
+                ):
                     check()
                     fx_start = time.monotonic()
                     fx = current_exchange_rate_snapshot(cache_path=runtime / "output_shared/state/rate_cache.json",

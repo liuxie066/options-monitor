@@ -202,6 +202,31 @@ def test_scene_exposes_real_tool_schema_and_complete_dialogue_guidance(monkeypat
     assert get_tool_definition('option_candidates').description in tool['description']
 
 
+def test_dialogue_passes_explicit_delta_cap_for_both_selling_directions(monkeypatch, tmp_path):
+    payload = {"queries": [
+        {"symbol": "NVDA", "strategy": "short_put", "max_abs_delta": .25},
+        {"symbol": "NVDA", "strategy": "short_call", "max_abs_delta": .25},
+    ]}
+    _, fixed = _scope(tmp_path, monkeypatch, ['us'])
+    manifest = build_scene_manifest(_contract(fixed), 'test')
+    tool = next(t for t in manifest.tool_descriptions if t['name'] == 'option_candidates')
+    cap = tool['input_schema']['properties']['queries']['items']['properties']['max_abs_delta']
+    assert cap['minimum'] == 0 and cap['maximum'] == 1
+    guidance = load_general_scene()['option_candidates_guidance']
+    assert 'max_abs_delta' in guidance and '休市参考' in guidance
+    calls = []
+
+    def execute(name, value):
+        calls.append((name, value))
+        assert value == payload
+        return {'ok': True, 'data': {'results': []}}
+
+    monkeypatch.setattr(tools, 'execute_tool', execute)
+    result = invoke(payload, trusted_input=fixed, deadline_monotonic=time.monotonic() + 10)
+    assert result['ok'] is True
+    assert calls == [('option_candidates', payload)]
+
+
 def test_real_executor_returns_unavailable_for_missing_trusted_configs(monkeypatch, tmp_path):
     configs, fixed = _scope(tmp_path, monkeypatch, ['us', 'hk'])
     for path, _ in configs.values():

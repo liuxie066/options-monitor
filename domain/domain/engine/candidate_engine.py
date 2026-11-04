@@ -407,11 +407,13 @@ def validate_opening_contract_evidence(
     mode: StrategyMode | str,
     now_utc: Any = None,
     max_snapshot_age_seconds: int = 300,
+    allow_closed_market_reference: bool = False,
 ) -> dict[str, Any]:
-    """Validate canonical opening-contract identity and sell-side quote evidence."""
+    """Validate sell-side opening evidence with explicit opt-in for closed references."""
     return validate_option_contract_evidence(
         raw, mode=mode, quote_side="sell", now_utc=now_utc,
         max_snapshot_age_seconds=max_snapshot_age_seconds,
+        allow_closed_market_reference=allow_closed_market_reference,
     )
 
 
@@ -422,6 +424,7 @@ def validate_option_contract_evidence(
     quote_side: Literal["buy", "sell"],
     now_utc: Any = None,
     max_snapshot_age_seconds: int = 300,
+    allow_closed_market_reference: bool = False,
 ) -> dict[str, Any]:
     """Validate a standard option observation for the side being estimated.
 
@@ -469,7 +472,25 @@ def validate_option_contract_evidence(
             },
             threshold="ready",
         )
-    if underlier_status != "ready":
+    reference = None
+    if allow_closed_market_reference and underlier_status == "market_closed":
+        from domain.domain.opening_quote_policy import resolve_closed_market_reference
+        provided = raw.get("closed_market_reference")
+        try:
+            reference = resolve_closed_market_reference(
+                observation={"code": raw.get("stock_owner"), "market": raw.get("market"),
+                             "last_price": raw.get("spot"), "observed_at_utc": raw.get("spot_observed_at_utc"),
+                             "market_state": raw.get("market_state"), "sec_status": raw.get("underlier_sec_status"),
+                             "suspension": raw.get("underlier_suspension")},
+                calendar=provided["calendar"], now_utc=_decision_now(now_utc),
+            )
+            if any(provided.get(key) != value for key, value in reference.items()):
+                raise ValueError("closed_market_reference_mismatch")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CandidateCalculationError(REJECT_EVIDENCE_UNAVAILABLE,
+                "closed-market reference evidence is unavailable", metric_value=str(exc),
+                threshold="verified latest trading date") from exc
+    if underlier_status != "ready" and reference is None:
         raise CandidateCalculationError(
             "opening_underlier_not_ready",
             "normalized OpenD underlier observation is not ready",
@@ -503,7 +524,7 @@ def validate_option_contract_evidence(
             threshold=">= 0",
         )
     # Spot source age has its own fixed limit, independent of option receipt age.
-    if spot_age > 300:
+    if spot_age > 300 and reference is None:
         raise CandidateCalculationError(
             REJECT_EVIDENCE_UNAVAILABLE,
             "OpenD underlier quote is stale relative to the decision moment",
@@ -582,12 +603,26 @@ def validate_option_contract_evidence(
             threshold="all equal",
         )
 
+    dte = _required_positive_int(raw, "dte")
+    return_dte = dte
+    if reference is not None:
+        from domain.domain.expiration_dates import expiration_market_date
+        try:
+            expiry = date.fromisoformat(str(raw.get("expiration")))
+            current_day = expiration_market_date(decision_now, raw.get("market"))
+            reference_dte = (expiry - date.fromisoformat(reference["reference_date"])).days
+            if (expiry - current_day).days != dte or raw.get("reference_dte") != reference_dte or reference_dte < dte:
+                raise ValueError("reference_dte_mismatch")
+            return_dte = reference_dte
+        except (TypeError, ValueError) as exc:
+            raise CandidateCalculationError(REJECT_EVIDENCE_UNAVAILABLE,
+                "reference and query DTE evidence disagree", threshold="expiry bound to both dates") from exc
     return {
         "bid": bid,
         "ask": ask,
         "price_tick": price_tick,
         "multiplier": multiplier,
-        "dte": _required_positive_int(raw, "dte"),
+        "dte": return_dte,
         "strike": _required_positive_float(raw, "strike"),
         "spot": _required_positive_float(raw, "spot"),
     }
@@ -601,6 +636,7 @@ def calculate_opening_candidate_metrics(
     cny_per_currency_unit: float | None = None,
     now_utc: Any = None,
     max_snapshot_age_seconds: int = 300,
+    allow_closed_market_reference: bool = False,
 ) -> dict[str, Any]:
     """Calculate the sole formal opening price, fee and return contract.
 
@@ -616,6 +652,7 @@ def calculate_opening_candidate_metrics(
         mode=mode_norm,
         now_utc=now_utc,
         max_snapshot_age_seconds=max_snapshot_age_seconds,
+        allow_closed_market_reference=allow_closed_market_reference,
     )
     bid = evidence["bid"]
     ask = evidence["ask"]
