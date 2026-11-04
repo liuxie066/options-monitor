@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
+import time
 
 import pytest
 
@@ -31,6 +33,37 @@ def result(completed, outcome="partial"):
 
 def test_selects_first_parent_units_in_order_without_skipping_direct_commits():
     assert select_commits(fake_git, A, D, 2) == [B, C]
+
+
+@pytest.mark.parametrize("max_units", [1, 3, 10])
+def test_review_prompt_uses_configured_mainline_limit(tmp_path, max_units):
+    prompt = review.review_prompt(tmp_path, tmp_path / "run", {"cursor": A, "target": D}, max_units=max_units)
+    assert f"按序最多{max_units}个主线单元" in prompt
+    assert "最多三个主线单元" not in prompt
+
+
+@pytest.mark.parametrize(("zone", "current", "expected"), [
+    ("Asia/Shanghai", "2026-11-04T09:16:59", "2026-11-04T09:17:00+08:00"),
+    ("Asia/Shanghai", "2026-11-04T09:17:00", "2026-11-05T09:17:00+08:00"),
+    ("Asia/Shanghai", "2026-11-04T23:59:59", "2026-11-05T09:17:00+08:00"),
+    ("Asia/Shanghai", "2026-12-31T23:59:59", "2027-01-01T09:17:00+08:00"),
+    ("America/New_York", "2026-03-07T23:59:59", "2026-03-08T09:17:00-04:00"),
+    ("America/New_York", "2026-10-31T23:59:59", "2026-11-01T09:17:00-05:00"),
+])
+def test_next_calendar_trigger_uses_next_local_0917(monkeypatch, zone, current, expected):
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromisoformat(current)
+
+    try:
+        with monkeypatch.context() as clock:
+            clock.setenv("TZ", zone)
+            time.tzset()
+            clock.setattr(review, "datetime", Clock)
+            assert review.next_calendar_trigger() == expected
+    finally:
+        time.tzset()
 
 
 def test_missing_cursor_cannot_silently_restart_or_skip_history():
@@ -88,8 +121,18 @@ def test_archive_export_ignore_does_not_remove_frozen_review_instructions(tmp_pa
     assert len(calls) == 4
 
 
-def test_daily_run_resumes_pending_repair_without_new_prs(tmp_path, monkeypatch):
+@pytest.mark.parametrize("installed", [False, True])
+def test_daily_run_resumes_pending_repair_without_new_prs(tmp_path, monkeypatch, installed):
     import json
+    installation = {
+        "installed_at": "2026-11-03T05:16:41+00:00", "schedule": {"hour": 9, "minute": 17},
+        "next_calendar_trigger": "2026-11-04T09:17:00+08:00",
+    }
+    installation_path = tmp_path / "installation.json"
+    if installed:
+        installation_path.write_text(json.dumps(installation))
+    expected_trigger = "2026-11-05T09:17:00+08:00"
+    monkeypatch.setattr(review, "next_calendar_trigger", lambda: expected_trigger)
     (tmp_path / "repository.git").mkdir()
     (tmp_path / "report.md").write_text("previous review")
     (tmp_path / "config.json").write_text(json.dumps({
@@ -116,10 +159,16 @@ def test_daily_run_resumes_pending_repair_without_new_prs(tmp_path, monkeypatch)
     assert receipt["repair"]["status"] == "awaiting_delivery_authorization"
     assert observed == [tmp_path]
     assert json.loads((tmp_path / "state.json").read_text())["cursor"] == A
+    assert json.loads((tmp_path / "last-run.json").read_text()) == receipt
+    if installed:
+        assert json.loads(installation_path.read_text()) == {**installation, "next_calendar_trigger": expected_trigger}
+    else:
+        assert not installation_path.exists()
 
 
 @pytest.mark.parametrize("missing_evidence", [False, True])
-def test_daily_entry_persists_findings_before_cursor_with_real_git(tmp_path, monkeypatch, missing_evidence):
+@pytest.mark.parametrize("max_units", [3, 10])
+def test_daily_entry_persists_findings_before_cursor_with_real_git(tmp_path, monkeypatch, missing_evidence, max_units):
     import json
     import subprocess
     import sys
@@ -172,14 +221,16 @@ def test_daily_entry_persists_findings_before_cursor_with_real_git(tmp_path, mon
         "plan = json.loads((work.parent / 'plan.json').read_text())\n"
         f"assert plan['cursor'] == {base!r} and plan['target'] == {target!r}\n"
         "assert (work.parent / 'source/AGENTS.md').read_text() == 'Frozen fixture instructions\\n'\n"
-        "assert '禁止修业务代码' in sys.stdin.read()\n"
+        "prompt = sys.stdin.read()\n"
+        "assert '禁止修业务代码' in prompt\n"
+        f"assert '按序最多{max_units}个主线单元' in prompt\n"
         + ("" if missing_evidence else "(work / 'probe.log').write_text('expected=1 actual=2\\n')\n")
         + f"pathlib.Path(args[args.index('--output-last-message') + 1]).write_text({json.dumps(payload)!r})\n"
     )
     agent.chmod(0o700)
     (root / "config.json").write_text(json.dumps({
         "git": "git", "gh": "github-client", "codex": str(agent),
-        "repository_url": str(source), "repository": "fixture/repo", "max_units": 3,
+        "repository_url": str(source), "repository": "fixture/repo", "max_units": max_units,
         "timeout_seconds": 180, "repair_enabled": False,
         "model": "fixture", "model_base_url": "http://fixture.invalid",
         "model_catalog": str(root / "catalog.json"),
