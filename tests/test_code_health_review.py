@@ -161,7 +161,7 @@ def test_daily_entry_persists_findings_before_cursor_with_real_git(tmp_path, mon
     payload = {**result([target], "complete"), "confirmed_findings": [finding]}
     agent = tmp_path / "model-client"
     agent.write_text(
-        f"#!{sys.executable}\n"
+        f"#!{Path(sys.executable).resolve()}\n"
         "import json, pathlib, sys\n"
         "args = sys.argv[1:]\n"
         "assert args[:4] == ['exec', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check']\n"

@@ -16,8 +16,10 @@ import tarfile
 import time
 
 if __package__:
+    from . import code_health_issues as issues
     from . import code_health_repair as repair
 else:
+    import code_health_issues as issues
     import code_health_repair as repair
 
 
@@ -56,8 +58,8 @@ def write_json(path: Path, value: dict) -> None:
     temporary.replace(path)
 
 
-def command(argv: list[str], *, cwd: Path | None = None) -> str:
-    result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=180)
+def command(argv: list[str], *, cwd: Path | None = None, timeout: float = 180) -> str:
+    result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=timeout)
     if result.returncode:
         raise RuntimeError(f"{argv[0]} exited {result.returncode}: {result.stderr.strip()[:1500]}")
     return result.stdout.strip()
@@ -222,19 +224,26 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False) -> dict:
     deadline = time.monotonic() + config["timeout_seconds"]
     with run_lock(root):
         state = json.loads((root / "state.json").read_text(encoding="utf-8"))
-        run = root / "runs" / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-{os.getpid()}")
+        run = root / "runs" / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + f"-{os.getpid()}")
         run.mkdir(parents=True)
         receipt = {"started_at": now(), "cursor_before": state["cursor"], "mode": "smoke" if smoke else "daily"}
+        def bounded_command(argv, **kwargs):
+            remaining = deadline - time.monotonic()
+            if remaining < 1:
+                raise TimeoutError("daily budget exhausted during preparation")
+            return command(argv, **{**kwargs, "timeout": min(kwargs.get("timeout", 180), remaining)})
+
         try:
             mirror = root / "repository.git"
             if not mirror.exists():
-                command([config["git"], "init", "--bare", str(mirror)])
-                command([config["git"], "--git-dir", str(mirror), "remote", "add", "origin", config["repository_url"]])
+                bounded_command([config["git"], "init", "--bare", str(mirror)])
+                bounded_command([config["git"], "--git-dir", str(mirror), "remote", "add", "origin", config["repository_url"]])
             def git(*args):
-                return command([config["git"], "--git-dir", str(mirror), *args])
+                return bounded_command([config["git"], "--git-dir", str(mirror), *args])
             git("fetch", "--tags", "origin", "+refs/heads/main:refs/heads/main")
             target = git("rev-parse", "refs/heads/main")
             commits = select_commits(git, state["cursor"], target, config["max_units"])
+            receipt.update({"target": target, "planned_commits": commits})
             if smoke:
                 commits = []
             previous_report = Path(state["last_review"])
@@ -245,25 +254,39 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False) -> dict:
                 "previous_review": previous_report.read_text(encoding="utf-8"),
                 "coverage_note": state.get("coverage_note", ""),
                 "verification_python": config.get("verification_python"),
+                "local_repairs": repair.task_summaries(root),
             }
+            issue_run, issue_plan = run / "issues", None
+            if config.get("issues_enabled") and not smoke:
+                issue_run.mkdir()
+                try:
+                    issue_plan = issues.plan_issues(root, config, target, bounded_command, deadline=deadline)
+                    write_json(issue_run / "plan.json", issue_plan)
+                    receipt["issues"] = {"status": "planned", "numbers": [row["number"] for row in issue_plan["issues"]]}
+                except (TimeoutError, subprocess.TimeoutExpired) as exc:
+                    receipt["issues"] = {"status": "pending", "error": str(exc)}
+                    write_json(issue_run / "receipt.json", receipt["issues"])
+                except Exception as exc:
+                    receipt["issues"] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+                    write_json(issue_run / "receipt.json", receipt["issues"])
             changes = run / "changes"
             changes.mkdir()
             for sha in commits:
                 parent = git("rev-parse", f"{sha}^1")
-                associated = json.loads(command([
+                associated = json.loads(bounded_command([
                     config["gh"], "api", f"repos/{config['repository']}/commits/{sha}/pulls",
                 ]))
                 prs = [{key: pr.get(key) for key in ("number", "title", "html_url", "body", "merged_at")}
                        for pr in associated if pr.get("merge_commit_sha") == sha]
                 for pr in prs:
-                    pr["review_evidence"] = json.loads(command([
+                    pr["review_evidence"] = json.loads(bounded_command([
                         config["gh"], "pr", "view", str(pr["number"]), "--repo", config["repository"],
                         "--json", "headRefOid,mergeCommit,reviews,statusCheckRollup",
                     ]))
                 plan["commits"].append({"sha": sha, "parent": parent, "subject": git("show", "-s", "--format=%s", sha), "pull_requests": prs})
                 (changes / f"{sha}.patch").write_text(git("diff", "--no-ext-diff", parent, sha), encoding="utf-8")
             if commits:
-                plan["recent_issues"] = json.loads(command([
+                plan["recent_issues"] = json.loads(bounded_command([
                     config["gh"], "issue", "list", "--repo", config["repository"], "--state", "all",
                     "--limit", "100", "--json", "number,title,state,url",
                 ]))
@@ -276,31 +299,58 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False) -> dict:
                     f"# 每日增量巡检\n\n时间：{now()}\n\n起点与目标：`{target}`。无新增主线提交，未调用模型。\n\n续跑位置保持 `{state['cursor']}`。\n", encoding="utf-8",
                 )
                 receipt["status"] = "no_changes"
-            else:
+            source = run / "source"
+            if not dry_run and (commits or smoke or (issue_plan and issue_plan["issues"])):
                 archive = run / "source.tar"
-                with archive.open("wb") as handle:
-                    subprocess.run([config["git"], "--git-dir", str(mirror), "archive", target], stdout=handle, check=True, timeout=180)
-                source = run / "source"
+                git("archive", "--output=" + str(archive), target)
                 source.mkdir()
                 with tarfile.open(archive) as bundle:
                     bundle.extractall(source, filter="data")
                 restore_review_instructions(git, target, source)
+            if not dry_run and (commits or smoke):
                 review_config = {**repair.remaining_config(config, deadline)}
                 if config.get("repair_enabled") and not smoke:
                     review_config["timeout_seconds"] = min(review_config["timeout_seconds"], config.get("review_timeout_seconds", 900))
-                result = invoke_agent(review_config, run, review_prompt(root, run, plan, smoke=smoke))
-                completed = validate_result(result, commits)
-                (run / "report.md").write_text(result["report_markdown"].rstrip() + "\n", encoding="utf-8")
-                if not smoke:
-                    receipt["repair_tasks"] = repair.persist_findings(root, run, result, target)
-                receipt.update({"status": "smoke_passed" if smoke else result["outcome"], "completed_commits": completed})
-                if completed and not smoke:
-                    # Report and receipt exist before the durable coverage cursor moves.
-                    write_json(run / "receipt.json", {**receipt, "finished_at": now()})
-                    write_json(root / "state.json", {**state, "cursor": completed[-1], "last_review": str(run / "report.md"), "updated_at": now()})
+                if issue_plan and issue_plan["issues"]:
+                    review_config["timeout_seconds"] = min(review_config["timeout_seconds"], 600)
+                try:
+                    result = invoke_agent(review_config, run, review_prompt(root, run, plan, smoke=smoke))
+                    completed = validate_result(result, commits)
+                    (run / "report.md").write_text(result["report_markdown"].rstrip() + "\n", encoding="utf-8")
+                    if not smoke:
+                        receipt["repair_tasks"] = repair.persist_findings(root, run, result, target)
+                    receipt.update({"status": "smoke_passed" if smoke else result["outcome"], "completed_commits": completed})
+                    if completed and not smoke:
+                        # Report and receipt exist before the durable coverage cursor moves.
+                        write_json(run / "receipt.json", {**receipt, "finished_at": now()})
+                        write_json(root / "state.json", {**state, "cursor": completed[-1], "last_review": str(run / "report.md"), "updated_at": now()})
+                except TimeoutError as exc:
+                    if smoke:
+                        raise
+                    receipt.update({"status": "pending", "review_error": str(exc), "completed_commits": []})
+                    (run / "report.md").write_text(f"提交巡检超时，覆盖游标保持原值；后续阶段按剩余预算继续。\n\n{exc}\n", encoding="utf-8")
+            if issue_plan is not None and not dry_run:
+                try:
+                    receipt["issues"] = issues.process_issues(
+                        root, config, issue_run, source, issue_plan, deadline, invoke_agent, FINDING_SCHEMA, validate_finding,
+                    )
+                except TimeoutError as exc:
+                    receipt["issues"] = {"status": "pending", "error": str(exc), "run_dir": str(issue_run)}
+                except Exception as exc:
+                    receipt["issues"] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "run_dir": str(issue_run)}
+                write_json(issue_run / "receipt.json", receipt["issues"])
             if config.get("repair_enabled") and not smoke and not dry_run:
-                receipt["repair"] = repair.repair_one(root, config, run, deadline, invoke_agent)
+                repair.remaining_config(config, deadline)
+                repair_config = {**config, "issue_target": target, "issue_inputs": issue_plan.get("issue_inputs", {}) if issue_plan else {},
+                                 "issue_intake_ready": receipt.get("issues", {}).get("status") in {"complete", "partial", "no_eligible_issues"}}
+                receipt["repair"] = repair.repair_one(root, repair_config, run, deadline, invoke_agent)
             receipt.update({"finished_at": now(), "cursor_after": json.loads((root / "state.json").read_text())["cursor"], "run_dir": str(run)})
+            write_json(run / "receipt.json", receipt)
+            write_json(root / "last-run.json", receipt)
+            return receipt
+        except (TimeoutError, subprocess.TimeoutExpired) as exc:
+            receipt.update({"status": "pending", "error": f"{type(exc).__name__}: {exc}", "finished_at": now(),
+                            "run_dir": str(run), "cursor_after": json.loads((root / "state.json").read_text())["cursor"]})
             write_json(run / "receipt.json", receipt)
             write_json(root / "last-run.json", receipt)
             return receipt
@@ -320,7 +370,7 @@ def main() -> int:
     args = parser.parse_args()
     root = args.state_dir.expanduser().resolve()
     if args.action == "status":
-        print(json.dumps({name: json.loads((root / name).read_text()) for name in ("state.json", "last-run.json") if (root / name).exists()}, ensure_ascii=False, indent=2))
+        print(json.dumps({name: json.loads((root / name).read_text()) for name in ("state.json", "issue-state.json", "last-run.json") if (root / name).exists()}, ensure_ascii=False, indent=2))
         return 0
     try:
         print(json.dumps(run_once(root, smoke=args.smoke, dry_run=args.dry_run), ensure_ascii=False, indent=2))
