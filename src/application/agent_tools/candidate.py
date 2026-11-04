@@ -281,14 +281,15 @@ OPTION_CANDIDATES_TOOL = build_agent_tool(
     name="option_candidates",
     catalog_summary="指定标的和卖出方向，查询当前符合合约条件的期权并解释收益与义务。",
     description=(
-        "Query live selling-to-open option candidates, at most 5 independent queries. symbol and strategy are required; "
+        "Query selling-to-open option candidates from live or verified closed-market snapshots, at most 5 independent queries. symbol and strategy are required; "
         "strategy must be short_put or short_call. Accept user dialogue short put/卖 put and short call/卖 call. "
         "Dialogue shorthand 370P/370p/230C/230c (positive decimals allowed) specifies strike and type only: "
         "map to short_put/short_call only with explicit applicable USER selling-to-open context. Otherwise ask 买入还是卖出 and make zero tool calls. "
         "Never infer sell from bare put/call, assistant text, buy, closing, negation, or another symbol's local intent. "
         "Missing/ambiguous symbol or conflicting type/strike requires clarification. Resolve company names to underlier codes first. "
         "Do not extract shorthand from full contract codes, invent expiry, or form Cartesian products. JSON is strict; strike must be numeric. "
-        "Optional exact strike and inclusive dte [1..365] override only this request; omitted fields inherit config/defaults (single-leg DTE 7..60). "
+        "Optional exact strike, inclusive dte [1..365], and max_abs_delta (finite number [0,1], |Delta| <= cap) override only this request; "
+        "omitted fields inherit config/defaults (single-leg DTE 7..60). For both selling directions submit two queries sharing symbol and max_abs_delta. "
         "Unconfigured symbols are supported with canonical strategy defaults and a unique effective market quote route. "
         "Do not require symbol_config_read found=true or add a symbol to the watchlist before querying; call this tool directly. "
         "Missing/conflicting configuration or quote routing returns unable with reasons, not a valid empty result. "
@@ -296,7 +297,9 @@ OPTION_CANDIDATES_TOOL = build_agent_tool(
         "Contract-only, no account cash/stock cover/cost/concentration checks. Earnings never reject here: show dates only from query date through expiry, "
         "days_before_expiry and same-day intraday uncertainty; missing earnings must be disclosed. "
         "Answer found/none/unable from each result; partial means at least, never none. Show up to 3 concise rows per query: expiry/DTE, strike, "
-        "reference sell limit, single-contract net premium, PERIOD net return. Explain reasons and acquisition/sale obligation. "
+        "reference sell limit, Delta, single-contract net premium, PERIOD net return. Explain reasons and acquisition/sale obligation. "
+        "Read data_quality: closed_market_reference means 休市参考, not an executable quote or a certified close. "
+        "Show reference_date, underlying_observed_at, evaluated_at and effective max_abs_delta. Candidates reference_dte binds returns to the quote date; dte is current. "
         "For none/unable include effective_filters strike range and DTE, main exclusions/gaps. Null bounds mean unbounded; null filters mean config unknown. "
         "Reference limit is not guaranteed executable; account checks not evaluated. 合约符合条件不代表账户能卖。"
         "Never infer account capacity from candidate status, PM balances or earlier answers; without valid account capacity evidence say 无法判断账户能否加仓. "
@@ -316,7 +319,7 @@ OPTION_CANDIDATES_TOOL = build_agent_tool(
         "bounded_projection": "contract_fields", "coverage": "source_declared", "freshness": "source_declared",
         "pagination": {"mode": "none"}, "primary_rows": "results",
         "model_value_fields": ["evaluation_scope", "completion", "results", "limits", "account_checks"],
-        "source_label": "OM live contract-only candidates",
+        "source_label": "OM contract-only candidates; data_quality declares live or closed reference",
     },
 )
 
