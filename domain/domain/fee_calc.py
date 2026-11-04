@@ -16,6 +16,7 @@ FUTU_HK_FEE_SCHEDULE_URL = "https://www.futuhk.com/en/support/topic2_335"
 FUTU_US_OPTION_FEE_BASIS = "futu_us_fixed_package_2026-07-22"
 FUTU_HK_OPTION_FEE_BASIS = "futu_hk_tier1_upper_bound_2026-07-22"
 FUTU_OPTION_FEE_SCHEDULE_VERSION = "futu_option_sell_fee.v1"
+FUTU_OPTION_BUY_FEE_SCHEDULE_VERSION = "futu_option_buy_fee.v1"
 FUTU_EXECUTED_OPTION_FEE_FORMULA_VERSION = "futu_executed_option_fee.v1"
 FUTU_US_OPTION_CANDIDATE_FEE_BASIS = "futu_us_candidate_upper_bound_2026-08-06"
 FUTU_US_CANDIDATE_PLATFORM_FEE_UPPER_BOUND = 0.60
@@ -129,6 +130,36 @@ def estimate_futu_option_sell_fee(
     performance consumes persisted fee provenance instead of this candidate estimate.
     """
 
+    return _estimate_futu_candidate_option_fee(
+        currency, order_price, contracts=contracts, multiplier=multiplier, is_sell=True,
+    )
+
+
+def estimate_futu_option_buy_fee(
+    currency: str | None,
+    order_price: float,
+    *,
+    contracts: int,
+    multiplier: int,
+) -> OptionFeeEstimate:
+    """Return the candidate-stage buy estimate for the actual order quantity.
+
+    This uses the same conservative package assumption as candidate sells,
+    with the canonical formula excluding sell-only regulatory fees.
+    """
+    return _estimate_futu_candidate_option_fee(
+        currency, order_price, contracts=contracts, multiplier=multiplier, is_sell=False,
+    )
+
+
+def _estimate_futu_candidate_option_fee(
+    currency: str | None,
+    order_price: float,
+    *,
+    contracts: int,
+    multiplier: int,
+    is_sell: bool,
+) -> OptionFeeEstimate:
     ccy = normalize_currency(currency)
     if ccy == "USD":
         basis = FUTU_US_OPTION_CANDIDATE_FEE_BASIS
@@ -143,12 +174,11 @@ def estimate_futu_option_sell_fee(
         order_price,
         contracts=contracts,
         multiplier=multiplier,
-        is_sell=True,
+        is_sell=is_sell,
     )
     if ccy == "USD":
-        # Opening candidates have no account-level package fact. Use the
-        # confirmed conservative platform-fee upper bound without changing
-        # compatibility callers that explicitly model the fixed package.
+        # Candidates have no account-level package fact. Use the confirmed
+        # conservative upper bound without changing fixed-package callers.
         amount += (
             FUTU_US_CANDIDATE_PLATFORM_FEE_UPPER_BOUND
             - FUTU_US_FIXED_PLATFORM_FEE
@@ -157,7 +187,9 @@ def estimate_futu_option_sell_fee(
     return OptionFeeEstimate(
         amount=amount,
         currency=ccy,
-        fee_schedule_version=FUTU_OPTION_FEE_SCHEDULE_VERSION,
+        fee_schedule_version=(
+            FUTU_OPTION_FEE_SCHEDULE_VERSION if is_sell else FUTU_OPTION_BUY_FEE_SCHEDULE_VERSION
+        ),
         fee_basis=basis,
         fee_schedule_url=url,
     )

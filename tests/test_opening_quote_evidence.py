@@ -259,6 +259,53 @@ def test_option_observation_preserves_zero_optional_values_and_normalizes_iv_onl
     assert observation.multiplier == 100
 
 
+@pytest.mark.parametrize("market", ["US", "HK"])
+@pytest.mark.parametrize(
+    ("size", "multiplier", "expected_reason"),
+    [
+        (100, "N/A", None),
+        (100, " N/A ", None),
+        (100, None, None),
+        (100, 100, None),
+        (100, 50, "option_snapshot_multiplier_conflict"),
+        (100, 0, "option_snapshot_multiplier_missing"),
+        (100, 100.5, "option_snapshot_multiplier_missing"),
+        (100, True, "option_snapshot_multiplier_missing"),
+        (100, "invalid", "option_snapshot_multiplier_missing"),
+        (100, float("nan"), "option_snapshot_multiplier_missing"),
+        (None, "N/A", "option_snapshot_multiplier_missing"),
+        ("N/A", "N/A", "option_snapshot_multiplier_missing"),
+    ],
+)
+def test_sdk_optional_multiplier_sentinel_preserves_verified_size_only(
+    market, size, multiplier, expected_reason,
+):
+    make_option, make_snapshot, receipt = (
+        (_us_option, _snapshot, _RECEIPT) if market == "US" else (_hk_option, _hk_snapshot, _RECEIPT_HK)
+    )
+    context = {} if market == "US" else {"underlier_observation": _hk_underlier(_HK_NOW), "now_utc": _HK_NOW}
+    observation = make_option(snapshot_row=make_snapshot(
+        option_contract_size=size, option_contract_multiplier=multiplier,
+    ), **receipt, **context)
+    if expected_reason is None:
+        assert observation.status == "ready"
+        assert observation.multiplier == observation.snapshot_multiplier == observation.chain_multiplier == 100
+    else:
+        assert observation.status == "data_unavailable"
+        assert expected_reason in observation.reason_codes
+        assert observation.multiplier is None
+
+
+@pytest.mark.parametrize("sec_status", [None, float("nan"), "N/A"])
+@pytest.mark.parametrize("suspension", [False, True])
+def test_missing_security_state_remains_unavailable_even_when_suspended(sec_status, suspension):
+    observation = _us_option(snapshot_row=_snapshot(sec_status=sec_status, suspension=suspension), **_RECEIPT)
+    assert observation.status == "data_unavailable"
+    assert "option_sec_status_missing" in observation.reason_codes
+    if suspension:
+        assert "option_suspended" in observation.reason_codes
+
+
 @pytest.mark.parametrize(
     ("chain_overrides", "snapshot_overrides", "expected_reason"),
     [

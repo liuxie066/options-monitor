@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1428 (`src`: 605, `domain`: 98, `scripts`: 21, `tests`: 700)
-- Internal import edges: 12687 total, 4434 production/script edges excluding tests
+- Python files scanned: 1433 (`src`: 606, `domain`: 98, `scripts`: 21, `tests`: 704)
+- Internal import edges: 12744 total, 4462 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,9 +31,9 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|722| domain
+  application -->|728| domain
   application -->|4| domain_services
-  application -->|209| infrastructure
+  application -->|210| infrastructure
   application -->|2| om_strategy_core
   application -->|60| storage
   domain_services -->|6| domain
@@ -51,11 +51,11 @@ flowchart LR
   scripts -->|1| tests
   src -->|1| application
   storage -->|1| domain
-  tests -->|6248| application
-  tests -->|705| domain
+  tests -->|6271| application
+  tests -->|706| domain
   tests -->|2| domain_services
   tests -->|431| infrastructure
-  tests -->|485| interfaces
+  tests -->|490| interfaces
   tests -->|13| om_strategy_core
   tests -->|46| scripts
   tests -->|77| storage
@@ -65,9 +65,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 722 |
+| application | domain | 728 |
 | interfaces | application | 240 |
-| application | infrastructure | 209 |
+| application | infrastructure | 210 |
 | scripts | application | 70 |
 | application | storage | 60 |
 | infrastructure | application | 46 |
@@ -90,9 +90,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 6248 |
-| tests | domain | 705 |
-| tests | interfaces | 485 |
+| tests | application | 6271 |
+| tests | domain | 706 |
+| tests | interfaces | 490 |
 | tests | infrastructure | 431 |
 | tests | storage | 77 |
 | tests | scripts | 46 |
@@ -105,10 +105,10 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 303 |
+| src.application | domain.domain | 308 |
 | src.interfaces | src.application | 189 |
 | src.application.ledger | domain.domain | 184 |
-| src.application | src.infrastructure | 143 |
+| src.application | src.infrastructure | 144 |
 | src.application.ledger | domain.domain.ledger | 76 |
 | src.application.trades | domain.domain | 67 |
 | src.application.research | src.application | 59 |
@@ -117,7 +117,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | domain.storage | 47 |
 | src.infrastructure | src.application | 45 |
 | src.application | src.application.ledger | 42 |
-| src.application | domain.domain.engine | 33 |
+| src.application | domain.domain.engine | 34 |
 | src.application.trades | src.application.ledger | 33 |
 | domain.domain | domain.domain.ledger | 33 |
 | src.application.inbound | src.application | 29 |
@@ -191,18 +191,18 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 138 |
-| domain.domain.symbol_identity | 102 |
+| src.application.agent_tool_contracts | 140 |
+| domain.domain.symbol_identity | 103 |
 | src.application.payload_helpers | 102 |
 | src.application.ledger.api | 94 |
-| src.application.account_config | 77 |
+| src.application.account_config | 78 |
 | src.application.agent_tool_config | 76 |
-| domain.domain.trade_contract_identity | 73 |
+| domain.domain.trade_contract_identity | 74 |
 | domain.domain.decision_state_fingerprint | 64 |
-| domain.domain.option_position_identity | 60 |
-| src.infrastructure.io_utils | 58 |
+| domain.domain.option_position_identity | 61 |
+| src.infrastructure.io_utils | 59 |
+| src.application.runtime_paths | 54 |
 | domain.domain.ledger.position_fields | 53 |
-| src.application.runtime_paths | 52 |
 | src.application.plugin_runtime | 48 |
 | domain.domain.trade_execution | 40 |
 | src.infrastructure.exchange_rates | 35 |

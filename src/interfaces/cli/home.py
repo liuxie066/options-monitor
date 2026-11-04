@@ -24,6 +24,7 @@ def command_guide() -> str:
   om daily-brief latest              查看已有决策简报
   om scan --help                     扫描机会；保留现有参数和输出
   om position-advice evaluate --help 主动评估持仓；默认人工展示，--format json 输出业务 JSON
+  om position-advice roll-down --help 查询 short put 向下移仓；请求须指定最大新到期日
   om symbols list                    查看单市场标的；双市场时指定 --market
   om symbols add --help              新增标的；编辑和删除见 om symbols --help
   om accounts list                   查看账户映射；新增、编辑、删除见 om accounts --help
