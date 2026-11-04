@@ -23,6 +23,7 @@ OM 面向自己做交易决策的期权投资者，支持富途账户及长桥�
 | Combo Yield | 查看组合候选及策略含义 | [策略架构](docs/STRATEGY_ARCHITECTURE.md)、[术语对照](docs/STRATEGY_TERMINOLOGY.md) |
 | Wheel 轮转策略 | 管理卖出 Put 后接股、卖出 Call 后交股的轮转分支；需启用，仍受身份与交割证据约束，归属不明确时需人工确认 | [轮转策略](docs/WHEEL_STRATEGY_PRD.md) |
 | 持仓评估与建议 | 评估账本或临时输入的多笔 short Put / Call，扫描时复用同一规则；展示指标、持有／平仓依据及休市历史参考，不自动平仓；需安装并启用 `position-advice` 插件 | [持仓建议](docs/CLOSE_ADVICE_CONTRACT.md) |
+| Short Put 向下移仓 | 为已有 short Put 查询更低行权价、严格价外且双腿扣费后净收现金的替代合约，比较收益率与延期；需安装并启用 `position-advice` 插件 | [移仓查询](docs/TOOL_REFERENCE.md#short-put-向下移仓) |
 | 决策简报与提醒 | 查看最近成功扫描、候选变化和数据缺口；发送消息需安装并配置对应渠道插件 | [报告与通知规则](docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md) |
 | 候选解释与决策历史 | 解释已有扫描的排序、未入选原因，查询明确关联的结果 | [工具参考](docs/TOOL_REFERENCE.md)、[决策历史](docs/DECISION_HISTORY.md) |
 | 期权账本 | 查询开仓、平仓、指派和行权记录；写入与修复需要预览和确认 | [账本架构](docs/LEDGER_ARCHITECTURE.md)、[修账指南](docs/OPTION_POSITIONS_REPAIR.md) |
@@ -273,6 +274,34 @@ om plugins uninstall position-advice         # 预览移除；加 --confirm 才�
 `symbols list` 在只配置一个市场时不需要市场参数；配置多个市场后，加 `--market us` 或 `--market hk`。
 
 文档中的短命令 `om`、`om-agent` 分别对应 `"$HOME/.local/bin/om"`、`"$HOME/.local/bin/om-agent"`。如果终端已经能识别短命令，可以省去完整路径；否则继续使用上面的写法即可。
+
+### 查询已有 Short Put 的向下移仓候选
+
+需要把已有 short Put 换成更低行权价、同时继续净收现金时，可使用 `position-advice roll-down`。需安装并启用 `position-advice` 插件；一次选择一个账户内的一个未到期标准 short Put 开仓批次（lot），按全部剩余张数等量替换。
+
+查询处理价内、平值及价外幅度不超过 5% 的旧仓；更深价外的旧仓返回“不适用”，不搜索替代合约。新 Put 必须同标的、同市场、同币种及已验证乘数，行权价同时严格低于旧行权价和有效现价；到期日不早于旧到期日，也不超过你指定的上限。
+
+先将以下内容保存为 `roll-request.json`，把示例账户、lot ID 和日期替换成自己的选择。`account`、`lot_id`、`max_new_expiration` 必填，最大到期日没有默认值；日期格式为 `YYYY-MM-DD`，且不得早于旧仓到期日。
+
+```json
+{
+  "account": "sample",
+  "lot_id": "<existing-lot-id>",
+  "max_new_expiration": "2026-12-18"
+}
+```
+
+```bash
+# 美股；港股将 us 换成 hk，所选账户和 lot 也须属于该市场
+"$HOME/.local/bin/om" position-advice roll-down \
+  --config-key us --request-file roll-request.json
+```
+
+需要结构化结果时加 `--format json`。可在请求文件中另加 `min_new_strike`（正数，且低于旧行权价和有效现价）及 `limit`（1–50，默认 10，仅限制排序后的展示数量）。
+
+结果同时展示行权价降幅、延期天数、扣除两腿估算费用后的净增现金，以及新旧持仓到期归零假设下的最高年化比较。候选优先按“净增现金 ÷ 新履约义务 × 365 ÷ 新仓剩余天数”降序排列，因此延长到期日也会影响收益比较。**净收现金不等于交易盈利**，旧仓历史权利金和降低的名义履约义务不计入本次净增现金。
+
+报价使用旧仓 ask 买回、新仓 bid 卖出的单腿现金流估算，不是券商组合盘口，也不保证组合成交。查询会连接行情并保存独立请求报告，不下单、不写业务账本、不发通知；候选缺行情或覆盖不完整时会保留缺口，只有完整搜索后的零候选才表示本次没有符合条件的合约。详细输出、原因和收益口径见[移仓工具参考](docs/TOOL_REFERENCE.md#short-put-向下移仓)与[移仓契约](docs/CLOSE_ADVICE_CONTRACT.md#short-put-向下移仓主动查询)。
 
 ### 需要时再开启通知、Bot 和后台运行
 
