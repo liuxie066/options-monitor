@@ -76,14 +76,22 @@ def check_scope(paths, allowed):
         raise ValueError("repair changed files outside its approved local scope: " + ", ".join(sorted(unexpected)))
 
 
-def persist_findings(root, review_run, result, target):
-    """Persist before moving the review cursor; repeated keys reuse the same local task."""
+def task_summaries(root):
+    return [{"id": task.get("id", path.parent.name), "key": task["finding"]["key"], "status": task["status"],
+             "fix_scope": task["finding"].get("fix_scope", []), "sources": task.get("sources", [])}
+            for path in sorted((root / "repairs").glob("*/task.json"))
+            for task in [json.loads(path.read_text())]]
+
+
+def persist_findings(root, review_run, result, target, *, source=None):
+    """Persist before moving either cursor; equal keys share a task, conflicts stay distinct."""
     tasks = []
     for finding in result["confirmed_findings"]:
         evidence = (review_run / "work" / finding["evidence_log"]).resolve()
         if not evidence.is_relative_to((review_run / "work").resolve()) or not evidence.is_file() or not evidence.stat().st_size:
             raise ValueError("confirmed finding has no durable reproduction evidence")
         task_id = hashlib.sha256(finding["key"].encode()).hexdigest()[:16]
+        sources = [source or {"kind": "review", "commit": finding["commit"], "verification_sha": target}]
         folder = root / "repairs" / task_id
         folder.mkdir(parents=True, exist_ok=True)
         record = folder / "task.json"
@@ -91,11 +99,22 @@ def persist_findings(root, review_run, result, target):
             save(record, {
                 "id": task_id, "finding": finding, "base_sha": target,
                 "status": "pending", "stage": "reproduce", "review_run": str(review_run),
-                "evidence": str(evidence), "created_at": timestamp(), "attempts": [],
+                "evidence": str(evidence), "created_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+                "attempts": [], "sources": sources,
             })
             (folder / "issue-draft.md").write_text(
                 f"# {finding['title']}\n\n触发：{finding['failure_scenario']}\n\n预期：{finding['expected']}\n\n实际：{finding['actual']}\n\nOwner：`{finding['owner_path']}`\n\n来源提交：`{finding['commit']}`\n\n本地证据：{evidence.name}\n\n状态：仅本地记录，尚未发布 issue。\n", encoding="utf-8",
             )
+        else:
+            task = json.loads(record.read_text())
+            task.setdefault("sources", [])
+            task.setdefault("related_evidence", [])
+            for origin in sources:
+                if origin not in task["sources"]:
+                    task["sources"].append(origin)
+            if str(evidence) not in task["related_evidence"]:
+                task["related_evidence"].append(str(evidence))
+            save(record, task)
         tasks.append(task_id)
     return tasks
 
@@ -212,11 +231,38 @@ def dependency_inputs_match(config, root, base):
 def repair_one(root, config, run_dir, deadline, invoke):
     """Resume at most one nonterminal task; findings and repair status outlive review cursors."""
     records = sorted((root / "repairs").glob("*/task.json")) if (root / "repairs").exists() else []
-    pending = [(path, json.loads(path.read_text())) for path in records]
-    pending = [(path, task) for path, task in pending if task["status"] not in TERMINAL]
+    all_tasks = [(path, json.loads(path.read_text())) for path in records]
+    pending = [(path, task) for path, task in all_tasks if task["status"] not in TERMINAL]
     if not pending:
         return {"status": "no_pending_repairs"}
-    record, task = pending[0]
+    issue_state_path = root / "issue-state.json"
+    issue_state = json.loads(issue_state_path.read_text())["issues"] if issue_state_path.exists() else {}
+    eligible, deferred = [], []
+    for path, task in pending:
+        reason = None
+        for source in task.get("sources", []):
+            if source["kind"] != "issue":
+                continue
+            latest = issue_state.get(str(source["number"]), {})
+            current = config.get("issue_inputs", {}).get(str(source["number"]), {})
+            if (not config.get("issue_intake_ready") or latest.get("outcome") != "confirmed"
+                    or latest.get("target") != config.get("issue_target")
+                    or latest.get("repair_task") != task["id"] or not current or current.get("assigned")
+                    or latest.get("input_digest") != current.get("input_digest")):
+                reason = "issue changed, is unconfirmed, or awaits current intake verification"
+        older_conflicts = [other["id"] for _, other in all_tasks if other["id"] != task["id"]
+                           and other["status"] not in {"needs_triage", "blocked"}
+                           and (datetime.fromisoformat(other["created_at"]), other["id"]) < (datetime.fromisoformat(task["created_at"]), task["id"])
+                           and set(other["finding"]["fix_scope"]) & set(task["finding"]["fix_scope"])]
+        if older_conflicts:
+            reason = "overlapping earlier local work requires resolution: " + ", ".join(older_conflicts)
+        if reason:
+            deferred.append({"id": task["id"], "reason": reason})
+        else:
+            eligible.append((path, task))
+    if not eligible:
+        return {"status": "deferred", "tasks": deferred}
+    record, task = min(eligible, key=lambda row: (datetime.fromisoformat(row[1]["created_at"]), row[1]["id"]))
     folder = record.parent
     attempt = folder / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + f"-{os.getpid()}")
     attempt.mkdir()

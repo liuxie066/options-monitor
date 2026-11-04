@@ -99,8 +99,19 @@ def local_repository(tmp_path):
 
 
 @pytest.mark.parametrize("interrupt_stage", [None, "implement", "verify"])
-def test_same_run_reproduces_repairs_verifies_and_independently_reviews_without_delivery(tmp_path, monkeypatch, interrupt_stage):
+@pytest.mark.parametrize("issue_origin", [False, True])
+def test_same_run_reproduces_repairs_verifies_and_independently_reviews_without_delivery(tmp_path, monkeypatch, interrupt_stage, issue_origin):
     root, config, run, task_id = local_repository(tmp_path)
+    if issue_origin:
+        record = root / "repairs" / task_id / "task.json"
+        task = json.loads(record.read_text())
+        task["sources"] = [{"kind": "issue", "number": 1, "verification_sha": task["base_sha"]}]
+        repair.save(record, task)
+        repair.save(root / "issue-state.json", {"issues": {"1": {
+            "outcome": "confirmed", "target": task["base_sha"], "repair_task": task_id, "run_dir": str(run), "input_digest": "unchanged",
+        }}})
+        config.update({"issue_intake_ready": True, "issue_target": task["base_sha"],
+                       "issue_inputs": {"1": {"input_digest": "unchanged", "assigned": False}}})
     calls, commands = [], []
     original_run = repair.run
 
