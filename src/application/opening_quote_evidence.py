@@ -46,7 +46,7 @@ _NON_CONTINUOUS_MARKET_STATES = frozenset(
         "TRADE_AUCTION",
     }
 )
-_MISSING_ENUM_VALUES = frozenset({"", "N/A", "NONE", "UNKNOWN"})
+_MISSING_ENUM_VALUES = frozenset({"", "N/A", "NONE", "NAN", "UNKNOWN"})
 _OPEND_OPTION_SECURITY_TYPE = "DRVT"
 
 
@@ -401,7 +401,10 @@ def normalize_option_observation(
         next(iter(snapshot_multiplier_values))
         if len(snapshot_multiplier_values) == 1
         and all(
-            value is None or (isinstance(value, str) and not value.strip()) or _positive_int(value) is not None
+            # The SDK emits N/A for an absent index-only contractMultiplier;
+            # a valid contractSizeFloat still supplies the stock-option size.
+            value is None or (isinstance(value, str) and value.strip().upper() in {"", "N/A"})
+            or _positive_int(value) is not None
             for value in (snapshot.get("option_contract_size"), snapshot.get("option_contract_multiplier"))
         )
         else None

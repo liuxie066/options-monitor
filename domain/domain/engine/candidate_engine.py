@@ -408,8 +408,29 @@ def validate_opening_contract_evidence(
     now_utc: Any = None,
     max_snapshot_age_seconds: int = 300,
 ) -> dict[str, Any]:
-    """Validate canonical opening-contract identity and quote evidence."""
+    """Validate canonical opening-contract identity and sell-side quote evidence."""
+    return validate_option_contract_evidence(
+        raw, mode=mode, quote_side="sell", now_utc=now_utc,
+        max_snapshot_age_seconds=max_snapshot_age_seconds,
+    )
 
+
+def validate_option_contract_evidence(
+    raw: dict[str, Any] | Any,
+    *,
+    mode: StrategyMode | str,
+    quote_side: Literal["buy", "sell"],
+    now_utc: Any = None,
+    max_snapshot_age_seconds: int = 300,
+) -> dict[str, Any]:
+    """Validate a standard option observation for the side being estimated.
+
+    Buybacks can use a positive ask with zero bid. The normalized sell-side
+    ``option_no_current_bid`` exclusion is the only non-ready observation accepted for buys;
+    all identity, freshness and other eligibility checks remain required.
+    """
+    if quote_side not in {"buy", "sell"}:
+        raise ValueError("quote_side must be buy or sell")
     mode_norm = normalize_strategy_mode(mode)
     if not isinstance(raw, dict):
         raise CandidateCalculationError(
@@ -419,8 +440,15 @@ def validate_opening_contract_evidence(
             threshold="object",
         )
     opening_status = _first_text(raw, "opening_contract_status").lower()
-    if opening_status != "ready":
-        reason_codes = raw.get("opening_contract_reason_codes")
+    reason_codes = raw.get("opening_contract_reason_codes")
+    buyback_without_bid = (
+        quote_side == "buy"
+        and opening_status == "ineligible"
+        and isinstance(reason_codes, (list, tuple))
+        and set(reason_codes) == {"option_no_current_bid"}
+        and _coerce_float(raw.get("bid")) == 0
+    )
+    if opening_status != "ready" and not buyback_without_bid:
         raise CandidateCalculationError(
             _opening_not_ready_reason(opening_status),
             "normalized OpenD opening contract is not ready",
@@ -518,7 +546,10 @@ def validate_opening_contract_evidence(
             threshold="non-empty",
         )
 
-    bid = _required_positive_float(raw, "bid")
+    if quote_side == "buy" and _coerce_float(raw.get("bid")) == 0:
+        bid = 0.0
+    else:
+        bid = _required_positive_float(raw, "bid")
     ask = _required_positive_float(raw, "ask")
     if ask < bid:
         raise CandidateCalculationError(

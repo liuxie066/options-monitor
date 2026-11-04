@@ -34,7 +34,7 @@
 
 实例选择由原 `resolve_runtime_root` 负责（显式作用域、有效 `OM_RUNTIME_ROOT`、用户记录、代码目录）；配置请求中的 `config_path` 优先于 `config_key` 默认路径，相对配置及输入文件相对调用 cwd，env 文件相对代码根目录。账户和市场仍由工具 schema、配置身份与既有业务 owner 校验；`om tools` 不另选账户、市场或实例。账户增改删保留 `--config-yaml/--config-path`、`--rebuild-runtime-root` 和原配置发布/审计流程；默认写操作仍需 `OM_AGENT_ENABLE_WRITE_TOOLS=true` 与 `--confirm`，`--dry-run` 只预览。
 
-人工命令使用各领域原有格式与退出码；新增双格式的命令使用局部 `--format text|json`，不添加全局格式开关。`om position-advice evaluate` 默认人工展示；`--format json` 返回原 `position_advice.output.v1` 业务对象，`om tools run --tool position_advice_evaluate` 返回含该对象的原 envelope。成功、部分结果、合法空结果、插件未启用/不可用均完成请求并退出 0，行内不可评估保留原因；执行失败为 2，不能只凭退出码判断所有持仓都可评估。
+人工命令使用各领域原有格式与退出码；新增双格式的命令使用局部 `--format text|json`，不添加全局格式开关。`om position-advice evaluate` 默认人工展示；`--format json` 返回原 `position_advice.output.v1` 业务对象，`om tools run --tool position_advice_evaluate` 返回含该对象的原 envelope。`om position-advice roll-down` 同样默认人工展示，JSON 格式返回原 `short_put_roll.output.v1` 业务对象；Tool `short_put_roll_candidates` 保留 envelope。成功、部分结果、合法空结果、范围外未搜索、插件未启用/不可用均完成请求并退出 0，证据缺口保留原因；输入或执行失败为 2，不能只凭退出码判断查询结果是否可用。
 
 ## Manifest
 
@@ -179,6 +179,7 @@ CSP 现金担保与余量使用 `query_cash_headroom`。其 `assessment.supporte
 
 - `close_advice_read`
 - `position_advice_evaluate`：按需行情及隔离请求报告，不写账本或发送通知
+- `short_put_roll_candidates`：已有单笔 short put 的向下移仓查询，按需行情及独立请求报告，不下单、不写账本、不通知
 
 ### 通知
 
@@ -429,6 +430,22 @@ stdout；休市时 `unable/market_closed` 是有效的不可评估结果，不�
 ```
 
 手工请求示例：`{"account":"sample","positions":[{"input_id":"manual-1","input_as_of_utc":"2026-10-30T15:00:00Z","symbol":"NVDA","option_type":"put","expiration":"2026-12-18","strike":100,"contracts_open":1,"multiplier":100,"currency":"USD","premium":2}]}`。请填写自己的持仓事实与时间；此示例不是有效行情。休市参考保留原始 DTE/价格；没有兼容封存记录时不可用。该工具显式声明行情读取与本地报告写入，属于本地物化能力，不是 pure-read；业务账本与通知无写入。
+
+### Short Put 向下移仓
+
+`short_put_roll_candidates` 是 Position Advice 的同级主动查询，复用同一可选插件及启用边界；原 Close Advice 止盈政策仍不产生 roll 建议。
+
+```bash
+./om position-advice roll-down --config-key us --request-file /path/to/roll-request.json
+./om position-advice roll-down --request-file /path/to/roll-request.json --format json
+./om tools run --tool short_put_roll_candidates --input-file /path/to/roll-request.json
+```
+
+请求文件为 JSON 对象：`{"account":"sample","lot_id":"<existing-lot-id>","max_new_expiration":"YYYY-MM-DD","min_new_strike":90,"limit":10}`。请替换账户、真实 lot 与日期；`account`、`lot_id`、`max_new_expiration` 必填，最大到期日没有默认值。`min_new_strike` 可省略，提供时必须为正数且低于旧 strike；进入移仓范围后还必须严格低于有效现价，否则为输入错误且不请求期权链。`limit` 为 1..50 的整数，默认 10，只限制排序后的展示。可在文件中选择 `config_key`；CLI 的 `--config-key us|hk` 覆盖文件值，账户/市场必须与旧 lot 相符。
+
+查询仅替换一个旧 lot 的全部剩余张数；旧仓价内、平值或价外幅度不超过 5% 才搜索。新仓同标的、同张数、较低 strike 且严格价外，到期日不早于旧到期日且不超过请求上限，两腿扣费净增现金必须大于零。人工展示并列显示 strike 降幅、延期、新仓价外幅度、净增现金年化、新仓到期归零最高年化及相对旧仓变化（pp），并保留两腿费用、资金分母、DTE、来源/时点及缺口原因。净增现金是现金流，不等于交易盈利；旧 ask 买回与新 bid 卖出是单腿现金估算，不保证组合执行。
+
+JSON 业务输出为 `short_put_roll.output.v1`，含旧仓快照、评估时间、请求范围 `scope`、覆盖 `coverage`、已排序 `candidates`、展示/省略数、原因及独立报告路径。`status` 表示执行/插件状态，`outcome` 区分：`not_applicable` 为旧仓价外超过 5%、`coverage=null` 且未搜索；`none` 为覆盖完整的合法零候选；`unable` 为数据缺失/过期或未评价范围使结论不足；`found` 为已找到候选，仍可能 `status=partial`。部分排名仅覆盖已评价集合，不能据此排除缺口中的机会。`disabled` 表示插件未启用；`unavailable` 为查询不可用，插件缺失与行情依赖失败通过原因码区分。新腿已确认不合格且证据完整时计入排除；真实缺失或陈旧证据仍保留覆盖缺口。查询按需读取行情并写独立请求报告；报告写入失败以 `REPORT_WRITE_FAILED` 返回执行错误，CLI 退出 2，不提供未保存成功的报告路径。不下单、不改账本、不发通知，也不接入 Tick 或 Daily Brief。完整经济口径见[移仓合同](CLOSE_ADVICE_CONTRACT.md#short-put-向下移仓主动查询)。
 
 ### Daily Brief
 

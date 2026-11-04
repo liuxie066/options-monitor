@@ -23,6 +23,7 @@ from domain.domain.close_advice import (
 from domain.domain.option_position_identity import normalize_account
 from domain.domain.trade_contract_identity import contract_share_quantity
 
+from .economics import remaining_max_annualized_return as _remaining_max_annualized_return
 from .presentation import format_close_advice_reason
 
 
@@ -187,7 +188,9 @@ def evaluate_close_advice(inp: CloseAdviceInput) -> dict[str, Any]:
 
     net_capture_ratio = 1.0 - all_in_close_cost / opening_net_credit
     close_cost_ratio = all_in_close_cost / strike_notional
-    remaining_max_annualized_return = all_in_close_cost / capital_basis * 365 / dte
+    remaining_max_annualized_return = _remaining_max_annualized_return(
+        remaining_cash=all_in_close_cost, capital_basis=capital_basis, dte=dte,
+    )
     if not all(
         math.isfinite(value)
         for value in (

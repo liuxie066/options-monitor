@@ -10,6 +10,8 @@ from domain.domain.fee_calc import (
     FUTU_HK_FEE_SCHEDULE_URL,
     FUTU_HK_TERMINAL_FEE_SCHEDULE_VERSION,
     calc_futu_hk_terminal_fee,
+    estimate_futu_option_buy_fee,
+    estimate_futu_option_sell_fee,
 )
 
 
@@ -122,6 +124,91 @@ def test_calc_futu_option_fee_rejects_missing_or_unsupported_currency() -> None:
             calc_futu_option_fee(currency, 1.0, contracts=1, multiplier=100, is_sell=True)
         exc = _caught.value
         assert "USD or HKD" in str(exc)
+
+
+@pytest.mark.parametrize(("currency", "price", "contracts", "multiplier", "amount", "basis", "url"), [
+    ("USD", 1.0, 1, 100, 2.8233, "futu_us_candidate_upper_bound_2026-08-06", "https://www.futuhk.com/en/support/topic2_283"),
+    ("USD", 1.0, 3, 100, 4.4499, "futu_us_candidate_upper_bound_2026-08-06", "https://www.futuhk.com/en/support/topic2_283"),
+    ("USD", 0.05, 20, 10, 19.3418, "futu_us_candidate_upper_bound_2026-08-06", "https://www.futuhk.com/en/support/topic2_283"),
+    ("HKD", 1.0, 1, 100, 21.0, "futu_hk_tier1_upper_bound_2026-07-22", "https://www.futuhk.com/en/support/topic2_335"),
+    ("HKD", 2.0, 3, 500, 30.0, "futu_hk_tier1_upper_bound_2026-07-22", "https://www.futuhk.com/en/support/topic2_335"),
+    ("HKD", 0.01, 3, 500, 18.0, "futu_hk_tier1_upper_bound_2026-07-22", "https://www.futuhk.com/en/support/topic2_335"),
+])
+def test_candidate_sell_facade_preserves_existing_amounts_and_provenance(currency, price, contracts, multiplier, amount, basis, url):
+    out = estimate_futu_option_sell_fee(currency, price, contracts=contracts, multiplier=multiplier)
+    assert out.to_dict() == {
+        "amount": amount,
+        "currency": currency,
+        "fee_schedule_version": "futu_option_sell_fee.v1",
+        "fee_basis": basis,
+        "fee_schedule_url": url,
+    }
+
+
+@pytest.mark.parametrize(("price", "contracts", "multiplier", "expected"), [
+    (1.0, 1, 100, 2.8033),
+    (1.0, 3, 100, 4.4299),
+    (1.0, 10, 100, 14.633),
+    (0.05, 20, 10, 19.266),
+    (1.0, 3000, 100, 4384.9),
+])
+def test_candidate_buy_uses_canonical_us_fees_and_conservative_platform_bound(price, contracts, multiplier, expected):
+    out = estimate_futu_option_buy_fee("USD", price, contracts=contracts, multiplier=multiplier)
+    assert out.to_dict() == {
+        "amount": expected,
+        "currency": "USD",
+        "fee_schedule_version": "futu_option_buy_fee.v1",
+        "fee_basis": "futu_us_candidate_upper_bound_2026-08-06",
+        "fee_schedule_url": "https://www.futuhk.com/en/support/topic2_283",
+    }
+    sell = estimate_futu_option_sell_fee("USD", price, contracts=contracts, multiplier=multiplier)
+    # The candidate platform assumption is identical on both sides; only the
+    # canonical SEC and TAF sell charges account for this difference.
+    sell_only_fees = max(price * contracts * multiplier * 0.0000206, 0.01) + max(0.00329 * contracts, 0.01)
+    assert sell.amount - out.amount == pytest.approx(sell_only_fees, abs=1e-6)
+
+
+@pytest.mark.parametrize("estimate", [estimate_futu_option_buy_fee, estimate_futu_option_sell_fee])
+def test_candidate_actual_q_is_not_one_contract_fee_times_q(estimate):
+    single_us = estimate("USD", 1, contracts=1, multiplier=100).amount
+    triple_us = estimate("USD", 1, contracts=3, multiplier=100).amount
+    assert triple_us < single_us * 3
+    assert triple_us == pytest.approx(4.4299 if estimate is estimate_futu_option_buy_fee else 4.4499)
+    # HK's platform fee is per order, while the tariff is per contract.
+    assert estimate("HKD", 1, contracts=3, multiplier=100).amount == 27
+    assert estimate("HKD", 1, contracts=1, multiplier=100).amount * 3 == 63
+
+
+@pytest.mark.parametrize(("price", "contracts", "multiplier", "expected"), [
+    (1.0, 1, 100, 21.0),
+    (2.0, 3, 100, 27.0),
+    (2.0, 3, 500, 30.0),
+    (0.01, 3, 500, 18.0),
+    (0.010001, 3, 500, 27.0),
+])
+def test_candidate_buy_retains_hk_commission_tier_tariff_and_provenance(price, contracts, multiplier, expected):
+    out = estimate_futu_option_buy_fee("港币", price, contracts=contracts, multiplier=multiplier)
+    sell = estimate_futu_option_sell_fee("HKD", price, contracts=contracts, multiplier=multiplier)
+    assert out.amount == expected == sell.amount
+    assert out.currency == "HKD"
+    assert out.fee_basis == sell.fee_basis == "futu_hk_tier1_upper_bound_2026-07-22"
+    assert out.fee_schedule_url == sell.fee_schedule_url == FUTU_HK_FEE_SCHEDULE_URL
+    assert out.fee_schedule_version == "futu_option_buy_fee.v1"
+
+
+@pytest.mark.parametrize("estimate", [estimate_futu_option_buy_fee, estimate_futu_option_sell_fee])
+@pytest.mark.parametrize(("contracts", "multiplier"), [(0, 100), (1.5, 100), (True, 100), (1, 0), (1, None), (1, 1.5)])
+def test_candidate_fee_requires_actual_integral_quantity_and_observed_multiplier(estimate, contracts, multiplier):
+    with pytest.raises((ValueError, TypeError)):
+        estimate("USD", 1, contracts=contracts, multiplier=multiplier)
+
+
+def test_candidate_buy_requires_multiplier_and_supported_currency():
+    with pytest.raises(TypeError):
+        estimate_futu_option_buy_fee("USD", 1, contracts=1)
+    for currency in (None, "", "CNY", "EUR"):
+        with pytest.raises(ValueError, match="USD or HKD"):
+            estimate_futu_option_buy_fee(currency, 1, contracts=1, multiplier=100)
 
 
 def test_calc_futu_us_stock_fee_includes_sell_only_regulatory_fees() -> None:

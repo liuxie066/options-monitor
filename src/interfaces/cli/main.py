@@ -190,9 +190,10 @@ def _print(payload: dict[str, Any]) -> int:
 def _print_error(err: AgentToolError, args: argparse.Namespace | None = None) -> int:
     payload = build_response(tool_name="om", ok=False, error=build_error_payload(err))
     if args is not None and args.command == "position-advice" and args.format == "text":
-        from src.interfaces.cli.position_advice import render_position_advice
+        from src.interfaces.cli.position_advice import render_position_advice, render_short_put_roll
 
-        sys.stdout.write(render_position_advice(payload))
+        render = render_short_put_roll if args.position_advice_command == "roll-down" else render_position_advice
+        sys.stdout.write(render(payload))
         return 2
     return _print(payload)
 
@@ -288,9 +289,10 @@ def _main(argv: list[str] | None = None, *, parsed_args: argparse.Namespace | No
                 preview_notification_fn=preview_notification,
             )
             if args.command == "position-advice" and args.format == "text":
-                from src.interfaces.cli.position_advice import render_position_advice
+                from src.interfaces.cli.position_advice import render_position_advice, render_short_put_roll
 
-                sys.stdout.write(render_position_advice(result))
+                render = render_short_put_roll if args.position_advice_command == "roll-down" else render_position_advice
+                sys.stdout.write(render(result))
                 return 0
             return _print(result)
 

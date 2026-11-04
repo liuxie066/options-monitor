@@ -7,6 +7,7 @@ from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import mask_path
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_config import resolve_output_root
+from src.application.short_put_roll import SHORT_PUT_ROLL_INPUT_SCHEMA
 
 
 _CLOSE_ADVICE_READ_OUTPUT_CONTRACT: dict[str, Any] = {
@@ -153,5 +154,55 @@ POSITION_ADVICE_EVALUATE_TOOL = build_agent_tool(
     examples=({"input": {"config_key": "us", "account": "sample", "symbols": ["NVDA", "AAPL"]}},),
 )
 
-TOOLS = (CLOSE_ADVICE_READ_TOOL, POSITION_ADVICE_EVALUATE_TOOL)
-__all__ = ["CLOSE_ADVICE_READ_TOOL", "POSITION_ADVICE_EVALUATE_TOOL", "TOOLS"]
+def _short_put_roll_tool(payload: dict[str, Any]):
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.quality.gate import QualityGateBlocked
+    from src.application.runtime_paths import resolve_runtime_root, runtime_root_scope
+    from src.application.short_put_roll import short_put_roll_candidates
+
+    path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
+    base = repo_base()
+    resolved = resolve_runtime_root(repo_root=base)
+    runtime_root = path.expanduser().resolve().parent if resolved.source == "repo_default" else resolved.runtime_root
+    try:
+        with runtime_root_scope(runtime_root):
+            result = short_put_roll_candidates(payload, config=cfg, config_path=path, base_dir=base, runtime_root=runtime_root)
+    except ValueError as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+    except QualityGateBlocked as exc:
+        raise AgentToolError(code="QUALITY_GATE_BLOCKED", message=str(exc)) from exc
+    return result, [], {"source": "short_put_roll", "notifications_sent": False}
+
+
+SHORT_PUT_ROLL_CANDIDATES_TOOL = build_agent_tool(
+    name="short_put_roll_candidates",
+    catalog_summary="比较价内或接近平值的 short put 向下移仓方案、扣费净收入和收益率。",
+    description=(
+        "Query replacement candidates for one account's existing short-put lot. Old OTM distance must be <=5%; "
+        "new put must be strictly OTM, lower strike, same underlying and quantity, and positive cash after both fees. "
+        "max_new_expiration is required; never invent a default expiry. Rank by incremental cash annualized over the new DTE. "
+        "Single-leg old ask/new bid estimates, not executable combo quotes or trading profit. "
+        "Returns honest complete/partial/unavailable coverage and not_applicable for excluded old positions. "
+        "On-demand data and isolated request reports only; never orders, ledger changes or notifications."
+    ),
+    requires=("runtime_config", "canonical_ledger", "position_advice_plugin", "market_data_provider"),
+    capabilities=("position_advice", "short_put_roll", "read_only"),
+    read_only=True, risk_level="local_write",
+    side_effects=("fetches_market_data", "writes_isolated_request_reports"),
+    input_schema=SHORT_PUT_ROLL_INPUT_SCHEMA, allow_additional_input=False,
+    handler=_short_put_roll_tool,
+    output_contract={
+        "schema_version": "short_put_roll.output.v1", "evidence_type": "collection",
+        "primary_rows": "candidates", "row_count_field": "displayed", "freshness": "source_declared",
+        "fact_fields": ["account", "outcome", "position", "scope", "coverage", "pricing_basis", "candidates[].contract", "candidates[].strike",
+            "candidates[].net_credit", "candidates[].incremental_annualized_return", "candidates[].new_otm_pct",
+            "candidates[].extension_days"],
+        "freshness_fields": ["evaluated_at_utc", "source.spot_observed_at_utc"],
+        "missing_data_fields": ["reason_codes", "coverage.status"],
+        "model_preview_fields": ["status", "outcome", "position", "scope", "coverage", "candidates", "reason_codes", "pricing_basis", "interpretation"],
+    },
+    bot_input_fields=("config_key", "account", "lot_id", "max_new_expiration", "min_new_strike", "limit"),
+)
+
+TOOLS = (CLOSE_ADVICE_READ_TOOL, POSITION_ADVICE_EVALUATE_TOOL, SHORT_PUT_ROLL_CANDIDATES_TOOL)
+__all__ = ["CLOSE_ADVICE_READ_TOOL", "POSITION_ADVICE_EVALUATE_TOOL", "SHORT_PUT_ROLL_CANDIDATES_TOOL", "TOOLS"]

@@ -1,10 +1,10 @@
 # Close Advice Contract
 
-本文前半部记录持仓评估与建议（Position Advice）的现行契约及 `remaining_yield_capture.v3` 策略；后半部保留 v2 和 v3 的设计过程作为历史资料。运行规则以前半部及代码为准。
+本文前半部记录持仓评估与建议（Position Advice）的现行契约、`remaining_yield_capture.v3` 止盈策略及独立的 Short Put 向下移仓查询；后半部保留 v2 和 v3 的设计过程作为历史资料。运行规则以前半部及代码为准。
 
 Close Advice 判断已有 short Put / short Call 是否值得提前买回：净兑现至少 80% 开仓净权利金，且继续持有到期归零所能多取得的最高期权收益年化不超过 10% 时考虑提示平仓；临期远价外的仓位优先持有。OM 接受 Put 接股及 Covered Call 交股；指派本身不是提前平仓理由。
 
-它不建议新开仓，不 roll，不比较替代标的，不 reallocate，不根据方向、集中度或 short-vol thesis 产生平仓建议，也不处理 long option 的止盈或止损。Delta 只用于临期持有例外，不单独触发平仓。开仓候选仍由 Candidate Engine 负责。
+Close Advice 止盈策略不建议新开仓，不 roll，不比较替代标的，不 reallocate，不根据方向、集中度或 short-vol thesis 产生平仓建议，也不处理 long option 的止盈或止损。Delta 只用于临期持有例外，不单独触发平仓。开仓候选仍由 Candidate Engine 负责。Position Advice 的同级能力 `short_put_roll_candidates` 提供主动移仓查询，不改变本策略的 `close/hold/not_evaluable` 含义，也不要求先取得 `close` 结论。
 
 ## 决策状态
 
@@ -110,6 +110,26 @@ SQLite ledger position_lots
 人工 CLI 默认展示合约、原数据时间、评估模式、净兑现比例、剩余最高年化、资金分母、结论及原因；缺失指标显示不可用。追加 `--format json` 保留原业务 JSON 对象，`om tools run --tool position_advice_evaluate --input-file <JSON>`（兼容 `om-agent run`）保留工具 envelope。`success`、`partial`、合法空行、`disabled` 和 `unavailable` 都是完成请求，退出 0；输入或执行错误退出 2。部分与不可评估不会转换为合法空结果。历史参考单列历史结论；hold 仅说明现有策略未触发平仓条件。
 
 多个标的使用已配置且唯一的行情路由；非 watchlist 标的只在可解析到唯一有效路由时评估。行情链发现可能返回额外合约，但只评估所选持仓，不运行开仓候选策略。每次主动请求使用独立目录：`output_shared/position_advice_requests/<request_id>/`，其内部保留 `output_runs/<request_id>/required_data` 与封存报告；不会覆盖调度 latest。主动入口不发送通知，不更新 Daily Brief。显式选择的 runtime root 优先；没有选择实例时，使用所加载配置的父目录，账本、质量门禁和请求报告保持同一实例范围。
+
+### Short Put 向下移仓主动查询
+
+`short_put_roll_candidates` Tool 与 `om position-advice roll-down --request-file <JSON> [--config-key us|hk] [--format text|json]` 共用 `src/application/short_put_roll.py::short_put_roll_candidates`。纯经济计算、准入与排序由现有可选包内 `plugins/position-advice/src/om_position_advice_plugin/short_put_roll.py` 持有，费用复用 `domain/domain/fee_calc.py`；CLI 不重新计算收益或另排候选。它是止盈评估的同级能力，复用 Position Advice 的安装和启用边界，查询不会自动启用插件。
+
+请求必填 `account`、已有 `lot_id`、`max_new_expiration`（YYYY-MM-DD，无默认值）；可选 `min_new_strike > 0`、整数 `limit`（1..50，默认 10，仅限制展示）。提供最低新 strike 时必须低于旧 strike；对进入搜索范围的旧仓，取得有效现价后还要求最低新 strike 严格低于现价，否则返回输入错误且不请求期权链。一次仅处理该账户中一个有效、未到期的标准 short put，替换其全部 `contracts_open`，不合并 lot、不部分移仓、不增加张数。合约乘数来自证据，不默认 100。
+
+旧仓价外幅度为 `(spot - old_strike) / spot`，负值为价内。价内、平值及价外幅度 `<=5%` 纳入；超过 5% 返回 `outcome=not_applicable`、`coverage=null` 和 `old_position_outside_roll_scope`，不搜索替代期权链、不声称没有机会。现价缺失或过期则不可评估。新 put 必须同标的、市场、币种、乘数和交割单位，新 strike 同时严格低于旧 strike 与有效现价；新到期日不早于旧到期日且不超过请求上限，不套用 CSP 的 Delta、IV/RV 或最低开仓收益门槛。
+
+记 `Q` 为剩余张数，`M` 为已验证乘数，`K0/K1` 为旧/新 strike，`T0/T1` 为评估市场日期到旧/新到期日的自然日数。旧仓买回总支出 `C = old_ask × Q × M + old_buy_fee`；新卖出净收入 `N = new_bid × Q × M - new_sell_fee`；净增现金 `R = N - C` 必须严格大于零。两腿费用各按实际 Q 估计并保留币种、fee_basis 和版本；不按一张费用简单乘 Q。旧仓买回可使用 bid 为零而 ask 有效的正常报价；新仓卖出仍要求正 bid，两腿身份、新鲜度、市场状态与行情权限资格均须满足。资金分母 `B0/B1 = K0/K1 × Q × M`：
+
+- 净增现金期间回报：`R / B1`；净增现金年化：`R / B1 × 365 / T1`。
+- 旧仓继续持有到期归零最高年化：`C / B0 × 365 / T0`；新仓到期归零最高年化：`N / B1 × 365 / T1`。
+- 新旧到期归零最高年化之差以 pp 展示；延期为 `T1 - T0`，strike 降幅为 `(K0 - K1) / K0`。这些是到期归零假设下的上限口径，不是期望收益；净增现金不等于交易盈利。
+
+仅在同一旧 lot 内按净增现金年化降序，其次 strike 降幅降序、延后天数升序、净增现金降序，最后以合约身份稳定排序。先评价和排序已获取集合，再应用 limit；首行只代表该排序口径。缺少新仓 Delta、IV/RV 等展示指标不阻断有充分证据的现金估算，报价、现价、费用或身份缺失则保留不可评估原因。两条单腿分别按 ask/bid 的 `leg_cashflow_estimate` 不是组合盘口，也不保证组合可成交；休市或过期观察不能形成当前正净收入结论。
+
+业务结果为 `short_put_roll.output.v1`，保留旧仓、评估时点、`scope` 请求边界和实际已请求到期日、`coverage` 枚举/计数、候选、展示/省略数及原因。`status=success|partial|disabled|unavailable` 与 `outcome=found|none|unable|not_applicable` 分开表达：覆盖完整才可返回 `none`；有候选且存在未评价范围为 `found + partial`；没有合格候选但存在缺口为 `unable`。`disabled` 表示插件未启用；`unavailable` 的插件缺失与行情依赖失败按原因码分别展示。缺失诊断保留不可用，不补零。新腿证据完整且明确停牌或证券状态不正常时计入排除；伴随缺失或陈旧证据时仍计入未评价，旧腿不合格仍阻断整次查询。文字输出提供旧/新收益比较、两腿费用与证据；JSON 输出原业务对象，Tool 保留 envelope；完成请求退出 0，输入或执行错误退出 2。独立 request/result 报告写入失败返回 `REPORT_WRITE_FAILED` 执行错误，不作为行情依赖失败，也不返回未保存成功的报告路径。
+
+查询仅按需行情读取与独立请求报告，不下单、不写账本、不通知，不接入 scheduled Tick、Daily Brief 或原平仓提醒。它不改变旧仓生命周期及 `close/hold/not_evaluable` 含义，也不要求旧策略先判定 `close`。
 
 ### 行情时效与休市
 
