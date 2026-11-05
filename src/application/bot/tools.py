@@ -344,9 +344,9 @@ def tool_descriptions(
                 "description": _agent_description(definition.description, output_contract),
                 "input_schema": bot_schema,
                 "default_input": redact_value(default_input),
-                "examples": [dict(item) for item in definition.examples[:3]],
-                "capabilities": list(definition.capabilities),
-                "output_contract": output_contract,
+                "examples": _agent_examples(definition.examples, visible_fields),
+                "capabilities": [item for item in definition.capabilities if item != "read_only"],
+                "output_contract": _agent_output_contract(output_contract),
             }
         )
     return descriptions
@@ -663,12 +663,34 @@ def _is_hidden_bot_input(name: str) -> bool:
     return name in _BOT_HIDDEN_INPUT_NAMES or name.endswith(_BOT_HIDDEN_INPUT_SUFFIXES)
 
 
+def _agent_examples(examples: tuple[dict[str, Any], ...], visible_fields: set[str]) -> list[dict[str, Any]]:
+    for example in examples:
+        payload = example.get("input", example)
+        visible = {key: deepcopy(value) for key, value in payload.items() if key in visible_fields}
+        if visible and set(visible) != {"config_key"}:
+            return [{"input": visible}]
+    return []
+
+
+def _agent_output_contract(output_contract: dict[str, Any]) -> dict[str, Any]:
+    # Only a catalog hint. Execution and observation admission resolve the full
+    # contract from AgentTool, independently of this model-facing projection.
+    compact = {key: output_contract[key] for key in ("schema_version", "primary_rows") if key in output_contract}
+    fields = (
+        output_contract.get("fact_fields")
+        or output_contract.get("model_value_fields")
+        or output_contract.get("model_preview_fields")
+        or []
+    )
+    if fields:
+        compact["fact_fields"] = list(dict.fromkeys(field.split(".", 1)[0].removesuffix("[]") for field in fields))
+    return compact
+
+
 def _agent_description(description: str, output_contract: dict[str, Any]) -> str:
     parts = [str(description).strip()]
     if output_contract.get("primary_rows"):
         parts.append(f"Returns primary collection `{output_contract['primary_rows']}`.")
-    if output_contract.get("fact_fields"):
-        parts.append("Key result fields: " + ", ".join(output_contract["fact_fields"]) + ".")
     if output_contract.get("source_label"):
         parts.append(f"Source: {output_contract['source_label']}.")
     return " ".join(part for part in parts if part)

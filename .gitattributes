@@ -2,3 +2,6 @@
 AGENTS.md export-ignore
 CLAUDE.md export-ignore
 .agents export-ignore
+
+# Maintainer measurements are not part of release archives.
+docs/reviews/bot-tool-definition-size-20261105.md export-ignore
