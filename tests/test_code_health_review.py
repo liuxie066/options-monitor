@@ -97,63 +97,27 @@ def test_smoke_accepts_empty_plan_without_advancing():
     assert validate_result(result([], "complete"), []) == []
 
 
-@pytest.mark.parametrize(("count", "has_issues", "expected"), [
-    (0, False, 300), (1, False, 300), (3, False, 900), (9, False, 1350),
-    (10, False, 1384), (10000, False, 1770),
-    (1, True, 300), (3, True, 600), (9, True, 900), (10, True, 923),
-])
-def test_review_budget_scales_with_actual_commits_and_reserves_other_stages(monkeypatch, count, has_issues, expected):
+@pytest.mark.parametrize(("remaining", "expected"), [(1800, 600), (601, 600), (450, 450), (30, 30), (29, None), (0, None)])
+def test_review_unit_budget_is_bounded_by_phase_remaining(monkeypatch, remaining, expected):
     monkeypatch.setattr(review.time, "monotonic", lambda: 0)
-    config = {"timeout_seconds": 1800, "review_timeout_seconds": 900,
-              "issue_timeout_seconds": 600, "repair_enabled": True}
-    allocated = review.review_stage_config(config, 1800, count, has_issues=has_issues)
-    assert allocated["timeout_seconds"] == expected
-    assert config["timeout_seconds"] == 1800
-    assert allocated["issue_timeout_seconds"] == 600
-    assert allocated["timeout_seconds"] < 1800 - (600 if has_issues else 0)
-
-
-@pytest.mark.parametrize(("baseline", "count", "expected"), [
-    (0, 1, 30), (60, 1, 30), (60, 3, 90), (450, 1, 150), (450, 3, 450), (1200, 1, 400),
-])
-def test_review_budget_honors_custom_three_unit_baseline_and_unit_minimum(monkeypatch, baseline, count, expected):
-    monkeypatch.setattr(review.time, "monotonic", lambda: 0)
-    config = {"timeout_seconds": 1800, "review_timeout_seconds": baseline, "repair_enabled": True}
-    assert review.review_stage_config(config, 1800, count, has_issues=False)["timeout_seconds"] == expected
-
-
-@pytest.mark.parametrize(("total", "remaining", "has_issues", "repair_enabled", "expected"), [
-    (1800, 60, False, True, 30),
-    (1800, 59, False, True, None),
-    (1800, 200, False, True, 150),
-    (1800, 680, True, True, 50),
-    (1800, 650, True, True, None),
-    (1800, 600, True, True, None),
-    (1800, 500, True, True, None),
-    (1800, 0, False, True, None),
-    (1800, 1, False, True, None),
-    (900, 900, False, True, 675),
-    (1800, 1800, False, False, 1800),
-    (1800, 1800, True, False, 1200),
-    (1800, 9999, False, False, 1800),
-])
-def test_review_budget_never_exceeds_remaining_daily_or_stage_budget(
-    monkeypatch, total, remaining, has_issues, repair_enabled, expected,
-):
-    monkeypatch.setattr(review.time, "monotonic", lambda: 0)
-    config = {"timeout_seconds": total, "review_timeout_seconds": 900,
-              "issue_timeout_seconds": 600, "repair_enabled": repair_enabled}
+    config = {"timeout_seconds": 1800, "review_timeout_seconds": 900, "issue_timeout_seconds": 600, "repair_enabled": True}
     if expected is None:
         with pytest.raises(TimeoutError):
-            review.review_stage_config(config, remaining, 9, has_issues=has_issues)
+            review.review_stage_config(config, remaining)
     else:
-        allocated = review.review_stage_config(config, remaining, 9, has_issues=has_issues)
-        assert allocated["timeout_seconds"] == expected
-        assert allocated["timeout_seconds"] <= min(total, remaining)
+        assert review.review_stage_config(config, remaining)["timeout_seconds"] == expected
+    assert config["timeout_seconds"] == 1800
 
 
-@pytest.mark.parametrize(("unit_count", "expected"), [(1, 300), (3, 900), (9, 1350)])
-def test_daily_review_uses_planned_commit_count_instead_of_configured_limit(tmp_path, monkeypatch, unit_count, expected):
+@pytest.mark.parametrize(("baseline", "expected"), [(0, 30), (60, 60), (450, 450), (1200, 1200), (2400, 1800)])
+def test_review_unit_budget_honors_custom_baseline_and_unit_minimum(monkeypatch, baseline, expected):
+    monkeypatch.setattr(review.time, "monotonic", lambda: 0)
+    config = {"timeout_seconds": 1800, "review_unit_timeout_seconds": baseline}
+    assert review.review_stage_config(config, 1800)["timeout_seconds"] == expected
+
+
+@pytest.mark.parametrize("unit_count", [1, 3, 9])
+def test_daily_review_invokes_one_model_per_planned_commit(tmp_path, monkeypatch, unit_count):
     import json
     import subprocess
 
@@ -189,6 +153,7 @@ def test_daily_review_uses_planned_commit_count_instead_of_configured_limit(tmp_
     def invoke(config, run, prompt):
         calls.append(config["timeout_seconds"])
         plan = json.loads((run / "plan.json").read_text())
+        assert len(plan["commits"]) == 1
         return result([row["sha"] for row in plan["commits"]], "complete")
 
     monkeypatch.setattr(review, "command", command)
@@ -196,7 +161,7 @@ def test_daily_review_uses_planned_commit_count_instead_of_configured_limit(tmp_
     monkeypatch.setattr(review.time, "monotonic", lambda: 0)
     monkeypatch.setattr(review.repair, "repair_one", lambda *args: {"status": "no_pending_repairs"})
     receipt = review.run_once(root)
-    assert calls == [expected]
+    assert calls == [600] * unit_count
     assert len(receipt["planned_commits"]) == unit_count
     assert receipt["completed_commits"] == receipt["planned_commits"]
     assert receipt["status"] == "complete"
@@ -325,7 +290,7 @@ def test_daily_entry_persists_findings_before_cursor_with_real_git(tmp_path, mon
         "work = pathlib.Path(args[args.index('--cd') + 1])\n"
         "plan = json.loads((work.parent / 'plan.json').read_text())\n"
         f"assert plan['cursor'] == {base!r} and plan['target'] == {target!r}\n"
-        "assert (work.parent / 'source/AGENTS.md').read_text() == 'Frozen fixture instructions\\n'\n"
+        "assert (work.parents[3] / 'source/AGENTS.md').read_text() == 'Frozen fixture instructions\\n'\n"
         "prompt = sys.stdin.read()\n"
         "assert '禁止修业务代码' in prompt\n"
         f"assert '按序最多{max_units}个主线单元' in prompt\n"
