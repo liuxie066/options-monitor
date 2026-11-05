@@ -24,6 +24,7 @@ OM 面向自己做交易决策的期权投资者，支持富途账户及长桥�
 | Wheel 轮转策略 | 管理卖出 Put 后接股、卖出 Call 后交股的轮转分支；需启用，仍受身份与交割证据约束，归属不明确时需人工确认 | [轮转策略](docs/WHEEL_STRATEGY_PRD.md) |
 | 持仓评估与建议 | 评估账本或临时输入的多笔 short Put / Call，扫描时复用同一规则；展示指标、持有／平仓依据及休市历史参考，不自动平仓；需安装并启用 `position-advice` 插件 | [持仓建议](docs/CLOSE_ADVICE_CONTRACT.md) |
 | Short Put 向下移仓 | 为已有 short Put 查询更低行权价、严格价外且双腿扣费后净收现金的替代合约，比较收益率与延期；需安装并启用 `position-advice` 插件 | [移仓查询](docs/TOOL_REFERENCE.md#short-put-向下移仓) |
+| Covered Call 上滚 | 先核实股票覆盖，查询更高行权价、更晚到期的替代 Call；分别展示净收现金与可考虑的净支出上滚及交股价提升 | [CC 滚仓查询](docs/TOOL_REFERENCE.md#covered-call-上滚) |
 | 决策简报与提醒 | 查看最近成功扫描、候选变化和数据缺口；发送消息需安装并配置对应渠道插件 | [报告与通知规则](docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md) |
 | 候选解释与决策历史 | 解释已有扫描的排序、未入选原因，查询明确关联的结果 | [工具参考](docs/TOOL_REFERENCE.md)、[决策历史](docs/DECISION_HISTORY.md) |
 | 期权账本 | 查询开仓、平仓、指派和行权记录；写入与修复需要预览和确认 | [账本架构](docs/LEDGER_ARCHITECTURE.md)、[修账指南](docs/OPTION_POSITIONS_REPAIR.md) |
@@ -302,6 +303,29 @@ om plugins uninstall position-advice         # 预览移除；加 --confirm 才�
 结果同时展示行权价降幅、延期天数、扣除两腿估算费用后的净增现金，以及新旧持仓到期归零假设下的最高年化比较。候选优先按“净增现金 ÷ 新履约义务 × 365 ÷ 新仓剩余天数”降序排列，因此延长到期日也会影响收益比较。**净收现金不等于交易盈利**，旧仓历史权利金和降低的名义履约义务不计入本次净增现金。
 
 报价使用旧仓 ask 买回、新仓 bid 卖出的单腿现金流估算，不是券商组合盘口，也不保证组合成交。查询会连接行情并保存独立请求报告，不下单、不写业务账本、不发通知；候选缺行情或覆盖不完整时会保留缺口，只有完整搜索后的零候选才表示本次没有符合条件的合约。详细输出、原因和收益口径见[移仓工具参考](docs/TOOL_REFERENCE.md#short-put-向下移仓)与[移仓契约](docs/CLOSE_ADVICE_CONTRACT.md#short-put-向下移仓主动查询)。
+
+### 查询已有 Covered Call 的上滚候选
+
+持有股票且已有 short Call 接近平值或已价内时，可查询更高行权价、严格更晚到期的替代合约。先确认同账户股票足以覆盖全部未关闭 Call；无持股或覆盖不足返回“不适用”。价外幅度超过 5% 的旧 Call 也不搜索。安装、启用与上述 Short Put 查询共用 `position-advice` 插件。
+
+将以下内容保存为 `cc-roll-request.json`，替换账户、lot ID 与最大到期日（必须晚于旧仓到期日，无默认值）：
+
+```json
+{
+  "account": "sample",
+  "lot_id": "<existing-covered-call-lot-id>",
+  "max_new_expiration": "2026-12-18"
+}
+```
+
+```bash
+"$HOME/.local/bin/om" position-advice roll-up \
+  --config-key us --request-file cc-roll-request.json
+```
+
+加 `--format json` 获取结构化结果；可选 `max_new_strike`（正数且高于旧 strike）、`limit`（1–50，默认 10）。CC 上滚可以净支出：报告分别展示净现金、净支出、每股行权价提升、交股价提升总额及延期。**扣费净支出严格小于行权价提升总额**时，debit roll 列为可考虑候选，与净收现金上滚分开标注；等于或超过则不推荐。资金分母统一使用当前股价 × 覆盖股数，按条件性交股改善年化排序。
+
+这个改善假设两边最终均按各自行权价卖出股票，不是已实现利润或预期收益。新 Call 可仍价内，上滚不保证消除提前指派；交股是 wheel 的第二步，接受原仓交股仍是有效选择。与 Put 查询一样，它使用单腿报价并扣费，不下单、不写账本、不通知，仅保存独立请求报告。完整状态、覆盖和经济口径见 [CC 滚仓契约](docs/CLOSE_ADVICE_CONTRACT.md#covered-call-上滚主动查询)。
 
 ### 需要时再开启通知、Bot 和后台运行
 

@@ -1,5 +1,10 @@
 """Optional Position Advice capability for options-monitor."""
 
+from .covered_call_roll import (
+    evaluate_covered_call_roll,
+    old_covered_call_in_roll_scope,
+    rank_covered_call_roll_candidates,
+)
 from .economics import remaining_max_annualized_return
 from .policy import evaluate_close_advice
 from .presentation import format_close_advice_reason
@@ -16,4 +21,7 @@ __all__ = [
     "evaluate_short_put_roll",
     "old_position_in_roll_scope",
     "rank_short_put_roll_candidates",
+    "evaluate_covered_call_roll",
+    "old_covered_call_in_roll_scope",
+    "rank_covered_call_roll_candidates",
 ]

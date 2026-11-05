@@ -16,6 +16,7 @@ from domain.domain.engine.candidate_engine import (
 from domain.domain.expiration_dates import expiration_market_date
 from domain.domain.fee_calc import estimate_futu_option_buy_fee, estimate_futu_option_sell_fee
 from domain.domain.option_position_identity import normalize_account, normalize_broker
+from domain.domain.risk_capacity import evaluate_covered_call_stock_coverage
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.domain.trade_contract_identity import contract_key, contract_share_quantity, require_option_multiplier
 from src.application.account_config import build_account_runtime_config, resolve_account_broker, resolve_configured_accounts
@@ -28,6 +29,8 @@ from src.application.opend_utils import normalize_underlier
 from src.application.position_advice import _read_holdings
 from src.application.position_advice_evidence import current_position_advice_evidence
 from src.application.position_advice_inputs import select_ledger_positions
+from src.application.portfolio_context_service import load_account_portfolio_context, portfolio_position_snapshot_errors
+from src.application.futu_portfolio_context import fetch_futu_portfolio_context
 from src.application.position_advice_plugin import (
     PositionAdviceUnavailableError, position_advice_plugin_status, require_position_advice_plugin,
 )
@@ -47,6 +50,16 @@ SHORT_PUT_ROLL_INPUT_SCHEMA: dict[str, Any] = {
     "min_new_strike": {"type": "number", "exclusiveMinimum": 0},
     "limit": {"type": "integer", "minimum": 1, "maximum": 50},
 }
+COVERED_CALL_ROLL_INPUT_SCHEMA: dict[str, Any] = {
+    key: dict(value) for key, value in SHORT_PUT_ROLL_INPUT_SCHEMA.items() if key != "min_new_strike"
+}
+COVERED_CALL_ROLL_INPUT_SCHEMA["max_new_strike"] = {"type": "number", "exclusiveMinimum": 0}
+_CC_INTERPRETATION = (
+    "两笔单腿按旧 ask 买回、新 bid 卖出的扣费现金估算；不保证组合成交，也不保证消除提前指派。"
+    "debit roll 仅在净支出严格小于行权价提升总额时列为可考虑；条件差额假设两边最终均按各自行权价交股，"
+    "不是已实现利润或预期收益。新旧资金分母均为当前股价×覆盖股数。"
+    "交股是 wheel 卖出持股的第二步；接受旧仓交股仍是有效选择。"
+)
 _INTERPRETATION = (
     "两笔单腿按旧 ask 买回、新 bid 卖出的扣费现金估算；不保证张数足额成交或组合成交。"
     "净增现金年化以新 strike 名义本金和今天至新到期日计算；"
@@ -60,11 +73,12 @@ def _positive(value: Any, name: str) -> float:
     return float(value)
 
 
-def _normalize_request(payload: Mapping[str, Any]) -> dict[str, Any]:
+def _normalize_request(payload: Mapping[str, Any], *, covered_call: bool = False) -> dict[str, Any]:
     from src.application.tool_input_schema import build_tool_input_json_schema, validate_tool_input_payload
 
-    validate_tool_input_payload(tool_name="short_put_roll_candidates", payload=dict(payload),
-        schema=build_tool_input_json_schema(SHORT_PUT_ROLL_INPUT_SCHEMA), enforce_required=True)
+    validate_tool_input_payload(tool_name="covered_call_roll_candidates" if covered_call else "short_put_roll_candidates",
+        payload=dict(payload), schema=build_tool_input_json_schema(
+            COVERED_CALL_ROLL_INPUT_SCHEMA if covered_call else SHORT_PUT_ROLL_INPUT_SCHEMA), enforce_required=True)
     request = dict(payload)
     request["account"] = normalize_account(request["account"])
     request["lot_id"] = request["lot_id"].strip()
@@ -73,8 +87,9 @@ def _normalize_request(payload: Mapping[str, Any]) -> dict[str, Any]:
     expiry = date.fromisoformat(request["max_new_expiration"])
     if expiry.isoformat() != request["max_new_expiration"]:
         raise ValueError("max_new_expiration must use YYYY-MM-DD")
-    if "min_new_strike" in request:
-        request["min_new_strike"] = _positive(request["min_new_strike"], "min_new_strike")
+    strike_bound = "max_new_strike" if covered_call else "min_new_strike"
+    if strike_bound in request:
+        request[strike_bound] = _positive(request[strike_bound], strike_bound)
     limit = request.get("limit", 10)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
         raise ValueError("limit must be an integer from 1 to 50")
@@ -142,6 +157,8 @@ def _complete_enumeration(bundle: Mapping[str, Any], start: date, end: date) -> 
 def _evaluate_bundle(*, result: dict[str, Any], position: dict[str, Any], bundle: Mapping[str, Any],
                      requirement: dict[str, Any], spot: float, market: str, now: datetime,
                      request: dict[str, Any], policy: Any) -> dict[str, Any]:
+    covered_call = position["option_type"] == "call"
+    option_type = position["option_type"]
     old_key = _identity(position)
     grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     invalid_rows = 0
@@ -164,7 +181,7 @@ def _evaluate_bundle(*, result: dict[str, Any], position: dict[str, Any], bundle
     _, old_flags = current_position_advice_evidence(position=position, quote=old, requirement=requirement,
         market=market, now_utc=now)
     try:
-        validate_option_contract_evidence(old, mode="put", quote_side="buy", now_utc=now)
+        validate_option_contract_evidence(old, mode=option_type, quote_side="buy", now_utc=now)
         if old.get("currency") != position["currency"] or require_option_multiplier(old.get("multiplier")) != position["multiplier"]:
             old_flags.append("old_contract_identity_mismatch")
     except (CandidateCalculationError, ValueError, TypeError):
@@ -193,9 +210,15 @@ def _evaluate_bundle(*, result: dict[str, Any], position: dict[str, Any], bundle
             discovered += 1
             missing["candidate_identity_invalid"] += 1
             continue
-        if not (old_expiry <= expiry <= max_expiry and row.get("option_type") == "put"
+        if covered_call:
+            in_scope = (old_expiry < expiry <= max_expiry and row.get("option_type") == "call"
+                and strike > position["strike"]
+                and (request.get("max_new_strike") is None or strike <= request["max_new_strike"]))
+        else:
+            in_scope = (old_expiry <= expiry <= max_expiry and row.get("option_type") == "put"
                 and strike < position["strike"] and strike < spot
-                and (request.get("min_new_strike") is None or strike >= request["min_new_strike"])):
+                and (request.get("min_new_strike") is None or strike >= request["min_new_strike"]))
+        if not in_scope:
             continue
         discovered += 1
         if any(other != row for other in duplicates[1:]):
@@ -211,11 +234,16 @@ def _evaluate_bundle(*, result: dict[str, Any], position: dict[str, Any], bundle
             continue
         try:
             validate_opening_quote_freshness(row, now_utc=now)
-            validate_opening_contract_evidence(row, mode="put", now_utc=now)
+            validate_opening_contract_evidence(row, mode=option_type, now_utc=now)
             new_fee = estimate_futu_option_sell_fee(position["currency"], row["bid"], contracts=qty, multiplier=position["multiplier"])
             candidate = {**row, "contracts": qty}
-            decision = policy.evaluate_short_put_roll(position, candidate, old_quote=old, spot=spot,
-                old_dte=old_dte, new_dte=(expiry - today).days, old_buy_fee=old_fee.amount, new_sell_fee=new_fee.amount)
+            economics = dict(old_quote=old, spot=spot, old_dte=old_dte, new_dte=(expiry - today).days,
+                old_buy_fee=old_fee.amount, new_sell_fee=new_fee.amount)
+            if covered_call:
+                decision = policy.evaluate_covered_call_roll(position, candidate,
+                    covered_shares=contract_share_quantity(qty, position["multiplier"]), **economics)
+            else:
+                decision = policy.evaluate_short_put_roll(position, candidate, **economics)
         except CandidateCalculationError as exc:
             if exc.reason in {"contract_ineligible", "option_non_standard", "option_type_mismatch"}:
                 rejects[exc.reason] += 1
@@ -225,12 +253,14 @@ def _evaluate_bundle(*, result: dict[str, Any], position: dict[str, Any], bundle
         except (ValueError, TypeError):
             missing["candidate_economics_unavailable"] += 1
             continue
-        if not decision["accepted"]:
+        eligible = decision.get("recommendation") in {"credit_roll", "cash_neutral_roll", "debit_roll"} if covered_call else decision["accepted"]
+        if not eligible:
             rejects.update(decision["reason_codes"])
             continue
         metrics = decision["metrics"]
+        conclusion = {key: decision[key] for key in ("recommendation", "cash_flow_type")} if covered_call else {}
         matched.append({"contract": row["contract_symbol"], "expiration": row["expiration"], "strike": strike,
-            **metrics, "old_buy_fee": old_fee.to_dict(), "new_sell_fee": new_fee.to_dict(),
+            **metrics, **conclusion, "old_buy_fee": old_fee.to_dict(), "new_sell_fee": new_fee.to_dict(),
             "evidence": {"old_ask": old["ask"], "new_bid": row["bid"], "new_ask": row["ask"],
                 "old_snapshot_received_at_utc": old.get("snapshot_received_at_utc"),
                 "snapshot_received_at_utc": row.get("snapshot_received_at_utc"),
@@ -240,7 +270,7 @@ def _evaluate_bundle(*, result: dict[str, Any], position: dict[str, Any], bundle
                 "term_matched_rv": row.get("term_matched_rv"), **requirement}})
     evaluated = discovered - sum(missing.values())
     coverage_status = "complete" if complete and not missing else "partial" if evaluated else "unavailable"
-    ranked = policy.rank_short_put_roll_candidates(matched)
+    ranked = policy.rank_covered_call_roll_candidates(matched) if covered_call else policy.rank_short_put_roll_candidates(matched)
     result.update(status="success" if coverage_status == "complete" else "partial",
         outcome="found" if matched else "none" if coverage_status == "complete" else "unable",
         coverage={"status": coverage_status, "enumeration_complete": complete, "discovered": discovered,
@@ -253,18 +283,65 @@ def _evaluate_bundle(*, result: dict[str, Any], position: dict[str, Any], bundle
         old_buy_fee=old_fee.to_dict(), old_dte=old_dte)
     result["position"]["old_remaining_max_annualized_return"] = policy.remaining_max_annualized_return(
         remaining_cash=result["position"]["old_close_cost"],
-        capital_basis=position["strike"] * contract_share_quantity(qty, position["multiplier"]), dte=old_dte)
+        capital_basis=(spot if covered_call else position["strike"]) * contract_share_quantity(qty, position["multiplier"]), dte=old_dte)
     result["reason_codes"].extend(missing)
     if not complete:
         result["reason_codes"].append("enumeration_incomplete")
     return result
 
 
+def _covered_stock_evidence(*, records: list[dict[str, Any]], position: dict[str, Any],
+                            config: dict[str, Any], account: str, broker: str, market: str,
+                            runtime_root: Path, clock: Callable[[], datetime]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    from src.application.ledger.api import build_position_risk_context
+
+    context = build_position_risk_context(records, broker=broker, account=account, observed_at=clock())
+    unavailable = context.get("locked_shares_unavailable_by_symbol") or {}
+    if context.get("context_status") != "available" or position["symbol"] in unavailable:
+        return {"status": "unavailable", "reason_codes": [
+            unavailable.get(position["symbol"]) or "canonical_call_obligations_unavailable"]}, None
+    try:
+        portfolio = load_account_portfolio_context(runtime_config=config, account=account,
+            market=broker, portfolio_source="futu", write_cache=False,
+            state_dir=runtime_root / "output_accounts" / account / "state", log=lambda _: None,
+            fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
+            exchange_rate_observation={}, required_position_asset_types=("stock",))
+    except (OSError, RuntimeError, ValueError) as exc:
+        return {"status": "unavailable", "reason_codes": ["stock_coverage_observation_unavailable"],
+            "error_type": type(exc).__name__}, None
+    errors = portfolio_position_snapshot_errors(portfolio, account=account, market=market, now_utc=clock())
+    if errors:
+        return {"status": "unavailable", "reason_codes": errors}, portfolio
+    snapshot = portfolio["position_snapshot_input"]
+    coverage = evaluate_covered_call_stock_coverage(positions=context["open_positions_min"],
+        snapshot=snapshot, account=account, broker=broker, symbol=position["symbol"], currency=position["currency"])
+    coverage["observed_at_utc"] = snapshot.get("observed_at_utc")
+    return coverage, portfolio
+
+
 def short_put_roll_candidates(payload: Mapping[str, Any], *, config: dict[str, Any], config_path: Path,
                              base_dir: Path, runtime_root: Path, now_utc: datetime | None = None,
                              deadline: float | None = None, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
-    """Estimate one lot's replacement choices without orders or ledger writes."""
-    request = _normalize_request(payload)
+    """Estimate one put lot's replacement choices without orders or ledger writes."""
+    return _roll_candidates(payload, config=config, config_path=config_path, base_dir=base_dir,
+        runtime_root=runtime_root, now_utc=now_utc, deadline=deadline, cancelled=cancelled)
+
+
+def covered_call_roll_candidates(payload: Mapping[str, Any], *, config: dict[str, Any], config_path: Path,
+                                base_dir: Path, runtime_root: Path, now_utc: datetime | None = None,
+                                deadline: float | None = None, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
+    """Estimate higher-strike, later-expiry covered calls with explicit debit cost."""
+    return _roll_candidates(payload, config=config, config_path=config_path, base_dir=base_dir,
+        runtime_root=runtime_root, now_utc=now_utc, deadline=deadline, cancelled=cancelled, covered_call=True)
+
+
+def _roll_candidates(payload: Mapping[str, Any], *, config: dict[str, Any], config_path: Path,
+                     base_dir: Path, runtime_root: Path, now_utc: datetime | None = None,
+                     deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
+                     covered_call: bool = False) -> dict[str, Any]:
+    request = _normalize_request(payload, covered_call=covered_call)
+    option_type = "call" if covered_call else "put"
+    capability = "covered_call_roll" if covered_call else "short_put_roll"
     if now_utc is not None and now_utc.tzinfo is None:
         raise ValueError("now_utc must be timezone-aware")
     clock = (lambda: now_utc.astimezone(timezone.utc)) if now_utc is not None else (lambda: datetime.now(timezone.utc))
@@ -274,12 +351,18 @@ def short_put_roll_candidates(payload: Mapping[str, Any], *, config: dict[str, A
     account = request["account"]
     resolve_configured_accounts(config, [account])
     cfg = build_account_runtime_config(base_cfg=config, cfg_path=config_path, account=account, markets_to_run=[])
-    result: dict[str, Any] = {"schema_version": "short_put_roll.output.v1", "status": "unavailable", "outcome": "unable",
+    result: dict[str, Any] = {"schema_version": capability + ".output.v1", "status": "unavailable", "outcome": "unable",
         "account": account, "position": None, "evaluated_at_utc": started.isoformat(), "coverage": None,
         "candidates": [], "displayed": 0, "omitted": 0, "reason_codes": [],
         "pricing_basis": "leg_cashflow_estimate", "interpretation": _INTERPRETATION,
         "scope": {"max_new_expiration": request["max_new_expiration"], "min_new_strike": request.get("min_new_strike"),
             "old_otm_max_pct": 0.05, "new_put_must_be_otm": True}}
+    if covered_call:
+        result.update(interpretation=_CC_INTERPRETATION,
+            scope={"max_new_expiration": request["max_new_expiration"],
+                "max_new_strike": request.get("max_new_strike"), "old_otm_max_pct": 0.05,
+                "new_call_must_be_otm": False, "new_expiration_must_be_later": True},
+            capital_basis_kind="covered_stock_market_value", assignment_semantics="wheel_stock_sale")
     plugin_status = position_advice_plugin_status(cfg)
     if plugin_status != "available":
         result.update(status=plugin_status, reason_codes=["position_advice_" + plugin_status])
@@ -289,9 +372,9 @@ def short_put_roll_candidates(payload: Mapping[str, Any], *, config: dict[str, A
     except PositionAdviceUnavailableError:
         result["reason_codes"] = ["position_advice_unavailable"]
         return result
-    if not all(callable(getattr(policy, name, None)) for name in (
-        "evaluate_short_put_roll", "rank_short_put_roll_candidates", "old_position_in_roll_scope", "remaining_max_annualized_return",
-    )):
+    policy_names = ("evaluate_covered_call_roll", "rank_covered_call_roll_candidates", "old_covered_call_in_roll_scope") if covered_call else (
+        "evaluate_short_put_roll", "rank_short_put_roll_candidates", "old_position_in_roll_scope")
+    if not all(callable(getattr(policy, name, None)) for name in (*policy_names, "remaining_max_annualized_return")):
         result["reason_codes"] = ["position_advice_roll_unavailable"]
         return result
     broker = resolve_account_broker(cfg, account=account)
@@ -306,8 +389,8 @@ def short_put_roll_candidates(payload: Mapping[str, Any], *, config: dict[str, A
     records = _read_holdings(config=cfg, config_path=config_path, base_dir=base_dir, runtime_root=runtime_root, account=account)
     positions, _ = select_ledger_positions({"lot_ids": [request["lot_id"]]}, records=records,
         account=account, broker=broker, now_utc=started)
-    if len(positions) != 1 or positions[0].get("option_type") != "put":
-        raise ValueError("select exactly one open short put lot")
+    if len(positions) != 1 or positions[0].get("option_type") != option_type:
+        raise ValueError(f"select exactly one open short {option_type} lot")
     position = dict(positions[0])
     position["symbol"] = canonical_symbol(position["symbol"])
     position["expiration"] = position.get("expiration_ymd") or position.get("expiration")
@@ -325,15 +408,33 @@ def short_put_roll_candidates(payload: Mapping[str, Any], *, config: dict[str, A
         "symbol", "expiration", "strike", "contracts_open", "multiplier", "currency", "broker", "lot_id")}
     expiry, max_expiry = date.fromisoformat(position["expiration"]), date.fromisoformat(request["max_new_expiration"])
     today = expiration_market_date(started, market)
-    if max_expiry < expiry:
-        raise ValueError("max_new_expiration must not precede the old expiration")
+    if max_expiry < expiry or (covered_call and max_expiry == expiry):
+        raise ValueError("max_new_expiration must be later than the old expiration" if covered_call else
+            "max_new_expiration must not precede the old expiration")
     if expiry <= today:
         result["reason_codes"] = ["old_position_not_active"]
         return result
-    if request.get("min_new_strike", 0) >= position["strike"]:
+    if covered_call:
+        if request.get("max_new_strike") is not None and request["max_new_strike"] <= position["strike"]:
+            raise ValueError("max_new_strike must be above the old strike")
+    elif request.get("min_new_strike", 0) >= position["strike"]:
         raise ValueError("min_new_strike must be below the old strike")
     with runtime_root_scope(runtime_root):
         assert_quality_allows("close_advice", account=account, market=market.lower())
+    if covered_call:
+        coverage, stock_portfolio = _covered_stock_evidence(records=records, position=position, config=cfg, account=account,
+            broker=broker, market=market, runtime_root=runtime_root, clock=clock)
+        result["stock_coverage"] = coverage
+        if coverage["status"] != "covered":
+            result["reason_codes"] = coverage["reason_codes"]
+            if coverage["status"] == "insufficient":
+                result.update(status="success", outcome="not_applicable")
+            return result
+        try:
+            check_run(stop, is_cancelled)
+        except RunStopped as exc:
+            result["reason_codes"] = [exc.code.lower()]
+            return result
     gateway = None
     try:
         provider = resolve_market_data_provider(cfg)
@@ -350,31 +451,41 @@ def short_put_roll_candidates(payload: Mapping[str, Any], *, config: dict[str, A
             result["reason_codes"] = [observation.reason_code or "underlier_observation_unavailable"]
             return result
         spot = _positive(observation.last_price, "spot")
-        result["position"].update(spot=spot, old_otm_pct=(spot - position["strike"]) / spot)
-        if not policy.old_position_in_roll_scope(strike=position["strike"], spot=spot):
+        result["position"].update(spot=spot,
+            old_otm_pct=((position["strike"] - spot) if covered_call else (spot - position["strike"])) / spot)
+        scope_policy = policy.old_covered_call_in_roll_scope if covered_call else policy.old_position_in_roll_scope
+        if not scope_policy(strike=position["strike"], spot=spot):
             result.update(status="success", outcome="not_applicable", reason_codes=["old_position_outside_roll_scope"])
             return result
-        if request.get("min_new_strike", 0) >= spot:
+        if not covered_call and request.get("min_new_strike", 0) >= spot:
             raise ValueError("min_new_strike must be below the current spot for an OTM replacement")
         check_run(stop, is_cancelled)
         gateway = provider.open_quote_gateway(host=route.host, port=route.port,
             is_option_chain_cache_enabled=True, deadline=stop, cancelled=is_cancelled)
         old_dte = (expiry - today).days
+        replacement_filter = {"option_type": option_type,
+            "min_strike": position["strike"] if covered_call else request.get("min_new_strike"),
+            "max_strike": request.get("max_new_strike") if covered_call else min(position["strike"], spot),
+            "min_dte": old_dte + 1 if covered_call else old_dte, "max_dte": (max_expiry - today).days}
         fetch_request = FetchSymbolRequest(symbol=position["symbol"], host=route.host, port=route.port,
-            market_data_provider=provider.name, base_dir=runtime_root, gateway=gateway, option_types="put",
+            market_data_provider=provider.name, base_dir=runtime_root, gateway=gateway, option_types=option_type,
             underlier_observation=observation.to_dict(), fetch_spot_if_missing=False, trading_date=today.isoformat(),
             min_dte=old_dte, max_dte=(max_expiry - today).days, include_realized_volatility=False,
             deadline=stop, cancelled=is_cancelled, chain_cache=True, freshness_policy="force_refresh", **limits,
-            query_filters=[{"option_type": "put", "min_strike": position["strike"], "max_strike": position["strike"],
-                "min_dte": old_dte, "max_dte": old_dte},
-                {"option_type": "put", "min_strike": request.get("min_new_strike"),
-                 "max_strike": min(position["strike"], spot), "min_dte": old_dte, "max_dte": (max_expiry - today).days}])
+            query_filters=[{"option_type": option_type, "min_strike": position["strike"], "max_strike": position["strike"],
+                "min_dte": old_dte, "max_dte": old_dte}, replacement_filter])
         bundle = provider.fetch_symbol_request(fetch_request)
         check_run(stop, is_cancelled)
         requirement = _current_requirement(provider=provider, gateway=gateway, symbol=position["symbol"], market=market,
             runtime_root=runtime_root, limits=limits, clock=clock, deadline=stop, cancelled=is_cancelled)
         evaluated_at = clock()
         result["evaluated_at_utc"] = evaluated_at.isoformat()
+        if covered_call:
+            stock_errors = portfolio_position_snapshot_errors(stock_portfolio, account=account, market=market, now_utc=evaluated_at)
+            if stock_errors:
+                result["stock_coverage"].update(status="unavailable", reason_codes=stock_errors)
+                result["reason_codes"] = stock_errors
+                return result
         if expiration_market_date(evaluated_at, market) != today:
             result["reason_codes"] = ["market_date_changed"]
             return result
@@ -384,7 +495,8 @@ def short_put_roll_candidates(payload: Mapping[str, Any], *, config: dict[str, A
         result["reason_codes"] = list(dict.fromkeys(result["reason_codes"]))
         result["source"] = {"ledger": "canonical_position_lot", "lot_id": request["lot_id"], "market_data_provider": provider.name,
             "spot_observed_at_utc": observation.observed_at_utc, "effective_max_new_expiration": max_expiry.isoformat(),
-            "min_new_strike": request.get("min_new_strike")}
+            ("max_new_strike" if covered_call else "min_new_strike"):
+                request.get("max_new_strike" if covered_call else "min_new_strike")}
     except RunStopped as exc:
         result.update(status="unavailable", outcome="unable", candidates=[], displayed=0, omitted=0,
             coverage=None, reason_codes=[exc.code.lower()])
@@ -406,7 +518,7 @@ def short_put_roll_candidates(payload: Mapping[str, Any], *, config: dict[str, A
                 gateway.close()
             except Exception:
                 pass
-    workspace = Path(runtime_root) / "output_requests" / "short_put_roll" / uuid4().hex
+    workspace = Path(runtime_root) / "output_requests" / capability / uuid4().hex
     saved_result = {**result, "report_path": str(workspace / "result.json")}
     try:
         atomic_write_json(workspace / "request.json", request)
