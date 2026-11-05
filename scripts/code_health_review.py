@@ -61,10 +61,14 @@ def next_calendar_trigger() -> str:
     return trigger.astimezone().isoformat(timespec="seconds")
 
 
-def write_json(path: Path, value: dict) -> None:
+def write_text(path: Path, value: str) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.write_text(value, encoding="utf-8")
     temporary.replace(path)
+
+
+def write_json(path: Path, value: dict) -> None:
+    write_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
 
 
 def command(argv: list[str], *, cwd: Path | None = None, timeout: float = 180) -> str:
@@ -233,6 +237,7 @@ plan.previous_review 是上轮报告，coverage_note 是历史覆盖及待办提
 plan.confirmed_finding_keys 包含跨轮和本轮之前已确认的key；相同owner+故障机制必须复用key，已列出的key只引用，不再加入confirmed_findings或issue草稿。
 已有环境不保证匹配源码；不得仅因旧 venv 缺插件判定业务回归。测试未跑则明确写出，不得虚构。
 当前调用只审plan.commits中的单个主线单元，在分片预算{plan.get('timeout_seconds', '以外层配置为准')}秒内结束；只将完成四项检查的该提交放入completed_commits。预算或证据不足返回partial/blocked。
+本阶段硬超时为{plan.get('timeout_seconds', 1800)}秒（含读取、验证及结果生成），不是额外30分钟。至少预留min(60秒, 本阶段预算的四分之一)生成最终JSON；到预留时间立即停止新探针，返回已完成结论或明确partial/blocked，不能继续开工直到被杀。
 结果必须符合提供的JSON schema，report_markdown 为该单元的中文报告，含范围、逐项结论、确认问题、验证缺口、漏检原因、issue草稿及下一步；外层会合成本轮完整报告。
 零发现有效；不强制凑问题。已修/重复问题不重报；无实证线索不写成确认缺陷。
 确认缺陷必须在confirmed_findings中结构化记录，key为稳定的owner+故障机制标识以便跨轮去重，commit属于已完成范围，owner_path和fix_scope是明确的相对文件路径（源码、测试、相关文档及生成物），不能用目录或通配符。
@@ -242,7 +247,7 @@ plan.confirmed_finding_keys 包含跨轮和本轮之前已确认的key；相同o
 """
     if smoke:
         return prefix + "\n本次仅验证调度链路：读取规则、源码 AGENTS.md 与 LESSONS.md，报告能读到的四项检查和L001边界。不要审查新提交或运行测试。outcome=complete，completed_commits=[]，confirmed_findings=[]。这不是第二轮巡检，也不能推进游标。\n"
-    return prefix + "\n本轮输入：\n" + json.dumps(plan, ensure_ascii=False)
+    return prefix + "\n本阶段plan仅含当前一个主线单元；只审该提交与上下游一跳，不继续审其它提交。完成即返回JSON，外层会先持久化并推进连续游标，再启动下一单元。历史报告仅用于去重与保留待办，不重跑历史审查。\n本轮输入：\n" + json.dumps(plan, ensure_ascii=False)
 
 
 def review_stage_config(config: dict, deadline: float) -> dict:
@@ -252,7 +257,7 @@ def review_stage_config(config: dict, deadline: float) -> dict:
     return stage
 
 
-def run_commit_reviews(
+def review_commits(
     root: Path, config: dict, run: Path, plan: dict, state: dict, receipt: dict, deadline: float,
 ) -> dict:
     """Checkpoint every validated unit before starting the next; never skip a pending unit."""
@@ -260,11 +265,12 @@ def run_commit_reviews(
     completed, findings, gaps, reports, tasks = [], [], [], [], []
     known_keys = set(plan["confirmed_finding_keys"])
     pending_reason = plan.get("preparation_error", "")
-    blocked = False
+    blocked = incomplete = False
+    review_units = receipt.setdefault("review_units", [])
 
     def checkpoint():
         remaining = planned[len(completed):]
-        outcome = "complete" if not remaining else "blocked" if blocked and not completed else "partial"
+        outcome = "complete" if not remaining and not incomplete else "blocked" if blocked and not completed else "partial"
         markdown = (
             f"# 逐提交增量巡检\n\n冻结目标：`{plan['target']}`\n\n起始游标：`{plan['cursor']}`\n\n"
             f"状态：{outcome}；已完成 {len(completed)}/{len(planned)} 个主线单元。\n\n"
@@ -285,7 +291,7 @@ def run_commit_reviews(
         validate_result(result, planned, work=run / "work")
         write_json(run / "result.json", result)
         report = run / "report.md"
-        report.write_text(markdown + "\n", encoding="utf-8")
+        write_text(report, markdown + "\n")
         receipt.update({"status": outcome, "completed_commits": list(completed), "repair_tasks": list(tasks)})
         if pending_reason:
             receipt["review_error"] = pending_reason
@@ -301,11 +307,15 @@ def run_commit_reviews(
         sha = unit["sha"]
         shard = run / "work" / "shards" / f"{index:03d}-{sha}"
         shard.mkdir(parents=True)
+        unit_receipt = {"commit": sha, "run_dir": str(shard), "started_at": now()}
+        review_units.append(unit_receipt)
         try:
             if plan.get("preparation_error"):
                 raise TimeoutError(plan["preparation_error"])
             stage = review_stage_config(config, deadline)
-            shard_plan = {**plan, "commits": [unit], "confirmed_finding_keys": sorted(known_keys),
+            unit_receipt["timeout_seconds"] = stage["timeout_seconds"]
+            shard_plan = {**plan, "cursor": completed[-1] if completed else plan["cursor"],
+                          "commits": [unit], "confirmed_finding_keys": sorted(known_keys),
                           "timeout_seconds": stage["timeout_seconds"]}
             write_json(shard / "plan.json", shard_plan)
             result = invoke_agent(stage, shard, review_prompt(
@@ -319,15 +329,18 @@ def run_commit_reviews(
             duplicates = [item["key"] for item in result["confirmed_findings"] if item["key"] in known_keys]
             result["confirmed_findings"] = [item for item in result["confirmed_findings"] if item["key"] not in known_keys]
             write_json(shard / "result.json", result)
-            write_json(shard / "receipt.json", {"commit": sha, "status": result["outcome"],
-                                               "completed_commits": finished, "duplicate_finding_keys": duplicates})
+            unit_receipt.update({"status": result["outcome"], "completed_commits": finished,
+                                 "duplicate_finding_keys": duplicates, "finished_at": now()})
+            write_json(shard / "receipt.json", unit_receipt)
         except (TimeoutError, subprocess.TimeoutExpired) as exc:
             pending_reason = f"{sha}: {type(exc).__name__}: {exc}"
             gaps.append(pending_reason)
-            write_json(shard / "receipt.json", {"commit": sha, "status": "pending", "error": pending_reason})
+            unit_receipt.update({"status": "pending", "error": pending_reason, "finished_at": now()})
+            write_json(shard / "receipt.json", unit_receipt)
             break
         except Exception as exc:
-            write_json(shard / "receipt.json", {"commit": sha, "status": "failed", "error": f"{type(exc).__name__}: {exc}"})
+            unit_receipt.update({"status": "failed", "error": f"{type(exc).__name__}: {exc}", "finished_at": now()})
+            write_json(shard / "receipt.json", unit_receipt)
             raise
         completed.extend(finished)
         for finding in result["confirmed_findings"]:
@@ -337,9 +350,10 @@ def run_commit_reviews(
         gaps.extend(result["verification_gaps"])
         reports.append(f"## 提交 `{sha}`\n\n" + result["report_markdown"]
                        + ("\n\n已关联原问题、未新增 finding：" + ", ".join(duplicates) if duplicates else ""))
-        if not finished:
+        if not finished or result["outcome"] != "complete":
+            incomplete = True
             blocked = result["outcome"] == "blocked"
-            pending_reason = f"{sha} 的四项检查尚未完成，后续提交留待下一轮。"
+            pending_reason = f"{sha} 当前提交审查尚未全部完成，后续提交留待下一轮。"
             break
         checkpoint()
     return checkpoint()
@@ -439,19 +453,22 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False) -> dict:
                 try:
                     if smoke:
                         review_config = repair.remaining_config(config, daily_deadline)
-                        result = invoke_agent(review_config, run, review_prompt(root, run, plan, max_units=config["max_units"], smoke=True))
+                        result = invoke_agent(review_config, run, review_prompt(
+                            root, run, {**plan, "timeout_seconds": review_config["timeout_seconds"]},
+                            max_units=config["max_units"], smoke=True,
+                        ))
                         validate_result(result, [], work=run / "work")
                         write_json(run / "result.json", result)
-                        (run / "report.md").write_text(result["report_markdown"].rstrip() + "\n", encoding="utf-8")
+                        write_text(run / "report.md", result["report_markdown"].rstrip() + "\n")
                     else:
-                        result = run_commit_reviews(root, config, run, plan, state, receipt, review_deadline)
+                        result = review_commits(root, config, run, plan, state, receipt, review_deadline)
                     receipt.update({"status": "smoke_passed" if smoke else result["outcome"],
                                     "completed_commits": result["completed_commits"]})
                 except TimeoutError as exc:
                     if smoke:
                         raise
                     receipt.update({"status": "pending", "review_error": str(exc), "completed_commits": []})
-                    (run / "report.md").write_text(f"提交巡检超时，覆盖游标保持原值；后续阶段按剩余预算继续。\n\n{exc}\n", encoding="utf-8")
+                    write_text(run / "report.md", f"提交巡检预算不足，后续阶段按剩余预算继续。\n\n{exc}\n")
             if config.get("issues_enabled") and not smoke:
                 issue_run.mkdir()
                 issue_deadline = min(daily_deadline, time.monotonic() + issue_budget)
