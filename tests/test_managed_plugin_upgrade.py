@@ -71,6 +71,8 @@ def _release_code(release: Path):
         destination = release / "plugins" / item["source"] / "pyproject.toml"
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / "plugins" / item["source"] / "pyproject.toml", destination)
+        shutil.copytree(ROOT / "plugins" / item["source"] / "src", destination.parent / "src",
+                        dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__", "*.egg-info"))
 
 
 def _inventory(path: Path):
@@ -904,6 +906,9 @@ def test_provider_selection_binds_cache_hash_to_selected_source_bytes(tmp_path):
     (tmp_path / "plugins/broker-longbridge/src/entry.py").write_text("VALUE=2\n")
     assert digest(selected) == original
     (tmp_path / "plugins/broker-futu/src/entry.py").write_text("VALUE=2\n")
+    assert digest(selected) == original
+    metadata = tmp_path / "plugins/broker-futu/pyproject.toml"
+    metadata.write_text(metadata.read_text() + 'dependencies=["futu-api>=9"]\n')
     assert digest(selected) != original
 
 

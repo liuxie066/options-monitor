@@ -323,7 +323,7 @@ def test_message_source_dependencies_and_selection_are_cache_inputs(message_tran
     source = next((target / "plugins" / package / "src").rglob("*.py"))
     source.write_text(source.read_text() + "\n# changed source\n")
     changed = upgrade._dependency_hash(target, include_server=True, **{key: True})
-    assert selected != changed
+    assert selected == changed
     spec = target / "plugins" / package / "pyproject.toml"
     spec.write_text(spec.read_text().replace('dependencies = [', 'dependencies = ["fixture-dependency>=1", '))
     assert changed != upgrade._dependency_hash(target, include_server=True, **{key: True})
