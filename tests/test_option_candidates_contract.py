@@ -199,7 +199,9 @@ def test_evaluate_projects_canonical_financial_conditions_without_capacity(mode,
     assert candidate["sell_limit"] == metrics["sell_limit"]
     assert candidate["period_net_return"] == metrics["period_net_return"]
     assert candidate["evidence"]["estimated_full_sell_fees"] == metrics["estimated_full_sell_fees"]
-    assert candidate["evidence"]["annualized_net_return"] == metrics["annualized_net_return_on_cash_basis" if mode == "put" else "annualized_net_premium_return"]
+    assert candidate["annualized_net_return"] == metrics["annualized_net_return_on_cash_basis" if mode == "put" else "annualized_net_premium_return"]
+    assert candidate["evidence"]["annualized_net_return"] == candidate["annualized_net_return"]
+    assert candidate["annualized_net_return"] == pytest.approx(candidate["period_net_return"] * 365 / candidate["reference_dte"])
     denominator = row["strike"] * row["multiplier"] - candidate["net_premium"] if mode == "put" else row["spot"] * row["multiplier"]
     assert candidate["period_net_return"] == pytest.approx(candidate["net_premium"] / denominator)
     expected_obligation = ({"kind": "net_acquisition_price", "price": metrics["breakeven"]} if mode == "put" else
@@ -470,6 +472,8 @@ def test_five_query_response_bound_preserves_results_gaps_filters_and_earnings(i
         assert after["displayed"] >= 1
         assert {"output_limited", "earnings_incomplete", "enumeration_incomplete"} <= set(after["reason_codes"])
         for candidate in after["candidates"]:
+            source = next(row for row in before["candidates"] if row["contract"] == candidate["contract"])
+            assert candidate["annualized_net_return"] == source["annualized_net_return"]
             assert candidate["evidence"] is None and candidate["earnings"]["coverage"] == "partial"
             assert len(candidate["earnings"]["events"]) + candidate["earnings"]["omitted_events"] == 5
             if after["displayed"] == 1:

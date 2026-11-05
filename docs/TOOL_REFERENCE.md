@@ -304,8 +304,11 @@ OpenD endpoint；必要配置缺失或路由冲突时返回 `unable`。不要把
 部分数据下找到候选仍可为 `found`。`effective_filters` 包含行权价上下界、DTE 和
 `max_abs_delta` 及其 `max_abs_delta_source=request/config`；
 无界端点为 null，配置不可用时整个 filters 为 null。每项最多展示 3 个候选，含合约、
-到期日、行权价、Delta、参考卖价、单份净权利金、期间净收益率和履约义务；`displayed/omitted`
-说明展示量。整体 `completion` 单独说明完成程度，输出超限时可将 evidence 置为 null 或压缩候选。
+到期日、行权价、Delta、参考卖价、单份净权利金、期间净收益率、年化净收益率和履约义务；`displayed/omitted`
+说明展示量。候选字段 `period_net_return` 和 `annualized_net_return` 都以小数比例返回，对话中用百分比并列展示。
+年化直接复用引擎结果，按 `期间净收益率 × 365 ÷ reference_dte` 计算；实时行情的 `reference_dte` 等于 `dte`，
+休市参考使用报价参考日到到期日的期限。年化是估算，不代表未来一年可持续获得同样收益。
+整体 `completion` 单独说明完成程度，输出超限时可将 evidence 置为 null 或压缩候选；保留候选的两项收益率字段。
 
 仅筛合约，不检查账户现金、股票覆盖、成本底线或集中度。财报不淘汰合约，只展示查询日
 至到期日内事件及 `days_before_expiry`；同日事件不判断日内先后，缺失时明确“财报信息不完整”。

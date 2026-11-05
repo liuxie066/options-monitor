@@ -127,6 +127,8 @@ def test_cli_facade_reaches_real_fetch_policy_and_bounded_envelope(configured, m
     candidate = result['candidates'][0]
     assert candidate['contract'] == code and candidate['multiplier'] == 100
     assert candidate['evidence']['iv'] == .30
+    assert candidate['annualized_net_return'] == candidate['evidence']['annualized_net_return']
+    assert candidate['annualized_net_return'] == pytest.approx(candidate['period_net_return'] * 365 / candidate['reference_dte'])
     assert candidate['obligation']['price'] < 100
     assert result['earnings_coverage'] == 'complete'
     assert [entry[0] for entry in calls] == ['snapshot', 'chain', 'snapshot', 'close']

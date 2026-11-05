@@ -154,6 +154,9 @@ def test_closed_weekend_both_directions_use_one_bundle_and_original_source_times
         candidate = row["candidates"][0]
         assert abs(candidate["delta"]) <= .25
         assert candidate["dte"] == 19 and candidate["reference_dte"] == 21
+        assert candidate["annualized_net_return"] == candidate["evidence"]["annualized_net_return"]
+        assert candidate["annualized_net_return"] == pytest.approx(candidate["period_net_return"] * 365 / 21)
+        assert candidate["annualized_net_return"] != pytest.approx(candidate["period_net_return"] * 365 / 19)
         assert candidate["evidence"]["snapshot_received_at"] == state["now"].isoformat()
         assert candidate["evidence"]["underlying_observed_at"] == state["source"].isoformat()
     for raw in state["bundles"][0]["rows"]:
