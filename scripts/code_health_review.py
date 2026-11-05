@@ -91,7 +91,7 @@ def select_commits(git, cursor: str, target: str, limit: int) -> list[str]:
     return git("rev-list", "--first-parent", "--reverse", f"{cursor}..{target}").splitlines()[:limit]
 
 
-def validate_result(result: dict, commits: list[str]) -> list[str]:
+def validate_result(result: dict, commits: list[str], *, work: Path | None = None) -> list[str]:
     if not isinstance(result, dict) or set(result) != set(RESULT_SCHEMA["required"]):
         raise ValueError("agent result has unexpected fields")
     completed = result["completed_commits"]
@@ -114,7 +114,7 @@ def validate_result(result: dict, commits: list[str]) -> list[str]:
         raise ValueError("confirmed findings must be a list")
     keys = set()
     for finding in findings:
-        validate_finding(finding, completed)
+        validate_finding(finding, completed, work=work)
         if finding["key"] in keys:
             raise ValueError("duplicate finding key")
         keys.add(finding["key"])
@@ -126,7 +126,19 @@ def safe_relative_path(value: str) -> bool:
     return bool(value) and not path.is_absolute() and ".." not in path.parts and ".git" not in path.parts
 
 
-def validate_finding(finding: dict, completed: list[str]) -> None:
+def normalize_evidence_path(value: str, work: Path | None) -> str:
+    path = Path(value)
+    if path.is_absolute() and work is not None and ".." not in path.parts and ".git" not in path.parts:
+        try:
+            value = path.resolve().relative_to(work.resolve()).as_posix()
+        except (ValueError, OSError, RuntimeError) as exc:
+            raise ValueError("finding contains an unsafe evidence path") from exc
+    if not safe_relative_path(value):
+        raise ValueError("finding contains an unsafe evidence path")
+    return value
+
+
+def validate_finding(finding: dict, completed: list[str], *, work: Path | None = None) -> None:
     if not isinstance(finding, dict) or set(finding) != set(FINDING_SCHEMA["required"]):
         raise ValueError("confirmed finding fields are incomplete")
     for key in FINDING_SCHEMA["required"]:
@@ -134,13 +146,14 @@ def validate_finding(finding: dict, completed: list[str]) -> None:
             raise ValueError(f"finding {key} must contain evidence")
     if finding["commit"] not in completed:
         raise ValueError("finding must belong to a completed reviewed commit")
-    if not safe_relative_path(finding["owner_path"]) or not safe_relative_path(finding["evidence_log"]):
-        raise ValueError("finding contains an unsafe evidence or owner path")
+    if not safe_relative_path(finding["owner_path"]):
+        raise ValueError("finding contains an unsafe owner path")
     scope = finding["fix_scope"]
     if not isinstance(scope, list) or not scope or not all(isinstance(p, str) and safe_relative_path(p) for p in scope):
         raise ValueError("finding must define explicit relative files for repair")
     if finding["owner_path"] not in scope:
         raise ValueError("repair scope must include the owning source")
+    finding["evidence_log"] = normalize_evidence_path(finding["evidence_log"], work)
 
 
 def agent_command(config: dict, work: Path, schema: Path, output: Path, *, writable: list[Path] | None = None) -> list[str]:
@@ -226,6 +239,23 @@ plan.previous_review 是上轮报告，coverage_note 是历史覆盖及待办提
     if smoke:
         return prefix + "\n本次仅验证调度链路：读取规则、源码 AGENTS.md 与 LESSONS.md，报告能读到的四项检查和L001边界。不要审查新提交或运行测试。outcome=complete，completed_commits=[]，confirmed_findings=[]。这不是第二轮巡检，也不能推进游标。\n"
     return prefix + "\n本轮输入：\n" + json.dumps(plan, ensure_ascii=False)
+
+
+def review_stage_config(config: dict, deadline: float, commit_count: int, *, has_issues: bool) -> dict:
+    """Scale the legacy three-unit review budget within the shared daily deadline."""
+    stage = repair.remaining_config(config, deadline)
+    available = min(stage["timeout_seconds"], config["timeout_seconds"])
+    if has_issues:
+        available -= min(available, config.get("issue_timeout_seconds", 600))
+    units = max(1, commit_count)
+    unit_seconds = max(30, config.get("review_timeout_seconds", 900) / 3)
+    if config.get("repair_enabled"):
+        # Keep one legacy three-unit share for the later repair stages.
+        available = min(available * units // (units + 3), available - 30)
+    stage["timeout_seconds"] = int(min(unit_seconds * units, available))
+    if stage["timeout_seconds"] < 30:
+        raise TimeoutError("daily budget exhausted before commit review; later stages retain their budget")
+    return stage
 
 
 def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False) -> dict:
@@ -317,14 +347,13 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False) -> dict:
                     bundle.extractall(source, filter="data")
                 restore_review_instructions(git, target, source)
             if not dry_run and (commits or smoke):
-                review_config = {**repair.remaining_config(config, deadline)}
-                if config.get("repair_enabled") and not smoke:
-                    review_config["timeout_seconds"] = min(review_config["timeout_seconds"], config.get("review_timeout_seconds", 900))
-                if issue_plan and issue_plan["issues"]:
-                    review_config["timeout_seconds"] = min(review_config["timeout_seconds"], 600)
                 try:
+                    review_config = repair.remaining_config(config, deadline) if smoke else review_stage_config(
+                        config, deadline, len(commits), has_issues=bool(issue_plan and issue_plan["issues"]),
+                    )
                     result = invoke_agent(review_config, run, review_prompt(root, run, plan, max_units=config["max_units"], smoke=smoke))
-                    completed = validate_result(result, commits)
+                    completed = validate_result(result, commits, work=run / "work")
+                    write_json(run / "result.json", result)
                     (run / "report.md").write_text(result["report_markdown"].rstrip() + "\n", encoding="utf-8")
                     if not smoke:
                         receipt["repair_tasks"] = repair.persist_findings(root, run, result, target)

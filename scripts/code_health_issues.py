@@ -141,7 +141,7 @@ comment_draft为可供用户审核的脱敏更新草稿，不发出。准确区�
 """
 
 
-def validate_result(result, plan, finding_schema, validate_finding):
+def validate_result(result, plan, finding_schema, validate_finding, *, work=None):
     schema = result_schema(finding_schema)
     if not isinstance(result, dict) or set(result) != set(schema["required"]):
         raise ValueError("invalid issue review result")
@@ -164,7 +164,9 @@ def validate_result(result, plan, finding_schema, validate_finding):
         if item["outcome"] == "confirmed":
             if not isinstance(item["finding"], dict) or "commit" in item["finding"]:
                 raise ValueError("issue findings must use the verification target, not a reviewed commit")
-            validate_finding({**item["finding"], "commit": plan["target"]}, [plan["target"]])
+            finding = {**item["finding"], "commit": plan["target"]}
+            validate_finding(finding, [plan["target"]], work=work)
+            item["finding"]["evidence_log"] = finding["evidence_log"]
         elif item["finding"] is not None:
             raise ValueError("unconfirmed issue cannot enter repair")
     if result["outcome"] == "complete" and seen != planned:
@@ -179,7 +181,8 @@ def process_issues(root, config, run, source, plan, deadline, invoke, finding_sc
     remaining = repair.remaining_config(config, deadline)
     remaining["timeout_seconds"] = min(remaining["timeout_seconds"], config.get("issue_timeout_seconds", 600))
     result = invoke(remaining, run, prompt(root, run, source, config), result_schema=result_schema(finding_schema))
-    validate_result(result, plan, finding_schema, validate_finding)
+    validate_result(result, plan, finding_schema, validate_finding, work=run / "work")
+    (run / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     (run / "report.md").write_text(result["report_markdown"] + "\n", encoding="utf-8")
     state = read_state(root)
     snapshots = {item["number"]: item for item in plan["issues"]}
