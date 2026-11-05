@@ -230,3 +230,95 @@ def test_invalid_or_interrupted_shard_cannot_erase_saved_prefix(commit_review_ru
     assert review.validate_result(aggregate, shas[1:]) == shas[1:3]
     assert calls == shas[1:4]
     assert not list((root / "repairs").glob("*/task.json"))
+
+
+@pytest.mark.parametrize("failure", ["partial", "timeout"])
+def test_first_unfinished_shard_hands_latest_report_to_next_run(commit_review_run, monkeypatch, failure):
+    root, shas, _ = commit_review_run
+    marker = "首片最新进度：入口已核对，失败路径尚待验证。"
+
+    def unfinished(config, shard, prompt):
+        if failure == "timeout":
+            raise TimeoutError(marker)
+        return {**result([], "partial"), "report_markdown": marker * 20}
+
+    monkeypatch.setattr(review, "invoke_agent", unfinished)
+    first = review.run_once(root)
+    state = json.loads((root / "state.json").read_text())
+    assert state["cursor"] == shas[0]
+    assert state["last_review"] == str(Path(first["run_dir"]) / "report.md")
+    seen = []
+
+    def resume(config, shard, prompt):
+        plan = json.loads((shard / "plan.json").read_text())
+        assert marker in plan["previous_review"]
+        seen.append(plan["commits"][0]["sha"])
+        return result([seen[-1]])
+
+    monkeypatch.setattr(review, "invoke_agent", resume)
+    assert review.run_once(root)["status"] == "complete"
+    assert seen == shas[1:]
+
+
+def test_metadata_preparation_cannot_spend_reserved_issue_budget(commit_review_run, monkeypatch):
+    root, shas, clock = commit_review_run
+    config = json.loads((root / "config.json").read_text())
+    review.write_json(root / "config.json", {**config, "issues_enabled": True})
+    original = review.command
+    observed, reviewed = [], []
+
+    def slow_metadata(argv, **kwargs):
+        if argv[0] == "github-client":
+            assert clock[0] < 1200
+            duration = min(150, kwargs["timeout"])
+            clock[0] += duration
+            if duration < 150:
+                raise subprocess.TimeoutExpired(argv, duration)
+            if argv[-1].endswith("/pulls"):
+                sha = argv[-1].split("/")[-2]
+                return json.dumps([{"merge_commit_sha": sha, "number": shas.index(sha)}])
+            return "{}" if argv[1] == "pr" else "[]"
+        return original(argv, **kwargs)
+
+    def invoke(config, shard, prompt):
+        sha = json.loads((shard / "plan.json").read_text())["commits"][0]["sha"]
+        reviewed.append(sha)
+        return result([sha])
+
+    def intake(root, config, target, command, *, deadline):
+        observed.append(deadline - clock[0])
+        return {"issues": [], "target": target}
+
+    monkeypatch.setattr(review, "command", slow_metadata)
+    monkeypatch.setattr(review, "invoke_agent", invoke)
+    monkeypatch.setattr(review.issues, "plan_issues", intake)
+    receipt = review.run_once(root)
+    assert receipt["status"] == "partial"
+    assert receipt["cursor_after"] == shas[len(reviewed)]
+    assert observed == [600]
+    assert clock[0] == 1200
+
+
+def test_repair_budget_exhaustion_preserves_review_partial_receipt(commit_review_run, monkeypatch):
+    root, shas, clock = commit_review_run
+    config = json.loads((root / "config.json").read_text())
+    review.write_json(root / "config.json", {**config, "repair_enabled": True})
+    calls = []
+
+    def invoke(config, shard, prompt):
+        clock[0] += config["timeout_seconds"]
+        sha = json.loads((shard / "plan.json").read_text())["commits"][0]["sha"]
+        calls.append(sha)
+        if len(calls) == 3:
+            raise TimeoutError("third shard timed out at daily deadline")
+        return result([sha])
+
+    monkeypatch.setattr(review, "invoke_agent", invoke)
+    monkeypatch.setattr(review.repair, "repair_one", lambda *args: pytest.fail("repair must not start without budget"))
+    receipt = review.run_once(root)
+    assert calls == shas[1:4]
+    assert receipt["status"] == "partial"
+    assert receipt["completed_commits"] == shas[1:3]
+    assert receipt["repair"]["status"] == "pending"
+    assert json.loads((root / "last-run.json").read_text())["status"] == "partial"
+    assert json.loads((Path(receipt["run_dir"]) / "result.json").read_text())["outcome"] == "partial"

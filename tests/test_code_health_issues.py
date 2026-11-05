@@ -424,14 +424,16 @@ output.write_text(json.dumps(payload))
     else:
         assert not (root / "issue-state.json").exists()
         if mode == "archive_budget":
-            assert receipt["status"] == "pending" and not repairs
+            assert receipt["status"] == ("partial" if has_commit else "no_changes") and not repairs
             assert receipt["cursor_after"] == base
-            # Frozen source is now prepared before issue intake consumes its own budget.
-            assert any(call[0] == "git" and "archive" in call for call in calls) == (not has_commit)
+            assert receipt["repair"]["status"] == "pending"
+            # Frozen source is prepared before metadata or issue intake can exhaust their budgets.
+            assert any(call[0] == "git" and "archive" in call for call in calls)
         if mode in {"intake_timeout", "budget_exhausted"}:
             assert receipt["issues"]["status"] == "pending"
         if mode == "budget_exhausted":
-            assert receipt["status"] == "pending" and not repairs
+            assert receipt["status"] == ("complete" if has_commit else "no_changes") and not repairs
+            assert receipt["repair"]["status"] == "pending"
     if mode == "smoke":
         assert not any(call[0] == "github-client" for call in calls)
     assert git("status", "--porcelain") == ""

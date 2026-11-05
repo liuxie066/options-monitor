@@ -259,7 +259,7 @@ def run_commit_reviews(
     planned = [unit["sha"] for unit in plan["commits"]]
     completed, findings, gaps, reports, tasks = [], [], [], [], []
     known_keys = set(plan["confirmed_finding_keys"])
-    pending_reason = ""
+    pending_reason = plan.get("preparation_error", "")
     blocked = False
 
     def checkpoint():
@@ -290,8 +290,9 @@ def run_commit_reviews(
         if pending_reason:
             receipt["review_error"] = pending_reason
         write_json(run / "receipt.json", {**receipt, "updated_at": now()})
-        if completed and state["cursor"] != completed[-1]:
-            state.update({"cursor": completed[-1], "last_review": str(report), "updated_at": now(),
+        cursor = completed[-1] if completed else state["cursor"]
+        if state["cursor"] != cursor or state["last_review"] != str(report):
+            state.update({"cursor": cursor, "last_review": str(report), "updated_at": now(),
                           "confirmed_finding_keys": sorted(known_keys)})
             write_json(root / "state.json", state)
         return result
@@ -301,6 +302,8 @@ def run_commit_reviews(
         shard = run / "work" / "shards" / f"{index:03d}-{sha}"
         shard.mkdir(parents=True)
         try:
+            if plan.get("preparation_error"):
+                raise TimeoutError(plan["preparation_error"])
             stage = review_stage_config(config, deadline)
             shard_plan = {**plan, "commits": [unit], "confirmed_finding_keys": sorted(known_keys),
                           "timeout_seconds": stage["timeout_seconds"]}
@@ -349,7 +352,8 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False) -> dict:
         not smoke and config.get("issues_enabled")
     ) else 0
     review_deadline = daily_deadline - issue_budget
-    deadline = daily_deadline
+    # Shared source preparation belongs to review unless all time was explicitly assigned to issues.
+    deadline = review_deadline if issue_budget < config["timeout_seconds"] else daily_deadline
     with run_lock(root):
         state = json.loads((root / "state.json").read_text(encoding="utf-8"))
         run = root / "runs" / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + f"-{os.getpid()}")
@@ -387,27 +391,41 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False) -> dict:
                 "local_repairs": repair.task_summaries(root),
             }
             issue_run, issue_plan = run / "issues", None
+            source = run / "source"
+            if not dry_run and (commits or smoke or config.get("issues_enabled")):
+                archive = run / "source.tar"
+                git("archive", "--output=" + str(archive), target)
+                source.mkdir()
+                with tarfile.open(archive) as bundle:
+                    bundle.extractall(source, filter="data")
+                restore_review_instructions(git, target, source)
+            deadline = review_deadline
             changes = run / "changes"
             changes.mkdir()
-            for sha in commits:
-                parent = git("rev-parse", f"{sha}^1")
-                associated = json.loads(bounded_command([
-                    config["gh"], "api", f"repos/{config['repository']}/commits/{sha}/pulls",
-                ]))
-                prs = [{key: pr.get(key) for key in ("number", "title", "html_url", "body", "merged_at")}
-                       for pr in associated if pr.get("merge_commit_sha") == sha]
-                for pr in prs:
-                    pr["review_evidence"] = json.loads(bounded_command([
-                        config["gh"], "pr", "view", str(pr["number"]), "--repo", config["repository"],
-                        "--json", "headRefOid,mergeCommit,reviews,statusCheckRollup",
+            try:
+                # Leave enough information to report the whole pending range if metadata times out.
+                plan["commits"] = [{"sha": sha} for sha in commits]
+                for index, sha in enumerate(commits):
+                    parent = git("rev-parse", f"{sha}^1")
+                    associated = json.loads(bounded_command([
+                        config["gh"], "api", f"repos/{config['repository']}/commits/{sha}/pulls",
                     ]))
-                plan["commits"].append({"sha": sha, "parent": parent, "subject": git("show", "-s", "--format=%s", sha), "pull_requests": prs})
-                (changes / f"{sha}.patch").write_text(git("diff", "--no-ext-diff", parent, sha), encoding="utf-8")
-            if commits:
-                plan["recent_issues"] = json.loads(bounded_command([
-                    config["gh"], "issue", "list", "--repo", config["repository"], "--state", "all",
-                    "--limit", "100", "--json", "number,title,state,url",
-                ]))
+                    prs = [{key: pr.get(key) for key in ("number", "title", "html_url", "body", "merged_at")}
+                           for pr in associated if pr.get("merge_commit_sha") == sha]
+                    for pr in prs:
+                        pr["review_evidence"] = json.loads(bounded_command([
+                            config["gh"], "pr", "view", str(pr["number"]), "--repo", config["repository"],
+                            "--json", "headRefOid,mergeCommit,reviews,statusCheckRollup",
+                        ]))
+                    plan["commits"][index] = {"sha": sha, "parent": parent, "subject": git("show", "-s", "--format=%s", sha), "pull_requests": prs}
+                    (changes / f"{sha}.patch").write_text(git("diff", "--no-ext-diff", parent, sha), encoding="utf-8")
+                if commits:
+                    plan["recent_issues"] = json.loads(bounded_command([
+                        config["gh"], "issue", "list", "--repo", config["repository"], "--state", "all",
+                        "--limit", "100", "--json", "number,title,state,url",
+                    ]))
+            except (TimeoutError, subprocess.TimeoutExpired) as exc:
+                plan["preparation_error"] = f"commit preparation pending: {exc}"
             write_json(run / "plan.json", plan)
             receipt.update({"target": target, "planned_commits": commits})
             if dry_run:
@@ -417,14 +435,6 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False) -> dict:
                     f"# 每日增量巡检\n\n时间：{now()}\n\n起点与目标：`{target}`。无新增主线提交，未调用模型。\n\n续跑位置保持 `{state['cursor']}`。\n", encoding="utf-8",
                 )
                 receipt["status"] = "no_changes"
-            source = run / "source"
-            if not dry_run and (commits or smoke or config.get("issues_enabled")):
-                archive = run / "source.tar"
-                git("archive", "--output=" + str(archive), target)
-                source.mkdir()
-                with tarfile.open(archive) as bundle:
-                    bundle.extractall(source, filter="data")
-                restore_review_instructions(git, target, source)
             if not dry_run and (commits or smoke):
                 try:
                     if smoke:
@@ -466,10 +476,13 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False) -> dict:
                     receipt["issues"] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "run_dir": str(issue_run)}
                 write_json(issue_run / "receipt.json", receipt["issues"])
             if config.get("repair_enabled") and not smoke and not dry_run:
-                repair.remaining_config(config, deadline)
-                repair_config = {**config, "issue_target": target, "issue_inputs": issue_plan.get("issue_inputs", {}) if issue_plan else {},
-                                 "issue_intake_ready": receipt.get("issues", {}).get("status") in {"complete", "partial", "no_eligible_issues"}}
-                receipt["repair"] = repair.repair_one(root, repair_config, run, deadline, invoke_agent)
+                try:
+                    repair.remaining_config(config, daily_deadline)
+                    repair_config = {**config, "issue_target": target, "issue_inputs": issue_plan.get("issue_inputs", {}) if issue_plan else {},
+                                     "issue_intake_ready": receipt.get("issues", {}).get("status") in {"complete", "partial", "no_eligible_issues"}}
+                    receipt["repair"] = repair.repair_one(root, repair_config, run, daily_deadline, invoke_agent)
+                except TimeoutError as exc:
+                    receipt["repair"] = {"status": "pending", "error": str(exc)}
             receipt.update({"finished_at": now(), "cursor_after": json.loads((root / "state.json").read_text())["cursor"], "run_dir": str(run)})
             write_json(run / "receipt.json", receipt)
             write_json(root / "last-run.json", receipt)
