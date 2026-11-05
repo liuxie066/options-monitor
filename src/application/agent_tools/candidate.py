@@ -185,7 +185,7 @@ CANDIDATE_RANK_EXPLAIN_TOOL = build_agent_tool(
         "account": {
             "type": "string",
             "required": True,
-            "description": "Logical account label bound to the physical OpenD account snapshot",
+            "description": "Logical account label for the physical OpenD snapshot",
         },
     },
     handler=_candidate_rank_explain_tool,
@@ -217,19 +217,19 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
         "symbol": {
             "type": "string",
             "required": True,
-            "description": "Canonical symbol, company name, or alias, for example NVDA, 0700.HK, or 泡泡玛特",
+            "description": "Canonical symbol, company name or alias: NVDA, 0700.HK, 泡泡玛特",
         },
         "config_key": {
             "type": "string",
             "enum": ["us", "hk"],
-            "description": "Optional market config; when present, include runtime-config symbol aliases",
+            "description": "Market config; enables configured symbol aliases",
         },
         "config_path": "optional explicit config path",
         "runtime_root": "optional explicit runtime root; defaults to OM_RUNTIME_ROOT then repo root",
         "account": {
             "type": "string",
             "required": True,
-            "description": "Logical account label bound to the physical OpenD account snapshot",
+            "description": "Logical account label for the physical OpenD snapshot",
         },
         "conversation_id": "optional operator notification conversation scope",
         "authenticated_conversation_id": "host-injected authenticated notification conversation scope",
@@ -250,10 +250,7 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
             "optional latest|latest_notification; latest_notification resolves the most recent run whose "
             "notification was actually delivered to the account on notification_date"
         ),
-        "notification_date": (
-            "optional ISO YYYY-MM-DD used with run_selector=latest_notification; "
-            "defaults to today in the runtime host local timezone"
-        ),
+        "notification_date": "optional YYYY-MM-DD for run_selector=latest_notification; default today in runtime host timezone",
     },
     handler=_candidate_filter_explain_tool,
     pure_read=True,
