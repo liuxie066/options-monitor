@@ -225,6 +225,7 @@ def _in_scope(row: dict, prepared: PreparedQuery) -> bool:
 
 
 def _candidate(row: dict, decision: dict, mode: str, *, source: str = "opend") -> dict:
+    annualized_return = row["annualized_net_return"] if mode == "put" else row["annualized_net_premium_return"]
     evidence_fields = {
         "underlying_price": "spot", "bid": "bid", "ask": "ask", "mid": "mid", "last": "last_price",
         "spread_ratio": "spread_ratio", "iv": "implied_volatility", "term_matched_rv": "term_matched_rv",
@@ -239,12 +240,13 @@ def _candidate(row: dict, decision: dict, mode: str, *, source: str = "opend") -
             "snapshot_received_at": row.get("snapshot_received_at_utc"),
             "sell_limit": row["sell_limit"], "multiplier": row["multiplier"],
             "net_premium": row["net_income"], "period_net_return": row["period_net_return"],
+            "annualized_net_return": annualized_return,
             "obligation": ({"kind": "net_acquisition_price", "price": row["breakeven"]} if mode == "put" else
                            {"kind": "sale_price", "price": row["strike"], "above_spot_ratio": row["strike_above_spot_pct"]}),
             "reasons": [f"净收益{row['period_net_return']:.2%}；波动率溢价{row['iv_minus_rv']:.1%}"],
             "earnings": {"coverage": "unavailable", "events": [], "omitted_events": 0},
             "evidence": {**{key: row.get(source) for key, source in evidence_fields.items()},
-                "iv_source": source, "annualized_net_return": row.get("annualized_net_return", row.get("annualized_net_premium_return")),
+                "iv_source": source, "annualized_net_return": annualized_return,
                 "conditions": decision.get("conditions", [])}}
 
 
