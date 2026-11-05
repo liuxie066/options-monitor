@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1445 (`src`: 607, `domain`: 99, `scripts`: 21, `tests`: 714)
-- Internal import edges: 12833 total, 4482 production/script edges excluding tests
+- Python files scanned: 1446 (`src`: 607, `domain`: 99, `scripts`: 21, `tests`: 715)
+- Internal import edges: 12835 total, 4482 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -57,7 +57,7 @@ flowchart LR
   tests -->|431| infrastructure
   tests -->|495| interfaces
   tests -->|13| om_strategy_core
-  tests -->|48| scripts
+  tests -->|50| scripts
   tests -->|77| storage
 ```
 
@@ -95,7 +95,7 @@ flowchart LR
 | tests | interfaces | 495 |
 | tests | infrastructure | 431 |
 | tests | storage | 77 |
-| tests | scripts | 48 |
+| tests | scripts | 50 |
 | tests | om_strategy_core | 13 |
 | tests | domain_services | 2 |
 

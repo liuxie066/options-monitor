@@ -338,7 +338,7 @@ output.write_text(json.dumps(payload))
     agent.chmod(0o700)
     (root / "config.json").write_text(json.dumps({
         "git": "git", "gh": "github-client", "codex": str(agent), "repository": "fixture/repo",
-        "repository_url": str(source), "max_units": 3, "timeout_seconds": 180, "issue_timeout_seconds": 30,
+        "repository_url": str(source), "max_units": 3, "timeout_seconds": 180, "issue_timeout_seconds": 60,
         "issues_enabled": True, "repair_enabled": True, "model": "fixture",
         "model_base_url": "http://fixture.invalid", "model_catalog": str(root / "catalog.json"),
     }))
@@ -406,7 +406,7 @@ output.write_text(json.dumps(payload))
     assert not forbidden
     assert len(repairs) == (1 if mode in {"run", "review_timeout", "intake_timeout", "reserved_budget"} else 0)
     actual = json.loads((root / "state.json").read_text())
-    assert actual["cursor"] == (target if mode in {"run", "intake_timeout"} and has_commit else base)
+    assert actual["cursor"] == (target if mode in {"run", "intake_timeout", "budget_exhausted"} and has_commit else base)
     if mode in {"run", "review_timeout", "reserved_budget"}:
         assert receipt["issues"]["reviewed"] == [1]
         saved = json.loads((root / "issue-state.json").read_text())["issues"]["1"]
@@ -414,23 +414,27 @@ output.write_text(json.dumps(payload))
         assert not (root / "repairs").exists()
         if mode == "reserved_budget":
             if has_commit:
-                assert receipt["status"] == "pending" and receipt["completed_commits"] == []
-                assert "later stages retain their budget" in receipt["review_error"]
+                assert receipt["status"] == "partial" and receipt["completed_commits"] == []
+                assert "budget exhausted" in receipt["review_error"]
             assert not (Path(receipt["run_dir"]) / "agent.jsonl").exists()
             assert not (Path(receipt["run_dir"]) / "units").exists()
         repeated = review.run_once(root)
         assert repeated["issues"]["status"] == "no_eligible_issues"
         if mode == "review_timeout" and has_commit:
-            assert receipt["status"] == "pending" and receipt["completed_commits"] == []
+            assert receipt["status"] == "partial" and receipt["completed_commits"] == []
     else:
         assert not (root / "issue-state.json").exists()
         if mode == "archive_budget":
-            assert receipt["status"] == "pending" and not repairs
-            assert not any(call[0] == "git" and "archive" in call for call in calls)
+            assert receipt["status"] == ("partial" if has_commit else "no_changes") and not repairs
+            assert receipt["cursor_after"] == base
+            assert receipt["repair"]["status"] == "pending"
+            # Frozen source is prepared before metadata or issue intake can exhaust their budgets.
+            assert any(call[0] == "git" and "archive" in call for call in calls)
         if mode in {"intake_timeout", "budget_exhausted"}:
             assert receipt["issues"]["status"] == "pending"
         if mode == "budget_exhausted":
-            assert receipt["status"] == "pending" and not repairs
+            assert receipt["status"] == ("complete" if has_commit else "no_changes") and not repairs
+            assert receipt["repair"]["status"] == "pending"
     if mode == "smoke":
         assert not any(call[0] == "github-client" for call in calls)
     assert git("status", "--porcelain") == ""
