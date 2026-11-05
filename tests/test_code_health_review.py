@@ -196,10 +196,150 @@ def test_daily_review_uses_planned_commit_count_instead_of_configured_limit(tmp_
     monkeypatch.setattr(review.time, "monotonic", lambda: 0)
     monkeypatch.setattr(review.repair, "repair_one", lambda *args: {"status": "no_pending_repairs"})
     receipt = review.run_once(root)
-    assert calls == [expected]
+    assert calls == [expected] * unit_count
+    assert len(receipt["review_units"]) == unit_count
     assert len(receipt["planned_commits"]) == unit_count
     assert receipt["completed_commits"] == receipt["planned_commits"]
     assert receipt["status"] == "complete"
+
+
+@pytest.mark.parametrize(("has_issues", "expected"), [(False, [900, 590, 480]), (True, [600, 290, 180])])
+def test_commit_can_use_more_than_baseline_while_later_units_share_remaining_budget(
+    tmp_path, monkeypatch, has_issues, expected,
+):
+    import json
+
+    clock = [0]
+    monkeypatch.setattr(review.time, "monotonic", lambda: clock[0])
+    run = tmp_path / "run"
+    (run / "source").mkdir(parents=True)
+    (run / "changes").mkdir()
+    plan = {"cursor": A, "target": D, "previous_review": "previous report",
+            "commits": [{"sha": sha} for sha in [B, C, D]]}
+    state = {"cursor": A, "last_review": "previous report"}
+    config = {"max_units": 10, "timeout_seconds": 1800, "review_timeout_seconds": 900,
+              "issue_timeout_seconds": 600, "repair_enabled": True}
+    limits = []
+
+    def invoke_agent(stage, unit, prompt):
+        index = len(limits)
+        limits.append(stage["timeout_seconds"])
+        assert f"本阶段硬超时为{expected[index]}秒" in prompt
+        clock[0] += [310, 110, 50][index]
+        return result([unit.name], outcome="complete")
+
+    monkeypatch.setattr(review, "invoke_agent", invoke_agent)
+    receipt = {}
+    review.review_commits(tmp_path, config, run, plan, [B, C, D], 1800, receipt, state, has_issues=has_issues)
+    assert limits == expected
+    assert receipt["status"] == "complete"
+    assert receipt["completed_commits"] == [B, C, D]
+    assert json.loads((tmp_path / "state.json").read_text())["cursor"] == D
+    assert review.repair.remaining_config(config, 1800)["timeout_seconds"] == 1330
+    assert config["timeout_seconds"] == 1800
+
+
+@pytest.mark.parametrize("next_outcome", ["timeout", "partial", "budget", "report_write_error"])
+def test_completed_unit_survives_later_incomplete_review_and_bounds_the_stage(tmp_path, monkeypatch, next_outcome):
+    import json
+
+    root, run = tmp_path, tmp_path / "run"
+    run.mkdir()
+    (run / "source").mkdir()
+    (run / "changes").mkdir()
+    old = root / "previous.md"
+    old.write_text("previous review")
+    state = {"cursor": A, "last_review": str(old)}
+    review.write_json(root / "state.json", state)
+    config = {"timeout_seconds": 1800, "review_timeout_seconds": 900, "issue_timeout_seconds": 600,
+              "max_units": 10, "repair_enabled": True}
+    plan = {"cursor": A, "target": D, "previous_review": old.read_text(),
+            "commits": [{"sha": B}, {"sha": C}, {"sha": D}]}
+    receipt = {"mode": "daily", "cursor_before": A, "target": D, "planned_commits": [B, C, D]}
+    clock, calls = [0], []
+    monkeypatch.setattr(review.time, "monotonic", lambda: clock[0])
+
+    def invoke(cfg, stage, prompt):
+        current = json.loads((stage / "plan.json").read_text())
+        sha, = [row["sha"] for row in current["commits"]]
+        calls.append((sha, cfg["timeout_seconds"]))
+        assert f"硬超时为{cfg['timeout_seconds']}秒" in prompt
+        assert "不是额外30分钟" in prompt
+        assert (stage / "source").resolve() == (run / "source").resolve()
+        if sha == C:
+            assert json.loads((root / "state.json").read_text())["cursor"] == B
+            checkpoint = json.loads((run / "receipt.json").read_text())
+            assert checkpoint["completed_commits"] == [B]
+            assert "finished_at" not in checkpoint
+            if next_outcome == "timeout":
+                raise TimeoutError("unit budget exceeded")
+            if next_outcome == "report_write_error":
+                original_write = Path.write_text
+
+                def interrupted_write(path, value, *args, **kwargs):
+                    if path == run / "report.md.tmp":
+                        original_write(path, value[:10], *args, **kwargs)
+                        raise OSError("injected interrupted report write")
+                    return original_write(path, value, *args, **kwargs)
+
+                monkeypatch.setattr(Path, "write_text", interrupted_write)
+                return result([C], "complete")
+            return result([], "partial")
+        assert sha == B
+        work = stage / "work"
+        work.mkdir()
+        (work / "probe.log").write_text("assert actual == expected; actual=2 expected=1\n")
+        finding = {"key": "fixture:wrong-value", "title": "Wrong value", "commit": B,
+                   "owner_path": "example.py", "failure_scenario": "read value", "expected": "1", "actual": "2",
+                   "evidence_log": str(work / "probe.log"), "fix_scope": ["example.py", "tests/test_example.py"]}
+        clock[0] += 590 if next_outcome == "budget" else 250
+        return {**result([B], "complete"), "confirmed_findings": [finding]}
+
+    monkeypatch.setattr(review, "invoke_agent", invoke)
+    if next_outcome == "report_write_error":
+        with pytest.raises(OSError, match="interrupted report"):
+            review.review_commits(root, config, run, plan, [B, C, D], 1800, receipt, state, has_issues=True)
+        saved_state = json.loads((root / "state.json").read_text())
+        assert saved_state["cursor"] == B
+        assert Path(saved_state["last_review"]).read_text() == f"## {B}\n\n{result([B], 'complete')['report_markdown']}\n"
+        assert json.loads((run / "receipt.json").read_text())["completed_commits"] == [B]
+        return
+    review.review_commits(root, config, run, plan, [B, C, D], 1800, receipt, state, has_issues=True)
+    assert calls == ([(B, 600)] if next_outcome == "budget" else [(B, 600), (C, 350)])
+    assert receipt["status"] == "partial" and receipt["completed_commits"] == [B]
+    assert json.loads((root / "state.json").read_text())["cursor"] == B
+    aggregate = json.loads((run / "result.json").read_text())
+    assert validate_result(aggregate, [B, C, D], work=run / "work") == [B]
+    assert len(aggregate["confirmed_findings"]) == 1
+    evidence = run / "work" / aggregate["confirmed_findings"][0]["evidence_log"]
+    assert evidence.read_text().startswith("assert actual")
+    task_path, = (root / "repairs").glob("*/task.json")
+    task = json.loads(task_path.read_text())
+    assert task["finding"]["evidence_log"] == "probe.log"
+    assert Path(task["evidence"]).is_file()
+    assert "待续" in (run / "report.md").read_text()
+    assert clock[0] < 1800 - 600
+
+
+def test_last_partial_unit_is_not_promoted_to_complete(tmp_path, monkeypatch):
+    import json
+
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "source").mkdir()
+    (run / "changes").mkdir()
+    plan = {"cursor": A, "target": B, "previous_review": "history", "commits": [{"sha": B}]}
+    state = {"cursor": A, "last_review": "history"}
+    receipt = {}
+    config = {"timeout_seconds": 1800, "max_units": 10}
+    monkeypatch.setattr(review.time, "monotonic", lambda: 0)
+    monkeypatch.setattr(review, "invoke_agent", lambda *a, **k: {**result([B], "partial"), "verification_gaps": ["follow-up"]})
+    review.review_commits(tmp_path, config, run, plan, [B], 1800, receipt, state, has_issues=False)
+    aggregate = json.loads((run / "result.json").read_text())
+    assert aggregate["outcome"] == receipt["status"] == "partial"
+    assert aggregate["completed_commits"] == receipt["completed_commits"] == [B]
+    assert "follow-up" in aggregate["verification_gaps"]
+    assert json.loads((tmp_path / "state.json").read_text())["cursor"] == B
 
 
 def test_concurrent_runs_cannot_share_cursor_lock(tmp_path):

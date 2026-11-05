@@ -417,6 +417,7 @@ output.write_text(json.dumps(payload))
                 assert receipt["status"] == "pending" and receipt["completed_commits"] == []
                 assert "later stages retain their budget" in receipt["review_error"]
             assert not (Path(receipt["run_dir"]) / "agent.jsonl").exists()
+            assert not (Path(receipt["run_dir"]) / "units").exists()
         repeated = review.run_once(root)
         assert repeated["issues"]["status"] == "no_eligible_issues"
         if mode == "review_timeout" and has_commit:
