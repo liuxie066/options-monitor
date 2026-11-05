@@ -340,11 +340,15 @@ def test_final_card_and_fallback_ack_only_the_same_visible_rolls(
 def test_suppressing_unshown_roll_preserves_close_in_same_position(tmp_path: Path) -> None:
     brief = roll_brief(base=tmp_path, rows=[{**position_row(), "recommendation_state": "close",
         "notification_eligible": True, "evaluation_status": "priced", "quote_status": "priced"}])
-    message, _transport, identities = flow._render_daily_brief_advice_delivery(
-        brief, [], delivery_kind="fixed_report", diff={}, limits={}, context={}, card=False)
+    render_brief = flow._daily_brief_roll_render_source(brief, [])
+    message = renderer.render_fixed_report_text(render_brief, diff={}, limits={}, context={})
+    identities = flow._daily_brief_transport_roll_identities(
+        render_brief, [], delivery_kind="fixed_report", diff={}, limits={},
+        rendered_message=message, rendered_transport=None)
     assert "建议平仓" in message
     assert "向上移仓" not in message
     assert identities == []
+    assert daily_brief_position_roll(brief["positions"][0]) is not None
 
 
 @pytest.mark.parametrize("gate", ["quiet", "disabled", "missing_target", "closed_window"])

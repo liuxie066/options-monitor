@@ -181,15 +181,32 @@ def _daily_brief_fanout_spec(request, route, brief, *, kind, identities, diff, s
             delivery_kind="candidate_alert" if kind == "candidate_alert" else "fixed_report",
             candidate_identities=identities, diff=diff, limits=limits))
     card = route["provider"] == FEISHU_APP_NOTIFICATION_PROVIDER
-    if kind == "fixed_failure":
-        message = (render_fixed_failure if card else render_fixed_failure_text)(brief, context=context)
-        envelope = render_feishu_notification_card(markdown=message, markdown_blocks=[message],
-            fallback_text=message, fallback_open_id=route["target"]) if card else None
-    else:
-        message, envelope, identities = _render_daily_brief_advice_delivery(
-            brief, identities, delivery_kind=kind, diff=diff, limits=limits, context=context,
-            card=card, fallback_open_id=route["target"],
-        )
+    while True:
+        render_brief = brief if kind == "fixed_failure" else _daily_brief_roll_render_source(brief, identities)
+        blocks = []
+        if kind == "fixed_failure":
+            message = (render_fixed_failure if card else render_fixed_failure_text)(render_brief, context=context)
+        elif kind == "candidate_alert":
+            message = (render_candidate_alert if card else render_candidate_alert_text)(render_brief, identities,
+                context=context, limits=limits)
+            if card:
+                blocks = render_candidate_alert_card_blocks(render_brief, identities, context=context, limits=limits)
+        else:
+            message = (render_fixed_report if card else render_fixed_report_text)(render_brief,
+                context=context, limits=limits, diff=diff)
+            if card:
+                blocks = render_fixed_report_card_blocks(render_brief, context=context, limits=limits, diff=diff)
+        envelope = render_feishu_notification_card(markdown="\n\n".join(blocks) or message,
+            markdown_blocks=blocks or [message], fallback_text=message,
+            fallback_open_id=route["target"]) if card else None
+        if kind == "fixed_failure":
+            break
+        visible_identities = _daily_brief_transport_roll_identities(
+            render_brief, identities, delivery_kind=kind, diff=diff, limits=limits,
+            rendered_message=message, rendered_transport=envelope)
+        if visible_identities == identities:
+            break
+        identities = visible_identities
     # Secrets stay in the transport's credential owner. Only binding locators
     # and provider selection are frozen alongside the final rendered envelope.
     options = {key: value for key, value in route["notifications"].items()
@@ -1750,12 +1767,54 @@ def _prepare_daily_brief_notification(
                                 persisted["brief"], delivery_kind=action, candidate_identities=identities,
                                 diff=diff, limits=daily_limits,
                             ))
-                            message, rendered_transport, identities = _render_daily_brief_advice_delivery(
-                                persisted["brief"], identities, delivery_kind=action, diff=diff,
-                                limits=daily_limits, context=render_context, card=feishu_card_delivery,
-                                fallback_open_id=(resolve_feishu_bot_send_target(notifications=request.base_cfg.get("notifications"))
-                                    if feishu_card_delivery else None),
-                            )
+                            while True:
+                                render_brief = _daily_brief_roll_render_source(persisted["brief"], identities)
+                                if action == "fixed_report":
+                                    message = (render_fixed_report if feishu_card_delivery else render_fixed_report_text)(
+                                        render_brief,
+                                        diff=diff,
+                                        limits=daily_limits,
+                                        context=render_context,
+                                    )
+                                    card_blocks = []
+                                    if feishu_card_delivery:
+                                        card_blocks = render_fixed_report_card_blocks(
+                                            render_brief,
+                                            diff=diff,
+                                            limits=daily_limits,
+                                            context=render_context,
+                                        )
+                                else:
+                                    message = (render_candidate_alert if feishu_card_delivery else render_candidate_alert_text)(
+                                        render_brief,
+                                        identities,
+                                        limits=daily_limits,
+                                        context=render_context,
+                                    )
+                                    card_blocks = []
+                                    if feishu_card_delivery:
+                                        card_blocks = render_candidate_alert_card_blocks(
+                                            render_brief,
+                                            identities,
+                                            limits=daily_limits,
+                                            context=render_context,
+                                        )
+                                rendered_transport = (
+                                    render_feishu_notification_card(
+                                        markdown="\n\n".join(card_blocks),
+                                        markdown_blocks=card_blocks,
+                                        fallback_text=message,
+                                        fallback_open_id=resolve_feishu_bot_send_target(notifications=request.base_cfg.get("notifications")),
+                                    )
+                                    if feishu_card_delivery
+                                    else None
+                                )
+                                visible_identities = _daily_brief_transport_roll_identities(
+                                    render_brief, identities, delivery_kind=action, diff=diff, limits=daily_limits,
+                                    rendered_message=message, rendered_transport=rendered_transport)
+                                if visible_identities == identities:
+                                    break
+                                identities = visible_identities
                             if action != "candidate_alert" or identities:
                                 prepare_daily_decision_brief_delivery(
                                     base=request.base,
@@ -1938,48 +1997,41 @@ def _daily_brief_displayed_roll_identities(
     return [identity for identity in identities if identity not in rolls or identity in rendered & current]
 
 
-def _render_daily_brief_advice_delivery(
+def _daily_brief_roll_render_source(
+    brief: Mapping[str, Any], identities: list[str],
+) -> Mapping[str, Any]:
+    """Limit only roll advice; leave existing report and close data intact."""
+    if not daily_brief_roll_notification_identities(brief):
+        return brief
+    allowed = set(identities)
+    return {**brief, "positions": [
+        row if daily_brief_position_roll_identity(
+            row, account=brief.get("account"), market=brief.get("market")) in allowed
+        else {key: value for key, value in row.items()
+              if key not in {"roll_advice", "roll_notification_eligible"}}
+        for row in brief.get("positions") or []
+    ]}
+
+
+def _daily_brief_transport_roll_identities(
     brief: Mapping[str, Any], identities: list[str], *, delivery_kind: str,
-    diff: Mapping[str, Any], limits: Any, context: Mapping[str, Any],
-    card: bool, fallback_open_id: str | None = None,
-) -> tuple[str, dict[str, Any] | None, list[str]]:
-    """Freeze one roll set visible in every possible transport projection."""
-    source = dict(brief)
-    source["positions"] = [dict(row) for row in brief.get("positions") or []]
+    diff: Mapping[str, Any], limits: Any, rendered_message: str,
+    rendered_transport: Mapping[str, Any] | None,
+) -> list[str]:
+    """Select complete rolls from existing final outputs without dispatching renders."""
     rolls = daily_brief_roll_notification_identities(brief)
     allowed = set(identities) & rolls
-    # Selection only shrinks: removed rows must not refill either display budget.
-    while True:
-        source["positions"] = [
-            row if daily_brief_position_roll_identity(
-                row, account=brief.get("account"), market=brief.get("market")) in allowed
-            else {key: value for key, value in row.items()
-                  if key not in {"roll_advice", "roll_notification_eligible"}}
-            for row in source["positions"]
-        ]
-        if delivery_kind in {"fixed_report", "fixed_recovery_report"}:
-            message = (render_fixed_report if card else render_fixed_report_text)(
-                source, diff=diff, limits=limits, context=context)
-            blocks = render_fixed_report_card_blocks(source, diff=diff, limits=limits, context=context) if card else []
-        else:
-            message = (render_candidate_alert if card else render_candidate_alert_text)(
-                source, identities, limits=limits, context=context)
-            blocks = render_candidate_alert_card_blocks(source, identities, limits=limits, context=context) if card else []
-        transport = render_feishu_notification_card(
-            markdown="\n\n".join(blocks), markdown_blocks=blocks, fallback_text=message,
-            fallback_open_id=fallback_open_id,
-        ) if card else None
-        bodies = (message,)
-        if transport is not None:
-            bodies += feishu_notification_visible_markdown(transport)
-        visible_sets = [set(_daily_brief_displayed_roll_identities(
-            source, identities, delivery_kind=delivery_kind, diff=diff, limits=limits,
-            rendered_message=body)) & allowed for body in bodies]
-        common = set.intersection(*visible_sets)
-        if all(shown == allowed for shown in visible_sets):
-            return message, transport, [identity for identity in identities if identity not in rolls or identity in common]
-        allowed = common
-        identities = [identity for identity in identities if identity not in rolls or identity in allowed]
+    if not allowed:
+        return identities
+    bodies = (rendered_message,)
+    if rendered_transport is not None:
+        bodies += feishu_notification_visible_markdown(rendered_transport)
+    visible_sets = [set(_daily_brief_displayed_roll_identities(
+        brief, identities, delivery_kind=delivery_kind, diff=diff, limits=limits,
+        rendered_message=body)) & allowed for body in bodies]
+    common = set.intersection(*visible_sets)
+    # Only remove rolls: a smaller message must not refill its budget with other lots.
+    return [identity for identity in identities if identity not in rolls or identity in common]
 
 
 def _daily_brief_candidate_render_context(
@@ -2207,14 +2259,49 @@ def _rebuild_daily_brief_delivery(
     )
     if recovering_report:
         feishu_card_delivery = bool(render_context["recovery_card_delivery"])
-    message, rendered_transport, identities = _render_daily_brief_advice_delivery(
-        brief, identities, delivery_kind=action, diff=diff, limits=daily_limits,
-        context=render_context, card=feishu_card_delivery,
-        fallback_open_id=(
-            render_context.get("recovery_fallback_open_id") if recovering_report
-            else resolve_feishu_bot_send_target(notifications=request.base_cfg.get("notifications"))
-        ) if feishu_card_delivery else None,
-    )
+    while True:
+        render_brief = _daily_brief_roll_render_source(brief, identities)
+        if full_report:
+            message = (render_fixed_report if feishu_card_delivery else render_fixed_report_text)(
+                render_brief, diff=diff, limits=daily_limits, context=render_context,
+            )
+            card_blocks = []
+            if feishu_card_delivery:
+                card_blocks = render_fixed_report_card_blocks(
+                    render_brief,
+                    diff=diff,
+                    limits=daily_limits,
+                    context=render_context,
+                )
+        else:
+            message = (render_candidate_alert if feishu_card_delivery else render_candidate_alert_text)(
+                render_brief, identities, limits=daily_limits, context=render_context,
+            )
+            card_blocks = []
+            if feishu_card_delivery:
+                card_blocks = render_candidate_alert_card_blocks(
+                    render_brief,
+                    identities,
+                    limits=daily_limits,
+                    context=render_context,
+                )
+        rendered_transport = (
+            render_feishu_notification_card(
+                markdown="\n\n".join(card_blocks), markdown_blocks=card_blocks, fallback_text=message,
+                fallback_open_id=(
+                    render_context.get("recovery_fallback_open_id") if recovering_report
+                    else resolve_feishu_bot_send_target(notifications=request.base_cfg.get("notifications"))
+                ),
+            )
+            if feishu_card_delivery
+            else None
+        )
+        visible_identities = _daily_brief_transport_roll_identities(
+            render_brief, identities, delivery_kind=action, diff=diff, limits=daily_limits,
+            rendered_message=message, rendered_transport=rendered_transport)
+        if visible_identities == identities:
+            break
+        identities = visible_identities
     if action == "candidate_alert" and not identities:
         return {"envelope": None, "reason": "no_rendered_current_position_advice"}
     prepared = prepare_daily_decision_brief_delivery(
