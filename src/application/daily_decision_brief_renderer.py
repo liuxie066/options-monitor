@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from domain.domain.portfolio_assignment_scenario import POSITION_SIZING_BASIS
+from domain.domain.daily_decision_brief import (
+    daily_brief_position_roll, daily_brief_position_roll_identity, daily_brief_position_roll_is_current,
+    daily_brief_roll_notification_identities,
+)
 from domain.domain.short_vol_assessment import CANDIDATE_POSITION_SIZING_BASIS
 
 from dataclasses import dataclass
@@ -138,6 +142,8 @@ def build_daily_brief_user_view(
         brief,
         diff=normalized_diff,
         limits=cfg,
+        now_utc=_parse_datetime(ctx.get("query_time_utc") or ctx.get("advice_time_utc")
+                                or brief.get("generated_at_utc")),
     )
     capacity, reminders = _capacity_views(brief, selected_rows=selected_candidate_rows)
     fixed_report_reminders = list(reminders)
@@ -434,6 +440,32 @@ def select_rendered_combo_candidate_rows(
     return [dict(item) for item in selected.get("combo_yield") or []]
 
 
+def select_rendered_position_roll_identities(
+    brief: Mapping[str, Any], *, delivery_kind: str, candidate_identities: Iterable[str] = (),
+    diff: Mapping[str, Any] | None = None, limits: Mapping[str, Any] | None = None,
+    rendered_message: str | None = None, now_utc: datetime | str | None = None,
+) -> set[str]:
+    if brief.get("actionability") != "live_actionable":
+        return set()
+    source = brief
+    if delivery_kind == "candidate_alert":
+        source, _ = _candidate_alert_brief(brief, candidate_identities)
+    rows = _position_views(source, diff=dict(diff or {}), limits=resolve_daily_brief_render_limits(limits),
+                           now_utc=_parse_datetime(now_utc) if now_utc is not None else None)[0]
+    shown: set[str] = set()
+    occurrences: dict[tuple[str, ...], int] = {}
+    for row in rows:
+        if not row.get("roll_identity"):
+            continue
+        details = tuple(str(detail) for detail in row.get("details") or [])
+        occurrences[details] = occurrences.get(details, 0) + 1
+        if rendered_message is None or all(
+            rendered_message.count(detail) >= occurrences[details] for detail in details
+        ):
+            shown.add(row["roll_identity"])
+    return shown
+
+
 @daily_brief_phase("render", operation="render_fixed_failure")
 def render_fixed_failure(
     failure: Mapping[str, Any],
@@ -713,7 +745,7 @@ def _render_user_view(
         else candidate_families
     )
     if projection == "candidate_alert":
-        if not candidates and not view.get("wheel_batches"):
+        if not candidates and not view.get("wheel_batches") and not view.get("positions"):
             lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} 策略候选"])
             lines.append(str(view.get("candidate_empty_summary") or "本轮暂无符合条件的候选。"))
         else:
@@ -788,7 +820,7 @@ def _render_user_view(
         if isinstance(item, Mapping)
     ]
     positions, fact_reviews = _partition_position_views(position_rows)
-    if projection != "candidate_alert":
+    if projection != "candidate_alert" or position_rows:
         lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} 持仓"])
         lines.append(
             _position_summary(
@@ -931,12 +963,16 @@ def _render_user_view_blocks(
             blocks.extend([heading("事件"), *events])
     blocks.extend(f"补充｜{note}" for note in view.get("candidate_omissions") or [])
 
-    if projection != "candidate_alert":
+    if projection != "candidate_alert" or view.get("positions"):
         position_rows = [item for item in view.get("positions") or [] if isinstance(item, Mapping)]
         positions, fact_reviews = _partition_position_views(position_rows)
         blocks.append(heading("持仓") + "\n" + _position_summary(view, visible_actionable_count=len(position_rows)))
         for index, item in enumerate(positions, start=1):
             lines = [emphasis(f"{index}｜{_flat_title(item.get('holding'))}｜{item.get('status')}")]
+            if item.get("is_roll"):
+                lines.extend(f"参考｜{detail}" for detail in item.get("details") or [])
+                blocks.append("\n".join(lines))
+                continue
             facts = []
             for label, key in (
                 ("买回参考价", "close_ask"),
@@ -1705,8 +1741,14 @@ def _position_views(
     *,
     diff: Mapping[str, Any],
     limits: Mapping[str, int],
+    now_utc: datetime | None = None,
 ) -> tuple[list[dict[str, Any]], int, int, int]:
-    positions = [item for item in brief.get("positions") or [] if isinstance(item, Mapping)]
+    effective_now = now_utc or _parse_datetime(brief.get("generated_at_utc"))
+    positions = [
+        dict(item) if daily_brief_position_roll_is_current(item, now_utc=effective_now)
+        else {key: value for key, value in item.items() if key != "roll_advice"}
+        for item in brief.get("positions") or [] if isinstance(item, Mapping)
+    ]
     total = len(positions)
     # 无行动指向的持仓（继续观察、无法评估）不逐条展示；
     # 总持仓数和需处理数在汇总中分开呈现，避免把非行动项误说成“折叠”。
@@ -1743,6 +1785,9 @@ def _position_views(
                 "holding": " · ".join(title_parts),
                 "status": status,
                 "display_kind": display_kind,
+                "roll_identity": daily_brief_position_roll_identity(
+                    row, account=brief.get("account"), market=brief.get("market")),
+                "is_roll": daily_brief_position_roll(row) is not None,
                 "recommendation": _lower(row.get("recommendation")),
                 "details": _position_close_details(row, market=market, status=status),
                 **_position_card_fields(row, market=market, status=status),
@@ -1771,6 +1816,10 @@ def _position_contract_label(row: Mapping[str, Any], *, market: str) -> str:
 
 
 def _position_status_label(row: Mapping[str, Any]) -> str:
+    roll = daily_brief_position_roll(row)
+    if roll is not None:
+        label = "CC 向上移仓" if roll[0] == "roll_up" else "CSP 向下移仓"
+        return label + (" · 同时建议平仓" if _lower(row.get("recommendation_state")) == "close" else "")
     recommendation = _lower(row.get("recommendation_state"))
     if recommendation == "not_evaluable":
         return _CLOSE_RECOMMENDATION_LABELS["not_evaluable"]
@@ -1800,6 +1849,8 @@ _POSITION_ACTIONABLE_LABELS = frozenset({"建议平仓"})
 def _position_has_advice(row: Mapping[str, Any]) -> bool:
     # 只展示现行策略已触发的平仓动作；hold 和
     # not_evaluable 仍保留在结构化审计数据中，但不进入普通提醒。
+    if daily_brief_position_roll(row) is not None:
+        return True
     if row.get("notification_eligible") is False:
         return False
     return _position_status_label(row) in _POSITION_ACTIONABLE_LABELS
@@ -1852,7 +1903,60 @@ def _position_summary(
     return summary + "。"
 
 
+def _position_roll_details(
+    row: Mapping[str, Any], *, market: str, selected: tuple[str, Mapping[str, Any]],
+) -> list[str]:
+    direction, target = selected
+    result = row["roll_advice"]
+    position = result["position"]
+    evidence = target.get("evidence") if isinstance(target.get("evidence"), Mapping) else {}
+    currency = str(position.get("currency") or ("HKD" if market == "HK" else "USD"))
+    old = str(position.get("contract_symbol") or row.get("contract_symbol") or "")
+    new = str(target["contract"])
+    old_contract = _position_contract_label(row, market=market)
+    new_contract = _human_contract(expiration=target["expiration"], strike=target.get("strike"),
+                                  option_type=row.get("option_type"), market=market)
+    details = [f"旧仓买回：{old_contract}（{old}）；新仓卖出：{new_contract}（{new}）"]
+    quotes = []
+    for label, key in (("平仓 ask", "old_ask"), ("开仓 bid", "new_bid")):
+        value = _number(evidence.get(key))
+        if value is not None:
+            quotes.append(f"{label} {currency} {value:g}")
+    if quotes:
+        details.append("；".join(quotes) + "（每股）")
+    old_strike, new_strike = _number(row.get("strike")), _number(target.get("strike"))
+    if old_strike is not None and new_strike is not None:
+        delta = new_strike - old_strike
+        pct = _number(target.get("strike_increase_pct")) if direction == "roll_up" else None
+        details.append(f"行权价变化：{currency} {delta:+g}" + (f"（{pct:+.2%}）" if pct is not None else ""))
+    credit = _number(target.get("net_credit"))
+    if credit is not None:
+        details.append(f"移仓净收取：{currency} {credit:g}（含双腿费用）")
+    period = _number(target.get("incremental_period_return"))
+    annualized = _number(target.get("incremental_annualized_return"))
+    basis = _number(target.get("new_capital_basis"))
+    basis_label = "新仓担保资金" if direction == "roll_down" else "标的市值"
+    basis_text = f"{basis_label} {currency} {basis:g}" if basis is not None else basis_label
+    if period is not None or annualized is not None:
+        rates = []
+        if period is not None:
+            rates.append(f"增量期收益率 {_percent(period)}")
+        if annualized is not None:
+            rates.append(f"增量年化 {_percent(annualized)}")
+        details.append("；".join(rates) + f"（净现金流 ÷ {basis_text}，新到期剩余期限）")
+    if result.get("status") == "partial":
+        details.append("搜索覆盖不完整，展示当前已评估目标首选")
+    return details
+
+
 def _position_close_details(row: Mapping[str, Any], *, market: str, status: str) -> list[str]:
+    roll = daily_brief_position_roll(row)
+    if roll is not None:
+        details = _position_roll_details(row, market=market, selected=roll)
+        if _lower(row.get("recommendation_state")) == "close":
+            close_row = {key: value for key, value in row.items() if key != "roll_advice"}
+            details.extend(_position_close_details(close_row, market=market, status="建议平仓"))
+        return details
     if (
         status.startswith("暂无法评估")
         or _lower(row.get("recommendation_state")) != "close"
@@ -2725,8 +2829,15 @@ def _candidate_alert_brief(
         for item in brief.get("candidate_index") or []
         if isinstance(item, Mapping) and str(item.get("identity") or "").strip()
     }
+    roll_rows = {
+        identity: row for row in brief.get("positions") or []
+        if isinstance(row, Mapping)
+        and (identity := daily_brief_position_roll_identity(
+            row, account=brief.get("account"), market=brief.get("market")))
+        in daily_brief_roll_notification_identities(brief)
+    }
     selected = [index[identity] for identity in identities if identity in index]
-    missing = [identity for identity in identities if identity not in index]
+    missing = [identity for identity in identities if identity not in index and identity not in roll_rows]
     if missing:
         raise ValueError("candidate alert identity is absent from the successful brief")
     shown = selected[:_DEFAULT_MAX_CANDIDATES]
@@ -2756,7 +2867,7 @@ def _candidate_alert_brief(
         and str(row.get("wheel_branch_id") or row.get("position_lot_id") or "").strip()
         in wheel_branch_ids
     ]
-    filtered["positions"] = []
+    filtered["positions"] = [dict(roll_rows[identity]) for identity in identities if identity in roll_rows]
     return filtered, max(0, len(selected) - len(shown))
 
 

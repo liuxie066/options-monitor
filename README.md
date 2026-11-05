@@ -24,7 +24,8 @@ OM 面向自己做交易决策的期权投资者，支持富途账户及长桥�
 | Wheel 轮转策略 | 管理卖出 Put 后接股、卖出 Call 后交股的轮转分支；需启用，仍受身份与交割证据约束，归属不明确时需人工确认 | [轮转策略](docs/WHEEL_STRATEGY_PRD.md) |
 | 持仓评估与建议 | 评估账本或临时输入的多笔 short Put / Call，扫描时复用同一规则；展示指标、持有／平仓依据及休市历史参考，不自动平仓；需安装并启用 `position-advice` 插件 | [持仓建议](docs/CLOSE_ADVICE_CONTRACT.md) |
 | Short Put 向下移仓 | 为已有 short Put 查询更低行权价、严格价外且双腿扣费后净收现金的替代合约，比较收益率与延期；需安装并启用 `position-advice` 插件 | [移仓查询](docs/TOOL_REFERENCE.md#short-put-向下移仓) |
-| 决策简报与提醒 | 查看最近成功扫描、候选变化和数据缺口；发送消息需安装并配置对应渠道插件 | [报告与通知规则](docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md) |
+| Covered Call 上滚 | 先核实股票覆盖，查询更高行权价且到期不早于旧仓的替代 Call；仅推荐扣费净现金严格为正的候选，并展示交股价提升 | [CC 滚仓查询](docs/TOOL_REFERENCE.md#covered-call-上滚) |
+| 决策简报与提醒 | 查看最近成功扫描、候选变化、平仓及移仓建议和数据缺口；发送消息需安装并配置对应渠道插件 | [报告与通知规则](docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md) |
 | 候选解释与决策历史 | 解释已有扫描的排序、未入选原因，查询明确关联的结果 | [工具参考](docs/TOOL_REFERENCE.md)、[决策历史](docs/DECISION_HISTORY.md) |
 | 期权账本 | 查询开仓、平仓、指派和行权记录；写入与修复需要预览和确认 | [账本架构](docs/LEDGER_ARCHITECTURE.md)、[修账指南](docs/OPTION_POSITIONS_REPAIR.md) |
 | 期权现金流与绩效 | 查询期间期权净现金流及开仓批次现金结果；两种口径不能相加，也不能当作包含股票盈亏的账户总回报 | [绩效说明](docs/OPTION_PERFORMANCE_DESIGN.md) |
@@ -275,6 +276,12 @@ om plugins uninstall position-advice         # 预览移除；加 --confirm 才�
 
 文档中的短命令 `om`、`om-agent` 分别对应 `"$HOME/.local/bin/om"`、`"$HOME/.local/bin/om-agent"`。如果终端已经能识别短命令，可以省去完整路径；否则继续使用上面的写法即可。
 
+### 扫描中的持仓移仓建议
+
+启用 `position-advice` 插件后，Tick 会用同一批封存行情评估已有 Short Put 向下移仓和 Covered Call 上滚，独立于止盈策略的 `close/hold/not_evaluable` 结论。调度搜索最晚到期日采用该标的、对应 Put／Call 方向配置的 `max_dte`，默认 60 天；两类新仓都允许同日或更晚到期，剩余天数必须为正。Put 和 CC 均要求扣费后净现金严格为正，零现金及净支出均排除；CC 还须先核实该账户所有 Call 的股票覆盖。
+
+结果以 `roll_advice` JSON 写入 `close_advice.csv`，再进入 Daily Brief 的持仓建议。简短提醒展示排序首位的目标合约、旧 ask／新 bid、行权价变化、扣费净现金及收益率；移仓年化展示净现金年化，Put 分母为新行权价对应履约义务，CC 分母为覆盖股票当前市值。Put 与 CC 均按净增现金年化优先排序，再比较各自方向的行权价变动幅度、延期天数及净现金；条件性交股改善仅作补充展示。统一读取工具 `position_advice_read` 从 canonical latest Daily Brief 读取 `close`、`roll_down`、`roll_up`；不刷新行情或发送消息。通知沿用现有渠道配置，主动查询仍不发送通知。所有建议均不下单、不写业务账本。
+
 ### 查询已有 Short Put 的向下移仓候选
 
 需要把已有 short Put 换成更低行权价、同时继续净收现金时，可使用 `position-advice roll-down`。需安装并启用 `position-advice` 插件；一次选择一个账户内的一个未到期标准 short Put 开仓批次（lot），按全部剩余张数等量替换。
@@ -302,6 +309,29 @@ om plugins uninstall position-advice         # 预览移除；加 --confirm 才�
 结果同时展示行权价降幅、延期天数、扣除两腿估算费用后的净增现金，以及新旧持仓到期归零假设下的最高年化比较。候选优先按“净增现金 ÷ 新履约义务 × 365 ÷ 新仓剩余天数”降序排列，因此延长到期日也会影响收益比较。**净收现金不等于交易盈利**，旧仓历史权利金和降低的名义履约义务不计入本次净增现金。
 
 报价使用旧仓 ask 买回、新仓 bid 卖出的单腿现金流估算，不是券商组合盘口，也不保证组合成交。查询会连接行情并保存独立请求报告，不下单、不写业务账本、不发通知；候选缺行情或覆盖不完整时会保留缺口，只有完整搜索后的零候选才表示本次没有符合条件的合约。详细输出、原因和收益口径见[移仓工具参考](docs/TOOL_REFERENCE.md#short-put-向下移仓)与[移仓契约](docs/CLOSE_ADVICE_CONTRACT.md#short-put-向下移仓主动查询)。
+
+### 查询已有 Covered Call 的上滚候选
+
+持有股票且已有 short Call 接近平值或已价内时，可查询更高行权价、同日或更晚到期的替代合约，新仓剩余天数须为正。先确认同账户股票足以覆盖全部未关闭 Call；无持股或覆盖不足返回“不适用”。价外幅度超过 5% 的旧 Call 也不搜索。安装、启用与上述 Short Put 查询共用 `position-advice` 插件。
+
+将以下内容保存为 `cc-roll-request.json`，替换账户、lot ID 与最大到期日（不得早于旧仓到期日，无默认值）：
+
+```json
+{
+  "account": "sample",
+  "lot_id": "<existing-covered-call-lot-id>",
+  "max_new_expiration": "2026-12-18"
+}
+```
+
+```bash
+"$HOME/.local/bin/om" position-advice roll-up \
+  --config-key us --request-file cc-roll-request.json
+```
+
+加 `--format json` 获取结构化结果；可选 `max_new_strike`（正数且高于旧 strike）、`limit`（1–50，默认 10）。CC 与 Put 一样，**扣除两腿费用后的净现金必须严格大于零**；零现金或净支出均以 `non_positive_net_credit` 排除，即使行权价提升总额更大也不推荐。报告展示净现金、每股行权价提升、交股价提升总额及延期；条件性交股改善不替代净现金准入条件。CC 的资金分母继续使用当前股价 × 覆盖股数，排序统一为净增现金年化降序、行权价提升比例降序、延期天数升序、净现金降序，再按合约与到期日稳定排序。
+
+这个改善假设两边最终均按各自行权价卖出股票，不是已实现利润或预期收益。新 Call 可仍价内，上滚不保证消除提前指派；交股是 wheel 的第二步，接受原仓交股仍是有效选择。与 Put 查询一样，它使用单腿报价并扣费，不下单、不写账本、不通知，仅保存独立请求报告。完整状态、覆盖和经济口径见 [CC 滚仓契约](docs/CLOSE_ADVICE_CONTRACT.md#covered-call-上滚主动查询)。
 
 ### 需要时再开启通知、Bot 和后台运行
 

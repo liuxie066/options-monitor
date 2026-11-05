@@ -182,3 +182,58 @@ def render_short_put_roll(result: dict[str, Any]) -> str:
     if result.get("report_path"):
         lines.append(f"独立报告：{result['report_path']}")
     return "\n".join(lines) + "\n"
+
+
+def render_covered_call_roll(result: dict[str, Any]) -> str:
+    """Render service-owned coverage, cash costs and conditional sale comparison."""
+    if result.get("ok") is False:
+        error = result["error"]
+        return (f"Covered Call 上滚执行失败 [{error['code']}]：{error['message']}\n"
+                + (str(error["hint"]) + "\n" if error.get("hint") else ""))
+    statuses = {"success": "请求完成", "partial": "部分结果", "disabled": "持仓建议插件未启用", "unavailable": "查询不可用"}
+    outcomes = {"found": "找到候选", "none": "无合格候选（覆盖完整的合法空结果）",
+        "unable": "不可评估（证据不足）", "not_applicable": "不适用（未搜索候选，原因见下）"}
+    status, outcome = result.get("status"), result.get("outcome")
+    position = result.get("position") or {}
+    currency = position.get("currency")
+    lines = ["Covered Call 上滚", f"执行状态：{statuses.get(status, _value(status))}（{status}）",
+        f"筛选结果：{outcomes.get(outcome, _value(outcome))}（{outcome}）",
+        f"账户：{_value(result.get('account'))}；评估时间：{_value(result.get('evaluated_at_utc'))}",
+        f"旧仓：{_value(position.get('symbol'))} call {_value(position.get('expiration'))}；"
+        f"strike {_value(position.get('strike'))}；张数 {_value(position.get('contracts_open'))}；"
+        f"乘数 {_value(position.get('multiplier'))}；现价 {_roll_money(position.get('spot'), currency)}",
+        f"股票覆盖：{_roll_diagnostic(result.get('stock_coverage'))}",
+        f"搜索范围：{_roll_diagnostic(result.get('scope'))}",
+        f"覆盖：{_roll_diagnostic(result.get('coverage'))}"]
+    for key, label in (("reason_codes", "原因"), ("exclusion_summary", "排除原因")):
+        if result.get(key):
+            lines.append(f"{label}：{_roll_diagnostic(result[key])}")
+    if result.get("candidates"):
+        lines.append("\n候选比较（净增现金年化优先，仅覆盖已评价集合）：")
+    labels = {"credit_roll": "净收现金上滚", "not_recommended": "不推荐", "excluded": "排除"}
+    for index, row in enumerate(result.get("candidates") or [], 1):
+        lines.extend([
+            f"{index}. {_value(row.get('contract'))}；{labels.get(row.get('recommendation'), _value(row.get('recommendation')))}；"
+            f"strike {_value(row.get('strike'))}；到期 {_value(row.get('expiration'))}；延后 {_value(row.get('extension_days'))} 天",
+            f"   扣费净现金 {_roll_money(row.get('net_credit'), currency)}；净支出 {_roll_money(row.get('net_debit'), currency)}；"
+            f"每股行权价提升 {_roll_money(row.get('strike_increase'), currency)}；"
+            f"交股价提升总额 {_roll_money(row.get('assignment_proceeds_uplift'), currency)}",
+            f"   条件性交股净改善 {_roll_money(row.get('assignment_net_improvement'), currency)}；"
+            f"条件改善年化 {_value(row.get('assignment_improvement_annualized_return'), percent=True)}；"
+            f"净现金年化 {_value(row.get('incremental_annualized_return'), percent=True)}",
+            f"   买回总支出 {_roll_money(row.get('old_close_cost'), currency)}；新卖出净收入 {_roll_money(row.get('new_net_premium'), currency)}；"
+            f"资金分母（当前股价×覆盖股数，旧/新）{_roll_money(row.get('old_capital_basis'), currency)} / "
+            f"{_roll_money(row.get('new_capital_basis'), currency)}",
+            f"   买回费用：{_roll_diagnostic(row.get('old_buy_fee'))}；新卖出费用：{_roll_diagnostic(row.get('new_sell_fee'))}",
+        ])
+        if row.get("evidence"):
+            lines.append(f"   报价与证据：{_roll_diagnostic(row['evidence'])}")
+    lines.append(f"展示 {_value(result.get('displayed'))}；省略 {_value(result.get('omitted'))}（limit 仅限制展示）。")
+    lines.append("仅推荐扣费净现金严格大于零的上滚；零现金及净支出均排除（non_positive_net_credit）。")
+    lines.append("单腿旧 ask / 新 bid 扣费估算，不保证组合成交或消除提前指派。")
+    lines.append("条件改善假设两边最终均按各自行权价交股，不是已实现利润或预期收益；交股是 wheel 卖出持股的第二步，接受旧仓交股仍是有效选择。")
+    if result.get("interpretation"):
+        lines.append(str(result["interpretation"]))
+    if result.get("report_path"):
+        lines.append(f"独立报告：{result['report_path']}")
+    return "\n".join(lines) + "\n"
