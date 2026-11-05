@@ -6,9 +6,26 @@ Bot 支持解释 OM 策略、分析已记录的报错、说明历史过滤原因
 
 渠道鉴权与去重 → `channel_facade.py` → `local_harness.py` → `host.py` → `runtime.py`。
 
-`runtime.py` 直接使用现有 Python Chat Completions / Responses 适配器。没有历史上下文的首轮默认使用原生 `tool_choice=required` 要求一次工具调用；Host 对独立数字+P/C 简写或完整 put/call 词片段（如“腾讯put”“NVDA call”“卖put”）显式允许先澄清；明确的解释、过滤原因和报错查询仍优先读取，工具名单本身不改变默认值。已有上下文的追问由模型判断是否需要重读。Host 校验参数和固定范围，调用原有 OM 工具，返回脱敏结果；模型随后直接给出正文。没有 Pi 子进程、IPC、答案提交工具、claims、证据编号准入或目录激活步骤。
+`runtime.py` 直接使用现有 Python Chat Completions / Responses 适配器。没有历史上下文的首轮默认使用原生 `tool_choice=required` 要求一次工具调用；Host 对独立数字+P/C 简写或完整 put/call 词片段（如“腾讯put”“NVDA call”“卖put”）显式允许先澄清；明确的解释、过滤原因和报错查询仍优先读取，工具名单本身不改变默认值。已有上下文的追问由模型判断是否需要重读。Host 校验参数和固定范围，调用原有 OM 工具，返回脱敏结果；模型随后直接给出正文。没有 Pi 子进程、IPC、答案提交工具、claims 或证据编号准入。
 
-工具由现有 registry 与各领域 `TOOLS` 定义；Scene 按 [`om_chat.scene.json`](../src/application/bot/om_chat.scene.json) 的 `tool_selection.names` 固定清单投影只读工具。渠道场景按身份追加 `bot_memory`。不再按 toolset 展开工具，也不构造目录 catalog、snapshot 或 hash。工具仍拥有账户、配置、历史快照、分页和真实状态判断；Bot 不重新计算历史筛选结果。
+工具由现有 registry 与各领域 `TOOLS` 定义；Scene 按 [`om_chat.scene.json`](../src/application/bot/om_chat.scene.json) 的 `tool_selection.names` 投影 29 个业务只读工具，覆盖项目、诊断、报告、标的解析及组合读取。`position_advice_read` 不在本次清单内，`preview_notification` 和 `portfolio_cash_bridge` 仍退役。`option_positions_read` 保留原有 `action=events` 投影。渠道场景按身份追加 `bot_memory`，Control 仍按既有条件追加预览工具。工具继续拥有账户、配置、历史快照、分页和真实状态判断；Bot 不重新计算历史筛选结果。
+
+## 工具发现模式
+
+Host 从进程环境读取 `OM_BOT_TOOL_DISCOVERY=full|index`，省略时为 `index`；其他值返回 `CONFIG_ERROR`。默认从 full 改为 index，减少首轮及后续请求携带的 schema；显式设置 `OM_BOT_TOOL_DISCOVERY=full` 可直接下发完整定义。两种模式共用上述 29 个业务工具及同一 allowlist。
+
+- `full`：每次正常模型请求直接携带 29 个业务工具的完整 Bot schema。
+- `index`：初始只提供业务工具的名称/用途索引，以及私有 `find_tools(query)`、`get_tool_schema(name)` 定义。`find_tools` 用本地关键词、中文双字片段与别名匹配，最多返回 3 个工具的用途和参数摘要。命中后，完整 Bot schema 从下一次模型请求起下发并允许调用；同批中的业务调用仍被拒绝。已知精确名称可用 `get_tool_schema` 返回完整定义并激活。
+
+发现状态仅存在于单次 run，后续 run 重新检索；已激活 schema 在该 run 后续正常请求中保留。`bot_memory` 和 Control 预览工具按原条件常驻，不通过业务检索授予权限。最后答复阶段仍会移除所有工具。
+
+连续两次检索未命中时返回可恢复的 `NEEDS_NARROWING`，提示换关键词或从索引选择精确名称。调用未下发的名字返回可恢复 `INPUT_ERROR`，提示先检索并等下一次请求；未知、退役及写工具不能靠发现激活。index 模式的元工具、拒绝、参数解析失败和预算拒绝均经过 Host 的 `tool_call`/`tool_result` 审计与标准 result envelope；目录结果不作为个人经验记忆的业务证据。检索调用计入现有工具预算，失败批次、模型轮数、deadline、取消和上下文容量限制继续生效。没有向量库、额外网络检索或新业务执行入口。
+
+新增读取使用原 `build_tool_payload` → `call_read_tool` → `execute_tool` 路径。简报、平仓报告和质量状态要求明确授权账户并绑定所选市场；平仓报告不接受跨市场 `market_scope=all`。质量工具的范围投影只保留账户/市场可证明匹配的 datasets、运行检查和 incidents，移除整份产物的扩展事实，并按所选结果重新汇总；没有匹配运行证据时状态为 `unknown`。组合工具校验复数 `accounts`，禁止缺省聚合和全局账户目录，且只接受与底层客户端相同的可信 US 配置路径。账户发现使用 `project_context`。这些限制在 full/index 下相同。
+
+`option_performance_report` 保持原有账户级跨市场计算，`config_key` 仅选择配置。Bot 要求 US/HK 双市场读取授权，并验证选中账户在两份身份和新鲜度有效的配置中均获准；省略账户时验证所选配置的全部账户。单市场授权下返回明确错误。`symbol_config_read` 在授权之前使用原有符号校准器解析配置别名，核实实际目标配置，再将已核实的规范代码传给原工具。
+
+29 个 schema 会增加 full 的输入。实际模型配置仍由操作者提供，Host 不自动提高 `context_window_tokens`；容量不足返回 `context_capacity`，可使用 index 或显式配置更大窗口。离线评测夹具使用 64k，另有 24k 的 index 成功与 full 容量拒绝测试。token 代理收益不等于真实账单、缓存命中率或真实模型的检索准确率。
 
 ## 指定标的卖出开仓候选
 
@@ -79,7 +96,7 @@ worker 显式复制 ContextVar；应用在自身预算内保留已完成结果�
 
 1. 在经验证的独立 `config.bot.json` 的 `bot` 中增加显式 `read_markets: [us, hk]`；缺省为渠道原有单市场。只接受无重复的 `us`/`hk` 非空列表，必须包含渠道主市场；列表形状非法时配置验证失败，遗漏主市场时该渠道请求无法启动。主市场快照提供市场和账户身份，不提供读权限。渠道从同一运行目录解析另一个标准市场文件，不接受模型路径；每次选中后核验文件身份、新鲜度、账户集合及其与实际数据 runtime root 的对应关系。当前 allowlist 用户可配置双市场，生产启用仍遵守配置变更授权。
 2. 渠道把市场集合和 Bot 配置代际传入 Host 的可信合同。Host 根据顶层 `config_key`/`market`/`symbol` 和嵌套 `query.symbol` 选择目标市场并拒绝冲突；各工具 owner 规范化筛选并校验 cursor 绑定的查询条件。`symbol_market` 的大写值转为小写比较。省略时单市场沿用原行为，双市场且无可判定标的的查询要求明确市场，不能默选 US。Host 只为选中市场注入可信配置，工具 owner 仍作最终验证；模型永远不能传 `config_path`。
-3. Host 对目标市场及顶层/嵌套账户一起校验；同名 `lx` 只有在该市场配置包含 `lx` 时可读。成功构造工具 payload 后产生的工具观察附独立的 Host 路由标签（实际 market/account/tool）；输入被 Host 拒绝时没有这类标签。保留工具自身来源，不能把 Host 标签写成券商证明。回答说明本地 ledger、归属记录还是回执及分页覆盖；空、缺失、失败和未授权各自明确。普通工具每次只读一个市场；`option_candidates` 的批量授权按上文单独处理，不合并不同查询的事实。
+3. Host 对目标市场及顶层/嵌套账户一起校验；同名 `lx` 只有在该市场配置包含 `lx` 时可读。成功构造工具 payload 后产生的工具观察附独立的 Host 路由标签（实际 market/account/tool）；输入被 Host 拒绝时没有这类标签。保留工具自身来源，不能把 Host 标签写成券商证明。回答说明本地 ledger、归属记录还是回执及分页覆盖；空、缺失、失败和未授权各自明确。普通工具每次只读一个市场；`option_candidates` 的批量授权按上文单独处理，不合并不同查询的事实。账户级绩效报告须完整双市场授权，`config_key` 不表示报告只含该市场。
 4. Scene 加入已有 `option_positions_read` 的 `events` 查询，限制可见字段为只读必要筛选；暂不开放 `list`，因为它的共享账本读取尚无市场谓词。现有事件投影补 `event_type`，据此区分本地 assignment 与普通 close，不把它称为券商确认。`trade_attribution_read` 保留独立入口并在现有 owner 增加规范化 `symbol` 筛选，分页前过滤。用户说「被指派」时按 HK 标的定位并分别核验可用证据；缺账户时仅在可信 HK 配置有唯一账户时可默认，否则请用户给账户。未读尽分页只能报告已查页，不能作否定结论。旧 `receipt_read` 的完整 ID 和不降级广泛查询规则继续适用。
 5. 会话键和个人记忆 owner 绑定渠道、sender、conversation、主配置身份与 Bot 配置代际；取消分析先按当前会话键定位，再按可信渠道身份匹配并取消旧代际的活跃运行。代际取已校验 assistant 文件的规范路径、完整字节 SHA-256、`_generated.generated_at` 及文件 `mtime_ns`；受控构建的 A→B→A 得到新代际。渠道只从可信 assistant 路径生成并写入合同，`session_key_for_contract` 和 `scope_from_contract` 从同一路径重算并比对，不能信任模型或序列化字段。业务证据记忆在现有 `account_scope` 使用 `us:lx`/`hk:lx`，只从工具的可信实际市场和账户生成。每次重建 Bot 配置（包括版本升级）都会隔离旧会话和个人记忆，即使 `read_markets` 未变；旧数据保留但不自动迁移。每次工具读取前以及回答/outbox 持久化前复核代际，变化即中止本轮，不返回旧授权下的结果。不可读取的配置、冲突、撤权和工具异常均失败关闭，不以空结果返回。
 
@@ -130,6 +147,6 @@ Feishu 绑定配置 app_id；Wechat 绑定规范连接 profile 目录。目录�
 
 ## 验证
 
-`tests/test_bot_python_runtime.py` 覆盖模型工具循环、两个 HTTP 协议、当前轮压缩、上下文事务、个人记忆隔离、取消、真实源码读取、真实过滤快照和报错写入记录。渠道 HTTP、取消、业务工具与安装升级测试分别验证相邻边界。脚本化模型结果不等同于真实模型语义验收；真实模型必须回答同一组问题后再评估效果。
+`tests/test_bot_python_runtime.py` 覆盖模型工具循环、两个 HTTP 协议、当前轮压缩、上下文事务、个人记忆隔离、取消、真实源码读取、真实过滤快照和报错写入记录。`tests/test_bot_tool_discovery.py` 覆盖检索激活、同批拒绝、两次未命中恢复、持久化审计、两个适配器的动态 schema、常驻工具和容量边界；`tests/test_bot_discovery_scope.py` 与 `tests/test_bot_discovery_scope_boundaries.py` 覆盖新增读取的账户/市场限制、真实组合客户端参数绑定、账户级绩效、质量最终结果与配置别名路由。`tests/bot_eval/test_tool_discovery.py` 用现有夹具比较两种模式的业务结果、请求数与输入 token 代理。渠道 HTTP、取消、业务工具与安装升级测试分别验证相邻边界。脚本化模型结果不等同于真实模型语义验收；真实模型必须回答同一组问题后再评估效果。
 
 同一 `deepseek-flash` 下进行两轮成对复验：完整证据直答与 Bot 工具路径都覆盖策略主要边界；报错回答都保留两条独立记录的证据边界，没有再把它们拼成因果链。结果保存在 `/private/tmp/om-python-paired-yz2ru4ib`。这是本轮目标题的回归证据，不代表生产状态或长期可靠性统计。

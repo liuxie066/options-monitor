@@ -7,13 +7,13 @@ from dataclasses import replace
 import pytest
 
 from src.application.bot.contracts import BotRequest, BotScope
-from src.application.bot.host import run_contract
+from tests.bot_test_support import run_contract
 from src.application.bot.host_store import BotHostStore
 from src.application.bot.model_config import ModelSettings
 from src.application.bot.runtime import RunStopped, compact_messages, run_agent, token_estimate
 from src.application.bot.service import prepare_contract
 
-MODEL = ModelSettings.from_config({'provider': 'deepseek', 'model': 'test-model', 'context_window_tokens': 24000, 'max_output_tokens': 2048})
+MODEL = ModelSettings.from_config({'provider': 'deepseek', 'model': 'test-model', 'context_window_tokens': 64000, 'max_output_tokens': 2048})
 TOOL = {'name': 'read', 'description': 'read', 'input_schema': {'type': 'object'}}
 
 

@@ -7,7 +7,7 @@ import pytest
 
 from src.application import option_candidates as app
 from src.application.bot import tools
-from src.application.bot.host import run_contract
+from tests.bot_test_support import run_contract
 from src.application.bot.scene import build_scene_manifest, load_general_scene
 from src.application.bot.session import session_key_for_contract
 from src.application.read_execution import bounded_call

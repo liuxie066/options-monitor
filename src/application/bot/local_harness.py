@@ -29,7 +29,7 @@ _EVAL_MODEL = ModelSettings(
     api_key_env="",
     credential_name="",
     timeout_seconds=90,
-    context_window_tokens=24_000,
+    context_window_tokens=64_000,
     max_output_tokens=2_048,
     max_attempts=1,
 )
@@ -47,6 +47,7 @@ _CHILD_ENV_NAMES = (
     "http_proxy",
     "https_proxy",
     "no_proxy",
+    "OM_BOT_TOOL_DISCOVERY",
 )
 
 
@@ -151,7 +152,7 @@ def run_prepared_contract(
     child_environ = {
         name: os.environ[name]
         for name in _CHILD_ENV_NAMES
-        if os.environ.get(name)
+        if name in os.environ and (os.environ[name] or name == "OM_BOT_TOOL_DISCOVERY")
     }
     if api_key:
         child_environ["OM_BOT_MODEL_API_KEY"] = api_key

@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from src.application.bot.host import run_contract
+from tests.bot_test_support import run_contract
 from tests.test_bot_python_runtime import MODEL, answer, call, contract, script
 
 

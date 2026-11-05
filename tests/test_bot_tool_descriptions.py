@@ -53,19 +53,27 @@ def test_catalog_and_scene_preserve_all_baseline_input_constraints() -> None:
     contract = ExecutionContract("test", "test", "om_chat", "eval", {"user_message": "status"}, {}, {})
     descriptions = build_scene_manifest(contract, "test").tool_descriptions
     wire = [{key: item[key] for key in ("name", "description", "input_schema")} for item in descriptions]
-    assert _constraint_fingerprint(wire) == "08f32b65acbcedfde56ec40562f05f83c4fa9b3f5605b62e981f9b2ae0f196a2"
+    # Expanded names retain canonical schemas and the existing positions projection.
+    canonical = [{key: item[key] for key in ("name", "description", "input_schema")}
+                 for item in tools.tool_descriptions(build_scene_manifest(contract, "test").allowed_tools)]
+    assert [item for item in wire if item["name"] != "option_positions_read"] == [
+        item for item in canonical if item["name"] != "option_positions_read"]
+    positions = next(item for item in wire if item["name"] == "option_positions_read")
+    assert positions["input_schema"]["properties"]["action"]["enum"] == ["events"]
 
 
 def test_catalog_and_actual_scene_stay_within_measured_definition_budgets() -> None:
     catalog = tools.tool_descriptions(list(AGENT_TOOL_REGISTRY))
     assert len(catalog) == len(tools.available_read_tools())
     assert {item["name"] for item in catalog} == set(tools.available_read_tools())
-    # Baseline 6d2b673ce: 81,360 bytes for the catalog, 17,750 for the Scene.
+    # Catalog compression baseline 6d2b673ce: 81,360 bytes.
     assert _serialized_bytes(catalog) < 50_000
     contract = ExecutionContract("test", "test", "om_chat", "eval", {"user_message": "status"}, {}, {})
     manifest = build_scene_manifest(contract, "test")
     wire = [{key: item[key] for key in ("name", "description", "input_schema")} for item in manifest.tool_descriptions]
-    assert _serialized_bytes(wire) < 14_500
+    # Approved 29-tool full catalog: about 38.9 KB on the model wire.
+    assert len(wire) == 29
+    assert _serialized_bytes(wire) < 40_000
 
 
 @pytest.mark.parametrize("name", tools.available_read_tools())

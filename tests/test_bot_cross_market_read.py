@@ -10,7 +10,7 @@ import pytest
 
 from src.application.bot import tools
 from src.application.bot.contracts import BotRequest, BotScope, ExecutionContract, new_id
-from src.application.bot.host import run_contract
+from tests.bot_test_support import run_contract
 from src.application.bot.host_store import BotHostStore
 from src.application.bot.scene import build_scene_manifest
 from src.application.bot.memory_worker import configured_memory_scope, verified_sources_from_run

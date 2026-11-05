@@ -207,10 +207,8 @@ def test_scene_selects_only_the_required_read_tools() -> None:
     expected = definition["tool_selection"]["names"]
 
     assert manifest.allowed_tools == expected
-    assert set(expected) == {
-        "project_context", "project_files", "candidate_filter_explain", "option_candidates",
-        "runtime_runs", "runtime_logs", "runtime_status", "receipt_read", "option_positions_read", "trade_attribution_read",
-    }
+    assert set(expected) == set(bot_tools.available_read_tools()) - {"position_advice_read"}
+    assert len(expected) == 29
     assert len(manifest.tool_descriptions) == len(expected)
 
 
@@ -811,3 +809,5 @@ def test_performance_fee_interpretation_reaches_prompt_and_tool_contract():
     assert "实际手续费尚未确认（原因待核）" in prompt
     assert "手续费待同步" in prompt
     assert "affected metric and currency" in prompt
+    assert "option_performance_report is account-wide across US/HK" in prompt
+    assert "its config_key selects the config, never filters instrument market" in prompt

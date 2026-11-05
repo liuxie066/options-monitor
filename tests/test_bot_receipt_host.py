@@ -8,7 +8,7 @@ import pytest
 
 from src.application.agent_tools import receipts
 from src.application.bot.contracts import AppResult, BotRequest, BotScope, new_id
-from src.application.bot.host import run_contract
+from tests.bot_test_support import run_contract
 from src.application.bot.scene import build_scene_manifest
 from src.application.bot.service import prepare_contract
 from src.application.receipt_query import receipt_event
