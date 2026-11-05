@@ -1911,19 +1911,21 @@ def _position_roll_details(
     position = result["position"]
     evidence = target.get("evidence") if isinstance(target.get("evidence"), Mapping) else {}
     currency = str(position.get("currency") or ("HKD" if market == "HK" else "USD"))
-    old = str(position.get("contract_symbol") or row.get("contract_symbol") or "")
-    new = str(target["contract"])
+    old = str(position.get("contract_symbol") or row.get("contract_symbol") or "").strip()
+    new = str(target.get("contract") or "").strip()
     old_contract = _position_contract_label(row, market=market)
     new_contract = _human_contract(expiration=target["expiration"], strike=target.get("strike"),
                                   option_type=row.get("option_type"), market=market)
-    details = [f"旧仓买回：{old_contract}（{old}）；新仓卖出：{new_contract}（{new}）"]
+    old_leg = f"{old_contract}（{old}）" if old else old_contract
+    new_leg = f"{new_contract}（{new}）" if new else new_contract
+    details = [f"旧仓买回：{old_leg}；新仓卖出：{new_leg}"]
     quotes = []
     for label, key in (("平仓 ask", "old_ask"), ("开仓 bid", "new_bid")):
         value = _number(evidence.get(key))
         if value is not None:
             quotes.append(f"{label} {currency} {value:g}")
     if quotes:
-        details.append("；".join(quotes) + "（每股）")
+        details.append("；".join(quotes))
     old_strike, new_strike = _number(row.get("strike")), _number(target.get("strike"))
     if old_strike is not None and new_strike is not None:
         delta = new_strike - old_strike
@@ -1931,19 +1933,16 @@ def _position_roll_details(
         details.append(f"行权价变化：{currency} {delta:+g}" + (f"（{pct:+.2%}）" if pct is not None else ""))
     credit = _number(target.get("net_credit"))
     if credit is not None:
-        details.append(f"移仓净收取：{currency} {credit:g}（含双腿费用）")
+        details.append(f"移仓净收取：{currency} {credit:.2f}")
     period = _number(target.get("incremental_period_return"))
     annualized = _number(target.get("incremental_annualized_return"))
-    basis = _number(target.get("new_capital_basis"))
-    basis_label = "新仓担保资金" if direction == "roll_down" else "标的市值"
-    basis_text = f"{basis_label} {currency} {basis:g}" if basis is not None else basis_label
     if period is not None or annualized is not None:
         rates = []
         if period is not None:
             rates.append(f"增量期收益率 {_percent(period)}")
         if annualized is not None:
             rates.append(f"增量年化 {_percent(annualized)}")
-        details.append("；".join(rates) + f"（净现金流 ÷ {basis_text}，新到期剩余期限）")
+        details.append("；".join(rates))
     if result.get("status") == "partial":
         details.append("搜索覆盖不完整，展示当前已评估目标首选")
     return details

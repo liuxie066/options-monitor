@@ -101,7 +101,7 @@ def test_roll_down_dispatches_request_and_text_renders_cash_yields_and_fees(tmp_
         "最大新到期日 2026-12-18（无默认）", "最低新 strike 90", "实际已请求到期日",
         "发现 12 / 已评价 12 / 匹配 2 / 排除 10 / 不可评估 0", "净增现金年化优先",
         "US.NVDA261214P95000", "strike 95", "降幅 5.00%", "新仓价外 3.06%",
-        "到期 2026-12-14", "延后 30 天", "净增现金 40.00 USD", "净增现金年化 3.84%",
+        "到期 2026-12-14", "延后 30 天", "净增现金·双腿扣费后 40.00 USD", "净增现金年化 3.84%",
         "新仓到期归零最高年化 51.87%", "较旧仓变化 -130.63 pp", "资金分母（旧/新）",
         "DTE（旧/新）10/40", "买回费用：", "新卖出费用：", "sample_buy_fee", "sample_sell_fee",
         "sample_fee.v1", '"amount": 1.5', '"amount": 2', "报价与证据", "2026-11-04T15:00:00Z",
@@ -124,6 +124,22 @@ def test_json_is_original_roll_business_payload(tmp_path, monkeypatch, capsys, c
     assert captured.err == ""
     assert json.loads(captured.out) == data
     assert calls == [("short_put_roll_candidates", dict(payload, config_key=config_key))]
+
+
+def test_put_roll_copy_keeps_fees_and_return_basis_out_of_parentheses() -> None:
+    payload = result()
+    payload["candidates"][0].update(net_credit=24.3734, new_capital_basis=7900)
+    payload["candidates"].append(dict(payload["candidates"][0]))
+    text = render_short_put_roll(payload)
+
+    assert "净增现金·双腿扣费后 24.37 USD" in text
+    assert "24.3734" not in text
+    assert "净增现金期间回报 = 净现金流 ÷ 新仓担保资金" in text
+    assert "年化按新到期剩余期限折算" in text
+    assert text.count("移仓收益口径") == 1
+    assert text.index("移仓收益口径") > text.index("2. US.NVDA")
+    assert "（净增现金 /" not in text and "（）" not in text and "()" not in text
+    assert "资金分母（旧/新）10000.00 USD / 7900.00 USD" in text
 
 
 def test_cli_does_not_inject_expiration_or_display_defaults(tmp_path, monkeypatch, capsys):
@@ -210,7 +226,7 @@ def test_missing_diagnostics_render_unavailable_without_inventing_zeros(tmp_path
     assert invoke(tmp_path, request()) == 0
     output = capsys.readouterr().out
     assert "旧仓继续持有到期归零最高年化：不可用" in output
-    assert "净增现金 不可用" in output and "买回费用：不可用" in output
+    assert "净增现金·双腿扣费后 不可用" in output and "买回费用：不可用" in output
     assert "覆盖：不可用" in output and "未提供诊断" in output
     assert "不可用" in output and "0.00%" not in output
 
