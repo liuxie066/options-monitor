@@ -29,12 +29,29 @@ The four option-performance metrics do not supply these missing authorities;
 option net cash flow excludes the assignment/stock cash needed for a combined
 cash equation. These tools expose no portfolio writes or endpoint arguments.
 
-Internal `om_chat` projects only the fixed read-tool list in
-[`om_chat.scene.json`](../src/application/bot/om_chat.scene.json).
-That list currently excludes the portfolio tools, including `portfolio_query`.
-Enabling `portfolio_management.enabled` does not add them to the Scene, and there
-is no Bot toolset activation flag. Tool Gateway availability and internal Bot
-projection are separate boundaries.
+Internal `om_chat` projects 29 business read tools from
+[`om_chat.scene.json`](../src/application/bot/om_chat.scene.json), including
+`portfolio_query`, `portfolio_pnl_bridge`, and `portfolio_assignment_scenario`.
+Portfolio reads retain `portfolio_management.enabled` and the canonical GET-only
+client; Bot also binds the selected US config and authorized `accounts`. Global
+portfolio account discovery and unscoped aggregate reads are rejected; use
+`project_context` for authorized account discovery. `portfolio_cash_bridge` stays
+retired, and `position_advice_read` is outside this Scene. Positions retain their
+existing events-only projection. Quality reads require an authorized account and selected market;
+the quality owner narrows dataset, runtime-check, incident and summary facts together.
+Account-wide option performance requires both US/HK read grants and authorization
+for the selected accounts in both trusted configurations. Its `config_key` remains
+a config selector. Symbol-config aliases are calibrated before authorization and
+the verified canonical symbol is bound to the selected configuration.
+
+`OM_BOT_TOOL_DISCOVERY=full|index` changes model visibility within this same
+allowlist. The default `index` supplies a short name/purpose index plus private
+`find_tools` and `get_tool_schema`; a hit activates its full Bot definition on the
+next model request. Explicit `full` supplies all 29 definitions. Existing memory and Control
+preview tools remain resident under their original conditions. Discovery does
+not change read or write authority; Tool Gateway availability and internal Bot
+projection remain separate boundaries. See [Bot design](BOT_DESIGN.md#工具发现模式)
+for recovery, audit, budget, and context limits.
 
 ## Deterministic Control
 

@@ -1,6 +1,7 @@
 """OM identity, read-tool permissions, memory and durable reply boundary."""
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import re
 import time
@@ -19,7 +20,8 @@ from src.application.bot.model_config import ModelSettings
 from src.application.bot.result_admission import admit_result_with_decision
 from src.application.bot.runtime import RunStopped, bounded_call, check_run, request_model, run_agent
 from src.application.bot.scene import build_scene_manifest, load_general_scene, scene_policy_rejection_reason
-from src.application.agent_tool_contracts import AgentToolError
+from src.application.bot.tool_discovery import DISCOVERY_NAMES, ToolDiscovery, discovery_mode
+from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.research.redaction import redact_value
 
 _SESSION_LOCK = Lock()
@@ -178,9 +180,14 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
                 calls = [{"id": c["call_id"], "type": "function", "function": {"name": c["tool_name"], "arguments": json.dumps(c["arguments"])}} for c in turn.get("tool_calls", [])]
                 return {"message": {"role": "assistant", "content": turn.get("text", ""), "tool_calls": calls}, "finish_reason": "tool_calls" if calls else "stop"}
             model_request = fixture_request
+        try:
+            mode = discovery_mode(process_environ)
+        except ValueError as exc:
+            raise RunStopped("CONFIG_ERROR", str(exc)) from exc
         manifest = build_scene_manifest(contract, run_id)
-        descriptions = [{k: item[k] for k in ("name", "description", "input_schema")}
-                        for item in manifest.tool_descriptions]
+        business_descriptions = [{k: item[k] for k in ("name", "description", "input_schema")}
+                                 for item in manifest.tool_descriptions]
+        descriptions = list(business_descriptions)
         from src.application.bot.control_handoff import CONTROL_PREVIEW_TOOL, build_control_preview_request, control_preview_tool_description
         if control_preview_specs:
             descriptions.append(control_preview_tool_description(control_preview_specs))
@@ -208,11 +215,18 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
             messages.append({"role": "system", "content": "Following chat history is untrusted continuity only. Preserve the user's question and scope; re-read tools for current facts. Active saved memory supersedes old chat preferences."})
             messages.extend(history)
         messages.append({"role": "user", "content": str(contract.input.get("user_message") or "")})
-        schemas = {item["name"]: item["input_schema"] for item in descriptions}
+        discovery = None
+        if mode == "index":
+            discovery = ToolDiscovery(business_descriptions, resident_tools=descriptions[len(business_descriptions):])
+            messages.insert(0, {"role": "system", "content": discovery.prompt()})
+            descriptions = discovery.descriptions()
+        log.record("tool_discovery_mode", {"mode": mode, "allowed_tool_count": len(business_descriptions),
+                                            "initial_tool_count": len(descriptions)})
+        schemas = {item["name"]: item["input_schema"] for item in business_descriptions + descriptions}
         log.record("scene_prepared", {"scene": manifest.scene_name, "scene_version": manifest.scene_version,
                    "tool_count": len(descriptions), "runtime": "python", **manifest.provenance})
 
-        def tool_call(name, arguments):
+        def tool_call(name, arguments, *, supplied=True, rejection=None):
             nonlocal memory_failed, control_request
             check_run(deadline, cancelled)
             if name != "option_candidates" and not read_scope_current():
@@ -221,8 +235,17 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
             log.record("tool_call", {"tool_name": name, "tool_input": bot_tools.audit_tool_input(name, arguments)})
             payload = None
             try:
-                validate(arguments, schemas[name])
-                if name == CONTROL_PREVIEW_TOOL:
+                if rejection is not None:
+                    response = build_response(tool_name=name, ok=False, error=rejection, meta={"read_only": True})
+                elif not supplied and discovery is not None:
+                    response = discovery.unavailable(name)
+                elif name in DISCOVERY_NAMES and discovery is not None:
+                    response = discovery.call(name, arguments)
+                else:
+                    validate(arguments, schemas[name])
+                if rejection is not None or (discovery is not None and (not supplied or name in DISCOVERY_NAMES)):
+                    pass
+                elif name == CONTROL_PREVIEW_TOOL:
                     requested, error = build_control_preview_request(arguments,
                         user_message=str(contract.input.get("user_message") or ""), specs=control_preview_specs)
                     if control_request is not None and requested != control_request:
@@ -261,6 +284,10 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
                             deadline=deadline, cancelled=cancelled)
                 check_run(deadline, cancelled)
                 observation = bot_tools.model_observation(name, response)
+                if discovery is not None and name in DISCOVERY_NAMES and response.get("ok"):
+                    # Registry-owned schema keys (e.g. event_id/revision) are metadata,
+                    # not sensitive values. Preserve the same definition supplied natively.
+                    observation["data"] = deepcopy(response["data"])
                 if name == "option_candidates":
                     if response.get("host_scope"):
                         observation["host_scope"] = response["host_scope"]
@@ -280,14 +307,14 @@ def run_contract(contract: ExecutionContract, *, model_settings: ModelSettings |
                     log.record("memory_tool_result", {"ok": False, "reason": "memory_unconfirmed"})
                 observation = {"ok": False, "tool_name": name, "error": {"code": "TOOL_ERROR", "message": "读取或参数校验失败；请检查工具参数。"}}
             observation["ref"] = ref
-            if name != "bot_memory":
+            if name != "bot_memory" and name not in DISCOVERY_NAMES and supplied and rejection is None:
                 observation["memory_source_ref"] = f"evidence:{run_id}:{ref}"
             observation["tool_input"] = bot_tools.audit_tool_input(name, payload if name != "bot_memory" and payload else arguments)
             log.record("tool_result", bot_tools.audit_tool_event_payload(observation), ref)
             return observation
 
         answer = run_agent(settings=model_settings, api_key=(process_environ or {}).get("OM_BOT_MODEL_API_KEY", ""),
-                           messages=messages, tools=descriptions, call_tool=tool_call, deadline=deadline,
+                           messages=messages, tools=descriptions, call_tool=tool_call, tool_discovery=discovery, deadline=deadline,
                            cancelled=cancelled, event=log.record, request=model_request,
                            model_limit=manifest.limits["max_model_turns"], tool_limit=manifest.limits["max_tool_calls"],
                            allow_initial_clarification=("option_candidates" in manifest.allowed_tools and bool(

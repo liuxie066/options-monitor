@@ -90,7 +90,12 @@ def _run_ws_event(text: str, settings: FeishuWsSettings, replies: list[dict]) ->
     )
 
 
-def test_feishu_key_only_scope_runs_python_bot_and_runtime_status(monkeypatch, tmp_path):
+@pytest.mark.parametrize("mode", [None, "full"], ids=["default-index", "explicit-full"])
+def test_feishu_key_only_scope_runs_python_bot_and_runtime_status(monkeypatch, tmp_path, mode):
+    if mode is None:
+        monkeypatch.delenv("OM_BOT_TOOL_DISCOVERY", raising=False)
+    else:
+        monkeypatch.setenv("OM_BOT_TOOL_DISCOVERY", mode)
     config = _build_runtime_config(tmp_path, market="us")
     state = tmp_path / "output_shared" / "state" / "scheduler_state_us.json"
     state.parent.mkdir(parents=True)
@@ -120,12 +125,27 @@ def test_feishu_key_only_scope_runs_python_bot_and_runtime_status(monkeypatch, t
         },
         {"body": submit},
     ]
+    if mode is None:
+        responses.insert(0, {"body": _chat_response(
+            tool_name="find_tools", tool_arguments={"query": "runtime_status"}, call_id="find",
+        )})
     with _loopback_server(responses) as (url, requests):
         settings = _feishu_settings(tmp_path, url, config_key="us")
         out = _run_ws_event("读取 lx 当前业务调度状态", settings, replies)
 
     assert out["ok"], out
-    assert len(requests) == 2
+    assert len(requests) == (3 if mode is None else 2)
+    initial_names = {tool["function"]["name"] for tool in requests[0]["payload"]["tools"]}
+    if mode is None:
+        assert {"find_tools", "get_tool_schema"} <= initial_names
+        assert "runtime_status" not in initial_names
+        activated = {tool["function"]["name"] for tool in requests[1]["payload"]["tools"]}
+        assert "runtime_status" in activated
+        discovery = next(obs for obs in seen if obs.get("tool_name") == "find_tools")
+        assert discovery["ok"] and discovery["data"]["activated"] == ["runtime_status"]
+    else:
+        assert "runtime_status" in initial_names
+        assert not {"find_tools", "get_tool_schema"} & initial_names
     assert replies and "运行状态已读取" in _reply_text(replies[-1])
     status = next(obs for obs in seen if obs.get("tool_name") == "runtime_status")
     assert status["ok"] is True
@@ -160,6 +180,7 @@ def test_feishu_initial_config_failure_precedes_model_and_tool(monkeypatch, tmp_
 
 
 def test_feishu_hk_can_use_two_active_read_tools(monkeypatch, tmp_path):
+    monkeypatch.delenv("OM_BOT_TOOL_DISCOVERY", raising=False)
     config = _build_runtime_config(tmp_path, market="hk")
     state = tmp_path / "output_shared" / "state" / "scheduler_state_hk.json"
     state.parent.mkdir(parents=True)
@@ -231,12 +252,23 @@ def test_feishu_hk_can_use_two_active_read_tools(monkeypatch, tmp_path):
         },
         {"body": submit},
     ]
+    responses.insert(0, {"body": _chat_response(
+        tool_name="find_tools", tool_arguments={"query": "runtime_status project_context"}, call_id="find",
+    )})
     with _loopback_server(responses) as (url, requests):
         settings = _feishu_settings(tmp_path, url, config_key="hk")
         out = _run_ws_event("查看 HK lx 调度历史、业务窗口和系统定时任务状态", settings, replies)
 
     assert out["ok"], out
-    assert len(requests) == 3
+    assert len(requests) == 4
+    initial_names = {tool["function"]["name"] for tool in requests[0]["payload"]["tools"]}
+    assert {"find_tools", "get_tool_schema"} <= initial_names
+    assert not {"runtime_status", "project_context"} & initial_names
+    for request in requests[1:]:
+        activated = {tool["function"]["name"] for tool in request["payload"]["tools"]}
+        assert {"runtime_status", "project_context"} <= activated
+    discovery = next(obs for obs in seen if obs.get("tool_name") == "find_tools")
+    assert set(discovery["data"]["activated"]) == {"runtime_status", "project_context"}
     assert all(obs["ok"] is True for obs in seen)
     assert "运行状态和项目范围已读取" in _reply_text(replies[-1])
     assert probes == []

@@ -92,6 +92,26 @@ def build_tool_payload(
         if explicit not in (None, "") and explicit != value:
             return None, f"tool input conflicts with trusted scope: {name}"
         payload[name] = value.strip() if isinstance(value, str) else value
+    # These readers use native market/account selectors rather than the injected
+    # config path. Bind them before exposing the expanded Scene to channels.
+    scoped_market = str(trusted_fixed.get("config_key") or "").lower()
+    if scoped_market in {"us", "hk"}:
+        if tool_name in {"daily_decision_brief_read", "decision_history_read"}:
+            if payload.get("market") and str(payload["market"]).lower() != scoped_market:
+                return None, "market conflicts with the trusted Bot scope"
+            payload["market"] = scoped_market.upper()
+        if tool_name == "quality_status":
+            payload["market"] = scoped_market
+        if tool_name == "close_advice_read":
+            selector = str(payload.get("market_scope") or scoped_market).lower()
+            if selector != scoped_market:
+                return None, "close-advice market_scope must match the selected authorized market; query each market separately"
+            payload["market_scope"] = scoped_market
+        if tool_name in {"daily_decision_brief_read", "close_advice_read", "quality_status"}:
+            query = payload.get("query")
+            selected_account = (query.get("account") if isinstance(query, dict) else None) if tool_name == "close_advice_read" else payload.get("account")
+            if not selected_account:
+                return None, "select an authorized account with project_context before reading this report"
     dual_market_events = (
         tool_name == "option_positions_read" and payload.get("action") == "events"
         and len(trusted_fixed.get("read_markets") or []) > 1
@@ -99,7 +119,31 @@ def build_tool_payload(
     nested_query = payload.get("query")
     needs_account_scope = "account" in fields and payload.get("account") not in (None, "")
     needs_nested_account_scope = isinstance(nested_query, dict) and nested_query.get("account") not in (None, "")
-    if tool_name == "receipt_read" or needs_account_scope or needs_nested_account_scope or dual_market_events:
+    needs_accounts_scope = "accounts" in fields and bool(payload.get("accounts"))
+    portfolio_tool = tool_name in {"portfolio_query", "portfolio_pnl_bridge", "portfolio_assignment_scenario"}
+    if scoped_market and portfolio_tool:
+        if scoped_market != "us":
+            return None, "portfolio tools use the US-configured service; select the authorized US market"
+        # These owners resolve their own US configuration. Verify it is the same
+        # file whose accounts the Host authorizes rather than ignoring a path scope.
+        if trusted_fixed.get("config_path"):
+            from src.application.agent_tool_config import resolve_runtime_config_path
+
+            if Path(trusted_fixed["config_path"]).resolve() != resolve_runtime_config_path(config_key="us").resolve():
+                return None, "portfolio tools require the trusted runtime US configuration path"
+        if tool_name == "portfolio_query":
+            view = payload.get("view", "health")
+            if view == "accounts":
+                return None, "use project_context for authorized account discovery; the global portfolio accounts view is unavailable in Bot"
+            if view in {"overview", "distribution"} and not payload.get("accounts") and not payload.get("account"):
+                return None, "select authorized accounts before reading portfolio data"
+            if view == "overview" and payload.get("account") and not payload.get("accounts"):
+                payload["accounts"] = [payload.pop("account")]
+                needs_account_scope, needs_accounts_scope = False, True
+        elif not payload.get("accounts"):
+            return None, "select authorized accounts before reading portfolio data"
+    account_wide_performance = tool_name == "option_performance_report" and bool(trusted_fixed.get("read_generation"))
+    if tool_name == "receipt_read" or needs_account_scope or needs_nested_account_scope or needs_accounts_scope or dual_market_events or account_wide_performance:
         from src.application.account_config import accounts_from_config, normalize_account_label
         from src.application.agent_tool_config import load_runtime_config
         from src.application.agent_tool_contracts import AgentToolError
@@ -122,7 +166,7 @@ def build_tool_payload(
                 deal_id = payload.get("deal_id")
                 if isinstance(deal_id, str) and ("..." in deal_id or "…" in deal_id):
                     return None, "receipt_read needs the complete deal_id from the user; masked IDs cannot identify a receipt."
-            if needs_account_scope or needs_nested_account_scope or dual_market_events:
+            if needs_account_scope or needs_nested_account_scope or needs_accounts_scope or dual_market_events or account_wide_performance:
                 allowed = accounts_from_config(config, fallback=())
             if dual_market_events and not needs_account_scope:
                 if len(allowed) != 1:
@@ -137,11 +181,36 @@ def build_tool_payload(
             if account not in allowed:
                 return None, "account is outside the configured scope; use project_context to discover valid scope"
             payload["account"] = account
+        if needs_accounts_scope:
+            requested_accounts = payload.get("accounts")
+            if not isinstance(requested_accounts, list) or any(not isinstance(item, str) for item in requested_accounts):
+                return None, "accounts must be a list of authorized account names"
+            normalized = [normalize_account_label(item) for item in requested_accounts]
+            if any(item not in allowed for item in normalized):
+                return None, "one or more accounts are outside the trusted config scope"
+            payload["accounts"] = normalized
         if needs_nested_account_scope:
             nested_account = normalize_account_label(nested_query["account"])
             if nested_account not in allowed or (needs_account_scope and nested_account != account):
                 return None, "query.account is outside or conflicts with the configured scope"
             payload["query"] = {**nested_query, "account": nested_account}
+    if tool_name == "option_performance_report" and trusted_fixed.get("read_generation"):
+        # The canonical report is account-wide; config_key never filters trades
+        # by instrument market. Prove both market/account grants before reading.
+        if set(trusted_fixed.get("read_markets") or ()) != {"us", "hk"}:
+            return None, "account-wide performance requires both US and HK read authorization"
+        from src.application.bot.config_scope import BotConfigScopeError, resolve_trusted_config_scope
+
+        selected_accounts = {account} if needs_account_scope else set(allowed)
+        other_market = "hk" if scoped_market == "us" else "us"
+        other_path = Path(trusted_fixed["config_path"]).with_name(f"config.{other_market}.json")
+        try:
+            actual, canonical, _authority = resolve_trusted_config_scope(config_key=None, config_path=str(other_path))
+            _path, other_config = load_runtime_config(config_path=canonical)
+        except (BotConfigScopeError, AgentToolError, OSError, RuntimeError, ValueError):
+            return None, "both market configurations must be available and fresh for account-wide performance"
+        if actual != other_market or not selected_accounts <= set(accounts_from_config(other_config, fallback=())):
+            return None, "performance accounts must be authorized in both US and HK configurations"
     if tool_name == "option_performance_report" and os.environ.get("OM_PERFORMANCE_SERVICE_URL", "").strip():
         # Host scope was checked locally; server paths are never request selectors.
         for name in ("config_path", "data_config"):
@@ -167,12 +236,24 @@ def _route_read_market(tool_name: str, explicit: dict[str, Any], fixed: dict[str
         return fixed, "trusted Bot read authorization changed; stop this turn"
     if tool_name == "project_files" and explicit.get("resource") != "run":
         return fixed, None
+    calibration = None
+    if tool_name == "symbol_config_read":
+        from src.application.agent_tool_config import load_runtime_config
+        from src.application.symbol_calibration import calibrate_symbol
+
+        try:
+            _path, config = load_runtime_config(config_key=primary, config_path=primary_path)
+            calibration = calibrate_symbol(explicit.get("symbol"), config=config)
+        except Exception:
+            return fixed, "symbol configuration is unavailable"
+        if calibration.status != "ok" or not calibration.canonical_symbol:
+            return fixed, "provide a canonical symbol or a configured unambiguous alias"
     choices: set[str] = set()
     for field in ("config_key", "market"):
         if explicit.get(field):
             choices.add(str(explicit[field]).strip().lower())
     query = explicit.get("query")
-    symbols = [explicit.get("symbol")]
+    symbols = [calibration.canonical_symbol if calibration is not None else explicit.get("symbol")]
     if isinstance(query, dict):
         symbols.append(query.get("symbol"))
     for symbol in symbols:
@@ -202,6 +283,15 @@ def _route_read_market(tool_name: str, explicit: dict[str, Any], fixed: dict[str
         return fixed, "selected market config is unavailable or stale"
     if actual != target:
         return fixed, "selected market config identity differs from the requested market"
+    if calibration is not None:
+        try:
+            _path, config = load_runtime_config(config_path=canonical)
+            target_calibration = calibrate_symbol(calibration.canonical_symbol, config=config)
+        except Exception:
+            return fixed, "selected symbol configuration is unavailable"
+        if target_calibration.canonical_symbol != calibration.canonical_symbol or str(target_calibration.market).lower() != target:
+            return fixed, "symbol identity conflicts with the selected authorized market"
+        explicit["symbol"] = calibration.canonical_symbol
     return {**fixed, "config_key": target, "config_path": canonical}, None
 
 

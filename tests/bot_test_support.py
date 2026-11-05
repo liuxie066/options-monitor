@@ -18,7 +18,7 @@ _TEST_MODEL = ModelSettings(
     api_key_env="",
     credential_name="",
     timeout_seconds=90,
-    context_window_tokens=24_000,
+    context_window_tokens=64_000,
     max_output_tokens=2_048,
     max_attempts=1,
 )
@@ -56,6 +56,8 @@ ModelRunner = Callable[[ModelRequest], ModelTurn]
 
 
 def run_contract(contract, *, model_runner=None, **kwargs):
+    """Run legacy direct-call scripts in explicit full mode; discovery tests use the Host directly."""
+    kwargs.setdefault("process_environ", {"OM_BOT_TOOL_DISCOVERY": "full"})
     if model_runner is not None:
         kwargs.setdefault("model_settings", _TEST_MODEL)
         sequence = 0

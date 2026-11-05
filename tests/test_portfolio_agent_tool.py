@@ -135,15 +135,17 @@ def test_assignment_scenario_tool_has_optional_scenario_contract(monkeypatch) ->
 
 
 @pytest.mark.parametrize("scenario", ["short_put", "short_call", "all_short"])
-def test_assignment_tool_forwards_assumption(monkeypatch, scenario):
+def test_assignment_tool_forwards_assumption(monkeypatch, scenario, example_config_path):
     from src.application.bot.tools import build_tool_payload
 
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
     calls = []
     monkeypatch.setattr(portfolio, "query_portfolio_assignment_scenario", lambda accounts, **kwargs: (
         calls.append((accounts, kwargs)) or {"warnings": []}
     ))
     payload, error = build_tool_payload(
-        "portfolio_assignment_scenario", {"accounts": ["lx"], "scenario": scenario}, fixed_input={},
+        "portfolio_assignment_scenario", {"accounts": ["lx"], "scenario": scenario},
+        fixed_input={"config_key": "us", "config_path": str(example_config_path)},
     )
     assert error is None
     _tool("portfolio_assignment_scenario").call(payload)

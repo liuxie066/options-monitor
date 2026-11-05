@@ -7,6 +7,7 @@ import time
 from collections import Counter
 from typing import Any, Callable
 
+from src.application.bot.tool_discovery import DISCOVERY_NAMES
 from src.application.read_execution import RunStopped, bounded_call, check_run
 from src.infrastructure.openai_chat_completions import create_chat_completion
 from src.infrastructure.openai_responses import create_response
@@ -103,11 +104,12 @@ def run_agent(*, settings, api_key: str, messages: list[dict], tools: list[dict]
               model_limit: int = 16, tool_limit: int = 12, failed_batch_limit: int = 3,
               reserve_seconds: float = 45,
               allow_initial_clarification: bool = False,
+              tool_discovery=None,
               request: Callable = request_model) -> str:
-    names = {tool["name"] for tool in tools}
     calls_seen: set[str] = set()
     repeated: Counter = Counter()
     tool_count = failed_batches = model_failures = 0
+    has_observation = False
     final = False
     continued = False
     parts: list[str] = []
@@ -117,6 +119,8 @@ def run_agent(*, settings, api_key: str, messages: list[dict], tools: list[dict]
         message.get("role") == "assistant" for message in messages)
     for turn in range(model_limit):
         check_run(deadline, cancelled)
+        if tool_discovery is not None:
+            tools = tool_discovery.descriptions()
         final = final or turn == model_limit - 1 or tool_count >= tool_limit or failed_batches >= failed_batch_limit or deadline - time.monotonic() <= reserve_seconds
         # Providers report tokens for the exact previous request. Calibrate the
         # conservative local estimate before deciding that current evidence no
@@ -124,6 +128,9 @@ def run_agent(*, settings, api_key: str, messages: list[dict], tools: list[dict]
         if estimate_scale is None and tool_count and token_estimate([messages, tools]) > capacity:
             final = True
         active_tools = [] if final else tools
+        # Freeze request visibility: a search cannot authorize a sibling call in
+        # the same batch; the next model request must receive its actual schema.
+        names = {tool["name"] for tool in active_tools}
         current = list(messages)
         if final:
             current.append({"role": "system", "content": "Stop investigating. Answer the user's question from the available results. State missing evidence plainly. No tools are available."})
@@ -145,8 +152,10 @@ def run_agent(*, settings, api_key: str, messages: list[dict], tools: list[dict]
         except Exception:
             model_failures += 1
             event("model_turn_failed", {"turn": turn + 1, "reason": "provider_error"})
-            if not final and (tool_count or model_failures < settings.max_attempts):
-                final = bool(tool_count)
+            # Discovery loads protocol metadata, not evidence for a final answer.
+            # Before an actual tool result, retain the normal provider retry budget.
+            if not final and (has_observation or model_failures < settings.max_attempts):
+                final = has_observation
                 continue
             raise RunStopped("MODEL_ERROR", "provider_error")
         model_failures = 0
@@ -189,14 +198,28 @@ def run_agent(*, settings, api_key: str, messages: list[dict], tools: list[dict]
                     args = None
                 key = json.dumps([fn.get("name"), args], sort_keys=True, ensure_ascii=False)
                 repeated[key] += 1
-                if fn.get("name") not in names or args is None:
-                    result = {"ok": False, "error": {"code": "INPUT_ERROR", "message": "Use an available tool and a JSON object matching its schema."}}
-                elif tool_count >= tool_limit or repeated[key] > 2:
+                if fn.get("name") not in names and args is not None and tool_discovery is not None and not final:
+                    result = call_tool(fn.get("name"), args, supplied=False)
+                elif fn.get("name") not in names or args is None:
+                    error = {"code": "INPUT_ERROR", "message": "Use an available tool and a JSON object matching its schema."}
+                    if tool_discovery is not None:
+                        error.update(hint="Call find_tools or get_tool_schema, then use the supplied schema on the next request.",
+                                     details={"retryable": True})
+                    # Invalid arguments and final-turn rejections still enter the
+                    # Host's envelope/audit boundary, without executing a handler.
+                    result = (call_tool(fn.get("name"), args if args is not None else {"invalid_arguments": fn.get("arguments")},
+                                        supplied=fn.get("name") in names, rejection=error)
+                              if tool_discovery is not None else {"ok": False, "error": error})
+                elif final or tool_count >= tool_limit or repeated[key] > 2:
                     final = True
-                    result = {"ok": False, "error": {"code": "BUDGET_EXHAUSTED", "message": "Stop reading; answer using existing results and state gaps."}}
+                    error = {"code": "BUDGET_EXHAUSTED", "message": "Stop reading; answer using existing results and state gaps."}
+                    result = (call_tool(fn["name"], args, rejection=error) if tool_discovery is not None
+                              else {"ok": False, "error": error})
                 else:
                     tool_count += 1
                     result = call_tool(fn["name"], args)
+                    if tool_discovery is None or fn["name"] not in DISCOVERY_NAMES:
+                        has_observation = True
                 batch_succeeded = batch_succeeded or bool(result.get("ok"))
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result, ensure_ascii=False, allow_nan=False)})
             failed_batches = 0 if batch_succeeded else failed_batches + 1

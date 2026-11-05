@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
@@ -8,6 +9,8 @@ from src.application.quality.gate import (
     quality_payload_has_lifecycle_rows,
     record_quality_consumer_read,
 )
+from src.application.quality.model import summarize
+from src.application.quality.runtime_checks import runtime_verdict
 from src.application.quality.service import OMQualityService
 
 
@@ -49,15 +52,27 @@ def _quality_status_tool(
         )
     if not any((account, market, dataset_id)):
         return status, [], {"artifact": "om-quality-status"}
-    projected = dict(status)
+    def selected(item: dict[str, Any]) -> bool:
+        scope = item.get("scope") or {}
+        return all(not wanted or str(scope.get(key) or "").lower() == wanted
+                   for key, wanted in (("account", account), ("market", market)))
+
+    # Missing scope is not proof of global visibility: producer listener rows
+    # can carry an account without a market. Keep only proven matching facts,
+    # without whole-artifact extension facts or precomputed totals.
+    projected = {key: deepcopy(status[key]) for key in ("schema_version", "producer", "observed_at_utc", "runtime")}
+    projected["producer"].pop("extensions", None)
     projected["datasets"] = [
-        item
-        for item in status.get("datasets") or []
-        if isinstance(item, dict)
-        and (not dataset_id or item.get("dataset_id") == dataset_id)
-        and (not account or str((item.get("scope") or {}).get("account") or "").lower() == account)
-        and (not market or str((item.get("scope") or {}).get("market") or "").lower() == market)
+        deepcopy(item) for item in status.get("datasets") or []
+        if isinstance(item, dict) and (not dataset_id or item.get("dataset_id") == dataset_id) and selected(item)
     ]
+    projected["incidents"] = [deepcopy(item) for item in status.get("incidents") or []
+                              if isinstance(item, dict) and selected(item)]
+    runtime = projected["runtime"]
+    runtime.pop("extensions", None)
+    runtime["checks"] = [item for item in runtime.get("checks") or [] if selected(item)]
+    runtime["status"] = runtime_verdict(runtime["checks"]) if runtime["checks"] else "unknown"
+    projected["summary"] = summarize(projected)
     return projected, [], {"artifact": "om-quality-status"}
 
 
