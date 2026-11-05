@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+from src.application.output_runs_retention import run_reader_lease
 from src.application.candidate_snapshot_contract import (
     CandidateSnapshotContractError,
     assert_current_candidate_artifact_boundary,
@@ -841,6 +842,7 @@ def validate_candidate_snapshot_bundle_bytes(
     return {"manifest": manifest, "status_index": index, "owners": owners}
 
 
+@run_reader_lease(lambda *, base, **_kwargs: base)
 def load_candidate_snapshot_bundle(
     *,
     base: Path,
@@ -1021,6 +1023,7 @@ def _scheduler_skipped_market(*, base: Path, run_id: str, account: str) -> str |
     return market
 
 
+@run_reader_lease(lambda *, base, **_kwargs: base)
 def _load_latest_candidate_snapshot_bundle(
     *,
     base: Path,

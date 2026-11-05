@@ -4191,10 +4191,10 @@ def test_service_cleanup_dry_run_reports_expired_output_runs_and_protects_latest
         os.utime(run, (ts, ts))
         return run
 
-    new_run = _run("run-new", 1_780_000_000)
-    keep_count_run = _run("run-keep-count", 1_779_900_000)
-    delete_run = _run("run-delete", 1_700_000_000)
-    pointer_run = _run("run-pointer", 1_690_000_000)
+    new_run = _run("20260528T202640Z", 1_780_000_000)
+    keep_count_run = _run("20260527T164000Z", 1_779_900_000)
+    delete_run = _run("20231114T221320Z", 1_700_000_000)
+    pointer_run = _run("20230722T042640Z", 1_690_000_000)
     (state_root / "last_run_dir.txt").write_text(str(pointer_run), encoding="utf-8")
 
     out = service_cleanup(
@@ -4210,11 +4210,11 @@ def test_service_cleanup_dry_run_reports_expired_output_runs_and_protects_latest
     cleanup = out["output_runs_cleanup"]
     assert out["status"] == "dry_run"
     assert cleanup["scanned_count"] == 4
-    assert [Path(item["path"]).name for item in cleanup["delete_runs"]] == ["run-delete"]
+    assert [Path(item["path"]).name for item in cleanup["delete_runs"]] == [delete_run.name]
     protected = {Path(item["path"]).name: item["reason"] for item in cleanup["protected_runs"]}
-    assert protected[new_run.name] == "latest_keep_count"
-    assert protected[keep_count_run.name] == "latest_keep_count"
-    assert protected[pointer_run.name] == "last_run_dir_pointer"
+    assert protected[new_run.name] == "latest_run"
+    assert protected[keep_count_run.name] == "within_retention"
+    assert protected[pointer_run.name] == "last_run_pointer"
     assert delete_run.exists()
 
 def test_service_cleanup_confirm_deletes_expired_output_runs_and_runtime_logs(tmp_path: Path) -> None:
@@ -4246,8 +4246,8 @@ def test_service_cleanup_confirm_deletes_expired_output_runs_and_runtime_logs(tm
         os.utime(run, (ts, ts))
         return run
 
-    kept_run = _run("run-kept", 1_780_000_000)
-    expired_run = _run("run-expired", 1_700_000_000)
+    kept_run = _run("20260528T202640Z", 1_780_000_000)
+    expired_run = _run("20231114T221320Z", 1_700_000_000)
     old_log = logs_root / "old.log"
     new_log = logs_root / "new.log"
     audit_file = logs_root / "audit.jsonl"

@@ -188,6 +188,21 @@ Linux/macOS `scan-pipeline` 主线程中的 `runtime.symbol_timeout_sec` 能真�
 仍兼容，两者同时出现时新键优先。`om config validate` 和 `om config build` 会拒绝
 这两个键的无效值及明显拼写错误；省略时保持默认全并行。
 
+## 运行目录保留策略
+
+`runtime.output_runs_keep_days` 默认 `7`，必须是正整数。它通过现有配置构建链路进入各市场的 runtime JSON；旧快照缺少该字段时也使用 `7`。例如在 `config.yaml` 中配置：
+
+```yaml
+runtime:
+  output_runs_keep_days: 7
+```
+
+修改后按受影响市场运行 `om config build`。US/HK 共用一个 `output_runs`；手动命令未指定市场时取已有市场快照中较长的保留天数。`--config-key us|hk` 或 `--config-path` 可选择配置；`--keep-days` 仅覆盖本次清理，不改配置文件。
+
+清理按直接子目录名中的 UTC 时间戳判断，支持 `20261105T075006Z` 和当前生成器的 `20261105T075006Z-abcdef`。以执行时刻减去 `7×24` 小时为边界：恰好 7 天保留，超过 7 天才进入候选；不使用 mtime。最新 run、最新账户/市场候选扫描、`last_run_dir.txt` 指向的 run、存活进程的运行 claim、实际路径引用及账户别名目标会跳过。运行或诊断读取持有共享生命周期锁，清理无法取得独占锁时跳过；目录内被占用的 `.lock` 也会阻止删除该 run。引用清单读取失败时停止本次删除。
+
+自动清理挂在整次 Tick 的退出收尾：`tick-cron` 等子进程、通知和完成回执处理结束后执行；手动 Tick 等全部账户线程和后置 sidecar 完成后执行。先释放运行共享锁，再尝试清理独占锁，锁忙则记录跳过；不新增定时器。US/HK 共用目录时自动策略同样取较长的已配置保留天数。清理失败写入审计/本地错误信号，不改变扫描与通知的既有退出结果。手动清理和审计查询见 [运行手册](RUNBOOK.md#output_runs-保留与手动清理)。
+
 ## 账户
 
 账户类型为 `futu`：

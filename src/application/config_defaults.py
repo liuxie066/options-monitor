@@ -114,6 +114,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "outputs": {"top_n_alerts": 3},
         "runtime": {
+            "output_runs_keep_days": 7,
             "symbol_timeout_sec": 120,
             "portfolio_timeout_sec": 60,
             "pipeline_timeout_sec": 600,
@@ -292,6 +293,17 @@ __all__ = [
     "default_config",
     "default_config_sha256",
 ]
+
+
+def output_runs_keep_days(config: dict[str, Any]) -> int:
+    """Resolve run retention for old snapshots as well as newly built configs."""
+    runtime = config.get("runtime", {})
+    if not isinstance(runtime, dict):
+        raise ValueError("runtime must be an object")
+    value = runtime.get("output_runs_keep_days", DEFAULT_CONFIG["defaults"]["runtime"]["output_runs_keep_days"])
+    if type(value) is not int or value < 1:
+        raise ValueError("runtime.output_runs_keep_days must be a positive integer")
+    return value
 
 
 def cash_snapshot_ttl_sec(config: dict[str, Any]) -> int:

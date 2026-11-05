@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import sys
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,7 @@ from src.application.runtime_config_freshness import (
     ensure_runtime_config_identity,
 )
 from src.application.runtime_paths import resolve_runtime_root
+from src.application.output_runs_retention import tick_run_lifecycle
 from src.application.symbol_mutations import split_symbol_whitelist
 from src.application.system_alerts import report_system_failure, report_system_recovery
 from src.infrastructure.io_utils import read_json
@@ -396,7 +398,7 @@ def run_tick_cron(
 
     lock_file = Path(plan.lock_path)
     lock_file.parent.mkdir(parents=True, exist_ok=True)
-    with lock_file.open("a+", encoding="utf-8") as fh:
+    with lock_file.open("a+", encoding="utf-8") as fh, ExitStack() as lifecycle:
         try:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -410,6 +412,9 @@ def run_tick_cron(
             environ=env,
             user_home=Path.home() if environ is None else None,
         ).runtime_root
+        lifecycle.enter_context(tick_run_lifecycle(
+            runtime_root=base, config_path=_resolve_config_for_preflight(plan, cwd=cwd),
+        ))
         run_id = create_run_id()
         env.update(plan.trigger_env)
         env["OM_TICK_CRON_RUN_ID"] = run_id

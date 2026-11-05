@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1305 (`src`: 574, `domain`: 98, `scripts`: 16, `tests`: 613)
-- Internal import edges: 11356 total, 4037 production/script edges excluding tests
+- Python files scanned: 1310 (`src`: 576, `domain`: 98, `scripts`: 16, `tests`: 616)
+- Internal import edges: 11394 total, 4055 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -35,12 +35,12 @@ flowchart LR
   application -->|4| domain_services
   application -->|196| infrastructure
   application -->|2| om_strategy_core
-  application -->|58| storage
+  application -->|60| storage
   domain_services -->|6| domain
   domain_services -->|2| storage
   infrastructure -->|10| application
   infrastructure -->|8| domain
-  interfaces -->|196| application
+  interfaces -->|200| application
   interfaces -->|3| domain
   interfaces -->|6| infrastructure
   om_strategy_core -->|8| domain
@@ -50,11 +50,11 @@ flowchart LR
   scripts -->|2| interfaces
   scripts -->|1| tests
   storage -->|1| domain
-  tests -->|5557| application
+  tests -->|5574| application
   tests -->|671| domain
   tests -->|2| domain_services
   tests -->|372| infrastructure
-  tests -->|409| interfaces
+  tests -->|412| interfaces
   tests -->|9| om_strategy_core
   tests -->|31| scripts
   tests -->|77| storage
@@ -65,10 +65,10 @@ flowchart LR
 | from | to | imports |
 |---|---|---|
 | application | domain | 679 |
+| interfaces | application | 200 |
 | application | infrastructure | 196 |
-| interfaces | application | 196 |
 | scripts | application | 67 |
-| application | storage | 58 |
+| application | storage | 60 |
 | infrastructure | application | 10 |
 | infrastructure | domain | 8 |
 | om_strategy_core | domain | 8 |
@@ -88,9 +88,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 5557 |
+| tests | application | 5574 |
 | tests | domain | 671 |
-| tests | interfaces | 409 |
+| tests | interfaces | 412 |
 | tests | infrastructure | 372 |
 | tests | storage | 77 |
 | tests | scripts | 31 |
@@ -105,18 +105,18 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 |---|---|---|
 | src.application | domain.domain | 273 |
 | src.application.ledger | domain.domain | 183 |
-| src.interfaces | src.application | 158 |
+| src.interfaces | src.application | 162 |
 | src.application | src.infrastructure | 140 |
 | src.application.ledger | domain.domain.ledger | 76 |
 | src.application.trades | domain.domain | 67 |
 | scripts | src.application | 54 |
-| src.application | domain.storage | 45 |
+| src.application | domain.storage | 47 |
 | src.application.trades | src.application | 45 |
 | src.application | src.application.ledger | 40 |
 | src.application | domain.domain.engine | 33 |
+| src.application.research | src.application | 33 |
 | src.application.trades | src.application.ledger | 33 |
 | domain.domain | domain.domain.ledger | 33 |
-| src.application.research | src.application | 32 |
 | src.application.inbound | src.application | 28 |
 | src.application.ledger | src.application | 28 |
 | domain.domain.ledger | domain.domain | 27 |
@@ -189,7 +189,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 128 |
+| src.application.agent_tool_contracts | 130 |
 | src.application.payload_helpers | 98 |
 | domain.domain.symbol_identity | 92 |
 | src.application.ledger.api | 92 |
@@ -200,7 +200,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.infrastructure.io_utils | 56 |
 | domain.domain.option_position_identity | 56 |
 | domain.domain.ledger.position_fields | 53 |
-| src.application.runtime_paths | 44 |
+| src.application.runtime_paths | 45 |
 | domain.domain.trade_execution | 39 |
 | domain.domain.ledger.events | 34 |
 | src.infrastructure.futu_gateway | 32 |
@@ -214,14 +214,14 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.ledger.trade_attribution | 41 |
 | src.application.multi_tick.required_data_prefetch | 35 |
 | src.application.pipeline_watchlist | 33 |
+| src.interfaces.cli.main | 33 |
 | src.application.daily_decision_brief_service | 32 |
 | src.application.ledger.queries | 32 |
-| src.interfaces.cli.main | 32 |
 | src.interfaces.cli.option_positions | 31 |
 | src.application.agent_tools.positions | 30 |
 | src.application.agent_tools.runtime_status_impl | 30 |
+| src.application.multi_account_tick | 30 |
 | src.application.channels.wechat_clawbot.inbound | 29 |
-| src.application.multi_account_tick | 29 |
 | src.application.agent_tools.config | 26 |
 | src.application.ledger.writer_common | 26 |
 

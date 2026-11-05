@@ -121,7 +121,7 @@ def add_runtime_observability_commands(subparsers: Any) -> None:
     logs.add_argument("--profile-path", default=None)
     logs.add_argument("--run-id", default=None)
     logs.add_argument("--run-dir", default=None)
-    logs.add_argument("--kind", default="all", choices=("all", "audit", "tool", "tick", "service"))
+    logs.add_argument("--kind", default="all", choices=("all", "audit", "tool", "tick", "service", "maintenance"))
     logs.add_argument("--lines", type=int, default=50)
     logs.add_argument("--file", dest="log_file", default=None)
     logs.add_argument("--json", action="store_true", help="print JSON envelope")

@@ -276,6 +276,7 @@ OM · 决策简报 · [你的账户标签]
 | 期权现金流与绩效 | 查询期间期权净现金流及开仓批次现金结果；两种口径不能相加，也不能当作包含股票盈亏的账户总回报；见[绩效说明](docs/OPTION_PERFORMANCE_DESIGN.md) |
 | 指派压力测试 | 模拟所选账户仅卖出 Put、仅卖出 Call 或全部未平仓卖出期权被指派（默认全部），查看资产、资金覆盖和潜在负债；通过 `om portfolio assignment-scenario --scenario short_put\|short_call\|all_short` 选择假设；不执行实际交易，也不修改账本 |
 | 可选 Holdings 来源 | 为全局持仓风险补充同机 Portfolio Management 中的非富途资产；默认关闭，不替代富途账户数据；见[配置指南](CONFIGURATION_GUIDE.md) |
+| 运行目录清理 | Tick 收尾自动保留最近 7 天；`om maintenance prune-runs` 默认预览，`--confirm` 才手动删除过期目录；见[运行手册](RUNBOOK.md#output_runs-保留与手动清理) |
 | 离线研究与归档 | 收集证据、复核已有样本；写入归档需显式授权；见[Agent Handbook](docs/AGENT_WIKI.md) |
 
 离线研究的 `om_strategy_core.evaluation` 提供估值、市场/FX 资格和规范现金基础。summarize/compare 的 v1/v2 接口及指标实现已从当前源码移除；回测收益、回撤、现金流稳定性、模拟接股风险及策略比较由 OptionBench 的 csp_metrics 模块维护，OM 不反向依赖 OB。缺资料仍按指标报告不足；这不是完整车轮或线上交易功能，详见 [API Index](docs/API_INDEX.md)。

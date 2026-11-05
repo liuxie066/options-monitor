@@ -25,6 +25,7 @@ from src.interfaces.cli.channel_ops import add_channel_commands, handle_channel_
 from src.interfaces.cli.command_environment import command_environment
 from src.interfaces.cli.feature_ops import add_holdings_commands, run_feature_configure
 from src.interfaces.cli.home import command_guide, interactive_home, render_credential_readiness, render_settings_doctor, render_setup_check
+from src.interfaces.cli.maintenance_ops import add_maintenance_commands, handle_maintenance_command
 from src.interfaces.cli.inbound_ops import (
     add_inbound_commands,
     build_feishu_ws_settings,
@@ -138,6 +139,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_runtime_observability_commands(sub)
 
     add_research_commands(sub)
+    add_maintenance_commands(sub)
 
     add_operator_commands(sub)
 
@@ -222,6 +224,8 @@ def _main(argv: list[str] | None = None) -> int:
         actual_argv[0] = "bot"
     args = parse_args(actual_argv)
     try:
+        if args.command == "maintenance":
+            return handle_maintenance_command(args, repo_root=repo_base())
         if args.command in {"healthcheck", "doctor", "support", "status", "runs", "logs"}:
             return handle_observability_command(
                 args,

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.output_runs_retention import run_reader_lease
 from src.application.candidate_evidence_history import (
     NOT_SCANNED,
     summarize_run_candidate_evidence,
@@ -237,6 +238,7 @@ def archive_inventory(
     }
 
 
+@run_reader_lease(lambda *, source_root=None, **_kwargs: Path(source_root).expanduser().resolve() if source_root else None)
 def archive_pull(
     *,
     repo_root: str | Path,

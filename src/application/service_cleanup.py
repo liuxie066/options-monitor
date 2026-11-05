@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.file_locks import single_instance_lock
+from src.application.output_runs_retention import prune_output_runs, parse_run_timestamp
 from src.application.version_check import compare_versions
 
 
@@ -183,68 +184,25 @@ def _output_run_cleanup_plan(
     now: datetime,
 ) -> dict[str, Any]:
     runs_root = runtime_root / "output_runs"
-    keep_days_int = max(0, int(keep_days))
-    keep_count_int = max(1, int(keep_count))
-    cutoff = now - timedelta(days=keep_days_int)
-    base = {
-        "enabled": True,
-        "root": str(runs_root),
-        "root_exists": runs_root.exists() and runs_root.is_dir(),
-        "keep_days": keep_days_int,
-        "keep_count": keep_count_int,
-        "cutoff_utc": cutoff.isoformat(),
-        "scanned_count": 0,
-        "protected_runs": [],
-        "delete_runs": [],
-        "estimated_bytes": 0,
-    }
-    if not runs_root.exists() or not runs_root.is_dir():
-        return base
-
-    run_dirs = sorted(
-        [item.resolve() for item in runs_root.iterdir() if item.is_dir() and not item.is_symlink()],
-        key=lambda item: (_mtime_utc(item), item.name),
-        reverse=True,
+    count = max(1, int(keep_count))
+    valid = sorted(
+        [path for path in runs_root.iterdir() if not path.is_symlink() and path.is_dir() and parse_run_timestamp(path.name)]
+        if runs_root.exists() else [], key=lambda path: path.name, reverse=True,
     )
-    latest_protected = run_dirs[:keep_count_int]
-    protected: dict[Path, str] = {path: "latest_keep_count" for path in latest_protected}
-    pointer = _latest_run_pointer(runtime_root, runs_root)
-    if pointer is not None:
-        protected[pointer.resolve()] = "last_run_dir_pointer"
-    delete_runs: list[dict[str, Any]] = []
-    protected_runs: list[dict[str, Any]] = []
-    for run_dir in run_dirs:
-        if run_dir in protected:
-            protected_runs.append(
-                _set_result_item(kind="output_run", path=run_dir, root=runs_root, reason=protected[run_dir])
-            )
-            continue
-        try:
-            mtime = _mtime_utc(run_dir)
-        except OSError:
-            protected_runs.append(
-                _set_result_item(kind="output_run", path=run_dir, root=runs_root, reason="mtime_unavailable")
-            )
-            continue
-        if mtime >= cutoff:
-            protected_runs.append(
-                _set_result_item(kind="output_run", path=run_dir, root=runs_root, reason="within_keep_days")
-            )
-            continue
-        if run_dir.parent != runs_root.resolve() or not _safe_child(run_dir, parent=runs_root):
-            protected_runs.append(
-                _set_result_item(kind="output_run", path=run_dir, root=runs_root, reason="unsafe_path")
-            )
-            continue
-        delete_runs.append(_set_result_item(kind="output_run", path=run_dir, root=runs_root, reason="expired"))
-
-    estimated = sum(int(item.get("estimated_bytes") or 0) for item in delete_runs)
+    latest = {path.name for path in valid[:count]}
+    preview = prune_output_runs(runtime_root=runtime_root, keep_days=keep_days, now=now,
+                                candidate_ids={path.name for path in valid} - latest)
+    protected = [{**row, "reason": "latest_keep_count" if row["reason"] == "outside_requested_set" else row["reason"]}
+                 for row in preview["skipped"]]
+    candidates = [{**row, "kind": "output_run", "estimated_bytes": row["size_bytes"], "mtime_utc": None}
+                  for row in preview["candidates"]]
     return {
-        **base,
-        "scanned_count": len(run_dirs),
-        "protected_runs": protected_runs,
-        "delete_runs": delete_runs,
-        "estimated_bytes": estimated,
+        "enabled": True, "root": str(runs_root), "root_exists": runs_root.is_dir(),
+        "keep_days": keep_days, "keep_count": count, "cutoff_utc": preview["cutoff_utc"],
+        "scanned_count": len(preview["candidates"]) + len(preview["skipped"]),
+        "protected_runs": protected, "delete_runs": candidates,
+        "estimated_bytes": sum(item["estimated_bytes"] for item in candidates),
+        "ok": preview["ok"], "errors": preview["errors"],
     }
 
 
@@ -637,35 +595,18 @@ def _service_cleanup_under_transition_lock(
                     )
                     output_runs_cleanup["plan_sha256"] = current_plan_sha256
                     raise _OutputRunsPlanChanged
-                for item in output_runs_cleanup.get("delete_runs") or []:
-                    path = Path(str(item.get("path") or ""))
-                    runs_root = Path(str(output_runs_cleanup.get("root") or ""))
-                    if not path.exists():
-                        operations.append(
-                            {
-                                "path": str(path),
-                                "ok": False,
-                                "skipped": True,
-                                "reason": "missing",
-                                "kind": "output_run",
-                            }
-                        )
-                        continue
-                    if path.parent != runs_root.resolve() or not _safe_child(path, parent=runs_root):
-                        operations.append(
-                            {
-                                "path": str(path),
-                                "ok": False,
-                                "skipped": True,
-                                "reason": "unsafe_output_run_path",
-                                "kind": "output_run",
-                            }
-                        )
-                        continue
-                    operation = _delete_path_result(path, kind="output_run")
-                    operations.append(operation)
-                    if operation.get("ok"):
-                        deleted_paths.append(str(path))
+                planned_ids = {item["run_id"] for item in output_runs_cleanup.get("delete_runs") or []}
+                receipt = prune_output_runs(
+                    runtime_root=runtime_cleanup_root, keep_days=output_runs_keep_days,
+                    now=runtime_now, confirm=True, trigger="service_cleanup", candidate_ids=planned_ids,
+                )
+                for item in receipt["deleted"]:
+                    operations.append({**item, "kind": "output_run", "ok": True, "freed_bytes": item["size_bytes"]})
+                    deleted_paths.append(item["path"])
+                operations.extend({**item, "kind": "output_run", "ok": False} for item in receipt["errors"])
+                operations.extend({**item, "kind": "output_run", "ok": True, "skipped": True}
+                                  for item in receipt["skipped"] if item.get("reason") in {"runs_locked", "run_locked"})
+                output_runs_cleanup["receipt"] = receipt
             except _OutputRunsPlanChanged:
                 pass
             except OSError as exc:

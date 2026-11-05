@@ -16,11 +16,14 @@ from src.application.runtime_cli_format import resolve_runtime_cli_path as _reso
 from src.application.runtime_cli_format import selected_run_dir as _selected_run_dir
 from src.application.runtime_cli_format import yes_no as _yes_no
 from src.application.runtime_paths import resolve_runtime_root
+from src.application.output_runs_retention import run_reader_lease
 
 
 SCHEMA_VERSION = "runtime_runs.v1"
 
 
+@run_reader_lease(lambda *, repo_root, runs_root=None, profile_path=None, **_kwargs:
+                  resolve_runtime_runs_root(base=repo_root.resolve(), runs_root=runs_root, profile_path=profile_path).parent)
 def collect_runtime_runs(
     *,
     repo_root: Path,

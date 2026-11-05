@@ -111,6 +111,7 @@
       "top_n_alerts": 3
     },
     "runtime": {
+      "output_runs_keep_days": 7,
       "symbol_timeout_sec": 120,
       "portfolio_timeout_sec": 60,
       "pipeline_timeout_sec": 600,

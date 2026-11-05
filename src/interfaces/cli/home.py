@@ -37,6 +37,7 @@ def command_guide() -> str:
 高级与完整命令
   om config --help                   构建、校验和解释配置；脚本化初始化
   om settings --help                 查看设置来源
+  om maintenance prune-runs           预览过期 run 清理；--confirm 执行，--keep-days 覆盖保留天数
   om help all                        查看全部顶层命令
 
 结构化工具给外部 Agent/脚本使用：om-agent spec；om-agent run --tool <name> --input-json '<json>'。

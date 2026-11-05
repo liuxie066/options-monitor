@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -15,6 +16,7 @@ from src.infrastructure.io_utils import (
 from src.infrastructure.run_log import RunLogger
 from src.application.account_config import build_account_portfolio_source_plan, resolve_configured_accounts
 from src.application.config_sections import resolve_watchlist_config
+from src.application.output_runs_retention import tick_run_lifecycle
 from src.application.symbol_mutations import split_symbol_whitelist
 from src.application.config_validator import (
     validate_config,
@@ -246,6 +248,12 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         ap.error(str(exc))
 
+    with ExitStack() as lifecycle:
+        return _run_tick(args, lifecycle=lifecycle)
+
+
+def _run_tick(args: argparse.Namespace, *, lifecycle: ExitStack) -> int:
+    symbols_arg = ",".join(str(item) for item in args.symbols) if args.symbols is not None else None
     set_debug(bool(getattr(args, 'debug', False)))
 
     no_send = bool(getattr(args, 'no_send', False))
@@ -336,6 +344,10 @@ def main(argv: list[str] | None = None) -> int:
         trigger_context=trigger_context,
     )
     runlog = RunLogger(base)
+    lifecycle.enter_context(tick_run_lifecycle(
+        runtime_root=base, config_path=cfg_path,
+        automatic=not bool(os.environ.get("OM_TICK_CRON_RUN_ID")),
+    ))
     global _CURRENT_RUN_ID
     _CURRENT_RUN_ID = runlog.run_id  # pyright: ignore[reportConstantRedefinition]
     run_id = runlog.run_id

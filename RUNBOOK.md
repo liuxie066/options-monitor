@@ -30,6 +30,31 @@ trade_events -> projection -> position_lots
 
 需要修账时先看 `docs/OPTION_POSITIONS_REPAIR.md`。如果旧环境只剩 legacy SQLite / Feishu 历史表，先离线整理为 canonical `trade_events`，再进入 `rebuild` / `verify-projection`；不要把旧表重新接成当前运行时来源。
 
+## output_runs 保留与手动清理
+
+运行目录默认保留 7 天，可通过 `runtime.output_runs_keep_days` 配置，详见[配置指南](CONFIGURATION_GUIDE.md#运行目录保留策略)。自动清理在整次 Tick 收尾后执行，不新增定时器：正式 `tick-cron` 等子进程及回执处理结束，手动 Tick 等账户线程、通知和后置 sidecar 结束，再释放运行锁并尝试清理。另一运行或读取仍持锁时跳过本次自动清理；失败记录审计或本地错误，不改变 Tick 结果。
+
+先预览删除目录、预估字节数和跳过原因：
+
+```bash
+om maintenance prune-runs --runtime-root /var/lib/options-monitor --dry-run
+# 省略 --dry-run 仍然只是预览；覆盖天数只作用于本次
+om maintenance prune-runs --runtime-root /var/lib/options-monitor --keep-days 7
+```
+
+核对目标实例与候选目录后，显式确认才执行：
+
+```bash
+om maintenance prune-runs --runtime-root /var/lib/options-monitor --keep-days 7 --confirm
+om logs --runs-root /var/lib/options-monitor/output_runs --kind maintenance --lines 50 --json
+```
+
+预览不创建审计或锁文件，不删除目录。执行时会重新检查运行锁和实际路径引用；忙碌或受引用的目录会跳过并列出原因。仅删除 `output_runs` 下合法时间戳命名且已过期的直接子目录，非法名字、符号链接和非目录项会跳过；不会进入 `output_shared/state`、账本 `data`、`configs` 或 `upgrade-backups` 删除文件。目录中的符号链接仅随目录移除，不跟随链接删除目标。
+
+执行回执中的 `deleted`、`skipped`、`errors`、`freed_bytes`（已删文件逻辑字节）和 `freed_allocated_bytes`（无其他硬链接文件的已分配字节）提供本次结果。实际文件系统可用空间还会受文件系统压缩、快照及已打开文件等影响。记录复用 `output_shared/state/audit_events.jsonl` 的轮转审计，事件类型为 `output_runs_retention`；`om logs --kind maintenance` 读取该共享审计。删除前先落审计意图，成功后记录目录与空间统计；无法写审计意图时不删除。异常时返回非零并保留错误信息，不把部分失败报成清理成功。
+
+旧的 `om service cleanup --output-runs` 也通过同一清理 owner 校验目录时间戳、锁和引用；它仍保留自己的显式 `--output-runs-keep-days` / `--output-runs-keep-count` 参数和预览摘要校验。归档副本、历史审计中的 run ID 不会仅凭来源 ID 永久保留原目录；需要长期调查的历史 run，应先按研究归档流程保存独立副本。
+
 ## 日常运行（prod）
 
 ```bash

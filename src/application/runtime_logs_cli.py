@@ -15,6 +15,7 @@ from src.application.runtime_cli_format import resolve_runtime_cli_path as _reso
 from src.application.runtime_cli_format import yes_no as _yes_no
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.runtime_runs_cli import _load_profile, resolve_runtime_runs_root
+from src.application.output_runs_retention import run_reader_lease
 
 
 SCHEMA_VERSION = "runtime_logs.v1"
@@ -28,6 +29,8 @@ RUN_LOG_FILES = {
 }
 
 
+@run_reader_lease(lambda *, repo_root, runs_root=None, profile_path=None, **_kwargs:
+                  resolve_runtime_runs_root(base=repo_root.resolve(), runs_root=runs_root, profile_path=profile_path).parent)
 def collect_runtime_logs(
     *,
     repo_root: Path,
@@ -57,12 +60,16 @@ def collect_runtime_logs(
         files = [explicit_file]
     elif kind == "service":
         files = _service_log_files(service_logs_root)
+    elif kind == "maintenance":
+        files = [root.parent / "output_shared" / "state" / "audit_events.jsonl"]
     else:
         if selected_run is None and not requested_run:
             selected_run = _latest_run_dir(root)
         files = _run_log_files(selected_run, kind=kind) if selected_run is not None else []
 
     allowed_roots = [root, service_logs_root]
+    if kind == "maintenance":
+        allowed_roots.append(root.parent / "output_shared" / "state")
     if log_file and allow_explicit_file_outside_roots:
         allowed_roots.append(files[0].parent)
     entries = [

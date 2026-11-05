@@ -25,6 +25,7 @@ from src.application.experience_candidate_snapshot import (
     EXPERIENCE_CANDIDATE_MANIFEST_FILE,
 )
 from src.application.runtime_paths import RuntimeRootResolution
+from src.application.output_runs_retention import run_reader_lease
 
 _MAX_BYTES = 8 * 1024 * 1024
 _MANIFESTS = (
@@ -66,6 +67,7 @@ def _scope(root: RuntimeRootResolution, accounts: list[str] | tuple[str, ...],
     return [account] if account is not None else allowed
 
 
+@run_reader_lease(lambda *, runtime_root, **_kwargs: runtime_root.runtime_root)
 def load_run_bundle(
     *, runtime_root: RuntimeRootResolution, run_id: str, account: str, market: str,
     authorized_accounts: list[str] | tuple[str, ...], deadline_monotonic: float | None = None,
@@ -194,6 +196,7 @@ def load_run_bundle(
     }
 
 
+@run_reader_lease(lambda *, runtime_root, **_kwargs: runtime_root.runtime_root)
 def load_run_metrics(
     *, runtime_root: RuntimeRootResolution, run_id: str, account: str, market: str,
     authorized_accounts: list[str] | tuple[str, ...], deadline_monotonic: float | None = None,
@@ -270,6 +273,7 @@ def load_run_record(**kwargs: Any) -> dict[str, Any]:
 
 
 
+@run_reader_lease(lambda *, runtime_root, **_kwargs: runtime_root.runtime_root)
 def load_run_diagnostics(
     *, runtime_root: RuntimeRootResolution, scope: dict[str, Any], account: str, run_id: str,
     limit: int = 20, cursor: str | None = None,
@@ -466,6 +470,7 @@ def load_run_diagnostics(
     _check(deadline_monotonic, cancelled)
     return result
 
+@run_reader_lease(lambda *, runtime_root, **_kwargs: runtime_root.runtime_root)
 def discover_runs(
     *, runtime_root: RuntimeRootResolution, market: str,
     authorized_accounts: list[str] | tuple[str, ...], account: str | None = None,
@@ -621,6 +626,7 @@ def _project_run_files(
     return result
 
 
+@run_reader_lease(lambda runtime_root, **_kwargs: runtime_root.runtime_root)
 def project_run_files(runtime_root: RuntimeRootResolution, **kwargs: Any) -> dict[str, Any]:
     """Pin the trusted root and share one transient retry across the logical query."""
     from src.application.agent_tools.project_reader import _directory, reader_query_context

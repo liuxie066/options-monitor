@@ -161,7 +161,7 @@ def test_cleanup_preserves_plan_bytes_and_safe_targets(
     current.symlink_to(releases / '1.2.0')
     runtime = tmp_path / 'runtime'
     runs = runtime / 'output_runs'
-    for name, timestamp in [('old', 1_600_000_000), ('latest', 1_700_000_000)]:
+    for name, timestamp in [('20200913T122640Z', 1_600_000_000), ('20231114T221320Z', 1_700_000_000)]:
         run = runs / name
         run.mkdir(parents=True)
         (run / 'payload').write_bytes(b'x' * 30)
@@ -176,7 +176,7 @@ def test_cleanup_preserves_plan_bytes_and_safe_targets(
                 cleanup_runtime_logs=True, now=datetime(2026, 1, 1, tzinfo=timezone.utc))
     preview = cleanup.service_cleanup(**args)
     if change_after_preview:
-        (runs / 'old' / 'payload').write_bytes(b'changed after preview')
+        (runs / '20200913T122640Z' / 'payload').write_bytes(b'changed after preview')
     out = cleanup.service_cleanup(**args, confirm=confirm,
                                   expected_output_runs_plan_sha256=preview['output_runs_plan_sha256'])
 
@@ -187,7 +187,7 @@ def test_cleanup_preserves_plan_bytes_and_safe_targets(
         assert out['operations'] == []
         assert out['deleted_paths'] == []
         assert (releases / '1.0.0').is_dir()
-        assert (runs / 'old' / 'payload').read_bytes() == b'changed after preview'
+        assert (runs / '20200913T122640Z' / 'payload').read_bytes() == b'changed after preview'
         assert (logs / 'old.log').is_file()
         return
 
@@ -196,11 +196,11 @@ def test_cleanup_preserves_plan_bytes_and_safe_targets(
     assert out['freed_bytes'] == (95 + len(_PYTHON_RUNTIME_MARKER) if confirm else 0)
     assert out['output_runs_plan_sha256'] == preview['output_runs_plan_sha256']
     assert (releases / '1.0.0').exists() is not confirm
-    assert (runs / 'old').exists() is not confirm
+    assert (runs / '20200913T122640Z').exists() is not confirm
     assert (logs / 'old.log').exists() is not confirm
     assert (releases / '1.1.0').is_dir()
     assert current.resolve() == releases / '1.2.0'
-    assert (runs / 'latest').is_dir()
+    assert (runs / '20231114T221320Z').is_dir()
     assert (logs / 'audit.jsonl').read_bytes() == b'protected'
 
 
