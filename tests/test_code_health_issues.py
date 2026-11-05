@@ -156,6 +156,32 @@ def test_existing_ownership_blocks_issue_repair_admission(tmp_path, owner):
     assert json.loads((tmp_path / "issue-state.json").read_text())["issues"]["1"]["outcome"] == "in_progress"
 
 
+def test_issue_normalizes_absolute_work_evidence_in_finding_and_repair_task(tmp_path):
+    payload = response(outcome="confirmed")
+    payload["reviews"][0]["finding"]["evidence_log"] = str(tmp_path / "run" / "work" / "probe.log")
+    assert process(tmp_path, payload)["status"] == "complete"
+    persisted = json.loads((tmp_path / "run" / "result.json").read_text())["reviews"][0]["finding"]
+    task_path, = (tmp_path / "repairs").glob("*/task.json")
+    task = json.loads(task_path.read_text())
+    assert persisted["evidence_log"] == task["finding"]["evidence_log"] == "probe.log"
+    assert payload["reviews"][0]["finding"]["evidence_log"] == "probe.log"
+    assert task["finding"]["owner_path"] == "example.py"
+    assert task["finding"]["fix_scope"] == ["example.py", "tests/test_example.py"]
+    state = json.loads((tmp_path / "issue-state.json").read_text())
+    assert state["issues"]["1"]["outcome"] == "confirmed"
+
+
+def test_issue_rejects_absolute_evidence_outside_work_before_persistence(tmp_path):
+    outside = tmp_path / "probe.log"
+    outside.write_text("out of scope evidence")
+    payload = response(outcome="confirmed")
+    payload["reviews"][0]["finding"]["evidence_log"] = str(outside)
+    with pytest.raises(ValueError, match="unsafe"):
+        process(tmp_path, payload)
+    assert not (tmp_path / "issue-state.json").exists()
+    assert not (tmp_path / "repairs").exists()
+
+
 def test_issue_report_cannot_assert_confirmation_without_evidence(tmp_path):
     run = tmp_path / "run/work"
     run.mkdir(parents=True)
@@ -262,7 +288,7 @@ def test_budget_and_model_timeout_preserve_pending_issue(tmp_path):
 
 
 @pytest.mark.parametrize("has_commit", [False, True])
-@pytest.mark.parametrize("mode", ["run", "dry_run", "smoke", "review_timeout", "intake_timeout", "budget_exhausted", "archive_budget"])
+@pytest.mark.parametrize("mode", ["run", "dry_run", "smoke", "review_timeout", "intake_timeout", "budget_exhausted", "archive_budget", "reserved_budget"])
 def test_daily_entry_processes_issues_independently_with_real_git_and_model_adapter(tmp_path, monkeypatch, has_commit, mode):
     source = tmp_path / "source"
     source.mkdir()
@@ -312,10 +338,14 @@ output.write_text(json.dumps(payload))
     agent.chmod(0o700)
     (root / "config.json").write_text(json.dumps({
         "git": "git", "gh": "github-client", "codex": str(agent), "repository": "fixture/repo",
-        "repository_url": str(source), "max_units": 3, "timeout_seconds": 180,
+        "repository_url": str(source), "max_units": 3, "timeout_seconds": 180, "issue_timeout_seconds": 30,
         "issues_enabled": True, "repair_enabled": True, "model": "fixture",
         "model_base_url": "http://fixture.invalid", "model_catalog": str(root / "catalog.json"),
     }))
+    if mode == "reserved_budget":
+        config = json.loads((root / "config.json").read_text())
+        config["issue_timeout_seconds"] = 180
+        (root / "config.json").write_text(json.dumps(config))
     original = review.command
     calls, forbidden, repairs = [], [], []
     clock = [0]
@@ -374,14 +404,19 @@ output.write_text(json.dumps(payload))
         monkeypatch.setattr(review, "command", timeout_intake)
     receipt = review.run_once(root, **({mode: True} if mode in {"dry_run", "smoke"} else {}))
     assert not forbidden
-    assert len(repairs) == (1 if mode in {"run", "review_timeout", "intake_timeout"} else 0)
+    assert len(repairs) == (1 if mode in {"run", "review_timeout", "intake_timeout", "reserved_budget"} else 0)
     actual = json.loads((root / "state.json").read_text())
     assert actual["cursor"] == (target if mode in {"run", "intake_timeout"} and has_commit else base)
-    if mode in {"run", "review_timeout"}:
+    if mode in {"run", "review_timeout", "reserved_budget"}:
         assert receipt["issues"]["reviewed"] == [1]
         saved = json.loads((root / "issue-state.json").read_text())["issues"]["1"]
         assert saved["outcome"] == "not_reproduced" and saved["target"] == target
         assert not (root / "repairs").exists()
+        if mode == "reserved_budget":
+            if has_commit:
+                assert receipt["status"] == "pending" and receipt["completed_commits"] == []
+                assert "later stages retain their budget" in receipt["review_error"]
+            assert not (Path(receipt["run_dir"]) / "agent.jsonl").exists()
         repeated = review.run_once(root)
         assert repeated["issues"]["status"] == "no_eligible_issues"
         if mode == "review_timeout" and has_commit:

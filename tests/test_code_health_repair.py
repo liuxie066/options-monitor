@@ -51,6 +51,73 @@ def test_finding_paths_cannot_escape_the_scoped_task(bad_path):
         review.validate_finding(data, [A])
 
 
+@pytest.mark.parametrize("absolute_evidence", [False, True])
+def test_commit_findings_normalize_work_evidence_before_persistence(tmp_path, absolute_evidence):
+    stage = tmp_path / "Application Support" / "run"
+    work = stage / "work"
+    (work / "logs").mkdir(parents=True)
+    evidence = work / "logs" / "probe.log"
+    evidence.write_text("assert add(2, 1) == 3; actual=1\n")
+    data = finding()
+    data["evidence_log"] = str(evidence) if absolute_evidence else "logs/probe.log"
+    payload = {"outcome": "complete", "completed_commits": [A], "report_markdown": "evidence report " * 30,
+               "verification_gaps": [], "confirmed_findings": [data]}
+    assert review.validate_result(payload, [A], work=work) == [A]
+    task_ids = repair.persist_findings(tmp_path, stage, payload, A)
+    task = json.loads((tmp_path / "repairs" / task_ids[0] / "task.json").read_text())
+    assert data["evidence_log"] == task["finding"]["evidence_log"] == "logs/probe.log"
+    assert task["finding"]["owner_path"] == "src/example.py"
+    assert task["finding"]["fix_scope"] == ["src/example.py", "tests/test_example.py"]
+
+
+@pytest.mark.parametrize("kind", ["outside", "sibling_prefix", "parent", "git", "escape_symlink", "git_symlink"])
+def test_absolute_evidence_rejects_unsafe_paths_even_with_work_context(tmp_path, kind):
+    work = tmp_path / "work"
+    work.mkdir()
+    if kind == "outside":
+        evidence = tmp_path / "outside.log"
+    elif kind == "sibling_prefix":
+        evidence = tmp_path / "work-other" / "probe.log"
+    elif kind == "parent":
+        evidence = work / "logs" / ".." / "probe.log"
+    elif kind == "git":
+        evidence = work / ".git" / "probe.log"
+    elif kind == "escape_symlink":
+        (work / "logs").symlink_to(tmp_path, target_is_directory=True)
+        evidence = work / "logs" / "outside.log"
+    else:
+        (work / ".git").mkdir()
+        (work / "logs").symlink_to(work / ".git", target_is_directory=True)
+        evidence = work / "logs" / "probe.log"
+    data = finding()
+    data["evidence_log"] = str(evidence)
+    with pytest.raises(ValueError, match="unsafe"):
+        review.validate_finding(data, [A], work=work)
+    assert data["evidence_log"] == str(evidence)
+
+
+@pytest.mark.parametrize("field", ["owner_path", "fix_scope"])
+def test_work_context_does_not_allow_absolute_owner_or_scope(tmp_path, field):
+    data = finding()
+    absolute = str(tmp_path / "example.py")
+    data[field] = [absolute] if field == "fix_scope" else absolute
+    with pytest.raises(ValueError, match="unsafe|relative"):
+        review.validate_finding(data, [A], work=tmp_path)
+
+
+def test_absolute_evidence_resolves_work_and_file_symlinks(tmp_path):
+    work = tmp_path / "work"
+    (work / "logs").mkdir(parents=True)
+    (work / "logs" / "probe.log").write_text("persisted evidence")
+    (work / "alias.log").symlink_to(work / "logs" / "probe.log")
+    alias = tmp_path / "work-alias"
+    alias.symlink_to(work, target_is_directory=True)
+    data = finding()
+    data["evidence_log"] = str(alias / "alias.log")
+    review.validate_finding(data, [A], work=alias)
+    assert data["evidence_log"] == "logs/probe.log"
+
+
 def test_repair_rejects_changed_scope_and_regression_options():
     with pytest.raises(ValueError, match="outside"):
         repair.check_scope(["VERSION"], finding()["fix_scope"])
