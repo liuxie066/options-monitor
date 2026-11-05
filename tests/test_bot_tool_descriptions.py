@@ -45,26 +45,27 @@ def _constraint_fingerprint(descriptions) -> str:
 
 
 def test_catalog_and_scene_preserve_all_baseline_input_constraints() -> None:
-    # Captured from 2ff8514b3 before compression. Only schema description
-    # annotations are excluded; names, defaults and every validation keyword remain.
+    # Captured from 6d2b673ce before compression, including position_advice_read.
+    # Only schema description annotations are excluded; names, defaults and
+    # every validation keyword remain.
     catalog = tools.tool_descriptions(list(AGENT_TOOL_REGISTRY))
-    assert _constraint_fingerprint(catalog) == "1ec25d5a3fed2a740d0e50a6e73f48930dd45c7a6586e40b9e77d2981beb5e97"
+    assert _constraint_fingerprint(catalog) == "b49e8eec36523646d5dec10b5cb60848ed39ffc4372a894f180a3c11f08eb19b"
     contract = ExecutionContract("test", "test", "om_chat", "eval", {"user_message": "status"}, {}, {})
     descriptions = build_scene_manifest(contract, "test").tool_descriptions
     wire = [{key: item[key] for key in ("name", "description", "input_schema")} for item in descriptions]
-    assert _constraint_fingerprint(wire) == "6c78ca9f5e16d4c09317cfcc30ae558bf9e437d68f121ca27b6c97b028bf6ffb"
+    assert _constraint_fingerprint(wire) == "08f32b65acbcedfde56ec40562f05f83c4fa9b3f5605b62e981f9b2ae0f196a2"
 
 
 def test_catalog_and_actual_scene_stay_within_measured_definition_budgets() -> None:
     catalog = tools.tool_descriptions(list(AGENT_TOOL_REGISTRY))
     assert len(catalog) == len(tools.available_read_tools())
     assert {item["name"] for item in catalog} == set(tools.available_read_tools())
-    # Baseline 2ff8514b3: 78,764 bytes for the catalog, 16,969 for the Scene.
+    # Baseline 6d2b673ce: 81,360 bytes for the catalog, 17,750 for the Scene.
     assert _serialized_bytes(catalog) < 50_000
     contract = ExecutionContract("test", "test", "om_chat", "eval", {"user_message": "status"}, {}, {})
     manifest = build_scene_manifest(contract, "test")
     wire = [{key: item[key] for key in ("name", "description", "input_schema")} for item in manifest.tool_descriptions]
-    assert _serialized_bytes(wire) < 14_000
+    assert _serialized_bytes(wire) < 14_500
 
 
 @pytest.mark.parametrize("name", tools.available_read_tools())

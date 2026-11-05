@@ -1,6 +1,31 @@
 # Bot 工具定义体量归因与精简
 
-## 口径与结果
+## Rebase 到 #1008 后的当前结果
+
+PR #1010 已 rebase 到 `origin/main` 的 `6d2b673cee94d164141fd8f8ad3152466b9de31b`，包含 #1008。以下为当前证据；后面的原始记录保留初始基准。三个精简实现文件 `bot/tools.py`、`agent_tools/candidate.py`、`agent_tools/project.py` 与 rebase 前 `b50269e16` 逐字一致；冲突处理合并了 `.gitattributes` 两侧规则，并重新生成依赖图。
+
+最新 main 新增的 `position_advice_read` 完整保留，因此当前目录为 30 个工具。以 `6d2b673ce` 未精简定义为基线，按下文相同 UTF-8 JSON 口径重测：**81,360 → 49,995 字节，减少 38.55%**。实际 Scene 仍为 10 个工具，三个模型字段 **17,750 → 14,439 字节，减少 18.65%**。全注册表的三个模型字段为 48,558 → 39,494。23 条保留示例全部通过 schema 校验。
+
+| 字段 | 精简前字节 | 占比 | 精简后字节 | 占比 |
+| --- | ---: | ---: | ---: | ---: |
+| name | 902 | 1.11% | 902 | 1.80% |
+| description | 25,794 | 31.70% | 17,076 | 34.16% |
+| input_schema | 21,802 | 26.80% | 21,456 | 42.92% |
+| default_input | 905 | 1.11% | 905 | 1.81% |
+| examples | 2,946 | 3.62% | 1,694 | 3.39% |
+| capabilities | 1,894 | 2.33% | 1,543 | 3.09% |
+| output_contract | 27,057 | 33.26% | 6,359 | 12.72% |
+| 结构开销 | 60 | 0.07% | 60 | 0.12% |
+
+逐项对照最新 main 的 30 个工具及 rebase 前的 29 个工具，工具名、参数名、类型、枚举、必填、范围、嵌套结构和默认值均保留；未因精简改变调用语义。基线指纹仅更新为 #1008 后的目录，Scene 预算按上游既有说明保持 14,500 字节。任务独立环境刷新 #1008 更新的 position-advice 插件后，精确收集 1,476 个唯一 node ID，测试结果 **1476 passed（49.66s）**，没有跳过或删减用例。
+
+```sh
+env -u PYTHONPATH OM_PYTHON="$PWD/.venv/bin/python" .venv/bin/python -m pytest -q tests/test_bot*.py tests/bot_eval tests/test_*agent*.py tests/test_*tool*.py tests/test_option_candidates*.py tests/test_runtime_scoped_diagnostics.py tests/test_position_advice_read.py tests/test_covered_call_roll*.py tests/test_short_put_roll_cli.py tests/test_tick_position*.py
+```
+
+Ruff、依赖图（731 个生产模块、0 环）、文档/运行配置/敏感产物守卫、固定基准 `6d2b673ce` 的公开面检查通过。现有公开 CLI fixture 回放成功。此次使用 `--force-with-lease` 更新同一分支，不合并 PR；真实模型准确率仍存在下文列出的评测证据缺口。
+
+## 原始口径与结果
 
 基准 `2ff8514b3`，调用 `tool_descriptions(list(AGENT_TOOL_REGISTRY))`。统一用 `len(json.dumps(value, ensure_ascii=False).encode("utf-8"))`，保留默认分隔符。共 29 个 Bot 可用只读工具，78,764 → 48,174 字节，减少 30,590 字节（38.84%）。用户给出的 78,618 字节未在此版本复现。ASCII 转义口径为 80,090 → 49,320，紧凑分隔符口径为 75,449 → 45,958；不把更换序列化口径算作收益，也不把字节数当作实测模型 token 数。
 
