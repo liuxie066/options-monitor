@@ -1,0 +1,295 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.16",
+  "base": {
+    "tag": "v4.6.15",
+    "commit": "2b0e8223d49b3d51bbb9b0261c35d626b07a9d36"
+  },
+  "reviewed_head": "4604d370911e5bc0fa26cc4e63f9e6369308ebfb",
+  "commits": [
+    {
+      "sha": "f21a13cdceb2241b8a9801e3f5d31058147ea3f1",
+      "subject": "feat(candidates): expose annualized returns in symbol queries"
+    },
+    {
+      "sha": "f0f163bc47800c5426a3899f9f20ee6c43ee9eb1",
+      "subject": "feat(candidates): expose annualized returns in symbol queries (#1006)"
+    },
+    {
+      "sha": "837dd4754cc28d6a4cc53ffc9d87bef03337274a",
+      "subject": "feat(position-advice): add covered call roll-up candidates"
+    },
+    {
+      "sha": "ffbbe5ade122f0cade2015be7cb396cf8da473c9",
+      "subject": "fix(code-health): scale review budgets and normalize scoped evidence"
+    },
+    {
+      "sha": "be3f51176e288683f55bde62af050a032805fa8e",
+      "subject": "fix(code-health): merge review budget and evidence fixes (#1007)"
+    },
+    {
+      "sha": "ac2e75e58eb5b429bcbd8e2dff45500c4f5af7b6",
+      "subject": "feat(position-advice): add tick roll alerts and unified agent advice"
+    },
+    {
+      "sha": "c9e0dcffba5737afe4c14b42aea33a4e8197984c",
+      "subject": "refactor(code-health): checkpoint per-commit review shards"
+    },
+    {
+      "sha": "f09068c77295d05f8ba1726fb482b829c3950988",
+      "subject": "fix(maintenance): checkpoint reviews within shared stage budget"
+    },
+    {
+      "sha": "761d5daf5b93b23117c56ef976c0cbe82945093e",
+      "subject": "fix(code-health): preserve phase budgets and partial handoffs"
+    },
+    {
+      "sha": "5ecc0dd4d41ace9ac66303ec8463ecefdd1e71c9",
+      "subject": "fix(notifications): restore daily brief renderer dispatch"
+    },
+    {
+      "sha": "c03ef0b39df2d6a66302b0f85e4b9a477fd675d2",
+      "subject": "fix(maintenance): merge review checkpoints and shared budgets (#1009)"
+    },
+    {
+      "sha": "32ce82e549a29a9dbb2179e67d9e7bcb4c1171c7",
+      "subject": "Merge branch 'main' into codex/covered-call-roll"
+    },
+    {
+      "sha": "6d2b673cee94d164141fd8f8ad3152466b9de31b",
+      "subject": "feat(position-advice): merge covered call roll queries and Tick advice (#1008)"
+    },
+    {
+      "sha": "bd5ecbf53e7afc4f35edbc3c945f2dd28ac572cf",
+      "subject": "fix(code-health): reconcile mainline review checkpoints"
+    },
+    {
+      "sha": "8298bf9a4e1b6634ba2b30a09ec465381187c93d",
+      "subject": "chore(code-health): sync main before merging review shards"
+    },
+    {
+      "sha": "6eb8787577a94ddfec918f824378e05d09f1995d",
+      "subject": "refactor(code-health): merge per-commit review checkpoints (#1011)"
+    },
+    {
+      "sha": "88337932669482de4d56b21b865470b68fc954cd",
+      "subject": "refactor(bot): compact model tool definitions"
+    },
+    {
+      "sha": "4965e4c03e2c13b139f2e1228ac79bb38150c2dc",
+      "subject": "test(bot): refresh rebased tool contracts and verification"
+    },
+    {
+      "sha": "92ddd9e164286ae4fea584ef04d51ef23b88cb23",
+      "subject": "refactor(bot): merge compact model tool definitions (#1010)"
+    },
+    {
+      "sha": "a94498d6f2af32386abf71c392313508ce8f1bce",
+      "subject": "docs(bot): measure tool discovery costs and retain full mode"
+    },
+    {
+      "sha": "5808fc68f9e8d15f3a9c49e43fd183731dc88d6c",
+      "subject": "feat(bot): add indexed discovery for read tools"
+    },
+    {
+      "sha": "9dccdb02123203405e61658eb497bde53f3ed5e3",
+      "subject": "test(bot): cover indexed discovery in Feishu entry"
+    },
+    {
+      "sha": "4604d370911e5bc0fa26cc4e63f9e6369308ebfb",
+      "subject": "Merge pull request #1012 from liuxie066/codex/bot-tool-discovery"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "Position Advice 新增 Covered Call 上滚查询（`om position-advice roll-up` / `covered_call_roll_candidates`）：核实同账户全部未平仓 Short Call 的股票覆盖后，为单个持仓批次寻找更高行权价、到期不早于旧仓且双腿扣费净收入严格为正的替代 Call，展示净现金收益及交股价提升；沿用可选插件启用边界，不下单、不改业务账本。（#1008）。",
+      "commits": [
+        "837dd4754cc28d6a4cc53ffc9d87bef03337274a",
+        "ac2e75e58eb5b429bcbd8e2dff45500c4f5af7b6",
+        "32ce82e549a29a9dbb2179e67d9e7bcb4c1171c7",
+        "6d2b673cee94d164141fd8f8ad3152466b9de31b"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "启用 Position Advice 后，Tick 使用同批封存行情评估 Covered Call 上滚和 Short Put 下移，在持仓简报与既有提醒中展示首选目标、平仓 ask／开仓 bid、行权价变化、扣费净收入和净现金收益率；Tool Gateway 新增 `position_advice_read` 统一读取平仓、上滚、下移建议，过期结果保留并停止标为当前可操作，沿用原通知去重与送达确认。（#1008）。",
+      "commits": [
+        "ac2e75e58eb5b429bcbd8e2dff45500c4f5af7b6",
+        "5ecc0dd4d41ace9ac66303ec8463ecefdd1e71c9",
+        "32ce82e549a29a9dbb2179e67d9e7bcb4c1171c7",
+        "6d2b673cee94d164141fd8f8ad3152466b9de31b"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "Bot 业务只读工具由 10 个扩展到 29 个，覆盖简报、平仓报告、诊断、标的解析和组合查询；默认通过本地关键词检索按需加载完整定义，可设置 `OM_BOT_TOOL_DISCOVERY=full` 完整下发，两种模式沿用账户与市场授权、审计和可恢复错误。（#1012）。",
+      "commits": [
+        "5808fc68f9e8d15f3a9c49e43fd183731dc88d6c",
+        "9dccdb02123203405e61658eb497bde53f3ed5e3",
+        "4604d370911e5bc0fa26cc4e63f9e6369308ebfb"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "指定标的合约查询并列展示期间净收益率和年化净收益率；直接复用已有计算结果，响应裁剪后保留年化字段，休市参考继续使用报价参考期限。（#1006）。",
+      "commits": [
+        "f21a13cdceb2241b8a9801e3f5d31058147ea3f1",
+        "f0f163bc47800c5426a3899f9f20ee6c43ee9eb1"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "精简 Bot 工具目录的重复描述、示例及结果契约摘要，减少工具定义体量和模型请求中的重复文字；保留参数约束、完整执行和结果准入契约。（#1010）。",
+      "commits": [
+        "88337932669482de4d56b21b865470b68fc954cd",
+        "4965e4c03e2c13b139f2e1228ac79bb38150c2dc",
+        "92ddd9e164286ae4fea584ef04d51ef23b88cb23"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复按账户和市场查询质量状态时仍夹带范围外事件、运行检查及全局汇总的问题；仅保留范围可证明匹配的事实并重新汇总，缺少匹配运行证据时返回 `unknown`。（#1012）。",
+      "commits": [
+        "5808fc68f9e8d15f3a9c49e43fd183731dc88d6c",
+        "4604d370911e5bc0fa26cc4e63f9e6369308ebfb"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "ffbbe5ade122f0cade2015be7cb396cf8da473c9",
+      "reason": "仅修正仓库维护巡检的阶段预算及 work 目录内 evidence_log 归一化；维护脚本、测试与维护文档不进入产品运行包，不改变产品业务、配置或生产运维入口。"
+    },
+    {
+      "commit": "be3f51176e288683f55bde62af050a032805fa8e",
+      "reason": "合入同组仓库维护巡检的预算与证据路径修复；维护脚本和文档不进入产品运行包，没有新增产品行为。"
+    },
+    {
+      "commit": "f09068c77295d05f8ba1726fb482b829c3950988",
+      "reason": "仅调整仓库维护巡检的逐提交上下文、剩余预算、原子检查点及超时前缀保留；相关维护脚本与文档不进入产品运行包。"
+    },
+    {
+      "commit": "c03ef0b39df2d6a66302b0f85e4b9a477fd675d2",
+      "reason": "合入仓库维护巡检的检查点与共享阶段预算修复；变更限于开发维护流程，不改变产品账户、交易、调度或通知合同。"
+    },
+    {
+      "commit": "c9e0dcffba5737afe4c14b42aea33a4e8197984c",
+      "reason": "仅将仓库维护巡检改为 first-parent 分片和连续覆盖检查点；维护脚本、测试与维护文档不进入产品运行包。"
+    },
+    {
+      "commit": "761d5daf5b93b23117c56ef976c0cbe82945093e",
+      "reason": "仅保留开发巡检的独立阶段预算与 partial 报告交接；不改变产品运行配置或业务行为，维护脚本与文档不进入产品运行包。"
+    },
+    {
+      "commit": "bd5ecbf53e7afc4f35edbc3c945f2dd28ac572cf",
+      "reason": "维护巡检分支同步主线的冲突裁决限于维护脚本、文档与测试，不新增产品运行或业务行为。"
+    },
+    {
+      "commit": "8298bf9a4e1b6634ba2b30a09ec465381187c93d",
+      "reason": "维护巡检分支同步主线，独立冲突裁决仅为生成依赖图数据；各产品功能提交已单独映射发布条目。"
+    },
+    {
+      "commit": "6eb8787577a94ddfec918f824378e05d09f1995d",
+      "reason": "合入仓库维护巡检的分片、去重与检查点改动；相关维护脚本和合同不进入产品运行包，不改变产品运行配置或业务行为。"
+    },
+    {
+      "commit": "a94498d6f2af32386abf71c392313508ce8f1bce",
+      "reason": "仅交付早期工具发现可行性测量报告、脚本与 JSON，并配置精确 gitignore/export-ignore；未修改 Bot 运行源码或默认模式，测量产物不进入运行包或源码发布归档。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "f21a13cdceb2241b8a9801e3f5d31058147ea3f1",
+      "references": ["docs/TOOL_REFERENCE.md#指定标的卖出开仓候选", "https://github.com/liuxie066/options-monitor/pull/1006"]
+    },
+    {
+      "commit": "f0f163bc47800c5426a3899f9f20ee6c43ee9eb1",
+      "references": ["docs/TOOL_REFERENCE.md#指定标的卖出开仓候选", "https://github.com/liuxie066/options-monitor/pull/1006"]
+    },
+    {
+      "commit": "837dd4754cc28d6a4cc53ffc9d87bef03337274a",
+      "references": ["docs/CLOSE_ADVICE_CONTRACT.md#covered-call-上滚主动查询", "https://github.com/liuxie066/options-monitor/pull/1008"]
+    },
+    {
+      "commit": "ffbbe5ade122f0cade2015be7cb396cf8da473c9",
+      "references": ["docs/CODE_HEALTH_REVIEW.md", "https://github.com/liuxie066/options-monitor/pull/1007"]
+    },
+    {
+      "commit": "be3f51176e288683f55bde62af050a032805fa8e",
+      "references": ["docs/CODE_HEALTH_REVIEW.md", "https://github.com/liuxie066/options-monitor/pull/1007"]
+    },
+    {
+      "commit": "ac2e75e58eb5b429bcbd8e2dff45500c4f5af7b6",
+      "references": ["docs/CLOSE_ADVICE_CONTRACT.md#tick-调度移仓与提醒", "docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md", "https://github.com/liuxie066/options-monitor/pull/1008"]
+    },
+    {
+      "commit": "c9e0dcffba5737afe4c14b42aea33a4e8197984c",
+      "references": ["docs/CODE_HEALTH_REVIEW.md#每日本地调度", "https://github.com/liuxie066/options-monitor/pull/1011"]
+    },
+    {
+      "commit": "f09068c77295d05f8ba1726fb482b829c3950988",
+      "references": ["docs/CODE_HEALTH_REVIEW.md", "https://github.com/liuxie066/options-monitor/pull/1009"]
+    },
+    {
+      "commit": "761d5daf5b93b23117c56ef976c0cbe82945093e",
+      "references": ["docs/CODE_HEALTH_REVIEW.md#每日本地调度", "https://github.com/liuxie066/options-monitor/pull/1011"]
+    },
+    {
+      "commit": "5ecc0dd4d41ace9ac66303ec8463ecefdd1e71c9",
+      "references": ["docs/OPTION_NOTIFICATION_EXPERIENCE_PRD.md", "https://github.com/liuxie066/options-monitor/pull/1008"]
+    },
+    {
+      "commit": "c03ef0b39df2d6a66302b0f85e4b9a477fd675d2",
+      "references": ["docs/CODE_HEALTH_REVIEW.md", "https://github.com/liuxie066/options-monitor/pull/1009"]
+    },
+    {
+      "commit": "32ce82e549a29a9dbb2179e67d9e7bcb4c1171c7",
+      "references": ["docs/CLOSE_ADVICE_CONTRACT.md#tick-调度移仓与提醒", "https://github.com/liuxie066/options-monitor/pull/1008"]
+    },
+    {
+      "commit": "6d2b673cee94d164141fd8f8ad3152466b9de31b",
+      "references": ["docs/CLOSE_ADVICE_CONTRACT.md#covered-call-上滚主动查询", "docs/CLOSE_ADVICE_CONTRACT.md#tick-调度移仓与提醒", "https://github.com/liuxie066/options-monitor/pull/1008"]
+    },
+    {
+      "commit": "bd5ecbf53e7afc4f35edbc3c945f2dd28ac572cf",
+      "references": ["docs/CODE_HEALTH_REVIEW.md#每日本地调度", "https://github.com/liuxie066/options-monitor/pull/1011"]
+    },
+    {
+      "commit": "8298bf9a4e1b6634ba2b30a09ec465381187c93d",
+      "references": ["docs/CODE_HEALTH_REVIEW.md#每日本地调度", "https://github.com/liuxie066/options-monitor/pull/1011"]
+    },
+    {
+      "commit": "6eb8787577a94ddfec918f824378e05d09f1995d",
+      "references": ["docs/CODE_HEALTH_REVIEW.md#每日本地调度", "https://github.com/liuxie066/options-monitor/pull/1011"]
+    },
+    {
+      "commit": "88337932669482de4d56b21b865470b68fc954cd",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1010"]
+    },
+    {
+      "commit": "4965e4c03e2c13b139f2e1228ac79bb38150c2dc",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1010"]
+    },
+    {
+      "commit": "92ddd9e164286ae4fea584ef04d51ef23b88cb23",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1010"]
+    },
+    {
+      "commit": "a94498d6f2af32386abf71c392313508ce8f1bce",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1012"]
+    },
+    {
+      "commit": "5808fc68f9e8d15f3a9c49e43fd183731dc88d6c",
+      "references": ["docs/BOT_DESIGN.md#工具发现模式", "docs/OM_AGENT_CAPABILITY_MAP.md", "https://github.com/liuxie066/options-monitor/pull/1012"]
+    },
+    {
+      "commit": "9dccdb02123203405e61658eb497bde53f3ed5e3",
+      "references": ["docs/BOT_DESIGN.md#工具发现模式", "https://github.com/liuxie066/options-monitor/pull/1012"]
+    },
+    {
+      "commit": "4604d370911e5bc0fa26cc4e63f9e6369308ebfb",
+      "references": ["docs/BOT_DESIGN.md#工具发现模式", "docs/OM_AGENT_CAPABILITY_MAP.md", "https://github.com/liuxie066/options-monitor/pull/1012"]
+    }
+  ]
+}
