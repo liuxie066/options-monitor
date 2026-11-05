@@ -5,3 +5,6 @@ CLAUDE.md export-ignore
 
 # Maintainer measurements are not part of release archives.
 docs/reviews/bot-tool-definition-size-20261105.md export-ignore
+docs/reviews/bot-tool-discovery-20261105.md export-ignore
+docs/reviews/bot-tool-discovery-20261105.py export-ignore
+docs/reviews/bot-tool-discovery-20261105.json export-ignore

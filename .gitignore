@@ -73,6 +73,10 @@ config.market_us.fallback_yahoo.json
 config.market_*.json.deprecated
 
 # Process artifacts (reviews/plans/gateflow are consumables, keep local only)
-docs/reviews/
+# This requested feasibility record is delivered with its reproducible evidence.
+docs/reviews/*
+!docs/reviews/bot-tool-discovery-20261105.md
+!docs/reviews/bot-tool-discovery-20261105.py
+!docs/reviews/bot-tool-discovery-20261105.json
 docs/plans/
 docs/gateflow/

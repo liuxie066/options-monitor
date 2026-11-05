@@ -1,0 +1,1403 @@
+{
+  "base": "92ddd9e16",
+  "method": "offline JSON token proxies, not provider billing/semantic accuracy",
+  "registry_entries": 46,
+  "bot_read_definitions": 30,
+  "catalog_bytes": 49995,
+  "actual_scene_tool_count": 10,
+  "scene_wire_bytes": 14439,
+  "recommended_flow": {
+    "healthcheck": {
+      "in_scene": false,
+      "read_only": true
+    },
+    "scan_opportunities": {
+      "in_scene": false,
+      "read_only": false
+    },
+    "close_advice_read": {
+      "in_scene": false,
+      "read_only": true
+    }
+  },
+  "encodings": {
+    "cl100k_base": {
+      "tool_tokens": {
+        "project_context": 77,
+        "project_files": 339,
+        "candidate_filter_explain": 478,
+        "option_candidates": 810,
+        "runtime_runs": 186,
+        "runtime_logs": 149,
+        "runtime_status": 266,
+        "receipt_read": 252,
+        "option_positions_read": 232,
+        "trade_attribution_read": 167
+      },
+      "full_tools_tokens": 2952,
+      "shared_messages_tokens": 2810,
+      "index_tokens": 315,
+      "meta_tokens": 100,
+      "discovery_prompt_tokens": 396,
+      "pairs": {
+        "cheap_tool_twice": {
+          "full": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              5819,
+              5876,
+              5933
+            ],
+            "input_tokens": 17628,
+            "output_call_tokens": 62
+          },
+          "direct": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3316,
+              3540,
+              3597,
+              3654
+            ],
+            "input_tokens": 14107,
+            "output_call_tokens": 100,
+            "input_saved_percent": 19.97
+          },
+          "search": {
+            "model_requests": 5,
+            "input_tokens_per_request": [
+              3316,
+              3415,
+              3639,
+              3696,
+              3753
+            ],
+            "input_tokens": 17819,
+            "output_call_tokens": 139,
+            "input_saved_percent": -1.08
+          },
+          "search_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3322,
+              3503,
+              3560,
+              3617
+            ],
+            "input_tokens": 14002,
+            "output_call_tokens": 101,
+            "input_saved_percent": 20.57
+          },
+          "direct_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3325,
+              3472,
+              3529,
+              3586
+            ],
+            "input_tokens": 13912,
+            "output_call_tokens": 100,
+            "input_saved_percent": 21.08
+          }
+        },
+        "filter_tool_twice": {
+          "full": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              5819,
+              5878,
+              5937
+            ],
+            "input_tokens": 17634,
+            "output_call_tokens": 66
+          },
+          "direct": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3316,
+              4366,
+              4425,
+              4484
+            ],
+            "input_tokens": 16591,
+            "output_call_tokens": 106,
+            "input_saved_percent": 5.91
+          },
+          "search": {
+            "model_requests": 5,
+            "input_tokens_per_request": [
+              3316,
+              3529,
+              4579,
+              4638,
+              4697
+            ],
+            "input_tokens": 20759,
+            "output_call_tokens": 149,
+            "input_saved_percent": -17.72
+          },
+          "search_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3322,
+              4018,
+              4077,
+              4136
+            ],
+            "input_tokens": 15553,
+            "output_call_tokens": 109,
+            "input_saved_percent": 11.8
+          },
+          "direct_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3325,
+              3877,
+              3936,
+              3995
+            ],
+            "input_tokens": 15133,
+            "output_call_tokens": 106,
+            "input_saved_percent": 14.18
+          }
+        },
+        "candidate_tool_twice": {
+          "full": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              5819,
+              5876,
+              5933
+            ],
+            "input_tokens": 17628,
+            "output_call_tokens": 62
+          },
+          "direct": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3316,
+              5016,
+              5073,
+              5130
+            ],
+            "input_tokens": 18535,
+            "output_call_tokens": 100,
+            "input_saved_percent": -5.15
+          },
+          "search": {
+            "model_requests": 5,
+            "input_tokens_per_request": [
+              3316,
+              3433,
+              5133,
+              5190,
+              5247
+            ],
+            "input_tokens": 22319,
+            "output_call_tokens": 139,
+            "input_saved_percent": -26.61
+          },
+          "search_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3322,
+              4254,
+              4311,
+              4368
+            ],
+            "input_tokens": 16255,
+            "output_call_tokens": 101,
+            "input_saved_percent": 7.79
+          },
+          "direct_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3325,
+              4205,
+              4262,
+              4319
+            ],
+            "input_tokens": 16111,
+            "output_call_tokens": 100,
+            "input_saved_percent": 8.61
+          }
+        },
+        "account_then_filter": {
+          "full": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              5819,
+              5876,
+              5935
+            ],
+            "input_tokens": 17630,
+            "output_call_tokens": 64
+          },
+          "direct": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3316,
+              4580,
+              4637,
+              4696
+            ],
+            "input_tokens": 17229,
+            "output_call_tokens": 132,
+            "input_saved_percent": 2.27
+          },
+          "search": {
+            "model_requests": 5,
+            "input_tokens_per_request": [
+              3316,
+              3562,
+              4826,
+              4883,
+              4942
+            ],
+            "input_tokens": 21529,
+            "output_call_tokens": 173,
+            "input_saved_percent": -22.12
+          },
+          "search_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3322,
+              4133,
+              4190,
+              4249
+            ],
+            "input_tokens": 15894,
+            "output_call_tokens": 105,
+            "input_saved_percent": 9.85
+          },
+          "direct_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3325,
+              4014,
+              4071,
+              4130
+            ],
+            "input_tokens": 15540,
+            "output_call_tokens": 132,
+            "input_saved_percent": 11.85
+          }
+        },
+        "runtime_then_filter": {
+          "full": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              5819,
+              5876,
+              5935
+            ],
+            "input_tokens": 17630,
+            "output_call_tokens": 64
+          },
+          "direct": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3316,
+              4979,
+              5036,
+              5095
+            ],
+            "input_tokens": 18426,
+            "output_call_tokens": 132,
+            "input_saved_percent": -4.52
+          },
+          "search": {
+            "model_requests": 5,
+            "input_tokens_per_request": [
+              3316,
+              3651,
+              5314,
+              5371,
+              5430
+            ],
+            "input_tokens": 23082,
+            "output_call_tokens": 173,
+            "input_saved_percent": -30.92
+          },
+          "search_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3322,
+              4411,
+              4468,
+              4527
+            ],
+            "input_tokens": 16728,
+            "output_call_tokens": 105,
+            "input_saved_percent": 5.12
+          },
+          "direct_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3325,
+              4203,
+              4260,
+              4319
+            ],
+            "input_tokens": 16107,
+            "output_call_tokens": 132,
+            "input_saved_percent": 8.64
+          }
+        },
+        "runs_then_logs": {
+          "full": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              5819,
+              5876,
+              5933
+            ],
+            "input_tokens": 17628,
+            "output_call_tokens": 62
+          },
+          "direct": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3316,
+              4134,
+              4191,
+              4248
+            ],
+            "input_tokens": 15889,
+            "output_call_tokens": 128,
+            "input_saved_percent": 9.86
+          },
+          "search": {
+            "model_requests": 5,
+            "input_tokens_per_request": [
+              3316,
+              3580,
+              4398,
+              4455,
+              4512
+            ],
+            "input_tokens": 20261,
+            "output_call_tokens": 167,
+            "input_saved_percent": -14.94
+          },
+          "search_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3322,
+              3931,
+              3988,
+              4045
+            ],
+            "input_tokens": 15286,
+            "output_call_tokens": 101,
+            "input_saved_percent": 13.29
+          },
+          "direct_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3325,
+              3790,
+              3847,
+              3904
+            ],
+            "input_tokens": 14866,
+            "output_call_tokens": 128,
+            "input_saved_percent": 15.67
+          }
+        },
+        "positions_then_receipt": {
+          "full": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              5819,
+              5877,
+              5934
+            ],
+            "input_tokens": 17630,
+            "output_call_tokens": 63
+          },
+          "direct": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3316,
+              4460,
+              4518,
+              4575
+            ],
+            "input_tokens": 16869,
+            "output_call_tokens": 130,
+            "input_saved_percent": 4.32
+          },
+          "search": {
+            "model_requests": 5,
+            "input_tokens_per_request": [
+              3316,
+              3726,
+              4870,
+              4928,
+              4985
+            ],
+            "input_tokens": 21825,
+            "output_call_tokens": 170,
+            "input_saved_percent": -23.79
+          },
+          "search_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3322,
+              4226,
+              4284,
+              4341
+            ],
+            "input_tokens": 16173,
+            "output_call_tokens": 103,
+            "input_saved_percent": 8.26
+          },
+          "direct_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3325,
+              3941,
+              3999,
+              4056
+            ],
+            "input_tokens": 15321,
+            "output_call_tokens": 130,
+            "input_saved_percent": 13.1
+          }
+        },
+        "account_then_filter_with_memory": {
+          "full": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              6154,
+              6211,
+              6270
+            ],
+            "input_tokens": 18635,
+            "output_call_tokens": 64
+          },
+          "direct": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3651,
+              4915,
+              4972,
+              5031
+            ],
+            "input_tokens": 18569,
+            "output_call_tokens": 132,
+            "input_saved_percent": 0.35
+          },
+          "search": {
+            "model_requests": 5,
+            "input_tokens_per_request": [
+              3651,
+              3897,
+              5161,
+              5218,
+              5277
+            ],
+            "input_tokens": 23204,
+            "output_call_tokens": 173,
+            "input_saved_percent": -24.52
+          },
+          "search_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3657,
+              4468,
+              4525,
+              4584
+            ],
+            "input_tokens": 17234,
+            "output_call_tokens": 105,
+            "input_saved_percent": 7.52
+          },
+          "direct_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3660,
+              4349,
+              4406,
+              4465
+            ],
+            "input_tokens": 16880,
+            "output_call_tokens": 132,
+            "input_saved_percent": 9.42
+          }
+        },
+        "two_parallel_calls": {
+          "full": {
+            "model_requests": 2,
+            "input_tokens_per_request": [
+              5819,
+              5925
+            ],
+            "input_tokens": 11744,
+            "output_call_tokens": 54
+          },
+          "direct": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              3316,
+              4979,
+              5085
+            ],
+            "input_tokens": 13380,
+            "output_call_tokens": 122,
+            "input_saved_percent": -13.93
+          },
+          "search": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3316,
+              3651,
+              5314,
+              5420
+            ],
+            "input_tokens": 17701,
+            "output_call_tokens": 163,
+            "input_saved_percent": -50.72
+          },
+          "search_activate": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              3322,
+              4411,
+              4517
+            ],
+            "input_tokens": 12250,
+            "output_call_tokens": 95,
+            "input_saved_percent": -4.31
+          },
+          "direct_activate": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              3325,
+              4203,
+              4309
+            ],
+            "input_tokens": 11837,
+            "output_call_tokens": 122,
+            "input_saved_percent": -0.79
+          }
+        }
+      },
+      "fixtures": {
+        "opening_candidate_snapshot_diagnostics_model_ready": {
+          "observed_tools": [
+            "runtime_status",
+            "candidate_filter_explain"
+          ],
+          "scene_tools": [
+            "runtime_status",
+            "candidate_filter_explain"
+          ],
+          "outside_scene": [],
+          "note": "observations are pre-injected; scripted fixture does not select any tools",
+          "two_call_cost": {
+            "full": {
+              "model_requests": 3,
+              "input_tokens_per_request": [
+                5819,
+                5935,
+                6197
+              ],
+              "input_tokens": 17951,
+              "output_call_tokens": 64
+            },
+            "direct": {
+              "model_requests": 4,
+              "input_tokens_per_request": [
+                3316,
+                4979,
+                5095,
+                5357
+              ],
+              "input_tokens": 18747,
+              "output_call_tokens": 132,
+              "input_saved_percent": -4.43
+            },
+            "search": {
+              "model_requests": 5,
+              "input_tokens_per_request": [
+                3316,
+                3651,
+                5314,
+                5430,
+                5692
+              ],
+              "input_tokens": 23403,
+              "output_call_tokens": 173,
+              "input_saved_percent": -30.37
+            },
+            "search_activate": {
+              "model_requests": 4,
+              "input_tokens_per_request": [
+                3322,
+                4411,
+                4527,
+                4789
+              ],
+              "input_tokens": 17049,
+              "output_call_tokens": 105,
+              "input_saved_percent": 5.02
+            },
+            "direct_activate": {
+              "model_requests": 4,
+              "input_tokens_per_request": [
+                3325,
+                4203,
+                4319,
+                4581
+              ],
+              "input_tokens": 16428,
+              "output_call_tokens": 132,
+              "input_saved_percent": 8.48
+            }
+          }
+        },
+        "close_advice_notification_diagnostics_model_ready": {
+          "observed_tools": [
+            "runtime_status",
+            "close_advice_read"
+          ],
+          "scene_tools": [
+            "runtime_status"
+          ],
+          "outside_scene": [
+            "close_advice_read"
+          ],
+          "note": "observations are pre-injected; scripted fixture does not select any tools"
+        },
+        "current_option_exposure_model_ready": {
+          "observed_tools": [
+            "option_positions_read"
+          ],
+          "scene_tools": [
+            "option_positions_read"
+          ],
+          "outside_scene": [],
+          "note": "observations are pre-injected; scripted fixture does not select any tools"
+        }
+      },
+      "all_55_pairs_unweighted": {
+        "direct": {
+          "min_saved_percent": -22.84,
+          "max_saved_percent": 19.97,
+          "mean_input_tokens": 17101.27,
+          "pairs_saving_input": 38
+        },
+        "search": {
+          "min_saved_percent": -47.63,
+          "max_saved_percent": -1.08,
+          "mean_input_tokens": 21529.64,
+          "pairs_saving_input": 0
+        },
+        "search_activate": {
+          "min_saved_percent": -2.93,
+          "max_saved_percent": 20.57,
+          "mean_input_tokens": 15934.27,
+          "pairs_saving_input": 53
+        },
+        "direct_activate": {
+          "min_saved_percent": -0.62,
+          "max_saved_percent": 21.08,
+          "mean_input_tokens": 15447.45,
+          "pairs_saving_input": 54
+        }
+      }
+    },
+    "o200k_base": {
+      "tool_tokens": {
+        "project_context": 66,
+        "project_files": 333,
+        "candidate_filter_explain": 484,
+        "option_candidates": 791,
+        "runtime_runs": 187,
+        "runtime_logs": 147,
+        "runtime_status": 275,
+        "receipt_read": 260,
+        "option_positions_read": 243,
+        "trade_attribution_read": 160
+      },
+      "full_tools_tokens": 2948,
+      "shared_messages_tokens": 2526,
+      "index_tokens": 256,
+      "meta_tokens": 102,
+      "discovery_prompt_tokens": 337,
+      "pairs": {
+        "cheap_tool_twice": {
+          "full": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              5528,
+              5586,
+              5644
+            ],
+            "input_tokens": 16758,
+            "output_call_tokens": 64
+          },
+          "direct": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2978,
+              3181,
+              3239,
+              3297
+            ],
+            "input_tokens": 12695,
+            "output_call_tokens": 103,
+            "input_saved_percent": 24.25
+          },
+          "search": {
+            "model_requests": 5,
+            "input_tokens_per_request": [
+              2978,
+              3078,
+              3281,
+              3339,
+              3397
+            ],
+            "input_tokens": 16073,
+            "output_call_tokens": 143,
+            "input_saved_percent": 4.09
+          },
+          "search_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2984,
+              3155,
+              3213,
+              3271
+            ],
+            "input_tokens": 12623,
+            "output_call_tokens": 104,
+            "input_saved_percent": 24.67
+          },
+          "direct_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2987,
+              3124,
+              3182,
+              3240
+            ],
+            "input_tokens": 12533,
+            "output_call_tokens": 103,
+            "input_saved_percent": 25.21
+          }
+        },
+        "filter_tool_twice": {
+          "full": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              5528,
+              5588,
+              5648
+            ],
+            "input_tokens": 16764,
+            "output_call_tokens": 68
+          },
+          "direct": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2978,
+              4032,
+              4092,
+              4152
+            ],
+            "input_tokens": 15254,
+            "output_call_tokens": 109,
+            "input_saved_percent": 9.01
+          },
+          "search": {
+            "model_requests": 5,
+            "input_tokens_per_request": [
+              2978,
+              3187,
+              4241,
+              4301,
+              4361
+            ],
+            "input_tokens": 19068,
+            "output_call_tokens": 153,
+            "input_saved_percent": -13.74
+          },
+          "search_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2984,
+              3682,
+              3742,
+              3802
+            ],
+            "input_tokens": 14210,
+            "output_call_tokens": 112,
+            "input_saved_percent": 15.24
+          },
+          "direct_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2987,
+              3546,
+              3606,
+              3666
+            ],
+            "input_tokens": 13805,
+            "output_call_tokens": 109,
+            "input_saved_percent": 17.65
+          }
+        },
+        "candidate_tool_twice": {
+          "full": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              5528,
+              5586,
+              5644
+            ],
+            "input_tokens": 16758,
+            "output_call_tokens": 64
+          },
+          "direct": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2978,
+              4640,
+              4698,
+              4756
+            ],
+            "input_tokens": 17072,
+            "output_call_tokens": 103,
+            "input_saved_percent": -1.87
+          },
+          "search": {
+            "model_requests": 5,
+            "input_tokens_per_request": [
+              2978,
+              3089,
+              4751,
+              4809,
+              4867
+            ],
+            "input_tokens": 20494,
+            "output_call_tokens": 143,
+            "input_saved_percent": -22.29
+          },
+          "search_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2984,
+              3891,
+              3949,
+              4007
+            ],
+            "input_tokens": 14831,
+            "output_call_tokens": 104,
+            "input_saved_percent": 11.5
+          },
+          "direct_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2987,
+              3849,
+              3907,
+              3965
+            ],
+            "input_tokens": 14708,
+            "output_call_tokens": 103,
+            "input_saved_percent": 12.23
+          }
+        },
+        "account_then_filter": {
+          "full": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              5528,
+              5586,
+              5646
+            ],
+            "input_tokens": 16760,
+            "output_call_tokens": 66
+          },
+          "direct": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2978,
+              4224,
+              4282,
+              4342
+            ],
+            "input_tokens": 15826,
+            "output_call_tokens": 135,
+            "input_saved_percent": 5.57
+          },
+          "search": {
+            "model_requests": 5,
+            "input_tokens_per_request": [
+              2978,
+              3220,
+              4466,
+              4524,
+              4584
+            ],
+            "input_tokens": 19772,
+            "output_call_tokens": 177,
+            "input_saved_percent": -17.97
+          },
+          "search_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2984,
+              3786,
+              3844,
+              3904
+            ],
+            "input_tokens": 14518,
+            "output_call_tokens": 108,
+            "input_saved_percent": 13.38
+          },
+          "direct_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2987,
+              3672,
+              3730,
+              3790
+            ],
+            "input_tokens": 14179,
+            "output_call_tokens": 135,
+            "input_saved_percent": 15.4
+          }
+        },
+        "runtime_then_filter": {
+          "full": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              5528,
+              5586,
+              5646
+            ],
+            "input_tokens": 16760,
+            "output_call_tokens": 66
+          },
+          "direct": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2978,
+              4654,
+              4712,
+              4772
+            ],
+            "input_tokens": 17116,
+            "output_call_tokens": 135,
+            "input_saved_percent": -2.12
+          },
+          "search": {
+            "model_requests": 5,
+            "input_tokens_per_request": [
+              2978,
+              3300,
+              4976,
+              5034,
+              5094
+            ],
+            "input_tokens": 21382,
+            "output_call_tokens": 177,
+            "input_saved_percent": -27.58
+          },
+          "search_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2984,
+              4075,
+              4133,
+              4193
+            ],
+            "input_tokens": 15385,
+            "output_call_tokens": 108,
+            "input_saved_percent": 8.2
+          },
+          "direct_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2987,
+              3881,
+              3939,
+              3999
+            ],
+            "input_tokens": 14806,
+            "output_call_tokens": 135,
+            "input_saved_percent": 11.66
+          }
+        },
+        "runs_then_logs": {
+          "full": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              5528,
+              5586,
+              5644
+            ],
+            "input_tokens": 16758,
+            "output_call_tokens": 64
+          },
+          "direct": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2978,
+              3794,
+              3852,
+              3910
+            ],
+            "input_tokens": 14534,
+            "output_call_tokens": 131,
+            "input_saved_percent": 13.27
+          },
+          "search": {
+            "model_requests": 5,
+            "input_tokens_per_request": [
+              2978,
+              3232,
+              4048,
+              4106,
+              4164
+            ],
+            "input_tokens": 18528,
+            "output_call_tokens": 171,
+            "input_saved_percent": -10.56
+          },
+          "search_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2984,
+              3582,
+              3640,
+              3698
+            ],
+            "input_tokens": 13904,
+            "output_call_tokens": 104,
+            "input_saved_percent": 17.03
+          },
+          "direct_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2987,
+              3452,
+              3510,
+              3568
+            ],
+            "input_tokens": 13517,
+            "output_call_tokens": 131,
+            "input_saved_percent": 19.34
+          }
+        },
+        "positions_then_receipt": {
+          "full": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              5528,
+              5587,
+              5645
+            ],
+            "input_tokens": 16760,
+            "output_call_tokens": 65
+          },
+          "direct": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2978,
+              4150,
+              4209,
+              4267
+            ],
+            "input_tokens": 15604,
+            "output_call_tokens": 133,
+            "input_saved_percent": 6.9
+          },
+          "search": {
+            "model_requests": 5,
+            "input_tokens_per_request": [
+              2978,
+              3373,
+              4545,
+              4604,
+              4662
+            ],
+            "input_tokens": 20162,
+            "output_call_tokens": 174,
+            "input_saved_percent": -20.3
+          },
+          "search_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2984,
+              3892,
+              3951,
+              4009
+            ],
+            "input_tokens": 14836,
+            "output_call_tokens": 106,
+            "input_saved_percent": 11.48
+          },
+          "direct_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2987,
+              3623,
+              3682,
+              3740
+            ],
+            "input_tokens": 14032,
+            "output_call_tokens": 133,
+            "input_saved_percent": 16.28
+          }
+        },
+        "account_then_filter_with_memory": {
+          "full": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              5865,
+              5923,
+              5983
+            ],
+            "input_tokens": 17771,
+            "output_call_tokens": 66
+          },
+          "direct": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3315,
+              4561,
+              4619,
+              4679
+            ],
+            "input_tokens": 17174,
+            "output_call_tokens": 135,
+            "input_saved_percent": 3.36
+          },
+          "search": {
+            "model_requests": 5,
+            "input_tokens_per_request": [
+              3315,
+              3557,
+              4803,
+              4861,
+              4921
+            ],
+            "input_tokens": 21457,
+            "output_call_tokens": 177,
+            "input_saved_percent": -20.74
+          },
+          "search_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3321,
+              4123,
+              4181,
+              4241
+            ],
+            "input_tokens": 15866,
+            "output_call_tokens": 108,
+            "input_saved_percent": 10.72
+          },
+          "direct_activate": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              3324,
+              4009,
+              4067,
+              4127
+            ],
+            "input_tokens": 15527,
+            "output_call_tokens": 135,
+            "input_saved_percent": 12.63
+          }
+        },
+        "two_parallel_calls": {
+          "full": {
+            "model_requests": 2,
+            "input_tokens_per_request": [
+              5528,
+              5635
+            ],
+            "input_tokens": 11163,
+            "output_call_tokens": 55
+          },
+          "direct": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              2978,
+              4654,
+              4761
+            ],
+            "input_tokens": 12393,
+            "output_call_tokens": 124,
+            "input_saved_percent": -11.02
+          },
+          "search": {
+            "model_requests": 4,
+            "input_tokens_per_request": [
+              2978,
+              3300,
+              4976,
+              5083
+            ],
+            "input_tokens": 16337,
+            "output_call_tokens": 166,
+            "input_saved_percent": -46.35
+          },
+          "search_activate": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              2984,
+              4075,
+              4182
+            ],
+            "input_tokens": 11241,
+            "output_call_tokens": 97,
+            "input_saved_percent": -0.7
+          },
+          "direct_activate": {
+            "model_requests": 3,
+            "input_tokens_per_request": [
+              2987,
+              3881,
+              3988
+            ],
+            "input_tokens": 10856,
+            "output_call_tokens": 124,
+            "input_saved_percent": 2.75
+          }
+        }
+      },
+      "fixtures": {
+        "opening_candidate_snapshot_diagnostics_model_ready": {
+          "observed_tools": [
+            "runtime_status",
+            "candidate_filter_explain"
+          ],
+          "scene_tools": [
+            "runtime_status",
+            "candidate_filter_explain"
+          ],
+          "outside_scene": [],
+          "note": "observations are pre-injected; scripted fixture does not select any tools",
+          "two_call_cost": {
+            "full": {
+              "model_requests": 3,
+              "input_tokens_per_request": [
+                5528,
+                5645,
+                5909
+              ],
+              "input_tokens": 17082,
+              "output_call_tokens": 66
+            },
+            "direct": {
+              "model_requests": 4,
+              "input_tokens_per_request": [
+                2978,
+                4654,
+                4771,
+                5035
+              ],
+              "input_tokens": 17438,
+              "output_call_tokens": 135,
+              "input_saved_percent": -2.08
+            },
+            "search": {
+              "model_requests": 5,
+              "input_tokens_per_request": [
+                2978,
+                3300,
+                4976,
+                5093,
+                5357
+              ],
+              "input_tokens": 21704,
+              "output_call_tokens": 177,
+              "input_saved_percent": -27.06
+            },
+            "search_activate": {
+              "model_requests": 4,
+              "input_tokens_per_request": [
+                2984,
+                4075,
+                4192,
+                4456
+              ],
+              "input_tokens": 15707,
+              "output_call_tokens": 108,
+              "input_saved_percent": 8.05
+            },
+            "direct_activate": {
+              "model_requests": 4,
+              "input_tokens_per_request": [
+                2987,
+                3881,
+                3998,
+                4262
+              ],
+              "input_tokens": 15128,
+              "output_call_tokens": 135,
+              "input_saved_percent": 11.44
+            }
+          }
+        },
+        "close_advice_notification_diagnostics_model_ready": {
+          "observed_tools": [
+            "runtime_status",
+            "close_advice_read"
+          ],
+          "scene_tools": [
+            "runtime_status"
+          ],
+          "outside_scene": [
+            "close_advice_read"
+          ],
+          "note": "observations are pre-injected; scripted fixture does not select any tools"
+        },
+        "current_option_exposure_model_ready": {
+          "observed_tools": [
+            "option_positions_read"
+          ],
+          "scene_tools": [
+            "option_positions_read"
+          ],
+          "outside_scene": [],
+          "note": "observations are pre-injected; scripted fixture does not select any tools"
+        }
+      },
+      "all_55_pairs_unweighted": {
+        "direct": {
+          "min_saved_percent": -20.54,
+          "max_saved_percent": 24.25,
+          "mean_input_tokens": 15723.09,
+          "pairs_saving_input": 41
+        },
+        "search": {
+          "min_saved_percent": -44.34,
+          "max_saved_percent": 4.09,
+          "mean_input_tokens": 19774.55,
+          "pairs_saving_input": 1
+        },
+        "search_activate": {
+          "min_saved_percent": 0.2,
+          "max_saved_percent": 24.67,
+          "mean_input_tokens": 14550.64,
+          "pairs_saving_input": 55
+        },
+        "direct_activate": {
+          "min_saved_percent": 2.42,
+          "max_saved_percent": 25.21,
+          "mean_input_tokens": 14096.0,
+          "pairs_saving_input": 55
+        }
+      }
+    }
+  }
+}
