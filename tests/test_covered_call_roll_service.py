@@ -1,5 +1,6 @@
 """Offline CC roll service: existing inventory coverage, current quotes and reports."""
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 import json
@@ -37,7 +38,7 @@ def covered_service(setup_service, monkeypatch):
     provider, rows, cfg = setup_service
     rows[0]["fields"]["contract_key"]["option_type"] = "call"
     provider.spot = 102
-    provider.rows = [call_quote(100, OLD_EXPIRY, bid=4.8, ask=5), call_quote(105, NEW_EXPIRY, bid=4, ask=4.1)]
+    provider.rows = [call_quote(100, OLD_EXPIRY, bid=4.8, ask=5), call_quote(105, NEW_EXPIRY, bid=6, ask=6.1)]
     stock_context, calls = portfolio(), []
     def load(**kwargs):
         calls.append(kwargs)
@@ -60,7 +61,7 @@ def run(tmp_path, covered_service, payload=None, **kwargs):
         runtime_root=tmp_path, now_utc=kwargs.pop("now_utc", NOW), **kwargs)
 
 
-def test_debit_roll_found_with_fees_cost_stock_basis_and_saved_report(tmp_path, covered_service):
+def test_credit_roll_found_with_fees_cost_stock_basis_and_saved_report(tmp_path, covered_service):
     provider, _rows, _cfg, _context, calls = covered_service
     result = run(tmp_path, covered_service)
     assert result["schema_version"] == "covered_call_roll.output.v1"
@@ -69,23 +70,25 @@ def test_debit_roll_found_with_fees_cost_stock_basis_and_saved_report(tmp_path, 
     assert result["stock_coverage"]["required_shares"] == result["stock_coverage"]["available_shares"] == 100
     assert result["coverage"]["status"] == "complete"
     candidate = result["candidates"][0]
-    assert candidate["recommendation"] == "debit_roll"
-    assert candidate["cash_flow_type"] == "debit"
-    assert candidate["net_credit"] < -100
-    assert candidate["net_debit"] == -candidate["net_credit"]
+    assert candidate["recommendation"] == "credit_roll"
+    assert candidate["cash_flow_type"] == "credit"
+    assert candidate["net_credit"] == pytest.approx(
+        100 - candidate["old_buy_fee"]["amount"] - candidate["new_sell_fee"]["amount"])
+    assert candidate["net_credit"] > 0
+    assert candidate["net_debit"] == 0
     assert candidate["strike_increase"] == 5
     assert candidate["assignment_proceeds_uplift"] == 500
     assert candidate["assignment_net_improvement"] == pytest.approx(500 + candidate["net_credit"])
     assert candidate["old_capital_basis"] == candidate["new_capital_basis"] == 10200
     assert candidate["old_buy_fee"]["amount"] > 0 and candidate["new_sell_fee"]["amount"] > 0
-    assert candidate["incremental_annualized_return"] < 0
+    assert candidate["incremental_annualized_return"] == pytest.approx(candidate["net_credit"] / 10200 * 365 / 40)
     assert result["assignment_semantics"] == "wheel_stock_sale"
     assert calls[0]["write_cache"] is False
     assert calls[0]["required_position_asset_types"] == ("stock",)
     assert "now_utc" not in calls[0]  # The loader qualifies direct fetches at response time.
     assert provider.requests[0].option_types == "call"
     replacement = provider.requests[0].query_filters[1]
-    assert replacement["min_strike"] == 100 and replacement["min_dte"] == 11
+    assert replacement["min_strike"] == 100 and replacement["min_dte"] == 10
     report = Path(result["report_path"])
     assert "output_requests/covered_call_roll" in str(report)
     assert json.loads(report.read_text()) == result
@@ -142,8 +145,8 @@ def test_call_at_another_broker_does_not_consume_this_accounts_stock(tmp_path, c
     assert result["stock_coverage"]["required_shares"] == 100
 
 
-@pytest.mark.parametrize("strike,expiry", [(95, NEW_EXPIRY), (100, NEW_EXPIRY), (105, OLD_EXPIRY)])
-def test_wrong_direction_equal_strike_and_same_expiry_not_candidates(tmp_path, covered_service, strike, expiry):
+@pytest.mark.parametrize("strike,expiry", [(95, NEW_EXPIRY), (100, NEW_EXPIRY), (105, "2026-11-13")])
+def test_wrong_direction_equal_strike_and_earlier_expiry_not_candidates(tmp_path, covered_service, strike, expiry):
     provider, *_ = covered_service
     provider.rows = [provider.rows[0], call_quote(strike, expiry, bid=10, ask=10.1)]
     result = run(tmp_path, covered_service)
@@ -151,20 +154,76 @@ def test_wrong_direction_equal_strike_and_same_expiry_not_candidates(tmp_path, c
     assert result["coverage"]["status"] == "complete" and result["candidates"] == []
 
 
-def test_debit_exceeding_uplift_is_known_economic_exclusion(tmp_path, covered_service):
+def test_same_expiry_with_higher_strike_and_credit_is_found(tmp_path, covered_service):
     provider, *_ = covered_service
-    provider.rows[1] = call_quote(101, NEW_EXPIRY, bid=1, ask=1.1)
+    provider.rows[1] = call_quote(105, OLD_EXPIRY, bid=6, ask=6.1)
+    result = run(tmp_path, covered_service, {"max_new_expiration": OLD_EXPIRY})
+    assert (result["status"], result["outcome"]) == ("success", "found")
+    candidate = result["candidates"][0]
+    assert candidate["recommendation"] == "credit_roll"
+    assert candidate["expiration"] == OLD_EXPIRY
+    assert candidate["old_dte"] == candidate["new_dte"] == 10
+    assert candidate["extension_days"] == 0
+    assert candidate["assignment_improvement_annualized_return"] == pytest.approx(
+        candidate["assignment_net_improvement"] / 10200 * 365 / 10)
+
+
+@pytest.mark.parametrize("strike,bid", [(105, 4), (101, 1)])
+def test_net_debit_is_known_economic_exclusion_regardless_of_uplift(tmp_path, covered_service, strike, bid):
+    provider, *_ = covered_service
+    provider.rows[1] = call_quote(strike, NEW_EXPIRY, bid=bid, ask=bid + 0.1)
     result = run(tmp_path, covered_service)
-    assert result["outcome"] == "none"
-    assert {"code": "debit_not_below_assignment_uplift", "count": 1} in result["exclusion_summary"]
+    assert (result["status"], result["outcome"]) == ("success", "none")
+    assert result["coverage"]["status"] == "complete"
+    assert result["candidates"] == []
+    assert {"code": "non_positive_net_credit", "count": 1} in result["exclusion_summary"]
 
 
-def test_partial_query_keeps_a_valid_debit_and_missing_scope(tmp_path, covered_service):
+@pytest.mark.parametrize("fee_extra,expected", [(-0.01, "credit_roll"), (0, None), (0.01, None)])
+def test_service_applies_both_leg_fees_at_neutral_and_debit_boundary(
+    tmp_path, covered_service, monkeypatch, fee_extra, expected,
+):
+    provider, *_ = covered_service
+    provider.rows[1] = call_quote(105, NEW_EXPIRY, bid=5.05, ask=5.15)
+    buy_estimate, sell_estimate = service.estimate_futu_option_buy_fee, service.estimate_futu_option_sell_fee
+    monkeypatch.setattr(service, "estimate_futu_option_buy_fee",
+        lambda *args, **kwargs: replace(buy_estimate(*args, **kwargs), amount=2))
+    monkeypatch.setattr(service, "estimate_futu_option_sell_fee",
+        lambda *args, **kwargs: replace(sell_estimate(*args, **kwargs), amount=3 + fee_extra))
+    result = run(tmp_path, covered_service)
+    assert result["status"] == "success" and result["coverage"]["status"] == "complete"
+    if expected:
+        candidate = result["candidates"][0]
+        assert result["outcome"] == "found"
+        assert candidate["recommendation"] == expected
+        assert candidate["cash_flow_type"] == "credit"
+        assert candidate["net_credit"] == pytest.approx(0.01) and candidate["net_debit"] == 0
+        assert candidate["old_buy_fee"]["amount"] == 2 and candidate["new_sell_fee"]["amount"] == pytest.approx(2.99)
+        assert candidate["old_buy_fee"]["fee_basis"] and candidate["new_sell_fee"]["fee_basis"]
+    else:
+        assert result["outcome"] == "none" and result["candidates"] == []
+        assert {"code": "non_positive_net_credit", "count": 1} in result["exclusion_summary"]
+
+
+def test_active_query_ranks_cash_return_above_larger_conditional_uplift(tmp_path, covered_service):
+    provider, *_ = covered_service
+    provider.rows = [provider.rows[0], call_quote(110, NEW_EXPIRY, bid=5.1, ask=5.2),
+        call_quote(105, NEW_EXPIRY, bid=6, ask=6.1)]
+    result = run(tmp_path, covered_service)
+    assert (result["status"], result["outcome"]) == ("success", "found")
+    first, second = result["candidates"]
+    assert first["strike"] == 105 and second["strike"] == 110
+    assert first["incremental_annualized_return"] > second["incremental_annualized_return"] > 0
+    assert second["assignment_improvement_annualized_return"] > first["assignment_improvement_annualized_return"]
+
+
+def test_partial_query_keeps_a_valid_credit_and_missing_scope(tmp_path, covered_service):
     provider, *_ = covered_service
     provider.rows.append(call_quote(110, NEW_EXPIRY, bid=None, ask=2))
     result = run(tmp_path, covered_service)
     assert (result["status"], result["outcome"]) == ("partial", "found")
-    assert result["candidates"][0]["recommendation"] == "debit_roll"
+    assert result["candidates"][0]["recommendation"] == "credit_roll"
+    assert result["candidates"][0]["net_credit"] > 0
     assert result["coverage"]["unassessed"] == 1
 
 

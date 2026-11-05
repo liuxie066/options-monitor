@@ -22,6 +22,10 @@ from src.application.config_sections import (
     resolve_watchlist_config,
 )
 from src.application.close_advice_runner import run_close_advice
+from src.application.prepared_portfolio_context import (
+    PreparedPortfolioContextError,
+    load_prepared_portfolio_context,
+)
 from src.application.prepared_option_positions_context import (
     PreparedOptionPositionsContextError,
     load_prepared_option_positions_context,
@@ -558,6 +562,21 @@ def run_one_account(
     close_advice_cfg = (cfg.get("close_advice") or {}) if isinstance(cfg, dict) else {}
     if not request.experience and bool(close_advice_cfg.get("enabled", False)):
         try:
+            prepared_portfolio = None
+            if request.prepared_portfolio_context_manifest is not None:
+                try:
+                    prepared_portfolio = load_prepared_portfolio_context(
+                        manifest_path=request.prepared_portfolio_context_manifest,
+                        expected_base=request.base, expected_run_id=request.run_id,
+                        expected_account=acct,
+                        expected_account_config_sha256=request.account_config_authority.account_config_sha256,
+                        expected_manifest_sha256=request.prepared_portfolio_context_manifest_sha256,
+                        expected_runtime_config=cfg,
+                    )
+                except PreparedPortfolioContextError:
+                    # A missing stock proof blocks CC rolls, while close/Put advice
+                    # can still use the independently sealed option evidence.
+                    prepared_portfolio = None
             raw_close_result = run_close_advice(
                 config=cfg,
                 context_path=(acct_state_dir / "option_positions_context.json").resolve(),
@@ -574,6 +593,7 @@ def run_one_account(
                 ),
                 account=acct,
                 context_override=prepared_option_context,
+                portfolio_context_override=prepared_portfolio,
                 required_data_snapshot_manifest_sha256=(
                     request.required_data_snapshot_sha256
                 ),

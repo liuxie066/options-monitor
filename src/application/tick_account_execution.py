@@ -300,6 +300,7 @@ def _build_close_advice_barrier_plan(
         markets_to_run=request.markets_to_run,
         position_records_by_account=records_by_account,
         unavailable_by_account=unavailable,
+        include_roll_candidates=True,
     )
     blocked_markets_by_account: dict[str, dict[str, str]] = {}
     for account, account_plan in sorted((plan.get("accounts") or {}).items()):
@@ -336,6 +337,7 @@ def _build_close_advice_barrier_plan(
             position_records_by_account=records_by_account,
             unavailable_by_account=unavailable,
             blocked_markets_by_account=blocked_markets_by_account,
+            include_roll_candidates=True,
         )
     merged_config, plan = merge_close_advice_requirements_into_prefetch_config(
         candidate_config=candidate_config,

@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1441 (`src`: 606, `domain`: 99, `scripts`: 21, `tests`: 711)
-- Internal import edges: 12791 total, 4474 production/script edges excluding tests
+- Python files scanned: 1445 (`src`: 607, `domain`: 99, `scripts`: 21, `tests`: 714)
+- Internal import edges: 12833 total, 4482 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|733| domain
+  application -->|736| domain
   application -->|4| domain_services
   application -->|210| infrastructure
   application -->|2| om_strategy_core
@@ -51,8 +51,8 @@ flowchart LR
   scripts -->|1| tests
   src -->|1| application
   storage -->|1| domain
-  tests -->|6296| application
-  tests -->|708| domain
+  tests -->|6328| application
+  tests -->|710| domain
   tests -->|2| domain_services
   tests -->|431| infrastructure
   tests -->|495| interfaces
@@ -65,7 +65,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 733 |
+| application | domain | 736 |
 | interfaces | application | 240 |
 | application | infrastructure | 210 |
 | scripts | application | 70 |
@@ -90,8 +90,8 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 6296 |
-| tests | domain | 708 |
+| tests | application | 6328 |
+| tests | domain | 710 |
 | tests | interfaces | 495 |
 | tests | infrastructure | 431 |
 | tests | storage | 77 |
@@ -105,7 +105,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 313 |
+| src.application | domain.domain | 316 |
 | src.interfaces | src.application | 189 |
 | src.application.ledger | domain.domain | 184 |
 | src.application | src.infrastructure | 144 |

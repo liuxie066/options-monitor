@@ -1,10 +1,10 @@
 # Close Advice Contract
 
-本文前半部记录持仓评估与建议（Position Advice）的现行契约、`remaining_yield_capture.v3` 止盈策略及独立的 Short Put 向下移仓、Covered Call 上滚查询；后半部保留 v2 和 v3 的设计过程作为历史资料。运行规则以前半部及代码为准。
+本文前半部记录持仓评估与建议（Position Advice）的现行契约、`remaining_yield_capture.v3` 止盈策略、Short Put 向下移仓及 Covered Call 上滚的调度评估与主动查询；后半部保留 v2 和 v3 的设计过程作为历史资料。运行规则以前半部及代码为准。
 
 Close Advice 判断已有 short Put / short Call 是否值得提前买回：净兑现至少 80% 开仓净权利金，且继续持有到期归零所能多取得的最高期权收益年化不超过 10% 时考虑提示平仓；临期远价外的仓位优先持有。OM 接受 Put 接股及 Covered Call 交股；指派本身不是提前平仓理由。
 
-Close Advice 止盈策略不建议新开仓，不 roll，不比较替代标的，不 reallocate，不根据方向、集中度或 short-vol thesis 产生平仓建议，也不处理 long option 的止盈或止损。Delta 只用于临期持有例外，不单独触发平仓。开仓候选仍由 Candidate Engine 负责。Position Advice 的同级能力 `short_put_roll_candidates`、`covered_call_roll_candidates` 提供主动移仓查询，不改变本策略的 `close/hold/not_evaluable` 含义，也不要求先取得 `close` 结论。
+Close Advice 止盈策略不建议新开仓，不 roll，不比较替代标的，不 reallocate，不根据方向、集中度或 short-vol thesis 产生平仓建议，也不处理 long option 的止盈或止损。Delta 只用于临期持有例外，不单独触发平仓。开仓候选仍由 Candidate Engine 负责。Position Advice 的同级移仓策略在 Tick 中评估 Short Put 向下移仓和 Covered Call 上滚；`short_put_roll_candidates`、`covered_call_roll_candidates` 另提供主动查询。移仓结论保留在独立的 `roll_advice` 中，不改变止盈策略的 `close/hold/not_evaluable` 含义，也不要求先取得 `close` 结论。
 
 ## 决策状态
 
@@ -16,7 +16,7 @@ Close Advice 止盈策略不建议新开仓，不 roll，不比较替代标的�
 | `hold` | 必需经济数据有效，但经济性条件未通过，或满足临期远价外持有例外 | 否 |
 | `not_evaluable` | 持仓、日期、双边报价或手续费证据不完整/不一致 | 否 |
 
-新报告不再生成 `tier`、`tier_label`、`exit_state` 或 `close_action` 等平行状态。读取旧报告时，如果没有明确的 `recommendation_state`，或 `policy_version` 不是当前版本，读取面不猜测旧字段的含义，而是保守投影为 `not_evaluable`。Daily Brief 同样只接受当前版本、当前时点证据有效且决策指标完整的 `close` 行。`hold` 仅表示这一止盈规则没有触发平仓，不代表对持仓整体风险的认可。
+新报告不再生成 `tier`、`tier_label`、`exit_state` 或 `close_action` 等平行状态。读取旧报告时，如果没有明确的 `recommendation_state`，或 `policy_version` 不是当前版本，读取面不猜测旧字段的含义，而是保守投影为 `not_evaluable`。Daily Brief 的平仓建议只接受当前版本、当前时点证据有效且决策指标完整的 `close` 行；移仓建议另验证当前 `roll_advice` 的证据与候选。`hold` 仅表示这一止盈规则没有触发平仓，不代表对持仓整体风险的认可。
 
 ## 剩余收益止盈策略
 
@@ -87,18 +87,27 @@ Close Advice 不推断 assignment、called-away、exercise 或 settlement。这�
 
 ```text
 SQLite ledger position_lots
-  + sealed required-data snapshot (spot/bid/ask)
-  + versioned Futu fee schedule
-  -> domain.domain.close_advice.evaluate_close_advice
-  -> close_advice.csv / close_advice.txt / report manifest
-  -> Daily Brief selects only current-policy, priced, complete-evidence CLOSE rows with decision metrics
+  + same sealed required-data batch (old contracts and roll candidates)
+  + versioned Futu fee schedule + verified CC stock coverage
+  -> independent close policy and Put/CC roll policies
+  -> close_advice.csv (roll_advice JSON) / close_advice.txt / report manifest
+  -> Daily Brief positions (close / roll_down / roll_up)
+  -> configured daily notification and position_advice_read
 ```
 
 调度 Tick 与主动评估入口复用相同 runner、版本化 evaluator、费用 owner、run-scoped required-data plan 和封存 snapshot。Runner 必须同时取得 run ID、snapshot manifest 和该 manifest 绑定的 Close Advice plan；任一缺失或变更都在发布前失败关闭。评估期间不得修复 cache、回退到 last price 或重新请求 OpenD。每行报告保留 plan、binding、snapshot、receipt、payload hash 和观测时间，用于追溯决策输入。
 
 当前报告的 manifest 必须声明 `quote_mode=frozen_snapshot`、非空 `run_id`、snapshot manifest SHA-256 和 Close Advice plan SHA-256。每个 CSV 数据行的 `quote_mode` 及两个 SHA-256 必须与 manifest 完全一致；任一行不一致会使整份当前报告不可读。零行报告仍可有效，但报告级绑定必须完整。
 
-`close_advice_read` 继续只读已有报告。默认路径与 `run_id` 路径只读取通过上述 sealed 校验的报告，不刷新持仓、不拉取行情、不生成建议。显式 `report_path` 可用于查看历史字节；缺少完整 sealed provenance 或与 manifest 不一致的历史行一律投影为 `not_evaluable`。
+`position_advice_read` 是统一的持仓建议读取工具，从 canonical latest Daily Brief 的 `positions` 读取平仓、Put 向下移仓及 CC 上滚建议，对应 `close`、`roll_down`、`roll_up`。读取沿用简报的账户、市场和完整性校验，不刷新持仓、不拉取行情、不重新评估，也不发送通知。平仓行的 `close_actionable` 由简报生产方按完整策略证据、在通知展示裁剪前封存；读取时再结合简报时效，`notification_eligible` 仅控制通知展示，历史缺少决策资格字段的行不升级为当前可操作。既有 `close_advice_read` 仍可只读平仓报告：默认路径与 `run_id` 路径只读取通过上述 sealed 校验的报告；显式 `report_path` 用于查看历史字节，缺少完整 sealed provenance 或与 manifest 不一致的历史行一律投影为 `not_evaluable`。
+
+### Tick 调度移仓与提醒
+
+启用 Position Advice 后，Tick 在同一批 run-scoped required-data plan 中封存旧仓报价、适用的替代期权链及搜索覆盖证据，评估期间不另拉行情。搜索最晚到期日为本次市场日期加上该标的对应方向配置的 `max_dte`：Put 使用 `sell_put`，Call 使用 `sell_call`，默认均为 60 天；这只规定调度搜索上限，主动查询仍显式传入 `max_new_expiration`。新到期日不得早于旧仓，新仓 DTE 必须大于零；上限容纳不了旧仓时没有合格搜索区间，不扩张用户配置。
+
+每个旧 lot 的移仓结果作为 `roll_advice` JSON 写入 `close_advice.csv`，保留适用性、覆盖缺口、原因和已排序候选，再投影到 Daily Brief `positions`。`actionable_until_utc` 取双腿报价及其现价有效期、股票覆盖有效期（CC）和封存来源有效期的最小值；过期或缺少此字段时，统一读取保留原结果但不标为当前可操作，不生成新滚仓提醒。移仓建议独立于止盈状态；旧仓为 `hold` 不阻止有充分证据的移仓建议，缺证或净支出排除也不改写止盈结论。CC 仍须核实同账户全部 Call 的股票覆盖；Put 和 CC 均要求扣费净现金严格大于零，零现金及净支出均排除。
+
+简短通知展示该 lot 排序首位的目标合约、旧 ask／新 bid、行权价变化、扣费净现金及收益率。通知中的移仓年化统一使用净现金年化 `incremental_annualized_return`，分母沿用各策略：Put 为新仓 `strike × 股数`，CC 为本次 `spot × 覆盖股数`；CC 的条件性交股改善不替代净现金年化。两方向统一按净现金年化优先、方向对应的 strike 调整比例次优排序，首位只代表当前已评价集合；有部分覆盖时保留缺口。通知沿用 Daily Brief 的账户/市场隔离、发送配置、幂等和交付确认；飞书卡片与备用正文完成最终字节预算裁剪后，必须保留同一组完整移仓条目才封存确认身份，未完整显示的条目保留待提醒；主动评估、`roll-down` 和 `roll-up` 查询仅写独立请求报告，均不发送通知。所有路径均不下单、不写业务账本。
 
 ### 主动评估与两种输入
 
@@ -129,13 +138,13 @@ SQLite ledger position_lots
 
 业务结果为 `short_put_roll.output.v1`，保留旧仓、评估时点、`scope` 请求边界和实际已请求到期日、`coverage` 枚举/计数、候选、展示/省略数及原因。`status=success|partial|disabled|unavailable` 与 `outcome=found|none|unable|not_applicable` 分开表达：覆盖完整才可返回 `none`；有候选且存在未评价范围为 `found + partial`；没有合格候选但存在缺口为 `unable`。`disabled` 表示插件未启用；`unavailable` 的插件缺失与行情依赖失败按原因码分别展示。缺失诊断保留不可用，不补零。新腿证据完整且明确停牌或证券状态不正常时计入排除；伴随缺失或陈旧证据时仍计入未评价，旧腿不合格仍阻断整次查询。文字输出提供旧/新收益比较、两腿费用与证据；JSON 输出原业务对象，Tool 保留 envelope；完成请求退出 0，输入或执行错误退出 2。独立 request/result 报告写入失败返回 `REPORT_WRITE_FAILED` 执行错误，不作为行情依赖失败，也不返回未保存成功的报告路径。
 
-查询仅按需行情读取与独立请求报告，不下单、不写账本、不通知，不接入 scheduled Tick、Daily Brief 或原平仓提醒。它不改变旧仓生命周期及 `close/hold/not_evaluable` 含义，也不要求旧策略先判定 `close`。
+主动查询仅按需读取行情并写独立请求报告，不下单、不写账本、不通知，也不改写调度 Tick 的报告或 Daily Brief。同一纯移仓策略另由 Tick 消费封存批次，按上文合同进入简报与提醒。它不改变旧仓生命周期及 `close/hold/not_evaluable` 含义，也不要求旧策略先判定 `close`。
 
 ### Covered Call 上滚主动查询
 
 `covered_call_roll_candidates` Tool 与 `om position-advice roll-up --request-file <JSON> [--config-key us|hk] [--format text|json]` 共用 `src/application/short_put_roll.py::covered_call_roll_candidates` 的取数、费用及证据编排；纯策略和排序由 `plugins/position-advice/src/om_position_advice_plugin/covered_call_roll.py` 持有，复用 Put 的身份与双腿现金校验。安装/启用边界与原 Position Advice 相同。
 
-请求必填 `account`、已有 short call 的 `lot_id`、`max_new_expiration`（YYYY-MM-DD，无默认值，必须晚于旧到期日）；可选 `max_new_strike > old_strike`、`limit`（整数 1..50，默认 10，仅限制展示）。仅等量替换一个 active 标准 short call lot 的全部剩余张数。旧 Call 价外幅度为 `(old_strike - spot) / spot`，价内、平值及价外幅度 `<=5%` 纳入；更深价外返回 `success/not_applicable`、`coverage=null`，不搜索候选。新 Call 必须同标的、市场、币种、乘数和交割单位，`new_strike > old_strike` 且 `new_expiration > old_expiration`，不超过请求上限。允许新 Call 仍然价内；这只提升交股价，不证明已消除提前指派。
+请求必填 `account`、已有 short call 的 `lot_id`、`max_new_expiration`（YYYY-MM-DD，无默认值，不得早于旧到期日）；可选 `max_new_strike > old_strike`、`limit`（整数 1..50，默认 10，仅限制展示）。仅等量替换一个 active 标准 short call lot 的全部剩余张数。旧 Call 价外幅度为 `(old_strike - spot) / spot`，价内、平值及价外幅度 `<=5%` 纳入；更深价外返回 `success/not_applicable`、`coverage=null`，不搜索候选。新 Call 必须同标的、市场、币种、乘数和交割单位，`new_strike > old_strike` 且 `new_expiration >= old_expiration`，不超过请求上限，新仓 DTE 必须大于零。与 Put 相同，同日到期也可评估，延期天数为零；更早到期以 `new_expiration_before_old` 排除。允许新 Call 仍然价内；这只提升交股价，不证明已消除提前指派。
 
 查询先通过既有 portfolio owner 取得或复用同账户、同券商、同市场且完整、新鲜、未过滤的股票快照（现有股票时效上限 300 秒；缺失或不合格快照按需刷新；不写 portfolio 缓存）。再由 `domain/domain/risk_capacity.py::evaluate_covered_call_stock_coverage` 比较同标的、同币种的实际股票总量与该账户所有未关闭 short call 的交割股数之和，防止不同 lot 重复占用同一批股票；无法确认 Call 义务或乘数时保留不可用。使用总持股而非已扣除锁定股票的可卖数量。确认零持股或股数不足返回 `success/not_applicable`、`insufficient_stock_coverage`、`coverage=null`，不拉期权行情、不建议交易；覆盖证据缺失、过期或账户不符返回 `unable`，不能等同于已确认无持股。`stock_coverage` 单列持股证据与时间，`coverage` 仍专指候选搜索覆盖。股票来自合格券商快照，Call 义务来自可信本地账本；本次不新增券商期权与账本的全量对账。
 
@@ -155,18 +164,18 @@ incremental_period_return = R / B1
 incremental_annualized_return = R / B1 × 365 / new_dte
 ```
 
-CC 不返回 Put 的 `accepted`。资格有效时，`R>0` 为 `recommendation=credit_roll`、`cash_flow_type=credit`；`R=0` 为 `cash_neutral_roll/cash_neutral`；`R<0` 且 `D<U`（即 `G>0`）为 `debit_roll/debit`，列为可考虑候选。`D>=U` 的 debit 为 `not_recommended`，通过 `debit_not_below_assignment_uplift` 计入排除；方向、到期、覆盖等资格不符为 `excluded`。负现金年化保留真实负值，不因此一票否决 debit。两腿费用可能把原本可考虑的 debit 推到排除边界；金额比较使用 Decimal，等于边界不推荐。
+CC 不返回 Put 的 `accepted`。资格有效时，仅 `R>0` 为 `recommendation=credit_roll`、`cash_flow_type=credit`；`R<=0` 均为 `recommendation=not_recommended`，通过与 Put 相同的 `non_positive_net_credit` 计入排除。零现金保留 `cash_flow_type=cash_neutral`，负现金保留 `cash_flow_type=debit`；这些描述不表示推荐，即使交股价提升大于净支出也不推荐。方向、到期、覆盖等资格不符为 `excluded`。纯策略仍保留被排除候选的净支出、现金年化及条件性交股改善指标以解释原因。金额以 Decimal 比较，先扣除两腿费用，再检查净现金是否严格为正，不用展示取整结果决定资格；任一腿费用都可能把净收入候选变为零现金或净支出而排除。
 
 `G` 比较的是“旧仓与新仓最终都按各自行权价卖出同量股票”时的条件性交股收入改善，不是已实现利润、预期收益或可兑现套利；新仓未被指派、股价变化、持股占用时间及提前指派均可能改变实际结果。本规则不引入主观持股成本、Delta 概率或开仓收益门槛。报告必须同时展示 `net_credit`、`net_debit`、每股 `strike_increase`、总额 `assignment_proceeds_uplift`、`assignment_net_improvement` 及延后天数。被指派交股是 wheel 的第二步，接受旧仓交股仍是有效选择，不把交股描述为失败或告警。
 
-CC 排序依次为 `assignment_improvement_annualized_return` 降序、`assignment_net_improvement` 降序、延期升序、`net_credit` 降序、到期日及合约代码；条件年化只衡量上述条件差额。JSON 为 `covered_call_roll.output.v1`，沿用 `success/partial/disabled/unavailable`、`found/none/unable/not_applicable` 和 `coverage=complete/partial/unavailable` 语义，只有完整搜索零候选才是 `none`；报告保存在 `output_requests/covered_call_roll/<request_id>/`，写入失败为执行错误。查询不下单、不写业务账本、不通知，不接入 Tick 或 Daily Brief。
+CC 仅对合格的净收现金候选排序，与 Put 使用同一排序逻辑：`incremental_annualized_return` 降序、方向对应的行权价变动比例降序（CC 为 `strike_increase_pct`，Put 为 `strike_drop_pct`）、`extension_days` 升序、`net_credit` 降序，再按合约身份、到期日稳定排序。`assignment_improvement_annualized_return` 仅展示条件性交股差额，不参与排序。JSON 为 `covered_call_roll.output.v1`，沿用 `success/partial/disabled/unavailable`、`found/none/unable/not_applicable` 和 `coverage=complete/partial/unavailable` 语义，只有完整搜索零候选才是 `none`；报告保存在 `output_requests/covered_call_roll/<request_id>/`，写入失败为执行错误。主动查询不下单、不写业务账本、不通知，也不改写 Tick 或 Daily Brief；调度路径另按上文合同发布。
 
 | 口径 | Short Put 向下移仓 | Covered Call 上滚 |
 |---|---|---|
-| 新行权价与到期 | 严格更低且严格价外；到期不早于旧仓 | 严格更高；到期严格更晚；可仍价内 |
-| 现金判定 | `R>0` 才 `accepted` | credit、现金中性、`D<U` 的 debit 分别展示 |
+| 新行权价与到期 | 严格更低且严格价外；到期不早于旧仓，DTE 为正 | 严格更高；到期不早于旧仓，DTE 为正；可仍价内 |
+| 现金判定 | `R>0` 才 `accepted` | `R>0` 才推荐；零现金与净支出均排除 |
 | 资金分母 | 各自 `strike × S`，担保资金代理 | 新旧均为 `spot × S`，覆盖股票当前市值代理 |
-| 排序主项 | 净增现金年化 | 条件性交股改善年化 |
+| 排序主项 | 净增现金年化 | 净增现金年化 |
 | 指派语义 | 可能接股 | wheel 第二步卖出持股，仍是有效选择 |
 | 持股前置 | 不要求持有股票 | 必须先核实所有 Call 的股票覆盖 |
 
@@ -195,12 +204,13 @@ CC 排序依次为 `assignment_improvement_annualized_return` 降序、`assignme
 | 组件 | 责任 |
 |---|---|
 | `domain/domain/close_advice.py` / `plugins/position-advice` | 核心输入合同、安全读取/排序/通知资格与懒加载门面；可选包执行唯一版本化策略及结论文案 |
-| `src/application/close_advice_required_data.py` | 为 active short Put/Call 计划精确合约行情，并封存独立交易日日历与市场状态 |
-| `src/application/close_advice_runner.py` | 装配已封存输入、费用估算、CSV/文本/审计输出 |
-| `src/application/daily_decision_brief_service.py` | 仅投影当前版本且证据完整的 `close` 为日常提醒 |
+| `src/application/close_advice_required_data.py` | 为 active short Put/Call 计划精确合约及移仓范围行情，并封存独立交易日日历与市场状态 |
+| `src/application/close_advice_runner.py` | 装配已封存输入、费用估算、独立止盈与移仓评估及 CSV/文本/审计输出 |
+| `src/application/daily_decision_brief_service.py` | 将当前版本且证据完整的平仓与移仓结论投影到 Daily Brief `positions` |
 | `src/application/position_advice.py` / `position_advice_history.py` | 主动选择、隔离请求编排与兼容历史参考，不新增财务公式 |
 | `src/application/position_advice_evidence.py` | 调度与主动评估共用的时效、时段、行情权限资格 |
-| `src/application/agent_tools/close_advice_read_impl.py` | 只读已有报告，不重新评估 |
+| `position_advice_read` Tool | 只读 canonical latest Daily Brief 的平仓和移仓建议，不重新评估 |
+| `src/application/agent_tools/close_advice_read_impl.py` | 只读已有平仓报告，不重新评估 |
 
 Close Advice 只是建议，不写 trade event，不修改 position lot，不向 broker 下单。
 

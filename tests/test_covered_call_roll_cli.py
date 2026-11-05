@@ -1,4 +1,4 @@
-"""Covered-call public CLI/tool projection, including debit cost and honest outcomes."""
+"""Covered-call public CLI/tool projection for credit and excluded non-credit."""
 from contextlib import nullcontext
 import json
 
@@ -25,10 +25,10 @@ def result():
         "stock_coverage": {"status": "covered", "required_shares": 100, "available_shares": 100},
         "scope": {"max_new_expiration": "2026-12-14"}, "coverage": {"status": "complete"},
         "candidates": [{"contract": "US.NVDA261214C00105000", "strike": 105, "expiration": "2026-12-14",
-            "recommendation": "debit_roll", "cash_flow_type": "debit", "net_credit": -105, "net_debit": 105,
-            "strike_increase": 5, "assignment_proceeds_uplift": 500, "assignment_net_improvement": 395,
-            "assignment_improvement_annualized_return": 0.3534, "incremental_annualized_return": -0.0939,
-            "extension_days": 30, "old_close_cost": 502, "new_net_premium": 397,
+            "recommendation": "credit_roll", "cash_flow_type": "credit", "net_credit": 95, "net_debit": 0,
+            "strike_increase": 5, "assignment_proceeds_uplift": 500, "assignment_net_improvement": 595,
+            "assignment_improvement_annualized_return": 0.5323, "incremental_annualized_return": 0.0850,
+            "extension_days": 30, "old_close_cost": 502, "new_net_premium": 597,
             "old_capital_basis": 10200, "new_capital_basis": 10200,
             "old_buy_fee": {"amount": 2, "currency": "USD"}, "new_sell_fee": {"amount": 3, "currency": "USD"}}],
         "displayed": 1, "omitted": 0, "reason_codes": [], "report_path": "/isolated/result.json"}
@@ -54,10 +54,35 @@ def test_roll_up_routes_to_covered_call_tool_and_keeps_original_json(tmp_path, m
     if fmt == "json":
         assert json.loads(output) == data
     else:
-        for text in ("Covered Call 上滚", "可考虑的净支出上滚", "-105", "净支出", "105", "每股行权价提升",
-                     "交股价提升总额", "500", "395", "当前股价×覆盖股数", "wheel", "不是已实现利润", "买回费用", "新卖出费用"):
+        for text in ("Covered Call 上滚", "净收现金上滚", "95", "每股行权价提升",
+                     "交股价提升总额", "500", "595", "当前股价×覆盖股数", "wheel", "不是已实现利润", "买回费用", "新卖出费用",
+                     "净增现金年化优先", "仅推荐扣费净现金严格大于零", "零现金及净支出均排除", "non_positive_net_credit"):
             assert text in output
         assert "向下移仓" not in output
+        assert "可考虑的净支出上滚" not in output
+        assert "debit_roll" not in output
+
+
+def test_renderer_preserves_credit_same_expiry_candidate():
+    data = result()
+    data["candidates"][0].update(expiration=data["position"]["expiration"], extension_days=0)
+    output = render_covered_call_roll(data)
+    assert "净收现金上滚" in output
+    assert "到期 2026-11-14；延后 0 天" in output
+    assert "扣费净现金 95.00 USD" in output
+
+
+def test_renderer_explains_zero_and_debit_exclusion_without_recommending_them():
+    data = result()
+    data.update(outcome="none", candidates=[], displayed=0,
+        exclusion_summary=[{"code": "non_positive_net_credit", "count": 2}])
+    output = render_covered_call_roll(data)
+    assert "non_positive_net_credit" in output
+    assert "零现金及净支出均排除" in output
+    assert "无合格候选" in output
+    assert "候选比较" not in output
+    assert "可考虑的净支出上滚" not in output
+    assert "现金中性上滚" not in output
 
 
 @pytest.mark.parametrize("status,outcome,coverage,label", [

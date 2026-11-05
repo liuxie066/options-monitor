@@ -88,8 +88,9 @@ def test_real_adapters_prove_stock_before_call_chain_without_business_writes(
     result = run(tmp_path, covered_service)
     assert result["outcome"] == ("found" if shares else "not_applicable"), (result["reason_codes"], broker.calls, logs)
     if shares:
-        assert result["candidates"][0]["recommendation"] == "debit_roll"
-        assert result["candidates"][0]["net_debit"] > 100
+        assert result["candidates"][0]["recommendation"] == "credit_roll"
+        assert result["candidates"][0]["net_credit"] > 0
+        assert result["candidates"][0]["net_debit"] == 0
         chain_calls = [value for name, value in quotes.calls if name == "chain"]
         assert chain_calls
     else:

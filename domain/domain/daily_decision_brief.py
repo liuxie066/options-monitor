@@ -126,6 +126,83 @@ def build_daily_brief_candidate_identity(
     return f"{identity}:{branch_id}"
 
 
+def daily_brief_position_roll(row: Mapping[str, Any]) -> tuple[str, Mapping[str, Any]] | None:
+    """Select the producer's best roll without re-evaluating its economics."""
+
+    result = row.get("roll_advice")
+    if not isinstance(result, Mapping):
+        return None
+    if result.get("status") not in {"success", "partial"} or result.get("outcome") != "found":
+        return None
+    position = result.get("position")
+    candidates = result.get("candidates")
+    if not isinstance(position, Mapping) or not isinstance(candidates, list) or not candidates:
+        return None
+    target = candidates[0]
+    if not isinstance(target, Mapping):
+        return None
+    lot = str(row.get("position_lot_id") or "").strip()
+    option_type = _lower(row.get("option_type"))
+    if (not lot or lot != str(position.get("lot_id") or position.get("position_lot_id") or "").strip()
+            or canonical_symbol(row.get("symbol")) != canonical_symbol(position.get("symbol"))
+            or option_type not in {"call", "put"}
+            or option_type != _lower(position.get("option_type"))):
+        return None
+    if (str(row.get("expiration") or "") != str(position.get("expiration") or position.get("expiration_ymd") or "")
+            or row.get("strike") != position.get("strike")):
+        return None
+    if not target.get("contract") or not target.get("expiration"):
+        return None
+    try:
+        net_credit = float(target["net_credit"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not math.isfinite(net_credit) or net_credit <= 0:
+        return None
+    if option_type == "call" and target.get("recommendation") != "credit_roll":
+        return None
+    return ("roll_up" if option_type == "call" else "roll_down"), target
+
+
+def daily_brief_position_roll_is_current(
+    row: Mapping[str, Any], *, now_utc: datetime | str | None = None,
+) -> bool:
+    result = row.get("roll_advice")
+    if not isinstance(result, Mapping):
+        return False
+    valid_until = _parse_datetime(result.get("actionable_until_utc"))
+    if valid_until is None:
+        return False
+    now = _parse_datetime(now_utc) if now_utc is not None else datetime.now(timezone.utc)
+    return now is not None and now.astimezone(timezone.utc) < valid_until
+
+
+def daily_brief_position_roll_identity(
+    row: Mapping[str, Any], *, account: Any, market: Any,
+) -> str | None:
+    selected = daily_brief_position_roll(row)
+    if selected is None:
+        return None
+    binding = [_lower(account), _upper(market), canonical_symbol(row.get("symbol")),
+               str(row.get("position_lot_id") or "").strip(), selected[0]]
+    return f"position-roll:v1:{binding[0]}:{binding[1]}:{selected[0]}:" + _digest(binding)
+
+
+def daily_brief_roll_notification_identities(
+    brief: Mapping[str, Any], *, now_utc: datetime | str | None = None,
+) -> set[str]:
+    if brief.get("actionability") != "live_actionable":
+        return set()
+    return {
+        identity
+        for row in brief.get("positions") or []
+        if isinstance(row, Mapping) and row.get("roll_notification_eligible") is True
+        and daily_brief_position_roll_is_current(row, now_utc=now_utc or _parse_datetime(brief.get("generated_at_utc")))
+        and (identity := daily_brief_position_roll_identity(
+            row, account=brief.get("account"), market=brief.get("market")))
+    }
+
+
 def decide_daily_brief_notification(
     *,
     ran_scan: bool,

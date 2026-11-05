@@ -180,7 +180,8 @@ CSP 现金担保与余量使用 `query_cash_headroom`。其 `assessment.supporte
 - `close_advice_read`
 - `position_advice_evaluate`：按需行情及隔离请求报告，不写账本或发送通知
 - `short_put_roll_candidates`：已有单笔 short put 的向下移仓查询，按需行情及独立请求报告，不下单、不写账本、不通知
-- `covered_call_roll_candidates`：有股票覆盖的单笔 short call 上滚查询，分别展示净收现金、净支出及条件性交股价提升，不下单、不写账本、不通知
+- `covered_call_roll_candidates`：有股票覆盖的单笔 short call 上移查询，扣费后净收入须严格大于零，到期不早于旧仓；不下单、不写账本、不通知
+- `position_advice_read`：读取最近 Tick 的统一持仓建议，支持平仓、CC 上移、CSP 下移；不刷新行情
 
 ### 通知
 
@@ -438,8 +439,18 @@ bid/ask、Delta、IV 没有独立源时间，不能宣称为精确收盘价或�
 ```
 
 `close_advice_read` 不刷新持仓或行情，也不生成新建议。调度与主动评估均使用同一 sealed required-data 路径；显式历史路径中的非 sealed 行会投影为 `not_evaluable`。
-新报告只支持 short put/call，并仅返回 `close`、`hold` 或
-`not_evaluable`。它不生成新仓、roll、replace 或 reallocate 建议。
+平仓政策只支持 short put/call，并返回 `close`、`hold` 或 `not_evaluable`。Tick 报告另以 `roll_advice` 保存同轮封存行情计算的滚仓结果，平仓状态与滚仓结论独立。
+
+统一读取最近 Tick 的持仓建议：
+
+```bash
+./om tools run --tool position_advice_read \
+  --input-json '{"account":"sample","market":"US"}'
+./om tools run --tool position_advice_read \
+  --input-json '{"account":"sample","market":"US","action":"roll_up"}'
+```
+
+`action` 可选 `close`、`roll_up`、`roll_down`。工具读取经过验证的最新 Daily Brief，不重新扫描或重算经济指标；过期结果保留数据新鲜度，并停止标为当前可操作。Tick 通知在“持仓”内展示每笔旧仓的首选目标、平仓 ask、开仓 bid、strike 调整、扣费净收入和净现金收益率。
 
 主动评估（需安装持仓建议可选包并启用）：
 
@@ -465,7 +476,7 @@ bid/ask、Delta、IV 没有独立源时间，不能宣称为精确收盘价或�
 
 查询仅替换一个旧 lot 的全部剩余张数；旧仓价内、平值或价外幅度不超过 5% 才搜索。新仓同标的、同张数、较低 strike 且严格价外，到期日不早于旧到期日且不超过请求上限，两腿扣费净增现金必须大于零。人工展示并列显示 strike 降幅、延期、新仓价外幅度、净增现金年化、新仓到期归零最高年化及相对旧仓变化（pp），并保留两腿费用、资金分母、DTE、来源/时点及缺口原因。净增现金是现金流，不等于交易盈利；旧 ask 买回与新 bid 卖出是单腿现金估算，不保证组合执行。
 
-JSON 业务输出为 `short_put_roll.output.v1`，含旧仓快照、评估时间、请求范围 `scope`、覆盖 `coverage`、已排序 `candidates`、展示/省略数、原因及独立报告路径。`status` 表示执行/插件状态，`outcome` 区分：`not_applicable` 为旧仓价外超过 5%、`coverage=null` 且未搜索；`none` 为覆盖完整的合法零候选；`unable` 为数据缺失/过期或未评价范围使结论不足；`found` 为已找到候选，仍可能 `status=partial`。部分排名仅覆盖已评价集合，不能据此排除缺口中的机会。`disabled` 表示插件未启用；`unavailable` 为查询不可用，插件缺失与行情依赖失败通过原因码区分。新腿已确认不合格且证据完整时计入排除；真实缺失或陈旧证据仍保留覆盖缺口。查询按需读取行情并写独立请求报告；报告写入失败以 `REPORT_WRITE_FAILED` 返回执行错误，CLI 退出 2，不提供未保存成功的报告路径。不下单、不改账本、不发通知，也不接入 Tick 或 Daily Brief。完整经济口径见[移仓合同](CLOSE_ADVICE_CONTRACT.md#short-put-向下移仓主动查询)。
+JSON 业务输出为 `short_put_roll.output.v1`，含旧仓快照、评估时间、请求范围 `scope`、覆盖 `coverage`、已排序 `candidates`、展示/省略数、原因及独立报告路径。`status` 表示执行/插件状态，`outcome` 区分：`not_applicable` 为旧仓价外超过 5%、`coverage=null` 且未搜索；`none` 为覆盖完整的合法零候选；`unable` 为数据缺失/过期或未评价范围使结论不足；`found` 为已找到候选，仍可能 `status=partial`。部分排名仅覆盖已评价集合，不能据此排除缺口中的机会。`disabled` 表示插件未启用；`unavailable` 为查询不可用，插件缺失与行情依赖失败通过原因码区分。新腿已确认不合格且证据完整时计入排除；真实缺失或陈旧证据仍保留覆盖缺口。查询按需读取行情并写独立请求报告；报告写入失败以 `REPORT_WRITE_FAILED` 返回执行错误，CLI 退出 2，不提供未保存成功的报告路径。主动查询不下单、不改账本、不发通知；Tick 使用同一政策消费本轮封存行情，另将结果写入 Daily Brief 持仓。完整经济口径见[移仓合同](CLOSE_ADVICE_CONTRACT.md#short-put-向下移仓主动查询)。
 
 ### Covered Call 上滚
 
@@ -477,9 +488,9 @@ JSON 业务输出为 `short_put_roll.output.v1`，含旧仓快照、评估时间
 ./om tools run --tool covered_call_roll_candidates --input-file /path/to/cc-roll-request.json
 ```
 
-JSON 请求必填 `account`、已有 short call 的 `lot_id`、`max_new_expiration`（YYYY-MM-DD，必须晚于旧到期日，无默认值）；可选 `max_new_strike > old_strike`、整数 `limit`（1..50，默认 10，仅限制展示）。旧仓价内/平值/价外不超过 5%，先以合格账户股票快照核实全部未关闭 Call 的覆盖；新合约须更高 strike 且严格更晚到期，可仍价内。
+JSON 请求必填 `account`、已有 short call 的 `lot_id`、`max_new_expiration`（YYYY-MM-DD，不早于旧到期日，无默认值）；可选 `max_new_strike > old_strike`、整数 `limit`（1..50，默认 10，仅限制展示）。旧仓价内/平值/价外不超过 5%，先以合格账户股票快照核实全部未关闭 Call 的覆盖；新合约须更高 strike，到期不早于旧仓，允许同到期日，可仍价内。
 
-业务对象为 `covered_call_roll.output.v1`，保留与 Put 相同的 `status/outcome/coverage` 语义；`stock_coverage` 独立记录持股依据。确认无股或覆盖不足返回 `success/not_applicable`、`coverage=null`；缺失/陈旧持股证据为 `unable`。`credit_roll`、`cash_neutral_roll`、`debit_roll` 分开标注；debit 的双腿扣费净支出必须严格小于 `(新 strike−旧 strike)×覆盖股数`，输出同时展示净支出、每股与总行权价提升、条件性交股净改善。资金分母统一为 `spot×覆盖股数`，按条件性交股改善年化排序；这是两边最终均交股的条件比较，不是已实现利润或预期收益。交股是 wheel 第二步，接受原仓交股仍是有效选择，上滚不保证消除提前指派。只查询并保存独立报告，不下单、不写业务账本、不通知；详情见 [CC 滚仓契约](CLOSE_ADVICE_CONTRACT.md#covered-call-上滚主动查询)。
+业务对象为 `covered_call_roll.output.v1`，保留与 Put 相同的 `status/outcome/coverage` 语义；`stock_coverage` 独立记录持股依据。确认无股或覆盖不足返回 `success/not_applicable`、`coverage=null`；缺失/陈旧持股证据为 `unable`。仅推荐 `credit_roll`；两腿扣费净收入须严格大于零，零和负值均排除，原因 `non_positive_net_credit`。输出分别展示扣费净现金、每股与总行权价提升、条件性交股净改善。资金分母为 `spot×覆盖股数`，与 CSP 一样按净现金年化优先、strike 调整比例次优排序；这是两边最终均交股的条件比较，不是已实现利润或预期收益。交股是 wheel 第二步，接受原仓交股仍是有效选择，上滚不保证消除提前指派。只查询并保存独立报告，不下单、不写业务账本、不通知；详情见 [CC 滚仓契约](CLOSE_ADVICE_CONTRACT.md#covered-call-上滚主动查询)。
 
 ### Daily Brief
 

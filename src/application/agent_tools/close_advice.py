@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.application.agent_tools.base import build_agent_tool
+from src.application.agent_tools.position_advice_read_impl import position_advice_read_tool
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import mask_path
 from src.application.agent_tool_config import repo_base
@@ -217,11 +218,11 @@ COVERED_CALL_ROLL_CANDIDATES_TOOL = build_agent_tool(
     name="covered_call_roll_candidates",
     catalog_summary="比较有股票覆盖的 short call 上滚候选、净支出及交股价提升。",
     description=(
-        "Query higher-strike, strictly later-expiry calls for one fully covered short-call lot. "
+        "Query higher-strike calls with expiration on or after the old expiry for one fully covered short-call lot. "
         "Verify account stock coverage before fetching quotes; naked or undercovered calls are not applicable. "
-        "Return distinct credit_roll, cash_neutral_roll and debit_roll conclusions. A debit is eligible only when "
-        "strictly below the strike uplift times covered shares, after both fees. Show the debit and conditional "
-        "assignment improvement, not realized profit or expected return. Use spot times covered shares for capital. "
+        "Return credit_roll only; net cash after both fees must be strictly positive. "
+        "Show net cash and conditional assignment improvement separately from realized profit or expected return. "
+        "Use spot times covered shares for capital. "
         "Assignment is the wheel's stock sale step. max_new_expiration is required. "
         "Preserve complete/partial/unavailable coverage; never orders, ledger changes or notifications."
     ),
@@ -246,6 +247,31 @@ COVERED_CALL_ROLL_CANDIDATES_TOOL = build_agent_tool(
 )
 
 
-TOOLS = (CLOSE_ADVICE_READ_TOOL, POSITION_ADVICE_EVALUATE_TOOL, SHORT_PUT_ROLL_CANDIDATES_TOOL, COVERED_CALL_ROLL_CANDIDATES_TOOL)
+POSITION_ADVICE_READ_TOOL = build_agent_tool(
+    name="position_advice_read", pure_read=True,
+    requires=("local_daily_brief_store",), capabilities=("daily_brief", "position_advice", "read_only"),
+    description="Read canonical latest Daily Brief position close / CC roll-up / CSP roll-down advice. "
+        "Uses persisted results and source freshness; never fetches quotes or recomputes economics. "
+        "CC and CSP rolls require strictly positive net cash and may retain the old expiration.",
+    catalog_summary="读取最新持仓平仓、CC 向上移仓、CSP 向下移仓建议；过期结果不可操作",
+    input_schema={
+        "account": {"type": "string", "minLength": 1},
+        "market": {"type": "string", "enum": ["US", "HK", "us", "hk"]},
+        "action": {"type": "string", "enum": ["close", "roll_up", "roll_down"]},
+    },
+    handler=position_advice_read_tool, allow_additional_input=False,
+    output_contract={"schema_version": "position_advice_read.output.v1", "evidence_type": "collection",
+        "primary_rows": "rows", "row_count_field": "returned_count", "freshness": "source_declared",
+        "fact_fields": ["rows[].account", "rows[].market", "rows[].position_lot_id", "rows[].action",
+            "rows[].actionable", "rows[].status", "rows[].outcome", "rows[].close_advice", "rows[].roll_advice"],
+        "freshness_fields": ["scopes[].freshness", "rows[].effective_actionability", "rows[].actionable_until_utc"],
+        "missing_data_fields": ["scopes[].status", "rows[].status", "rows[].reason_codes"],
+        "model_preview_fields": ["status", "scope", "coverage", "scopes", "rows"]},
+    bot_input_fields=("account", "market", "action"),
+    examples=({"input": {"account": "sample", "market": "US", "action": "roll_up"}},),
+)
+
+
+TOOLS = (CLOSE_ADVICE_READ_TOOL, POSITION_ADVICE_READ_TOOL, POSITION_ADVICE_EVALUATE_TOOL, SHORT_PUT_ROLL_CANDIDATES_TOOL, COVERED_CALL_ROLL_CANDIDATES_TOOL)
 __all__ = ["CLOSE_ADVICE_READ_TOOL", "POSITION_ADVICE_EVALUATE_TOOL", "SHORT_PUT_ROLL_CANDIDATES_TOOL",
     "COVERED_CALL_ROLL_CANDIDATES_TOOL", "TOOLS"]

@@ -209,8 +209,8 @@ def render_covered_call_roll(result: dict[str, Any]) -> str:
         if result.get(key):
             lines.append(f"{label}：{_roll_diagnostic(result[key])}")
     if result.get("candidates"):
-        lines.append("\n候选比较（条件性交股改善年化优先，仅覆盖已评价集合）：")
-    labels = {"credit_roll": "净收现金上滚", "cash_neutral_roll": "现金中性上滚", "debit_roll": "可考虑的净支出上滚"}
+        lines.append("\n候选比较（净增现金年化优先，仅覆盖已评价集合）：")
+    labels = {"credit_roll": "净收现金上滚", "not_recommended": "不推荐", "excluded": "排除"}
     for index, row in enumerate(result.get("candidates") or [], 1):
         lines.extend([
             f"{index}. {_value(row.get('contract'))}；{labels.get(row.get('recommendation'), _value(row.get('recommendation')))}；"
@@ -229,6 +229,7 @@ def render_covered_call_roll(result: dict[str, Any]) -> str:
         if row.get("evidence"):
             lines.append(f"   报价与证据：{_roll_diagnostic(row['evidence'])}")
     lines.append(f"展示 {_value(result.get('displayed'))}；省略 {_value(result.get('omitted'))}（limit 仅限制展示）。")
+    lines.append("仅推荐扣费净现金严格大于零的上滚；零现金及净支出均排除（non_positive_net_credit）。")
     lines.append("单腿旧 ask / 新 bid 扣费估算，不保证组合成交或消除提前指派。")
     lines.append("条件改善假设两边最终均按各自行权价交股，不是已实现利润或预期收益；交股是 wheel 卖出持股的第二步，接受旧仓交股仍是有效选择。")
     if result.get("interpretation"):

@@ -62,6 +62,7 @@ from src.application.position_advice_inputs import advice_position_key, position
 from src.application.position_advice_evidence import current_position_advice_evidence, QUOTE_RIGHTS_FIELDS
 from src.application.position_advice_plugin import evaluate_close_advice, position_advice_plugin_status, require_position_advice_plugin, PositionAdviceUnavailableError
 from src.application.source_receipts import sha256_bytes
+from src.application.short_put_roll import evaluate_frozen_position_roll
 from src.application.market_data_provider import resolve_market_data_provider
 from src.application.required_data_snapshot import assert_required_data_source
 from src.application.required_data_snapshot import (
@@ -75,6 +76,7 @@ OUTPUT_COLUMNS = [
     "account",
     "position_lot_id",
     "input_source",
+    "roll_advice",
     "input_id",
     "input_as_of_utc",
     "position_economics_sha256",
@@ -1095,6 +1097,7 @@ def _load_frozen_required_data_quotes(
             raise RequiredDataSnapshotError(
                 f"{symbol} sealed required-data CSV is unreadable"
             ) from exc
+        frame = frame.astype(object).where(pd.notna(frame), None)
         for row in frame.to_dict("records"):
             key = _quote_key(
                 row.get("symbol") or symbol,
@@ -1168,6 +1171,7 @@ def run_close_advice(
     close_advice_required_data_plan: Path | None = None,
     account: str | None = None,
     context_override: Mapping[str, Any] | None = None,
+    portfolio_context_override: Mapping[str, Any] | None = None,
     required_data_snapshot_manifest_sha256: str | None = None,
     now_utc: datetime | None = None,
 ) -> dict[str, Any]:
@@ -1512,6 +1516,16 @@ def run_close_advice(
         else:
             row["evaluation_status"] = "priced"
             row["quote_status"] = "priced"
+        requirement = frozen_requirements_by_lot.get(lot_id) or {}
+        if requirement.get("roll_scope"):
+            roll = evaluate_frozen_position_roll(
+                position=pos0, positions_context=ctx, portfolio_context=portfolio_context_override,
+                requirement=requirement,
+                quotes=[value for quote_identity, value in quotes.items() if quote_identity[0] == key[0]],
+                provenance=frozen_provenance.get(key[0], {}), config=config, now=decision_now,
+                unavailable_reason=frozen_plan_reasons.get(advice_position_key(pos0)),
+            )
+            row["roll_advice"] = json.dumps(roll, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
         status = str(row.get("evaluation_status") or "unknown").strip().lower() or "unknown"
         evaluation_status_counts[status] = evaluation_status_counts.get(status, 0) + 1
         rows.append(row)

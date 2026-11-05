@@ -132,8 +132,8 @@ def _evaluate_roll(
             reasons.append("insufficient_stock_coverage")
         if new_strike <= old_strike:
             reasons.append("new_strike_not_higher")
-        if extension_days <= 0:
-            reasons.append("new_expiration_not_later")
+        if extension_days < 0:
+            reasons.append("new_expiration_before_old")
     if reasons:
         if option_type == "call":
             return {"recommendation": "excluded", "cash_flow_type": None, "reason_codes": reasons, "metrics": {}}
@@ -149,13 +149,10 @@ def _evaluate_roll(
         debit = max(-net_credit, Decimal(0))
         if net_credit > 0:
             recommendation, cash_flow_type, reasons = "credit_roll", "credit", []
-        elif net_credit == 0:
-            recommendation, cash_flow_type, reasons = "cash_neutral_roll", "cash_neutral", []
-        elif assignment_improvement > 0:
-            recommendation, cash_flow_type, reasons = "debit_roll", "debit", []
         else:
-            recommendation, cash_flow_type = "not_recommended", "debit"
-            reasons = ["debit_not_below_assignment_uplift"]
+            recommendation = "not_recommended"
+            cash_flow_type = "cash_neutral" if net_credit == 0 else "debit"
+            reasons = ["non_positive_net_credit"]
         return {"recommendation": recommendation, "cash_flow_type": cash_flow_type,
             "reason_codes": reasons, "metrics": {
                 "old_otm_pct": float((old_strike - spot_value) / spot_value),
@@ -224,9 +221,13 @@ def _evaluate_roll(
 
 def rank_short_put_roll_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Rank a complete eligible set using full-precision flattened metrics."""
+    return _rank_roll_candidates(rows, strike_change_field="strike_drop_pct")
+
+
+def _rank_roll_candidates(rows: list[dict[str, Any]], *, strike_change_field: str) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda row: (
         -row["incremental_annualized_return"],
-        -row["strike_drop_pct"],
+        -row[strike_change_field],
         row["extension_days"],
         -row["net_credit"],
         str(row.get("contract_symbol") or row.get("contract") or ""),
