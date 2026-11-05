@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -9,6 +9,11 @@ import subprocess
 import sys
 from typing import Any, Mapping
 
+from domain.domain.candidate_defaults import (
+    DEFAULT_SELL_CALL_WINDOW,
+    DEFAULT_SELL_PUT_WINDOW,
+    resolve_candidate_window,
+)
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.expiration_dates import MARKET_TIMEZONES, expiration_market_date
 from domain.domain.fetch_source import (
@@ -206,6 +211,7 @@ def build_close_advice_required_data_plan(
     unavailable_by_account: Mapping[str, str] | None = None,
     blocked_markets_by_account: Mapping[str, Mapping[str, str]] | None = None,
     manual_positions_by_account: Mapping[str, list[dict[str, Any]]] | None = None,
+    include_roll_candidates: bool = False,
 ) -> dict[str, Any]:
     run_id_norm = _required_text(run_id, "run_id")
     market_dates = {
@@ -361,6 +367,7 @@ def build_close_advice_required_data_plan(
                 symbol=symbol,
                 account_config=config,
                 base_config=base_config,
+                roll_option_type=option_type if include_roll_candidates else None,
             )
             quote_key = "|".join(
                 contract_key(
@@ -402,6 +409,13 @@ def build_close_advice_required_data_plan(
                 ),
             }
             if binding is not None:
+                if include_roll_candidates:
+                    max_dte = binding.pop("roll_max_dte")
+                    requirement["roll_scope"] = {
+                        "max_dte": max_dte,
+                        "max_new_expiration": (as_of_date + timedelta(days=max_dte)).isoformat(),
+                        "direction": "up" if option_type == "call" else "down",
+                    }
                 requirement["fetch_binding"] = binding
             if binding_error is not None:
                 requirement["planning_reason"] = binding_error
@@ -444,6 +458,7 @@ def resolve_position_fetch_binding(
     symbol: str,
     account_config: Mapping[str, Any],
     base_config: Mapping[str, Any],
+    roll_option_type: str | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     symbol_norm = canonical_symbol(symbol) or str(symbol or "").strip().upper()
     for scope, config in (
@@ -483,11 +498,16 @@ def resolve_position_fetch_binding(
                 "host": host,
                 "port": port,
             }
-            return {
+            binding = {
                 **binding_payload,
                 "config_scope": scope,
                 "binding_id": canonical_sha256(binding_payload),
-            }, None
+            }
+            if roll_option_type in {"put", "call"}:
+                defaults = DEFAULT_SELL_CALL_WINDOW if roll_option_type == "call" else DEFAULT_SELL_PUT_WINDOW
+                side_cfg = resolved.get("sell_call" if roll_option_type == "call" else "sell_put")
+                binding["roll_max_dte"] = resolve_candidate_window(side_cfg, defaults=defaults).max_dte
+            return binding, None
     return None, "required_data_symbol_config_missing"
 
 

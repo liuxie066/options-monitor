@@ -904,6 +904,7 @@ def _position_requirement_side_plans(
     *,
     trading_date: date | None,
     symbol: str,
+    available_expirations: list[str] | None = None,
 ) -> list[OptionSideFetchPlan]:
     grouped: dict[OptionSide, list[dict[str, Any]]] = {
         "put": [],
@@ -969,6 +970,47 @@ def _position_requirement_side_plans(
                 source_fields=["close_advice.position_requirements"],
             )
         )
+    for index, requirement in enumerate(requirements):
+        scope = requirement.get("roll_scope")
+        if scope is None:
+            continue
+        try:
+            if not isinstance(scope, dict):
+                raise ValueError("roll scope missing")
+            max_expiration = date.fromisoformat(scope["max_new_expiration"])
+            option_type = requirement["option_type"]
+            if scope["direction"] != ("up" if option_type == "call" else "down"):
+                raise ValueError("roll direction mismatch")
+            if trading_date is not None and (max_expiration - trading_date).days != scope["max_dte"]:
+                raise ValueError("roll horizon mismatch")
+        except (KeyError, ValueError, TypeError):
+            raise RequiredDataPlanningError(
+                symbol=symbol, requirement_index=index, field_name="roll_scope",
+            ) from None
+        if trading_date is None:
+            continue
+        old_expiration = requirement["expiration"]
+        expirations = [
+            expiry for expiry in (available_expirations or [])
+            if expiry >= old_expiration
+            and expiry <= max_expiration.isoformat()
+        ]
+        if not expirations:
+            continue
+        strike = float(requirement["strike"])
+        plans.append(OptionSideFetchPlan(
+            option_type=option_type,
+            min_dte=min((date.fromisoformat(expiry) - trading_date).days for expiry in expirations),
+            max_dte=scope["max_dte"],
+            explicit_expirations=expirations,
+            strike_window=StrikeWindowPlan(
+                min_strike=strike if option_type == "call" else None,
+                max_strike=strike if option_type == "put" else None,
+                source="position_advice.roll_scope",
+            ),
+            planning_reason="same-scan position roll replacement scope",
+            source_fields=["position_advice.roll_scope"],
+        ))
     return plans
 
 
@@ -1342,6 +1384,7 @@ def build_required_data_fetch_plan(
         ready_position_requirements,
         trading_date=trading_date,
         symbol=symbol,
+        available_expirations=list(expiration_discovery.expirations),
     )
     available_expirations = list(expiration_discovery.expirations)
 

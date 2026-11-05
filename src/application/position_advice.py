@@ -7,7 +7,6 @@ from datetime import datetime, timezone, date
 from io import StringIO
 from pathlib import Path
 import sys
-import sqlite3
 from typing import Any
 from uuid import uuid4
 
@@ -21,7 +20,10 @@ from src.application.close_advice_report_manifest import read_close_advice_repor
 from src.application.config_sections import resolve_watchlist_config, set_watchlist_config
 from src.application.market_data_provider import resolve_market_data_provider
 from src.application.position_advice_history import find_position_reference, reference_report_paths
-from src.application.position_advice_inputs import MAX_ADVICE_POSITIONS, advice_position_key, normalize_manual_positions, select_ledger_positions
+from src.application.position_advice_inputs import (
+    MAX_ADVICE_POSITIONS, advice_position_key, normalize_manual_positions, select_ledger_positions,
+    read_advice_holdings as _read_holdings,
+)
 from src.application.runtime_paths import runtime_root_scope
 from src.infrastructure.io_utils import atomic_write_json
 
@@ -78,22 +80,6 @@ def _observe_sessions(config: dict[str, Any], positions: list[dict[str, Any]]) -
 
     return result
 
-
-def _read_holdings(*, config: dict[str, Any], config_path: Path, base_dir: Path, runtime_root: Path, account: str) -> list[dict[str, Any]]:
-    from src.application.ledger.api import read_position_query_ledger, attach_event_strategy_metadata
-    from src.application.agent_tool_contracts import AgentToolError
-
-    try:
-        _repo, snapshots = read_position_query_ledger(base=base_dir, accounts=[account], cfg=config, config_path=config_path, runtime_root=runtime_root)
-    except (sqlite3.Error, OSError) as exc:
-        raise AgentToolError(
-            code="DEPENDENCY_MISSING", message="Canonical ledger is unavailable; holdings were not treated as empty",
-            details={"reason": "ledger_unavailable", "cause": type(exc).__name__},
-        ) from exc
-    snapshot = snapshots.get(account) or {}
-    if snapshot.get("snapshot_status") != "trusted":
-        raise ValueError("canonical ledger evidence is unavailable; holdings were not treated as empty")
-    return attach_event_strategy_metadata(snapshot["account_position_lots"], snapshot.get("trade_events"))
 
 
 def _run_current_assessment(

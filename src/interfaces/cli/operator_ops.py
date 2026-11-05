@@ -42,6 +42,10 @@ def add_operator_commands(subparsers: Any) -> None:
     roll.add_argument("--config-key", choices=("us", "hk"))
     roll.add_argument("--request-file", required=True, help="JSON: 必填 account、lot_id、max_new_expiration（无默认）；可选 min_new_strike > 0、limit 1..50（默认 10）")
     roll.add_argument("--format", choices=("text", "json"), default="text", help="人工展示（默认）或原业务 JSON")
+    roll_up = advice_sub.add_parser("roll-up", help="查询 Covered Call 上滚候选与净支出，不下单、不写账本、不通知")
+    roll_up.add_argument("--config-key", choices=("us", "hk"))
+    roll_up.add_argument("--request-file", required=True, help="JSON: 必填 account、lot_id、max_new_expiration；可选 max_new_strike > 旧 strike、limit 1..50")
+    roll_up.add_argument("--format", choices=("text", "json"), default="text", help="人工展示（默认）或原业务 JSON")
 
     notify = subparsers.add_parser("notify", help="notification helpers")
     notify_sub = notify.add_subparsers(dest="notify_command", required=True)
@@ -97,11 +101,10 @@ def handle_operator_command(
                 payload["config_path"] = args.config_path
         except (OSError, ValueError) as exc:
             raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
-        tool_name = (
-            "short_put_roll_candidates"
-            if args.position_advice_command == "roll-down"
-            else "position_advice_evaluate"
-        )
+        tool_name = {
+            "roll-down": "short_put_roll_candidates",
+            "roll-up": "covered_call_roll_candidates",
+        }.get(args.position_advice_command, "position_advice_evaluate")
         result = execute_tool(tool_name, payload)
         if not result["ok"]:
             raise AgentToolError(**result["error"])

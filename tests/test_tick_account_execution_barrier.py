@@ -864,6 +864,8 @@ def test_barrier_reads_shared_ledger_once_and_plans_close_advice_before_prefetch
         requirement["position_lot_id"]
         for requirement in merged_requirements
     } == {"lot-lx", "lot-sy"}
+    assert all(requirement["roll_scope"]["max_dte"] == 60 for requirement in merged_requirements)
+    assert all(requirement["roll_scope"]["direction"] == "down" for requirement in merged_requirements)
     assert quality_gate_calls == [
         ("close_advice", "lx", "hk"),
         ("close_advice", "sy", "hk"),

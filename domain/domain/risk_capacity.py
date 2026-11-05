@@ -1137,6 +1137,59 @@ def evaluate_cash_snapshot(
     }
 
 
+def evaluate_covered_call_stock_coverage(
+    *, positions: Sequence[Mapping[str, Any]], snapshot: Mapping[str, Any],
+    account: str, broker: str, symbol: str, currency: str,
+) -> dict[str, Any]:
+    """Prove existing call coverage once per account/symbol/currency pool.
+
+    The host qualifies the stock snapshot's physical account, scope and time.
+    Use total stock inventory: sellable quantity may already exclude the shares
+    backing these calls. Open calls retain their obligation until ledger close,
+    including expired calls awaiting settlement. No new shares are allocated.
+    """
+    from decimal import Decimal, InvalidOperation
+    from domain.domain.option_position_identity import normalize_account, normalize_broker, normalize_currency
+    from domain.domain.symbol_identity import canonical_symbol
+
+    required = 0
+    inventory = Decimal(0)
+    selected_account, selected_broker = normalize_account(account), normalize_broker(broker)
+    selected_symbol, selected_currency = canonical_symbol(symbol), normalize_currency(currency, strict=True)
+    try:
+        for row in positions:
+            if (normalize_account(row.get("account")) != selected_account
+                    or normalize_broker(row.get("broker")) != selected_broker
+                    or canonical_symbol(row.get("symbol")) != selected_symbol
+                    or row.get("side") != "short" or row.get("option_type") != "call"):
+                continue
+            row_currency = normalize_currency(row.get("currency"), strict=True)
+            if row_currency != selected_currency:
+                continue
+            required += contract_share_quantity(row.get("contracts_open"), require_option_multiplier(row.get("multiplier")))
+        for row in snapshot["rows"]:
+            instrument = row["instrument_ref"]
+            if instrument.get("asset_type") != "stock" or canonical_symbol(instrument.get("symbol")) != selected_symbol:
+                continue
+            if normalize_currency(instrument.get("currency"), strict=True) != selected_currency:
+                continue
+            quantity = Decimal(str(row["quantity"]))
+            if not quantity.is_finite() or quantity < 0 or row.get("position_side") not in {"long", "short"}:
+                raise ValueError("invalid stock inventory")
+            inventory += quantity if row["position_side"] == "long" else -quantity
+        if required <= 0:
+            raise ValueError("no verified call obligation")
+    except (KeyError, TypeError, ValueError, InvalidOperation):
+        return {"status": "unavailable", "reason_codes": ["stock_coverage_evidence_invalid"],
+            "required_shares": None, "available_shares": None}
+    covered = inventory >= required
+    return {"status": "covered" if covered else "insufficient",
+        "reason_codes": [] if covered else ["insufficient_stock_coverage"],
+        "required_shares": required, "available_shares": float(max(inventory, Decimal(0))),
+        "account": selected_account, "broker": selected_broker, "symbol": selected_symbol,
+        "currency": selected_currency, "basis": "qualified_broker_stock_and_canonical_open_calls"}
+
+
 def evaluate_booked_option_capacity(
     *, fact: Mapping[str, Any], facts: Sequence[Mapping[str, Any]],
     snapshot: Mapping[str, Any], wheel_read_model: Mapping[str, Any],

@@ -1030,8 +1030,18 @@ def test_run_one_account_reuses_validated_close_inputs_without_legacy_text_proje
         prepared_option_positions_context_manifest=prepared_manifest,
         prepared_option_positions_context_manifest_sha256="a" * 64,
         required_data_snapshot_sha256="b" * 64,
+        prepared_portfolio_context_manifest=tmp_path / "prepared-portfolio.manifest.json",
+        prepared_portfolio_context_manifest_sha256="c" * 64,
     )
     env = _install_common_patches(monkeypatch, request)
+    portfolio = {"same_run_stock_evidence": True}
+    portfolio_reads = []
+
+    def load_portfolio(**kwargs):
+        portfolio_reads.append(kwargs)
+        return portfolio
+
+    monkeypatch.setattr(env["mod"], "load_prepared_portfolio_context", load_portfolio)
     validated_context = {
         "context_status": "available",
         "open_positions_min": [],
@@ -1099,6 +1109,11 @@ def test_run_one_account_reuses_validated_close_inputs_without_legacy_text_proje
     outcome = _run_account(request, env, _FakeRunlog(), _allow_schema_validation)
 
     assert observed["context_override"] == validated_context
+    assert observed["portfolio_context_override"] == portfolio
+    assert portfolio_reads[0]["expected_run_id"] == request.run_id
+    assert portfolio_reads[0]["expected_account"] == "lx"
+    assert portfolio_reads[0]["expected_account_config_sha256"] == request.account_config_authority.account_config_sha256
+    assert portfolio_reads[0]["expected_manifest_sha256"] == "c" * 64
     assert observed["required_data_snapshot_manifest_sha256"] == "b" * 64
     assert outcome.result.notification_text == ""
     assert not (request.accounts_root / "lx" / "reports" / "symbols_notification.txt").exists()

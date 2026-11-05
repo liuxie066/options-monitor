@@ -427,9 +427,14 @@ def assemble_daily_decision_brief(
     combo_rows = _dedupe_rows(combo_rows, family="combo_yield")
     wheel_rows = _dedupe_rows(wheel_rows, family="wheel")
     close_rows = _dedupe_close_rows(close_rows)
-    selected_close_rows = select_close_advice_notification_rows(
+    actionable_close_rows = select_close_advice_notification_rows(
         close_rows,
-        max_items_per_account=close_advice_max_items,
+        max_items_per_account=0,
+    )
+    actionable_close_row_ids = {id(row) for row in actionable_close_rows}
+    selected_close_rows = (
+        actionable_close_rows[:close_advice_max_items]
+        if close_advice_max_items > 0 else actionable_close_rows
     )
     selected_close_row_ids = {id(row) for row in selected_close_rows}
     _load_strategy_step_failures(
@@ -593,6 +598,7 @@ def assemble_daily_decision_brief(
             _position_view(
                 row,
                 notification_eligible=notification_eligible,
+                close_actionable=id(row) in actionable_close_row_ids,
             )
         )
     for row in selected_close_rows:
@@ -1387,6 +1393,19 @@ def _load_close_advice(
             return [], False
         if _row_market(row) != market:
             continue
+        roll_raw = row.get("roll_advice")
+        if roll_raw not in (None, ""):
+            try:
+                roll = json.loads(roll_raw)
+                if not isinstance(roll, dict):
+                    raise ValueError("roll_advice must be an object")
+                row["roll_advice"] = roll
+            except (TypeError, ValueError):
+                row.pop("roll_advice", None)
+                data_gaps.append({"scope": "position", "strategy_family": "roll_advice",
+                    "position_lot_id": row.get("position_lot_id"), "reason": "roll_advice_invalid"})
+        else:
+            row.pop("roll_advice", None)
         row["_source_path"] = _source_path(run_account_dir, path)
         row["_source_row"] = source_row
         rows.append(row)
@@ -2163,6 +2182,7 @@ def _position_view(
     row: Mapping[str, Any],
     *,
     notification_eligible: bool,
+    close_actionable: bool,
 ) -> dict[str, Any]:
     fields = (
         "position_lot_id",
@@ -2189,6 +2209,10 @@ def _position_view(
     out = {field: _json_safe(row.get(field)) for field in fields}
     out["advice_kind"] = "close_advice"
     out["notification_eligible"] = notification_eligible
+    out["close_actionable"] = close_actionable
+    if "roll_advice" in row:
+        out["roll_advice"] = row["roll_advice"]
+        out["roll_notification_eligible"] = True
     out["metrics"] = {
         key: _json_safe(row.get(key))
         for key in (

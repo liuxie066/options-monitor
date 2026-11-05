@@ -14,6 +14,7 @@ from domain.domain.daily_decision_brief import (
     build_daily_brief_candidate_identity,
     daily_brief_compatible_digests,
     daily_brief_digest,
+    daily_brief_roll_notification_identities,
     normalize_daily_decision_brief,
     normalize_persisted_daily_decision_brief,
     normalize_persisted_daily_decision_brief_with_digests,
@@ -2833,6 +2834,13 @@ def _normalize_candidate_identities(
     out: set[str] = set()
     for raw in values:
         identity = str(raw or "").strip()
+        if identity.startswith(f"position-roll:v1:{account}:{market}:"):
+            suffix = identity.removeprefix(f"position-roll:v1:{account}:{market}:")
+            direction, _, digest = suffix.partition(":")
+            if direction not in {"roll_up", "roll_down"} or not _SHA256_RE.fullmatch(digest):
+                raise ValueError(f"candidate identity is incompatible: {identity!r}")
+            out.add(identity)
+            continue
         match = _CANDIDATE_IDENTITY_RE.fullmatch(identity)
         if not match or match.group("account") != account or match.group("market") != market:
             raise ValueError(f"candidate identity is incompatible: {identity!r}")
@@ -2947,8 +2955,10 @@ def _candidate_identity_set(brief: Mapping[str, Any] | None) -> set[str]:
         for item in brief.get("candidate_index") or []
         if isinstance(item, Mapping) and str(item.get("identity") or "").strip()
     }
+    rolls = daily_brief_roll_notification_identities(brief)
     if identities:
-        return identities
+        return identities | rolls
+    identities.update(rolls)
     for action in brief.get("actions") or []:
         if not isinstance(action, Mapping):
             continue

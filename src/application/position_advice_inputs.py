@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
+import sqlite3
 from typing import Any, Mapping
 
 from domain.domain.close_advice import safe_float, safe_int
@@ -11,6 +13,26 @@ from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.domain.trade_contract_identity import normalize_contract_expiration
 
 MAX_ADVICE_POSITIONS = 100
+
+
+def read_advice_holdings(*, config: dict[str, Any], config_path: Path, base_dir: Path,
+                         runtime_root: Path, account: str) -> list[dict[str, Any]]:
+    from src.application.ledger.api import read_position_query_ledger, attach_event_strategy_metadata
+    from src.application.agent_tool_contracts import AgentToolError
+
+    try:
+        _repo, snapshots = read_position_query_ledger(
+            base=base_dir, accounts=[account], cfg=config, config_path=config_path, runtime_root=runtime_root,
+        )
+    except (sqlite3.Error, OSError) as exc:
+        raise AgentToolError(
+            code="DEPENDENCY_MISSING", message="Canonical ledger is unavailable; holdings were not treated as empty",
+            details={"reason": "ledger_unavailable", "cause": type(exc).__name__},
+        ) from exc
+    snapshot = snapshots.get(account) or {}
+    if snapshot.get("snapshot_status") != "trusted":
+        raise ValueError("canonical ledger evidence is unavailable; holdings were not treated as empty")
+    return attach_event_strategy_metadata(snapshot["account_position_lots"], snapshot.get("trade_events"))
 
 
 def aware_time(value: Any) -> datetime | None:

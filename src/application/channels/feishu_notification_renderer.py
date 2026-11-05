@@ -280,6 +280,14 @@ def normalize_feishu_notification_envelope(
     }
 
 
+def feishu_notification_visible_markdown(value: Mapping[str, Any]) -> tuple[str, str]:
+    """Return the final budgeted primary and fallback bodies of a frozen envelope."""
+    normalized = normalize_feishu_notification_envelope(value)
+    elements = normalized["transport"]["content"]["body"]["elements"]
+    primary = "\n\n".join(element["content"] for element in elements)
+    return primary, normalized["fallback"]["markdown"]
+
+
 def feishu_notification_envelope_sha256(value: Mapping[str, Any]) -> str:
     normalized = normalize_feishu_notification_envelope(value)
     return _sha256(_canonical_json(normalized))
@@ -299,6 +307,7 @@ __all__ = [
     "FEISHU_NOTIFICATION_MAX_CHARS",
     "FEISHU_NOTIFICATION_RENDERER_VERSION",
     "feishu_notification_envelope_sha256",
+    "feishu_notification_visible_markdown",
     "is_feishu_notification_envelope",
     "normalize_feishu_notification_envelope",
     "render_feishu_notification_card",

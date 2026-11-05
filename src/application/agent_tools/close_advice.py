@@ -3,11 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 from src.application.agent_tools.base import build_agent_tool
+from src.application.agent_tools.position_advice_read_impl import position_advice_read_tool
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import mask_path
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_config import resolve_output_root
-from src.application.short_put_roll import SHORT_PUT_ROLL_INPUT_SCHEMA
+from src.application.short_put_roll import COVERED_CALL_ROLL_INPUT_SCHEMA, SHORT_PUT_ROLL_INPUT_SCHEMA
 
 
 _CLOSE_ADVICE_READ_OUTPUT_CONTRACT: dict[str, Any] = {
@@ -155,10 +156,18 @@ POSITION_ADVICE_EVALUATE_TOOL = build_agent_tool(
 )
 
 def _short_put_roll_tool(payload: dict[str, Any]):
+    return _roll_tool(payload, covered_call=False)
+
+
+def _covered_call_roll_tool(payload: dict[str, Any]):
+    return _roll_tool(payload, covered_call=True)
+
+
+def _roll_tool(payload: dict[str, Any], *, covered_call: bool):
     from src.application.agent_tool_contracts import AgentToolError
     from src.application.quality.gate import QualityGateBlocked
     from src.application.runtime_paths import resolve_runtime_root, runtime_root_scope
-    from src.application.short_put_roll import short_put_roll_candidates
+    from src.application.short_put_roll import covered_call_roll_candidates, short_put_roll_candidates
 
     path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
     base = repo_base()
@@ -166,12 +175,13 @@ def _short_put_roll_tool(payload: dict[str, Any]):
     runtime_root = path.expanduser().resolve().parent if resolved.source == "repo_default" else resolved.runtime_root
     try:
         with runtime_root_scope(runtime_root):
-            result = short_put_roll_candidates(payload, config=cfg, config_path=path, base_dir=base, runtime_root=runtime_root)
+            query = covered_call_roll_candidates if covered_call else short_put_roll_candidates
+            result = query(payload, config=cfg, config_path=path, base_dir=base, runtime_root=runtime_root)
     except ValueError as exc:
         raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
     except QualityGateBlocked as exc:
         raise AgentToolError(code="QUALITY_GATE_BLOCKED", message=str(exc)) from exc
-    return result, [], {"source": "short_put_roll", "notifications_sent": False}
+    return result, [], {"source": "covered_call_roll" if covered_call else "short_put_roll", "notifications_sent": False}
 
 
 SHORT_PUT_ROLL_CANDIDATES_TOOL = build_agent_tool(
@@ -204,5 +214,64 @@ SHORT_PUT_ROLL_CANDIDATES_TOOL = build_agent_tool(
     bot_input_fields=("config_key", "account", "lot_id", "max_new_expiration", "min_new_strike", "limit"),
 )
 
-TOOLS = (CLOSE_ADVICE_READ_TOOL, POSITION_ADVICE_EVALUATE_TOOL, SHORT_PUT_ROLL_CANDIDATES_TOOL)
-__all__ = ["CLOSE_ADVICE_READ_TOOL", "POSITION_ADVICE_EVALUATE_TOOL", "SHORT_PUT_ROLL_CANDIDATES_TOOL", "TOOLS"]
+COVERED_CALL_ROLL_CANDIDATES_TOOL = build_agent_tool(
+    name="covered_call_roll_candidates",
+    catalog_summary="比较有股票覆盖的 short call 上滚候选、净支出及交股价提升。",
+    description=(
+        "Query higher-strike calls with expiration on or after the old expiry for one fully covered short-call lot. "
+        "Verify account stock coverage before fetching quotes; naked or undercovered calls are not applicable. "
+        "Return credit_roll only; net cash after both fees must be strictly positive. "
+        "Show net cash and conditional assignment improvement separately from realized profit or expected return. "
+        "Use spot times covered shares for capital. "
+        "Assignment is the wheel's stock sale step. max_new_expiration is required. "
+        "Preserve complete/partial/unavailable coverage; never orders, ledger changes or notifications."
+    ),
+    requires=("runtime_config", "canonical_ledger", "position_advice_plugin", "market_data_provider"),
+    capabilities=("position_advice", "covered_call_roll", "read_only"),
+    read_only=True, risk_level="local_write",
+    side_effects=("fetches_market_data", "writes_isolated_request_reports"),
+    input_schema=COVERED_CALL_ROLL_INPUT_SCHEMA, allow_additional_input=False,
+    handler=_covered_call_roll_tool,
+    output_contract={
+        "schema_version": "covered_call_roll.output.v1", "evidence_type": "collection",
+        "primary_rows": "candidates", "row_count_field": "displayed", "freshness": "source_declared",
+        "fact_fields": ["account", "outcome", "position", "stock_coverage", "scope", "coverage", "pricing_basis",
+            "candidates[].contract", "candidates[].strike", "candidates[].recommendation", "candidates[].cash_flow_type",
+            "candidates[].net_credit", "candidates[].net_debit", "candidates[].strike_increase",
+            "candidates[].assignment_proceeds_uplift", "candidates[].assignment_net_improvement",
+            "candidates[].assignment_improvement_annualized_return", "candidates[].extension_days"],
+        "freshness_fields": ["evaluated_at_utc", "source.spot_observed_at_utc"],
+        "missing_data_fields": ["reason_codes", "coverage", "exclusion_summary"],
+    },
+    bot_input_fields=("config_key", "account", "lot_id", "max_new_expiration", "max_new_strike", "limit"),
+)
+
+
+POSITION_ADVICE_READ_TOOL = build_agent_tool(
+    name="position_advice_read", pure_read=True,
+    requires=("local_daily_brief_store",), capabilities=("daily_brief", "position_advice", "read_only"),
+    description="Read canonical latest Daily Brief position close / CC roll-up / CSP roll-down advice. "
+        "Uses persisted results and source freshness; never fetches quotes or recomputes economics. "
+        "CC and CSP rolls require strictly positive net cash and may retain the old expiration.",
+    catalog_summary="读取最新持仓平仓、CC 向上移仓、CSP 向下移仓建议；过期结果不可操作",
+    input_schema={
+        "account": {"type": "string", "minLength": 1},
+        "market": {"type": "string", "enum": ["US", "HK", "us", "hk"]},
+        "action": {"type": "string", "enum": ["close", "roll_up", "roll_down"]},
+    },
+    handler=position_advice_read_tool, allow_additional_input=False,
+    output_contract={"schema_version": "position_advice_read.output.v1", "evidence_type": "collection",
+        "primary_rows": "rows", "row_count_field": "returned_count", "freshness": "source_declared",
+        "fact_fields": ["rows[].account", "rows[].market", "rows[].position_lot_id", "rows[].action",
+            "rows[].actionable", "rows[].status", "rows[].outcome", "rows[].close_advice", "rows[].roll_advice"],
+        "freshness_fields": ["scopes[].freshness", "rows[].effective_actionability", "rows[].actionable_until_utc"],
+        "missing_data_fields": ["scopes[].status", "rows[].status", "rows[].reason_codes"],
+        "model_preview_fields": ["status", "scope", "coverage", "scopes", "rows"]},
+    bot_input_fields=("account", "market", "action"),
+    examples=({"input": {"account": "sample", "market": "US", "action": "roll_up"}},),
+)
+
+
+TOOLS = (CLOSE_ADVICE_READ_TOOL, POSITION_ADVICE_READ_TOOL, POSITION_ADVICE_EVALUATE_TOOL, SHORT_PUT_ROLL_CANDIDATES_TOOL, COVERED_CALL_ROLL_CANDIDATES_TOOL)
+__all__ = ["CLOSE_ADVICE_READ_TOOL", "POSITION_ADVICE_EVALUATE_TOOL", "SHORT_PUT_ROLL_CANDIDATES_TOOL",
+    "COVERED_CALL_ROLL_CANDIDATES_TOOL", "TOOLS"]
