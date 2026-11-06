@@ -242,7 +242,7 @@ def test_candidate_alert_selector_uses_the_same_fixed_limit_as_the_renderer() ->
     [
         ((), ("NVDA",)),
         (("AMD",), ("AMD",)),
-        (("AMD", "AAPL"), ("AMD", "AAPL")),
+        (("AMD", "AAPL"), ("AMD",)),
     ],
 )
 def test_fixed_report_renderers_and_evidence_share_candidate_projection(

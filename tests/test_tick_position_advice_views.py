@@ -366,6 +366,122 @@ def _many_candidate_roll_brief(*, base, run_id, account="lx") -> dict:
     return brief
 
 
+def _budget_combo_roll_brief(*, base: Path, run_id: str) -> dict:
+    from domain.domain.combo_candidate_evidence import build_combo_candidate_occurrence
+    from domain.domain.daily_decision_brief import build_daily_brief_candidate_identity
+    from test_daily_decision_brief_renderer import _brief as renderer_brief
+
+    brief = _many_candidate_roll_brief(base=base, run_id=run_id)
+    for family in ("sell_put", "covered_call"):
+        brief["candidates"][family] = brief["candidates"][family][:12]
+    brief["candidate_index"] = [
+        item for item in brief["candidate_index"] if int(item["symbol"][3:]) < 12
+    ]
+    combos = []
+    for i in range(3):
+        symbol = f"COMBO{i}"
+        candidate = deepcopy(renderer_brief()["candidates"]["combo_yield"][0])
+        candidate.update(
+            symbol=symbol, candidate_pair_id=f"combo-pair-{i}", strategy_group_id=f"combo-pair-{i}",
+            structure_mode="same_expiry_pair", currency="USD", multiplier=100,
+            capacity={"contracts_available": 1},
+            put_contract_symbol=f"{symbol}260821P00300000",
+            call_contract_symbol=f"{symbol}260821C00400000", call_expiration="2026-08-21",
+        )
+        candidate.update(build_combo_candidate_occurrence(
+            candidate, account="lx", market="US", run_id=run_id,
+            generated_at_utc=brief["generated_at_utc"],
+        ))
+        combos.append(candidate)
+        brief["candidate_index"].append({
+            "identity": build_daily_brief_candidate_identity(
+                account="lx", market="US", symbol=symbol, strategy_family="combo_yield",
+            ),
+            "symbol": symbol, "strategy_family": "combo_yield", "representative": candidate,
+            "contract_count": 1,
+        })
+    brief["candidates"]["combo_yield"] = combos
+    return brief
+
+
+def test_combo_selector_uses_effective_advice_time_for_shared_budget(tmp_path: Path) -> None:
+    brief = _budget_combo_roll_brief(base=tmp_path, run_id="effective-time")
+    for row in brief["positions"]:
+        row["roll_advice"]["actionable_until_utc"] = "2026-07-21T14:01:00Z"
+    limits = {"max_actions_per_priority": 20, "max_candidates_per_strategy": 20}
+    context = {"advice_time_utc": "2026-07-21T14:02:00Z"}
+
+    view = renderer.build_daily_brief_user_view(brief, limits=limits, context=context)
+    selected = renderer.select_rendered_combo_candidate_rows(
+        brief, delivery_kind="fixed_report", limits=limits, context=context,
+    )
+
+    assert not view["positions"]
+    assert [row["symbol"] for row in selected] == ["COMBO0", "COMBO1", "COMBO2"]
+    assert [row["symbol"] for row in view["candidates"] if row["family"] == "combo_yield"] == [
+        row["symbol"] for row in selected
+    ]
+
+
+@pytest.mark.parametrize("explicit_routes", [False, True])
+@pytest.mark.parametrize("remove_rolls", ["expired", "transport"])
+def test_final_combo_metadata_uses_shared_budget_after_roll_removal(
+    monkeypatch, tmp_path: Path, explicit_routes: bool, remove_rolls: str,
+) -> None:
+    from test_daily_decision_brief_notification_flow import _feishu_config
+
+    captured = []
+    def assemble(**kw):
+        brief = _budget_combo_roll_brief(base=kw["base"], run_id=kw["run_id"])
+        if remove_rolls == "expired":
+            for row in brief["positions"]:
+                row["roll_advice"]["actionable_until_utc"] = "2026-07-21T14:00:01Z"
+        captured.append(brief)
+        return {"US": brief}
+
+    monkeypatch.setattr(flow, "assemble_daily_decision_briefs", assemble)
+    monkeypatch.setattr(flow, "utc_now", lambda: datetime(2026, 7, 21, 14, 0, 30, tzinfo=timezone.utc))
+    if remove_rolls == "transport":
+        # Model the existing transport loop dropping rolls and freeing their card slots.
+        monkeypatch.setattr(flow, "_daily_brief_transport_roll_identities", lambda brief, identities, **kw: [
+            identity for identity in identities if identity not in daily_brief_roll_notification_identities(brief)
+        ])
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_fixture")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "fixture-app")
+    config = _feishu_config()
+    config["notifications"]["daily_brief"] = {
+        "max_actions_per_priority": 20, "max_candidates_per_strategy": 20,
+    }
+    if explicit_routes:
+        config["notifications"]["routes"] = [{
+            "id": "primary", "provider": "feishu_app", "channel": "feishu_app",
+            "target": "ou_fixture", "accounts": ["lx"],
+        }]
+    request = _request(tmp_path, run_id="combo-budget", config=config).request
+
+    preparation = flow._prepare_daily_brief_notification(request)
+
+    if explicit_routes:
+        from src.application.daily_decision_brief_repository import read_daily_brief_fanout_children
+        child = read_daily_brief_fanout_children(
+            base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE,
+        )[0]
+        render_context = child["spec"]["metadata"]["render_context"]
+        message = child["spec"]["message"]
+    else:
+        envelope = preparation.lifecycles_by_account["lx"]["envelope"]
+        render_context = envelope["render_context"]
+        message = envelope["rendered_message"]
+    expected = {
+        item["identity"] for item in captured[0]["candidate_index"] if item["strategy_family"] == "combo_yield"
+    }
+    assert len(expected) == 3
+    assert set(render_context["rendered_combo_candidate_identities"]) == expected
+    assert len(render_context["candidate_occurrence_ids"]) == 3
+    assert len(render_context["candidate_exposure_ids"]) == 3
+    assert all(symbol in message for symbol in ("COMBO0", "COMBO1", "COMBO2"))
+
+
 @pytest.mark.parametrize("explicit_routes", [False, True])
 @pytest.mark.parametrize("fallback_used", [False, True])
 def test_final_card_and_fallback_ack_only_the_same_visible_rolls(
@@ -378,7 +494,9 @@ def test_final_card_and_fallback_ack_only_the_same_visible_rolls(
     from src.application.notification_delivery_route import notification_reminder_route_key
     from test_daily_decision_brief_notification_flow import _feishu_config
 
-    limits = {"max_actions_per_priority": 20, "max_candidates_per_strategy": 20}
+    # Exercise length truncation without refilling candidate slots when hidden rolls are removed.
+    monkeypatch.setattr(renderer, "_MAX_MESSAGE_CHARS", 6000)
+    limits = {"max_actions_per_priority": 20, "max_candidates_per_strategy": 10}
     def assemble(**kw):
         return {market: _many_candidate_roll_brief(base=kw["base"], run_id=kw["run_id"], account=kw["account"])
             for market in kw["markets_to_run"]}

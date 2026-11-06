@@ -25,6 +25,7 @@ from src.application.daily_decision_brief_renderer import (
     render_full_brief,
     render_query_brief,
     resolve_daily_brief_render_limits,
+    select_rendered_combo_candidate_rows,
 )
 
 
@@ -1050,7 +1051,156 @@ def test_renderer_honors_section_limits() -> None:
     assert "C7 08-21 $107 Put｜按当前现金最多 1 手" not in message
 
 
-def test_material_candidates_break_soft_limit_and_keep_funds_in_sync() -> None:
+def _budget_brief(*, candidate_counts: tuple[int, int], position_count: int) -> dict:
+    brief = _brief()
+    brief["positions"] = [
+        {
+            "symbol": f"P{i}",
+            "strategy_family": "sell_put",
+            "expiration": "2026-08-21",
+            "strike": 100 + i,
+            "option_type": "put",
+            "position_lot_id": f"budget-lot-{i}",
+            "quote_status": "priced",
+            "evaluation_status": "evaluable",
+            "recommendation_state": "close",
+        }
+        for i in range(position_count)
+    ]
+    brief["candidates"] = {
+        family: [
+            _candidate(
+                rank=i + 1,
+                symbol=f"{prefix}{i}",
+                option_type=option_type,
+                expiration="2026-08-21",
+                strike=100 + i,
+                capacity=1,
+            )
+            for i in range(count)
+        ]
+        for family, option_type, prefix, count in (
+            ("sell_put", "put", "C", candidate_counts[0]),
+            ("covered_call", "call", "D", candidate_counts[1]),
+        )
+    }
+    return brief
+
+
+def test_daily_brief_shares_42_item_budget_with_positions_first() -> None:
+    brief = _budget_brief(candidate_counts=(20, 5), position_count=25)
+    diff = {
+        "changes": [
+            {"change_type": "action_added", "action": {**row, "action_type": "close_position"}}
+            for row in brief["positions"]
+        ]
+    }
+    limits = {"max_actions_per_priority": 20, "max_candidates_per_strategy": 20}
+
+    view = build_daily_brief_user_view(brief, diff=diff, limits=limits)
+    blocks = render_fixed_report_card_blocks(brief, diff=diff, limits=limits)
+    cards = [block for block in blocks if re.match(r"\*\*(?:[CD]\d+｜|\d+｜P\d+)", block)]
+
+    assert len(cards) <= 42
+    assert len(cards) == len(view["positions"]) + len(view["candidates"]) == 42
+    assert len(view["positions"]) == 20
+    assert [row["symbol"] for row in view["candidates"]] == [
+        *[f"C{i}" for i in range(20)], "D0", "D1",
+    ]
+    assert view["candidate_omissions"] == ["CC 另有 3 个策略候选未展开"]
+    assert "补充｜CC 另有 3 个策略候选未展开" in blocks
+    assert "汇总｜共 25 条，需处理 25 条，本消息展示 20 条。" in "\n".join(blocks)
+
+
+def test_changed_items_keep_priority_within_section_and_total_limits() -> None:
+    brief = _budget_brief(candidate_counts=(30, 30), position_count=30)
+    changes = [
+        {"change_type": "action_added", "action": {**row, "action_type": "close_position"}}
+        for row in brief["positions"][5:]
+    ]
+    changes.extend(
+        {
+            "change_type": "candidate_added",
+            "action": {**row, "action_type": "open_candidate", "strategy_family": family},
+        }
+        for family, rows in brief["candidates"].items()
+        for row in rows[5:]
+    )
+    diff = {"changes": changes}
+    limits = {"max_actions_per_priority": 20, "max_candidates_per_strategy": 20}
+
+    view = build_daily_brief_user_view(brief, diff=diff, limits=limits)
+    blocks = render_fixed_report_card_blocks(brief, diff=diff, limits=limits)
+    cards = [block for block in blocks if re.match(r"\*\*(?:[CD]\d+｜|\d+｜P\d+)", block)]
+
+    assert len(cards) == len(view["positions"]) + len(view["candidates"]) == 42
+    assert [row["title"].split(" · ")[0] for row in view["positions"]] == [
+        f"P{i}" for i in range(5, 25)
+    ]
+    assert [row["symbol"] for row in view["candidates"]] == [
+        *[f"C{i}" for i in range(5, 25)], "D5", "D6",
+    ]
+    assert view["candidate_omissions"] == [
+        "CSP 另有 10 个策略候选未展开", "CC 另有 28 个策略候选未展开",
+    ]
+    assert "补充｜CSP 另有 10 个策略候选未展开" in blocks
+    assert "补充｜CC 另有 28 个策略候选未展开" in blocks
+    assert "汇总｜共 30 条，需处理 30 条，本消息展示 20 条。" in "\n".join(blocks)
+
+
+def test_changed_items_precede_unchanged_items_when_both_fit() -> None:
+    brief = _budget_brief(candidate_counts=(4, 0), position_count=4)
+    diff = {
+        "changes": [
+            {
+                "change_type": "action_added",
+                "action": {**brief["positions"][2], "action_type": "close_position"},
+            },
+            {
+                "change_type": "candidate_added",
+                "action": {
+                    **brief["candidates"]["sell_put"][2],
+                    "action_type": "open_candidate",
+                    "strategy_family": "sell_put",
+                },
+            },
+        ]
+    }
+
+    view = build_daily_brief_user_view(
+        brief, diff=diff, limits={"max_actions_per_priority": 3, "max_candidates_per_strategy": 3},
+    )
+
+    assert [row["title"].split(" · ")[0] for row in view["positions"]] == ["P2", "P0", "P1"]
+    assert [row["symbol"] for row in view["candidates"]] == ["C2", "C0", "C1"]
+    assert view["candidate_omissions"] == ["CSP 另有 1 个策略候选未展开"]
+
+
+@pytest.mark.parametrize("render", [
+    render_full_brief, render_query_brief, render_delta_brief, render_fixed_report,
+    render_fixed_report_card_markdown, render_fixed_report_text,
+])
+def test_combo_selection_respects_budget_consumed_by_positions_and_other_families(render) -> None:
+    brief = _budget_brief(candidate_counts=(12, 12), position_count=20)
+    brief["candidates"]["combo_yield"] = [
+        deepcopy(_brief()["candidates"]["combo_yield"][0]) for _ in range(3)
+    ]
+    limits = {"max_actions_per_priority": 20, "max_candidates_per_strategy": 20}
+
+    view = build_daily_brief_user_view(brief, limits=limits)
+    selected = select_rendered_combo_candidate_rows(brief, delivery_kind="fixed_report", limits=limits)
+    message = render(brief, {}, limits=limits) if render is render_delta_brief else render(brief, limits=limits)
+
+    assert len(view["positions"]) + len(view["candidates"]) == 42
+    assert not any(row["family"] == "combo_yield" for row in view["candidates"])
+    assert selected == []
+    assert "组合增强 另有 3 个策略候选未展开" in view["candidate_omissions"]
+    assert "组合增强" in message and "另有 3 个策略候选未展开" in message
+    assert "另有 2 个策略候选未展开" in message
+    assert "暂无合适合约" not in message
+
+
+def test_material_candidates_respect_limit_and_keep_funds_in_sync() -> None:
     brief = _brief()
     brief["positions"] = []
     brief["candidates"] = {
@@ -1092,11 +1242,11 @@ def test_material_candidates_break_soft_limit_and_keep_funds_in_sync() -> None:
     )
 
     assert "C2｜CSP｜08-21 $102 Put（策略排序 3）" in message
-    assert "C3｜CSP｜08-21 $103 Put（策略排序 4）" in message
+    assert "C3｜CSP｜08-21 $103 Put（策略排序 4）" not in message
     assert "C0｜CSP" not in message
-    assert "补充｜另有 2 个策略候选未展开" in message
+    assert "补充｜另有 3 个策略候选未展开" in message
     assert "C2 08-21 $102 Put｜按当前现金最多 3 手" in message
-    assert "C3 08-21 $103 Put｜按当前现金最多 4 手" in message
+    assert "C3 08-21 $103 Put｜按当前现金最多 4 手" not in message
     assert "C0 08-21 $100 Put｜按当前现金最多 1 手" not in message
 
 
