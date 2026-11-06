@@ -76,6 +76,16 @@ def migrate_switch_document(source: dict[str, Any]) -> tuple[dict[str, Any], lis
             raise AgentToolError(code="CONFIG_MIGRATION_CONFLICT", message=prefix + "notifications.enabled must be a boolean")
         daily = section(notifications, "daily_brief", prefix + "notifications.daily_brief")
         remove(daily, "enabled", prefix + "notifications.daily_brief.enabled", lambda v: isinstance(v, bool))
+    # System templates store notification defaults under defaults, while YAML
+    # authoring stores them at the root or inside a market override.
+    display_scopes = scopes + [("defaults.", section(doc, "defaults", "defaults"))]
+    for prefix, scope in display_scopes:
+        notifications = section(scope, "notifications", prefix + "notifications")
+        daily = section(notifications, "daily_brief", prefix + "notifications.daily_brief")
+        remove(daily, "max_items_per_account", prefix + "notifications.daily_brief.max_items_per_account",
+               lambda v: isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 20)
+        remove(daily, "max_actions_per_priority", prefix + "notifications.daily_brief.max_actions_per_priority",
+               lambda v: isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 20)
     # Legacy omission meant true; market overrides inherit this explicit root value.
     notifications = doc.setdefault("notifications", {})
     if "enabled" not in notifications:

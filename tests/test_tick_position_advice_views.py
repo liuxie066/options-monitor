@@ -537,7 +537,7 @@ def test_final_card_and_fallback_ack_only_the_same_visible_rolls(
 
     # Exercise length truncation without refilling candidate slots when hidden rolls are removed.
     monkeypatch.setattr(renderer, "_MAX_MESSAGE_CHARS", 6000)
-    limits = {"max_items_per_account": 0, "max_candidates_per_strategy": 10}
+    limits = {"max_roll_up_items": 0, "max_candidates_per_strategy": 10}
     def assemble(**kw):
         return {market: _many_candidate_roll_brief(base=kw["base"], run_id=kw["run_id"], account=kw["account"])
             for market in kw["markets_to_run"]}

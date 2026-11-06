@@ -88,7 +88,7 @@ def _brief(rows: list[dict]) -> dict:
 
 def _view(rows: list[dict], *, limit: int = 5, **kwargs) -> dict:
     return build_daily_brief_user_view(
-        _brief(rows), limits={"max_items_per_account": limit}, **kwargs,
+        _brief(rows), limits={"max_close_items": limit, "max_roll_up_items": limit, "max_roll_down_items": limit}, **kwargs,
     )
 
 
@@ -256,14 +256,15 @@ def test_non_roll_close_cards_stay_separate_and_keep_their_fields() -> None:
         {**deepcopy(close), "position_lot_id": "close-second"},
     ]
     view = _view(rows)
-    assert len(view["positions"]) == 3
-    assert [card["is_roll"] for card in view["positions"]] == [False, True, False]
-    first, second = [card for card in view["positions"] if not card["is_roll"]]
-    assert first == second
+    assert len(view["positions"]) == 2
+    assert [card["is_roll"] for card in view["positions"]] == [False, True]
+    first = view["positions"][0]
+    assert first["lot_count"] == 2
     assert first["is_roll"] is False
     assert first["status"] == "建议平仓"
     assert first["close_ask"] == "$0.50"
     assert first["realized_if_close"] == "+$25.00"
+    assert "第 1 笔" in "\n".join(first["details"]) and "第 2 笔" in "\n".join(first["details"])
     assert [card["is_roll"] for card in _view(rows, limit=2)["positions"]] == [False, True]
 
 
@@ -278,7 +279,7 @@ def test_visible_group_acknowledges_every_member_lot_and_respects_truncation(ren
         _roll_row("first"), _roll_row("second"),
         _roll_row("hidden", target_contract="HIDDEN_TARGET"),
     ])
-    limits = {"max_items_per_account": 1}
+    limits = {"max_roll_down_items": 1}
     identities = sorted(daily_brief_roll_notification_identities(brief))
     args = (brief, identities) if delivery_kind == "candidate_alert" else (brief,)
     message = render(*args, limits=limits)

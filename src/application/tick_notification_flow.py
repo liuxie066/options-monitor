@@ -1748,6 +1748,14 @@ def _prepare_daily_brief_notification(
                     )
                     should_prepare = not (isinstance(existing_retry, dict) and isinstance(existing_envelope, dict))
                     if (
+                        action == "fixed_report"
+                        and isinstance(existing_envelope, dict)
+                        and existing_envelope.get("delivery_kind") == "candidate_alert"
+                        and existing_envelope.get("status") == "pending"
+                    ):
+                        # A fixed batch has its own envelope; the selector keeps ambiguous retries first.
+                        should_prepare = True
+                    if (
                         not multi_market
                         and not request.no_send
                         and should_prepare

@@ -1592,7 +1592,10 @@ def test_candidate_index_uses_one_ranked_candidate_per_symbol_beyond_display_lim
 
     brief = _assemble(tmp_path)
 
-    assert len(brief["candidates"]["sell_put"]) == 3
+    assert len(brief["candidates"]["sell_put"]) == 5
+    from src.application.daily_decision_brief_renderer import build_daily_brief_user_view
+    assert len(build_daily_brief_user_view(brief)["candidates"]) == 3
+    assert len(build_daily_brief_user_view(brief, limits={"max_candidates_per_strategy": 5})["candidates"]) == 5
     assert len(brief["candidate_index"]) == 4
     by_symbol = {item["symbol"]: item for item in brief["candidate_index"]}
     assert by_symbol["NVDA"]["contract_count"] == 2
@@ -2182,22 +2185,73 @@ def test_close_advice_daily_brief_honors_ranked_account_limit(
     }
     message = render_full_brief(
         brief,
-        limits={"max_items_per_account": 10},
+        limits={"max_close_items": 2},
     )
 
-    assert [item["symbol"] for item in close_actions] == ["SECOND"]
-    assert eligibility == {
-        "SECOND": True,
-        "FIRST": False,
-        "THIRD": False,
-    }
+    assert [item["symbol"] for item in close_actions] == ["SECOND", "FIRST", "THIRD"]
+    assert eligibility == {"SECOND": True, "FIRST": True, "THIRD": True}
     assert "SECOND｜CSP｜08-21 $101 Put｜建议平仓" in message
-    assert "FIRST" not in message
-    assert "THIRD" not in message
-    assert "汇总｜共 3 条，需处理 1 条。" in message
-    # The close owner still limits notification eligibility; the new display
-    # cap never changes which close actions the service seals.
+    assert "FIRST｜CSP｜08-21 $100 Put｜建议平仓" in message
+    assert "THIRD｜CSP｜08-21 $102 Put｜建议平仓" not in message
+    assert "汇总｜共 3 条，需处理 3 条，本消息展示 2 条。" in message
+    # Standalone CLOSE quota does not remove eligible facts before Brief selection.
     assert brief["next_fixed_report_at_utc"] == "2026-07-17T15:00:00+00:00"
+
+
+def test_daily_brief_retains_all_qualified_closes_before_configured_section_limit(tmp_path: Path) -> None:
+    from domain.domain.close_advice import select_close_advice_notification_rows
+    from src.application.daily_decision_brief_renderer import build_daily_brief_user_view
+    account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
+    rows = [{
+        "account": "lx", "position_lot_id": f"lot-{index}", "symbol": f"CLOSE{index}",
+        "strategy_family": "sell_put", "option_type": "put", "expiration": "2026-08-21", "strike": 100,
+        "recommendation_state": "close", "policy_version": "remaining_yield_capture.v3",
+        "decision_basis": "strict_profit_capture_all_gates_passed", "decision_evidence_status": "complete",
+        "evaluation_status": "priced", "quote_status": "priced", "ask": 0.1, "capital_basis": 10000,
+        "net_capture_ratio": 0.95, "remaining_max_annualized_return": index / 1000,
+    } for index in range(7)]
+    _write_close_report(account_dir, rows)
+    config = _config()
+    config["close_advice"] = {"enabled": True, "max_items_per_account": 1}
+    brief = _assemble(tmp_path, config=config)
+    assert len(select_close_advice_notification_rows(rows, max_items_per_account=1)) == 1
+    assert all(row["notification_eligible"] for row in brief["positions"])
+    assert len([row for row in brief["actions"] if row["action_type"] == "close_position"]) == 7
+    assert len(build_daily_brief_user_view(brief, limits={"max_close_items": 6})["positions"]) == 6
+
+
+@pytest.mark.parametrize("expired_roll", [False, True])
+@pytest.mark.parametrize("second_currency", ["USD", "HKD"])
+def test_close_group_currency_survives_source_projection_with_partial_roll_coverage(
+    expired_roll: bool, second_currency: str,
+) -> None:
+    from copy import deepcopy
+
+    from domain.domain.daily_decision_brief import normalize_daily_decision_brief
+    from src.application.daily_decision_brief_renderer import build_daily_brief_user_view
+    from src.application.daily_decision_brief_service import _position_view
+    from test_daily_decision_brief_renderer import _brief
+    from test_tick_position_advice_views import position_row
+
+    first = position_row(lot="a-close-roll")
+    first.update(currency="USD", recommendation_state="close", evaluation_status="evaluable",
+        quote_status="priced", ask=0.1, capital_basis=10000,
+        remaining_max_annualized_return=0.01, net_capture_ratio=0.95)
+    second = {**deepcopy(first), "position_lot_id": "b-close-only", "currency": second_currency}
+    second.pop("roll_advice")
+    if expired_roll:
+        first["roll_advice"]["actionable_until_utc"] = "2026-07-20T13:00:00Z"
+    brief = _brief()
+    brief.update(candidates={}, actions=[], source_artifacts=[], positions=[
+        _position_view(row, notification_eligible=True, close_actionable=True)
+        for row in (first, second)
+    ])
+    brief = normalize_daily_decision_brief(brief)
+    view = build_daily_brief_user_view(brief, limits={"max_close_items": 1})
+    same_currency = second_currency == "USD"
+    assert sum(row["lot_count"] for row in view["positions"]) == (2 if same_currency else 1)
+    assert any("平仓子区上限" in note for note in view["selection_omissions"]) is not same_currency
+    assert [row["currency"] for row in brief["positions"]] == ["USD", second_currency]
 
 
 def test_paired_combo_net_income_survives_snapshot_and_brief(tmp_path: Path) -> None:

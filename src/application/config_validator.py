@@ -165,7 +165,11 @@ NOTIFICATION_CONFIG_KEYS = {
     'wechat_clawbot_state_dir',
 }
 NOTIFICATION_DAILY_BRIEF_KEYS = {
-    'max_items_per_account',
+    'max_total_items',
+    'max_close_items',
+    'max_roll_up_items',
+    'max_roll_down_items',
+    'max_items_per_account',  # Deprecated; accepted and validated, ignored by selection.
     'max_actions_per_priority',  # Deprecated; accepted and validated, ignored by selection.
     'max_candidates_per_strategy',
     'max_rejection_reasons',
@@ -1325,27 +1329,36 @@ def validate_config(cfg: dict):
                     'notifications.daily_brief contains unsupported keys: '
                     + ', '.join(unknown_daily_brief_keys)
                 )
-            if 'max_items_per_account' in daily_brief:
-                value = daily_brief['max_items_per_account']
-                if isinstance(value, bool) or not isinstance(value, int):
-                    die('notifications.daily_brief.max_items_per_account must be an integer')
-                if value < 0 or value > 20:
-                    die('notifications.daily_brief.max_items_per_account must be between 0 and 20')
-            for key in ('max_actions_per_priority', 'max_candidates_per_strategy', 'max_rejection_reasons'):
+            for key, minimum, maximum in (
+                ('max_total_items', 1, 40),
+                ('max_close_items', 0, 20),
+                ('max_roll_up_items', 0, 20),
+                ('max_roll_down_items', 0, 20),
+                ('max_items_per_account', 0, 20),
+                ('max_actions_per_priority', 1, 20),
+                ('max_candidates_per_strategy', 1, 20),
+                ('max_rejection_reasons', 1, 20),
+            ):
                 if key not in daily_brief:
                     continue
-                value = daily_brief.get(key)
+                value = daily_brief[key]
                 if isinstance(value, bool) or not isinstance(value, int):
                     die(f'notifications.daily_brief.{key} must be an integer')
-                if value < 1 or value > 20:
-                    die(f'notifications.daily_brief.{key} must be between 1 and 20')
-            if 'max_actions_per_priority' in daily_brief:
-                warn(
-                    'notifications.daily_brief.max_actions_per_priority is deprecated and ignored; '
-                    'use notifications.daily_brief.max_items_per_account '
-                    '(default 5 across A/B/C for each account and market; '
-                    '0 removes only the account cap). See docs/NOTIFICATION_BRIEF_SELECTION.md'
-                )
+                if value < minimum or value > maximum:
+                    die(f'notifications.daily_brief.{key} must be between {minimum} and {maximum}')
+            for key in ('max_items_per_account', 'max_actions_per_priority'):
+                if key in daily_brief:
+                    warn(
+                        f'notifications.daily_brief.{key} is deprecated and ignored; '
+                        'use notifications.daily_brief.max_close_items, '
+                        'notifications.daily_brief.max_roll_up_items and '
+                        'notifications.daily_brief.max_roll_down_items '
+                        '(default 5 each per account and market; 0 removes only that section quota), '
+                        'plus notifications.daily_brief.max_total_items (default 40, range 1..40). '
+                        'Legacy values are not copied to the new keys; '
+                        'run om config migrate-switches to remove them explicitly. '
+                        'See docs/NOTIFICATION_BRIEF_SELECTION.md'
+                    )
 
         if 'render_style' in notifications:
             render_style = notifications.get('render_style')
@@ -1458,6 +1471,14 @@ def validate_config(cfg: dict):
             validate_non_negative_integer(
                 close_advice.get('max_items_per_account'),
                 'close_advice.max_items_per_account',
+            )
+            warn(
+                'close_advice.max_items_per_account applies only to standalone Close Advice; '
+                'Daily Brief uses all qualified close rows and its independent '
+                'notifications.daily_brief.max_close_items display quota '
+                '(default 5; 0 removes only the close section quota). '
+                'The standalone value is preserved by om config migrate-switches. '
+                'See docs/NOTIFICATION_BRIEF_SELECTION.md'
             )
     alert_policy = cfg.get('alert_policy')
     if alert_policy is not None and not isinstance(alert_policy, (dict, str)):

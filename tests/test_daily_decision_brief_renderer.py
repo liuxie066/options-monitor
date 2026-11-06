@@ -753,7 +753,7 @@ def test_strict_close_uses_one_action_label_for_every_close_state() -> None:
 
     message = render_full_brief(
         brief,
-        limits={"max_items_per_account": 10},
+        limits={"max_close_items": 10},
     )
 
     for symbol in ("A", "B", "C", "D", "E", "F"):
@@ -1057,7 +1057,7 @@ def test_renderer_honors_section_limits() -> None:
     message = render_full_brief(
         brief,
         limits={
-            "max_items_per_account": 2,
+            "max_close_items": 2,
             "max_actions_per_priority": 1,
             "max_candidates_per_strategy": 7,
             "max_rejection_reasons": 999,
@@ -1069,13 +1069,14 @@ def test_renderer_honors_section_limits() -> None:
     assert "P2｜CSP" not in message
     assert "汇总｜共 8 条，需处理 8 条，本消息展示 2 条。" in message
     assert "持仓未展开" not in message
-    assert "C0｜CSP" not in message
-    assert "补充｜另有 20 个策略候选未展开" in message
+    assert "C0｜CSP" in message and "C6｜CSP" in message
+    assert "C7｜CSP" not in message
+    assert "补充｜另有 13 个策略候选未展开" in message
 
-    # The legacy priority cap does not change the default shared five-item cap.
+    # Retired mixed limits cannot consume independent section or opening quotas.
     default_view = build_daily_brief_user_view(brief, limits={"max_actions_per_priority": 1})
     assert len(default_view["positions"]) == 5
-    assert not default_view["candidates"]
+    assert len(default_view["candidates"]) == 3
 
     candidate_brief = {**brief, "positions": []}
     message = render_full_brief(
@@ -1139,23 +1140,23 @@ def test_daily_brief_shares_42_item_budget_with_positions_first() -> None:
             for row in brief["positions"]
         ]
     }
-    limits = {"max_items_per_account": 0, "max_candidates_per_strategy": 20}
+    limits = {"max_close_items": 0, "max_candidates_per_strategy": 20}
 
     view = build_daily_brief_user_view(brief, diff=diff, limits=limits)
     blocks = render_fixed_report_card_blocks(brief, diff=diff, limits=limits)
     cards = [block for block in blocks if re.match(r"\*\*(?:[CD]\d+｜|\d+｜P\d+)", block)]
 
-    assert len(cards) <= 42
-    assert len(cards) == len(view["positions"]) + len(view["candidates"]) == 42
+    assert len(cards) <= 40
+    assert len(cards) == len(view["positions"]) + len(view["candidates"]) == 40
     assert [row["title"].split(" · ")[0] for row in view["positions"]] == [
         f"P{i}" for i in range(25)
     ]
     assert [row["symbol"] for row in view["candidates"]] == [
         *[symbol for i in range(5) for symbol in (f"C{i}", f"D{i}")],
-        *[f"C{i}" for i in range(5, 12)],
+        *[f"C{i}" for i in range(5, 10)],
     ]
-    assert view["candidate_omissions"] == ["CSP 另有 8 个策略候选未展开"]
-    assert "补充｜CSP 另有 8 个策略候选未展开" in blocks
+    assert view["candidate_omissions"] == ["CSP 另有 10 个策略候选未展开"]
+    assert "补充｜CSP 另有 10 个策略候选未展开" in blocks
     assert "汇总｜共 25 条，需处理 25 条。" in "\n".join(blocks)
 
 
@@ -1174,25 +1175,25 @@ def test_changed_items_keep_priority_within_section_and_total_limits() -> None:
         for row in rows[5:]
     )
     diff = {"changes": changes}
-    limits = {"max_items_per_account": 0, "max_candidates_per_strategy": 20}
+    limits = {"max_close_items": 0, "max_candidates_per_strategy": 20}
 
     view = build_daily_brief_user_view(brief, diff=diff, limits=limits)
     blocks = render_fixed_report_card_blocks(brief, diff=diff, limits=limits)
     cards = [block for block in blocks if re.match(r"\*\*(?:[CD]\d+｜|\d+｜P\d+)", block)]
 
-    assert len(cards) == len(view["positions"]) + len(view["candidates"]) == 42
+    assert len(cards) == len(view["positions"]) + len(view["candidates"]) == 40
     # Diff membership changes the banner, never the sealed economic/rank order.
     assert [row["title"].split(" · ")[0] for row in view["positions"]] == [
         f"P{i}" for i in range(30)
     ]
     assert [row["symbol"] for row in view["candidates"]] == [
-        symbol for i in range(6) for symbol in (f"C{i}", f"D{i}")
+        symbol for i in range(5) for symbol in (f"C{i}", f"D{i}")
     ]
     assert view["candidate_omissions"] == [
-        "CSP 另有 24 个策略候选未展开", "CC 另有 24 个策略候选未展开",
+        "CSP 另有 25 个策略候选未展开", "CC 另有 25 个策略候选未展开",
     ]
-    assert "补充｜CSP 另有 24 个策略候选未展开" in blocks
-    assert "补充｜CC 另有 24 个策略候选未展开" in blocks
+    assert "补充｜CSP 另有 25 个策略候选未展开" in blocks
+    assert "补充｜CC 另有 25 个策略候选未展开" in blocks
     assert "汇总｜共 30 条，需处理 30 条。" in "\n".join(blocks)
     unchanged_view = build_daily_brief_user_view(brief, limits=limits)
     assert view["positions"] == unchanged_view["positions"]
@@ -1241,28 +1242,28 @@ def test_combo_selection_respects_budget_consumed_by_positions_and_other_familie
         {**deepcopy(_brief()["candidates"]["combo_yield"][0]), "rank": i + 1, "symbol": f"COMBO{i}"}
         for i in range(3)
     ]
-    limits = {"max_items_per_account": 0, "max_candidates_per_strategy": 20}
+    limits = {"max_close_items": 0, "max_candidates_per_strategy": 20}
 
     view = build_daily_brief_user_view(brief, limits=limits)
     selected = select_rendered_combo_candidate_rows(brief, delivery_kind="fixed_report", limits=limits)
     message = render(brief, {}, limits=limits) if render is render_delta_brief else render(brief, limits=limits)
 
-    assert len(view["positions"]) + len(view["candidates"]) == 42
+    assert len(view["positions"]) + len(view["candidates"]) == 40
     assert [row["symbol"] for row in view["candidates"]] == [
         *[symbol for i in range(3) for symbol in (f"C{i}", f"D{i}", f"COMBO{i}")],
-        *[symbol for i in range(3, 9) for symbol in (f"C{i}", f"D{i}")],
-        "C9",
+        *[symbol for i in range(3, 8) for symbol in (f"C{i}", f"D{i}")],
+        "C8",
     ]
     assert selected == brief["candidates"]["combo_yield"]
     assert view["candidate_omissions"] == [
-        "CSP 另有 2 个策略候选未展开", "CC 另有 3 个策略候选未展开",
+        "CSP 另有 3 个策略候选未展开", "CC 另有 4 个策略候选未展开",
     ]
     if render in (render_fixed_report_card_markdown, render_fixed_report_text):
-        assert "CSP 另有 2 个策略候选未展开" in message
-        assert "CC 另有 3 个策略候选未展开" in message
+        assert "CSP 另有 3 个策略候选未展开" in message
+        assert "CC 另有 4 个策略候选未展开" in message
     else:
-        assert re.search(r"## CSP\n.*?补充｜另有 2 个策略候选未展开", message, re.DOTALL)
-        assert re.search(r"## CC\n.*?补充｜另有 3 个策略候选未展开", message, re.DOTALL)
+        assert re.search(r"## CSP\n.*?补充｜另有 3 个策略候选未展开", message, re.DOTALL)
+        assert re.search(r"## CC\n.*?补充｜另有 4 个策略候选未展开", message, re.DOTALL)
     assert "组合增强 另有" not in message
     assert "COMBO0｜组合增强（策略排序 1）" in message
     assert "COMBO2｜组合增强（策略排序 3）" in message
@@ -1309,7 +1310,7 @@ def test_material_candidates_respect_limit_and_keep_funds_in_sync() -> None:
     message = render_delta_brief(
         brief,
         diff,
-        limits={"max_items_per_account": 1},
+        limits={"max_total_items": 1},
     )
 
     assert "C0｜CSP｜08-21 $100 Put（策略排序 1）" in message
@@ -1389,7 +1390,7 @@ def test_material_position_uses_exact_lot_before_same_contract_siblings() -> Non
     view_message = render_delta_brief(
         brief,
         diff,
-        limits={"max_items_per_account": 1},
+        limits={"max_total_items": 1},
     )
 
     assert "PDD｜CSP｜08-21 $95 Put｜建议平仓" in view_message
@@ -1480,9 +1481,10 @@ def test_notification_and_query_projections_use_plain_language_and_account_funds
     assert "## CSP" in alert
     assert "### 新增策略候选" in alert
     assert "## 持仓" not in alert
-    assert "另有 1 个新增候选未展开" in alert
+    assert "AAPL｜CC" in alert
+    assert "补充｜CSP 另有 1 个策略候选未展开" in alert
     assert "MSFT｜CSP" in alert
-    assert "NVDA｜CSP" in alert
+    assert "NVDA｜CSP" not in alert
     assert "较上一轮" not in alert
     assert "现金总额｜$180,000.00" not in alert
     assert "现金总额（折CNY）｜¥1,260,000.00" in alert
@@ -1616,15 +1618,20 @@ def test_render_limit_normalization_remains_bounded() -> None:
             "max_rejection_reasons": 999,
         }
     ) == {
-        "max_actions_per_priority": 1,
-        "max_items_per_account": 5,
+        "max_total_items": 40,
+        "max_close_items": 5,
+        "max_roll_up_items": 5,
+        "max_roll_down_items": 5,
         "max_candidates_per_strategy": 7,
         "max_rejection_reasons": 20,
     }
-    assert resolve_daily_brief_render_limits({"max_items_per_account": 0})["max_items_per_account"] == 0
-    assert resolve_daily_brief_render_limits({"max_items_per_account": 20})["max_items_per_account"] == 20
-    for invalid in (True, False, -1, 21, 1.5, None, "7"):
-        assert resolve_daily_brief_render_limits({"max_items_per_account": invalid})["max_items_per_account"] == 5
+    for section in ("max_close_items", "max_roll_up_items", "max_roll_down_items"):
+        assert resolve_daily_brief_render_limits({section: 0})[section] == 0
+        assert resolve_daily_brief_render_limits({section: 20})[section] == 20
+        for invalid in (True, False, -1, 21, 1.5, None, "7"):
+            assert resolve_daily_brief_render_limits({section: invalid})[section] == 5
+    for invalid in (True, False, 0, 41, 1.5, None, "7"):
+        assert resolve_daily_brief_render_limits({"max_total_items": invalid})["max_total_items"] == 40
 
 
 def _render_event_risk(
@@ -2700,12 +2707,12 @@ def test_alert_blocks_follow_selected_identities_order_and_preserve_ranks_and_om
     assert _shared_channel_content(text) == _shared_channel_content(_plain_card_content(card))
     candidates = [block for block in blocks[:blocks.index("## 事件")] if block.startswith("**")]
     assert [block.splitlines()[0] for block in candidates] == [
+        "**NVDA｜CSP｜08-21 $100 Put（策略排序 2）**",
         "**FUTU｜CSP｜08-21 $100 Put（策略排序 4）**",
         "**PDD｜CSP｜08-21 $100 Put（策略排序 8）**",
-        "**MSFT｜CSP｜08-21 $100 Put（策略排序 9）**",
     ]
-    assert "另有 1 个新增候选未展开" in text
-    assert "NVDA" not in text
+    assert "CSP 另有 1 个策略候选未展开" in text
+    assert "MSFT" not in text
     assert "【持仓】" not in text and "## CC" not in card
     event_blocks = blocks[blocks.index("## 事件") + 1:]
     event = "\n\n".join(event_blocks)
