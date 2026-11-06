@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1460 (`src`: 608, `domain`: 99, `scripts`: 21, `tests`: 728)
-- Internal import edges: 13055 total, 4515 production/script edges excluding tests
+- Internal import edges: 13076 total, 4514 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -51,10 +51,10 @@ flowchart LR
   scripts -->|1| tests
   src -->|1| application
   storage -->|1| domain
-  tests -->|6467| application
-  tests -->|714| domain
+  tests -->|6479| application
+  tests -->|723| domain
   tests -->|2| domain_services
-  tests -->|435| infrastructure
+  tests -->|436| infrastructure
   tests -->|495| interfaces
   tests -->|13| om_strategy_core
   tests -->|52| scripts
@@ -90,10 +90,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 6467 |
-| tests | domain | 714 |
+| tests | application | 6479 |
+| tests | domain | 723 |
 | tests | interfaces | 495 |
-| tests | infrastructure | 435 |
+| tests | infrastructure | 436 |
 | tests | storage | 77 |
 | tests | scripts | 52 |
 | tests | om_strategy_core | 13 |
@@ -193,7 +193,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 |---|---|
 | src.application.agent_tool_contracts | 141 |
 | domain.domain.symbol_identity | 104 |
-| src.application.payload_helpers | 102 |
+| src.application.payload_helpers | 101 |
 | src.application.ledger.api | 95 |
 | src.application.agent_tool_config | 78 |
 | src.application.account_config | 78 |
@@ -218,8 +218,8 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.interfaces.cli.main | 37 |
 | src.application.agent_tools.runtime_status_impl | 36 |
 | src.application.pipeline_watchlist | 35 |
-| src.application.daily_decision_brief_service | 34 |
 | src.infrastructure.futu_gateway | 34 |
+| src.application.daily_decision_brief_service | 33 |
 | src.application.ledger.queries | 32 |
 | src.application.multi_account_tick | 31 |
 | src.application.tick_notification_flow | 31 |

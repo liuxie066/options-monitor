@@ -49,6 +49,7 @@ def test_close_and_roll_down_actions_share_same_persisted_position(tmp_path: Pat
 
 @pytest.mark.parametrize("limit", [1, 5])
 def test_close_actionability_uses_all_qualified_decisions_before_notification_limit(tmp_path: Path, limit) -> None:
+    from domain.domain.close_advice import select_close_advice_notification_rows
     from test_daily_decision_brief_service import (
         _assemble, _config, _write_close_report, _write_labeled_put_candidates,
     )
@@ -75,7 +76,8 @@ def test_close_actionability_uses_all_qualified_decisions_before_notification_li
     assert output["returned_count"] == 4
     assert output["actionable_count"] == 3
     assert {row["symbol"] for row in output["rows"] if row["actionable"]} == {"FIRST", "SECOND", "THIRD"}
-    assert sum(row["close_advice"]["notification_eligible"] for row in output["rows"]) == min(limit, 3)
+    assert sum(row["close_advice"]["notification_eligible"] for row in output["rows"]) == 3
+    assert len(select_close_advice_notification_rows(rows, max_items_per_account=limit)) == min(limit, 3)
     assert next(row for row in output["rows"] if row["symbol"] == "UNQUALIFIED")["actionable"] is False
 
 

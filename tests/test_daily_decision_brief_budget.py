@@ -90,7 +90,7 @@ def test_display_evidence_follows_surviving_summary_and_full_cards() -> None:
         "expanded", "expanded", "expanded", "summary_notified", "summary_notified",
     ]
     blocks = selection["markdown_blocks"]
-    assert "另有 2 个新增候选未展开" in selection["text"]
+    assert "CSP 另有 2 个策略候选未展开" in selection["text"]
     no_summary = [row for row in blocks if not row.summary_family]
     evidence = _display_evidence(brief, identities, blocks, no_summary)
     assert [row["state"] for row in evidence] == [
@@ -137,8 +137,7 @@ def test_partial_range_cards_keep_coverage_and_display_evidence_for_surviving_ca
         and feishu_notification_blocks_fit(rows, text, open_id="ou_example"),
     )
     # A smaller recipient budget forces two originally selected long cards out.
-    expected = (["expanded", "not_shown", "not_shown"]
-                + (["summary_notified"] * 2 if delivery_kind == "candidate_alert" else ["not_shown"] * 2)
+    expected = (["expanded"] + ["not_shown"] * 4
                 if long else ["expanded"] * 3 + ["summary_notified"] * 2)
     assert [row["state"] for row in selection["display_evidence"]] == expected
     cards = [block for block in selection["markdown_blocks"] if block.tier == "candidate" and block.identities]
@@ -163,6 +162,83 @@ def test_partial_range_cards_keep_coverage_and_display_evidence_for_surviving_ca
     for block in cards:
         assert str(block) in markdown
         assert block.plain_text in envelope["text"]
+
+
+def test_channel_fitting_preserves_holding_round_robin_priority_and_exact_roll_ids() -> None:
+    from domain.domain.daily_decision_brief import daily_brief_position_roll_identity
+    from test_daily_decision_brief_selection import _close, _roll, _source
+    up, down = _roll(0), _roll(1, option_type="put")
+    brief = _source([_close(0), up, down])
+    identities = [daily_brief_position_roll_identity(row, account=brief["account"], market=brief["market"])
+                  for row in (up, down)]
+    result = select_daily_brief_notification(brief, delivery_kind="fixed_report", candidate_identities=identities,
+        context={"advice_time_utc": "2026-07-21T14:00:00Z"},
+        fits=lambda blocks, text: sum(row.tier == "action" for row in blocks) <= 2)
+    actions = [row for row in result["markdown_blocks"] if row.tier == "action"]
+    assert len(actions) == 2
+    assert "C0" in str(actions) and "R0" in str(actions)
+    assert "R1" not in str(actions)
+    assert {row["identity"]: row["state"] for row in result["display_evidence"]} == {
+        identities[0]: "expanded", identities[1]: "not_shown",
+    }
+
+
+def test_channel_fitting_uses_actual_card_deadline_over_close_group_deadline() -> None:
+    from domain.domain.daily_decision_brief import daily_brief_position_roll_identity
+    from test_daily_decision_brief_selection import _urgent_roll_and_close_remainder_brief
+
+    brief = _urgent_roll_and_close_remainder_brief()
+    identity = daily_brief_position_roll_identity(brief["positions"][0],
+        account=brief["account"], market=brief["market"])
+    result = select_daily_brief_notification(brief, delivery_kind="fixed_report", candidate_identities=[identity],
+        context={"advice_time_utc": "2026-07-20T14:04:00Z", "next_fixed_report_at_utc": "2026-07-20T15:00:00Z"},
+        fits=lambda blocks, text: sum(row.tier == "action" for row in blocks) <= 1)
+    assert {row["identity"]: row["state"] for row in result["display_evidence"]} == {identity: "expanded"}
+    assert "CC 向上移仓" in result["text"]
+    assert sum(row.tier == "action" for row in result["markdown_blocks"]) == 1
+
+
+def test_cross_target_close_group_fitting_keeps_down_turn_and_exact_evidence() -> None:
+    from domain.domain.daily_decision_brief import daily_brief_position_roll_identity
+    from test_daily_decision_brief_selection import _cross_target_close_brief
+
+    brief = _cross_target_close_brief()
+    identities = [daily_brief_position_roll_identity(row, account=brief["account"], market=brief["market"])
+                  for row in brief["positions"] if row.get("roll_advice")]
+    result = select_daily_brief_notification(brief, delivery_kind="fixed_report", candidate_identities=identities,
+        context={"advice_time_utc": "2026-07-20T14:04:00Z"},
+        fits=lambda blocks, text: sum(row.tier == "action" for row in blocks) <= 2)
+    states = {row["identity"]: row["state"] for row in result["display_evidence"]}
+    assert [states[identity] for identity in identities] == ["expanded", "not_shown", "not_shown", "expanded"]
+    assert "CC 向上移仓" in result["text"] and "CSP 向下移仓" in result["text"]
+    assert sum(row.tier == "action" for row in result["markdown_blocks"]) == 2
+
+
+def test_wheel_evidence_uses_selected_branch_after_total_budget() -> None:
+    from domain.domain.daily_decision_brief import build_daily_brief_candidate_identity
+    brief = _brief()
+    brief.update(positions=[], candidates={"wheel": []}, candidate_index=[], wheel_batches=[])
+    identities = []
+    for index, rank in ((0, 2), (1, 1)):
+        branch = f"branch-{index}"
+        row = _candidate(rank=rank, symbol=f"W{index}", option_type="put",
+                         expiration="2026-08-21", strike=100, capacity=1)
+        row.update(wheel_branch_id=branch, direction="put", strategy_family="wheel")
+        brief["candidates"]["wheel"].append(row)
+        brief["wheel_batches"].append({"wheel_branch_id": branch, "symbol": f"W{index}",
+            "direction": "put", "remaining_contracts": 1, "recommended_contracts": 1,
+            "status": "ready", "expiration": "2026-08-21", "strike": 100, "sell_limit": 1.2})
+        identity = build_daily_brief_candidate_identity(account="lx", market="US", symbol=f"W{index}",
+            strategy_family="wheel", wheel_branch_id=branch)
+        identities.append(identity)
+        brief["candidate_index"].append({"identity": identity, "symbol": f"W{index}",
+            "strategy_family": "wheel", "representative": row})
+    selected = select_daily_brief_notification(brief, delivery_kind="fixed_report",
+        candidate_identities=identities, limits={"max_total_items": 1}, context=_scheduled_context())
+    assert "W1｜Wheel" in selected["text"]
+    states = {row["identity"]: row["state"] for row in selected["display_evidence"]}
+    assert states[identities[1]] == "expanded"
+    assert states[identities[0]] != "expanded"
 
 
 def test_common_selection_fits_unicode_card_post_and_frozen_text_atomically() -> None:

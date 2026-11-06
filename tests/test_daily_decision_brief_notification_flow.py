@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+from datetime import datetime
 import json
 from pathlib import Path
 from decision_history_fixtures import replace_history_payload
@@ -263,6 +264,239 @@ def _patch_sender(
             failure_stage="wechat_clawbot_message_send",
         ),
     )
+
+
+@pytest.fixture
+def fixed_report_flow(monkeypatch, tmp_path):
+    import src.application.channels.feishu_notification as provider
+    import src.application.daily_decision_brief_repository as repository
+    import src.application.channels.plugins as plugins
+    from src.infrastructure.feishu_bitable import FeishuPermanentError
+
+    clock = {"now": "2026-07-21T14:00:30+00:00", "candidate": True, "outcome": "confirmed"}
+    monkeypatch.setattr(mod, "utc_now", lambda: clock["now"])
+    monkeypatch.setattr(repository, "_utc_now_iso", lambda: clock["now"])
+    monkeypatch.setattr(mod, "report_system_meta_signal", lambda **_kwargs: "suppressed")
+    monkeypatch.setattr(plugins, "channel_plugin_installed", lambda _: True)
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_fixture")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "fixture-secret")
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_fixture")
+
+    def assemble(*, base, run_id, account, markets_to_run, **_kwargs):
+        return {
+            market: {
+                **_brief(base=base, run_id=run_id, account=account, market=market, candidate=clock["candidate"]),
+                "generated_at_utc": clock["now"],
+                "data_as_of_utc": clock["now"],
+            }
+            for market in markets_to_run
+        }
+
+    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", assemble)
+    calls = []
+
+    def send(**kwargs):
+        calls.append(deepcopy(kwargs))
+        if clock["outcome"] == "failed":
+            raise FeishuPermanentError("fixture rejection", code=230002)
+        if clock["outcome"] == "ambiguous":
+            return {"code": 0, "msg": "success", "data": {}}
+        return {"code": 0, "msg": "success", "data": {"message_id": f"om_fixture_{len(calls)}"}}
+
+    monkeypatch.setattr(provider, "send_message", send)
+    monkeypatch.setattr(provider, "send_post_message", send)
+
+    def request(*, run_id, target=FIXED_TARGET, fixed=True, config=None, **kwargs):
+        observed = datetime.fromisoformat(clock["now"])
+        bundle = _request(tmp_path, run_id=run_id, fixed=fixed, config=config or _feishu_config(), **kwargs)
+        scheduler = bundle.request.scheduler_decisions_by_account["lx"]
+        scheduler["now_utc"] = clock["now"]
+        scheduler["now_market"] = observed.astimezone(ZoneInfo("America/New_York")).isoformat()
+        scheduler["scheduled_scan_target_market"] = target
+        scheduler["scheduled_target_market"] = target if fixed else None
+        bundle.request = replace(bundle.request, scheduled_scan_targets_by_account={"lx": target})
+        return bundle
+
+    return SimpleNamespace(base=tmp_path, clock=clock, calls=calls, request=request)
+
+
+@pytest.mark.parametrize("prior_attempt", ["unattempted", "failed"])
+@pytest.mark.parametrize("candidate", [False, True], ids=["valid-empty", "still-valid-actions"])
+def test_current_fixed_report_precedes_older_pending_candidate_without_rewriting_it(
+    fixed_report_flow, prior_attempt, candidate,
+):
+    from src.application.notification_delivery_adapter import build_notification_transport_key
+
+    flow = fixed_report_flow
+    flow.clock["now"] = "2026-07-21T13:30:30+00:00"
+    if prior_attempt == "unattempted":
+        prepared = mod._prepare_daily_brief_notification(
+            flow.request(run_id="pending-candidate", target="2026-07-21T09:30:00-04:00", fixed=False).request,
+        )
+        assert prepared.lifecycles_by_account["lx"]["envelope"]["delivery_kind"] == "candidate_alert"
+        assert flow.calls == []
+    else:
+        flow.clock["outcome"] = "failed"
+        assert mod.run_tick_notification_flow(
+            flow.request(run_id="failed-candidate", target="2026-07-21T09:30:00-04:00", fixed=False).request,
+        ) == 1
+    before = read_daily_decision_brief_delivery_state(
+        base=flow.base, account="lx", market="US",
+    )["state"]["days"][MARKET_DATE]
+    frozen = deepcopy(before["candidate_delivery"])
+    assert frozen["status"] == "pending"
+    assert bool(frozen["last_attempt_at_utc"]) is (prior_attempt == "failed")
+    assert frozen["candidate_identities"] == [IDENTITY]
+    assert before["fixed_reports"] == {}
+
+    flow.clock.update(now="2026-07-21T14:00:30+00:00", candidate=candidate, outcome="confirmed")
+    sent_before = len(flow.calls)
+    fixed = flow.request(run_id="fixed-after-pending-candidate")
+    assert mod.run_tick_notification_flow(fixed.request) == 0
+    day = read_daily_decision_brief_delivery_state(
+        base=flow.base, account="lx", market="US",
+    )["state"]["days"][MARKET_DATE]
+    assert FIXED_TARGET in day["fixed_reports"]
+    envelope = day["fixed_reports"][FIXED_TARGET]
+    assert envelope["delivery_kind"] == "fixed_report" and envelope["status"] == "confirmed"
+    assert fixed.request.tick_metrics["daily_brief"]["prepared"][0]["decision"] == "fixed_report"
+    assert len(flow.calls) == sent_before + 1
+    assert flow.calls[-1]["uuid"] == build_notification_transport_key(envelope["delivery_key"])
+    assert envelope["delivery_key"] != frozen["delivery_key"]
+    assert day["candidate_delivery"] == frozen
+    assert day["candidate_delivery_history"] == []
+    assert envelope["candidate_identities"] == ([IDENTITY] if candidate else [])
+    assert mod.run_tick_notification_flow(flow.request(run_id="fixed-after-pending-replay").request) == 0
+    assert len(flow.calls) == sent_before + 1
+    replayed = read_daily_decision_brief_delivery_state(
+        base=flow.base, account="lx", market="US",
+    )["state"]["days"][MARKET_DATE]
+    assert replayed["fixed_reports"][FIXED_TARGET] == envelope
+    assert replayed["candidate_delivery"] == frozen
+
+
+@pytest.mark.parametrize("candidate", [False, True], ids=["valid-empty", "still-valid-actions"])
+def test_identical_business_data_sends_each_fixed_batch_and_retries_same_batch_idempotently(
+    fixed_report_flow, candidate,
+):
+    from src.application.notification_delivery_adapter import build_notification_transport_key
+
+    flow = fixed_report_flow
+    flow.clock["candidate"] = candidate
+    first = flow.request(run_id="fixed-first")
+    assert mod.run_tick_notification_flow(first.request) == 0
+    first_brief = read_latest_daily_decision_brief(base=flow.base, account="lx", market="US")["brief"]
+    initial = read_daily_decision_brief_delivery_state(
+        base=flow.base, account="lx", market="US",
+    )["state"]["days"][MARKET_DATE]
+    frozen_first = deepcopy(initial["fixed_reports"][FIXED_TARGET])
+    assert frozen_first["status"] == "confirmed"
+    assert len(flow.calls) == 1
+    assert mod.run_tick_notification_flow(flow.request(run_id="fixed-first-replay").request) == 0
+    assert len(flow.calls) == 1
+
+    next_target = "2026-07-21T11:00:00-04:00"
+    flow.clock["now"] = "2026-07-21T15:00:30+00:00"
+    second = flow.request(run_id="fixed-second", target=next_target)
+    assert mod.run_tick_notification_flow(second.request) == 0
+    day = read_daily_decision_brief_delivery_state(
+        base=flow.base, account="lx", market="US",
+    )["state"]["days"][MARKET_DATE]
+    second_envelope = deepcopy(day["fixed_reports"][next_target])
+    assert second_envelope["status"] == "confirmed"
+    latest = read_latest_daily_decision_brief(base=flow.base, account="lx", market="US")["brief"]
+    diff = mod.diff_daily_decision_briefs(first_brief, latest)
+    assert diff["material"] is False
+    assert diff["changes"] == []
+    assert "扫描正常" in second_envelope["rendered_message"]
+    assert "与上轮相比无业务变化" in second_envelope["rendered_message"]
+    if not candidate:
+        assert "本轮无符合条件的候选、平仓或移仓动作" in second_envelope["rendered_message"]
+    assert second_envelope["revision"] > frozen_first["revision"]
+    assert second_envelope["delivery_key"] != frozen_first["delivery_key"]
+    assert day["fixed_reports"][FIXED_TARGET] == frozen_first
+    assert len(flow.calls) == 2
+    assert [call["uuid"] for call in flow.calls] == [
+        build_notification_transport_key(envelope["delivery_key"])
+        for envelope in (frozen_first, second_envelope)
+    ]
+    assert mod.run_tick_notification_flow(
+        flow.request(run_id="fixed-second-replay", target=next_target).request,
+    ) == 0
+    assert len(flow.calls) == 2
+    replayed = read_daily_decision_brief_delivery_state(
+        base=flow.base, account="lx", market="US",
+    )["state"]["days"][MARKET_DATE]
+    assert replayed["fixed_reports"] == day["fixed_reports"]
+    if candidate:
+        assert set(replayed["alerted_candidates"]) == {IDENTITY}
+        assert replayed["pending_candidates"] == {}
+    else:
+        assert not second_envelope["candidate_identities"]
+        assert "暂无合适合约" in second_envelope["rendered_message"]
+        assert "扫描失败" not in second_envelope["rendered_message"]
+
+
+def test_ambiguous_candidate_keeps_exact_retry_priority_over_new_fixed_batch(fixed_report_flow):
+    from src.application.notification_delivery_adapter import build_notification_transport_key
+
+    flow = fixed_report_flow
+    flow.clock.update(now="2026-07-21T13:30:30+00:00", outcome="ambiguous")
+    assert mod.run_tick_notification_flow(
+        flow.request(run_id="ambiguous-candidate", target="2026-07-21T09:30:00-04:00", fixed=False).request,
+    ) == 1
+    frozen = deepcopy(read_daily_decision_brief_delivery_state(
+        base=flow.base, account="lx", market="US",
+    )["state"]["days"][MARKET_DATE]["candidate_delivery"])
+    assert frozen["status"] == "ambiguous"
+    flow.clock.update(now="2026-07-21T14:00:30+00:00", outcome="confirmed")
+    assert mod.run_tick_notification_flow(flow.request(run_id="fixed-with-ambiguous-candidate").request) == 0
+    day = read_daily_decision_brief_delivery_state(
+        base=flow.base, account="lx", market="US",
+    )["state"]["days"][MARKET_DATE]
+    assert day["fixed_reports"] == {}
+    confirmed = day["candidate_delivery"]
+    assert confirmed["status"] == "confirmed"
+    assert flow.calls[-1]["uuid"] == build_notification_transport_key(frozen["delivery_key"])
+    assert confirmed["rendered_message"] == frozen["rendered_message"]
+    assert confirmed["message_sha256"] == frozen["message_sha256"]
+    assert confirmed["candidate_identities"] == frozen["candidate_identities"]
+    assert confirmed["rendered_transport"] == frozen["rendered_transport"]
+
+
+@pytest.mark.parametrize("outcome", ["failed", "ambiguous"])
+def test_same_fixed_batch_retry_keeps_frozen_report_after_business_data_changes(
+    fixed_report_flow, monkeypatch, outcome,
+):
+    from src.application.notification_delivery_adapter import build_notification_transport_key
+
+    flow = fixed_report_flow
+    flow.clock["outcome"] = outcome
+    assert mod.run_tick_notification_flow(flow.request(run_id="fixed-unconfirmed").request) == 1
+    frozen = deepcopy(read_daily_decision_brief_delivery_state(
+        base=flow.base, account="lx", market="US",
+    )["state"]["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET])
+    assert frozen["status"] == ("pending" if outcome == "failed" else "ambiguous")
+    flow.clock.update(now="2026-07-21T14:01:30+00:00", outcome="confirmed", candidate=False)
+    select = mod._select_daily_brief_delivery
+    monkeypatch.setattr(mod, "_select_daily_brief_delivery", lambda *_args, **_kwargs: pytest.fail("must reuse frozen report"))
+    sent_before = len(flow.calls)
+    assert mod.run_tick_notification_flow(flow.request(run_id="fixed-exact-retry").request) == 0
+    confirmed = read_daily_decision_brief_delivery_state(
+        base=flow.base, account="lx", market="US",
+    )["state"]["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET]
+    assert confirmed["status"] == "confirmed"
+    assert {key: value for key, value in confirmed.items() if key not in {
+        "status", "last_attempt_at_utc", "confirmed_at_utc", "confirmed_attribution_route_key",
+    }} == {key: value for key, value in frozen.items() if key not in {
+        "status", "last_attempt_at_utc", "confirmed_at_utc", "confirmed_attribution_route_key",
+    }}
+    assert len(flow.calls) == sent_before + 1
+    assert flow.calls[-1]["content"] == frozen["rendered_transport"]["transport"]["content"]
+    assert flow.calls[-1]["uuid"] == build_notification_transport_key(frozen["delivery_key"])
+    monkeypatch.setattr(mod, "_select_daily_brief_delivery", select)
+    assert mod.run_tick_notification_flow(flow.request(run_id="fixed-confirmed-replay").request) == 0
+    assert len(flow.calls) == sent_before + 1
 
 
 def test_scheduled_daily_brief_needs_no_renderer_enable_switch(monkeypatch, tmp_path: Path) -> None:
@@ -1090,9 +1324,9 @@ def test_candidate_display_evidence_acknowledges_only_surviving_details_or_summa
         result = actual_selection(*args, **kwargs)
         if not summary_retained:
             # Simulate a transport-specific selection with the overflow summary absent.
-            summary = next(line for line in result["text"].split("\n\n") if "另有 2 个新增候选未展开" in line)
+            summary = next(line for line in result["text"].split("\n\n") if "CSP 另有 2 个策略候选未展开" in line)
             result["text"] = result["text"].replace("\n\n" + summary, "")
-            result["markdown_blocks"] = [block for block in result["markdown_blocks"] if "另有 2 个新增候选未展开" not in block]
+            result["markdown_blocks"] = [block for block in result["markdown_blocks"] if "CSP 另有 2 个策略候选未展开" not in block]
             result["display_evidence"] = [
                 {**item, "state": "not_shown"} if item["state"] == "summary_notified" else item
                 for item in result["display_evidence"]]
@@ -1113,7 +1347,7 @@ def test_candidate_display_evidence_acknowledges_only_surviving_details_or_summa
     represented = {identity for identity, state in evidence.items() if state != "not_shown"}
     assert set(day["alerted_candidates"]) == represented
     assert set(day["pending_candidates"]) == set(evidence) - represented
-    assert ("另有 2 个新增候选未展开" in calls[0]["message"]) is summary_retained
+    assert ("CSP 另有 2 个策略候选未展开" in calls[0]["message"]) is summary_retained
 
 
 def test_feishu_delivery_only_retry_reuses_frozen_card_transport(monkeypatch, tmp_path: Path) -> None:

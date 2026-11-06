@@ -9,7 +9,9 @@ import src.application.daily_decision_brief_repository as repo
 import src.application.tick_notification_flow as mod
 from src.application.notification_delivery_route import notification_reminder_route_key
 from src.application.notification_fanout import list_notification_fanouts
-from test_daily_decision_brief_notification_flow import _brief, _config, _request, FIXED_TARGET, MARKET_DATE, IDENTITY
+from test_daily_decision_brief_notification_flow import (
+    _brief, _config, _request, fixed_report_flow, FIXED_TARGET, MARKET_DATE, IDENTITY,
+)
 
 
 def config(routes=("a", "b")):
@@ -71,6 +73,74 @@ def test_real_entry_mixed_children_continue_only_failed_without_assembly_or_reta
     rows = repo.query_daily_brief_receipts(base=flow.base, account="lx", market="US", query={"run_id": "retry"})
     assert sorted(row["delivery_state"] for row in rows) == ["attempted", "confirmed", "confirmed"]
     assert {row["business_result"]["route_id"] for row in rows} == {"a", "b", "c"}
+
+
+@pytest.mark.parametrize("candidate", [False, True], ids=["valid-empty", "still-valid-actions"])
+def test_real_adapter_fanout_sends_identical_fixed_batches_once_per_route(fixed_report_flow, candidate):
+    flow = fixed_report_flow
+    flow.clock["candidate"] = candidate
+    cfg = config()
+    assert mod.run_tick_notification_flow(flow.request(run_id="fanout-fixed-first", config=cfg).request) == 0
+    first = list_notification_fanouts(base=flow.base, account="lx", logical_key_prefix="daily-brief:")[0]
+    assert first["status"] == "confirmed"
+    assert {child["route_id"] for child in first["children"]} == {"a", "b"}
+    assert {call["open_id"] for call in flow.calls} == {"ou_a", "ou_b"}
+    assert len(flow.calls) == 2
+    frozen_first = deepcopy(first)
+    assert mod.run_tick_notification_flow(flow.request(run_id="fanout-fixed-first-replay", config=cfg).request) == 0
+    assert len(flow.calls) == 2
+
+    next_target = "2026-07-21T11:00:00-04:00"
+    flow.clock["now"] = "2026-07-21T15:00:30+00:00"
+    assert mod.run_tick_notification_flow(
+        flow.request(run_id="fanout-fixed-second", target=next_target, config=cfg).request,
+    ) == 0
+    rows = list_notification_fanouts(base=flow.base, account="lx", logical_key_prefix="daily-brief:")
+    assert len(rows) == 2 and all(row["status"] == "confirmed" for row in rows)
+    assert next(row for row in rows if row["fanout_id"] == first["fanout_id"]) == frozen_first
+    second = next(row for row in rows if row["fanout_id"] != first["fanout_id"])
+    assert second["logical_key"].endswith(next_target)
+    assert {child["route_id"] for child in second["children"]} == {"a", "b"}
+    assert all(child["spec"]["metadata"]["delivery_kind"] == "fixed_report" for child in second["children"])
+    assert len(flow.calls) == 4
+    assert len({call["uuid"] for call in flow.calls}) == 4
+    assert mod.run_tick_notification_flow(
+        flow.request(run_id="fanout-fixed-second-replay", target=next_target, config=cfg).request,
+    ) == 0
+    assert len(flow.calls) == 4
+    day = repo.read_daily_decision_brief_delivery_state(
+        base=flow.base, account="lx", market="US",
+    )["state"]["days"][MARKET_DATE]
+    assert day["fixed_reports"] == {} and day["candidate_delivery"] is None
+
+
+def test_new_fixed_fanout_preserves_prior_route_failure_for_exact_retry(flow):
+    flow.clock["now"] = "2026-07-21T13:30:30+00:00"
+    flow.outcomes["b"] = {"explicit_pre_acceptance_failure": True}
+    assert mod.run_tick_notification_flow(
+        _request(flow.base, run_id="candidate-partial-before-fixed", fixed=False, config=config()).request,
+    ) == 1
+    old = next(item for item in fanouts(flow) if ":candidate:" in item["logical_key"])
+    assert old["status"] == "partial"
+    frozen = {child["route_id"]: deepcopy(child["spec"]) for child in old["children"]}
+    flow.clock["now"] = "2026-07-21T14:00:30+00:00"
+    flow.outcomes.clear()
+    assert mod.run_tick_notification_flow(
+        _request(flow.base, run_id="fixed-after-partial-candidate", config=config()).request,
+    ) == 0
+    rows = fanouts(flow)
+    fixed = next(item for item in rows if ":fixed:" in item["logical_key"])
+    assert fixed["status"] == "confirmed"
+    assert all(child["spec"]["metadata"]["delivery_kind"] == "fixed_report" for child in fixed["children"])
+    continued = next(item for item in rows if item["fanout_id"] == old["fanout_id"])
+    assert continued["status"] == "confirmed"
+    assert {child["route_id"]: child["spec"] for child in continued["children"]} == frozen
+    assert [call["target"] for call in flow.calls].count("ou_a") == 2
+    assert [call["target"] for call in flow.calls].count("ou_b") == 3
+    day = repo.read_daily_decision_brief_delivery_state(
+        base=flow.base, account="lx", market="US",
+    )["state"]["days"][MARKET_DATE]
+    assert day["fixed_reports"] == {} and day["candidate_delivery"] is None
 
 
 def test_current_binding_rotation_and_route_removal_pause_without_attempt(flow, monkeypatch):

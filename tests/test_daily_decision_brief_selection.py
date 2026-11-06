@@ -12,8 +12,8 @@ from test_daily_decision_brief_renderer import _brief, _candidate
 from test_tick_position_advice_views import position_row
 
 
-def _roll(index: int, *, annualized: float = 0.2, credit: float = 100) -> dict:
-    row = position_row(lot=f"roll-{index}", credit=credit)
+def _roll(index: int, *, annualized: float = 0.2, credit: float = 100, option_type: str = "call") -> dict:
+    row = position_row(lot=f"roll-{index}", credit=credit, option_type=option_type)
     row["symbol"] = f"R{index}"
     row["roll_advice"]["position"]["symbol"] = row["symbol"]
     target = row["roll_advice"]["candidates"][0]
@@ -67,10 +67,10 @@ def test_thirteen_positions_keep_both_rolls_and_hold_uses_no_card(with_candidate
 def test_close_roll_queues_alternate_and_urgent_deadline_precedes_without_duplicate() -> None:
     rows = [_roll(i, annualized=0.5 - i / 100) for i in range(4)] + [_close(i) for i in range(3)]
     brief = _source(rows)
-    assert _symbols(build_daily_brief_user_view(brief)) == ["C0", "R0", "C1", "R1", "C2"]
+    assert _symbols(build_daily_brief_user_view(brief)) == ["C0", "R0", "C1", "R1", "C2", "R2"]
     rows[3]["last_trading_at_utc"] = "2026-07-20T16:00:00Z"
     context = {"next_fixed_report_at_utc": "2026-07-20T18:00:00Z"}
-    view = build_daily_brief_user_view(brief, context=context)
+    view = build_daily_brief_user_view(brief, context=context, limits={"max_total_items": 5})
     assert _symbols(view) == ["R3", "C0", "R0", "C1", "R1"]
     assert len(set(_symbols(view))) == 5
 
@@ -98,7 +98,7 @@ def test_roll_and_close_share_one_mutually_exclusive_card_with_both_metrics() ->
 
 def test_account_cap_names_the_sixth_omitted_action_and_legacy_key_is_ignored() -> None:
     brief = _source([_close(i) for i in range(6)])
-    view = build_daily_brief_user_view(brief, limits={"max_items_per_account": 5, "max_actions_per_priority": 1})
+    view = build_daily_brief_user_view(brief, limits={"max_items_per_account": 1, "max_actions_per_priority": 1})
     assert _symbols(view) == ["C0", "C1", "C2", "C3", "C4"]
     assert any("C5" in line and "1" in line for line in view["selection_omissions"])
     message = render_fixed_report_card_markdown(brief)
@@ -121,13 +121,13 @@ def test_candidates_round_robin_by_sealed_rank_and_do_not_promote_diff_changes()
     view = build_daily_brief_user_view(brief, diff={"changes": []})
     assert [(row["family"], row["rank"]) for row in view["candidates"]] == [
         (family, 1) for family in families
-    ] + [("sell_put", 2)]
+    ] + [(family, 2) for family in families]
 
 
 def test_zero_account_cap_still_respects_whole_brief_budget() -> None:
     view = build_daily_brief_user_view(_source([_close(i) for i in range(50)]),
-                                       limits={"max_items_per_account": 0})
-    assert len(view["positions"]) == 42
+                                       limits={"max_close_items": 0})
+    assert len(view["positions"]) == 40
 
 
 @pytest.mark.parametrize("unknown_time", [None, "2026-07-20", "2026-07-20T01:00:00", "invalid"])
@@ -153,12 +153,15 @@ def test_wheel_opening_and_status_cards_share_account_and_whole_brief_caps() -> 
     ]
     view = build_daily_brief_user_view(brief)
     assert len(view["positions"]) == 4
-    assert len(view["wheel_batches"]) == 1
-    assert any("Wheel 另有 2" in line for line in view["selection_omissions"])
+    assert len(view["wheel_batches"]) == 3
+    assert not any("Wheel 另有" in line for line in view["selection_omissions"])
+    bounded = build_daily_brief_user_view(brief, limits={"max_total_items": 5})
+    assert len(bounded["wheel_batches"]) == 1
+    assert any("Wheel 另有 2" in line for line in bounded["selection_omissions"])
     brief["positions"] = []
     for row in brief["wheel_batches"]:
         row["recommended_contracts"] = 0
-    view = build_daily_brief_user_view(brief, limits={"max_items_per_account": 2})
+    view = build_daily_brief_user_view(brief, limits={"max_total_items": 2})
     assert len(view["wheel_batches"]) == 2
 
 
@@ -191,7 +194,7 @@ def test_sealed_rank_two_does_not_skip_another_strategys_rank_two() -> None:
     # Sealed rank=1 precedes rank=2; same-rank strategy order stays CSP then CC.
     # A zero-capacity CC1 is informational and does not promote CC2 to rank=1.
     assert [(row["family"], row["rank"]) for row in build_daily_brief_user_view(brief)["candidates"]] == [
-        ("sell_put", 1), ("sell_put", 2),
+        ("sell_put", 1), ("sell_put", 2), ("covered_call", 2), ("covered_call", 1),
     ]
 
 
@@ -208,6 +211,145 @@ def test_next_fixed_report_excludes_candidate_checks_and_send_cutoff() -> None:
     assert next_daily_brief_fixed_report(
         schedule_cfg=schedule, now_utc=datetime(2026, 11, 6, 7, 50, tzinfo=timezone.utc),
     ) == "2026-11-09T02:00:00+00:00"
+
+
+def test_independent_close_up_down_sections_keep_opening_candidates() -> None:
+    down = [_roll(i, option_type="put") for i in range(7)]
+    rows = [*down, *[_close(i) for i in range(2)], _roll(20)]
+    brief = _source(rows)
+    brief["candidates"] = {"sell_put": [
+        _candidate(rank=i + 1, symbol=f"B{i}", option_type="put",
+                   expiration="2026-08-21", strike=100, capacity=1)
+        for i in range(3)
+    ]}
+    view = build_daily_brief_user_view(brief)
+    assert len(view["positions"]) == 6
+    assert len(view["candidates"]) == 3
+    assert sum("向下移仓" in row["status"] for row in view["positions"]) == 3
+    assert sum("向上移仓" in row["status"] for row in view["positions"]) == 1
+    assert any("下移" in note and "4 条" in note for note in view["selection_omissions"])
+    text = render_fixed_report_card_markdown(brief)
+    assert all(label in text for label in ("平仓", "上移", "下移"))
+
+
+def test_extra_down_suggestions_do_not_displace_other_sections() -> None:
+    def brief(down_count: int) -> dict:
+        result = _source([*[_close(i) for i in range(8)], *[_roll(i) for i in range(7)],
+                          *[_roll(i + 20, option_type="put") for i in range(down_count)]])
+        result["candidates"] = {"sell_put": [
+            _candidate(rank=i + 1, symbol=f"B{i}", option_type="put",
+                       expiration="2026-08-21", strike=100, capacity=1) for i in range(3)
+        ]}
+        return result
+    first = build_daily_brief_user_view(brief(6))
+    crowded = build_daily_brief_user_view(brief(26))
+    assert len(first["positions"]) + len(first["candidates"]) == 14
+    for section, maximum in (("close", 5), ("roll_up", 3), ("roll_down", 3)):
+        assert sum(row["section"] == section for row in first["positions"]) == maximum
+    assert first["positions"] == crowded["positions"]
+    assert first["candidates"] == crowded["candidates"]
+    assert any("下移" in note and "23 条" in note for note in crowded["selection_omissions"])
+
+
+def test_admitted_mutually_exclusive_alternatives_use_one_physical_total_slot() -> None:
+    row = _roll(0)
+    row.update(recommendation_state="close", notification_eligible=True,
+               evaluation_status="evaluable", quote_status="priced",
+               metrics=_close(0)["metrics"])
+    view = build_daily_brief_user_view(_source([row, _close(1), _roll(2)]), limits={
+        "max_close_items": 1, "max_roll_up_items": 1, "max_total_items": 1,
+    })
+    assert len(view["positions"]) == 1
+    assert view["positions"][0]["has_close_alternative"]
+    assert view["positions"][0]["is_roll"]
+    assert len(view["positions"][0]["roll_identities"]) == 1
+
+
+def test_section_quota_does_not_leak_unselected_close_or_roll_alternative() -> None:
+    row = _roll(0)
+    row.update(recommendation_state="close", notification_eligible=True,
+               evaluation_status="evaluable", quote_status="priced",
+               metrics={"remaining_max_annualized_return": 0.02, "net_capture_ratio": 0.9,
+                        "ask": 0.1, "capital_basis": 10000})
+    brief = _source([_close(0), row])
+    view = build_daily_brief_user_view(brief, limits={"max_close_items": 1})
+    roll = next(item for item in view["positions"] if item.get("is_roll"))
+    assert "互斥" not in "\n".join(roll["details"])
+    assert "同时建议平仓" not in roll["status"]
+    assert len(view["positions"]) == 2
+    other_roll = _roll(1, annualized=0.8)
+    view = build_daily_brief_user_view(_source([row, other_roll]), limits={"max_roll_up_items": 1})
+    close = next(item for item in view["positions"] if item["title"].startswith("R0"))
+    assert not close.get("is_roll")
+    assert not close.get("roll_identities")
+    assert "互斥" not in "\n".join(close["details"])
+
+
+def _urgent_roll_and_close_remainder_brief() -> dict:
+    from domain.domain.daily_decision_brief import normalize_daily_decision_brief
+    from src.application.daily_decision_brief_service import _position_view
+
+    urgent = position_row(lot="a-urgent-event-roll")
+    urgent.update(currency="USD", recommendation_state="close", evaluation_status="evaluable",
+        quote_status="priced", event_at_utc="2026-07-20T14:20:00Z", **_close(0)["metrics"])
+    remainder = {**deepcopy(urgent), "position_lot_id": "b-no-time-close"}
+    remainder.pop("roll_advice")
+    remainder.pop("event_at_utc")
+    brief = _source([_position_view(row, notification_eligible=True, close_actionable=True)
+                     for row in (urgent, remainder)])
+    brief["source_artifacts"] = []
+    return normalize_daily_decision_brief(brief)
+
+
+@pytest.mark.parametrize("total", [1, 2])
+def test_actual_card_deadline_keeps_urgent_roll_before_unknown_close_remainder(total: int) -> None:
+    view = build_daily_brief_user_view(_urgent_roll_and_close_remainder_brief(),
+        limits={"max_total_items": total}, context={"next_fixed_report_at_utc": "2026-07-20T15:00:00Z"})
+    ordered = sorted(view["positions"], key=lambda row: row["selection_rank"])
+    assert [row["section"] for row in ordered] == ["roll_up", "close"][:total]
+    assert sum(row["lot_count"] for row in ordered) == total
+
+
+def _cross_target_close_brief() -> dict:
+    from domain.domain.daily_decision_brief import normalize_daily_decision_brief
+
+    ups = []
+    for index in range(3):
+        row = position_row(lot=f"shared-old-{index}")
+        row.update(currency="USD", notification_eligible=True, recommendation_state="close",
+            evaluation_status="evaluable", quote_status="priced", metrics=_close(0)["metrics"])
+        target = row["roll_advice"]["candidates"][0]
+        target.update(contract=f"NVDA260821C{(105 + index) * 1000:08d}", strike=105 + index,
+            strike_increase_pct=(5 + index) / 100, incremental_annualized_return=0.3 - index / 100)
+        ups.append(row)
+    down = position_row(lot="independent-down", option_type="put")
+    down["currency"] = "USD"
+    brief = _source([*ups, down, {**_close(10), "currency": "USD"}])
+    brief["source_artifacts"] = []
+    return normalize_daily_decision_brief(brief)
+
+
+@pytest.mark.parametrize("total", [2, 3])
+def test_close_group_with_multiple_roll_targets_keeps_section_round_robin(total: int) -> None:
+    view = build_daily_brief_user_view(_cross_target_close_brief(), limits={"max_total_items": total})
+    ordered = sorted(view["positions"], key=lambda row: row["selection_rank"])
+    assert [row["section"] for row in ordered] == ["roll_up", "roll_down", "close"][:total]
+    assert sum(row["section"] == "roll_up" for row in ordered) == 1
+
+
+def test_total_forty_is_shared_after_independent_sections_and_can_be_lowered() -> None:
+    brief = _source([_close(i) for i in range(50)])
+    brief["candidates"] = {"sell_put": [
+        _candidate(rank=i + 1, symbol=f"B{i}", option_type="put",
+                   expiration="2026-08-21", strike=100, capacity=1)
+        for i in range(10)
+    ]}
+    limits = {"max_close_items": 0, "max_candidates_per_strategy": 10}
+    view = build_daily_brief_user_view(brief, limits=limits)
+    assert len(view["positions"]) + len(view["candidates"]) == 40
+    view = build_daily_brief_user_view(brief, limits={**limits, "max_total_items": 7})
+    assert len(view["positions"]) == 7
+    assert view["candidates"] == []
 
 
 def test_missing_required_roll_economics_fails_eligibility_instead_of_zero_default() -> None:
@@ -235,5 +377,5 @@ def test_zero_capacity_candidate_is_after_actionable_opening_and_market_caps_are
     for market in ("US", "HK"):
         brief["market"] = market
         assert [row["symbol"] for row in build_daily_brief_user_view(
-            brief, limits={"max_items_per_account": 1},
+            brief, limits={"max_total_items": 1},
         )["candidates"]] == ["ACTIONABLE"]

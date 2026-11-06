@@ -80,12 +80,9 @@ from src.application.close_advice_report_manifest import (
     normalize_close_advice_report_value,
     read_close_advice_report_snapshot,
 )
-from src.application.payload_helpers import positive_int_or as _positive_int
 from src.application.ledger.api import (
     open_trade_reconciliation_evidence_repo, resolve_position_ledger_sqlite_path,
 )
-_DEFAULT_MAX_CANDIDATES = 3
-_DEFAULT_CLOSE_ADVICE_MAX_ITEMS_PER_ACCOUNT = 5
 _MARKET_TIMEZONES = {"US": "America/New_York", "HK": "Asia/Hong_Kong", "CN": "Asia/Shanghai"}
 _COMBO_OCCURRENCE_FIELDS = (
     "candidate_occurrence_schema",
@@ -165,11 +162,6 @@ def assemble_daily_decision_brief(
 
     data_gaps: list[dict[str, Any]] = []
     source_artifacts: list[dict[str, Any]] = []
-    max_candidates = _positive_int(
-        _daily_brief_config(config_map).get("max_candidates_per_strategy"),
-        default=_DEFAULT_MAX_CANDIDATES,
-    )
-    close_advice_max_items = _close_advice_max_items_per_account(config_map)
 
     candidate_bundle: dict[str, Any] | None = None
     candidate_bundle_unavailable_reason: str | None = None
@@ -435,20 +427,17 @@ def assemble_daily_decision_brief(
         max_items_per_account=0,
     )
     actionable_close_row_ids = {id(row) for row in actionable_close_rows}
-    selected_close_rows = select_close_advice_notification_rows(
-        close_rows, max_items_per_account=close_advice_max_items,
-    )
-    selected_close_row_ids = {id(row) for row in selected_close_rows}
     _load_strategy_step_failures(
         failure_path=strategy_failure_path, run_account_dir=run_account_dir,
         account=account_norm, run_id=run_id_norm, market=market_norm,
         strategy_statuses=indexed_strategy_statuses, data_gaps=data_gaps,
     )
-    selected_puts = put_rows[:max_candidates]
-    selected_calls = call_rows[:max_candidates]
+    # Sealed Brief sources stay complete; display quotas belong to the shared selector.
+    selected_puts = put_rows
+    selected_calls = call_rows
     ranked_combos = combo_rows
-    selected_combos = ranked_combos[:max_candidates]
-    selected_wheel = wheel_rows[:max_candidates]
+    selected_combos = ranked_combos
+    selected_wheel = wheel_rows
     actions: list[dict[str, Any]] = []
     candidate_payloads: dict[str, list[dict[str, Any]]] = {
         "sell_put": [],
@@ -595,7 +584,7 @@ def assemble_daily_decision_brief(
             )
 
     for row in close_rows:
-        notification_eligible = id(row) in selected_close_row_ids
+        notification_eligible = id(row) in actionable_close_row_ids
         positions.append(
             _position_view(
                 row,
@@ -603,7 +592,7 @@ def assemble_daily_decision_brief(
                 close_actionable=id(row) in actionable_close_row_ids,
             )
         )
-    for row in selected_close_rows:
+    for row in actionable_close_rows:
         actions.append(_close_action(row, account=account_norm))
 
     portfolio_context = _load_portfolio_context(
@@ -2217,6 +2206,7 @@ def _position_view(
         "leg_role",
         "source_stock_lot_id",
         "symbol",
+        "currency",
         "option_type",
         "expiration",
         "strike",
@@ -2966,29 +2956,6 @@ def _account_result_view(result: AccountResult | Mapping[str, Any]) -> dict[str,
         "ran_scan": bool(getattr(result, "ran_scan", False)),
         "decision_reason": _text(getattr(result, "decision_reason", "")),
     }
-
-
-def _daily_brief_config(config: Mapping[str, Any]) -> dict[str, Any]:
-    notifications = config.get("notifications")
-    if not isinstance(notifications, Mapping):
-        return {}
-    brief = notifications.get("daily_brief")
-    return dict(brief) if isinstance(brief, Mapping) else {}
-
-
-def _close_advice_max_items_per_account(config: Mapping[str, Any]) -> int:
-    close_advice = config.get("close_advice")
-    close_advice_map = (
-        dict(close_advice)
-        if isinstance(close_advice, Mapping)
-        else {}
-    )
-    configured = safe_int(close_advice_map.get("max_items_per_account"))
-    return (
-        _DEFAULT_CLOSE_ADVICE_MAX_ITEMS_PER_ACCOUNT
-        if configured is None
-        else configured
-    )
 
 
 def _market_timezone(config: Mapping[str, Any], market: str) -> str:
