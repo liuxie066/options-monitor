@@ -35,6 +35,29 @@ env-file 不是合并进生成快照的配置层；它在进程启动或工具�
 
 人工维护监控清单使用 `om symbols list|add|rm|edit --market us|hk`；写命令默认预览，`--apply` 经既有配置事务发布 YAML、已配置市场和 Bot 的快照。无显式 `--config-yaml` 时，YAML 默认位置跟随当前运行目录（`OM_RUNTIME_ROOT`、用户记录、repo 回退）；显式 `--config-yaml` 可选择另一实例。外部 Agent 使用 `om-agent run --tool manage_symbols`，其输入和写入门禁由 `om-agent spec` 定义。两类入口不直接写生成的 JSON。
 
+## 升级共享 venv 保留数
+
+在 `config.yaml` 顶层配置：
+
+```yaml
+runtime:
+  upgrade_keep_venvs: 2
+```
+
+默认值来自 `config_defaults.DEFAULT_CONFIG`。该值必须是非负整数，禁止布尔、字符串、浮点及 null；
+`0` 表示只要求保留当前共享 venv，`2` 表示当前加最近两个其它 venv。它是实例级策略，不能写在
+`markets.*.runtime` 下。修改后通过现有 `config build` 或配置事务生成快照，升级收尾从 service profile
+指向的有效市场快照读取；多个市场的值不一致时跳过 venv 清理并在升级回执中记录错误。
+
+每次成功升级在现有收尾阶段自动执行 venv 保留策略，不需要 `--cleanup-after-upgrade`，该参数仍只控制
+原有 release 清理。仍被保留 release 的 `.venv` 引用的缓存受到额外保护，保证回滚目标可运行，因此
+实际保留量可能超过当前加 N 个；要回收这部分空间，先使用现有 release 清理移除不再需要的旧 release。
+最近使用时间在共享 venv 准备成功时更新。清理范围限于升级 cache root 的 `venvs/` 内直接子级的
+16 位小写十六进制目录，跳过软链接、临时构建目录及其它名称；不清理 git 缓存、release、共享输出、
+账本或配置。删除路径、保留路径、逐目录结果和释放的文件字节数写入 `upgrade_status.json` 的
+`post_upgrade_venv_cleanup`，也保留在升级 operations 中。释放字节是文件逻辑大小差值，非磁盘块空间保证；
+清理失败记录警告而不改变已经成功的升级状态。
+
 ## `config.yaml`
 
 稳定约定：

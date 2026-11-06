@@ -601,6 +601,28 @@ Provider 首次迁移由下述新控制器驱动：旧固定目录尚无 `market
 该控制器会从旧实例环境读取安装状态，并从旧有效配置识别内置 PM/Position Advice；不要先切换 `current`
 或先删除旧环境。本变更未回写已发布版本的升级器，也未验证旧自动升级链路的首次迁移。
 
+源码升级的共享 venv 只缓存依赖，不缓存插件代码。依赖哈希输入包括根 `requirements.txt`、
+`constraints.txt` 和它们的 `-r` / `-c` 引用链；启用服务器依赖时还包括 `requirements/server.txt`、
+`constraints/server.txt` 及引用链，启用 Longbridge 时包括 `requirements/longbridge.txt` 及引用链。
+选中的源码插件贡献 `pyproject.toml` 和存在的 `setup.py` / `setup.cfg`，不再贡献 `src/**/*.py`。
+哈希仍绑定插件选择、Python 实现及主次版本、平台、架构和安装器模式。声明文件任何字节变化都会
+使缓存失效；动态依赖不能使用这条仅按声明复用的路径。`pyproject.toml` 的静态依赖在构建共享 venv
+时按根约束安装，插件本体随后以 `--no-deps --target` 安装进 release 的 `.om-source-plugins/<id>/site`。
+
+插件复用校验包标识、声明版本、整个插件源目录指纹，以及安装回执列出的每个文件摘要和实际 distribution
+元数据；指纹排除 build、dist、egg-info、pycache 等构建产物。当前目标已匹配则跳过；上一 release 匹配则复制
+经验证的安装文件；变化或校验失败只重新安装该插件。目标解释器仍执行原有导入与能力校验。插件代码
+逐 release 隔离，更新不会改写旧 release 的插件或共享依赖。托管 wheel 继续沿用 release 版本、wheel 摘要、
+receipt 和实际导入校验，`preserve_managed_plugin` 不使用源码插件的跳过条件。`om plugins list` 将这类
+源码安装标记为 `release_source`，`om plugins uninstall` 可停用本 release 的插件，包括损坏安装；安装文件先
+重命名保留，随该 release 的正常清理回收。替换为托管 wheel 前需先卸载源码选择。
+
+依赖哈希使用 v2 格式标记，因此历史缓存首次重建一次，防止复用仍混有旧插件代码的 venv；旧 16 位哈希
+目录进入正常保留策略。成功升级收尾自动清理未保留的共享 venv，默认当前加最近两个其它缓存，并保护仍被
+保留 release 引用的缓存；这与下面 opt-in 的 release 清理独立。配置及审计字段见 [配置契约](../CONFIGS.md#升级共享-venv-保留数)。
+首次进入包含本改动的 release，旧控制器仍执行旧逻辑；通常从该 release 发起的下一次升级开始复用新缓存，
+如需首次迁移也使用新逻辑，须按上文的新控制器方式驱动。
+
 release 清理默认 dry-run，不删除文件：
 
 ```bash

@@ -19,7 +19,10 @@ import uuid
 import zipfile
 
 from src.application import runtime_bundle
-from src.application.plugin_runtime import PLUGINS, code_root, expected_plugin_version, plugin_store, read_managed_plugin
+from src.application.plugin_runtime import (
+    PLUGINS, code_root, expected_plugin_version, plugin_store, read_managed_plugin,
+    read_source_plugin, source_plugin_store,
+)
 from src.infrastructure.private_storage import ensure_private_directory, exclusive_private_file_lock
 
 
@@ -47,12 +50,13 @@ def list_plugins(*, repo_root: Path | None = None) -> dict:
     for key, item in PLUGINS.items():
         try:
             receipt = read_managed_plugin(root, key)
-            environment_version = _environment_version(key)
+            source_receipt = read_source_plugin(root, key) if receipt is None else None
+            environment_version = source_receipt["version"] if source_receipt else _environment_version(key)
             expected = _version(root) if receipt else expected_plugin_version(key, repo_root=root)
             installed_version = receipt["version"] if receipt else environment_version
             rows.append({"id": key, "distribution": item["distribution"], "installed": installed_version is not None,
                          "version": installed_version, "compatible": installed_version == expected if installed_version else None,
-                         "source": "managed" if receipt else "python_environment" if environment_version else None,
+                         "source": "managed" if receipt else "release_source" if source_receipt else "python_environment" if environment_version else None,
                          "status": "installed" if installed_version == expected else "incompatible" if installed_version else "not_installed"})
         except (ValueError, OSError, KeyError) as exc:
             rows.append({"id": key, "distribution": item["distribution"], "installed": None,
@@ -217,6 +221,8 @@ def install_plugin(plugin_id: str, *, repo_root: Path | None = None, confirm: bo
                 "om_version": version, "directory": str(plugin_store(root) / plugin_id)}
     # Upgrade controllers can run in a different environment. In that case the
     # staged subprocess checks target ownership instead of inspecting this one.
+    if read_source_plugin(root, plugin_id) is not None:
+        raise ValueError("plugin belongs to this release's source installation; use om plugins uninstall before replacing it")
     environment_version = _environment_version(plugin_id) if python_executable is None else None
     if environment_version is not None:
         raise ValueError("plugin is installed in Python environment; manage it with that environment's pip before using om plugins")
@@ -298,6 +304,21 @@ def uninstall_plugin(plugin_id: str, *, repo_root: Path | None = None, confirm: 
     # follow a link or touch a package owned by the interpreter environment.
     if store.parent.is_symlink() or store.is_symlink() or target.is_symlink():
         raise ValueError("plugin directory must not be a symlink")
+    source_target = source_plugin_store(root) / plugin_id
+    if source_target.exists() and not target.exists():
+        if (source_plugin_store(root).is_symlink() or source_target.is_symlink()
+                or not source_target.is_dir() or source_target.resolve().parent != source_plugin_store(root).resolve()):
+            raise ValueError("source plugin directory must be a direct non-symlink child of the release plugin store")
+        _check_market_removal(root, plugin_id)
+        preview = {"ok": True, "status": "preview", "changed": False, "plugin": plugin_id,
+                   "directory": str(source_target), "enabled_changed": False,
+                   "note": "停用此 release 的源码插件；配置与依赖保留，已有进程需单独重启"}
+        if not confirm:
+            return preview
+        with exclusive_private_file_lock(source_plugin_store(root) / ".lock"):
+            _check_market_removal(root, plugin_id)
+            source_target.rename(source_target.with_name(f".removed-{plugin_id}-{uuid.uuid4().hex}"))
+        return {**preview, "status": "removed", "changed": True, "restart_required": True}
     if _environment_version(plugin_id) is not None:
         raise ValueError("plugin also belongs to Python environment; use that environment's pip uninstall first")
     if not target.exists():
