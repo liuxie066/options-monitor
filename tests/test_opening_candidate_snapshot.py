@@ -310,6 +310,66 @@ def _publish_opening_manifest(base: Path, payload: dict) -> dict:
     )
 
 
+@pytest.mark.parametrize("detail", [None, "Required-data scan: later expiration failed; covered expiration remains usable."])
+@pytest.mark.parametrize(
+    ("status", "reason", "has_candidate", "opening_status"),
+    [
+        ("completed", None, True, "candidates_found"),
+        ("completed", "no_candidate", False, "no_candidate"),
+        ("completed", "partial_data", True, "candidates_found"),
+        ("failed", "strategy_execution_failed", False, "data_unavailable"),
+    ],
+)
+def test_optional_status_detail_roundtrips_without_changing_decisions(
+    tmp_path: Path,
+    detail: str | None,
+    status: str,
+    reason: str | None,
+    has_candidate: bool,
+    opening_status: str,
+) -> None:
+    status_row = _scan_status("NVDA", "put", status, reason=reason)
+    candidates = {
+        "put": [_candidate(contract_symbol="NVDA260918P00090000", period_return=0.20)]
+        if has_candidate else []
+    }
+    baseline = _seal_snapshot(
+        tmp_path / "without-detail", run_id="run-detail",
+        scan_statuses=[status_row], final_candidates=candidates,
+    )
+    observed_base = tmp_path / "observed"
+    observed = _seal_snapshot(
+        observed_base, run_id="run-detail",
+        scan_statuses=[{**status_row, **({"detail": detail} if detail is not None else {})}],
+        final_candidates=candidates,
+    )
+
+    strategy_scope = next(row for row in observed["scope_results"] if row["scope"] == "strategy")
+    assert strategy_scope["status"] == status
+    assert strategy_scope["reason_code"] == reason
+    assert observed["opening_status"] == opening_status
+    assert len(observed["ranked_candidates"]) == int(has_candidate)
+    assert [row["opening_decision"]["accepted"] for row in observed["candidate_decisions"]] == (
+        [True] if has_candidate else []
+    )
+    if detail is None:
+        assert "reason_detail" not in strategy_scope
+    else:
+        assert strategy_scope["reason_detail"] == detail
+    assert candidate_universe_summary(observed) == candidate_universe_summary(baseline)
+    assert observed == load_opening_candidate_snapshot(
+        base=observed_base, run_id="run-detail", account="lx", require_current_contract=True,
+    )
+    assert baseline == load_opening_candidate_snapshot(
+        base=tmp_path / "without-detail", run_id="run-detail", account="lx", require_current_contract=True,
+    )
+    projected = deepcopy(observed)
+    projected.pop("content_sha256")
+    for row in projected["scope_results"]:
+        row.pop("reason_detail", None)
+    assert projected == {key: value for key, value in baseline.items() if key != "content_sha256"}
+
+
 def test_snapshot_seals_final_candidate_order_and_account_binding(tmp_path: Path) -> None:
     payload = _seal(tmp_path)
 
@@ -1084,6 +1144,48 @@ def test_market_closed_is_sealed_as_explicit_unavailable_state(
         row["strategy_mode"]: row["strategy_status"]
         for row in payload["strategy_results"]
     } == {"call": "not_applicable", "put": "data_unavailable"}
+
+
+def test_incomplete_date_candidate_seals_with_ranges_and_incomplete_ranking(tmp_path: Path) -> None:
+    import pandas as pd
+    from src.application.required_data_coverage import (
+        evaluate_required_data_frame_fetch_plan_debug, required_data_candidate_coverage,
+    )
+    from src.application.candidate_snapshot_contract import (
+        CandidateSnapshotContractError, required_data_coverage_fields,
+    )
+    from tests.test_required_data_exact_coverage import _plan, _row, _window_request
+
+    request = _window_request(
+        minimum=80.0, maximum=100.0, expirations=["2026-09-18"], min_dte=20, max_dte=60,
+    )
+    frame = pd.DataFrame([_row(expiration="2026-09-18", dte=53, strike=value) for value in (90.0, 95.0, 100.0)])
+    coverage = evaluate_required_data_frame_fetch_plan_debug(frame, _plan(requests=[request])).to_dict()
+    assert coverage["covered_expirations"] == []
+    candidate = _candidate(contract_symbol="NVDA260918P00090000", period_return=0.04)
+    candidate.update(required_data_candidate_coverage(candidate, coverage))
+    payload = _seal_snapshot(
+        tmp_path, run_id="run-1", final_candidates={"put": [candidate]},
+        scan_statuses=[{**_scan_status("NVDA", "put", "completed", reason="partial_data"),
+                        "required_data_coverage": coverage}],
+    )
+    facts = payload["ranked_candidates"][0]["facts"]
+    assert facts["required_data_expiration_status"] == "incomplete"
+    assert facts["ranking_complete"] is False
+    assert facts["partial_candidate_policy"] == "retain_and_mark"
+    detail = facts["required_data_coverage"]["per_expiration"][0]
+    assert detail["covered_ranges"] == [[90.0, 100.0]]
+    assert detail["missing_ranges"] == [[80.0, 90.0]]
+    assert detail["missing_range_inclusive"] == [[True, False]]
+    contract_scope = next(row for row in payload["scope_results"] if row["scope"] == "contract")
+    assert contract_scope["required_data_expiration_status"] == "incomplete"
+    assert contract_scope["required_data_coverage"] == facts["required_data_coverage"]
+    with pytest.raises(CandidateSnapshotContractError, match="outside observed"):
+        required_data_coverage_fields({**facts, "strike": 85.0})
+    corrupted = deepcopy(facts)
+    corrupted["required_data_coverage"]["per_expiration"][0]["strike_coverage"][0]["covered_ranges"] = [[80.0, 100.0]]
+    with pytest.raises(CandidateSnapshotContractError, match="does not match observations"):
+        required_data_coverage_fields(corrupted)
 
 
 def test_partial_expiration_coverage_survives_sealing_explanations_and_brief(tmp_path: Path) -> None:

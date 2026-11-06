@@ -127,20 +127,27 @@ def test_runtime_snapshot_reader_preserves_partial_required_data_manifest(tmp_pa
     )
 
 
-def test_all_incomplete_dates_never_publish_receipt(tmp_path: Path) -> None:
+def test_all_incomplete_dates_publish_partial_receipt_for_observed_ranges(tmp_path: Path) -> None:
+    # Real observations now permit a partial receipt without a complete date;
+    # this deliberately replaces whole-date exclusion, not the completeness gate.
     payload, contract, now = partial_candidate(all_incomplete=True)
-    from src.application.source_receipts import SourceReceiptError
+    finalized = finalize_required_data_quote_candidate(
+        base=tmp_path, producer_root=tmp_path, producer_run_id="run-partial", symbol="NVDA",
+        expected_fetch_contract=contract, fetch_policy=fixture._policy(), mode="fresh",
+        payload=payload, now=now,
+    )
+    assert finalized["quote_receipt_path"].is_file()
+    metadata = json.loads(finalized["raw_path"].read_text())["meta"]
+    coverage = finalized["evidence"]["required_data_coverage"]
+    assert metadata["source_outcome"] == "success_rows"
+    assert coverage["status"] == "partial"
+    assert coverage["covered_expirations"] == []
+    assert coverage["incomplete_expirations"] == ["2026-08-21", "2026-08-28"]
+    assert coverage["ranking_complete"] is False
+    assert all(item["covered_ranges"] == [[115.0, 120.0]] for item in coverage["per_expiration"])
 
-    with pytest.raises(SourceReceiptError, match="invalid_row_identity.*covered_expirations"):
-        finalize_required_data_quote_candidate(
-            base=tmp_path, producer_root=tmp_path, producer_run_id="run-partial", symbol="NVDA",
-            expected_fetch_contract=contract, fetch_policy=fixture._policy(), mode="fresh",
-            payload=payload, now=now,
-        )
-    assert not list(tmp_path.glob("source_receipts/**/receipt.json"))
 
-
-def test_frozen_partial_dates_reach_candidate_runner_and_publish_partial_status(tmp_path: Path) -> None:
+def test_frozen_partial_ranges_reach_candidate_runner_and_keep_partial_status(tmp_path: Path) -> None:
     from src.application.symbol_monitoring import run_symbol_monitoring
 
     root, path, _manifest, batch, _finalized = sealed_partial(tmp_path)
@@ -174,7 +181,9 @@ def test_frozen_partial_dates_reach_candidate_runner_and_publish_partial_status(
             runtime_config={"portfolio": {"account": "lx"}},
         ), deps=deps,
     )
-    assert len(seen) == 5 and {row["expiration"] for row in seen} == {"2026-08-21"}
+    # Keep the second date's observed segment without claiming its lower edge.
+    assert len(seen) == 7 and {row["expiration"] for row in seen} == {"2026-08-21", "2026-08-28"}
+    assert {row["strike"] for row in seen if row["expiration"] == "2026-08-28"} == {115.0, 120.0}
     assert rows[0]["candidate_count"] == 1
     assert rows[0]["required_data_status"] == "incomplete"
     status = json.loads(next(report.glob("*_scan_status.v3.json")).read_text())
@@ -182,7 +191,7 @@ def test_frozen_partial_dates_reach_candidate_runner_and_publish_partial_status(
     assert status["required_data_coverage"]["incomplete_expirations"] == ["2026-08-28"]
 
 
-def test_close_and_roll_quotes_exclude_rejected_dates(tmp_path: Path) -> None:
+def test_close_and_roll_quotes_keep_partial_date_observations_with_gap_detail(tmp_path: Path) -> None:
     from src.application.close_advice_runner import _load_frozen_required_data_quotes
 
     _root, _path, _manifest, batch, _finalized = sealed_partial(tmp_path)
@@ -191,5 +200,8 @@ def test_close_and_roll_quotes_exclude_rejected_dates(tmp_path: Path) -> None:
         csv_bytes_by_symbol={"NVDA": csv_bytes}, base_dir=tmp_path,
         provenance_by_symbol={"NVDA": evidence},
     )
-    assert len(quotes) == 5
-    assert {key[2] for key in quotes} == {"2026-08-21"}
+    assert len(quotes) == 7
+    assert {key[2] for key in quotes} == {"2026-08-21", "2026-08-28"}
+    partial = [quote for key, quote in quotes.items() if key[2] == "2026-08-28"]
+    assert {quote["strike"] for quote in partial} == {115.0, 120.0}
+    assert all(quote["required_data_coverage"]["per_expiration"][0]["status"] == "incomplete" for quote in partial)

@@ -85,6 +85,39 @@ def _batch(*, final: bool = True) -> dict:
     }
 
 
+@pytest.mark.parametrize("detail", [None, "Required-data scan retained covered expiration rows."])
+@pytest.mark.parametrize("has_candidate", [True, False])
+def test_wheel_status_detail_roundtrips_without_changing_candidate_decisions(
+    tmp_path: Path, detail: str | None, has_candidate: bool,
+) -> None:
+    for base in (tmp_path / "without-detail", tmp_path / "observed"):
+        base.mkdir()
+    scope = _scope(candidate_count=int(has_candidate))
+    batches = [_batch()] if has_candidate else []
+    baseline = _seal(tmp_path / "without-detail", scope_results=[scope], batches=batches)
+    payload = _seal(
+        tmp_path / "observed",
+        scope_results=[{**scope, **({"detail": detail} if detail is not None else {})}],
+        batches=batches,
+    )
+
+    assert payload["opening_status"] == ("candidates_found" if has_candidate else "no_candidate")
+    assert payload["scope_results"][0]["status"] == "completed"
+    if detail is None:
+        assert "reason_detail" not in payload["scope_results"][0]
+    else:
+        assert payload["scope_results"][0]["reason_detail"] == detail
+    assert payload == load_wheel_candidate_snapshot(
+        base=tmp_path / "observed", run_id="run-1", account="lx",
+    )
+    assert payload["batches"] == baseline["batches"]
+    assert payload["capacity_allocations"] == baseline["capacity_allocations"]
+    assert [
+        {key: value for key, value in row.items() if key != "reason_detail"}
+        for row in payload["scope_results"]
+    ] == baseline["scope_results"]
+
+
 def test_wheel_candidate_snapshot_seals_one_account_run_owner(tmp_path: Path) -> None:
     payload = _seal(
         tmp_path,

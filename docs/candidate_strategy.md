@@ -517,6 +517,10 @@ Daily Brief 的 RV 缺口提醒保留具体到期日与原因，同到期档多�
 
 执行终态由 `strategy_scan_status` 发布并进入绑定 run/account/config 的索引；快照与 Brief 不再维护另一套捕获终态。`completed` 且零候选必须有有效执行结果。`None`、缺少数量或无效终态属于执行失败，不能当成正常空结果。来源 `success_empty/no_expirations`、`success_empty/no_contract_rows` 与策略 `no_candidate` 分别保留，`candidate_scope_reason` 统一投影到当前快照。
 
+`strategy_scan_status.v3.detail` 是可选诊断文本，进入 `strategy_scan_status_index.v5` 后，由 opening 快照保存为策略范围的 `reason_detail`；`candidate_filter_explain` 的事件优先使用已有合约拒绝消息，再使用 `reason_detail`，均缺失时沿用 reason code。写盘前复用统一脱敏规则清理凭据、令牌、敏感标识及本地绝对路径，归一化空白并去除控制字符，最多保存 2,048 字符。整包 `content_sha256` 仍包含该字段；旧状态没有 detail 时照常读取。detail 不参与筛选、排序、采纳或终态判断，重复发布仅有诊断变化时保留首次状态。
+
+无冻结 manifest 的 `--symbols` 或直接 `process_symbol` 扫描，在配置含逻辑账户时，也把状态写入 `output_runs/<run-id>/accounts/<account>/`。同次 symbols 调用共用运行身份；直接调用未提供身份时生成新身份，避免共享报告目录的旧状态冲突。此索引带 `evidence_authority=scan_status_only`，只供 `candidate_filter_explain` 解释状态及原因，返回 `candidate_evidence_available=false`；成功状态也不据此产生已采纳候选。候选读取与封存仍要求正式绑定证据。explain 的 latest 会考虑调度指针之后的新账户运行，既不修改该指针，也不跳过较新的失败或损坏运行。缺少正式 manifest 的普通索引不能降级成此诊断路径；已经存在的 manifest 必须通过原校验。
+
 策略执行先缓冲候选与诊断，校验结果后再发布终态和提交证据；执行异常丢弃该步骤缓冲，其他步骤继续。终态发布、证据提交或账户级 hash/身份不一致时停止封存。标的超时只给尚未完成的步骤写失败，已完成步骤保持不变；工作线程在下一步与发布前检查同一绝对截止时间，不能强制中断正在运行的外部调用。冻结输入缺失不能回退读取可变 CSV。
 
 Wheel 在标的计算与分支评估边界隔离异常，资金和股票仍由账户共享分配。Brief 从已验证快照保留健康候选；历史候选仅在相同 symbol、策略、方向、Combo owner、Wheel 分支或合约的证据缺口下转为待核验。`candidate_universe_summary.affected_scopes` 在合约身份可用时携带 `scope=contract`、`contract_symbol`、`expiration`；没有细分证据时保留原策略范围。执行日志只补充匹配失败终态的诊断，不覆盖快照中的健康结果。
@@ -530,8 +534,8 @@ OI、volume 等可选字段缺失不产生 `partial_data`；启用 delta 门槛�
 - 完成后不可变；
 - 通过 seal/hash 校验后才能被 Agent 或通知消费。
 
-Candidate Agent 工具必须显式提供 account。run 可省略，但只能解析到该账户最新已封存且
-hash 有效的 snapshot；不允许调用方传任意文件系统路径。
+Candidate Agent 工具必须显式提供 account。run 可省略；候选事实必须来自该账户最新运行中已封存且
+hash 有效的 snapshot。`candidate_filter_explain` 可按上述受限契约解释直接扫描状态；较新运行尚未完成或证据损坏时不回退到旧候选。不允许调用方传任意文件系统路径。
 
 ## 10. 组合口径与消费边界
 

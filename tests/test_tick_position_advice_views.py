@@ -33,13 +33,16 @@ def position_row(*, lot: str = "old-lot", option_type: str = "call", credit: flo
         "net_credit": credit, "net_debit": max(0, -credit),
         "incremental_period_return": credit / 10000,
         "incremental_annualized_return": credit / 10000 * 365 / 31,
-        "new_capital_basis": 10000, "evidence": {"old_ask": 1.0, "new_bid": 2.0},
+        "new_capital_basis": 10000, "extension_days": 0,
+        "evidence": {"old_ask": 1.0, "new_bid": 2.0},
     }
     if option_type == "call":
         target.update(recommendation="credit_roll" if credit > 0 else "cash_neutral_roll" if credit == 0 else "debit_roll",
             cash_flow_type="credit" if credit > 0 else "neutral" if credit == 0 else "debit",
             strike_increase=5, strike_increase_pct=0.05, assignment_net_improvement=500 + credit,
             assignment_improvement_period_return=0.0595, assignment_improvement_annualized_return=0.7)
+    else:
+        target.update(strike_drop_pct=0.05)
     roll = {
         "schema_version": "covered_call_roll.v1" if option_type == "call" else "short_put_roll.v1",
         "status": "success", "outcome": "found", "account": "lx",
@@ -171,7 +174,9 @@ def test_roll_notifications_omit_explanations_and_preserve_values(
 
     lines = message.splitlines()
     assert "平仓 ask USD 1.81234；开仓 bid USD 2.11234" in lines
-    assert "共 2 笔 · 合计净收取 USD 48.75 · 合计 2 手" in lines
+    assert "合计 2 手" in lines
+    assert "每手净收取：USD 24.37" in lines
+    assert "共 2 笔" not in message and "合计净收取" not in message
     assert message.count("旧仓买回") == 1
     assert "24.3734" not in message
     assert "增量期收益率 0.3%；增量年化 3.9%" in lines
@@ -197,7 +202,7 @@ def test_roll_optional_contract_code_and_total_precision(tmp_path: Path, old_cod
     else:
         assert "Put（" not in old_leg
     assert f"（{row['roll_advice']['candidates'][0]['contract']}）" in contract_line
-    assert f"移仓净收取：{currency} 1234.57" in message
+    assert f"每手净收取：{currency} 1234.57" in message
     assert f"平仓 ask {currency} 1；开仓 bid {currency} 2" in message
     _assert_roll_explanations_absent(message)
 
@@ -234,7 +239,16 @@ def test_plain_hold_and_missing_disabled_roll_stay_suppressed(tmp_path: Path) ->
     row["roll_advice"] = {"status": "disabled", "outcome": "unable", "candidates": []}
     brief = roll_brief(base=tmp_path, rows=[row])
     assert not daily_brief_roll_notification_identities(brief)
-    assert "CC 向上移仓" not in renderer.render_fixed_report_text(brief)
+    text = renderer.render_fixed_report_text(brief)
+    assert "CC 向上移仓" not in text
+    assert "缺口摘要：1 条暂无法评估" in text
+    assert "旧仓买回" not in text
+
+    row.update(evaluation_status="evaluable", quote_status="priced")
+    text = renderer.render_fixed_report_text(brief)
+    assert "普通持有 1 条" in text
+    assert "暂无法评估" not in text
+    assert "CC 向上移仓" not in text
 
 
 def test_expired_roll_is_not_actionable_in_query_or_new_fixed_report(tmp_path: Path) -> None:
@@ -306,7 +320,9 @@ def test_grouped_roll_alert_acknowledges_all_lots_and_does_not_repeat(monkeypatc
     assert not state["pending_candidates"]
     assert len(calls) == 1
     assert calls[0]["message"].count("旧仓买回") == 1
-    assert "共 3 笔 · 合计净收取 USD 285.00 · 合计 3 手" in calls[0]["message"]
+    assert "合计 3 手" in calls[0]["message"]
+    assert "每手净收取：USD 95.00" in calls[0]["message"]
+    assert "共 3 笔" not in calls[0]["message"] and "合计净收取" not in calls[0]["message"]
     assert flow.run_tick_notification_flow(_request(tmp_path, run_id="grouped-again", fixed=False).request) == 0
     assert len(calls) == 1
 
@@ -332,8 +348,8 @@ def test_display_budget_acknowledges_only_shown_roll_positions(monkeypatch, tmp_
 def test_truncated_message_does_not_ack_cut_off_roll(monkeypatch, tmp_path: Path) -> None:
     patch_roll_assembler(monkeypatch)
     monkeypatch.setattr(renderer, "_MAX_MESSAGE_CHARS", 200)
-    prep = flow._prepare_daily_brief_notification(_request(tmp_path, run_id="truncated", fixed=False).request)
-    assert not prep.lifecycles_by_account.get("lx", {}).get("envelope")
+    with pytest.raises(ValueError, match="render_unavailable"):
+        flow._prepare_daily_brief_notification(_request(tmp_path, run_id="truncated", fixed=False).request)
     state = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")
     day = state["state"]["days"][MARKET_DATE]
     assert not day["alerted_candidates"]
@@ -366,6 +382,147 @@ def _many_candidate_roll_brief(*, base, run_id, account="lx") -> dict:
     return brief
 
 
+def _budget_combo_roll_brief(*, base: Path, run_id: str) -> dict:
+    from domain.domain.combo_candidate_evidence import build_combo_candidate_occurrence
+    from domain.domain.daily_decision_brief import build_daily_brief_candidate_identity
+    from test_daily_decision_brief_renderer import _brief as renderer_brief
+
+    brief = _many_candidate_roll_brief(base=base, run_id=run_id)
+    for family in ("sell_put", "covered_call"):
+        brief["candidates"][family] = brief["candidates"][family][:12]
+    brief["candidate_index"] = [
+        item for item in brief["candidate_index"] if int(item["symbol"][3:]) < 12
+    ]
+    combos = []
+    for i in range(3):
+        symbol = f"COMBO{i}"
+        candidate = deepcopy(renderer_brief()["candidates"]["combo_yield"][0])
+        candidate.update(
+            symbol=symbol, candidate_pair_id=f"combo-pair-{i}", strategy_group_id=f"combo-pair-{i}",
+            structure_mode="same_expiry_pair", currency="USD", multiplier=100,
+            capacity={"contracts_available": 1},
+            put_contract_symbol=f"{symbol}260821P00300000",
+            call_contract_symbol=f"{symbol}260821C00400000", call_expiration="2026-08-21",
+        )
+        candidate.update(build_combo_candidate_occurrence(
+            candidate, account="lx", market="US", run_id=run_id,
+            generated_at_utc=brief["generated_at_utc"],
+        ))
+        combos.append(candidate)
+        brief["candidate_index"].append({
+            "identity": build_daily_brief_candidate_identity(
+                account="lx", market="US", symbol=symbol, strategy_family="combo_yield",
+            ),
+            "symbol": symbol, "strategy_family": "combo_yield", "representative": candidate,
+            "contract_count": 1,
+        })
+    brief["candidates"]["combo_yield"] = combos
+    return brief
+
+
+def test_combo_selector_uses_effective_advice_time_for_shared_budget(tmp_path: Path) -> None:
+    brief = _budget_combo_roll_brief(base=tmp_path, run_id="effective-time")
+    for row in brief["positions"]:
+        row["roll_advice"]["actionable_until_utc"] = "2026-07-21T14:01:00Z"
+    limits = {"max_items_per_account": 0, "max_candidates_per_strategy": 20}
+    context = {"advice_time_utc": "2026-07-21T14:02:00Z"}
+
+    view = renderer.build_daily_brief_user_view(brief, limits=limits, context=context)
+    selected = renderer.select_rendered_combo_candidate_rows(
+        brief, delivery_kind="fixed_report", limits=limits, context=context,
+    )
+
+    assert not view["positions"]
+    assert [row["symbol"] for row in selected] == ["COMBO0", "COMBO1", "COMBO2"]
+    assert [row["symbol"] for row in view["candidates"] if row["family"] == "combo_yield"] == [
+        row["symbol"] for row in selected
+    ]
+
+
+@pytest.mark.parametrize("explicit_routes", [False, True])
+@pytest.mark.parametrize("remove_rolls", ["expired", "transport"])
+def test_final_combo_metadata_uses_shared_budget_after_roll_removal(
+    monkeypatch, tmp_path: Path, explicit_routes: bool, remove_rolls: str,
+) -> None:
+    from test_daily_decision_brief_notification_flow import _feishu_config
+
+    captured = []
+    def assemble(**kw):
+        brief = _budget_combo_roll_brief(base=kw["base"], run_id=kw["run_id"])
+        if remove_rolls == "expired":
+            for row in brief["positions"]:
+                row["roll_advice"]["actionable_until_utc"] = "2026-07-21T14:00:01Z"
+        captured.append(brief)
+        return {"US": brief}
+
+    monkeypatch.setattr(flow, "assemble_daily_decision_briefs", assemble)
+    monkeypatch.setattr(flow, "utc_now", lambda: datetime(2026, 7, 21, 14, 0, 30, tzinfo=timezone.utc))
+    if remove_rolls == "transport":
+        actual_fits = flow.feishu_notification_blocks_fit
+        def without_roll_details(blocks, text, **kwargs):
+            return actual_fits(blocks, text, **kwargs) and not any(
+                any(identity.startswith("position-roll:") for identity in getattr(block, "identities", ()))
+                for block in blocks
+            )
+        monkeypatch.setattr(flow, "feishu_notification_blocks_fit", without_roll_details)
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_fixture")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "fixture-app")
+    config = _feishu_config()
+    config["notifications"]["daily_brief"] = {
+        "max_items_per_account": 0, "max_candidates_per_strategy": 20,
+    }
+    if explicit_routes:
+        config["notifications"]["routes"] = [{
+            "id": "primary", "provider": "feishu_app", "channel": "feishu_app",
+            "target": "ou_fixture", "accounts": ["lx"],
+        }]
+    request = _request(tmp_path, run_id="combo-budget", config=config).request
+
+    preparation = flow._prepare_daily_brief_notification(request)
+
+    if explicit_routes:
+        from src.application.daily_decision_brief_repository import read_daily_brief_fanout_children
+        child = read_daily_brief_fanout_children(
+            base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE,
+        )[0]
+        metadata = child["spec"]["metadata"]
+        message = child["spec"]["message"]
+    else:
+        envelope = preparation.lifecycles_by_account["lx"]["envelope"]
+        metadata = envelope
+        message = envelope["rendered_message"]
+    render_context = metadata["render_context"]
+    states = {item["identity"]: item["state"] for item in metadata["display_evidence"]}
+    original_view = renderer.build_daily_brief_user_view(captured[0],
+        limits=config["notifications"]["daily_brief"], context=render_context)
+    expected = {
+        item["identity"] for item in captured[0]["candidate_index"]
+        if item["strategy_family"] == "combo_yield" and any(
+            row["symbol"] == item["symbol"] and row["family"] == "combo_yield"
+            for row in original_view["candidates"])
+    }
+    assert len([item for item in captured[0]["candidate_index"]
+                if item["strategy_family"] == "combo_yield"]) == 3
+    # Rank rotation keeps all three Combo rows in the shared 42-item plan;
+    # stripping roll cards from transport never causes a second selection.
+    assert len(expected) == 3
+    assert set(render_context["rendered_combo_candidate_identities"]) == expected
+    assert len(render_context["candidate_occurrence_ids"]) == len(expected)
+    assert len(render_context["candidate_exposure_ids"]) == len(expected)
+    expanded = {identity for identity in expected if states[identity] == "expanded"}
+    actual_expanded = {
+        item["identity"] for item in captured[0]["candidate_index"]
+        if item["strategy_family"] == "combo_yield" and states[item["identity"]] == "expanded"
+    }
+    assert expanded == actual_expanded
+    # The event summary can retain a symbol after its complete action card is
+    # removed. Only a complete card title proves expanded delivery.
+    assert all((f"{item['symbol']}｜组合增强（策略排序" in message) == (item["identity"] in expanded)
+               for item in captured[0]["candidate_index"] if item["strategy_family"] == "combo_yield")
+    assert not any(state == "expanded" for identity, state in states.items()
+                   if identity.startswith("position-roll:"))
+
+
 @pytest.mark.parametrize("explicit_routes", [False, True])
 @pytest.mark.parametrize("fallback_used", [False, True])
 def test_final_card_and_fallback_ack_only_the_same_visible_rolls(
@@ -378,7 +535,9 @@ def test_final_card_and_fallback_ack_only_the_same_visible_rolls(
     from src.application.notification_delivery_route import notification_reminder_route_key
     from test_daily_decision_brief_notification_flow import _feishu_config
 
-    limits = {"max_actions_per_priority": 20, "max_candidates_per_strategy": 20}
+    # Exercise length truncation without refilling candidate slots when hidden rolls are removed.
+    monkeypatch.setattr(renderer, "_MAX_MESSAGE_CHARS", 6000)
+    limits = {"max_items_per_account": 0, "max_candidates_per_strategy": 10}
     def assemble(**kw):
         return {market: _many_candidate_roll_brief(base=kw["base"], run_id=kw["run_id"], account=kw["account"])
             for market in kw["markets_to_run"]}
@@ -391,6 +550,7 @@ def test_final_card_and_fallback_ack_only_the_same_visible_rolls(
                 config={"notifications": kw["notifications"]}, base=tmp_path)}
 
     monkeypatch.setattr(flow, "assemble_daily_decision_briefs", assemble)
+    monkeypatch.setattr(renderer, "_MAX_MESSAGE_CHARS", 2_000)
     monkeypatch.setattr(flow, "utc_now", lambda: datetime(2026, 7, 21, 14, 0, 30, tzinfo=timezone.utc))
     monkeypatch.setattr(plugins, "channel_plugin_installed", lambda _provider: True)
     monkeypatch.setattr(flow, "select_notification_delivery_adapter", lambda _provider: SimpleNamespace(
@@ -410,7 +570,8 @@ def test_final_card_and_fallback_ack_only_the_same_visible_rolls(
             market_trading_date=MARKET_DATE)[0]
         assert child["delivery_confirmed"] is True
         envelope = child["spec"]["transport_envelope"]
-        acknowledged = set(child["spec"]["metadata"]["candidate_identities"]) & all_rolls
+        acknowledged = {row["identity"] for row in child["spec"]["metadata"]["display_evidence"]
+                        if row["state"] == "expanded"} & all_rolls
     else:
         day = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")["state"]["days"][MARKET_DATE]
         envelope = next(iter(day["fixed_reports"].values()))["rendered_transport"]
@@ -425,11 +586,14 @@ def test_final_card_and_fallback_ack_only_the_same_visible_rolls(
     assert 0 < len(acknowledged) < len(all_rolls)
     assert acknowledged == primary_rolls == fallback_rolls
 
+    # A larger later budget can deliver the previously omitted actions.
+    monkeypatch.setattr(renderer, "_MAX_MESSAGE_CHARS", 12_000)
     assert flow.run_tick_notification_flow(_request(tmp_path, run_id="followup", fixed=False, config=config).request) == 0
     if explicit_routes:
         children = read_daily_brief_fanout_children(base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE)
         assert len(children) == 2 and all(child["delivery_confirmed"] for child in children)
-        delivered = [set(child["spec"]["metadata"]["candidate_identities"]) & all_rolls for child in children]
+        delivered = [{row["identity"] for row in child["spec"]["metadata"]["display_evidence"]
+                      if row["state"] == "expanded"} & all_rolls for child in children]
         assert delivered[0].isdisjoint(delivered[1])
         assert set.union(*delivered) == all_rolls
     else:
@@ -442,7 +606,9 @@ def test_final_card_and_fallback_ack_only_the_same_visible_rolls(
 
 def test_suppressing_unshown_roll_preserves_close_in_same_position(tmp_path: Path) -> None:
     brief = roll_brief(base=tmp_path, rows=[{**position_row(), "recommendation_state": "close",
-        "notification_eligible": True, "evaluation_status": "priced", "quote_status": "priced"}])
+        "notification_eligible": True, "evaluation_status": "priced", "quote_status": "priced",
+        "metrics": {"capital_basis": 10000, "remaining_max_annualized_return": 0.05,
+                    "net_capture_ratio": 0.95}}])
     render_brief = flow._daily_brief_roll_render_source(brief, [])
     message = renderer.render_fixed_report_text(render_brief, diff={}, limits={}, context={})
     identities = flow._daily_brief_transport_roll_identities(

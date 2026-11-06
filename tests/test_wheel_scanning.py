@@ -267,6 +267,56 @@ def test_wheel_frozen_partial_expirations_filter_rows_and_retain_gap(direction):
 
 
 @pytest.mark.parametrize("direction", ["call", "put"])
+def test_wheel_partial_date_retains_candidates_with_actual_range_provenance(direction):
+    from src.application.required_data_snapshot import FrozenRequiredDataBatch
+    from src.application.required_data_coverage import evaluate_required_data_frame_fetch_plan_debug
+    from src.application.wheel.scanning import _frames_from_snapshot
+    from tests.test_required_data_exact_coverage import _plan, _window_request
+
+    row = phase2_opening_row({
+        **_call_row(), "option_type": direction,
+        "strike": 99 if direction == "put" else 110,
+        "delta": -0.3 if direction == "put" else 0.3,
+    })
+    # Retain the observed strike while keeping its unseen lower window visible
+    # on both candidate evidence and the Wheel scope.
+    row_date = datetime.fromisoformat(row["expiration"]).date()
+    dte = (row_date - AS_OF.date()).days
+    frame = pd.DataFrame([{**row, "dte": dte, "spot": 110.0}])
+    request = _window_request(
+        option_type=direction, minimum=row["strike"] - 20.0, maximum=row["strike"],
+        expirations=[row["expiration"]], min_dte=0, max_dte=100,
+    )
+    request["trading_date"] = AS_OF.date().isoformat()
+    plan = _plan(requests=[request])
+    plan["expiration_discovery"]["request_identity"]["trading_date"] = AS_OF.date().isoformat()
+    coverage = evaluate_required_data_frame_fetch_plan_debug(frame, plan).to_dict()
+    assert coverage["status"] == "partial" and coverage["covered_expirations"] == []
+    # The scan receives its existing strategy fixture DTE; coverage selection
+    # independently binds the same expiration, option side and actual strike.
+    raw = pd.DataFrame([row]).to_csv(index=False).encode()
+    snapshot = FrozenRequiredDataBatch(
+        manifest={}, manifest_bytes=b"{}", entries={"NVDA": ({"required_data_coverage": coverage}, raw)},
+        unavailable={}, require_fresh=False,
+    )
+    frames, unavailable = _frames_from_snapshot(snapshot, ["NVDA"])
+    assert not unavailable and len(frames["NVDA"]) == 1
+    args = (_eligibility_model(direction), _policy(), snapshot)
+    fees = {"exchange_rate_converter": _converter()}
+    now_ms = int(AS_OF.timestamp() * 1000)
+    scan = (run_wheel_put_scan(*args, fees, decision_time_ms=now_ms) if direction == "put"
+            else run_wheel_call_scan(*args, {}, fees, decision_time_ms=now_ms))
+    scope = scan["scope_results"][0]
+    assert scope["status"] == "completed" and scope["reason_code"] == "partial_data"
+    candidates = scan["raw_candidates"]["stock-1"]
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate["required_data_expiration_status"] == "incomplete"
+    assert candidate["ranking_complete"] is False
+    assert candidate["required_data_coverage"]["per_expiration"][0]["covered_ranges"] == [[row["strike"], row["strike"]]]
+
+
+@pytest.mark.parametrize("direction", ["call", "put"])
 @pytest.mark.parametrize("phase", ["ready", "data_unavailable", "option_open", "intent_pending"])
 @pytest.mark.parametrize("reason_fields", [{}, {"reason_codes": None}, {"reason_codes": []}])
 def test_absent_branch_reasons_preserve_legacy_remaining_capacity(direction, phase, reason_fields):

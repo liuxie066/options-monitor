@@ -149,6 +149,9 @@ def test_tick_uses_same_sealed_batch_for_concrete_roll_target(tmp_path, monkeypa
     assert target["evidence"]["old_ask"] == 5
     assert target["evidence"]["new_bid"] == 6.5
     assert target["net_credit"] > 0
+    assert target["per_contract"]["net_credit"] == pytest.approx(target["net_credit"])
+    assert target["per_contract"]["incremental_annualized_return"] == pytest.approx(
+        target["incremental_annualized_return"])
     assert roll["coverage"]["enumeration_complete"] is True
     assert roll["source"]["expected_fetch_contract_sha256"]
     assert roll["reason_codes"] == []
@@ -235,6 +238,9 @@ def test_real_tick_report_flows_unchanged_into_agent_advice(tmp_path, monkeypatc
     assert loaded is True
     assert data_gaps == []
     assert rows[0]["roll_advice"] == roll
+    # Complete receipts retain their existing reader path; the optional
+    # coverage detail is reserved for partial rows and must not reject them.
+    assert "required_data_coverage" not in rows[0]
     brief = _brief(base=tmp_path, run_id="scheduled-roll", account="sample", candidate=False)
     now = datetime.now(timezone.utc)
     brief.update(generated_at_utc=now.isoformat(), data_as_of_utc=roll["evaluated_at_utc"],

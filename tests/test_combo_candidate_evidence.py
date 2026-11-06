@@ -241,8 +241,8 @@ def test_candidate_alert_selector_uses_the_same_fixed_limit_as_the_renderer() ->
     ("changed_symbols", "expected_symbols"),
     [
         ((), ("NVDA",)),
-        (("AMD",), ("AMD",)),
-        (("AMD", "AAPL"), ("AMD", "AAPL")),
+        (("AMD",), ("NVDA",)),
+        (("AMD", "AAPL"), ("NVDA",)),
     ],
 )
 def test_fixed_report_renderers_and_evidence_share_candidate_projection(
@@ -259,7 +259,8 @@ def test_fixed_report_renderers_and_evidence_share_candidate_projection(
             call_contract_symbol="AAPL260821C00110000",
         ),
     ]
-    for row in rows:
+    for rank, row in enumerate(rows, start=1):
+        row["rank"] = rank
         row.update(_occurrence(row))
     brief = _brief(rows[0])
     for row in rows[1:]:

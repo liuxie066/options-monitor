@@ -10,12 +10,21 @@ from typing import Any, Callable, TypedDict
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.candidate_reject_summary import candidate_rule_label
-from src.application.candidate_snapshot_contract import CandidateSnapshotContractError, sha256_text
-from src.application.candidate_snapshot_manifest import CandidateSnapshotManifestError
+from src.application.candidate_snapshot_contract import (
+    CandidateSnapshotContractError, required_data_coverage_fields, sha256_text,
+)
+from src.application.candidate_snapshot_manifest import (
+    CandidateSnapshotManifestError, _KNOWN_MANIFEST_FILES,
+    _load_latest_candidate_snapshot_bundle,
+)
 from src.application.candidate_evidence_history import (
     load_candidate_snapshot_bundle_for_inspection,
-    load_latest_candidate_snapshot_bundle_for_inspection,
 )
+from src.application.strategy_scan_status import (
+    STRATEGY_SCAN_STATUS_INDEX_V5_FILE, StrategyScanStatusError,
+    candidate_scope_reason, load_strategy_scan_status_index,
+)
+from src.application.tick_run_workspace import AccountRunConfigError, account_run_config_path
 from src.application.notification_perception_read import (
     iter_notification_perception_events,
 )
@@ -181,6 +190,50 @@ def _resolve_notification_run(
     return resolution
 
 
+def _load_explanation_bundle(*, base: Path, run_id: str, account: str) -> dict[str, Any]:
+    """Admit explicit status-only diagnostics without weakening candidate readers."""
+    account_dir = account_run_config_path(base=base, run_id=run_id, account=account).parent.parent
+    state_dir = account_dir / "state"
+    if any((state_dir / name).exists() or (state_dir / name).is_symlink()
+           for name in _KNOWN_MANIFEST_FILES):
+        return load_candidate_snapshot_bundle_for_inspection(base=base, run_id=run_id, account=account)
+    index_path = account_dir / STRATEGY_SCAN_STATUS_INDEX_V5_FILE
+    if not index_path.exists():
+        return load_candidate_snapshot_bundle_for_inspection(base=base, run_id=run_id, account=account)
+    for path in (account_dir, account_dir.parent, account_dir.parent.parent, account_dir.parent.parent.parent):
+        if path.is_symlink():
+            raise CandidateSnapshotManifestError("scan status account path is unsafe")
+    index = load_strategy_scan_status_index(
+        index_path, expected_run_id=run_id, expected_account=account, allow_status_only=True,
+    )
+    if index.get("evidence_authority") != "scan_status_only":
+        raise CandidateSnapshotManifestError("candidate snapshot manifest is unavailable")
+    scopes = [
+        {
+            "scope": "strategy", "symbol": row["symbol"], "market": row["market"],
+            "strategy_mode": row["strategy_mode"], "status": row["status"],
+            "reason_code": candidate_scope_reason(row),
+            **({"reason_detail": row["detail"]} if row.get("detail") else {}),
+            **({"required_data_coverage": row["required_data_coverage"]}
+               if row.get("required_data_coverage") else {}),
+        }
+        for row in index["items"] if row["candidate_owner"] == "opening"
+    ]
+    markets = sorted({row["market"] for row in index["items"]})
+    snapshot = {
+        "run_id": run_id, "account": account,
+        "market": markets[0] if len(markets) == 1 else None,
+        "sealed_at_utc": index["published_at_utc"],
+        "scope_results": scopes, "content_sha256": index["content_sha256"],
+    }
+    return {
+        "manifest": {"run_id": run_id, "account": account, "markets": markets,
+                     "account_config_sha256": index["account_config_sha256"],
+                     "content_sha256": index["content_sha256"]},
+        "owners": {"opening": snapshot}, "status_only": True,
+    }
+
+
 def candidate_filter_explain_tool(
     payload: dict[str, Any],
     *,
@@ -247,7 +300,7 @@ def candidate_filter_explain_tool(
     run_resolution: dict[str, Any] | None = None
     try:
         if str(payload.get("run_id") or "").strip():
-            bundle = load_candidate_snapshot_bundle_for_inspection(
+            bundle = _load_explanation_bundle(
                 base=base,
                 run_id=str(payload["run_id"]).strip(),
                 account=account,
@@ -287,7 +340,7 @@ def candidate_filter_explain_tool(
                     },
                 )
             try:
-                bundle = load_candidate_snapshot_bundle_for_inspection(
+                bundle = _load_explanation_bundle(
                     base=base,
                     run_id=resolved["run_id"],
                     account=account,
@@ -315,9 +368,9 @@ def candidate_filter_explain_tool(
                 ),
             }
         else:
-            bundle = load_latest_candidate_snapshot_bundle_for_inspection(
-                base=base,
-                account=account,
+            bundle = _load_latest_candidate_snapshot_bundle(
+                base=base, account=account, loader=_load_explanation_bundle,
+                prefer_newer_account_runs=True,
             )
             run_resolution = {
                 "selector": "latest",
@@ -332,7 +385,7 @@ def candidate_filter_explain_tool(
             raise CandidateSnapshotManifestError("notification source market does not match candidate snapshot")
     except AgentToolError:
         raise
-    except CandidateSnapshotManifestError as exc:
+    except (CandidateSnapshotManifestError, StrategyScanStatusError, AccountRunConfigError) as exc:
         raise AgentToolError(
             code="DEPENDENCY_MISSING",
             message=str(exc),
@@ -340,6 +393,9 @@ def candidate_filter_explain_tool(
             details={"account": account, "run_id": getattr(exc, "run_id", None) or (run_resolution or {}).get("resolved_run_id") or payload.get("run_id"),
                      "reason": "candidate_snapshot_unavailable", "retryable": False},
         ) from exc
+    if bundle.get("status_only"):
+        for item in snapshot["scope_results"]:
+            item["evidence_path"] = STRATEGY_SCAN_STATUS_INDEX_V5_FILE
     if run_resolution is not None and run_resolution.get("resolved_run_id") is None:
         run_resolution["resolved_run_id"] = snapshot.get("run_id")
 
@@ -395,14 +451,17 @@ def candidate_filter_explain_tool(
         for item in scoped
     )
     source = {
-        "path": mask_path("state/opening_candidate_snapshot.json"),
+        "path": mask_path(STRATEGY_SCAN_STATUS_INDEX_V5_FILE if bundle.get("status_only")
+                          else "state/opening_candidate_snapshot.json"),
         "rows": len(scoped),
         "run_ids": [snapshot.get("run_id")],
         "content_sha256": snapshot.get("content_sha256"),
         "manifest_content_sha256": (bundle.get("manifest") or {}).get(
             "content_sha256"
         ),
-        "authority": "terminal_manifest_bound_opening_candidate_snapshot",
+        "authority": ("scan_status_only" if bundle.get("status_only") else
+                      "terminal_manifest_bound_opening_candidate_snapshot"),
+        **({"candidate_evidence_available": False} if bundle.get("status_only") else {}),
         "scan_mode": snapshot.get("scan_mode"),
         "account_display_name": snapshot.get("account_display_name"),
         "executable": snapshot.get("executable"),
@@ -421,7 +480,9 @@ def candidate_filter_explain_tool(
             "summary_count": len(summary),
             "coverage": {"status": "complete" if scoped else "partial", "complete_for": "point",
                          "included_count": len(summary), "total_count": len(summary), "omitted_count": 0},
-            "source": {"run_id": snapshot.get("run_id"), "account": account, **run_resolution},
+            "source": {"run_id": snapshot.get("run_id"), "account": account, **run_resolution,
+                       **({"authority": "scan_status_only", "candidate_evidence_available": False}
+                          if bundle.get("status_only") else {})},
             "freshness": {"status": "historical", "as_of": manifest.get("sealed_at_utc")},
             "symbol": symbol,
             "raw_symbol": raw_symbol,
@@ -435,6 +496,8 @@ def candidate_filter_explain_tool(
             },
             "opening_status": snapshot.get("opening_status"),
             "evidence_status": "available",
+            **({"authority": "scan_status_only", "candidate_evidence_available": False}
+               if bundle.get("status_only") else {}),
             "conclusion_status": "supported" if scoped else "indeterminate",
             "trace_count": len(scoped),
             "run_ids": [snapshot.get("run_id")],
@@ -575,13 +638,12 @@ def _event(
         "contract_symbol": row.get("contract_symbol"),
         "expiration": row.get("expiration"),
         "strike": row.get("strike"),
-        "message": reject_detail.get("message") or reason,
+        "message": reject_detail.get("message") or row.get("reason_detail") or reason,
         "candidate_id": row.get("candidate_id"),
         "decision_hash": row.get("decision_hash"),
         "normalized_input_hash": row.get("normalized_input_hash"),
-        **({"required_data_coverage": row["required_data_coverage"]}
-           if row.get("required_data_coverage") else {}),
-        "evidence_path": "state/opening_candidate_snapshot.json",
+        **required_data_coverage_fields(row),
+        "evidence_path": row.get("evidence_path") or "state/opening_candidate_snapshot.json",
     }
 
 
@@ -594,12 +656,18 @@ def _model_summary(function: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
         counts.update(reasons)
         for reason in reasons:
             event = _event(row, reason, run_id=None, account="")
-            examples.append({key: event[key] for key in ("rule", "contract_symbol", "threshold", "metric_value")})
+            examples.append({
+                **{key: event[key] for key in (
+                    "rule", "contract_symbol", "threshold", "metric_value", "expiration",
+                    "required_data_expiration_status", "ranking_complete", "ranking_scope", "partial_candidate_policy",
+                ) if key in event},
+                **({"message": event["message"]} if row.get("reason_detail") else {}),
+            })
     rules = sorted(counts, key=lambda rule: (-counts[rule], rule))
     examples.sort(key=lambda item: (-counts[item["rule"]], item["rule"], str(item["contract_symbol"] or "")))
     return {
         "function": function, "status": _function_status(rows),
-        **_coverage_summary(rows),
+        **({"data_status": "incomplete"} if any(row.get("required_data_coverage") for row in rows) else {}),
         "accepted_count": sum(row.get("status") == "accepted" for row in contracts),
         "rejected_count": sum(row.get("status") == "rejected" for row in contracts),
         "rules": [{"rule": rule, "label": candidate_rule_label(rule), "count": counts[rule]} for rule in rules[:8]],

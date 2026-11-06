@@ -22,6 +22,7 @@ from domain.domain.combo_candidate_evidence import (
 )
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER, evaluate_dnd_quiet_hours
 from src.application.channels.feishu_notification_renderer import (
+    feishu_notification_blocks_fit,
     feishu_notification_visible_markdown,
     render_feishu_notification_card,
 )
@@ -42,6 +43,7 @@ from src.application.daily_decision_brief_renderer import (
     render_fixed_report_card_blocks,
     render_fixed_report_text,
     resolve_daily_brief_render_limits,
+    select_daily_brief_notification,
     select_rendered_combo_candidate_rows,
     select_rendered_position_roll_identities,
 )
@@ -162,6 +164,43 @@ def _daily_brief_day_fanouts(request, account, market, market_date):
         logical_key_prefix=f"daily-brief:{market}:{market_date}:")
 
 
+def _daily_brief_represented_identities(metadata: Mapping[str, Any]) -> set[str]:
+    evidence = metadata.get("display_evidence")
+    if evidence is None:
+        return set(metadata.get("candidate_identities", []))
+    return {row["identity"] for row in evidence
+            if row["state"] == "expanded"
+            or (row["state"] == "summary_notified" and not row["identity"].startswith("position-roll:"))}
+
+
+def _select_daily_brief_delivery(
+    brief, *, kind, identities, diff, limits, context, card, open_id, preserve_context=False,
+):
+    visible = _daily_brief_displayed_roll_identities(
+        brief, identities, delivery_kind=kind, diff=diff, limits=limits)
+    render_brief = _daily_brief_roll_render_source(brief, visible)
+    if not preserve_context:
+        context.update(_daily_brief_candidate_render_context(
+            render_brief, delivery_kind="candidate_alert" if kind == "candidate_alert" else "fixed_report",
+            candidate_identities=visible, diff=diff, limits=limits, context=context,
+        ))
+    selection = select_daily_brief_notification(
+        render_brief, delivery_kind="candidate_alert" if kind == "candidate_alert" else "fixed_report",
+        candidate_identities=visible, diff=diff, limits=limits, context=context,
+        fits=(lambda blocks, text: feishu_notification_blocks_fit(blocks, text, open_id=open_id))
+        if card else None,
+    )
+    states = {row["identity"]: row["state"] for row in selection["display_evidence"]}
+    selection["display_evidence"] = [
+        {"identity": identity, "state": states.get(identity, "not_shown")} for identity in identities]
+    blocks, message = selection["markdown_blocks"], selection["text"]
+    transport = render_feishu_notification_card(
+        markdown="\n\n".join(blocks), markdown_blocks=blocks, fallback_text=message,
+        fallback_open_id=open_id, preserve_blocks=True,
+    ) if card else None
+    return message, transport, selection["display_evidence"]
+
+
 def _daily_brief_fanout_spec(request, route, brief, *, kind, identities, diff, scheduler,
                              limits, source=None, cutoff=None, original_target=None, recovery_intent=None):
     context = (dict(recovery_intent["render_context"]) if recovery_intent is not None
@@ -170,43 +209,22 @@ def _daily_brief_fanout_spec(request, route, brief, *, kind, identities, diff, s
         context.update(scheduled_target_market=original_target, recovery_original_target=original_target,
             recovery_scan_at_utc=brief["generated_at_utc"])
     if kind != "fixed_failure":
-        identities = _daily_brief_displayed_roll_identities(
-            brief, identities, delivery_kind=kind, diff=diff, limits=limits)
         previous = (recovery_intent["previous_attribution_context"] if recovery_intent is not None
             else read_confirmed_fanout_attribution_context(base=request.base, account=brief["account"],
                 market=brief["market"], identity_key=route["identity_key"]))
         context.update(build_attribution_reminder_context(brief, previous_context=previous))
         context["attribution_route_key"] = route["identity_key"]
-        context.update(_daily_brief_candidate_render_context(brief,
-            delivery_kind="candidate_alert" if kind == "candidate_alert" else "fixed_report",
-            candidate_identities=identities, diff=diff, limits=limits))
     card = route["provider"] == FEISHU_APP_NOTIFICATION_PROVIDER
-    while True:
-        render_brief = brief if kind == "fixed_failure" else _daily_brief_roll_render_source(brief, identities)
-        blocks = []
-        if kind == "fixed_failure":
-            message = (render_fixed_failure if card else render_fixed_failure_text)(render_brief, context=context)
-        elif kind == "candidate_alert":
-            message = (render_candidate_alert if card else render_candidate_alert_text)(render_brief, identities,
-                context=context, limits=limits)
-            if card:
-                blocks = render_candidate_alert_card_blocks(render_brief, identities, context=context, limits=limits)
-        else:
-            message = (render_fixed_report if card else render_fixed_report_text)(render_brief,
-                context=context, limits=limits, diff=diff)
-            if card:
-                blocks = render_fixed_report_card_blocks(render_brief, context=context, limits=limits, diff=diff)
-        envelope = render_feishu_notification_card(markdown="\n\n".join(blocks) or message,
-            markdown_blocks=blocks or [message], fallback_text=message,
-            fallback_open_id=route["target"]) if card else None
-        if kind == "fixed_failure":
-            break
-        visible_identities = _daily_brief_transport_roll_identities(
-            render_brief, identities, delivery_kind=kind, diff=diff, limits=limits,
-            rendered_message=message, rendered_transport=envelope)
-        if visible_identities == identities:
-            break
-        identities = visible_identities
+    if kind == "fixed_failure":
+        message = (render_fixed_failure if card else render_fixed_failure_text)(brief, context=context)
+        envelope = render_feishu_notification_card(markdown=message, markdown_blocks=[message],
+            fallback_text=message, fallback_open_id=route["target"]) if card else None
+        display_evidence = []
+    else:
+        message, envelope, display_evidence = _select_daily_brief_delivery(
+            brief, kind=kind, identities=identities, diff=diff, limits=limits,
+            context=context, card=card, open_id=route["target"],
+        )
     # Secrets stay in the transport's credential owner. Only binding locators
     # and provider selection are frozen alongside the final rendered envelope.
     options = {key: value for key, value in route["notifications"].items()
@@ -218,7 +236,8 @@ def _daily_brief_fanout_spec(request, route, brief, *, kind, identities, diff, s
         "metadata": {"account": brief["account"], "market": brief["market"], "market_trading_date": brief["market_trading_date"],
             "run_id": request.run_id, "delivery_kind": kind,
             "scheduled_target_market": original_target or scheduler.get("scheduled_target_market"),
-            "candidate_identities": identities, "render_context": context,
+            "candidate_identities": identities, "display_evidence": display_evidence,
+            "render_context": context,
             "revision": (source or {}).get("current_revision"),
             "source_digest": (source or {}).get("current_brief_digest"),
             "source_reference": (source or {}).get("source_reference"),
@@ -254,7 +273,7 @@ def _prepare_daily_brief_fanout(request, account, market, scheduler, brief, pers
     legacy_owned = set(day.get("alerted_candidates", {}))
     for envelope in [*day.get("fixed_reports", {}).values(), *day.get("recovery_reports", {}).values(),
                      *([day["candidate_delivery"]] if day.get("candidate_delivery") else [])]:
-        legacy_owned.update(envelope.get("candidate_identities", []))
+        legacy_owned.update(_daily_brief_represented_identities(envelope))
     for route in routes:
         identities = list((persisted or {}).get("current_candidate_identities", []))
         kind = "fixed_report" if reliable else "fixed_failure"
@@ -264,14 +283,14 @@ def _prepare_daily_brief_fanout(request, account, market, scheduler, brief, pers
             owned = set(legacy_owned)
             for child in children:
                 if child["identity_key"] == route["identity_key"]:
-                    owned.update(child["spec"]["metadata"].get("candidate_identities", []))
+                    owned.update(_daily_brief_represented_identities(child["spec"]["metadata"]))
             identities = [identity for identity in identities if identity not in owned]
             if not identities:
                 continue
             kind = "candidate_alert"
         spec = _daily_brief_fanout_spec(request, route, brief, kind=kind,
             identities=identities, diff=diff, scheduler=scheduler, limits=limits, source=persisted)
-        if kind != "candidate_alert" or spec["metadata"]["candidate_identities"]:
+        if kind != "candidate_alert" or _daily_brief_represented_identities(spec["metadata"]):
             deliveries.append(spec)
     if deliveries:
         prepare_notification_fanout(base=request.base, account=account, logical_key=key,
@@ -1761,61 +1780,15 @@ def _prepare_daily_brief_notification(
                                 request, persisted["brief"], account=account, market=market,
                             ))
                             identities = persisted["current_candidate_identities"] if action == "fixed_report" else pending
-                            identities = _daily_brief_displayed_roll_identities(
-                                persisted["brief"], identities, delivery_kind=action, diff=diff, limits=daily_limits)
-                            render_context.update(_daily_brief_candidate_render_context(
-                                persisted["brief"], delivery_kind=action, candidate_identities=identities,
-                                diff=diff, limits=daily_limits,
-                            ))
-                            while True:
-                                render_brief = _daily_brief_roll_render_source(persisted["brief"], identities)
-                                if action == "fixed_report":
-                                    message = (render_fixed_report if feishu_card_delivery else render_fixed_report_text)(
-                                        render_brief,
-                                        diff=diff,
-                                        limits=daily_limits,
-                                        context=render_context,
-                                    )
-                                    card_blocks = []
-                                    if feishu_card_delivery:
-                                        card_blocks = render_fixed_report_card_blocks(
-                                            render_brief,
-                                            diff=diff,
-                                            limits=daily_limits,
-                                            context=render_context,
-                                        )
-                                else:
-                                    message = (render_candidate_alert if feishu_card_delivery else render_candidate_alert_text)(
-                                        render_brief,
-                                        identities,
-                                        limits=daily_limits,
-                                        context=render_context,
-                                    )
-                                    card_blocks = []
-                                    if feishu_card_delivery:
-                                        card_blocks = render_candidate_alert_card_blocks(
-                                            render_brief,
-                                            identities,
-                                            limits=daily_limits,
-                                            context=render_context,
-                                        )
-                                rendered_transport = (
-                                    render_feishu_notification_card(
-                                        markdown="\n\n".join(card_blocks),
-                                        markdown_blocks=card_blocks,
-                                        fallback_text=message,
-                                        fallback_open_id=resolve_feishu_bot_send_target(notifications=request.base_cfg.get("notifications")),
-                                    )
-                                    if feishu_card_delivery
-                                    else None
-                                )
-                                visible_identities = _daily_brief_transport_roll_identities(
-                                    render_brief, identities, delivery_kind=action, diff=diff, limits=daily_limits,
-                                    rendered_message=message, rendered_transport=rendered_transport)
-                                if visible_identities == identities:
-                                    break
-                                identities = visible_identities
-                            if action != "candidate_alert" or identities:
+                            message, rendered_transport, display_evidence = _select_daily_brief_delivery(
+                                persisted["brief"], kind=action, identities=identities, diff=diff,
+                                limits=daily_limits, context=render_context, card=feishu_card_delivery,
+                                open_id=resolve_feishu_bot_send_target(notifications=request.base_cfg.get("notifications"))
+                                if feishu_card_delivery else "",
+                            )
+                            represented = _daily_brief_represented_identities({
+                                "candidate_identities": identities, "display_evidence": display_evidence})
+                            if action != "candidate_alert" or represented:
                                 prepare_daily_decision_brief_delivery(
                                     base=request.base,
                                     account=account,
@@ -1828,6 +1801,7 @@ def _prepare_daily_brief_notification(
                                     source_digest=str(persisted["current_brief_digest"]),
                                     scheduled_target_market=(fixed_target or None),
                                     candidate_identities=identities,
+                                    display_evidence=display_evidence,
                                     rendered_message=message,
                                     rendered_transport=rendered_transport,
                                     render_context=render_context,
@@ -2036,10 +2010,11 @@ def _daily_brief_transport_roll_identities(
 
 def _daily_brief_candidate_render_context(
     brief: Mapping[str, Any], *, delivery_kind: str, candidate_identities: list[str],
-    diff: Mapping[str, Any], limits: Any,
+    diff: Mapping[str, Any], limits: Any, context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     rows = select_rendered_combo_candidate_rows(
-        brief, delivery_kind=delivery_kind, candidate_identities=candidate_identities, diff=diff, limits=limits,
+        brief, delivery_kind=delivery_kind, candidate_identities=candidate_identities,
+        diff=diff, limits=limits, context=context,
     )
     identities = combo_candidate_identities_for_rendered_rows(brief, rows)
     return {
@@ -2113,7 +2088,7 @@ def _bind_daily_brief_recovery(
         context = dict(intent["render_context"])
         context.update(_daily_brief_candidate_render_context(
             brief, delivery_kind="fixed_report", candidate_identities=identities,
-            diff=diff, limits=intent["render_limits"],
+            diff=diff, limits=intent["render_limits"], context=context,
         ))
         bound = bind_daily_decision_brief_recovery_report(
             base=request.base, account=account, market=market, market_trading_date=market_date,
@@ -2247,62 +2222,21 @@ def _rebuild_daily_brief_delivery(
         render_context = dict(recovery["render_context"])
         daily_limits = dict(recovery["render_limits"])
         diff = dict(recovery["diff"])
-    else:
-        render_context.update(_daily_brief_candidate_render_context(
-            brief, delivery_kind=action, candidate_identities=identities, diff=diff, limits=daily_limits,
-        ))
-    identities = _daily_brief_displayed_roll_identities(
-        brief, identities, delivery_kind=action, diff=diff, limits=daily_limits)
     feishu_card_delivery = (
         str(_notification_perception_route_hint(request.base_cfg).get("provider") or "").strip().lower()
         == FEISHU_APP_NOTIFICATION_PROVIDER
     )
     if recovering_report:
         feishu_card_delivery = bool(render_context["recovery_card_delivery"])
-    while True:
-        render_brief = _daily_brief_roll_render_source(brief, identities)
-        if full_report:
-            message = (render_fixed_report if feishu_card_delivery else render_fixed_report_text)(
-                render_brief, diff=diff, limits=daily_limits, context=render_context,
-            )
-            card_blocks = []
-            if feishu_card_delivery:
-                card_blocks = render_fixed_report_card_blocks(
-                    render_brief,
-                    diff=diff,
-                    limits=daily_limits,
-                    context=render_context,
-                )
-        else:
-            message = (render_candidate_alert if feishu_card_delivery else render_candidate_alert_text)(
-                render_brief, identities, limits=daily_limits, context=render_context,
-            )
-            card_blocks = []
-            if feishu_card_delivery:
-                card_blocks = render_candidate_alert_card_blocks(
-                    render_brief,
-                    identities,
-                    limits=daily_limits,
-                    context=render_context,
-                )
-        rendered_transport = (
-            render_feishu_notification_card(
-                markdown="\n\n".join(card_blocks), markdown_blocks=card_blocks, fallback_text=message,
-                fallback_open_id=(
-                    render_context.get("recovery_fallback_open_id") if recovering_report
-                    else resolve_feishu_bot_send_target(notifications=request.base_cfg.get("notifications"))
-                ),
-            )
-            if feishu_card_delivery
-            else None
-        )
-        visible_identities = _daily_brief_transport_roll_identities(
-            render_brief, identities, delivery_kind=action, diff=diff, limits=daily_limits,
-            rendered_message=message, rendered_transport=rendered_transport)
-        if visible_identities == identities:
-            break
-        identities = visible_identities
-    if action == "candidate_alert" and not identities:
+    message, rendered_transport, display_evidence = _select_daily_brief_delivery(
+        brief, kind=action, identities=identities, diff=diff, limits=daily_limits,
+        context=render_context, card=feishu_card_delivery, preserve_context=recovering_report,
+        open_id=(render_context.get("recovery_fallback_open_id") if recovering_report
+                 else resolve_feishu_bot_send_target(notifications=request.base_cfg.get("notifications")))
+        if feishu_card_delivery else "",
+    )
+    if action == "candidate_alert" and not _daily_brief_represented_identities({
+        "candidate_identities": identities, "display_evidence": display_evidence}):
         return {"envelope": None, "reason": "no_rendered_current_position_advice"}
     prepared = prepare_daily_decision_brief_delivery(
         base=request.base,
@@ -2316,6 +2250,7 @@ def _rebuild_daily_brief_delivery(
         revision=int(brief["revision"]),
         scheduled_target_market=fixed_target or None,
         candidate_identities=identities,
+        display_evidence=display_evidence,
         rendered_message=message,
         rendered_transport=rendered_transport,
         render_context=render_context,

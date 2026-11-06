@@ -133,6 +133,34 @@ def _seal(
     return seal_combo_yield_candidate_snapshot(**kwargs)
 
 
+@pytest.mark.parametrize("detail", [None, "Required-data scan retained covered expiration rows."])
+@pytest.mark.parametrize("pairs", [True, False])
+def test_combo_status_detail_roundtrips_without_changing_candidate_decisions(
+    tmp_path: Path, detail: str | None, pairs: bool,
+) -> None:
+    for base in (tmp_path / "without-detail", tmp_path / "observed"):
+        base.mkdir()
+    baseline = _seal(tmp_path / "without-detail", pairs=pairs)
+    status = {**_scope(), **({"detail": detail} if detail is not None else {})}
+    payload = _seal(tmp_path / "observed", pairs=pairs, scan_statuses=[status])
+
+    assert payload["opening_status"] == ("candidates_found" if pairs else "no_candidate")
+    assert payload["scope_results"][0]["status"] == "completed"
+    if detail is None:
+        assert "reason_detail" not in payload["scope_results"][0]
+    else:
+        assert payload["scope_results"][0]["reason_detail"] == detail
+    assert payload == load_combo_yield_candidate_snapshot(
+        base=tmp_path / "observed", run_id="run-1", account="lx",
+    )
+    for field in ("opening_status", "funding_put_decisions", "pair_evaluations", "rank_records", "ranked_pairs"):
+        assert payload[field] == baseline[field]
+    assert [
+        {key: value for key, value in row.items() if key != "reason_detail"}
+        for row in payload["scope_results"]
+    ] == baseline["scope_results"]
+
+
 def test_combo_yield_snapshot_seals_full_evidence_and_loads(tmp_path: Path) -> None:
     payload = _seal(tmp_path)
 

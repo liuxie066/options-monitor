@@ -158,7 +158,9 @@ def _complete_enumeration(bundle: Mapping[str, Any], start: date, end: date) -> 
 def _evaluate_bundle(*, result: dict[str, Any], position: dict[str, Any], bundle: Mapping[str, Any],
                      requirement: dict[str, Any], spot: float, market: str, now: datetime,
                      request: dict[str, Any], policy: Any,
-                     enumeration_complete: bool | None = None) -> dict[str, Any]:
+                     enumeration_complete: bool | None = None,
+                     required_data_coverage: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    partial_required_data = bool(required_data_coverage and required_data_coverage.get("status") == "partial")
     covered_call = position["option_type"] == "call"
     option_type = position["option_type"]
     old_key = _identity(position)
@@ -198,6 +200,7 @@ def _evaluate_bundle(*, result: dict[str, Any], position: dict[str, Any], bundle
     old_dte = (old_expiry - today).days
     complete = (_complete_enumeration(bundle, old_expiry, max_expiry)
                 if enumeration_complete is None else enumeration_complete)
+    complete = complete and not partial_required_data
     meta = bundle.get("meta", {})
     result["scope"]["enumerated_expirations"] = meta.get("requested_expirations", bundle.get("expirations", []))
     rejects: Counter[str] = Counter()
@@ -242,11 +245,24 @@ def _evaluate_bundle(*, result: dict[str, Any], position: dict[str, Any], bundle
             candidate = {**row, "contracts": qty}
             economics = dict(old_quote=old, spot=spot, old_dte=old_dte, new_dte=(expiry - today).days,
                 old_buy_fee=old_fee.amount, new_sell_fee=new_fee.amount)
+            evaluate = policy.evaluate_covered_call_roll if covered_call else policy.evaluate_short_put_roll
             if covered_call:
-                decision = policy.evaluate_covered_call_roll(position, candidate,
-                    covered_shares=contract_share_quantity(qty, position["multiplier"]), **economics)
-            else:
-                decision = policy.evaluate_short_put_roll(position, candidate, **economics)
+                economics["covered_shares"] = contract_share_quantity(qty, position["multiplier"])
+            decision = evaluate(position, candidate, **economics)
+            per_contract_decision = decision
+            per_contract_old_fee, per_contract_new_fee = old_fee, new_fee
+            if qty != 1 and decision.get("metrics"):
+                # Minimum commissions and per-order fees do not scale with lot size.
+                per_contract_old_fee = estimate_futu_option_buy_fee(
+                    position["currency"], old["ask"], contracts=1, multiplier=position["multiplier"])
+                per_contract_new_fee = estimate_futu_option_sell_fee(
+                    position["currency"], row["bid"], contracts=1, multiplier=position["multiplier"])
+                per_contract_economics = {**economics, "old_buy_fee": per_contract_old_fee.amount,
+                    "new_sell_fee": per_contract_new_fee.amount}
+                if covered_call:
+                    per_contract_economics["covered_shares"] = position["multiplier"]
+                per_contract_decision = evaluate({**position, "contracts_open": 1}, {**candidate, "contracts": 1},
+                    **per_contract_economics)
         except CandidateCalculationError as exc:
             if exc.reason in {"contract_ineligible", "option_non_standard", "option_type_mismatch"}:
                 rejects[exc.reason] += 1
@@ -261,9 +277,13 @@ def _evaluate_bundle(*, result: dict[str, Any], position: dict[str, Any], bundle
             rejects.update(decision["reason_codes"])
             continue
         metrics = decision["metrics"]
+        per_contract = {key: per_contract_decision["metrics"][key] for key in (
+            "net_credit", "incremental_period_return", "incremental_annualized_return")}
+        per_contract.update(old_buy_fee=per_contract_old_fee.to_dict(), new_sell_fee=per_contract_new_fee.to_dict())
         conclusion = {key: decision[key] for key in ("recommendation", "cash_flow_type")} if covered_call else {}
         matched.append({"contract": row["contract_symbol"], "expiration": row["expiration"], "strike": strike,
-            **metrics, **conclusion, "old_buy_fee": old_fee.to_dict(), "new_sell_fee": new_fee.to_dict(),
+            **metrics, **conclusion, "per_contract": per_contract,
+            "old_buy_fee": old_fee.to_dict(), "new_sell_fee": new_fee.to_dict(),
             "evidence": {"old_ask": old["ask"], "new_bid": row["bid"], "new_ask": row["ask"],
                 "old_snapshot_received_at_utc": old.get("snapshot_received_at_utc"),
                 "old_spot_observed_at_utc": old.get("spot_observed_at_utc"),
@@ -272,8 +292,12 @@ def _evaluate_bundle(*, result: dict[str, Any], position: dict[str, Any], bundle
                 "delta": row.get("delta") if not row.get("delta_reason_code") else None,
                 "delta_reason_code": row.get("delta_reason_code"), "iv": row.get("implied_volatility"),
                 "term_matched_rv": row.get("term_matched_rv"), **requirement}})
+        if partial_required_data:
+            from src.application.required_data_coverage import required_data_candidate_coverage
+
+            matched[-1]["evidence"].update(required_data_candidate_coverage(row, required_data_coverage))
     evaluated = discovered - sum(missing.values())
-    coverage_status = "complete" if complete and not missing else "partial" if evaluated else "unavailable"
+    coverage_status = "complete" if complete and not missing else "partial" if evaluated or partial_required_data else "unavailable"
     ranked = policy.rank_covered_call_roll_candidates(matched) if covered_call else policy.rank_short_put_roll_candidates(matched)
     result.update(status="success" if coverage_status == "complete" else "partial",
         outcome="found" if matched else "none" if coverage_status == "complete" else "unable",
@@ -283,6 +307,11 @@ def _evaluate_bundle(*, result: dict[str, Any], position: dict[str, Any], bundle
         candidates=ranked[:request["limit"]], displayed=min(len(ranked), request["limit"]),
         omitted=max(0, len(ranked) - request["limit"]),
         exclusion_summary=[{"code": key, "count": value} for key, value in rejects.items()])
+    if required_data_coverage is not None:
+        result["coverage"]["required_data_coverage"] = dict(required_data_coverage)
+    if partial_required_data:
+        result["coverage"].update(ranking_complete=False, ranking_scope="observed_contracts",
+            partial_candidate_policy="retain_and_mark")
     result["position"].update(old_close_cost=old["ask"] * contract_share_quantity(qty, position["multiplier"]) + old_fee.amount,
         old_buy_fee=old_fee.to_dict(), old_dte=old_dte)
     result["position"]["old_remaining_max_annualized_return"] = policy.remaining_max_annualized_return(
@@ -336,6 +365,12 @@ def evaluate_frozen_position_roll(
     )}
     result["source"]["requirement_id"] = requirement.get("requirement_id")
     result["position"] = dict(position)
+    required_data_coverage = provenance.get("required_data_coverage")
+    if not isinstance(required_data_coverage, Mapping):
+        required_data_coverage = None
+    partial_required_data = bool(required_data_coverage and required_data_coverage.get("status") == "partial")
+    if required_data_coverage is not None:
+        result["source"]["required_data_coverage"] = dict(required_data_coverage)
     plugin_status = position_advice_plugin_status(config)
     if plugin_status != "available":
         result.update(status=plugin_status, reason_codes=["position_advice_" + plugin_status])
@@ -396,13 +431,14 @@ def evaluate_frozen_position_roll(
         complete, expirations = _frozen_roll_scope_coverage(
             plan=plan, requirement=requirement, position=position,
         )
-        if not complete:
+        if not complete and not partial_required_data:
             result["reason_codes"] = ["roll_scope_not_covered"]
             return result
         result = _evaluate_bundle(
             result=result, position=position, bundle={"rows": quotes, "expirations": expirations},
             requirement=dict(requirement), spot=spot, market=market, now=now,
-            request=request, policy=policy, enumeration_complete=True,
+            request=request, policy=policy, enumeration_complete=complete,
+            required_data_coverage=required_data_coverage,
         )
         if result["candidates"]:
             expiry_times = [datetime.fromisoformat(str(provenance["expires_at"]).replace("Z", "+00:00"))]

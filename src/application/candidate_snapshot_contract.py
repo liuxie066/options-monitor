@@ -358,7 +358,7 @@ def required_data_coverage_fields(row: Mapping[str, Any]) -> dict[str, Any]:
         raise CandidateSnapshotContractError("required-data partial coverage status is invalid")
 
     def expiration_list(value: Any) -> list[str]:
-        if not isinstance(value, list) or not value:
+        if not isinstance(value, list):
             raise CandidateSnapshotContractError("required-data coverage expirations are invalid")
         for expiration in value:
             try:
@@ -376,7 +376,7 @@ def required_data_coverage_fields(row: Mapping[str, Any]) -> dict[str, Any]:
     if set(covered) & set(incomplete):
         raise CandidateSnapshotContractError("required-data coverage expiration states overlap")
     rows = coverage.get("per_expiration")
-    if not isinstance(rows, list) or any(not isinstance(item, Mapping) for item in rows):
+    if not isinstance(rows, list) or not rows or any(not isinstance(item, Mapping) for item in rows):
         raise CandidateSnapshotContractError("required-data per-expiration coverage is invalid")
     expirations = expiration_list([item.get("expiration") for item in rows])
     if set(expirations) != set(covered) | set(incomplete):
@@ -409,7 +409,97 @@ def required_data_coverage_fields(row: Mapping[str, Any]) -> dict[str, Any]:
                            or not math.isfinite(strike) for strike in strikes)
                 ):
                     raise CandidateSnapshotContractError("required-data missing exact strikes are invalid")
-    return {"required_data_coverage": coverage}
+    range_evidence = any("strike_coverage" in item for item in rows)
+    if range_evidence:
+        for item in rows:
+            _validate_strike_coverage(item)
+        if coverage.get("ranking_complete") is not False or coverage.get("ranking_scope") != "observed_contracts":
+            raise CandidateSnapshotContractError("partial required-data ranking must remain incomplete")
+        if coverage.get("partial_candidate_policy") != "retain_and_mark":
+            raise CandidateSnapshotContractError("partial required-data candidate policy is invalid")
+    elif not covered or not incomplete:
+        raise CandidateSnapshotContractError("legacy required-data partial coverage needs both date states")
+    expiration = row.get("expiration")
+    if expiration is not None:
+        detail = next((item for item in rows if item["expiration"] == expiration), None)
+        if detail is None or detail["status"] == "missing":
+            raise CandidateSnapshotContractError("candidate belongs to an unavailable expiration")
+        if detail["status"] == "incomplete":
+            strike = row.get("strike")
+            side = row.get("option_type")
+            scopes = detail.get("strike_coverage", [])
+            if not any(
+                scope.get("option_type") == side
+                and strike in scope.get("covered_strikes", [])
+                and any(lower <= strike <= upper for lower, upper in scope.get("covered_ranges", []))
+                for scope in scopes
+            ) or any("exact_strike" in gap["missing"] for gap in detail["missing_requirements"]):
+                raise CandidateSnapshotContractError("candidate is outside observed required-data coverage")
+        if row.get("required_data_expiration_status", detail["status"]) != detail["status"]:
+            raise CandidateSnapshotContractError("candidate required-data expiration status mismatch")
+    if range_evidence and any(
+        key in row and row[key] != expected for key, expected in (
+            ("ranking_complete", False), ("ranking_scope", "observed_contracts"),
+            ("partial_candidate_policy", "retain_and_mark"),
+        )
+    ):
+        raise CandidateSnapshotContractError("candidate contradicts partial required-data ranking")
+    out = {"required_data_coverage": coverage}
+    for key in ("required_data_expiration_status", "ranking_complete", "ranking_scope", "partial_candidate_policy"):
+        if key in row:
+            out[key] = row[key]
+    return out
+
+
+def _validate_strike_coverage(detail: Mapping[str, Any]) -> None:
+    """Validate stored range evidence at the existing snapshot contract boundary."""
+    scopes = detail.get("strike_coverage")
+    if not isinstance(scopes, list) or not scopes:
+        raise CandidateSnapshotContractError("required-data strike coverage scopes are invalid")
+    for scope in scopes:
+        if not isinstance(scope, Mapping):
+            raise CandidateSnapshotContractError("required-data strike coverage scope is invalid")
+        index = scope.get("request_index")
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0 or scope.get("option_type") not in {"put", "call"}:
+            raise CandidateSnapshotContractError("required-data strike coverage identity is invalid")
+        observed = scope.get("covered_strikes")
+        if not isinstance(observed, list) or any(
+            isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0
+            for value in observed
+        ) or observed != sorted(set(observed)):
+            raise CandidateSnapshotContractError("required-data observed strikes are invalid")
+        expected = [[observed[0], observed[-1]]] if observed else []
+        if scope.get("covered_ranges") != expected:
+            raise CandidateSnapshotContractError("required-data covered range does not match observations")
+        window = scope.get("strike_window")
+        if not isinstance(window, list) or len(window) != 2:
+            raise CandidateSnapshotContractError("required-data strike window is invalid")
+        lower, upper = window
+        if any(value is not None and (
+            isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0
+        ) for value in window) or (lower is not None and upper is not None and lower > upper):
+            raise CandidateSnapshotContractError("required-data strike window is invalid")
+        if any((lower is not None and value < lower) or (upper is not None and value > upper) for value in observed):
+            raise CandidateSnapshotContractError("required-data observed strike is outside its window")
+        expected_missing = []
+        inclusive = []
+        if not observed:
+            expected_missing.append(window)
+            inclusive.append([lower is not None, upper is not None])
+        else:
+            if lower is not None and lower < observed[0]:
+                expected_missing.append([lower, observed[0]])
+                inclusive.append([True, False])
+            if upper is not None and upper > observed[-1]:
+                expected_missing.append([observed[-1], upper])
+                inclusive.append([False, True])
+        if scope.get("missing_ranges") != expected_missing or scope.get("missing_range_inclusive") != inclusive:
+            raise CandidateSnapshotContractError("required-data missing range endpoints are invalid")
+    for key in ("covered_ranges", "missing_ranges", "missing_range_inclusive"):
+        if detail.get(key) != [value for scope in scopes for value in scope[key]]:
+            raise CandidateSnapshotContractError("required-data range summary mismatch")
+    if detail.get("covered_strikes") != sorted({value for scope in scopes for value in scope["covered_strikes"]}):
+        raise CandidateSnapshotContractError("required-data observed strikes summary mismatch")
 
 
 def normalize_combo_scope_results(
@@ -439,6 +529,7 @@ def normalize_combo_scope_results(
         status = required_text(raw.get("status"), "scope status").lower()
         if status not in CANDIDATE_CAPTURE_STATUSES:
             raise CandidateSnapshotContractError("combo candidate scope status is invalid")
+        detail = raw.get("reason_detail", raw.get("detail"))
         out.append(
             {
                 "scope": "strategy",
@@ -447,6 +538,7 @@ def normalize_combo_scope_results(
                 "candidate_owner": owner_norm,
                 "status": status,
                 "reason_code": str(raw.get("reason") or raw.get("reason_code") or "").strip() or None,
+                **({"reason_detail": detail.strip()} if isinstance(detail, str) and detail.strip() else {}),
                 "quote_snapshot_id": str(raw.get("quote_snapshot_id") or "").strip() or None,
                 "quote_receipt_relpath": str(raw.get("quote_receipt_relpath") or "").strip() or None,
                 **required_data_coverage_fields(raw),

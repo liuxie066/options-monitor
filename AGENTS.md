@@ -121,14 +121,25 @@ Existing explicit authorization remains valid within its action, target, and sco
 
 Authorized local source/template edits and isolated test fixtures follow the development task. Before treating configuration or output as isolated, verify its path, consumers, and service bindings cannot affect a running environment or contact real services. When uncertain, keep it read-only and resolve the target before writing. Runtime JSON remains generated; edit its authoring source and use the supported build path.
 
+### Release and Upgrade Ticket
+
+An explicit release or remote-upgrade request issues a one-time authorization ticket for that task. Use the following rule to determine its scope:
+
+- `release` / `发布` covers commit/push and PR creation/merge for the included source changes, followed by the VERSION-driven tag and GitHub Release. It covers no remote upgrade.
+- Only an explicit remote-upgrade request, such as `发布并升级远端`, `release and upgrade`, `发布并升级`, or `升级远端`, extends the ticket through SSH to the target host, upgrade preview, apply, and post-upgrade acceptance. Within that scope, proceed across stages without repeated user confirmation, including after a matching preview.
+- The ticket covers only the target version, target host (when upgrading), and included source change set explicitly scoped to the current request (for example, `v4.6.18` on `liuxie-incus`). It expires when that task ends or the user starts a new request; never reuse it for a later task or another release.
+- The ticket does not authorize trading, sending notifications, ledger or broker-facing writes, deleting production data, changing secrets or production configuration, or business fixes outside the requested scope. These retain their separate red-line authorization requirements.
+- Preview, readback, and receipt requirements remain mandatory. Before upgrading, run the supported preview without `--confirm` and check `planned_operations` against the authorized scope before apply. After apply, independently read back the active version, check service health, and run `verify`; retain evidence for each stage.
+- Obtain renewed explicit authorization if the target version, target host, or included source change set changes, if a failure requires new business-code fixes, or if the user changes intent. Each is a new scope; the old ticket cannot authorize it.
+
 ## Request Defaults
 
 | User intent | Repo-specific default |
 |---|---|
 | explain / look into / check / why / how does this work | Start read-only with the direct owner and evidence needed to answer; expand along the call chain when gaps remain. Inspect runtime only when the question concerns actual runtime behavior |
 | commit and push / 提交并推送 | Commit and push the named development change only; do not modify `VERSION`, publish a Release, or upgrade production unless explicitly requested |
-| release / 发布 | Prepare and publish the full VERSION-driven GitHub Release; production upgrade remains a separate explicit action |
-| release and upgrade / 发布并升级远端 | Publish the VERSION-driven Release, then use the controlled remote upgrade and runtime verification flow |
+| release / 发布 | Use the [Release and Upgrade Ticket](#release-and-upgrade-ticket) through commit/push, PR creation/merge, and VERSION-driven tag/Release verification; no remote upgrade |
+| release and upgrade / 发布并升级远端 | Extend the same ticket through SSH to the scoped host, preview without `--confirm` and review of `planned_operations`, apply, and independent acceptance of the active version, service health, and `verify` results; no repeated confirmation within scope |
 | diagnostic only / 不要改文件 | Keep commands read-only and do not edit files |
 
 Do not run Python scripts just to see what happens.

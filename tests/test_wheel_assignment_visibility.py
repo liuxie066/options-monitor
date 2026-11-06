@@ -4,7 +4,7 @@ import pytest
 from cash_evidence_helpers import cash_portfolio
 from conftest import phase2_opening_row
 from domain.domain.ledger import ContractKey, TradeEvent
-from src.application.daily_decision_brief_renderer import render_fixed_report
+from src.application.daily_decision_brief_renderer import render_fixed_report, select_daily_brief_notification
 from src.application.daily_decision_brief_service import _load_wheel_snapshot_family
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_objects_atomically
@@ -16,6 +16,35 @@ from tests.test_daily_decision_brief_renderer import _brief, _scheduled_context
 from tests.test_wheel_assignment_companions import _assignment_payload, _open_activation, _put_event
 from tests.test_wheel_candidate_snapshot import _dependencies
 from tests.test_wheel_scanning import AS_OF, _call_row, _converter, _policy
+
+
+@pytest.mark.parametrize('symbol_count', [170, 200])
+def test_many_wheel_gaps_keep_all_reasons_without_blocking_notification(symbol_count):
+    brief = _brief()
+    brief['wheel_batches'] = [{
+        'wheel_branch_id': f'gap-{index}',
+        'symbol': f'WHEEL{index:03d}',
+        'direction': 'call',
+        'status': 'data_unavailable',
+        'recommended_contracts': 0,
+        'reason_code': 'data_unavailable',
+        'reason_codes': [
+            'multiplier_unproven', 'assignment_cash_facts_unavailable',
+            'assignment_currency_unavailable',
+        ],
+    } for index in range(symbol_count)]
+    selection = select_daily_brief_notification(
+        brief, delivery_kind='fixed_report', context=_scheduled_context(),
+    )
+    for message in (selection['text'], '\n\n'.join(selection['markdown_blocks'])):
+        assert 0 < len(message) <= 12_000
+        assert 'WHEEL000 Wheel Call、WHEEL001 Wheel Call、WHEEL002 Wheel Call' in message
+        assert f'另有 {symbol_count - 3} 个标的/方向，共 {symbol_count} 个' in message
+        assert '候选数据不足，无法评估' in message
+        assert '合约乘数来源未核实，暂停推荐' in message
+        assert '指派交割金额或实际费用证据不完整，暂停推荐' in message
+        assert '指派交割币种缺失，暂停推荐' in message
+        assert 'WHEEL003 Wheel Call' not in message
 
 
 def test_incomplete_assignment_is_visible_in_brief_without_trade_capacity(tmp_path):
@@ -67,10 +96,16 @@ def test_incomplete_assignment_is_visible_in_brief_without_trade_capacity(tmp_pa
     brief = _brief()
     brief['wheel_batches'] = batches
     message = render_fixed_report(brief, context=_scheduled_context())
-    assert 'NVDA｜Wheel Call' in message
-    assert 'CC 覆盖｜未覆盖 · 100 股' in message
+    # The default five A/B cards can use the account quota; missing-evidence
+    # reasons still survive in the gap summary without another status card.
+    assert '缺口摘要｜NVDA Wheel Call' in message
     assert '合约乘数来源未核实，暂停推荐' in message
     assert '指派交割金额或实际费用证据不完整，暂停推荐' in message
+    expanded = render_fixed_report(brief, context=_scheduled_context(), limits={'max_items_per_account': 0})
+    assert 'NVDA｜Wheel Call' in expanded
+    assert 'CC 覆盖｜未覆盖 · 100 股' in expanded
+    assert '合约乘数来源未核实，暂停推荐' in expanded
+    assert '指派交割金额或实际费用证据不完整，暂停推荐' in expanded
 
 
 def _source_event(event_id, event_type, option, at, lot, *, contracts=1, known=True, raw=None):

@@ -95,6 +95,31 @@ def test_credit_roll_found_with_fees_cost_stock_basis_and_saved_report(tmp_path,
     assert provider.closed == 1
 
 
+@pytest.mark.parametrize("contracts", [1, 3])
+def test_covered_roll_publishes_one_contract_cash_and_stock_basis(tmp_path, covered_service, monkeypatch, contracts):
+    _provider, rows, _cfg, _context, _calls = covered_service
+    rows[0]["fields"].update(contracts_open=contracts, contracts_opened=contracts)
+    context = portfolio(shares=100 * contracts)
+    monkeypatch.setattr(service, "load_account_portfolio_context", lambda **_kwargs: context)
+
+    result = run(tmp_path, covered_service)
+
+    assert result["outcome"] == "found"
+    target, = result["candidates"]
+    per_contract = target["per_contract"]
+    buy_fee = service.estimate_futu_option_buy_fee("USD", 5, contracts=1, multiplier=100)
+    sell_fee = service.estimate_futu_option_sell_fee("USD", 6, contracts=1, multiplier=100)
+    credit = 100 - buy_fee.amount - sell_fee.amount
+    assert target["contracts"] == contracts
+    assert per_contract["net_credit"] == pytest.approx(credit)
+    assert per_contract["old_buy_fee"] == buy_fee.to_dict()
+    assert per_contract["new_sell_fee"] == sell_fee.to_dict()
+    assert per_contract["incremental_period_return"] == pytest.approx(credit / 10200)
+    assert per_contract["incremental_annualized_return"] == pytest.approx(credit / 10200 * 365 / 40)
+    if contracts > 1:
+        assert per_contract["net_credit"] != pytest.approx(target["net_credit"] / contracts)
+
+
 @pytest.mark.parametrize("shares", [0, 99])
 def test_no_or_insufficient_stock_is_not_applicable_before_quote_search(tmp_path, covered_service, shares):
     provider, _rows, _cfg, context, _calls = covered_service

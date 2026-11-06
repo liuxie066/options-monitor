@@ -99,6 +99,11 @@ OUTPUT_COLUMNS = [
     "required_data_payload_sha256",
     "required_data_source_observed_at",
     "required_data_expires_at",
+    "required_data_coverage",
+    "required_data_expiration_status",
+    "ranking_complete",
+    "ranking_scope",
+    "partial_candidate_policy",
     "symbol",
     "option_type",
     "expiration",
@@ -885,10 +890,11 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     writer.writeheader()
     for row in rows:
         output = dict(row)
-        if isinstance(output.get("trading_calendar_receipt"), Mapping):
-            output["trading_calendar_receipt"] = json.dumps(
-                output["trading_calendar_receipt"], sort_keys=True, separators=(",", ":")
-            )
+        for field in ("trading_calendar_receipt", "roll_advice", "required_data_coverage"):
+            if isinstance(output.get(field), Mapping):
+                output[field] = json.dumps(
+                    output[field], sort_keys=True, separators=(",", ":"), allow_nan=False
+                )
         writer.writerow(output)
     atomic_write_text(path, buf.getvalue(), encoding="utf-8")
 
@@ -1100,7 +1106,10 @@ def _load_frozen_required_data_quotes(
             ) from exc
         coverage = ((provenance_by_symbol or {}).get(symbol) or {}).get("required_data_coverage")
         if isinstance(coverage, dict) and coverage.get("status") == "partial":
-            from src.application.required_data_coverage import covered_required_data_frame
+            from src.application.required_data_coverage import (
+                covered_required_data_frame,
+                required_data_candidate_coverage,
+            )
 
             frame = covered_required_data_frame(frame, coverage)
         frame = frame.astype(object).where(pd.notna(frame), None)
@@ -1113,6 +1122,8 @@ def _load_frozen_required_data_quotes(
                 base_dir=base_dir,
             )
             if all(key):
+                if isinstance(coverage, dict) and coverage.get("status") == "partial":
+                    row.update(required_data_candidate_coverage(row, coverage))
                 quotes[key] = row
     return quotes
 
@@ -1152,6 +1163,12 @@ def _apply_required_data_row_provenance(
     row["required_data_payload_sha256"] = str(provenance.get("payload_sha256") or "") or None
     row["required_data_source_observed_at"] = str(provenance.get("source_observed_at") or "") or None
     row["required_data_expires_at"] = str(provenance.get("expires_at") or "") or None
+    coverage = provenance.get("required_data_coverage")
+    if isinstance(coverage, Mapping) and coverage.get("status") == "partial":
+        from src.application.required_data_coverage import required_data_candidate_coverage
+
+        row["required_data_coverage"] = dict(coverage)
+        row.update(required_data_candidate_coverage({**position, "expiration": _position_expiration(position)}, coverage))
     return row
 
 

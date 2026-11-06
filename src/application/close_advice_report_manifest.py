@@ -8,7 +8,7 @@ from io import StringIO
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from domain.domain.ledger.position_fields import normalize_account
 from domain.domain.symbol_identity import symbol_market
@@ -377,6 +377,26 @@ _BOOLEAN_PUBLIC_FIELDS = frozenset({"is_otm"})
 
 
 def normalize_close_advice_report_value(key: str, value: Any) -> Any:
+    if key == "required_data_coverage":
+        if isinstance(value, Mapping):
+            return dict(value)
+        if value in (None, ""):
+            return None
+        try:
+            decoded = json.loads(str(value))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("required-data coverage JSON is invalid") from exc
+        if not isinstance(decoded, dict):
+            raise ValueError("required-data coverage must be an object")
+        return decoded
+    if key == "ranking_complete":
+        if value in (None, ""):
+            return None
+        if isinstance(value, bool):
+            return value
+        if str(value).lower() in {"true", "false"}:
+            return str(value).lower() == "true"
+        raise ValueError("required-data ranking completeness is invalid")
     text = str(value).strip() if value is not None else ""
     if not text:
         return None

@@ -165,7 +165,8 @@ NOTIFICATION_CONFIG_KEYS = {
     'wechat_clawbot_state_dir',
 }
 NOTIFICATION_DAILY_BRIEF_KEYS = {
-    'max_actions_per_priority',
+    'max_items_per_account',
+    'max_actions_per_priority',  # Deprecated; accepted and validated, ignored by selection.
     'max_candidates_per_strategy',
     'max_rejection_reasons',
 }
@@ -1324,6 +1325,12 @@ def validate_config(cfg: dict):
                     'notifications.daily_brief contains unsupported keys: '
                     + ', '.join(unknown_daily_brief_keys)
                 )
+            if 'max_items_per_account' in daily_brief:
+                value = daily_brief['max_items_per_account']
+                if isinstance(value, bool) or not isinstance(value, int):
+                    die('notifications.daily_brief.max_items_per_account must be an integer')
+                if value < 0 or value > 20:
+                    die('notifications.daily_brief.max_items_per_account must be between 0 and 20')
             for key in ('max_actions_per_priority', 'max_candidates_per_strategy', 'max_rejection_reasons'):
                 if key not in daily_brief:
                     continue
@@ -1332,6 +1339,13 @@ def validate_config(cfg: dict):
                     die(f'notifications.daily_brief.{key} must be an integer')
                 if value < 1 or value > 20:
                     die(f'notifications.daily_brief.{key} must be between 1 and 20')
+            if 'max_actions_per_priority' in daily_brief:
+                warn(
+                    'notifications.daily_brief.max_actions_per_priority is deprecated and ignored; '
+                    'use notifications.daily_brief.max_items_per_account '
+                    '(default 5 across A/B/C for each account and market; '
+                    '0 removes only the account cap). See docs/NOTIFICATION_BRIEF_SELECTION.md'
+                )
 
         if 'render_style' in notifications:
             render_style = notifications.get('render_style')

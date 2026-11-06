@@ -298,7 +298,11 @@ def _evaluate_required_data_rows(
             for expiration in requested_expirations:
                 expiration_result = expiration_results.setdefault(
                     expiration,
-                    {"expiration": expiration, "status": "covered", "missing_requirements": []},
+                    {
+                        "expiration": expiration, "status": "covered", "missing_requirements": [],
+                        "covered_strikes": [], "covered_ranges": [], "missing_ranges": [],
+                        "missing_range_inclusive": [], "strike_coverage": [],
+                    },
                 )
                 proven_codes = (
                     scope_evidence.get((request_index, option_type, expiration))
@@ -329,11 +333,28 @@ def _evaluate_required_data_rows(
                         side_df[side_df["expiration"].astype(str) == expiration].copy()
                         if "expiration" in side_df.columns else side_df.iloc[:0].copy()
                     )
+                # Preserve the existing authority for the usable window:
+                # provider proof covers position-expanded scopes; without it,
+                # inferred completeness and retained rows use the base window.
+                range_min = request_scope_min if proven_codes is not None else effective_min
+                range_max = request_scope_max if proven_codes is not None else effective_max
+                strike_coverage = _strike_window_coverage(
+                    _numeric_series(exp_df, "strike"), range_min, range_max,
+                )
+                strike_coverage.update({"request_index": request_index, "option_type": option_type})
+                expiration_result["strike_coverage"].append(strike_coverage)
+                expiration_result["covered_strikes"] = sorted(set(
+                    expiration_result["covered_strikes"] + strike_coverage["covered_strikes"]
+                ))
+                for field_name in ("covered_ranges", "missing_ranges", "missing_range_inclusive"):
+                    expiration_result[field_name].extend(strike_coverage[field_name])
                 if exp_df.empty:
                     required_exact = exact_strikes_by_expiration.get(expiration, [])
                     if proven_codes == frozenset() and not required_exact:
                         # Keep proven empty scopes distinct from unproven missing rows.
+                        strike_coverage["status"] = "covered"
                         continue
+                    strike_coverage["status"] = "missing"
                     gap: dict[str, Any] = {
                         "request_index": request_index,
                         "option_type": option_type,
@@ -381,6 +402,12 @@ def _evaluate_required_data_rows(
                 ]
                 if missing_exact:
                     missing.append("exact_strike")
+                if not strike_coverage["covered_strikes"]:
+                    missing = list(dict.fromkeys(["rows", *missing]))
+                strike_coverage["status"] = (
+                    "missing" if not strike_coverage["covered_strikes"]
+                    else "incomplete" if missing else "covered"
+                )
                 if missing:
                     gap = {
                         "request_index": request_index,
@@ -456,6 +483,10 @@ def evaluate_required_data_frame_fetch_plan_debug(
             warnings=scope_validation.warnings,
         )
     per_expiration = [expiration_results[key] for key in sorted(expiration_results)]
+    for item in per_expiration:
+        if item["missing_requirements"]:
+            item["status"] = "incomplete" if item["covered_strikes"] else "missing"
+        item["ranking_complete"] = item["status"] == "covered"
     covered = [item["expiration"] for item in per_expiration if item["status"] == "covered"]
     incomplete = [item["expiration"] for item in per_expiration if item["status"] != "covered"]
     details = {
@@ -463,8 +494,19 @@ def evaluate_required_data_frame_fetch_plan_debug(
         "covered_expirations": covered,
         "incomplete_expirations": incomplete,
         "per_expiration": per_expiration,
+        "range_endpoint_convention": "covered_closed_missing_explicit",
+        "ranking_complete": not incomplete,
+        "ranking_scope": "observed_contracts" if incomplete else "complete_expirations",
+        "partial_candidate_policy": "retain_and_mark",
     }
-    if incomplete and not covered:
+    # An absent required exact position contract is never repaired by retaining
+    # neighbouring strikes. A date with that gap remains unavailable to consumers.
+    usable_expirations = [item for item in per_expiration if (
+        item["covered_strikes"] and not any(
+            "exact_strike" in gap["missing"] for gap in item["missing_requirements"]
+        )
+    )]
+    if incomplete and not usable_expirations:
         only_exact_gaps = all(
             gap["missing"] in (["exact_strike"], ["rows", "exact_strike"])
             for item in per_expiration for gap in item["missing_requirements"]
@@ -921,18 +963,107 @@ def _missing_strike_bounds(
     return ["strike_window"]
 
 
+def _strike_window_coverage(
+    strikes: pd.Series, minimum: float | None, maximum: float | None,
+) -> dict[str, Any]:
+    """Summarize the observed strike envelope, never manufacture its endpoints.
+
+    Strikes are a discrete provider grid: an interval describes its observed
+    extent, not proof that every numeric value inside is a listed contract.
+    Projection also requires membership in covered_strikes.
+    """
+    observed = sorted({float(value) for value in strikes.tolist() if (
+        (minimum is None or value >= minimum) and (maximum is None or value <= maximum)
+    )})
+    covered_ranges = [[observed[0], observed[-1]]] if observed else []
+    missing_ranges: list[list[float | None]] = []
+    inclusive: list[list[bool]] = []
+    if not observed:
+        missing_ranges.append([minimum, maximum])
+        inclusive.append([minimum is not None, maximum is not None])
+    else:
+        if minimum is not None and observed[0] > minimum:
+            missing_ranges.append([minimum, observed[0]])
+            inclusive.append([True, False])
+        if maximum is not None and observed[-1] < maximum:
+            missing_ranges.append([observed[-1], maximum])
+            inclusive.append([False, True])
+    return {
+        "strike_window": [minimum, maximum],
+        "covered_strikes": observed,
+        "covered_ranges": covered_ranges,
+        "missing_ranges": missing_ranges,
+        "missing_range_inclusive": inclusive,
+    }
+
+
 def covered_required_data_frame(
     df: pd.DataFrame, coverage: RequiredDataCoverageResult | Mapping[str, Any] | None,
 ) -> pd.DataFrame:
-    """Project consumer rows only; never change the receipt-bound source bytes."""
+    """Project observed in-window rows without changing receipt-bound bytes."""
     payload = coverage.to_dict() if isinstance(coverage, RequiredDataCoverageResult) else (coverage or {})
     if payload.get("status") == "blocked":
         return df.iloc[:0].copy()
     if payload.get("status") != "partial":
         return df
-    if "expiration" not in df.columns:
+    if not {"expiration", "option_type", "strike"}.issubset(df.columns):
         return df.iloc[:0].copy()
-    return df[df["expiration"].astype(str).isin(payload.get("covered_expirations", []))].copy()
+    keep = pd.Series(False, index=df.index)
+    strikes = pd.to_numeric(df["strike"], errors="coerce")
+    sides = df["option_type"].map(normalize_opend_option_type)
+    for detail in payload.get("per_expiration", []):
+        if detail.get("status") not in {"covered", "incomplete"}:
+            continue
+        if any("exact_strike" in gap.get("missing", []) for gap in detail.get("missing_requirements", [])):
+            continue
+        date_mask = df["expiration"].astype(str) == detail.get("expiration")
+        scopes = detail.get("strike_coverage")
+        if scopes is None:
+            # Old receipts have only whole-date proof. Never promote their
+            # incomplete dates using ranges that were not recorded.
+            if detail.get("status") == "covered":
+                keep |= date_mask
+            continue
+        for scope in scopes:
+            scope_mask = date_mask & (sides == scope.get("option_type"))
+            observed_mask = strikes.isin(scope.get("covered_strikes", []))
+            for lower, upper in scope.get("covered_ranges", []):
+                keep |= scope_mask & observed_mask & strikes.between(lower, upper, inclusive="both")
+    return df[keep].copy()
+
+
+def required_data_candidate_coverage(
+    row: Mapping[str, Any], coverage: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Bind a candidate to its date/side evidence in the existing detail channel."""
+    if not isinstance(coverage, Mapping) or coverage.get("status") != "partial":
+        return {}
+    expiration = str(row.get("expiration") or "")
+    side = normalize_opend_option_type(row.get("option_type"))
+    for item in coverage.get("per_expiration", []):
+        if item.get("expiration") != expiration:
+            continue
+        detail = dict(item)
+        if "strike_coverage" in detail:
+            scopes = [scope for scope in detail["strike_coverage"] if scope.get("option_type") == side]
+            detail["strike_coverage"] = scopes
+            detail["covered_strikes"] = sorted({strike for scope in scopes for strike in scope["covered_strikes"]})
+            for field_name in ("covered_ranges", "missing_ranges", "missing_range_inclusive"):
+                detail[field_name] = [value for scope in scopes for value in scope[field_name]]
+        compact = {
+            **coverage,
+            "covered_expirations": [expiration] if item["status"] == "covered" else [],
+            "incomplete_expirations": [] if item["status"] == "covered" else [expiration],
+            "per_expiration": [detail],
+        }
+        return {
+            "required_data_coverage": compact,
+            "required_data_expiration_status": item["status"],
+            "ranking_complete": False,
+            "ranking_scope": "observed_contracts",
+            "partial_candidate_policy": "retain_and_mark",
+        }
+    return {}
 
 
 def _fetch_plan_trading_date(

@@ -104,19 +104,38 @@ SQLite ledger position_lots
 ### Required-data 到期日覆盖与部分可用
 
 覆盖判定的最小检查单位是 `request_index × option_type × expiration`，再按到期日汇总。
-一个到期日的所有请求范围均通过才标为 `covered`；有行但缺 strike 窗口边界或必需 exact strike
-时标为 `incomplete`；缺少未经供应商完整证据证明为空的请求行时标为 `missing`。
-同一天任何一个方向或请求范围不完整，该日全部行都不进入开仓候选、Wheel 或平仓／移仓评估。
+一个到期日的所有请求范围均通过才标为 `covered`；有真实窗口内 strike、但缺窗口边界或必需
+exact strike 时标为 `incomplete`；该日与窗口交集为空且没有完整供应商空集证明时为 `missing`。
+`covered` 日期保留窗口内实收行，`incomplete` 日期保留已覆盖区间内的实收行，`missing` 日期
+无行可留。必需 exact strike 缺失仍阻断该日期的消费，不以相邻 strike 代替持仓合约。
 窗口来源、边界容差和 exact strike 的绝对容差保持不变。原有完整供应商 scope 证据仍可证明
-实际有限合约网格或合法空集；没有这种证据时继续逐日执行数值边界检查，不能借另一日的行补齐。
+实际有限合约网格、持仓扩展窗口或合法空集；没有这种证据时继续逐日执行数值边界检查，
+不能借另一日的行补齐。
 
-至少一个日期 `covered` 且另有缺口时，覆盖结果为 `status=partial`、
-`reason_code=required_data_partial_coverage`。**部分覆盖不等于完整**：只有 `covered_expirations`
-中的行可用于策略，`incomplete_expirations` 包含所有被排除的日期（包括 `missing`）。
-`per_expiration` 逐日记录 `expiration`、`status` 和 `missing_requirements`；缺口中保留
-`request_index`、`option_type`、`missing`（`lower_bound`、`upper_bound`、`strike_window`、
-`rows`、`exact_strike`）以及适用时的 `missing_exact_strikes`。这些值是按绑定数据重新计算的，
-不能由供应商自报的完整状态替代。缺失数据不补零、不推断，也不使用其他日期的报价代替。
+只要仍有可用实收行且存在覆盖缺口，结果为 `status=partial`、
+`reason_code=required_data_partial_coverage`；不要求至少一天完整。**部分覆盖不等于完整**：
+`covered_expirations` 仅列全部范围完整的日期，`incomplete_expirations` 列 `incomplete` 与
+`missing` 日期，包括仍有可评估合约的部分日期。`per_expiration` 保留 `expiration`、`status`、
+`missing_requirements`，并在原结构内增加 `covered_strikes`、`covered_ranges`、`missing_ranges`、
+`missing_range_inclusive`。`strike_coverage` 按 `request_index`、`option_type` 保留该范围的
+`strike_window`、同名区间字段和状态；逐日区间列表按这些范围顺序展开，不能跨方向或跨请求
+合并来填洞。`missing_requirements` 继续保留 `lower_bound`、`upper_bound`、`strike_window`、
+`rows`、`exact_strike` 及适用时的 `missing_exact_strikes`。
+
+区间以窗口与真实抓到的 strikes 求交后产生。`covered_ranges` 的每个 `[lo, hi]` 是闭区间，
+端点都来自 `covered_strikes`；它表达实收离散网格的范围，不推断每个数值都是上市合约，也
+不推断内部不存在未收到的上市 strike。投影同时检查 `covered_strikes` 成员身份。
+`missing_ranges` 的每个 `[lo, hi]` 与同序 `missing_range_inclusive=[左闭, 右闭]` 配对；
+`true` 表示闭端点，`false` 表示开端点。窗口 `[120,150]` 实收 `135–275` 的例子：
+`covered_ranges=[[135,150]]`，`missing_ranges=[[120,135]]`，
+`missing_range_inclusive=[[true,false]]`，即缺口 `[120,135)`；右侧缺口为 `(已收最大值,窗口上限]`。
+窗口交集为空时覆盖列表为空，缺口为整个闭窗口；无界窗口端点使用 `null`，不声明无穷端点闭合。
+这些值按绑定数据重新计算，不能用窗口本身或供应商自报状态假装实收覆盖。
+
+所有日期均无可用交集时继续 fail closed，保留 `invalid_row_identity` /
+`required_contract_missing` 原因语义；完整供应商证据证明的合法空集仍走原 `success_empty` 合同。
+身份、DTE、现价、RV、快照完整性和必需 exact strike 的守卫不放宽。缺失数据不补零、不推断，
+也不使用其他日期的报价代替。
 
 Symbol monitoring 的汇总使用 `required_data_status=incomplete`、
 `required_data_reason=required_data_partial_coverage` 并携带 `required_data_coverage`。
@@ -129,9 +148,19 @@ Symbol monitoring 的汇总使用 `required_data_status=incomplete`、
 冻结 required-data manifest 保留可用条目的 `status=ready`，新增可选
 `required_data_coverage`；只要任一可用条目为部分覆盖，manifest 总体为 `partial`。
 `ready` 表示有可消费的冻结数据，不代表每个计划日期都完整。收据绑定的原始 JSON、CSV
-及其 hash 保留全部真实采集行；各消费者只在读取后的内存视图中过滤日期，覆盖详情须与绑定行重算结果一致。
+及其 hash 保留全部真实采集行；各消费者只在读取后的内存视图中过滤日期、方向与实收区间，
+覆盖详情须与绑定行重算结果一致。候选、决策、快照、筛选／排名解释、Brief、Wheel 和 close/roll
+沿用 `required_data_coverage` detail；候选携带所属日期与方向的证据，并保留
+`required_data_expiration_status=covered|incomplete`，Brief 缺口提示显示范围及端点开闭。
 
-没有任何日期通过时仍拒绝整批：窗口／行缺口为 `invalid_row_identity`，只有 exact contract
+排序与采纳阈值、评分公式不变，部分覆盖的合格候选可以被返回与采纳；排序只比较当前观察到的
+合约，同一天未见的 strike 可能改变排名或首选目标。结构化输出使用 `ranking_complete=false`、
+`ranking_scope=observed_contracts`、`partial_candidate_policy=retain_and_mark` 表达“保留并标注”；
+完整日期候选也可能处于整体 partial 的排名集合。不能由 `accepted`、`candidates_found`、
+封存成功或到期日枚举完整推导 strike 覆盖完整。roll 分开保留日期枚举与实际 strike 覆盖，
+partial 的零候选结果也不表示完整排除了所有目标。
+
+没有任何可用交集时仍拒绝整批：窗口／行缺口为 `invalid_row_identity`，只有 exact contract
 缺口时保持 `required_contract_missing`，不得发布可执行报价收据。计划错误、身份冲突、
 证据不一致、过期数据和必需 RV 错误仍保留原来的整批 fail-closed 边界；它们不能被局部覆盖掩盖。
 没有 `explicit_expirations` 的旧策略窗口检查与原有合法 success-empty 分支不变；
@@ -143,7 +172,7 @@ Symbol monitoring 的汇总使用 `required_data_status=incomplete`、
 
 每个旧 lot 的移仓结果作为 `roll_advice` JSON 写入 `close_advice.csv`，保留适用性、覆盖缺口、原因和已排序候选，再投影到 Daily Brief `positions`。`actionable_until_utc` 取双腿报价及其现价有效期、股票覆盖有效期（CC）和封存来源有效期的最小值；过期或缺少此字段时，统一读取保留原结果但不标为当前可操作，不生成新滚仓提醒。移仓建议独立于止盈状态；旧仓为 `hold` 不阻止有充分证据的移仓建议，缺证或净支出排除也不改写止盈结论。CC 仍须核实同账户全部 Call 的股票覆盖；Put 和 CC 均要求扣费净现金严格大于零，零现金及净支出均排除。
 
-简短通知展示该 lot 排序首位的目标合约、旧 ask／新 bid、行权价变化、扣费净现金及收益率。通知中的移仓年化统一使用净现金年化 `incremental_annualized_return`，分母沿用各策略：Put 为新仓 `strike × 股数`，CC 为本次 `spot × 覆盖股数`；CC 的条件性交股改善不替代净现金年化。两方向统一按净现金年化优先、方向对应的 strike 调整比例次优排序，首位只代表当前已评价集合；有部分覆盖时保留缺口。通知沿用 Daily Brief 的账户/市场隔离、发送配置、幂等和交付确认；飞书卡片与备用正文完成最终字节预算裁剪后，必须保留同一组完整移仓条目才封存确认身份，未完整显示的条目保留待提醒；主动评估、`roll-down` 和 `roll-up` 查询仅写独立请求报告，均不发送通知。所有路径均不下单、不写业务账本。
+简短通知按方向、标的、旧到期日、旧行权价和首选新仓合约合并同一移仓动作，显示合计手数、目标合约、旧 ask／新 bid、行权价变化和每手收益，不显示笔数或合计净收取。候选的 `per_contract` 保留按 1 手重新估算双腿费用后、由同一纯策略计算的 `net_credit`、`incremental_period_return`、`incremental_annualized_return` 及双腿费用证据；固定费用和最低佣金不能按整笔金额均摊。通知使用这些每手净现金指标，Put 分母为新仓 `strike × multiplier`，CC 为本次 `spot × multiplier`，年化仍使用新仓 DTE；CC 的条件性交股改善不替代净现金年化。原候选顶层的整笔持仓指标仍用于筛选、排序及查询。历史单手结果可直接使用原指标，历史多手结果缺少 `per_contract` 时显示每手净收取暂无法评估，不投影整笔收益率。两方向统一按净现金年化优先、方向对应的 strike 调整比例次优排序，首位只代表当前已评价集合；有部分覆盖时保留缺口。通知沿用 Daily Brief 的账户/市场隔离、发送配置、幂等和交付确认；飞书卡片与备用正文完成最终字节预算裁剪后，必须保留同一组完整移仓条目才封存确认身份，未完整显示的条目保留待提醒；主动评估、`roll-down` 和 `roll-up` 查询仅写独立请求报告，均不发送通知。所有路径均不下单、不写业务账本。
 
 ### 主动评估与两种输入
 
