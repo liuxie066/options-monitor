@@ -453,15 +453,14 @@ def select_rendered_position_roll_identities(
     rows = _position_views(source, diff=dict(diff or {}), limits=resolve_daily_brief_render_limits(limits),
                            now_utc=_parse_datetime(now_utc) if now_utc is not None else None)[0]
     shown: set[str] = set()
-    occurrences: dict[tuple[str, ...], int] = {}
+    occurrences: dict[str, int] = {}
     for row in rows:
         if not row.get("roll_identity"):
             continue
-        details = tuple(str(detail) for detail in row.get("details") or [])
+        # 必须是同一张卡片连续完整的明细，不能借用另一组相同的金额或报价。
+        details = "\n".join(str(detail) for detail in row.get("details") or [])
         occurrences[details] = occurrences.get(details, 0) + 1
-        if rendered_message is None or all(
-            rendered_message.count(detail) >= occurrences[details] for detail in details
-        ):
+        if rendered_message is None or rendered_message.count(details) >= occurrences[details]:
             shown.update(row["roll_identities"])
     return shown
 
@@ -1819,6 +1818,16 @@ def _position_views(
                 row, market=market, selected=roll, lot_count=len(group),
                 contracts=contracts, net_credit=net_credit,
             )
+            close_members = [member for member in group if _lower(member.get("recommendation_state")) == "close"]
+            if close_members:
+                status = _position_status_label(close_members[0])
+                for index, member in enumerate(group, start=1):
+                    if _lower(member.get("recommendation_state")) != "close":
+                        continue
+                    close_row = {key: value for key, value in member.items() if key != "roll_advice"}
+                    close_details = _position_close_details(close_row, market=market, status="建议平仓")
+                    prefix = f"第 {index} 笔建议平仓：" if len(group) > 1 else ""
+                    details.extend(prefix + detail for detail in close_details)
         else:
             details = _position_close_details(row, market=market, status=status)
         out.append(

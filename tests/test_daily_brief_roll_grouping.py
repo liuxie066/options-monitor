@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 
 import pytest
 
 from domain.domain.daily_decision_brief import daily_brief_roll_notification_identities
+from src.application import tick_notification_flow
+from src.application.channels.feishu_notification_renderer import render_feishu_notification_card
 from src.application.daily_decision_brief_renderer import (
     build_daily_brief_user_view,
     render_candidate_alert_card_markdown,
@@ -210,6 +213,83 @@ def test_visible_group_acknowledges_every_member_lot_and_respects_truncation(ren
     assert select_rendered_position_roll_identities(brief, rendered_message=message, **kwargs) == expected
     assert select_rendered_position_roll_identities(brief, rendered_message=None, **kwargs) == expected
     assert select_rendered_position_roll_identities(brief, rendered_message="持仓内容已截断", **kwargs) == set()
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+def test_roll_cards_preserve_close_advice_for_each_close_member(grouped: bool) -> None:
+    first = _roll_row("hold" if grouped else "close")
+    close = _roll_row("close") if grouped else first
+    close.update(
+        recommendation_state="close", notification_eligible=True,
+        quote_status="priced", evaluation_status="evaluable",
+        metrics={"ask": 0.5, "estimated_pnl_if_close_net": 25, "net_capture_ratio": 0.8},
+    )
+    rows = [first, close] if grouped else [close]
+    if grouped:
+        other_close = deepcopy(close)
+        other_close["position_lot_id"] = "another-close"
+        other_close["roll_advice"]["position"]["lot_id"] = "another-close"
+        other_close["metrics"]["estimated_pnl_if_close_net"] = 40
+        rows.append(other_close)
+    brief = _brief(rows)
+    card, = build_daily_brief_user_view(brief)["positions"]
+    assert card["status"] == "CSP 向下移仓 · 同时建议平仓"
+    for render in (render_fixed_report_text, render_fixed_report_card_markdown):
+        message = render(brief)
+        assert "同时建议平仓" in message
+        assert "买回参考价 $0.50（ask）" in message
+        assert "预计锁定收益 $25.00" in message
+        assert "净兑现比例 80.0%" in message
+        if grouped:
+            assert "预计锁定收益 $40.00" in message
+            assert message.count("旧仓买回") == 1
+
+
+@pytest.mark.parametrize("render", [render_fixed_report_text, render_fixed_report_card_markdown])
+def test_truncated_group_cannot_borrow_identical_totals_from_another_old_position(render) -> None:
+    brief = _brief([
+        _roll_row("a1", contracts=1, credit=80),
+        _roll_row("a2", contracts=3, credit=240),
+        _roll_row("b1", expiration="2026-07-17", contracts=2, credit=160),
+        _roll_row("b2", expiration="2026-07-17", contracts=2, credit=160),
+    ])
+    cards = build_daily_brief_user_view(brief)["positions"]
+    assert len(cards) == 2
+    assert cards[0]["details"][1:] == cards[1]["details"][1:]
+    message = render(brief)
+    first_line = cards[1]["details"][0]
+    truncated = message[:message.index(first_line) + len(first_line)]
+    expected = daily_brief_roll_notification_identities({**brief, "positions": brief["positions"][:2]})
+    assert select_rendered_position_roll_identities(
+        brief, delivery_kind="fixed_report", rendered_message=truncated,
+    ) == expected
+
+
+@pytest.mark.parametrize("partial_output", ["primary", "fallback", "message"])
+def test_final_transport_only_acknowledges_complete_grouped_cards(monkeypatch, partial_output: str) -> None:
+    brief = _brief([
+        _roll_row("a1", contracts=1, credit=80),
+        _roll_row("a2", contracts=3, credit=240),
+        _roll_row("b1", expiration="2026-07-17", contracts=2, credit=160),
+        _roll_row("b2", expiration="2026-07-17", contracts=2, credit=160),
+    ])
+    monkeypatch.setattr(tick_notification_flow, "utc_now", lambda: datetime(2026, 7, 21, 14, 30, tzinfo=timezone.utc))
+    text = render_fixed_report_text(brief)
+    markdown = render_fixed_report_card_markdown(brief)
+    first_line = build_daily_brief_user_view(brief)["positions"][1]["details"][0]
+    truncate = lambda body: body[:body.index(first_line) + len(first_line)]
+    transport = render_feishu_notification_card(
+        markdown=truncate(markdown) if partial_output == "primary" else markdown,
+        fallback_text=truncate(text) if partial_output == "fallback" else text,
+        fallback_open_id="ou_fixture",
+    )
+    identities = sorted(daily_brief_roll_notification_identities(brief))
+    expected = daily_brief_roll_notification_identities({**brief, "positions": brief["positions"][:2]})
+    assert set(tick_notification_flow._daily_brief_transport_roll_identities(
+        brief, identities, delivery_kind="fixed_report", diff={}, limits={},
+        rendered_message=truncate(text) if partial_output == "message" else text,
+        rendered_transport=transport,
+    )) == expected
 
 
 @pytest.mark.parametrize("account,expected_groups", [
