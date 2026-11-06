@@ -16,7 +16,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def installer_env(tmp_path, archive, *, tag, corrupt_checksum=False):
+def installer_env(tmp_path, archive, *, tag, corrupt_checksum=False, missing_asset=""):
     home = tmp_path / 'home'
     home.mkdir()
     tools = tmp_path / 'tools'
@@ -39,9 +39,13 @@ while [ "$#" -gt 0 ]; do
    *) shift ;;
  esac
 done
+printf '%s\\n' "$url" >> "$TEST_REQUEST_LOG"
 case "$url" in
- *.sha256) filename="${url##*/}"; printf '%s  %s\\n' "$TEST_DIGEST" "${filename%.sha256}" > "$out" ;;
- *.tar.gz) /bin/cp "$TEST_ARCHIVE" "$out" ;;
+ */releases/latest) printf '{"tag_name":"%s"}\\n' "$TEST_TAG" ;;
+ *.sha256) [ "$TEST_MISSING_ASSET" != checksum ] || exit 22
+   filename="${url##*/}"; printf '%s  %s\\n' "$TEST_DIGEST" "${filename%.sha256}" > "$out" ;;
+ *.tar.gz) [ "$TEST_MISSING_ASSET" != archive ] || exit 22
+   /bin/cp "$TEST_ARCHIVE" "$out" ;;
  *) exit 97 ;;
 esac
 ''')
@@ -49,7 +53,9 @@ esac
     env = {k: v for k,v in os.environ.items() if not k.startswith(('OM_', 'PYTHON', 'VIRTUAL_ENV'))}
     snapshot = tmp_path / 'install.sh'
     snapshot.write_bytes((ROOT / 'scripts/install.sh').read_bytes())
-    env.update(HOME=str(home), PATH=f'{tools}:/usr/bin:/bin', TEST_DIGEST=digest, TEST_ARCHIVE=str(archive), TEST_INSTALLER=str(snapshot))
+    env.update(HOME=str(home), PATH=f'{tools}:/usr/bin:/bin', TEST_DIGEST=digest, TEST_ARCHIVE=str(archive),
+               TEST_INSTALLER=str(snapshot), TEST_TAG=tag, TEST_MISSING_ASSET=missing_asset,
+               TEST_REQUEST_LOG=str(tmp_path / 'requests.log'))
     return env, log
 
 
@@ -58,6 +64,38 @@ def install(tmp_path, env, tag):
                            '--prefix', str(tmp_path / "中文 安装 'quoted' $prefix"),
                            '--bin-dir', str(tmp_path / '中文 命令')],
                           env=env, capture_output=True, text=True, timeout=600)
+
+
+@pytest.mark.parametrize('latest', [False, True])
+@pytest.mark.parametrize('missing_asset', ['checksum', 'archive'])
+def test_published_release_without_runtime_asset_refuses_install_and_preserves_current(tmp_path, latest, missing_asset):
+    archive = tmp_path / 'unused.tar.gz'
+    archive.write_bytes(b'not reached')
+    tag = 'v1.2.3'
+    env, forbidden = installer_env(tmp_path, archive, tag=tag, missing_asset=missing_asset)
+    prefix, bin_dir = tmp_path / 'installation', tmp_path / 'commands'
+    old = prefix / 'releases/v1.2.2'
+    old.mkdir(parents=True)
+    (prefix / 'current').symlink_to(old)
+    bin_dir.mkdir()
+    for name in ('om', 'om-agent'):
+        (bin_dir / name).write_text('# options-monitor managed wrapper\nexisting wrapper\n')
+    command = ['/bin/bash', env['TEST_INSTALLER'], '--prefix', str(prefix), '--bin-dir', str(bin_dir)]
+    if not latest:
+        command += ['--version', tag]
+    result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode != 0
+    expected = 'no source fallback' if missing_asset == 'checksum' else 'runtime bundle download failed'
+    assert expected in result.stderr
+    requests = Path(env['TEST_REQUEST_LOG']).read_text().splitlines()
+    downloads = [url for url in requests if '/releases/download/' in url]
+    assert downloads and all(f'/releases/download/{tag}/options-monitor-{tag}-' in url for url in downloads)
+    assert len(downloads) == (1 if missing_asset == 'checksum' else 2)
+    assert not forbidden.exists()
+    assert (prefix / 'current').resolve() == old.resolve()
+    assert not (prefix / f'releases/{tag}').exists()
+    assert not list((prefix / 'releases').glob(f'.{tag}.tmp.*'))
+    assert all((bin_dir / name).read_text() == '# options-monitor managed wrapper\nexisting wrapper\n' for name in ('om', 'om-agent'))
 
 
 @pytest.mark.parametrize('bad_kind', ['traversal', 'symlink', 'hardlink', 'fifo', 'duplicate'])

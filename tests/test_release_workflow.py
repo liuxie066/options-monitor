@@ -301,9 +301,36 @@ def test_runtime_candidate_workflow_never_publishes_and_release_waits_for_qualif
     assert 'release_platforms' in text and 'runtime_bundle.lock.json' in text
     assert '--require-clean' in text and 'OM_TEST_RUNTIME_BUNDLE' in text
     release = workflows()['_release-reusable.yml']['jobs']
-    assert release['release']['needs'] == 'bundles'
+    assert release['bundles']['needs'] == 'release'
     assert release['bundles']['with']['release-platforms-only'] == 'true'
-    steps = release['release']['steps']
-    assert any('--bundle-dir runtime-bundles' in s.get('run', '') for s in steps)
+    append = release['publish-bundles']
+    assert append['needs'] == ['release', 'bundles']
+    assert "always()" in append['if'] and "outputs.published == 'success'" in append['if']
+    assert "outputs.published == 'failure'" in append['if']
+    steps = append['steps']
+    verify = next(i for i, s in enumerate(steps) if '--bundle-dir runtime-bundles' in s.get('run', ''))
+    upload = next(i for i, s in enumerate(steps) if 'gh release upload' in s.get('run', ''))
+    ready = next(i for i, s in enumerate(steps) if s.get('id') == 'ready')
+    assert verify < upload < ready
+    assert 'runtime-target' in steps[upload]['run']
+    assert '--state ready --bundle-dir runtime-bundles' in steps[ready]['run']
+    failure = steps[-1]
+    assert "always() && steps.ready.outcome != 'success'" in failure['if']
+    assert '--state failed' in failure['run']
+    assert 'gh release create' not in str(append) and 'git tag' not in str(append)
+
+
+def test_core_publication_is_independent_and_explicitly_defers_runtime_bundles():
+    jobs = workflows()['_release-reusable.yml']['jobs']
+    core = jobs['release']
+    assert 'needs' not in core
+    steps = core['steps']
+    assert not any(s.get('uses') == 'actions/download-artifact@v4' for s in steps)
+    metadata = next(s for s in steps if s.get('name') == 'Validate release metadata')
+    assert '--defer-runtime-bundles' in metadata['run']
+    assert 'runtime_release.py prepare-notes' in metadata['run']
     publish = next(s for s in steps if s.get('id') == 'publish')
-    assert 'runtime-bundles/*' in publish['with']['files']
+    files = publish['with']['files']
+    assert all(name in files for name in ('options-monitor-', 'om-agent-spec.json', 'VERSION', 'plugin-wheels/*'))
+    assert 'runtime-bundles/*' not in files
+    assert '--defer-runtime-bundles' in steps[-1]['run']

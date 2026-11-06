@@ -11,15 +11,10 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  bundles:
-    uses: ./.github/workflows/runtime-bundle.yml
-    with:
-      release-platforms-only: true
-    permissions:
-      contents: read
   release:
-    needs: bundles
     runs-on: ubuntu-latest
+    outputs:
+      published: ${{ steps.publish.outcome }}
     timeout-minutes: 25
     concurrency:
       group: release-${{ github.repository }}-${{ inputs.tag }}
@@ -56,7 +51,8 @@ jobs:
       - name: Validate release metadata
         run: |
           chmod +x ./om-agent
-          ./.venv/bin/python scripts/release_check.py --tag "${{ inputs.tag }}" --require-current-taxonomy --require-delta-coverage --render-notes-out /tmp/release-notes.md
+          ./.venv/bin/python scripts/release_check.py --tag "$RELEASE_TAG" --require-current-taxonomy --require-delta-coverage --defer-runtime-bundles --render-notes-out /tmp/release-notes.md
+          ./.venv/bin/python .github/ci/runtime_release.py prepare-notes --notes /tmp/release-notes.md
           ./.venv/bin/python scripts/generate_dependency_graph.py --check
           ./om-agent spec > /tmp/om-agent-spec.json
 
@@ -71,16 +67,6 @@ jobs:
           tar -xzf "options-monitor-${{ inputs.tag }}.tar.gz" -C "${ARCHIVE_ROOT}"
           cd "${ARCHIVE_ROOT}"
           "${CHECKOUT_PYTHON}" -c 'import src.application.bot.host; import src.application.bot.runtime'
-
-      - name: Download qualified runtime artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: runtime-bundle-*
-          path: runtime-bundles
-          merge-multiple: true
-
-      - name: Verify runtime publication set
-        run: ./.venv/bin/python scripts/release_check.py --tag "${{ inputs.tag }}" --bundle-dir runtime-bundles
 
       - name: Verify official plugin publication set
         run: ./.venv/bin/python scripts/build_plugin_wheels.py --output plugin-wheels --verify-only
@@ -100,9 +86,69 @@ jobs:
             options-monitor-${{ inputs.tag }}.tar.gz
             /tmp/om-agent-spec.json
             VERSION
-            runtime-bundles/*
             plugin-wheels/*
 
       - name: Read back publication outcome
         if: ${{ always() && (steps.publish.outcome == 'success' || steps.publish.outcome == 'failure') }}
-        run: ./.venv/bin/python .github/ci/release_checks.py readback
+        run: ./.venv/bin/python .github/ci/release_checks.py readback --defer-runtime-bundles
+
+  bundles:
+    needs: release
+    uses: ./.github/workflows/runtime-bundle.yml
+    with:
+      release-platforms-only: true
+    permissions:
+      contents: read
+
+  publish-bundles:
+    needs: [release, bundles]
+    if: ${{ always() && (needs.release.outputs.published == 'success' || needs.release.outputs.published == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: release-${{ github.repository }}-${{ inputs.tag }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Download qualified runtime artifacts
+        if: ${{ needs.bundles.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-bundle-*
+          path: runtime-bundles
+          merge-multiple: true
+
+      - name: Verify complete runtime publication set
+        if: ${{ needs.bundles.result == 'success' }}
+        run: python scripts/release_check.py --tag "$RELEASE_TAG" --bundle-dir runtime-bundles
+
+      - name: Append runtime assets to existing release
+        if: ${{ needs.bundles.result == 'success' }}
+        run: |
+          python .github/ci/release_checks.py runtime-target
+          gh release upload "$RELEASE_TAG" runtime-bundles/* --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Read back runtime assets and mark ready
+        id: ready
+        if: ${{ needs.bundles.result == 'success' }}
+        run: python .github/ci/runtime_release.py update --state ready --bundle-dir runtime-bundles
+
+      - name: Mark runtime build or publication failure
+        if: ${{ always() && steps.ready.outcome != 'success' }}
+        run: python .github/ci/runtime_release.py update --state failed
