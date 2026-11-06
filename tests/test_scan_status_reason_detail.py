@@ -312,6 +312,80 @@ def test_latest_direct_scan_supersedes_scheduler_pointer_without_moving_it(tmp_p
     assert pointer.read_bytes() == old_pointer
 
 
+@pytest.mark.parametrize("direct_market", ["US", "HK"])
+def test_latest_direct_scan_survives_later_scheduler_skip_with_market_isolation(
+    tmp_path, monkeypatch, direct_market,
+):
+    import os
+    from tests.test_candidate_snapshot_manifest import _write_scheduler_skip
+    from src.application.agent_tool_contracts import AgentToolError
+
+    process_symbol = _patch_direct_process(monkeypatch)
+    item = deepcopy(CONFIG["symbols"][0])
+    if direct_market == "HK":
+        item["symbol"] = "0700.HK"
+    process_symbol(
+        "python", tmp_path, item, 3, runtime_config=CONFIG,
+        strategy_status_run_id="direct-before-skip",
+    )
+    _write_scheduler_skip(tmp_path, monkeypatch, run_id="later-skip")
+    skip_dir = tmp_path / "output_runs" / "later-skip"
+    stamp = (tmp_path / "output_runs" / "direct-before-skip").stat().st_mtime_ns + 1_000_000_000
+    os.utime(skip_dir, ns=(stamp, stamp))
+    pointer = tmp_path / "output_shared" / "state" / "last_run_dir.txt"
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(str(skip_dir))
+    reads = _forbid_jsonl_reads(monkeypatch)
+    if direct_market == "US":
+        result = _explain(tmp_path)
+        assert result["scope"]["run_id"] == "direct-before-skip"
+        assert result["source"]["skipped_non_scan_runs"] == 1
+        assert result["candidate_evidence_available"] is False
+        assert _events(result)[0]["message"].startswith("invalid_row_identity")
+    else:
+        with pytest.raises(AgentToolError, match="market binding mismatch"):
+            _explain(tmp_path)
+    assert reads == []
+
+
+def test_direct_symbols_timeout_publishes_new_failure_without_reusing_old_run(tmp_path, monkeypatch):
+    import signal
+    from src.application import pipeline_context, pipeline_symbol, pipeline_watchlist, report_builders
+    from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
+
+    if not hasattr(signal, "setitimer"):
+        pytest.skip("SIGALRM deadline test requires setitimer")
+    seal_opening_candidate_fixture(base=tmp_path, run_id="previous-success", account="lx")
+    _patch_direct_process(monkeypatch)
+
+    def stalled_fetch(**_):
+        while True:
+            pass
+
+    monkeypatch.setattr(pipeline_symbol, "ensure_required_data", stalled_fetch)
+    monkeypatch.setattr(pipeline_context, "build_pipeline_context", lambda **_: ({}, {}, None, None))
+    monkeypatch.setattr(pipeline_watchlist, "resolve_watchlist_item_runtime_config", lambda *, item, **_: dict(item))
+    monkeypatch.setattr(report_builders, "build_symbols_summary", lambda *_, **__: None)
+    monkeypatch.setattr(report_builders, "build_symbols_digest", lambda *_, **__: None)
+    reads = _forbid_jsonl_reads(monkeypatch)
+    rows = pipeline_watchlist.run_watchlist_pipeline_default(
+        py="python", base=tmp_path, cfg=deepcopy(CONFIG), report_dir=tmp_path / "reports",
+        state_dir=tmp_path / "state", shared_state_dir=None, required_data_dir=tmp_path / "required",
+        is_scheduled=False, top_n=3, symbol_timeout_sec=0.02, portfolio_timeout_sec=1,
+        want_scan=True, no_context=True, symbols_arg="NVDA", log=lambda _: None,
+        want_fn=lambda name: name == "scan",
+    )
+    assert "deadline" in rows[0]["note"]
+    result = _explain(tmp_path)
+    assert result["scope"]["run_id"] != "previous-success"
+    assert result["authority"] == "scan_status_only"
+    event = _events(result)[0]
+    assert event["rule"] == "symbol_processing_timeout"
+    assert "deadline" in event["message"]
+    assert _group(result)["status"] == "failed"
+    assert reads == []
+
+
 def test_direct_real_fetch_adapter_failure_reaches_explain(tmp_path, monkeypatch):
     from src.application import pipeline_symbol, required_data_steps
 

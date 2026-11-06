@@ -49,6 +49,8 @@ from src.application.strategy_scan_status import (
     publish_strategy_scan_status_index,
 )
 from src.application.candidate_snapshot_contract import candidate_run_mode_fields
+from src.application.source_receipts import sha256_bytes
+from src.application.tick_run_workspace import canonical_account_run_config_bytes
 from src.application.opening_candidate_snapshot import (
     dependency_from_file,
     dependency_from_hash,
@@ -389,6 +391,7 @@ def run_watchlist_pipeline(
     build_symbols_digest_fn: Callable[[list[dict], int], object],
     quote_snapshot_ids: dict[str, str] | None = None,
     source_producer_run_id: str | None = None,
+    strategy_status_run_id: str | None = None,
     opening_final_candidates_sink_fn: (
         Callable[[str, list[dict[str, Any]]], None] | None
     ) = None,
@@ -475,11 +478,18 @@ def run_watchlist_pipeline(
                 continue
         watchlist_items.append(item0)
 
+    status_report_dir = report_dir
+    status_run_id = str(strategy_status_run_id or source_producer_run_id or "").strip()
+    status_only = bool(strategy_status_run_id and required_data_snapshot_manifest is None)
+    status_account = str((cfg.get("portfolio") or {}).get("account") or "").strip().lower()
+    status_config_hash = str(account_config_sha256 or "")
+    if status_only:
+        status_run_id, status_report_dir = direct_strategy_status_run(
+            base=base, account=status_account, run_id=status_run_id,
+        )
+        status_config_hash = sha256_bytes(canonical_account_run_config_bytes(cfg))
     expected_strategy_statuses: list[dict[str, str]] = []
-    if (
-        required_data_snapshot_manifest is not None
-        and str(source_producer_run_id or "").strip()
-    ):
+    if status_run_id and (required_data_snapshot_manifest is not None or status_only):
         for item0 in watchlist_items:
             resolved = resolve_watchlist_item_runtime_config(
                 item=item0,
@@ -512,7 +522,7 @@ def run_watchlist_pipeline(
                         "strategy_family": "sell_put",
                         "strategy_mode": "put",
                         "candidate_owner": "opening",
-                        "account_config_sha256": str(account_config_sha256 or ""),
+                        "account_config_sha256": status_config_hash,
                     }
                 )
             yield_policy = derive_combo_yield_policy(
@@ -533,7 +543,7 @@ def run_watchlist_pipeline(
                         "strategy_family": "combo_yield",
                         "strategy_mode": "combo_yield",
                         "candidate_owner": variant,
-                        "account_config_sha256": str(account_config_sha256 or ""),
+                        "account_config_sha256": status_config_hash,
                     }
                 )
             if configured_call:
@@ -544,7 +554,7 @@ def run_watchlist_pipeline(
                         "strategy_family": "covered_call",
                         "strategy_mode": "call",
                         "candidate_owner": "opening",
-                        "account_config_sha256": str(account_config_sha256 or ""),
+                        "account_config_sha256": status_config_hash,
                     }
                 )
 
@@ -703,12 +713,13 @@ def run_watchlist_pipeline(
             for scope in expected_strategy_statuses:
                 if scope["symbol"] != normalize_symbol_read(symbol):
                     continue
-                path = strategy_status_path(report_dir=report_dir, symbol=scope["symbol"],
+                path = strategy_status_path(report_dir=status_report_dir, symbol=scope["symbol"],
                                             strategy_family=scope["strategy_family"])
                 if not path.exists():
-                    publish_strategy_scan_status(report_dir=report_dir, run_id=str(source_producer_run_id),
+                    publish_strategy_scan_status(report_dir=status_report_dir, run_id=status_run_id,
                         account=account, market=scope["market"], symbol=scope["symbol"],
-                        strategy_family=scope["strategy_family"], status="failed", reason="symbol_processing_timeout")
+                        strategy_family=scope["strategy_family"], status="failed",
+                        reason="symbol_processing_timeout", detail=str(exc))
             return _failure_rows(item0, exc)
 
     summary_rows: list[dict] = []
@@ -718,21 +729,19 @@ def run_watchlist_pipeline(
     if want_fn('scan'):
         build_symbols_summary_fn(summary_rows)
         build_symbols_digest_fn(summary_rows, int(top_n))
-        if (
-            required_data_snapshot_manifest is not None
-            and str(source_producer_run_id or "").strip()
-        ):
+        if status_run_id and (required_data_snapshot_manifest is not None or status_only):
             portfolio_cfg = (
                 cfg.get("portfolio")
                 if isinstance(cfg.get("portfolio"), dict)
                 else {}
             )
-            if str(account_config_sha256 or "").strip():
+            if status_config_hash.strip():
                 publish_strategy_scan_status_index(
-                    report_dir=report_dir,
-                    run_id=str(source_producer_run_id),
+                    report_dir=status_report_dir,
+                    run_id=status_run_id,
                     account=str(portfolio_cfg.get("account") or ""),
-                    account_config_sha256=str(account_config_sha256),
+                    account_config_sha256=status_config_hash,
+                    status_only=status_only,
                     expected=expected_strategy_statuses,
                     run_mode=candidate_run_mode_fields(
                         experience=experience,
@@ -890,6 +899,7 @@ def run_watchlist_pipeline_default(
         source_producer_run_id=(
             account_run_id if candidate_capture_enabled else None
         ),
+        strategy_status_run_id=(status_run_id if not candidate_capture_enabled else None),
         opening_final_candidates_sink_fn=(
             _capture_final_candidates if candidate_capture_enabled else None
         ),

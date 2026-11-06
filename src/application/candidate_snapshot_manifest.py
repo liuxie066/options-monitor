@@ -1073,15 +1073,21 @@ def _load_latest_candidate_snapshot_bundle(
             bundle = loader(base=root, run_id=run_dir.name, account=account_norm)
             if skipped:
                 manifest = bundle["manifest"]
-                market = _frozen_account_market(
-                    base=root, run_id=run_dir.name, account=account_norm,
-                    config_hash=manifest["account_config_sha256"],
-                )
-                if market != skipped_market or any(
-                    scope.get("market") != market
-                    for scope in manifest.get("expected_scopes", [])
-                ):
-                    raise CandidateSnapshotManifestError("candidate account market binding mismatch")
+                if bundle.get("status_only"):
+                    # The filter-only loader has validated the diagnostic index;
+                    # direct scans do not publish a frozen account configuration.
+                    if set(manifest.get("markets") or []) != {skipped_market}:
+                        raise CandidateSnapshotManifestError("candidate account market binding mismatch")
+                else:
+                    market = _frozen_account_market(
+                        base=root, run_id=run_dir.name, account=account_norm,
+                        config_hash=manifest["account_config_sha256"],
+                    )
+                    if market != skipped_market or any(
+                        scope.get("market") != market
+                        for scope in manifest.get("expected_scopes", [])
+                    ):
+                        raise CandidateSnapshotManifestError("candidate account market binding mismatch")
             return {**bundle, "source_selection": {"skipped_non_scan_runs": skipped}}
         except (CandidateSnapshotManifestError, AccountRunConfigError, OSError, ValueError) as exc:
             error = CandidateSnapshotManifestError(str(exc))
