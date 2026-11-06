@@ -149,6 +149,9 @@ def test_tick_uses_same_sealed_batch_for_concrete_roll_target(tmp_path, monkeypa
     assert target["evidence"]["old_ask"] == 5
     assert target["evidence"]["new_bid"] == 6.5
     assert target["net_credit"] > 0
+    assert target["per_contract"]["net_credit"] == pytest.approx(target["net_credit"])
+    assert target["per_contract"]["incremental_annualized_return"] == pytest.approx(
+        target["incremental_annualized_return"])
     assert roll["coverage"]["enumeration_complete"] is True
     assert roll["source"]["expected_fetch_contract_sha256"]
     assert roll["reason_codes"] == []

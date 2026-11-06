@@ -1838,10 +1838,7 @@ def _position_views(
                 "lot_count": len(group), "contracts": contracts, "net_credit": float(net_credit),
                 "roll_identities": identities,
             }
-            details = _position_roll_details(
-                row, market=market, selected=roll, lot_count=len(group),
-                contracts=contracts, net_credit=net_credit,
-            )
+            details = _position_roll_details(row, market=market, selected=roll, contracts=contracts)
             close_members = [member for member in group if _lower(member.get("recommendation_state")) == "close"]
             if close_members:
                 status = _position_status_label(close_members[0])
@@ -1981,7 +1978,7 @@ def _position_summary(
 
 def _position_roll_details(
     row: Mapping[str, Any], *, market: str, selected: tuple[str, Mapping[str, Any]],
-    lot_count: int = 1, contracts: int = 0, net_credit: Decimal | None = None,
+    contracts: int = 0,
 ) -> list[str]:
     direction, target = selected
     result = row["roll_advice"]
@@ -2008,16 +2005,22 @@ def _position_roll_details(
         delta = new_strike - old_strike
         pct = _number(target.get("strike_increase_pct")) if direction == "roll_up" else None
         details.append(f"行权价变化：{currency} {delta:+g}" + (f"（{pct:+.2%}）" if pct is not None else ""))
-    if lot_count > 1 and net_credit is not None:
-        details.append(
-            f"共 {lot_count} 笔 · 合计净收取 {currency} {net_credit:,.2f} · 合计 {contracts} 手"
-        )
+    contracts = contracts or _whole_number(target.get("contracts", position.get("contracts_open"))) or 0
+    if contracts:
+        details.append(f"合计 {contracts} 手")
+    per_contract = target.get("per_contract")
+    values = per_contract if isinstance(per_contract, Mapping) else {}
+    # An older one-contract result already has unit economics; a multi-contract
+    # result cannot be divided because its minimum and fixed fees differ.
+    if not values and _whole_number(target.get("contracts", position.get("contracts_open"))) == 1:
+        values = target
+    credit = _number(values.get("net_credit"))
+    if credit is not None:
+        details.append(f"每手净收取：{currency} {credit:.2f}")
     else:
-        credit = _number(target.get("net_credit"))
-        if credit is not None:
-            details.append(f"移仓净收取：{currency} {credit:.2f}")
-    period = _number(target.get("incremental_period_return"))
-    annualized = _number(target.get("incremental_annualized_return"))
+        details.append("每手净收取：暂无法评估")
+    period = _number(values.get("incremental_period_return"))
+    annualized = _number(values.get("incremental_annualized_return"))
     if period is not None or annualized is not None:
         rates = []
         if period is not None:
