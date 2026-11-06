@@ -207,24 +207,17 @@ def check_tag(api, tag, sha, *, allow_missing):
         raise EvidenceError("release tag moved or differs from checked commit")
 
 
-def readback(api, tag, sha, *, plugin_dir=Path("plugin-wheels")):
-    try:
-        catalog = verify_publication(plugin_dir, tag=tag, commit=sha)
-    except ValueError:
-        raise EvidenceError("local plugin publication set invalid or missing") from None
-    plugin_assets = {CATALOG, NOTES} | {e["asset"] for e in catalog["plugins"]}
+def existing_release(api, tag, sha):
+    check_tag(api, tag, sha, allow_missing=False)
     release = api.get(f"/releases/tags/{tag}")
     if (not isinstance(release, dict) or release.get("tag_name") != tag
             or release.get("draft") is not False or not _positive(release.get("id"))):
         raise EvidenceError("publication outcome unknown or incomplete")
-    base = Path(__file__).resolve().parents[2]
-    policy = json.loads((base / "scripts/runtime_bundle.lock.json").read_text())
-    platforms = policy["release_platforms"]
-    if not platforms or len(set(platforms)) != len(platforms) or any(p not in policy["platforms"] for p in platforms):
-        raise EvidenceError("invalid qualified runtime platform policy")
-    runtime_assets = {f"options-monitor-{tag}-{platform}.tar.gz{suffix}"
-                      for platform in platforms for suffix in ("", ".sha256", ".manifest.json", ".qualification.json")}
-    required = {f"options-monitor-{tag}.tar.gz", "om-agent-spec.json", "VERSION"} | runtime_assets | plugin_assets
+    return release
+
+
+def readback_assets(api, tag, sha, *, required, hashed_assets, local_files):
+    release = existing_release(api, tag, sha)
     assets, ids = [], set()
     for page in range(1, 11):
         batch = api.get(f"/releases/{release['id']}/assets?per_page=100&page={page}")
@@ -243,25 +236,56 @@ def readback(api, tag, sha, *, plugin_dir=Path("plugin-wheels")):
         matches = [a for a in assets if a.get("name") == name]
         if len(matches) != 1 or matches[0].get("state") != "uploaded" or not _positive(matches[0].get("size")):
             raise EvidenceError("publication outcome unknown or incomplete")
-        if name in runtime_assets or name in plugin_assets:
+        if name in hashed_assets:
             digest = matches[0].get("digest", "")
             if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
                 raise EvidenceError("publication digest unavailable")
-            local = (plugin_dir if name in plugin_assets else Path("runtime-bundles")) / name
-            if name in plugin_assets and matches[0]["size"] != local.stat().st_size:
-                raise EvidenceError("plugin publication size mismatch")
-            if local.is_file():
+            local = local_files.get(name)
+            if local is not None:
+                if matches[0]["size"] != local.stat().st_size:
+                    raise EvidenceError("publication size mismatch")
                 with local.open("rb") as stream:
                     expected_digest = "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
                 if digest != expected_digest:
                     raise EvidenceError("publication digest mismatch")
     check_tag(api, tag, sha, allow_missing=False)
+    return release
+
+
+def readback(api, tag, sha, *, plugin_dir=Path("plugin-wheels"), runtime_pending=False):
+    try:
+        catalog = verify_publication(plugin_dir, tag=tag, commit=sha)
+    except ValueError:
+        raise EvidenceError("local plugin publication set invalid or missing") from None
+    from src.application.runtime_bundle import publication_assets
+    base = Path(__file__).resolve().parents[2]
+    runtime_assets = set() if runtime_pending else publication_assets(base, tag)
+    plugin_assets = {CATALOG, NOTES} | {e["asset"] for e in catalog["plugins"]}
+    required = {f"options-monitor-{tag}.tar.gz", "om-agent-spec.json", "VERSION"} | runtime_assets | plugin_assets
+    local_files = {name: plugin_dir / name for name in plugin_assets}
+    local_files.update({name: Path("runtime-bundles") / name for name in runtime_assets
+                        if (Path("runtime-bundles") / name).is_file()})
+    return readback_assets(api, tag, sha, required=required, hashed_assets=runtime_assets | plugin_assets,
+                           local_files=local_files)
+
+
+def readback_runtime(api, tag, sha, *, bundle_dir):
+    from src.application.runtime_bundle import publication_assets, validate_publication_set
+    base = Path(__file__).resolve().parents[2]
+    validate_publication_set(base, bundle_dir, tag=tag, commit=sha)
+    names = publication_assets(base, tag)
+    return readback_assets(api, tag, sha, required=names, hashed_assets=names,
+                           local_files={name: bundle_dir / name for name in names})
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("identity", "before-publish", "readback"))
-    mode = parser.parse_args().mode
+    parser.add_argument("mode", choices=("identity", "before-publish", "readback", "runtime-target"))
+    parser.add_argument("--defer-runtime-bundles", action="store_true")
+    args = parser.parse_args()
+    mode = args.mode
+    if args.defer_runtime_bundles and mode != "readback":
+        parser.error("--defer-runtime-bundles requires readback")
     try:
         repo, sha, tag = (os.environ.get(k, "") for k in ("GITHUB_REPOSITORY", "GITHUB_SHA", "RELEASE_TAG"))
         head = subprocess.run(["git", "rev-parse", "HEAD"], check=True, capture_output=True,
@@ -270,13 +294,18 @@ def main():
         api = GitHubReads(os.environ.get("GH_TOKEN", ""))
         allow_missing = os.environ.get("GITHUB_REF_TYPE") != "tag"
         if mode == "readback":
-            readback(api, tag, sha)
+            readback(api, tag, sha, runtime_pending=args.defer_runtime_bundles)
+        elif mode == "runtime-target":
+            existing_release(api, tag, sha)
         else:
             if mode == "before-publish":
                 verify_publication(Path("plugin-wheels"), tag=tag, commit=sha)
                 wait_codeql(api, sha)
             check_tag(api, tag, sha, allow_missing=allow_missing)
-        print("publication verified" if mode == "readback" else "release evidence verified")
+        if args.defer_runtime_bundles:
+            print("core publication verified; runtime_bundles=pending (not validated)")
+        else:
+            print("publication verified" if mode == "readback" else "release evidence verified")
         return 0
     except EvidenceError as exc:
         print("publication outcome unknown or incomplete" if mode == "readback" else str(exc), file=sys.stderr)
