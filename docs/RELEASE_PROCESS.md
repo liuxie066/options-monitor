@@ -288,8 +288,8 @@ VERSION="$(cat VERSION)"
 - 使用完整 Git 历史验证 commit-to-release-note coverage，不接受漏项、无理由排除或审阅后夹带代码
 - 渲染只包含目标版本的 Release Notes
 - 重新校验 release metadata / coverage，并验证最终 source archive 中的 Python Bot runtime
-- 等待拟发布平台运行包构建/搬迁资格任务，核对精确资产集合和来源身份
-- 发布对应 GitHub Release
+- 先发布对应 GitHub Release：源码 tar.gz、`VERSION`、`om-agent-spec.json`、七个官方插件 wheels 和 `om-plugins.json/md` 可先下载，正文标明运行包 `building`
+- 核心产物发布并回读成功后，异步构建拟发布平台运行包；完成完整资格校验后追加到同一个 Release，再回读资产并更新运行包状态
 
 源码归档使用仓库 `.gitattributes` 的 `export-ignore`，排除 `AGENTS.md`、`CLAUDE.md` 和 `.agents/` 等开发指令。升级的 Git cache archive 使用同一规则；只有包含该规则的 tag 才会在归档时排除这些文件，历史 tag 不会被追溯修改。显式 `--source` 安装对新安装目录另行执行排除，覆盖旧 tag，详见 [Install](INSTALL.md)。
 
@@ -331,7 +331,28 @@ PR qualification 构建并校验上述资产；release reusable workflow 构建�
 
 v4.6.9 的正式 `macos-arm64` 产物在 macOS 15.8.2 arm64 完成上述搬迁与自检，回执随 Release 发布。`macos-x86_64`、`linux-x86_64` 未随该版本发布正式运行包；CI 资格任务不能代替正式资产或最低 OS 实机验收。`scripts/runtime_bundle.lock.json` 的 `release_platforms` 当前只列 `macos-arm64`，发布仍需逐次核对实际回执与资产集合。
 
-`.github/workflows/runtime-bundle.yml` 已配置不发布的原生构建/搬迁及无用户 Git/Python 的安装验证；release reusable workflow 依赖该 workflow 的拟发布平台任务，再下载同次产物并调用 `scripts/release_check.py --bundle-dir` 核对精确资产集合。`src/application/runtime_bundle.py::validate_publication_set` 绑定 tag、commit、平台、归档摘要、清单与实际资格回执，拒绝 dirty 构建和多余/缺失资产。源码中的工作流接线不等于 CI 已执行或 GitHub 资产已发布；发布收口仍需上述任务与上传回读证据。
+`.github/workflows/runtime-bundle.yml` 负责不发布的原生构建/搬迁及无用户 Git/Python 的安装验证。`.github/workflows/_release-reusable.yml` 的时序为 `release → bundles → publish-bundles`：`release` 不等待运行包，先发布并回读核心产物；`bundles` 再以 `release-platforms-only: true` 调用资格工作流；`publish-bundles` 下载同次产物，完整校验后通过 `gh release upload` 追加到已有 Release。补挂只查找原 tag 对应的 Release，不创建第二个 Release、不重打 tag，也不改变锁文件中的 `release_platforms`（当前仍只有 `macos-arm64`）。
+
+#### 观察运行包状态与重试
+
+Release 正文的 **Runtime bundles** 区段由 `.github/ci/runtime_release.py` 维护，绑定 tag、commit、发布平台及本次 Actions 日志链接；其他发布说明保留。三种状态含义如下：
+
+| 状态 | 含义与可见资产 |
+|---|---|
+| `building` | 核心产物已发布；运行包仍在排队、构建、资格校验或补挂，尚未确认就绪。此时缺包不表示该版本取消提供运行包，也不能据此宣称运行包校验通过。 |
+| `ready` | 全部拟发布平台的归档、`.sha256`、`.manifest.json`、`.qualification.json` 已通过完整本地校验，远端逐文件大小和 SHA-256 回读一致；正文提供相应下载链接。 |
+| `failed` | 构建、资格校验、上传或回读失败（包括资格任务取消）；核心产物仍保留，但本次未确认运行包就绪。可能有部分资产，不能仅凭归档文件存在就判断成功。 |
+
+`publish-bundles` 在资格任务失败或取消后仍尝试更新 `failed`；上传或回读失败也不能写成 `ready`。核心发布 action 已尝试但上传失败时，收尾同样查找绑定原 tag / commit 的公开 Release 并更新 `failed`，避免重发已有 Release 后留下假构建状态；不存在或仍为 draft 的 Release 不会被收尾任务创建或公开。如果整次 workflow 被强制终止，或 GitHub 不可用导致状态更新本身失败，正文可能仍停在 `building`；应查看所链 Actions 的实际终态，不把它当成已就绪。核心发布成功与整条发布 workflow 成功是两个阶段，后者还要求运行包补挂完成。
+
+补挂失败时，修复原因后在**原发布 run 选择 Re-run all jobs**。核心阶段重新发布正文后，运行包阶段会显示 `building`；在这之前的排队和前置门禁期间，正文可能仍保留旧 `failed`，应查看原 run 日志。相同 tag 的资产可重传，完成后仍须回读。不要仅选 `Re-run failed jobs`：成功的核心 job 不会重跑，只读构建 job 不修改 Release 正文，因此重试构建期间会保留上次的 `failed`，不能用正文确认本次构建已启动；最终成功回读后仍会更新 `ready`。整次重试避免这个状态窗口，且不需要给构建 job 增加写权限。单独手动运行 `Runtime bundle qualification (no publication)` 只产生 Actions artifacts，不会补挂 Release；不要为补包修改 `VERSION` 或打新 tag，也不要把跟随新 `main` 的 `Release from VERSION` 当成旧 run 的重试。
+
+#### 两种发布校验模式
+
+- 核心阶段：`scripts/release_check.py --tag <tag> --defer-runtime-bundles` 继续校验 VERSION、Changelog 和调用方要求的 taxonomy / delta coverage；成功返回 0 只授权核心阶段，输出 `[RELEASE_CORE_OK] ... runtime_bundles=pending (not validated)`。核心发布回读同样使用 `release_checks.py readback --defer-runtime-bundles`，仍要求核心资产与完整插件集合，不宣称运行包校验通过。
+- 完整运行包阶段：`scripts/release_check.py --tag <tag> --bundle-dir <artifact-dir>` 使用原完整校验，拒绝缺失/多余资产、坏摘要、来源不符及无效资格回执；通过才输出 `[RELEASE_OK] ... runtime_bundles=ready (fully validated)`。两个参数互斥，不能通过 pending 模式掩盖不合格运行包。未指定这两个参数时仅检查 metadata，输出 `runtime_bundles=not_checked`。
+
+`src/application/runtime_bundle.py::validate_publication_set` 仍绑定 tag、commit、平台、归档摘要、清单与实际资格回执，拒绝 dirty 构建和多余/缺失资产。补挂前还核对已有 tag / Release 身份，补挂后用 `.github/ci/release_checks.py::readback_runtime` 逐文件比对远端大小及 SHA-256，最后更新正文并回读正文。源码接线和本地合成归档测试不能代替实际 macOS 构建、资格执行或 GitHub 上传证据。
 
 真实新手走查 U12 仍待参与者：须由未熟悉项目的人完成安装、账户选择和首份结果阅读，记录卡点及实际终态。Agent 的输入驱动 QA、mock SDK 或包自检只能证明各自技术边界，不能替代该验收。
 

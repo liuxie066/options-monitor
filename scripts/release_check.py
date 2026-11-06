@@ -59,7 +59,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="optional release delta manifest path; requires --require-delta-coverage",
     )
-    parser.add_argument("--bundle-dir", type=Path, help="verify complete qualified runtime publication artifacts")
+    runtime = parser.add_mutually_exclusive_group()
+    runtime.add_argument("--bundle-dir", type=Path, help="verify complete qualified runtime publication artifacts")
+    runtime.add_argument(
+        "--defer-runtime-bundles",
+        action="store_true",
+        help="validate core release metadata while explicitly leaving runtime bundles pending",
+    )
     return parser.parse_args()
 
 
@@ -119,7 +125,12 @@ def main() -> int:
             f"{coverage_summary['no_release_note_count']} no-note dispositions, "
             f"{coverage_summary['design_evidence_count']} design dispositions",
         )
-    print(f"[OK] release metadata valid for {version}")
+    if args.defer_runtime_bundles:
+        print(f"[RELEASE_CORE_OK] release metadata valid for {version}; runtime_bundles=pending (not validated)")
+    elif args.bundle_dir:
+        print(f"[RELEASE_OK] release metadata valid for {version}; runtime_bundles=ready (fully validated)")
+    else:
+        print(f"[OK] release metadata valid for {version}; runtime_bundles=not_checked")
     return 0
 
 

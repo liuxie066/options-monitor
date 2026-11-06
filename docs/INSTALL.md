@@ -20,6 +20,10 @@ v4.6.9 已正式发布 `macos-arm64` 运行包。以下按[该版本实际 Relea
 
 默认安装要求目标稳定 Release 有精确匹配的 `options-monitor-<tag>-<platform>.tar.gz` 及可信 SHA-256。安装端需要 shell、HTTPS 下载工具 `curl`、`tar`、`awk`、`sed` 和 `sha256sum` 或 `shasum`，会先检查缺失工具。没有合格资产、摘要不符或平台不匹配会失败，不会自动安装编译器、Homebrew 或切换源码路径。发布证据要求见[运行包发布资格](RELEASE_PROCESS.md#完整运行包的发布资格)。
 
+新 Release 会先提供核心产物，运行包随后异步构建并补挂。Release 刚发布的几分钟内，正文 **Runtime bundles** 可能显示 `building`：这表示包尚未就绪，不表示该版本不提供运行包；实际等待时间取决于 Actions 排队与构建。`ready` 才表示资格回执与 SHA-256 已齐全并完成回读；`failed` 表示构建或补挂失败，请查看正文中的 Actions 日志并等待维护者重试。
+
+默认安装会选择最新稳定 Release，版本提示也可能先发现新版本；它们不会等待运行包补齐。需要下载时，缺当前 tag 的包或必需摘要就明确失败；不会自动改用旧版本包或回退源码。请等该 Release 标为 `ready` 后重试，或自行显式选择另一个已有合格包的 `--version <release-tag>`。已有同 tag 合格本地安装的验证复用不需要重新下载。
+
 尚无合格资产时，若选择源码安装，须自己准备 **Git、Python 3.12+ 和 venv 支持**，并显式指定：
 
 ```bash
