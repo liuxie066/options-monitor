@@ -1,0 +1,139 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.18",
+  "base": {
+    "tag": "v4.6.17",
+    "commit": "75dc4d51215f045e02a9485ca54d5c06bad526a0"
+  },
+  "reviewed_head": "980ce32496ad880cd0a52a08d2fec2acdfd72604",
+  "commits": [
+    {
+      "sha": "271a1b679253a5f6acb00acc399ba1492fff4e4a",
+      "subject": "fix(required-data): preserve complete expirations in partial scans"
+    },
+    {
+      "sha": "43fbd7639162b7232942d439eca61ee3af7e8d74",
+      "subject": "Merge pull request #1018 from liuxie066/codex/required-data-partial-expirations-20261106"
+    },
+    {
+      "sha": "4cb3c9cb1e4b51e5d4798411c6995acdc8b49356",
+      "subject": "fix(scan-status): expose sanitized failure detail in explanations"
+    },
+    {
+      "sha": "2a860eedd3910dee7a3ed1bed65cccdc13102185",
+      "subject": "fix(scan-status): retain direct diagnostics across skips and timeouts"
+    },
+    {
+      "sha": "d920c6250ac844ee5f6aed7f37af0ff700ef33ae",
+      "subject": "fix(daily-brief): group roll lots before position limits (#1019)"
+    },
+    {
+      "sha": "41d0b3abeb31fa22e920cbf8ae626a225fd43322",
+      "subject": "fix(scan-status): preserve legacy failures and startup boundaries"
+    },
+    {
+      "sha": "87f2c27fcb1c09c10f67420b7ebbb85ea6bb71b2",
+      "subject": "chore(merge): integrate main into scan diagnostic fix"
+    },
+    {
+      "sha": "c60865951af6321b313723bc1071cfbea3823faa",
+      "subject": "Merge pull request #1020 from liuxie066/codex/scan-status-reason-detail-20261106"
+    },
+    {
+      "sha": "6016e8bd24cb295e7f7dd29b331fcd6c1b3ee525",
+      "subject": "fix(notifications): enforce one 42-item daily brief budget"
+    },
+    {
+      "sha": "b60efb807911b24710528ac568a15ccf4483bead",
+      "subject": "fix(notifications): enforce one 42-item daily brief budget (#1022)"
+    },
+    {
+      "sha": "980ce32496ad880cd0a52a08d2fec2acdfd72604",
+      "subject": "fix(daily-brief): show per-contract returns for grouped rolls (#1023)"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "同一移仓动作在展示条数限制前合并为一条通知，仅显示合计手数；净收取、期收益率和年化统一按 1 手重新估算双腿费用后展示，不显示持仓笔数或合计收益，保留各持仓的完整送达确认。（#1019、#1023）。",
+      "commits": [
+        "d920c6250ac844ee5f6aed7f37af0ff700ef33ae",
+        "980ce32496ad880cd0a52a08d2fec2acdfd72604"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复单个到期日行情覆盖不完整时整批拒绝的问题；保留覆盖完整的到期日，明确列出排除日期及缺口，候选、Wheel、平仓和移仓沿用同一覆盖边界。（#1018）。",
+      "commits": [
+        "271a1b679253a5f6acb00acc399ba1492fff4e4a",
+        "43fbd7639162b7232942d439eca61ee3af7e8d74"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "扫描诊断保留并展示经脱敏的失败详情，覆盖直接失败、跳过、超时和启动失败，兼容旧失败记录，便于查询具体原因。（#1020）。",
+      "commits": [
+        "4cb3c9cb1e4b51e5d4798411c6995acdc8b49356",
+        "2a860eedd3910dee7a3ed1bed65cccdc13102185",
+        "41d0b3abeb31fa22e920cbf8ae626a225fd43322",
+        "87f2c27fcb1c09c10f67420b7ebbb85ea6bb71b2",
+        "c60865951af6321b313723bc1071cfbea3823faa"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复简报各模块独立裁剪导致总条数超限及送达确认与展示不一致的问题；固定报告、即时提醒和恢复补报共用 42 条总预算，卡片与备用正文保持完整条目一致。（#1022）。",
+      "commits": [
+        "6016e8bd24cb295e7f7dd29b331fcd6c1b3ee525",
+        "b60efb807911b24710528ac568a15ccf4483bead"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "271a1b679253a5f6acb00acc399ba1492fff4e4a",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1018"]
+    },
+    {
+      "commit": "43fbd7639162b7232942d439eca61ee3af7e8d74",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1018"]
+    },
+    {
+      "commit": "4cb3c9cb1e4b51e5d4798411c6995acdc8b49356",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1020"]
+    },
+    {
+      "commit": "2a860eedd3910dee7a3ed1bed65cccdc13102185",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1020"]
+    },
+    {
+      "commit": "d920c6250ac844ee5f6aed7f37af0ff700ef33ae",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1019"]
+    },
+    {
+      "commit": "41d0b3abeb31fa22e920cbf8ae626a225fd43322",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1020"]
+    },
+    {
+      "commit": "87f2c27fcb1c09c10f67420b7ebbb85ea6bb71b2",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1020"]
+    },
+    {
+      "commit": "c60865951af6321b313723bc1071cfbea3823faa",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1020"]
+    },
+    {
+      "commit": "6016e8bd24cb295e7f7dd29b331fcd6c1b3ee525",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1022"]
+    },
+    {
+      "commit": "b60efb807911b24710528ac568a15ccf4483bead",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1022"]
+    },
+    {
+      "commit": "980ce32496ad880cd0a52a08d2fec2acdfd72604",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1023"]
+    }
+  ]
+}
