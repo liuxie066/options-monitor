@@ -299,7 +299,7 @@ Feishu long-connection、WeChat ClawBot 和本地 Bot 共享 Control/Bot 安全�
 
 不要复制旧 OpenClaw、Feishu option-position mirror 或 `notifications.daily_brief.enabled` 作为路由开关。scheduled ordinary notification 的 renderer authority 是 Daily Brief；兼容 preview 不具有 scheduled sender authority。
 
-简报的 `notifications.daily_brief.max_total_items` 默认 `40`，严格接受整数 `1..40`，限制单账户、单市场、单份报告完整展开的卡片总数。`max_close_items`、`max_roll_up_items`、`max_roll_down_items` 分别控制平仓、CC 上移、Put 下移，默认各 `5`，严格接受整数 `0..20`；`0` 只取消对应分区条数上限，整份和正文／渠道大小限制继续生效。三个分区彼此独立，不借名额；各开仓策略沿用 `max_candidates_per_strategy` 默认 `3`、整数 `1..20`，不消耗持仓分区额度。上述整数均拒绝布尔、浮点、字符串和 `null`。
+简报的 `notifications.daily_brief.max_total_items` 默认 `40`，严格接受整数 `1..40`，限制单账户、单市场、单份报告完整展开的卡片总数。`max_close_items`、`max_roll_up_items`、`max_roll_down_items` 分别控制平仓、CC 上移、Put 下移，默认分别为 `5`、`3`、`3`，严格接受整数 `0..20`；`0` 只取消对应分区条数上限，整份和正文／渠道大小限制继续生效。三个分区彼此独立，不借名额；各开仓策略沿用 `max_candidates_per_strategy` 默认 `3`、整数 `1..20`，不消耗持仓分区额度。上述整数均拒绝布尔、浮点、字符串和 `null`。
 
 旧 `notifications.daily_brief.max_items_per_account`（整数 `0..20`）及 `max_actions_per_priority`（整数 `1..20`）继续校验并提示弃用，但不再分配名额；使用 `om config migrate-switches` 显式删除，不自动复制旧值到新键。`close_advice.max_items_per_account` 保留给独立 Close Advice，Daily Brief 使用全部领域合格平仓行生成来源与 action，再按独立 `max_close_items` 展示。每个有效固定批次仍需报告，包括正常无变化与真实空态，额度不控制报告频率。迁移步骤、建议与卡片计数区别见[通知简报条数与配置迁移](docs/NOTIFICATION_BRIEF_SELECTION.md)。
 
@@ -445,7 +445,7 @@ service profile 应记录这些显式路径。升级时缺少 YAML authoring sou
 `notifications.daily_brief.max_items_per_account`、`notifications.daily_brief.max_actions_per_priority`。
 旧展示键先按原范围严格校验；非法值使迁移冲突，不会自动修正。已有新分区／总额键和
 `close_advice.max_items_per_account` 保留，不复制旧混合额度。账户级组合归因模式和 Wheel 激活历史仍保留。
-新键缺省时持仓三个分区默认各五条，消息可能比旧混合五条更长，迁移前须核对展示量。
+新键缺省时平仓默认五条，上移与下移各三条，消息可能比旧混合五条更长，迁移前须核对展示量。
 旧通知总开关缺省时，预览会明确补为 `true` 以保留原意；市场级显式关闭仍然关闭。
 
 核对 `changes`、目标路径及两个哈希后，使用同一命令加上 `--apply --confirm`、

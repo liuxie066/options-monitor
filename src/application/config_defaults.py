@@ -126,8 +126,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "daily_brief": {
                 "max_total_items": 40,
                 "max_close_items": 5,
-                "max_roll_up_items": 5,
-                "max_roll_down_items": 5,
+                "max_roll_up_items": 3,
+                "max_roll_down_items": 3,
                 "max_candidates_per_strategy": 3,
                 "max_rejection_reasons": 5,
             },

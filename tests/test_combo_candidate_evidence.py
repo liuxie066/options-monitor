@@ -208,33 +208,38 @@ def test_publication_keeps_incomplete_rows_but_only_complete_rows_get_occurrence
     assert pd.isna(published.iloc[1]["candidate_occurrence_id"])
 
 
-def test_candidate_alert_selector_uses_the_same_fixed_limit_as_the_renderer() -> None:
+@pytest.mark.parametrize("limit", [1, 2])
+def test_candidate_alert_selector_uses_the_same_fixed_limit_as_the_renderer(limit: int) -> None:
     from src.application.daily_decision_brief_renderer import render_candidate_alert
 
-    first = _candidate_row()
+    first = _candidate_row(rank=1)
     second = _amd_row()
+    second["rank"] = 2
     for row in (first, second):
         row.update(_occurrence(row))
     brief = _brief(first)
     second_brief = _brief(second)
-    brief["candidates"]["combo_yield"].append(second)
-    brief["candidate_index"].append(second_brief["candidate_index"][0])
+    brief["candidate_index"][0]["representative"]["rank"] = first["rank"]
+    second_brief["candidate_index"][0]["representative"]["rank"] = second["rank"]
+    brief["candidates"]["combo_yield"] = [second, first]
+    brief["candidate_index"].insert(0, second_brief["candidate_index"][0])
     identities = [item["identity"] for item in brief["candidate_index"]]
 
     rendered = render_candidate_alert(
         brief,
         identities,
-        limits={"max_candidates_per_strategy": 1},
+        limits={"max_candidates_per_strategy": limit},
     )
     selected = select_rendered_combo_candidate_rows(
         brief,
         delivery_kind="candidate_alert",
         candidate_identities=identities,
-        limits={"max_candidates_per_strategy": 1},
+        limits={"max_candidates_per_strategy": limit},
     )
 
-    assert "NVDA" in rendered and "AMD" in rendered
-    assert {str(item["symbol"]) for item in selected} == {"NVDA", "AMD"}
+    assert "NVDA" in rendered
+    assert ("AMD" in rendered) is (limit == 2)
+    assert {str(item["symbol"]) for item in selected} == ({"NVDA"} if limit == 1 else {"NVDA", "AMD"})
 
 
 @pytest.mark.parametrize(

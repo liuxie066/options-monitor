@@ -328,20 +328,20 @@ def test_grouped_roll_alert_acknowledges_all_lots_and_does_not_repeat(monkeypatc
 
 
 def test_display_budget_acknowledges_only_shown_roll_positions(monkeypatch, tmp_path: Path) -> None:
-    rows = [position_row(lot=f"lot-{n}") for n in range(7)]
+    rows = [position_row(lot=f"lot-{n}", credit=100 - n) for n in range(7)]
     for index, row in enumerate(rows):
-        # Distinct actions still consume distinct slots after lot grouping.
+        # Distinct targets consume distinct slots; sealed returns set the expected rank.
         row["roll_advice"]["candidates"][0]["contract"] = f"ROLL_TARGET_{index}"
-    patch_roll_assembler(monkeypatch, rows=rows)
+    patch_roll_assembler(monkeypatch, rows=list(reversed(rows)))
     calls = []
     _patch_sender(monkeypatch, calls=calls)
     assert flow.run_tick_notification_flow(_request(tmp_path, run_id="many", fixed=False).request) == 0
     state = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")["state"]["days"][MARKET_DATE]
-    assert len(state["alerted_candidates"]) == 5
-    assert len(state["pending_candidates"]) == 2
-    expected = sorted(daily_brief_roll_notification_identities(roll_brief(base=tmp_path, rows=rows)))[:5]
+    assert len(state["alerted_candidates"]) == 3
+    assert len(state["pending_candidates"]) == 4
+    expected = daily_brief_roll_notification_identities(roll_brief(base=tmp_path, rows=rows[:3]))
     assert set(state["alerted_candidates"]) == set(expected)
-    assert calls[0]["message"].count("旧仓买回") == 5
+    assert calls[0]["message"].count("旧仓买回") == 3
     assert all(row["position_lot_id"] not in calls[0]["message"] for row in rows)
 
 

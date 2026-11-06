@@ -19,6 +19,7 @@ from src.application.report_formatting import attribution_pending_text
 from src.application.payload_helpers import parse_utc as _parse_datetime
 
 _DEFAULT_MAX_ACTIONS = 5
+_DEFAULT_MAX_ROLL_ACTIONS = 3
 _DEFAULT_MAX_CANDIDATES = 3
 _DEFAULT_MAX_REJECTIONS = 5
 _MAX_TOTAL_ITEMS = 40
@@ -3649,8 +3650,10 @@ def resolve_daily_brief_render_limits(value: Mapping[str, Any] | None) -> dict[s
         "max_total_items": (src["max_total_items"]
             if type(src.get("max_total_items")) is int and 1 <= src["max_total_items"] <= _MAX_TOTAL_ITEMS
             else _MAX_TOTAL_ITEMS),
-        **{key: (src[key] if type(src.get(key)) is int and 0 <= src[key] <= 20 else _DEFAULT_MAX_ACTIONS)
-           for key in ("max_close_items", "max_roll_up_items", "max_roll_down_items")},
+        **{key: (src[key] if type(src.get(key)) is int and 0 <= src[key] <= 20 else default)
+           for key, default in (("max_close_items", _DEFAULT_MAX_ACTIONS),
+                                ("max_roll_up_items", _DEFAULT_MAX_ROLL_ACTIONS),
+                                ("max_roll_down_items", _DEFAULT_MAX_ROLL_ACTIONS))},
         "max_candidates_per_strategy": _positive_int(src.get("max_candidates_per_strategy"), _DEFAULT_MAX_CANDIDATES),
         "max_rejection_reasons": _positive_int(src.get("max_rejection_reasons"), _DEFAULT_MAX_REJECTIONS),
     }

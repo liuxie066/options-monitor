@@ -67,7 +67,7 @@ def test_thirteen_positions_keep_both_rolls_and_hold_uses_no_card(with_candidate
 def test_close_roll_queues_alternate_and_urgent_deadline_precedes_without_duplicate() -> None:
     rows = [_roll(i, annualized=0.5 - i / 100) for i in range(4)] + [_close(i) for i in range(3)]
     brief = _source(rows)
-    assert _symbols(build_daily_brief_user_view(brief)) == ["C0", "R0", "C1", "R1", "C2", "R2", "R3"]
+    assert _symbols(build_daily_brief_user_view(brief)) == ["C0", "R0", "C1", "R1", "C2", "R2"]
     rows[3]["last_trading_at_utc"] = "2026-07-20T16:00:00Z"
     context = {"next_fixed_report_at_utc": "2026-07-20T18:00:00Z"}
     view = build_daily_brief_user_view(brief, context=context, limits={"max_total_items": 5})
@@ -223,11 +223,11 @@ def test_independent_close_up_down_sections_keep_opening_candidates() -> None:
         for i in range(3)
     ]}
     view = build_daily_brief_user_view(brief)
-    assert len(view["positions"]) == 8
+    assert len(view["positions"]) == 6
     assert len(view["candidates"]) == 3
-    assert sum("向下移仓" in row["status"] for row in view["positions"]) == 5
+    assert sum("向下移仓" in row["status"] for row in view["positions"]) == 3
     assert sum("向上移仓" in row["status"] for row in view["positions"]) == 1
-    assert any("下移" in note and "2 条" in note for note in view["selection_omissions"])
+    assert any("下移" in note and "4 条" in note for note in view["selection_omissions"])
     text = render_fixed_report_card_markdown(brief)
     assert all(label in text for label in ("平仓", "上移", "下移"))
 
@@ -243,12 +243,12 @@ def test_extra_down_suggestions_do_not_displace_other_sections() -> None:
         return result
     first = build_daily_brief_user_view(brief(6))
     crowded = build_daily_brief_user_view(brief(26))
-    assert len(first["positions"]) + len(first["candidates"]) == 18
-    for section in ("close", "roll_up", "roll_down"):
-        assert sum(row["section"] == section for row in first["positions"]) == 5
+    assert len(first["positions"]) + len(first["candidates"]) == 14
+    for section, maximum in (("close", 5), ("roll_up", 3), ("roll_down", 3)):
+        assert sum(row["section"] == section for row in first["positions"]) == maximum
     assert first["positions"] == crowded["positions"]
     assert first["candidates"] == crowded["candidates"]
-    assert any("下移" in note and "21 条" in note for note in crowded["selection_omissions"])
+    assert any("下移" in note and "23 条" in note for note in crowded["selection_omissions"])
 
 
 def test_admitted_mutually_exclusive_alternatives_use_one_physical_total_slot() -> None:

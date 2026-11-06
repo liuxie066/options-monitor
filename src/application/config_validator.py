@@ -1353,10 +1353,12 @@ def validate_config(cfg: dict):
                         'use notifications.daily_brief.max_close_items, '
                         'notifications.daily_brief.max_roll_up_items and '
                         'notifications.daily_brief.max_roll_down_items '
-                        '(default 5 each per account and market; 0 removes only that section quota), '
+                        '(default 5 close, 3 roll-up and 3 roll-down per account and market; '
+                        '0 removes only that section quota), '
                         'plus notifications.daily_brief.max_total_items (default 40, range 1..40). '
                         'Legacy values are not copied to the new keys; '
                         'run om config migrate-switches to remove them explicitly. '
+                        'close_advice.max_items_per_account remains valid for standalone Close Advice only. '
                         'See docs/NOTIFICATION_BRIEF_SELECTION.md'
                     )
 
@@ -1471,14 +1473,6 @@ def validate_config(cfg: dict):
             validate_non_negative_integer(
                 close_advice.get('max_items_per_account'),
                 'close_advice.max_items_per_account',
-            )
-            warn(
-                'close_advice.max_items_per_account applies only to standalone Close Advice; '
-                'Daily Brief uses all qualified close rows and its independent '
-                'notifications.daily_brief.max_close_items display quota '
-                '(default 5; 0 removes only the close section quota). '
-                'The standalone value is preserved by om config migrate-switches. '
-                'See docs/NOTIFICATION_BRIEF_SELECTION.md'
             )
     alert_policy = cfg.get('alert_policy')
     if alert_policy is not None and not isinstance(alert_policy, (dict, str)):

@@ -1620,16 +1620,17 @@ def test_render_limit_normalization_remains_bounded() -> None:
     ) == {
         "max_total_items": 40,
         "max_close_items": 5,
-        "max_roll_up_items": 5,
-        "max_roll_down_items": 5,
+        "max_roll_up_items": 3,
+        "max_roll_down_items": 3,
         "max_candidates_per_strategy": 7,
         "max_rejection_reasons": 20,
     }
-    for section in ("max_close_items", "max_roll_up_items", "max_roll_down_items"):
+    for section, default in (("max_close_items", 5), ("max_roll_up_items", 3), ("max_roll_down_items", 3)):
+        assert resolve_daily_brief_render_limits(None)[section] == default
         assert resolve_daily_brief_render_limits({section: 0})[section] == 0
         assert resolve_daily_brief_render_limits({section: 20})[section] == 20
         for invalid in (True, False, -1, 21, 1.5, None, "7"):
-            assert resolve_daily_brief_render_limits({section: invalid})[section] == 5
+            assert resolve_daily_brief_render_limits({section: invalid})[section] == default
     for invalid in (True, False, 0, 41, 1.5, None, "7"):
         assert resolve_daily_brief_render_limits({"max_total_items": invalid})["max_total_items"] == 40
 

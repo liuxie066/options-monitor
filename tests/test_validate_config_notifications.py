@@ -496,6 +496,7 @@ def test_validate_config_accepts_daily_brief_account_budget(value: int, capsys) 
     mod.validate_config(cfg)
     warning = capsys.readouterr().err
     assert "notifications.daily_brief.max_items_per_account is deprecated and ignored" in warning
+    assert "default 5 close, 3 roll-up and 3 roll-down per account and market" in warning
     for key in ("max_close_items", "max_roll_up_items", "max_roll_down_items", "max_total_items"):
         assert f"notifications.daily_brief.{key}" in warning
     assert "om config migrate-switches" in warning
@@ -541,9 +542,11 @@ def test_validate_config_accepts_legacy_daily_brief_limit_with_migration_warning
     mod.validate_config(cfg)
     warning = capsys.readouterr().err
     assert "notifications.daily_brief.max_actions_per_priority is deprecated and ignored" in warning
+    assert "default 5 close, 3 roll-up and 3 roll-down per account and market" in warning
     for key in ("max_close_items", "max_roll_up_items", "max_roll_down_items", "max_total_items"):
         assert f"notifications.daily_brief.{key}" in warning
-    assert "max_items_per_account" not in warning
+    assert "notifications.daily_brief.max_items_per_account" not in warning
+    assert "close_advice.max_items_per_account remains valid for standalone Close Advice only" in warning
     assert "om config migrate-switches" in warning
     assert "docs/NOTIFICATION_BRIEF_SELECTION.md" in warning
     assert cfg["notifications"] == before["notifications"]
@@ -585,8 +588,8 @@ def test_daily_brief_defaults_and_examples_use_account_budget_without_legacy_war
         brief = notifications["daily_brief"]
         assert brief["max_total_items"] == 40
         assert brief["max_close_items"] == 5
-        assert brief["max_roll_up_items"] == 5
-        assert brief["max_roll_down_items"] == 5
+        assert brief["max_roll_up_items"] == 3
+        assert brief["max_roll_down_items"] == 3
         assert brief["max_candidates_per_strategy"] == 3
         assert brief["max_rejection_reasons"] == 5
         assert "max_items_per_account" not in brief
@@ -606,9 +609,7 @@ def test_close_advice_budget_keeps_standalone_scope_with_daily_brief_guidance(va
     before = deepcopy(cfg)
     mod.validate_config(cfg)
     warning = capsys.readouterr().err
-    assert "close_advice.max_items_per_account applies only to standalone Close Advice" in warning
-    assert "Daily Brief uses all qualified close rows" in warning
-    assert "notifications.daily_brief.max_close_items" in warning
+    assert warning == ""
     assert cfg["notifications"] == before["notifications"]
     assert cfg["close_advice"] == before["close_advice"]
 
