@@ -1,0 +1,119 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.17",
+  "base": {
+    "tag": "v4.6.16",
+    "commit": "984c4bc51da0a2d483c5a9c40011b0c728d108ea"
+  },
+  "reviewed_head": "a1169942d88efb96f442256847bf936844b32b09",
+  "commits": [
+    {
+      "sha": "e6d05b6772ede8b75198122a2eb89dbf509249e7",
+      "subject": "fix(advice): remove roll explanations from notifications"
+    },
+    {
+      "sha": "dd203ffc0653d050c39bff26a6ec5a49b7bf9c11",
+      "subject": "fix(advice): remove roll explanations from notifications (#1014)"
+    },
+    {
+      "sha": "a949a6144f54f01f073907ecf6423300d8db807e",
+      "subject": "perf(upgrade): reuse dependency venvs and retain bounded caches (#1015)"
+    },
+    {
+      "sha": "0a95fc7cc7178c6351978401d316aae73e45aa52",
+      "subject": "fix(advice): drop repeated reference labels from roll details"
+    },
+    {
+      "sha": "f618429c9ec0bfdf1565221b8bec685efdb2c17a",
+      "subject": "chore(advice): sync main before merging roll copy"
+    },
+    {
+      "sha": "a1169942d88efb96f442256847bf936844b32b09",
+      "subject": "fix(advice): remove repeated reference labels from roll notifications (#1016)"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "精简 Covered Call 上滚和 Short Put 下移通知中的每股、双腿费用及收益口径解释性括号，CLI 保留扣费与收益口径说明，移仓净收取金额固定显示两位小数。（#1014）。",
+      "commits": [
+        "e6d05b6772ede8b75198122a2eb89dbf509249e7",
+        "dd203ffc0653d050c39bff26a6ec5a49b7bf9c11"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "移仓通知中的合约、报价、净收取和收益率详情直接成行展示，去掉重复的“参考｜”前缀，覆盖定时报告、候选提醒、恢复补报和文本回退。（#1016）。",
+      "commits": [
+        "0a95fc7cc7178c6351978401d316aae73e45aa52",
+        "a1169942d88efb96f442256847bf936844b32b09"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "源码升级的共享 venv 依赖哈希改为基于依赖声明及其引用链，保留插件选择、Python 与平台等环境绑定；插件按源码内容及安装回执校验，匹配时跳过重装或复用上一 release 的已验证文件。新哈希格式首次使用需重建缓存，从新版发起的后续升级使用新逻辑。（#1015）。",
+      "commits": [
+        "a949a6144f54f01f073907ecf6423300d8db807e"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "成功升级后按配置清理共享 venv 缓存，默认保留当前缓存及最近两个其它缓存，并保护保留 release 仍引用的环境；升级状态记录清理计划、删除和保留结果。（#1015）。",
+      "commits": [
+        "a949a6144f54f01f073907ecf6423300d8db807e"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复移仓通知在可选合约代码缺失时留下空括号的问题，保留已有合约名称与建议内容。（#1014）。",
+      "commits": [
+        "e6d05b6772ede8b75198122a2eb89dbf509249e7",
+        "dd203ffc0653d050c39bff26a6ec5a49b7bf9c11"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "f618429c9ec0bfdf1565221b8bec685efdb2c17a",
+      "reason": "PR #1016 合并前同步 main 的纯合并提交，没有独立的用户或运营行为变化；实际变更已由 #1014、#1015、#1016 对应条目覆盖。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "e6d05b6772ede8b75198122a2eb89dbf509249e7",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1014"
+      ]
+    },
+    {
+      "commit": "0a95fc7cc7178c6351978401d316aae73e45aa52",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1016"
+      ]
+    },
+    {
+      "commit": "f618429c9ec0bfdf1565221b8bec685efdb2c17a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1016"
+      ]
+    },
+    {
+      "commit": "a1169942d88efb96f442256847bf936844b32b09",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1016"
+      ]
+    },
+    {
+      "commit": "dd203ffc0653d050c39bff26a6ec5a49b7bf9c11",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1014"
+      ]
+    },
+    {
+      "commit": "a949a6144f54f01f073907ecf6423300d8db807e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1015"
+      ]
+    }
+  ]
+}
