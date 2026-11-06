@@ -1,0 +1,157 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.19",
+  "base": {
+    "tag": "v4.6.18",
+    "commit": "1c3f95eb217191d3a395207482a0b37db663cd26"
+  },
+  "reviewed_head": "b9fa1d23df6b746a0737e67b91edef7313715543",
+  "commits": [
+    {
+      "sha": "15b546aeed5562b852be9968a2d4dbd40918e619",
+      "subject": "fix(notifications): fit complete cards and freeze display evidence"
+    },
+    {
+      "sha": "f187311975361704ad31d8f9aff7276ce7e4d898",
+      "subject": "test(notifications): guard unified brief selection entrypoint"
+    },
+    {
+      "sha": "f2cf48a028bedd5bb9b02afb1140f58ba805f49d",
+      "subject": "fix(notifications): preserve complete cards and display evidence (#1025)"
+    },
+    {
+      "sha": "bf1593e7980589fd7fc683b5d92c3a9ff293c689",
+      "subject": "docs(agents): define one-time release and upgrade ticket"
+    },
+    {
+      "sha": "1ee4f6f566db22d55be545362cefee8907006431",
+      "subject": "docs(agents): merge release and upgrade ticket (#1027)"
+    },
+    {
+      "sha": "44933f738a7262876bd6121de5a82e0a1091287e",
+      "subject": "fix(notifications): prioritize daily brief actions within account budget"
+    },
+    {
+      "sha": "c0196a5265218540f3163271bdfc29fb8841923f",
+      "subject": "fix(notifications): retain bounded Wheel evidence gap summaries"
+    },
+    {
+      "sha": "58e576b0010a8faedb33f455a9882d5eb5e4f0f6",
+      "subject": "fix(notifications): merge daily brief account selection plan (#1026)"
+    },
+    {
+      "sha": "06f4adde448265fba91f778ec8cd2a82e37bd159",
+      "subject": "fix(required-data): retain observed ranges on partial expirations"
+    },
+    {
+      "sha": "b895f19ea090999648320819ff8e30f0e3696345",
+      "subject": "fix(required-data): preserve complete position advice readers"
+    },
+    {
+      "sha": "116087ca1235a8930bca3132abe11d9f8051aadf",
+      "subject": "test(required-data): verify partial ranges with brief display budgets"
+    },
+    {
+      "sha": "b9fa1d23df6b746a0737e67b91edef7313715543",
+      "subject": "fix(required-data): retain observed ranges on partial expirations (#1021)"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "简报按已有持仓平仓／移仓、可执行开仓、提醒的顺序分配展示名额；省略的持仓列出标的与合约，Wheel 状态卡被省略时仍保留限量的证据缺口摘要。（#1026）。",
+      "commits": [
+        "44933f738a7262876bd6121de5a82e0a1091287e",
+        "c0196a5265218540f3163271bdfc29fb8841923f",
+        "58e576b0010a8faedb33f455a9882d5eb5e4f0f6"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "简报展示额度改用 `notifications.daily_brief.max_items_per_account`，同一账户、同一市场各部分共享额度，默认 5，支持整数 0–20；0 仅取消账户层上限。旧 `max_actions_per_priority` 已弃用且不再分配名额，需更新 authoring 配置并重新生成运行快照。（#1026）。",
+      "commits": [
+        "44933f738a7262876bd6121de5a82e0a1091287e",
+        "58e576b0010a8faedb33f455a9882d5eb5e4f0f6"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "required-data 部分覆盖的到期日按真实窗口交集保留合约参与评估，候选、简报及平仓／移仓结果携带覆盖范围与缺口；部分排名仅比较已观测合约，不再把可用部分日整日排除，也不声称覆盖完整。（#1021）。",
+      "commits": [
+        "06f4adde448265fba91f778ec8cd2a82e37bd159",
+        "b895f19ea090999648320819ff8e30f0e3696345",
+        "116087ca1235a8930bca3132abe11d9f8051aadf",
+        "b9fa1d23df6b746a0737e67b91edef7313715543"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "飞书简报按卡片及备用正文的实际发送预算整卡裁减，依据最终展示结果记录候选通知状态；未展示的移仓保留后续提醒资格，失败重试复用封存正文、卡片和展示证据。（#1025）。",
+      "commits": [
+        "15b546aeed5562b852be9968a2d4dbd40918e619",
+        "f187311975361704ad31d8f9aff7276ce7e4d898",
+        "f2cf48a028bedd5bb9b02afb1140f58ba805f49d"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "bf1593e7980589fd7fc683b5d92c3a9ff293c689",
+      "reason": "仅更新 AGENTS.md 中一次发布与远端升级任务的授权和回读要求；未修改运行代码、用户配置或产品行为。"
+    },
+    {
+      "commit": "1ee4f6f566db22d55be545362cefee8907006431",
+      "reason": "合并仅修改 AGENTS.md 的交付授权说明，不增加运行时功能或远端升级动作。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "15b546aeed5562b852be9968a2d4dbd40918e619",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1025"]
+    },
+    {
+      "commit": "f187311975361704ad31d8f9aff7276ce7e4d898",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1025"]
+    },
+    {
+      "commit": "f2cf48a028bedd5bb9b02afb1140f58ba805f49d",
+      "references": ["https://github.com/liuxie066/options-monitor/pull/1025"]
+    },
+    {
+      "commit": "bf1593e7980589fd7fc683b5d92c3a9ff293c689",
+      "references": ["AGENTS.md#release-and-upgrade-ticket", "https://github.com/liuxie066/options-monitor/pull/1027"]
+    },
+    {
+      "commit": "1ee4f6f566db22d55be545362cefee8907006431",
+      "references": ["AGENTS.md#release-and-upgrade-ticket", "https://github.com/liuxie066/options-monitor/pull/1027"]
+    },
+    {
+      "commit": "44933f738a7262876bd6121de5a82e0a1091287e",
+      "references": ["docs/NOTIFICATION_BRIEF_SELECTION.md", "https://github.com/liuxie066/options-monitor/pull/1026"]
+    },
+    {
+      "commit": "c0196a5265218540f3163271bdfc29fb8841923f",
+      "references": ["docs/NOTIFICATION_BRIEF_SELECTION.md", "https://github.com/liuxie066/options-monitor/pull/1026"]
+    },
+    {
+      "commit": "58e576b0010a8faedb33f455a9882d5eb5e4f0f6",
+      "references": ["docs/NOTIFICATION_BRIEF_SELECTION.md", "https://github.com/liuxie066/options-monitor/pull/1026"]
+    },
+    {
+      "commit": "06f4adde448265fba91f778ec8cd2a82e37bd159",
+      "references": ["docs/CLOSE_ADVICE_CONTRACT.md", "docs/REQUIRED_DATA_STORAGE_DESIGN.md", "https://github.com/liuxie066/options-monitor/pull/1021"]
+    },
+    {
+      "commit": "b895f19ea090999648320819ff8e30f0e3696345",
+      "references": ["docs/CLOSE_ADVICE_CONTRACT.md", "https://github.com/liuxie066/options-monitor/pull/1021"]
+    },
+    {
+      "commit": "116087ca1235a8930bca3132abe11d9f8051aadf",
+      "references": ["docs/CLOSE_ADVICE_CONTRACT.md", "https://github.com/liuxie066/options-monitor/pull/1021"]
+    },
+    {
+      "commit": "b9fa1d23df6b746a0737e67b91edef7313715543",
+      "references": ["docs/CLOSE_ADVICE_CONTRACT.md", "docs/REQUIRED_DATA_STORAGE_DESIGN.md", "https://github.com/liuxie066/options-monitor/pull/1021"]
+    }
+  ]
+}
