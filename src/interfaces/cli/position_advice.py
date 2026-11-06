@@ -159,7 +159,7 @@ def render_short_put_roll(result: dict[str, Any]) -> str:
             f"降幅 {_value(candidate.get('strike_drop_pct'), percent=True)} | "
             f"新仓价外 {_value(candidate.get('new_otm_pct'), percent=True)} | "
             f"到期 {_value(candidate.get('expiration'))} | 延后 {_value(candidate.get('extension_days'))} 天",
-            f"   净增现金 {_roll_money(candidate.get('net_credit'), currency)} | "
+            f"   净增现金·双腿扣费后 {_roll_money(candidate.get('net_credit'), currency)} | "
             f"净增现金年化 {_value(candidate.get('incremental_annualized_return'), percent=True)} | "
             f"新仓到期归零最高年化 {_value(candidate.get('new_remaining_max_annualized_return'), percent=True)} | "
             f"较旧仓变化 {change_label}",
@@ -174,6 +174,8 @@ def render_short_put_roll(result: dict[str, Any]) -> str:
         ])
         if candidate.get("evidence"):
             lines.append(f"   报价与证据：{_roll_diagnostic(candidate['evidence'])}")
+    if candidates:
+        lines.append("移仓收益口径：净增现金期间回报 = 净现金流 ÷ 新仓担保资金；年化按新到期剩余期限折算。")
     lines.append(f"展示 {_value(result.get('displayed'))}；省略 {_value(result.get('omitted'))}（limit 仅限制展示）。")
     lines.append("单腿 bid/ask 现金估算：旧腿按 ask 买回、新腿按 bid 卖出并分别扣费；不是保证可成交的组合报价。")
     lines.append("净增现金是移仓现金流，不等于交易盈利；到期归零最高年化以期权到期归零为假设，不是期望收益。")
@@ -215,7 +217,7 @@ def render_covered_call_roll(result: dict[str, Any]) -> str:
         lines.extend([
             f"{index}. {_value(row.get('contract'))}；{labels.get(row.get('recommendation'), _value(row.get('recommendation')))}；"
             f"strike {_value(row.get('strike'))}；到期 {_value(row.get('expiration'))}；延后 {_value(row.get('extension_days'))} 天",
-            f"   扣费净现金 {_roll_money(row.get('net_credit'), currency)}；净支出 {_roll_money(row.get('net_debit'), currency)}；"
+            f"   移仓净收取·双腿扣费后 {_roll_money(row.get('net_credit'), currency)}；净支出 {_roll_money(row.get('net_debit'), currency)}；"
             f"每股行权价提升 {_roll_money(row.get('strike_increase'), currency)}；"
             f"交股价提升总额 {_roll_money(row.get('assignment_proceeds_uplift'), currency)}",
             f"   条件性交股净改善 {_roll_money(row.get('assignment_net_improvement'), currency)}；"
@@ -228,6 +230,8 @@ def render_covered_call_roll(result: dict[str, Any]) -> str:
         ])
         if row.get("evidence"):
             lines.append(f"   报价与证据：{_roll_diagnostic(row['evidence'])}")
+    if result.get("candidates"):
+        lines.append("移仓收益口径：净增现金期间回报 = 净现金流 ÷ 股票现值；年化按新到期剩余期限折算。")
     lines.append(f"展示 {_value(result.get('displayed'))}；省略 {_value(result.get('omitted'))}（limit 仅限制展示）。")
     lines.append("仅推荐扣费净现金严格大于零的上滚；零现金及净支出均排除（non_positive_net_credit）。")
     lines.append("单腿旧 ask / 新 bid 扣费估算，不保证组合成交或消除提前指派。")

@@ -68,6 +68,14 @@ def roll_brief(*, base: Path, run_id: str = "roll", rows: list[dict] | None = No
     return brief
 
 
+def _assert_roll_explanations_absent(text: str) -> None:
+    for explanation in (
+        "每股", "含双腿费用", "双腿扣费后", "移仓收益口径", "收益分母",
+        "净现金流 ÷", "新仓担保资金", "新到期剩余期限",
+    ):
+        assert explanation not in text
+
+
 def patch_roll_assembler(monkeypatch, *, rows=None):
     def assemble(**kw):
         brief = roll_brief(base=kw["base"], run_id=kw["run_id"], rows=rows, account=kw["account"])
@@ -127,8 +135,75 @@ def test_roll_concise_text_card_parity_and_first_target(tmp_path: Path, option_t
         assert "平仓 ask USD 1" in text and "开仓 bid USD 2" in text
         assert f"USD {delta}" in text
         assert "净收取" in text and "95" in text
-        assert "增量期收益率" in text and "净现金流 ÷" in text
+        assert "增量期收益率" in text and "增量年化" in text
+        _assert_roll_explanations_absent(text)
         assert "预计锁定收益" not in text
+
+
+@pytest.mark.parametrize("render", [
+    renderer.render_query_brief, renderer.render_full_brief, renderer.render_fixed_report,
+    renderer.render_fixed_report_text, renderer.render_fixed_report_card_markdown,
+    renderer.render_candidate_alert, renderer.render_candidate_alert_text,
+    renderer.render_candidate_alert_card_markdown, renderer.render_delta_brief,
+    renderer.render_recovery_brief, renderer.render_daily_brief_lifecycle,
+])
+@pytest.mark.parametrize("option_type", ["put", "call"])
+def test_roll_notifications_omit_explanations_and_preserve_values(
+    tmp_path: Path, render, option_type: str,
+) -> None:
+    rows = [position_row(lot=f"lot-{i}", option_type=option_type, credit=24.3734) for i in range(2)]
+    for row in rows:
+        row.pop("contract_symbol")
+        row["roll_advice"]["position"].pop("contract_symbol")
+        target = row["roll_advice"]["candidates"][0]
+        target.update(new_capital_basis=7900 if option_type == "put" else 10000,
+            incremental_period_return=0.003, incremental_annualized_return=0.039)
+        target["evidence"].update(old_ask=1.81234, new_bid=2.11234)
+    brief = roll_brief(base=tmp_path, rows=rows)
+    if render.__name__.startswith("render_candidate_alert"):
+        message = render(brief, daily_brief_roll_notification_identities(brief))
+    elif render in (renderer.render_delta_brief, renderer.render_recovery_brief):
+        message = render(brief, {})
+    elif render is renderer.render_daily_brief_lifecycle:
+        message = render({"brief": brief, "delivery_kind": "full"})
+    else:
+        message = render(brief)
+
+    assert "平仓 ask USD 1.81234；开仓 bid USD 2.11234" in message
+    assert "移仓净收取：USD 24.37" in message
+    assert "24.3734" not in message
+    assert "增量期收益率 0.3%；增量年化 3.9%" in message
+    _assert_roll_explanations_absent(message)
+    for removed in ("()", "（）"):
+        assert removed not in message
+
+
+@pytest.mark.parametrize("old_code", [None, "", "   ", "OLD_OPTION_CONTRACT"])
+@pytest.mark.parametrize("currency", ["USD", "HKD"])
+def test_roll_optional_contract_code_and_total_precision(tmp_path: Path, old_code, currency: str) -> None:
+    row = position_row(option_type="put", credit=1234.5678)
+    row["contract_symbol"] = old_code
+    row["roll_advice"]["position"].update(contract_symbol=old_code, currency=currency)
+    brief = roll_brief(base=tmp_path, rows=[row])
+    message = renderer.render_fixed_report_card_markdown(brief)
+    contract_line = next(line for line in message.splitlines() if "旧仓买回：" in line)
+    old_leg = contract_line.split("；新仓卖出：", 1)[0]
+    assert "()" not in contract_line and "（）" not in contract_line
+    if old_code and old_code.strip():
+        assert f"（{old_code}）" in old_leg
+    else:
+        assert "Put（" not in old_leg
+    assert f"（{row['roll_advice']['candidates'][0]['contract']}）" in contract_line
+    assert f"移仓净收取：{currency} 1234.57" in message
+    assert f"平仓 ask {currency} 1；开仓 bid {currency} 2" in message
+    _assert_roll_explanations_absent(message)
+
+
+def test_roll_return_note_only_appears_with_visible_roll(tmp_path: Path) -> None:
+    brief = roll_brief(base=tmp_path, rows=[{**position_row(), "roll_advice": None}])
+    for render in (renderer.render_query_brief, renderer.render_fixed_report_text,
+                   renderer.render_fixed_report_card_markdown):
+        assert "移仓收益口径" not in render(brief)
 
 
 def test_debit_cc_is_not_revived_as_an_actionable_roll(tmp_path: Path) -> None:
@@ -316,6 +391,8 @@ def test_final_card_and_fallback_ack_only_the_same_visible_rolls(
         envelope = next(iter(day["fixed_reports"].values()))["rendered_transport"]
         acknowledged = set(day["alerted_candidates"]) & all_rolls
     primary, fallback = feishu_notification_visible_markdown(envelope)
+    for body in (primary, fallback, envelope["text"]):
+        _assert_roll_explanations_absent(body)
     primary_rolls, fallback_rolls = [renderer.select_rendered_position_roll_identities(
         brief, delivery_kind="fixed_report", limits=limits, rendered_message=body)
         for body in (primary, fallback)]
