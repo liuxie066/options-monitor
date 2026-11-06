@@ -10,6 +10,7 @@ from src.application.candidate_snapshot_contract import (
     CandidateSnapshotContractError,
     assert_current_candidate_artifact_boundary,
     candidate_run_mode_fields,
+    required_data_coverage_fields,
     sha256_text,
     validate_candidate_run_mode,
 )
@@ -88,6 +89,7 @@ def publish_strategy_scan_status(
     source_outcome: str | None = None,
     reason_code: str | None = None,
     direction: str | None = None,
+    required_data_coverage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     status_norm = str(status or "").strip().lower()
     if status_norm not in _TERMINAL:
@@ -145,6 +147,9 @@ def publish_strategy_scan_status(
         payload["reason_code"] = reason_code_norm
     if direction_value:
         payload["direction"] = direction_value
+    if required_data_coverage is not None:
+        payload["required_data_coverage"] = dict(required_data_coverage)
+    _validate_required_data_coverage(payload)
     payload["content_sha256"] = sha256_bytes(_canonical_index_content(payload))
     path = strategy_status_path(
         report_dir=root,
@@ -791,6 +796,7 @@ def _validate_current_status_core(
             "receipt_relpath",
             "source_outcome",
             "reason_code",
+            "required_data_coverage",
             "content_sha256",
         }
     }
@@ -799,7 +805,20 @@ def _validate_current_status_core(
     return out
 
 
+def _validate_required_data_coverage(payload: Mapping[str, Any]) -> None:
+    try:
+        fields = required_data_coverage_fields(payload)
+    except CandidateSnapshotContractError as exc:
+        raise StrategyScanStatusError(str(exc)) from exc
+    if fields and (
+        (payload.get("status") == "completed" and payload.get("reason") != "partial_data")
+        or payload.get("source_outcome")
+    ):
+        raise StrategyScanStatusError("partial required-data coverage requires partial scan evidence")
+
+
 def _validate_status_facts(payload: Mapping[str, Any], *, label: str) -> None:
+    _validate_required_data_coverage(payload)
     status = str(payload.get("status") or "")
     if status not in _TERMINAL:
         raise StrategyScanStatusError(f"{label} status is not terminal")

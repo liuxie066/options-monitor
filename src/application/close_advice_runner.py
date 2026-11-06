@@ -1083,6 +1083,7 @@ def _load_frozen_required_data_quotes(
     *,
     csv_bytes_by_symbol: dict[str, bytes],
     base_dir: Path,
+    provenance_by_symbol: dict[str, dict[str, Any]] | None = None,
 ) -> dict[tuple[str, str, str, str], dict[str, Any]]:
     quotes: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for symbol in sorted(csv_bytes_by_symbol):
@@ -1097,6 +1098,11 @@ def _load_frozen_required_data_quotes(
             raise RequiredDataSnapshotError(
                 f"{symbol} sealed required-data CSV is unreadable"
             ) from exc
+        coverage = ((provenance_by_symbol or {}).get(symbol) or {}).get("required_data_coverage")
+        if isinstance(coverage, dict) and coverage.get("status") == "partial":
+            from src.application.required_data_coverage import covered_required_data_frame
+
+            frame = covered_required_data_frame(frame, coverage)
         frame = frame.astype(object).where(pd.notna(frame), None)
         for row in frame.to_dict("records"):
             key = _quote_key(
@@ -1353,6 +1359,7 @@ def run_close_advice(
         quotes = _load_frozen_required_data_quotes(
             csv_bytes_by_symbol=frozen_csv_bytes_by_symbol,
             base_dir=Path(base_dir),
+            provenance_by_symbol=frozen_provenance,
         )
     except RequiredDataSnapshotError as exc:
         return _snapshot_integrity_failure_result(

@@ -269,6 +269,8 @@ def _publish_opening_manifest(base: Path, payload: dict) -> dict:
             "snapshot_id": scope.get("quote_snapshot_id"),
             "receipt_relpath": scope.get("quote_receipt_relpath"),
         }
+        if "required_data_coverage" in scope:
+            status_kwargs["required_data_coverage"] = scope["required_data_coverage"]
         if status == "completed":
             status_kwargs["candidate_count"] = candidate_count
             if reason in SUCCESS_EMPTY_REASON_CODES:
@@ -1082,6 +1084,54 @@ def test_market_closed_is_sealed_as_explicit_unavailable_state(
         row["strategy_mode"]: row["strategy_status"]
         for row in payload["strategy_results"]
     } == {"call": "not_applicable", "put": "data_unavailable"}
+
+
+def test_partial_expiration_coverage_survives_sealing_explanations_and_brief(tmp_path: Path) -> None:
+    from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
+    from src.application.daily_decision_brief_service import _append_strategy_status_gaps
+    from src.application.pipeline_watchlist import _index_owner_statuses
+
+    coverage = {
+        "status": "partial", "reason_code": "required_data_partial_coverage",
+        "covered_expirations": ["2026-09-18"], "incomplete_expirations": ["2026-09-25"],
+        "per_expiration": [
+            {"expiration": "2026-09-18", "status": "covered", "missing_requirements": []},
+            {"expiration": "2026-09-25", "status": "incomplete", "missing_requirements": [
+                {"request_index": 0, "option_type": "put", "missing": ["upper_bound"]}
+            ]},
+        ],
+    }
+    candidate = _candidate(contract_symbol="NVDA260918P00090000", period_return=0.04)
+    payload = _seal_snapshot(
+        tmp_path, run_id="run-1", final_candidates={"put": [candidate]},
+        scan_statuses=[{**_scan_status("NVDA", "put", "completed", reason="partial_data"),
+                        "required_data_coverage": coverage}],
+    )
+    assert payload["opening_status"] == "candidates_found"
+    assert payload["strategy_results"][0]["strategy_status"] == "candidates_found"
+    assert load_opening_candidate_snapshot(base=tmp_path, run_id="run-1", account="lx") == payload
+    assert candidate_universe_summary(payload)["affected_scopes"][0]["required_data_coverage"] == coverage
+    _publish_opening_manifest(tmp_path, payload)
+    bundle = load_candidate_snapshot_bundle(base=tmp_path, run_id="run-1", account="lx")
+    index = bundle["status_index"]
+    assert _index_owner_statuses(index)["opening"][0]["required_data_coverage"] == coverage
+
+    explained, _warnings, _meta = _explain_candidates(tmp_path, run_id="run-1", function="sell_put")
+    function = explained["functions"][0]
+    assert function["status"] == "accepted"
+    assert function["data_status"] == "incomplete"
+    assert function["required_data_coverage"][0]["incomplete_expirations"] == ["2026-09-25"]
+    assert explained["summary"][0]["data_status"] == "incomplete"
+    ranking, _warnings, _meta = candidate_rank_explain_tool(
+        {"account": "lx", "run_id": "run-1", "mode": "put"}, repo_base=lambda: tmp_path,
+        resolve_output_root=lambda _value: tmp_path, mask_path=lambda value: str(value),
+    )
+    assert ranking["groups"][0]["data_status"] == "incomplete"
+    assert ranking["groups"][0]["row_count"] == 1
+    gaps = []
+    _append_strategy_status_gaps(index, run_id="run-1", account="lx", market="US", data_gaps=gaps)
+    assert gaps[0]["reason_code"] == "required_data_partial_coverage"
+    assert gaps[0]["required_data_coverage"] == coverage
 
 
 def test_partial_scope_is_explicit_but_optional_metrics_do_not_make_partial(

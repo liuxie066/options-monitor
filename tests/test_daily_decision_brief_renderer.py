@@ -1616,6 +1616,27 @@ def test_fixed_report_card_reminds_only_for_confirmed_source_errors() -> None:
     assert "quote_fetch_timeout" not in message
 
 
+@pytest.mark.parametrize("render", [_render_card, render_fixed_report, render_fixed_report_text])
+def test_partial_expiration_coverage_is_visible_with_healthy_candidates(render) -> None:
+    brief = _card_brief()
+    brief["data_gaps"].append({
+        **_strategy_partial_data_gap("NVDA"),
+        "reason_code": "required_data_partial_coverage",
+        "required_data_coverage": {
+            "status": "partial", "reason_code": "required_data_partial_coverage",
+            "covered_expirations": ["2026-11-13"], "incomplete_expirations": ["2026-11-20"],
+            "per_expiration": [{"expiration": "2026-11-20", "status": "incomplete", "missing_requirements": [
+                {"request_index": 0, "option_type": "put", "missing": ["upper_bound"]}
+            ]}],
+        },
+    })
+    message = render(brief)
+    assert "已跳过到期日 2026-11-20" in message
+    assert "仅评估完整到期日 2026-11-13" in message
+    assert "Put 缺行权价上界" in message
+    assert "MSFT" in message
+
+
 def test_fixed_report_card_keeps_specific_hard_evidence_gap() -> None:
     brief = _card_brief()
     brief["data_gaps"].extend(

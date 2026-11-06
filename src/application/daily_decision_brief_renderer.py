@@ -2111,6 +2111,9 @@ def _fixed_report_error_reminders(
             )
             continue
         if reason == "opening_candidate_strategy_partial_data":
+            if _lower(item.get("reason_code")) == "required_data_partial_coverage":
+                reminders.append(_required_data_coverage_reminder(item))
+                continue
             if _lower(item.get("reason_code")) == "option_close_settlement_pending":
                 continue
             if _lower(item.get("reason_code")) == "term_matched_rv_unavailable":
@@ -2184,6 +2187,27 @@ def _candidate_empty_summary_for_failures(
     return f"本轮暂无符合条件的候选；{subject} 扫描失败。"
 
 
+def _required_data_coverage_reminder(item: Mapping[str, Any]) -> str:
+    symbol = _upper(item.get("symbol")) or "相关标的"
+    family = _STRATEGY_LABELS.get(_lower(item.get("strategy_family")), "候选")
+    coverage = item.get("required_data_coverage") or {}
+    skipped = "、".join(str(value) for value in coverage.get("incomplete_expirations") or [])
+    covered = "、".join(str(value) for value in coverage.get("covered_expirations") or [])
+    labels = {"lower_bound": "行权价下界", "upper_bound": "行权价上界",
+              "strike_window": "行权价窗口", "exact_strike": "指定行权价", "rows": "合约行"}
+    details = []
+    for expiration in coverage.get("per_expiration") or []:
+        for requirement in expiration.get("missing_requirements") or []:
+            side = _OPTION_LABELS.get(requirement.get("option_type"), "期权")
+            missing = "、".join(labels.get(value, str(value)) for value in requirement.get("missing") or [])
+            strikes = requirement.get("missing_exact_strikes") or []
+            if strikes:
+                missing += "（" + "、".join(f"{value:g}" for value in strikes) + "）"
+            details.append(f"{expiration.get('expiration')} {side} 缺{missing}")
+    detail = f"；{'；'.join(details)}" if details else ""
+    return f"{symbol} {family}：期权数据不完整，已跳过到期日 {skipped}；仅评估完整到期日 {covered}{detail}"
+
+
 def _strategy_data_gap_reminders(
     brief: Mapping[str, Any],
 ) -> list[str]:
@@ -2237,6 +2261,10 @@ def _strategy_data_gap_reminders(
                 f"{symbol} {family}：局部告警证据不一致，已忽略该提示（不影响其他可靠结果）"
             )
         elif reason == "opening_candidate_strategy_partial_data":
+            if _lower(item.get("reason_code")) == "required_data_partial_coverage":
+                reminders.append(_required_data_coverage_reminder(item))
+                seen.add(identity)
+                continue
             if _lower(item.get("reason_code")) == "option_close_settlement_pending":
                 continue
             detail = _PARTIAL_DATA_REASON_TEXT.get(

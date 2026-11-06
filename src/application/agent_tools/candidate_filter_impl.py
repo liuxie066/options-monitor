@@ -504,6 +504,7 @@ def _summarize_function(
     return {
         "function": function_name,
         "status": _function_status(rows),
+        **_coverage_summary(rows),
         "reason_counts": dict(reason_counts),
         "reason_labels": {
             reason: candidate_rule_label(reason) for reason in sorted(reason_counts)
@@ -519,6 +520,14 @@ def _summarize_function(
         ],
         "events": events,
     }
+
+
+def _coverage_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    coverage = [
+        {"symbol": row.get("symbol"), **dict(row["required_data_coverage"])}
+        for row in rows if row.get("required_data_coverage")
+    ]
+    return {"data_status": "incomplete", "required_data_coverage": coverage} if coverage else {}
 
 
 def _function_status(rows: list[dict[str, Any]]) -> str:
@@ -570,6 +579,8 @@ def _event(
         "candidate_id": row.get("candidate_id"),
         "decision_hash": row.get("decision_hash"),
         "normalized_input_hash": row.get("normalized_input_hash"),
+        **({"required_data_coverage": row["required_data_coverage"]}
+           if row.get("required_data_coverage") else {}),
         "evidence_path": "state/opening_candidate_snapshot.json",
     }
 
@@ -588,6 +599,7 @@ def _model_summary(function: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
     examples.sort(key=lambda item: (-counts[item["rule"]], item["rule"], str(item["contract_symbol"] or "")))
     return {
         "function": function, "status": _function_status(rows),
+        **_coverage_summary(rows),
         "accepted_count": sum(row.get("status") == "accepted" for row in contracts),
         "rejected_count": sum(row.get("status") == "rejected" for row in contracts),
         "rules": [{"rule": rule, "label": candidate_rule_label(rule), "count": counts[rule]} for rule in rules[:8]],

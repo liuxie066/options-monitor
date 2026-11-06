@@ -36,7 +36,14 @@ class RequiredDataCoverageResult:
 
     @property
     def accepted(self) -> bool:
-        return self.status in {"success", "success_empty"}
+        return self.status in {"success", "success_empty", "partial"}
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "reason_code": self.reason_code,
+            **self.details,
+        }
 
 
 @dataclass(frozen=True)
@@ -135,8 +142,9 @@ def _evaluate_required_data_rows(
     fetch_plan: Mapping[str, Any],
     *,
     scope_evidence: Mapping[tuple[int, str, str], frozenset[str]] | None,
+    expiration_results: dict[str, dict[str, Any]],
 ) -> tuple[str | None, bool]:
-    """Validate plan rows once and return ``(reason_code, is_empty)``."""
+    """Validate identities globally and accumulate coverage gaps per expiration."""
 
     if not isinstance(fetch_plan, Mapping):
         return "internal_contract_error", False
@@ -285,11 +293,13 @@ def _evaluate_required_data_rows(
                 return "internal_contract_error", False
             effective_min, effective_max = effective_bounds
             side_df = _filter_option_type(df, option_type)
-            if scope_evidence is None and (
-                side_df.empty or "expiration" not in side_df.columns
-            ):
+            if not side_df.empty and "expiration" not in side_df.columns:
                 return "invalid_row_identity", False
             for expiration in requested_expirations:
+                expiration_result = expiration_results.setdefault(
+                    expiration,
+                    {"expiration": expiration, "status": "covered", "missing_requirements": []},
+                )
                 proven_codes = (
                     scope_evidence.get((request_index, option_type, expiration))
                     if scope_evidence is not None
@@ -315,14 +325,25 @@ def _evaluate_required_data_rows(
                             .isin(proven_codes)
                         ].copy()
                 else:
-                    exp_df = side_df[
-                        side_df["expiration"].astype(str) == expiration
-                    ].copy()
+                    exp_df = (
+                        side_df[side_df["expiration"].astype(str) == expiration].copy()
+                        if "expiration" in side_df.columns else side_df.iloc[:0].copy()
+                    )
                 if exp_df.empty:
-                    if proven_codes != frozenset():
-                        return "invalid_row_identity", False
-                    if exact_strikes_by_expiration.get(expiration):
-                        return "required_contract_missing", False
+                    required_exact = exact_strikes_by_expiration.get(expiration, [])
+                    if proven_codes == frozenset() and not required_exact:
+                        # Keep proven empty scopes distinct from unproven missing rows.
+                        continue
+                    gap: dict[str, Any] = {
+                        "request_index": request_index,
+                        "option_type": option_type,
+                        "missing": ["rows"],
+                    }
+                    if required_exact:
+                        gap["missing"].append("exact_strike")
+                        gap["missing_exact_strikes"] = list(required_exact)
+                    expiration_result["missing_requirements"].append(gap)
+                    expiration_result["status"] = "missing"
                     continue
                 any_rows = True
                 if not _frame_dte_matches(
@@ -350,20 +371,27 @@ def _evaluate_required_data_rows(
                 ):
                     return "invalid_row_identity", False
                 # Complete scope proof can establish an empty base strategy window.
-                if proven_codes is None and not _strikes_cover_bounds(
-                    strikes=strikes,
-                    base_min=effective_min,
-                    base_max=effective_max,
-                ):
-                    return "invalid_row_identity", False
-                if not _strikes_cover_exact_requirements(
-                    strikes=strikes,
-                    required_strikes=exact_strikes_by_expiration.get(
-                        expiration,
-                        [],
-                    ),
-                ):
-                    return "required_contract_missing", False
+                missing = (
+                    _missing_strike_bounds(strikes, effective_min, effective_max)
+                    if proven_codes is None else []
+                )
+                missing_exact = [
+                    strike for strike in exact_strikes_by_expiration.get(expiration, [])
+                    if not _strikes_cover_exact_requirements(strikes=strikes, required_strikes=[strike])
+                ]
+                if missing_exact:
+                    missing.append("exact_strike")
+                if missing:
+                    gap = {
+                        "request_index": request_index,
+                        "option_type": option_type,
+                        "missing": missing,
+                    }
+                    if missing_exact:
+                        gap["missing_exact_strikes"] = missing_exact
+                    expiration_result["missing_requirements"].append(gap)
+                    if expiration_result["status"] != "missing":
+                        expiration_result["status"] = "incomplete"
 
     if active_request_count <= 0:
         return "internal_contract_error", False
@@ -409,10 +437,12 @@ def evaluate_required_data_frame_fetch_plan_debug(
             scope_validation.reason_code,
             warnings=scope_validation.warnings,
         )
+    expiration_results: dict[str, dict[str, Any]] = {}
     reason_code, is_empty = _evaluate_required_data_rows(
         df,
         fetch_plan,
         scope_evidence=scope_validation.resolved,
+        expiration_results=expiration_results,
     )
     if reason_code is not None:
         return _blocked_coverage(
@@ -425,17 +455,38 @@ def evaluate_required_data_frame_fetch_plan_debug(
             ),
             warnings=scope_validation.warnings,
         )
+    per_expiration = [expiration_results[key] for key in sorted(expiration_results)]
+    covered = [item["expiration"] for item in per_expiration if item["status"] == "covered"]
+    incomplete = [item["expiration"] for item in per_expiration if item["status"] != "covered"]
+    details = {
+        "completion_unit": "request_option_type_expiration",
+        "covered_expirations": covered,
+        "incomplete_expirations": incomplete,
+        "per_expiration": per_expiration,
+    }
+    if incomplete and not covered:
+        only_exact_gaps = all(
+            gap["missing"] in (["exact_strike"], ["rows", "exact_strike"])
+            for item in per_expiration for gap in item["missing_requirements"]
+        )
+        return _blocked_coverage(
+            "required_contract_missing" if only_exact_gaps else "invalid_row_identity",
+            provider_coverage="partial",
+            warnings=scope_validation.warnings,
+            details=details,
+        )
+    partial = bool(incomplete)
     return RequiredDataCoverageResult(
-        status=("success_empty" if is_empty else "success"),
-        reason_code=None,
+        status="partial" if partial else ("success_empty" if is_empty else "success"),
+        reason_code="required_data_partial_coverage" if partial else None,
         provider_coverage=(
-            "complete" if scope_validation.resolved is not None else "unproven"
+            "partial" if partial else ("complete" if scope_validation.resolved is not None else "unproven")
         ),
         internal_integrity="valid",
         freshness=_freshness_evidence_strength(option_chain_evidence),
-        strategy_readiness=("empty" if is_empty else "ready"),
+        strategy_readiness="partial" if partial else ("empty" if is_empty else "ready"),
         warnings=scope_validation.warnings,
-        details={"completion_unit": "request_option_type_expiration"},
+        details=details,
     )
 
 
@@ -445,6 +496,7 @@ def _blocked_coverage(
     provider_coverage: str | None = None,
     strategy_readiness: str = "blocked",
     warnings: tuple[str, ...] = (),
+    details: Mapping[str, Any] | None = None,
 ) -> RequiredDataCoverageResult:
     if provider_coverage is None:
         provider_coverage = (
@@ -467,7 +519,7 @@ def _blocked_coverage(
         freshness=("stale" if reason_code == "stale_data" else "unproven"),
         strategy_readiness=strategy_readiness,
         warnings=warnings,
-        details={},
+        details=details or {},
     )
 
 
@@ -846,6 +898,41 @@ def required_data_frame_covers_strategy_bounds(
         ):
             return False
     return True
+
+
+def _missing_strike_bounds(
+    strikes: pd.Series, minimum: float | None, maximum: float | None,
+) -> list[str]:
+    if _strikes_cover_bounds(strikes=strikes, base_min=minimum, base_max=maximum):
+        return []
+    unique = sorted({float(value) for value in strikes.tolist()})
+    if not unique or any(not math.isfinite(value) or value <= 0 for value in unique):
+        return ["strike_window"]
+    if minimum is not None and maximum is not None and maximum > minimum:
+        tolerance = _strike_edge_tolerance(unique_strikes=unique, base_min=minimum, base_max=maximum)
+        return [
+            name for name, bound in (("lower_bound", minimum), ("upper_bound", maximum))
+            if min(abs(value - bound) for value in unique) > tolerance
+        ] or ["strike_window"]
+    if minimum is not None and max(unique) < minimum:
+        return ["lower_bound"]
+    if maximum is not None and min(unique) > maximum:
+        return ["upper_bound"]
+    return ["strike_window"]
+
+
+def covered_required_data_frame(
+    df: pd.DataFrame, coverage: RequiredDataCoverageResult | Mapping[str, Any] | None,
+) -> pd.DataFrame:
+    """Project consumer rows only; never change the receipt-bound source bytes."""
+    payload = coverage.to_dict() if isinstance(coverage, RequiredDataCoverageResult) else (coverage or {})
+    if payload.get("status") == "blocked":
+        return df.iloc[:0].copy()
+    if payload.get("status") != "partial":
+        return df
+    if "expiration" not in df.columns:
+        return df.iloc[:0].copy()
+    return df[df["expiration"].astype(str).isin(payload.get("covered_expirations", []))].copy()
 
 
 def _fetch_plan_trading_date(

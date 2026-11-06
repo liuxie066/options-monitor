@@ -65,7 +65,7 @@ REQUIRED_DATA_READY_ENTRY_FIELDS = frozenset({
     "required_data_csv_relpath",
     "source_outcome",
 })
-REQUIRED_DATA_READY_ENTRY_OPTIONAL_FIELDS = frozenset({"reason_code", "scan_blob_ref"})
+REQUIRED_DATA_READY_ENTRY_OPTIONAL_FIELDS = frozenset({"reason_code", "scan_blob_ref", "required_data_coverage"})
 _TERMINAL_STATUSES = frozenset({"complete", "partial", "failed"})
 
 
@@ -254,7 +254,11 @@ def seal_required_data_snapshot(
 
     ready = sum(1 for item in symbol_entries.values() if item.get("status") == "ready")
     failed = len(symbol_entries) - ready
-    if ready == len(symbol_entries) and symbol_entries:
+    has_partial_coverage = any(
+        (item.get("required_data_coverage") or {}).get("status") == "partial"
+        for item in symbol_entries.values()
+    )
+    if ready == len(symbol_entries) and symbol_entries and not has_partial_coverage:
         status = "complete"
     elif ready > 0:
         status = "partial"
@@ -870,7 +874,11 @@ def _validate_manifest_symbols(
             raise RequiredDataSnapshotError(
                 "required-data snapshot summary contradicts symbol entries"
             )
-    if ready_count == total and total:
+    has_partial_coverage = any(
+        (evidence.get("required_data_coverage") or {}).get("status") == "partial"
+        for evidence, _csv_bytes in resolved_entries.values()
+    )
+    if ready_count == total and total and not has_partial_coverage:
         expected_status = "complete"
     elif ready_count:
         expected_status = "partial"
@@ -1240,6 +1248,9 @@ def _ready_manifest_entry(
         entry["scan_blob_ref"] = scan_blob_ref
     if reason_code:
         entry["reason_code"] = reason_code
+    coverage = evidence.get("required_data_coverage")
+    if isinstance(coverage, Mapping) and coverage.get("status") == "partial":
+        entry["required_data_coverage"] = dict(coverage)
     return entry
 
 
@@ -1314,18 +1325,20 @@ def _validate_ready_entry(
         expected_fetch_contract=expected_contract,
         raw_json_bytes=raw_bytes,
     )
-    if read_source == "canonical_blob":
-        validate_required_data_quote_bytes(
-            raw_json_bytes=raw_bytes,
-            required_data_csv_bytes=csv_bytes,
-            expected_fetch_contract=contract,
-        )
-    else:
+    validated_meta = validate_required_data_quote_bytes(
+        raw_json_bytes=raw_bytes,
+        required_data_csv_bytes=csv_bytes,
+        expected_fetch_contract=contract,
+    )
+    if read_source != "canonical_blob":
         _validate_canonical_bundle_candidate(
             root=root,
             bundle=bundle,
             expected_fetch_contract=contract,
         )
+    derived_coverage = validated_meta.get("required_data_coverage")
+    if "required_data_coverage" in entry and entry["required_data_coverage"] != derived_coverage:
+        raise SourceReceiptError("required-data coverage differs from bound rows")
     source_outcome, reason_code = _validate_complete_required_data_bundle(
         bundle,
         raw_json_bytes=raw_bytes,
@@ -1373,6 +1386,7 @@ def _validate_ready_entry(
             ),
             "scan_blob_ref": scan_blob_ref,
             "read_source": read_source,
+            "required_data_coverage": validated_meta.get("required_data_coverage"),
         },
         csv_bytes,
     )

@@ -276,6 +276,112 @@ def _typed_plan(
     )
 
 
+def _two_expiration_frame(*, second_strikes: tuple[float, ...]) -> tuple[pd.DataFrame, dict[str, object]]:
+    second = "2026-08-28"
+    request = _window_request(
+        minimum=100.0, maximum=120.0, expirations=[EXPIRATION, second],
+        min_dte=20, max_dte=40,
+    )
+    rows = [
+        _row(expiration=expiration, dte=dte, strike=strike)
+        for expiration, dte, strikes in (
+            (EXPIRATION, 25, (100.0, 105.0, 110.0, 115.0, 120.0)),
+            (second, 32, second_strikes),
+        )
+        for strike in strikes
+    ]
+    return pd.DataFrame(rows), _plan(requests=[request])
+
+
+def test_one_incomplete_expiration_preserves_covered_dates_without_relaxing_edges() -> None:
+    # Per-date isolation replaces all-or-nothing failure; the edge rule stays strict.
+    frame, plan = _two_expiration_frame(second_strikes=(115.0, 120.0))
+    result = evaluate_required_data_frame_fetch_plan_debug(df=frame, fetch_plan=plan)
+    assert result.accepted and result.status == "partial"
+    assert result.reason_code == "required_data_partial_coverage"
+    assert result.provider_coverage == "partial"
+    assert result.details["covered_expirations"] == [EXPIRATION]
+    assert result.details["incomplete_expirations"] == ["2026-08-28"]
+    gap = result.details["per_expiration"][1]
+    assert gap["status"] == "incomplete"
+    assert gap["missing_requirements"][0]["missing"] == ["lower_bound"]
+
+
+def test_all_incomplete_expirations_still_fail_closed_with_gap_details() -> None:
+    frame, plan = _two_expiration_frame(second_strikes=(115.0, 120.0))
+    frame = frame[frame["strike"] >= 115.0]
+    result = evaluate_required_data_frame_fetch_plan_debug(df=frame, fetch_plan=plan)
+    assert not result.accepted
+    assert result.reason_code == "invalid_row_identity"
+    assert result.details["covered_expirations"] == []
+    assert result.details["incomplete_expirations"] == [EXPIRATION, "2026-08-28"]
+
+
+def test_missing_exact_strike_only_excludes_its_expiration() -> None:
+    frame, plan = _two_expiration_frame(second_strikes=(100.0, 105.0, 115.0, 120.0))
+    request = plan["merged_requests"][0]
+    request["side_plans"][0]["required_exact_strikes_by_expiration"] = {
+        "2026-08-28": [110.0],
+    }
+    result = evaluate_required_data_frame_fetch_plan_debug(df=frame, fetch_plan=plan)
+    assert result.accepted and result.status == "partial"
+    gap = result.details["per_expiration"][1]["missing_requirements"][0]
+    assert gap["missing"] == ["exact_strike"]
+    assert gap["missing_exact_strikes"] == [110.0]
+
+
+def test_missing_expiration_is_reported_without_discarding_covered_date() -> None:
+    frame, plan = _two_expiration_frame(second_strikes=())
+    result = evaluate_required_data_frame_fetch_plan_debug(df=frame, fetch_plan=plan)
+    assert result.accepted and result.status == "partial"
+    assert result.details["per_expiration"][1]["status"] == "missing"
+
+
+@pytest.mark.parametrize("expirations", [None, []])
+def test_no_explicit_expirations_keeps_existing_fail_closed_semantics(expirations) -> None:
+    request = _request()
+    if expirations is None:
+        del request["explicit_expirations"]
+    else:
+        request["explicit_expirations"] = expirations
+    result = evaluate_required_data_frame_fetch_plan_debug(df=_frame(), fetch_plan=_plan(requests=[request]))
+    assert not result.accepted and result.reason_code == "internal_contract_error"
+
+
+@pytest.mark.parametrize("bad_strikes,missing", [((100.0, 105.0), "upper_bound"), ((115.0, 120.0), "lower_bound")])
+def test_partial_coverage_preserves_existing_edge_math(bad_strikes, missing) -> None:
+    frame, plan = _two_expiration_frame(second_strikes=bad_strikes)
+    result = evaluate_required_data_frame_fetch_plan_debug(frame, plan)
+    assert result.status == "partial"
+    assert result.details["per_expiration"][1]["missing_requirements"][0]["missing"] == [missing]
+
+
+def test_complete_other_side_cannot_mask_incomplete_date() -> None:
+    frame, plan = _two_expiration_frame(second_strikes=(115.0, 120.0))
+    put_request = plan["merged_requests"][0]
+    call_request = deepcopy(put_request)
+    call_request["option_types"] = ["call"]
+    call_request["side_plans"][0]["option_type"] = "call"
+    call_request["side_strike_windows"] = {"call": {"min_strike": 100.0, "max_strike": 120.0}}
+    plan["merged_requests"].append(call_request)
+    calls = frame[frame["expiration"] == EXPIRATION].copy()
+    calls["option_type"] = "call"
+    second_calls = calls.copy()
+    second_calls["expiration"] = "2026-08-28"
+    second_calls["dte"] = 32
+    result = evaluate_required_data_frame_fetch_plan_debug(pd.concat([frame, calls, second_calls]), plan)
+    assert result.status == "partial"
+    assert result.details["covered_expirations"] == [EXPIRATION]
+    assert result.details["incomplete_expirations"] == ["2026-08-28"]
+
+
+def test_bad_identity_on_incomplete_date_still_fails_entire_batch() -> None:
+    frame, plan = _two_expiration_frame(second_strikes=(115.0, 120.0))
+    frame.loc[frame["expiration"] == "2026-08-28", "dte"] = 999
+    result = evaluate_required_data_frame_fetch_plan_debug(frame, plan)
+    assert not result.accepted and result.reason_code == "invalid_row_identity"
+
+
 def test_exact_coverage_rejects_empty_executable_child() -> None:
     empty_child = _request(
         option_type="call",
@@ -666,7 +772,8 @@ def test_exact_coverage_scopes_same_side_multi_request_rows_by_proven_codes() ->
     )
 
 
-def test_exact_coverage_rejects_empty_scope_with_required_exact_strike() -> None:
+def test_exact_coverage_isolates_empty_exact_scope_and_preserves_covered_expiration() -> None:
+    # A missing exact contract invalidates its date, while the other proven date survives.
     second_expiration = "2026-09-18"
     request = _window_request(
         minimum=80.0, maximum=120.0,
@@ -688,8 +795,12 @@ def test_exact_coverage_rejects_empty_scope_with_required_exact_strike() -> None
         option_chain_evidence=evidence,
     )
 
-    assert result.accepted is False
-    assert result.reason_code == "required_contract_missing"
+    assert result.accepted is True
+    assert result.status == "partial"
+    assert result.reason_code == "required_data_partial_coverage"
+    assert result.details["covered_expirations"] == [EXPIRATION]
+    assert result.details["incomplete_expirations"] == [second_expiration]
+    assert result.details["per_expiration"][1]["missing_requirements"][0]["missing_exact_strikes"] == [100.0]
 
 
 @pytest.mark.parametrize("status", ["empty", "stale_cache", "error", ""])

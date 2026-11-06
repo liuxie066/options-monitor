@@ -192,6 +192,80 @@ def test_canonical_branch_reasons_block_scan_before_candidate_calculation(
     assert model["wheel_branches"][0]["reason_codes"] == reasons
 
 
+@pytest.mark.parametrize("coverage", [None, {"status": "success", "reason_code": None}])
+@pytest.mark.parametrize("direction", ["call", "put"])
+def test_wheel_complete_or_legacy_frozen_coverage_keeps_clean_status(direction, coverage):
+    from src.application.required_data_snapshot import FrozenRequiredDataBatch
+    from src.application.wheel.scanning import _frames_from_snapshot
+
+    row = phase2_opening_row({
+        **_call_row(), "option_type": direction,
+        "strike": 99 if direction == "put" else 110,
+        "delta": -0.3 if direction == "put" else 0.3,
+    })
+    entry = {"required_data_coverage": coverage} if coverage is not None else {}
+    raw = pd.DataFrame([row]).to_csv(index=False).encode()
+    snapshot = FrozenRequiredDataBatch(
+        manifest={}, manifest_bytes=b"{}", entries={"NVDA": (entry, raw)},
+        unavailable={}, require_fresh=False,
+    )
+    frames, unavailable = _frames_from_snapshot(snapshot, ["NVDA"])
+    assert not unavailable
+    assert len(frames["NVDA"]) == 1
+    assert "required_data_coverage" not in frames["NVDA"].attrs
+    args = (_eligibility_model(direction), _policy(), snapshot)
+    fees = {"exchange_rate_converter": _converter()}
+    now_ms = int(AS_OF.timestamp() * 1000)
+    scan = (run_wheel_put_scan(*args, fees, decision_time_ms=now_ms) if direction == "put"
+            else run_wheel_call_scan(*args, {}, fees, decision_time_ms=now_ms))
+    scope = scan["scope_results"][0]
+    assert scope["status"] == "completed" and scope["reason_code"] == "candidates_found"
+    assert "required_data_coverage" not in scope
+
+
+@pytest.mark.parametrize("direction", ["call", "put"])
+def test_wheel_frozen_partial_expirations_filter_rows_and_retain_gap(direction):
+    from src.application.required_data_snapshot import FrozenRequiredDataBatch
+    from src.application.wheel.scanning import _frames_from_snapshot
+
+    row = phase2_opening_row({
+        **_call_row(), "option_type": direction,
+        "strike": 99 if direction == "put" else 110,
+        "delta": -0.3 if direction == "put" else 0.3,
+    })
+    covered = row["expiration"]
+    rejected = (datetime.fromisoformat(covered) + timedelta(days=7)).date().isoformat()
+    coverage = {
+        "status": "partial", "reason_code": "required_data_partial_coverage",
+        "covered_expirations": [covered], "incomplete_expirations": [rejected],
+        "per_expiration": [
+            {"expiration": covered, "status": "covered", "missing_requirements": []},
+            {"expiration": rejected, "status": "incomplete", "missing_requirements": [
+                {"request_index": 0, "option_type": direction, "missing": ["upper_bound"]}
+            ]},
+        ],
+    }
+    raw = pd.DataFrame([row, {**row, "expiration": rejected}]).to_csv(index=False).encode()
+    snapshot = FrozenRequiredDataBatch(
+        manifest={}, manifest_bytes=b"{}", entries={"NVDA": ({"required_data_coverage": coverage}, raw)},
+        unavailable={}, require_fresh=False,
+    )
+    frames, unavailable = _frames_from_snapshot(snapshot, ["NVDA"])
+    assert not unavailable
+    assert frames["NVDA"]["expiration"].tolist() == [covered]
+    assert snapshot.resolve("NVDA")[1] == raw
+    args = (_eligibility_model(direction), _policy(), snapshot)
+    fees = {"exchange_rate_converter": _converter()}
+    now_ms = int(AS_OF.timestamp() * 1000)
+    scan = (run_wheel_put_scan(*args, fees, decision_time_ms=now_ms) if direction == "put"
+            else run_wheel_call_scan(*args, {}, fees, decision_time_ms=now_ms))
+    scope = scan["scope_results"][0]
+    assert scope["status"] == "completed"
+    assert scope["reason_code"] == "partial_data"
+    assert scope["required_data_coverage"] == coverage
+    assert len(scan["raw_candidates"]["stock-1"]) == 1
+
+
 @pytest.mark.parametrize("direction", ["call", "put"])
 @pytest.mark.parametrize("phase", ["ready", "data_unavailable", "option_open", "intent_pending"])
 @pytest.mark.parametrize("reason_fields", [{}, {"reason_codes": None}, {"reason_codes": []}])
