@@ -106,6 +106,7 @@ def _scopes(
         candidate_count = int(raw.get("candidate_count") or 0)
         if candidate_count < 0 or (status != "completed" and candidate_count):
             raise CandidateSnapshotContractError("Wheel candidate scope count is invalid")
+        detail = raw.get("reason_detail", raw.get("detail"))
         out.append(
             {
                 "scope": "strategy",
@@ -119,6 +120,7 @@ def _scopes(
                 "candidate_owner": "wheel",
                 "status": status,
                 "reason_code": str(raw.get("reason_code") or raw.get("reason") or "").strip() or None,
+                **({"reason_detail": detail.strip()} if isinstance(detail, str) and detail.strip() else {}),
                 "candidate_count": candidate_count,
                 "quote_snapshot_id": str(raw.get("quote_snapshot_id") or "").strip() or None,
                 "quote_receipt_relpath": str(raw.get("quote_receipt_relpath") or "").strip() or None,

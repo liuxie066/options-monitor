@@ -439,6 +439,7 @@ def normalize_combo_scope_results(
         status = required_text(raw.get("status"), "scope status").lower()
         if status not in CANDIDATE_CAPTURE_STATUSES:
             raise CandidateSnapshotContractError("combo candidate scope status is invalid")
+        detail = raw.get("reason_detail", raw.get("detail"))
         out.append(
             {
                 "scope": "strategy",
@@ -447,6 +448,7 @@ def normalize_combo_scope_results(
                 "candidate_owner": owner_norm,
                 "status": status,
                 "reason_code": str(raw.get("reason") or raw.get("reason_code") or "").strip() or None,
+                **({"reason_detail": detail.strip()} if isinstance(detail, str) and detail.strip() else {}),
                 "quote_snapshot_id": str(raw.get("quote_snapshot_id") or "").strip() or None,
                 "quote_receipt_relpath": str(raw.get("quote_receipt_relpath") or "").strip() or None,
                 **required_data_coverage_fields(raw),

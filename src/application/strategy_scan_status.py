@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+from uuid import uuid4
 
 from src.application.opend_symbol_outputs import SUCCESS_EMPTY_REASON_CODES
 from src.application.candidate_snapshot_contract import (
@@ -15,6 +16,7 @@ from src.application.candidate_snapshot_contract import (
     validate_candidate_run_mode,
 )
 from src.application.source_receipts import sha256_bytes
+from src.application.research.redaction import redact_text
 from src.infrastructure.io_utils import atomic_write_json
 
 
@@ -37,6 +39,33 @@ _COMPLETED_REASONS = frozenset({"no_candidate", "partial_data", "market_closed"}
 
 class StrategyScanStatusError(RuntimeError):
     pass
+
+
+_MAX_DETAIL_CHARS = 2048
+
+
+def sanitize_strategy_status_detail(detail: Any) -> str | None:
+    """Keep bounded diagnostics out of status decisions and remove known secrets."""
+    if not isinstance(detail, str) or not detail.strip():
+        return None
+    # Redact before truncation so a cut cannot expose part of a quoted secret.
+    text = redact_text(detail)
+    text = " ".join("".join(ch for ch in text if ch.isprintable() or ch.isspace()).split())
+    return text[:_MAX_DETAIL_CHARS] or None
+
+
+def direct_strategy_status_run(
+    *, base: Path, account: str, run_id: str | None = None,
+) -> tuple[str, Path]:
+    """Allocate account-scoped diagnostics without creating candidate authority."""
+    from src.application.tick_run_workspace import account_run_config_path
+
+    identity = str(run_id or "").strip() or (
+        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        + "-" + uuid4().hex[:6]
+    )
+    state_path = account_run_config_path(base=base, run_id=identity, account=account)
+    return identity, state_path.parent.parent
 
 
 def candidate_scope_reason(item: Mapping[str, Any]) -> str | None:
@@ -84,6 +113,7 @@ def publish_strategy_scan_status(
     status: str,
     candidate_count: int | None = None,
     reason: str | None = None,
+    detail: str | None = None,
     snapshot_id: str | None = None,
     receipt_relpath: str | None = None,
     source_outcome: str | None = None,
@@ -147,6 +177,9 @@ def publish_strategy_scan_status(
         payload["reason_code"] = reason_code_norm
     if direction_value:
         payload["direction"] = direction_value
+    clean_detail = sanitize_strategy_status_detail(detail)
+    if clean_detail:
+        payload["detail"] = clean_detail
     if required_data_coverage is not None:
         payload["required_data_coverage"] = dict(required_data_coverage)
     _validate_required_data_coverage(payload)
@@ -177,8 +210,9 @@ def publish_strategy_scan_status_index(
     account_config_sha256: str,
     expected: Iterable[Mapping[str, str]],
     run_mode: Mapping[str, Any],
+    status_only: bool = False,
 ) -> dict[str, Any]:
-    """Publish the single current terminal scope index for one account run."""
+    """Publish terminal scopes, with explicit limited authority for direct runs."""
 
     root = Path(report_dir).resolve()
     run_id_norm = _required(run_id, "run_id")
@@ -196,10 +230,27 @@ def publish_strategy_scan_status_index(
         mode_fields = validate_candidate_run_mode(run_mode)
     except CandidateSnapshotContractError as exc:
         raise StrategyScanStatusError(str(exc)) from exc
+    scope_rows = [dict(row) for row in expected]
+    if status_only and path.exists():
+        previous = load_strategy_scan_status_index(
+            path, expected_run_id=run_id_norm, expected_account=account_norm,
+            expected_account_config_sha256=config_hash, allow_status_only=True,
+        )
+        if previous.get("evidence_authority") != "scan_status_only":
+            raise StrategyScanStatusError("cannot replace candidate-bound status index")
+        scopes = {
+            (row["symbol"], row["strategy_family"], row.get("direction")): row
+            for row in previous["items"]
+        }
+        scopes.update({
+            (row["symbol"], row["strategy_family"], row.get("direction")): row
+            for row in scope_rows
+        })
+        scope_rows = list(scopes.values())
     items: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str | None]] = set()
     for raw in sorted(
-        (dict(item) for item in expected),
+        scope_rows,
         key=lambda item: (
             str(item.get("market") or ""),
             str(item.get("symbol") or ""),
@@ -274,6 +325,7 @@ def publish_strategy_scan_status_index(
         "counts": counts,
         "items": items,
         **mode_fields,
+        **({"evidence_authority": "scan_status_only"} if status_only else {}),
     }
     payload["content_sha256"] = sha256_bytes(_canonical_index_content(payload))
     validate_strategy_scan_status_index(
@@ -281,6 +333,7 @@ def publish_strategy_scan_status_index(
         expected_run_id=run_id_norm,
         expected_account=account_norm,
         expected_account_config_sha256=config_hash,
+        allow_status_only=status_only,
     )
     _assert_no_legacy_index(root)
     adopted = _write_current_index(path, payload)
@@ -293,6 +346,7 @@ def load_strategy_scan_status_index(
     expected_run_id: str | None = None,
     expected_account: str | None = None,
     expected_account_config_sha256: str | None = None,
+    allow_status_only: bool = False,
 ) -> dict[str, Any]:
     target = Path(path)
     if not target.is_file() or target.is_symlink():
@@ -308,6 +362,7 @@ def load_strategy_scan_status_index(
         expected_run_id=expected_run_id,
         expected_account=expected_account,
         expected_account_config_sha256=expected_account_config_sha256,
+        allow_status_only=allow_status_only,
     )
     return payload
 
@@ -318,10 +373,14 @@ def validate_strategy_scan_status_index(
     expected_run_id: str | None = None,
     expected_account: str | None = None,
     expected_account_config_sha256: str | None = None,
+    allow_status_only: bool = False,
 ) -> None:
     item = dict(payload or {})
     if item.get("schema_version") != STRATEGY_SCAN_STATUS_INDEX_V5_SCHEMA:
         raise StrategyScanStatusError("current strategy status index schema mismatch")
+    authority = item.get("evidence_authority")
+    if authority is not None and (authority != "scan_status_only" or not allow_status_only):
+        raise StrategyScanStatusError("status-only evidence has no candidate authority")
     try:
         mode_fields = validate_candidate_run_mode(item)
     except CandidateSnapshotContractError as exc:
@@ -797,6 +856,7 @@ def _validate_current_status_core(
             "source_outcome",
             "reason_code",
             "required_data_coverage",
+            "detail",
             "content_sha256",
         }
     }
@@ -887,8 +947,16 @@ def _write_status_once(path: Path, payload: Mapping[str, Any]) -> dict[str, Any]
             existing = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise StrategyScanStatusError("current strategy status is unreadable") from exc
-        if not isinstance(existing, dict) or _semantic_payload(existing) != _semantic_payload(payload):
+        if not isinstance(existing, dict):
             raise StrategyScanStatusError("current strategy status conflicts")
+        # Keep the first diagnostic on retries. Optional observability alone
+        # cannot turn a previously completed terminal publication into failure.
+        old_facts = {k: v for k, v in _semantic_payload(existing).items() if k != "detail"}
+        new_facts = {k: v for k, v in _semantic_payload(payload).items() if k != "detail"}
+        if old_facts != new_facts:
+            raise StrategyScanStatusError("current strategy status conflicts")
+        if sha256_bytes(_canonical_index_content({k: v for k, v in existing.items() if k != "content_sha256"})) != existing.get("content_sha256"):
+            raise StrategyScanStatusError("current strategy status content hash mismatch")
         return existing
     atomic_write_json(path, dict(payload))
     return dict(payload)
@@ -920,7 +988,9 @@ def _write_current_index(path: Path, payload: Mapping[str, Any]) -> dict[str, An
     if path.exists() or path.is_symlink():
         if not path.is_file() or path.is_symlink():
             raise StrategyScanStatusError("current strategy status index is unsafe")
-        existing = load_strategy_scan_status_index(path)
+        existing = load_strategy_scan_status_index(
+            path, allow_status_only=payload.get("evidence_authority") == "scan_status_only",
+        )
         if sealed:
             if _semantic_payload(existing) != _semantic_payload(payload):
                 raise StrategyScanStatusError("terminal strategy status index conflicts")

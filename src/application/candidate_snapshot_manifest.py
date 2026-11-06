@@ -1025,6 +1025,7 @@ def _load_latest_candidate_snapshot_bundle(
     base: Path,
     account: str,
     loader: Callable[..., dict[str, Any]],
+    prefer_newer_account_runs: bool = False,
 ) -> dict[str, Any]:
     root = Path(base).resolve()
     try:
@@ -1088,6 +1089,24 @@ def _load_latest_candidate_snapshot_bundle(
             error.account = account_norm
             raise error from exc
 
+    if prefer_newer_account_runs and pointed is not None and runs_root.is_dir():
+        # Direct scans do not move the scheduler's pointer. Explanation still
+        # selects the newest actual account attempt, including a failed attempt.
+        pointed_order = (pointed.stat().st_mtime_ns, pointed.name) if pointed.exists() else (0, "")
+        newer = sorted(
+            (item for item in runs_root.iterdir()
+             if item.is_dir() and not item.is_symlink()
+             and (item.stat().st_mtime_ns, item.name) > pointed_order),
+            key=lambda item: (item.stat().st_mtime_ns, item.name), reverse=True,
+        )
+        for run_dir in newer:
+            account_dir = run_dir / "accounts" / account_norm
+            if account_dir.is_symlink() or account_dir.parent.is_symlink():
+                raise CandidateSnapshotManifestError("latest account run may not be a symlink")
+            if account_dir.is_dir():
+                bundle = load_or_skip(run_dir)
+                if bundle is not None:
+                    return bundle
     if pointed is not None:
         bundle = load_or_skip(pointed)
         if bundle is not None:

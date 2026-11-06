@@ -41,6 +41,7 @@ from src.application.config_validator import validate_resolved_watchlist_item_ru
 from src.application.prefilters import apply_prefilters
 from src.application.strategy_scan_status import (
     load_strategy_scan_status_index,
+    direct_strategy_status_run,
     publish_strategy_scan_status,
     candidate_scope_reason,
     strategy_status_path,
@@ -188,6 +189,7 @@ def _index_owner_statuses(
                 "variant": None if owner == "opening" else owner,
                 "owner": owner,
                 "candidate_count": item.get("candidate_count"),
+                **({"detail": item["detail"]} if item.get("detail") else {}),
                 **({"required_data_coverage": item["required_data_coverage"]}
                    if "required_data_coverage" in item else {}),
             }
@@ -780,6 +782,12 @@ def run_watchlist_pipeline_default(
     from src.application.report_builders import build_symbols_digest, build_symbols_summary
 
     account_run_id = str(source_account_run_id or "").strip()
+    status_run_id = account_run_id
+    account = str((cfg.get("portfolio") or {}).get("account") or "").strip().lower()
+    if required_data_snapshot_manifest is None and want_scan and want_fn("scan") and account:
+        status_run_id, _ = direct_strategy_status_run(
+            base=base, account=account, run_id=status_run_id,
+        )
     captured_final_candidates: dict[str, list[dict[str, Any]]] = {
         "put": [],
         "call": [],
@@ -855,11 +863,15 @@ def run_watchlist_pipeline_default(
         process_symbol_fn=(
             lambda *a, **kw: process_symbol(
                 *a,
-                **{k: v for k, v in kw.items() if k != 'is_scheduled'},
+                **{
+                    **{k: v for k, v in kw.items() if k != 'is_scheduled'},
+                    **({"strategy_status_run_id": status_run_id} if status_run_id else {}),
+                },
                 required_data_dir=required_data_dir,
                 report_dir=report_dir,
                 state_dir=state_dir,
                 is_scheduled=is_scheduled,
+                account_display_name=account_display_name,
             )
         ),
         build_pipeline_context_fn=(

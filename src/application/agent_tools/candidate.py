@@ -203,9 +203,12 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
     name="candidate_filter_explain",
     catalog_summary="解释候选机会的筛选结果与排除原因。",
     description=(
-        "Explain the recorded opening decision for a symbol from a terminal manifest-bound account snapshot. The tool never re-filters rows. "
+        "Explain the recorded opening decision for a symbol from a terminal manifest-bound account snapshot. "
+        "Direct scans may supply an explicitly marked scan_status_only index: it explains status and sanitized detail, "
+        "with candidate_evidence_available=false and no accepted candidate authority. The tool never re-filters rows. "
         "Delta is a hard gate, never a rank factor; report only the recorded threshold and evidence, without inferring a default for historical rows. "
-        "Explicit run_id and run_selector are mutually exclusive. Omitted run_id or run_selector=latest selects the latest eligible terminal scan, skipping only proven scheduler skips. "
+        "Explicit run_id and run_selector are mutually exclusive. Omitted run_id or run_selector=latest selects the latest account attempt, "
+        "including a newer direct scan after the scheduler pointer, skipping only proven scheduler skips. "
         "Use latest_notification only when the question refers to a delivered notification. "
         "With run_selector=latest_notification it resolves the validated source run of the most recent report actually delivered "
         "to the account on notification_date (default: today, runtime host local timezone), so a user can ask why a symbol was "

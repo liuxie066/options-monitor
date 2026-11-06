@@ -4,6 +4,9 @@ from dataclasses import dataclass
 import io
 import logging
 import time
+from src.application.tick_run_workspace import canonical_account_run_config_bytes
+from src.application.source_receipts import sha256_bytes
+from src.application.candidate_snapshot_contract import candidate_run_mode_fields
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -24,7 +27,9 @@ from src.application.required_data_snapshot import (
 )
 from src.application.strategy_scan_status import (
     StrategyScanStatusError,
+    direct_strategy_status_run,
     publish_strategy_scan_status,
+    publish_strategy_scan_status_index,
 )
 from src.application.combo_yield_config import (
     COMBO_YIELD_CONFIG_KEY,
@@ -67,6 +72,7 @@ class SymbolMonitoringInputs:
     fetch_only: bool = False
     quote_snapshot_id: str | None = None
     source_producer_run_id: str | None = None
+    strategy_status_run_id: str | None = None
     required_data_snapshot_manifest: Path | None = None
     required_data_snapshot_run_id: str | None = None
     required_data_snapshot_batch: FrozenRequiredDataBatch | None = None
@@ -81,6 +87,7 @@ class SymbolMonitoringInputs:
         Callable[[dict[str, Any]], None] | None
     ) = None
     experience: bool = False
+    account_display_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -223,7 +230,18 @@ def run_symbol_monitoring(
         or ""
     ).strip().upper()
 
+    status_run_id = str(inputs.strategy_status_run_id or inputs.source_producer_run_id or "").strip()
+    status_report_dir = inputs.report_dir
+    direct_status_enabled = bool(
+        inputs.required_data_snapshot_manifest is None
+        and status_account and not inputs.fetch_only
+    )
+    if direct_status_enabled:
+        status_run_id, status_report_dir = direct_strategy_status_run(
+            base=inputs.base, account=status_account, run_id=status_run_id,
+        )
     partial_coverage: dict[str, Any] | None = None
+    direct_scopes: dict[str, dict[str, str]] = {}
 
     def _publish_status(
         *,
@@ -231,18 +249,19 @@ def run_symbol_monitoring(
         status: str,
         candidate_count: int | None = None,
         reason: str | None = None,
+        detail: str | None = None,
         snapshot_id: str | None = None,
         receipt_relpath: str | None = None,
         source_outcome: str | None = None,
         reason_code: str | None = None,
     ) -> None:
         check_deadline()
-        if not frozen_status_enabled:
+        if not (frozen_status_enabled or direct_status_enabled):
             return
         try:
             publish_strategy_scan_status(
-                report_dir=inputs.report_dir,
-                run_id=str(inputs.source_producer_run_id),
+                report_dir=status_report_dir,
+                run_id=status_run_id,
                 account=status_account,
                 market=status_market,
                 symbol=symbol,
@@ -250,12 +269,35 @@ def run_symbol_monitoring(
                 status=status,
                 candidate_count=candidate_count,
                 reason=reason,
+                detail=detail,
                 snapshot_id=snapshot_id,
                 receipt_relpath=receipt_relpath,
                 source_outcome=source_outcome,
                 reason_code=reason_code,
                 **({"required_data_coverage": partial_coverage} if partial_coverage else {}),
             )
+            if direct_status_enabled:
+                config_hash = sha256_bytes(canonical_account_run_config_bytes(runtime_config))
+                owner = "opening"
+                mode = "put" if family == "sell_put" else "call"
+                if family == "combo_yield":
+                    owner = str(combo_yield_cfg.get("variant") or "sp_lc").lower()
+                    mode = "combo_yield"
+                direct_scopes[family] = {
+                    "market": status_market, "symbol": symbol,
+                    "strategy_family": family, "strategy_mode": mode,
+                    "candidate_owner": owner, "account_config_sha256": config_hash,
+                }
+                publish_strategy_scan_status_index(
+                    report_dir=status_report_dir, run_id=status_run_id,
+                    account=status_account, account_config_sha256=config_hash,
+                    expected=direct_scopes.values(),
+                    run_mode=candidate_run_mode_fields(
+                        experience=inputs.experience,
+                        account_display_name=inputs.account_display_name if inputs.experience else None,
+                    ),
+                    status_only=True,
+                )
         except SymbolProcessingTimeout:
             raise
         except Exception as exc:
@@ -308,9 +350,10 @@ def run_symbol_monitoring(
     fetch_cfg = dict(symbol_cfg.get("fetch", {}) or {})
     discovery_fetch_kwargs = opend_discovery_kwargs(runtime_config)
     fetch_request_kwargs = opend_fetch_kwargs(runtime_config)
-    fetch_plan = None
-    if not frozen_required_data:
-        fetch_plan = build_required_data_fetch_plan(
+    def _resolve_fetch_plan():
+        if frozen_required_data:
+            return None
+        return build_required_data_fetch_plan(
             market_data_provider=market_data_provider,
             base=inputs.base,
             required_data_dir=inputs.required_data_dir,
@@ -341,6 +384,7 @@ def run_symbol_monitoring(
 
     check_deadline()
     try:
+        fetch_plan = _resolve_fetch_plan()
         required_data_kwargs: dict[str, Any] = {
             "py": inputs.py,
             "base": inputs.base,
@@ -391,7 +435,21 @@ def run_symbol_monitoring(
             quote_evidence = deps.ensure_required_data_fn(
                 **required_data_kwargs,
             )
-    except FrozenRequiredDataUnavailable as exc:
+    except Exception as exc:
+        if isinstance(exc, (SymbolProcessingTimeout, StrategyScanStatusError)):
+            raise
+        if frozen_required_data and not isinstance(exc, FrozenRequiredDataUnavailable):
+            raise
+        failure_reason = (
+            "required_data_snapshot_unavailable"
+            if isinstance(exc, FrozenRequiredDataUnavailable)
+            else "required_data_unavailable"
+        )
+        failure_detail = (
+            (f"{exc.reason}: {exc.detail}" if exc.detail else None)
+            if isinstance(exc, FrozenRequiredDataUnavailable)
+            else str(exc)
+        )
         summary_rows: list[dict[str, Any]] = []
 
         def _unavailable_summary(result: object) -> None:
@@ -440,9 +498,10 @@ def run_symbol_monitoring(
                 _publish_status(
                     family=family,
                     status="unavailable",
-                    reason="required_data_snapshot_unavailable",
-                    snapshot_id=exc.snapshot_id,
-                    receipt_relpath=exc.receipt_relpath,
+                    reason=failure_reason,
+                    detail=failure_detail,
+                    snapshot_id=getattr(exc, "snapshot_id", None),
+                    receipt_relpath=getattr(exc, "receipt_relpath", None),
                 )
         return summary_rows
 
@@ -555,7 +614,7 @@ def run_symbol_monitoring(
         except Exception as exc:
             log.exception("symbol_monitoring: %s step failed for %s", family, symbol)
             append_strategy_scan_failure(report_dir=inputs.report_dir, symbol=symbol, strategy_family=family, error=exc)
-            _publish_status(family=family, status="failed", reason=f"{family}_scan_failed",
+            _publish_status(family=family, status="failed", reason=f"{family}_scan_failed", detail=str(exc),
                             snapshot_id=resolved_quote_snapshot_id, receipt_relpath=quote_receipt_relpath)
             _append_summary_result(summary_rows, empty(symbol, symbol_cfg=symbol_cfg))
             return

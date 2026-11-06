@@ -670,6 +670,7 @@ def validate_opening_candidate_snapshot(
                     "strategy_mode": row.get("strategy_mode"),
                     "status": row.get("status"),
                     "reason": row.get("reason_code"),
+                    **({"detail": row["reason_detail"]} if "reason_detail" in row else {}),
                     "quote_snapshot_id": row.get("quote_snapshot_id"),
                     "quote_receipt_relpath": row.get("quote_receipt_relpath"),
                     **required_data_coverage_fields(row),
@@ -1406,6 +1407,7 @@ def _scope_results(
                 "strategy_mode": status["strategy_mode"],
                 "status": status["status"],
                 "reason_code": status.get("reason") or None,
+                **({"reason_detail": status["detail"]} if "detail" in status else {}),
                 "quote_snapshot_id": status.get("quote_snapshot_id"),
                 "quote_receipt_relpath": status.get("quote_receipt_relpath"),
                 **required_data_coverage_fields(status),
@@ -1538,6 +1540,11 @@ def _scan_statuses(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
                 "strategy_mode": mode,
                 "status": status,
                 "reason": str(item.get("reason") or "").strip() or None,
+                **(
+                    {"detail": item["detail"].strip()}
+                    if isinstance(item.get("detail"), str) and item["detail"].strip()
+                    else {}
+                ),
                 "quote_snapshot_id": str(item.get("quote_snapshot_id") or "").strip() or None,
                 "quote_receipt_relpath": str(item.get("quote_receipt_relpath") or "").strip() or None,
                 **required_data_coverage_fields(item),
