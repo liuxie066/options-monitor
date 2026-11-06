@@ -6,6 +6,7 @@ from domain.domain.daily_decision_brief import (
     daily_brief_roll_notification_identities,
 )
 from domain.domain.short_vol_assessment import CANDIDATE_POSITION_SIZING_BASIS
+from domain.domain.close_advice import has_complete_close_metrics
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -186,32 +187,28 @@ def build_daily_brief_user_view(
         user_tz = _safe_zoneinfo(str(ctx.get("user_timezone") or "Asia/Shanghai"))
         phase_line = f"{scheduled_batch} 批次恢复补报 · {recovery_scan.astimezone(user_tz).strftime('%H:%M')} 扫描"
 
-    budget = _RenderBudget()
-    (
-        position_views,
-        position_total,
-        position_actionable_total,
-        position_review_total,
-    ) = _position_views(
-        brief,
-        diff=normalized_diff,
-        limits=cfg,
+    plan, selection = _selection_plan(
+        brief, normalized_diff, cfg, _RenderBudget(),
         now_utc=_parse_datetime(ctx.get("query_time_utc") or ctx.get("advice_time_utc")
                                 or brief.get("generated_at_utc")),
-        budget=budget,
+        next_fixed_report_at_utc=ctx.get("next_fixed_report_at_utc"),
+        delivery_kind=delivery_kind,
     )
-    candidate_views, candidate_omissions, selected_candidate_rows = _candidate_views(
-        brief,
-        diff=normalized_diff,
-        limits=cfg,
-        budget=budget,
-    )
+    position_views = _position_views(brief, plan=plan)
+    position_total = selection["position_total"]
+    position_actionable_total = selection["position_actionable_total"]
+    position_review_total = selection["position_review_total"]
+    candidate_views, selected_candidate_rows = _candidate_views(brief, plan=plan)
+    candidate_omissions = list(selection["candidate_omissions"])
+    candidate_omissions.extend(selection["position_omissions"])
     wheel_batches = _wheel_batch_views(
         brief,
         diff=normalized_diff,
         delivery_kind=delivery_kind,
+        selected_rows=selection["wheel_rows"],
     )
     capacity, reminders = _capacity_views(brief, selected_rows=selected_candidate_rows)
+    reminders.extend(_wheel_gap_reminders(brief))
     fixed_report_reminders = list(reminders)
     funds = _fund_views(brief)
     strategy_failure_items = _strategy_failure_items(brief)
@@ -338,6 +335,9 @@ def build_daily_brief_user_view(
         "position_total": position_total,
         "position_actionable_total": position_actionable_total,
         "position_review_total": position_review_total,
+        "position_hold_total": selection["position_hold_total"],
+        "position_not_evaluable_total": selection["position_not_evaluable_total"],
+        "selection_omissions": [*selection["position_omissions"], *selection["candidate_omissions"]],
         "funds": funds,
         "capacity": capacity,
         "reminders": reminders,
@@ -508,19 +508,15 @@ def select_rendered_combo_candidate_rows(
         return []
     cfg = resolve_daily_brief_render_limits(selection_limits)
     normalized_diff = dict(diff or {})
-    budget = _RenderBudget()
     ctx = dict(context or {})
-    _position_views(
-        source, diff=normalized_diff, limits=cfg, budget=budget,
+    plan, _ = _selection_plan(
+        source, normalized_diff, cfg, _RenderBudget(),
         now_utc=_parse_datetime(ctx.get("query_time_utc") or ctx.get("advice_time_utc")
                                 or source.get("generated_at_utc")),
+        next_fixed_report_at_utc=ctx.get("next_fixed_report_at_utc"),
+        delivery_kind=kind,
     )
-    selected = _candidate_views(
-        source,
-        diff=normalized_diff,
-        limits=cfg,
-        budget=budget,
-    )[2]
+    selected = _candidate_views(source, plan=plan)[1]
     return [dict(item) for item in selected.get("combo_yield") or []]
 
 
@@ -534,8 +530,12 @@ def select_rendered_position_roll_identities(
     source = brief
     if delivery_kind == "candidate_alert":
         source, _ = _candidate_alert_brief(brief, candidate_identities)
-    rows = _position_views(source, diff=dict(diff or {}), limits=resolve_daily_brief_render_limits(limits),
-                           now_utc=_parse_datetime(now_utc) if now_utc is not None else None)[0]
+    plan, _ = _selection_plan(
+        source, dict(diff or {}), resolve_daily_brief_render_limits(limits), _RenderBudget(),
+        now_utc=_parse_datetime(now_utc) if now_utc is not None else None,
+        delivery_kind=delivery_kind,
+    )
+    rows = _position_views(source, plan=plan)
     shown: set[str] = set()
     occurrences: dict[str, int] = {}
     for row in rows:
@@ -1323,34 +1323,209 @@ def _candidate_detail_label(value: Any) -> str:
     return "指标"
 
 
+def _selection_identity(row: Mapping[str, Any]) -> tuple[str, ...]:
+    return tuple(str(row.get(key) or "") for key in (
+        "symbol", "expiration", "option_type", "strike", "contract_symbol",
+        "position_lot_id", "strategy_group_id", "candidate_id", "wheel_branch_id",
+        "put_contract_symbol", "call_contract_symbol", "candidate_pair_id",
+    ))
+
+
+def _sort_number(value: Any, *, descending: bool = False) -> tuple[bool, Decimal]:
+    number = _decimal(value)
+    return (True, Decimal(0)) if number is None else (False, -number if descending else number)
+
+
+def _confirmed_time(value: Any) -> datetime | None:
+    # A date or a timezone-less value does not prove an intraday deadline.
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
+
+
+def _business_deadline(row: Mapping[str, Any]) -> datetime | None:
+    # Quote/actionability expiry is not a business deadline.
+    values = [_confirmed_time(row.get(key)) for key in (
+        "last_trading_at_utc", "assignment_deadline_at_utc", "event_at_utc",
+    )]
+    return min((value for value in values if value is not None), default=None)
+
+
+def _has_timing_reminder(row: Mapping[str, Any]) -> bool:
+    return (
+        _lower(row.get("decision_basis")) == "near_expiry_far_otm_hold"
+        or any(row.get(key) for key in ("last_trading_at_utc", "assignment_deadline_at_utc", "event_at_utc"))
+    )
+
+
+def _close_selection_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    metrics = row.get("metrics") if isinstance(row.get("metrics"), Mapping) else {}
+    last_trade = _confirmed_time(row.get("last_trading_at_utc"))
+    return (
+        _sort_number(metrics.get("remaining_max_annualized_return")),
+        _sort_number(metrics.get("net_capture_ratio"), descending=True),
+        last_trade is None, last_trade or datetime.max.replace(tzinfo=timezone.utc),
+        _selection_identity(row),
+    )
+
+
+def _roll_selection_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    direction, target = daily_brief_position_roll(row)
+    adjustment = target.get("strike_increase_pct" if direction == "roll_up" else "strike_drop_pct")
+    return (
+        _sort_number(target.get("incremental_annualized_return"), descending=True),
+        _sort_number(adjustment, descending=True),
+        _sort_number(target.get("extension_days")),
+        str(row["roll_advice"]["position"].get("currency") or ""),
+        _sort_number(target.get("net_credit"), descending=True),
+        _selection_identity(row),
+    )
+
+
+def _selection_plan(
+    brief: Mapping[str, Any], diff: Mapping[str, Any], limits: Mapping[str, int], budget: _RenderBudget,
+    *, now_utc: datetime | None = None, next_fixed_report_at_utc: Any = None,
+    delivery_kind: str = "full",
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Choose sealed facts once, before any presentation or delivery accounting."""
+    effective_now = now_utc or _parse_datetime(brief.get("generated_at_utc"))
+    positions = [
+        dict(row) if daily_brief_position_roll_is_current(row, now_utc=effective_now)
+        else {key: value for key, value in row.items() if key != "roll_advice"}
+        for row in brief.get("positions") or [] if isinstance(row, Mapping)
+    ]
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    reminders: list[dict[str, Any]] = []
+    holds = unavailable = 0
+    for row in sorted(positions, key=_selection_identity):
+        if _position_has_advice(row):
+            roll = daily_brief_position_roll(row)
+            key = (("roll", roll[0], _upper(row.get("symbol")), row.get("expiration"),
+                    _decimal(row.get("strike")), roll[1]["contract"],
+                    row["roll_advice"]["position"].get("currency")) if roll else
+                   ("close", *_selection_identity(row)))
+            groups.setdefault(key, []).append(row)
+        elif _lower(row.get("recommendation_state")) == "not_evaluable":
+            unavailable += 1
+        elif _has_timing_reminder(row):
+            reminders.append({"kind": "position", "tier": "C", "rows": [row]})
+        elif _position_status_label(row).startswith("暂无法评估"):
+            unavailable += 1
+        elif _lower(row.get("recommendation_state")) == "hold":
+            holds += 1
+
+    close_queue, roll_queue, urgent = [], [], []
+    horizon = _parse_datetime(next_fixed_report_at_utc or brief.get("next_fixed_report_at_utc"))
+    for rows in groups.values():
+        item = {"kind": "position", "tier": "A", "rows": rows}
+        deadlines = [_business_deadline(row) for row in rows]
+        deadline = min((value for value in deadlines if value is not None), default=None)
+        if deadline is not None and horizon is not None and deadline < horizon:
+            urgent.append((deadline, _selection_identity(rows[0]), item))
+        elif any(_position_close_is_eligible(row) for row in rows):
+            close_queue.append(item)
+        else:
+            roll_queue.append(item)
+    close_queue.sort(key=lambda item: min(_close_selection_key(row) for row in item["rows"]
+                                         if _position_close_is_eligible(row)))
+    roll_queue.sort(key=lambda item: _roll_selection_key(item["rows"][0]))
+    actions = [item for _, _, item in sorted(urgent, key=lambda value: value[:2])]
+    for index in range(max(len(close_queue), len(roll_queue))):
+        if index < len(close_queue):
+            actions.append(close_queue[index])
+        if index < len(roll_queue):
+            actions.append(roll_queue[index])
+
+    candidates = brief.get("candidates") if isinstance(brief.get("candidates"), Mapping) else {}
+    families = ("sell_put", "covered_call", "combo_yield", "wheel")
+    opening: list[dict[str, Any]] = []
+    candidate_counts: dict[str, int] = {}
+    wheel_batches = [dict(row) for row in brief.get("wheel_batches") or [] if isinstance(row, Mapping)]
+    if delivery_kind == "fixed_report":
+        wheel_batches = _group_fixed_wheel_batches(wheel_batches)
+    wheel_by_branch = {str(row.get("wheel_branch_id") or row.get("position_lot_id") or ""): row
+                       for row in wheel_batches}
+    selected_wheel_branches: set[str] = set()
+    for family_index, family in enumerate(families):
+        rows = [row for row in candidates.get(family) or [] if isinstance(row, Mapping)]
+        if family == "wheel":
+            represented = {str(row.get("wheel_branch_id") or row.get("position_lot_id") or "") for row in rows}
+            rows = [*rows, *(row for key, row in wheel_by_branch.items()
+                            if key not in represented and (_whole_number(row.get("recommended_contracts")) or 0) > 0)]
+        candidate_counts[family] = len(rows)
+        rows.sort(key=lambda row: (_sort_number(row.get("rank")), _selection_identity(row)))
+        for row in rows[:limits["max_candidates_per_strategy"]]:
+            item = {"kind": "candidate", "tier": "B", "family": family,
+                    "family_index": family_index, "row": row}
+            if family == "wheel":
+                branch = str(row.get("wheel_branch_id") or row.get("position_lot_id") or "")
+                if branch in wheel_by_branch:
+                    item["wheel_batch"] = wheel_by_branch[branch]
+                    selected_wheel_branches.add(branch)
+            if _capacity_contracts(row) == 0:
+                item["tier"] = "C"
+                reminders.append(item)
+            else:
+                opening.append(item)
+    for row in wheel_batches:
+        branch = str(row.get("wheel_branch_id") or row.get("position_lot_id") or "")
+        if (_whole_number(row.get("recommended_contracts")) or 0) <= 0 and branch not in selected_wheel_branches:
+            reminders.append({"kind": "wheel", "tier": "C", "row": row})
+    opening.sort(key=lambda item: (_sort_number(item["row"].get("rank")),
+                                   item["family_index"], _selection_identity(item["row"])))
+    reminders.sort(key=lambda item: (
+        _business_deadline(item["rows"][0] if item["kind"] == "position" else item["row"]) is None,
+        _business_deadline(item["rows"][0] if item["kind"] == "position" else item["row"])
+        or datetime.max.replace(tzinfo=timezone.utc),
+        _sort_number(item["row"].get("rank")) if item["kind"] == "candidate" else (True, Decimal(0)),
+        item.get("family_index", len(families)),
+        _selection_identity(item["rows"][0] if item["kind"] == "position" else item["row"]),
+    ))
+    ordered = [*actions, *opening, *reminders]
+    account_limit = limits["max_items_per_account"]
+    plan = budget.take(ordered, account_limit or budget.remaining)
+    omitted_positions = [item for item in ordered[len(plan):] if item["kind"] == "position"]
+    position_omissions = []
+    omitted_wheel = sum(item["kind"] == "wheel" for item in ordered[len(plan):])
+    if omitted_wheel:
+        position_omissions.append(f"Wheel 另有 {omitted_wheel} 条状态提醒未展开")
+    if omitted_positions:
+        market = _upper(brief.get("market"))
+        names = [f"{_upper(item['rows'][0].get('symbol'))} "
+                 f"{_position_contract_label(item['rows'][0], market=market)}" for item in omitted_positions]
+        position_omissions.append(f"另有 {len(omitted_positions)} 条持仓动作/提醒未展开：" + "、".join(names))
+    candidate_omissions = []
+    for family in families:
+        selected_count = sum(item["kind"] == "candidate" and item["family"] == family for item in plan)
+        omitted = candidate_counts[family] - selected_count
+        if omitted:
+            candidate_omissions.append(f"{_STRATEGY_LABELS[family]} 另有 {omitted} 个策略候选未展开")
+    return plan, {
+        "wheel_rows": [row for row in wheel_batches if any(
+            row is (item["wheel_batch"] if item["kind"] == "candidate" else item["row"])
+            for item in plan if item["kind"] == "wheel" or item.get("wheel_batch") is not None)],
+        "position_total": len(positions), "position_actionable_total": len(actions) + sum(
+            item["kind"] == "position" for item in reminders),
+        "position_review_total": sum(item["kind"] == "position" for item in reminders), "position_hold_total": holds,
+        "position_not_evaluable_total": unavailable, "position_omissions": position_omissions,
+        "candidate_omissions": candidate_omissions,
+    }
+
+
 def _candidate_views(
-    brief: Mapping[str, Any],
-    *,
-    diff: Mapping[str, Any],
-    limits: Mapping[str, int],
-    budget: _RenderBudget | None = None,
-) -> tuple[list[dict[str, Any]], list[str], dict[str, list[Mapping[str, Any]]]]:
-    candidates = brief.get("candidates")
-    source = candidates if isinstance(candidates, Mapping) else {}
-    changed_keys = _changed_candidate_keys(diff)
-    budget = budget if budget is not None else _RenderBudget()
+    brief: Mapping[str, Any], *, plan: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, list[Mapping[str, Any]]]]:
     out: list[dict[str, Any]] = []
-    omissions: list[str] = []
     selected_by_family: dict[str, list[Mapping[str, Any]]] = {}
-    limit = limits["max_candidates_per_strategy"]
     market = _upper(brief.get("market"))
-    for family in ("sell_put", "covered_call", "combo_yield"):
-        rows = [item for item in source.get(family) or [] if isinstance(item, Mapping)]
-        changed_rows = [row for row in rows if _candidate_row_keys(family, row) & changed_keys]
-        unchanged_rows = [row for row in rows if row not in changed_rows]
-        selected = budget.take(
-            [*changed_rows, *unchanged_rows],
-            limit,
-        )
-        selected_by_family[family] = selected
-        omitted = len(rows) - len(selected)
-        if omitted > 0:
-            omissions.append(f"{_STRATEGY_LABELS[family]} 另有 {omitted} 个策略候选未展开")
+    for item in plan:
+        if item["kind"] != "candidate" or item.get("wheel_batch") is not None:
+            continue
+        family = item["family"]
+        selected = [item["row"]]
+        selected_by_family.setdefault(family, []).extend(selected)
         for position, row in enumerate(selected, start=1):
             rank = _positive_rank(row.get("rank"), fallback=position)
             choice = f"策略排序 {rank}"
@@ -1447,7 +1622,7 @@ def _candidate_views(
                     **_regular_candidate_card_fields(row, family=family, market=market),
                 }
             )
-    return out, omissions, selected_by_family
+    return out, selected_by_family
 
 
 def _wheel_assignment_group_key(row: Mapping[str, Any]) -> tuple[Any, ...] | None:
@@ -1553,14 +1728,9 @@ def _wheel_batch_views(
     *,
     diff: Mapping[str, Any],
     delivery_kind: str,
+    selected_rows: list[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    rows = [
-        dict(item)
-        for item in brief.get("wheel_batches") or []
-        if isinstance(item, Mapping)
-    ]
-    if delivery_kind == "fixed_report":
-        rows = _group_fixed_wheel_batches(rows)
+    rows = [dict(item) for item in selected_rows]
     # Keep first-seen symbol order and original branch order within each symbol.
     symbol_order = {symbol: index for index, symbol in enumerate(dict.fromkeys(
         _upper(row.get("symbol")) for row in rows
@@ -1715,6 +1885,37 @@ def _wheel_batch_views(
             }
         )
     return out
+
+
+def _wheel_gap_reminders(brief: Mapping[str, Any]) -> list[str]:
+    # Missing evidence stays visible even when its non-trading status card
+    # cannot fit the account quota. Reuse the source reasons; never infer capacity.
+    gap_reasons = {
+        "coverage_quantity_unavailable", "coverage_overallocated", "strategy_attribution_conflict",
+        "share_capacity_oversubscribed", "partial_data", "wheel_scan_failed",
+        "wheel_scan_prerequisite_unavailable", "wheel_coverage_facts_unavailable",
+        "wheel_cash_capacity_unavailable", "data_unavailable", "wheel_candidate_data_unavailable",
+        "multiplier_unproven", "multiplier_conflict", "assignment_cash_facts_unavailable",
+        "assignment_currency_unavailable", "wheel_integrity_conflict", "linkage_unresolved",
+    }
+    grouped: dict[str, set[str]] = {}
+    for row in brief.get("wheel_batches") or []:
+        if not isinstance(row, Mapping):
+            continue
+        coverage = row.get("coverage") if isinstance(row.get("coverage"), Mapping) else {}
+        reasons = [*(row.get("reason_codes") or []), row.get("reason_code"),
+                   *(coverage.get("reason_codes") or [])]
+        subject = f"{_upper(row.get('symbol')) or '未知标的'} Wheel {str(row.get('direction') or 'call').title()}"
+        for reason in reasons:
+            if isinstance(reason, str) and reason in gap_reasons:
+                grouped.setdefault(reason, set()).add(subject)
+    reminders = []
+    for reason, subjects in sorted(grouped.items()):
+        shown = "、".join(sorted(subjects)[:3])
+        if len(subjects) > 3:
+            shown += f"（另有 {len(subjects) - 3} 个标的/方向，共 {len(subjects)} 个）"
+        reminders.append("缺口摘要：" + shown + " · " + _wheel_reason_text(reason))
+    return reminders
 
 
 def _wheel_reason_text(value: Any) -> str:
@@ -1965,51 +2166,9 @@ def _candidate_event_line(candidate: Mapping[str, Any], *, family: str) -> str:
 
 
 def _position_views(
-    brief: Mapping[str, Any],
-    *,
-    diff: Mapping[str, Any],
-    limits: Mapping[str, int],
-    now_utc: datetime | None = None,
-    budget: _RenderBudget | None = None,
-) -> tuple[list[dict[str, Any]], int, int, int]:
-    budget = budget if budget is not None else _RenderBudget()
-    effective_now = now_utc or _parse_datetime(brief.get("generated_at_utc"))
-    positions = [
-        dict(item) if daily_brief_position_roll_is_current(item, now_utc=effective_now)
-        else {key: value for key, value in item.items() if key != "roll_advice"}
-        for item in brief.get("positions") or [] if isinstance(item, Mapping)
-    ]
-    total = len(positions)
-    # 无行动指向的持仓（继续观察、无法评估）不逐条展示；
-    # 总持仓数和需处理数在汇总中分开呈现，避免把非行动项误说成“折叠”。
-    positions = [row for row in positions if _position_has_advice(row)]
-    # 名额按展示动作计算；同一旧合约的多个 lot 只在渲染时合并。
-    groups: list[list[dict[str, Any]]] = []
-    roll_groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
-    for row in positions:
-        roll = daily_brief_position_roll(row)
-        if roll is None:
-            groups.append([row])
-            continue
-        key = (roll[0], _upper(row.get("symbol")), row.get("expiration"),
-               _decimal(row.get("strike")), roll[1]["contract"])
-        if key not in roll_groups:
-            roll_groups[key] = []
-            groups.append(roll_groups[key])
-        roll_groups[key].append(row)
-    actionable_total = len(groups)
-    review_total = sum(1 for group in groups if _is_position_fact_review(group[0]))
-    changed_keys = _changed_position_keys(diff)
-    changed_groups, unchanged_groups = [], []
-    for group in groups:
-        destination = changed_groups if any(
-            _position_row_keys(row) & changed_keys for row in group
-        ) else unchanged_groups
-        destination.append(group)
-    selected = budget.take(
-        [*changed_groups, *unchanged_groups],
-        limits["max_actions_per_priority"],
-    )
+    brief: Mapping[str, Any], *, plan: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    selected = [item["rows"] for item in plan if item["kind"] == "position"]
     market = _upper(brief.get("market"))
     out: list[dict[str, Any]] = []
     for group in selected:
@@ -2046,11 +2205,12 @@ def _position_views(
                 "roll_identities": identities,
             }
             details = _position_roll_details(row, market=market, selected=roll, contracts=contracts)
-            close_members = [member for member in group if _lower(member.get("recommendation_state")) == "close"]
+            close_members = [member for member in group if _position_close_is_eligible(member)]
             if close_members:
                 status = _position_status_label(close_members[0])
+                details.append("平仓与移仓互斥：两种方案仅可择一执行，不能同时执行。")
                 for index, member in enumerate(group, start=1):
-                    if _lower(member.get("recommendation_state")) != "close":
+                    if not _position_close_is_eligible(member):
                         continue
                     close_row = {key: value for key, value in member.items() if key != "roll_advice"}
                     close_details = _position_close_details(close_row, market=market, status="建议平仓")
@@ -2058,6 +2218,11 @@ def _position_views(
                     details.extend(prefix + detail for detail in close_details)
         else:
             details = _position_close_details(row, market=market, status=status)
+            if display_kind == "fact_review":
+                deadline = _business_deadline(row)
+                status = "持仓时间提醒" if deadline else "持仓提醒 · 时间待核实"
+                details = ([f"已证实时间：{deadline.isoformat()}；执行前复核持仓和报价。"] if deadline else
+                           ["时间待核实；请先核对交易日历与事件时间，继续按原持仓建议观察。"])
         out.append(
             {
                 "title": " · ".join(title_parts),
@@ -2073,7 +2238,7 @@ def _position_views(
                 **_position_card_fields(row, market=market, status=status),
             }
         )
-    return out, total, actionable_total, review_total
+    return out
 
 
 def _position_strategy_label(row: Mapping[str, Any]) -> str:
@@ -2099,7 +2264,7 @@ def _position_status_label(row: Mapping[str, Any]) -> str:
     roll = daily_brief_position_roll(row)
     if roll is not None:
         label = "CC 向上移仓" if roll[0] == "roll_up" else "CSP 向下移仓"
-        return label + (" · 同时建议平仓" if _lower(row.get("recommendation_state")) == "close" else "")
+        return label + (" · 同时建议平仓" if _position_close_is_eligible(row) else "")
     recommendation = _lower(row.get("recommendation_state"))
     if recommendation == "not_evaluable":
         return _CLOSE_RECOMMENDATION_LABELS["not_evaluable"]
@@ -2126,18 +2291,20 @@ def _position_status_label(row: Mapping[str, Any]) -> str:
 _POSITION_ACTIONABLE_LABELS = frozenset({"建议平仓"})
 
 
+def _position_close_is_eligible(row: Mapping[str, Any]) -> bool:
+    close_row = {key: value for key, value in row.items() if key != "roll_advice"}
+    metrics = row.get("metrics") if isinstance(row.get("metrics"), Mapping) else {}
+    return (row.get("notification_eligible") is not False
+            and has_complete_close_metrics(dict(metrics))
+            and _position_status_label(close_row) in _POSITION_ACTIONABLE_LABELS)
+
+
 def _position_has_advice(row: Mapping[str, Any]) -> bool:
-    # 只展示现行策略已触发的平仓动作；hold 和
-    # not_evaluable 仍保留在结构化审计数据中，但不进入普通提醒。
-    if daily_brief_position_roll(row) is not None:
-        return True
-    if row.get("notification_eligible") is False:
-        return False
-    return _position_status_label(row) in _POSITION_ACTIONABLE_LABELS
+    return daily_brief_position_roll(row) is not None or _position_close_is_eligible(row)
 
 
 def _is_position_fact_review(row: Mapping[str, Any]) -> bool:
-    return False
+    return _has_timing_reminder(row) and not _position_has_advice(row)
 
 
 def _partition_position_views(
@@ -2180,6 +2347,12 @@ def _position_summary(
         summary += " · 暂无操作建议"
     if visible_actionable_count < actionable_total:
         summary += f"，本消息展示 {visible_actionable_count} 条"
+    holds = _whole_number(view.get("position_hold_total")) or 0
+    unavailable = _whole_number(view.get("position_not_evaluable_total")) or 0
+    if holds:
+        summary += f"，普通持有 {holds} 条"
+    if unavailable:
+        summary += f"，缺口摘要：{unavailable} 条暂无法评估"
     return summary + "。"
 
 
@@ -3296,6 +3469,9 @@ def resolve_daily_brief_render_limits(value: Mapping[str, Any] | None) -> dict[s
     src = value if isinstance(value, Mapping) else {}
     return {
         "max_actions_per_priority": _positive_int(src.get("max_actions_per_priority"), _DEFAULT_MAX_ACTIONS),
+        "max_items_per_account": (src["max_items_per_account"]
+            if type(src.get("max_items_per_account")) is int and 0 <= src["max_items_per_account"] <= 20
+            else _DEFAULT_MAX_ACTIONS),
         "max_candidates_per_strategy": _positive_int(src.get("max_candidates_per_strategy"), _DEFAULT_MAX_CANDIDATES),
         "max_rejection_reasons": _positive_int(src.get("max_rejection_reasons"), _DEFAULT_MAX_REJECTIONS),
     }

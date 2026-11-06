@@ -62,6 +62,12 @@ def _roll_row(
                 "contracts": contracts,
                 "net_credit": credit,
                 "per_contract": {"net_credit": credit / contracts},
+                "incremental_period_return": 0.01,
+                "incremental_annualized_return": 0.1,
+                "new_capital_basis": 10000,
+                "extension_days": 28,
+                "strike_drop_pct": 0.05,
+                "strike_increase_pct": 0.05,
                 "recommendation": "credit_roll",
                 "cash_flow_type": "credit",
                 "evidence": {"old_ask": 1, "new_bid": 2},
@@ -82,7 +88,7 @@ def _brief(rows: list[dict]) -> dict:
 
 def _view(rows: list[dict], *, limit: int = 5, **kwargs) -> dict:
     return build_daily_brief_user_view(
-        _brief(rows), limits={"max_actions_per_priority": limit}, **kwargs,
+        _brief(rows), limits={"max_items_per_account": limit}, **kwargs,
     )
 
 
@@ -190,7 +196,7 @@ def test_expired_roll_member_and_hold_rows_do_not_consume_slots_or_inflate_total
     assert len(_view(rows, context={"query_time_utc": "2026-07-21T15:00:01Z"})["positions"]) == 0
 
 
-def test_section_limit_applies_after_roll_grouping_and_preserves_first_action_order() -> None:
+def test_account_limit_applies_after_roll_grouping_and_uses_stable_identity_order() -> None:
     rows = [
         _roll_row("first"),
         _roll_row("second"),
@@ -200,25 +206,30 @@ def test_section_limit_applies_after_roll_grouping_and_preserves_first_action_or
     view = _view(rows, limit=2)
     assert len(view["positions"]) == 2
     assert view["positions"][0]["lot_count"] == 2
-    assert "SECOND_TARGET" in " ".join(view["positions"][1]["details"])
-    assert "THIRD_TARGET" not in str(view["positions"])
+    assert "THIRD_TARGET" in " ".join(view["positions"][1]["details"])
+    assert "SECOND_TARGET" not in str(view["positions"])
     assert view["position_actionable_total"] == 3
+    assert view["positions"] == _view(list(reversed(rows)), limit=2)["positions"]
 
 
-def test_changed_member_prioritizes_its_complete_roll_group_without_extra_slots() -> None:
+def test_changed_member_does_not_reorder_complete_roll_groups_with_equal_economics() -> None:
     rows = [
-        _roll_row("first"),
-        _roll_row("second"),
-        _roll_row("changed-first", target_contract="CHANGED_TARGET"),
-        _roll_row("changed-second", target_contract="CHANGED_TARGET"),
+        _roll_row("a-first"),
+        _roll_row("a-second"),
+        _roll_row("z-changed-first", target_contract="CHANGED_TARGET"),
+        _roll_row("z-changed-second", target_contract="CHANGED_TARGET"),
     ]
     diff = {"changes": [{"action": {
-        "action_type": "close_position", "position_lot_id": "changed-second",
+        "action_type": "close_position", "position_lot_id": "z-changed-second",
     }}]}
     view = _view(rows, limit=1, diff=diff)
     card, = view["positions"]
-    assert "CHANGED_TARGET" in " ".join(card["details"])
+    assert "TEST260918P00095000" in " ".join(card["details"])
+    assert "CHANGED_TARGET" not in str(view["positions"])
     assert card["lot_count"] == 2
+    assert set(card["roll_identities"]) == daily_brief_roll_notification_identities(_brief(rows[:2]))
+    assert view["positions"] == _view(rows, limit=1)["positions"]
+    assert view["positions"] == _view(list(reversed(rows)), limit=1, diff=diff)["positions"]
 
 
 def test_non_roll_close_cards_stay_separate_and_keep_their_fields() -> None:
@@ -231,16 +242,29 @@ def test_non_roll_close_cards_stay_separate_and_keep_their_fields() -> None:
         "recommendation_state": "close",
         "evaluation_status": "evaluable",
         "quote_status": "priced",
-        "metrics": {"ask": 0.5, "estimated_pnl_if_close_net": 25},
+        "metrics": {
+            "ask": 0.5,
+            "estimated_pnl_if_close_net": 25,
+            "capital_basis": 5000,
+            "remaining_max_annualized_return": 0.02,
+            "net_capture_ratio": 0.8,
+        },
     }
-    view = _view([_roll_row("first"), _roll_row("second"), close, deepcopy(close)])
+    rows = [
+        _roll_row("first"), _roll_row("second"),
+        {**close, "position_lot_id": "close-first"},
+        {**deepcopy(close), "position_lot_id": "close-second"},
+    ]
+    view = _view(rows)
     assert len(view["positions"]) == 3
-    first, second = view["positions"][1:]
+    assert [card["is_roll"] for card in view["positions"]] == [False, True, False]
+    first, second = [card for card in view["positions"] if not card["is_roll"]]
     assert first == second
     assert first["is_roll"] is False
     assert first["status"] == "建议平仓"
     assert first["close_ask"] == "$0.50"
     assert first["realized_if_close"] == "+$25.00"
+    assert [card["is_roll"] for card in _view(rows, limit=2)["positions"]] == [False, True]
 
 
 @pytest.mark.parametrize("render,delivery_kind", [
@@ -254,7 +278,7 @@ def test_visible_group_acknowledges_every_member_lot_and_respects_truncation(ren
         _roll_row("first"), _roll_row("second"),
         _roll_row("hidden", target_contract="HIDDEN_TARGET"),
     ])
-    limits = {"max_actions_per_priority": 1}
+    limits = {"max_items_per_account": 1}
     identities = sorted(daily_brief_roll_notification_identities(brief))
     args = (brief, identities) if delivery_kind == "candidate_alert" else (brief,)
     message = render(*args, limits=limits)
@@ -276,7 +300,13 @@ def test_roll_cards_preserve_close_advice_for_each_close_member(grouped: bool) -
     close.update(
         recommendation_state="close", notification_eligible=True,
         quote_status="priced", evaluation_status="evaluable",
-        metrics={"ask": 0.5, "estimated_pnl_if_close_net": 25, "net_capture_ratio": 0.8},
+        metrics={
+            "ask": 0.5,
+            "estimated_pnl_if_close_net": 25,
+            "net_capture_ratio": 0.8,
+            "capital_basis": 10000,
+            "remaining_max_annualized_return": 0.02,
+        },
     )
     rows = [first, close] if grouped else [close]
     if grouped:
@@ -309,11 +339,17 @@ def test_truncated_group_cannot_borrow_identical_totals_from_another_old_positio
     ])
     cards = build_daily_brief_user_view(brief)["positions"]
     assert len(cards) == 2
+    assert set(cards[0]["roll_identities"]) == daily_brief_roll_notification_identities(
+        {**brief, "positions": brief["positions"][2:]},
+    )
+    assert set(cards[1]["roll_identities"]) == daily_brief_roll_notification_identities(
+        {**brief, "positions": brief["positions"][:2]},
+    )
     assert cards[0]["details"][1:] == cards[1]["details"][1:]
     message = render(brief)
     first_line = cards[1]["details"][0]
     truncated = message[:message.index(first_line) + len(first_line)]
-    expected = daily_brief_roll_notification_identities({**brief, "positions": brief["positions"][:2]})
+    expected = daily_brief_roll_notification_identities({**brief, "positions": brief["positions"][2:]})
     assert select_rendered_position_roll_identities(
         brief, delivery_kind="fixed_report", rendered_message=truncated,
     ) == expected
@@ -338,7 +374,7 @@ def test_final_transport_only_acknowledges_complete_grouped_cards(monkeypatch, p
         fallback_open_id="ou_fixture",
     )
     identities = sorted(daily_brief_roll_notification_identities(brief))
-    expected = daily_brief_roll_notification_identities({**brief, "positions": brief["positions"][:2]})
+    expected = daily_brief_roll_notification_identities({**brief, "positions": brief["positions"][2:]})
     assert set(tick_notification_flow._daily_brief_transport_roll_identities(
         brief, identities, delivery_kind="fixed_report", diff={}, limits={},
         rendered_message=truncate(text) if partial_output == "message" else text,
@@ -362,39 +398,72 @@ def test_historical_hk_briefs_render_three_distinct_roll_actions(account: str, e
     fixture = Path(__file__).parent / "fixtures" / "daily_brief_roll_grouping" / f"{account}.json"
     brief = json.loads(fixture.read_text())
     original = deepcopy(brief)
-    limits = {"max_actions_per_priority": 5, "max_candidates_per_strategy": 3}
+    limits = {"max_items_per_account": 5, "max_candidates_per_strategy": 3}
     view = build_daily_brief_user_view(brief, limits=limits)
     cards = [card for card in view["positions"] if card["is_roll"]]
     assert len(cards) == 3
-    by_lot = {row["position_lot_id"]: row for row in brief["positions"]}
+    by_identity = {}
+    for row in brief["positions"]:
+        for identity in daily_brief_roll_notification_identities({**brief, "positions": [row]}):
+            assert identity not in by_identity
+            by_identity[identity] = row
+    expected_by_action = {expected[:4]: expected[4:] for expected in expected_groups}
+    assert len(expected_by_action) == 3
+    expected_order = {
+        "lx": [
+            ("9992.HK", "2026-11-27", 140, "HK.POP270128P137500"),
+            ("0700.HK", "2026-11-27", 410, "HK.TCH270128P400000"),
+            ("0700.HK", "2026-11-27", 420, "HK.TCH270128P410000"),
+        ],
+        "sy": [
+            ("9992.HK", "2026-11-27", 140, "HK.POP270128P137500"),
+            ("0700.HK", "2026-11-27", 420, "HK.TCH270128P410000"),
+            ("9992.HK", "2026-12-30", 140, "HK.POP270128P137500"),
+        ],
+    }
     seen_actions = set()
     target_old_positions: dict[str, set] = {}
-    for card, expected in zip(cards, expected_groups):
-        symbol, expiration, strike, contract, lots, contracts, credit = expected
+    cards_by_action = {}
+    displayed_actions = []
+    annualized_returns = []
+    for card in cards:
+        members = [by_identity[identity] for identity in card["roll_identities"]]
+        representative = members[0]
+        target = representative["roll_advice"]["candidates"][0]
+        action_key = (
+            representative["symbol"], representative["expiration"],
+            representative["strike"], target["contract"],
+        )
+        lots, contracts, credit = expected_by_action[action_key]
+        symbol, expiration, strike, contract = action_key
         assert card["lot_count"] == lots
+        assert len(members) == lots
         assert card["contracts"] == contracts
         assert card["net_credit"] == pytest.approx(credit)
         assert contract in card["details"][0]
         # Every displayed member matches the complete old-position/target key.
-        for identity in card["roll_identities"]:
-            members = [row for row in by_lot.values() if identity in daily_brief_roll_notification_identities(
-                {**brief, "positions": [row]},
-            )]
-            member, = members
+        for member in members:
             assert (member["symbol"], member["expiration"], member["strike"]) == (symbol, expiration, strike)
             assert member["roll_advice"]["candidates"][0]["contract"] == contract
-        action_key = (symbol, expiration, strike, contract)
         assert action_key not in seen_actions
         seen_actions.add(action_key)
         old_positions = target_old_positions.setdefault(contract, set())
         assert (symbol, expiration, strike) not in old_positions
         old_positions.add((symbol, expiration, strike))
+        cards_by_action[action_key] = card
+        displayed_actions.append(action_key)
+        annualized_returns.append(target["incremental_annualized_return"])
+    assert seen_actions == set(expected_by_action)
+    assert displayed_actions == expected_order[account]
+    assert all(left > right for left, right in zip(annualized_returns, annualized_returns[1:]))
     if account == "lx":
         assert len(target_old_positions) == 3
-        assert "合计 3 手" in cards[1]["details"]
-        assert "每手净收取：HKD 642.00" in cards[1]["details"]
-        assert "合计 2 手" in cards[2]["details"]
-        assert "每手净收取：HKD 476.35" in cards[2]["details"]
+        pop_details = cards_by_action[("9992.HK", "2026-11-27", 140, "HK.POP270128P137500")]["details"]
+        tch_details = cards_by_action[("0700.HK", "2026-11-27", 420, "HK.TCH270128P410000")]["details"]
+        assert "合计 3 手" in pop_details
+        assert "每手净收取：HKD 642.00" in pop_details
+        assert "合计 2 手" in tch_details
+        assert "每手净收取：HKD 476.35" in tch_details
     else:
         assert target_old_positions["HK.POP270128P137500"] == {
             ("9992.HK", "2026-11-27", 140), ("9992.HK", "2026-12-30", 140),
