@@ -203,16 +203,13 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
     name="candidate_filter_explain",
     catalog_summary="解释候选机会的筛选结果与排除原因。",
     description=(
-        "Explain the recorded opening decision for a symbol from a terminal manifest-bound account snapshot. "
-        "Direct scans may supply an explicitly marked scan_status_only index: it explains status and sanitized detail, "
-        "with candidate_evidence_available=false and no accepted candidate authority. The tool never re-filters rows. "
-        "Delta is a hard gate, never a rank factor; report only the recorded threshold and evidence, without inferring a default for historical rows. "
-        "Explicit run_id and run_selector are mutually exclusive. Omitted run_id or run_selector=latest selects the latest account attempt, "
-        "including a newer direct scan after the scheduler pointer, skipping only proven scheduler skips. "
-        "Use latest_notification only when the question refers to a delivered notification. "
-        "With run_selector=latest_notification it resolves the validated source run of the most recent report actually delivered "
-        "to the account on notification_date (default: today, runtime host local timezone), so a user can ask why a symbol was "
-        "filtered right after a monitoring notification arrives."
+        "Explain recorded opening decisions from a manifest-bound snapshot without re-filtering. "
+        "Direct scan_status_only indexes explain status/detail with candidate_evidence_available=false, never candidate authority. "
+        "Delta is a hard gate, never a rank factor; report recorded thresholds, never inferred historical defaults. "
+        "run_id and run_selector are exclusive. Omitted run_id or latest selects the newest account attempt, including direct scans "
+        "after the scheduler pointer; skip only proven scheduler skips. "
+        "For delivered-notification questions, latest_notification selects the validated source of the latest report delivered "
+        "on notification_date (default today in runtime host local timezone)."
     ),
     requires=("candidate_snapshot_manifest", "opening_candidate_snapshot"),
     capabilities=("opening_candidate_snapshot", "filter_explain", "read_only"),

@@ -438,7 +438,7 @@ def run_symbol_monitoring(
     except Exception as exc:
         if isinstance(exc, (SymbolProcessingTimeout, StrategyScanStatusError)):
             raise
-        if frozen_required_data and not isinstance(exc, FrozenRequiredDataUnavailable):
+        if not isinstance(exc, FrozenRequiredDataUnavailable) and not direct_status_enabled:
             raise
         failure_reason = (
             "required_data_snapshot_unavailable"

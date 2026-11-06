@@ -250,6 +250,13 @@ def test_direct_process_symbol_publishes_failure_and_latest_explain(tmp_path, mo
     assert reads == []
 
 
+def test_direct_call_without_logical_account_preserves_fetch_exception(tmp_path, monkeypatch):
+    process_symbol = _patch_direct_process(monkeypatch)
+    with pytest.raises(SourceReceiptError, match="invalid_row_identity"):
+        process_symbol("python", tmp_path, deepcopy(CONFIG["symbols"][0]), 3)
+    assert not (tmp_path / "output_runs").exists()
+
+
 def test_direct_success_diagnostics_do_not_create_accepted_candidates(tmp_path, monkeypatch):
     process_symbol = _patch_direct_process(monkeypatch, error=None, completed=True)
     process_symbol("python", tmp_path, deepcopy(CONFIG["symbols"][0]), 3, runtime_config=CONFIG)

@@ -16,7 +16,6 @@ from src.application.candidate_snapshot_contract import (
     validate_candidate_run_mode,
 )
 from src.application.source_receipts import sha256_bytes
-from src.application.research.redaction import redact_text
 from src.infrastructure.io_utils import atomic_write_json
 
 
@@ -48,6 +47,10 @@ def sanitize_strategy_status_detail(detail: Any) -> str | None:
     """Keep bounded diagnostics out of status decisions and remove known secrets."""
     if not isinstance(detail, str) or not detail.strip():
         return None
+    # Ordinary tick startup must not import the research side lane. Load the
+    # shared redactor only when a diagnostic actually needs sanitizing.
+    from src.application.research.redaction import redact_text
+
     # Redact before truncation so a cut cannot expose part of a quoted secret.
     text = redact_text(detail)
     text = " ".join("".join(ch for ch in text if ch.isprintable() or ch.isspace()).split())
