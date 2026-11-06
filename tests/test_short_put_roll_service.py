@@ -603,10 +603,12 @@ def test_registered_tool_requires_explicit_expiry_and_has_no_trade_effects():
 
 @pytest.fixture
 def frozen_roll_ranges(monkeypatch):
+    # Use the real calculator so frozen targets include #1023's one-contract
+    # economics as well as the existing partial-coverage evidence.
+    roll_policy = service.require_position_advice_plugin()
     policy = SimpleNamespace(
         old_position_in_roll_scope=lambda **_: True,
-        evaluate_short_put_roll=lambda *_, **__: {"accepted": True, "reason_codes": [],
-            "metrics": {"incremental_net_cash_annualized_return": 0.2}},
+        evaluate_short_put_roll=roll_policy.evaluate_short_put_roll,
         rank_short_put_roll_candidates=lambda rows: list(rows),
         remaining_max_annualized_return=lambda **_: 0.1,
     )
