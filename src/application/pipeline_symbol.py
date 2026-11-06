@@ -53,6 +53,7 @@ def process_symbol(
     fetch_only: bool = False,
     quote_snapshot_id: str | None = None,
     source_producer_run_id: str | None = None,
+    strategy_status_run_id: str | None = None,
     required_data_snapshot_manifest: Path | None = None,
     required_data_snapshot_run_id: str | None = None,
     required_data_snapshot_batch: FrozenRequiredDataBatch | None = None,
@@ -67,6 +68,7 @@ def process_symbol(
         Callable[[dict[str, Any]], None] | None
     ) = None,
     experience: bool = False,
+    account_display_name: str | None = None,
 ) -> list[dict]:
     """Thin wrapper around the canonical symbol monitoring use case."""
     if report_dir is None:
@@ -91,6 +93,7 @@ def process_symbol(
             fetch_only=bool(fetch_only),
             quote_snapshot_id=quote_snapshot_id,
             source_producer_run_id=source_producer_run_id,
+            strategy_status_run_id=strategy_status_run_id,
             required_data_snapshot_manifest=required_data_snapshot_manifest,
             required_data_snapshot_run_id=required_data_snapshot_run_id,
             required_data_snapshot_batch=required_data_snapshot_batch,
@@ -99,6 +102,7 @@ def process_symbol(
             candidate_decisions_sink_fn=candidate_decisions_sink_fn,
             combo_evidence_sink_fn=combo_evidence_sink_fn,
             experience=experience,
+            account_display_name=account_display_name,
         ),
         deps=SymbolMonitoringDependencies(
             build_converter_fn=build_converter,

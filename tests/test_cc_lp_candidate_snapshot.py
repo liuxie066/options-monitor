@@ -52,7 +52,9 @@ def _pair(**overrides) -> dict:
     return row
 
 
-def _seal(tmp_path: Path, *, pairs: bool = True, status: str = "completed") -> dict:
+def _seal(
+    tmp_path: Path, *, pairs: bool = True, status: str = "completed", detail: str | None = None,
+) -> dict:
     return seal_cc_lp_candidate_snapshot(
         base=tmp_path,
         run_id="run-1",
@@ -63,13 +65,42 @@ def _seal(tmp_path: Path, *, pairs: bool = True, status: str = "completed") -> d
         run_mode={"scan_mode": "standard", "executable": True},
         dependencies=_dependencies(),
         scan_statuses=[
-            _scope(
-                status=status,
-                reason="no_covered_stock" if status == "not_applicable" else None,
-            )
+            {
+                **_scope(
+                    status=status,
+                    reason="no_covered_stock" if status == "not_applicable" else None,
+                ),
+                **({"detail": detail} if detail is not None else {}),
+            }
         ],
         ranked_pairs=[_pair()] if pairs else [],
     )
+
+
+@pytest.mark.parametrize("detail", [None, "Required-data scan retained covered expiration rows."])
+@pytest.mark.parametrize("pairs", [True, False])
+def test_cc_lp_status_detail_roundtrips_without_changing_candidate_decisions(
+    tmp_path: Path, detail: str | None, pairs: bool,
+) -> None:
+    for base in (tmp_path / "without-detail", tmp_path / "observed"):
+        base.mkdir()
+    baseline = _seal(tmp_path / "without-detail", pairs=pairs)
+    payload = _seal(tmp_path / "observed", pairs=pairs, detail=detail)
+
+    assert payload["opening_status"] == ("candidates_found" if pairs else "no_candidate")
+    assert payload["scope_results"][0]["status"] == "completed"
+    if detail is None:
+        assert "reason_detail" not in payload["scope_results"][0]
+    else:
+        assert payload["scope_results"][0]["reason_detail"] == detail
+    assert payload == load_cc_lp_candidate_snapshot(
+        base=tmp_path / "observed", run_id="run-1", account="lx",
+    )
+    assert payload["ranked_pairs"] == baseline["ranked_pairs"]
+    assert [
+        {key: value for key, value in row.items() if key != "reason_detail"}
+        for row in payload["scope_results"]
+    ] == baseline["scope_results"]
 
 
 def test_cc_lp_snapshot_seals_and_loads_with_pairs(tmp_path: Path) -> None:
