@@ -34,6 +34,7 @@ from src.application.candidate_scanning import (
     project_evidence_scan_status,
     run_candidate_scan,
 )
+from src.application.required_data_coverage import covered_required_data_frame
 from src.application.required_data_snapshot import (
     FrozenRequiredDataBatch,
     FrozenRequiredDataUnavailable,
@@ -103,8 +104,12 @@ def _frames_from_snapshot(
         unavailable: dict[str, str] = {}
         for symbol in symbols:
             try:
-                _entry, csv_bytes = snapshot.resolve(symbol)
-                frames[symbol] = pd.read_csv(BytesIO(csv_bytes), converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
+                entry, csv_bytes = snapshot.resolve(symbol)
+                frame = pd.read_csv(BytesIO(csv_bytes), converters={field: str for field in ("multiplier", "chain_multiplier", "snapshot_multiplier")})
+                coverage = entry.get("required_data_coverage")
+                frames[symbol] = covered_required_data_frame(frame, coverage)
+                if coverage and coverage.get("status") == "partial":
+                    frames[symbol].attrs["required_data_coverage"] = coverage
             except (FrozenRequiredDataUnavailable, pd.errors.ParserError, pd.errors.EmptyDataError, UnicodeDecodeError) as exc:
                 unavailable[symbol] = getattr(exc, "reason", "required_data_invalid")
         return frames, unavailable
@@ -118,6 +123,24 @@ def _frames_from_snapshot(
     return frames, {
         symbol: "symbol_entry_missing" for symbol in symbols if symbol not in frames
     }
+
+
+def _coverage_fields(frames: Mapping[str, pd.DataFrame], symbol: str) -> dict[str, Any]:
+    frame = frames.get(symbol)
+    coverage = frame.attrs.get("required_data_coverage") if frame is not None else None
+    return {"required_data_coverage": coverage} if coverage else {}
+
+
+def _scope_coverage(
+    scopes: list[dict[str, Any]], frames: Mapping[str, pd.DataFrame],
+) -> list[dict[str, Any]]:
+    for scope in scopes:
+        fields = _coverage_fields(frames, str(scope.get("symbol") or ""))
+        if fields:
+            scope.update(fields)
+            if scope.get("status") == "completed":
+                scope["reason_code"] = "partial_data"
+    return scopes
 
 
 def _candidate_universe(
@@ -565,7 +588,7 @@ def run_wheel_call_scan(
             scopes.append({**base_scope, "status": "failed", "reason_code": "wheel_scan_failed"})
     return {
         "account": account,
-        "scope_results": scopes,
+        "scope_results": _scope_coverage(scopes, frames),
         "raw_candidates": raw_by_batch,
         "capacity_claims": claims,
         "calculation_decisions": calculation_decisions,
@@ -824,7 +847,7 @@ def run_wheel_put_scan(
             scopes.append({**base_scope, "status": "failed", "reason_code": "wheel_scan_failed"})
     return {
         "account": account,
-        "scope_results": scopes,
+        "scope_results": _scope_coverage(scopes, frames),
         "raw_candidates": raw_by_branch,
         "capacity_claims": claims,
         "calculation_decisions": calculation_decisions,

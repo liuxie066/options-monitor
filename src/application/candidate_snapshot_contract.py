@@ -342,6 +342,76 @@ def dependency_hash(rows: Iterable[Mapping[str, Any]], kind: str) -> str:
     raise CandidateSnapshotContractError(f"candidate dependency is missing: {kind}")
 
 
+def required_data_coverage_fields(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Preserve optional expiration coverage evidence across candidate projections."""
+
+    if "required_data_coverage" not in row:
+        return {}
+    raw = row["required_data_coverage"]
+    if not isinstance(raw, Mapping):
+        raise CandidateSnapshotContractError("required-data coverage must be an object")
+    coverage = normalize_json_value(dict(raw), field="required_data_coverage")
+    if (
+        coverage.get("status") != "partial"
+        or coverage.get("reason_code") != "required_data_partial_coverage"
+    ):
+        raise CandidateSnapshotContractError("required-data partial coverage status is invalid")
+
+    def expiration_list(value: Any) -> list[str]:
+        if not isinstance(value, list) or not value:
+            raise CandidateSnapshotContractError("required-data coverage expirations are invalid")
+        for expiration in value:
+            try:
+                valid = isinstance(expiration, str) and date.fromisoformat(expiration).isoformat() == expiration
+            except ValueError:
+                valid = False
+            if not valid:
+                raise CandidateSnapshotContractError("required-data coverage expiration is invalid")
+        if len(set(value)) != len(value):
+            raise CandidateSnapshotContractError("required-data coverage expiration is duplicated")
+        return value
+
+    covered = expiration_list(coverage.get("covered_expirations"))
+    incomplete = expiration_list(coverage.get("incomplete_expirations"))
+    if set(covered) & set(incomplete):
+        raise CandidateSnapshotContractError("required-data coverage expiration states overlap")
+    rows = coverage.get("per_expiration")
+    if not isinstance(rows, list) or any(not isinstance(item, Mapping) for item in rows):
+        raise CandidateSnapshotContractError("required-data per-expiration coverage is invalid")
+    expirations = expiration_list([item.get("expiration") for item in rows])
+    if set(expirations) != set(covered) | set(incomplete):
+        raise CandidateSnapshotContractError("required-data coverage expiration summary mismatch")
+    allowed_missing = {"lower_bound", "upper_bound", "strike_window", "exact_strike", "rows"}
+    for item in rows:
+        is_covered = item["expiration"] in covered
+        if item.get("status") not in ({"covered"} if is_covered else {"incomplete", "missing"}):
+            raise CandidateSnapshotContractError("required-data expiration coverage status mismatch")
+        missing = item.get("missing_requirements")
+        if not isinstance(missing, list) or bool(missing) == is_covered:
+            raise CandidateSnapshotContractError("required-data missing requirements are invalid")
+        for requirement in missing:
+            if not isinstance(requirement, Mapping):
+                raise CandidateSnapshotContractError("required-data missing requirement is invalid")
+            index = requirement.get("request_index")
+            gaps = requirement.get("missing")
+            if (
+                isinstance(index, bool) or not isinstance(index, int) or index < 0
+                or requirement.get("option_type") not in {"put", "call"}
+                or not isinstance(gaps, list) or not gaps
+                or any(not isinstance(gap, str) or gap not in allowed_missing for gap in gaps)
+            ):
+                raise CandidateSnapshotContractError("required-data missing requirement scope is invalid")
+            if "missing_exact_strikes" in requirement:
+                strikes = requirement["missing_exact_strikes"]
+                if (
+                    "exact_strike" not in gaps or not isinstance(strikes, list)
+                    or any(isinstance(strike, bool) or not isinstance(strike, (int, float))
+                           or not math.isfinite(strike) for strike in strikes)
+                ):
+                    raise CandidateSnapshotContractError("required-data missing exact strikes are invalid")
+    return {"required_data_coverage": coverage}
+
+
 def normalize_combo_scope_results(
     rows: Iterable[Mapping[str, Any]],
     *,
@@ -379,6 +449,7 @@ def normalize_combo_scope_results(
                 "reason_code": str(raw.get("reason") or raw.get("reason_code") or "").strip() or None,
                 "quote_snapshot_id": str(raw.get("quote_snapshot_id") or "").strip() or None,
                 "quote_receipt_relpath": str(raw.get("quote_receipt_relpath") or "").strip() or None,
+                **required_data_coverage_fields(raw),
             }
         )
     return sorted(out, key=lambda row: (str(row["symbol"]), str(row["strategy_mode"])))

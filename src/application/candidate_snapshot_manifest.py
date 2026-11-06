@@ -285,6 +285,10 @@ def _snapshot_strategy_scopes(
             raise CandidateSnapshotManifestError(
                 f"candidate owner terminal reason mismatch: {owner}"
             )
+        if snapshot_row.get("required_data_coverage") != index_row.get("required_data_coverage"):
+            raise CandidateSnapshotManifestError(
+                f"candidate owner required-data coverage mismatch: {owner}"
+            )
         for index_field, snapshot_field in (
             ("snapshot_id", "quote_snapshot_id"),
             ("receipt_relpath", "quote_receipt_relpath"),

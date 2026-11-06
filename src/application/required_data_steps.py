@@ -25,7 +25,7 @@ from src.application.source_receipts import (
 from src.application.required_data_coverage import (
     build_required_data_coverage,
     load_required_data_payload_from_csv,
-    required_data_csv_covers_fetch_plan,
+    evaluate_required_data_frame_fetch_plan_debug,
 )
 from src.application.required_data_fetching import (
     RequiredDataFetchRequest,
@@ -189,9 +189,13 @@ def ensure_required_data(
                             if isinstance(evidence, dict)
                             else None
                         )
-                    if required_data_csv_covers_fetch_plan(
-                        parsed=parsed, fetch_plan=fetch_plan
-                    ):
+                    import pandas as pd
+
+                    coverage = evaluate_required_data_frame_fetch_plan_debug(
+                        pd.read_csv(parsed, float_precision="round_trip"),
+                        fetch_plan.to_debug_dict(),
+                    )
+                    if coverage.accepted:
                         _write_fetch_plan_debug(
                             symbol=sym,
                             required_data_dir=required_data_dir,
@@ -201,7 +205,10 @@ def ensure_required_data(
                                 parsed=parsed, symbol=sym
                             ),
                         )
-                        return None
+                        return (
+                            {"required_data_coverage": coverage.to_dict()}
+                            if coverage.status == "partial" else None
+                        )
                 except Exception:
                     should_refetch = True
             elif min_dte is not None:
@@ -383,6 +390,9 @@ def ensure_required_data(
         if isinstance(evidence, dict):
             return dict(evidence)
         if not producer_run_id:
+            coverage = finalized.get("required_data_coverage")
+            if isinstance(coverage, dict) and coverage.get("status") == "partial":
+                return {"required_data_coverage": coverage}
             return None
         return resolve_exact_fresh_required_data_quote_receipt(
             runtime_root=base,

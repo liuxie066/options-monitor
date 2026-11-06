@@ -938,6 +938,8 @@ def _load_opening_candidate_families(
                 "actionable": False,
                 "reason": "opening_candidate_strategy_partial_data",
                 "reason_code": affected.get("reason_code"),
+                **({"required_data_coverage": affected["required_data_coverage"]}
+                   if affected.get("required_data_coverage") else {}),
             }
         )
 
@@ -2879,6 +2881,19 @@ def _append_strategy_status_gaps(
         }
         if item.get("candidate_owner") == "opening":
             scope["direction"] = item.get("strategy_mode")
+        coverage = item.get("required_data_coverage")
+        if isinstance(coverage, Mapping) and not any(
+            gap.get("symbol") == symbol and gap.get("strategy_family") == family
+            and gap.get("required_data_coverage") == coverage
+            and all(gap.get(key) == scope.get(key) for key in ("direction", "candidate_owner"))
+            for gap in data_gaps
+        ):
+            data_gaps.append({
+                **scope, "severity": "warning", "actionable": False,
+                "reason": "opening_candidate_strategy_partial_data",
+                "reason_code": "required_data_partial_coverage",
+                "required_data_coverage": dict(coverage),
+            })
         if status in {"completed", "not_applicable"}:
             if _text(item.get("reason")) != "partial_data":
                 continue

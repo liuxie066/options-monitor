@@ -19,6 +19,7 @@ from src.application.candidate_snapshot_manifest import (
     CandidateSnapshotManifestError,
     validate_candidate_snapshot_manifest,
 )
+from src.application.candidate_snapshot_contract import required_data_coverage_fields
 from src.application.candidate_evidence_history import (
     validate_historical_candidate_snapshot_bundle_bytes,
 )
@@ -1706,6 +1707,7 @@ def _validate_required_data_reference(
         _fail("REFERENCE_HASH_INVALID", "required-data content hash mismatch")
     symbols = _mapping(payload.get("symbols"), "required-data symbols")
     ready_count = 0
+    has_partial_coverage = False
     for symbol, raw in symbols.items():
         if not isinstance(symbol, str) or symbol != symbol.strip().upper():
             _fail("REFERENCE_PAYLOAD_INVALID", "required-data symbol is not canonical")
@@ -1718,6 +1720,12 @@ def _validate_required_data_reference(
                 | REQUIRED_DATA_READY_ENTRY_OPTIONAL_FIELDS.intersection(row)
             )
             _keys(row, ready_keys, f"required-data symbols.{symbol}")
+            if "required_data_coverage" in row:
+                try:
+                    required_data_coverage_fields(row)
+                except ValueError as exc:
+                    _fail("REFERENCE_PAYLOAD_INVALID", f"required-data {symbol} coverage is invalid: {exc}")
+                has_partial_coverage = True
             if "scan_blob_ref" in row:
                 blob_ref = _mapping(row["scan_blob_ref"], f"required-data {symbol} scan_blob_ref")
                 try:
@@ -1757,7 +1765,7 @@ def _validate_required_data_reference(
     }
     if summary != expected_summary:
         _fail("REFERENCE_PAYLOAD_INVALID", "required-data summary mismatch")
-    expected_status = "complete" if ready_count == len(symbols) and symbols else "partial" if ready_count else "failed"
+    expected_status = "complete" if ready_count == len(symbols) and symbols and not has_partial_coverage else "partial" if ready_count else "failed"
     if status != expected_status:
         _fail("REFERENCE_PAYLOAD_INVALID", "required-data status mismatch")
 

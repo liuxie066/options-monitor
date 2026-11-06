@@ -101,6 +101,42 @@ SQLite ledger position_lots
 
 `position_advice_read` 是统一的持仓建议读取工具，从 canonical latest Daily Brief 的 `positions` 读取平仓、Put 向下移仓及 CC 上滚建议，对应 `close`、`roll_down`、`roll_up`。读取沿用简报的账户、市场和完整性校验，不刷新持仓、不拉取行情、不重新评估，也不发送通知。平仓行的 `close_actionable` 由简报生产方按完整策略证据、在通知展示裁剪前封存；读取时再结合简报时效，`notification_eligible` 仅控制通知展示，历史缺少决策资格字段的行不升级为当前可操作。既有 `close_advice_read` 仍可只读平仓报告：默认路径与 `run_id` 路径只读取通过上述 sealed 校验的报告；显式 `report_path` 用于查看历史字节，缺少完整 sealed provenance 或与 manifest 不一致的历史行一律投影为 `not_evaluable`。
 
+### Required-data 到期日覆盖与部分可用
+
+覆盖判定的最小检查单位是 `request_index × option_type × expiration`，再按到期日汇总。
+一个到期日的所有请求范围均通过才标为 `covered`；有行但缺 strike 窗口边界或必需 exact strike
+时标为 `incomplete`；缺少未经供应商完整证据证明为空的请求行时标为 `missing`。
+同一天任何一个方向或请求范围不完整，该日全部行都不进入开仓候选、Wheel 或平仓／移仓评估。
+窗口来源、边界容差和 exact strike 的绝对容差保持不变。原有完整供应商 scope 证据仍可证明
+实际有限合约网格或合法空集；没有这种证据时继续逐日执行数值边界检查，不能借另一日的行补齐。
+
+至少一个日期 `covered` 且另有缺口时，覆盖结果为 `status=partial`、
+`reason_code=required_data_partial_coverage`。**部分覆盖不等于完整**：只有 `covered_expirations`
+中的行可用于策略，`incomplete_expirations` 包含所有被排除的日期（包括 `missing`）。
+`per_expiration` 逐日记录 `expiration`、`status` 和 `missing_requirements`；缺口中保留
+`request_index`、`option_type`、`missing`（`lower_bound`、`upper_bound`、`strike_window`、
+`rows`、`exact_strike`）以及适用时的 `missing_exact_strikes`。这些值是按绑定数据重新计算的，
+不能由供应商自报的完整状态替代。缺失数据不补零、不推断，也不使用其他日期的报价代替。
+
+Symbol monitoring 的汇总使用 `required_data_status=incomplete`、
+`required_data_reason=required_data_partial_coverage` 并携带 `required_data_coverage`。
+`strategy_scan_status.v3` 保持现有终态：策略正常处理可用日期后为 `completed`、`reason=partial_data`，
+候选数可以大于零；新增可选对象 `required_data_coverage` 携带上述覆盖结果。策略自身的失败或
+不可用状态仍优先保留，覆盖详情继续可读。状态索引、候选快照、候选解释／排序和简报保留该对象，
+简报按具体日期展示数据缺口。此次采用新增可选字段，不提升 v3 schema：终态、候选数与
+原有 `partial_data` 语义兼容，缺少新字段的历史载荷仍按既有合同读取。
+
+冻结 required-data manifest 保留可用条目的 `status=ready`，新增可选
+`required_data_coverage`；只要任一可用条目为部分覆盖，manifest 总体为 `partial`。
+`ready` 表示有可消费的冻结数据，不代表每个计划日期都完整。收据绑定的原始 JSON、CSV
+及其 hash 保留全部真实采集行；各消费者只在读取后的内存视图中过滤日期，覆盖详情须与绑定行重算结果一致。
+
+没有任何日期通过时仍拒绝整批：窗口／行缺口为 `invalid_row_identity`，只有 exact contract
+缺口时保持 `required_contract_missing`，不得发布可执行报价收据。计划错误、身份冲突、
+证据不一致、过期数据和必需 RV 错误仍保留原来的整批 fail-closed 边界；它们不能被局部覆盖掩盖。
+没有 `explicit_expirations` 的旧策略窗口检查与原有合法 success-empty 分支不变；
+声明为显式计划却缺少该列表仍是合同错误。
+
 ### Tick 调度移仓与提醒
 
 启用 Position Advice 后，Tick 在同一批 run-scoped required-data plan 中封存旧仓报价、适用的替代期权链及搜索覆盖证据，评估期间不另拉行情。搜索最晚到期日为本次市场日期加上该标的对应方向配置的 `max_dte`：Put 使用 `sell_put`，Call 使用 `sell_call`，默认均为 60 天；这只规定调度搜索上限，主动查询仍显式传入 `max_new_expiration`。新到期日不得早于旧仓，新仓 DTE 必须大于零；上限容纳不了旧仓时没有合格搜索区间，不扩张用户配置。

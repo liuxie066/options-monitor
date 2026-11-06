@@ -266,6 +266,42 @@ def test_current_status_rejects_legacy_run_before_writing(tmp_path: Path) -> Non
     assert not (report_dir / "nvda_combo_yield_scan_status.v3.json").exists()
 
 
+def test_current_status_preserves_partial_expiration_coverage(tmp_path: Path) -> None:
+    coverage = {
+        "status": "partial", "reason_code": "required_data_partial_coverage",
+        "covered_expirations": ["2026-11-13"],
+        "incomplete_expirations": ["2026-11-20"],
+        "per_expiration": [
+            {"expiration": "2026-11-13", "status": "covered", "missing_requirements": []},
+            {"expiration": "2026-11-20", "status": "incomplete", "missing_requirements": [
+                {"request_index": 0, "option_type": "put", "missing": ["upper_bound"]}
+            ]},
+        ],
+    }
+    status = publish_strategy_scan_status(
+        report_dir=tmp_path, run_id="run-1", account="lx", market="US", symbol="NVDA",
+        strategy_family="combo_yield", status="completed", candidate_count=1,
+        reason="partial_data", required_data_coverage=coverage,
+    )
+    assert status["required_data_coverage"] == coverage
+    index = _publish_index(report_dir=tmp_path)
+    assert index["items"][0]["required_data_coverage"] == coverage
+    validate_strategy_scan_status_index({key: value for key, value in index.items() if key != "index_path"})
+    with pytest.raises(StrategyScanStatusError, match="partial scan evidence"):
+        publish_strategy_scan_status(
+            report_dir=tmp_path / "clean", run_id="run-1", account="lx", market="US", symbol="NVDA",
+            strategy_family="combo_yield", status="completed", candidate_count=1,
+            required_data_coverage=coverage,
+        )
+    coverage["per_expiration"][1]["status"] = "covered"
+    with pytest.raises(StrategyScanStatusError, match="status mismatch"):
+        publish_strategy_scan_status(
+            report_dir=tmp_path / "invalid", run_id="run-1", account="lx", market="US", symbol="NVDA",
+            strategy_family="combo_yield", status="completed", candidate_count=1,
+            reason="partial_data", required_data_coverage=coverage,
+        )
+
+
 def test_current_status_retry_adopts_the_same_semantic_payload(tmp_path: Path) -> None:
     report_dir = tmp_path / "reports"
     report_dir.mkdir()

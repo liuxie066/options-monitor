@@ -168,6 +168,8 @@ def _validate_required_data_payload_candidate_impl(
         raise SourceReceiptError("required-data JSON must be an object")
     meta = raw_payload.get("meta")
     meta = dict(meta) if isinstance(meta, Mapping) else {}
+    # Coverage is derived from verified rows, including for empty payloads.
+    meta.pop("required_data_coverage", None)
     if str(meta.get("status") or "").strip().lower() != "ok":
         raise SourceReceiptError(
             "provider_incomplete: incomplete required-data payload cannot "
@@ -323,8 +325,10 @@ def _validate_required_data_payload_candidate_impl(
             )
             raise SourceReceiptError(
                 f"{coverage.reason_code or 'internal_contract_error'}: "
-                f"required-data {subject} does not cover expected fetch contract"
+                f"required-data {subject} does not cover expected fetch contract; "
+                f"coverage={json.dumps(coverage.to_dict(), sort_keys=True)}"
             )
+        meta["required_data_coverage"] = coverage.to_dict()
         canonical_realized_volatility = (
             _validate_required_realized_volatility(meta=meta, rows=rows)
             if require_realized_volatility
@@ -409,8 +413,8 @@ def validate_required_data_quote_bytes(
     raw_json_bytes: bytes,
     required_data_csv_bytes: bytes,
     expected_fetch_contract: Mapping[str, Any],
-) -> None:
-    """Validate exact bytes after the canonical blob verified multiplier overrides."""
+) -> dict[str, Any]:
+    """Validate bound bytes and return coverage derived from their verified rows."""
 
     try:
         raw_payload = json.loads(bytes(raw_json_bytes).decode("utf-8"))
@@ -420,7 +424,7 @@ def validate_required_data_quote_bytes(
         frame = pd.read_csv(io.BytesIO(bytes(required_data_csv_bytes)), float_precision="round_trip")
     except Exception as exc:
         raise SourceReceiptError("required-data canonical CSV is unreadable") from exc
-    _validate_required_data_quote_content(
+    return _validate_required_data_quote_content(
         raw_payload=raw_payload,
         frame=frame,
         expected_fetch_contract=expected_fetch_contract,
@@ -462,6 +466,7 @@ def _validate_required_data_quote_content(
             f"{coverage.reason_code or 'internal_contract_error'}: "
             "required-data CSV does not cover expected fetch contract"
         )
+    meta["required_data_coverage"] = coverage.to_dict()
     return meta
 
 
@@ -473,8 +478,8 @@ def validate_required_data_quote_candidate(
     expected_fetch_contract: Mapping[str, Any],
     now: datetime | str | None = None,
     require_fresh: bool = False,
-) -> None:
-    """Validate cached/fresh bytes without publishing a receipt."""
+) -> dict[str, Any]:
+    """Validate cached/fresh bytes and return derived metadata without a receipt."""
 
     root_input = Path(producer_root)
     if (
@@ -501,6 +506,7 @@ def validate_required_data_quote_candidate(
             meta=meta,
             now=now,
         )
+    return meta
 
 
 def _snapshot_complete(meta: Mapping[str, Any]) -> bool:
@@ -1910,7 +1916,7 @@ def finalize_required_data_quote_candidate(
         producer_run_id=producer_run_id,
         preserve_existing_run_id=mode_norm in {"cached", "subprocess"},
     )
-    validate_required_data_quote_candidate(
+    validated_meta = validate_required_data_quote_candidate(
         producer_root=root,
         raw_path=raw_path,
         csv_path=csv_path,
@@ -1930,6 +1936,7 @@ def finalize_required_data_quote_candidate(
         "quote_receipt_path": None,
         "quote_receipt": None,
         "evidence": None,
+        "required_data_coverage": validated_meta.get("required_data_coverage"),
     }
     run_id = str(producer_run_id or "").strip()
     if not run_id:
@@ -2491,6 +2498,13 @@ def resolve_exact_fresh_required_data_quote_receipt(
                         csv_path=csv_path,
                     )
                 )
+            validated_meta = (
+                validate_required_data_quote_bytes(
+                    raw_json_bytes=raw_bytes,
+                    required_data_csv_bytes=csv_bytes,
+                    expected_fetch_contract=contract,
+                ) if contract is not None else {}
+            )
             observed = datetime.fromisoformat(
                 str(validated["source_observed_at"]).replace("Z", "+00:00")
             )
@@ -2517,6 +2531,7 @@ def resolve_exact_fresh_required_data_quote_receipt(
                         ),
                         "read_source": read_source,
                         "legacy_shadow_match": legacy_shadow_match,
+                        "required_data_coverage": validated_meta.get("required_data_coverage"),
                     },
                 )
             )

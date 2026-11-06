@@ -14,6 +14,7 @@ from src.application.candidate_snapshot_contract import (
     normalize_dependencies,
     normalize_json_value,
     required_text,
+    required_data_coverage_fields,
     sha256_text,
     utc_timestamp,
     validate_candidate_run_mode,
@@ -121,6 +122,7 @@ def _scopes(
                 "candidate_count": candidate_count,
                 "quote_snapshot_id": str(raw.get("quote_snapshot_id") or "").strip() or None,
                 "quote_receipt_relpath": str(raw.get("quote_receipt_relpath") or "").strip() or None,
+                **required_data_coverage_fields(raw),
             }
         )
     return sorted(

@@ -29,6 +29,7 @@ from src.application.candidate_snapshot_contract import (
     CandidateSnapshotContractError,
     OPENING_BROKER_SNAPSHOT_SCHEMA,
     assert_current_candidate_artifact_boundary,
+    required_data_coverage_fields,
     validate_candidate_run_mode,
 )
 from src.application.tick_run_workspace import (
@@ -671,6 +672,7 @@ def validate_opening_candidate_snapshot(
                     "reason": row.get("reason_code"),
                     "quote_snapshot_id": row.get("quote_snapshot_id"),
                     "quote_receipt_relpath": row.get("quote_receipt_relpath"),
+                    **required_data_coverage_fields(row),
                 }
                 for row in strategy_scopes
             )
@@ -900,10 +902,15 @@ def candidate_universe_summary(
                 and reason not in _BENIGN_ACCOUNT_NOT_APPLICABLE_REASONS
             )
         if incomplete:
+            coverage_fields = required_data_coverage_fields(raw)
             affected_by_scope[key] = {
                 "symbol": symbol,
                 "strategy_mode": mode,
-                "reason_code": reason or status,
+                "reason_code": (
+                    coverage_fields["required_data_coverage"]["reason_code"]
+                    if coverage_fields else reason or status
+                ),
+                **coverage_fields,
             }
     unavailable_reasons = {
         REJECT_EVIDENCE_UNAVAILABLE,
@@ -1401,6 +1408,7 @@ def _scope_results(
                 "reason_code": status.get("reason") or None,
                 "quote_snapshot_id": status.get("quote_snapshot_id"),
                 "quote_receipt_relpath": status.get("quote_receipt_relpath"),
+                **required_data_coverage_fields(status),
             }
         )
     for decision in decisions:
@@ -1532,6 +1540,7 @@ def _scan_statuses(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
                 "reason": str(item.get("reason") or "").strip() or None,
                 "quote_snapshot_id": str(item.get("quote_snapshot_id") or "").strip() or None,
                 "quote_receipt_relpath": str(item.get("quote_receipt_relpath") or "").strip() or None,
+                **required_data_coverage_fields(item),
             }
         )
     return sorted(out, key=lambda row: (str(row["symbol"]), str(row["strategy_mode"])))

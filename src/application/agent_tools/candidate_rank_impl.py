@@ -137,12 +137,20 @@ def candidate_rank_explain_tool(
                 "strategy_status": strategy_scope.get("status"),
                 "capacity_status": "demo_scenario",
             }
+        coverage = [
+            {"symbol": item.get("symbol"), **item["required_data_coverage"]}
+            for item in snapshot.get("scope_results") or []
+            if item.get("scope") == "strategy" and item.get("strategy_mode") == mode
+            and item.get("required_data_coverage")
+        ]
         groups.append(
             {
                 "mode": mode,
                 "ranking_policy": "opening_candidate_snapshot",
                 "strategy_status": strategy_result.get("strategy_status"),
                 "capacity_status": strategy_result.get("capacity_status"),
+                **({"data_status": "incomplete", "required_data_coverage": coverage}
+                   if coverage else {}),
                 "row_count": len(source_rows),
                 "ranked": ranked,
             }

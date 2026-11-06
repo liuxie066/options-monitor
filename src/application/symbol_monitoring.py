@@ -13,6 +13,7 @@ from domain.domain.sell_call_config import resolve_effective_sell_call_min_strik
 from domain.domain.symbol_identity import symbol_market
 from src.application.market_data_provider import resolve_market_data_provider, market_data_source
 from src.application.required_data_snapshot import assert_required_data_source
+from src.application.required_data_coverage import covered_required_data_frame
 from src.application.opend_symbol_outputs import SUCCESS_EMPTY_REASON_CODES
 from src.application.strategy_scan_failures import append_strategy_scan_failure
 from src.application.opend_fetch_config import opend_discovery_kwargs, opend_fetch_kwargs
@@ -222,6 +223,8 @@ def run_symbol_monitoring(
         or ""
     ).strip().upper()
 
+    partial_coverage: dict[str, Any] | None = None
+
     def _publish_status(
         *,
         family: str,
@@ -251,6 +254,7 @@ def run_symbol_monitoring(
                 receipt_relpath=receipt_relpath,
                 source_outcome=source_outcome,
                 reason_code=reason_code,
+                **({"required_data_coverage": partial_coverage} if partial_coverage else {}),
             )
         except SymbolProcessingTimeout:
             raise
@@ -478,6 +482,17 @@ def run_symbol_monitoring(
         or ""
     ).strip()
 
+    coverage_payload = (
+        quote_evidence.get("required_data_coverage")
+        if isinstance(quote_evidence, dict) else None
+    )
+    if isinstance(coverage_payload, dict) and coverage_payload.get("status") == "partial":
+        partial_coverage = coverage_payload
+        if required_data_frame is None:
+            parsed = inputs.required_data_dir / "parsed" / f"{symbol}_required_data.csv"
+            _capture_required_data_csv_bytes(parsed.read_bytes())
+        required_data_frame = covered_required_data_frame(required_data_frame, partial_coverage)
+
     def _completed_empty_evidence(
         candidate_count: int,
     ) -> dict[str, str | None]:
@@ -545,6 +560,8 @@ def run_symbol_monitoring(
             _append_summary_result(summary_rows, empty(symbol, symbol_cfg=symbol_cfg))
             return
 
+        if partial_coverage and status == "completed":
+            reason = "partial_data"
         # Publication/commit errors must escape; an immutable completed status cannot become failed.
         _publish_status(family=family, status=status, reason=reason, candidate_count=count,
                         snapshot_id=resolved_quote_snapshot_id, receipt_relpath=quote_receipt_relpath,
@@ -620,4 +637,9 @@ def run_symbol_monitoring(
     else:
         _append_summary_result(summary_rows, deps.empty_sell_call_summary_fn(symbol, symbol_cfg=symbol_cfg))
 
+    if partial_coverage:
+        for row in summary_rows:
+            row["required_data_status"] = "incomplete"
+            row["required_data_reason"] = "required_data_partial_coverage"
+            row["required_data_coverage"] = partial_coverage
     return summary_rows

@@ -664,6 +664,8 @@ def finalize_wheel_capacity(
                 "status": status,
                 "reason_code": reason,
                 "candidate_count": raw_count,
+                **next(({"required_data_coverage": row["required_data_coverage"]}
+                        for row in source_scopes if row.get("required_data_coverage")), {}),
             }
         )
     return {
@@ -855,6 +857,8 @@ def finalize_wheel_put_capacity(
             and str(row.get("reason_code") or "").strip()
         }
         candidate_count = sum(int(row.get("candidate_count") or 0) for row in rows)
+        if any(row.get("required_data_coverage") for row in rows):
+            reasons.add("partial_data")
         if statuses == {"completed"}:
             status = "completed"
             reason = "partial_data" if "partial_data" in reasons else None
@@ -886,6 +890,8 @@ def finalize_wheel_put_capacity(
                 "status": status,
                 "reason_code": reason,
                 "candidate_count": candidate_count,
+                **next(({"required_data_coverage": row["required_data_coverage"]}
+                        for row in rows if row.get("required_data_coverage")), {}),
             }
         )
     return {

@@ -188,6 +188,8 @@ def _index_owner_statuses(
                 "variant": None if owner == "opening" else owner,
                 "owner": owner,
                 "candidate_count": item.get("candidate_count"),
+                **({"required_data_coverage": item["required_data_coverage"]}
+                   if "required_data_coverage" in item else {}),
             }
         )
     for owner in statuses_by_owner:
@@ -1218,6 +1220,7 @@ def run_watchlist_pipeline_default(
                 status=status,
                 candidate_count=(int(scope["candidate_count"]) if status == "completed" else None),
                 reason=(reason or None),
+                required_data_coverage=scope.get("required_data_coverage"),
             )
             wheel_expected.append(
                 {
