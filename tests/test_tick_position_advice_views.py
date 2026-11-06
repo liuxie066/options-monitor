@@ -169,10 +169,12 @@ def test_roll_notifications_omit_explanations_and_preserve_values(
     else:
         message = render(brief)
 
-    assert "平仓 ask USD 1.81234；开仓 bid USD 2.11234" in message
-    assert "移仓净收取：USD 24.37" in message
+    lines = message.splitlines()
+    assert "平仓 ask USD 1.81234；开仓 bid USD 2.11234" in lines
+    assert "移仓净收取：USD 24.37" in lines
     assert "24.3734" not in message
-    assert "增量期收益率 0.3%；增量年化 3.9%" in message
+    assert "增量期收益率 0.3%；增量年化 3.9%" in lines
+    assert not any(line.startswith("参考｜") for line in lines)
     _assert_roll_explanations_absent(message)
     for removed in ("()", "（）"):
         assert removed not in message
@@ -393,6 +395,7 @@ def test_final_card_and_fallback_ack_only_the_same_visible_rolls(
     primary, fallback = feishu_notification_visible_markdown(envelope)
     for body in (primary, fallback, envelope["text"]):
         _assert_roll_explanations_absent(body)
+        assert not any(line.startswith("参考｜") for line in body.splitlines())
     primary_rolls, fallback_rolls = [renderer.select_rendered_position_roll_identities(
         brief, delivery_kind="fixed_report", limits=limits, rendered_message=body)
         for body in (primary, fallback)]

@@ -831,7 +831,7 @@ def _render_user_view(
         for item in positions:
             lines.extend([_VISIBLE_BLANK_LINE, f"**{_flat_title(item['title'])}｜{item['status']}**"])
             for detail in item.get("details") or []:
-                lines.append(f"参考｜{detail}")
+                lines.append(str(detail) if item.get("is_roll") else f"参考｜{detail}")
         if fact_reviews:
             lines.extend(
                 [
@@ -970,7 +970,7 @@ def _render_user_view_blocks(
         for index, item in enumerate(positions, start=1):
             lines = [emphasis(f"{index}｜{_flat_title(item.get('holding'))}｜{item.get('status')}")]
             if item.get("is_roll"):
-                lines.extend(f"参考｜{detail}" for detail in item.get("details") or [])
+                lines.extend(str(detail) for detail in item.get("details") or [])
                 blocks.append("\n".join(lines))
                 continue
             facts = []
