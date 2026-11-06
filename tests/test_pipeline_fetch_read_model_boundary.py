@@ -1986,7 +1986,7 @@ def test_ensure_required_data_refetches_when_existing_bounds_do_not_cover_plan()
     assert len(called) == 1
 
 
-def test_ensure_required_data_fetches_combo_yield_call_side_when_local_cache_has_only_puts() -> None:
+def test_ensure_required_data_retains_partial_put_cache_and_marks_missing_combo_call() -> None:
     import src.application.required_data_steps as mod
     from src.application.required_data_planning import (
         OptionSideFetchPlan,
@@ -2070,7 +2070,7 @@ def test_ensure_required_data_fetches_combo_yield_call_side_when_local_cache_has
         mod.finalize_required_data_quote_candidate = (  # type: ignore[assignment]
             lambda **_kwargs: {"evidence": None}
         )
-        _ensure(
+        result = _ensure(
             symbol=symbol,
             required_data_dir=required,
             limit_expirations=1,
@@ -2085,16 +2085,27 @@ def test_ensure_required_data_fetches_combo_yield_call_side_when_local_cache_has
         mod.execute_required_data_opend = old_execute  # type: ignore[assignment]
         mod.finalize_required_data_quote_candidate = old_finalize  # type: ignore[assignment]
 
-    assert len(called) == 1
-    request = called[0]["request"]
-    assert request.option_types == "put,call"
-    assert request.explicit_expirations == ["2026-06-19"]
-    assert request.side_strike_windows["call"] == {"min_strike": 103.0, "max_strike": 127.5}
-    assert request.chain_cache is True
-    assert request.freshness_policy == "cache_first"
+    # Partial acceptance replaces automatic refetch: real Put rows are usable,
+    # while the absent Call stays missing and cannot borrow Put coverage.
+    assert called == []
+    coverage = result["required_data_coverage"]
+    assert coverage["status"] == "partial" and coverage["ranking_complete"] is False
+    assert coverage["covered_expirations"] == []
+    detail = coverage["per_expiration"][0]
+    assert detail["status"] == "incomplete"
+    scopes = {item["option_type"]: item for item in detail["strike_coverage"]}
+    assert scopes["put"]["covered_ranges"] == [[90.0, 90.0]]
+    assert scopes["call"]["status"] == "missing"
+    assert scopes["call"]["covered_ranges"] == []
+    assert scopes["call"]["missing_ranges"] == [[103.0, 125.0]]
+    assert scopes["call"]["missing_range_inclusive"] == [[True, True]]
+    from src.application.required_data_coverage import covered_required_data_frame
+    projected = covered_required_data_frame(pd.read_csv(required / "parsed" / f"{symbol}_required_data.csv"), coverage)
+    assert projected["option_type"].tolist() == ["put"]
+    assert projected["strike"].tolist() == [90]
 
 
-def test_ensure_required_data_refetches_when_bounds_are_split_across_expirations() -> None:
+def test_ensure_required_data_retains_split_date_rows_without_claiming_complete_bounds() -> None:
     import src.application.required_data_steps as mod
     from src.application.required_data_planning import (
         OptionSideFetchPlan,
@@ -2163,7 +2174,7 @@ def test_ensure_required_data_refetches_when_bounds_are_split_across_expirations
         mod.finalize_required_data_quote_candidate = (  # type: ignore[assignment]
             lambda **_kwargs: {"evidence": None}
         )
-        _ensure(
+        result = _ensure(
             symbol=symbol,
             required_data_dir=required,
             limit_expirations=2,
@@ -2178,7 +2189,24 @@ def test_ensure_required_data_refetches_when_bounds_are_split_across_expirations
         mod.execute_required_data_opend = old_execute  # type: ignore[assignment]
         mod.finalize_required_data_quote_candidate = old_finalize  # type: ignore[assignment]
 
-    assert len(called) == 1
+    # Both dates keep their actual singleton, but neither can use the other
+    # date's boundary to become covered. This replaces whole-date rejection.
+    assert called == []
+    coverage = result["required_data_coverage"]
+    assert coverage["status"] == "partial" and coverage["ranking_complete"] is False
+    assert coverage["covered_expirations"] == []
+    assert coverage["incomplete_expirations"] == ["2026-05-29", "2026-06-26"]
+    first, second = coverage["per_expiration"]
+    assert first["status"] == second["status"] == "incomplete"
+    assert first["covered_ranges"] == [[505.0, 505.0]]
+    assert first["missing_ranges"] == [[505.0, 550.0]]
+    assert first["missing_range_inclusive"] == [[False, True]]
+    assert second["covered_ranges"] == [[550.0, 550.0]]
+    assert second["missing_ranges"] == [[505.0, 550.0]]
+    assert second["missing_range_inclusive"] == [[True, False]]
+    from src.application.required_data_coverage import covered_required_data_frame
+    projected = covered_required_data_frame(pd.read_csv(required / "parsed" / f"{symbol}_required_data.csv"), coverage)
+    assert projected[["expiration", "strike"]].values.tolist() == [["2026-05-29", 505], ["2026-06-26", 550]]
 
 
 def _tcom_portfolio_context(account: str) -> dict[str, object]:

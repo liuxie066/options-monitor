@@ -238,6 +238,9 @@ def test_real_tick_report_flows_unchanged_into_agent_advice(tmp_path, monkeypatc
     assert loaded is True
     assert data_gaps == []
     assert rows[0]["roll_advice"] == roll
+    # Complete receipts retain their existing reader path; the optional
+    # coverage detail is reserved for partial rows and must not reject them.
+    assert "required_data_coverage" not in rows[0]
     brief = _brief(base=tmp_path, run_id="scheduled-roll", account="sample", candidate=False)
     now = datetime.now(timezone.utc)
     brief.update(generated_at_utc=now.isoformat(), data_as_of_utc=roll["evaluated_at_utc"],

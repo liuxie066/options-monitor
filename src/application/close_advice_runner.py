@@ -1164,7 +1164,7 @@ def _apply_required_data_row_provenance(
     row["required_data_source_observed_at"] = str(provenance.get("source_observed_at") or "") or None
     row["required_data_expires_at"] = str(provenance.get("expires_at") or "") or None
     coverage = provenance.get("required_data_coverage")
-    if isinstance(coverage, Mapping):
+    if isinstance(coverage, Mapping) and coverage.get("status") == "partial":
         from src.application.required_data_coverage import required_data_candidate_coverage
 
         row["required_data_coverage"] = dict(coverage)
