@@ -111,6 +111,7 @@
       "top_n_alerts": 3
     },
     "runtime": {
+      "upgrade_keep_venvs": 2,
       "symbol_timeout_sec": 120,
       "portfolio_timeout_sec": 60,
       "pipeline_timeout_sec": 600,

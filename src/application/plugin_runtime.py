@@ -65,6 +65,10 @@ def plugin_installed(plugin_id: str) -> bool:
             selected = plugin_store(root) / plugin_id / "site" / item["module"] / "__init__.py"
             # A cached pip owner must not silently impersonate a managed selection.
             return cached is None or getattr(cached, "__file__", None) == str(selected)
+        if read_source_plugin(root, plugin_id) is not None:
+            cached = sys.modules.get(item["module"])
+            selected = source_plugin_store(root) / plugin_id / "site" / item["module"] / "__init__.py"
+            return cached is None or getattr(cached, "__file__", None) == str(selected)
         return _environment_version_matches(plugin_id) and importlib.util.find_spec(item["module"]) is not None
     except (OSError, ValueError, ImportError, KeyError):
         return False
@@ -212,7 +216,11 @@ class _OfficialPluginFinder(importlib.abc.MetaPathFinder):
         root = code_root()
         try:
             receipt = read_managed_plugin(root, match)
-        except ValueError as exc:
+            if receipt is None and read_source_plugin(root, match) is not None:
+                package = source_plugin_store(root) / match / "site" / fullname
+                return importlib.util.spec_from_file_location(fullname, package / "__init__.py",
+                                                              submodule_search_locations=[str(package)])
+        except (ValueError, OSError) as exc:
             raise ImportError(f"Official plugin {match} is invalid; use om plugins list") from exc
         if receipt is None:
             # Ask the remaining importers, preserving absent and editable-package discovery.
@@ -240,6 +248,49 @@ class _OfficialPluginFinder(importlib.abc.MetaPathFinder):
                                                       submodule_search_locations=[str(package)])
 
 
+def source_plugin_store(repo_root: Path) -> Path:
+    return Path(repo_root) / ".om-source-plugins"
+
+
+def read_source_plugin(repo_root: Path, plugin_id: str) -> dict | None:
+    """Validate an upgrade-installed source package independently of shared dependencies."""
+    target = source_plugin_store(repo_root) / plugin_id
+    if not target.exists():
+        return None
+    receipt = json.loads((target / "receipt.json").read_text())
+    item = PLUGINS[plugin_id]
+    if (source_plugin_store(repo_root).is_symlink() or target.is_symlink()
+            or not isinstance(receipt, dict) or receipt.get("schema_version") != 1
+            or receipt.get("plugin_id") != plugin_id
+            or receipt.get("distribution") != item["distribution"]
+            or receipt.get("version") != expected_plugin_version(plugin_id, repo_root=repo_root)
+            or not isinstance(receipt.get("source_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", receipt["source_sha256"])):
+        raise ValueError("source plugin receipt identity mismatch")
+    files = receipt.get("files")
+    if not isinstance(files, dict) or f"{item['module']}/__init__.py" not in files:
+        raise ValueError("source plugin file inventory missing")
+    _validate_inventory(target / "site", files)
+    distributions = list(importlib.metadata.distributions(path=[str(target / "site")]))
+    if (len(distributions) != 1 or distributions[0].metadata["Name"] != item["distribution"]
+            or distributions[0].version != receipt["version"]):
+        raise ValueError("source plugin installed distribution mismatch")
+    return receipt
+
+
 def register_plugin_finder() -> None:
+    # Each release owns its plugin code; shared venvs contain only dependencies.
+    # Metadata probes and normal imports see the same release-specific packages.
+    for plugin_id in PLUGINS:
+        try:
+            receipt = read_source_plugin(code_root(), plugin_id)
+        except (OSError, ValueError, KeyError):
+            # Keep core commands usable to inspect/repair an invalid add-on.
+            # The finder and plugin_installed still reject it on actual use.
+            continue
+        if receipt is not None:
+            site = str(source_plugin_store(code_root()) / plugin_id / "site")
+            if site not in sys.path:
+                sys.path.insert(0, site)
     if not any(isinstance(finder, _OfficialPluginFinder) for finder in sys.meta_path):
         sys.meta_path.insert(0, _OfficialPluginFinder())

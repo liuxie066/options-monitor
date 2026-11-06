@@ -50,6 +50,19 @@ class OfflineRuntime:
                 self.lb_installs.append(list(command))
             if command[0] == "uv" and self.uv_fails:
                 status = 1
+            if status == 0 and "--target" in command:
+                import tomllib
+                source = next(part for part in command if part.startswith("./plugins/"))
+                project = Path(kwargs["cwd"]) / source
+                spec = tomllib.loads((project / "pyproject.toml").read_text())["project"]
+                site = Path(command[command.index("--target") + 1])
+                shutil.copytree(project / "src", site)
+                name = spec.get("name", "om-" + project.name)
+                metadata = site / (name.replace("-", "_") + ".dist-info")
+                metadata.mkdir()
+                (metadata / "METADATA").write_text(f"Name: {name}\nVersion: {spec['version']}\n")
+        elif command[1:3] == ["-m", "ensurepip"]:
+            pass
         elif command == ["sh", "-lc", "command -v uv"]:
             stdout = "/offline/uv\n"
         elif "-c" in command:
@@ -231,7 +244,7 @@ def test_pm_source_and_selection_are_dependency_cache_inputs(transition):
     source = package / "src/om_pm_plugin/__init__.py"
     source.write_text("# changed package\n")
     changed = upgrade._dependency_hash(target, include_server=True, include_pm=True)
-    assert changed != installed
+    assert changed == installed
     assert upgrade._dependency_hash(target, include_server=True) == base
     metadata = package / "pyproject.toml"
     metadata.write_text(metadata.read_text().replace("0.1.0", "0.2.0"))

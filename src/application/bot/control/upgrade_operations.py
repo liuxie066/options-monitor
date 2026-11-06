@@ -950,6 +950,7 @@ def _preview_upgrade(args: dict[str, Any]) -> dict[str, Any]:
             else "repair expected timer activation drift"
         ),
         "restart long-running services" if bool(args.get("restart_services", True)) else "skip service restart",
+        "after success, retain current shared venv plus runtime.upgrade_keep_venvs recent others (default 2), protecting retained release references",
     ]
     if bool(args.get("cleanup_after_upgrade", False)):
         planned.append(f"cleanup old releases after successful upgrade, keep {int(args.get('cleanup_keep_releases') or 2)} releases")

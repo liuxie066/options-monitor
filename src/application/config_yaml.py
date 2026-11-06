@@ -729,6 +729,13 @@ def yaml_to_market_user_config(raw_cfg: dict[str, Any], *, market: str) -> dict[
     markets = raw_cfg.get("markets")
     if not isinstance(markets, dict):
         raise AgentToolError(code="CONFIG_ERROR", message="markets must be an object keyed by market")
+    for name, settings in markets.items():
+        market_runtime = settings.get("runtime") if isinstance(settings, dict) else None
+        if isinstance(market_runtime, dict) and "upgrade_keep_venvs" in market_runtime:
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message=f"markets.{name}.runtime.upgrade_keep_venvs must be configured globally at runtime.upgrade_keep_venvs",
+            )
     market_cfg = markets.get(normalized_market)
     if market_cfg is None:
         raise AgentToolError(

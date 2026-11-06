@@ -114,6 +114,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "outputs": {"top_n_alerts": 3},
         "runtime": {
+            "upgrade_keep_venvs": 2,
             "symbol_timeout_sec": 120,
             "portfolio_timeout_sec": 60,
             "pipeline_timeout_sec": 600,
@@ -292,6 +293,17 @@ __all__ = [
     "default_config",
     "default_config_sha256",
 ]
+
+
+def upgrade_keep_venvs(config: dict[str, Any]) -> int:
+    """Number of recent noncurrent shared venvs retained after an upgrade."""
+    runtime = config.get("runtime", {})
+    if not isinstance(runtime, dict):
+        raise ValueError("runtime must be an object")
+    value = runtime.get("upgrade_keep_venvs", DEFAULT_CONFIG["defaults"]["runtime"]["upgrade_keep_venvs"])
+    if type(value) is not int or value < 0:
+        raise ValueError("runtime.upgrade_keep_venvs must be a non-negative integer")
+    return value
 
 
 def cash_snapshot_ttl_sec(config: dict[str, Any]) -> int:

@@ -352,6 +352,12 @@ launchd 没有每任务 IANA 日历时区；对应 plist 使用每分钟日历�
 
 两端点默认最坏等待约 10 分钟，配置提高预算后最多约 20 分钟，另加子进程基础余量；补偿事务可能再次等待。所有非 ok 均有界轮询，需人工处理的错误也可能延迟到预算用尽。目标主机如覆盖 systemd 启动超时，应一并核验。
 
+成功升级收尾自动执行共享依赖 venv 保留策略。顶层 YAML `runtime.upgrade_keep_venvs` 默认 `2`，
+保留当前加最近两个其它缓存；仍被保留 release 引用的 venv 额外受到保护。`0` 可关闭额外近期保留。
+只有 cache root 下 `venvs/` 的直接 16 位哈希目录可能被清理，不会触碰其它缓存、release 或运行数据。
+清理失败不回滚升级，删除路径及文件字节数写入 `upgrade_status.json.post_upgrade_venv_cleanup`。
+完整配置和边界见 [配置契约](../CONFIGS.md#升级共享-venv-保留数)。
+
 升级后的 release 清理默认 dry-run：
 
 ```bash

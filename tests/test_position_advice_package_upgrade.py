@@ -136,7 +136,7 @@ def test_source_metadata_and_selection_are_cache_inputs(advice_transition):
     source = target / "plugins/position-advice/src/om_position_advice_plugin/presentation.py"
     source.write_text(source.read_text() + "\n# source change\n")
     changed = upgrade._dependency_hash(target, include_server=True, include_position_advice=True)
-    assert changed != selected
+    assert changed == selected
     assert upgrade._dependency_hash(target, include_server=True) == base
     metadata = target / "plugins/position-advice/pyproject.toml"
     metadata.write_text(metadata.read_text().replace("0.1.0", "0.2.0"))

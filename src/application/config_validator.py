@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.application.config_defaults import cash_snapshot_ttl_sec
+from src.application.config_defaults import cash_snapshot_ttl_sec, upgrade_keep_venvs
 from domain.domain.candidate_defaults import validate_max_abs_delta
 
 from difflib import get_close_matches
@@ -1251,6 +1251,7 @@ def validate_config(cfg: dict):
 
     try:
         cash_snapshot_ttl_sec(cfg)
+        upgrade_keep_venvs(cfg)
     except ValueError as exc:
         die(str(exc))
     runtime = cfg.get('runtime') or {}

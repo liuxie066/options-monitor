@@ -14,6 +14,7 @@ import sys
 import sysconfig
 import tempfile
 import time
+import tomllib
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,7 +23,7 @@ from typing import Any, Callable
 from src.application import plugin_distribution, runtime_bundle
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.file_locks import single_instance_lock
-from src.application.plugin_runtime import PLUGINS, read_managed_plugin
+from src.application.plugin_runtime import PLUGINS, read_managed_plugin, read_source_plugin, source_plugin_store
 
 from src.application.release_target import compare_versions, parse_version, resolve_upgrade_target
 from src.application.runtime_config_freshness import (
@@ -1923,8 +1924,131 @@ def _command_error(result: dict[str, Any]) -> str:
     return f"{command}: {detail}" if command else detail
 
 
+def _selected_source_plugins(
+    *, include_pm: bool = False, include_position_advice: bool = False,
+    include_feishu: bool = False, include_wechat: bool = False,
+    provider_plugins: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    return tuple(key for key, selected in (
+        ("pm", include_pm), ("position-advice", include_position_advice),
+        ("feishu", include_feishu), ("wechat", include_wechat),
+        *((key, True) for key in provider_plugins),
+    ) if selected)
+
+
+def _plugin_dependency_commands(
+    venv_python: Path, *, target_dir: Path, installer: str = "pip", **selection: Any,
+) -> list[tuple[list[str], int]]:
+    dependencies = []
+    for plugin_id in _selected_source_plugins(**selection):
+        project = tomllib.loads((target_dir / "plugins" / PLUGINS[plugin_id]["source"] / "pyproject.toml").read_text())
+        metadata = project.get("project", {})
+        if "dependencies" in metadata.get("dynamic", []):
+            raise RuntimeError(f"{plugin_id}: source-dependent dynamic dependencies cannot use a specification-only venv cache")
+        dependencies.extend(metadata.get("dependencies", []))
+    if not dependencies:
+        return []
+    command = (["uv", "pip", "install", "-p", str(venv_python)] if installer == "uv"
+               else [str(venv_python), "-m", "pip", "install"])
+    return [(command + ["-c", "constraints.txt", *sorted(set(dependencies))], 1200)]
+
+
+def _source_plugin_fingerprint(package: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(package.rglob("*")):
+        relative = path.relative_to(package)
+        if (not path.is_file() or any(part in {"build", "dist", "__pycache__", ".git"}
+                or part.endswith(".egg-info") for part in relative.parts) or path.suffix == ".pyc"):
+            continue
+        digest.update(relative.as_posix().encode() + b"\0" + path.read_bytes() + b"\0")
+    return digest.hexdigest()
+
+
+def _prepare_source_plugins(
+    *, target_dir: Path, previous_dir: Path | None, selected: tuple[str, ...],
+    venv_python: Path, installer: str, env: dict[str, str],
+    run_cmd: Callable[..., Any], operations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    results = []
+    store = source_plugin_store(target_dir)
+    for plugin_id in PLUGINS:
+        obsolete = store / plugin_id
+        if plugin_id not in selected and obsolete.exists():
+            # Preserve previous staged files while removing this release's selection.
+            obsolete.rename(store / f".disabled-{plugin_id}-{time.time_ns()}")
+    if not selected:
+        return results
+    store.mkdir(parents=True, exist_ok=True)
+    for plugin_id in selected:
+        item = PLUGINS[plugin_id]
+        package = target_dir / "plugins" / item["source"]
+        fingerprint = _source_plugin_fingerprint(package)
+        version = tomllib.loads((package / "pyproject.toml").read_text())["project"]["version"]
+        destination = store / plugin_id
+        reusable = None
+        for release in (target_dir, previous_dir):
+            if release is None:
+                continue
+            try:
+                receipt = read_source_plugin(release, plugin_id)
+            except (OSError, ValueError, KeyError):
+                continue
+            if receipt and receipt["source_sha256"] == fingerprint and receipt["version"] == version:
+                reusable = source_plugin_store(release) / plugin_id
+                break
+        result = {"operation": "prepare_source_plugin", "plugin": plugin_id,
+                  "version": version, "source_sha256": fingerprint, "directory": str(destination)}
+        if reusable == destination:
+            result.update(status="unchanged", installed=False, ok=True)
+        else:
+            with tempfile.TemporaryDirectory(prefix=f".{plugin_id}-", dir=store) as temporary:
+                staged = Path(temporary) / "package"
+                if reusable is not None:
+                    shutil.copytree(reusable, staged)
+                    result.update(status="reused", installed=False, reused_from=str(reusable))
+                else:
+                    staged.mkdir()
+                    command = (["uv", "pip", "install", "-p", str(venv_python)] if installer == "uv"
+                               else [str(venv_python), "-m", "pip", "install"])
+                    command += ["--no-deps", *(["--no-compile"] if installer == "pip" else []),
+                                "--target", str(staged / "site"), "./plugins/" + item["source"]]
+                    try:
+                        _run_required(command, cwd=target_dir, run_cmd=run_cmd, operations=operations,
+                                      timeout=600, env=env)
+                    except RuntimeError:
+                        if installer != "uv" or _upgrade_installer_mode() != "auto":
+                            raise
+                        # uv-created environments need not contain pip. Bootstrap
+                        # it without rebuilding dependencies, then retry this plugin.
+                        _run_required([str(venv_python), "-m", "ensurepip", "--upgrade"],
+                                      cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=300, env=env)
+                        command = [str(venv_python), "-m", "pip", "install", "--no-deps", "--no-compile",
+                                   "--upgrade", "--target", str(staged / "site"), "./plugins/" + item["source"]]
+                        _run_required(command, cwd=target_dir, run_cmd=run_cmd, operations=operations,
+                                      timeout=600, env=env)
+                        result["fallback"] = "pip"
+                    files = {p.relative_to(staged / "site").as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                             for p in (staged / "site").rglob("*") if p.is_file()}
+                    _write_json_atomic_file(staged / "receipt.json", {
+                        "schema_version": 1, "plugin_id": plugin_id, "distribution": item["distribution"],
+                        "version": version, "source_sha256": fingerprint, "files": files,
+                    })
+                    result.update(status="installed", installed=True)
+                if destination.exists():
+                    shutil.rmtree(destination)
+                staged.replace(destination)
+            try:
+                read_source_plugin(target_dir, plugin_id)
+            except (OSError, ValueError, KeyError) as exc:
+                raise RuntimeError(f"{plugin_id}: installed source plugin validation failed: {exc}") from exc
+            result["ok"] = True
+        operations.append(result)
+        results.append(result)
+    return results
+
+
 def _pip_install_commands(
-    venv_python: Path, *, include_pm: bool = False, include_longbridge: bool = False,
+    venv_python: Path, *, target_dir: Path, include_pm: bool = False, include_longbridge: bool = False,
     include_position_advice: bool = False,
     include_feishu: bool = False,
     include_wechat: bool = False,
@@ -1934,15 +2058,10 @@ def _pip_install_commands(
         ([str(venv_python), "-m", "pip", "install", "-U", "pip"], 600),
         ([str(venv_python), "-m", "pip", "install", "-r", "requirements.txt", "-c", "constraints.txt"], 1200),
     ]
-    if include_pm:
-        commands.append(([str(venv_python), "-m", "pip", "install", "./plugins/portfolio-management"], 600))
-    if include_position_advice:
-        commands.append(([str(venv_python), "-m", "pip", "install", "./plugins/position-advice"], 600))
-    for selected, package in ((include_feishu, "feishu-channel"), (include_wechat, "wechat-channel")):
-        if selected:
-            commands.append(([str(venv_python), "-m", "pip", "install", f"./plugins/{package}"], 600))
-    for plugin_id in provider_plugins:
-        commands.append(([str(venv_python), "-m", "pip", "install", "./plugins/" + PLUGINS[plugin_id]["source"]], 600))
+    commands.extend(_plugin_dependency_commands(
+        venv_python, target_dir=target_dir, include_pm=include_pm, include_position_advice=include_position_advice,
+        include_feishu=include_feishu, include_wechat=include_wechat, provider_plugins=provider_plugins,
+    ))
     if include_longbridge:
         commands.append(([str(venv_python), "-m", "pip", "install", "-r", "requirements/longbridge.txt"], 600))
     return commands
@@ -1952,6 +2071,7 @@ def _uv_install_commands(
     venv_python: Path,
     *,
     venv_dir: Path,
+    target_dir: Path,
     include_server: bool,
     bootstrap_python: str,
     include_pm: bool = False,
@@ -1982,15 +2102,11 @@ def _uv_install_commands(
                 1200,
             )
         )
-    if include_pm:
-        commands.append((["uv", "pip", "install", "-p", str(venv_python), "./plugins/portfolio-management"], 600))
-    if include_position_advice:
-        commands.append((["uv", "pip", "install", "-p", str(venv_python), "./plugins/position-advice"], 600))
-    for selected, package in ((include_feishu, "feishu-channel"), (include_wechat, "wechat-channel")):
-        if selected:
-            commands.append((["uv", "pip", "install", "-p", str(venv_python), f"./plugins/{package}"], 600))
-    for plugin_id in provider_plugins:
-        commands.append((["uv", "pip", "install", "-p", str(venv_python), "./plugins/" + PLUGINS[plugin_id]["source"]], 600))
+    commands.extend(_plugin_dependency_commands(
+        venv_python, target_dir=target_dir, include_pm=include_pm, include_position_advice=include_position_advice,
+        include_feishu=include_feishu, include_wechat=include_wechat, provider_plugins=provider_plugins,
+        installer="uv",
+    ))
     if include_longbridge:
         commands.append(([
             "uv", "pip", "install", "-p", str(venv_python), "-r", "requirements/longbridge.txt",
@@ -2039,7 +2155,7 @@ def _run_pip_runtime_prepare(
         operations[-1]["runtime_prepare_installer"] = "pip"
         commands.append(command)
     pip_commands = _pip_install_commands(
-        venv_python, include_pm=include_pm, include_longbridge=include_longbridge,
+        venv_python, target_dir=target_dir, include_pm=include_pm, include_longbridge=include_longbridge,
         include_position_advice=include_position_advice,
         include_feishu=include_feishu, include_wechat=include_wechat, provider_plugins=provider_plugins,
     )
@@ -2143,7 +2259,8 @@ def _dependency_hash(
     include_wechat: bool = False,
     provider_plugins: tuple[str, ...] = (),
 ) -> str:
-    digest = hashlib.sha256()
+    # v2 caches contain dependencies only; never reuse a v1 cache with plugin code.
+    digest = hashlib.sha256(b"om-dependency-venv-v2\0")
     selected_python_spec = python_spec or f"{sys.version_info.major}.{sys.version_info.minor}"
     context = _dependency_context(
         include_server=include_server,
@@ -2218,7 +2335,7 @@ def _dependency_files(
         if selected:
             package = target_dir / "plugins" / name
             ordered.append(package / "pyproject.toml")
-            ordered.extend(sorted((package / "src").rglob("*.py")))
+            ordered.extend(package / name for name in ("setup.py", "setup.cfg") if (package / name).is_file())
     return ordered
 
 
@@ -2328,7 +2445,9 @@ def _installed_optional_packages(
         raise RuntimeError("could not determine installed optional packages in current runtime") from exc
     if not isinstance(installed, list) or len(installed) != 3 or any(type(item) is not bool for item in installed):
         raise RuntimeError("current runtime optional package probe did not return three booleans")
-    return installed[0], installed[1], installed[2]
+    return (installed[0] or read_source_plugin(previous_dir, "pm") is not None,
+            installed[1],
+            installed[2] or read_source_plugin(previous_dir, "position-advice") is not None)
 
 
 def _message_package_selection(
@@ -2374,7 +2493,8 @@ def _message_package_selection(
     if any(legacy):
         enabled = _legacy_message_channels_enabled(runtime_root=runtime_root)
         installed = [present or (builtin and active) for present, builtin, active in zip(installed, legacy, enabled)]
-    return installed[0], installed[1]
+    return (installed[0] or read_source_plugin(previous_dir, "feishu") is not None,
+            installed[1] or read_source_plugin(previous_dir, "wechat") is not None)
 
 
 def _legacy_message_channels_enabled(*, runtime_root: Path) -> tuple[bool, bool]:
@@ -2540,6 +2660,8 @@ def _provider_upgrade_selection(
                 raise ValueError("invalid provider selection")
         except (ValueError, TypeError) as exc:
             raise RuntimeError("could not determine installed provider packages in current runtime") from exc
+        selected.extend(key for key in PROVIDER_PLUGINS
+                        if key not in selected and read_source_plugin(previous_dir, key) is not None)
         pip_selected = tuple(key for key in selected if key not in managed)
         if "market-opend" not in {*managed, *pip_selected}:
             raise RuntimeError("current runtime has no market package; use om plugins install market-opend --confirm")
@@ -2752,6 +2874,7 @@ def _validate_optional_runtime(
         "import importlib.metadata as m, sys, tomllib\n"
         "from pathlib import Path\n"
         "sys.path.insert(0, sys.argv[1])\n"
+        "import src\n"
         "try: dist = m.distribution('om-pm-plugin')\n"
         "except m.PackageNotFoundError: dist = None\n"
         "if sys.argv[2] == 'true':\n"
@@ -2791,6 +2914,7 @@ def _ensure_release_runtime(
     *,
     target_dir: Path,
     cache_root: Path | None = None,
+    previous_dir: Path | None = None,
     run_cmd: Callable[..., Any],
     operations: list[dict[str, Any]],
     include_pm: bool = False,
@@ -2863,6 +2987,8 @@ def _ensure_release_runtime(
         "venv_path": str(release_venv),
         "python": str(release_python),
         "dependency_hash": dependency_hash,
+        "dependency_hash_schema": 2,
+        "legacy_cache_policy": "rebuild_once_then_normal_retention",
         "dependency_context": dependency_context,
         "shared_venv_path": str(shared_venv),
         "shared_venv_build_path": str(build_venv),
@@ -2899,6 +3025,7 @@ def _ensure_release_runtime(
             uv_commands = _uv_install_commands(
                 build_python,
                 venv_dir=build_venv,
+                target_dir=target_dir,
                 include_server=include_server,
                 bootstrap_python=bootstrap_python,
                 include_pm=include_pm,
@@ -2970,6 +3097,20 @@ def _ensure_release_runtime(
             _relocate_venv_scripts(venv_dir=shared_venv, built_at=build_venv)
             _link_release_venv(target_dir=target_dir, shared_venv=shared_venv)
 
+        plugin_installer = runtime_prepare["installer"]
+        if plugin_installer == "cache":
+            plugin_installer = "uv" if mode in {"auto", "uv"} and _check_uv_available(
+                target_dir=target_dir, run_cmd=run_cmd, operations=operations,
+            ) else "pip"
+        runtime_prepare["source_plugins"] = _prepare_source_plugins(
+            target_dir=target_dir, previous_dir=previous_dir,
+            selected=_selected_source_plugins(
+                include_pm=include_pm, include_position_advice=include_position_advice,
+                include_feishu=include_feishu, include_wechat=include_wechat, provider_plugins=provider_plugins,
+            ),
+            venv_python=_venv_python(shared_venv), installer=plugin_installer, env=install_env,
+            run_cmd=run_cmd, operations=operations,
+        )
         if not release_python.exists() or not os.access(release_python, os.X_OK):
             raise RuntimeError(f"release virtualenv python is missing after setup: {release_python}")
         _run_required(
@@ -3001,10 +3142,11 @@ def _ensure_release_runtime(
             run_cmd=run_cmd, operations=operations,
         )
         _validate_provider_runtime(target_dir=target_dir, selected=provider_plugins, run_cmd=run_cmd, operations=operations)
+        shared_venv.touch()
         runtime_prepare["ended_at"] = utc_now_iso()
         runtime_prepare["duration_seconds"] = round(time.monotonic() - started, 3)
         return runtime_prepare
-    except RuntimeError as exc:
+    except (RuntimeError, OSError, ValueError) as exc:
         if not runtime_prepare["venv_reused"]:
             shutil.rmtree(build_venv, ignore_errors=True)
             shutil.rmtree(shared_venv, ignore_errors=True)
@@ -3547,6 +3689,37 @@ def _preflight_service_transition(
                       cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=60)
 
 
+def _cleanup_upgrade_venvs(
+    *, cache_root: Path, releases_root: Path, target_dir: Path, runtime_root: Path,
+) -> dict[str, Any]:
+    from src.application.config_defaults import upgrade_keep_venvs
+    from src.application.service_cleanup import cleanup_shared_venvs
+
+    try:
+        if _is_runtime_bundle(target_dir):
+            return {"ok": True, "status": "skipped", "reason": "runtime bundle has no shared venv"}
+        profile = _load_service_profile(runtime_root)
+        paths = {_runtime_config_path_for_market(market=market, runtime_root=runtime_root, profile=profile)
+                 for market in _verify_markets(runtime_root=runtime_root, profile=profile)}
+        policies = set()
+        for path in paths:
+            if path.is_file():
+                policies.add(upgrade_keep_venvs(json.loads(path.read_text())))
+        if len(policies) > 1:
+            raise ValueError("runtime.upgrade_keep_venvs differs between effective market configs")
+        keep = policies.pop() if policies else upgrade_keep_venvs({})
+        # A retained release must remain usable for rollback, even with N=0.
+        protected = tuple((release / ".venv").resolve() for release in releases_root.iterdir()
+                          if release.is_dir() and not release.is_symlink()
+                          and re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", release.name)
+                          and (release / ".venv").is_symlink())
+        return cleanup_shared_venvs(cache_root=cache_root, current_venv=(target_dir / ".venv").resolve(),
+                                    keep_other_venvs=keep, protected_venvs=protected)
+    except Exception as exc:
+        return {"ok": False, "status": "cleanup_failed", "error": f"{type(exc).__name__}: {exc}",
+                "deleted_paths": [], "freed_bytes": 0, "operations": []}
+
+
 def service_upgrade(
     *,
     repo_root: str | Path,
@@ -3719,6 +3892,7 @@ def service_upgrade(
                 else "repair expected timer activation drift"
             ),
             "restart long-running services" if restart_services else "skip service restart",
+            "after success, retain current shared venv plus runtime.upgrade_keep_venvs recent others (default 2), protecting retained release references",
         ]
         if cleanup_after_upgrade:
             planned.append(f"cleanup old releases after successful upgrade, keep {status_base['cleanup_keep_releases']} releases")
@@ -3883,6 +4057,7 @@ def service_upgrade(
             )
             runtime_prepare = _ensure_release_runtime(
                 target_dir=target_dir,
+                previous_dir=previous_dir,
                 cache_root=cache,
                 run_cmd=run_cmd,
                 operations=operations,
@@ -4142,6 +4317,10 @@ def service_upgrade(
                         run_cmd=run_cmd,
                     )
 
+        venv_cleanup_result = _cleanup_upgrade_venvs(
+            cache_root=cache, releases_root=releases, target_dir=target_dir, runtime_root=runtime,
+        )
+        operations.append({"operation": "cleanup_shared_venvs", **venv_cleanup_result})
         out = {
             **status_base,
             "ok": True,
@@ -4160,6 +4339,7 @@ def service_upgrade(
             "service_health": service_health,
             "runtime_readiness": runtime_readiness,
             "restarted_services": restarted,
+            "post_upgrade_venv_cleanup": venv_cleanup_result,
             **({"post_upgrade_cleanup": cleanup_result} if cleanup_result is not None else {}),
             "operations": operations,
         }

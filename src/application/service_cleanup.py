@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from functools import cmp_to_key
@@ -173,6 +174,53 @@ def _latest_run_pointer(runtime: Path, runs_root: Path) -> Path | None:
     if target.exists() and target.is_dir() and _safe_child(target, parent=runs_root):
         return target
     return None
+
+
+def cleanup_shared_venvs(
+    *, cache_root: Path, current_venv: Path, keep_other_venvs: int = 2,
+    protected_venvs: tuple[Path, ...] = (),
+) -> dict[str, Any]:
+    """Upgrade-finish retention, confined to direct hash directories in cache/venvs."""
+    result: dict[str, Any] = {"ok": True, "status": "cleaned", "deleted_paths": [],
+                              "freed_bytes": 0, "operations": [], "keep_other_venvs": keep_other_venvs}
+    root = Path(cache_root) / "venvs"
+    result["root"] = str(root)
+    try:
+        if type(keep_other_venvs) is not int or keep_other_venvs < 0:
+            raise ValueError("keep_other_venvs must be a non-negative integer")
+        if root.is_symlink():
+            raise ValueError("venv cache root must not be a symlink")
+        root = root.resolve()
+        current = Path(current_venv)
+        if (not re.fullmatch(r"[0-9a-f]{16}", current.name) or current.is_symlink()
+                or not current.is_dir() or current.resolve().parent != root):
+            raise ValueError("current venv must be an existing direct hash directory in cache/venvs")
+        current = current.resolve()
+        candidates = [p for p in root.iterdir() if re.fullmatch(r"[0-9a-f]{16}", p.name)
+                      and not p.is_symlink() and p.is_dir() and p.resolve().parent == root]
+        others = sorted((p for p in candidates if p != current),
+                        key=lambda p: (p.stat().st_mtime_ns, p.name), reverse=True)
+        protected = {p.resolve() for p in protected_venvs}
+        kept = {current, *others[:keep_other_venvs], *protected}
+        result["kept_paths"] = sorted(str(p) for p in candidates if p in kept)
+        result["protected_paths"] = sorted(str(p) for p in candidates if p in protected)
+        for path in others:
+            if path in kept:
+                continue
+            if root.is_symlink() or path.is_symlink() or path.resolve().parent != root:
+                raise ValueError("venv cache directory changed during cleanup")
+            operation = _delete_path_result(path, kind="shared_venv")
+            result["operations"].append(operation)
+            result["freed_bytes"] += operation["freed_bytes"]
+            if operation["ok"]:
+                result["deleted_paths"].append(str(path))
+            else:
+                result["ok"] = False
+        if not result["ok"]:
+            result["status"] = "partial_failure"
+    except Exception as exc:
+        result.update(ok=False, status="cleanup_failed", error=f"{type(exc).__name__}: {exc}")
+    return result
 
 
 def _output_run_cleanup_plan(
