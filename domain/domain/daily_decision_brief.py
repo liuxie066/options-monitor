@@ -153,11 +153,19 @@ def daily_brief_position_roll(row: Mapping[str, Any]) -> tuple[str, Mapping[str,
         return None
     if not target.get("contract") or not target.get("expiration"):
         return None
-    try:
-        net_credit = float(target["net_credit"])
-    except (KeyError, TypeError, ValueError):
+    if row.get("roll_notification_eligible") is False:
         return None
-    if not math.isfinite(net_credit) or net_credit <= 0:
+    try:
+        economic_values = [target[key] for key in (
+            "net_credit", "incremental_period_return", "incremental_annualized_return",
+        )]
+        if any(isinstance(value, bool) for value in economic_values):
+            return None
+        net_credit, period_return, annualized_return = map(float, economic_values)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if (not all(math.isfinite(value) for value in (net_credit, period_return, annualized_return))
+            or min(net_credit, period_return, annualized_return) <= 0):
         return None
     if option_type == "call" and target.get("recommendation") != "credit_roll":
         return None

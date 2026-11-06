@@ -358,6 +358,30 @@ def _scheduled_report_targets(
     ]
 
 
+def next_daily_brief_fixed_report(*, schedule_cfg: dict, now_utc: datetime) -> str | None:
+    """Return the next configured fixed report, excluding candidate checks and send cutoffs."""
+    if not schedule_cfg or not schedule_cfg.get('enabled', True):
+        return None
+    market_tz = ZoneInfo(str(schedule_cfg.get('timezone') or 'America/New_York'))
+    now_market = now_utc.astimezone(market_tz)
+    run_start, run_end, breaks = _resolve_run_window(schedule_cfg)
+    run_points = schedule_cfg.get('run_points')
+    if not isinstance(run_points, dict) or not run_points:
+        run_points = {'start_plus_min': 10, 'hourly_minute': 0, 'end_minus_min': 10}
+    gates = schedule_cfg.get('gates') if isinstance(schedule_cfg.get('gates'), list) else []
+    day_cursor = now_market
+    for _ in range(8):
+        reports = _scheduled_report_targets(
+            now_market=day_cursor, market_tz=market_tz, run_start=run_start,
+            run_end=run_end, breaks=breaks, run_points=run_points, gates=gates,
+        )
+        following = [target for target in reports if target > now_market]
+        if following:
+            return to_iso(min(following))
+        day_cursor = datetime.combine(_next_trading_day(day_cursor.date()), time(0), tzinfo=market_tz)
+    return None
+
+
 def daily_brief_recovery_cutoff(*, schedule_cfg: dict, scheduled_target_market: str) -> str:
     """Return the original report's same-day replacement/send-window boundary."""
     target = datetime.fromisoformat(scheduled_target_market)

@@ -299,6 +299,8 @@ Feishu long-connection、WeChat ClawBot 和本地 Bot 共享 Control/Bot 安全�
 
 不要复制旧 OpenClaw、Feishu option-position mirror 或 `notifications.daily_brief.enabled` 作为路由开关。scheduled ordinary notification 的 renderer authority 是 Daily Brief；兼容 preview 不具有 scheduled sender authority。
 
+简报的 `notifications.daily_brief.max_items_per_account` 默认 `5`，接受 `0..20` 的整数；同一账户、同一市场的 A/B/C 共享额度，市场各自计算。`0` 只取消账户层上限，整篇 `42` 条预算与正文长度上限仍生效。旧 `max_actions_per_priority` 已弃用，继续按 `1..20` 验证但不再分配名额；`close_advice.max_items_per_account` 仍负责平仓通知资格与平仓 action 生成。迁移步骤及原有多层限制见[通知简报条数与配置迁移](docs/NOTIFICATION_BRIEF_SELECTION.md)。
+
 发送前先检查：
 
 ```bash

@@ -33,6 +33,7 @@ from domain.domain.cash_secured_utils import (
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.storage import paths
 from src.application.multi_tick_audit import daily_brief_phase
+from src.application.scan_scheduler import next_daily_brief_fixed_report
 from src.application.portfolio_context_service import cash_snapshot_is_usable
 from src.application.cash_totals import sum_by_currency_to_cny
 from src.infrastructure.exchange_rates import project_exchange_rate_snapshot
@@ -432,9 +433,8 @@ def assemble_daily_decision_brief(
         max_items_per_account=0,
     )
     actionable_close_row_ids = {id(row) for row in actionable_close_rows}
-    selected_close_rows = (
-        actionable_close_rows[:close_advice_max_items]
-        if close_advice_max_items > 0 else actionable_close_rows
+    selected_close_rows = select_close_advice_notification_rows(
+        close_rows, max_items_per_account=close_advice_max_items,
     )
     selected_close_row_ids = {id(row) for row in selected_close_rows}
     _load_strategy_step_failures(
@@ -767,6 +767,9 @@ def assemble_daily_decision_brief(
         "generated_at_utc": generated_at,
         "data_as_of_utc": data_as_of,
         "valid_until_utc": valid_until.isoformat(),
+        "next_fixed_report_at_utc": next_daily_brief_fixed_report(
+            schedule_cfg=dict(config_map.get("schedule") or {}), now_utc=effective_now,
+        ),
         "status": status,
         "actionability": actionability,
         "strategy_summary": strategy_summary,
@@ -2201,12 +2204,17 @@ def _position_view(
         "quote_status",
         "recommendation_state",
         "policy_version",
+        "decision_basis",
+        "decision_evidence_status",
         "delta",
         "remaining_trading_sessions",
         "remaining_trading_sessions_min",
         "remaining_trading_sessions_max",
         "trading_calendar_status",
         "trading_calendar_reason",
+        "last_trading_at_utc",
+        "assignment_deadline_at_utc",
+        "event_at_utc",
     )
     out = {field: _json_safe(row.get(field)) for field in fields}
     out["advice_kind"] = "close_advice"

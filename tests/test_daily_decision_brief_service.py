@@ -1883,7 +1883,7 @@ def test_close_advice_daily_brief_selects_only_close_state(tmp_path: Path) -> No
     }
     message = render_full_brief(
         brief,
-        limits={"max_actions_per_priority": 10},
+        limits={"max_items_per_account": 10},
     )
 
     assert {item["symbol"] for item in close_actions} == {"FIRST", "SECOND"}
@@ -1897,7 +1897,7 @@ def test_close_advice_daily_brief_selects_only_close_state(tmp_path: Path) -> No
     assert "SECOND｜CSP｜08-21 $101 Put｜建议平仓" in message
     assert "HOLD" not in message
     assert "GAP" not in message
-    assert "汇总｜共 4 条，需处理 2 条。" in message
+    assert "汇总｜共 4 条，需处理 2 条，普通持有 1 条，缺口摘要：1 条暂无法评估。" in message
 
 
 def test_close_advice_without_valid_manifest_cannot_enter_daily_brief(
@@ -2078,7 +2078,7 @@ def test_close_advice_daily_brief_honors_ranked_account_limit(
     }
     message = render_full_brief(
         brief,
-        limits={"max_actions_per_priority": 10},
+        limits={"max_items_per_account": 10},
     )
 
     assert [item["symbol"] for item in close_actions] == ["SECOND"]
@@ -2091,6 +2091,9 @@ def test_close_advice_daily_brief_honors_ranked_account_limit(
     assert "FIRST" not in message
     assert "THIRD" not in message
     assert "汇总｜共 3 条，需处理 1 条。" in message
+    # The close owner still limits notification eligibility; the new display
+    # cap never changes which close actions the service seals.
+    assert brief["next_fixed_report_at_utc"] == "2026-07-17T15:00:00+00:00"
 
 
 def test_paired_combo_net_income_survives_snapshot_and_brief(tmp_path: Path) -> None:

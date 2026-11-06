@@ -106,6 +106,11 @@ def _brief() -> dict:
                 "evaluation_status": "evaluable",
                 "quote_status": "priced",
                 "position_lot_id": "lot-put-secret",
+                "metrics": {
+                    "capital_basis": 10000,
+                    "remaining_max_annualized_return": 0.05,
+                    "net_capture_ratio": 0.925,
+                },
             },
             {
                 "symbol": "PDD",
@@ -299,7 +304,7 @@ def test_full_renderer_is_compact_human_readable_and_allowlisted() -> None:
     assert "数据｜美东 10:03 / 北京 22:03" in message
     assert "## CSP" in message
     assert "## 持仓" in message
-    assert "汇总｜共 3 条，需处理 1 条。" in message
+    assert "汇总｜共 3 条，需处理 1 条，缺口摘要：2 条暂无法评估。" in message
     assert "## 资金" in message
     assert "MSFT｜CSP｜08-21 $400 Put（策略排序 1）" in message
     assert "NVDA｜CSP｜08-21 $100 Put（策略排序 2）" in message
@@ -307,7 +312,7 @@ def test_full_renderer_is_compact_human_readable_and_allowlisted() -> None:
     assert "TSLA｜组合增强（策略排序 1）" in message
     assert "Put｜08-21 $300 Put｜推荐卖出 $3.45" in message
     assert "Call｜09-18 $400 Call｜推荐买入 $1.05" in message
-    assert "暂无法评估" not in message
+    assert message.count("暂无法评估") == 1
     assert "PDD" not in message
     assert "FUTU" not in message
     assert "MSFT 08-21 $400 Put｜按当前现金最多 2 手" in message
@@ -407,7 +412,9 @@ def test_fixed_report_renders_wheel_after_combo_yield() -> None:
         }
     ]
 
-    message = render_fixed_report(brief, context=_scheduled_context())
+    message = render_fixed_report(
+        brief, limits={"max_items_per_account": 0}, context=_scheduled_context(),
+    )
 
     assert message.index("## 组合增强") < message.index("## Wheel")
     assert "NVDA｜Wheel Call" in message
@@ -437,7 +444,9 @@ def test_fixed_report_renders_wheel_put_branch() -> None:
         }
     ]
 
-    message = render_fixed_report(brief, context=_scheduled_context())
+    message = render_fixed_report(
+        brief, limits={"max_items_per_account": 0}, context=_scheduled_context(),
+    )
 
     assert "NVDA｜Wheel Put" in message
     assert "剩余轮转｜1 张" in message
@@ -450,6 +459,8 @@ def test_fixed_report_renders_wheel_put_branch() -> None:
 def _hk_assigned_wheel_brief() -> dict:
     brief = _brief()
     brief["market"] = "HK"
+    brief["candidates"] = {}
+    brief["positions"] = []
     brief["wheel_batches"] = []
     for index, price in enumerate((77.5, 77.5, 77.5, 75, 80), start=1):
         brief["wheel_batches"].append({
@@ -497,7 +508,8 @@ def test_fixed_report_groups_same_assignment_without_hiding_warning() -> None:
         if blocked:
             current["actionability"] = current["status"] = "blocked"
         view = build_daily_brief_user_view(
-            current, delivery_kind="fixed_report", context=_scheduled_context(),
+            current, delivery_kind="fixed_report", limits={"max_items_per_account": 0},
+            context=_scheduled_context(),
         )
         wheel = view["wheel_batches"]
         assert len(wheel) == (3 if blocked else 4)
@@ -511,18 +523,19 @@ def test_fixed_report_groups_same_assignment_without_hiding_warning() -> None:
         assert "可开数量以账户容量检查为准" in " ".join(grouped["details"])
         assert all(f"{index:08d}" not in " ".join(grouped["details"]) for index in (1, 2, 3))
         for render in (render_fixed_report, render_fixed_report_card_markdown):
-            message = render(current, context=_scheduled_context())
+            message = render(current, limits={"max_items_per_account": 0}, context=_scheduled_context())
             assert "77.5P" in message
             assert "1,500 股" in message
             assert "成交归属待人工确认" in message
     full = build_daily_brief_user_view(
-        brief, delivery_kind="full", context=_scheduled_context(),
+        brief, delivery_kind="full", limits={"max_items_per_account": 0}, context=_scheduled_context(),
     )
     assert len(full["wheel_batches"]) == 6
     for row in brief["wheel_batches"][:3]:
         row["reason_codes"] = ["no_candidate"]
     grouped = next(item for item in build_daily_brief_user_view(
-        brief, delivery_kind="fixed_report", context=_scheduled_context(),
+        brief, delivery_kind="fixed_report", limits={"max_items_per_account": 0},
+        context=_scheduled_context(),
     )["wheel_batches"] if "77.5P" in item["title"])
     assert "成交归属待人工确认" in " ".join(grouped["details"])
 
@@ -542,7 +555,8 @@ def test_fixed_report_keeps_unsafe_assignment_batches_separate(change: str) -> N
     else:
         row["coverage"]["available_shares"] = None
     view = build_daily_brief_user_view(
-        brief, delivery_kind="fixed_report", context=_scheduled_context(),
+        brief, delivery_kind="fixed_report", limits={"max_items_per_account": 0},
+        context=_scheduled_context(),
     )
     assert len(view["wheel_batches"]) == 6
     if change == "malformed":
@@ -728,8 +742,10 @@ def test_strict_close_uses_one_action_label_for_every_close_state() -> None:
             "symbol": symbol,
             "strategy_family": "sell_put",
             "recommendation_state": "close",
+            "notification_eligible": True,
             "evaluation_status": "evaluable",
             "quote_status": "priced",
+            "metrics": deepcopy(brief["positions"][0]["metrics"]),
         }
         for symbol in ("A", "B", "C", "D", "E", "F")
     ]
@@ -737,7 +753,7 @@ def test_strict_close_uses_one_action_label_for_every_close_state() -> None:
 
     message = render_full_brief(
         brief,
-        limits={"max_actions_per_priority": 10},
+        limits={"max_items_per_account": 10},
     )
 
     for symbol in ("A", "B", "C", "D", "E", "F"):
@@ -758,7 +774,11 @@ def test_close_details_use_signed_pnl_and_degrade_without_inventing_values() -> 
             "recommendation_state": "close",
             "evaluation_status": "evaluable",
             "quote_status": "priced",
-            "metrics": {"estimated_pnl_if_close_net": -125.5},
+            "notification_eligible": True,
+            "metrics": {
+                **brief["positions"][0]["metrics"],
+                "estimated_pnl_if_close_net": -125.5,
+            },
         },
         {
             "symbol": "PARTIAL.HK",
@@ -769,7 +789,9 @@ def test_close_details_use_signed_pnl_and_degrade_without_inventing_values() -> 
             "recommendation_state": "close",
             "evaluation_status": "evaluable",
             "quote_status": "priced",
+            "notification_eligible": True,
             "metrics": {
+                **brief["positions"][0]["metrics"],
                 "ask": 0.3,
                 "estimated_pnl_if_close_net": "nan",
                 "remaining_term_ratio": "invalid",
@@ -936,13 +958,13 @@ def test_position_statuses_use_safe_allowlisted_fallbacks() -> None:
     ]
     message = render_full_brief(brief)
 
-    assert "暂无法评估" not in message
+    assert message.count("暂无法评估") == 1
     assert "继续观察" not in message
     assert "**A｜CSP" not in message
     assert "**B｜CSP" not in message
     assert "**C｜CSP" not in message
     assert "**D｜CSP" not in message
-    assert "汇总｜共 4 条 · 暂无操作建议。" in message
+    assert "汇总｜共 4 条 · 暂无操作建议，普通持有 1 条，缺口摘要：3 条暂无法评估。" in message
     assert "持仓未展开" not in message
     assert "future_state" not in message
 
@@ -1011,6 +1033,8 @@ def test_renderer_honors_section_limits() -> None:
             "quote_status": "priced",
             "evaluation_status": "evaluable",
             "recommendation_state": "close",
+            "notification_eligible": True,
+            "metrics": {**brief["positions"][0]["metrics"], "remaining_max_annualized_return": i / 1000},
         }
         for i in range(8)
     ]
@@ -1033,7 +1057,8 @@ def test_renderer_honors_section_limits() -> None:
     message = render_full_brief(
         brief,
         limits={
-            "max_actions_per_priority": 2,
+            "max_items_per_account": 2,
+            "max_actions_per_priority": 1,
             "max_candidates_per_strategy": 7,
             "max_rejection_reasons": 999,
         },
@@ -1044,6 +1069,19 @@ def test_renderer_honors_section_limits() -> None:
     assert "P2｜CSP" not in message
     assert "汇总｜共 8 条，需处理 8 条，本消息展示 2 条。" in message
     assert "持仓未展开" not in message
+    assert "C0｜CSP" not in message
+    assert "补充｜另有 20 个策略候选未展开" in message
+
+    # The legacy priority cap does not change the default shared five-item cap.
+    default_view = build_daily_brief_user_view(brief, limits={"max_actions_per_priority": 1})
+    assert len(default_view["positions"]) == 5
+    assert not default_view["candidates"]
+
+    candidate_brief = {**brief, "positions": []}
+    message = render_full_brief(
+        candidate_brief,
+        limits={"max_items_per_account": 7, "max_candidates_per_strategy": 7},
+    )
     assert "C6｜CSP" in message
     assert "C7｜CSP" not in message
     assert "补充｜另有 13 个策略候选未展开" in message
@@ -1064,6 +1102,12 @@ def _budget_brief(*, candidate_counts: tuple[int, int], position_count: int) -> 
             "quote_status": "priced",
             "evaluation_status": "evaluable",
             "recommendation_state": "close",
+            "notification_eligible": True,
+            "metrics": {
+                "capital_basis": 10000,
+                "remaining_max_annualized_return": i / 1000,
+                "net_capture_ratio": 0.95,
+            },
         }
         for i in range(position_count)
     ]
@@ -1095,7 +1139,7 @@ def test_daily_brief_shares_42_item_budget_with_positions_first() -> None:
             for row in brief["positions"]
         ]
     }
-    limits = {"max_actions_per_priority": 20, "max_candidates_per_strategy": 20}
+    limits = {"max_items_per_account": 0, "max_candidates_per_strategy": 20}
 
     view = build_daily_brief_user_view(brief, diff=diff, limits=limits)
     blocks = render_fixed_report_card_blocks(brief, diff=diff, limits=limits)
@@ -1103,13 +1147,16 @@ def test_daily_brief_shares_42_item_budget_with_positions_first() -> None:
 
     assert len(cards) <= 42
     assert len(cards) == len(view["positions"]) + len(view["candidates"]) == 42
-    assert len(view["positions"]) == 20
-    assert [row["symbol"] for row in view["candidates"]] == [
-        *[f"C{i}" for i in range(20)], "D0", "D1",
+    assert [row["title"].split(" · ")[0] for row in view["positions"]] == [
+        f"P{i}" for i in range(25)
     ]
-    assert view["candidate_omissions"] == ["CC 另有 3 个策略候选未展开"]
-    assert "补充｜CC 另有 3 个策略候选未展开" in blocks
-    assert "汇总｜共 25 条，需处理 25 条，本消息展示 20 条。" in "\n".join(blocks)
+    assert [row["symbol"] for row in view["candidates"]] == [
+        *[symbol for i in range(5) for symbol in (f"C{i}", f"D{i}")],
+        *[f"C{i}" for i in range(5, 12)],
+    ]
+    assert view["candidate_omissions"] == ["CSP 另有 8 个策略候选未展开"]
+    assert "补充｜CSP 另有 8 个策略候选未展开" in blocks
+    assert "汇总｜共 25 条，需处理 25 条。" in "\n".join(blocks)
 
 
 def test_changed_items_keep_priority_within_section_and_total_limits() -> None:
@@ -1127,25 +1174,29 @@ def test_changed_items_keep_priority_within_section_and_total_limits() -> None:
         for row in rows[5:]
     )
     diff = {"changes": changes}
-    limits = {"max_actions_per_priority": 20, "max_candidates_per_strategy": 20}
+    limits = {"max_items_per_account": 0, "max_candidates_per_strategy": 20}
 
     view = build_daily_brief_user_view(brief, diff=diff, limits=limits)
     blocks = render_fixed_report_card_blocks(brief, diff=diff, limits=limits)
     cards = [block for block in blocks if re.match(r"\*\*(?:[CD]\d+｜|\d+｜P\d+)", block)]
 
     assert len(cards) == len(view["positions"]) + len(view["candidates"]) == 42
+    # Diff membership changes the banner, never the sealed economic/rank order.
     assert [row["title"].split(" · ")[0] for row in view["positions"]] == [
-        f"P{i}" for i in range(5, 25)
+        f"P{i}" for i in range(30)
     ]
     assert [row["symbol"] for row in view["candidates"]] == [
-        *[f"C{i}" for i in range(5, 25)], "D5", "D6",
+        symbol for i in range(6) for symbol in (f"C{i}", f"D{i}")
     ]
     assert view["candidate_omissions"] == [
-        "CSP 另有 10 个策略候选未展开", "CC 另有 28 个策略候选未展开",
+        "CSP 另有 24 个策略候选未展开", "CC 另有 24 个策略候选未展开",
     ]
-    assert "补充｜CSP 另有 10 个策略候选未展开" in blocks
-    assert "补充｜CC 另有 28 个策略候选未展开" in blocks
-    assert "汇总｜共 30 条，需处理 30 条，本消息展示 20 条。" in "\n".join(blocks)
+    assert "补充｜CSP 另有 24 个策略候选未展开" in blocks
+    assert "补充｜CC 另有 24 个策略候选未展开" in blocks
+    assert "汇总｜共 30 条，需处理 30 条。" in "\n".join(blocks)
+    unchanged_view = build_daily_brief_user_view(brief, limits=limits)
+    assert view["positions"] == unchanged_view["positions"]
+    assert view["candidates"] == unchanged_view["candidates"]
 
 
 def test_changed_items_precede_unchanged_items_when_both_fit() -> None:
@@ -1168,12 +1219,16 @@ def test_changed_items_precede_unchanged_items_when_both_fit() -> None:
     }
 
     view = build_daily_brief_user_view(
-        brief, diff=diff, limits={"max_actions_per_priority": 3, "max_candidates_per_strategy": 3},
+        brief, diff=diff, limits={"max_items_per_account": 7},
     )
 
-    assert [row["title"].split(" · ")[0] for row in view["positions"]] == ["P2", "P0", "P1"]
-    assert [row["symbol"] for row in view["candidates"]] == ["C2", "C0", "C1"]
+    # Preserve the test name for cross-module callers; changed facts no longer gain priority.
+    assert [row["title"].split(" · ")[0] for row in view["positions"]] == ["P0", "P1", "P2", "P3"]
+    assert [row["symbol"] for row in view["candidates"]] == ["C0", "C1", "C2"]
     assert view["candidate_omissions"] == ["CSP 另有 1 个策略候选未展开"]
+    unchanged_view = build_daily_brief_user_view(brief, limits={"max_items_per_account": 7})
+    assert view["positions"] == unchanged_view["positions"]
+    assert view["candidates"] == unchanged_view["candidates"]
 
 
 @pytest.mark.parametrize("render", [
@@ -1183,20 +1238,36 @@ def test_changed_items_precede_unchanged_items_when_both_fit() -> None:
 def test_combo_selection_respects_budget_consumed_by_positions_and_other_families(render) -> None:
     brief = _budget_brief(candidate_counts=(12, 12), position_count=20)
     brief["candidates"]["combo_yield"] = [
-        deepcopy(_brief()["candidates"]["combo_yield"][0]) for _ in range(3)
+        {**deepcopy(_brief()["candidates"]["combo_yield"][0]), "rank": i + 1, "symbol": f"COMBO{i}"}
+        for i in range(3)
     ]
-    limits = {"max_actions_per_priority": 20, "max_candidates_per_strategy": 20}
+    limits = {"max_items_per_account": 0, "max_candidates_per_strategy": 20}
 
     view = build_daily_brief_user_view(brief, limits=limits)
     selected = select_rendered_combo_candidate_rows(brief, delivery_kind="fixed_report", limits=limits)
     message = render(brief, {}, limits=limits) if render is render_delta_brief else render(brief, limits=limits)
 
     assert len(view["positions"]) + len(view["candidates"]) == 42
-    assert not any(row["family"] == "combo_yield" for row in view["candidates"])
-    assert selected == []
-    assert "组合增强 另有 3 个策略候选未展开" in view["candidate_omissions"]
-    assert "组合增强" in message and "另有 3 个策略候选未展开" in message
-    assert "另有 2 个策略候选未展开" in message
+    assert [row["symbol"] for row in view["candidates"]] == [
+        *[symbol for i in range(3) for symbol in (f"C{i}", f"D{i}", f"COMBO{i}")],
+        *[symbol for i in range(3, 9) for symbol in (f"C{i}", f"D{i}")],
+        "C9",
+    ]
+    assert selected == brief["candidates"]["combo_yield"]
+    assert view["candidate_omissions"] == [
+        "CSP 另有 2 个策略候选未展开", "CC 另有 3 个策略候选未展开",
+    ]
+    if render in (render_fixed_report_card_markdown, render_fixed_report_text):
+        assert "CSP 另有 2 个策略候选未展开" in message
+        assert "CC 另有 3 个策略候选未展开" in message
+    else:
+        assert re.search(r"## CSP\n.*?补充｜另有 2 个策略候选未展开", message, re.DOTALL)
+        assert re.search(r"## CC\n.*?补充｜另有 3 个策略候选未展开", message, re.DOTALL)
+    assert "组合增强 另有" not in message
+    assert "COMBO0｜组合增强（策略排序 1）" in message
+    assert "COMBO2｜组合增强（策略排序 3）" in message
+    assert "Put｜08-21 $300 Put｜推荐卖出 $3.45" in message
+    assert "Call｜09-18 $400 Call｜推荐买入 $1.05" in message
     assert "暂无合适合约" not in message
 
 
@@ -1238,16 +1309,16 @@ def test_material_candidates_respect_limit_and_keep_funds_in_sync() -> None:
     message = render_delta_brief(
         brief,
         diff,
-        limits={"max_candidates_per_strategy": 1},
+        limits={"max_items_per_account": 1},
     )
 
-    assert "C2｜CSP｜08-21 $102 Put（策略排序 3）" in message
+    assert "C0｜CSP｜08-21 $100 Put（策略排序 1）" in message
+    assert "C2｜CSP" not in message
     assert "C3｜CSP｜08-21 $103 Put（策略排序 4）" not in message
-    assert "C0｜CSP" not in message
     assert "补充｜另有 3 个策略候选未展开" in message
-    assert "C2 08-21 $102 Put｜按当前现金最多 3 手" in message
+    assert "C0 08-21 $100 Put｜按当前现金最多 1 手" in message
     assert "C3 08-21 $103 Put｜按当前现金最多 4 手" not in message
-    assert "C0 08-21 $100 Put｜按当前现金最多 1 手" not in message
+    assert "C2 08-21 $102 Put｜按当前现金最多 3 手" not in message
 
 
 def test_invalidated_candidate_banner_keeps_removed_contract_identifiable() -> None:
@@ -1292,6 +1363,8 @@ def test_material_position_uses_exact_lot_before_same_contract_siblings() -> Non
             "evaluation_status": "evaluable",
             "quote_status": "priced",
             "recommendation_state": state,
+            "notification_eligible": state == "close",
+            "metrics": deepcopy(brief["positions"][0]["metrics"]),
         }
         for i, state in enumerate(("hold", "hold", "close"))
     ]
@@ -1316,12 +1389,12 @@ def test_material_position_uses_exact_lot_before_same_contract_siblings() -> Non
     view_message = render_delta_brief(
         brief,
         diff,
-        limits={"max_actions_per_priority": 1},
+        limits={"max_items_per_account": 1},
     )
 
     assert "PDD｜CSP｜08-21 $95 Put｜建议平仓" in view_message
     assert "继续观察" not in view_message
-    assert "汇总｜共 3 条，需处理 1 条。" in view_message
+    assert "汇总｜共 3 条，需处理 1 条，普通持有 2 条。" in view_message
     assert "持仓未展开" not in view_message
     assert "lot-2" not in view_message
 
@@ -1343,7 +1416,7 @@ def test_renderer_honors_total_length_bound() -> None:
         row["event_risk"] = _render_event_risk("confirmed_none")
     message = render_full_brief(
         brief,
-        limits={"max_candidates_per_strategy": 20},
+        limits={"max_items_per_account": 0, "max_candidates_per_strategy": 20},
     )
 
     assert len(message) <= 12_000
@@ -1544,9 +1617,14 @@ def test_render_limit_normalization_remains_bounded() -> None:
         }
     ) == {
         "max_actions_per_priority": 1,
+        "max_items_per_account": 5,
         "max_candidates_per_strategy": 7,
         "max_rejection_reasons": 20,
     }
+    assert resolve_daily_brief_render_limits({"max_items_per_account": 0})["max_items_per_account"] == 0
+    assert resolve_daily_brief_render_limits({"max_items_per_account": 20})["max_items_per_account"] == 20
+    for invalid in (True, False, -1, 21, 1.5, None, "7"):
+        assert resolve_daily_brief_render_limits({"max_items_per_account": invalid})["max_items_per_account"] == 5
 
 
 def _render_event_risk(
@@ -1904,7 +1982,7 @@ def test_fixed_report_card_renders_candidate_paragraphs_and_actionable_position_
         }
     )
 
-    message = _render_card(brief)
+    message = _render_card(brief, limits={"max_items_per_account": 0})
 
     assert "| 优先 | 合约 | 权利金 / 净收入 | 年化 | 风险 / 容量 |" not in message
     assert "## CSP" in message
@@ -2062,7 +2140,7 @@ def test_wheel_no_recommendation_status_is_readable(direction, reason, expected)
         "symbol": "NVDA", "shares_remaining": 100, "remaining_contracts": 1,
         "status": "ready", "reason_code": reason, "recommended_contracts": 0,
     }]
-    message = render_fixed_report(brief, context=_scheduled_context())
+    message = render_fixed_report(brief, limits={"max_items_per_account": 0}, context=_scheduled_context())
     assert f"NVDA｜Wheel {direction.title()}" in message
     assert f"状态｜{expected}" in message
     if reason != "unknown_wheel_reason":
@@ -2077,12 +2155,12 @@ def test_wheel_quantity_and_same_candidate_limit_price(direction,status,label):
         "expiration":"2026-08-21","strike":110,"currency":"USD","sell_limit":2.15,"mid":2.125,
         "quote_observed_at_utc":"2026-07-31T14:00:00Z","coverage":{"status":status,"target_shares":300,
         "committed_shares":100,"reserved_shares":100,"available_shares":100}}]
-    rendered=render_fixed_report(brief,context=_scheduled_context())
+    rendered=render_fixed_report(brief,limits={"max_items_per_account": 0},context=_scheduled_context())
     assert label in rendered and "100 / 300 股" in rendered
     assert "建议限价｜USD 2.15" in rendered and "2.125" not in rendered
     assert "意图预留｜100 股" in rendered and "以账户容量检查为准" in rendered
     brief["wheel_batches"][0].pop("sell_limit")
-    unavailable=render_fixed_report(brief,context=_scheduled_context())
+    unavailable=render_fixed_report(brief,limits={"max_items_per_account": 0},context=_scheduled_context())
     assert "建议价格暂不可用" in unavailable and "建议｜卖出 1 张 08-21 $110" not in unavailable
 
 
@@ -2102,7 +2180,7 @@ def test_compact_wheel_keeps_quantities_reservations_and_conflicts(status, commi
                      "reserved_shares": reserved, "available_shares": 500 - committed - reserved},
     }]
     for render in (render_fixed_report, render_fixed_report_card_markdown):
-        message = render(brief, context=_scheduled_context())
+        message = render(brief, limits={"max_items_per_account": 0}, context=_scheduled_context())
         assert f"CC 覆盖｜{expected}" in message
         assert "剩余股份｜" not in message
         assert "分支剩余｜" not in message
@@ -2124,7 +2202,7 @@ def test_uncertain_wheel_coverage_remains_explicit(coverage_status):
         "coverage": {"status": coverage_status, "target_shares": 500, "committed_shares": 500,
                      "reserved_shares": 0, "available_shares": 0},
     }]
-    message = render_fixed_report(brief, context=_scheduled_context())
+    message = render_fixed_report(brief, limits={"max_items_per_account": 0}, context=_scheduled_context())
     assert "剩余股份｜500 股" in message
     assert "待核实" in message
     assert "覆盖数量待核实" in message
@@ -2144,7 +2222,7 @@ def test_wheel_keeps_same_symbol_adjacent_with_stable_branch_order(delivery_kind
     brief = _hk_assigned_wheel_brief()
     rows = brief["wheel_batches"]
     rows.insert(1, rows.pop())  # Tencent between Meituan branches in source order.
-    view = build_daily_brief_user_view(brief, delivery_kind=delivery_kind)
+    view = build_daily_brief_user_view(brief, delivery_kind=delivery_kind, limits={"max_items_per_account": 0})
     symbols = [item["title"].split(" · ")[0] for item in view["wheel_batches"]]
     assert symbols == ["3690.HK"] * (len(symbols)-1) + ["0700.HK"]
     if delivery_kind != "fixed_report":
@@ -2163,11 +2241,13 @@ def test_grouped_wheel_preserves_distinct_covered_contracts_and_missing_details(
         row["active_option_contracts"] = [{"lot_id":str(index),"underlying_symbol":row["symbol"],
             "expiration_ymd":"2026-11-27", "strike":"80" if index<2 else "85", "option_type":"call"}]
     for render in (render_fixed_report, render_fixed_report_card_markdown):
-        message=render(brief)
+        message=render(brief, limits={"max_items_per_account": 0})
         assert "2026-11-27 80 Call；2026-11-27 85 Call" in message
         assert "建议：卖出" not in message
     brief["wheel_batches"][1].pop("active_option_contracts")
-    grouped=build_daily_brief_user_view(brief,delivery_kind="fixed_report")["wheel_batches"][0]
+    grouped = next(item for item in build_daily_brief_user_view(
+        brief, delivery_kind="fixed_report", limits={"max_items_per_account": 0},
+    )["wheel_batches"] if "77.5P" in item["title"])
     assert "合约信息不完整" in " ".join(grouped["details"])
 
 
@@ -2372,9 +2452,10 @@ def test_fixed_blocks_and_plain_text_share_content_and_compact_sections(state) -
         "option_type": "call", "execution_key": "private-execution-id",
     }]
     original = deepcopy(brief)
-    blocks = render_fixed_report_card_blocks(brief, context=_scheduled_context())
-    card = render_fixed_report_card_markdown(brief, context=_scheduled_context())
-    text = render_fixed_report_text(brief, context=_scheduled_context())
+    limits = {"max_items_per_account": 0} if state == "wheel" else None
+    blocks = render_fixed_report_card_blocks(brief, limits=limits, context=_scheduled_context())
+    card = render_fixed_report_card_markdown(brief, limits=limits, context=_scheduled_context())
+    text = render_fixed_report_text(brief, limits=limits, context=_scheduled_context())
     assert card == "\n\n".join(blocks)
     assert _shared_channel_content(text) == _shared_channel_content(_plain_card_content(card))
     assert blocks and all(block.strip() == block and block for block in blocks)
@@ -2542,8 +2623,12 @@ def test_event_block_identifies_symbols_and_preserves_candidate_ranks() -> None:
         assert element["content"] == event_blocks[offset]
         assert element["margin"] == "0px 0px 0px 0px"
     text = render_fixed_report_text(brief, diff=diff)
-    assert "【事件】\n\nNVDA｜CSP" in text
-    assert "执行前需要重新确认事件窗口和报价。\n\nCC\n组合增强\n" in text
+    text_events = text.split("【事件】\n\n", 1)[1].split("【持仓】", 1)[0]
+    assert text_events.startswith("CC\n组合增强\n已确认到期前无近期重要事件；\n下单前复核报价。")
+    assert "NVDA｜CSP｜08-21 $100 Put（策略排序 3）\n事件数据不完整" in text_events
+    assert "MSFT｜CSP｜08-21 $400 Put（策略排序 7）\n预计 8 月 5 日发布财报" in text_events
+    assert "执行前需要重新确认事件窗口和报价。" in text_events
+    assert text_events.index("NVDA｜CSP") < text_events.index("MSFT｜CSP")
     assert "#1" not in event
     assert "AAPL" not in event and "TSLA" not in event
     assert all("预计 8 月" not in block for block in candidate_blocks)

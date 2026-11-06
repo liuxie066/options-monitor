@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1458 (`src`: 608, `domain`: 99, `scripts`: 21, `tests`: 726)
-- Internal import edges: 13004 total, 4508 production/script edges excluding tests
+- Python files scanned: 1459 (`src`: 608, `domain`: 99, `scripts`: 21, `tests`: 727)
+- Internal import edges: 13009 total, 4510 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|736| domain
+  application -->|737| domain
   application -->|4| domain_services
   application -->|210| infrastructure
   application -->|2| om_strategy_core
@@ -51,7 +51,7 @@ flowchart LR
   scripts -->|1| tests
   src -->|1| application
   storage -->|1| domain
-  tests -->|6434| application
+  tests -->|6437| application
   tests -->|714| domain
   tests -->|2| domain_services
   tests -->|435| infrastructure
@@ -65,7 +65,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 736 |
+| application | domain | 737 |
 | interfaces | application | 240 |
 | application | infrastructure | 210 |
 | scripts | application | 70 |
@@ -90,7 +90,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 6434 |
+| tests | application | 6437 |
 | tests | domain | 714 |
 | tests | interfaces | 495 |
 | tests | infrastructure | 435 |
@@ -105,7 +105,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 316 |
+| src.application | domain.domain | 317 |
 | src.interfaces | src.application | 189 |
 | src.application.ledger | domain.domain | 184 |
 | src.application | src.infrastructure | 144 |
@@ -219,7 +219,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.agent_tools.runtime_status_impl | 36 |
 | src.application.pipeline_watchlist | 35 |
 | src.infrastructure.futu_gateway | 34 |
-| src.application.daily_decision_brief_service | 32 |
+| src.application.daily_decision_brief_service | 33 |
 | src.application.ledger.queries | 32 |
 | src.application.multi_account_tick | 31 |
 | src.application.tick_notification_flow | 31 |

@@ -406,13 +406,97 @@ def test_validate_config_accepts_default_off_daily_brief() -> None:
         _config(
             notifications={
                 "daily_brief": {
-                    "max_actions_per_priority": 5,
+                    "max_items_per_account": 5,
                     "max_candidates_per_strategy": 3,
                     "max_rejection_reasons": 5,
                 }
             }
         )
     )
+
+
+@pytest.mark.parametrize("value", [0, 5, 20])
+def test_validate_config_accepts_daily_brief_account_budget(value: int, capsys) -> None:
+    mod.validate_config(
+        _config(notifications={"daily_brief": {"max_items_per_account": value}})
+    )
+    assert "max_actions_per_priority" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (True, "must be an integer"),
+        (False, "must be an integer"),
+        (-1, "must be between 0 and 20"),
+        (21, "must be between 0 and 20"),
+        (5.0, "must be an integer"),
+        (None, "must be an integer"),
+        ("5", "must be an integer"),
+    ],
+)
+def test_validate_config_rejects_invalid_daily_brief_account_budget(value, expected: str) -> None:
+    _reject_config(
+        f"notifications.daily_brief.max_items_per_account {expected}",
+        notifications={"daily_brief": {"max_items_per_account": value}},
+    )
+
+
+@pytest.mark.parametrize("value", [1, 5, 20])
+def test_validate_config_accepts_legacy_daily_brief_limit_with_migration_warning(
+    value: int, capsys,
+) -> None:
+    cfg = _config(
+        notifications={
+            "daily_brief": {"max_items_per_account": 5, "max_actions_per_priority": value}
+        }
+    )
+    mod.validate_config(cfg)
+    warning = capsys.readouterr().err
+    assert "notifications.daily_brief.max_actions_per_priority is deprecated and ignored" in warning
+    assert "notifications.daily_brief.max_items_per_account" in warning
+    assert "docs/NOTIFICATION_BRIEF_SELECTION.md" in warning
+    assert cfg["notifications"]["daily_brief"]["max_items_per_account"] == 5
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (True, "must be an integer"),
+        (False, "must be an integer"),
+        (-1, "must be between 1 and 20"),
+        (0, "must be between 1 and 20"),
+        (21, "must be between 1 and 20"),
+        (5.0, "must be an integer"),
+        (None, "must be an integer"),
+        ("5", "must be an integer"),
+    ],
+)
+def test_validate_config_rejects_invalid_legacy_daily_brief_limit(value, expected: str) -> None:
+    _reject_config(
+        f"notifications.daily_brief.max_actions_per_priority {expected}",
+        notifications={
+            "daily_brief": {"max_items_per_account": 5, "max_actions_per_priority": value}
+        },
+    )
+
+
+def test_daily_brief_defaults_and_examples_use_account_budget_without_legacy_warning(capsys) -> None:
+    from src.application.config_defaults import DEFAULT_CONFIG
+
+    root = Path(__file__).resolve().parents[1]
+    example = json.loads((root / "configs" / "examples" / "user.common.example.json").read_text())
+    system = json.loads((root / "configs" / "system.json").read_text())
+    for notifications in (
+        DEFAULT_CONFIG["defaults"]["notifications"],
+        system["defaults"]["notifications"],
+        example["notifications"],
+    ):
+        brief = notifications["daily_brief"]
+        assert brief["max_items_per_account"] == 5
+        assert "max_actions_per_priority" not in brief
+        mod.validate_config(_config(notifications=notifications))
+    assert "max_actions_per_priority" not in capsys.readouterr().err
 
 
 def test_validate_config_rejects_invalid_daily_brief_contract() -> None:

@@ -33,13 +33,16 @@ def position_row(*, lot: str = "old-lot", option_type: str = "call", credit: flo
         "net_credit": credit, "net_debit": max(0, -credit),
         "incremental_period_return": credit / 10000,
         "incremental_annualized_return": credit / 10000 * 365 / 31,
-        "new_capital_basis": 10000, "evidence": {"old_ask": 1.0, "new_bid": 2.0},
+        "new_capital_basis": 10000, "extension_days": 0,
+        "evidence": {"old_ask": 1.0, "new_bid": 2.0},
     }
     if option_type == "call":
         target.update(recommendation="credit_roll" if credit > 0 else "cash_neutral_roll" if credit == 0 else "debit_roll",
             cash_flow_type="credit" if credit > 0 else "neutral" if credit == 0 else "debit",
             strike_increase=5, strike_increase_pct=0.05, assignment_net_improvement=500 + credit,
             assignment_improvement_period_return=0.0595, assignment_improvement_annualized_return=0.7)
+    else:
+        target.update(strike_drop_pct=0.05)
     roll = {
         "schema_version": "covered_call_roll.v1" if option_type == "call" else "short_put_roll.v1",
         "status": "success", "outcome": "found", "account": "lx",
@@ -236,7 +239,16 @@ def test_plain_hold_and_missing_disabled_roll_stay_suppressed(tmp_path: Path) ->
     row["roll_advice"] = {"status": "disabled", "outcome": "unable", "candidates": []}
     brief = roll_brief(base=tmp_path, rows=[row])
     assert not daily_brief_roll_notification_identities(brief)
-    assert "CC 向上移仓" not in renderer.render_fixed_report_text(brief)
+    text = renderer.render_fixed_report_text(brief)
+    assert "CC 向上移仓" not in text
+    assert "缺口摘要：1 条暂无法评估" in text
+    assert "旧仓买回" not in text
+
+    row.update(evaluation_status="evaluable", quote_status="priced")
+    text = renderer.render_fixed_report_text(brief)
+    assert "普通持有 1 条" in text
+    assert "暂无法评估" not in text
+    assert "CC 向上移仓" not in text
 
 
 def test_expired_roll_is_not_actionable_in_query_or_new_fixed_report(tmp_path: Path) -> None:
@@ -412,7 +424,7 @@ def test_combo_selector_uses_effective_advice_time_for_shared_budget(tmp_path: P
     brief = _budget_combo_roll_brief(base=tmp_path, run_id="effective-time")
     for row in brief["positions"]:
         row["roll_advice"]["actionable_until_utc"] = "2026-07-21T14:01:00Z"
-    limits = {"max_actions_per_priority": 20, "max_candidates_per_strategy": 20}
+    limits = {"max_items_per_account": 0, "max_candidates_per_strategy": 20}
     context = {"advice_time_utc": "2026-07-21T14:02:00Z"}
 
     view = renderer.build_daily_brief_user_view(brief, limits=limits, context=context)
@@ -457,7 +469,7 @@ def test_final_combo_metadata_uses_shared_budget_after_roll_removal(
     monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "fixture-app")
     config = _feishu_config()
     config["notifications"]["daily_brief"] = {
-        "max_actions_per_priority": 20, "max_candidates_per_strategy": 20,
+        "max_items_per_account": 0, "max_candidates_per_strategy": 20,
     }
     if explicit_routes:
         config["notifications"]["routes"] = [{
@@ -491,7 +503,9 @@ def test_final_combo_metadata_uses_shared_budget_after_roll_removal(
     }
     assert len([item for item in captured[0]["candidate_index"]
                 if item["strategy_family"] == "combo_yield"]) == 3
-    assert len(expected) == (3 if remove_rolls == "expired" else 0)
+    # Rank rotation keeps all three Combo rows in the shared 42-item plan;
+    # stripping roll cards from transport never causes a second selection.
+    assert len(expected) == 3
     assert set(render_context["rendered_combo_candidate_identities"]) == expected
     assert len(render_context["candidate_occurrence_ids"]) == len(expected)
     assert len(render_context["candidate_exposure_ids"]) == len(expected)
@@ -501,7 +515,9 @@ def test_final_combo_metadata_uses_shared_budget_after_roll_removal(
         if item["strategy_family"] == "combo_yield" and states[item["identity"]] == "expanded"
     }
     assert expanded == actual_expanded
-    assert all((item["symbol"] in message) == (item["identity"] in expanded)
+    # The event summary can retain a symbol after its complete action card is
+    # removed. Only a complete card title proves expanded delivery.
+    assert all((f"{item['symbol']}｜组合增强（策略排序" in message) == (item["identity"] in expanded)
                for item in captured[0]["candidate_index"] if item["strategy_family"] == "combo_yield")
     assert not any(state == "expanded" for identity, state in states.items()
                    if identity.startswith("position-roll:"))
@@ -521,7 +537,7 @@ def test_final_card_and_fallback_ack_only_the_same_visible_rolls(
 
     # Exercise length truncation without refilling candidate slots when hidden rolls are removed.
     monkeypatch.setattr(renderer, "_MAX_MESSAGE_CHARS", 6000)
-    limits = {"max_actions_per_priority": 20, "max_candidates_per_strategy": 10}
+    limits = {"max_items_per_account": 0, "max_candidates_per_strategy": 10}
     def assemble(**kw):
         return {market: _many_candidate_roll_brief(base=kw["base"], run_id=kw["run_id"], account=kw["account"])
             for market in kw["markets_to_run"]}
@@ -590,7 +606,9 @@ def test_final_card_and_fallback_ack_only_the_same_visible_rolls(
 
 def test_suppressing_unshown_roll_preserves_close_in_same_position(tmp_path: Path) -> None:
     brief = roll_brief(base=tmp_path, rows=[{**position_row(), "recommendation_state": "close",
-        "notification_eligible": True, "evaluation_status": "priced", "quote_status": "priced"}])
+        "notification_eligible": True, "evaluation_status": "priced", "quote_status": "priced",
+        "metrics": {"capital_basis": 10000, "remaining_max_annualized_return": 0.05,
+                    "net_capture_ratio": 0.95}}])
     render_brief = flow._daily_brief_roll_render_source(brief, [])
     message = renderer.render_fixed_report_text(render_brief, diff={}, limits={}, context={})
     identities = flow._daily_brief_transport_roll_identities(
