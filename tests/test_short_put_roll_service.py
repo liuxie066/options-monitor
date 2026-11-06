@@ -599,3 +599,123 @@ def test_registered_tool_requires_explicit_expiry_and_has_no_trade_effects():
     assert "max_new_expiration" in tool.input_json_schema()["required"]
     assert "lot_id" in tool.input_json_schema()["required"]
     assert tool.side_effects == ("fetches_market_data", "writes_isolated_request_reports")
+
+
+@pytest.fixture
+def frozen_roll_ranges(monkeypatch):
+    # Use the real calculator so frozen targets include #1023's one-contract
+    # economics as well as the existing partial-coverage evidence.
+    roll_policy = service.require_position_advice_plugin()
+    policy = SimpleNamespace(
+        old_position_in_roll_scope=lambda **_: True,
+        evaluate_short_put_roll=roll_policy.evaluate_short_put_roll,
+        rank_short_put_roll_candidates=lambda rows: list(rows),
+        remaining_max_annualized_return=lambda **_: 0.1,
+    )
+    monkeypatch.setattr(service, "position_advice_plugin_status", lambda _: "available")
+    monkeypatch.setattr(service, "require_position_advice_plugin", lambda: policy)
+    position = {"account": "lx", "lot_id": "lot-frozen", "symbol": "NVDA", "side": "short",
+        "option_type": "put", "expiration": OLD_EXPIRY, "strike": 100,
+        "contracts_open": 1, "multiplier": 100, "currency": "USD", "broker": "富途"}
+    requirement = {"requirement_id": "frozen-roll", "quote_rights_status": "ok", "quote_rights_market": "US",
+        "quote_rights_underlier": "LV1", "quote_rights_option": "LV1",
+        "quote_rights_received_at_utc": (NOW - timedelta(seconds=1)).isoformat(),
+        "market_state_after_snapshot": "MORNING",
+        "market_state_received_at_utc": (NOW - timedelta(seconds=1)).isoformat(),
+        "roll_scope": {"max_new_expiration": NEW_EXPIRY, "old_strike": 100, "directional_bound": 0.95}}
+    details = []
+    for expiry, strike in ((OLD_EXPIRY, 100), (NEW_EXPIRY, 95)):
+        scope = {"request_index": 0, "option_type": "put",
+            "strike_window": {"min_strike": 80, "max_strike": 100},
+            "covered_strikes": [strike], "covered_ranges": [[strike, strike]],
+            "missing_ranges": [[80, strike]], "missing_range_inclusive": [[True, False]]}
+        details.append({"expiration": expiry, "status": "incomplete",
+            "missing_requirements": [{"request_index": 0, "option_type": "put", "missing": ["lower_bound"]}],
+            **{key: value for key, value in scope.items() if key not in {"request_index", "option_type", "strike_window"}},
+            "strike_coverage": [scope], "ranking_complete": False})
+    coverage = {"status": "partial", "reason_code": "required_data_partial_coverage",
+        "covered_expirations": [], "incomplete_expirations": [OLD_EXPIRY, NEW_EXPIRY],
+        "per_expiration": details, "ranking_complete": False, "ranking_scope": "observed_contracts",
+        "partial_candidate_policy": "retain_and_mark"}
+    plan = {"spot_reference": 98, "expiration_discovery_complete": True,
+        "expiration_discovery": {"outcome": "success_rows", "expirations": [OLD_EXPIRY, NEW_EXPIRY]},
+        "side_plans": [{"option_type": "put", "explicit_expirations": [OLD_EXPIRY, NEW_EXPIRY],
+            "source_fields": ["position_advice.roll_scope"],
+            "strike_window": {"min_strike": None, "max_strike": 100}}]}
+    arguments = {"position": position, "positions_context": {}, "portfolio_context": None,
+        "requirement": requirement, "quotes": [quote(100, OLD_EXPIRY, bid=1, ask=1.05), quote(95, NEW_EXPIRY)],
+        "provenance": {"expires_at": (NOW + timedelta(minutes=5)).isoformat(),
+            "expected_fetch_contract": {"fetch_plan": plan}, "required_data_coverage": coverage},
+        "config": {"close_advice": {"enabled": True}}, "now": NOW}
+    return arguments, policy
+
+
+@pytest.mark.parametrize("complete_proof", [False, True])
+@pytest.mark.parametrize("kind", ["found", "rejected", "empty"])
+def test_frozen_partial_ranges_never_become_complete(frozen_roll_ranges, complete_proof, kind):
+    arguments, policy = frozen_roll_ranges
+    arguments["provenance"]["expected_fetch_contract"]["fetch_plan"]["expiration_discovery_complete"] = complete_proof
+    if kind == "rejected":
+        policy.evaluate_short_put_roll = lambda *_, **__: {"accepted": False, "reason_codes": ["no_positive_net_cash"]}
+    elif kind == "empty":
+        arguments["quotes"] = arguments["quotes"][:1]
+    original = deepcopy(arguments["provenance"]["required_data_coverage"])
+    result = service.evaluate_frozen_position_roll(**arguments)
+    assert result["status"] == "partial", result
+    assert result["outcome"] == ("found" if kind == "found" else "unable")
+    coverage = result["coverage"]
+    assert coverage["status"] == "partial"
+    assert coverage["enumeration_complete"] is False
+    assert coverage["ranking_complete"] is False
+    assert coverage["ranking_scope"] == "observed_contracts"
+    assert coverage["partial_candidate_policy"] == "retain_and_mark"
+    assert coverage["required_data_coverage"] == original
+    assert result["source"]["required_data_coverage"] == original
+    assert "enumeration_incomplete" in result["reason_codes"]
+    assert "roll_scope_not_covered" not in result["reason_codes"]
+    if kind == "found":
+        assert result["displayed"] == 1
+        evidence = result["candidates"][0]["evidence"]
+        assert evidence["required_data_expiration_status"] == "incomplete"
+        assert evidence["ranking_complete"] is False
+        assert evidence["ranking_scope"] == "observed_contracts"
+        assert evidence["partial_candidate_policy"] == "retain_and_mark"
+        compact = evidence["required_data_coverage"]
+        assert compact["status"] == "partial"
+        assert compact["per_expiration"] == [original["per_expiration"][1]]
+        assert compact["covered_expirations"] == []
+        assert compact["incomplete_expirations"] == [NEW_EXPIRY]
+        assert result["actionable_until_utc"]
+    else:
+        assert result["candidates"] == []
+        assert coverage["matched"] == 0
+        assert coverage["discovered"] == (0 if kind == "empty" else 1)
+    assert arguments["provenance"]["required_data_coverage"] == original
+
+
+def test_frozen_partial_ranges_do_not_replace_missing_held_contract(frozen_roll_ranges):
+    arguments, _ = frozen_roll_ranges
+    arguments["quotes"] = arguments["quotes"][1:]
+    result = service.evaluate_frozen_position_roll(**arguments)
+    assert result["status"] == "unavailable"
+    assert result["outcome"] == "unable"
+    assert result["candidates"] == []
+    assert result["coverage"] is None
+    assert result["reason_codes"] == ["old_quote_missing_or_conflicting"]
+    assert result["source"]["required_data_coverage"]["status"] == "partial"
+
+
+def test_frozen_complete_empty_still_requires_complete_scope_proof(frozen_roll_ranges):
+    arguments, _ = frozen_roll_ranges
+    arguments["quotes"] = arguments["quotes"][:1]
+    arguments["provenance"].pop("required_data_coverage")
+    result = service.evaluate_frozen_position_roll(**arguments)
+    assert result["status"] == "success"
+    assert result["outcome"] == "none"
+    assert result["coverage"]["enumeration_complete"] is True
+    assert result["coverage"]["status"] == "complete"
+    arguments["provenance"]["expected_fetch_contract"]["fetch_plan"]["expiration_discovery_complete"] = False
+    result = service.evaluate_frozen_position_roll(**arguments)
+    assert result["status"] == "unavailable"
+    assert result["outcome"] == "unable"
+    assert result["reason_codes"] == ["roll_scope_not_covered"]

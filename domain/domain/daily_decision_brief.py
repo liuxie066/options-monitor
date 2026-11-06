@@ -51,6 +51,11 @@ _CANDIDATE_REPRESENTATIVE_FIELDS = (
     "metrics",
     "capacity",
     "event_risk",
+    "required_data_coverage",
+    "required_data_expiration_status",
+    "ranking_complete",
+    "ranking_scope",
+    "partial_candidate_policy",
 )
 
 # Retired fields are never part of the current normalized/write contract.  Raw

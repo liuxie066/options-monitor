@@ -7,6 +7,7 @@ from typing import Any, Callable
 from domain.domain.engine import normalize_strategy_mode
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.candidate_snapshot_manifest import CandidateSnapshotManifestError
+from src.application.candidate_snapshot_contract import required_data_coverage_fields
 from src.application.candidate_evidence_history import (
     load_candidate_snapshot_bundle_for_inspection,
     load_latest_candidate_snapshot_bundle_for_inspection,
@@ -112,7 +113,9 @@ def candidate_rank_explain_tool(
                     "rank": item.get("rank"),
                     "symbol": facts.get("symbol"),
                     "contract_symbol": facts.get("contract_symbol"),
+                    "expiration": facts.get("expiration"),
                     "source_file": "state/opening_candidate_snapshot.json",
+                    **required_data_coverage_fields(facts),
                 }
             )
             ranked.append(explanation)
@@ -208,7 +211,8 @@ def candidate_rank_explain_tool(
     }
     returned = len(ranked_flat)
     total = sum(int(group["row_count"]) for group in groups)
-    model_fields = ("mode", "rank", "symbol", "contract_symbol", "period_net_return", "annualized_return", "net_income", "primary_drivers")
+    provenance_fields = ("expiration", "required_data_expiration_status", "ranking_complete", "ranking_scope", "partial_candidate_policy")
+    model_fields = ("mode", "rank", "symbol", "contract_symbol", "period_net_return", "annualized_return", "net_income", "primary_drivers", *provenance_fields)
     data = {
         "narrowing_hint": (
             "结果超过证据预算，请指定 mode=put 或 call，并使用 top_n=1。" if mode_filter == "all"
@@ -218,7 +222,9 @@ def candidate_rank_explain_tool(
         "ranked_summary": [{key: row.get(key) for key in model_fields} for row in ranked_flat],
         "ranking_summary": [
             {"mode": group["mode"], "strategy_status": group["strategy_status"], "capacity_status": group["capacity_status"],
-             "rank_reason": group["ranked"][0].get("rank_reason") if group["ranked"] else None}
+             "rank_reason": group["ranked"][0].get("rank_reason") if group["ranked"] else None,
+             **{key: group["ranked"][0][key] for key in provenance_fields
+                if group["ranked"] and key in group["ranked"][0]}}
             for group in groups
         ],
         "returned_count": returned,

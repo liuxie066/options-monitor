@@ -8,6 +8,22 @@ from src.application.position_advice_evidence import current_position_advice_evi
 NOW = datetime(2026, 11, 2, 15, 0, tzinfo=timezone.utc)
 
 
+def test_position_report_normalization_keeps_coverage_structured_and_rank_partial():
+    import json
+    from src.application.close_advice_report_manifest import normalize_close_advice_report_value
+
+    coverage = {"status": "partial", "per_expiration": [{
+        "expiration": "2026-12-24", "status": "incomplete",
+        "covered_ranges": [[135.0, 150.0]], "missing_ranges": [[120.0, 135.0]],
+        "missing_range_inclusive": [[True, False]],
+    }]}
+    assert normalize_close_advice_report_value("required_data_coverage", json.dumps(coverage)) == coverage
+    assert normalize_close_advice_report_value("required_data_coverage", coverage) == coverage
+    assert normalize_close_advice_report_value("ranking_complete", "False") is False
+    with pytest.raises(ValueError, match="coverage JSON"):
+        normalize_close_advice_report_value("required_data_coverage", "not-json")
+
+
 def _evidence(*, quote_changes=None, requirement_changes=None, position=None, now=NOW):
     quote = {
         "snapshot_requested_at_utc": (NOW - timedelta(seconds=3)).isoformat(),

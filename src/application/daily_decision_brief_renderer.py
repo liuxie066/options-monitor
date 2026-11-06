@@ -1064,6 +1064,7 @@ def _render_user_view_blocks(
             if sizing:
                 lines.append("Position Sizing：" + sizing[0])
                 lines.extend(sizing[1:])
+            lines.extend(item.get("required_data_details") or [])
             identity = (view.get("notification_identities") or {}).get((item["symbol"], family))
             blocks.append("\n".join(lines), "candidate", -int(item.get("rank") or 0),
                           identities=(identity,))
@@ -1571,6 +1572,7 @@ def _candidate_views(
                         "event_normal": _lower((row.get("event_risk") or {}).get("user_state")) == "confirmed_none"
                         if isinstance(row.get("event_risk"), Mapping) else False,
                         "event_summary": _candidate_event_summary(row),
+                        "required_data_details": _candidate_required_data_details(row),
                         "details": [
                             *_candidate_metric_details(row, family=family, market=market),
                             _candidate_event_line(row, family=family),
@@ -1612,6 +1614,7 @@ def _candidate_views(
                     "event_normal": _lower((row.get("event_risk") or {}).get("user_state")) == "confirmed_none"
                     if isinstance(row.get("event_risk"), Mapping) else False,
                     "event_summary": _candidate_event_summary(row),
+                    "required_data_details": _candidate_required_data_details(row),
                     "details": [
                         *_candidate_metric_details(row, family=family, market=market),
                         _candidate_event_line(row, family=family),
@@ -1878,6 +1881,7 @@ def _wheel_batch_views(
                 details.append("状态：" + "；".join(dict.fromkeys(
                     _wheel_reason_text(reason) for reason in reasons
                 )))
+        details.extend(_candidate_required_data_details(row))
         out.append(
             {
                 "title": f"{symbol} · Wheel {direction.title()}{suffix}",
@@ -2051,6 +2055,7 @@ def _candidate_metric_details(
     details = [" · ".join(parts)] if parts else []
     if fields.get("sizing"):
         details.append("Position Sizing：" + " · ".join(fields["sizing"]))
+    details.extend(_candidate_required_data_details(candidate))
     return details
 
 
@@ -2652,15 +2657,76 @@ def _candidate_empty_summary_for_failures(
     return f"本轮暂无符合条件的候选；{subject} 扫描失败。"
 
 
+def _required_data_ranges_text(ranges: Any, inclusive: Any = None) -> str:
+    values = []
+    for index, bounds in enumerate(ranges or []):
+        if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+            continue
+        flags = inclusive[index] if inclusive is not None and index < len(inclusive) else (True, True)
+        lower, upper = bounds
+        left = "[" if flags[0] and lower is not None else "("
+        right = "]" if flags[1] and upper is not None else ")"
+        lower_text = f"{lower:g}" if _number(lower) is not None else "−∞"
+        upper_text = f"{upper:g}" if _number(upper) is not None else "+∞"
+        values.append(f"{left}{lower_text}, {upper_text}{right}")
+    text = "、".join(values[:3])
+    if len(values) > 3:
+        text += f"（另 {len(values) - 3} 段）"
+    return text
+
+
+def _required_data_range_details(coverage: Mapping[str, Any], *, expirations: set[str] | None = None) -> list[str]:
+    details = []
+    for item in coverage.get("per_expiration") or []:
+        expiration = str(item.get("expiration") or "")
+        if expirations and expiration not in expirations:
+            continue
+        scopes = item.get("strike_coverage") or []
+        if not scopes:
+            continue
+        status = {"covered": "完整", "incomplete": "不完整", "missing": "缺失"}.get(item.get("status"), "待核实")
+        parts = [f"{expiration} 覆盖{status}"]
+        for scope in scopes[:3]:
+            side = _OPTION_LABELS.get(scope.get("option_type"), "期权")
+            observed = _required_data_ranges_text(scope.get("covered_ranges"))
+            missing = _required_data_ranges_text(scope.get("missing_ranges"), scope.get("missing_range_inclusive"))
+            if observed:
+                parts.append(f"{side} 已观测 {observed}")
+            if missing:
+                parts.append(f"缺口 {missing}")
+        if len(scopes) > 3:
+            parts.append(f"另 {len(scopes) - 3} 个请求窗口未展开")
+        details.append(" · ".join(parts))
+    return details
+
+
+def _candidate_required_data_details(candidate: Mapping[str, Any]) -> list[str]:
+    metrics = candidate.get("metrics") if isinstance(candidate.get("metrics"), Mapping) else {}
+    coverage = candidate.get("required_data_coverage") or metrics.get("required_data_coverage")
+    if not isinstance(coverage, Mapping):
+        return []
+    expirations = {str(candidate[key]) for key in ("expiration", "put_expiration", "call_expiration") if candidate.get(key)}
+    details = _required_data_range_details(coverage, expirations=expirations)
+    ranking_complete = candidate.get("ranking_complete", metrics.get("ranking_complete", coverage.get("ranking_complete")))
+    if ranking_complete is False:
+        details.append("仅对已观测合约排序，未观测行权价可能改变排序")
+    return details
+
+
 def _required_data_coverage_reminder(item: Mapping[str, Any]) -> str:
     symbol = _upper(item.get("symbol")) or "相关标的"
     family = _STRATEGY_LABELS.get(_lower(item.get("strategy_family")), "候选")
     coverage = item.get("required_data_coverage") or {}
-    skipped = "、".join(str(value) for value in coverage.get("incomplete_expirations") or [])
+    incomplete = "、".join(str(value) for value in coverage.get("incomplete_expirations") or [])
     covered = "、".join(str(value) for value in coverage.get("covered_expirations") or [])
     labels = {"lower_bound": "行权价下界", "upper_bound": "行权价上界",
               "strike_window": "行权价窗口", "exact_strike": "指定行权价", "rows": "合约行"}
-    details = []
+    details = ["已保留已观测窗口内合约"]
+    if incomplete:
+        details.append(f"覆盖不完整到期日 {incomplete}")
+    if covered:
+        details.append(f"完整到期日 {covered}")
+    details.extend(_required_data_range_details(coverage))
     for expiration in coverage.get("per_expiration") or []:
         for requirement in expiration.get("missing_requirements") or []:
             side = _OPTION_LABELS.get(requirement.get("option_type"), "期权")
@@ -2669,8 +2735,8 @@ def _required_data_coverage_reminder(item: Mapping[str, Any]) -> str:
             if strikes:
                 missing += "（" + "、".join(f"{value:g}" for value in strikes) + "）"
             details.append(f"{expiration.get('expiration')} {side} 缺{missing}")
-    detail = f"；{'；'.join(details)}" if details else ""
-    return f"{symbol} {family}：期权数据不完整，已跳过到期日 {skipped}；仅评估完整到期日 {covered}{detail}"
+    details.append("仅对已观测合约排序，未观测行权价可能改变排序")
+    return f"{symbol} {family}：期权数据不完整；" + "；".join(details)
 
 
 def _strategy_data_gap_reminders(

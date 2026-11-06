@@ -71,11 +71,13 @@ from src.application.wheel.candidate_snapshot import (
     WheelCandidateSnapshotError,
     validate_wheel_candidate_snapshot,
 )
+from src.application.candidate_snapshot_contract import required_data_coverage_fields
 from src.application.candidate_snapshot_manifest import (
     CandidateSnapshotManifestError,
     load_candidate_snapshot_bundle,
 )
 from src.application.close_advice_report_manifest import (
+    normalize_close_advice_report_value,
     read_close_advice_report_snapshot,
 )
 from src.application.payload_helpers import positive_int_or as _positive_int
@@ -1242,6 +1244,8 @@ def _load_wheel_snapshot_family(
             "projected_lifecycle_pnl_scope": (final or {}).get(
                 "projected_lifecycle_pnl_scope"
             ),
+            **required_data_coverage_fields(batch),
+            **required_data_coverage_fields({**(final or {}), "option_type": direction}),
         }
         batch_views.append(view)
         if final is None or not price_available:
@@ -1254,6 +1258,7 @@ def _load_wheel_snapshot_family(
                 "stock_lot_id": lot_id,
                 "wheel_branch_id": branch_id,
                 "direction": direction,
+                "option_type": direction,
                 "expiration": _text(
                     final.get("expiration") or final.get("expiration_ymd")
                 ),
@@ -1411,6 +1416,21 @@ def _load_close_advice(
                     "position_lot_id": row.get("position_lot_id"), "reason": "roll_advice_invalid"})
         else:
             row.pop("roll_advice", None)
+        coverage_raw = row.get("required_data_coverage")
+        if coverage_raw not in (None, ""):
+            try:
+                row["required_data_coverage"] = normalize_close_advice_report_value("required_data_coverage", coverage_raw)
+                if row.get("ranking_complete") not in (None, ""):
+                    row["ranking_complete"] = normalize_close_advice_report_value("ranking_complete", row["ranking_complete"])
+                # A held position can have unavailable quote coverage. Candidate
+                # membership is checked by its owner, not this position projection.
+                row.update(required_data_coverage_fields({**row, "expiration": None}))
+            except (TypeError, ValueError):
+                data_gaps.append({"scope": "position", "strategy_family": "close_advice",
+                    "position_lot_id": row.get("position_lot_id"), "reason": "required_data_coverage_invalid"})
+                return [], False
+        else:
+            row.pop("required_data_coverage", None)
         row["_source_path"] = _source_path(run_account_dir, path)
         row["_source_row"] = source_row
         rows.append(row)
@@ -2103,6 +2123,7 @@ def _candidate_view(
             "capacity": dict(capacity or {}),
             "event_risk": dict(event_risk or {}),
             "source": _source_view(row),
+            **required_data_coverage_fields(row),
             **{
                 field: row.get(field)
                 for field in _COMBO_OCCURRENCE_FIELDS
@@ -2130,6 +2151,7 @@ def _candidate_view(
         "capacity": dict(capacity or {}),
         "event_risk": dict(event_risk or {}),
         "source": _source_view(row),
+        **required_data_coverage_fields(row),
     }
 
 
@@ -2217,6 +2239,8 @@ def _position_view(
         "event_at_utc",
     )
     out = {field: _json_safe(row.get(field)) for field in fields}
+    coverage_fields = required_data_coverage_fields({**row, "expiration": None})
+    out.update(coverage_fields)
     out["advice_kind"] = "close_advice"
     out["notification_eligible"] = notification_eligible
     out["close_actionable"] = close_actionable
@@ -2241,6 +2265,7 @@ def _position_view(
         )
         if row.get(key) is not None
     }
+    out["metrics"].update(coverage_fields)
     out["strategy_family"] = _text(
         row.get("strategy_family") or row.get("strategy") or "close_advice"
     ).lower()
@@ -2312,6 +2337,7 @@ def _candidate_metrics(row: Mapping[str, Any], *, rank: int) -> dict[str, Any]:
     )
     out = {"rank": rank}
     out.update({key: _json_safe(row.get(key)) for key in keys if row.get(key) is not None})
+    out.update(required_data_coverage_fields(row))
     return out
 
 

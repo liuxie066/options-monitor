@@ -29,6 +29,7 @@ from tests.test_daily_decision_brief_renderer import (
     _candidate,
     _render_event_risk,
     _scheduled_context,
+    _strategy_partial_data_gap,
 )
 
 
@@ -97,6 +98,71 @@ def test_display_evidence_follows_surviving_summary_and_full_cards() -> None:
     ]
     assert _display_evidence({}, ["position-roll:v1:lx:US:roll:id"], [],
                              [_Block("另有 1 条", "omission", summary_family="all")])[0]["state"] == "not_shown"
+
+
+@pytest.mark.parametrize("delivery_kind", ["candidate_alert", "fixed_report"])
+@pytest.mark.parametrize("long", [False, True])
+def test_partial_range_cards_keep_coverage_and_display_evidence_for_surviving_cards(delivery_kind, long) -> None:
+    brief, identities = _five_candidate_brief(long=long)
+    for row in brief["candidates"]["sell_put"]:
+        strike, expiration = row["strike"], row["expiration"]
+        scope = {
+            "request_index": 0, "option_type": "put", "status": "incomplete",
+            "strike_window": [strike - 10, strike + 10],
+            "covered_strikes": [strike - 5, strike, strike + 5],
+            "covered_ranges": [[strike - 5, strike + 5]],
+            "missing_ranges": [[strike - 10, strike - 5], [strike + 5, strike + 10]],
+            "missing_range_inclusive": [[True, False], [False, True]],
+        }
+        coverage = {
+            "status": "partial", "reason_code": "required_data_partial_coverage",
+            "covered_expirations": [], "incomplete_expirations": [expiration],
+            "ranking_complete": False, "ranking_scope": "observed_contracts",
+            "partial_candidate_policy": "retain_and_mark",
+            "per_expiration": [{"expiration": expiration, **scope, "strike_coverage": [scope]}],
+        }
+        row.update(required_data_coverage=coverage, required_data_expiration_status="incomplete",
+                   ranking_complete=False, ranking_scope="observed_contracts",
+                   partial_candidate_policy="retain_and_mark")
+    # A surviving gap summary mentions NVDA even when its whole candidate card
+    # is removed. That mention must not upgrade the frozen display evidence.
+    brief["data_gaps"] = [{**_strategy_partial_data_gap("NVDA"),
+        "reason_code": "required_data_partial_coverage",
+        "required_data_coverage": brief["candidates"]["sell_put"][1]["required_data_coverage"]}]
+    selection = select_daily_brief_notification(
+        brief, delivery_kind=delivery_kind, candidate_identities=identities,
+        limits={"max_candidates_per_strategy": 5} if long else None,
+        context=_scheduled_context(),
+        fits=lambda rows, text: len(text) <= (4000 if long else 12_000)
+        and feishu_notification_blocks_fit(rows, text, open_id="ou_example"),
+    )
+    # A smaller recipient budget forces two originally selected long cards out.
+    expected = (["expanded", "not_shown", "not_shown"]
+                + (["summary_notified"] * 2 if delivery_kind == "candidate_alert" else ["not_shown"] * 2)
+                if long else ["expanded"] * 3 + ["summary_notified"] * 2)
+    assert [row["state"] for row in selection["display_evidence"]] == expected
+    cards = [block for block in selection["markdown_blocks"] if block.tier == "candidate" and block.identities]
+    assert len(cards) == (1 if long else 3)
+    assert "NVDA CSP" in selection["text"]
+    for block in cards:
+        for content in (str(block), block.plain_text):
+            assert "覆盖不完整" in content
+            assert "已观测 [" in content and "缺口 [" in content
+            assert ")、(" in content
+            assert "仅对已观测合约排序，未观测行权价可能改变排序" in content
+    envelope = render_feishu_notification_card(
+        markdown="\n\n".join(selection["markdown_blocks"]), markdown_blocks=selection["markdown_blocks"],
+        fallback_text=selection["text"], fallback_open_id="ou_example", preserve_blocks=True,
+    )
+    assert not envelope["render_meta"]["truncated"]
+    assert envelope["fallback"]["markdown"] == envelope["text"] == selection["text"]
+    primary = envelope["transport"]["content"]
+    markdown = "\n\n".join(row["content"] for row in primary["body"]["elements"])
+    assert markdown == "\n\n".join(selection["markdown_blocks"])
+    assert feishu_notification_blocks_fit(selection["markdown_blocks"], selection["text"], open_id="ou_example")
+    for block in cards:
+        assert str(block) in markdown
+        assert block.plain_text in envelope["text"]
 
 
 def test_common_selection_fits_unicode_card_post_and_frozen_text_atomically() -> None:

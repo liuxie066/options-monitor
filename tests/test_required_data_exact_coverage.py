@@ -307,14 +307,90 @@ def test_one_incomplete_expiration_preserves_covered_dates_without_relaxing_edge
     assert gap["missing_requirements"][0]["missing"] == ["lower_bound"]
 
 
-def test_all_incomplete_expirations_still_fail_closed_with_gap_details() -> None:
+def test_single_partial_date_keeps_only_actual_window_intersection() -> None:
+    from src.application.required_data_coverage import covered_required_data_frame
+
+    request = _window_request(minimum=120.0, maximum=150.0)
+    frame = pd.DataFrame([_row(strike=float(strike)) for strike in range(135, 276, 5)])
+    result = evaluate_required_data_frame_fetch_plan_debug(frame, _plan(requests=[request]))
+    assert result.accepted and result.status == "partial"
+    detail = result.details["per_expiration"][0]
+    assert detail["status"] == "incomplete"
+    assert detail["covered_strikes"] == [135.0, 140.0, 145.0, 150.0]
+    assert detail["covered_ranges"] == [[135.0, 150.0]]
+    assert detail["missing_ranges"] == [[120.0, 135.0]]
+    assert detail["missing_range_inclusive"] == [[True, False]]  # [120, 135)
+    assert result.details["covered_expirations"] == []
+    assert result.details["incomplete_expirations"] == [EXPIRATION]
+    projected = covered_required_data_frame(frame, result)
+    assert projected["strike"].tolist() == [135.0, 140.0, 145.0, 150.0]
+    assert projected["strike"].between(135.0, 150.0).all()
+    # Range summaries must not admit a strike absent from the bound observations.
+    extra = pd.concat([frame, pd.DataFrame([_row(strike=137.0)])], ignore_index=True)
+    assert 137.0 not in covered_required_data_frame(extra, result)["strike"].tolist()
+
+
+@pytest.mark.parametrize("strikes", [(80.0, 100.0), (155.0, 275.0), ()])
+def test_empty_window_intersection_remains_missing_and_fail_closed(strikes) -> None:
+    from src.application.required_data_coverage import covered_required_data_frame
+
+    request = _window_request(minimum=120.0, maximum=150.0)
+    frame = pd.DataFrame([_row(strike=strike) for strike in strikes])
+    result = evaluate_required_data_frame_fetch_plan_debug(frame, _plan(requests=[request]))
+    assert not result.accepted and result.status == "blocked"
+    assert result.reason_code == "invalid_row_identity"
+    detail = result.details["per_expiration"][0]
+    assert detail["status"] == "missing"
+    assert detail["covered_strikes"] == detail["covered_ranges"] == []
+    assert detail["missing_ranges"] == [[120.0, 150.0]]
+    assert detail["missing_range_inclusive"] == [[True, True]]
+    assert covered_required_data_frame(frame, result).empty
+
+
+def test_eight_complete_dates_and_one_partial_keep_nine_dates_with_provenance() -> None:
+    from datetime import date, timedelta
+    from src.application.required_data_coverage import covered_required_data_frame
+
+    expirations = [(date(2026, 8, 21) + timedelta(days=day)).isoformat() for day in range(9)]
+    request = _window_request(
+        minimum=120.0, maximum=150.0, expirations=expirations, min_dte=20, max_dte=40,
+    )
+    frame = pd.DataFrame([
+        _row(expiration=expiration, dte=25 + offset, strike=float(strike))
+        for offset, expiration in enumerate(expirations)
+        for strike in (range(135, 276, 5) if offset == 8 else range(120, 151, 5))
+    ])
+    result = evaluate_required_data_frame_fetch_plan_debug(frame, _plan(requests=[request]))
+    assert result.status == "partial" and result.accepted
+    assert result.details["covered_expirations"] == expirations[:8]
+    assert result.details["incomplete_expirations"] == expirations[8:]
+    assert result.details["ranking_complete"] is False
+    assert result.details["ranking_scope"] == "observed_contracts"
+    assert result.details["partial_candidate_policy"] == "retain_and_mark"
+    projected = covered_required_data_frame(frame, result)
+    assert sorted(projected["expiration"].unique()) == expirations
+    assert len(projected) == 8 * 7 + 4
+    for detail in result.details["per_expiration"]:
+        partial = detail["expiration"] == expirations[-1]
+        assert detail["status"] == ("incomplete" if partial else "covered")
+        assert detail["ranking_complete"] is not partial
+        assert detail["covered_ranges"] == ([[135.0, 150.0]] if partial else [[120.0, 150.0]])
+
+
+def test_all_incomplete_expirations_retain_observed_rows_and_stay_partial() -> None:
+    # Range retention intentionally replaces the whole-date exclusion. Acceptance
+    # proves usable observations, while completeness and rank proof remain false.
+    from src.application.required_data_coverage import covered_required_data_frame
+
     frame, plan = _two_expiration_frame(second_strikes=(115.0, 120.0))
     frame = frame[frame["strike"] >= 115.0]
     result = evaluate_required_data_frame_fetch_plan_debug(df=frame, fetch_plan=plan)
-    assert not result.accepted
-    assert result.reason_code == "invalid_row_identity"
+    assert result.accepted and result.status == "partial"
+    assert result.reason_code == "required_data_partial_coverage"
     assert result.details["covered_expirations"] == []
     assert result.details["incomplete_expirations"] == [EXPIRATION, "2026-08-28"]
+    assert result.details["ranking_complete"] is False
+    pd.testing.assert_frame_equal(covered_required_data_frame(frame, result), frame)
 
 
 def test_missing_exact_strike_only_excludes_its_expiration() -> None:
@@ -513,8 +589,14 @@ def test_exact_coverage_accepts_complete_provider_strike_grid_without_numeric_ed
     plan = _plan(requests=[request])
     evidence = _scope_evidence(request=request, codes_by_scope={("put", EXPIRATION): ["NVDA-C1"]})
 
-    assert not required_data_frame_covers_fetch_plan_debug(frame, plan)
-    assert required_data_frame_covers_fetch_plan_debug(frame, plan, option_chain_evidence=evidence)
+    # Without provider proof the observed singleton is usable but incomplete;
+    # complete finite-grid proof is still required to claim success.
+    inferred = evaluate_required_data_frame_fetch_plan_debug(frame, plan)
+    assert inferred.accepted and inferred.status == "partial"
+    assert inferred.details["per_expiration"][0]["status"] == "incomplete"
+    proven = evaluate_required_data_frame_fetch_plan_debug(frame, plan, option_chain_evidence=evidence)
+    assert proven.accepted and proven.status == "success"
+    assert proven.details["per_expiration"][0]["status"] == "covered"
 
 
 def test_exact_coverage_keeps_legacy_global_chain_evidence_strict() -> None:

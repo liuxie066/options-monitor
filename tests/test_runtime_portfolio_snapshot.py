@@ -430,6 +430,11 @@ def test_real_sealed_required_data_assembles_publishes_and_replays(
     receipt = snapshot["sections"]["source_status"]["facts"]["required_data"]
     assert receipt["owner_status"] == manifest["status"]
     assert receipt["completeness"]["status"] == manifest["status"]
+    # Capturing all candidate scopes cannot prove complete ranking inputs when
+    # the bound required-data source is partial.
+    candidate_receipt = snapshot["sections"]["source_status"]["facts"]["candidate_results"]
+    assert candidate_receipt["completeness"]["status"] == ("partial" if include_failed else "complete")
+    assert candidate_receipt["completeness"]["reason_codes"] == (["required_data_partial_coverage"] if include_failed else [])
     assert snapshot == _verified(
         snapshot, expected_run_id=run_id, expected_account=assembly["account"],
         reference_payloads=references,

@@ -809,6 +809,110 @@ def _write_labeled_put_candidates(
     return account_dir
 
 
+def _partial_range_provenance(*, expiration: str = "2026-08-21", status: str = "incomplete") -> dict[str, Any]:
+    missing = [[105.0, 110.0]] if status == "incomplete" else []
+    inclusive = [[False, True]] if missing else []
+    scope = {
+        "request_index": 0, "option_type": "put", "status": status,
+        "strike_window": [95.0, 110.0 if status == "incomplete" else 105.0], "covered_strikes": [95.0, 100.0, 105.0],
+        "covered_ranges": [[95.0, 105.0]], "missing_ranges": missing,
+        "missing_range_inclusive": inclusive,
+    }
+    return {
+        "required_data_coverage": {
+            "status": "partial", "reason_code": "required_data_partial_coverage",
+            "covered_expirations": [expiration] if status == "covered" else [],
+            "incomplete_expirations": [expiration] if status == "incomplete" else [],
+            "ranking_complete": False, "ranking_scope": "observed_contracts",
+            "partial_candidate_policy": "retain_and_mark",
+            "per_expiration": [{
+                "expiration": expiration, "status": status,
+                "missing_requirements": [{"request_index": 0, "option_type": "put", "missing": ["upper_bound"]}] if missing else [],
+                **{key: scope[key] for key in (
+                    "covered_strikes", "covered_ranges", "missing_ranges", "missing_range_inclusive",
+                )}, "strike_coverage": [scope],
+            }],
+        },
+        "required_data_expiration_status": status,
+        "ranking_complete": False, "ranking_scope": "observed_contracts",
+        "partial_candidate_policy": "retain_and_mark",
+    }
+
+
+@pytest.mark.parametrize("status", ["incomplete", "covered"])
+def test_brief_preserves_candidate_range_provenance_through_normalization(tmp_path, status) -> None:
+    from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
+
+    _write_labeled_put_candidates(tmp_path)
+    provenance = _partial_range_provenance(status=status)
+    row = {**_put_row(contract="NVDA_OBSERVED"), **provenance}
+    seal_opening_candidate_fixture(tmp_path, run_id="run-1", accepted_rows=[row])
+
+    brief = _assemble(tmp_path)
+
+    candidate = brief["candidates"]["sell_put"][0]
+    representative = next(item["representative"] for item in brief["candidate_index"] if item["strategy_family"] == "sell_put")
+    action = next(item for item in brief["actions"] if item["strategy_family"] == "sell_put")
+    for projection in (candidate, candidate["metrics"], representative, representative["metrics"], action["metrics"]):
+        for key, value in provenance.items():
+            assert projection[key] == value
+    assert candidate["contract_symbol"] == "NVDA_OBSERVED"
+    assert candidate["rank"] == 1
+
+
+def test_wheel_batch_and_candidate_preserve_final_range_provenance(monkeypatch) -> None:
+    from src.application import daily_decision_brief_service as service
+
+    provenance = _partial_range_provenance()
+    batch = {
+        "symbol": "NVDA", "stock_lot_id": "stock-1", "wheel_branch_id": "branch-1",
+        "direction": "put", "recommended_contracts": 1,
+        "final_candidate": {
+            "contract_symbol": "NVDA_OBSERVED", "expiration": "2026-08-21", "strike": 100.0,
+            "sell_limit": 1.2, "quote_observed_at_utc": "2026-07-17T14:00:00Z",
+            **provenance,
+        },
+    }
+    monkeypatch.setattr(service, "validate_wheel_candidate_snapshot", lambda *args, **kwargs: None)
+    batches, candidates, available = service._load_wheel_snapshot_family(
+        run_id="run-1", account="lx", market="US", source_artifacts=[], data_gaps=[],
+        snapshot={"market": "US", "wheel_branches": [batch]},
+    )
+    assert available is True
+    assert len(batches) == len(candidates) == 1
+    candidate_view = service._candidate_view(candidates[0], family="wheel", rank=1)
+    for projection in (batches[0], candidates[0], candidate_view, candidate_view["metrics"]):
+        for key, value in provenance.items():
+            assert projection[key] == value
+
+
+def test_close_csv_range_provenance_survives_position_projection(tmp_path) -> None:
+    from src.application import daily_decision_brief_service as service
+
+    account_dir = _account_dir(tmp_path)
+    provenance = _partial_range_provenance()
+    close_row = {
+        "account": "lx", "position_lot_id": "lot-1", "symbol": "NVDA",
+        "option_type": "put", "contract_symbol": "NVDA_P100", "expiration": "2026-08-21",
+        "strike": 100.0, **provenance,
+        "required_data_coverage": json.dumps(provenance["required_data_coverage"]),
+    }
+    _write_close_report(account_dir, [close_row])
+    csv_path = account_dir / "close_advice.csv"
+    gaps = []
+    rows, available = service._load_close_advice(
+        path=csv_path, run_account_dir=account_dir, market="US", account="lx", run_id="run-1",
+        source_artifacts=[], data_gaps=gaps,
+    )
+    assert available is True
+    assert gaps == []
+    view = service._position_view(rows[0], notification_eligible=True, close_actionable=True)
+    for projection in (rows[0], view, view["metrics"]):
+        for key, value in provenance.items():
+            assert projection[key] == value
+    assert view["ranking_complete"] is False
+
+
 def _earnings_evidence(
     *,
     event_date: str | None = None,

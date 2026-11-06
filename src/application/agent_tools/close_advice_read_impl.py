@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from datetime import date, datetime, timezone
 from io import StringIO
+import json
 from pathlib import Path
 from typing import Any, Callable
 
@@ -568,6 +569,19 @@ def _read_rows(source: _Source) -> list[dict[str, Any]]:
             if not isinstance(raw, dict):
                 continue
             row = {str(key): value for key, value in raw.items() if key is not None}
+            for field in ("roll_advice", "required_data_coverage"):
+                value = row.get(field)
+                if not value:
+                    continue
+                decoded = json.loads(value)
+                if not isinstance(decoded, dict):
+                    raise ValueError(f"{field} must be an object")
+                row[field] = decoded
+            if row.get("ranking_complete"):
+                value = str(row["ranking_complete"]).strip().lower()
+                if value not in {"true", "false"}:
+                    raise ValueError("ranking_complete must be a boolean")
+                row["ranking_complete"] = value == "true"
             if source.account and not str(row.get("account") or "").strip():
                 row["account"] = source.account
             row["_source_run_id"] = source.run_id
@@ -577,7 +591,7 @@ def _read_rows(source: _Source) -> list[dict[str, Any]]:
             row["_source_snapshot_manifest_sha256"] = source.snapshot_manifest_sha256
             row["_source_required_data_plan_sha256"] = source.required_data_plan_sha256
             rows.append(row)
-    except (UnicodeError, csv.Error) as exc:
+    except (UnicodeError, csv.Error, ValueError) as exc:
         raise AgentToolError(
             code="READ_ERROR",
             message=f"读取平仓建议报告失败：{source.path.name}",
@@ -817,6 +831,11 @@ def _public_row(row: dict[str, Any]) -> dict[str, Any]:
         "required_data_payload_sha256",
         "required_data_source_observed_at",
         "required_data_expires_at",
+        "required_data_coverage",
+        "required_data_expiration_status",
+        "ranking_complete",
+        "ranking_scope",
+        "partial_candidate_policy",
         "symbol",
         "option_type",
         "side",
@@ -881,6 +900,9 @@ def _public_row(row: dict[str, Any]) -> dict[str, Any]:
         for key in keys
         if source_row.get(key) not in (None, "")
     }
+    for field in ("required_data_coverage", "ranking_complete"):
+        if row.get(field) is not None:
+            out[field] = row[field]
     canonical = _row_symbol(row)
     if canonical:
         out["symbol"] = canonical
