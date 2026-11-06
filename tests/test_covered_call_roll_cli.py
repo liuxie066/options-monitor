@@ -69,7 +69,23 @@ def test_renderer_preserves_credit_same_expiry_candidate():
     output = render_covered_call_roll(data)
     assert "净收现金上滚" in output
     assert "到期 2026-11-14；延后 0 天" in output
-    assert "扣费净现金 95.00 USD" in output
+    assert "移仓净收取·双腿扣费后 95.00 USD" in output
+
+
+def test_cc_roll_copy_keeps_fees_and_return_basis_out_of_parentheses() -> None:
+    payload = result()
+    payload["candidates"][0]["net_credit"] = 24.3734
+    payload["candidates"].append(dict(payload["candidates"][0]))
+    text = render_covered_call_roll(payload)
+
+    assert "移仓净收取·双腿扣费后 24.37 USD" in text
+    assert "24.3734" not in text
+    assert "净增现金期间回报 = 净现金流 ÷ 股票现值" in text
+    assert "年化按新到期剩余期限折算" in text
+    assert text.count("移仓收益口径") == 1
+    assert text.index("移仓收益口径") > text.index("2. US.NVDA")
+    assert "（净增现金 /" not in text and "（）" not in text and "()" not in text
+    assert "资金分母（当前股价×覆盖股数，旧/新）10200.00 USD / 10200.00 USD" in text
 
 
 def test_renderer_explains_zero_and_debit_exclusion_without_recommending_them():
