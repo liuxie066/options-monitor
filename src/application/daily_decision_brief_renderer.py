@@ -208,6 +208,7 @@ def build_daily_brief_user_view(
         selected_rows=selection["wheel_rows"],
     )
     capacity, reminders = _capacity_views(brief, selected_rows=selected_candidate_rows)
+    reminders.extend(_wheel_gap_reminders(brief))
     fixed_report_reminders = list(reminders)
     funds = _fund_views(brief)
     strategy_failure_items = _strategy_failure_items(brief)
@@ -1884,6 +1885,37 @@ def _wheel_batch_views(
             }
         )
     return out
+
+
+def _wheel_gap_reminders(brief: Mapping[str, Any]) -> list[str]:
+    # Missing evidence stays visible even when its non-trading status card
+    # cannot fit the account quota. Reuse the source reasons; never infer capacity.
+    gap_reasons = {
+        "coverage_quantity_unavailable", "coverage_overallocated", "strategy_attribution_conflict",
+        "share_capacity_oversubscribed", "partial_data", "wheel_scan_failed",
+        "wheel_scan_prerequisite_unavailable", "wheel_coverage_facts_unavailable",
+        "wheel_cash_capacity_unavailable", "data_unavailable", "wheel_candidate_data_unavailable",
+        "multiplier_unproven", "multiplier_conflict", "assignment_cash_facts_unavailable",
+        "assignment_currency_unavailable", "wheel_integrity_conflict", "linkage_unresolved",
+    }
+    grouped: dict[str, set[str]] = {}
+    for row in brief.get("wheel_batches") or []:
+        if not isinstance(row, Mapping):
+            continue
+        coverage = row.get("coverage") if isinstance(row.get("coverage"), Mapping) else {}
+        reasons = [*(row.get("reason_codes") or []), row.get("reason_code"),
+                   *(coverage.get("reason_codes") or [])]
+        subject = f"{_upper(row.get('symbol')) or '未知标的'} Wheel {str(row.get('direction') or 'call').title()}"
+        for reason in reasons:
+            if isinstance(reason, str) and reason in gap_reasons:
+                grouped.setdefault(reason, set()).add(subject)
+    reminders = []
+    for reason, subjects in sorted(grouped.items()):
+        shown = "、".join(sorted(subjects)[:3])
+        if len(subjects) > 3:
+            shown += f"（另有 {len(subjects) - 3} 个标的/方向，共 {len(subjects)} 个）"
+        reminders.append("缺口摘要：" + shown + " · " + _wheel_reason_text(reason))
+    return reminders
 
 
 def _wheel_reason_text(value: Any) -> str:
