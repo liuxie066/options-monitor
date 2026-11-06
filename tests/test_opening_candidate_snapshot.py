@@ -1146,6 +1146,48 @@ def test_market_closed_is_sealed_as_explicit_unavailable_state(
     } == {"call": "not_applicable", "put": "data_unavailable"}
 
 
+def test_incomplete_date_candidate_seals_with_ranges_and_incomplete_ranking(tmp_path: Path) -> None:
+    import pandas as pd
+    from src.application.required_data_coverage import (
+        evaluate_required_data_frame_fetch_plan_debug, required_data_candidate_coverage,
+    )
+    from src.application.candidate_snapshot_contract import (
+        CandidateSnapshotContractError, required_data_coverage_fields,
+    )
+    from tests.test_required_data_exact_coverage import _plan, _row, _window_request
+
+    request = _window_request(
+        minimum=80.0, maximum=100.0, expirations=["2026-09-18"], min_dte=20, max_dte=60,
+    )
+    frame = pd.DataFrame([_row(expiration="2026-09-18", dte=53, strike=value) for value in (90.0, 95.0, 100.0)])
+    coverage = evaluate_required_data_frame_fetch_plan_debug(frame, _plan(requests=[request])).to_dict()
+    assert coverage["covered_expirations"] == []
+    candidate = _candidate(contract_symbol="NVDA260918P00090000", period_return=0.04)
+    candidate.update(required_data_candidate_coverage(candidate, coverage))
+    payload = _seal_snapshot(
+        tmp_path, run_id="run-1", final_candidates={"put": [candidate]},
+        scan_statuses=[{**_scan_status("NVDA", "put", "completed", reason="partial_data"),
+                        "required_data_coverage": coverage}],
+    )
+    facts = payload["ranked_candidates"][0]["facts"]
+    assert facts["required_data_expiration_status"] == "incomplete"
+    assert facts["ranking_complete"] is False
+    assert facts["partial_candidate_policy"] == "retain_and_mark"
+    detail = facts["required_data_coverage"]["per_expiration"][0]
+    assert detail["covered_ranges"] == [[90.0, 100.0]]
+    assert detail["missing_ranges"] == [[80.0, 90.0]]
+    assert detail["missing_range_inclusive"] == [[True, False]]
+    contract_scope = next(row for row in payload["scope_results"] if row["scope"] == "contract")
+    assert contract_scope["required_data_expiration_status"] == "incomplete"
+    assert contract_scope["required_data_coverage"] == facts["required_data_coverage"]
+    with pytest.raises(CandidateSnapshotContractError, match="outside observed"):
+        required_data_coverage_fields({**facts, "strike": 85.0})
+    corrupted = deepcopy(facts)
+    corrupted["required_data_coverage"]["per_expiration"][0]["strike_coverage"][0]["covered_ranges"] = [[80.0, 100.0]]
+    with pytest.raises(CandidateSnapshotContractError, match="does not match observations"):
+        required_data_coverage_fields(corrupted)
+
+
 def test_partial_expiration_coverage_survives_sealing_explanations_and_brief(tmp_path: Path) -> None:
     from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
     from src.application.daily_decision_brief_service import _append_strategy_status_gaps

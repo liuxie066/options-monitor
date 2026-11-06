@@ -551,6 +551,7 @@ def run_symbol_monitoring(
             parsed = inputs.required_data_dir / "parsed" / f"{symbol}_required_data.csv"
             _capture_required_data_csv_bytes(parsed.read_bytes())
         required_data_frame = covered_required_data_frame(required_data_frame, partial_coverage)
+        required_data_frame.attrs["required_data_coverage"] = partial_coverage
 
     def _completed_empty_evidence(
         candidate_count: int,

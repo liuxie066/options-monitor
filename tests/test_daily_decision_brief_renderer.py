@@ -1865,10 +1865,59 @@ def test_partial_expiration_coverage_is_visible_with_healthy_candidates(render) 
         },
     })
     message = render(brief)
-    assert "已跳过到期日 2026-11-20" in message
-    assert "仅评估完整到期日 2026-11-13" in message
+    assert "覆盖不完整到期日 2026-11-20" in message
+    assert "完整到期日 2026-11-13" in message
+    assert "已保留已观测窗口内合约" in message
+    assert "未观测行权价可能改变排序" in message
     assert "Put 缺行权价上界" in message
+    assert "已跳过到期日" not in message
+    assert "仅评估完整到期日" not in message
     assert "MSFT" in message
+
+
+@pytest.mark.parametrize("render", [_render_card, render_fixed_report, render_fixed_report_text, render_full_brief])
+@pytest.mark.parametrize("status", ["incomplete", "covered"])
+def test_candidate_retains_own_range_provenance_and_partial_ranking(render, status) -> None:
+    brief = _card_brief()
+    row = brief["candidates"]["sell_put"][0]
+    expiration = row["expiration"]
+    strike = row["strike"]
+    missing_ranges = [[strike - 10, strike - 5], [strike + 5, strike + 10]] if status == "incomplete" else []
+    inclusive = [[True, False], [False, True]] if missing_ranges else []
+    observed = [[strike - 5, strike + 5]]
+    scope = {
+        "request_index": 0, "option_type": "put", "status": status,
+        "strike_window": [strike - 10, strike + 10],
+        "covered_strikes": [strike - 5, strike, strike + 5],
+        "covered_ranges": observed, "missing_ranges": missing_ranges,
+        "missing_range_inclusive": inclusive,
+    }
+    coverage = {
+        "status": "partial", "reason_code": "required_data_partial_coverage",
+        "covered_expirations": [expiration] if status == "covered" else [],
+        "incomplete_expirations": [expiration] if status == "incomplete" else [],
+        "ranking_complete": False, "ranking_scope": "observed_contracts",
+        "partial_candidate_policy": "retain_and_mark",
+        "per_expiration": [{"expiration": expiration, "status": status, **{
+            key: scope[key] for key in (
+                "covered_strikes", "covered_ranges", "missing_ranges", "missing_range_inclusive",
+            )
+        }, "strike_coverage": [scope]}],
+    }
+    row.update({
+        "required_data_coverage": coverage, "required_data_expiration_status": status,
+        "ranking_complete": False, "ranking_scope": "observed_contracts",
+        "partial_candidate_policy": "retain_and_mark",
+    })
+    message = render(brief)
+    assert row["symbol"] in message
+    assert f"{expiration} 覆盖{'不完整' if status == 'incomplete' else '完整'}" in message
+    assert f"已观测 [{strike - 5:g}, {strike + 5:g}]" in message
+    assert "仅对已观测合约排序" in message
+    assert "未观测行权价可能改变排序" in message
+    if missing_ranges:
+        assert f"缺口 [{strike - 10:g}, {strike - 5:g})、({strike + 5:g}, {strike + 10:g}]" in message
+    assert "已跳过到期日" not in message
 
 
 def test_fixed_report_card_keeps_specific_hard_evidence_gap() -> None:

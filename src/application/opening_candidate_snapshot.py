@@ -1424,8 +1424,10 @@ def _scope_results(
                 "symbol": normalized.get("symbol"),
                 "strategy_mode": decision.get("strategy_mode"),
                 "expiration": normalized.get("expiration"),
+                "option_type": normalized.get("option_type"),
                 "strike": normalized.get("strike"),
                 "contract_symbol": normalized.get("contract_symbol"),
+                **required_data_coverage_fields(normalized),
                 "status": "accepted" if opening.get("accepted") is True else "rejected",
                 "reason_codes": sorted(
                     {

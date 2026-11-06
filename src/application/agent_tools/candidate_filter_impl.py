@@ -10,7 +10,9 @@ from typing import Any, Callable, TypedDict
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.candidate_reject_summary import candidate_rule_label
-from src.application.candidate_snapshot_contract import CandidateSnapshotContractError, sha256_text
+from src.application.candidate_snapshot_contract import (
+    CandidateSnapshotContractError, required_data_coverage_fields, sha256_text,
+)
 from src.application.candidate_snapshot_manifest import (
     CandidateSnapshotManifestError, _KNOWN_MANIFEST_FILES,
     _load_latest_candidate_snapshot_bundle,
@@ -640,8 +642,7 @@ def _event(
         "candidate_id": row.get("candidate_id"),
         "decision_hash": row.get("decision_hash"),
         "normalized_input_hash": row.get("normalized_input_hash"),
-        **({"required_data_coverage": row["required_data_coverage"]}
-           if row.get("required_data_coverage") else {}),
+        **required_data_coverage_fields(row),
         "evidence_path": row.get("evidence_path") or "state/opening_candidate_snapshot.json",
     }
 
@@ -656,14 +657,17 @@ def _model_summary(function: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
         for reason in reasons:
             event = _event(row, reason, run_id=None, account="")
             examples.append({
-                **{key: event[key] for key in ("rule", "contract_symbol", "threshold", "metric_value")},
+                **{key: event[key] for key in (
+                    "rule", "contract_symbol", "threshold", "metric_value", "expiration",
+                    "required_data_expiration_status", "ranking_complete", "ranking_scope", "partial_candidate_policy",
+                ) if key in event},
                 **({"message": event["message"]} if row.get("reason_detail") else {}),
             })
     rules = sorted(counts, key=lambda rule: (-counts[rule], rule))
     examples.sort(key=lambda item: (-counts[item["rule"]], item["rule"], str(item["contract_symbol"] or "")))
     return {
         "function": function, "status": _function_status(rows),
-        **_coverage_summary(rows),
+        **({"data_status": "incomplete"} if any(row.get("required_data_coverage") for row in rows) else {}),
         "accepted_count": sum(row.get("status") == "accepted" for row in contracts),
         "rejected_count": sum(row.get("status") == "rejected" for row in contracts),
         "rules": [{"rule": rule, "label": candidate_rule_label(rule), "count": counts[rule]} for rule in rules[:8]],

@@ -867,11 +867,38 @@ remain usable even if none fall inside the base opening-strategy strike window.
 This means the opening strategy can have no contracts while position quotes and
 another option side remain available; it does not make the shared payload empty.
 
-Without complete scope proof, retain the existing inferred base-window coverage
-requirement. Missing snapshots, stale/incomplete chains, out-of-request rows and
-missing required exact position strikes still fail closed. Do not change strategy
-strike settings or turn a provider failure into a valid empty result to recover
-an expanded-window validation failure.
+Without complete scope proof, retain the existing inferred base-window
+completeness rule, evaluated per request, option side and expiration. An
+incomplete expiration may supply its actually observed in-window contracts;
+accepting those rows produces `partial`, never complete coverage. A batch with no
+usable window intersection still fails closed. Missing snapshots, stale or
+incomplete provider chain evidence, conflicting row identities and missing
+required exact position strikes retain their existing guards. Do not change
+strategy strike settings or turn a provider failure into a valid empty result.
+
+The existing `required_data_coverage.per_expiration` detail records the actual
+`covered_strikes`, closed `covered_ranges`, and `missing_ranges` paired with
+`missing_range_inclusive` endpoint flags. Its `strike_coverage` entries keep
+request/option-side windows separate; date summaries must not fill one scope's
+gap with another scope's observations. The covered interval is the extent of an
+observed discrete grid, not proof that all numeric strikes inside it exist or
+were fetched. Projection also checks actual strike membership. For window
+`[120,150]` and fetched strikes from 135 through 275, only the actual 135–150
+strikes remain: coverage is `[[135,150]]`, missing bounds are `[[120,135]]`, and
+inclusivity is `[[true,false]]`, meaning `[120,135)`. Empty intersections record
+the entire closed window as missing. Neither window endpoints nor another
+expiration can manufacture coverage.
+
+`covered_expirations` remains the list of complete dates;
+`incomplete_expirations` includes both retained incomplete dates and missing
+dates. Receipts and sealed source bytes retain every fetched row. Consumer
+projections retain observed covered segments and their partial provenance,
+including a candidate's own expiration status. Ranking and adoption compare only
+observed contracts: unseen strikes can change ranks. Structured partial output
+therefore declares `ranking_complete=false`, `ranking_scope=observed_contracts`,
+and `partial_candidate_policy=retain_and_mark`, even when candidates are accepted
+or all enumerated expiration dates were processed. The endpoint and consumer
+contract is maintained in [Close Advice contract](CLOSE_ADVICE_CONTRACT.md#required-data-到期日覆盖与部分可用).
 
 
 ### Delta evidence schema benchmark fixture v2

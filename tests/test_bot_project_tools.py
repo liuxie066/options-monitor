@@ -115,3 +115,33 @@ def test_line_controls_error_is_actionable_through_gateway_and_host(tmp_path, mo
     observed = json.loads(captured[-1]["messages"][-1]["content"])
     assert not observed["ok"] and observed["error"]["message"] == "line_controls_require_read"
     assert result.ok and hint in result.user_response
+
+
+@pytest.mark.parametrize("status", ["incomplete", "covered"])
+def test_candidate_rank_summary_keeps_own_date_and_partial_ranking_without_grid(tmp_path, status):
+    from tests.candidate_evidence_helpers import seal_opening_candidate_fixture
+    from tests.test_daily_decision_brief_service import _partial_range_provenance
+
+    provenance = _partial_range_provenance(status=status)
+    seal_opening_candidate_fixture(tmp_path, run_id="run-ranges", accepted_rows=[{
+        "symbol": "NVDA", "contract_symbol": "NVDA_OBSERVED", "expiration": "2026-08-21",
+        "strike": 100.0, **provenance,
+    }])
+    result = execute_tool("candidate_rank_explain", {
+        "runtime_root": str(tmp_path), "account": "lx", "run_id": "run-ranges", "mode": "put", "top_n": 1,
+    })
+    assert result["ok"], result
+    data = result["data"]
+    assert len(data["ranked"]) == len(data["ranked_summary"]) == 1
+    detail = data["ranked"][0]
+    assert detail["required_data_coverage"] == provenance["required_data_coverage"]
+    assert data["groups"][0]["ranked"][0]["required_data_coverage"] == provenance["required_data_coverage"]
+    for projection in (detail, data["ranked_summary"][0], data["ranking_summary"][0]):
+        assert projection["expiration"] == "2026-08-21"
+        for key in ("required_data_expiration_status", "ranking_complete", "ranking_scope", "partial_candidate_policy"):
+            assert projection[key] == provenance[key]
+    assert detail["rank"] == 1
+    assert detail["contract_symbol"] == "NVDA_OBSERVED"
+    assert "required_data_coverage" not in data["ranked_summary"][0]
+    assert "required_data_coverage" not in data["ranking_summary"][0]
+    assert data["coverage"]["status"] == "complete"

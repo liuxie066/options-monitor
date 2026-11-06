@@ -158,6 +158,38 @@ def test_summary_rejects_accepted_count_drift() -> None:
         )
 
 
+def test_candidate_scan_binds_partial_range_evidence_before_metrics_and_policy(tmp_path) -> None:
+    from src.application.required_data_coverage import (
+        evaluate_required_data_frame_fetch_plan_debug,
+    )
+    from tests.test_required_data_exact_coverage import _plan, _row, _window_request
+
+    request = _window_request(minimum=120.0, maximum=150.0)
+    frame = pd.DataFrame([_row(strike=value) for value in (135.0, 140.0, 150.0)])
+    coverage = evaluate_required_data_frame_fetch_plan_debug(frame, _plan(requests=[request])).to_dict()
+    frame.attrs["required_data_coverage"] = coverage
+    rejected = []
+    rows = run_candidate_scan(
+        config=CandidateScanConfig(
+            mode="put", symbols=["NVDA"], input_root=tmp_path, required_data_frames={"NVDA": frame},
+            min_dte=0, max_dte=60, min_strike=None, max_strike=None, min_open_interest=None,
+            min_volume=None, max_spread_ratio=None, min_annualized_net_return=None, min_net_income=0,
+        ),
+        deps=CandidateScanDependencies(
+            compute_metrics_fn=lambda contract: None if contract.strike == 140.0 else {"premium": 1.0},
+            build_row_fn=lambda contract, base, metrics: {**contract.to_gate_payload(), "symbol": "NVDA"},
+        ),
+        calculation_decision_sink_fn=rejected.extend,
+    )
+    assert len(rows) == 2 and len(rejected) == 1
+    for row in [*rows.to_dict("records"), rejected[0]["normalized_input"]]:
+        assert row["required_data_expiration_status"] == "incomplete"
+        assert row["ranking_complete"] is False
+        detail = row["required_data_coverage"]["per_expiration"][0]
+        assert detail["covered_ranges"] == [[135.0, 150.0]]
+        assert detail["missing_range_inclusive"] == [[True, False]]
+
+
 def test_supplied_required_data_frame_avoids_legacy_csv_read(
     monkeypatch,
     tmp_path,

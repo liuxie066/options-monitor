@@ -354,3 +354,120 @@ def test_empty_sealed_report_is_valid_with_complete_report_binding(tmp_path: Pat
         expected_quote_mode="frozen_snapshot",
     )
     assert validation["ok"] is True
+
+
+@pytest.fixture
+def partial_close_quotes(tmp_path: Path) -> tuple[dict, dict]:
+    from src.application import close_advice_runner as runner
+    from tests.test_required_data_partial_pipeline import partial_candidate, fixture
+    from src.application.opend_symbol_outputs import finalize_required_data_quote_candidate
+
+    payload, contract, now = partial_candidate(all_incomplete=True)
+    finalized = finalize_required_data_quote_candidate(
+        base=tmp_path, producer_root=tmp_path, producer_run_id="run-partial", symbol="NVDA",
+        expected_fetch_contract=contract, fetch_policy=fixture._policy(), mode="fresh", payload=payload, now=now,
+    )
+    provenance = {"NVDA": {"required_data_coverage": finalized["evidence"]["required_data_coverage"]}}
+    quotes = runner._load_frozen_required_data_quotes(
+        csv_bytes_by_symbol={"NVDA": pd.DataFrame(payload["rows"]).to_csv(index=False).encode("utf-8")},
+        base_dir=tmp_path, provenance_by_symbol=provenance,
+    )
+    return quotes, provenance
+
+
+def test_partial_range_quotes_retain_own_date_gaps_with_no_complete_dates(partial_close_quotes) -> None:
+    quotes, provenance = partial_close_quotes
+    assert provenance["NVDA"]["required_data_coverage"]["covered_expirations"] == []
+    assert len(quotes) == 4
+    for key, quote in quotes.items():
+        own = quote["required_data_coverage"]
+        assert own["status"] == "partial"
+        assert own["covered_expirations"] == []
+        assert own["incomplete_expirations"] == [key[2]]
+        detail = own["per_expiration"][0]
+        assert detail["expiration"] == key[2]
+        assert detail["status"] == "incomplete"
+        assert detail["missing_ranges"] == [[100.0, 115.0]]
+        assert detail["missing_range_inclusive"] == [[True, False]]
+        assert quote["required_data_expiration_status"] == "incomplete"
+        assert quote["ranking_complete"] is False
+        assert quote["ranking_scope"] == "observed_contracts"
+        assert quote["partial_candidate_policy"] == "retain_and_mark"
+
+
+def test_partial_close_provenance_survives_sealed_csv_and_public_reader(
+    tmp_path: Path, partial_close_quotes,
+) -> None:
+    import csv
+    from io import StringIO
+
+    from src.application import close_advice_runner as runner
+    from src.application.agent_tools import close_advice_read_impl as reader
+    from src.application.close_advice_report_manifest import (
+        publish_close_advice_report_manifest, read_close_advice_report_snapshot,
+    )
+
+    quotes, provenance = partial_close_quotes
+    key = next(iter(quotes))
+    position = {
+        "account": "lx", "lot_id": "lot-partial", "symbol": "NVDA",
+        "option_type": "put", "side": "short", "expiration": key[2],
+        "strike": float(key[3]), "multiplier": 100, "contracts_open": 1,
+        "currency": "USD", "broker": "富途",
+    }
+    row = runner._apply_required_data_row_provenance(
+        {"account": "lx", "symbol": "NVDA", "expiration": key[2], "option_type": "put"},
+        position=position, quote_key=key, frozen_manifest={"plan_id": "partial-plan"},
+        frozen_manifest_sha256="a" * 64, frozen_plan_sha256="b" * 64,
+        requirements_by_lot={}, provenance_by_symbol=provenance,
+    )
+    coverage = row["required_data_coverage"]
+    assert coverage == quotes[key]["required_data_coverage"]
+    row["roll_advice"] = {"status": "partial", "coverage": {"required_data_coverage": coverage}}
+    csv_path = tmp_path / "reports" / "close_advice.csv"
+    text_path = csv_path.with_suffix(".txt")
+    runner._write_csv(csv_path, [row])
+    text_path.write_text("sealed partial coverage\n", encoding="utf-8")
+    raw = next(csv.DictReader(StringIO(csv_path.read_text(encoding="utf-8"))))
+    assert json.loads(raw["required_data_coverage"]) == coverage
+    assert json.loads(raw["roll_advice"]) == row["roll_advice"]
+    publish_close_advice_report_manifest(
+        csv_path=csv_path, text_path=text_path, context_path=tmp_path / "unused.json",
+        context={"filters": {"account": "lx"}, "open_positions_min": []}, rows=[row],
+        markets_to_run=["US"], run_id="run-sealed", quote_mode="frozen_snapshot",
+        required_data_snapshot_manifest_sha256="a" * 64,
+        close_advice_required_data_plan_sha256="b" * 64,
+    )
+    snapshot = read_close_advice_report_snapshot(csv_path=csv_path, expected_quote_mode="frozen_snapshot")
+    assert snapshot["validation"]["ok"] is True
+    source = reader._Source(csv_path, source_type="explicit", account="lx")
+    source.csv_bytes = snapshot["csv_bytes"]
+    decoded = reader._read_rows(source)[0]
+    assert decoded["required_data_coverage"] == coverage
+    assert decoded["roll_advice"] == row["roll_advice"]
+    public = reader._public_row(decoded)
+    assert public["required_data_coverage"] == coverage
+    assert public["required_data_expiration_status"] == "incomplete"
+    assert public["ranking_complete"] is False
+    assert public["ranking_scope"] == "observed_contracts"
+    assert public["partial_candidate_policy"] == "retain_and_mark"
+
+
+@pytest.mark.parametrize("field", ["required_data_coverage", "roll_advice"])
+@pytest.mark.parametrize("value", ["{broken", "[]", "null"])
+def test_close_reader_rejects_invalid_structured_provenance(tmp_path: Path, field: str, value: str) -> None:
+    import csv
+    from io import StringIO
+
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.agent_tools import close_advice_read_impl as reader
+
+    csv_bytes = StringIO()
+    writer = csv.DictWriter(csv_bytes, fieldnames=["account", field])
+    writer.writeheader()
+    writer.writerow({"account": "lx", field: value})
+    source = reader._Source(tmp_path / "close_advice.csv", source_type="explicit", account="lx")
+    source.csv_bytes = csv_bytes.getvalue().encode("utf-8")
+    with pytest.raises(AgentToolError) as error:
+        reader._read_rows(source)
+    assert error.value.code == "READ_ERROR"

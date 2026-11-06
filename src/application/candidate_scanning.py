@@ -25,6 +25,7 @@ from domain.domain.symbol_identity import symbol_market
 from om_strategy_core.identity import runtime_identity
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
 from src.application.earnings_calendar import annotate_candidates_with_earnings_evidence
+from src.application.required_data_coverage import required_data_candidate_coverage
 
 _DEFINITIVE_CALCULATION_REASONS = frozenset({"net_premium_non_positive"})
 _DEFINITIVE_CONTRACT_EVIDENCE_REASONS = frozenset(
@@ -259,16 +260,17 @@ def run_candidate_scan(
                         detail = deps.metric_reject_reason_fn(contract)
                     except Exception:
                         detail = None
-                calculation_decisions.append(
-                    _calculation_decision_record(
-                        contract=contract,
-                        config=config,
-                        reason=detail,
-                    )
-                )
+                decision = _calculation_decision_record(contract=contract, config=config, reason=detail)
+                decision["normalized_input"].update(required_data_candidate_coverage(
+                    raw_row, data.attrs.get("required_data_coverage"),
+                ))
+                calculation_decisions.append(decision)
                 continue
             candidate = deps.build_row_fn(contract, base_values, metrics)
             if candidate is not None:
+                candidate.update(required_data_candidate_coverage(
+                    raw_row, data.attrs.get("required_data_coverage"),
+                ))
                 if config.decision_now_utc is not None:
                     candidate["decision_now_utc"] = config.decision_now_utc
                 if config.resolved_strategy is not None:

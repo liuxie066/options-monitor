@@ -677,7 +677,10 @@ def assemble_runtime_portfolio_snapshot(
             reason_codes=[],
             observed=str(candidate_manifest.get("sealed_at_utc") or ""),
             received=str(candidate_manifest.get("sealed_at_utc") or ""),
-            completeness={"status": "complete", "reason_codes": []},
+            completeness={
+                "status": "partial" if required_completeness == "partial" else "complete",
+                "reason_codes": ["required_data_partial_coverage"] if required_completeness == "partial" else [],
+            },
         ),
         "ledger_projection": _receipt_from_binding(
             by_role["prepared_option_positions_context"],
@@ -1455,7 +1458,10 @@ def _validate_source_bindings(
         reason_codes=[],
         observed=candidate_time,
         received=candidate_time,
-        completeness={"status": "complete", "reason_codes": []},
+        completeness={
+            "status": "partial" if required_status == "partial" else "complete",
+            "reason_codes": ["required_data_partial_coverage"] if required_status == "partial" else [],
+        },
         freshness=_not_applicable_freshness(),
         owner="candidate_results",
     )
