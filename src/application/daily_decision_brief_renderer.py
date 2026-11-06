@@ -19,7 +19,7 @@ from src.application.payload_helpers import parse_utc as _parse_datetime
 _DEFAULT_MAX_ACTIONS = 5
 _DEFAULT_MAX_CANDIDATES = 3
 _DEFAULT_MAX_REJECTIONS = 5
-_MAX_TOTAL_ITEMS = 40
+_MAX_TOTAL_ITEMS = 42
 _MAX_MESSAGE_CHARS = 12_000
 _SHARED_SELL_PUT_CAPACITY_REMINDER = "多个 CSP 候选共享同一现金额度，手数不能相加"
 
@@ -123,16 +123,7 @@ def build_daily_brief_user_view(
         user_tz = _safe_zoneinfo(str(ctx.get("user_timezone") or "Asia/Shanghai"))
         phase_line = f"{scheduled_batch} 批次恢复补报 · {recovery_scan.astimezone(user_tz).strftime('%H:%M')} 扫描"
 
-    candidate_views, candidate_omissions, selected_candidate_rows = _candidate_views(
-        brief,
-        diff=normalized_diff,
-        limits=cfg,
-    )
-    wheel_batches = _wheel_batch_views(
-        brief,
-        diff=normalized_diff,
-        delivery_kind=delivery_kind,
-    )
+    budget = _RenderBudget()
     (
         position_views,
         position_total,
@@ -144,6 +135,18 @@ def build_daily_brief_user_view(
         limits=cfg,
         now_utc=_parse_datetime(ctx.get("query_time_utc") or ctx.get("advice_time_utc")
                                 or brief.get("generated_at_utc")),
+        budget=budget,
+    )
+    candidate_views, candidate_omissions, selected_candidate_rows = _candidate_views(
+        brief,
+        diff=normalized_diff,
+        limits=cfg,
+        budget=budget,
+    )
+    wheel_batches = _wheel_batch_views(
+        brief,
+        diff=normalized_diff,
+        delivery_kind=delivery_kind,
     )
     capacity, reminders = _capacity_views(brief, selected_rows=selected_candidate_rows)
     fixed_report_reminders = list(reminders)
@@ -189,7 +192,14 @@ def build_daily_brief_user_view(
         )
     )
     candidate_empty_by_family: dict[str, str] = {}
+    candidate_source = brief.get("candidates")
+    candidate_source = candidate_source if isinstance(candidate_source, Mapping) else {}
     for family in ("sell_put", "covered_call", "combo_yield"):
+        if not selected_candidate_rows.get(family) and any(
+            isinstance(row, Mapping) for row in candidate_source.get(family) or []
+        ):
+            candidate_empty_by_family[family] = "本消息未展开策略候选。"
+            continue
         family_gaps = [
             item for item in brief.get("data_gaps") or []
             if isinstance(item, Mapping)
@@ -421,6 +431,7 @@ def select_rendered_combo_candidate_rows(
     candidate_identities: Iterable[str] = (),
     diff: Mapping[str, Any] | None = None,
     limits: Mapping[str, Any] | None = None,
+    context: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Return the Combo rows selected by the same projection used for rendering."""
 
@@ -432,10 +443,20 @@ def select_rendered_combo_candidate_rows(
         selection_limits["max_candidates_per_strategy"] = _DEFAULT_MAX_CANDIDATES
     elif kind != "fixed_report":
         return []
+    cfg = resolve_daily_brief_render_limits(selection_limits)
+    normalized_diff = dict(diff or {})
+    budget = _RenderBudget()
+    ctx = dict(context or {})
+    _position_views(
+        source, diff=normalized_diff, limits=cfg, budget=budget,
+        now_utc=_parse_datetime(ctx.get("query_time_utc") or ctx.get("advice_time_utc")
+                                or source.get("generated_at_utc")),
+    )
     selected = _candidate_views(
         source,
-        diff=dict(diff or {}),
-        limits=resolve_daily_brief_render_limits(selection_limits),
+        diff=normalized_diff,
+        limits=cfg,
+        budget=budget,
     )[2]
     return [dict(item) for item in selected.get("combo_yield") or []]
 
@@ -777,7 +798,7 @@ def _render_user_view(
                 other_omissions.append(str(note))
         for family in ("sell_put", "covered_call", "combo_yield"):
             family_rows = [item for item in candidates if item.get("family") == family]
-            if family not in visible_families:
+            if family not in visible_families and not omissions_by_family.get(family):
                 continue
             lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} {_STRATEGY_LABELS[family]}"])
             if family_rows:
@@ -1100,11 +1121,12 @@ def _candidate_views(
     *,
     diff: Mapping[str, Any],
     limits: Mapping[str, int],
+    budget: _RenderBudget | None = None,
 ) -> tuple[list[dict[str, Any]], list[str], dict[str, list[Mapping[str, Any]]]]:
     candidates = brief.get("candidates")
     source = candidates if isinstance(candidates, Mapping) else {}
     changed_keys = _changed_candidate_keys(diff)
-    budget = _RenderBudget()
+    budget = budget if budget is not None else _RenderBudget()
     out: list[dict[str, Any]] = []
     omissions: list[str] = []
     selected_by_family: dict[str, list[Mapping[str, Any]]] = {}
@@ -1116,7 +1138,7 @@ def _candidate_views(
         unchanged_rows = [row for row in rows if row not in changed_rows]
         selected = budget.take(
             [*changed_rows, *unchanged_rows],
-            max(limit, len(changed_rows)),
+            limit,
         )
         selected_by_family[family] = selected
         omitted = len(rows) - len(selected)
@@ -1741,7 +1763,9 @@ def _position_views(
     diff: Mapping[str, Any],
     limits: Mapping[str, int],
     now_utc: datetime | None = None,
+    budget: _RenderBudget | None = None,
 ) -> tuple[list[dict[str, Any]], int, int, int]:
+    budget = budget if budget is not None else _RenderBudget()
     effective_now = now_utc or _parse_datetime(brief.get("generated_at_utc"))
     positions = [
         dict(item) if daily_brief_position_roll_is_current(item, now_utc=effective_now)
@@ -1775,9 +1799,9 @@ def _position_views(
             _position_row_keys(row) & changed_keys for row in group
         ) else unchanged_groups
         destination.append(group)
-    selected = _RenderBudget().take(
+    selected = budget.take(
         [*changed_groups, *unchanged_groups],
-        max(limits["max_actions_per_priority"], len(changed_groups)),
+        limits["max_actions_per_priority"],
     )
     market = _upper(brief.get("market"))
     out: list[dict[str, Any]] = []
