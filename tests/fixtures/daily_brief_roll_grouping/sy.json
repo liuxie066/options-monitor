@@ -1,0 +1,605 @@
+{
+  "schema_version": "daily_decision_brief.v1",
+  "account": "sy",
+  "market": "HK",
+  "generated_at_utc": "2026-11-06T03:36:17.458613+00:00",
+  "data_as_of_utc": "2026-11-06T03:35:16.104688+00:00",
+  "market_trading_date": "2026-11-06",
+  "actionability": "live_actionable",
+  "status": "ready",
+  "positions": [
+    {
+      "symbol": "0883.HK",
+      "strategy_family": "sell_put",
+      "option_type": "put",
+      "expiration": "2026-11-27",
+      "strike": 21.0,
+      "contract_symbol": null,
+      "quote_status": "priced",
+      "evaluation_status": "priced",
+      "recommendation_state": "hold",
+      "notification_eligible": false,
+      "roll_notification_eligible": true,
+      "position_lot_id": "fixture-lot-01",
+      "metrics": {
+        "ask": 0.09,
+        "net_capture_ratio": 0.4931506849315068,
+        "capital_basis": 21000.0,
+        "remaining_max_annualized_return": 0.0918707482993197,
+        "estimated_pnl_if_close_net": 108.0
+      },
+      "roll_advice": {
+        "status": "success",
+        "outcome": "not_applicable",
+        "position": {
+          "symbol": "0883.HK",
+          "option_type": "put",
+          "expiration": "2026-11-27",
+          "expiration_ymd": "2026-11-27",
+          "strike": 21.0,
+          "currency": "HKD",
+          "contracts": 1,
+          "contracts_open": 1,
+          "lot_id": "fixture-lot-01"
+        },
+        "candidates": []
+      }
+    },
+    {
+      "symbol": "9992.HK",
+      "strategy_family": "sell_put",
+      "option_type": "put",
+      "expiration": "2026-12-30",
+      "strike": 127.5,
+      "contract_symbol": null,
+      "quote_status": "priced",
+      "evaluation_status": "priced",
+      "recommendation_state": "hold",
+      "notification_eligible": false,
+      "roll_notification_eligible": true,
+      "position_lot_id": "fixture-lot-02",
+      "metrics": {
+        "ask": 2.53,
+        "net_capture_ratio": 0.5676784249384741,
+        "capital_basis": 25500.0,
+        "remaining_max_annualized_return": 0.1396913580246913,
+        "estimated_pnl_if_close_net": 692.0
+      },
+      "roll_advice": {
+        "status": "success",
+        "outcome": "not_applicable",
+        "position": {
+          "symbol": "9992.HK",
+          "option_type": "put",
+          "expiration": "2026-12-30",
+          "expiration_ymd": "2026-12-30",
+          "strike": 127.5,
+          "currency": "HKD",
+          "contracts": 1,
+          "contracts_open": 1,
+          "lot_id": "fixture-lot-02"
+        },
+        "candidates": []
+      }
+    },
+    {
+      "symbol": "0700.HK",
+      "strategy_family": "covered_call",
+      "option_type": "call",
+      "expiration": "2026-12-30",
+      "strike": 460.0,
+      "contract_symbol": null,
+      "quote_status": "priced",
+      "evaluation_status": "priced",
+      "recommendation_state": "hold",
+      "notification_eligible": false,
+      "roll_notification_eligible": true,
+      "position_lot_id": "fixture-lot-03",
+      "metrics": {
+        "ask": 8.99,
+        "net_capture_ratio": -0.0032715376226826,
+        "capital_basis": 42280.0,
+        "remaining_max_annualized_return": 0.1470794351589053,
+        "estimated_pnl_if_close_net": -2.9999999999998863
+      },
+      "roll_advice": {
+        "status": "success",
+        "outcome": "not_applicable",
+        "position": {
+          "symbol": "0700.HK",
+          "option_type": "call",
+          "expiration": "2026-12-30",
+          "expiration_ymd": "2026-12-30",
+          "strike": 460.0,
+          "currency": "HKD",
+          "contracts": 1,
+          "contracts_open": 1,
+          "lot_id": "fixture-lot-03"
+        },
+        "candidates": []
+      }
+    },
+    {
+      "symbol": "0700.HK",
+      "strategy_family": "sell_put",
+      "option_type": "put",
+      "expiration": "2026-12-30",
+      "strike": 400.0,
+      "contract_symbol": null,
+      "quote_status": "priced",
+      "evaluation_status": "priced",
+      "recommendation_state": "hold",
+      "notification_eligible": false,
+      "roll_notification_eligible": true,
+      "position_lot_id": "fixture-lot-04",
+      "metrics": {
+        "ask": 10.73,
+        "net_capture_ratio": 0.340423479477162,
+        "capital_basis": 40000.0,
+        "remaining_max_annualized_return": 0.1848657407407407,
+        "estimated_pnl_if_close_net": 564.6400000000001
+      },
+      "roll_advice": {
+        "status": "success",
+        "outcome": "not_applicable",
+        "position": {
+          "symbol": "0700.HK",
+          "option_type": "put",
+          "expiration": "2026-12-30",
+          "expiration_ymd": "2026-12-30",
+          "strike": 400.0,
+          "currency": "HKD",
+          "contracts": 1,
+          "contracts_open": 1,
+          "lot_id": "fixture-lot-04"
+        },
+        "candidates": []
+      }
+    },
+    {
+      "symbol": "0700.HK",
+      "strategy_family": "sell_put",
+      "option_type": "put",
+      "expiration": "2027-01-28",
+      "strike": 410.0,
+      "contract_symbol": null,
+      "quote_status": "priced",
+      "evaluation_status": "priced",
+      "recommendation_state": "hold",
+      "notification_eligible": false,
+      "roll_notification_eligible": true,
+      "position_lot_id": "fixture-lot-05",
+      "metrics": {
+        "ask": 18.37,
+        "net_capture_ratio": -0.0351686035435321,
+        "capital_basis": 164000.0,
+        "remaining_max_annualized_return": 0.198151560387893,
+        "estimated_pnl_if_close_net": -251.0559999999996
+      },
+      "roll_advice": {
+        "status": "success",
+        "outcome": "none",
+        "position": {
+          "symbol": "0700.HK",
+          "option_type": "put",
+          "expiration": "2027-01-28",
+          "expiration_ymd": "2027-01-28",
+          "strike": 410.0,
+          "currency": "HKD",
+          "contracts": 4,
+          "contracts_open": 4,
+          "lot_id": "fixture-lot-05"
+        },
+        "candidates": []
+      }
+    },
+    {
+      "symbol": "0700.HK",
+      "strategy_family": "sell_put",
+      "option_type": "put",
+      "expiration": "2026-12-30",
+      "strike": 410.0,
+      "contract_symbol": null,
+      "quote_status": "priced",
+      "evaluation_status": "priced",
+      "recommendation_state": "hold",
+      "notification_eligible": false,
+      "roll_notification_eligible": true,
+      "position_lot_id": "fixture-lot-06",
+      "metrics": {
+        "ask": 14.38,
+        "net_capture_ratio": 0.098670554512207,
+        "capital_basis": 41000.0,
+        "remaining_max_annualized_return": 0.2405307136404697,
+        "estimated_pnl_if_close_net": 159.7199999999998
+      },
+      "roll_advice": {
+        "status": "success",
+        "outcome": "none",
+        "position": {
+          "symbol": "0700.HK",
+          "option_type": "put",
+          "expiration": "2026-12-30",
+          "expiration_ymd": "2026-12-30",
+          "strike": 410.0,
+          "currency": "HKD",
+          "contracts": 1,
+          "contracts_open": 1,
+          "lot_id": "fixture-lot-06"
+        },
+        "candidates": []
+      }
+    },
+    {
+      "symbol": "0700.HK",
+      "strategy_family": "sell_put",
+      "option_type": "put",
+      "expiration": "2026-11-27",
+      "strike": 400.0,
+      "contract_symbol": null,
+      "quote_status": "priced",
+      "evaluation_status": "priced",
+      "recommendation_state": "hold",
+      "notification_eligible": false,
+      "roll_notification_eligible": true,
+      "position_lot_id": "fixture-lot-07",
+      "metrics": {
+        "ask": 5.83,
+        "net_capture_ratio": 0.121122599704579,
+        "capital_basis": 80000.0,
+        "remaining_max_annualized_return": 0.2585416666666666,
+        "estimated_pnl_if_close_net": 164.0
+      },
+      "roll_advice": {
+        "status": "success",
+        "outcome": "not_applicable",
+        "position": {
+          "symbol": "0700.HK",
+          "option_type": "put",
+          "expiration": "2026-11-27",
+          "expiration_ymd": "2026-11-27",
+          "strike": 400.0,
+          "currency": "HKD",
+          "contracts": 2,
+          "contracts_open": 2,
+          "lot_id": "fixture-lot-07"
+        },
+        "candidates": []
+      }
+    },
+    {
+      "symbol": "0700.HK",
+      "strategy_family": "sell_put",
+      "option_type": "put",
+      "expiration": "2026-11-27",
+      "strike": 400.0,
+      "contract_symbol": null,
+      "quote_status": "priced",
+      "evaluation_status": "priced",
+      "recommendation_state": "hold",
+      "notification_eligible": false,
+      "roll_notification_eligible": true,
+      "position_lot_id": "fixture-lot-08",
+      "metrics": {
+        "ask": 5.83,
+        "net_capture_ratio": 0.0792682926829267,
+        "capital_basis": 40000.0,
+        "remaining_max_annualized_return": 0.2624523809523809,
+        "estimated_pnl_if_close_net": 52.0
+      },
+      "roll_advice": {
+        "status": "success",
+        "outcome": "not_applicable",
+        "position": {
+          "symbol": "0700.HK",
+          "option_type": "put",
+          "expiration": "2026-11-27",
+          "expiration_ymd": "2026-11-27",
+          "strike": 400.0,
+          "currency": "HKD",
+          "contracts": 1,
+          "contracts_open": 1,
+          "lot_id": "fixture-lot-08"
+        },
+        "candidates": []
+      }
+    },
+    {
+      "symbol": "0700.HK",
+      "strategy_family": "sell_put",
+      "option_type": "put",
+      "expiration": "2026-11-27",
+      "strike": 400.0,
+      "contract_symbol": null,
+      "quote_status": "priced",
+      "evaluation_status": "priced",
+      "recommendation_state": "hold",
+      "notification_eligible": false,
+      "roll_notification_eligible": true,
+      "position_lot_id": "fixture-lot-09",
+      "metrics": {
+        "ask": 5.83,
+        "net_capture_ratio": 0.0082101806239737,
+        "capital_basis": 40000.0,
+        "remaining_max_annualized_return": 0.2624523809523809,
+        "estimated_pnl_if_close_net": 5.0
+      },
+      "roll_advice": {
+        "status": "success",
+        "outcome": "not_applicable",
+        "position": {
+          "symbol": "0700.HK",
+          "option_type": "put",
+          "expiration": "2026-11-27",
+          "expiration_ymd": "2026-11-27",
+          "strike": 400.0,
+          "currency": "HKD",
+          "contracts": 1,
+          "contracts_open": 1,
+          "lot_id": "fixture-lot-09"
+        },
+        "candidates": []
+      }
+    },
+    {
+      "symbol": "9992.HK",
+      "strategy_family": "sell_put",
+      "option_type": "put",
+      "expiration": "2026-12-30",
+      "strike": 140.0,
+      "contract_symbol": null,
+      "quote_status": "priced",
+      "evaluation_status": "priced",
+      "recommendation_state": "hold",
+      "notification_eligible": false,
+      "roll_notification_eligible": true,
+      "position_lot_id": "fixture-lot-10",
+      "metrics": {
+        "ask": 6.73,
+        "net_capture_ratio": -0.6101295641931685,
+        "capital_basis": 28000.0,
+        "remaining_max_annualized_return": 0.3299966931216931,
+        "estimated_pnl_if_close_net": -518.0000000000001
+      },
+      "roll_advice": {
+        "status": "success",
+        "outcome": "found",
+        "actionable_until_utc": "2026-11-06T03:36:30+00:00",
+        "position": {
+          "symbol": "9992.HK",
+          "option_type": "put",
+          "expiration": "2026-12-30",
+          "expiration_ymd": "2026-12-30",
+          "strike": 140.0,
+          "currency": "HKD",
+          "contracts": 1,
+          "contracts_open": 1,
+          "lot_id": "fixture-lot-10"
+        },
+        "candidates": [
+          {
+            "contract": "HK.POP270128P137500",
+            "expiration": "2027-01-28",
+            "strike": 137.5,
+            "contracts": 1,
+            "net_credit": 44.0,
+            "incremental_period_return": 0.0016,
+            "incremental_annualized_return": 0.007036144578313254,
+            "evidence": {
+              "old_ask": 6.73,
+              "new_bid": 7.16
+            }
+          }
+        ]
+      }
+    },
+    {
+      "symbol": "9992.HK",
+      "strategy_family": "sell_put",
+      "option_type": "put",
+      "expiration": "2026-12-30",
+      "strike": 140.0,
+      "contract_symbol": null,
+      "quote_status": "priced",
+      "evaluation_status": "priced",
+      "recommendation_state": "hold",
+      "notification_eligible": false,
+      "roll_notification_eligible": true,
+      "position_lot_id": "fixture-lot-11",
+      "metrics": {
+        "ask": 6.73,
+        "net_capture_ratio": -0.911888111888112,
+        "capital_basis": 28000.0,
+        "remaining_max_annualized_return": 0.3299966931216931,
+        "estimated_pnl_if_close_net": -652.0
+      },
+      "roll_advice": {
+        "status": "success",
+        "outcome": "found",
+        "actionable_until_utc": "2026-11-06T03:36:30+00:00",
+        "position": {
+          "symbol": "9992.HK",
+          "option_type": "put",
+          "expiration": "2026-12-30",
+          "expiration_ymd": "2026-12-30",
+          "strike": 140.0,
+          "currency": "HKD",
+          "contracts": 1,
+          "contracts_open": 1,
+          "lot_id": "fixture-lot-11"
+        },
+        "candidates": [
+          {
+            "contract": "HK.POP270128P137500",
+            "expiration": "2027-01-28",
+            "strike": 137.5,
+            "contracts": 1,
+            "net_credit": 44.0,
+            "incremental_period_return": 0.0016,
+            "incremental_annualized_return": 0.007036144578313254,
+            "evidence": {
+              "old_ask": 6.73,
+              "new_bid": 7.16
+            }
+          }
+        ]
+      }
+    },
+    {
+      "symbol": "9992.HK",
+      "strategy_family": "sell_put",
+      "option_type": "put",
+      "expiration": "2026-11-27",
+      "strike": 140.0,
+      "contract_symbol": null,
+      "quote_status": "priced",
+      "evaluation_status": "priced",
+      "recommendation_state": "hold",
+      "notification_eligible": false,
+      "roll_notification_eligible": true,
+      "position_lot_id": "fixture-lot-12",
+      "metrics": {
+        "ask": 3.74,
+        "net_capture_ratio": 0.1271282633371169,
+        "capital_basis": 28000.0,
+        "remaining_max_annualized_return": 0.4773554421768707,
+        "estimated_pnl_if_close_net": 112.0
+      },
+      "roll_advice": {
+        "status": "success",
+        "outcome": "found",
+        "actionable_until_utc": "2026-11-06T03:36:30+00:00",
+        "position": {
+          "symbol": "9992.HK",
+          "option_type": "put",
+          "expiration": "2026-11-27",
+          "expiration_ymd": "2026-11-27",
+          "strike": 140.0,
+          "currency": "HKD",
+          "contracts": 1,
+          "contracts_open": 1,
+          "lot_id": "fixture-lot-12"
+        },
+        "candidates": [
+          {
+            "contract": "HK.POP270128P137500",
+            "expiration": "2027-01-28",
+            "strike": 137.5,
+            "contracts": 1,
+            "net_credit": 642.0,
+            "incremental_period_return": 0.023345454545454544,
+            "incremental_annualized_return": 0.10266374589266154,
+            "evidence": {
+              "old_ask": 3.74,
+              "new_bid": 7.16
+            }
+          }
+        ]
+      }
+    },
+    {
+      "symbol": "0700.HK",
+      "strategy_family": "sell_put",
+      "option_type": "put",
+      "expiration": "2026-11-27",
+      "strike": 420.0,
+      "contract_symbol": null,
+      "quote_status": "priced",
+      "evaluation_status": "priced",
+      "recommendation_state": "hold",
+      "notification_eligible": false,
+      "roll_notification_eligible": true,
+      "position_lot_id": "fixture-lot-13",
+      "metrics": {
+        "ask": 13.04,
+        "net_capture_ratio": 0.1827349572126227,
+        "capital_basis": 168000.0,
+        "remaining_max_annualized_return": 0.5435098299319727,
+        "estimated_pnl_if_close_net": 1174.6320000000014
+      },
+      "roll_advice": {
+        "status": "success",
+        "outcome": "found",
+        "actionable_until_utc": "2026-11-06T03:36:38+00:00",
+        "position": {
+          "symbol": "0700.HK",
+          "option_type": "put",
+          "expiration": "2026-11-27",
+          "expiration_ymd": "2026-11-27",
+          "strike": 420.0,
+          "currency": "HKD",
+          "contracts": 4,
+          "contracts_open": 4,
+          "lot_id": "fixture-lot-13"
+        },
+        "candidates": [
+          {
+            "contract": "HK.TCH270128P410000",
+            "expiration": "2027-01-28",
+            "strike": 410.0,
+            "contracts": 4,
+            "net_credit": 1996.984,
+            "incremental_period_return": 0.012176731707317073,
+            "incremental_annualized_return": 0.05354827799000881,
+            "evidence": {
+              "old_ask": 13.04,
+              "new_bid": 18.23
+            }
+          }
+        ]
+      }
+    },
+    {
+      "symbol": "0700.HK",
+      "strategy_family": "sell_put",
+      "option_type": "put",
+      "expiration": "2026-11-27",
+      "strike": 420.0,
+      "contract_symbol": null,
+      "quote_status": "priced",
+      "evaluation_status": "priced",
+      "recommendation_state": "hold",
+      "notification_eligible": false,
+      "roll_notification_eligible": true,
+      "position_lot_id": "fixture-lot-14",
+      "metrics": {
+        "ask": 13.04,
+        "net_capture_ratio": 0.0807695588755614,
+        "capital_basis": 126000.0,
+        "remaining_max_annualized_return": 0.5440271201814059,
+        "estimated_pnl_if_close_net": 346.53000000000065
+      },
+      "roll_advice": {
+        "status": "success",
+        "outcome": "found",
+        "actionable_until_utc": "2026-11-06T03:36:38+00:00",
+        "position": {
+          "symbol": "0700.HK",
+          "option_type": "put",
+          "expiration": "2026-11-27",
+          "expiration_ymd": "2026-11-27",
+          "strike": 420.0,
+          "currency": "HKD",
+          "contracts": 3,
+          "contracts_open": 3,
+          "lot_id": "fixture-lot-14"
+        },
+        "candidates": [
+          {
+            "contract": "HK.TCH270128P410000",
+            "expiration": "2027-01-28",
+            "strike": 410.0,
+            "contracts": 3,
+            "net_credit": 1490.238,
+            "incremental_period_return": 0.012115756097560975,
+            "incremental_annualized_return": 0.05328013223626213,
+            "evidence": {
+              "old_ask": 13.04,
+              "new_bid": 18.23
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
