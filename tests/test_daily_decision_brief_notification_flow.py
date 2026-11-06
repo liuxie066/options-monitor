@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -1067,6 +1068,54 @@ def test_retired_ai_blocker_does_not_suppress_clean_account_delivery(
     ]
 
 
+@pytest.mark.parametrize("summary_retained", [True, False])
+def test_candidate_display_evidence_acknowledges_only_surviving_details_or_summary(
+    monkeypatch, tmp_path: Path, summary_retained: bool,
+) -> None:
+    symbols = ["NVDA", "MSFT", "AAPL", "TSLA", "AMD"]
+    def assemble(*, base, run_id, account, markets_to_run, **_kwargs):
+        brief = _brief(base=base, run_id=run_id, account=account)
+        action, row = brief["actions"][0], brief["candidates"]["sell_put"][0]
+        brief["actions"] = []
+        brief["candidates"]["sell_put"] = []
+        for rank, symbol in enumerate(symbols, start=1):
+            contract = f"{symbol}260821P00100000"
+            brief["actions"].append({**deepcopy(action), "symbol": symbol, "contract_symbol": contract})
+            brief["candidates"]["sell_put"].append({
+                **deepcopy(row), "symbol": symbol, "contract_symbol": contract, "rank": rank})
+        return {"US": brief}
+    monkeypatch.setattr(mod, "assemble_daily_decision_briefs", assemble)
+    actual_selection = mod.select_daily_brief_notification
+    def select(*args, **kwargs):
+        result = actual_selection(*args, **kwargs)
+        if not summary_retained:
+            # Simulate a transport-specific selection with the overflow summary absent.
+            summary = next(line for line in result["text"].split("\n\n") if "另有 2 个新增候选未展开" in line)
+            result["text"] = result["text"].replace("\n\n" + summary, "")
+            result["markdown_blocks"] = [block for block in result["markdown_blocks"] if "另有 2 个新增候选未展开" not in block]
+            result["display_evidence"] = [
+                {**item, "state": "not_shown"} if item["state"] == "summary_notified" else item
+                for item in result["display_evidence"]]
+        return result
+    monkeypatch.setattr(mod, "select_daily_brief_notification", select)
+    calls: list[dict] = []
+    _patch_sender(monkeypatch, calls=calls)
+    bundle = _request(tmp_path, run_id="five-candidates", fixed=False)
+    assert mod.run_tick_notification_flow(bundle.request) == 0
+    day = read_daily_decision_brief_delivery_state(
+        base=tmp_path, account="lx", market="US")["state"]["days"][MARKET_DATE]
+    envelope = day["candidate_delivery"]
+    evidence = {item["identity"]: item["state"] for item in envelope["display_evidence"]}
+    assert len(envelope["candidate_identities"]) == 5
+    assert list(evidence.values()).count("expanded") == 3
+    assert list(evidence.values()).count("summary_notified") == (2 if summary_retained else 0)
+    assert list(evidence.values()).count("not_shown") == (0 if summary_retained else 2)
+    represented = {identity for identity, state in evidence.items() if state != "not_shown"}
+    assert set(day["alerted_candidates"]) == represented
+    assert set(day["pending_candidates"]) == set(evidence) - represented
+    assert ("另有 2 个新增候选未展开" in calls[0]["message"]) is summary_retained
+
+
 def test_feishu_delivery_only_retry_reuses_frozen_card_transport(monkeypatch, tmp_path: Path) -> None:
     _patch_assembler(monkeypatch)
     monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_test")
@@ -1097,17 +1146,26 @@ def test_feishu_delivery_only_retry_reuses_frozen_card_transport(monkeypatch, tm
 
     retry_calls: list[dict] = []
     _patch_sender(monkeypatch, calls=retry_calls)
+    changed_config = _feishu_config()
+    changed_config["notifications"]["daily_brief"] = {
+        "max_candidates_per_strategy": 1, "max_actions": 1}
+    monkeypatch.setattr(mod, "select_daily_brief_notification",
+        lambda *_args, **_kwargs: pytest.fail("exact retry must not select a new display plan"))
     second = _request(
         tmp_path,
         run_id="feishu-card-delivery-only",
         delivery_only=True,
-        config=_feishu_config(),
+        config=changed_config,
     )
     assert mod.run_tick_notification_flow(second.request) == 0
 
     assert retry_calls[0]["message"] == retry_before["rendered_message"]
     assert retry_calls[0]["transport_envelope"] == retry_before["rendered_transport"]
     assert retry_calls[0]["idempotency_key"] == first_calls[0]["idempotency_key"]
+    state = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")
+    confirmed = state["state"]["days"][MARKET_DATE]["fixed_reports"][FIXED_TARGET]
+    assert retry_before["display_evidence"] == [{"identity": IDENTITY, "state": "expanded"}]
+    assert confirmed["display_evidence"] == retry_before["display_evidence"]
 
 
 def test_delivery_only_no_send_keeps_pending_envelope_without_claiming_send(monkeypatch, tmp_path: Path) -> None:
@@ -1144,15 +1202,13 @@ def test_delivery_only_rebuilds_missing_envelope_from_committed_brief(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from src.application.daily_decision_brief_renderer import (
-        render_fixed_report_text as actual_render_fixed_report_text,
-    )
+    actual_selection = mod.select_daily_brief_notification
 
     _patch_assembler(monkeypatch)
     first = _request(tmp_path, run_id="render-crash")
     monkeypatch.setattr(
         mod,
-        "render_fixed_report_text",
+        "select_daily_brief_notification",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("render failed")),
     )
     with pytest.raises(RuntimeError, match="render failed"):
@@ -1190,7 +1246,7 @@ def test_delivery_only_rebuilds_missing_envelope_from_committed_brief(
         market="US",
     )["brief"]["revision"] == 1
 
-    monkeypatch.setattr(mod, "render_fixed_report_text", actual_render_fixed_report_text)
+    monkeypatch.setattr(mod, "select_daily_brief_notification", actual_selection)
     calls: list[dict] = []
     _patch_sender(monkeypatch, calls=calls)
     retry = _request(tmp_path, run_id="delivery-recovery", delivery_only=True)
@@ -1873,9 +1929,14 @@ def test_feishu_large_fallback_is_frozen_and_retried_without_rerender(monkeypatc
     _patch_assembler(monkeypatch)
     receiver = 'ou_' + 'x' * 64
     monkeypatch.setenv('OM_FEISHU_BOT_USER_OPEN_ID', receiver)
-    text = '\n\n'.join('中文🙂"\\' * 10 for _ in range(700))
-    monkeypatch.setattr(mod, 'render_fixed_report', lambda *args, **kwargs: text)
-    monkeypatch.setattr(mod, 'render_candidate_alert', lambda *args, **kwargs: text)
+    import src.application.daily_decision_brief_renderer as renderer
+    actual_view = renderer.build_daily_brief_user_view
+    oversized_funds = '中文🙂"\\' * 1900
+    def long_view(*args, **kwargs):
+        view = actual_view(*args, **kwargs)
+        view['funds'] = ['现金总额：' + oversized_funds]
+        return view
+    monkeypatch.setattr(renderer, 'build_daily_brief_user_view', long_view)
     calls = []
     _patch_sender(monkeypatch, calls=calls, result={
         'ok': False, 'command_ok': False, 'delivery_confirmed': False,
@@ -1885,11 +1946,16 @@ def test_feishu_large_fallback_is_frozen_and_retried_without_rerender(monkeypatc
     assert mod.run_tick_notification_flow(bundle.request) == 1
     retry = read_retryable_daily_decision_brief_delivery(base=tmp_path, account='lx', market='US', market_trading_date=MARKET_DATE)
     envelope = retry['envelope']
-    assert envelope['rendered_message'] == text
+    text = envelope['rendered_message']
+    assert len(text) <= 12000
+    assert '正文大小限制：撤去 1 条辅助信息' in text
+    assert oversized_funds not in text
     assert envelope['message_sha256'] == hashlib.sha256(text.encode()).hexdigest()
     frozen = envelope['rendered_transport']
     assert frozen['text'] == text
-    assert frozen['fallback']['markdown'] != text
+    assert frozen['fallback']['markdown'] == text
+    assert frozen['render_meta']['truncated'] is False
+    assert envelope['display_evidence'] == [{'identity': IDENTITY, 'state': 'expanded'}]
     assert envelope['rendered_transport_sha256'] == feishu_notification_envelope_sha256(frozen)
     assert calls[0]['transport_envelope'] == frozen
     uuid = calls[0]['idempotency_key'] + ':fallback'
@@ -1902,6 +1968,7 @@ def test_feishu_large_fallback_is_frozen_and_retried_without_rerender(monkeypatc
 
     monkeypatch.setattr(mod, 'render_feishu_notification_card', forbidden)
     monkeypatch.setattr(mod, 'assemble_daily_decision_briefs', forbidden)
+    monkeypatch.setattr(mod, 'select_daily_brief_notification', forbidden)
     calls.clear()
     _patch_sender(monkeypatch, calls=calls)
     again = _request(tmp_path, run_id='retry-long-fallback', delivery_only=True, config=_feishu_config(), fixed=fixed)

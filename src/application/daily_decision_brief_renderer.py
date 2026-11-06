@@ -10,7 +10,8 @@ from domain.domain.short_vol_assessment import CANDIDATE_POSITION_SIZING_BASIS
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
+
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from src.application.multi_tick_audit import daily_brief_phase
 from src.application.report_formatting import attribution_pending_text
@@ -26,6 +27,68 @@ _SHARED_SELL_PUT_CAPACITY_REMINDER = "多个 CSP 候选共享同一现金额度�
 # 飞书 post 消息的 md 标签会把纯空行折叠掉，段落之间没有可视间距；
 # 用零宽空格撑出可见空行（不是空白字符，不会被渲染端或 str.strip() 移除）。
 _VISIBLE_BLANK_LINE = "\u200b"
+
+
+class _Block(str):
+    """A complete display unit; string compatibility preserves the card-block API."""
+
+    def __new__(
+        cls, text: str, tier: str = "status", rank: int = 0,
+        removable: bool = False, *, identities: Iterable[str] = (),
+        summary_family: str = "",
+    ) -> _Block:
+        block = super().__new__(cls, text)
+        block.tier = tier
+        block.rank = rank
+        block.removable = removable
+        block.identities = tuple(identity for identity in identities if identity)
+        block.summary_family = summary_family
+        block.plain_text = text
+        return block
+
+    @property
+    def text(self) -> str:
+        return str(self)
+
+
+def _budget_omission(removed: list[_Block]) -> _Block:
+    labels = {"aux": "\u8f85\u52a9\u4fe1\u606f", "info": "\u77e5\u60c5\u5361", "candidate": "\u5f00\u4ed3\u5361", "action": "\u6301\u4ed3\u52a8\u4f5c\u5361"}
+    counts = [f"{sum(block.tier == tier for block in removed)} \u6761{label}"
+              for tier, label in labels.items() if any(block.tier == tier for block in removed)]
+    return _Block("\u5c55\u793a\u8303\u56f4\uff5c\u6b63\u6587\u5927\u5c0f\u9650\u5236\uff1a\u64a4\u53bb " + "\u3001".join(counts)
+                  + "\uff1b\u5b8c\u6574\u7ed3\u679c\u53ef\u6309\u672c\u6b21\u8d26\u6237\u3001\u5e02\u573a\u548c\u6570\u636e\u65f6\u95f4\u67e5\u8be2\u3002", "omission")
+
+
+def _fit_blocks(
+    blocks: list[_Block], max_chars: int, *,
+    fits: Callable[[list[_Block]], bool] | None = None,
+) -> tuple[list[_Block], list[_Block], bool]:
+    """Remove complete lowest-priority units, counting the final notice too."""
+    kept = list(blocks)
+    removed: list[_Block] = []
+    priorities = {"aux": 0, "info": 1, "candidate": 2, "action": 3}
+    order = sorted(
+        (index for index, block in enumerate(blocks)
+         if block.removable and block.tier in priorities),
+        key=lambda index: (priorities[blocks[index].tier], blocks[index].rank, index),
+    )
+    for index in [None, *order]:
+        if index is not None:
+            removed.append(blocks[index])
+            # Repeated text can represent distinct cards; remove by original index.
+            removed_indices = set(order[:len(removed)])
+            kept = [block for position, block in enumerate(blocks) if position not in removed_indices]
+        result = [*kept, _budget_omission(removed)] if removed else kept
+        if len("\n\n".join(result)) <= max_chars and (fits is None or fits(result)):
+            return result, removed, False
+    return result, removed, True
+
+
+def _require_fitted_blocks(blocks: list[_Block]) -> list[_Block]:
+    kept, _removed, truncated_hard = _fit_blocks(blocks, _MAX_MESSAGE_CHARS)
+    if truncated_hard:
+        raise ValueError("render_unavailable: required Daily Brief blocks exceed the message budget")
+    return kept
 
 _MARKET_LABELS = {"US": "美股", "HK": "港股", "CN": "A股"}
 _MARKET_TIMEZONES = {"US": "America/New_York", "HK": "Asia/Hong_Kong", "CN": "Asia/Shanghai"}
@@ -880,6 +943,10 @@ def _render_user_view(
         lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} 提醒"])
         lines.extend(_flat_field_line(item) for item in reminders)
 
+    if len("\n".join(lines).strip()) > _MAX_MESSAGE_CHARS:
+        return "\n\n".join(_render_user_view_blocks(
+            view, projection="fixed_report" if projection == "legacy" else projection,
+        ))
     return _bounded_markdown(lines)
 
 
@@ -896,42 +963,70 @@ def _render_user_view_blocks(
     *,
     projection: str,
     markdown: bool = True,
-) -> list[str]:
+    fit: bool = True,
+) -> list[_Block]:
     def heading(title: str, level: int = 2) -> str:
         return f"{'#' * level} {title}" if markdown else f"【{title}】"
 
     def emphasis(title: str) -> str:
         return f"**{title}**" if markdown else title
 
-    blocks = ["\n".join([
+    class Blocks(list[_Block]):
+        def append(self, text: str, tier: str = "status", rank: int = 0, *,
+                   identities: Iterable[str] = (), summary_family: str = "") -> None:
+            if text.strip():
+                super().append(_Block(
+                    text.strip(), tier, rank,
+                    tier in {"action", "candidate", "info", "aux"},
+                    identities=identities, summary_family=summary_family,
+                ))
+
+        def extend(self, texts: Iterable[str]) -> None:
+            for text in texts:
+                super().append(text if isinstance(text, _Block) else _Block(text))
+
+    blocks = Blocks()
+    blocks.append("\n".join([
         heading(f"OM · 决策简报 · {view['account']}", 1),
         f"状态｜{view['phase_line']} · {view['market_label']}",
         f"数据｜{_strip_display_label(view['data_as_of'], '数据截至：')}",
-    ])]
+    ]))
     attribution = _attribution_review_lines(view)
     if attribution:
-        blocks.append("\n".join(attribution))
+        blocks.append("\n".join(attribution), "gap")
     if view.get("planning_notice"):
         blocks.append(f"提示｜{view['planning_notice']}")
+
+    def has_gap(text: str) -> bool:
+        return any(word in text for word in (
+            "不可用", "不完整", "不足", "缺失", "待核", "未核", "未确认",
+            "冲突", "失败", "暂停", "待人工确认", "超额", "高风险",
+        ))
 
     def wheel_blocks() -> list[str]:
         rows = [item for item in view.get("wheel_batches") or [] if isinstance(item, Mapping)]
         if not rows:
             return []
-        return [heading("Wheel"), *[
-            "\n".join([emphasis(_flat_title(item['title'])), *[
+        result = [_Block(heading("Wheel"))]
+        for index, item in enumerate(rows):
+            text = "\n".join([emphasis(_flat_title(item['title'])), *[
                 _flat_field_line(detail) for detail in item.get("details") or []
-            ]]) for item in rows
-        ]]
+            ]])
+            gap = has_gap(text)
+            result.append(_Block(
+                text, "gap" if gap else "candidate", -index, not gap,
+                identities=(view.get("notification_wheel_identities") or {}).get(index, ()),
+            ))
+        return result
 
     if view.get("blocked"):
         blocks.append("\n".join([
             f"结论｜{view.get('blocked_summary') or '本轮关键数据不可用，暂时无法形成可靠决策。'}",
             "后续｜系统将在后续批次自动重新评估。",
-        ]))
+        ]), "gap")
         if projection == "fixed_report":
             blocks.extend(wheel_blocks())
-        return blocks
+        return _require_fitted_blocks(blocks) if fit else blocks
 
     changes = [str(item) for item in view.get("change_summaries") or [] if str(item).strip()]
     if changes:
@@ -969,7 +1064,9 @@ def _render_user_view_blocks(
             if sizing:
                 lines.append("Position Sizing：" + sizing[0])
                 lines.extend(sizing[1:])
-            blocks.append("\n".join(lines))
+            identity = (view.get("notification_identities") or {}).get((item["symbol"], family))
+            blocks.append("\n".join(lines), "candidate", -int(item.get("rank") or 0),
+                          identities=(identity,))
     if projection == "fixed_report" and not candidates:
         summary = str(view.get("candidate_empty_summary") or "")
         if summary and summary != "本轮暂无符合条件的候选。":
@@ -980,8 +1077,15 @@ def _render_user_view_blocks(
             candidates, compact=projection == "fixed_report", markdown=markdown,
         )
         if events:
-            blocks.extend([heading("事件"), *events])
-    blocks.extend(f"补充｜{note}" for note in view.get("candidate_omissions") or [])
+            blocks.append(heading("事件"))
+            for event in events:
+                tier = "gap" if any(word in event for word in ("不完整", "不可用", "无法", "缺口")) else "info"
+                blocks.append(event, tier)
+    for note in view.get("candidate_omissions") or []:
+        family = next((family for family, label in _STRATEGY_LABELS.items()
+                       if str(note).startswith(label + " ")), "")
+        blocks.append(f"补充｜{note}", "omission",
+                      summary_family=(family or "all") if "未展开" in str(note) else "")
 
     if projection != "candidate_alert" or view.get("positions"):
         position_rows = [item for item in view.get("positions") or [] if isinstance(item, Mapping)]
@@ -991,7 +1095,8 @@ def _render_user_view_blocks(
             lines = [emphasis(f"{index}｜{_flat_title(item.get('holding'))}｜{item.get('status')}")]
             if item.get("is_roll"):
                 lines.extend(str(detail) for detail in item.get("details") or [])
-                blocks.append("\n".join(lines))
+                blocks.append("\n".join(lines), "action", -index,
+                              identities=item.get("roll_identities") or [item.get("roll_identity")])
                 continue
             facts = []
             for label, key in (
@@ -1005,26 +1110,128 @@ def _render_user_view_blocks(
                     facts.append(f"{label} {_table_cell(item[key])}".strip())
             if facts:
                 lines.append("参考｜" + " · ".join(facts))
-            blocks.append("\n".join(lines))
+            blocks.append("\n".join(lines), "action", -index)
         if fact_reviews:
             blocks.append(heading("持仓事实核查（非交易建议）"))
             for item in fact_reviews:
                 blocks.append("\n".join([
                     emphasis(f"{_flat_title(item['title'])}｜{item['status']}"),
                     *[f"核查原因｜{detail}" for detail in item.get("details") or []],
-                ]))
+                ]), "aux")
 
     funds = [str(item) for item in view.get("funds") or [] if str(item).strip()]
     blocks.append(heading("资金") + "\n" + (
         "\n".join(_flat_field_line(item) for item in funds) if funds else "资金数据暂不可用。"
-    ))
+    ), "gap" if not funds or any(has_gap(item) for item in funds) else "aux")
     reminder_key = "fixed_report_reminders" if projection == "fixed_report" else "reminders"
     reminders = [str(item) for item in view.get(reminder_key) or [] if str(item).strip()]
     if reminders:
         if projection != "fixed_report":
             blocks.append(heading("提醒"))
-        blocks.append("\n".join(f"提醒｜{item}" for item in reminders))
-    return blocks
+        blocks.append("\n".join(f"提醒｜{item}" for item in reminders), "gap")
+    return _require_fitted_blocks(blocks) if fit else blocks
+
+
+@daily_brief_phase("render", operation="select_daily_brief_notification")
+def select_daily_brief_notification(
+    brief: Mapping[str, Any], *, delivery_kind: str,
+    candidate_identities: Iterable[str] = (), limits: Mapping[str, Any] | None = None,
+    context: Mapping[str, Any] | None = None, diff: Mapping[str, Any] | None = None,
+    fits: Callable[[list[str], str], bool] | None = None,
+) -> dict[str, Any]:
+    """Freeze one selection for every presentation and its acknowledgement evidence."""
+    identities = list(dict.fromkeys(candidate_identities))
+    view = (
+        _candidate_alert_user_view(brief, identities, limits=limits, context=context)
+        if delivery_kind == "candidate_alert" else build_daily_brief_user_view(
+            brief, delivery_kind="fixed_report", limits=limits, context=context, diff=diff,
+        )
+    )
+    view["notification_identities"] = {
+        (_upper(row.get("symbol")), str(row.get("strategy_family"))): str(row["identity"])
+        for row in brief.get("candidate_index") or []
+        if isinstance(row, Mapping) and row.get("identity")
+    }
+    wheel_source = (_candidate_alert_brief(brief, identities)[0]
+                    if delivery_kind == "candidate_alert" else brief)
+    wheel_rows = [dict(row) for row in wheel_source.get("wheel_batches") or []
+                  if isinstance(row, Mapping)]
+    if delivery_kind == "fixed_report":
+        wheel_rows = _group_fixed_wheel_batches(wheel_rows)
+    symbol_order = {symbol: index for index, symbol in enumerate(dict.fromkeys(
+        _upper(row.get("symbol")) for row in wheel_rows
+    ))}
+    wheel_rows.sort(key=lambda row: symbol_order[_upper(row.get("symbol"))])
+    wheel_rows = [row for row in wheel_rows if not view.get("blocked") or (
+        not row.get("recommended_contracts") and row.get("reason_codes")
+    )]
+    wheel_index = [row for row in brief.get("candidate_index") or []
+                   if isinstance(row, Mapping) and row.get("strategy_family") == "wheel"]
+    view["notification_wheel_identities"] = {
+        index: tuple(str(item["identity"]) for item in wheel_index
+                     if _upper(item.get("symbol")) == _upper(row.get("symbol"))
+                     and str((item.get("representative") or {}).get("wheel_branch_id")
+                             or (item.get("representative") or {}).get("position_lot_id") or "")
+                     in (row.get("display_branch_ids") or [str(row.get("wheel_branch_id")
+                                                               or row.get("position_lot_id") or "")]))
+        for index, row in enumerate(wheel_rows)
+    }
+    blocks = _render_user_view_blocks(view, projection=delivery_kind, fit=False)
+    # The plain projection uses the same card boundaries. Event groups have a
+    # different layout, so replace that whole section by its plain equivalent.
+    plain_blocks = _render_user_view_blocks(view, projection=delivery_kind, markdown=False, fit=False)
+    markdown_events = [index for index, block in enumerate(blocks) if block == "## 事件"]
+    plain_events = [index for index, block in enumerate(plain_blocks) if block == "【事件】"]
+    if markdown_events and plain_events:
+        start, plain_start = markdown_events[0], plain_events[0]
+        end = next((index for index in range(start + 1, len(blocks))
+                    if blocks[index].startswith("## ") or blocks[index].tier == "omission"), len(blocks))
+        plain_end = next((index for index in range(plain_start + 1, len(plain_blocks))
+                          if plain_blocks[index].startswith("【") or plain_blocks[index].tier == "omission"), len(plain_blocks))
+        # Keep event warnings atomically alongside their equivalent flat facts.
+        event = _Block("\n\n".join(blocks[start:end]),
+                       "gap" if any(block.tier == "gap" for block in blocks[start:end]) else "info",
+                       removable=not any(block.tier == "gap" for block in blocks[start:end]))
+        event.plain_text = "\n\n".join(plain_blocks[plain_start:plain_end])
+        blocks[start:end] = [event]
+        plain_blocks[plain_start:plain_end] = [event]
+    if len(blocks) != len(plain_blocks):
+        raise ValueError("render_unavailable: Daily Brief projections have different card boundaries")
+    for block, plain in zip(blocks, plain_blocks):
+        if block is not plain:
+            block.plain_text = str(plain)
+
+    selected_blocks = list(blocks)
+    def within_budget(rows: list[_Block]) -> bool:
+        text = "\n\n".join(block.plain_text for block in rows)
+        return len(text) <= _MAX_MESSAGE_CHARS and (fits is None or fits(rows, text))
+
+    kept, _removed, hard = _fit_blocks(blocks, _MAX_MESSAGE_CHARS, fits=within_budget)
+    if hard:
+        raise ValueError("render_unavailable: required Daily Brief blocks exceed notification budgets")
+    if not identities:
+        identities = [str(row["identity"]) for row in brief.get("candidate_index") or []
+                      if isinstance(row, Mapping) and row.get("identity")]
+        identities.extend(sorted(daily_brief_roll_notification_identities(brief)))
+    evidence = _display_evidence(brief, identities, selected_blocks, kept)
+    return {"markdown_blocks": kept, "text": "\n\n".join(block.plain_text for block in kept),
+            "display_evidence": evidence}
+
+
+def _display_evidence(
+    brief: Mapping[str, Any], identities: Iterable[str],
+    selected: list[_Block], kept: list[_Block],
+) -> list[dict[str, str]]:
+    expanded = {identity for block in kept for identity in block.identities}
+    originally_expanded = {identity for block in selected for identity in block.identities}
+    families = {str(row.get("identity")): str(row.get("strategy_family"))
+                for row in brief.get("candidate_index") or [] if isinstance(row, Mapping)}
+    summaries = {block.summary_family for block in kept if block.summary_family}
+    return [{"identity": identity, "state": (
+        "expanded" if identity in expanded else "summary_notified"
+        if identity not in originally_expanded and not identity.startswith("position-roll:")
+        and (families.get(identity) in summaries or "all" in summaries) else "not_shown"
+    )} for identity in identities]
 
 
 def _render_candidate_event_card(
@@ -3118,9 +3325,7 @@ def _bounded_message(message: str, *, plain_text: bool = False) -> str:
     message = message.strip()
     if len(message) <= _MAX_MESSAGE_CHARS:
         return message
-    prefix = "\n\n" if plain_text else "\n\n- "
-    marker = prefix + "… 消息已按总长度上限截断；完整结构化简报仍保存在审计记录中。"
-    return message[: _MAX_MESSAGE_CHARS - len(marker)].rstrip() + marker
+    raise ValueError("render_unavailable: unstructured Daily Brief exceeds the message budget")
 
 
 __all__ = [

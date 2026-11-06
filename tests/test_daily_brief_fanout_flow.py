@@ -287,6 +287,46 @@ def test_legacy_confirmed_fixed_report_is_not_backfilled_when_routes_are_added(f
     assert len(flow.calls) == 1 and not fanouts(flow)
 
 
+def test_per_route_display_evidence_keeps_unshown_candidates_eligible(flow, monkeypatch):
+    actual_fits = mod.feishu_notification_blocks_fit
+    def smaller_b_budget(blocks, text, *, open_id, **kwargs):
+        return actual_fits(blocks, text, open_id=open_id, **kwargs) and (
+            open_id != "ou_b" or not any(getattr(block, "tier", None) == "candidate" for block in blocks))
+    monkeypatch.setattr(mod, "feishu_notification_blocks_fit", smaller_b_budget)
+    assert mod.run_tick_notification_flow(_request(flow.base, run_id="different-budgets", config=config()).request) == 0
+    first = {child["route_id"]: deepcopy(child["spec"]) for child in fanouts(flow)[0]["children"]}
+    assert first["a"]["metadata"]["display_evidence"] == [{"identity": IDENTITY, "state": "expanded"}]
+    assert first["b"]["metadata"]["display_evidence"] == [{"identity": IDENTITY, "state": "not_shown"}]
+    assert "正文大小限制" in first["b"]["message"]
+    monkeypatch.setattr(mod, "feishu_notification_blocks_fit", actual_fits)
+    flow.clock["now"] = "2026-07-21T14:30:30+00:00"
+    assert mod.run_tick_notification_flow(_request(flow.base, run_id="unshown-next-scan", fixed=False, config=config()).request) == 0
+    assert [call["notifications"]["target"] for call in flow.calls] == ["ou_a", "ou_b", "ou_b"]
+    candidates = [item for item in fanouts(flow) if ":candidate:" in item["logical_key"]]
+    assert len(candidates) == 1 and candidates[0]["children"][0]["route_id"] == "b"
+    assert candidates[0]["children"][0]["spec"]["metadata"]["display_evidence"] == [
+        {"identity": IDENTITY, "state": "expanded"}]
+
+
+def test_failed_child_retry_keeps_original_display_evidence(flow, monkeypatch):
+    flow.outcomes["b"] = {"explicit_pre_acceptance_failure": True}
+    assert mod.run_tick_notification_flow(_request(flow.base, run_id="freeze-evidence", config=config()).request) == 1
+    initial = deepcopy(fanouts(flow)[0]["children"])
+    assert all(child["spec"]["metadata"]["display_evidence"] == [
+        {"identity": IDENTITY, "state": "expanded"}] for child in initial)
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("failed child retry must reuse its frozen display evidence")
+    monkeypatch.setattr(mod, "select_daily_brief_notification", forbidden)
+    flow.clock["now"] = "2026-07-21T14:01:00+00:00"
+    flow.outcomes["b"] = {"delivery_confirmed": True}
+    cfg = config(("a", "b", "new"))
+    cfg["notifications"]["daily_brief"] = {"max_actions": 1}
+    assert mod.run_tick_notification_flow(_request(flow.base, run_id="retry-evidence", delivery_only=True, config=cfg).request) == 0
+    retried = fanouts(flow)[0]["children"]
+    assert [child["spec"] for child in retried] == [child["spec"] for child in initial]
+    assert [call["notifications"]["target"] for call in flow.calls] == ["ou_a", "ou_b", "ou_b"]
+
+
 def _legacy_pending(flow):
     cfg = _config()
     cfg["notifications"].update(provider="feishu_app", channel="feishu_app")
