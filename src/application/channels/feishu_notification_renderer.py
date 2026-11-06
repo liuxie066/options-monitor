@@ -35,6 +35,24 @@ def _fallback_request_bytes(markdown: str, open_id: str) -> int:
     ))
 
 
+def feishu_notification_blocks_fit(
+    markdown_blocks: list[str], fallback_text: str, *, open_id: str,
+    max_chars: int = FEISHU_NOTIFICATION_MAX_CHARS,
+) -> bool:
+    """Measure the exact primary and fallback bodies without truncating either."""
+    sanitized = [sanitize_feishu_markdown(block) for block in markdown_blocks]
+    markdown = "\n\n".join(sanitized)
+    return (
+        bool(markdown and fallback_text)
+        and max(len(markdown), len(fallback_text)) <= max_chars
+        and len(markdown.encode("utf-8")) <= FEISHU_NOTIFICATION_CONTENT_BUDGET_BYTES
+        and len(fallback_text.encode("utf-8")) <= FEISHU_NOTIFICATION_CONTENT_BUDGET_BYTES
+        and _primary_request_bytes(_card_transport(markdown, sanitized), open_id)
+        <= FEISHU_SEND_REQUEST_BUDGET_BYTES
+        and _fallback_request_bytes(fallback_text, open_id) <= FEISHU_POST_REQUEST_BUDGET_BYTES
+    )
+
+
 def _bounded_fallback(text: str, *, open_id: str, max_chars: int) -> tuple[str, bool]:
     if _fallback_request_bytes(text, open_id) <= FEISHU_POST_REQUEST_BUDGET_BYTES:
         return text, False
@@ -61,6 +79,7 @@ def render_feishu_notification_card(
     fallback_open_id: str,
     markdown_blocks: list[str] | None = None,
     max_chars: int = FEISHU_NOTIFICATION_MAX_CHARS,
+    preserve_blocks: bool = False,
 ) -> dict[str, Any]:
     source = str(markdown or "").strip()
     fallback = str(fallback_text or "").strip()
@@ -75,15 +94,23 @@ def render_feishu_notification_card(
         raise ValueError("Feishu notification Markdown blocks must be nonempty strings")
     if "\n\n".join(blocks).strip() != source:
         raise ValueError("Feishu notification Markdown blocks do not match source")
-    fallback_markdown, fallback_truncated = _bounded_fallback(
-        fallback, open_id=fallback_open_id, max_chars=max_chars,
+    if preserve_blocks and not feishu_notification_blocks_fit(
+        blocks, fallback, open_id=fallback_open_id, max_chars=max_chars,
+    ):
+        raise ValueError("render_unavailable: selected Daily Brief exceeds the Feishu budgets")
+    fallback_markdown, fallback_truncated = (
+        (fallback, False) if preserve_blocks else _bounded_fallback(
+            fallback, open_id=fallback_open_id, max_chars=max_chars,
+        )
     )
     sanitized_blocks = [sanitize_feishu_markdown(block) for block in blocks]
     sanitized = "\n\n".join(sanitized_blocks)
-    rendered, truncated = truncate_feishu_markdown(
-        sanitized,
-        max_chars=max_chars,
-        max_bytes=FEISHU_NOTIFICATION_CONTENT_BUDGET_BYTES,
+    rendered, truncated = (
+        (sanitized, False) if preserve_blocks else truncate_feishu_markdown(
+            sanitized,
+            max_chars=max_chars,
+            max_bytes=FEISHU_NOTIFICATION_CONTENT_BUDGET_BYTES,
+        )
     )
     transport = _card_transport(rendered, sanitized_blocks)
     if _primary_request_bytes(transport, fallback_open_id) > FEISHU_SEND_REQUEST_BUDGET_BYTES:

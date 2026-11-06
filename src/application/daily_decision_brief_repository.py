@@ -572,6 +572,7 @@ def prepare_daily_decision_brief_delivery(
     source_reference: str | None = None,
     render_context: Mapping[str, Any] | None = None,
     rendered_transport: Mapping[str, Any] | None = None,
+    display_evidence: list[Mapping[str, Any]] | None = None,
     prepared_at_utc: datetime | str | None = None,
 ) -> dict[str, Any]:
     """Persist an exact v2 delivery envelope and its run-scoped audit copy."""
@@ -615,6 +616,10 @@ def prepare_daily_decision_brief_delivery(
         candidate_identities,
         account=account_norm,
         market=market_norm,
+    )
+    evidence = (
+        _normalize_display_evidence(display_evidence, identities=identities)
+        if display_evidence is not None else None
     )
 
     revision_norm: int | None
@@ -697,6 +702,8 @@ def prepare_daily_decision_brief_delivery(
         "confirmed_at_utc": None,
         "confirmed_attribution_route_key": None,
     }
+    if evidence is not None:
+        envelope["display_evidence"] = evidence
 
     state_dir = paths.account_state_dir(base_path, account_norm)
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -1318,7 +1325,18 @@ def _mark_delivery_envelope_confirmed(
         return
     revision = int(envelope["revision"])
     via = str(envelope["delivery_kind"])
+    evidence = envelope.get("display_evidence")
+    notified = (
+        {row["identity"] for row in evidence
+         if row["state"] == "expanded" or (
+             row["state"] == "summary_notified"
+             and not row["identity"].startswith("position-roll:")
+         )}
+        if evidence is not None else set(envelope["candidate_identities"])
+    )
     for identity in envelope["candidate_identities"]:
+        if identity not in notified:
+            continue
         day["alerted_candidates"].setdefault(
             identity,
             {
@@ -1575,7 +1593,9 @@ def read_combo_candidate_exposures(
         if metadata["delivery_kind"] != "fixed_failure":
             envelopes.append({"status": child["status"], "source_kind": "successful_brief",
                 "delivery_key": child["child_id"], **{key: metadata.get(key) for key in
-                    ("revision", "source_digest", "render_context")}})
+                    ("revision", "source_digest", "render_context")},
+                **({"display_evidence": metadata["display_evidence"]}
+                   if "display_evidence" in metadata else {})})
     delivery_available = delivery_result.get("available") is True or (
         delivery_result.get("reason") == "not_found" and bool(fanout_children))
 
@@ -1612,6 +1632,10 @@ def read_combo_candidate_exposures(
                 in set((envelope.get("render_context") or {}).get("candidate_exposure_ids") or [])
                 and str(item["candidate_occurrence_id"])
                 in set((envelope.get("render_context") or {}).get("candidate_occurrence_ids") or [])
+                and ("display_evidence" not in envelope or any(
+                    row.get("identity") == item["candidate_identity"] and row.get("state") == "expanded"
+                    for row in envelope["display_evidence"]
+                ))
             ]
             item["delivery_confirmed"] = bool(confirmed_envelopes)
             item["confirmed_delivery_keys"] = sorted(
@@ -2135,6 +2159,10 @@ def _normalize_delivery_envelope(
             account=account,
             market=market,
         )
+        display_evidence = (
+            _normalize_display_evidence(envelope["display_evidence"], identities=candidate_identities)
+            if "display_evidence" in envelope else None
+        )
         first_prepared = _normalize_required_utc_iso(
             envelope.get("first_prepared_at_utc"),
             field="first_prepared_at_utc",
@@ -2270,6 +2298,7 @@ def _normalize_delivery_envelope(
         "rendered_transport": rendered_transport,
         "rendered_transport_sha256": rendered_transport_sha256,
         "candidate_identities": candidate_identities,
+        **({"display_evidence": display_evidence} if display_evidence is not None else {}),
         "scheduled_target_market": target_norm,
         "render_context": dict(render_context),
         "first_prepared_at_utc": first_prepared,
@@ -2490,6 +2519,7 @@ def _delivery_envelope_content(envelope: Mapping[str, Any]) -> dict[str, Any]:
             "rendered_transport",
             "rendered_transport_sha256",
             "candidate_identities",
+            "display_evidence",
             "scheduled_target_market",
             "render_context",
         )
@@ -2858,6 +2888,26 @@ def _normalize_candidate_identities(
             raise ValueError(f"candidate identity is not canonical: {identity!r}")
         out.add(identity)
     return sorted(out)
+
+
+def _normalize_display_evidence(
+    values: Any, *, identities: list[str],
+) -> list[dict[str, str]]:
+    if not isinstance(values, list):
+        raise ValueError("display_evidence must be a list")
+    states: dict[str, str] = {}
+    for row in values:
+        if not isinstance(row, Mapping) or set(row) != {"identity", "state"}:
+            raise ValueError("display_evidence rows must contain identity and state")
+        identity, state = row["identity"], row["state"]
+        if not isinstance(identity, str) or identity not in identities or identity in states:
+            raise ValueError("display_evidence identity is missing, repeated, or incompatible")
+        if not isinstance(state, str) or state not in {"expanded", "summary_notified", "not_shown"}:
+            raise ValueError("display_evidence state is invalid")
+        states[identity] = state
+    if set(states) != set(identities):
+        raise ValueError("display_evidence must cover every candidate identity exactly once")
+    return [{"identity": identity, "state": states[identity]} for identity in identities]
 
 
 def _validate_failure_source_reference(

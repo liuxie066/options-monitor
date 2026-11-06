@@ -235,7 +235,9 @@ def _prepare(tmp_path: Path, **overrides: object) -> dict:
     return prepare_daily_decision_brief_delivery(**base)
 
 
-def _prepare_fixed(tmp_path: Path, persisted: dict, *, message: str = "# lx · 美股期权监控") -> dict:
+def _prepare_fixed(
+    tmp_path: Path, persisted: dict, *, message: str = "# lx · 美股期权监控", **overrides: object,
+) -> dict:
     return _prepare(
         tmp_path,
         run_id=persisted["brief"]["run_id"],
@@ -248,6 +250,7 @@ def _prepare_fixed(tmp_path: Path, persisted: dict, *, message: str = "# lx · �
         rendered_message=message,
         render_context={"projection": "fixed_report"},
         prepared_at_utc="2026-07-21T14:00:02+00:00",
+        **overrides,
     )
 
 
@@ -528,6 +531,125 @@ def test_v2_candidate_state_fixed_envelope_and_retry_read_round_trip(tmp_path: P
     assert retry["reason"] == "pending_fixed"
     assert retry["envelope"] == envelope
     assert prepared["paths"]["delivery"].read_bytes() == before
+
+
+@pytest.mark.parametrize("unexpanded_state", ["summary_notified", "not_shown"])
+def test_display_evidence_controls_confirmation_and_survives_exact_retry(
+    tmp_path: Path, unexpanded_state: str,
+) -> None:
+    from src.application.daily_decision_brief_repository import confirm_daily_decision_brief_delivery_v2
+    from src.application.notification_delivery_adapter import build_notification_transport_key
+
+    persisted = _persist(tmp_path, actions=[_action(symbol=symbol)
+                         for symbol in ("AMD", "NVDA", "MSFT", "AAPL", "TSLA")])
+    identities = persisted["current_candidate_identities"]
+    assert len(identities) == 5
+    _record_candidates(tmp_path, revision=persisted["current_revision"],
+                       brief_digest=persisted["current_brief_digest"], candidate_identities=identities)
+    evidence = [{"identity": identity, "state": "expanded" if index < 3 else unexpanded_state}
+                for index, identity in enumerate(identities)]
+    prepared = _prepare_fixed(tmp_path, persisted, display_evidence=list(reversed(evidence)))
+    envelope = prepared["envelope"]
+    assert envelope["display_evidence"] == evidence
+    assert _retry(tmp_path)["envelope"]["display_evidence"] == evidence
+    plan = json.loads(prepared["paths"]["run_plan"].read_text())
+    assert plan["envelope"]["display_evidence"] == evidence
+    confirmed = confirm_daily_decision_brief_delivery_v2(
+        base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE,
+        delivery_key=envelope["delivery_key"], source_digest=envelope["source_digest"],
+        message_sha256=envelope["message_sha256"],
+        transport_idempotency_key=build_notification_transport_key(envelope["delivery_key"]),
+    )
+    assert confirmed["envelope"]["status"] == "confirmed"
+    day = _read_state(tmp_path)["state"]["days"][MARKET_DATE]
+    notified = identities if unexpanded_state == "summary_notified" else identities[:3]
+    assert sorted(day["alerted_candidates"]) == notified
+    assert sorted(day["pending_candidates"]) == sorted(set(identities) - set(notified))
+    assert day["fixed_reports"][TARGET_1000]["display_evidence"] == evidence
+
+
+@pytest.mark.parametrize("evidence", [
+    [], None, {}, [{"identity": IDENTITY_NVDA, "state": "unknown"}],
+    [{"identity": IDENTITY_AMD, "state": "expanded"}],
+    [{"identity": IDENTITY_NVDA, "state": "expanded"}] * 2,
+    [{"identity": IDENTITY_NVDA, "state": "expanded", "extra": True}],
+])
+def test_explicit_invalid_display_evidence_fails_closed(tmp_path: Path, evidence) -> None:
+    persisted = _persist(tmp_path, actions=[_action()])
+    if evidence is not None:
+        with pytest.raises(ValueError, match="display_evidence"):
+            _prepare_fixed(tmp_path, persisted, display_evidence=evidence)
+    prepared = _prepare_fixed(tmp_path, persisted)
+    delivery = json.loads(prepared["paths"]["delivery"].read_text())
+    delivery["days"][MARKET_DATE]["fixed_reports"][TARGET_1000]["display_evidence"] = evidence
+    prepared["paths"]["delivery"].write_text(json.dumps(delivery))
+    invalid = _read_state(tmp_path)
+    assert invalid["available"] is False and invalid["reason"] == "state_invalid"
+    assert "display_evidence" in invalid["error"]
+
+
+def test_display_evidence_only_change_cannot_rewrite_frozen_envelope(tmp_path: Path) -> None:
+    from src.application.daily_decision_brief_repository import (
+        DailyDecisionBriefStateError, record_daily_decision_brief_delivery_attempt,
+    )
+    from src.application.notification_delivery_adapter import build_notification_transport_key
+
+    persisted = _persist(tmp_path, actions=[_action()])
+    expanded = [{"identity": IDENTITY_NVDA, "state": "expanded"}]
+    prepared = _prepare_fixed(tmp_path, persisted, display_evidence=expanded)
+    envelope = prepared["envelope"]
+    changed = [{"identity": IDENTITY_NVDA, "state": "not_shown"}]
+    with pytest.raises(DailyDecisionBriefStateError, match="cannot change content"):
+        _prepare_fixed(tmp_path, persisted, display_evidence=changed)
+    record_daily_decision_brief_delivery_attempt(
+        base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE,
+        delivery_key=envelope["delivery_key"], source_digest=envelope["source_digest"],
+        message_sha256=envelope["message_sha256"],
+        transport_idempotency_key=build_notification_transport_key(envelope["delivery_key"]),
+        ambiguous=True,
+    )
+    with pytest.raises(DailyDecisionBriefStateError, match="frozen"):
+        _prepare_fixed(tmp_path, persisted, display_evidence=changed)
+    assert _retry(tmp_path)["envelope"]["display_evidence"] == expanded
+
+
+def test_roll_summary_evidence_does_not_confirm_member_identity(tmp_path: Path) -> None:
+    from src.application.daily_decision_brief_repository import _mark_delivery_envelope_confirmed
+
+    identity = "position-roll:v1:lx:US:roll_down:" + "a" * 64
+    day = {"alerted_candidates": {}, "pending_candidates": {identity: {"revision": 1}}}
+    envelope = {"delivery_kind": "candidate_alert", "revision": 1,
+                "source_digest": "b" * 64, "delivery_key": "option-report-test",
+                "candidate_identities": [identity],
+                "display_evidence": [{"identity": identity, "state": "summary_notified"}]}
+    _mark_delivery_envelope_confirmed(day=day, envelope=envelope, confirmed_at="2026-07-21T14:00:04Z")
+    assert day["alerted_candidates"] == {}
+    assert identity in day["pending_candidates"]
+    envelope["display_evidence"][0]["state"] = "expanded"
+    _mark_delivery_envelope_confirmed(day=day, envelope=envelope, confirmed_at="2026-07-21T14:00:05Z")
+    assert identity in day["alerted_candidates"]
+    assert day["pending_candidates"] == {}
+
+
+def test_legacy_envelope_without_display_evidence_preserves_confirmation_policy(tmp_path: Path) -> None:
+    from src.application.daily_decision_brief_repository import confirm_daily_decision_brief_delivery_v2
+    from src.application.notification_delivery_adapter import build_notification_transport_key
+
+    persisted = _persist(tmp_path, actions=[_action(), _action(symbol="AMD")])
+    identities = persisted["current_candidate_identities"]
+    _record_candidates(tmp_path, revision=persisted["current_revision"],
+                       brief_digest=persisted["current_brief_digest"], candidate_identities=identities)
+    envelope = _prepare_fixed(tmp_path, persisted)["envelope"]
+    assert "display_evidence" not in _retry(tmp_path)["envelope"]
+    confirm_daily_decision_brief_delivery_v2(
+        base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE,
+        delivery_key=envelope["delivery_key"], source_digest=envelope["source_digest"],
+        message_sha256=envelope["message_sha256"],
+        transport_idempotency_key=build_notification_transport_key(envelope["delivery_key"]),
+    )
+    day = _read_state(tmp_path)["state"]["days"][MARKET_DATE]
+    assert sorted(day["alerted_candidates"]) == identities
+    assert day["pending_candidates"] == {}
 
 
 def test_candidate_delivery_key_is_stable_and_pending_content_can_rotate(tmp_path: Path) -> None:
@@ -1413,8 +1535,9 @@ def test_confirmed_candidate_delivery_rolls_to_later_candidate_batch(tmp_path: P
     assert day["pending_candidates"] == {}
 
 
+@pytest.mark.parametrize("display_state", [None, "expanded", "summary_notified", "not_shown"])
 def test_legacy_combo_revision_remains_source_for_recovery_delivery_and_exposure(
-    tmp_path: Path,
+    tmp_path: Path, display_state: str | None,
 ) -> None:
     from domain.domain.combo_candidate_evidence import (
         combo_exposure_render_context,
@@ -1492,6 +1615,8 @@ def test_legacy_combo_revision_remains_source_for_recovery_delivery_and_exposure
             "rendered_combo_candidate_identities": [identity],
         },
         prepared_at_utc="2026-07-21T14:00:03+00:00",
+        **({"display_evidence": [{"identity": identity, "state": display_state}]}
+           if display_state is not None else {}),
     )["envelope"]
     retry = _retry(tmp_path)
     assert retry["reason"] == "pending_candidates"
@@ -1515,7 +1640,7 @@ def test_legacy_combo_revision_remains_source_for_recovery_delivery_and_exposure
     )
     assert replayed["reason"] == "ok"
     assert len(replayed["exposures"]) == 1
-    assert replayed["exposures"][0]["delivery_confirmed"] is True
+    assert replayed["exposures"][0]["delivery_confirmed"] is (display_state in {None, "expanded"})
 
 
 def test_legacy_combo_hold_survives_two_revisions_then_recovers_to_current_id(

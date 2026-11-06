@@ -68,12 +68,12 @@ def test_delivery_only_prioritizes_unknown_candidate_over_unrendered_supplement(
     ambiguous,
 ):
     clock, _, calls, _ = recovery
-    renderer = mod.render_fixed_report_text
+    renderer = mod.select_daily_brief_notification
 
     def crash_render(*args, **kwargs):
         raise RuntimeError("render crash")
 
-    monkeypatch.setattr(mod, "render_fixed_report_text", crash_render)
+    monkeypatch.setattr(mod, "select_daily_brief_notification", crash_render)
     with pytest.raises(RuntimeError, match="render crash"):
         mod.run_tick_notification_flow(_request(tmp_path, run_id="bound", fixed=False).request)
     bound = _recovery(tmp_path)
@@ -100,7 +100,7 @@ def test_delivery_only_prioritizes_unknown_candidate_over_unrendered_supplement(
     assert retry["envelope"] == frozen
     assert retry["reason"] == ("ambiguous" if ambiguous else "pending_candidates")
 
-    monkeypatch.setattr(mod, "render_fixed_report_text", renderer)
+    monkeypatch.setattr(mod, "select_daily_brief_notification", renderer)
 
     def forbid_scan(**kwargs):
         raise AssertionError("delivery-only must not scan")

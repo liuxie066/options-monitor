@@ -1339,13 +1339,19 @@ def test_renderer_honors_total_length_bound() -> None:
         )
         for i in range(20)
     ]
+    for row in brief["candidates"]["sell_put"]:
+        row["event_risk"] = _render_event_risk("confirmed_none")
     message = render_full_brief(
         brief,
         limits={"max_candidates_per_strategy": 20},
     )
 
     assert len(message) <= 12_000
-    assert "消息已按总长度上限截断" in message
+    assert "展示范围｜正文大小限制：撤去" in message
+    for row in brief["candidates"]["sell_put"]:
+        title = f"{row['symbol']}｜CSP｜08-21 ${row['strike']} Put（策略排序 {row['rank']}）"
+        assert (title in message) == (f"**{title}**\n" in message)
+    assert "消息已按总长度上限截断" not in message
 
 
 def test_no_delivery_kind_renders_empty_message() -> None:
@@ -2647,9 +2653,15 @@ def test_wechat_text_retains_length_budget_and_plain_truncation_notice(alert: bo
         identities.append(identity)
         brief['candidate_index'].append({'identity': identity, 'symbol': symbol, 'strategy_family': 'sell_put', 'representative': row, 'contract_count': 1})
     brief['candidates'] = {'sell_put': rows, 'covered_call': [], 'combo_yield': []}
+    # Missing event evidence repeats these long identities in required gap blocks.
+    with pytest.raises(ValueError, match="render_unavailable"):
+        render_candidate_alert_text(brief, identities) if alert else render_fixed_report_text(brief)
+    for row in rows:
+        row['event_risk'] = _render_event_risk('confirmed_none')
     text = render_candidate_alert_text(brief, identities) if alert else render_fixed_report_text(brief)
     assert len(text) <= 12_000
-    assert text.endswith('… 消息已按总长度上限截断；完整结构化简报仍保存在审计记录中。')
+    assert '展示范围｜正文大小限制：撤去' in text
+    assert '消息已按总长度上限截断' not in text
     assert not any(line.startswith(('#', '- ')) for line in text.splitlines())
     assert '**' not in text and '\u200b' not in text
 

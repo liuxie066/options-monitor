@@ -336,8 +336,8 @@ def test_display_budget_acknowledges_only_shown_roll_positions(monkeypatch, tmp_
 def test_truncated_message_does_not_ack_cut_off_roll(monkeypatch, tmp_path: Path) -> None:
     patch_roll_assembler(monkeypatch)
     monkeypatch.setattr(renderer, "_MAX_MESSAGE_CHARS", 200)
-    prep = flow._prepare_daily_brief_notification(_request(tmp_path, run_id="truncated", fixed=False).request)
-    assert not prep.lifecycles_by_account.get("lx", {}).get("envelope")
+    with pytest.raises(ValueError, match="render_unavailable"):
+        flow._prepare_daily_brief_notification(_request(tmp_path, run_id="truncated", fixed=False).request)
     state = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")
     day = state["state"]["days"][MARKET_DATE]
     assert not day["alerted_candidates"]
@@ -446,10 +446,13 @@ def test_final_combo_metadata_uses_shared_budget_after_roll_removal(
     monkeypatch.setattr(flow, "assemble_daily_decision_briefs", assemble)
     monkeypatch.setattr(flow, "utc_now", lambda: datetime(2026, 7, 21, 14, 0, 30, tzinfo=timezone.utc))
     if remove_rolls == "transport":
-        # Model the existing transport loop dropping rolls and freeing their card slots.
-        monkeypatch.setattr(flow, "_daily_brief_transport_roll_identities", lambda brief, identities, **kw: [
-            identity for identity in identities if identity not in daily_brief_roll_notification_identities(brief)
-        ])
+        actual_fits = flow.feishu_notification_blocks_fit
+        def without_roll_details(blocks, text, **kwargs):
+            return actual_fits(blocks, text, **kwargs) and not any(
+                any(identity.startswith("position-roll:") for identity in getattr(block, "identities", ()))
+                for block in blocks
+            )
+        monkeypatch.setattr(flow, "feishu_notification_blocks_fit", without_roll_details)
     monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_fixture")
     monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "fixture-app")
     config = _feishu_config()
@@ -470,20 +473,38 @@ def test_final_combo_metadata_uses_shared_budget_after_roll_removal(
         child = read_daily_brief_fanout_children(
             base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE,
         )[0]
-        render_context = child["spec"]["metadata"]["render_context"]
+        metadata = child["spec"]["metadata"]
         message = child["spec"]["message"]
     else:
         envelope = preparation.lifecycles_by_account["lx"]["envelope"]
-        render_context = envelope["render_context"]
+        metadata = envelope
         message = envelope["rendered_message"]
+    render_context = metadata["render_context"]
+    states = {item["identity"]: item["state"] for item in metadata["display_evidence"]}
+    original_view = renderer.build_daily_brief_user_view(captured[0],
+        limits=config["notifications"]["daily_brief"], context=render_context)
     expected = {
-        item["identity"] for item in captured[0]["candidate_index"] if item["strategy_family"] == "combo_yield"
+        item["identity"] for item in captured[0]["candidate_index"]
+        if item["strategy_family"] == "combo_yield" and any(
+            row["symbol"] == item["symbol"] and row["family"] == "combo_yield"
+            for row in original_view["candidates"])
     }
-    assert len(expected) == 3
+    assert len([item for item in captured[0]["candidate_index"]
+                if item["strategy_family"] == "combo_yield"]) == 3
+    assert len(expected) == (3 if remove_rolls == "expired" else 0)
     assert set(render_context["rendered_combo_candidate_identities"]) == expected
-    assert len(render_context["candidate_occurrence_ids"]) == 3
-    assert len(render_context["candidate_exposure_ids"]) == 3
-    assert all(symbol in message for symbol in ("COMBO0", "COMBO1", "COMBO2"))
+    assert len(render_context["candidate_occurrence_ids"]) == len(expected)
+    assert len(render_context["candidate_exposure_ids"]) == len(expected)
+    expanded = {identity for identity in expected if states[identity] == "expanded"}
+    actual_expanded = {
+        item["identity"] for item in captured[0]["candidate_index"]
+        if item["strategy_family"] == "combo_yield" and states[item["identity"]] == "expanded"
+    }
+    assert expanded == actual_expanded
+    assert all((item["symbol"] in message) == (item["identity"] in expanded)
+               for item in captured[0]["candidate_index"] if item["strategy_family"] == "combo_yield")
+    assert not any(state == "expanded" for identity, state in states.items()
+                   if identity.startswith("position-roll:"))
 
 
 @pytest.mark.parametrize("explicit_routes", [False, True])
@@ -513,6 +534,7 @@ def test_final_card_and_fallback_ack_only_the_same_visible_rolls(
                 config={"notifications": kw["notifications"]}, base=tmp_path)}
 
     monkeypatch.setattr(flow, "assemble_daily_decision_briefs", assemble)
+    monkeypatch.setattr(renderer, "_MAX_MESSAGE_CHARS", 2_000)
     monkeypatch.setattr(flow, "utc_now", lambda: datetime(2026, 7, 21, 14, 0, 30, tzinfo=timezone.utc))
     monkeypatch.setattr(plugins, "channel_plugin_installed", lambda _provider: True)
     monkeypatch.setattr(flow, "select_notification_delivery_adapter", lambda _provider: SimpleNamespace(
@@ -532,7 +554,8 @@ def test_final_card_and_fallback_ack_only_the_same_visible_rolls(
             market_trading_date=MARKET_DATE)[0]
         assert child["delivery_confirmed"] is True
         envelope = child["spec"]["transport_envelope"]
-        acknowledged = set(child["spec"]["metadata"]["candidate_identities"]) & all_rolls
+        acknowledged = {row["identity"] for row in child["spec"]["metadata"]["display_evidence"]
+                        if row["state"] == "expanded"} & all_rolls
     else:
         day = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")["state"]["days"][MARKET_DATE]
         envelope = next(iter(day["fixed_reports"].values()))["rendered_transport"]
@@ -547,11 +570,14 @@ def test_final_card_and_fallback_ack_only_the_same_visible_rolls(
     assert 0 < len(acknowledged) < len(all_rolls)
     assert acknowledged == primary_rolls == fallback_rolls
 
+    # A larger later budget can deliver the previously omitted actions.
+    monkeypatch.setattr(renderer, "_MAX_MESSAGE_CHARS", 12_000)
     assert flow.run_tick_notification_flow(_request(tmp_path, run_id="followup", fixed=False, config=config).request) == 0
     if explicit_routes:
         children = read_daily_brief_fanout_children(base=tmp_path, account="lx", market="US", market_trading_date=MARKET_DATE)
         assert len(children) == 2 and all(child["delivery_confirmed"] for child in children)
-        delivered = [set(child["spec"]["metadata"]["candidate_identities"]) & all_rolls for child in children]
+        delivered = [{row["identity"] for row in child["spec"]["metadata"]["display_evidence"]
+                      if row["state"] == "expanded"} & all_rolls for child in children]
         assert delivered[0].isdisjoint(delivered[1])
         assert set.union(*delivered) == all_rolls
     else:

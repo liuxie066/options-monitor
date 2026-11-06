@@ -96,8 +96,8 @@ def test_continued_failure_no_send_and_manual_do_not_create_recovery(recovery, t
 
 def test_render_crash_rebuilds_bound_revision_without_scan(recovery, monkeypatch, tmp_path):
     clock, _, calls, _ = recovery
-    renderer = mod.render_fixed_report_text
-    monkeypatch.setattr(mod, "render_fixed_report_text", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("render crash")))
+    renderer = mod.select_daily_brief_notification
+    monkeypatch.setattr(mod, "select_daily_brief_notification", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("render crash")))
     restored = _request(tmp_path, run_id="bound", fixed=False)
     with pytest.raises(RuntimeError, match="render crash"):
         mod.run_tick_notification_flow(restored.request)
@@ -107,7 +107,7 @@ def test_render_crash_rebuilds_bound_revision_without_scan(recovery, monkeypatch
     newer = {**_brief(base=tmp_path, run_id="newer", candidate=False), "generated_at_utc": clock["now"]}
     persisted = repo.persist_daily_decision_brief_success(base=tmp_path, brief=newer)
     assert persisted["current_revision"] > bound["revision"]
-    monkeypatch.setattr(mod, "render_fixed_report_text", renderer)
+    monkeypatch.setattr(mod, "select_daily_brief_notification", renderer)
     forbidden = []
 
     def forbid(**kwargs):
@@ -124,14 +124,14 @@ def test_render_crash_rebuilds_bound_revision_without_scan(recovery, monkeypatch
 @pytest.mark.parametrize("render_crash", [True, False])
 def test_next_fixed_report_replaces_expired_recovery(recovery, monkeypatch, tmp_path, render_crash):
     clock, _, calls, _ = recovery
-    renderer = mod.render_fixed_report_text
+    renderer = mod.select_daily_brief_notification
     if render_crash:
         monkeypatch.setattr(
-            mod, "render_fixed_report_text", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("render crash"))
+            mod, "select_daily_brief_notification", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("render crash"))
         )
         with pytest.raises(RuntimeError):
             mod.run_tick_notification_flow(_request(tmp_path, run_id="bind", fixed=False).request)
-        monkeypatch.setattr(mod, "render_fixed_report_text", renderer)
+        monkeypatch.setattr(mod, "select_daily_brief_notification", renderer)
     else:
         _patch_sender(
             monkeypatch,
@@ -207,11 +207,11 @@ def test_cutoff_is_rechecked_immediately_before_provider(recovery, monkeypatch, 
 
 def test_expired_unrendered_binding_cannot_resurrect_as_candidate_delivery(recovery, monkeypatch, tmp_path):
     clock, _, calls, _ = recovery
-    renderer = mod.render_fixed_report_text
-    monkeypatch.setattr(mod, "render_fixed_report_text", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("render crash")))
+    renderer = mod.select_daily_brief_notification
+    monkeypatch.setattr(mod, "select_daily_brief_notification", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("render crash")))
     with pytest.raises(RuntimeError):
         mod.run_tick_notification_flow(_request(tmp_path, run_id="unrendered", fixed=False).request)
-    monkeypatch.setattr(mod, "render_fixed_report_text", renderer)
+    monkeypatch.setattr(mod, "select_daily_brief_notification", renderer)
     clock["now"] = "2026-07-21T15:00:00+00:00"
     mod.run_tick_notification_flow(_request(tmp_path, run_id="late-delivery-only", delivery_only=True).request)
     assert len(calls) == 1
