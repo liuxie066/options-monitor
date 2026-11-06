@@ -453,16 +453,15 @@ def select_rendered_position_roll_identities(
     rows = _position_views(source, diff=dict(diff or {}), limits=resolve_daily_brief_render_limits(limits),
                            now_utc=_parse_datetime(now_utc) if now_utc is not None else None)[0]
     shown: set[str] = set()
-    occurrences: dict[tuple[str, ...], int] = {}
+    occurrences: dict[str, int] = {}
     for row in rows:
         if not row.get("roll_identity"):
             continue
-        details = tuple(str(detail) for detail in row.get("details") or [])
+        # 必须是同一张卡片连续完整的明细，不能借用另一组相同的金额或报价。
+        details = "\n".join(str(detail) for detail in row.get("details") or [])
         occurrences[details] = occurrences.get(details, 0) + 1
-        if rendered_message is None or all(
-            rendered_message.count(detail) >= occurrences[details] for detail in details
-        ):
-            shown.add(row["roll_identity"])
+        if rendered_message is None or rendered_message.count(details) >= occurrences[details]:
+            shown.update(row["roll_identities"])
     return shown
 
 
@@ -1753,18 +1752,37 @@ def _position_views(
     # 无行动指向的持仓（继续观察、无法评估）不逐条展示；
     # 总持仓数和需处理数在汇总中分开呈现，避免把非行动项误说成“折叠”。
     positions = [row for row in positions if _position_has_advice(row)]
-    actionable_total = len(positions)
-    review_total = sum(1 for row in positions if _is_position_fact_review(row))
+    # 名额按展示动作计算；同一旧合约的多个 lot 只在渲染时合并。
+    groups: list[list[dict[str, Any]]] = []
+    roll_groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for row in positions:
+        roll = daily_brief_position_roll(row)
+        if roll is None:
+            groups.append([row])
+            continue
+        key = (roll[0], _upper(row.get("symbol")), row.get("expiration"),
+               _decimal(row.get("strike")), roll[1]["contract"])
+        if key not in roll_groups:
+            roll_groups[key] = []
+            groups.append(roll_groups[key])
+        roll_groups[key].append(row)
+    actionable_total = len(groups)
+    review_total = sum(1 for group in groups if _is_position_fact_review(group[0]))
     changed_keys = _changed_position_keys(diff)
-    changed_positions = [row for row in positions if _position_row_keys(row) & changed_keys]
-    unchanged_positions = [row for row in positions if row not in changed_positions]
+    changed_groups, unchanged_groups = [], []
+    for group in groups:
+        destination = changed_groups if any(
+            _position_row_keys(row) & changed_keys for row in group
+        ) else unchanged_groups
+        destination.append(group)
     selected = _RenderBudget().take(
-        [*changed_positions, *unchanged_positions],
-        max(limits["max_actions_per_priority"], len(changed_positions)),
+        [*changed_groups, *unchanged_groups],
+        max(limits["max_actions_per_priority"], len(changed_groups)),
     )
     market = _upper(brief.get("market"))
     out: list[dict[str, Any]] = []
-    for row in selected:
+    for group in selected:
+        row = group[0]
         symbol = _upper(row.get("symbol")) or "未知标的"
         strategy = _position_strategy_label(row)
         contract = _position_contract_label(row, market=market)
@@ -1779,6 +1797,39 @@ def _position_views(
             if _is_position_fact_review(row)
             else "advice"
         )
+        roll = daily_brief_position_roll(row)
+        roll_fields: dict[str, Any] = {}
+        if roll is not None:
+            targets = [member["roll_advice"]["candidates"][0] for member in group]
+            contracts = sum(
+                _whole_number(target.get("contracts", member["roll_advice"]["position"].get("contracts_open"))) or 0
+                for member, target in zip(group, targets)
+            )
+            net_credit = sum((Decimal(str(target["net_credit"])) for target in targets), Decimal(0))
+            identities = [
+                daily_brief_position_roll_identity(member, account=brief.get("account"), market=brief.get("market"))
+                for member in group
+            ]
+            roll_fields = {
+                "lot_count": len(group), "contracts": contracts, "net_credit": float(net_credit),
+                "roll_identities": identities,
+            }
+            details = _position_roll_details(
+                row, market=market, selected=roll, lot_count=len(group),
+                contracts=contracts, net_credit=net_credit,
+            )
+            close_members = [member for member in group if _lower(member.get("recommendation_state")) == "close"]
+            if close_members:
+                status = _position_status_label(close_members[0])
+                for index, member in enumerate(group, start=1):
+                    if _lower(member.get("recommendation_state")) != "close":
+                        continue
+                    close_row = {key: value for key, value in member.items() if key != "roll_advice"}
+                    close_details = _position_close_details(close_row, market=market, status="建议平仓")
+                    prefix = f"第 {index} 笔建议平仓：" if len(group) > 1 else ""
+                    details.extend(prefix + detail for detail in close_details)
+        else:
+            details = _position_close_details(row, market=market, status=status)
         out.append(
             {
                 "title": " · ".join(title_parts),
@@ -1787,9 +1838,10 @@ def _position_views(
                 "display_kind": display_kind,
                 "roll_identity": daily_brief_position_roll_identity(
                     row, account=brief.get("account"), market=brief.get("market")),
-                "is_roll": daily_brief_position_roll(row) is not None,
+                "is_roll": roll is not None,
                 "recommendation": _lower(row.get("recommendation")),
-                "details": _position_close_details(row, market=market, status=status),
+                "details": details,
+                **roll_fields,
                 **_position_card_fields(row, market=market, status=status),
             }
         )
@@ -1905,6 +1957,7 @@ def _position_summary(
 
 def _position_roll_details(
     row: Mapping[str, Any], *, market: str, selected: tuple[str, Mapping[str, Any]],
+    lot_count: int = 1, contracts: int = 0, net_credit: Decimal | None = None,
 ) -> list[str]:
     direction, target = selected
     result = row["roll_advice"]
@@ -1931,9 +1984,14 @@ def _position_roll_details(
         delta = new_strike - old_strike
         pct = _number(target.get("strike_increase_pct")) if direction == "roll_up" else None
         details.append(f"行权价变化：{currency} {delta:+g}" + (f"（{pct:+.2%}）" if pct is not None else ""))
-    credit = _number(target.get("net_credit"))
-    if credit is not None:
-        details.append(f"移仓净收取：{currency} {credit:.2f}")
+    if lot_count > 1 and net_credit is not None:
+        details.append(
+            f"共 {lot_count} 笔 · 合计净收取 {currency} {net_credit:,.2f} · 合计 {contracts} 手"
+        )
+    else:
+        credit = _number(target.get("net_credit"))
+        if credit is not None:
+            details.append(f"移仓净收取：{currency} {credit:.2f}")
     period = _number(target.get("incremental_period_return"))
     annualized = _number(target.get("incremental_annualized_return"))
     if period is not None or annualized is not None:

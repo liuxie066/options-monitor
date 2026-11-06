@@ -171,7 +171,8 @@ def test_roll_notifications_omit_explanations_and_preserve_values(
 
     lines = message.splitlines()
     assert "平仓 ask USD 1.81234；开仓 bid USD 2.11234" in lines
-    assert "移仓净收取：USD 24.37" in lines
+    assert "共 2 笔 · 合计净收取 USD 48.75 · 合计 2 手" in lines
+    assert message.count("旧仓买回") == 1
     assert "24.3734" not in message
     assert "增量期收益率 0.3%；增量年化 3.9%" in lines
     assert not any(line.startswith("参考｜") for line in lines)
@@ -293,8 +294,28 @@ def test_roll_retry_reuses_exact_payload_and_does_not_ack_failed_send(monkeypatc
     assert retries[0]["idempotency_key"] == calls[0]["idempotency_key"]
 
 
+def test_grouped_roll_alert_acknowledges_all_lots_and_does_not_repeat(monkeypatch, tmp_path: Path) -> None:
+    rows = [position_row(lot=f"grouped-{index}") for index in range(3)]
+    patch_roll_assembler(monkeypatch, rows=rows)
+    calls = []
+    _patch_sender(monkeypatch, calls=calls)
+    assert flow.run_tick_notification_flow(_request(tmp_path, run_id="grouped", fixed=False).request) == 0
+    state = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")["state"]["days"][MARKET_DATE]
+    assert set(state["alerted_candidates"]) == daily_brief_roll_notification_identities(
+        roll_brief(base=tmp_path, rows=rows))
+    assert not state["pending_candidates"]
+    assert len(calls) == 1
+    assert calls[0]["message"].count("旧仓买回") == 1
+    assert "共 3 笔 · 合计净收取 USD 285.00 · 合计 3 手" in calls[0]["message"]
+    assert flow.run_tick_notification_flow(_request(tmp_path, run_id="grouped-again", fixed=False).request) == 0
+    assert len(calls) == 1
+
+
 def test_display_budget_acknowledges_only_shown_roll_positions(monkeypatch, tmp_path: Path) -> None:
     rows = [position_row(lot=f"lot-{n}") for n in range(7)]
+    for index, row in enumerate(rows):
+        # Distinct actions still consume distinct slots after lot grouping.
+        row["roll_advice"]["candidates"][0]["contract"] = f"ROLL_TARGET_{index}"
     patch_roll_assembler(monkeypatch, rows=rows)
     calls = []
     _patch_sender(monkeypatch, calls=calls)
@@ -323,8 +344,10 @@ def _many_candidate_roll_brief(*, base, run_id, account="lx") -> dict:
     from domain.domain.daily_decision_brief import build_daily_brief_candidate_identity
     from test_daily_decision_brief_renderer import _candidate
 
-    brief = roll_brief(base=base, run_id=run_id, account=account,
-        rows=[position_row(lot=f"lot-{i}") for i in range(20)])
+    rows = [position_row(lot=f"lot-{i}") for i in range(20)]
+    for i, row in enumerate(rows):
+        row["roll_advice"]["candidates"][0]["contract"] = f"ROLL_TARGET_{i}"
+    brief = roll_brief(base=base, run_id=run_id, account=account, rows=rows)
     index = []
     for family, option_type in (("sell_put", "put"), ("covered_call", "call")):
         candidates = []
