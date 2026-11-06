@@ -61,6 +61,7 @@ def _roll_row(
                 "strike": 95 if option_type == "put" else 105,
                 "contracts": contracts,
                 "net_credit": credit,
+                "per_contract": {"net_credit": credit / contracts},
                 "recommendation": "credit_roll",
                 "cash_flow_type": "credit",
                 "evidence": {"old_ask": 1, "new_bid": 2},
@@ -102,10 +103,63 @@ def test_same_roll_groups_lots_sizes_and_unrounded_credit_without_mutating_brief
     assert card["lot_count"] == 3
     assert card["contracts"] == 6
     assert card["net_credit"] == pytest.approx(300.375)
-    assert "共 3 笔 · 合计净收取 USD 300.38 · 合计 6 手" in card["details"]
+    assert "合计 6 手" in card["details"]
+    assert "每手净收取：USD 50.06" in card["details"]
+    assert all("共 3 笔" not in detail and "合计净收取" not in detail for detail in card["details"])
     assert view["position_total"] == 3
     assert view["position_actionable_total"] == 1
     assert brief == original
+
+
+@pytest.mark.parametrize("option_type", ["put", "call"])
+def test_roll_group_displays_total_contracts_with_one_contract_returns(option_type: str) -> None:
+    rows = [
+        _roll_row("first", option_type=option_type, contracts=2, credit=1008.204),
+        _roll_row("second", option_type=option_type, credit=487),
+        _roll_row("third", option_type=option_type, credit=487),
+    ]
+    for row in rows:
+        row["roll_advice"]["position"]["currency"] = "HKD"
+        row["roll_advice"]["candidates"][0].update(
+            incremental_period_return=0.01292569,
+            incremental_annualized_return=0.05684190,
+            per_contract={"net_credit": 487, "incremental_period_return": 487 / 39000,
+                "incremental_annualized_return": 487 / 39000 * 365 / 83},
+        )
+    brief = _brief(rows)
+    original = deepcopy(brief)
+
+    identities = daily_brief_roll_notification_identities(brief)
+    for render in (render_fixed_report_text, render_fixed_report_card_markdown,
+                   render_candidate_alert_text, render_candidate_alert_card_markdown):
+        candidate_alert = render in (render_candidate_alert_text, render_candidate_alert_card_markdown)
+        message = render(brief, identities) if candidate_alert else render(brief)
+        assert message.count("旧仓买回") == 1
+        assert "合计 4 手" in message
+        assert "每手净收取：HKD 487.00" in message
+        assert "增量期收益率 1.2%；增量年化 5.5%" in message
+        assert "共 3 笔" not in message
+        assert "合计净收取" not in message
+        assert "1008.20" not in message and "1,982.20" not in message
+        assert select_rendered_position_roll_identities(
+            brief, delivery_kind="candidate_alert" if candidate_alert else "fixed_report",
+            candidate_identities=identities, rendered_message=message,
+        ) == identities
+    assert brief == original
+
+
+def test_old_multi_contract_roll_does_not_mislabel_total_as_per_contract_cash() -> None:
+    row = _roll_row("legacy", contracts=2, credit=1008.204)
+    target = row["roll_advice"]["candidates"][0]
+    target.pop("per_contract")
+    target.update(incremental_period_return=0.01292569, incremental_annualized_return=0.05684190)
+
+    for render in (render_fixed_report_text, render_fixed_report_card_markdown):
+        message = render(_brief([row]))
+        assert "合计 2 手" in message
+        assert "每手净收取：暂无法评估" in message
+        assert "1008.20" not in message and "504.10" not in message
+        assert "增量期收益率" not in message and "增量年化" not in message
 
 
 @pytest.mark.parametrize("changed", [
@@ -337,8 +391,10 @@ def test_historical_hk_briefs_render_three_distinct_roll_actions(account: str, e
         old_positions.add((symbol, expiration, strike))
     if account == "lx":
         assert len(target_old_positions) == 3
-        assert "共 3 笔 · 合计净收取 HKD 1,926.00 · 合计 3 手" in cards[1]["details"]
-        assert "共 2 笔 · 合计净收取 HKD 952.71 · 合计 2 手" in cards[2]["details"]
+        assert "合计 3 手" in cards[1]["details"]
+        assert "每手净收取：HKD 642.00" in cards[1]["details"]
+        assert "合计 2 手" in cards[2]["details"]
+        assert "每手净收取：HKD 476.35" in cards[2]["details"]
     else:
         assert target_old_positions["HK.POP270128P137500"] == {
             ("9992.HK", "2026-11-27", 140), ("9992.HK", "2026-12-30", 140),

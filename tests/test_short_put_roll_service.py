@@ -127,6 +127,59 @@ def test_found_uses_actual_lot_qty_and_bid_ask_without_opening_policy(tmp_path, 
     assert result["scope"]["max_new_expiration"] == NEW_EXPIRY
 
 
+@pytest.mark.parametrize("contracts", [1, 2, 10])
+def test_hk_roll_publishes_one_contract_returns_independent_of_lot_size(tmp_path, setup_service, monkeypatch, contracts):
+    provider, rows, cfg = setup_service
+    fields = rows[0]["fields"]
+    fields["contract_key"].update(underlying_symbol="0700.HK", strike="400")
+    fields.update(currency="HKD", contracts_open=contracts, contracts_opened=contracts)
+    provider.spot = 395
+    provider.rows = [quote(400, OLD_EXPIRY, bid=6.6, ask=6.7), quote(390, NEW_EXPIRY, bid=11.99, ask=12)]
+    owner = f"HK.{700:05d}"
+    for row in provider.rows:
+        row.update(symbol="0700.HK", market="HK", currency="HKD", stock_owner=owner,
+            contract_symbol=f"HK.TCH{row['expiration'].replace('-', '')[2:]}P{int(row['strike'] * 1000)}")
+    monkeypatch.setattr(provider, "get_underlier_observation", lambda *_args, **_kwargs:
+        normalize_underlier_observation(code=owner, market="HK",
+            snapshot_row={"code": owner, "last_price": 395,
+                "update_time": "2026-11-04 22:59:56", "sec_status": "NORMAL", "suspension": False},
+            market_state_row={"code": owner, "market_state": "MORNING"}, now_utc=NOW))
+
+    result = service.short_put_roll_candidates(
+        {"account": "sample", "lot_id": "old", "max_new_expiration": NEW_EXPIRY},
+        config=cfg, config_path=tmp_path / "config.hk.json", base_dir=Path(__file__).resolve().parents[1],
+        runtime_root=tmp_path, now_utc=NOW,
+    )
+
+    assert result["outcome"] == "found"
+    target, = result["candidates"]
+    assert target["contracts"] == contracts
+    per_contract = target["per_contract"]
+    assert per_contract["net_credit"] == pytest.approx(487)
+    assert per_contract["old_buy_fee"]["amount"] == pytest.approx(21)
+    assert per_contract["new_sell_fee"]["amount"] == pytest.approx(21)
+    assert per_contract["incremental_period_return"] == pytest.approx(487 / 39000)
+    assert per_contract["incremental_annualized_return"] == pytest.approx(487 / 39000 * 365 / 40)
+    if contracts == 2:
+        assert target["net_credit"] == pytest.approx(1008.204)
+        assert per_contract["net_credit"] != pytest.approx(target["net_credit"] / contracts)
+    assert provider.open_calls == 1 and len(provider.requests) == 1
+
+
+def test_one_contract_display_economics_do_not_change_actual_lot_eligibility(tmp_path, setup_service):
+    provider, rows, _ = setup_service
+    rows[0]["fields"].update(contracts_open=10, contracts_opened=10)
+    provider.rows[1].update(bid=5.04, ask=5.05)
+
+    result = run(tmp_path, setup_service)
+
+    assert result["outcome"] == "found"
+    target, = result["candidates"]
+    assert target["net_credit"] > 0
+    assert target["per_contract"]["net_credit"] < 0
+    assert target["per_contract"]["incremental_period_return"] < 0
+
+
 @pytest.mark.parametrize("strike,expected", [(95, "found"), (94.999, "not_applicable")])
 def test_old_five_percent_boundary_skips_chain_outside(tmp_path, setup_service, strike, expected):
     provider, rows, _ = setup_service

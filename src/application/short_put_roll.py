@@ -242,11 +242,24 @@ def _evaluate_bundle(*, result: dict[str, Any], position: dict[str, Any], bundle
             candidate = {**row, "contracts": qty}
             economics = dict(old_quote=old, spot=spot, old_dte=old_dte, new_dte=(expiry - today).days,
                 old_buy_fee=old_fee.amount, new_sell_fee=new_fee.amount)
+            evaluate = policy.evaluate_covered_call_roll if covered_call else policy.evaluate_short_put_roll
             if covered_call:
-                decision = policy.evaluate_covered_call_roll(position, candidate,
-                    covered_shares=contract_share_quantity(qty, position["multiplier"]), **economics)
-            else:
-                decision = policy.evaluate_short_put_roll(position, candidate, **economics)
+                economics["covered_shares"] = contract_share_quantity(qty, position["multiplier"])
+            decision = evaluate(position, candidate, **economics)
+            per_contract_decision = decision
+            per_contract_old_fee, per_contract_new_fee = old_fee, new_fee
+            if qty != 1 and decision.get("metrics"):
+                # Minimum commissions and per-order fees do not scale with lot size.
+                per_contract_old_fee = estimate_futu_option_buy_fee(
+                    position["currency"], old["ask"], contracts=1, multiplier=position["multiplier"])
+                per_contract_new_fee = estimate_futu_option_sell_fee(
+                    position["currency"], row["bid"], contracts=1, multiplier=position["multiplier"])
+                per_contract_economics = {**economics, "old_buy_fee": per_contract_old_fee.amount,
+                    "new_sell_fee": per_contract_new_fee.amount}
+                if covered_call:
+                    per_contract_economics["covered_shares"] = position["multiplier"]
+                per_contract_decision = evaluate({**position, "contracts_open": 1}, {**candidate, "contracts": 1},
+                    **per_contract_economics)
         except CandidateCalculationError as exc:
             if exc.reason in {"contract_ineligible", "option_non_standard", "option_type_mismatch"}:
                 rejects[exc.reason] += 1
@@ -261,9 +274,13 @@ def _evaluate_bundle(*, result: dict[str, Any], position: dict[str, Any], bundle
             rejects.update(decision["reason_codes"])
             continue
         metrics = decision["metrics"]
+        per_contract = {key: per_contract_decision["metrics"][key] for key in (
+            "net_credit", "incremental_period_return", "incremental_annualized_return")}
+        per_contract.update(old_buy_fee=per_contract_old_fee.to_dict(), new_sell_fee=per_contract_new_fee.to_dict())
         conclusion = {key: decision[key] for key in ("recommendation", "cash_flow_type")} if covered_call else {}
         matched.append({"contract": row["contract_symbol"], "expiration": row["expiration"], "strike": strike,
-            **metrics, **conclusion, "old_buy_fee": old_fee.to_dict(), "new_sell_fee": new_fee.to_dict(),
+            **metrics, **conclusion, "per_contract": per_contract,
+            "old_buy_fee": old_fee.to_dict(), "new_sell_fee": new_fee.to_dict(),
             "evidence": {"old_ask": old["ask"], "new_bid": row["bid"], "new_ask": row["ask"],
                 "old_snapshot_received_at_utc": old.get("snapshot_received_at_utc"),
                 "old_spot_observed_at_utc": old.get("spot_observed_at_utc"),

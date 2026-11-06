@@ -171,7 +171,9 @@ def test_roll_notifications_omit_explanations_and_preserve_values(
 
     lines = message.splitlines()
     assert "平仓 ask USD 1.81234；开仓 bid USD 2.11234" in lines
-    assert "共 2 笔 · 合计净收取 USD 48.75 · 合计 2 手" in lines
+    assert "合计 2 手" in lines
+    assert "每手净收取：USD 24.37" in lines
+    assert "共 2 笔" not in message and "合计净收取" not in message
     assert message.count("旧仓买回") == 1
     assert "24.3734" not in message
     assert "增量期收益率 0.3%；增量年化 3.9%" in lines
@@ -197,7 +199,7 @@ def test_roll_optional_contract_code_and_total_precision(tmp_path: Path, old_cod
     else:
         assert "Put（" not in old_leg
     assert f"（{row['roll_advice']['candidates'][0]['contract']}）" in contract_line
-    assert f"移仓净收取：{currency} 1234.57" in message
+    assert f"每手净收取：{currency} 1234.57" in message
     assert f"平仓 ask {currency} 1；开仓 bid {currency} 2" in message
     _assert_roll_explanations_absent(message)
 
@@ -306,7 +308,9 @@ def test_grouped_roll_alert_acknowledges_all_lots_and_does_not_repeat(monkeypatc
     assert not state["pending_candidates"]
     assert len(calls) == 1
     assert calls[0]["message"].count("旧仓买回") == 1
-    assert "共 3 笔 · 合计净收取 USD 285.00 · 合计 3 手" in calls[0]["message"]
+    assert "合计 3 手" in calls[0]["message"]
+    assert "每手净收取：USD 95.00" in calls[0]["message"]
+    assert "共 3 笔" not in calls[0]["message"] and "合计净收取" not in calls[0]["message"]
     assert flow.run_tick_notification_flow(_request(tmp_path, run_id="grouped-again", fixed=False).request) == 0
     assert len(calls) == 1
 
