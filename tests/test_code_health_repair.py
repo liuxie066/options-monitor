@@ -877,6 +877,8 @@ def repair_delivery(tmp_path, monkeypatch):
     branch = f"codex/health-fix-{task['id']}"
     subprocess.run(["git", "--git-dir", str(root / "repository.git"), "worktree", "add", "-q", "-b", branch,
                     str(tree), task["base_sha"]], check=True)
+    git(tree, "config", "user.name", "Test")
+    git(tree, "config", "user.email", "test@example.invalid")
     (tree / "src/example.py").write_text("def add(a, b):\n    return a + b\n")
     (tree / "tests").mkdir()
     (tree / "tests/test_example.py").write_text("from src.example import add\ndef test_add():\n    assert add(2, 1) == 3\n")
