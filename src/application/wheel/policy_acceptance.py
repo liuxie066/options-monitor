@@ -439,6 +439,10 @@ def accept_wheel_policy(
                 }
             account_results.append(outcome)
         result["accounts"] = account_results
+        # Preserve write effects before the final readback can fail.
+        result["write_applied"] = _activation_any_effect(
+            [result["snapshot"]["written"], *[item.get("write_applied") for item in account_results]]
+        )
 
         phase = "readback"
         _, refreshed = load_runtime_config(config_path=runtime_path, expected_market=market)
@@ -447,9 +451,6 @@ def accept_wheel_policy(
             sqlite_path=sqlite_path,
         )
         result["readiness_after"] = readiness_after
-        result["write_applied"] = _activation_any_effect(
-            [result["snapshot"]["written"], *[item.get("write_applied") for item in account_results]]
-        )
         failed = any(item["status"] == "failed" for item in account_results)
         if failed or refusals:
             result["status"] = "partial"

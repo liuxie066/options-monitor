@@ -337,6 +337,122 @@ def test_accept_policy_leaves_one_binding_after_a_committed_readback_failure(tmp
     assert len(_read(root)["policy_bindings"]) == 1
 
 
+@pytest.mark.parametrize("fail_readback", [False, True], ids=["healthy", "final-readback-failure"])
+def test_accept_policy_cli_reports_committed_binding_with_fresh_snapshot(
+    tmp_path, monkeypatch, capsys, fail_readback
+):
+    from src.application.wheel import policy_acceptance as operation
+    from src.interfaces.cli.main import main
+
+    root = _deployment(tmp_path, monkeypatch)
+    _activation(root, "us", "lx")
+    _change(root)
+    runtime = root / "config.us.json"
+    snapshot = runtime.read_bytes()
+
+    def cli(*extra):
+        code = main([
+            "wheel", "activation", "accept-policy", "--market", "us", "--actor", "test",
+            "--config", str(runtime), "--runtime-root", str(root), "--format", "json", *extra,
+        ])
+        return code, json.loads(capsys.readouterr().out)
+
+    code, plan = cli()
+    assert code == 0 and plan["status"] == "planned"
+    assert plan["plan"]["snapshot_stale"] is False
+    assert _read(root)["policy_bindings"] == []
+    faults = []
+
+    def fail_final_readback(**kwargs):
+        faults.append(kwargs["accounts"])
+        assert len(_read(root)["policy_bindings"]) == 1
+        raise OSError("final market readiness interrupted")
+
+    with monkeypatch.context() as patch:
+        if fail_readback:
+            patch.setattr(operation, "build_wheel_activation_readiness", fail_final_readback)
+        code, payload = cli("--apply", "--confirm", "--expected-plan-hash", plan["plan_hash"])
+
+    if fail_readback:
+        assert code == 2
+        assert payload["error"]["code"] == "WHEEL_ACCEPT_POLICY_FAILED"
+        assert payload["error"]["message"] == "final market readiness interrupted"
+        result = payload["error"]["details"]
+        assert result["status"] == "incomplete" and result["failure_phase"] == "readback"
+        assert result["readiness_after"] is None
+        assert faults == [["lx"]]
+    else:
+        assert code == 0 and payload["status"] == "applied"
+        result = payload
+        assert result["readiness_after"]["monitoring_gate"] == "enabled"
+        assert faults == []
+    assert result["snapshot"]["written"] is False
+    assert len(result["accounts"]) == 1
+    account = result["accounts"][0]
+    assert account["account"] == "lx" and account["status"] == "applied"
+    assert account["write_applied"] is True
+    stored = _read(root)["policy_bindings"]
+    assert len(stored) == 1
+    assert account["receipt"] == stored[0]
+    assert _read(root, account="sy")["policy_bindings"] == []
+    assert runtime.read_bytes() == snapshot
+
+    for flags in ((), ("--apply", "--confirm")):
+        retry_code, retry = cli(*flags)
+        assert retry_code == 0 and retry["status"] == "no_drift"
+        assert retry["write_applied"] is False
+        assert _read(root)["policy_bindings"] == stored
+        assert _read(root, account="sy")["policy_bindings"] == []
+        assert runtime.read_bytes() == snapshot
+    assert result["write_applied"] is True
+
+
+@pytest.mark.parametrize("fail_readback", [False, True], ids=["healthy", "final-readback-failure"])
+def test_accept_policy_preserves_unknown_binding_effect_with_fresh_snapshot(
+    tmp_path, monkeypatch, fail_readback
+):
+    from src.application.wheel import policy_acceptance as operation
+    from src.application.wheel import policy_binding as binding
+
+    root = _deployment(tmp_path, monkeypatch)
+    _activation(root, "us", "lx")
+    _change(root)
+    plan = _accept(root)
+    assert plan["plan"]["snapshot_stale"] is False
+    attempts = []
+    faults = []
+
+    def fail_open(*args, **kwargs):
+        attempts.append(args)
+        raise OSError("binding transaction unavailable")
+
+    def fail_final_readback(**kwargs):
+        faults.append(kwargs["accounts"])
+        raise OSError("final market readiness interrupted")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(binding, "open_wheel_activation_repository", fail_open)
+        if fail_readback:
+            patch.setattr(operation, "build_wheel_activation_readiness", fail_final_readback)
+            with pytest.raises(AgentToolError, match="final market readiness interrupted") as failure:
+                _accept(root, apply=True, plan=plan["plan_hash"])
+            assert failure.value.code == "WHEEL_ACCEPT_POLICY_FAILED"
+            result = failure.value.details
+            assert result["status"] == "incomplete" and result["failure_phase"] == "readback"
+            assert faults == [["lx"]]
+        else:
+            result = _accept(root, apply=True, plan=plan["plan_hash"])
+            assert result["status"] == "partial"
+            assert faults == []
+    assert len(attempts) == 1
+    assert result["snapshot"]["written"] is False
+    assert result["accounts"][0]["status"] == "failed"
+    assert result["accounts"][0]["error"]["code"] == "WHEEL_POLICY_BINDING_FAILED"
+    assert result["accounts"][0]["error"]["message"] == "WHEEL_POLICY_BINDING_FAILED: binding transaction unavailable"
+    assert _read(root)["policy_bindings"] == []
+    assert result["write_applied"] is None
+
+
 def test_accept_policy_reports_a_boundary_refusal_as_partial(tmp_path, monkeypatch):
     root = _deployment(tmp_path, monkeypatch)
     _activation(root, "us", "lx")
