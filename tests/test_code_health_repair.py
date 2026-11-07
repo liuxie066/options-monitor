@@ -888,6 +888,7 @@ def repair_delivery(tmp_path, monkeypatch):
     manifest = record.parent / "approved-content.json"
     task.update({"status": "awaiting_delivery_authorization", "stage": "delivery", "worktree": str(tree), "branch": branch,
                  "sources": [{"kind": "issue", "number": 7}], "baseline": baseline, "fixed_verification": fixed,
+                 "reproduction": {"selectors": ["tests/test_example.py"], "test_paths": ["tests/test_example.py"]},
                  "verified_content": files, "approved_content_manifest": str(manifest),
                  "independent_review": {"verdict": "approve", "findings": []},
                  "implementation": {"pr_body": "Fixes #999", "pr_title": "Fixes #999"}})
@@ -970,6 +971,28 @@ def test_remote_repair_delivery_defaults_to_no_commands_or_state_writes(repair_d
     assert result["prs"] == result["merged"] == result["closed"] == []
 
 
+@pytest.mark.parametrize(("delivery_config", "publishes"), [
+    ({}, True), ({"repair_delivery_enabled": True}, True), ({"repair_delivery_enabled": False}, False),
+    ({"repair_delivery_enabled": False, "_deliver_repairs": True}, True),
+])
+def test_daily_delivery_config_can_publish_but_cannot_authorize_a_merge(repair_delivery, monkeypatch, delivery_config, publishes):
+    root, config, run_dir, _, _, task, _, calls, _ = repair_delivery
+    config.update(delivery_config)
+    monkeypatch.setattr(repair, "run_repairs", lambda *args, **kwargs:
+                        {"inventory": {"ready": [task["id"]]}, "attempted": [], "local_verified": [], "manual_todo": []})
+    result = review.run_repair_phase(root, config, run_dir, root, task["base_sha"], {}, "complete", time.monotonic() + 300)
+    if publishes:
+        assert result["prs_created"][0]["number"] == 80
+        assert result["delivery"][0]["status"] == "awaiting_merge_authorization"
+        assert result["inventory"]["awaiting_merge_authorization"] == [task["id"]]
+        assert result["inventory"]["ready"] == []
+    else:
+        assert calls == [] and result["prs_created"] == []
+        assert result["inventory"]["ready"] == [task["id"]]
+    assert result["merged"] == result["closed"] == []
+    assert not any(argv[:3] == ["github-client", "pr", "merge"] or "PATCH" in argv for argv in calls)
+
+
 def test_repair_pr_publish_requires_human_head_approval_and_reuses_existing_pr(repair_delivery):
     _, _, _, record, tree, task, state, calls, deliver = repair_delivery
     first = deliver()
@@ -977,6 +1000,12 @@ def test_repair_pr_publish_requires_human_head_approval_and_reuses_existing_pr(r
     assert first["results"][0]["status"] == "awaiting_merge_authorization"
     head = git(tree, "rev-parse", "HEAD")
     assert head != task["base_sha"] and "Fixes #999" not in state["body"] and "Related issues: #7" in state["body"]
+    assert "## 复现方式" in state["body"] and "add(2, 1)" in state["body"]
+    assert "预期：3" in state["body"] and "实际：1" in state["body"]
+    assert "## 改动范围" in state["body"] and "`src/example.py`" in state["body"]
+    assert "## 验证命令与结果" in state["body"] and "-m pytest -q -p no:cacheprovider tests/test_example.py" in state["body"]
+    assert "exit=1" in state["body"] and "exit=0" in state["body"] and "独立审核：approve" in state["body"]
+    assert "本 PR 未合并，需人工确认" in state["body"]
     assert json.loads(record.read_text())["delivery"]["head"] == head
     again = deliver(approved_head=A)
     assert not again["prs"][0]["created"] and again["merged"] == again["closed"] == []
@@ -986,6 +1015,19 @@ def test_repair_pr_publish_requires_human_head_approval_and_reuses_existing_pr(r
     gates = [argv for argv in calls if argv[0].endswith("python") or argv[0] == sys.executable]
     assert any("--staged" in argv and "--check-public-surface" in argv for argv in gates)
     assert any("scripts/generate_dependency_graph.py" in argv for argv in gates)
+
+
+def test_preexisting_remote_pr_is_reused_without_another_push_or_create(repair_delivery):
+    _, _, _, _, tree, _, state, calls, deliver = repair_delivery
+    state["pr"] = True
+    first = deliver()
+    head = git(tree, "rev-parse", "HEAD")
+    again = deliver()
+    assert first["prs"][0]["number"] == again["prs"][0]["number"] == 80
+    assert not first["prs"][0]["created"] and not again["prs"][0]["created"]
+    assert git(tree, "rev-parse", "HEAD") == head
+    assert not any(argv[:3] in (["github-client", "pr", "create"], ["github-client", "pr", "merge"])
+                   or argv[:2] == ["git", "push"] for argv in calls)
 
 
 @pytest.mark.parametrize("failure", ["missing", "skipped", "pending", "failed"])
@@ -1001,6 +1043,109 @@ def test_repair_delivery_requires_all_eight_regression_shards_and_checks(repair_
     assert result["results"][0]["status"] == ("ci_failed" if failure == "failed" else "ci_pending")
     assert result["merged"] == result["closed"] == []
     assert not any(argv[:3] == ["github-client", "pr", "merge"] or "PATCH" in argv for argv in calls)
+
+
+def test_failed_ci_is_reported_and_preserved_without_reruns_or_duplicate_prs(repair_delivery, monkeypatch):
+    root, config, run_dir, record, tree, task, state, calls, deliver = repair_delivery
+    state["checks"][1]["conclusion"] = "FAILURE"
+    monkeypatch.setattr(repair, "run_repairs", lambda *args, **kwargs:
+                        {"inventory": {"ready": [task["id"]]}, "manual_todo": []})
+    result = review.run_repair_phase(root, config, run_dir, root, task["base_sha"], {}, "complete", time.monotonic() + 300)
+    review.save_daily_summary(run_dir, {"repair": result})
+    assert result["delivery"][0]["status"] == "ci_failed"
+    assert result["inventory"]["blocked"] == result["inventory"]["ci_failed"] == [task["id"]]
+    assert result["inventory"]["awaiting_merge_authorization"] == [task["id"]]
+    persisted = json.loads(record.read_text())["delivery"]
+    failure = persisted["ci_failure"]
+    assert persisted["last_result"]["status"] == "ci_failed"
+    assert failure["head"] == git(tree, "rev-parse", "HEAD") and failure["checks"] == state["checks"]
+    summary = json.loads((run_dir / "daily-summary.json").read_text())
+    assert summary["ci_failed"] == summary["blocked"] == [task["id"]]
+    assert "regression (0): FAILURE" in summary["blocked_reasons"][0]["reason"]
+    report = (run_dir / "report.md").read_text()
+    assert "新建 PR 1" in report and "PR [#80]" in report and "CI 失败 1" in report
+    assert "blocked 1" in report and "regression (0): FAILURE" in report and "核实合并修复 0" in report
+    assert deliver(approved_head=failure["head"])["results"][0]["status"] == "ci_failed"
+    state["checks"][1]["conclusion"] = "SUCCESS"
+    assert deliver()["results"][0]["status"] == "awaiting_merge_authorization"
+    assert json.loads(record.read_text())["delivery"]["ci_failure"] == failure
+    assert sum(argv[:3] == ["github-client", "pr", "create"] for argv in calls) == 1
+    assert sum(argv[:2] == ["git", "push"] for argv in calls) == 1
+    assert not any(argv[:3] in (["github-client", "pr", "merge"], ["github-client", "run", "rerun"])
+                   or "PATCH" in argv for argv in calls)
+
+
+@pytest.mark.parametrize("ci_state", ["SUCCESS", "FAILURE", "PENDING"])
+@pytest.mark.parametrize("skip", ["budget", "disabled"])
+def test_saved_pr_and_ci_are_reported_when_delivery_is_skipped(repair_delivery, monkeypatch, ci_state, skip):
+    root, config, _, record, tree, task, state, calls, deliver = repair_delivery
+    if ci_state == "PENDING":
+        state["checks"][1].update({"status": "IN_PROGRESS", "conclusion": None})
+    else:
+        state["checks"][1]["conclusion"] = ci_state
+    first = deliver()
+    expected = {"SUCCESS": "awaiting_merge_authorization", "FAILURE": "ci_failed", "PENDING": "ci_pending"}[ci_state]
+    assert first["results"][0]["status"] == expected
+    before, head = record.read_bytes(), git(tree, "rev-parse", "HEAD")
+    calls.clear()
+    config["repair_delivery_enabled"] = skip != "disabled"
+    monkeypatch.setattr(repair, "run_repairs", lambda *args, **kwargs:
+                        {"inventory": {"ready": [task["id"]]}, "manual_todo": []})
+    later_run = root / "later-run"
+    later_run.mkdir()
+    result = review.run_repair_phase(root, config, later_run, root, task["base_sha"], {}, "complete",
+                                     time.monotonic() + (4 if skip == "budget" else 300))
+    assert calls == [] and record.read_bytes() == before and git(tree, "rev-parse", "HEAD") == head
+    assert result["prs_created"] == result["merged"] == result["closed"] == []
+    assert result["prs"][0]["number"] == 80 and not result["prs"][0]["refreshed_this_run"]
+    assert result["inventory"]["ready"] == []
+    assert result["inventory"]["awaiting_merge_authorization"] == [task["id"]]
+    assert result["inventory"]["blocked"] == ([task["id"]] if ci_state == "FAILURE" else [])
+    assert result["inventory"]["ci_failed"] == ([task["id"]] if ci_state == "FAILURE" else [])
+    assert result["inventory"]["ci_pending"] == ([task["id"]] if ci_state == "PENDING" else [])
+    review.save_daily_summary(later_run, {"repair": result})
+    summary = json.loads((later_run / "daily-summary.json").read_text())
+    assert summary["delivery_not_refreshed"][0]["status"] == expected
+    report = (later_run / "report.md").read_text()
+    assert "新建 PR 0" in report and "已有（本轮未刷新） PR [#80]" in report
+    assert "等待合并批准 1" in report and "本地待交付 0" in report
+    if ci_state == "FAILURE":
+        assert "CI 失败 1" in report and "blocked 1" in report and "regression (0): FAILURE" in report
+
+
+def test_saved_observation_cannot_carry_merge_approval_into_another_invocation(repair_delivery):
+    root, _, _, record, tree, task, state, _, deliver = repair_delivery
+    state["checks"][1]["conclusion"] = "FAILURE"
+    deliver()
+    head = git(tree, "rev-parse", "HEAD")
+    assert not deliver(approved_head=head)["results"][0]["merge_approval_required"]
+    assert not json.loads(record.read_text())["delivery"]["last_result"]["merge_approval_required"]
+    saved, = repair.saved_delivery_results(root, merge_approvals={})
+    assert saved["id"] == task["id"] and saved["merge_approval_required"]
+
+
+def test_existing_pr_readback_timeout_retains_its_identity_without_republishing(repair_delivery):
+    _, _, _, _, _, _, state, calls, deliver = repair_delivery
+    deliver()
+    state["read_timeout"] = True
+    result = deliver()
+    assert result["results"][0]["status"] == "pending"
+    assert result["prs"][0]["number"] == 80 and not result["prs"][0]["readback_confirmed"]
+    assert result["results"][0]["merge_approval_required"]
+    assert sum(argv[:3] == ["github-client", "pr", "create"] for argv in calls) == 1
+    assert sum(argv[:2] == ["git", "push"] for argv in calls) == 1
+
+
+def test_pr_body_uses_recorded_commands_and_disables_issue_closing_directives(repair_delivery):
+    _, config, _, _, _, task, _, _, _ = repair_delivery
+    task["baseline"]["command"] = ["python-before", "-m", "pytest", "tests/test_example.py"]
+    task["fixed_verification"]["command"] = ["python-after", "-m", "pytest", "tests/test_example.py"]
+    task["finding"]["failure_scenario"] += "\nFixes #7\nResolves fixture/repo#8"
+    body = repair._repair_pr_body(task, config, task["verified_content"], [7])
+    assert "python-before -m pytest tests/test_example.py" in body
+    assert "python-after -m pytest tests/test_example.py" in body
+    assert "原始记录未保存命令" not in body
+    assert "Fixes #7" not in body and "Resolves fixture/repo#8" not in body and "Related issues: #7" in body
 
 
 def test_verified_repair_merge_closes_only_its_source_issue_once(repair_delivery):
