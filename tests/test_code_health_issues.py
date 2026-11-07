@@ -34,7 +34,29 @@ def response(number=1, outcome="not_reproduced", **extra):
     return {"outcome": "complete", "report_markdown": REPORT,
             "reviews": [{"number": number, "outcome": outcome, "report_markdown": REPORT,
                          "comment_draft": "待审核：当前版本的后续反证不能当成已修复或已发布。",
-                         "finding": finding() if outcome == "confirmed" else None, **extra}]}
+                         "finding": finding() if outcome == "confirmed" else None,
+                         "closure_evidence": None, **extra}]}
+
+
+def stage_evidence(stage, text="expected=3 actual=1\nexit_code=0\n"):
+    work = stage / "work"
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "probe.log").write_text(text)
+    return work
+
+
+def issue_work(run, number=1):
+    return run / "items" / str(number) / "work"
+
+
+def invoke_response(payload):
+    def invoke(config, stage, prompt, **kwargs):
+        assert stage.parent.name == "items"
+        snapshot = json.loads((stage / "plan.json").read_text())["issues"]
+        assert [row["number"] for row in snapshot] == [int(stage.name)]
+        stage_evidence(stage)
+        return json.loads(json.dumps(payload))
+    return invoke
 
 
 def make_plan(*numbers, **extra):
@@ -43,12 +65,10 @@ def make_plan(*numbers, **extra):
             "open_pull_requests": [], "local_repairs": [], **extra}
 
 
-def process(tmp_path, payload, plan=None):
-    run = tmp_path / "run"
-    (run / "work").mkdir(parents=True, exist_ok=True)
-    (run / "work/probe.log").write_text("assert add(2, 1) == 3; actual=1\n")
-    return issues.process_issues(tmp_path, {"timeout_seconds": 180}, run, tmp_path / "source", plan or make_plan(1),
-                                 time.monotonic() + 180, lambda *a, **k: payload, review.FINDING_SCHEMA, review.validate_finding)
+def process(tmp_path, payload, plan=None, *, config=None, command=None):
+    return issues.process_issues(tmp_path, {"timeout_seconds": 180, **(config or {})}, tmp_path / "run",
+                                 tmp_path / "source", plan or make_plan(1), time.monotonic() + 180,
+                                 invoke_response(payload), review.FINDING_SCHEMA, review.validate_finding, command=command)
 
 
 def test_full_discussion_and_linked_work_are_paginated_before_review(tmp_path):
@@ -83,16 +103,18 @@ def test_full_discussion_and_linked_work_are_paginated_before_review(tmp_path):
     assert not forbidden
     assert not any("issues/4" in call[-1] for call in calls)
     repair.save(tmp_path / "issue-state.json", {"issues": {
-        str(row["number"]): {"target": A, "input_digest": row["input_digest"], "selection_digest": row["selection_digest"], "outcome": "not_reproduced", "reviewed_at": "2026-11-03"} for row in plan["issues"]}})
+        str(row["number"]): {"target": A, "input_digest": row["input_digest"], "outcome": "not_reproduced", "reviewed_at": "2026-11-03"} for row in plan["issues"]}})
     assert [row["number"] for row in issues.plan_issues(tmp_path, config, A, command)["issues"]] == [4]
     assert [row["number"] for row in issues.plan_issues(tmp_path, config, "b" * 40, command)["issues"]] == [4, 1, 2]
     responses["issues?state=open&sort=created&direction=asc&per_page=100"][0][0]["updated_at"] = "later"
+    responses["issues/1"]["updated_at"] = "later"
     assert [row["number"] for row in issues.plan_issues(tmp_path, config, A, command)["issues"]] == [4, 1]
     pending = tmp_path / "repairs/local/task.json"
     pending.parent.mkdir(parents=True)
     repair.save(pending, {"id": "local", "status": "pending", "sources": [{"kind": "issue", "number": 3}],
                           "finding": {"key": "current-work", "fix_scope": ["example.py"]}})
-    assert issues.plan_issues(tmp_path, config, A, command)["issues"][0]["number"] == 3
+    assert [row["number"] for row in issues.plan_issues(tmp_path, config, A, command)["issues"]] == [4, 1]
+    assert issues.plan_issues(tmp_path, config, A, command)["local_repairs"][0]["id"] == "local"
 
 
 def test_confirmed_issue_uses_shared_queue_and_keeps_review_cursor(tmp_path):
@@ -126,7 +148,7 @@ def test_scope_conflict_preserves_distinct_findings_without_parallel_work(tmp_pa
         task["sources"] = [{"kind": "review", "commit": A}]
         repair.save(first_path, task)
     second_finding = {**finding("other-key"), "commit": A}
-    second = repair.persist_findings(tmp_path, tmp_path / "run", {"confirmed_findings": [second_finding]}, A,
+    second = repair.persist_findings(tmp_path, tmp_path / "run/items/1", {"confirmed_findings": [second_finding]}, A,
                                     source={"kind": "issue" if first_source == "review" else "review", "number": 2})[0]
     assert first != second
     second_task = json.loads((tmp_path / "repairs" / second / "task.json").read_text())
@@ -158,13 +180,16 @@ def test_existing_ownership_blocks_issue_repair_admission(tmp_path, owner):
 
 def test_issue_normalizes_absolute_work_evidence_in_finding_and_repair_task(tmp_path):
     payload = response(outcome="confirmed")
-    payload["reviews"][0]["finding"]["evidence_log"] = str(tmp_path / "run" / "work" / "probe.log")
+    payload["reviews"][0]["finding"]["evidence_log"] = str(issue_work(tmp_path / "run") / "probe.log")
     assert process(tmp_path, payload)["status"] == "complete"
-    persisted = json.loads((tmp_path / "run" / "result.json").read_text())["reviews"][0]["finding"]
+    stage = tmp_path / "run/items/1"
+    persisted = json.loads((stage / "result.json").read_text())["reviews"][0]["finding"]
     task_path, = (tmp_path / "repairs").glob("*/task.json")
     task = json.loads(task_path.read_text())
     assert persisted["evidence_log"] == task["finding"]["evidence_log"] == "probe.log"
-    assert payload["reviews"][0]["finding"]["evidence_log"] == "probe.log"
+    assert (stage / "comment-draft.md").read_text().strip() == payload["reviews"][0]["comment_draft"]
+    assert (stage / "report.md").read_text().strip() == REPORT
+    assert task["evidence"] == str((stage / "work/probe.log").resolve())
     assert task["finding"]["owner_path"] == "example.py"
     assert task["finding"]["fix_scope"] == ["example.py", "tests/test_example.py"]
     state = json.loads((tmp_path / "issue-state.json").read_text())
@@ -176,31 +201,43 @@ def test_issue_rejects_absolute_evidence_outside_work_before_persistence(tmp_pat
     outside.write_text("out of scope evidence")
     payload = response(outcome="confirmed")
     payload["reviews"][0]["finding"]["evidence_log"] = str(outside)
-    with pytest.raises(ValueError, match="unsafe"):
-        process(tmp_path, payload)
-    assert not (tmp_path / "issue-state.json").exists()
+    receipt = process(tmp_path, payload)
+    assert receipt["status"] == "partial" and receipt["summary"]["pending"] == [1]
+    assert "unsafe" in receipt["summary"]["pending_reasons"]["1"]
+    state = json.loads((tmp_path / "issue-state.json").read_text())["issues"]["1"]
+    assert state["last_attempted_at"] and "reviewed_at" not in state
     assert not (tmp_path / "repairs").exists()
 
 
 def test_issue_report_cannot_assert_confirmation_without_evidence(tmp_path):
-    run = tmp_path / "run/work"
-    run.mkdir(parents=True)
-    with pytest.raises(ValueError, match="durable"):
-        issues.process_issues(tmp_path, {}, run.parent, tmp_path, make_plan(1), time.monotonic() + 180,
-                              lambda *a, **k: response(outcome="confirmed"), review.FINDING_SCHEMA, review.validate_finding)
-    assert not (tmp_path / "issue-state.json").exists()
+    def missing_evidence(config, stage, prompt, **kwargs):
+        (stage / "work").mkdir()
+        return response(outcome="confirmed")
+    receipt = issues.process_issues(tmp_path, {}, tmp_path / "run", tmp_path, make_plan(1),
+                                   time.monotonic() + 180, missing_evidence,
+                                   review.FINDING_SCHEMA, review.validate_finding)
+    assert receipt["summary"]["pending"] == [1]
+    assert "durable" in receipt["summary"]["pending_reasons"]["1"]
+    state = json.loads((tmp_path / "issue-state.json").read_text())["issues"]["1"]
+    assert "reviewed_at" not in state and state["last_attempted_at"]
     assert not (tmp_path / "state.json").exists()
+    assert not (tmp_path / "repairs").exists()
 
 
 @pytest.mark.parametrize("bad", [
     response(number=99), response(outcome="not_reproduced", finding=finding()),
     response(outcome="confirmed", finding={**finding(), "commit": A}),
-    {**response(), "reviews": []}, {**response(), "outcome": "blocked"},
+    {**response(), "reviews": []}, {**response(), "outcome": "partial", "reviews": []},
+    {**response(), "outcome": "blocked"},
+    {**response(), "reviews": [{key: value for key, value in response()["reviews"][0].items() if key != "closure_evidence"}]},
 ])
 def test_invalid_decisions_do_not_create_issue_progress(tmp_path, bad):
-    with pytest.raises(ValueError):
-        process(tmp_path, bad)
-    assert not (tmp_path / "issue-state.json").exists()
+    receipt = process(tmp_path, bad)
+    assert receipt["status"] == "partial" and receipt["reviewed"] == [] and receipt["summary"]["pending"] == [1]
+    state = json.loads((tmp_path / "issue-state.json").read_text())["issues"]["1"]
+    assert state["last_attempted_at"] and "reviewed_at" not in state
+    assert "completed_reviews" not in state and "repair_task" not in state
+    assert (tmp_path / "run/items/1/pending.json").is_file()
     assert not (tmp_path / "repairs").exists()
 
 
@@ -215,7 +252,8 @@ def test_changed_issue_decision_pauses_existing_pending_repair(tmp_path, new_out
     before = path.read_bytes()
     process(tmp_path, response(outcome=new_outcome))
     state = json.loads((tmp_path / "issue-state.json").read_text())["issues"]["1"]
-    assert state["repair_task"] == task_id and state["outcome"] == new_outcome
+    expected = "needs_decision" if new_outcome in {"already_fixed", "not_reproduced"} else new_outcome
+    assert state["repair_task"] == task_id and state["outcome"] == expected
     receipt = repair.repair_one(tmp_path, {"issue_intake_ready": True, "issue_target": A, "issue_inputs": {"1": {"input_digest": "1", "assigned": False}}},
                                 tmp_path / "run", time.monotonic() + 180,
                                 lambda *a, **k: pytest.fail("superseded issue repair resumed"))
@@ -281,10 +319,12 @@ def test_budget_and_model_timeout_preserve_pending_issue(tmp_path):
     def timeout(*args, **kwargs):
         raise TimeoutError("model budget exhausted")
     for deadline in (time.monotonic() - 1, time.monotonic() + 120):
-        with pytest.raises(TimeoutError):
-            issues.process_issues(tmp_path, {}, tmp_path, tmp_path, make_plan(1), deadline, timeout,
-                                  review.FINDING_SCHEMA, review.validate_finding)
-    assert not (tmp_path / "issue-state.json").exists()
+        receipt = issues.process_issues(tmp_path, {}, tmp_path / "run", tmp_path, make_plan(1), deadline,
+                                       timeout, review.FINDING_SCHEMA, review.validate_finding)
+        assert receipt["status"] == "partial" and receipt["summary"]["pending"] == [1] and receipt["reviewed"] == []
+    state = json.loads((tmp_path / "issue-state.json").read_text())["issues"]["1"]
+    assert state["last_attempted_at"] and "reviewed_at" not in state
+    assert not (tmp_path / "repairs").exists()
 
 
 @pytest.mark.parametrize("has_commit", [False, True])
@@ -323,12 +363,13 @@ schema = json.loads(pathlib.Path(args[args.index("--output-schema") + 1]).read_t
 if "reviews" in schema["properties"]:
     plan = json.loads((work.parent / "plan.json").read_text())
     assert "Correction: no write" in plan["issues"][0]["comments"][-1]["body"]
-    source = work.parent.parent / "source"
+    assert work.parent.parent.name == "items"
+    source = work.parents[3] / "source"
     assert (source / "AGENTS.md").read_text().startswith("Frozen")
     assert "禁止网络" in prompt and "comment_draft" in prompt
     payload = {"outcome":"complete", "report_markdown":"issue evidence and limitations " * 15,
                "reviews":[{"number":1,"outcome":"not_reproduced", "report_markdown":"Later correction rejects the original write claim " * 12,
-                           "comment_draft":"Current SHA only; not merged/released", "finding":None}]}
+                           "comment_draft":"Current SHA only; not merged/released", "finding":None, "closure_evidence":None}]}
 else:
     plan = json.loads((work.parent / "plan.json").read_text())
     payload = {"outcome":"complete", "completed_commits":[row["sha"] for row in plan["commits"]],
@@ -374,7 +415,7 @@ output.write_text(json.dumps(payload))
         forbidden.append(tuple(argv))
         raise AssertionError(f"forbidden call: {argv}")
 
-    def repair_once(*args):
+    def repair_once(*args, **kwargs):
         repairs.append(args[0])
         return {"status": "no_pending_repairs"}
 
@@ -385,7 +426,7 @@ output.write_text(json.dumps(payload))
         monkeypatch.setattr(review.time, "monotonic", lambda: clock[0])
     if mode == "review_timeout":
         def timeout_commit(config, stage, *args, **kwargs):
-            if stage.name != "issues":
+            if stage.parent.name != "items":
                 raise TimeoutError("commit review stage exhausted its reserved budget")
             return original_invoke(config, stage, *args, **kwargs)
         monkeypatch.setattr(review, "invoke_agent", timeout_commit)
@@ -410,7 +451,10 @@ output.write_text(json.dumps(payload))
     if mode in {"run", "review_timeout", "reserved_budget"}:
         assert receipt["issues"]["reviewed"] == [1]
         saved = json.loads((root / "issue-state.json").read_text())["issues"]["1"]
-        assert saved["outcome"] == "not_reproduced" and saved["target"] == target
+        assert saved["outcome"] == "needs_decision" and saved["target"] == target
+        assert "closure evidence insufficient" in saved["reason"]
+        stage = Path(receipt["run_dir"]) / "issues/items/1"
+        assert (stage / "report.md").is_file() and (stage / "comment-draft.md").is_file()
         assert not (root / "repairs").exists()
         if mode == "reserved_budget":
             if has_commit:
@@ -423,7 +467,12 @@ output.write_text(json.dumps(payload))
         if mode == "review_timeout" and has_commit:
             assert receipt["status"] == "partial" and receipt["completed_commits"] == []
     else:
-        assert not (root / "issue-state.json").exists()
+        if mode == "archive_budget" and not has_commit:
+            attempted = json.loads((root / "issue-state.json").read_text())["issues"]["1"]
+            assert attempted["last_attempted_at"] and "reviewed_at" not in attempted
+            assert receipt["issues"]["summary"]["pending"] == [1]
+        else:
+            assert not (root / "issue-state.json").exists()
         if mode == "archive_budget":
             assert receipt["status"] == ("partial" if has_commit else "no_changes") and not repairs
             assert receipt["cursor_after"] == base
@@ -438,3 +487,267 @@ output.write_text(json.dumps(payload))
     if mode == "smoke":
         assert not any(call[0] == "github-client" for call in calls)
     assert git("status", "--porcelain") == ""
+
+
+def inventory_command(inventory, calls):
+    def command(argv, **kwargs):
+        calls.append(argv)
+        assert argv[:2] == ["gh", "api"]
+        assert not set(argv) & {"--method", "-X", "POST", "PATCH", "PUT", "DELETE", "--input", "--field", "-f", "-F"}
+        path = argv[-1].removeprefix("repos/fixture/repo/")
+        if path.startswith("issues?"):
+            return json.dumps([inventory])
+        if path.startswith("pulls?"):
+            return "[[]]"
+        if path == "pulls/50":
+            return json.dumps({"number": 50, "state": "closed", "merged_at": "2026-11-02", "merge_commit_sha": A})
+        if path.startswith("issues/"):
+            number = int(path.split("/")[1])
+            if "/comments?" in path:
+                return json.dumps([[{"body": "Original trigger and later corrections must be checked"}]])
+            if "/timeline?" in path:
+                return "[[]]"
+            return json.dumps(next(row for row in inventory if row["number"] == number))
+        raise AssertionError(argv)
+    return command
+
+
+def run_plan(root, run, plan, invoke, *, config=None, command=None):
+    return issues.process_issues(root, {"timeout_seconds": 180, **(config or {})}, run, root / "source",
+                                 plan, time.monotonic() + 180, invoke,
+                                 review.FINDING_SCHEMA, review.validate_finding, command=command)
+
+
+@pytest.mark.parametrize(("overrides", "expected"), [({}, 5), ({"max_issues": 7}, 7)])
+def test_default_five_and_configured_batch_above_three(tmp_path, overrides, expected):
+    inventory, calls = [issue(n) for n in range(1, 10)], []
+    plan = issues.plan_issues(tmp_path, {"gh": "gh", "repository": "fixture/repo", **overrides}, A,
+                              inventory_command(inventory, calls), hydrate=False)
+    assert [row["number"] for row in plan["issues"]] == list(range(1, expected + 1))
+    assert plan["open_issue_count"] == 9
+
+
+def test_sixty_four_issues_do_not_starve_when_sha_changes_and_repairs_are_active(tmp_path):
+    inventory, calls, invoked = [issue(n) for n in range(1, 65)], [], []
+    command = inventory_command(inventory, calls)
+    config = {"gh": "gh", "repository": "fixture/repo"}
+    for day in range(13):
+        target = f"{day + 1:040x}"
+        plan = issues.plan_issues(tmp_path, config, target, command, hydrate=False)
+        if day:
+            assert len(plan["local_repairs"]) == 5
+            assert all(task["status"] == "pending" for task in plan["local_repairs"])
+
+        def invoke(config, stage, prompt, **kwargs):
+            number = int(stage.name)
+            invoked.append(number)
+            stage_evidence(stage)
+            return response(number, "confirmed", finding=finding(f"inventory:{number}")) if day == 0 else response(number, "needs_decision")
+
+        receipt = run_plan(tmp_path, tmp_path / "runs" / str(day), plan, invoke, command=command, config=config)
+        assert receipt["status"] == "complete" and not receipt["summary"]["pending"]
+    assert invoked[:64] == list(range(1, 65))
+    state = issues.read_state(tmp_path)["issues"]
+    assert set(state) == {str(n) for n in range(1, 65)}
+    assert all(row["reviewed_at"] and row["completed_reviews"] for row in state.values())
+    assert len(list((tmp_path / "repairs").glob("*/task.json"))) == 5
+
+
+def test_completed_history_reuses_original_input_after_a_b_a_change(tmp_path):
+    inventory, calls = [issue(1)], []
+    command = inventory_command(inventory, calls)
+    config = {"gh": "gh", "repository": "fixture/repo"}
+    first = issues.plan_issues(tmp_path, config, A, command)
+    run_plan(tmp_path, tmp_path / "first", first, invoke_response(response(outcome="needs_decision")))
+    first_digest = first["issues"][0]["input_digest"]
+    inventory[0] = issue(1, body="Changed discussion B", updated_at="2026-11-04T10:00:00Z")
+    second = issues.plan_issues(tmp_path, config, A, command)
+    run_plan(tmp_path, tmp_path / "second", second, invoke_response(response(outcome="needs_decision")))
+    assert second["issues"][0]["input_digest"] != first_digest
+    inventory[0] = issue(1)
+    assert not issues.plan_issues(tmp_path, config, A, command)["issues"]
+    replay = issues.plan_issues(tmp_path, config, A, command, full_scan=True)
+    assert replay["issues"][0]["cached_review"]["run_dir"] == str(tmp_path / "first/items/1")
+    receipt = run_plan(tmp_path, tmp_path / "replay", replay,
+                       lambda *a, **k: pytest.fail("completed input A was invoked again"))
+    assert receipt["reviewed"] == [1] and not receipt["summary"]["pending"]
+    state = issues.read_state(tmp_path)["issues"]["1"]
+    assert state["input_digest"] == first_digest and len(state["completed_reviews"]) == 2
+
+
+def test_repair_only_changes_do_not_reinvoke_or_duplicate_completed_issue(tmp_path):
+    inventory, calls = [issue(1)], []
+    command = inventory_command(inventory, calls)
+    config = {"gh": "gh", "repository": "fixture/repo"}
+    plan = issues.plan_issues(tmp_path, config, A, command)
+    result = run_plan(tmp_path, tmp_path / "initial", plan, invoke_response(response(outcome="confirmed")))
+    task_id, = result["repair_tasks"]
+    path = tmp_path / "repairs" / task_id / "task.json"
+    task = json.loads(path.read_text())
+    task.update({"stage": "implement", "status": "awaiting_delivery_authorization", "worktree": "preserved"})
+    repair.save(path, task)
+    before = path.read_bytes()
+    assert not issues.plan_issues(tmp_path, config, A, command)["issues"]
+    replay = issues.plan_issues(tmp_path, config, A, command, full_scan=True)
+    assert replay["issues"][0]["input_digest"] == plan["issues"][0]["input_digest"]
+    run_plan(tmp_path, tmp_path / "replay", replay, lambda *a, **k: pytest.fail("repair state caused issue re-review"))
+    assert path.read_bytes() == before
+    assert len(list((tmp_path / "repairs").glob("*/task.json"))) == 1
+    assert issues.read_state(tmp_path)["issues"]["1"]["repair_task"] == task_id
+
+
+@pytest.mark.parametrize("failure", ["timeout", "subprocess_timeout", "invalid"])
+def test_one_failed_issue_persists_both_successful_neighbours(tmp_path, failure):
+    invoked = []
+
+    def invoke(config, stage, prompt, **kwargs):
+        number = int(stage.name)
+        invoked.append(number)
+        stage_evidence(stage)
+        if number == 2:
+            if failure == "timeout":
+                raise TimeoutError("only issue #2 timed out")
+            if failure == "subprocess_timeout":
+                raise subprocess.TimeoutExpired(["fixture-model"], 1)
+            return response(number=99)
+        return response(number, "confirmed", finding=finding(f"neighbour:{number}"))
+
+    receipt = run_plan(tmp_path, tmp_path / "run", make_plan(1, 2, 3), invoke)
+    assert invoked == [1, 2, 3]
+    assert receipt["status"] == "partial" and receipt["reviewed"] == [1, 3] and receipt["summary"]["pending"] == [2]
+    state = issues.read_state(tmp_path)["issues"]
+    assert all(state[str(n)]["outcome"] == "confirmed" for n in (1, 3))
+    assert state["2"]["last_attempted_at"] and "reviewed_at" not in state["2"]
+    assert len(receipt["repair_tasks"]) == 2
+    for number in (1, 3):
+        stage = tmp_path / "run/items" / str(number)
+        assert (stage / "result.json").is_file() and (stage / "report.md").is_file()
+        assert (stage / "comment-draft.md").is_file()
+    assert (tmp_path / "run/items/2/pending.json").is_file()
+    assert receipt["summary"]["pending"] == [2]
+
+
+CLOSURE_COMMAND = "python -I reproduce_original_issue.py"
+CLOSURE_LOG = json.dumps({"command": CLOSURE_COMMAND, "exit_code": 0, "output": "original trigger now passes"}) + "\n"
+
+
+def closure():
+    return {"reason": "Original trigger and subsequent correction both pass at the frozen target",
+            "fix_commit": "", "verification_log": "probe.log",
+            "commands": [{"command": CLOSURE_COMMAND, "exit_code": 0}]}
+
+
+@pytest.mark.parametrize("missing", ["structured", "log", "empty_log", "commands", "command_in_log", "exit_in_log", "failed", "boolean_exit"])
+def test_closure_without_actual_successful_verification_needs_decision(tmp_path, missing):
+    evidence, log = closure(), CLOSURE_LOG
+    if missing == "structured":
+        evidence = None
+    elif missing == "log":
+        evidence["verification_log"] = "not-executed.log"
+    elif missing == "empty_log":
+        log = ""
+    elif missing == "commands":
+        evidence["commands"] = []
+    elif missing == "command_in_log":
+        log = "generic tests passed\nexit_code=0\n"
+    elif missing == "exit_in_log":
+        log = CLOSURE_COMMAND + "\nall assertions passed\n"
+    elif missing == "failed":
+        evidence["commands"][0]["exit_code"] = 1
+        log = CLOSURE_COMMAND + "\nexit_code=1\n"
+    else:
+        evidence["commands"][0]["exit_code"] = False
+
+    def invoke(config, stage, prompt, **kwargs):
+        stage_evidence(stage, log)
+        return response(outcome="already_fixed", closure_evidence=evidence)
+
+    receipt = run_plan(tmp_path, tmp_path / "run", make_plan(1), invoke)
+    assert receipt["status"] == "complete" and receipt["summary"]["needs_decision"] == [1]
+    assert not receipt["summary"]["close_recommended"] and not receipt["summary"]["closure_batches"]
+    state = issues.read_state(tmp_path)["issues"]["1"]
+    assert state["outcome"] == "needs_decision" and "closure evidence insufficient" in state["reason"]
+    assert "close_recommendation" not in state
+
+
+@pytest.mark.parametrize("structured", [False, True])
+def test_failed_closure_command_cannot_borrow_another_commands_success(tmp_path, structured):
+    log = (json.dumps({"command": CLOSURE_COMMAND, "exit_code": 1}) + "\n"
+           + json.dumps({"command": "true", "exit_code": 0}) + "\n") if structured else (
+               CLOSURE_COMMAND + "\nexit_code=1\ntrue\nexit_code=0\n")
+
+    def invoke(config, stage, prompt, **kwargs):
+        stage_evidence(stage, log)
+        return response(outcome="already_fixed", closure_evidence=closure())
+
+    receipt = run_plan(tmp_path, tmp_path / "run", make_plan(1), invoke)
+    assert receipt["summary"]["needs_decision"] == [1]
+    assert receipt["summary"]["close_recommended"] == []
+
+
+def test_valid_closure_recommendations_batch_ten_without_github_writes(tmp_path):
+    inventory, calls = [issue(n) for n in range(1, 24)], []
+    command = inventory_command(inventory, calls)
+    config = {"gh": "gh", "repository": "fixture/repo"}
+    plan = issues.plan_issues(tmp_path, config, A, command, full_scan=True, hydrate=False)
+
+    def invoke(config, stage, prompt, **kwargs):
+        stage_evidence(stage, CLOSURE_LOG)
+        number = int(stage.name)
+        return response(number, "already_fixed" if number % 2 else "not_reproduced", closure_evidence=closure())
+
+    receipt = run_plan(tmp_path, tmp_path / "run", plan, invoke, config=config, command=command)
+    summary = receipt["summary"]
+    assert receipt["status"] == "complete" and summary["close_recommended"] == list(range(1, 24))
+    assert [len(batch) for batch in summary["closure_batches"]] == [10, 10, 3]
+    assert [row["number"] for batch in summary["closure_batches"] for row in batch] == list(range(1, 24))
+    assert summary["github_closed"] == [] and not (tmp_path / "repairs").exists()
+    published = json.loads((tmp_path / "run/close-recommendations.json").read_text())
+    assert published["action"] == "recommendation_only" and published["github_closed"] == []
+    for batch in published["batches"]:
+        for row in batch:
+            assert row["target"] == A and row["input_digest"]
+            assert Path(row["verification_log"]).read_text() == CLOSURE_LOG
+            assert row["commands"] == closure()["commands"]
+    assert calls and all(argv[:2] == ["gh", "api"] for argv in calls)
+
+
+@pytest.mark.parametrize("is_ancestor", [True, False])
+def test_closure_fix_commit_requires_verified_ancestry(tmp_path, is_ancestor):
+    fix_commit, calls = "b" * 40, []
+    config = {"git": "git", "mirror": str(tmp_path / "mirror.git")}
+
+    def command(argv, *, timeout):
+        calls.append(argv)
+        assert 0 < timeout <= 180
+        assert argv == ["git", "--git-dir", config["mirror"], "merge-base", "--is-ancestor", fix_commit, A]
+        if not is_ancestor:
+            raise RuntimeError("fix commit is not an ancestor of the frozen target")
+        return ""
+
+    def invoke(config, stage, prompt, **kwargs):
+        stage_evidence(stage, CLOSURE_LOG)
+        evidence = {**closure(), "fix_commit": fix_commit}
+        return response(outcome="already_fixed", closure_evidence=evidence)
+
+    receipt = run_plan(tmp_path, tmp_path / "run", make_plan(1), invoke, config=config, command=command)
+    assert len(calls) == 1 and not receipt["summary"]["pending"]
+    if is_ancestor:
+        assert receipt["summary"]["close_recommended"] == [1]
+        assert receipt["summary"]["closure_batches"][0][0]["fix_commit"] == fix_commit
+    else:
+        assert receipt["summary"]["needs_decision"] == [1]
+        assert not receipt["summary"]["closure_batches"]
+
+
+def test_outer_blocked_report_is_retained_as_needs_decision(tmp_path):
+    payload = {"outcome": "blocked", "report_markdown": REPORT, "reviews": []}
+    receipt = process(tmp_path, payload)
+    assert receipt["reviewed"] == [1] and not receipt["summary"]["pending"]
+    assert receipt["summary"]["needs_decision"] == [1]
+    stage = tmp_path / "run/items/1"
+    assert (stage / "report.md").read_text().strip() == REPORT
+    assert json.loads((stage / "raw-result.json").read_text()) == payload
+    result = json.loads((stage / "result.json").read_text())
+    assert result["reviews"][0]["outcome"] == "needs_decision"
+    assert set(result["reviews"][0]) == {"number", "outcome", "report_markdown", "comment_draft", "finding", "closure_evidence"}

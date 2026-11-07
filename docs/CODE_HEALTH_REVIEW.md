@@ -16,7 +16,7 @@
 2. 首轮沿目标 SHA 的 first-parent 主线选择最近三个已合并 PR，按主线从旧到新审查，以最早一个 PR 的主线父提交为本轮起点。不得按 PR 编号或列表默认排序推定合并顺序。首轮起点之前的历史明确不在覆盖范围内。
 3. 后续轮次先读取上一份报告，核对“已完成至”是本轮目标的祖先；续查其后的改动，每轮 first-parent 主线单元数上限由配置 `max_units` 决定（默认 10）。PR 合并和直接提交各计一个主线单元，都必须列出并检查。没有新提交时记录无增量；续跑记录缺失或主线关系不成立时，明确报告断点，不能猜测已完成位置。
 4. 每个 PR 比较其合并提交与主线父提交，检查全部变更文件，并追踪相关入口及上下游一跳。再确认候选问题在本轮冻结目标是否仍然存在，避免将后续已修复的问题重新报成新缺陷。
-5. 每轮以约 30 分钟为投入预算，及时记录进展。预算耗尽时保存未完成项和下一步，不能把未检查的提交记为完成；不为凑满 `max_units` 配置的上限扩大投入。
+5. 每轮按独立的提交审查和 issue 额度执行，及时记录进展；建议每日总上限 12000 秒，具体公式和配置见下文。预算耗尽时保存未完成项和下一步，不能把未检查的提交记为完成；`max_units` 是数量上限，不保证每轮完成。
 
 可用 `git log --first-parent <目标SHA>` 确认主线顺序，再用 `gh pr view <编号>` 核对 PR、变更和检查记录。PR 编号、完整 SHA、测试修订和证据路径都写入报告，不能只记录“最新 main”或“CI 全绿”。
 
@@ -43,7 +43,7 @@
 
 审核通过后生成本地 `pr-draft.md`，状态为 `awaiting_delivery_authorization`；这不代表远端 PR 已创建，也不构成提交、推送、合并或发布授权。审核要求修改时，下次日跑续接实现与复审；无法复现或关键证据不足时停为待裁决/blocked。任务状态和审查游标分离，无新增 PR 时仍可继续待办；同次预算不足则保留阶段和脏分支，不删除或提交。
 
-修复与验证共用每日约30分钟预算。生产、服务、发布边界的改动以及已验证依赖输入发生变化时，保留记录并交用户单独裁决或刷新环境，不自动安装或放宽权限。原因查明后，按 `LESSONS.md` 的触发条件、错误原因、下次检查方式和证据更新原条目；相同原因合并，不复制任务流水账。被证伪的审查判断先保留反证，只有可复用且证据充分的原因才进入经验。
+修复与验证使用每日总预算中提交审查和 issue 阶段结束后剩余的时间。生产、服务、发布边界的改动以及已验证依赖输入发生变化时，保留记录并交用户单独裁决或刷新环境，不自动安装或放宽权限。原因查明后，按 `LESSONS.md` 的触发条件、错误原因、下次检查方式和证据更新原条目；相同原因合并，不复制任务流水账。被证伪的审查判断先保留反证，只有可复用且证据充分的原因才进入经验。
 
 ## 每轮报告
 
@@ -76,7 +76,7 @@ GitHub issue 是已有问题与使用反馈的统一持久待办。对话或其�
 
 反馈至少记录来源、使用版本或提交、触发步骤、预期与实际、已有证据和缺失信息。用户未提供的事实保持未知；故障以“用户报告，待复核”记录，issue 的存在不代表缺陷成立。体验建议记录希望改善的行为，策略偏好记录待决事项，不强行包装成 bug。诊断附件只采集必要的脱敏内容，内部日志与完整附件不自动公开。
 
-手动复核与每日任务按以下顺序进行，每轮共用约30分钟；预算不足时保存待续位置，不为完成数量扩大范围：
+手动复核与每日任务按以下顺序进行，分别遵守对应入口的预算；预算不足时保存待续位置，不为完成数量扩大范围：
 
 1. 冻结当前 `main` SHA 和 issue 讨论快照，先检查 assignee、最新讨论、关联开放或已合并 PR，以及本机正在处理该问题的任务。没有 assignee 不等于无人处理；范围重叠时复用已有工作或保留待办。
 2. 最多复核3条 issue，读取完整讨论和关联实现，追踪真实入口及上下游一跳。在冻结版本上分别记录“仍可复现”“已修复或部分修复”“证据不足或未复现”“需要产品或策略裁决”。后续评论可以纠正原报告，不能只按标题开修。
@@ -86,17 +86,46 @@ GitHub issue 是已有问题与使用反馈的统一持久待办。对话或其�
 
 处理进度与合并后审查游标分开。issue 中的历史问题或使用反馈不属于本轮新增提交时，不改写 `completed_commits`，也不推进定时任务的覆盖游标。用户于 2026-11-03 授权将 issue 处理接入现有每日任务：`scripts/code_health_issues.py` 负责独立取数、复核及准入，复用 `scripts/code_health_repair.py`；不改变线上 Bot 权限。
 
-每日通过只读 GitHub API 分页读取全部开放 issue 摘要，先复核有待续修复的 issue，再按尚未复核优先、上次复核时间最早优先，最多选三条；已在同一冻结 SHA 复核、issue 元数据、开放 PR 及本地修复状态均未变化时跳过。`blocked` 保留为可重试，模型超时或未完成项不记完成。选中后分页保存完整评论、timeline、关联 PR，以及开放 PR 的文件范围；后续纠正和已合并修复必须纳入判断。需要他人输入的 `needs_decision`、`not_reproduced` 等结论在输入或 main 变化后再审，不承诺每天重复同一条。
+每日通过只读 GitHub API 分页读取全部开放 issue 摘要，默认选 5 条，由 `max_issues` 覆盖，不再存在三条硬上限。先排除已完成的 `(issue编号, target SHA, input_digest)`；身份历史保存在 `issue-state.json`，输入 A→B→A 也不会重复调用。输入指纹包含 issue 元数据及开放 PR 快照，本地 repair 状态不使同一身份失效。剩余候选按 `(bool(reviewed_at), last_attempted_at 或 reviewed_at 或空串, issue编号)` 排序，复核时间跨 target 保留。有活跃 repair 的 issue 不享受优先权；持续超时的条目保留尝试时间，其他未尝试条目先行。固定 64 条、每日实际完成 5 条时，首轮需 13 次调度；这不等于全部修复或关闭。
 
-模型返回 `confirmed`、`already_fixed`、`not_reproduced`、`needs_decision`、`blocked`、`duplicate` 或 `in_progress`。只有冻结版本上的实测证据、明确 owner 与文件范围齐备时才入修复队列；已有 assignee、关联开放 PR 或与开放 PR 文件重叠时记录 `in_progress`，不接管。稳定故障 key 在两种来源间复用同一任务；不同 key 的故障分别保留完整发现与验收范围，文件相交不能证明是同一问题。两种来源均在执行时检查本地文件冲突：与更早的待修或待交付工作重叠时暂停后来的任务，保留各自证据和待续资格，交人工解决冲突。issue 来源的待续任务需在本轮开放列表中核对每个来源：归属未变、输入指纹未变、先前复核仍为 confirmed 且验证目标相同才可恢复；输入变化时优先重新复核。一个故障关联超过三条 issue 时，可复用同版本且输入未变的先前结论，不要求所有来源同日重审。新反证、已修结论、关闭、取数失败或变化尚未复核均保留工作区并暂停。来源 issue、验证 SHA 和新增证据另记，不伪称发现来自本轮新增提交。
+每条独立获取完整评论、timeline 和关联 PR，独立调用、验证及落盘。`issues/items/<编号>/` 保存该条 plan、原始结果、报告、证据或 `pending.json`；完成后立即更新状态和累计汇总。单条超时、取数失败或无效结果只使该条待续，不能抹掉其他条目的结果；未完成项不写已完成身份。提供有效阻塞说明的结论归入 `needs_decision`，没有返回有效结论的尝试仍待续。
+
+模型返回 `confirmed`、`already_fixed`、`not_reproduced`、`needs_decision`、`blocked`、`duplicate` 或 `in_progress`。只有冻结版本上的实测证据、明确 owner 与文件范围齐备时才入修复队列；已有 assignee、关联开放 PR 或与开放 PR 文件重叠时记录 `in_progress`，不接管。稳定故障 key 在两种来源间复用同一任务；不同 key 的故障分别保留完整发现与验收范围，文件相交不能证明是同一问题。两种来源均在执行时检查本地文件冲突：与更早的待修或待交付工作重叠时暂停后来的任务，保留各自证据和待续资格，交人工解决冲突。issue 来源的待续任务需在本轮开放列表中核对每个来源：归属未变、输入指纹未变且先前复核仍为 confirmed。仅验证目标过期时，repair 阶段使用自己的剩余预算单独复核，不占每日 5 条；当前身份已有结论时复用。复核后仍须 confirmed 且验证目标相同才可恢复。尚无工作树、未开始实现的任务可记录重验证并更新基线；已有旧基线工作树一律保留，明确等待人工迁移，不自动 reset/rebase。输入变化时暂停续修，等待正常复核。一个故障关联多条 issue 时，不要求所有来源同日占用日常配额。新反证、已修结论、关闭、取数失败或变化尚未复核均保留工作区并暂停。来源 issue、验证 SHA 和新增证据另记，不伪称发现来自本轮新增提交。
 
 反馈文字准确区分“已复现”“本地修复完成”“已合并”“已发布”和“运行版本已验证”，绑定对应提交、版本与证据。合并到 `main` 不等于用户运行版本已修复；新建 issue 不代表承诺修改策略或发布。使用反馈的手动验收要求至少有一条真实反馈完成查重、建单或补充、复核与明确下一步；缺少输入时，只确认规则落地及历史 issue 处理结果。
 
+## 历史 issue 的处置与人工关闭
+
+复核有三种本地出口：当前实证缺陷转 `repair`，按稳定 key 新建或复用任务；已修复或失效且证据齐备时为 `close_recommended`；无法判定、归属其他工作或关闭证据不足时为 `needs_decision`。模型的 `already_fixed`、`not_reproduced`、`duplicate` 本身不能证明可关闭。阻塞项、未执行的测试和通用测试通过不能推断原问题已消失。
+
+每条关闭建议记录 issue 编号、冻结 SHA、输入指纹、关闭理由、可选的修复提交、实际验证日志及命令与整数退出码。日志必须在本条 work 内、非空，使用 JSON Lines 逐条记录 `command`、整数 `exit_code` 和实际 `output`。每条建议中的命令必须与自身日志记录对应，匹配记录的退出码均为 0；其他命令的成功码不能掩盖它的失败。提供修复提交时还校验完整 SHA 是冻结目标的祖先。结构性检查不替代人工判断日志是否覆盖原缺陷；不合格证据降为 `needs_decision`。
+
+每轮 `issues/summary.json` 和 `issues/report.md` 汇总四类计数与清单：建议关闭、转 repair、needs_decision、超时或其他待续（附具体原因）。`issues/close-recommendations.json` 按最多 10 条一批输出关闭建议，供用户明确整批确认。`github_closed` 始终为空：本批程序只有 GET，不实现 PATCH、不发布评论，建议关闭不表示 GitHub 已关闭。用户确认后由人另外执行关闭；本地入队也不表示已经修复。
+
+## 手动全量补扫
+
+补扫复用相同状态目录和互斥锁，冻结开始时的全部 open issue，不受日常 `max_issues` 限制。它不运行提交审查和 repair 实现，不推进 `state.json`，不修改 `config.json`、`installation.json`、每日 `last-run.json` 或 launchd 日程。
+
+```bash
+python scripts/code_health_review.py issues-backfill \
+  --state-dir "$HOME/Library/Application Support/options-monitor/code-health-review"
+```
+
+每条仍受 `issue_unit_timeout_seconds`（默认 600 秒）限制；手动全量扫描按条目数分配总时间，不套用每日 12000 秒上限。64 条全部用满时，仅单条预算合计约 10 小时 40 分钟，准备阶段另限 600 秒。已有同身份结论复用，不再次调用模型。每条落盘并打印进度，每处理 10 条及末尾打印累计清单，关闭建议也按 10 条分组；结束写入 `runs/issues-backfill-<时间>/receipt.json` 和 `last-backfill.json`。有待续项时 CLI 返回 2；全部得出本地处置时返回 0，仍不意味着 GitHub 已关闭或 repair 已完成。
+
+```bash
+python scripts/code_health_review.py issues-backfill \
+  --state-dir "$HOME/Library/Application Support/options-monitor/code-health-review" \
+  --resume-run "$HOME/Library/Application Support/options-monitor/code-health-review/runs/issues-backfill-<时间>"
+```
+
+续跑保留原冻结 SHA、issue 清单及源码，在新目录写结果，复用已完成身份，仅重试未完成项。它刷新未完成条目的 issue 元数据、开放 PR 快照与输入指纹，新增评论、正文修改或指派变化不会使旧任务永久卡住。条目在这次取数期间再次变化时保留待续，下次续跑再刷新；不带 `--resume-run` 则冻结新的 main 和完整开放清单。每日任务和补扫不能同时持锁运行；锁冲突明确报错，不改变游标。
+
 ## 每日本地调度
 
-执行入口为 `scripts/code_health_review.py`，macOS 使用同一个用户级 launchd，每天本地时间 09:17 运行一轮。首次游标来自已完成首轮的完整 SHA；每轮先冻结远端 main，按配置 `max_units` 限制处理的 first-parent 主线单元数（默认 10，PR 合并或直接提交各计一个），并最多复核三条 issue。没有增量时仍可处理 issue 和修复待办；两种输入均无待办时不调用模型。两种发现共用一个修复队列，每轮最多推进一条修复，不增加第二个日程。
+执行入口为 `scripts/code_health_review.py`，macOS 使用同一个用户级 launchd，每天本地时间 09:17 运行一轮。首次游标来自已完成首轮的完整 SHA；每轮先冻结远端 main，按配置 `max_units` 限制处理的 first-parent 主线单元数（默认 10，PR 合并或直接提交各计一个），并默认复核 5 条 issue（由 `max_issues` 覆盖）。没有增量时仍可处理 issue 和修复待办；两种输入均无待办时不调用模型。两种发现共用一个修复队列，每轮最多推进一条修复，不增加第二个日程。
 
-安装状态、规则副本、独立 Git mirror、游标与报告位于本机用户目录的 `Library/Application Support/options-monitor/code-health-review/`；任务工作区不作为调度运行依赖。每轮持久保存 `plan.json`、patch、报告、结构化结果及执行回执。`state.json` 保存连续已完成提交位置，`issue-state.json` 仅保存各 issue 的输入指纹、验证 SHA、结论及报告/修复任务位置，作为 GitHub 待办的本地执行进度；`last-run.json` 保存最近执行状态；runner 每次成功运行后同时刷新已有 `installation.json` 的 `next_calendar_trigger`，记录完成时刻之后的下一个系统本地时间 09:17。定时巡检报告位于 `runs/<运行编号>/report.md`，issue 的完整快照、逐条报告与评论草稿位于同轮 `issues/`。评论草稿尚未发布，仍需明确授权。
+安装状态、规则副本、独立 Git mirror、游标与报告位于本机用户目录的 `Library/Application Support/options-monitor/code-health-review/`；任务工作区不作为调度运行依赖。每轮持久保存 `plan.json`、patch、报告、结构化结果及执行回执。`state.json` 保存连续已完成提交位置，`issue-state.json` 保存各 issue 的尝试时间、已完成身份历史、输入指纹、验证 SHA、处置及报告/修复任务位置，作为 GitHub 待办的本地执行进度；`last-run.json` 保存最近执行状态；runner 每次成功运行后同时刷新已有 `installation.json` 的 `next_calendar_trigger`，记录完成时刻之后的下一个系统本地时间 09:17。定时巡检报告位于 `runs/<运行编号>/report.md`，issue 的完整快照、逐条报告与评论草稿位于同轮 `issues/`。评论草稿尚未发布，仍需明确授权。
 
 runner 先获取只读 GitHub 元数据和冻结源码，再用已有订阅登录的 Codex CLI 按 first-parent 顺序逐提交调用审查。Agent 不加载个人 CLI 配置或 MCP，模型网关和目录参数由本地任务配置明确指定；巡检和审核上下文只可在阶段 `work/` 写临时文件，复现/实现上下文额外只允许写独立修复树，均禁止网络和交互提权。外层 runner 负责写报告与游标。修复回归使用无网络验证沙箱与独立依赖环境，日志和 JUnit 由 runner 回读。运行锁防止手动与定时并发更新状态。
 
@@ -104,7 +133,11 @@ runner 先获取只读 GitHub 元数据和冻结源码，再用已有订阅登�
 
 某片超时、预算不足或返回未完成时即停止提交审查，不启动后续片。已保存的连续前缀保留，未完成单元及之后的提交留待下轮；混合完成与待续时总状态为 `partial`，首片超时也保存 `partial` 报告，片内回执为 `pending`。格式非法或证据缺失仍按原规则拒绝，不越过该片。即使首片未完成、cursor 未变，也将最近的合成报告保存为下一轮交接，保留检查进度、阻塞原因及未完成范围；下一轮从已保存 cursor 之后继续。修复阶段缺预算只记录 repair 待续，不覆盖已保存的 review 状态。issue 快照和复核在 review 之后使用独立预算，issue 结果不参与提交游标；issue 报告及合格修复记录先持久化，再写 issue 进度。其后修复只用每日实际剩余时间，不承诺单轮完成。
 
-预算公式：总上限 `D = timeout_seconds`（默认安装配置1800秒），启动时刻 `t0`，总截止 `E = t0 + D`。启用 issue 时独立额度 `I = min(D, issue_timeout_seconds)`（默认600秒），未启用或 smoke 时 `I = 0`；review 截止 `Er = E - I`，不因 issue 数量、片数或 repair 开关缩减、扩张。每片基准 `U = max(30, review_unit_timeout_seconds)`（默认600秒），调用超时 `Tk = min(U, floor(Er - monotonic()))`；剩余不足30秒不启动下一片。准备源码和提交元数据均受 review 截止约束；提交元数据超时会保存待续范围，继续处理 issue。若将全部总预算显式分给 issue（`I = D`），共用 mirror 与源码准备计入 issue 的可用时间，提交模型不启动。旧配置 `review_timeout_seconds` 不再控制逐片预算。issue 阶段开始时 `Ei = min(E, monotonic() + I)`，取数与复核共用此截止，不借用 review 提前结束省下的额度；review 也不借用没有待审 issue 时空下的额度。默认启用 issue 时 review 最多1200秒、issue 最多600秒；关闭 issue 时 review 最多1800秒。总预算不足、片超时或证据不足时均留待下轮，`--smoke` 继续只受总预算剩余时间限制。
+预算公式：每日总上限 `D = timeout_seconds`，启动时刻 `t0`，总截止 `E = t0 + D`。建议 `D=12000`；现有安装或配置中的值不会由本次改造自动修改。启用 issue 时独立额度 `I = min(D, issue_timeout_seconds)`（缺省 3600 秒），未启用或 smoke 时 `I = 0`；review 独立额度 `R = review_budget_seconds`（缺省 6600 秒），截止 `Er = min(t0 + R, E - I)`。review 提前结束省下的时间不增加 issue 额度，issue 无待办省下的时间不增加 review 额度；两者节省时间均留给 repair。
+
+提交逐片只使用 `review_unit_timeout_seconds`（缺省 600 秒，最低 30 秒），调用超时为该上限与 review 剩余时间的较小值；剩余不足 30 秒不启动下一片。准备源码和提交元数据计入 review 额度；提交元数据超时保存待续范围，继续 issue。将全部总预算分给 issue 时，共用 mirror 与源码准备计入总预算，提交模型不启动。旧键 `review_timeout_seconds` 完全不控制逐提交超时，与 `review_unit_timeout_seconds` 同时存在时也不生效。
+
+issue 阶段开始时 `Ei = min(E, monotonic() + I)`；取数、逐条复核及证据校验共用此截止，每条另受 `issue_unit_timeout_seconds`（缺省 600 秒）限制。建议 `max_issues=5`、`max_units=10`、`D=12000`、`R=6600`、`I=3600`，提交和 issue 均用满时，repair 约剩 1800 秒。旧的一小时配置继续有效，但可能不足以完成两种配额；数量是上限，不能将超时记成完成。`--smoke` 继续只受总预算剩余时间限制。
 
 发现中的 `evidence_log` 可以是阶段 `work/` 内的相对路径，或规范化后仍位于该目录内的绝对路径。绝对路径的原始组件含 `..` 或 `.git` 时拒绝；解析路径与 `work/` 的 symlink 后，必须能通过路径级 `relative_to(work)` 检查，转换结果还须满足原有相对路径校验（无 `..`、`.git`）。目录外路径、同前缀兄弟目录和通过 symlink 逃逸的路径仍拒绝。归一化后的 finding、持久化结构化结果与修复任务均保存相对 `work/` 的 `evidence_log`；入队仍要求该证据为目录内实际文件。`owner_path`、`fix_scope` 继续只允许原有规则下的相对路径。
 
@@ -117,6 +150,6 @@ launchctl print gui/$(id -u)/local.options-monitor.code-health-review
 launchctl kickstart gui/$(id -u)/local.options-monitor.code-health-review
 ```
 
-`--dry-run` 只取数规划，包括最多三条 issue 的完整快照，不调用模型、不改两种进度。`--smoke` 仅调用模型读规则和源码验证结构化结果，不处理 issue、不审查增量、不推进游标。状态入口同时显示 issue 进度；回执中 `issues.status` 单独表示 issue 阶段的完成、待续或失败，不能用外层进程成功推断 issue 已完成。暂停任务使用 `launchctl bootout gui/$(id -u) <plist路径>`，恢复使用 `launchctl bootstrap gui/$(id -u) <plist路径>`；操作调度或删除状态仍需要相应用户授权。不要删除唯一游标及报告副本。
+`--dry-run` 只取数规划，包括由 `max_issues` 限制的 issue 摘要及开放 PR 范围，不调用模型、不改两种进度；完整讨论在逐条执行时获取。`--smoke` 仅调用模型读规则和源码验证结构化结果，不处理 issue、不审查增量、不推进游标。状态入口同时显示 issue 进度；回执中 `issues.status` 单独表示 issue 阶段的完成、待续或失败，不能用外层进程成功推断 issue 已完成。暂停任务使用 `launchctl bootout gui/$(id -u) <plist路径>`，恢复使用 `launchctl bootstrap gui/$(id -u) <plist路径>`；操作调度或删除状态仍需要相应用户授权。不要删除唯一游标及报告副本。
 
 任务跨本次聊天会话继续，但不是云端常驻：依赖该 macOS 用户已登录、机器可运行、GitHub认证和本地模型网关可用。睡眠错过的 calendar 触发由 launchd 在唤醒后合并补跑；关机或退出登录时不运行，也不承诺补齐每天一次。失败保留回执，等下次日跑或显式手动重试；不自动修改权限、切换模型或高频重试。
