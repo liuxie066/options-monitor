@@ -397,7 +397,7 @@ def run_repair_phase(root, config, run, source, target, issue_plan, issue_status
                               deadline, invoke_agent, FINDING_SCHEMA, validate_finding, command=command)
         repair_config["issue_inputs"] = fresh["issue_inputs"]
 
-    authorized = bool(config.get("_deliver_repairs"))
+    authorized = bool(config.get("_deliver_repairs") or config.get("repair_delivery_enabled", True))
     approvals = config.get("_merge_approvals", {})
     # Existing ready work gets a bounded turn; local repair retains the rest of its allocation.
     first = repair.deliver_repairs(root, repair_config, run,
@@ -412,10 +412,28 @@ def run_repair_phase(root, config, run, source, target, issue_plan, issue_status
         result[name] = first[name] + [value for value in last[name] if value not in first[name]]
     result["prs_created"] = [item for item in result["prs"] if item.get("created")]
     result["manual_todo"] = [item for item in result.get("manual_todo", []) if item["id"] not in delivered] + first["manual_todo"] + last["manual_todo"]
-    inventory = result.get("inventory", {})
+    retained = repair.saved_delivery_results(root, merge_approvals=approvals, exclude=delivered)
+    result["delivery_not_refreshed"] = retained
+    observations = result["delivery"] + retained
+    manual_ids = {item["id"] for item in result["manual_todo"]}
+    for item in retained:
+        if item.get("pr"):
+            result["prs"].append(item["pr"])
+        if item["id"] not in manual_ids:
+            result["manual_todo"].append({"id": item["id"], "reason": item["reason"],
+                "needed_action": "Inspect the saved delivery evidence; this run did not refresh it.",
+                "evidence": str(root / "repairs" / item["id"] / "task.json")})
+    inventory = result.setdefault("inventory", {})
     merged = {item["id"] for item in result["delivery"] if item.get("merge_proven")}
-    inventory["ready"] = [task for task in inventory.get("ready", []) if task not in merged]
+    published = {item["id"] for item in result["prs"]}
+    inventory["ready"] = [task for task in inventory.get("ready", []) if task not in merged | published]
     inventory["merged"] = list(dict.fromkeys(inventory.get("merged", []) + sorted(merged)))
+    inventory["awaiting_merge_authorization"] = [item["id"] for item in observations
+                                                if item.get("merge_approval_required")]
+    for status in ("ci_pending", "ci_failed"):
+        inventory[status] = [item["id"] for item in observations if item.get("status") == status]
+    inventory["blocked"] = list(dict.fromkeys(inventory.get("blocked", []) + [item["id"]
+        for item in observations if item.get("status") in {"blocked", "ci_failed"}]))
     if preflight_error:
         result["preflight_error"] = preflight_error
     return result
@@ -432,14 +450,30 @@ def save_daily_summary(run, receipt):
                "prs_created": phase.get("prs_created", []), "merged": phase.get("merged", []), "closed": phase.get("closed", []),
                "pending": inventory.get("pending", []), "blocked": inventory.get("blocked", []),
                "needs_triage": inventory.get("needs_triage", []), "ready": inventory.get("ready", []),
+               "awaiting_merge_authorization": inventory.get("awaiting_merge_authorization", []),
+               "ci_pending": inventory.get("ci_pending", []), "ci_failed": inventory.get("ci_failed", []),
+               "delivery_not_refreshed": phase.get("delivery_not_refreshed", []),
                "manual_todo": phase.get("manual_todo", [])}
+    reasons = {item["id"]: item["reason"] for item in summary["manual_todo"] if item.get("reason")}
+    summary["blocked_reasons"] = [{"id": task, "reason": reasons.get(task, "阻塞原因未记录，需人工核对任务证据")}
+                                  for task in summary["blocked"]]
     write_json(run / "daily-summary.json", summary)
     lines = ["\n\n## 审核与修复实际进度", f"已审提交 {summary['reviewed_commits']}；已审 issue {summary['reviewed_issues']}。",
              f"入队 {len(queued)}；尝试修复 {len(summary['repair_attempted'])}；本地验证通过 {len(summary['local_verified'])}；"
              f"新建 PR {len(summary['prs_created'])}；核实合并修复 {len(summary['merged'])}；确认关闭 issue {len(summary['closed'])}。"
-             "入队和本地验证均不等于合并修复。",
+             "入队、本地验证和开 PR 均不等于合并修复。",
+             f"等待合并批准 {len(summary['awaiting_merge_authorization'])}；CI 等待 {len(summary['ci_pending'])}；"
+             f"CI 失败 {len(summary['ci_failed'])}（CI 状态与等待批准可重叠）。",
              f"剩余 pending {len(summary['pending'])}；blocked {len(summary['blocked'])}；待裁决 {len(summary['needs_triage'])}；"
              f"本地待交付 {len(summary['ready'])}。", "完整任务、PR 和人工待办清单见同目录 daily-summary.json。"]
+    for pr in summary["prs"]:
+        label = "已有（本轮未刷新）" if pr.get("refreshed_this_run") is False else "新建" if pr.get("created") else "复用"
+        lines.append(f"- {label} PR [#{pr['number']}]({pr['url']})；任务 `{pr['id']}`；HEAD `{pr['head']}`。")
+    lines.extend(f"- 任务 `{item['id']}` 本轮未刷新，沿用本地记录 `{item.get('recorded_at') or '时间未知'}`：{item['status']}。"
+                 for item in summary["delivery_not_refreshed"])
+    if summary["awaiting_merge_authorization"]:
+        lines.append("等待合并批准的任务：" + "、".join(f"`{task}`" for task in summary["awaiting_merge_authorization"]) + "。")
+    lines.extend(f"- blocked `{item['id']}`：{item['reason']}" for item in summary["blocked_reasons"])
     report = run / "report.md"
     write_text(report, (report.read_text(encoding="utf-8") if report.exists() else "") + "\n\n".join(lines) + "\n")
     receipt["daily_summary"] = summary
@@ -451,8 +485,11 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False,
         raise ValueError("remote repair delivery is incompatible with smoke or dry-run")
     if merge_approvals and not deliver_repairs:
         raise ValueError("merge approval requires explicit repair delivery authorization")
+    # Invocation-only approvals overwrite any similarly named keys in config.json.
     config = {**json.loads((root / "config.json").read_text(encoding="utf-8")),
               "_deliver_repairs": deliver_repairs, "_merge_approvals": merge_approvals or {}}
+    if type(config.get("repair_delivery_enabled", True)) is not bool:
+        raise ValueError("repair_delivery_enabled must be a boolean")
     started = time.monotonic()
     budgets = phase_budgets(config, smoke=smoke)
     daily_deadline = started + budgets["total"]
@@ -718,7 +755,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="fetch and plan only; do not call the model or advance")
     parser.add_argument("--resume-run", type=Path, help="resume a frozen issues-backfill run; completed identities are reused")
     parser.add_argument("--deliver-repairs", action="store_true",
-                        help="explicitly authorize verified repair commits, pushes, PR creation and verified-merge issue closure")
+                        help="publish verified repairs even if repair_delivery_enabled is false; merging still needs TASK=HEAD approval")
     parser.add_argument("--approve-repair-merge", action="append", type=merge_approval, default=[], metavar="TASK=HEAD",
                         help="human approval to merge this exact repair task and commit after required CI passes")
     args = parser.parse_args()

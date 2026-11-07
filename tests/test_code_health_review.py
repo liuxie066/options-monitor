@@ -75,6 +75,14 @@ def test_direct_daily_api_cannot_authorize_remote_delivery_in_readonly_mode(tmp_
         review.run_once(tmp_path, **{mode: True}, deliver_repairs=True)
 
 
+@pytest.mark.parametrize("value", [None, "false", 0, 1, [], {}])
+def test_delivery_config_requires_a_boolean_before_running(tmp_path, value):
+    review.write_json(tmp_path / "config.json", {"repair_delivery_enabled": value})
+    with pytest.raises(ValueError, match="repair_delivery_enabled must be a boolean"):
+        review.run_once(tmp_path)
+    assert not (tmp_path / "runs").exists()
+
+
 def test_ready_delivery_gets_bounded_turn_without_starving_local_repairs(tmp_path, monkeypatch):
     clock, phases = [0], []
     monkeypatch.setattr(review.time, "monotonic", lambda: clock[0])
@@ -104,23 +112,31 @@ def test_ready_delivery_gets_bounded_turn_without_starving_local_repairs(tmp_pat
     assert phases == [("delivery", 120, ()), ("local", 1680), ("delivery", 1800, ["old"])]
     assert result["attempted"] == result["local_verified"] == result["merged"] == ["new"]
     assert result["prs_created"] == [{"id": "new", "created": True}] and result["closed"] == [7]
-    assert result["inventory"]["ready"] == ["old"] and result["inventory"]["merged"] == ["new"]
+    assert result["inventory"]["ready"] == [] and result["inventory"]["merged"] == ["new"]
     assert result["manual_todo"] == [{"id": "blocked", "reason": "retained failure"}]
 
 
 def test_daily_summary_separates_intake_local_verification_pr_and_merge(tmp_path):
+    pr = {"id": "old", "number": 80, "url": "https://github.com/fixture/repo/pull/80", "head": A, "created": False}
     receipt = {"completed_commits": [A], "repair_tasks": ["queued"], "issues": {"reviewed": [7]},
-               "repair": {"attempted": ["old"], "local_verified": ["old"], "prs": [{"id": "old"}],
+               "repair": {"attempted": ["old"], "local_verified": ["old"], "prs": [pr],
                           "prs_created": [], "merged": [], "closed": [],
-                          "inventory": {"pending": ["queued"], "blocked": ["failed"], "ready": ["old"]},
+                          "inventory": {"pending": ["queued"], "blocked": ["failed"], "ready": [],
+                                        "awaiting_merge_authorization": ["old"]},
                           "manual_todo": [{"id": "failed", "reason": "real failure", "needed_action": "refresh environment"}]}}
     review.save_daily_summary(tmp_path, receipt)
     saved = json.loads((tmp_path / "daily-summary.json").read_text())
     assert saved == receipt["daily_summary"]
     assert saved["queued_repairs"] == ["queued"] and saved["local_verified"] == ["old"]
     assert saved["prs_created"] == saved["merged"] == saved["closed"] == []
-    assert saved["pending"] == ["queued"] and saved["blocked"] == ["failed"] and saved["ready"] == ["old"]
+    assert saved["pending"] == ["queued"] and saved["blocked"] == ["failed"] and saved["ready"] == []
     assert saved["manual_todo"][0]["reason"] == "real failure"
+    assert saved["awaiting_merge_authorization"] == ["old"]
+    assert saved["blocked_reasons"] == [{"id": "failed", "reason": "real failure"}]
+    report = (tmp_path / "report.md").read_text()
+    assert "复用 PR [#80]" in report and "新建 PR 0" in report and "等待合并批准 1" in report
+    assert "blocked 1" in report and "blocked `failed`：real failure" in report
+    assert "开 PR 均不等于合并修复" in report
 
 
 @pytest.fixture
@@ -178,6 +194,33 @@ def backfill_environment(tmp_path, monkeypatch):
 
     monkeypatch.setattr(review, "command", command)
     return root, config, inventory, calls, git
+
+
+@pytest.mark.parametrize("mode", ["daily", "smoke", "dry_run"])
+def test_config_cannot_inject_merge_approval_or_publish_from_readonly_modes(backfill_environment, monkeypatch, mode):
+    root, config, _, _, git = backfill_environment
+    task = "1" * 16
+    config.update({"repair_enabled": True, "repair_delivery_enabled": True, "issues_enabled": False,
+                   "_deliver_repairs": True, "_merge_approvals": {task: A}, "merge_approvals": {task: A},
+                   "approve_repair_merge": [f"{task}={A}"], "auto_merge": True})
+    review.write_json(root / "config.json", config)
+    review.write_json(root / "state.json", {"cursor": git("rev-parse", "HEAD"), "last_review": str(root / "previous.md")})
+    observed = []
+    def delivery(root, repair_config, run, deadline, **kwargs):
+        observed.append((repair_config["_deliver_repairs"], kwargs))
+        return {key: [] for key in ("results", "processed", "prs", "merged", "closed", "manual_todo")}
+    monkeypatch.setattr(review.repair, "deliver_repairs", delivery)
+    monkeypatch.setattr(review.repair, "run_repairs", lambda *args, **kwargs: {"inventory": {}})
+    monkeypatch.setattr(review, "invoke_agent", lambda *args, **kwargs:
+                        {"outcome": "complete", "completed_commits": [], "verification_gaps": [],
+                         "confirmed_findings": [], "report_markdown": BACKFILL_REPORT})
+    review.run_once(root, **({mode: True} if mode != "daily" else {}))
+    if mode == "daily":
+        assert len(observed) == 2
+        assert all(not explicit and kwargs["authorized"] and kwargs["merge_approvals"] == {}
+                   for explicit, kwargs in observed)
+    else:
+        assert observed == []
 
 
 def backfill_decision(run, number, outcome):
