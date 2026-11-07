@@ -38,7 +38,7 @@ def commit_review_run(tmp_path, monkeypatch):
                                             "confirmed_finding_keys": ["old-owner:failure"]})
     review.write_json(root / "config.json", {
         "git": "git", "gh": "github-client", "repository": "fixture/repo", "repository_url": str(source),
-        "timeout_seconds": 1800, "max_units": 10,
+        "timeout_seconds": 1800, "max_units": 10, "issue_timeout_seconds": 600,
     })
     original = review.command
     monkeypatch.setattr(review, "command", lambda argv, **kwargs: "[]" if argv[0] == "github-client" else original(argv, **kwargs))
@@ -172,13 +172,15 @@ def test_review_and_issue_budgets_do_not_borrow_from_each_other(commit_review_ru
     review.write_json(root / "config.json", {**config, "issues_enabled": True, "max_units": 1})
     observed = []
 
-    def intake(root, config, target, command, *, deadline):
+    def intake(root, config, target, command, *, deadline, hydrate):
+        assert hydrate is False
         assert clock[0] == review_elapsed
         assert deadline == review_elapsed + 600
         clock[0] += intake_elapsed
         return {"issues": [{"number": 1}], "target": target}
 
-    def process(root, config, run, source, plan, deadline, *args):
+    def process(root, config, run, source, plan, deadline, *args, command):
+        assert callable(command)
         observed.append(deadline - clock[0])
         return {"status": "complete", "reviewed": [1]}
 
@@ -285,7 +287,8 @@ def test_metadata_preparation_cannot_spend_reserved_issue_budget(commit_review_r
         reviewed.append(sha)
         return result([sha])
 
-    def intake(root, config, target, command, *, deadline):
+    def intake(root, config, target, command, *, deadline, hydrate):
+        assert hydrate is False
         observed.append(deadline - clock[0])
         return {"issues": [], "target": target}
 

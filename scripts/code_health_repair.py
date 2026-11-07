@@ -228,11 +228,27 @@ def dependency_inputs_match(config, root, base):
         raise ValueError("repair dependency inputs changed since the verified environment; human environment refresh required")
 
 
-def repair_one(root, config, run_dir, deadline, invoke):
-    """Resume at most one nonterminal task; findings and repair status outlive review cursors."""
+def _issue_repair_matches(task, config, issue_state):
+    """Check the verdict, ownership and input identity before considering its target."""
+    for source in task.get("sources", []):
+        if source["kind"] != "issue":
+            continue
+        latest = issue_state.get(str(source["number"]), {})
+        current = config.get("issue_inputs", {}).get(str(source["number"]), {})
+        if (not config.get("issue_intake_ready") or not config.get("issue_target")
+                or latest.get("outcome") != "confirmed" or latest.get("repair_task") != task["id"]
+                or not current or current.get("assigned")
+                or latest.get("input_digest") != current.get("input_digest")):
+            return False
+    return True
+
+
+def repair_one(root, config, run_dir, deadline, invoke, *, revalidate_issue=None):
+    """Resume one task; revalidate_issue(number) refreshes stale verdicts within the repair deadline."""
     records = sorted((root / "repairs").glob("*/task.json")) if (root / "repairs").exists() else []
     all_tasks = [(path, json.loads(path.read_text())) for path in records]
-    pending = [(path, task) for path, task in all_tasks if task["status"] not in TERMINAL]
+    pending = sorted(((path, task) for path, task in all_tasks if task["status"] not in TERMINAL),
+                     key=lambda row: (datetime.fromisoformat(row[1]["created_at"]), row[1]["id"]))
     if not pending:
         return {"status": "no_pending_repairs"}
     issue_state_path = root / "issue-state.json"
@@ -240,30 +256,63 @@ def repair_one(root, config, run_dir, deadline, invoke):
     eligible, deferred = [], []
     for path, task in pending:
         reason = None
-        for source in task.get("sources", []):
-            if source["kind"] != "issue":
-                continue
-            latest = issue_state.get(str(source["number"]), {})
-            current = config.get("issue_inputs", {}).get(str(source["number"]), {})
-            if (not config.get("issue_intake_ready") or latest.get("outcome") != "confirmed"
-                    or latest.get("target") != config.get("issue_target")
-                    or latest.get("repair_task") != task["id"] or not current or current.get("assigned")
-                    or latest.get("input_digest") != current.get("input_digest")):
-                reason = "issue changed, is unconfirmed, or awaits current intake verification"
         older_conflicts = [other["id"] for _, other in all_tasks if other["id"] != task["id"]
                            and other["status"] not in {"needs_triage", "blocked"}
                            and (datetime.fromisoformat(other["created_at"]), other["id"]) < (datetime.fromisoformat(task["created_at"]), task["id"])
                            and set(other["finding"]["fix_scope"]) & set(task["finding"]["fix_scope"])]
         if older_conflicts:
             reason = "overlapping earlier local work requires resolution: " + ", ".join(older_conflicts)
+        elif not _issue_repair_matches(task, config, issue_state):
+            reason = "issue changed, is unconfirmed, or awaits current intake verification"
+        else:
+            numbers = dict.fromkeys(source["number"] for source in task.get("sources", []) if source["kind"] == "issue")
+            for number in numbers:
+                if issue_state[str(number)].get("target") == config["issue_target"]:
+                    continue
+                if revalidate_issue is None:
+                    reason = "issue awaits revalidation at the current target"
+                    break
+                try:
+                    remaining_config(config, deadline)
+                    revalidate_issue(number)
+                    issue_state = json.loads(issue_state_path.read_text())["issues"]
+                    task = json.loads(path.read_text())
+                    remaining_config(config, deadline)
+                except Exception as exc:
+                    reason = f"issue #{number} revalidation deferred: {exc}"
+                    break
+                if (task["status"] in TERMINAL or not _issue_repair_matches(task, config, issue_state)
+                        or issue_state.get(str(number), {}).get("target") != config["issue_target"]):
+                    reason = f"issue #{number} is not confirmed for this repair at the current target"
+                    break
+            if not reason and any(issue_state.get(str(source["number"]), {}).get("target") != config["issue_target"]
+                                  for source in task.get("sources", []) if source["kind"] == "issue"):
+                reason = "issue awaits revalidation at the current target"
+            if not reason and numbers and task["base_sha"] != config["issue_target"]:
+                tree = path.parent / "worktree"
+                recorded_tree = Path(task["worktree"]) if task.get("worktree") else tree
+                if tree.exists() or recorded_tree.exists():
+                    reason = "human baseline migration required: preserving existing worktree at the older repair base"
+                elif task["stage"] != "reproduce" or any(task.get(key) for key in (
+                        "reproduction", "baseline", "test_hashes", "implementation", "fixed_verification", "independent_review")):
+                    reason = "human baseline migration required: existing implementation or regression work belongs to the older repair base"
         if reason:
             deferred.append({"id": task["id"], "reason": reason})
         else:
             eligible.append((path, task))
+            break
     if not eligible:
         return {"status": "deferred", "tasks": deferred}
-    record, task = min(eligible, key=lambda row: (datetime.fromisoformat(row[1]["created_at"]), row[1]["id"]))
+    record, task = eligible[0]
     folder = record.parent
+    numbers = sorted({source["number"] for source in task.get("sources", []) if source["kind"] == "issue"})
+    if numbers and task["base_sha"] != config["issue_target"]:
+        task.setdefault("revalidations", []).append({
+            "from_base_sha": task["base_sha"], "target": config["issue_target"], "issues": numbers,
+            "revalidated_at": timestamp(), "run_dir": str(run_dir),
+        })
+        task["base_sha"] = config["issue_target"]
+        save(record, task)
     attempt = folder / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + f"-{os.getpid()}")
     attempt.mkdir()
     task["attempts"].append(str(attempt))

@@ -361,11 +361,12 @@ def review_commits(
 
 def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False) -> dict:
     config = json.loads((root / "config.json").read_text(encoding="utf-8"))
-    daily_deadline = time.monotonic() + config["timeout_seconds"]
-    issue_budget = min(config["timeout_seconds"], config.get("issue_timeout_seconds", 600)) if (
+    started = time.monotonic()
+    daily_deadline = started + config.get("timeout_seconds", 12000)
+    issue_budget = min(config.get("timeout_seconds", 12000), config.get("issue_timeout_seconds", 3600)) if (
         not smoke and config.get("issues_enabled")
     ) else 0
-    review_deadline = daily_deadline - issue_budget
+    review_deadline = min(started + config.get("review_budget_seconds", 6600), daily_deadline - issue_budget)
     # Shared source preparation belongs to review unless all time was explicitly assigned to issues.
     deadline = review_deadline if issue_budget < config["timeout_seconds"] else daily_deadline
     with run_lock(root):
@@ -473,7 +474,7 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False) -> dict:
                 issue_run.mkdir()
                 issue_deadline = min(daily_deadline, time.monotonic() + issue_budget)
                 try:
-                    issue_plan = issues.plan_issues(root, config, target, command, deadline=issue_deadline)
+                    issue_plan = issues.plan_issues(root, config, target, command, deadline=issue_deadline, hydrate=False)
                     write_json(issue_run / "plan.json", issue_plan)
                     receipt["issues"] = {"status": "planned", "numbers": [row["number"] for row in issue_plan["issues"]]}
                 except (TimeoutError, subprocess.TimeoutExpired) as exc:
@@ -485,7 +486,8 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False) -> dict:
             if issue_plan is not None and not dry_run:
                 try:
                     receipt["issues"] = issues.process_issues(
-                        root, config, issue_run, source, issue_plan, issue_deadline, invoke_agent, FINDING_SCHEMA, validate_finding,
+                        root, {**config, "mirror": str(mirror)}, issue_run, source, issue_plan, issue_deadline,
+                        invoke_agent, FINDING_SCHEMA, validate_finding, command=command,
                     )
                 except TimeoutError as exc:
                     receipt["issues"] = {"status": "pending", "error": str(exc), "run_dir": str(issue_run)}
@@ -497,7 +499,17 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False) -> dict:
                     repair.remaining_config(config, daily_deadline)
                     repair_config = {**config, "issue_target": target, "issue_inputs": issue_plan.get("issue_inputs", {}) if issue_plan else {},
                                      "issue_intake_ready": receipt.get("issues", {}).get("status") in {"complete", "partial", "no_eligible_issues"}}
-                    receipt["repair"] = repair.repair_one(root, repair_config, run, daily_deadline, invoke_agent)
+                    def revalidate_issue(number):
+                        # Repair preflight has its own quota and uses only the remaining repair budget.
+                        fresh = issues.plan_issues(root, config, target, command, deadline=daily_deadline,
+                                                   numbers={number}, hydrate=False)
+                        validation = run / "repair-issue-validation" / str(number)
+                        issues.process_issues(root, {**config, "mirror": str(mirror)}, validation, source, fresh,
+                                              daily_deadline, invoke_agent, FINDING_SCHEMA, validate_finding, command=command)
+                        repair_config["issue_inputs"] = fresh["issue_inputs"]
+
+                    receipt["repair"] = repair.repair_one(root, repair_config, run, daily_deadline, invoke_agent,
+                                                         revalidate_issue=revalidate_issue)
                 except TimeoutError as exc:
                     receipt["repair"] = {"status": "pending", "error": str(exc)}
             receipt.update({"finished_at": now(), "cursor_after": json.loads((root / "state.json").read_text())["cursor"], "run_dir": str(run)})
@@ -522,19 +534,107 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False) -> dict:
             raise
 
 
+def run_issue_backfill(root: Path, *, resume_run: Path | None = None) -> dict:
+    """Scan a frozen open-issue inventory without changing the daily cursor or schedule."""
+    config = json.loads((root / "config.json").read_text(encoding="utf-8"))
+    with run_lock(root):
+        run = root / "runs" / ("issues-backfill-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"))
+        run.mkdir(parents=True)
+        receipt = {"mode": "issues-backfill", "started_at": now(), "run_dir": str(run)}
+        setup_deadline = time.monotonic() + 600
+
+        def bounded(argv, **kwargs):
+            remaining = setup_deadline - time.monotonic()
+            if remaining < 1:
+                raise TimeoutError("backfill preparation budget exhausted")
+            return command(argv, **{**kwargs, "timeout": min(180, remaining, kwargs.get("timeout", 180))})
+
+        try:
+            mirror = root / "repository.git"
+            config = {**config, "mirror": str(mirror)}
+            if resume_run is not None:
+                previous = resume_run.expanduser().resolve()
+                if not previous.is_relative_to((root / "runs").resolve()):
+                    raise ValueError("resume run must belong to this state directory")
+                plan = json.loads((previous / "plan.json").read_text(encoding="utf-8"))
+                source = Path(plan["source_dir"])
+                if not source.is_dir():
+                    raise ValueError("the original frozen source is missing")
+                state = issues.read_state(root)["issues"]
+                pending_numbers = set()
+                for snapshot in plan["issues"]:
+                    snapshot.pop("cached_review", None)
+                    cached = issues.completed_review(state.get(str(snapshot["number"]), {}),
+                                                     plan["target"], snapshot["input_digest"])
+                    if cached:
+                        snapshot["cached_review"] = cached
+                    else:
+                        pending_numbers.add(snapshot["number"])
+                if pending_numbers:
+                    # Keep the frozen code and inventory, refresh only unfinished issue inputs.
+                    fresh = issues.plan_issues(root, config, plan["target"], command, deadline=setup_deadline,
+                                               numbers=pending_numbers, hydrate=False)
+                    refreshed = {row["number"]: row for row in fresh["issues"]}
+                    plan["issues"] = [refreshed.get(row["number"], row) for row in plan["issues"]]
+                    plan["open_pull_requests"] = fresh["open_pull_requests"]
+                    plan["issue_inputs"] = fresh["issue_inputs"]
+                receipt["resumed_from"] = str(previous)
+            else:
+                if not mirror.exists():
+                    bounded([config["git"], "init", "--bare", str(mirror)])
+                    bounded([config["git"], "--git-dir", str(mirror), "remote", "add", "origin", config["repository_url"]])
+                def git(*args):
+                    return bounded([config["git"], "--git-dir", str(mirror), *args])
+                git("fetch", "origin", "+refs/heads/main:refs/heads/main")
+                target = git("rev-parse", "refs/heads/main")
+                plan = issues.plan_issues(root, config, target, command, deadline=setup_deadline,
+                                          full_scan=True, hydrate=False)
+                source = run / "source"
+                archive = run / "source.tar"
+                git("archive", "--output=" + str(archive), target)
+                source.mkdir()
+                with tarfile.open(archive) as bundle:
+                    bundle.extractall(source, filter="data")
+                restore_review_instructions(git, target, source)
+                plan["source_dir"] = str(source)
+            write_json(run / "plan.json", plan)
+            # Manual backfills are bounded per issue, independently of the daily 12000-second ceiling.
+            deadline = time.monotonic() + max(1, len(plan["issues"])) * config.get("issue_unit_timeout_seconds", 600)
+            receipt["issues"] = issues.process_issues(root, config, run / "issues", source, plan, deadline,
+                                                       invoke_agent, FINDING_SCHEMA, validate_finding, command=command)
+            receipt.update({"status": receipt["issues"]["status"], "target": plan["target"], "finished_at": now()})
+            write_json(run / "receipt.json", receipt)
+            write_json(root / "last-backfill.json", receipt)
+            return receipt
+        except Exception as exc:
+            receipt.update({"status": "failed", "error": str(exc), "finished_at": now()})
+            write_json(run / "receipt.json", receipt)
+            write_json(root / "last-backfill.json", receipt)
+            raise
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["run", "status"])
+    parser.add_argument("action", choices=["run", "status", "issues-backfill"])
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--smoke", action="store_true", help="test the model and sandbox without reviewing or advancing")
     parser.add_argument("--dry-run", action="store_true", help="fetch and plan only; do not call the model or advance")
+    parser.add_argument("--resume-run", type=Path, help="resume a frozen issues-backfill run; completed identities are reused")
     args = parser.parse_args()
+    if args.resume_run and args.action != "issues-backfill":
+        parser.error("--resume-run requires issues-backfill")
+    if args.action == "issues-backfill" and (args.smoke or args.dry_run):
+        parser.error("issues-backfill cannot be combined with --smoke or --dry-run")
     root = args.state_dir.expanduser().resolve()
     if args.action == "status":
         print(json.dumps({name: json.loads((root / name).read_text()) for name in ("state.json", "issue-state.json", "last-run.json") if (root / name).exists()}, ensure_ascii=False, indent=2))
         return 0
     try:
-        print(json.dumps(run_once(root, smoke=args.smoke, dry_run=args.dry_run), ensure_ascii=False, indent=2))
+        result = run_issue_backfill(root, resume_run=args.resume_run) if args.action == "issues-backfill" else run_once(
+            root, smoke=args.smoke, dry_run=args.dry_run)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if args.action == "issues-backfill" and result["status"] == "partial":
+            return 2
         return 0
     except Exception as exc:
         print(f"daily code-health review failed: {exc}", file=sys.stderr)

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+import json
+import subprocess
+import sys
 import time
 
 import pytest
@@ -11,6 +14,181 @@ from scripts.code_health_review import agent_command, restore_review_instruction
 
 
 A, B, C, D = [letter * 40 for letter in "abcd"]
+BACKFILL_REPORT = "原报告、完整讨论、冻结目标、真实入口及上下游、验证命令、退出码和证据缺口均已核对，结论与下一步单独记录。" * 8
+
+
+@pytest.fixture
+def backfill_environment(tmp_path, monkeypatch):
+    source = tmp_path / "repository"
+    source.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(source), *args], text=True).strip()
+
+    git("init", "-q", "-b", "main")
+    (source / "AGENTS.md").write_text("Read-only review fixture")
+    (source / "example.py").write_text("value = 0\n")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    (source / "example.py").write_text("value = 1\n")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "current")
+    root = tmp_path / "state"
+    root.mkdir()
+    (root / "previous.md").write_text("Previous verified review")
+    review.write_json(root / "state.json", {"cursor": base, "last_review": str(root / "previous.md")})
+    config = {"git": "git", "gh": "github-fixture", "repository": "fixture/repo", "repository_url": str(source),
+              "timeout_seconds": 12000, "review_budget_seconds": 6600, "issue_timeout_seconds": 3600,
+              "issue_unit_timeout_seconds": 600, "review_unit_timeout_seconds": 600,
+              "issues_enabled": True, "repair_enabled": False, "max_units": 10}
+    review.write_json(root / "config.json", config)
+    review.write_json(root / "installation.json", {"next_calendar_trigger": "unchanged"})
+    review.write_json(root / "last-run.json", {"mode": "daily", "status": "unchanged"})
+    inventory = [{"number": number, "title": f"Issue {number}", "body": "Original trigger", "state": "open",
+                  "updated_at": "2026-11-07", "assignees": [],
+                  "html_url": f"https://github.com/fixture/repo/issues/{number}"} for number in range(1, 65)]
+    calls = []
+    original = review.command
+
+    def command(argv, **kwargs):
+        calls.append(argv)
+        if argv[0] != "github-fixture":
+            return original(argv, **kwargs)
+        assert not any(word in argv for word in ("-X", "PATCH", "POST", "--method", "--input", "--field"))
+        if argv[1:3] == ["issue", "list"]:
+            return json.dumps(inventory)
+        assert argv[:2] == ["github-fixture", "api"]
+        path = argv[-1].removeprefix("repos/fixture/repo/")
+        if path.startswith("issues?"):
+            return json.dumps([inventory])
+        if path.startswith("pulls?"):
+            return "[[]]"
+        if path.startswith("commits/"):
+            return "[]"
+        if "/comments?" in path or "/timeline?" in path:
+            return "[[]]"
+        return json.dumps(next(row for row in inventory if row["number"] == int(path.split("/")[1])))
+
+    monkeypatch.setattr(review, "command", command)
+    return root, config, inventory, calls, git
+
+
+def backfill_decision(run, number, outcome):
+    work = run / "work"
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "probe.log").write_text(json.dumps({"command": "probe original-trigger", "exit_code": 0,
+                                               "output": "expected=1 actual=" + ("1" if outcome == "already_fixed" else "2")}) + "\n")
+    finding = {"key": f"example:failure-{number}", "title": f"Failure {number}", "owner_path": "example.py",
+               "failure_scenario": "original trigger", "expected": "1", "actual": "2", "evidence_log": "probe.log",
+               "fix_scope": ["example.py", "tests/test_example.py"]} if outcome == "confirmed" else None
+    closure = {"reason": "Original trigger now passes the complete expected assertions", "fix_commit": "",
+               "verification_log": "probe.log", "commands": [{"command": "probe original-trigger", "exit_code": 0}]} if outcome == "already_fixed" else None
+    return {"outcome": "complete", "report_markdown": BACKFILL_REPORT, "reviews": [{
+        "number": number, "outcome": outcome, "report_markdown": BACKFILL_REPORT,
+        "comment_draft": "Local recommendation only; GitHub remains open", "finding": finding,
+        "closure_evidence": closure,
+    }]}
+
+
+def test_backfill_scans_64_checkpoints_batches_and_resumes_only_pending(backfill_environment, monkeypatch, capsys):
+    root, _, inventory, calls, _ = backfill_environment
+    preserved = {name: (root / name).read_bytes() for name in ("state.json", "config.json", "installation.json", "last-run.json")}
+    invoked = []
+
+    def invoke(config, run, prompt, **kwargs):
+        number = json.loads((run / "plan.json").read_text())["issues"][0]["number"]
+        invoked.append(number)
+        assert config["timeout_seconds"] <= 600
+        if number == 2:
+            raise TimeoutError("one issue timed out")
+        outcome = "already_fixed" if number % 4 == 0 else "confirmed" if number % 4 == 1 else "needs_decision"
+        return backfill_decision(run, number, outcome)
+
+    monkeypatch.setattr(review, "invoke_agent", invoke)
+    receipt = review.run_issue_backfill(root)
+    summary = receipt["issues"]["summary"]
+    assert receipt["status"] == "partial"
+    assert sorted(invoked) == [row["number"] for row in inventory]
+    assert summary["counts"] == {"close_recommended": 16, "repair": 16, "needs_decision": 31, "pending": 1}
+    assert summary["pending"] == [2]
+    assert [len(batch) for batch in summary["closure_batches"]] == [10, 6]
+    assert summary["github_closed"] == []
+    run = Path(receipt["run_dir"])
+    assert len(list((run / "issues/items").glob("*/result.json"))) == 63
+    assert (run / "issues/items/2/pending.json").exists()
+    assert "建议关闭" in (run / "issues/report.md").read_text()
+    printed = capsys.readouterr().out
+    assert '"issue_batch": 1' in printed and '"issue_batch": 7' in printed
+    for name, original in preserved.items():
+        assert (root / name).read_bytes() == original
+    before = len(calls)
+    original_plan = json.loads((run / "plan.json").read_text())
+    original_input = next(row["input_digest"] for row in original_plan["issues"] if row["number"] == 2)
+    inventory[1].update({"updated_at": "2026-11-08", "body": "Original trigger plus clarification"})
+    resumed = []
+
+    def finish(config, stage, prompt, **kwargs):
+        resumed_plan = json.loads((stage / "plan.json").read_text())
+        number = resumed_plan["issues"][0]["number"]
+        assert resumed_plan["target"] == original_plan["target"]
+        assert resumed_plan["issues"][0]["input_digest"] != original_input
+        assert resumed_plan["issues"][0]["issue"]["body"] == inventory[1]["body"]
+        resumed.append(number)
+        return backfill_decision(stage, number, "needs_decision")
+
+    monkeypatch.setattr(review, "invoke_agent", finish)
+    complete = review.run_issue_backfill(root, resume_run=run)
+    assert complete["status"] == "complete"
+    assert resumed == [2]
+    assert complete["issues"]["summary"]["counts"] == {
+        "close_recommended": 16, "repair": 16, "needs_decision": 32, "pending": 0}
+    assert not any("fetch" in argv for argv in calls[before:])
+    assert sum("issues?" in argv[-1] for argv in calls[before:]) == 1
+    assert len(list((root / "repairs").glob("*/task.json"))) == 16
+    for name, original in preserved.items():
+        assert (root / name).read_bytes() == original
+
+
+def test_daily_phase_caps_are_independent_and_saved_time_is_available_to_repair(backfill_environment, monkeypatch):
+    root, config, inventory, _, git = backfill_environment
+    source = Path(config["repository_url"])
+    (source / "example.py").write_text("value = 2\n")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "next")
+    inventory[:] = inventory[:2]
+    config.update({"review_budget_seconds": 600, "issue_timeout_seconds": 600, "repair_enabled": True,
+                   "review_timeout_seconds": 9000})
+    review.write_json(root / "config.json", config)
+    clock = [0]
+    monkeypatch.setattr(review.time, "monotonic", lambda: clock[0])
+    calls = []
+
+    def invoke(stage_config, stage, prompt, **kwargs):
+        plan = json.loads((stage / "plan.json").read_text())
+        calls.append(("issue" if "issues" in plan else "commit", stage_config["timeout_seconds"]))
+        clock[0] += stage_config["timeout_seconds"]
+        if "issues" in plan:
+            return backfill_decision(stage, plan["issues"][0]["number"], "needs_decision")
+        return {"outcome": "complete", "completed_commits": [plan["commits"][0]["sha"]],
+                "report_markdown": BACKFILL_REPORT, "verification_gaps": [], "confirmed_findings": []}
+
+    repair_budget = []
+    monkeypatch.setattr(review, "invoke_agent", invoke)
+    monkeypatch.setattr(review.repair, "repair_one", lambda root, config, run, deadline, invoke, **kwargs:
+                        repair_budget.append(deadline - clock[0]) or {"status": "no_pending_repairs"})
+    receipt = review.run_once(root)
+    assert calls == [("commit", 600), ("issue", 600)]
+    assert receipt["status"] == "partial"
+    assert receipt["issues"]["status"] == "partial"
+    assert receipt["issues"]["summary"]["pending"] == [2]
+    assert repair_budget == [10800]
+
+
+def test_backfill_partial_exit_is_not_reported_as_success(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "argv", ["code_health_review.py", "issues-backfill", "--state-dir", str(tmp_path)])
+    monkeypatch.setattr(review, "run_issue_backfill", lambda *args, **kwargs: {"status": "partial"})
+    assert review.main() == 2
 
 
 def fake_git(*args):
@@ -159,7 +337,7 @@ def test_daily_review_invokes_one_model_per_planned_commit(tmp_path, monkeypatch
     monkeypatch.setattr(review, "command", command)
     monkeypatch.setattr(review, "invoke_agent", invoke)
     monkeypatch.setattr(review.time, "monotonic", lambda: 0)
-    monkeypatch.setattr(review.repair, "repair_one", lambda *args: {"status": "no_pending_repairs"})
+    monkeypatch.setattr(review.repair, "repair_one", lambda *args, **kwargs: {"status": "no_pending_repairs"})
     receipt = review.run_once(root)
     assert calls == [600] * unit_count
     assert len(receipt["review_units"]) == unit_count
@@ -364,7 +542,8 @@ def test_daily_run_resumes_pending_repair_without_new_prs(tmp_path, monkeypatch,
         raise AssertionError(argv)
     monkeypatch.setattr(review, "command", command)
     observed = []
-    def resume(root, config, run, deadline, invoke):
+    def resume(root, config, run, deadline, invoke, *, revalidate_issue=None):
+        assert callable(revalidate_issue)
         observed.append(root)
         return {"status": "awaiting_delivery_authorization", "id": "existing"}
     monkeypatch.setattr(review.repair, "repair_one", resume)
