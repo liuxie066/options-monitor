@@ -17,6 +17,112 @@ A, B, C, D = [letter * 40 for letter in "abcd"]
 BACKFILL_REPORT = "原报告、完整讨论、冻结目标、真实入口及上下游、验证命令、退出码和证据缺口均已核对，结论与下一步单独记录。" * 8
 
 
+@pytest.mark.parametrize(("total", "intake", "expected"), [
+    (12000, 3600, {"total": 12000, "review": 6600, "issues": 3600, "repair_reserved": 1800}),
+    (3600, 600, {"total": 3600, "review": 1200, "issues": 600, "repair_reserved": 1800}),
+    (1800, 3600, {"total": 1800, "review": 0, "issues": 0, "repair_reserved": 1800}),
+])
+def test_repair_reservation_precedes_both_audit_caps(total, intake, expected):
+    config = {"timeout_seconds": total, "issue_timeout_seconds": intake,
+              "issues_enabled": True, "repair_enabled": True}
+    assert review.phase_budgets(config) == expected
+    assert sum(expected[key] for key in ("review", "issues", "repair_reserved")) <= total
+
+
+def test_enabled_repair_cannot_silently_reserve_zero_budget():
+    with pytest.raises(ValueError, match="reserved repair budget"):
+        review.phase_budgets({"repair_enabled": True, "repair_budget_seconds": 0})
+    assert review.phase_budgets({"repair_enabled": True, "repair_budget_seconds": 0}, smoke=True)["repair_reserved"] == 0
+
+
+@pytest.mark.parametrize("authorized", [False, True])
+def test_daily_cli_passes_only_explicit_delivery_and_exact_head_approval(tmp_path, monkeypatch, authorized):
+    task = "1" * 16
+    flags = ["--deliver-repairs", "--approve-repair-merge", f"{task}={A}"] if authorized else []
+    monkeypatch.setattr(sys, "argv", ["code_health_review.py", "run", "--state-dir", str(tmp_path), *flags])
+    observed = []
+    def daily(root, **kwargs):
+        observed.append((root, kwargs))
+        return {"status": "complete"}
+    monkeypatch.setattr(review, "run_once", daily)
+    assert review.main() == 0
+    assert observed == [(tmp_path, {"smoke": False, "dry_run": False, "deliver_repairs": authorized,
+                                   "merge_approvals": {task: A} if authorized else {}})]
+
+
+@pytest.mark.parametrize("args", [
+    ["issues-backfill", "--deliver-repairs"], ["status", "--deliver-repairs"],
+    ["run", "--deliver-repairs", "--dry-run"], ["run", "--deliver-repairs", "--smoke"],
+    ["run", "--approve-repair-merge", "1" * 16 + "=" + A],
+    ["run", "--deliver-repairs", "--approve-repair-merge", "1" * 16 + "=latest"],
+])
+def test_invalid_delivery_cli_cannot_enter_any_runner(tmp_path, monkeypatch, args):
+    monkeypatch.setattr(sys, "argv", ["code_health_review.py", *args, "--state-dir", str(tmp_path)])
+    forbidden = []
+    def runner(*args, **kwargs):
+        forbidden.append(True)
+        raise AssertionError("runner must not execute")
+    monkeypatch.setattr(review, "run_once", runner)
+    monkeypatch.setattr(review, "run_issue_backfill", runner)
+    with pytest.raises(SystemExit) as failure:
+        review.main()
+    assert failure.value.code == 2 and forbidden == [] and list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("mode", ["smoke", "dry_run"])
+def test_direct_daily_api_cannot_authorize_remote_delivery_in_readonly_mode(tmp_path, mode):
+    with pytest.raises(ValueError, match="remote repair delivery"):
+        review.run_once(tmp_path, **{mode: True}, deliver_repairs=True)
+
+
+def test_ready_delivery_gets_bounded_turn_without_starving_local_repairs(tmp_path, monkeypatch):
+    clock, phases = [0], []
+    monkeypatch.setattr(review.time, "monotonic", lambda: clock[0])
+    def delivery(root, config, run, deadline, *, authorized, merge_approvals, exclude=()):
+        assert authorized and merge_approvals == {"old": A}
+        phases.append(("delivery", deadline, exclude))
+        first = not exclude
+        if first:
+            assert deadline == 120
+            clock[0] += 120
+        else:
+            assert exclude == ["old"] and deadline == 1800
+        task = "old" if first else "new"
+        return {"processed": [task], "results": [{"id": task, "merge_proven": not first}],
+                "prs": [{"id": task, "created": not first}], "merged": [] if first else ["new"],
+                "closed": [] if first else [7], "manual_todo": []}
+    def local(root, config, run, deadline, invoke, **kwargs):
+        phases.append(("local", deadline - clock[0]))
+        clock[0] += 100
+        return {"status": "complete", "entered": True, "attempted": ["new"], "local_verified": ["new"],
+                "inventory": {"pending": [], "blocked": ["blocked"], "ready": ["old", "new"]},
+                "manual_todo": [{"id": "old"}, {"id": "blocked", "reason": "retained failure"}]}
+    monkeypatch.setattr(review.repair, "deliver_repairs", delivery)
+    monkeypatch.setattr(review.repair, "run_repairs", local)
+    result = review.run_repair_phase(tmp_path, {"_deliver_repairs": True, "_merge_approvals": {"old": A}},
+                                     tmp_path, tmp_path, None, None, None, 1800)
+    assert phases == [("delivery", 120, ()), ("local", 1680), ("delivery", 1800, ["old"])]
+    assert result["attempted"] == result["local_verified"] == result["merged"] == ["new"]
+    assert result["prs_created"] == [{"id": "new", "created": True}] and result["closed"] == [7]
+    assert result["inventory"]["ready"] == ["old"] and result["inventory"]["merged"] == ["new"]
+    assert result["manual_todo"] == [{"id": "blocked", "reason": "retained failure"}]
+
+
+def test_daily_summary_separates_intake_local_verification_pr_and_merge(tmp_path):
+    receipt = {"completed_commits": [A], "repair_tasks": ["queued"], "issues": {"reviewed": [7]},
+               "repair": {"attempted": ["old"], "local_verified": ["old"], "prs": [{"id": "old"}],
+                          "prs_created": [], "merged": [], "closed": [],
+                          "inventory": {"pending": ["queued"], "blocked": ["failed"], "ready": ["old"]},
+                          "manual_todo": [{"id": "failed", "reason": "real failure", "needed_action": "refresh environment"}]}}
+    review.save_daily_summary(tmp_path, receipt)
+    saved = json.loads((tmp_path / "daily-summary.json").read_text())
+    assert saved == receipt["daily_summary"]
+    assert saved["queued_repairs"] == ["queued"] and saved["local_verified"] == ["old"]
+    assert saved["prs_created"] == saved["merged"] == saved["closed"] == []
+    assert saved["pending"] == ["queued"] and saved["blocked"] == ["failed"] and saved["ready"] == ["old"]
+    assert saved["manual_todo"][0]["reason"] == "real failure"
+
+
 @pytest.fixture
 def backfill_environment(tmp_path, monkeypatch):
     source = tmp_path / "repository"
@@ -175,7 +281,7 @@ def test_daily_phase_caps_are_independent_and_saved_time_is_available_to_repair(
 
     repair_budget = []
     monkeypatch.setattr(review, "invoke_agent", invoke)
-    monkeypatch.setattr(review.repair, "repair_one", lambda root, config, run, deadline, invoke, **kwargs:
+    monkeypatch.setattr(review.repair, "run_repairs", lambda root, config, run, deadline, invoke, **kwargs:
                         repair_budget.append(deadline - clock[0]) or {"status": "no_pending_repairs"})
     receipt = review.run_once(root)
     assert calls == [("commit", 600), ("issue", 600)]
@@ -183,6 +289,63 @@ def test_daily_phase_caps_are_independent_and_saved_time_is_available_to_repair(
     assert receipt["issues"]["status"] == "partial"
     assert receipt["issues"]["summary"]["pending"] == [2]
     assert repair_budget == [10800]
+
+
+def test_audits_cannot_consume_guaranteed_repair_budget(backfill_environment, monkeypatch):
+    root, config, inventory, _, _ = backfill_environment
+    inventory[:] = inventory[:1]
+    config.update({"timeout_seconds": 3000, "review_budget_seconds": 6600, "issue_timeout_seconds": 600,
+                   "repair_enabled": True, "repair_budget_seconds": 1800})
+    review.write_json(root / "config.json", config)
+    before = (root / "config.json").read_bytes()
+    clock = [0]
+    monkeypatch.setattr(review.time, "monotonic", lambda: clock[0])
+
+    def invoke(stage_config, stage, prompt, **kwargs):
+        plan = json.loads((stage / "plan.json").read_text())
+        assert stage_config["timeout_seconds"] == 600
+        clock[0] += 600
+        if "issues" in plan:
+            return backfill_decision(stage, 1, "needs_decision")
+        return {"outcome": "complete", "completed_commits": [plan["commits"][0]["sha"]],
+                "report_markdown": BACKFILL_REPORT, "verification_gaps": [], "confirmed_findings": []}
+
+    observed = []
+    def advance(root, config, run, deadline, invoke, **kwargs):
+        observed.append(deadline - clock[0])
+        return {"status": "complete", "entered": True, "attempted": ["legacy-task"], "local_verified": [],
+                "inventory": {"pending": ["legacy-task"], "blocked": ["manual-task"], "needs_triage": [], "ready": []}}
+
+    monkeypatch.setattr(review, "invoke_agent", invoke)
+    monkeypatch.setattr(review.repair, "run_repairs", advance)
+    receipt = review.run_once(root)
+    assert observed == [1800]
+    assert receipt["budgets"] == {"total": 3000, "review": 600, "issues": 600, "repair_reserved": 1800}
+    assert receipt["daily_summary"]["repair_attempted"] == ["legacy-task"]
+    assert receipt["daily_summary"]["merged"] == []
+    assert receipt["daily_summary"]["blocked"] == ["manual-task"]
+    assert (root / "config.json").read_bytes() == before
+
+
+def test_failed_preparation_still_enters_repair_phase(backfill_environment, monkeypatch):
+    root, config, _, _, _ = backfill_environment
+    config.update({"repair_enabled": True})
+    review.write_json(root / "config.json", config)
+    original = review.command
+    def fail_fetch(argv, **kwargs):
+        if "fetch" in argv:
+            raise TimeoutError("main fetch unavailable")
+        return original(argv, **kwargs)
+    entered = []
+    def advance(*args, **kwargs):
+        entered.append(True)
+        return {"status": "partial", "entered": True, "attempted": [], "inventory": {"pending": ["retained"]}}
+    monkeypatch.setattr(review, "command", fail_fetch)
+    monkeypatch.setattr(review.repair, "run_repairs", advance)
+    receipt = review.run_once(root)
+    assert receipt["status"] == "pending" and entered == [True]
+    assert receipt["repair"]["entered"] is True
+    assert receipt["daily_summary"]["pending"] == ["retained"]
 
 
 def test_backfill_partial_exit_is_not_reported_as_success(monkeypatch, tmp_path):
@@ -321,6 +484,7 @@ def test_daily_review_invokes_one_model_per_planned_commit(tmp_path, monkeypatch
     review.write_json(root / "config.json", {
         "git": "git", "gh": "github-client", "repository": "fixture/repo", "repository_url": str(source),
         "timeout_seconds": 1800, "review_timeout_seconds": 900, "max_units": 10, "repair_enabled": True,
+        "repair_budget_seconds": 30,
     })
     original_command = review.command
     calls = []
@@ -337,7 +501,7 @@ def test_daily_review_invokes_one_model_per_planned_commit(tmp_path, monkeypatch
     monkeypatch.setattr(review, "command", command)
     monkeypatch.setattr(review, "invoke_agent", invoke)
     monkeypatch.setattr(review.time, "monotonic", lambda: 0)
-    monkeypatch.setattr(review.repair, "repair_one", lambda *args, **kwargs: {"status": "no_pending_repairs"})
+    monkeypatch.setattr(review.repair, "run_repairs", lambda *args, **kwargs: {"status": "no_pending_repairs"})
     receipt = review.run_once(root)
     assert calls == [600] * unit_count
     assert len(receipt["review_units"]) == unit_count
@@ -546,7 +710,7 @@ def test_daily_run_resumes_pending_repair_without_new_prs(tmp_path, monkeypatch,
         assert callable(revalidate_issue)
         observed.append(root)
         return {"status": "awaiting_delivery_authorization", "id": "existing"}
-    monkeypatch.setattr(review.repair, "repair_one", resume)
+    monkeypatch.setattr(review.repair, "run_repairs", resume)
     receipt = review.run_once(tmp_path)
     assert receipt["status"] == "no_changes"
     assert receipt["repair"]["status"] == "awaiting_delivery_authorization"

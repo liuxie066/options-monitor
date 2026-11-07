@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import time
@@ -39,7 +40,8 @@ AUDIT_SCHEMA = {
     "required": ["verdict", "report_markdown", "findings"],
     "additionalProperties": False,
 }
-TERMINAL = {"awaiting_delivery_authorization", "needs_triage", "blocked"}
+TERMINAL = {"awaiting_delivery_authorization", "needs_triage", "blocked", "merged"}
+REQUIRED_REPAIR_CHECKS = {"checks"} | {f"regression ({shard})" for shard in range(8)}
 
 
 def timestamp():
@@ -53,19 +55,28 @@ def save(path: Path, value: dict):
     temporary.replace(path)
 
 
-def run(argv, *, cwd=None):
-    result = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, timeout=180)
+def run(argv, *, cwd=None, timeout=180):
+    result = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, timeout=timeout)
     if result.returncode:
         raise RuntimeError(f"{argv[0]} exited {result.returncode}: {result.stderr[:1000]}")
     return result.stdout.strip()
 
 
+def _git_timeout(config):
+    if "_repair_deadline" not in config:
+        return 180
+    remaining = config["_repair_deadline"] - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("daily repair budget exhausted")
+    return min(180, remaining)
+
+
 def git(config, tree, *args):
-    return run([config["git"], "-C", str(tree), *args])
+    return run([config["git"], "-C", str(tree), *args], timeout=_git_timeout(config))
 
 
-def changed_paths(config, tree):
-    tracked = git(config, tree, "diff", "--name-only", "HEAD").splitlines()
+def changed_paths(config, tree, *, base_sha="HEAD"):
+    tracked = git(config, tree, "diff", "--name-only", base_sha).splitlines()
     untracked = git(config, tree, "ls-files", "--others", "--exclude-standard").splitlines()
     return sorted(set(tracked + untracked))
 
@@ -107,6 +118,8 @@ def persist_findings(root, review_run, result, target, *, source=None):
             )
         else:
             task = json.loads(record.read_text())
+            if task["status"] == "merged" and target != task["base_sha"]:
+                task.update({"status": "needs_triage", "last_error": f"new confirmation at {target} after a merged repair; inspect recurrence before reusing delivery"})
             task.setdefault("sources", [])
             task.setdefault("related_evidence", [])
             for origin in sources:
@@ -223,7 +236,7 @@ def dependency_inputs_match(config, root, base):
     if not anchor or not Path(config.get("verification_python", "")).is_file():
         raise ValueError("no verified dependency environment is configured")
     changed = run([config["git"], "--git-dir", str(root / "repository.git"), "diff", "--name-only", anchor, base,
-                   "--", "requirements", "constraints", "plugins", "pyproject.toml"])
+                   "--", "requirements", "constraints", "plugins", "pyproject.toml"], timeout=_git_timeout(config))
     if changed:
         raise ValueError("repair dependency inputs changed since the verified environment; human environment refresh required")
 
@@ -243,11 +256,40 @@ def _issue_repair_matches(task, config, issue_state):
     return True
 
 
-def repair_one(root, config, run_dir, deadline, invoke, *, revalidate_issue=None):
+def _admission_reason(task, all_tasks, config, issue_state):
+    older_conflicts = [other["id"] for _, other in all_tasks if other["id"] != task["id"]
+                       and other["status"] not in {"needs_triage", "blocked", "merged"}
+                       and (datetime.fromisoformat(other["created_at"]), other["id"])
+                       < (datetime.fromisoformat(task["created_at"]), task["id"])
+                       and set(other["finding"]["fix_scope"]) & set(task["finding"]["fix_scope"])]
+    if older_conflicts:
+        return "overlapping earlier local work requires resolution: " + ", ".join(older_conflicts)
+    if not _issue_repair_matches(task, config, issue_state):
+        return "issue changed, is unconfirmed, or awaits current intake verification"
+    return None
+
+
+def _content_files(config, tree, *, base_sha="HEAD"):
+    files = {}
+    for name in changed_paths(config, tree, base_sha=base_sha):
+        path = tree / name
+        if path.is_symlink():
+            files[name] = {"kind": "symlink", "target": os.readlink(path)}
+        elif path.exists():
+            files[name] = {"kind": "file", "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                           "mode": path.stat().st_mode & 0o777}
+        else:
+            files[name] = {"kind": "deleted"}
+    return files
+
+
+def repair_one(root, config, run_dir, deadline, invoke, *, revalidate_issue=None, _task_id=None):
     """Resume one task; revalidate_issue(number) refreshes stale verdicts within the repair deadline."""
+    config = {**config, "_repair_deadline": deadline}
     records = sorted((root / "repairs").glob("*/task.json")) if (root / "repairs").exists() else []
     all_tasks = [(path, json.loads(path.read_text())) for path in records]
-    pending = sorted(((path, task) for path, task in all_tasks if task["status"] not in TERMINAL),
+    pending = sorted(((path, task) for path, task in all_tasks if task["status"] not in TERMINAL
+                      and (_task_id is None or task["id"] == _task_id)),
                      key=lambda row: (datetime.fromisoformat(row[1]["created_at"]), row[1]["id"]))
     if not pending:
         return {"status": "no_pending_repairs"}
@@ -255,16 +297,8 @@ def repair_one(root, config, run_dir, deadline, invoke, *, revalidate_issue=None
     issue_state = json.loads(issue_state_path.read_text())["issues"] if issue_state_path.exists() else {}
     eligible, deferred = [], []
     for path, task in pending:
-        reason = None
-        older_conflicts = [other["id"] for _, other in all_tasks if other["id"] != task["id"]
-                           and other["status"] not in {"needs_triage", "blocked"}
-                           and (datetime.fromisoformat(other["created_at"]), other["id"]) < (datetime.fromisoformat(task["created_at"]), task["id"])
-                           and set(other["finding"]["fix_scope"]) & set(task["finding"]["fix_scope"])]
-        if older_conflicts:
-            reason = "overlapping earlier local work requires resolution: " + ", ".join(older_conflicts)
-        elif not _issue_repair_matches(task, config, issue_state):
-            reason = "issue changed, is unconfirmed, or awaits current intake verification"
-        else:
+        reason = _admission_reason(task, all_tasks, config, issue_state)
+        if reason is None:
             numbers = dict.fromkeys(source["number"] for source in task.get("sources", []) if source["kind"] == "issue")
             for number in numbers:
                 if issue_state[str(number)].get("target") == config["issue_target"]:
@@ -316,6 +350,7 @@ def repair_one(root, config, run_dir, deadline, invoke, *, revalidate_issue=None
     attempt = folder / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + f"-{os.getpid()}")
     attempt.mkdir()
     task["attempts"].append(str(attempt))
+    task["last_attempted_at"] = datetime.now(timezone.utc).isoformat(timespec="microseconds")
     task["verification_python"] = config.get("verification_python", "")
     save(record, task)
     try:
@@ -327,7 +362,8 @@ def repair_one(root, config, run_dir, deadline, invoke, *, revalidate_issue=None
         tree = folder / "worktree"
         if not tree.exists():
             branch = "codex/health-fix-" + task["id"]
-            run([config["git"], "--git-dir", str(root / "repository.git"), "worktree", "add", "-b", branch, str(tree), task["base_sha"]])
+            run([config["git"], "--git-dir", str(root / "repository.git"), "worktree", "add", "-b", branch, str(tree), task["base_sha"]],
+                timeout=_git_timeout(config))
             task.update({"worktree": str(tree), "branch": branch})
             save(record, task)
         if git(config, tree, "rev-parse", "HEAD") != task["base_sha"]:
@@ -365,12 +401,19 @@ def repair_one(root, config, run_dir, deadline, invoke, *, revalidate_issue=None
                 raise ValueError("implementation rewrote the regression used to demonstrate the old defect")
             task.update({"stage": "verify", "status": "pending", "implementation": result})
             save(record, task)
+        if task["stage"] == "independent_review" and "verified_content" not in task:
+            task["stage"] = "verify"
         if task["stage"] == "verify":
+            verified_content = _content_files(config, tree)
             fixed = verify_tests(config, tree, attempt / "fixed", task["reproduction"]["selectors"], remaining_config(config, deadline)["timeout_seconds"])
             validate_test_pair(task["baseline"], fixed)
-            task.update({"stage": "independent_review", "fixed_verification": fixed})
+            if _content_files(config, tree) != verified_content:
+                raise ValueError("repair content changed during verification")
+            task.update({"stage": "independent_review", "fixed_verification": fixed, "verified_content": verified_content})
             save(record, task)
         if task["stage"] == "independent_review":
+            if _content_files(config, tree) != task["verified_content"]:
+                raise ValueError("repair content changed since verification")
             stage = attempt / "independent-review"
             (attempt / "fix.patch").write_text(git(config, tree, "diff", "--binary", "HEAD") + "\n", encoding="utf-8")
             result = invoke(remaining_config(config, deadline), stage, prompt(task, tree,
@@ -382,6 +425,13 @@ def repair_one(root, config, run_dir, deadline, invoke, *, revalidate_issue=None
                 check_scope(changed_paths(config, tree), scope)
                 if file_hashes(tree, task["reproduction"]["test_paths"]) != task["test_hashes"]:
                     raise ValueError("reviewed regression content changed")
+                if _content_files(config, tree) != task["verified_content"]:
+                    raise ValueError("reviewed repair content changed")
+                manifest = folder / "approved-content.json"
+                save(manifest, {"task_id": task["id"], "base_sha": task["base_sha"], "branch": task["branch"],
+                                "worktree": str(tree), "files": task["verified_content"], "attempt": str(attempt),
+                                "verification": task["fixed_verification"], "review_report": str(stage / "report.md")})
+                task["approved_content_manifest"] = str(manifest)
                 (folder / "pr-draft.md").write_text(
                     f"# {task['implementation']['pr_title']}\n\n{task['implementation']['pr_body']}\n\n"
                     f"本地交付：分支 `{task['branch']}`，基线 `{task['base_sha']}`。\n\n"
@@ -395,7 +445,7 @@ def repair_one(root, config, run_dir, deadline, invoke, *, revalidate_issue=None
                 task["status"] = "blocked"
             save(record, task)
         return {"id": task["id"], "status": task["status"], "stage": task["stage"], "record": str(record)}
-    except TimeoutError as exc:
+    except (TimeoutError, subprocess.TimeoutExpired) as exc:
         task.update({"status": "pending", "last_error": str(exc)})
         save(record, task)
         return {"id": task["id"], "status": "pending", "stage": task["stage"], "reason": str(exc)}
@@ -403,3 +453,367 @@ def repair_one(root, config, run_dir, deadline, invoke, *, revalidate_issue=None
         task.update({"status": "blocked", "last_error": str(exc)})
         save(record, task)
         return {"id": task["id"], "status": "blocked", "stage": task["stage"], "reason": str(exc)}
+
+
+def _attempt_order(row):
+    _, task = row
+    created = datetime.fromisoformat(task["created_at"])
+    last = created
+    if task.get("attempts"):
+        if task.get("last_attempted_at"):
+            last = datetime.fromisoformat(task["last_attempted_at"])
+        else:
+            try:
+                last = datetime.strptime(Path(task["attempts"][-1]).name.split("-")[0], "%Y%m%dT%H%M%S%fZ").replace(tzinfo=timezone.utc)
+            except ValueError:
+                last = datetime.fromisoformat(task.get("updated_at", task["created_at"]))
+    return bool(task.get("attempts")), last, created, task["id"]
+
+
+def _manual_todo(path, task, reason):
+    delivery = task.get("delivery", {})
+    if task["status"] == "merged":
+        reason = delivery.get("last_result", {}).get("reason") or "merge is proven; source issue closing is incomplete"
+        action = "Inspect the saved merge proof and closing readbacks, then resume authorized delivery without reimplementing the repair."
+    elif task["status"] == "awaiting_delivery_authorization":
+        reason = "local verification approved; delivery requires explicit human authorization"
+        action = "Review the approved content manifest and explicitly authorize delivery of these exact files."
+        if not task.get("approved_content_manifest"):
+            reason = "existing local approval has no content manifest binding the tested and reviewed files"
+            action = "Reverify and independently review the existing files to bind a content manifest before authorizing delivery."
+        elif delivery.get("last_result"):
+            last = delivery["last_result"]
+            reason = last.get("reason") or last["status"]
+            action = f"Inspect PR {delivery.get('pr_url')} and delivery evidence; resolve CI/blockers before approving {task['id']}={delivery.get('head')}."
+    elif reason.startswith("overlapping earlier"):
+        action = "Resolve the earlier overlapping task(s) listed in this reason before resuming this existing task."
+    elif reason.startswith("human baseline migration"):
+        action = "Review the preserved work and explicitly migrate its implementation/regression to the current verified baseline."
+    elif reason.startswith("issue"):
+        action = "Refresh the issue evidence, ownership and current-target validation before resuming this existing task."
+    elif task["status"] == "needs_triage":
+        action = "Review the recorded reproduction and decide the missing evidence, environment or disposition for this existing task."
+    else:
+        action = "Resolve the recorded blocker using the linked evidence, then explicitly resume this existing task."
+    return {"id": task["id"], "status": task["status"], "reason": reason, "needed_action": action,
+            "evidence": {"record": str(path), "initial": task.get("evidence"),
+                         "related": task.get("related_evidence", []), "attempts": task.get("attempts", []),
+                         "last_result": task.get("last_result"), "independent_review": task.get("independent_review"),
+                         "approved_content_manifest": task.get("approved_content_manifest"), "delivery": delivery}}
+
+
+def run_repairs(root, config, run_dir, deadline, invoke, *, revalidate_issue=None):
+    """Run distinct existing tasks locally; the outer issue callback accepts (number, *, deadline)."""
+    limit = int(config.get("max_repairs", 3))
+    unit_seconds = float(config.get("repair_unit_timeout_seconds", 600))
+    if limit < 0 or unit_seconds <= 0:
+        raise ValueError("max_repairs must be nonnegative and repair_unit_timeout_seconds must be positive")
+
+    def records():
+        return [(path, json.loads(path.read_text())) for path in sorted((root / "repairs").glob("*/task.json"))]
+
+    def issue_state():
+        path = root / "issue-state.json"
+        return json.loads(path.read_text())["issues"] if path.exists() else {}
+
+    queue = sorted((row for row in records() if row[1]["status"] not in TERMINAL), key=_attempt_order)
+    results, processed, attempted, local_verified, deferred = [], [], [], [], {}
+    for path, original in queue:
+        if len(processed) >= limit or deadline - time.monotonic() < 30:
+            break
+        task = json.loads(path.read_text())
+        if task["status"] in TERMINAL:
+            continue
+        reason = _admission_reason(task, records(), config, issue_state())
+        if reason:
+            deferred[task["id"]] = reason
+            continue
+        unit_deadline = min(deadline, time.monotonic() + unit_seconds)
+
+        def revalidate(number):
+            remaining_config(config, unit_deadline)
+            revalidate_issue(number, deadline=unit_deadline)
+            remaining_config(config, unit_deadline)
+
+        processed.append(task["id"])
+        try:
+            result = repair_one(root, config, run_dir, unit_deadline, invoke,
+                                revalidate_issue=revalidate if revalidate_issue is not None else None,
+                                _task_id=task["id"])
+        except (TimeoutError, subprocess.TimeoutExpired) as exc:
+            result = {"id": task["id"], "status": "pending", "reason": str(exc)}
+        except Exception as exc:
+            result = {"id": task["id"], "status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+        results.append({"id": task["id"], **result})
+        latest = json.loads(path.read_text())
+        if len(latest.get("attempts", [])) > len(original.get("attempts", [])):
+            attempted.append(task["id"])
+        if result["status"] == "awaiting_delivery_authorization":
+            local_verified.append(task["id"])
+        for item in result.get("tasks", []):
+            deferred[item["id"]] = item["reason"]
+
+    all_tasks, latest_issues = records(), issue_state()
+    inventory = {name: [] for name in ("pending", "blocked", "needs_triage", "ready", "merged")}
+    manual = []
+    for path, task in all_tasks:
+        status = task["status"]
+        inventory["ready" if status == "awaiting_delivery_authorization" else status if status in inventory else "pending"].append(task["id"])
+        reason = deferred.get(task["id"])
+        if status not in TERMINAL:
+            reason = reason or _admission_reason(task, all_tasks, config, latest_issues)
+            if reason:
+                deferred[task["id"]] = reason
+        if (status in TERMINAL and not (status == "merged" and task.get("delivery", {}).get("complete"))) or reason:
+            report = task.get("last_result") or task.get("independent_review") or {}
+            reason = reason or task.get("last_error") or report.get("report_markdown") or "recorded task requires human review"
+            manual.append(_manual_todo(path, task, reason))
+    return {"status": "partial" if inventory["pending"] else "complete" if results else "no_pending_repairs",
+            "entered": True, "processed": processed, "results": results, "attempted": attempted,
+            "local_verified": local_verified, "inventory": inventory,
+            "deferred": [{"id": key, "reason": value} for key, value in deferred.items()], "manual_todo": manual}
+
+
+def _delivery_command(config, folder, deadline, argv, *, cwd=None):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("repair delivery budget exhausted")
+    entry = {"argv": argv, "started_at": timestamp()}
+    try:
+        output = run(argv, cwd=cwd, timeout=min(120, remaining))
+        entry.update({"exit_code": 0, "output": output})
+        return output
+    except Exception as exc:
+        entry["error"] = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        with (folder / "delivery-commands.jsonl").open("a", encoding="utf-8") as log:
+            log.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def _delivery_content(root, config, task, tree):
+    manifest_path = Path(task.get("approved_content_manifest", ""))
+    folder = root / "repairs" / task["id"]
+    if not manifest_path.is_file() or not manifest_path.resolve().is_relative_to(folder.resolve()):
+        raise ValueError("delivery requires the existing approved content manifest; human revalidation required")
+    manifest = json.loads(manifest_path.read_text())
+    expected = {"task_id": task["id"], "base_sha": task["base_sha"], "branch": task["branch"], "worktree": str(tree)}
+    if any(manifest.get(key) != value for key, value in expected.items()):
+        raise ValueError("delivery manifest identity does not match this task and worktree")
+    validate_test_pair(task["baseline"], task["fixed_verification"])
+    if (task["baseline"].get("exit_code") != 1 or task["fixed_verification"].get("exit_code") != 0
+            or task.get("independent_review", {}).get("verdict") != "approve"
+            or task["independent_review"].get("findings") != []
+            or manifest.get("verification") != task["fixed_verification"]):
+        raise ValueError("delivery requires actual failing/passing regressions and independent approval")
+    files = manifest.get("files")
+    if not files or files != task.get("verified_content") or files != _content_files(config, tree, base_sha=task["base_sha"]):
+        raise ValueError("delivery content differs from the tested and approved files")
+    check_scope(files, task["finding"]["fix_scope"])
+    if "VERSION" in files or "CHANGELOG.md" in files:
+        raise ValueError("version or release changes require a separate human delivery")
+    if git(config, tree, "branch", "--show-current") != task["branch"]:
+        raise ValueError("repair branch identity changed")
+    dependency_inputs_match(config, root, task["base_sha"])
+    return files
+
+
+def _repair_ci(pr):
+    checks = {}
+    for item in pr.get("statusCheckRollup") or []:
+        name = item.get("name") or item.get("context")
+        state = item.get("conclusion") if item.get("status") == "COMPLETED" else item.get("state")
+        checks.setdefault(name, []).append(state or "PENDING")
+    if any(value in {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+           for values in checks.values() for value in values):
+        return "ci_failed"
+    if (not REQUIRED_REPAIR_CHECKS.issubset(checks)
+            or any(checks[name] != ["SUCCESS"] for name in REQUIRED_REPAIR_CHECKS)
+            or any(value not in {"SUCCESS", "SKIPPED", "NEUTRAL"} for values in checks.values() for value in values)):
+        return "ci_pending"
+    return "passed"
+
+
+def _deliver_one(root, config, run_dir, deadline, record, task, approved_head):
+    folder, tree = record.parent, Path(task["worktree"])
+    delivery = task.setdefault("delivery", {})
+    result = {"id": task["id"], "closed": [], "merged": False}
+    config = {**config, "_repair_deadline": deadline}
+    def execute(*argv):
+        return _delivery_command(config, folder, deadline, list(argv), cwd=tree)
+    def gh(*args):
+        return execute(config["gh"], *args)
+    def api(number, *args):
+        value = json.loads(gh("api", f"repos/{config['repository']}/issues/{number}", *args))
+        if not isinstance(value, dict) or value.get("number") != number or value.get("state") not in {"open", "closed"}:
+            raise ValueError("GitHub issue response is not a positive issue readback")
+        return value
+    def source_issues():
+        numbers = list(dict.fromkeys(source["number"] for source in task.get("sources", []) if source["kind"] == "issue"))
+        if any(type(number) is not int or number <= 0 for number in numbers):
+            raise ValueError("invalid source issue identity")
+        return numbers
+    def ownership():
+        for number in source_issues():
+            issue = api(number)
+            if issue["state"] != "open" or not isinstance(issue.get("assignees"), list) or issue["assignees"]:
+                raise ValueError(f"source issue #{number} changed state or ownership; human revalidation required")
+    def read_pr(ref):
+        pr = json.loads(gh("pr", "view", str(ref), "--repo", config["repository"], "--json",
+                           "number,url,state,headRefOid,headRefName,baseRefName,headRepository,mergeCommit,mergedAt,statusCheckRollup,mergeable,mergeStateStatus"))
+        if (not isinstance(pr, dict) or type(pr.get("number")) is not int
+                or pr.get("headRefOid") != delivery.get("head") or pr.get("headRefName") != task["branch"]
+                or pr.get("baseRefName") != "main" or pr.get("headRepository", {}).get("nameWithOwner") != config["repository"]
+                or pr.get("state") not in {"OPEN", "CLOSED", "MERGED"}):
+            raise ValueError("GitHub PR readback does not match this repository, branch, base and approved head")
+        return pr
+    try:
+        files = _delivery_content(root, config, task, tree)
+        head = git(config, tree, "rev-parse", "HEAD")
+        subject = f"fix(code-health): repair {task['id']}"
+        if head == task["base_sha"]:
+            ownership()
+            execute(config["git"], "add", "--", *files)
+            check_scope(git(config, tree, "diff", "--cached", "--name-only").splitlines(), files)
+            python = config["verification_python"]
+            execute(python, "scripts/guardrails_check.py", "--staged", "--check-doc-wording", "--check-runtime-config-tracking",
+                    "--check-sensitive-artifacts", "--check-public-surface", "--public-surface-base", task["base_sha"])
+            paths = [name for name in files if name.endswith(".py") and (tree / name).is_file()]
+            if paths:
+                execute(python, "-m", "ruff", "check", *paths)
+            execute(python, "scripts/generate_dependency_graph.py", "--check")
+            _delivery_content(root, config, task, tree)
+            execute(config["git"], "diff", "--exit-code")
+            execute(config["git"], "commit", "-m", subject)
+            head = git(config, tree, "rev-parse", "HEAD")
+        # Recover a commit whose command succeeded before its receipt could be saved.
+        if (git(config, tree, "rev-parse", "HEAD^"), git(config, tree, "show", "-s", "--format=%s", "HEAD")) != (task["base_sha"], subject):
+            raise ValueError("delivery HEAD is not this task's single approved repair commit")
+        if delivery.get("head", head) != head or git(config, tree, "status", "--porcelain"):
+            raise ValueError("delivery commit or worktree changed")
+        _delivery_content(root, config, task, tree)
+        delivery.update({"head": head, "run_dir": str(run_dir)})
+        save(record, task)
+        created = False
+        if not delivery.get("pr_url"):
+            existing = json.loads(gh("pr", "list", "--repo", config["repository"], "--head", task["branch"],
+                                     "--state", "all", "--json", "number"))
+            if not isinstance(existing, list) or len(existing) > 1:
+                raise ValueError("repair branch has ambiguous PR ownership")
+            if existing:
+                pr = read_pr(existing[0]["number"])
+            else:
+                ownership()
+                if git(config, tree, "remote", "get-url", "origin") != config["repository_url"]:
+                    raise ValueError("repair push remote differs from the configured repository")
+                execute(config["git"], "push", "origin", f"HEAD:refs/heads/{task['branch']}")
+                # Publish a bounded description; model text cannot inject issue-closing directives.
+                title = re.sub(r"(?i)\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\b", "address", task["finding"]["title"])
+                body = folder / "delivery-body.md"
+                body.write_text(f"{title}\n\nLocal repair `{task['id']}` passed the same regression cases that failed on its base, plus independent review.\n\n"
+                                + "Scope: " + ", ".join(f"`{name}`" for name in files)
+                                + "\n\nRelated issues: " + ", ".join(f"#{number}" for number in source_issues()) + "\n", encoding="utf-8")
+                url = gh("pr", "create", "--repo", config["repository"], "--base", "main", "--head", task["branch"],
+                         "--title", f"fix(code-health): {title}", "--body-file", str(body))
+                if not re.fullmatch(rf"https://github\.com/{re.escape(config['repository'])}/pull/[1-9][0-9]*", url):
+                    raise ValueError("PR creation returned no verified URL; retry by branch lookup")
+                created = True
+                delivery["pr_url"] = url
+                delivery["pr_created_receipt"] = {"url": url, "head": head, "run_dir": str(run_dir), "observed_at": timestamp()}
+                result["pr"] = {"id": task["id"], "number": int(url.rsplit("/", 1)[-1]), "url": url,
+                                "head": head, "created": True, "readback_confirmed": False}
+                save(record, task)
+                pr = read_pr(url)
+            delivery.update({"pr_url": pr["url"], "pr_number": pr["number"]})
+            save(record, task)
+        else:
+            pr = read_pr(delivery["pr_url"])
+        result["pr"] = {"id": task["id"], "number": pr["number"], "url": pr["url"], "head": head, "created": created, "readback_confirmed": True}
+        if pr["state"] == "CLOSED":
+            raise ValueError("repair PR was closed without a merge; human decision required")
+        if pr["state"] != "MERGED":
+            state = _repair_ci(pr)
+            if state != "passed":
+                result["status"] = state
+                return result
+            if approved_head != head:
+                result.update({"status": "awaiting_merge_authorization", "reason": f"human approval required for {task['id']}={head}"})
+                return result
+            if pr.get("mergeable") != "MERGEABLE" or pr.get("mergeStateStatus") != "CLEAN":
+                raise ValueError("repair PR is not cleanly mergeable; update and reverify through human review")
+            ownership()
+            delivery["merge_authorized_head"] = head
+            save(record, task)
+            gh("pr", "merge", str(pr["number"]), "--repo", config["repository"], "--merge", "--match-head-commit", head)
+            pr = read_pr(pr["number"])
+        merge = (pr.get("mergeCommit") or {}).get("oid", "")
+        if pr["state"] != "MERGED" or not pr.get("mergedAt") or not re.fullmatch(r"[0-9a-f]{40}", merge):
+            raise ValueError("merge command has no positive merged PR readback")
+        # A manually merged or recovered PR must satisfy the same CI contract before issue closure.
+        state = _repair_ci(pr)
+        if state != "passed":
+            result["status"] = state
+            return result
+        execute(config["git"], "fetch", "origin", "+refs/heads/main:refs/remotes/origin/main")
+        execute(config["git"], "merge-base", "--is-ancestor", head, merge)
+        execute(config["git"], "merge-base", "--is-ancestor", merge, "refs/remotes/origin/main")
+        result["merged"] = not delivery.get("merge_proof")
+        result["merge_proven"] = True
+        result["pr"].update({"merge_commit": merge, "merged_at": pr["mergedAt"]})
+        delivery["merge_proof"] = {"head": head, "merge_commit": merge, "merged_at": pr["mergedAt"], "main_ref": "refs/remotes/origin/main"}
+        task["status"] = "merged"
+        save(record, task)
+        closed = delivery.setdefault("closed_issues", {})
+        requests = delivery.setdefault("close_requests", {})
+        for number in source_issues():
+            issue = api(number)
+            if issue["state"] == "open":
+                if not isinstance(issue.get("assignees"), list) or issue["assignees"]:
+                    raise ValueError(f"merged source issue #{number} acquired an owner; human closing decision required")
+                requests.setdefault(str(number), {"merge_commit": merge, "run_dir": str(run_dir), "requested_at": timestamp()})
+                save(record, task)
+                api(number, "--method", "PATCH", "-f", "state=closed", "-f", "state_reason=completed")
+                if api(number)["state"] != "closed":
+                    raise ValueError(f"issue #{number} close was not confirmed by readback")
+            # Count the first confirmed outcome, including a preceding request whose response was lost.
+            if str(number) in requests and str(number) not in closed:
+                result["closed"].append(number)
+            closed[str(number)] = {"state": "closed", "merge_commit": merge, "observed_at": timestamp()}
+            save(record, task)
+        delivery["complete"] = True
+        result["status"] = "merged"
+        return result
+    except Exception as exc:
+        result.update({"status": "pending" if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)) else "blocked",
+                       "reason": f"{type(exc).__name__}: {exc}"})
+        return result
+    finally:
+        delivery["last_result"] = result
+        save(record, task)
+
+
+def deliver_repairs(root, config, run_dir, deadline, *, authorized=False, merge_approvals=None, exclude=()):
+    """Only an explicit invocation can publish; merging additionally binds human approval to task=HEAD."""
+    output = {"results": [], "processed": [], "prs": [], "merged": [], "closed": [], "manual_todo": []}
+    if not authorized:
+        return output
+    for record in sorted((root / "repairs").glob("*/task.json")):
+        task = json.loads(record.read_text())
+        if (task["id"] in exclude or task["status"] not in {"awaiting_delivery_authorization", "merged"}
+                or task.get("delivery", {}).get("complete")):
+            continue
+        if deadline - time.monotonic() < 5:
+            break
+        output["processed"].append(task["id"])
+        result = _deliver_one(root, config, run_dir, deadline, record, task, (merge_approvals or {}).get(task["id"]))
+        output["results"].append(result)
+        if result.get("pr"):
+            output["prs"].append(result["pr"])
+        if result["merged"]:
+            output["merged"].append(task["id"])
+        output["closed"].extend(number for number in result["closed"] if number not in output["closed"])
+        if result["status"] != "merged":
+            output["manual_todo"].append({"id": task["id"], "reason": result.get("reason", result["status"]),
+                                          "needed_action": "Inspect delivery evidence, CI and exact head; authorize merge only after human review.",
+                                          "evidence": str(record.parent / "delivery-commands.jsonl")})
+    return output

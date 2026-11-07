@@ -536,3 +536,550 @@ def test_sandbox_denies_network_and_writes_outside_verification_stage(tmp_path):
     policy = (tmp_path / "verification.sb").read_text()
     assert "(deny network*)" in policy and "(deny file-write*)" in policy
     assert str(tmp_path.resolve()) in policy
+
+
+def queued_repairs(tmp_path, count=4):
+    """Existing local records only: no repository history, subprocesses or agent execution."""
+    root = tmp_path / "state"
+    run = root / "run"
+    (run / "work").mkdir(parents=True)
+    (run / "work/probe.log").write_text("recorded reproduction evidence\n")
+    paths = []
+    for index in range(count):
+        item = {**finding(), "key": f"task-{index}", "owner_path": f"src/task_{index}.py",
+                "fix_scope": [f"src/task_{index}.py", f"tests/test_task_{index}.py"]}
+        task_id = repair.persist_findings(root, run, {"confirmed_findings": [item]}, A)[0]
+        path = root / "repairs" / task_id / "task.json"
+        task = json.loads(path.read_text())
+        task["created_at"] = f"2026-01-{index + 1:02d}T00:00:00+00:00"
+        repair.save(path, task)
+        paths.append(path)
+    return root, {"timeout_seconds": 900, "verification_python": sys.executable}, run, paths
+
+
+def fake_local_attempt(monkeypatch, *, status="pending"):
+    def run_one(root, config, run_dir, deadline, invoke, *, revalidate_issue=None, _task_id=None):
+        path = root / "repairs" / _task_id / "task.json"
+        task = json.loads(path.read_text())
+        task["attempts"].append(f"retained-attempt-{len(task['attempts']) + 1}")
+        task["status"] = status
+        repair.save(path, task)
+        return {"id": _task_id, "status": status, "stage": task["stage"], "record": str(path)}
+    monkeypatch.setattr(repair, "repair_one", run_one)
+
+
+def test_run_repairs_defaults_prioritize_unattempted_then_oldest_attempt_without_recreating_tasks(tmp_path, monkeypatch):
+    root, config, run, paths = queued_repairs(tmp_path, 5)
+    for index, at in [(0, "2026-03-03"), (2, "2026-03-01"), (4, "2026-03-02")]:
+        task = json.loads(paths[index].read_text())
+        task.update({"attempts": [f"kept-{index}"], "last_attempted_at": at + "T00:00:00+00:00"})
+        repair.save(paths[index], task)
+    before = [json.loads(path.read_text()) for path in paths]
+    fake_local_attempt(monkeypatch)
+    result = repair.run_repairs(root, config, run, time.monotonic() + 3000, unexpected_repair)
+    expected = [before[index]["id"] for index in (1, 3, 2)]
+    assert result["entered"] is True and result["status"] == "partial"
+    assert result["processed"] == result["attempted"] == expected
+    assert [row["id"] for row in result["results"]] == expected
+    assert result["local_verified"] == [] and len(result["inventory"]["pending"]) == 5
+    assert len(list((root / "repairs").glob("*/task.json"))) == 5
+    for path, original in zip(paths, before):
+        latest = json.loads(path.read_text())
+        for field in ("id", "finding", "sources", "created_at", "branch", "base_sha", "evidence"):
+            assert (field in latest) == (field in original)
+            assert latest.get(field) == original.get(field)
+        assert latest["attempts"][:len(original["attempts"])] == original["attempts"]
+
+
+@pytest.mark.parametrize("limit", [0, 1, 5])
+def test_run_repairs_configured_max_never_selects_a_task_twice(tmp_path, monkeypatch, limit):
+    root, config, run, paths = queued_repairs(tmp_path)
+    fake_local_attempt(monkeypatch)
+    result = repair.run_repairs(root, {**config, "max_repairs": limit}, run, time.monotonic() + 3000, unexpected_repair)
+    assert len(result["results"]) == len(result["attempted"]) == min(limit, len(paths))
+    assert len(set(result["processed"])) == len(result["processed"])
+    assert all(len(json.loads(path.read_text())["attempts"]) <= 1 for path in paths)
+
+
+def test_attempt_fairness_reads_legacy_attempt_timestamp_instead_of_later_intake_update():
+    task = {"id": "legacy", "created_at": "2026-01-01T00:00:00+00:00", "updated_at": "2026-11-07T00:00:00+00:00",
+            "attempts": ["/retained/attempts/20260201T010203000004Z-123"]}
+    assert repair._attempt_order((None, task))[1].isoformat() == "2026-02-01T01:02:03.000004+00:00"
+
+
+def fake_repair_tree(root, monkeypatch):
+    for record in (root / "repairs").glob("*/task.json"):
+        task = json.loads(record.read_text())
+        tree = record.parent / "worktree"
+        tree.mkdir()
+        source = tree / task["finding"]["owner_path"]
+        source.parent.mkdir()
+        source.write_text("def add(a, b):\n    return a - b\n")
+        task.update({"worktree": str(tree), "branch": "codex/health-fix-" + task["id"]})
+        repair.save(record, task)
+
+    def git(config, tree, *args):
+        if args == ("rev-parse", "HEAD"):
+            return json.loads((tree.parent / "task.json").read_text())["base_sha"]
+        return "local diff evidence"
+
+    monkeypatch.setattr(repair, "dependency_inputs_match", lambda *args: None)
+    monkeypatch.setattr(repair, "git", git)
+    monkeypatch.setattr(repair, "changed_paths", lambda config, tree, **kwargs: sorted(
+        str(p.relative_to(tree)) for p in tree.rglob("*.py")
+        if str(p.relative_to(tree)).startswith("tests/") or p.read_text() != "def add(a, b):\n    return a - b\n"))
+
+
+@pytest.mark.parametrize("process_timeout", [False, True])
+def test_run_repairs_unit_timeouts_leave_later_tasks_their_own_budget(tmp_path, monkeypatch, process_timeout):
+    root, config, run, paths = queued_repairs(tmp_path, 3)
+    fake_repair_tree(root, monkeypatch)
+    clock, budgets = [1000.0], []
+    monkeypatch.setattr(repair.time, "monotonic", lambda: clock[0])
+
+    def timeout(config, *args, **kwargs):
+        budgets.append(config["timeout_seconds"])
+        clock[0] += 60
+        if process_timeout:
+            raise subprocess.TimeoutExpired("local verification", 60)
+        raise TimeoutError("unit budget exhausted")
+
+    result = repair.run_repairs(root, {**config, "repair_unit_timeout_seconds": 60}, run, 1300, timeout)
+    assert budgets == [60, 60, 60]
+    assert len(result["attempted"]) == len(result["processed"]) == 3
+    assert all(item["status"] == "pending" for item in result["results"])
+    assert all(json.loads(path.read_text())["status"] == "pending" for path in paths)
+    assert result["inventory"]["blocked"] == result["manual_todo"] == []
+
+
+def test_run_repairs_bounds_outer_revalidation_and_keeps_direct_single_argument_callback(tmp_path, monkeypatch):
+    root, config, run, paths = queued_repairs(tmp_path, 2)
+    fake_repair_tree(root, monkeypatch)
+    clock, deadlines = [1000.0], []
+    monkeypatch.setattr(repair.time, "monotonic", lambda: clock[0])
+    config.update({"issue_target": "b" * 40, "issue_intake_ready": True, "issue_inputs": {}})
+    state = {"issues": {}}
+    for number, path in enumerate(paths, 1):
+        task = json.loads(path.read_text())
+        task["sources"] = [{"kind": "issue", "number": number, "verification_sha": A}]
+        task["base_sha"] = config["issue_target"]
+        repair.save(path, task)
+        config["issue_inputs"][str(number)] = {"input_digest": "same", "assigned": False, "open": True}
+        state["issues"][str(number)] = {"outcome": "confirmed", "input_digest": "same", "repair_task": task["id"], "target": A}
+    repair.save(root / "issue-state.json", state)
+    before_first = paths[0].read_bytes()
+
+    def revalidate(number, *, deadline):
+        deadlines.append((number, deadline))
+        if number == 1:
+            clock[0] = deadline
+            raise TimeoutError("issue unit exhausted")
+        latest = json.loads((root / "issue-state.json").read_text())
+        latest["issues"][str(number)]["target"] = config["issue_target"]
+        repair.save(root / "issue-state.json", latest)
+
+    def timeout(*args, **kwargs):
+        raise TimeoutError("stop after local preparation")
+
+    result = repair.run_repairs(root, config, run, 3000, timeout, revalidate_issue=revalidate)
+    assert deadlines == [(1, 1600), (2, 2200)]
+    assert paths[0].read_bytes() == before_first
+    assert result["attempted"] == [paths[1].parent.name]
+    assert result["results"][0]["status"] == "deferred"
+    assert result["results"][1]["status"] == "pending"
+    direct_calls = []
+
+    def direct_revalidate(number):
+        direct_calls.append(number)
+        latest = json.loads((root / "issue-state.json").read_text())
+        latest["issues"][str(number)]["target"] = config["issue_target"]
+        repair.save(root / "issue-state.json", latest)
+
+    direct = repair.repair_one(root, config, run, 3000, timeout, revalidate_issue=direct_revalidate,
+                               _task_id=paths[0].parent.name)
+    assert direct_calls == [1] and direct["status"] == "pending"
+
+
+def test_run_repairs_preserves_manual_tasks_and_earlier_scope_gates(tmp_path, monkeypatch):
+    root, config, run, paths = queued_repairs(tmp_path, 5)
+    for index, status in [(0, "awaiting_delivery_authorization"), (2, "blocked"), (3, "needs_triage")]:
+        task = json.loads(paths[index].read_text())
+        task.update({"status": status, "last_error": f"recorded reason {index}", "attempts": [f"retained-{index}"]})
+        repair.save(paths[index], task)
+    task = json.loads(paths[1].read_text())
+    task["finding"]["fix_scope"] = json.loads(paths[0].read_text())["finding"]["fix_scope"]
+    repair.save(paths[1], task)
+    preserved = {path: path.read_bytes() for path in paths[:4]}
+    fake_local_attempt(monkeypatch)
+    result = repair.run_repairs(root, config, run, time.monotonic() + 3000, unexpected_repair)
+    assert result["processed"] == result["attempted"] == [paths[4].parent.name]
+    assert all(path.read_bytes() == before for path, before in preserved.items())
+    manual = {item["id"]: item for item in result["manual_todo"]}
+    assert "overlapping earlier" in manual[paths[1].parent.name]["reason"]
+    assert manual[paths[2].parent.name]["reason"] == "recorded reason 2"
+    assert manual[paths[3].parent.name]["reason"] == "recorded reason 3"
+    for index in range(4):
+        item = manual[paths[index].parent.name]
+        assert item["needed_action"] and item["evidence"]["record"] == str(paths[index])
+        assert item["evidence"]["initial"] == json.loads(paths[index].read_text())["evidence"]
+    assert result["inventory"]["ready"] == [paths[0].parent.name]
+    assert result["inventory"]["blocked"] == [paths[2].parent.name]
+    assert result["inventory"]["needs_triage"] == [paths[3].parent.name]
+
+
+def test_run_repairs_expired_deadline_still_returns_inventory_without_mutation(tmp_path):
+    root, config, run, paths = queued_repairs(tmp_path, 1)
+    before = paths[0].read_bytes()
+    result = repair.run_repairs(root, config, run, time.monotonic() - 1, unexpected_repair)
+    assert result["entered"] and result["processed"] == result["attempted"] == []
+    assert result["inventory"]["pending"] == [paths[0].parent.name] and paths[0].read_bytes() == before
+
+
+@pytest.mark.parametrize("verdict,findings,tamper,status", [
+    ("approve", [], False, "awaiting_delivery_authorization"),
+    ("changes_required", ["scope needs review"], False, "pending"),
+    ("blocked", ["missing evidence"], False, "blocked"),
+    ("approve", ["unresolved finding"], False, "blocked"),
+    ("approve", [], True, "blocked"),
+])
+def test_local_approval_manifest_binds_tested_reviewed_content_only(tmp_path, monkeypatch, verdict, findings, tamper, status):
+    root, config, run, paths = queued_repairs(tmp_path, 1)
+    record = paths[0]
+    manifest = record.parent / "approved-content.json"
+    fake_repair_tree(root, monkeypatch)
+    verifications = []
+
+    def verify(config, tree, stage, selectors, timeout):
+        assert not manifest.exists()
+        verifications.append(stage.name)
+        return {"cases": [("tests.example", "test_add")], "failures": int(stage.name == "baseline"),
+                "exit_code": int(stage.name == "baseline"), "errors": 0, "skipped": 0}
+
+    monkeypatch.setattr(repair, "verify_tests", verify)
+
+    def invoke(config, stage, prompt, *, result_schema=None, writable=None):
+        stage.mkdir(parents=True)
+        task = json.loads(record.read_text())
+        tree = Path(task["worktree"])
+        source, test = (tree / name for name in task["finding"]["fix_scope"])
+        assert not manifest.exists()
+        if stage.name == "reproduce":
+            test.parent.mkdir(exist_ok=True)
+            test.write_text("def test_add():\n    assert add(2, 1) == 3\n")
+            return {"outcome": "reproduced", "report_markdown": "recorded assertion failure", "test_paths": [str(test.relative_to(tree))],
+                    "selectors": [str(test.relative_to(tree)) + "::test_add"]}
+        if stage.name == "implement":
+            source.write_text("def add(a, b):\n    return a + b\n")
+            return {"outcome": "fixed", "report_markdown": "local implementation", "pr_title": "draft", "pr_body": "local draft"}
+        assert stage.name == "independent-review" and verifications == ["baseline", "fixed"]
+        if tamper:
+            source.write_text("unreviewed content after verification\n")
+        return {"verdict": verdict, "findings": findings, "report_markdown": "independent local review evidence"}
+
+    result = repair.run_repairs(root, config, run, time.monotonic() + 3000, invoke)
+    task = json.loads(record.read_text())
+    assert result["results"][0]["status"] == task["status"] == status, task.get("last_error")
+    assert len(result["attempted"]) == len(task["attempts"]) == 1
+    if status == "awaiting_delivery_authorization":
+        content = json.loads(manifest.read_text())
+        assert content["files"] == repair._content_files(config, Path(task["worktree"]))
+        assert set(content["files"]) == set(task["finding"]["fix_scope"])
+        assert all(len(item["sha256"]) == 64 for item in content["files"].values())
+        assert content["task_id"] == task["id"] and content["base_sha"] == task["base_sha"]
+        assert content["branch"] == task["branch"] and Path(content["review_report"]).is_file()
+        assert result["local_verified"] == result["inventory"]["ready"] == [task["id"]]
+        assert result["manual_todo"][0]["evidence"]["approved_content_manifest"] == str(manifest)
+    else:
+        assert not manifest.exists() and "approved_content_manifest" not in task
+        assert result["local_verified"] == []
+
+
+def test_content_manifest_covers_deletions_symlink_targets_and_file_modes(tmp_path, monkeypatch):
+    (tmp_path / "regular").write_text("approved bytes\n")
+    (tmp_path / "regular").chmod(0o755)
+    (tmp_path / "link").symlink_to("missing-target")
+    monkeypatch.setattr(repair, "changed_paths", lambda *args, **kwargs: ["regular", "deleted", "link"])
+    files = repair._content_files({}, tmp_path)
+    assert files["regular"]["mode"] == 0o755 and len(files["regular"]["sha256"]) == 64
+    assert files["deleted"] == {"kind": "deleted"}
+    assert files["link"] == {"kind": "symlink", "target": "missing-target"}
+
+
+def test_local_git_commands_share_the_remaining_unit_deadline(tmp_path, monkeypatch):
+    clock, budgets = [10.0], []
+    monkeypatch.setattr(repair.time, "monotonic", lambda: clock[0])
+
+    def command(argv, **kwargs):
+        budgets.append(kwargs["timeout"])
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(repair.subprocess, "run", command)
+    config = {"git": "git", "_repair_deadline": 70}
+    repair.git(config, tmp_path, "diff", "--name-only")
+    clock[0] = 65
+    repair.git(config, tmp_path, "diff", "--name-only")
+    clock[0] = 70
+    with pytest.raises(TimeoutError, match="budget"):
+        repair.git(config, tmp_path, "diff", "--name-only")
+    assert budgets == [60, 5]
+
+
+@pytest.mark.parametrize("config", [{"max_repairs": -1}, {"repair_unit_timeout_seconds": 0}])
+def test_run_repairs_rejects_invalid_limits_without_touching_queue(tmp_path, config):
+    with pytest.raises(ValueError, match="max_repairs"):
+        repair.run_repairs(tmp_path, config, tmp_path, time.monotonic() + 3000, unexpected_repair)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_run_repairs_empty_inventory_does_not_create_tasks(tmp_path):
+    result = repair.run_repairs(tmp_path, {}, tmp_path, time.monotonic() + 3000, unexpected_repair)
+    assert result["status"] == "no_pending_repairs" and result["entered"]
+    assert result["results"] == result["attempted"] == result["local_verified"] == result["manual_todo"] == []
+    assert result["inventory"] == {"pending": [], "blocked": [], "needs_triage": [], "ready": [], "merged": []}
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_merged_task_releases_file_scope_for_later_pending_task(tmp_path, monkeypatch):
+    root, config, run, paths = queued_repairs(tmp_path, 2)
+    first, second = [json.loads(path.read_text()) for path in paths]
+    first.update({"status": "merged", "delivery": {"complete": True}})
+    second["finding"]["fix_scope"] = first["finding"]["fix_scope"]
+    repair.save(paths[0], first)
+    repair.save(paths[1], second)
+    preserved = paths[0].read_bytes()
+    fake_local_attempt(monkeypatch)
+    result = repair.run_repairs(root, config, run, time.monotonic() + 3000, unexpected_repair)
+    assert result["attempted"] == [second["id"]] and paths[0].read_bytes() == preserved
+    assert result["inventory"]["merged"] == [first["id"]] and result["manual_todo"] == []
+
+
+def test_new_confirmation_after_merge_preserves_delivery_and_requires_triage(tmp_path):
+    root, config, run, paths = queued_repairs(tmp_path, 1)
+    task = json.loads(paths[0].read_text())
+    task.update({"status": "merged", "delivery": {"complete": True, "merge_proof": {"head": A}}})
+    repair.save(paths[0], task)
+    retained = task["delivery"]
+    ids = repair.persist_findings(root, run, {"confirmed_findings": [task["finding"]]}, "b" * 40)
+    saved = json.loads(paths[0].read_text())
+    assert ids == [task["id"]] and saved["status"] == "needs_triage" and saved["delivery"] == retained
+    result = repair.run_repairs(root, config, run, time.monotonic() + 3000, unexpected_repair)
+    assert result["attempted"] == [] and result["inventory"]["needs_triage"] == [task["id"]]
+    assert "new confirmation" in result["manual_todo"][0]["reason"]
+
+
+@pytest.fixture
+def repair_delivery(tmp_path, monkeypatch):
+    """Real local Git/content adapter; every network and gate command is intercepted."""
+    root, config, run_dir, _ = local_repository(tmp_path)
+    record, = (root / "repairs").glob("*/task.json")
+    task = json.loads(record.read_text())
+    tree = record.parent / "worktree"
+    branch = f"codex/health-fix-{task['id']}"
+    subprocess.run(["git", "--git-dir", str(root / "repository.git"), "worktree", "add", "-q", "-b", branch,
+                    str(tree), task["base_sha"]], check=True)
+    (tree / "src/example.py").write_text("def add(a, b):\n    return a + b\n")
+    (tree / "tests").mkdir()
+    (tree / "tests/test_example.py").write_text("from src.example import add\ndef test_add():\n    assert add(2, 1) == 3\n")
+    baseline = {"cases": [["tests.test_example", "test_add"]], "failures": 1, "errors": 0, "skipped": 0, "exit_code": 1}
+    fixed = {**baseline, "failures": 0, "exit_code": 0}
+    files = repair._content_files(config, tree)
+    manifest = record.parent / "approved-content.json"
+    task.update({"status": "awaiting_delivery_authorization", "stage": "delivery", "worktree": str(tree), "branch": branch,
+                 "sources": [{"kind": "issue", "number": 7}], "baseline": baseline, "fixed_verification": fixed,
+                 "verified_content": files, "approved_content_manifest": str(manifest),
+                 "independent_review": {"verdict": "approve", "findings": []},
+                 "implementation": {"pr_body": "Fixes #999", "pr_title": "Fixes #999"}})
+    repair.save(manifest, {"task_id": task["id"], "base_sha": task["base_sha"], "branch": branch, "worktree": str(tree),
+                           "files": files, "verification": fixed})
+    repair.save(record, task)
+    config.update({"gh": "github-client", "repository": "fixture/repo", "repository_url": git(tree, "remote", "get-url", "origin")})
+    state = {"pr": False, "merged": False, "issue": "open", "assigned": False, "reachability": True,
+             "merge_readback": True, "close_timeout": False, "read_timeout": False, "wrong_head": False, "error_envelope": False,
+             "checks": [{"name": name, "status": "COMPLETED", "conclusion": "SUCCESS"} for name in sorted(repair.REQUIRED_REPAIR_CHECKS)]}
+    calls, forbidden = [], []
+    original = repair.run
+
+    def external(argv, **kwargs):
+        calls.append(argv)
+        if argv[0] == "github-client":
+            args = argv[1:]
+            if args[0] == "api" and args[1] == "repos/fixture/repo/issues/7":
+                if "--method" in args:
+                    assert args[args.index("--method") + 1] == "PATCH"
+                    state["issue"] = "closed"
+                    if state["close_timeout"]:
+                        state["close_timeout"] = False
+                        raise TimeoutError("close response lost after the effect")
+                return json.dumps({"number": 7, "state": state["issue"], "assignees": [{"login": "other"}] if state["assigned"] else []})
+            if args[:2] == ["pr", "list"]:
+                return json.dumps([{"number": 80}] if state["pr"] else [])
+            if args[:2] == ["pr", "create"]:
+                assert "--body-file" in args and "--base" in args and args[args.index("--base") + 1] == "main"
+                state["body"] = Path(args[args.index("--body-file") + 1]).read_text()
+                state["pr"] = True
+                return "https://github.com/fixture/repo/pull/80"
+            if args[:2] == ["pr", "view"]:
+                if state["read_timeout"]:
+                    state["read_timeout"] = False
+                    raise TimeoutError("PR readback timed out after creation")
+                if state["error_envelope"]:
+                    return json.dumps({"ok": False, "error": "unavailable", "data": {}})
+                head = git(tree, "rev-parse", "HEAD")
+                return json.dumps({"number": 80, "url": "https://github.com/fixture/repo/pull/80",
+                                   "state": "MERGED" if state["merged"] else "OPEN", "headRefOid": A if state["wrong_head"] else head,
+                                   "headRefName": branch, "baseRefName": "main", "headRepository": {"nameWithOwner": "fixture/repo"},
+                                   "mergedAt": "2026-11-07T08:00:00Z" if state["merged"] else None,
+                                   "mergeCommit": {"oid": head} if state["merged"] else None,
+                                   "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "statusCheckRollup": state["checks"]})
+            if args[:2] == ["pr", "merge"]:
+                assert "--match-head-commit" in args and args[-1] == git(tree, "rev-parse", "HEAD")
+                assert "--admin" not in args and "--auto" not in args
+                state["merged"] = state["merge_readback"]
+                return ""
+        elif argv[0] == config["verification_python"]:
+            return "fixture gate passed"
+        elif argv[0] == "git":
+            if argv[1:3] == ["push", "origin"]:
+                assert argv == ["git", "push", "origin", f"HEAD:refs/heads/{branch}"]
+                return ""
+            if argv[1:3] == ["fetch", "origin"]:
+                target = "HEAD" if state["reachability"] else task["base_sha"]
+                original(["git", "-C", str(tree), "update-ref", "refs/remotes/origin/main", git(tree, "rev-parse", target)])
+                return ""
+            if "push" not in argv and "fetch" not in argv:
+                return original(argv, **kwargs)
+        forbidden.append(argv)
+        raise AssertionError(f"forbidden external effect: {argv}")
+
+    monkeypatch.setattr(repair, "run", external)
+    def deliver(*, authorized=True, approved_head=None):
+        result = repair.deliver_repairs(root, config, run_dir, time.monotonic() + 300, authorized=authorized,
+                                        merge_approvals={task["id"]: approved_head} if approved_head else {})
+        assert forbidden == []
+        return result
+    return root, config, run_dir, record, tree, task, state, calls, deliver
+
+
+def test_remote_repair_delivery_defaults_to_no_commands_or_state_writes(repair_delivery):
+    _, _, _, record, tree, _, _, calls, deliver = repair_delivery
+    before, head = record.read_bytes(), git(tree, "rev-parse", "HEAD")
+    result = deliver(authorized=False)
+    assert calls == [] and record.read_bytes() == before and git(tree, "rev-parse", "HEAD") == head
+    assert result["prs"] == result["merged"] == result["closed"] == []
+
+
+def test_repair_pr_publish_requires_human_head_approval_and_reuses_existing_pr(repair_delivery):
+    _, _, _, record, tree, task, state, calls, deliver = repair_delivery
+    first = deliver()
+    assert first["prs"][0]["created"] and first["merged"] == first["closed"] == []
+    assert first["results"][0]["status"] == "awaiting_merge_authorization"
+    head = git(tree, "rev-parse", "HEAD")
+    assert head != task["base_sha"] and "Fixes #999" not in state["body"] and "Related issues: #7" in state["body"]
+    assert json.loads(record.read_text())["delivery"]["head"] == head
+    again = deliver(approved_head=A)
+    assert not again["prs"][0]["created"] and again["merged"] == again["closed"] == []
+    assert sum(argv[:3] == ["github-client", "pr", "create"] for argv in calls) == 1
+    assert sum(argv[:2] == ["git", "push"] for argv in calls) == 1
+    assert not any(argv[:3] == ["github-client", "pr", "merge"] or "PATCH" in argv for argv in calls)
+    gates = [argv for argv in calls if argv[0].endswith("python") or argv[0] == sys.executable]
+    assert any("--staged" in argv and "--check-public-surface" in argv for argv in gates)
+    assert any("scripts/generate_dependency_graph.py" in argv for argv in gates)
+
+
+@pytest.mark.parametrize("failure", ["missing", "skipped", "pending", "failed"])
+def test_repair_delivery_requires_all_eight_regression_shards_and_checks(repair_delivery, failure):
+    _, _, _, _, tree, _, state, calls, deliver = repair_delivery
+    deliver()
+    if failure == "missing":
+        state["checks"].pop()
+    else:
+        state["checks"][0].update({"status": "IN_PROGRESS" if failure == "pending" else "COMPLETED",
+                                   "conclusion": {"skipped": "SKIPPED", "pending": None, "failed": "FAILURE"}[failure]})
+    result = deliver(approved_head=git(tree, "rev-parse", "HEAD"))
+    assert result["results"][0]["status"] == ("ci_failed" if failure == "failed" else "ci_pending")
+    assert result["merged"] == result["closed"] == []
+    assert not any(argv[:3] == ["github-client", "pr", "merge"] or "PATCH" in argv for argv in calls)
+
+
+def test_verified_repair_merge_closes_only_its_source_issue_once(repair_delivery):
+    _, _, _, record, tree, task, state, calls, deliver = repair_delivery
+    deliver()
+    result = deliver(approved_head=git(tree, "rev-parse", "HEAD"))
+    assert result["merged"] == [task["id"]] and result["closed"] == [7] and result["manual_todo"] == []
+    saved = json.loads(record.read_text())
+    assert saved["status"] == "merged" and saved["delivery"]["complete"] and saved["delivery"]["merge_proof"]
+    assert saved["delivery"]["closed_issues"]["7"]["state"] == "closed" and state["issue"] == "closed"
+    patch = next(index for index, argv in enumerate(calls) if "PATCH" in argv)
+    assert any(argv[:3] == ["github-client", "pr", "merge"] for argv in calls[:patch])
+    assert sum("--is-ancestor" in argv for argv in calls[:patch]) == 2
+    before = len(calls)
+    assert deliver()["processed"] == [] and len(calls) == before
+
+
+@pytest.mark.parametrize("failure", ["merge_readback", "reachability", "wrong_head", "error_envelope"])
+def test_delivery_cannot_close_on_unproven_merge_or_error_envelope(repair_delivery, failure):
+    _, _, _, record, tree, _, state, calls, deliver = repair_delivery
+    deliver()
+    state[failure] = failure in {"wrong_head", "error_envelope"}
+    result = deliver(approved_head=git(tree, "rev-parse", "HEAD"))
+    assert result["results"][0]["status"] == "blocked" and result["merged"] == result["closed"] == []
+    assert state["issue"] == "open" and not any("PATCH" in argv for argv in calls)
+    assert json.loads(record.read_text())["status"] == "awaiting_delivery_authorization"
+
+
+@pytest.mark.parametrize("failure", ["content", "manifest", "ownership"])
+def test_delivery_keeps_unapproved_content_and_changed_ownership_local(repair_delivery, failure):
+    _, _, _, record, tree, task, state, calls, deliver = repair_delivery
+    if failure == "content":
+        (tree / "src/example.py").write_text("unreviewed changes\n")
+    elif failure == "manifest":
+        Path(task["approved_content_manifest"]).unlink()
+    else:
+        state["assigned"] = True
+    result = deliver()
+    assert result["results"][0]["status"] == "blocked"
+    assert git(tree, "rev-parse", "HEAD") == task["base_sha"] and result["prs"] == []
+    assert not any(argv[:2] == ["git", "push"] or argv[:3] in (["github-client", "pr", "create"], ["github-client", "pr", "merge"]) or "PATCH" in argv for argv in calls)
+    assert json.loads(record.read_text())["status"] == "awaiting_delivery_authorization"
+
+
+def test_ambiguous_close_response_retries_readback_without_duplicate_patch(repair_delivery):
+    _, _, _, record, tree, task, state, calls, deliver = repair_delivery
+    deliver()
+    state["close_timeout"] = True
+    first = deliver(approved_head=git(tree, "rev-parse", "HEAD"))
+    assert first["merged"] == [task["id"]] and first["results"][0]["status"] == "pending"
+    assert state["issue"] == "closed" and not json.loads(record.read_text())["delivery"].get("complete")
+    resumed = deliver()
+    assert resumed["results"][0]["status"] == "merged" and resumed["merged"] == [] and resumed["closed"] == [7]
+    assert json.loads(record.read_text())["delivery"]["complete"]
+    assert sum("PATCH" in argv for argv in calls) == 1
+
+
+@pytest.mark.parametrize("failure", ["failed", "missing"])
+def test_already_merged_repair_still_requires_complete_successful_ci_before_closing(repair_delivery, failure):
+    _, _, _, record, _, _, state, calls, deliver = repair_delivery
+    deliver()
+    state["merged"] = True
+    if failure == "failed":
+        state["checks"][0]["conclusion"] = "FAILURE"
+    else:
+        state["checks"].pop()
+    result = deliver()
+    assert result["results"][0]["status"] == ("ci_failed" if failure == "failed" else "ci_pending")
+    assert result["merged"] == result["closed"] == [] and state["issue"] == "open"
+    assert not any("PATCH" in argv for argv in calls)
+    assert not json.loads(record.read_text())["delivery"].get("merge_proof")
+
+
+def test_pr_creation_receipt_is_counted_even_when_its_readback_times_out(repair_delivery):
+    _, _, _, record, _, _, state, calls, deliver = repair_delivery
+    state["read_timeout"] = True
+    first = deliver()
+    assert first["results"][0]["status"] == "pending"
+    assert len(first["prs"]) == 1 and first["prs"][0]["created"]
+    saved = json.loads(record.read_text())["delivery"]
+    assert saved["pr_created_receipt"]["url"] == "https://github.com/fixture/repo/pull/80"
+    resumed = deliver()
+    assert not resumed["prs"][0]["created"] and resumed["merged"] == resumed["closed"] == []
+    assert sum(argv[:3] == ["github-client", "pr", "create"] for argv in calls) == 1

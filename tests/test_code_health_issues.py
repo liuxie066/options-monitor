@@ -380,7 +380,7 @@ output.write_text(json.dumps(payload))
     (root / "config.json").write_text(json.dumps({
         "git": "git", "gh": "github-client", "codex": str(agent), "repository": "fixture/repo",
         "repository_url": str(source), "max_units": 3, "timeout_seconds": 180, "issue_timeout_seconds": 60,
-        "issues_enabled": True, "repair_enabled": True, "model": "fixture",
+        "issues_enabled": True, "repair_enabled": True, "repair_budget_seconds": 30, "model": "fixture",
         "model_base_url": "http://fixture.invalid", "model_catalog": str(root / "catalog.json"),
     }))
     if mode == "reserved_budget":
@@ -417,10 +417,11 @@ output.write_text(json.dumps(payload))
 
     def repair_once(*args, **kwargs):
         repairs.append(args[0])
-        return {"status": "no_pending_repairs"}
+        status = "pending" if args[3] - time.monotonic() < 30 else "no_pending_repairs"
+        return {"status": status, "entered": True, "attempted": []}
 
     monkeypatch.setattr(review, "command", external)
-    monkeypatch.setattr(repair, "repair_one", repair_once)
+    monkeypatch.setattr(repair, "run_repairs", repair_once)
     original_invoke = review.invoke_agent
     if mode == "archive_budget":
         monkeypatch.setattr(review.time, "monotonic", lambda: clock[0])
@@ -445,7 +446,7 @@ output.write_text(json.dumps(payload))
         monkeypatch.setattr(review, "command", timeout_intake)
     receipt = review.run_once(root, **({mode: True} if mode in {"dry_run", "smoke"} else {}))
     assert not forbidden
-    assert len(repairs) == (1 if mode in {"run", "review_timeout", "intake_timeout", "reserved_budget"} else 0)
+    assert len(repairs) == (0 if mode in {"dry_run", "smoke"} else 1)
     actual = json.loads((root / "state.json").read_text())
     assert actual["cursor"] == (target if mode in {"run", "intake_timeout", "budget_exhausted"} and has_commit else base)
     if mode in {"run", "review_timeout", "reserved_budget"}:
@@ -474,7 +475,8 @@ output.write_text(json.dumps(payload))
         else:
             assert not (root / "issue-state.json").exists()
         if mode == "archive_budget":
-            assert receipt["status"] == ("partial" if has_commit else "no_changes") and not repairs
+            assert receipt["status"] == ("partial" if has_commit else "no_changes")
+            assert receipt["repair"]["entered"] is True and receipt["repair"]["attempted"] == []
             assert receipt["cursor_after"] == base
             assert receipt["repair"]["status"] == "pending"
             # Frozen source is prepared before metadata or issue intake can exhaust their budgets.
@@ -482,7 +484,8 @@ output.write_text(json.dumps(payload))
         if mode in {"intake_timeout", "budget_exhausted"}:
             assert receipt["issues"]["status"] == "pending"
         if mode == "budget_exhausted":
-            assert receipt["status"] == ("complete" if has_commit else "no_changes") and not repairs
+            assert receipt["status"] == ("complete" if has_commit else "no_changes")
+            assert receipt["repair"]["entered"] is True and receipt["repair"]["attempted"] == []
             assert receipt["repair"]["status"] == "pending"
     if mode == "smoke":
         assert not any(call[0] == "github-client" for call in calls)

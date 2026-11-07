@@ -359,26 +359,130 @@ def review_commits(
     return checkpoint()
 
 
-def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False) -> dict:
-    config = json.loads((root / "config.json").read_text(encoding="utf-8"))
+def phase_budgets(config: dict, *, smoke: bool = False) -> dict:
+    """Reserve repair first; neither audit can borrow its guaranteed allocation."""
+    defaults = {"timeout_seconds": 12000, "review_budget_seconds": 6600,
+                "issue_timeout_seconds": 3600, "repair_budget_seconds": 1800}
+    values = {key: config.get(key, default) for key, default in defaults.items()}
+    if any(type(value) is not int or value < 0 for value in values.values()) or not values["timeout_seconds"]:
+        raise ValueError("phase budgets must be nonnegative integer seconds with a positive total")
+    total = values["timeout_seconds"]
+    reserved = min(total, values["repair_budget_seconds"]) if config.get("repair_enabled") and not smoke else 0
+    if config.get("repair_enabled") and not smoke and reserved < 30:
+        raise ValueError("enabled repair requires at least 30 seconds of reserved repair budget")
+    intake = min(total - reserved, values["issue_timeout_seconds"]) if config.get("issues_enabled") and not smoke else 0
+    review = min(total - reserved - intake, values["review_budget_seconds"])
+    return {"total": total, "review": review, "issues": intake, "repair_reserved": reserved}
+
+
+def run_repair_phase(root, config, run, source, target, issue_plan, issue_status, deadline):
+    """Ownership checks belong to repair too, even when issue intake could not finish."""
+    repair_config = {**config, "issue_target": target,
+                     "issue_inputs": issue_plan.get("issue_inputs", {}) if issue_plan else {},
+                     "issue_intake_ready": issue_status in {"complete", "partial", "no_eligible_issues"}}
+    preflight_error = None
+    if not repair_config["issue_intake_ready"] and target and any(
+        source["kind"] == "issue" for task in repair.task_summaries(root) for source in task["sources"]
+    ):
+        try:
+            fresh = issues.plan_issues(root, config, target, command, deadline=deadline, numbers=set(), hydrate=False)
+            repair_config.update({"issue_inputs": fresh["issue_inputs"], "issue_intake_ready": True})
+        except (TimeoutError, subprocess.TimeoutExpired, ValueError, RuntimeError, OSError) as exc:
+            preflight_error = str(exc)
+
+    def revalidate_issue(number, *, deadline=deadline):
+        fresh = issues.plan_issues(root, config, target, command, deadline=deadline, numbers={number}, hydrate=False)
+        validation = run / "repair-issue-validation" / str(number)
+        issues.process_issues(root, {**config, "mirror": str(root / "repository.git")}, validation, source, fresh,
+                              deadline, invoke_agent, FINDING_SCHEMA, validate_finding, command=command)
+        repair_config["issue_inputs"] = fresh["issue_inputs"]
+
+    authorized = bool(config.get("_deliver_repairs"))
+    approvals = config.get("_merge_approvals", {})
+    # Existing ready work gets a bounded turn; local repair retains the rest of its allocation.
+    first = repair.deliver_repairs(root, repair_config, run,
+                                   min(deadline, time.monotonic() + min(120, max(0, deadline - time.monotonic()) / 4)),
+                                   authorized=authorized, merge_approvals=approvals)
+    result = repair.run_repairs(root, repair_config, run, deadline, invoke_agent, revalidate_issue=revalidate_issue)
+    last = repair.deliver_repairs(root, repair_config, run, deadline, authorized=authorized,
+                                  merge_approvals=approvals, exclude=first["processed"])
+    delivered = first["processed"] + last["processed"]
+    result["delivery"] = first["results"] + last["results"]
+    for name in ("prs", "merged", "closed"):
+        result[name] = first[name] + [value for value in last[name] if value not in first[name]]
+    result["prs_created"] = [item for item in result["prs"] if item.get("created")]
+    result["manual_todo"] = [item for item in result.get("manual_todo", []) if item["id"] not in delivered] + first["manual_todo"] + last["manual_todo"]
+    inventory = result.get("inventory", {})
+    merged = {item["id"] for item in result["delivery"] if item.get("merge_proven")}
+    inventory["ready"] = [task for task in inventory.get("ready", []) if task not in merged]
+    inventory["merged"] = list(dict.fromkeys(inventory.get("merged", []) + sorted(merged)))
+    if preflight_error:
+        result["preflight_error"] = preflight_error
+    return result
+
+
+def save_daily_summary(run, receipt):
+    phase = receipt.get("repair", {})
+    inventory = phase.get("inventory", {})
+    queued = sorted(set(receipt.get("repair_tasks", [])) | set(receipt.get("issues", {}).get("repair_tasks", [])))
+    summary = {"reviewed_commits": len(receipt.get("completed_commits", [])),
+               "reviewed_issues": len(receipt.get("issues", {}).get("reviewed", [])),
+               "queued_repairs": queued, "repair_attempted": phase.get("attempted", []),
+               "local_verified": phase.get("local_verified", []), "prs": phase.get("prs", []),
+               "prs_created": phase.get("prs_created", []), "merged": phase.get("merged", []), "closed": phase.get("closed", []),
+               "pending": inventory.get("pending", []), "blocked": inventory.get("blocked", []),
+               "needs_triage": inventory.get("needs_triage", []), "ready": inventory.get("ready", []),
+               "manual_todo": phase.get("manual_todo", [])}
+    write_json(run / "daily-summary.json", summary)
+    lines = ["\n\n## 审核与修复实际进度", f"已审提交 {summary['reviewed_commits']}；已审 issue {summary['reviewed_issues']}。",
+             f"入队 {len(queued)}；尝试修复 {len(summary['repair_attempted'])}；本地验证通过 {len(summary['local_verified'])}；"
+             f"新建 PR {len(summary['prs_created'])}；核实合并修复 {len(summary['merged'])}；确认关闭 issue {len(summary['closed'])}。"
+             "入队和本地验证均不等于合并修复。",
+             f"剩余 pending {len(summary['pending'])}；blocked {len(summary['blocked'])}；待裁决 {len(summary['needs_triage'])}；"
+             f"本地待交付 {len(summary['ready'])}。", "完整任务、PR 和人工待办清单见同目录 daily-summary.json。"]
+    report = run / "report.md"
+    write_text(report, (report.read_text(encoding="utf-8") if report.exists() else "") + "\n\n".join(lines) + "\n")
+    receipt["daily_summary"] = summary
+
+
+def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False,
+             deliver_repairs: bool = False, merge_approvals: dict | None = None) -> dict:
+    if (smoke or dry_run) and (deliver_repairs or merge_approvals):
+        raise ValueError("remote repair delivery is incompatible with smoke or dry-run")
+    if merge_approvals and not deliver_repairs:
+        raise ValueError("merge approval requires explicit repair delivery authorization")
+    config = {**json.loads((root / "config.json").read_text(encoding="utf-8")),
+              "_deliver_repairs": deliver_repairs, "_merge_approvals": merge_approvals or {}}
     started = time.monotonic()
-    daily_deadline = started + config.get("timeout_seconds", 12000)
-    issue_budget = min(config.get("timeout_seconds", 12000), config.get("issue_timeout_seconds", 3600)) if (
-        not smoke and config.get("issues_enabled")
-    ) else 0
-    review_deadline = min(started + config.get("review_budget_seconds", 6600), daily_deadline - issue_budget)
-    # Shared source preparation belongs to review unless all time was explicitly assigned to issues.
-    deadline = review_deadline if issue_budget < config["timeout_seconds"] else daily_deadline
+    budgets = phase_budgets(config, smoke=smoke)
+    daily_deadline = started + budgets["total"]
+    issue_budget = budgets["issues"]
+    review_deadline = started + budgets["review"]
+    # Preparation uses an audit allocation first; repair-only runs prepare within their own budget.
+    deadline = review_deadline if budgets["review"] else started + issue_budget if issue_budget else daily_deadline
     with run_lock(root):
         state = json.loads((root / "state.json").read_text(encoding="utf-8"))
         run = root / "runs" / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + f"-{os.getpid()}")
         run.mkdir(parents=True)
-        receipt = {"started_at": now(), "cursor_before": state["cursor"], "mode": "smoke" if smoke else "daily"}
+        receipt = {"started_at": now(), "cursor_before": state["cursor"], "mode": "smoke" if smoke else "daily",
+                   "budgets": budgets}
+        target, source, issue_plan = None, run / "source", None
         def bounded_command(argv, **kwargs):
             remaining = deadline - time.monotonic()
             if remaining < 1:
                 raise TimeoutError("daily budget exhausted during preparation")
             return command(argv, **{**kwargs, "timeout": min(kwargs.get("timeout", 180), remaining)})
+
+        def finish_repair():
+            if config.get("repair_enabled") and not smoke and not dry_run and "repair" not in receipt:
+                try:
+                    receipt["repair"] = run_repair_phase(root, config, run, source, target, issue_plan,
+                                                         receipt.get("issues", {}).get("status"), daily_deadline)
+                except Exception as exc:
+                    receipt["repair"] = {"status": "failed", "entered": True,
+                                         "error": f"{type(exc).__name__}: {exc}"}
+            if not smoke and not dry_run and "daily_summary" not in receipt:
+                save_daily_summary(run, receipt)
 
         try:
             mirror = root / "repository.git"
@@ -472,7 +576,7 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False) -> dict:
                     write_text(run / "report.md", f"提交巡检预算不足，后续阶段按剩余预算继续。\n\n{exc}\n")
             if config.get("issues_enabled") and not smoke:
                 issue_run.mkdir()
-                issue_deadline = min(daily_deadline, time.monotonic() + issue_budget)
+                issue_deadline = min(daily_deadline - budgets["repair_reserved"], time.monotonic() + issue_budget)
                 try:
                     issue_plan = issues.plan_issues(root, config, target, command, deadline=issue_deadline, hydrate=False)
                     write_json(issue_run / "plan.json", issue_plan)
@@ -494,24 +598,7 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False) -> dict:
                 except Exception as exc:
                     receipt["issues"] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "run_dir": str(issue_run)}
                 write_json(issue_run / "receipt.json", receipt["issues"])
-            if config.get("repair_enabled") and not smoke and not dry_run:
-                try:
-                    repair.remaining_config(config, daily_deadline)
-                    repair_config = {**config, "issue_target": target, "issue_inputs": issue_plan.get("issue_inputs", {}) if issue_plan else {},
-                                     "issue_intake_ready": receipt.get("issues", {}).get("status") in {"complete", "partial", "no_eligible_issues"}}
-                    def revalidate_issue(number):
-                        # Repair preflight has its own quota and uses only the remaining repair budget.
-                        fresh = issues.plan_issues(root, config, target, command, deadline=daily_deadline,
-                                                   numbers={number}, hydrate=False)
-                        validation = run / "repair-issue-validation" / str(number)
-                        issues.process_issues(root, {**config, "mirror": str(mirror)}, validation, source, fresh,
-                                              daily_deadline, invoke_agent, FINDING_SCHEMA, validate_finding, command=command)
-                        repair_config["issue_inputs"] = fresh["issue_inputs"]
-
-                    receipt["repair"] = repair.repair_one(root, repair_config, run, daily_deadline, invoke_agent,
-                                                         revalidate_issue=revalidate_issue)
-                except TimeoutError as exc:
-                    receipt["repair"] = {"status": "pending", "error": str(exc)}
+            finish_repair()
             receipt.update({"finished_at": now(), "cursor_after": json.loads((root / "state.json").read_text())["cursor"], "run_dir": str(run)})
             write_json(run / "receipt.json", receipt)
             write_json(root / "last-run.json", receipt)
@@ -522,12 +609,14 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False) -> dict:
                 write_json(installation_path, installation)
             return receipt
         except (TimeoutError, subprocess.TimeoutExpired) as exc:
+            finish_repair()
             receipt.update({"status": "pending", "error": f"{type(exc).__name__}: {exc}", "finished_at": now(),
                             "run_dir": str(run), "cursor_after": json.loads((root / "state.json").read_text())["cursor"]})
             write_json(run / "receipt.json", receipt)
             write_json(root / "last-run.json", receipt)
             return receipt
         except Exception as exc:
+            finish_repair()
             receipt.update({"status": "failed", "finished_at": now(), "error": str(exc), "run_dir": str(run)})
             write_json(run / "receipt.json", receipt)
             write_json(root / "last-run.json", receipt)
@@ -613,6 +702,14 @@ def run_issue_backfill(root: Path, *, resume_run: Path | None = None) -> dict:
             raise
 
 
+def merge_approval(value):
+    task, separator, head = value.partition("=")
+    if (separator != "=" or len(task) != 16 or len(head) != 40
+            or any(char not in "0123456789abcdef" for char in task + head)):
+        raise argparse.ArgumentTypeError("expected existing 16-hex task ID = exact 40-hex approved HEAD")
+    return task, head
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["run", "status", "issues-backfill"])
@@ -620,7 +717,15 @@ def main() -> int:
     parser.add_argument("--smoke", action="store_true", help="test the model and sandbox without reviewing or advancing")
     parser.add_argument("--dry-run", action="store_true", help="fetch and plan only; do not call the model or advance")
     parser.add_argument("--resume-run", type=Path, help="resume a frozen issues-backfill run; completed identities are reused")
+    parser.add_argument("--deliver-repairs", action="store_true",
+                        help="explicitly authorize verified repair commits, pushes, PR creation and verified-merge issue closure")
+    parser.add_argument("--approve-repair-merge", action="append", type=merge_approval, default=[], metavar="TASK=HEAD",
+                        help="human approval to merge this exact repair task and commit after required CI passes")
     args = parser.parse_args()
+    if (args.deliver_repairs or args.approve_repair_merge) and (args.action != "run" or args.smoke or args.dry_run):
+        parser.error("repair delivery authorization requires a normal run")
+    if args.approve_repair_merge and not args.deliver_repairs:
+        parser.error("--approve-repair-merge requires --deliver-repairs")
     if args.resume_run and args.action != "issues-backfill":
         parser.error("--resume-run requires issues-backfill")
     if args.action == "issues-backfill" and (args.smoke or args.dry_run):
@@ -631,7 +736,8 @@ def main() -> int:
         return 0
     try:
         result = run_issue_backfill(root, resume_run=args.resume_run) if args.action == "issues-backfill" else run_once(
-            root, smoke=args.smoke, dry_run=args.dry_run)
+            root, smoke=args.smoke, dry_run=args.dry_run, deliver_repairs=args.deliver_repairs,
+            merge_approvals=dict(args.approve_repair_merge))
         print(json.dumps(result, ensure_ascii=False, indent=2))
         if args.action == "issues-backfill" and result["status"] == "partial":
             return 2

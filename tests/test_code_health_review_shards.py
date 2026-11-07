@@ -305,23 +305,27 @@ def test_metadata_preparation_cannot_spend_reserved_issue_budget(commit_review_r
 def test_repair_budget_exhaustion_preserves_review_partial_receipt(commit_review_run, monkeypatch):
     root, shas, clock = commit_review_run
     config = json.loads((root / "config.json").read_text())
-    review.write_json(root / "config.json", {**config, "repair_enabled": True})
-    calls = []
+    review.write_json(root / "config.json", {**config, "repair_enabled": True, "repair_budget_seconds": 600})
+    calls, repair_remaining = [], []
 
     def invoke(config, shard, prompt):
         clock[0] += config["timeout_seconds"]
         sha = json.loads((shard / "plan.json").read_text())["commits"][0]["sha"]
         calls.append(sha)
-        if len(calls) == 3:
-            raise TimeoutError("third shard timed out at daily deadline")
         return result([sha])
 
+    def advance(root, config, run, deadline, invoke, **kwargs):
+        repair_remaining.append(deadline - clock[0])
+        return {"status": "complete", "entered": True, "attempted": ["existing-task"]}
+
     monkeypatch.setattr(review, "invoke_agent", invoke)
-    monkeypatch.setattr(review.repair, "repair_one", lambda *args: pytest.fail("repair must not start without budget"))
+    monkeypatch.setattr(review.repair, "run_repairs", advance)
     receipt = review.run_once(root)
-    assert calls == shas[1:4]
+    assert calls == shas[1:3]
     assert receipt["status"] == "partial"
     assert receipt["completed_commits"] == shas[1:3]
-    assert receipt["repair"]["status"] == "pending"
+    assert repair_remaining == [600]
+    assert receipt["repair"]["entered"] is True
+    assert receipt["daily_summary"]["repair_attempted"] == ["existing-task"]
     assert json.loads((root / "last-run.json").read_text())["status"] == "partial"
     assert json.loads((Path(receipt["run_dir"]) / "result.json").read_text())["outcome"] == "partial"
