@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from domain.domain.ledger import ContractKey
 from src.application.ledger.lot_resolver import (
     contract_key_from_lot_fields,
     lot_contract_value,
@@ -138,6 +139,31 @@ def build_current_combo_facts(
             if contracts_open > original_contracts:
                 reasons.add("combo_current_member_quantity_invalid")
             if contracts_open > 0:
+                # Bind active legs to their immutable contract, using the same
+                # canonical identity as adoption. Closed legs retain their
+                # historical meaning; legacy position_side is not contract identity.
+                bound_key = identity[f"{expected_role}_contract_key"]
+                try:
+                    current_key = ContractKey.from_values(**{
+                        key: lot_contract_value(
+                            fields, contract_key, key,
+                            "symbol" if key == "underlying_symbol" else key,
+                        )
+                        for key in (
+                            "broker", "account", "underlying_symbol", "option_type",
+                            "strike", "expiration_ymd", "asset_type",
+                        )
+                    })
+                    contract_matches = (
+                        isinstance(bound_key, Mapping)
+                        and current_key == ContractKey.from_values(
+                            **{key: bound_key.get(key) for key in current_key.to_dict()}
+                        )
+                    )
+                except (TypeError, ValueError):
+                    contract_matches = False
+                if not contract_matches:
+                    reasons.add("combo_current_member_binding_invalid")
                 bindings.append(
                     {
                         "record_id": lot_id,

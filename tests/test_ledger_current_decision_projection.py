@@ -6,6 +6,7 @@ import json
 import sqlite3
 from copy import deepcopy
 from pathlib import Path
+from time import time_ns
 from typing import Any
 
 import pytest
@@ -22,6 +23,7 @@ from domain.domain.wheel import (
     merge_lot_strategy_metadata,
 )
 from src.application.ledger import (
+    api as ledger_api,
     combo_reconciliation,
     current_decision_combo,
     current_decision_projection as current_projection_module,
@@ -2287,6 +2289,157 @@ def test_covered_call_candidate_resolution_is_linear_in_current_lots() -> None:
     assert CountingAccount.comparisons < size * 10
 
 
+@pytest.mark.parametrize("adjustment", ["strike", "expiration", "same_strike", "premium"])
+def test_current_combo_checks_active_contract_binding_after_public_manual_adjust(
+    tmp_path: Path, adjustment: str,
+) -> None:
+    repo = _repo(tmp_path)
+    group_id = "combo-yield:lx:contract-binding"
+    keys = {
+        kind: _contract_key(
+            option_type=kind,
+            strike=100 if kind == "put" else 110,
+            expiration_ymd="2030-06-21",
+        )
+        for kind in ("put", "call")
+    }
+    writer.persist_trade_event_objects_atomically(
+        repo,
+        [
+            TradeEvent(
+                event_id=f"combo-{kind}-open",
+                event_type="open",
+                event_time_ms=2_000,
+                contract_key=keys[kind],
+                contracts=1,
+                price=2,
+                currency="USD",
+                source="test",
+                multiplier=100,
+                lot_id=f"combo-{kind}-lot",
+                raw_payload={
+                    "side": "sell" if kind == "put" else "buy",
+                    "strategy": "combo_yield",
+                    "strategy_group_id": group_id,
+                    "leg_role": role,
+                },
+            )
+            for kind, role in (("put", "funding_put"), ("call", "participation_call"))
+        ],
+    )
+    _bootstrap(repo, "lx")
+    adoption_args = {
+        "strategy_group_id": group_id,
+        "funding_put_lot_id": "combo-put-lot",
+        "funding_put_open_event_id": "combo-put-open",
+        "participation_call_lot_id": "combo-call-lot",
+        "participation_call_open_event_id": "combo-call-open",
+        "expected_contracts": 1,
+    }
+    adopted = ledger_api.adopt_existing_combo_identity(repo, **adoption_args, apply_changes=True)
+    assert adopted["status"] == "adopted"
+    before = read_current_decision_projection(repo, account="lx", now_ms=time_ns() // 1_000_000)
+    assert before["status"] == "trusted"
+    before_group = before["payload"]["combo"]["current_groups"][0]
+    assert before_group["reason_codes"] == []
+    assert before_group["status"] == "active_combo"
+    identities = deepcopy(repo.read_current_decision_projection_inputs("lx")["identities"])
+    adjustments = {
+        "strike": {"strike": 120},
+        "expiration": {"expiration_ymd": "2030-07-19"},
+        "same_strike": {"strike": float(keys["call"].strike)},
+        "premium": {"premium_per_share": 3},
+    }
+    result = ledger_api.record_manual_position_adjust(
+        repo, lot_id="combo-call-lot", **adjustments[adjustment],
+    )
+    assert result.result.to_dict()["decision_projection"]["statuses"] == {"lx": "published"}
+
+    reopened = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    after = read_current_decision_projection(
+        reopened, account="lx", now_ms=time_ns() // 1_000_000,
+    )
+    assert after["status"] == "trusted"
+    assert reopened.read_current_decision_projection_inputs("lx")["identities"] == identities
+    group = after["payload"]["combo"]["current_groups"][0]
+    if adjustment in {"strike", "expiration"}:
+        with pytest.raises(ValueError, match="contract key mismatch"):
+            ledger_api.adopt_existing_combo_identity(reopened, **adoption_args)
+        assert group["status"] == "review_required"
+        assert group["reason_codes"] == ["combo_current_member_binding_invalid"]
+    else:
+        assert group == before_group
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["legacy-flat", "nested"])
+@pytest.mark.parametrize("option_type", ["put", "call"])
+@pytest.mark.parametrize("closed", [False, True], ids=["active-leg", "closed-leg"])
+@pytest.mark.parametrize(
+    "changed_field", [None, "broker", "option_type", "strike", "expiration_ymd", "asset_type"],
+)
+def test_combo_contract_binding_normalizes_legacy_keys_and_rejects_active_mismatch(
+    nested: bool, option_type: str, closed: bool, changed_field: str | None,
+) -> None:
+    group_id = "combo-yield:lx:legacy-contract-binding"
+    keys = {
+        kind: _contract_key(option_type=kind, strike=100 if kind == "put" else 110).to_dict()
+        for kind in ("put", "call")
+    }
+    identity = build_combo_identity({
+        "group_id": group_id,
+        "strategy": "combo_yield",
+        "account": "lx",
+        "symbol": "NVDA",
+        "funding_put_record_id": "put-lot",
+        "funding_put_open_event_id": "put-open",
+        "funding_put_contract_key": {**keys["put"], "strike": 100.0, "position_side": "short"},
+        "participation_call_record_id": "call-lot",
+        "participation_call_open_event_id": "call-open",
+        "participation_call_contract_key": {**keys["call"], "strike": 110.0, "position_side": "long"},
+        "original_contracts": 1,
+    })
+    lots = []
+    for kind, role in (("put", "funding_put"), ("call", "participation_call")):
+        contracts_open = 0 if closed and kind == option_type else 1
+        fields = {
+            "status": "open" if contracts_open else "closed",
+            "contracts_open": contracts_open,
+            "source_event_id": f"{kind}-open",
+            "strategy_group_id": group_id,
+            "leg_role": role,
+        }
+        if nested:
+            fields["contract_key"] = keys[kind]
+        else:
+            fields.update(keys[kind])
+            fields["symbol"] = fields.pop("underlying_symbol")
+        lots.append({"record_id": f"{kind}-lot", "fields": fields})
+    before_group = build_current_combo_facts(
+        account="lx", current_position_lots=lots, identities=[identity],
+        assigned_stock=empty_assigned_stock_fact("lx"),
+    )["current_groups"][0]
+    assert before_group["reason_codes"] == []
+    if changed_field:
+        fields = next(row["fields"] for row in lots if row["record_id"] == f"{option_type}-lot")
+        current_key = fields["contract_key"] if nested else fields
+        current_key[changed_field] = {
+            "broker": "盈透",
+            "option_type": "call" if option_type == "put" else "put",
+            "strike": "120",
+            "expiration_ymd": "2026-07-17",
+            "asset_type": "stock",
+        }[changed_field]
+    group = build_current_combo_facts(
+        account="lx", current_position_lots=lots, identities=[identity],
+        assigned_stock=empty_assigned_stock_fact("lx"),
+    )["current_groups"][0]
+    if changed_field and not closed:
+        assert group["status"] == "review_required"
+        assert group["reason_codes"] == ["combo_current_member_binding_invalid"]
+    else:
+        assert group == before_group
+
+
 @pytest.mark.parametrize(
     ("original", "put_open", "call_open", "assigned", "expected"),
     [
@@ -2304,6 +2457,10 @@ def test_combo_facts_use_retained_terminal_lots(
     expected: str,
 ) -> None:
     group_id = "combo-yield:lx:group-a"
+    contract_keys = {
+        "funding_put": _contract_key().to_dict(),
+        "participation_call": _contract_key(option_type="call", strike=110).to_dict(),
+    }
     identity = build_combo_identity(
         {
             "group_id": group_id,
@@ -2312,10 +2469,10 @@ def test_combo_facts_use_retained_terminal_lots(
             "symbol": "NVDA",
             "funding_put_record_id": "put-lot",
             "funding_put_open_event_id": "put-open",
-            "funding_put_contract_key": "put-key",
+            "funding_put_contract_key": contract_keys["funding_put"],
             "participation_call_record_id": "call-lot",
             "participation_call_open_event_id": "call-open",
-            "participation_call_contract_key": "call-key",
+            "participation_call_contract_key": contract_keys["participation_call"],
             "original_contracts": original,
         }
     )
@@ -2341,6 +2498,7 @@ def test_combo_facts_use_retained_terminal_lots(
                 "status": "open" if contracts_open else "closed",
                 "contracts_open": contracts_open,
                 "source_event_id": open_event_id,
+                "contract_key": contract_keys[role],
                 "account": "lx",
                 "symbol": "NVDA",
                 "strategy_group_id": group_id,
