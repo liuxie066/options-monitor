@@ -1790,6 +1790,43 @@ def test_trade_intake_uses_embedded_state_for_pending_age(tmp_path: Path) -> Non
     assert pending["observed"]["oldest_pending_age_seconds"] == 600
 
 
+@pytest.mark.parametrize("scenario,reason", [
+    ("canonical", "INTAKE_PENDING_CLEAR"),
+    ("other_physical", "INTAKE_PENDING_OVERDUE"),
+])
+def test_trade_intake_pending_quality_uses_verified_execution_identity(
+    tmp_path: Path, scenario: str, reason: str,
+) -> None:
+    from tests.test_trades_state_reconcile import _pending_lifecycle_identity_fixture
+    from src.application.agent_tools.runtime_status_impl import (
+        _trade_intake_audit_reconciliation_summary,
+        _trade_intake_reconciliation_summary,
+    )
+
+    state_path, ledger_path = _pending_lifecycle_identity_fixture(tmp_path, scenario)
+    before = {path: path.read_bytes() for path in (state_path, ledger_path)}
+    store = {"sqlite_path": str(ledger_path)}
+    summary = _trade_intake_reconciliation_summary(state_path=state_path, ledger_store=store)
+    summary.update(pending_count=1, failed_count=0, unresolved_count=1)
+    summary["audit_reconciliation"] = _trade_intake_audit_reconciliation_summary(
+        state_path=state_path, audit_path=tmp_path / "absent-audit.jsonl", ledger_store=store,
+    )
+    datasets = build_trade_intake_datasets(
+        runtime_statuses=[{"trade_intake": {"enabled": True, "sources": [{
+            "id": "fixture", "account": "lx", "enabled": True,
+            "state": {"json": json.loads(state_path.read_text())}, "summary": summary,
+        }]}}],
+        accounts=["lx"], market="us", repo_root=tmp_path,
+        observed_at_utc="2026-07-13T10:00:00Z",
+        now=datetime(2026, 7, 13, 10, tzinfo=timezone.utc),
+    )
+    pending = next(check for check in datasets[0]["checks"] if check["check_id"] == "OM-INT-001")
+
+    assert pending["reason_code"] == reason
+    assert pending["status"] == ("pass" if reason == "INTAKE_PENDING_CLEAR" else "fail")
+    assert {path: path.read_bytes() for path in before} == before
+
+
 def test_trade_intake_does_not_trust_state_only_lifecycle_delegation(
     tmp_path: Path,
 ) -> None:

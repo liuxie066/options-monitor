@@ -446,6 +446,104 @@ def test_readonly_sqlite_preview_delegates_canonical_lifecycle_pending(
     assert state_path.read_bytes() == original_state
 
 
+def _pending_lifecycle_identity_fixture(tmp_path: Path, scenario: str) -> tuple[Path, Path]:
+    from src.application.trades.deal_identity import broker_deal_key
+    from src.application.trades.normalizer import normalize_trade_deal
+
+    test_readonly_sqlite_preview_delegates_canonical_lifecycle_pending(tmp_path)
+    ledger_path = tmp_path / "ledger.sqlite3"
+    deal = normalize_trade_deal(
+        {
+            "code": "US.FUTU260821P100000", "asset_type": "option",
+            "environment": "REAL", "external_id_namespace": "futu.deal",
+            "futu_account_id": "1001", "broker_account_id": "fixture-futu-1001",
+            "deal_id": "deal-option-waiting", "qty": 1, "price": 0,
+            "trd_side": "BUY_BACK", "position_effect": "close", "multiplier": 100,
+            "currency": "USD", "trade_time_ms": 1_700_000_000_100,
+        },
+        futu_account_mapping={"1001": "lx"},
+        allow_opend_refresh=False,
+    )
+    execution_key = broker_deal_key(deal)
+    assert execution_key.startswith("execution:v1:")
+    assert not deal.execution_input.get("errors")
+    with closing(connect_ledger_fixture(ledger_path)) as conn, conn:
+        evidence = json.loads(conn.execute(
+            "SELECT raw_json FROM trade_lifecycle_evidence WHERE evidence_id = 'ev-option-waiting'"
+        ).fetchone()[0])
+        evidence["raw"] = {"execution_input": deal.execution_input}
+        conn.execute(
+            "UPDATE trade_lifecycle_evidence SET raw_json = ? WHERE evidence_id = 'ev-option-waiting'",
+            (json.dumps(evidence),),
+        )
+    state_item = {
+        "status": "unresolved", "action": "lifecycle", "account": "lx",
+        "source_deal_id": deal.deal_id, "futu_account_id": "1001",
+        "reason": "waiting_settlement_evidence",
+        "updated_at": "2026-07-13T09:00:00+00:00",
+        "diagnostics": {"lifecycle_evidence": evidence},
+    }
+    state_key = deal.deal_id
+    if scenario == "compat":
+        state_key = "futu:lx:1001:deal-option-waiting"
+    elif scenario.startswith("canonical"):
+        state_key = execution_key
+        state_item["broker_deal_key"] = execution_key
+    if scenario in {"other_physical", "canonical_other_physical"}:
+        state_item["futu_account_id"] = "1002"
+        state_item["diagnostics"] = {}
+    elif scenario == "other_account":
+        state_item["account"] = "sy"
+        state_item["diagnostics"] = {}
+    elif scenario == "unscoped":
+        state_item.pop("futu_account_id")
+        state_item["diagnostics"] = {}
+    elif scenario == "canonical_without_diagnostics":
+        state_item["diagnostics"] = {}
+    state_path = tmp_path / "identity-state.json"
+    _write_state(state_path, unresolved={state_key: state_item})
+    return state_path, ledger_path
+
+
+@pytest.mark.parametrize("scenario,delegated", [
+    ("compat", True),
+    ("canonical", True),
+    ("bare", True),
+    ("other_physical", False),
+    ("other_account", False),
+    ("unscoped", False),
+    ("canonical_other_physical", False),
+    ("canonical_without_diagnostics", True),
+])
+def test_pending_lifecycle_delegation_requires_matching_execution_identity(
+    tmp_path: Path, scenario: str, delegated: bool,
+) -> None:
+    from src.application.ledger.api import (
+        lifecycle_account_coherent_facts, open_trade_reconciliation_evidence_repo,
+    )
+
+    state_path, ledger_path = _pending_lifecycle_identity_fixture(tmp_path, scenario)
+    repo = open_trade_reconciliation_evidence_repo(ledger_path)
+    facts = lifecycle_account_coherent_facts(repo, account="lx")
+    assert facts["account_lifecycle_resolution"]["case_resolutions"][0]["status"] == "direct"
+    before = {path: path.read_bytes() for path in (state_path, ledger_path)}
+    preview = preview_trade_intake_reconciliation_from_sqlite(
+        state_path=state_path, sqlite_path=ledger_path,
+    )
+    reconciled = reconcile_trade_intake_state(
+        state_path=state_path, repo=repo, apply_changes=False,
+    )
+
+    assert preview["available"] is True
+    assert preview["delegated_lifecycle_pending_count"] == int(delegated)
+    assert preview["pending_after_reconcile_count"] == 1
+    assert preview["actionable_pending_after_reconcile_count"] == int(not delegated)
+    assert reconciled["actions"][0]["reason"] == (
+        "lifecycle_pending_delegated" if delegated else "no_reconciliation_evidence"
+    )
+    assert {path: path.read_bytes() for path in before} == before
+
+
 def test_reconcile_trade_intake_state_dry_run_keeps_file_unchanged(tmp_path: Path) -> None:
     state_path = tmp_path / "auto_trade_intake_state.json"
     _write_state(

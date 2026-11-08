@@ -340,10 +340,10 @@ def reconcile_trade_intake_state(
             new_state = upsert_deal_state(new_state, bucket="processed_deal_ids", deal_id=deal_id, payload=payload)
             continue
 
-        delegated_entries = _filter_evidence_for_state_item(
-            delegated_lifecycle_by_deal.get(deal_id) or [],
-            state_item=item,
-        )
+        delegated_entries = [
+            entry for entry in delegated_lifecycle_by_deal.get(_lifecycle_lookup_key(deal_id, item), [])
+            if _lifecycle_source_matches_state(entry, deal_id=deal_id, state_item=item)
+        ]
         if len(delegated_entries) == 1:
             delegated = delegated_entries[0]
             case = delegated.get("case") if isinstance(delegated.get("case"), dict) else {}
@@ -604,23 +604,28 @@ def _completed_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, An
                     "terminal_event_ids": [row["event_id"] for row in terminal],
                     "terminal_types": terminal_types,
                 }
-                keys = _deal_ids_from_source_key(source_key)
-                execution = (owner.get("raw") or {}).get("execution_input")
-                if isinstance(execution, dict):
-                    ref = execution.get("broker_account_ref") or {}
-                    parts = source_key.split(":", 3)
-                    if (len(parts) == 4 and ref.get("broker_id") == "futu"
-                            and ref.get("external_account_id") == parts[2]
-                            and ref.get("environment") == "REAL"
-                            and execution.get("external_id_namespace") == "futu.deal"
-                            and str(execution.get("external_execution_id")) == parts[3]):
-                        identity = execution_identity_from_input(execution)
-                        if identity:
-                            keys.append(identity)
-                            entry["execution_identity"] = identity
-                for key in keys:
+                for key in _lifecycle_entry_keys(entry):
                     out.setdefault(key, []).append(entry)
     return out
+
+
+def _lifecycle_entry_keys(entry: dict[str, Any]) -> list[str]:
+    source_key = entry["source_key"]
+    keys = _deal_ids_from_source_key(source_key)
+    execution = (entry["evidence"].get("raw") or {}).get("execution_input")
+    if isinstance(execution, dict):
+        ref = execution.get("broker_account_ref") or {}
+        parts = source_key.split(":", 3)
+        if (len(parts) == 4 and ref.get("broker_id") == "futu"
+                and ref.get("external_account_id") == parts[2]
+                and ref.get("environment") == "REAL"
+                and execution.get("external_id_namespace") == "futu.deal"
+                and str(execution.get("external_execution_id")) == parts[3]):
+            identity = execution_identity_from_input(execution)
+            if identity:
+                keys.append(identity)
+                entry["execution_identity"] = identity
+    return keys
 
 
 def _positive_contract_count(value: Any) -> int:
@@ -726,6 +731,11 @@ def _delegated_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, An
             if isinstance(item, dict)
             and str(item.get("evidence_id") or "").strip()
         }
+        claims_by_anchor = {
+            (claim.get("source_key"), claim.get("case_id"), claim.get("owner_evidence_id"),
+             claim.get("source_payload_hash")): claim
+            for claim in _dict_rows(facts.get("account_lifecycle_source_consumptions"))
+        }
         resolution = facts.get("account_lifecycle_resolution")
         if not isinstance(resolution, dict):
             raise TypeError("canonical lifecycle resolution is unavailable")
@@ -749,15 +759,21 @@ def _delegated_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, An
                 owner_evidence_id = str(
                     anchor.get("source_owner_evidence_id") or ""
                 ).strip()
-                if not source_key:
+                claim = claims_by_anchor.get((
+                    source_key, anchor.get("source_owner_case_id"), owner_evidence_id,
+                    anchor.get("source_payload_hash"),
+                ))
+                if not source_key or claim is None:
                     continue
                 entry = {
                     "case": dict(lifecycle_case),
                     "evidence": dict(evidence_by_id.get(owner_evidence_id) or {}),
                     "source_key": source_key,
+                    "source_payload": claim["source_payload"],
+                    "source_payload_hash": claim["source_payload_hash"],
                     "anchor_kind": anchor.get("anchor_kind"),
                 }
-                for deal_id in _deal_ids_from_source_key(source_key):
+                for deal_id in _lifecycle_entry_keys(entry):
                     out.setdefault(deal_id, []).append(entry)
     return out
 
