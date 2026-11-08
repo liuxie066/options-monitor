@@ -47,6 +47,8 @@ wrapper 严格核对本轮身份、账户集合、布尔字段及退出码一致
 
 `OPEND_NEEDS_PHONE_VERIFY` 分支以终态错误和非零返回结束，账户 last-run 保留原因码与 pending marker。`tick_guard_flow` 在 marker pending 时也返回非零、同一原因码，不能标 guard 成功；人工 `--opend-phone-verify-continue` 只放行一次 watchdog 探测，不在探测前清 marker。watchdog 验证所需登录能力确实恢复后清 marker，即使这次人工 Tick 因时窗没有扫描；市场级失败仍保持到下一次完整计划 Tick 收据。探测失败则保留 marker 并返回非零。`OPEND_LOGIN_INVALID` 沿现有 fail-fast 路径；“需要图形验证码”单独归一为 `OPEND_NEEDS_PIC_VERIFY`/人工动作，不再错误标成手机验证码。恢复不能靠时间过期伪装健康；账户旧错误与市场新收据按同一市场、账号、时间与 pending 状态仲裁，不能让旧记录永久遮蔽真恢复。
 
+看门狗 CLI 的 `--required-capability broker` 必须提供至少一个非空白的 `--expected-account-id`，可重复指定账户；缺省、空串或全空白列表在端口探测、启动 OpenD 和构造 SDK context 前以 argparse 输入错误退出（退出码 2、stderr 提示；`--json` 也遵守此输入检查）。账户列表和 `--trd-env` 继续原样交给券商 readiness owner 校验；`quote`、`both` 及默认 `both` 保持原有能力检查。
+
 看门狗对明确的行情/交易未登录分别报告 `OPEND_QOT_NOT_LOGINED` / `OPEND_TRD_NOT_LOGINED`；单独的 `not logged` / `not login` 不证明需要手机验证码，缺少具体能力证据时使用既有接口异常码。真实验证码提示仍优先识别；单次探测保持原查询重试次数，成交监听的普通未登录错误沿用既有重连退避，真实认证阻塞仍终止。
 
 告警复用现有独立于富途的通道；三种登录人工动作码归同一事故族。限流状态在窄锁内作原子认领，每次事故最多**一次发送尝试**，不把 provider 提交等同于投递确认。提交结果不明保持认领并给运维可读的 `delivery_unknown`，人工或恢复事件才解锁下一次事故；`no_send` 不认领也不发送。其他 OpenD 暂时故障仍遵守现有限流及重试策略。
