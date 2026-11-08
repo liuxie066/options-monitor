@@ -160,14 +160,17 @@ def cc_lp_rank_key(
 
     retention = _safe_float(row.get("net_credit_retention")) or _safe_float(row.get("retention")) or 0.0
     put_delta = abs(_safe_float(row.get("put_delta")) or 0.0)
-    call_spread = _safe_float(row.get("call_spread_ratio")) or 999.0
-    put_spread = _safe_float(row.get("put_spread_ratio")) or 999.0
+    call_spread = _safe_float(row.get("call_spread_ratio"))
+    put_spread = _safe_float(row.get("put_spread_ratio"))
     call_oi = _safe_float(row.get("call_open_interest")) or 0.0
     put_oi = _safe_float(row.get("put_open_interest")) or 0.0
     return (
         -float(retention),
         abs(float(put_delta) - float(target_put_delta)),
-        max(float(call_spread), float(put_spread)),
+        max(
+            call_spread if call_spread is not None else 999.0,
+            put_spread if put_spread is not None else 999.0,
+        ),
         -min(float(call_oi), float(put_oi)),
         str(row.get("call_contract_symbol") or ""),
         str(row.get("put_contract_symbol") or ""),

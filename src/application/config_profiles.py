@@ -15,10 +15,37 @@ class ConfigProfileError(ValueError):
 
 
 def deep_merge(base: dict, override: dict) -> dict:
-    """Recursively merge two dicts. override wins."""
-    out = dict(base or {})
-    for k, v in (override or {}).items():
-        if isinstance(v, dict) and isinstance(out.get(k), dict):
+    """Merge authored overrides without letting materialized defaults mask profiles."""
+    base = base or {}
+    override = override or {}
+    out = dict(base)
+    explicit = override.get('_explicit_fields')
+    for k, v in override.items():
+        if (
+            k in {'_explicit_fields', '_explicit_call_fields', '_explicit_put_fields'}
+            and isinstance(v, (list, tuple, set))
+        ):
+            inherited = base.get(k)
+            if not isinstance(inherited, (list, tuple, set)):
+                scope = (
+                    base if k == '_explicit_fields'
+                    else base.get(k[len('_explicit_'):-len('_fields')], {})
+                )
+                inherited = (
+                    [name for name in scope if not str(name).startswith('_')]
+                    if isinstance(scope, dict) else []
+                )
+            out[k] = sorted(set(inherited) | set(v))
+        elif (
+            isinstance(explicit, (list, tuple, set))
+            and not k.startswith('_') and k not in explicit
+        ):
+            if k not in out:
+                out[k] = v
+        elif isinstance(v, dict) and isinstance(out.get(k), dict):
+            nested_explicit = override.get(f'_explicit_{k}_fields')
+            if isinstance(nested_explicit, (list, tuple, set)):
+                v = {name: v[name] for name in nested_explicit if name in v}
             out[k] = deep_merge(out[k], v)
         else:
             out[k] = v

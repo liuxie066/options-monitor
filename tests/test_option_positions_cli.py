@@ -1935,6 +1935,158 @@ def test_option_positions_cli_adjust_lot_dry_run_outputs_strategy_metadata(
     assert "yield_enhancement_mode" not in out
 
 
+@pytest.mark.parametrize("queried_lot", ["a", "b", "other-broker", "opposite"])
+def test_option_positions_cli_history_isolates_lots_in_real_ledger(
+    monkeypatch, tmp_path: Path, capsys, queried_lot: str,
+) -> None:
+    from src.interfaces.cli.main import main
+
+    db = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=db)
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db)
+    empty_env = tmp_path / "empty.env"
+    empty_env.write_text("", encoding="utf-8")
+    monkeypatch.setenv("OM_ENV_FILE", str(empty_env))
+    opens = {}
+    for index, (name, broker, side) in enumerate([
+        ("a", "futu", "short"),
+        ("b", "futu", "short"),
+        ("other-broker", "longbridge", "short"),
+        ("opposite", "futu", "long"),
+    ]):
+        opens[name] = ledger_manual_trades.persist_manual_open_event(
+            repo, broker=broker, account="lx", symbol="NVDA", option_type="put",
+            side=side, contracts=1, currency="USD", strike=100.0, multiplier=100.0,
+            expiration_ymd="2026-06-19", premium_per_share=2.5,
+            opened_at_ms=1000 + index, request_id=f"history-isolation-{name}",
+        )
+    b_id = opens["b"].lot_id
+    adjust = ledger_manual_trades.persist_manual_adjust_event(
+        repo, lot_id=b_id, fields=repo.get_position_lot_fields(b_id),
+        premium_per_share=2.75, as_of_ms=2000,
+    )
+    close = ledger_manual_trades.persist_manual_close_event(
+        repo, lot_id=b_id, fields=repo.get_position_lot_fields(b_id),
+        contracts_to_close=1, close_price=1.0, close_reason="manual_buy_to_close",
+        as_of_ms=3000,
+    )
+    void = ledger_interventions.persist_manual_void_event(
+        repo, target_event_id=close.event_id, void_reason="restore B", as_of_ms=4000,
+    )
+    expected = {opens[queried_lot].event_id}
+    if queried_lot == "b":
+        expected.update([adjust.event_id, close.event_id, void.event_id])
+    before_events = repo.list_trade_events()
+    before_lots = repo.list_position_lots()
+    before_files = {path.name: path.read_bytes() for path in db.parent.iterdir() if path.is_file()}
+
+    assert main([
+        "option-positions", "--data-config", str(data_config), "history",
+        "--runtime-root", str(tmp_path), "--record-id", opens[queried_lot].lot_id,
+        "--format", "json",
+    ]) == 0
+
+    history = json.loads(capsys.readouterr().out)
+    assert {row["event_id"] for row in history} == expected
+    assert all(row["record_id"] == opens[queried_lot].lot_id for row in history)
+    if queried_lot == "b":
+        void_row = next(row for row in history if row["event_id"] == void.event_id)
+        assert void_row["void_target_event_id"] == close.event_id
+    assert repo.list_trade_events() == before_events
+    assert repo.list_position_lots() == before_lots
+    assert {path.name: path.read_bytes() for path in db.parent.iterdir() if path.is_file()} == before_files
+
+
+@pytest.mark.parametrize(
+    ("competing_lot", "missing_identity", "include_legacy"),
+    [
+        (None, None, True),
+        ("other-broker", None, True),
+        ("opposite", None, True),
+        ("same", None, False),
+        ("same-voided", None, False),
+        (None, "broker", False),
+        (None, "side", False),
+    ],
+)
+def test_option_positions_cli_history_attributes_legacy_events_only_uniquely(
+    monkeypatch, tmp_path: Path, capsys, competing_lot, missing_identity, include_legacy,
+) -> None:
+    from src.interfaces.cli.main import main
+
+    db = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=db)
+    repo = ledger_repository.SQLiteOptionPositionsRepository(db)
+    empty_env = tmp_path / "empty.env"
+    empty_env.write_text("", encoding="utf-8")
+    monkeypatch.setenv("OM_ENV_FILE", str(empty_env))
+    target = ledger_manual_trades.persist_manual_open_event(
+        repo, broker="futu", account="lx", symbol="NVDA", option_type="put",
+        side="short", contracts=1, currency="USD", strike=100.0, multiplier=100.0,
+        expiration_ymd="2026-06-19", premium_per_share=2.5,
+        opened_at_ms=1000, request_id="history-legacy-target",
+    )
+    competitor = None
+    if competing_lot:
+        competitor = ledger_manual_trades.persist_manual_open_event(
+            repo, broker="longbridge" if competing_lot == "other-broker" else "futu",
+            account="lx", symbol="NVDA", option_type="put",
+            side="long" if competing_lot == "opposite" else "short",
+            contracts=1, currency="USD", strike=100.0, multiplier=100.0,
+            expiration_ymd="2026-06-19", premium_per_share=2.5,
+            opened_at_ms=1001, request_id="history-legacy-competitor",
+        )
+    competitor_void = None
+    if competing_lot == "same-voided":
+        competitor_void = ledger_interventions.persist_manual_void_event(
+            repo, target_event_id=competitor.event_id,
+            void_reason="retain historical lot identity", as_of_ms=1500,
+        )
+    # Historical flat rows predate the current writer's mandatory lot references.
+    legacy = {
+        "event_id": "legacy-unbound-close", "event_type": "close",
+        "position_effect": "close", "trade_time_ms": 2000,
+        "broker": "futu", "account": "lx", "symbol": "NVDA", "option_type": "put",
+        "side": "buy", "contracts": 1, "price": 1.0, "currency": "USD",
+        "strike": 100.0, "multiplier": 100.0, "expiration_ymd": "2026-06-19",
+        "source_name": "legacy-import", "raw_payload": {},
+    }
+    if missing_identity:
+        legacy.pop(missing_identity)
+    with repo._writer_connection(begin_immediate=True) as conn:
+        # Recreate historical storage, before canonical insert guards existed.
+        for (name,) in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='trade_events'"
+        ).fetchall():
+            conn.execute('DROP TRIGGER "' + name.replace('"', '""') + '"')
+        conn.execute(
+            "INSERT INTO trade_events "
+            "(event_id, account, event_json, trade_time_ms, created_at_ms, updated_at_ms, "
+            "ingest_seq, market, position_effect) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (legacy["event_id"], "lx", json.dumps(legacy), 2000, 2000, 2000, 99, "us", "close"),
+        )
+    before_events = repo.list_trade_events()
+    before_lots = repo.list_position_lots()
+    before_bytes = db.read_bytes()
+    for opened in [target, *([competitor] if competitor else [])]:
+        assert main([
+            "option-positions", "--data-config", str(data_config), "history",
+            "--runtime-root", str(tmp_path), "--record-id", opened.lot_id,
+            "--format", "json",
+        ]) == 0
+        history = json.loads(capsys.readouterr().out)
+        expected = {opened.event_id}
+        if opened == target and include_legacy:
+            expected.add(legacy["event_id"])
+        if opened == competitor and competitor_void:
+            expected.add(competitor_void.event_id)
+        assert {row["event_id"] for row in history} == expected
+        assert all(row["record_id"] == opened.lot_id for row in history)
+    assert repo.list_trade_events() == before_events
+    assert repo.list_position_lots() == before_lots
+    assert db.read_bytes() == before_bytes
+
+
 def test_option_positions_cli_history_json_includes_related_events(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
     data_config, repo = _active_ledger_context(tmp_path)

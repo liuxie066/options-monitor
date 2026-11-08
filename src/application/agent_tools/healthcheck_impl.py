@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER, normalize_notification_provider
+from src.application.account_config import resolve_configured_accounts
 from src.application.agent_tool_config import repo_base
+from src.application.agent_tool_contracts import AgentToolError
 from src.application.bot.control.audit import default_audit_db_path
 from src.application.channels.status import build_channel_status
 from src.application.environment_status import build_effective_env_with_status
@@ -109,6 +111,14 @@ def run_healthcheck_tool(
         config_key=payload.get("config_key"),
         config_path=payload.get("config_path"),
     )
+    validate_runtime_config(cfg, allow_empty_symbols=True)
+    configured_accounts = accounts_from_config(cfg)
+    accounts = normalize_accounts(payload.get("accounts"), fallback=tuple(configured_accounts))
+    try:
+        accounts = resolve_configured_accounts({"accounts": configured_accounts}, accounts)
+    except ValueError as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+
     warnings: list[str] = []
     effective_env, environment = build_effective_env_with_status(
         env_file=payload.get("env_file"),
@@ -119,7 +129,6 @@ def run_healthcheck_tool(
         _dict(_dict(environment.get("secret_credentials")).get("summary")).get("ok")
     )
     checks: list[dict[str, Any]] = []
-    validate_runtime_config(cfg, allow_empty_symbols=True)
     checks.append({"name": "runtime_config", "status": "ok", "message": "config validation passed"})
 
     market_plugin = "market-" + str(_dict(cfg.get("market_data")).get("provider", "opend"))
@@ -131,7 +140,6 @@ def run_healthcheck_tool(
         "value": {"plugin_id": market_plugin, "installed": market_installed},
     })
 
-    accounts = normalize_accounts(payload.get("accounts"), fallback=tuple(accounts_from_config(cfg)))
     checks.append(
         {
             "name": "accounts",

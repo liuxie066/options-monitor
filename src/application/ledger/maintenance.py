@@ -156,15 +156,15 @@ def _lot_close_type(repo: Any, fields: dict[str, Any]) -> str:
     if legacy:
         return normalize_close_type(legacy)
     close_ids = fields.get("close_event_ids")
-    wanted = {
+    closing_ids = [
         str(item or "").strip()
         for item in (close_ids if isinstance(close_ids, (list, tuple)) else ())
         if str(item or "").strip()
-    }
+    ]
     last_event_id = str(fields.get("last_event_id") or "").strip()
     if last_event_id:
-        wanted.add(last_event_id)
-    if not wanted:
+        closing_ids.append(last_event_id)
+    if not closing_ids:
         return ""
     candidate = getattr(repo, "primary_repo", repo)
     list_events = getattr(candidate, "list_trade_events", None)
@@ -174,10 +174,17 @@ def _lot_close_type(repo: Any, fields: dict[str, Any]) -> str:
         rows = list_events()
     except Exception:
         return ""
-    for item in rows if isinstance(rows, list) else []:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("event_id") or "").strip() not in wanted:
+    wanted = set(closing_ids)
+    events = {
+        str(item.get("event_id") or "").strip(): item
+        for item in (rows if isinstance(rows, list) else [])
+        if isinstance(item, dict) and str(item.get("event_id") or "").strip() in wanted
+    }
+    # The latest event takes precedence over earlier partial closes; older
+    # projections without last_event_id retain closing IDs in event order.
+    for event_id in reversed(closing_ids):
+        item = events.get(event_id)
+        if item is None:
             continue
         raw_payload = item.get("raw_payload")
         raw_payload = raw_payload if isinstance(raw_payload, dict) else {}

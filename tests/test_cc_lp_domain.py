@@ -177,3 +177,22 @@ def test_long_put_missing_delta_never_becomes_zero(delta) -> None:
 def test_metrics_honors_custom_delta_window() -> None:
     metrics = _metrics(_call_leg(), _put_leg(delta=-0.45), min_put_delta=0.4, max_put_delta=0.5)
     assert metrics.net_credit > 0
+
+
+@pytest.mark.parametrize("leg", ["call", "put"])
+@pytest.mark.parametrize("missing", [None, "invalid"])
+def test_rank_cc_lp_zero_spread_beats_positive_and_missing(leg, missing) -> None:
+    common = {
+        "net_credit_retention": .50, "put_delta": -.15,
+        "call_spread_ratio": .05, "put_spread_ratio": .05,
+        "call_open_interest": 100, "put_open_interest": 100,
+    }
+    rows = [
+        {**common, "name": "wide", f"{leg}_spread_ratio": .10},
+        {**common, "name": "missing", f"{leg}_spread_ratio": missing},
+        {**common, "name": "zero", f"{leg}_spread_ratio": 0.0},
+    ]
+    ranked = rank_cc_lp_rows(rows)
+    assert [row["name"] for row in ranked] == ["zero", "wide", "missing"]
+    assert cc_lp_rank_key(ranked[0])[2] == .05
+    assert cc_lp_rank_key(ranked[-1])[2] == 999.0
