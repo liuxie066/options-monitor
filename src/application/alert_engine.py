@@ -911,6 +911,10 @@ def run_alert_engine(
     changes_path = Path(changes_output) if str(changes_output) == '/dev/null' else _resolve_repo_path(repo_base=base, value=changes_output)
     previous_path = _resolve_previous_summary_path(repo_base=base, previous_summary=previous_summary, state_dir=state_dir)
 
+    # The current summary is required; only the previous snapshot is optional.
+    current = pd.read_csv(summary_path)
+    previous = safe_read_csv(previous_path)
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         if str(changes_path) != '/dev/null':
@@ -919,8 +923,6 @@ def run_alert_engine(
         pass
     previous_path.parent.mkdir(parents=True, exist_ok=True)
 
-    current = safe_read_csv(summary_path)
-    previous = safe_read_csv(previous_path)
     current = _fill_capacity_fields_from_note(current)
 
     resolved_state_dir = None
