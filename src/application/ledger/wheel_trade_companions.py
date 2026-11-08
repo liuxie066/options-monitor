@@ -346,6 +346,7 @@ def plan_wheel_assignment_companion(
     activation_window: Mapping[str, Any] | None,
     *,
     recorded_at_ms: int,
+    stock_rows: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Plan the same assignment companion for intake and exact-event recovery."""
     event_id = str(getattr(event, "event_id", "") or "").strip()
@@ -474,13 +475,28 @@ def plan_wheel_assignment_companion(
                     for branch in overlaps
                 ):
                     return None, "ordinary_cc_overlaps_active_wheel_stock"
-            elif overlaps:
+            else:
+                # CC+LP tightening applies on first arrival, even before a Put
+                # from the same account/symbol/millisecond group is ingested.
+                # Read the complete persisted group, not just this intake batch;
+                # the stock owner orders it by (event_time_ms, event_id). Exclude
+                # this Call from its own evidence. Its independently sufficient
+                # lot must predate the group: same-time Put buys are not proof.
+                # Existing companions are never rewritten or automatically voided.
+                stock_context = dict(stock_rows if stock_rows is not None else rows)
+                stock_context["trade_events"] = [
+                    item for item in stock_context.get("trade_events") or []
+                    if str(item.get("event_id") or "").strip() != event_id
+                ]
                 stock_report = project_assigned_stock_lifecycle_from_rows(
-                    rows, account=account, as_of_ms=_event_time_ms(event),
+                    stock_context, account=account, as_of_ms=_event_time_ms(event),
                 )
                 source_stock = _stock_lot(stock_report, source_stock_lot_id) if source_stock_lot_id else None
                 if (
                     source_stock is None
+                    or not 0 < int(source_stock.get("assigned_at_ms") or 0) < _event_time_ms(event)
+                    or int(source_stock.get("shares_remaining") or 0)
+                    < contract_share_quantity(getattr(event, "contracts"), getattr(event, "multiplier"))
                     or str(source_stock.get("symbol") or "").strip().upper()
                     != event.contract_key.underlying_symbol
                     or str(source_stock.get("account") or "").strip().lower() != account
@@ -586,15 +602,20 @@ def append_wheel_trade_companions(
 ) -> tuple[dict[str, str], dict[str, str]]:
     source_fields = dict(context.get("source_fields") or {})
     before_rows = dict(context.get("before_rows") or {})
+    assignments = [
+        event for event in events
+        if str(getattr(event, "event_type", "") or "").strip().lower() == "assignment"
+    ]
     new_assignments = [
         event
         for event, created in zip(events, created_flags, strict=True)
         if created
         and str(getattr(event, "event_type", "") or "").strip().lower() == "assignment"
     ]
-    if not new_assignments:
+    if not assignments:
         return {}, {}
-    accounts = sorted({_event_account(event) for event in new_assignments if _event_account(event)})
+    new_assignment_ids = {str(getattr(event, "event_id", "") or "").strip() for event in new_assignments}
+    accounts = sorted({_event_account(event) for event in assignments if _event_account(event)})
     after_rows = {
         account: repo.read_lifecycle_account_rows(account=account, conn=conn)
         for account in accounts
@@ -605,15 +626,30 @@ def append_wheel_trade_companions(
     companion_by_trade: dict[str, str] = {}
     review_reason_by_trade: dict[str, str] = {}
     for event in sorted(
-        new_assignments,
+        assignments,
         key=lambda item: (_event_time_ms(item), str(getattr(item, "event_id", ""))),
     ):
         event_id = str(getattr(event, "event_id", "") or "").strip()
         account = _event_account(event)
+        if event_id not in new_assignment_ids and (
+            any(
+                str(item.get("source_trade_event_id") or "").strip() == event_id
+                for item in after_rows[account].get("account_wheel_events") or []
+            )
+            or any(
+                valid_void_target_event_id(item) == event_id
+                for item in after_rows[account].get("trade_events") or []
+            )
+        ):
+            # Preserve existing branches and explicitly voided assignments on replay.
+            continue
         fields = source_fields.get(event_id)
         planner_rows = dict(before_rows[account])
         planner_rows["trade_events"] = [
-            *(before_rows[account].get("trade_events") or []),
+            *(
+                item for item in before_rows[account].get("trade_events") or []
+                if str(item.get("event_id") or "").strip() != event_id
+            ),
             *(
                 item.to_dict()
                 for item, created in zip(events, created_flags, strict=True)
@@ -659,13 +695,14 @@ def append_wheel_trade_companions(
         ) if market else None
         companion, review_reason = plan_wheel_assignment_companion(
             event, fields, planner_rows, activation_window,
-            recorded_at_ms=recorded_at_ms,
+            recorded_at_ms=recorded_at_ms, stock_rows=after_rows[account],
         )
         if review_reason and review_reason not in {
             "strategy_not_eligible", "option_type_not_eligible", "wheel_activation_window_unavailable",
         }:
             review_reason_by_trade[event_id] = review_reason
-        if companion is None:
+        if companion is None or event_id not in new_assignment_ids:
+            # Recompute a rejection receipt on replay; never backfill a branch.
             continue
         membership = resolve_option_strategy_membership(event.contract_key, event.position_side, fields)
         internal = membership.strategy == "wheel"
