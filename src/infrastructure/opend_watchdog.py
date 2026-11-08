@@ -384,7 +384,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.required_capability == "broker" and not any(value.strip() for value in args.expected_account_id):
+        parser.error("--required-capability broker requires at least one non-empty --expected-account-id")
     h = run_watchdog_check(
         host=str(args.host),
         port=int(args.port),

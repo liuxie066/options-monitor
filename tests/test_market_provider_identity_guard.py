@@ -178,6 +178,128 @@ def test_required_opend_failure_or_pending_blocks_tick(monkeypatch, tmp_path, pr
         assert calls[0]["expected_account_ids"] == ["123"]
 
 
+def _watchdog_cli_transport(monkeypatch, *, fail_constructor=False):
+    from src.infrastructure import futu_gateway, opend_watchdog
+    from test_futu_gateway_minimal import _BrokerClient
+
+    calls = {name: [] for name in ("ports", "gateway", "sdk", "state", "accounts", "closed", "starts")}
+
+    class TradeContext:
+        def get_global_state(self):
+            calls["state"].append(True)
+            return 0, {"program_status_type": "READY", "trd_logined": True}
+
+        def get_acc_list(self):
+            calls["accounts"].append(True)
+            return 0, [{"acc_id": account, "trd_env": environment} for account, environment in
+                       [("123", "REAL"), ("456", "REAL"), ("789", "SIMULATE")]]
+
+        def close(self):
+            calls["closed"].append(True)
+
+    class Backend:
+        def __init__(self, **kwargs):
+            self.host, self.port = kwargs["host"], kwargs["port"]
+            self._trade_client = None
+
+        def _ensure_trade_client(self):
+            calls["sdk"].append((self.host, self.port))
+            if fail_constructor:
+                raise RuntimeError("synthetic SDK handshake unavailable")
+            if self._trade_client is None:
+                self._trade_client = TradeContext()
+            return self._trade_client
+
+    build = futu_gateway.build_ready_futu_broker_gateway
+
+    def real_readiness_with_mock_sdk(**kwargs):
+        calls["gateway"].append(kwargs)
+        return build(**kwargs, backend_cls=Backend, client_cls=_BrokerClient)
+
+    def forbidden_start():
+        calls["starts"].append(True)
+        raise AssertionError("CLI input must not start OpenD")
+
+    monkeypatch.setattr(futu_gateway, "build_ready_futu_broker_gateway", real_readiness_with_mock_sdk)
+    monkeypatch.setattr(opend_watchdog, "port_open", lambda host, port: calls["ports"].append((host, port)) or True)
+    monkeypatch.setattr(opend_watchdog, "try_start_opend", forbidden_start)
+    return calls
+
+
+@pytest.mark.parametrize("identity_args", [[], ["--expected-account-id", ""],
+                                          ["--expected-account-id", " \t "]],
+                         ids=["absent", "empty", "whitespace"])
+@pytest.mark.parametrize("fail_constructor", [False, True], ids=["sdk-available", "sdk-unavailable"])
+def test_broker_watchdog_cli_missing_accounts_fail_before_sdk(monkeypatch, capsys, identity_args, fail_constructor):
+    from src.infrastructure import opend_watchdog
+
+    calls = _watchdog_cli_transport(monkeypatch, fail_constructor=fail_constructor)
+    argv = ["--host", "isolated.invalid", "--port", "12346", "--required-capability", "broker",
+            "--ensure", "--json", *identity_args]
+    try:
+        code = opend_watchdog.main(argv)
+    except SystemExit as error:
+        code = error.code
+    output = capsys.readouterr()
+    assert calls["sdk"] == []
+    assert calls["ports"] == calls["gateway"] == calls["starts"] == []
+    assert code == 2
+    assert "--expected-account-id" in output.err
+    assert output.out == ""
+
+
+@pytest.mark.parametrize("accounts,environment,ready", [
+    (["123"], "REAL", True), (["123", "456"], "REAL", True),
+    (["123", "123"], "REAL", True), (["789"], "SIMULATE", True),
+    (["999"], "REAL", False), (["123"], "SIMULATE", False),
+])
+def test_broker_watchdog_cli_keeps_real_account_readiness(monkeypatch, capsys, accounts, environment, ready):
+    import json
+    from src.infrastructure import opend_watchdog
+
+    calls = _watchdog_cli_transport(monkeypatch)
+    argv = ["--host", "isolated.invalid", "--port", "12346", "--required-capability", "broker",
+            "--trd-env", environment, "--json"]
+    for account in accounts:
+        argv.extend(["--expected-account-id", account])
+    assert opend_watchdog.main(argv) == (0 if ready else 2)
+    output = capsys.readouterr()
+    assert json.loads(output.out)["ok"] is ready
+    assert not output.err
+    assert len(calls["gateway"]) == 1
+    assert calls["gateway"][0]["expected_account_ids"] == accounts
+    assert calls["gateway"][0]["trd_env"] == environment
+    assert calls["sdk"] == [("isolated.invalid", 12346)]
+    assert calls["state"] == calls["accounts"] == calls["closed"] == [True]
+    assert calls["starts"] == []
+
+
+@pytest.mark.parametrize("capability,trade_ready,ready", [
+    ("quote", False, True), ("both", True, True), ("both", False, False), (None, True, True),
+])
+def test_watchdog_cli_quote_and_both_keep_existing_behavior(monkeypatch, capsys, capability, trade_ready, ready):
+    import json
+    from src.infrastructure import opend_watchdog
+
+    calls = _watchdog_cli_transport(monkeypatch)
+    quote_calls = []
+
+    def state(host, port, **kwargs):
+        quote_calls.append((host, port, kwargs))
+        return {"program_status_type": "READY", "qot_logined": True, "trd_logined": trade_ready}, None, None
+
+    monkeypatch.setattr(opend_watchdog, "get_global_state", state)
+    argv = ["--host", "isolated.invalid", "--port", "12346", "--json"]
+    if capability is not None:
+        argv.extend(["--required-capability", capability])
+    assert opend_watchdog.main(argv) == (0 if ready else 2)
+    output = capsys.readouterr()
+    assert json.loads(output.out)["ok"] is ready
+    assert not output.err
+    assert len(quote_calls) == 1
+    assert calls["sdk"] == calls["gateway"] == calls["starts"] == []
+
+
 def test_broker_watchdog_subprocess_preserves_account_binding(monkeypatch, tmp_path):
     from src.infrastructure import external_services, opend_watchdog
 
