@@ -386,9 +386,11 @@ def _build_notification_block_compact(
     exp_part = _fmt_date_compact(contract)
     _, strike_raw = _parse_contract(contract)
     strike = _normalize_contract_strike(strike_raw)
-    emoji = _action_emoji(action_label, risk_line)
     is_enhancement = _is_combo_yield_action(action_label)
     is_call = _is_covered_call_action(action_label)
+    qty_match = re.search(r'数量=(\d+)张', contract_line) if is_call else None
+    zero_cover = qty_match is not None and int(qty_match.group(1)) == 0
+    emoji = '🟡' if zero_cover else _action_emoji(action_label, risk_line)
     action_display = '组合·同期' if is_enhancement else ('CC' if is_call else 'CSP')
     expiry_display = exp_part.replace('@ ', '· ', 1)
 
@@ -453,10 +455,8 @@ def _build_notification_block_compact(
             except Exception:
                 l3_parts.append(f"Δ {delta_val}")
 
-    if is_call:
-        qty_match = re.search(r'数量=(\d+)张', contract_line)
-        if qty_match:
-            l3_parts.append(f"可卖{qty_match.group(1)}张")
+    if is_call and qty_match:
+        l3_parts.append(f"可卖{qty_match.group(1)}张")
 
     if not is_enhancement and ('保证金' in detail_line or '担保' in detail_line):
         margin_match = re.search(r'保证金占用[=:]([^|]+)', detail_line)
@@ -492,7 +492,7 @@ def _build_notification_block_compact(
         out_lines.append(l3)
     if l4:
         out_lines.append(l4)
-    if not is_call and note.startswith(("当前", "所需")):
+    if (not is_call or zero_cover) and note.startswith(("当前", "所需")):
         out_lines.append(f"备注｜{note}")
 
     return "\n".join(out_lines)

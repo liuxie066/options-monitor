@@ -30,6 +30,10 @@ Combo Yield 摘要及 canonical processor row 保留现有 `combo_yield_rank_key
 手工告警在各优先级内沿用该 owner 的排序，经过 summary CSV 不改变同等级候选顺序；
 不同优先级仍先按告警等级分组，缺失字段沿用原排序键的默认语义。
 
+手工 compact CC 正文用同一已解析整数可卖数量生成标记及数量行：明确可卖 0 张时显示黄色标记，
+并保留上游以“当前”或“所需”开头的限制备注；其余 CC 沿用原有标记及省略备注的简约布局。
+该约束属于手工兼容正文，不改变 Daily Brief。
+
 ## 不冻结的 canonical owner
 
 以下生产核继续演进，但不得再建平行实现：
