@@ -25,6 +25,7 @@ from src.application.ledger.lifecycle_overlay import (
 )
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.repository_core import with_sqlite_repo_writer_lock
+from src.application.ledger.read_model import canonicalize_position_lot_fields
 
 
 CURRENT_DECISION_SHADOW_SCHEMA = "current_decision_shadow.v1"
@@ -884,8 +885,11 @@ def _position_consumer_view(rows: Sequence[Any]) -> dict[str, dict[str, Any]]:
         fields = raw.get("fields")
         if not lot_id or not isinstance(fields, Mapping) or lot_id in out:
             raise ValueError("position lot identity is invalid")
+        # Stored lots use the nested write-side vocabulary; compare the same
+        # canonical facts that the position read model publishes to consumers.
+        consumer_fields = canonicalize_position_lot_fields(dict(fields))
         out[lot_id] = {
-            field: fields.get(field)
+            field: consumer_fields.get(field)
             for field in sorted(CURRENT_DECISION_POSITION_FIELDS)
         }
     return dict(sorted(out.items()))

@@ -3,8 +3,11 @@ from unittest.mock import patch
 
 import pytest
 
-from src.application.ledger import decision_snapshot as mod
-from src.application.ledger.manual_trades import persist_manual_open_event
+from src.application.ledger import api as ledger_api, decision_snapshot as mod
+from src.application.ledger.manual_trades import (
+    persist_manual_adjust_event,
+    persist_manual_open_event,
+)
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 
 
@@ -199,3 +202,123 @@ def test_batch_preserves_caller_keys_without_normalization_collisions(tmp_path):
     assert list(actual) == ["LX", "lx"]
     assert actual["LX"]["normalized_account"] == actual["lx"]["normalized_account"] == "lx"
     assert actual["LX"]["decision_state_fingerprint"] != actual["lx"]["decision_state_fingerprint"]
+
+
+def _premium_adjustment_observations(tmp_path, *, adjusted_account="lx"):
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    with patch("src.application.ledger.writer_trade_events.utc_now_ms", return_value=5_000):
+        for index, account in enumerate(SCOPES):
+            opened = ledger_api.record_manual_position_open(
+                repo, broker="futu", account=account, symbol="NVDA", option_type="put",
+                side="short", contracts=index + 1, currency="USD", strike=100,
+                multiplier=100, expiration_ymd="2099-09-18", premium_per_share=2,
+                opened_at_ms=1_000 + index, request_id=f"shadow-{account}",
+            )
+            assert opened.result.created is True
+    inventory = ledger_api.build_current_decision_projection_migration_inventory(
+        repo.db_path, now_ms=10_000,
+    )
+    assert inventory["readiness"] == "ready", inventory["readiness_reasons"]
+    migrated = ledger_api.apply_current_decision_projection_migration(repo.db_path, inventory)
+    assert migrated["write_applied"] is True
+
+    def observe():
+        rows = ledger_api.read_decision_state_rows_many(repo, accounts=list(SCOPES))
+        current = {
+            account: ledger_api.read_current_decision_projection(
+                repo, account=account, now_ms=20_000,
+            ) for account in SCOPES
+        }
+        assert all(item["status"] == "trusted" for item in current.values()), current
+        return rows, current
+
+    before = observe()
+    frozen_before = deepcopy(before)
+    lot = before[0][adjusted_account]["account_position_lots"][0]
+    adjusted = persist_manual_adjust_event(
+        repo, lot_id=lot["record_id"], fields=lot["fields"],
+        premium_per_share=3, as_of_ms=15_000,
+    )
+    assert adjusted.created is True
+    after = observe()
+    assert before == frozen_before
+    return before, after
+
+
+@pytest.mark.parametrize("observation", ["before", "after"])
+def test_public_batch_current_shadow_matches_same_premium_observation(tmp_path, observation):
+    before, after = _premium_adjustment_observations(tmp_path)
+    rows, current = before if observation == "before" else after
+    frozen = deepcopy((rows, current))
+    replay = ledger_api.project_position_lots_from_trade_facts(rows["lx"]["trade_events"])
+    assert not replay.diagnostics
+    replayed_lots = {lot.lot_id: lot.to_dict()["fields"] for lot in replay.lots}
+    snapshots = ledger_api.decision_state_snapshots_from_rows_many(
+        rows, portfolio_scope_ids=SCOPES, source_observed_at=OBSERVED,
+        current_projections=current, current_decision_now_ms=20_000,
+    )
+    for account, snapshot in snapshots.items():
+        premium = "3" if observation == "after" and account == "lx" else "2"
+        lot = snapshot["account_position_lots"][0]
+        assert lot["fields"]["contract_key"]["account"] == account
+        assert lot["fields"]["premium_open"] == premium
+        assert replayed_lots[lot["record_id"]]["premium_open"] == premium
+        assert snapshot["snapshot_status"] == "trusted"
+        assert snapshot["actionable"] is True
+        shadow = snapshot["current_decision_shadow"]
+        assert shadow["status"] == "matched"
+        assert shadow["mismatch_count"] == 0
+        assert all(section["legacy_sha256"] == section["current_sha256"]
+                   for section in shadow["sections"])
+        assert mod.decision_state_snapshot_fingerprint(snapshot) == snapshot["decision_state_fingerprint"]
+    assert (rows, current) == frozen
+
+
+@pytest.mark.parametrize("adjusted_account", ["lx", "sy"])
+def test_public_batch_current_shadow_detects_legal_premium_adjustment(tmp_path, adjusted_account):
+    (rows, previous), (_fresh_rows, current) = _premium_adjustment_observations(
+        tmp_path, adjusted_account=adjusted_account,
+    )
+    frozen = deepcopy((rows, previous, current))
+    replay = ledger_api.project_position_lots_from_trade_facts(rows["lx"]["trade_events"])
+    assert not replay.diagnostics
+    replayed_lots = {lot.lot_id: lot.to_dict()["fields"] for lot in replay.lots}
+    baseline = ledger_api.decision_state_snapshots_from_rows_many(
+        rows, portfolio_scope_ids=SCOPES, source_observed_at=OBSERVED,
+        current_projections=previous, current_decision_now_ms=20_000,
+    )
+    snapshots = ledger_api.decision_state_snapshots_from_rows_many(
+        rows, portfolio_scope_ids=SCOPES, source_observed_at=OBSERVED,
+        current_projections=current, current_decision_now_ms=20_000,
+    )
+    for account, snapshot in snapshots.items():
+        lot = snapshot["account_position_lots"][0]
+        assert lot["fields"]["contract_key"]["account"] == account
+        assert lot["fields"]["premium_open"] == "2"
+        assert replayed_lots[lot["record_id"]]["premium_open"] == "2"
+        current_lot = current[account]["position_lots"][0]
+        assert current_lot["record_id"] == lot["record_id"]
+        assert current_lot["fields"]["contract_key"]["account"] == account
+        assert current_lot["fields"]["premium_open"] == ("3" if account == adjusted_account else "2")
+        assert baseline[account]["current_decision_shadow"]["status"] == "matched"
+        assert snapshot["snapshot_status"] == "trusted"
+        assert snapshot["actionable"] is True
+        assert {key: value for key, value in snapshot.items()
+                if key not in {"current_decision_shadow", "current_decision_read"}} == {
+            key: value for key, value in baseline[account].items()
+            if key not in {"current_decision_shadow", "current_decision_read"}
+        }
+        assert mod.decision_state_snapshot_fingerprint(snapshot) == baseline[account]["decision_state_fingerprint"]
+        shadow = snapshot["current_decision_shadow"]
+        positions = next(section for section in shadow["sections"] if section["section"] == "position_lots")
+        if account == adjusted_account:
+            assert shadow["status"] == "mismatch", shadow
+            assert shadow["reason"] == "consumer_fact_mismatch"
+            assert shadow["mismatch_count"] == positions["mismatch_count"] == 1
+            assert positions["legacy_sha256"] != positions["current_sha256"]
+            assert [sample["key"] for sample in positions["mismatch_samples"]] == [lot["record_id"]]
+        else:
+            assert shadow == baseline[account]["current_decision_shadow"]
+            assert shadow["status"] == "matched"
+            assert shadow["mismatch_count"] == 0
+    assert (rows, previous, current) == frozen
