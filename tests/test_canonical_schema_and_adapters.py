@@ -37,6 +37,14 @@ def _opend_tool_payload(**overrides: object) -> dict:
     }
 
 
+@pytest.mark.parametrize("field", ["put_open_interest", "call_open_interest", "put_assignment_margin_pct", "annualized_net_credit_yield"])
+def test_normalize_processor_row_preserves_combo_original_rank_inputs(field):
+    raw = {"symbol": "NVDA", "strategy": "combo_yield", "candidate_count": 1, field: 0.25}
+    result = normalize_processor_row(raw)
+    assert result[field] == raw[field]
+    assert result["schema_version"] == "3.0"
+
+
 def test_normalize_processor_row_requires_symbol_and_strategy() -> None:
     out = normalize_processor_row({"symbol": "aapl", "strategy": "sell_put", "candidate_count": "2"})
     assert out["schema_kind"] == "processor_output"

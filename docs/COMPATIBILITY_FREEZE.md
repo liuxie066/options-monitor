@@ -25,6 +25,11 @@
 文件缺失或没有可解析列（零字节、纯空白）时失败，不生成提醒/变化报告，也不更新前次快照。
 含列头、零数据行的 CSV 仍是合法空结果；前次快照允许缺失或无列内容，表示尚无比较基线。
 
+Combo Yield 摘要及 canonical processor row 保留现有 `combo_yield_rank_key` 的排序输入，
+包括两腿 open interest、`put_assignment_margin_pct` 和原始 `annualized_net_credit_yield`。
+手工告警在各优先级内沿用该 owner 的排序，经过 summary CSV 不改变同等级候选顺序；
+不同优先级仍先按告警等级分组，缺失字段沿用原排序键的默认语义。
+
 ## 不冻结的 canonical owner
 
 以下生产核继续演进，但不得再建平行实现：
