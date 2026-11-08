@@ -166,6 +166,148 @@ def test_cmd_refresh_persists_opend_receipt(monkeypatch, tmp_path: Path) -> None
     ] == "b" * 64
 
 
+def _refresh_cli(monkeypatch, capsys, cache_path, symbols, *, force=False):
+    from src.application.multiplier_cache import main
+
+    argv = ["multiplier-cache", "--cache", str(cache_path), "refresh", "--symbols", *symbols,
+            "--host", "isolated.invalid", "--port", "12346", "--limit-expirations", "2"]
+    if force:
+        argv.append("--force")
+    monkeypatch.setattr(sys, "argv", argv)
+    main()
+    return json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("writer", ["opend", "seed"])
+@pytest.mark.parametrize("cached_first", [True, False], ids=["cached-first", "missing-first"])
+@pytest.mark.parametrize("refresh_ok", [True, False], ids=["refresh-success", "refresh-failure"])
+def test_refresh_cli_skipped_cache_never_overwrites_independent_writer(
+    monkeypatch, tmp_path, capsys, writer, cached_first, refresh_ok,
+):
+    from copy import deepcopy
+    import subprocess
+    from domain.domain.decision_state_fingerprint import canonical_sha256
+    from src.application import multiplier_cache as cache_owner, opend_symbol_fetching
+
+    cache_path = resolve_cache_path(repo_base=tmp_path)
+    initial = cache_owner.store_multiplier({}, "0700.HK", 100, source_receipt_sha256="a" * 64)
+    initial["0700.HK"]["as_of_utc"] = "2026-01-01T00:00:00+00:00"
+    cache_owner.store_multiplier(initial, "0005.HK", 400, source_receipt_sha256="d" * 64)
+    save_cache(cache_path, initial)
+    calls, writes, concurrent_rows = [], [], []
+    payload = {"rows": [{"multiplier": 100}], "source": "synthetic-opend"}
+    merge = cache_owner.merge_cache_updates
+
+    def record_merge(path, updates):
+        writes.append(deepcopy(updates))
+        return merge(path, updates)
+
+    def fetch(request):
+        calls.append(request)
+        process = subprocess.run(
+            [sys.executable, "-c", """
+import json, sys
+from pathlib import Path
+from src.application.multiplier_cache import (
+    load_cache, merge_cache_updates, seed_multiplier_cache, store_multiplier,
+)
+path = Path(sys.argv[1])
+if sys.argv[2] == "opend":
+    merge_cache_updates(path, store_multiplier({}, "0700.HK", 500, source_receipt_sha256="b" * 64))
+else:
+    result = seed_multiplier_cache(repo_base=path.parent, cache_path=path,
+        symbol="0700.HK", multiplier=500, source="operator_seed_new", confirm=True)
+    assert result["ok"] and result["changed"]
+print(json.dumps(load_cache(path)["0700.HK"]))
+""", str(cache_path), writer],
+            check=True, capture_output=True, text=True, timeout=15,
+        )
+        concurrent_rows.append(json.loads(process.stdout))
+        if not refresh_ok:
+            raise RuntimeError("synthetic quote unavailable")
+        return payload
+
+    monkeypatch.setattr(cache_owner, "merge_cache_updates", record_merge)
+    monkeypatch.setattr(opend_symbol_fetching, "fetch_symbol_request", fetch)
+    symbols = ["00700.HK", "3690.HK"] if cached_first else ["3690.HK", "00700.HK"]
+    output = _refresh_cli(monkeypatch, capsys, cache_path, symbols)
+    persisted = load_cache(cache_path)
+    assert len(concurrent_rows) == 1
+    assert persisted["0700.HK"] == concurrent_rows[0]
+    assert persisted["0005.HK"] == initial["0005.HK"]
+    assert len(calls) == 1
+    assert (calls[0].symbol, calls[0].host, calls[0].port, calls[0].limit_expirations) == (
+        "3690.HK", "isolated.invalid", 12346, 2,
+    )
+    assert output["updated"] == int(refresh_ok)
+    assert [row["symbol"] for row in output["results"]] == [normalize_symbol(symbol) for symbol in symbols]
+    cached = next(row for row in output["results"] if row["symbol"] == "0700.HK")
+    assert (cached["ok"], cached["multiplier"], cached["error"]) == (True, 100, "cached")
+    if refresh_ok:
+        assert writes == [{"3690.HK": persisted["3690.HK"]}]
+        assert persisted["3690.HK"]["multiplier_evidence"]["source_receipt_sha256"] == canonical_sha256(payload)
+    else:
+        assert writes == []
+        assert "3690.HK" not in persisted
+        failed = next(row for row in output["results"] if row["symbol"] == "3690.HK")
+        assert not failed["ok"] and "synthetic quote unavailable" in failed["error"]
+    value, source, diagnostics = resolve_multiplier_with_source_and_diagnostics(
+        repo_base=tmp_path, symbol="00700.HK", allow_opend_refresh=False,
+    )
+    assert (value, source) == (500, "opend" if writer == "opend" else "operator_seed_new")
+    assert diagnostics.get("multiplier_evidence") == concurrent_rows[0].get("multiplier_evidence")
+    assert diagnostics.get("multiplier_evidence_hash") == concurrent_rows[0].get("multiplier_evidence_hash")
+
+
+@pytest.mark.parametrize("repeat_cached_alias", [False, True], ids=["distinct", "repeated-alias"])
+def test_refresh_cli_force_fetches_every_requested_item(monkeypatch, tmp_path, capsys, repeat_cached_alias):
+    from domain.domain.decision_state_fingerprint import canonical_sha256
+    from src.application import multiplier_cache as cache_owner, opend_symbol_fetching
+
+    cache_path = resolve_cache_path(repo_base=tmp_path)
+    save_cache(cache_path, cache_owner.store_multiplier({}, "0700.HK", 100, source_receipt_sha256="a" * 64))
+    calls, payloads = [], {}
+
+    def fetch(request):
+        calls.append(request.symbol)
+        payload = {"rows": [{"multiplier": 500 if request.symbol == "0700.HK" else 100}], "sample": len(calls)}
+        payloads[request.symbol] = payload
+        return payload
+
+    monkeypatch.setattr(opend_symbol_fetching, "fetch_symbol_request", fetch)
+    symbols = ["00700.HK", "0700.HK", "3690.HK"] if repeat_cached_alias else ["00700.HK", "3690.HK"]
+    output = _refresh_cli(monkeypatch, capsys, cache_path, symbols, force=True)
+    assert calls == [normalize_symbol(symbol) for symbol in symbols]
+    assert output["updated"] == len(symbols)
+    assert all(row["ok"] and row["error"] != "cached" for row in output["results"])
+    persisted = load_cache(cache_path)
+    assert set(persisted) == {"0700.HK", "3690.HK"}
+    for symbol, payload in payloads.items():
+        assert persisted[symbol]["multiplier"] == payload["rows"][0]["multiplier"]
+        assert persisted[symbol]["multiplier_evidence"]["source_receipt_sha256"] == canonical_sha256(payload)
+
+
+def test_refresh_cli_only_cached_items_preserve_file_bytes(monkeypatch, tmp_path, capsys):
+    from src.application import multiplier_cache as cache_owner, opend_symbol_fetching
+
+    cache_path = resolve_cache_path(repo_base=tmp_path)
+    save_cache(cache_path, cache_owner.store_multiplier({}, "0700.HK", 100, source_receipt_sha256="a" * 64))
+    before = cache_path.read_bytes()
+    calls = []
+
+    def forbidden(*args, **kwargs):
+        calls.append(True)
+        raise AssertionError("cached-only refresh must not fetch or write")
+
+    monkeypatch.setattr(opend_symbol_fetching, "fetch_symbol_request", forbidden)
+    monkeypatch.setattr(cache_owner, "merge_cache_updates", forbidden)
+    output = _refresh_cli(monkeypatch, capsys, cache_path, ["0700.HK", "00700.HK"])
+    assert calls == []
+    assert output["updated"] == 0
+    assert all(row["ok"] and row["error"] == "cached" for row in output["results"])
+    assert cache_path.read_bytes() == before
+
+
 def test_merge_cache_updates_preserves_existing_entries(tmp_path: Path) -> None:
     cache_path = tmp_path / "output_shared" / "state" / "multiplier_cache.json"
     save_cache(cache_path, _entry("0700.HK", 500, "existing"))

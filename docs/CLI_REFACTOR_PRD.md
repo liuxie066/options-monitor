@@ -185,6 +185,8 @@ flowchart TD
 | trade-events | 保留 | 审阅、修复、回放和作废各有明确效果 |
 | run | 保留，具体任务按需进入菜单 | tick、cron 和摄取等操作，不变成所有功能的统一容器 |
 
+合约乘数的人类入口 `om multiplier-cache seed` 默认预览，`--apply` 确认后写入。兼容模块入口 `python -m src.application.multiplier_cache --cache <path> refresh --symbols <symbol>` 只持久化本轮实际刷新成功的项，并复用缓存 owner 的加锁合并；未指定 `--force` 时，命中项仍在结果中显示 `cached`，但其旧快照不写回缓存，因此保留其他写方对该项的数值、时间和来源证据更新。`--force` 继续逐项刷新请求，刷新失败项不纳入本轮写入。
+
 目标新增入口 `om holdings configure` 保留用户已要求的配置能力。它管理是否纳入 Holdings 数据及所需配置，不是 Portfolio Exposure 总开关；准确字段、启用确认和状态展示范围以独立方案为准。本 CLI 任务不另造 holdings CRUD 或第二套持仓账本。
 
 明确的子命令收敛方向：

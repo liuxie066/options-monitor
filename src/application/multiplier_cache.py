@@ -540,6 +540,8 @@ def cmd_refresh(cache_path: Path, symbols: list[str], *, host: str, port: int, l
     cache = load_cache(cache_path)
     updated = 0
     results: list[RefreshResult] = []
+    # Cached hits are display-only; persist only rows refreshed by this call.
+    updates: dict[str, Any] = {}
 
     for s in symbols:
         sym = normalize_symbol(s)
@@ -559,14 +561,10 @@ def cmd_refresh(cache_path: Path, symbols: list[str], *, host: str, port: int, l
                 source="opend",
                 source_receipt_sha256=r.source_receipt_sha256,
             )
+            updates[sym] = cache[sym]
             updated += 1
 
     if updated:
-        updates = {
-            normalize_symbol(r.symbol): cache[normalize_symbol(r.symbol)]
-            for r in results
-            if r.ok and r.multiplier and normalize_symbol(r.symbol) in cache
-        }
         merge_cache_updates(cache_path, updates)
 
     # summary JSON (machine-friendly)
