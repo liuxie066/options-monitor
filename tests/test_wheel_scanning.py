@@ -1038,6 +1038,111 @@ def test_wheel_put_scan_and_account_cash_grant_are_direction_aware(tmp_path: Pat
     ]
 
 
+@pytest.mark.parametrize(
+    "principal_anchor,cash,boundary_count,healthy_count,expected_grants",
+    [
+        (19_803, 15_000, 1, 0, [0]),
+        (19_803, 15_000, 1, 1, [0, 1]),
+        (19_803, 15_000, 2, 2, [0, 0, 1, 0]),
+        (19_803, 20_000, 1, 0, [2]),
+        (20_020, 15_000, 1, 0, [1]),
+    ],
+)
+def test_wheel_put_rejected_partial_grants_release_cash_before_sealing(
+    tmp_path: Path,
+    principal_anchor: int,
+    cash: int,
+    boundary_count: int,
+    healthy_count: int,
+    expected_grants: list[int],
+) -> None:
+    branches = [
+        {
+            "account": "lx",
+            "symbol": "NVDA",
+            "wheel_branch_id": f"branch-{index}",
+            "direction": "put",
+            "lifecycle_status": "active",
+            "integrity_status": "trusted",
+            "phase": "ready",
+            "monitoring_gate": "enabled",
+            "remaining_contracts": 2 if index < boundary_count else 1,
+            "multiplier": 100,
+            "principal_anchor": principal_anchor if index < boundary_count else 10_010,
+            "realized_put_net_pnl_in_current_stage": 0,
+            "currency": "USD",
+            "batch_generation_hash": "a" * 64,
+            "projection_hash": "b" * 64,
+            "assignment_at_ms": index + 1,
+        }
+        for index in range(boundary_count + healthy_count)
+    ]
+    model = {"account": "lx", "wheel_branches": list(reversed(branches))}
+    row = phase2_opening_row(_call_row(
+        option_type="put", contract_symbol="NVDA-PUT-99", strike=99, delta=-0.30,
+    ))
+    converter = _converter()
+    scan = run_wheel_put_scan(
+        model,
+        _policy(),
+        {"frames": {"NVDA": pd.DataFrame([row])}},
+        {"exchange_rate_converter": converter},
+        decision_time_ms=int(AS_OF.timestamp() * 1000),
+    )
+    assert len(scan["capacity_claims"]) == len(branches)
+    evaluations = scan["raw_candidates"]["branch-0"][0]["_grant_evaluations"]
+    assert evaluations["2"]["accepted"] is True
+    assert evaluations["1"]["accepted"] is (principal_anchor != 19_803)
+    captured = finalize_wheel_put_capacity(
+        account="lx",
+        wheel_read_model=model,
+        wheel_scan=scan,
+        opening_put_candidates=[],
+        cash_capacity_fact=cash_portfolio({
+            "account": "lx",
+            "status": "available",
+            "cash_authority": {"status": "available", "logical_account": "lx"},
+            "cash_authority_hash": "authority-1",
+            "cash_by_currency": {"USD": cash},
+            "cash_secured_by_currency": {},
+            "wheel_intent_reservations": [],
+            "fx_snapshot": {"rates": {}},
+        }),
+        exchange_rate_converter=converter,
+    )
+    payload = seal_wheel_candidate_snapshot(
+        base=tmp_path, run_id="put-rejected-grant", account="lx", market="us",
+        account_config_sha256="a" * 64, strategy_policy_sha256="b" * 64,
+        dependencies=_seal_dependencies(),
+        run_mode={"scan_mode": "standard", "executable": True},
+        scope_results=captured["scope_results"], batches=captured["batches"],
+        capacity_allocations=captured["allocations"], sealed_at=AS_OF,
+    )
+    assert load_wheel_candidate_snapshot(
+        base=tmp_path, run_id="put-rejected-grant", account="lx",
+    ) == payload
+    allocations = {item["wheel_branch_id"]: item for item in payload["capacity_allocations"]}
+    batches = {item["wheel_branch_id"]: item for item in payload["batches"]}
+    remaining_cash = cash
+    for index, expected in enumerate(expected_grants):
+        branch_id = f"branch-{index}"
+        allocation = allocations[branch_id]
+        batch = batches[branch_id]
+        assert allocation["granted_contracts"] == batch["granted_contracts"] == expected
+        assert allocation["cash_reservation_amount"] == 9_900 * expected
+        assert allocation["capacity_before"] == remaining_cash
+        remaining_cash -= 9_900 * expected
+        assert allocation["capacity_after"] == remaining_cash
+        if expected:
+            assert batch["final_candidate"]["granted_contracts"] == expected
+            assert "_grant_evaluations" not in batch["final_candidate"]
+        else:
+            assert batch["final_candidate"] is None
+        if principal_anchor == 19_803 and cash == 15_000 and index < boundary_count:
+            assert allocation["allocation_reason"] == "wheel_capacity_grant_candidate_rejected"
+            assert batch["reason_code"] == "wheel_capacity_grant_candidate_rejected"
+
+
 def test_wheel_pending_put_branch_remains_visible_without_required_data() -> None:
     model = {
         "account": "lx",

@@ -736,8 +736,9 @@ def allocate_wheel_put_cash_capacity(
     active_wheel_put_intents: Sequence[Mapping[str, Any]],
     wheel_put_claims: Sequence[Mapping[str, Any]],
     convert_currency: Callable[[float, str, str], float | None],
+    accept_grant: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> dict[str, Any]:
-    """Grant Wheel Put claims from one account pool after immutable prior claims."""
+    """Grant claims in order, reserving cash only after optional candidate acceptance."""
 
     fact = dict(cash_capacity_fact or {})
     account = str(fact.get("account") or "").strip().lower()
@@ -870,8 +871,6 @@ def allocate_wheel_put_cash_capacity(
                 reserved_amount = unit_required * granted
                 before = float(effective.cash_free)
                 after = max(0.0, before - reserved_amount)
-                if granted:
-                    secured[currency] = secured.get(currency, 0.0) + reserved_amount
                 result.update(
                     granted_contracts=granted,
                     cash_reservation_amount=round(reserved_amount, 6),
@@ -886,6 +885,16 @@ def allocate_wheel_put_cash_capacity(
                         else "effective_native_cash_insufficient"
                     ),
                 )
+                if granted and accept_grant is not None and not accept_grant(result):
+                    result.update(
+                        granted_contracts=0,
+                        cash_reservation_amount=0.0,
+                        capacity_after=round(before, 6),
+                        allocation_status="blocked",
+                        allocation_reason="wheel_capacity_grant_candidate_rejected",
+                    )
+                elif granted:
+                    secured[currency] = secured.get(currency, 0.0) + reserved_amount
         allocations_by_index[index] = result
     allocations = [allocations_by_index[index] for index in range(len(wheel_rows))]
     return {
