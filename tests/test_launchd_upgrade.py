@@ -312,6 +312,79 @@ def test_target_without_launchd_capability_fails_before_switch(upgrade_instance)
     assert not any(command[1] == 'bootout' for command in manager.calls)
 
 
+@pytest.mark.parametrize('materialization', ['cached', 'downloaded'])
+@pytest.mark.parametrize('damage', ['none', 'tag', 'version', 'repository', 'checksum', 'qualification', 'qualification_error'])
+def test_bundle_upgrade_without_maintainer_script_preserves_validation(
+    upgrade_instance, monkeypatch, tmp_path, materialization, damage,
+):
+    import shutil
+    import sys
+    import tarfile
+    from src.application import runtime_bundle, service_upgrade as upgrade
+
+    args, manager, old, new, runner, _ = upgrade_instance
+    assert not (new / 'scripts/release_check.py').exists()
+    manifest_path = new / runtime_bundle.MANIFEST
+    manifest = json.loads(manifest_path.read_text())
+    if damage == 'tag':
+        manifest.update(tag='v1.0.2', version='1.0.2')
+        (new / 'VERSION').write_text('1.0.2\n')
+        manifest['files']['VERSION'] = runtime_bundle.sha256(new / 'VERSION')
+    elif damage == 'version':
+        (new / 'VERSION').write_text('1.0.2\n')
+        manifest['files']['VERSION'] = runtime_bundle.sha256(new / 'VERSION')
+    elif damage == 'repository':
+        manifest['repository'] = 'other/repository'
+    elif damage == 'checksum':
+        (new / 'om').write_text('tampered entrypoint\n')
+    manifest_path.write_text(json.dumps(manifest))
+
+    if materialization == 'downloaded':
+        archive = tmp_path / 'target.tar.gz'
+        with tarfile.open(archive, 'w:gz') as tar:
+            for path in new.rglob('*'):
+                if path.is_file():
+                    tar.add(path, arcname=path.relative_to(new))
+        shutil.rmtree(new)
+
+        def download(release, destination, **kwargs):
+            assert release['tag_name'] == 'v1.0.1'
+            assert kwargs['platform_name'] == runtime_bundle.current_platform()
+            shutil.copyfile(archive, destination)
+            return destination
+
+        monkeypatch.setattr(runtime_bundle, 'download_bundle', download)
+
+    qualified = []
+    def qualify(root):
+        qualified.append(Path(root))
+        runtime_bundle.load_manifest(root, expected_platform=runtime_bundle.current_platform(), verify_files=True)
+        if damage == 'qualification_error':
+            raise runtime_bundle.RuntimeBundleError('runtime self-check failed')
+        return {'ok': damage != 'qualification'}
+
+    monkeypatch.setattr(runtime_bundle, 'validate_runtime', qualify)
+    def checked_runner(command, **kwargs):
+        # Exercise CPython's actual missing-file failure instead of a successful command stub.
+        if command[1:2] == ['scripts/release_check.py']:
+            return subprocess.run([sys.executable, *command[1:]], **kwargs)
+        return runner(command, **kwargs)
+
+    result = upgrade.service_upgrade(repo_root=args['repo_root'], runtime_root=args['runtime_root'],
+        releases_root=old.parent, target_version='1.0.1', confirm=True, run_cmd=checked_runner)
+    assert result['ok'] is (damage == 'none'), json.dumps(result.get('operations', [])[-1:])
+    if damage == 'none':
+        assert args['repo_root'].resolve() == new
+        assert qualified[-1] == new
+        assert result['runtime_prepare']['installer'] == 'runtime_bundle'
+        assert manager.loaded['com.options-monitor.trade-intake'][0]['EnvironmentVariables']['OM_RELEASE'] == '1.0.1'
+    else:
+        assert args['repo_root'].resolve() == old
+        assert result['symlink_switched'] is False
+        assert not any(command[1] == 'bootout' for command in manager.calls)
+        assert bool(qualified) is damage.startswith('qualification')
+
+
 def test_latest_bundle_check_never_invokes_git(upgrade_instance):
     from src.application import service_upgrade as upgrade
     args, _, old, _, runner, calls = upgrade_instance

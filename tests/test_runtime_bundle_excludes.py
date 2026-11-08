@@ -31,7 +31,7 @@ PRIVATE_FILES = INTERNAL_DOCS | {
     "scripts/code_health_review.py", "scripts/code_health_issues.py",
     "scripts/code_health_repair.py", "scripts/benchmark_future.py",
     "scripts/bot_p1_eval.py", "scripts/build_runtime_bundle.py",
-    "scripts/build_future.py", "scripts/release_future.py",
+    "scripts/build_future.py", "scripts/release_future.py", "scripts/release_check.py",
     "scripts/generate_dependency_graph.py", "scripts/guardrails_check.py",
     "scripts/retired_column_scan.py", "scripts/incident_cleanup_preview.py",
     "scripts/setup_git_hooks.sh", "scripts/__init__.py",

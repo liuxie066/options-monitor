@@ -4085,13 +4085,16 @@ def service_upgrade(
                     "operations": operations,
                 },
             )
-            _run_required(
-                [str(_release_python(target_dir)), "scripts/release_check.py", "--tag", str(tag)],
-                cwd=target_dir,
-                run_cmd=run_cmd,
-                operations=operations,
-                timeout=120,
-            )
+            # Bundles already passed manifest/tag checks and runtime qualification;
+            # release_check.py is a maintainer script shipped only with source releases.
+            if not bundled:
+                _run_required(
+                    [str(_release_python(target_dir)), "scripts/release_check.py", "--tag", str(tag)],
+                    cwd=target_dir,
+                    run_cmd=run_cmd,
+                    operations=operations,
+                    timeout=120,
+                )
             _run_required(
                 ["./om-agent", "spec"],
                 cwd=target_dir,
