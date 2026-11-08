@@ -558,16 +558,47 @@ def _distribution(samples: list[int]) -> dict[str, Any]:
     }
 
 
+def _canonical_persisted_limit(evidence: dict[str, Any]) -> int:
+    return sum(evidence[key] for key in (
+        "compressed_blob_bytes", "manifest_bytes", "compact_receipt_bytes", "cache_metadata_bytes",
+    ))
+
+
 def _measure(
     action: Callable[[Path], dict[str, Any]],
     *,
     warmups: int,
     repetitions: int,
     measure_allocation: bool = True,
-) -> tuple[dict[str, Any], dict[str, Any], int, dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], int, dict[str, Any], dict[str, Any]]:
     wall: list[int] = []
     cpu: list[int] = []
     last: dict[str, Any] = {}
+    counts = {"warmup": 0, "timing": 0, "allocation": 0}
+    failed_count = 0
+    failures: list[dict[str, Any]] = []
+    violations: set[str] = set()
+
+    def check_sample(phase: str, index: int, result: dict[str, Any]) -> None:
+        nonlocal failed_count
+        counts[phase] += 1
+        sample_violations = []
+        if result["mismatch_count"] or len(result["mismatch_samples"]) > 10:
+            sample_violations.append("bounded_shadow_comparison")
+        limit = _canonical_persisted_limit(result)
+        if result["retained_bytes"] > limit:
+            sample_violations.append("canonical_persisted_bytes")
+        violations.update(sample_violations)
+        if sample_violations:
+            failed_count += 1
+            if len(failures) < 10:
+                failures.append({
+                    "phase": phase,
+                    "index": index,
+                    "violations": sample_violations,
+                    "space": {**result, "canonical_persisted_limit_bytes": limit},
+                })
+
     with tempfile.TemporaryDirectory(prefix="scan-blob-benchmark-") as raw_tmp:
         base = Path(raw_tmp)
         for index in range(warmups + repetitions):
@@ -580,14 +611,25 @@ def _measure(
                 wall.append(elapsed_wall)
                 cpu.append(elapsed_cpu)
                 last = result
+                check_sample("timing", index - warmups, result)
+            else:
+                check_sample("warmup", index, result)
         peak = 0
         if measure_allocation:
             allocation_root = base / "allocation"
             tracemalloc.start()
-            action(allocation_root)
-            _, peak = tracemalloc.get_traced_memory()
-            tracemalloc.stop()
-    return _distribution(wall), _distribution(cpu), peak, last
+            try:
+                result = action(allocation_root)
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+            check_sample("allocation", 0, result)
+    return _distribution(wall), _distribution(cpu), peak, last, {
+        "counts": counts,
+        "failed_count": failed_count,
+        "failure_samples": failures,
+        "violations": sorted(violations),
+    }
 
 
 def _git_sha() -> str:
@@ -612,7 +654,7 @@ def run_profile(profile: str, *, warmups: int, repetitions: int) -> dict[str, An
         raise RuntimeError("scan blob fixture preflight failed") from exc
     formal = warmups == WARMUPS and repetitions == REPETITIONS
     action = lambda root: _canonical_bundle(root, fixture)
-    wall, cpu, peak, evidence = _measure(
+    wall, cpu, peak, evidence, sample_checks = _measure(
         action,
         warmups=warmups,
         repetitions=repetitions,
@@ -622,18 +664,10 @@ def run_profile(profile: str, *, warmups: int, repetitions: int) -> dict[str, An
         32 * 1024 * 1024,
         2 * fixture["observed"]["canonical_blob_bytes"],
     )
-    canonical_limit = (
-        evidence["compressed_blob_bytes"]
-        + evidence["manifest_bytes"]
-        + evidence["compact_receipt_bytes"]
-        + evidence["cache_metadata_bytes"]
-    )
-    if evidence["mismatch_count"] or len(evidence["mismatch_samples"]) > 10:
-        violations.append("bounded_shadow_comparison")
+    canonical_limit = _canonical_persisted_limit(evidence)
+    violations.extend(sample_checks["violations"])
     if peak > allocation_limit:
         violations.append("python_peak_allocation_bytes")
-    if evidence["retained_bytes"] > canonical_limit:
-        violations.append("canonical_persisted_bytes")
     receipt = {
         "schema_version": RECEIPT_SCHEMA,
         "measured_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -659,6 +693,7 @@ def run_profile(profile: str, *, warmups: int, repetitions: int) -> dict[str, An
             **evidence,
             "canonical_persisted_limit_bytes": canonical_limit,
         },
+        "sample_checks": sample_checks,
         "violations": sorted(set(violations)),
     }
     return receipt
