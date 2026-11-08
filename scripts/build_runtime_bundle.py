@@ -25,7 +25,7 @@ SOURCE_DIRS = {"src", "domain", "om_strategy_core", "configs", "contracts", "ser
 SOURCE_FILES = {
     "om", "om-agent", "VERSION", "LICENSE", "CHANGELOG.md", "README.md", "RUNBOOK.md", "DEPLOY.md",
     "CONFIGS.md", "CONFIGURATION_GUIDE.md", "SECURITY.md", "pyproject.toml", "requirements.txt", "constraints.txt",
-    "scripts/install.sh", "scripts/install_agent_plugin.sh", "scripts/python_runtime.sh",
+    "scripts/install.sh", "scripts/install_agent_plugin.sh", "scripts/python_runtime.sh", "scripts/auto_close_schedule.sh",
 }
 EXCLUDED_DOCS = {
     "docs/CODE_HEALTH_REVIEW.md", "docs/DECISION_HISTORY.md", "docs/DECISION_HISTORY_PRD.md",

@@ -23,6 +23,34 @@ from tests.service_deploy_test_support import (
 )
 
 
+@pytest.mark.parametrize("target", ["systemd", "launchd"])
+@pytest.mark.parametrize("market", ["us", "hk"])
+def test_packaged_auto_close_service_entrypoint_runs_help(tmp_path: Path, target: str, market: str) -> None:
+    from scripts import build_runtime_bundle as builder
+
+    repo = tmp_path / "运行包 with spaces"
+    runtime = tmp_path / "instance"
+    builder.copy_source(Path(__file__).resolve().parents[2], repo)
+    bundle = _render_bundle(repo, runtime, target=target, accounts=["lx"], markets=[market])
+    files = {item["relative_path"]: item["content"] for item in bundle["files"]}
+    if target == "systemd":
+        service = files[f"systemd/options-monitor-auto-close-{market}.service"]
+        command = shlex.split(next(line.removeprefix("ExecStart=") for line in service.splitlines() if line.startswith("ExecStart=")))
+    else:
+        service = plistlib.loads(files[f"launchd/com.options-monitor.auto-close-{market}.plist"].encode())
+        command = service["ProgramArguments"]
+
+    assert command[:3] == [str(repo / "scripts/auto_close_schedule.sh"), "--market", market]
+    assert command[-2:] == ["--apply", "--yes"]
+    assert command[command.index("--runtime-root") + 1] == str(runtime)
+    result = subprocess.run([*command, "--help"], cwd=tmp_path, capture_output=True, text=True, timeout=30,
+        env={**os.environ, "OM_PYTHON": CURRENT_PYTHON, "PYTHONPATH": str(repo),
+             "PYTHONDONTWRITEBYTECODE": "1", "OM_RUNTIME_ROOT": str(runtime), "HOME": str(tmp_path / "home")})
+    assert result.returncode == 0, result.stderr
+    assert "Native-service daily expiry maintenance clock" in result.stdout
+    assert not runtime.exists()
+
+
 def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     runtime = tmp_path / "runtime"
