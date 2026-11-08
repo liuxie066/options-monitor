@@ -1273,6 +1273,190 @@ def test_trade_event_pagination_errors_explain_the_next_user_action(
     assert exc_info.value.hint == expected_hint
 
 
+def _assigned_stock_refresh_case(monkeypatch, tmp_path, *, elapsed_ms=1000, outcome="ok"):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from domain.domain.option_position_lots import parse_exp_to_ms
+    from src.application.ledger import api as ledger_api
+    from src.application.ledger.commands import record_manual_assignment
+    from src.application.agent_tools import operations_impl
+    from src.application.positions import assigned_stock_quotes
+    from src.application.tool_execution import execute_tool
+
+    def ms(value):
+        instant = parse_exp_to_ms(value)
+        assert instant is not None
+        return instant
+
+    initial_ms = ms("2026-06-02")
+    sqlite_path = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
+    data_cfg = tmp_path / "portfolio.runtime.json"
+    data_cfg.write_text(json.dumps({"option_positions": {"sqlite_path": str(sqlite_path)}}))
+    config = tmp_path / "config.us.json"
+    config.write_text(json.dumps(_public_cfg_with_futu(str(data_cfg))))
+
+    def assign(account, opened_at_ms, assigned_at_ms):
+        before_ids = {row["record_id"] for row in repo.list_position_lots()}
+        ledger_manual_trades.persist_manual_open_event(
+            repo, broker="富途", account=account, symbol="NVDA", option_type="put", side="short",
+            contracts=1, currency="USD", strike=100.0, multiplier=100, expiration_ymd="2026-06-19",
+            premium_per_share=2.5, opened_at_ms=opened_at_ms,
+        )
+        lot = next(row for row in repo.list_position_lots() if row["record_id"] not in before_ids)
+        before_events = {row["event_id"] for row in repo.list_trade_events()}
+        record_manual_assignment(repo, lot_id=lot["record_id"], contracts_to_close=1,
+                                 stock_side="buy", stock_qty=100, stock_price=100.0, as_of_ms=assigned_at_ms)
+        event = next(row for row in repo.list_trade_events()
+                     if row.get("event_type") == "assignment" and row["event_id"] not in before_events)
+        return f"assigned-stock-{event['event_id']}"
+
+    lot_id = assign("user1", ms("2026-04-03"), ms("2026-05-15"))
+    assign("user2", ms("2026-04-03"), ms("2026-05-15"))
+    case = SimpleNamespace(repo=repo, initial_ms=initial_ms, clock_ms=initial_ms,
+                           quote_ms=initial_ms + elapsed_ms, calls=[], on_snapshot=None,
+                           lot_id=lot_id, assign=assign)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromtimestamp(case.clock_ms / 1000, tz=tz)
+
+    class Gateway:
+        def get_snapshot(self, codes):
+            case.calls.append(("snapshot", list(codes)))
+            case.clock_ms = initial_ms + elapsed_ms
+            if case.on_snapshot is not None:
+                case.on_snapshot()
+            return pd.DataFrame([] if outcome == "missing" else [{"code": list(codes)[0], "last_price": 120.0}])
+
+        def close(self):
+            case.calls.append(("close",))
+
+    def gateway(**kwargs):
+        case.calls.append(("gateway", kwargs))
+        if outcome == "source-error":
+            raise RuntimeError("synthetic quote unavailable")
+        return Gateway()
+
+    def refresh(*args, **kwargs):
+        return assigned_stock_quotes.refresh_assigned_stock_quote_snapshots(
+            *args, now_ms=lambda: case.quote_ms, **kwargs,
+        )
+
+    monkeypatch.setattr(operations_impl, "datetime", Clock)
+    monkeypatch.setattr(assigned_stock_quotes, "build_ready_futu_quote_gateway", gateway)
+    _patch_agent_tool_dependencies(monkeypatch, refresh_assigned_stock_quotes=refresh)
+    case.facts = lambda: {
+        "trade_events": ledger_api.trade_event_log(repo),
+        "assigned_stock_events": ledger_api.assigned_stock_event_log(repo).events,
+        "position_lots": repo.list_position_lots(),
+    }
+    def read(**kwargs):
+        result = execute_tool("option_positions_read", {
+            "config_path": str(config), "action": "assigned-stock", "account": "user1", **kwargs,
+        })
+        assert result["ok"], result.get("error")
+        return result
+
+    case.read = read
+    return case
+
+
+@pytest.mark.parametrize("elapsed_ms", [0, 1, 1000], ids=["same-ms", "later-1ms", "later-1000ms"])
+@pytest.mark.parametrize("supplied_old_quote", [False, True], ids=["default-refresh", "replace-old-quote"])
+def test_assigned_stock_current_refresh_uses_new_quote(monkeypatch, tmp_path, elapsed_ms, supplied_old_quote):
+    case = _assigned_stock_refresh_case(monkeypatch, tmp_path, elapsed_ms=elapsed_ms)
+    before = case.facts()
+    query = {}
+    if supplied_old_quote:
+        query = {"refresh_quotes": True, "quote_snapshots": [
+            {"symbol": "NVDA", "spot": 110.0, "quote_time_ms": case.initial_ms - 1000},
+        ]}
+    result = case.read(**query)
+    assert result["ok"]
+    data = result["data"]
+    assert data["quote_refresh"]["status"] == "ok", data["quote_refresh"]
+    assert data["quote_refresh"]["refreshed_symbols"] == ["NVDA"]
+    assert data["row_count"] == 1
+    row = data["rows"][0]
+    assert row["account"] == "user1" and row["stock_lot_id"] == case.lot_id
+    assert row["spot"] == 120.0
+    assert row["remaining_market_value"] == 12000
+    assert row["assigned_stock_unrealized_pnl"] == 2000
+    assert [call[0] for call in case.calls] == ["gateway", "snapshot", "close"]
+    assert case.calls[1][1] == ["US.NVDA"]
+    assert case.facts() == before
+
+
+@pytest.mark.parametrize("mode", ["historical", "disabled", "supplied-only", "missing", "source-error", "future"])
+def test_assigned_stock_refresh_preserves_quote_cutoff_controls(monkeypatch, tmp_path, mode):
+    case = _assigned_stock_refresh_case(monkeypatch, tmp_path,
+                                      outcome=mode if mode in {"missing", "source-error"} else "ok")
+    before = case.facts()
+    old = {"symbol": "NVDA", "spot": 110.0, "quote_time_ms": case.initial_ms - 1000}
+    query = {}
+    if mode == "historical":
+        query = {"as_of_ms": case.initial_ms, "refresh_quotes": True, "quote_snapshots": [
+            old, {"symbol": "NVDA", "spot": 120.0, "quote_time_ms": case.initial_ms + 1},
+        ]}
+    elif mode == "disabled":
+        query = {"refresh_quotes": False}
+    elif mode == "supplied-only":
+        query = {"quote_snapshots": [old]}
+    elif mode == "future":
+        case.quote_ms += 1
+    result = case.read(**query)
+    assert result["ok"] and result["data"]["row_count"] == 1
+    data, row = result["data"], result["data"]["rows"][0]
+    assert row["spot"] == (110.0 if mode in {"historical", "supplied-only"} else None)
+    if mode in {"historical", "disabled", "supplied-only"}:
+        assert case.calls == []
+    elif mode == "source-error":
+        assert [call[0] for call in case.calls] == ["gateway"]
+        assert data["quote_refresh"]["status"] == "source_unavailable"
+    else:
+        assert [call[0] for call in case.calls] == ["gateway", "snapshot", "close"]
+    if mode == "historical":
+        assert data["quote_refresh"]["status"] == "skipped_historical_as_of"
+    assert case.facts() == before
+
+
+@pytest.mark.parametrize("change", ["sale", "assignment"])
+def test_assigned_stock_current_refresh_keeps_original_ledger_inputs(monkeypatch, tmp_path, change):
+    from src.application.positions.workflows import execute_manual_assigned_stock_sale
+
+    case = _assigned_stock_refresh_case(monkeypatch, tmp_path)
+    expected_facts = []
+
+    def concurrent_write():
+        if change == "sale":
+            execute_manual_assigned_stock_sale(
+                case.repo, target_lot_id=case.lot_id, account="user1", broker="富途", symbol="NVDA",
+                currency="USD", shares=40, price=110.0, trade_time_ms=case.clock_ms, dry_run=False,
+            )
+        else:
+            case.assign("user1", case.clock_ms - 1, case.clock_ms)
+        expected_facts.append(case.facts())
+
+    case.on_snapshot = concurrent_write
+    result = case.read()
+    assert len(expected_facts) == 1
+    assert result["ok"] and result["data"]["row_count"] == 1
+    row = result["data"]["rows"][0]
+    assert row["stock_lot_id"] == case.lot_id and row["shares_remaining"] == 100
+    assert row["spot"] == 120 and row["remaining_market_value"] == 12000
+    assert case.facts() == expected_facts[0]
+    current = case.read(refresh_quotes=False, quote_snapshots=[
+        {"symbol": "NVDA", "spot": 120.0, "quote_time_ms": case.quote_ms},
+    ])
+    assert current["ok"]
+    assert current["data"]["row_count"] == (1 if change == "sale" else 2)
+    if change == "sale":
+        assert current["data"]["rows"][0]["shares_remaining"] == 60
+    assert case.facts() == expected_facts[0]
+
+
 def test_option_positions_read_open_assigned_stock_includes_partially_sold(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
     from domain.domain.option_position_lots import parse_exp_to_ms

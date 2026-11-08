@@ -806,6 +806,12 @@ def test_assigned_stock_output_v3_includes_branch_without_stock_row(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    from src.application.performance.adapters import ledger_performance_inputs_from_rows
+
+    ledger_inputs = ledger_performance_inputs_from_rows({
+        "trade_events": [], "account_assigned_stock_events": [],
+    })
+    monkeypatch.setattr(operations_impl, "load_ledger_performance_inputs", lambda _repo: ledger_inputs)
     put_branch = {
         "account": "lx",
         "symbol": "NVDA",

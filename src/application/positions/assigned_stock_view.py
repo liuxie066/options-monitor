@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.application.performance.adapters import (
+    LedgerPerformanceInputs,
     load_assigned_stock_projection,
     load_ledger_performance_inputs,
 )
@@ -18,11 +19,12 @@ def build_assigned_stock_view(
     quote_snapshots: Any = None,
     assigned_stock_events: list[dict[str, Any]] | None = None,
     as_of_ms: int | None = None,
+    ledger_inputs: LedgerPerformanceInputs | None = None,
 ) -> dict[str, Any]:
-    """Project assigned-stock state through the canonical performance adapters."""
+    """Project assigned stock, reusing supplied ledger inputs without another read."""
 
     instant = int(as_of_ms) if as_of_ms is not None else int(datetime.now(timezone.utc).timestamp() * 1000)
-    inputs = load_ledger_performance_inputs(repo)
+    inputs = ledger_inputs if ledger_inputs is not None else load_ledger_performance_inputs(repo)
     if assigned_stock_events is not None:
         inputs = replace(
             inputs,
