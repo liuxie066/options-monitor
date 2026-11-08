@@ -345,6 +345,54 @@ def test_display_budget_acknowledges_only_shown_roll_positions(monkeypatch, tmp_
     assert all(row["position_lot_id"] not in calls[0]["message"] for row in rows)
 
 
+@pytest.mark.parametrize("provider", ["wechat_clawbot", "feishu_app"])
+@pytest.mark.parametrize("fixed", [False, True], ids=["candidate-alert", "fixed-report"])
+@pytest.mark.parametrize("option_type,label", [("call", "上移"), ("put", "下移")])
+@pytest.mark.parametrize("row_count", [2, 7], ids=["within-limit", "over-section-limit"])
+def test_tick_roll_section_omissions_preserve_eligibility_and_acknowledgements(
+    monkeypatch, tmp_path: Path, provider: str, fixed: bool,
+    option_type: str, label: str, row_count: int,
+) -> None:
+    from test_daily_decision_brief_notification_flow import _feishu_config
+
+    rows = [
+        position_row(lot=f"lot-{index}", option_type=option_type, credit=100 - index)
+        for index in range(row_count)
+    ]
+    for index, row in enumerate(rows):
+        row["roll_advice"]["candidates"][0]["contract"] = f"ROLL_TARGET_{index}"
+    original_rows = deepcopy(rows)
+    patch_roll_assembler(monkeypatch, rows=list(reversed(rows)))
+    calls = []
+    _patch_sender(monkeypatch, calls=calls)
+    if provider == "feishu_app":
+        monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_fixture")
+        monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "fixture-app")
+    config = _feishu_config() if provider == "feishu_app" else _config()
+    request = _request(tmp_path, run_id="roll-section-limit", fixed=fixed, config=config).request
+
+    assert flow.run_tick_notification_flow(request) == 0
+    assert len(calls) == 1
+    message = calls[0]["message"]
+    shown = min(row_count, 3)
+    assert message.count("旧仓买回") == shown
+    if row_count > shown:
+        assert f"{label}子区上限 3 条，另有 {row_count - shown} 条未展开" in message
+    else:
+        assert "子区上限" not in message
+    assert "条暂无法评估" not in message
+    day = read_daily_decision_brief_delivery_state(
+        base=tmp_path, account="lx", market="US",
+    )["state"]["days"][MARKET_DATE]
+    envelope = next(iter(day["fixed_reports"].values())) if fixed else day["candidate_delivery"]
+    assert envelope["status"] == "confirmed"
+    assert envelope["rendered_message"] == message
+    expected = daily_brief_roll_notification_identities(roll_brief(base=tmp_path, rows=rows[:shown]))
+    assert set(day["alerted_candidates"]) == set(expected)
+    assert len(day["pending_candidates"]) == row_count - shown
+    assert rows == original_rows
+
+
 def test_truncated_message_does_not_ack_cut_off_roll(monkeypatch, tmp_path: Path) -> None:
     patch_roll_assembler(monkeypatch)
     monkeypatch.setattr(renderer, "_MAX_MESSAGE_CHARS", 200)
