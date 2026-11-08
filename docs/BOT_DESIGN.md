@@ -70,6 +70,8 @@ worker 显式复制 ContextVar；应用在自身预算内保留已完成结果�
 
 运行诊断保留 `ran_scan` 的扫描尝试语义；`usable_scan_result` 仅由同运行、账户和市场的完整校验封存证据决定：至少一个范围完成为 true（包括零候选及部分成功），已验证但没有完成范围为 false，仅有指标记录时为 null。Bot 不从扫描尝试或预期范围推断结果可用。指标诊断行补充封存结果时，以 `usable_scan_result_source=validated_candidate_bundle` 标明该字段来源；它不改变指标原因、时间或记录间的因果关系。`pipeline_completed_successfully` 仍保留原指标值，封存运行记录没有该信息时保持 null。`account_metrics` 与 `run_audit` 是独立记录；除非单条记录明确给出关系，运行 ID、顺序和时间接近均不构成因果链。
 
+完整校验为 `no_applicable_scope` 的封存运行没有策略市场条目。`runtime_runs` 读取这类记录时，须以同次 `account_metrics` 核对 run、账户、请求市场及 manifest 的账户配置哈希；依据缺失、冲突或封存损坏时仍拒绝。匹配记录可列举及按 ID 读取，但保留 `scanned=false`、`usable_scan_result=false`，因此不会进入 `scanned_only` 结果。候选资源仍须通过完整封存校验，原始 metrics 与配置内容不作为候选资源暴露。
+
 ### 成交回执的市场参数纠错（本次实现设计）
 
 问题：渠道会话固定 `config.us.json`，用户给出美股期权成交 `deal_id`，没有指定市场；模型却向 `receipt_read` 传入 `market=HK`。工具正确返回 `SCOPE_DENIED`，模型随后把参数冲突说成“这笔回执属于 HK”，并建议切换配置。`SCOPE_DENIED` 只证明请求参数超出当前授权范围，不能证明回执的实际市场或是否已被监听。通知里的“香港”也可能是时间地点或券商地点，不能据此填写 `market`。模型把完整 `deal_id` 写成省略形式同样会破坏精确查询。

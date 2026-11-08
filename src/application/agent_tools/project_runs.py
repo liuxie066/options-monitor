@@ -129,8 +129,6 @@ def load_run_bundle(
             or not isinstance(manifest.get("owner_snapshots"), list)
         ):
             raise ProjectReaderError("bundle_invalid")
-        if not manifest["markets"]:
-            raise ProjectReaderError("market_unverifiable")
         if set(manifest["markets"]) - {market.upper()}:
             raise ProjectReaderError("permission_denied")
         index_name = manifest["status_index"]["relpath"]
@@ -179,6 +177,21 @@ def load_run_bundle(
     except (KeyError, TypeError, ValueError, RuntimeError) as exc:
         raise ProjectReaderError("bundle_invalid") from exc
     manifest = bundle["manifest"]
+    if not manifest["markets"]:
+        # A verified no-scope bundle needs same-run, same-config metrics to prove its market.
+        if manifest.get("completion_reason") != "no_applicable_scope":
+            raise ProjectReaderError("market_unverifiable")
+        try:
+            load_run_metrics(
+                runtime_root=runtime_root, run_id=run_id, account=account, market=market,
+                authorized_accounts=authorized_accounts, _budget=budget, _reader_root=_reader_root,
+                expected_account_config_sha256=manifest["account_config_sha256"], **options,
+            )
+        except ProjectReaderError as exc:
+            if exc.code == "not_found":
+                raise ProjectReaderError("market_unverifiable") from exc
+            raise
+        check()
     identity = {"account": account, "run_id": run_id, "market": market.upper(),
                 "as_of": manifest["sealed_at_utc"], "revision": manifest["content_sha256"]}
     return {
@@ -198,9 +211,9 @@ def load_run_metrics(
     *, runtime_root: RuntimeRootResolution, run_id: str, account: str, market: str,
     authorized_accounts: list[str] | tuple[str, ...], deadline_monotonic: float | None = None,
     cancelled: Callable[[], bool] | None = None, _budget: dict[str, int] | None = None,
-    _reader_root: int | None = None,
+    _reader_root: int | None = None, expected_account_config_sha256: str | None = None,
 ) -> dict[str, Any]:
-    """Read only account metrics whose payload proves the historical identity."""
+    """Read identity-verified metrics, optionally bound to a sealed account-config hash."""
     _scope(runtime_root, authorized_accounts, account, market)
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", run_id):
         raise ProjectReaderError("invalid_run_id")
@@ -216,6 +229,8 @@ def load_run_metrics(
         if not isinstance(value, dict):
             raise ValueError("metrics object required")
         if value.get("run_id") != run_id or value.get("account") != account:
+            raise ProjectReaderError("scope_conflict")
+        if expected_account_config_sha256 is not None and value.get("account_config_sha256") != expected_account_config_sha256:
             raise ProjectReaderError("scope_conflict")
         markets = value.get("markets_to_run")
         if not isinstance(markets, list) or not markets or any(not isinstance(item, str) for item in markets):
