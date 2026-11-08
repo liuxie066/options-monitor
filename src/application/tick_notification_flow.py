@@ -176,17 +176,15 @@ def _daily_brief_represented_identities(metadata: Mapping[str, Any]) -> set[str]
 def _select_daily_brief_delivery(
     brief, *, kind, identities, diff, limits, context, card, open_id, preserve_context=False,
 ):
-    visible = _daily_brief_displayed_roll_identities(
-        brief, identities, delivery_kind=kind, diff=diff, limits=limits)
-    render_brief = _daily_brief_roll_render_source(brief, visible)
+    render_brief = _daily_brief_roll_render_source(brief, identities)
     if not preserve_context:
         context.update(_daily_brief_candidate_render_context(
             render_brief, delivery_kind="candidate_alert" if kind == "candidate_alert" else "fixed_report",
-            candidate_identities=visible, diff=diff, limits=limits, context=context,
+            candidate_identities=identities, diff=diff, limits=limits, context=context,
         ))
     selection = select_daily_brief_notification(
         render_brief, delivery_kind="candidate_alert" if kind == "candidate_alert" else "fixed_report",
-        candidate_identities=visible, diff=diff, limits=limits, context=context,
+        candidate_identities=identities, diff=diff, limits=limits, context=context,
         fits=(lambda blocks, text: feishu_notification_blocks_fit(blocks, text, open_id=open_id))
         if card else None,
     )
@@ -1982,10 +1980,11 @@ def _daily_brief_displayed_roll_identities(
 def _daily_brief_roll_render_source(
     brief: Mapping[str, Any], identities: list[str],
 ) -> Mapping[str, Any]:
-    """Limit only roll advice; leave existing report and close data intact."""
+    """Filter requested current rolls without applying display limits."""
     if not daily_brief_roll_notification_identities(brief):
         return brief
-    allowed = set(identities)
+    allowed = set(identities).intersection(
+        daily_brief_roll_notification_identities(brief, now_utc=utc_now()))
     return {**brief, "positions": [
         row if daily_brief_position_roll_identity(
             row, account=brief.get("account"), market=brief.get("market")) in allowed
