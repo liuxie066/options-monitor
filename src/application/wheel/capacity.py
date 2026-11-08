@@ -734,6 +734,31 @@ def finalize_wheel_put_capacity(
     """Allocate one account-wide cash pool after immutable ordinary Put claims."""
 
     account_value = str(account or "").strip().lower()
+    branches = {
+        str(row.get("wheel_branch_id") or ""): dict(row)
+        for row in wheel_read_model.get("wheel_branches") or []
+        if isinstance(row, Mapping)
+        and str(row.get("direction") or "").strip().lower() == "put"
+    }
+    raw_by_branch = wheel_scan.get("raw_candidates")
+    raw_by_branch = raw_by_branch if isinstance(raw_by_branch, Mapping) else {}
+
+    def accept_grant(allocation: Mapping[str, Any]) -> bool:
+        branch_id = str(allocation.get("wheel_branch_id") or "")
+        branch = branches.get(branch_id)
+        if branch is None:
+            return False
+        return _final_wheel_put_candidate(
+            account=account_value,
+            branch=branch,
+            internal_candidates=[
+                dict(item)
+                for item in raw_by_branch.get(branch_id) or []
+                if isinstance(item, Mapping)
+            ],
+            allocation=allocation,
+        ) is not None
+
     allocation_result = allocate_wheel_put_cash_capacity(
         cash_capacity_fact=cash_capacity_fact,
         ordinary_put_claims=_ordinary_put_cash_claims(
@@ -758,6 +783,7 @@ def finalize_wheel_put_capacity(
                 else None
             ),
         ),
+        accept_grant=accept_grant,
     )
     allocations = [
         dict(item)
@@ -767,14 +793,6 @@ def finalize_wheel_put_capacity(
     by_branch = {
         str(row.get("wheel_branch_id") or ""): row for row in allocations
     }
-    branches = {
-        str(row.get("wheel_branch_id") or ""): dict(row)
-        for row in wheel_read_model.get("wheel_branches") or []
-        if isinstance(row, Mapping)
-        and str(row.get("direction") or "").strip().lower() == "put"
-    }
-    raw_by_branch = wheel_scan.get("raw_candidates")
-    raw_by_branch = raw_by_branch if isinstance(raw_by_branch, Mapping) else {}
     snapshot_batches: list[dict[str, Any]] = []
     branch_scopes: list[dict[str, Any]] = []
     for raw_scope in wheel_scan.get("scope_results") or []:

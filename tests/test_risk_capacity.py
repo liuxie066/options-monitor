@@ -526,6 +526,44 @@ def test_short_put_cash_secured_zero_open_contracts_release_explicit_cash() -> N
     ) == 0.0
 
 
+def test_wheel_put_cash_capacity_rejected_grant_preserves_prior_claims_and_order() -> None:
+    checked = []
+
+    def accept_grant(allocation):
+        checked.append((allocation["wheel_branch_id"], allocation["granted_contracts"]))
+        return allocation["wheel_branch_id"] != "a"
+
+    result = allocate_wheel_put_cash_capacity(
+        cash_capacity_fact=_cash_fact(),
+        ordinary_put_claims=[_ordinary_put_claim("ordinary", 100)],
+        active_wheel_put_intents=[{
+            "intent_id": "intent-1", "account": "lx", "currency": "USD",
+            "cash_reservation_amount": 5_000,
+        }],
+        wheel_put_claims=[
+            _wheel_put_claim("wheel-c", "c", 80),
+            _wheel_put_claim("wheel-b", "b", 120),
+            _wheel_put_claim("wheel-a", "a", 100),
+        ],
+        convert_currency=_identity_fx,
+        accept_grant=accept_grant,
+    )
+    allocations = {row["wheel_branch_id"]: row for row in result["allocations"]}
+
+    assert checked == [("a", 1), ("b", 1)]
+    assert allocations["a"]["granted_contracts"] == 0
+    assert allocations["a"]["cash_reservation_amount"] == 0
+    assert allocations["a"]["capacity_before"] == allocations["a"]["capacity_after"] == 15_000
+    assert allocations["a"]["allocation_status"] == "blocked"
+    assert allocations["a"]["allocation_reason"] == "wheel_capacity_grant_candidate_rejected"
+    assert allocations["b"]["granted_contracts"] == 1
+    assert allocations["b"]["capacity_before"] == 15_000
+    assert allocations["b"]["capacity_after"] == 3_000
+    assert allocations["c"]["granted_contracts"] == 0
+    assert allocations["c"]["allocation_reason"] == "effective_native_cash_insufficient"
+    assert result["cash_secured_after_by_currency"] == {"USD": 27_000}
+
+
 def test_wheel_put_cash_capacity_reserves_ordinary_and_intents_before_wheel() -> None:
     result = _wheel_capacity(
         _cash_fact(),
