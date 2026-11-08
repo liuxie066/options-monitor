@@ -29,6 +29,8 @@ Combo group/role 时回退完整历史投影。已终结成员不在活动续算
 发布两种 resumable state 均存在，与 writer 的发布门槛一致。历史更正仍先折叠有效 adjustment
 再校验，current/no-event 读取和 adjustment 的既有 warning 预览规则不变；本契约不修复既有坏历史。
 
+SQLite checkpoint 续算预览在应用候选前，在同一只读事务内有界查询候选 event ID 和新开仓 lot ID。命中历史身份时，回退完整投影产生既有冲突诊断，覆盖前缀及尾部中已关闭的持仓。手工开仓预检复用 writer 的请求意图核验；同意图重试返回既有 `duplicate` 结果，复用 request ID 改变意图则拒绝，正常新身份仍可续算。公开预览及 dry-run 共用此边界。
+
 订单费用是同一成交事件的延迟证据，不另建费用事实账本。受控 fee enrichment 是唯一
 允许更新既有事件费用 provenance 的路径：按完整订单组执行 CAS、审计、读回并在同一
 事务重放受影响投影。其他模块不得直接改 `event_json`。下文“Futu 订单身份

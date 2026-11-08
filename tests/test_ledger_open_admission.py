@@ -12,6 +12,7 @@ from src.application.ledger.event_codec import import_stored_trade_events
 from src.application.ledger.position_projection_publication import publish_full_position_projection
 from src.application.ledger.position_projection_runtime import (
     _RUNTIME_TELEMETRY,
+    preview_position_projection_append,
     run_position_projection_fast_if_safe,
     run_position_projection_forced_full,
 )
@@ -73,6 +74,148 @@ def _checkpoint(repo):
     result = run_position_projection_forced_full(repo, seed_checkpoint=True)
     assert result.checkpoint_written and result.publication.heads_trusted
     assert not result.pruned_checkpoint_ids
+
+
+def _request_history(repo, history, *, closed=True):
+    original = _input("closed-request")
+    api.record_manual_position_open(repo, **original)
+    latest = original["opened_at_ms"]
+    if closed:
+        latest = _ms("2026-05-02T00:00:00Z")
+        api.record_manual_position_close(
+            repo, lot_id=_event(original).lot_id, contracts_to_close=2,
+            close_price=0.5, close_reason="manual", as_of_ms=latest,
+        )
+    if history == "prefix":
+        _checkpoint(repo)
+    checkpoint = repo.read_newest_trusted_position_projection_checkpoint()
+    assert checkpoint is not None
+    assert (checkpoint["prefix_end_trade_time_ms"] >= latest) is (history == "prefix")
+    return original
+
+
+@pytest.mark.parametrize("history", ["prefix", "tail"])
+@pytest.mark.parametrize("entry", ["preflight", "public", "workflow"])
+def test_closed_request_changed_intent_is_rejected_before_preview(tmp_path, history, entry):
+    from src.application.positions.workflows import execute_manual_open
+
+    repo = _repo(tmp_path)
+    original = _request_history(repo, history)
+    changed = {**original, "premium_per_share": 2.0,
+               "opened_at_ms": _ms("2026-05-03T00:00:00Z")}
+    before = _snapshot(repo)
+    with pytest.raises(ValueError, match="manual request conflict"):
+        api.record_manual_position_open(repo, **changed)
+    assert _snapshot(repo) == before
+    preview = {
+        "preflight": preflight_manual_open,
+        "public": api.preview_manual_position_open,
+        "workflow": lambda repo, **kwargs: execute_manual_open(repo, dry_run=True, **kwargs),
+    }[entry]
+    with pytest.raises(ValueError, match="manual request conflict"):
+        preview(repo, **changed)
+    assert _snapshot(repo) == before
+
+
+@pytest.mark.parametrize("history", ["prefix", "tail"])
+@pytest.mark.parametrize("later_clock", [False, True], ids=["exact-retry", "later-clock"])
+def test_closed_request_same_intent_remains_read_only_duplicate(tmp_path, history, later_clock):
+    from src.application.positions.workflows import execute_manual_open
+
+    repo = _repo(tmp_path)
+    original = _request_history(repo, history)
+    retry = {**original, **({"opened_at_ms": _ms("2026-05-03T00:00:00Z")} if later_clock else {})}
+    before = _snapshot(repo)
+    assert not api.record_manual_position_open(repo, **retry).result.created
+    assert _snapshot(repo) == before
+    assert preflight_manual_open(repo, **retry).status == "duplicate"
+    assert api.preview_manual_position_open(repo, **retry).ledger_preflight.status == "duplicate"
+    assert execute_manual_open(repo, dry_run=True, **retry)["ledger_preflight"]["status"] == "duplicate"
+    assert _snapshot(repo) == before
+
+
+@pytest.mark.parametrize("history", ["prefix", "tail"])
+def test_closed_request_new_identity_keeps_ordinary_tail_admission(tmp_path, history):
+    repo = _repo(tmp_path)
+    original = _request_history(repo, history)
+    old_lot_id = _event(original).lot_id
+    closed_fields = repo.get_record_fields(old_lot_id)
+    _assert_admission(
+        repo, _input("new-request", premium_per_share=2.0,
+                     opened_at_ms=_ms("2026-05-03T00:00:00Z")),
+        True, ordinary_tail=True,
+    )
+    assert repo.get_record_fields(old_lot_id) == closed_fields
+
+
+@pytest.mark.parametrize("history", ["prefix", "tail"])
+@pytest.mark.parametrize("collision", ["event", "lot"])
+@pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
+@pytest.mark.parametrize("event_form", ["object", "dict", "uppercase", "spaced"])
+def test_closed_history_identity_collision_matches_full_preview(tmp_path, history, collision, batch, event_form):
+    repo = _repo(tmp_path)
+    original = _request_history(repo, history)
+    old = _event(original)
+    fresh = _event(_input("raw-candidate", opened_at_ms=_ms("2026-05-03T00:00:00Z")))
+    candidate = replace(fresh, **({"event_id": old.event_id} if collision == "event" else {"lot_id": old.lot_id}))
+    events = [candidate]
+    if batch:
+        events.insert(0, _event(_input("batch-sibling", symbol="AAPL",
+                                     opened_at_ms=_ms("2026-05-03T00:00:00Z") - 1)))
+    if event_form != "object":
+        events = [event.to_dict() for event in events]
+        if event_form in {"uppercase", "spaced"}:
+            for event in events:
+                event["event_type"] = "OPEN" if event_form == "uppercase" else " open "
+    before = _snapshot(repo)
+    resumed = preview_position_projection_append(repo, events)
+    assert _snapshot(repo) == before
+    with pytest.raises((ValueError, RuntimeError)):
+        persist_trade_event_object(repo, candidate)
+    assert _snapshot(repo) == before
+    repo.set_position_projection_checkpoint_mode("disabled")
+    before_full = _snapshot(repo)
+    full = preview_position_projection_append(repo, events)
+    assert _snapshot(repo) == before_full
+    expected = "duplicate_event_id" if collision == "event" else "duplicate_lot_id"
+    assert expected in {item.code for item in full.projection.diagnostics}
+    assert resumed.mode_used == "full"
+    assert expected in {item.code for item in resumed.projection.diagnostics}
+
+
+@pytest.mark.parametrize("history", ["prefix", "tail"])
+@pytest.mark.parametrize("closed,checkpoint_enabled", [(False, True), (False, False), (True, False)],
+                         ids=["active-enabled", "active-disabled", "closed-disabled"])
+@pytest.mark.parametrize("changed", [False, True], ids=["same-intent", "changed-intent"])
+def test_manual_open_retry_and_conflict_match_writer_in_all_modes(
+    tmp_path, history, closed, checkpoint_enabled, changed,
+):
+    from src.application.positions.workflows import execute_manual_open
+
+    repo = _repo(tmp_path)
+    original = _request_history(repo, history, closed=closed)
+    if not checkpoint_enabled:
+        repo.set_position_projection_checkpoint_mode("disabled")
+    retry = {**original, "opened_at_ms": _ms("2026-05-03T00:00:00Z"),
+             "premium_per_share": 2.0 if changed else original["premium_per_share"]}
+    before = _snapshot(repo)
+    calls = [
+        lambda: api.record_manual_position_open(repo, **retry),
+        lambda: preflight_manual_open(repo, **retry),
+        lambda: api.preview_manual_position_open(repo, **retry),
+        lambda: execute_manual_open(repo, dry_run=True, **retry),
+    ]
+    if changed:
+        for call in calls:
+            with pytest.raises(ValueError, match="manual request conflict"):
+                call()
+            assert _snapshot(repo) == before
+    else:
+        assert not calls[0]().result.created
+        assert calls[1]().status == "duplicate"
+        assert calls[2]().ledger_preflight.status == "duplicate"
+        assert calls[3]()["ledger_preflight"]["status"] == "duplicate"
+        assert _snapshot(repo) == before
 
 
 DATES = [

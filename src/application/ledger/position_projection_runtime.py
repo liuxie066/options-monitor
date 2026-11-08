@@ -541,6 +541,26 @@ def preview_position_projection_append(
                 conn=conn,
                 fallback_reason="candidate_not_strict_append",
             )
+        # Checkpoint state retains active lots, so closed historical identities
+        # need bounded repository lookups in this same read transaction. Let
+        # the full oracle produce the existing collision diagnostics.
+        event_ids = tuple(_event_order_key(item)[1] for item in events)
+        open_lot_ids = tuple(
+            lot_id_for_open_event(item)
+            for item in events
+            if str(
+                (item.get("event_type") if isinstance(item, dict) else getattr(item, "event_type", None)) or ""
+            ).strip().lower() == "open"
+        )
+        if candidate.get_trade_events_by_ids(event_ids, conn=conn) or candidate.get_position_lots_by_ids(
+            open_lot_ids, conn=conn
+        ):
+            return _preview_full(
+                candidate,
+                events,
+                conn=conn,
+                fallback_reason="candidate_identity_collision",
+            )
         projection = (
             project_stored_trade_events_to_resumable_position_lots(
                 list(events),

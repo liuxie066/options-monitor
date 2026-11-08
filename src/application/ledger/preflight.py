@@ -58,7 +58,7 @@ def preflight_manual_open(
     strategy_snapshot: dict[str, Any] | None = None,
     request_id: str | None = None,
 ) -> LedgerPreflightResult:
-    _fields, event = _manual_open_ledger_inputs(
+    fields, event = _manual_open_ledger_inputs(
         broker=broker,
         account=account,
         symbol=symbol,
@@ -76,6 +76,33 @@ def preflight_manual_open(
         strategy_snapshot=strategy_snapshot,
         request_id=request_id,
     )
+    duplicate = _existing_open_event_result(repo, event_id=event.event_id, lot_id=event.lot_id)
+    if duplicate is not None:
+        request_id_value = str(request_id or "").strip()
+        if request_id_value:
+            from src.application.ledger.manual_trades import assert_manual_request_event_matches
+
+            # Match the writer's intent check before treating a historical ID
+            # as an idempotent retry, including a lot that is already closed.
+            assert_manual_request_event_matches(
+                repo,
+                event_id=event.event_id,
+                request_id=request_id_value,
+                intent_hash=str((event.raw_payload or {}).get("manual_request_intent_hash") or ""),
+                broker=broker,
+                account=account,
+                symbol=symbol,
+                option_type=option_type,
+                side=side,
+                contracts=contracts,
+                currency=currency,
+                strike=strike,
+                expiration_ymd=expiration_ymd,
+                underlying_share_locked=underlying_share_locked,
+                note=note,
+                fields=fields,
+            )
+        return _duplicate_open_preflight(event=event, result=duplicate)
     return _preflight_open_event(
         repo,
         event=event,
