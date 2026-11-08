@@ -3,6 +3,7 @@ import io
 import json
 import re
 import shlex
+import shutil
 import subprocess
 import tarfile
 from pathlib import Path
@@ -12,7 +13,8 @@ import pytest
 from scripts import build_runtime_bundle as builder
 
 ROOT = Path(__file__).resolve().parents[1]
-INSTALL_SCRIPTS = {
+RUNTIME_SCRIPTS = {
+    "scripts/auto_close_schedule.sh",
     "scripts/install.sh",
     "scripts/install_agent_plugin.sh",
     "scripts/python_runtime.sh",
@@ -41,7 +43,7 @@ PRIVATE_FILES = INTERNAL_DOCS | {
     "codex/internal.md", ".devflow/scope.md",
     "docs/reviews/internal.md", "docs/reviews/nested/internal.md",
 }
-PRODUCT_FILES = INSTALL_SCRIPTS | {
+PRODUCT_FILES = RUNTIME_SCRIPTS | {
     "om", "om-agent", "VERSION", "README.md", "LICENSE",
     "src/application/example.py", "domain/example.py",
     "docs/INSTALL.md", "docs/STRATEGY_ARCHITECTURE.md",
@@ -63,7 +65,10 @@ def test_runtime_bundle_manifest_excludes_maintainer_files(tmp_path, monkeypatch
     for name in PRIVATE_FILES | PRODUCT_FILES:
         path = source / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("fixture\n")
+        if name in RUNTIME_SCRIPTS:
+            shutil.copy2(ROOT / name, path)
+        else:
+            path.write_text("fixture\n")
     (source / "VERSION").write_text("1.2.3\n")
     (source / "scripts/runtime_bundle.lock.json").write_bytes(
         (ROOT / "scripts/runtime_bundle.lock.json").read_bytes()
@@ -104,11 +109,12 @@ def test_runtime_bundle_manifest_excludes_maintainer_files(tmp_path, monkeypatch
     files = set(manifest["files"])
     with tarfile.open(output / report["archive"]) as archive:
         archived_files = {member.name for member in archive if member.isfile()}
+        assert archive.getmember("scripts/auto_close_schedule.sh").mode & 0o111
 
     assert archived_files == files | {builder.MANIFEST}
     assert files.isdisjoint(PRIVATE_FILES), sorted(files & PRIVATE_FILES)
     assert PRODUCT_FILES <= files
-    assert {name for name in files if name.startswith("scripts/")} == INSTALL_SCRIPTS
+    assert {name for name in files if name.startswith("scripts/")} == RUNTIME_SCRIPTS
     assert not any(
         name.startswith(("tests/", "release/", "memory/", "codex/", ".devflow/", "docs/reviews/"))
         for name in files
@@ -123,6 +129,6 @@ def test_runtime_bundle_source_keeps_readme_user_docs(tmp_path):
     user_docs = readme_docs - INTERNAL_DOCS
 
     assert user_docs
-    assert user_docs | INSTALL_SCRIPTS | {"README.md", "om", "om-agent"} <= files
+    assert user_docs | RUNTIME_SCRIPTS | {"README.md", "om", "om-agent"} <= files
     assert files.isdisjoint(INTERNAL_DOCS)
-    assert {name for name in files if name.startswith("scripts/")} == INSTALL_SCRIPTS
+    assert {name for name in files if name.startswith("scripts/")} == RUNTIME_SCRIPTS
