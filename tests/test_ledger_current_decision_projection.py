@@ -1102,6 +1102,85 @@ def test_legacy_snapshot_attaches_bounded_current_consumer_shadow(
     ]
 
 
+@pytest.mark.parametrize(
+    ("field_path", "value"),
+    [
+        pytest.param(("premium_open",), "3", id="premium_open"),
+        pytest.param(("premium_open",), "0", id="zero_premium"),
+        pytest.param(("contracts_opened",), 2, id="contracts_opened"),
+        pytest.param(("position_side",), "long", id="position_side"),
+        pytest.param(("contract_key", "strike"), "101", id="strike"),
+        pytest.param(("contract_key", "expiration_ymd"), "2026-06-26", id="expiration"),
+        pytest.param(("contract_key", "underlying_symbol"), "AAPL", id="symbol"),
+        pytest.param(("contract_key", "broker"), "other", id="broker"),
+        pytest.param(("contract_key", "account"), "other", id="account"),
+        pytest.param(("contract_key", "option_type"), "call", id="option_type"),
+        pytest.param(("opened_at_ms",), 2_000, id="opened_at_ms"),
+        pytest.param(("open_event_id",), "other-open", id="open_event_id"),
+        pytest.param(("multiplier",), 101, id="multiplier"),
+    ],
+)
+def test_current_shadow_compares_canonical_position_economics(
+    tmp_path: Path, field_path: tuple[str, ...], value: object,
+) -> None:
+    repo = _repo(tmp_path)
+    _bootstrap(repo, "lx")
+    rows = ledger_api.read_decision_state_rows_many(repo, accounts=("lx",))["lx"]
+    current = ledger_api.read_current_decision_projection(repo, account="lx", now_ms=20_000)
+    assert current["status"] == "trusted"
+    changed = deepcopy(current)
+    fields = changed["position_lots"][0]["fields"]
+    target = fields
+    for key in field_path[:-1]:
+        target = target[key]
+    target[field_path[-1]] = value
+    frozen = deepcopy((rows, current, changed))
+
+    def snapshot(current_projection):
+        return ledger_api.decision_state_snapshot_from_rows(
+            rows, account="lx", portfolio_scope_id="futu:lx",
+            source_observed_at="2026-08-16T00:00:20+00:00",
+            current_projection=current_projection, current_decision_now_ms=20_000,
+        )
+
+    baseline = snapshot(current)
+    actual = snapshot(changed)
+    assert baseline["current_decision_shadow"]["status"] == "matched"
+    assert actual["snapshot_status"] == "trusted"
+    assert actual["actionable"] is True
+    assert actual["decision_state_fingerprint"] == baseline["decision_state_fingerprint"]
+    assert actual["current_decision_shadow"]["status"] == "mismatch"
+    positions = next(section for section in actual["current_decision_shadow"]["sections"]
+                     if section["section"] == "position_lots")
+    assert positions["mismatch_count"] == 1
+    assert positions["legacy_sha256"] != positions["current_sha256"]
+    assert positions["mismatch_samples"][0]["key"] == "lot-lx"
+    assert (rows, current, changed) == frozen
+
+
+def test_current_shadow_prefers_canonical_position_facts_over_flat_aliases(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _bootstrap(repo, "lx")
+    rows = ledger_api.read_decision_state_rows_many(repo, accounts=("lx",))["lx"]
+    current = ledger_api.read_current_decision_projection(repo, account="lx", now_ms=20_000)
+    assert current["status"] == "trusted"
+    current["position_lots"][0]["fields"].update({
+        "premium": "999", "contracts": 999, "side": "long", "strike": 999,
+        "account": "other", "symbol": "AAPL", "note": "display only",
+    })
+    frozen = deepcopy((rows, current))
+    snapshot = ledger_api.decision_state_snapshot_from_rows(
+        rows, account="lx", portfolio_scope_id="futu:lx",
+        source_observed_at="2026-08-16T00:00:20+00:00",
+        current_projection=current, current_decision_now_ms=20_000,
+    )
+    assert snapshot["snapshot_status"] == "trusted"
+    assert snapshot["actionable"] is True
+    assert snapshot["current_decision_shadow"]["status"] == "matched"
+    assert snapshot["current_decision_shadow"]["mismatch_count"] == 0
+    assert (rows, current) == frozen
+
+
 def test_current_shadow_read_failure_does_not_change_legacy_authority(
     monkeypatch,
     tmp_path: Path,

@@ -1535,6 +1535,8 @@ probe 的绿色只说明重放结果与已存持仓行一致，可能同时存�
 
 `decision_snapshot.py` 的持仓事实契约校验复用账本生命周期解析器，重算决策事实、仲裁和 token 的依赖案例及目标 lot 绑定；仅跳过比对时会丢弃的期望侧 generation-token 哈希。快照构建仍生成完整 token，校验仍检查提供的 resolution 自身哈希、token 格式和完整快照指纹；没有缩减原始证据或改变失败原因。
 
+当前决策影子的 `position_lots` 分区复用 `read_model.canonicalize_position_lot_fields`，先将嵌套 `contract_key`、`premium_open` 等存储字段转换为读模型词汇，再按既有字段白名单比较合约身份、方向、数量和权利金等消费者事实；`note` 不参与比较。冻结 rows 与传入的可信 current read 存在这些事实差异时，影子报告 `mismatch` / `consumer_fact_mismatch`，并按 lot 计数。影子结果及 current read 仍是观察元数据，不参与冻结快照的业务指纹；`snapshot_status` 和 `actionable` 继续由冻结 rows 自身的来源约束及同快照投影校验决定。
+
 真实持仓准备入口的 `prepared_context_phase` 增加共享的 `snapshot_build` 和逐账户的 `snapshot_contract`。前者位于 `projection` 内，后者覆盖校验调用；耗时是包含子阶段的墙钟时间，不可相加，也不代表数据可信。CPU 热点和优化收益应另做离线分析，再由正常运行样本验证生产收益。
 
 ### 当前投影内容资格与历史全量证明
