@@ -559,6 +559,7 @@ def derive_lifecycle_quality_view(
     quality: Mapping[str, Any],
     *,
     now_ms: int,
+    current_case_views: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     stored = validate_lifecycle_quality_fact(quality)
     verdict_counts: dict[str, int] = {}
@@ -586,6 +587,14 @@ def derive_lifecycle_quality_view(
             market_blocked[consumer] = market_blocked.get(consumer, 0) + count
 
     for item in stored["operational_cases"]:
+        current = (
+            current_case_views[item["case_id"]]
+            if current_case_views is not None else None
+        )
+        # Classify before aggregation from the same current view as the reader;
+        # a live quantity conflict must not inherit the stored waiting grace.
+        current_conflict = current is not None and current["lifecycle_state"] == "conflict"
+        reason_state = current["reason_state"] if current is not None else item["reason_state"]
         trust = item["trust_class"]
         market = item["market"]
         market_trust = operational_trust.setdefault(market, {})
@@ -600,6 +609,9 @@ def derive_lifecycle_quality_view(
         )
         if trust == "external_review":
             verdict = "unavailable"
+            blocked = ["close_advice", "lifecycle_report", "option_performance"]
+        elif current_conflict:
+            verdict = "untrusted"
             blocked = ["close_advice", "lifecycle_report", "option_performance"]
         elif trust == "legacy_gap":
             verdict = "untrusted"
@@ -619,6 +631,7 @@ def derive_lifecycle_quality_view(
         add_counts(market, verdict, blocked)
         details.append({
             **item,
+            "reason_state": reason_state,
             "settlement_deadline_ms": deadline,
             "dataset_status": verdict,
             "blocked_consumers": blocked,

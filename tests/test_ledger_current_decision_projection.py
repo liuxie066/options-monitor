@@ -441,6 +441,83 @@ def _bind_test_timing(
     )
 
 
+def _current_quantity_conflict_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, close_target: bool,
+) -> tuple[SQLiteOptionPositionsRepository, dict[str, str], int]:
+    repo = _repo(tmp_path, accounts=("lx", "sy"))
+    case_ids = {}
+    deadlines = set()
+    for account in ("lx", "sy"):
+        _bootstrap(repo, account)
+        discovered = writer.discover_expired_lifecycle_cases_atomically(
+            repo, account=account, observed_at_ms=1_800_000_000_000, apply_changes=True,
+        )
+        lifecycle_case = repo.get_trade_lifecycle_case(discovered["created_case_ids"][0])
+        case_ids[account] = str(lifecycle_case["case_id"])
+        deadlines.add(_bind_test_timing(repo, lifecycle_case)["policy"]["settlement_deadline_ms"])
+    assert len(deadlines) == 1
+    deadline_ms = deadlines.pop()
+    cache_calls = []
+
+    def invalidate_cache(actual_repo: Any, *, account: str | None) -> dict[str, Any]:
+        cache_calls.append((actual_repo, account))
+        return {"ok": True}
+
+    monkeypatch.setattr(workflows, "invalidate_option_positions_context_cache_for_repo", invalidate_cache)
+    if close_target:
+        result = workflows.execute_manual_close(
+            repo, lot_id="lot-lx", contracts_to_close=1, close_price=0.5,
+            close_reason="manual_buy_to_close", dry_run=False, as_of_ms=deadline_ms - 2,
+        )
+        assert result["mode"] == "applied"
+        assert result["result"]["created"] is True
+        assert result["result"]["decision_projection"]["statuses"] == {"lx": "published", "sy": "published"}
+        assert len(cache_calls) == 1
+        assert cache_calls[0][0] is repo
+    else:
+        assert cache_calls == []
+    return SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3"), case_ids, deadline_ms
+
+
+@pytest.mark.parametrize("close_target", [False, True], ids=["waiting", "quantity-conflict"])
+@pytest.mark.parametrize("offset_ms", [-1, 0, 1], ids=["before-deadline", "at-deadline", "after-deadline"])
+def test_current_quantity_conflict_blocks_quality_before_settlement_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, close_target: bool, offset_ms: int,
+) -> None:
+    repo, case_ids, deadline_ms = _current_quantity_conflict_repo(
+        tmp_path, monkeypatch, close_target=close_target,
+    )
+    snapshots = {account: repo.read_current_decision_storage_state(account) for account in case_ids}
+    consumers = ["close_advice", "lifecycle_report", "option_performance"]
+    for account, case_id in case_ids.items():
+        current = ledger_api.read_current_decision_projection(
+            repo, account=account, now_ms=deadline_ms + offset_ms,
+        )
+        assert current["status"] == "trusted"
+        case_view = current["lifecycle_by_case"][case_id]
+        conflicted = close_target and account == "lx"
+        if conflicted:
+            assert case_view["lifecycle_state"] == "conflict"
+            assert case_view["reason_state"] == "conflict"
+            assert "target_lot_quantity_drift" in case_view["lifecycle_reason_codes"]
+            assert current["position_lots"][0]["fields"]["contracts_open"] == 0
+        else:
+            assert case_view["lifecycle_state"] != "conflict"
+        quality = current["lifecycle_quality"]
+        detail = quality["operational_cases"][0]
+        assert detail["reason_state"] == case_view["reason_state"]
+        blocked = consumers if conflicted or offset_ms > 0 else []
+        expected_status = "untrusted" if blocked else "partial"
+        assert detail["dataset_status"] == expected_status
+        assert detail["blocked_consumers"] == blocked
+        assert quality["operational_status_counts"] == {expected_status: 1}
+        assert quality["blocked_consumer_counts"] == {consumer: 1 for consumer in blocked}
+        aggregate = quality["aggregate_by_market"][0]
+        assert aggregate["dataset_status_counts"] == {expected_status: 1}
+        assert aggregate["blocked_consumer_counts"] == {consumer: 1 for consumer in blocked}
+    assert {account: repo.read_current_decision_storage_state(account) for account in case_ids} == snapshots
+
+
 def _case_fact(
     *,
     case_id: str = "case-a",

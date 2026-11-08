@@ -32,6 +32,7 @@ from src.application.quality.runtime_checks import build_runtime_checks, runtime
 from src.application.quality.opend_position_adapter import OpenDOptionSnapshot
 
 import test_trades_resolver_close
+import test_ledger_current_decision_projection as current_projection_tests
 from domain.domain.option_lifecycle import expiration_observation_start_ms
 from domain.domain.trade_execution import execution_identity_from_input
 from src.application.ledger.api import project_trade_event_log, refresh_position_lot_projection
@@ -905,6 +906,67 @@ def test_lifecycle_excludes_superseded_and_other_market_cases() -> None:
     )
 
     assert [item["scope"]["lifecycle_case_id"] for item in datasets] == ["pending-us"]
+
+
+@pytest.mark.parametrize("close_target", [False, True], ids=["waiting", "quantity-conflict"])
+@pytest.mark.parametrize("offset_ms", [-1, 0, 1], ids=["before-deadline", "at-deadline", "after-deadline"])
+def test_current_quantity_conflict_blocks_quality_consumers_before_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, close_target: bool, offset_ms: int,
+) -> None:
+    repo, case_ids, deadline_ms = current_projection_tests._current_quantity_conflict_repo(
+        tmp_path, monkeypatch, close_target=close_target,
+    )
+    consumers = ["close_advice", "lifecycle_report", "option_performance"]
+    now_ms = deadline_ms + offset_ms
+    for account in case_ids:
+        current = current_projection_tests.ledger_api.read_current_decision_projection(
+            repo, account=account, now_ms=now_ms,
+        )
+        assert current["status"] == "trusted"
+        dataset = build_current_lifecycle_quality_dataset(
+            current_quality=current["lifecycle_quality"], projection_status=current["status"],
+            projection_reason=current["reason"], account=account, market="us",
+            observed_at_utc=datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc).isoformat(),
+        )
+        blocked = close_target and account == "lx" or offset_ms > 0
+        assert dataset["status"] == ("untrusted" if blocked else "partial")
+        assert dataset["blocked_consumers"] == (consumers if blocked else [])
+        assert dataset["usable_for"] == ([] if blocked else consumers)
+        assert dataset["checks"][0]["status"] == ("fail" if blocked else "pass")
+
+
+@pytest.mark.parametrize("needs_review", [False, True])
+@pytest.mark.parametrize("legacy_gap", [False, True])
+def test_current_quality_conflict_blocks_all_consumers_without_mutating_stored_fact(
+    needs_review: bool, legacy_gap: bool,
+) -> None:
+    fact = current_projection_tests._case_fact(
+        status="needs_review" if needs_review else "pending",
+        reason_state="needs_review" if needs_review else "not_started",
+        legacy_evidence_gap=legacy_gap,
+    )
+    current = current_projection_tests.derive_lifecycle_case_current_view(
+        fact, current_position_lots=[], now_ms=1_500,
+    )
+    assert current["lifecycle_state"] == "conflict"
+    assert "target_lot_quantity_drift" in current["lifecycle_reason_codes"]
+    quality = current_projection_tests.build_lifecycle_quality_fact(
+        account="lx", all_case_facts=[fact], operational_case_facts=[fact],
+    )
+    stored = deepcopy(quality)
+    view = derive_lifecycle_quality_view(
+        quality, now_ms=1_500, current_case_views={fact["case_id"]: current},
+    )
+    consumers = ["close_advice", "lifecycle_report", "option_performance"]
+    detail = view["operational_cases"][0]
+    assert detail["reason_state"] == current["reason_state"]
+    assert detail["dataset_status"] == "untrusted"
+    assert detail["blocked_consumers"] == consumers
+    assert view["aggregate_by_market"][0]["blocked_consumer_counts"] == {name: 1 for name in consumers}
+    assert quality == stored
+    offline = derive_lifecycle_quality_view(quality, now_ms=1_500)
+    assert offline["operational_cases"][0]["dataset_status"] == ("untrusted" if legacy_gap else "partial")
+    assert offline["operational_cases"][0]["blocked_consumers"] == (["option_performance"] if legacy_gap else [])
 
 
 def test_lifecycle_quality_shadow_matches_without_timing_policy() -> None:

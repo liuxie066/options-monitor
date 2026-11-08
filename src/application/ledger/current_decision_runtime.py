@@ -429,9 +429,8 @@ def read_current_decision_projection(
         quality = derive_lifecycle_quality_view(
             payload["lifecycle_quality"],
             now_ms=instant,
+            current_case_views=case_views,
         )
-        for item in quality["operational_cases"]:
-            item["reason_state"] = case_views[str(item["case_id"])]["reason_state"]
         return {
             "schema_version": CURRENT_DECISION_READ_SCHEMA,
             "status": "trusted",
