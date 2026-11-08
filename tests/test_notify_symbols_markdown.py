@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import subprocess
+import sys
 import warnings
 from typing import Any
 
@@ -10,6 +13,89 @@ import pandas as pd
 import pytest
 
 from tests.notification_format_assertions import assert_mobile_flat_markdown
+
+
+@pytest.mark.parametrize("entry", ["stage", "cli"])
+@pytest.mark.parametrize("symbol,currency", [("NVDA", "USD"), ("0700.HK", "HKD")])
+@pytest.mark.parametrize("shares_total,shares_locked,cover", [(0, 0, 0), (200, 200, 0), (200, 0, 2)])
+def test_compact_cc_coverage_marker_and_observation_survive_public_render_chain(
+    tmp_path, symbol, currency, shares_total, shares_locked, cover, entry,
+):
+    from src.application.alert_engine import main as alert_main
+    from src.application.notify_symbols import extract_section
+    from src.application.pipeline_alert_steps import run_stage_only_alert_notify
+
+    account_dir = tmp_path / "output_accounts" / "qa733"
+    reports, state = account_dir / "reports", account_dir / "state"
+    reports.mkdir(parents=True)
+    state.mkdir()
+    current = reports / "symbols_summary.csv"
+    pd.DataFrame([_summary_row(
+        symbol=symbol, top_contract="2026-06-19 180C", strategy="sell_call",
+        annualized_return=0.123, net_income=240.4, dte=30, strike=180,
+        risk_label="保守", option_ccy=currency, cover_avail=cover,
+        shares_total=shares_total, shares_locked=shares_locked,
+        if_exercised_total_return=0.16, mid=2.4, delta=0.16,
+    )]).to_csv(current, index=False)
+    previous = state / "symbols_summary_prev.csv"
+    previous.write_bytes(b"symbol,strategy,candidate_count\n")
+    alerts = reports / "symbols_alerts.txt"
+    changes = reports / "symbols_changes.txt"
+    assert alert_main(["--summary-input", str(current), "--output", str(alerts),
+                       "--changes-output", str(changes), "--state-dir", str(state)]) == 0
+    alerts_text = alerts.read_text(encoding="utf-8")
+    if cover == 0:
+        assert extract_section(alerts_text, "## 低优先级")
+        assert "仅供观察" in alerts_text
+    else:
+        assert not extract_section(alerts_text, "## 低优先级")
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    output = reports / "symbols_notification.txt"
+    if entry == "stage":
+        run_stage_only_alert_notify(report_dir=reports, stage_only="notify",
+                                    want=lambda stage: stage == "notify", log=lambda _text: None)
+    else:
+        result = subprocess.run(
+            [sys.executable, "-m", "src.application.notify_symbols", "--alerts-input", str(alerts),
+             "--changes-input", str(changes), "--output", str(output), "--state-dir", str(state)],
+            cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+    text = output.read_text(encoding="utf-8")
+    if cover == 0:
+        assert "🟡 CC" in text
+        assert "🟢 CC" not in text
+        assert "可卖0张" in text
+        assert "备注｜当前富途可覆盖张数为 0（可能已占用或持仓不足），仅供观察。" in text
+    else:
+        assert "🟢 CC" in text
+        assert "🟡 CC" not in text
+        assert "可卖2张" in text
+        assert "备注｜" not in text
+    assert text.startswith("### CC\n\n**")
+    assert "收益｜" in text and "风险｜" in text
+    assert not any(line.startswith(("- ", "  ", "|")) for line in text.splitlines())
+    assert {path: path.read_bytes() for path in before} == before
+    assert {path for path in tmp_path.rglob("*") if path.is_file()} - set(before) == {output}
+
+
+@pytest.mark.parametrize("action_label", ["CC", "Covered Call", "卖Call"])
+@pytest.mark.parametrize("cover", [0, 2])
+def test_compact_cc_block_uses_quantity_for_marker_without_risk_text_hint(action_label, cover):
+    from src.application.notify_symbols import _build_notification_block_compact
+
+    note = "当前富途可覆盖张数为 0（可能已占用或持仓不足），仅供观察。" if cover == 0 else "已通过准入，可作为 CC 备选。"
+    text = _build_notification_block_compact(
+        symbol_name="SYNTH", action_label=action_label, contract="2026-06-19 180C",
+        income_line="- 收益: 权利金=$2.4 | 年化 12.3% | 净收入 $240.4",
+        contract_line=f"- 合约: 行权价=180 | 数量={cover}张(可覆盖) | DTE=30",
+        risk_line="- 风控: 风险=保守 | delta=0.16", detail_line="", note=note,
+    )
+    assert ("🟡 CC" if cover == 0 else "🟢 CC") in text
+    assert f"可卖{cover}张" in text
+    assert ("备注｜" in text) is (cover == 0)
+    if cover == 0:
+        assert note in text
 
 
 def _render_via_alert_engine(summary_row: dict, *, render_style: str = "legacy") -> str:
