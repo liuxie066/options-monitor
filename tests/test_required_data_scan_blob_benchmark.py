@@ -159,3 +159,201 @@ def test_current_schema_populated_delta_evidence_uses_real_bundle(tmp_path) -> N
     assert result["mismatch_count"] == 0
     assert result["removed_files"] == 2
     assert result["failed_files"] == 0
+
+
+@pytest.mark.parametrize(
+    "fault_sample",
+    [None, "sample-0000", "sample-0005", "allocation", "sample-0034"],
+    ids=["normal", "warmup-eio", "first-timed-eio", "allocation-eio", "last-timed-eio"],
+)
+def test_formal_main_checks_every_sample_cleanup(monkeypatch, tmp_path, fault_sample) -> None:
+    """Real 5+30+allocation correctness run; makes no timing performance claim."""
+    import errno
+    import os
+    from pathlib import Path
+
+    from src.application import required_data_snapshot as snapshot
+
+    original_bundle = benchmark._canonical_bundle
+    original_bound_fsync = snapshot.fsync_required_data_bound_file
+    original_fsync = os.fsync
+    samples = []
+    cleanup_sample = None
+    injected = 0
+
+    def _observe_bundle(root, fixture):
+        result = original_bundle(root, fixture)
+        samples.append({"sample": root.name, **result})
+        return result
+
+    def _bound_fsync(**kwargs):
+        nonlocal cleanup_sample
+        cleanup_sample = next(
+            (part for part in Path(kwargs["root"]).parts if part == fault_sample),
+            None,
+        )
+        try:
+            return original_bound_fsync(**kwargs)
+        finally:
+            cleanup_sample = None
+
+    def _fsync(fd):
+        nonlocal injected
+        if fault_sample is not None and cleanup_sample == fault_sample and injected == 0:
+            injected += 1
+            raise OSError(errno.EIO, "synthetic cleanup durability fsync EIO")
+        return original_fsync(fd)
+
+    monkeypatch.setattr(benchmark, "_canonical_bundle", _observe_bundle)
+    monkeypatch.setattr(snapshot, "fsync_required_data_bound_file", _bound_fsync)
+    monkeypatch.setattr(os, "fsync", _fsync)
+    monkeypatch.setattr(benchmark, "_git_sha", lambda: "0" * 40)
+    monkeypatch.setattr(benchmark.platform, "platform", lambda: "isolated correctness test")
+    output = tmp_path / "receipt.json"
+    code = benchmark.main(["--profile", "canonical", "--output", str(output)])
+    receipt = json.loads(output.read_text(encoding="utf-8"))
+
+    assert receipt["run_label"] == "acceptance_5_warmups_30_repetitions"
+    assert [sample["sample"] for sample in samples] == [
+        *(f"sample-{index:04d}" for index in range(35)), "allocation",
+    ]
+    assert len(receipt["timing"]["canonical_wall"]["samples"]) == 30
+    assert len(receipt["timing"]["canonical_cpu"]["samples"]) == 30
+    assert receipt["timing"]["tracemalloc_enabled"] is True
+    bad = [sample for sample in samples if sample["mismatch_count"] or sample["failed_files"]]
+    assert injected == int(fault_sample is not None)
+    assert [sample["sample"] for sample in bad] == ([] if fault_sample is None else [fault_sample])
+    for sample in samples:
+        limit = sum(sample[key] for key in (
+            "compressed_blob_bytes", "manifest_bytes", "compact_receipt_bytes", "cache_metadata_bytes",
+        ))
+        if sample["sample"] == fault_sample:
+            assert sample["failed_files"] == 2
+            assert sample["removed_files"] == 0
+            assert sample["retained_bytes"] - limit == 227_564
+            assert sample["mismatch_count"] == 3
+            assert set(sample["mismatch_samples"]) == {
+                "canonical_cleanup", "canonical_raw_shadow", "canonical_csv_shadow",
+            }
+        else:
+            assert sample["failed_files"] == 0
+            assert sample["removed_files"] == 2
+            assert sample["removed_bytes"] == 227_564
+            assert sample["mismatch_count"] == 0
+            assert sample["mismatch_samples"] == []
+            assert sample["retained_bytes"] == limit
+
+    diagnostic = json.dumps({
+        "fault_sample": fault_sample, "injected": injected, "bad_samples": bad,
+        "main_exit": code, "receipt_space": receipt["space"], "violations": receipt["violations"],
+    }, sort_keys=True)
+    if fault_sample is None:
+        assert code == 0, diagnostic
+        assert receipt["violations"] == [], diagnostic
+    else:
+        assert code == 1, diagnostic
+        assert "bounded_shadow_comparison" in receipt["violations"], diagnostic
+        assert "canonical_persisted_bytes" in receipt["violations"], diagnostic
+
+    checks = receipt["sample_checks"]
+    assert checks["counts"] == {"warmup": 5, "timing": 30, "allocation": 1}
+    assert checks["failed_count"] == int(fault_sample is not None)
+    if fault_sample is None:
+        assert checks["failure_samples"] == []
+        assert checks["violations"] == []
+    else:
+        expected_phase, expected_index = {
+            "sample-0000": ("warmup", 0),
+            "sample-0005": ("timing", 0),
+            "sample-0034": ("timing", 29),
+            "allocation": ("allocation", 0),
+        }[fault_sample]
+        failure, = checks["failure_samples"]
+        assert (failure["phase"], failure["index"]) == (expected_phase, expected_index)
+        assert set(failure["violations"]) == {"bounded_shadow_comparison", "canonical_persisted_bytes"}
+        assert failure["space"]["failed_files"] == 2
+        assert failure["space"]["retained_bytes"] - failure["space"]["canonical_persisted_limit_bytes"] == 227_564
+
+
+def test_sample_failure_details_are_bounded_but_all_violations_are_retained(monkeypatch, tmp_path) -> None:
+    healthy = benchmark._canonical_bundle(tmp_path / "reference", benchmark.generate_fixture())
+    observed = []
+
+    def _fault(root, fixture):
+        observed.append(root.name)
+        result = dict(healthy)
+        if root.name == "allocation":
+            result["retained_bytes"] += 1
+        else:
+            result["mismatch_count"] = 1
+            result["mismatch_samples"] = ["synthetic_sample_mismatch"]
+        return result
+
+    monkeypatch.setattr(benchmark, "_canonical_bundle", _fault)
+    receipt = benchmark.run_profile("canonical", warmups=5, repetitions=30)
+
+    assert observed == [*(f"sample-{index:04d}" for index in range(35)), "allocation"]
+    checks = receipt["sample_checks"]
+    assert checks["counts"] == {"warmup": 5, "timing": 30, "allocation": 1}
+    assert checks["failed_count"] == 36
+    assert [(row["phase"], row["index"]) for row in checks["failure_samples"]] == [
+        *(("warmup", index) for index in range(5)),
+        *(("timing", index) for index in range(5)),
+    ]
+    assert all(row["violations"] == ["bounded_shadow_comparison"] for row in checks["failure_samples"])
+    assert set(checks["violations"]) == {"bounded_shadow_comparison", "canonical_persisted_bytes"}
+    assert receipt["violations"] == checks["violations"]
+    assert receipt["space"]["retained_bytes"] == healthy["retained_bytes"]
+    assert benchmark.benchmark_exit_code(receipt) == 1
+
+
+def test_sample_validation_is_outside_measured_timing() -> None:
+    clock = {"wall": 0, "cpu": 0}
+
+    class Evidence(dict):
+        def __getitem__(self, key):
+            clock["wall"] += 10_000
+            clock["cpu"] += 10_000
+            return super().__getitem__(key)
+
+    def action(root):
+        clock["wall"] += 10
+        clock["cpu"] += 3
+        return Evidence(
+            compressed_blob_bytes=1, manifest_bytes=2, compact_receipt_bytes=3,
+            cache_metadata_bytes=4, retained_bytes=10, mismatch_count=0, mismatch_samples=[],
+        )
+
+    from unittest.mock import patch
+
+    with patch.object(benchmark.time, "perf_counter_ns", lambda: clock["wall"]), \
+         patch.object(benchmark.time, "process_time_ns", lambda: clock["cpu"]):
+        wall, cpu, peak, _, checks = benchmark._measure(
+            action, warmups=1, repetitions=3, measure_allocation=False,
+        )
+
+    assert wall["samples"] == [10, 10, 10]
+    assert cpu["samples"] == [3, 3, 3]
+    assert peak == 0
+    assert checks["counts"] == {"warmup": 1, "timing": 3, "allocation": 0}
+    assert checks["violations"] == []
+
+
+def test_allocation_cancellation_stops_profiler_and_does_not_publish_receipt(monkeypatch, tmp_path) -> None:
+    healthy = benchmark._canonical_bundle(tmp_path / "reference", benchmark.generate_fixture())
+    profiler_calls = []
+
+    def action(root, fixture):
+        if root.name == "allocation":
+            raise KeyboardInterrupt
+        return dict(healthy)
+
+    monkeypatch.setattr(benchmark, "_canonical_bundle", action)
+    monkeypatch.setattr(benchmark.tracemalloc, "start", lambda: profiler_calls.append("start"))
+    monkeypatch.setattr(benchmark.tracemalloc, "stop", lambda: profiler_calls.append("stop"))
+    output = tmp_path / "receipt.json"
+    with pytest.raises(KeyboardInterrupt):
+        benchmark.main(["--profile", "canonical", "--output", str(output)])
+
+    assert profiler_calls == ["start", "stop"]
+    assert not output.exists()

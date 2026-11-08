@@ -290,6 +290,12 @@ evidence and are not source-release artifacts. The only profile, `canonical`, ex
 compact receipt publication, seal, durability cleanup, and blob-only resolution.
 It gates deterministic fixture integrity, retained bytes, Python allocation,
 cleanup counts, and resolved bytes; timing is host-specific diagnostic evidence.
+Every warmup, timed sample, and allocation sample is checked independently outside
+its measurement interval; a failure in any sample makes the receipt fail. The
+`sample_checks` summary counts every checked and failed sample and retains the
+first ten failures with their phase and zero-based index within that phase. Space
+limits apply per sample, without adding bytes across independent directories;
+`space` continues to describe the last timed sample.
 
 To measure the current canonical position projector and the real SQLite full-
 replay writer on deterministic synthetic data:

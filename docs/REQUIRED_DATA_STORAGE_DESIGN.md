@@ -306,7 +306,14 @@ Minimum focused evidence:
   counts the blob plus required receipt/manifest metadata as retained bytes;
 - formal canonical acceptance enforces deterministic fixture integrity,
   bounded retained bytes, bounded Python allocation, exact cleanup counts, and
-  blob-only resolution; timing is reported but is not a cross-host gate.
+  blob-only resolution; timing is reported but is not a cross-host gate;
+- correctness and retained-byte limits apply independently to every warmup,
+  timed sample, and allocation sample, with checks outside measurement intervals.
+  Any sample violation fails acceptance, even if later samples succeed.
+  `sample_checks` counts all samples and failures and retains the first ten
+  failed-sample details with phase and zero-based phase-local index. The legacy
+  `space` field describes the last timed sample; independent sample bytes are
+  never summed into that sample's limit.
 
 After focused tests, run Ruff, dependency-graph validation if imports change,
 the relevant tick/research integration tests, and the full project test suite.
