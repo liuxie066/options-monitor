@@ -88,6 +88,59 @@ def test_notification_conflicting_conversation_reference_is_not_visible(tmp_path
     assert response["data"]["events"] == []
 
 
+@pytest.mark.parametrize("mode", ["invalid", "puts", "combo"])
+def test_rank_rejects_invalid_mode_before_reading_snapshot(monkeypatch, tmp_path, mode):
+    from src.application.agent_tools import candidate_rank_impl
+
+    reads = []
+
+    def forbidden_snapshot(*args, **kwargs):
+        reads.append(True)
+        raise AssertionError("invalid mode must be rejected before snapshot access")
+
+    monkeypatch.setattr(candidate_rank_impl, "_snapshot", forbidden_snapshot)
+    response = execute_tool("candidate_rank_explain", {
+        "runtime_root": str(tmp_path), "account": "lx", "mode": mode,
+    })
+    assert response["ok"] is False
+    assert response["error"]["code"] == "INPUT_ERROR"
+    assert "mode" in response["error"]["message"]
+    assert all(value in response["error"]["hint"] for value in ("all", "put", "call"))
+    assert reads == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("mode,expected", [
+    (None, ["put", "call"]), ("all", ["put", "call"]),
+    ("put", ["put"]), ("call", ["call"]), (" PUT ", ["put"]), (" Call ", ["call"]),
+])
+def test_rank_valid_modes_keep_recorded_candidate_order(tmp_path, mode, expected):
+    seal_opening_candidate_fixture(tmp_path, run_id="run", accepted_rows=[
+        {"symbol": "NVDA", "contract_symbol": "PUT-A", "mode": "put"},
+        {"symbol": "NVDA", "contract_symbol": "PUT-B", "mode": "put"},
+        {"symbol": "NVDA", "contract_symbol": "CALL-A", "mode": "call"},
+    ])
+    query = {"runtime_root": str(tmp_path), "account": "lx"}
+    if mode is not None:
+        query["mode"] = mode
+    response = execute_tool("candidate_rank_explain", query)
+    assert response["ok"], response
+    groups = response["data"]["groups"]
+    assert [group["mode"] for group in groups] == expected
+    contracts = {"put": ["PUT-A", "PUT-B"], "call": ["CALL-A"]}
+    for group in groups:
+        assert [row["contract_symbol"] for row in group["ranked"]] == contracts[group["mode"]]
+
+
+@pytest.mark.parametrize("mode", ["put", "call"])
+def test_rank_valid_mode_preserves_missing_snapshot_error(tmp_path, mode):
+    response = execute_tool("candidate_rank_explain", {
+        "runtime_root": str(tmp_path), "account": "lx", "mode": mode,
+    })
+    assert response["ok"] is False
+    assert response["error"]["code"] == "DEPENDENCY_MISSING"
+
+
 @pytest.mark.parametrize("counts,top_n", [((3, 3), 1), ((1, 3), 2), ((3, 1), 2),
                                             ((0, 5), 2), ((5, 0), 2), ((0, 0), 2)])
 @pytest.mark.parametrize("limit", [None, 4])

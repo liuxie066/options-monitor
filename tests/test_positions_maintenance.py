@@ -723,6 +723,73 @@ def test_position_maintenance_projection_refresh_failure_stops_before_load_or_wr
         )
 
 
+@pytest.mark.parametrize("position_side", ["long", "short"])
+@pytest.mark.parametrize("explicit_close_type", [False, True])
+def test_position_maintenance_uses_final_close_after_a_partial_broker_close(
+    monkeypatch, tmp_path: Path, position_side: str, explicit_close_type: bool,
+) -> None:
+    from domain.domain.ledger.position_fields import EXPIRE_AUTO_CLOSE, parse_exp_to_ms
+    from src.application.ledger import api
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
+    from src.application.positions import maintenance as mod
+    from src.application.trades.normalizer import NormalizedTradeDeal
+
+    quote_calls = _forbid_assignment_quote_fetch(monkeypatch, mod)
+    sqlite_path = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
+    repo = SQLiteOptionPositionsRepository(sqlite_path)
+    for effect in ("open", "close"):
+        closing = effect == "close"
+        raw = {}
+        if closing and explicit_close_type:
+            raw["close_type"] = "sell_to_close" if position_side == "long" else "buy_to_close"
+        api.record_normalized_trade_event(repo, NormalizedTradeDeal(
+            broker="富途", futu_account_id="synthetic-account", internal_account="lx",
+            deal_id=f"{position_side}-{effect}", order_id=f"{position_side}-{effect}-order",
+            symbol="TIGR", option_type="put",
+            side=("sell" if position_side == "long" else "buy") if closing
+                 else ("buy" if position_side == "long" else "sell"),
+            position_effect=effect, contracts=1 if closing else 2,
+            price=0.2 if closing else 1.0, strike=6, multiplier=100, multiplier_source="broker",
+            expiration_ymd="2026-05-22", currency="USD",
+            trade_time_ms=parse_exp_to_ms("2026-05-21" if closing else "2026-05-20"),
+            raw_payload=raw,
+        ))
+    lot_id = repo.list_position_lots()[0]["record_id"]
+    data_config = tmp_path / "data.json"
+    data_config.write_text(json.dumps({"option_positions": {"sqlite_path": str(sqlite_path)}}))
+    kwargs = dict(
+        base=tmp_path,
+        cfg={"market": "US", "portfolio": {"data_config": str(data_config), "broker": "富途"},
+             "notifications": {"enabled": False},
+             "option_positions": {"auto_close": {"grace_days": 1, "max_close": 5,
+                                                   "receipt": {"enabled": False}}}},
+        account="lx", broker="富途", report_dir=tmp_path / "reports",
+        as_of_ms=parse_exp_to_ms("2026-05-25"), dry_run=False, send_receipt=False,
+    )
+    result = mod.run_expired_position_maintenance_for_account(**kwargs)
+    reader = SQLiteOptionPositionsRepository(sqlite_path)
+    fields = reader.get_record_fields(lot_id)
+    events = reader.list_trade_events()
+    assert result["receipt"]["reason"] == "skipped_no_send"
+    assert result["positions_checked"] == 1
+    if position_side == "short":
+        assert result["skipped_review_required"] == 1
+        assert result["applied_closed"] == 0 and result["errors"] == []
+        assert fields["status"] == "open" and fields["contracts_open"] == 1
+        assert len(events) == 2
+    else:
+        assert fields["status"] == "close" and fields["contracts_open"] == 0
+        assert len(events) == 3
+        assert fields["last_event_id"] == events[-1]["event_id"]
+        assert events[-1]["raw_payload"]["close_type"] == EXPIRE_AUTO_CLOSE
+        assert result["applied_closed"] == 1
+        assert result["errors"] == []
+    retry = mod.run_expired_position_maintenance_for_account(**kwargs)
+    assert retry["applied_closed"] == 0 and retry["errors"] == []
+    assert reader.list_trade_events() == events
+    assert quote_calls == []
+
+
 def test_position_maintenance_attaches_receipt_after_apply(monkeypatch, tmp_path: Path) -> None:
     from src.application.positions import maintenance as mod
 

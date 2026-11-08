@@ -28,7 +28,16 @@ def _as_int(value: Any, *, default: int, low: int, high: int) -> int:
 
 def _mode(value: Any) -> str:
     mode = str(value or "all").strip().lower()
-    return mode if mode == "all" else normalize_strategy_mode(mode)
+    if mode == "all":
+        return mode
+    try:
+        return normalize_strategy_mode(mode)
+    except ValueError as exc:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"unsupported candidate strategy mode: {mode}",
+            hint="Use mode all, put or call.",
+        ) from exc
 
 
 def _snapshot(

@@ -12,7 +12,7 @@ from domain.domain.ledger.position_fields import (
 )
 from domain.domain.ledger.identity import ContractKey, position_key_for
 from domain.domain.option_position_identity import normalize_side
-from domain.domain.trade_contract_identity import canonical_contract_symbol
+from domain.domain.trade_contract_identity import canonical_contract_symbol, derive_position_side
 from src.application.ledger.api import (
     lot_id_for_open_event,
     valid_void_target_event_id,
@@ -237,35 +237,88 @@ def _event_matches_lot(event: dict[str, object], *, lot_id: str, fields: dict[st
     )
 
 
+def _event_position_key(event: dict[str, object]) -> str | None:
+    side = str(event.get("position_side") or event.get("side") or "").strip().lower()
+    if side not in {"long", "short"}:
+        side = derive_position_side(event.get("position_effect") or event.get("event_type"), side)
+    if not side:
+        return None
+    return _canonical_position_key_from_fields({**event, "position_side": side})
+
+
+def _history_event_matches_lot(
+    event: dict[str, object], *, lot_id: str, fields: dict[str, object],
+    legacy_lot_ids_by_position_key: dict[str, set[str]],
+) -> bool:
+    # Voids belong to their target event; the history builder resolves that link.
+    if event.get("event_type") == "void":
+        return False
+    payload = _event_payload(event)
+    lot_refs = {
+        str(source.get(key) or "").strip()
+        for source in (event, payload)
+        for key in ("record_id", "target_lot_id", "lot_record_id", "lot_id")
+        if str(source.get(key) or "").strip()
+    }
+    if event.get("event_type") == "open":
+        lot_refs.add(lot_id_for_open_event(event))
+    # Explicit lot identity is authoritative, even when the contract is shared.
+    if lot_refs:
+        return lot_refs == {lot_id}
+    source_event_id = str(fields.get("open_event_id") or "").strip()
+    event_refs = {
+        str(source.get(key) or "").strip()
+        for source in (event, payload)
+        for key in ("close_target_source_event_id", "adjust_target_source_event_id", "target_event_id")
+        if str(source.get(key) or "").strip()
+    }
+    if event_refs:
+        return event_refs == {source_event_id}
+    # Unbound legacy events need a complete position identity and one possible lot.
+    position_key = _event_position_key(event)
+    return bool(position_key and legacy_lot_ids_by_position_key.get(position_key) == {lot_id})
+
+
 def build_lot_event_history(repo, *, base: Path, lot_id: str) -> list[dict[str, object]]:
     _ = base
     requested_lot_id = str(lot_id or "").strip()
     if not requested_lot_id:
         raise ValueError("record_id is required")
+    lots = list_position_lot_snapshots(repo)
     current = next(
-        (
-            item
-            for item in list_position_lot_snapshots(repo)
-            if str(item.get("record_id") or "").strip() == requested_lot_id
-        ),
+        (item for item in lots if str(item.get("record_id") or "").strip() == requested_lot_id),
         None,
     )
-    fields = current.get("fields") or {} if current is not None else {}
-    if not isinstance(fields, dict):
-        fields = {}
+    fields = dict(_lot_fields(current)) if current is not None else {}
     events = trade_event_log(repo)
-    matched_ids = {str(event["event_id"]) for event in events
-                   if requested_lot_id in _event_record_refs(event)}
+    legacy_lot_ids_by_position_key: dict[str, set[str]] = {}
+    for item in lots:
+        position_key = _canonical_position_key_from_fields(_lot_fields(item))
+        if position_key:
+            legacy_lot_ids_by_position_key.setdefault(position_key, set()).add(str(item["record_id"]))
+    # Voided openings still count: their absence from the projection is not unique attribution.
+    for event in events:
+        if event.get("event_type") != "open":
+            continue
+        opening_lot_id = lot_id_for_open_event(event)
+        position_key = _event_position_key(event)
+        if position_key:
+            legacy_lot_ids_by_position_key.setdefault(position_key, set()).add(opening_lot_id)
+        if opening_lot_id == requested_lot_id:
+            fields.setdefault("open_event_id", event["event_id"])
+    matched_ids = {
+        str(event["event_id"]) for event in events
+        if _history_event_matches_lot(
+            event, lot_id=requested_lot_id, fields=fields,
+            legacy_lot_ids_by_position_key=legacy_lot_ids_by_position_key,
+        )
+    }
     matched_ids.update(str(event["event_id"]) for event in events
                        if valid_void_target_event_id(event) in matched_ids)
     history = [
-        _event_to_history_row(event, fallback_lot_id=lot_id)
+        _event_to_history_row(event, fallback_lot_id=requested_lot_id)
         for event in events
-        if (
-            _event_matches_lot(event, lot_id=requested_lot_id, fields=fields)
-            if current is not None
-            else str(event["event_id"]) in matched_ids
-        )
+        if str(event["event_id"]) in matched_ids
     ]
     if not history:
         raise ValueError(f"position lot or event history not found: {lot_id}")

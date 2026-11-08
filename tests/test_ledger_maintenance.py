@@ -16,6 +16,31 @@ import src.application.ledger.repository as ledger_repository
 import src.application.ledger.writer as ledger_writer
 
 
+@pytest.mark.parametrize("fields", [
+    {"close_event_ids": ["partial", "final"], "last_event_id": "final"},
+    {"last_event_id": "final"},
+    {"close_event_ids": ["partial", "final"]},
+    {"close_event_ids": ["partial", "final"], "last_event_id": "later-adjustment"},
+    {"close_type": EXPIRE_AUTO_CLOSE},
+], ids=["full", "tail-only", "legacy-ids", "non-closing-tail", "legacy-flat"])
+def test_lot_close_type_uses_the_final_close_and_preserves_legacy_fields(fields):
+    from types import SimpleNamespace
+    from src.application.ledger.maintenance import _lot_close_type
+
+    reads = []
+
+    def list_events():
+        reads.append(True)
+        return [
+            {"event_id": "partial", "raw_payload": {"close_type": "sell_to_close"}},
+            {"event_id": "final", "raw_payload": {"close_type": EXPIRE_AUTO_CLOSE}},
+            {"event_id": "later-adjustment", "raw_payload": {}},
+        ]
+
+    assert _lot_close_type(SimpleNamespace(list_trade_events=list_events), fields) == EXPIRE_AUTO_CLOSE
+    assert len(reads) == (0 if "close_type" in fields else 1)
+
+
 def _seed_open_lot_event(
     repo: ledger_repository.SQLiteOptionPositionsRepository,
     *,
