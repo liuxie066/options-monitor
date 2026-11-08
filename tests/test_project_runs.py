@@ -3,6 +3,7 @@ from __future__ import annotations
 from src.application import query_cursor
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -251,6 +252,111 @@ def test_query_keeps_root_descriptor_after_path_replacement(tmp_path, monkeypatc
                                scope={"market": "us", "accounts": ["lx"], "config_revision": "a"},
                                run_id="run-1", account="lx")
     assert replaced and len(result["entries"]) == 2
+
+
+def _publish_zero_scope_bundle(root: Path, config_path: Path) -> tuple[dict, Path]:
+    from src.application.candidate_snapshot_manifest import publish_candidate_snapshot_manifest
+    from src.application.strategy_scan_status import publish_strategy_scan_status_index
+    from src.application.tick_run_workspace import publish_account_run_config
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["portfolio"]["account"] = "lx"
+    config["symbols"] = [{"symbol": "NVDA", "broker": "US",
+                          "sell_put": {"enabled": False}, "sell_call": {"enabled": False},
+                          "combo_yield": {"enabled": False}}]
+    config.pop("wheel", None)
+    authority = publish_account_run_config(base=root, run_id="run-1", account="lx", config=config)
+    account_dir = root / "output_runs/run-1/accounts/lx"
+    publish_strategy_scan_status_index(
+        report_dir=account_dir, run_id="run-1", account="lx",
+        account_config_sha256=authority.account_config_sha256, expected=[],
+        run_mode={"scan_mode": "standard", "executable": True},
+    )
+    manifest = publish_candidate_snapshot_manifest(
+        base=root, run_id="run-1", account="lx", strategy_policy_sha256="b" * 64,
+        sealed_at="2026-08-12T01:00:01Z",
+    )
+    assert manifest["completion_reason"] == "no_applicable_scope"
+    assert manifest["markets"] == []
+    metrics_path = account_dir / "state/account_metrics.json"
+    metrics_path.write_text(json.dumps({
+        "run_id": "run-1", "account": "lx", "markets_to_run": ["US"],
+        "account_config_sha256": authority.account_config_sha256,
+        "as_of_utc": "2026-08-12T01:00:02Z", "ran_scan": True, "ran_pipeline": True,
+    }), encoding="utf-8")
+    return manifest, metrics_path
+
+
+def test_zero_scope_bundle_uses_matching_run_metrics_without_exposing_them(tmp_path, example_config_path):
+    from src.application.agent_tools import project_runs
+    from src.application.candidate_snapshot_manifest import load_candidate_snapshot_bundle
+
+    manifest, metrics_path = _publish_zero_scope_bundle(tmp_path, example_config_path)
+    assert load_candidate_snapshot_bundle(base=tmp_path, run_id="run-1", account="lx")["owners"] == {}
+    assert project_runs.load_run_metrics(**_kwargs(tmp_path))["market"] == "US"
+    before = _hashes(tmp_path)
+    result = load_run_bundle(**_kwargs(tmp_path))
+    assert result["manifest"]["scanned"] is False
+    assert result["manifest"]["outcomes"] == {
+        "usable_scan_result": False, "pipeline_completed_successfully": None,
+    }
+    assert result["scope"]["market"] == "US"
+    assert list(result["resources"]) == [manifest["status_index"]["relpath"]]
+    assert result["bytes_read"] == sum(len(raw) for raw in result["resources"].values()) + len(
+        (metrics_path.parent / "candidate_snapshot_manifest.v4.json").read_bytes()
+    ) + len(metrics_path.read_bytes())
+    record = project_runs.load_run_record(**_kwargs(tmp_path))
+    assert record["scanned"] is False
+    assert record["resource_categories"] == ["candidate_snapshot", "status_index", "account_diagnostics"]
+    assert _hashes(tmp_path) == before
+
+
+@pytest.mark.parametrize("change", [
+    {"run_id": "other-run"}, {"account": "sy"}, {"markets_to_run": []},
+    {"markets_to_run": ["HK"]}, {"markets_to_run": ["US", "HK"]},
+    {"account_config_sha256": None}, {"account_config_sha256": "c" * 64},
+    {"as_of_utc": "not-a-time"}, {"ran_scan": "true"},
+])
+def test_zero_scope_bundle_rejects_conflicting_metrics(tmp_path, example_config_path, change):
+    from src.application.agent_tools import project_runs
+
+    _, metrics_path = _publish_zero_scope_bundle(tmp_path, example_config_path)
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    metrics_path.write_text(json.dumps({**metrics, **change}), encoding="utf-8")
+    before = _hashes(tmp_path)
+    for reader in (load_run_bundle, project_runs.load_run_record):
+        with pytest.raises(ProjectReaderError):
+            reader(**_kwargs(tmp_path))
+    assert _hashes(tmp_path) == before
+
+
+def test_zero_scope_corrupt_bundle_is_rejected_before_metrics_read(tmp_path, monkeypatch, example_config_path):
+    from src.application.agent_tools import project_runs
+
+    manifest, _ = _publish_zero_scope_bundle(tmp_path, example_config_path)
+    index_path = tmp_path / "output_runs/run-1/accounts/lx" / manifest["status_index"]["relpath"]
+    index_path.write_bytes(index_path.read_bytes() + b" ")
+    calls = []
+    original = project_runs.load_run_metrics
+
+    def counted(**kwargs):
+        calls.append(kwargs)
+        return original(**kwargs)
+
+    monkeypatch.setattr(project_runs, "load_run_metrics", counted)
+    with pytest.raises(ProjectReaderError, match="bundle_invalid"):
+        load_run_bundle(**_kwargs(tmp_path))
+    assert calls == []
+
+
+def test_zero_scope_metrics_share_bundle_byte_budget(tmp_path, example_config_path):
+    manifest, _ = _publish_zero_scope_bundle(tmp_path, example_config_path)
+    state = tmp_path / "output_runs/run-1/accounts/lx/state"
+    budget = len((state / "candidate_snapshot_manifest.v4.json").read_bytes()) + len(
+        (tmp_path / "output_runs/run-1/accounts/lx" / manifest["status_index"]["relpath"]).read_bytes()
+    )
+    with pytest.raises(ProjectReaderError, match="bundle_too_large"):
+        load_run_bundle(**_kwargs(tmp_path), max_bytes=budget)
 
 
 def test_empty_manifest_cannot_claim_requested_market(tmp_path):

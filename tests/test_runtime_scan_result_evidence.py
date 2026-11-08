@@ -1,7 +1,7 @@
 """Result availability uses verified scoped evidence, never attempt metadata.
 
-Fixtures serialize canonical bytes directly; immutable production publishers are
-not exercised by these reader tests.
+Scope fixtures serialize canonical bytes directly; zero-scope regressions also
+exercise immutable production publishers in isolated runtime roots.
 """
 from __future__ import annotations
 
@@ -153,6 +153,61 @@ def _public(tool: str, config: Path) -> tuple[dict, dict]:
     response = tools.call_read_tool(tool, payload, allowed_tools=(tool,))
     assert response["ok"], response
     return response, tools.model_observation(tool, response)
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("scanned_only", [False, True])
+def test_runtime_runs_reads_verified_zero_scope_without_claiming_scan(
+    tmp_path, monkeypatch, example_config_path, explicit, scanned_only,
+):
+    from test_project_runs import _hashes, _publish_zero_scope_bundle
+    from src.application.tool_execution import execute_tool
+
+    _publish_zero_scope_bundle(tmp_path, example_config_path)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    payload = {"action": "scoped", "account": "lx", "config_path": str(example_config_path),
+               "scanned_only": scanned_only}
+    if explicit:
+        payload["run_id"] = "run-1"
+    before = _hashes(tmp_path)
+    response = execute_tool("runtime_runs", payload)
+    assert response["ok"], response
+    data = response["data"]
+    assert data["unverified_newer_count"] == 0
+    assert len(data["runs"]) == int(not scanned_only)
+    if not scanned_only:
+        row = data["runs"][0]
+        assert (row["run_id"], row["account"], row["market"]) == ("run-1", "lx", "US")
+        assert row["scanned"] is False
+        assert row["outcomes"] == {"usable_scan_result": False, "pipeline_completed_successfully": None}
+        assert row["resource_categories"] == ["candidate_snapshot", "status_index", "account_diagnostics"]
+    assert _hashes(tmp_path) == before
+
+
+@pytest.mark.parametrize("corruption", ["metrics-account", "metrics-config", "index"])
+def test_runtime_runs_does_not_salvage_invalid_zero_scope_record(
+    tmp_path, monkeypatch, example_config_path, corruption,
+):
+    from test_project_runs import _hashes, _publish_zero_scope_bundle
+    from src.application.tool_execution import execute_tool
+
+    manifest, metrics_path = _publish_zero_scope_bundle(tmp_path, example_config_path)
+    if corruption == "index":
+        target = tmp_path / "output_runs/run-1/accounts/lx" / manifest["status_index"]["relpath"]
+        target.write_bytes(target.read_bytes() + b" ")
+    else:
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        metrics["account" if corruption == "metrics-account" else "account_config_sha256"] = "sy"
+        metrics_path.write_text(json.dumps(metrics), encoding="utf-8")
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    payload = {"action": "scoped", "account": "lx", "config_path": str(example_config_path)}
+    before = _hashes(tmp_path)
+    direct = execute_tool("runtime_runs", {**payload, "run_id": "run-1"})
+    assert direct["ok"] is False
+    listed = execute_tool("runtime_runs", payload)
+    assert listed["ok"] and listed["data"]["runs"] == []
+    assert listed["data"]["unverified_newer_count"] == 1
+    assert _hashes(tmp_path) == before
 
 
 @pytest.mark.parametrize("scanned,pipeline", [(True, False), (False, False), (True, True)])
