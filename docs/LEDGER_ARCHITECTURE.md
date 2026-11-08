@@ -1403,6 +1403,8 @@ CNY 金额继续通过读取校验。上述订单证据路径修正后必须独�
 - 当前时点报价刷新失败时返回明确 quote status；
 - 缺少费用、汇率、行情或 lifecycle evidence 时保留 partial / missing，不把未知值写成零。
 
+`option_positions_read` 的 `assigned-stock` 当前查询在刷新前读取一份 canonical 账本输入，并在刷新后的股票估值中复用；成功取得报价后，以刷新完成后的当前时间检查报价。刷新期间其他写方新增的交易或股票事件留给下一次查询读取，不混入本轮股票视图。显式历史 `as_of_ms` 仍跳过实时刷新，未来报价仍按既有截止规则拒绝；Wheel 读取继续使用本轮入口的原始截止时间。`build_assigned_stock_view` 可接收已读取的 `LedgerPerformanceInputs`，未提供时保留自行读取的行为。
+
 常用只读入口：
 
 ```bash

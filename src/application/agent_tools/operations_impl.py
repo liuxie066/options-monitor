@@ -23,6 +23,7 @@ from src.application.ledger.api import (
     normalize_position_lot_snapshot,
     trade_event_page,
 )
+from src.application.performance.adapters import load_ledger_performance_inputs
 from src.application.positions.assigned_stock_view import build_assigned_stock_view
 from src.application.trade_time_format import add_trade_time_beijing
 from src.application.payload_helpers import as_dict as _dict
@@ -722,12 +723,14 @@ def _assigned_stock_action(
     )
 
     read_as_of_ms = as_of_ms or int(datetime.now(timezone.utc).timestamp() * 1000)
+    ledger_inputs = load_ledger_performance_inputs(repo)
     report = build_assigned_stock_view(
         repo,
         account=account,
         broker=broker,
         quote_snapshots=quote_snapshots,
         as_of_ms=read_as_of_ms,
+        ledger_inputs=ledger_inputs,
     )
     selected_report_rows = [
         row
@@ -787,7 +790,9 @@ def _assigned_stock_action(
                         account=account,
                         broker=broker,
                         quote_snapshots=quote_snapshots,
-                        as_of_ms=read_as_of_ms,
+                        # Current quotes use the post-fetch clock on the original ledger inputs.
+                        as_of_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+                        ledger_inputs=ledger_inputs,
                     )
                     selected_report_rows = [
                         row
