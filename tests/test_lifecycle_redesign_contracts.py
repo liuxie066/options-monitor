@@ -778,8 +778,25 @@ def test_migration_inventory_blocks_v2_without_timing_policy(
     )
 
 
+def _migration_stock_evidence(*, case_id: str, evidence_id: str, deal_id: str, observed_at_ms: int) -> dict:
+    return {
+        "evidence_id": evidence_id, "case_id": case_id,
+        "source_type": "futu_broker_deal", "source_event_id": f"futu:lx:1001:{deal_id}",
+        "evidence_type": "stock_settlement_leg", "account": "lx", "futu_account_id": "1001",
+        "symbol": "NVDA", "side": "buy", "shares": 100, "stock_qty": 100,
+        "price": 100, "stock_price": 100, "event_time_ms": observed_at_ms,
+        "trade_time_ms": observed_at_ms,
+        "raw": {"internal_account": "lx", "futu_account_id": "1001", "deal_id": deal_id,
+                "symbol": "NVDA", "side": "buy", "contracts": 100, "price": 100,
+                "trade_time_ms": observed_at_ms,
+                "raw_payload": {"futu_account_id": "1001", "trd_acc_id": "1001", "deal_id": deal_id}},
+    }
+
+
+@pytest.mark.parametrize("evidence_shape", ["option_only", "stock_only", "option_and_stock", "two_options"])
 def test_migration_upgrades_unique_legacy_case_with_bridge(
     tmp_path: Path,
+    evidence_shape: str,
 ) -> None:
     repo = SQLiteOptionPositionsRepository(
         tmp_path / "ledger.sqlite3"
@@ -819,27 +836,25 @@ def test_migration_upgrades_unique_legacy_case_with_bridge(
             "status": "waiting_settlement_evidence",
         }
     )
-    assert repo.insert_trade_lifecycle_evidence_once(
-        {
-            "evidence_id": "legacy-anchor-1",
-            "case_id": legacy_id,
-            "source_type": "futu_broker_deal",
-            "source_event_id": (
-                "futu:lx:1001:legacy-option-close-1"
-            ),
-            "evidence_type": "option_zero_price_close",
-            "account": "lx",
-            "futu_account_id": "1001",
-            "symbol": "NVDA",
-            "option_type": "put",
-            "position_side": "short",
-            "strike": 100,
-            "expiration_ymd": EXPIRATION_YMD,
-            "contracts": 1,
-            "price": 0,
-            "event_time_ms": observed_at_ms,
-        }
-    )
+    option_evidence = {
+        "evidence_id": "legacy-anchor-1", "case_id": legacy_id,
+        "source_type": "futu_broker_deal", "source_event_id": "futu:lx:1001:legacy-option-close-1",
+        "evidence_type": "option_zero_price_close", "account": "lx", "futu_account_id": "1001",
+        "symbol": "NVDA", "option_type": "put", "position_side": "short", "strike": 100,
+        "expiration_ymd": EXPIRATION_YMD, "contracts": 1, "price": 0, "event_time_ms": observed_at_ms,
+    }
+    if evidence_shape != "stock_only":
+        assert repo.insert_trade_lifecycle_evidence_once(option_evidence)
+    if evidence_shape == "two_options":
+        assert repo.insert_trade_lifecycle_evidence_once({
+            **option_evidence, "evidence_id": "legacy-anchor-2",
+            "source_event_id": "futu:lx:1001:legacy-option-close-2",
+        })
+    if evidence_shape in {"stock_only", "option_and_stock"}:
+        assert repo.insert_trade_lifecycle_evidence_once(_migration_stock_evidence(
+            case_id=legacy_id, evidence_id="legacy-stock-1", deal_id="legacy-stock-close-1",
+            observed_at_ms=observed_at_ms,
+        ))
     legacy_policy = build_lifecycle_timing_policy(
         case_id=legacy_id,
         market="US",
@@ -867,6 +882,17 @@ def test_migration_upgrades_unique_legacy_case_with_bridge(
     inventory = build_lifecycle_migration_inventory(repo)
     target_key = f"lifecycle:{legacy_id}"
     row = _inventory_row(inventory, target_key)
+    if evidence_shape in {"stock_only", "two_options"}:
+        assert row["mapping_status"] == "needs_review", row["review_reason_codes"]
+        manifest = select_lifecycle_migration_targets(inventory, target_keys=[target_key])
+        with repo._optional_conn(None) as conn:
+            before_tables = tuple(conn.iterdump())
+        for apply_changes in (False, True):
+            with pytest.raises(ValueError, match="migration_needs_review"):
+                apply_lifecycle_migration_manifest(repo, manifest=manifest, apply_changes=apply_changes)
+            with repo._optional_conn(None) as conn:
+                assert tuple(conn.iterdump()) == before_tables
+        return
     assert row["mapping_status"] == "exact"
     canonical_case_id = row["legacy_upgrade"][
         "canonical_case"
@@ -898,14 +924,22 @@ def test_migration_upgrades_unique_legacy_case_with_bridge(
     bridges = repo.list_trade_lifecycle_evidence(
         case_id=canonical_case_id
     )
-    assert [item["evidence_type"] for item in bridges] == [
-        "migration_bridge"
-    ]
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    claims = repo.list_trade_lifecycle_source_consumptions()
+    assert {item["source_role"] for item in claims} == (
+        {"option_anchor", "stock_settlement"} if evidence_shape == "option_and_stock" else {"option_anchor"}
+    )
+    assert all(item["case_id"] == legacy_id for item in claims)
+    assert len(repo.list_trade_lifecycle_migration_receipts()) == 1
+    replayed = apply_lifecycle_migration_manifest(repo, manifest=manifest, apply_changes=True)
+    assert replayed["applied_count"] == 0 and replayed["status"] == "noop"
     anchor_facts = lifecycle_option_close_anchor_facts(
         repo,
         case_id=canonical_case_id,
     )
-    assert anchor_facts["status"] == "bridged"
+    assert anchor_facts["status"] == "bridged", anchor_facts["reason_codes"]
+    assert [item["evidence_type"] for item in bridges] == ["migration_bridge"]
+    assert bridges[0]["referenced_legacy_evidence_id"] == "legacy-anchor-1"
     assert anchor_facts["reason_codes"] == []
     assert len(anchor_facts["anchors"]) == 1
     assert anchor_facts["anchors"][0]["source_owner_case_id"] == legacy_id
@@ -1175,10 +1209,12 @@ def test_explicit_mapping_apply_rejects_source_drift(
 
 
 @pytest.mark.parametrize("prebound_policy", [False, True])
+@pytest.mark.parametrize("evidence_shape", ["option_only", "stock_only", "option_and_stock"])
 def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     prebound_policy: bool,
+    evidence_shape: str,
 ) -> None:
     repo = SQLiteOptionPositionsRepository(
         tmp_path / "ledger.sqlite3"
@@ -1245,19 +1281,20 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
             "raw": {"option_deal": option_raw},
         }
     )
-    assert repo.insert_trade_lifecycle_evidence_once(
-        {
-            "evidence_id": "bridge-option-evidence-1",
-            "case_id": legacy_case_id,
-            "source_type": "futu_trade_push",
-            "source_event_id": "bridge-option-deal-1",
-            "evidence_type": "option_zero_price_close",
-            "account": "lx",
-            "symbol": "NVDA",
-            "trade_time_ms": observed_at_ms,
-            "raw": option_raw,
-        }
-    )
+    if evidence_shape != "stock_only":
+        assert repo.insert_trade_lifecycle_evidence_once(
+            {
+                "evidence_id": "bridge-option-evidence-1",
+                "case_id": legacy_case_id,
+                "source_type": "futu_trade_push",
+                "source_event_id": "bridge-option-deal-1",
+                "evidence_type": "option_zero_price_close",
+                "account": "lx",
+                "symbol": "NVDA",
+                "trade_time_ms": observed_at_ms,
+                "raw": option_raw,
+            }
+        )
     policy = build_lifecycle_timing_policy(
         case_id=canonical_case_id,
         market="US",
@@ -1310,6 +1347,17 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
             }
         ],
     }
+    if evidence_shape == "stock_only":
+        mapping["rows"][0]["evidence_sources"] = []
+    if evidence_shape in {"stock_only", "option_and_stock"}:
+        assert repo.insert_trade_lifecycle_evidence_once(_migration_stock_evidence(
+            case_id=legacy_case_id, evidence_id="bridge-stock-evidence-1", deal_id="bridge-stock-deal-1",
+            observed_at_ms=observed_at_ms,
+        ))
+        mapping["rows"][0]["evidence_sources"].append({
+            "evidence_id": "bridge-stock-evidence-1", "source_key": "futu:lx:1001:bridge-stock-deal-1",
+            "source_role": "stock_settlement",
+        })
     if prebound_policy:
         assert repo.insert_trade_lifecycle_timing_policy_once(policy)
     before_event_count = len(repo.list_trade_events())
@@ -1341,6 +1389,17 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
     )
     target_key = f"lifecycle:{legacy_case_id}"
     row = _inventory_row(inventory, target_key)
+    if evidence_shape == "stock_only":
+        assert row["mapping_status"] == "needs_review", row["review_reason_codes"]
+        manifest = select_lifecycle_migration_targets(inventory, target_keys=[target_key])
+        with repo._optional_conn(None) as conn:
+            before_tables = tuple(conn.iterdump())
+        for apply_changes in (False, True):
+            with pytest.raises(ValueError, match="migration_needs_review"):
+                apply_lifecycle_migration_manifest(repo, manifest=manifest, apply_changes=apply_changes)
+            with repo._optional_conn(None) as conn:
+                assert tuple(conn.iterdump()) == before_tables
+        return
     assert row["mapping_status"] == "exact", row[
         "review_reason_codes"
     ]
@@ -1397,6 +1456,18 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
     assert repo.list_trade_lifecycle_allocations(
         case_id=canonical_case_id
     ) == []
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    anchor_facts = lifecycle_option_close_anchor_facts(repo, case_id=canonical_case_id)
+    assert anchor_facts["status"] == "bridged", anchor_facts["reason_codes"]
+    assert anchor_facts["reason_codes"] == [] and len(anchor_facts["anchors"]) == 1
+    claims = repo.list_trade_lifecycle_source_consumptions()
+    assert {item["source_role"] for item in claims} == (
+        {"option_anchor", "stock_settlement"} if evidence_shape == "option_and_stock" else {"option_anchor"}
+    )
+    assert all(item["case_id"] == legacy_case_id for item in claims)
+    assert len(repo.list_trade_lifecycle_migration_receipts()) == 1
+    replayed = apply_lifecycle_migration_manifest(repo, manifest=manifest, apply_changes=True)
+    assert replayed["applied_count"] == 0 and replayed["status"] == "noop"
 
     now_ms = observed_at_ms + 1
     live_model = lifecycle_case_read_model(
