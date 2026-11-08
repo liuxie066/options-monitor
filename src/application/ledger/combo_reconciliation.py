@@ -455,6 +455,22 @@ def _reconcile_with_repo(
         exposures=exposures, effective_now_ms=effective_now_ms)
     lot_facts = matched.pop("lot_facts")
     reactivatable_inference_ids = matched.pop("reactivatable_inference_ids")
+    existing_inference_ids = {str(item["inference_id"]) for item in existing}
+    for inference in matched["inferences"]:
+        # Classify new proposals before any write, using this round's clock.
+        # Existing rows retain their expiry and explicit revalidation lifecycle;
+        # the exact expiry instant is still valid, as in the repository owner.
+        if (
+            str(inference["inference_id"]) not in existing_inference_ids
+            and int(inference["proposal_expires_at_ms"]) < effective_now_ms
+        ):
+            matched["proposal_ready_count"] -= int(inference["status"] == "proposal_ready")
+            matched["ambiguous_count"] -= int(inference["status"] == "ambiguous")
+            inference.update({
+                "status": "expired_unresolved",
+                "decision_at_ms": effective_now_ms,
+                "decision_reason": "proposal_expired",
+            })
     inserted_count = 0
     reactivated_count = 0
     stale_expired_count = 0

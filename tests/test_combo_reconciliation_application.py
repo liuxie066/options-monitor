@@ -2,11 +2,14 @@ from __future__ import annotations
 from src.application.ledger import trade_attribution as ledger_attribution
 
 import json
+from copy import deepcopy
 from dataclasses import replace
 
 import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.combo_reconciliation import COMBO_PROPOSAL_TTL_MS
+from src.application.ledger.api import list_combo_pair_inferences
 from domain.domain.trade_contract_identity import derive_trade_side
 from domain.domain.trade_execution import execution_identity_from_input
 from src.application.ledger.combo_reconciliation import (
@@ -274,6 +277,68 @@ def test_application_reconcile_is_post_trade_and_persists_only_inference_state(
         {"strategy", "strategy_group_id", "leg_role"} & set(item["fields"])
         for item in repo.list_position_lots()
     )
+
+
+@pytest.mark.parametrize("offset_ms", [-1, 0, 1], ids=["before-expiry", "at-expiry", "expired"])
+@pytest.mark.parametrize("persist", [False, True], ids=["preview", "persist"])
+@pytest.mark.parametrize("ambiguous", [False, True], ids=["ready-pair", "ambiguous-pairs"])
+def test_first_reconcile_classifies_expired_proposals_before_persistence(
+    tmp_path, monkeypatch, offset_ms, persist, ambiguous,
+) -> None:
+    path = tmp_path / "option_positions.sqlite3"
+    repo = SQLiteOptionPositionsRepository(path)
+    for event in (_call_open(), _put_open()):
+        persist_trade_event_object(repo, event)
+    if ambiguous:
+        persist_trade_event_object(repo, _call_open("call-b-open", "call-b-lot", strike=120))
+    expires_at = BASE_TIME_MS + 2_000 + COMBO_PROPOSAL_TTL_MS
+    baseline = _reconcile(repo, effective_now_ms=expires_at, persist=False)
+    originals = {item["inference_id"]: item for item in baseline["inferences"]}
+    assert len(originals) == (2 if ambiguous else 1)
+    assert repo.list_combo_pair_inferences(account="lx") == []
+    events_before = repo.list_trade_events()
+    lots_before = repo.list_position_lots()
+    writes = []
+    original_upsert = repo.upsert_combo_pair_inference
+
+    def capture_upsert(inference, **kwargs):
+        writes.append(deepcopy(inference))
+        return original_upsert(inference, **kwargs)
+
+    monkeypatch.setattr(repo, "upsert_combo_pair_inference", capture_upsert)
+    now = expires_at + offset_ms
+    result = _reconcile(repo, effective_now_ms=now, persist=persist)
+    expired = offset_ms > 0
+    expected_status = "expired_unresolved" if expired else "ambiguous" if ambiguous else "proposal_ready"
+    expected_count = len(originals)
+    assert result["proposal_ready_count"] == (expected_count if not expired and not ambiguous else 0)
+    assert result["ambiguous_count"] == (expected_count if not expired and ambiguous else 0)
+    assert result["inserted_inference_count"] == (expected_count if persist else 0)
+    for item in result["inferences"]:
+        assert item["status"] == expected_status
+        assert item["proposal_expires_at_ms"] == expires_at
+        assert item["input_snapshot_hash"] == originals[item["inference_id"]]["input_snapshot_hash"]
+        if expired:
+            assert item["decision_reason"] == "proposal_expired"
+            assert item["decision_at_ms"] == now
+    # Capture the payload before the real SQLite upsert, so expiring it only
+    # after insertion cannot satisfy the regression.
+    assert [item["status"] for item in writes] == ([expected_status] * expected_count if persist else [])
+    reopened = SQLiteOptionPositionsRepository(path)
+    stored = reopened.list_combo_pair_inferences(account="lx")
+    assert len(stored) == (expected_count if persist else 0)
+    assert all(item["status"] == expected_status for item in stored)
+    ready = list_combo_pair_inferences(repo=reopened, account="lx", status="proposal_ready")
+    assert len(ready) == (expected_count if persist and not expired and not ambiguous else 0)
+    if persist and expired:
+        retried = _reconcile(reopened, effective_now_ms=now + 1)
+        assert retried["proposal_ready_count"] == 0
+        assert retried["ambiguous_count"] == 0
+        assert retried["inserted_inference_count"] == 0
+        assert reopened.list_combo_pair_inferences(account="lx") == stored
+    assert reopened.list_trade_events() == events_before
+    assert reopened.list_position_lots() == lots_before
+    assert reopened.list_strategy_group_identities(account="lx") == []
 
 
 def _rewrite_stored_snapshot(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.combo_reconciliation import COMBO_PROPOSAL_TTL_MS
 from domain.domain.trade_contract_identity import derive_trade_side
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_object
@@ -107,6 +108,48 @@ def _event(
             }
         },
     )
+
+
+@pytest.mark.parametrize("offset_ms", [-1, 0, 1], ids=["before-expiry", "at-expiry", "expired"])
+@pytest.mark.parametrize("mode", ["observe", "confirm", "auto"])
+def test_first_account_reconcile_never_publishes_expired_proposals_as_ready(
+    tmp_path, monkeypatch, offset_ms, mode,
+) -> None:
+    import src.application.trades.combo_reconciliation as module
+
+    path = tmp_path / "option_positions.sqlite3"
+    repo = SQLiteOptionPositionsRepository(path)
+    for event in _open_events():
+        persist_trade_event_object(repo, event)
+    reads = []
+
+    def read_exposures(**kwargs):
+        reads.append(kwargs)
+        return {"available": True, "complete": True, "delivery_available": True, "exposures": []}
+
+    monkeypatch.setattr(module, "read_combo_candidate_exposures", read_exposures)
+    now = BASE_TIME_MS + 2_000 + COMBO_PROPOSAL_TTL_MS + offset_ms
+    result = reconcile_account_post_trade_combos(
+        repo=repo, runtime_root=tmp_path, account="lx",
+        runtime_environment="opend:127.0.0.1:11111", mode=mode, effective_now_ms=now,
+    )
+    expired = offset_ms > 0
+    assert result["effective_now_ms"] == now
+    assert result["proposal_ready_count"] == (0 if expired else 1)
+    assert result["inserted_inference_count"] == 1
+    assert result["inferences"][0]["status"] == ("expired_unresolved" if expired else "proposal_ready")
+    assert reads and all(item["account"] == "lx" and item["market"] == "US" for item in reads)
+    reopened = SQLiteOptionPositionsRepository(path)
+    stored = reopened.list_combo_pair_inferences(account="lx")
+    assert len(stored) == 1
+    assert stored[0]["status"] == result["inferences"][0]["status"]
+    ready = reopened.list_combo_pair_inferences(account="lx", status="proposal_ready")
+    assert len(ready) == (0 if expired else 1)
+    if expired:
+        assert stored[0]["decision_reason"] == "proposal_expired"
+        assert stored[0]["decision_at_ms"] == now
+    assert len(reopened.list_trade_events()) == 2
+    assert reopened.list_strategy_group_identities(account="lx") == []
 
 
 def test_account_reconciler_reads_frozen_exposure_and_auto_adopts_strict_match(
