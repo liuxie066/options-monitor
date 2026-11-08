@@ -1733,6 +1733,13 @@ def _plan_explicit_legacy_bridge(
         **canonical_case,
         "futu_account_id": existing_futu or futu_account_id,
     }
+    option_sources = [
+        item for item in mapping.get("evidence_sources") or []
+        if isinstance(item, dict)
+        and str(item.get("source_role") or "").strip().lower() == "option_anchor"
+    ]
+    if len(option_sources) != 1:
+        review_reasons.add("explicit_option_anchor_count_invalid")
     bridge_evidence = [
         {
             "schema_version": "migration_bridge_evidence.v1",
@@ -1758,9 +1765,8 @@ def _plan_explicit_legacy_bridge(
             ),
             "allocating": False,
         }
-        for item in mapping.get("evidence_sources") or []
-        if isinstance(item, dict)
-        and str(item.get("evidence_id") or "").strip()
+        for item in option_sources
+        if str(item.get("evidence_id") or "").strip()
     ]
     return canonical_case_id, {
         "schema_version": "legacy_lifecycle_upgrade.v1",
@@ -2034,6 +2040,10 @@ def _plan_legacy_case_upgrade(
             "lifecycle_timing_policy_missing"
         )
         return None
+    option_evidence = [item for item in evidence if _migration_source_role(item) == "option_anchor"]
+    if len(option_evidence) != 1:
+        review_reasons.add("legacy_option_anchor_count_invalid")
+        return None
     symbol = str(
         lifecycle_case.get("symbol") or ""
     ).strip().upper()
@@ -2124,7 +2134,7 @@ def _plan_legacy_case_upgrade(
             ),
             "allocating": False,
         }
-        for item in evidence
+        for item in option_evidence
         if str(item.get("evidence_id") or "").strip()
     ]
     return {
