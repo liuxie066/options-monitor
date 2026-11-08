@@ -15,7 +15,10 @@ from domain.domain.ledger.cash_facts import broker_settlement_multiplier_evidenc
 from domain.domain.trade_contract_identity import derive_trade_side
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.writer import persist_trade_event_objects_atomically
-from src.application.wheel.read_model import build_wheel_read_model
+from src.application.wheel.read_model import (
+    build_assigned_stock_projection_from_rows,
+    build_wheel_read_model,
+)
 from src.application.wheel.scanning import run_wheel_put_scan
 from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
@@ -381,11 +384,35 @@ def _cc_lp_events(*, long_at: int = 1_100) -> tuple[TradeEvent, TradeEvent, Trad
     return call, put, assignment
 
 
+def _seed_independent_stock(repo, *, assigned_at_ms=200, multiplier=10, stock_key=None):
+    stock_open = replace(
+        _put_event(
+            event_id="independent-put-open", event_type="open", multiplier=multiplier,
+            raw_payload=_trusted_multiplier_payload("independent-put-open"),
+        ),
+        event_time_ms=100, lot_id="independent-put-lot",
+    )
+    stock_assignment = replace(
+        _put_event(
+            event_id="independent-put-assignment", event_type="assignment", multiplier=multiplier,
+            raw_payload={**_assignment_payload(multiplier), "target_lot_id": "independent-put-lot"},
+        ),
+        event_time_ms=assigned_at_ms, target_lot_id="independent-put-lot",
+    )
+    if stock_key is not None:
+        stock_open = replace(stock_open, contract_key=stock_key)
+        stock_assignment = replace(stock_assignment, contract_key=stock_key)
+    persist_trade_event_objects_atomically(repo, [stock_open, stock_assignment])
+    return "assigned-stock-independent-put-assignment"
+
+
 @pytest.mark.parametrize("batched", [False, True])
 def test_external_cc_lp_short_call_assignment_starts_put_branch(tmp_path, batched):
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    stock_lot_id = _seed_independent_stock(repo)
     _open_activation(repo)
     call, put, assignment = _cc_lp_events()
+    call = replace(call, raw_payload={**call.raw_payload, "source_stock_lot_id": stock_lot_id})
     if batched:
         persist_trade_event_objects_atomically(repo, [call, put, assignment])
     else:
@@ -470,12 +497,218 @@ def test_cc_lp_same_batch_checks_earlier_assignment_wheel_stock(tmp_path, revers
     assert len(repo.list_wheel_events(account="lx")) == 1
 
 
-def test_external_cc_lp_rejects_wrong_stock_side_even_without_fee(tmp_path):
+@pytest.mark.parametrize("offset_ms", [0, 1])
+@pytest.mark.parametrize("mode", ["batch_forward", "batch_reverse", "put_first", "call_first"])
+@pytest.mark.parametrize("stock_basis", ["missing", "independent", "insufficient", "same_millisecond"])
+@pytest.mark.parametrize("put_assignment_id", ["a-put-assignment", "z-put-assignment"])
+def test_same_millisecond_group_requires_independent_sufficient_stock_for_cc_lp_in_all_delivery_orders(
+    tmp_path, offset_ms, mode, stock_basis, put_assignment_id,
+):
+    path = tmp_path / "ledger.sqlite3"
+    repo = SQLiteOptionPositionsRepository(path)
+    independent_stock = stock_basis == "independent"
+    stock_lot_id = "assigned-stock-independent-put-assignment"
+    if stock_basis != "missing":
+        _seed_independent_stock(
+            repo, assigned_at_ms=2_000 + offset_ms if stock_basis == "same_millisecond" else 200,
+        )
+        assert not repo.list_wheel_events(account="lx")
+    _open_activation(repo)
+    put_open = _put_event(
+        event_id="put-open", event_type="open", multiplier=10,
+        raw_payload=_trusted_multiplier_payload("put-open"),
+    )
+    put_assignment = _put_event(
+        event_id=put_assignment_id, event_type="assignment", multiplier=10,
+        raw_payload=_assignment_payload(10),
+    )
+    call, long_put, call_assignment = _cc_lp_events()
+    call_assignment = replace(call_assignment, event_time_ms=2_000 + offset_ms)
+    if stock_basis != "missing":
+        call = replace(
+            call, raw_payload={**call.raw_payload, "source_stock_lot_id": stock_lot_id},
+        )
+    if stock_basis == "insufficient":
+        call = replace(call, contracts=2)
+        long_put = replace(long_put, contracts=2)
+        call_assignment = replace(
+            call_assignment, contracts=2,
+            raw_payload={
+                **call_assignment.raw_payload,
+                "stock_settlement": {**call_assignment.raw_payload["stock_settlement"], "shares": 20},
+            },
+        )
+    put_group = [put_open, put_assignment]
+    call_group = [call, long_put, call_assignment]
+    groups = {
+        "batch_forward": [put_group + call_group],
+        "batch_reverse": [list(reversed(put_group + call_group))],
+        "put_first": [put_group, call_group],
+        "call_first": [call_group, put_group],
+    }[mode]
+    results = [
+        result
+        for group in groups
+        for result in persist_trade_event_objects_atomically(repo, group)
+    ]
+    reasons = {
+        result.event_id: result.to_dict().get("wheel_manual_review_reason")
+        for result in results
+    }
+    overlaps = not independent_stock
+    # Tightening applies on the first Call receipt, even before the Put arrives.
+    expected_reason = "combo_cc_overlaps_active_wheel_stock" if overlaps else None
+    assert reasons[call_assignment.event_id] == expected_reason
+    assert reasons[put_assignment.event_id] is None
+    repo = SQLiteOptionPositionsRepository(path)
+    model = build_wheel_read_model(repo, "lx", 3_000)
+    expected_sources = {put_assignment.event_id}
+    if not overlaps:
+        expected_sources.add(call_assignment.event_id)
+    assert {branch["source_assignment_event_id"] for branch in model["wheel_branches"]} == expected_sources
+    assert all(branch["lifecycle_status"] == "active" for branch in model["wheel_branches"])
+    assert all(branch["phase"] == "ready" and not branch["reason_codes"] for branch in model["wheel_branches"])
+    before = repo.read_lifecycle_account_rows(account="lx")
+    if stock_basis == "missing":
+        stock_report = build_assigned_stock_projection_from_rows(before, account="lx", as_of_ms=3_000)
+        assert "incomplete_inventory_basis" in json.dumps(stock_report)
+    for group in reversed(groups):
+        retried = persist_trade_event_objects_atomically(repo, list(reversed(group)))
+        assert all(not result.created for result in retried)
+        for result in retried:
+            if result.event_id == call_assignment.event_id:
+                assert result.to_dict().get("wheel_manual_review_reason") == expected_reason
+    assert repo.read_lifecycle_account_rows(account="lx") == before
+    assert build_wheel_read_model(repo, "lx", 3_000) == model
+
+
+@pytest.mark.parametrize("stock_account,stock_symbol,stock_broker", [
+    ("sy", "NVDA", "富途"), ("lx", "TSLA", "富途"), ("lx", "NVDA", "盈透"),
+])
+def test_cc_lp_independent_stock_proof_preserves_account_symbol_and_broker_isolation(
+    tmp_path, stock_account, stock_symbol, stock_broker,
+):
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    stock_key = ContractKey.from_values(
+        broker=stock_broker, account=stock_account, underlying_symbol=stock_symbol,
+        option_type="put", strike=100, expiration_ymd="2026-08-21",
+    )
+    stock_lot_id = _seed_independent_stock(repo, stock_key=stock_key)
+    original_stock_events = repo.list_trade_events()
+    _open_activation(repo)
+    call, long_put, assignment = _cc_lp_events()
+    call = replace(call, raw_payload={**call.raw_payload, "source_stock_lot_id": stock_lot_id})
+    results = persist_trade_event_objects_atomically(repo, [call, long_put, assignment])
+    assert results[-1].to_dict()["wheel_manual_review_reason"] == "combo_cc_overlaps_active_wheel_stock"
+    assert not repo.list_wheel_events()
+    assert [row for row in repo.list_trade_events() if row["event_id"].startswith("independent-")] == original_stock_events
+
+
+def test_tightening_replays_explicitly_voided_cc_lp_assignment_without_requalifying_it(tmp_path):
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    _open_activation(repo)
+    call, long_put, assignment = _cc_lp_events()
+    persist_trade_event_objects_atomically(repo, [call, long_put, assignment])
+    assert not repo.list_wheel_events()
+    void = TradeEvent(
+        event_id="void-call-assignment", event_type="void", event_time_ms=3_000,
+        contract_key=assignment.contract_key, contracts=0, price=0, currency="USD",
+        source="test", multiplier=assignment.multiplier, target_event_id=assignment.event_id,
+    )
+    persist_trade_event_objects_atomically(repo, [void])
+    before = repo.read_lifecycle_account_rows(account="lx")
+    with patch(
+        "src.application.ledger.wheel_trade_companions.plan_wheel_assignment_companion",
+        side_effect=AssertionError("explicit void must remain authoritative"),
+    ) as planner:
+        results = persist_trade_event_objects_atomically(repo, [call, long_put, assignment])
+        planner.assert_not_called()
+    assert all(not result.created for result in results)
+    assert repo.read_lifecycle_account_rows(account="lx") == before
+    assert not repo.list_wheel_events()
+
+
+def test_tightening_preserves_old_cc_lp_branch_without_historical_rewrite_or_automatic_void(tmp_path):
+    from domain.domain.ledger.cash_facts import assignment_principal_anchor
+    from domain.domain.wheel import build_wheel_branch_created_event
+    from src.application.ledger.wheel_trade_companions import _multiplier_evidence
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    _open_activation(repo)
+    call, long_put, assignment = _cc_lp_events()
+    persist_trade_event_objects_atomically(repo, [call, long_put, assignment])
+    assert not repo.list_wheel_events()
+    # Seed the immutable companion that the old, permissive policy issued.
+    multiplier, multiplier_source, evidence_hash = _multiplier_evidence(assignment, call.to_dict())
+    anchor, currency, anchor_reason, anchor_ids = assignment_principal_anchor(assignment, "put")
+    legacy = build_wheel_branch_created_event(
+        account="lx", source_assignment_event_id=assignment.event_id, direction="put",
+        occurred_at_ms=2_000, recorded_at_ms=2_100, symbol="NVDA", contracts=1,
+        multiplier=multiplier, multiplier_source=multiplier_source,
+        multiplier_evidence_hash=evidence_hash, currency=currency,
+        principal_anchor=anchor, principal_anchor_reason=anchor_reason,
+        principal_anchor_fact_ids=anchor_ids,
+        activation_window=repo.get_wheel_activation_window_for_event(
+            market="us", account="lx", occurred_at_ms=2_000,
+        ),
+    )
+    with repo._writer_connection(begin_immediate=True) as conn:
+        repo.append_wheel_event_once(legacy, conn=conn)
+    old_event = repo.list_wheel_events()[0]
+    assert build_wheel_read_model(repo, "lx", 3_000)["wheel_branches"][0]["phase"] == "ready"
+    put_open = _put_event(
+        event_id="put-open", event_type="open", multiplier=10,
+        raw_payload=_trusted_multiplier_payload("put-open"),
+    )
+    put_assignment = _put_event(
+        event_id="put-assignment", event_type="assignment", multiplier=10,
+        raw_payload=_assignment_payload(10),
+    )
+    persist_trade_event_objects_atomically(repo, [put_open, put_assignment])
+    assert old_event in repo.list_wheel_events()
+    assert {row["event_type"] for row in repo.list_wheel_events()} == {"wheel_branch_created"}
+    before = repo.read_lifecycle_account_rows(account="lx")
+    with patch(
+        "src.application.ledger.wheel_trade_companions.plan_wheel_assignment_companion",
+        side_effect=AssertionError("existing branches must not be re-adjudicated"),
+    ) as planner:
+        results = [
+            result
+            for group in ([call, long_put, assignment], [put_open, put_assignment])
+            for result in persist_trade_event_objects_atomically(repo, group)
+        ]
+        planner.assert_not_called()
+    assert all(not result.created for result in results)
+    assert all(result.to_dict().get("wheel_manual_review_reason") is None for result in results)
+    assert repo.read_lifecycle_account_rows(account="lx") == before
+
+
+@pytest.mark.parametrize("source_open_at_ms", [2_000, 2_001])
+def test_cc_lp_source_open_must_precede_assignment(tmp_path, source_open_at_ms):
     from src.application.ledger.wheel_trade_companions import plan_wheel_assignment_companion
 
     repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
     _open_activation(repo)
+    call, long_put, assignment = _cc_lp_events()
+    call = replace(call, event_time_ms=source_open_at_ms)
+    persist_trade_event_objects_atomically(repo, [call, long_put])
+    rows = repo.read_lifecycle_account_rows(account="lx")
+    fields = repo.get_position_lot_fields("combo-call-lot")
+    window = repo.get_wheel_activation_window_for_event(market="us", account="lx", occurred_at_ms=2_000)
+    assert plan_wheel_assignment_companion(
+        assignment, fields, rows, window, recorded_at_ms=2_100,
+    ) == (None, "assignment_source_open_after_assignment")
+    assert not repo.list_wheel_events(account="lx")
+
+
+def test_external_cc_lp_rejects_wrong_stock_side_even_without_fee(tmp_path):
+    from src.application.ledger.wheel_trade_companions import plan_wheel_assignment_companion
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    stock_lot_id = _seed_independent_stock(repo)
+    _open_activation(repo)
     call, put, assignment = _cc_lp_events()
+    call = replace(call, raw_payload={**call.raw_payload, "source_stock_lot_id": stock_lot_id})
     persist_trade_event_objects_atomically(repo, [call, put])
     raw = dict(assignment.raw_payload)
     raw["stock_settlement"] = {**raw["stock_settlement"], "side": "buy", "fees": None}
@@ -879,6 +1112,7 @@ def test_lifecycle_allocation_writer_enters_wheel_from_cc_lp_assignment(tmp_path
     call, put, _ = _cc_lp_events()
     call = replace(
         call, event_time_ms=1_700_000_000_000, multiplier=100,
+        raw_payload={**call.raw_payload, "source_stock_lot_id": "assigned-stock-independent-put-assignment"},
         contract_key=ContractKey.from_values(
             broker="富途", account="lx", underlying_symbol="NVDA",
             option_type="call", strike=110, expiration_ymd="2026-08-21",
@@ -890,6 +1124,9 @@ def test_lifecycle_allocation_writer_enters_wheel_from_cc_lp_assignment(tmp_path
             broker="富途", account="lx", underlying_symbol="NVDA",
             option_type="put", strike=100, expiration_ymd="2026-08-21",
         ),
+    )
+    _seed_independent_stock(
+        SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3"), multiplier=100,
     )
     repo, lifecycle_case, policy, _ = _repo_with_pending_case(
         tmp_path, opening_event=call, option_code="US.NVDA260821C110000",
@@ -920,7 +1157,26 @@ def test_lifecycle_allocation_writer_enters_wheel_from_cc_lp_assignment(tmp_path
         repo, case_id=lifecycle_case["case_id"], now_ms=now_ms,
         observation=observation, apply_changes=True,
     )
-    assert result["poll_settlement_results"][0]["status"] == "applied"
+    assert result["poll_settlement_results"][0]["status"] == "unresolved"
+    assert result["poll_settlement_results"][0]["reason"] == "ambiguous_stock_trade_ownership"
+    # Existing stock requires explicit ownership adjudication; keep the automatic
+    # guard and enter the real allocation writer through the supported manual path.
+    repo.insert_trade_lifecycle_evidence_once({
+        "evidence_id": "independent-cc-stock-evidence", "case_id": None,
+        "source_type": "futu_broker_deal",
+        "source_event_id": "futu:lx:1001:combo-cc-stock-settlement",
+        "evidence_type": "stock_settlement_leg", "account": "lx", "futu_account_id": "1001",
+        "symbol": "NVDA", "side": "sell", "stock_qty": 100, "stock_price": 110,
+        "trade_time_ms": stock_time_ms, "order_id": "combo-cc-stock-order",
+    })
+    revision = repo.get_trade_lifecycle_case(lifecycle_case["case_id"])["derived_summary"]["resolution_revision"]
+    applied = resolve_lifecycle_manually(
+        repo, case_id=lifecycle_case["case_id"], expected_revision=revision,
+        reason="assignment", broker_ref="futu:lx:1001:combo-cc-stock-settlement",
+        note="covered Call assignment against independently proven stock",
+        apply_changes=True, now_ms=now_ms,
+    )
+    assert applied["status"] == "applied", applied
     wheel_events = repo.list_wheel_events(account="lx")
     assert len(wheel_events) == 1
     assert wheel_events[0]["event_type"] == "wheel_branch_created"
