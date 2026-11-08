@@ -783,6 +783,13 @@ OM 完成，实际下单继续由用户完成。
 - 新普通 CSP、普通 CC 或身份与成员均已验证的外部 Combo Yield 卖腿 assignment 创建 active child；新 Wheel 内部 assignment 创建
   `pending_decision` child。用户决定只追加一次含 expected generation hash 的 CAS 事件：`start`
   转为 active，`end` 转为不可逆 `manual_ended`。
+- 外部 CC+LP 的 Short Call assignment 从首次受理起必须证明独立、足额的 `source_stock_lot_id`，
+  不以同毫秒 Put 是否已经入库作为守卫开关。股票证据读取账户内已持久化的完整毫秒事件组，由股票
+  owner 按 `(event_time_ms, event_id)` 稳定投影，排除当前 assignment 的自引用。来源 lot 必须早于
+  该毫秒组、账户/券商/标的一致、剩余股数足以覆盖本次 assignment，且不属于已有 active Wheel 股票；
+  同时间 Put 新买入的正股不能充当独立证明。证明不足时返回 `combo_cc_overlaps_active_wheel_stock`，
+  保留 `incomplete_inventory_basis` 等股票诊断；单批、分批、输入反序和重放采用相同规则。重放仅重算
+  未建分支的复核回执，不补建历史分支；已持久化的旧分支原样保留，不自动 void 或重新裁决。
 - 父分支按实际 assignment 数量减少可继续监控的数量；还有整张容量时继续原阶段，不足一张时
   显示 residual；完全转换后派生为 `converted`，不再生成原方向推荐。
 
