@@ -21,6 +21,10 @@
 | `python -m src.application.*` 旧入口、option-position repository wrapper、Futu combined client | 修现有参数解析或旧 backend 崩溃；wrapper 只转调 | 人工入口使用 `./om`，结构化入口使用 `./om-agent`；能力进入现有 application facade 或 capability client | caller 和测试完成迁移后删除 wrapper / `__main__`；已退休 candidate CSV 参数只保持拒绝，不得复活写出 |
 | `compatibility_amount`、旧 fees / fee、旧 market 列、非 Futu `fetch_source` 名字 | 只读旧事实并保持审计可解释；冲突继续 fail closed | 新费用进入 fee provenance，新持仓字段进入当前 portfolio schema；实际行情读取保持 Futu / OpenD owner | 历史事实和兼容 reader 无引用后，按独立数据迁移与 readback 证据删除 |
 
+手工告警入口 `run_alert_engine` 和 `python -m src.application.alert_engine` 的当前摘要是必需输入：
+文件缺失或没有可解析列（零字节、纯空白）时失败，不生成提醒/变化报告，也不更新前次快照。
+含列头、零数据行的 CSV 仍是合法空结果；前次快照允许缺失或无列内容，表示尚无比较基线。
+
 ## 不冻结的 canonical owner
 
 以下生产核继续演进，但不得再建平行实现：
