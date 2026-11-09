@@ -91,6 +91,7 @@
 - [Inbound Control](INBOUND_CONTROL.md)：确定性 Control、pending operation 和 channel 安全。
 - [Bot PRD](BOT_PRD.md)：Bot产品合同及项目内通用只读助理需求。
 - [Bot / Python runtime / Scene v7](BOT_DESIGN.md)：策略、报错与过滤原因问答，个人记忆、上下文和只读工具合同；历史 Bot 数据保留与 Host schema 迁移边界。
+- [群查询bot 设计方案](GROUP_QUERY_BOT_DESIGN.md)：可选插件、新飞书机器人、自然语言与独立模型 Key，以及由 API 服务端控制的无账户行情和场景分析权限；设计草案，尚未实现。
 - [Agent Handbook](AGENT_WIKI.md)：本地 agent 的任务 playbook、模块地图和验证矩阵。
 - [Session Summary](SESSION_SUMMARY.md)：仅在显式 handoff 时使用的模板。
 
