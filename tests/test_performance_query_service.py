@@ -17,6 +17,7 @@ from src.application.agent_tools import materialization_impl, positions
 from src.application.bot import tools as bot_tools
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.performance import query, query_http
+from src.application.tool_execution import execute_tool
 from src.infrastructure import option_performance_client as client
 from src.interfaces.cli import option_performance
 from test_performance_service_v2 import _event
@@ -323,6 +324,164 @@ def test_client_rejects_bad_envelopes_and_redirects(body, status):
         with pytest.raises(PerformanceQueryError) as exc:
             _remote(url)
         assert exc.value.details["reason_codes"] == ["service_protocol_invalid"]
+
+
+def _execute_service_page(monkeypatch, data, *, view, payload=None, direct=False):
+    request_payload = {**QUERY, **(payload or {})}
+    if view is not None:
+        request_payload["view"] = view
+    origin = "http://127.0.0.1:1"
+    raw = json.dumps({
+        "schema_version": client.API_VERSION, "ok": True,
+        "data": data, "meta": {}, "warnings": [],
+    }).encode()
+    requests, local_reads = [], []
+
+    class Response:
+        code = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, limit):
+            return raw[:limit]
+
+    class Opener:
+        def open(self, request, *, timeout):
+            requests.append((request, timeout))
+            return Response()
+
+    def forbidden_local_read(*args, **kwargs):
+        local_reads.append((args, kwargs))
+        raise AssertionError("service response must not fall back to local report dependencies")
+
+    monkeypatch.setenv("OM_PERFORMANCE_SERVICE_URL", origin)
+    monkeypatch.setenv("OM_PERFORMANCE_SERVICE_TOKEN", TOKEN)
+    monkeypatch.setattr(client, "build_opener", lambda *handlers: Opener())
+    for name in (
+        "load_runtime_config", "resolve_public_data_config_path",
+        "open_performance_query_ledger_from_data_config", "build_option_period_performance", "repo_base",
+    ):
+        monkeypatch.setattr(positions, name, forbidden_local_read)
+    response = (
+        client.query_option_performance(request_payload, url=origin, token=TOKEN)
+        if direct else execute_tool("option_performance_report", request_payload)
+    )
+    assert len(requests) == 1
+    request, timeout = requests[0]
+    assert request.full_url == origin + client.QUERY_PATH
+    assert request.get_method() == "POST"
+    assert request.get_header("Authorization") == "Bearer " + TOKEN
+    assert timeout == client.CLIENT_TIMEOUT_SECONDS
+    assert json.loads(request.data) == request_payload
+    assert local_reads == []
+    return response
+
+
+@pytest.mark.parametrize("view", ["rows", "summary", "breakdowns"])
+def test_public_tool_rejects_incomplete_service_pages(monkeypatch, view):
+    response = _execute_service_page(monkeypatch, {"view": view}, view=view)
+    assert response["ok"] is False
+    assert response["error"]["code"] == "SERVICE_ERROR"
+    assert response["error"]["details"]["reason_codes"] == ["service_protocol_invalid"]
+
+
+@pytest.mark.parametrize("view,field,value", [
+    ("rows", "rows", None),
+    ("rows", "rows", {}),
+    ("rows", "rows", [None]),
+    ("rows", "pagination", None),
+    ("rows", "pagination.has_more", "yes"),
+    ("rows", "pagination.returned_count", True),
+    ("rows", "pagination.page_cursor", 23),
+    ("rows", "next_cursor", 17),
+    ("rows", "source", []),
+    ("rows", "period", None),
+    ("summary", "scope", []),
+    ("summary", "coverage", None),
+    ("summary", "freshness", []),
+    ("summary", "quality", "ready"),
+    ("summary", "metric_semantics", []),
+    ("summary", "breakdowns", []),
+    ("summary", "breakdowns", {"symbols": None}),
+    ("summary", "option_return", []),
+    ("breakdowns", "rows", [1]),
+    ("breakdowns", "group_by", "accounts"),
+])
+def test_public_tool_rejects_malformed_service_pages(service, monkeypatch, view, field, value):
+    page = _remote(service[0], {**QUERY, "view": view})[0]
+    if "." in field:
+        parent, key = field.split(".")
+        page[parent][key] = value
+    else:
+        page[field] = value
+    response = _execute_service_page(monkeypatch, page, view=view)
+    assert response["ok"] is False
+    assert response["error"]["code"] == "SERVICE_ERROR"
+    assert response["error"]["details"]["reason_codes"] == ["service_protocol_invalid"]
+
+
+@pytest.mark.parametrize("view,field", [
+    ("summary", "view"), ("rows", "view"), ("breakdowns", "view"),
+    ("rows", "rows"), ("rows", "pagination"), ("rows", "source"), ("rows", "next_cursor"),
+    ("summary", "period_option_net_cashflow"), ("summary", "option_net_cashflow"),
+    ("summary", "sell_option_win_rate"), ("summary", "buy_option_win_rate"),
+    ("summary", "option_return"), ("summary", "daily_occupied_capital"),
+    ("summary", "breakdowns"), ("breakdowns", "group_by"),
+])
+def test_public_tool_rejects_missing_service_fields(service, monkeypatch, view, field):
+    page = _remote(service[0], {**QUERY, "view": view})[0]
+    del page[field]
+    response = _execute_service_page(monkeypatch, page, view=view)
+    assert response["ok"] is False
+    assert response["error"]["code"] == "SERVICE_ERROR"
+    assert response["error"]["details"]["reason_codes"] == ["service_protocol_invalid"]
+
+
+@pytest.mark.parametrize("requested,returned", [("rows", "summary"), ("summary", "rows")])
+def test_public_tool_rejects_service_view_mismatch(service, monkeypatch, requested, returned):
+    page = _remote(service[0], {**QUERY, "view": returned})[0]
+    response = _execute_service_page(monkeypatch, page, view=requested)
+    assert response["ok"] is False
+    assert response["error"]["code"] == "SERVICE_ERROR"
+    assert response["error"]["details"]["reason_codes"] == ["service_protocol_invalid"]
+
+
+@pytest.mark.parametrize("view,extra", [
+    (None, {}), (None, {"group_by": "accounts"}), (None, {"limit": 1}),
+    ("summary", {}), ("summary", {"month": "2026-08"}), ("summary", {"include_rows": True}),
+    ("rows", {}), ("rows", {"month": "2026-08"}), ("rows", {"limit": 1}),
+    ("breakdowns", {}), ("breakdowns", {"month": "2026-08"}), ("breakdowns", {"limit": 1}),
+    ("breakdowns", {"group_by": "accounts"}),
+])
+def test_public_tool_accepts_canonical_service_pages(service, monkeypatch, view, extra):
+    payload = {**QUERY, **extra}
+    if view is not None:
+        payload["view"] = view
+    page = _remote(service[0], payload)[0]
+    if view in {"rows", "breakdowns"} and extra.get("month") == "2026-08":
+        assert page["rows"] == []
+    if "limit" in extra:
+        assert page["pagination"]["has_more"] is True
+    response = _execute_service_page(monkeypatch, page, view=view, payload=payload)
+    assert response["ok"] is True
+
+
+@pytest.mark.parametrize("view", [None, "summary", "rows", "breakdowns"])
+def test_client_preserves_service_page_extensions(service, monkeypatch, view):
+    payload = dict(QUERY)
+    if view is not None:
+        payload["view"] = view
+    page = _remote(service[0], payload)[0]
+    page["future_field"] = {"supported": True}
+    if "pagination" in page:
+        page["pagination"]["future_field"] = "preserved"
+    data, warnings, meta = _execute_service_page(monkeypatch, page, view=view, direct=True)
+    assert data == page
+    assert warnings == [] and meta == {}
 
 
 def test_client_timeout_is_explicit(service, monkeypatch):

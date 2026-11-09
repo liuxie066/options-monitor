@@ -555,13 +555,21 @@ def test_closed_option_leg_keeps_settlement_constraints_while_reason_pending(mon
     }
 
 
-def test_fully_closed_pending_put_still_blocks_cash_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(("lifecycle_state", "reason_state"), [
+    ("settlement_pending", "cause_pending"),
+    ("conflict", "cause_pending"),
+    ("settlement_pending", "conflict"),
+    ("conflict", "conflict"),
+])
+def test_fully_closed_pending_put_still_blocks_cash_capacity(
+    monkeypatch: pytest.MonkeyPatch, lifecycle_state: str, reason_state: str,
+) -> None:
     monkeypatch.setattr(
         "src.application.ledger.position_context.build_lifecycle_read_models_from_decision_snapshot",
         lambda *_args, **_kwargs: {
             "closed": {
-                "lifecycle_state": "settlement_pending",
-                "reason_state": "cause_pending",
+                "lifecycle_state": lifecycle_state,
+                "reason_state": reason_state,
                 "closure_fact": "option_leg_closed",
                 "reserved_contracts_by_lot": {},
                 "pending_close_contracts_by_lot": {"closed": 4},
@@ -584,6 +592,84 @@ def test_fully_closed_pending_put_still_blocks_cash_capacity(monkeypatch: pytest
     assert context["cash_secured_unavailable_by_symbol"] == {
         "0700.HK": "option_close_settlement_pending"
     }
+
+
+def test_late_paid_close_preserves_pending_settlement_cash_constraint(tmp_path) -> None:
+    from domain.domain.ledger import ContractKey, TradeEvent
+    from domain.domain.option_lifecycle import expiration_observation_start_ms
+    from src.application.daily_decision_brief_service import _build_funds
+    from src.application.ledger.decision_snapshot import decision_state_snapshot
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
+    from src.application.ledger.writer import (
+        persist_trade_event_object, record_zero_price_option_close_atomically,
+    )
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    contract = ContractKey.from_values(
+        broker="futu", account="lx", underlying_symbol="NVDA", option_type="put",
+        strike=100, expiration_ymd="2026-08-21",
+    )
+    start = expiration_observation_start_ms("2026-08-21", "US")
+    now = datetime.fromtimestamp((start + 100) / 1000, tz=timezone.utc)
+    event_fields = {"contract_key": contract, "currency": "USD", "source": "futu", "multiplier": 100}
+    persist_trade_event_object(repo, event=TradeEvent(
+        event_id="open-1", event_type="open", event_time_ms=start - 3 * 86400000,
+        contracts=2, price=2, lot_id="lot-1", raw_payload={"side": "sell"}, **event_fields,
+    ))
+    accepted = record_zero_price_option_close_atomically(
+        repo,
+        contract_identity={
+            "account": "lx", "broker": "futu", "futu_account_id": "REAL_1", "symbol": "NVDA",
+            "option_type": "put", "position_side": "short", "strike": 100, "expiration_ymd": "2026-08-21",
+            "currency": "USD", "multiplier": 100, "market": "US",
+        },
+        evidence={
+            "evidence_id": "zero-evidence-1", "evidence_type": "option_zero_price_close",
+            "source_type": "broker_deal", "source_event_id": "futu:lx:REAL_1:zero-close-1",
+            "contracts": 1, "price": 0, "event_time_ms": start - 8 * 3600000,
+            "received_at_ms": start + 10, "side": "buy", "futu_account_id": "REAL_1",
+        },
+        base_event=TradeEvent(
+            event_id="base-close", event_type="close", event_time_ms=start - 8 * 3600000,
+            contracts=1, price=0, target_lot_id="lot-1", raw_payload={"side": "buy"}, **event_fields,
+        ),
+    )
+    assert accepted["status"] == "accepted"
+    portfolio = cash_portfolio({"as_of_utc": now.isoformat(), "cash_by_currency": {"USD": 50000}})
+
+    for late_close_received in (False, True):
+        if late_close_received:
+            persist_trade_event_object(repo, event=TradeEvent(
+                event_id="late-paid-close", event_type="close", event_time_ms=start - 10 * 3600000,
+                contracts=1, price=0.01, target_lot_id="lot-1", raw_payload={"side": "buy"}, **event_fields,
+            ))
+        snapshot = decision_state_snapshot(
+            repo, portfolio_scope_id="review", account="lx",
+            source_observed_at=now.isoformat(), current_decision_now_ms=start + 100,
+        )
+        assert snapshot["snapshot_status"] == "trusted"
+        assert snapshot["reason_codes"] == []
+        assert snapshot["projection_diagnostics"] == []
+        context = build_context(
+            [], broker="futu", account="lx", decision_snapshot=snapshot,
+            lifecycle_now_ms=start + 100, observed_at=now,
+        )
+        model = context["position_lifecycle_by_lot"]["lot-1"]
+        assert model["pending_close_contracts_by_lot"] == {"lot-1": 1}
+        assert snapshot["account_position_lots"][0]["fields"]["contracts_open"] == int(not late_close_received)
+        assert model["lifecycle_state"] == ("conflict" if late_close_received else "partially_resolved")
+        assert model["lifecycle_reason_codes"] == (
+            ["target_lot_quantity_drift"] if late_close_received else ["close_reason_pending"]
+        )
+        assert context["cash_secured_total_by_ccy"] == ({} if late_close_received else {"USD": 10000.0})
+        assert context["cash_secured_unavailable_by_symbol"] == {"NVDA": "option_close_settlement_pending"}
+        gaps = []
+        funds, _ = _build_funds(portfolio_context=portfolio, option_positions_context=context, data_gaps=gaps)
+        assert funds["cash_total_reliable"] is True
+        assert funds["option_opening_reliable"] is False
+        assert funds["available"] is False
+        assert funds["option_opening_available_by_currency"] == {}
+        assert any(gap.get("kind") == "option_opening_available" for gap in gaps)
 
 
 @pytest.mark.parametrize("mismatch", [False, True])
