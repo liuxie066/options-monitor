@@ -303,6 +303,98 @@ def test_review_wait_does_not_claim_a_settlement_deadline_without_policy() -> No
     assert bound.lifecycle_reason_codes == ("settlement_evidence_deadline_elapsed",)
 
 
+@pytest.mark.parametrize("target_contracts", [2, 3], ids=["fully_closed", "partially_closed"])
+@pytest.mark.parametrize("with_policy", [True, False], ids=["policy", "fallback"])
+@pytest.mark.parametrize("deadline_offset_ms", [-1, 0, 1], ids=["before", "at", "after"])
+def test_pending_close_obeys_settlement_deadline(
+    target_contracts: int, with_policy: bool, deadline_offset_ms: int,
+) -> None:
+    observation_start = expiration_observation_start_ms("2026-08-21", "US")
+    assert observation_start is not None
+    deadline = observation_start + (48 if with_policy else 72) * 60 * 60 * 1000
+
+    read_model = _read_model(
+        target_contracts_by_lot={"lot-1": target_contracts},
+        allocations=[_allocation(terminal_type="close")],
+        pending_close_contracts_by_lot={"lot-1": 2},
+        now_ms=deadline + deadline_offset_ms,
+        pending_until_ms_override=deadline if with_policy else None,
+    )
+
+    assert read_model.pending_until_ms == deadline
+    assert read_model.resolved_contracts_by_lot == {"lot-1": 2}
+    assert read_model.remaining_contracts_by_lot == {"lot-1": target_contracts - 2}
+    assert read_model.resolved_contracts_by_terminal_type == {"close": 2}
+    assert read_model.reserved_contracts_by_lot == {"lot-1": 0}
+    assert read_model.closure_fact == (
+        "option_leg_closed" if target_contracts == 2 else "partial_close_observed"
+    )
+    assert read_model.close_reason is None
+    assert read_model.reason_state == "cause_pending"
+    assert read_model.actionable is False
+    if deadline_offset_ms < 0:
+        assert read_model.lifecycle_state == (
+            "settlement_pending" if target_contracts == 2 else "partially_resolved"
+        )
+        assert read_model.lifecycle_reason_codes == ("close_reason_pending",)
+    else:
+        assert read_model.lifecycle_state == "needs_review"
+        assert read_model.lifecycle_reason_codes == (
+            "settlement_evidence_deadline_elapsed"
+            if with_policy else "lifecycle_timing_policy_unavailable",
+        )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({"conflict_reason_codes": ("broker_identity_conflict",)}, "broker_identity_conflict"),
+        ({"quantity_drift": True}, "target_lot_quantity_drift"),
+        ({"pending_close_contracts_by_lot": {"lot-1": 3}}, "pending_close_quantity_conflict"),
+    ],
+    ids=["explicit_conflict", "quantity_drift", "invalid_pending_close"],
+)
+def test_settlement_deadline_does_not_override_conflicts(overrides: dict, reason: str) -> None:
+    observation_start = expiration_observation_start_ms("2026-08-21", "US")
+    assert observation_start is not None
+    values = {
+        "target_contracts_by_lot": {"lot-1": 3},
+        "allocations": [_allocation(terminal_type="close")],
+        "pending_close_contracts_by_lot": {"lot-1": 2},
+        "now_ms": observation_start + 1,
+        "pending_until_ms_override": observation_start,
+    }
+
+    read_model = _read_model(**{**values, **overrides})
+
+    assert read_model.lifecycle_state == "conflict"
+    assert read_model.lifecycle_reason_codes == (reason,)
+    assert read_model.resolved_contracts_by_lot == {"lot-1": 2}
+    assert read_model.remaining_contracts_by_lot == {"lot-1": 1}
+    assert read_model.actionable is False
+
+
+@pytest.mark.parametrize(
+    ("terminal_type", "state"),
+    [("close", "closed"), ("assignment", "assigned"), ("exercise", "exercised"), ("expire_close", "expired_unassigned")],
+)
+def test_settlement_deadline_preserves_resolved_terminal_facts(terminal_type: str, state: str) -> None:
+    observation_start = expiration_observation_start_ms("2026-08-21", "US")
+    assert observation_start is not None
+
+    read_model = _read_model(
+        allocations=[_allocation(terminal_type=terminal_type)],
+        now_ms=observation_start + 1,
+        pending_until_ms_override=observation_start,
+    )
+
+    assert read_model.lifecycle_state == state
+    assert read_model.reason_state == "resolved"
+    assert read_model.remaining_contracts_by_lot == {"lot-1": 0}
+    assert read_model.resolved_contracts_by_lot == {"lot-1": 2}
+    assert read_model.actionable is False
+
+
 def test_pending_reservation_is_nonactionable_without_changing_remaining() -> None:
     observation_start = expiration_observation_start_ms("2026-08-21", "US")
     assert observation_start is not None

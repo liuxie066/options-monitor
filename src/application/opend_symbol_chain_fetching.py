@@ -18,6 +18,7 @@ from src.application.opend_expiration_cache import (
 )
 from src.application.option_chain_fetching import (
     OptionChainFetchRequest,
+    OptionChainFetchResult,
     fetch_option_chains,
     prune_option_chain_cache,
 )
@@ -408,32 +409,47 @@ def fetch_symbol_option_chain(
     )
 
     effective_policy = "force_refresh" if request.chain_cache_force_refresh else str(request.freshness_policy or "cache_first")
-    fetch_result = fetch_option_chains(
-        gateway=gateway,
-        request=OptionChainFetchRequest(
-            symbol=request.symbol,
-            underlier_code=underlier_code,
-            expirations=list(expirations_pick),
-            host=request.host,
-            port=int(request.port),
-            option_types=request.option_types,
-            strike_windows=request.side_strike_windows or {},
-            base_dir=request.effective_base_dir,
-            asof_date=today.isoformat(),
-            freshness_policy=effective_policy if effective_policy in {"cache_first", "refresh_missing", "force_refresh"} else "cache_first",
-            chain_cache=bool(request.chain_cache),
-            max_wait_sec=limits.option_chain.max_wait_sec,
-            window_sec=limits.option_chain.window_sec,
-            max_calls=limits.option_chain.max_calls,
-            is_force_refresh=bool(request.chain_cache_force_refresh or effective_policy == "force_refresh"),
-            no_retry=bool(request.no_retry),
-            retry_max_attempts=int(request.retry_max_attempts),
-            retry_time_budget_sec=float(request.retry_time_budget_sec),
-            retry_base_delay_sec=float(request.retry_base_delay_sec),
-            retry_max_delay_sec=float(request.retry_max_delay_sec),
-        ),
-        retry_call=retry_call,
-    )
+    if not expirations_pick:
+        fetch_result = OptionChainFetchResult(
+            rows=[],
+            from_cache_expirations=[],
+            fetched_expirations=[],
+            opend_call_count=0,
+            rate_gate_wait_sec=0.0,
+            status="ok",
+            error_code=None,
+            errors=[],
+            expiration_statuses={},
+            source_outcome="success_empty",
+            reason_code="no_expirations",
+        )
+    else:
+        fetch_result = fetch_option_chains(
+            gateway=gateway,
+            request=OptionChainFetchRequest(
+                symbol=request.symbol,
+                underlier_code=underlier_code,
+                expirations=list(expirations_pick),
+                host=request.host,
+                port=int(request.port),
+                option_types=request.option_types,
+                strike_windows=request.side_strike_windows or {},
+                base_dir=request.effective_base_dir,
+                asof_date=today.isoformat(),
+                freshness_policy=effective_policy if effective_policy in {"cache_first", "refresh_missing", "force_refresh"} else "cache_first",
+                chain_cache=bool(request.chain_cache),
+                max_wait_sec=limits.option_chain.max_wait_sec,
+                window_sec=limits.option_chain.window_sec,
+                max_calls=limits.option_chain.max_calls,
+                is_force_refresh=bool(request.chain_cache_force_refresh or effective_policy == "force_refresh"),
+                no_retry=bool(request.no_retry),
+                retry_max_attempts=int(request.retry_max_attempts),
+                retry_time_budget_sec=float(request.retry_time_budget_sec),
+                retry_base_delay_sec=float(request.retry_base_delay_sec),
+                retry_max_delay_sec=float(request.retry_max_delay_sec),
+            ),
+            retry_call=retry_call,
+        )
 
     fetch_meta = dict(fetch_result.to_meta())
     fetch_meta.update(expiration_fetch_meta)
