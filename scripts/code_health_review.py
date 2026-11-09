@@ -450,6 +450,7 @@ def save_daily_summary(run, receipt):
                "prs_created": phase.get("prs_created", []), "merged": phase.get("merged", []), "closed": phase.get("closed", []),
                "pending": inventory.get("pending", []), "blocked": inventory.get("blocked", []),
                "needs_triage": inventory.get("needs_triage", []), "ready": inventory.get("ready", []),
+               "source_closed": inventory.get("source_closed", []),
                "awaiting_merge_authorization": inventory.get("awaiting_merge_authorization", []),
                "ci_pending": inventory.get("ci_pending", []), "ci_failed": inventory.get("ci_failed", []),
                "delivery_not_refreshed": phase.get("delivery_not_refreshed", []),
@@ -465,7 +466,7 @@ def save_daily_summary(run, receipt):
              f"等待合并批准 {len(summary['awaiting_merge_authorization'])}；CI 等待 {len(summary['ci_pending'])}；"
              f"CI 失败 {len(summary['ci_failed'])}（CI 状态与等待批准可重叠）。",
              f"剩余 pending {len(summary['pending'])}；blocked {len(summary['blocked'])}；待裁决 {len(summary['needs_triage'])}；"
-             f"本地待交付 {len(summary['ready'])}。", "完整任务、PR 和人工待办清单见同目录 daily-summary.json。"]
+             f"本地待交付 {len(summary['ready'])}；来源已关闭终止 {len(summary['source_closed'])}。", "完整任务、PR 和人工待办清单见同目录 daily-summary.json。"]
     for pr in summary["prs"]:
         label = "已有（本轮未刷新）" if pr.get("refreshed_this_run") is False else "新建" if pr.get("created") else "复用"
         lines.append(f"- {label} PR [#{pr['number']}]({pr['url']})；任务 `{pr['id']}`；HEAD `{pr['head']}`。")
