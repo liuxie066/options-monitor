@@ -173,7 +173,9 @@ def build_feishu_ws_settings(
     effective_env = build_effective_env(environ=environ, env_file=env_file)
     acl_keys = {"OM_FEISHU_BOT_ALLOWED_OPEN_IDS", "OM_FEISHU_BOT_USER_OPEN_ID"}
     file_owned = {key for key in acl_keys if effective_env.source_of(key) and effective_env.source_of(key).source == "env_file"}
-    bound_env_file = effective_env.env_file
+    # Systemd can inject ACLs from a root-only EnvironmentFile. Bind the ordinary
+    # file for refresh only when this loader actually sourced an ACL key from it.
+    bound_env_file = effective_env.env_file if file_owned else None
     if credential_env_file is not None and str(credential_env_file).strip():
         effective_env = build_effective_env(
             environ=effective_env.values,
@@ -192,6 +194,9 @@ def build_feishu_ws_settings(
             if not loaded.env_file_loaded or loaded.warnings:
                 raise ReplyAuthorizationError("sender authorization source unavailable")
             base = loaded.values
+        # Resolve the refreshed values without an implicit second env-file load,
+        # which would also overwrite the explicit credential-file overlay.
+        base.pop("OM_ENV_FILE", None)
         return resolve_feishu_bot_config(environ=base, metadata_only=True).default_allowed_senders()
 
     env = effective_env.values
