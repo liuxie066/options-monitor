@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -38,7 +39,13 @@ def _default_tag() -> str | None:
 
 def main() -> int:
     args = parse_args()
-    changed_files = args.changed_file or changed_files_from_git(base_ref=args.base, cwd=BASE_DIR)
+    try:
+        changed_files = args.changed_file or changed_files_from_git(base_ref=args.base, cwd=BASE_DIR)
+    except subprocess.CalledProcessError as exc:
+        sys.stderr.write(f"Failed to discover changed files: {exc}\n")
+        if exc.stderr:
+            sys.stderr.write(str(exc.stderr).rstrip() + "\n")
+        return 2
     plan = build_release_test_plan(
         changed_files=changed_files,
         mode=args.mode,
