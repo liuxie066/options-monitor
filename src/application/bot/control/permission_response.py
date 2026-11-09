@@ -207,7 +207,9 @@ def _resolve_operation_id(
     if operation_id and family.key == "attribution":
         # The handler authenticates and reads durable effects, including after TTL.
         return operation_id
-    if operation_id is None and family.key == "trade":
+    # Only confirmation accepts an expiry batch's unstored parent ID.
+    # Cancellation uses the normal child-operation ambiguity handling.
+    if action == "confirm" and operation_id is None and family.key == "trade":
         pending = store.list_pending_operations(
             channel=request.channel,
             sender_id=request.sender_id,
