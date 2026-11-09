@@ -37,7 +37,7 @@ def commit_review_run(tmp_path, monkeypatch):
     review.write_json(root / "state.json", {"cursor": shas[0], "last_review": str(root / "previous.md"),
                                             "confirmed_finding_keys": ["old-owner:failure"]})
     review.write_json(root / "config.json", {
-        "git": "git", "gh": "github-client", "repository": "fixture/repo", "repository_url": str(source),
+        "git": "git", "gh": "github-client", "repository": "fixture/repo", "repository_url": str(source), "pull_requests_enabled": False, "comments_enabled": False, "release_enabled": False,
         "timeout_seconds": 1800, "max_units": 10, "issue_timeout_seconds": 600,
     })
     original = review.command

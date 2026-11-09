@@ -1,6 +1,6 @@
 # 合并后增量巡检
 
-本流程检查已经合并到 `main` 的改动，交付有证据的问题、验证缺口和漏检原因；已有问题与使用反馈统一在 GitHub issue 跟踪，按下文流程复核和处理。合并后巡检已启用每日本地调度；issue 处理的接入实现按用户授权开发，复用同一个任务及现有 PR、测试、过程报告和 [开发经验](../LESSONS.md)。本机安装结果以安装回执为准；没有成功安装回执时不能视为日程已启用 issue 处理。它不替代合并前审查，也不是新增的 GitHub 强制门禁。
+同一个每日任务依次处理合并后增量巡检、issue 价值分诊、开放 PR 的逐行审查与实际验证、本地修复，以及评论和发布交付。问题与使用反馈仍统一在 GitHub issue 跟踪，复用现有 PR、测试、过程报告和 [开发经验](../LESSONS.md)。开放 PR 阶段补充合并前检查，不新增 GitHub 强制门禁。下文描述仓库代码；本机脚本、配置及日程是否生效，以另行部署的安装回执为准，本次代码交付不修改已安装配置或运行真实队列。
 
 ## 目标与权限
 
@@ -8,7 +8,7 @@
 
 巡检阶段对业务代码和外部系统保持只读；可在隔离临时目录运行无外部副作用的定向测试。用户于 2026-11-03 进一步授权：确认缺陷后，在同次调度接上独立本地修复、回归验证与独立审核。检查前阅读 [Agent Manual](../AGENTS.md)、本次相关合同和经验条目；保留无关工作区的改动。
 
-手动报告保存在 gitignored 的 `docs/reviews/`，定时报告与修复任务位于独立状态目录，不强行纳入版本控制。脚本将修复 PR 发布和合并分为两个入口：发布路径读取 `repair_delivery_enabled` 或显式交付参数；合并路径只接受本次调用中的 `--approve-repair-merge TASK=HEAD`，不从配置读取批准。下文描述代码行为，不代表本机已安装或部署；本机配置与部署另行安排。发布 issue、发布版本、调整权限和封禁贡献者仍需逐次明确授权。疑似敏感或恶意内容仅记录必要的脱敏证据，按 [Security](../SECURITY.md) 处理。
+手动报告保存在 gitignored 的 `docs/reviews/`，定时报告、修复任务和交付回执位于独立状态目录。用户于 2026-11-09 明确授权本 loop：评论实际处理过的 issue/PR；对逐行审查、实际验证与 CI 均通过的精确 PR 修订执行 squash 合并；修复合入 main 后按既有流程准备发布 PR，并在发布证据齐全后回复版本。开关和默认值见下文。新建 issue、修改标题/标签、人工关闭 issue/PR、改权限、封禁贡献者和操作生产仍需单独授权；已合并修复的来源 issue 沿用既有自动关闭路径。疑似敏感或恶意内容仅保留必要脱敏证据，按 [Security](../SECURITY.md) 处理。
 
 ## 每轮范围与续跑
 
@@ -16,7 +16,7 @@
 2. 首轮沿目标 SHA 的 first-parent 主线选择最近三个已合并 PR，按主线从旧到新审查，以最早一个 PR 的主线父提交为本轮起点。不得按 PR 编号或列表默认排序推定合并顺序。首轮起点之前的历史明确不在覆盖范围内。
 3. 后续轮次先读取上一份报告，核对“已完成至”是本轮目标的祖先；续查其后的改动，每轮 first-parent 主线单元数上限由配置 `max_units` 决定（默认 10）。PR 合并和直接提交各计一个主线单元，都必须列出并检查。没有新提交时记录无增量；续跑记录缺失或主线关系不成立时，明确报告断点，不能猜测已完成位置。
 4. 每个 PR 比较其合并提交与主线父提交，检查全部变更文件，并追踪相关入口及上下游一跳。再确认候选问题在本轮冻结目标是否仍然存在，避免将后续已修复的问题重新报成新缺陷。
-5. 每轮按独立的提交审查和 issue 额度执行，及时记录进展；建议每日总上限 12000 秒，具体公式和配置见下文。预算耗尽时保存未完成项和下一步，不能把未检查的提交记为完成；`max_units` 是数量上限，不保证每轮完成。
+5. 每轮按独立的提交审查和 issue 额度执行，及时记录进展；新配置建议每日总上限 15000 秒，具体公式和配置见下文。预算耗尽时保存未完成项和下一步，不能把未检查的提交记为完成；`max_units` 是数量上限，不保证每轮完成。
 
 可用 `git log --first-parent <目标SHA>` 确认主线顺序，再用 `gh pr view <编号>` 核对 PR、变更和检查记录。PR 编号、完整 SHA、测试修订和证据路径都写入报告，不能只记录“最新 main”或“CI 全绿”。
 
@@ -39,7 +39,7 @@
 
 确认问题至少记录触发条件、预期和实际结果、源码位置、实际复现日志、稳定去重 key，以及明确的修复文件范围。没有实证日志的线索保留为验证缺口；例如首轮 V001 不自动变成当前业务故障。结构化确认记录先写入 `repairs/<问题标识>/task.json` 和本地 issue 草稿，再推进审查游标；同 key 复用任务，不重复开工。
 
-同次调度默认最多推进 3 个现有待办，由 `max_repairs` 覆盖，每个任务另受 `repair_unit_timeout_seconds`（默认 600 秒）限制。同一任务每轮最多选择一次，先处理尚无尝试的任务，再按最近尝试时间从旧到新处理；有归属或文件冲突时保留并说明原因。`attempts=0` 的历史任务直接沿原 task.json 续跑，保留 ID、来源及尝试历史，不另建任务。每个合格任务沿以下步骤推进：创建冻结基础的独立本地分支/worktree；在未修改业务源码时先补回归并由 runner 记录真实断言失败；启动另一个上下文修改 owning boundary，保持该回归文件不变；由 runner 对同样用例重跑，要求失败/跳过/fixture error 为零；再启动全新只读审核上下文核对整个最终 diff、未跟踪测试、上下游、门禁和实测证据。
+同次调度默认最多推进 1 个现有待办，由 `max_repairs` 覆盖，每个任务另受 `repair_unit_timeout_seconds`（默认 600 秒）限制。同一任务每轮最多选择一次，先处理尚无尝试的任务，再按最近尝试时间从旧到新处理；有归属或文件冲突时保留并说明原因。`attempts=0` 的历史任务直接沿原 task.json 续跑，保留 ID、来源及尝试历史，不另建任务。每个合格任务沿以下步骤推进：创建冻结基础的独立本地分支/worktree；在未修改业务源码时先补回归并由 runner 记录真实断言失败；启动另一个上下文修改 owning boundary，保持该回归文件不变；由 runner 对同样用例重跑，要求失败/跳过/fixture error 为零；再启动全新只读审核上下文核对整个最终 diff、未跟踪测试、上下游、门禁和实测证据。
 
 审核通过后生成本地 `pr-draft.md` 和 `approved-content.json`，状态为 `awaiting_delivery_authorization`；这是本地验证就绪标记，不代表远端 PR 已创建或修复已合并。runner 在同轮按交付配置继续发布；关闭发布时保留本地任务。清单绑定原 task ID、基线、分支、工作树、全部变更文件内容/模式及成功验证；验证前后和独立审核前后必须保持相同内容。遗留待交付任务缺少清单时，需要人工重新验证与审核，不能补造历史批准。审核要求修改时，下次日跑续接实现与复审；无法复现或关键证据不足时停为待裁决/blocked。`blocked`、`needs_triage` 保留失败原因和历史，不自动重置；`manual_todo` 列出所需人工动作、任务文件、证据与历次尝试。任务状态和审查游标分离，无新增 PR 时仍可继续待办；同次预算不足则保留阶段和脏分支，不删除或提交。
 
@@ -49,7 +49,7 @@
 
 普通 `run` 在 `repair_enabled=true` 时，按布尔配置 `repair_delivery_enabled` 控制已验证修复的 PR 发布；缺省为 `true`，设为 `false` 时停留本地。兼容参数 `--deliver-repairs` 可以在本次调用覆盖关闭配置。发布路径核对内容清单、归属、基线与依赖环境；暂存批准文件；运行 staged guardrails（含公开面）、Ruff 与依赖图检查；创建单个修复提交；普通 push；创建或回读该分支唯一的 PR。这一级只推进到 PR，不赋予合并权限。日程原有的 `runner.py run --state-dir <state>` 参数已能读取该配置，无需为此修改 plist；部署仍由用户另行安排。
 
-PR 正文从任务与验证记录生成，必须包含来源 issue 编号（提交巡检无来源 issue 时明确说明）、触发条件和预期/实际、实际改动文件、验证命令与结果，以及“本 PR 未合并，需人工确认”。新验证记录保存实际命令；旧任务缺少命令时使用已保存的同一 selectors 生成复查命令并明确标注，不能伪造历史命令。正文移除自动关单指令。版本与发布文件变更不走这条路径；代码不安装依赖、不重置旧 worktree、不强推、不代建 issue、不发布版本。
+PR 正文从任务与验证记录生成，必须包含来源 issue 编号（提交巡检无来源 issue 时明确说明）、触发条件和预期/实际、实际改动文件、验证命令与结果，以及“本 PR 尚未合并；须经独立逐行审查、实际验证和宿主交付门禁”。新验证记录保存实际命令；旧任务缺少命令时使用已保存的同一 selectors 生成复查命令并明确标注，不能伪造历史命令。正文移除自动关单指令。版本与发布文件变更不走这条路径；代码不安装依赖、不重置旧 worktree、不强推、不代建 issue、不发布版本。
 
 ```bash
 python scripts/code_health_review.py run \
@@ -59,13 +59,49 @@ python scripts/code_health_review.py run \
 
 已存在的待交付任务先获得至多 120 秒、且不超过 repair 剩余额度四分之一的交付时间；其后推进本地任务，再用剩余时间交付新通过的任务。同一任务本轮只交付一次；同一分支已有 PR 时复用，HEAD 不变时不重复创建 PR 或 push。CI 未完成时保存 PR 和 HEAD，立即让出本轮时间。CI 失败记录 `ci_failed`、具体检查结果和首次失败证据 `delivery.ci_failure`，计入 blocked；不会触发 CI 重跑，也不会把任务重新送进本地修复来覆盖红灯。后续运行可回读外部检查状态，首次失败证据保留。合并要求 `checks` 及当前 [Guardrails](../.github/workflows/guardrails.yml) 的八个 `regression (0)` 至 `regression (7)` 全部成功，其余已返回检查不得失败或仍运行；缺失、跳过的必需检查不算成功。
 
-远端 PR 还需人审并由人决定合并；没有批准时保留 `awaiting_merge_authorization`。人核对具体任务、内容和 CI 后，可在 GitHub 手工合并，或在下一次正常运行增加 `--approve-repair-merge <16位任务ID>=<40位HEAD>`，可重复该参数批准多个明确修订；后者为兼容原入口仍须同时带 `--deliver-repairs`。批准只应用于这次调用中的该 task/HEAD；任何配置项、本地独立审核或已保存的旧批准都不能替代新调用的人工授权。程序使用 `gh pr merge --merge --match-head-commit <HEAD>`，要求 PR 明确可合并且状态为 `CLEAN`，不使用 admin 或自动等待合并选项。`status`、`issues-backfill`、smoke、dry-run 均拒绝交付参数。
+常规自动合并由下文“开放 PR 审查与实际验证”的独立阶段负责，`pull_request_merge_enabled=true` 才可在所有门禁通过后 squash 合并；本地修复者的 approve 不能替代该阶段。修复交付模块本身仍保留人工兼容入口：`--approve-repair-merge <16位任务ID>=<40位HEAD>`，须同时带 `--deliver-repairs`，仅用于当次指定 task/HEAD，使用原有 `--merge --match-head-commit` 并要求 `CLEAN`。关闭 PR 自动合并开关后，仍可由用户在 GitHub 人工合并或使用这个精确批准入口。任何路径都不使用 admin 或自动等待合并选项。`status`、`issues-backfill`、smoke、dry-run 均拒绝交付参数，也不运行新增评论/发布阶段。
 
-合并命令成功仍不算完成。程序重新回读同仓库、同分支、base=`main`、同 HEAD 的 merged PR，再次核对上述必需 CI，记录合并 SHA 与时间，fetch 后证明修复 HEAD 属于合并提交、合并提交属于 `origin/main`，才记录任务为 `merged`。手工已合并 PR 和中断后的恢复路径同样必须满足 CI 证据，不能绕过后直接关单。只有这条有证据的修复路径可以 PATCH 关闭该任务已有的来源 issue，并再次 GET 确认；新归属出现时转人工处理。人工采用 squash/rebase 导致不能证明 HEAD 祖先关系时，同样保留人工核对，不猜测合并等价。
+合并命令成功仍不算完成。程序重新回读同仓库、同分支、base=`main`、同 HEAD 的 merged PR，再次核对上述必需 CI，记录合并 SHA 与时间，fetch 后证明修复 HEAD 属于合并提交、合并提交属于 `origin/main`，才记录任务为 `merged`。手工已合并 PR 和中断后的恢复路径同样必须满足 CI 证据，不能绕过后直接关单。只有这条有证据的修复路径可以 PATCH 关闭该任务已有的来源 issue，并再次 GET 确认；新归属出现时转人工处理。squash 后 HEAD 不再是合并提交的祖先时，须用 Git 证明合并树与已验证 HEAD 的内容完全一致；不能证明时保留人工核对。开放 PR 自动合并另要求 squash 的第一父提交等于实测 base，才把它交给发布阶段。
 
 `delivery-commands.jsonl` 和 task 的 `delivery` 字段保存执行、PR、HEAD、合并证据及逐条关闭回读。创建命令成功返回 URL 时立即保存 `pr_created_receipt` 并计入本轮新建 PR，后续状态回读超时不抹掉创建事实。每次关闭先持久化 `close_requests`，再发送 PATCH；响应丢失时先 GET，已有请求首次确认为 closed 时计入确认关闭，已确认条目不重复计数或 PATCH。中途失败保留已完成步骤，续跑复用分支/PR。模型判断“已修复”“不能复现”的历史条目仍只输出关闭建议，不能进入这条自动关闭路径。
 
 这些是代码入口和权限边界；开发或测试通过不表示本机已安装、日程已调整或远端交付已启用。日程使用的脚本、参数与安装回执须另行核对，本轮不修改本机配置实际值。smoke、dry-run、status 和 issues-backfill 不进入 PR 发布或合并路径，配置启用也不改变这一点。
+
+## 开放 PR 审查与实际验证
+
+`scripts/code_health_pull_requests.py` 使用 `gh pr list --state open` 获取完整队列，按创建时间、编号从旧到新处理。`max_pull_requests` 默认 3，`pull_request_unit_timeout_seconds` 默认 900 秒；超过本阶段预算或数量上限的 PR 写入待续清单，不消耗提交巡检或 issue 配额。loop 自己的发布 PR 交给发布专用门禁，避免通用审查绕开 release_delta 的完整范围要求。draft 和非 main 目标均保留待裁决。
+
+每个 PR fetch 到独立 detached worktree，绑定完整 HEAD、当前 main/base 和 diff 摘要；模型须逐文件逐行读取全部 diff、原断言、owner 及上下游一跳，为每个文件和每个 hunk 返回对应摘要及逻辑分析。宿主拒绝漏文件、漏 hunk、摘要不符或空分析。明确检查无关改动、弱化断言、伪造或只覆盖 mock 的测试、只写注释却声称实现、复制错误逻辑和异常边界；按实际代码与证据判断，不以贡献者身份或工具使用情况推断质量。
+
+模型提出受影响测试和相关回归的精确 selectors，宿主在现有无网络验证沙箱中实际执行两组 pytest，保存命令、JUnit、非空测试清单及退出码。失败、error、skip、测试前后源码变化都拒绝合并；仅 CI 绿色或模型自述通过不算验证。bug fix（模型分类、fix 标题或 bug 标签任一成立）须将相同回归测试复制到独立基础树，验证真实断言从红变绿，测试身份相同；运行时异常、依赖错误或旧环境不匹配不能冒充红灯。maintenance/nonbug 必须说明为何不适用失败基线，仍实际跑影响测试和相关回归。无法实跑则 blocked。
+
+三种审查结论：
+
+- `approve`：完整逐行检查和宿主实测通过、没有未解决 findings，才进入 `merge_eligible`。交付宿主重新绑定内容、HEAD/base、讨论、非 draft、可合并状态和必需 CI，然后 `gh pr merge --squash --match-head-commit <HEAD>`；回读 merged、main 祖先关系、squash 第一父和完整树后才记录 `merged`。
+- `changes_required`：回复具体问题及证据，不修改对方代码，等对方更新或另行安排修复；更新 HEAD/有效讨论后重新审查。
+- `decline`：回复无价值、超范围或明显有问题的原因并建议关闭。关闭始终由用户单独裁决；`pull_request_close_enabled` 默认 false，当前实现拒绝将其设为 true，避免一次开关扩大所有 PR 的关闭权限。
+
+第三方中转/代理服务、外部 provider 站点接入或硬编码路由是硬边界：issue、修复独立审核、开放 PR 和发布全增量审核均须显式检查 `third_party_service`。命中就转产品决策；即使模型同时返回 approve、测试通过或声称低成本，宿主仍拒绝自行入队、合并或发布。通用协议能力是否值得做也需单独分析，不把某个中转站直接塞进产品。
+
+`pull-request-state.json` 保存精确输入和结果；新 HEAD、base、有效讨论或验证环境变化会失效。相同失败输入复用报告，相同成功输入可复用实测证据，但每次合并仍重新回读身份和 CI。只有已有发送回执且作者匹配的 loop 评论才从输入中排除，用户追加的证据仍触发重审。每条报告、patch、清单、实测日志和评论草稿保存在 `pull-requests/items/<编号>/<尝试>/`；超时、半途停止不能记成已审完成。
+
+## 修复后的发版与回复
+
+`scripts/code_health_delivery.py` 仅对本地确实处理过的 issue/PR 评论，使用 `gh issue comment` / `gh pr comment --body-file`。默认开启 `comments_enabled`，实现用户要求的明确反馈；关闭时不写 GitHub。回复包括分诊理由或问题清单，完成时包括复现、改动、实际验证命令/结果、合并 SHA，以及已核实的版本与 Release 链接。正文不得把未执行的测试或尚未发布写成完成，也不自动公开内部日志。标题、标签、状态和权限不在评论授权内；PR 不通过不会自动关闭。
+
+`comment-state.json` 在发送前持久化待发正文和标识。发生超时或响应丢失时，下一轮先按标识和实际发送账号 GET 回读，已存在则补收据，不重复发。评论必须绑定已复核记录或已有修复 PR/来源；仅凭远端编号不能获得评论权限。日常 issue 复核仍只取数、保存结论，由独立交付阶段发送；`issues-backfill`、status、smoke 和 dry-run 不发布评论。
+
+`release_enabled` 默认 true，但只由已核实合入 main 的本 loop 修复/实现触发；没有合并不定时制造版本，一轮可将多个已合并修复放入同一发布任务。复用 [发布流程](RELEASE_PROCESS.md) 和现有 `.github/workflows/guardrails.yml` 的 VERSION 触发链路：
+
+1. fetch main/tags，冻结发布目标，核实所有修复提交属于 main；完整检查上个正式 tag 到该目标的**全部提交**，包括中间其他合并。发布上下文逐个读完整 diff，为每条提交提供真实 release_notes/no_release_note 和 design_evidence，不能只按提交主题分类。
+2. 默认只升 patch。保留已有 Unreleased 条目；新增功能、Breaking Changes、第三方服务接入、兼容性敏感改动或证据不足转待裁决。通过实际存在的 `version_update` 工具 preview/apply 及 freshness digest 更新 VERSION，不调用文档中尚无 CLI 实现的 `release.prepare` 等名字。
+3. 准备 VERSION、带日期的 CHANGELOG 和 `scripts/release_delta.py` 生成的 coverage，逐提交填入覆盖证据；运行 canonical `release_check.py --require-current-taxonomy --require-delta-coverage`、独立发布审核、完整 `release_preflight.sh --full --allow-dirty`，只提交三个发布元数据文件，再跑 `--require-clean`。
+4. 创建发布 PR，等待其必需 CI，重新确认发布 main 与已审目标一致后 squash。现有 Guardrails 在 VERSION 合入 main 后负责 tag、Release 及运行包；runner 不自建 tag，不直接 `gh release create`，不改 workflow、不部署生产。
+5. 回读精确 release merge SHA 的最新 Guardrails 整轮成功、tag 剥离后的提交、正式 Release、完整非零资产和运行包 `ready` 标记。核心 Release 已有但运行包未 ready 仍未完成；跨轮保存发布 PR 和证据，不能抢先回复版本。
+
+`releases/<批次>/task.json` 保存发布状态及来源。检查、授权、环境、预算或 CI 不足时明确回复“已合并未发版”并列待办；失败准备树保留，需人工核对后续跑，不自动 reset 或覆盖历史。已知发布 PR 可跨轮回读；发送响应丢失时保留证据交人工核对，不能猜测成功或重复制造发布 PR。评论失败单独记录，不抹掉已核实的合并/发布事实。
+
+新增开关均需布尔值：`pull_requests_enabled=true`、`pull_request_merge_enabled=true`、`comments_enabled=true`、`release_enabled=true`，以执行本轮明确授权；`pull_request_close_enabled=false`，因为低价值或有问题的判断可能出错，关闭应逐 PR 确认。`repair_delivery_enabled` 延用默认 true。开启这些配置不代表本机已部署，更不授权生产服务、配置、交易、通知或账本写入。
 
 ## 每轮报告
 
@@ -96,37 +132,37 @@ python scripts/code_health_review.py run \
 
 ## Issue 与使用反馈处理
 
-GitHub issue 是已有问题与使用反馈的统一持久待办。对话或其他渠道可以提供反馈；先查重，相同故障补充到原 issue，新问题才建 issue，不另建反馈队列。普通答疑可以直接解释；需要继续复核、产品裁决或研发处理的有效反馈应留下 issue。新建、评论、关闭、修改 issue 及对外回复均需相应明确授权；缺少授权时先准备具体正文草稿，本地处理可以继续。
+GitHub issue 是已有问题与使用反馈的统一持久待办。对话或其他渠道可以提供反馈；先查重，相同故障补充到原 issue，新问题才建 issue，不另建反馈队列。普通答疑可以直接解释；需要继续复核、产品裁决或研发处理的有效反馈应留下 issue。本 loop 对自己处理过的 issue/PR 的评论已获明确持续授权，按 `comments_enabled` 控制；新建 issue、修改元数据或人工关闭仍需另行授权。缺少相应权限时保留正文草稿和待办，本地处理可以继续。
 
 反馈至少记录来源、使用版本或提交、触发步骤、预期与实际、已有证据和缺失信息。用户未提供的事实保持未知；故障以“用户报告，待复核”记录，issue 的存在不代表缺陷成立。体验建议记录希望改善的行为，策略偏好记录待决事项，不强行包装成 bug。诊断附件只采集必要的脱敏内容，内部日志与完整附件不自动公开。
 
 手动复核与每日任务按以下顺序进行，分别遵守对应入口的预算；预算不足时保存待续位置，不为完成数量扩大范围：
 
 1. 冻结当前 `main` SHA 和 issue 讨论快照，先检查 assignee、最新讨论、关联开放或已合并 PR，以及本机正在处理该问题的任务。没有 assignee 不等于无人处理；范围重叠时复用已有工作或保留待办。
-2. 最多复核3条 issue，读取完整讨论和关联实现，追踪真实入口及上下游一跳。在冻结版本上分别记录“仍可复现”“已修复或部分修复”“证据不足或未复现”“需要产品或策略裁决”。后续评论可以纠正原报告，不能只按标题开修。
+2. 每日默认最多复核 5 条 issue，手动补扫按所选清单逐条进行，读取完整讨论和关联实现，追踪真实入口及上下游一跳。在冻结版本上分别记录“仍可复现”“已修复或部分修复”“证据不足或未复现”“需要产品或策略裁决”。后续评论可以纠正原报告，不能只按标题开修。
 3. 最多推进1条已确认、范围清楚且获授权的问题；明确当前剩余问题、owning boundary、文件范围和回归条件。沿现有本地复现、修复、验证与独立审核步骤处理；低影响的文档修正核对事实来源、链接和门禁即可，不为单行措辞新增镜像测试。没有合格问题时零修复有效。
-4. 在 gitignored 的 `docs/reviews/` 保留本轮报告、命令退出码、必要反证和验证证据。报告按 issue 链接列出冻结版本、结论、已改与未改范围、证据位置、阻塞与下一步；它是执行证据，不作为第二套待办。issue 更新草稿区分已完成和残留，获得针对该更新的授权后再发出；关闭 issue 需另行明确授权。
-5. 有符合条件的真实使用反馈时，将其整理为新 issue 或原 issue 的补充，获授权后写入，再按同一流程复核。没有新反馈就明确记录“反馈建单未验收”，不能编造故障来演示。完成本地改动与审核后准备 PR 草稿；提交、推送、创建远端 PR、合并和发布继续逐次授权。
+4. 在 gitignored 的 `docs/reviews/` 保留本轮报告、命令退出码、必要反证和验证证据。报告按 issue 链接列出冻结版本、结论、已改与未改范围、证据位置、阻塞与下一步；它是执行证据，不作为第二套待办。issue 更新区分已完成和残留，交由日常评论阶段按已授权范围发送；人工关闭仍需另行明确授权。
+5. 有符合条件的真实使用反馈时，将其整理为新 issue 或原 issue 的补充，获授权后写入，再按同一流程复核。没有新反馈就明确记录“反馈建单未验收”，不能编造故障来演示。完成本地改动与审核后按上述已授权门禁交付 PR、核实合并，再由独立发布阶段处理发版和结果回复；不扩大生产操作权限。
 
 处理进度与合并后审查游标分开。issue 中的历史问题或使用反馈不属于本轮新增提交时，不改写 `completed_commits`，也不推进定时任务的覆盖游标。用户于 2026-11-03 授权将 issue 处理接入现有每日任务：`scripts/code_health_issues.py` 负责独立取数、复核及准入，复用 `scripts/code_health_repair.py`；不改变线上 Bot 权限。
 
-每日通过只读 GitHub API 分页读取全部开放 issue 摘要，默认选 5 条，由 `max_issues` 覆盖，不再存在三条硬上限。先排除已完成的 `(issue编号, target SHA, input_digest)`；身份历史保存在 `issue-state.json`，输入 A→B→A 也不会重复调用。版本 2 输入指纹只包含该 issue 元数据及其关联 PR 摘要，本地 repair 状态和无关开放 PR 不使同一身份失效。剩余候选按 `(bool(reviewed_at), last_attempted_at 或 reviewed_at 或空串, issue编号)` 排序，复核时间跨 target 保留。有活跃 repair 的 issue 不享受优先权；持续超时的条目保留尝试时间，其他未尝试条目先行。固定 64 条、每日实际完成 5 条时，首轮需 13 次调度；这不等于全部修复或关闭。
+每日通过只读 GitHub API 分页读取全部开放 issue 摘要，默认选 5 条，由 `max_issues` 覆盖，不再存在三条硬上限。先排除已完成的 `(issue编号, target SHA, input_digest)`；身份历史保存在 `issue-state.json`，输入 A→B→A 也不会重复调用。版本 3 输入指纹包含该 issue 的有效字段、非 loop 自发评论及关联 PR 摘要；忽略仅更新时间/评论计数和已有回执绑定的自发评论，避免回复使同一 issue 无限重审。本地 repair 状态和无关开放 PR 不使同一身份失效。剩余候选按 `(bool(reviewed_at), last_attempted_at 或 reviewed_at 或空串, issue编号)` 排序，复核时间跨 target 保留。有活跃 repair 的 issue 不享受优先权；持续超时的条目保留尝试时间，其他未尝试条目先行。固定 64 条、每日实际完成 5 条时，首轮需 13 次调度；这不等于全部修复或关闭。
 
-身份规划在两种模式下均分页读取评论和 timeline，从本仓库 cross-reference、正文/评论 PR 链接，以及开放 PR 正文/标题中的 issue 引用构建关联集合。PR 摘要按编号排序，绑定标题、正文、状态、更新时间、HEAD 和合并信息，覆盖仍开放和已关闭的关联 PR；无关 PR 新建、编辑或合并不改该 issue 的指纹。`hydrate=False` 省去完整复核上下文，不省略这些身份读取，因此与完整 plan 的 digest 一致；代价是规划阶段也需要讨论和关联 PR 元数据请求，不依赖可能过期的本地关联缓存。全局开放 PR 的文件列表继续用于范围占用检查，独立于指纹，未链接但文件重叠的 PR 仍阻止准入。单条关联读取失败或请求超时而总预算尚足时，仅使该条身份不可用；总预算耗尽则停止规划。缺失信息不当成空关联集合。版本 2 与旧全局 PR 指纹不兼容：旧确认记录须重新复核，不能只改哈希后认可原结论；本次代码交付不迁移安装目录里的状态数据。
+身份规划在两种模式下均分页读取评论和 timeline，从本仓库 cross-reference、正文/评论 PR 链接，以及开放 PR 正文/标题中的 issue 引用构建关联集合。PR 摘要按编号排序，绑定标题、正文、状态、更新时间、HEAD 和合并信息，覆盖仍开放和已关闭的关联 PR；无关 PR 新建、编辑或合并不改该 issue 的指纹。`hydrate=False` 省去完整复核上下文，不省略这些身份读取，因此与完整 plan 的 digest 一致；代价是规划阶段也需要讨论和关联 PR 元数据请求，不依赖可能过期的本地关联缓存。全局开放 PR 的文件列表继续用于范围占用检查，独立于指纹，未链接但文件重叠的 PR 仍阻止准入。单条关联读取失败或请求超时而总预算尚足时，仅使该条身份不可用；总预算耗尽则停止规划。缺失信息不当成空关联集合。版本 3 与旧指纹不兼容，且复用结论必须含明确 triage：旧确认记录须重新复核，不能只改哈希后认可原结论；本次代码交付不迁移安装目录里的状态数据。
 
 选中的条目在调用模型前再次获取完整评论、timeline 和关联 PR，核对规划期间的 issue/关联 PR 是否变化，再独立调用、验证及落盘。`issues/items/<编号>/` 保存该条 plan、原始结果、报告、证据或 `pending.json`；完成后立即更新状态和累计汇总。单条超时、取数失败或无效结果只使该条待续，不能抹掉其他条目的结果；未完成项不写已完成身份。提供有效阻塞说明的结论归入 `needs_decision`，没有返回有效结论的尝试仍待续。
 
-模型返回 `confirmed`、`already_fixed`、`not_reproduced`、`needs_decision`、`blocked`、`duplicate` 或 `in_progress`。只有冻结版本上的实测证据、明确 owner 与文件范围齐备时才入修复队列；已有 assignee、关联开放 PR 或与开放 PR 文件重叠时记录 `in_progress`，不接管。稳定故障 key 在两种来源间复用同一任务；不同 key 的故障分别保留完整发现与验收范围，文件相交不能证明是同一问题。两种来源均在执行时检查本地文件冲突：与更早的待修或待交付工作重叠时暂停后来的任务，保留各自证据和待续资格，交人工解决冲突。issue 来源的待续任务需核对每个仍开放的来源：归属未变、输入指纹未变、先前复核仍为 confirmed，且 `latest.repair_task` 仍是当前任务 ID。同一 finding key 的重建或复用产生同一 ID；不同 key 是不同任务，不能因共享 issue 就绕过 ID 守卫。仅验证目标过期时，repair 阶段使用自己的剩余预算单独复核，不占每日 5 条；当前身份已有结论时复用。复核后仍须 confirmed 且验证目标相同才可恢复。尚无工作树、未开始实现的任务可记录重验证并更新基线；已有旧基线工作树一律保留，明确等待人工迁移，不自动 reset/rebase。输入变化时暂停续修，等待正常复核。一个故障关联多条 issue 时，不要求所有来源同日占用日常配额。新反证、已修结论、取数失败或变化尚未复核均保留工作区并暂停。来源不在开放列表时另作 GET 核对，只有明确返回 `closed` 才算已关闭；缺失、错误响应或权限失败都不等于关闭。所有来源均为已关闭 issue 的任务，在本地调度/交付前转为 `source_closed` 终态，保存原状态、关闭来源、时间、finding、attempts、证据及工作树；不占修复名额，不参与文件范围冲突，不删除数据或关闭远端 PR/issue。混合来源仅排除已确认关闭的 issue，其余开放来源仍逐项严格核对；有独立提交巡检来源时不会因 issue 关闭自动终止。报告单列 `source_closed` 数量。后续出现新确认时保留原工作并进入 `needs_triage`，不直接恢复旧实现。来源 issue、验证 SHA 和新增证据另记，不伪称发现来自本轮新增提交。
+模型返回 `confirmed`、`already_fixed`、`not_reproduced`、`needs_decision`、`blocked`、`duplicate`、`in_progress` 或 `not_worthwhile`，另必须提供 triage 的 decision、reason 和 third_party_service。先判断是否值得做：项目职责内、收益高于维护成本、没有未决产品/策略选择才是 `worthwhile`；超范围、重复、非本项目职责或收益不足为 `not_worthwhile`，保存理由并走 `reply`，需要用户选择为 `needs_decision`。第三方中转/provider 接入无论同时报告什么技术结论均强制待裁决。只有 `worthwhile`、third_party_service=false 且冻结版本上的实测证据、明确 owner 与文件范围齐备时才入修复队列；已有 assignee、关联开放 PR 或与开放 PR 文件重叠时记录 `in_progress`，不接管。稳定故障 key 在两种来源间复用同一任务；不同 key 的故障分别保留完整发现与验收范围，文件相交不能证明是同一问题。两种来源均在执行时检查本地文件冲突：与更早的待修或待交付工作重叠时暂停后来的任务，保留各自证据和待续资格，交人工解决冲突。issue 来源的待续任务需核对每个仍开放的来源：归属未变、输入指纹未变、先前复核仍为 confirmed、triage=worthwhile 且没有第三方服务接入，且 `latest.repair_task` 仍是当前任务 ID。同一 finding key 的重建或复用产生同一 ID；不同 key 是不同任务，不能因共享 issue 就绕过 ID 守卫。仅验证目标过期时，repair 阶段使用自己的剩余预算单独复核，不占每日 5 条；当前身份已有结论时复用。复核后仍须 confirmed 且验证目标相同才可恢复。尚无工作树、未开始实现的任务可记录重验证并更新基线；已有旧基线工作树一律保留，明确等待人工迁移，不自动 reset/rebase。输入变化时暂停续修，等待正常复核。一个故障关联多条 issue 时，不要求所有来源同日占用日常配额。新反证、已修结论、取数失败或变化尚未复核均保留工作区并暂停。来源不在开放列表时另作 GET 核对，只有明确返回 `closed` 才算已关闭；缺失、错误响应或权限失败都不等于关闭。所有来源均为已关闭 issue 的任务，在本地调度/交付前转为 `source_closed` 终态，保存原状态、关闭来源、时间、finding、attempts、证据及工作树；不占修复名额，不参与文件范围冲突，不删除数据或关闭远端 PR/issue。混合来源仅排除已确认关闭的 issue，其余开放来源仍逐项严格核对；有独立提交巡检来源时不会因 issue 关闭自动终止。报告单列 `source_closed` 数量。后续出现新确认时保留原工作并进入 `needs_triage`，不直接恢复旧实现。来源 issue、验证 SHA 和新增证据另记，不伪称发现来自本轮新增提交。
 
 反馈文字准确区分“已复现”“本地修复完成”“已合并”“已发布”和“运行版本已验证”，绑定对应提交、版本与证据。合并到 `main` 不等于用户运行版本已修复；新建 issue 不代表承诺修改策略或发布。使用反馈的手动验收要求至少有一条真实反馈完成查重、建单或补充、复核与明确下一步；缺少输入时，只确认规则落地及历史 issue 处理结果。
 
 ## 历史 issue 的处置与人工关闭
 
-复核有三种本地出口：当前实证缺陷转 `repair`，按稳定 key 新建或复用任务；已修复或失效且证据齐备时为 `close_recommended`；无法判定、归属其他工作或关闭证据不足时为 `needs_decision`。模型的 `already_fixed`、`not_reproduced`、`duplicate` 本身不能证明可关闭。阻塞项、未执行的测试和通用测试通过不能推断原问题已消失。
+复核有四种本地出口：值得做的当前实证缺陷转 `repair`，按稳定 key 新建或复用任务；不值得做为 `reply`，写明理由并回复；已修复或失效且证据齐备时为 `close_recommended`；产品待决、无法判定、归属其他工作或关闭证据不足时为 `needs_decision`。模型的 `already_fixed`、`not_reproduced`、`duplicate` 本身不能证明可关闭。阻塞项、未执行的测试和通用测试通过不能推断原问题已消失。
 
 每条关闭建议记录 issue 编号、冻结 SHA、输入指纹、关闭理由、可选的修复提交、实际验证日志及命令与整数退出码。日志必须在本条 work 内、非空，使用 JSON Lines 逐条记录 `command`、整数 `exit_code` 和实际 `output`。每条建议中的命令必须与自身日志记录对应，匹配记录的退出码均为 0；其他命令的成功码不能掩盖它的失败。提供修复提交时还校验完整 SHA 是冻结目标的祖先。结构性检查不替代人工判断日志是否覆盖原缺陷；不合格证据降为 `needs_decision`。
 
-每轮 `issues/summary.json` 和 `issues/report.md` 汇总四类计数与清单：建议关闭、转 repair、needs_decision、超时或其他待续（附具体原因）。`issues/close-recommendations.json` 按最多 10 条一批输出关闭建议，供用户明确整批确认。issue 复核/补扫的 `github_closed` 始终为空：这两个入口只有 GET，不执行 PATCH、不发布评论，建议关闭不表示 GitHub 已关闭。这些建议仍须由人明确确认并另行关闭；本地入队也不表示已经修复。上文已验证修复合并后的自动关闭独立记录在 repair 交付回执中，不消费或冒用关闭建议。
+每轮 `issues/summary.json` 和 `issues/report.md` 汇总五类计数与清单：建议关闭、转 repair、reply、needs_decision、超时或其他待续（附具体原因）。`issues/close-recommendations.json` 按最多 10 条一批输出关闭建议，供用户明确整批确认。issue 复核阶段及补扫的 `github_closed` 始终为空：复核不执行 PATCH；日常评论由后续交付阶段独立发送，补扫仍不发布评论。建议关闭不表示 GitHub 已关闭。这些建议仍须由人明确确认并另行关闭；本地入队也不表示已经修复。上文已验证修复合并后的自动关闭独立记录在 repair 交付回执中，不消费或冒用关闭建议。
 
 ## 手动全量补扫
 
@@ -137,7 +173,7 @@ python scripts/code_health_review.py issues-backfill \
   --state-dir "$HOME/Library/Application Support/options-monitor/code-health-review"
 ```
 
-每条仍受 `issue_unit_timeout_seconds`（默认 600 秒）限制；手动全量扫描按条目数分配总时间，不套用每日 12000 秒上限。64 条全部用满时，仅单条预算合计约 10 小时 40 分钟，准备阶段另限 600 秒。已有同身份结论复用，不再次调用模型。每条落盘并打印进度，每处理 10 条及末尾打印累计清单，关闭建议也按 10 条分组；结束写入 `runs/issues-backfill-<时间>/receipt.json` 和 `last-backfill.json`。有待续项时 CLI 返回 2；全部得出本地处置时返回 0，仍不意味着 GitHub 已关闭或 repair 已完成。
+每条仍受 `issue_unit_timeout_seconds`（默认 600 秒）限制；手动全量扫描按条目数分配总时间，不套用每日总预算上限。64 条全部用满时，仅单条预算合计约 10 小时 40 分钟，准备阶段另限 600 秒。已有同身份结论复用，不再次调用模型。每条落盘并打印进度，每处理 10 条及末尾打印累计清单，关闭建议也按 10 条分组；结束写入 `runs/issues-backfill-<时间>/receipt.json` 和 `last-backfill.json`。有待续项时 CLI 返回 2；全部得出本地处置时返回 0，仍不意味着 GitHub 已关闭或 repair 已完成。
 
 ```bash
 python scripts/code_health_review.py issues-backfill \
@@ -149,9 +185,9 @@ python scripts/code_health_review.py issues-backfill \
 
 ## 每日本地调度
 
-执行入口为 `scripts/code_health_review.py`，macOS 使用同一个用户级 launchd，每天本地时间 09:17 运行一轮。首次游标来自已完成首轮的完整 SHA；每轮先冻结远端 main，按配置 `max_units` 限制处理的 first-parent 主线单元数（默认 10，PR 合并或直接提交各计一个），并默认复核 5 条 issue（由 `max_issues` 覆盖）。没有增量时仍可处理 issue 和修复待办；两种输入均无待办时不调用模型。两种发现共用一个修复队列，每轮默认最多推进 3 个本地任务，不增加第二个日程。
+执行入口为 `scripts/code_health_review.py`，macOS 使用同一个用户级 launchd，每天本地时间 09:17 运行一轮。首次游标来自已完成首轮的完整 SHA；每轮先冻结远端 main，按配置 `max_units` 限制处理的 first-parent 主线单元数（默认 10，PR 合并或直接提交各计一个），并默认复核 5 条 issue（由 `max_issues` 覆盖）。没有增量时仍可处理 issue 和修复待办；两种输入均无待办时不调用模型。两种发现共用一个修复队列，每轮默认最多推进 1 个本地任务，不增加第二个日程。
 
-安装状态、规则副本、独立 Git mirror、游标与报告位于本机用户目录的 `Library/Application Support/options-monitor/code-health-review/`；任务工作区不作为调度运行依赖。每轮持久保存 `plan.json`、patch、报告、结构化结果及执行回执。`state.json` 保存连续已完成提交位置，`issue-state.json` 保存各 issue 的尝试时间、已完成身份历史、输入指纹、验证 SHA、处置及报告/修复任务位置，作为 GitHub 待办的本地执行进度；`last-run.json` 保存最近执行状态；runner 每次成功运行后同时刷新已有 `installation.json` 的 `next_calendar_trigger`，记录完成时刻之后的下一个系统本地时间 09:17。定时巡检报告位于 `runs/<运行编号>/report.md`，issue 的完整快照、逐条报告与评论草稿位于同轮 `issues/`。评论草稿尚未发布，仍需明确授权。
+安装状态、规则副本、独立 Git mirror、游标与报告位于本机用户目录的 `Library/Application Support/options-monitor/code-health-review/`；任务工作区不作为调度运行依赖。每轮持久保存 `plan.json`、patch、报告、结构化结果及执行回执。`state.json` 保存连续已完成提交位置，`issue-state.json` 保存各 issue 的尝试时间、已完成身份历史、输入指纹、验证 SHA、处置及报告/修复任务位置，作为 GitHub 待办的本地执行进度；`last-run.json` 保存最近执行状态；runner 每次成功运行后同时刷新已有 `installation.json` 的 `next_calendar_trigger`，记录完成时刻之后的下一个系统本地时间 09:17。定时巡检报告位于 `runs/<运行编号>/report.md`，issue 的完整快照、逐条报告与评论草稿位于同轮 `issues/`。评论草稿与实际发送回执分开保存；只有部署了新交付阶段且开关启用时才自动发送，草稿存在不代表已回复。部署须将同一修订的 runner.py 及 code_health_issues.py、code_health_repair.py、code_health_pull_requests.py、code_health_delivery.py 一起安装，并同步 policy.md；不能只替换旧的三个模块。本次不修改安装目录或其配置、队列。
 
 runner 先获取只读 GitHub 元数据和冻结源码，再用已有订阅登录的 Codex CLI 按 first-parent 顺序逐提交调用审查。Agent 不加载个人 CLI 配置或 MCP，模型网关和目录参数由本地任务配置明确指定；巡检和审核上下文只可在阶段 `work/` 写临时文件，复现/实现上下文额外只允许写独立修复树，均禁止网络和交互提权。外层 runner 负责写报告与游标。修复回归使用无网络验证沙箱与独立依赖环境，日志和 JUnit 由 runner 回读。运行锁防止手动与定时并发更新状态。
 
@@ -159,11 +195,11 @@ runner 先获取只读 GitHub 元数据和冻结源码，再用已有订阅登�
 
 某片超时、预算不足或返回未完成时即停止提交审查，不启动后续片。已保存的连续前缀保留，未完成单元及之后的提交留待下轮；混合完成与待续时总状态为 `partial`，首片超时也保存 `partial` 报告，片内回执为 `pending`。格式非法或证据缺失仍按原规则拒绝，不越过该片。即使首片未完成、cursor 未变，也将最近的合成报告保存为下一轮交接，保留检查进度、阻塞原因及未完成范围；下一轮从已保存 cursor 之后继续。修复阶段缺预算只记录 repair 待续，不覆盖已保存的 review 状态。issue 快照和复核在 review 之后使用独立预算，issue 结果不参与提交游标；issue 报告及合格修复记录先持久化，再写 issue 进度。修复阶段使用其保底额度及审核节省的剩余时间，不承诺单轮完成。`daily-summary.json` 分别列出已审提交/issue、入队任务、实际尝试、本地验证、跟进的 PR、本轮新建的 `prs_created`、本轮首次核实的 `merged`、本轮关闭回读确认的 `closed`，以及剩余 pending/blocked/待裁决。`merged` 保存首次核实的任务 ID，实际合并时间与提交见任务的 `delivery.merge_proof`；跨轮继续关闭不重复累计合并。不得将入队、本地验证或 PR 创建计为已合并修复。人工待办保留原 blocked 原因、证据及继续所需动作，不通过重置 pending 消除阻塞。已合并任务不再占用后续任务的文件冲突门禁。
 
-预算公式：每日总上限 `D = timeout_seconds`，启动时刻 `t0`，总截止 `E = t0 + D`。启用 repair 时首先预留 `P = min(D, repair_budget_seconds)`（缺省 1800 秒，启用时至少 30 秒），否则 `P = 0`。其后启用 issue 时分配 `I = min(D - P, issue_timeout_seconds)`（缺省 3600 秒），否则 `I = 0`；提交审查分配 `R = min(D - P - I, review_budget_seconds)`（缺省 6600 秒），截止 `Er = t0 + R`。smoke 不预留 issue 或 repair。review 提前结束不增加 issue 额度，issue 无待办不增加 review 额度；两者节省的时间均可供 repair 使用。现有安装或配置实际值不会由本次改造自动修改。
+预算公式：每日总上限 `D = timeout_seconds`（新缺省 15000 秒），启动时刻 `t0`，总截止 `E = t0 + D`。原有分配保持：启用 repair 时 `P = min(D, repair_budget_seconds)`（缺省 1800 秒，至少 30 秒），否则 0；启用 issue 时 `I = min(D - P, issue_timeout_seconds)`（缺省 3600 秒），否则 0；提交审查 `R = min(D - P - I, review_budget_seconds)`（缺省 6600 秒）。新增 PR 分配 `Q = pull_request_budget_seconds`（缺省 1800 秒，关闭 PR 阶段时为 0）；评论或发布任一开启时 `L = delivery_budget_seconds`（缺省 1200 秒），否则 0。必须满足 `R + I + P + Q + L <= D`，不满足直接报告配置容量不足，不静默压缩原 R/I/P。新默认全开启时为 `15000 = 6600 + 3600 + 1800 + 1800 + 1200`。旧 12000 秒配置若已占满原额度，部署时须显式扩总预算、重配额度或关闭新阶段；本次不改本机实际值。smoke 的 I/P/Q/L 都为 0。
 
 提交逐片只使用 `review_unit_timeout_seconds`（缺省 600 秒，最低 30 秒），调用超时为该上限与 review 剩余时间的较小值；剩余不足 30 秒不启动下一片。准备源码和提交元数据计入 review 额度；提交元数据超时保存待续范围，继续 issue。提交额度为 0 时，共用准备先计入可用 issue 额度；两种审核额度均为 0 时，准备和现有任务预检使用 repair 自身额度，提交模型不启动。旧键 `review_timeout_seconds` 完全不控制逐提交超时，与 `review_unit_timeout_seconds` 同时存在时也不生效。
 
-issue 阶段开始时 `Ei = min(E - P, monotonic() + I)`；取数、逐条复核及证据校验共用此截止，每条另受 `issue_unit_timeout_seconds`（缺省 600 秒）限制。建议 `max_issues=5`、`max_units=10`、`max_repairs=3`、`D=12000`、`R=6600`、`I=3600`、`P=1800`。现有 `D=3600`、issue 配额 600 秒且 repair 启用时，提交额度为 1200 秒、issue 600 秒、repair 保底 1800 秒；它会降低提交审查量以避免修复继续被饿死。数量均是上限，不能将超时记成完成。`--smoke` 继续只受总预算剩余时间限制。
+阶段顺序为 review → issues → pull_requests → repair → delivery。review 截止 `Er = t0 + R`；issue 开始时 `Ei = min(E - P - Q - L, monotonic() + I)`，取数、逐条复核及证据校验共用截止，每条另受 `issue_unit_timeout_seconds`（缺省 600 秒）限制；PR 开始时 `Eq = min(E - P - L, monotonic() + Q)`，每条另受 900 秒上限；repair 截止 `Ep = E - L`；交付开始时 `El = min(E, monotonic() + L)`。前阶段节省的时间可供 repair 使用，但不扩大 issue、PR 或交付自己的上限；PR 超时不能借 issue、修复保底或发布额度。建议 `max_units=10`、`max_issues=5`、`max_pull_requests=3`、`max_repairs=1`。发布任务未完成时继续审查其他 PR，但暂停本 loop 的其他 PR 自动合并，避免先推进 main 使待发布覆盖失效。数量均是上限，超时不记成完成；执行失败不影响已持久化的其他阶段。`--smoke` 继续只受总预算剩余时间限制。
 
 发现中的 `evidence_log` 可以是阶段 `work/` 内的相对路径，或规范化后仍位于该目录内的绝对路径。绝对路径的原始组件含 `..` 或 `.git` 时拒绝；解析路径与 `work/` 的 symlink 后，必须能通过路径级 `relative_to(work)` 检查，转换结果还须满足原有相对路径校验（无 `..`、`.git`）。目录外路径、同前缀兄弟目录和通过 symlink 逃逸的路径仍拒绝。归一化后的 finding、持久化结构化结果与修复任务均保存相对 `work/` 的 `evidence_log`；入队仍要求该证据为目录内实际文件。`owner_path`、`fix_scope` 继续只允许原有规则下的相对路径。
 
