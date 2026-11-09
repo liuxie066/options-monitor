@@ -75,6 +75,142 @@ def _chain_bundle(*, rows: list[dict[str, object]], source_outcome: str) -> Symb
     )
 
 
+class _DteSelectionGateway:
+    def __init__(self, expirations: list[str], *, chain_expiration: str = "2026-12-18", empty_chain: bool = False, discovery_mode: str = "ok"):
+        self.expirations = expirations
+        self.chain_expiration = chain_expiration
+        self.empty_chain = empty_chain
+        self.discovery_mode = discovery_mode
+        self.expiration_calls: list[str] = []
+        self.chain_calls: list[dict] = []
+        self.snapshot_calls: list[list[str]] = []
+        self.close_calls = 0
+
+    def get_option_expiration_dates(self, code):
+        self.expiration_calls.append(code)
+        if self.discovery_mode == "error":
+            raise RuntimeError("synthetic expiration discovery failure")
+        if self.discovery_mode == "malformed":
+            return pd.DataFrame({"unexpected_column": ["2026-12-18"]})
+        return pd.DataFrame({"strike_time": self.expirations})
+
+    def get_option_chain(self, **kwargs):
+        self.chain_calls.append(dict(kwargs))
+        if self.empty_chain:
+            return pd.DataFrame()
+        code = f"US.NVDA{date.fromisoformat(self.chain_expiration).strftime('%y%m%d')}P100000"
+        return pd.DataFrame([{
+            **_chain_row(code), "strike_time": self.chain_expiration,
+            "option_standard_type": "STANDARD", "stock_owner": "US.NVDA",
+            "stock_type": "DRVT", "suspension": False,
+        }])
+
+    def get_snapshot(self, codes):
+        codes = list(codes)
+        self.snapshot_calls.append(codes)
+        return pd.DataFrame([
+            {"code": code, "last_price": 1.0, "bid_price": 0.9, "ask_price": 1.1,
+             "bid_vol": 10, "ask_vol": 12, "price_spread": 0.01, "sec_status": "NORMAL",
+             "suspension": False, "option_contract_multiplier": 100}
+            for code in codes
+        ])
+
+    def close(self):
+        self.close_calls += 1
+
+
+@pytest.mark.parametrize("case", [
+    "discovery_empty", "dte_filtered_empty", "dte_filtered_empty_chain_empty",
+    "selected_date", "explicit_date", "discovery_error", "discovery_malformed",
+])
+def test_fetch_symbol_preserves_completed_empty_expiration_selection(monkeypatch, tmp_path: Path, case: str) -> None:
+    import socket
+
+    import src.application.opend_symbol_fetching as mod
+
+    today = date(2026, 7, 28)
+    in_scope = "2026-08-21"
+    positive = case in {"selected_date", "explicit_date"}
+    gateway = _DteSelectionGateway(
+        [] if case == "discovery_empty" else [in_scope if case == "selected_date" else "2026-12-18"],
+        chain_expiration=in_scope if positive else "2026-12-18",
+        empty_chain=case == "dte_filtered_empty_chain_empty",
+        discovery_mode={"discovery_error": "error", "discovery_malformed": "malformed"}.get(case, "ok"),
+    )
+    forbidden_calls = []
+
+    def forbidden(*args, **kwargs):
+        forbidden_calls.append((args, kwargs))
+        raise AssertionError("controlled fetch must not construct a real gateway or connect a socket")
+
+    monkeypatch.setattr(mod, "get_trading_date", lambda _market: today)
+    monkeypatch.setattr(mod, "build_ready_futu_quote_gateway", forbidden)
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    monkeypatch.setattr("src.application.opend_utils.load_runtime_symbol_aliases", lambda *_: {})
+    payload = mod.fetch_symbol(
+        "NVDA", gateway=gateway, spot_override=100.0, base_dir=tmp_path,
+        option_types="put", min_dte=7, max_dte=45, no_retry=True,
+        explicit_expirations=[in_scope] if case == "explicit_date" else None,
+    )
+    meta = payload["meta"]
+    summary = {
+        "expiration_calls": gateway.expiration_calls, "chain_calls": gateway.chain_calls,
+        "snapshot_calls": gateway.snapshot_calls,
+        "rows": [{key: row.get(key) for key in ("expiration", "dte")} for row in payload["rows"]],
+        "meta": {key: meta.get(key) for key in ("status", "source_outcome", "reason_code", "error_code", "error")},
+    }
+    assert forbidden_calls == []
+    assert gateway.close_calls == 0
+    assert gateway.expiration_calls == ([] if case == "explicit_date" else ["US.NVDA"])
+    assert payload["symbol"] == "NVDA" and payload["underlier_code"] == "US.NVDA"
+    if case in {"discovery_error", "discovery_malformed"}:
+        assert meta["status"] == "error", summary
+        assert meta.get("source_outcome") != "success_empty", summary
+        assert meta["snapshot_complete"] is False
+        assert gateway.chain_calls == gateway.snapshot_calls == []
+    elif positive:
+        assert meta["status"] == "ok" and meta["source_outcome"] == "success_rows", summary
+        assert len(payload["rows"]) == 1 and payload["expirations"] == [in_scope], summary
+        assert len(gateway.chain_calls) == 1
+        assert gateway.chain_calls[0]["start"] == gateway.chain_calls[0]["end"] == in_scope
+        expected_code = f"US.NVDA{date.fromisoformat(in_scope).strftime('%y%m%d')}P100000"
+        assert gateway.snapshot_calls == [[expected_code]]
+    else:
+        assert payload["rows"] == [] and payload["expirations"] == [], summary
+        assert meta["status"] == "ok" and meta["source_outcome"] == "success_empty", summary
+        assert meta["reason_code"] == "no_expirations"
+        assert meta["snapshot_complete"] is True and meta["snapshot_requested_code_set"] == []
+        assert meta["query_scope_validated"] is True
+        assert meta["expiration_opend_calls"] == 1 and meta["expiration_cache_hits"] == 0
+        assert meta["opend_call_count"] == 0
+        assert meta["errors"] == [] and meta["expiration_statuses"] == {}
+        assert OpeningUnderlierObservation.from_mapping(meta["underlier_observation"]).code == "US.NVDA"
+        assert datetime.fromisoformat(meta["source_observed_at"]).tzinfo is not None
+        assert datetime.fromisoformat(meta["completed_at_utc"]).tzinfo is not None
+        assert gateway.chain_calls == gateway.snapshot_calls == []
+
+
+def test_raw_chain_request_retains_unscoped_full_chain_contract(tmp_path: Path) -> None:
+    from src.application.option_chain_fetching import OptionChainFetchRequest, fetch_option_chains
+    from src.infrastructure.futu_gateway import retry_futu_gateway_call
+
+    gateway = _DteSelectionGateway([])
+    result = fetch_option_chains(
+        gateway=gateway,
+        retry_call=retry_futu_gateway_call,
+        request=OptionChainFetchRequest(
+            symbol="NVDA", underlier_code="US.NVDA", expirations=[], option_types="put",
+            chain_cache=False, base_dir=tmp_path, asof_date="2026-07-28", no_retry=True,
+        ),
+    )
+    assert result.status == "ok" and result.source_outcome == "success_rows"
+    assert len(result.rows) == 1 and result.rows[0]["strike_time"] == "2026-12-18"
+    assert len(gateway.chain_calls) == 1
+    assert "start" not in gateway.chain_calls[0] and "end" not in gateway.chain_calls[0]
+    assert gateway.expiration_calls == gateway.snapshot_calls == []
+    assert gateway.close_calls == 0
+
+
 def _install_symbol_dependencies(monkeypatch, *, chain_bundle: SymbolOptionChainResult) -> None:  # type: ignore[no-untyped-def]
     import src.application.opend_symbol_fetching as mod
 
