@@ -26,6 +26,7 @@ from src.application.runtime_config_freshness import configured_runtime_markets
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.settings import build_effective_env, diagnose_effective_settings
 from src.infrastructure.futu_gateway import inspect_futu_sdk_earnings_calendar_capability
+from src.infrastructure.private_storage import validate_private_sqlite_target
 
 
 def run_setup_check(
@@ -202,7 +203,7 @@ def run_setup_check(
         ),
     )
 
-    session_parent_ok = False
+    session_path_ok = False
     if bot_disabled:
         add("bot.session_path", "info", "Bot is disabled; session path check skipped")
     else:
@@ -215,10 +216,24 @@ def run_setup_check(
             and not session_parent_is_symlink
             and os.access(session_parent, os.W_OK | os.X_OK)
         )
+        session_target_error = None
+        if session_parent_ok:
+            try:
+                validate_private_sqlite_target(session_path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                session_target_error = str(exc)
+        session_path_ok = session_parent_ok and session_target_error is None
+        session_message = "Bot Host parent exists and is writable" if session_parent_ok else "Bot Host parent is missing or not writable"
+        session_hint = None if session_parent_ok else f"Create and grant write access to the Session parent: {session_parent}"
+        if session_target_error is not None:
+            session_message = f"Bot Host audit target is unavailable: {session_target_error}"
+            session_hint = "Set OM_INBOUND_AUDIT_DB to a regular file or an unused non-symlink path."
         add(
             "bot.session_path",
-            "ok" if session_parent_ok else "error",
-            "Bot Host parent exists and is writable" if session_parent_ok else "Bot Host parent is missing or not writable",
+            "ok" if session_path_ok else "error",
+            session_message,
             {
                 "host_audit_db": str(audit_db),
                 "session_path": str(session_path),
@@ -227,7 +242,7 @@ def run_setup_check(
                 "parent_is_symlink": session_parent_is_symlink,
                 "session_exists": session_path.exists(),
             },
-            hint=None if session_parent_ok else f"Create and grant write access to the Session parent: {session_parent}",
+            hint=session_hint,
         )
     if bundle_declared:
         add("upgrade.runtime_bundle", "info", "runtime bundle upgrades use verified complete runtime artifacts")
@@ -397,7 +412,7 @@ def run_setup_check(
     return {
         "summary": {
             "ok": error_count == 0,
-            "bot_ready": model_context_ok and session_parent_ok,
+            "bot_ready": model_context_ok and session_path_ok,
             "error_count": error_count,
             "warning_count": warning_count,
         },
