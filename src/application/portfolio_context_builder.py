@@ -234,8 +234,11 @@ def build_context(
             continue
 
         sym = _normalize_symbol(asset_type, asset_id)
-        if not sym or qty is None:
+        if not sym or qty is None or not math.isfinite(qty):
             continue
+        # Non-finite stock costs follow the existing unknown-cost aggregation path.
+        if avg_cost is not None and not math.isfinite(avg_cost):
+            avg_cost = None
 
         # Keep only what downstream needs. Multiple holdings rows for the same
         # account/symbol must aggregate; otherwise CC capacity can be
