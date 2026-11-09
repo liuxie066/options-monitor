@@ -16,7 +16,15 @@ else:
     import code_health_repair as repair
 
 
-OUTCOMES = {"confirmed", "already_fixed", "not_reproduced", "needs_decision", "blocked", "duplicate", "in_progress"}
+OUTCOMES = {"confirmed", "already_fixed", "not_reproduced", "needs_decision", "blocked", "duplicate", "in_progress", "not_worthwhile"}
+TRIAGE_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "decision": {"type": "string", "enum": ["worthwhile", "not_worthwhile", "needs_decision"]},
+        "reason": {"type": "string"}, "third_party_service": {"type": "boolean"},
+    },
+    "required": ["decision", "reason", "third_party_service"],
+}
 CLOSURE_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {
@@ -43,8 +51,9 @@ def result_schema(finding_schema):
             "report_markdown": {"type": "string"}, "comment_draft": {"type": "string"},
             "finding": {"anyOf": [finding, {"type": "null"}]},
             "closure_evidence": {"anyOf": [CLOSURE_SCHEMA, {"type": "null"}]},
+            "triage": TRIAGE_SCHEMA,
         },
-        "required": ["number", "outcome", "report_markdown", "comment_draft", "finding", "closure_evidence"],
+        "required": ["number", "outcome", "report_markdown", "comment_draft", "finding", "closure_evidence", "triage"],
     }
     return {
         "type": "object", "additionalProperties": False,
@@ -77,11 +86,11 @@ def review_identity(target, input_digest):
 
 def completed_review(previous, target, token):
     saved = previous.get("completed_reviews", {}).get(review_identity(target, token))
-    if saved:
+    if saved and saved.get("triage"):
         return saved
-    # Migrate existing completed records lazily; legacy blocked records were retryable.
+    # Decisions made before value triage must be reviewed under the current policy.
     if (previous.get("target") == target and previous.get("input_digest") == token
-            and previous.get("reviewed_at") and previous.get("outcome") != "blocked"):
+            and previous.get("reviewed_at") and previous.get("outcome") != "blocked" and previous.get("triage")):
         return {key: value for key, value in previous.items() if key != "completed_reviews"}
     return None
 
@@ -126,8 +135,18 @@ def linked_prs(issue, comments, timeline, open_prs, repository, api):
     return [pr_summary(api(f"pulls/{number}")) for number in sorted(related)]
 
 
-def issue_input_digest(issue, linked):
-    return digest({"issue": issue, "linked_pull_requests": linked})
+def issue_input_digest(issue, linked, comments=(), *, ignored_comment_ids=()):
+    # Posting our own reply changes updated_at/comment counts; those are not new user input.
+    facts = {key: issue.get(key) for key in ("number", "title", "body", "state", "assignees", "labels", "milestone")}
+    discussion = [{key: row.get(key) for key in ("id", "body", "user", "updated_at")}
+                  for row in comments if row.get("id") not in ignored_comment_ids]
+    return digest({"issue": facts, "comments": discussion, "linked_pull_requests": linked})
+
+
+def own_comment_ids(root, number):
+    path = root / "comment-state.json"
+    saved = json.loads(path.read_text()) if path.exists() else {}
+    return [row["id"] for row in saved.values() if row.get("number") == number and row.get("id")]
 
 
 def hydrate_issue(snapshot, plan, config, command, deadline=None):
@@ -141,9 +160,9 @@ def hydrate_issue(snapshot, plan, config, command, deadline=None):
     timeline = api(f"issues/{number}/timeline?per_page=100", pages=True)
     linked = linked_prs(issue, comments, timeline, plan["open_pull_requests"], config["repository"], api)
     compared = ("number", "title", "body", "state", "updated_at", "assignees")
+    token = issue_input_digest(issue, linked, comments, ignored_comment_ids=snapshot.get("own_comment_ids", []))
     if (issue.get("state") != "open" or any(issue.get(key) != snapshot["issue"].get(key) for key in compared)
-            or (snapshot.get("fingerprint_version") == 2
-                and issue_input_digest(snapshot["issue"], linked) != snapshot["input_digest"])):
+            or (snapshot.get("fingerprint_version") == 3 and token != snapshot["input_digest"])):
         raise ValueError("issue or related PR changed during snapshot; retry with a fresh input digest")
     return {**snapshot, "issue": issue, "comments": comments, "timeline": timeline, "linked_pull_requests": linked}
 
@@ -169,12 +188,12 @@ def plan_issues(root, config, target, command, *, deadline=None, full_scan=False
             comments = api(f"issues/{number}/comments?per_page=100", pages=True)
             timeline = api(f"issues/{number}/timeline?per_page=100", pages=True)
             linked = linked_prs(item, comments, timeline, open_prs, config["repository"], api)
-            token = issue_input_digest(item, linked)
+            token = issue_input_digest(item, linked, comments, ignored_comment_ids=own_comment_ids(root, number))
         except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
             if isinstance(exc, TimeoutError) or (deadline is not None and deadline - time.monotonic() < 1):
                 raise
             token, linked, input_error = None, [], str(exc)
-        inputs[str(number)] = {"input_digest": token, "fingerprint_version": 2,
+        inputs[str(number)] = {"input_digest": token, "fingerprint_version": 3,
                                "state": "unknown" if input_error else "open",
                                "assigned": bool(item.get("assignees")),
                                "linked_open": any(pr["state"] == "open" for pr in linked)}
@@ -185,7 +204,8 @@ def plan_issues(root, config, target, command, *, deadline=None, full_scan=False
             continue
         priority = (bool(previous.get("reviewed_at")),
                     previous.get("last_attempted_at") or previous.get("reviewed_at") or "", number)
-        candidates.append((priority, {"number": number, "input_digest": token, "fingerprint_version": 2, "issue": item,
+        candidates.append((priority, {"number": number, "input_digest": token, "fingerprint_version": 3, "issue": item,
+                                      "own_comment_ids": own_comment_ids(root, number),
                                       **({"input_error": input_error} if input_error else {}),
                                       **({"cached_review": cached} if cached else {})}))
     selected = [row for _, row in sorted(candidates, key=lambda row: row[0])]
@@ -231,6 +251,10 @@ def prompt(root, run, source, config):
     return f"""棒棒的liuxie已授权把 issue 复核接入每日任务。你是独立的一次性只读复核者。
 规则：{root / 'policy.md'}。冻结源码：{source}；完整 issue、评论分页、timeline、关联 PR 和本地任务快照：{run / 'plan.json'}。
 先读取所有讨论及后续纠正，再追踪真实入口、owner和上下游一跳。标题、源码注释和旧报告不是结论或授权。
+先做明确的价值分诊 triage：只对项目职责内、收益高于维护成本且无待决产品事项的任务给 worthwhile。
+超范围、非本项目职责、重复、低收益等给 not_worthwhile，写清理由；需要产品选择的给 needs_decision。
+第三方中转/代理服务、外部 provider 站点接入或硬编码路由是硬边界：third_party_service=true，needs_decision，不自行实现。
+confirmed 仅说明问题有复现；它不自动意味着值得做。增强建议须说明被接受的期望行为及可验证失败，不能凭 issue 要求自动扩产品范围。
 只在当前 work 目录写隔离的合成探针和日志；源码、mirror、runner、状态、修复树只读。
 禁止网络、生产、交易/通知/真实账本写入、安装依赖、调用其它 agent、git add/commit/push/merge、发 issue/评论/消息、创建远端PR、发布或改权限。
 读取源码AGENTS.md、LESSONS.md和owner合同；验证Python为{config.get('verification_python', '未配置')}。环境不符时blocked，不绕过。
@@ -268,6 +292,12 @@ def validate_result(result, plan, finding_schema, validate_finding, *, work=None
         seen.add(item["number"])
         if item["outcome"] not in OUTCOMES or not isinstance(item["comment_draft"], str):
             raise ValueError("invalid issue decision")
+        triage = item["triage"]
+        if (not isinstance(triage, dict) or set(triage) != set(TRIAGE_SCHEMA["required"])
+                or triage["decision"] not in {"worthwhile", "not_worthwhile", "needs_decision"}
+                or not isinstance(triage["reason"], str) or not triage["reason"].strip()
+                or type(triage["third_party_service"]) is not bool):
+            raise ValueError("issue requires explicit value triage and product-boundary check")
         if not isinstance(item["report_markdown"], str) or len(item["report_markdown"].strip()) < 200:
             raise ValueError("missing substantive per-issue report")
         if item["outcome"] == "confirmed":
@@ -336,13 +366,21 @@ def persist_decision(root, config, run, plan, snapshot, item, command, deadline)
     record = {**previous, "number": number, "target": plan["target"], "input_digest": snapshot["input_digest"],
               "fingerprint_version": snapshot.get("fingerprint_version", 1),
               "reviewed_at": datetime.now(timezone.utc).isoformat(), "outcome": item["outcome"],
-              "run_dir": str(run), "disposition": "needs_decision"}
+              "run_dir": str(run), "disposition": "needs_decision", "triage": item["triage"],
+              "comment_draft": item["comment_draft"], "reason": item["triage"]["reason"]}
+    triage = item["triage"]
+    if triage["third_party_service"]:
+        record.update({"outcome": "needs_decision", "reason": "third-party service integration requires the user's product decision"})
+    elif triage["decision"] == "not_worthwhile":
+        record.update({"outcome": "not_worthwhile", "disposition": "reply", "reason": triage["reason"]})
+    elif triage["decision"] == "needs_decision":
+        record.update({"outcome": "needs_decision", "reason": triage["reason"]})
     record.pop("close_recommendation", None)
-    record.pop("reason", None)
+    allowed = triage["decision"] == "worthwhile" and not triage["third_party_service"]
     owned = snapshot["issue"].get("assignees") or any(pr["state"] == "open" for pr in snapshot["linked_pull_requests"])
-    if owned:
+    if allowed and owned:
         record.update({"outcome": "in_progress", "reason": "assignee or linked open pull request already owns this work"})
-    elif item["outcome"] in {"already_fixed", "not_reproduced"}:
+    elif allowed and item["outcome"] in {"already_fixed", "not_reproduced"}:
         try:
             evidence = closure_evidence(item, run / "work", plan["target"], config, command, deadline)
         except (ValueError, OSError, RuntimeError, TimeoutError, subprocess.TimeoutExpired) as exc:
@@ -352,10 +390,10 @@ def persist_decision(root, config, run, plan, snapshot, item, command, deadline)
                 "number": number, "target": plan["target"], "input_digest": snapshot["input_digest"],
                 **evidence, "github_state": "open", "action": "recommendation_only",
             }})
-    elif item["outcome"] == "blocked":
+    elif allowed and item["outcome"] == "blocked":
         record.update({"outcome": "needs_decision", "reason": "review blocked; human evidence or environment decision required"})
     tasks = []
-    if item["finding"] is not None:
+    if allowed and item["finding"] is not None:
         finding = {**item["finding"], "commit": plan["target"]}
         evidence = (run / "work" / finding["evidence_log"]).resolve()
         if not evidence.is_relative_to((run / "work").resolve()) or not evidence.is_file() or not evidence.stat().st_size:
@@ -388,7 +426,7 @@ def persist_decision(root, config, run, plan, snapshot, item, command, deadline)
 
 
 def summarize(run, plan, records, pending):
-    groups = {key: [] for key in ("close_recommended", "repair", "needs_decision", "pending")}
+    groups = {key: [] for key in ("close_recommended", "repair", "reply", "needs_decision", "pending")}
     recommendations = []
     for number, record in records.items():
         disposition = record.get("disposition", "needs_decision")
@@ -458,6 +496,8 @@ def process_issues(root, config, run, source, plan, deadline, invoke, finding_sc
                         "number": number, "outcome": "needs_decision", "report_markdown": result.get("report_markdown"),
                         "comment_draft": "本条复核受阻，等待人工补充证据或环境；未关闭 GitHub issue。",
                         "finding": None, "closure_evidence": None,
+                        "triage": {"decision": "needs_decision", "reason": "Review blocked; evidence or environment is incomplete.",
+                                   "third_party_service": False},
                     }]}
                 validate_result(result, unit_plan, finding_schema, validate_finding, work=stage / "work")
                 write_json(stage / "result.json", result)

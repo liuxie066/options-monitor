@@ -18,9 +18,13 @@ import time
 if __package__:
     from . import code_health_issues as issues
     from . import code_health_repair as repair
+    from . import code_health_delivery as delivery
+    from . import code_health_pull_requests as pull_requests
 else:
     import code_health_issues as issues
     import code_health_repair as repair
+    import code_health_delivery as delivery
+    import code_health_pull_requests as pull_requests
 
 
 FINDING_SCHEMA = {
@@ -359,10 +363,28 @@ def review_commits(
     return checkpoint()
 
 
+def runtime_config(config: dict) -> dict:
+    defaults = {"pull_requests_enabled": True, "pull_request_merge_enabled": True,
+                "pull_request_close_enabled": False, "comments_enabled": True, "release_enabled": True,
+                "max_pull_requests": 3, "pull_request_unit_timeout_seconds": 900, "max_repairs": 1}
+    result = {**defaults, **config}
+    for key in ("pull_requests_enabled", "pull_request_merge_enabled", "pull_request_close_enabled",
+                "comments_enabled", "release_enabled", "repair_delivery_enabled"):
+        if key in result and type(result[key]) is not bool:
+            raise ValueError(f"{key} must be a boolean")
+    if result["pull_request_close_enabled"]:
+        raise ValueError("closing a PR requires a separate per-PR human decision; automatic close is unsupported")
+    for key in ("max_pull_requests", "pull_request_unit_timeout_seconds"):
+        if type(result[key]) is not int or result[key] < (0 if key == "max_pull_requests" else 30):
+            raise ValueError(f"invalid {key}")
+    return result
+
+
 def phase_budgets(config: dict, *, smoke: bool = False) -> dict:
-    """Reserve repair first; neither audit can borrow its guaranteed allocation."""
-    defaults = {"timeout_seconds": 12000, "review_budget_seconds": 6600,
-                "issue_timeout_seconds": 3600, "repair_budget_seconds": 1800}
+    """Keep existing review/intake/repair allocations; new stages need their own capacity."""
+    defaults = {"timeout_seconds": 15000, "review_budget_seconds": 6600,
+                "issue_timeout_seconds": 3600, "repair_budget_seconds": 1800,
+                "pull_request_budget_seconds": 1800, "delivery_budget_seconds": 1200}
     values = {key: config.get(key, default) for key, default in defaults.items()}
     if any(type(value) is not int or value < 0 for value in values.values()) or not values["timeout_seconds"]:
         raise ValueError("phase budgets must be nonnegative integer seconds with a positive total")
@@ -372,7 +394,12 @@ def phase_budgets(config: dict, *, smoke: bool = False) -> dict:
         raise ValueError("enabled repair requires at least 30 seconds of reserved repair budget")
     intake = min(total - reserved, values["issue_timeout_seconds"]) if config.get("issues_enabled") and not smoke else 0
     review = min(total - reserved - intake, values["review_budget_seconds"])
-    return {"total": total, "review": review, "issues": intake, "repair_reserved": reserved}
+    prs = values["pull_request_budget_seconds"] if config.get("pull_requests_enabled") and not smoke else 0
+    deliver = values["delivery_budget_seconds"] if (config.get("comments_enabled") or config.get("release_enabled")) and not smoke else 0
+    if reserved + intake + review + prs + deliver > total:
+        raise ValueError("new PR/delivery budgets exceed total capacity; increase timeout_seconds or explicitly resize/disable stages")
+    return {"total": total, "review": review, "issues": intake, "repair_reserved": reserved,
+            "pull_requests": prs, "delivery": deliver}
 
 
 def run_repair_phase(root, config, run, source, target, issue_plan, issue_status, deadline):
@@ -445,6 +472,12 @@ def save_daily_summary(run, receipt):
     queued = sorted(set(receipt.get("repair_tasks", [])) | set(receipt.get("issues", {}).get("repair_tasks", [])))
     summary = {"reviewed_commits": len(receipt.get("completed_commits", [])),
                "reviewed_issues": len(receipt.get("issues", {}).get("reviewed", [])),
+               "reviewed_pull_requests": len(receipt.get("pull_requests", {}).get("reviewed", [])),
+               "pull_request_results": receipt.get("pull_requests", {}).get("results", []),
+               "pending_pull_requests": receipt.get("pull_requests", {}).get("pending", []),
+               "release": receipt.get("delivery", {}).get("release", {}),
+               "reply_receipts": receipt.get("delivery", {}).get("comments", []),
+               "delivery_errors": receipt.get("delivery", {}).get("errors", []),
                "queued_repairs": queued, "repair_attempted": phase.get("attempted", []),
                "local_verified": phase.get("local_verified", []), "prs": phase.get("prs", []),
                "prs_created": phase.get("prs_created", []), "merged": phase.get("merged", []), "closed": phase.get("closed", []),
@@ -475,6 +508,11 @@ def save_daily_summary(run, receipt):
     if summary["awaiting_merge_authorization"]:
         lines.append("等待合并批准的任务：" + "、".join(f"`{task}`" for task in summary["awaiting_merge_authorization"]) + "。")
     lines.extend(f"- blocked `{item['id']}`：{item['reason']}" for item in summary["blocked_reasons"])
+    lines.append(f"开放 PR：实际审查 {summary['reviewed_pull_requests']} 条；待续 {summary['pending_pull_requests']}。")
+    lines.extend(f"- PR #{item['number']}：{item['status']}；{item.get('reason', '')}" for item in summary["pull_request_results"])
+    if summary["release"]:
+        lines.append(f"发布：{summary['release'].get('status')}；{summary['release'].get('reason', '')}")
+    lines.extend(f"- 交付阻塞：{error}" for error in summary["delivery_errors"])
     report = run / "report.md"
     write_text(report, (report.read_text(encoding="utf-8") if report.exists() else "") + "\n\n".join(lines) + "\n")
     receipt["daily_summary"] = summary
@@ -487,7 +525,7 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False,
     if merge_approvals and not deliver_repairs:
         raise ValueError("merge approval requires explicit repair delivery authorization")
     # Invocation-only approvals overwrite any similarly named keys in config.json.
-    config = {**json.loads((root / "config.json").read_text(encoding="utf-8")),
+    config = {**runtime_config(json.loads((root / "config.json").read_text(encoding="utf-8"))),
               "_deliver_repairs": deliver_repairs, "_merge_approvals": merge_approvals or {}}
     if type(config.get("repair_delivery_enabled", True)) is not bool:
         raise ValueError("repair_delivery_enabled must be a boolean")
@@ -512,14 +550,39 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False,
             return command(argv, **{**kwargs, "timeout": min(kwargs.get("timeout", 180), remaining)})
 
         def finish_repair():
-            if config.get("repair_enabled") and not smoke and not dry_run and "repair" not in receipt:
+            if smoke or dry_run:
+                return
+            if config["pull_requests_enabled"] and target and "pull_requests" not in receipt:
+                pr_deadline = min(daily_deadline - budgets["repair_reserved"] - budgets["delivery"],
+                                  time.monotonic() + budgets["pull_requests"])
+                release_tasks = [delivery.read_json(path, {}) for path in (root / "releases").glob("*/task.json")]
+                excluded = [task["pr_number"] for task in release_tasks if task.get("pr_number")]
+                waiting_release = any(task.get("status") != "released" for task in release_tasks)
+                receipt["merge_deferred_for_release"] = waiting_release
+                pr_config = {**config, "pull_request_merge_enabled": config["pull_request_merge_enabled"] and not waiting_release,
+                             "_release_pr_numbers": excluded,
+                             "_own_pr_comments": list(delivery.read_json(root / "comment-state.json", {}).values())}
+                try:
+                    receipt["pull_requests"] = pull_requests.process_pull_requests(
+                        root, pr_config, run / "pull-requests", pr_deadline, invoke_agent, command=command)
+                    delivery.merge_pull_requests(root, pr_config, run / "pull-requests", pr_deadline,
+                                                 command=command, receipt=receipt["pull_requests"])
+                except Exception as exc:
+                    receipt.setdefault("pull_requests", {}).update({"status": "pending", "error": f"{type(exc).__name__}: {exc}"})
+            if config.get("repair_enabled") and "repair" not in receipt:
                 try:
                     receipt["repair"] = run_repair_phase(root, config, run, source, target, issue_plan,
-                                                         receipt.get("issues", {}).get("status"), daily_deadline)
+                        receipt.get("issues", {}).get("status"), daily_deadline - budgets["delivery"])
                 except Exception as exc:
-                    receipt["repair"] = {"status": "failed", "entered": True,
-                                         "error": f"{type(exc).__name__}: {exc}"}
-            if not smoke and not dry_run and "daily_summary" not in receipt:
+                    receipt["repair"] = {"status": "failed", "entered": True, "error": f"{type(exc).__name__}: {exc}"}
+            if (config["comments_enabled"] or config["release_enabled"]) and "delivery" not in receipt:
+                try:
+                    receipt["delivery"] = delivery.process_delivery(root, config, run / "delivery",
+                        min(daily_deadline, time.monotonic() + budgets["delivery"]), invoke_agent,
+                        command=command, receipt=receipt)
+                except Exception as exc:
+                    receipt["delivery"] = {"status": "pending", "error": f"{type(exc).__name__}: {exc}"}
+            if "daily_summary" not in receipt:
                 save_daily_summary(run, receipt)
 
         try:
@@ -614,7 +677,8 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False,
                     write_text(run / "report.md", f"提交巡检预算不足，后续阶段按剩余预算继续。\n\n{exc}\n")
             if config.get("issues_enabled") and not smoke:
                 issue_run.mkdir()
-                issue_deadline = min(daily_deadline - budgets["repair_reserved"], time.monotonic() + issue_budget)
+                issue_deadline = min(daily_deadline - budgets["repair_reserved"] - budgets["pull_requests"] - budgets["delivery"],
+                                     time.monotonic() + issue_budget)
                 try:
                     issue_plan = issues.plan_issues(root, config, target, command, deadline=issue_deadline, hydrate=False)
                     write_json(issue_run / "plan.json", issue_plan)
@@ -756,7 +820,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="fetch and plan only; do not call the model or advance")
     parser.add_argument("--resume-run", type=Path, help="resume a frozen issues-backfill run; completed identities are reused")
     parser.add_argument("--deliver-repairs", action="store_true",
-                        help="publish verified repairs even if repair_delivery_enabled is false; merging still needs TASK=HEAD approval")
+                        help="publish verified repairs even if repair_delivery_enabled is false; automatic merges use the separate open-PR review gate")
     parser.add_argument("--approve-repair-merge", action="append", type=merge_approval, default=[], metavar="TASK=HEAD",
                         help="human approval to merge this exact repair task and commit after required CI passes")
     args = parser.parse_args()

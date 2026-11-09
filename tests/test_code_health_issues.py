@@ -37,7 +37,9 @@ def response(number=1, outcome="not_reproduced", **extra):
             "reviews": [{"number": number, "outcome": outcome, "report_markdown": REPORT,
                          "comment_draft": "待审核：当前版本的后续反证不能当成已修复或已发布。",
                          "finding": finding() if outcome == "confirmed" else None,
-                         "closure_evidence": None, **extra}]}
+                         "closure_evidence": None,
+                         "triage": {"decision": "worthwhile", "reason": "Project-owned defect with a small, verifiable fix.",
+                                    "third_party_service": False}, **extra}]}
 
 
 def stage_evidence(stage, text="expected=3 actual=1\nexit_code=0\n"):
@@ -107,11 +109,15 @@ def test_full_discussion_and_linked_work_are_paginated_before_review(tmp_path):
     assert not any(call[-1].endswith("/issues/4") for call in calls)
     assert any("issues/4/timeline?" in call[-1] for call in calls)
     repair.save(tmp_path / "issue-state.json", {"issues": {
-        str(row["number"]): {"target": A, "input_digest": row["input_digest"], "outcome": "not_reproduced", "reviewed_at": "2026-11-03"} for row in plan["issues"]}})
+        str(row["number"]): {"target": A, "input_digest": row["input_digest"], "outcome": "not_reproduced", "reviewed_at": "2026-11-03",
+                                 "triage": {"decision": "worthwhile", "reason": "verified", "third_party_service": False}} for row in plan["issues"]}})
     assert [row["number"] for row in issues.plan_issues(tmp_path, config, A, command)["issues"]] == [4]
     assert [row["number"] for row in issues.plan_issues(tmp_path, config, "b" * 40, command)["issues"]] == [4, 1, 2]
     responses["issues?state=open&sort=created&direction=asc&per_page=100"][0][0]["updated_at"] = "later"
     responses["issues/1"]["updated_at"] = "later"
+    assert [row["number"] for row in issues.plan_issues(tmp_path, config, A, command)["issues"]] == [4]
+    responses["issues?state=open&sort=created&direction=asc&per_page=100"][0][0]["body"] += " Updated reproduction"
+    responses["issues/1"]["body"] += " Updated reproduction"
     assert [row["number"] for row in issues.plan_issues(tmp_path, config, A, command)["issues"]] == [4, 1]
     pending = tmp_path / "repairs/local/task.json"
     pending.parent.mkdir(parents=True)
@@ -272,7 +278,7 @@ def test_four_issue_sources_can_resume_when_current_inputs_match(tmp_path, monke
     task = json.loads(path.read_text())
     task["sources"] = [{"kind": "issue", "number": n} for n in (1, 2, 3, 4)]
     repair.save(path, task)
-    state = {str(n): {"outcome": "confirmed", "target": A, "repair_task": task_id, "input_digest": str(n),
+    state = {str(n): {"outcome": "confirmed", "triage": {"decision": "worthwhile", "reason": "project defect", "third_party_service": False}, "target": A, "repair_task": task_id, "input_digest": str(n),
                        "run_dir": "earlier-round"} for n in (1, 2, 3, 4)}
     repair.save(tmp_path / "issue-state.json", {"issues": state})
     inputs = {str(n): {"input_digest": str(n), "assigned": False} for n in (1, 2, 3, 4)}
@@ -373,7 +379,8 @@ if "reviews" in schema["properties"]:
     assert "禁止网络" in prompt and "comment_draft" in prompt
     payload = {"outcome":"complete", "report_markdown":"issue evidence and limitations " * 15,
                "reviews":[{"number":1,"outcome":"not_reproduced", "report_markdown":"Later correction rejects the original write claim " * 12,
-                           "comment_draft":"Current SHA only; not merged/released", "finding":None, "closure_evidence":None}]}
+                           "comment_draft":"Current SHA only; not merged/released", "finding":None, "closure_evidence":None,
+                           "triage":{"decision":"worthwhile","reason":"Review project defect", "third_party_service":False}}]}
 else:
     plan = json.loads((work.parent / "plan.json").read_text())
     payload = {"outcome":"complete", "completed_commits":[row["sha"] for row in plan["commits"]],
@@ -383,7 +390,7 @@ output.write_text(json.dumps(payload))
     agent.chmod(0o700)
     (root / "config.json").write_text(json.dumps({
         "git": "git", "gh": "github-client", "codex": str(agent), "repository": "fixture/repo",
-        "repository_url": str(source), "max_units": 3, "timeout_seconds": 180, "issue_timeout_seconds": 60,
+        "repository_url": str(source), "pull_requests_enabled": False, "comments_enabled": False, "release_enabled": False, "max_units": 3, "timeout_seconds": 180, "issue_timeout_seconds": 60,
         "issues_enabled": True, "repair_enabled": True, "repair_budget_seconds": 30, "model": "fixture",
         "model_base_url": "http://fixture.invalid", "model_catalog": str(root / "catalog.json"),
     }))
@@ -757,7 +764,8 @@ def test_outer_blocked_report_is_retained_as_needs_decision(tmp_path):
     assert json.loads((stage / "raw-result.json").read_text()) == payload
     result = json.loads((stage / "result.json").read_text())
     assert result["reviews"][0]["outcome"] == "needs_decision"
-    assert set(result["reviews"][0]) == {"number", "outcome", "report_markdown", "comment_draft", "finding", "closure_evidence"}
+    assert set(result["reviews"][0]) == {"number", "outcome", "report_markdown", "comment_draft", "finding", "closure_evidence", "triage"}
+    assert result["reviews"][0]["triage"]["decision"] == "needs_decision"
 
 
 @pytest.fixture
@@ -805,7 +813,7 @@ def queue_inputs(tmp_path):
         task_path = tmp_path / "repairs" / task_id / "task.json"
         repair.save(tmp_path / "issue-state.json", {"issues": {"1": {
             "target": A, "input_digest": current["issue_inputs"]["1"]["input_digest"],
-            "outcome": "confirmed", "repair_task": task_id, "reviewed_at": "2026-11-01"}}})
+            "outcome": "confirmed", "triage": {"decision": "worthwhile", "reason": "project defect", "third_party_service": False}, "repair_task": task_id, "reviewed_at": "2026-11-01"}}})
         return task_path, json.loads(task_path.read_text()), current
 
     return tmp_path, config, data, plan, confirm
@@ -1044,7 +1052,7 @@ def test_closed_source_does_not_weaken_guards_for_remaining_open_source(queue_in
     _, task, _ = confirm()
     task["sources"].append({"kind": "issue", "number": 2})
     current = {"1": {"state": "closed"}, "2": {"state": "open", "input_digest": "verified"}}
-    latest = {"2": {"outcome": "confirmed", "repair_task": task["id"], "input_digest": "verified"}}
+    latest = {"2": {"outcome": "confirmed", "triage": {"decision": "worthwhile", "reason": "project defect", "third_party_service": False}, "repair_task": task["id"], "input_digest": "verified"}}
     live = {**config, "issue_target": A, "issue_intake_ready": True, "issue_inputs": current}
     assert repair._issue_repair_matches(task, live, latest)
     if change == "digest":
