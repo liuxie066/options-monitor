@@ -260,16 +260,19 @@ def build_position_risk_context(
         snapshot_lot = snapshot_lots_by_id.get(it.lot_id)
         if (
             lifecycle
-            and lifecycle.get("lifecycle_state") != "conflict"
-            and lifecycle.get("reason_state") != "conflict"
             and snapshot_lot is not None
             and snapshot_lot.fields == {
                 key: value for key, value in it.fields.items()
                 if key not in STRATEGY_METADATA_KEYS
             }
             and (
+                # A persisted close still needs settlement evidence during a conflict.
                 (lifecycle.get("pending_close_contracts_by_lot") or {}).get(it.lot_id, 0) > 0
-                or (lifecycle.get("reserved_contracts_by_lot") or {}).get(it.lot_id, 0) > 0
+                or (
+                    lifecycle.get("lifecycle_state") != "conflict"
+                    and lifecycle.get("reason_state") != "conflict"
+                    and (lifecycle.get("reserved_contracts_by_lot") or {}).get(it.lot_id, 0) > 0
+                )
             )
         ):
             symbol = it.canonical_underlying_symbol
