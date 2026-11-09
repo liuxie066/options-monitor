@@ -50,6 +50,7 @@ def main() -> int:
         changed_files=changed_files,
         mode=args.mode,
         version=args.tag or _default_tag(),
+        base_ref=None if args.changed_file else args.base,
     )
     sys.stdout.write(json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     return 0 if plan.get("ok", True) else 2
