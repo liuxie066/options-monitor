@@ -1,0 +1,79 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.22",
+  "base": {
+    "tag": "v4.6.21",
+    "commit": "e6195e80329861bedeb3e91a4d15d8db10d7afbe"
+  },
+  "reviewed_head": "fe5f3cec307680a615e09789744e443a86a1cb21",
+  "commits": [
+    {
+      "sha": "08d0b18554d8b6d4b5d93ac728e672873b847351",
+      "subject": "fix(release): reject failed test plan Git discovery (#1076)"
+    },
+    {
+      "sha": "db96a3f7d7037d11549af7daec5d986a2fa45e9a",
+      "subject": "fix(setup): reject unsupported audit database targets (#1077)"
+    },
+    {
+      "sha": "c75fc3404eac80ae8e2eee0afc11da120e09af8e",
+      "subject": "fix(feishu): bind ACL refresh to effective env sources (#1078)"
+    },
+    {
+      "sha": "fe5f3cec307680a615e09789744e443a86a1cb21",
+      "subject": "fix(release): cover all discovered whitespace changes (#1079)"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "修复飞书机器人在发送者允许列表由进程环境提供、普通 env 文件对服务用户不可读时，授权前置检查错误拒绝消息、导致没有 ACK 和业务回复的问题；只刷新实际提供 ACL 的文件，保留文件授权源不可用时的拒绝行为和显式凭据文件校验，并避免解析器二次读取覆盖凭据层。（#1078）。",
+      "commits": [
+        "c75fc3404eac80ae8e2eee0afc11da120e09af8e"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "`setup check` 按实际 SQLite 存储适配器核验 Bot 审计库目标，拒绝目录、FIFO 和符号链接等不支持的目标，避免只因父目录可写就误报会话就绪；检查保持只读，不创建数据库、不更改权限。（#1077）。",
+      "commits": [
+        "db96a3f7d7037d11549af7daec5d986a2fa45e9a"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "08d0b18554d8b6d4b5d93ac728e672873b847351",
+      "reason": "内部发布测试建议工具在 Git 变更发现失败时明确返回失败，避免把未知变更误报为空；仅影响开发验证建议及对应测试，不改变扫描、策略、账本或消息处理能力。"
+    },
+    {
+      "commit": "fe5f3cec307680a615e09789744e443a86a1cb21",
+      "reason": "内部发布测试建议工具分别覆盖已提交、已暂存和工作区的空白检查，并正确引用比较基线；仅更新开发验证建议、发布文档和测试，不改变产品运行行为。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "08d0b18554d8b6d4b5d93ac728e672873b847351",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1076"
+      ]
+    },
+    {
+      "commit": "db96a3f7d7037d11549af7daec5d986a2fa45e9a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1077"
+      ]
+    },
+    {
+      "commit": "c75fc3404eac80ae8e2eee0afc11da120e09af8e",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1078"
+      ]
+    },
+    {
+      "commit": "fe5f3cec307680a615e09789744e443a86a1cb21",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1079"
+      ]
+    }
+  ]
+}
