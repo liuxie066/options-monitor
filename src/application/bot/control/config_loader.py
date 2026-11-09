@@ -11,12 +11,14 @@ from src.application.config_validator import validate_bot_config
 from src.application.config_yaml import default_yaml_bot_config_path
 
 
-def default_bot_config_path(*, repo_root: str | Path | None = None) -> Path:
+def default_bot_config_path(
+    *, repo_root: str | Path | None = None, runtime_root: str | Path | None = None,
+) -> Path:
     root = _repo_root(repo_root)
     repo_local = (root / "config.bot.json").resolve()
     if repo_local.exists():
         return repo_local
-    return default_yaml_bot_config_path(repo_root=root)
+    return default_yaml_bot_config_path(repo_root=root, runtime_root=runtime_root)
 
 
 def load_bot_config(

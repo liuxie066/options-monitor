@@ -16,7 +16,7 @@ from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError
 from src.application import runtime_bundle
 from src.application.bot.control.audit import default_audit_db_path
-from src.application.bot.control.config_loader import load_bot_config
+from src.application.bot.control.config_loader import default_bot_config_path, load_bot_config
 from src.application.config_yaml import load_yaml_config_file, resolve_yaml_bot_config
 from src.application.config_yaml_init import DEFAULT_FUTU_ACCOUNT_ID
 from src.application.platform_profile import PlatformProfile, current_platform_profile
@@ -142,13 +142,7 @@ def run_setup_check(
         add("config.authoring", "error", exc.message)
     selected_markets = _normalize_markets(markets) if markets is not None else configured_markets or ["us", "hk"]
 
-    repo_bot_config = root / "config.bot.json"
-    resolved_bot_config = runtime.runtime_root / "resolved" / "config.bot.json"
-    bot_config = (
-        repo_bot_config
-        if runtime.source == "repo_default" and repo_bot_config.exists()
-        else resolved_bot_config
-    )
+    bot_config = default_bot_config_path(repo_root=root, runtime_root=runtime.runtime_root)
     source_path = runtime.runtime_root / "config.yaml"
     bot_disabled = False
     model_raw, model_error = None, None
