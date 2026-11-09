@@ -794,6 +794,21 @@ def _normalize_daily_brief_funds(value: Any) -> dict[str, Any]:
                 funds["cash_secured_unavailable_by_symbol"], field="funds.cash_secured_unavailable_by_symbol",
             ).items()
         }
+    if "cash_secured_unavailable_by_ccy" in funds:
+        out["cash_secured_unavailable_by_ccy"] = {}
+        for currency, symbols in _mapping(
+            funds["cash_secured_unavailable_by_ccy"], field="funds.cash_secured_unavailable_by_ccy"
+        ).items():
+            if not isinstance(symbols, list):
+                raise ValueError("funds.cash_secured_unavailable_by_ccy symbols must be a list")
+            out["cash_secured_unavailable_by_ccy"][str(currency)] = [str(symbol) for symbol in symbols]
+    if "cash_secured_pending_by_symbol_by_ccy" in funds:
+        out["cash_secured_pending_by_symbol_by_ccy"] = {
+            str(symbol): _normalize_currency_amounts(amounts, field="funds.cash_secured_pending_by_symbol_by_ccy.amounts")
+            for symbol, amounts in _mapping(
+                funds["cash_secured_pending_by_symbol_by_ccy"], field="funds.cash_secured_pending_by_symbol_by_ccy"
+            ).items()
+        }
     for key in ("cash_total_cny", "cash_secured_total_cny", "option_opening_available_cny"):
         if key not in funds:
             continue

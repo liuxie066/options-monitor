@@ -878,6 +878,9 @@ def _reconcile_due_lifecycle_cases_for_source(
             case_id=case_id,
             invocation_id=invocation_id,
             audit=audit,
+            retry_deadline_ms=int(
+                (candidates_by_id[case_id].get("timing_policy") or {}).get("settlement_deadline_ms") or 0
+            ) or None,
         )
         if control_error is not None:
             local_result = _plan_due_cases(
@@ -2374,6 +2377,7 @@ def _reconcile_due_lifecycle_cases_for_source(
                         case_id=case_id,
                         invocation_id=invocation_id,
                         audit=audit,
+                        retry_deadline_ms=int(read_model.get("pending_until_ms") or 0) or None,
                     )
                 )
                 if control_error is not None:
@@ -2766,7 +2770,7 @@ def _next_local_recheck_ms(
     now_ms: int,
 ) -> int | None:
     boundaries: list[int] = []
-    for key in ("pairing_until_ms", "pending_until_ms"):
+    for key in ("pairing_until_ms", "review_after_ms", "pending_until_ms"):
         value = read_model.get(key)
         if value is None:
             continue

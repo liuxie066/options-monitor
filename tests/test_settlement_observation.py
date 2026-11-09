@@ -4985,9 +4985,10 @@ def test_automatic_settlement_waits_until_next_day_close_then_confirms_once(tmp_
     before = reconcile_due_lifecycle_cases_for_source(
         repo, source=source, now_ms=now_ms,
         apply_changes=True, settlement_collector=collector, seal_sink=seals.append,
+        settlement_control_now_ms_fn=lambda: now_ms,
     )
-    assert before["provider_attempt_count"] == 0
-    assert gateway.history_deal_queries == []
+    assert before["provider_attempt_count"] == 1
+    assert len(gateway.history_deal_queries) == 1
     assert lifecycle_case_read_model(
         repo, case_id=case_id, now_ms=now_ms,
     )["reason_state"] == "cause_pending"
@@ -4995,6 +4996,7 @@ def test_automatic_settlement_waits_until_next_day_close_then_confirms_once(tmp_
     due = reconcile_due_lifecycle_cases_for_source(
         repo, source=source, now_ms=now_ms,
         apply_changes=True, settlement_collector=collector, seal_sink=seals.append,
+        settlement_control_now_ms_fn=lambda: now_ms,
     )
     assert due["provider_attempt_count"] == 1
     readback = lifecycle_case_read_model(repo, case_id=case_id, now_ms=now_ms)
@@ -5006,9 +5008,10 @@ def test_automatic_settlement_waits_until_next_day_close_then_confirms_once(tmp_
     retry = reconcile_due_lifecycle_cases_for_source(
         repo, source=source, now_ms=now_ms,
         apply_changes=True, settlement_collector=collector, seal_sink=seals.append,
+        settlement_control_now_ms_fn=lambda: now_ms,
     )
     assert retry["provider_attempt_count"] == 0
-    assert len(gateway.history_deal_queries) == 1
+    assert len(gateway.history_deal_queries) == 2
     assert repo.list_trade_events() == events
     assert repo.list_trade_lifecycle_evidence(case_id=case_id) == evidence
 
@@ -5046,7 +5049,11 @@ def test_projected_pending_close_is_observed_at_deadline_without_new_events(tmp_
 
     repo, case, policy = _repo_with_projected_pending_close(tmp_path)
     deadline = int(policy["settlement_deadline_ms"])
-    now = [deadline - 1]
+    review_after = lifecycle_case_read_model(
+        repo, case_id=case["case_id"], now_ms=deadline - 1,
+    )["review_after_ms"]
+    assert review_after < deadline
+    now = [review_after - 1]
     assert case["status"] == "ledger_written"
     with repo._connect() as conn:  # noqa: SLF001 - reproduce missing publication
         assert conn.execute(
@@ -5078,15 +5085,22 @@ def test_projected_pending_close_is_observed_at_deadline_without_new_events(tmp_
     before_events = repo.list_trade_events()
     before = run_due()
     assert before["provider_attempt_count"] == 0
-    assert attempt()["next_attempt_at_ms"] == deadline
+    assert attempt()["next_attempt_at_ms"] == review_after
     assert gateway.history_deal_queries == []
     assert repo.list_trade_events() == before_events
 
-    # The persisted event and evidence stay unchanged; only wall-clock time advances.
+    now[0] = review_after
+    early = run_due()
+    assert early["provider_attempt_count"] == 1
+    assert len(gateway.history_deal_queries) == 1
+    assert lifecycle_case_read_model(repo, case_id=case["case_id"], now_ms=now[0])["close_reason"] is None
+    assert repo.list_trade_events() == before_events
+
+    # Early collection leaves economic events intact; final attribution still waits.
     now[0] = deadline
     due = run_due()
     assert due["provider_attempt_count"] == 1
-    assert len(gateway.history_deal_queries) == 1
+    assert len(gateway.history_deal_queries) == 2
     if gateway_type is not _Gateway:
         outcome = due["provider_results"][0]["outcome"]
         assert outcome["kind"] == ("unknown_error" if gateway_type is _UntypedFailedReceiptGateway else "retryable_error")
@@ -5104,7 +5118,7 @@ def test_projected_pending_close_is_observed_at_deadline_without_new_events(tmp_
         assert next_attempt > deadline
         now[0] = next_attempt - 1
         assert run_due()["skipped_counts"]["backoff"] == 1
-        assert len(gateway.history_deal_queries) == 1
+        assert len(gateway.history_deal_queries) == 2
         gateway.get_history_deals = lambda **kwargs: _Gateway.get_history_deals(gateway, **kwargs)
         now[0] = next_attempt
         assert run_due()["provider_attempt_count"] == 1

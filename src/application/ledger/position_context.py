@@ -224,6 +224,8 @@ def build_position_risk_context(
     cash_secured_by_symbol_by_ccy: dict[str, dict[str, float]] = {}
     cash_secured_total_by_ccy: dict[str, float] = {}
     cash_secured_unavailable_by_symbol: dict[str, str] = {}
+    cash_secured_unavailable_by_ccy: dict[str, list[str]] = {}
+    cash_secured_pending_by_symbol_by_ccy: dict[str, dict[str, float]] = {}
 
     cash_secured_total_cny: float | None = 0.0
 
@@ -258,66 +260,54 @@ def build_position_risk_context(
     for it in selected_items:
         lifecycle = lifecycle_by_lot.get(it.lot_id)
         snapshot_lot = snapshot_lots_by_id.get(it.lot_id)
-        if (
+        lifecycle_bound = bool(
             lifecycle
             and snapshot_lot is not None
             and snapshot_lot.fields == {
                 key: value for key, value in it.fields.items()
                 if key not in STRATEGY_METADATA_KEYS
             }
-            and (
-                # A persisted close still needs settlement evidence during a conflict.
-                (lifecycle.get("pending_close_contracts_by_lot") or {}).get(it.lot_id, 0) > 0
-                or (
-                    lifecycle.get("lifecycle_state") != "conflict"
-                    and lifecycle.get("reason_state") != "conflict"
-                    and (lifecycle.get("reserved_contracts_by_lot") or {}).get(it.lot_id, 0) > 0
-                )
-            )
+        )
+        reserved = (
+            int((lifecycle.get("reserved_contracts_by_lot") or {}).get(it.lot_id, 0))
+            if lifecycle_bound else 0
+        )
+        pending_close = (
+            int((lifecycle.get("pending_close_contracts_by_lot") or {}).get(it.lot_id, 0))
+            if lifecycle_bound else 0
+        )
+        pending_put_contracts = reserved + pending_close if it.side == "short" and it.option_type == "put" else 0
+        symbol = it.canonical_underlying_symbol
+        if symbol and it.side == "short" and it.option_type == "call" and (
+            pending_close > 0
+            or (reserved > 0 and lifecycle.get("lifecycle_state") != "conflict" and lifecycle.get("reason_state") != "conflict")
         ):
-            symbol = it.canonical_underlying_symbol
-            if symbol and it.side == "short" and it.option_type == "put":
-                cash_secured_unavailable_by_symbol[symbol] = "option_close_settlement_pending"
-            elif symbol and it.side == "short" and it.option_type == "call":
-                locked_shares_unavailable_by_symbol[symbol] = "option_close_settlement_pending"
-        if not it.is_open:
+            locked_shares_unavailable_by_symbol[symbol] = "option_close_settlement_pending"
+        if not it.is_open and not pending_put_contracts:
             continue
         contracts_total = int(it.contracts or 0)
-        contracts_open = int(it.contracts_open or 0)
-        if contracts_open <= 0:
-            continue
-
-        symbol = it.canonical_underlying_symbol
-
-        position_row = it.as_open_position_min(
-            as_of_date=expiration_market_date(observed_at_dt, symbol_market(symbol))
-        )
-        if lifecycle is not None:
-            position_row.update(lifecycle)
-        open_positions_min.append(position_row)
+        contracts_open = int(it.contracts_open or 0) if it.is_open else 0
+        if contracts_open > 0:
+            position_row = it.as_open_position_min(
+                as_of_date=expiration_market_date(observed_at_dt, symbol_market(symbol))
+            )
+            if lifecycle is not None:
+                position_row.update(lifecycle)
+            open_positions_min.append(position_row)
         effective_contracts_open = contracts_open
-        if (
-            lifecycle
+        if pending_put_contracts:
+            # Unallocated reservations remain in contracts_open. Allocated
+            # pending closes have left it, but their collateral is not released.
+            effective_contracts_open = max(contracts_open, reserved) + pending_close
+        elif (
+            lifecycle_bound
             and lifecycle.get("lifecycle_state") != "conflict"
             and lifecycle.get("reason_state") != "conflict"
             and lifecycle.get("closure_fact") in {"option_leg_closed", "partial_close_observed"}
-            and (snapshot_lot := snapshot_lots_by_id.get(it.lot_id)) is not None
-            and snapshot_lot.fields == {
-                key: value for key, value in it.fields.items()
-                if key not in STRATEGY_METADATA_KEYS
-            }
+            and 0 <= reserved <= contracts_open
         ):
-            reserved = (lifecycle.get("reserved_contracts_by_lot") or {}).get(it.lot_id)
-            if type(reserved) is int and 0 <= reserved <= contracts_open:
-                effective_contracts_open -= reserved
-                if reserved and symbol:
-                    if it.side == "short" and it.option_type == "put":
-                        cash_secured_unavailable_by_symbol[symbol] = "option_close_settlement_pending"
-                    elif it.side == "short" and it.option_type == "call":
-                        locked_shares_unavailable_by_symbol[symbol] = "option_close_settlement_pending"
-        if effective_contracts_open <= 0:
-            continue
-        if not symbol:
+            effective_contracts_open -= reserved
+        if effective_contracts_open <= 0 or not symbol:
             continue
 
         option_type = it.option_type
@@ -344,18 +334,36 @@ def build_position_risk_context(
                 strike=it.strike,
                 multiplier=it.multiplier,
             )
+            if pending_put_contracts:
+                # A closed leg's stored amount may already be reduced or zero.
+                # Pending attribution still reserves at least full exercise cash.
+                principal = compute_short_put_cash_secured(
+                    contracts_open=effective_contracts_open,
+                    strike=it.strike,
+                    multiplier=it.multiplier,
+                )
+                bounds = [amount for amount in (cash_secured, principal) if amount is not None and amount > 0]
+                cash_secured = max(bounds) if bounds else None
             if cash_secured is None:
                 cash_secured_unavailable_by_symbol[symbol] = "short_put_cash_secured_basis_missing"
+                cash_secured_unavailable_by_ccy.setdefault(currency or "UNKNOWN", []).append(symbol)
                 cash_secured_total_cny = None
                 continue
             if not currency:
                 cash_secured_unavailable_by_symbol[symbol] = "short_put_cash_secured_currency_missing"
+                cash_secured_unavailable_by_ccy.setdefault("UNKNOWN", []).append(symbol)
                 cash_secured_total_cny = None
                 continue
             if currency not in {"CNY", "USD", "HKD"}:
                 cash_secured_unavailable_by_symbol[symbol] = f"short_put_cash_secured_currency_unsupported:{currency}"
+                cash_secured_unavailable_by_ccy.setdefault(currency, []).append(symbol)
                 cash_secured_total_cny = None
                 continue
+
+            if pending_put_contracts:
+                pending_amount = float(cash_secured) * min(pending_put_contracts, effective_contracts_open) / effective_contracts_open
+                pending_by_ccy = cash_secured_pending_by_symbol_by_ccy.setdefault(symbol, {})
+                pending_by_ccy[currency] = pending_by_ccy.get(currency, 0.0) + pending_amount
 
             # bucket per symbol per currency
             m = cash_secured_by_symbol_by_ccy.get(symbol) or {}
@@ -392,6 +400,10 @@ def build_position_risk_context(
         "cash_secured_by_symbol_by_ccy": cash_secured_by_symbol_by_ccy,
         "cash_secured_total_by_ccy": cash_secured_total_by_ccy,
         "cash_secured_unavailable_by_symbol": cash_secured_unavailable_by_symbol,
+        "cash_secured_unavailable_by_ccy": {
+            currency: sorted(set(symbols)) for currency, symbols in cash_secured_unavailable_by_ccy.items()
+        },
+        "cash_secured_pending_by_symbol_by_ccy": cash_secured_pending_by_symbol_by_ccy,
         "cash_secured_total_cny": cash_secured_total_cny,
         "exchange_rates": (rates or {}),
         "raw_selected_count": len(selected_items),
