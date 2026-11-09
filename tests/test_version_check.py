@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import pytest
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+import stat
 import subprocess
+import threading
 
 from src.application.release_target import parse_release_tags
 from src.application.version_check import bump_version, check_version_update, compare_versions, update_local_version
@@ -36,6 +39,110 @@ def _auto_apply(**overrides) -> dict[str, object]:
         "expected_target_version": "1.1.0",
         **overrides,
     }
+
+
+def _apply_isolated_version(base: Path, mode: str, target: str = "1.1.0"):
+    if mode == "auto":
+        return update_local_version(
+            base_dir=base,
+            **_auto_apply(recommendation_fn=lambda **_kwargs: _auto_recommendation()),
+        )
+    return update_local_version(base_dir=base, target_version=target, apply=True, now_fn=_fixed_now)
+
+
+@pytest.mark.parametrize("mode", ["manual", "auto"])
+def test_version_apply_preserves_existing_fixed_temporary_file(tmp_path: Path, mode: str) -> None:
+    base = _write_version(tmp_path, "1.0.0")
+    version = base / "VERSION"
+    original_mode = stat.S_IMODE(version.stat().st_mode)
+    sentinel = base / "VERSION.tmp"
+    sentinel.write_bytes(b"unrelated preparation notes\n")
+    sentinel.chmod(0o600)
+
+    out = _apply_isolated_version(base, mode)
+
+    assert out["mode"] == "applied"
+    assert version.read_bytes() == b"1.1.0\n"
+    assert sentinel.read_bytes() == b"unrelated preparation notes\n"
+    assert stat.S_IMODE(sentinel.stat().st_mode) == 0o600
+    assert stat.S_IMODE(version.stat().st_mode) == original_mode
+    assert {path.name for path in base.iterdir()} == {"VERSION", "VERSION.tmp"}
+
+
+@pytest.mark.parametrize("mode", ["manual", "auto"])
+@pytest.mark.parametrize("failure", ["write", "replace"])
+def test_version_apply_cleans_only_its_temporary_file_on_failure(tmp_path: Path, monkeypatch, mode, failure) -> None:
+    base = _write_version(tmp_path, "1.0.0")
+    version = base / "VERSION"
+    sentinel = base / "VERSION.tmp"
+    sentinel.write_bytes(b"unrelated preparation notes\n")
+    before = {path.name: path.read_bytes() for path in base.iterdir()}
+    write_text, replace = Path.write_text, Path.replace
+
+    def fail_write(path, content, *args, **kwargs):
+        if path.parent == base and path != version:
+            write_text(path, content[:2], *args, **kwargs)
+            raise OSError("fixture write failure")
+        return write_text(path, content, *args, **kwargs)
+
+    def fail_replace(path, target):
+        if Path(target) == version:
+            raise OSError("fixture replace failure")
+        return replace(path, target)
+
+    if failure == "write":
+        monkeypatch.setattr(Path, "write_text", fail_write)
+    else:
+        monkeypatch.setattr(Path, "replace", fail_replace)
+    with pytest.raises(OSError, match=f"fixture {failure} failure"):
+        _apply_isolated_version(base, mode)
+
+    assert {path.name: path.read_bytes() for path in base.iterdir()} == before
+
+
+def test_version_apply_interleaving_publishes_each_writers_own_content(tmp_path: Path, monkeypatch) -> None:
+    base = _write_version(tmp_path, "1.0.0")
+    version = base / "VERSION"
+    a_ready, b_ready, a_replaced = threading.Event(), threading.Event(), threading.Event()
+    writer = threading.local()
+    seen = {}
+    replace = Path.replace
+
+    def ordered_replace(path, target):
+        if Path(target) != version:
+            return replace(path, target)
+        label = writer.label
+        if label == "a":
+            a_ready.set()
+            assert b_ready.wait(5), "second writer did not finish staging"
+        else:
+            b_ready.set()
+            assert a_replaced.wait(5), "first writer did not publish"
+        try:
+            seen[label] = path.read_text(encoding="utf-8")
+            return replace(path, target)
+        finally:
+            if label == "a":
+                a_replaced.set()
+
+    def apply(label, target):
+        writer.label = label
+        try:
+            return _apply_isolated_version(base, "manual", target)
+        except Exception as exc:
+            return exc
+
+    monkeypatch.setattr(Path, "replace", ordered_replace)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(apply, "a", "1.1.0")
+        assert a_ready.wait(5), "first writer did not finish staging"
+        second = executor.submit(apply, "b", "1.2.0")
+        results = [first.result(timeout=10), second.result(timeout=10)]
+
+    assert seen == {"a": "1.1.0\n", "b": "1.2.0\n"}
+    assert all(isinstance(result, dict) and result["mode"] == "applied" for result in results), results
+    assert version.read_bytes() == b"1.2.0\n"
+    assert {path.name for path in base.iterdir()} == {"VERSION"}
 
 
 def test_parse_version_orders_prerelease_before_stable() -> None:

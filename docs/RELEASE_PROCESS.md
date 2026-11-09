@@ -106,6 +106,10 @@ Changelog、commit、push、创建 tag、发布 GitHub Release 或升级生产�
 已确认的 `Unreleased` 内容移动到 `## <version> - <date>`，并保留一个空的 `## Unreleased`。手动
 `bump=patch|minor|major` 与 `target_version` 流程保持可用。
 
+手动与自动 apply 复用原子文本写入 owner：每次在 `VERSION` 同目录使用不同临时路径，
+成功替换及失败清理只处理本次临时文件，保留既有 `VERSION.tmp`。多个已确认写入交错时
+各自发布自己的暂存内容，最后一次成功替换决定最终版本。
+
 ---
 
 ## 准备发布
