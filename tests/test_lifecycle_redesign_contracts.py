@@ -1538,6 +1538,10 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
             "cash_balance_reliable": True,
         }),
     )
+    monkeypatch.setattr(
+        "src.application.portfolio_context_service.resolve_broker_portfolio_provider",
+        lambda _config, *, account, futu_provider: futu_provider,
+    )
     wheel_fact = load_shared_cash_capacity_fact(
         repo, config=cash_config(), runtime_root=tmp_path, account="lx", broker="futu", as_of_ms=now_ms, fx_snapshot={},
     )
