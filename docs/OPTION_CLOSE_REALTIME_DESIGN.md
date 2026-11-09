@@ -99,6 +99,15 @@ anchor、逐 lot 映射不清时，只记录既有结算观察/审查证据，�
 多份部分证据自动聚合、2+2 原因拆分及费用分摊不在本轮承诺内，需独立设计和验收；不能把
 部分证据当作整批原因，也不能因缺原因将仓位恢复为 open。
 
+有效 pending close 使全部或部分张数保持原因待定；在权威 timing policy 的
+`settlement_deadline_ms` 到达时（包含相等时点），生命周期从 `settlement_pending` /
+`partially_resolved` 转为 `needs_review`，原因是 `settlement_evidence_deadline_elapsed`。
+没有 timing policy 时，以观察起点后 72 小时作为复核兜底，原因是
+`lifecycle_timing_policy_unavailable`。该转换只升级复核状态，`actionable=False`，不写
+终结事件，不改变 remaining/resolved/pending 张数，不重开仓。`reason_state=cause_pending`
+继续表达平仓原因未定，使后到、完整匹配原 anchor 的权威结算证据仍可按原流程更正；
+已持久化的人工复核或冲突结论仍保留原优先级。conflict 不因截止时间而降级为普通复核。
+
 更正后的期权事件仍使用原券商期权平仓时间、零成交价、物理账户、订单及 deal
 身份；股票交收时间只用于股票事件和证据。保留原已确认现金及汇率转换，并以
 更正时**当前有效**费用事实填入 replacement，不能从原 event 复制已过时的
@@ -142,6 +151,14 @@ case、物理账户、币种/标的及交收时点匹配的可信结算证据解
 并验证同账户其他交易不会导致双计。缺足够证据时保持不可用。仅补齐平仓原因不
 证明资金或股份可用。下游 auto-close、Wheel、Daily Brief、Control 均以同一
 有效投影看剩余张数；原因未定以现有生命周期状态暴露，不伪装成已确认指派或到期失效。
+
+截止后进入 `needs_review` 也不证明交收完成，故保留
+`cash_secured_unavailable_by_symbol[symbol] = "option_close_settlement_pending"`；
+Call 的股份约束同理。仅按截止时间清除该标记，会在已平仓 lot 的数值担保已归零时，
+把尚无交收证据的现金当作可开仓容量。生命周期复核状态继续保留在
+`position_lifecycle_by_lot`，包括已全平仓的 lot。资金简报沿用现有人类可读提示，例如
+“可用于期权开仓（折CNY）｜暂不可用”和“可开仓资金待核实｜PDD 期权平仓待结算确认”；
+不会以原因待定的已关闭张数推测释放现金，也不会因状态转为复核而隐藏资金约束。
 
 仅有完整券商持仓快照中某仓位消失、但没有精确平仓成交时，只能确认快照时点
 已不在持仓，不能推造平仓时间、分配和收益率；保留 review/partial。

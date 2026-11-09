@@ -323,6 +323,11 @@ def derive_lifecycle_read_model(
             reservation=reservation,
         )
     current_ms = int(now_ms if now_ms is not None else datetime.now(timezone.utc).timestamp() * 1000)
+    deadline_reason_codes = (
+        ("settlement_evidence_deadline_elapsed",)
+        if pending_until_ms_override is not None
+        else ("lifecycle_timing_policy_unavailable",)
+    )
     if any(pending_close.values()):
         if any(
             lot_id not in target_manifest
@@ -335,10 +340,14 @@ def derive_lifecycle_read_model(
                 observation_start=observation_start, pending_until=pending_until,
                 resolution=resolution, reservation=reservation,
             )
+        state = "settlement_pending" if resolution.remaining_contracts == 0 else "partially_resolved"
+        reasons = ("close_reason_pending",)
+        if current_ms >= pending_until:
+            state = "needs_review"
+            reasons = deadline_reason_codes
         return _read_model(
-            state=("settlement_pending" if resolution.remaining_contracts == 0
-                   else "partially_resolved"),
-            reasons=("close_reason_pending",),
+            state=state,
+            reasons=reasons,
             observation_start=observation_start, pending_until=pending_until,
             resolution=resolution, reservation=reservation,
             pending_close=pending_close,
@@ -393,11 +402,7 @@ def derive_lifecycle_read_model(
     if current_ms >= pending_until:
         return _read_model(
             state="needs_review",
-            reasons=(
-                ("settlement_evidence_deadline_elapsed",)
-                if pending_until_ms_override is not None
-                else ("lifecycle_timing_policy_unavailable",)
-            ),
+            reasons=deadline_reason_codes,
             observation_start=observation_start,
             pending_until=pending_until,
             resolution=resolution,
@@ -480,10 +485,11 @@ def _read_model(
 
     if state == "conflict":
         reason_state = "conflict"
+    elif any((pending_close or {}).values()):
+        # A review deadline does not resolve the economic close's pending reason.
+        reason_state = "cause_pending"
     elif state == "needs_review":
         reason_state = "needs_review"
-    elif any((pending_close or {}).values()):
-        reason_state = "cause_pending"
     elif resolution.remaining_contracts == 0:
         reason_state = "resolved"
     elif resolution.resolved_contracts > 0:

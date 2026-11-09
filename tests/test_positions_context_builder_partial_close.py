@@ -557,6 +557,8 @@ def test_closed_option_leg_keeps_settlement_constraints_while_reason_pending(mon
 
 @pytest.mark.parametrize(("lifecycle_state", "reason_state"), [
     ("settlement_pending", "cause_pending"),
+    ("needs_review", "cause_pending"),
+    ("needs_review", "needs_review"),
     ("conflict", "cause_pending"),
     ("settlement_pending", "conflict"),
     ("conflict", "conflict"),
@@ -592,6 +594,128 @@ def test_fully_closed_pending_put_still_blocks_cash_capacity(
     assert context["cash_secured_unavailable_by_symbol"] == {
         "0700.HK": "option_close_settlement_pending"
     }
+
+
+@pytest.mark.parametrize("closed_contracts", [1, 2], ids=["partial_close", "full_close"])
+@pytest.mark.parametrize("with_policy", [True, False], ids=["policy", "fallback"])
+def test_pending_close_deadline_preserves_funds_constraint_and_brief(
+    tmp_path, closed_contracts: int, with_policy: bool,
+) -> None:
+    from domain.domain.ledger import ContractKey, TradeEvent
+    from domain.domain.option_lifecycle import expiration_observation_start_ms
+    from src.application.daily_decision_brief_renderer import render_full_brief
+    from src.application.daily_decision_brief_service import _build_funds
+    from src.application.ledger.decision_snapshot import decision_state_snapshot
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
+    from src.application.ledger.writer import (
+        persist_trade_event_object, record_zero_price_option_close_atomically,
+    )
+    from src.application.trades.lifecycle_timing import bind_lifecycle_timing_policy
+
+    repo = SQLiteOptionPositionsRepository(tmp_path / "ledger.sqlite3")
+    contract = ContractKey.from_values(
+        broker="futu", account="lx", underlying_symbol="PDD", option_type="put",
+        strike=100, expiration_ymd="2026-08-21",
+    )
+    start = expiration_observation_start_ms("2026-08-21", "US")
+    assert start is not None
+    event_fields = {"contract_key": contract, "currency": "USD", "source": "futu", "multiplier": 100}
+    persist_trade_event_object(repo, event=TradeEvent(
+        event_id="open-1", event_type="open", event_time_ms=start - 3 * 86400000,
+        contracts=2, price=2, lot_id="lot-1", raw_payload={"side": "sell"}, **event_fields,
+    ))
+    accepted = record_zero_price_option_close_atomically(
+        repo,
+        contract_identity={
+            "account": "lx", "broker": "futu", "futu_account_id": "REAL_1", "symbol": "PDD",
+            "option_type": "put", "position_side": "short", "strike": 100, "expiration_ymd": "2026-08-21",
+            "currency": "USD", "multiplier": 100, "market": "US",
+        },
+        evidence={
+            "evidence_id": "zero-evidence-1", "evidence_type": "option_zero_price_close",
+            "source_type": "broker_deal", "source_event_id": "futu:lx:REAL_1:zero-close-1",
+            "contracts": closed_contracts, "price": 0, "event_time_ms": start - 8 * 3600000,
+            "received_at_ms": start + 10, "side": "buy", "futu_account_id": "REAL_1",
+        },
+        base_event=TradeEvent(
+            event_id="base-close", event_type="close", event_time_ms=start - 8 * 3600000,
+            contracts=closed_contracts, price=0, target_lot_id="lot-1", raw_payload={"side": "buy"}, **event_fields,
+        ),
+    )
+    assert accepted["status"] == "accepted"
+    lifecycle_case = repo.list_trade_lifecycle_cases(account="lx")[0]
+    deadline = start + 72 * 3600000
+    if with_policy:
+        bound = bind_lifecycle_timing_policy(
+            repo, lifecycle_case=lifecycle_case,
+            contract_metadata={
+                "settlement_style": "physical", "underlying_security_type": "equity",
+                "contract_class": "standard_equity_option",
+            },
+            trading_days=[
+                {"date": "2026-08-21", "type": "TRADING"},
+                {"date": "2026-08-24", "type": "TRADING"},
+            ],
+            calendar_source="test_calendar", calendar_observed_at_ms=start - 86400000,
+            apply_changes=True,
+        )
+        deadline = int(bound["policy"]["settlement_deadline_ms"])
+    before_deadline = datetime.fromtimestamp((deadline - 1) / 1000, tz=timezone.utc)
+    snapshot = decision_state_snapshot(
+        repo, portfolio_scope_id="deadline-review", account="lx",
+        source_observed_at=before_deadline.isoformat(), current_decision_now_ms=deadline - 1,
+    )
+    assert snapshot["snapshot_status"] == "trusted"
+    assert snapshot["reason_codes"] == []
+    events_before = repo.list_trade_events()
+    lots_before = repo.list_position_lots()
+    remaining = 2 - closed_contracts
+
+    for offset_ms in (-1, 0, 1):
+        now = datetime.fromtimestamp((deadline + offset_ms) / 1000, tz=timezone.utc)
+        context = build_context(
+            [], broker="futu", account="lx", rates={"USDCNY": 7.0},
+            decision_snapshot=snapshot, lifecycle_now_ms=deadline + offset_ms,
+        )
+        lifecycle = context["position_lifecycle_by_lot"]["lot-1"]
+        assert lifecycle["lifecycle_state"] == (
+            ("partially_resolved" if remaining else "settlement_pending")
+            if offset_ms < 0 else "needs_review"
+        )
+        if offset_ms >= 0:
+            assert lifecycle["lifecycle_reason_codes"] == [
+                "settlement_evidence_deadline_elapsed"
+                if with_policy else "lifecycle_timing_policy_unavailable",
+            ]
+        assert bool(lifecycle["timing_policy_hash"]) is with_policy
+        assert lifecycle["pending_until_ms"] == deadline
+        assert lifecycle["target_contracts_by_lot"] == {"lot-1": 2}
+        assert lifecycle["pending_close_contracts_by_lot"] == {"lot-1": closed_contracts}
+        assert lifecycle["remaining_contracts_by_lot"] == {"lot-1": remaining}
+        assert lifecycle["resolved_contracts_by_lot"] == {"lot-1": closed_contracts}
+        assert lifecycle["reason_state"] == "cause_pending"
+        assert lifecycle["close_reason"] is None
+        assert lifecycle["actionable"] is False
+        assert context["cash_secured_total_by_ccy"] == ({"USD": remaining * 10000.0} if remaining else {})
+        assert context["cash_secured_unavailable_by_symbol"] == {"PDD": "option_close_settlement_pending"}
+        assert sum(item["contracts_open"] for item in context["open_positions_min"]) == remaining
+        portfolio = cash_portfolio({"as_of_utc": now.isoformat(), "cash_by_currency": {"USD": 50000}})
+        gaps = []
+        funds, _ = _build_funds(portfolio_context=portfolio, option_positions_context=context, data_gaps=gaps)
+        assert funds["cash_total_by_currency"] == {"USD": 50000.0}
+        assert funds["cash_secured_unavailable_by_symbol"] == {"PDD": "option_close_settlement_pending"}
+        assert funds["option_opening_available_by_currency"] == {}
+        assert funds["option_opening_available_cny"] is None
+        assert funds["option_opening_reliable"] is False
+        assert funds["available"] is False
+        assert funds["reason"] == "option_cash_secured_unavailable"
+        rendered = render_full_brief({"account": "lx", "market": "us", "funds": funds})
+        assert "可用于期权开仓（折CNY）｜暂不可用" in rendered
+        assert "可开仓资金待核实｜PDD 期权平仓待结算确认" in rendered
+        assert "option_close_settlement_pending" not in rendered
+
+    assert repo.list_trade_events() == events_before
+    assert repo.list_position_lots() == lots_before
 
 
 def test_late_paid_close_preserves_pending_settlement_cash_constraint(tmp_path) -> None:
