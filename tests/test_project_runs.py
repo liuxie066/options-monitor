@@ -216,7 +216,7 @@ def test_discovery_budget_exhaustion_retries_same_candidate(tmp_path, monkeypatc
         if budget["bytes"] < 1024:
             raise ProjectReaderError("file_too_large")
         budget["bytes"] = 10
-        return {"manifest": {"run_id": kwargs["run_id"], "account": "lx"}}
+        return {"manifest": {"run_id": kwargs["run_id"], "account": "lx", "config_revision": "a" * 64}}
 
     # Exercise discovery accounting independently; filesystem safety is tested above with real bytes.
     monkeypatch.setattr(project_runs, "load_run_bundle", bounded_candidate)
