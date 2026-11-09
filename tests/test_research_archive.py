@@ -126,6 +126,7 @@ def test_explicit_pull_preserves_failed_inventory_without_effects(
     assert data["ok"] is False and data["changed"] is False
     assert data["dry_run"] is (not write)
     assert data["manifest"] is None and data["scan_blob_refs"] == []
+    assert data["run_publications"] == []
     assert len(data["operations"]) == 1
     operation = data["operations"][0]
     assert operation["ok"] is False
@@ -206,6 +207,108 @@ def test_archive_cli_missing_explicit_run_uses_real_error_envelope(
     assert data["error"]["code"] == "SOURCE_INVENTORY_ERROR"
     assert data["error"]["details"] == {"missing_run_ids": ["missing"]}
     assert not root.exists()
+
+
+@pytest.mark.parametrize("mode", ["partial_new", "partial_reuse", "success", "dry_run"])
+def test_archive_cli_reports_actual_run_publications(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], mode: str,
+) -> None:
+    import shutil
+    import socket
+    from src.application.research import archive
+    from src.interfaces.cli.main import main
+
+    source, root = tmp_path / "source", tmp_path / "archive"
+    run_ids = ["run-1", "run-2", "run-3"]
+    for index, run_id in enumerate(run_ids):
+        path = _write_minimal_run(source, run_id)
+        os.utime(path, (2_000_000_000 - index, 2_000_000_000 - index))
+    for relative in ("output_shared/research", "output_shared/required_data"):
+        (source / relative).mkdir(parents=True)
+    shared = source / "output_shared/research/fixture.txt"
+    shared.write_text("synthetic shared data", encoding="utf-8")
+    local_shared = root / "output_shared/research/fixture.txt"
+    local_shared.parent.mkdir(parents=True)
+    local_shared.write_text("old local shared data", encoding="utf-8")
+    partial = mode in {"partial_new", "partial_reuse"}
+    if mode == "partial_reuse":
+        shutil.copytree(source / "output_runs/run-1", root / "output_runs/run-1")
+    if partial:
+        shutil.copytree(source / "output_runs/run-2", root / "output_runs/run-2")
+        conflict = root / "output_runs/run-2/state/last_run.json"
+        conflict.write_bytes(conflict.read_bytes() + b"\n")
+    conflict_before = _archive_tree_snapshot(root / "output_runs/run-2")
+    source_before, archive_before = _archive_tree_snapshot(source), _archive_tree_snapshot(root)
+    calls, forbidden_calls = [], []
+    rsync_path = str(tmp_path / "never-execute-real-rsync")
+
+    def transfer(command, **_kwargs):
+        calls.append(command)
+        if command[0] != rsync_path:
+            forbidden_calls.append(command[0])
+            raise AssertionError("only the isolated transfer adapter may execute")
+        origin, destination = Path(command[-2]), Path(command[-1])
+        assert origin.resolve().is_relative_to(source)
+        assert destination.resolve().is_relative_to(root)
+        if "--dry-run" not in command:
+            shutil.copytree(origin, destination, dirs_exist_ok=True)
+        return _completed(command, "")
+
+    def forbidden_network(*args, **kwargs):
+        forbidden_calls.append("network.connect")
+        raise AssertionError("archive fixtures must not contact a real host")
+
+    # The CLI uses the library's injectable default transport; keep the owner itself real.
+    monkeypatch.setitem(archive.archive_pull.__kwdefaults__, "run_cmd", transfer)
+    monkeypatch.setattr("src.interfaces.cli.main.repo_base", lambda: tmp_path)
+    monkeypatch.setattr(socket.socket, "connect", forbidden_network)
+    argv = ["research", "archive", "pull", "--source-root", str(source),
+            "--archive-root", str(root), "--no-logs", "--rsync-path", rsync_path]
+    for run_id in run_ids:
+        argv.extend(["--run-id", run_id])
+    if mode != "dry_run":
+        argv.append("--write")
+    rc = main(argv)
+    response = json.loads(capsys.readouterr().out)
+    assert rc == (2 if partial else 0), response
+    assert response["tool_name"] == "research.archive.pull" and response["ok"] is (not partial)
+    data = response["data"]
+    assert data["selected_run_ids"] == run_ids
+    assert data["ok"] is (not partial)
+    assert data["changed"] is (mode == "success")
+    assert (data["manifest"] is not None) is (mode == "success")
+    assert len(calls) == 5
+    if mode == "dry_run":
+        expected = []
+        assert _archive_tree_snapshot(root) == archive_before
+    else:
+        assert local_shared.read_bytes() == shared.read_bytes()
+        assert _archive_tree_snapshot(root / "output_runs/run-1") == _archive_tree_snapshot(source / "output_runs/run-1")
+        expected = [{"run_id": "run-1", "status": "reused" if mode == "partial_reuse" else "published",
+                     "path": str(root / "output_runs/run-1")}]
+        if partial:
+            assert _archive_tree_snapshot(root / "output_runs/run-2") == conflict_before
+            assert not (root / "output_runs/run-3").exists()
+            conflicts = [operation for operation in data["operations"]
+                         if operation.get("reason") == "archive_run_conflict"]
+            assert len(conflicts) == 1 and conflicts[0]["run_id"] == "run-2", data["operations"]
+            expected.append({"run_id": "run-2", "status": "conflict",
+                             "path": str(root / "output_runs/run-2"), "reason": "archive_run_conflict"})
+        else:
+            expected.extend({"run_id": run_id, "status": "published", "path": str(root / "output_runs" / run_id)}
+                            for run_id in run_ids[1:])
+    assert data["run_publications"] == expected
+    if mode != "dry_run":
+        first_before = _archive_tree_snapshot(root / "output_runs/run-1")
+        assert main(argv) == (2 if partial else 0)
+        repeated = json.loads(capsys.readouterr().out)["data"]
+        assert repeated["changed"] is (not partial)
+        assert repeated["run_publications"] == [
+            {**row, "status": "reused"} if row["status"] == "published" else row for row in expected
+        ]
+        assert _archive_tree_snapshot(root / "output_runs/run-1") == first_before
+    assert _archive_tree_snapshot(source) == source_before
+    assert forbidden_calls == []
 
 
 @pytest.mark.parametrize("remote", [False, True])
