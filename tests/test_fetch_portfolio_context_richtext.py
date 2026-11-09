@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import copy
+import json
+import sys
+from types import SimpleNamespace
 
+import pytest
 
+from src.application import portfolio_context_builder as builder
 from src.application.portfolio_context_builder import build_context
+from src.infrastructure import feishu_bitable
 
 
 def _cell(text: object) -> list[dict[str, object]]:
@@ -15,6 +22,115 @@ def _rec(**fields: object) -> dict:
 
 def _timed_rec(last_modified_time: str, **fields: object) -> dict:
     return {"last_modified_time": last_modified_time, "fields": fields}
+
+
+def _run_isolated_holdings_cli(tmp_path, monkeypatch, primary_rows):
+    records = primary_rows + [
+        _rec(broker="富途", account="other768", asset_type="us_stock", asset_id="NVDA",
+             quantity="7", avg_cost="10", currency="USD"),
+        _rec(broker="excluded768", account="qa768", asset_type="us_stock", asset_id="NVDA",
+             quantity="999", avg_cost="NaN", currency="USD"),
+    ]
+    original_records = copy.deepcopy(records)
+    data_config = tmp_path / "data.json"
+    data_config.write_text('{"fixture": "qa768"}', encoding="utf-8")
+    state_dir = tmp_path / "state"
+    output = state_dir / "portfolio_context.json"
+    shared_output = state_dir / "shared.json"
+    calls = []
+
+    def resolve_fixture(config):
+        calls.append(("config", config))
+        return SimpleNamespace(ready=True, missing_fields=(), holdings_ref="fixture-app/fixture-table",
+                               app_id="fixture-id", app_secret="fixture-secret")
+
+    def token(app_id, app_secret):
+        calls.append(("token", app_id, app_secret))
+        return "fixture-token"
+
+    def search(token, app_token, table_id):
+        calls.append(("search", token, app_token, table_id))
+        return records
+
+    def forbidden(*args, **kwargs):
+        calls.append(("forbidden",))
+        raise AssertionError("unexpected provider call")
+
+    monkeypatch.setattr(builder, "resolve_feishu_holdings_config", resolve_fixture)
+    monkeypatch.setattr(feishu_bitable, "get_tenant_access_token", token)
+    monkeypatch.setattr(builder, "bitable_search_records", search)
+    monkeypatch.setattr(builder, "bitable_list_records", forbidden)
+    monkeypatch.setattr(feishu_bitable, "http_json", forbidden)
+    monkeypatch.setattr(sys, "argv", ["portfolio_context_builder", "--data-config", str(data_config),
+                                    "--broker", "富途", "--account", "qa768", "--state-dir", str(state_dir),
+                                    "--shared-out", str(shared_output), "--quiet"])
+    builder.main()
+    assert calls == [
+        ("config", {"fixture": "qa768"}),
+        ("token", "fixture-id", "fixture-secret"),
+        ("search", "fixture-token", "fixture-app", "fixture-table"),
+    ]
+    assert records == original_records
+    assert data_config.read_bytes() == b'{"fixture": "qa768"}'
+    assert {path for path in tmp_path.rglob("*") if path.is_file()} == {data_config, output, shared_output}
+
+    def reject_constant(value):
+        raise ValueError(f"non-standard JSON number: {value}")
+
+    context = json.loads(output.read_text(encoding="utf-8"), parse_constant=reject_constant)
+    shared = json.loads(shared_output.read_text(encoding="utf-8"), parse_constant=reject_constant)
+    assert context["filters"] == {"broker": "富途", "account": "qa768"}
+    assert set(shared["by_account"]) == {"qa768", "other768"}
+    assert shared["by_account"]["qa768"]["stocks_by_symbol"] == context["stocks_by_symbol"]
+    assert shared["by_account"]["other768"]["stocks_by_symbol"]["NVDA"]["shares"] == 7
+    return context, shared
+
+
+@pytest.mark.parametrize("cost,known,only_average,mixed_average", [
+    ("NaN", 0, None, None), ("Infinity", 0, None, None), ("-Infinity", 0, None, None),
+    (None, 0, None, None), ("12.5", 10, 12.5, 20.833333333333332),
+    ("0", 10, 0.0, 16.666666666666668),
+])
+@pytest.mark.parametrize("order", ["only", "invalid_first", "known_first"])
+def test_holdings_cli_nonfinite_cost_is_unknown_and_outputs_strict_json(
+    tmp_path, monkeypatch, cost, known, only_average, mixed_average, order,
+):
+    row = _rec(broker="富途", account="qa768", asset_type="us_stock", asset_id="NVDA",
+               quantity="10", avg_cost=cost, currency="USD")
+    clean = _rec(broker="富途", account="qa768", asset_type="us_stock", asset_id="NVDA",
+                 quantity="20", avg_cost="25", currency="USD")
+    rows = [row] if order == "only" else [row, clean] if order == "invalid_first" else [clean, row]
+    context, shared = _run_isolated_holdings_cli(tmp_path, monkeypatch, rows)
+    stock = context["stocks_by_symbol"]["NVDA"]
+    extra_known = 0 if order == "only" else 20
+    assert stock["shares"] == 10 + extra_known
+    assert stock["cost_known_shares"] == known + extra_known
+    assert stock["cost_unknown_shares"] == 10 - known
+    assert stock["cost_basis_complete"] is (known == 10)
+    expected_average = only_average if order == "only" else mixed_average
+    if expected_average is None:
+        assert stock["avg_cost"] is None
+    else:
+        assert stock["avg_cost"] == pytest.approx(expected_average)
+    assert context["raw_selected_count"] == len(rows)
+    assert shared["all_accounts"]["stocks_by_symbol"]["NVDA"]["shares"] == stock["shares"] + 7
+
+
+@pytest.mark.parametrize("quantity", ["NaN", "Infinity", "-Infinity"])
+def test_holdings_cli_skips_nonfinite_stock_quantity_before_integer_conversion(tmp_path, monkeypatch, quantity):
+    rows = [
+        _rec(broker="富途", account="qa768", asset_type="us_stock", asset_id="NVDA",
+             quantity=quantity, avg_cost="12.5", currency="USD"),
+        _rec(broker="富途", account="qa768", asset_type="us_stock", asset_id="AAPL",
+             quantity="20", avg_cost="25", currency="USD"),
+    ]
+    context, _shared = _run_isolated_holdings_cli(tmp_path, monkeypatch, rows)
+    assert set(context["stocks_by_symbol"]) == {"AAPL"}
+    stock = context["stocks_by_symbol"]["AAPL"]
+    assert stock["shares"] == stock["cost_known_shares"] == 20
+    assert stock["cost_unknown_shares"] == 0
+    assert stock["avg_cost"] == 25
+    assert stock["cost_basis_complete"] is True
 
 
 def test_build_context_requires_broker_field_and_normalizes_hk_symbol() -> None:

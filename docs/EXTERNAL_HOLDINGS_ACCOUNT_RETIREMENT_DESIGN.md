@@ -75,6 +75,11 @@ F2 修订依据（2026-09-30）：对 `liuxie-incus:/var/lib/options-monitor` �
 
 当前 `strategy_policy.py::strategy_semantics_for_profile` 对所有可选开仓 profile 都返回 `scan_uses_path_risk=False`；`wants_global_path_risk_context` 只读取该字段。因此 `pipeline_context.py::build_pipeline_context` 中两个全局加载器、预备 worker 中的全局读取以及 `short_vol_risk_context.py` 的 `_global_*` 消费分支都不能由有效配置触发。测试可通过 monkeypatch 人为令门为真，但不能证明产品路径可达。`portfolio_context_builder.py::load_holdings_records` 还供该模块独立 `main()` 使用；`build_shared_context` 也供其 `--shared-out` 使用，不能随着扫描分支一起删除。`positions.context_builder` 的账户账本上下文、`portfolio_context_service.py::load_account_portfolio_context` 的账户富途上下文、`short_vol_risk_context.py::build_portfolio_risk_context` 及候选排序仍在真实调用链上。
 
+保留的独立 Holdings 命令在股票聚合前将 NaN、正负 Infinity 成本按缺失成本处理：对应份额计入
+`cost_unknown_shares`，有未知成本份额时 `avg_cost` 为 `null`、`cost_basis_complete` 为 `false`，
+重复行顺序不改变这一结果。非有限数量沿用无效数量的跳过规则，在整数转换前排除。
+这是保留入口的数值修复，不改变账户券商来源，也不恢复全局扫描分支。
+
 复用清单：账户持仓沿用 `portfolio_context_service.py::load_account_portfolio_context`；账户期权沿用 `pipeline_context.py::load_option_positions_context` 与 `prepared_option_positions_context.py`，包括前者使用的 `build_shared_option_positions_context` 和账户共享缓存；CSP 风险计算沿用 `short_vol_risk_context.py::build_portfolio_risk_context`，CC 维持自己的候选逻辑；缓存 I/O 沿用现有账户级路径。新增概念、字段、状态、别名、计算或校验：无。检索范围为 `src/application`、`src/interfaces`、`domain/domain`、`scripts`、测试、服务/部署模板和 `docs/INDEX.md` 指向的文档；关键词为 `wants_global_path_risk_context`、`scan_uses_path_risk`、`_global_portfolio_ctx`、`_global_option_ctx`、两个 `.global.json` 文件名、`load_holdings_records` 和 `build_shared_context`。除上述门控链、独立读取命令与测试外，未发现运行时全局扫描风险消费者；文档历史记载不是运行时消费者。
 
 选定方案：在策略 owner 移除恒假能力字段及门函数，在直接/预备上下文 owner 删除全局读取与两类全局缓存分支，在风险 owner 只消费账户上下文；删去仅为全局风险服务的校验/共享包装与无用导入。保留 Feishu 底层读取和独立命令，不将它改造成账户风险回退。备选的“保留死分支以便未来开启”继续制造无效配置预期和伪覆盖，拒绝；“删除全部 Feishu 读取器”会改变独立命令的现有合同，超出范围，拒绝。
