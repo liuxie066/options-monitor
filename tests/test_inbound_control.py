@@ -1295,6 +1295,103 @@ def test_inbound_record_expiry_creates_independent_previews_and_confirms_one(
     assert len(expire_events) == 3
 
 
+@pytest.mark.parametrize("reply", ["取消记录", "取消", "确认记录", "确认"])
+def test_inbound_expiry_batch_parent_is_confirmation_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reply: str,
+) -> None:
+    from src.application.bot.control import manual_trade_operations
+    from src.application.ledger.repository import SQLiteOptionPositionsRepository
+    from src.application.positions.workflows import execute_manual_open
+
+    _enable_inbound_trade_write(monkeypatch)
+    cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    cfg["_generated"]["market"] = cfg["_resolved"]["market"] = "hk"
+    cfg["accounts"] = ["lx"]
+    cfg["portfolio"]["account"] = "lx"
+    cfg_path = tmp_path / "config.hk.json"
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    audit_db = tmp_path / "inbound.sqlite3"
+    repo = SQLiteOptionPositionsRepository(sqlite_path)
+    for symbol, option_type, strike, contracts in (
+        ("0700.HK", "call", 490.0, 1), ("3690.HK", "put", 65.0, 2),
+    ):
+        execute_manual_open(
+            repo, broker="富途", account="lx", symbol=symbol, option_type=option_type,
+            side="short", contracts=contracts, currency="HKD", strike=strike,
+            multiplier=100, expiration_ymd="2026-07-10", premium_per_share=1.0,
+            underlying_share_locked=100 if option_type == "call" else None,
+            note=None, dry_run=False,
+            opened_at_ms=int(datetime(2026, 7, 1, tzinfo=timezone.utc).timestamp() * 1000),
+            request_id=f"expiry-response-seed-{symbol}",
+        )
+    initial_events = repo.list_trade_events()
+    notice = (
+        "到期未指派平仓，lx，衍生品提醒: 期权到期失效通知: 您的保证金综合账户(7973) - "
+        "证券所持有的-1张腾讯 260710 490.00 购, -2张美团 260710 65.00 沽"
+        "期权已到期失效，详情请查看持仓情况。【富途证券(香港)】"
+    )
+    preview = _handle(
+        f"/record-expiry {notice}", "expiry_response_preview",
+        config_path=str(cfg_path), audit_db=str(audit_db),
+    )
+    assert preview["ok"] is True, preview
+    parent_id = preview["data"]["command_id"]
+    operation_ids = preview["data"]["operation_ids"]
+    assert operation_ids == [f"{parent_id}:1", f"{parent_id}:2"]
+    store = InboundOperationStore(audit_db)
+    assert store.get(parent_id) is None
+    before = [store.get(operation_id) for operation_id in operation_ids]
+    assert all(operation["status"] == "previewed" for operation in before)
+    applied = []
+    apply_operation = manual_trade_operations._apply_operation
+
+    def observe_apply(payload):
+        applied.append(payload["arguments"]["symbol"])
+        return apply_operation(payload)
+
+    monkeypatch.setattr(manual_trade_operations, "_apply_operation", observe_apply)
+    response = _handle(
+        reply, "expiry_response_reply", config_path=str(cfg_path), audit_db=str(audit_db),
+    )
+    if reply.startswith("确认"):
+        assert response["ok"] is True, response
+        assert response["data"]["command_id"] == parent_id
+        assert response["data"]["applied_count"] == 2
+        assert sorted(applied) == ["0700.HK", "3690.HK"]
+        assert all(store.get(operation_id)["status"] == "applied" for operation_id in operation_ids)
+        events = [event for event in repo.list_trade_events() if event["event_type"] == "expire_close"]
+        assert len(events) == 2
+        return
+
+    assert response["ok"] is False, response
+    assert response["error"]["code"] == "NEEDS_CLARIFICATION", response
+    candidates = response["error"]["details"]["candidate_operations"]
+    assert {candidate["operation_id"] for candidate in candidates} == set(operation_ids)
+    assert all(f"/cancel trade {operation_id}" in response["error"]["hint"] for operation_id in operation_ids)
+    assert [store.get(operation_id) for operation_id in operation_ids] == before
+    assert applied == []
+    assert repo.list_trade_events() == initial_events
+
+    cancelled = _handle(
+        f"/cancel trade {operation_ids[0]}", "expiry_response_cancel_child",
+        config_path=str(cfg_path), audit_db=str(audit_db),
+    )
+    assert cancelled["ok"] is True, cancelled
+    assert cancelled["data"]["operation_id"] == operation_ids[0]
+    assert store.get(operation_ids[0])["status"] == "cancelled"
+    assert store.get(operation_ids[1])["status"] == "previewed"
+    single_cancelled = _handle(
+        reply, "expiry_response_cancel_remaining",
+        config_path=str(cfg_path), audit_db=str(audit_db),
+    )
+    assert single_cancelled["ok"] is True, single_cancelled
+    assert single_cancelled["data"]["operation_id"] == operation_ids[1]
+    assert all(store.get(operation_id)["status"] == "cancelled" for operation_id in operation_ids)
+    assert applied == []
+    assert repo.list_trade_events() == initial_events
+
+
 def test_operation_timeline_reports_audit_only_operation_when_store_missing(tmp_path: Path) -> None:
     from src.application.bot.control.audit import InboundAuditStore
     from src.application.bot.control.operation_diagnostics import collect_operation_timeline
