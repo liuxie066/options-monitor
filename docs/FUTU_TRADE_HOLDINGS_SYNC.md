@@ -1083,7 +1083,26 @@ Inbox、生命周期原因、逐意图 Outbox 与 delivery batch 分开显示，
 apply 会在创建 gateway 前把当前账户的 lifecycle audit heads 持久化到 intake
 audit JSONL，并在有实际 attempt 时追加 touched-head seal。任一 seal 写入失败都
 返回非零；已提交的 attempt 不会因此重调 provider，下一次 apply 会先补写当前
-账户 checkpoint。
+账户 checkpoint。该命令与常驻监听器使用同一 ledger 对应的权威 execution inbox，
+复用其中的 claim、退避和观察调度；它不是强制绕过这些守卫的补查入口。
+
+apply 模式的 trade-intake 每 60 秒检查本账户的到期 case，不依赖新成交。
+已写入 close 的 case 即使存储状态是 `ledger_written`，只要有持久化的
+`close` allocation，也会进入候选，不依赖 decision fact 是否已发布，也不扫描历史证据。
+`conflict`、`superseded` 保持排除，已完成归因的 case 不会再次采集。
+进入候选不代表立即查询券商：
+仍须有合法零价 close anchor、timing policy，配对窗口和结算截止时间均已到达，
+并通过 gateway、claim 和退避守卫。
+
+状态中的 `last_lifecycle_due_reconciliation.control_summary.earliest_next_attempt_at_ms`
+包含本地等待截止时间的下一次检查时间。`cached_local` 且 provider attempt 为零
+可以是正常等待，应核对该时间与 case 的权威 timing policy。provider 失败的
+`provider_results[].outcome.query_errors` 保留查询来源和错误详情；监听器和手工
+apply 补查均将其以 `phase=settlement_observation_failed` 持久化到该账户 intake audit JSONL，
+避免下一次缓存扫描覆盖最近结果后丢失诊断。失败 receipt 不作为成功结算观察，
+也不会据此写 `expire_close`。成功到期归因会把完整券商观察保存在 `expire_close`
+证据的 `observation` 中，来源为 `broker_settlement_observation`；不能仅按
+`evidence_type=settlement_observation` 的条数判断是否已经采集。
 
 ```bash
 # 查看 case、证据和当前 revision

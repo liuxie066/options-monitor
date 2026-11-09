@@ -580,6 +580,62 @@ def test_legacy_semantic_block_rechecks_after_evidence_scope_changes() -> None:
     assert repaired_evidence["attempt_count"] == 0
 
 
+def test_failed_provider_receipt_retains_query_error_details() -> None:
+    contract, capability = _contract_and_capability()
+    outcome = classify_observation_outcome(
+        {
+            "complete": False,
+            "observation_id": "failed-observation",
+            "source_receipts": {
+                "history_deals": {
+                    "source": "history_deals", "retcode": -1,
+                    "coverage_complete": False, "pagination_complete": False,
+                    "error": "history query unavailable", "error_class": "timeout",
+                },
+            },
+        },
+        **_case(), contract=contract, capability=capability,
+    )
+
+    assert outcome.kind == "retryable_error"
+    assert outcome.observation is None
+    assert outcome.to_dict(include_observation=False)["query_errors"] == [
+        {"source": "history_deals", "error": "history query unavailable"},
+    ]
+
+
+def test_collector_exception_retains_error_details() -> None:
+    contract, capability = _contract_and_capability()
+    outcome = classify_exception_outcome(
+        TimeoutError("broker response deadline exceeded"),
+        **_case(), contract=contract, capability=capability,
+    )
+
+    assert outcome.observation is None
+    assert outcome.to_dict(include_observation=False)["query_errors"] == [
+        {"source": "collector", "error": "TimeoutError: broker response deadline exceeded"},
+    ]
+
+
+def test_local_waiting_summary_reports_next_observation_time(tmp_path: Path) -> None:
+    path = tmp_path / "inbox.sqlite3"
+    upsert_settlement_attempt_state(path, state={
+        **_state(), "classification": "local", "outcome_kind": "cause_pending",
+        "next_attempt_at_ms": 2_000,
+    })
+    upsert_settlement_attempt_state(path, state={**_state(), "source_id": "sy", "next_attempt_at_ms": 1_500})
+    upsert_settlement_attempt_state(path, state={**_state(), "case_id": "unselected", "next_attempt_at_ms": 1_600})
+
+    summary = settlement_attempt_summary(
+        path, **_account(case_ids=["case-1"], now_ms=1_000),
+    )
+
+    assert summary["provider_required_count"] == 0
+    assert summary["eligible_count"] == 0
+    assert summary["backoff_count"] == 0
+    assert summary["earliest_next_attempt_at_ms"] == 2_000
+
+
 def test_unknown_errors_never_promote_to_permanent_block() -> None:
     state = _state()
     now_ms = 1_000

@@ -104,6 +104,7 @@ class SettlementAttemptOutcome:
     error_class: str | None = None
     retry_after_ms: int | None = None
     observation: dict[str, Any] | None = None
+    query_errors: tuple[dict[str, str], ...] = ()
 
     def to_dict(self, *, include_observation: bool = True) -> dict[str, Any]:
         output = {
@@ -118,6 +119,8 @@ class SettlementAttemptOutcome:
             "error_class": self.error_class,
             "retry_after_ms": self.retry_after_ms,
         }
+        if self.query_errors:
+            output["query_errors"] = [dict(item) for item in self.query_errors]
         if include_observation:
             output["observation"] = (
                 dict(self.observation)
@@ -253,6 +256,11 @@ def classify_observation_outcome(
                 else "unknown"
             ),
             retry_after_ms=retry_after_ms or None,
+            query_errors=tuple(
+                {"source": str(row.get("source") or "collector"), "error": str(row["error"])}
+                for row in failures
+                if row.get("error")
+            ),
         )
     kind = (
         "observed_complete"
@@ -311,6 +319,7 @@ def classify_exception_outcome(
         provider_code=provider_code or None,
         error_class=error_class,
         retry_after_ms=retry_after,
+        query_errors=({"source": "collector", "error": f"{type(exc).__name__}: {exc}"},),
     )
 
 

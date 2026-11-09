@@ -559,7 +559,7 @@ class LifecycleCaseRepositoryMixin:
         account: str,
         conn: sqlite3.Connection | None = None,
     ) -> list[dict[str, Any]]:
-        """Return compact case/timing/evidence invalidation facts only."""
+        """Return compact invalidation facts, retaining ledger-written pending closes."""
 
         account_value = str(account or "").strip().lower()
         if not account_value:
@@ -580,8 +580,19 @@ class LifecycleCaseRepositoryMixin:
                   AS evidence_revision
                   ON evidence_revision.case_id = lifecycle_case.case_id
                 WHERE lifecycle_case.account = ?
-                  AND lifecycle_case.status NOT IN (
-                    'ledger_written', 'conflict', 'superseded'
+                  AND (
+                    lifecycle_case.status NOT IN (
+                      'ledger_written', 'conflict', 'superseded'
+                    )
+                    OR (
+                      lifecycle_case.status = 'ledger_written'
+                      AND EXISTS (
+                        SELECT 1
+                        FROM trade_lifecycle_allocations AS close_allocation
+                        WHERE close_allocation.case_id = lifecycle_case.case_id
+                          AND close_allocation.terminal_type = 'close'
+                      )
+                    )
                   )
                 ORDER BY lifecycle_case.updated_at_ms DESC,
                          lifecycle_case.case_id DESC

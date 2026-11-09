@@ -622,30 +622,27 @@ def test_due_candidate_reader_excludes_absorbing_terminal_states(
         else:
             terminal_case_ids.add(case_id)
 
-    candidates = repo.list_trade_lifecycle_due_candidates(account="lx")
+    statements = []
+    with repo._connect() as conn:  # noqa: SLF001 - query-plan contract
+        conn.set_trace_callback(statements.append)
+        candidates = repo.list_trade_lifecycle_due_candidates(account="lx", conn=conn)
+        candidate_sql = next(sql for sql in statements if "AS case_raw_json" in sql)
+        query_plan = conn.execute("EXPLAIN QUERY PLAN " + candidate_sql).fetchall()
     returned_case_ids = {
         str(item["lifecycle_case"]["case_id"])
         for item in candidates
     }
-    with repo._connect() as conn:  # noqa: SLF001 - query-plan contract
-        query_plan = conn.execute(
-            """
-            EXPLAIN QUERY PLAN
-            SELECT case_id
-            FROM trade_lifecycle_cases
-            WHERE account = ?
-              AND status NOT IN (
-                'ledger_written', 'conflict', 'superseded'
-              )
-            ORDER BY updated_at_ms DESC, case_id DESC
-            """,
-            ("lx",),
-        ).fetchall()
 
     assert returned_case_ids == active_case_ids
     assert returned_case_ids.isdisjoint(terminal_case_ids)
     assert any(
-        "idx_trade_lifecycle_cases_due" in str(row["detail"])
+        "SEARCH lifecycle_case USING INDEX" in str(row["detail"])
+        and "account=?" in str(row["detail"])
+        for row in query_plan
+    )
+    assert any(
+        "SEARCH close_allocation USING INDEX" in str(row["detail"])
+        and "case_id=?" in str(row["detail"])
         for row in query_plan
     )
 
@@ -2145,6 +2142,8 @@ def test_invalid_stock_input_runtime_records_error_and_backoff_without_terminal(
     assert outcome["kind"] == "unknown_error"
     assert outcome["reason_code"] == "settlement_observation_data_invalid"
     assert outcome["error_class"] == "case_data"
+    assert outcome["query_errors"][0]["source"] == "collector"
+    assert outcome["query_errors"][0]["error"].startswith("SettlementObservationDataError: ")
     assert result["provider_results"][0]["semantic_fingerprint"] is None
     state = get_settlement_attempt_state(
         source["inbox_path"], source_id="lx", account="lx", case_id=case_id,
@@ -5039,6 +5038,90 @@ def _repo_with_projected_pending_close(tmp_path):
         repo, case_id=case["case_id"], now_ms=anchor_ms,
     )["reason_state"] == "cause_pending"
     return repo, case, policy
+
+
+@pytest.mark.parametrize("gateway_type", [_Gateway, _UntypedFailedReceiptGateway, _RateLimitedGateway])
+def test_projected_pending_close_is_observed_at_deadline_without_new_events(tmp_path, gateway_type):
+    from src.application.trades.inbox import get_settlement_attempt_state
+
+    repo, case, policy = _repo_with_projected_pending_close(tmp_path)
+    deadline = int(policy["settlement_deadline_ms"])
+    now = [deadline - 1]
+    assert case["status"] == "ledger_written"
+    with repo._connect() as conn:  # noqa: SLF001 - reproduce missing publication
+        assert conn.execute(
+            "SELECT decision_fact_json FROM trade_lifecycle_cases WHERE case_id=?", (case["case_id"],),
+        ).fetchone()[0] is None
+    gateway = gateway_type()
+    collector = build_settlement_observation_collector(
+        repo=repo, gateway=gateway, futu_account_id="1001",
+        now_ms_fn=lambda: now[0], source_id="lx",
+    )
+    source = {
+        "id": "lx", "account": "lx", "futu_account_ids": ["1001"],
+        "inbox_path": tmp_path / "inbox.sqlite3", "settlement_observation": {"enabled": True},
+    }
+    seals = []
+
+    def run_due():
+        return reconcile_due_lifecycle_cases_for_source(
+            repo, source=source, now_ms=now[0], apply_changes=True,
+            settlement_collector=collector, settlement_control_now_ms_fn=lambda: now[0],
+            seal_sink=seals.append,
+        )
+
+    def attempt():
+        return get_settlement_attempt_state(
+            source["inbox_path"], source_id="lx", account="lx", case_id=case["case_id"],
+        )
+
+    before_events = repo.list_trade_events()
+    before = run_due()
+    assert before["provider_attempt_count"] == 0
+    assert attempt()["next_attempt_at_ms"] == deadline
+    assert gateway.history_deal_queries == []
+    assert repo.list_trade_events() == before_events
+
+    # The persisted event and evidence stay unchanged; only wall-clock time advances.
+    now[0] = deadline
+    due = run_due()
+    assert due["provider_attempt_count"] == 1
+    assert len(gateway.history_deal_queries) == 1
+    if gateway_type is not _Gateway:
+        outcome = due["provider_results"][0]["outcome"]
+        assert outcome["kind"] == ("unknown_error" if gateway_type is _UntypedFailedReceiptGateway else "retryable_error")
+        assert outcome["error_class"] == ("unknown" if gateway_type is _UntypedFailedReceiptGateway else "rate_limit")
+        assert outcome["query_errors"] == [{
+            "source": "history_deals",
+            "error": "query failed" if gateway_type is _UntypedFailedReceiptGateway else "_RateLimitError: diagnostic text",
+        }]
+        assert repo.list_trade_events() == before_events
+        assert not any(
+            evidence["evidence_type"] in {"settlement_observation", "expire_close"}
+            for evidence in repo.list_trade_lifecycle_evidence(case_id=case["case_id"])
+        )
+        next_attempt = attempt()["next_attempt_at_ms"]
+        assert next_attempt > deadline
+        now[0] = next_attempt - 1
+        assert run_due()["skipped_counts"]["backoff"] == 1
+        assert len(gateway.history_deal_queries) == 1
+        gateway.get_history_deals = lambda **kwargs: _Gateway.get_history_deals(gateway, **kwargs)
+        now[0] = next_attempt
+        assert run_due()["provider_attempt_count"] == 1
+
+    readback = lifecycle_case_read_model(repo, case_id=case["case_id"], now_ms=now[0])
+    assert readback["close_reason"] == "expiration_no_settlement"
+    assert readback["lifecycle_state"] == "expired_unassigned"
+    evidence = repo.list_trade_lifecycle_evidence(case_id=case["case_id"])
+    terminal = [item for item in evidence if item["evidence_type"] == "expire_close"]
+    assert len(terminal) == 1
+    assert terminal[0]["source_type"] == "broker_settlement_observation"
+    assert terminal[0]["observation"]["complete"] is True
+    assert terminal[0]["observation"]["observed_at_ms"] >= deadline
+    stable_events = repo.list_trade_events()
+    terminal_retry = run_due()
+    assert terminal_retry["provider_attempt_count"] == 0
+    assert repo.list_trade_events() == stable_events
 
 
 def test_identified_multilot_pending_close_resolves_expiration_and_replays(tmp_path):
