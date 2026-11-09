@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 
 import pytest
 
@@ -27,6 +30,14 @@ from src.application.required_data_snapshot import (
     resolve_frozen_required_data_csv_bytes_batch,
     retire_required_data_snapshot_shadows,
     seal_required_data_snapshot,
+)
+from src.application.required_data_blobs import (
+    RequiredDataBlobError,
+    fsync_required_data_bound_file,
+    load_required_data_scan_blob,
+    publish_required_data_scan_blob,
+    required_data_shadow_file_matches,
+    retire_required_data_shadow_file,
 )
 from src.application.required_data_plan_identity import (
     build_required_data_expected_fetch_contract,
@@ -796,7 +807,10 @@ def test_cleanup_processes_one_blob_payload_at_a_time(
     assert events == ["load", "retire", "retire", "load", "retire", "retire"]
 
 
-@pytest.mark.parametrize("unsafe_kind", ("mismatch", "hardlink", "leaf_symlink", "parent_symlink"))
+@pytest.mark.parametrize(
+    "unsafe_kind",
+    ("mismatch", "hardlink", "leaf_symlink", "parent_symlink", "directory", "fifo"),
+)
 def test_cleanup_preserves_each_unsafe_shadow(
     unsafe_kind: str,
     tmp_path: Path,
@@ -816,17 +830,29 @@ def test_cleanup_preserves_each_unsafe_shadow(
         outside.write_bytes(raw.read_bytes())
         raw.unlink()
         raw.symlink_to(outside)
+    elif unsafe_kind in {"directory", "fifo"}:
+        raw.rename(raw.with_suffix(".regular"))
+        if unsafe_kind == "directory":
+            raw.mkdir()
+        else:
+            os.mkfifo(raw)
     else:
         real_raw = root / "raw-real"
         raw.parent.rename(real_raw)
         raw.parent.symlink_to(real_raw, target_is_directory=True)
 
-    result = _retire(root, manifest_path, manifest, manifest_bytes)
+    with _fifo_deadline("shadow cleanup"):
+        result = _retire(root, manifest_path, manifest, manifest_bytes)
 
     assert result["removed_files"] == 1
     assert result["failed_files"] == 1
     assert not csv.exists()
     assert raw.exists()
+    assert manifest_path.read_bytes() == manifest_bytes
+    with pytest.raises(FrozenRequiredDataUnavailable, match="receipt_or_payload_mismatch"):
+        _resolve(root, manifest_path)
+    if unsafe_kind == "fifo":
+        assert raw.is_fifo()
 
 
 def test_cleanup_handles_partial_manifest_and_skips_legacy_receipt(
@@ -951,6 +977,116 @@ def test_canonical_root_resolves_without_legacy_and_corruption_fails_closed(
         _resolve(root, manifest_path)
 
 
+
+
+@contextmanager
+def _fifo_deadline(operation: str) -> Iterator[None]:
+    def fail_on_deadline(_signum, _frame) -> None:
+        # pytest.fail escapes the facade's broad Exception wrappers.
+        pytest.fail(f"{operation} blocked on a FIFO without a writer")
+
+    previous_handler = signal.signal(signal.SIGALRM, fail_on_deadline)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, 1.0)
+    try:
+        # A timeout is a failure, never an acceptable rejection result.
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+
+
+@pytest.mark.parametrize("entrypoint", ("frozen_batch", "canonical_blob", "publisher"))
+def test_canonical_blob_fifo_is_rejected_without_waiting_for_writer(
+    tmp_path: Path,
+    entrypoint: str,
+) -> None:
+    root, manifest_path, manifest, _manifest_bytes = _sealed_canonical_snapshot(
+        tmp_path
+    )
+    blob_ref = manifest["symbols"]["3690.HK"]["scan_blob_ref"]
+    expected_csv = (root / "parsed/3690.HK_required_data.csv").read_bytes()
+
+    # Prove the sealed fixture works through the real readers and adoption path.
+    assert _batch(root, manifest_path).resolve("3690.HK")[1] == expected_csv
+    loaded = load_required_data_scan_blob(runtime_root=tmp_path, blob_ref=blob_ref)
+    assert loaded["required_data_csv_bytes"] == expected_csv
+    publication = {
+        "runtime_root": tmp_path,
+        "symbol": "3690.HK",
+        "market": "HK",
+        "raw_json_bytes": loaded["raw_json_bytes"],
+        "required_data_csv_bytes": expected_csv,
+        "columns": loaded["payload"]["projection"]["columns"],
+    }
+    assert publish_required_data_scan_blob(**publication) == blob_ref
+
+    blob_path = tmp_path / blob_ref["blob_relpath"]
+    blob_path.rename(blob_path.with_suffix(".regular"))
+    os.mkfifo(blob_path)
+
+    with _fifo_deadline(entrypoint):
+        if entrypoint == "frozen_batch":
+            with pytest.raises(
+                FrozenRequiredDataUnavailable, match="receipt_or_payload_mismatch",
+            ):
+                _batch(root, manifest_path)
+        else:
+            with pytest.raises(RequiredDataBlobError, match="not a regular file"):
+                if entrypoint == "canonical_blob":
+                    load_required_data_scan_blob(runtime_root=tmp_path, blob_ref=blob_ref)
+                else:
+                    publish_required_data_scan_blob(**publication)
+    assert blob_path.is_fifo()
+
+
+def test_shadow_comparison_rejects_fifo_without_waiting_for_writer(tmp_path: Path) -> None:
+    shadow = tmp_path / "shadow.json"
+    expected_bytes = b"shadow data"
+    shadow.write_bytes(expected_bytes)
+    assert required_data_shadow_file_matches(shadow, expected_bytes)
+    assert not required_data_shadow_file_matches(shadow, b"wrong bytes")
+    os.link(shadow, tmp_path / "hardlink.json")
+    assert required_data_shadow_file_matches(shadow, expected_bytes)
+
+    shadow.rename(shadow.with_suffix(".regular"))
+    os.mkfifo(shadow)
+
+    with _fifo_deadline("shadow comparison"):
+        assert not required_data_shadow_file_matches(shadow, expected_bytes)
+    assert shadow.is_fifo()
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "message"),
+    (("fsync", "changed before cleanup"), ("retire", "shadow content mismatch")),
+)
+def test_bound_file_operations_reject_fifo_without_waiting_for_writer(
+    tmp_path: Path,
+    entrypoint: str,
+    message: str,
+) -> None:
+    bound_file = tmp_path / "bound.json"
+    expected_bytes = b"bound data"
+    bound_file.write_bytes(expected_bytes)
+    operation = (
+        fsync_required_data_bound_file
+        if entrypoint == "fsync"
+        else retire_required_data_shadow_file
+    )
+    result = operation(root=tmp_path, relpath=bound_file.name, expected_bytes=expected_bytes)
+    if entrypoint == "fsync":
+        assert bound_file.read_bytes() == expected_bytes
+        bound_file.rename(bound_file.with_suffix(".regular"))
+    else:
+        assert result == "removed"
+        assert not bound_file.exists()
+    os.mkfifo(bound_file)
+
+    with _fifo_deadline(entrypoint):
+        with pytest.raises(RequiredDataBlobError, match=message):
+            operation(root=tmp_path, relpath=bound_file.name, expected_bytes=expected_bytes)
+    assert bound_file.is_fifo()
 
 
 def test_manifest_snapshot_returns_the_exact_validated_generation(
