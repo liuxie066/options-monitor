@@ -16,6 +16,7 @@ from src.application.release_version_recommendation import (
     SCHEMA_VERSION as RECOMMENDATION_SCHEMA_VERSION,
     recommend_release_version,
 )
+from src.infrastructure.io_utils import atomic_write_text
 
 
 def repo_base() -> Path:
@@ -222,9 +223,7 @@ def _stale_result(
 
 
 def _write_version_atomic(version_path: Path, version: str) -> None:
-    tmp_path = version_path.with_name(f"{version_path.name}.tmp")
-    tmp_path.write_text(version + "\n", encoding="utf-8")
-    tmp_path.replace(version_path)
+    atomic_write_text(version_path, version + "\n", encoding="utf-8")
 
 
 def check_version_update(
