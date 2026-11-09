@@ -2240,9 +2240,11 @@ def test_deal_json_write_contract_requires_applied_result(tmp_path, monkeypatch,
     assert result["dry_run"] is (mode == "dry-run")
 
 
+@pytest.mark.parametrize("collector_error", [False, True])
 def test_source_loop_carries_listening_status_across_iterations(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    collector_error: bool,
 ) -> None:
     """A running source must not read as "starting" for the whole iteration.
 
@@ -2317,9 +2319,20 @@ def test_source_loop_carries_listening_status_across_iterations(
     status_path = tmp_path / "status.json"
     observed: list[str] = []
 
+    query_errors = [{"source": "history_deals", "error": "broker query unavailable"}]
+
     def observe(*_args, **_kwargs):
         observed.append(json.loads(status_path.read_text(encoding="utf-8"))["status"])
-        return {"seal_status": "not_required", "run_seal": None, "process_counters": _kwargs["process_metrics"]}
+        return {
+            "seal_status": "not_required", "run_seal": None,
+            "process_counters": _kwargs["process_metrics"],
+            "provider_results": [{
+                "case_id": "pending-case", "outcome": {
+                    "kind": "retryable_error", "reason_code": "provider_query_retryable",
+                    "error_class": "timeout", "query_errors": query_errors,
+                },
+            }] if collector_error and len(observed) == 1 else [],
+        }
 
     monkeypatch.setattr(auto_intake, "OpenDTradePushListener", Listener)
     monkeypatch.setattr(auto_intake, "OpenDHistoryDealClient", History)
@@ -2375,6 +2388,17 @@ def test_source_loop_carries_listening_status_across_iterations(
     assert rc == 0
     assert observed, "the loop never reached its work phase"
     assert observed == ["listening"] * len(observed)
+    assert len(observed) >= 2
+    audit_path = tmp_path / "audit.jsonl"
+    audit = [json.loads(line) for line in audit_path.read_text().splitlines()] if audit_path.exists() else []
+    failures = [item for item in audit if item.get("phase") == "settlement_observation_failed"]
+    assert len(failures) == int(collector_error)
+    if collector_error:
+        assert failures[0]["account"] == "lx"
+        assert failures[0]["case_id"] == "pending-case"
+        assert failures[0]["outcome"]["query_errors"] == query_errors
+        status = json.loads(status_path.read_text())
+        assert status["last_lifecycle_due_reconciliation"]["provider_results"] == []
 
 
 def _initialize_preview_ledger(root, config_path):

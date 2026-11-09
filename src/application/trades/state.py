@@ -256,6 +256,30 @@ def append_trade_intake_audit(
     return p
 
 
+def append_settlement_observation_failures(
+    path: str | Path,
+    *,
+    source_id: str,
+    account: str,
+    provider_results: Iterable[dict[str, Any]],
+) -> None:
+    """Keep query diagnostics after the next cached sweep replaces runtime status."""
+    for result in provider_results:
+        outcome = result.get("outcome") or {}
+        if outcome.get("query_errors"):
+            append_trade_intake_audit(
+                path,
+                {
+                    "phase": "settlement_observation_failed",
+                    "source_id": source_id,
+                    "account": account,
+                    "case_id": result.get("case_id"),
+                    "outcome": outcome,
+                },
+                durable=True,
+            )
+
+
 def append_lifecycle_attempt_checkpoint_seal(
     path: str | Path,
     repo: Any,

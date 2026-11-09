@@ -99,6 +99,7 @@ from src.application.trades.inbox import (
 from src.application.trades.inbox_authority import resolve_execution_inbox_path
 from src.application.trades.state import (
     append_lifecycle_attempt_checkpoint_seal,
+    append_settlement_observation_failures,
     append_trade_intake_audit,
 )
 from src.application.trades.lifecycle_outbox import (
@@ -2025,6 +2026,24 @@ def main(argv: list[str] | None = None) -> int:
             source = sources[0]
             if not str(source.get("account") or "").strip():
                 source["account"] = account_value
+            source_base = (
+                Path(str(args.runtime_root)).expanduser().resolve()
+                if getattr(args, "runtime_root", None)
+                else base
+            )
+            requested_inbox = _resolve_path_under(
+                source.get("inbox_path")
+                or "output_shared/state/trade_intake_inbox.sqlite3",
+                base=source_base,
+            )
+            try:
+                source["inbox_path"] = resolve_execution_inbox_path(
+                    repo, requested_inbox
+                )
+            except (ValueError, sqlite3.Error) as exc:
+                raise SystemExit(
+                    f"lifecycle reconcile-due refused: {exc}"
+                ) from exc
             wheel_start_enabled = bool(
                 resolve_wheel_config(cfg, account_value).get(
                     "enabled_for_new_lifecycle"
@@ -2051,15 +2070,10 @@ def main(argv: list[str] | None = None) -> int:
                     raise SystemExit(
                         "lifecycle reconcile-due requires valid broker and canonical quote routes"
                     )
-                audit_base = (
-                    Path(str(args.runtime_root)).expanduser().resolve()
-                    if getattr(args, "runtime_root", None)
-                    else base
-                )
                 audit_path = _resolve_path_under(
                     source.get("audit_path")
                     or "output_shared/state/auto_trade_intake_audit.jsonl",
-                    base=audit_base,
+                    base=source_base,
                 )
 
                 def seal_sink(payload: dict[str, Any]) -> None:
@@ -2113,6 +2127,12 @@ def main(argv: list[str] | None = None) -> int:
                             seal_sink=seal_sink,
                             wheel_start_enabled=wheel_start_enabled,
                         )
+                    )
+                    append_settlement_observation_failures(
+                        audit_path,
+                        source_id=str(source.get("id") or account_value),
+                        account=account_value,
+                        provider_results=result.get("provider_results", []),
                     )
                 finally:
                     broker_gateway.close()
