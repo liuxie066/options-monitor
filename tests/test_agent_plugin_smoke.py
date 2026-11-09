@@ -1115,6 +1115,26 @@ def test_version_update_defaults_to_dry_run(monkeypatch, tmp_path: Path) -> None
     assert (tmp_path / "VERSION").read_text(encoding="utf-8").strip() == "1.0.0"
 
 
+def test_version_update_apply_preserves_existing_temporary_file(monkeypatch, tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    version = tmp_path / "VERSION"
+    version.write_bytes(b"1.0.0\n")
+    sentinel = tmp_path / "VERSION.tmp"
+    sentinel.write_bytes(b"unrelated preparation notes\n")
+    _patch_agent_tool_dependencies(monkeypatch, repo_base=lambda: tmp_path)
+    monkeypatch.setenv("OM_AGENT_ENABLE_WRITE_TOOLS", "true")
+
+    out = run_tool("version_update", {"target_version": "1.1.0", "apply": True, "confirm": True})
+
+    assert out["ok"] is True
+    assert out["data"]["mode"] == "applied"
+    assert out["data"]["target_version"] == "1.1.0"
+    assert version.read_bytes() == b"1.1.0\n"
+    assert sentinel.read_bytes() == b"unrelated preparation notes\n"
+    assert {path.name for path in tmp_path.iterdir()} == {"VERSION", "VERSION.tmp"}
+
+
 def test_version_update_apply_writes_version(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
