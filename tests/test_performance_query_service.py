@@ -507,3 +507,252 @@ def test_income_control_projects_trusted_paths_and_rejects_identity_mismatch(ser
     with pytest.raises(AgentToolError) as exc:
         execute_explicit_control(command, request=request, command_id="isolated-test", operation_store=None)
     assert exc.value.code == "SCOPE_ERROR" and "/trusted/" not in exc.value.message
+
+
+def _service_business_page(payload):
+    """Produce a canonical empty page from synthetic in-memory config."""
+    from src.application.performance.service import build_option_period_performance
+
+    class Ledger:
+        def list_trade_events(self):
+            return []
+
+        def list_position_lots(self):
+            return []
+
+    data, _, _ = query.option_performance_report_tool(
+        payload,
+        load_runtime_config=lambda **kw: (
+            Path("/synthetic/config.us.json"),
+            {"accounts": ["synthetic"], "portfolio": {}},
+        ),
+        resolve_public_data_config_path=lambda *args: Path("/synthetic/portfolio.runtime.json"),
+        normalize_broker=positions.normalize_broker,
+        resolve_option_positions_repo=lambda **kw: (Path("/synthetic/portfolio.runtime.json"), Ledger()),
+        build_option_period_performance=build_option_period_performance,
+        repo_base=lambda: Path("/synthetic"),
+        mask_path=lambda path: "<synthetic>",
+        now_ms=1791000000000,
+    )
+    return data
+
+
+def _service_business_page_execute(monkeypatch, wire_data, *, payload=None):
+    """Keep the public route real and record any forbidden local fallback."""
+    from io import BytesIO
+    from src.application.tool_execution import execute_tool
+
+    if payload is None:
+        payload = {**QUERY, **({"view": wire_data["view"]} if "view" in wire_data else {})}
+    local_calls = []
+
+    def forbidden_local_read(*args, **kwargs):
+        local_calls.append(True)
+        raise AssertionError("Service mode must not read local configuration or ledger data")
+
+    for name in ("load_runtime_config", "open_performance_query_ledger_from_data_config", "build_option_period_performance"):
+        monkeypatch.setattr(positions, name, forbidden_local_read)
+    envelope = {
+        "schema_version": client.API_VERSION,
+        "ok": True,
+        "data": wire_data,
+        "meta": {},
+        "warnings": [],
+    }
+    raw = json.dumps(envelope, allow_nan=False).encode("utf-8")
+    requests = []
+
+    class Response(BytesIO):
+        code = 200
+
+    class Opener:
+        def open(self, request, *, timeout):
+            requests.append({
+                "url": request.full_url,
+                "method": request.get_method(),
+                "payload": json.loads(request.data),
+                "timeout": timeout,
+            })
+            return Response(raw)
+
+    monkeypatch.setenv("OM_PERFORMANCE_SERVICE_URL", "http://127.0.0.1:1")
+    monkeypatch.setenv("OM_PERFORMANCE_SERVICE_TOKEN", "synthetic-performance-token")
+    monkeypatch.setattr(client, "build_opener", lambda *args: Opener())
+    result = execute_tool("option_performance_report", payload)
+    evidence = json.dumps({
+        "input": payload, "http_status": 200, "wire_envelope": envelope,
+        "public_output": result, "transport_calls": requests, "local_calls": local_calls,
+    }, ensure_ascii=False, sort_keys=True)
+    assert local_calls == [], evidence
+    assert requests == [{
+        "url": "http://127.0.0.1:1" + client.QUERY_PATH,
+        "method": "POST", "payload": payload, "timeout": client.CLIENT_TIMEOUT_SECONDS,
+    }], evidence
+    return result, evidence
+
+
+@pytest.mark.parametrize("view", [None, "rows", "summary", "breakdowns"])
+@pytest.mark.parametrize("variant", ["zero-result", "compatible-extension", "older-body"])
+def test_service_business_page_accepts_valid_empty_pages(monkeypatch, view, variant):
+    from copy import deepcopy
+
+    # Fixture signing must never consult a real credential backend.
+    monkeypatch.setattr(query_cursor, "_key", lambda: "synthetic-performance-page-key")
+    wire_data = _service_business_page({**QUERY, **({"view": view} if view else {})})
+    if variant == "compatible-extension":
+        wire_data["additive_future_field"] = {"accepted": True}
+        wire_data["quality"]["additive_future_field"] = ["accepted"]
+    elif variant == "older-body":
+        for name in ("schema_version", "metric_semantics", "period_option_net_cashflow"):
+            wire_data.pop(name, None)
+    expected = deepcopy(wire_data)
+    if view in {"rows", "breakdowns"}:
+        expected["pagination"].pop("page_cursor")
+    result, evidence = _service_business_page_execute(monkeypatch, wire_data)
+    assert result["ok"] is True and result["error"] is None, evidence
+    assert result["data"] == expected, evidence
+    assert result["warnings"] == [] and result["meta"] == {}, evidence
+    if view in {None, "summary"}:
+        if variant != "older-body":
+            assert result["data"]["period_option_net_cashflow"]["fact_count"] == 0, evidence
+        assert all(rows == [] for rows in result["data"]["breakdowns"].values()), evidence
+    else:
+        assert result["data"]["rows"] == [], evidence
+        assert result["data"]["pagination"]["has_more"] is False, evidence
+        assert result["data"]["next_cursor"] is None, evidence
+
+
+@pytest.mark.parametrize(
+    "view,path,value",
+    [
+        pytest.param("summary", ("period",), ..., id="missing-period"),
+        pytest.param("summary", ("scope",), [], id="invalid-scope"),
+        pytest.param("summary", ("coverage",), None, id="null-coverage"),
+        pytest.param("summary", ("freshness",), ..., id="missing-freshness"),
+        pytest.param("summary", ("quality",), [], id="invalid-quality"),
+        pytest.param("summary", ("option_net_cashflow",), ..., id="missing-cashflow"),
+        pytest.param("summary", ("sell_option_win_rate",), [], id="invalid-sell-win-rate"),
+        pytest.param("summary", ("buy_option_win_rate",), None, id="null-buy-win-rate"),
+        pytest.param("summary", ("option_return",), ..., id="missing-return"),
+        pytest.param("summary", ("daily_occupied_capital",), None, id="null-capital"),
+        pytest.param("summary", ("period_option_net_cashflow",), [], id="invalid-additive-metric"),
+        pytest.param("summary", ("breakdowns",), [], id="invalid-breakdown-map"),
+        pytest.param("summary", ("breakdowns", "symbols"), None, id="null-breakdown-group"),
+        pytest.param("summary", ("breakdowns", "symbols"), [None], id="invalid-breakdown-row"),
+        pytest.param("rows", ("view",), ..., id="missing-page-view"),
+        pytest.param("rows", ("view",), "unknown", id="unknown-page-view"),
+        pytest.param("rows", ("view",), "summary", id="response-view-mismatch"),
+        pytest.param("rows", ("rows",), ..., id="missing-page-rows"),
+        pytest.param("rows", ("rows",), None, id="null-page-rows"),
+        pytest.param("rows", ("rows",), {}, id="object-page-rows"),
+        pytest.param("rows", ("rows",), ["invalid"], id="invalid-page-row"),
+        pytest.param("rows", ("pagination",), ..., id="missing-pagination"),
+        pytest.param("rows", ("pagination",), [], id="invalid-pagination"),
+        pytest.param("rows", ("pagination", "offset"), ..., id="missing-offset"),
+        pytest.param("rows", ("pagination", "offset"), "0", id="string-offset"),
+        pytest.param("rows", ("pagination", "matched_count"), True, id="bool-matched-count"),
+        pytest.param("rows", ("pagination", "matched_count"), -1, id="negative-matched-count"),
+        pytest.param("rows", ("pagination", "has_more"), 0, id="integer-has-more"),
+        pytest.param("rows", ("pagination", "page_cursor"), 1, id="invalid-replay-cursor"),
+        pytest.param("rows", ("next_cursor",), [], id="invalid-next-cursor"),
+        pytest.param("rows", ("source",), ..., id="missing-source"),
+        pytest.param("rows", ("source", "content_hash"), [], id="invalid-content-hash"),
+        pytest.param("breakdowns", ("group_by",), ..., id="missing-breakdown-group"),
+        pytest.param("breakdowns", ("group_by",), [], id="invalid-breakdown-group"),
+        pytest.param("breakdowns", ("breakdowns", "symbols"), ..., id="missing-selected-breakdown"),
+    ],
+)
+def test_service_business_page_rejects_malformed_canonical_pages(monkeypatch, view, path, value):
+    monkeypatch.setattr(query_cursor, "_key", lambda: "synthetic-performance-page-key")
+    payload = {**QUERY, "view": view}
+    wire_data = _service_business_page(payload)
+    target = wire_data
+    for name in path[:-1]:
+        target = target[name]
+    if value is ...:
+        target.pop(path[-1])
+    else:
+        target[path[-1]] = value
+    result, evidence = _service_business_page_execute(monkeypatch, wire_data, payload=payload)
+    assert result["ok"] is False, evidence
+    assert result["error"]["code"] == "SERVICE_ERROR", evidence
+    assert result["error"]["details"]["reason_codes"] == ["service_protocol_invalid"], evidence
+
+
+@pytest.mark.parametrize(
+    "selectors",
+    [
+        {},
+        {"include_rows": True},
+        {"view": "summary"},
+        {"limit": 1},
+        {"view": "rows"},
+        {"group_by": "currencies"},
+        {"view": "breakdowns", "group_by": "accounts"},
+    ],
+)
+def test_service_business_page_preserves_query_view_defaults(monkeypatch, selectors):
+    monkeypatch.setattr(query_cursor, "_key", lambda: "synthetic-performance-page-key")
+    payload = {**QUERY, **selectors}
+    wire_data = _service_business_page(payload)
+    result, evidence = _service_business_page_execute(monkeypatch, wire_data, payload=payload)
+    assert result["ok"] is True and result["error"] is None, evidence
+    assert result["data"].get("view") == wire_data.get("view"), evidence
+    if selectors.get("include_rows"):
+        assert result["data"]["rows"] == [], evidence
+
+
+def test_service_business_page_full_report_requires_requested_rows(monkeypatch):
+    payload = {**QUERY, "include_rows": True}
+    wire_data = _service_business_page(payload)
+    wire_data.pop("rows")
+    result, evidence = _service_business_page_execute(monkeypatch, wire_data, payload=payload)
+    assert result["ok"] is False, evidence
+    assert result["error"]["code"] == "SERVICE_ERROR", evidence
+    assert result["error"]["details"]["reason_codes"] == ["service_protocol_invalid"], evidence
+
+
+@pytest.mark.parametrize("view", ["rows", "breakdowns"])
+def test_service_business_page_preserves_nonempty_pagination(service, monkeypatch, view):
+    monkeypatch.setattr(query_cursor, "_key", lambda: "synthetic-performance-page-key")
+    url, writer, _, _ = service
+    for index in range(3):
+        event = _event(f"page-open-{index}", "open", "2026-09-01T10:00:00")
+        writer.upsert_trade_event(replace(
+            event,
+            contract_key=replace(event.contract_key, underlying_symbol=f"SYM{index}"),
+            lot_id=f"page-lot-{index}",
+        ))
+    payload = {**QUERY, "view": view, "limit": 1}
+    count = 6
+    for offset in range(count):
+        data, warnings, meta = _remote(url, payload)
+        assert len(data["rows"]) == 1
+        assert data["pagination"]["offset"] == offset
+        assert data["pagination"]["matched_count"] == count
+        assert data["pagination"]["has_more"] is (offset < count - 1)
+        assert data["coverage"]["omitted_count"] == count - 1
+        assert warnings == [] and meta["config_path"] == "<bound-runtime>"
+        if view == "breakdowns":
+            assert data["breakdowns"]["symbols"] == data["rows"]
+        payload = {**payload, "cursor": data["next_cursor"]}
+    assert data["next_cursor"] is None
+
+
+@pytest.mark.parametrize(
+    "wire_data",
+    [
+        {"view": "rows"},
+        {"view": "summary"},
+        {"view": "rows", "rows": None},
+        {"view": "summary", "breakdowns": []},
+    ],
+    ids=["original-missing-rows", "original-hollow-summary", "null-rows", "wrong-summary-breakdowns-type"],
+)
+def test_service_business_page_regression_success_envelope_requires_business_page(monkeypatch, wire_data):
+    result, evidence = _service_business_page_execute(monkeypatch, wire_data)
+    assert result["ok"] is False, evidence
+    error = result.get("error") or {}
+    assert error.get("code") == "SERVICE_ERROR", evidence
+    assert "service_protocol_invalid" in error.get("details", {}).get("reason_codes", []), evidence
+    assert result["data"] == {}, evidence

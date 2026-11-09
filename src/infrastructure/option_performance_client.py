@@ -74,6 +74,59 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
+def _validate_business_page(data: dict, payload: dict) -> None:
+    paged = any(name in payload for name in ("view", "group_by", "symbol", "limit", "cursor"))
+    view = (
+        payload.get("view")
+        or ("breakdowns" if any(name in payload for name in ("group_by", "symbol", "limit", "cursor")) else "summary")
+    ) if paged else None
+    if data.get("view") != view:
+        raise ValueError
+    required_objects = ("period", "scope", "coverage", "freshness", "quality", "breakdowns")
+    if view in (None, "summary"):
+        required_objects += (
+            "option_net_cashflow", "sell_option_win_rate", "buy_option_win_rate", "option_return", "daily_occupied_capital",
+        )
+    if any(not isinstance(data.get(name), dict) for name in required_objects):
+        raise ValueError
+    # Additive report fields may be absent in older compatible business bodies.
+    for name in ("period_option_net_cashflow", "metric_semantics"):
+        if name in data and not isinstance(data[name], dict):
+            raise ValueError
+    if any(
+        not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows)
+        for rows in data["breakdowns"].values()
+    ):
+        raise ValueError
+    if view in ("rows", "breakdowns") or "rows" in data or (view is None and payload.get("include_rows")):
+        rows = data.get("rows")
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ValueError
+    if view not in ("rows", "breakdowns"):
+        return
+    if not isinstance(data.get("pagination"), dict) or not isinstance(data.get("source"), dict):
+        raise ValueError
+    pagination = data["pagination"]
+    for name in ("offset", "matched_count"):
+        if type(pagination.get(name)) is not int or pagination[name] < 0:
+            raise ValueError
+    for name in ("total_count", "returned_count", "scanned_count"):
+        if name in pagination and (type(pagination[name]) is not int or pagination[name] < 0):
+            raise ValueError
+    if type(pagination.get("has_more")) is not bool or "page_cursor" not in pagination or "next_cursor" not in data:
+        raise ValueError
+    # Null cursors are valid when continuation signing is unavailable.
+    for cursor in (pagination["page_cursor"], data["next_cursor"], pagination.get("next_cursor")):
+        if cursor is not None and (not isinstance(cursor, str) or not cursor):
+            raise ValueError
+    if not isinstance(data["source"].get("content_hash"), str) or not data["source"]["content_hash"]:
+        raise ValueError
+    if view == "breakdowns":
+        group = data.get("group_by")
+        if not isinstance(group, str) or group not in data["breakdowns"]:
+            raise ValueError
+
+
 def query_option_performance(payload: dict, *, url: str, token: str) -> tuple[dict, list[str], dict]:
     origin = validate_service_origin(url)
     validate_service_token(token)
@@ -126,6 +179,7 @@ def query_option_performance(payload: dict, *, url: str, token: str) -> tuple[di
                 or result.get("error") is not None
             ):
                 raise ValueError
+            _validate_business_page(result["data"], payload)
             return result["data"], result["warnings"], result["meta"]
         error = result.get("error")
         if (
