@@ -4663,6 +4663,130 @@ def test_manage_symbols_list_and_dry_run_add(monkeypatch, tmp_path: Path) -> Non
     assert [x["symbol"] for x in current["symbols"]] == ["NVDA"]
 
 
+@pytest.mark.parametrize("action", ["edit", "add", "remove"])
+@pytest.mark.parametrize("apply", [False, True])
+@pytest.mark.parametrize("source_change", ["none", "policy", "membership"])
+def test_manage_symbols_receipt_uses_yaml_candidate(
+    monkeypatch, tmp_path: Path, action: str, apply: bool, source_change: str,
+) -> None:
+    import socket
+    import yaml
+    from src.application.config_yaml import build_yaml_runtime_config_file
+    from src.application.tool_execution import execute_tool as run_tool
+
+    config_yaml, cfg_path = _write_manage_symbols_generation(tmp_path)
+    source = yaml.safe_load(config_yaml.read_text(encoding="utf-8"))
+    source["markets"]["us"]["symbols"].append("MSFT")
+    nvda = source["markets"]["us"]["overrides"]["NVDA"]
+    nvda.update({"use": ["put_base", "call_base"],
+                 "sell_put": {"enabled": True, "max_strike": 140},
+                 "covered_call": {"enabled": True, "min_strike": 150}})
+    config_yaml.write_text(yaml.safe_dump(source, sort_keys=False), encoding="utf-8")
+    build_yaml_runtime_config_file(
+        repo_root=BASE, market="us", config_path=config_yaml, output_config_path=cfg_path,
+    )
+    if source_change != "none":
+        nvda["covered_call"]["min_strike"] = 160
+        if source_change == "membership":
+            source["markets"]["us"]["symbols"].append("AMD")
+        config_yaml.write_text(yaml.safe_dump(source, sort_keys=False), encoding="utf-8")
+    expected_symbols = ["NVDA", "MSFT", "AMD"] if source_change == "membership" else ["NVDA", "MSFT"]
+    if action == "add":
+        expected_symbols.append("TSLA")
+        mutation = {"symbol": "TSLA", "broker": "US", "sell_put_enabled": True,
+                    "sell_put_min_dte": 20, "sell_put_max_dte": 45,
+                    "sell_put_min_strike": 100, "sell_put_max_strike": 120}
+    else:
+        mutation = {"symbol": "NVDA", **({"set": {"sell_put.max_strike": 145}} if action == "edit" else {})}
+        if action == "remove":
+            expected_symbols.remove("NVDA")
+    forbidden_calls = []
+
+    def forbidden_network(*args, **kwargs):
+        forbidden_calls.append("network.connect")
+        raise AssertionError("isolated config authoring must not connect to a real service")
+
+    monkeypatch.setattr(socket.socket, "connect", forbidden_network)
+    monkeypatch.setenv("OM_AGENT_ENABLE_WRITE_TOOLS", "true")
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    before = {str(path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    response = run_tool("manage_symbols", {
+        "config_path": str(cfg_path), "action": action,
+        "dry_run": not apply, "confirm": apply, **mutation,
+    })
+    assert response["ok"] is True, response
+    data = response["data"]
+    assert data["symbol_count"] == len(data["symbols"]) == len(expected_symbols)
+    assert [row["symbol"] for row in data["symbols"]] == expected_symbols
+    assert response["meta"]["write_applied"] is apply
+    assert data["dry_run"] is (not apply) and data["write_applied"] is apply
+    authoring = data["authoring"]
+    assert authoring["config_yaml_path"] == str(config_yaml)
+    assert authoring["market"] == "us" and authoring["action"] == action
+    for row in data["symbols"]:
+        assert set(row) == {"symbol", "broker", "accounts", "use", "limit_expirations",
+                            "sell_put", "sell_call", "combo_yield"}
+        assert row["broker"] == "US"
+    if action != "remove":
+        row = next(row for row in data["symbols"] if row["symbol"] == mutation["symbol"])
+        assert row["sell_put"]["max_strike"] == authoring["summary"]["after_effective"]["sell_put"]["max_strike"]
+    if action != "remove":
+        nvda_row = next(row for row in data["symbols"] if row["symbol"] == "NVDA")
+        assert nvda_row["sell_call"]["min_strike"] == (150 if source_change == "none" else 160)
+        if action == "edit":
+            assert nvda_row["sell_call"]["min_strike"] == authoring["summary"]["after_effective"]["sell_call"]["min_strike"]
+    if apply:
+        readback = run_tool("manage_symbols", {"config_path": str(cfg_path), "action": "list"})
+        assert readback["ok"] is True, readback
+        assert data["symbols"] == readback["data"]["symbols"]
+        assert [item["symbol"] for item in json.loads(cfg_path.read_text())["symbols"]] == expected_symbols
+    else:
+        assert {str(path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+    assert forbidden_calls == []
+
+
+@pytest.mark.parametrize("action", ["add", "edit", "remove"])
+def test_manage_symbols_validates_current_yaml_membership(monkeypatch, tmp_path: Path, action: str) -> None:
+    import socket
+    import yaml
+    from src.application.tool_execution import execute_tool as run_tool
+
+    config_yaml, cfg_path = _write_manage_symbols_generation(tmp_path)
+    source = yaml.safe_load(config_yaml.read_text(encoding="utf-8"))
+    market = source["markets"]["us"]
+    if action == "add":
+        market["symbols"] = ["MSFT"]
+        market["overrides"]["MSFT"] = market["overrides"].pop("NVDA")
+        mutation = {"symbol": "NVDA", "broker": "US", "sell_put_enabled": True,
+                    "sell_put_min_dte": 20, "sell_put_max_dte": 45,
+                    "sell_put_min_strike": 100, "sell_put_max_strike": 120}
+        expected_symbols = ["MSFT", "NVDA"]
+    else:
+        market["symbols"].append("TSLA")
+        market["overrides"]["TSLA"] = {"use": ["put_base"], "sell_put": {"enabled": True, "max_strike": 100}}
+        mutation = {"symbol": "TSLA", **({"set": {"sell_put.max_strike": 120}} if action == "edit" else {})}
+        expected_symbols = ["NVDA", "TSLA"] if action == "edit" else ["NVDA"]
+    config_yaml.write_text(yaml.safe_dump(source, sort_keys=False), encoding="utf-8")
+    forbidden_calls = []
+
+    def forbidden_network(*args, **kwargs):
+        forbidden_calls.append("network.connect")
+        raise AssertionError("isolated authoring preview must not connect to a real service")
+
+    monkeypatch.setattr(socket.socket, "connect", forbidden_network)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    before = {str(path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    response = run_tool("manage_symbols", {
+        "config_path": str(cfg_path), "action": action, "dry_run": True, **mutation,
+    })
+    assert response["ok"] is True, response
+    assert [row["symbol"] for row in response["data"]["symbols"]] == expected_symbols
+    assert response["data"]["symbol_count"] == len(expected_symbols)
+    assert response["meta"]["write_applied"] is False
+    assert {str(path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+    assert forbidden_calls == []
+
+
 def test_symbol_config_read_routes_to_calibrated_symbol_market(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
