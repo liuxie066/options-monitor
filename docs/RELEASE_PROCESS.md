@@ -212,7 +212,7 @@ VERSION="$(cat VERSION)"
 ./.venv/bin/python scripts/release_test_plan.py --mode standard --base origin/main
 ```
 
-它只读取 git diff 和 `VERSION`，输出 JSON 计划，不执行测试、不写文件。`--mode fast|standard|full` 用来选择预检强度；如果命中 ledger/position/trade 等高风险路径，计划会显式要求完整 pytest。
+它只读取 Git 变更信息和 `VERSION`，输出 JSON 计划，不执行测试、不写文件。任一 Git 发现命令返回非零退出码时，advisor 非零退出并向 stderr 输出失败命令和诊断，不生成不完整的 JSON 计划；有效零变更仍正常返回。可重复使用 `--changed-file <path>` 显式指定变更文件并跳过 Git 发现。`--mode fast|standard|full` 用来选择预检强度；如果命中 ledger/position/trade 等高风险路径，计划会显式要求完整 pytest。
 开发和 PR 迭代阶段按 advisor 输出跑定向检查；完整 preflight 留到 release commit
 定稿后集中跑一次，避免每次小修改重复扫全量 suite。
 

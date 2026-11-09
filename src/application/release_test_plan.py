@@ -353,8 +353,11 @@ def _git_name_only(command: list[str], *, run_cmd: Callable[..., Any], cwd: str 
         text=True,
         check=False,
     )
-    if int(getattr(proc, "returncode", 1)) != 0:
-        return []
+    returncode = int(getattr(proc, "returncode", 1))
+    if returncode != 0:
+        raise subprocess.CalledProcessError(
+            returncode, command, output=getattr(proc, "stdout", None), stderr=getattr(proc, "stderr", None),
+        )
     return [line.strip() for line in str(getattr(proc, "stdout", "") or "").splitlines() if line.strip()]
 
 
