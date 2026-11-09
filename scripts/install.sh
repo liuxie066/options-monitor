@@ -782,6 +782,15 @@ else
   if [ "$SOURCE_INSTALL" -eq 1 ]; then
     printf '[install] cloning %s at %s\n' "$REPO_URL" "$TAG"
     git clone --depth 1 --branch "$TAG" "$REPO_URL" "$tmp_dir"
+    source_tag_commit="$(git -C "$tmp_dir" rev-parse --verify "refs/tags/${TAG}^{commit}" 2>/dev/null)" \
+      || die "source release tag missing or invalid: $TAG"
+    source_checkout_commit="$(git -C "$tmp_dir" rev-parse HEAD)" \
+      || die "cannot establish source checkout identity: $TAG"
+    [ "$source_tag_commit" = "$source_checkout_commit" ] \
+      || die "source checkout does not match requested release tag: $TAG"
+    source_version="$(cat "$tmp_dir/VERSION" 2>/dev/null || true)"
+    [ "$source_version" = "${TAG#v}" ] \
+      || die "source release VERSION mismatch; expected=${TAG#v}; observed=${source_version:-missing}"
     # Clone does not honor export-ignore; also protect installs of older tags.
     find "$tmp_dir" -name .git -prune -o \
       \( -name AGENTS.md -o -name CLAUDE.md -o -name .agents \) -prune -exec rm -rf {} +
