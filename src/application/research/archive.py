@@ -715,6 +715,7 @@ def archive_prune_remote(
         and not unverified,
     }
     operations = [dry_operation, remote_inventory_operation]
+    cleanup_changed = False
     if confirm and guard["confirmable"]:
         confirm_command = _remote_cleanup_command(
             ssh_target=target,
@@ -742,6 +743,8 @@ def archive_prune_remote(
             confirm_validation.get("ok")
         )
         operations.append(confirm_operation)
+        if confirm_operation["ok"]:
+            cleanup_changed = confirm_payload["data"]["changed"]
     elif confirm and not guard["confirmable"]:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -761,7 +764,7 @@ def archive_prune_remote(
         "action": "prune-remote",
         "scope": "output-runs",
         "ok": bool(ok),
-        "changed": bool(confirm and ok and len(operations) > 1),
+        "changed": bool(ok and cleanup_changed),
         "dry_run": not bool(confirm),
         "remote": _safe_label(remote or DEFAULT_REMOTE),
         "archive_root": str(root),
@@ -1450,6 +1453,8 @@ def _validate_cleanup_confirm(
         errors.append("confirmed_plan_sha256_mismatch")
     if data.get("status") != "cleaned":
         errors.append("cleanup_status_not_cleaned")
+    if not isinstance(data.get("changed"), bool):
+        errors.append("cleanup_changed_missing_or_invalid")
     return {"ok": not errors, "errors": errors}
 
 
