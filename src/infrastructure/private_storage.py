@@ -250,12 +250,19 @@ def _secure_sqlite_directory(path: Path) -> None:
         raise OSError(f"sensitive SQLite directory changed during permission maintenance: {path.name}")
 
 
-def _secure_sqlite_file(path: Path) -> None:
-    before = path.lstat()
+def validate_private_sqlite_target(path: str | Path) -> os.stat_result:
+    """Validate an existing SQLite target's type without opening or changing it."""
+    target = private_path(path)
+    before = target.lstat()
     if stat.S_ISLNK(before.st_mode):
-        raise OSError(f"sensitive SQLite artifact must not be a symlink: {path.name}")
+        raise OSError(f"sensitive SQLite artifact must not be a symlink: {target.name}")
     if not stat.S_ISREG(before.st_mode):
-        raise OSError(f"sensitive SQLite artifact is not a regular file: {path.name}")
+        raise OSError(f"sensitive SQLite artifact is not a regular file: {target.name}")
+    return before
+
+
+def _secure_sqlite_file(path: Path) -> None:
+    before = validate_private_sqlite_target(path)
     # Opening and closing an existing inode releases this process's POSIX SQLite locks.
     os.chmod(path, PRIVATE_FILE_MODE, follow_symlinks=False)
     after = path.lstat()
@@ -291,4 +298,5 @@ __all__ = [
     "open_private_text",
     "private_path",
     "secure_sqlite_artifacts",
+    "validate_private_sqlite_target",
 ]

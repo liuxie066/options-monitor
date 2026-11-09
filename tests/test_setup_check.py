@@ -194,6 +194,108 @@ def test_setup_check_reports_earnings_calendar_sdk_capability(monkeypatch, tmp_p
     assert "10.9.6908" in capability["hint"]
 
 
+@pytest.mark.parametrize("kind", [
+    "missing", "regular", "file_symlink", "dangling_symlink", "directory_symlink", "directory", "fifo",
+])
+def test_setup_cli_session_target_matches_private_sqlite(monkeypatch, tmp_path: Path, capsys, kind) -> None:
+    import socket
+    import sqlite3
+    import stat
+
+    from src.infrastructure import private_storage
+    import src.interfaces.cli.main as cli
+
+    root = _prepare_python_setup_root(tmp_path).resolve()
+    runtime = (tmp_path / "runtime").resolve()
+    target = tmp_path / "audit/inbound.sqlite3"
+    target.parent.mkdir()
+    if kind == "regular":
+        target.write_bytes(b"")
+    elif kind == "file_symlink":
+        source = tmp_path / "source.sqlite3"
+        source.write_bytes(b"source must remain untouched")
+        target.symlink_to(source)
+    elif kind == "dangling_symlink":
+        target.symlink_to(tmp_path / "absent-source.sqlite3")
+    elif kind == "directory_symlink":
+        source = tmp_path / "source-directory"
+        source.mkdir()
+        target.symlink_to(source, target_is_directory=True)
+    elif kind == "directory":
+        target.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(target)
+    expected_ready = kind in {"missing", "regular"}
+    monkeypatch.delenv("OM_ENV_FILE", raising=False)
+    monkeypatch.setenv("OM_INBOUND_AUDIT_DB", str(target))
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
+    monkeypatch.setattr(cli, "repo_base", lambda: root)
+    _stub_toolchain(monkeypatch)
+    forbidden_calls = []
+
+    def snapshot():
+        return {
+            p.relative_to(tmp_path): (
+                stat.S_IMODE(p.lstat().st_mode), p.lstat().st_ino,
+                os.readlink(p) if p.is_symlink() else p.read_bytes() if p.is_file() else None,
+            )
+            for p in tmp_path.rglob("*")
+        }
+
+    def forbidden_effect(*args, **kwargs):
+        forbidden_calls.append((args, kwargs))
+        raise AssertionError("setup must not create storage, connect SQLite/network, or change permissions")
+
+    before = snapshot()
+    with monkeypatch.context() as diagnostic:
+        diagnostic.setattr(sqlite3, "connect", forbidden_effect)
+        diagnostic.setattr(socket.socket, "connect", forbidden_effect)
+        diagnostic.setattr(os, "mkdir", forbidden_effect)
+        diagnostic.setattr(os, "chmod", forbidden_effect)
+        diagnostic.setattr(private_storage.tempfile, "mkstemp", forbidden_effect)
+        cli.main(["setup", "check", "--market", "us", "--no-local-env-file"])
+        response = json.loads(capsys.readouterr().out)
+    assert response["tool_name"] == "setup.check"
+    assert forbidden_calls == []
+    assert snapshot() == before
+
+    # Exercise the real storage adapter only after the diagnostic's read-only checks.
+    real_connect = sqlite3.connect
+    sqlite_calls = []
+
+    def sqlite_transport(*args, **kwargs):
+        sqlite_calls.append((args, kwargs))
+        if not expected_ready:
+            raise AssertionError("an unsupported target must be rejected before SQLite is called")
+        return real_connect(*args, **kwargs)
+
+    owner_error = None
+    with monkeypatch.context() as storage_probe:
+        storage_probe.setattr(sqlite3, "connect", sqlite_transport)
+        if expected_ready:
+            connection = private_storage.connect_private_sqlite(target, timeout=0.1)
+            try:
+                assert connection.execute("SELECT 1").fetchone() == (1,)
+            finally:
+                connection.close()
+            assert sqlite_calls == [((str(target),), {"timeout": 0.1})]
+        else:
+            with pytest.raises(OSError) as caught:
+                private_storage.connect_private_sqlite(target, timeout=0.1)
+            owner_error = str(caught.value)
+            assert sqlite_calls == []
+    checks = {item["name"]: item for item in response["data"]["checks"]}
+    session = checks["bot.session_path"]
+    assert checks["bot.model_context"]["status"] == "ok"
+    assert session["value"]["parent_exists"] is True
+    assert session["value"]["parent_is_symlink"] is False
+    assert session["value"]["host_audit_db"] == session["value"]["session_path"] == str(target)
+    assert session["status"] == ("ok" if expected_ready else "error")
+    assert response["data"]["summary"]["bot_ready"] is expected_ready
+    if owner_error is not None:
+        assert owner_error in session["message"]
+
+
 @pytest.mark.parametrize("repo_state,runtime_state", [
     pytest.param("valid", "valid", id="both-valid-different-contexts"),
     pytest.param("invalid", "valid", id="repo-invalid-runtime-valid"),
