@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import sqlite3
 import sys
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1469,35 +1472,39 @@ def test_option_positions_cli_reconcile_due_preview_does_not_build_gateways(
         return original_reconcile(_repo, **kwargs)
 
     monkeypatch.setattr(cli_mod, "reconcile_due_lifecycle_cases_for_source", reconcile)
-    # SQLite readers may update shared-memory lock metadata; retain DB/WAL byte checks.
-    before = {
-        path.relative_to(tmp_path): path.read_bytes()
-        for path in tmp_path.rglob("*")
-        if path.is_file() and not path.name.endswith("-shm")
-    }
+    def snapshot():
+        return {
+            path.relative_to(tmp_path): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in tmp_path.rglob("*")
+            if path.is_file() and not path.name.endswith("-shm")
+        }
 
-    assert cli_mod.main(_om_cli_args(
-        data_config, "lifecycle", "reconcile-due", "--runtime-root", runtime_root,
-        "--account", "lx", "--config", runtime_config, "--observed-at-ms", "123",
-        "--dry-run", "--format", "json",
-    )) == 0
+    # Establish WAL sidecars before measuring the CLI. Keep this connection open so
+    # SQLite's last-connection cleanup cannot change the fixture during the preview.
+    # SHM lock metadata is excluded; DB/WAL content and the file set remain checked.
+    with closing(sqlite3.connect(ledger_path)) as observer:
+        observer.execute("PRAGMA query_only=ON")
+        observer.execute("SELECT 1 FROM sqlite_schema LIMIT 1").fetchall()
+        before = snapshot()
 
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["dry_run"] is True
-    assert captured["apply_changes"] is False
-    assert "broker_gateway" not in captured
-    assert "quote_gateway" not in captured
-    assert captured["source"] == {
-        **selected_source,
-        "account": "lx",
-        "inbox_path": ledger_path.with_name(ledger_path.name + ".trade_intake_inbox.sqlite3"),
-    }
-    assert "account" not in selected_source
-    assert {
-        path.relative_to(tmp_path): path.read_bytes()
-        for path in tmp_path.rglob("*")
-        if path.is_file() and not path.name.endswith("-shm")
-    } == before
+        assert cli_mod.main(_om_cli_args(
+            data_config, "lifecycle", "reconcile-due", "--runtime-root", runtime_root,
+            "--account", "lx", "--config", runtime_config, "--observed-at-ms", "123",
+            "--dry-run", "--format", "json",
+        )) == 0
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["dry_run"] is True
+        assert captured["apply_changes"] is False
+        assert "broker_gateway" not in captured
+        assert "quote_gateway" not in captured
+        assert captured["source"] == {
+            **selected_source,
+            "account": "lx",
+            "inbox_path": ledger_path.with_name(ledger_path.name + ".trade_intake_inbox.sqlite3"),
+        }
+        assert "account" not in selected_source
+        assert snapshot() == before
 
 
 def test_resolve_ambiguous_cli_previews_read_only_then_applies_one_scoped_receipt(
