@@ -6,7 +6,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 from src.application.agent_tool_contracts import AgentToolError, mask_path
@@ -17,12 +17,16 @@ from src.infrastructure.io_utils import utc_now as utc_now_iso
 from src.application.payload_helpers import optional_text as _optional_str
 
 
-def default_audit_db_path() -> Path:
-    raw = str(build_effective_env().get("OM_INBOUND_AUDIT_DB") or "").strip()
+def default_audit_db_path(
+    *, repo_root: str | Path | None = None, environ: Mapping[str, str] | None = None,
+) -> Path:
+    root = Path(repo_root).expanduser() if repo_root is not None else repo_base()
+    values = environ if environ is not None else build_effective_env(repo_root=repo_root).values
+    raw = str(values.get("OM_INBOUND_AUDIT_DB") or "").strip()
     if raw:
         path = Path(raw).expanduser()
-        return private_path(path if path.is_absolute() else repo_base() / path)
-    return private_path(repo_base() / "output_shared" / "state" / "inbound_control.sqlite3")
+        return private_path(path if path.is_absolute() else root / path)
+    return private_path(root / "output_shared" / "state" / "inbound_control.sqlite3")
 
 
 def build_command_id(*, channel: str, sender_id: str, message_id: str | None, text: str) -> str:

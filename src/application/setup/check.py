@@ -15,6 +15,7 @@ from typing import Any, Iterable
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError
 from src.application import runtime_bundle
+from src.application.bot.control.audit import default_audit_db_path
 from src.application.bot.control.config_loader import load_bot_config
 from src.application.config_yaml import load_yaml_config_file, resolve_yaml_bot_config
 from src.application.config_yaml_init import DEFAULT_FUTU_ACCOUNT_ID
@@ -25,7 +26,6 @@ from src.application.runtime_config_freshness import configured_runtime_markets
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.settings import build_effective_env, diagnose_effective_settings
 from src.infrastructure.futu_gateway import inspect_futu_sdk_earnings_calendar_capability
-from src.infrastructure.private_storage import private_path
 
 
 def run_setup_check(
@@ -212,11 +212,7 @@ def run_setup_check(
     if bot_disabled:
         add("bot.session_path", "info", "Bot is disabled; session path check skipped")
     else:
-        audit_raw = str(effective_env.values.get("OM_INBOUND_AUDIT_DB") or "").strip()
-        audit_db = Path(audit_raw).expanduser() if audit_raw else runtime.runtime_root / "output_shared" / "state" / "inbound_control.sqlite3"
-        if not audit_db.is_absolute():
-            audit_db = root / audit_db
-        audit_db = private_path(audit_db)
+        audit_db = default_audit_db_path(repo_root=root, environ=effective_env.values)
         session_path = audit_db
         session_parent = session_path.parent
         session_parent_is_symlink = session_parent.is_symlink()
