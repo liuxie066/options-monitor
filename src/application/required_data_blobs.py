@@ -312,13 +312,16 @@ def required_data_shadow_file_matches(
     path: Path,
     expected_bytes: bytes,
 ) -> bool:
-    """Hash-compare a legacy shadow file through a no-follow descriptor."""
+    """Hash-compare a legacy shadow; reject FIFOs without waiting for a writer."""
 
     descriptor: int | None = None
     try:
         descriptor = os.open(
             Path(path),
-            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY
+            | os.O_NONBLOCK
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
         )
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != len(expected_bytes):
@@ -452,6 +455,7 @@ def _open_bound_leaf(
         descriptor = os.open(
             parts[-1],
             os.O_RDONLY
+            | os.O_NONBLOCK
             | getattr(os, "O_CLOEXEC", 0)
             | getattr(os, "O_NOFOLLOW", 0),
             dir_fd=directories[-1],
@@ -858,7 +862,10 @@ def _open_blob_for_read(*, runtime_root: Path, ref: Mapping[str, Any]) -> int:
     try:
         descriptor = os.open(
             f"{digest}.json.gz",
-            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY
+            | os.O_NONBLOCK
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
             dir_fd=directory,
         )
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
@@ -914,7 +921,10 @@ def _read_regular_at(directory: int, name: str) -> bytes:
     try:
         descriptor = os.open(
             name,
-            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY
+            | os.O_NONBLOCK
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
             dir_fd=directory,
         )
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
