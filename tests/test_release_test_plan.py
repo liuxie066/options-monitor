@@ -620,3 +620,238 @@ def test_release_version_recommendation_maps_to_release_focused_tests() -> None:
     rules = {rule["name"] for rule in plan["matched_rules"]}
     assert {"service_release", "dependency_graph"} <= rules
     assert any("tests/test_release_version_recommendation.py" in command for command in plan["commands"])
+
+
+def _git_discovery_failed_runner(failed_index: int, calls: list[list[str]]):
+    def run(command, **kwargs):
+        calls.append(list(command))
+        assert kwargs == {
+            "cwd": str(Path.cwd()), "capture_output": True, "text": True, "check": False,
+        }
+        if len(calls) - 1 == failed_index:
+            return subprocess.CompletedProcess(
+                command, 128,
+                stdout="src/application/unreliable_partial_result.py\n",
+                stderr="synthetic Git discovery failure\n",
+            )
+        return subprocess.CompletedProcess(
+            command, 0, stdout="domain/domain/ledger/projection.py\n", stderr="",
+        )
+
+    return run
+
+
+@pytest.mark.parametrize("failed_index", range(4), ids=["committed", "staged", "unstaged", "untracked"])
+def test_git_discovery_rejects_each_failed_command(failed_index: int) -> None:
+    from src.application.release_test_plan import changed_files_from_git
+
+    calls = []
+    with pytest.raises(subprocess.CalledProcessError) as caught:
+        changed_files_from_git(
+            base_ref="HEAD", cwd=Path.cwd(),
+            run_cmd=_git_discovery_failed_runner(failed_index, calls),
+        )
+    assert len(calls) == failed_index + 1
+    assert caught.value.cmd == calls[-1]
+    assert caught.value.returncode == 128
+    assert caught.value.stdout == "src/application/unreliable_partial_result.py\n"
+    assert caught.value.stderr == "synthetic Git discovery failure\n"
+
+
+@pytest.mark.parametrize("failed_index", range(4), ids=["committed", "staged", "unstaged", "untracked"])
+def test_git_discovery_cli_emits_no_plan_after_partial_failure(monkeypatch, capsys, failed_index: int) -> None:
+    from argparse import Namespace
+    from scripts import release_test_plan as cli
+    from src.application.release_test_plan import changed_files_from_git
+
+    calls = []
+    builds = []
+    real_build = cli.build_release_test_plan
+
+    def discover(**kwargs):
+        return changed_files_from_git(run_cmd=_git_discovery_failed_runner(failed_index, calls), **kwargs)
+
+    def build(**kwargs):
+        builds.append(kwargs)
+        return real_build(**kwargs)
+
+    monkeypatch.setattr(cli, "parse_args", lambda: Namespace(
+        base="HEAD", mode="standard", tag=None, changed_file=None,
+    ))
+    monkeypatch.setattr(cli, "changed_files_from_git", discover)
+    monkeypatch.setattr(cli, "build_release_test_plan", build)
+    assert cli.main() == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "128" in captured.err
+    assert "synthetic Git discovery failure" in captured.err
+    assert len(calls) == failed_index + 1
+    assert builds == []
+
+
+def _git_discovery_git_env(tmp_path: Path) -> dict[str, str]:
+    """Build an empty, valid Git history without touching the task's .git.
+
+    Loose objects avoid init/add/commit commands, hooks, and real Git config.
+    Git itself still performs every discovery operation used by the CLI.
+    """
+    import hashlib
+    import zlib
+
+    git_dir = tmp_path / "synthetic-git"
+    work_tree = tmp_path / "synthetic-work-tree"
+    (git_dir / "objects").mkdir(parents=True)
+    (git_dir / "refs" / "heads").mkdir(parents=True)
+    work_tree.mkdir()
+
+    def write_object(kind: str, body: bytes) -> str:
+        raw = f"{kind} {len(body)}\0".encode("ascii") + body
+        oid = hashlib.sha1(raw).hexdigest()
+        object_path = git_dir / "objects" / oid[:2] / oid[2:]
+        object_path.parent.mkdir(exist_ok=True)
+        object_path.write_bytes(zlib.compress(raw))
+        return oid
+
+    tree = write_object("tree", b"")
+    commit = write_object(
+        "commit",
+        (
+            f"tree {tree}\n"
+            "author Synthetic Fixture <fixture@example.invalid> 1700000000 +0000\n"
+            "committer Synthetic Fixture <fixture@example.invalid> 1700000000 +0000\n"
+            "\nSynthetic empty history for issue 708\n"
+        ).encode("ascii"),
+    )
+    (git_dir / "HEAD").write_text("ref: refs/heads/control\n", encoding="ascii")
+    (git_dir / "refs" / "heads" / "control").write_text(commit + "\n", encoding="ascii")
+    (git_dir / "config").write_text(
+        "[core]\n\trepositoryformatversion = 0\n\tbare = false\n", encoding="ascii"
+    )
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(
+        {
+            "GIT_DIR": str(git_dir),
+            "GIT_WORK_TREE": str(work_tree),
+            "GIT_INDEX_FILE": str(git_dir / "index"),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "OM_SECRET_BACKEND": "env",
+        }
+    )
+    return env
+
+
+def _git_discovery_run(
+    env: dict[str, str], *command: str
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        list(command),
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+
+def _git_discovery_cli(
+    env: dict[str, str], *args: str
+) -> subprocess.CompletedProcess[str]:
+    import sys
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "release_test_plan.py"
+    return _git_discovery_run(env, sys.executable, "-B", str(script), *args)
+
+
+def _git_discovery_summary(proc: subprocess.CompletedProcess[str]) -> str:
+    return (
+        f"input={proc.args!r}; exit={proc.returncode}; "
+        f"stdout={proc.stdout[:4000]!r}; stderr={proc.stderr[:4000]!r}"
+    )
+
+
+def test_git_discovery_control_valid_empty_head(tmp_path: Path) -> None:
+    import json
+
+    env = _git_discovery_git_env(tmp_path)
+    for args in (
+        ("diff", "--name-only", "HEAD...HEAD"),
+        ("diff", "--name-only", "--cached"),
+        ("diff", "--name-only"),
+        ("ls-files", "--others", "--exclude-standard"),
+    ):
+        discovery = _git_discovery_run(env, "git", *args)
+        assert discovery.returncode == 0 and not discovery.stdout.strip(), (
+            "Valid zero-change fixture required: " + _git_discovery_summary(discovery)
+        )
+
+    proc = _git_discovery_cli(env, "--base", "HEAD")
+    summary = _git_discovery_summary(proc)
+    assert proc.returncode == 0, summary
+    plan = json.loads(proc.stdout)
+    assert plan["ok"] is True, summary
+    assert plan["changed_files"] == [], summary
+    assert plan["matched_rules"] == [], summary
+    assert plan["requires_full_pytest"] is False, summary
+
+
+def test_git_discovery_control_explicit_ledger_mapping(tmp_path: Path) -> None:
+    import json
+
+    env = _git_discovery_git_env(tmp_path)
+    changed_file = "domain/domain/ledger/projection.py"
+    proc = _git_discovery_cli(env, "--changed-file", changed_file)
+    summary = _git_discovery_summary(proc)
+    assert proc.returncode == 0, summary
+    plan = json.loads(proc.stdout)
+    assert plan["ok"] is True, summary
+    assert plan["changed_files"] == [changed_file], summary
+    assert "ledger_positions_trades" in {rule["name"] for rule in plan["matched_rules"]}, summary
+    assert plan["requires_full_pytest"] is True, summary
+    assert "./.venv/bin/python -m pytest" in plan["commands"], summary
+
+
+def test_git_discovery_regression_absent_base_is_failure(tmp_path: Path) -> None:
+    import json
+
+    env = _git_discovery_git_env(tmp_path)
+    base = "refs/heads/om-issue-708-deliberately-absent"
+    failed_discovery = _git_discovery_run(
+        env, "git", "diff", "--name-only", f"{base}...HEAD"
+    )
+    assert failed_discovery.returncode == 128 and base in failed_discovery.stderr, (
+        "Original missing-base trigger required: "
+        + _git_discovery_summary(failed_discovery)
+    )
+    for args in (
+        ("diff", "--name-only", "--cached"),
+        ("diff", "--name-only"),
+        ("ls-files", "--others", "--exclude-standard"),
+    ):
+        discovery = _git_discovery_run(env, "git", *args)
+        assert discovery.returncode == 0 and not discovery.stdout.strip(), (
+            "Other three discovery lanes must succeed empty: "
+            + _git_discovery_summary(discovery)
+        )
+
+    proc = _git_discovery_cli(env, "--base", base)
+    summary = (
+        _git_discovery_summary(proc)
+        + "; git_failure="
+        + _git_discovery_summary(failed_discovery)
+    )
+    assert proc.returncode != 0, "Incomplete Git discovery must fail the CLI: " + summary
+    assert base in proc.stdout + proc.stderr, "Preserve the failed Git input in diagnostics: " + summary
+    try:
+        plan = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        # A nonzero exit with stderr diagnostics is also a valid error surface.
+        pass
+    else:
+        assert isinstance(plan, dict) and plan.get("ok") is False, (
+            "An incomplete discovery must not emit a successful JSON plan: " + summary
+        )
