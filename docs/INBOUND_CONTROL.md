@@ -61,6 +61,9 @@ pending operation per contract. Confirm the whole notice with the plain reply
 `确认` (the conversation resolves its unique `command_id`), use
 `/confirm trade <command_id>` as an explicit fallback, or confirm individual
 contracts with `/confirm trade <operation_id>`.
+Cancel individual contracts with `/cancel trade <operation_id>`. When multiple
+contracts remain pending, `取消记录` (or `取消` with only the trade family pending)
+lists the child IDs for selection.
 
 If confirmation loses its receipt after a possible ledger commit, the operation
 remains unverified. Confirm the original operation ID to check its signed request
