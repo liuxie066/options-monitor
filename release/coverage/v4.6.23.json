@@ -1,0 +1,84 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.23",
+  "base": {
+    "tag": "v4.6.22",
+    "commit": "335276ae75f4e3794fbb75d9e6e312472ff3e802"
+  },
+  "reviewed_head": "e7fa6ca18427959b7a740f6c86b75e090e66c56b",
+  "commits": [
+    {
+      "sha": "fda7426de350a7881e114c65508720d48b29d64a",
+      "subject": "fix(ledger): expire pending close lifecycle at settlement deadline (#1082)"
+    },
+    {
+      "sha": "a200cc35710787d9dc0d3cbcbf48bcdca7b453c1",
+      "subject": "fix(opend): preserve completed empty DTE selections (#1081)"
+    },
+    {
+      "sha": "a29623d00b1bdc38300efdedb82c6659866c518d",
+      "subject": "fix(trades): collect pending settlement after ledger closes (#1083)"
+    },
+    {
+      "sha": "e7fa6ca18427959b7a740f6c86b75e090e66c56b",
+      "subject": "fix(support): preserve healthcheck readiness in diagnostic summaries (#1084)"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "平仓原因待确认的期权生命周期在交收截止时间到期后转为人工复核，避免继续停留在自动等待状态。（#1082）。",
+      "commits": [
+        "fda7426de350a7881e114c65508720d48b29d64a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "账本已记录关闭后，成交采集仍会补采集相关待交收证据，并保留采集失败诊断，避免因账本关闭状态跳过后续补证。（#1083）。",
+      "commits": [
+        "a29623d00b1bdc38300efdedb82c6659866c518d"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "OpenD 期权链在 DTE 筛选结果为空时保留成功空集语义，避免将已完成的空选择误报为数据不可用。（#1081）。",
+      "commits": [
+        "a200cc35710787d9dc0d3cbcbf48bcdca7b453c1"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "支持包和诊断摘要保留 `healthcheck` 的就绪状态，使摘要准确反映原始健康检查结果。（#1084）。",
+      "commits": [
+        "e7fa6ca18427959b7a740f6c86b75e090e66c56b"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "fda7426de350a7881e114c65508720d48b29d64a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1082"
+      ]
+    },
+    {
+      "commit": "a200cc35710787d9dc0d3cbcbf48bcdca7b453c1",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1081"
+      ]
+    },
+    {
+      "commit": "a29623d00b1bdc38300efdedb82c6659866c518d",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1083"
+      ]
+    },
+    {
+      "commit": "e7fa6ca18427959b7a740f6c86b75e090e66c56b",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1084"
+      ]
+    }
+  ]
+}
