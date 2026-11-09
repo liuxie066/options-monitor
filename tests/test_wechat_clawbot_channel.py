@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import pytest
 import stat
 import subprocess
@@ -514,6 +515,151 @@ def test_wechat_clawbot_message_adapter_builds_bot_request(tmp_path: Path) -> No
             "group_id": "group_1",
         },
     )
+
+
+def _wechat_receipt_process(state_dir, name, results, first_read=None, release_first=None, progress=None):
+    import fcntl
+
+    sends = []
+    load_receipts = WechatClawbotStateStore.load_outbound_receipts
+    flock = fcntl.flock
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def send_text_message(self, **kwargs):
+            sends.append(dict(kwargs))
+            return {"ret": 0, "data": {"message_id": f"reply_{name}"}}
+
+    def paused_load(store, *args, **kwargs):
+        payload = load_receipts(store, *args, **kwargs)
+        # Pause only the save-phase read, after the synthetic send succeeded.
+        if name == "a" and sends and first_read is not None:
+            first_read.set()
+            assert release_first.wait(20), "first receipt writer was not released"
+        return payload
+
+    def observed_flock(descriptor, operation):
+        # Let A finish if B is waiting for a real lock; without locking B saves
+        # first, forcing A's already-read snapshot to overwrite B deterministically.
+        if name == "b" and progress is not None and operation & fcntl.LOCK_EX:
+            progress.put("lock_attempt")
+        return flock(descriptor, operation)
+
+    WechatClawbotStateStore.load_outbound_receipts = paused_load
+    fcntl.flock = observed_flock
+    try:
+        receipt = reply_wechat_clawbot_text(
+            base=Path(state_dir).parent, state_dir=str(state_dir), to_user_id="user_fixture",
+            context_token="context_fixture", text=f"completed {name}",
+            idempotency_key=f"in_receipt_{name}:upgrade-final", client_factory=FakeClient,
+        )
+        results.put((name, receipt, len(sends)))
+        if name == "b" and progress is not None:
+            progress.put("saved")
+    finally:
+        WechatClawbotStateStore.load_outbound_receipts = load_receipts
+        fcntl.flock = flock
+
+
+def test_wechat_receipts_keep_concurrent_operation_results_and_replay(tmp_path: Path) -> None:
+    state_dir = _wechat_state_dir(tmp_path, buf=None)
+    store = WechatClawbotStateStore(state_dir)
+    seed = {"ok": True, "message_id": "seed_reply"}
+    store.save_outbound_receipts({"receipts": {"seed": seed}})
+    context = multiprocessing.get_context("spawn")
+    first_read, release_first = context.Event(), context.Event()
+    progress, results = context.Queue(), context.Queue()
+    workers = [
+        context.Process(target=_wechat_receipt_process,
+                        args=(state_dir, name, results, first_read, release_first, progress))
+        for name in ("a", "b")
+    ]
+    try:
+        workers[0].start()
+        assert first_read.wait(20), "first writer did not read the receipt snapshot"
+        workers[1].start()
+        assert progress.get(timeout=20) in {"saved", "lock_attempt"}
+        release_first.set()
+        for worker in workers:
+            worker.join(20)
+            assert worker.exitcode == 0
+        outcomes = {name: (receipt, sends) for name, receipt, sends in (
+            results.get(timeout=5), results.get(timeout=5),
+        )}
+    finally:
+        release_first.set()
+        for worker in workers:
+            if worker.pid is not None:
+                if worker.is_alive():
+                    worker.terminate()
+                worker.join(5)
+        progress.close()
+        results.close()
+    assert set(outcomes) == {"a", "b"}
+    assert all(receipt["ok"] and sends == 1 for receipt, sends in outcomes.values())
+    persisted = store.load_outbound_receipts()["receipts"]
+    assert set(persisted) == {"seed", "in_receipt_a:upgrade-final", "in_receipt_b:upgrade-final"}
+    assert persisted["seed"] == seed
+    attempted_clients = []
+
+    def forbidden_client(**kwargs):
+        attempted_clients.append(kwargs)
+        raise AssertionError("persisted receipts must replay before client creation")
+
+    for name in ("a", "b"):
+        replay = reply_wechat_clawbot_text(
+            base=tmp_path, state_dir=str(state_dir), to_user_id="user_fixture",
+            context_token="context_fixture", text=f"completed {name}",
+            idempotency_key=f"in_receipt_{name}:upgrade-final", client_factory=forbidden_client,
+        )
+        assert replay["reason"] == "idempotent_replay"
+        assert replay["message_id"] == f"reply_{name}"
+    assert attempted_clients == []
+
+
+def test_wechat_receipt_write_failure_releases_other_process(tmp_path: Path, monkeypatch) -> None:
+    state_dir = _wechat_state_dir(tmp_path, buf=None)
+    sends = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def send_text_message(self, **kwargs):
+            sends.append(dict(kwargs))
+            return {"ret": 0, "data": {"message_id": "reply_failed_save"}}
+
+    def fail_save(*args, **kwargs):
+        raise OSError("fixture receipt write failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(WechatClawbotStateStore, "save_outbound_receipts", fail_save)
+        receipt = reply_wechat_clawbot_text(
+            base=tmp_path, state_dir=str(state_dir), to_user_id="user_fixture",
+            context_token="context_fixture", text="completed before persistence failure",
+            idempotency_key="in_failed_save:upgrade-final", client_factory=FakeClient,
+        )
+    assert receipt["ok"] is True and receipt["receipt_store_warning_code"] == "OSError"
+    assert len(sends) == 1
+    context = multiprocessing.get_context("spawn")
+    results = context.Queue()
+    worker = context.Process(target=_wechat_receipt_process, args=(state_dir, "b", results))
+    try:
+        worker.start()
+        worker.join(20)
+        assert worker.exitcode == 0
+        name, saved, send_count = results.get(timeout=5)
+        assert (name, saved["ok"], send_count) == ("b", True, 1)
+    finally:
+        if worker.is_alive():
+            worker.terminate()
+        worker.join(5)
+        results.close()
+    persisted = WechatClawbotStateStore(state_dir).load_outbound_receipts()["receipts"]
+    assert set(persisted) == {"in_receipt_b:upgrade-final"}
+    assert persisted["in_receipt_b:upgrade-final"]["message_id"] == "reply_b"
 
 
 def test_reply_wechat_clawbot_text_reuses_idempotent_receipt(tmp_path: Path) -> None:
