@@ -87,8 +87,10 @@ def _validate_business_page(data: dict, payload: dict) -> None:
         "period", "scope", "coverage", "freshness", "quality", "breakdowns",
     )):
         raise ValueError
-    if "metric_semantics" in data and not isinstance(data["metric_semantics"], dict):
-        raise ValueError
+    # Additive report fields may be absent in older compatible business bodies.
+    for name in ("period_option_net_cashflow", "metric_semantics"):
+        if name in data and not isinstance(data[name], dict):
+            raise ValueError
     if "schema_version" in data and not isinstance(data["schema_version"], str):
         raise ValueError
 
@@ -97,12 +99,14 @@ def _validate_business_page(data: dict, payload: dict) -> None:
 
     if any(not object_rows(rows) for rows in data["breakdowns"].values()):
         raise ValueError
-    if "rows" in data and not object_rows(data["rows"]):
+    rows_required = payload.get("include_rows") is True and "view" not in payload and not has_page_options
+    if ("rows" in data or rows_required) and not object_rows(data.get("rows")):
         raise ValueError
     if expected_view == "summary":
+        if "period_option_net_cashflow" in data.get("metric_semantics", {}) and "period_option_net_cashflow" not in data:
+            raise ValueError
         if any(not isinstance(data.get(name), dict) for name in (
-            "period_option_net_cashflow", "option_net_cashflow", "sell_option_win_rate",
-            "buy_option_win_rate", "option_return", "daily_occupied_capital",
+            "option_net_cashflow", "sell_option_win_rate", "buy_option_win_rate", "option_return", "daily_occupied_capital",
         )):
             raise ValueError
         return
@@ -114,8 +118,10 @@ def _validate_business_page(data: dict, payload: dict) -> None:
         or not isinstance(data.get("pagination"), dict)
     ):
         raise ValueError
+    if not isinstance(data["source"].get("content_hash"), str) or not data["source"]["content_hash"]:
+        raise ValueError
     pagination = data["pagination"]
-    if any(type(pagination.get(name)) is not int for name in (
+    if any(type(pagination.get(name)) is not int or pagination[name] < 0 for name in (
         "offset", "total_count", "matched_count", "returned_count", "scanned_count",
     )) or type(pagination.get("has_more")) is not bool:
         raise ValueError
