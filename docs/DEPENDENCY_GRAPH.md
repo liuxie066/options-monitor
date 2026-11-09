@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 1462 (`src`: 608, `domain`: 99, `scripts`: 21, `tests`: 730)
-- Internal import edges: 13226 total, 4522 production/script edges excluding tests
+- Internal import edges: 13233 total, 4522 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -33,7 +33,7 @@ flowchart LR
   storage["domain.storage"]
   application -->|738| domain
   application -->|4| domain_services
-  application -->|212| infrastructure
+  application -->|211| infrastructure
   application -->|2| om_strategy_core
   application -->|60| storage
   domain_services -->|6| domain
@@ -51,11 +51,11 @@ flowchart LR
   scripts -->|1| tests
   src -->|1| application
   storage -->|1| domain
-  tests -->|6588| application
+  tests -->|6594| application
   tests -->|737| domain
   tests -->|2| domain_services
   tests -->|449| infrastructure
-  tests -->|498| interfaces
+  tests -->|499| interfaces
   tests -->|13| om_strategy_core
   tests -->|54| scripts
   tests -->|77| storage
@@ -67,7 +67,7 @@ flowchart LR
 |---|---|---|
 | application | domain | 738 |
 | interfaces | application | 240 |
-| application | infrastructure | 212 |
+| application | infrastructure | 211 |
 | scripts | application | 70 |
 | application | storage | 60 |
 | infrastructure | application | 46 |
@@ -90,9 +90,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 6588 |
+| tests | application | 6594 |
 | tests | domain | 737 |
-| tests | interfaces | 498 |
+| tests | interfaces | 499 |
 | tests | infrastructure | 449 |
 | tests | storage | 77 |
 | tests | scripts | 54 |
@@ -133,9 +133,9 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | domain.domain.ledger | 16 |
 | src.application.trades | src.infrastructure | 15 |
 | src.interfaces | src.application.trades | 15 |
+| src.application.setup | src.application | 13 |
 | src.application | src.application.positions | 12 |
 | src.application | src.application.research | 12 |
-| src.application.setup | src.application | 12 |
 | src.application.research | src.infrastructure | 11 |
 | src.application.research | domain.domain | 11 |
 | src.application.multi_tick | src.infrastructure | 10 |

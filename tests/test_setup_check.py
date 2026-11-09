@@ -194,9 +194,151 @@ def test_setup_check_reports_earnings_calendar_sdk_capability(monkeypatch, tmp_p
     assert "10.9.6908" in capability["hint"]
 
 
+@pytest.mark.parametrize("kind,repo_parent,runtime_parent", [
+    pytest.param("default", True, True, id="default-both-parents"),
+    pytest.param("default", False, True, id="default-runtime-parent-only"),
+    pytest.param("default", True, False, id="default-repo-parent-only"),
+    pytest.param("absolute", True, True, id="explicit-absolute"),
+    pytest.param("relative", True, True, id="explicit-relative"),
+])
+def test_setup_cli_session_path_matches_actual_bot_store(
+    monkeypatch, tmp_path: Path, capsys, kind, repo_parent, runtime_parent,
+) -> None:
+    import socket
+
+    from src.application.bot.control import audit, runtime as bot_runtime
+    import src.interfaces.cli.main as cli
+
+    root = _prepare_python_setup_root(tmp_path).resolve()
+    runtime_root = (tmp_path / "runtime").resolve()
+    runtime_db = runtime_root / "output_shared/state/inbound_control.sqlite3"
+    if not runtime_parent:
+        runtime_db.parent.rmdir()
+    if kind == "absolute":
+        raw = str(tmp_path / "explicit/inbound.sqlite3")
+        expected = Path(raw)
+    elif kind == "relative":
+        raw = "relative/inbound.sqlite3"
+        expected = root / raw
+    else:
+        raw = None
+        expected = root / "output_shared/state/inbound_control.sqlite3"
+    if repo_parent:
+        expected.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.delenv("OM_ENV_FILE", raising=False)
+    monkeypatch.delenv("OM_INBOUND_AUDIT_DB", raising=False)
+    if raw is not None:
+        monkeypatch.setenv("OM_INBOUND_AUDIT_DB", raw)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.setattr(cli, "repo_base", lambda: root)
+    monkeypatch.setattr(audit, "repo_base", lambda: root)
+    _stub_toolchain(monkeypatch)
+    selected_paths, forbidden_calls = [], []
+    real_store = audit.InboundAuditStore
+
+    class StoreCaptured(BaseException):
+        pass
+
+    def capture_store(path=None, **kwargs):
+        store = real_store(path, **kwargs)
+        selected_paths.append(store.path)
+        raise StoreCaptured
+
+    def forbidden_effect(*args, **kwargs):
+        forbidden_calls.append((args, kwargs))
+        raise AssertionError("diagnostic path comparison must not execute business or persist")
+
+    monkeypatch.setattr(bot_runtime, "InboundAuditStore", capture_store)
+    monkeypatch.setattr(bot_runtime, "handle_bot_request", forbidden_effect)
+    monkeypatch.setattr(audit, "connect_private_sqlite", forbidden_effect)
+    monkeypatch.setattr(socket.socket, "connect", forbidden_effect)
+    before = {p.relative_to(tmp_path): p.read_bytes() if p.is_file() else None for p in tmp_path.rglob("*")}
+    cli.main(["setup", "check", "--market", "us", "--no-local-env-file"])
+    response = json.loads(capsys.readouterr().out)
+    assert response["tool_name"] == "setup.check"
+    with pytest.raises(StoreCaptured):
+        cli.main([
+            "bot", "handle", "--text", "/help", "--sender", "fixture", "--config-key", "us",
+            "--bot-config", str(runtime_root / "resolved/config.bot.json"),
+        ])
+    assert selected_paths == [expected]
+    assert forbidden_calls == []
+    assert {p.relative_to(tmp_path): p.read_bytes() if p.is_file() else None for p in tmp_path.rglob("*")} == before
+    assert not expected.exists() and not runtime_db.exists()
+    report = response["data"]
+    checks = {item["name"]: item for item in report["checks"]}
+    session = checks["bot.session_path"]
+    assert session["value"]["session_path"] == str(selected_paths[0])
+    assert session["value"]["host_audit_db"] == str(selected_paths[0])
+    assert session["value"]["parent_exists"] is repo_parent
+    assert session["status"] == ("ok" if repo_parent else "error")
+    assert checks["bot.model_context"]["status"] == "ok"
+    assert report["summary"]["bot_ready"] is repo_parent
+
+
+@pytest.mark.parametrize("repo_env_exists", [False, True], ids=["repo-env-missing", "repo-env-conflicts"])
+def test_default_bot_stores_preserve_relative_env_file(monkeypatch, tmp_path: Path, repo_env_exists) -> None:
+    from src.application.bot.control import audit, operation_store
+
+    repo = tmp_path / "repo"
+    instance = tmp_path / "instance"
+    repo.mkdir()
+    instance.mkdir()
+    expected = instance / "chosen.sqlite3"
+    (instance / "options-monitor.env").write_text(f"OM_INBOUND_AUDIT_DB={expected}\n", encoding="utf-8")
+    if repo_env_exists:
+        (repo / "options-monitor.env").write_text(
+            f"OM_INBOUND_AUDIT_DB={repo / 'other.sqlite3'}\n", encoding="utf-8",
+        )
+    monkeypatch.chdir(instance)
+    monkeypatch.setenv("OM_ENV_FILE", "options-monitor.env")
+    monkeypatch.delenv("OM_INBOUND_AUDIT_DB", raising=False)
+    monkeypatch.setattr(audit, "repo_base", lambda: repo)
+    forbidden_calls = []
+
+    def forbidden_connect(*args, **kwargs):
+        forbidden_calls.append((args, kwargs))
+        raise AssertionError("selecting an audit path must not connect SQLite")
+
+    monkeypatch.setattr(audit, "connect_private_sqlite", forbidden_connect)
+    monkeypatch.setattr(operation_store, "connect_inbound_sqlite", forbidden_connect)
+    before = {p.relative_to(tmp_path): p.read_bytes() if p.is_file() else None for p in tmp_path.rglob("*")}
+    selected = [audit.InboundAuditStore().path, operation_store.InboundOperationStore().path]
+
+    assert forbidden_calls == []
+    assert {p.relative_to(tmp_path): p.read_bytes() if p.is_file() else None for p in tmp_path.rglob("*")} == before
+    assert selected == [expected, expected]
+
+
+@pytest.mark.parametrize("kind", ["absolute", "relative"])
+def test_setup_check_session_path_preserves_effective_env_file(monkeypatch, tmp_path: Path, kind) -> None:
+    root = _prepare_python_setup_root(tmp_path).resolve()
+    raw = str(tmp_path / "file-selected/inbound.sqlite3") if kind == "absolute" else "file-selected/inbound.sqlite3"
+    expected = Path(raw) if kind == "absolute" else root / raw
+    expected.parent.mkdir(parents=True)
+    env_file = tmp_path / "audit.env"
+    env_file.write_text(f"OM_INBOUND_AUDIT_DB={raw}\n", encoding="utf-8")
+    monkeypatch.delenv("OM_ENV_FILE", raising=False)
+    monkeypatch.setenv("OM_INBOUND_AUDIT_DB", str(tmp_path / "process-selected/inbound.sqlite3"))
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    _stub_toolchain(monkeypatch)
+    before = {p.relative_to(tmp_path): p.read_bytes() if p.is_file() else None for p in tmp_path.rglob("*")}
+    before_env = dict(os.environ)
+
+    out = run_setup_check(repo_root=root, markets=["us"], env_file=env_file, include_local_env_file=False)
+    session = {item["name"]: item for item in out["checks"]}["bot.session_path"]
+
+    assert session["value"]["session_path"] == str(expected)
+    assert session["value"]["host_audit_db"] == str(expected)
+    assert session["status"] == "ok"
+    assert dict(os.environ) == before_env
+    assert {p.relative_to(tmp_path): p.read_bytes() if p.is_file() else None for p in tmp_path.rglob("*")} == before
+
+
 def test_setup_check_reports_python_runtime_context_and_session_without_writes(monkeypatch, tmp_path: Path) -> None:
     root = _prepare_python_setup_root(tmp_path)
     runtime = tmp_path / "runtime"
+    (root / "output_shared" / "state").mkdir(parents=True)
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
     _stub_toolchain(monkeypatch)
     before = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*"))
@@ -209,8 +351,9 @@ def test_setup_check_reports_python_runtime_context_and_session_without_writes(m
     assert checks["bot.model_context"]["value"]["context_window_tokens"] == 24_000
     assert checks["bot.session_path"]["status"] == "ok"
     assert checks["bot.session_path"]["value"]["session_path"] == str(
-        runtime / "output_shared" / "state" / "inbound_control.sqlite3"
+        root / "output_shared" / "state" / "inbound_control.sqlite3"
     )
+    assert not (root / "output_shared" / "state" / "inbound_control.sqlite3").exists()
     assert not (runtime / "output_shared" / "state" / "inbound_control.sqlite3").exists()
     assert sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*")) == before
 
@@ -461,6 +604,9 @@ def test_setup_facade_honors_authoring_bot_intent(monkeypatch, tmp_path, capsys,
     elif case == "stale_source":
         source.write_text(source.read_text() + "\n# source changed after publication\n")
     (tmp_path / "output_shared/state").mkdir(parents=True, exist_ok=True)
+    setup_root = _prepare_python_setup_root(tmp_path)
+    (setup_root / "output_shared/state").mkdir(parents=True)
+    monkeypatch.setattr(cli, "repo_base", lambda: setup_root)
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
     monkeypatch.setattr(socket.socket, "connect", lambda *a, **kw: pytest.fail("setup must stay offline"))
     before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
