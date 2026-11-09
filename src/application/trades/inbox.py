@@ -3066,7 +3066,7 @@ def settlement_attempt_summary(
     ]
     next_values = [
         int(row["next_attempt_at_ms"])
-        for row in provider_rows
+        for row in validated_rows
         if row["next_attempt_at_ms"] is not None
         and int(row["next_attempt_at_ms"]) > int(now_ms)
     ]

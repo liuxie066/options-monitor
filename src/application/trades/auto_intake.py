@@ -39,6 +39,7 @@ from src.application.trades.normalizer import normalize_trade_deal
 from src.application.trades.resolver import resolve_trade_deal
 from src.application.trades.state import (
     append_lifecycle_attempt_checkpoint_seal,
+    append_settlement_observation_failures,
     append_trade_intake_audit,
     is_durable_processed_deal,
     load_trade_intake_state,
@@ -2986,6 +2987,12 @@ def _run_listener_source_loop(
                         status_state[
                             "last_lifecycle_due_reconciliation"
                         ] = due_result
+                        append_settlement_observation_failures(
+                            audit_path,
+                            source_id=str(source.get("id") or ""),
+                            account=str(source.get("account") or ""),
+                            provider_results=due_result.get("provider_results", []),
+                        )
                         status_state.pop(
                             "last_lifecycle_due_error",
                             None,
