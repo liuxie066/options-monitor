@@ -1146,7 +1146,16 @@ exec(compile(code, "<real installer Python entry>", "exec"))
     else:
         env = _installer_env(tmp_path)
         env["FAKE_REAL_PYTHON"] = str(driver)
-        _write_executable(tmp_path / "fake-bin/git", '#!/bin/bash\nset -eu\n[[ "$1" == clone ]]\ndest="${!#}"\n/bin/cp -R ' + shlex.quote(str(template)) + ' "$dest"\n')
+        _write_executable(tmp_path / "fake-bin/git", (
+            "#!/bin/bash\nset -eu\n"
+            'if [[ "${1:-}" == "-C" && "${3:-}" == "rev-parse" ]]; then\n'
+            '  [[ "${4:-}" == HEAD || ( "${4:-}" == --verify &&\n'
+            '        "${5:-}" == "refs/tags/v1.0.0^{commit}" ) ]]\n'
+            "  printf 'fixture-release-commit\\n'\n"
+            "  exit 0\nfi\n"
+            '[[ "$1" == clone ]]\ndest="${!#}"\n/bin/cp -R '
+            + shlex.quote(str(template)) + ' "$dest"\n'
+        ))
         forbidden_tools = tmp_path / "forbidden-tools.log"
         args = ["--source"]
     env.update(TMPDIR=str(tmp_path), PYTHONDONTWRITEBYTECODE="1", OM_SECRET_BACKEND="env",
