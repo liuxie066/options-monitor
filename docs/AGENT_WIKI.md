@@ -478,6 +478,15 @@ source-bound `inventory.latest.json` from `pull --write`. If that evidence is
 missing, repeat `pull --write` from the intended SSH source. Pruning still checks
 the current source identity, local and remote contents, and cleanup plan.
 
+A `pull` summary includes `run_publications`: each entry identifies the run,
+its local archive path, and a `published`, `reused`, or `conflict` status. A
+conflict also carries `reason=archive_run_conflict`; later runs have no entry.
+Dry runs and failures before publication return an empty list. `changed` retains
+its batch-completion meaning: it is true when a write pull succeeds, including a
+retry that reuses existing runs. A failed pull can already have synchronized
+shared files or published runs; inspect `operations` and `run_publications` to
+check those effects before retrying.
+
 ### Tick Runtime
 
 - Orchestration spine: `src/application/multi_account_tick.py`

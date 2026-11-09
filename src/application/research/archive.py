@@ -299,6 +299,7 @@ def archive_pull(
             "include_logs": bool(include_logs),
             "scan_blob_refs": [],
             "operations": [inventory_operation],
+            "run_publications": [],
             "manifest": None,
         }
     selected = set(selected_runs)
@@ -375,6 +376,7 @@ def archive_pull(
             operations.append(operation)
 
     ok = all(bool(item.get("ok")) for item in operations)
+    run_publications: list[dict[str, Any]] = []
     manifest: dict[str, Any] | None = None
     if write and ok:
         assert staging_root is not None
@@ -423,11 +425,17 @@ def archive_pull(
                                 "run_id": run_id,
                             }
                         )
+                        run_publications.append({
+                            "run_id": run_id, "status": "conflict", "path": str(published_run),
+                            "reason": "archive_run_conflict",
+                        })
                         break
                     shutil.rmtree(staged_run)
+                    run_publications.append({"run_id": run_id, "status": "reused", "path": str(published_run)})
                     continue
                 published_run.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(staged_run, published_run)
+                run_publications.append({"run_id": run_id, "status": "published", "path": str(published_run)})
         previous = _load_latest_inventory(root)
         previous_source = previous.get("source_identity")
         combined_source_inventory = list(source_run_inventory)
@@ -480,6 +488,7 @@ def archive_pull(
         "include_logs": bool(include_logs),
         "scan_blob_refs": scan_blob_refs,
         "operations": operations,
+        "run_publications": run_publications,
         "manifest": manifest,
     }
 
