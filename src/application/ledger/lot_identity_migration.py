@@ -970,6 +970,8 @@ def build_lot_identity_migration_inventory(sqlite_path: str | Path) -> dict[str,
     implementation, _timing = _loaded_implementation()
     before = _file_sizes(path)
     with _read_only_connection(path) as conn:
+        # A concurrent commit must not split the diagnostic across snapshots.
+        conn.execute("BEGIN")
         inventory = _inventory_from_conn(path, conn, implementation=implementation)
     after = _file_sizes(path)
     _assert_read_only_persistent_sizes(before, after, operation="inventory")
@@ -1013,6 +1015,8 @@ def verify_lot_identity_migration(sqlite_path: str | Path) -> dict[str, Any]:
     implementation, _timing = _loaded_implementation()
     before = _file_sizes(path)
     with _read_only_connection(path) as conn:
+        # A concurrent commit must not split the diagnostic across snapshots.
+        conn.execute("BEGIN")
         inventory = _inventory_from_conn(path, conn, implementation=implementation)
         rows = _scan_lot_payloads(conn)
         events = (
