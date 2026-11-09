@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from pathlib import Path
 import subprocess
@@ -14,6 +15,7 @@ from scripts import code_health_review as review
 
 
 A = "a" * 40
+B = "b" * 40
 REPORT = "已读取原报告、完整后续讨论与关联实现，并在冻结版本上明确当前残留、反证、验证范围、未完成事项和下一步。" * 8
 
 
@@ -77,6 +79,7 @@ def test_full_discussion_and_linked_work_are_paginated_before_review(tmp_path):
     responses = {
         "issues?state=open&sort=created&direction=asc&per_page=100": [[issue(1), issue(2)], [issue(3), issue(4)]],
         "pulls?state=open&per_page=100": [[open_pr]],
+        "pulls/60": {**open_pr, "state": "open"},
         "pulls/60/files?per_page=100": [[{"filename": "example.py"}]],
         "pulls/50": {"number": 50, "state": "closed", "merged_at": "2026-11-02", "title": "Partial implementation", "merge_commit_sha": A},
     }
@@ -101,7 +104,8 @@ def test_full_discussion_and_linked_work_are_paginated_before_review(tmp_path):
     assert "no successful write" in plan["issues"][0]["comments"][-1]["body"]
     assert [row["number"] for row in plan["issues"][0]["linked_pull_requests"]] == [50, 60]
     assert not forbidden
-    assert not any("issues/4" in call[-1] for call in calls)
+    assert not any(call[-1].endswith("/issues/4") for call in calls)
+    assert any("issues/4/timeline?" in call[-1] for call in calls)
     repair.save(tmp_path / "issue-state.json", {"issues": {
         str(row["number"]): {"target": A, "input_digest": row["input_digest"], "outcome": "not_reproduced", "reviewed_at": "2026-11-03"} for row in plan["issues"]}})
     assert [row["number"] for row in issues.plan_issues(tmp_path, config, A, command)["issues"]] == [4]
@@ -754,3 +758,314 @@ def test_outer_blocked_report_is_retained_as_needs_decision(tmp_path):
     result = json.loads((stage / "result.json").read_text())
     assert result["reviews"][0]["outcome"] == "needs_decision"
     assert set(result["reviews"][0]) == {"number", "outcome", "report_markdown", "comment_draft", "finding", "closure_evidence"}
+
+
+@pytest.fixture
+def queue_inputs(tmp_path):
+    issue = {"number": 1, "title": "Wrong result", "state": "open", "assignees": [],
+             "body": "See https://github.com/fixture/repo/pull/50", "updated_at": "original",
+             "html_url": "https://github.com/fixture/repo/issues/1"}
+    pr = {"number": 50, "title": "Earlier fix", "state": "closed", "body": "", "updated_at": "original",
+          "head": {"sha": A}, "merged_at": "yesterday", "merge_commit_sha": A,
+          "html_url": "https://github.com/fixture/repo/pull/50"}
+    data = {"issues": {1: issue}, "prs": {50: pr}, "open_prs": [], "comments": [], "timeline": [], "calls": []}
+    config = {"gh": "fixture-gh", "repository": "fixture/repo", "max_issues": 1}
+
+    def command(argv, **kwargs):
+        data["calls"].append(argv)
+        assert argv[:2] == ["fixture-gh", "api"] and not any(arg in argv for arg in ("PATCH", "POST", "--method"))
+        path = argv[-1].removeprefix("repos/fixture/repo/")
+        if path.startswith("issues?"):
+            return json.dumps([[row for row in data["issues"].values() if row["state"] == "open"]])
+        if path.startswith("pulls?"):
+            return json.dumps([data["open_prs"]])
+        if "/comments?" in path:
+            return json.dumps([data["comments"]])
+        if "/timeline?" in path:
+            return json.dumps([data["timeline"]])
+        if "/files?" in path:
+            number = int(path.split("/")[1])
+            return json.dumps([[{"filename": name} for name in data["prs"][number].get("files", ["elsewhere.py"])]])
+        kind, number = path.split("/")
+        return json.dumps(data["prs" if kind == "pulls" else kind][int(number)])
+
+    def plan(**kwargs):
+        return issues.plan_issues(tmp_path, config, A, command, **kwargs)
+
+    def confirm():
+        current = plan()
+        stage = tmp_path / "evidence"
+        (stage / "work").mkdir(parents=True, exist_ok=True)
+        (stage / "work/probe.log").write_text("expected=3 actual=1\n")
+        finding = {"key": "example:sum", "commit": A, "title": "Wrong sum", "owner_path": "example.py",
+                   "failure_scenario": "add(2, 1)", "expected": "3", "actual": "1",
+                   "fix_scope": ["example.py"], "evidence_log": "probe.log"}
+        task_id, = repair.persist_findings(tmp_path, stage, {"confirmed_findings": [finding]}, A,
+                                           source={"kind": "issue", "number": 1, "verification_sha": A})
+        task_path = tmp_path / "repairs" / task_id / "task.json"
+        repair.save(tmp_path / "issue-state.json", {"issues": {"1": {
+            "target": A, "input_digest": current["issue_inputs"]["1"]["input_digest"],
+            "outcome": "confirmed", "repair_task": task_id, "reviewed_at": "2026-11-01"}}})
+        return task_path, json.loads(task_path.read_text()), current
+
+    return tmp_path, config, data, plan, confirm
+
+
+def admission(root, config, plan, task):
+    live = {**config, "issue_target": A, "issue_intake_ready": True, "issue_inputs": plan["issue_inputs"]}
+    state = issues.read_state(root)["issues"]
+    return repair._admission_reason(task, [(root / "repairs" / task["id"] / "task.json", task)], live, state)
+
+
+@pytest.mark.parametrize("change", ["add", "merge", "edit"])
+def test_unrelated_pr_changes_do_not_invalidate_confirmed_repair(queue_inputs, change):
+    root, config, data, plan, confirm = queue_inputs
+    other = {**data["prs"][50], "number": 99, "title": "Unrelated", "state": "open", "merged_at": None,
+             "html_url": "https://github.com/fixture/repo/pull/99"}
+    data["prs"][99] = other
+    if change != "add":
+        data["open_prs"] = [other]
+    _, task, before = confirm()
+    if change == "add":
+        data["open_prs"] = [other]
+    elif change == "merge":
+        data["open_prs"] = []
+    else:
+        other.update({"body": "More unrelated explanation", "head": {"sha": B}})
+    after = plan(hydrate=False)
+    assert before["issue_inputs"]["1"]["input_digest"] == after["issue_inputs"]["1"]["input_digest"]
+    assert admission(root, config, after, task) is None
+
+
+@pytest.mark.parametrize("change", ["head", "merged", "body", "comment_link", "timeline_link"])
+def test_related_pr_changes_require_revalidation(queue_inputs, change):
+    root, config, data, plan, confirm = queue_inputs
+    _, task, before = confirm()
+    if change == "head":
+        data["prs"][50]["head"] = {"sha": B}
+    elif change == "merged":
+        data["prs"][50]["merge_commit_sha"] = B
+    elif change == "body":
+        data["prs"][50]["body"] = "Corrected description"
+    else:
+        data["prs"][51] = {**data["prs"][50], "number": 51}
+        if change == "comment_link":
+            data["comments"] = [{"body": "See https://github.com/fixture/repo/pull/51"}]
+        else:
+            data["timeline"] = [{"source": {"issue": {"number": 51, "pull_request": {},
+                                                       "repository_url": "https://api.github.com/repos/fixture/repo"}}}]
+    after = plan(hydrate=False)
+    assert before["issue_inputs"]["1"]["input_digest"] != after["issue_inputs"]["1"]["input_digest"]
+    assert admission(root, config, after, task) == "issue changed, is unconfirmed, or awaits current intake verification"
+    assert [item["number"] for item in after["issues"]] == [1]
+
+
+def test_light_and_full_plans_share_exact_issue_identity(queue_inputs):
+    _, _, data, plan, _ = queue_inputs
+    data["open_prs"] = [{**data["prs"][50], "number": 99, "title": "Addresses #1", "state": "open"}]
+    data["prs"][99] = data["open_prs"][0]
+    light = plan(hydrate=False)
+    full = plan()
+    assert light["issue_inputs"] == full["issue_inputs"]
+    assert light["issues"][0]["input_digest"] == full["issues"][0]["input_digest"]
+    assert "comments" not in light["issues"][0] and "comments" in full["issues"][0]
+
+
+@pytest.mark.parametrize("pr_side", [False, True])
+def test_related_pr_change_during_hydration_is_rejected(queue_inputs, pr_side):
+    _, config, data, plan, _ = queue_inputs
+    if pr_side:
+        data["issues"][1]["body"] = ""
+        data["prs"][50].update({"state": "open", "title": "Fixes #1", "merged_at": None})
+        data["open_prs"] = [data["prs"][50]]
+    light = plan(hydrate=False)
+    data["prs"][50]["head"] = {"sha": B}
+    def command(argv, **kwargs):
+        path = argv[-1].split("repos/fixture/repo/")[1]
+        if path == "issues/1":
+            return json.dumps(data["issues"][1])
+        if "?" in path:
+            return "[[]]"
+        return json.dumps(data["prs"][50])
+    with pytest.raises(ValueError, match="changed"):
+        issues.hydrate_issue(light["issues"][0], light, config, command)
+
+
+def test_unlinked_overlapping_pr_still_blocks_admission_without_changing_digest(queue_inputs):
+    root, config, data, plan, confirm = queue_inputs
+    _, task, before = confirm()
+    data["prs"][99] = {**data["prs"][50], "number": 99, "title": "Unlinked work", "body": "", "state": "open",
+                        "files": ["example.py"]}
+    data["open_prs"] = [data["prs"][99]]
+    after = plan(hydrate=False)
+    assert before["issue_inputs"]["1"]["input_digest"] == after["issue_inputs"]["1"]["input_digest"]
+    assert after["issue_inputs"]["1"]["overlapping_prs"] == [99]
+    assert admission(root, config, after, task) is not None
+
+
+@pytest.mark.parametrize("status", ["pending", "blocked", "awaiting_delivery_authorization"])
+def test_closed_source_retires_task_preserves_evidence_and_releases_scope(queue_inputs, monkeypatch, status):
+    root, config, data, plan, confirm = queue_inputs
+    path, task, _ = confirm()
+    task.update({"status": status, "attempts": ["preserved-attempt"]})
+    repair.save(path, task)
+    data["issues"][1]["state"] = "closed"
+    current = plan(hydrate=False)
+    assert current["issue_inputs"]["1"]["state"] == "closed"
+    newer = deepcopy(task)
+    newer.update({"id": "newer", "status": "pending", "sources": [], "created_at": "2026-12-01T00:00:00+00:00"})
+    newer_path = root / "repairs/newer/task.json"
+    newer_path.parent.mkdir()
+    repair.save(newer_path, newer)
+    calls = []
+    def resume(*args, **kwargs):
+        calls.append(kwargs["_task_id"])
+        return {"id": kwargs["_task_id"], "status": "pending"}
+    monkeypatch.setattr(repair, "repair_one", resume)
+    result = repair.run_repairs(root, {**config, "max_repairs": 1, "issue_intake_ready": True,
+                                       "issue_target": A, "issue_inputs": current["issue_inputs"]},
+                                root, time.monotonic() + 300, lambda *args: pytest.fail("no agent"))
+    saved = json.loads(path.read_text())
+    assert saved["status"] == "source_closed" and saved["attempts"] == task["attempts"]
+    assert saved["finding"] == task["finding"] and saved["evidence"] == task["evidence"]
+    assert saved["source_closed"]["previous_status"] == status
+    assert calls == ["newer"] and result["processed"] == ["newer"]
+    assert result["inventory"]["source_closed"] == [task["id"]]
+    assert all(item["id"] != task["id"] for item in result["manual_todo"])
+    receipt = {"repair": result}
+    review.save_daily_summary(root, receipt)
+    assert receipt["daily_summary"]["source_closed"] == [task["id"]]
+
+
+@pytest.mark.parametrize("case", ["missing", "not_ready", "mixed_open", "review_source"])
+def test_absence_or_partial_closure_does_not_retire_task(queue_inputs, case):
+    root, config, _, _, confirm = queue_inputs
+    path, task, _ = confirm()
+    current = {"1": {"state": "closed"}}
+    if case == "missing":
+        current = {}
+    elif case == "mixed_open":
+        task["sources"].append({"kind": "issue", "number": 2})
+        current["2"] = {"state": "open"}
+    elif case == "review_source":
+        task["sources"].append({"kind": "review", "commit": A})
+    repair.save(path, task)
+    assert repair.reconcile_closed_sources(root, {**config, "issue_intake_ready": case != "not_ready",
+                                                   "issue_inputs": current}) == []
+    assert json.loads(path.read_text())["status"] == "pending"
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("association temporarily unavailable"),
+                                     subprocess.TimeoutExpired("fixture-gh", 180)])
+def test_one_failed_association_read_does_not_invalidate_other_issue_inputs(queue_inputs, monkeypatch, failure):
+    _, config, data, plan, _ = queue_inputs
+    config["max_issues"] = 2
+    data["issues"][2] = {**data["issues"][1], "number": 2, "body": ""}
+    original = issues.github_api
+    def factory(*args, **kwargs):
+        api = original(*args, **kwargs)
+        def fetch(path, **options):
+            if path.startswith("issues/1/comments?"):
+                raise failure
+            return api(path, **options)
+        return fetch
+    monkeypatch.setattr(issues, "github_api", factory)
+    current = plan(hydrate=False, deadline=time.monotonic() + 600)
+    assert current["issue_inputs"]["1"]["state"] == "unknown"
+    assert current["issue_inputs"]["2"]["state"] == "open"
+    assert current["issue_inputs"]["2"]["input_digest"]
+    failed = next(item for item in current["issues"] if item["number"] == 1)
+    with pytest.raises(ValueError, match="identity snapshot failed"):
+        issues.hydrate_issue(failed, current, config, lambda *args: pytest.fail("no snapshot retry"))
+
+
+@pytest.mark.parametrize("failure", [TimeoutError("issue budget exhausted"),
+                                     subprocess.TimeoutExpired("fixture-gh", 180)])
+def test_exhausted_budget_still_aborts_issue_planning(queue_inputs, monkeypatch, failure):
+    _, _, _, plan, _ = queue_inputs
+    clock = [0]
+    monkeypatch.setattr(issues.time, "monotonic", lambda: clock[0])
+    original = issues.github_api
+    def factory(*args, **kwargs):
+        api = original(*args, **kwargs)
+        def fetch(path, **options):
+            if path.startswith("issues/1/comments?"):
+                clock[0] = 601
+                raise failure
+            return api(path, **options)
+        return fetch
+    monkeypatch.setattr(issues, "github_api", factory)
+    with pytest.raises((TimeoutError, subprocess.TimeoutExpired)):
+        plan(hydrate=False, deadline=600)
+
+
+def test_missing_source_request_timeout_does_not_hide_other_issue_inputs(queue_inputs, monkeypatch):
+    root, config, data, plan, confirm = queue_inputs
+    path, _, _ = confirm()
+    data["issues"][1]["state"] = "closed"
+    data["issues"][2] = {**data["issues"][1], "number": 2, "state": "open", "body": ""}
+    original = issues.github_api
+    def factory(*args, **kwargs):
+        api = original(*args, **kwargs)
+        def fetch(path, **options):
+            if path == "issues/1":
+                raise subprocess.TimeoutExpired("fixture-gh", 180)
+            return api(path, **options)
+        return fetch
+    monkeypatch.setattr(issues, "github_api", factory)
+    current = plan(hydrate=False, deadline=time.monotonic() + 600)
+    assert current["issue_inputs"]["1"]["state"] == "unknown"
+    assert current["issue_inputs"]["2"]["state"] == "open"
+    assert current["issue_inputs"]["2"]["input_digest"]
+    live = {**config, "issue_intake_ready": True, "issue_inputs": current["issue_inputs"]}
+    assert repair.reconcile_closed_sources(root, live) == []
+    assert json.loads(path.read_text())["status"] == "pending"
+
+
+def test_missing_open_issue_without_positive_closed_readback_is_not_retired(queue_inputs, monkeypatch):
+    root, config, data, plan, confirm = queue_inputs
+    path, _, _ = confirm()
+    data["issues"][1]["state"] = "closed"
+    original = issues.github_api
+    def factory(*args, **kwargs):
+        api = original(*args, **kwargs)
+        return lambda path, **options: {"ok": False} if path == "issues/1" else api(path, **options)
+    monkeypatch.setattr(issues, "github_api", factory)
+    current = plan(hydrate=False)
+    assert current["issue_inputs"]["1"]["state"] == "unknown"
+    assert repair.reconcile_closed_sources(root, {**config, "issue_intake_ready": True,
+                                                 "issue_inputs": current["issue_inputs"]}) == []
+    assert json.loads(path.read_text())["status"] == "pending"
+
+
+@pytest.mark.parametrize("change", ["digest", "task_id", "assigned", "linked_open", "overlap", "outcome", "unready"])
+def test_closed_source_does_not_weaken_guards_for_remaining_open_source(queue_inputs, change):
+    _, config, _, _, confirm = queue_inputs
+    _, task, _ = confirm()
+    task["sources"].append({"kind": "issue", "number": 2})
+    current = {"1": {"state": "closed"}, "2": {"state": "open", "input_digest": "verified"}}
+    latest = {"2": {"outcome": "confirmed", "repair_task": task["id"], "input_digest": "verified"}}
+    live = {**config, "issue_target": A, "issue_intake_ready": True, "issue_inputs": current}
+    assert repair._issue_repair_matches(task, live, latest)
+    if change == "digest":
+        current["2"]["input_digest"] = "changed"
+    elif change == "task_id":
+        latest["2"]["repair_task"] = "another"
+    elif change == "outcome":
+        latest["2"]["outcome"] = "not_reproduced"
+    elif change == "unready":
+        live["issue_intake_ready"] = False
+    else:
+        current["2"]["overlapping_prs" if change == "overlap" else change] = [99] if change == "overlap" else True
+    assert not repair._issue_repair_matches(task, live, latest)
+
+
+def test_rebuilt_same_finding_keeps_task_identity_but_other_task_is_rejected(queue_inputs):
+    root, config, _, plan, confirm = queue_inputs
+    _, task, before = confirm()
+    assert confirm()[1]["id"] == task["id"]
+    current = plan(hydrate=False)
+    assert before["issue_inputs"]["1"]["input_digest"] == current["issue_inputs"]["1"]["input_digest"]
+    assert admission(root, config, current, task) is None
+    other = {**task, "id": "different-task"}
+    assert admission(root, config, current, other) is not None
