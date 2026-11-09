@@ -13,6 +13,7 @@ from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import build_response, mask_path
 from src.application.research.redaction import redact_value
 from src.application.config_validator import validate_config
+from src.application.healthcheck import healthcheck_readiness_ok
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.setup import run_setup_check
 from src.application.settings import diagnose_effective_settings
@@ -196,7 +197,12 @@ def _tool_section(
         result = tool_fn(tool_name, payload)
         items.append({"label": target["label"], "payload": payload, "result": result})
     return {
-        "status": "ok" if all(bool(item.get("result", {}).get("ok", False)) for item in items) else "error",
+        "status": "ok" if all(
+            healthcheck_readiness_ok(item["result"])
+            if tool_name == "healthcheck"
+            else bool(item.get("result", {}).get("ok", False))
+            for item in items
+        ) else "error",
         "items": items,
     }
 
