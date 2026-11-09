@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -50,6 +51,12 @@ def _fake_installer_tools(tmp_path: Path) -> Path:
         bin_dir / "git",
         """#!/usr/bin/env bash
 set -euo pipefail
+if [[ "${1:-}" == "-C" && "${3:-}" == "rev-parse" ]]; then
+  if [[ "${4:-}" == "HEAD" || "${4:-}" == "--verify" ]]; then
+    printf 'fixture-release-commit\\n'
+    exit 0
+  fi
+fi
 if [[ "${1:-}" != "clone" ]]; then
   echo "unexpected git command: $*" >&2
   exit 2
@@ -59,7 +66,11 @@ if [[ -n "${FAKE_TRANSACTION_TRACE:-}" ]]; then
 fi
 if [[ "${FAKE_CLONE_STATUS:-0}" != "0" ]]; then exit "$FAKE_CLONE_STATUS"; fi
 dest=""
+clone_tag="v9.9.9"
+previous_arg=""
 for arg in "$@"; do
+  if [[ "$previous_arg" == "--branch" ]]; then clone_tag="$arg"; fi
+  previous_arg="$arg"
   dest="$arg"
 done
 mkdir -p "$dest/requirements" "$dest/constraints" "$dest/src/application/bot" "$dest/scripts" "$dest/plugins/portfolio-management"
@@ -73,7 +84,11 @@ printf 'Git metadata required by update\n' > "$dest/.git/config"
 : > "$dest/src/application/__init__.py"
 : > "$dest/src/application/bot/__init__.py"
 : > "$dest/VERSION"
-printf '9.9.%s\n' "${FAKE_RELEASE_PATCH:-9}" > "$dest/VERSION"
+if [[ -n "${FAKE_RELEASE_PATCH:-}" ]]; then
+  printf '9.9.%s\\n' "$FAKE_RELEASE_PATCH" > "$dest/VERSION"
+else
+  printf '%s\\n' "${clone_tag#v}" > "$dest/VERSION"
+fi
 : > "$dest/requirements.txt"
 : > "$dest/constraints.txt"
 : > "$dest/requirements/server.txt"
@@ -390,6 +405,99 @@ def _assert_transaction_clean(tmp_path: Path) -> None:
     assert not list((tmp_path / "apps/options-monitor").glob("current.tmp.*"))
 
 
+def _real_source_identity_fixture(tmp_path: Path, env: dict[str, str], reference: str, version: str | None):
+    real_git = shutil.which("git")
+    assert real_git
+    tools = tmp_path / "fake-bin"
+    template = tmp_path / "source-template"
+    subprocess.run([str(tools / "git"), "clone", "--branch", "v9.9.10", "fixture", str(template)],
+                   env=env, check=True, capture_output=True, text=True)
+    repository = tmp_path / "source-repository"
+    shutil.copytree(template, repository, ignore=shutil.ignore_patterns(".git"))
+    if version is None:
+        (repository / "VERSION").unlink()
+    else:
+        (repository / "VERSION").write_text(version + "\n", encoding="utf-8")
+    subprocess.run([real_git, "init", "-b", "main", str(repository)], check=True, capture_output=True)
+    subprocess.run([real_git, "-C", str(repository), "add", "."], check=True, capture_output=True)
+    identity = ["-c", "user.name=Install Fixture", "-c", "user.email=fixture@example.invalid"]
+    subprocess.run([real_git, "-C", str(repository), *identity, "commit", "-m", "fixture"],
+                   check=True, capture_output=True)
+    if reference == "branch":
+        tag_args = ["branch", "v9.9.10"]
+    elif reference == "annotated":
+        tag_args = [*identity, "tag", "-a", "v9.9.10", "-m", "fixture release"]
+    else:
+        tag_args = ["tag", "v9.9.10"]
+    subprocess.run([real_git, "-C", str(repository), *tag_args], check=True, capture_output=True)
+    _write_executable(tools / "git", f'#!/usr/bin/env bash\nexec {shlex.quote(real_git)} "$@"\n')
+    trace_python = _write_executable(
+        tools / "traced-python",
+        '#!/usr/bin/env bash\nset -euo pipefail\n'
+        'if [[ "${1:-}" == "-m" && "${2:-}" == "venv" ]]; then\n'
+        '  printf "venv\\n" >> "${FAKE_DEPENDENCY_TRACE:?}"\nfi\n'
+        f'exec {shlex.quote(str(tools / "python3.12"))} "$@"\n',
+    )
+    return repository.as_uri(), trace_python
+
+
+@pytest.mark.parametrize("has_current", [False, True], ids=["first-install", "existing-current"])
+@pytest.mark.parametrize("reference,version,accepted", [
+    ("branch", "9.9.10", False),
+    ("lightweight", "9.9.9", False),
+    ("lightweight", None, False),
+    ("lightweight", "9.9.10", True),
+    ("annotated", "9.9.10", True),
+])
+def test_source_install_validates_release_identity_before_dependencies(
+    tmp_path: Path, has_current: bool, reference: str, version: str | None, accepted: bool,
+) -> None:
+    env = _installer_env(tmp_path)
+    if has_current:
+        baseline = _run_installer(tmp_path, env=env)
+        assert baseline.returncode == 0, baseline.stderr + baseline.stdout
+    repository, trace_python = _real_source_identity_fixture(tmp_path, env, reference, version)
+    dependency_trace = tmp_path / "dependency.trace"
+    env["FAKE_DEPENDENCY_TRACE"] = str(dependency_trace)
+    prefix = tmp_path / "apps/options-monitor"
+    target = prefix / "releases/v9.9.10"
+    current = prefix / "current"
+    old_target = os.readlink(current) if current.is_symlink() else None
+    wrappers_before = _wrapper_state(tmp_path)
+    smoke = Path(env["FAKE_SMOKE_LOG"])
+    smoke_before = smoke.read_bytes() if smoke.exists() else b""
+    old_release = prefix / "releases/v9.9.9"
+    old_files = {str(path.relative_to(old_release)): path.read_bytes()
+                 for path in old_release.rglob("*") if path.is_file()}
+    args = ("--version", "v9.9.10", "--repo-url", repository, "--python", str(trace_python))
+
+    result = _run_installer(tmp_path, *args, env=env)
+
+    if not accepted:
+        assert result.returncode != 0, result.stdout + result.stderr
+        expected = "source release tag" if reference == "branch" else "source release VERSION mismatch"
+        assert expected in result.stderr
+        assert not dependency_trace.exists()
+        assert (smoke.read_bytes() if smoke.exists() else b"") == smoke_before
+        assert not target.exists()
+        assert (os.readlink(current) if current.is_symlink() else None) == old_target
+        assert _wrapper_state(tmp_path) == wrappers_before
+        assert {str(path.relative_to(old_release)): path.read_bytes()
+                for path in old_release.rglob("*") if path.is_file()} == old_files
+    else:
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert (target / "VERSION").read_text(encoding="utf-8") == "9.9.10\n"
+        assert os.readlink(current) == str(target)
+        assert dependency_trace.read_text(encoding="utf-8") == "venv\n"
+        assert smoke.read_bytes() == smoke_before + b"python import smoke\n"
+        repeat = _run_installer(tmp_path, *args, env=env)
+        assert repeat.returncode == 0, repeat.stderr + repeat.stdout
+        assert "already installed" in repeat.stdout
+        assert dependency_trace.read_text(encoding="utf-8") == "venv\n"
+        assert os.readlink(current) == str(target)
+    _assert_transaction_clean(tmp_path)
+
+
 def test_install_script_resolves_latest_release_by_default(tmp_path: Path) -> None:
     env = _installer_env(tmp_path)
     result = _run_installer_without_version(tmp_path, env=env)
@@ -397,6 +505,7 @@ def test_install_script_resolves_latest_release_by_default(tmp_path: Path) -> No
     assert result.returncode == 0, result.stderr + result.stdout
     prefix = tmp_path / "apps" / "options-monitor"
     assert (prefix / "releases" / "v9.9.10").exists()
+    assert (prefix / "releases" / "v9.9.10" / "VERSION").read_text(encoding="utf-8") == "9.9.10\n"
     assert os.readlink(prefix / "current") == str(prefix / "releases" / "v9.9.10")
     assert "[install] resolved latest release: v9.9.10" in result.stdout
 
