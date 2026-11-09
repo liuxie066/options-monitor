@@ -13,6 +13,7 @@ from tests.ledger_sqlite_test_support import connect_ledger_fixture
 
 from contextlib import closing
 from decimal import Decimal
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -1333,5 +1334,301 @@ def test_verify_propagates_every_comparator_blocker(tmp_path, monkeypatch, statu
 
 
 
+
+
+# One diagnostic must observe one WAL snapshot. Only scheduling is patched;
+# the scanner, public commands and reports remain real.
+
+
+def _diagnostic_snapshot_open(repo, index):
+    from src.application.ledger import api as ledger_api
+
+    inputs = {
+        "broker": "富途",
+        "account": "rebase-test",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "side": "short",
+        "contracts": 1,
+        "currency": "USD",
+        "strike": 100.0 + index,
+        "multiplier": 100,
+        "expiration_ymd": "2027-06-18",
+        "premium_per_share": 2.5,
+        "opened_at_ms": 1_000 + index,
+        "request_id": f"rebase-2341bcda6ad283f0-{index}",
+    }
+    result = ledger_api.record_manual_position_open(repo, **inputs)
+    assert result.result.created is True, (
+        f"synthetic open input={inputs!r}, output={result.to_payload()!r}"
+    )
+    return inputs, result.to_payload()
+
+
+def _diagnostic_snapshot_sizes(path):
+    return {
+        suffix or "db": Path(f"{path}{suffix}").stat().st_size
+        for suffix in ("", "-wal")
+    }
+
+
+def _diagnostic_snapshot_file_hashes(path):
+    return {
+        suffix or "db": hashlib.sha256(Path(f"{path}{suffix}").read_bytes()).hexdigest()
+        for suffix in ("", "-wal")
+    }
+
+
+@pytest.fixture
+def _diagnostic_snapshot_wal_store(tmp_path):
+    path = tmp_path / "snapshot-ledger.sqlite3"
+    repo = SQLiteOptionPositionsRepository(path)
+    # Keep a connection alive so SQLite retains the allocated WAL throughout
+    # the experiment. All business rows come from the public manual-open API.
+    with closing(connect_ledger_fixture(path)) as keeper:
+        mode = keeper.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        assert mode == "wal", f"synthetic path={path}, journal_mode={mode!r}"
+        keeper.execute("PRAGMA wal_autocheckpoint=0")
+        for index in range(14):
+            _diagnostic_snapshot_open(repo, index)
+
+        # Reserve physical WAL capacity, then restore the canonical schema.
+        # RESTART backfills the DB but retains WAL allocation. The dependent
+        # retained_wal_store pins the next generation before the real 15th
+        # commit; neither the size-only guard nor its inputs are mocked.
+        keeper.execute("CREATE TABLE rebase_wal_reserve (payload BLOB)")
+        keeper.execute(
+            "INSERT INTO rebase_wal_reserve VALUES (zeroblob(?))",
+            (2 * 1024 * 1024,),
+        )
+        keeper.commit()
+        keeper.execute("DROP TABLE rebase_wal_reserve")
+        keeper.commit()
+        checkpoint = keeper.execute("PRAGMA wal_checkpoint(RESTART)").fetchone()
+        assert checkpoint[0] == 0, (
+            f"synthetic path={path}, reserve checkpoint={checkpoint!r}"
+        )
+        yield path, repo, keeper
+
+
+def _diagnostic_snapshot_diagnose(operation, path):
+    from src.application.ledger import api as ledger_api
+
+    entry = {
+        "inventory": ledger_api.build_lot_identity_migration_inventory,
+        "verify": ledger_api.verify_lot_identity_migration,
+    }[operation]
+    return entry(path)
+
+
+def _diagnostic_snapshot_summary(report):
+    keys = (
+        "operation", "read_only", "readiness", "readiness_reasons", "counts",
+        "projection_replay_match", "ok", "projection", "pending", "checkpoint",
+        "inventory_fingerprint",
+    )
+    return {key: report[key] for key in keys if key in report}
+
+
+def _diagnostic_snapshot_assert_healthy(report, operation, count, evidence):
+    message = json.dumps(
+        {
+            "input": {"operation": operation, "expected_snapshot_count": count},
+            "output": _diagnostic_snapshot_summary(report),
+            "evidence": evidence,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    assert report["read_only"] is True, message
+    assert report["readiness_reasons"] == [], message
+    assert report["pending"]["rows"] == count, message
+    if operation == "inventory":
+        assert report["readiness"] == "ready", message
+        assert report["counts"] == {
+            "position_lots": count, "trade_events": count,
+        }, message
+        assert report["projection_replay_match"] == {
+            "status": "matched", "mismatch_count": 0,
+        }, message
+    else:
+        assert report["ok"] is True, message
+        projection = report["projection"]
+        assert projection["ok"] is True, message
+        assert projection["mismatch_count"] == 0, message
+        assert projection["summary"] == {"matched": count}, message
+        assert projection["event_count"] == count, message
+        assert projection["position_lot_count"] == count, message
+        assert report["mode_used"] == "full_replay", message
+
+
+@pytest.mark.parametrize("operation", ["inventory", "verify"])
+def test_diagnostic_snapshot_control_stable_states(
+    _diagnostic_snapshot_retained_wal_store, operation,
+):
+    path, repo, _keeper = _diagnostic_snapshot_retained_wal_store
+    before_sizes = _diagnostic_snapshot_sizes(path)
+    before_hashes = _diagnostic_snapshot_file_hashes(path)
+    before = _diagnostic_snapshot_diagnose(operation, path)
+    _diagnostic_snapshot_assert_healthy(before, operation, 14, before_sizes)
+    assert _diagnostic_snapshot_file_hashes(path) == before_hashes
+    assert _diagnostic_snapshot_sizes(path) == before_sizes, (
+        f"stable diagnostic input={before_sizes!r}, "
+        f"output={_diagnostic_snapshot_summary(before)!r}"
+    )
+
+    inputs, write_result = _diagnostic_snapshot_open(repo, 14)
+    after_sizes = _diagnostic_snapshot_sizes(path)
+    after_hashes = _diagnostic_snapshot_file_hashes(path)
+    after = _diagnostic_snapshot_diagnose(operation, path)
+    assert _diagnostic_snapshot_file_hashes(path) == after_hashes
+    evidence = {
+        "open_input": inputs, "open_output": write_result,
+        "sizes_before": before_sizes, "sizes_after": after_sizes,
+    }
+    _diagnostic_snapshot_assert_healthy(after, operation, 15, evidence)
+    assert after_sizes == before_sizes, json.dumps(
+        evidence, ensure_ascii=False, sort_keys=True,
+    )
+    assert _diagnostic_snapshot_sizes(path) == after_sizes, (
+        f"stable diagnostic input={after_sizes!r}, "
+        f"output={_diagnostic_snapshot_summary(after)!r}"
+    )
+
+
+def _diagnostic_snapshot_interleaving(store, monkeypatch, operation):
+    path, repo, keeper = store
+    before = _diagnostic_snapshot_diagnose(operation, path)
+    _diagnostic_snapshot_assert_healthy(before, operation, 14, {})
+    sizes_before = _diagnostic_snapshot_sizes(path)
+    real_scan = module._scan_lot_payloads
+    evidence = {"scans": [], "commits": []}
+
+    def scan_then_commit(conn):
+        rows = real_scan(conn)
+        evidence["scans"].append({
+            "lot_count": len(rows), "reader_in_transaction": conn.in_transaction,
+        })
+        if not evidence["commits"]:
+            assert len(rows) == 14, f"first real scan: {evidence!r}"
+            inputs, write_result = _diagnostic_snapshot_open(repo, 14)
+            evidence["commits"].append({
+                "input": inputs, "output": write_result,
+                "visible_counts": {
+                    "position_lots": keeper.execute(
+                        "SELECT count(*) FROM position_lots"
+                    ).fetchone()[0],
+                    "trade_events": keeper.execute(
+                        "SELECT count(*) FROM trade_events"
+                    ).fetchone()[0],
+                },
+            })
+        return rows
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_scan_lot_payloads", scan_then_commit)
+        interleaved = _diagnostic_snapshot_diagnose(operation, path)
+
+    sizes_after = _diagnostic_snapshot_sizes(path)
+    after = _diagnostic_snapshot_diagnose(operation, path)
+    evidence.update({
+        "sizes_before": sizes_before, "sizes_after": sizes_after,
+        "before": _diagnostic_snapshot_summary(before),
+        "interleaved": _diagnostic_snapshot_summary(interleaved),
+        "after": _diagnostic_snapshot_summary(after),
+    })
+    message = json.dumps(evidence, ensure_ascii=False, sort_keys=True)
+    assert len(evidence["commits"]) == 1, message
+    assert evidence["commits"][0]["visible_counts"] == {
+        "position_lots": 15, "trade_events": 15,
+    }, message
+    assert sizes_before == sizes_after, message
+    _diagnostic_snapshot_assert_healthy(after, operation, 15, evidence)
+    # The first completed lot scan predates the atomic public commit: every
+    # subsequent read in this diagnostic must retain that 14/14 snapshot.
+    _diagnostic_snapshot_assert_healthy(interleaved, operation, 14, evidence)
+    assert interleaved["inventory_fingerprint"] == before["inventory_fingerprint"], message
+    if operation == "verify":
+        assert interleaved["checkpoint"] == before["checkpoint"], message
+
+
+@pytest.mark.parametrize("operation", ["inventory", "verify"])
+def test_diagnostic_snapshot_regression_atomic_commit_during_diagnostic(
+    _diagnostic_snapshot_retained_wal_store, monkeypatch, operation,
+):
+    _diagnostic_snapshot_interleaving(
+        _diagnostic_snapshot_retained_wal_store, monkeypatch, operation,
+    )
+
+
+@pytest.fixture
+def _diagnostic_snapshot_retained_wal_store(
+    _diagnostic_snapshot_wal_store,
+):
+    """Retain real WAL capacity across a public writer on this SQLite build.
+
+    SQLite's journal_size_limit is connection-local (32768 in the verification
+    environment). RESTART alone leaves the *next* writer free to shrink the
+    large reserved WAL. Start its next generation on the fixture connection
+    with an unlimited retention setting, then pin that generation with a real
+    independent reader. The business writer must append to it. The pin does
+    not make other readers share its snapshot: the public diagnostics still
+    have to start their own transaction to keep the 14/14 view.
+    """
+    path, repo, keeper = _diagnostic_snapshot_wal_store
+    allocated = _diagnostic_snapshot_sizes(path)
+    limit = keeper.execute("PRAGMA journal_size_limit=-1").fetchone()[0]
+    assert limit == -1, f"fixture path={path}, retention_limit={limit!r}"
+    # This synthetic schema transaction produces live WAL frames after RESTART
+    # without changing any event/lot/checkpoint or leaving a helper table.
+    with keeper:
+        keeper.execute("BEGIN IMMEDIATE")
+        keeper.execute("CREATE TABLE rebase_snapshot_generation (value INTEGER)")
+        keeper.execute("DROP TABLE rebase_snapshot_generation")
+    retained = _diagnostic_snapshot_sizes(path)
+    assert retained == allocated, (
+        f"fixture restart input={allocated!r}, output={retained!r}, path={path}"
+    )
+    with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as pin:
+        pin.execute("PRAGMA query_only=ON")
+        pin.execute("BEGIN")
+        counts = {
+            table: pin.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+            for table in ("position_lots", "trade_events")
+        }
+        assert counts == {"position_lots": 14, "trade_events": 14}, (
+            f"fixture reader input=14 public opens, output={counts!r}, path={path}"
+        )
+        yield path, repo, keeper
+
+
+@pytest.mark.parametrize("operation", ["inventory", "verify"])
+def test_diagnostic_snapshot_preserves_real_projection_mismatch(
+    _diagnostic_snapshot_retained_wal_store, operation,
+):
+    path, _repo, _keeper = _diagnostic_snapshot_retained_wal_store
+    with closing(connect_ledger_fixture(path)) as conn:
+        lot_id = conn.execute(
+            "SELECT lot_id FROM position_lots ORDER BY lot_id LIMIT 1"
+        ).fetchone()[0]
+    _edit_lot_fields(path, lot_id, lambda fields: fields.update(premium_open="999"))
+
+    before_hashes = _diagnostic_snapshot_file_hashes(path)
+    report = _diagnostic_snapshot_diagnose(operation, path)
+
+    assert _diagnostic_snapshot_file_hashes(path) == before_hashes
+    assert report["read_only"] is True
+    assert "projection_replay_mismatch" in report["readiness_reasons"]
+    if operation == "inventory":
+        assert report["readiness"] == "not_ready"
+        assert report["counts"] == {"position_lots": 14, "trade_events": 14}
+        assert report["projection_replay_match"] == {"status": "mismatch", "mismatch_count": 1}
+    else:
+        assert report["ok"] is False
+        assert report["projection"]["ok"] is False
+        assert report["projection"]["mismatch_count"] == 1
+        assert report["projection"]["summary"]["matched"] == 13
+        assert report["projection"]["event_count"] == 14
+        assert report["projection"]["position_lot_count"] == 14
 
 
