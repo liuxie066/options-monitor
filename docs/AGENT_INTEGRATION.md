@@ -316,6 +316,8 @@ For the full Feishu loop, run the long-connection service:
 
 The long-connection client receives Feishu events through the authenticated SDK connection, delegates text messages to Inbound control, and replies through the Feishu message reply API. Successful Bot replies and deterministic replies that contain rich Markdown are rendered as display-only Feishu Card JSON 2.0 Markdown so tables remain readable; short plain Control replies and errors stay as text. The reply outbox persists the final transport envelope before delivery, retries that exact envelope with a stable UUID, and remains compatible with legacy text rows. New envelopes also retain a top-level flattened `text` copy so a code rollback can drain pending rows through the legacy sender. A confirmed permanent card rejection may use the envelope's flattened text fallback; ambiguous or transient failures retry the original card.
 
+Sender authorization refreshes process-owned ACL keys from the process environment; an unreadable ordinary `OM_ENV_FILE` does not block those keys. The ordinary env file is bound for refresh only when it supplied an ACL key while settings were built; a bound file becoming unreadable still blocks authorization. An explicitly selected credential env file is still reread on every authorization check, and a read or parse failure continues to block authorization.
+
 Scheduled Daily Brief delivery independently uses a frozen Card JSON 2.0
 envelope derived from its canonical decision view. A post fallback is allowed
 only for a definite permanent Card rejection with no earlier transient or
