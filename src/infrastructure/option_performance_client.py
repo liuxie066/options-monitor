@@ -74,6 +74,64 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
+def _validate_business_page(data: dict, payload: dict) -> None:
+    has_page_options = any(name in payload for name in ("group_by", "symbol", "limit", "cursor"))
+    expected_view = str(payload.get("view") or ("breakdowns" if has_page_options else "summary"))
+    # Only unpaged requests may receive a legacy report without view.
+    if (
+        data.get("view", "summary") != expected_view
+        or ("view" not in data and ("view" in payload or has_page_options))
+    ):
+        raise ValueError
+    if any(not isinstance(data.get(name), dict) for name in (
+        "period", "scope", "coverage", "freshness", "quality", "breakdowns",
+    )):
+        raise ValueError
+    if "metric_semantics" in data and not isinstance(data["metric_semantics"], dict):
+        raise ValueError
+    if "schema_version" in data and not isinstance(data["schema_version"], str):
+        raise ValueError
+
+    def object_rows(value):
+        return isinstance(value, list) and all(isinstance(row, dict) for row in value)
+
+    if any(not object_rows(rows) for rows in data["breakdowns"].values()):
+        raise ValueError
+    if "rows" in data and not object_rows(data["rows"]):
+        raise ValueError
+    if expected_view == "summary":
+        if any(not isinstance(data.get(name), dict) for name in (
+            "period_option_net_cashflow", "option_net_cashflow", "sell_option_win_rate",
+            "buy_option_win_rate", "option_return", "daily_occupied_capital",
+        )):
+            raise ValueError
+        return
+    if expected_view not in {"rows", "breakdowns"}:
+        raise ValueError
+    if (
+        not object_rows(data.get("rows"))
+        or not isinstance(data.get("source"), dict)
+        or not isinstance(data.get("pagination"), dict)
+    ):
+        raise ValueError
+    pagination = data["pagination"]
+    if any(type(pagination.get(name)) is not int for name in (
+        "offset", "total_count", "matched_count", "returned_count", "scanned_count",
+    )) or type(pagination.get("has_more")) is not bool:
+        raise ValueError
+    if (
+        "next_cursor" not in data
+        or (data["next_cursor"] is not None and not isinstance(data["next_cursor"], str))
+        or (pagination.get("page_cursor") is not None and not isinstance(pagination["page_cursor"], str))
+    ):
+        raise ValueError
+    if expected_view == "breakdowns" and (
+        data.get("group_by") != str(payload.get("group_by") or "symbols")
+        or data.get("group_by") not in data["breakdowns"]
+    ):
+        raise ValueError
+
+
 def query_option_performance(payload: dict, *, url: str, token: str) -> tuple[dict, list[str], dict]:
     origin = validate_service_origin(url)
     validate_service_token(token)
@@ -126,6 +184,7 @@ def query_option_performance(payload: dict, *, url: str, token: str) -> tuple[di
                 or result.get("error") is not None
             ):
                 raise ValueError
+            _validate_business_page(result["data"], payload)
             return result["data"], result["warnings"], result["meta"]
         error = result.get("error")
         if (
