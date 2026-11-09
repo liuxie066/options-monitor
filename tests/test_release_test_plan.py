@@ -767,6 +767,117 @@ def _git_discovery_cli(
     return _git_discovery_run(env, sys.executable, "-B", str(script), *args)
 
 
+def _whitespace_plan_commit(env: dict[str, str]) -> str:
+    """Publish a synthetic fixture commit without repository hooks or user config."""
+    import hashlib
+    import zlib
+
+    tree = _git_discovery_run(env, "git", "write-tree")
+    parent = _git_discovery_run(env, "git", "rev-parse", "HEAD")
+    assert tree.returncode == parent.returncode == 0
+    body = (
+        f"tree {tree.stdout.strip()}\nparent {parent.stdout.strip()}\n"
+        "author Synthetic Fixture <fixture@example.invalid> 1700000000 +0000\n"
+        "committer Synthetic Fixture <fixture@example.invalid> 1700000000 +0000\n"
+        "\nWhitespace fixture\n"
+    ).encode("ascii")
+    raw = f"commit {len(body)}\0".encode("ascii") + body
+    oid = hashlib.sha1(raw).hexdigest()
+    git_dir = Path(env["GIT_DIR"])
+    target = git_dir / "objects" / oid[:2] / oid[2:]
+    target.parent.mkdir(exist_ok=True)
+    target.write_bytes(zlib.compress(raw))
+    (git_dir / "refs/heads/control").write_text(oid + "\n", encoding="ascii")
+    return oid
+
+
+def _whitespace_plan_fixture(tmp_path: Path, *, baseline: str = "base\n"):
+    env = _git_discovery_git_env(tmp_path)
+    target = Path(env["GIT_WORK_TREE"]) / "sample.txt"
+    target.write_text(baseline, encoding="utf-8")
+    added = _git_discovery_run(env, "git", "add", "sample.txt")
+    assert added.returncode == 0, _git_discovery_summary(added)
+    commit = _whitespace_plan_commit(env)
+    base = "refs/heads/plan'base"
+    (Path(env["GIT_DIR"]) / base).write_text(commit + "\n", encoding="ascii")
+    return env, target, base
+
+
+@pytest.mark.parametrize(("source", "bad"), [
+    ("committed", True), ("staged", True), ("unstaged", True),
+    ("committed", False), ("staged", False), ("unstaged", False),
+    ("committed_then_staged_cleanup", True),
+    ("staged_then_worktree_cleanup", True),
+])
+def test_plan_cli_whitespace_advice_covers_discovered_sources(tmp_path: Path, source: str, bad: bool) -> None:
+    import json
+
+    env, target, base = _whitespace_plan_fixture(tmp_path)
+    target.write_text("changed \n" if bad else "changed\n", encoding="utf-8")
+    if source != "unstaged":
+        added = _git_discovery_run(env, "git", "add", "sample.txt")
+        assert added.returncode == 0, _git_discovery_summary(added)
+    if source.startswith("committed"):
+        _whitespace_plan_commit(env)
+    if source.endswith("cleanup"):
+        target.write_text("changed\n", encoding="utf-8")
+        if source == "committed_then_staged_cleanup":
+            added = _git_discovery_run(env, "git", "add", "sample.txt")
+            assert added.returncode == 0, _git_discovery_summary(added)
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    proc = _git_discovery_cli(env, "--base", base)
+    assert proc.returncode == 0, _git_discovery_summary(proc)
+    plan = json.loads(proc.stdout)
+    assert plan["changed_files"] == ["sample.txt"]
+    commands = [c for c in plan["commands"] if c.startswith("git diff ") and "--check" in c]
+    assert commands
+    checks = [
+        subprocess.run(command, shell=True, env=env, cwd=tmp_path, capture_output=True, text=True, timeout=30)
+        for command in commands
+    ]
+    assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+    assert all(c.returncode in {0, 2} and not c.stderr for c in checks), [
+        _git_discovery_summary(c) for c in checks
+    ]
+    detected = [c for c in checks if c.returncode == 2 and "trailing whitespace" in c.stdout]
+    assert bool(detected) is bad, [_git_discovery_summary(c) for c in checks]
+
+
+def test_plan_cli_whitespace_advice_uses_merge_base_for_diverged_ref(tmp_path: Path) -> None:
+    import json
+
+    env, target, base = _whitespace_plan_fixture(tmp_path, baseline="shared \n")
+    shared = _git_discovery_run(env, "git", "rev-parse", "HEAD").stdout.strip()
+    target.write_text("shared\n", encoding="utf-8")
+    assert _git_discovery_run(env, "git", "add", "sample.txt").returncode == 0
+    base_head = _whitespace_plan_commit(env)
+    git_dir = Path(env["GIT_DIR"])
+    (git_dir / base).write_text(base_head + "\n", encoding="ascii")
+    (git_dir / "refs/heads/control").write_text(shared + "\n", encoding="ascii")
+    assert _git_discovery_run(env, "git", "read-tree", "HEAD").returncode == 0
+    target.write_text("shared \n", encoding="utf-8")
+    (target.parent / "other.txt").write_text("new content\n", encoding="utf-8")
+    assert _git_discovery_run(env, "git", "add", "other.txt").returncode == 0
+    _whitespace_plan_commit(env)
+    refreshed = _git_discovery_run(env, "git", "update-index", "--refresh")
+    assert refreshed.returncode == 0, _git_discovery_summary(refreshed)
+    two_dot = _git_discovery_run(env, "git", "diff", "--check", f"{base}..HEAD")
+    three_dot = _git_discovery_run(env, "git", "diff", "--check", f"{base}...HEAD")
+    assert two_dot.returncode == 2 and "trailing whitespace" in two_dot.stdout
+    assert three_dot.returncode == 0 and not three_dot.stdout
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    proc = _git_discovery_cli(env, "--base", base)
+    assert proc.returncode == 0, _git_discovery_summary(proc)
+    plan = json.loads(proc.stdout)
+    assert plan["changed_files"] == ["other.txt"]
+    commands = [c for c in plan["commands"] if c.startswith("git diff ") and "--check" in c]
+    assert commands
+    for command in commands:
+        check = subprocess.run(command, shell=True, env=env, cwd=tmp_path, capture_output=True, text=True, timeout=30)
+        assert check.returncode == 0, _git_discovery_summary(check)
+    assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
 def _git_discovery_summary(proc: subprocess.CompletedProcess[str]) -> str:
     return (
         f"input={proc.args!r}; exit={proc.returncode}; "
@@ -813,6 +924,11 @@ def test_git_discovery_control_explicit_ledger_mapping(tmp_path: Path) -> None:
     assert "ledger_positions_trades" in {rule["name"] for rule in plan["matched_rules"]}, summary
     assert plan["requires_full_pytest"] is True, summary
     assert "./.venv/bin/python -m pytest" in plan["commands"], summary
+    # Explicit files bypass discovery; this fixture has no origin/main to compare.
+    for command in plan["commands"]:
+        if command.startswith("git diff ") and "--check" in command:
+            check = subprocess.run(command, shell=True, env=env, cwd=tmp_path, capture_output=True, text=True, timeout=30)
+            assert check.returncode == 0, _git_discovery_summary(check)
 
 
 def test_git_discovery_regression_absent_base_is_failure(tmp_path: Path) -> None:

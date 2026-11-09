@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import shlex
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -212,6 +213,7 @@ def build_release_test_plan(
     changed_files: Sequence[str],
     mode: str = "standard",
     version: str | None = None,
+    base_ref: str | None = None,
 ) -> dict[str, Any]:
     selected_mode = _normalize_mode(mode)
     files = _normalize_changed_files(changed_files)
@@ -224,8 +226,10 @@ def build_release_test_plan(
             require_current_taxonomy="VERSION" in files,
             require_delta_coverage=release_metadata_changed,
         ),
-        "git diff --check",
     ]
+    if base_ref is not None:
+        commands.append(f"git diff --check {shlex.quote(f'{base_ref}...HEAD')}")
+    commands.extend(["git diff --cached --check", "git diff --check"])
     reasons: list[str] = []
     matched_rules: list[dict[str, Any]] = []
     risk = "fast" if files else "standard"
