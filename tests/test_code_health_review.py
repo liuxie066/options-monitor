@@ -25,7 +25,7 @@ BACKFILL_REPORT = "原报告、完整讨论、冻结目标、真实入口及上�
 def test_repair_reservation_precedes_both_audit_caps(total, intake, expected):
     config = {"timeout_seconds": total, "issue_timeout_seconds": intake,
               "issues_enabled": True, "repair_enabled": True}
-    assert review.phase_budgets(config) == expected
+    assert review.phase_budgets(config) == {**expected, "pull_requests": 0, "delivery": 0}
     assert sum(expected[key] for key in ("review", "issues", "repair_reserved")) <= total
 
 
@@ -160,7 +160,7 @@ def backfill_environment(tmp_path, monkeypatch):
     root.mkdir()
     (root / "previous.md").write_text("Previous verified review")
     review.write_json(root / "state.json", {"cursor": base, "last_review": str(root / "previous.md")})
-    config = {"git": "git", "gh": "github-fixture", "repository": "fixture/repo", "repository_url": str(source),
+    config = {"git": "git", "gh": "github-fixture", "repository": "fixture/repo", "repository_url": str(source), "pull_requests_enabled": False, "comments_enabled": False, "release_enabled": False,
               "timeout_seconds": 12000, "review_budget_seconds": 6600, "issue_timeout_seconds": 3600,
               "issue_unit_timeout_seconds": 600, "review_unit_timeout_seconds": 600,
               "issues_enabled": True, "repair_enabled": False, "max_units": 10}
@@ -237,6 +237,7 @@ def backfill_decision(run, number, outcome):
         "number": number, "outcome": outcome, "report_markdown": BACKFILL_REPORT,
         "comment_draft": "Local recommendation only; GitHub remains open", "finding": finding,
         "closure_evidence": closure,
+        "triage": {"decision": "worthwhile", "reason": "Project defect or closure verification.", "third_party_service": False},
     }]}
 
 
@@ -259,7 +260,7 @@ def test_backfill_scans_64_checkpoints_batches_and_resumes_only_pending(backfill
     summary = receipt["issues"]["summary"]
     assert receipt["status"] == "partial"
     assert sorted(invoked) == [row["number"] for row in inventory]
-    assert summary["counts"] == {"close_recommended": 16, "repair": 16, "needs_decision": 31, "pending": 1}
+    assert summary["counts"] == {"close_recommended": 16, "repair": 16, "reply": 0, "needs_decision": 31, "pending": 1}
     assert summary["pending"] == [2]
     assert [len(batch) for batch in summary["closure_batches"]] == [10, 6]
     assert summary["github_closed"] == []
@@ -291,7 +292,7 @@ def test_backfill_scans_64_checkpoints_batches_and_resumes_only_pending(backfill
     assert complete["status"] == "complete"
     assert resumed == [2]
     assert complete["issues"]["summary"]["counts"] == {
-        "close_recommended": 16, "repair": 16, "needs_decision": 32, "pending": 0}
+        "close_recommended": 16, "repair": 16, "reply": 0, "needs_decision": 32, "pending": 0}
     assert not any("fetch" in argv for argv in calls[before:])
     assert sum("issues?" in argv[-1] for argv in calls[before:]) == 1
     assert len(list((root / "repairs").glob("*/task.json"))) == 16
@@ -363,7 +364,8 @@ def test_audits_cannot_consume_guaranteed_repair_budget(backfill_environment, mo
     monkeypatch.setattr(review.repair, "run_repairs", advance)
     receipt = review.run_once(root)
     assert observed == [1800]
-    assert receipt["budgets"] == {"total": 3000, "review": 600, "issues": 600, "repair_reserved": 1800}
+    assert receipt["budgets"] == {"total": 3000, "review": 600, "issues": 600, "repair_reserved": 1800,
+                                  "pull_requests": 0, "delivery": 0}
     assert receipt["daily_summary"]["repair_attempted"] == ["legacy-task"]
     assert receipt["daily_summary"]["merged"] == []
     assert receipt["daily_summary"]["blocked"] == ["manual-task"]
@@ -525,7 +527,7 @@ def test_daily_review_invokes_one_model_per_planned_commit(tmp_path, monkeypatch
     (root / "previous.md").write_text("previous report")
     review.write_json(root / "state.json", {"cursor": base, "last_review": str(root / "previous.md")})
     review.write_json(root / "config.json", {
-        "git": "git", "gh": "github-client", "repository": "fixture/repo", "repository_url": str(source),
+        "git": "git", "gh": "github-client", "repository": "fixture/repo", "repository_url": str(source), "pull_requests_enabled": False, "comments_enabled": False, "release_enabled": False,
         "timeout_seconds": 1800, "review_timeout_seconds": 900, "max_units": 10, "repair_enabled": True,
         "repair_budget_seconds": 30,
     })
@@ -736,6 +738,7 @@ def test_daily_run_resumes_pending_repair_without_new_prs(tmp_path, monkeypatch,
     (tmp_path / "report.md").write_text("previous review")
     (tmp_path / "config.json").write_text(json.dumps({
         "git": "git", "repository_url": "unused", "repository": "owner/repo", "max_units": 3,
+        "pull_requests_enabled": False, "comments_enabled": False, "release_enabled": False,
         "timeout_seconds": 1800, "repair_enabled": True,
     }))
     (tmp_path / "state.json").write_text(json.dumps({"cursor": A, "last_review": str(tmp_path / "report.md")}))
@@ -830,7 +833,7 @@ def test_daily_entry_persists_findings_before_cursor_with_real_git(tmp_path, mon
     agent.chmod(0o700)
     (root / "config.json").write_text(json.dumps({
         "git": "git", "gh": "github-client", "codex": str(agent),
-        "repository_url": str(source), "repository": "fixture/repo", "max_units": max_units,
+        "repository_url": str(source), "pull_requests_enabled": False, "comments_enabled": False, "release_enabled": False, "repository": "fixture/repo", "max_units": max_units,
         "timeout_seconds": 180, "repair_enabled": False,
         "model": "fixture", "model_base_url": "http://fixture.invalid",
         "model_catalog": str(root / "catalog.json"),
