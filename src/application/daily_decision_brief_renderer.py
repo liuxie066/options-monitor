@@ -3000,6 +3000,15 @@ def _fund_views(brief: Mapping[str, Any]) -> list[str]:
             for currency, amount in amounts.items()
             if currency in {"CNY", "HKD", "USD"}
         )
+    pending = funds.get("cash_secured_pending_by_symbol_by_ccy")
+    if isinstance(pending, Mapping):
+        for symbol, amounts in sorted(pending.items()):
+            reserved = "、".join(
+                _currency_money(currency, amount)
+                for currency, amount in _currency_amounts(amounts).items()
+            )
+            if reserved:
+                out.append(f"{symbol} 归属未定，已保守扣留担保：{reserved}（未计入可用资金）")
     unavailable = funds.get("cash_secured_unavailable_by_symbol")
     if opening_cny is None and isinstance(unavailable, Mapping):
         for symbol, reason in sorted(unavailable.items()):
@@ -3011,7 +3020,13 @@ def _fund_views(brief: Mapping[str, Any]) -> list[str]:
             }.get(reason_code, "期权担保依据待核实")
             if reason_code.startswith("short_put_cash_secured_currency_unsupported:"):
                 detail = "期权担保币种暂不支持"
-            out.append(f"可开仓资金待核实：{symbol} {detail}")
+            unavailable_by_ccy = funds.get("cash_secured_unavailable_by_ccy")
+            currencies = sorted(
+                currency for currency, symbols in unavailable_by_ccy.items()
+                if currency in {"CNY", "HKD", "USD"} and isinstance(symbols, list) and symbol in symbols
+            ) if isinstance(unavailable_by_ccy, Mapping) else []
+            scope = f"（{'/'.join(currencies)}）" if currencies else ""
+            out.append(f"可开仓资金待核实：{symbol}{scope} {detail}")
     return out
 
 

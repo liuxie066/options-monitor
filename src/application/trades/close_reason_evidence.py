@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from domain.domain.lifecycle_timing import (
     TIMING_POLICY_SCHEMA, PAIRING_WINDOW_MS, canonical_hash, derive_effective_lifecycle_timing,
+    effective_last_trade_cutoff_ms,
 )
 from domain.domain.option_lifecycle import (
     INSTRUMENT_POLICY_REGISTRY,
@@ -66,6 +67,12 @@ def build_lifecycle_timing_policy(
         raise ValueError("lifecycle timing observation times are invalid")
     expiration = date.fromisoformat(str(expiration_ymd or "").strip())
     normalized_days = _normalize_trading_days(trading_days)
+    cutoff_ms = effective_last_trade_cutoff_ms({
+        "market": market_value,
+        "last_trade_cutoff_ms": cutoff_ms,
+        "last_trade_cutoff_source": cutoff_source,
+        "trading_days": normalized_days,
+    }, expiration_ymd=expiration.isoformat())
     following = [
         item
         for item in normalized_days

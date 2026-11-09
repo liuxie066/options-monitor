@@ -9,7 +9,12 @@ from zoneinfo import ZoneInfo
 
 from domain.domain.expiration_dates import MARKET_TIMEZONES
 from domain.domain.symbol_identity import symbol_market
-from domain.domain.lifecycle_timing import canonical_hash, derive_effective_lifecycle_timing
+from domain.domain.lifecycle_timing import (
+    INSTRUMENT_POLICY_REGISTRY,
+    INSTRUMENT_POLICY_SCHEMA,
+    canonical_hash,
+    derive_effective_lifecycle_timing,
+)
 from domain.domain.lifecycle_allocation import (
     AllocationResolution,
     normalize_target_manifest,
@@ -32,33 +37,6 @@ SUPPORTED_LAST_TRADE_SOURCES = frozenset({
     "broker_contract_metadata",
     "instrument_policy_registry",
 })
-
-
-INSTRUMENT_POLICY_SCHEMA = "lifecycle_instrument_policy.v1"
-INSTRUMENT_POLICY_REGISTRY: dict[str, dict[str, Any]] = {
-    "US:standard_equity_option": {
-        "schema_version": INSTRUMENT_POLICY_SCHEMA,
-        "policy_id": "us_standard_equity_option.v1",
-        "market": "US",
-        "contract_class": "standard_equity_option",
-        "underlying_security_type": "equity",
-        "settlement_style": "physical",
-        "timezone": "America/New_York",
-        "last_trade_session_close": "16:00:00",
-        "half_trade_session_close": "13:00:00",
-    },
-    "HK:standard_equity_option": {
-        "schema_version": INSTRUMENT_POLICY_SCHEMA,
-        "policy_id": "hk_standard_equity_option.v1",
-        "market": "HK",
-        "contract_class": "standard_equity_option",
-        "underlying_security_type": "equity",
-        "settlement_style": "physical",
-        "timezone": "Asia/Hong_Kong",
-        "last_trade_session_close": "16:00:00",
-        "half_trade_session_close": "12:00:00",
-    },
-}
 
 
 @dataclass(frozen=True)
@@ -714,6 +692,7 @@ def build_lifecycle_case_read_model_from_resolved_facts(
         try:
             effective_timing = derive_effective_lifecycle_timing(
                 policy=timing_policy,
+                expiration_ymd=str(lifecycle_case.get("expiration_ymd") or "") or None,
                 option_close_evidence=[
                     {
                         "evidence_type": "option_zero_price_close",
@@ -848,6 +827,11 @@ def build_lifecycle_case_read_model_from_resolved_facts(
         "pending_until_ms": read_model.pending_until_ms,
         "pairing_until_ms": (
             int(effective_timing["pairing_until_ms"])
+            if effective_timing is not None
+            else None
+        ),
+        "review_after_ms": (
+            int(effective_timing["review_after_ms"])
             if effective_timing is not None
             else None
         ),

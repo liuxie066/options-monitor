@@ -346,6 +346,7 @@ def reconcile_lifecycle_close_reason(
                 derive_effective_lifecycle_timing(
                     policy=timing_policy,
                     option_close_evidence=option_rows,
+                    expiration_ymd=str(lifecycle_case.get("expiration_ymd") or "") or None,
                 )
             )
             timing = EffectiveLifecycleTiming(
@@ -863,6 +864,12 @@ def reconcile_due_lifecycle_cases(
                 if settlement_deadline is not None
                 else None
             )
+            review_after = read_model.get("review_after_ms")
+            review_after_value = (
+                int(review_after)
+                if review_after is not None
+                else settlement_deadline_value
+            )
         except LifecycleCaseDataError as exc:
             results.append(
                 _case_data_failure(
@@ -922,8 +929,8 @@ def reconcile_due_lifecycle_cases(
             continue
         observation: dict[str, Any] | None = None
         observation_required = (
-            settlement_deadline_value is not None
-            and int(now_ms) >= settlement_deadline_value
+            review_after_value is not None
+            and int(now_ms) >= review_after_value
             and read_model.get("reason_state") != "resolved"
         )
         if observation_required and observation_collector is not None:

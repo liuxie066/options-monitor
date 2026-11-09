@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from domain.domain.lifecycle_timing import EFFECTIVE_TIMING_SCHEMA
+
 
 SETTLEMENT_COLLECTOR_NAME = "settlement_observation"
 SETTLEMENT_COLLECTOR_CONTRACT_VERSION = "settlement_collector.v1"
@@ -357,7 +359,8 @@ def case_scope_fingerprint(candidate: Mapping[str, Any]) -> str:
     timing = dict(timing_policy) if isinstance(timing_policy, Mapping) else {}
     return _canonical_hash(
         {
-            "schema_version": "case_scope_fingerprint.v2",
+            "schema_version": "case_scope_fingerprint.v3",
+            "effective_timing_schema": EFFECTIVE_TIMING_SCHEMA,
             "case": {
                 "case_id": case.get("case_id"),
                 "account": case.get("account"),
@@ -402,7 +405,8 @@ def provider_input_scope_fingerprint(
 ) -> str:
     return _canonical_hash(
         {
-            "schema_version": "provider_input_scope_fingerprint.v1",
+            "schema_version": "provider_input_scope_fingerprint.v2",
+            "effective_timing_schema": EFFECTIVE_TIMING_SCHEMA,
             "case_id": lifecycle_case.get("case_id"),
             "account": lifecycle_case.get("account"),
             "futu_account_id": lifecycle_case.get("futu_account_id"),
@@ -415,6 +419,7 @@ def provider_input_scope_fingerprint(
             ),
             "pending_until_ms": read_model.get("pending_until_ms"),
             "pairing_until_ms": read_model.get("pairing_until_ms"),
+            "review_after_ms": read_model.get("review_after_ms"),
             "first_option_close_received_at_ms": read_model.get(
                 "first_option_close_received_at_ms"
             ),
@@ -520,6 +525,7 @@ def settlement_attempt_updates_after_outcome(
     provider_input_scope_fingerprint_value: str,
     semantic_fingerprint: str | None = None,
     provider_attempted: bool | None = None,
+    retry_deadline_ms: int | None = None,
 ) -> dict[str, Any]:
     previous_attempts = _nonnegative_int(
         current.get("attempt_count")
@@ -543,6 +549,8 @@ def settlement_attempt_updates_after_outcome(
         retry_after_ms=outcome.retry_after_ms,
     )
     if outcome.kind == "observed_incomplete":
+        if retry_deadline_ms is not None and delay_ms is not None and int(now_ms) < retry_deadline_ms:
+            delay_ms = min(delay_ms, retry_deadline_ms - int(now_ms))
         no_progress_count = (
             previous_no_progress + 1 if same_semantic else 1
         )

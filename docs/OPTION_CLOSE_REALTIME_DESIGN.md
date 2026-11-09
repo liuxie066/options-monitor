@@ -63,6 +63,45 @@ source deal ID、费用来源和原始币种/汇率转换证据，供现有按�
 receipt 或 outbox；若原因已更正，按原 claim 读回更正后的有效状态，不能把已 void
 的原 pending event 当缺失。若提交结果不明，先按 broker identity 读回，不能盲重试。
 
+### 1.1 到期交易截止、提前复核与最终负证据门槛
+
+`expiration_ymd` 保留合约所属市场的实际到期日期，不按北京时间的回执日期改写，也不
+由下游把休市日静默滚到另一天。US/HK 标准个股实物交割期权的 registry cutoff 读取
+**到期当天**的可信交易日历：全日为当地 16:00；`MORNING` 为 US 13:00、HK 12:00。
+日历明确记载到期日休市时报告合约日期与日历冲突。明确的 broker cutoff 不被 registry
+覆盖；旧策略未冻结到期当天日历时，继续保留其已有 cutoff，不补猜交易时段。
+
+统一领域时序 `derive_effective_lifecycle_timing` 派生 `review_after_ms`：取有效
+`last_trade_cutoff_ms` 与首次已接受零价 close 的 `received_at_ms + 15min` 中较晚者。
+前者是交易时段边界，后者是乱序配对窗；成交时刻不能代替首次收到证据的时刻。
+从复核时点开始，既有 collector 可以重采历史成交、订单与 fresh positions，并按原
+attempt 退避继续查询。成功但尚未完成的早期观察，其 `next_attempt_at_ms` 不越过尚未到达
+的最终等待门；到达门槛后的未完成观察及 provider 错误继续使用原退避预算。
+
+持久化 v1 `settlement_deadline_ms` 继续保留为**最终无交割归因的安全等待门**及股票腿
+匹配时间上界；v1 生成规则仍为到期后首个市场交易日收盘。它不再控制首次复核，也不
+表示法定股票交收时刻或券商证据可见性的 SLA。提前查询的空结果仍为
+`cause_pending`；自动 `expiration_no_settlement` 仍须等待该门槛并取得完整、冻结、
+匹配原 anchor 的无交割观察。晚于首次复核的股票腿仍按原窗口接受；可信的指派/行权
+正证据可沿原流程更正原因。复核时点及原因更新均不单独授权现金、担保或股份释放。
+
+旧 v1 策略原文和 `timing_policy_hash` 保持不可变；有效时序版本 v2 在读取时应用同一
+复核和半日市规则，不覆盖策略表或经济事件。调度的 case/provider scope 包含有效时序
+版本及复核输入，因此旧 `cached_local` / `next_attempt_at_ms` 会重新规划，无需等待
+另一笔成交，也不会继续睡到旧最终截止。持久化决策投影仍保留原最终等待值及策略身份。
+
+例如 PDD 到期日期为 2026-11-06：纽约当天 16:00（北京时间 11-07 05:00）截止；若首次
+已接受回执为北京时间 11-07 13:21:49（纽约 11-07 00:21:49），则 13:36:49 即可开始
+复核。保留的最终等待门仍为纽约 11-09 16:00（北京时间 11-10 05:00）；两者职责不同。
+
+公开规则依据：[富途到期日字段及市场时区](https://openapi.futunn.com/futu-api-doc/quote/get-option-expiration-date.html)、
+[Cboe 个股期权交易及半日市时间](https://www.cboe.com/about/hours/us-options)、
+[HKEX 股票期权规格](https://www.hkex.com.hk/Products/Listed-Derivatives/Single-Stock/Stock-Options?sc_lang=en)、
+[HKEX 周权规格（附件 I，含到期半日市）](https://www.hkex.com.hk/-/media/HKEX-Market/Services/Circulars-and-Notices/Participant-and-Members-Circulars/SEHK/2024/EQD_09_24_e.pdf)。
+[OIC 的 US T+1 说明](https://prd-web.optionseducation.org/news/understanding-t-1-conversion)
+与 HKEX 的 HK 实股 T+2 是股票交收规则，均不规定本系统证据等待 SLA；本次没有把它们
+替换成新的资金可用性或最终无交割归因政策。
+
 ### 2. 原因迟到时更正同一平仓事实
 
 生命周期 case 和源成交唯一 claim 继续持有平仓事实。领域生命周期读模型须从
@@ -142,23 +181,22 @@ HKD 月收益率与年化率可计算，即使胜率和总报告仍为 partial�
 
 `context_builder.py` 以 canonical `contracts_open` 为仓位数量，不把已分配事件再从
 数量中减一次；仍未入账的旧 reservation 只在可信同代快照下按现有规则影响风险。
-待交收导致的现金/股份不可用量从有效 lifecycle case/evidence 派生，**即使 lot
-已全平仓、`contracts_open=0` 也不能因 open-position 循环跳过**；该量与持仓数量
-分别计算，不再从已关闭张数重复释放或扣减。Put/Call 的 case 阻断只能由与该
-case、物理账户、币种/标的及交收时点匹配的可信结算证据解除；账户总现金或总持股
-变化不能证明这笔 case 已释放。若消费者改用更新且可信的券商可用额/可用股数
-直接作容量上限，必须作为独立的 authoritative 模式，不再叠加该 case 的推测释放，
-并验证同账户其他交易不会导致双计。缺足够证据时保持不可用。仅补齐平仓原因不
-证明资金或股份可用。下游 auto-close、Wheel、Daily Brief、Control 均以同一
-有效投影看剩余张数；原因未定以现有生命周期状态暴露，不伪装成已确认指派或到期失效。
+待交收约束从有效 lifecycle case/evidence 派生，**即使 lot 已全平仓、
+`contracts_open=0` 也不能因 open-position 循环跳过**。Put 的归属未定与担保金额未知
+分别处理：未分配 reservation 已包含在 open 投影中，不重复计数；已分配的
+`pending_close` 须补回担保。数量、行权价、乘数和币种可核实时，按保存占用与完整
+行权本金中的较大值继续预留，扣除后仍可计算其余可用资金。保存占用为零或已减记
+不能释放待归属本金。真正缺少金额依据时，仅隐藏受影响币种的可用数字；币种未知
+或缺口映射不完整时阻断账户汇总。逐币种展示和完整 CNY 汇总合同见
+[资金合同 §11.2](OPTION_NOTIFICATION_EXPERIENCE_PRD.md)。Call 保留现有股份约束。
 
-截止后进入 `needs_review` 也不证明交收完成，故保留
-`cash_secured_unavailable_by_symbol[symbol] = "option_close_settlement_pending"`；
-Call 的股份约束同理。仅按截止时间清除该标记，会在已平仓 lot 的数值担保已归零时，
-把尚无交收证据的现金当作可开仓容量。生命周期复核状态继续保留在
-`position_lifecycle_by_lot`，包括已全平仓的 lot。资金简报沿用现有人类可读提示，例如
-“可用于期权开仓（折CNY）｜暂不可用”和“可开仓资金待核实｜PDD 期权平仓待结算确认”；
-不会以原因待定的已关闭张数推测释放现金，也不会因状态转为复核而隐藏资金约束。
+截止后进入 `needs_review` 不证明交收完成，也不单独释放担保或股份。生命周期复核
+状态继续保留在 `position_lifecycle_by_lot`，包括已全平仓的 lot；资金简报可显示扣留
+后的余额，并注明“PDD 归属未定，已保守扣留担保”。解除具体 case 的预留或股份
+约束仍须匹配该 case、物理账户、币种/标的及交收时点的可信证据，账户总现金或
+总持股变化本身不能证明释放。若消费者改用券商可用额/可用股数直接作容量上限，
+须作为独立 authoritative 模式并验证不会双计。下游 auto-close、Wheel、Daily Brief、
+Control 仍以同一有效投影看剩余张数，不把原因未定伪装成已确认指派或到期失效。
 
 仅有完整券商持仓快照中某仓位消失、但没有精确平仓成交时，只能确认快照时点
 已不在持仓，不能推造平仓时间、分配和收益率；保留 review/partial。

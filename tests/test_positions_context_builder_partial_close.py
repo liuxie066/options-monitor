@@ -454,6 +454,7 @@ def test_build_context_marks_short_put_cash_secured_unavailable_when_basis_missi
     assert ctx["cash_secured_by_symbol_by_ccy"] == {}
     assert ctx["cash_secured_total_cny"] is None
     assert ctx["cash_secured_unavailable_by_symbol"]["0700.HK"] == "short_put_cash_secured_basis_missing"
+    assert ctx["cash_secured_unavailable_by_ccy"] == {"HKD": ["0700.HK"]}
 
 
 def test_build_context_marks_short_put_cash_secured_unavailable_when_currency_missing() -> None:
@@ -527,12 +528,12 @@ def test_closed_option_leg_keeps_settlement_constraints_while_reason_pending(mon
         decision_snapshot={"snapshot_status": "trusted", "normalized_account": "lx", "account_position_lots": snapshot_rows},
     )
 
-    assert ctx["cash_secured_total_by_ccy"] == {"HKD": 28_000.0}
-    assert ctx["cash_secured_total_cny"] == 28_000.0 * 0.8547
+    assert ctx["cash_secured_total_by_ccy"] == {"HKD": 124_000.0}
+    assert ctx["cash_secured_total_cny"] == 124_000.0 * 0.8547
     assert ctx["locked_shares_by_symbol"] == {"AAPL": 200}
-    assert ctx["cash_secured_unavailable_by_symbol"] == {
-        "3690.HK": "option_close_settlement_pending",
-        "9992.HK": "option_close_settlement_pending",
+    assert ctx["cash_secured_unavailable_by_symbol"] == {}
+    assert ctx["cash_secured_pending_by_symbol_by_ccy"] == {
+        "3690.HK": {"HKD": 40_000.0}, "9992.HK": {"HKD": 56_000.0},
     }
     assert ctx["locked_shares_unavailable_by_symbol"] == {
         "0700.HK": "option_close_settlement_pending",
@@ -563,8 +564,12 @@ def test_closed_option_leg_keeps_settlement_constraints_while_reason_pending(mon
     ("settlement_pending", "conflict"),
     ("conflict", "conflict"),
 ])
+@pytest.mark.parametrize(("cash_hint", "expected_secured"), [
+    (None, 172_000.0), (0, 172_000.0), (40_000.0, 172_000.0), (200_000.0, 200_000.0),
+])
 def test_fully_closed_pending_put_still_blocks_cash_capacity(
     monkeypatch: pytest.MonkeyPatch, lifecycle_state: str, reason_state: str,
+    cash_hint: float | None, expected_secured: float,
 ) -> None:
     monkeypatch.setattr(
         "src.application.ledger.position_context.build_lifecycle_read_models_from_decision_snapshot",
@@ -581,7 +586,7 @@ def test_fully_closed_pending_put_still_blocks_cash_capacity(
     records = [_lot(
         record_id="closed", symbol="0700.HK", status="closed",
         contracts=4, contracts_open=0, strike=430, multiplier=100,
-        currency="HKD",
+        currency="HKD", cash_secured_amount=cash_hint,
     )]
     context = build_context(
         records, broker="富途", account="lx", rates={"HKDCNY": 0.85},
@@ -590,10 +595,9 @@ def test_fully_closed_pending_put_still_blocks_cash_capacity(
             "account_position_lots": deepcopy(records),
         },
     )
-    assert context["cash_secured_total_by_ccy"] == {}
-    assert context["cash_secured_unavailable_by_symbol"] == {
-        "0700.HK": "option_close_settlement_pending"
-    }
+    assert context["cash_secured_total_by_ccy"] == {"HKD": expected_secured}
+    assert context["cash_secured_unavailable_by_symbol"] == {}
+    assert context["cash_secured_pending_by_symbol_by_ccy"] == {"0700.HK": {"HKD": expected_secured}}
 
 
 @pytest.mark.parametrize("closed_contracts", [1, 2], ids=["partial_close", "full_close"])
@@ -696,22 +700,27 @@ def test_pending_close_deadline_preserves_funds_constraint_and_brief(
         assert lifecycle["reason_state"] == "cause_pending"
         assert lifecycle["close_reason"] is None
         assert lifecycle["actionable"] is False
-        assert context["cash_secured_total_by_ccy"] == ({"USD": remaining * 10000.0} if remaining else {})
-        assert context["cash_secured_unavailable_by_symbol"] == {"PDD": "option_close_settlement_pending"}
+        assert context["cash_secured_total_by_ccy"] == {"USD": 20_000.0}
+        assert context["cash_secured_unavailable_by_symbol"] == {}
+        assert context["cash_secured_pending_by_symbol_by_ccy"] == {
+            "PDD": {"USD": closed_contracts * 10_000.0},
+        }
         assert sum(item["contracts_open"] for item in context["open_positions_min"]) == remaining
         portfolio = cash_portfolio({"as_of_utc": now.isoformat(), "cash_by_currency": {"USD": 50000}})
         gaps = []
         funds, _ = _build_funds(portfolio_context=portfolio, option_positions_context=context, data_gaps=gaps)
         assert funds["cash_total_by_currency"] == {"USD": 50000.0}
-        assert funds["cash_secured_unavailable_by_symbol"] == {"PDD": "option_close_settlement_pending"}
-        assert funds["option_opening_available_by_currency"] == {}
+        assert funds.get("cash_secured_unavailable_by_symbol", {}) == {}
+        assert funds["option_opening_available_by_currency"] == {"USD": 30_000.0}
         assert funds["option_opening_available_cny"] is None
-        assert funds["option_opening_reliable"] is False
-        assert funds["available"] is False
-        assert funds["reason"] == "option_cash_secured_unavailable"
+        assert funds["option_opening_reliable"] is True
+        assert funds["available"] is True
+        assert funds["reason"] == "ok"
         rendered = render_full_brief({"account": "lx", "market": "us", "funds": funds})
+        pending_amount = f"${closed_contracts * 10_000:,.2f}"
+        assert f"PDD 归属未定，已保守扣留担保｜{pending_amount}（未计入可用资金）" in rendered
+        assert "可用于期权开仓｜$30,000.00" in rendered
         assert "可用于期权开仓（折CNY）｜暂不可用" in rendered
-        assert "可开仓资金待核实｜PDD 期权平仓待结算确认" in rendered
         assert "option_close_settlement_pending" not in rendered
 
     assert repo.list_trade_events() == events_before
@@ -785,15 +794,17 @@ def test_late_paid_close_preserves_pending_settlement_cash_constraint(tmp_path) 
         assert model["lifecycle_reason_codes"] == (
             ["target_lot_quantity_drift"] if late_close_received else ["close_reason_pending"]
         )
-        assert context["cash_secured_total_by_ccy"] == ({} if late_close_received else {"USD": 10000.0})
-        assert context["cash_secured_unavailable_by_symbol"] == {"NVDA": "option_close_settlement_pending"}
+        secured = 10_000.0 if late_close_received else 20_000.0
+        assert context["cash_secured_total_by_ccy"] == {"USD": secured}
+        assert context["cash_secured_unavailable_by_symbol"] == {}
+        assert context["cash_secured_pending_by_symbol_by_ccy"] == {"NVDA": {"USD": 10_000.0}}
         gaps = []
         funds, _ = _build_funds(portfolio_context=portfolio, option_positions_context=context, data_gaps=gaps)
         assert funds["cash_total_reliable"] is True
-        assert funds["option_opening_reliable"] is False
-        assert funds["available"] is False
-        assert funds["option_opening_available_by_currency"] == {}
-        assert any(gap.get("kind") == "option_opening_available" for gap in gaps)
+        assert funds["option_opening_reliable"] is True
+        assert funds["available"] is True
+        assert funds["option_opening_available_by_currency"] == {"USD": 50_000.0 - secured}
+        assert not any(gap.get("kind") == "option_opening_available" for gap in gaps)
 
 
 @pytest.mark.parametrize("mismatch", [False, True])
@@ -814,6 +825,7 @@ def test_closed_option_leg_uses_bound_snapshot_and_preserves_conflict(
     records = [_lot(record_id="lot", symbol="3690.HK", strike=80, multiplier=500, currency="HKD")]
     snapshot_lot = _lot(record_id="lot", symbol="3690.HK", strike=80, multiplier=500, currency="HKD")
     if mismatch:
+        snapshot_lot["fields"]["contracts"] = 2
         snapshot_lot["fields"]["contracts_open"] = 2
 
     ctx = build_context(
@@ -824,10 +836,9 @@ def test_closed_option_leg_uses_bound_snapshot_and_preserves_conflict(
         decision_snapshot={"snapshot_status": "trusted", "normalized_account": "lx", "account_position_lots": [snapshot_lot]},
     )
 
-    assert ctx["cash_secured_total_by_ccy"] == {"HKD": 40_000.0}
-    assert ctx["cash_secured_unavailable_by_symbol"] == (
-        {"3690.HK": "option_close_settlement_pending"} if mismatch else {}
-    )
+    assert ctx["cash_secured_total_by_ccy"] == {"HKD": 80_000.0 if mismatch else 40_000.0}
+    assert ctx["cash_secured_unavailable_by_symbol"] == {}
+    assert ctx["cash_secured_pending_by_symbol_by_ccy"] == {"3690.HK": {"HKD": 40_000.0}}
 
 
 def test_build_context_excludes_closed_or_zero_open_records() -> None:

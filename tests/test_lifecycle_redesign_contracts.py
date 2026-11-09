@@ -1514,7 +1514,9 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
         decision_snapshot=snapshot,
         observed_at=datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc),
     )
-    assert context["cash_secured_total_cny"] == 0
+    assert context["cash_secured_total_cny"] == 72_000.0
+    assert context["cash_secured_total_by_ccy"] == {"USD": 10_000.0}
+    assert context["cash_secured_pending_by_symbol_by_ccy"] == {"NVDA": {"USD": 10_000.0}}
     assert context["open_positions_min"][0]["last_option_close_received_at_ms"] == frozen_model[
         "last_option_close_received_at_ms"
     ]
@@ -1528,7 +1530,7 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
         option_positions_context=context,
         data_gaps=gaps,
     )
-    assert context["cash_secured_unavailable_by_symbol"] == {"NVDA": "option_close_settlement_pending"}
+    assert context["cash_secured_unavailable_by_symbol"] == {}
     from src.application.wheel.capacity import load_shared_cash_capacity_fact
     monkeypatch.setattr(
         "src.application.wheel.capacity.fetch_futu_portfolio_context",
@@ -1545,12 +1547,12 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
     wheel_fact = load_shared_cash_capacity_fact(
         repo, config=cash_config(), runtime_root=tmp_path, account="lx", broker="futu", as_of_ms=now_ms, fx_snapshot={},
     )
-    assert wheel_fact["status"] == "unavailable"
-    assert wheel_fact["reason"] == "option_cash_secured_unavailable"
+    assert wheel_fact["status"] == "available"
+    assert wheel_fact["cash_secured_by_currency"] == {"USD": 10_000.0}
     assert funds["option_opening_available_cny"] is None
-    assert funds["available"] is False
+    assert funds["option_opening_available_by_currency"] == {"USD": -9_000.0}
+    assert funds["available"] is True
     assert gaps == [
-        {"scope": "funds", "kind": "option_opening_available", "reason": "option_cash_secured_unavailable"},
         {"scope": "funds", "kind": "cash_total_cny", "reason": "cash_total_cny_unavailable"},
     ]
 
@@ -1568,7 +1570,8 @@ def test_explicit_bridge_reuses_existing_v2_case_without_terminal_write(
         option_positions_context=context,
         data_gaps=[],
     )
-    assert refreshed_funds["available"] is False
+    assert refreshed_funds["available"] is True
+    assert refreshed_funds["option_opening_available_by_currency"] == {"USD": -9_000.0}
     assert refreshed_funds["option_opening_available_cny"] is None
 
 
