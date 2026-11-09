@@ -1442,6 +1442,40 @@ def test_unreliable_secured_usage_keeps_cash_but_does_not_invent_opening_funds(
     assert brief["funds"]["reason"] == "option_cash_secured_unavailable"
 
 
+def test_funds_preserve_cross_market_unavailable_reasons(tmp_path: Path, monkeypatch) -> None:
+    from src.infrastructure import exchange_rates as fx
+    from src.application.daily_decision_brief_renderer import render_fixed_report
+
+    monkeypatch.setattr(fx, "_utc_now", lambda: datetime(2026, 10, 2, 1, 43, tzinfo=timezone.utc))
+    account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
+    (account_dir / "nvda_sell_put_candidates_labeled.csv").rename(
+        account_dir / "0700.hk_sell_put_candidates_labeled.csv"
+    )
+    option_path = account_dir / "state" / "option_positions_context.json"
+    option = json.loads(option_path.read_text(encoding="utf-8"))
+    unavailable = {"PDD": "option_close_settlement_pending", "AAPL": "short_put_cash_secured_basis_missing"}
+    option["cash_secured_unavailable_by_symbol"] = unavailable
+    option["exchange_rates"] = {"pairs": {
+        pair: {"rate": rate, "source": "tencent_quote",
+               "quote_at_utc": "2026-09-30T07:00:00+00:00", "observed_at_utc": "2026-09-30T07:01:00+00:00"}
+        for pair, rate in (("USDCNY", 7.0), ("HKDCNY", 0.9))
+    }}
+    option_path.write_text(json.dumps(option), encoding="utf-8")
+
+    brief = _assemble(tmp_path, market="HK")
+
+    assert brief["funds"]["cash_secured_unavailable_by_symbol"] == unavailable
+    assert brief["funds"]["cash_total_cny"] == 558000.0
+    assert brief["funds"]["option_opening_reliable"] is False
+    assert brief["funds"]["option_opening_available_cny"] is None
+    assert brief["funds"]["option_opening_available_by_currency"] == {}
+    message = render_fixed_report(brief)
+    assert "PDD 期权平仓待结算确认" in message
+    assert "AAPL 期权担保计算依据缺失" in message
+    assert "可用于期权开仓（折CNY）｜暂不可用" in message
+    assert "option_close_settlement_pending" not in message
+
+
 def test_closed_put_with_newer_futu_cash_keeps_settlement_block(tmp_path: Path) -> None:
     account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
     state_dir = account_dir / "state"
