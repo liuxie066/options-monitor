@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.options-monitor.code-entropy.daily</string>
+<key>ProgramArguments</key><array>
+<string>@PYTHON@</string><string>@RUNNER@</string>
+<string>--state-dir</string><string>@STATE@</string><string>run</string>
+<string>--mode</string><string>daily</string><string>--timeout-seconds</string><string>900</string><string>--publish</string>
+</array>
+<key>WorkingDirectory</key><string>@STATE@</string>
+<key>StartCalendarInterval</key><dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>20</integer></dict>
+<key>RunAtLoad</key><false/>
+<key>ProcessType</key><string>Background</string>
+<key>LowPriorityIO</key><true/>
+<key>Nice</key><integer>15</integer>
+<key>Umask</key><integer>63</integer>
+<key>EnvironmentVariables</key><dict>
+<key>HOME</key><string>@HOME@</string><key>PATH</key><string>@PATH@</string>
+<key>PYTHONPATH</key><string></string><key>PYTHONDONTWRITEBYTECODE</key><string>1</string>
+</dict>
+<key>StandardOutPath</key><string>@STATE@/daily.stdout.log</string>
+<key>StandardErrorPath</key><string>@STATE@/daily.stderr.log</string>
+</dict></plist>
