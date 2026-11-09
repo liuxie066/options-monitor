@@ -102,34 +102,49 @@ def github_api(config, command, deadline=None):
     return api
 
 
+def pr_summary(pr):
+    head = pr.get("head")
+    return {**{key: pr.get(key) for key in (
+        "number", "title", "state", "merged_at", "merge_commit_sha", "body", "updated_at")},
+        "html_url": pr.get("html_url") or pr.get("url"),
+        "head": head.get("sha") if isinstance(head, dict) else head}
+
+
+def linked_prs(issue, comments, timeline, open_prs, repository, api):
+    related = set()
+    for event in timeline:
+        source = event.get("source", {}).get("issue", {})
+        if "pull_request" in source and source.get("repository_url") == f"https://api.github.com/repos/{repository}":
+            related.add(source["number"])
+    for text in [issue.get("body") or "", *(row.get("body") or "" for row in comments)]:
+        related.update(int(n) for n in re.findall(
+            rf"https://github\.com/{re.escape(repository)}/pull/(\d+)", text))
+    for pr in open_prs:
+        if re.search(rf"(?<![\w/])#{issue['number']}\b", (pr.get("body") or "") + " " + (pr.get("title") or "")):
+            related.add(pr["number"])
+    # Read related heads/states afresh, including references found only on the PR side.
+    return [pr_summary(api(f"pulls/{number}")) for number in sorted(related)]
+
+
+def issue_input_digest(issue, linked):
+    return digest({"issue": issue, "linked_pull_requests": linked})
+
+
 def hydrate_issue(snapshot, plan, config, command, deadline=None):
-    """Fetch one complete discussion within that issue's own budget."""
+    """Refresh the selected discussion, rejecting changes since identity planning."""
+    if snapshot.get("input_error"):
+        raise ValueError("issue identity snapshot failed: " + snapshot["input_error"])
     api = github_api(config, command, deadline)
     number = snapshot["number"]
     issue = api(f"issues/{number}")
     comments = api(f"issues/{number}/comments?per_page=100", pages=True)
     timeline = api(f"issues/{number}/timeline?per_page=100", pages=True)
-    related = set()
-    prefix = f"repos/{config['repository']}"
-    for event in timeline:
-        source = event.get("source", {}).get("issue", {})
-        if "pull_request" in source and source.get("repository_url") == f"https://api.github.com/{prefix}":
-            related.add(source["number"])
-    for text in [issue.get("body") or "", *(row.get("body") or "" for row in comments)]:
-        related.update(int(n) for n in re.findall(
-            rf"https://github\.com/{re.escape(config['repository'])}/pull/(\d+)", text))
-    linked = []
-    for pr_number in sorted(related):
-        pr = api(f"pulls/{pr_number}")
-        linked.append({key: pr.get(key) for key in (
-            "number", "title", "html_url", "state", "merged_at", "merge_commit_sha", "body")})
-    for pr in plan["open_pull_requests"]:
-        if re.search(rf"(?<![\w/])#{number}\b", (pr.get("body") or "") + " " + pr["title"]):
-            if not any(row["number"] == pr["number"] for row in linked):
-                linked.append({**pr, "state": "open"})
+    linked = linked_prs(issue, comments, timeline, plan["open_pull_requests"], config["repository"], api)
     compared = ("number", "title", "body", "state", "updated_at", "assignees")
-    if issue.get("state") != "open" or any(issue.get(key) != snapshot["issue"].get(key) for key in compared):
-        raise ValueError("issue changed during snapshot; retry with a fresh input digest")
+    if (issue.get("state") != "open" or any(issue.get(key) != snapshot["issue"].get(key) for key in compared)
+            or (snapshot.get("fingerprint_version") == 2
+                and issue_input_digest(snapshot["issue"], linked) != snapshot["input_digest"])):
+        raise ValueError("issue or related PR changed during snapshot; retry with a fresh input digest")
     return {**snapshot, "issue": issue, "comments": comments, "timeline": timeline, "linked_pull_requests": linked}
 
 
@@ -142,37 +157,71 @@ def plan_issues(root, config, target, command, *, deadline=None, full_scan=False
     issues = [item for item in api("issues?state=open&sort=created&direction=asc&per_page=100", pages=True)
               if "pull_request" not in item]
     open_prs = api("pulls?state=open&per_page=100", pages=True)
-    prs_token = digest(open_prs)
     state = read_state(root)["issues"]
+    local = repair.task_summaries(root)
     candidates, inputs = [], {}
     for item in issues:
         number = item["number"]
         previous = state.get(str(number), {})
-        token = digest({"issue": item, "open_prs": prs_token})
-        inputs[str(number)] = {"input_digest": token, "assigned": bool(item.get("assignees"))}
-        cached = completed_review(previous, target, token)
+        # Both modes need the same association facts; one unreadable discussion must not block every issue.
+        input_error = None
+        try:
+            comments = api(f"issues/{number}/comments?per_page=100", pages=True)
+            timeline = api(f"issues/{number}/timeline?per_page=100", pages=True)
+            linked = linked_prs(item, comments, timeline, open_prs, config["repository"], api)
+            token = issue_input_digest(item, linked)
+        except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+            if isinstance(exc, TimeoutError) or (deadline is not None and deadline - time.monotonic() < 1):
+                raise
+            token, linked, input_error = None, [], str(exc)
+        inputs[str(number)] = {"input_digest": token, "fingerprint_version": 2,
+                               "state": "unknown" if input_error else "open",
+                               "assigned": bool(item.get("assignees")),
+                               "linked_open": any(pr["state"] == "open" for pr in linked)}
+        cached = completed_review(previous, target, token) if token else None
         if numbers is not None and number not in numbers:
             continue
         if cached and not full_scan and numbers is None:
             continue
         priority = (bool(previous.get("reviewed_at")),
                     previous.get("last_attempted_at") or previous.get("reviewed_at") or "", number)
-        candidates.append((priority, {"number": number, "input_digest": token, "issue": item,
+        candidates.append((priority, {"number": number, "input_digest": token, "fingerprint_version": 2, "issue": item,
+                                      **({"input_error": input_error} if input_error else {}),
                                       **({"cached_review": cached} if cached else {})}))
     selected = [row for _, row in sorted(candidates, key=lambda row: row[0])]
     if not full_scan and numbers is None:
         selected = selected[:limit]
+    sources = {source["number"] for task in local if task["status"] not in {"merged", "source_closed"}
+               for source in task["sources"] if source["kind"] == "issue"}
+    for number in sorted(sources - {item["number"] for item in issues}):
+        try:
+            item = api(f"issues/{number}")
+            if not isinstance(item, dict) or item.get("number") != number or item.get("state") not in {"open", "closed"}:
+                raise ValueError("source issue requires a positive state readback")
+        except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+            if isinstance(exc, TimeoutError) or (deadline is not None and deadline - time.monotonic() < 1):
+                raise
+            inputs[str(number)] = {"state": "unknown", "reason": str(exc)}
+        else:
+            inputs[str(number)] = {"state": item["state"], "assigned": bool(item.get("assignees"))}
     plan = {"target": target, "open_issue_count": len(issues), "issues": [], "open_pull_requests": [],
-            "local_repairs": repair.task_summaries(root), "issue_inputs": inputs}
-    if selected:
+            "local_repairs": local, "issue_inputs": inputs}
+    if selected or sources:
         for pr in open_prs:
             plan["open_pull_requests"].append({
-                "number": pr["number"], "title": pr["title"], "url": pr["html_url"], "body": pr.get("body"),
-                "head": pr["head"]["sha"],
+                **pr_summary({**pr, "state": "open"}), "url": pr["html_url"],
                 "files": [row["filename"] for row in api(f"pulls/{pr['number']}/files?per_page=100", pages=True)],
             })
+    # File ownership remains a live admission guard, separate from review identity.
+    for number in sources:
+        scope = {name for task in local for source in task["sources"]
+                 if source["kind"] == "issue" and source["number"] == number
+                 and task["status"] not in {"merged", "source_closed", "needs_triage", "blocked"}
+                 for name in task["fix_scope"]}
+        inputs[str(number)]["overlapping_prs"] = [pr["number"] for pr in plan["open_pull_requests"]
+                                                   if scope.intersection(pr["files"])]
     for snapshot in selected:
-        if hydrate and not snapshot.get("cached_review"):
+        if hydrate and not snapshot.get("cached_review") and not snapshot.get("input_error"):
             snapshot = hydrate_issue(snapshot, plan, config, command, deadline)
         plan["issues"].append(snapshot)
     return plan
@@ -285,6 +334,7 @@ def persist_decision(root, config, run, plan, snapshot, item, command, deadline)
     state = read_state(root)
     previous = state["issues"].get(str(number), {})
     record = {**previous, "number": number, "target": plan["target"], "input_digest": snapshot["input_digest"],
+              "fingerprint_version": snapshot.get("fingerprint_version", 1),
               "reviewed_at": datetime.now(timezone.utc).isoformat(), "outcome": item["outcome"],
               "run_dir": str(run), "disposition": "needs_decision"}
     record.pop("close_recommendation", None)

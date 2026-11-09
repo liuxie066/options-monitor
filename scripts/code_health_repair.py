@@ -41,7 +41,7 @@ AUDIT_SCHEMA = {
     "required": ["verdict", "report_markdown", "findings"],
     "additionalProperties": False,
 }
-TERMINAL = {"awaiting_delivery_authorization", "needs_triage", "blocked", "merged"}
+TERMINAL = {"awaiting_delivery_authorization", "needs_triage", "blocked", "merged", "source_closed"}
 REQUIRED_REPAIR_CHECKS = {"checks"} | {f"regression ({shard})" for shard in range(8)}
 
 
@@ -119,8 +119,8 @@ def persist_findings(root, review_run, result, target, *, source=None):
             )
         else:
             task = json.loads(record.read_text())
-            if task["status"] == "merged" and target != task["base_sha"]:
-                task.update({"status": "needs_triage", "last_error": f"new confirmation at {target} after a merged repair; inspect recurrence before reusing delivery"})
+            if task["status"] == "source_closed" or (task["status"] == "merged" and target != task["base_sha"]):
+                task.update({"status": "needs_triage", "last_error": f"new confirmation at {target} after a {task['status']} repair; inspect recurrence before reusing delivery"})
             task.setdefault("sources", [])
             task.setdefault("related_evidence", [])
             for origin in sources:
@@ -242,16 +242,42 @@ def dependency_inputs_match(config, root, base):
         raise ValueError("repair dependency inputs changed since the verified environment; human environment refresh required")
 
 
+def _source_is_closed(source, config):
+    return (source["kind"] == "issue" and config.get("issue_intake_ready")
+            and config.get("issue_inputs", {}).get(str(source["number"]), {}).get("state") == "closed")
+
+
+def reconcile_closed_sources(root, config):
+    """Retire only positively closed, issue-only tasks; preserve their work and evidence."""
+    retired = []
+    for path in sorted((root / "repairs").glob("*/task.json")):
+        task = json.loads(path.read_text())
+        sources = task.get("sources", [])
+        if (task["status"] in {"merged", "source_closed"} or not sources
+                or not all(_source_is_closed(source, config) for source in sources)):
+            continue
+        task["source_closed"] = {"previous_status": task["status"], "observed_at": timestamp(),
+                                 "issues": sorted({source["number"] for source in sources})}
+        task["status"] = "source_closed"
+        save(path, task)
+        retired.append(task["id"])
+    return retired
+
+
 def _issue_repair_matches(task, config, issue_state):
-    """Check the verdict, ownership and input identity before considering its target."""
-    for source in task.get("sources", []):
-        if source["kind"] != "issue":
+    """Check every active source's verdict, ownership and exact task/input identity."""
+    sources = task.get("sources", [])
+    if sources and all(_source_is_closed(source, config) for source in sources):
+        return False
+    for source in sources:
+        if source["kind"] != "issue" or _source_is_closed(source, config):
             continue
         latest = issue_state.get(str(source["number"]), {})
         current = config.get("issue_inputs", {}).get(str(source["number"]), {})
         if (not config.get("issue_intake_ready") or not config.get("issue_target")
                 or latest.get("outcome") != "confirmed" or latest.get("repair_task") != task["id"]
-                or not current or current.get("assigned")
+                or not current or current.get("state", "open") != "open"
+                or current.get("assigned") or current.get("linked_open") or current.get("overlapping_prs")
                 or latest.get("input_digest") != current.get("input_digest")):
             return False
     return True
@@ -259,7 +285,7 @@ def _issue_repair_matches(task, config, issue_state):
 
 def _admission_reason(task, all_tasks, config, issue_state):
     older_conflicts = [other["id"] for _, other in all_tasks if other["id"] != task["id"]
-                       and other["status"] not in {"needs_triage", "blocked", "merged"}
+                       and other["status"] not in {"needs_triage", "blocked", "merged", "source_closed"}
                        and (datetime.fromisoformat(other["created_at"]), other["id"])
                        < (datetime.fromisoformat(task["created_at"]), task["id"])
                        and set(other["finding"]["fix_scope"]) & set(task["finding"]["fix_scope"])]
@@ -287,6 +313,7 @@ def _content_files(config, tree, *, base_sha="HEAD"):
 def repair_one(root, config, run_dir, deadline, invoke, *, revalidate_issue=None, _task_id=None):
     """Resume one task; revalidate_issue(number) refreshes stale verdicts within the repair deadline."""
     config = {**config, "_repair_deadline": deadline}
+    reconcile_closed_sources(root, config)
     records = sorted((root / "repairs").glob("*/task.json")) if (root / "repairs").exists() else []
     all_tasks = [(path, json.loads(path.read_text())) for path in records]
     pending = sorted(((path, task) for path, task in all_tasks if task["status"] not in TERMINAL
@@ -300,7 +327,8 @@ def repair_one(root, config, run_dir, deadline, invoke, *, revalidate_issue=None
     for path, task in pending:
         reason = _admission_reason(task, all_tasks, config, issue_state)
         if reason is None:
-            numbers = dict.fromkeys(source["number"] for source in task.get("sources", []) if source["kind"] == "issue")
+            numbers = dict.fromkeys(source["number"] for source in task.get("sources", [])
+                                    if source["kind"] == "issue" and not _source_is_closed(source, config))
             for number in numbers:
                 if issue_state[str(number)].get("target") == config["issue_target"]:
                     continue
@@ -320,8 +348,8 @@ def repair_one(root, config, run_dir, deadline, invoke, *, revalidate_issue=None
                         or issue_state.get(str(number), {}).get("target") != config["issue_target"]):
                     reason = f"issue #{number} is not confirmed for this repair at the current target"
                     break
-            if not reason and any(issue_state.get(str(source["number"]), {}).get("target") != config["issue_target"]
-                                  for source in task.get("sources", []) if source["kind"] == "issue"):
+            if not reason and any(issue_state.get(str(number), {}).get("target") != config["issue_target"]
+                                  for number in numbers):
                 reason = "issue awaits revalidation at the current target"
             if not reason and numbers and task["base_sha"] != config["issue_target"]:
                 tree = path.parent / "worktree"
@@ -340,7 +368,8 @@ def repair_one(root, config, run_dir, deadline, invoke, *, revalidate_issue=None
         return {"status": "deferred", "tasks": deferred}
     record, task = eligible[0]
     folder = record.parent
-    numbers = sorted({source["number"] for source in task.get("sources", []) if source["kind"] == "issue"})
+    numbers = sorted({source["number"] for source in task.get("sources", [])
+                      if source["kind"] == "issue" and not _source_is_closed(source, config)})
     if numbers and task["base_sha"] != config["issue_target"]:
         task.setdefault("revalidations", []).append({
             "from_base_sha": task["base_sha"], "target": config["issue_target"], "issues": numbers,
@@ -518,6 +547,7 @@ def run_repairs(root, config, run_dir, deadline, invoke, *, revalidate_issue=Non
         path = root / "issue-state.json"
         return json.loads(path.read_text())["issues"] if path.exists() else {}
 
+    reconcile_closed_sources(root, config)
     queue = sorted((row for row in records() if row[1]["status"] not in TERMINAL), key=_attempt_order)
     results, processed, attempted, local_verified, deferred = [], [], [], [], {}
     for path, original in queue:
@@ -556,7 +586,7 @@ def run_repairs(root, config, run_dir, deadline, invoke, *, revalidate_issue=Non
             deferred[item["id"]] = item["reason"]
 
     all_tasks, latest_issues = records(), issue_state()
-    inventory = {name: [] for name in ("pending", "blocked", "needs_triage", "ready", "merged")}
+    inventory = {name: [] for name in ("pending", "blocked", "needs_triage", "ready", "merged", "source_closed")}
     manual = []
     for path, task in all_tasks:
         status = task["status"]
@@ -566,7 +596,8 @@ def run_repairs(root, config, run_dir, deadline, invoke, *, revalidate_issue=Non
             reason = reason or _admission_reason(task, all_tasks, config, latest_issues)
             if reason:
                 deferred[task["id"]] = reason
-        if (status in TERMINAL and not (status == "merged" and task.get("delivery", {}).get("complete"))) or reason:
+        if (status in TERMINAL and status != "source_closed"
+                and not (status == "merged" and task.get("delivery", {}).get("complete"))) or reason:
             report = task.get("last_result") or task.get("independent_review") or {}
             reason = reason or task.get("last_error") or report.get("report_markdown") or "recorded task requires human review"
             manual.append(_manual_todo(path, task, reason))
@@ -846,7 +877,7 @@ def saved_delivery_results(root, *, merge_approvals, exclude=()):
     for record in sorted((root / "repairs").glob("*/task.json")):
         task = json.loads(record.read_text())
         delivery = task.get("delivery", {})
-        if task["id"] in exclude or not delivery or delivery.get("complete"):
+        if task["id"] in exclude or task["status"] == "source_closed" or not delivery or delivery.get("complete"):
             continue
         previous = delivery.get("last_result", {})
         item = {"id": task["id"], "status": previous.get("status", "pending"),
@@ -868,6 +899,7 @@ def deliver_repairs(root, config, run_dir, deadline, *, authorized=False, merge_
     output = {"results": [], "processed": [], "prs": [], "merged": [], "closed": [], "manual_todo": []}
     if not authorized:
         return output
+    reconcile_closed_sources(root, config)
     for record in sorted((root / "repairs").glob("*/task.json")):
         task = json.loads(record.read_text())
         if (task["id"] in exclude or task["status"] not in {"awaiting_delivery_authorization", "merged"}
