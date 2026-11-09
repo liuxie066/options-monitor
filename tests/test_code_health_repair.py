@@ -289,6 +289,30 @@ def stale_issue_task(tmp_path):
     return root, config, run, record
 
 
+@pytest.mark.parametrize("active_current", [True, False])
+def test_closed_source_target_does_not_override_active_source_target(stale_issue_task, monkeypatch, active_current):
+    root, config, run, record = stale_issue_task
+    task = json.loads(record.read_text())
+    task["sources"].append({"kind": "issue", "number": 2, "verification_sha": config["issue_target"]})
+    repair.save(record, task)
+    state = json.loads((root / "issue-state.json").read_text())
+    state["issues"]["2"] = {"outcome": "confirmed", "repair_task": task["id"], "input_digest": "active",
+                             "target": config["issue_target"] if active_current else task["base_sha"]}
+    repair.save(root / "issue-state.json", state)
+    config["issue_inputs"] = {"1": {"state": "closed"},
+                              "2": {"state": "open", "input_digest": "active", "assigned": False}}
+    checked = []
+    def stop_at_dependency_check(config, root, target):
+        checked.append(target)
+        raise ValueError("dependency verification reached")
+    monkeypatch.setattr(repair, "dependency_inputs_match", stop_at_dependency_check)
+    result = repair.repair_one(root, config, run, time.monotonic() + 120, unexpected_repair)
+    assert checked == ([config["issue_target"]] if active_current else [])
+    assert result["status"] == ("blocked" if active_current else "deferred")
+    if active_current:
+        assert json.loads(record.read_text())["revalidations"][-1]["issues"] == [2]
+
+
 def existing_issue_worktree(root, config, record, *, elsewhere=False, dirty=True):
     task = json.loads(record.read_text())
     tree = root / "preserved-work" if elsewhere else record.parent / "worktree"
@@ -835,7 +859,7 @@ def test_run_repairs_empty_inventory_does_not_create_tasks(tmp_path):
     result = repair.run_repairs(tmp_path, {}, tmp_path, time.monotonic() + 3000, unexpected_repair)
     assert result["status"] == "no_pending_repairs" and result["entered"]
     assert result["results"] == result["attempted"] == result["local_verified"] == result["manual_todo"] == []
-    assert result["inventory"] == {"pending": [], "blocked": [], "needs_triage": [], "ready": [], "merged": []}
+    assert result["inventory"] == {"pending": [], "blocked": [], "needs_triage": [], "ready": [], "merged": [], "source_closed": []}
     assert list(tmp_path.iterdir()) == []
 
 
@@ -961,6 +985,18 @@ def repair_delivery(tmp_path, monkeypatch):
         assert forbidden == []
         return result
     return root, config, run_dir, record, tree, task, state, calls, deliver
+
+
+def test_all_closed_sources_stop_publication_without_touching_the_worktree(repair_delivery):
+    root, config, _, record, tree, task, _, calls, deliver = repair_delivery
+    head = git(tree, "rev-parse", "HEAD")
+    config.update({"issue_intake_ready": True, "issue_inputs": {"7": {"state": "closed"}}})
+    result = deliver()
+    assert result["processed"] == result["prs"] == result["merged"] == result["closed"] == []
+    assert calls == [] and git(tree, "rev-parse", "HEAD") == head
+    saved = json.loads(record.read_text())
+    assert saved["status"] == "source_closed" and saved["finding"] == task["finding"]
+    assert repair.saved_delivery_results(root, merge_approvals={}) == []
 
 
 def test_remote_repair_delivery_defaults_to_no_commands_or_state_writes(repair_delivery):
