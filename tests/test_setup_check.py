@@ -194,6 +194,138 @@ def test_setup_check_reports_earnings_calendar_sdk_capability(monkeypatch, tmp_p
     assert "10.9.6908" in capability["hint"]
 
 
+@pytest.mark.parametrize("repo_state,runtime_state", [
+    pytest.param("valid", "valid", id="both-valid-different-contexts"),
+    pytest.param("invalid", "valid", id="repo-invalid-runtime-valid"),
+    pytest.param("valid", "invalid", id="repo-valid-runtime-invalid"),
+    pytest.param("missing", "valid", id="repo-missing-runtime-valid"),
+    pytest.param("missing", "invalid", id="repo-missing-runtime-invalid"),
+    pytest.param("disabled", "valid", id="repo-disabled-runtime-enabled"),
+    pytest.param("valid", "missing", id="repo-valid-runtime-missing"),
+])
+def test_setup_cli_bot_config_matches_default_bot_and_feishu(
+    monkeypatch, tmp_path: Path, capsys, repo_state, runtime_state,
+) -> None:
+    import socket
+    import sqlite3
+
+    from src.application.agent_tool_contracts import AgentToolError
+    from src.application.bot.control import config_loader
+    from src.application.inbound.feishu import _bot_settings
+    import src.interfaces.cli.main as cli
+
+    root = _prepare_python_setup_root(tmp_path).resolve()
+    runtime = (tmp_path / "runtime").resolve()
+    repo_config = root / "config.bot.json"
+    runtime_config = runtime / "resolved/config.bot.json"
+    document = json.loads(runtime_config.read_text())
+    document["bot"]["llm"]["context_window_tokens"] = 48_000
+    document["bot"]["llm"]["model"] = "repo-local-test"
+    if repo_state == "invalid":
+        repo_config.write_text("{broken", encoding="utf-8")
+    elif repo_state != "missing":
+        document["bot"]["enabled"] = repo_state != "disabled"
+        repo_config.write_text(json.dumps(document), encoding="utf-8")
+    if runtime_state == "invalid":
+        runtime_config.write_text("{broken", encoding="utf-8")
+    elif runtime_state == "missing":
+        runtime_config.unlink()
+    (root / "output_shared/state").mkdir(parents=True)
+    monkeypatch.delenv("OM_ENV_FILE", raising=False)
+    monkeypatch.delenv("OM_INBOUND_AUDIT_DB", raising=False)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
+    monkeypatch.setattr(cli, "repo_base", lambda: root)
+    real_repo_root = config_loader._repo_root
+    monkeypatch.setattr(config_loader, "_repo_root", lambda raw: real_repo_root(root if raw is None else raw))
+    _stub_toolchain(monkeypatch)
+    expected_path = runtime_config if repo_state == "missing" else repo_config
+    selected_state = runtime_state if repo_state == "missing" else repo_state
+    selected_invalid = selected_state == "invalid"
+    selected_disabled = selected_state == "disabled"
+    selected_context = 24_000 if repo_state == "missing" else 48_000
+    forbidden_calls, turn_calls = [], []
+
+    class TurnCaptured(BaseException):
+        pass
+
+    def capture_turn(request, *, settings):
+        turn_calls.append((request, settings))
+        raise TurnCaptured
+
+    def forbidden_effect(*args, **kwargs):
+        forbidden_calls.append((args, kwargs))
+        raise AssertionError("configuration diagnostics must remain offline and read-only")
+
+    monkeypatch.setattr(cli, "handle_bot_turn", capture_turn)
+    monkeypatch.setattr(socket.socket, "connect", forbidden_effect)
+    monkeypatch.setattr(sqlite3, "connect", forbidden_effect)
+    before = {p.relative_to(tmp_path): p.read_bytes() if p.is_file() else None for p in tmp_path.rglob("*")}
+    cli.main(["setup", "check", "--market", "us", "--no-local-env-file"])
+    response = json.loads(capsys.readouterr().out)
+    assert response["tool_name"] == "setup.check"
+    assert config_loader.default_bot_config_path() == expected_path
+    bot_argv = ["bot", "handle", "--text", "/help", "--sender", "fixture", "--config-key", "us"]
+    if selected_invalid:
+        assert cli.main(bot_argv) == 2
+        assert json.loads(capsys.readouterr().out)["error"]["code"] == "CONFIG_ERROR"
+        assert turn_calls == []
+        with pytest.raises(AgentToolError) as caught:
+            _bot_settings(config_key="us", config_path=None)
+        assert caught.value.code == "CONFIG_ERROR"
+    else:
+        with pytest.raises(TurnCaptured):
+            cli.main(bot_argv)
+        assert len(turn_calls) == 1
+        request, actual_settings = turn_calls[0]
+        assert request.bot_config_path is None and request.text == "/help"
+        assert request.sender_id == "fixture" and request.config_key == "us"
+        feishu_settings = _bot_settings(config_key="us", config_path=None)
+        assert actual_settings.enabled is feishu_settings.enabled is (not selected_disabled)
+        assert actual_settings.llm.model == feishu_settings.llm.model == (
+            "local-test" if repo_state == "missing" else "repo-local-test"
+        )
+        loaded_path, loaded_config = config_loader.load_bot_config()
+        assert loaded_path == expected_path
+        assert loaded_config["bot"]["llm"]["context_window_tokens"] == selected_context
+    assert forbidden_calls == []
+    assert {p.relative_to(tmp_path): p.read_bytes() if p.is_file() else None for p in tmp_path.rglob("*")} == before
+    checks = {item["name"]: item for item in response["data"]["checks"]}
+    model = checks["bot.model_context"]
+    assert model["value"]["config_path"] == str(expected_path)
+    assert model["status"] == ("error" if selected_invalid else "info" if selected_disabled else "ok")
+    assert model["value"]["context_window_tokens"] == (None if selected_invalid or selected_disabled else selected_context)
+    assert response["data"]["summary"]["bot_ready"] is (not selected_invalid and not selected_disabled)
+
+
+def test_setup_bot_config_fallback_preserves_effective_runtime_root(monkeypatch, tmp_path: Path) -> None:
+    root = _prepare_python_setup_root(tmp_path).resolve()
+    ambient = tmp_path / "runtime"
+    selected = tmp_path / "file-selected-runtime"
+    selected_config = selected / "resolved/config.bot.json"
+    selected_config.parent.mkdir(parents=True)
+    document = json.loads((ambient / "resolved/config.bot.json").read_text())
+    document["bot"]["llm"]["context_window_tokens"] = 48_000
+    selected_config.write_text(json.dumps(document), encoding="utf-8")
+    (root / "output_shared/state").mkdir(parents=True)
+    env_file = tmp_path / "runtime.env"
+    env_file.write_text(f"OM_RUNTIME_ROOT={selected}\n", encoding="utf-8")
+    monkeypatch.delenv("OM_ENV_FILE", raising=False)
+    monkeypatch.delenv("OM_INBOUND_AUDIT_DB", raising=False)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(ambient))
+    _stub_toolchain(monkeypatch)
+    before = {p.relative_to(tmp_path): p.read_bytes() if p.is_file() else None for p in tmp_path.rglob("*")}
+    before_env = dict(os.environ)
+
+    out = run_setup_check(repo_root=root, markets=["us"], env_file=env_file, include_local_env_file=False)
+    model = {item["name"]: item for item in out["checks"]}["bot.model_context"]
+
+    assert model["value"]["config_path"] == str(selected_config)
+    assert model["value"]["context_window_tokens"] == 48_000
+    assert model["status"] == "ok" and out["summary"]["bot_ready"] is True
+    assert dict(os.environ) == before_env
+    assert {p.relative_to(tmp_path): p.read_bytes() if p.is_file() else None for p in tmp_path.rglob("*")} == before
+
+
 @pytest.mark.parametrize("kind,repo_parent,runtime_parent", [
     pytest.param("default", True, True, id="default-both-parents"),
     pytest.param("default", False, True, id="default-runtime-parent-only"),
@@ -689,7 +821,7 @@ def test_setup_facade_declared_bundle_has_no_source_fallback(monkeypatch, tmp_pa
 
 
 @pytest.mark.parametrize("repo_default", [False, True])
-def test_setup_check_retains_runtime_only_instance_ownership(monkeypatch, tmp_path, repo_default):
+def test_setup_check_follows_bot_owner_for_each_runtime_source(monkeypatch, tmp_path, repo_default):
     root = _prepare_python_setup_root(tmp_path)
     runtime = tmp_path / "runtime"
     (root / "config.bot.json").write_text('{"bot":{"enabled":false}}')
@@ -700,8 +832,8 @@ def test_setup_check_retains_runtime_only_instance_ownership(monkeypatch, tmp_pa
         )())
     out = run_setup_check(repo_root=root, markets=["us"], include_local_env_file=False)
     check = next(c for c in out["checks"] if c["name"] == "bot.model_context")
-    assert check["status"] == ("info" if repo_default else "ok")
-    assert check["value"]["config_path"] == str(root / "config.bot.json" if repo_default else runtime / "resolved/config.bot.json")
+    assert check["status"] == "info"
+    assert check["value"]["config_path"] == str(root / "config.bot.json")
 
 
 def test_setup_check_source_venv_and_override_diagnostics_remain_compatible(monkeypatch, tmp_path):
