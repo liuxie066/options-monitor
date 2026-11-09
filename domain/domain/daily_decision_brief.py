@@ -787,6 +787,13 @@ def _normalize_daily_brief_funds(value: Any) -> dict[str, Any]:
         "available": available,
         "reason": str(funds.get("reason") or ("ok" if available else "unavailable")).strip(),
     }
+    if "cash_secured_unavailable_by_symbol" in funds:
+        out["cash_secured_unavailable_by_symbol"] = {
+            str(symbol): str(reason or "").strip()
+            for symbol, reason in _mapping(
+                funds["cash_secured_unavailable_by_symbol"], field="funds.cash_secured_unavailable_by_symbol",
+            ).items()
+        }
     for key in ("cash_total_cny", "cash_secured_total_cny", "option_opening_available_cny"):
         if key not in funds:
             continue

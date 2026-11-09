@@ -3000,6 +3000,18 @@ def _fund_views(brief: Mapping[str, Any]) -> list[str]:
             for currency, amount in amounts.items()
             if currency in {"CNY", "HKD", "USD"}
         )
+    unavailable = funds.get("cash_secured_unavailable_by_symbol")
+    if opening_cny is None and isinstance(unavailable, Mapping):
+        for symbol, reason in sorted(unavailable.items()):
+            reason_code = _lower(reason)
+            detail = {
+                "option_close_settlement_pending": "期权平仓待结算确认",
+                "short_put_cash_secured_basis_missing": "期权担保计算依据缺失",
+                "short_put_cash_secured_currency_missing": "期权担保币种缺失",
+            }.get(reason_code, "期权担保依据待核实")
+            if reason_code.startswith("short_put_cash_secured_currency_unsupported:"):
+                detail = "期权担保币种暂不支持"
+            out.append(f"可开仓资金待核实：{symbol} {detail}")
     return out
 
 

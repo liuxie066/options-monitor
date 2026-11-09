@@ -1543,6 +1543,32 @@ def test_funds_fall_back_to_per_currency_lines_when_cny_unavailable() -> None:
     assert "可用于期权开仓（折CNY）｜暂不可用" in message
 
 
+@pytest.mark.parametrize(("reason", "detail"), [
+    ("option_close_settlement_pending", "期权平仓待结算确认"),
+    ("short_put_cash_secured_basis_missing", "期权担保计算依据缺失"),
+    ("short_put_cash_secured_currency_missing", "期权担保币种缺失"),
+    ("short_put_cash_secured_currency_unsupported:JPY", "期权担保币种暂不支持"),
+    ("future_reason", "期权担保依据待核实"),
+])
+def test_funds_render_unavailable_symbol_reasons(reason: str, detail: str) -> None:
+    brief = deepcopy(_brief())
+    brief["funds"] = {
+        "cash_total_by_currency": {"USD": 50000}, "cash_total_cny": 350000,
+        "option_opening_available_by_currency": {}, "option_opening_available_cny": None,
+        "option_opening_reliable": False, "available": False,
+        "reason": "option_cash_secured_unavailable",
+        "cash_secured_unavailable_by_symbol": {"PDD": reason},
+    }
+    brief["data_gaps"] = []
+
+    message = render_fixed_report(brief, context=_scheduled_context())
+
+    assert "可用于期权开仓（折CNY）｜暂不可用" in message
+    assert f"PDD {detail}" in message
+    assert reason not in message
+    assert "现金总额（折CNY）｜¥350,000.00" in message
+
+
 def test_funds_totals_hide_redundant_native_currency_lines() -> None:
     brief = deepcopy(_brief())
     brief["funds"] = {
