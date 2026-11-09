@@ -11,6 +11,7 @@ from src.application.channels.wechat_clawbot.message import response_code, respo
 from src.application.channels.wechat_clawbot.state import DEFAULT_WECHAT_CLAWBOT_LABEL, resolve_wechat_clawbot_state_dir
 from src.application.channels.wechat_clawbot.state_store import WechatClawbotStateStore
 from src.infrastructure.io_utils import utc_now
+from src.infrastructure.private_storage import exclusive_private_file_lock
 
 
 ClientFactory = Callable[..., WechatClawbotClient]
@@ -111,15 +112,17 @@ def _save_outbound_receipt(*, store: WechatClawbotStateStore, idempotency_key: s
     if not key:
         return
     try:
-        payload = store.load_outbound_receipts(default={"receipts": {}})
-        receipts = payload.get("receipts") if isinstance(payload.get("receipts"), dict) else {}
-        receipts = dict(receipts) if isinstance(receipts, dict) else {}
-        receipts[key] = {
-            **dict(receipt),
-            "stored_at_utc": utc_now(),
-        }
-        payload["receipts"] = receipts
-        store.save_outbound_receipts(payload)
+        # A stable lock covers the merge as well as the atomic file replacement.
+        with exclusive_private_file_lock(store.state_dir / "outbound_receipts.lock"):
+            payload = store.load_outbound_receipts(default={"receipts": {}})
+            receipts = payload.get("receipts") if isinstance(payload.get("receipts"), dict) else {}
+            receipts = dict(receipts) if isinstance(receipts, dict) else {}
+            receipts[key] = {
+                **dict(receipt),
+                "stored_at_utc": utc_now(),
+            }
+            payload["receipts"] = receipts
+            store.save_outbound_receipts(payload)
     except Exception as exc:
         receipt["receipt_store_warning_code"] = type(exc).__name__
 
