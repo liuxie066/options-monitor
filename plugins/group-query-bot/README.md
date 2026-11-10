@@ -29,7 +29,7 @@
 }
 ```
 
-默认返回 `live_not_run`，只读取指定配置并验证，零凭据读取、零网络、零数据目录写入。配置不接受 App Secret 明文、model/query_api 段、账户或其他 bot 凭据引用；data_dir 必须为管理员显式指定的绝对路径。不读取 OM config.yaml、生产配置或 home 下的默认配置。
+默认返回 `live_not_run`，只读取指定配置并验证，零凭据读取、零网络、零数据目录写入。配置不接受 App Secret 明文、model/query_api 段、账户或其他 bot 凭据引用；data_dir 必须为管理员显式指定的绝对路径。不读取 OM config.yaml、生产配置或 home 下的默认配置。`allowed_chat_ids` 可写一个或多个具体群 ID，也可只写 `["*"]` 表示接受任意群；通配必须是唯一项，不能与具体群混用，群范围改由飞书侧「谁可邀请 bot 入群」控制。
 
 ## 经授权的真实预检
 
@@ -41,7 +41,7 @@
 ./om group-query-bot preflight --config /absolute/path/preflight.json --confirm
 ```
 
-程序通过应用 token 调用固定机器人信息接口取得 bot open_id，再启动既有飞书长连接。仅接收授权群内 @当前 bot 的文本事件，回复原消息固定文本“群查询bot 接入测试已收到”。不调用模型、行情、账户或查询 API。SDK 回调只进入容量 16 的队列；单 worker 处理，满载拒绝并记录计数。
+程序通过应用 token 调用固定机器人信息接口取得 bot open_id，再启动既有飞书长连接。仅接收配置群范围内（具体白名单或唯一通配 `["*"]`）@当前 bot 的文本事件，回复原消息固定文本“群查询bot 接入测试已收到”。不调用模型、行情、账户或查询 API。SDK 回调只进入容量 16 的队列；单 worker 处理，满载拒绝并记录计数。
 
 Ctrl+C 停止接收新工作；正在进行的不可取消 I/O 可能继续，返回 stopped_with_pending_io 时不能宣称请求已经终止。已占用但未完成的投递记录保留原状态，重复事件不会自动重发。
 
@@ -56,7 +56,7 @@ Ctrl+C 停止接收新工作；正在进行的不可取消 I/O 可能继续，�
 
 `serve` 在 `data_dir/bot.lock` 持有实例锁，`api-serve` 在 `data_dir/api.lock` 持有实例锁；同一实例重复启动被拒绝。配置不完整、凭据缺失或地址非回环时进程不启动，也不回退到环境变量或 OM 账户配置。
 
-bot 配置字段固定为 `instance_id`、`data_dir`、`feishu`（`app_id`、`app_secret_ref`、`allowed_chat_ids`）、`model`（`provider`、`model`、`base_url`、`api_key_ref`、`context_window_tokens`、`max_output_tokens`、`timeout_seconds`）和 `query_api`（`base_url`、`token_ref`）；`base_url` 只能是 `http://127.0.0.1:<port>`。三个引用必须是 `group_query_bot.feishu.app_secret`、`group_query_bot.llm.api_key`、`group_query_bot.query_api.token`。可选 `limits` 默认每用户 3/min、每群 10/min、用户并发 1、bot 并发 2、回合 90 秒、模型 4 次、API 3 次、输出 2000 tokens、预留 32000 tokens、历史 10 轮/4000 tokens、API 超时 30 秒。模型只能使用 `query_quotes`、`query_candidates`、`evaluate_close`、`evaluate_roll_down`、`evaluate_roll_up` 五个固定工具，群/发送者/线程/截止时间/输入身份由宿主填写；关键数值由结构化结果渲染，模型只解释或补参。
+bot 配置字段固定为 `instance_id`、`data_dir`、`feishu`（`app_id`、`app_secret_ref`、`allowed_chat_ids`）、`model`（`provider`、`model`、`base_url`、`api_key_ref`、`context_window_tokens`、`max_output_tokens`、`timeout_seconds`）和 `query_api`（`base_url`、`token_ref`）；`base_url` 只能是 `http://127.0.0.1:<port>`。三个引用必须是 `group_query_bot.feishu.app_secret`、`group_query_bot.llm.api_key`、`group_query_bot.query_api.token`。`allowed_chat_ids` 同样支持唯一通配 `["*"]`。可选 `limits` 默认每用户 3/min、每群 10/min、用户并发 1、bot 并发 2、回合 90 秒、模型 4 次、API 3 次、输出 2000 tokens、预留 32000 tokens、历史 10 轮/4000 tokens、API 超时 30 秒。模型只能使用 `query_quotes`、`query_candidates`、`evaluate_close`、`evaluate_roll_down`、`evaluate_roll_up` 五个固定工具，群/发送者/线程/截止时间/输入身份由宿主填写；关键数值由结构化结果渲染，模型只解释或补参。
 
 API 配置字段固定为 `instance_id`、`data_dir`、`api`（`bind_host` 必须为 `127.0.0.1`、`bind_port`、`token_ref`、`app_id`）、`principal`（`principal_id`、`capabilities`、`markets`、`account_scope` 必须为 `[]`）、`quote`、`max_budget_seconds`、`public_policy`；可选 `principal_requests_per_minute` 默认 30。API 只接受固定五个回环路由，按服务端能力、市场和账户范围授权，不接受账户、持仓、收益或报告参数。
 

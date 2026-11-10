@@ -12,7 +12,7 @@ from om_group_query_bot.agent import (
     BotService,
     GroupQueryAgent,
 )
-from om_group_query_bot.config import BotSettings
+from om_group_query_bot.config import BotSettings, load_bot_settings
 from om_group_query_bot.feishu import EventRejected, VerifiedGroupEvent, message_text
 from om_group_query_bot.store import (
     CONVERSATION_DB_NAME,
@@ -51,6 +51,35 @@ def _settings(tmp_path, **overrides):
     )
     values.update(overrides)
     return BotSettings(**values)
+
+
+def _bot_config_file(tmp_path, chats):
+    path = tmp_path / "bot.json"
+    path.write_text(json.dumps({
+        "instance_id": "gq",
+        "data_dir": str(tmp_path / "data"),
+        "feishu": {"app_id": "cli_group",
+                   "app_secret_ref": "group_query_bot.feishu.app_secret",
+                   "allowed_chat_ids": chats},
+        "model": {"provider": "deepseek", "model": "deepseek-chat",
+                  "base_url": "https://api.deepseek.com",
+                  "api_key_ref": "group_query_bot.llm.api_key",
+                  "context_window_tokens": 65536,
+                  "max_output_tokens": 1000,
+                  "timeout_seconds": 30},
+        "query_api": {"base_url": "http://127.0.0.1:8765",
+                      "token_ref": "group_query_bot.query_api.token"},
+    }))
+    return path
+
+
+def test_bot_config_accepts_sole_wildcard_chat_scope(tmp_path):
+    assert load_bot_settings(_bot_config_file(tmp_path, ["*"])).allowed_chat_ids == ("*",)
+
+
+def test_bot_config_rejects_wildcard_mixed_with_concrete_chats(tmp_path):
+    with pytest.raises(ValueError, match="wildcard"):
+        load_bot_settings(_bot_config_file(tmp_path, ["*", "oc_group"]))
 
 
 def _event(sender="ou_alice", chat="oc_group", message_id="om_1", thread=None):

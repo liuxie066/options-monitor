@@ -55,6 +55,18 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict:
     return result
 
 
+def _chat_scope(value: object, *, owner: str) -> tuple[str, ...]:
+    """A concrete chat allowlist, or the sole wildcard entry ``"*"``."""
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{owner} requires at least one allowed chat")
+    chat_ids = tuple(sorted({_text(chat) for chat in value}))
+    if len(chat_ids) != len(value):
+        raise ValueError(f"{owner} allowed chats must be unique")
+    if "*" in chat_ids and chat_ids != ("*",):
+        raise ValueError(f"{owner} wildcard chat scope must be the only entry")
+    return chat_ids
+
+
 def load_preflight_settings(path: str | Path) -> PreflightSettings:
     """Validate only: no secret lookup, network, default config or directory creation."""
     try:
@@ -74,11 +86,7 @@ def load_preflight_settings(path: str | Path) -> PreflightSettings:
     if secret_ref != GROUP_QUERY_BOT_FEISHU_APP_SECRET:
         raise ValueError("preflight requires its dedicated Feishu credential reference")
     chats = feishu["allowed_chat_ids"]
-    if not isinstance(chats, list) or not chats:
-        raise ValueError("preflight requires at least one allowed chat")
-    chat_ids = tuple(sorted({_text(chat) for chat in chats}))
-    if len(chat_ids) != len(chats):
-        raise ValueError("preflight allowed chats must be unique")
+    chat_ids = _chat_scope(chats, owner="preflight")
     return PreflightSettings(instance, data_dir, app_id, secret_ref, chat_ids)
 
 
@@ -317,11 +325,7 @@ def load_bot_settings(path: str | Path) -> BotSettings:
     if app_secret_ref != GROUP_QUERY_BOT_FEISHU_APP_SECRET:
         raise ValueError("bot requires its dedicated Feishu credential reference")
     chats = feishu["allowed_chat_ids"]
-    if not isinstance(chats, list) or not chats:
-        raise ValueError("bot requires at least one allowed chat")
-    chat_ids = tuple(sorted({_text(chat) for chat in chats}))
-    if len(chat_ids) != len(chats):
-        raise ValueError("bot allowed chats must be unique")
+    chat_ids = _chat_scope(chats, owner="bot")
     model = _object(raw["model"], {"provider", "model", "base_url", "api_key_ref",
                                    "context_window_tokens", "max_output_tokens",
                                    "timeout_seconds"})
