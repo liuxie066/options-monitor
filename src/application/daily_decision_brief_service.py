@@ -1652,18 +1652,27 @@ def _build_funds(
     ledger_reliable = ledger is None or (
         isinstance(ledger, Mapping) and not bool(ledger.get("fail_closed"))
     )
-    secured_reliable = (
-        secured is not None
-        and option_as_of is not None
-        and unavailable_reliable
-        and ledger_reliable
-    )
+    secured_source_reliable = secured is not None and option_as_of is not None and ledger_reliable
+    secured_reliable = secured_source_reliable and unavailable_reliable
+    unavailable_by_ccy = option_positions_context.get("cash_secured_unavailable_by_ccy")
+    blocked_currencies: set[str] = set()
+    scoped_unavailable = False
+    if isinstance(unavailable, Mapping) and isinstance(unavailable_by_ccy, Mapping):
+        mapped_symbols: set[str] = set()
+        for currency, symbols in unavailable_by_ccy.items():
+            if currency not in {"CNY", "HKD", "USD"} or not isinstance(symbols, list):
+                break
+            blocked_currencies.add(currency)
+            mapped_symbols.update(str(symbol) for symbol in symbols)
+        else:
+            scoped_unavailable = set(unavailable) <= mapped_symbols
     reason = "ok"
     opening: dict[str, float] = {}
-    if cash_total_reliable and secured_reliable:
+    if cash_total_reliable and secured_source_reliable and (unavailable_reliable or scoped_unavailable):
         opening = {
             currency: float((cash_total or {}).get(currency, 0.0)) - float((secured or {}).get(currency, 0.0))
             for currency in sorted(set(cash_total or {}) | set(secured or {}))
+            if currency not in blocked_currencies
         }
     if not secured_reliable:
         if reason == "ok":
@@ -1747,6 +1756,8 @@ def _build_funds(
             "cash_snapshot": portfolio_context.get("cash_snapshot"),
             **({"cash_secured_unavailable_by_symbol": dict(unavailable)}
                if isinstance(unavailable, Mapping) and unavailable else {}),
+            "cash_secured_unavailable_by_ccy": dict(unavailable_by_ccy) if isinstance(unavailable_by_ccy, Mapping) else {},
+            "cash_secured_pending_by_symbol_by_ccy": option_positions_context.get("cash_secured_pending_by_symbol_by_ccy") or {},
             "option_opening_available_by_currency": opening,
             "cash_total_cny": cash_total_cny,
             "cash_secured_total_cny": secured_total_cny,
@@ -1761,7 +1772,7 @@ def _build_funds(
                 for pair, row in pairs.items() if isinstance(row, Mapping)
             },
             "available": bool(
-                cash_total_reliable and secured_reliable and (opening or opening_cny is not None)
+                cash_total_reliable and (opening or opening_cny is not None)
             ),
             "reason": reason,
         },

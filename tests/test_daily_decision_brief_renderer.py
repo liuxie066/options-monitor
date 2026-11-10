@@ -1071,7 +1071,7 @@ def test_renderer_honors_section_limits() -> None:
     assert "持仓未展开" not in message
     assert "C0｜CSP" in message and "C6｜CSP" in message
     assert "C7｜CSP" not in message
-    assert "补充｜另有 13 个策略候选未展开" in message
+    assert "展示范围｜CSP 本轮 20 个候选，入选 7 个，另有 13 个未展开" in message
 
     # Retired mixed limits cannot consume independent section or opening quotas.
     default_view = build_daily_brief_user_view(brief, limits={"max_actions_per_priority": 1})
@@ -1085,7 +1085,7 @@ def test_renderer_honors_section_limits() -> None:
     )
     assert "C6｜CSP" in message
     assert "C7｜CSP" not in message
-    assert "补充｜另有 13 个策略候选未展开" in message
+    assert "展示范围｜CSP 本轮 20 个候选，入选 7 个，另有 13 个未展开" in message
     assert "C6 08-21 $106 Put｜按当前现金最多 1 手" in message
     assert "C7 08-21 $107 Put｜按当前现金最多 1 手" not in message
 
@@ -1155,9 +1155,146 @@ def test_daily_brief_shares_42_item_budget_with_positions_first() -> None:
         *[symbol for i in range(5) for symbol in (f"C{i}", f"D{i}")],
         *[f"C{i}" for i in range(5, 10)],
     ]
-    assert view["candidate_omissions"] == ["CSP 另有 10 个策略候选未展开"]
-    assert "补充｜CSP 另有 10 个策略候选未展开" in blocks
+    assert view["candidate_omissions"] == ["CSP 本轮 20 个候选，入选 10 个，另有 10 个未展开"]
+    assert "展示范围｜CSP 本轮 20 个候选，入选 10 个，另有 10 个未展开" in blocks
     assert "汇总｜共 25 条，需处理 25 条。" in "\n".join(blocks)
+
+
+@pytest.mark.parametrize(
+    ("render", "csp_heading", "wheel_heading"),
+    [
+        (render_fixed_report, "## CSP", "## Wheel"),
+        (render_fixed_report_card_markdown, "## CSP", "## Wheel"),
+        (render_fixed_report_text, "【CSP】", "【Wheel】"),
+    ],
+)
+def test_candidate_omission_note_sits_after_its_family_cards(
+    render, csp_heading: str, wheel_heading: str,
+) -> None:
+    brief = _brief()
+    brief["positions"] = []
+    brief["candidates"] = {
+        "sell_put": [
+            _candidate(
+                rank=i + 1,
+                symbol=f"C{i}",
+                option_type="put",
+                expiration="2026-08-21",
+                strike=100 + i,
+                capacity=1,
+            )
+            for i in range(14)
+        ],
+        "covered_call": [],
+        "combo_yield": [],
+        "wheel": [],
+    }
+    brief["wheel_batches"] = [{
+        "wheel_branch_id": "wheel-0",
+        "symbol": "W0",
+        "direction": "call",
+        "shares_remaining": 100,
+        "recommended_contracts": 0,
+        "status": "ready",
+        "reason_code": "no_candidate",
+        "coverage": {
+            "status": "full",
+            "target_shares": 100,
+            "committed_shares": 100,
+            "reserved_shares": 0,
+            "available_shares": 0,
+        },
+    }]
+
+    message = render(
+        brief,
+        context=_scheduled_context(),
+        limits={"max_candidates_per_strategy": 3},
+    )
+
+    note = "展示范围｜CSP 本轮 14 个候选，入选 3 个，另有 11 个未展开"
+    assert message.count(note) == 1
+    assert "开仓分区上限" not in message
+    assert (
+        message.index(csp_heading)
+        < message.index("C2｜CSP")
+        < message.index(note)
+        < message.index(wheel_heading)
+    )
+
+
+@pytest.mark.parametrize(
+    ("render", "wheel_heading"),
+    [
+        (render_fixed_report, "## Wheel"),
+        (render_fixed_report_card_markdown, "## Wheel"),
+        (render_fixed_report_text, "【Wheel】"),
+    ],
+)
+def test_wheel_omission_note_follows_wheel_section(render, wheel_heading: str) -> None:
+    brief = _brief()
+    brief["positions"] = [
+        {
+            "symbol": f"P{i}",
+            "position_lot_id": f"close-{i}",
+            "strategy_family": "sell_put",
+            "expiration": "2026-08-21",
+            "strike": 100,
+            "option_type": "put",
+            "quote_status": "priced",
+            "evaluation_status": "evaluable",
+            "recommendation_state": "close",
+            "notification_eligible": True,
+            "metrics": {
+                "remaining_max_annualized_return": i / 1000,
+                "net_capture_ratio": 0.9,
+                "ask": 0.1,
+                "capital_basis": 10000,
+            },
+        }
+        for i in range(4)
+    ]
+    brief["actions"] = []
+    brief["candidates"] = {}
+    brief["wheel_batches"] = [
+        {
+            "wheel_branch_id": f"wheel-{i}",
+            "symbol": f"W{i}",
+            "direction": "call",
+            "shares_remaining": 100,
+            "recommended_contracts": 1,
+            "status": "ready",
+            "reason_code": "no_candidate",
+            "coverage": {
+                "status": "full",
+                "target_shares": 100,
+                "committed_shares": 100,
+                "reserved_shares": 0,
+                "available_shares": 0,
+            },
+        }
+        for i in range(3)
+    ]
+
+    note = "展示范围｜Wheel 本轮 3 个候选，入选 1 个，另有 2 个未展开"
+    message = render(
+        brief,
+        context=_scheduled_context(),
+        limits={"max_total_items": 5},
+    )
+
+    assert message.count(note) == 1
+    assert message.index(wheel_heading) < message.index(note)
+
+    no_section_note = "展示范围｜Wheel 本轮 3 个候选，入选 0 个，另有 3 个未展开"
+    message = render(
+        brief,
+        context=_scheduled_context(),
+        limits={"max_total_items": 4},
+    )
+
+    assert message.count(no_section_note) == 1
+    assert wheel_heading not in message
 
 
 def test_changed_items_keep_priority_within_section_and_total_limits() -> None:
@@ -1190,10 +1327,11 @@ def test_changed_items_keep_priority_within_section_and_total_limits() -> None:
         symbol for i in range(5) for symbol in (f"C{i}", f"D{i}")
     ]
     assert view["candidate_omissions"] == [
-        "CSP 另有 25 个策略候选未展开", "CC 另有 25 个策略候选未展开",
+        "CSP 本轮 30 个候选，入选 5 个，另有 25 个未展开",
+        "CC 本轮 30 个候选，入选 5 个，另有 25 个未展开",
     ]
-    assert "补充｜CSP 另有 25 个策略候选未展开" in blocks
-    assert "补充｜CC 另有 25 个策略候选未展开" in blocks
+    assert "展示范围｜CSP 本轮 30 个候选，入选 5 个，另有 25 个未展开" in blocks
+    assert "展示范围｜CC 本轮 30 个候选，入选 5 个，另有 25 个未展开" in blocks
     assert "汇总｜共 30 条，需处理 30 条。" in "\n".join(blocks)
     unchanged_view = build_daily_brief_user_view(brief, limits=limits)
     assert view["positions"] == unchanged_view["positions"]
@@ -1226,7 +1364,7 @@ def test_changed_items_precede_unchanged_items_when_both_fit() -> None:
     # Preserve the test name for cross-module callers; changed facts no longer gain priority.
     assert [row["title"].split(" · ")[0] for row in view["positions"]] == ["P0", "P1", "P2", "P3"]
     assert [row["symbol"] for row in view["candidates"]] == ["C0", "C1", "C2"]
-    assert view["candidate_omissions"] == ["CSP 另有 1 个策略候选未展开"]
+    assert view["candidate_omissions"] == ["CSP 本轮 4 个候选，入选 3 个，另有 1 个未展开"]
     unchanged_view = build_daily_brief_user_view(brief, limits={"max_items_per_account": 7})
     assert view["positions"] == unchanged_view["positions"]
     assert view["candidates"] == unchanged_view["candidates"]
@@ -1256,14 +1394,15 @@ def test_combo_selection_respects_budget_consumed_by_positions_and_other_familie
     ]
     assert selected == brief["candidates"]["combo_yield"]
     assert view["candidate_omissions"] == [
-        "CSP 另有 3 个策略候选未展开", "CC 另有 4 个策略候选未展开",
+        "CSP 本轮 12 个候选，入选 9 个，另有 3 个未展开",
+        "CC 本轮 12 个候选，入选 8 个，另有 4 个未展开",
     ]
     if render in (render_fixed_report_card_markdown, render_fixed_report_text):
-        assert "CSP 另有 3 个策略候选未展开" in message
-        assert "CC 另有 4 个策略候选未展开" in message
+        assert "CSP 本轮 12 个候选，入选 9 个，另有 3 个未展开" in message
+        assert "CC 本轮 12 个候选，入选 8 个，另有 4 个未展开" in message
     else:
-        assert re.search(r"## CSP\n.*?补充｜另有 3 个策略候选未展开", message, re.DOTALL)
-        assert re.search(r"## CC\n.*?补充｜另有 4 个策略候选未展开", message, re.DOTALL)
+        assert re.search(r"## CSP\n.*?展示范围｜CSP 本轮 12 个候选，入选 9 个，另有 3 个未展开", message, re.DOTALL)
+        assert re.search(r"## CC\n.*?展示范围｜CC 本轮 12 个候选，入选 8 个，另有 4 个未展开", message, re.DOTALL)
     assert "组合增强 另有" not in message
     assert "COMBO0｜组合增强（策略排序 1）" in message
     assert "COMBO2｜组合增强（策略排序 3）" in message
@@ -1316,7 +1455,7 @@ def test_material_candidates_respect_limit_and_keep_funds_in_sync() -> None:
     assert "C0｜CSP｜08-21 $100 Put（策略排序 1）" in message
     assert "C2｜CSP" not in message
     assert "C3｜CSP｜08-21 $103 Put（策略排序 4）" not in message
-    assert "补充｜另有 3 个策略候选未展开" in message
+    assert "展示范围｜CSP 本轮 4 个候选，入选 1 个，另有 3 个未展开" in message
     assert "C0 08-21 $100 Put｜按当前现金最多 1 手" in message
     assert "C3 08-21 $103 Put｜按当前现金最多 4 手" not in message
     assert "C2 08-21 $102 Put｜按当前现金最多 3 手" not in message
@@ -1482,7 +1621,7 @@ def test_notification_and_query_projections_use_plain_language_and_account_funds
     assert "### 新增策略候选" in alert
     assert "## 持仓" not in alert
     assert "AAPL｜CC" in alert
-    assert "补充｜CSP 另有 1 个策略候选未展开" in alert
+    assert "补充｜CSP 本轮 2 个候选，入选 1 个，另有 1 个未展开" in alert
     assert "MSFT｜CSP" in alert
     assert "NVDA｜CSP" not in alert
     assert "较上一轮" not in alert
@@ -2738,7 +2877,7 @@ def test_alert_blocks_follow_selected_identities_order_and_preserve_ranks_and_om
         "**FUTU｜CSP｜08-21 $100 Put（策略排序 4）**",
         "**PDD｜CSP｜08-21 $100 Put（策略排序 8）**",
     ]
-    assert "CSP 另有 1 个策略候选未展开" in text
+    assert "CSP 本轮 4 个候选，入选 3 个，另有 1 个未展开" in text
     assert "MSFT" not in text
     assert "【持仓】" not in text and "## CC" not in card
     event_blocks = blocks[blocks.index("## 事件") + 1:]

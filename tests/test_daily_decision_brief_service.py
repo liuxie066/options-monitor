@@ -1352,6 +1352,68 @@ def test_assembler_projects_multicurrency_funds_from_run_scoped_context(tmp_path
     assert funds["available"] is True
 
 
+def test_known_pending_collateral_is_deducted_and_explained(tmp_path: Path) -> None:
+    from src.application.daily_decision_brief_renderer import render_fixed_report
+
+    account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
+    path = account_dir / "state/option_positions_context.json"
+    context = json.loads(path.read_text(encoding="utf-8"))
+    context["cash_secured_total_by_ccy"] = {"HKD": 255_000, "USD": 13_000}
+    context["cash_secured_pending_by_symbol_by_ccy"] = {"PDD": {"USD": 10_000}}
+    path.write_text(json.dumps(context), encoding="utf-8")
+
+    brief = _assemble(tmp_path)
+    funds = brief["funds"]
+    message = render_fixed_report(brief)
+
+    assert funds["option_opening_available_by_currency"] == {"HKD": 225_000.0, "USD": 5_000.0}
+    assert funds["option_opening_reliable"] is True
+    assert funds["cash_secured_pending_by_symbol_by_ccy"] == {"PDD": {"USD": 10_000.0}}
+    assert "PDD 归属未定，已保守扣留担保｜$10,000.00（未计入可用资金）" in message
+    assert "可用于期权开仓｜HK$225,000.00" in message
+    assert "可用于期权开仓｜$5,000.00" in message
+
+
+@pytest.mark.parametrize(("unavailable_by_ccy", "expected_opening"), [
+    ({"USD": ["PDD"]}, {"HKD": 225_000.0}),
+    ({"UNKNOWN": ["PDD"]}, {}),
+    ({}, {}),
+    ({"USD": ["OTHER"]}, {}),
+])
+def test_partial_collateral_keeps_unaffected_currency_available(
+    tmp_path: Path, unavailable_by_ccy: dict, expected_opening: dict,
+) -> None:
+    account_dir = _write_labeled_put_candidates(tmp_path, header_only=True)
+    state_dir = account_dir / "state"
+    (state_dir / "portfolio_context.json").write_text(
+        json.dumps(cash_portfolio({"cash_by_currency": {"HKD": 480_000, "USD": 50_000}})),
+        encoding="utf-8",
+    )
+    (state_dir / "option_positions_context.json").write_text(json.dumps({
+        "decision_snapshot_status": "trusted",
+        "as_of_utc": "2026-07-17T13:59:30+00:00",
+        "cash_secured_total_by_ccy": {"HKD": 255_000, "USD": 3_000},
+        "cash_secured_unavailable_by_symbol": {"PDD": "short_put_cash_secured_basis_missing"},
+        "cash_secured_unavailable_by_ccy": unavailable_by_ccy,
+        "filters": {"account": "lx"},
+    }), encoding="utf-8")
+
+    brief = _assemble(tmp_path)
+    funds = brief["funds"]
+    if expected_opening:
+        from src.application.daily_decision_brief_renderer import render_fixed_report
+
+        message = render_fixed_report(brief)
+        assert "可用于期权开仓｜HK$225,000.00" in message
+        assert "可开仓资金待核实｜PDD（USD） 期权担保计算依据缺失" in message
+
+    assert funds["option_opening_available_by_currency"] == expected_opening
+    assert funds["option_opening_available_cny"] is None
+    assert funds["option_opening_reliable"] is False
+    assert funds["available"] is bool(expected_opening)
+    assert funds["cash_secured_unavailable_by_symbol"] == {"PDD": "short_put_cash_secured_basis_missing"}
+
+
 def test_funds_cny_totals_cover_secured_currency_without_cash(tmp_path: Path, monkeypatch) -> None:
     from src.infrastructure import exchange_rates as fx
     from src.application.daily_decision_brief_renderer import render_fixed_report

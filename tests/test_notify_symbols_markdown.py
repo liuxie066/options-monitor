@@ -15,6 +15,48 @@ import pytest
 from tests.notification_format_assertions import assert_mobile_flat_markdown
 
 
+@pytest.mark.parametrize("input_kind", ["missing", "empty", "whitespace", "produced_zero"])
+@pytest.mark.parametrize("existing_output", [False, True])
+def test_notify_symbols_module_preserves_report_when_alerts_unavailable(
+    tmp_path: Path, input_kind: str, existing_output: bool,
+) -> None:
+    from src.application.alert_engine import build_alert_text
+
+    alerts = tmp_path / "symbols_alerts.txt"
+    if input_kind != "missing":
+        content = {"empty": "", "whitespace": "\n \t　\n"}.get(input_kind)
+        if input_kind == "produced_zero":
+            content = build_alert_text(pd.DataFrame())
+            assert content.strip() and "无提醒。" in content
+        alerts.write_text(content, encoding="utf-8")
+    output = tmp_path / "output_accounts/qa734/reports/symbols_notification.txt"
+    if existing_output:
+        output.parent.mkdir(parents=True)
+        output.write_bytes(b"SYNTHETIC_OLD_REPORT\n")
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns)
+              for path in tmp_path.rglob("*") if path.is_file()}
+    result = subprocess.run(
+        [sys.executable, "-m", "src.application.notify_symbols",
+         "--alerts-input", str(alerts), "--changes-input", "/dev/null",
+         "--output", str(output), "--state-dir", str(tmp_path / "state")],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=30,
+    )
+    if input_kind == "produced_zero":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert output.read_text(encoding="utf-8") == "当前没有通过筛选的候选。\n"
+        assert "[DONE]" in result.stdout
+        assert (alerts.read_bytes(), alerts.stat().st_mtime_ns) == before[alerts]
+        assert {path for path in tmp_path.rglob("*") if path.is_file()} == set(before) | {output}
+    else:
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert "alerts input is missing or empty" in result.stderr
+        assert str(alerts) in result.stderr
+        assert "[DONE]" not in result.stdout
+        assert {path: (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in tmp_path.rglob("*") if path.is_file()} == before
+        assert output.parent.exists() is existing_output
+
+
 @pytest.mark.parametrize("entry", ["stage", "cli"])
 @pytest.mark.parametrize("symbol,currency", [("NVDA", "USD"), ("0700.HK", "HKD")])
 @pytest.mark.parametrize("shares_total,shares_locked,cover", [(0, 0, 0), (200, 200, 0), (200, 0, 2)])

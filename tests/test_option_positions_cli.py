@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import sqlite3
 import sys
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1416,22 +1419,30 @@ def test_lifecycle_reconcile_input_preflight_preserves_write_controls(
     assert _lifecycle_business_snapshot(repo) == before
 
 
+@pytest.mark.parametrize("absolute_legacy_path", [False, True])
 def test_option_positions_cli_reconcile_due_preview_does_not_build_gateways(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    absolute_legacy_path: bool,
 ) -> None:
     import src.interfaces.cli.option_positions as cli_mod
 
-    data_config = _write_data_config(
-        tmp_path / "data.json",
-        sqlite_path=tmp_path / "option_positions.sqlite3",
-    )
+    runtime_root = tmp_path / "runtime"
+    ledger_path = runtime_root / "output_shared/state/option_positions.sqlite3"
+    legacy_path = Path("output_accounts/lx/state/trade_intake_inbox.sqlite3")
+    if absolute_legacy_path:
+        legacy_path = runtime_root / legacy_path
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=ledger_path)
     runtime_config = tmp_path / "runtime.json"
     runtime_config.write_text("{}\n", encoding="utf-8")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(
-        tmp_path / "option_positions.sqlite3"
-    )
+    repo = ledger_repository.SQLiteOptionPositionsRepository(ledger_path)
+    selected_source = {
+        "id": "futu-lx",
+        "account_mapping": {"1001": "lx"},
+        "futu_account_ids": ["1001"],
+        "inbox_path": str(legacy_path),
+    }
     captured: dict[str, object] = {}
     monkeypatch.setattr(
         cli_mod,
@@ -1443,11 +1454,8 @@ def test_option_positions_cli_reconcile_due_preview_does_not_build_gateways(
         "resolve_trade_intake_config",
         lambda _cfg: {
             "sources": [
-                {
-                    "id": "lx",
-                    "account": "lx",
-                    "futu_account_ids": ["1001"],
-                }
+                selected_source,
+                {"id": "futu-sy", "account": "sy", "futu_account_ids": ["2002"]},
             ]
         },
     )
@@ -1455,40 +1463,48 @@ def test_option_positions_cli_reconcile_due_preview_does_not_build_gateways(
     def fail_gateway(**kwargs):
         raise AssertionError(f"gateway built during preview: {kwargs}")
 
-    monkeypatch.setattr(
-        cli_mod,
-        "build_ready_futu_broker_gateway",
-        fail_gateway,
-    )
-    monkeypatch.setattr(
-        cli_mod,
-        "build_ready_futu_quote_gateway",
-        fail_gateway,
-    )
+    monkeypatch.setattr(cli_mod, "build_ready_futu_broker_gateway", fail_gateway)
+    monkeypatch.setattr(cli_mod, "build_ready_futu_quote_gateway", fail_gateway)
+    original_reconcile = cli_mod.reconcile_due_lifecycle_cases_for_source
 
     def reconcile(_repo, **kwargs):
         captured.update(kwargs)
-        return {"results": [], "status": "ok"}
+        return original_reconcile(_repo, **kwargs)
 
-    monkeypatch.setattr(
-        cli_mod,
-        "reconcile_due_lifecycle_cases_for_source",
-        reconcile,
-    )
+    monkeypatch.setattr(cli_mod, "reconcile_due_lifecycle_cases_for_source", reconcile)
+    def snapshot():
+        return {
+            path.relative_to(tmp_path): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in tmp_path.rglob("*")
+            if path.is_file() and not path.name.endswith("-shm")
+        }
 
-    assert (
-        cli_mod.main(_om_cli_args(data_config,
-            "lifecycle", "reconcile-due", "--account", "lx", "--config", str(runtime_config), "--observed-at-ms", "123",
+    # Establish WAL sidecars before measuring the CLI. Keep this connection open so
+    # SQLite's last-connection cleanup cannot change the fixture during the preview.
+    # SHM lock metadata is excluded; DB/WAL content and the file set remain checked.
+    with closing(sqlite3.connect(ledger_path)) as observer:
+        observer.execute("PRAGMA query_only=ON")
+        observer.execute("SELECT 1 FROM sqlite_schema LIMIT 1").fetchall()
+        before = snapshot()
+
+        assert cli_mod.main(_om_cli_args(
+            data_config, "lifecycle", "reconcile-due", "--runtime-root", runtime_root,
+            "--account", "lx", "--config", runtime_config, "--observed-at-ms", "123",
             "--dry-run", "--format", "json",
-    ))
-        == 0
-    )
+        )) == 0
 
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["dry_run"] is True
-    assert captured["apply_changes"] is False
-    assert "broker_gateway" not in captured
-    assert "quote_gateway" not in captured
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["dry_run"] is True
+        assert captured["apply_changes"] is False
+        assert "broker_gateway" not in captured
+        assert "quote_gateway" not in captured
+        assert captured["source"] == {
+            **selected_source,
+            "account": "lx",
+            "inbox_path": ledger_path.with_name(ledger_path.name + ".trade_intake_inbox.sqlite3"),
+        }
+        assert "account" not in selected_source
+        assert snapshot() == before
 
 
 def test_resolve_ambiguous_cli_previews_read_only_then_applies_one_scoped_receipt(
@@ -1595,24 +1611,38 @@ def test_resolve_ambiguous_cli_previews_read_only_then_applies_one_scoped_receip
     ("seal_status", "expected_return_code"),
     [("not_required", 0), ("seal_persist_failed", 1)],
 )
+@pytest.mark.parametrize("attempt_block", ["backoff", "claim"])
 def test_option_positions_cli_reconcile_due_apply_checkpoints_before_gateways(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     seal_status: str,
     expected_return_code: int,
+    attempt_block: str,
 ) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-
-    data_config = _write_data_config(
-        tmp_path / "data.json",
-        sqlite_path=tmp_path / "option_positions.sqlite3",
+    from src.application.trades.inbox import (
+        claim_settlement_attempt,
+        get_settlement_attempt_state,
+        upsert_settlement_attempt_state,
     )
+
+    ledger_path = tmp_path / "option_positions.sqlite3"
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=ledger_path)
     runtime_config = tmp_path / "runtime.json"
     runtime_config.write_text("{}\n", encoding="utf-8")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(
-        tmp_path / "option_positions.sqlite3"
-    )
+    repo = ledger_repository.SQLiteOptionPositionsRepository(ledger_path)
+    inbox_path = ledger_path.with_name(ledger_path.name + ".trade_intake_inbox.sqlite3")
+    state = {
+        "source_id": "lx", "account": "lx", "case_id": "listener-case",
+        "case_scope_fingerprint": "listener-scope", "classification": "provider_required",
+        "updated_at_ms": 1_000,
+    }
+    if attempt_block == "backoff":
+        state["next_attempt_at_ms"] = 2_000
+    else:
+        state.update(claim_id="listener-claim", claim_until_ms=2_000)
+    shared_state = upsert_settlement_attempt_state(inbox_path, state=state)
     order: list[str] = []
     monkeypatch.setattr(
         cli_mod,
@@ -1692,10 +1722,27 @@ def test_option_positions_cli_reconcile_due_apply_checkpoints_before_gateways(
     def reconcile(_repo, **kwargs):
         order.append("runtime")
         assert callable(kwargs["seal_sink"])
+        source = kwargs["source"]
+        assert source["inbox_path"] == inbox_path
+        assert (source["id"], source["account"]) == ("lx", "lx")
+        assert claim_settlement_attempt(
+            source["inbox_path"], source_id=source["id"], account=source["account"],
+            case_id="listener-case", case_scope_fingerprint="listener-scope",
+            claim_id="cli-claim", now_ms=1_000, lease_ms=60_000,
+        ) is False
+        assert get_settlement_attempt_state(
+            source["inbox_path"], source_id="lx", account="lx", case_id="listener-case",
+        ) == shared_state
         return {
             "account": "lx",
             "source_id": "lx",
             "results": [],
+            "provider_results": [{
+                "case_id": "failed-case", "outcome": {
+                    "kind": "retryable_error", "error_class": "timeout",
+                    "query_errors": [{"source": "history_deals", "error": "history query unavailable"}],
+                },
+            }],
             "seal_status": seal_status,
             "run_seal": None,
         }
@@ -1717,6 +1764,13 @@ def test_option_positions_cli_reconcile_due_apply_checkpoints_before_gateways(
     assert order == ["checkpoint", "broker", "quote", "runtime"]
     payload = json.loads(capsys.readouterr().out)
     assert payload["seal_status"] == seal_status
+    audit = [json.loads(line) for line in (tmp_path / "audit.jsonl").read_text().splitlines()]
+    failures = [item for item in audit if item.get("phase") == "settlement_observation_failed"]
+    assert len(failures) == 1
+    assert failures[0]["case_id"] == "failed-case"
+    assert failures[0]["outcome"]["query_errors"] == [
+        {"source": "history_deals", "error": "history query unavailable"},
+    ]
 
 
 def test_option_positions_cli_checkpoint_failure_blocks_gateways(

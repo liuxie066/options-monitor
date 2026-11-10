@@ -9,7 +9,12 @@ from zoneinfo import ZoneInfo
 
 from domain.domain.expiration_dates import MARKET_TIMEZONES
 from domain.domain.symbol_identity import symbol_market
-from domain.domain.lifecycle_timing import canonical_hash, derive_effective_lifecycle_timing
+from domain.domain.lifecycle_timing import (
+    INSTRUMENT_POLICY_REGISTRY,
+    INSTRUMENT_POLICY_SCHEMA,
+    canonical_hash,
+    derive_effective_lifecycle_timing,
+)
 from domain.domain.lifecycle_allocation import (
     AllocationResolution,
     normalize_target_manifest,
@@ -32,33 +37,6 @@ SUPPORTED_LAST_TRADE_SOURCES = frozenset({
     "broker_contract_metadata",
     "instrument_policy_registry",
 })
-
-
-INSTRUMENT_POLICY_SCHEMA = "lifecycle_instrument_policy.v1"
-INSTRUMENT_POLICY_REGISTRY: dict[str, dict[str, Any]] = {
-    "US:standard_equity_option": {
-        "schema_version": INSTRUMENT_POLICY_SCHEMA,
-        "policy_id": "us_standard_equity_option.v1",
-        "market": "US",
-        "contract_class": "standard_equity_option",
-        "underlying_security_type": "equity",
-        "settlement_style": "physical",
-        "timezone": "America/New_York",
-        "last_trade_session_close": "16:00:00",
-        "half_trade_session_close": "13:00:00",
-    },
-    "HK:standard_equity_option": {
-        "schema_version": INSTRUMENT_POLICY_SCHEMA,
-        "policy_id": "hk_standard_equity_option.v1",
-        "market": "HK",
-        "contract_class": "standard_equity_option",
-        "underlying_security_type": "equity",
-        "settlement_style": "physical",
-        "timezone": "Asia/Hong_Kong",
-        "last_trade_session_close": "16:00:00",
-        "half_trade_session_close": "12:00:00",
-    },
-}
 
 
 @dataclass(frozen=True)
@@ -323,6 +301,11 @@ def derive_lifecycle_read_model(
             reservation=reservation,
         )
     current_ms = int(now_ms if now_ms is not None else datetime.now(timezone.utc).timestamp() * 1000)
+    deadline_reason_codes = (
+        ("settlement_evidence_deadline_elapsed",)
+        if pending_until_ms_override is not None
+        else ("lifecycle_timing_policy_unavailable",)
+    )
     if any(pending_close.values()):
         if any(
             lot_id not in target_manifest
@@ -335,10 +318,14 @@ def derive_lifecycle_read_model(
                 observation_start=observation_start, pending_until=pending_until,
                 resolution=resolution, reservation=reservation,
             )
+        state = "settlement_pending" if resolution.remaining_contracts == 0 else "partially_resolved"
+        reasons = ("close_reason_pending",)
+        if current_ms >= pending_until:
+            state = "needs_review"
+            reasons = deadline_reason_codes
         return _read_model(
-            state=("settlement_pending" if resolution.remaining_contracts == 0
-                   else "partially_resolved"),
-            reasons=("close_reason_pending",),
+            state=state,
+            reasons=reasons,
             observation_start=observation_start, pending_until=pending_until,
             resolution=resolution, reservation=reservation,
             pending_close=pending_close,
@@ -393,11 +380,7 @@ def derive_lifecycle_read_model(
     if current_ms >= pending_until:
         return _read_model(
             state="needs_review",
-            reasons=(
-                ("settlement_evidence_deadline_elapsed",)
-                if pending_until_ms_override is not None
-                else ("lifecycle_timing_policy_unavailable",)
-            ),
+            reasons=deadline_reason_codes,
             observation_start=observation_start,
             pending_until=pending_until,
             resolution=resolution,
@@ -480,10 +463,11 @@ def _read_model(
 
     if state == "conflict":
         reason_state = "conflict"
+    elif any((pending_close or {}).values()):
+        # A review deadline does not resolve the economic close's pending reason.
+        reason_state = "cause_pending"
     elif state == "needs_review":
         reason_state = "needs_review"
-    elif any((pending_close or {}).values()):
-        reason_state = "cause_pending"
     elif resolution.remaining_contracts == 0:
         reason_state = "resolved"
     elif resolution.resolved_contracts > 0:
@@ -708,6 +692,7 @@ def build_lifecycle_case_read_model_from_resolved_facts(
         try:
             effective_timing = derive_effective_lifecycle_timing(
                 policy=timing_policy,
+                expiration_ymd=str(lifecycle_case.get("expiration_ymd") or "") or None,
                 option_close_evidence=[
                     {
                         "evidence_type": "option_zero_price_close",
@@ -842,6 +827,11 @@ def build_lifecycle_case_read_model_from_resolved_facts(
         "pending_until_ms": read_model.pending_until_ms,
         "pairing_until_ms": (
             int(effective_timing["pairing_until_ms"])
+            if effective_timing is not None
+            else None
+        ),
+        "review_after_ms": (
+            int(effective_timing["review_after_ms"])
             if effective_timing is not None
             else None
         ),

@@ -126,6 +126,7 @@ def test_explicit_pull_preserves_failed_inventory_without_effects(
     assert data["ok"] is False and data["changed"] is False
     assert data["dry_run"] is (not write)
     assert data["manifest"] is None and data["scan_blob_refs"] == []
+    assert data["run_publications"] == []
     assert len(data["operations"]) == 1
     operation = data["operations"][0]
     assert operation["ok"] is False
@@ -206,6 +207,108 @@ def test_archive_cli_missing_explicit_run_uses_real_error_envelope(
     assert data["error"]["code"] == "SOURCE_INVENTORY_ERROR"
     assert data["error"]["details"] == {"missing_run_ids": ["missing"]}
     assert not root.exists()
+
+
+@pytest.mark.parametrize("mode", ["partial_new", "partial_reuse", "success", "dry_run"])
+def test_archive_cli_reports_actual_run_publications(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], mode: str,
+) -> None:
+    import shutil
+    import socket
+    from src.application.research import archive
+    from src.interfaces.cli.main import main
+
+    source, root = tmp_path / "source", tmp_path / "archive"
+    run_ids = ["run-1", "run-2", "run-3"]
+    for index, run_id in enumerate(run_ids):
+        path = _write_minimal_run(source, run_id)
+        os.utime(path, (2_000_000_000 - index, 2_000_000_000 - index))
+    for relative in ("output_shared/research", "output_shared/required_data"):
+        (source / relative).mkdir(parents=True)
+    shared = source / "output_shared/research/fixture.txt"
+    shared.write_text("synthetic shared data", encoding="utf-8")
+    local_shared = root / "output_shared/research/fixture.txt"
+    local_shared.parent.mkdir(parents=True)
+    local_shared.write_text("old local shared data", encoding="utf-8")
+    partial = mode in {"partial_new", "partial_reuse"}
+    if mode == "partial_reuse":
+        shutil.copytree(source / "output_runs/run-1", root / "output_runs/run-1")
+    if partial:
+        shutil.copytree(source / "output_runs/run-2", root / "output_runs/run-2")
+        conflict = root / "output_runs/run-2/state/last_run.json"
+        conflict.write_bytes(conflict.read_bytes() + b"\n")
+    conflict_before = _archive_tree_snapshot(root / "output_runs/run-2")
+    source_before, archive_before = _archive_tree_snapshot(source), _archive_tree_snapshot(root)
+    calls, forbidden_calls = [], []
+    rsync_path = str(tmp_path / "never-execute-real-rsync")
+
+    def transfer(command, **_kwargs):
+        calls.append(command)
+        if command[0] != rsync_path:
+            forbidden_calls.append(command[0])
+            raise AssertionError("only the isolated transfer adapter may execute")
+        origin, destination = Path(command[-2]), Path(command[-1])
+        assert origin.resolve().is_relative_to(source)
+        assert destination.resolve().is_relative_to(root)
+        if "--dry-run" not in command:
+            shutil.copytree(origin, destination, dirs_exist_ok=True)
+        return _completed(command, "")
+
+    def forbidden_network(*args, **kwargs):
+        forbidden_calls.append("network.connect")
+        raise AssertionError("archive fixtures must not contact a real host")
+
+    # The CLI uses the library's injectable default transport; keep the owner itself real.
+    monkeypatch.setitem(archive.archive_pull.__kwdefaults__, "run_cmd", transfer)
+    monkeypatch.setattr("src.interfaces.cli.main.repo_base", lambda: tmp_path)
+    monkeypatch.setattr(socket.socket, "connect", forbidden_network)
+    argv = ["research", "archive", "pull", "--source-root", str(source),
+            "--archive-root", str(root), "--no-logs", "--rsync-path", rsync_path]
+    for run_id in run_ids:
+        argv.extend(["--run-id", run_id])
+    if mode != "dry_run":
+        argv.append("--write")
+    rc = main(argv)
+    response = json.loads(capsys.readouterr().out)
+    assert rc == (2 if partial else 0), response
+    assert response["tool_name"] == "research.archive.pull" and response["ok"] is (not partial)
+    data = response["data"]
+    assert data["selected_run_ids"] == run_ids
+    assert data["ok"] is (not partial)
+    assert data["changed"] is (mode == "success")
+    assert (data["manifest"] is not None) is (mode == "success")
+    assert len(calls) == 5
+    if mode == "dry_run":
+        expected = []
+        assert _archive_tree_snapshot(root) == archive_before
+    else:
+        assert local_shared.read_bytes() == shared.read_bytes()
+        assert _archive_tree_snapshot(root / "output_runs/run-1") == _archive_tree_snapshot(source / "output_runs/run-1")
+        expected = [{"run_id": "run-1", "status": "reused" if mode == "partial_reuse" else "published",
+                     "path": str(root / "output_runs/run-1")}]
+        if partial:
+            assert _archive_tree_snapshot(root / "output_runs/run-2") == conflict_before
+            assert not (root / "output_runs/run-3").exists()
+            conflicts = [operation for operation in data["operations"]
+                         if operation.get("reason") == "archive_run_conflict"]
+            assert len(conflicts) == 1 and conflicts[0]["run_id"] == "run-2", data["operations"]
+            expected.append({"run_id": "run-2", "status": "conflict",
+                             "path": str(root / "output_runs/run-2"), "reason": "archive_run_conflict"})
+        else:
+            expected.extend({"run_id": run_id, "status": "published", "path": str(root / "output_runs" / run_id)}
+                            for run_id in run_ids[1:])
+    assert data["run_publications"] == expected
+    if mode != "dry_run":
+        first_before = _archive_tree_snapshot(root / "output_runs/run-1")
+        assert main(argv) == (2 if partial else 0)
+        repeated = json.loads(capsys.readouterr().out)["data"]
+        assert repeated["changed"] is (not partial)
+        assert repeated["run_publications"] == [
+            {**row, "status": "reused"} if row["status"] == "published" else row for row in expected
+        ]
+        assert _archive_tree_snapshot(root / "output_runs/run-1") == first_before
+    assert _archive_tree_snapshot(source) == source_before
+    assert forbidden_calls == []
 
 
 @pytest.mark.parametrize("remote", [False, True])
@@ -455,7 +558,7 @@ def _prune_run_cmd(
                 remote_runtime_root="/var/lib/options-monitor",
             )["plan_sha256"]
             confirmed = _cleanup_payload(
-                data={"status": "cleaned", "expected_output_runs_plan_sha256": digest}
+                data={"status": "cleaned", "expected_output_runs_plan_sha256": digest, "changed": True}
             )
             return _completed(command, json.dumps(confirmed))
         return _completed(command, json.dumps(preview))
@@ -1036,6 +1139,127 @@ def test_archive_pull_treats_missing_optional_remote_dirs_as_skipped(tmp_path: P
     skipped = [item for item in data["operations"] if item.get("skipped")]
     assert data["ok"] is True
     assert skipped[0]["reason"] == "source_dir_missing"
+
+
+@pytest.mark.parametrize("mode", [
+    "empty", "delete", "dry_run", "missing_changed", "string_changed",
+    "confirm_failure", "wrong_plan", "wrong_status", "ssh_failure",
+])
+def test_archive_prune_cli_uses_verified_cleanup_effect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], mode: str,
+) -> None:
+    import shutil
+    import socket
+
+    from src.application.research import archive
+    from src.application.service_cleanup import service_cleanup
+    from src.interfaces.cli.main import main
+
+    runtime, root = tmp_path / "remote-runtime", tmp_path / "archive"
+    releases = tmp_path / "releases"
+    release = releases / "1.0.0"
+    marker = release / "src/application/bot/runtime.py"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("# isolated cleanup fixture\n", encoding="utf-8")
+    (release / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    current = tmp_path / "current"
+    current.symlink_to(release, target_is_directory=True)
+    kept = _write_minimal_run(runtime, "run-kept")
+    os.utime(kept, (_fixed_now().timestamp(),) * 2)
+    old = runtime / "output_runs/run-old"
+    if mode in {"delete", "dry_run"}:
+        _write_minimal_run(runtime, "run-old")
+        os.utime(old, ((_fixed_now() - timedelta(days=10)).timestamp(),) * 2)
+    shutil.copytree(runtime / "output_runs", root / "output_runs")
+    inventory = archive._run_inventory(runtime / "output_runs", base=tmp_path)
+    assert archive.archive_verify(
+        repo_root=tmp_path, archive_root=root, now_fn=_fixed_now,
+        source_identity={"kind": "ssh", "ssh_target": "deploy@example",
+                         "runtime_root": str(runtime), "source_host": "fixture-host"},
+        source_run_inventory=inventory,
+    )["ok"] is True
+    archive_before = _archive_tree_snapshot(root)
+    kept_before = _archive_tree_snapshot(kept)
+    release_before = _archive_tree_snapshot(release)
+    calls: list[list[str]] = []
+    forbidden_calls: list[str] = []
+    cleanup_results: list[dict[str, Any]] = []
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        forbidden_calls.append("external_call")
+        raise AssertionError("the fixture must not invoke a process or network connection")
+
+    def transfer(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        assert command[:2] == ["ssh", "deploy@example"]
+        if "python3 -c" in command[-1]:
+            return _completed(command, json.dumps({
+                "runtime_root": str(runtime), "source_host": "fixture-host",
+                "runs": archive._run_inventory(runtime / "output_runs", base=tmp_path),
+            }))
+        args = shlex.split(command[-1])
+        assert args[args.index("--repo-root") + 1] == str(current)
+        assert args[args.index("--runtime-root") + 1] == str(runtime)
+        assert "--cleanup-output-runs" in args and "--cleanup-runtime-logs" not in args
+        confirmed = "--confirm" in args
+        expected = args[args.index("--expected-output-runs-plan-sha256") + 1] if confirmed else None
+        result = service_cleanup(
+            repo_root=current, releases_root=releases, runtime_root=runtime,
+            keep_releases=int(args[args.index("--keep-releases") + 1]),
+            cleanup_output_runs=True,
+            output_runs_keep_days=int(args[args.index("--output-runs-keep-days") + 1]),
+            output_runs_keep_count=int(args[args.index("--output-runs-keep-count") + 1]),
+            expected_output_runs_plan_sha256=expected, confirm=confirmed,
+            run_cmd=forbidden, now=_fixed_now(),
+        )
+        assert result["ok"] is True, (result.get("status"), result.get("reason"))
+        cleanup_results.append(result)
+        payload = _cleanup_payload(ok=result["ok"], data=dict(result))
+        if confirmed:
+            if mode == "missing_changed":
+                payload["data"].pop("changed")
+            elif mode == "string_changed":
+                payload["data"]["changed"] = "false"
+            elif mode == "confirm_failure":
+                payload["ok"] = False
+            elif mode == "wrong_plan":
+                payload["data"]["expected_output_runs_plan_sha256"] = "0" * 64
+            elif mode == "wrong_status":
+                payload["data"]["status"] = "dry_run"
+        return subprocess.CompletedProcess(command, 1 if confirmed and mode == "ssh_failure" else 0,
+                                           json.dumps(payload), "")
+
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    monkeypatch.setattr("src.interfaces.cli.main.repo_base", lambda: tmp_path)
+    monkeypatch.setitem(archive.archive_prune_remote.__kwdefaults__, "run_cmd", transfer)
+    args = ["research", "archive", "prune-remote", "--archive-root", str(root),
+            "--ssh-target", "deploy@example", "--remote-repo-root", str(current),
+            "--remote-runtime-root", str(runtime), "--keep-count", "1", "--no-logs"]
+    if mode != "dry_run":
+        args.append("--confirm")
+    exit_code = main(args)
+    payload = json.loads(capsys.readouterr().out)
+    data = payload["data"]
+    successful = mode in {"empty", "delete", "dry_run"}
+    assert data["deletion_guard"]["confirmable"] is True, [
+        (op.get("ok"), op.get("stderr"), op.get("payload_validation")) for op in data["operations"]
+    ]
+    assert data["deletion_guard"]["planned_delete_run_ids"] == (["run-old"] if mode in {"delete", "dry_run"} else [])
+    assert len(calls) == (2 if mode == "dry_run" else 3)
+    assert cleanup_results[-1]["changed"] is (mode == "delete")
+    assert cleanup_results[-1]["deleted_paths"] == ([str(old.resolve())] if mode == "delete" else [])
+    assert old.exists() is (mode == "dry_run")
+    assert _archive_tree_snapshot(root) == archive_before
+    assert _archive_tree_snapshot(kept) == kept_before
+    assert _archive_tree_snapshot(release) == release_before
+    assert forbidden_calls == []
+    assert payload["tool_name"] == "research.archive.prune-remote"
+    assert exit_code == (0 if successful else 2)
+    assert payload["ok"] is successful and data["ok"] is successful
+    assert data["changed"] is (mode == "delete")
+    if mode in {"missing_changed", "string_changed"}:
+        assert "cleanup_changed_missing_or_invalid" in data["operations"][-1]["payload_validation"]["errors"]
 
 
 def test_archive_prune_remote_requires_verified_delete_runs(tmp_path: Path) -> None:

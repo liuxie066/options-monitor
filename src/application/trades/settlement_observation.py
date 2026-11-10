@@ -141,7 +141,7 @@ class SettlementObservationCollector:
                 reason_code="lifecycle_generation_changed",
                 error_class="stale_generation",
             )
-        except SettlementObservationDataError:
+        except SettlementObservationDataError as exc:
             if provider_start_failed:
                 raise
             return SettlementAttemptOutcome(
@@ -155,6 +155,7 @@ class SettlementObservationCollector:
                 ),
                 reason_code="settlement_observation_data_invalid",
                 error_class="case_data",
+                query_errors=({"source": "collector", "error": f"{type(exc).__name__}: {exc}"},),
             )
         except Exception as exc:
             if provider_start_failed:

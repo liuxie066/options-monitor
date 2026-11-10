@@ -299,6 +299,7 @@ def archive_pull(
             "include_logs": bool(include_logs),
             "scan_blob_refs": [],
             "operations": [inventory_operation],
+            "run_publications": [],
             "manifest": None,
         }
     selected = set(selected_runs)
@@ -375,6 +376,7 @@ def archive_pull(
             operations.append(operation)
 
     ok = all(bool(item.get("ok")) for item in operations)
+    run_publications: list[dict[str, Any]] = []
     manifest: dict[str, Any] | None = None
     if write and ok:
         assert staging_root is not None
@@ -423,11 +425,17 @@ def archive_pull(
                                 "run_id": run_id,
                             }
                         )
+                        run_publications.append({
+                            "run_id": run_id, "status": "conflict", "path": str(published_run),
+                            "reason": "archive_run_conflict",
+                        })
                         break
                     shutil.rmtree(staged_run)
+                    run_publications.append({"run_id": run_id, "status": "reused", "path": str(published_run)})
                     continue
                 published_run.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(staged_run, published_run)
+                run_publications.append({"run_id": run_id, "status": "published", "path": str(published_run)})
         previous = _load_latest_inventory(root)
         previous_source = previous.get("source_identity")
         combined_source_inventory = list(source_run_inventory)
@@ -480,6 +488,7 @@ def archive_pull(
         "include_logs": bool(include_logs),
         "scan_blob_refs": scan_blob_refs,
         "operations": operations,
+        "run_publications": run_publications,
         "manifest": manifest,
     }
 
@@ -706,6 +715,7 @@ def archive_prune_remote(
         and not unverified,
     }
     operations = [dry_operation, remote_inventory_operation]
+    cleanup_changed = False
     if confirm and guard["confirmable"]:
         confirm_command = _remote_cleanup_command(
             ssh_target=target,
@@ -733,6 +743,8 @@ def archive_prune_remote(
             confirm_validation.get("ok")
         )
         operations.append(confirm_operation)
+        if confirm_operation["ok"]:
+            cleanup_changed = confirm_payload["data"]["changed"]
     elif confirm and not guard["confirmable"]:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -752,7 +764,7 @@ def archive_prune_remote(
         "action": "prune-remote",
         "scope": "output-runs",
         "ok": bool(ok),
-        "changed": bool(confirm and ok and len(operations) > 1),
+        "changed": bool(ok and cleanup_changed),
         "dry_run": not bool(confirm),
         "remote": _safe_label(remote or DEFAULT_REMOTE),
         "archive_root": str(root),
@@ -1441,6 +1453,8 @@ def _validate_cleanup_confirm(
         errors.append("confirmed_plan_sha256_mismatch")
     if data.get("status") != "cleaned":
         errors.append("cleanup_status_not_cleaned")
+    if not isinstance(data.get("changed"), bool):
+        errors.append("cleanup_changed_missing_or_invalid")
     return {"ok": not errors, "errors": errors}
 
 

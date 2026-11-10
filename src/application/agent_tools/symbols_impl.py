@@ -176,9 +176,11 @@ def manage_symbols_tool(
             raise AgentToolError(code="PERMISSION_DENIED", message="write tools are disabled", hint="Set OM_AGENT_ENABLE_WRITE_TOOLS=true to enable config writes.")
         if not confirm:
             raise AgentToolError(code="CONFIRMATION_REQUIRED", message="confirm=true is required for non-dry-run symbol mutations")
-    mutated = apply_symbol_mutation_fn(deepcopy_fn(cfg), payload)
-    validate_runtime_config(mutated)
-    rows = list_symbol_rows_fn(mutated)
+    rows: list[dict[str, Any]] = []
+    if action == "list":
+        mutated = apply_symbol_mutation_fn(deepcopy_fn(cfg), payload)
+        validate_runtime_config(mutated)
+        rows = list_symbol_rows_fn(mutated)
     write_applied = action != "list" and not dry_run
     authoring = None
     config_yaml_path = None
@@ -204,7 +206,9 @@ def manage_symbols_tool(
             config_path=config_yaml_path,
             rebuild_runtime_root=config_path.parent,
             apply=write_applied,
+            project_symbols=list_symbol_rows_fn,
         )
+        rows = authoring.pop("symbols")
     result = {
         "action": action,
         "symbols": rows,

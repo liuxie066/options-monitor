@@ -830,6 +830,7 @@ def _render_user_view(
         if projection == "fixed_report"
         else candidate_families
     )
+    wheel_omissions: list[str] = []
     if projection == "candidate_alert":
         if not candidates and not view.get("wheel_batches") and not view.get("positions"):
             lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} 策略候选"])
@@ -857,11 +858,12 @@ def _render_user_view(
             matched = False
             for family, label in _STRATEGY_LABELS.items():
                 if str(note).startswith(f"{label} "):
-                    omissions_by_family.setdefault(family, []).append(str(note)[len(label):].strip())
+                    omissions_by_family.setdefault(family, []).append(str(note))
                     matched = True
                     break
             if not matched:
                 other_omissions.append(str(note))
+        wheel_omissions = omissions_by_family.get("wheel") or []
         for family in ("sell_put", "covered_call", "combo_yield"):
             family_rows = [item for item in candidates if item.get("family") == family]
             if family not in visible_families and not omissions_by_family.get(family):
@@ -879,10 +881,11 @@ def _render_user_view(
             else:
                 lines.append(view["candidate_empty_by_family"][family])
             for note in omissions_by_family.get(family) or []:
-                lines.append(f"补充｜{note}")
+                lines.append(f"展示范围｜{note}")
         for note in other_omissions:
             lines.append(f"补充｜{note}")
-        if not candidates and not visible_families and not view.get("wheel_batches"):
+        if not candidates and not visible_families and not view.get("wheel_batches") \
+                and not any(omissions_by_family.values()):
             lines.extend([_VISIBLE_BLANK_LINE, f"{section_mark} {candidate_heading}"])
             lines.append(str(view.get("candidate_empty_summary") or "本轮暂无符合条件的候选。"))
         if projection == "fixed_report" and not candidates:
@@ -899,6 +902,9 @@ def _render_user_view(
             lines.extend([_VISIBLE_BLANK_LINE, f"**{_flat_title(item['title'])}**"])
             for detail in item.get("details") or []:
                 lines.append(_flat_field_line(detail))
+        lines.extend(f"展示范围｜{note}" for note in wheel_omissions)
+    else:
+        lines.extend(f"展示范围｜{note}" for note in wheel_omissions)
 
     lines.extend(f"展示范围｜{note}" for note in view.get("budget_notes") or [])
     position_rows = [
@@ -1048,10 +1054,20 @@ def _render_user_view_blocks(
         {"sell_put", "covered_call", "combo_yield"} if projection == "fixed_report"
         else {item.get("family") for item in candidates}
     )
-    if not visible_families and not view.get("wheel_batches"):
+    omissions_by_family: dict[str, list[str]] = {}
+    other_omissions: list[str] = []
+    for note in view.get("candidate_omissions") or []:
+        family = next((family for family, label in _STRATEGY_LABELS.items()
+                       if str(note).startswith(label + " ")), "")
+        if family:
+            omissions_by_family.setdefault(family, []).append(str(note))
+        else:
+            other_omissions.append(str(note))
+    if not visible_families and not view.get("wheel_batches") and not omissions_by_family:
         blocks.append(heading("策略候选") + "\n" + str(view.get("candidate_empty_summary") or "本轮暂无符合条件的候选。"))
     for family in ("sell_put", "covered_call", "combo_yield"):
-        if family not in visible_families:
+        family_omissions = omissions_by_family.get(family) or []
+        if family not in visible_families and not family_omissions:
             continue
         rows = [item for item in candidates if item.get("family") == family]
         family_heading = heading(_STRATEGY_LABELS[family])
@@ -1079,11 +1095,15 @@ def _render_user_view_blocks(
             identity = (view.get("notification_identities") or {}).get((item["symbol"], family))
             blocks.append("\n".join(lines), "info" if item.get("selection_tier") == "C" else "candidate",
                           -int(item.get("selection_rank", item.get("rank") or 0)), identities=(identity,))
+        for note in family_omissions:
+            blocks.append(f"展示范围｜{note}", "omission", summary_family=family)
     if projection == "fixed_report" and not candidates:
         summary = str(view.get("candidate_empty_summary") or "")
         if summary and summary != "本轮暂无符合条件的候选。":
             blocks.append(summary)
     blocks.extend(wheel_blocks())
+    for note in omissions_by_family.get("wheel") or []:
+        blocks.append(f"展示范围｜{note}", "omission", summary_family="wheel")
     for note in view.get("budget_notes") or []:
         blocks.append(f"展示范围｜{note}", "omission")
     if candidates:
@@ -1095,11 +1115,9 @@ def _render_user_view_blocks(
             for event in events:
                 tier = "gap" if any(word in event for word in ("不完整", "不可用", "无法", "缺口")) else "info"
                 blocks.append(event, tier)
-    for note in view.get("candidate_omissions") or []:
-        family = next((family for family, label in _STRATEGY_LABELS.items()
-                       if str(note).startswith(label + " ")), "")
+    for note in other_omissions:
         blocks.append(f"补充｜{note}", "omission",
-                      summary_family=(family or "all") if "未展开" in str(note) else "")
+                      summary_family=("all" if "未展开" in note else ""))
 
     if projection != "candidate_alert" or view.get("positions"):
         position_rows = [item for item in view.get("positions") or [] if isinstance(item, Mapping)]
@@ -1573,11 +1591,10 @@ def _selection_plan(
         selected_count = sum(item["kind"] == "candidate" and item["family"] == family for item in plan)
         omitted = candidate_counts[family] - selected_count
         if omitted:
-            candidate_omissions.append(f"{_STRATEGY_LABELS[family]} 另有 {omitted} 个策略候选未展开")
-    capped_families = [_STRATEGY_LABELS[family] for family in families
-                       if candidate_counts[family] > limits["max_candidates_per_strategy"]]
-    budget_notes = ([f"开仓分区上限 {limits['max_candidates_per_strategy']} 条／策略：{'、'.join(capped_families)}。"]
-                    if capped_families else [])
+            candidate_omissions.append(
+                f"{_STRATEGY_LABELS[family]} 本轮 {candidate_counts[family]} 个候选，"
+                f"入选 {selected_count} 个，另有 {omitted} 个未展开")
+    budget_notes = []
     if len(ordered) > len(plan):
         budget_notes.append(f"整份上限 {limits['max_total_items']} 张完整卡已触发；持仓先于开仓，开仓先于提醒。")
     return plan, {
@@ -3000,6 +3017,15 @@ def _fund_views(brief: Mapping[str, Any]) -> list[str]:
             for currency, amount in amounts.items()
             if currency in {"CNY", "HKD", "USD"}
         )
+    pending = funds.get("cash_secured_pending_by_symbol_by_ccy")
+    if isinstance(pending, Mapping):
+        for symbol, amounts in sorted(pending.items()):
+            reserved = "、".join(
+                _currency_money(currency, amount)
+                for currency, amount in _currency_amounts(amounts).items()
+            )
+            if reserved:
+                out.append(f"{symbol} 归属未定，已保守扣留担保：{reserved}（未计入可用资金）")
     unavailable = funds.get("cash_secured_unavailable_by_symbol")
     if opening_cny is None and isinstance(unavailable, Mapping):
         for symbol, reason in sorted(unavailable.items()):
@@ -3011,7 +3037,13 @@ def _fund_views(brief: Mapping[str, Any]) -> list[str]:
             }.get(reason_code, "期权担保依据待核实")
             if reason_code.startswith("short_put_cash_secured_currency_unsupported:"):
                 detail = "期权担保币种暂不支持"
-            out.append(f"可开仓资金待核实：{symbol} {detail}")
+            unavailable_by_ccy = funds.get("cash_secured_unavailable_by_ccy")
+            currencies = sorted(
+                currency for currency, symbols in unavailable_by_ccy.items()
+                if currency in {"CNY", "HKD", "USD"} and isinstance(symbols, list) and symbol in symbols
+            ) if isinstance(unavailable_by_ccy, Mapping) else []
+            scope = f"（{'/'.join(currencies)}）" if currencies else ""
+            out.append(f"可开仓资金待核实：{symbol}{scope} {detail}")
     return out
 
 

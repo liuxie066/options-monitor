@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from domain.domain.symbol_identity import resolve_underlier_alias
 from src.application.account_config import normalize_accounts
@@ -209,6 +209,7 @@ def mutate_yaml_symbol_config(
     apply: bool = False,
     backup: bool = True,
     expected_source_sha256: str | None = None,
+    project_symbols: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     action = str(payload.get("action") or "").strip().lower()
     if action not in {"add", "edit", "remove"}:
@@ -221,6 +222,11 @@ def mutate_yaml_symbol_config(
     summary = _mutate_generic_symbol_config(after_doc, market=market_key, action=action, payload=payload)
     summary.update(_validate_changed_symbol(repo_root=repo_root, before=before_doc, after=after_doc,
                                             market=market_key, summary=summary))
+    symbols = None
+    if project_symbols is not None:
+        symbols = project_symbols(_effective_runtime_config(
+            repo_root=repo_root, document=after_doc, market=market_key,
+        ))
     runtime_root = (
         Path(rebuild_runtime_root).expanduser().resolve()
         if rebuild_runtime_root is not None and str(rebuild_runtime_root).strip()
@@ -250,6 +256,8 @@ def mutate_yaml_symbol_config(
         "source_revision": transaction.get("source_revision"),
         "audit_id": transaction.get("audit_id"),
     }
+    if symbols is not None:
+        result["symbols"] = symbols
     return attach_write_contract(
         result,
         dry_run=not bool(apply),
@@ -370,11 +378,16 @@ def _mutate_generic_symbol_config(
     }
 
 
-def _effective_symbol(*, repo_root: Path, document: dict[str, Any], market: str, symbol: str) -> dict[str, Any] | None:
+def _effective_runtime_config(*, repo_root: Path, document: dict[str, Any], market: str) -> dict[str, Any]:
     runtime, _ = build_layered_runtime_config_from_user_config(
         repo_root=repo_root, market=market, user_config=yaml_to_market_user_config(document, market=market),
         system_config=default_config(),
     )
+    return runtime
+
+
+def _effective_symbol(*, repo_root: Path, document: dict[str, Any], market: str, symbol: str) -> dict[str, Any] | None:
+    runtime = _effective_runtime_config(repo_root=repo_root, document=document, market=market)
     raw = next((deepcopy(item) for item in runtime["symbols"] if item["symbol"] == symbol), None)
     return apply_profiles(raw, runtime.get("templates")) if raw is not None else None
 

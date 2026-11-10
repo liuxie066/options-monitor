@@ -8,7 +8,10 @@ from typing import Any, Callable
 
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response
-from src.application.healthcheck import run_healthcheck
+from src.application.healthcheck import (
+    healthcheck_readiness_ok as _healthcheck_readiness_ok,
+    run_healthcheck,
+)
 from src.application.runtime_logs_cli import collect_runtime_logs, format_runtime_logs
 from src.application.runtime_runs_cli import collect_runtime_runs, format_runtime_runs
 from src.application.runtime_status_cli import (
@@ -27,14 +30,6 @@ def _dumps(payload: dict[str, Any]) -> str:
 def _print(payload: dict[str, Any]) -> int:
     sys.stdout.write(_dumps(payload))
     return 0 if payload.get("ok", True) else 2
-
-
-def _healthcheck_readiness_ok(payload: dict[str, Any]) -> bool:
-    if payload.get("ok") is not True:
-        return False
-    data = payload.get("data")
-    summary = data.get("summary") if isinstance(data, dict) else None
-    return not isinstance(summary, dict) or summary.get("ok") is not False
 
 
 def _print_healthcheck(payload: dict[str, Any]) -> int:

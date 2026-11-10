@@ -5,6 +5,15 @@ from typing import Any
 from src.application.wheel.runtime_readiness import build_wheel_activation_readiness
 
 
+def healthcheck_readiness_ok(payload: dict[str, Any]) -> bool:
+    """Require successful execution and reject an explicit readiness failure."""
+    if payload.get("ok") is not True:
+        return False
+    data = payload.get("data")
+    summary = data.get("summary") if isinstance(data, dict) else None
+    return not isinstance(summary, dict) or summary.get("ok") is not False
+
+
 def run_healthcheck(
     *,
     config_key: str | None = None,

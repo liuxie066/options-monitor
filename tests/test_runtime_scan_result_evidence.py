@@ -138,6 +138,7 @@ def _bundle(root: Path, states: tuple[str, ...], *, version: int = 4, positive: 
 def _metrics(root: Path, *, scanned: bool = True, pipeline: bool = False) -> None:
     _write(root / f"output_runs/{RUN}/accounts/{ACCOUNT}/state/account_metrics.json",
            {"run_id": RUN, "account": ACCOUNT, "markets_to_run": ["US"], "as_of_utc": NOW,
+            "account_config_sha256": CONFIG,
             "ran_scan": scanned, "ran_pipeline": pipeline, "reason": "pipeline failed"})
 
 
@@ -153,6 +154,100 @@ def _public(tool: str, config: Path) -> tuple[dict, dict]:
     response = tools.call_read_tool(tool, payload, allowed_tools=(tool,))
     assert response["ok"], response
     return response, tools.model_observation(tool, response)
+
+
+@pytest.mark.parametrize("version", [1, 2, 3, 4])
+@pytest.mark.parametrize("case", [
+    "failure", "success", "unknown_reason", "missing",
+    "wrong_run", "wrong_account", "wrong_market", "wrong_config",
+])
+def test_runtime_runs_preserves_verified_account_execution(
+    tmp_path, monkeypatch, example_config_path, version, case,
+):
+    import socket
+
+    _bundle(tmp_path, ("completed", "failed"), version=version)
+    metrics = {
+        "run_id": RUN, "account": ACCOUNT, "markets_to_run": ["US"],
+        "account_config_sha256": CONFIG, "as_of_utc": "2026-10-21T00:01:00Z",
+        "ran_scan": False, "ran_pipeline": case == "success",
+        "reason": "SYNTHETIC_DETAIL_DO_NOT_EXPOSE" if case == "unknown_reason"
+        else "prepared_option_context_integrity_failed" if case != "success" else None,
+    }
+    conflicts = {
+        "wrong_run": ("run_id", "other-run"),
+        "wrong_account": ("account", "sy"),
+        "wrong_market": ("markets_to_run", ["HK"]),
+        "wrong_config": ("account_config_sha256", "c" * 64),
+    }
+    if case in conflicts:
+        field, value = conflicts[case]
+        metrics[field] = value
+    raw_metrics = None
+    if case != "missing":
+        raw_metrics = _write(tmp_path / f"output_runs/{RUN}/accounts/{ACCOUNT}/state/account_metrics.json", metrics)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path))
+    forbidden_calls = []
+
+    def forbidden_network(*args, **kwargs):
+        forbidden_calls.append("network.connect")
+        raise AssertionError("runtime evidence reads must not connect to a real service")
+
+    monkeypatch.setattr(socket.socket, "connect", forbidden_network)
+    before = {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in tmp_path.rglob("*") if path.is_file()}
+    config_before = example_config_path.read_bytes()
+    snapshot = project_runs.load_run_bundle(**_options(tmp_path))["manifest"]
+    assert snapshot["outcomes"] == {"usable_scan_result": True, "pipeline_completed_successfully": None}
+    for explicit in (True, False):
+        arguments = {"account": ACCOUNT, "scanned_only": True}
+        if explicit:
+            arguments["run_id"] = RUN
+        payload, error = tools.build_tool_payload(
+            "runtime_runs", arguments, fixed_input={"config_path": str(example_config_path)},
+        )
+        assert error is None
+        response = tools.call_read_tool("runtime_runs", payload, allowed_tools=("runtime_runs",))
+        if case in conflicts:
+            if explicit:
+                assert response["ok"] is False, response
+            else:
+                assert response["ok"] is True, response
+                assert response["data"]["runs"] == []
+                assert response["data"]["unverified_newer_count"] == 1
+            continue
+        assert response["ok"] is True, response
+        observation = tools.model_observation("runtime_runs", response)
+        row, = response["data"]["runs"]
+        observed, = observation["data"]["runs"]
+        expected_outcomes = {"usable_scan_result": True,
+                             "pipeline_completed_successfully": None if case == "missing" else metrics["ran_pipeline"]}
+        assert row["outcomes"] == observed["outcomes"] == expected_outcomes
+        assert row["terminal"] is True and row["scanned"] is True
+        assert row["as_of"] == snapshot["as_of"] == NOW
+        assert row["revision"] == snapshot["revision"]
+        if case == "missing":
+            assert "account_execution" not in row and "account_execution" not in observed
+            assert row["resource_categories"] == ["candidate_snapshot", "status_index"]
+        else:
+            expected_execution = {
+                "source_kind": "account_metrics", "as_of": metrics["as_of_utc"],
+                "revision": hashlib.sha256(raw_metrics).hexdigest(), "ran_pipeline": metrics["ran_pipeline"],
+                "reason": "prepared_option_context_integrity_failed" if case == "failure" else None,
+                "reason_description": "该次预备期权上下文未通过完整性校验。" if case == "failure" else None,
+                "cause_available": case == "failure", "causal_link_to_other_records": "not_established",
+            }
+            assert row["account_execution"] == expected_execution
+            assert observed["account_execution"] == {
+                key: value for key, value in expected_execution.items() if key != "revision"
+            }
+            assert row["resource_categories"] == ["candidate_snapshot", "status_index", "account_diagnostics"]
+        assert "scanned" not in observed and "terminal" not in observed
+        assert "SYNTHETIC_DETAIL_DO_NOT_EXPOSE" not in json.dumps(observation)
+    assert forbidden_calls == []
+    assert example_config_path.read_bytes() == config_before
+    assert {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in tmp_path.rglob("*") if path.is_file()} == before
 
 
 @pytest.mark.parametrize("explicit", [False, True])
@@ -179,7 +274,9 @@ def test_runtime_runs_reads_verified_zero_scope_without_claiming_scan(
         row = data["runs"][0]
         assert (row["run_id"], row["account"], row["market"]) == ("run-1", "lx", "US")
         assert row["scanned"] is False
-        assert row["outcomes"] == {"usable_scan_result": False, "pipeline_completed_successfully": None}
+        assert row["outcomes"] == {"usable_scan_result": False, "pipeline_completed_successfully": True}
+        assert row["account_execution"]["ran_pipeline"] is True
+        assert row["account_execution"]["source_kind"] == "account_metrics"
         assert row["resource_categories"] == ["candidate_snapshot", "status_index", "account_diagnostics"]
     assert _hashes(tmp_path) == before
 
@@ -248,7 +345,11 @@ def test_verified_scopes_decide_availability(tmp_path, monkeypatch, example_conf
     filtered = execute_tool("runtime_runs", {"action": "scoped", "run_id": RUN, "account": ACCOUNT,
                             "scanned_only": True, "config_path": str(example_config_path)})
     assert filtered["ok"] and len(filtered["data"]["runs"]) == 1
-    assert run_observation["data"]["runs"][0]["outcomes"] == bundle["manifest"]["outcomes"]
+    assert run_observation["data"]["runs"][0]["outcomes"] == {
+        "usable_scan_result": expected, "pipeline_completed_successfully": False,
+    }
+    assert bundle["manifest"]["outcomes"]["pipeline_completed_successfully"] is None
+    assert run_observation["data"]["runs"][0]["account_execution"]["source_kind"] == "account_metrics"
     _, log_observation = _public("runtime_logs", example_config_path)
     row = log_observation["data"]["diagnostics"][0]
     assert row["outcomes"] == {"usable_scan_result": expected, "pipeline_completed_successfully": False}
@@ -263,6 +364,7 @@ def test_positive_bundle_without_metrics_and_legacy_bot_fallback(tmp_path):
     _bundle(tmp_path, ("completed",), positive=True)
     record = project_runs.load_run_record(**_options(tmp_path))
     assert record["outcomes"] == {"usable_scan_result": True, "pipeline_completed_successfully": None}
+    assert "account_execution" not in record
     legacy = tools.model_observation("runtime_runs", {"ok": True, "data": {"runs": [{"scanned": True, "ran_pipeline": False}]}})
     assert legacy["data"]["runs"][0]["outcomes"] == {"usable_scan_result": None, "pipeline_completed_successfully": False}
 

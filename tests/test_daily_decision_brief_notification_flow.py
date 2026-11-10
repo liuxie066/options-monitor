@@ -1324,9 +1324,9 @@ def test_candidate_display_evidence_acknowledges_only_surviving_details_or_summa
         result = actual_selection(*args, **kwargs)
         if not summary_retained:
             # Simulate a transport-specific selection with the overflow summary absent.
-            summary = next(line for line in result["text"].split("\n\n") if "CSP 另有 2 个策略候选未展开" in line)
+            summary = next(line for line in result["text"].split("\n\n") if "CSP 本轮 5 个候选，入选 3 个，另有 2 个未展开" in line)
             result["text"] = result["text"].replace("\n\n" + summary, "")
-            result["markdown_blocks"] = [block for block in result["markdown_blocks"] if "CSP 另有 2 个策略候选未展开" not in block]
+            result["markdown_blocks"] = [block for block in result["markdown_blocks"] if "CSP 本轮 5 个候选，入选 3 个，另有 2 个未展开" not in block]
             result["display_evidence"] = [
                 {**item, "state": "not_shown"} if item["state"] == "summary_notified" else item
                 for item in result["display_evidence"]]
@@ -1347,7 +1347,7 @@ def test_candidate_display_evidence_acknowledges_only_surviving_details_or_summa
     represented = {identity for identity, state in evidence.items() if state != "not_shown"}
     assert set(day["alerted_candidates"]) == represented
     assert set(day["pending_candidates"]) == set(evidence) - represented
-    assert ("CSP 另有 2 个策略候选未展开" in calls[0]["message"]) is summary_retained
+    assert ("CSP 本轮 5 个候选，入选 3 个，另有 2 个未展开" in calls[0]["message"]) is summary_retained
 
 
 def test_feishu_delivery_only_retry_reuses_frozen_card_transport(monkeypatch, tmp_path: Path) -> None:

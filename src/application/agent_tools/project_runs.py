@@ -193,7 +193,8 @@ def load_run_bundle(
             raise
         check()
     identity = {"account": account, "run_id": run_id, "market": market.upper(),
-                "as_of": manifest["sealed_at_utc"], "revision": manifest["content_sha256"]}
+                "as_of": manifest["sealed_at_utc"], "revision": manifest["content_sha256"],
+                "config_revision": manifest["account_config_sha256"]}
     return {
         "manifest": {**identity, "terminal": True, "scanned": bool(bundle["status_index"]["items"]),
                      "resource_categories": ["candidate_snapshot", "status_index"],
@@ -275,12 +276,23 @@ def load_run_record(**kwargs: Any) -> dict[str, Any]:
             raise
         return load_run_metrics(**kwargs)
     try:
-        metrics = load_run_metrics(**kwargs)
+        metrics = load_run_metrics(**kwargs, expected_account_config_sha256=record["config_revision"])
     except ProjectReaderError as exc:
         if exc.code == "not_found":
             return record
         raise
     record["resource_categories"] += metrics["resource_categories"]
+    record["outcomes"] = {
+        **record["outcomes"],
+        "pipeline_completed_successfully": metrics["outcomes"]["pipeline_completed_successfully"],
+    }
+    record["account_execution"] = {
+        **{key: metrics[key] for key in (
+            "as_of", "revision", "ran_pipeline", "reason", "reason_description", "cause_available",
+        )},
+        "source_kind": "account_metrics",
+        "causal_link_to_other_records": "not_established",
+    }
     return record
 
 

@@ -181,7 +181,7 @@ def test_same_run_reproduces_repairs_verifies_and_independently_reviews_without_
             task["attempts"] = [str(record.parent / "earlier-preparation")]
         repair.save(record, task)
         repair.save(root / "issue-state.json", {"issues": {"1": {
-            "outcome": "confirmed", "target": task["base_sha"], "repair_task": task_id, "run_dir": str(run), "input_digest": "unchanged",
+            "outcome": "confirmed", "triage": {"decision": "worthwhile", "reason": "project defect", "third_party_service": False}, "target": task["base_sha"], "repair_task": task_id, "run_dir": str(run), "input_digest": "unchanged",
         }}})
         config.update({"issue_intake_ready": True, "issue_target": git(root / "repository.git", "rev-parse", "HEAD"),
                        "issue_inputs": {"1": {"input_digest": "unchanged", "assigned": False}}})
@@ -199,7 +199,7 @@ def test_same_run_reproduces_repairs_verifies_and_independently_reviews_without_
         repair.persist_findings(root, stage, {"confirmed_findings": [original_task["finding"]]}, config["issue_target"],
                                 source={"kind": "issue", "number": number, "verification_sha": config["issue_target"]})
         repair.save(root / "issue-state.json", {"issues": {"1": {
-            "outcome": "confirmed", "target": config["issue_target"], "repair_task": task_id, "input_digest": "unchanged",
+            "outcome": "confirmed", "triage": {"decision": "worthwhile", "reason": "project defect", "third_party_service": False}, "target": config["issue_target"], "repair_task": task_id, "input_digest": "unchanged",
         }}})
 
     calls, commands = [], []
@@ -227,7 +227,7 @@ def test_same_run_reproduces_repairs_verifies_and_independently_reviews_without_
         assert result_schema is repair.AUDIT_SCHEMA
         assert writable is None
         assert (tree / "tests/test_example.py").read_text().endswith("assert add(2, 1) == 3\n")
-        return {"verdict": "approve", "report_markdown": "independent review", "findings": []}
+        return {"verdict": "approve", "report_markdown": "independent review", "findings": [], "third_party_service": False}
 
     interrupted = False
     original_verify = repair.verify_tests
@@ -282,7 +282,7 @@ def stale_issue_task(tmp_path):
     task["attempts"] = [str(record.parent / "earlier-preparation")]
     repair.save(record, task)
     repair.save(root / "issue-state.json", {"issues": {"1": {
-        "outcome": "confirmed", "target": task["base_sha"], "repair_task": task_id, "input_digest": "unchanged",
+        "outcome": "confirmed", "triage": {"decision": "worthwhile", "reason": "project defect", "third_party_service": False}, "target": task["base_sha"], "repair_task": task_id, "input_digest": "unchanged",
     }}})
     config.update({"issue_intake_ready": True, "issue_target": git(root / "repository.git", "rev-parse", "HEAD"),
                    "issue_inputs": {"1": {"input_digest": "unchanged", "assigned": False}}})
@@ -296,7 +296,7 @@ def test_closed_source_target_does_not_override_active_source_target(stale_issue
     task["sources"].append({"kind": "issue", "number": 2, "verification_sha": config["issue_target"]})
     repair.save(record, task)
     state = json.loads((root / "issue-state.json").read_text())
-    state["issues"]["2"] = {"outcome": "confirmed", "repair_task": task["id"], "input_digest": "active",
+    state["issues"]["2"] = {"outcome": "confirmed", "triage": {"decision": "worthwhile", "reason": "project defect", "third_party_service": False}, "repair_task": task["id"], "input_digest": "active",
                              "target": config["issue_target"] if active_current else task["base_sha"]}
     repair.save(root / "issue-state.json", state)
     config["issue_inputs"] = {"1": {"state": "closed"},
@@ -689,7 +689,7 @@ def test_run_repairs_bounds_outer_revalidation_and_keeps_direct_single_argument_
         task["base_sha"] = config["issue_target"]
         repair.save(path, task)
         config["issue_inputs"][str(number)] = {"input_digest": "same", "assigned": False, "open": True}
-        state["issues"][str(number)] = {"outcome": "confirmed", "input_digest": "same", "repair_task": task["id"], "target": A}
+        state["issues"][str(number)] = {"outcome": "confirmed", "triage": {"decision": "worthwhile", "reason": "project defect", "third_party_service": False}, "input_digest": "same", "repair_task": task["id"], "target": A}
     repair.save(root / "issue-state.json", state)
     before_first = paths[0].read_bytes()
 
@@ -798,7 +798,7 @@ def test_local_approval_manifest_binds_tested_reviewed_content_only(tmp_path, mo
         assert stage.name == "independent-review" and verifications == ["baseline", "fixed"]
         if tamper:
             source.write_text("unreviewed content after verification\n")
-        return {"verdict": verdict, "findings": findings, "report_markdown": "independent local review evidence"}
+        return {"verdict": verdict, "findings": findings, "report_markdown": "independent local review evidence", "third_party_service": False}
 
     result = repair.run_repairs(root, config, run, time.monotonic() + 3000, invoke)
     task = json.loads(record.read_text())
@@ -914,7 +914,7 @@ def repair_delivery(tmp_path, monkeypatch):
                  "sources": [{"kind": "issue", "number": 7}], "baseline": baseline, "fixed_verification": fixed,
                  "reproduction": {"selectors": ["tests/test_example.py"], "test_paths": ["tests/test_example.py"]},
                  "verified_content": files, "approved_content_manifest": str(manifest),
-                 "independent_review": {"verdict": "approve", "findings": []},
+                 "independent_review": {"verdict": "approve", "findings": [], "third_party_service": False},
                  "implementation": {"pr_body": "Fixes #999", "pr_title": "Fixes #999"}})
     repair.save(manifest, {"task_id": task["id"], "base_sha": task["base_sha"], "branch": branch, "worktree": str(tree),
                            "files": files, "verification": fixed})
@@ -1041,7 +1041,7 @@ def test_repair_pr_publish_requires_human_head_approval_and_reuses_existing_pr(r
     assert "## 改动范围" in state["body"] and "`src/example.py`" in state["body"]
     assert "## 验证命令与结果" in state["body"] and "-m pytest -q -p no:cacheprovider tests/test_example.py" in state["body"]
     assert "exit=1" in state["body"] and "exit=0" in state["body"] and "独立审核：approve" in state["body"]
-    assert "本 PR 未合并，需人工确认" in state["body"]
+    assert "本 PR 尚未合并；须经独立逐行审查、实际验证和宿主交付门禁" in state["body"]
     assert json.loads(record.read_text())["delivery"]["head"] == head
     again = deliver(approved_head=A)
     assert not again["prs"][0]["created"] and again["merged"] == again["closed"] == []

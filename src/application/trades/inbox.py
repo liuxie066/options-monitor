@@ -2375,6 +2375,7 @@ def reconcile_settlement_attempt_invocation(
     case_id: str,
     invocation_id: str,
     audit: Mapping[str, Any] | None,
+    retry_deadline_ms: int | None = None,
 ) -> dict[str, Any]:
     """Classify restart state or finish an exact compact ledger receipt."""
 
@@ -2452,7 +2453,9 @@ def reconcile_settlement_attempt_invocation(
                 conn.commit()
                 return current
 
-            projected = _pending_settlement_control_updates(current)
+            projected = _pending_settlement_control_updates(
+                current, retry_deadline_ms=retry_deadline_ms,
+            )
             merged = {
                 **current,
                 **projected,
@@ -3066,7 +3069,7 @@ def settlement_attempt_summary(
     ]
     next_values = [
         int(row["next_attempt_at_ms"])
-        for row in provider_rows
+        for row in validated_rows
         if row["next_attempt_at_ms"] is not None
         and int(row["next_attempt_at_ms"]) > int(now_ms)
     ]
@@ -3697,6 +3700,8 @@ def _read_settlement_attempt_row(
 
 def _pending_settlement_control_updates(
     row: Mapping[str, Any],
+    *,
+    retry_deadline_ms: int | None = None,
 ) -> dict[str, Any]:
     outcome = SettlementAttemptOutcome(
         kind=str(row["pending_outcome_kind"]),
@@ -3725,6 +3730,7 @@ def _pending_settlement_control_updates(
             semantic.hex() if type(semantic) is bytes else None
         ),
         provider_attempted=True,
+        retry_deadline_ms=retry_deadline_ms,
     )
 
 
