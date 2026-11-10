@@ -17,7 +17,7 @@ import venv
 import pytest
 from packaging.requirements import Requirement
 
-from src.application import plugin_distribution as distribution, runtime_bundle, service_upgrade as upgrade
+from src.application import plugin_distribution as distribution, plugin_release as release, runtime_bundle, service_upgrade as upgrade
 from src.application.plugin_runtime import PLUGINS, plugin_store, read_managed_plugin
 from tests.plugin_release_helpers import copy_channel_core, copy_provider_core, provider_test_dependencies, wheel_files, write_wheel
 from tests.test_pm_package_upgrade import OfflineRuntime, _bundled_runtime, transition
@@ -335,6 +335,20 @@ def test_managed_selection_rotates_wheels_independently_of_config(managed_transi
         assert not result["runtime_prepare"]["dependency_context"].get("include_position_advice")
         assert not result["runtime_prepare"]["dependency_context"].get("include_feishu")
         assert not result["runtime_prepare"]["dependency_context"].get("include_wechat")
+
+
+def test_upgrade_tolerates_target_catalog_that_adds_an_unknown_official_plugin(managed_transition, monkeypatch):
+    ctx = managed_transition
+    # The shipped controller knows one fewer official plugin than the target
+    # catalog; that older code must not block the managed-plugin migration.
+    monkeypatch.setattr(release, "OFFICIAL_PLUGINS",
+                        tuple(item for item in release.OFFICIAL_PLUGINS if item[0] != "group-query-bot"))
+    result = ctx.run()
+    assert result["ok"], result
+    assert ctx.current.resolve() == ctx.target
+    assert read_managed_plugin(ctx.target, "market-opend")["om_version"] == "1.0.1"
+    wheels = [url for url in ctx.requests if url.endswith(".whl")]
+    assert len(wheels) == 1 and "om_market_opend_plugin" in wheels[0]
 
 
 @pytest.mark.parametrize("plugin_id", ["feishu", "wechat"])

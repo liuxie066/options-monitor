@@ -87,6 +87,46 @@ def test_catalog_requires_every_official_plugin(artifacts, plugin_id):
         release.validate_catalog(catalog, om_version="1.2.3")
 
 
+def _newer_release_catalog(catalog):
+    """Simulate a release catalog that adds an official plugin this code lacks."""
+    future = copy.deepcopy(catalog["plugins"][0])
+    future.update(id="future-plugin", distribution="om-future-plugin", module="om_future_plugin",
+                  asset="om_future_plugin-1.2.3-py3-none-any.whl", sha256="b" * 64, size=12345)
+    catalog["plugins"].append(future)
+    return catalog
+
+
+def test_catalog_rejects_unknown_official_plugin_for_publication(artifacts):
+    _, catalog = artifacts
+    _newer_release_catalog(catalog)
+    with pytest.raises(ValueError, match="exactly the official plugins"):
+        release.validate_catalog(catalog, om_version="1.2.3")
+
+
+def test_catalog_allow_additional_accepts_a_newer_release(artifacts):
+    _, catalog = artifacts
+    _newer_release_catalog(catalog)
+    validated = release.validate_catalog(catalog, om_version="1.2.3", allow_additional=True)
+    assert {e["id"] for e in validated["plugins"]} == {p[0] for p in release.OFFICIAL_PLUGINS}
+    assert validated["om_version"] == "1.2.3" and validated["commit"] == catalog["commit"]
+
+
+@pytest.mark.parametrize("damage", ["missing", "duplicate", "known_entry", "unknown_id"])
+def test_catalog_allow_additional_still_enforces_known_entries(artifacts, damage):
+    _, catalog = artifacts
+    _newer_release_catalog(catalog)
+    if damage == "missing":
+        catalog["plugins"].remove(next(e for e in catalog["plugins"] if e["id"] == "pm"))
+    elif damage == "duplicate":
+        catalog["plugins"].append(copy.deepcopy(catalog["plugins"][0]))
+    elif damage == "known_entry":
+        next(e for e in catalog["plugins"] if e["id"] == "feishu")["version"] = "1.2.4"
+    else:
+        catalog["plugins"][-1]["id"] = ["unhashable"]
+    with pytest.raises(ValueError):
+        release.validate_catalog(catalog, om_version="1.2.3", allow_additional=True)
+
+
 def test_publication_and_independent_selected_wheel(artifacts):
     directory, catalog = artifacts
     assert release.verify_publication(directory, tag="v1.2.3", commit="a" * 40) == catalog
