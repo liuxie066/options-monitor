@@ -711,7 +711,7 @@ def run_one_account(
                     account=acct,
                     config=cfg,
                     prepared=prepared_portfolio,
-                    now=utc_now(),
+                    now=datetime.now(timezone.utc),
                 )
                 roll_refresh_used = prepared_portfolio is not sealed_portfolio
             record_tick_latency(
