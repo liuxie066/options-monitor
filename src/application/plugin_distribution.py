@@ -90,7 +90,11 @@ def _catalog(root: Path, temporary: Path) -> tuple[dict, dict]:
     path = runtime_bundle.download_verified(url, temporary / "om-plugins.json", digest)
     if path.stat().st_size != size:
         raise ValueError("plugin catalog size mismatch")
-    catalog = validate_catalog(json.loads(path.read_text()), om_version=version)
+    # An older release orchestrates the upgrade and installs its managed
+    # plugins from the target release's catalog, which may list official
+    # plugins that release does not know yet. Validate the known entries and
+    # ignore the rest instead of blocking the upgrade.
+    catalog = validate_catalog(json.loads(path.read_text()), om_version=version, allow_additional=True)
     if (root / "om.runtime.json").exists():
         manifest = runtime_bundle.load_manifest(root)
         if manifest["commit"] != catalog["commit"]:

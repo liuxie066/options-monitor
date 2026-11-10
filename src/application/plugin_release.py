@@ -59,8 +59,15 @@ def _validate_entry(entry: dict, version: str) -> None:
         raise ValueError("invalid plugin version, compatibility or asset identity")
 
 
-def validate_catalog(data, *, om_version: str) -> dict:
-    """Validate the official catalog against the exact host OM version, without I/O."""
+def validate_catalog(data, *, om_version: str, allow_additional: bool = False) -> dict:
+    """Validate the official catalog against the exact host OM version, without I/O.
+
+    ``allow_additional`` lets an older host accept a catalog published by a
+    newer release that added official plugins it does not know yet. Known
+    entries are still fully validated and must all be present; unknown entries
+    are dropped from the returned catalog. Publication stays strict so a
+    release cannot silently ship an unregistered plugin.
+    """
     version = _package_version(om_version)
     if (not isinstance(data, dict) or type(data.get("schema_version")) is not int
             or data["schema_version"] != 1 or data.get("repository") != REPOSITORY
@@ -69,13 +76,27 @@ def validate_catalog(data, *, om_version: str) -> dict:
             or not re.fullmatch(r"[0-9a-f]{40}", data["commit"])):
         raise ValueError("invalid official plugin catalog identity or OM version mismatch")
     entries = data.get("plugins")
-    if not isinstance(entries, list) or len(entries) != len(OFFICIAL_PLUGINS):
+    if not isinstance(entries, list):
+        raise ValueError("catalog must contain exactly the official plugins")
+    filtered = False
+    if allow_additional:
+        if any(not isinstance(entry, dict) or not isinstance(entry.get("id"), str) for entry in entries):
+            raise ValueError("invalid plugin catalog entry")
+        ids = [entry["id"] for entry in entries]
+        if len(set(ids)) != len(ids):
+            raise ValueError("duplicate or missing official plugin")
+        known = {p[0] for p in OFFICIAL_PLUGINS}
+        if not known <= set(ids):
+            raise ValueError("duplicate or missing official plugin")
+        entries = [entry for entry in entries if entry["id"] in known]
+        filtered = True
+    elif len(entries) != len(OFFICIAL_PLUGINS):
         raise ValueError("catalog must contain exactly the official plugins")
     for entry in entries:
         _validate_entry(entry, version)
     if {e["id"] for e in entries} != {p[0] for p in OFFICIAL_PLUGINS}:
         raise ValueError("duplicate or missing official plugin")
-    return data
+    return {**data, "plugins": entries} if filtered else data
 
 
 def _digest(path: Path) -> str:

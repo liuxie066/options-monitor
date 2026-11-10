@@ -3,6 +3,7 @@
 Only HTTPS transport is replaced; package/receipt/import and CLI paths are real.
 """
 import base64
+import copy
 import csv
 import hashlib
 import importlib
@@ -167,6 +168,21 @@ def test_cli_list_offline_and_install_preview_has_no_persistent_effect(official,
     assert output["status"] == "preview" and output["enabled_changed"] is False
     assert not runtime.plugin_store(root).exists()
     assert len(downloads) == 2
+
+
+def test_cli_install_accepts_newer_release_catalog_with_unknown_official_plugin(official, capsys):
+    root, _, catalog, downloads = official
+    future = copy.deepcopy(catalog["plugins"][0])
+    future.update(id="future-plugin", distribution="om-future-plugin", module="om_future_plugin",
+                  asset=f"om_future_plugin-{VERSION}-py3-none-any.whl", sha256="b" * 64, size=1)
+    catalog["plugins"].append(future)
+    assert cli.main(["plugins", "install", "pm", "--confirm", "--format", "json"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "installed" and output["plugin"] == "pm"
+    assert runtime.read_managed_plugin(root, "pm")["version"] == VERSION
+    # The unknown entry is ignored: its (nonexistent) wheel is never fetched.
+    assert len(downloads) == 3
+    assert all("om_future_plugin" not in url for url in downloads)
 
 
 @pytest.mark.parametrize("plugin_id", runtime.PLUGINS)
