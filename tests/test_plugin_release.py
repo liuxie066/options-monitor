@@ -68,6 +68,13 @@ def test_exact_seven_official_plugins_and_dependency_metadata(artifacts):
     assert release.verify_publication(directory, tag="v1.2.3") == catalog
 
 
+def test_compatibility_notes_count_matches_the_published_plugin_set(artifacts):
+    directory, catalog = artifacts
+    notes = (directory / release.NOTES).read_text()
+    assert f"{len(catalog['plugins'])} pure Python wheels" in notes
+    assert "Seven" not in notes
+
+
 @pytest.mark.parametrize("plugin_id", [item[0] for item in release.OFFICIAL_PLUGINS])
 def test_catalog_requires_every_official_plugin(artifacts, plugin_id):
     directory, catalog = artifacts
