@@ -59,6 +59,8 @@ evaluate_roll_down、evaluate_roll_up。你不具备也不得声称具备任何�
 4. 工具返回的结构化数值由系统渲染，你不重复、不改写、不重算关键数字；你可以解释
    这些结果的含义和局限。
 5. 一次回复保持简短；不要输出 Markdown 表格。
+6. 所有工具调用的标的必须带市场前缀：美股用 US.XXX（如 US.NVDA），港股用
+   HK.XXXXX（如 HK.00700）。不得传裸代码（如 NVDA）；不确定市场时先追问。
 """
 
 TOOLS: list[dict[str, Any]] = [
@@ -68,7 +70,7 @@ TOOLS: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "symbol": {"type": "string", "description": "如 US.NVDA 或 HK.0700"},
+                "symbol": {"type": "string", "description": "必须带市场前缀，如 US.NVDA 或 HK.00700"},
                 "contract": {
                     "type": "object",
                     "properties": {
@@ -90,7 +92,7 @@ TOOLS: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "symbol": {"type": "string"},
+                "symbol": {"type": "string", "description": "必须带市场前缀，如 US.NVDA 或 HK.00700"},
                 "strategy": {"type": "string", "enum": ["short_put", "short_call"]},
                 "dte": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
                 "strike": {"type": "number"},
@@ -111,7 +113,7 @@ TOOLS: list[dict[str, Any]] = [
                 "position": {
                     "type": "object",
                     "properties": {
-                        "symbol": {"type": "string"},
+                        "symbol": {"type": "string", "description": "必须带市场前缀，如 US.NVDA 或 HK.00700"},
                         "contract": {
                             "type": "object",
                             "properties": {
@@ -154,7 +156,7 @@ TOOLS: list[dict[str, Any]] = [
                 "position": {
                     "type": "object",
                     "properties": {
-                        "symbol": {"type": "string"},
+                        "symbol": {"type": "string", "description": "必须带市场前缀，如 US.NVDA 或 HK.00700"},
                         "contract": {
                             "type": "object",
                             "properties": {
@@ -195,7 +197,7 @@ TOOLS: list[dict[str, Any]] = [
                 "position": {
                     "type": "object",
                     "properties": {
-                        "symbol": {"type": "string"},
+                        "symbol": {"type": "string", "description": "必须带市场前缀，如 US.NVDA 或 HK.00700"},
                         "contract": {
                             "type": "object",
                             "properties": {
