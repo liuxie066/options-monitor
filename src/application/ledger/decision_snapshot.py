@@ -18,10 +18,12 @@ from src.application.ledger.combo_membership import (
     validate_combo_group_membership,
 )
 from src.application.ledger.lifecycle_overlay import (
-    lifecycle_effective_void_target_event_ids,
     resolve_account_lifecycle_overlay,
     resolve_lifecycle_account_rows,
     validate_account_lifecycle_resolution,
+)
+from src.application.ledger.void_repair import (
+    lifecycle_effective_void_target_event_ids,
 )
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.repository_core import with_sqlite_repo_writer_lock

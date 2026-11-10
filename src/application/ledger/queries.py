@@ -13,7 +13,9 @@ from src.application.ledger.source_consumption import build_source_consumption_c
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.projection_verify import load_projection_verify_state
 from src.application.ledger.bootstrap import load_option_positions_repo
-from src.application.ledger.event_codec import valid_void_target_event_id
+from src.application.ledger.void_repair import (
+    lifecycle_effective_void_target_event_ids,
+)
 from src.application.ledger.lifecycle_overlay import (
     resolve_lifecycle_account_rows,
 )
@@ -642,13 +644,8 @@ def lifecycle_reconciliation_facts(
     )
     list_events = getattr(candidate, "list_trade_events", None)
     trade_events = list(list_events() or []) if callable(list_events) else []
-    effective_void_event_ids = sorted(
-        {
-            target
-            for item in trade_events
-            for target in [valid_void_target_event_id(item)]
-            if target
-        }
+    effective_void_event_ids = list(
+        lifecycle_effective_void_target_event_ids(trade_events)
     )
     requested_evidence = None
     requested_evidence_id = str(evidence_id or "").strip()
@@ -1115,14 +1112,8 @@ def _materialize_lifecycle_case_from_account_snapshot_index(
 
 
 def _effective_void_event_ids_from_rows(rows: dict[str, Any]) -> list[str]:
-    return sorted(
-        {
-            target
-            for item in rows.get("trade_events") or []
-            if isinstance(item, dict)
-            for target in [valid_void_target_event_id(item)]
-            if target
-        }
+    return list(
+        lifecycle_effective_void_target_event_ids(rows.get("trade_events") or [])
     )
 
 

@@ -32,9 +32,11 @@ from .writer_common import (
     resolve_allocations,
     settlement_semantic_from_evidence,
     terminal_event_id_for,
-    valid_void_target_event_id,
 )
 from src.application.payload_helpers import positive_integer as _combo_contract_count
+from src.application.ledger.void_repair import (
+    lifecycle_effective_void_target_event_ids,
+)
 
 def _existing_combo_adoption_leg(
     *,
@@ -894,15 +896,8 @@ def _effective_void_target_ids(
     *,
     conn: Any,
 ) -> tuple[str, ...]:
-    return tuple(
-        sorted(
-            {
-                target
-                for item in sqlite_repo.list_trade_events(conn=conn)
-                for target in [valid_void_target_event_id(item)]
-                if target
-            }
-        )
+    return lifecycle_effective_void_target_event_ids(
+        sqlite_repo.list_trade_events(conn=conn)
     )
 
 def _positive_lifecycle_contracts(value: Any) -> int:

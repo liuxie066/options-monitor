@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 
@@ -13,8 +12,8 @@ from src.application.ledger.lifecycle_overlay import (
     advance_direct_lifecycle_anchor_resolution,
     lifecycle_case_generation_token,
     lifecycle_case_resolution,
-    lifecycle_effective_void_target_event_ids,
     resolve_account_lifecycle_overlay,
+    resolve_lifecycle_account_rows,
 )
 from src.application.ledger.source_consumption import (
     build_source_consumption_claim,
@@ -490,8 +489,8 @@ def test_generation_token_tracks_potential_competitor_not_unrelated_case() -> No
     )
 
 
-def _contract_key() -> ContractKey:
-    return ContractKey.from_values(
+def _rows_for_repaired_close() -> dict[str, Any]:
+    contract_key = ContractKey.from_values(
         broker="富途",
         account="lx",
         underlying_symbol="AAPL",
@@ -500,159 +499,105 @@ def _contract_key() -> ContractKey:
         expiration_ymd="2026-06-19",
     )
 
+    def close(event_id: str, event_time_ms: int) -> dict[str, Any]:
+        return TradeEvent(
+            event_id=event_id,
+            event_type="close",
+            event_time_ms=event_time_ms,
+            contract_key=contract_key,
+            contracts=1,
+            price=Decimal("0.5"),
+            currency="USD",
+            source="manual",
+            multiplier=100,
+            target_lot_id="lot-1",
+            raw_payload={"side": "buy"},
+        ).to_dict()
 
-def _terminal_close(
-    event_id: str, *, event_time_ms: int = 2000, **overrides: object
-) -> TradeEvent:
-    kwargs: dict[str, object] = {
-        "event_id": event_id,
-        "event_type": "close",
-        "event_time_ms": event_time_ms,
-        "contract_key": _contract_key(),
-        "contracts": 1,
-        "price": Decimal("0.5"),
-        "currency": "USD",
-        "source": "manual",
-        "multiplier": 100,
-        "target_lot_id": "lot_open-aapl",
-        "raw_payload": {"side": "buy"},
-    }
-    kwargs.update(overrides)
-    return TradeEvent(**kwargs)
-
-
-def _repair_void(
-    event_id: str,
-    target_event_id: str,
-    repair_event_id: str | None,
-    *,
-    event_time_ms: int = 4000,
-) -> TradeEvent:
-    raw_payload: dict[str, object] = {"side": "sell"}
-    if repair_event_id is not None:
-        raw_payload["repair_event_id"] = repair_event_id
-    return TradeEvent(
-        event_id=event_id,
+    void = TradeEvent(
+        event_id="void-1",
         event_type="void",
-        event_time_ms=event_time_ms,
-        contract_key=_contract_key(),
+        event_time_ms=4000,
+        contract_key=contract_key,
         contracts=0,
         price=Decimal("0"),
         currency="USD",
         source="cli_trade_event_repair",
         multiplier=100,
-        target_event_id=target_event_id,
-        raw_payload=raw_payload,
+        target_event_id="close-original",
+        raw_payload={"side": "sell", "repair_event_id": "close-repair"},
     )
-
-
-def test_lifecycle_effective_voids_exclude_a_close_reproduced_by_its_repair() -> None:
-    original = _terminal_close("close-original")
-    replacement = _terminal_close("close-repair", event_time_ms=3000)
-    void = _repair_void("void-original", "close-original", "close-repair")
-
-    assert lifecycle_effective_void_target_event_ids(
-        [original.to_dict(), replacement.to_dict(), void.to_dict()]
-    ) == ()
-
-
-def test_lifecycle_effective_voids_keep_a_void_without_a_live_replacement() -> None:
-    original = _terminal_close("close-original")
-    void = _repair_void("void-original", "close-original", "close-missing")
-
-    assert lifecycle_effective_void_target_event_ids(
-        [original.to_dict(), void.to_dict()]
-    ) == ("close-original",)
-
-
-@pytest.mark.parametrize(
-    "replacement_overrides",
-    [
-        {"contracts": 2},
-        {"target_lot_id": "lot-other"},
-        {"event_type": "expire_close"},
-        {"contract_key": replace(_contract_key(), strike=Decimal("155"))},
-    ],
-    ids=["contracts", "lot", "event_type", "contract"],
-)
-def test_lifecycle_effective_voids_keep_a_void_whose_repair_differs(
-    replacement_overrides: dict[str, object],
-) -> None:
-    original = _terminal_close("close-original")
-    replacement = _terminal_close(
-        "close-repair", event_time_ms=3000, **replacement_overrides
+    case = _case("case-1", {"lot-1": 1}, status="waiting_settlement_evidence")
+    evidence = {
+        "evidence_id": "ev-1",
+        "case_id": "case-1",
+        "source_event_id": "futu:lx:1001:deal-1",
+        "evidence_type": "option_zero_price_close",
+        "account": "lx",
+        "futu_account_id": "1001",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "position_side": "short",
+        "strike": "100",
+        "expiration_ymd": EXPIRATION_YMD,
+        "contracts": 1,
+        "target_contracts_by_lot": {"lot-1": 1},
+        "price": "0",
+        "event_time_ms": 1_700_000_000_100,
+        "received_at_ms": 1_700_000_000_200,
+    }
+    claim = build_source_consumption_claim(
+        source_key="futu:lx:1001:deal-1",
+        case_id="case-1",
+        owner_evidence_id="ev-1",
+        source_role="option_anchor",
+        economic_payload={
+            "account": "lx",
+            "futu_account_id": "1001",
+            "symbol": "NVDA",
+            "option_type": "put",
+            "position_side": "short",
+            "strike": "100",
+            "expiration_ymd": EXPIRATION_YMD,
+            "contracts": 1,
+            "price": "0",
+            "event_time_ms": 1_700_000_000_100,
+        },
     )
-    void = _repair_void("void-original", "close-original", "close-repair")
-
-    assert lifecycle_effective_void_target_event_ids(
-        [original.to_dict(), replacement.to_dict(), void.to_dict()]
-    ) == ("close-original",)
-
-
-def test_lifecycle_effective_voids_follow_a_repaired_repair_chain() -> None:
-    original = _terminal_close("close-original")
-    first_repair = _terminal_close("close-repair-1", event_time_ms=3000)
-    second_repair = _terminal_close("close-repair-2", event_time_ms=5000)
-    first_void = _repair_void("void-1", "close-original", "close-repair-1")
-    second_void = _repair_void(
-        "void-2", "close-repair-1", "close-repair-2", event_time_ms=6000
-    )
-
-    assert lifecycle_effective_void_target_event_ids(
-        [
-            original.to_dict(),
-            first_repair.to_dict(),
-            first_void.to_dict(),
-            second_void.to_dict(),
-            second_repair.to_dict(),
-        ]
-    ) == ()
-
-
-def test_lifecycle_effective_voids_keep_a_chain_whose_repair_is_itself_dead() -> None:
-    original = _terminal_close("close-original")
-    first_repair = _terminal_close("close-repair-1", event_time_ms=3000)
-    first_void = _repair_void("void-1", "close-original", "close-repair-1")
-    second_void = _repair_void("void-2", "close-repair-1", None, event_time_ms=6000)
-
-    assert lifecycle_effective_void_target_event_ids(
-        [
-            original.to_dict(),
-            first_repair.to_dict(),
-            first_void.to_dict(),
-            second_void.to_dict(),
-        ]
-    ) == ("close-original", "close-repair-1")
+    return {
+        "account": "lx",
+        "trade_events": [
+            close("close-original", 2000),
+            close("close-repair", 3000),
+            void.to_dict(),
+        ],
+        "account_position_lots": [_lot("lot-1")],
+        "account_lifecycle_cases": [case],
+        "account_lifecycle_evidence": [evidence],
+        "account_lifecycle_allocations": [
+            {
+                "allocation_id": "alloc-1",
+                "case_id": "case-1",
+                "evidence_id": "ev-1",
+                "target_lot_id": "lot-1",
+                "terminal_type": "expire_close",
+                "canonical_terminal_event_id": "close-original",
+                "contracts_allocated": 1,
+            }
+        ],
+        "account_lifecycle_source_consumptions": [claim],
+        "account_lifecycle_timing_policies": [],
+        "account_lifecycle_evidence_received_at_ms_by_id": {
+            "ev-1": 1_700_000_000_200
+        },
+    }
 
 
-def test_lifecycle_effective_voids_keep_a_close_with_contradictory_repairs() -> None:
-    original = _terminal_close("close-original")
-    first_replacement = _terminal_close("close-repair-1", event_time_ms=3000)
-    second_replacement = _terminal_close("close-repair-2", event_time_ms=5000)
-    first_void = _repair_void("void-1", "close-original", "close-repair-1")
-    second_void = _repair_void(
-        "void-2", "close-original", "close-repair-2", event_time_ms=6000
-    )
+def test_resolve_lifecycle_account_rows_keeps_a_repaired_close_allocation() -> None:
+    resolution = resolve_lifecycle_account_rows(_rows_for_repaired_close())
+    case_resolution = resolution["case_resolutions"][0]
 
-    assert lifecycle_effective_void_target_event_ids(
-        [
-            original.to_dict(),
-            first_replacement.to_dict(),
-            second_replacement.to_dict(),
-            first_void.to_dict(),
-            second_void.to_dict(),
-        ]
-    ) == ("close-original",)
-
-
-def test_lifecycle_effective_voids_accept_two_voids_naming_the_same_repair() -> None:
-    original = _terminal_close("close-original")
-    replacement = _terminal_close("close-repair", event_time_ms=3000)
-    first_void = _repair_void("void-1", "close-original", "close-repair")
-    second_void = _repair_void(
-        "void-2", "close-original", "close-repair", event_time_ms=5000
-    )
-
-    assert lifecycle_effective_void_target_event_ids(
-        [original.to_dict(), replacement.to_dict(), first_void.to_dict(), second_void.to_dict()]
-    ) == ()
+    assert case_resolution["status"] == "direct"
+    assert case_resolution["reason_codes"] == []
+    assert case_resolution["requested_reservations_by_lot"] == {}
+    assert case_resolution["effective_reservations_by_lot"] == {}
