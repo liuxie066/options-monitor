@@ -579,7 +579,7 @@ API 服务端的显式配置是群查询公共策略的唯一选择入口。它�
 
 管理员必须创建新的飞书应用机器人，提供独立 App ID 和 App Secret；不继承已有通知或管理 bot 的绑定。新建身份是部署验收项，启动校验凭据与配置的应用身份一致；若有已登记的旧应用 ID，可核对不是同一应用，不能声称仅靠凭据校验就证明应用刚刚新建。
 
-沿用现有飞书插件长连接，无需公网事件回调地址。首版只开通接收 @消息和回复所需权限，服务端同时检查授权群及真实 mention 身份。
+沿用现有飞书插件长连接，无需公网事件回调地址。首版只开通接收 @消息和回复所需权限，服务端按配置检查群范围及真实 mention 身份：默认是显式群白名单，也可配置唯一通配 `["*"]`，此时群范围完全由飞书侧「谁可邀请 bot 入群」控制；通配不能与具体群 ID 混用，任何情况下都必须 @ 当前 bot。
 
 SDK 事件适配需保留 mentions，并在业务处理前核对目标是当前新 bot；不能只从文本删除 @标签。来自其他群、未 @当前 bot 或缺少身份信息的事件，不进入模型与查询 API。
 
@@ -621,7 +621,7 @@ SDK 事件适配需保留 mentions，并在业务处理前核对目标是当前�
 feishu:
   app_id: <NEW_FEISHU_APP_ID>
   app_secret_ref: group_query_bot.feishu.app_secret
-  allowed_chat_ids: [<AUTHORIZED_CHAT_ID>]
+  allowed_chat_ids: [<AUTHORIZED_CHAT_ID>]  # 或唯一通配 ["*"]，由飞书侧邀请权限控制群范围
 model:
   provider: <REGISTERED_PROVIDER>
   model: <MODEL_ID>

@@ -54,7 +54,8 @@ def normalize_sdk_event(payload: object, expected_app_id: str,
         raise EventRejected("unsupported_event")
     if not expected_app_id or header.get("app_id") != expected_app_id:
         raise EventRejected("wrong_app")
-    if message.get("chat_type") != "group" or message.get("chat_id") not in allowed_chat_ids:
+    if message.get("chat_type") != "group" or (
+            allowed_chat_ids != ("*",) and message.get("chat_id") not in allowed_chat_ids):
         raise EventRejected("unauthorized_chat")
     tenant = _text(header.get("tenant_key"))
     sender_open_id = _text(sender_id.get("open_id"))

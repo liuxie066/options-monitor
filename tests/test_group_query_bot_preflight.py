@@ -73,7 +73,7 @@ def test_preview_uses_explicit_config_without_secret_network_or_writes(tmp_path,
     assert not Path(raw["data_dir"]).exists()
 
 
-@pytest.mark.parametrize("case", ["unknown", "model", "query_api", "secret", "wrong_ref", "empty_app", "empty_chats", "duplicate_chats", "relative_dir", "missing"])
+@pytest.mark.parametrize("case", ["unknown", "model", "query_api", "secret", "wrong_ref", "empty_app", "empty_chats", "duplicate_chats", "wildcard_mixed", "relative_dir", "missing"])
 def test_strict_preflight_config_rejects_other_features_and_credentials(tmp_path, case):
     path, raw = config_file(tmp_path)
     if case in {"unknown", "model", "query_api"}:
@@ -88,6 +88,8 @@ def test_strict_preflight_config_rejects_other_features_and_credentials(tmp_path
         raw["feishu"]["allowed_chat_ids"] = []
     elif case == "duplicate_chats":
         raw["feishu"]["allowed_chat_ids"] *= 2
+    elif case == "wildcard_mixed":
+        raw["feishu"]["allowed_chat_ids"] = ["*", "chat_allowed"]
     elif case == "relative_dir":
         raw["data_dir"] = "data"
     else:
@@ -96,6 +98,25 @@ def test_strict_preflight_config_rejects_other_features_and_credentials(tmp_path
     with pytest.raises(ValueError):
         run_preflight(path)
     assert not (tmp_path / "data").exists()
+
+
+def test_sole_wildcard_chat_scope_accepts_any_group(tmp_path):
+    path, raw = config_file(tmp_path)
+    raw["feishu"]["allowed_chat_ids"] = ["*"]
+    path.write_text(json.dumps(raw))
+    settings = load_preflight_settings(path)
+    assert settings.allowed_chat_ids == ("*",)
+    payload = event()
+    payload["event"]["message"]["chat_id"] = "oc_other_group"
+    normalized = normalize_sdk_event(payload, "app_new", "bot_new", settings.allowed_chat_ids)
+    assert normalized.chat_id == "oc_other_group"
+
+
+def test_concrete_chat_scope_still_rejects_other_groups():
+    payload = event()
+    payload["event"]["message"]["chat_id"] = "oc_other_group"
+    with pytest.raises(EventRejected, match="unauthorized_chat"):
+        normalize_sdk_event(payload, "app_new", "bot_new", ("chat_allowed",))
 
 
 def test_duplicate_json_fields_are_rejected(tmp_path):
