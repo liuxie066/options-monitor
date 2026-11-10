@@ -136,7 +136,11 @@ def duplicate_measure(token_files, selected=None, window=50, minimum_lines=10):
             if pair not in groups:
                 groups[pair] = candidate("duplicate", owner, f"{other}|{path}|{signature.hex()}", line,
                     f"{right - left} identical tokens: {other}:{other_rows[other_left][1]} / {path}:{rows[left][1]}",
-                    tool="entropy-token-v1")
+                    high=True, tool="entropy-token-v1", facts={"token_count": right - left,
+                        "token_digest": digest(words[left:right]),
+                        "locations": [{"path": other, "start": other_rows[other_left][1],
+                                       "end": other_rows[other_right - 1][1]},
+                                      {"path": path, "start": rows[left][1], "end": rows[right - 1][1]}]})
                 groups[pair]["key"] = stable_key("duplicate", f"{other}|{path}", signature.hex())
     total = sum(len(rows) for path, rows in token_files.items() if path in selected)
     repeated = sum(len(positions) for positions in covered.values())
@@ -197,7 +201,10 @@ def scan(root: Path, selected: list[str], coverage=None):
             cc = complexity(node)
             scores.append(cc)
             if cc > 10:
-                findings.append(candidate("complexity", path, name, node.lineno, f"cyclomatic complexity={cc} >10"))
+                findings.append(candidate("complexity", path, name, node.lineno,
+                    f"cyclomatic complexity={cc} >10", high=True,
+                    facts={"complexity": cc, "threshold": 10,
+                           "source_digest": digest(ast.dump(node, include_attributes=False))}))
             if id(node) not in top or not node.name.startswith("_") or node.name.startswith("__"):
                 continue
             if words[node.name] == 1:
@@ -212,6 +219,7 @@ def scan(root: Path, selected: list[str], coverage=None):
                          if runtime and span and span <= measured else None,
                          "not_public_api": node.name not in public if public is not None else None,
                          "not_entry_point": None if dynamic or node.decorator_list else True}
+                facts["source_digest"] = digest(ast.dump(node, include_attributes=False))
                 findings.append(candidate("dead-code", path, name, node.lineno,
                     f"AST/text reference count=0; gates={facts}", high=dead_code(facts), facts=facts))
             body = list(node.body)

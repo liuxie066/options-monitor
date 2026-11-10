@@ -18,8 +18,10 @@ import time
 import uuid
 
 if __package__:
+    from . import code_entropy_assessment as assessment
     from . import code_entropy_scan as scan
 else:
+    import code_entropy_assessment as assessment
     import code_entropy_scan as scan
 
 DEFAULT_STATE = Path.home() / "Library/Application Support/options-monitor/code-entropy-review"
@@ -60,13 +62,16 @@ def run_lock(state):
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def command(argv, cwd, log, timeout):
+def command(argv, cwd, log, timeout, *, input_text=None):
     if timeout <= 0:
         raise TimeoutError("scan budget exhausted")
     with log.open("w") as stdout, log.with_suffix(".stderr").open("w") as stderr:
-        process = subprocess.Popen(argv, cwd=cwd, stdout=stdout, stderr=stderr, start_new_session=True)
+        process = subprocess.Popen(argv, cwd=cwd, stdout=stdout, stderr=stderr, start_new_session=True,
+                                   stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+                                   text=True)
         try:
-            code = process.wait(timeout=timeout)
+            process.communicate(input=input_text, timeout=timeout)
+            code = process.returncode
         except BaseException:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
@@ -190,6 +195,62 @@ def deliver(candidates, state, config, sha, execute):
     return published
 
 
+def automatic_review(source, findings, state, config, output, sha, coverage, execute):
+    options = config.get("auto_review", {})
+    if not isinstance(options, dict):
+        raise ValueError("auto_review must be an object")
+    if options.get("enabled") is not True:
+        return findings, {"enabled": False}
+    client = Path(options.get("client", ""))
+    timeout = options.get("timeout_seconds", 240)
+    model = options.get("model", "opus")
+    if not client.is_absolute() or not client.is_file():
+        raise ValueError("auto_review.client must name an existing absolute Claude executable; no installation attempted")
+    if type(timeout) is not int or not 1 <= timeout <= 300 or not isinstance(model, str) or not model.strip():
+        raise ValueError("invalid auto_review model or timeout (1..300 seconds)")
+    deliver([], state, config, sha, execute)
+    decisions = read_json(state / "decisions.json", {})
+    ledger = read_json(state / "issues.json", {})
+    queue = read_json(state / "review-queue.json", {})
+    assessment.enqueue(queue, findings, decisions, ledger)
+    write_json(state / "review-queue.json", queue)
+    before = json.loads(json.dumps(decisions))
+
+    def invoke(packet, schema):
+        write_json(output / "review-request.json", packet)
+        write_json(output / "review-schema.json", schema)
+        work = output / "review-work"
+        work.mkdir()
+        argv = [str(client), "--print", "--safe-mode", "--tools", "",
+                "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+                "--no-session-persistence", "--permission-mode", "dontAsk",
+                "--output-format", "json", "--json-schema", json.dumps(schema),
+                "--system-prompt", assessment.SYSTEM, "--model", model]
+        result = execute(argv, cwd=work, input_text=json.dumps(packet, ensure_ascii=False), timeout=timeout)
+        if result["exit_code"]:
+            raise RuntimeError("automatic entropy reviewer failed; queue retained and daily cursor not advanced")
+        envelope = json.loads(result["text"])
+        write_json(output / "review-response.json", envelope)
+        if not isinstance(envelope, dict) or envelope.get("is_error") is not False or envelope.get("subtype") != "success":
+            raise ValueError("automatic reviewer did not return a successful structured result")
+        return envelope.get("structured_output")
+
+    ready, summary = assessment.assess(source, findings, queue, decisions, ledger, options, invoke,
+                                      sha=sha, coverage=coverage)
+    for key, decision in decisions.items():
+        if decision != before.get(key):
+            decision["at"] = now()
+            decision.setdefault("history", []).append({"action": "auto-" + decision["review_decision"],
+                "at": decision["at"], "run_id": output.name, "evidence_digest": decision["reviewed_evidence"],
+                "reason": decision["reason"], "model": model, "policy_version": assessment.POLICY_VERSION})
+    write_json(state / "decisions.json", decisions)
+    write_json(state / "review-queue.json", queue)
+    write_json(output / "reviewed-candidates.json", ready)
+    summary.update(enabled=True, model=model, timeout_seconds=timeout)
+    write_json(output / "assessment.json", summary)
+    return list({row["key"]: row for row in [*findings, *ready]}.values()), summary
+
+
 def tool_command(name):
     import importlib.util
     import shutil
@@ -266,15 +327,16 @@ def run_scan(state, mode, *, publish=False, coverage_manifest=None, timeout_seco
               "baseline_version": 1, "baseline_digest": baseline, "algorithm": scan.VERSION,
               "budget_seconds": budget, "base_sha": cursor["sha"] if cursor else None,
               "metrics": None, "gaps": [], "python": sys.executable, "commands": []}
-    source_files = [Path(__file__), Path(scan.__file__), Path(scan.__file__).with_name("guardrails_check.py")]
+    source_files = [Path(__file__), Path(scan.__file__), Path(assessment.__file__), Path(scan.__file__).with_name("guardrails_check.py")]
     record["scanner_digest"] = scan.digest({path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in source_files})
     record["python_version"] = sys.version.split()[0]
     write_json(output / "progress.json", record)
 
-    def execute(argv, cwd=None):
+    def execute(argv, cwd=None, *, input_text=None, timeout=300):
         log = output / f"{len(record['commands']):03d}.stdout"
         remaining = budget - (time.monotonic() - started)
-        result = command(argv, cwd or state, log, min(remaining, 300))
+        options = {"input_text": input_text} if input_text is not None else {}
+        result = command(argv, cwd or state, log, min(remaining, timeout, 300), **options)
         record["commands"].append(result)
         write_json(output / "progress.json", record)
         return {**result, "text": log.read_text(errors="replace")}
@@ -355,12 +417,22 @@ def run_scan(state, mode, *, publish=False, coverage_manifest=None, timeout_seco
             if coverage is not None and metrics["dead_code_symbols"] is None:
                 record["gaps"].append("Dead-code gates remain unproven (partial coverage, public API or dynamic entry): confirmation is null.")
             record["gaps"].append("Dynamic config consumers are not excluded: confirmed unused config is null.")
-            record["published_issues"] = deliver(findings, state, config, sha, execute) if publish else []
+            delivery_findings = findings
+            if publish:
+                record["stage"] = "candidate-assessment"
+                record["auto_review"] = {"status": "running"}
+                write_json(output / "progress.json", record)
+                delivery_findings, record["auto_review"] = automatic_review(
+                    source, findings, state, config, output, sha, coverage, execute)
+                record["auto_review"]["status"] = "complete"
+            record["published_issues"] = deliver(delivery_findings, state, config, sha, execute) if publish else []
             ledger = read_json(state / "issues.json", {})
             record["pending_issues"] = [key for key, value in ledger.items() if value["status"] == "pending"]
             record["status"] = "complete"
     except Exception as error:
         record["status"] = "failed"
+        if record.get("auto_review", {}).get("status") == "running":
+            record["auto_review"]["status"] = "failed"
         record["gaps"].append(f"{type(error).__name__}: {error}")
     record["finished_at"] = now()
     record["elapsed_seconds"] = round(time.monotonic() - started, 3)
@@ -407,6 +479,7 @@ def record_decision(state, action, key, reason, run_id=None):
         decision["muted"] = action == "mute"
         if action == "unmute":
             decision.pop("accepted_evidence", None)
+            decision.pop("reviewed_evidence", None)
     decision.update(reason=reason, at=now())
     decision.setdefault("history", []).append({"action": action, "reason": reason, "at": now()})
     write_json(state / "decisions.json", decisions)
