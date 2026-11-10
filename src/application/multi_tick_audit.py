@@ -86,6 +86,41 @@ def daily_brief_phase(phase: str, *, operation: str) -> Iterator[None]:
         _emit_daily_brief_phase(runlog, outcome, data=terminal, duration_ms=duration_ms)
 
 
+def daily_brief_checkpoint(
+    phase: str, *, operation: str, started: float | None,
+) -> None:
+    """Record elapsed time between two checkpoints inside an already-timed phase.
+
+    A checkpoint is terminal-only: it pairs with the previous checkpoint (or
+    the phase start), carries ``checkpoint: true`` so it is not mistaken for
+    the closing event of a ``daily_brief_phase`` pair, and is a no-op outside
+    account preparation. Diagnostic failures never affect the measured code.
+    """
+    scope = _daily_brief_timing.get()
+    if scope is None:
+        return
+    runlog, account, market = scope
+    duration_ms = None
+    if started is not None:
+        try:
+            duration_ms = max(0, int((monotonic() - started) * 1000))
+        except Exception:
+            pass
+    _emit_daily_brief_phase(
+        runlog,
+        "ok",
+        data={
+            "account": account,
+            "market": market,
+            "phase": phase,
+            "operation": operation,
+            "outcome": "ok",
+            "checkpoint": True,
+        },
+        duration_ms=duration_ms,
+    )
+
+
 @contextmanager
 def daily_brief_timing_scope(*, runlog: Any, account: str, market: str) -> Iterator[None]:
     """Bind telemetry to one account; never retain it across preparation calls."""

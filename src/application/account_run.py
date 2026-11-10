@@ -42,6 +42,7 @@ from src.application.multi_tick.misc import (
     _safe_runlog_data,
     ensure_account_output_dir,
 )
+from src.application.multi_tick_audit import record_tick_latency
 from src.application.tick_run_workspace import (
     AccountRunConfigAuthority,
     AccountRunConfigError,
@@ -633,12 +634,14 @@ def run_one_account(
         duration_ms=acct_metrics["pipeline_ms"],
         data=_safe_runlog_data({"account": acct}),
     )
+    t_post_pipeline = monotonic()
 
     prepared_option_context: dict[str, Any] | None = None
     if (
         not request.experience
         and request.prepared_option_positions_context_manifest is not None
     ):
+        t_stage = monotonic()
         try:
             prepared_option_context = load_prepared_option_positions_context(
                 manifest_path=(
@@ -657,6 +660,12 @@ def run_one_account(
             )
         except PreparedOptionPositionsContextError as exc:
             return _prepared_option_integrity_failure(exc)
+        record_tick_latency(
+            runlog=runlog,
+            stage="account_prepared_option_context",
+            started=t_stage,
+            data={"account": acct},
+        )
 
     experience_report_path = (acct_report_dir / "experience_report.md").resolve()
     text = (
@@ -669,6 +678,7 @@ def run_one_account(
     if not request.experience and bool(close_advice_cfg.get("enabled", False)):
         try:
             prepared_portfolio = None
+            t_stage = monotonic()
             if request.prepared_portfolio_context_manifest is not None:
                 try:
                     prepared_portfolio = load_prepared_portfolio_context(
@@ -683,7 +693,19 @@ def run_one_account(
                     # A missing stock proof blocks CC rolls, while close/Put advice
                     # can still use the independently sealed option evidence.
                     prepared_portfolio = None
-            if prepared_portfolio is not None and _has_open_short_call(prepared_option_context):
+            record_tick_latency(
+                runlog=runlog,
+                stage="account_prepared_portfolio_context",
+                started=t_stage,
+                data={"account": acct, "loaded": prepared_portfolio is not None},
+            )
+            t_stage = monotonic()
+            roll_refresh_gate = prepared_portfolio is not None and _has_open_short_call(
+                prepared_option_context
+            )
+            roll_refresh_used = False
+            if roll_refresh_gate:
+                sealed_portfolio = prepared_portfolio
                 prepared_portfolio = _refresh_roll_portfolio_context(
                     base=request.base,
                     account=acct,
@@ -691,6 +713,18 @@ def run_one_account(
                     prepared=prepared_portfolio,
                     now=utc_now(),
                 )
+                roll_refresh_used = prepared_portfolio is not sealed_portfolio
+            record_tick_latency(
+                runlog=runlog,
+                stage="account_roll_portfolio_refresh",
+                started=t_stage,
+                data={
+                    "account": acct,
+                    "gate": roll_refresh_gate,
+                    "refreshed": roll_refresh_used,
+                },
+            )
+            t_stage = monotonic()
             raw_close_result = run_close_advice(
                 config=cfg,
                 context_path=(acct_state_dir / "option_positions_context.json").resolve(),
@@ -711,6 +745,12 @@ def run_one_account(
                 required_data_snapshot_manifest_sha256=(
                     request.required_data_snapshot_sha256
                 ),
+            )
+            record_tick_latency(
+                runlog=runlog,
+                stage="account_close_advice",
+                started=t_stage,
+                data={"account": acct},
             )
             close_result: dict[str, Any] = raw_close_result if isinstance(raw_close_result, dict) else {}
             snapshot_authority_invalid = (
@@ -796,6 +836,12 @@ def run_one_account(
     acct_metrics["should_notify"] = bool(should_notify)
     acct_metrics["reason"] = str(reason)
     _write_account_metrics_state()
+    record_tick_latency(
+        runlog=runlog,
+        stage="account_post_pipeline",
+        started=t_post_pipeline,
+        data={"account": acct},
+    )
     return AccountRunOutcome(
         result=AccountResult(acct, True, False if request.experience else bool(should_notify), reason, text),
         acct_metrics=acct_metrics,

@@ -1107,7 +1107,8 @@ def test_run_one_account_reuses_validated_close_inputs_without_legacy_text_proje
 
     monkeypatch.setattr(env["mod"], "run_close_advice", _run_close_advice)
 
-    outcome = _run_account(request, env, _FakeRunlog(), _allow_schema_validation)
+    runlog = _FakeRunlog()
+    outcome = _run_account(request, env, runlog, _allow_schema_validation)
 
     assert observed["context_override"] == validated_context
     assert observed["portfolio_context_override"] == portfolio
@@ -1118,6 +1119,29 @@ def test_run_one_account_reuses_validated_close_inputs_without_legacy_text_proje
     assert observed["required_data_snapshot_manifest_sha256"] == "b" * 64
     assert outcome.result.notification_text == ""
     assert not (request.accounts_root / "lx" / "reports" / "symbols_notification.txt").exists()
+    stage_events = {
+        event["data"]["stage"]: event
+        for event in runlog.events
+        if event["step"] == "tick_latency" and event["status"] == "ok"
+    }
+    assert list(stage_events) == [
+        "account_prepared_option_context",
+        "account_prepared_portfolio_context",
+        "account_roll_portfolio_refresh",
+        "account_close_advice",
+        "account_post_pipeline",
+    ]
+    assert stage_events["account_prepared_portfolio_context"]["data"]["loaded"] is True
+    assert stage_events["account_roll_portfolio_refresh"]["data"] == {
+        "stage": "account_roll_portfolio_refresh",
+        "account": "lx",
+        "gate": False,
+        "refreshed": False,
+    }
+    assert all(
+        isinstance(event["duration_ms"], int)
+        for event in stage_events.values()
+    )
 
 
 @pytest.mark.parametrize("decision,expected", [
