@@ -1,7 +1,7 @@
 """Public candidate policy and shared close economics without account reads."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -397,3 +397,187 @@ def test_scenario_response_carries_design_identity_and_evidence(tmp_path, monkey
                                      "tenant", "chat", "sender", None)),
                              now_utc=NOW)
     assert stored["binding"]["binding_sha256"] == data["binding_sha256"]
+
+
+def _spot_only_bundle():
+    """The real spot-only plan shape: no fetch requests, one observation."""
+    from src.application.opend_symbol_chain_fetching import (
+        OptionExpirationDiscoveryResult,
+    )
+    from src.application.opening_quote_evidence import (
+        OPENING_UNDERLIER_OBSERVATION_SCHEMA,
+        OpeningUnderlierObservation,
+    )
+    from src.application.required_data_planning import RequiredDataFetchPlanBundle
+
+    observation = OpeningUnderlierObservation(
+        schema_version=OPENING_UNDERLIER_OBSERVATION_SCHEMA, code="US.NVDA",
+        market="US", last_price=185.0, update_time=NOW.isoformat(),
+        observed_at_utc=NOW.isoformat(), age_seconds=0.0, market_state="NORMAL",
+        sec_status="NORMAL", suspension=False, status="ready", reason_code=None)
+    discovery = OptionExpirationDiscoveryResult(
+        outcome="success_rows", reason_code=None, expirations=["2026-12-18"],
+        observed_at_utc=(NOW - timedelta(seconds=3)).isoformat(),
+        completed_at_utc=(NOW - timedelta(seconds=2)).isoformat(),
+        request_identity={"symbol": "NVDA", "underlier": "US.NVDA",
+                          "source": "opend", "host": "127.0.0.1", "port": 11111,
+                          "trading_date": NOW.date().isoformat()})
+    return RequiredDataFetchPlanBundle(
+        symbol="NVDA", spot_reference=185.0, side_plans=[], merged_specs=[],
+        underlier_observation=observation, expiration_discovery=discovery,
+        projection_outcome="success_rows", projected_expirations=["2026-12-18"])
+
+
+def test_spot_only_plan_is_not_forced_through_the_fetch_contract(tmp_path, monkeypatch):
+    from test_group_query_bot_api import _body, _service
+
+    import om_group_query_bot.business as business
+    from src.application.required_data_plan_identity import (
+        build_required_data_expected_fetch_contract,
+    )
+
+    service, recorder = _service(tmp_path)
+    bundle = _spot_only_bundle()
+    # The shared validator rejects this real shape; the spot-only path must
+    # bypass it rather than turn a valid quote into a 503.
+    with pytest.raises(ValueError, match="success-rows required-data plan lacks fetch requests"):
+        build_required_data_expected_fetch_contract(
+            symbol="NVDA", fetch_plan=bundle.to_debug_dict(),
+            source=business._fetch_source(service.settings),
+            host=service.settings.quote_host, port=service.settings.quote_port)
+    monkeypatch.setattr(business, "build_required_data_fetch_plan",
+                        lambda **kwargs: bundle)
+    envelope, status = service.handle("query_quotes", _body({"symbol": "US.NVDA"}))
+    assert status == 200
+    data = envelope["data"]
+    assert data["underlier"]["spot"] == 185.0
+    assert data["currency"] == "USD"
+    assert data["underlier"]["currency"] == "USD"
+    assert data["option"] is None
+    assert data["quote_status"] == "current"
+    plan_id = data["evidence"]["plan_id"]
+    assert len(plan_id) == 64 and all(ch in "0123456789abcdef" for ch in plan_id)
+    assert recorder.calls == []
+
+
+def test_spot_quote_received_during_the_fetch_is_current_not_future(tmp_path, monkeypatch):
+    from test_group_query_bot_api import _body, _service
+
+    service, _recorder = _service(tmp_path)
+    clock = [NOW]
+    service.business._now = lambda: clock[0]
+    plan = _fake_plan({"fetch_plan": {}, "expected_fetch_contract": {},
+                       "global_required_data_plan": {"plan_id": "p"}})
+    received = NOW + timedelta(seconds=1)
+    def slow_fetch(**kwargs):
+        clock[0] = NOW + timedelta(seconds=2)
+        return ([{"symbol": "NVDA", "underlier_code": "NVDA", "meta": {},
+                  "rows": [{"last_price": 185.0, "spot": 185.0,
+                            "snapshot_received_at_utc": received.isoformat()}]}], plan)
+    monkeypatch.setattr(service.business, "_fetch", slow_fetch)
+    envelope, status = service.handle("query_quotes", _body({"symbol": "US.NVDA"}))
+    assert status == 200
+    data = envelope["data"]
+    assert data["quote_status"] == "current"
+    assert "quote_snapshot_future" not in data["missing_requirements"]
+    assert data["requested_at_utc"] == NOW.isoformat()
+    assert data["evaluated_at_utc"] == (NOW + timedelta(seconds=2)).isoformat()
+
+
+def test_candidates_judge_fx_and_candidates_after_their_fetches(tmp_path, monkeypatch):
+    from test_group_query_bot_api import _body, _service
+    from src.infrastructure.exchange_rates import rates_for_purpose
+    from domain.domain.performance.cash_conversion import TENCENT_EXCHANGE_RATE_SOURCE
+
+    service, _recorder = _service(tmp_path)
+    clock = [NOW]
+    service.business._now = lambda: clock[0]
+    plan = _fake_plan({"fetch_plan": {}, "expected_fetch_contract": {},
+                       "global_required_data_plan": {"plan_id": "p"}, "symbol": "NVDA"})
+    captured = {}
+    def slow_fetch(**kwargs):
+        clock[0] = NOW + timedelta(seconds=2)
+        return ([{"symbol": "NVDA", "underlier_code": "NVDA", "meta": {}, "rows": []}], plan)
+    fx_quote_at = NOW + timedelta(seconds=1)
+    def fake_rates(settings, now, budget):
+        captured["rates_clock"] = now
+        return {"pairs": {"USDCNY": {
+            "rate": 7.1, "source": TENCENT_EXCHANGE_RATE_SOURCE,
+            "quote_at_utc": fx_quote_at.isoformat(),
+            "observed_at_utc": fx_quote_at.isoformat()}}}
+    def fake_evaluate(prepared, merged, fx, index, now):
+        captured["evaluate_clock"] = now
+        captured["fx"] = fx
+        return {"outcome": "unable", "reason_codes": []}
+    monkeypatch.setattr(service.business, "_fetch", slow_fetch)
+    service.business.dependencies = Dependencies(
+        fetch_symbol=service.business.dependencies.fetch_symbol,
+        exchange_rates=fake_rates)
+    monkeypatch.setattr("om_group_query_bot.business.evaluate_public_candidates",
+                        fake_evaluate)
+    envelope, status = service.handle(
+        "query_candidates",
+        _body({"symbol": "US.NVDA", "strategy": "short_put", "limit": 5}))
+    assert status == 200
+    assert captured["rates_clock"] == NOW + timedelta(seconds=2)
+    assert captured["evaluate_clock"] == NOW + timedelta(seconds=2)
+    assert rates_for_purpose(captured["fx"], purpose="capacity",
+                             now=captured["evaluate_clock"]) == {"USDCNY": 7.1}
+    assert envelope["data"]["evaluated_at_utc"] == (NOW + timedelta(seconds=2)).isoformat()
+
+
+def test_default_exchange_rates_lets_the_snapshot_sample_its_own_clock(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from test_group_query_bot_api import _settings
+    import om_group_query_bot.business as business
+
+    captured = {}
+    monkeypatch.setattr(business, "current_exchange_rate_snapshot",
+                        lambda **kwargs: captured.update(kwargs) or {})
+    dependencies = Dependencies.defaults()
+    settings = _settings(tmp_path)
+    deps = dependencies.exchange_rates(
+        settings, NOW, SimpleNamespace(deadline_monotonic=None, expired=lambda: False))
+    assert deps == {}
+    assert "now" not in captured
+    assert captured["write_cache"] is False
+
+
+def test_candidates_reprepare_after_a_fetch_crossing_market_midnight(tmp_path, monkeypatch):
+    from test_group_query_bot_api import _body, _service
+
+    service, _recorder = _service(tmp_path)
+    request_clock = datetime(2026, 11, 11, 4, 59, 59, tzinfo=timezone.utc)  # 23:59:59 New York
+    eval_clock = datetime(2026, 11, 11, 5, 0, 1, tzinfo=timezone.utc)       # 00:00:01 New York
+    clock = [request_clock]
+    service.business._now = lambda: clock[0]
+    plan = _fake_plan({"fetch_plan": {}, "expected_fetch_contract": {},
+                       "global_required_data_plan": {"plan_id": "p"}})
+    def slow_fetch(**kwargs):
+        clock[0] = eval_clock
+        return ([{"symbol": "NVDA", "underlier_code": "NVDA", "meta": {},
+                  "rows": []}], plan)
+    monkeypatch.setattr(service.business, "_fetch", slow_fetch)
+    service.business.dependencies = Dependencies(
+        fetch_symbol=service.business.dependencies.fetch_symbol,
+        exchange_rates=lambda settings, now, budget: {})
+    envelope, status = service.handle(
+        "query_candidates",
+        _body({"symbol": "US.NVDA", "strategy": "short_put", "limit": 5}))
+    assert status == 200
+    assert "date_changed" not in envelope["data"]["reason_codes"]
+
+
+def test_contract_quotes_still_fail_closed_without_fetch_requests(tmp_path, monkeypatch):
+    from test_group_query_bot_api import _body, _service
+    import om_group_query_bot.business as business
+
+    service, _recorder = _service(tmp_path)
+    monkeypatch.setattr(business, "build_required_data_fetch_plan",
+                        lambda **kwargs: _spot_only_bundle())
+    envelope, status = service.handle("query_quotes", _body({
+        "symbol": "US.NVDA",
+        "contract": {"option_type": "put", "expiration": "2026-12-18",
+                     "strike": 180.0}}))
+    assert status == 503
+    assert envelope["error"]["code"] == "DEPENDENCY_UNAVAILABLE"

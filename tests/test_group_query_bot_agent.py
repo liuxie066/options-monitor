@@ -379,6 +379,24 @@ def test_only_the_five_fixed_tools_exist_and_unknown_calls_are_refused(tmp_path)
     assert "未执行实时查询" in reply.text
 
 
+def test_all_symbol_inputs_require_a_market_prefix():
+    from om_group_query_bot.agent import SYSTEM_PROMPT
+
+    assert "不得传裸代码" in SYSTEM_PROMPT
+    symbol_fields = []
+    def walk(schema):
+        for name, prop in (schema.get("properties") or {}).items():
+            if name == "symbol":
+                symbol_fields.append(prop)
+            elif isinstance(prop, dict) and "properties" in prop:
+                walk(prop)
+    for tool in TOOLS:
+        walk(tool["input_schema"])
+    assert len(symbol_fields) == 5
+    assert all("必须带市场前缀" in field.get("description", "")
+               for field in symbol_fields)
+
+
 def test_host_request_identity_is_not_model_supplied(tmp_path):
     model = _ScriptedModel([
         _tool_response("query_quotes", {"symbol": "US.NVDA",

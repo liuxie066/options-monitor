@@ -1,0 +1,40 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.27",
+  "base": {
+    "tag": "v4.6.26",
+    "commit": "081149547950ec4d8b7e604c79ec7395fabd3bbc"
+  },
+  "reviewed_head": "b38453dd9f3025563b91f3fc84b06e583cfc2db4",
+  "commits": [
+    {
+      "sha": "b38453dd9f3025563b91f3fc84b06e583cfc2db4",
+      "subject": "fix(group-query-bot): keep spot quotes and post-fetch evidence current (#1107)"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "群查询bot 的纯正股现价查询改用 spot-only 计划自身的证据，不再被「必须包含取数请求」的期望契约拒绝而返回服务不可用；行情、汇率与场景证据按取数完成后的时钟判断新鲜度，取数期间收到的数据不再被误判为未来时间；候选查询在取数后按评估时钟重新准备，跨市场本地午夜的查询不再误报日期变化；正股报价补齐币种。（#1107）。",
+      "commits": [
+        "b38453dd9f3025563b91f3fc84b06e583cfc2db4"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "群查询bot 的工具调用要求标的带市场前缀（如 `US.NVDA` / `HK.00700`），避免模型传入裸代码导致输入错误。（#1107）。",
+      "commits": [
+        "b38453dd9f3025563b91f3fc84b06e583cfc2db4"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "b38453dd9f3025563b91f3fc84b06e583cfc2db4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1107"
+      ]
+    }
+  ]
+}
