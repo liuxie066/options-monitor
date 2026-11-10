@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -1150,3 +1151,100 @@ def test_terminal_skip_marker_requires_positive_account_scheduler_decision(
     metrics = json.loads(path.read_text())
     assert (metrics.get("scan_outcome") == "scheduler_skipped") is expected
     assert (outcome.acct_metrics.get("scan_outcome") == "scheduler_skipped") is expected
+
+
+def _position_snapshot_context(observed: datetime, *, errors: list[str] | None = None) -> dict:
+    return {
+        "position_snapshot_input": {
+            "observed_at_utc": observed.isoformat(),
+            "errors": list(errors or []),
+        }
+    }
+
+
+def test_roll_portfolio_refresh_replaces_a_stale_sealed_snapshot(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    from src.application import account_run as module
+
+    now = datetime(2026, 11, 10, 6, 34, tzinfo=timezone.utc)
+    prepared = _position_snapshot_context(now - timedelta(seconds=250))
+    refreshed = _position_snapshot_context(now - timedelta(seconds=2))
+    calls: list[dict[str, Any]] = []
+
+    def load(**kwargs):
+        calls.append(kwargs)
+        return refreshed
+
+    monkeypatch.setattr(module, "load_account_portfolio_context", load)
+    assert module._refresh_roll_portfolio_context(
+        base=tmp_path, account="lx", config={"portfolio": {"broker": "富途"}},
+        prepared=prepared, now=now,
+    ) is refreshed
+    assert calls
+    assert calls[0]["load_json_fn"](None) is None
+    assert calls[0]["write_cache"] is False
+    assert calls[0]["required_position_asset_types"] == ("stock",)
+    # The account's configured source, not a hardcoded provider.
+    assert calls[0]["portfolio_source"] == "auto"
+    # No empty FX observation: the live fetch's own rates must survive.
+    assert "exchange_rate_observation" not in calls[0]
+
+
+def test_roll_portfolio_refresh_skips_a_fresh_sealed_snapshot(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    from src.application import account_run as module
+
+    now = datetime(2026, 11, 10, 6, 34, tzinfo=timezone.utc)
+    prepared = _position_snapshot_context(now - timedelta(seconds=30))
+
+    def fail(**_kwargs):
+        raise AssertionError("a fresh sealed snapshot must not trigger a live refresh")
+
+    monkeypatch.setattr(module, "load_account_portfolio_context", fail)
+    assert module._refresh_roll_portfolio_context(
+        base=tmp_path, account="lx", config={"portfolio": {"broker": "富途"}},
+        prepared=prepared, now=now,
+    ) is prepared
+
+
+@pytest.mark.parametrize("failure", ["raises", "errors", "stale"])
+def test_roll_portfolio_refresh_keeps_the_sealed_snapshot_when_live_fails(
+    monkeypatch, tmp_path: Path, failure: str,
+) -> None:
+    from src.application import account_run as module
+
+    now = datetime(2026, 11, 10, 6, 34, tzinfo=timezone.utc)
+    prepared = _position_snapshot_context(now - timedelta(seconds=250))
+
+    def load(**_kwargs):
+        if failure == "raises":
+            raise RuntimeError("opend unavailable")
+        if failure == "errors":
+            return _position_snapshot_context(now - timedelta(seconds=2), errors=["snapshot_invalid"])
+        return _position_snapshot_context(now - timedelta(seconds=120))
+
+    monkeypatch.setattr(module, "load_account_portfolio_context", load)
+    assert module._refresh_roll_portfolio_context(
+        base=tmp_path, account="lx", config={"portfolio": {"broker": "富途"}},
+        prepared=prepared, now=now,
+    ) is prepared
+
+
+def test_roll_portfolio_refresh_gate_requires_an_open_short_call() -> None:
+    from src.application import account_run as module
+
+    assert module._has_open_short_call({
+        "open_positions_min": [
+            {"option_type": "put", "side": "short", "contracts_open": 1},
+            {"option_type": "call", "side": "short", "contracts_open": 2},
+        ],
+    })
+    assert not module._has_open_short_call({
+        "open_positions_min": [
+            {"option_type": "put", "side": "short", "contracts_open": 1},
+            {"option_type": "call", "side": "long", "contracts_open": 1},
+        ],
+    })
+    assert not module._has_open_short_call(None)

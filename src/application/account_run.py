@@ -3,10 +3,10 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from domain.domain.engine import (
     AccountSchedulerDecisionView,
@@ -17,11 +17,16 @@ from domain.domain.engine import (
 from domain.domain.intermediate_objects import Decision, SchemaValidationError
 from domain.domain.multi_tick import decide_should_notify
 from domain.domain.tool_boundary import normalize_pipeline_subprocess_output
-from src.application.account_config import build_account_runtime_config as build_account_runtime_config
+from src.application.account_config import (
+    build_account_portfolio_source_plan as build_account_portfolio_source_plan,
+    build_account_runtime_config as build_account_runtime_config,
+)
 from src.application.config_sections import (
     resolve_watchlist_config,
 )
 from src.application.close_advice_runner import run_close_advice
+from src.application.futu_portfolio_context import fetch_futu_portfolio_context
+from src.application.portfolio_context_service import load_account_portfolio_context
 from src.application.prepared_portfolio_context import (
     PreparedPortfolioContextError,
     load_prepared_portfolio_context,
@@ -45,6 +50,7 @@ from src.application.tick_run_workspace import (
 )
 from src.application.experience_mode import experience_fields
 
+from domain.storage import paths
 from domain.storage.repositories import run_repo, state_repo
 from domain.storage.no_follow import UnsafePathError
 
@@ -94,6 +100,106 @@ class AccountRunOutcome:
     acct_metrics: dict[str, Any]
     prefetch_done: bool
     ran_pipeline: bool
+
+
+_ROLL_PORTFOLIO_REFRESH_AGE_SECONDS = 120
+_ROLL_PORTFOLIO_REFRESH_MAX_AGE_SECONDS = 60
+
+
+def _roll_portfolio_snapshot_age_seconds(
+    context: Mapping[str, Any], *, now: datetime,
+) -> float | None:
+    snapshot = context.get("position_snapshot_input")
+    if not isinstance(snapshot, Mapping):
+        return None
+    observed = snapshot.get("observed_at_utc") or snapshot.get("observed_at")
+    if observed is None:
+        return None
+    try:
+        value = datetime.fromisoformat(str(observed).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return (now - value).total_seconds()
+
+
+def _has_open_short_call(context: Mapping[str, Any] | None) -> bool:
+    """Covered-call roll advice is the only consumer of the refreshed stock proof."""
+    if not isinstance(context, Mapping):
+        return False
+    rows = context.get("open_positions_min")
+    if not isinstance(rows, list):
+        return False
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if row.get("option_type") != "call" or row.get("side") != "short":
+            continue
+        try:
+            contracts = int(row.get("contracts_open") or 0)
+        except (TypeError, ValueError):
+            continue
+        if contracts > 0:
+            return True
+    return False
+
+
+def _refresh_roll_portfolio_context(
+    *,
+    base: Path,
+    account: str,
+    config: Mapping[str, Any],
+    prepared: Mapping[str, Any] | None,
+    now: datetime,
+) -> Mapping[str, Any] | None:
+    """Re-observe stock holdings when the sealed snapshot is near the roll window edge.
+
+    Covered-call roll advice is actionable only while its position snapshot is
+    fresh. The sealed snapshot is observed at the start of the scan, so by the
+    time close advice runs it can have consumed most of the 300s window. Refresh
+    it at the point of use; the sealed context stays the fallback when the live
+    observation is unavailable or itself fails validation.
+    """
+    if not isinstance(prepared, Mapping):
+        return prepared
+    age = _roll_portfolio_snapshot_age_seconds(prepared, now=now)
+    if age is None or age < _ROLL_PORTFOLIO_REFRESH_AGE_SECONDS:
+        return prepared
+    portfolio_cfg = config.get("portfolio")
+    broker = str(
+        (portfolio_cfg if isinstance(portfolio_cfg, Mapping) else {}).get("broker") or "富途"
+    )
+    try:
+        source = build_account_portfolio_source_plan(
+            dict(config), account=account,
+        ).requested_source
+        refreshed = load_account_portfolio_context(
+            market=broker,
+            account=account,
+            state_dir=paths.account_state_dir(Path(base), account),
+            log=lambda _: None,
+            runtime_config=dict(config),
+            portfolio_source=str(source),
+            fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
+            load_json_fn=lambda _: None,
+            write_cache=False,
+            required_position_asset_types=("stock",),
+            now_utc=now,
+        )
+    except Exception:
+        return prepared
+    refreshed_age = _roll_portfolio_snapshot_age_seconds(refreshed, now=now)
+    snapshot = refreshed.get("position_snapshot_input")
+    if (
+        not isinstance(snapshot, Mapping)
+        or refreshed.get("errors")
+        or snapshot.get("errors")
+        or refreshed_age is None
+        or refreshed_age > _ROLL_PORTFOLIO_REFRESH_MAX_AGE_SECONDS
+    ):
+        return prepared
+    return refreshed
 
 
 def _pipeline_account_config_error_code(output: str) -> str | None:
@@ -577,6 +683,14 @@ def run_one_account(
                     # A missing stock proof blocks CC rolls, while close/Put advice
                     # can still use the independently sealed option evidence.
                     prepared_portfolio = None
+            if prepared_portfolio is not None and _has_open_short_call(prepared_option_context):
+                prepared_portfolio = _refresh_roll_portfolio_context(
+                    base=request.base,
+                    account=acct,
+                    config=cfg,
+                    prepared=prepared_portfolio,
+                    now=utc_now(),
+                )
             raw_close_result = run_close_advice(
                 config=cfg,
                 context_path=(acct_state_dir / "option_positions_context.json").resolve(),
