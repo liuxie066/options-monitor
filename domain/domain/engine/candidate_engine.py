@@ -784,12 +784,16 @@ def calculate_opening_candidate_metrics(
     return out
 
 
-def _delta_qualification_rejects(row: dict[str, Any], *, mode: StrategyMode, max_abs_delta: Any) -> list[dict[str, Any]]:
+def _delta_qualification_rejects(
+    row: dict[str, Any], *, mode: StrategyMode, max_abs_delta: Any,
+    min_abs_delta: Any = None,
+) -> list[dict[str, Any]]:
     cap = validate_max_abs_delta(
         row.get("policy_max_abs_delta", DEFAULT_MAX_ABS_DELTA)
         if max_abs_delta is _MAX_ABS_DELTA_UNSET else max_abs_delta
     )
-    if cap is None:
+    floor = validate_max_abs_delta(min_abs_delta)
+    if cap is None and floor is None:
         return []
     raw = row.get("delta")
     try:
@@ -827,22 +831,28 @@ def _delta_qualification_rejects(row: dict[str, Any], *, mode: StrategyMode, max
             elif age > 300:
                 reason = "delta_snapshot_receipt_stale"
     rejects: list[dict[str, Any]] = []
-    if reason or abs(value) > cap:
+    magnitude = abs(value) if value is not None else None
+    above_cap = magnitude is not None and cap is not None and magnitude > cap
+    below_floor = magnitude is not None and floor is not None and magnitude < floor
+    if reason or above_cap or below_floor:
         _reject(rejects, stage=STAGE_RISK_FILTER,
                 reason=REJECT_RISK_DELTA_UNAVAILABLE if reason else REJECT_RISK_DELTA,
-                message="Delta evidence is unavailable" if reason else "absolute Delta exceeds configured maximum",
+                message=("Delta evidence is unavailable" if reason else
+                         "absolute Delta is outside the configured range" if floor is not None
+                         else "absolute Delta exceeds configured maximum"),
                 metric_value={"delta": value, "reason_code": reason,
                               "source": _first_text(row, "delta_source") or None,
                               "unit": _first_text(row, "delta_unit") or None,
                               "snapshot_received_at_utc": _first_text(row, "snapshot_received_at_utc") or None,
                               "decision_now_utc": _first_text(row, "decision_now_utc") or None},
-                threshold=cap)
+                threshold=cap if cap is not None else floor)
     return rejects
 
 
 def opening_qualification_rejects(
     row: dict[str, Any], *, mode: StrategyMode | str, min_net_premium_cny: float | None,
     max_abs_delta: Any = _MAX_ABS_DELTA_UNSET,
+    min_abs_delta: Any = None,
 ) -> list[dict[str, Any]]:
     """Shared capacity, required value and earnings-evidence invariants."""
     mode_norm = normalize_strategy_mode(mode)
@@ -908,7 +918,8 @@ def opening_qualification_rejects(
             metric_value=earnings_evidence["metric_value"],
             threshold="ready",
         )
-    rejects.extend(_delta_qualification_rejects(src, mode=mode_norm, max_abs_delta=max_abs_delta))
+    rejects.extend(_delta_qualification_rejects(
+        src, mode=mode_norm, max_abs_delta=max_abs_delta, min_abs_delta=min_abs_delta))
     return rejects
 
 
@@ -944,6 +955,7 @@ def evaluate_opening_candidate_policy(
     min_iv_minus_rv: float | None = None,
     max_spread_ratio: float | None = None,
     max_abs_delta: Any = _MAX_ABS_DELTA_UNSET,
+    min_abs_delta: Any = None,
     require_earnings_evidence: bool = True,
     reject_known_earnings: bool = True,
     apply_default_call_strike_cap: bool = True,
@@ -1071,7 +1083,8 @@ def evaluate_opening_candidate_policy(
         )
 
     qualification = opening_qualification_rejects(
-        src, mode=mode_norm, min_net_premium_cny=resolved_min_net_premium_cny, max_abs_delta=max_abs_delta,
+        src, mode=mode_norm, min_net_premium_cny=resolved_min_net_premium_cny,
+        max_abs_delta=max_abs_delta, min_abs_delta=min_abs_delta,
     )
     if check_capacity:
         rejects.extend(item for item in qualification if item["reason"] in (REJECT_HARD_CAPACITY_PUT, REJECT_HARD_CAPACITY_CALL))

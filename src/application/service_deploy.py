@@ -27,6 +27,9 @@ from src.application.platform_profile import default_runtime_root_for_service_ta
 from src.application.secret_store import (
     FEISHU_BOT_APP_SECRET,
     FEISHU_HOLDINGS_APP_SECRET,
+    GROUP_QUERY_BOT_FEISHU_APP_SECRET,
+    GROUP_QUERY_BOT_LLM_API_KEY,
+    GROUP_QUERY_BOT_QUERY_API_TOKEN,
     INBOUND_OPERATION_HMAC_KEY,
     credential_spec,
     legacy_secret_env_names,
@@ -272,7 +275,57 @@ def _service_slug(value: str) -> str:
     return slug or "account"
 
 
-def managed_systemd_unit_names(*, accounts: list[str]) -> set[str]:
+def _normalize_group_query_bot_instances(
+    value: list[dict[str, Any]] | None,
+    *,
+    base: Path,
+) -> list[dict[str, str]]:
+    """Explicit, default-empty instance set; config paths are never secret values."""
+    if not value:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("group_query_bot_instances must be a list")
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    seen_units: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"instance_id", "bot_config", "api_config"}:
+            raise ValueError(
+                "each group_query_bot instance requires instance_id, bot_config and api_config")
+        raw_instance_id = item["instance_id"]
+        if not isinstance(raw_instance_id, str) or not raw_instance_id.strip():
+            raise ValueError("group_query_bot instance_id must be a nonempty string")
+        instance_id = raw_instance_id.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", instance_id):
+            raise ValueError("group_query_bot instance_id must be a bounded identifier")
+        if instance_id in seen:
+            raise ValueError("group_query_bot instance ids must be unique")
+        seen.add(instance_id)
+        units = _group_query_bot_unit_names({"instance_id": instance_id})
+        if seen_units.intersection(units):
+            raise ValueError(
+                "group_query_bot instance ids must produce distinct unit names")
+        seen_units.update(units)
+        for key in ("bot_config", "api_config"):
+            if not isinstance(item[key], (str, Path)) or not str(item[key]).strip():
+                raise ValueError(
+                    f"group_query_bot {key} must be a nonempty path string")
+        bot_config = _absolute_path_preserve_symlink(item["bot_config"], base=base)
+        api_config = _absolute_path_preserve_symlink(item["api_config"], base=base)
+        out.append({"instance_id": instance_id,
+                    "bot_config": str(bot_config),
+                    "api_config": str(api_config)})
+    return out
+
+
+def _group_query_bot_unit_names(instance: dict[str, str]) -> tuple[str, str]:
+    slug = _service_slug(instance["instance_id"])
+    return (f"options-monitor-group-query-bot-{slug}.service",
+            f"options-monitor-group-query-api-{slug}.service")
+
+
+def managed_systemd_unit_names(*, accounts: list[str],
+                               group_query_bot_instance_ids: list[str] | tuple[str, ...] = ()) -> set[str]:
     """Reserved product names, including retired units; never a prefix wildcard."""
     timers = set(_SHARED_TIMER_NAMES) | {
         f"options-monitor-{task}-{market}.timer"
@@ -293,6 +346,11 @@ def managed_systemd_unit_names(*, accounts: list[str]) -> set[str]:
     } | {
         f"options-monitor-opend-{_service_slug(account)}.service"
         for account in accounts if isinstance(account, str) and account.strip()
+    } | {
+        f"options-monitor-group-query-{role}-{_service_slug(instance_id)}.service"
+        for instance_id in group_query_bot_instance_ids
+        if isinstance(instance_id, str) and instance_id.strip()
+        for role in ("bot", "api")
     }
 
 
@@ -605,6 +663,7 @@ def _systemd_secret_bindings(
     bot_credential_name: str | None,
     feature_configs: dict[str, dict[str, Any]] | None = None,
     inbound_operations_enabled: bool = False,
+    group_query_bot_units: dict[str, tuple[str, ...]] | None = None,
 ) -> dict[str, tuple[str, ...]]:
     available = set(service_names)
     bindings: dict[str, list[str]] = {}
@@ -616,6 +675,9 @@ def _systemd_secret_bindings(
         for logical_name in logical_names:
             if logical_name and logical_name not in bucket:
                 bucket.append(logical_name)
+
+    for service_name, logical_names in sorted((group_query_bot_units or {}).items()):
+        bind(service_name, *logical_names)
 
     for service_name in sorted(available):
         if service_name.startswith("options-monitor-tick-") and service_name.endswith(".service"):
@@ -947,7 +1009,18 @@ def build_service_profile(
     quality_monitoring: dict[str, Any] | None = None,
     feishu_agent_credential: dict[str, Any] | None = None,
     secret_credentials: dict[str, Any] | None = None,
+    group_query_bot_instances: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    group_query_bot_instances_value = _normalize_group_query_bot_instances(
+        group_query_bot_instances, base=Path(repo_root))
+    service_names = list(service_names)
+    if target == "systemd":
+        # launchd already contributes its labels through the renderer; adding
+        # systemd unit names there would record units that are never installed.
+        for instance in group_query_bot_instances_value:
+            for unit_name in _group_query_bot_unit_names(instance):
+                if unit_name not in service_names:
+                    service_names.append(unit_name)
     restartable_services = [
         name
         for name in service_names
@@ -960,6 +1033,7 @@ def build_service_profile(
                 or "trade-intake" in str(name)
                 or "feishu-ws" in str(name)
                 or "wechat-clawbot" in str(name)
+                or "group-query-" in str(name)
             )
         )
     ]
@@ -981,6 +1055,8 @@ def build_service_profile(
         "config_paths": {key: str(value) for key, value in config_paths.items()},
         "services": [{"name": name} for name in service_names],
     }
+    if group_query_bot_instances_value:
+        profile["group_query_bot_instances"] = group_query_bot_instances_value
     if bot_config_path is not None:
         profile["bot_config_path"] = str(bot_config_path)
     if config_authoring is not None:
@@ -1066,6 +1142,7 @@ def render_service_bundle(
     feishu_holdings_credential_store: str | Path | None = None,
     feishu_agent_credential_env_file: str | Path | None = None,
     include_content: bool = True,
+    group_query_bot_instances: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if type(timeout_seconds) is not int or timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be a positive integer")
@@ -1081,6 +1158,8 @@ def render_service_bundle(
         raise ValueError("per-unit encrypted credentials and the legacy Feishu env materializer are mutually exclusive")
     repo = _absolute_path_preserve_symlink(repo_root or Path.cwd())
     runtime = _resolve_path(runtime_root, base=repo, default=default_runtime_root(target_key))
+    group_query_instances = _normalize_group_query_bot_instances(
+        group_query_bot_instances, base=repo)
     env_file_path = (
         _resolve_path(env_file, base=repo, default=Path())
         if env_file is not None and str(env_file).strip()
@@ -1253,6 +1332,52 @@ def render_service_bundle(
         )
         if service_name:
             service_names.append(service_name)
+
+    if target_key == "systemd":
+        for instance in group_query_instances:
+            bot_unit, api_unit = _group_query_bot_unit_names(instance)
+            add(
+                f"systemd/{bot_unit}",
+                _systemd_unit(
+                    description=f"Options Monitor group query bot ({instance['instance_id']})",
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    env_file=env_file_path,
+                    deploy_user=systemd_user,
+                    deploy_home=systemd_home,
+                    exec_args=[om, "group-query-bot", "serve",
+                               "--config", instance["bot_config"], "--confirm"],
+                    service_type="simple",
+                    restart="always",
+                    timeout_start_sec=60,
+                    timeout_stop_sec=30,
+                    syslog_level_prefix=True,
+                ),
+                install_path=f"/etc/systemd/system/{bot_unit}",
+                kind="systemd_service",
+                service_name=bot_unit,
+            )
+            add(
+                f"systemd/{api_unit}",
+                _systemd_unit(
+                    description=f"Options Monitor group query API ({instance['instance_id']})",
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    env_file=env_file_path,
+                    deploy_user=systemd_user,
+                    deploy_home=systemd_home,
+                    exec_args=[om, "group-query-bot", "api-serve",
+                               "--config", instance["api_config"]],
+                    service_type="simple",
+                    restart="always",
+                    timeout_start_sec=60,
+                    timeout_stop_sec=30,
+                    syslog_level_prefix=True,
+                ),
+                install_path=f"/etc/systemd/system/{api_unit}",
+                kind="systemd_service",
+                service_name=api_unit,
+            )
 
     if target_key == "systemd":
         for market in market_values:
@@ -1804,11 +1929,21 @@ def render_service_bundle(
                     bot_credential_name = None
                 effective = build_effective_env(environ={}, env_file=env_file_path)
                 inbound_operations_enabled = str(effective.get("OM_INBOUND_OPERATIONS_ENABLED")).lower() in {"1", "true", "yes"}
+            group_query_units: dict[str, tuple[str, ...]] = {}
+            for instance in group_query_instances:
+                bot_unit, api_unit = _group_query_bot_unit_names(instance)
+                group_query_units[bot_unit] = (
+                    GROUP_QUERY_BOT_FEISHU_APP_SECRET,
+                    GROUP_QUERY_BOT_LLM_API_KEY,
+                    GROUP_QUERY_BOT_QUERY_API_TOKEN,
+                )
+                group_query_units[api_unit] = (GROUP_QUERY_BOT_QUERY_API_TOKEN,)
             secret_credential_bindings = _systemd_secret_bindings(
                 service_names=service_names,
                 bot_credential_name=bot_credential_name,
                 feature_configs=feature_configs,
                 inbound_operations_enabled=inbound_operations_enabled,
+                group_query_bot_units=group_query_units,
             )
             secret_deploy_user = str(systemd_user or "root")
             for consumer, logical_names in secret_credential_bindings.items():
@@ -2170,6 +2305,46 @@ def render_service_bundle(
                 service_name=wechat_label,
             )
 
+    if target_key == "launchd":
+        for instance in group_query_instances:
+            bot_unit, api_unit = _group_query_bot_unit_names(instance)
+            bot_label = "com.options-monitor." + bot_unit.removesuffix(".service")
+            api_label = "com.options-monitor." + api_unit.removesuffix(".service")
+            add(
+                f"launchd/{bot_label}.plist",
+                _launchd_plist(
+                    label=bot_label,
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    program_args=[om, "group-query-bot", "serve",
+                                  "--config", instance["bot_config"], "--confirm"],
+                    log_root=log_root,
+                    env_file=env_file_path,
+                    keep_alive=True,
+                    run_at_load=True,
+                ),
+                install_path=f"~/Library/LaunchAgents/{bot_label}.plist",
+                kind="launchd_plist",
+                service_name=bot_label,
+            )
+            add(
+                f"launchd/{api_label}.plist",
+                _launchd_plist(
+                    label=api_label,
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    program_args=[om, "group-query-bot", "api-serve",
+                                  "--config", instance["api_config"]],
+                    log_root=log_root,
+                    env_file=env_file_path,
+                    keep_alive=True,
+                    run_at_load=True,
+                ),
+                install_path=f"~/Library/LaunchAgents/{api_label}.plist",
+                kind="launchd_plist",
+                service_name=api_label,
+            )
+
     profile = build_service_profile(
         target=target_key,
         repo_root=repo,
@@ -2244,6 +2419,7 @@ def render_service_bundle(
             },
             "legacy_env_materializer_enabled": False,
         } if include_secret_credentials else None,
+        group_query_bot_instances=group_query_instances or None,
     )
     profile_content = json.dumps(profile, ensure_ascii=False, indent=2) + "\n"
     add(
@@ -2865,6 +3041,10 @@ def render_service_bundle_from_profile(
     )
     secret_credentials_raw = profile.get("secret_credentials")
     secret_credentials = secret_credentials_raw if isinstance(secret_credentials_raw, dict) else {}
+    group_query_bot_instances_raw = profile.get("group_query_bot_instances")
+    group_query_bot_instances = (
+        group_query_bot_instances_raw if isinstance(group_query_bot_instances_raw, list) else []
+    )
     services = _service_names_from_profile(profile)
     include_auto_upgrade = bool(
         isinstance(profile.get("auto_upgrade"), dict)
@@ -2954,6 +3134,7 @@ def render_service_bundle_from_profile(
             or DEFAULT_FEISHU_AGENT_CREDENTIAL_ENV_FILE
         ),
         "include_content": True,
+        "group_query_bot_instances": group_query_bot_instances or None,
     }
     bundle = render_service_bundle(**render_kwargs)
     expected_profile = _bundle_profile(bundle)

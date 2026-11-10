@@ -75,6 +75,37 @@ class CloseAdviceInput:
     input_as_of_utc: str | None = None
 
 
+@dataclass(frozen=True)
+class UserProvidedCloseAdviceInput:
+    """Account-free close scenario input; economics match CloseAdviceInput."""
+
+    symbol: str
+    option_type: str
+    side: str
+    expiration: str | None
+    strike: float | None
+    contracts_open: int | None
+    premium: float | None
+    bid: float | None = None
+    ask: float | None = None
+    dte: int | None = None
+    multiplier: float | None = None
+    spot: float | None = None
+    currency: str | None = None
+    original_dte: int | None = None
+    estimated_open_fee: float | None = None
+    estimated_close_fee: float | None = None
+    fee_calc_status: str | None = None
+    fee_calc_basis: str | None = None
+    delta: float | None = None
+    remaining_trading_sessions: int | None = None
+    remaining_trading_sessions_min: int | None = None
+    remaining_trading_sessions_max: int | None = None
+    input_source: str = "user_provided"
+    input_id: str | None = None
+    input_as_of_utc: str | None = None
+
+
 class PositionAdviceUnavailableError(RuntimeError):
     """The optional evaluator is absent or cannot be loaded."""
 
@@ -98,6 +129,29 @@ def require_position_advice_plugin() -> Any:
 def evaluate_close_advice(inp: CloseAdviceInput) -> dict[str, Any]:
     """Evaluate through the installed optional policy, loaded on first use."""
     return require_position_advice_plugin().evaluate_close_advice(inp)
+
+
+def _optional_user_scenario_entry(name: str):
+    plugin = require_position_advice_plugin()
+    entry = getattr(plugin, name, None)
+    if not callable(entry):
+        raise PositionAdviceUnavailableError(
+            "POSITION_ADVICE_UNAVAILABLE: installed package lacks the user-provided scenario entry"
+        )
+    return entry
+
+
+def evaluate_user_provided_close_advice(inp: UserProvidedCloseAdviceInput) -> dict[str, Any]:
+    """Account-free close scenario through the installed plugin's shared economics."""
+    return _optional_user_scenario_entry("evaluate_user_provided_close_advice")(inp)
+
+
+def evaluate_user_provided_short_put_roll(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    return _optional_user_scenario_entry("evaluate_user_provided_short_put_roll")(*args, **kwargs)
+
+
+def evaluate_conditional_covered_call_roll(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    return _optional_user_scenario_entry("evaluate_conditional_covered_call_roll")(*args, **kwargs)
 
 
 def sort_advice_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

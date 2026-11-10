@@ -2618,10 +2618,12 @@ def _provider_catalog_supported(release_dir: Path) -> bool:
         catalog = ast.literal_eval(value)
         present = set(PROVIDER_PLUGINS) & set(catalog)
         if not present:
+            # A release predating the provider packages only carries the plugins
+            # that existed then, so today's catalog may be a strict superset.
             legacy = set(PLUGINS) - set(PROVIDER_PLUGINS)
-            if set(catalog) != legacy or any(
+            if not catalog or not set(catalog) <= legacy or any(
                 any(catalog[key].get(field) != PLUGINS[key][field] for field in ("distribution", "module"))
-                for key in legacy
+                for key in catalog
             ):
                 raise ValueError("unrecognized legacy plugin catalog")
             return False

@@ -14,13 +14,17 @@ class EnvSecretProvider:
     def __init__(self, environ: Mapping[str, str]):
         self._environ = environ
 
-    def _env_name(self, logical_name: str, legacy_env_name: str | None) -> str:
+    def _env_name(self, logical_name: str, legacy_env_name: str | None) -> str | None:
         spec = require_credential_spec(logical_name)
+        if not spec.legacy_env_names:
+            return None
         override = str(legacy_env_name or "").strip()
         return override or spec.legacy_env_names[0]
 
     def get(self, logical_name: str, *, legacy_env_name: str | None = None) -> str | None:
         env_name = self._env_name(logical_name, legacy_env_name)
+        if env_name is None:
+            return None
         value = str(self._environ.get(env_name) or "").strip()
         return value or None
 

@@ -21,6 +21,7 @@ PLUGINS = {
     "position-advice": {"distribution": "om-position-advice-plugin", "module": "om_position_advice_plugin", "source": "position-advice"},
     "feishu": {"distribution": "om-feishu-channel-plugin", "module": "om_feishu_channel", "source": "feishu-channel"},
     "wechat": {"distribution": "om-wechat-channel-plugin", "module": "om_wechat_channel", "source": "wechat-channel"},
+    "group-query-bot": {"distribution": "om-group-query-bot-plugin", "module": "om_group_query_bot", "source": "group-query-bot"},
     "market-opend": {"distribution": "om-market-opend-plugin", "module": "om_market_opend", "source": "market-opend", "kind": "market"},
     "broker-futu": {"distribution": "om-broker-futu-plugin", "module": "om_broker_futu", "source": "broker-futu"},
     "broker-longbridge": {"distribution": "om-broker-longbridge-plugin", "module": "om_broker_longbridge", "source": "broker-longbridge"},
@@ -149,6 +150,8 @@ def validate_plugin_import(plugin_id: str) -> None:
         assert callable(importlib.import_module(module + ".bot").send_message)
         assert callable(importlib.import_module(module + ".ws_client").start_feishu_ws_client)
         validate_feishu_sdk()
+    elif plugin_id == "group-query-bot":
+        assert callable(importlib.import_module(module + ".cli").run_preflight)
     elif plugin_id == "wechat":
         assert callable(importlib.import_module(module + ".ilink_client").WechatClawbotClient)
     elif plugin_id == "market-opend":

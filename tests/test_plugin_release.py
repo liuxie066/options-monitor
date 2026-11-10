@@ -51,6 +51,7 @@ def test_exact_seven_official_plugins_and_dependency_metadata(artifacts):
         "position-advice": ("om-position-advice-plugin", "om_position_advice_plugin"),
         "feishu": ("om-feishu-channel-plugin", "om_feishu_channel"),
         "wechat": ("om-wechat-channel-plugin", "om_wechat_channel"),
+        "group-query-bot": ("om-group-query-bot-plugin", "om_group_query_bot"),
         "market-opend": ("om-market-opend-plugin", "om_market_opend"),
         "broker-futu": ("om-broker-futu-plugin", "om_broker_futu"),
         "broker-longbridge": ("om-broker-longbridge-plugin", "om_broker_longbridge"),
@@ -304,7 +305,7 @@ def test_isolated_build_versions_source_copy_without_network(tmp_path, monkeypat
     monkeypatch.setattr(release.subprocess, "run", pip_wheel)
     output = tmp_path / "output"
     catalog = release.build(source=source, output=output)
-    assert len(calls) == 7 and all(not p.exists() for p in calls)
+    assert len(calls) == 8 and all(not p.exists() for p in calls)
     assert release.verify_publication(output, tag="v1.2.3", commit="a" * 40) == catalog
     assert {p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()} == originals
     assert "Source/pip" in (output / release.NOTES).read_text()

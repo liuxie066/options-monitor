@@ -10,6 +10,9 @@ LLM_KIMI_API_KEY = "llm.kimi.api_key"
 FEISHU_HOLDINGS_APP_SECRET = "feishu.holdings.app_secret"
 FEISHU_BOT_APP_SECRET = "feishu.bot.app_secret"
 INBOUND_OPERATION_HMAC_KEY = "inbound.operation_hmac_key"
+GROUP_QUERY_BOT_FEISHU_APP_SECRET = "group_query_bot.feishu.app_secret"
+GROUP_QUERY_BOT_LLM_API_KEY = "group_query_bot.llm.api_key"
+GROUP_QUERY_BOT_QUERY_API_TOKEN = "group_query_bot.query_api.token"
 
 _RETIRED_LEGACY_SECRET_ENV_NAMES = frozenset({"OM_COPILOT_CURSOR_HMAC_KEY", "OM_QUALITY_READ_TOKEN"})
 
@@ -88,6 +91,27 @@ _SPECS = (
         ),
     ),
     CredentialSpec(
+        GROUP_QUERY_BOT_FEISHU_APP_SECRET,
+        "om-group-query-bot-feishu-app-secret",
+        (),
+        "dedicated group-query bot Feishu authentication",
+        ("options-monitor-group-query-bot-*.service",),
+    ),
+    CredentialSpec(
+        GROUP_QUERY_BOT_LLM_API_KEY,
+        "om-group-query-bot-llm-api-key",
+        (),
+        "dedicated group-query bot model authentication",
+        ("options-monitor-group-query-bot-*.service",),
+    ),
+    CredentialSpec(
+        GROUP_QUERY_BOT_QUERY_API_TOKEN,
+        "om-group-query-bot-query-api-token",
+        (),
+        "dedicated group-query bot loopback API authentication",
+        ("options-monitor-group-query-bot-*.service", "options-monitor-group-query-api-*.service"),
+    ),
+    CredentialSpec(
         INBOUND_OPERATION_HMAC_KEY,
         "om-inbound-operation-hmac-key",
         ("OM_INBOUND_OPERATION_HMAC_KEY",),
@@ -123,6 +147,9 @@ def legacy_secret_env_names() -> frozenset[str]:
 __all__ = [
     "CREDENTIAL_SPECS",
     "CredentialSpec",
+    "GROUP_QUERY_BOT_FEISHU_APP_SECRET",
+    "GROUP_QUERY_BOT_LLM_API_KEY",
+    "GROUP_QUERY_BOT_QUERY_API_TOKEN",
     "FEISHU_BOT_APP_SECRET",
     "FEISHU_HOLDINGS_APP_SECRET",
     "INBOUND_OPERATION_HMAC_KEY",

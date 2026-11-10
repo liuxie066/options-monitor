@@ -195,6 +195,116 @@ def _prepare(query: dict, context: QueryContext, now: datetime) -> PreparedQuery
     return PreparedQuery(query, policy, filters, (route.host, route.port), earnings_calendar_scan_date(query["market"], now), provider.name)
 
 
+_PUBLIC_POLICY_KEYS = {
+    "short_put": ("sell_put", "_global_sell_put_liquidity"),
+    "short_call": ("sell_call", "_global_sell_call_liquidity"),
+}
+
+
+def _public_number(value: object, *, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise AgentToolError(code="INPUT_ERROR", message=f"{name} must be a finite number")
+    return float(value)
+
+
+def _public_range(value: object, *, name: str, low: float, high: float) -> tuple[float, float] | None:
+    if value is None:
+        return None
+    if (not isinstance(value, (list, tuple)) or len(value) != 2):
+        raise AgentToolError(code="INPUT_ERROR", message=f"{name} must contain two numbers")
+    lower, upper = (_public_number(item, name=name) for item in value)
+    if not (low <= lower <= upper <= high):
+        raise AgentToolError(code="INPUT_ERROR", message=f"{name} must be an ordered range within [{low}, {high}]")
+    return lower, upper
+
+
+def prepare_public_query(query: dict, public_policy: dict, quote_route: dict, now: datetime) -> PreparedQuery:
+    """Prepare candidates from explicit public policy and route, never runtime account config."""
+    if not isinstance(query, dict) or not isinstance(public_policy, dict) or not isinstance(quote_route, dict):
+        raise AgentToolError(code="INPUT_ERROR", message="public query inputs must be objects")
+    strategy = query.get("strategy")
+    keys = _PUBLIC_POLICY_KEYS.get(strategy)
+    if keys is None:
+        raise AgentToolError(code="INPUT_ERROR", message="unsupported public candidate strategy")
+    # The shared public policy carries both strategy sections; each call reads
+    # only its own direction, but the other direction is still a known field.
+    known_keys = set().union(*_PUBLIC_POLICY_KEYS.values())
+    unknown = set(public_policy) - known_keys
+    if unknown:
+        raise AgentToolError(code="INPUT_ERROR", message="public policy has unsupported fields")
+    policy_key, liquidity_key = keys
+    if policy_key not in public_policy:
+        raise AgentToolError(code="INPUT_ERROR", message="public policy section is missing")
+    market = str(query.get("market") or "").upper()
+    if market not in {"US", "HK"}:
+        raise AgentToolError(code="INPUT_ERROR", message="unsupported market")
+    identity = calibrate_symbol(query.get("symbol"))
+    symbol = identity.canonical_symbol
+    if not symbol or identity.market != market:
+        raise AgentToolError(code="INPUT_ERROR", message="symbol does not match market")
+    if not isinstance(quote_route.get("market_data_provider"), str):
+        raise AgentToolError(code="INPUT_ERROR", message="quote route requires a provider")
+    host, port = quote_route.get("host"), quote_route.get("port")
+    if not isinstance(host, str) or not host.strip() or type(port) is not int or not 1 <= port <= 65535:
+        raise AgentToolError(code="INPUT_ERROR", message="quote route requires an explicit host and port")
+    liquidity = resolve_candidate_liquidity(public_policy.get(liquidity_key))
+    raw_policy = {**(public_policy.get(policy_key) or {}), "max_spread_ratio": liquidity.max_spread_ratio}
+    resolver = resolve_sell_put_underwriting_config if policy_key == "sell_put" else resolve_covered_call_underwriting_config
+    policy = resolver(raw_policy)
+    strike = query.get("strike")
+    if strike is not None:
+        policy = replace(policy, min_strike=_public_number(strike, name="strike"),
+                         max_strike=_public_number(strike, name="strike"))
+    for name in ("min_strike", "max_strike"):
+        if query.get(name) is not None:
+            policy = replace(policy, **{name: _public_number(query[name], name=name)})
+    dte = _public_range(query.get("dte"), name="dte", low=1, high=365)
+    if dte is not None:
+        policy = replace(policy, min_dte=int(dte[0]), max_dte=int(dte[1]))
+    for bound in (policy.min_strike, policy.max_strike):
+        if bound is not None and (not math.isfinite(bound) or bound <= 0):
+            raise AgentToolError(code="INPUT_ERROR", message="configured strike must be positive finite")
+    if policy.min_strike is not None and policy.max_strike is not None and policy.min_strike > policy.max_strike:
+        raise AgentToolError(code="INPUT_ERROR", message="configured strike range reversed")
+    if not (1 <= policy.min_dte <= policy.max_dte <= 365):
+        raise AgentToolError(code="QUERY_RANGE_EXCEEDED", message="configured DTE outside query resource bounds")
+    requested_range = _public_range(query.get("abs_delta_range"), name="abs_delta_range", low=0, high=1)
+    min_abs_delta = None
+    if requested_range is not None:
+        cap = validate_max_abs_delta(policy.max_abs_delta)
+        lower, upper = requested_range
+        effective_upper = upper if cap is None else min(upper, cap)
+        if lower > effective_upper:
+            raise AgentToolError(code="INPUT_ERROR", message="abs_delta_range has no intersection with public maximum")
+        min_abs_delta = lower
+        policy = replace(policy, max_abs_delta=effective_upper)
+    limit = query.get("limit", 10)
+    if type(limit) is not int or not 1 <= limit <= 50:
+        raise AgentToolError(code="INPUT_ERROR", message="limit must be an integer within 1..50")
+    provider = provider_by_name(quote_route["market_data_provider"])
+    filters = {
+        "strike": query.get("strike"), "min_strike": policy.min_strike, "max_strike": policy.max_strike,
+        "dte": [policy.min_dte, policy.max_dte],
+        "strike_source": "request" if any(query.get(k) is not None for k in ("strike", "min_strike", "max_strike")) else "public_policy",
+        "dte_source": "request" if dte is not None else "public_policy",
+        "max_abs_delta": policy.max_abs_delta,
+        "min_abs_delta": min_abs_delta,
+        "abs_delta_range": list(requested_range) if requested_range is not None else None,
+        "max_abs_delta_source": "request" if requested_range is not None else "public_policy",
+        "limit": limit,
+    }
+    prepared_query = {"symbol": symbol, "market": market, "strategy": strategy, "limit": limit}
+    if requested_range is not None:
+        prepared_query["abs_delta_range"] = [min_abs_delta, policy.max_abs_delta]
+    return PreparedQuery(prepared_query, policy, filters, (host, port),
+                         earnings_calendar_scan_date(market, now), provider.name)
+
+
+def evaluate_public_candidates(prepared: PreparedQuery, bundle: dict, fx: dict, index: int, now: datetime) -> dict:
+    """Evaluate already-fetched public data with the shared candidate engine; no account reads."""
+    return _evaluate(prepared, bundle, fx, index, now, limit=int(prepared.query.get("limit", 10)))
+
+
 def _empty_result(query: dict, index: int, now: datetime) -> dict:
     return {"query_index": index, "symbol": query["symbol"], "strategy": query["strategy"],
             "market": query["market"], "currency": "HKD" if query["market"] == "HK" else "USD",
@@ -250,7 +360,8 @@ def _candidate(row: dict, decision: dict, mode: str, *, source: str = "opend") -
                 "conditions": decision.get("conditions", [])}}
 
 
-def _evaluate(prepared: PreparedQuery, bundle: dict, fx: dict, index: int, now: datetime) -> dict:
+def _evaluate(prepared: PreparedQuery, bundle: dict, fx: dict, index: int, now: datetime,
+              limit: int = 3) -> dict:
     query, cfg = prepared.query, prepared.config
     result = _empty_result(query, index, now)
     result["query_date"] = prepared.query_date.isoformat()
@@ -335,6 +446,7 @@ def _evaluate(prepared: PreparedQuery, bundle: dict, fx: dict, index: int, now: 
             min_strike=cfg.min_strike, max_strike=cfg.max_strike, min_annualized_return=cfg.min_annualized_return,
             min_net_premium_cny=cfg.min_net_income, min_iv_rv_ratio=cfg.min_iv_rv_ratio,
             min_iv_minus_rv=cfg.min_iv_minus_rv, max_spread_ratio=cfg.max_spread_ratio, max_abs_delta=cfg.max_abs_delta,
+            min_abs_delta=(prepared.filters or {}).get("min_abs_delta"),
             check_capacity=False, require_earnings_evidence=False, reject_known_earnings=False)
         if decision["accepted"]:
             row["_candidate"] = _candidate(row, decision, mode, source=prepared.market_data_provider)
@@ -357,7 +469,7 @@ def _evaluate(prepared: PreparedQuery, bundle: dict, fx: dict, index: int, now: 
                   coverage={"status": status, "enumeration_complete": complete, "discovered": len(rows),
                             "evaluated": evaluated, "matched": len(matched), "excluded": excluded_count,
                             "unassessed": unknown if complete else None},
-                  candidates=[row["_candidate"] for row in rank_candidate_rows(matched, mode=mode)[:3]],
+                  candidates=[row["_candidate"] for row in rank_candidate_rows(matched, mode=mode)[:limit]],
                   reason_codes=list(reasons)[:8], exclusion_summary=[{"code": key, "count": count} for key, count in excluded.most_common(3)])
     result["displayed"] = len(result["candidates"])
     result["omitted"] = len(matched) - result["displayed"]

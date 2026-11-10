@@ -160,7 +160,7 @@ PM 默认关闭。安装后设置全局 `portfolio_management.enabled: true`；�
 富途/OpenD 行情仍使用既有依赖。长桥 SDK 不在模块导入或 provider 选择时自动载入；
 `broker-longbridge` 的托管安装及升级验证也要求 SDK 可用。SDK 安装不完成账号凭据绑定，也不证明连接和数据权限可用。
 
-开发与 CI 的 `requirements/dev.txt` 显式安装七个本地插件包，保留全部自动发现回归；
+开发与 CI 的 `requirements/dev.txt` 显式安装八个本地插件包，保留全部自动发现回归；
 缺包状态由隔离子进程验证，不跳过这些测试。
 
 `install.sh --with-dev` 始终从下载的 release 根目录安装这些依赖，不使用调用目录中的

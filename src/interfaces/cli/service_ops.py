@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 from typing import Any, Callable
@@ -60,6 +61,9 @@ def add_service_update_commands(subparsers: Any) -> None:
             lifecycle.add_argument("--include-opend", action="store_true")
             lifecycle.add_argument("--include-feishu-ws", action="store_true")
             lifecycle.add_argument("--include-wechat-clawbot", action="store_true")
+            lifecycle.add_argument(
+                "--group-query-bot-instances", default=None,
+                help="JSON file listing explicit group-query bot/API instances")
             lifecycle.add_argument("--channel-market", choices=("us", "hk"), default=None)
     service_render = service_sub.add_parser("render", help="render systemd or launchd service files")
     service_render.add_argument("--target", required=True, choices=("systemd", "launchd"))
@@ -111,6 +115,10 @@ def add_service_update_commands(subparsers: Any) -> None:
     )
     service_render.add_argument("--wechat-clawbot-config-key", default=None, choices=("us", "hk"))
     service_render.add_argument("--wechat-clawbot-label", default=None)
+    service_render.add_argument(
+        "--group-query-bot-instances", default=None,
+        help="JSON file listing explicit group-query bot/API instances; absent keeps the default service set",
+    )
     service_render.add_argument(
         "--wechat-clawbot-allowed-senders",
         default=None,
@@ -320,6 +328,19 @@ def _config_paths_from_args(args: argparse.Namespace) -> dict[str, str]:
     }
 
 
+def _group_query_bot_instances_from_args(args: argparse.Namespace) -> list[dict[str, Any]] | None:
+    path = getattr(args, "group_query_bot_instances", None)
+    if not path:
+        return None
+    try:
+        payload = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("group-query bot instances must be a readable JSON list") from exc
+    if not isinstance(payload, list):
+        raise ValueError("group-query bot instances must be a JSON list")
+    return payload
+
+
 def handle_service_update_command(
     args: argparse.Namespace,
     *,
@@ -346,6 +367,9 @@ def handle_service_update_command(
         if args.service_command == "install":
             options["env_file"] = args.env_file or os.environ.get("OM_ENV_FILE")
             options.update({key: getattr(args, key) for key in ("accounts", "markets", "include_opend", "include_feishu_ws", "include_wechat_clawbot", "channel_market")})
+            group_query_instances = _group_query_bot_instances_from_args(args)
+            if group_query_instances is not None:
+                options["group_query_bot_instances"] = group_query_instances
         data = service_lifecycle_fn(args.service_command, repo_root=repo, runtime_root=runtime,
                                     confirm=args.confirm, expected_preview_sha256=args.expected_preview_sha256, **options)
         return build_response(tool_name=f"service.{args.service_command}", ok=bool(data.get("ok")), data=data,
@@ -372,6 +396,7 @@ def handle_service_update_command(
             feishu_ws_config_key=args.feishu_ws_config_key,
             include_wechat_clawbot=bool(args.include_wechat_clawbot),
             wechat_clawbot_config_key=args.wechat_clawbot_config_key,
+            group_query_bot_instances=_group_query_bot_instances_from_args(args),
             wechat_clawbot_label=args.wechat_clawbot_label,
             wechat_clawbot_allowed_senders=args.wechat_clawbot_allowed_senders,
             include_quality_monitoring=bool(args.include_quality_monitoring),

@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from plugin_release_helpers import publication
+from src.application import plugin_release as release
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("release_checks", ROOT / ".github/ci/release_checks.py")
@@ -174,12 +175,12 @@ def test_publication_readback_requires_all_assets_and_exact_tag(tmp_path):
         checks.readback(api, TAG, SHA, plugin_dir=tmp_path)
 
 
-@pytest.mark.parametrize("asset_index", range(9))
+@pytest.mark.parametrize("asset_index", range(2 + len(release.OFFICIAL_PLUGINS)))
 @pytest.mark.parametrize("damage", ["missing", "digest_missing", "digest_mismatch", "size", "duplicate", "pending"])
 def test_plugin_readback_requires_published_bytes_for_every_new_asset(tmp_path, asset_index, damage):
     catalog = publication(tmp_path)
     names = ["om-plugins.json", "om-plugins.md"] + [e["asset"] for e in catalog["plugins"]]
-    assert len(names) == 9
+    assert len(names) == 2 + len(release.OFFICIAL_PLUGINS)
     assets = [dict(id=i, name=n, state="uploaded", size=10, digest="sha256:" + "a" * 64) for i, n in enumerate(
         [f"options-monitor-{TAG}.tar.gz", "om-agent-spec.json", "VERSION"] +
         [f"options-monitor-{TAG}-macos-arm64.tar.gz{suffix}" for suffix in ("", ".sha256", ".manifest.json", ".qualification.json")], 1)]

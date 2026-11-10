@@ -7,7 +7,6 @@ import time
 from collections import Counter
 from typing import Any, Callable
 
-from src.application.bot.tool_discovery import DISCOVERY_NAMES
 from src.application.read_execution import RunStopped, bounded_call, check_run
 from src.infrastructure.openai_chat_completions import create_chat_completion
 from src.infrastructure.openai_responses import create_response
@@ -106,6 +105,9 @@ def run_agent(*, settings, api_key: str, messages: list[dict], tools: list[dict]
               allow_initial_clarification: bool = False,
               tool_discovery=None,
               request: Callable = request_model) -> str:
+    # Deferred: importing the transport (request_model) must not import the
+    # management account tool registry that tool_discovery pulls in.
+    from src.application.bot.tool_discovery import DISCOVERY_NAMES
     calls_seen: set[str] = set()
     repeated: Counter = Counter()
     tool_count = failed_batches = model_failures = 0

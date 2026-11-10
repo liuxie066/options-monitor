@@ -69,6 +69,13 @@ def feishu_event_model_to_payload(event: Any) -> dict[str, Any]:
                 "chat_type": _text(_getattr(message, "chat_type")),
                 "message_type": _text(_getattr(message, "message_type")),
                 "content": _text(_getattr(message, "content")),
+                "mentions": [
+                    {"key": _text(_getattr(mention, "key")),
+                     "id": {field: _text(_getattr(_getattr(mention, "id"), field))
+                            for field in ("open_id", "user_id", "union_id")},
+                     "tenant_key": _text(_getattr(mention, "tenant_key"))}
+                    for mention in (_getattr(message, "mentions") or [])
+                ],
             },
         },
     }

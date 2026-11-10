@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -44,6 +45,11 @@ from src.application.payload_helpers import required_text
 from src.application.opend_utils import normalize_underlier
 from src.application.opend_market_snapshot_fetching import trading_calendar_dates
 from src.application.market_data_provider import resolve_market_data_provider, provider_by_name, market_data_source
+from src.application.required_data_plan_identity import (
+    build_required_data_expected_fetch_contract,
+    required_data_plan_id,
+)
+from src.application.required_data_planning import build_required_data_fetch_plan
 from functools import partial
 
 
@@ -60,6 +66,14 @@ _PLAN_STATUSES = frozenset({"complete", "partial", "failed"})
 
 class CloseAdviceRequiredDataPlanError(RuntimeError):
     pass
+
+
+class ScenarioInputError(CloseAdviceRequiredDataPlanError):
+    """The confirmed scenario input is invalid; no evidence may be read."""
+
+
+class ScenarioEvidenceError(CloseAdviceRequiredDataPlanError):
+    """Quote discovery or the required-data plan is unavailable."""
 
 
 def close_advice_market_date(value: datetime, market: str) -> date:
@@ -873,19 +887,437 @@ def _is_sha256(value: Any) -> bool:
     return len(text) == 64 and all(char in "0123456789abcdef" for char in text)
 
 
+SCENARIO_PLAN_SCHEMA = "group_query_scenario_plan.v1"
+
+_SCENARIO_OPERATIONS = {"close": None, "roll-down": "put", "roll-up": "call"}
+_SCENARIO_PLAN_KEYS = frozenset({
+    "schema", "operation", "input_id", "input_as_of_utc", "market", "symbol",
+    "fetch_symbol", "as_of_market_date", "contracts", "original_contract",
+    "opening_premium", "opened_at", "search_bounds", "limit", "quote_route",
+    "policy_sha256", "strategy_version", "fee_model_id", "fee_model_version",
+    "fetch_source", "fetch_host", "fetch_port", "requirements", "fetch_plan",
+    "expected_fetch_contract", "global_required_data_plan",
+})
+_CONTRACT_KEYS = frozenset({"option_type", "expiration", "strike"})
+
+
+def _scenario_error(message: str) -> CloseAdviceRequiredDataPlanError:
+    return ScenarioInputError(message)
+
+
+def _scenario_text(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise _scenario_error(f"scenario {name} must be a nonempty string")
+    return value
+
+
+def _scenario_contract(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != _CONTRACT_KEYS:
+        raise _scenario_error("scenario contract must contain option_type, expiration and strike")
+    option_type = value.get("option_type")
+    if option_type not in {"put", "call"}:
+        raise _scenario_error("scenario contract option_type is invalid")
+    expiration = normalize_contract_expiration(value.get("expiration"))
+    if not expiration:
+        raise _scenario_error("scenario contract expiration is invalid")
+    strike = value.get("strike")
+    if isinstance(strike, bool) or not isinstance(strike, (int, float)):
+        raise _scenario_error("scenario contract strike is invalid")
+    strike_float = float(strike)
+    if not strike_float > 0 or not math.isfinite(strike_float):
+        raise _scenario_error("scenario contract strike is invalid")
+    return {"option_type": str(option_type), "expiration": expiration,
+            "strike": strike_float}
+
+
+def _scenario_market_symbol(value: Any) -> tuple[str, str]:
+    text = _scenario_text(value, "symbol")
+    if text.count(".") != 1:
+        raise _scenario_error("scenario symbol must use a US. or HK. market prefix")
+    prefix, code = text.split(".", 1)
+    market = prefix.upper()
+    if market not in MARKET_TIMEZONES or not code:
+        raise _scenario_error("scenario symbol must use a US. or HK. market prefix")
+    canonical = canonical_symbol(text)
+    if not canonical or symbol_market(canonical) != market:
+        raise _scenario_error("scenario symbol identity is inconsistent")
+    bare = canonical[:-3] if canonical.endswith(".HK") else canonical
+    return market, f"{market}.{bare}"
+
+
+def _scenario_policy_digest(
+    *, policy_sha256: Any, strategy_version: Any, fee_model_id: Any,
+    fee_model_version: Any,
+) -> dict[str, str]:
+    values = {
+        "policy_sha256": policy_sha256, "strategy_version": strategy_version,
+        "fee_model_id": fee_model_id, "fee_model_version": fee_model_version,
+    }
+    if not _is_sha256(policy_sha256):
+        raise _scenario_error("scenario policy_sha256 is invalid")
+    for name in ("strategy_version", "fee_model_id", "fee_model_version"):
+        _scenario_text(values[name], f"scenario {name}")
+    return {name: str(value).strip() for name, value in values.items()}
+
+
+def build_user_provided_scenario_plan(
+    *,
+    scenario: Mapping[str, Any],
+    policy_sha256: str,
+    strategy_version: str,
+    fee_model_id: str,
+    fee_model_version: str,
+    quote_route: Mapping[str, Any],
+    runtime_root: Path,
+    required_data_dir: Path,
+    now_utc: datetime,
+    expiration_discovery_cache: Any = None,
+    spot_observation_cache: Any = None,
+) -> dict[str, Any]:
+    """Plan one account-free scenario fetch without creating account lots.
+
+    Expiration discovery and the spot observation follow the existing
+    required-data planner; the scenario never indexes accountRequirements.
+    """
+    if not isinstance(scenario, Mapping):
+        raise _scenario_error("scenario must be a mapping")
+    policy = _scenario_policy_digest(
+        policy_sha256=policy_sha256, strategy_version=strategy_version,
+        fee_model_id=fee_model_id, fee_model_version=fee_model_version,
+    )
+    operation = _scenario_text(scenario.get("operation"), "operation")
+    if operation not in _SCENARIO_OPERATIONS:
+        raise _scenario_error("scenario operation is not supported")
+    input_id = _scenario_text(scenario.get("input_id"), "input_id")
+    input_as_of_utc = _scenario_text(scenario.get("input_as_of_utc"), "input_as_of_utc")
+    position = scenario.get("position")
+    if not isinstance(position, Mapping):
+        raise _scenario_error("scenario position is required")
+    market, symbol = _scenario_market_symbol(position.get("symbol"))
+    fetch_symbol = canonical_symbol(symbol)
+    if not fetch_symbol:
+        raise _scenario_error("scenario symbol identity is unavailable")
+    contract = _scenario_contract(position.get("contract"))
+    option_type = _SCENARIO_OPERATIONS[operation]
+    if option_type is not None and contract["option_type"] != option_type:
+        raise _scenario_error("scenario position direction contradicts the operation")
+    if position.get("side") != "short":
+        raise _scenario_error("scenario position side must be short")
+    contracts = _positive_int(position.get("contracts"))
+    if contracts is None:
+        raise _scenario_error("scenario position contracts must be a positive integer")
+    as_of_date = close_advice_market_date(now_utc, market)
+    old_dte = (date.fromisoformat(contract["expiration"]) - as_of_date).days
+    if old_dte < 0:
+        raise _scenario_error("scenario contract has already expired")
+    search_bounds: dict[str, Any] | None = None
+    sell_put_cfg: dict[str, Any] = {}
+    sell_call_cfg: dict[str, Any] = {}
+    raw_premium = scenario.get("opening_premium")
+    if operation == "close":
+        if not isinstance(raw_premium, Mapping):
+            raise _scenario_error("close scenario requires an opening premium")
+        if raw_premium.get("unit") not in {"per_share", "per_contract", "total"}:
+            raise _scenario_error("opening premium unit is invalid")
+        amount = raw_premium.get("amount")
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not float(amount) > 0:
+            raise _scenario_error("opening premium amount is invalid")
+        if raw_premium.get("currency") not in {"USD", "HKD"}:
+            raise _scenario_error("opening premium currency is invalid")
+    elif raw_premium is not None:
+        raise _scenario_error("roll scenarios do not accept an opening premium")
+    if operation != "close" and scenario.get("opened_at") is not None:
+        raise _scenario_error("roll scenarios do not accept opened_at")
+    if operation == "close" and scenario.get("search_bounds") is not None:
+        raise _scenario_error("close scenario does not accept search_bounds")
+    if operation != "close":
+        raw_bounds = scenario.get("search_bounds")
+        if not isinstance(raw_bounds, Mapping):
+            raise _scenario_error("scenario search_bounds are required")
+        strike_key = "min_new_strike" if option_type == "put" else "max_new_strike"
+        if set(raw_bounds) - {"max_new_expiration", strike_key}:
+            raise _scenario_error("scenario search_bounds contain unsupported fields")
+        max_expiration = normalize_contract_expiration(raw_bounds.get("max_new_expiration"))
+        if not max_expiration:
+            raise _scenario_error("scenario max_new_expiration is invalid")
+        max_dte = (date.fromisoformat(max_expiration) - as_of_date).days
+        if max_dte < old_dte:
+            raise _scenario_error("scenario max_new_expiration precedes the old contract")
+        search_bounds = {"max_new_expiration": max_expiration}
+        boundary = raw_bounds.get(strike_key)
+        if boundary is not None:
+            if isinstance(boundary, bool) or not isinstance(boundary, (int, float)):
+                raise _scenario_error(f"scenario {strike_key} is invalid")
+            boundary = float(boundary)
+            if boundary <= 0 or not math.isfinite(boundary):
+                raise _scenario_error(f"scenario {strike_key} is invalid")
+            search_bounds[strike_key] = boundary
+            if option_type == "put" and boundary >= contract["strike"]:
+                raise _scenario_error("scenario min_new_strike must be below the old strike")
+            if option_type == "call" and boundary <= contract["strike"]:
+                raise _scenario_error("scenario max_new_strike must be above the old strike")
+        if option_type == "put":
+            sell_put_cfg = {"enabled": True, "min_dte": old_dte, "max_dte": max_dte,
+                            "max_strike": contract["strike"]}
+            if boundary is not None:
+                sell_put_cfg["min_strike"] = boundary
+        else:
+            sell_call_cfg = {"enabled": True, "min_dte": old_dte, "max_dte": max_dte,
+                             "min_strike": contract["strike"]}
+            if boundary is not None:
+                sell_call_cfg["max_strike"] = boundary
+    limit = scenario.get("limit", 10)
+    if isinstance(limit, bool) or type(limit) is not int or not 1 <= limit <= 50:
+        raise _scenario_error("scenario limit must be an integer from 1 to 50")
+    route = {
+        "source": _scenario_text(quote_route.get("source"), "quote source"),
+        "host": _scenario_text(quote_route.get("host"), "quote host"),
+        "port": _positive_int(quote_route.get("port")),
+    }
+    if route["port"] is None:
+        raise _scenario_error("scenario quote port is invalid")
+    fetch_source = normalize_fetch_source(
+        market_data_source("opend", route["source"]))
+    requirement = {
+        "option_type": contract["option_type"],
+        "expiration": contract["expiration"],
+        "strike": contract["strike"],
+        "planning_status": "ready",
+    }
+    try:
+        bundle = build_required_data_fetch_plan(
+            base=Path(runtime_root),
+            required_data_dir=Path(required_data_dir),
+            symbol=fetch_symbol,
+            limit_expirations=0,
+            want_put=bool(sell_put_cfg),
+            want_call=bool(sell_call_cfg),
+            sell_put_cfg=sell_put_cfg or None,
+            sell_call_cfg=sell_call_cfg or None,
+            position_requirements=[requirement],
+            fetch_host=route["host"],
+            fetch_port=int(route["port"]),
+            fetch_source=route["source"],
+            expiration_discovery_cache=expiration_discovery_cache,
+            spot_observation_cache=spot_observation_cache,
+            market_data_provider="opend",
+        )
+        fetch_plan = bundle.to_debug_dict()
+        expected_contract = build_required_data_expected_fetch_contract(
+            symbol=fetch_symbol,
+            fetch_plan=fetch_plan,
+            source=fetch_source,
+            host=route["host"],
+            port=int(route["port"]),
+        )
+    except ScenarioEvidenceError:
+        raise
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise ScenarioEvidenceError(
+            "scenario quote discovery or fetch planning is unavailable") from exc
+    plan_symbol = {
+        "symbol": fetch_symbol,
+        "expected_fetch_contract": expected_contract,
+        "fetch_plan": fetch_plan,
+        "fetch_binding": expected_contract["fetch_binding"],
+    }
+    global_plan = {
+        "plan_id": required_data_plan_id([plan_symbol]),
+        "symbols": [plan_symbol],
+    }
+    return {
+        "schema": SCENARIO_PLAN_SCHEMA,
+        "operation": operation,
+        "input_id": input_id,
+        "input_as_of_utc": input_as_of_utc,
+        "market": market,
+        "symbol": symbol,
+        "fetch_symbol": fetch_symbol,
+        "as_of_market_date": as_of_date.isoformat(),
+        "contracts": contracts,
+        "original_contract": contract,
+        "opening_premium": dict(scenario.get("opening_premium") or {}) or None,
+        "opened_at": scenario.get("opened_at"),
+        "search_bounds": search_bounds,
+        "limit": limit,
+        "quote_route": route,
+        "policy_sha256": policy["policy_sha256"],
+        "strategy_version": policy["strategy_version"],
+        "fee_model_id": policy["fee_model_id"],
+        "fee_model_version": policy["fee_model_version"],
+        "fetch_source": fetch_source,
+        "fetch_host": route["host"],
+        "fetch_port": int(route["port"]),
+        "requirements": [requirement],
+        "fetch_plan": fetch_plan,
+        "expected_fetch_contract": expected_contract,
+        "global_required_data_plan": global_plan,
+    }
+
+
+def validate_user_provided_scenario_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
+    """Re-validate a stored plan with the same strictness as its builder."""
+    if not isinstance(plan, Mapping) or set(plan) != _SCENARIO_PLAN_KEYS:
+        raise _scenario_error("scenario plan fields are missing or unsupported")
+    if plan.get("schema") != SCENARIO_PLAN_SCHEMA:
+        raise _scenario_error("scenario plan schema mismatch")
+    operation = plan.get("operation")
+    if operation not in _SCENARIO_OPERATIONS:
+        raise _scenario_error("scenario plan operation is invalid")
+    market, symbol = _scenario_market_symbol(plan.get("symbol"))
+    if market != plan.get("market"):
+        raise _scenario_error("scenario plan market contradicts its symbol")
+    fetch_symbol = plan.get("fetch_symbol")
+    if not isinstance(fetch_symbol, str) or canonical_symbol(symbol) != fetch_symbol:
+        raise _scenario_error("scenario plan fetch symbol is inconsistent")
+    contract = _scenario_contract(plan.get("original_contract"))
+    option_type = _SCENARIO_OPERATIONS[operation]
+    if option_type is not None and contract["option_type"] != option_type:
+        raise _scenario_error("scenario plan contract contradicts the operation")
+    if plan.get("contracts") != _positive_int(plan.get("contracts")):
+        raise _scenario_error("scenario plan contracts are invalid")
+    _scenario_policy_digest(
+        policy_sha256=plan.get("policy_sha256"),
+        strategy_version=plan.get("strategy_version"),
+        fee_model_id=plan.get("fee_model_id"),
+        fee_model_version=plan.get("fee_model_version"),
+    )
+    _scenario_text(plan.get("input_id"), "input id")
+    try:
+        input_as_of = datetime.fromisoformat(str(plan.get("input_as_of_utc")))
+    except ValueError as exc:
+        raise _scenario_error("scenario plan input time is invalid") from exc
+    if input_as_of.tzinfo is None:
+        raise _scenario_error("scenario plan input time must carry an offset")
+    try:
+        as_of_date = date.fromisoformat(str(plan.get("as_of_market_date")))
+    except ValueError as exc:
+        raise _scenario_error("scenario plan market date is invalid") from exc
+    limit = plan.get("limit")
+    if isinstance(limit, bool) or type(limit) is not int or not 1 <= limit <= 50:
+        raise _scenario_error("scenario plan limit is invalid")
+    premium = plan.get("opening_premium")
+    if operation == "close":
+        if not isinstance(premium, Mapping):
+            raise _scenario_error("close scenario plan requires an opening premium")
+        amount = premium.get("amount")
+        if (isinstance(amount, bool) or not isinstance(amount, (int, float))
+                or not math.isfinite(float(amount)) or float(amount) <= 0):
+            raise _scenario_error("scenario plan premium amount is invalid")
+        if premium.get("unit") not in {"per_share", "per_contract", "total"}:
+            raise _scenario_error("scenario plan premium unit is invalid")
+        if premium.get("currency") not in {"USD", "HKD"}:
+            raise _scenario_error("scenario plan premium currency is invalid")
+    elif premium is not None:
+        raise _scenario_error("roll scenario plan does not accept an opening premium")
+    opened_at = plan.get("opened_at")
+    if opened_at is not None:
+        try:
+            if date.fromisoformat(str(opened_at)).isoformat() != opened_at:
+                raise ValueError("opened_at is not a date")
+            opened_date = date.fromisoformat(str(opened_at))
+        except ValueError as exc:
+            raise _scenario_error("scenario plan opened_at is invalid") from exc
+        if opened_date > date.fromisoformat(str(contract["expiration"])):
+            raise _scenario_error("scenario plan opened_at is after expiration")
+        if opened_date > input_as_of.astimezone(timezone.utc).date():
+            raise _scenario_error("scenario plan opened_at is after the input time")
+    bounds = plan.get("search_bounds")
+    if operation == "close":
+        if bounds is not None:
+            raise _scenario_error("close scenario plan does not accept search bounds")
+    else:
+        if not isinstance(bounds, Mapping):
+            raise _scenario_error("roll scenario plan requires search bounds")
+        try:
+            max_expiration = date.fromisoformat(str(bounds.get("max_new_expiration")))
+        except ValueError as exc:
+            raise _scenario_error("scenario plan max expiration is invalid") from exc
+        strike_key = "min_new_strike" if operation == "roll-down" else "max_new_strike"
+        boundary = bounds.get(strike_key)
+        if set(bounds) - {"max_new_expiration", strike_key} or (
+                boundary is not None and (
+                    isinstance(boundary, bool) or not isinstance(boundary, (int, float))
+                    or not math.isfinite(float(boundary)) or float(boundary) <= 0)):
+            raise _scenario_error("scenario plan strike boundary is invalid")
+        if boundary is not None:
+            if operation == "roll-down" and float(boundary) >= float(contract["strike"]):
+                raise _scenario_error("scenario plan strike boundary is not below the old strike")
+            if operation == "roll-up" and float(boundary) <= float(contract["strike"]):
+                raise _scenario_error("scenario plan strike boundary is not above the old strike")
+        if max_expiration < date.fromisoformat(contract["expiration"]):
+            raise _scenario_error("scenario plan max expiration precedes the old contract")
+    route = plan.get("quote_route")
+    if (not isinstance(route, Mapping) or set(route) != {"source", "host", "port"}
+            or _positive_int(route.get("port")) is None):
+        raise _scenario_error("scenario plan quote route is invalid")
+    _scenario_text(route.get("source"), "quote source")
+    _scenario_text(route.get("host"), "quote host")
+    if (plan.get("fetch_source") != normalize_fetch_source(
+            market_data_source("opend", str(route.get("source"))))
+            or plan.get("fetch_host") != route.get("host")
+            or plan.get("fetch_port") != route.get("port")):
+        raise _scenario_error("scenario plan fetch route is inconsistent")
+    global_plan = plan.get("global_required_data_plan")
+    if not isinstance(global_plan, Mapping):
+        raise _scenario_error("scenario plan lacks its global fetch plan")
+    symbols = global_plan.get("symbols")
+    if not isinstance(symbols, list) or len(symbols) != 1:
+        raise _scenario_error("scenario global fetch plan must contain one symbol")
+    plan_item = symbols[0]
+    if not isinstance(plan_item, Mapping) or plan_item.get("symbol") != fetch_symbol:
+        raise _scenario_error("scenario global fetch plan symbol mismatch")
+    if global_plan.get("plan_id") != required_data_plan_id([dict(plan_item)]):
+        raise _scenario_error("scenario global fetch plan id mismatch")
+    expected = plan.get("expected_fetch_contract")
+    if not isinstance(expected, Mapping) or dict(plan_item.get("expected_fetch_contract") or {}) != dict(expected):
+        raise _scenario_error("scenario expected fetch contract mismatch")
+    if plan_item.get("fetch_plan") != plan.get("fetch_plan"):
+        raise _scenario_error("scenario fetch plan contradicts its global entry")
+    if plan_item.get("fetch_binding") != expected.get("fetch_binding"):
+        raise _scenario_error("scenario fetch binding contradicts its contract")
+    requirements = plan.get("requirements")
+    if not isinstance(requirements, list) or not requirements:
+        raise _scenario_error("scenario plan requires at least one contract requirement")
+    for requirement in requirements:
+        if not isinstance(requirement, Mapping) or not {"option_type", "expiration", "strike"} <= set(requirement):
+            raise _scenario_error("scenario plan requirement is invalid")
+    return dict(plan)
+
+
+def scenario_requirement_index(plan: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the executable fetch identity for one validated scenario plan."""
+    validated = validate_user_provided_scenario_plan(plan)
+    global_plan = validated["global_required_data_plan"]
+    plan_item = dict(global_plan["symbols"][0])
+    return {
+        "symbol": validated["symbol"],
+        "plan_id": global_plan["plan_id"],
+        "fetch_plan": dict(plan_item["fetch_plan"]),
+        "expected_fetch_contract": dict(plan_item["expected_fetch_contract"]),
+        "fetch_binding": dict(plan_item["fetch_binding"]),
+    }
+
+
 __all__ = [
     "CLOSE_ADVICE_REQUIRED_DATA_PLAN_SCHEMA",
     "CloseAdviceRequiredDataPlanError",
     "PLAN_FILE_NAME",
+    "SCENARIO_PLAN_SCHEMA",
+    "ScenarioEvidenceError",
+    "ScenarioInputError",
     "account_requirement_index",
     "close_advice_market_date",
     "build_close_advice_required_data_plan",
+    "build_user_provided_scenario_plan",
     "finalize_close_advice_required_data_plan",
     "load_close_advice_required_data_plan",
     "publish_close_advice_required_data_plan",
     "resolve_bound_close_advice_required_data_plan",
     "resolve_bound_close_advice_required_data_plan_snapshot",
     "resolve_position_fetch_binding",
+    "scenario_requirement_index",
+    "validate_user_provided_scenario_plan",
 ]
 
 

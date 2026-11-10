@@ -16,6 +16,7 @@ from src.application.llm_provider_registry import (
     resolve_output_reservation,
 )
 from src.application.secret_store import SecretProvider, resolve_secret, resolve_secret_status
+from src.application.secret_store.registry import require_credential_spec
 
 
 _API_KINDS = {
@@ -69,13 +70,22 @@ class ModelSettings:
         resolve_output_reservation(
             spec.provider_id, model, context_window_tokens, max_output_tokens, path="bot.model"
         )
+        credential_name = str(raw.get("credential_name") or spec.credential_name).strip()
+        # An explicit credential must be one of the fixed registry entries; it can
+        # never point at an unregistered name or an account-scoped secret.  Local
+        # providers such as ollama legitimately have no credential at all.
+        if credential_name:
+            require_credential_spec(credential_name)
+        elif provider_requires_api_key(spec.provider_id):
+            raise ValueError(
+                "bot.model.credential_name is required for a provider that needs an API key")
         return cls(
             provider=spec.provider_id,
             api_kind=_API_KINDS[spec.api_kind],
             model=model,
             base_url=base_url,
             api_key_env=str(raw.get("api_key_env") or spec.default_api_key_env).strip(),
-            credential_name=spec.credential_name,
+            credential_name=credential_name,
             timeout_seconds=timeout_seconds,
             context_window_tokens=context_window_tokens,
             max_output_tokens=max_output_tokens,

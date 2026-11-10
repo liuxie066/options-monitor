@@ -32,13 +32,23 @@ from src.application.secret_store import credential_spec
 from domain.storage.json_io import atomic_write_private_json
 
 
+def _group_query_bot_instance_ids(profile: dict[str, Any]) -> list[str]:
+    raw = profile.get("group_query_bot_instances")
+    if not isinstance(raw, list):
+        return []
+    return [
+        str(item.get("instance_id")).strip()
+        for item in raw
+        if isinstance(item, dict) and str(item.get("instance_id") or "").strip()
+    ]
+
+
 SYSTEMD_REQUIRED_MAINTENANCE_UNITS = (
     FEISHU_AGENT_CREDENTIAL_SERVICE,
     "options-monitor-projection-verify.timer",
 )
 LAUNCHD_REQUIRED_MAINTENANCE_UNITS = (
-    "com.options-monitor.projection-verify",
-)
+    "com.options-monitor.projection-verify",)
 LEGACY_FEISHU_AGENT_CREDENTIAL_UNIT_PATH = Path(
     "/usr/lib/systemd/system/options-monitor-feishu-agent-credential.service"
 )
@@ -1330,6 +1340,7 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
     extra_managed_units = (
         sorted(set(extra_installed_units) & managed_systemd_unit_names(
             accounts=accounts if isinstance(accounts, list) else [],
+            group_query_bot_instance_ids=_group_query_bot_instance_ids(profile),
         ))
         if provider == "systemd" else extra_installed_units
     )
@@ -2206,6 +2217,7 @@ def _apply_service_drift(
     accounts = ctx["profile"].get("accounts")
     managed_units = managed_systemd_unit_names(
         accounts=accounts if isinstance(accounts, list) else [],
+        group_query_bot_instance_ids=_group_query_bot_instance_ids(ctx["profile"]),
     )
     for name in sorted(extra_installed & managed_units):
         if live_systemctl:

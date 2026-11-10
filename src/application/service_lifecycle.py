@@ -419,6 +419,7 @@ def service_lifecycle(
     include_opend: bool = False,
     include_feishu_ws: bool = False,
     include_wechat_clawbot: bool = False,
+    group_query_bot_instances: list[dict[str, Any]] | None = None,
     channel_market: str | None = None,
     confirm: bool = False,
     expected_preview_sha256: str | None = None,
@@ -490,6 +491,11 @@ def service_lifecycle(
             include_wechat_clawbot=include_wechat_clawbot, wechat_clawbot_config_key=channel_market,
             include_secret_credentials=provider == "systemd", feature_aware_credentials=True,
             secret_credential_store_root=credential_store_root,
+            group_query_bot_instances=(
+                group_query_bot_instances
+                if group_query_bot_instances is not None
+                else (existing or {}).get("group_query_bot_instances")
+            ),
         )
         profile = json.loads(next(item["content"] for item in bundle["files"] if item["kind"] == "service_profile"))
         if existing and {item["name"] for item in existing.get("services", [])} - {item["name"] for item in profile["services"]}:

@@ -292,7 +292,7 @@ VERSION="$(cat VERSION)"
 - 使用完整 Git 历史验证 commit-to-release-note coverage，不接受漏项、无理由排除或审阅后夹带代码
 - 渲染只包含目标版本的 Release Notes
 - 重新校验 release metadata / coverage，并验证最终 source archive 中的 Python Bot runtime
-- 先发布对应 GitHub Release：源码 tar.gz、`VERSION`、`om-agent-spec.json`、七个官方插件 wheels 和 `om-plugins.json/md` 可先下载，正文标明运行包 `building`
+- 先发布对应 GitHub Release：源码 tar.gz、`VERSION`、`om-agent-spec.json`、八个官方插件 wheels 和 `om-plugins.json/md` 可先下载，正文标明运行包 `building`
 - 核心产物发布并回读成功后，异步构建拟发布平台运行包；完成完整资格校验后追加到同一个 Release，再回读资产并更新运行包状态
 
 源码归档使用仓库 `.gitattributes` 的 `export-ignore`，排除 `AGENTS.md`、`CLAUDE.md` 和 `.agents/` 等开发指令。升级的 Git cache archive 使用同一规则；只有包含该规则的 tag 才会在归档时排除这些文件，历史 tag 不会被追溯修改。显式 `--source` 安装对新安装目录另行执行排除，覆盖旧 tag，详见 [Install](INSTALL.md)。
@@ -308,7 +308,7 @@ VERSION="$(cat VERSION)"
 
 ### 官方可选插件资产
 
-从 v4.6.9 起，Release 由 `scripts/build_plugin_wheels.py` 在临时源码副本中构建 PM、持仓建议、飞书、微信、OpenD 行情、富途券商、长桥券商七个纯 Python wheel；源项目版本不被修改，官方 wheel 版本跟随 OM VERSION。产物为七个版本化 `py3-none-any.whl`、`om-plugins.json` 和 `om-plugins.md`，清单及兼容说明绑定精确 OM 版本、tag、commit、Python >=3.12、文件大小和 SHA-256。不存在插件市场或第三方包发现。
+当前 Release 由 `scripts/build_plugin_wheels.py` 在临时源码副本中构建 PM、持仓建议、飞书、微信、OpenD 行情、富途券商、长桥券商和群查询 bot 八个纯 Python wheel；源项目版本不被修改，官方 wheel 版本跟随 OM VERSION。产物为八个版本化 `py3-none-any.whl`、`om-plugins.json` 和 `om-plugins.md`，清单及兼容说明绑定精确 OM 版本、tag、commit、Python >=3.12、文件大小和 SHA-256。不存在插件市场或第三方包发现。
 
 PR qualification 构建并校验上述资产；release reusable workflow 构建、上传同一组资产，发布回读逐文件验证摘要、catalog、METADATA、WHEEL、RECORD 及兼容说明。校验 owner 为 `src/application/plugin_release.py`，不会安装或发布。v4.6.9 已正式发布七个 wheel 及清单；v4.6.8 仅发布其中 PM、持仓建议、飞书、微信四个 wheel。每次发布仍须以目标 tag 的实际上传与回读结果为准，不能从源码接线或本地构建推断发布成功。用户可用范围由[安装指南](INSTALL.md#官方可选插件)维护。
 
