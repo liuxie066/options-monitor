@@ -60,7 +60,9 @@ def normalize_sdk_event(payload: object, expected_app_id: str,
     tenant = _text(header.get("tenant_key"))
     sender_open_id = _text(sender_id.get("open_id"))
     message_id = _text(message.get("message_id"))
-    if not tenant or not sender_open_id or not message_id or sender.get("sender_type") != "user":
+    chat_id = _text(message.get("chat_id"))
+    if (not tenant or not sender_open_id or not message_id or not chat_id
+            or sender.get("sender_type") != "user"):
         raise EventRejected("missing_identity")
     if message.get("message_type") != "text":
         raise EventRejected("unsupported_message")
@@ -74,7 +76,7 @@ def normalize_sdk_event(payload: object, expected_app_id: str,
     ):
         raise EventRejected("not_mentioned")
     return VerifiedGroupEvent(expected_app_id, tenant, sender_open_id,
-                              _text(sender.get("tenant_key")), message["chat_id"],
+                              _text(sender.get("tenant_key")), chat_id,
                               thread or None, message_id, _text(header.get("event_id")))
 
 

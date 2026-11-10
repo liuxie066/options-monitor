@@ -119,6 +119,17 @@ def test_concrete_chat_scope_still_rejects_other_groups():
         normalize_sdk_event(payload, "app_new", "bot_new", ("chat_allowed",))
 
 
+@pytest.mark.parametrize("chat_id", [None, "", " ", 123])
+def test_wildcard_scope_still_requires_a_valid_chat_identity(chat_id):
+    payload = event()
+    if chat_id is None:
+        payload["event"]["message"].pop("chat_id")
+    else:
+        payload["event"]["message"]["chat_id"] = chat_id
+    with pytest.raises(EventRejected, match="missing_identity"):
+        normalize_sdk_event(payload, "app_new", "bot_new", ("*",))
+
+
 def test_duplicate_json_fields_are_rejected(tmp_path):
     path, _ = config_file(tmp_path)
     path.write_text('{"instance_id":"one","instance_id":"two"}')

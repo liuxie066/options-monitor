@@ -41,7 +41,7 @@
 ./om group-query-bot preflight --config /absolute/path/preflight.json --confirm
 ```
 
-程序通过应用 token 调用固定机器人信息接口取得 bot open_id，再启动既有飞书长连接。仅接收授权群内 @当前 bot 的文本事件，回复原消息固定文本“群查询bot 接入测试已收到”。不调用模型、行情、账户或查询 API。SDK 回调只进入容量 16 的队列；单 worker 处理，满载拒绝并记录计数。
+程序通过应用 token 调用固定机器人信息接口取得 bot open_id，再启动既有飞书长连接。仅接收配置群范围内（具体白名单或唯一通配 `["*"]`）@当前 bot 的文本事件，回复原消息固定文本“群查询bot 接入测试已收到”。不调用模型、行情、账户或查询 API。SDK 回调只进入容量 16 的队列；单 worker 处理，满载拒绝并记录计数。
 
 Ctrl+C 停止接收新工作；正在进行的不可取消 I/O 可能继续，返回 stopped_with_pending_io 时不能宣称请求已经终止。已占用但未完成的投递记录保留原状态，重复事件不会自动重发。
 
