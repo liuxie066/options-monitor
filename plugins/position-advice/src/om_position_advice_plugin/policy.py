@@ -6,6 +6,7 @@ from typing import Any
 
 from domain.domain.close_advice import (
     CloseAdviceInput,
+    UserProvidedCloseAdviceInput,
     DECISION_EVIDENCE_COMPLETE,
     DECISION_EVIDENCE_NOT_EVALUABLE,
     EXPIRY_HOLD_MAX_ABS_DELTA,
@@ -28,6 +29,16 @@ from .presentation import format_close_advice_reason
 
 
 def evaluate_close_advice(inp: CloseAdviceInput) -> dict[str, Any]:
+    """Evaluate a formal account/lot row; original identity guards stay in force."""
+    return _evaluate_close(inp, formal_identity=True)
+
+
+def evaluate_user_provided_close_advice(inp: UserProvidedCloseAdviceInput) -> dict[str, Any]:
+    """Evaluate an account-free user scenario through the same economic policy."""
+    return _evaluate_close(inp, formal_identity=False)
+
+
+def _evaluate_close(inp: Any, *, formal_identity: bool) -> dict[str, Any]:
     """Evaluate whether the maximum remaining option return merits holding."""
 
     option_type = str(inp.option_type or "").strip().lower()
@@ -58,18 +69,28 @@ def evaluate_close_advice(inp: CloseAdviceInput) -> dict[str, Any]:
     )
 
     flags: list[str] = []
-    if not normalize_account(inp.account):
-        flags.append("missing_account")
-    if inp.input_source == "ledger":
-        if not str(inp.position_lot_id or "").strip():
-            flags.append("missing_position_lot_id")
-    elif inp.input_source == "user_provided":
+    if formal_identity:
+        if not normalize_account(inp.account):
+            flags.append("missing_account")
+        if inp.input_source == "ledger":
+            if not str(inp.position_lot_id or "").strip():
+                flags.append("missing_position_lot_id")
+        elif inp.input_source == "user_provided":
+            if not str(inp.input_id or "").strip():
+                flags.append("missing_input_id")
+            if str(inp.position_lot_id or "").strip():
+                flags.append("manual_position_has_ledger_lot")
+        else:
+            flags.append("invalid_input_source")
+    else:
+        if getattr(inp, "account", None) or getattr(inp, "position_lot_id", None):
+            flags.append("user_scenario_has_account_identity")
+        if inp.input_source != "user_provided":
+            flags.append("invalid_input_source")
         if not str(inp.input_id or "").strip():
             flags.append("missing_input_id")
-        if str(inp.position_lot_id or "").strip():
-            flags.append("manual_position_has_ledger_lot")
-    else:
-        flags.append("invalid_input_source")
+        if not str(inp.input_as_of_utc or "").strip():
+            flags.append("missing_input_as_of_utc")
     if not str(inp.symbol or "").strip():
         flags.append("missing_symbol")
     if side != "short" or option_type not in {"put", "call"}:
@@ -142,6 +163,7 @@ def evaluate_close_advice(inp: CloseAdviceInput) -> dict[str, Any]:
             flags=flags,
             spread_ratio=spread_ratio,
             is_otm=is_otm,
+            formal_identity=formal_identity,
         )
 
     assert shares is not None
@@ -184,6 +206,7 @@ def evaluate_close_advice(inp: CloseAdviceInput) -> dict[str, Any]:
             inp,
             recommendation=RECOMMENDATION_NOT_EVALUABLE,
             flags=["invalid_economic_denominator"],
+            formal_identity=formal_identity,
         )
 
     net_capture_ratio = 1.0 - all_in_close_cost / opening_net_credit
@@ -203,6 +226,7 @@ def evaluate_close_advice(inp: CloseAdviceInput) -> dict[str, Any]:
             inp,
             recommendation=RECOMMENDATION_NOT_EVALUABLE,
             flags=["invalid_economic_result"],
+            formal_identity=formal_identity,
         )
     is_otm = spot > strike if option_type == "put" else spot < strike
 
@@ -244,6 +268,7 @@ def evaluate_close_advice(inp: CloseAdviceInput) -> dict[str, Any]:
         capital_basis=capital_basis,
         remaining_max_annualized_return=remaining_max_annualized_return,
         is_otm=is_otm,
+        formal_identity=formal_identity,
     )
 
 
@@ -273,6 +298,7 @@ def _result(
     capital_basis: float | None = None,
     remaining_max_annualized_return: float | None = None,
     is_otm: bool | None = None,
+    formal_identity: bool = True,
 ) -> dict[str, Any]:
     is_evaluable = recommendation != RECOMMENDATION_NOT_EVALUABLE
     bid = safe_float(inp.bid)
@@ -291,9 +317,16 @@ def _result(
         else DECISION_EVIDENCE_NOT_EVALUABLE
     )
     basis = flags or ["remaining_yield_capture_all_gates_passed"]
+    identity = (
+        {
+            "account": normalize_account(inp.account),
+            "position_lot_id": str(inp.position_lot_id or "").strip() or None,
+        }
+        if formal_identity
+        else {}
+    )
     return {
-        "account": normalize_account(inp.account),
-        "position_lot_id": str(inp.position_lot_id or "").strip() or None,
+        **identity,
         "input_source": inp.input_source,
         "input_id": inp.input_id,
         "input_as_of_utc": inp.input_as_of_utc,

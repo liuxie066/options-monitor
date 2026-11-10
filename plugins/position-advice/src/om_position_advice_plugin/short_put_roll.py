@@ -57,11 +57,29 @@ def evaluate_short_put_roll(
         option_type="put")
 
 
+def evaluate_user_provided_short_put_roll(
+    position: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    *,
+    old_quote: Mapping[str, Any],
+    spot: float,
+    old_dte: int,
+    new_dte: int,
+    old_buy_fee: float,
+    new_sell_fee: float,
+) -> dict[str, Any]:
+    """User-provided Put scenario: same economics without a broker/account claim."""
+    return _evaluate_roll(position, candidate, old_quote=old_quote, spot=spot,
+        old_dte=old_dte, new_dte=new_dte, old_buy_fee=old_buy_fee, new_sell_fee=new_sell_fee,
+        option_type="put", require_broker=False)
+
+
 def _evaluate_roll(
     position: Mapping[str, Any], candidate: Mapping[str, Any], *,
     old_quote: Mapping[str, Any], spot: float, old_dte: int, new_dte: int,
     old_buy_fee: float, new_sell_fee: float, option_type: str,
-    covered_shares: float | None = None,
+    covered_shares: float | None = None, require_broker: bool = True,
+    conditional: bool = False,
 ) -> dict[str, Any]:
     """Share identity and two-leg cash validation; each strategy owns its decision."""
     for name, observation in (("position", position), ("candidate", candidate), ("old_quote", old_quote)):
@@ -71,7 +89,8 @@ def _evaluate_roll(
     new_symbol = _symbol(candidate.get("symbol"))
     old_currency = normalize_currency(_required_text("currency", position.get("currency")), strict=True)
     new_currency = normalize_currency(_required_text("currency", candidate.get("currency")), strict=True)
-    _required_text("broker", position.get("broker"))
+    if require_broker:
+        _required_text("broker", position.get("broker"))
     side = _required_text("side", position.get("side"))
     old_option_type = _required_text("option_type", position.get("option_type"))
     new_option_type = _required_text("option_type", candidate.get("option_type"))
@@ -126,10 +145,11 @@ def _evaluate_roll(
         if extension_days < 0:
             reasons.append("new_expiration_before_old")
     else:
-        if covered_shares is None:
+        if covered_shares is not None:
+            if _nonnegative_decimal("covered_shares", covered_shares) < shares:
+                reasons.append("insufficient_stock_coverage")
+        elif not conditional:
             raise ValueError("covered_shares evidence is required")
-        if _nonnegative_decimal("covered_shares", covered_shares) < shares:
-            reasons.append("insufficient_stock_coverage")
         if new_strike <= old_strike:
             reasons.append("new_strike_not_higher")
         if extension_days < 0:

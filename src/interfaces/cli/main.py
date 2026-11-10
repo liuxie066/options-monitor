@@ -63,6 +63,7 @@ from src.interfaces.cli.portfolio_ops import (
     handle_portfolio_command,
 )
 from src.interfaces.cli.plugin_ops import add_plugin_commands, handle_plugin_command
+from src.interfaces.cli.group_query_bot_ops import add_group_query_bot_commands, handle_group_query_bot_command
 from src.interfaces.quality.cli import add_quality_commands, handle_quality_command
 from src.interfaces.cli.observability_ops import (
     add_diagnostic_commands,
@@ -167,6 +168,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     add_portfolio_commands(sub)
     add_plugin_commands(sub)
+    add_group_query_bot_commands(sub)
 
     add_daily_brief_commands(sub)
     add_decision_history_commands(sub)
@@ -239,6 +241,8 @@ def _main(argv: list[str] | None = None, *, parsed_args: argparse.Namespace | No
     try:
         if args.command == "plugins":
             return handle_plugin_command(args)
+        if args.command == "group-query-bot":
+            return handle_group_query_bot_command(args)
         if args.command in {"healthcheck", "doctor", "support", "status", "runs", "logs"}:
             return handle_observability_command(
                 args,
@@ -423,6 +427,9 @@ def main(argv: list[str] | None = None, *, discover_local: bool = False) -> int:
 
         # The gateway owns its existing env policy, independent of operator discovery.
         return gateway_main(actual_argv[1:], discover_local=argv is None or discover_local, prog="om tools")
+    if actual_argv[:1] == ["group-query-bot"]:
+        # This plugin uses only its explicit config; never discover OM account/env files.
+        return _main(actual_argv)
     # Validate the advice output contract before runtime discovery can fail.
     args = parse_args(actual_argv) if actual_argv[:1] == ["position-advice"] else None
     try:

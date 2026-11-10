@@ -1,0 +1,60 @@
+"""Renderer keeps numeric authority and refuses inconsistent conditional results."""
+from __future__ import annotations
+
+from om_group_query_bot.render import render_close, render_roll
+
+
+def _roll(**overrides):
+    data = {
+        "status": "success", "outcome": "found", "analysis_kind": "conditional",
+        "old_quote": {"bid": 1.10, "ask": 1.20},
+        "stock_coverage": {"verification_status": "not_verified",
+                           "required_shares": 200},
+        "unverified_conditions": ["actual_share_count_not_verified"],
+        "candidates": [{
+            "contract_symbol": "US.NVDA270115C190000",
+            "option_contract": {"expiration": "2027-01-15", "strike": 190.0},
+            "bid": 2.0, "ask": 2.2, "dte": 66, "delta": 0.3,
+            "economic_result": "positive_net_credit",
+            "metrics": {"incremental_annualized_return": 0.25},
+        }],
+        "displayed": 1, "omitted": 0, "reason_codes": [],
+        "scope": {"max_new_expiration": "2027-03-19", "strike_boundary": 200.0},
+        "evaluated_at_utc": "2026-11-10T06:00:00+00:00",
+    }
+    data.update(overrides)
+    return data
+
+
+def test_roll_without_a_not_verified_coverage_contract_is_refused():
+    text = render_roll(_roll(stock_coverage={"verification_status": "covered"}))
+    assert text.startswith("结果合同不一致")
+    assert "条件分析" not in text
+
+
+def test_roll_without_unverified_conditions_is_refused():
+    text = render_roll(_roll(unverified_conditions=[]))
+    assert text.startswith("结果合同不一致")
+
+
+def test_conditional_roll_renders_disclaimers_and_nested_metrics():
+    text = render_roll(_roll())
+    assert "条件分析：股票覆盖未经核实，不构成正式账户建议。" in text
+    assert "年化 25.00%" in text
+    assert "按富途标准费用模型估算，非账户实际费用。" in text
+
+
+def test_close_uses_the_fee_model_id_and_estimate_disclaimer():
+    text = render_close({
+        "recommendation_state": "hold", "evaluation_status": "priced",
+        "quote": {"bid": 1.10, "ask": 1.20},
+        "metrics": {"net_capture_ratio": 0.4},
+        "fee_model": {"id": "futu_option_fee", "version": "v1",
+                      "estimated_open_fee": 1.3,
+                      "estimated_close_fee": 1.2,
+                      "fee_calc_status": "conservative_estimate"},
+        "reason_codes": [],
+        "evaluated_at_utc": "2026-11-10T06:00:00+00:00",
+    })
+    assert "费用模型 futu_option_fee@v1" in text
+    assert "非账户实际费用" in text
