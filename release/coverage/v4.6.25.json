@@ -1,0 +1,33 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.25",
+  "base": {
+    "tag": "v4.6.24",
+    "commit": "f6b1456bef0339d15fdd998bf0ba0f6872419a21"
+  },
+  "reviewed_head": "e3888d184443b245d654635673e5da209fc9dd77",
+  "commits": [
+    {
+      "sha": "e3888d184443b245d654635673e5da209fc9dd77",
+      "subject": "fix(plugins): accept newer official catalog during upgrade (#1102)"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "升级时按目标版本的官方插件目录安装受管插件，允许目录包含当前版本尚不认识的官方插件；包含此修复的版本可以升级到新增官方插件的后续版本。（#1102）。",
+      "commits": [
+        "e3888d184443b245d654635673e5da209fc9dd77"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "e3888d184443b245d654635673e5da209fc9dd77",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1102"
+      ]
+    }
+  ]
+}
