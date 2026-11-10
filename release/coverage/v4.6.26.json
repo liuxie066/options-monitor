@@ -1,0 +1,50 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.26",
+  "base": {
+    "tag": "v4.6.25",
+    "commit": "1e81210b5eeeaaf939b7519765ba55a496becf4c"
+  },
+  "reviewed_head": "57a364ead67e7394d160635355692e4afe3cb144",
+  "commits": [
+    {
+      "sha": "b40e94808c1c3072d21872fec65ea24d144bc28c",
+      "subject": "feat(entropy): auto-review queued candidates before issue delivery (#1104)"
+    },
+    {
+      "sha": "57a364ead67e7394d160635355692e4afe3cb144",
+      "subject": "feat(group-query-bot): allow a sole wildcard chat scope (#1105)"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "群查询bot 的 `allowed_chat_ids` 支持唯一通配 `[\"*\"]`，配置后接受任意群，群范围由飞书侧「谁可邀请 bot 入群」控制；通配不能与具体群 ID 混用，具体白名单模式行为不变。（#1105）。",
+      "commits": [
+        "57a364ead67e7394d160635355692e4afe3cb144"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "代码熵巡检在交付 issue 前自动复核排期候选：工具确认的复杂度、完全重复、字面 False 分支和完全证明的死代码经无工具、无插件的审查器复核，并按证据摘要校验后持久化队列；缺少覆盖的死代码保持排队，单批不超过剩余 issue 配额。（#1104）。",
+      "commits": [
+        "b40e94808c1c3072d21872fec65ea24d144bc28c"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "57a364ead67e7394d160635355692e4afe3cb144",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1105"
+      ]
+    },
+    {
+      "commit": "b40e94808c1c3072d21872fec65ea24d144bc28c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1104"
+      ]
+    }
+  ]
+}
