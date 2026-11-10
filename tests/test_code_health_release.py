@@ -147,17 +147,34 @@ def test_completion_reply_contains_actual_verification_and_only_confirmed_versio
 
 
 def test_release_changelog_matches_real_repository_and_canonical_parser():
-    from src.application.release_notes import parse_unreleased_categories, parse_version_categories
+    from src.application.release_notes import (
+        CURRENT_RELEASE_HEADINGS, parse_unreleased_categories, parse_version_categories,
+    )
 
     root = Path(__file__).resolve().parents[1]
     original = (root / "CHANGELOG.md").read_text()
     version_parts = (root / "VERSION").read_text().strip().split(".")
     target = ".".join([*version_parts[:2], str(int(version_parts[2]) + 1)])
-    notes = release_plan()["release_notes"]
+    pending = parse_unreleased_categories(original)
+    assert pending["status"] in {"ok", "empty"}
+    # The plan must cover every note the repository already carries, exactly as
+    # a real release preparation would preserve them.
+    notes = [
+        {"category": heading, "text": text, "commits": [A]}
+        for heading, key in CURRENT_RELEASE_HEADINGS.items()
+        for text in pending["evidence"][key]
+    ] + release_plan()["release_notes"]
+    if pending["evidence"]["breaking_changes"] or pending["evidence"]["added"]:
+        with pytest.raises(ValueError, match="product/version decision"):
+            delivery.release_changelog(original, notes)
+        return
     preview = delivery.release_changelog(original, notes)
     assert parse_unreleased_categories(preview)["status"] == "ok"
     published = delivery.release_changelog(original, notes, target)
     parsed = parse_version_categories(published, target)
     assert parsed["status"] == "ok"
-    assert parsed["evidence"]["fixed"] == [notes[0]["text"]]
+    expected = {key: [] for key in CURRENT_RELEASE_HEADINGS.values()}
+    for note in notes:
+        expected[CURRENT_RELEASE_HEADINGS[note["category"]]].append(note["text"])
+    assert parsed["evidence"] == {**expected, "unsupported": []}
     assert published.endswith(original[original.index("\n## ", original.index("## Unreleased")):])
