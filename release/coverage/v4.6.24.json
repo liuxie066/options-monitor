@@ -1,0 +1,242 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.24",
+  "base": {
+    "tag": "v4.6.23",
+    "commit": "6412ddf588d58ed78cd5b9e5aeff0cb384b31a4d"
+  },
+  "reviewed_head": "798652882cd2b4d9d3d8b9ad3acbf3ad6948ea27",
+  "commits": [
+    {
+      "sha": "b9f3a0de14e6fb7d28bd026fc887e831c43e7600",
+      "subject": "fix(runtime): preserve verified account outcomes for sealed runs (#1086)"
+    },
+    {
+      "sha": "3402161b96ba676c205bc2fe64b0686eaab1b253",
+      "subject": "fix(config): project symbol receipts from current YAML candidates (#1087)"
+    },
+    {
+      "sha": "698be3d41a4496d68d9b6be6fb74adc081ffd19c",
+      "subject": "feat(code-health): triage issues and verify PR delivery (#1088)"
+    },
+    {
+      "sha": "c0d3f084a404a96bcbc8879f999bbb4572c84013",
+      "subject": "fix(research): report per-run archive pull publications (#1089)"
+    },
+    {
+      "sha": "ca7268e891a0f0c017a433e3633d2203fb76f3ce",
+      "subject": "fix(research): derive archive prune changes from cleanup receipt (#1090)"
+    },
+    {
+      "sha": "d77ddaa3b77f2f3949d6283d1eb69682e25e2075",
+      "subject": "fix(trades): correct expiry review and collateral availability (#1091)"
+    },
+    {
+      "sha": "eabec7830aa25bd3354ee8bae6d963aa7827ed73",
+      "subject": "feat(entropy): add independent static code entropy scans (#1092)"
+    },
+    {
+      "sha": "fd2ef2f7750e4c5af7e0318dd17599913e6faed0",
+      "subject": "fix(notify): reject unavailable alerts before report writes (#1093)"
+    },
+    {
+      "sha": "32864929f101117a0cccf10d9d7450078578c7a9",
+      "subject": "fix(brief): show candidate omission counts under their strategy section (#1095)"
+    },
+    {
+      "sha": "32d4ccd3741abea627a560d4b264387d7be792fa",
+      "subject": "fix(tick): skip expired roll candidates instead of failing the tick (#1097)"
+    },
+    {
+      "sha": "0d7413659e25d46c6f168a35f4b86cf2fe2ec3da",
+      "subject": "feat(group-query-bot): add optional Feishu group query bot plugin (#1096)"
+    },
+    {
+      "sha": "2cd25ebc4dc8f781f8afbe51b22c52b0d8639902",
+      "subject": "feat(tick): instrument daily brief assembly and post-pipeline stages (#1099)"
+    },
+    {
+      "sha": "798652882cd2b4d9d3d8b9ad3acbf3ad6948ea27",
+      "subject": "fix(release): derive plugin wheel count in compatibility notes (#1100)"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "New Features",
+      "text": "新增可选「群查询」飞书 bot 插件：使用独立机器人身份、独立模型 API Key 和查询 token，通过受鉴权的只读 API 回答自然语言行情与用户给出的平仓、Put 下移、Call 上移条件问题，不能访问账户、持仓和收益；未安装时普通 OM 行为不变。（#1096）。",
+      "commits": [
+        "0d7413659e25d46c6f168a35f4b86cf2fe2ec3da"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "代码巡检增加 issue 价值分诊、开放 PR 独立审查与实际测试、评论回执和已合并工作的发布交付；自动关闭 PR 保持禁用。（#1088）。",
+      "commits": [
+        "698be3d41a4496d68d9b6be6fb74adc081ffd19c"
+      ]
+    },
+    {
+      "category": "New Features",
+      "text": "新增独立的静态代码熵扫描：每日扫描本周变更文件、每周扫描全量范围，按运行追加带原始工具证据的记分卡，与代码巡检的状态、锁和调度隔离。（#1092）。",
+      "commits": [
+        "eabec7830aa25bd3354ee8bae6d963aa7827ed73"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "Tick 增加日报装配与扫描后阶段的耗时诊断事件，可按 checkpoint 定位耗时，不改变任何结果或异常行为。（#1099）。",
+      "commits": [
+        "2cd25ebc4dc8f781f8afbe51b22c52b0d8639902"
+      ]
+    },
+    {
+      "category": "Improvements",
+      "text": "简报在对应策略分区内展示候选总数、已选和省略数量，替代仅显示配置上限的说明。（#1095）。",
+      "commits": [
+        "32864929f101117a0cccf10d9d7450078578c7a9"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "运行结果读取合并同轮已验证的账户执行结果，候选 bundle 已封存时不再把已知账户失败降为未知；公开工具与 Bot 观察继续不暴露原始指标和自由文本原因。（#1086）。",
+      "commits": [
+        "b9f3a0de14e6fb7d28bd026fc887e831c43e7600"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "`manage_symbols` 改为由当前 YAML 生成候选并投影标的行，避免 YAML 已变更而运行快照未重建时返回旧 CC 边界或旧标的列表，并为新增标的补齐默认行字段。（#1087）。",
+      "commits": [
+        "3402161b96ba676c205bc2fe64b0686eaab1b253"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "`research archive pull` 回执新增逐 run 发布结果，前序 run 已发布但后续 run 冲突时，操作者仍能识别已完成效果并据此重试。（#1089）。",
+      "commits": [
+        "c0d3f084a404a96bcbc8879f999bbb4572c84013"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "`research archive prune-remote --confirm` 按清理回执的真实删除结果报告 `changed`，成功空操作不再误报为已变更。（#1090）。",
+      "commits": [
+        "ca7268e891a0f0c017a433e3633d2203fb76f3ce"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "首次到期复核与最终无交割归因使用不同的等待门，周五到期的合约按到期日实际交易时段提前重采；待归属 short Put 继续按保存担保与完整行权本金较大值扣留，并在明细中展示扣留后的可开仓资金。（#1091）。",
+      "commits": [
+        "d77ddaa3b77f2f3949d6283d1eb69682e25e2075"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "直接运行 `python -m src.application.notify_symbols` 时，告警文件缺失、为空或仅空白会在写报告前报错退出，不再以零候选成功覆盖既有报告。（#1093）。",
+      "commits": [
+        "fd2ef2f7750e4c5af7e0318dd17599913e6faed0"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "已过建议窗口的滚仓候选在扫描、分发准备和仅投递重建中按同一时钟过滤，正常“不发送”不再让整轮 tick 失败；接近快照窗口边缘的 covered-call 滚仓会现场重新观察正股持仓。（#1097）。",
+      "commits": [
+        "32d4ccd3741abea627a560d4b264387d7be792fa"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "插件发布说明按实际官方插件数量生成 wheel 清单描述，避免发布说明与发布资产不一致。（#1100）。",
+      "commits": [
+        "798652882cd2b4d9d3d8b9ad3acbf3ad6948ea27"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "b9f3a0de14e6fb7d28bd026fc887e831c43e7600",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1086"
+      ]
+    },
+    {
+      "commit": "3402161b96ba676c205bc2fe64b0686eaab1b253",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1087"
+      ]
+    },
+    {
+      "commit": "698be3d41a4496d68d9b6be6fb74adc081ffd19c",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1088",
+        "docs/CODE_HEALTH_REVIEW.md"
+      ]
+    },
+    {
+      "commit": "c0d3f084a404a96bcbc8879f999bbb4572c84013",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1089"
+      ]
+    },
+    {
+      "commit": "ca7268e891a0f0c017a433e3633d2203fb76f3ce",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1090"
+      ]
+    },
+    {
+      "commit": "d77ddaa3b77f2f3949d6283d1eb69682e25e2075",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1091",
+        "docs/OPTION_CLOSE_REALTIME_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "eabec7830aa25bd3354ee8bae6d963aa7827ed73",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1092",
+        "docs/CODE_ENTROPY_REVIEW.md"
+      ]
+    },
+    {
+      "commit": "fd2ef2f7750e4c5af7e0318dd17599913e6faed0",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1093"
+      ]
+    },
+    {
+      "commit": "32864929f101117a0cccf10d9d7450078578c7a9",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1095"
+      ]
+    },
+    {
+      "commit": "0d7413659e25d46c6f168a35f4b86cf2fe2ec3da",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1096",
+        "docs/GROUP_QUERY_BOT_DESIGN.md"
+      ]
+    },
+    {
+      "commit": "32d4ccd3741abea627a560d4b264387d7be792fa",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1097"
+      ]
+    },
+    {
+      "commit": "2cd25ebc4dc8f781f8afbe51b22c52b0d8639902",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1099",
+        "docs/RUNTIME_FAILURE_OPERATIONS.md"
+      ]
+    },
+    {
+      "commit": "798652882cd2b4d9d3d8b9ad3acbf3ad6948ea27",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1100"
+      ]
+    }
+  ]
+}
