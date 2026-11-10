@@ -160,10 +160,11 @@ def validate_wheel(path: Path, entry: dict) -> None:
 
 
 def compatibility_notes(catalog: dict) -> str:
+    count = len(catalog["plugins"])
     return (f"# Official plugins for options-monitor {catalog['om_version']}\n\n"
             f"Requires exactly OM {catalog['om_version']} (tag `{catalog['tag']}`, "
             f"commit `{catalog['commit']}`) and Python >=3.12.\n"
-            "Seven pure Python wheels (`py3-none-any`). Feishu declares `lark-oapi`; "
+            f"{count} pure Python wheels (`py3-none-any`). Feishu declares `lark-oapi`; "
             "the other packages declare no dependencies. Provider packages reuse the runtime Futu SDK; "
             "broker-longbridge requires the separately installed SDK from requirements/longbridge.txt. "
             "Install only with the matching OM release; other OM versions are incompatible.\n\n"
