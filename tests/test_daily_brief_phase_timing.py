@@ -212,6 +212,21 @@ def test_actual_assembly_and_render_have_same_results(tmp_path):
     ends = [e for e in log.events if e["status"] == "ok"]
     assert {"assemble", "render"} <= {e["data"]["phase"] for e in ends}
     assert all(e["data"]["market"] == "US" for e in ends)
+    checkpoints = [e for e in log.events if e["data"].get("checkpoint")]
+    assert [e["data"]["operation"] for e in checkpoints] == [
+        "setup",
+        "candidate_sources",
+        "close_advice_rows",
+        "row_dedupe",
+        "actions_positions",
+        "contexts",
+        "status_summary",
+        "attribution",
+        "payload",
+        "normalize",
+    ]
+    assert all(e["status"] == "ok" and e["duration_ms"] is not None for e in checkpoints)
+    assert all(e["data"]["phase"] == "assemble" for e in checkpoints)
 
 
 @pytest.mark.parametrize("error", [RuntimeError("assembly"), KeyboardInterrupt(), asyncio.CancelledError()])
@@ -227,9 +242,51 @@ def test_actual_assembly_failure_records_original_exception(monkeypatch, tmp_pat
                 scheduler_decision={}, account_result={}, pipeline_succeeded=False, config={},
             )
     assert caught.value is error
-    phases = [e for e in log.events if e["data"]["phase"] == "assemble"]
+    phases = [
+        e for e in log.events
+        if e["data"]["phase"] == "assemble" and not e["data"].get("checkpoint")
+    ]
     assert [e["status"] for e in phases] == ["start", "error"]
     assert phases[-1]["data"]["error_type"] == type(error).__name__
+    checkpoints = [e for e in log.events if e["data"].get("checkpoint")]
+    assert [(e["status"], e["data"]["operation"]) for e in checkpoints] == [("ok", "setup")]
+
+
+def test_checkpoint_is_terminal_only_and_measures_since_previous_boundary(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(audit, "monotonic", lambda: clock[0])
+    log = RunLog()
+    with audit.daily_brief_timing_scope(runlog=log, account="lx", market="HK"):
+        with audit.daily_brief_phase("assemble", operation="outer"):
+            started = audit.monotonic()
+            clock[0] += 2.5
+            audit.daily_brief_checkpoint("assemble", operation="section", started=started)
+            clock[0] += 1.0
+            audit.daily_brief_checkpoint("assemble", operation="no_clock", started=None)
+    checkpoints = [e for e in log.events if e["data"].get("checkpoint")]
+    assert [(e["status"], e["data"]["operation"]) for e in checkpoints] == [
+        ("ok", "section"), ("ok", "no_clock"),
+    ]
+    assert checkpoints[0]["duration_ms"] == 2500
+    assert checkpoints[1]["duration_ms"] is None
+    assert checkpoints[0]["data"]["phase"] == "assemble"
+    assert checkpoints[0]["data"]["market"] == "HK"
+    terminals = [
+        e for e in log.events
+        if not e["data"].get("checkpoint") and e["data"]["phase"] == "assemble"
+    ]
+    assert [e["status"] for e in terminals] == ["start", "ok"]
+
+
+def test_checkpoint_outside_scope_emits_nothing(monkeypatch):
+    monkeypatch.setattr(audit, "monotonic", lambda: (_ for _ in ()).throw(OSError("clock")))
+    log = RunLog()
+    audit.daily_brief_checkpoint("assemble", operation="section", started=0.0)
+    assert log.events == []
+    with audit.daily_brief_timing_scope(runlog=log, account="lx", market="HK"):
+        audit.daily_brief_checkpoint("assemble", operation="clock_unavailable", started=0.0)
+    checkpoint = next(e for e in log.events if e["data"].get("checkpoint"))
+    assert checkpoint["status"] == "ok" and checkpoint["duration_ms"] is None
 
 
 def test_real_runlog_keeps_identity_and_omits_unavailable_duration(monkeypatch, tmp_path):

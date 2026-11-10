@@ -97,6 +97,20 @@ runlog 的 `daily_brief_prepare` 记录 `start` 和 `ok`/`error`，`tick_latency
 阶段 `ok` 表示该操作正常返回，不表示现金/候选有效或通知已送达；例如历史读取可能在捕获校验
 异常后返回不可用，内层校验为 `error`，外层账户准备是否正常结束仍由实际控制流决定。
 
+`assemble` 阶段内部另记 `checkpoint: true` 的终点事件：它们只有 `ok`、没有 `start`，
+`duration_ms` 从上一个检查点（或阶段开始）算起，`operation` 标识被测量的组装段
+（`setup`、`candidate_sources`、`close_advice_rows`、`row_dedupe`、`actions_positions`、
+`contexts`、`status_summary`、`attribution`、`payload`、`normalize`）。检查点是被
+`assemble` 包含的内层分段，不能与整段耗时相加。
+
+账户执行在 `snapshot_batches` 终态之后用 `tick_latency` 记录相邻阶段：
+`account_prepared_option_context`、`account_prepared_portfolio_context`（`data.loaded`
+表示封存持仓是否可用）、`account_roll_portfolio_refresh`（`data.gate` 表示是否满足
+覆盖式滚仓刷新的前置条件，`data.refreshed` 表示是否真的采用了现场重取的持仓）和
+`account_close_advice`；`account_post_pipeline` 是这一段（含账户结果收尾）的包含式
+总耗时。它们只在该账户实际执行对应步骤时出现，用于定位扫描子进程结束到账户结果之间的
+空档，不表示通知已生成或已送达。
+
 软取消/异常在展开栈时记录 `error` 并保持原异常；硬超时或强杀可能仅留下 `start`，须结合
 wrapper 终态取证，不能补推成功或虚构耗时。时钟不可用时省略耗时；日志不可用不改变原业务
 结果。计时只在显式账户准备范围内启用，范围结束即复原；独立查询、投递确认和其他仓库调用

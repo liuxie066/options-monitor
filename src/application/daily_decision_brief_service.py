@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -32,7 +33,7 @@ from domain.domain.cash_secured_utils import (
 )
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.storage import paths
-from src.application.multi_tick_audit import daily_brief_phase
+from src.application.multi_tick_audit import daily_brief_checkpoint, daily_brief_phase
 from src.application.scan_scheduler import next_daily_brief_fixed_report
 from src.application.portfolio_context_service import cash_snapshot_is_usable
 from src.application.cash_totals import sum_by_currency_to_cny
@@ -142,6 +143,7 @@ def assemble_daily_decision_brief(
 ) -> dict[str, Any]:
     """Assemble one market-qualified brief from structured run artifacts only."""
 
+    checkpoint_started = monotonic()
     base_path = Path(base).resolve()
     run_id_norm = str(run_id or "").strip()
     account_norm = str(account or "").strip().lower()
@@ -162,6 +164,8 @@ def assemble_daily_decision_brief(
 
     data_gaps: list[dict[str, Any]] = []
     source_artifacts: list[dict[str, Any]] = []
+    daily_brief_checkpoint("assemble", operation="setup", started=checkpoint_started)
+    checkpoint_started = monotonic()
 
     candidate_bundle: dict[str, Any] | None = None
     candidate_bundle_unavailable_reason: str | None = None
@@ -340,6 +344,10 @@ def assemble_daily_decision_brief(
             and item.get("status") != "not_applicable"
         },
     )
+    daily_brief_checkpoint(
+        "assemble", operation="candidate_sources", started=checkpoint_started,
+    )
+    checkpoint_started = monotonic()
     close_rows, close_available = _load_close_advice(
         path=run_account_dir / "close_advice.csv",
         run_account_dir=run_account_dir,
@@ -349,6 +357,10 @@ def assemble_daily_decision_brief(
         source_artifacts=source_artifacts,
         data_gaps=data_gaps,
     )
+    daily_brief_checkpoint(
+        "assemble", operation="close_advice_rows", started=checkpoint_started,
+    )
+    checkpoint_started = monotonic()
 
     indexed_strategy_statuses = _append_strategy_status_gaps(
         strategy_status_index,
@@ -438,6 +450,10 @@ def assemble_daily_decision_brief(
     ranked_combos = combo_rows
     selected_combos = ranked_combos
     selected_wheel = wheel_rows
+    daily_brief_checkpoint(
+        "assemble", operation="row_dedupe", started=checkpoint_started,
+    )
+    checkpoint_started = monotonic()
     actions: list[dict[str, Any]] = []
     candidate_payloads: dict[str, list[dict[str, Any]]] = {
         "sell_put": [],
@@ -594,6 +610,10 @@ def assemble_daily_decision_brief(
         )
     for row in actionable_close_rows:
         actions.append(_close_action(row, account=account_norm))
+    daily_brief_checkpoint(
+        "assemble", operation="actions_positions", started=checkpoint_started,
+    )
+    checkpoint_started = monotonic()
 
     portfolio_context = _load_portfolio_context(
         base=base_path,
@@ -635,6 +655,10 @@ def assemble_daily_decision_brief(
         required=False,
     )
     _append_prefetch_gaps(prefetch, market=market_norm, data_gaps=data_gaps)
+    daily_brief_checkpoint(
+        "assemble", operation="contexts", started=checkpoint_started,
+    )
+    checkpoint_started = monotonic()
 
     rejections = {
         "schema_version": "opening_candidate_rejection_summary.v1",
@@ -737,12 +761,20 @@ def assemble_daily_decision_brief(
         candidates=candidate_payloads,
         data_gaps=deduped_data_gaps,
     )
+    daily_brief_checkpoint(
+        "assemble", operation="status_summary", started=checkpoint_started,
+    )
+    checkpoint_started = monotonic()
 
     attribution_pending, attribution_read_error = _pending_attribution_for_brief(
         base=base_path, config=config_map, account=account_norm, market=market_norm,
         now_ms=int(effective_now.timestamp() * 1000),
         capacity_observation={"portfolio": portfolio_context} if portfolio_context else None,
     )
+    daily_brief_checkpoint(
+        "assemble", operation="attribution", started=checkpoint_started,
+    )
+    checkpoint_started = monotonic()
     from src.application.account_config import account_decision_scope
 
     brief_payload = {
@@ -777,7 +809,15 @@ def assemble_daily_decision_brief(
     }
     if wheel_applicable or wheel_batches:
         brief_payload["wheel_batches"] = wheel_batches
-    return normalize_daily_decision_brief(brief_payload)
+    daily_brief_checkpoint(
+        "assemble", operation="payload", started=checkpoint_started,
+    )
+    checkpoint_started = monotonic()
+    normalized_brief = normalize_daily_decision_brief(brief_payload)
+    daily_brief_checkpoint(
+        "assemble", operation="normalize", started=checkpoint_started,
+    )
+    return normalized_brief
 
 
 def assemble_daily_decision_briefs(
