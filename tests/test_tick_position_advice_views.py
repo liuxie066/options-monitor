@@ -694,3 +694,81 @@ def test_roll_alert_preserves_notification_gates(monkeypatch, tmp_path: Path, ga
     state = read_daily_decision_brief_delivery_state(base=tmp_path, account="lx", market="US")
     if state.get("available"):
         assert not state["state"]["days"].get(MARKET_DATE, {}).get("alerted_candidates")
+
+
+def _roll_row_with_until(lot: str, until: str) -> dict:
+    row = position_row(lot=lot)
+    row["roll_advice"] = {**row["roll_advice"], "actionable_until_utc": until}
+    return row
+
+
+def test_candidate_alert_drops_expired_roll_instead_of_raising(monkeypatch, tmp_path: Path) -> None:
+    current = _roll_row_with_until("current-lot", "2026-07-21T14:05:00Z")
+    expired = _roll_row_with_until("expired-lot", "2026-07-21T14:01:00Z")
+    brief = roll_brief(base=tmp_path, rows=[current, expired])
+    current_id = daily_brief_position_roll_identity(current, account="lx", market="US")
+    expired_id = daily_brief_position_roll_identity(expired, account="lx", market="US")
+    assert current_id and expired_id and current_id != expired_id
+    monkeypatch.setattr(
+        flow, "utc_now", lambda: datetime(2026, 7, 21, 14, 2, tzinfo=timezone.utc),
+    )
+    message, transport, evidence = flow._select_daily_brief_delivery(
+        brief, kind="candidate_alert", identities=[current_id, expired_id], diff={},
+        limits=renderer.resolve_daily_brief_render_limits({}), context={},
+        card=False, open_id="",
+    )
+    assert transport is None
+    assert [row["identity"] for row in evidence] == [current_id]
+    assert message
+
+
+def test_candidate_alert_with_only_expired_rolls_prepares_nothing(monkeypatch, tmp_path: Path) -> None:
+    expired = _roll_row_with_until("expired-lot", "2026-07-21T14:01:00Z")
+    brief = roll_brief(base=tmp_path, rows=[expired])
+    identity = daily_brief_position_roll_identity(expired, account="lx", market="US")
+    assert identity
+    monkeypatch.setattr(
+        flow, "utc_now", lambda: datetime(2026, 7, 21, 14, 2, tzinfo=timezone.utc),
+    )
+    assert flow._select_daily_brief_delivery(
+        brief, kind="candidate_alert", identities=[identity], diff={},
+        limits=renderer.resolve_daily_brief_render_limits({}), context={},
+        card=False, open_id="",
+    ) == ("", None, [])
+
+
+def test_roll_render_source_uses_the_supplied_delivery_instant(tmp_path: Path) -> None:
+    row = _roll_row_with_until("current-lot", "2026-07-21T14:05:00Z")
+    brief = roll_brief(base=tmp_path, rows=[row])
+    identity = daily_brief_position_roll_identity(row, account="lx", market="US")
+    assert identity
+    before = flow._daily_brief_roll_render_source(
+        brief, [identity], now_utc=datetime(2026, 7, 21, 14, 2, tzinfo=timezone.utc),
+    )
+    after = flow._daily_brief_roll_render_source(
+        brief, [identity], now_utc=datetime(2026, 7, 21, 14, 6, tzinfo=timezone.utc),
+    )
+    assert daily_brief_position_roll(before["positions"][0]) is not None
+    assert daily_brief_position_roll(after["positions"][0]) is None
+
+
+def test_expired_roll_identity_would_break_the_alert_without_the_delivery_filter(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    expired = _roll_row_with_until("expired-lot", "2026-07-21T14:01:00Z")
+    brief = roll_brief(base=tmp_path, rows=[expired])
+    identity = daily_brief_position_roll_identity(expired, account="lx", market="US")
+    assert identity
+    monkeypatch.setattr(
+        flow, "utc_now", lambda: datetime(2026, 7, 21, 14, 2, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        flow, "_daily_brief_deliverable_candidates",
+        lambda _brief, identities, **_kwargs: list(identities),
+    )
+    with pytest.raises(ValueError, match="absent from the successful brief"):
+        flow._select_daily_brief_delivery(
+            brief, kind="candidate_alert", identities=[identity], diff={},
+            limits=renderer.resolve_daily_brief_render_limits({}), context={},
+            card=False, open_id="",
+        )

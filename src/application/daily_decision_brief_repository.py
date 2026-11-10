@@ -60,6 +60,21 @@ _SuccessfulRevisionSources = dict[
     tuple[str, str, str, str, int, str],
     tuple[dict[str, Any], Mapping[str, Any]],
 ]
+# Delivery-state normalization re-validates every historical envelope on every
+# read and write. The history row is still read fresh each time (deletion,
+# corruption and identity tampering must fail closed), but an observation whose
+# content hash is unchanged has already passed deep normalization; reuse that
+# result for this process. A changed payload gets a new key and is normalized
+# again, so a stale entry can never authorize changed evidence. Entries are
+# ~1MB deep per brief, so the bound is a count; when it is exceeded the oldest
+# observation is dropped rather than the whole table, which keeps a cyclic
+# read of one account's history (a few hundred sources) fully cached.
+_ValidatedBriefSources = dict[
+    tuple[str, str, str, str, int, str, str],
+    tuple[dict[str, Any], tuple[str, ...]],
+]
+_VALIDATED_BRIEF_CACHE: _ValidatedBriefSources = {}
+_VALIDATED_BRIEF_CACHE_LIMIT = 256
 _MISSING = object()
 _RETIRED_AI_MESSAGE_MARKERS = (
     "AI建议",
@@ -2459,12 +2474,25 @@ def _read_validated_successful_revision_source(
         raise DailyDecisionBriefStateError(f"daily brief delivery references a missing revision: {revision_path}")
     if not isinstance(raw, Mapping):
         raise DailyDecisionBriefStateError(f"daily brief state is not an object: {revision_path}")
-    try:
-        brief, compatible_digests = normalize_persisted_daily_decision_brief_with_digests(raw)
-    except (TypeError, ValueError) as exc:
-        raise DailyDecisionBriefStateError(
-            f"daily brief state is incompatible: {revision_path}: {exc}"
-        ) from exc
+    observation_digest = content_hash(raw)
+    cache_key = (*key, observation_digest)
+    cached = _VALIDATED_BRIEF_CACHE.get(cache_key)
+    if cached is not None:
+        # Every read must hand back its own object: callers have always been
+        # free to copy-on-write a brief, and a shared instance would let one
+        # caller's edit leak into the next read.
+        brief, compatible_digests = deepcopy(cached[0]), cached[1]
+    else:
+        try:
+            brief, compatible_digests = normalize_persisted_daily_decision_brief_with_digests(raw)
+        except (TypeError, ValueError) as exc:
+            raise DailyDecisionBriefStateError(
+                f"daily brief state is incompatible: {revision_path}: {exc}"
+            ) from exc
+        if len(_VALIDATED_BRIEF_CACHE) >= _VALIDATED_BRIEF_CACHE_LIMIT:
+            del _VALIDATED_BRIEF_CACHE[next(iter(_VALIDATED_BRIEF_CACHE))]
+        # Store a copy: the caller owns the object it gets back.
+        _VALIDATED_BRIEF_CACHE[cache_key] = (deepcopy(brief), compatible_digests)
     if brief["account"] != account or brief["market"] != market:
         raise DailyDecisionBriefStateError(f"daily brief state identity mismatch: {revision_path}")
     if brief["market_trading_date"] != market_trading_date or int(brief["revision"]) != revision:
