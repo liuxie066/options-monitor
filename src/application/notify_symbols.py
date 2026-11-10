@@ -984,9 +984,11 @@ def main():
     alerts_path = base / args.alerts_input
     changes_path = base / args.changes_input
     output_path = base / args.output
-    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     alerts_text = read_text(alerts_path)
+    if not alerts_text:
+        parser.error(f'alerts input is missing or empty: {alerts_path}')
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     account_label = _infer_account_label(output_path, alerts_path)
 
     notification = build_notification(
