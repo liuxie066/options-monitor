@@ -422,7 +422,15 @@ def evaluate_frozen_position_roll(
                 snapshot=portfolio_context["position_snapshot_input"], account=account, broker=broker,
                 symbol=position["symbol"], currency=position["currency"],
             )
-            result["stock_coverage"] = coverage
+            # This observation anchors actionable_until_utc, so record it: a
+            # point-of-use refresh must stay visible instead of hiding behind
+            # the sealed scan snapshot.
+            result["stock_coverage"] = {
+                **coverage,
+                "observed_at_utc": (
+                    portfolio_context.get("position_snapshot_input") or {}
+                ).get("observed_at_utc"),
+            }
             if coverage["status"] != "covered":
                 result["reason_codes"] = coverage["reason_codes"]
                 if coverage["status"] == "insufficient":

@@ -173,24 +173,51 @@ def _daily_brief_represented_identities(metadata: Mapping[str, Any]) -> set[str]
             or (row["state"] == "summary_notified" and not row["identity"].startswith("position-roll:"))}
 
 
+def _daily_brief_deliverable_candidates(
+    brief: Mapping[str, Any], identities: Any, *, now_utc: datetime | str | None = None,
+) -> list[str]:
+    """Drop roll identities whose advice window has closed at delivery time.
+
+    Pending candidates are recorded against the brief's generated_at, but a tick
+    can reach delivery minutes later. An expired roll is a normal state (do not
+    send it), never a broken identity.
+    """
+    ordered = list(identities or [])
+    rolls = daily_brief_roll_notification_identities(brief)
+    if not rolls:
+        return ordered
+    current = daily_brief_roll_notification_identities(
+        brief, now_utc=now_utc or utc_now())
+    return [identity for identity in ordered if identity not in rolls or identity in current]
+
+
 def _select_daily_brief_delivery(
     brief, *, kind, identities, diff, limits, context, card, open_id, preserve_context=False,
 ):
-    render_brief = _daily_brief_roll_render_source(brief, identities)
+    now = utc_now()
+    selected_identities = list(identities)
+    if kind == "candidate_alert":
+        selected_identities = _daily_brief_deliverable_candidates(
+            brief, selected_identities, now_utc=now)
+        if not selected_identities:
+            return "", None, []
+    render_brief = _daily_brief_roll_render_source(
+        brief, selected_identities, now_utc=now)
     if not preserve_context:
         context.update(_daily_brief_candidate_render_context(
             render_brief, delivery_kind="candidate_alert" if kind == "candidate_alert" else "fixed_report",
-            candidate_identities=identities, diff=diff, limits=limits, context=context,
+            candidate_identities=selected_identities, diff=diff, limits=limits, context=context,
         ))
     selection = select_daily_brief_notification(
         render_brief, delivery_kind="candidate_alert" if kind == "candidate_alert" else "fixed_report",
-        candidate_identities=identities, diff=diff, limits=limits, context=context,
+        candidate_identities=selected_identities, diff=diff, limits=limits, context=context,
         fits=(lambda blocks, text: feishu_notification_blocks_fit(blocks, text, open_id=open_id))
         if card else None,
     )
     states = {row["identity"]: row["state"] for row in selection["display_evidence"]}
     selection["display_evidence"] = [
-        {"identity": identity, "state": states.get(identity, "not_shown")} for identity in identities]
+        {"identity": identity, "state": states.get(identity, "not_shown")}
+        for identity in selected_identities]
     blocks, message = selection["markdown_blocks"], selection["text"]
     transport = render_feishu_notification_card(
         markdown="\n\n".join(blocks), markdown_blocks=blocks, fallback_text=message,
@@ -283,6 +310,7 @@ def _prepare_daily_brief_fanout(request, account, market, scheduler, brief, pers
                 if child["identity_key"] == route["identity_key"]:
                     owned.update(_daily_brief_represented_identities(child["spec"]["metadata"]))
             identities = [identity for identity in identities if identity not in owned]
+            identities = _daily_brief_deliverable_candidates(brief, identities)
             if not identities:
                 continue
             kind = "candidate_alert"
@@ -1641,7 +1669,10 @@ def _prepare_daily_brief_notification(
                             )
                             candidate_record_reason = str(recorded["reason"])
                             if recorded["applied"]:
-                                pending = list(recorded["pending_candidate_identities"])
+                                pending = _daily_brief_deliverable_candidates(
+                                    persisted["brief"],
+                                    recorded["pending_candidate_identities"],
+                                )
                         if not explicit_routes and fixed_target and blocked_retry_envelope is None and not request.no_send:
                             record_daily_decision_brief_fixed_recovery(
                                 base=request.base,
@@ -1978,13 +2009,15 @@ def _daily_brief_displayed_roll_identities(
 
 
 def _daily_brief_roll_render_source(
-    brief: Mapping[str, Any], identities: list[str],
+    brief: Mapping[str, Any], identities: list[str], *,
+    now_utc: datetime | str | None = None,
 ) -> Mapping[str, Any]:
     """Filter requested current rolls without applying display limits."""
     if not daily_brief_roll_notification_identities(brief):
         return brief
     allowed = set(identities).intersection(
-        daily_brief_roll_notification_identities(brief, now_utc=utc_now()))
+        daily_brief_roll_notification_identities(
+            brief, now_utc=now_utc or utc_now()))
     return {**brief, "positions": [
         row if daily_brief_position_roll_identity(
             row, account=brief.get("account"), market=brief.get("market")) in allowed
@@ -2186,6 +2219,7 @@ def _rebuild_daily_brief_delivery(
         if expired_source:
             return {"envelope": None, "reason": "recovery_window_expired"}
     pending = sorted((day.get("pending_candidates") or {}).keys()) if isinstance(day, dict) else []
+    pending = _daily_brief_deliverable_candidates(brief, pending)
     recovery = supplement.get("recovery") if recovering_report else recovery_result.get("recovery")
     fixed_target = (
         str(recovery.get("scheduled_target_market") or "").strip()

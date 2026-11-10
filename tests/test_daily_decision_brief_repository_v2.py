@@ -2264,3 +2264,71 @@ def test_earnings_comparability_roundtrip_and_diff(tmp_path: Path, with_provenan
         assert change["after_event_risk"]["evidence_snapshot_hash"] == "b" * 64
     else:
         assert "evidence_snapshot_hash" not in change["before_event_risk"]
+
+
+def test_unchanged_source_normalization_is_reused_across_independent_reads(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import src.application.daily_decision_brief_repository as repository
+
+    _confirmed_repeated_source(tmp_path)
+    repository._VALIDATED_BRIEF_CACHE.clear()
+    calls: list[int] = []
+    original = repository.normalize_persisted_daily_decision_brief_with_digests
+
+    def counted(raw):
+        calls.append(1)
+        return original(raw)
+
+    monkeypatch.setattr(
+        repository, "normalize_persisted_daily_decision_brief_with_digests", counted,
+    )
+    assert _read_state(tmp_path)["available"] is True
+    assert _read_state(tmp_path)["available"] is True
+    assert len(calls) == 1
+
+
+def test_changed_source_payload_is_normalized_again(tmp_path: Path, monkeypatch) -> None:
+    import src.application.daily_decision_brief_repository as repository
+
+    persisted, _ = _confirmed_repeated_source(tmp_path)
+    repository._VALIDATED_BRIEF_CACHE.clear()
+    calls: list[int] = []
+    original = repository.normalize_persisted_daily_decision_brief_with_digests
+
+    def counted(raw):
+        calls.append(1)
+        return original(raw)
+
+    monkeypatch.setattr(
+        repository, "normalize_persisted_daily_decision_brief_with_digests", counted,
+    )
+    assert _read_state(tmp_path)["available"] is True
+    raw = dict(persisted["brief"])
+    raw["strategy_summary"] = "changed facts"
+    replace_history_payload(tmp_path, raw)
+    rejected = _read_state(tmp_path)
+    assert rejected["available"] is False
+    assert rejected["reason"] == "state_invalid"
+    assert len(calls) == 2
+
+
+def test_cached_source_hands_each_caller_an_independent_object(tmp_path: Path) -> None:
+    import src.application.daily_decision_brief_repository as repository
+
+    persisted = _persist(tmp_path, actions=[_action(), _action(symbol="AMD")])
+    repository._VALIDATED_BRIEF_CACHE.clear()
+    lookup = {
+        "base": tmp_path,
+        "account": "lx",
+        "market": "US",
+        "market_trading_date": MARKET_DATE,
+        "revision": persisted["current_revision"],
+        "source_digest": persisted["current_brief_digest"],
+    }
+    first = repository._validate_successful_revision_source(**lookup)
+    first["run_id"] = "tampered"
+    first["actions"].clear()
+    second = repository._validate_successful_revision_source(**lookup)
+    assert second["run_id"] == "run-1"
+    assert second["actions"]
