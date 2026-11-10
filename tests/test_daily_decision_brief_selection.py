@@ -157,7 +157,8 @@ def test_wheel_opening_and_status_cards_share_account_and_whole_brief_caps() -> 
     assert not any("Wheel 另有" in line for line in view["selection_omissions"])
     bounded = build_daily_brief_user_view(brief, limits={"max_total_items": 5})
     assert len(bounded["wheel_batches"]) == 1
-    assert any("Wheel 另有 2" in line for line in bounded["selection_omissions"])
+    assert any("Wheel 本轮 3 个候选，入选 1 个，另有 2 个未展开" in line
+               for line in bounded["selection_omissions"])
     brief["positions"] = []
     for row in brief["wheel_batches"]:
         row["recommended_contracts"] = 0

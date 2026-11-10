@@ -90,7 +90,7 @@ def test_display_evidence_follows_surviving_summary_and_full_cards() -> None:
         "expanded", "expanded", "expanded", "summary_notified", "summary_notified",
     ]
     blocks = selection["markdown_blocks"]
-    assert "CSP 另有 2 个策略候选未展开" in selection["text"]
+    assert "CSP 本轮 5 个候选，入选 3 个，另有 2 个未展开" in selection["text"]
     no_summary = [row for row in blocks if not row.summary_family]
     evidence = _display_evidence(brief, identities, blocks, no_summary)
     assert [row["state"] for row in evidence] == [
