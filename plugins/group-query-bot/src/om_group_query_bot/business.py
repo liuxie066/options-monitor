@@ -197,7 +197,10 @@ def _spot_payloads(settings: APISettings, fetch_symbol: str,
     if price is None or price <= 0:
         return []
     observed = str(getattr(observation, "observed_at_utc", "") or "")
+    market = str(getattr(observation, "market", "") or "").upper()
+    currency = "HKD" if market == "HK" else "USD" if market == "US" else None
     row = {
+        "currency": currency,
         "last_price": price, "spot": price,
         "spot_observed_at_utc": observed, "snapshot_received_at_utc": observed,
         "last_price_update_time": getattr(observation, "update_time", None),
@@ -254,11 +257,14 @@ class Dependencies:
             except (OSError, UnicodeError, json.JSONDecodeError) as exc:
                 raise BusinessUnavailable("required-data payload is unreadable") from exc
 
-        def exchange_rates(settings: APISettings, now: datetime,
+        def exchange_rates(settings: APISettings, _now: datetime,
                            budget: RunBudget) -> dict[str, Any]:
+            # The snapshot samples its evaluation clock after its own fetch.
+            # Passing the request's earlier clock would drop provider quotes
+            # stamped during the fetch as "future" and report FX unavailable.
             return current_exchange_rate_snapshot(
                 cache_path=Path(settings.data_dir) / "output_shared/state/rate_cache.json",
-                now=now, write_cache=False,
+                write_cache=False,
                 deadline=budget.deadline_monotonic, cancelled=budget.expired,
             )
 
@@ -317,12 +323,16 @@ class BusinessService:
     # ---- quotes -------------------------------------------------------
     def _quotes(self, request: NormalizedRequest, budget: RunBudget) -> dict[str, Any]:
         contract = request.parameters.get("contract")
-        now = _utc(self._now())
+        requested_at = _utc(self._now())
         payloads, plan = self._fetch(
             request=request, budget=budget,
             option_type=contract["option_type"] if contract else None,
             original_contract=contract,
         )
+        # Freshness must be judged at the post-fetch clock: a snapshot received
+        # while the fetch was in flight is newer than the request's clock but
+        # is not a future quote.
+        now = _utc(self._now())
         rows = [row for payload in payloads for row in _payload_rows(payload)]
         underlier = None
         option = None
@@ -361,29 +371,41 @@ class BusinessService:
             "quote_status": status,
             "missing_requirements": sorted(set(missing)),
             "effective_parameters": _effective(request, contract_requested=contract is not None),
-            "requested_at_utc": now.isoformat(),
+            "requested_at_utc": requested_at.isoformat(),
             "evidence": {"plan_id": plan.plan_id, "payloads": _payload_evidence(payloads)},
         }
 
     # ---- candidates ---------------------------------------------------
-    def _candidates(self, request: NormalizedRequest, budget: RunBudget) -> dict[str, Any]:
-        now = _utc(self._now())
-        prepared = prepare_public_query(
+    def _prepare_candidates(self, request: NormalizedRequest,
+                            now: datetime) -> Any:
+        return prepare_public_query(
             {**request.parameters, "market": request.market},
             self.settings.public_policy.policy,
             {"market_data_provider": "opend", "host": self.settings.quote_host,
              "port": self.settings.quote_port},
             now,
         )
+
+    def _candidates(self, request: NormalizedRequest, budget: RunBudget) -> dict[str, Any]:
+        requested_at = _utc(self._now())
+        prepared = self._prepare_candidates(request, requested_at)
         payloads, plan = self._fetch(
             request=request, budget=budget,
             option_type=prepared.query["strategy"].removeprefix("short_"),
             candidate_config=prepared.config,
         )
+        fetched_at = _utc(self._now())
         budget.begin_api_call()
-        fx = self.dependencies.exchange_rates(self.settings, now, budget)
+        fx = self.dependencies.exchange_rates(self.settings, fetched_at, budget)
         if budget.expired():
             raise BudgetExhausted("deadline_exceeded")
+        # Evaluate at the post-fetch clock so quotes and rates received during
+        # the two fetches are not rejected as future evidence.  The prepared
+        # query carries its scan date, so it must be rebuilt for that clock:
+        # otherwise a fetch crossing the market-local midnight reports
+        # date_changed and drops every candidate.
+        now = _utc(self._now())
+        prepared = self._prepare_candidates(request, now)
         merged = merge_required_data_payloads(
             symbol=plan.symbol, payloads=[dict(item) for item in payloads])
         result = evaluate_public_candidates(prepared, merged, dict(fx or {}), 0, now)
@@ -402,10 +424,10 @@ class BusinessService:
     # ---- scenarios ----------------------------------------------------
     def _scenario(self, request: NormalizedRequest, principal: VerifiedPrincipal,
                   budget: RunBudget) -> dict[str, Any]:
-        now = _utc(self._now())
-        scenario = _scenario_input(request, now)
+        requested_at = _utc(self._now())
+        scenario = _scenario_input(request, requested_at)
         scope = conversation_scope_sha256(self.settings.instance_id, request.context)
-        purge_expired_assessments(Path(self.settings.data_dir), now)
+        purge_expired_assessments(Path(self.settings.data_dir), requested_at)
         assessment_id = new_assessment_id()
         runtime_root = Path(self.settings.data_dir) / "output_runs" / assessment_id
         required_dir = runtime_root / "required_data"
@@ -422,7 +444,7 @@ class BusinessService:
                              "host": self.settings.quote_host,
                              "port": self.settings.quote_port},
                 runtime_root=runtime_root, required_data_dir=required_dir,
-                now_utc=now,
+                now_utc=requested_at,
             )
             plan = validate_user_provided_scenario_plan(plan)
         except ScenarioInputError as exc:
@@ -432,6 +454,9 @@ class BusinessService:
         try:
             payload, effective_scope = self._fetch_scenario_payload(
                 plan, required_dir, budget)
+            # Judge quote freshness after the fetch: rows received in flight
+            # are newer than the request clock but are not future evidence.
+            now = _utc(self._now())
             rows = _payload_rows(payload)
             original = _original_row(rows, plan)
             contract_evidence = _contract_evidence(plan, original)
@@ -571,19 +596,30 @@ class BusinessService:
                     fetch_source=settings.quote_source, market_data_provider="opend",
                 )
                 fetch_plan = bundle.to_debug_dict()
-                expected = build_required_data_expected_fetch_contract(
-                    symbol=fetch_symbol, fetch_plan=fetch_plan,
-                    source=_fetch_source(settings), host=settings.quote_host,
-                    port=settings.quote_port,
-                )
+                if spot_only and not bundle.merged_specs:
+                    # A spot-only plan has no fetch requests by design: its
+                    # evidence is the underlier observation.  The shared
+                    # expected-contract validator requires requests for a
+                    # success_rows outcome, so it does not apply here.
+                    expected = {}
+                    global_plan = {"plan_id": _spot_plan_id(fetch_symbol, fetch_plan),
+                                   "symbols": [{"symbol": fetch_symbol,
+                                                "fetch_plan": fetch_plan}]}
+                else:
+                    expected = build_required_data_expected_fetch_contract(
+                        symbol=fetch_symbol, fetch_plan=fetch_plan,
+                        source=_fetch_source(settings), host=settings.quote_host,
+                        port=settings.quote_port,
+                    )
+                    global_plan = {
+                        "plan_id": _plan_id(fetch_symbol, expected, fetch_plan),
+                        "symbols": [{"symbol": fetch_symbol,
+                                     "expected_fetch_contract": expected,
+                                     "fetch_plan": fetch_plan,
+                                     "fetch_binding": expected["fetch_binding"]}]}
             except (RuntimeError, ValueError, OSError) as exc:
                 raise BusinessUnavailable(
                     "quote discovery or fetch planning is unavailable") from exc
-            global_plan = {"plan_id": _plan_id(fetch_symbol, expected, fetch_plan),
-                           "symbols": [{"symbol": fetch_symbol,
-                                        "expected_fetch_contract": expected,
-                                        "fetch_plan": fetch_plan,
-                                        "fetch_binding": expected["fetch_binding"]}]}
             payloads: list[dict[str, Any]] = []
             if bundle.merged_specs:
                 for spec in bundle.merged_specs:
@@ -616,6 +652,12 @@ def _plan_id(symbol: str, expected: dict[str, Any], fetch_plan: dict[str, Any]) 
                                    "expected_fetch_contract": expected,
                                    "fetch_plan": fetch_plan,
                                    "fetch_binding": expected["fetch_binding"]}])
+
+
+def _spot_plan_id(symbol: str, fetch_plan: dict[str, Any]) -> str:
+    """Stable evidence identity for a spot-only plan without fetch requests."""
+    from src.application.required_data_plan_identity import required_data_plan_id
+    return required_data_plan_id([{"symbol": symbol, "fetch_plan": fetch_plan}])
 
 
 def _scenario_input(request: NormalizedRequest, now: datetime) -> dict[str, Any]:
