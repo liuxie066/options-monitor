@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
+from decimal import Decimal
 from typing import Any
 
 import pytest
 
+from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.ledger.lifecycle_overlay import (
     LifecycleOverlayContractError,
     advance_direct_lifecycle_anchor_resolution,
     lifecycle_case_generation_token,
     lifecycle_case_resolution,
+    lifecycle_effective_void_target_event_ids,
     resolve_account_lifecycle_overlay,
 )
 from src.application.ledger.source_consumption import (
@@ -484,3 +488,171 @@ def test_generation_token_tracks_potential_competitor_not_unrelated_case() -> No
         before_token["generation_token"]
         != competitor_token["generation_token"]
     )
+
+
+def _contract_key() -> ContractKey:
+    return ContractKey.from_values(
+        broker="富途",
+        account="lx",
+        underlying_symbol="AAPL",
+        option_type="put",
+        strike=150.0,
+        expiration_ymd="2026-06-19",
+    )
+
+
+def _terminal_close(
+    event_id: str, *, event_time_ms: int = 2000, **overrides: object
+) -> TradeEvent:
+    kwargs: dict[str, object] = {
+        "event_id": event_id,
+        "event_type": "close",
+        "event_time_ms": event_time_ms,
+        "contract_key": _contract_key(),
+        "contracts": 1,
+        "price": Decimal("0.5"),
+        "currency": "USD",
+        "source": "manual",
+        "multiplier": 100,
+        "target_lot_id": "lot_open-aapl",
+        "raw_payload": {"side": "buy"},
+    }
+    kwargs.update(overrides)
+    return TradeEvent(**kwargs)
+
+
+def _repair_void(
+    event_id: str,
+    target_event_id: str,
+    repair_event_id: str | None,
+    *,
+    event_time_ms: int = 4000,
+) -> TradeEvent:
+    raw_payload: dict[str, object] = {"side": "sell"}
+    if repair_event_id is not None:
+        raw_payload["repair_event_id"] = repair_event_id
+    return TradeEvent(
+        event_id=event_id,
+        event_type="void",
+        event_time_ms=event_time_ms,
+        contract_key=_contract_key(),
+        contracts=0,
+        price=Decimal("0"),
+        currency="USD",
+        source="cli_trade_event_repair",
+        multiplier=100,
+        target_event_id=target_event_id,
+        raw_payload=raw_payload,
+    )
+
+
+def test_lifecycle_effective_voids_exclude_a_close_reproduced_by_its_repair() -> None:
+    original = _terminal_close("close-original")
+    replacement = _terminal_close("close-repair", event_time_ms=3000)
+    void = _repair_void("void-original", "close-original", "close-repair")
+
+    assert lifecycle_effective_void_target_event_ids(
+        [original.to_dict(), replacement.to_dict(), void.to_dict()]
+    ) == ()
+
+
+def test_lifecycle_effective_voids_keep_a_void_without_a_live_replacement() -> None:
+    original = _terminal_close("close-original")
+    void = _repair_void("void-original", "close-original", "close-missing")
+
+    assert lifecycle_effective_void_target_event_ids(
+        [original.to_dict(), void.to_dict()]
+    ) == ("close-original",)
+
+
+@pytest.mark.parametrize(
+    "replacement_overrides",
+    [
+        {"contracts": 2},
+        {"target_lot_id": "lot-other"},
+        {"event_type": "expire_close"},
+        {"contract_key": replace(_contract_key(), strike=Decimal("155"))},
+    ],
+    ids=["contracts", "lot", "event_type", "contract"],
+)
+def test_lifecycle_effective_voids_keep_a_void_whose_repair_differs(
+    replacement_overrides: dict[str, object],
+) -> None:
+    original = _terminal_close("close-original")
+    replacement = _terminal_close(
+        "close-repair", event_time_ms=3000, **replacement_overrides
+    )
+    void = _repair_void("void-original", "close-original", "close-repair")
+
+    assert lifecycle_effective_void_target_event_ids(
+        [original.to_dict(), replacement.to_dict(), void.to_dict()]
+    ) == ("close-original",)
+
+
+def test_lifecycle_effective_voids_follow_a_repaired_repair_chain() -> None:
+    original = _terminal_close("close-original")
+    first_repair = _terminal_close("close-repair-1", event_time_ms=3000)
+    second_repair = _terminal_close("close-repair-2", event_time_ms=5000)
+    first_void = _repair_void("void-1", "close-original", "close-repair-1")
+    second_void = _repair_void(
+        "void-2", "close-repair-1", "close-repair-2", event_time_ms=6000
+    )
+
+    assert lifecycle_effective_void_target_event_ids(
+        [
+            original.to_dict(),
+            first_repair.to_dict(),
+            first_void.to_dict(),
+            second_void.to_dict(),
+            second_repair.to_dict(),
+        ]
+    ) == ()
+
+
+def test_lifecycle_effective_voids_keep_a_chain_whose_repair_is_itself_dead() -> None:
+    original = _terminal_close("close-original")
+    first_repair = _terminal_close("close-repair-1", event_time_ms=3000)
+    first_void = _repair_void("void-1", "close-original", "close-repair-1")
+    second_void = _repair_void("void-2", "close-repair-1", None, event_time_ms=6000)
+
+    assert lifecycle_effective_void_target_event_ids(
+        [
+            original.to_dict(),
+            first_repair.to_dict(),
+            first_void.to_dict(),
+            second_void.to_dict(),
+        ]
+    ) == ("close-original", "close-repair-1")
+
+
+def test_lifecycle_effective_voids_keep_a_close_with_contradictory_repairs() -> None:
+    original = _terminal_close("close-original")
+    first_replacement = _terminal_close("close-repair-1", event_time_ms=3000)
+    second_replacement = _terminal_close("close-repair-2", event_time_ms=5000)
+    first_void = _repair_void("void-1", "close-original", "close-repair-1")
+    second_void = _repair_void(
+        "void-2", "close-original", "close-repair-2", event_time_ms=6000
+    )
+
+    assert lifecycle_effective_void_target_event_ids(
+        [
+            original.to_dict(),
+            first_replacement.to_dict(),
+            second_replacement.to_dict(),
+            first_void.to_dict(),
+            second_void.to_dict(),
+        ]
+    ) == ("close-original",)
+
+
+def test_lifecycle_effective_voids_accept_two_voids_naming_the_same_repair() -> None:
+    original = _terminal_close("close-original")
+    replacement = _terminal_close("close-repair", event_time_ms=3000)
+    first_void = _repair_void("void-1", "close-original", "close-repair")
+    second_void = _repair_void(
+        "void-2", "close-original", "close-repair", event_time_ms=5000
+    )
+
+    assert lifecycle_effective_void_target_event_ids(
+        [original.to_dict(), replacement.to_dict(), first_void.to_dict(), second_void.to_dict()]
+    ) == ()
