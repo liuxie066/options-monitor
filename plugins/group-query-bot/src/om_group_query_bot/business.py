@@ -181,6 +181,52 @@ def _closed_market_reference_from(bundle: dict[str, Any]) -> dict[str, Any] | No
     return None
 
 
+def _candidate_enumeration_meta(bundle: dict[str, Any],
+                                fetch_plan: dict[str, Any]) -> dict[str, Any]:
+    """Restore the plan-owned enumeration facts the shared merge drops.
+
+    The required-data plan owns expiration discovery and projection; each child
+    payload owns the per-expiration fetch status.  The shared merge keeps the
+    child metas under ``meta.requests`` but not their enumeration keys, and the
+    non-query fetcher does not emit the two plan-level keys at all.  Without
+    these facts the shared evaluator can only report ``enumeration_incomplete``.
+    """
+    meta = bundle.get("meta") if isinstance(bundle, dict) else None
+    requests = meta.get("requests") if isinstance(meta, dict) else None
+    statuses: dict[str, str] = {}
+    conflict = False
+    scope_validated = True
+    saw_meta = False
+    for item in requests or []:
+        if not isinstance(item, dict):
+            continue
+        saw_meta = True
+        child_statuses = item.get("expiration_statuses")
+        if isinstance(child_statuses, dict):
+            for expiration, status in child_statuses.items():
+                key, value = str(expiration), str(status)
+                if key in statuses and statuses[key] != value:
+                    conflict = True
+                else:
+                    statuses[key] = value
+        if item.get("query_scope_validated") is not True:
+            scope_validated = False
+    facts: dict[str, Any] = {}
+    projected = fetch_plan.get("projected_expirations") \
+        if isinstance(fetch_plan, dict) else None
+    if isinstance(projected, list):
+        facts["available_expirations"] = [str(item) for item in projected]
+    if saw_meta and not conflict:
+        facts["expiration_statuses"] = statuses
+    complete = fetch_plan.get("expiration_discovery_complete") \
+        if isinstance(fetch_plan, dict) else None
+    if isinstance(complete, bool):
+        facts["expiration_enumeration_complete"] = complete
+    if saw_meta:
+        facts["query_scope_validated"] = scope_validated
+    return facts
+
+
 def _quote_status(quote: dict[str, Any], now: datetime, missing: list[str]) -> str:
     try:
         received = parse_utc(quote.get("snapshot_received_at_utc"), "snapshot_received_at_utc")
@@ -323,6 +369,36 @@ def _spot_payloads(settings: APISettings, fetch_symbol: str,
         "rows": [row],
         "meta": {"observed_at_utc": observed, "source": settings.quote_source},
     }]
+
+
+def _empty_scope_payload(settings: APISettings,
+                         fetch_plan: dict[str, Any]) -> dict[str, Any]:
+    """Shape a plan-proven empty candidate scope for the shared evaluator.
+
+    ``success_empty`` and ``projection_empty`` mean the plan produced no fetch
+    request; that is an answer, not a failure.  The payload carries the plan's
+    underlier observation and the child-scope validation; the adapter restores
+    the plan-level enumeration facts.
+    """
+    observation = fetch_plan.get("underlier_observation")
+    if not isinstance(observation, dict):
+        observation = None
+    return {
+        "symbol": str(fetch_plan.get("symbol") or ""),
+        "underlier_code": str((observation or {}).get("code") or ""),
+        "spot": fetch_plan.get("spot_reference"),
+        "expirations": [],
+        "rows": [],
+        "meta": {
+            "source": settings.quote_source,
+            "observed_at_utc": str((observation or {}).get("observed_at_utc") or ""),
+            "underlier_observation": observation,
+            "expiration_statuses": {},
+            # No request exists whose expirations could fall outside the
+            # plan's proven-empty scope, so the scope is vacuously validated.
+            "query_scope_validated": True,
+        },
+    }
 
 
 def _underlier_missing_reason(payloads: list[dict[str, Any]],
@@ -542,6 +618,9 @@ class BusinessService:
         prepared = self._prepare_candidates(request, now)
         merged = merge_required_data_payloads(
             symbol=plan.symbol, payloads=[dict(item) for item in payloads])
+        for key, value in _candidate_enumeration_meta(
+                merged, plan.fetch_plan).items():
+            merged["meta"].setdefault(key, value)
         reference = _closed_market_reference_from(merged)
         if reference is not None:
             merged["meta"]["closed_market_reference"] = reference
@@ -733,11 +812,25 @@ class BusinessService:
                     fetch_source=settings.quote_source, market_data_provider="opend",
                 )
                 fetch_plan = bundle.to_debug_dict()
+                empty_scope = bool(
+                    candidate_config is not None
+                    and not bundle.merged_specs
+                    and bundle.projection_outcome
+                    in {"success_empty", "projection_empty"}
+                )
                 if spot_only and not bundle.merged_specs:
                     # A spot-only plan has no fetch requests by design: its
                     # evidence is the underlier observation.  The shared
                     # expected-contract validator requires requests for a
                     # success_rows outcome, so it does not apply here.
+                    expected = {}
+                    global_plan = {"plan_id": _spot_plan_id(fetch_symbol, fetch_plan),
+                                   "symbols": [{"symbol": fetch_symbol,
+                                                "fetch_plan": fetch_plan}]}
+                elif empty_scope:
+                    # A proven-empty candidate scope has nothing to fetch or
+                    # seal; its evidence is the plan-owned observation and
+                    # enumeration facts, like a spot-only plan.
                     expected = {}
                     global_plan = {"plan_id": _spot_plan_id(fetch_symbol, fetch_plan),
                                    "symbols": [{"symbol": fetch_symbol,
@@ -774,6 +867,8 @@ class BusinessService:
             elif spot_only:
                 payloads = _spot_payloads(settings, fetch_symbol,
                                           bundle.underlier_observation)
+            elif empty_scope:
+                payloads = [_empty_scope_payload(settings, fetch_plan)]
             else:
                 raise BusinessUnavailable("no bounded quote scope was produced")
             return payloads, FetchPlan(symbol=fetch_symbol,

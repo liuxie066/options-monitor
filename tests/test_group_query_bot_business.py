@@ -969,3 +969,174 @@ def test_contract_quotes_still_fail_closed_without_fetch_requests(tmp_path, monk
                      "strike": 180.0}}))
     assert status == 503
     assert envelope["error"]["code"] == "DEPENDENCY_UNAVAILABLE"
+
+
+def test_contract_quotes_with_an_empty_plan_still_fail_closed(tmp_path, monkeypatch):
+    from test_group_query_bot_api import _body, _service
+    import om_group_query_bot.business as business
+
+    service, _recorder = _service(tmp_path)
+    monkeypatch.setattr(business, "build_required_data_fetch_plan",
+                        lambda **kwargs: _empty_scope_bundle("success_empty"))
+    envelope, status = service.handle("query_quotes", _body({
+        "symbol": "US.NVDA",
+        "contract": {"option_type": "put", "expiration": "2026-12-18",
+                     "strike": 180.0}}))
+    assert status == 503
+    assert envelope["error"]["code"] == "DEPENDENCY_UNAVAILABLE"
+
+
+def _ready_observation():
+    from src.application.opening_quote_evidence import (
+        OPENING_UNDERLIER_OBSERVATION_SCHEMA,
+        OpeningUnderlierObservation,
+    )
+
+    return OpeningUnderlierObservation(
+        schema_version=OPENING_UNDERLIER_OBSERVATION_SCHEMA, code="US.NVDA",
+        market="US", last_price=185.0, update_time=NOW.isoformat(),
+        observed_at_utc=NOW.isoformat(), age_seconds=0.0,
+        market_state="MORNING", sec_status="NORMAL", suspension=False,
+        status="ready", reason_code=None)
+
+
+def _empty_scope_bundle(projection_outcome):
+    from src.application.opend_symbol_chain_fetching import (
+        OptionExpirationDiscoveryResult,
+    )
+    from src.application.required_data_planning import RequiredDataFetchPlanBundle
+
+    discovery = OptionExpirationDiscoveryResult(
+        outcome=("success_empty" if projection_outcome == "success_empty"
+                 else "success_rows"),
+        reason_code=None,
+        expirations=([] if projection_outcome == "success_empty"
+                     else ["2026-12-18"]),
+        observed_at_utc=(NOW - timedelta(seconds=3)).isoformat(),
+        completed_at_utc=(NOW - timedelta(seconds=2)).isoformat(),
+        request_identity={"symbol": "NVDA", "underlier": "US.NVDA",
+                          "source": "opend", "host": "127.0.0.1", "port": 11111,
+                          "trading_date": NOW.date().isoformat()})
+    return RequiredDataFetchPlanBundle(
+        symbol="NVDA", spot_reference=185.0, side_plans=[], merged_specs=[],
+        underlier_observation=_ready_observation(), expiration_discovery=discovery,
+        projection_outcome=projection_outcome, projected_expirations=[])
+
+
+def test_candidate_enumeration_facts_restore_plan_scope_completeness():
+    from om_group_query_bot.business import _candidate_enumeration_meta
+    from src.application.required_data_fetching import (
+        merge_required_data_payloads,
+    )
+
+    observation = _ready_observation().to_dict()
+    child = {
+        "symbol": "NVDA", "underlier_code": "US.NVDA", "spot": 185.0,
+        "expirations": ["2026-12-18"], "rows": [],
+        "meta": {"underlier_observation": observation,
+                 "query_scope_validated": True,
+                 "expiration_statuses": {"2026-12-18": "fetched"}},
+    }
+    merged = merge_required_data_payloads(symbol="US.NVDA", payloads=[child])
+    assert "expiration_statuses" not in merged["meta"]
+    facts = _candidate_enumeration_meta(
+        merged, {"projected_expirations": ["2026-12-18"],
+                 "expiration_discovery_complete": True})
+    assert facts == {"available_expirations": ["2026-12-18"],
+                     "expiration_statuses": {"2026-12-18": "fetched"},
+                     "expiration_enumeration_complete": True,
+                     "query_scope_validated": True}
+    merged["meta"].update(facts)
+    prepared = _prepare({"symbol": "US.NVDA", "strategy": "short_put",
+                         "limit": 5})
+    result = evaluate_public_candidates(prepared, merged, {}, 0, NOW)
+    assert result["outcome"] == "none"
+    assert result["coverage"]["status"] == "complete"
+    assert result["coverage"]["enumeration_complete"] is True
+    assert "enumeration_incomplete" not in result["reason_codes"]
+
+
+def test_conflicting_child_expiration_statuses_keep_enumeration_incomplete():
+    from om_group_query_bot.business import _candidate_enumeration_meta
+
+    merged = {"meta": {"requests": [
+        {"expiration_statuses": {"2026-12-18": "fetched"},
+         "query_scope_validated": True},
+        {"expiration_statuses": {"2026-12-18": "cache"},
+         "query_scope_validated": True},
+    ]}}
+    facts = _candidate_enumeration_meta(
+        merged, {"projected_expirations": ["2026-12-18"],
+                 "expiration_discovery_complete": True})
+    assert "expiration_statuses" not in facts
+    assert facts["available_expirations"] == ["2026-12-18"]
+    assert facts["expiration_enumeration_complete"] is True
+
+
+@pytest.mark.parametrize("projection_outcome", ["success_empty", "projection_empty"])
+def test_proven_empty_candidate_scope_returns_none(
+        tmp_path, monkeypatch, projection_outcome):
+    from test_group_query_bot_api import _body, _service
+    import om_group_query_bot.business as business
+
+    service, recorder = _service(tmp_path)
+    monkeypatch.setattr(business, "build_required_data_fetch_plan",
+                        lambda **kwargs: _empty_scope_bundle(projection_outcome))
+    service.business.dependencies = Dependencies(
+        fetch_symbol=recorder.fetch_symbol,
+        exchange_rates=lambda *args, **kwargs: {"USDCNY": {"rate": 7.1}})
+    envelope, status = service.handle(
+        "query_candidates",
+        _body({"symbol": "US.NVDA", "strategy": "short_put", "limit": 5}))
+    assert status == 200
+    data = envelope["data"]
+    assert data["outcome"] == "none"
+    assert data["coverage"]["status"] == "complete"
+    assert data["coverage"]["enumeration_complete"] is True
+    assert "enumeration_incomplete" not in data["reason_codes"]
+    assert recorder.calls == []
+
+
+def test_empty_scope_with_incomplete_discovery_stays_unable(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from test_group_query_bot_api import _body, _service
+    import om_group_query_bot.business as business
+
+    service, recorder = _service(tmp_path)
+    bundle = replace(_empty_scope_bundle("success_empty"),
+                     expiration_discovery_complete=False)
+    monkeypatch.setattr(business, "build_required_data_fetch_plan",
+                        lambda **kwargs: bundle)
+    service.business.dependencies = Dependencies(
+        fetch_symbol=recorder.fetch_symbol,
+        exchange_rates=lambda *args, **kwargs: {"USDCNY": {"rate": 7.1}})
+    envelope, status = service.handle(
+        "query_candidates",
+        _body({"symbol": "US.NVDA", "strategy": "short_put", "limit": 5}))
+    assert status == 200
+    data = envelope["data"]
+    assert data["outcome"] == "unable"
+    assert data["coverage"]["enumeration_complete"] is False
+    assert "enumeration_incomplete" in data["reason_codes"]
+
+
+def test_failed_candidate_projection_still_fails_closed(tmp_path, monkeypatch):
+    from test_group_query_bot_api import _body, _service
+    from src.application.required_data_planning import RequiredDataFetchPlanBundle
+    import om_group_query_bot.business as business
+
+    service, recorder = _service(tmp_path)
+    monkeypatch.setattr(
+        business, "build_required_data_fetch_plan",
+        lambda **kwargs: RequiredDataFetchPlanBundle(
+            symbol="NVDA", spot_reference=185.0, side_plans=[], merged_specs=[],
+            underlier_observation=_ready_observation(),
+            projection_outcome="provider_error"))
+    service.business.dependencies = Dependencies(
+        fetch_symbol=recorder.fetch_symbol,
+        exchange_rates=lambda *args, **kwargs: {"USDCNY": {"rate": 7.1}})
+    envelope, status = service.handle(
+        "query_candidates",
+        _body({"symbol": "US.NVDA", "strategy": "short_put", "limit": 5}))
+    assert status == 503
+    assert envelope["error"]["code"] == "DEPENDENCY_UNAVAILABLE"
