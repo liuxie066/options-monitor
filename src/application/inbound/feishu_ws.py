@@ -951,10 +951,7 @@ def _maybe_reply(
             **({"delivery_key": delivery_key} if delivery_key else {}),
         }
     outbound_message_id = _reply_api_message_id(api_response)
-    if outbox is not None and delivery_key:
-        if not outbox.mark_reply_delivered(delivery_key, attempt_count=claimed["attempt_count"]):
-            return {"attempted": True, "ok": False, "reason": "claim_superseded", "delivery_key": delivery_key}
-    return {
+    reply_status = {
         "attempted": True,
         "ok": True,
         "reason": decision.send_reason,
@@ -968,6 +965,13 @@ def _maybe_reply(
         ),
         **({"delivery_key": delivery_key} if delivery_key else {}),
     }
+    if outbox is not None and delivery_key:
+        if not outbox.mark_reply_delivered(
+            delivery_key, attempt_count=claimed["attempt_count"],
+            receipt=_reply_receipt_payload(data=decision.data, reply_status=reply_status),
+        ):
+            return {"attempted": True, "ok": False, "reason": "claim_superseded", "delivery_key": delivery_key}
+    return reply_status
 
 
 def _retry_pending_feishu_reply(
@@ -1030,20 +1034,25 @@ def _retry_pending_feishu_reply(
             delivery_unknown=_reply_response_outcome_unknown(api_response),
         )
         return {"attempted": True, "ok": False, "reason": "reply_failed", "delivery_key": delivery_key}
-    if not store.mark_reply_delivered(delivery_key, attempt_count=record["attempt_count"]):
-        return {"attempted": True, "ok": False, "reason": "claim_superseded", "delivery_key": delivery_key}
-    return {
+    reply_status = {
         "attempted": True,
         "ok": True,
         "reason": "sent",
         "delivery_key": delivery_key,
         "outbound_message_id": _reply_api_message_id(api_response),
+        "provider_response_code": _reply_api_code(api_response),
         "render": _reply_render_status(
             envelope,
             uuid=delivery_key,
             fallback_used=bool(delivery.get("fallback_used")),
         ),
     }
+    if not store.mark_reply_delivered(
+        delivery_key, attempt_count=record["attempt_count"],
+        receipt=_reply_receipt_payload(data={}, reply_status=reply_status),
+    ):
+        return {"attempted": True, "ok": False, "reason": "claim_superseded", "delivery_key": delivery_key}
+    return reply_status
 
 
 def _reply_envelope_from_outbox_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -1273,6 +1282,7 @@ def _record_reply_receipt(
         InboundAuditStore(settings.audit_db).merge_response_data(
             command_id=command_id,
             data={"reply": receipt},
+            reply_delivery_key=_first_text(reply_status.get("delivery_key")),
         )
     except Exception:
         LOG.warning("failed to persist Feishu WebSocket reply receipt to inbound audit", exc_info=True)
