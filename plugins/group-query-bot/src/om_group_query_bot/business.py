@@ -80,9 +80,11 @@ QUOTE_FIELDS = (
     "snapshot_received_at_utc", "spot", "spot_observed_at_utc",
     "last_price_update_time", "market_state", "opening_contract_status",
     "underlier_observation_status", "option_sec_status",
-    "underlier_sec_status", "quote_rights",
+    "underlier_sec_status", "option_suspension", "underlier_suspension",
+    "quote_rights",
 )
 CURRENT_QUOTE_SECONDS = 300
+_QUOTE_STATUS_ORDER = ("unavailable", "delayed", "last_known", "current")
 
 CLOSE_METRIC_FIELDS = (
     "opening_gross_credit", "opening_net_credit", "all_in_close_cost",
@@ -130,6 +132,19 @@ def _payload_digest(payload: Any) -> str:
     return sha256_hex(canonical_json_bytes(payload))
 
 
+def _closed_market_reference_from(bundle: dict[str, Any]) -> dict[str, Any] | None:
+    """Pick the fetch-bound closed-market reference from merged child metas."""
+    meta = bundle.get("meta") if isinstance(bundle, dict) else None
+    requests = meta.get("requests") if isinstance(meta, dict) else None
+    for item in requests or []:
+        if not isinstance(item, dict):
+            continue
+        reference = item.get("closed_market_reference")
+        if isinstance(reference, dict):
+            return reference
+    return None
+
+
 def _quote_status(quote: dict[str, Any], now: datetime, missing: list[str]) -> str:
     try:
         received = parse_utc(quote.get("snapshot_received_at_utc"), "snapshot_received_at_utc")
@@ -140,11 +155,27 @@ def _quote_status(quote: dict[str, Any], now: datetime, missing: list[str]) -> s
     if age < 0:
         missing.append("quote_snapshot_future")
         return "unavailable"
+    closed_market = False
     for field in ("opening_contract_status", "underlier_observation_status"):
         status = str(quote.get(field) or "").strip().lower()
-        if status and status != "ready":
+        if status == "market_closed":
+            # A closed market still has a usable last observation.  The quote
+            # method may display it as last_known with its own timestamp; it
+            # never becomes a current quote or a trading recommendation.
+            prefix = "option" if field == "opening_contract_status" else "underlier"
+            sec_status = str(quote.get(f"{prefix}_sec_status") or "").strip().upper()
+            if sec_status not in {"", "NORMAL"}:
+                missing.append(f"{prefix}_sec_status_not_normal")
+                return "unavailable"
+            if quote.get(f"{prefix}_suspension") is True:
+                missing.append(f"{prefix}_suspended")
+                return "unavailable"
+            closed_market = True
+        elif status and status != "ready":
             missing.append(f"{field}_not_ready")
             return "unavailable"
+    if closed_market:
+        return "last_known"
     return "current" if age <= CURRENT_QUOTE_SECONDS else "last_known"
 
 
@@ -162,10 +193,11 @@ def _underlier_quote(row: dict[str, Any], symbol: str) -> dict[str, Any] | None:
         "spot": spot,
         "spot_observed_at_utc": row.get("spot_observed_at_utc"),
         "snapshot_received_at_utc": observed,
-        "last_price_update_time": row.get("last_price_update_time"),
+        "last_price_update_time": row.get("spot_update_time"),
         "market_state": row.get("market_state"),
         "underlier_observation_status": row.get("underlier_observation_status"),
         "underlier_sec_status": row.get("underlier_sec_status"),
+        "underlier_suspension": row.get("underlier_suspension"),
         "quote_rights": row.get("underlier_quote_rights") or row.get("quote_rights"),
     })
     return result
@@ -190,9 +222,25 @@ def _row_matches(row: dict[str, Any], contract: dict[str, Any]) -> bool:
 
 def _spot_payloads(settings: APISettings, fetch_symbol: str,
                    observation: Any) -> list[dict[str, Any]]:
-    """Wrap a ready underlier observation as the account-free spot quote row."""
-    if observation is None or getattr(observation, "status", None) != "ready":
+    """Wrap an observed underlier as the account-free spot quote row.
+
+    A closed market is not missing data: the observation still carries the last
+    price and its own timestamp, which the quote method may show as
+    ``last_known``.  Other non-ready statuses remain unavailable.
+    """
+    if observation is None:
         return []
+    status = str(getattr(observation, "status", "") or "").strip().lower()
+    if status not in {"ready", "market_closed"}:
+        return []
+    if status == "market_closed":
+        # The shared normalizer classifies a closed market before it checks
+        # security eligibility, so a halted or suspended underlier must not
+        # pass as merely "last known".
+        sec_status = str(getattr(observation, "sec_status", "") or "").strip().upper()
+        if sec_status not in {"", "NORMAL"} \
+                or getattr(observation, "suspension", None) is True:
+            return []
     price = _finite_or_none(getattr(observation, "last_price", None))
     if price is None or price <= 0:
         return []
@@ -205,7 +253,9 @@ def _spot_payloads(settings: APISettings, fetch_symbol: str,
         "spot_observed_at_utc": observed, "snapshot_received_at_utc": observed,
         "last_price_update_time": getattr(observation, "update_time", None),
         "market_state": getattr(observation, "market_state", None),
+        "underlier_observation_status": status,
         "underlier_sec_status": getattr(observation, "sec_status", None),
+        "underlier_suspension": getattr(observation, "suspension", None),
     }
     return [{
         "symbol": fetch_symbol,
@@ -356,8 +406,10 @@ class BusinessService:
         status = _quote_status(underlier, now, missing) if underlier is not None else "unavailable"
         if option is not None:
             option_status = _quote_status(option, now, missing)
-            if status == "current" and option_status != "current":
-                status = option_status
+            # The response status covers every requested quote: one unavailable
+            # part cannot be hidden behind a current or last-known underlier.
+            status = min(status, option_status,
+                         key=_QUOTE_STATUS_ORDER.index)
         currency = (option or {}).get("currency") or (underlier or {}).get("currency")
         return {
             "symbol": plan.symbol,
@@ -408,6 +460,9 @@ class BusinessService:
         prepared = self._prepare_candidates(request, now)
         merged = merge_required_data_payloads(
             symbol=plan.symbol, payloads=[dict(item) for item in payloads])
+        reference = _closed_market_reference_from(merged)
+        if reference is not None:
+            merged["meta"]["closed_market_reference"] = reference
         result = evaluate_public_candidates(prepared, merged, dict(fx or {}), 0, now)
         filters = prepared.filters
         requested_range = filters.get("abs_delta_range")
@@ -624,8 +679,14 @@ class BusinessService:
             if bundle.merged_specs:
                 for spec in bundle.merged_specs:
                     budget.begin_api_call()
-                    payloads.append(self.dependencies.fetch_symbol(
-                        required_dir, build_fetch_request_from_spec(spec=spec)))
+                    request = build_fetch_request_from_spec(
+                        spec=spec,
+                        # Candidates may evaluate against the latest completed
+                        # session while the market is closed; the payload is
+                        # labelled as a closed-market reference, never as a
+                        # live quote or a trading recommendation.
+                        allow_closed_market_reference=candidate_config is not None)
+                    payloads.append(self.dependencies.fetch_symbol(required_dir, request))
                     if budget.expired():
                         raise BudgetExhausted("deadline_exceeded")
             elif spot_only:
@@ -725,11 +786,31 @@ def _scenario_evidence_reason(row: dict[str, Any], *, option_type: str,
         validate_option_contract_evidence,
     )
 
+    # The shared gate reports every non-ready observation as
+    # evidence_unavailable.  When the market is closed that is the reason the
+    # member needs to see, not a generic "not ready" — including when the
+    # snapshot receipt is missing or stale because no current session exists.
+    statuses = {str(row.get(field) or "").strip().lower()
+                for field in ("opening_contract_status",
+                              "underlier_observation_status")}
+    closed_market = "market_closed" in statuses
+
+    def _reason(exc: Any) -> str:
+        if closed_market and exc.reason == "evidence_unavailable":
+            return "market_closed"
+        return exc.reason
+
     try:
         validate_opening_quote_freshness(row, now_utc=now)
+    except CandidateCalculationError as exc:
+        return _reason(exc)
+    try:
         validate_option_contract_evidence(
             row, mode=option_type, quote_side=quote_side, now_utc=now)
     except CandidateCalculationError as exc:
+        if closed_market and exc.reason in {
+                "evidence_unavailable", "opening_underlier_not_ready"}:
+            return "market_closed"
         return exc.reason
     return None
 

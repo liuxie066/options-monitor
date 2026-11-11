@@ -53,6 +53,7 @@ class RequiredDataFetchRequest:
     no_retry: bool = False
     trading_date: str | None = None
     market_data_provider: str = "opend"
+    allow_closed_market_reference: bool = False
 
 
 def execute_required_data_opend(*, base: Path, request: RequiredDataFetchRequest) -> dict[str, object]:
@@ -101,6 +102,7 @@ def execute_required_data_opend(*, base: Path, request: RequiredDataFetchRequest
             include_realized_volatility=bool(request.include_realized_volatility),
             no_retry=bool(request.no_retry),
             trading_date=request.trading_date,
+            allow_closed_market_reference=bool(request.allow_closed_market_reference),
         )
     )
 
@@ -125,6 +127,7 @@ def build_fetch_request_from_spec(
     spot_override: float | None = None,
     underlier_observation: dict[str, object] | None = None,
     fetch_spot_if_missing: bool = True,
+    allow_closed_market_reference: bool = False,
 ) -> RequiredDataFetchRequest:
     if not spec.explicit_expirations:
         raise RuntimeError(
@@ -177,6 +180,7 @@ def build_fetch_request_from_spec(
         freshness_policy=("force_refresh" if chain_cache_force_refresh else "cache_first"),
         include_realized_volatility=spec.include_realized_volatility,
         trading_date=spec.trading_date,
+        allow_closed_market_reference=allow_closed_market_reference,
         **kwargs,
     )
 

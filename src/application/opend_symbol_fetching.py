@@ -555,6 +555,13 @@ def _fetch_query_chain(
     return SymbolOptionChainResult(result.rows, all_expirations, selected, metrics, result.frame)
 
 
+def _should_resolve_closed_market_reference(
+    request: FetchSymbolRequest, observation: OpeningUnderlierObservation,
+) -> bool:
+    """An explicit opt-in is enough; required-data scans are not query mode."""
+    return bool(request.allow_closed_market_reference) and observation.status == "market_closed"
+
+
 def _closed_market_reference(request: FetchSymbolRequest, observation: OpeningUnderlierObservation,
                              gateway: Any, now: datetime) -> dict[str, Any]:
     """Bind a just-fetched closed snapshot to its latest provider trading date."""
@@ -742,7 +749,7 @@ def fetch_symbol_request(
         phase_name = None
         closed_market_reference = None
         reference_error = None
-        if request.allow_closed_market_reference and query_mode and underlier_observation.status == "market_closed":
+        if _should_resolve_closed_market_reference(request, underlier_observation):
             try:
                 closed_market_reference = _closed_market_reference(
                     request, underlier_observation, gateway, datetime.now(timezone.utc))
