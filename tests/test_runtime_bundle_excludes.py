@@ -132,3 +132,20 @@ def test_runtime_bundle_source_keeps_readme_user_docs(tmp_path):
     assert user_docs | RUNTIME_SCRIPTS | {"README.md", "om", "om-agent"} <= files
     assert files.isdisjoint(INTERNAL_DOCS)
     assert {name for name in files if name.startswith("scripts/")} == RUNTIME_SCRIPTS
+
+
+DEV_ONLY_ANALYSIS_TOOLS = {"coverage", "radon", "vulture"}
+
+
+def test_dev_only_entropy_tools_stay_out_of_runtime_inputs():
+    lock = json.loads((ROOT / "scripts/runtime_bundle.lock.json").read_text())
+    installed = {str(name).lower() for name in [*lock["build_dependencies"], *lock["dependencies"]]}
+    assert DEV_ONLY_ANALYSIS_TOOLS.isdisjoint(installed)
+    for relative in ("requirements.txt", "requirements/runtime.txt", "requirements/server.txt",
+                     "constraints/runtime.txt", "constraints/server.txt"):
+        text = (ROOT / relative).read_text().lower()
+        assert not any(tool in text for tool in DEV_ONLY_ANALYSIS_TOOLS), relative
+    dev_lines = {line.strip().split("==")[0] for line in (ROOT / "requirements/dev.txt").read_text().splitlines()}
+    assert DEV_ONLY_ANALYSIS_TOOLS <= dev_lines
+    assert not any(name.startswith("scripts/code_entropy") for name in builder.SOURCE_FILES)
+    assert "scripts" not in builder.SOURCE_DIRS

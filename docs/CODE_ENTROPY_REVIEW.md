@@ -39,7 +39,7 @@
 | coverage | 优先使用`--coverage-manifest`绑定的外部证据；未提供时仅周扫在快照内自建一次性venv并运行全量测试 |
 | jscpd | 不采用。它是Node工具，本仓为纯Python；重复率继续使用版本化`entropy-token-v1`，两者口径不可直接比较 |
 
-固定的分析工具版本记录在`requirements/dev.txt`与`constraints/dev.txt`：vulture 2.16、radon 6.0.1、coverage 7.17.2。工具通过既有解释器的隔离模块模式运行；每轮记录可用性、版本、命令、退出码、stdout/stderr。分析工具缺失时不自动安装，只在gaps说明降级口径，缺证据不填0。
+固定的分析工具版本记录在`requirements/dev.txt`与`constraints/dev.txt`：vulture 2.16、radon 6.0.1、coverage 7.17.2。它们是开发侧依赖，不是产品功能：`requirements/runtime.txt`、`requirements/server.txt`、`constraints/runtime*.txt`和`scripts/runtime_bundle.lock.json`都不包含这三个工具，运行时bundle只安装lock中锁定的产物，用户安装和线上运行都不需要它们，这是有意排除。周扫的coverage工作负载使用快照内一次性venv，运行结束随临时目录清理，不进入运行时安装包。ruff、vulture和radon通过既有解释器的隔离模块模式运行；每轮记录可用性、版本、命令、退出码、stdout/stderr。分析工具缺失时不自动安装，只在gaps说明降级口径，缺证据不填0。
 
 周扫的coverage工作负载不信任环境里的解释器和依赖：它在临时快照内用`python -m venv`建一次性venv，按快照自己的`requirements/dev.txt`/`constraints/dev.txt`安装（包括本地插件包），清理安装产生的`build/`和`egg-info`后，串行运行快照自带的全量测试。这样覆盖率严格绑定被扫描的SHA，也不会被宿主venv的漂移污染。代价是周扫增加约一次依赖安装和一次全量测试的时间；因此日扫不跑coverage，只保留增量静态指标。工作负载失败、超时或剩余预算不足时周扫仍完成静态测量，`untested_branches`和死代码确认保持null并写入真实原因。外部`--coverage-manifest`仍优先，且必须绑定同一SHA、成功退出和分支数据。
 
