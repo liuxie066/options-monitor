@@ -363,6 +363,116 @@ def test_resolve_trade_close_dry_run_routes_zero_price_expiry_leg_to_lifecycle_p
     assert result.diagnostics["decision"]["decision_type"] == "needs_review"
 
 
+def test_resolve_trade_close_routes_sell_side_zero_price_leg_without_effect_to_lifecycle(tmp_path) -> None:
+    """#1075: a SELL-side zero-price close must reach lifecycle routing.
+
+    ``normalize_position_effect`` cannot map SELL to ``close``; the ledger
+    context inference that proves the close only runs later in the resolver.
+    Route the inferred deal through lifecycle (as BUY_BACK already is) instead
+    of letting it fall into the expire_auto_close bypass with no evidence.
+    """
+    repo = _open_lot(
+        tmp_path, symbol="PDD", option_type="call", side="long", contracts=1,
+        strike=85, currency="USD", expiration_ymd="2026-11-06", opened_at_ms=100,
+    )
+
+    result = resolve_trade_deal(
+        _deal(
+            deal_id="deal-zero-close-sell",
+            symbol="PDD",
+            option_type="call",
+            side="sell",
+            position_effect=None,
+            contracts=1,
+            price=0.0,
+            strike=85.0,
+            currency="USD",
+            expiration_ymd="2026-11-06",
+            trade_time_ms=1794268800000,  # 2026-11-10, after expiration
+        ),
+        repo=repo,
+        state={},
+        apply_changes=False,
+    )
+
+    assert result.status == "dry_run"
+    assert result.action == "lifecycle"
+    assert result.reason == "waiting_settlement_evidence"
+    assert result.operations[0].to_payload()["action"] == "lifecycle_pending"
+
+
+def test_resolve_trade_close_applies_sell_side_zero_price_leg_with_lifecycle_evidence(tmp_path) -> None:
+    """#1075: the inferred close must write option_zero_price_close evidence."""
+    repo = _open_lot(
+        tmp_path, symbol="PDD", option_type="call", side="long", contracts=1,
+        strike=85, currency="USD", expiration_ymd="2026-11-06", opened_at_ms=100,
+    )
+
+    result = resolve_trade_deal(
+        _deal(
+            deal_id="deal-zero-close-sell",
+            symbol="PDD",
+            option_type="call",
+            side="sell",
+            position_effect=None,
+            contracts=1,
+            price=0.0,
+            strike=85.0,
+            currency="USD",
+            expiration_ymd="2026-11-06",
+            trade_time_ms=1794268800000,  # 2026-11-10, after expiration
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+        notification_status="suppressed",
+    )
+
+    assert result.status == "applied"
+    assert result.action == "lifecycle"
+    evidence = [
+        row for row in repo.list_trade_lifecycle_evidence()
+        if row["evidence_type"] == "option_zero_price_close"
+    ]
+    assert len(evidence) == 1
+    assert (evidence[0]["symbol"], evidence[0]["futu_account_id"]) == ("PDD", "REAL_1")
+
+
+def test_resolve_trade_close_zero_price_legs_share_lifecycle_across_side_spellings(tmp_path) -> None:
+    """#1075: BUY_BACK and SELL legs of one combination must classify alike."""
+    repo = ledger_repository.SQLiteOptionPositionsRepository(
+        tmp_path / "option_positions.sqlite3"
+    )
+    _persist_lot(repo, symbol="PDD", option_type="call", side="long", contracts=1, strike=85,
+                 currency="USD", expiration_ymd="2026-11-06", opened_at_ms=100)
+    _persist_lot(repo, symbol="PDD", option_type="put", side="short", contracts=1, strike=77,
+                 currency="USD", expiration_ymd="2026-11-06", opened_at_ms=100)
+    common = dict(
+        symbol="PDD", contracts=1, price=0.0, currency="USD",
+        expiration_ymd="2026-11-06", trade_time_ms=1794268800000,
+    )
+
+    sell_leg = resolve_trade_deal(
+        _deal(deal_id="deal-zero-call-leg", option_type="call", side="sell",
+              position_effect=None, strike=85.0, **common),
+        repo=repo, state={}, apply_changes=True, notification_status="suppressed",
+    )
+    buy_back_leg = resolve_trade_deal(
+        _deal(deal_id="deal-zero-put-leg", option_type="put", side="buy",
+              position_effect="close", strike=77.0, **common),
+        repo=repo, state={}, apply_changes=True, notification_status="suppressed",
+    )
+
+    assert (sell_leg.status, sell_leg.action) == ("applied", "lifecycle")
+    assert (buy_back_leg.status, buy_back_leg.action) == ("applied", "lifecycle")
+    evidence = [
+        row for row in repo.list_trade_lifecycle_evidence()
+        if row["evidence_type"] == "option_zero_price_close"
+    ]
+    assert sorted(row["option_type"] for row in evidence) == ["call", "put"]
+    assert {row["futu_account_id"] for row in evidence} == {"REAL_1"}
+
+
 def test_resolve_trade_close_skips_failed_deal_by_default() -> None:
     repo = FakeRepo([_record("rec1", 100, 3)])
 
