@@ -569,11 +569,12 @@ def test_spot_quote_is_last_known_with_its_time_while_the_market_is_closed(tmp_p
     assert underlier["underlier_observation_status"] == "market_closed"
     assert underlier["last_price_update_time"] == "2026-11-09 18:32:10.786"
     text = render_quotes(data)
-    assert "行情状态：最近已知" in text
-    assert "最新 168.8900" in text
+    assert "最近已知报价" in text
+    assert "最新价 168.8900" in text
     assert "最新价时间 2026-11-09 18:32:10.786（纽约时间）" in text
-    assert "市场状态 盘后（AFTER_HOURS_BEGIN）" in text
-    assert "非当前可成交状态" in text
+    assert "不是当前可成交价格" in text
+    assert "市场状态 盘后" in text
+    assert "以上是最近已知报价" in text
     assert recorder.calls == []
 
 

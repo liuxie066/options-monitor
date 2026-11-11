@@ -35,12 +35,14 @@ from .feishu import (
     message_text,
     normalize_sdk_event,
 )
+from .guard import check_result_reply, correction_message
 from .render import (
-    compose_reply,
+    fact_card,
     finalize_clarification,
     render_admission_rejected,
     render_budget_exhausted,
     render_result,
+    result_contract_error,
     strip_clarification_note,
 )
 from .store import CONVERSATION_DB_NAME, ConversationStore, DeliveryStore, derived_expiry
@@ -67,14 +69,18 @@ evaluate_roll_down、evaluate_roll_up；另有一个宿主工具 answer_general�
    evaluate_close 的 position（symbol/contract/side/contracts）和 opening_premium；
    evaluate_roll_down 与 evaluate_roll_up 的 position 和 search_bounds.max_new_expiration。
    其余参数均可省略：用户没给时不要把可选参数当缺失去追问，直接调用工具；
-   工具结果会回显实际采用的期限、Delta、行权价和展示上限。
+   工具结果里会写明实际采用的期限、Delta、行权价和展示上限。
 5. 只有必填参数缺失，或方向、合约、张数、权利金单位等意图本身有歧义时才追问。
 6. 用户给出的相对日期要保留原话并请用户确认明确日期；最晚新到期日必须由用户明确给出。
-7. 工具返回的结构化数值由系统渲染，你不重复、不改写、不重算关键数字；你可以解释
-   这些结果的含义和局限。
-8. 不要复述工具结果或历史查询结果的原文（尤其不要输出 JSON）；不要自行添加
-   “未执行实时查询”之类的免责声明，系统会按需统一追加。
-9. 一次回复保持简短；不要输出 Markdown 表格。
+7. 工具返回的「查询结果」是唯一的事实来源。直接引用里面的数字、日期和合约代码，
+   可以保留原精度；不要自己计算（不要算价差、收益率或比例），不要编造或改写数字。
+8. 像群里的朋友说话：先给结论，再说关键数字，2-4 句就够；可以分 1-3 行，但不要
+   抄“查询结果：”“筛选条件：”这类标题，不要复述整份结果，不要输出 JSON 或
+   Markdown 表格。不要出现英文字段名、状态代码或原因代码，把原因换成日常中文。
+9. 数据是最近已知或延迟的时候，要明确说“不是现在的实时价”；涉及费用时说明是
+   估算、不是账户实际扣费；条件移仓要说明股票覆盖未经核实。
+10. 解释历史结果时按上面的风格转述，不要复述历史原文。不要自行添加
+   “未执行实时查询”之类的免责声明：只有澄清问题、没有实时数据时，系统会统一追加。
 """
 
 
@@ -127,15 +133,13 @@ TOOLS: list[dict[str, Any]] = [
                 "dte": {"type": "array", "items": {"type": "integer"},
                         "minItems": 2, "maxItems": 2,
                         "description": "可选；省略时使用公共策略对应方向的期限窗口，"
-                                       "不要为此追问用户；实际生效窗口见结果 "
-                                       "effective_filters.dte"},
+                                       "不要为此追问用户；结果里会写明实际生效的期限"},
                 "strike": {"type": "number",
                            "description": "可选；省略时使用公共策略行权价范围"},
                 "abs_delta_range": {"type": "array", "items": {"type": "number"},
                                     "minItems": 2, "maxItems": 2,
                                     "description": "可选；省略时使用公共策略 Delta 范围；"
-                                                   "实际生效区间见结果 effective_filters 的 "
-                                                   "min_abs_delta/max_abs_delta"},
+                                                   "结果里会写明实际生效的 Delta 区间"},
                 "limit": _limit_schema(),
             },
             "required": ["symbol", "strategy"],
@@ -364,13 +368,15 @@ def _history_tool_messages(content: str, turn_index: int,
     if (isinstance(method, str) and method in TOOL_NAMES
             and isinstance(arguments, dict) and "summary" in payload):
         call_id = f"hist_{turn_index}_{item_index}"
+        stored_card = payload.get("fact_card")
+        content = (stored_card if isinstance(stored_card, str)
+                   and stored_card.strip() else _canonical(payload["summary"]))
         return [
             {"role": "assistant", "content": "",
              "tool_calls": [{"id": call_id, "type": "function",
                              "function": {"name": method,
                                           "arguments": _canonical(arguments)}}]},
-            {"role": "tool", "tool_call_id": call_id,
-             "content": _canonical(payload["summary"])},
+            {"role": "tool", "tool_call_id": call_id, "content": content},
         ]
     # Legacy rows store a bare summary; keep them as context, not as an
     # assistant message the model would imitate.
@@ -471,12 +477,16 @@ class GroupQueryAgent:
         messages = self._messages(history, pending, text)
         stored_results: list[dict] = []
         last_result: tuple[str, dict[str, Any]] | None = None
+        last_card: str | None = None
+        contract_error: str | None = None
         reply_expiry = source_expiry
         explanation = ""
         general_answer = False
         status = "ok"
         reasons: list[str] = []
         stop = False
+        guard_retry_used = False
+        fallback_used = False
         output_cap = min(int(self.settings.output_tokens),
                          int(self.settings.model.max_output_tokens
                              or self.settings.output_tokens))
@@ -511,6 +521,25 @@ class GroupQueryAgent:
                 break
             calls = message.get("tool_calls") or []
             if not calls:
+                if last_result is None:
+                    break
+                contract_error = result_contract_error(*last_result)
+                if contract_error:
+                    break
+                verdict = check_result_reply(
+                    explanation, method=last_result[0], data=last_result[1],
+                    fact_card_text=last_card or "", user_text=text, now=now)
+                if verdict.ok:
+                    break
+                if (not guard_retry_used
+                        and budget.model_calls < budget.max_model_calls):
+                    guard_retry_used = True
+                    messages.append({"role": "assistant", "content": explanation})
+                    messages.append({"role": "user",
+                                     "content": correction_message(verdict)})
+                    continue
+                fallback_used = True
+                reasons.append("reply_guard_fallback")
                 break
             messages.append({"role": "assistant", "content": explanation,
                              "tool_calls": calls})
@@ -533,13 +562,21 @@ class GroupQueryAgent:
                         stop = True
                         break
                     last_result = (result[0], result[1])
+                    last_card = fact_card(result[0], result[1])
+                    contract_error = result_contract_error(result[0], result[1])
                     reply_expiry = min(reply_expiry, result[2])
                     stored_results.append({"method": result[0],
                                            "arguments": result[3],
-                                           "summary": _tool_summary(result[0], result[1])})
+                                           "summary": _tool_summary(result[0], result[1]),
+                                           "fact_card": last_card})
+                    if contract_error:
+                        stop = True
                 messages.append({"role": "tool",
                                  "tool_call_id": str(call.get("id") or ""),
-                                 "content": _canonical(payload)})
+                                 "content": last_card if result is not None
+                                 else _canonical(payload)})
+                if stop:
+                    break
             if stop:
                 break
             if budget.stopped_reason is not None:
@@ -554,15 +591,24 @@ class GroupQueryAgent:
         if budget.stopped_reason is not None and status == "ok":
             status = "limited"
             reasons.append(budget.stopped_reason)
+        if contract_error is None and last_result is not None:
+            contract_error = result_contract_error(*last_result)
         rendered = render_result(*last_result) if last_result is not None else None
         prose = strip_clarification_note(explanation)
         if status == "model_unavailable":
             body = "自然语言服务当前不可用，请稍后重试。"
         elif status == "limited":
             note = render_budget_exhausted(reasons[0] if reasons else "limit")
-            body = compose_reply(note, rendered)
+            body = f"{note}\n\n{rendered}" if rendered else note
+        elif contract_error:
+            body = contract_error
+            reasons.append("result_contract_inconsistent")
+        elif fallback_used:
+            body = rendered
         elif rendered is not None:
-            body = compose_reply(prose, rendered)
+            body = prose or rendered
+            if guard_retry_used:
+                reasons.append("reply_guard_retry")
         else:
             if prose:
                 body = prose if general_answer else finalize_clarification(prose)
@@ -590,11 +636,14 @@ class GroupQueryAgent:
             source_expiry=source_expiry)
         seq = 1
         for result in results:
+            payload = {"method": result["method"],
+                       "arguments": result.get("arguments") or {},
+                       "summary": result["summary"]}
+            if result.get("fact_card"):
+                payload["fact_card"] = result["fact_card"]
             self.conversations.append_message(
                 scope_sha256=scope, turn_id=turn_id, seq=seq, role="tool_result",
-                content=_canonical({"method": result["method"],
-                                    "arguments": result.get("arguments") or {},
-                                    "summary": result["summary"]}), now=now,
+                content=_canonical(payload), now=now,
                 source_id=source_id, source_expiry=derived_expiry(now, reply_expiry))
             seq += 1
         self.conversations.append_message(
