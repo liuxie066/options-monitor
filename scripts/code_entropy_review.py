@@ -15,6 +15,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import sysconfig
 import tarfile
 import time
 import uuid
@@ -366,16 +367,55 @@ def coverage_sources(source):
     return roots
 
 
-def coverage_environment(output, source):
+def coverage_environment(output):
+    """Ambient-neutral environment; the workload's own venv supplies its imports.
+
+    Plugin sources must never be injected through PYTHONPATH: pip installs them
+    into the disposable venv, and shadowing those distributions with the source
+    tree makes package-bound tests resolve a different module than the one the
+    environment declares.
+    """
     environment = {key: value for key, value in os.environ.items()
                    if key not in {"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV",
-                                  "COVERAGE_FILE", "COVERAGE_PROCESS_START"}}
-    plugin_paths = [str((source / path).resolve()) for path in coverage_sources(source)
-                    if path.startswith("plugins/")]
-    environment.update(PYTHONPATH=os.pathsep.join(plugin_paths), PYTHONDONTWRITEBYTECODE="1",
-                       COVERAGE_FILE=str(output / "coverage.data"),
+                                  "COVERAGE_FILE", "COVERAGE_RCFILE", "COVERAGE_PROCESS_START"}}
+    environment.update(PYTHONDONTWRITEBYTECODE="1",
+                       COVERAGE_FILE=str(output / "coverage-raw.data"),
                        PIP_DISABLE_PIP_VERSION_CHECK="1")
     return environment
+
+
+def coverage_plugin_mappings(source, venv):
+    """Map each installed plugin package back to the snapshot source it was built from.
+
+    Coverage traces the imported distribution in the venv's site-packages.  The
+    ``[paths]`` remapping folds those traces back onto the snapshot's
+    ``plugins/*/src`` tree so the report speaks the repository's own paths.
+    """
+    site_packages = Path(sysconfig.get_path("purelib", vars={"base": str(venv), "platbase": str(venv)}))
+    measured, mappings = [], {}
+    for root in sorted((source / "plugins").glob("*/src")):
+        for package in sorted(root.iterdir()):
+            installed = site_packages / package.name
+            if not (package / "__init__.py").is_file() or not installed.is_dir():
+                continue
+            measured.append(str(installed.resolve()))
+            mappings[package.name] = (str(package.resolve()), str(installed.resolve()))
+    return measured, mappings
+
+
+def coverage_configuration(output, measured, mappings):
+    """Write the coverage rc file: branch mode, measured roots, and path remapping."""
+    lines = ["[run]", "branch = True", "source ="]
+    lines.extend(f"    {path}" for path in measured)
+    if mappings:
+        lines.extend(["", "[paths]"])
+        for name, (canonical, installed) in sorted(mappings.items()):
+            # The first pattern is the canonical name coverage reports; the
+            # installed distribution is the path the workload actually imports.
+            lines.extend([f"{name} =", f"    {canonical}", f"    {installed}"])
+    path = output / "coverage.rc"
+    path.write_text("\n".join(lines) + "\n")
+    return path
 
 
 def self_coverage(source, output, execute, *, scratch, time_left):
@@ -400,7 +440,7 @@ def self_coverage(source, output, execute, *, scratch, time_left):
             record["reason"] = "remaining budget is too small for a coverage workload"
             return None, record
         venv = Path(scratch) / "coverage-venv"
-        environment = coverage_environment(output, source)
+        environment = coverage_environment(output)
         result = execute([sys.executable, "-m", "venv", str(venv)], timeout=120, env=environment)
         record["venv_command"] = {key: value for key, value in result.items() if key != "text"}
         if result["exit_code"]:
@@ -419,8 +459,13 @@ def self_coverage(source, output, execute, *, scratch, time_left):
                          *sorted((source / "plugins").glob("*/*.egg-info")),
                          *sorted((source / "plugins").glob("*/src/*.egg-info"))]:
             shutil.rmtree(artifact)
+        installed_plugins, mappings = coverage_plugin_mappings(source, venv)
+        measured = [str((source / name).resolve()) for name in sources if not name.startswith("plugins/")]
+        configuration = coverage_configuration(output, [*measured, *installed_plugins], mappings)
+        environment["COVERAGE_RCFILE"] = str(configuration)
+        record["configuration"] = {"path": str(configuration), "measured_roots": len(measured),
+                                   "mapped_plugins": sorted(mappings)}
         workload = [str(venv / "bin/python"), "-m", "coverage", "run", "--branch",
-                    f"--source={','.join(sources)}",
                     "-m", "pytest", "-q", "-p", "no:cacheprovider",
                     "--basetemp", str(Path(scratch) / "pytest-tmp")]
         result = execute(workload, cwd=source, timeout=max(60, time_left() - 420), env=environment)
@@ -429,14 +474,23 @@ def self_coverage(source, output, execute, *, scratch, time_left):
         if result["exit_code"]:
             record.update(status="failed", reason=f"snapshot test workload exited {result['exit_code']}")
             return None, record
+        combined_environment = {**environment, "COVERAGE_FILE": str(output / "coverage.data")}
+        combine = [str(venv / "bin/python"), "-m", "coverage", "combine", "--keep",
+                   str(output / "coverage-raw.data")]
+        result = execute(combine, cwd=source, timeout=min(120, max(30, time_left() - 360)),
+                         env=combined_environment)
+        record["combine_command"] = {key: value for key, value in result.items() if key != "text"}
+        if result["exit_code"]:
+            record.update(status="failed", reason="coverage data could not be combined")
+            return None, record
         report = output / "coverage-self.json"
         result = execute([str(venv / "bin/python"), "-m", "coverage", "json", "-o", str(report)],
-                         cwd=source, timeout=min(120, max(30, time_left() - 300)), env=environment)
+                         cwd=source, timeout=min(120, max(30, time_left() - 300)), env=combined_environment)
         record["json_command"] = {key: value for key, value in result.items() if key != "text"}
         if result["exit_code"]:
             record.update(status="failed", reason="coverage JSON generation failed")
             return None, record
-        entries = coverage_entries(read_json(report))
+        entries = coverage_entries(read_json(report), source_root=source)
         record.update(status="complete", reason=None, files=len(entries),
                       coverage_sha256=hashlib.sha256(report.read_bytes()).hexdigest(),
                       elapsed_seconds=round(time.monotonic() - started, 3))

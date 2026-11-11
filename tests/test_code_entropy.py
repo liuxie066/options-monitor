@@ -7,6 +7,7 @@ from pathlib import Path
 import plistlib
 import subprocess
 import sys
+import sysconfig
 import time
 
 import pytest
@@ -649,7 +650,7 @@ def test_tool_runs_parses_vulture_and_radon_evidence(tmp_path, monkeypatch):
     assert any("--min-confidence" in argv for argv in seen)
 
 
-def test_self_coverage_builds_disposable_environment_and_removes_build_artifacts(tmp_path):
+def test_self_coverage_builds_disposable_environment_and_removes_build_artifacts(tmp_path, monkeypatch):
     source = tmp_path / "source"
     (source / "tests").mkdir(parents=True)
     put(source, "requirements/dev.txt", "-r runtime.txt\n")
@@ -657,12 +658,19 @@ def test_self_coverage_builds_disposable_environment_and_removes_build_artifacts
     put(source, "plugins/x/build/junk.py", "")
     put(source, "plugins/x/src/pkg/__init__.py", "")
     (source / "plugins/x/src/pkg.egg-info").mkdir()
+    venv = tmp_path / "scratch" / "coverage-venv"
+    site_packages = Path(sysconfig.get_path("purelib", vars={"base": str(venv), "platbase": str(venv)}))
+    installed = site_packages / "pkg"
+    installed.mkdir(parents=True)
     output = tmp_path / "run"
     output.mkdir()
+    monkeypatch.setenv("PYTHONPATH", "/ambient/should-not-leak")
     commands = []
+    environments = []
 
     def execute(argv, cwd=None, **options):
         commands.append(argv)
+        environments.append((argv, options.get("env")))
         if "json" in argv:
             (output / "coverage-self.json").write_text(json.dumps({
                 "meta": {"branch_coverage": True},
@@ -678,6 +686,47 @@ def test_self_coverage_builds_disposable_environment_and_removes_build_artifacts
     workload = next(argv for argv in commands if "-m" in argv and "pytest" in argv)
     assert "--basetemp" in workload
     assert Path(workload[workload.index("--basetemp") + 1]).is_relative_to(tmp_path / "scratch")
+    # The workload must import the distributions pip installed; a PYTHONPATH
+    # entry or a --source= argument would shadow them with the source tree.
+    workload_environment = next(env for argv, env in environments if "pytest" in argv)
+    assert "PYTHONPATH" not in workload_environment
+    assert not any(argument.startswith("--source=") for argument in workload)
+    assert workload_environment["COVERAGE_FILE"].endswith("coverage-raw.data")
+    configuration = output / "coverage.rc"
+    text = configuration.read_text()
+    assert workload_environment["COVERAGE_RCFILE"] == str(configuration)
+    run_section, paths_section = text.split("[paths]", 1)
+    assert "branch = True" in run_section
+    assert str(installed.resolve()) in run_section
+    assert str((source / "plugins/x/src").resolve()) not in run_section
+    # The first pattern is the canonical snapshot path, the installed copy second.
+    assert (f"pkg =\n    {(source / 'plugins/x/src/pkg').resolve()}\n    {installed.resolve()}"
+            in paths_section)
+    assert record["configuration"]["mapped_plugins"] == ["pkg"]
+    combine = next(argv for argv in commands if "combine" in argv)
+    assert str(output / "coverage-raw.data") in combine
+    combine_environment = next(env for argv, env in environments if "combine" in argv)
+    assert combine_environment["COVERAGE_FILE"].endswith("coverage.data")
+    json_environment = next(env for argv, env in environments if "json" in argv)
+    assert json_environment["COVERAGE_FILE"].endswith("coverage.data")
+
+
+def test_self_coverage_combine_failure_degrades_with_explicit_reason(tmp_path):
+    source = tmp_path / "source"
+    (source / "tests").mkdir(parents=True)
+    (source / "src").mkdir()
+    put(source, "requirements/dev.txt", "")
+    put(source, "constraints/dev.txt", "")
+    output = tmp_path / "run"
+    output.mkdir()
+
+    def execute(argv, cwd=None, **options):
+        return {"exit_code": 1 if "combine" in argv else 0, "text": ""}
+
+    entries, record = review.self_coverage(source, output, execute, scratch=tmp_path / "scratch",
+                                           time_left=lambda: 1000)
+    assert entries is None and record["status"] == "failed"
+    assert "combined" in record["reason"]
 
 
 def test_self_coverage_workload_failure_degrades_with_explicit_reason(tmp_path):
