@@ -30,9 +30,9 @@ MARKET_STATE_LABELS = {
     "AUCTION": "集合竞价",
     "TRADE_AUCTION": "交易竞价",
     "PRE_MARKET_BEGIN": "盘前",
-    "PRE_MARKET_END": "盘前",
+    "PRE_MARKET_END": "盘前结束",
     "AFTER_HOURS_BEGIN": "盘后",
-    "AFTER_HOURS_END": "盘后",
+    "AFTER_HOURS_END": "盘后结束",
     "CLOSED": "休市",
     "REST": "休市或午间",
     "WAITING_OPEN": "待开盘",
@@ -40,10 +40,10 @@ MARKET_STATE_LABELS = {
     "CLOSE_AUCTION": "收市竞价",
     "TRADE_AT_LAST": "按最新价交易",
     "NIGHT_OPEN": "夜盘",
-    "NIGHT_END": "夜盘",
+    "NIGHT_END": "夜盘结束",
     "NIGHT": "夜盘",
     "OVERNIGHT_BEGIN": "隔夜盘",
-    "OVERNIGHT_END": "隔夜盘",
+    "OVERNIGHT_END": "隔夜盘结束",
     "OVERNIGHT": "隔夜盘",
 }
 
@@ -79,18 +79,41 @@ def _receipt_time(value: Any, zone: Any, zone_label: str | None) -> str | None:
     return f"{parsed.astimezone(zone).strftime('%Y-%m-%d %H:%M:%S')}（{zone_label}）"
 
 
-def _price_time(value: Any, zone_label: str | None) -> str | None:
-    """OpenD update times are already market-local wall-clock strings."""
-    if value in (None, ""):
+def _price_time(value: Any, zone: Any, zone_label: str | None) -> str | None:
+    """Format a last-trade time, or refuse a placeholder/invalid one.
+
+    OpenD update times are normally market-local wall-clock strings without an
+    offset.  An offset-aware value (some fixtures and derived rows use ISO)
+    must be converted before it is labelled with the market zone; placeholders
+    such as ``N/A`` fail the parse and are not shown as times.
+    """
+    text = str(value or "").strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
         return None
-    text = str(value)
-    return f"{text}（{zone_label}）" if zone_label else text
+    if parsed.tzinfo is None:
+        # OpenD wall clock: already in the market's local time.  A date with
+        # no clock component is not a last-trade time.
+        if ":" not in text:
+            return None
+        return f"{text}（{zone_label}）" if zone_label else text
+    if zone is None:
+        return f"{parsed.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}（UTC）"
+    return f"{parsed.astimezone(zone).strftime('%Y-%m-%d %H:%M:%S')}（{zone_label}）"
+
+
+def _evaluated_time(data: dict[str, Any]) -> str | None:
+    zone, zone_label = _zone_for_market(data.get("market"))
+    return _receipt_time(data.get("evaluated_at_utc"), zone, zone_label)
 
 
 def _market_state_text(value: Any) -> str | None:
     if value in (None, ""):
         return None
-    text = str(value)
+    text = str(value).strip()
+    if text.upper() in {"N/A", "NA", "NAN", "UNKNOWN", "NULL", "-"}:
+        return None
     label = MARKET_STATE_LABELS.get(text)
     return f"{label}（{text}）" if label and label != text else text
 
@@ -105,21 +128,30 @@ def _text(value: Any) -> str:
     return str(value) if value not in (None, "") else "不可用"
 
 
+def _positive_number(value: Any) -> bool:
+    return (not isinstance(value, bool) and isinstance(value, (int, float))
+            and value > 0)
+
+
 def _primary_quote(quote: dict[str, Any] | None, market: Any = None) -> str:
     if not isinstance(quote, dict):
         return "报价不可用"
     bits: list[str] = []
-    for label, key in (("最新", "last_price"), ("买", "bid"), ("卖", "ask")):
-        if quote.get(key) is not None:
-            bits.append(f"{label} {_number(quote[key], 4)}")
-    if quote.get("delta") is not None:
-        bits.append(f"Delta {_number(quote['delta'], 3)}")
     zone, zone_label = _market_zone(quote)
     if zone is None:
         zone, zone_label = _zone_for_market(market)
-    price_time = _price_time(quote.get("last_price_update_time"), zone_label)
-    if price_time:
+    price_time = _price_time(quote.get("last_price_update_time"), zone, zone_label)
+    # A last trade is only shown with its own timestamp; a placeholder time or
+    # a zero/absent price is not a displayable quote.  Bid/ask are quote sides
+    # and use the receipt time shown below.
+    if _positive_number(quote.get("last_price")) and price_time:
+        bits.append(f"最新 {_number(quote['last_price'], 4)}")
         bits.append(f"最新价时间 {price_time}")
+    for label, key in (("买", "bid"), ("卖", "ask")):
+        if _positive_number(quote.get(key)):
+            bits.append(f"{label} {_number(quote[key], 4)}")
+    if quote.get("delta") is not None:
+        bits.append(f"Delta {_number(quote['delta'], 3)}")
     state = _market_state_text(quote.get("market_state"))
     if state:
         bits.append(f"市场状态 {state}")
@@ -240,7 +272,7 @@ def render_close(data: dict[str, Any]) -> str:
         lines.append(f"理由：{data['reason']}")
     for code in data.get("reason_codes") or []:
         lines.append(f"原因：{code}")
-    lines.append(f"评估时间：{_text(data.get('evaluated_at_utc'))}")
+    lines.append(f"评估时间：{_text(_evaluated_time(data))}")
     return "\n".join(lines)
 
 
@@ -272,7 +304,7 @@ def render_roll(data: dict[str, Any]) -> str:
     for code in data.get("reason_codes") or []:
         lines.append(f"原因：{code}")
     lines.append("按富途标准费用模型估算，非账户实际费用。")
-    lines.append(f"评估时间：{_text(data.get('evaluated_at_utc'))}")
+    lines.append(f"评估时间：{_text(_evaluated_time(data))}")
     return "\n".join(lines)
 
 

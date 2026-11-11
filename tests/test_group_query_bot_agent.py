@@ -142,6 +142,7 @@ class _FakeAPI:
             return {"quote_status": "current",
                     "underlier": {"last_price": 185.0, "bid": 184.9,
                                   "ask": 185.1,
+                                  "last_price_update_time": "2026-11-10 01:00:00",
                                   "observed_at_utc": "2026-11-10T06:00:00+00:00"},
                     "option": None, "effective_parameters": {}}
         return {"status": "ok", "outcome": "none", "old_quote": None,
