@@ -158,7 +158,10 @@ def _record_snapshot_call(gateway, codes, receipts, *, stage, batch_start, provi
             receipt["received_at_utc"] = datetime.now(timezone.utc).isoformat()
 
 
-def get_spot_opend(
+_SPOT_PRICE_FIELDS = ("last_price", "price", "cur_price", "close_price_5min", "open_price", "prev_close_price")
+
+
+def get_spot_opend_quote(
     gateway: Any,
     underlier_code: str,
     *,
@@ -171,8 +174,12 @@ def get_spot_opend(
     metrics: dict[str, Any] | None = None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
-) -> float | None:
-    """Try to get underlying spot from OpenD."""
+) -> dict[str, Any] | None:
+    """Return the selected spot price with the field identity that supplied it.
+
+    The fallback order is unchanged; callers that need to classify an estimate
+    (``prev_close_price``) must use this instead of the bare-float facade.
+    """
     check_fetch_control(deadline, cancelled)
     controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     snapshot_limit = OpenDFetchLimits.from_flat_kwargs(
@@ -180,15 +187,20 @@ def get_spot_opend(
         snapshot_window_sec=snapshot_window_sec,
         snapshot_max_calls=snapshot_max_calls,
     ).market_snapshot
+    requested_at: str | None = None
+    received_at: str | None = None
     try:
 
         def _call_snapshot() -> Any:
+            nonlocal requested_at, received_at
             _increment_metric(metrics, "spot_snapshot_opend_calls")
             _increment_metric(metrics, "spot_snapshot_requested_codes")
             check_fetch_control(deadline, cancelled)
+            requested_at = datetime.now(timezone.utc).isoformat()
             try:
                 result = gateway.get_snapshot([underlier_code])
             finally:
+                received_at = datetime.now(timezone.utc).isoformat()
                 check_fetch_control(deadline, cancelled)
             return result
 
@@ -212,10 +224,18 @@ def get_spot_opend(
             )
             return None
         row = df.iloc[0]
-        for key in ["last_price", "price", "cur_price", "close_price_5min", "open_price", "prev_close_price"]:
+        for key in _SPOT_PRICE_FIELDS:
             value = _to_float(row.get(key))
             if value is not None and value > 0:
-                return value
+                quote: dict[str, Any] = {"price": value, "price_field": key}
+                update_time = row.get("update_time")
+                if update_time not in (None, ""):
+                    quote["update_time"] = str(update_time)
+                if requested_at is not None:
+                    quote["_snapshot_requested_at_utc"] = requested_at
+                if received_at is not None:
+                    quote["_snapshot_received_at_utc"] = received_at
+                return quote
         _append_opend_observation_error(
             errors,
             stage="underlier_snapshot",
@@ -234,6 +254,37 @@ def get_spot_opend(
             message=str(exc),
         )
         return None
+
+
+def get_spot_opend(
+    gateway: Any,
+    underlier_code: str,
+    *,
+    base_dir: Path | None = None,
+    snapshot_max_wait_sec: float = 30.0,
+    snapshot_window_sec: float = 30.0,
+    snapshot_max_calls: int = 60,
+    errors: list[dict[str, Any]] | None = None,
+    rate_limited_call: Callable[..., Any] = rate_limited_opend_call,
+    metrics: dict[str, Any] | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> float | None:
+    """Try to get underlying spot from OpenD."""
+    quote = get_spot_opend_quote(
+        gateway,
+        underlier_code,
+        base_dir=base_dir,
+        snapshot_max_wait_sec=snapshot_max_wait_sec,
+        snapshot_window_sec=snapshot_window_sec,
+        snapshot_max_calls=snapshot_max_calls,
+        errors=errors,
+        rate_limited_call=rate_limited_call,
+        metrics=metrics,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    return float(quote["price"]) if quote is not None else None
 
 
 def get_underlier_observation_opend(
@@ -549,7 +600,7 @@ def _increment_metric(metrics: dict[str, Any] | None, key: str, value: int = 1) 
         metrics[key] = int(value)
 
 
-def get_underlier_spot(
+def get_underlier_spot_quote(
     symbol: str,
     *,
     host: str = "127.0.0.1",
@@ -560,7 +611,7 @@ def get_underlier_spot(
     snapshot_max_calls: int = 60,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
-) -> float | None:
+) -> dict[str, Any] | None:
     check_fetch_control(deadline, cancelled)
     controls = {"deadline": deadline, "cancelled": cancelled} if deadline is not None or cancelled is not None else {}
     gateway = build_ready_futu_quote_gateway(
@@ -571,7 +622,7 @@ def get_underlier_spot(
     )
     try:
         effective_base_dir = Path(base_dir) if base_dir is not None else REPO_ROOT
-        return get_spot_opend(
+        return get_spot_opend_quote(
             gateway,
             normalize_underlier(symbol, base_dir=effective_base_dir).code,
             base_dir=effective_base_dir,
@@ -586,6 +637,32 @@ def get_underlier_spot(
             gateway.close()
         except Exception:
             pass
+
+
+def get_underlier_spot(
+    symbol: str,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 11111,
+    base_dir: Path | None = None,
+    snapshot_max_wait_sec: float = 30.0,
+    snapshot_window_sec: float = 30.0,
+    snapshot_max_calls: int = 60,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> float | None:
+    quote = get_underlier_spot_quote(
+        symbol,
+        host=host,
+        port=port,
+        base_dir=base_dir,
+        snapshot_max_wait_sec=snapshot_max_wait_sec,
+        snapshot_window_sec=snapshot_window_sec,
+        snapshot_max_calls=snapshot_max_calls,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    return float(quote["price"]) if quote is not None else None
 
 
 def get_underlier_observation(

@@ -149,7 +149,12 @@ def collect_current_performance_evidence(
             diagnostics.append(_diag("stock_mark_missing", instrument_key=instrument.instrument_key))
             continue
         effective_at_ms, timestamp_fallback = _snapshot_timestamp_ms(raw, fallback_ms=instant)
+        _, observed_at_ms, _ = _snapshot_capture_times_ms(raw, fallback_ms=instant)
+        price_field = str(raw.get("price_field") or "").strip()
+        mark_kind, mark_source = _stock_mark_identity(price_field)
         quality = {"persistence": "live_unpersisted"}
+        if price_field:
+            quality["price_field"] = price_field
         if timestamp_fallback:
             quality["timestamp_fallback"] = True
         marks.append(
@@ -157,10 +162,10 @@ def collect_current_performance_evidence(
                 fact_id=None,
                 instrument=instrument,
                 price=price,
-                mark_kind="spot",
+                mark_kind=mark_kind,
                 effective_at_ms=effective_at_ms,
-                observed_at_ms=instant,
-                source="realtime_snapshot",
+                observed_at_ms=observed_at_ms,
+                source=mark_source,
                 source_id=f"{instrument.instrument_key}:{effective_at_ms}",
                 quality=quality,
                 raw=raw,
@@ -304,15 +309,14 @@ def _default_stock_price(
     cfg: Mapping[str, Any],
     base_dir: str | Path | None,
 ) -> Mapping[str, Any] | float | None:
-    from src.application.opend_market_snapshot_fetching import get_underlier_spot
+    from src.application.opend_market_snapshot_fetching import get_underlier_spot_quote
 
-    price = get_underlier_spot(
+    return get_underlier_spot_quote(
         instrument.symbol,
         host=str(cfg.get("opend_host") or cfg.get("host") or "127.0.0.1"),
         port=int(cfg.get("opend_port") or cfg.get("port") or 11111),
         base_dir=Path(base_dir) if base_dir is not None else None,
     )
-    return {"price": price}
 
 
 def _default_fx_payload(*, cfg: Mapping[str, Any], base_dir: str | Path | None) -> Mapping[str, Any] | None:
@@ -418,6 +422,16 @@ def _positive_decimal(value: Any):
     except (TypeError, ValueError):
         return None
     return out if out > 0 else None
+
+
+_STOCK_MARK_IDENTITIES = {
+    "prev_close_price": ("close_estimate", "prev_close_fallback"),
+}
+
+
+def _stock_mark_identity(price_field: str) -> tuple[str, str]:
+    """Classify a stock mark by the OpenD field that supplied its price."""
+    return _STOCK_MARK_IDENTITIES.get(price_field, ("spot", "realtime_snapshot"))
 
 
 def _snapshot_timestamp_ms(payload: Mapping[str, Any], *, fallback_ms: int) -> tuple[int, bool]:
