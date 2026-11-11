@@ -225,6 +225,7 @@ def test_unconfirmed_response_retains_envelope_for_identical_replay(recovery, re
     failed = store.list_replies()[0]
     assert failed["status"] == "retryable_failed"
     assert json.loads(failed["payload_json"]) == envelope
+    assert json.loads(failed["receipt_json"]) == {}
     _set_due(store)
     assert feishu_ws._retry_pending_feishu_reply(settings=settings, reply_fn=reply)["ok"] is True
     assert _request(calls[0]) == _request(calls[1])
@@ -608,21 +609,70 @@ def test_recovery_receipt_survives_without_command_audit(recovery):
 def test_recovery_audit_write_failure_rolls_back_delivery(recovery):
     from src.application.bot.control.audit import InboundAuditStore
 
-    settings, store, _ = recovery
+    settings, store, envelope = recovery
     audit = InboundAuditStore(settings.audit_db)
     audit.record_result({"command_id": "synthetic", "channel": "feishu", "message_id": "synthetic-inbound",
                          "response": {"ok": True, "data": {"reply": {"ok": False}}}})
-    claim = store.claim_reply(delivery_key="feishu:synthetic")
-    before_outbox = store.list_replies()
     before_audit = audit.find_by_message(channel="feishu", message_id=None, command_id="synthetic")
+    calls, effects = [], {}
+
+    def reply(**kwargs):
+        calls.append(kwargs)
+        effects.setdefault(kwargs["uuid"], "synthetic-receipt")
+        return {"code": 0, "data": {"message_id": effects[kwargs["uuid"]]}}
+
     with sqlite3.connect(settings.audit_db) as conn:
         conn.execute("""CREATE TRIGGER synthetic_audit_failure BEFORE UPDATE OF response_json
                         ON inbound_command_audit BEGIN SELECT RAISE(ABORT, 'synthetic audit failure'); END""")
     with pytest.raises(sqlite3.IntegrityError, match="synthetic audit failure"):
-        store.mark_reply_delivered("feishu:synthetic", attempt_count=claim["attempt_count"],
-                                   receipt={"ok": True, "message_id": "synthetic-receipt"})
-    assert store.list_replies() == before_outbox
+        feishu_ws._retry_pending_feishu_reply(settings=settings, reply_fn=reply)
+    interrupted = store.list_replies()[0]
+    assert interrupted["status"] == "delivering" and interrupted["attempt_count"] == 1
+    assert json.loads(interrupted["payload_json"]) == envelope
+    assert json.loads(interrupted["receipt_json"]) == {}
     assert audit.find_by_message(channel="feishu", message_id=None, command_id="synthetic") == before_audit
+
+    # Recover the interrupted settlement under the existing UUID and replay window.
+    with sqlite3.connect(settings.audit_db) as conn:
+        conn.execute("DROP TRIGGER synthetic_audit_failure")
+        conn.execute("UPDATE bot_reply_outbox SET updated_at='2000-01-01T00:00:00+00:00'")
+    result = feishu_ws._retry_pending_feishu_reply(settings=settings, reply_fn=reply)
+    assert result["ok"] is True
+    delivered = store.list_replies()[0]
+    receipt = json.loads(delivered["receipt_json"])
+    assert delivered["status"] == "delivered" and delivered["attempt_count"] == 2
+    assert delivered["payload_json"] == "{}" and receipt["delivery_confirmed"] is True
+    assert receipt["outbound_message_id"] == "synthetic-receipt"
+    assert json.loads(audit.find_by_message(channel="feishu", message_id=None, command_id="synthetic")["response_json"])["data"]["reply"] == receipt
+    assert len(calls) == 2 and _request(calls[0]) == _request(calls[1])
+    assert effects == {"feishu:synthetic": "synthetic-receipt"}
+    assert feishu_ws._retry_pending_feishu_reply(settings=settings, reply_fn=reply)["attempted"] is False
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("audit_state", ["missing", "processing"])
+def test_recovery_preserves_receipt_when_audit_cannot_be_completed(recovery, audit_state):
+    from src.application.bot.control.audit import InboundAuditStore
+
+    settings, store, _ = recovery
+    audit = InboundAuditStore(settings.audit_db)
+    audit.record_result({"command_id": "unrelated", "channel": "feishu", "message_id": "other",
+                         "response": {"data": {"marker": "keep"}}})
+    if audit_state == "processing":
+        assert audit.claim_message({"command_id": "synthetic", "channel": "feishu",
+                                    "message_id": "synthetic-inbound"})["claimed"] is True
+    before = audit.find_by_message(channel="feishu", message_id=None, command_id="synthetic")
+    unrelated = audit.find_by_message(channel="feishu", message_id="other")
+    result = feishu_ws._retry_pending_feishu_reply(
+        settings=settings, reply_fn=lambda **kwargs: {"code": 0, "data": {"message_id": "retained-receipt"}},
+    )
+    assert result["ok"] is True
+    delivered = BotHostStore(settings.audit_db).list_replies()[0]
+    receipt = json.loads(delivered["receipt_json"])
+    assert delivered["status"] == "delivered" and delivered["payload_json"] == "{}"
+    assert receipt["outbound_message_id"] == "retained-receipt" and receipt["delivery_confirmed"] is True
+    assert audit.find_by_message(channel="feishu", message_id=None, command_id="synthetic") == before
+    assert audit.find_by_message(channel="feishu", message_id="other") == unrelated
 
 
 def test_legacy_delivered_reply_does_not_invent_provider_confirmation(recovery):
