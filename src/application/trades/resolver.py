@@ -560,6 +560,14 @@ def _resolve_trade_deal(
                     reason="stock_trade_candidate_changed", deal=deal,
                 )
             return _from_lifecycle_resolution(deal, lifecycle_applied)
+    if _is_zero_price_option_close_candidate(deal):
+        # The lifecycle gate needs position_effect == "close", but the broker
+        # spelling SELL does not normalize to close. Infer it from ledger
+        # context first so this leg reaches option_zero_price_close evidence
+        # instead of the expire_auto_close bypass that BUY_BACK escapes (#1075).
+        inference = _infer_missing_position_effect(deal, repo=repo)
+        if inference.deal is not None:
+            deal = inference.deal
     lifecycle_result = resolve_lifecycle_trade_deal(
         deal,
         repo=repo,
@@ -774,6 +782,24 @@ def _state_entry_is_failed(
         bucket == "failed_deal_ids"
         and str(payload.get("status") or "").strip().lower() == "failed"
     )
+
+
+def _is_zero_price_option_close_candidate(deal: NormalizedTradeDeal) -> bool:
+    """A zero-price option close whose position effect is still missing.
+
+    Mirrors ``trades.lifecycle._is_zero_price_option_close`` minus the
+    ``position_effect`` requirement, which is exactly the field being inferred.
+    """
+    if deal.position_effect not in (None, ""):
+        return False
+    if not deal.option_type or str(deal.side or "").lower() not in {"buy", "sell"}:
+        return False
+    try:
+        if float(deal.price) != 0.0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return bool(deal.expiration_ymd and deal.trade_time_ms)
 
 
 def _infer_missing_position_effect(
