@@ -1042,6 +1042,37 @@ def test_model_execution_timeout_remains_resumable(tmp_path, monkeypatch):
     assert error.value.diagnostics == diagnostics
 
 
+def test_only_thread_and_turn_started_events_count_as_no_output(tmp_path, monkeypatch):
+    import subprocess
+
+    class SilentModel:
+        pid = 12347
+        returncode = -15
+
+        def __init__(self, *args, stdout=None, **kwargs):
+            stdout.write('{"type":"thread.started"}\n')
+            stdout.write('{"type":"turn.started"}\n')
+            stdout.flush()
+
+        def communicate(self, prompt, timeout):
+            raise subprocess.TimeoutExpired("model", timeout)
+
+        def wait(self, timeout):
+            return -15
+
+    monkeypatch.setattr(review.subprocess, "Popen", SilentModel)
+    monkeypatch.setattr(review.os, "killpg", lambda *_: None)
+    monkeypatch.setattr(review, "agent_command", lambda *args, **kwargs: ["unused"])
+    stage = tmp_path / "stage"
+    with pytest.raises(review.repair.AgentTimeout, match="agent_no_output"):
+        review.invoke_agent({"timeout_seconds": 1}, stage, "read only")
+    diagnostics = json.loads((stage / "agent-diagnostics.json").read_text())
+    assert diagnostics["failure_kind"] == "agent_no_output"
+    assert diagnostics["agent_jsonl_lines"] == 2
+    assert diagnostics["event_types"] == {"thread.started": 1, "turn.started": 1}
+    assert diagnostics["model_output_events"] == 0
+
+
 def test_slow_agent_with_output_is_not_misclassified_as_no_output(tmp_path, monkeypatch):
     import subprocess
 
