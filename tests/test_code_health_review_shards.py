@@ -58,7 +58,9 @@ def test_shards_checkpoint_prefix_before_failure_and_resume_next_run(commit_revi
         assert len(plan["commits"]) == 1
         calls.append(sha)
         persisted = json.loads((root / "state.json").read_text())
-        assert persisted["cursor"] == shas[shas.index(sha) - 1]
+        index = shas.index(sha)
+        # The cursor stops before the first unresolved unit; units after it are still attempted.
+        assert persisted["cursor"] == (shas[index - 1] if index <= 3 else shas[2])
         assert "上一轮报告" in plan["previous_review"]
         assert "old-owner:failure" in plan["confirmed_finding_keys"]
         if sha == shas[3]:
@@ -78,12 +80,12 @@ def test_shards_checkpoint_prefix_before_failure_and_resume_next_run(commit_revi
     monkeypatch.setattr(review, "invoke_agent", invoke)
     receipt = review.run_once(root)
     assert receipt["status"] == "partial"
-    assert receipt["completed_commits"] == shas[1:3]
+    assert receipt["completed_commits"] == [shas[1], shas[2], shas[4]]
     assert receipt["cursor_after"] == shas[2]
-    assert calls == shas[1:4]
+    assert calls == shas[1:]
     run = Path(receipt["run_dir"])
     aggregate = json.loads((run / "result.json").read_text())
-    assert review.validate_result(aggregate, shas[1:]) == shas[1:3]
+    assert review.validate_result(aggregate, shas[1:]) == [shas[1], shas[2], shas[4]]
     assert all(sha in aggregate["report_markdown"] for sha in shas[1:])
     assert json.loads((run / "work" / "shards" / f"003-{shas[3]}" / "receipt.json").read_text())["status"] == (
         "pending" if "timeout" in failure else failure
@@ -100,7 +102,7 @@ def test_shards_checkpoint_prefix_before_failure_and_resume_next_run(commit_revi
     monkeypatch.setattr(review, "invoke_agent", resume)
     next_receipt = review.run_once(root)
     assert next_receipt["status"] == "complete"
-    assert resumed == shas[3:]
+    assert resumed == [shas[3]]
     assert next_receipt["cursor_after"] == shas[-1]
 
 
@@ -166,7 +168,8 @@ def test_shards_stop_at_review_budget_without_skipping_unit(commit_review_run, m
 
 
 @pytest.mark.parametrize(("review_elapsed", "intake_elapsed"), [(0, 0), (600, 60), (1200, 60)])
-def test_review_and_issue_budgets_do_not_borrow_from_each_other(commit_review_run, monkeypatch, review_elapsed, intake_elapsed):
+def test_unused_review_budget_flows_to_issues_without_breaching_the_daily_cap(
+        commit_review_run, monkeypatch, review_elapsed, intake_elapsed):
     root, shas, clock = commit_review_run
     config = json.loads((root / "config.json").read_text())
     review.write_json(root / "config.json", {**config, "issues_enabled": True, "max_units": 1})
@@ -175,7 +178,8 @@ def test_review_and_issue_budgets_do_not_borrow_from_each_other(commit_review_ru
     def intake(root, config, target, command, *, deadline, hydrate):
         assert hydrate is False
         assert clock[0] == review_elapsed
-        assert deadline == review_elapsed + 600
+        # Review's unused allocation (1200s here) carries into intake, capped by the daily deadline.
+        assert deadline == 1800
         clock[0] += intake_elapsed
         return {"issues": [{"number": 1}], "target": target}
 
@@ -196,8 +200,62 @@ def test_review_and_issue_budgets_do_not_borrow_from_each_other(commit_review_ru
     monkeypatch.setattr(review.issues, "process_issues", process)
     receipt = review.run_once(root)
     assert receipt["status"] == ("partial" if review_elapsed else "complete")
-    assert observed == [600 - intake_elapsed]
+    assert observed == [1800 - review_elapsed - intake_elapsed]
     assert receipt["issues"]["status"] == "complete"
+
+
+def test_agent_no_output_skips_later_model_stages(commit_review_run, monkeypatch):
+    root, shas, clock = commit_review_run
+    config = json.loads((root / "config.json").read_text())
+    review.write_json(root / "config.json", {
+        **config, "issues_enabled": True, "repair_enabled": True, "pull_requests_enabled": True,
+        "comments_enabled": True, "review_budget_seconds": 600, "issue_timeout_seconds": 300,
+        "repair_budget_seconds": 300, "pull_request_budget_seconds": 300, "delivery_budget_seconds": 300,
+    })
+    calls = []
+    for name, target in (("plan_issues", review.issues), ("process_issues", review.issues)):
+        monkeypatch.setattr(target, name, lambda *args, _name=name, **kwargs: calls.append(_name) or {})
+    monkeypatch.setattr(review.pull_requests, "process_pull_requests",
+                        lambda *args, **kwargs: calls.append("pull_requests") or {})
+    monkeypatch.setattr(review, "run_repair_phase", lambda *args, **kwargs: calls.append("repair") or {})
+    monkeypatch.setattr(review.delivery, "process_delivery",
+                        lambda *args, **kwargs: calls.append("delivery") or {})
+
+    def invoke(config, shard, prompt):
+        raise review.repair.AgentTimeout(
+            "no output", diagnostics={"failure_kind": "agent_no_output", "model_output_events": 0})
+
+    monkeypatch.setattr(review, "invoke_agent", invoke)
+    receipt = review.run_once(root)
+    assert calls == []
+    assert receipt["agent_unavailable"]["commit"] == shas[1]
+    for phase in ("issues", "pull_requests", "repair", "delivery"):
+        assert receipt[phase]["status"] == "skipped"
+    assert receipt["phase_timing"]["review"]["elapsed_seconds"] == 0
+    assert "模型无输出" in (Path(receipt["run_dir"]) / "report.md").read_text()
+
+
+def test_review_carryover_cannot_consume_reserved_repair_budget(commit_review_run, monkeypatch):
+    root, shas, clock = commit_review_run
+    config = json.loads((root / "config.json").read_text())
+    review.write_json(root / "config.json", {**config, "issues_enabled": True, "max_units": 1,
+                                             "repair_enabled": True, "repair_budget_seconds": 600})
+    observed = []
+
+    def intake(root, config, target, command, *, deadline, hydrate):
+        observed.append(deadline)
+        return {"issues": [], "target": target}
+
+    def process(root, config, run, source, plan, deadline, *args, command):
+        return {"status": "no_eligible_issues", "reviewed": []}
+
+    monkeypatch.setattr(review, "invoke_agent", lambda config, shard, prompt: result([shas[1]]))
+    monkeypatch.setattr(review.issues, "plan_issues", intake)
+    monkeypatch.setattr(review.issues, "process_issues", process)
+    monkeypatch.setattr(review, "run_repair_phase", lambda *args, **kwargs: {"status": "no_pending_repairs"})
+    review.run_once(root)
+    # 1800 total - 600 reserved repair = 1200 is the hard cap for review + intake.
+    assert observed == [1200]
 
 
 @pytest.mark.parametrize("failure", ["noncontiguous", "short_report", "missing_evidence", "interrupted"])

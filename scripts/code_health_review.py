@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import fcntl
@@ -103,8 +104,13 @@ def validate_result(result: dict, commits: list[str], *, work: Path | None = Non
     if not isinstance(result, dict) or set(result) != set(RESULT_SCHEMA["required"]):
         raise ValueError("agent result has unexpected fields")
     completed = result["completed_commits"]
-    if not isinstance(completed, list) or completed != commits[:len(completed)]:
-        raise ValueError("completed commits must be a contiguous prefix of the planned mainline")
+    known = set(commits)
+    if (not isinstance(completed, list) or len(set(completed)) != len(completed)
+            or not set(completed).issubset(known)
+            or [sha for sha in commits if sha in set(completed)] != completed):
+        # Units may finish out of order after a neighbour timed out; the durable cursor
+        # still only advances across the contiguous decided prefix.
+        raise ValueError("completed commits must preserve planned order without duplicates")
     if result["outcome"] not in {"complete", "partial", "blocked"}:
         raise ValueError("unknown review outcome")
     if result["outcome"] == "complete" and completed != commits:
@@ -181,6 +187,57 @@ def agent_command(config: dict, work: Path, schema: Path, output: Path, *, writa
     ]
 
 
+def agent_diagnostics(run: Path, *, timeout_seconds: float, elapsed_seconds: float) -> dict:
+    """Summarise what the agent actually emitted before the runner killed it."""
+    agent_log, stderr_log = run / "agent.jsonl", run / "agent.stderr"
+    events, last_event, lines = Counter(), None, 0
+    log_bytes = 0
+    if agent_log.is_file():
+        log_bytes = agent_log.stat().st_size
+        with agent_log.open(encoding="utf-8", errors="replace") as source:
+            for line in source:
+                if not line.strip():
+                    continue
+                lines += 1
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                kind = str(event.get("type", "unknown"))
+                events[kind] += 1
+                last_event = {"type": kind}
+                if isinstance(event.get("item"), dict) and event["item"].get("type"):
+                    last_event["item_type"] = event["item"]["type"]
+                if isinstance(event.get("message"), str):
+                    last_event["message"] = event["message"][:300]
+    stderr_bytes = stderr_log.stat().st_size if stderr_log.is_file() else 0
+    stderr_tail = ""
+    if stderr_log.is_file():
+        with stderr_log.open("rb") as source:
+            if stderr_bytes > 4096:
+                source.seek(-4096, os.SEEK_END)
+            stderr_tail = source.read().decode("utf-8", errors="replace")[-2000:]
+    meaningful = sum(count for kind, count in events.items() if kind not in repair.OUTPUT_EVENT_TYPES)
+    seconds_since_last_event = None
+    if agent_log.is_file():
+        seconds_since_last_event = round(max(0.0, time.time() - agent_log.stat().st_mtime), 3)
+    return {
+        "failure_kind": "agent_no_output" if meaningful == 0 else "unit_timeout",
+        "timeout_seconds": timeout_seconds,
+        "elapsed_seconds": round(elapsed_seconds, 3),
+        "agent_jsonl_lines": lines,
+        "agent_jsonl_bytes": log_bytes,
+        "event_types": dict(events),
+        "model_output_events": meaningful,
+        "last_event": last_event,
+        "seconds_since_last_event": seconds_since_last_event,
+        "stderr_bytes": stderr_bytes,
+        "stderr_tail": stderr_tail,
+    }
+
+
 def invoke_agent(
     config: dict, run: Path, prompt: str, *, result_schema: dict = RESULT_SCHEMA,
     writable: list[Path] | None = None,
@@ -193,6 +250,7 @@ def invoke_agent(
     (run / "prompt.txt").write_text(prompt, encoding="utf-8")
     env = {key: os.environ[key] for key in ("HOME", "PATH", "LANG", "LC_CTYPE", "TMPDIR") if key in os.environ}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    started = time.monotonic()
     with (run / "agent.jsonl").open("w") as stdout, (run / "agent.stderr").open("w") as stderr:
         process = subprocess.Popen(
             agent_command(config, work, schema, output, writable=writable), stdin=subprocess.PIPE,
@@ -207,7 +265,20 @@ def invoke_agent(
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
-            raise TimeoutError("agent exceeded the daily time budget; incomplete stage will resume") from None
+            diagnostics = agent_diagnostics(
+                run, timeout_seconds=config["timeout_seconds"], elapsed_seconds=time.monotonic() - started,
+            )
+            write_json(run / "agent-diagnostics.json", diagnostics)
+            if diagnostics["failure_kind"] == "agent_no_output":
+                raise repair.AgentTimeout(
+                    f"agent produced no model output within {config['timeout_seconds']}s (agent_no_output); "
+                    "the model gateway may be unavailable", diagnostics=diagnostics,
+                ) from None
+            raise repair.AgentTimeout(
+                f"agent timed out after {config['timeout_seconds']}s with "
+                f"{diagnostics['model_output_events']} output events (unit_timeout): "
+                f"{json.dumps(diagnostics['event_types'], ensure_ascii=False)}", diagnostics=diagnostics,
+            ) from None
     if process.returncode:
         raise RuntimeError(f"agent exited {process.returncode}; inspect {run / 'agent.stderr'}")
     return json.loads(output.read_text(encoding="utf-8"))
@@ -251,7 +322,7 @@ plan.confirmed_finding_keys 包含跨轮和本轮之前已确认的key；相同o
 """
     if smoke:
         return prefix + "\n本次仅验证调度链路：读取规则、源码 AGENTS.md 与 LESSONS.md，报告能读到的四项检查和L001边界。不要审查新提交或运行测试。outcome=complete，completed_commits=[]，confirmed_findings=[]。这不是第二轮巡检，也不能推进游标。\n"
-    return prefix + "\n本阶段plan仅含当前一个主线单元；只审该提交与上下游一跳，不继续审其它提交。完成即返回JSON，外层会先持久化并推进连续游标，再启动下一单元。历史报告仅用于去重与保留待办，不重跑历史审查。\n本轮输入：\n" + json.dumps(plan, ensure_ascii=False)
+    return prefix + "\n本阶段plan仅含当前一个主线单元；只审该提交与上下游一跳，不继续审其它提交。完成即返回JSON，外层会先持久化再启动下一单元；游标只推进到连续已决策前缀。历史报告仅用于去重与保留待办，不重跑历史审查。\n本轮输入：\n" + json.dumps(plan, ensure_ascii=False)
 
 
 def review_stage_config(config: dict, deadline: float) -> dict:
@@ -264,29 +335,124 @@ def review_stage_config(config: dict, deadline: float) -> dict:
 def review_commits(
     root: Path, config: dict, run: Path, plan: dict, state: dict, receipt: dict, deadline: float,
 ) -> dict:
-    """Checkpoint every validated unit before starting the next; never skip a pending unit."""
+    """Checkpoint every unit independently; one stuck commit must not block its neighbours."""
     planned = [unit["sha"] for unit in plan["commits"]]
-    completed, findings, gaps, reports, tasks = [], [], [], [], []
+    reviewed_now, findings, gaps, reports, tasks = [], [], [], [], []
     known_keys = set(plan["confirmed_finding_keys"])
     pending_reason = plan.get("preparation_error", "")
-    blocked = incomplete = False
+    blocked = False
+    partial_seen = False
+    max_failures = config.get("review_max_unit_failures", 2)
+    failures = state.setdefault("review_unit_failures", {})
+    needs_human = state.setdefault("review_needs_human", {})
+    previous_units = state.setdefault("reviewed_units", {})
+    deferred = {}
+    agent_unavailable = None
+    persisted = [None]
     review_units = receipt.setdefault("review_units", [])
 
+    def reviewed(sha: str) -> bool:
+        return sha in reviewed_now or sha in previous_units
+
+    def decided_prefix() -> list[str]:
+        prefix = []
+        for sha in planned:
+            if reviewed(sha) or sha in needs_human:
+                prefix.append(sha)
+            else:
+                break
+        return prefix
+
+    def reviewed_commits() -> list[str]:
+        return [sha for sha in planned if reviewed(sha)]
+
+    def blocker_rows() -> list[dict]:
+        rows = []
+        for sha in planned:
+            record = deferred.get(sha)
+            failure = failures.get(sha) or {}
+            if sha in needs_human:
+                item = needs_human[sha]
+                rows.append({"commit": sha, "needs_human": True, "attempts": item.get("attempts", 0),
+                             "failure_kind": item.get("failure_kind"), "last_error": item.get("last_error"),
+                             "last_failed_at": item.get("last_failed_at"), "counts_toward_needs_human": True})
+            elif record:
+                rows.append({"commit": sha, "needs_human": False, "attempts": failure.get("count", 0),
+                             "failure_kind": record.get("failure_kind"), "last_error": record.get("error"),
+                             "last_failed_at": record.get("finished_at"),
+                             "counts_toward_needs_human": record.get("counts_toward_needs_human", True)})
+            elif failure:
+                # The unit was not reached this round (for example, the phase budget ran out)
+                # but its earlier failure streak is still pending.
+                rows.append({"commit": sha, "needs_human": False, "attempts": failure.get("count", 0),
+                             "failure_kind": failure.get("failure_kind"), "last_error": failure.get("last_error"),
+                             "last_failed_at": failure.get("last_failed_at"), "counts_toward_needs_human": True})
+        return rows
+
+    def remember_failure(sha: str, kind: str, reason: str, diagnostics: dict | None) -> dict:
+        stamp = now()
+        record = {"commit": sha, "status": "pending", "failure_kind": kind, "error": reason,
+                  "diagnostics": diagnostics or {}, "finished_at": stamp, "counts_toward_needs_human": True}
+        if kind == "agent_no_output":
+            # A silent gateway is an environment condition, not a property of this commit.
+            # Do not quarantine the commit for it.
+            record["counts_toward_needs_human"] = False
+        else:
+            failure = failures.setdefault(sha, {"count": 0, "first_failed_at": stamp})
+            failure["count"] += 1
+            failure.update({"last_failed_at": stamp, "failure_kind": kind, "last_error": reason})
+            record["attempts"] = failure["count"]
+            if failure["count"] >= max_failures:
+                needs_human[sha] = {"sha": sha, "attempts": failure["count"], "escalated_at": stamp,
+                                    "first_failed_at": failure["first_failed_at"], "last_failed_at": stamp,
+                                    "failure_kind": kind, "last_error": reason}
+                failures.pop(sha, None)
+                record["needs_human"] = True
+                record["status"] = "needs_human"
+        deferred[sha] = record
+        return record
+
     def checkpoint():
-        remaining = planned[len(completed):]
-        outcome = "complete" if not remaining and not incomplete else "blocked" if blocked and not completed else "partial"
+        completed = reviewed_commits()
+        decided = decided_prefix()
+        remaining = planned[len(decided):]
+        outcome = ("complete" if len(completed) == len(planned) and not pending_reason and not partial_seen
+                   else "blocked" if blocked and not completed else "partial")
+        rows = blocker_rows()
+        planned_set = set(planned)
+        escalations = [row for row in rows if row["needs_human"]] + [
+            {"commit": sha, "needs_human": True, "attempts": item.get("attempts", 0),
+             "failure_kind": item.get("failure_kind"), "last_error": item.get("last_error"),
+             "last_failed_at": item.get("last_failed_at"), "counts_toward_needs_human": True}
+            for sha, item in needs_human.items() if sha not in planned_set
+        ]
         markdown = (
             f"# 逐提交增量巡检\n\n冻结目标：`{plan['target']}`\n\n起始游标：`{plan['cursor']}`\n\n"
-            f"状态：{outcome}；已完成 {len(completed)}/{len(planned)} 个主线单元。\n\n"
-            "只有按序完成实现与所有权、测试判别力、业务失败路径、权限与执行能力四项检查的提交才计入连续前缀。"
+            f"状态：{outcome}；本轮完成 {len(reviewed_now)}/{len(planned)} 个主线单元，"
+            f"游标可推进到 `{decided[-1] if decided else state['cursor']}`。\n\n"
+            "各单元独立推进：单个提交超时或返回未完成时记录诊断并继续下一个，只有 review 预算不足才停止。"
+            "完成清单仍要求实现与所有权、测试判别力、业务失败路径、权限与执行能力四项检查；"
+            "连续失败达到阈值的提交升级为 needs_human 并从后续队列跳过。"
             "各片结果、临时验证证据和执行日志保存在本轮 work/shards 目录，报告及游标由外层 runner 写入。"
             "零发现不代表没有缺陷；未运行的验证和证据缺口仍需按逐片结论继续跟踪。"
             "本报告只记录只读巡检和本地问题记录，不代表业务修复、外部 issue 发布或交付已完成。\n\n"
-            "## 连续完成\n\n" + ("\n".join(f"- `{sha}`" for sha in completed) or "无")
+            "## 本轮完成\n\n" + ("\n".join(f"- `{sha}`" for sha in reviewed_now) or "无")
+            + "\n\n## 连续完成（游标前缀）\n\n"
+            + ("\n".join(f"- `{sha}`" for sha in decided if reviewed(sha)) or "无")
             + "\n\n## 待续\n\n" + ("\n".join(f"- `{sha}`" for sha in remaining) or "无")
+            + "\n\n## 卡点（本轮，下轮重试）\n\n" + ("\n".join(
+                f"- `{row['commit']}`：{row['failure_kind']}；连续失败 {row['attempts']} 次"
+                + ("（模型无输出，未计入提交失败次数）" if not row["counts_toward_needs_human"] else "")
+                + f"；{row['last_error']}" for row in rows if not row["needs_human"]) or "无")
+            + "\n\n## 需人工处理（needs_human，已跳过）\n\n" + ("\n".join(
+                f"- `{row['commit']}`：连续失败 {row['attempts']} 次；最后类型 {row['failure_kind']}；"
+                f"{row['last_error']}" for row in escalations) or "无")
             + (f"\n\n停止原因：{pending_reason}" if pending_reason else "")
+            + (f"\n\n模型无输出：`{agent_unavailable['commit']}`；本轮后续阶段不再调用模型。"
+               if agent_unavailable else "")
             + "\n\n## 本轮新增确认问题\n\n"
-            + ("\n".join(f"- `{item['key']}`：{item['title']}" for item in findings) or "无；已确认 key 的重复证据仅关联原记录。")
+            + ("\n".join(f"- `{item['key']}`：{item['title']}" for item in findings)
+               or "无；已确认 key 的重复证据仅关联原记录。")
             + "\n\n## 验证缺口\n\n" + ("\n".join(f"- {gap}" for gap in gaps) or "见逐片结论。")
             + "\n\n" + "\n\n".join(reports)
         )
@@ -296,32 +462,76 @@ def review_commits(
         write_json(run / "result.json", result)
         report = run / "report.md"
         write_text(report, markdown + "\n")
-        receipt.update({"status": outcome, "completed_commits": list(completed), "repair_tasks": list(tasks)})
+        receipt.update({"status": outcome, "completed_commits": list(completed),
+                        "reviewed_commits": list(reviewed_now), "repair_tasks": list(tasks),
+                        "review_blockers": rows, "needs_human_commits": escalations,
+                        "cursor_advance_sha": decided[-1] if decided else state["cursor"]})
         if pending_reason:
             receipt["review_error"] = pending_reason
+        else:
+            receipt.pop("review_error", None)
+        if agent_unavailable:
+            receipt["agent_unavailable"] = agent_unavailable
         write_json(run / "receipt.json", {**receipt, "updated_at": now()})
-        cursor = completed[-1] if completed else state["cursor"]
-        if state["cursor"] != cursor or state["last_review"] != str(report):
-            state.update({"cursor": cursor, "last_review": str(report), "updated_at": now(),
-                          "confirmed_finding_keys": sorted(known_keys)})
+        # Persist the decided prefix without discarding out-of-order completion records that
+        # a later unit in this same loop may still reuse.
+        view = {
+            "cursor": decided[-1] if decided else state["cursor"],
+            "last_review": str(report), "updated_at": now(),
+            "confirmed_finding_keys": sorted(known_keys),
+            "review_unit_failures": {key: value for key, value in failures.items() if key not in decided},
+            "review_needs_human": needs_human,
+            "reviewed_units": {key: value for key, value in previous_units.items() if key not in decided},
+        }
+        fingerprint = json.dumps(view, sort_keys=True, ensure_ascii=False)
+        if fingerprint != persisted[0]:
+            persisted[0] = fingerprint
+            state.update(view)
             write_json(root / "state.json", state)
         return result
 
     for index, unit in enumerate(plan["commits"], 1):
         sha = unit["sha"]
         shard = run / "work" / "shards" / f"{index:03d}-{sha}"
-        shard.mkdir(parents=True)
+        shard.mkdir(parents=True, exist_ok=True)
         unit_receipt = {"commit": sha, "run_dir": str(shard), "started_at": now()}
         review_units.append(unit_receipt)
+        if sha in needs_human:
+            unit_receipt.update({"status": "needs_human", "reason": "previously escalated; skipped",
+                                 "record": needs_human[sha], "finished_at": now()})
+            write_json(shard / "receipt.json", unit_receipt)
+            continue
+        if sha in previous_units:
+            unit_receipt.update({"status": "reused", "reason": "completed in an earlier run beyond the cursor gap",
+                                 "record": previous_units[sha], "finished_at": now()})
+            write_json(shard / "receipt.json", unit_receipt)
+            continue
+        if plan.get("preparation_error"):
+            pending_reason = plan["preparation_error"]
+            unit_receipt.update({"status": "pending", "error": pending_reason, "finished_at": now()})
+            write_json(shard / "receipt.json", unit_receipt)
+            break
+        remaining = deadline - time.monotonic()
+        if remaining < 30:
+            pending_reason = f"review budget exhausted before {sha}; remaining {int(remaining)}s"
+            unit_receipt.update({"status": "pending", "error": pending_reason, "finished_at": now()})
+            write_json(shard / "receipt.json", unit_receipt)
+            break
         try:
-            if plan.get("preparation_error"):
-                raise TimeoutError(plan["preparation_error"])
             stage = review_stage_config(config, deadline)
-            unit_receipt["timeout_seconds"] = stage["timeout_seconds"]
-            shard_plan = {**plan, "cursor": completed[-1] if completed else plan["cursor"],
-                          "commits": [unit], "confirmed_finding_keys": sorted(known_keys),
-                          "timeout_seconds": stage["timeout_seconds"]}
-            write_json(shard / "plan.json", shard_plan)
+        except TimeoutError as exc:
+            pending_reason = f"review budget exhausted before {sha}: {exc}"
+            unit_receipt.update({"status": "pending", "error": pending_reason, "finished_at": now()})
+            write_json(shard / "receipt.json", unit_receipt)
+            break
+        unit_receipt["timeout_seconds"] = stage["timeout_seconds"]
+        unit_receipt["attempt"] = (failures.get(sha) or {}).get("count", 0) + 1
+        cursor_now = decided_prefix()
+        shard_plan = {**plan, "cursor": cursor_now[-1] if cursor_now else plan["cursor"],
+                      "commits": [unit], "confirmed_finding_keys": sorted(known_keys),
+                      "timeout_seconds": stage["timeout_seconds"]}
+        write_json(shard / "plan.json", shard_plan)
+        try:
             result = invoke_agent(stage, shard, review_prompt(
                 root, shard, shard_plan, max_units=config["max_units"], source_run=run,
             ))
@@ -333,20 +543,49 @@ def review_commits(
             duplicates = [item["key"] for item in result["confirmed_findings"] if item["key"] in known_keys]
             result["confirmed_findings"] = [item for item in result["confirmed_findings"] if item["key"] not in known_keys]
             write_json(shard / "result.json", result)
+            if not finished:
+                kind = "unit_blocked" if result["outcome"] == "blocked" else "unit_incomplete"
+                reason = f"{sha}: agent returned {result['outcome']} without completing the unit"
+                record = remember_failure(sha, kind, reason, {})
+                gaps.append(reason)
+                reports.append(f"## 提交 `{sha}`（未完成，下轮重试）\n\n" + result["report_markdown"])
+                unit_receipt.update({"status": result["outcome"], "error": reason,
+                                     "attempts": record.get("attempts"), "finished_at": now()})
+                write_json(shard / "receipt.json", unit_receipt)
+                if result["outcome"] == "blocked":
+                    blocked = True
+                checkpoint()
+                continue
+            reviewed_now.append(sha)
+            previous_units[sha] = {"status": "complete", "reviewed_at": now(), "run_dir": str(shard)}
+            failures.pop(sha, None)
+            needs_human.pop(sha, None)
             unit_receipt.update({"status": result["outcome"], "completed_commits": finished,
                                  "duplicate_finding_keys": duplicates, "finished_at": now()})
             write_json(shard / "receipt.json", unit_receipt)
+            if result["outcome"] != "complete":
+                partial_seen = True
         except (TimeoutError, subprocess.TimeoutExpired) as exc:
-            pending_reason = f"{sha}: {type(exc).__name__}: {exc}"
-            gaps.append(pending_reason)
-            unit_receipt.update({"status": "pending", "error": pending_reason, "finished_at": now()})
+            diagnostics = repair.timeout_diagnostics(exc)
+            kind = diagnostics.get("failure_kind", "unit_timeout")
+            reason = f"{sha}: {type(exc).__name__}: {exc}"
+            record = remember_failure(sha, kind, reason, diagnostics)
+            gaps.append(reason)
+            unit_receipt.update({"status": record["status"], "error": reason,
+                                 "attempts": record.get("attempts"), "diagnostics": diagnostics,
+                                 "finished_at": now()})
             write_json(shard / "receipt.json", unit_receipt)
-            break
+            checkpoint()
+            if kind == "agent_no_output":
+                agent_unavailable = {"commit": sha, "reason": reason, "diagnostics": diagnostics}
+                pending_reason = f"{sha}: model produced no output; review stopped"
+                checkpoint()
+                break
+            continue
         except Exception as exc:
             unit_receipt.update({"status": "failed", "error": f"{type(exc).__name__}: {exc}", "finished_at": now()})
             write_json(shard / "receipt.json", unit_receipt)
             raise
-        completed.extend(finished)
         for finding in result["confirmed_findings"]:
             known_keys.add(finding["key"])
             evidence = (shard / "work" / finding["evidence_log"]).relative_to(run / "work")
@@ -354,11 +593,6 @@ def review_commits(
         gaps.extend(result["verification_gaps"])
         reports.append(f"## 提交 `{sha}`\n\n" + result["report_markdown"]
                        + ("\n\n已关联原问题、未新增 finding：" + ", ".join(duplicates) if duplicates else ""))
-        if not finished or result["outcome"] != "complete":
-            incomplete = True
-            blocked = result["outcome"] == "blocked"
-            pending_reason = f"{sha} 当前提交审查尚未全部完成，后续提交留待下一轮。"
-            break
         checkpoint()
     return checkpoint()
 
@@ -366,7 +600,8 @@ def review_commits(
 def runtime_config(config: dict) -> dict:
     defaults = {"pull_requests_enabled": True, "pull_request_merge_enabled": True,
                 "pull_request_close_enabled": False, "comments_enabled": True, "release_enabled": True,
-                "max_pull_requests": 3, "pull_request_unit_timeout_seconds": 900, "max_repairs": 1}
+                "max_pull_requests": 3, "pull_request_unit_timeout_seconds": 900, "max_repairs": 1,
+                "review_max_unit_failures": 2}
     result = {**defaults, **config}
     for key in ("pull_requests_enabled", "pull_request_merge_enabled", "pull_request_close_enabled",
                 "comments_enabled", "release_enabled", "repair_delivery_enabled"):
@@ -377,6 +612,8 @@ def runtime_config(config: dict) -> dict:
     for key in ("max_pull_requests", "pull_request_unit_timeout_seconds"):
         if type(result[key]) is not int or result[key] < (0 if key == "max_pull_requests" else 30):
             raise ValueError(f"invalid {key}")
+    if type(result["review_max_unit_failures"]) is not int or result["review_max_unit_failures"] < 2:
+        raise ValueError("review_max_unit_failures must be an integer of at least 2")
     return result
 
 
@@ -487,7 +724,13 @@ def save_daily_summary(run, receipt):
                "awaiting_merge_authorization": inventory.get("awaiting_merge_authorization", []),
                "ci_pending": inventory.get("ci_pending", []), "ci_failed": inventory.get("ci_failed", []),
                "delivery_not_refreshed": phase.get("delivery_not_refreshed", []),
-               "manual_todo": phase.get("manual_todo", [])}
+               "manual_todo": phase.get("manual_todo", []),
+               "review_blockers": receipt.get("review_blockers", []),
+               "needs_human_commits": receipt.get("needs_human_commits", []),
+               "phase_timing": receipt.get("phase_timing", {}),
+               "agent_unavailable": (receipt.get("agent_unavailable")
+                                     or receipt.get("issues", {}).get("agent_unavailable")
+                                     or phase.get("agent_unavailable"))}
     reasons = {item["id"]: item["reason"] for item in summary["manual_todo"] if item.get("reason")}
     summary["blocked_reasons"] = [{"id": task, "reason": reasons.get(task, "阻塞原因未记录，需人工核对任务证据")}
                                   for task in summary["blocked"]]
@@ -513,6 +756,20 @@ def save_daily_summary(run, receipt):
     if summary["release"]:
         lines.append(f"发布：{summary['release'].get('status')}；{summary['release'].get('reason', '')}")
     lines.extend(f"- 交付阻塞：{error}" for error in summary["delivery_errors"])
+    if summary["review_blockers"]:
+        lines.append("\n## 卡点")
+        for row in summary["review_blockers"]:
+            status = "needs_human（已跳过后续队列）" if row.get("needs_human") else "下轮重试"
+            lines.append(f"- `{row['commit']}`：{row.get('failure_kind')}；连续失败 {row.get('attempts', 0)} 次；"
+                         f"{status}；{row.get('last_error', '')}")
+    if summary["phase_timing"]:
+        lines.append("\n## 阶段耗时与预算")
+        for name, timing in summary["phase_timing"].items():
+            lines.append(f"- {name}：耗时 {timing.get('elapsed_seconds')}s；预算 {timing.get('budget_seconds')}s；"
+                         f"可用 {timing.get('available_seconds')}s；剩余 {timing.get('remaining_seconds')}s；"
+                         f"截止 `{timing.get('deadline_at')}`。")
+    if summary["agent_unavailable"]:
+        lines.append(f"\n模型无输出：{summary['agent_unavailable'].get('reason', '')}；后续模型阶段已跳过。")
     report = run / "report.md"
     write_text(report, (report.read_text(encoding="utf-8") if report.exists() else "") + "\n\n".join(lines) + "\n")
     receipt["daily_summary"] = summary
@@ -542,19 +799,55 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False,
         run.mkdir(parents=True)
         receipt = {"started_at": now(), "cursor_before": state["cursor"], "mode": "smoke" if smoke else "daily",
                    "budgets": budgets}
+        started_wall = datetime.now(timezone.utc)
+        issue_deadline = None
+
+        def wall(moment: float) -> str:
+            return (started_wall + timedelta(seconds=moment - started)).isoformat(timespec="seconds")
+
+        def phase_mark(name: str, begin: float, budget: int, deadline_at: float) -> float:
+            ended = time.monotonic()
+            remaining = max(0.0, deadline_at - ended)
+            receipt.setdefault("phase_timing", {})[name] = {
+                "started_at": wall(begin), "finished_at": wall(ended),
+                "elapsed_seconds": round(ended - begin, 3),
+                "available_seconds": round(max(0.0, deadline_at - begin), 3),
+                "budget_seconds": budget,
+                "remaining_seconds": round(remaining, 3),
+                "deadline_at": wall(deadline_at),
+            }
+            return remaining
+
         target, source, issue_plan = None, run / "source", None
         def bounded_command(argv, **kwargs):
             remaining = deadline - time.monotonic()
             if remaining < 1:
-                raise TimeoutError("daily budget exhausted during preparation")
+                raise TimeoutError("review budget exhausted during preparation")
             return command(argv, **{**kwargs, "timeout": min(kwargs.get("timeout", 180), remaining)})
 
         def finish_repair():
             if smoke or dry_run:
                 return
+            agent_down = receipt.get("agent_unavailable") or receipt.get("issues", {}).get("agent_unavailable")
+            if agent_down:
+                reason = "agent_no_output in an earlier stage; repeated model calls skipped"
+                receipt.setdefault("pull_requests", {"status": "skipped", "reason": reason, "run_dir": str(run / "pull-requests")})
+                receipt.setdefault("repair", {"status": "skipped", "entered": False, "reason": reason})
+                receipt.setdefault("delivery", {"status": "skipped", "reason": reason, "run_dir": str(run / "delivery")})
+                skipped_at = time.monotonic()
+                for name, budget in (("pull_requests", budgets["pull_requests"]),
+                                     ("repair", budgets["repair_reserved"]),
+                                     ("delivery", budgets["delivery"])):
+                    if name not in receipt.get("phase_timing", {}):
+                        phase_mark(name, skipped_at, budget, skipped_at)
+                if "daily_summary" not in receipt:
+                    save_daily_summary(run, receipt)
+                return
             if config["pull_requests_enabled"] and target and "pull_requests" not in receipt:
+                issue_carry = max(0.0, issue_deadline - time.monotonic()) if issue_deadline is not None else 0.0
                 pr_deadline = min(daily_deadline - budgets["repair_reserved"] - budgets["delivery"],
-                                  time.monotonic() + budgets["pull_requests"])
+                                  time.monotonic() + budgets["pull_requests"] + issue_carry)
+                pr_start = time.monotonic()
                 release_tasks = [delivery.read_json(path, {}) for path in (root / "releases").glob("*/task.json")]
                 excluded = [task["pr_number"] for task in release_tasks if task.get("pr_number")]
                 waiting_release = any(task.get("status") != "released" for task in release_tasks)
@@ -569,19 +862,31 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False,
                                                  command=command, receipt=receipt["pull_requests"])
                 except Exception as exc:
                     receipt.setdefault("pull_requests", {}).update({"status": "pending", "error": f"{type(exc).__name__}: {exc}"})
+                phase_mark("pull_requests", pr_start, budgets["pull_requests"] + int(issue_carry), pr_deadline)
             if config.get("repair_enabled") and "repair" not in receipt:
+                repair_deadline = daily_deadline - budgets["delivery"]
+                repair_start = time.monotonic()
                 try:
                     receipt["repair"] = run_repair_phase(root, config, run, source, target, issue_plan,
-                        receipt.get("issues", {}).get("status"), daily_deadline - budgets["delivery"])
+                        receipt.get("issues", {}).get("status"), repair_deadline)
                 except Exception as exc:
                     receipt["repair"] = {"status": "failed", "entered": True, "error": f"{type(exc).__name__}: {exc}"}
+                phase_mark("repair", repair_start, budgets["repair_reserved"], repair_deadline)
             if (config["comments_enabled"] or config["release_enabled"]) and "delivery" not in receipt:
-                try:
-                    receipt["delivery"] = delivery.process_delivery(root, config, run / "delivery",
-                        min(daily_deadline, time.monotonic() + budgets["delivery"]), invoke_agent,
-                        command=command, receipt=receipt)
-                except Exception as exc:
-                    receipt["delivery"] = {"status": "pending", "error": f"{type(exc).__name__}: {exc}"}
+                if receipt.get("repair", {}).get("agent_unavailable"):
+                    receipt["delivery"] = {"status": "skipped", "reason": "agent_no_output in repair stage",
+                                           "run_dir": str(run / "delivery")}
+                    skipped_at = time.monotonic()
+                    phase_mark("delivery", skipped_at, budgets["delivery"], skipped_at)
+                else:
+                    delivery_deadline = min(daily_deadline, time.monotonic() + budgets["delivery"])
+                    delivery_start = time.monotonic()
+                    try:
+                        receipt["delivery"] = delivery.process_delivery(root, config, run / "delivery",
+                            delivery_deadline, invoke_agent, command=command, receipt=receipt)
+                    except Exception as exc:
+                        receipt["delivery"] = {"status": "pending", "error": f"{type(exc).__name__}: {exc}"}
+                    phase_mark("delivery", delivery_start, budgets["delivery"], delivery_deadline)
             if "daily_summary" not in receipt:
                 save_daily_summary(run, receipt)
 
@@ -612,6 +917,7 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False,
             }
             issue_run, issue_plan = run / "issues", None
             source = run / "source"
+            review_start = time.monotonic()
             if not dry_run and (commits or smoke or config.get("issues_enabled")):
                 archive = run / "source.tar"
                 git("archive", "--output=" + str(archive), target)
@@ -675,20 +981,32 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False,
                         raise
                     receipt.update({"status": "pending", "review_error": str(exc), "completed_commits": []})
                     write_text(run / "report.md", f"提交巡检预算不足，后续阶段按剩余预算继续。\n\n{exc}\n")
+            review_unused = phase_mark("review", review_start, budgets["review"], review_deadline)
+            issue_start = time.monotonic()
             if config.get("issues_enabled") and not smoke:
                 issue_run.mkdir()
-                issue_deadline = min(daily_deadline - budgets["repair_reserved"] - budgets["pull_requests"] - budgets["delivery"],
-                                     time.monotonic() + issue_budget)
-                try:
-                    issue_plan = issues.plan_issues(root, config, target, command, deadline=issue_deadline, hydrate=False)
-                    write_json(issue_run / "plan.json", issue_plan)
-                    receipt["issues"] = {"status": "planned", "numbers": [row["number"] for row in issue_plan["issues"]]}
-                except (TimeoutError, subprocess.TimeoutExpired) as exc:
-                    receipt["issues"] = {"status": "pending", "error": str(exc)}
+                if receipt.get("agent_unavailable"):
+                    issue_deadline = time.monotonic()
+                    receipt["issues"] = {"status": "skipped", "reason": "agent_no_output in review stage",
+                                         "run_dir": str(issue_run)}
                     write_json(issue_run / "receipt.json", receipt["issues"])
-                except Exception as exc:
-                    receipt["issues"] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
-                    write_json(issue_run / "receipt.json", receipt["issues"])
+                else:
+                    # The unused review allocation (and any earlier surplus) flows into issue intake,
+                    # but the later repair/PR/delivery reservations stay protected by this cap.
+                    issue_deadline = min(
+                        daily_deadline - budgets["repair_reserved"] - budgets["pull_requests"] - budgets["delivery"],
+                        time.monotonic() + issue_budget + review_unused,
+                    )
+                    try:
+                        issue_plan = issues.plan_issues(root, config, target, command, deadline=issue_deadline, hydrate=False)
+                        write_json(issue_run / "plan.json", issue_plan)
+                        receipt["issues"] = {"status": "planned", "numbers": [row["number"] for row in issue_plan["issues"]]}
+                    except (TimeoutError, subprocess.TimeoutExpired) as exc:
+                        receipt["issues"] = {"status": "pending", "error": str(exc)}
+                        write_json(issue_run / "receipt.json", receipt["issues"])
+                    except Exception as exc:
+                        receipt["issues"] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+                        write_json(issue_run / "receipt.json", receipt["issues"])
             if issue_plan is not None and not dry_run:
                 try:
                     receipt["issues"] = issues.process_issues(
@@ -700,6 +1018,8 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False,
                 except Exception as exc:
                     receipt["issues"] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "run_dir": str(issue_run)}
                 write_json(issue_run / "receipt.json", receipt["issues"])
+            if issue_deadline is not None:
+                phase_mark("issues", issue_start, budgets["issues"], issue_deadline)
             finish_repair()
             receipt.update({"finished_at": now(), "cursor_after": json.loads((root / "state.json").read_text())["cursor"], "run_dir": str(run)})
             write_json(run / "receipt.json", receipt)

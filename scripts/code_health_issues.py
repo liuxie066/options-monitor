@@ -425,7 +425,7 @@ def persist_decision(root, config, run, plan, snapshot, item, command, deadline)
     return record, tasks
 
 
-def summarize(run, plan, records, pending):
+def summarize(run, plan, records, pending, pending_diagnostics=None, agent_unavailable=None):
     groups = {key: [] for key in ("close_recommended", "repair", "reply", "needs_decision", "pending")}
     recommendations = []
     for number, record in records.items():
@@ -437,6 +437,8 @@ def summarize(run, plan, records, pending):
     summary = {"target": plan["target"], "planned": [row["number"] for row in plan["issues"]],
                "counts": {key: len(values) for key, values in groups.items()}, **groups,
                "pending_reasons": {str(number): reason for number, reason in pending.items()},
+               "pending_diagnostics": {str(number): value for number, value in (pending_diagnostics or {}).items()},
+               "agent_unavailable": agent_unavailable,
                "github_closed": [], "closure_batches": [recommendations[i:i + 10] for i in range(0, len(recommendations), 10)]}
     write_json(run / "summary.json", summary)
     write_json(run / "close-recommendations.json", {"action": "recommendation_only", "batches": summary["closure_batches"], "github_closed": []})
@@ -459,6 +461,7 @@ def process_issues(root, config, run, source, plan, deadline, invoke, finding_sc
     """Checkpoint each issue independently; a failed unit cannot discard its neighbours."""
     run.mkdir(parents=True, exist_ok=True)
     records, pending, tasks, reviews = {}, {}, [], []
+    pending_diagnostics, agent_unavailable = {}, None
     snapshots = plan["issues"]
     for index, snapshot in enumerate(snapshots):
         number = snapshot["number"]
@@ -473,6 +476,11 @@ def process_issues(root, config, run, source, plan, deadline, invoke, finding_sc
             previous = state["issues"].get(str(number), {})
             state["issues"][str(number)] = {**record, "completed_reviews": previous.get("completed_reviews", {})}
             write_json(root / "issue-state.json", state)
+        elif agent_unavailable:
+            pending[number] = f"agent_no_output on #{agent_unavailable['number']}; not attempted this run"
+            pending_diagnostics[number] = {"failure_kind": "not_attempted", "detail": agent_unavailable["reason"]}
+            write_json(stage / "pending.json", {"number": number, "reason": pending[number], "target": plan["target"],
+                                                "input_digest": snapshot["input_digest"]})
         else:
             state = read_state(root)
             previous = state["issues"].get(str(number), {})
@@ -511,15 +519,22 @@ def process_issues(root, config, run, source, plan, deadline, invoke, finding_sc
                 tasks.extend(admitted)
                 reviews.append(item)
             except (TimeoutError, subprocess.TimeoutExpired, ValueError, RuntimeError, OSError) as exc:
+                diagnostics = repair.timeout_diagnostics(exc)
                 pending[number] = str(exc)
+                if diagnostics:
+                    pending_diagnostics[number] = diagnostics
                 write_json(stage / "pending.json", {"number": number, "reason": str(exc), "target": plan["target"],
-                                                    "input_digest": snapshot["input_digest"]})
-        summary = summarize(run, plan, records, pending)
+                                                    "input_digest": snapshot["input_digest"],
+                                                    "diagnostics": diagnostics})
+                if diagnostics.get("failure_kind") == "agent_no_output":
+                    agent_unavailable = {"number": number, "reason": str(exc), "diagnostics": diagnostics}
+        summary = summarize(run, plan, records, pending, pending_diagnostics, agent_unavailable)
         print(json.dumps({"issue_progress": number, "completed": len(records), "pending": len(pending),
                           "planned": len(snapshots)}, ensure_ascii=False), flush=True)
         if (index + 1) % 10 == 0 or index + 1 == len(snapshots):
             print(json.dumps({"issue_batch": index // 10 + 1, **summary}, ensure_ascii=False), flush=True)
-    summary = summarize(run, plan, records, pending)
+    summary = summarize(run, plan, records, pending, pending_diagnostics, agent_unavailable)
     write_json(run / "result.json", {"outcome": "partial" if pending else "complete", "reviews": reviews})
     return {"status": "partial" if pending else "complete" if snapshots else "no_eligible_issues",
-            "reviewed": list(records), "repair_tasks": list(dict.fromkeys(tasks)), "run_dir": str(run), "summary": summary}
+            "reviewed": list(records), "repair_tasks": list(dict.fromkeys(tasks)), "run_dir": str(run), "summary": summary,
+            "agent_unavailable": agent_unavailable}

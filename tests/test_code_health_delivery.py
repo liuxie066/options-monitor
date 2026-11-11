@@ -75,7 +75,7 @@ def test_pr_close_switch_cannot_authorize_closing_any_pr():
         review.runtime_config({"pull_request_close_enabled": True})
 
 
-def test_pr_timeout_cannot_use_issue_or_repair_or_delivery_allocation(commit_review_run, monkeypatch):
+def test_phase_carryover_moves_unused_budget_forward_but_protects_reserves(commit_review_run, monkeypatch):
     root, _, clock = commit_review_run
     config = json.loads((root / "config.json").read_text())
     config.update({"timeout_seconds": 15000, "pull_requests_enabled": True, "comments_enabled": True,
@@ -113,7 +113,9 @@ def test_pr_timeout_cannot_use_issue_or_repair_or_delivery_allocation(commit_rev
     monkeypatch.setattr(review, "run_repair_phase", fix)
     monkeypatch.setattr(delivery, "process_delivery", deliver)
     receipt = review.run_once(root)
-    assert seen[:2] == [("issues", 3600), ("pr", 1800)]
+    # Review finishes four units in four clock ticks, so 6596 of its 6600 seconds flow to
+    # issues and then, because intake finishes before its augmented deadline, to PRs.
+    assert seen[:2] == [("issues", 3600 + 6596), ("pr", 1800 + 6596)]
     assert seen[2][0] == "repair" and seen[2][1] >= 1800
     assert seen[3] == ("delivery", 1200)
     assert receipt["pull_requests"]["status"] == "pending"
