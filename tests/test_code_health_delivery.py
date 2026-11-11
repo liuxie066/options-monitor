@@ -154,6 +154,48 @@ def test_unused_review_budget_flows_to_prs_when_issues_are_disabled(commit_revie
     assert seen[0] == ("pr", 1800 + 6596)
 
 
+def test_pull_request_agent_no_output_skips_repair_and_delivery(commit_review_run, monkeypatch):
+    root, _, clock = commit_review_run
+    config = json.loads((root / "config.json").read_text())
+    config.update({"timeout_seconds": 15000, "pull_requests_enabled": True, "comments_enabled": True,
+                   "release_enabled": True, "issues_enabled": True, "repair_enabled": True,
+                   "review_budget_seconds": 6600, "issue_timeout_seconds": 3600})
+    review.write_json(root / "config.json", config)
+    calls = []
+    def agent(config, stage, prompt):
+        plan = json.loads((stage / "plan.json").read_text())
+        clock[0] += 1
+        return {"outcome": "complete", "completed_commits": [plan["commits"][0]["sha"]],
+                "report_markdown": "审查每个逻辑并记录完整复核和测试证据。" * 20,
+                "verification_gaps": [], "confirmed_findings": []}
+    def intake(*args, **kwargs):
+        return {"issues": [], "target": "fixture", "issue_inputs": {}}
+    def pull(*args, **kwargs):
+        calls.append("pull_requests")
+        return {"status": "partial", "reviewed": [1], "pending": [1, 2], "results": [],
+                "agent_unavailable": {"pr": 1, "reason": "no output",
+                                      "diagnostics": {"failure_kind": "agent_no_output"}}}
+    def fix(*args, **kwargs):
+        calls.append("repair")
+        return {"inventory": {}}
+    def deliver(*args, **kwargs):
+        calls.append("delivery")
+        return {"status": "complete"}
+    monkeypatch.setattr(review, "invoke_agent", agent)
+    monkeypatch.setattr(issues, "plan_issues", intake)
+    monkeypatch.setattr(issues, "process_issues",
+                        lambda *args, **kwargs: {"status": "no_eligible_issues", "reviewed": []})
+    monkeypatch.setattr(prs, "process_pull_requests", pull)
+    monkeypatch.setattr(review, "run_repair_phase", fix)
+    monkeypatch.setattr(delivery, "process_delivery", deliver)
+    receipt = review.run_once(root)
+    assert calls == ["pull_requests"]
+    assert receipt["repair"]["status"] == "skipped"
+    assert receipt["delivery"]["status"] == "skipped"
+    assert receipt["daily_summary"]["agent_unavailable"]["pr"] == 1
+    assert "模型无输出" in (Path(receipt["run_dir"]) / "report.md").read_text()
+
+
 @pytest.fixture
 def comment_transport(tmp_path):
     delivery.save_json(tmp_path / "issue-state.json", {"issues": {"7": {
