@@ -23,9 +23,12 @@ MARKET_ZONES = {
 }
 
 MARKET_STATE_LABELS = {
+    "NONE": "未知",
     "MORNING": "早盘",
     "AFTERNOON": "午盘",
+    "AFTERNOON_END": "午盘结束",
     "AUCTION": "集合竞价",
+    "TRADE_AUCTION": "交易竞价",
     "PRE_MARKET_BEGIN": "盘前",
     "PRE_MARKET_END": "盘前",
     "AFTER_HOURS_BEGIN": "盘后",
@@ -35,6 +38,7 @@ MARKET_STATE_LABELS = {
     "WAITING_OPEN": "待开盘",
     "HK_CAS": "收市竞价",
     "CLOSE_AUCTION": "收市竞价",
+    "TRADE_AT_LAST": "按最新价交易",
     "NIGHT_OPEN": "夜盘",
     "NIGHT_END": "夜盘",
     "NIGHT": "夜盘",
@@ -180,7 +184,10 @@ def render_candidates(data: dict[str, Any]) -> str:
     quality = data.get("data_quality")
     if isinstance(quality, dict):
         if quality.get("mode") == "closed_market_reference":
-            lines.append("数据口径：休市参考，基于最近已完成交易日；非实时可成交报价。")
+            notice = str(quality.get("notice") or "").strip()
+            lines.append(
+                f"数据口径：{notice}" if notice
+                else "数据口径：休市参考，基于最近已完成交易日；非实时可成交报价。")
             if quality.get("reference_date"):
                 lines.append(f"参考交易日：{quality['reference_date']}")
         state = _market_state_text(quality.get("market_state"))

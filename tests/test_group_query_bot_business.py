@@ -263,6 +263,33 @@ def test_spot_only_payload_wraps_the_ready_observation():
     assert _spot_payloads(_Settings(), "NVDA", None) == []
 
 
+def test_spot_only_payload_rejects_unavailable_and_suspended_observations():
+    from dataclasses import replace
+
+    from om_group_query_bot.business import _spot_payloads
+    from src.application.opening_quote_evidence import (
+        OPENING_UNDERLIER_OBSERVATION_SCHEMA,
+        OpeningUnderlierObservation,
+    )
+
+    class _Settings:
+        quote_source = "futu"
+
+    observation = OpeningUnderlierObservation(
+        schema_version=OPENING_UNDERLIER_OBSERVATION_SCHEMA, code="NVDA",
+        market="US", last_price=185.0, update_time="2026-11-10 18:32:10.786",
+        observed_at_utc="2026-11-10T23:32:10.786000+00:00", age_seconds=1.0,
+        market_state="AFTER_HOURS_BEGIN", sec_status="NORMAL", suspension=False,
+        status="market_closed", reason_code="market_closed")
+    assert _spot_payloads(_Settings(), "NVDA", observation) != []
+    assert _spot_payloads(
+        _Settings(), "NVDA", replace(observation, status="data_unavailable")) == []
+    assert _spot_payloads(
+        _Settings(), "NVDA", replace(observation, sec_status="HALT")) == []
+    assert _spot_payloads(
+        _Settings(), "NVDA", replace(observation, suspension=True)) == []
+
+
 def _fake_plan(plan):
     from om_group_query_bot.business import FetchPlan
 
@@ -400,7 +427,7 @@ def test_scenario_response_carries_design_identity_and_evidence(tmp_path, monkey
 
 
 def _spot_only_bundle(*, status="ready", market_state="NORMAL", price=185.0,
-                      update_time=None):
+                      update_time=None, observed_at_utc=None):
     """The real spot-only plan shape: no fetch requests, one observation."""
     from src.application.opend_symbol_chain_fetching import (
         OptionExpirationDiscoveryResult,
@@ -414,7 +441,8 @@ def _spot_only_bundle(*, status="ready", market_state="NORMAL", price=185.0,
     observation = OpeningUnderlierObservation(
         schema_version=OPENING_UNDERLIER_OBSERVATION_SCHEMA, code="US.NVDA",
         market="US", last_price=price, update_time=update_time or NOW.isoformat(),
-        observed_at_utc=NOW.isoformat(), age_seconds=0.0, market_state=market_state,
+        observed_at_utc=observed_at_utc or NOW.isoformat(), age_seconds=0.0,
+        market_state=market_state,
         sec_status="NORMAL", suspension=False, status=status,
         reason_code=None if status == "ready" else status)
     discovery = OptionExpirationDiscoveryResult(
@@ -492,9 +520,12 @@ def test_spot_quote_is_last_known_with_its_time_while_the_market_is_closed(tmp_p
     from om_group_query_bot.render import render_quotes
 
     service, recorder = _service(tmp_path)
+    # 18:32 New York the previous evening: a genuinely stale observation that
+    # must still render as last_known because no newer session exists.
     bundle = _spot_only_bundle(status="market_closed",
                                market_state="AFTER_HOURS_BEGIN", price=168.89,
-                               update_time="2026-11-10 18:32:10.786")
+                               update_time="2026-11-09 18:32:10.786",
+                               observed_at_utc="2026-11-09T23:32:10.786000+00:00")
     monkeypatch.setattr(business, "build_required_data_fetch_plan",
                         lambda **kwargs: bundle)
     envelope, status = service.handle("query_quotes", _body({"symbol": "US.NVDA"}))
@@ -507,11 +538,11 @@ def test_spot_quote_is_last_known_with_its_time_while_the_market_is_closed(tmp_p
     assert underlier["currency"] == "USD"
     assert underlier["market_state"] == "AFTER_HOURS_BEGIN"
     assert underlier["underlier_observation_status"] == "market_closed"
-    assert underlier["last_price_update_time"] == "2026-11-10 18:32:10.786"
+    assert underlier["last_price_update_time"] == "2026-11-09 18:32:10.786"
     text = render_quotes(data)
     assert "行情状态：最近已知" in text
     assert "最新 168.8900" in text
-    assert "最新价时间 2026-11-10 18:32:10.786（纽约时间）" in text
+    assert "最新价时间 2026-11-09 18:32:10.786（纽约时间）" in text
     assert "市场状态 盘后（AFTER_HOURS_BEGIN）" in text
     assert "非当前可成交状态" in text
     assert recorder.calls == []
@@ -533,6 +564,29 @@ def test_quote_status_keeps_only_the_closed_market_as_last_known():
         {**fresh, "underlier_observation_status": "data_unavailable"},
         NOW, missing) == "unavailable"
     assert "underlier_observation_status_not_ready" in missing
+    # A closed market stays last_known regardless of how old the observation
+    # is: there is no newer session to wait for.
+    stale = {"snapshot_received_at_utc": (NOW - timedelta(days=2)).isoformat()}
+    assert _quote_status(
+        {**stale, "underlier_observation_status": "market_closed"},
+        NOW, missing) == "last_known"
+
+
+def test_quote_status_refuses_halted_or_suspended_instruments_when_closed():
+    from om_group_query_bot.business import _quote_status
+
+    fresh = {"snapshot_received_at_utc": NOW.isoformat()}
+    missing = []
+    assert _quote_status(
+        {**fresh, "underlier_observation_status": "market_closed",
+         "underlier_sec_status": "HALT"}, NOW, missing) == "unavailable"
+    assert "underlier_sec_status_not_normal" in missing
+    missing = []
+    assert _quote_status(
+        {**fresh, "opening_contract_status": "market_closed",
+         "option_sec_status": "NORMAL", "option_suspension": True},
+        NOW, missing) == "unavailable"
+    assert "option_suspended" in missing
 
 
 def test_closed_market_contract_quote_is_last_known_not_unavailable(tmp_path, monkeypatch):
@@ -547,11 +601,12 @@ def test_closed_market_contract_quote_is_last_known_not_unavailable(tmp_path, mo
         "bid": 1.10, "ask": 1.20, "last_price": 1.15,
         "snapshot_received_at_utc": NOW.isoformat(),
         "last_price_update_time": "2026-11-10 18:00:00.000",
+        "spot_update_time": "2026-11-10 18:32:10.786",
         "market_state": "AFTER_HOURS_BEGIN",
         "opening_contract_status": "market_closed",
         "underlier_observation_status": "market_closed",
         "spot": 185.0, "spot_observed_at_utc": NOW.isoformat(),
-        "underlier_sec_status": "NORMAL",
+        "underlier_sec_status": "NORMAL", "underlier_suspension": False,
     }
     payload = {"symbol": "NVDA", "underlier_code": "NVDA", "meta": {},
                "rows": [row]}
@@ -565,8 +620,12 @@ def test_closed_market_contract_quote_is_last_known_not_unavailable(tmp_path, mo
     assert data["missing_requirements"] == []
     assert data["option"]["last_price"] == 1.15
     assert data["option"]["opening_contract_status"] == "market_closed"
+    assert data["option"]["last_price_update_time"] == "2026-11-10 18:00:00.000"
     assert data["underlier"]["last_price"] == 185.0
     assert data["underlier"]["underlier_observation_status"] == "market_closed"
+    # The underlier quote reports the underlier's own observation time, not
+    # the option contract's last trade time from the same row.
+    assert data["underlier"]["last_price_update_time"] == "2026-11-10 18:32:10.786"
 
 
 def test_scenario_reports_the_closed_market_instead_of_a_generic_reason():
@@ -577,6 +636,50 @@ def test_scenario_reports_the_closed_market_instead_of_a_generic_reason():
            "snapshot_received_at_utc": NOW.isoformat()}
     assert _scenario_evidence_reason(
         row, option_type="put", quote_side="buy", now=NOW) == "market_closed"
+    # After hours the option snapshot may be absent or older than the
+    # decision window; the member still needs the market reason, not a
+    # generic evidence failure.
+    assert _scenario_evidence_reason(
+        {k: v for k, v in row.items() if k != "snapshot_received_at_utc"},
+        option_type="put", quote_side="buy", now=NOW) == "market_closed"
+    assert _scenario_evidence_reason(
+        {**row, "snapshot_received_at_utc": (NOW - timedelta(days=1)).isoformat()},
+        option_type="put", quote_side="buy", now=NOW) == "market_closed"
+    assert _scenario_evidence_reason(
+        {**row, "opening_contract_status": "ineligible"},
+        option_type="put", quote_side="buy", now=NOW) != "market_closed"
+
+
+def test_quote_status_folds_an_unavailable_leg_into_the_response(tmp_path, monkeypatch):
+    from test_group_query_bot_api import _body, _service
+
+    service, _recorder = _service(tmp_path)
+    plan = _fake_plan({"fetch_plan": {}, "expected_fetch_contract": {},
+                       "global_required_data_plan": {"plan_id": "p"}})
+    row = {
+        "contract_symbol": "US.NVDA261218P00180000", "option_type": "put",
+        "expiration": "2026-12-18", "strike": 180.0, "currency": "USD",
+        "bid": 1.10, "ask": 1.20, "last_price": 1.15,
+        "snapshot_received_at_utc": NOW.isoformat(),
+        "last_price_update_time": "2026-11-10 18:00:00.000",
+        "spot_update_time": "2026-11-10 18:32:10.786",
+        "market_state": "AFTER_HOURS_BEGIN",
+        "opening_contract_status": "data_unavailable",
+        "underlier_observation_status": "market_closed",
+        "spot": 185.0, "spot_observed_at_utc": NOW.isoformat(),
+        "underlier_sec_status": "NORMAL",
+    }
+    payload = {"symbol": "NVDA", "underlier_code": "NVDA", "meta": {},
+               "rows": [row]}
+    monkeypatch.setattr(service.business, "_fetch", lambda **kwargs: ([payload], plan))
+    body = _body({"symbol": "US.NVDA", "contract": {
+        "option_type": "put", "expiration": "2026-12-18", "strike": 180.0}})
+    envelope, status = service.handle("query_quotes", body)
+    assert status == 200
+    data = envelope["data"]
+    assert data["quote_status"] == "unavailable"
+    assert "opening_contract_status_not_ready" in data["missing_requirements"]
+    assert data["underlier"]["last_price_update_time"] == "2026-11-10 18:32:10.786"
 
 
 def test_candidates_pass_the_closed_market_reference_into_evaluation(tmp_path, monkeypatch):
