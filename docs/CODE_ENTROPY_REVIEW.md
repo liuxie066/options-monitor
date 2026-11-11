@@ -41,7 +41,7 @@
 
 固定的分析工具版本记录在`requirements/dev.txt`与`constraints/dev.txt`：vulture 2.16、radon 6.0.1、coverage 7.17.2。它们是开发侧依赖，不是产品功能：`requirements/runtime.txt`、`requirements/server.txt`、`constraints/runtime*.txt`和`scripts/runtime_bundle.lock.json`都不包含这三个工具，运行时bundle只安装lock中锁定的产物，用户安装和线上运行都不需要它们，这是有意排除。周扫的coverage工作负载使用快照内一次性venv，运行结束随临时目录清理，不进入运行时安装包。ruff、vulture和radon通过既有解释器的隔离模块模式运行；每轮记录可用性、版本、命令、退出码、stdout/stderr。分析工具缺失时不自动安装，只在gaps说明降级口径，缺证据不填0。
 
-周扫的coverage工作负载不信任环境里的解释器和依赖：它在临时快照内用`python -m venv`建一次性venv，按快照自己的`requirements/dev.txt`/`constraints/dev.txt`安装（包括本地插件包），清理安装产生的`build/`和`egg-info`后，串行运行快照自带的全量测试。工作负载直接导入venv里pip安装的发行包，不把插件源码目录放进`PYTHONPATH`：同名源码树会遮蔽已安装发行包，让安装包边界测试解析到另一个模块。coverage用rc文件的`[paths]`把插件在site-packages里的命中路径折回快照的`plugins/*/src`，先`coverage combine`再生成JSON，报告路径仍是仓库自己的相对路径。pytest的`--basetemp`放在本轮快照scratch内，避免复用或清理其他pytest会话在`/tmp`下的basemp，工作负载结束随scratch一起删除。这样覆盖率严格绑定被扫描的SHA，也不会被宿主venv的漂移污染。代价是周扫增加约一次依赖安装和一次全量测试的时间；因此日扫不跑coverage，只保留增量静态指标。工作负载失败、超时或剩余预算不足时周扫仍完成静态测量，`untested_branches`和死代码确认保持null并写入真实原因。外部`--coverage-manifest`仍优先，且必须绑定同一SHA、成功退出和分支数据。
+周扫的coverage工作负载不信任环境里的解释器和依赖：它在无空格的临时scratch内用`python -m venv`建一次性venv，并在同SHA的git工作树上按快照自己的`requirements/dev.txt`/`constraints/dev.txt`安装（包括本地插件包），清理安装产生的`build/`和`egg-info`后，串行运行快照自带的全量测试。工作树来自状态目录的mirror，因为`git archive`快照没有历史，而仓库测试会读取更早的提交；scratch避开`~/Library/Application Support/...`这类带空格的状态目录，避免service渲染断言因路径空格而失败。工作负载直接导入venv里pip安装的发行包，不把插件源码目录放进`PYTHONPATH`：同名源码树会遮蔽已安装发行包，让安装包边界测试解析到另一个模块。coverage用rc文件的`[paths]`把插件在site-packages里的命中路径折回工作树的`plugins/*/src`，先`coverage combine`再生成JSON，报告路径仍是仓库自己的相对路径。pytest的`--basetemp`放在本轮scratch内，避免复用或清理其他pytest会话在`/tmp`下的basemp，工作负载结束随scratch一起删除。这样覆盖率严格绑定被扫描的SHA，也不会被宿主venv的漂移污染。代价是周扫增加约一次依赖安装和一次全量测试的时间；因此日扫不跑coverage，只保留增量静态指标。工作负载失败、超时或剩余预算不足时周扫仍完成静态测量，`untested_branches`和死代码确认保持null并写入真实原因。外部`--coverage-manifest`仍优先，且必须绑定同一SHA、成功退出和分支数据。
 
 全仓存在动态取名、注册、星号导入等风险时，不能仅凭函数所在文件没有入口语法就确认非入口；保留未知门禁。coverage只检查函数体命中，排除def声明行；缺少可执行行证据也不能确认零命中。四个过度设计代理为单一显式实现ABC/Protocol、静态单取值布尔开关、单调用点转发包装、单调用点常量实参通用参数。它们始终只作低置信候选，不等同应当删除。
 
@@ -73,7 +73,7 @@
 
 ## 手动运行与证据导入
 
-使用既有Python 3.12及已安装工具，不安装依赖。初始化只创建新流程自身的状态，不安装launchd：
+使用既有Python 3.12及已安装工具；除周扫coverage工作负载在快照scratch的一次性venv内按快照依赖安装外，不安装依赖。初始化只创建新流程自身的状态，不安装launchd：
 
 ```bash
 entropy_state="$HOME/Library/Application Support/options-monitor/code-entropy-review"
@@ -98,7 +98,7 @@ python3.12 scripts/code_entropy_review.py --state-dir "$entropy_state" unmute KE
 python3.12 scripts/code_entropy_review.py --state-dir "$entropy_state" reset-cursor --reason '已复核基线变更，重新建立起点'
 ```
 
-coverage不自动跑业务测试，避免外部副作用和资源争用。已有成功测试产生的branch coverage JSON可用--coverage-manifest导入。manifest包含main_sha、整型exit_code=0、非空命令数组command、coverage_json文件路径、coverage_sha256；绝对源码路径还需source_root。验证源码SHA、文件摘要、分支元数据和行/分支类型；拒绝未绑定或失败工作负载。测试未命中不代表生产永不执行。
+周扫默认在快照scratch的一次性venv内运行快照自带测试生成branch coverage，不对外部生产环境跑业务测试，避免外部副作用和资源争用。已有成功测试产生的branch coverage JSON可用--coverage-manifest导入。manifest包含main_sha、整型exit_code=0、非空命令数组command、coverage_json文件路径、coverage_sha256；绝对源码路径还需source_root。验证源码SHA、文件摘要、分支元数据和行/分支类型；拒绝未绑定或失败工作负载。测试未命中不代表生产永不执行。
 
 ## launchd预览与待确认安装
 
@@ -110,7 +110,7 @@ python3.12 scripts/code_entropy_review.py --state-dir "$entropy_state" render-pl
 
 默认渲染runner指向自身installed目录；确认安装后才将已验证的runner、scan、assessment三份模块、guardrails解析模块及所需模板复制到那里并留来源提交、工作区状态及文件摘要回执。预览不是安装成功证明，路径尚未落地时不能加载任务。
 
-日扫每天04:20，墙钟上限900秒；周扫周日01:20，上限5400秒，均为本机时区。单个子进程另受剩余预算和300秒上限约束，超时终止自身进程组；进程内静态分析也受总墙钟时限。两任务RunAtLoad=false、ProcessType=Background、LowPriorityIO=true、Nice=15、无KeepAlive。优先级设置不是CPU/内存硬配额。
+日扫每天04:20，墙钟上限900秒；周扫周日01:20，上限5400秒，均为本机时区。单个子进程默认另受剩余预算和300秒上限约束（coverage工作负载的venv/pip/测试/combine步骤按各自更宽的上限），超时终止自身进程组；进程内静态分析也受总墙钟时限。两任务RunAtLoad=false、ProcessType=Background、LowPriorityIO=true、Nice=15、无KeepAlive。优先级设置不是CPU/内存硬配额。
 
 这些时间避开已只读核对的code-health每天09:17；launchd可能补跑错过的日程，因此不能承诺绝对不重叠。未获得用户对完整plist的确认前，不复制到LaunchAgents、不bootstrap/load。确认后的安装须先plutil lint、再加载并用launchctl print独立回读；不调整code-health来迁就新任务。
 

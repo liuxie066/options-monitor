@@ -648,6 +648,7 @@ class BotHostStore:
                                      (row["delivery_key"],)).fetchone())
 
     def mark_reply_delivered(self, delivery_key: str, *, attempt_count: int | None = None) -> bool:
+        """Fence supplied generations; retain legacy callers without one outside Feishu."""
         self._ensure_schema()
         now = utc_now_iso()
         with self._connect() as conn:
@@ -656,9 +657,9 @@ class BotHostStore:
                 UPDATE bot_reply_outbox
                 SET status = 'delivered', payload_json = '{}', delivered_at = ?, updated_at = ?, last_error = NULL
                 WHERE delivery_key = ? AND status = 'delivering'
-                  AND (channel != 'feishu' OR attempt_count = ?)
+                  AND ((? IS NULL AND channel != 'feishu') OR attempt_count = ?)
                 """,
-                (now, now, str(delivery_key), attempt_count),
+                (now, now, str(delivery_key), attempt_count, attempt_count),
             )
         return bool(cursor.rowcount)
 
@@ -706,7 +707,7 @@ class BotHostStore:
                                       THEN 'delivery_outcome_unknown' ELSE ? END,
                     updated_at = ?
                 WHERE delivery_key = ? AND status = 'delivering'
-                  AND (channel != 'feishu' OR attempt_count = ?)
+                  AND ((? IS NULL AND channel != 'feishu') OR attempt_count = ?)
                 """,
                 (
                     delivery_unknown, retryable, now.isoformat(),
@@ -717,6 +718,7 @@ class BotHostStore:
                     "retryable_delivery_error" if retryable else "terminal_delivery_error",
                     now.isoformat(),
                     str(delivery_key),
+                    attempt_count,
                     attempt_count,
                 ),
             )

@@ -17,6 +17,7 @@ import subprocess
 import sys
 import sysconfig
 import tarfile
+import tempfile
 import time
 import uuid
 
@@ -418,27 +419,53 @@ def coverage_configuration(output, measured, mappings):
     return path
 
 
-def self_coverage(source, output, execute, *, scratch, time_left):
+def remove_worktree(repository, checkout):
+    """Best effort cleanup; a coverage result must not depend on it."""
+    for argv in (["git", "-C", str(repository), "worktree", "remove", "--force", str(checkout)],
+                 ["git", "-C", str(repository), "worktree", "prune"]):
+        try:
+            result = subprocess.run(argv, capture_output=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if not result.returncode:
+            break
+
+
+def self_coverage(source, output, execute, *, scratch, time_left, repository=None, sha=None):
     """Run the snapshot's own tests under branch coverage.
 
     The ambient interpreter is not trusted to match the snapshot's dependency
     declaration, so a disposable virtual environment is built from the snapshot
-    itself.  Any workload failure degrades to an explicit record; only the outer
-    budget alarm (TimeoutError) may abort the scan.
+    itself.  The workload runs in a git worktree of ``repository`` at ``sha``:
+    the archive snapshot has no history, and repository tests legitimately read
+    earlier commits.  Any workload failure degrades to an explicit record; only
+    the outer budget alarm (TimeoutError) may abort the scan.
     """
     started = time.monotonic()
     record = {"source": "self-run", "status": "skipped", "reason": None}
     if not (source / "tests").is_dir() or not (source / "requirements/dev.txt").is_file():
         record["reason"] = "snapshot has no tests/ and requirements/dev.txt workload"
         return None, record
-    sources = coverage_sources(source)
-    if not sources:
+    if not coverage_sources(source):
         record["reason"] = "snapshot has no coverage source roots"
         return None, record
+    workload = source
+    checkout = None
     try:
         if time_left() < 600:
             record["reason"] = "remaining budget is too small for a coverage workload"
             return None, record
+        if repository is not None and sha:
+            workload = Path(scratch) / "coverage-source"
+            result = execute(["git", "-C", str(repository), "worktree", "add", "--detach",
+                              str(workload), sha],
+                             timeout=min(300, max(60, time_left() - 600)))
+            record["worktree_command"] = {key: value for key, value in result.items() if key != "text"}
+            if result["exit_code"]:
+                record.update(status="failed", reason="coverage workload checkout could not be created")
+                return None, record
+            checkout = workload
+        sources = coverage_sources(workload)
         venv = Path(scratch) / "coverage-venv"
         environment = coverage_environment(output)
         result = execute([sys.executable, "-m", "venv", str(venv)], timeout=120, env=environment)
@@ -448,28 +475,28 @@ def self_coverage(source, output, execute, *, scratch, time_left):
             return None, record
         pip = [str(venv / "bin/python"), "-m", "pip", "install", "--disable-pip-version-check", "-q",
                "-r", "requirements/dev.txt", "-c", "constraints/dev.txt"]
-        result = execute(pip, cwd=source, timeout=min(600, max(60, time_left() - 420)), env=environment)
+        result = execute(pip, cwd=workload, timeout=min(600, max(60, time_left() - 420)), env=environment)
         record["install_command"] = {key: value for key, value in result.items() if key != "text"}
         if result["exit_code"]:
             record.update(status="failed", reason="snapshot development requirements could not be installed")
             return None, record
         # Building the local plugin packages writes untracked build/ and egg-info
-        # directories into the snapshot; remove them so they never become metrics.
-        for artifact in [*sorted((source / "plugins").glob("*/build")),
-                         *sorted((source / "plugins").glob("*/*.egg-info")),
-                         *sorted((source / "plugins").glob("*/src/*.egg-info"))]:
+        # directories into the workload; remove them so they never become metrics.
+        for artifact in [*sorted((workload / "plugins").glob("*/build")),
+                         *sorted((workload / "plugins").glob("*/*.egg-info")),
+                         *sorted((workload / "plugins").glob("*/src/*.egg-info"))]:
             shutil.rmtree(artifact)
-        installed_plugins, mappings = coverage_plugin_mappings(source, venv)
-        measured = [str((source / name).resolve()) for name in sources if not name.startswith("plugins/")]
+        installed_plugins, mappings = coverage_plugin_mappings(workload, venv)
+        measured = [str((workload / name).resolve()) for name in sources if not name.startswith("plugins/")]
         configuration = coverage_configuration(output, [*measured, *installed_plugins], mappings)
         environment["COVERAGE_RCFILE"] = str(configuration)
         record["configuration"] = {"path": str(configuration), "measured_roots": len(measured),
                                    "mapped_plugins": sorted(mappings)}
-        workload = [str(venv / "bin/python"), "-m", "coverage", "run", "--branch",
-                    "-m", "pytest", "-q", "-p", "no:cacheprovider",
-                    "--basetemp", str(Path(scratch) / "pytest-tmp")]
-        result = execute(workload, cwd=source, timeout=max(60, time_left() - 420), env=environment)
-        record["workload"] = {"command": workload, "exit_code": result["exit_code"],
+        workload_command = [str(venv / "bin/python"), "-m", "coverage", "run", "--branch",
+                            "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                            "--basetemp", str(Path(scratch) / "pytest-tmp")]
+        result = execute(workload_command, cwd=workload, timeout=max(60, time_left() - 420), env=environment)
+        record["workload"] = {"command": workload_command, "exit_code": result["exit_code"],
                               "output": result.get("output"), "stderr": result.get("stderr")}
         if result["exit_code"]:
             record.update(status="failed", reason=f"snapshot test workload exited {result['exit_code']}")
@@ -477,7 +504,7 @@ def self_coverage(source, output, execute, *, scratch, time_left):
         combined_environment = {**environment, "COVERAGE_FILE": str(output / "coverage.data")}
         combine = [str(venv / "bin/python"), "-m", "coverage", "combine", "--keep",
                    str(output / "coverage-raw.data")]
-        result = execute(combine, cwd=source, timeout=min(120, max(30, time_left() - 360)),
+        result = execute(combine, cwd=workload, timeout=min(120, max(30, time_left() - 360)),
                          env=combined_environment)
         record["combine_command"] = {key: value for key, value in result.items() if key != "text"}
         if result["exit_code"]:
@@ -485,12 +512,12 @@ def self_coverage(source, output, execute, *, scratch, time_left):
             return None, record
         report = output / "coverage-self.json"
         result = execute([str(venv / "bin/python"), "-m", "coverage", "json", "-o", str(report)],
-                         cwd=source, timeout=min(120, max(30, time_left() - 300)), env=combined_environment)
+                         cwd=workload, timeout=min(120, max(30, time_left() - 300)), env=combined_environment)
         record["json_command"] = {key: value for key, value in result.items() if key != "text"}
         if result["exit_code"]:
             record.update(status="failed", reason="coverage JSON generation failed")
             return None, record
-        entries = coverage_entries(read_json(report), source_root=source)
+        entries = coverage_entries(read_json(report), source_root=workload)
         record.update(status="complete", reason=None, files=len(entries),
                       coverage_sha256=hashlib.sha256(report.read_bytes()).hexdigest(),
                       elapsed_seconds=round(time.monotonic() - started, 3))
@@ -500,6 +527,9 @@ def self_coverage(source, output, execute, *, scratch, time_left):
     except (subprocess.TimeoutExpired, OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError) as error:
         record.update(status="failed", reason=f"{type(error).__name__}: {error}")
         return None, record
+    finally:
+        if checkout is not None:
+            remove_worktree(repository, checkout)
 
 
 @contextmanager
@@ -515,9 +545,24 @@ def deadline(seconds):
         signal.signal(signal.SIGALRM, previous)
 
 
+def space_free_temporary_directory():
+    """Scratch directory whose path contains no spaces.
+
+    The coverage workload runs the snapshot's own tests; several of them embed
+    their root path in rendered shell commands.  A state directory such as
+    ``~/Library/Application Support/...`` would make those tests fail for a
+    reason unrelated to the scanned code.  The root is resolved so the
+    snapshot path never disagrees with ``Path.resolve()`` later.
+    """
+    for candidate in (tempfile.gettempdir(), "/tmp", "/private/tmp"):
+        root = Path(candidate).resolve()
+        if root.is_dir() and " " not in str(root):
+            return tempfile.TemporaryDirectory(prefix="om-entropy-", dir=root)
+    raise RuntimeError("no space-free temporary directory is available")
+
+
 def run_scan(state, mode, *, publish=False, coverage_manifest=None, timeout_seconds=None):
     """Caller holds this scanner's lock; no other scheduler state is consulted."""
-    import tempfile
     budget = BUDGETS[mode] if timeout_seconds is None else timeout_seconds
     if not 1 <= budget <= BUDGETS[mode]:
         raise ValueError("timeout must be positive and within the independent mode budget")
@@ -568,7 +613,7 @@ def run_scan(state, mode, *, publish=False, coverage_manifest=None, timeout_seco
             bundle.extractall(destination, filter="data")
         return destination
     try:
-        with deadline(budget), tempfile.TemporaryDirectory(prefix="source-", dir=output) as scratch:
+        with deadline(budget), space_free_temporary_directory() as scratch:
             if not mirror.exists():
                 checked(["git", "clone", "--bare", "--no-hardlinks", "--single-branch", "--branch", "main",
                          "--filter=blob:none", "--no-tags", config["remote"], str(mirror)])
@@ -609,7 +654,7 @@ def run_scan(state, mode, *, publish=False, coverage_manifest=None, timeout_seco
                 record["stage"] = "coverage-workload"
                 write_json(output / "progress.json", record)
                 coverage, workload = self_coverage(
-                    source, output, execute, scratch=scratch,
+                    source, output, execute, scratch=scratch, repository=mirror, sha=sha,
                     time_left=lambda: budget - (time.monotonic() - started))
                 record["coverage_workload"] = workload
                 if coverage is not None:

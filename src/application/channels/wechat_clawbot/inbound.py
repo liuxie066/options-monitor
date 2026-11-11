@@ -841,6 +841,7 @@ def _status_only(payload: Any) -> dict[str, Any]:
     allowed = {
         "attempted",
         "ok",
+        "send_ok",
         "reason",
         "error_code",
         "provider_response_code",
@@ -943,6 +944,13 @@ def _maybe_stop_typing(
     }
 
 
+def _reply_settlement_status(status: dict[str, Any], *, settled: bool) -> dict[str, Any]:
+    """Preserve the client result when a superseded claim cannot settle locally."""
+    if settled:
+        return status
+    return {**status, "send_ok": bool(status.get("ok")), "ok": False, "reason": "claim_superseded"}
+
+
 def _maybe_reply(
     *,
     message: dict[str, Any],
@@ -984,6 +992,8 @@ def _maybe_reply(
     if outbox_state is not None:
         return outbox_state
     frozen = json.loads(claimed["payload_json"]) if claimed is not None else {}
+    attempt_count = claimed["attempt_count"] if claimed is not None else None
+    settled = True
     try:
         if outbox is not None and delivery_key:
             record = claimed or {}
@@ -1004,26 +1014,31 @@ def _maybe_reply(
         )
     except ReplyAuthorizationError as blocked:
         if outbox is not None and delivery_key:
-            outbox.mark_reply_failed(delivery_key, error="authorization_blocked", retryable=True)
-        return {"attempted": False, "ok": False, "reason": "authorization_blocked", "delivery_key": delivery_key,
-                **({"error_code": blocked.error_code} if blocked.error_code else {})}
+            settled = outbox.mark_reply_failed(delivery_key, error="authorization_blocked", retryable=True,
+                                                attempt_count=attempt_count)
+        return _reply_settlement_status(
+            {"attempted": False, "ok": False, "reason": "authorization_blocked", "delivery_key": delivery_key,
+             **({"error_code": blocked.error_code} if blocked.error_code else {})}, settled=settled,
+        )
     except Exception as exc:
         if outbox is not None and delivery_key:
-            outbox.mark_reply_failed(delivery_key, error=type(exc).__name__, retryable=True)
-        return {
+            settled = outbox.mark_reply_failed(delivery_key, error=type(exc).__name__, retryable=True,
+                                                attempt_count=attempt_count)
+        return _reply_settlement_status({
             "attempted": True,
             "ok": False,
             "reason": "reply_failed",
             "error_code": type(exc).__name__,
-        }
+        }, settled=settled)
     outbound_message_id = response_message_id(api_response)
     ok = response_success(api_response)
     if outbox is not None and delivery_key:
         if ok:
-            outbox.mark_reply_delivered(delivery_key)
+            settled = outbox.mark_reply_delivered(delivery_key, attempt_count=attempt_count)
         else:
-            outbox.mark_reply_failed(delivery_key, error="channel returned an unsuccessful response", retryable=True)
-    return {
+            settled = outbox.mark_reply_failed(delivery_key, error="channel returned an unsuccessful response",
+                                                retryable=True, attempt_count=attempt_count)
+    return _reply_settlement_status({
         "attempted": True,
         "ok": ok,
         "reason": decision.send_reason if ok else "reply_failed",
@@ -1031,7 +1046,7 @@ def _maybe_reply(
         "outbound_message_id": outbound_message_id,
         "provider_response_code": response_code(api_response),
         **({"delivery_key": delivery_key} if delivery_key else {}),
-    }
+    }, settled=settled)
 
 
 def _prepare_reply_outbox(
@@ -1122,22 +1137,30 @@ def _retry_pending_wechat_reply(
         )
         ok = response_success(api_response)
     except ReplyAuthorizationError as blocked:
-        store.mark_reply_failed(delivery_key, error="authorization_blocked", retryable=True)
-        return {"attempted": False, "ok": False, "reason": "authorization_blocked", "delivery_key": delivery_key,
-                **({"error_code": blocked.error_code} if blocked.error_code else {})}
+        settled = store.mark_reply_failed(delivery_key, error="authorization_blocked", retryable=True,
+                                          attempt_count=record["attempt_count"])
+        return _reply_settlement_status(
+            {"attempted": False, "ok": False, "reason": "authorization_blocked", "delivery_key": delivery_key,
+             **({"error_code": blocked.error_code} if blocked.error_code else {})}, settled=settled,
+        )
     except Exception as exc:
-        store.mark_reply_failed(delivery_key, error=type(exc).__name__, retryable=True)
-        return {"attempted": True, "ok": False, "reason": "reply_failed", "delivery_key": delivery_key}
+        settled = store.mark_reply_failed(delivery_key, error=type(exc).__name__, retryable=True,
+                                          attempt_count=record["attempt_count"])
+        return _reply_settlement_status(
+            {"attempted": True, "ok": False, "reason": "reply_failed", "delivery_key": delivery_key},
+            settled=settled,
+        )
     if ok:
-        store.mark_reply_delivered(delivery_key)
+        settled = store.mark_reply_delivered(delivery_key, attempt_count=record["attempt_count"])
     else:
-        store.mark_reply_failed(delivery_key, error="channel returned an unsuccessful response", retryable=True)
-    return {
+        settled = store.mark_reply_failed(delivery_key, error="channel returned an unsuccessful response",
+                                          retryable=True, attempt_count=record["attempt_count"])
+    return _reply_settlement_status({
         "attempted": True,
         "ok": ok,
         "reason": "sent" if ok else "reply_failed",
         "delivery_key": delivery_key,
-    }
+    }, settled=settled)
 
 
 def _outbox_client_id(delivery_key: str | None) -> str | None:
@@ -1189,6 +1212,8 @@ def _reply_receipt_payload(*, data: dict[str, Any], reply_status: dict[str, Any]
         "message_id": outbound_message_id,
         "outbound_message_id": outbound_message_id,
     }
+    if "send_ok" in reply_status:
+        receipt["send_ok"] = bool(reply_status["send_ok"])
     if outbound_message_id and bool(reply_status.get("ok")):
         receipt["delivery_confirmed"] = True
     error_code = _first_text(reply_status.get("error_code"))
