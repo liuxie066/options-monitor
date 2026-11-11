@@ -117,6 +117,42 @@ def _finite_or_none(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
+_PRICE_TIME_SENTINELS = {"", "N/A", "NA", "NONE", "NAN", "UNKNOWN", "NULL", "-"}
+
+
+def _price_time_present(value: Any) -> bool:
+    return str(value or "").strip().upper() not in _PRICE_TIME_SENTINELS
+
+
+def _has_displayable_price(quote: dict[str, Any]) -> bool:
+    """Whether the quote carries a price that can be shown with a timestamp.
+
+    A last trade without its own update time is not displayable: showing it
+    would repeat the misleading "price with no time" shape this method exists
+    to avoid.  Bid/ask are quote sides rather than trades, so their receipt
+    time (already checked by the caller) is the applicable clock.
+    """
+    last = _finite_or_none(quote.get("last_price"))
+    if last is not None and last > 0 \
+            and _price_time_present(quote.get("last_price_update_time")):
+        return True
+    for key in ("bid", "ask"):
+        value = _finite_or_none(quote.get(key))
+        if value is not None and value > 0:
+            return True
+    return False
+
+
+def _security_reason_for(prefix: str, quote: dict[str, Any]) -> str | None:
+    """Name a suspended or non-normal security on one leg of a quote row."""
+    if quote.get(f"{prefix}_suspension") is True:
+        return f"{prefix}_suspended"
+    sec_status = str(quote.get(f"{prefix}_sec_status") or "").strip().upper()
+    if sec_status not in {"", "NORMAL"}:
+        return f"{prefix}_sec_status_not_normal"
+    return None
+
+
 def _public_quote(row: dict[str, Any]) -> dict[str, Any]:
     return {field: row.get(field) for field in QUOTE_FIELDS}
 
@@ -163,12 +199,15 @@ def _quote_status(quote: dict[str, Any], now: datetime, missing: list[str]) -> s
             # method may display it as last_known with its own timestamp; it
             # never becomes a current quote or a trading recommendation.
             prefix = "option" if field == "opening_contract_status" else "underlier"
-            sec_status = str(quote.get(f"{prefix}_sec_status") or "").strip().upper()
-            if sec_status not in {"", "NORMAL"}:
-                missing.append(f"{prefix}_sec_status_not_normal")
+            security = _security_reason_for(prefix, quote)
+            if security:
+                missing.append(security)
                 return "unavailable"
-            if quote.get(f"{prefix}_suspension") is True:
-                missing.append(f"{prefix}_suspended")
+            if not _has_displayable_price(quote):
+                # A closed market alone does not make a quote displayable.
+                # Without a price (or with only stale/zero placeholders) there
+                # is nothing to show as last known.
+                missing.append(f"{prefix}_quote_unavailable")
                 return "unavailable"
             closed_market = True
         elif status and status != "ready":
@@ -184,8 +223,10 @@ def _underlier_quote(row: dict[str, Any], symbol: str) -> dict[str, Any] | None:
     spot = _finite_or_none(row.get("spot"))
     if spot is None or spot <= 0:
         return None
-    observed = (row.get("spot_observed_at_utc")
-                or row.get("snapshot_received_at_utc"))
+    # The underlier may only carry its own observation time.  The option row's
+    # snapshot_received_at_utc is when OM received the *option* snapshot and
+    # must never stand in for the underlier's clock.
+    observed = row.get("spot_observed_at_utc")
     result = {field: None for field in QUOTE_FIELDS}
     result.update({
         "contract_symbol": symbol,
@@ -220,31 +261,50 @@ def _row_matches(row: dict[str, Any], contract: dict[str, Any]) -> bool:
     )
 
 
+def _spot_unavailable_reason(observation: Any) -> str | None:
+    """Name why an observation cannot become a displayable spot quote."""
+    status = str(getattr(observation, "status", "") or "").strip().lower()
+    if status not in {"ready", "market_closed"}:
+        return str(getattr(observation, "reason_code", "") or
+                   "underlier_observation_not_ready")
+    if status == "market_closed":
+        # The shared normalizer classifies a closed market before it checks
+        # security eligibility, so a halted or suspended underlier must not
+        # pass as merely "last known".
+        security = _security_reason_for("underlier", {
+            "underlier_suspension": getattr(observation, "suspension", None),
+            "underlier_sec_status": getattr(observation, "sec_status", None)})
+        if security:
+            return security
+    price = _finite_or_none(getattr(observation, "last_price", None))
+    if price is None or price <= 0:
+        return "underlier_last_price_invalid"
+    return None
+
+
 def _spot_payloads(settings: APISettings, fetch_symbol: str,
                    observation: Any) -> list[dict[str, Any]]:
     """Wrap an observed underlier as the account-free spot quote row.
 
     A closed market is not missing data: the observation still carries the last
     price and its own timestamp, which the quote method may show as
-    ``last_known``.  Other non-ready statuses remain unavailable.
+    ``last_known``.  Other non-ready statuses remain unavailable, but carry the
+    specific reason so the member does not see an opaque missing field.
     """
     if observation is None:
         return []
     status = str(getattr(observation, "status", "") or "").strip().lower()
-    if status not in {"ready", "market_closed"}:
-        return []
-    if status == "market_closed":
-        # The shared normalizer classifies a closed market before it checks
-        # security eligibility, so a halted or suspended underlier must not
-        # pass as merely "last known".
-        sec_status = str(getattr(observation, "sec_status", "") or "").strip().upper()
-        if sec_status not in {"", "NORMAL"} \
-                or getattr(observation, "suspension", None) is True:
-            return []
-    price = _finite_or_none(getattr(observation, "last_price", None))
-    if price is None or price <= 0:
-        return []
     observed = str(getattr(observation, "observed_at_utc", "") or "")
+    reason = _spot_unavailable_reason(observation)
+    if reason is not None:
+        return [{
+            "symbol": fetch_symbol,
+            "underlier_code": str(getattr(observation, "code", "") or ""),
+            "rows": [],
+            "meta": {"observed_at_utc": observed, "source": settings.quote_source,
+                     "underlier_unavailable_reason": reason},
+        }]
+    price = _finite_or_none(getattr(observation, "last_price", None))
     market = str(getattr(observation, "market", "") or "").upper()
     currency = "HKD" if market == "HK" else "USD" if market == "US" else None
     row = {
@@ -263,6 +323,27 @@ def _spot_payloads(settings: APISettings, fetch_symbol: str,
         "rows": [row],
         "meta": {"observed_at_utc": observed, "source": settings.quote_source},
     }]
+
+
+def _underlier_missing_reason(payloads: list[dict[str, Any]],
+                              option_row: dict[str, Any] | None) -> str | None:
+    """Use the fetch's own reason instead of an opaque missing field."""
+    for payload in payloads:
+        meta = payload.get("meta") if isinstance(payload, dict) else None
+        reason = meta.get("underlier_unavailable_reason") if isinstance(meta, dict) else None
+        if isinstance(reason, str) and reason.strip():
+            return reason.strip()
+    if option_row is not None:
+        # A closed-market observation's reason code is the generic
+        # "market_closed"; the security fields on the row still distinguish a
+        # halt or suspension that blocks the contract after the open.
+        security = _security_reason_for("underlier", option_row)
+        if security:
+            return security
+        reason = str(option_row.get("underlier_observation_reason_code") or "").strip()
+        if reason:
+            return reason
+    return None
 
 
 def _payload_evidence(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -399,7 +480,8 @@ class BusinessService:
             underlier = _underlier_quote(option_row, plan.symbol)
         missing: list[str] = []
         if underlier is None:
-            missing.append("underlier_quote")
+            reason = _underlier_missing_reason(payloads, option_row)
+            missing.append(reason or "underlier_quote")
         if contract is not None and option is None:
             raise ContractError("INPUT_ERROR",
                                 "option contract identity is unavailable")
@@ -777,6 +859,16 @@ def _public_candidate(row: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _security_evidence_reason(row: dict[str, Any]) -> str | None:
+    """Name a suspended or non-normal security before blaming the market state.
+
+    The shared normalizer short-circuits a closed market before it checks
+    security eligibility, so ``market_closed`` alone hides a halt/suspension
+    that will still block the contract after the next open.
+    """
+    return _security_reason_for("option", row) or _security_reason_for("underlier", row)
+
+
 def _scenario_evidence_reason(row: dict[str, Any], *, option_type: str,
                               quote_side: str, now: datetime) -> str | None:
     """Reuse the candidate owner's freshness and contract-evidence gates."""
@@ -790,12 +882,17 @@ def _scenario_evidence_reason(row: dict[str, Any], *, option_type: str,
     # evidence_unavailable.  When the market is closed that is the reason the
     # member needs to see, not a generic "not ready" — including when the
     # snapshot receipt is missing or stale because no current session exists.
+    # Security eligibility wins over the market state: a halted contract stays
+    # unusable after the open, so it must not be reported as merely closed.
     statuses = {str(row.get(field) or "").strip().lower()
                 for field in ("opening_contract_status",
                               "underlier_observation_status")}
     closed_market = "market_closed" in statuses
+    security_reason = _security_evidence_reason(row)
 
     def _reason(exc: Any) -> str:
+        if exc.reason == "evidence_unavailable" and security_reason:
+            return security_reason
         if closed_market and exc.reason == "evidence_unavailable":
             return "market_closed"
         return exc.reason
@@ -808,9 +905,11 @@ def _scenario_evidence_reason(row: dict[str, Any], *, option_type: str,
         validate_option_contract_evidence(
             row, mode=option_type, quote_side=quote_side, now_utc=now)
     except CandidateCalculationError as exc:
-        if closed_market and exc.reason in {
-                "evidence_unavailable", "opening_underlier_not_ready"}:
-            return "market_closed"
+        if exc.reason in {"evidence_unavailable", "opening_underlier_not_ready"}:
+            if security_reason:
+                return security_reason
+            if closed_market:
+                return "market_closed"
         return exc.reason
     return None
 

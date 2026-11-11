@@ -174,3 +174,72 @@ def test_candidates_render_reference_time_even_when_unavailable():
     assert "数据口径" not in text
     assert "市场状态：休市（CLOSED）" in text
     assert "标的观察时间：2026-11-10 16:00:00（香港时间）" in text
+
+
+def test_quote_render_never_labels_a_placeholder_or_price_without_time():
+    from om_group_query_bot.render import render_quotes
+
+    text = render_quotes({
+        "quote_status": "unavailable", "market": "US",
+        "effective_parameters": {"contract_requested": True},
+        "underlier": None,
+        "option": {
+            "last_price": 3.25, "last_price_update_time": "N/A",
+            "bid": 3.1, "ask": 3.4, "market_state": "N/A",
+            "snapshot_received_at_utc": "2026-11-10T23:32:10.786000+00:00",
+        },
+        "missing_requirements": ["option_quote_unavailable"],
+    })
+    assert "最新" not in text
+    assert "最新价时间" not in text
+    assert "N/A" not in text
+    assert "买 3.1000" in text and "卖 3.4000" in text
+
+
+def test_quote_render_converts_an_offset_aware_update_time():
+    from om_group_query_bot.render import render_quotes
+
+    text = render_quotes({
+        "quote_status": "last_known", "market": "US",
+        "effective_parameters": {"contract_requested": False},
+        "underlier": {
+            "contract_symbol": "NVDA", "last_price": 168.89,
+            "last_price_update_time": "2026-11-10T23:32:10+00:00",
+            "snapshot_received_at_utc": "2026-11-10T23:32:10+00:00",
+        },
+        "missing_requirements": [],
+    })
+    assert "最新价时间 2026-11-10 18:32:10（纽约时间）" in text
+
+
+def test_end_of_session_states_keep_their_meaning():
+    from om_group_query_bot.render import render_quotes
+
+    for state, label in (("AFTER_HOURS_END", "盘后结束"),
+                         ("PRE_MARKET_END", "盘前结束"),
+                         ("NIGHT_END", "夜盘结束")):
+        text = render_quotes({
+            "quote_status": "last_known", "market": "US",
+            "effective_parameters": {"contract_requested": False},
+            "underlier": {"contract_symbol": "NVDA", "last_price": 1.0,
+                          "last_price_update_time": "2026-11-10 18:32:10",
+                          "snapshot_received_at_utc": "2026-11-10T23:32:10+00:00",
+                          "market_state": state},
+            "missing_requirements": [],
+        })
+        assert f"市场状态 {label}（{state}）" in text
+
+
+def test_close_and_roll_render_the_evaluation_time_in_the_market_zone():
+    zone_text = "评估时间：2026-11-10 01:00:00（纽约时间）"
+    close = render_close({
+        "recommendation_state": "hold", "evaluation_status": "priced",
+        "market": "US", "quote": {"bid": 1.10, "ask": 1.20},
+        "metrics": {}, "reason_codes": [],
+        "fee_model": {"id": "futu_option_fee", "version": "v1",
+                      "fee_calc_status": "conservative_estimate"},
+        "evaluated_at_utc": "2026-11-10T06:00:00+00:00",
+    })
+    assert zone_text in close
+    roll = render_roll(_roll(market="US"))
+    assert zone_text in roll

@@ -282,12 +282,41 @@ def test_spot_only_payload_rejects_unavailable_and_suspended_observations():
         market_state="AFTER_HOURS_BEGIN", sec_status="NORMAL", suspension=False,
         status="market_closed", reason_code="market_closed")
     assert _spot_payloads(_Settings(), "NVDA", observation) != []
-    assert _spot_payloads(
-        _Settings(), "NVDA", replace(observation, status="data_unavailable")) == []
-    assert _spot_payloads(
-        _Settings(), "NVDA", replace(observation, sec_status="HALT")) == []
-    assert _spot_payloads(
-        _Settings(), "NVDA", replace(observation, suspension=True)) == []
+
+    def reason(payloads):
+        assert len(payloads) == 1
+        assert payloads[0]["rows"] == []
+        return payloads[0]["meta"]["underlier_unavailable_reason"]
+
+    assert reason(_spot_payloads(
+        _Settings(), "NVDA",
+        replace(observation, status="data_unavailable",
+                reason_code="underlier_quote_stale"))) == "underlier_quote_stale"
+    assert reason(_spot_payloads(
+        _Settings(), "NVDA", replace(observation, sec_status="HALT"))) \
+        == "underlier_sec_status_not_normal"
+    assert reason(_spot_payloads(
+        _Settings(), "NVDA", replace(observation, suspension=True))) \
+        == "underlier_suspended"
+    assert reason(_spot_payloads(
+        _Settings(), "NVDA", replace(observation, last_price=None))) \
+        == "underlier_last_price_invalid"
+
+
+def test_missing_underlier_quote_names_the_reason_instead_of_a_generic_field():
+    from om_group_query_bot.business import _underlier_missing_reason
+
+    assert _underlier_missing_reason(
+        [], {"underlier_sec_status": "HALT"}) == "underlier_sec_status_not_normal"
+    assert _underlier_missing_reason(
+        [], {"underlier_suspension": True}) == "underlier_suspended"
+    assert _underlier_missing_reason(
+        [], {"underlier_observation_reason_code": "underlier_quote_stale"}) \
+        == "underlier_quote_stale"
+    assert _underlier_missing_reason(
+        [{"meta": {"underlier_unavailable_reason": "underlier_last_price_invalid"}}],
+        None) == "underlier_last_price_invalid"
+    assert _underlier_missing_reason([], None) is None
 
 
 def _fake_plan(plan):
@@ -551,7 +580,9 @@ def test_spot_quote_is_last_known_with_its_time_while_the_market_is_closed(tmp_p
 def test_quote_status_keeps_only_the_closed_market_as_last_known():
     from om_group_query_bot.business import _quote_status
 
-    fresh = {"snapshot_received_at_utc": NOW.isoformat()}
+    fresh = {"snapshot_received_at_utc": NOW.isoformat(),
+             "last_price": 185.0,
+             "last_price_update_time": "2026-11-10 18:32:10.786"}
     missing = []
     assert _quote_status(
         {**fresh, "underlier_observation_status": "market_closed"},
@@ -566,10 +597,40 @@ def test_quote_status_keeps_only_the_closed_market_as_last_known():
     assert "underlier_observation_status_not_ready" in missing
     # A closed market stays last_known regardless of how old the observation
     # is: there is no newer session to wait for.
-    stale = {"snapshot_received_at_utc": (NOW - timedelta(days=2)).isoformat()}
+    stale = {"snapshot_received_at_utc": (NOW - timedelta(days=2)).isoformat(),
+             "last_price": 185.0,
+             "last_price_update_time": "2026-11-08 18:32:10.786"}
     assert _quote_status(
         {**stale, "underlier_observation_status": "market_closed"},
         NOW, missing) == "last_known"
+
+
+def test_closed_market_without_a_displayable_price_is_unavailable():
+    from om_group_query_bot.business import _quote_status
+
+    fresh = {"snapshot_received_at_utc": NOW.isoformat(),
+             "opening_contract_status": "market_closed"}
+    missing = []
+    assert _quote_status(fresh, NOW, missing) == "unavailable"
+    assert "option_quote_unavailable" in missing
+    # A zero price is a placeholder, not a last observation.
+    missing = []
+    assert _quote_status(
+        {**fresh, "last_price": 0.0, "bid": 0.0, "ask": 0.0},
+        NOW, missing) == "unavailable"
+    assert "option_quote_unavailable" in missing
+    # A last trade without its own clock cannot be displayed as last known,
+    # but a live bid/ask side still can be.
+    missing = []
+    assert _quote_status(
+        {**fresh, "last_price": 3.25, "last_price_update_time": "N/A"},
+        NOW, missing) == "unavailable"
+    assert "option_quote_unavailable" in missing
+    missing = []
+    assert _quote_status(
+        {**fresh, "last_price": 3.25, "last_price_update_time": "N/A",
+         "bid": 3.1, "ask": 3.4}, NOW, missing) == "last_known"
+    assert missing == []
 
 
 def test_quote_status_refuses_halted_or_suspended_instruments_when_closed():
@@ -650,16 +711,46 @@ def test_scenario_reports_the_closed_market_instead_of_a_generic_reason():
         option_type="put", quote_side="buy", now=NOW) != "market_closed"
 
 
+def test_scenario_names_a_suspended_or_halted_security_before_the_market_state():
+    from om_group_query_bot.business import _scenario_evidence_reason
+
+    row = {"opening_contract_status": "market_closed",
+           "underlier_observation_status": "market_closed",
+           "snapshot_received_at_utc": NOW.isoformat()}
+    for override, expected in (
+            ({"option_suspension": True}, "option_suspended"),
+            ({"option_sec_status": "HALT"}, "option_sec_status_not_normal"),
+            ({"underlier_suspension": True}, "underlier_suspended"),
+            ({"underlier_sec_status": "HALT"}, "underlier_sec_status_not_normal")):
+        assert _scenario_evidence_reason(
+            {**row, **override}, option_type="put", quote_side="buy", now=NOW) \
+            == expected
+    # The same ordering holds while the market is open: a halted contract is
+    # not reported as a market-state problem.
+    live = {"opening_contract_status": "ready",
+            "underlier_observation_status": "ready",
+            "snapshot_received_at_utc": NOW.isoformat()}
+    assert _scenario_evidence_reason(
+        {**live, "option_sec_status": "HALT"},
+        option_type="put", quote_side="buy", now=NOW) \
+        == "option_sec_status_not_normal"
+
+
 def test_underlier_quote_without_its_own_time_does_not_borrow_the_option_time():
     from om_group_query_bot.business import _underlier_quote
 
     quote = _underlier_quote({
-        "spot": 185.0, "spot_observed_at_utc": NOW.isoformat(),
-        "last_price_update_time": "2026-11-10 18:00:00.000",
+        "spot": 185.0,
+        "snapshot_received_at_utc": NOW.isoformat(),
+        "spot_update_time": "2026-11-10 18:00:00.000",
         "underlier_sec_status": "NORMAL",
     }, "NVDA")
     assert quote["last_price"] == 185.0
-    assert quote["last_price_update_time"] is None
+    assert quote["last_price_update_time"] == "2026-11-10 18:00:00.000"
+    # The option row's receipt is when the *option* snapshot arrived; it must
+    # not become the underlier's observation time.
+    assert quote["spot_observed_at_utc"] is None
+    assert quote["snapshot_received_at_utc"] is None
 
 
 def test_quote_status_folds_an_unavailable_leg_into_the_response(tmp_path, monkeypatch):
