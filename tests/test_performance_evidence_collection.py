@@ -6,7 +6,13 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-from domain.domain.performance.models import EvidenceEnvelope, OptionInstrumentKey, OptionValuationPosition
+from domain.domain.performance.models import (
+    EvidenceEnvelope,
+    OptionInstrumentKey,
+    OptionValuationPosition,
+    StockInstrumentKey,
+    select_valuation_mark,
+)
 from src.application.performance.evidence_collection import (
     _default_option_snapshot_rows,
     capture_current_performance_evidence,
@@ -379,3 +385,109 @@ def test_external_snapshot_raw_is_json_safe_and_report_provenance_is_compact() -
     assert payload["valuation_mark_fact_ids"] == [mark.fact_id]
     assert "evidence" not in payload
     assert "raw" not in payload
+
+
+def test_spot_quote_adapter_preserves_selected_field_and_received_time() -> None:
+    from src.application.opend_market_snapshot_fetching import get_spot_opend, get_spot_opend_quote
+
+    gateway = SimpleNamespace(
+        get_snapshot=lambda codes: pd.DataFrame(
+            [{"code": "US.PDD", "prev_close_price": 99.0, "update_time": "2026-07-16 15:59:59"}]
+        )
+    )
+
+    quote = get_spot_opend_quote(gateway, "US.PDD")
+
+    assert quote["price"] == 99.0
+    assert quote["price_field"] == "prev_close_price"
+    assert quote["update_time"] == "2026-07-16 15:59:59"
+    assert quote["_snapshot_received_at_utc"]
+    # The legacy facade keeps returning the bare float for other callers.
+    assert get_spot_opend(gateway, "US.PDD") == 99.0
+
+
+def test_prev_close_fallback_stock_mark_is_persisted_as_close_estimate(tmp_path) -> None:
+    instrument = StockInstrumentKey(symbol="PDD", currency="USD")
+    effective = "2026-07-16T20:00:00+00:00"
+    received = "2026-07-17T02:59:58+00:00"
+
+    result = collect_current_performance_evidence(
+        period_status="partial_current",
+        refresh_quotes=True,
+        option_positions=(),
+        stock_instruments=(instrument,),
+        now_ms=NOW_MS,
+        stock_price_fetcher=lambda _: {
+            "price": 99.0,
+            "price_field": "prev_close_price",
+            "update_time": effective,
+            "_snapshot_requested_at_utc": "2026-07-17T02:59:57+00:00",
+            "_snapshot_received_at_utc": received,
+        },
+        fx_payload_fetcher=lambda: None,
+    )
+
+    mark = result.valuation_marks[0]
+    assert (mark.mark_kind, mark.source) == ("close_estimate", "prev_close_fallback")
+    assert mark.raw["price_field"] == "prev_close_price"
+    assert mark.quality["price_field"] == "prev_close_price"
+    assert mark.effective_at_ms == int(datetime.fromisoformat(effective).timestamp() * 1000)
+    assert mark.observed_at_ms == int(datetime.fromisoformat(received).timestamp() * 1000)
+    selection = select_valuation_mark(
+        result.valuation_marks, instrument_key=instrument.instrument_key, at_ms=NOW_MS
+    )
+    assert (selection.status, selection.fact.source) == ("selected", "prev_close_fallback")
+
+    repo = PerformanceEvidenceSQLiteRepository(tmp_path / "evidence.sqlite3")
+    imported = repo.import_envelope(result.envelope.to_dict(), apply=True, migrated_at_ms=NOW_MS)
+    assert imported.applied is True
+    stored = repo.read_all().valuation_marks[0]
+    assert (stored.mark_kind, stored.source) == ("close_estimate", "prev_close_fallback")
+    assert stored.raw["price_field"] == "prev_close_price"
+
+
+def test_live_last_price_stock_mark_stays_realtime_spot() -> None:
+    instrument = StockInstrumentKey(symbol="PDD", currency="USD")
+
+    result = collect_current_performance_evidence(
+        period_status="partial_current",
+        refresh_quotes=True,
+        option_positions=(),
+        stock_instruments=(instrument,),
+        now_ms=NOW_MS,
+        stock_price_fetcher=lambda _: {
+            "price": 120.0,
+            "price_field": "last_price",
+            "update_time": "2026-07-17T02:59:59+00:00",
+            "_snapshot_received_at_utc": "2026-07-17T03:00:00+00:00",
+        },
+        fx_payload_fetcher=lambda: None,
+    )
+
+    mark = result.valuation_marks[0]
+    assert (mark.mark_kind, mark.source) == ("spot", "realtime_snapshot")
+    assert mark.quality["price_field"] == "last_price"
+
+
+def test_prev_close_fallback_without_quote_time_keeps_timestamp_fallback() -> None:
+    instrument = StockInstrumentKey(symbol="PDD", currency="USD")
+
+    result = collect_current_performance_evidence(
+        period_status="partial_current",
+        refresh_quotes=True,
+        option_positions=(),
+        stock_instruments=(instrument,),
+        now_ms=NOW_MS,
+        stock_price_fetcher=lambda _: {
+            "price": 99.0,
+            "price_field": "prev_close_price",
+            "update_time": "2026-07-16 15:59:59",  # naive: no timezone to trust
+        },
+        fx_payload_fetcher=lambda: None,
+    )
+
+    mark = result.valuation_marks[0]
+    assert (mark.mark_kind, mark.source) == ("close_estimate", "prev_close_fallback")
+    assert mark.effective_at_ms == NOW_MS
+    assert mark.observed_at_ms == NOW_MS
+    assert mark.quality["timestamp_fallback"] is True
