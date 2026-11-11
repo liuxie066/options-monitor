@@ -370,6 +370,20 @@ def test_revalidation_failure_defers_and_preserves_task_and_worktree(stale_issue
         assert not (record.parent / "worktree").exists()
 
 
+def test_revalidation_no_output_propagates_instead_of_deferring(stale_issue_task):
+    root, config, run, record = stale_issue_task
+    before = record.read_bytes()
+    diagnostics = {"failure_kind": "agent_no_output", "model_output_events": 0}
+
+    def revalidate(number):
+        raise repair.AgentNoOutput(f"issue #{number} revalidation produced no model output", diagnostics=diagnostics)
+
+    with pytest.raises(repair.AgentNoOutput) as excinfo:
+        repair.repair_one(root, config, run, time.monotonic() + 120, unexpected_repair, revalidate_issue=revalidate)
+    assert excinfo.value.diagnostics == diagnostics
+    assert record.read_bytes() == before and not (record.parent / "worktree").exists()
+
+
 @pytest.mark.parametrize("change", ["in_progress", "needs_decision", "blocked", "already_fixed", "not_reproduced", "duplicate", "owner", "digest", "assigned"])
 def test_revalidation_reloads_verdict_ownership_and_inputs(stale_issue_task, change):
     root, config, run, record = stale_issue_task
@@ -745,6 +759,36 @@ def test_run_repairs_bounds_outer_revalidation_and_keeps_direct_single_argument_
     direct = repair.repair_one(root, config, run, 3000, timeout, revalidate_issue=direct_revalidate,
                                _task_id=paths[0].parent.name)
     assert direct_calls == [1] and direct["status"] == "pending"
+
+
+def test_run_repairs_aborts_queue_when_revalidation_reports_no_output(tmp_path, monkeypatch):
+    root, config, run, paths = queued_repairs(tmp_path, 2)
+    monkeypatch.setattr(repair.time, "monotonic", lambda: 1000.0)
+    config.update({"issue_target": "b" * 40, "issue_intake_ready": True, "issue_inputs": {}})
+    state = {"issues": {}}
+    for number, path in enumerate(paths, 1):
+        task = json.loads(path.read_text())
+        task["sources"] = [{"kind": "issue", "number": number, "verification_sha": A}]
+        task["base_sha"] = config["issue_target"]
+        repair.save(path, task)
+        config["issue_inputs"][str(number)] = {"input_digest": "same", "assigned": False, "open": True}
+        state["issues"][str(number)] = {"outcome": "confirmed", "triage": {"decision": "worthwhile", "reason": "project defect", "third_party_service": False}, "input_digest": "same", "repair_task": task["id"], "target": A}
+    repair.save(root / "issue-state.json", state)
+    before = [path.read_bytes() for path in paths]
+
+    def revalidate(number, *, deadline):
+        raise repair.AgentNoOutput(f"issue #{number} revalidation produced no model output",
+                                   diagnostics={"failure_kind": "agent_no_output", "model_output_events": 0})
+
+    result = repair.run_repairs(root, config, run, 3000, unexpected_repair, revalidate_issue=revalidate)
+    assert result["agent_unavailable"]["task"] == paths[0].parent.name
+    assert result["agent_unavailable"]["diagnostics"]["failure_kind"] == "agent_no_output"
+    assert result["processed"] == [paths[0].parent.name]
+    assert [row["failure_kind"] for row in result["results"]] == ["agent_no_output"]
+    assert result["attempted"] == []
+    assert [path.read_bytes() for path in paths] == before
+    deferred = {item["id"]: item["reason"] for item in result["deferred"]}
+    assert "agent_no_output" in deferred[paths[1].parent.name]
 
 
 def test_run_repairs_preserves_manual_tasks_and_earlier_scope_gates(tmp_path, monkeypatch):

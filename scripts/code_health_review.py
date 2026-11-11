@@ -663,9 +663,14 @@ def run_repair_phase(root, config, run, source, target, issue_plan, issue_status
     def revalidate_issue(number, *, deadline=deadline):
         fresh = issues.plan_issues(root, config, target, command, deadline=deadline, numbers={number}, hydrate=False)
         validation = run / "repair-issue-validation" / str(number)
-        issues.process_issues(root, {**config, "mirror": str(root / "repository.git")}, validation, source, fresh,
-                              deadline, invoke_agent, FINDING_SCHEMA, validate_finding, command=command)
+        summary = issues.process_issues(root, {**config, "mirror": str(root / "repository.git")}, validation, source, fresh,
+                                        deadline, invoke_agent, FINDING_SCHEMA, validate_finding, command=command)
         repair_config["issue_inputs"] = fresh["issue_inputs"]
+        unavailable = summary.get("agent_unavailable")
+        if unavailable:
+            raise repair.AgentNoOutput(
+                f"issue #{unavailable['number']} revalidation produced no model output: {unavailable['reason']}",
+                diagnostics=unavailable.get("diagnostics", {}))
 
     authorized = bool(config.get("_deliver_repairs") or config.get("repair_delivery_enabled", True))
     approvals = config.get("_merge_approvals", {})
