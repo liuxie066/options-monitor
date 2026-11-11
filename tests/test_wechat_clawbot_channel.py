@@ -878,6 +878,148 @@ def test_wechat_clawbot_poll_once_persists_failed_reply_receipt(tmp_path: Path) 
     assert "api_response" not in receipt
 
 
+@pytest.mark.parametrize("entry", ["retry", "fresh"])
+@pytest.mark.parametrize("settle_order", ["old_first", "new_first"])
+@pytest.mark.parametrize(("old_result", "new_result"), [
+    ("failure", "success"), ("success", "success"), ("success", "failure"),
+    ("failure", "failure"), ("exception", "success"), ("success", "exception"),
+])
+def test_wechat_poll_reply_settlement_is_owned_by_claim_generation(
+    tmp_path, monkeypatch, example_config_path, entry, settle_order, old_result, new_result,
+):
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import datetime, timedelta, timezone
+    import socket
+    from threading import Event
+    import src.application.bot.host_store as host_module
+    from src.application.bot.config_scope import resolve_replay_authorization
+
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(example_config_path.parent))
+    state_dir = _wechat_state_dir(tmp_path)
+    bot_config = _write_minimal_bot_config(tmp_path)
+    database = tmp_path / "reply-audit.sqlite3"
+    store = BotHostStore(database)
+    started, release = [Event(), Event()], [Event(), Event()]
+    clients, sends, tool_calls, forbidden_calls = [], [], [], []
+    origin = datetime.now(timezone.utc)
+    clock = [origin]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0].astimezone(tz) if tz else clock[0].replace(tzinfo=None)
+
+    monkeypatch.setattr(host_module, "datetime", Clock)
+    monkeypatch.setattr(host_module, "utc_now_iso", lambda: clock[0].isoformat())
+    if entry == "retry":
+        request = BotInboundRequest(
+            text="/status", sender_id="user_1", channel="wechat", conversation_id="wechat:group_1",
+            message_id="msg_1", config_key="us", bot_config_path=str(bot_config),
+            reply_context={"reply_sender_identity": str(state_dir.resolve())},
+        )
+        store.enqueue_reply(delivery_key="wechat:cmd_1", channel="wechat",
+                            authorization=resolve_replay_authorization(request),
+                            payload={"to_user_id": "user_1", "context_token": "ctx_1",
+                                     "group_id": "group_1", "text": "synthetic frozen reply"})
+
+    def forbidden(*_args, **_kwargs):
+        forbidden_calls.append(True)
+        raise AssertionError("unexpected real network or subprocess")
+
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+
+    class Client(_PollReplyClient):
+        def __init__(self, **kwargs):
+            assert kwargs["timeout"] == 600
+            super().__init__(**kwargs)
+            self.index = len(clients)
+            clients.append(self)
+
+        def get_updates(self, *, get_updates_buf):
+            return {"ret": 0, "get_updates_buf": get_updates_buf,
+                    "msgs": [_wechat_inbound_message()] if entry == "fresh" and self.index == 0 else []}
+
+        def send_text_message(self, **kwargs):
+            sends.append((self.index, kwargs))
+            started[self.index].set()
+            assert release[self.index].wait(10), "test did not release synthetic sender"
+            result = old_result if self.index == 0 else new_result
+            if result == "exception":
+                raise TimeoutError("synthetic client timeout")
+            return {"ret": 0 if result == "success" else 91,
+                    "data": {"message_id": f"reply_{self.index}"}}
+
+    def execute(tool_name, payload):
+        tool_calls.append(tool_name)
+        return _wechat_execute(tool_name, payload)
+
+    def poll():
+        return poll_wechat_clawbot_once(
+            base=tmp_path, state_dir=str(state_dir), config_key="us", bot_config_path=str(bot_config),
+            audit_db=str(database), allowed_senders="wechat:user_1", timeout_sec=600,
+            client_factory=Client, execute_tool_fn=execute,
+        )
+
+    def row(key):
+        return next(record for record in store.list_replies() if record["delivery_key"] == key)
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        first = workers.submit(poll)
+        try:
+            assert started[0].wait(10), first.result() if first.done() else "first sender did not start"
+            initial = next(record for record in store.list_replies() if record["status"] == "delivering")
+            key = initial["delivery_key"]
+            assert initial["attempt_count"] == 1
+            clock[0] = origin + timedelta(seconds=299)
+            assert store.claim_reply(delivery_key=key) is None
+            clock[0] = origin + timedelta(seconds=301)
+            second = workers.submit(poll)
+            assert started[1].wait(10), second.result() if second.done() else "second sender did not start"
+            current = row(key)
+            assert current["attempt_count"] == 2 and current["status"] == "delivering"
+            unrelated = store.enqueue_reply(delivery_key="wechat:unrelated", channel="wechat",
+                                             payload={"text": "unrelated frozen reply"})
+            unrelated = row(unrelated["delivery_key"])
+            if settle_order == "new_first":
+                release[1].set()
+                new_poll = second.result(timeout=10)
+                current = row(key)
+            release[0].set()
+            old_poll = first.result(timeout=10)
+            after_old = row(key)
+        finally:
+            release[0].set()
+            release[1].set()
+        if settle_order == "old_first":
+            new_poll = second.result(timeout=10)
+
+    old_status = (old_poll["data"]["results"][0]["reply"] if entry == "fresh"
+                  else old_poll["data"]["outbox_retry"])
+    new_status = new_poll["data"]["outbox_retry"]
+    final = row(key)
+    assert len(sends) == 2 and [index for index, _ in sends] == [0, 1]
+    assert all(arguments["client_id"] == _outbox_client_id(key) for _, arguments in sends)
+    assert sends[0][1] == sends[1][1]
+    assert after_old == current  # A stale success or failure cannot mutate B's generation.
+    assert old_status["ok"] is False and old_status["reason"] == "claim_superseded"
+    assert old_status["send_ok"] is (old_result == "success")
+    if entry == "fresh":
+        audit = InboundAuditStore(str(database)).find_by_message(channel="wechat", message_id="msg_1")
+        receipt = json.loads(audit["response_json"])["data"]["reply"]
+        assert receipt["ok"] is False and receipt["send_ok"] is (old_result == "success")
+        assert not receipt.get("delivery_confirmed")
+    assert new_status["ok"] is (new_result == "success")
+    assert new_status["reason"] == ("sent" if new_result == "success" else "reply_failed")
+    assert final["attempt_count"] == 2
+    assert final["status"] == ("delivered" if new_result == "success" else "retryable_failed")
+    assert bool(final["delivered_at"]) is (new_result == "success")
+    assert final["payload_json"] == ("{}" if new_result == "success" else initial["payload_json"])
+    assert row("wechat:unrelated") == unrelated
+    assert len(tool_calls) == (1 if entry == "fresh" else 0)
+    assert forbidden_calls == []
+
+
 @pytest.mark.parametrize("explicit_db", [True, False])
 def test_wechat_reply_outbox_retries_with_stable_client_id(tmp_path: Path, explicit_db: bool, monkeypatch, example_config_path) -> None:
     from src.application.bot.config_scope import resolve_replay_authorization
