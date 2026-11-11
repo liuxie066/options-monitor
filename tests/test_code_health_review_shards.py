@@ -202,6 +202,8 @@ def test_unused_review_budget_flows_to_issues_without_breaching_the_daily_cap(
     assert receipt["status"] == ("partial" if review_elapsed else "complete")
     assert observed == [1800 - review_elapsed - intake_elapsed]
     assert receipt["issues"]["status"] == "complete"
+    report = (Path(receipt["run_dir"]) / "report.md").read_text()
+    assert "## 阶段耗时与预算" in report and "- review：耗时" in report
 
 
 def test_agent_no_output_skips_later_model_stages(commit_review_run, monkeypatch):

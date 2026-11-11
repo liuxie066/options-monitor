@@ -759,6 +759,9 @@ def test_timeout_continues_to_next_commit_and_escalates_after_two_rounds(tmp_pat
     saved = json.loads((tmp_path / "state.json").read_text())
     assert saved["cursor"] == C
     assert saved["review_needs_human"][B]["attempts"] == 2
+    second_report = (tmp_path / "run2" / "report.md").read_text()
+    assert f"`{B}`" in second_report and "连续失败 2 次" in second_report
+    assert "needs_human" in second_report
 
     calls.clear()
     state = json.loads((tmp_path / "state.json").read_text())
