@@ -732,3 +732,35 @@ def test_real_weekly_scan_uses_installed_vulture_and_radon(tmp_path):
     assert result["metrics"]["dead_code_candidates"] == 1
     assert not any(gap.startswith(("vulture is not installed", "radon is not installed"))
                    for gap in result["gaps"])
+
+
+def test_missing_tools_degrade_with_explicit_gaps(tmp_path, monkeypatch):
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    git(origin, "init", "-b", "main")
+    body = "def _unused():\n    return 1\n\n\ndef complex_fn(a):\n"
+    body += "".join(f"    if a == {index}:\n        a += 1\n" for index in range(12))
+    body += "    return a\n"
+    put(origin, "src/example.py", body)
+    git(origin, "add", ".")
+    git(origin, "commit", "-m", "fixture missing tools")
+    state = tmp_path / "code-entropy-review"
+    state.mkdir()
+    baseline = put(tmp_path, "policy.md", "fixture baseline version 1")
+    review.initialize(state, "fixture/repo", str(origin), baseline)
+    monkeypatch.setattr(review, "tool_command", lambda name: None)
+    with review.run_lock(state):
+        result = review.run_scan(state, "weekly", timeout_seconds=60)
+    assert result["status"] == "complete"
+    metrics = result["metrics"]
+    assert metrics["dead_code_basis"] == "entropy-ast-v1"
+    assert metrics["dead_code_vulture_rejected"] is None
+    assert metrics["complexity_basis"] == "entropy-ast-v1"
+    assert metrics["complexity_unmatched"] is None
+    assert metrics["untested_branches"] is None
+    assert result["tools"]["vulture"]["available"] is False
+    assert result["tools"]["radon"]["available"] is False
+    assert result["tools"]["coverage"]["available"] is False
+    assert any(gap.startswith("vulture is not installed") for gap in result["gaps"])
+    assert any(gap.startswith("radon is not installed") for gap in result["gaps"])
+    assert any("coverage is not installed" in gap for gap in result["gaps"])
