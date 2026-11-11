@@ -807,6 +807,7 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False,
                    "budgets": budgets}
         started_wall = datetime.now(timezone.utc)
         issue_deadline = None
+        review_unused = 0.0
 
         def wall(moment: float) -> str:
             return (started_wall + timedelta(seconds=moment - started)).isoformat(timespec="seconds")
@@ -850,7 +851,10 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False,
                     save_daily_summary(run, receipt)
                 return
             if config["pull_requests_enabled"] and target and "pull_requests" not in receipt:
-                issue_carry = max(0.0, issue_deadline - time.monotonic()) if issue_deadline is not None else 0.0
+                # With issue intake disabled, review's unused allocation still belongs to the
+                # next enabled stage; the absolute cap keeps repair/delivery reserved.
+                issue_carry = (max(0.0, issue_deadline - time.monotonic())
+                               if issue_deadline is not None else review_unused)
                 pr_deadline = min(daily_deadline - budgets["repair_reserved"] - budgets["delivery"],
                                   time.monotonic() + budgets["pull_requests"] + issue_carry)
                 pr_start = time.monotonic()

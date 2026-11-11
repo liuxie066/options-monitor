@@ -122,6 +122,38 @@ def test_phase_carryover_moves_unused_budget_forward_but_protects_reserves(commi
     assert receipt["daily_summary"]["reviewed_commits"] == 4
 
 
+def test_unused_review_budget_flows_to_prs_when_issues_are_disabled(commit_review_run, monkeypatch):
+    root, _, clock = commit_review_run
+    config = json.loads((root / "config.json").read_text())
+    config.update({"timeout_seconds": 15000, "pull_requests_enabled": True, "comments_enabled": True,
+                   "release_enabled": True, "issues_enabled": False, "repair_enabled": True,
+                   "review_budget_seconds": 6600})
+    review.write_json(root / "config.json", config)
+    seen = []
+    def agent(config, stage, prompt):
+        plan = json.loads((stage / "plan.json").read_text())
+        clock[0] += 1
+        return {"outcome": "complete", "completed_commits": [plan["commits"][0]["sha"]],
+                "report_markdown": "审查每个逻辑并记录完整复核和测试证据。" * 20,
+                "verification_gaps": [], "confirmed_findings": []}
+    def pull(root, config, run, deadline, invoke, *, command):
+        seen.append(("pr", deadline - clock[0]))
+        raise TimeoutError("PR stage used only its own budget")
+    def fix(root, config, run, source, target, plan, status, deadline):
+        seen.append(("repair", deadline - clock[0]))
+        return {"inventory": {}}
+    def deliver(root, config, run, deadline, invoke, **kwargs):
+        seen.append(("delivery", deadline - clock[0]))
+        return {"status": "complete"}
+    monkeypatch.setattr(review, "invoke_agent", agent)
+    monkeypatch.setattr(prs, "process_pull_requests", pull)
+    monkeypatch.setattr(review, "run_repair_phase", fix)
+    monkeypatch.setattr(delivery, "process_delivery", deliver)
+    review.run_once(root)
+    # Review leaves 6596 seconds unused and there is no issue stage to absorb them.
+    assert seen[0] == ("pr", 1800 + 6596)
+
+
 @pytest.fixture
 def comment_transport(tmp_path):
     delivery.save_json(tmp_path / "issue-state.json", {"issues": {"7": {
