@@ -148,7 +148,16 @@ def duplicate_measure(token_files, selected=None, window=50, minimum_lines=10):
             "duplicate_ratio": repeated / total if total else 0.0}, list(groups.values())
 
 
-def scan(root: Path, selected: list[str], coverage=None):
+def scan(root: Path, selected: list[str], coverage=None, *, vulture_unused=None, radon_complexity=None):
+    """Measure the selected files.
+
+    vulture_unused maps a relative path to the definition lines vulture reports as
+    unused functions or methods.  It never creates a candidate by itself: it can
+    only corroborate (or veto) a function the built-in whole-tree reference index
+    already found unreferenced.  radon_complexity maps a relative path to
+    {definition line: cyclomatic complexity}; when present it is the authoritative
+    complexity measurement and the built-in counter is only a fallback.
+    """
     scoped = [path for path in sorted(set(selected)) if Path(path).suffix == ".py"
               and Path(path).parts[0] in ROOTS and (root / path).is_file() and not (root / path).is_symlink()]
     words, calls, subclasses = Counter(), Counter(), Counter()
@@ -176,6 +185,7 @@ def scan(root: Path, selected: list[str], coverage=None):
                 subclasses.update(base.id for base in node.bases if isinstance(base, ast.Name))
     findings, scores = [], []
     loc = code_loc = zero_refs = unused_config = unreachable = missed_branches = 0
+    vulture_rejected = unmatched_complexity = 0
     runtime_complete = coverage is not None
     for path in scoped:
         source = (root / path).read_text(encoding="utf-8")
@@ -197,31 +207,44 @@ def scan(root: Path, selected: list[str], coverage=None):
             "__import__", "import_module", "register", "entry_points"))
         top = {id(node) for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
         function_items = list(functions(tree))
+        measured_complexity = (radon_complexity or {}).get(path)
         for name, node in function_items:
-            cc = complexity(node)
+            cc = measured_complexity.get(node.lineno) if measured_complexity is not None else None
+            if cc is None:
+                cc = complexity(node)
+                if radon_complexity is not None:
+                    unmatched_complexity += 1
             scores.append(cc)
+            basis = "radon" if measured_complexity is not None and node.lineno in measured_complexity else "entropy-ast-v1"
             if cc > 10:
                 findings.append(candidate("complexity", path, name, node.lineno,
-                    f"cyclomatic complexity={cc} >10", high=True,
+                    f"{basis} cyclomatic complexity={cc} >10", high=True,
                     facts={"complexity": cc, "threshold": 10,
-                           "source_digest": digest(ast.dump(node, include_attributes=False))}))
+                           "source_digest": digest(ast.dump(node, include_attributes=False))},
+                    tool="radon" if basis == "radon" else "entropy-ast-v1"))
             if id(node) not in top or not node.name.startswith("_") or node.name.startswith("__"):
                 continue
             if words[node.name] == 1:
-                zero_refs += 1
-                body = list(node.body)
-                if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
-                    body = body[1:]
-                span = {item.lineno for statement in body for item in ast.walk(statement) if isinstance(item, ast.stmt)}
-                measured = set((runtime or {}).get("executed_lines", [])) | set((runtime or {}).get("missing_lines", []))
-                facts = {"zero_references": True,
-                         "no_runtime_hits": (not bool(span & set(runtime["executed_lines"])))
-                         if runtime and span and span <= measured else None,
-                         "not_public_api": node.name not in public if public is not None else None,
-                         "not_entry_point": None if dynamic or node.decorator_list else True}
-                facts["source_digest"] = digest(ast.dump(node, include_attributes=False))
-                findings.append(candidate("dead-code", path, name, node.lineno,
-                    f"AST/text reference count=0; gates={facts}", high=dead_code(facts), facts=facts))
+                if vulture_unused is not None and node.lineno not in vulture_unused.get(path, ()):
+                    vulture_rejected += 1
+                else:
+                    zero_refs += 1
+                    body = list(node.body)
+                    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+                        body = body[1:]
+                    span = {item.lineno for statement in body for item in ast.walk(statement) if isinstance(item, ast.stmt)}
+                    measured = set((runtime or {}).get("executed_lines", [])) | set((runtime or {}).get("missing_lines", []))
+                    facts = {"zero_references": True,
+                             "no_runtime_hits": (not bool(span & set(runtime["executed_lines"])))
+                             if runtime and span and span <= measured else None,
+                             "not_public_api": node.name not in public if public is not None else None,
+                             "not_entry_point": None if dynamic or node.decorator_list else True}
+                    if vulture_unused is not None:
+                        facts["vulture_unused"] = True
+                    facts["source_digest"] = digest(ast.dump(node, include_attributes=False))
+                    findings.append(candidate("dead-code", path, name, node.lineno,
+                        f"AST/text reference count=0; gates={facts}", high=dead_code(facts), facts=facts,
+                        tool="vulture+entropy-ast-v1" if vulture_unused is not None else "entropy-ast-v1"))
             body = list(node.body)
             if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
                 body = body[1:]
@@ -289,9 +312,14 @@ def scan(root: Path, selected: list[str], coverage=None):
     metrics = {"files": len(scoped), "loc": loc, "code_loc": code_loc,
                "dead_code_symbols": sum(row["high_confidence"] for row in dead_rows)
                if dead_complete else None, "dead_code_candidates": zero_refs,
+               "dead_code_basis": "vulture+entropy-ast-v1" if vulture_unused is not None else "entropy-ast-v1",
+               "dead_code_vulture_rejected": vulture_rejected if vulture_unused is not None else None,
                "unreachable_branches": unreachable,
                "untested_branches": missed_branches if runtime_complete else None,
                "complexity_distribution": bins, "complexity_gt10": sum(value > 10 for value in scores),
+               "complexity_basis": ("radon" if radon_complexity is not None and not unmatched_complexity else
+                                    "entropy-ast-v1" if radon_complexity is None else "radon+entropy-ast-v1-fallback"),
+               "complexity_unmatched": unmatched_complexity if radon_complexity is not None else None,
                "functions": len(scores), "unused_config_items": None, "unused_config_candidates": unused_config,
                **duplication}
     return metrics, list({row["key"]: row for row in findings}.values())

@@ -131,7 +131,8 @@ def validate(result, batch, max_accepts):
     return result["reviews"]
 
 
-def assess(source, candidates, queue, decisions, ledger, config, invoke, *, sha, coverage=None):
+def assess(source, candidates, queue, decisions, ledger, config, invoke, *, sha, coverage=None,
+           vulture_unused=None, radon_complexity=None):
     """Refresh queued facts against current main, then judge at most one bounded batch."""
     limit = config.get("max_candidates", 3)
     if type(limit) is not int or not 1 <= limit <= 3:
@@ -145,7 +146,9 @@ def assess(source, candidates, queue, decisions, ledger, config, invoke, *, sha,
     paths = sorted({row["path"] for row in pending})
     blocked = []
     if paths:
-        _, refreshed = scan.scan(source, paths, coverage)
+        _, refreshed = scan.scan(source, paths, coverage,
+                                 vulture_unused=vulture_unused,
+                                 radon_complexity=radon_complexity)
         refreshed = {row["key"]: row for row in refreshed}
         for row in pending:
             key = row["key"]
