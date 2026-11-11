@@ -93,6 +93,172 @@ def test_old_target_is_not_hidden_by_earlier_unresolved_keys(monkeypatch, tmp_pa
     ) == [{"futu_account_id": "123", "deal_id": "old-1", "date": "2026-05-01"}]
 
 
+def _seed_pending_old_deals(tmp_path, bucket):
+    state = {"processed_deal_ids": {}, "unresolved_deal_ids": {}, "failed_deal_ids": {}}
+    # Missing/recent evidence must not consume slots, including across key chunks.
+    pending = dict.fromkeys([f"missing-{index}" for index in range(405)], {"status": bucket})
+    pending.update(dict.fromkeys(["recent", *[f"old-{index}" for index in range(6)]], {"status": bucket}))
+    state[bucket] = pending
+    state_path = tmp_path / "state.json"
+    write_trade_intake_state(state_path, state)
+    inbox_path = tmp_path / "trade_intake_inbox.sqlite3"
+    for account in ("123", "456"):
+        for index in range(6):
+            enqueue_trade_payload(inbox_path, source="file", payload={
+                "deal_id": f"old-{index}", "acc_id": account, "trd_env": "REAL",
+                "create_time": f"2026-05-{index + 1:02d} 10:45:31",
+            })
+    enqueue_trade_payload(inbox_path, source="file", payload={
+        "deal_id": "recent", "acc_id": "123", "trd_env": "REAL",
+        "create_time": "2026-06-03T05:00:00+00:00",
+    })
+    return state_path, inbox_path
+
+
+@pytest.mark.parametrize("bucket", ["unresolved_deal_ids", "failed_deal_ids"])
+@pytest.mark.parametrize("query_result", ["complete", "incomplete", "exception"])
+def test_old_deal_rechecks_rotate_across_persisted_backfill_runs(tmp_path, monkeypatch, bucket, query_result):
+    import socket
+    import subprocess
+
+    state_path, inbox_path = _seed_pending_old_deals(tmp_path, bucket)
+    original_state = state_path.read_bytes()
+    original_inbox = inbox_path.read_bytes()
+    queries = []
+    forbidden_calls = []
+
+    def forbidden(*_args, **_kwargs):
+        forbidden_calls.append(True)
+        raise AssertionError("unexpected real network or subprocess")
+
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+
+    def history(**kwargs):
+        queries.append(kwargs)
+        if query_result == "exception":
+            raise OSError("synthetic unavailable history")
+        return [], {"account_results": [_complete_account("123")],
+                    "targeted_complete": query_result == "complete"}
+
+    for minute in range(3):
+        kwargs = _backfill_kwargs(tmp_path)
+        kwargs.update(account_mapping={"123": "lx"}, futu_account_ids=["123"],
+                      now_fn=lambda minute=minute: datetime(2026, 6, 3, 6, minute, tzinfo=timezone.utc))
+        result = run_history_backfill(
+            **kwargs, history_deals_fn=history,
+            process_payload_fn=lambda *_args, **_kwargs: pytest.fail("empty history reached processing"),
+        )
+        assert result["ok"] is (query_result == "complete")
+        if query_result != "exception":
+            assert result["diagnostics"]["history_query_complete"] is True
+            assert result["diagnostics"]["targeted_query_complete"] is (query_result == "complete")
+            assert result["diagnostics"]["checkpoint_advanced"] is True
+
+    expected = {("123", f"old-{index}", f"2026-05-{index + 1:02d}") for index in range(6)}
+    assert all(query["lookback_hours"] == 6 for query in queries)
+    assert all(len(query["targeted_deals"]) == 5 for query in queries)
+    assert all(query["futu_account_ids"] == ["123"] for query in queries)
+    assert all({(target["futu_account_id"], target["deal_id"], target["date"])
+                for target in query["targeted_deals"]} <= expected for query in queries)
+    assert {(target["futu_account_id"], target["deal_id"], target["date"])
+            for query in queries[:2] for target in query["targeted_deals"]} == expected
+    assert state_path.read_bytes() == original_state
+    assert inbox_path.read_bytes() == original_inbox
+    assert forbidden_calls == []
+
+
+@pytest.mark.parametrize("replacement", ["physical", "host", "port", "accounts"])
+def test_old_deal_rotation_retains_each_query_scope(tmp_path, replacement):
+    _seed_pending_old_deals(tmp_path, "unresolved_deal_ids")
+    queries = []
+
+    def run(*, accounts=("123",), host="127.0.0.1", port=11111, apply_changes=True):
+        def history(**kwargs):
+            queries.append(kwargs["targeted_deals"])
+            return [], {"account_results": [_complete_account(account) for account in accounts],
+                        "targeted_complete": True}
+        kwargs = _backfill_kwargs(tmp_path)
+        kwargs.update(account_mapping={account: "lx" for account in accounts},
+                      futu_account_ids=list(accounts), host=host, port=port, apply_changes=apply_changes)
+        result = run_history_backfill(**kwargs, history_deals_fn=history,
+                                      process_payload_fn=lambda *_args, **_kwargs: {})
+        assert result["ok"] is True
+
+    run()
+    other = {"physical": {"accounts": ("456",)}, "host": {"host": "opend-b"},
+             "port": {"port": 11112}, "accounts": {"accounts": ("123", "456")}}[replacement]
+    run(**other)
+    assert [target["deal_id"] for target in queries[1]] == [f"old-{index}" for index in range(5)]
+    checkpoint_path = tmp_path / "trade_intake_backfill_checkpoint.json"
+    checkpoint_before_preview = checkpoint_path.read_bytes(), checkpoint_path.stat().st_mtime_ns
+    run(apply_changes=False)
+    run(apply_changes=False)
+    assert (checkpoint_path.read_bytes(), checkpoint_path.stat().st_mtime_ns) == checkpoint_before_preview
+    run()
+    assert queries[2] == queries[3] == queries[4]
+    assert queries[4][0] == {"futu_account_id": "123", "deal_id": "old-5", "date": "2026-05-06"}
+    assert all(len(query) == 5 for query in queries)
+
+
+@pytest.mark.parametrize("bucket", ["unresolved_deal_ids", "failed_deal_ids"])
+def test_old_deal_rotation_reaches_original_dates_through_history_adapter(tmp_path, monkeypatch, bucket):
+    import socket
+    import subprocess
+    from src.infrastructure import futu_history_deals
+
+    state_path, inbox_path = _seed_pending_old_deals(tmp_path, bucket)
+    original = state_path.read_bytes(), inbox_path.read_bytes()
+    calls, builds, closed, forbidden_calls = [], [], [], []
+
+    class Gateway:
+        def get_history_deals(self, **kwargs):
+            calls.append(kwargs)
+            return {"retcode": 0, "rows": [], "coverage_complete": True, "pagination_complete": True}
+
+        def close(self):
+            closed.append(True)
+
+    def build(**kwargs):
+        builds.append(kwargs)
+        return Gateway()
+
+    def forbidden(*_args, **_kwargs):
+        forbidden_calls.append(True)
+        raise AssertionError("unexpected real network or subprocess")
+
+    monkeypatch.setattr(futu_history_deals, "build_futu_gateway", build)
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    for minute in range(3):
+        kwargs = _backfill_kwargs(tmp_path)
+        kwargs.update(account_mapping={"123": "lx", "456": "sy"}, futu_account_ids=["123", "456"],
+                      now_fn=lambda minute=minute: datetime(2026, 6, 3, 6, minute, tzinfo=timezone.utc))
+        result = run_history_backfill(
+            **kwargs, history_deals_fn=futu_history_deals.fetch_opend_history_deals,
+            process_payload_fn=lambda *_args, **_kwargs: pytest.fail("empty history reached processing"),
+        )
+        assert result["ok"] is True
+        assert result["diagnostics"]["effective_lookback_hours"] == 6
+        assert result["diagnostics"]["targeted_deal_count"] == 5
+        assert result["diagnostics"]["checkpoint_advanced_accounts"] == ["123", "456"]
+        assert len(calls) == (minute + 1) * 7  # Two recent queries plus five old dates.
+
+    targeted = [call for call in calls if call["start"].startswith("2026-05-")]
+    assert len(targeted) == 15
+    assert {(call["acc_id"], call["start"]) for call in targeted} == {
+        (account, f"2026-05-{index + 1:02d} 00:00:00")
+        for account in (123, 456) for index in range(6)
+    }
+    assert all(call["trd_env"] == "REAL" for call in calls)
+    assert all(call["end"] == f"2026-05-{int(call['start'][8:10]) + 1:02d} 00:00:00"
+               for call in targeted)
+    assert builds == [{"host": "127.0.0.1", "port": 11111, "is_option_chain_cache_enabled": False}] * 3
+    assert len(closed) == 3
+    assert (state_path.read_bytes(), inbox_path.read_bytes()) == original
+    assert forbidden_calls == []
+
+
 def test_old_target_query_failure_keeps_backfill_incomplete(monkeypatch, tmp_path):
     target = {"futu_account_id": "123", "deal_id": "old-1", "date": "2026-05-01"}
     monkeypatch.setattr(backfill_module, "_known_old_deal_targets", lambda **_kwargs: [target])

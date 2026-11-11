@@ -56,9 +56,9 @@ def payload_deal_id(payload: dict[str, Any] | None) -> str:
 
 def _known_old_deal_targets(
     *, state_path: Path, inbox_path: Path, futu_account_ids: list[str],
-    now: datetime, lookback_hours: float,
+    now: datetime, lookback_hours: float, after_target: dict[str, str] | None = None,
 ) -> list[dict[str, str]]:
-    """Recheck a bounded set of unresolved source trades by their original date."""
+    """Recheck up to five old trades by original date, rotating after a stable identity."""
     state = load_trade_intake_state(state_path)
     keys = [
         key for bucket in ("unresolved_deal_ids", "failed_deal_ids")
@@ -86,9 +86,13 @@ def _known_old_deal_targets(
                 continue
             seen.add(identity)
             targets.append(target)
-            if len(targets) >= 5:
-                return targets
-    return targets
+    targets.sort(key=lambda target: (target["futu_account_id"], target["deal_id"]))
+    start = 0
+    if after_target:
+        cursor = (str(after_target.get("futu_account_id") or ""), str(after_target.get("deal_id") or ""))
+        start = next((index for index, target in enumerate(targets)
+                      if (target["futu_account_id"], target["deal_id"]) > cursor), 0)
+    return (targets[start:] + targets[:start])[:5]
 
 
 def _old_deal_target(
@@ -145,6 +149,11 @@ def run_history_backfill(
     enqueue_fee_target_fn: Callable[[tuple[str, str, str, str]], Any] | None = None,
     now_fn: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
+    """Recover recent history and rotate old rechecks in the existing checkpoint.
+
+    Source-scoped recheck cursors record attempted batches, including provider
+    failures, separately from successful-window coverage. Preview advances neither.
+    """
     refresh_enabled = bool(apply_changes and dispatch_portfolio_refresh_fn is not None
                            and portfolio_management_enabled(config))
     if apply_changes:
@@ -161,6 +170,9 @@ def run_history_backfill(
     checkpoint = read_json(checkpoint_file, default={})
     checkpoint_payload = checkpoint if isinstance(checkpoint, dict) else {}
     scopes = _history_checkpoint_scopes(host=host, port=port, account_ids=futu_account_ids)
+    recheck_scope_key = _checkpoint_scope_key({"scopes": list(scopes.values())})
+    recheck_cursors = checkpoint_payload.get("old_deal_recheck_cursors")
+    recheck_cursor = recheck_cursors.get(recheck_scope_key) if isinstance(recheck_cursors, dict) else None
     scoped_checkpoints = {
         account_id: _scoped_checkpoint(checkpoint_payload, scope)
         for account_id, scope in scopes.items()
@@ -201,7 +213,14 @@ def run_history_backfill(
             futu_account_ids=futu_account_ids,
             now=now,
             lookback_hours=lookback_hours,
+            after_target=recheck_cursor if isinstance(recheck_cursor, dict) else None,
         )
+        if apply_changes and targeted_deals:
+            # Reserve the attempted batch even if the provider fails or finds no
+            # match; old unresolved trades must not monopolize the next run.
+            _advance_history_checkpoints(
+                checkpoint_file, {}, old_deal_recheck=(recheck_scope_key, targeted_deals[-1]),
+            )
         payloads, diagnostics = history_deals_fn(
             host=host,
             port=port,
@@ -809,7 +828,10 @@ def _scoped_checkpoint(checkpoint: dict[str, Any], scope: dict[str, Any]) -> dic
     return entry if isinstance(entry, dict) and entry.get("scope") == scope else {}
 
 
-def _advance_history_checkpoints(path: Path, updates: dict[str, dict[str, Any]]) -> set[str]:
+def _advance_history_checkpoints(
+    path: Path, updates: dict[str, dict[str, Any]], *,
+    old_deal_recheck: tuple[str, dict[str, str]] | None = None,
+) -> set[str]:
     # Re-read under the existing file lock so concurrent sources cannot discard each other's cursors.
     with exclusive_private_file_lock(path.with_suffix(path.suffix + ".lock")):
         saved = read_json(path, default={})
@@ -831,7 +853,13 @@ def _advance_history_checkpoints(path: Path, updates: dict[str, dict[str, Any]])
                     pass
             entries[key] = entry
             advanced.add(key)
-        if advanced:
+        if old_deal_recheck is not None:
+            key, target = old_deal_recheck
+            saved_cursors = current.get("old_deal_recheck_cursors")
+            cursors = dict(saved_cursors) if isinstance(saved_cursors, dict) else {}
+            cursors[key] = target
+            current["old_deal_recheck_cursors"] = cursors
+        if advanced or old_deal_recheck is not None:
             current.update(schema_version="trade_intake_backfill_checkpoint.v2", scopes=entries)
             atomic_write_json(path, current)
         return advanced
