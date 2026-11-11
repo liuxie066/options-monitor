@@ -565,7 +565,8 @@ def _dispatch_final_receipt_outbox(
             "reason": "dispatcher_failed",
             "error": f"{type(exc).__name__}: {exc}",
         }
-    store.complete_outbox(outbox_id, receipt=receipt)
+    if store.complete_outbox(outbox_id, claim_attempts=claimed["attempts"], receipt=receipt) is None:
+        return {**receipt, "send_ok": bool(receipt.get("ok")), "ok": False, "reason": "claim_superseded"}
     return receipt
 
 

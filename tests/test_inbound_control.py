@@ -2353,6 +2353,223 @@ def test_inbound_upgrade_worker_retries_final_receipt(monkeypatch: pytest.Monkey
     assert "升级执行完成" in str(reply_attempts[-1]["text"])
 
 
+@pytest.mark.parametrize("channel", ["feishu", "wechat"])
+@pytest.mark.parametrize("settle_order", ["old_first", "new_first"])
+@pytest.mark.parametrize(("old_result", "new_result"), [
+    ("failure", "success"), ("success", "success"),
+    ("success", "failure"), ("failure", "failure"),
+    ("exception", "success"), ("success", "exception"),
+])
+def test_upgrade_receipt_replay_settles_only_current_claim(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, channel: str,
+    settle_order: str, old_result: str, new_result: str,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    import socket
+    from threading import Event
+
+    from src.application.bot.control import operation_store, upgrade_operations
+    from src.application.bot.control.operation_signature import hash_operation_payload
+
+    _enable_inbound_upgrade_write(monkeypatch)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_test_app")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "cli_test_secret")
+    origin = datetime(2026, 5, 30, tzinfo=timezone.utc)
+    clock = [origin]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[no-untyped-def]
+            return clock[0] if tz is None else clock[0].astimezone(tz)
+
+    monkeypatch.setattr(operation_store, "datetime", Clock)
+    monkeypatch.setattr(operation_store, "utc_now_iso", lambda: clock[0].isoformat())
+    sleeps: list[float] = []
+    monkeypatch.setattr(upgrade_operations.time, "sleep", sleeps.append)
+    database = tmp_path / "inbound.sqlite3"
+    store = InboundOperationStore(database)
+    operation_id = "in_receipt_claim"
+    outbox_id = f"{operation_id}:upgrade-final"
+    target = {
+        "channel": channel, "message_id": "msg_confirm", "sender_id": "user_1",
+        "reply_context": {
+            "to_user_id": "user_1", "context_token": "synthetic_context", "group_id": "group_1",
+            "base": str(tmp_path), "state_dir": str(tmp_path / "wechat-state"),
+        },
+    }
+    payload = {"operation_type": "upgrade_now", "arguments": {"target_version": "1.2.111"}}
+    for key in (operation_id, "in_unrelated_receipt"):
+        store.save_preview(
+            operation_id=key, command_id=key, channel=channel, sender_id="user_1",
+            operation_type="upgrade_now", payload_hash=hash_operation_payload(payload),
+            payload=payload, preview={}, ttl_seconds=600,
+        )
+        assert store.mark_confirmed(key)
+        assert store.mark_terminal_with_outbox(
+            key, status="applied", result={"ok": True, "status": "applied", "target_version": "1.2.111"},
+            outbox_id=f"{key}:upgrade-final",
+            outbox_payload={
+                "operation_id": key, "receipt_target": target, "payload": payload,
+                "preview": {}, "result": {"ok": True, "target_version": "1.2.111"},
+                "status": "applied", "enabled": True,
+            },
+        )
+    unrelated = (store.get("in_unrelated_receipt"), store.get_operation_outbox("in_unrelated_receipt"))
+    initial_payload = store.get_outbox(outbox_id)["payload_json"]  # type: ignore[index]
+    started = {role: Event() for role in ("old", "new")}
+    release = {role: Event() for role in ("old", "new")}
+    sends: list[tuple[str, dict[str, Any]]] = []
+    settlements: list[dict[str, Any]] = []
+    forbidden_calls: list[str] = []
+
+    def forbidden(name):  # type: ignore[no-untyped-def]
+        def call(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            forbidden_calls.append(name)
+            raise AssertionError(name)
+        return call
+
+    monkeypatch.setattr(socket.socket, "connect", forbidden("socket.connect"))
+    monkeypatch.setattr(subprocess, "run", forbidden("subprocess.run"))
+    monkeypatch.setattr(upgrade_operations, "service_upgrade", forbidden("service_upgrade"))
+    real_dispatch = upgrade_operations._dispatch_final_receipt_outbox
+
+    def dispatch(**kwargs):  # type: ignore[no-untyped-def]
+        result = real_dispatch(**kwargs)
+        settlements.append(result)
+        return result
+
+    monkeypatch.setattr(upgrade_operations, "_dispatch_final_receipt_outbox", dispatch)
+
+    def client(role: str, outcome: str):  # type: ignore[no-untyped-def]
+        def send(**kwargs):  # type: ignore[no-untyped-def]
+            kwargs["before_send"]()
+            sends.append((role, {k: v for k, v in kwargs.items() if k != "before_send"}))
+            if role in started:
+                started[role].set()
+                assert release[role].wait(10), "test did not release the receipt client"
+            if outcome == "exception":
+                raise TimeoutError(f"synthetic {role} timeout")
+            if outcome == "failure" and channel == "feishu":
+                raise RuntimeError(f"synthetic {role} rejection")
+            return {"ok": outcome == "success", "reason": f"{role}_result", "message_id": f"{role}_reply"}
+        return send
+
+    def run(role: str, outcome: str):  # type: ignore[no-untyped-def]
+        send = client(role, outcome)
+        return upgrade_operations.run_confirmed_upgrade_operation(
+            operation_id=operation_id, audit_db=database, reply_fn=send, wechat_reply_fn=send,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        old = pool.submit(run, "old", old_result)
+        try:
+            assert started["old"].wait(10), "first worker did not reach the receipt client"
+            clock[0] = origin + timedelta(seconds=299)
+            assert store.claim_outbox(outbox_id) is None
+            clock[0] = origin + timedelta(seconds=301)
+            new = pool.submit(run, "new", new_result)
+            assert started["new"].wait(10), "second worker did not reclaim the receipt"
+            assert store.get_outbox(outbox_id)["attempts"] == 2  # type: ignore[index]
+            if settle_order == "new_first":
+                release["new"].set()
+                new_response = new.result(timeout=10)
+            current = (store.get_outbox(outbox_id), store.get(operation_id))
+            release["old"].set()
+            old_response = old.result(timeout=10)
+            after_old = (store.get_outbox(outbox_id), store.get(operation_id))
+            if settle_order == "old_first":
+                release["new"].set()
+                new_response = new.result(timeout=10)
+        finally:
+            release["old"].set()
+            release["new"].set()
+
+    assert after_old == current
+    old_settlement = settlements[0 if settle_order == "old_first" else 1]
+    assert old_settlement["ok"] is False and old_settlement["reason"] == "claim_superseded"
+    assert old_settlement["send_ok"] is (old_result == "success")
+    final = store.get_outbox(outbox_id)
+    operation = store.get(operation_id)
+    assert final is not None and operation is not None
+    assert final["status"] == ("sent" if new_result == "success" else "failed")
+    assert final["attempts"] == 2 and final["payload_json"] == initial_payload
+    assert final["receipt"]["ok"] is (new_result == "success")
+    assert final["receipt"]["attempts"] == (1 if new_result == "success" else 3)
+    assert bool(final["sent_at"]) is (new_result == "success")
+    assert operation["status"] == "applied" and operation["result"]["ok"] is True
+    assert operation["result"]["final_receipt"] == {
+        **final["receipt"], "outbox_id": outbox_id, "outbox_status": final["status"],
+    }
+    assert new_response["data"]["result"] == operation["result"]
+    assert old_response["ok"] is True and new_response["ok"] is True
+    assert (store.get("in_unrelated_receipt"), store.get_operation_outbox("in_unrelated_receipt")) == unrelated
+    identity_key = "uuid" if channel == "feishu" else "idempotency_key"
+    assert all(send[identity_key] == outbox_id for _, send in sends)
+    assert len({send["text"] for _, send in sends}) == 1
+    assert {role for role, _ in sends} == {"old", "new"}
+    sent_count = len(sends)
+    replay = run("replay", "success")
+    assert replay["ok"] is True
+    if new_result == "success":
+        assert len(sends) == sent_count and store.get_outbox(outbox_id) == final
+        assert store.get(operation_id) == operation
+    else:
+        assert len(sends) == sent_count + 1
+        assert store.get_outbox(outbox_id)["attempts"] == 3  # type: ignore[index]
+        assert store.get_outbox(outbox_id)["status"] == "sent"  # type: ignore[index]
+        assert store.get(operation_id)["result"]["final_receipt"]["ok"] is True  # type: ignore[index]
+    assert all(send[identity_key] == outbox_id for _, send in sends)
+    assert forbidden_calls == []
+
+
+@pytest.mark.parametrize("status", ["pending", "sending", "sent", "failed"])
+@pytest.mark.parametrize("ok", [True, False])
+def test_upgrade_receipt_completion_requires_sending_and_matching_generation(
+    tmp_path: Path, status: str, ok: bool,
+) -> None:
+    store = InboundOperationStore(tmp_path / "inbound.sqlite3")
+    operation_id = "in_completion_guard"
+    outbox_id = f"{operation_id}:upgrade-final"
+    store.save_preview(
+        operation_id=operation_id, command_id=operation_id, channel="feishu", sender_id="ou_1",
+        operation_type="upgrade_now", payload_hash="synthetic", payload={}, preview={}, ttl_seconds=600,
+    )
+    assert store.mark_confirmed(operation_id)
+    assert store.mark_terminal_with_outbox(
+        operation_id, status="applied", result={"ok": True}, outbox_id=outbox_id, outbox_payload={},
+    )
+    if status != "pending":
+        claim = store.claim_outbox(outbox_id)
+        assert claim is not None and claim["attempts"] == 1
+        if status in {"sent", "failed"}:
+            assert store.complete_outbox(
+                outbox_id, claim_attempts=1, receipt={"ok": status == "sent", "attempts": 37},
+            ) is not None
+    before = (store.get_outbox(outbox_id), store.get(operation_id))
+    assert before[0]["status"] == status  # type: ignore[index]
+    # Pending and terminal rows reject even their current counter; a sending
+    # row rejects an otherwise valid completion from another generation.
+    rejected_claim = 2 if status == "sending" else before[0]["attempts"]  # type: ignore[index]
+    assert store.complete_outbox(
+        outbox_id, claim_attempts=rejected_claim, receipt={"ok": ok, "attempts": 99},
+    ) is None
+    assert (store.get_outbox(outbox_id), store.get(operation_id)) == before
+    assert store.complete_outbox("missing", claim_attempts=1, receipt={"ok": ok}) is None
+    if status == "sending":
+        assert store.complete_outbox(
+            outbox_id, claim_attempts=1, receipt={"ok": ok, "attempts": 99},
+        ) is not None
+        final = store.get_outbox(outbox_id)
+        assert final is not None and final["status"] == ("sent" if ok else "failed")
+        assert final["attempts"] == 1 and final["receipt"]["attempts"] == 99
+        operation = store.get(operation_id)
+        assert operation is not None
+        assert operation["result"]["final_receipt"] == {
+            "ok": ok, "attempts": 99, "outbox_id": outbox_id, "outbox_status": final["status"],
+        }
+
+
 def test_inbound_upgrade_worker_recovers_pending_outbox_without_reapplying_upgrade(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
