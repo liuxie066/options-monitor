@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -873,9 +874,29 @@ def _operation_is_stale_active(
     if timeout_seconds <= 0:
         return False
     anchor = _operation_active_anchor(operation)
-    if anchor is None:
+    if anchor is not None and (now - anchor).total_seconds() < timeout_seconds:
+        return False
+    # Upgrade steps have individual budgets, not a one-hour total limit. The
+    # worker records its local PID before applying; age alone cannot reap it.
+    return not (status == "running" and _upgrade_worker_is_running(operation))
+
+
+def _upgrade_worker_is_running(operation: dict[str, Any]) -> bool:
+    if operation.get("operation_type") != "upgrade_now":
+        return False
+    result = operation.get("result") or {}
+    pid = result.get("worker_pid")
+    if type(pid) is not int or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
         return True
-    return (now - anchor).total_seconds() >= timeout_seconds
+    except OSError:
+        return False
+    return True
 
 
 def _operation_active_anchor(operation: dict[str, Any]) -> datetime | None:
