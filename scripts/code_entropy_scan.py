@@ -183,6 +183,8 @@ def scan(root: Path, selected: list[str], coverage=None, *, vulture_unused=None,
                 arguments[node.func.id].append(node)
             if isinstance(node, ast.ClassDef):
                 subclasses.update(base.id for base in node.bases if isinstance(base, ast.Name))
+    vulture_analyzed = set(vulture_unused.get("analyzed", ())) if vulture_unused is not None else set()
+    vulture_lines = vulture_unused.get("unused", {}) if vulture_unused is not None else {}
     findings, scores = [], []
     loc = code_loc = zero_refs = unused_config = unreachable = missed_branches = 0
     vulture_rejected = unmatched_complexity = 0
@@ -225,7 +227,9 @@ def scan(root: Path, selected: list[str], coverage=None, *, vulture_unused=None,
             if id(node) not in top or not node.name.startswith("_") or node.name.startswith("__"):
                 continue
             if words[node.name] == 1:
-                if vulture_unused is not None and node.lineno not in vulture_unused.get(path, ()):
+                corroborated = (vulture_unused is None or path not in vulture_analyzed
+                                or node.lineno in vulture_lines.get(path, ()))
+                if not corroborated:
                     vulture_rejected += 1
                 else:
                     zero_refs += 1
@@ -239,12 +243,13 @@ def scan(root: Path, selected: list[str], coverage=None, *, vulture_unused=None,
                              if runtime and span and span <= measured else None,
                              "not_public_api": node.name not in public if public is not None else None,
                              "not_entry_point": None if dynamic or node.decorator_list else True}
-                    if vulture_unused is not None:
+                    if vulture_unused is not None and path in vulture_analyzed:
                         facts["vulture_unused"] = True
                     facts["source_digest"] = digest(ast.dump(node, include_attributes=False))
                     findings.append(candidate("dead-code", path, name, node.lineno,
                         f"AST/text reference count=0; gates={facts}", high=dead_code(facts), facts=facts,
-                        tool="vulture+entropy-ast-v1" if vulture_unused is not None else "entropy-ast-v1"))
+                        tool="vulture+entropy-ast-v1" if vulture_unused is not None and path in vulture_analyzed
+                        else "entropy-ast-v1"))
             body = list(node.body)
             if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
                 body = body[1:]

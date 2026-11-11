@@ -329,7 +329,7 @@ def tool_runs(source, selected, execute):
                 if not match or match.group("kind") not in {"function", "method"}:
                     continue
                 unused.setdefault(Path(match.group("path")).as_posix(), set()).add(int(match.group("line")))
-            evidence["vulture"] = unused
+            evidence["vulture"] = {"analyzed": sorted(set(selected)), "unused": unused}
             tools[name]["execution"] = "corroborates or vetoes zero-reference dead-code candidates at 60% confidence"
             tools[name]["unused_symbols"] = sum(len(lines) for lines in unused.values())
             continue

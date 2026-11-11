@@ -588,7 +588,7 @@ def test_publication_failure_preserves_daily_cursor_and_reconciles_pending(tmp_p
 def test_vulture_corroboration_vetoes_uncorroborated_dead_candidates(tmp_path):
     put(tmp_path, "src/a.py", "def _confirmed():\n    return 1\n\ndef _vetoed():\n    return 2\n")
     coverage = {"src/a.py": {"executed_lines": [1], "missing_lines": [2, 4, 5], "missing_branches": []}}
-    metrics, rows = scan.scan(tmp_path, ["src/a.py"], coverage, vulture_unused={"src/a.py": {1}})
+    metrics, rows = scan.scan(tmp_path, ["src/a.py"], coverage, vulture_unused={"analyzed": ["src/a.py"], "unused": {"src/a.py": {1}}})
     dead = [row for row in rows if row["rule"] == "dead-code"]
     assert [row["identity"] for row in dead] == ["_confirmed"]
     assert dead[0]["high_confidence"] is True and dead[0]["facts"]["vulture_unused"] is True
@@ -596,6 +596,16 @@ def test_vulture_corroboration_vetoes_uncorroborated_dead_candidates(tmp_path):
     assert metrics["dead_code_vulture_rejected"] == 1
     assert metrics["dead_code_basis"] == "vulture+entropy-ast-v1"
     assert metrics["dead_code_symbols"] == 1
+
+
+def test_vulture_does_not_veto_paths_it_did_not_analyze(tmp_path):
+    put(tmp_path, "src/a.py", "def _maybe_dead():\n    return 1\n")
+    metrics, rows = scan.scan(tmp_path, ["src/a.py"],
+                              vulture_unused={"analyzed": [], "unused": {}})
+    dead = [row for row in rows if row["rule"] == "dead-code"]
+    assert metrics["dead_code_candidates"] == 1 and metrics["dead_code_vulture_rejected"] == 0
+    assert len(dead) == 1 and "vulture_unused" not in dead[0]["facts"]
+    assert dead[0]["tool"] == "entropy-ast-v1"
 
 
 def test_radon_complexity_is_authoritative_with_per_function_fallback(tmp_path):
@@ -629,7 +639,7 @@ def test_tool_runs_parses_vulture_and_radon_evidence(tmp_path, monkeypatch):
 
     monkeypatch.setattr(review, "tool_command", lambda name: [f"fake-{name}"])
     tools, findings, evidence = review.tool_runs(tmp_path, ["src/a.py"], execute)
-    assert evidence["vulture"] == {"src/a.py": {1}}
+    assert evidence["vulture"] == {"analyzed": ["src/a.py"], "unused": {"src/a.py": {1}}}
     assert evidence["radon"] == {"src/a.py": {1: 7}}
     assert tools["vulture"]["unused_symbols"] == 1
     assert tools["radon"]["measured_functions"] == 1
