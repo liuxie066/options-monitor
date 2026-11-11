@@ -1754,6 +1754,213 @@ def test_inbound_operation_store_fails_stale_confirmed_and_running_records(tmp_p
     assert store.get("in_stale_running")["result"]["previous_status"] == "running"  # type: ignore[index]
 
 
+@pytest.mark.parametrize(("queued_seconds", "running_seconds"), [(0, 3600), (0, 3610), (3500, 110)])
+@pytest.mark.parametrize("outcome", ["success", "failure", "exception"])
+def test_pending_query_preserves_live_upgrade_and_final_receipt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    queued_seconds: int, running_seconds: int, outcome: str,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    import socket
+    from threading import Event
+
+    from src.application.bot.control import operation_store, upgrade_operations
+    from src.application.bot.control.operation_diagnostics import collect_pending_operations
+    from src.application.bot.control.operation_signature import hash_operation_payload
+
+    _enable_inbound_upgrade_write(monkeypatch)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_test_app")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "cli_test_secret")
+    origin = datetime(2026, 5, 30, tzinfo=timezone.utc)
+    clock = [origin]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[no-untyped-def]
+            return clock[0] if tz is None else clock[0].astimezone(tz)
+
+    monkeypatch.setattr(operation_store, "datetime", Clock)
+    monkeypatch.setattr(operation_store, "utc_now_iso", lambda: clock[0].isoformat())
+    database = tmp_path / "inbound.sqlite3"
+    store = InboundOperationStore(database)
+    operation_id = "in_live_upgrade"
+    payload = {
+        "operation_type": "upgrade_now",
+        "arguments": {
+            "target_version": "1.2.111", "repo_root": str(tmp_path / "current"),
+            "runtime_root": str(tmp_path / "runtime"),
+        },
+        "receipt_target": {"channel": "feishu", "message_id": "msg_confirm"},
+    }
+    for key in (operation_id, "in_unrelated"):
+        store.save_preview(
+            operation_id=key, command_id=key, channel="feishu", sender_id="ou_1",
+            conversation_id="feishu:chat_a:ou_1", operation_type="upgrade_now",
+            payload_hash=hash_operation_payload(payload), payload=payload,
+            preview={"upgrade": {"ok": True, "planned_operations": ["upgrade"]}},
+            ttl_seconds=600, created_at=origin.isoformat(),
+        )
+    store.mark_failed("in_unrelated", result={"status": "failed", "reason": "unrelated"})
+    unrelated = store.get("in_unrelated")
+    assert store.mark_confirmed(operation_id) is True
+    clock[0] = origin + timedelta(seconds=queued_seconds)
+    started, release = Event(), Event()
+    applied: list[dict[str, Any]] = []
+    replies: list[dict[str, Any]] = []
+    forbidden: list[str] = []
+
+    def blocked(name):  # type: ignore[no-untyped-def]
+        def call(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            forbidden.append(name)
+            raise AssertionError(name)
+        return call
+
+    monkeypatch.setattr(socket.socket, "connect", blocked("socket.connect"))
+    monkeypatch.setattr(subprocess, "run", blocked("subprocess.run"))
+
+    def upgrade(**kwargs):  # type: ignore[no-untyped-def]
+        applied.append(kwargs)
+        started.set()
+        assert release.wait(10), "test did not release the upgrade"
+        if outcome == "exception":
+            raise RuntimeError("synthetic upgrade failure")
+        return {
+            "ok": outcome == "success", "status": "upgraded" if outcome == "success" else "blocked",
+            "changed": outcome == "success", "current_version": "1.2.110", "target_version": "1.2.111",
+        }
+
+    def run():  # type: ignore[no-untyped-def]
+        try:
+            return upgrade_operations.run_confirmed_upgrade_operation(
+                operation_id=operation_id, audit_db=database,
+                reply_fn=lambda **kwargs: replies.append(kwargs) or {"ok": True, "message_id": "final_reply"},
+            )
+        except AgentToolError as exc:
+            return exc
+
+    monkeypatch.setattr(upgrade_operations, "service_upgrade", upgrade)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(run)
+        try:
+            assert started.wait(10), "worker did not enter the upgrade adapter"
+            running = store.get(operation_id)
+            assert running is not None and running["status"] == "running"
+            assert running["result"]["worker_pid"] == os.getpid()
+            clock[0] = origin + timedelta(seconds=3599)
+            collect_pending_operations(audit_db=str(database), channel="feishu", sender_id="ou_1")
+            assert store.get(operation_id) == running
+            clock[0] = origin + timedelta(seconds=queued_seconds + running_seconds)
+            for _ in range(2):
+                pending = collect_pending_operations(audit_db=str(database), channel="feishu", sender_id="ou_1")
+            after_query = store.get(operation_id)
+        finally:
+            release.set()
+        result = future.result(timeout=10)
+
+    assert after_query == running
+    assert pending["pending_operations"] == []
+    final = store.get(operation_id)
+    expected_status = "applied" if outcome == "success" else "failed"
+    assert final is not None and final["status"] == expected_status
+    if outcome == "exception":
+        assert isinstance(result, AgentToolError) and result.code == "INTERNAL_ERROR"
+        assert final["result"]["error"] == "RuntimeError"
+        assert final["result"]["message"] == "synthetic upgrade failure"
+    else:
+        assert isinstance(result, dict) and result["ok"] is (outcome == "success")
+    outbox = store.get_operation_outbox(operation_id)
+    assert outbox is not None and outbox["status"] == "sent" and outbox["attempts"] == 1
+    with sqlite3.connect(database) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM inbound_operation_outbox WHERE operation_id = ?", (operation_id,),
+        ).fetchone()[0] == 1
+    assert final["result"]["final_receipt"]["ok"] is True
+    assert len(replies) == 1 and replies[0]["uuid"] == f"{operation_id}:upgrade-final"
+    replay = run()
+    assert isinstance(replay, dict) and replay["data"]["status"] == expected_status
+    assert store.get_operation_outbox(operation_id) == outbox
+    assert store.get(operation_id) == final and store.get("in_unrelated") == unrelated
+    assert len(applied) == 1 and applied[0]["confirm"] is True
+    assert applied[0]["repo_root"] == tmp_path / "current"
+    assert applied[0]["runtime_root"] == tmp_path / "runtime"
+    assert len(replies) == 1 and forbidden == []
+
+
+@pytest.mark.parametrize("operation_type", ["upgrade_now", "manual_trade_open"])
+@pytest.mark.parametrize("status", ["confirmed", "running"])
+@pytest.mark.parametrize("process_state", ["alive", "missing", "denied"])
+def test_stale_operation_recovery_checks_only_running_upgrade_workers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, operation_type: str, status: str, process_state: str,
+) -> None:
+    from src.application.bot.control import operation_store
+
+    store = InboundOperationStore(tmp_path / "inbound.sqlite3")
+    operation_id = "in_process_recovery"
+    origin = datetime(2026, 5, 30, tzinfo=timezone.utc)
+    monkeypatch.setattr(operation_store, "utc_now_iso", lambda: origin.isoformat())
+    store.save_preview(
+        operation_id=operation_id, command_id=operation_id, channel="feishu", sender_id="ou_1",
+        operation_type=operation_type, payload_hash="synthetic", payload={}, preview={},
+        ttl_seconds=600, created_at=origin.isoformat(),
+    )
+    assert store.mark_confirmed(operation_id, result={"worker_pid": 12345})
+    if status == "running":
+        assert store.mark_running(operation_id, result={"status": "running", "worker_pid": 12345})
+    calls: list[tuple[int, int]] = []
+
+    def probe(pid: int, signal: int) -> None:
+        calls.append((pid, signal))
+        if process_state == "missing":
+            raise ProcessLookupError("worker exited")
+        if process_state == "denied":
+            raise PermissionError("worker belongs to another user")
+
+    monkeypatch.setattr(operation_store.os, "kill", probe)
+    recovered = store.reconcile_stale_operations(now=origin + timedelta(hours=2))
+    protected = status == "running" and operation_type == "upgrade_now" and process_state != "missing"
+    current = store.get(operation_id)
+    assert current is not None and current["status"] == ("running" if protected else "failed")
+    assert recovered == {"expired_previewed": 0, "failed_stale": int(not protected)}
+    assert calls == ([(12345, 0)] if status == "running" and operation_type == "upgrade_now" else [])
+    if not protected:
+        assert current["result"]["reason"] == "operation_stale_after_confirmation"
+        assert not store.mark_terminal_with_outbox(
+            operation_id, status="applied", result={"ok": True},
+            outbox_id=f"{operation_id}:upgrade-final", outbox_payload={},
+        )
+        assert store.get_operation_outbox(operation_id) is None
+        assert store.get(operation_id) == current
+
+
+@pytest.mark.parametrize("worker_pid", [None, 0, -1, True, "12345"])
+def test_stale_upgrade_without_a_valid_worker_pid_keeps_legacy_recovery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, worker_pid: Any,
+) -> None:
+    from src.application.bot.control import operation_store
+
+    store = InboundOperationStore(tmp_path / "inbound.sqlite3")
+    origin = datetime(2026, 5, 30, tzinfo=timezone.utc)
+    monkeypatch.setattr(operation_store, "utc_now_iso", lambda: origin.isoformat())
+    store.save_preview(
+        operation_id="in_legacy", command_id="in_legacy", channel="feishu", sender_id="ou_1",
+        operation_type="upgrade_now", payload_hash="synthetic", payload={}, preview={},
+        ttl_seconds=600, created_at=origin.isoformat(),
+    )
+    assert store.mark_confirmed("in_legacy")
+    assert store.mark_running("in_legacy", result={"worker_pid": worker_pid})
+    probes: list[tuple[Any, ...]] = []
+
+    def forbidden(*args):  # type: ignore[no-untyped-def]
+        probes.append(args)
+        raise AssertionError("invalid PIDs must not reach the OS")
+
+    monkeypatch.setattr(operation_store.os, "kill", forbidden)
+    assert store.reconcile_stale_operations(now=origin + timedelta(hours=2))["failed_stale"] == 1
+    assert store.get("in_legacy")["status"] == "failed"  # type: ignore[index]
+    assert probes == []
+
+
 def test_inbound_manual_trade_update_pending_preview_then_confirm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import src.application.ledger.repository as ledger_repository
 
