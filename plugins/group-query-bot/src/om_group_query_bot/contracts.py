@@ -12,7 +12,10 @@ import math
 import re
 from typing import Any
 
-from domain.domain.symbol_identity import canonical_symbol, symbol_market
+from domain.domain.symbol_identity import (
+    looks_like_option_contract_label,
+    resolve_symbol_identity,
+)
 
 
 REQUEST_SCHEMA = "group_query_request.v1"
@@ -135,8 +138,8 @@ class NormalizedRequest:
 
     @property
     def market(self) -> str:
-        symbol = self.symbol
-        return symbol.split(".", 1)[0] if symbol else ""
+        identity = resolve_symbol_identity(self.symbol)
+        return identity.market if identity is not None else ""
 
 
 def _reject(message: str) -> ContractError:
@@ -230,21 +233,19 @@ def utc_datetime(value: Any, name: str) -> datetime:
 
 
 def canonical_market_symbol(value: Any) -> str:
-    """Return ``{US|HK}.{canonical code}`` or reject the symbol."""
+    """Return the shared canonical US/HK symbol (``NVDA``, ``0700.HK``).
+
+    Entrypoints accept the spelling the user or model supplied (bare code,
+    alias or an old ``US.``/``HK.`` prefix) and persist only the canonical
+    form owned by :mod:`domain.domain.symbol_identity`.
+    """
     raw = _text(value, "symbol")
-    if raw.count(".") != 1:
-        raise _reject("symbol must use a US. or HK. market prefix")
-    prefix, code = raw.split(".", 1)
-    market = prefix.upper()
-    if market not in ALL_MARKETS or not code:
-        raise _reject("symbol must use a US. or HK. market prefix")
-    canonical = canonical_symbol(raw)
-    if not canonical:
-        raise _reject("symbol is not a recognized security")
-    if symbol_market(canonical) != market:
-        raise _reject("symbol market prefix contradicts its canonical identity")
-    bare = canonical[:-3] if canonical.endswith(".HK") else canonical
-    return f"{market}.{bare}"
+    if looks_like_option_contract_label(raw):
+        raise _reject("symbol must be the underlier; put the option contract in contract")
+    identity = resolve_symbol_identity(raw)
+    if identity is None or identity.market not in ALL_MARKETS:
+        raise _reject(f"symbol is not a recognized US or HK security: {raw}")
+    return identity.canonical
 
 
 def _option_contract(value: Any) -> dict[str, Any]:

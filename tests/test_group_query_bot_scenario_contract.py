@@ -80,7 +80,28 @@ def _caches(now=NOW):
     return {key: discovery}, {key: spot}
 
 
-def _build(tmp_path, scenario, *, now=NOW):
+def _hk_caches(now=NOW):
+    trading_date = opend_utils.get_trading_date("HK").isoformat()
+    key = _expiration_discovery_cache_key(
+        symbol="0700.HK", source="futu", host="127.0.0.1", port=11111,
+        trading_date=trading_date)
+    discovery = OptionExpirationDiscoveryResult(
+        outcome="success_rows", reason_code=None, expirations=list(EXPIRATIONS),
+        observed_at_utc=now.isoformat(), completed_at_utc=now.isoformat(),
+        request_identity={"symbol": "0700.HK", "underlier": "HK.00700",
+                          "source": "futu", "host": "127.0.0.1", "port": 11111,
+                          "trading_date": trading_date},
+        error=None)
+    spot = OpeningUnderlierObservation(
+        schema_version=OPENING_UNDERLIER_OBSERVATION_SCHEMA,
+        code="HK.00700", market="HK", last_price=350.0,
+        update_time=now.isoformat(), observed_at_utc=now.isoformat(),
+        age_seconds=1.0, market_state="NORMAL", sec_status="NORMAL",
+        suspension=False, status="ready", reason_code=None)
+    return {key: discovery}, {key: spot}
+
+
+def _build(tmp_path, scenario, *, now=NOW, caches=None):
     # The planner derives DTE windows from the market trading date, so pin it to
     # the fixture clock instead of the live wall clock; otherwise these
     # assertions drift by one day whenever a US trading date rolls over.
@@ -89,7 +110,9 @@ def _build(tmp_path, scenario, *, now=NOW):
 
     with patch.object(opend_utils, "get_trading_date", market_date), \
             patch.object(opend_symbol_chain_fetching, "get_trading_date", market_date):
-        discovery, spot = _caches(now)
+        # ``caches`` is a callable so the pinned clock also governs the
+        # cache-key computation.
+        discovery, spot = (caches or _caches)(now)
         return build_user_provided_scenario_plan(
             scenario=scenario, policy_sha256=POLICY_SHA,
             strategy_version="remaining_yield_capture.v3",
@@ -131,7 +154,9 @@ def test_roll_plan_rejects_wrong_direction_bounds_and_premium(tmp_path):
                                                    "currency": "USD"}})
     _reject(tmp_path, {**base, "opened_at": "2026-11-01"})
     _reject(tmp_path, {**base, "position": {**base["position"], "side": "long"}})
-    _reject(tmp_path, {**base, "position": {**base["position"], "symbol": "U.S.NVDA"}})
+    _reject(tmp_path, {**base, "position": {**base["position"], "symbol": "HK.NVDA"}})
+    _reject(tmp_path, {**base, "position": {**base["position"],
+                                            "symbol": "US.NVDA270115C190000"}})
     _reject(tmp_path, {**base, "position": {**base["position"], "contracts": 0}})
     _reject(tmp_path, {**base, "limit": 0})
     _reject(tmp_path, {**base, "limit": 51})
@@ -154,7 +179,7 @@ def test_offline_plan_is_strict_and_carries_no_account_scope(tmp_path):
     plan = _build(tmp_path, _scenario())
     validated = validate_user_provided_scenario_plan(plan)
     assert validated["operation"] == "close"
-    assert validated["symbol"] == "US.NVDA"
+    assert validated["symbol"] == "NVDA"
     assert validated["fetch_symbol"] == "NVDA"
     assert validated["as_of_market_date"] == "2026-11-10"
     assert validated["original_contract"] == {
@@ -175,6 +200,31 @@ def test_offline_plan_is_strict_and_carries_no_account_scope(tmp_path):
         **plan["global_required_data_plan"], "plan_id": "0" * 64}}
     with pytest.raises(ScenarioInputError):
         validate_user_provided_scenario_plan(tampered)
+
+
+def test_hk_scenario_plan_uses_the_shared_canonical_symbol(tmp_path):
+    scenario = {
+        "operation": "close", "input_id": "input-hk",
+        "input_as_of_utc": (NOW - timedelta(seconds=30)).isoformat(),
+        "position": {
+            "symbol": "HK.0700",
+            "contract": {"option_type": "put", "expiration": "2026-12-18",
+                         "strike": 320.0},
+            "side": "short", "contracts": 1,
+        },
+        "opening_premium": {"amount": 8.0, "unit": "per_share",
+                            "currency": "HKD"},
+    }
+    plan = validate_user_provided_scenario_plan(
+        _build(tmp_path, scenario, caches=_hk_caches))
+    assert plan["symbol"] == "0700.HK"
+    assert plan["fetch_symbol"] == "0700.HK"
+    assert plan["market"] == "HK"
+    assert plan["as_of_market_date"] == "2026-11-10"
+    assert plan["original_contract"] == {
+        "option_type": "put", "expiration": "2026-12-18", "strike": 320.0}
+    index = scenario_requirement_index(plan)
+    assert index["symbol"] == "0700.HK"
     tampered = {**plan, "requirements": []}
     with pytest.raises(ScenarioInputError):
         validate_user_provided_scenario_plan(tampered)
@@ -239,7 +289,7 @@ def test_roll_plan_carries_bounded_replacement_scope(tmp_path):
 def test_requirement_index_returns_the_exact_fetch_identity(tmp_path):
     plan = _build(tmp_path, _scenario())
     index = scenario_requirement_index(plan)
-    assert index["symbol"] == "US.NVDA"
+    assert index["symbol"] == "NVDA"
     assert index["plan_id"] == plan["global_required_data_plan"]["plan_id"]
     assert index["fetch_binding"] == plan["expected_fetch_contract"]["fetch_binding"]
     assert "accounts" not in index

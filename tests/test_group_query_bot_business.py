@@ -163,9 +163,9 @@ def test_scenario_evaluation_reports_close_coverage_and_no_identity(tmp_path):
     assert result["fee_model"]["model_id"] == "futu_option_fee"
     assert result["fee_model"]["estimated_close_fee"] > 0
     assert result["quote"]["bid"] == 1.10 and result["quote"]["ask"] == 1.20
-    assert result["symbol"] == "US.NVDA" and result["currency"] == "USD"
+    assert result["symbol"] == "NVDA" and result["currency"] == "USD"
     assert "account" not in result and "position_lot_id" not in result
-    assert result["position"]["symbol"] == "US.NVDA"
+    assert result["position"]["symbol"] == "NVDA"
     assert result["position"]["contracts"] == 2
 
 

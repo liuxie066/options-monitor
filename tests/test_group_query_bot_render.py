@@ -1,7 +1,15 @@
 """Renderer keeps numeric authority and refuses inconsistent conditional results."""
 from __future__ import annotations
 
-from om_group_query_bot.render import render_close, render_roll
+from om_group_query_bot.render import (
+    CLARIFICATION_NOTE,
+    effective_filter_line,
+    finalize_clarification,
+    render_candidates,
+    render_close,
+    render_roll,
+    strip_clarification_note,
+)
 
 
 def _roll(**overrides):
@@ -243,3 +251,49 @@ def test_close_and_roll_render_the_evaluation_time_in_the_market_zone():
     assert zone_text in close
     roll = render_roll(_roll(market="US"))
     assert zone_text in roll
+
+
+def test_clarification_note_is_appended_exactly_once():
+    text = finalize_clarification(f"请补充张数。\n\n{CLARIFICATION_NOTE}")
+    assert text == f"请补充张数。\n\n{CLARIFICATION_NOTE}"
+    assert text.count(CLARIFICATION_NOTE) == 1
+
+
+def test_strip_clarification_note_removes_every_occurrence_and_trailing_blanks():
+    messy = f"A{CLARIFICATION_NOTE}\nB\n\n{CLARIFICATION_NOTE}\n\n  "
+    assert strip_clarification_note(messy) == "A\nB"
+    assert strip_clarification_note(None) == ""
+
+
+def test_candidate_render_echoes_effective_filters_with_their_source():
+    data = {
+        "outcome": "found", "status": "success",
+        "effective_filters": {
+            "dte": [20, 60], "dte_source": "request",
+            "min_abs_delta": 0.1, "max_abs_delta": 0.25,
+            "max_abs_delta_source": "public_policy",
+            "strike": 180.0, "strike_source": "public_policy",
+            "limit": 10,
+        },
+        "candidates": [], "displayed": 0, "omitted": 0, "reason_codes": [],
+    }
+    line = effective_filter_line(data)
+    assert line == ("筛选：期限 20–60 天（用户指定）；Delta 绝对值 0.10–0.25"
+                    "（公共策略默认）；行权价 180.00（公共策略默认）；展示上限 10")
+    assert line in render_candidates(data)
+    assert effective_filter_line({"effective_filters": None}) is None
+
+
+def test_delta_filter_echoes_the_applied_range_not_the_requested_range():
+    # The owner keeps the requested range verbatim in abs_delta_range while
+    # the applied range is the intersection with the public cap.
+    filters = {
+        "abs_delta_range": [0.2, 0.4], "min_abs_delta": 0.2,
+        "max_abs_delta": 0.25, "max_abs_delta_source": "request",
+    }
+    line = effective_filter_line({"effective_filters": filters})
+    assert line == ("筛选：Delta 绝对值 0.20–0.25"
+                    "（用户指定，受公共策略上限约束）")
+    uncapped = {**filters, "abs_delta_range": [0.2, 0.25]}
+    assert effective_filter_line({"effective_filters": uncapped}) == (
+        "筛选：Delta 绝对值 0.20–0.25（用户指定）")

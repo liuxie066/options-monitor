@@ -161,13 +161,13 @@ def _agent(tmp_path, *, model, api=None, settings=None, **overrides):
     return agent, conversations
 
 
-QUOTE_ARGUMENTS = {"symbol": "US.NVDA"}
+QUOTE_ARGUMENTS = {"symbol": "NVDA"}
 
 
 def _roll_arguments(*, limit=10, contracts=2):
     return {
         "position": {
-            "symbol": "US.NVDA",
+            "symbol": "NVDA",
             "contract": {"option_type": "put", "expiration": "2026-12-18",
                          "strike": 180.0},
             "side": "short",
@@ -380,10 +380,10 @@ def test_only_the_five_fixed_tools_exist_and_unknown_calls_are_refused(tmp_path)
     assert "未执行实时查询" in reply.text
 
 
-def test_all_symbol_inputs_require_a_market_prefix():
+def test_symbol_schema_accepts_user_spelling():
     from om_group_query_bot.agent import SYSTEM_PROMPT
 
-    assert "不得传裸代码" in SYSTEM_PROMPT
+    assert "不要要求用户提供市场前缀" in SYSTEM_PROMPT
     symbol_fields = []
     def walk(schema):
         for name, prop in (schema.get("properties") or {}).items():
@@ -394,7 +394,7 @@ def test_all_symbol_inputs_require_a_market_prefix():
     for tool in TOOLS:
         walk(tool["input_schema"])
     assert len(symbol_fields) == 5
-    assert all("必须带市场前缀" in field.get("description", "")
+    assert all("不要追问市场前缀" in field.get("description", "")
                for field in symbol_fields)
 
 
@@ -645,3 +645,124 @@ def test_reply_failure_after_send_is_outcome_unknown(tmp_path):
 
     assert result["status"] == "outcome_unknown"
     assert service.deliveries.counts(NOW) == {"outcome_unknown": 1}
+
+
+def test_clarification_note_is_not_accumulated_across_turns(tmp_path):
+    from om_group_query_bot.render import CLARIFICATION_NOTE
+
+    model = _ScriptedModel([
+        # Worst case: the model echoes a note it saw in older history.
+        _text_response(f"请补充张数。\n\n{CLARIFICATION_NOTE}"),
+    ])
+    agent, conversations = _agent(tmp_path, model=model)
+    scope = _event().scope_sha256("gq")
+    conversations.append_message(
+        scope_sha256=scope, turn_id="legacy", seq=0, role="user",
+        content="帮我看看平仓", now=NOW, source_id="om_legacy",
+        source_expiry=NOW + timedelta(hours=24))
+    conversations.append_message(
+        scope_sha256=scope, turn_id="legacy", seq=1, role="assistant",
+        content=f"请补充DTE。\n\n{CLARIFICATION_NOTE}", now=NOW,
+        source_id="om_legacy", source_expiry=NOW + timedelta(hours=24))
+
+    reply = agent.handle_event(_event(), "NVDA 180 put 2 张")
+
+    assert reply.text.count(CLARIFICATION_NOTE) == 1
+    assert reply.text.startswith("请补充张数。")
+    # The replayed history must not carry the note into the next prompt.
+    replayed = [item for item in model.calls[0]["messages"]
+                if CLARIFICATION_NOTE in str(item.get("content") or "")]
+    assert replayed == []
+    # Nor is the note persisted, so it cannot be copied back into context.
+    turns = conversations.context_turns(
+        scope, NOW + timedelta(seconds=1), max_turns=10, max_tokens=100000,
+        estimate=_estimate)
+    assert all(CLARIFICATION_NOTE not in item["content"]
+               for turn in turns if turn["turn_id"] != "legacy"
+               for item in turn["messages"])
+
+
+def test_legacy_tool_result_replays_as_context_not_assistant_prose(tmp_path):
+    model = _ScriptedModel([_text_response("张数是多少？")])
+    agent, conversations = _agent(tmp_path, model=model)
+    scope = _event().scope_sha256("gq")
+    legacy = json.dumps({"candidates": [{"contract_symbol": "NVDA270115P160000"}],
+                         "displayed": 1, "omitted": 0})
+    conversations.append_message(
+        scope_sha256=scope, turn_id="legacy", seq=0, role="user",
+        content="有什么候选", now=NOW, source_id="om_legacy",
+        source_expiry=NOW + timedelta(hours=24))
+    conversations.append_message(
+        scope_sha256=scope, turn_id="legacy", seq=1, role="tool_result",
+        content=legacy, now=NOW, source_id="om_legacy",
+        source_expiry=NOW + timedelta(hours=24))
+    conversations.append_message(
+        scope_sha256=scope, turn_id="legacy", seq=2, role="assistant",
+        content="有候选，见上。", now=NOW, source_id="om_legacy",
+        source_expiry=NOW + timedelta(hours=24))
+
+    agent.handle_event(_event(), "继续")
+
+    messages = model.calls[0]["messages"]
+    assert not any(item["role"] == "assistant" and "candidates" in
+                   str(item.get("content") or "") for item in messages)
+    context = [item for item in messages if item["role"] == "user"
+               and str(item.get("content") or "").startswith(
+                   "[历史查询结果，仅供指代，不要复述]")]
+    assert len(context) == 1
+    assert legacy in context[0]["content"]
+
+
+def test_tool_result_history_replays_as_a_real_tool_exchange(tmp_path):
+    model = _ScriptedModel([
+        # The model may keep using an old market prefix; only the normalized
+        # parameters are persisted and replayed.
+        _tool_response("query_quotes", {"symbol": "US.NVDA"}),
+        _text_response(""),
+        _text_response("张数是多少？"),
+    ])
+    agent, _ = _agent(tmp_path, model=model)
+
+    first = agent.handle_event(_event(message_id="om_1"), "NVDA 现价")
+    agent.handle_event(_event(message_id="om_2"), "继续")
+
+    messages = model.calls[-1]["messages"]
+    calls = [item for item in messages
+             if item["role"] == "assistant" and item.get("tool_calls")]
+    assert [item["tool_calls"][0]["id"] for item in calls] == ["hist_0_1"]
+    assert calls[0]["tool_calls"][0]["function"]["name"] == "query_quotes"
+    replayed = json.loads(calls[0]["tool_calls"][0]["function"]["arguments"])
+    assert replayed == {"symbol": "NVDA"}
+    assert not any("US.NVDA" in json.dumps(item, ensure_ascii=False)
+                   for item in messages)
+    results = [item for item in messages
+               if item["role"] == "tool" and item["tool_call_id"] == "hist_0_1"]
+    assert len(results) == 1
+    assert json.loads(results[0]["content"])["method"] == "query_quotes"
+    assert not any("[历史查询结果" in str(item.get("content") or "")
+                   for item in messages)
+    # Result turns are not clarification turns: the disclaimer belongs to
+    # clarification replies only.
+    from om_group_query_bot.render import CLARIFICATION_NOTE
+    assert CLARIFICATION_NOTE not in first.text
+
+
+def test_optional_tool_parameters_declare_defaults():
+    limit_defaults = []
+    optional_descriptions = []
+
+    def walk(schema):
+        for name, prop in (schema.get("properties") or {}).items():
+            if name == "limit":
+                limit_defaults.append(prop)
+            elif (name in {"dte", "strike", "abs_delta_range", "opened_at"}
+                  and "description" in prop):
+                optional_descriptions.append(prop["description"])
+            elif isinstance(prop, dict) and "properties" in prop:
+                walk(prop)
+
+    for tool in TOOLS:
+        walk(tool["input_schema"])
+    assert len(limit_defaults) == 3
+    assert all(field.get("default") == 10 for field in limit_defaults)
+    assert all("可选" in text for text in optional_descriptions)

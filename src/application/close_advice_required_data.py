@@ -23,7 +23,12 @@ from domain.domain.fetch_source import (
 )
 from domain.domain.ledger.position_fields import normalize_account
 from domain.domain.option_position_identity import normalize_broker
-from domain.domain.symbol_identity import canonical_symbol, symbol_market
+from domain.domain.symbol_identity import (
+    canonical_symbol,
+    looks_like_option_contract_label,
+    resolve_symbol_identity,
+    symbol_market,
+)
 from domain.domain.trade_contract_identity import (
     contract_key,
     normalize_contract_expiration,
@@ -932,17 +937,12 @@ def _scenario_contract(value: Any) -> dict[str, Any]:
 
 def _scenario_market_symbol(value: Any) -> tuple[str, str]:
     text = _scenario_text(value, "symbol")
-    if text.count(".") != 1:
-        raise _scenario_error("scenario symbol must use a US. or HK. market prefix")
-    prefix, code = text.split(".", 1)
-    market = prefix.upper()
-    if market not in MARKET_TIMEZONES or not code:
-        raise _scenario_error("scenario symbol must use a US. or HK. market prefix")
-    canonical = canonical_symbol(text)
-    if not canonical or symbol_market(canonical) != market:
-        raise _scenario_error("scenario symbol identity is inconsistent")
-    bare = canonical[:-3] if canonical.endswith(".HK") else canonical
-    return market, f"{market}.{bare}"
+    if looks_like_option_contract_label(text):
+        raise _scenario_error("scenario symbol must be the underlier")
+    identity = resolve_symbol_identity(text)
+    if identity is None or identity.market not in MARKET_TIMEZONES:
+        raise _scenario_error("scenario symbol is not a recognized US or HK security")
+    return identity.market, identity.canonical
 
 
 def _scenario_policy_digest(
