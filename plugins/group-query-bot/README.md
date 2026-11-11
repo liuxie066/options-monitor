@@ -15,6 +15,26 @@
 
 尚未发布的开发工作区使用以上源码安装。发布后的官方托管安装沿用 `om plugins install group-query-bot --confirm` 的精确 Release/资产校验，不用旧 Release catalog 启动新插件预检。
 
+### worktree 里的测试环境
+
+主仓库 `.venv` 里安装的 `om_group_query_bot` 可能来自另一个 checkout（见
+`site-packages/om_group_query_bot_plugin-*.dist-info/direct_url.json`），在
+worktree 里直接跑测试会导入旧副本。为当前 worktree 建独立环境，并让插件包
+跟随本树源码：
+
+```bash
+python3 -m venv --system-site-packages .venv
+./.venv/bin/pip install -r requirements/dev.txt -c constraints/dev.txt
+SP=$(echo .venv/lib/python*/site-packages)
+rm -rf "$SP/om_group_query_bot"
+ln -s "$PWD/plugins/group-query-bot/src/om_group_query_bot" "$SP/om_group_query_bot"
+./.venv/bin/python -m pytest tests/test_group_query_bot_*.py -q -p no:cacheprovider
+```
+
+`pip install` 保留 distribution 元数据（加载器会校验 distribution 与版本），
+符号链接让后续源码编辑无需重装。其余插件按 `requirements/dev.txt` 的副本安装，
+preflight 等跨插件测试因此可用。
+
 预检配置为独立 JSON，字段必须完整且不能增加其他段：
 
 ```json

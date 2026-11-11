@@ -413,21 +413,55 @@ def test_host_request_identity_is_not_model_supplied(tmp_path):
     assert "未执行实时查询" in reply.text
 
 
-def test_rendered_block_is_authoritative_over_model_prose(tmp_path):
+def test_invented_number_is_rejected_and_the_model_rewrites(tmp_path):
     model = _ScriptedModel([
         _tool_response("query_quotes", QUOTE_ARGUMENTS, "call_1"),
         _text_response("刚才看到的价格是 999.99。"),
+        _text_response("NVDA 最新价 185.0000，买一 184.9000 / 卖一 185.1000。"),
     ])
     agent, _ = _agent(tmp_path, model=model, api=_FakeAPI())
 
     reply = agent.handle_event(_event(), "NVDA 现价")
 
     assert reply.status == "ok"
+    # The first narration invented a number; the host asked for a rewrite and
+    # sent the corrected model reply without appending a structured block.
+    assert reply.text == "NVDA 最新价 185.0000，买一 184.9000 / 卖一 185.1000。"
+    assert "999.99" not in reply.text
+    assert reply.reason_codes == ("reply_guard_retry",)
+    correction = model.calls[2]["messages"][-1]
+    assert correction["role"] == "user"
+    assert "999.99" in correction["content"]
+
+
+def test_second_guard_failure_falls_back_to_host_wording(tmp_path):
+    model = _ScriptedModel([
+        _tool_response("query_quotes", QUOTE_ARGUMENTS, "call_1"),
+        _text_response("价格是 999.99。"),
+        _text_response("价格是 999.98。"),
+    ])
+    agent, _ = _agent(tmp_path, model=model, api=_FakeAPI())
+
+    reply = agent.handle_event(_event(), "NVDA 现价")
+
+    assert reply.status == "ok"
+    assert "reply_guard_fallback" in reply.reason_codes
     assert "185.0000" in reply.text
-    # The renderer's block is appended after the model prose and carries every
-    # key number; the model never becomes the source of a displayed value.
-    assert reply.text.index("999.99") < reply.text.index("行情状态：当前")
-    assert "未执行实时查询" not in reply.text
+    assert "999.9" not in reply.text
+
+
+def test_valid_model_narration_is_sent_as_is(tmp_path):
+    model = _ScriptedModel([
+        _tool_response("query_quotes", QUOTE_ARGUMENTS, "call_1"),
+        _text_response("NVDA 最新价 185.0000，买一 184.9000 / 卖一 185.1000。"),
+    ])
+    agent, _ = _agent(tmp_path, model=model, api=_FakeAPI())
+
+    reply = agent.handle_event(_event(), "NVDA 现价")
+
+    assert reply.text == "NVDA 最新价 185.0000，买一 184.9000 / 卖一 185.1000。"
+    assert "查询结果：" not in reply.text
+    assert reply.reason_codes == ()
 
 
 def test_budget_exhaustion_returns_a_controlled_note_with_the_render(tmp_path):
@@ -738,7 +772,8 @@ def test_tool_result_history_replays_as_a_real_tool_exchange(tmp_path):
     results = [item for item in messages
                if item["role"] == "tool" and item["tool_call_id"] == "hist_0_1"]
     assert len(results) == 1
-    assert json.loads(results[0]["content"])["method"] == "query_quotes"
+    assert results[0]["content"].startswith("查询结果：实时行情")
+    assert "185.0000" in results[0]["content"]
     assert not any("[历史查询结果" in str(item.get("content") or "")
                    for item in messages)
     # Result turns are not clarification turns: the disclaimer belongs to
