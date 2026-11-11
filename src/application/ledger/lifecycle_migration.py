@@ -7,7 +7,7 @@ from domain.domain.lifecycle_allocation import normalize_target_manifest, resolv
 from domain.domain.option_lifecycle import MARKET_TIMEZONES, SUPPORTED_LAST_TRADE_SOURCES, build_lifecycle_case
 from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from domain.domain.trade_contract_identity import derive_position_side, require_option_multiplier
-from src.application.ledger.void_repair import lifecycle_effective_void_target_event_ids
+from src.application.ledger.event_codec import valid_void_target_event_id
 from src.application.ledger.external_event_key import futu_compatibility_source_key
 from src.application.ledger.lot_resolver import (
     contract_key_from_lot_fields,
@@ -138,7 +138,14 @@ def _build_lifecycle_migration_inventory(
         if isinstance(item, dict)
         and str(item.get("case_id") or "").strip()
     }
-    void_ids = list(lifecycle_effective_void_target_event_ids(events))
+    void_ids = sorted(
+        {
+            target
+            for item in events
+            for target in [valid_void_target_event_id(item)]
+            if target
+        }
+    )
     rows: list[dict[str, Any]] = []
     known_case_ids = {
         str(item.get("case_id") or "").strip()

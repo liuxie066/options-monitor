@@ -13,7 +13,10 @@ from src.application.ledger.manual_trades import (
     persist_manual_open_event,
 )
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
-from src.application.ledger.queries import lifecycle_account_coherent_facts
+from src.application.ledger.queries import (
+    lifecycle_account_coherent_facts,
+    lifecycle_reconciliation_facts,
+)
 from src.application.ledger.repository import SQLiteOptionPositionsRepository
 from src.application.ledger.void_repair import (
     lifecycle_effective_void_target_event_ids,
@@ -310,6 +313,17 @@ def test_coherent_account_facts_drop_a_repaired_close(
     repo, original_id = _open_and_repaired_close(tmp_path)
 
     facts = lifecycle_account_coherent_facts(repo, account="lx")
+
+    assert original_id not in facts["effective_void_event_ids"]
+    assert facts["effective_void_event_ids"] == []
+
+
+def test_reconciliation_facts_drop_a_repaired_close(
+    tmp_path: Path,
+) -> None:
+    repo, original_id = _open_and_repaired_close(tmp_path)
+
+    facts = lifecycle_reconciliation_facts(repo)
 
     assert original_id not in facts["effective_void_event_ids"]
     assert facts["effective_void_event_ids"] == []
