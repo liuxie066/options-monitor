@@ -736,6 +736,7 @@ def save_daily_summary(run, receipt):
                "phase_timing": receipt.get("phase_timing", {}),
                "agent_unavailable": (receipt.get("agent_unavailable")
                                      or receipt.get("issues", {}).get("agent_unavailable")
+                                     or receipt.get("pull_requests", {}).get("agent_unavailable")
                                      or phase.get("agent_unavailable"))}
     reasons = {item["id"]: item["reason"] for item in summary["manual_todo"] if item.get("reason")}
     summary["blocked_reasons"] = [{"id": task, "reason": reasons.get(task, "阻塞原因未记录，需人工核对任务证据")}
@@ -873,6 +874,17 @@ def run_once(root: Path, *, smoke: bool = False, dry_run: bool = False,
                 except Exception as exc:
                     receipt.setdefault("pull_requests", {}).update({"status": "pending", "error": f"{type(exc).__name__}: {exc}"})
                 phase_mark("pull_requests", pr_start, budgets["pull_requests"] + int(issue_carry), pr_deadline)
+            if receipt.get("pull_requests", {}).get("agent_unavailable"):
+                reason = "agent_no_output in pull request stage; repeated model calls skipped"
+                receipt.setdefault("repair", {"status": "skipped", "entered": False, "reason": reason})
+                receipt.setdefault("delivery", {"status": "skipped", "reason": reason, "run_dir": str(run / "delivery")})
+                skipped_at = time.monotonic()
+                for name, budget in (("repair", budgets["repair_reserved"]), ("delivery", budgets["delivery"])):
+                    if name not in receipt.get("phase_timing", {}):
+                        phase_mark(name, skipped_at, budget, skipped_at)
+                if "daily_summary" not in receipt:
+                    save_daily_summary(run, receipt)
+                return
             if config.get("repair_enabled") and "repair" not in receipt:
                 repair_deadline = daily_deadline - budgets["delivery"]
                 repair_start = time.monotonic()

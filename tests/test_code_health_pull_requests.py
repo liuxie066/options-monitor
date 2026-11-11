@@ -418,6 +418,22 @@ def test_unit_deadline_is_passed_to_agent_and_late_result_stays_pending(reposito
     assert not repository.sandbox_profiles
 
 
+def test_agent_no_output_aborts_remaining_pull_request_reviews(repository):
+    ctx = repository
+    ctx.add_item(2, "2026-11-02T00:00:00Z")
+    ctx.add_item(3, "2026-11-03T00:00:00Z")
+    def silent(config, stage, prompt):
+        raise repair.AgentTimeout(
+            "no output", diagnostics={"failure_kind": "agent_no_output", "model_output_events": 0})
+    ctx.on_invoke = silent
+    receipt = ctx.run()
+    assert ctx.invocations == [1]
+    assert receipt["reviewed"] == [1]
+    assert receipt["agent_unavailable"]["pr"] == 1
+    assert receipt["status"] == "partial"
+    assert receipt["pending"] == [1, 2, 3]
+
+
 def test_expired_global_deadline_does_not_start_commands(repository):
     receipt = repository.run(deadline=time.monotonic() - 1)
     assert receipt["status"] == "pending"

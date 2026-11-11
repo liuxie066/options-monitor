@@ -473,7 +473,8 @@ def process_pull_requests(root, config, run_dir, deadline, invoke, *, command):
     unit_timeout = config.get("pull_request_unit_timeout_seconds", 900)
     if type(maximum) is not int or maximum < 0 or type(unit_timeout) not in (int, float) or unit_timeout <= 0:
         raise ValueError("invalid pull request count or unit timeout")
-    for pr in pull_requests:
+    agent_unavailable = None
+    for index, pr in enumerate(pull_requests):
         number = pr["number"]
         review_input, input_digest = _inputs(pr, base, config)
         previous = state["pull_requests"].get(str(number), {})
@@ -501,7 +502,12 @@ def process_pull_requests(root, config, run_dir, deadline, invoke, *, command):
                 _review_one(root, config, stage, pr, base, unit_deadline, invoke, command, record)
             _check_deadline(unit_deadline)
         except (TimeoutError, subprocess.TimeoutExpired) as exc:
-            record.update(status="pending", reason=str(exc))
+            diagnostics = repair.timeout_diagnostics(exc)
+            record.update(status="pending", reason=str(exc),
+                          failure_kind=diagnostics.get("failure_kind", "unit_timeout"),
+                          diagnostics=diagnostics)
+            if diagnostics.get("failure_kind") == "agent_no_output":
+                agent_unavailable = {"pr": number, "reason": str(exc), "diagnostics": diagnostics}
         except (OSError, RuntimeError, ValueError, KeyError, ET.ParseError, subprocess.SubprocessError) as exc:
             record.update(status="blocked", reason=str(exc))
         record["comment_draft"] = _draft(record)
@@ -512,6 +518,10 @@ def process_pull_requests(root, config, run_dir, deadline, invoke, *, command):
         summary["results"].append(record)
         if record["status"] in PENDING:
             summary["pending"].append(number)
+        if agent_unavailable:
+            summary["agent_unavailable"] = agent_unavailable
+            summary["pending"].extend(item["number"] for item in pull_requests[index + 1:])
+            break
     if summary["pending"]:
         summary["status"] = "partial"
     repair.save(run_dir / "receipt.json", summary)
