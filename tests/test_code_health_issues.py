@@ -75,6 +75,27 @@ def process(tmp_path, payload, plan=None, *, config=None, command=None):
                                  invoke_response(payload), review.FINDING_SCHEMA, review.validate_finding, command=command)
 
 
+def test_agent_no_output_aborts_issue_phase_and_marks_remaining_pending(tmp_path):
+    calls = []
+
+    def invoke(config, stage, prompt, **kwargs):
+        calls.append(int(stage.name))
+        raise review.repair.AgentTimeout(
+            "no output", diagnostics={"failure_kind": "agent_no_output", "model_output_events": 0})
+
+    receipt = issues.process_issues(
+        tmp_path, {"timeout_seconds": 180, "issue_unit_timeout_seconds": 600}, tmp_path / "run",
+        tmp_path / "source", make_plan(1, 2, 3), time.monotonic() + 180,
+        invoke, review.FINDING_SCHEMA, review.validate_finding, command=lambda *args, **kwargs: "[]",
+    )
+    assert calls == [1]
+    assert receipt["status"] == "partial"
+    assert receipt["summary"]["agent_unavailable"]["number"] == 1
+    assert receipt["summary"]["pending"] == [1, 2, 3]
+    assert receipt["summary"]["pending_diagnostics"]["1"]["failure_kind"] == "agent_no_output"
+    assert receipt["summary"]["pending_diagnostics"]["2"]["failure_kind"] == "not_attempted"
+
+
 def test_full_discussion_and_linked_work_are_paginated_before_review(tmp_path):
     calls, forbidden = [], []
     open_pr = {"number": 60, "title": "Fix #1", "body": "Fixes #1", "html_url": "https://github.com/fixture/repo/pull/60", "head": {"sha": A}}

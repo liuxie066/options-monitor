@@ -75,7 +75,7 @@ def test_pr_close_switch_cannot_authorize_closing_any_pr():
         review.runtime_config({"pull_request_close_enabled": True})
 
 
-def test_pr_timeout_cannot_use_issue_or_repair_or_delivery_allocation(commit_review_run, monkeypatch):
+def test_phase_carryover_moves_unused_budget_forward_but_protects_reserves(commit_review_run, monkeypatch):
     root, _, clock = commit_review_run
     config = json.loads((root / "config.json").read_text())
     config.update({"timeout_seconds": 15000, "pull_requests_enabled": True, "comments_enabled": True,
@@ -113,11 +113,45 @@ def test_pr_timeout_cannot_use_issue_or_repair_or_delivery_allocation(commit_rev
     monkeypatch.setattr(review, "run_repair_phase", fix)
     monkeypatch.setattr(delivery, "process_delivery", deliver)
     receipt = review.run_once(root)
-    assert seen[:2] == [("issues", 3600), ("pr", 1800)]
+    # Review finishes four units in four clock ticks, so 6596 of its 6600 seconds flow to
+    # issues and then, because intake finishes before its augmented deadline, to PRs.
+    assert seen[:2] == [("issues", 3600 + 6596), ("pr", 1800 + 6596)]
     assert seen[2][0] == "repair" and seen[2][1] >= 1800
     assert seen[3] == ("delivery", 1200)
     assert receipt["pull_requests"]["status"] == "pending"
     assert receipt["daily_summary"]["reviewed_commits"] == 4
+
+
+def test_unused_review_budget_flows_to_prs_when_issues_are_disabled(commit_review_run, monkeypatch):
+    root, _, clock = commit_review_run
+    config = json.loads((root / "config.json").read_text())
+    config.update({"timeout_seconds": 15000, "pull_requests_enabled": True, "comments_enabled": True,
+                   "release_enabled": True, "issues_enabled": False, "repair_enabled": True,
+                   "review_budget_seconds": 6600})
+    review.write_json(root / "config.json", config)
+    seen = []
+    def agent(config, stage, prompt):
+        plan = json.loads((stage / "plan.json").read_text())
+        clock[0] += 1
+        return {"outcome": "complete", "completed_commits": [plan["commits"][0]["sha"]],
+                "report_markdown": "审查每个逻辑并记录完整复核和测试证据。" * 20,
+                "verification_gaps": [], "confirmed_findings": []}
+    def pull(root, config, run, deadline, invoke, *, command):
+        seen.append(("pr", deadline - clock[0]))
+        raise TimeoutError("PR stage used only its own budget")
+    def fix(root, config, run, source, target, plan, status, deadline):
+        seen.append(("repair", deadline - clock[0]))
+        return {"inventory": {}}
+    def deliver(root, config, run, deadline, invoke, **kwargs):
+        seen.append(("delivery", deadline - clock[0]))
+        return {"status": "complete"}
+    monkeypatch.setattr(review, "invoke_agent", agent)
+    monkeypatch.setattr(prs, "process_pull_requests", pull)
+    monkeypatch.setattr(review, "run_repair_phase", fix)
+    monkeypatch.setattr(delivery, "process_delivery", deliver)
+    review.run_once(root)
+    # Review leaves 6596 seconds unused and there is no issue stage to absorb them.
+    assert seen[0] == ("pr", 1800 + 6596)
 
 
 @pytest.fixture

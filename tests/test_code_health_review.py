@@ -457,9 +457,15 @@ def test_missing_cursor_cannot_silently_restart_or_skip_history():
         select_commits(fake_git, "e" * 40, D, 3)
 
 
-@pytest.mark.parametrize("completed", [[C], [B, D], [B, C, D], "all"])
-def test_noncontiguous_or_unplanned_results_cannot_advance(completed):
-    with pytest.raises(ValueError, match="contiguous"):
+@pytest.mark.parametrize(("completed", "accepted"), [([C], [C]), ([B, C], [B, C])])
+def test_out_of_order_completed_units_keep_plan_order(completed, accepted):
+    # A timeout no longer stops the whole review, so a later unit may finish first.
+    assert validate_result(result(completed), [B, C]) == accepted
+
+
+@pytest.mark.parametrize("completed", [[B, D], [B, B], "all"])
+def test_unplanned_or_duplicate_results_cannot_advance(completed):
+    with pytest.raises(ValueError):
         validate_result(result(completed), [B, C])
 
 
@@ -639,6 +645,8 @@ def test_completed_unit_survives_later_incomplete_review_and_bounds_the_stage(tm
                 monkeypatch.setattr(Path, "write_text", interrupted_write)
                 return result([C], "complete")
             return result([], "partial")
+        if sha == D:
+            return result([D], "complete")
         assert sha == B
         work = stage / "work"
         work.mkdir()
@@ -661,11 +669,12 @@ def test_completed_unit_survives_later_incomplete_review_and_bounds_the_stage(tm
         assert json.loads((run / "receipt.json").read_text())["completed_commits"] == [B]
         return
     review.review_commits(root, config, run, plan, state, receipt, 1200)
-    assert calls == ([(B, 600)] if next_outcome == "budget" else [(B, 600), (C, 600)])
-    assert receipt["status"] == "partial" and receipt["completed_commits"] == [B]
+    assert calls == ([(B, 600)] if next_outcome == "budget" else [(B, 600), (C, 600), (D, 600)])
+    assert receipt["status"] == "partial"
+    assert receipt["completed_commits"] == ([B] if next_outcome == "budget" else [B, D])
     assert json.loads((root / "state.json").read_text())["cursor"] == B
     aggregate = json.loads((run / "result.json").read_text())
-    assert validate_result(aggregate, [B, C, D], work=run / "work") == [B]
+    assert validate_result(aggregate, [B, C, D], work=run / "work") == ([B] if next_outcome == "budget" else [B, D])
     assert len(aggregate["confirmed_findings"]) == 1
     evidence = run / "work" / aggregate["confirmed_findings"][0]["evidence_log"]
     assert evidence.read_text().startswith("assert actual")
@@ -696,6 +705,120 @@ def test_last_partial_unit_is_not_promoted_to_complete(tmp_path, monkeypatch):
     assert aggregate["completed_commits"] == receipt["completed_commits"] == [B]
     assert "follow-up" in aggregate["verification_gaps"]
     assert json.loads((tmp_path / "state.json").read_text())["cursor"] == B
+
+
+def _unit_run(tmp_path, name):
+    run = tmp_path / name
+    (run / "source").mkdir(parents=True)
+    (run / "changes").mkdir()
+    return run
+
+
+def _unit_plan(commits):
+    return {"cursor": A, "target": D, "previous_review": "history", "confirmed_finding_keys": [],
+            "commits": [{"sha": sha} for sha in commits]}
+
+
+def test_timeout_continues_to_next_commit_and_escalates_after_two_rounds(tmp_path, monkeypatch):
+    state = {"cursor": A, "last_review": "history"}
+    plan = _unit_plan([B, C])
+    config = {"timeout_seconds": 1800, "max_units": 10}
+    calls = []
+
+    def invoke(cfg, stage, prompt):
+        sha = json.loads((stage / "plan.json").read_text())["commits"][0]["sha"]
+        calls.append(sha)
+        if sha == B:
+            raise review.repair.AgentTimeout(
+                "slow unit", diagnostics={"failure_kind": "unit_timeout", "model_output_events": 3})
+        return result([sha])
+
+    monkeypatch.setattr(review, "invoke_agent", invoke)
+    monkeypatch.setattr(review.time, "monotonic", lambda: 0)
+    receipt = {}
+    review.review_commits(tmp_path, config, _unit_run(tmp_path, "run1"), plan, state, receipt, 1800)
+    assert calls == [B, C]
+    assert receipt["completed_commits"] == [C]
+    assert receipt["cursor_advance_sha"] == A
+    assert receipt["review_blockers"][0]["commit"] == B
+    assert receipt["review_blockers"][0]["attempts"] == 1
+    saved = json.loads((tmp_path / "state.json").read_text())
+    assert saved["cursor"] == A
+    assert saved["review_unit_failures"][B]["count"] == 1
+    assert C in saved["reviewed_units"]
+    assert saved["review_needs_human"] == {}
+
+    calls.clear()
+    state = json.loads((tmp_path / "state.json").read_text())
+    receipt = {}
+    review.review_commits(tmp_path, config, _unit_run(tmp_path, "run2"), plan, state, receipt, 1800)
+    assert calls == [B]  # C is reused instead of being re-reviewed.
+    assert receipt["completed_commits"] == [C]
+    assert receipt["needs_human_commits"][0]["commit"] == B
+    assert receipt["cursor_advance_sha"] == C
+    saved = json.loads((tmp_path / "state.json").read_text())
+    assert saved["cursor"] == C
+    assert saved["review_needs_human"][B]["attempts"] == 2
+    second_report = (tmp_path / "run2" / "report.md").read_text()
+    assert f"`{B}`" in second_report and "连续失败 2 次" in second_report
+    assert "needs_human" in second_report
+
+    calls.clear()
+    state = json.loads((tmp_path / "state.json").read_text())
+    receipt = {}
+    review.review_commits(tmp_path, config, _unit_run(tmp_path, "run3"), _unit_plan([]), state, receipt, 1800)
+    assert calls == []
+    assert receipt["needs_human_commits"][0]["commit"] == B
+
+
+def test_agent_no_output_stops_review_without_quarantining_the_commit(tmp_path, monkeypatch):
+    state = {"cursor": A, "last_review": "history"}
+    plan = _unit_plan([B, C, D])
+    calls = []
+
+    def invoke(cfg, stage, prompt):
+        calls.append(json.loads((stage / "plan.json").read_text())["commits"][0]["sha"])
+        raise review.repair.AgentTimeout(
+            "no output", diagnostics={"failure_kind": "agent_no_output", "model_output_events": 0})
+
+    monkeypatch.setattr(review, "invoke_agent", invoke)
+    monkeypatch.setattr(review.time, "monotonic", lambda: 0)
+    receipt = {}
+    review.review_commits(tmp_path, {"timeout_seconds": 1800, "max_units": 10},
+                          _unit_run(tmp_path, "run"), plan, state, receipt, 1800)
+    assert calls == [B]
+    assert receipt["agent_unavailable"]["commit"] == B
+    assert receipt["review_blockers"][0]["counts_toward_needs_human"] is False
+    assert "模型无输出" in (tmp_path / "run" / "report.md").read_text()
+    saved = json.loads((tmp_path / "state.json").read_text())
+    assert saved["cursor"] == A
+    assert saved["review_unit_failures"] == {}
+    assert saved["review_needs_human"] == {}
+
+
+def test_incomplete_unit_keeps_its_verification_gaps_and_continues(tmp_path, monkeypatch):
+    state = {"cursor": A, "last_review": "history"}
+    plan = _unit_plan([B, C])
+    calls = []
+
+    def invoke(cfg, stage, prompt):
+        sha = json.loads((stage / "plan.json").read_text())["commits"][0]["sha"]
+        calls.append(sha)
+        if sha == B:
+            return {**result([], "partial"), "verification_gaps": ["incomplete-unit gap"]}
+        return result([C])
+
+    monkeypatch.setattr(review, "invoke_agent", invoke)
+    monkeypatch.setattr(review.time, "monotonic", lambda: 0)
+    run = _unit_run(tmp_path, "run")
+    receipt = {}
+    review.review_commits(tmp_path, {"timeout_seconds": 1800, "max_units": 10},
+                          run, plan, state, receipt, 1800)
+    assert calls == [B, C]
+    aggregate = json.loads((run / "result.json").read_text())
+    assert "incomplete-unit gap" in aggregate["verification_gaps"]
+    assert receipt["completed_commits"] == [C]
+    assert json.loads((tmp_path / "state.json").read_text())["cursor"] == A
 
 
 def test_concurrent_runs_cannot_share_cursor_lock(tmp_path):
@@ -909,8 +1032,77 @@ def test_model_execution_timeout_remains_resumable(tmp_path, monkeypatch):
     monkeypatch.setattr(review.subprocess, "Popen", TimedOutModel)
     monkeypatch.setattr(review.os, "killpg", lambda *_: None)
     monkeypatch.setattr(review, "agent_command", lambda *args, **kwargs: ["unused"])
-    with pytest.raises(TimeoutError, match="resume"):
-        review.invoke_agent({"timeout_seconds": 1}, tmp_path / "stage", "read only")
+    stage = tmp_path / "stage"
+    with pytest.raises(review.repair.AgentTimeout, match="agent_no_output") as error:
+        review.invoke_agent({"timeout_seconds": 1}, stage, "read only")
+    diagnostics = json.loads((stage / "agent-diagnostics.json").read_text())
+    assert diagnostics["failure_kind"] == "agent_no_output"
+    assert diagnostics["model_output_events"] == 0
+    assert diagnostics["timeout_seconds"] == 1
+    assert error.value.diagnostics == diagnostics
+
+
+def test_only_thread_and_turn_started_events_count_as_no_output(tmp_path, monkeypatch):
+    import subprocess
+
+    class SilentModel:
+        pid = 12347
+        returncode = -15
+
+        def __init__(self, *args, stdout=None, **kwargs):
+            stdout.write('{"type":"thread.started"}\n')
+            stdout.write('{"type":"turn.started"}\n')
+            stdout.flush()
+
+        def communicate(self, prompt, timeout):
+            raise subprocess.TimeoutExpired("model", timeout)
+
+        def wait(self, timeout):
+            return -15
+
+    monkeypatch.setattr(review.subprocess, "Popen", SilentModel)
+    monkeypatch.setattr(review.os, "killpg", lambda *_: None)
+    monkeypatch.setattr(review, "agent_command", lambda *args, **kwargs: ["unused"])
+    stage = tmp_path / "stage"
+    with pytest.raises(review.repair.AgentTimeout, match="agent_no_output"):
+        review.invoke_agent({"timeout_seconds": 1}, stage, "read only")
+    diagnostics = json.loads((stage / "agent-diagnostics.json").read_text())
+    assert diagnostics["failure_kind"] == "agent_no_output"
+    assert diagnostics["agent_jsonl_lines"] == 2
+    assert diagnostics["event_types"] == {"thread.started": 1, "turn.started": 1}
+    assert diagnostics["model_output_events"] == 0
+
+
+def test_slow_agent_with_output_is_not_misclassified_as_no_output(tmp_path, monkeypatch):
+    import subprocess
+
+    class SlowModel:
+        pid = 12346
+        returncode = -15
+
+        def __init__(self, *args, stdout=None, **kwargs):
+            stdout.write('{"type":"thread.started"}\n')
+            stdout.write('{"type":"turn.started"}\n')
+            stdout.write('{"type":"item.started","item":{"type":"command_execution"}}\n')
+            stdout.flush()
+
+        def communicate(self, prompt, timeout):
+            raise subprocess.TimeoutExpired("model", timeout)
+
+        def wait(self, timeout):
+            return -15
+
+    monkeypatch.setattr(review.subprocess, "Popen", SlowModel)
+    monkeypatch.setattr(review.os, "killpg", lambda *_: None)
+    monkeypatch.setattr(review, "agent_command", lambda *args, **kwargs: ["unused"])
+    stage = tmp_path / "stage"
+    with pytest.raises(review.repair.AgentTimeout, match="unit_timeout"):
+        review.invoke_agent({"timeout_seconds": 1}, stage, "read only")
+    diagnostics = json.loads((stage / "agent-diagnostics.json").read_text())
+    assert diagnostics["failure_kind"] == "unit_timeout"
+    assert diagnostics["model_output_events"] == 1
+    assert diagnostics["event_types"]["item.started"] == 1
+    assert diagnostics["last_event"] == {"type": "item.started", "item_type": "command_execution"}
 
 
 def test_agent_writes_only_run_workspace_without_network_or_approval():

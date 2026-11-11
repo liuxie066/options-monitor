@@ -44,6 +44,21 @@ AUDIT_SCHEMA = {
 }
 TERMINAL = {"awaiting_delivery_authorization", "needs_triage", "blocked", "merged", "source_closed"}
 REQUIRED_REPAIR_CHECKS = {"checks"} | {f"regression ({shard})" for shard in range(8)}
+OUTPUT_EVENT_TYPES = frozenset({"thread.started", "turn.started"})
+
+
+class AgentTimeout(TimeoutError):
+    """A unit timeout carrying the evidence needed to tell a hung gateway from a slow task."""
+
+    def __init__(self, message: str, *, diagnostics: dict):
+        super().__init__(message)
+        self.diagnostics = dict(diagnostics)
+
+
+def timeout_diagnostics(exc: BaseException) -> dict:
+    diagnostics = getattr(exc, "diagnostics", None)
+    return dict(diagnostics) if isinstance(diagnostics, dict) else {}
+
 
 
 def timestamp():
@@ -214,7 +229,7 @@ def verify_tests(config, tree, stage, selectors, timeout):
 def remaining_config(config, deadline):
     remaining = int(deadline - time.monotonic())
     if remaining < 30:
-        raise TimeoutError("daily budget exhausted before the next stage")
+        raise TimeoutError("stage budget exhausted before the next unit")
     return {**config, "timeout_seconds": remaining}
 
 
@@ -480,9 +495,11 @@ def repair_one(root, config, run_dir, deadline, invoke, *, revalidate_issue=None
             save(record, task)
         return {"id": task["id"], "status": task["status"], "stage": task["stage"], "record": str(record)}
     except (TimeoutError, subprocess.TimeoutExpired) as exc:
+        diagnostics = timeout_diagnostics(exc)
         task.update({"status": "pending", "last_error": str(exc)})
         save(record, task)
-        return {"id": task["id"], "status": "pending", "stage": task["stage"], "reason": str(exc)}
+        return {"id": task["id"], "status": "pending", "stage": task["stage"], "reason": str(exc),
+                "failure_kind": diagnostics.get("failure_kind", "unit_timeout"), "diagnostics": diagnostics}
     except Exception as exc:
         task.update({"status": "blocked", "last_error": str(exc)})
         save(record, task)
@@ -553,7 +570,8 @@ def run_repairs(root, config, run_dir, deadline, invoke, *, revalidate_issue=Non
     reconcile_closed_sources(root, config)
     queue = sorted((row for row in records() if row[1]["status"] not in TERMINAL), key=_attempt_order)
     results, processed, attempted, local_verified, deferred = [], [], [], [], {}
-    for path, original in queue:
+    agent_unavailable = None
+    for position, (path, original) in enumerate(queue):
         if len(processed) >= limit or deadline - time.monotonic() < 30:
             break
         task = json.loads(path.read_text())
@@ -576,13 +594,27 @@ def run_repairs(root, config, run_dir, deadline, invoke, *, revalidate_issue=Non
                                 revalidate_issue=revalidate if revalidate_issue is not None else None,
                                 _task_id=task["id"])
         except (TimeoutError, subprocess.TimeoutExpired) as exc:
-            result = {"id": task["id"], "status": "pending", "reason": str(exc)}
+            diagnostics = timeout_diagnostics(exc)
+            result = {"id": task["id"], "status": "pending", "reason": str(exc),
+                      "failure_kind": diagnostics.get("failure_kind", "unit_timeout"),
+                      "diagnostics": diagnostics}
+            if diagnostics.get("failure_kind") == "agent_no_output":
+                agent_unavailable = {"task": task["id"], "reason": str(exc), "diagnostics": diagnostics}
         except Exception as exc:
             result = {"id": task["id"], "status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+        if result.get("failure_kind") == "agent_no_output" and not agent_unavailable:
+            agent_unavailable = {"task": task["id"], "reason": result.get("reason"),
+                                 "diagnostics": result.get("diagnostics", {})}
         results.append({"id": task["id"], **result})
         latest = json.loads(path.read_text())
         if len(latest.get("attempts", [])) > len(original.get("attempts", [])):
             attempted.append(task["id"])
+        if agent_unavailable:
+            for remaining_path, remaining_task in queue[position + 1:]:
+                if remaining_task["status"] not in TERMINAL:
+                    deferred.setdefault(remaining_task["id"],
+                                        "agent_no_output on the previous unit; not attempted this run")
+            break
         if result["status"] == "awaiting_delivery_authorization":
             local_verified.append(task["id"])
         for item in result.get("tasks", []):
@@ -607,7 +639,8 @@ def run_repairs(root, config, run_dir, deadline, invoke, *, revalidate_issue=Non
     return {"status": "partial" if inventory["pending"] else "complete" if results else "no_pending_repairs",
             "entered": True, "processed": processed, "results": results, "attempted": attempted,
             "local_verified": local_verified, "inventory": inventory,
-            "deferred": [{"id": key, "reason": value} for key, value in deferred.items()], "manual_todo": manual}
+            "deferred": [{"id": key, "reason": value} for key, value in deferred.items()], "manual_todo": manual,
+            "agent_unavailable": agent_unavailable}
 
 
 def _delivery_command(config, folder, deadline, argv, *, cwd=None):

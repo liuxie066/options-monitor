@@ -654,6 +654,29 @@ def fake_repair_tree(root, monkeypatch):
         if str(p.relative_to(tree)).startswith("tests/") or p.read_text() != "def add(a, b):\n    return a - b\n"))
 
 
+def test_run_repairs_agent_no_output_aborts_queue_after_first_unit(tmp_path, monkeypatch):
+    root, config, run, paths = queued_repairs(tmp_path, 3)
+    fake_repair_tree(root, monkeypatch)
+    clock = [1000.0]
+    monkeypatch.setattr(repair.time, "monotonic", lambda: clock[0])
+    calls = []
+
+    def no_output(config, *args, **kwargs):
+        calls.append(config["timeout_seconds"])
+        raise repair.AgentTimeout(
+            "no output", diagnostics={"failure_kind": "agent_no_output", "model_output_events": 0})
+
+    result = repair.run_repairs(root, {**config, "repair_unit_timeout_seconds": 60}, run, 1300, no_output)
+    assert calls == [60]
+    assert len(result["processed"]) == 1
+    assert result["attempted"] == result["processed"]
+    assert result["agent_unavailable"]["task"] == result["processed"][0]
+    assert result["results"][0]["failure_kind"] == "agent_no_output"
+    assert result["results"][0]["diagnostics"]["failure_kind"] == "agent_no_output"
+    reasons = {item["id"]: item["reason"] for item in result["deferred"]}
+    assert len(reasons) == 2 and all("agent_no_output" in reason for reason in reasons.values())
+
+
 @pytest.mark.parametrize("process_timeout", [False, True])
 def test_run_repairs_unit_timeouts_leave_later_tasks_their_own_budget(tmp_path, monkeypatch, process_timeout):
     root, config, run, paths = queued_repairs(tmp_path, 3)
