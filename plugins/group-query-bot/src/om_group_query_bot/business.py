@@ -8,7 +8,7 @@ transports and never reach OpenD, the model or Feishu.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 import json
 import math
@@ -22,6 +22,9 @@ from src.application.close_advice_required_data import (
     build_user_provided_scenario_plan,
     scenario_requirement_index,
     validate_user_provided_scenario_plan,
+)
+from src.application.required_data_plan_identity import (
+    required_data_planned_empty_reason,
 )
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.option_candidates import (
@@ -181,6 +184,28 @@ def _closed_market_reference_from(bundle: dict[str, Any]) -> dict[str, Any] | No
     return None
 
 
+def _expiration_list(values: Any) -> list[str] | None:
+    """Return the strict ISO expiration dates of ``values``, else ``None``.
+
+    The shared evaluator feeds every entry to ``date.fromisoformat``, so a
+    malformed chain value must never be injected as an enumeration fact.
+    """
+    if not isinstance(values, list):
+        return None
+    result: list[str] = []
+    for item in values:
+        if not isinstance(item, str):
+            continue
+        try:
+            parsed = date.fromisoformat(item)
+        except ValueError:
+            continue
+        if parsed.isoformat() != item or item in result:
+            continue
+        result.append(item)
+    return result
+
+
 def _candidate_enumeration_meta(bundle: dict[str, Any],
                                 fetch_plan: dict[str, Any]) -> dict[str, Any]:
     """Restore the plan-owned enumeration facts the shared merge drops.
@@ -190,6 +215,20 @@ def _candidate_enumeration_meta(bundle: dict[str, Any],
     child metas under ``meta.requests`` but not their enumeration keys, and the
     non-query fetcher does not emit the two plan-level keys at all.  Without
     these facts the shared evaluator can only report ``enumeration_incomplete``.
+
+    The denominator is the discovered chain, not ``projected_expirations``:
+    the evaluator re-derives the DTE window from its own scan date, so after a
+    market-local midnight an expiration can enter the window that the plan
+    never projected or fetched.  A projected-only denominator would report a
+    complete scan with no status for that expiration; the chain denominator
+    keeps it missing-status and therefore ``enumeration_incomplete``.
+
+    The one exception is a plan-proven-empty scope (no feasible strikes, no
+    discovered expirations): the core classifier proves that empty answer by a
+    date-independent argument, so the projected denominator is authoritative
+    and the evaluator must answer ``none`` rather than ``unable``.  Without a
+    discovered chain the fact is omitted outright, which keeps the evaluator
+    fail-closed instead of silently restoring the projected denominator.
     """
     meta = bundle.get("meta") if isinstance(bundle, dict) else None
     requests = meta.get("requests") if isinstance(meta, dict) else None
@@ -212,10 +251,19 @@ def _candidate_enumeration_meta(bundle: dict[str, Any],
         if item.get("query_scope_validated") is not True:
             scope_validated = False
     facts: dict[str, Any] = {}
-    projected = fetch_plan.get("projected_expirations") \
+    discovery = fetch_plan.get("expiration_discovery") \
         if isinstance(fetch_plan, dict) else None
-    if isinstance(projected, list):
-        facts["available_expirations"] = [str(item) for item in projected]
+    planned_empty = required_data_planned_empty_reason(fetch_plan) \
+        if isinstance(fetch_plan, dict) else None
+    if planned_empty is not None:
+        # The plan proved the scope empty without depending on its scan date.
+        available = _expiration_list(
+            fetch_plan.get("projected_expirations")) or []
+    else:
+        available = _expiration_list(
+            discovery.get("expirations") if isinstance(discovery, dict) else None)
+    if available is not None:
+        facts["available_expirations"] = available
     if saw_meta and not conflict:
         facts["expiration_statuses"] = statuses
     complete = fetch_plan.get("expiration_discovery_complete") \
@@ -377,8 +425,12 @@ def _empty_scope_payload(settings: APISettings,
 
     ``success_empty`` and ``projection_empty`` mean the plan produced no fetch
     request; that is an answer, not a failure.  The payload carries the plan's
-    underlier observation and the child-scope validation; the adapter restores
-    the plan-level enumeration facts.
+    underlier observation; the adapter restores the plan-level enumeration
+    facts.  Its ``query_scope_validated`` is a vacuous true: no fetch request
+    exists whose scope could fall short of the plan's denominator.  It grants
+    nothing on its own -- completeness also requires a fetch status for every
+    chain expiration the evaluator's window contains, so any scope that is not
+    truly empty still fails closed through ``enumeration_incomplete``.
     """
     observation = fetch_plan.get("underlier_observation")
     if not isinstance(observation, dict):
@@ -394,8 +446,9 @@ def _empty_scope_payload(settings: APISettings,
             "observed_at_utc": str((observation or {}).get("observed_at_utc") or ""),
             "underlier_observation": observation,
             "expiration_statuses": {},
-            # No request exists whose expirations could fall outside the
-            # plan's proven-empty scope, so the scope is vacuously validated.
+            # Vacuously true: there is no fetch request whose expirations could
+            # fall outside the plan's proven-empty scope.  This never widens the
+            # answer by itself; see the docstring.
             "query_scope_validated": True,
         },
     }
