@@ -399,7 +399,8 @@ def test_scenario_response_carries_design_identity_and_evidence(tmp_path, monkey
     assert stored["binding"]["binding_sha256"] == data["binding_sha256"]
 
 
-def _spot_only_bundle():
+def _spot_only_bundle(*, status="ready", market_state="NORMAL", price=185.0,
+                      update_time=None):
     """The real spot-only plan shape: no fetch requests, one observation."""
     from src.application.opend_symbol_chain_fetching import (
         OptionExpirationDiscoveryResult,
@@ -412,9 +413,10 @@ def _spot_only_bundle():
 
     observation = OpeningUnderlierObservation(
         schema_version=OPENING_UNDERLIER_OBSERVATION_SCHEMA, code="US.NVDA",
-        market="US", last_price=185.0, update_time=NOW.isoformat(),
-        observed_at_utc=NOW.isoformat(), age_seconds=0.0, market_state="NORMAL",
-        sec_status="NORMAL", suspension=False, status="ready", reason_code=None)
+        market="US", last_price=price, update_time=update_time or NOW.isoformat(),
+        observed_at_utc=NOW.isoformat(), age_seconds=0.0, market_state=market_state,
+        sec_status="NORMAL", suspension=False, status=status,
+        reason_code=None if status == "ready" else status)
     discovery = OptionExpirationDiscoveryResult(
         outcome="success_rows", reason_code=None, expirations=["2026-12-18"],
         observed_at_utc=(NOW - timedelta(seconds=3)).isoformat(),
@@ -423,7 +425,7 @@ def _spot_only_bundle():
                           "source": "opend", "host": "127.0.0.1", "port": 11111,
                           "trading_date": NOW.date().isoformat()})
     return RequiredDataFetchPlanBundle(
-        symbol="NVDA", spot_reference=185.0, side_plans=[], merged_specs=[],
+        symbol="NVDA", spot_reference=price, side_plans=[], merged_specs=[],
         underlier_observation=observation, expiration_discovery=discovery,
         projection_outcome="success_rows", projected_expirations=["2026-12-18"])
 
@@ -482,6 +484,186 @@ def test_spot_quote_received_during_the_fetch_is_current_not_future(tmp_path, mo
     assert "quote_snapshot_future" not in data["missing_requirements"]
     assert data["requested_at_utc"] == NOW.isoformat()
     assert data["evaluated_at_utc"] == (NOW + timedelta(seconds=2)).isoformat()
+
+
+def test_spot_quote_is_last_known_with_its_time_while_the_market_is_closed(tmp_path, monkeypatch):
+    from test_group_query_bot_api import _body, _service
+    import om_group_query_bot.business as business
+    from om_group_query_bot.render import render_quotes
+
+    service, recorder = _service(tmp_path)
+    bundle = _spot_only_bundle(status="market_closed",
+                               market_state="AFTER_HOURS_BEGIN", price=168.89,
+                               update_time="2026-11-10 18:32:10.786")
+    monkeypatch.setattr(business, "build_required_data_fetch_plan",
+                        lambda **kwargs: bundle)
+    envelope, status = service.handle("query_quotes", _body({"symbol": "US.NVDA"}))
+    assert status == 200
+    data = envelope["data"]
+    assert data["quote_status"] == "last_known"
+    assert data["missing_requirements"] == []
+    underlier = data["underlier"]
+    assert underlier["last_price"] == 168.89 and underlier["spot"] == 168.89
+    assert underlier["currency"] == "USD"
+    assert underlier["market_state"] == "AFTER_HOURS_BEGIN"
+    assert underlier["underlier_observation_status"] == "market_closed"
+    assert underlier["last_price_update_time"] == "2026-11-10 18:32:10.786"
+    text = render_quotes(data)
+    assert "行情状态：最近已知" in text
+    assert "最新 168.8900" in text
+    assert "最新价时间 2026-11-10 18:32:10.786（纽约时间）" in text
+    assert "市场状态 盘后（AFTER_HOURS_BEGIN）" in text
+    assert "非当前可成交状态" in text
+    assert recorder.calls == []
+
+
+def test_quote_status_keeps_only_the_closed_market_as_last_known():
+    from om_group_query_bot.business import _quote_status
+
+    fresh = {"snapshot_received_at_utc": NOW.isoformat()}
+    missing = []
+    assert _quote_status(
+        {**fresh, "underlier_observation_status": "market_closed"},
+        NOW, missing) == "last_known"
+    assert missing == []
+    assert _quote_status(
+        {**fresh, "opening_contract_status": "market_closed"},
+        NOW, missing) == "last_known"
+    assert _quote_status(
+        {**fresh, "underlier_observation_status": "data_unavailable"},
+        NOW, missing) == "unavailable"
+    assert "underlier_observation_status_not_ready" in missing
+
+
+def test_closed_market_contract_quote_is_last_known_not_unavailable(tmp_path, monkeypatch):
+    from test_group_query_bot_api import _body, _service
+
+    service, _recorder = _service(tmp_path)
+    plan = _fake_plan({"fetch_plan": {}, "expected_fetch_contract": {},
+                       "global_required_data_plan": {"plan_id": "p"}})
+    row = {
+        "contract_symbol": "US.NVDA261218P00180000", "option_type": "put",
+        "expiration": "2026-12-18", "strike": 180.0, "currency": "USD",
+        "bid": 1.10, "ask": 1.20, "last_price": 1.15,
+        "snapshot_received_at_utc": NOW.isoformat(),
+        "last_price_update_time": "2026-11-10 18:00:00.000",
+        "market_state": "AFTER_HOURS_BEGIN",
+        "opening_contract_status": "market_closed",
+        "underlier_observation_status": "market_closed",
+        "spot": 185.0, "spot_observed_at_utc": NOW.isoformat(),
+        "underlier_sec_status": "NORMAL",
+    }
+    payload = {"symbol": "NVDA", "underlier_code": "NVDA", "meta": {},
+               "rows": [row]}
+    monkeypatch.setattr(service.business, "_fetch", lambda **kwargs: ([payload], plan))
+    body = _body({"symbol": "US.NVDA", "contract": {
+        "option_type": "put", "expiration": "2026-12-18", "strike": 180.0}})
+    envelope, status = service.handle("query_quotes", body)
+    assert status == 200
+    data = envelope["data"]
+    assert data["quote_status"] == "last_known"
+    assert data["missing_requirements"] == []
+    assert data["option"]["last_price"] == 1.15
+    assert data["option"]["opening_contract_status"] == "market_closed"
+    assert data["underlier"]["last_price"] == 185.0
+    assert data["underlier"]["underlier_observation_status"] == "market_closed"
+
+
+def test_scenario_reports_the_closed_market_instead_of_a_generic_reason():
+    from om_group_query_bot.business import _scenario_evidence_reason
+
+    row = {"opening_contract_status": "market_closed",
+           "underlier_observation_status": "market_closed",
+           "snapshot_received_at_utc": NOW.isoformat()}
+    assert _scenario_evidence_reason(
+        row, option_type="put", quote_side="buy", now=NOW) == "market_closed"
+
+
+def test_candidates_pass_the_closed_market_reference_into_evaluation(tmp_path, monkeypatch):
+    from test_group_query_bot_api import _body, _service
+
+    service, _recorder = _service(tmp_path)
+    plan = _fake_plan({"fetch_plan": {}, "expected_fetch_contract": {},
+                       "global_required_data_plan": {"plan_id": "p"}})
+    reference = {"reference_date": "2026-11-10",
+                 "valid_until_utc": "2026-11-11T14:30:00+00:00",
+                 "calendar": {"sessions": {"2026-11-10": "WHOLE"}}}
+    payload = {"symbol": "NVDA", "underlier_code": "NVDA",
+               "meta": {"underlier_observation": {}, "source": "opend",
+                        "closed_market_reference": reference},
+               "rows": []}
+    captured = {}
+    def fake_evaluate(prepared, merged, fx, index, now):
+        captured["merged"] = merged
+        return {"outcome": "unable", "reason_codes": []}
+    monkeypatch.setattr(service.business, "_fetch", lambda **kwargs: ([payload], plan))
+    monkeypatch.setattr("om_group_query_bot.business.evaluate_public_candidates",
+                        fake_evaluate)
+    service.business.dependencies = Dependencies(
+        fetch_symbol=service.business.dependencies.fetch_symbol,
+        exchange_rates=lambda *args, **kwargs: {"USDCNY": {"rate": 7.1}})
+    envelope, status = service.handle(
+        "query_candidates",
+        _body({"symbol": "US.NVDA", "strategy": "short_put", "limit": 5}))
+    assert status == 200
+    assert captured["merged"]["meta"]["closed_market_reference"] == reference
+
+
+def test_candidates_request_closed_market_reference_from_the_fetch(tmp_path, monkeypatch):
+    from test_group_query_bot_api import _body, _service
+    from src.application.opend_symbol_chain_fetching import (
+        OptionExpirationDiscoveryResult,
+    )
+    from src.application.required_data_planning import (
+        RequiredDataFetchPlanBundle,
+        RequiredDataFetchSpec,
+    )
+
+    service, _recorder = _service(tmp_path)
+    captured = {}
+
+    spec = RequiredDataFetchSpec(
+        symbol="NVDA", limit_expirations=0, host="127.0.0.1", port=11111,
+        option_types=("put",), explicit_expirations=["2026-12-18"],
+        min_dte=20, max_dte=60, side_strike_windows={},
+        include_realized_volatility=False, trading_date="2026-11-10")
+    discovery = OptionExpirationDiscoveryResult(
+        outcome="success_rows", reason_code=None, expirations=["2026-12-18"],
+        observed_at_utc=(NOW - timedelta(seconds=3)).isoformat(),
+        completed_at_utc=(NOW - timedelta(seconds=2)).isoformat(),
+        request_identity={"symbol": "NVDA", "underlier": "US.NVDA",
+                          "source": "opend", "host": "127.0.0.1", "port": 11111,
+                          "trading_date": NOW.date().isoformat()})
+    bundle = RequiredDataFetchPlanBundle(
+        symbol="NVDA", spot_reference=185.0, side_plans=[],
+        merged_specs=[spec], expiration_discovery=discovery,
+        projection_outcome="success_rows", projected_expirations=["2026-12-18"])
+
+    def fake_build_request(spec, *, allow_closed_market_reference=False):
+        captured["allow_closed_market_reference"] = allow_closed_market_reference
+        return object()
+
+    def fake_fetch(base, request):
+        return {"symbol": "NVDA", "underlier_code": "NVDA", "meta": {},
+                "rows": []}
+
+    monkeypatch.setattr("om_group_query_bot.business.build_required_data_fetch_plan",
+                        lambda **kwargs: bundle)
+    monkeypatch.setattr(
+        "om_group_query_bot.business.build_required_data_expected_fetch_contract",
+        lambda **kwargs: {"fetch_binding": {}})
+    monkeypatch.setattr("om_group_query_bot.business.build_fetch_request_from_spec",
+                        fake_build_request)
+    service.business.dependencies = Dependencies(
+        fetch_symbol=fake_fetch,
+        exchange_rates=lambda *args, **kwargs: {"USDCNY": {"rate": 7.1}})
+    monkeypatch.setattr("om_group_query_bot.business.evaluate_public_candidates",
+                        lambda *args, **kwargs: {"outcome": "unable", "reason_codes": []})
+    envelope, status = service.handle(
+        "query_candidates",
+        _body({"symbol": "US.NVDA", "strategy": "short_put", "limit": 5}))
+    assert status == 200
+    assert captured["allow_closed_market_reference"] is True
 
 
 def test_candidates_judge_fx_and_candidates_after_their_fetches(tmp_path, monkeypatch):

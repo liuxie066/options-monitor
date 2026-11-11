@@ -58,3 +58,60 @@ def test_close_uses_the_fee_model_id_and_estimate_disclaimer():
     })
     assert "费用模型 futu_option_fee@v1" in text
     assert "非账户实际费用" in text
+
+
+def test_quote_render_shows_price_and_its_market_time_when_closed():
+    from om_group_query_bot.render import render_quotes
+
+    text = render_quotes({
+        "quote_status": "last_known",
+        "effective_parameters": {"contract_requested": False},
+        "underlier": {
+            "contract_symbol": "US.NVDA", "last_price": 168.89,
+            "market_state": "AFTER_HOURS_BEGIN",
+            "last_price_update_time": "2026-11-10 18:32:10.786",
+            "snapshot_received_at_utc": "2026-11-10T23:32:10.786000+00:00",
+        },
+        "missing_requirements": [],
+    })
+    assert "行情状态：最近已知" in text
+    assert "最新 168.8900" in text
+    assert "最新价时间 2026-11-10 18:32:10.786（纽约时间）" in text
+    assert "市场状态 盘后（AFTER_HOURS_BEGIN）" in text
+    assert "取数时间 2026-11-10 18:32:10（纽约时间）" in text
+    assert "非当前可成交状态" in text
+
+
+def test_candidates_render_closed_reference_and_observation_time():
+    from om_group_query_bot.render import render_candidates
+
+    text = render_candidates({
+        "outcome": "unable", "market": "US", "candidates": [],
+        "displayed": 0, "omitted": 0, "reason_codes": ["market_closed"],
+        "data_quality": {
+            "mode": "closed_market_reference",
+            "market_state": "AFTER_HOURS_BEGIN",
+            "underlying_observed_at": "2026-11-10T23:32:10.786000+00:00",
+            "reference_date": "2026-11-10",
+        },
+    })
+    assert "数据口径：休市参考" in text
+    assert "参考交易日：2026-11-10" in text
+    assert "市场状态：盘后（AFTER_HOURS_BEGIN）" in text
+    assert "标的观察时间：2026-11-10 18:32:10（纽约时间）" in text
+
+
+def test_candidates_render_reference_time_even_when_unavailable():
+    from om_group_query_bot.render import render_candidates
+
+    text = render_candidates({
+        "outcome": "unable", "market": "HK", "candidates": [],
+        "displayed": 0, "omitted": 0, "reason_codes": ["market_closed"],
+        "data_quality": {
+            "mode": "unavailable", "market_state": "CLOSED",
+            "underlying_observed_at": "2026-11-10T08:00:00+00:00",
+        },
+    })
+    assert "数据口径" not in text
+    assert "市场状态：休市（CLOSED）" in text
+    assert "标的观察时间：2026-11-10 16:00:00（香港时间）" in text
