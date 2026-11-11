@@ -675,7 +675,9 @@ def test_self_coverage_builds_disposable_environment_and_removes_build_artifacts
     assert not (source / "plugins/x/build").exists()
     assert not (source / "plugins/x/src/pkg.egg-info").exists()
     assert any("-m" in argv and "pip" in argv and "requirements/dev.txt" in argv for argv in commands)
-    assert any("-m" in argv and "pytest" in argv for argv in commands)
+    workload = next(argv for argv in commands if "-m" in argv and "pytest" in argv)
+    assert "--basetemp" in workload
+    assert Path(workload[workload.index("--basetemp") + 1]).is_relative_to(tmp_path / "scratch")
 
 
 def test_self_coverage_workload_failure_degrades_with_explicit_reason(tmp_path):

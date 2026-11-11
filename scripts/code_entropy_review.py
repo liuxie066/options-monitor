@@ -422,7 +422,7 @@ def self_coverage(source, output, execute, *, scratch, time_left):
         workload = [str(venv / "bin/python"), "-m", "coverage", "run", "--branch",
                     f"--source={','.join(sources)}",
                     "-m", "pytest", "-q", "-p", "no:cacheprovider",
-                    "-o", "tmp_path_retention_policy=none"]
+                    "--basetemp", str(Path(scratch) / "pytest-tmp")]
         result = execute(workload, cwd=source, timeout=max(60, time_left() - 420), env=environment)
         record["workload"] = {"command": workload, "exit_code": result["exit_code"],
                               "output": result.get("output"), "stderr": result.get("stderr")}
