@@ -3,9 +3,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+from unittest.mock import patch
 
 import pytest
 
+from domain.domain.expiration_dates import expiration_market_date
 from om_group_query_bot.assessment import (
     AssessmentError,
     build_binding,
@@ -28,6 +30,7 @@ from src.application.close_advice_required_data import (
     scenario_requirement_index,
     validate_user_provided_scenario_plan,
 )
+from src.application import opend_symbol_chain_fetching
 from src.application.opend_symbol_chain_fetching import OptionExpirationDiscoveryResult
 from src.application.opening_quote_evidence import (
     OPENING_UNDERLIER_OBSERVATION_SCHEMA,
@@ -78,17 +81,25 @@ def _caches(now=NOW):
 
 
 def _build(tmp_path, scenario, *, now=NOW):
-    discovery, spot = _caches(now)
-    return build_user_provided_scenario_plan(
-        scenario=scenario, policy_sha256=POLICY_SHA,
-        strategy_version="remaining_yield_capture.v3",
-        fee_model_id="futu_option_fee", fee_model_version="futu_option_sell_fee.v1",
-        quote_route={"source": "futu", "host": "127.0.0.1", "port": 11111},
-        runtime_root=tmp_path / "output_runs" / "a1",
-        required_data_dir=tmp_path / "output_runs" / "a1" / "required_data",
-        now_utc=now, expiration_discovery_cache=discovery,
-        spot_observation_cache=spot,
-    )
+    # The planner derives DTE windows from the market trading date, so pin it to
+    # the fixture clock instead of the live wall clock; otherwise these
+    # assertions drift by one day whenever a US trading date rolls over.
+    def market_date(market):
+        return expiration_market_date(now, market)
+
+    with patch.object(opend_utils, "get_trading_date", market_date), \
+            patch.object(opend_symbol_chain_fetching, "get_trading_date", market_date):
+        discovery, spot = _caches(now)
+        return build_user_provided_scenario_plan(
+            scenario=scenario, policy_sha256=POLICY_SHA,
+            strategy_version="remaining_yield_capture.v3",
+            fee_model_id="futu_option_fee", fee_model_version="futu_option_sell_fee.v1",
+            quote_route={"source": "futu", "host": "127.0.0.1", "port": 11111},
+            runtime_root=tmp_path / "output_runs" / "a1",
+            required_data_dir=tmp_path / "output_runs" / "a1" / "required_data",
+            now_utc=now, expiration_discovery_cache=discovery,
+            spot_observation_cache=spot,
+        )
 
 
 def _reject(tmp_path, scenario, *, now=NOW):
