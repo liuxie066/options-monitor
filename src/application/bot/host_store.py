@@ -647,21 +647,38 @@ class BotHostStore:
             return dict(conn.execute("SELECT * FROM bot_reply_outbox WHERE delivery_key = ?",
                                      (row["delivery_key"],)).fetchone())
 
-    def mark_reply_delivered(self, delivery_key: str, *, attempt_count: int | None = None) -> bool:
-        """Fence supplied generations; retain legacy callers without one outside Feishu."""
+    def mark_reply_delivered(
+        self, delivery_key: str, *, attempt_count: int | None = None, receipt: dict[str, Any] | None = None,
+    ) -> bool:
+        """Fence supplied generations and persist their receipt with successful settlement."""
+        from src.application.bot.control.audit import InboundAuditStore
+
         self._ensure_schema()
         now = utc_now_iso()
         with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
             cursor = conn.execute(
                 """
                 UPDATE bot_reply_outbox
-                SET status = 'delivered', payload_json = '{}', delivered_at = ?, updated_at = ?, last_error = NULL
+                SET status = 'delivered', payload_json = '{}', delivered_at = ?, updated_at = ?, last_error = NULL,
+                    receipt_json = ?
                 WHERE delivery_key = ? AND status = 'delivering'
                   AND ((? IS NULL AND channel != 'feishu') OR attempt_count = ?)
                 """,
-                (now, now, str(delivery_key), attempt_count, attempt_count),
+                (now, now, json.dumps(receipt or {}, ensure_ascii=False), str(delivery_key), attempt_count, attempt_count),
             )
-        return bool(cursor.rowcount)
+            if not cursor.rowcount:
+                return False
+            row = conn.execute("SELECT channel FROM bot_reply_outbox WHERE delivery_key = ?", (delivery_key,)).fetchone()
+            if receipt and row["channel"] == "feishu" and delivery_key.startswith("feishu:"):
+                audit_exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'inbound_command_audit'",
+                ).fetchone()
+                if audit_exists:
+                    InboundAuditStore.merge_response_data_in_transaction(
+                        conn, command_id=delivery_key.removeprefix("feishu:"), data={"reply": receipt},
+                    )
+        return True
 
     def select_reply_fallback(self, delivery_key: str, *, attempt_count: int) -> bool:
         self._ensure_schema()
@@ -818,7 +835,8 @@ class BotHostStore:
                     last_error TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    delivered_at TEXT
+                    delivered_at TEXT,
+                    receipt_json TEXT NOT NULL DEFAULT '{}'
                 );
                 CREATE TABLE IF NOT EXISTS bot_lane_leases (
                     lane TEXT NOT NULL,
@@ -835,6 +853,11 @@ class BotHostStore:
                 conn.execute("ALTER TABLE bot_sessions ADD COLUMN memory_json TEXT NOT NULL DEFAULT '{}'")
             run_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(bot_runs)")}
             reply_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(bot_reply_outbox)")}
+            if "receipt_json" not in reply_columns:
+                conn.execute("BEGIN IMMEDIATE")
+                if "receipt_json" not in {str(row[1]) for row in conn.execute("PRAGMA table_info(bot_reply_outbox)")}:
+                    conn.execute("ALTER TABLE bot_reply_outbox ADD COLUMN receipt_json TEXT NOT NULL DEFAULT '{}'")
+                conn.commit()
             if "authorization_json" not in reply_columns:
                 conn.execute("BEGIN IMMEDIATE")
                 if "authorization_json" not in {str(row[1]) for row in conn.execute("PRAGMA table_info(bot_reply_outbox)")}:

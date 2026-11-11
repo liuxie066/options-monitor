@@ -253,38 +253,56 @@ class InboundAuditStore:
                                (command_id,)).fetchone()
         return _loads_object(row[0]) if row and row[0] else None
 
-    def merge_response_data(self, *, command_id: str, data: dict[str, Any]) -> bool:
+    def merge_response_data(
+        self, *, command_id: str, data: dict[str, Any], reply_delivery_key: str | None = None,
+    ) -> bool:
         normalized_command_id = str(command_id or "").strip()
         if not normalized_command_id or not isinstance(data, dict) or not data:
             return False
         if not self.path.exists():
             return False
         self._ensure_schema()
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT response_json
-                FROM inbound_command_audit
-                WHERE command_id = ? AND execution_state = 'completed'
-                LIMIT 1
-                """,
-                (normalized_command_id,),
-            ).fetchone()
-            if row is None:
-                return False
-            response = _loads_object(row["response_json"])
-            response_data_raw = response.get("data")
-            response_data: dict[str, Any] = dict(response_data_raw) if isinstance(response_data_raw, dict) else {}
-            response_data.update(data)
-            response["data"] = response_data
-            conn.execute(
-                """
-                UPDATE inbound_command_audit
-                SET response_json = ?
-                WHERE command_id = ? AND execution_state = 'completed'
-                """,
-                (_json(response), normalized_command_id),
-            )
+        with self._transaction() as conn:
+            if reply_delivery_key:
+                row = conn.execute(
+                    "SELECT status FROM bot_reply_outbox WHERE delivery_key = ?",
+                    (reply_delivery_key,),
+                ).fetchone()
+                # Successful settlement already wrote the receipt atomically. A
+                # delayed initial handler must not replace it with its failure.
+                if row is not None and row["status"] == "delivered":
+                    return False
+            return self.merge_response_data_in_transaction(conn, command_id=normalized_command_id, data=data)
+
+    @staticmethod
+    def merge_response_data_in_transaction(
+        conn: sqlite3.Connection, *, command_id: str, data: dict[str, Any],
+    ) -> bool:
+        """Merge completed audit data inside the caller's write transaction."""
+        row = conn.execute(
+            """
+            SELECT response_json
+            FROM inbound_command_audit
+            WHERE command_id = ? AND execution_state = 'completed'
+            LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        response = _loads_object(row["response_json"])
+        response_data_raw = response.get("data")
+        response_data: dict[str, Any] = dict(response_data_raw) if isinstance(response_data_raw, dict) else {}
+        response_data.update(data)
+        response["data"] = response_data
+        conn.execute(
+            """
+            UPDATE inbound_command_audit
+            SET response_json = ?
+            WHERE command_id = ? AND execution_state = 'completed'
+            """,
+            (_json(response), command_id),
+        )
         return True
 
     def mark_duplicate(self, *, command_id: str, sender_id: str | None = None, decision: str = "idempotent_replay") -> None:
