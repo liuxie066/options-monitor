@@ -6,7 +6,9 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
 from domain.domain.option_lifecycle import LIFECYCLE_CASE_SCHEMA
-from src.application.ledger.event_codec import valid_void_target_event_id
+from src.application.ledger.void_repair import (
+    lifecycle_effective_void_target_event_ids,
+)
 from src.application.ledger.source_consumption import (
     SOURCE_CONSUMPTION_SCHEMA,
     SOURCE_PAYLOAD_SCHEMA,
@@ -485,13 +487,8 @@ def resolve_lifecycle_account_rows(
             item["_ledger_created_at_ms"] = received_at_by_id[evidence_id]
         evidence.append(item)
     events = normalized["trade_events"]
-    effective_void_event_ids = sorted(
-        {
-            target
-            for event in events
-            for target in [valid_void_target_event_id(dict(event))]
-            if target
-        }
+    effective_void_event_ids = list(
+        lifecycle_effective_void_target_event_ids(events)
     )
     return resolve_account_lifecycle_overlay(
         account=str(rows.get("account") or ""),

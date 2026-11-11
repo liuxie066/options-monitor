@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from decimal import Decimal
 from typing import Any
 
 import pytest
 
+from domain.domain.ledger import ContractKey, TradeEvent
 from src.application.ledger.lifecycle_overlay import (
     LifecycleOverlayContractError,
     advance_direct_lifecycle_anchor_resolution,
     lifecycle_case_generation_token,
     lifecycle_case_resolution,
     resolve_account_lifecycle_overlay,
+    resolve_lifecycle_account_rows,
 )
 from src.application.ledger.source_consumption import (
     build_source_consumption_claim,
@@ -484,3 +487,117 @@ def test_generation_token_tracks_potential_competitor_not_unrelated_case() -> No
         before_token["generation_token"]
         != competitor_token["generation_token"]
     )
+
+
+def _rows_for_repaired_close() -> dict[str, Any]:
+    contract_key = ContractKey.from_values(
+        broker="富途",
+        account="lx",
+        underlying_symbol="AAPL",
+        option_type="put",
+        strike=150.0,
+        expiration_ymd="2026-06-19",
+    )
+
+    def close(event_id: str, event_time_ms: int) -> dict[str, Any]:
+        return TradeEvent(
+            event_id=event_id,
+            event_type="close",
+            event_time_ms=event_time_ms,
+            contract_key=contract_key,
+            contracts=1,
+            price=Decimal("0.5"),
+            currency="USD",
+            source="manual",
+            multiplier=100,
+            target_lot_id="lot-1",
+            raw_payload={"side": "buy"},
+        ).to_dict()
+
+    void = TradeEvent(
+        event_id="void-1",
+        event_type="void",
+        event_time_ms=4000,
+        contract_key=contract_key,
+        contracts=0,
+        price=Decimal("0"),
+        currency="USD",
+        source="cli_trade_event_repair",
+        multiplier=100,
+        target_event_id="close-original",
+        raw_payload={"side": "sell", "repair_event_id": "close-repair"},
+    )
+    case = _case("case-1", {"lot-1": 1}, status="waiting_settlement_evidence")
+    evidence = {
+        "evidence_id": "ev-1",
+        "case_id": "case-1",
+        "source_event_id": "futu:lx:1001:deal-1",
+        "evidence_type": "option_zero_price_close",
+        "account": "lx",
+        "futu_account_id": "1001",
+        "symbol": "NVDA",
+        "option_type": "put",
+        "position_side": "short",
+        "strike": "100",
+        "expiration_ymd": EXPIRATION_YMD,
+        "contracts": 1,
+        "target_contracts_by_lot": {"lot-1": 1},
+        "price": "0",
+        "event_time_ms": 1_700_000_000_100,
+        "received_at_ms": 1_700_000_000_200,
+    }
+    claim = build_source_consumption_claim(
+        source_key="futu:lx:1001:deal-1",
+        case_id="case-1",
+        owner_evidence_id="ev-1",
+        source_role="option_anchor",
+        economic_payload={
+            "account": "lx",
+            "futu_account_id": "1001",
+            "symbol": "NVDA",
+            "option_type": "put",
+            "position_side": "short",
+            "strike": "100",
+            "expiration_ymd": EXPIRATION_YMD,
+            "contracts": 1,
+            "price": "0",
+            "event_time_ms": 1_700_000_000_100,
+        },
+    )
+    return {
+        "account": "lx",
+        "trade_events": [
+            close("close-original", 2000),
+            close("close-repair", 3000),
+            void.to_dict(),
+        ],
+        "account_position_lots": [_lot("lot-1")],
+        "account_lifecycle_cases": [case],
+        "account_lifecycle_evidence": [evidence],
+        "account_lifecycle_allocations": [
+            {
+                "allocation_id": "alloc-1",
+                "case_id": "case-1",
+                "evidence_id": "ev-1",
+                "target_lot_id": "lot-1",
+                "terminal_type": "expire_close",
+                "canonical_terminal_event_id": "close-original",
+                "contracts_allocated": 1,
+            }
+        ],
+        "account_lifecycle_source_consumptions": [claim],
+        "account_lifecycle_timing_policies": [],
+        "account_lifecycle_evidence_received_at_ms_by_id": {
+            "ev-1": 1_700_000_000_200
+        },
+    }
+
+
+def test_resolve_lifecycle_account_rows_keeps_a_repaired_close_allocation() -> None:
+    resolution = resolve_lifecycle_account_rows(_rows_for_repaired_close())
+    case_resolution = resolution["case_resolutions"][0]
+
+    assert case_resolution["status"] == "direct"
+    assert case_resolution["reason_codes"] == []
+    assert case_resolution["requested_reservations_by_lot"] == {}
+    assert case_resolution["effective_reservations_by_lot"] == {}

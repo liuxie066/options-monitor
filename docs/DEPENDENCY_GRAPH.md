@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 1485 (`src`: 609, `domain`: 99, `scripts`: 26, `tests`: 747)
-- Internal import edges: 13393 total, 4553 production/script edges excluding tests
+- Python files scanned: 1487 (`src`: 610, `domain`: 99, `scripts`: 26, `tests`: 748)
+- Internal import edges: 13406 total, 4556 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|739| domain
+  application -->|740| domain
   application -->|4| domain_services
   application -->|212| infrastructure
   application -->|2| om_strategy_core
@@ -51,8 +51,8 @@ flowchart LR
   scripts -->|1| tests
   src -->|1| application
   storage -->|1| domain
-  tests -->|6669| application
-  tests -->|742| domain
+  tests -->|6677| application
+  tests -->|744| domain
   tests -->|2| domain_services
   tests -->|459| infrastructure
   tests -->|506| interfaces
@@ -65,7 +65,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 739 |
+| application | domain | 740 |
 | interfaces | application | 242 |
 | application | infrastructure | 212 |
 | scripts | application | 70 |
@@ -90,8 +90,8 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 6669 |
-| tests | domain | 742 |
+| tests | application | 6677 |
+| tests | domain | 744 |
 | tests | interfaces | 506 |
 | tests | infrastructure | 459 |
 | tests | scripts | 84 |
@@ -109,7 +109,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.interfaces | src.application | 191 |
 | src.application.ledger | domain.domain | 184 |
 | src.application | src.infrastructure | 146 |
-| src.application.ledger | domain.domain.ledger | 77 |
+| src.application.ledger | domain.domain.ledger | 78 |
 | src.application.trades | domain.domain | 68 |
 | src.application.research | src.application | 59 |
 | scripts | src.application | 57 |

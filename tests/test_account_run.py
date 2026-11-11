@@ -1144,6 +1144,140 @@ def test_run_one_account_reuses_validated_close_inputs_without_legacy_text_proje
     )
 
 
+def test_run_one_account_passes_a_datetime_to_roll_portfolio_refresh(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """The refresh clock shares the decision clock's datetime type.
+
+    #1097 handed ``utc_now()``'s ISO string to a ``datetime`` parameter, so
+    every account with an open short call failed close advice with
+    ``str - datetime`` before any quote was evaluated.
+    """
+
+    prepared_manifest = tmp_path / "prepared-option-context.manifest.json"
+    request = replace(
+        _make_request(
+            tmp_path,
+            prefetch_done=True,
+            close_advice_enabled=True,
+        ),
+        prepared_option_positions_context_manifest=prepared_manifest,
+        prepared_option_positions_context_manifest_sha256="a" * 64,
+        required_data_snapshot_sha256="b" * 64,
+        prepared_portfolio_context_manifest=tmp_path / "prepared-portfolio.manifest.json",
+        prepared_portfolio_context_manifest_sha256="c" * 64,
+    )
+    env = _install_common_patches(monkeypatch, request)
+    sealed_portfolio = {
+        "position_snapshot_input": {
+            "observed_at_utc": "2026-04-24T00:00:00+00:00",
+            "errors": [],
+        }
+    }
+    monkeypatch.setattr(
+        env["mod"],
+        "load_prepared_portfolio_context",
+        lambda **_kwargs: sealed_portfolio,
+    )
+    monkeypatch.setattr(
+        env["mod"],
+        "load_prepared_option_positions_context",
+        lambda **_kwargs: {
+            "context_status": "available",
+            "open_positions_min": [
+                {"option_type": "call", "side": "short", "contracts_open": 1},
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        env["mod"],
+        "decide_account_scan_gate",
+        lambda **_kwargs: {
+            "run_pipeline": True,
+            "ran_scan": True,
+            "meaningful": True,
+            "result_reason": "run",
+        },
+    )
+
+    def _run_pipeline_script(**kwargs):
+        kwargs["report_dir"].mkdir(parents=True, exist_ok=True)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(env["mod"], "run_pipeline_script", _run_pipeline_script)
+    monkeypatch.setattr(
+        env["mod"],
+        "normalize_pipeline_subprocess_output",
+        lambda **kwargs: {
+            "returncode": kwargs["returncode"],
+            "adapter": "pipeline",
+        },
+    )
+    monkeypatch.setattr(
+        env["mod"],
+        "decide_pipeline_execution_result",
+        lambda **_kwargs: {
+            "ok": True,
+            "ran_scan": True,
+            "meaningful": True,
+            "reason": "ok",
+        },
+    )
+    refresh_calls: list[dict[str, Any]] = []
+
+    def _load_refreshed(**kwargs):
+        refresh_calls.append(kwargs)
+        observed = kwargs["now_utc"]
+        assert isinstance(observed, datetime)
+        assert observed.tzinfo is not None
+        return {
+            "position_snapshot_input": {
+                "observed_at_utc": observed.isoformat(),
+                "errors": [],
+            }
+        }
+
+    monkeypatch.setattr(
+        env["mod"], "load_account_portfolio_context", _load_refreshed,
+    )
+    close_calls: list[dict[str, Any]] = []
+
+    def _run_close_advice(**kwargs):
+        close_calls.append(kwargs)
+        return {
+            "enabled": True,
+            "status": "ok",
+            "snapshot_authority": "valid",
+            "rows": 0,
+            "notify_rows": 0,
+            "quote_issue_rows": 0,
+            "evaluation_gap_rows": 0,
+            "flag_counts": {},
+            "notification_text": "",
+        }
+
+    monkeypatch.setattr(env["mod"], "run_close_advice", _run_close_advice)
+
+    runlog = _FakeRunlog()
+    _run_account(request, env, runlog, _allow_schema_validation)
+
+    assert refresh_calls, "an open short call must trigger the roll refresh"
+    assert close_calls, "close advice must run after the refresh"
+    assert close_calls[0]["portfolio_context_override"] is not sealed_portfolio
+    stage_events = {
+        event["data"]["stage"]: event
+        for event in runlog.events
+        if event["step"] == "tick_latency" and event["status"] == "ok"
+    }
+    assert stage_events["account_roll_portfolio_refresh"]["data"] == {
+        "stage": "account_roll_portfolio_refresh",
+        "account": "lx",
+        "gate": True,
+        "refreshed": True,
+    }
+
+
 @pytest.mark.parametrize("decision,expected", [
     ({"source": "account_scheduler", "should_run": False}, True),
     ({"source": "account_scheduler", "should_run": 0}, False),

@@ -13,7 +13,6 @@ from domain.domain.decision_state_fingerprint import (
     canonical_sha256,
 )
 from src.application.ledger.projection_verify import compare_projection_lots
-from src.application.ledger.event_codec import valid_void_target_event_id
 from src.application.ledger.combo_membership import (
     resolve_account_combo_memberships,
     validate_combo_group_membership,
@@ -22,6 +21,9 @@ from src.application.ledger.lifecycle_overlay import (
     resolve_account_lifecycle_overlay,
     resolve_lifecycle_account_rows,
     validate_account_lifecycle_resolution,
+)
+from src.application.ledger.void_repair import (
+    lifecycle_effective_void_target_event_ids,
 )
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.repository_core import with_sqlite_repo_writer_lock
@@ -349,12 +351,9 @@ def _decision_state_snapshot_from_rows(
             if str(item.get("canonical_terminal_event_id") or "").strip()
         }
         effective_void_event_ids = sorted(
-            {
-                target
-                for item in events
-                for target in [valid_void_target_event_id(item)]
-                if target and target in account_terminal_event_ids
-            }
+            target
+            for target in lifecycle_effective_void_target_event_ids(events)
+            if target in account_terminal_event_ids
         )
         reprojected_account_lots = [
             row
