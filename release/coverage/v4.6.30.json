@@ -1,0 +1,131 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.30",
+  "base": {
+    "tag": "v4.6.29",
+    "commit": "122221d742fdf365fa9041c1c97be6631a13cfbc"
+  },
+  "reviewed_head": "b2299b4b340dfc2d3751c1e7d18ddf9f6a033f80",
+  "commits": [
+    {
+      "sha": "44e7b4496b623361fc3a3e6616d7589ca554aec5",
+      "subject": "fix(group-query-bot): complete candidate enumeration and empty scopes (#1116)"
+    },
+    {
+      "sha": "ea94695a4e49130e3c01dbc350ac92d40b103db4",
+      "subject": "fix(group-query-bot): pin scenario-contract trading date to fixture clock (#1120)"
+    },
+    {
+      "sha": "5b29685679c9e07d6390d28b098b1f3fc3422692",
+      "subject": "fix(code-health): keep one stuck commit from draining the whole round (#1118)"
+    },
+    {
+      "sha": "854c45814d1780667d74ff0a63bc7b921381db07",
+      "subject": "feat(entropy): wire vulture, radon and branch coverage into the loop (#1117)"
+    },
+    {
+      "sha": "6eec5f54af21d4ead2b80a3f7d84849e8dcf53cd",
+      "subject": "fix(group-query-bot): keep the discovered chain as the candidate enumeration denominator (#1119)"
+    },
+    {
+      "sha": "0938f5f29291b928253bd14fbaf2b384aa5f2334",
+      "subject": "test(entropy): cover weekly external coverage manifest path (#1121)"
+    },
+    {
+      "sha": "b2299b4b340dfc2d3751c1e7d18ddf9f6a033f80",
+      "subject": "fix(group-query-bot): unify symbol handling and clarification notes (#1122)"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Improvements",
+      "text": "群查询bot 统一复用 OM 的标的身份 owner：入口接受裸代码、旧式 `US.`/`HK.` 前缀和中文别名，成功请求只持久化和输出规范形式（`NVDA`、`0700.HK`），港股标的统一为 `0700.HK` 一种拼写，期权合约代码不再被当作标的。工具定义标明非必填参数的缺省来源（展示上限默认 10），候选结果回显实际生效的期限、Delta、行权价与展示上限。（#1122）",
+      "commits": [
+        "b2299b4b340dfc2d3751c1e7d18ddf9f6a033f80"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "修复群查询bot 的澄清说明随多轮累计叠加：说明改由宿主统一追加且只追加一次，不写入会话历史；历史工具结果改为以工具消息回放，模型不再复述历史 JSON 原文。（#1122）",
+      "commits": [
+        "b2299b4b340dfc2d3751c1e7d18ddf9f6a033f80"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "群查询bot 的候选查询不再把完整扫描固定判为「枚举不完整」：取数计划提供的到期日清单与逐到期抓取状态现在会合并回候选评估，可正常返回候选或「无候选」；计划已证明该范围为空（无到期日、无合约或行权价窗口为空）时返回「无候选」而不是服务不可用。（#1116）。",
+      "commits": [
+        "44e7b4496b623361fc3a3e6616d7589ca554aec5"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "群查询bot 的候选枚举改以交易所发现的完整到期链作为分母：跨市场本地午夜后新进入 DTE 窗口、计划时未抓取的到期日不再被误判为「无候选」，而是按枚举不完整返回数据不可用；计划已证明为空的作用域仍返回「无候选」。（#1119）。",
+      "commits": [
+        "6eec5f54af21d4ead2b80a3f7d84849e8dcf53cd"
+      ]
+    }
+  ],
+  "no_release_note": [
+    {
+      "commit": "ea94695a4e49130e3c01dbc350ac92d40b103db4",
+      "reason": "仅测试修复：场景契约测试的交易日改为按夹具时钟推导，产品运行时行为未变，无用户可见影响。"
+    },
+    {
+      "commit": "5b29685679c9e07d6390d28b098b1f3fc3422692",
+      "reason": "仅代码巡检工具的内部调度修复：单个卡住的提交不再耗尽整轮处理配额，不改变产品运行时行为。"
+    },
+    {
+      "commit": "854c45814d1780667d74ff0a63bc7b921381db07",
+      "reason": "仅开发期代码熵工具接入（vulture/radon/分支覆盖），只增加开发依赖与巡检流程，产品运行时行为未变。"
+    },
+    {
+      "commit": "0938f5f29291b928253bd14fbaf2b384aa5f2334",
+      "reason": "仅补充代码熵周度外部覆盖清单路径的测试，不改变产品运行时行为。"
+    }
+  ],
+  "design_evidence": [
+    {
+      "commit": "44e7b4496b623361fc3a3e6616d7589ca554aec5",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1116"
+      ]
+    },
+    {
+      "commit": "ea94695a4e49130e3c01dbc350ac92d40b103db4",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1120"
+      ]
+    },
+    {
+      "commit": "5b29685679c9e07d6390d28b098b1f3fc3422692",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1118"
+      ]
+    },
+    {
+      "commit": "854c45814d1780667d74ff0a63bc7b921381db07",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1117"
+      ]
+    },
+    {
+      "commit": "6eec5f54af21d4ead2b80a3f7d84849e8dcf53cd",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1119"
+      ]
+    },
+    {
+      "commit": "0938f5f29291b928253bd14fbaf2b384aa5f2334",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1121"
+      ]
+    },
+    {
+      "commit": "b2299b4b340dfc2d3751c1e7d18ddf9f6a033f80",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1122"
+      ]
+    }
+  ]
+}
