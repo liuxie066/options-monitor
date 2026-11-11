@@ -48,28 +48,33 @@ from .store import CONVERSATION_DB_NAME, ConversationStore, DeliveryStore, deriv
 LOGGER = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """你是「群查询bot」，只服务已授权的个人飞书群。
-你可以使用且只能使用五个工具：query_quotes、query_candidates、evaluate_close、
-evaluate_roll_down、evaluate_roll_up。你不具备也不得声称具备任何账户、持仓、
+你可以使用五个业务工具：query_quotes、query_candidates、evaluate_close、
+evaluate_roll_down、evaluate_roll_up；另有一个宿主工具 answer_general，只用于提交
+通用问题的回答。你不具备也不得声称具备任何账户、持仓、
 资金、收益、成交或报告访问能力；不要提及或请求账户信息。
 
 规则：
-1. 行情、候选、平仓和移仓结论必须来自工具返回的实时数据。工具未返回数据时，
-   只能澄清问题或说明限制，不得凭记忆给出价格、费用、年化或建议。
-2. 标的直接传用户原话即可（如 NVDA、0700、腾讯、MSFU）；宿主会自动补全并归一化，
+1. 行情、候选、平仓和移仓结论必须来自工具返回的实时数据。业务问题在工具未返回
+   数据时，只能澄清问题或说明限制；不得凭记忆给出价格、费用、年化、仓位或建议。
+2. 与这五项业务无关的通用问题（例如今天几点开盘、交易所日程、市场规则、合约常识、
+   概念解释等）必须调用 answer_general 回答，answer 参数放完整、简短的中文回答；
+   不得给出具体价格、费用、年化数值或买卖建议，也不得声称执行了实时查询。涉及
+   开盘时间、交易时段等时区或夏令时敏感信息时，提醒以交易所官方说明为准。
+3. 标的直接传用户原话即可（如 NVDA、0700、腾讯、MSFU）；宿主会自动补全并归一化，
    不要要求用户提供市场前缀，也不要把猜测的前缀当成事实。只有工具明确返回无法识别
    标的时，才请用户确认代码。
-3. 必填参数只有：query_quotes 的 symbol；query_candidates 的 symbol、strategy；
+4. 必填参数只有：query_quotes 的 symbol；query_candidates 的 symbol、strategy；
    evaluate_close 的 position（symbol/contract/side/contracts）和 opening_premium；
    evaluate_roll_down 与 evaluate_roll_up 的 position 和 search_bounds.max_new_expiration。
    其余参数均可省略：用户没给时不要把可选参数当缺失去追问，直接调用工具；
    工具结果会回显实际采用的期限、Delta、行权价和展示上限。
-4. 只有必填参数缺失，或方向、合约、张数、权利金单位等意图本身有歧义时才追问。
-5. 用户给出的相对日期要保留原话并请用户确认明确日期；最晚新到期日必须由用户明确给出。
-6. 工具返回的结构化数值由系统渲染，你不重复、不改写、不重算关键数字；你可以解释
+5. 只有必填参数缺失，或方向、合约、张数、权利金单位等意图本身有歧义时才追问。
+6. 用户给出的相对日期要保留原话并请用户确认明确日期；最晚新到期日必须由用户明确给出。
+7. 工具返回的结构化数值由系统渲染，你不重复、不改写、不重算关键数字；你可以解释
    这些结果的含义和局限。
-7. 不要复述工具结果或历史查询结果的原文（尤其不要输出 JSON）；不要自行添加
+8. 不要复述工具结果或历史查询结果的原文（尤其不要输出 JSON）；不要自行添加
    “未执行实时查询”之类的免责声明，系统会按需统一追加。
-8. 一次回复保持简短；不要输出 Markdown 表格。
+9. 一次回复保持简短；不要输出 Markdown 表格。
 """
 
 
@@ -270,6 +275,27 @@ TOOLS: list[dict[str, Any]] = [
 ]
 TOOL_NAMES = frozenset(tool["name"] for tool in TOOLS)
 
+GENERAL_ANSWER_TOOL: dict[str, Any] = {
+    "name": "answer_general",
+    "description": "提交与五项业务无关的通用问题回答；宿主原样展示，不附加实时查询声明。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "answer": {"type": "string",
+                       "description": "完整、简短的中文回答，不含免责声明"},
+        },
+        "required": ["answer"],
+        "additionalProperties": False,
+    },
+}
+MODEL_TOOLS: list[dict[str, Any]] = [*TOOLS, GENERAL_ANSWER_TOOL]
+
+
+@dataclass(frozen=True)
+class GeneralAnswer:
+    """Host-only tool result: the model's answer to a general question."""
+    answer: str
+
 
 @dataclass(frozen=True)
 class AgentReply:
@@ -421,7 +447,7 @@ class GroupQueryAgent:
         return messages
 
     def _reserve(self, messages: list[dict]) -> int:
-        return self._estimate({"messages": messages, "tools": TOOLS}) + self.settings.output_tokens
+        return self._estimate({"messages": messages, "tools": MODEL_TOOLS}) + self.settings.output_tokens
 
     def _run(self, event: VerifiedGroupEvent, text: str, now: datetime,
              scope: str) -> AgentReply:
@@ -447,6 +473,7 @@ class GroupQueryAgent:
         last_result: tuple[str, dict[str, Any]] | None = None
         reply_expiry = source_expiry
         explanation = ""
+        general_answer = False
         status = "ok"
         reasons: list[str] = []
         stop = False
@@ -462,7 +489,7 @@ class GroupQueryAgent:
                                          budget.remaining_seconds()))
                 response = self._request(
                     settings=call_settings, api_key=self._api_key,
-                    messages=messages, tools=TOOLS, timeout=timeout)
+                    messages=messages, tools=MODEL_TOOLS, timeout=timeout)
             except BudgetExhausted as exc:
                 status = "limited"
                 reasons.append(exc.reason)
@@ -499,6 +526,12 @@ class GroupQueryAgent:
                     stop = True
                     break
                 if result is not None:
+                    if isinstance(result, GeneralAnswer):
+                        explanation = result.answer
+                        general_answer = True
+                        reasons.append("general_answer")
+                        stop = True
+                        break
                     last_result = (result[0], result[1])
                     reply_expiry = min(reply_expiry, result[2])
                     stored_results.append({"method": result[0],
@@ -532,7 +565,7 @@ class GroupQueryAgent:
             body = compose_reply(prose, rendered)
         else:
             if prose:
-                body = finalize_clarification(prose)
+                body = prose if general_answer else finalize_clarification(prose)
             else:
                 body = finalize_clarification(
                     "请补充标的、合约、张数和开仓权利金等信息后再查询。")
@@ -574,6 +607,20 @@ class GroupQueryAgent:
                   deadline: datetime,
                   source_id: str, source_expiry: datetime):
         name = str((call.get("function") or {}).get("name") or "")
+        if name == GENERAL_ANSWER_TOOL["name"]:
+            try:
+                arguments = json.loads((call.get("function") or {}).get("arguments") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                return ({"ok": False, "error": "INPUT_ERROR",
+                         "message": "tool arguments must be a JSON object"}, None)
+            if not isinstance(arguments, dict):
+                return ({"ok": False, "error": "INPUT_ERROR",
+                         "message": "tool arguments must be a JSON object"}, None)
+            answer = arguments.get("answer")
+            if not isinstance(answer, str) or not answer.strip():
+                return ({"ok": False, "error": "INPUT_ERROR",
+                         "message": "answer must be a non-empty string"}, None)
+            return ({"ok": True, "mode": "general"}, GeneralAnswer(answer.strip()))
         if name not in TOOL_NAMES:
             return ({"ok": False, "error": "unsupported_tool",
                      "message": "only the five group-query tools exist"}, None)
@@ -827,7 +874,9 @@ __all__ = [
     "AgentReply",
     "BotService",
     "BusinessWorker",
+    "GENERAL_ANSWER_TOOL",
     "GroupQueryAgent",
+    "MODEL_TOOLS",
     "SYSTEM_PROMPT",
     "TOOLS",
     "TOOL_NAMES",
