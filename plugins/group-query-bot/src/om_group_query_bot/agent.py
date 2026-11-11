@@ -37,9 +37,11 @@ from .feishu import (
 )
 from .render import (
     compose_reply,
+    finalize_clarification,
     render_admission_rejected,
     render_budget_exhausted,
     render_result,
+    strip_clarification_note,
 )
 from .store import CONVERSATION_DB_NAME, ConversationStore, DeliveryStore, derived_expiry
 
@@ -53,15 +55,37 @@ evaluate_roll_down、evaluate_roll_up。你不具备也不得声称具备任何�
 规则：
 1. 行情、候选、平仓和移仓结论必须来自工具返回的实时数据。工具未返回数据时，
    只能澄清问题或说明限制，不得凭记忆给出价格、费用、年化或建议。
-2. 必要参数缺失或存在歧义（标的、市场、合约、张数、开仓权利金、最晚新到期日、
-   行权价边界等）时，先用简短中文追问；不要猜测。
-3. 用户给出的相对日期要保留原话并请用户确认明确日期；最晚新到期日必须由用户明确给出。
-4. 工具返回的结构化数值由系统渲染，你不重复、不改写、不重算关键数字；你可以解释
+2. 标的直接传用户原话即可（如 NVDA、0700、腾讯、MSFU）；宿主会自动补全并归一化，
+   不要要求用户提供市场前缀，也不要把猜测的前缀当成事实。只有工具明确返回无法识别
+   标的时，才请用户确认代码。
+3. 必填参数只有：query_quotes 的 symbol；query_candidates 的 symbol、strategy；
+   evaluate_close 的 position（symbol/contract/side/contracts）和 opening_premium；
+   evaluate_roll_down 与 evaluate_roll_up 的 position 和 search_bounds.max_new_expiration。
+   其余参数均可省略：用户没给时不要把可选参数当缺失去追问，直接调用工具；
+   工具结果会回显实际采用的期限、Delta、行权价和展示上限。
+4. 只有必填参数缺失，或方向、合约、张数、权利金单位等意图本身有歧义时才追问。
+5. 用户给出的相对日期要保留原话并请用户确认明确日期；最晚新到期日必须由用户明确给出。
+6. 工具返回的结构化数值由系统渲染，你不重复、不改写、不重算关键数字；你可以解释
    这些结果的含义和局限。
-5. 一次回复保持简短；不要输出 Markdown 表格。
-6. 所有工具调用的标的必须带市场前缀：美股用 US.XXX（如 US.NVDA），港股用
-   HK.XXXXX（如 HK.00700）。不得传裸代码（如 NVDA）；不确定市场时先追问。
+7. 不要复述工具结果或历史查询结果的原文（尤其不要输出 JSON）；不要自行添加
+   “未执行实时查询”之类的免责声明，系统会按需统一追加。
+8. 一次回复保持简短；不要输出 Markdown 表格。
 """
+
+
+def _symbol_schema() -> dict[str, Any]:
+    return {
+        "type": "string",
+        "description": "标的，可传用户原话（如 NVDA、0700、腾讯、MSFU）；"
+                       "宿主会自动归一化，不要追问市场前缀",
+    }
+
+
+def _limit_schema() -> dict[str, Any]:
+    return {
+        "type": "integer", "minimum": 1, "maximum": 50, "default": 10,
+        "description": "可选；默认 10，仅限制展示数量",
+    }
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -70,9 +94,10 @@ TOOLS: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "symbol": {"type": "string", "description": "必须带市场前缀，如 US.NVDA 或 HK.00700"},
+                "symbol": _symbol_schema(),
                 "contract": {
                     "type": "object",
+                    "description": "可选；省略时只查询标的行情",
                     "properties": {
                         "option_type": {"type": "string", "enum": ["put", "call"]},
                         "expiration": {"type": "string", "description": "YYYY-MM-DD"},
@@ -92,13 +117,21 @@ TOOLS: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "symbol": {"type": "string", "description": "必须带市场前缀，如 US.NVDA 或 HK.00700"},
+                "symbol": _symbol_schema(),
                 "strategy": {"type": "string", "enum": ["short_put", "short_call"]},
-                "dte": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
-                "strike": {"type": "number"},
+                "dte": {"type": "array", "items": {"type": "integer"},
+                        "minItems": 2, "maxItems": 2,
+                        "description": "可选；省略时使用公共策略对应方向的期限窗口，"
+                                       "不要为此追问用户；实际生效窗口见结果 "
+                                       "effective_filters.dte"},
+                "strike": {"type": "number",
+                           "description": "可选；省略时使用公共策略行权价范围"},
                 "abs_delta_range": {"type": "array", "items": {"type": "number"},
-                                    "minItems": 2, "maxItems": 2},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                                    "minItems": 2, "maxItems": 2,
+                                    "description": "可选；省略时使用公共策略 Delta 范围；"
+                                                   "实际生效区间见结果 effective_filters 的 "
+                                                   "min_abs_delta/max_abs_delta"},
+                "limit": _limit_schema(),
             },
             "required": ["symbol", "strategy"],
             "additionalProperties": False,
@@ -113,7 +146,7 @@ TOOLS: list[dict[str, Any]] = [
                 "position": {
                     "type": "object",
                     "properties": {
-                        "symbol": {"type": "string", "description": "必须带市场前缀，如 US.NVDA 或 HK.00700"},
+                        "symbol": _symbol_schema(),
                         "contract": {
                             "type": "object",
                             "properties": {
@@ -141,7 +174,8 @@ TOOLS: list[dict[str, Any]] = [
                     "required": ["amount", "unit", "currency"],
                     "additionalProperties": False,
                 },
-                "opened_at": {"type": "string", "description": "YYYY-MM-DD"},
+                "opened_at": {"type": "string",
+                              "description": "可选；省略表示未提供开仓日期，不阻断评估"},
             },
             "required": ["position", "opening_premium"],
             "additionalProperties": False,
@@ -156,7 +190,7 @@ TOOLS: list[dict[str, Any]] = [
                 "position": {
                     "type": "object",
                     "properties": {
-                        "symbol": {"type": "string", "description": "必须带市场前缀，如 US.NVDA 或 HK.00700"},
+                        "symbol": _symbol_schema(),
                         "contract": {
                             "type": "object",
                             "properties": {
@@ -177,12 +211,14 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "object",
                     "properties": {
                         "max_new_expiration": {"type": "string"},
-                        "min_new_strike": {"type": "number"},
+                        "min_new_strike": {"type": "number",
+                                           "description": "可选；省略时由原合约、现价和"
+                                                          "公共资源边界决定搜索范围"},
                     },
                     "required": ["max_new_expiration"],
                     "additionalProperties": False,
                 },
-                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                "limit": _limit_schema(),
             },
             "required": ["position", "search_bounds"],
             "additionalProperties": False,
@@ -197,7 +233,7 @@ TOOLS: list[dict[str, Any]] = [
                 "position": {
                     "type": "object",
                     "properties": {
-                        "symbol": {"type": "string", "description": "必须带市场前缀，如 US.NVDA 或 HK.00700"},
+                        "symbol": _symbol_schema(),
                         "contract": {
                             "type": "object",
                             "properties": {
@@ -218,12 +254,14 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "object",
                     "properties": {
                         "max_new_expiration": {"type": "string"},
-                        "max_new_strike": {"type": "number"},
+                        "max_new_strike": {"type": "number",
+                                           "description": "可选；省略时由原合约、现价和"
+                                                          "公共资源边界决定搜索范围"},
                     },
                     "required": ["max_new_expiration"],
                     "additionalProperties": False,
                 },
-                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                "limit": _limit_schema(),
             },
             "required": ["position", "search_bounds"],
             "additionalProperties": False,
@@ -254,31 +292,64 @@ def _input_digest(method: str, parameters: dict[str, Any]) -> str:
 def _tool_summary(method: str, data: dict[str, Any]) -> dict[str, Any]:
     """A bounded result for the model; the renderer keeps the full data."""
     if method == "query_quotes":
-        return {"method": method, "quote_status": data.get("quote_status"),
+        return {"method": method, "symbol": data.get("symbol"),
+                "market": data.get("market"),
+                "quote_status": data.get("quote_status"),
                 "underlier": data.get("underlier"), "option": data.get("option"),
                 "missing_requirements": data.get("missing_requirements"),
                 "effective_parameters": data.get("effective_parameters")}
     if method == "query_candidates":
-        return {"method": method, "status": data.get("status"),
+        return {"method": method, "symbol": data.get("symbol"),
+                "market": data.get("market"), "status": data.get("status"),
                 "outcome": data.get("outcome"),
                 "candidates": list(data.get("candidates") or [])[:10],
                 "displayed": data.get("displayed"), "omitted": data.get("omitted"),
-                "reason_codes": data.get("reason_codes")}
+                "reason_codes": data.get("reason_codes"),
+                "effective_filters": data.get("effective_filters")}
     if method == "evaluate_close":
-        return {"method": method,
+        return {"method": method, "symbol": data.get("symbol"),
+                "market": data.get("market"),
                 "recommendation_state": data.get("recommendation_state"),
                 "evaluation_status": data.get("evaluation_status"),
                 "quote": data.get("quote"), "metrics": data.get("metrics"),
                 "fee_model": data.get("fee_model"), "reason": data.get("reason"),
                 "reason_codes": data.get("reason_codes"),
                 "evaluated_at_utc": data.get("evaluated_at_utc")}
-    return {"method": method, "status": data.get("status"),
+    return {"method": method, "symbol": data.get("symbol"),
+            "market": data.get("market"),
+            "status": data.get("status"),
             "outcome": data.get("outcome"), "old_quote": data.get("old_quote"),
             "candidates": list(data.get("candidates") or [])[:10],
             "displayed": data.get("displayed"), "omitted": data.get("omitted"),
             "reason_codes": data.get("reason_codes"),
             "scope": data.get("scope"),
             "evaluated_at_utc": data.get("evaluated_at_utc")}
+
+
+def _history_tool_messages(content: str, turn_index: int,
+                           item_index: int) -> list[dict[str, Any]]:
+    """Replay a stored result as a real tool exchange, never as model prose."""
+    try:
+        payload = json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        payload = None
+    method = payload.get("method") if isinstance(payload, dict) else None
+    arguments = payload.get("arguments") if isinstance(payload, dict) else None
+    if (isinstance(method, str) and method in TOOL_NAMES
+            and isinstance(arguments, dict) and "summary" in payload):
+        call_id = f"hist_{turn_index}_{item_index}"
+        return [
+            {"role": "assistant", "content": "",
+             "tool_calls": [{"id": call_id, "type": "function",
+                             "function": {"name": method,
+                                          "arguments": _canonical(arguments)}}]},
+            {"role": "tool", "tool_call_id": call_id,
+             "content": _canonical(payload["summary"])},
+        ]
+    # Legacy rows store a bare summary; keep them as context, not as an
+    # assistant message the model would imitate.
+    return [{"role": "user",
+             "content": "[历史查询结果，仅供指代，不要复述] " + content}]
 
 
 class GroupQueryAgent:
@@ -334,13 +405,18 @@ class GroupQueryAgent:
         if pending:
             system += "\n待补参数（仅当用户本轮明确补充时才使用）：\n" + _canonical(pending)
         messages: list[dict] = [{"role": "system", "content": system}]
-        for turn in history:
-            for item in turn["messages"]:
-                if item["role"] == "tool_result":
-                    messages.append({"role": "assistant",
-                                     "content": "[历史查询结果] " + item["content"]})
+        for turn_index, turn in enumerate(history):
+            for item_index, item in enumerate(turn["messages"]):
+                role = item["role"]
+                if role == "tool_result":
+                    messages.extend(_history_tool_messages(
+                        item["content"], turn_index, item_index))
+                elif role == "assistant":
+                    content = strip_clarification_note(item["content"])
+                    if content:
+                        messages.append({"role": "assistant", "content": content})
                 else:
-                    messages.append({"role": item["role"], "content": item["content"]})
+                    messages.append({"role": role, "content": item["content"]})
         messages.append({"role": "user", "content": text})
         return messages
 
@@ -426,6 +502,7 @@ class GroupQueryAgent:
                     last_result = (result[0], result[1])
                     reply_expiry = min(reply_expiry, result[2])
                     stored_results.append({"method": result[0],
+                                           "arguments": result[3],
                                            "summary": _tool_summary(result[0], result[1])})
                 messages.append({"role": "tool",
                                  "tool_call_id": str(call.get("id") or ""),
@@ -445,19 +522,20 @@ class GroupQueryAgent:
             status = "limited"
             reasons.append(budget.stopped_reason)
         rendered = render_result(*last_result) if last_result is not None else None
+        prose = strip_clarification_note(explanation)
         if status == "model_unavailable":
             body = "自然语言服务当前不可用，请稍后重试。"
         elif status == "limited":
             note = render_budget_exhausted(reasons[0] if reasons else "limit")
             body = compose_reply(note, rendered)
         elif rendered is not None:
-            body = compose_reply(explanation, rendered)
+            body = compose_reply(prose, rendered)
         else:
-            prose = explanation.strip()
             if prose:
-                body = prose + "\n\n（未执行实时查询，以上为澄清或说明，不含实时数据。）"
+                body = finalize_clarification(prose)
             else:
-                body = "请补充标的、合约、张数和开仓权利金等信息后再查询。"
+                body = finalize_clarification(
+                    "请补充标的、合约、张数和开仓权利金等信息后再查询。")
                 reasons.append("clarification_required")
         self._store_turn(scope=scope, turn_id=turn_id, user_text=text,
                          results=stored_results, reply=body, now=now,
@@ -481,12 +559,14 @@ class GroupQueryAgent:
         for result in results:
             self.conversations.append_message(
                 scope_sha256=scope, turn_id=turn_id, seq=seq, role="tool_result",
-                content=_canonical(result["summary"]), now=now,
+                content=_canonical({"method": result["method"],
+                                    "arguments": result.get("arguments") or {},
+                                    "summary": result["summary"]}), now=now,
                 source_id=source_id, source_expiry=derived_expiry(now, reply_expiry))
             seq += 1
         self.conversations.append_message(
             scope_sha256=scope, turn_id=turn_id, seq=seq, role="assistant",
-            content=reply, now=now, source_id=source_id,
+            content=strip_clarification_note(reply), now=now, source_id=source_id,
             source_expiry=derived_expiry(now, reply_expiry))
 
     def _dispatch(self, call: dict[str, Any], *, event: VerifiedGroupEvent,
@@ -561,7 +641,9 @@ class GroupQueryAgent:
         except QueryAPIError as exc:
             return ({"ok": False, "error": exc.code, "message": exc.message}, None)
         payload = {"ok": True, **_tool_summary(name, data)}
-        return payload, (name, data, input_expiry)
+        # Persist the normalized parameters, never the model's raw spelling:
+        # aliases and old market prefixes must not be replayed from history.
+        return payload, (name, data, input_expiry, normalized.parameters)
 
 
 class BotService:

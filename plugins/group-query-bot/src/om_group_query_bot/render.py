@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+CLARIFICATION_NOTE = "（未执行实时查询，以上为澄清或说明，不含实时数据。）"
+
 QUOTE_STATUS_LABELS = {
     "current": "当前",
     "last_known": "最近已知",
@@ -118,6 +120,27 @@ def _market_state_text(value: Any) -> str | None:
     return f"{label}（{text}）" if label and label != text else text
 
 
+def strip_clarification_note(text: str | None) -> str:
+    """Remove every clarification disclaimer occurrence and trailing blanks."""
+    if not text:
+        return ""
+    cleaned = str(text)
+    while CLARIFICATION_NOTE in cleaned:
+        cleaned = cleaned.replace(CLARIFICATION_NOTE, "")
+    lines = [line.rstrip() for line in cleaned.splitlines()]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines).strip()
+
+
+def finalize_clarification(text: str | None) -> str:
+    """Append exactly one disclaimer to a clarification reply."""
+    prose = strip_clarification_note(text)
+    if not prose:
+        return CLARIFICATION_NOTE
+    return f"{prose}\n\n{CLARIFICATION_NOTE}"
+
+
 def _number(value: Any, digits: int = 2) -> str:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return "不可用"
@@ -210,6 +233,84 @@ def _candidate_line(index: int, candidate: dict[str, Any]) -> str:
     return "；".join(bits)
 
 
+def _filter_source(filters: dict[str, Any], key: str) -> str:
+    return "用户指定" if filters.get(key) == "request" else "公共策略默认"
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _range_text(low: Any, high: Any) -> str | None:
+    low_ok = _is_number(low)
+    high_ok = _is_number(high)
+    if low_ok and high_ok:
+        return f"{_number(low, 2)}–{_number(high, 2)}"
+    if high_ok:
+        return f"≤ {_number(high, 2)}"
+    if low_ok:
+        return f"≥ {_number(low, 2)}"
+    return None
+
+
+def _delta_filter_text(filters: dict[str, Any]) -> str | None:
+    """Describe the *effective* Delta window, not the user's raw request.
+
+    ``effective_filters.abs_delta_range`` keeps the requested range verbatim;
+    the applied range is ``[min_abs_delta, max_abs_delta]`` after the public
+    cap intersection (``option_candidates.prepare_public_query``).  Echoing the
+    requested range would overstate what the candidates were filtered by.
+    """
+    effective = (filters.get("min_abs_delta"), filters.get("max_abs_delta"))
+    requested = filters.get("abs_delta_range")
+    text = _range_text(*effective)
+    if text is None and isinstance(requested, list) and len(requested) == 2:
+        text = _range_text(requested[0], requested[1])
+    if text is None:
+        return None
+    source = _filter_source(filters, "max_abs_delta_source")
+    if (source == "用户指定"
+            and isinstance(requested, list) and len(requested) == 2
+            and all(_is_number(value) for value in (*effective, *requested))
+            and (float(effective[0]), float(effective[1]))
+            != (float(requested[0]), float(requested[1]))):
+        source += "，受公共策略上限约束"
+    return f"Delta 绝对值 {text}（{source}）"
+
+
+def effective_filter_line(data: dict[str, Any]) -> str | None:
+    """Echo the filters actually applied, including public-policy defaults."""
+    filters = data.get("effective_filters")
+    if not isinstance(filters, dict):
+        return None
+    bits: list[str] = []
+    dte = filters.get("dte")
+    if (isinstance(dte, list) and len(dte) == 2
+            and all(isinstance(value, int) and not isinstance(value, bool)
+                    for value in dte)):
+        bits.append(f"期限 {dte[0]}–{dte[1]} 天"
+                    f"（{_filter_source(filters, 'dte_source')}）")
+    delta_text = _delta_filter_text(filters)
+    if delta_text:
+        bits.append(delta_text)
+    strike = filters.get("strike")
+    if _is_number(strike):
+        bits.append(f"行权价 {_number(strike, 2)}"
+                    f"（{_filter_source(filters, 'strike_source')}）")
+    else:
+        strike_range = _range_text(filters.get("min_strike"),
+                                   filters.get("max_strike"))
+        if strike_range:
+            bits.append(f"行权价 {strike_range}"
+                        f"（{_filter_source(filters, 'strike_source')}）")
+    limit = filters.get("limit")
+    if isinstance(limit, int) and not isinstance(limit, bool):
+        bits.append(f"展示上限 {limit}")
+    if not bits:
+        return None
+    return "筛选：" + "；".join(bits)
+
+
 def render_candidates(data: dict[str, Any]) -> str:
     outcome = OUTCOME_LABELS.get(str(data.get("outcome")), str(data.get("status")))
     lines = [f"候选状态：{outcome}"]
@@ -229,6 +330,9 @@ def render_candidates(data: dict[str, Any]) -> str:
         observed = _receipt_time(quality.get("underlying_observed_at"), zone, zone_label)
         if observed:
             lines.append(f"标的观察时间：{observed}")
+    filter_line = effective_filter_line(data)
+    if filter_line:
+        lines.append(filter_line)
     candidates = data.get("candidates") or []
     for index, candidate in enumerate(candidates, start=1):
         lines.append(_candidate_line(index, candidate))
@@ -339,7 +443,10 @@ def render_budget_exhausted(reason: str) -> str:
 
 
 __all__ = [
+    "CLARIFICATION_NOTE",
     "compose_reply",
+    "effective_filter_line",
+    "finalize_clarification",
     "render_admission_rejected",
     "render_budget_exhausted",
     "render_candidates",
@@ -347,4 +454,5 @@ __all__ = [
     "render_quotes",
     "render_result",
     "render_roll",
+    "strip_clarification_note",
 ]

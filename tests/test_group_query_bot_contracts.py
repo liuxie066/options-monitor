@@ -76,22 +76,44 @@ def test_routes_are_frozen_to_five_methods():
     }
 
 
-def test_quotes_accepts_only_symbol_and_optional_contract():
+def test_quotes_accepts_user_symbol_forms_and_optional_contract():
     request = normalize_request("query_quotes",
                                 _body({"symbol": "us.nvda"}), now=NOW)
-    assert request.parameters == {"symbol": "US.NVDA"}
+    assert request.parameters == {"symbol": "NVDA"}
     assert request.market == "US"
     assert request.input_id is None
+    by_prefix = normalize_request(
+        "query_quotes", _body({"symbol": "US.NVDA"}), now=NOW)
+    assert by_prefix.parameters == {"symbol": "NVDA"}
     with_contract = normalize_request(
-        "query_quotes", _body({"symbol": "US.NVDA", "contract": _contract()}), now=NOW)
+        "query_quotes", _body({"symbol": "NVDA", "contract": _contract()}), now=NOW)
     assert with_contract.parameters["contract"] == {
         "option_type": "put", "expiration": "2026-12-18", "strike": 180.0}
-    _reject("query_quotes", _body({"symbol": "NVDA"}))
-    _reject("query_quotes", _body({"symbol": "XX.NVDA"}))
-    _reject("query_quotes", _body({"symbol": "US.NVDA", "contract": "not-an-object"}))
-    _reject("query_quotes", _body({"symbol": "US.NVDA", "account": "lx"}))
-    _reject("query_quotes", _body({"symbol": "US.NVDA", "contract": {
+    _reject("query_quotes", _body({"symbol": "HK.NVDA"}))
+    _reject("query_quotes", _body({"symbol": "SH.600000"}))
+    _reject("query_quotes", _body({"symbol": "US.NVDA270115C190000"}))
+    _reject("query_quotes", _body({"symbol": "NVDA", "contract": "not-an-object"}))
+    _reject("query_quotes", _body({"symbol": "NVDA", "account": "lx"}))
+    _reject("query_quotes", _body({"symbol": "NVDA", "contract": {
         "option_type": "put", "expiration": "2026-12-18", "strike": True}}))
+
+
+def test_symbol_entrypoint_canonicalizes_us_hk_and_aliases():
+    for raw, expected, market in (
+        ("NVDA", "NVDA", "US"),
+        ("nvda", "NVDA", "US"),
+        ("US.NVDA", "NVDA", "US"),
+        ("0700", "0700.HK", "HK"),
+        ("700", "0700.HK", "HK"),
+        ("0700.HK", "0700.HK", "HK"),
+        ("HK.0700", "0700.HK", "HK"),
+        ("腾讯", "0700.HK", "HK"),
+        ("US.BRK.B", "BRK.B", "US"),
+        ("US.MET", "MET.US", "US"),
+    ):
+        request = normalize_request("query_quotes", _body({"symbol": raw}), now=NOW)
+        assert request.parameters == {"symbol": expected}
+        assert request.market == market
 
 
 def test_queries_reject_scenario_identity_and_server_reserved_fields():
@@ -109,7 +131,7 @@ def test_scenarios_require_input_identity_and_reject_query_fields():
     parameters = {"position": _position(),
                   "opening_premium": {"amount": 2.5, "unit": "per_share", "currency": "USD"}}
     request = normalize_request("evaluate_close", _scenario_body(parameters), now=NOW)
-    assert request.market == "US" and request.symbol == "US.NVDA"
+    assert request.market == "US" and request.symbol == "NVDA"
     assert request.input_id == "input-1"
     assert request.input_as_of_utc == NOW - timedelta(seconds=30)
     body = _body(parameters)
@@ -129,7 +151,7 @@ def test_candidates_validate_delta_range_dte_limit_and_unknown_fields():
                   "abs_delta_range": [0.18, 0.22], "dte": [20, 60],
                   "strike": 180, "limit": 5}
     request = normalize_request("query_candidates", _body(parameters), now=NOW)
-    assert request.parameters == {"symbol": "US.NVDA", "strategy": "short_put",
+    assert request.parameters == {"symbol": "NVDA", "strategy": "short_put",
                                   "abs_delta_range": [0.18, 0.22], "dte": [20, 60],
                                   "strike": 180.0, "limit": 5}
     assert normalize_request(

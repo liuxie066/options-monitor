@@ -58,7 +58,7 @@ bot 使用独立配置 API Key 的模型理解自然语言，模型传输和凭�
 2. **识别意图与整理参数**：模型判断对应第 6.6 节五个固定方法中的哪一个，提取标的、方向、合约、张数、权利金、Delta 区间等业务字段，并结合本会话已确认条件理解修改或引用。
 3. **补齐必要信息**：必要参数缺失或有歧义时先追问，保存有限期的待补参数；信息不足时不提交该业务请求。
 4. **校验并调用固定 API**：宿主校验方法和业务参数，填写请求与会话元数据；API 服务端独立执行鉴权、能力授权、范围和额度校验，再获取行情并计算。模型不能填写宿主身份或选择任意接口。
-5. **组织回复**：根据 API 返回的数据状态和确定性结论解释结果，关键数值按结构化字段渲染，保留行情时间、费用假设、覆盖缺口与未核验条件。每次后续模型调用也受第 9.1 节预算约束。
+5. **组织回复**：根据 API 返回的数据状态和确定性结论解释结果，关键数值按结构化字段渲染，保留行情时间、费用假设、覆盖缺口与未核验条件。每次后续模型调用也受第 9.1 节预算约束。澄清类回复在宿主侧统一附加一次固定的「未执行实时查询」说明；该说明由宿主生成、不写入会话历史，也不随多轮累计。历史工具结果不再作为助手原文回放：新格式以工具消息回放，旧格式降级为仅供指代的用户上下文。
 
 参数理解遵守以下规则：
 
@@ -95,7 +95,7 @@ bot 使用独立配置 API Key 的模型理解自然语言，模型传输和凭�
 
 ```text
 用户：@bot 看看 NVDA 的 Put，期限 14 到 45 天。
-bot：以 US.NVDA、short_put、dte=[14,45] 查询并回复候选。
+bot：以 NVDA、short_put、dte=[14,45] 查询并回复候选。
 
 用户：@bot Delta 限制在 0.18 到 0.22。
 bot：沿用已确认标的、方向和期限，增加 abs_delta_range=[0.18,0.22] 后查询。
@@ -250,7 +250,7 @@ account_scope: []
 
 | 类型 | 定义 |
 | --- | --- |
-| `Symbol` | 带市场前缀的规范化美/港标的代码，例如 `US.NVDA`、`HK.00700`；自然语言别名先解析、歧义先确认，API 再验证身份 |
+| `Symbol` | 与 OM 共享 owner `domain.domain.symbol_identity.resolve_symbol_identity` 一致的规范化美/港标的代码，例如 `NVDA`、`MET.US`、`0700.HK`、`9992.HK`；入口接受用户原话（裸代码、旧式 `US.`/`HK.` 前缀、中文别名），成功请求只持久化和输出规范形式；`futu_code` 仅在经纪商边界使用 |
 | `OptionContract` | `{option_type: put或call, expiration: YYYY-MM-DD, strike: 正数}`，与外层 symbol 共同唯一定位合约；服务端核验标准交割及实际合约代码 |
 | `ScenarioPosition` | `{symbol: Symbol, contract: OptionContract, side: short, contracts: 正整数}`；不接受账户、lot、用户提供的已核验乘数或覆盖字段 |
 | `OpeningPremium` | `{amount: 正数, unit: per_share或per_contract或total, currency: USD或HKD}`；币种必须匹配合约。服务端按已核验乘数及张数归一化为每股/交割单位权利金，不由模型计算换算 |
@@ -335,7 +335,7 @@ Delta 采用合约报价的小数口径；`abs_delta_range` 不表示按张数�
 
 ```json
 {
-  "symbol": "US.NVDA",
+  "symbol": "NVDA",
   "strategy": "short_put",
   "abs_delta_range": [0.18, 0.22],
   "limit": 10
