@@ -1,0 +1,40 @@
+{
+  "schema_version": "release_delta_coverage.v2",
+  "target_version": "4.6.28",
+  "base": {
+    "tag": "v4.6.27",
+    "commit": "b48c8d9caac5223f3d871e555171e182715b1116"
+  },
+  "reviewed_head": "5c110ed51c3c1d8bab1fa70bfd7ce2a462c9497a",
+  "commits": [
+    {
+      "sha": "5c110ed51c3c1d8bab1fa70bfd7ce2a462c9497a",
+      "subject": "fix(tick): restore brief positions and clear the phantom 0700.HK hold (#1111)"
+    }
+  ],
+  "release_notes": [
+    {
+      "category": "Bug Fixes",
+      "text": "修复滚仓组合刷新把 ISO 字符串传给时间参数导致 close advice 失败、日内简报持仓段落为空的问题；账户持有未平仓 short call 时必然触发。（#1111）。",
+      "commits": [
+        "5c110ed51c3c1d8bab1fa70bfd7ce2a462c9497a"
+      ]
+    },
+    {
+      "category": "Bug Fixes",
+      "text": "期权生命周期的“作废”判定改为：仅当 void 之后没有任何存活的等价修复链复现原终态（合约、方向、手数、lot 全等）时才让归属记录失效；已平仓合约不再被当作归属未定并保守扣留担保。（#1111）。",
+      "commits": [
+        "5c110ed51c3c1d8bab1fa70bfd7ce2a462c9497a"
+      ]
+    }
+  ],
+  "no_release_note": [],
+  "design_evidence": [
+    {
+      "commit": "5c110ed51c3c1d8bab1fa70bfd7ce2a462c9497a",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1111"
+      ]
+    }
+  ]
+}
