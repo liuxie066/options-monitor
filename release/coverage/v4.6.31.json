@@ -5,7 +5,7 @@
     "tag": "v4.6.30",
     "commit": "7437039ce70e7631da7d4d9c39b8adea259725e8"
   },
-  "reviewed_head": "8f4a4c53b691aba714d8680aac635722c4314def",
+  "reviewed_head": "1a98e6277f43e1b226be353066df30376066a315",
   "commits": [
     {
       "sha": "d94a05ee5b884b74a4259e2eaf26cac4f865f250",
@@ -46,6 +46,10 @@
     {
       "sha": "8f4a4c53b691aba714d8680aac635722c4314def",
       "subject": "fix(bot): fence upgrade receipt settlement by claim generation (#1133)"
+    },
+    {
+      "sha": "1a98e6277f43e1b226be353066df30376066a315",
+      "subject": "chore: release 4.6.31 (#1134)"
     }
   ],
   "release_notes": [
@@ -108,6 +112,10 @@
     {
       "commit": "a16d4acf1487f39c367a87f9b46a5c6f4d239167",
       "reason": "仅开发期代码熵覆盖工具修复：覆盖负载改在无空格路径的 git worktree 中运行，产品运行时行为未变。"
+    },
+    {
+      "commit": "1a98e6277f43e1b226be353066df30376066a315",
+      "reason": "发布元数据提交（VERSION/CHANGELOG）：由 release PR #1134 squash 合并生成，提交树与发布分支提交 7b3ca7b8a 完全相同；对外说明见本版本 release_notes。"
     }
   ],
   "design_evidence": [
@@ -169,6 +177,12 @@
       "commit": "8f4a4c53b691aba714d8680aac635722c4314def",
       "references": [
         "https://github.com/liuxie066/options-monitor/pull/1133"
+      ]
+    },
+    {
+      "commit": "1a98e6277f43e1b226be353066df30376066a315",
+      "references": [
+        "https://github.com/liuxie066/options-monitor/pull/1134"
       ]
     }
   ]
