@@ -7,6 +7,7 @@ import json
 import pytest
 
 from om_group_query_bot.agent import (
+    MODEL_TOOLS,
     TOOL_NAMES,
     TOOLS,
     BotService,
@@ -374,10 +375,44 @@ def test_only_the_five_fixed_tools_exist_and_unknown_calls_are_refused(tmp_path)
     assert TOOL_NAMES == {"query_quotes", "query_candidates", "evaluate_close",
                           "evaluate_roll_down", "evaluate_roll_up"}
     assert {tool["name"] for tool in TOOLS} == TOOL_NAMES
+    assert {tool["name"] for tool in MODEL_TOOLS} == TOOL_NAMES | {"answer_general"}
     reply = agent.handle_event(_event(), "查一下账户")
 
     assert api.calls == []
     assert "未执行实时查询" in reply.text
+
+
+def test_general_answer_uses_host_tool_and_skips_the_clarification_note(tmp_path):
+    model = _ScriptedModel([
+        _tool_response("answer_general",
+                       {"answer": "美股常规交易时段为美东时间 9:30–16:00。"}, "call_1"),
+    ])
+    api = _FakeAPI()
+    agent, _ = _agent(tmp_path, model=model, api=api)
+
+    reply = agent.handle_event(_event(), "今天几点开盘？")
+
+    assert reply.status == "ok"
+    assert reply.reason_codes == ("general_answer",)
+    assert reply.text == "美股常规交易时段为美东时间 9:30–16:00。"
+    assert "未执行实时查询" not in reply.text
+    assert api.calls == []
+    assert len(model.calls) == 1
+
+
+def test_invalid_general_answer_falls_back_to_a_clarification(tmp_path):
+    model = _ScriptedModel([
+        _tool_response("answer_general", {"answer": "  "}, "call_1"),
+        _text_response("请补充问题。"),
+    ])
+    api = _FakeAPI()
+    agent, _ = _agent(tmp_path, model=model, api=api)
+
+    reply = agent.handle_event(_event(), "随便问问")
+
+    assert reply.status == "ok"
+    assert "未执行实时查询" in reply.text
+    assert api.calls == []
 
 
 def test_symbol_schema_accepts_user_spelling():
