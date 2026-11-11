@@ -116,6 +116,33 @@ def test_ready_delivery_gets_bounded_turn_without_starving_local_repairs(tmp_pat
     assert result["manual_todo"] == [{"id": "blocked", "reason": "retained failure"}]
 
 
+def test_repair_revalidation_surfaces_nested_issue_no_output(tmp_path, monkeypatch):
+    empty = {"processed": [], "results": [], "prs": [], "merged": [], "closed": [], "manual_todo": []}
+    monkeypatch.setattr(review.repair, "deliver_repairs", lambda *args, **kwargs: dict(empty))
+    diagnostics = {"failure_kind": "agent_no_output", "model_output_events": 0}
+    seen = []
+
+    def local(root, config, run, deadline, invoke, *, revalidate_issue):
+        with pytest.raises(review.repair.AgentNoOutput) as excinfo:
+            revalidate_issue(7)
+        seen.append(excinfo.value.diagnostics)
+        return {"status": "no_pending_repairs", "entered": True, "processed": [], "results": [],
+                "attempted": [], "local_verified": [], "inventory": {}, "deferred": [], "manual_todo": [],
+                "agent_unavailable": {"task": "t", "reason": str(excinfo.value),
+                                      "diagnostics": excinfo.value.diagnostics}}
+
+    monkeypatch.setattr(review.repair, "run_repairs", local)
+    monkeypatch.setattr(review.issues, "plan_issues",
+                        lambda *args, **kwargs: {"issues": [], "issue_inputs": {"7": {"input_digest": "d"}}})
+    monkeypatch.setattr(review.issues, "process_issues", lambda *args, **kwargs: {
+        "status": "partial", "reviewed": [],
+        "agent_unavailable": {"number": 7, "reason": "no output", "diagnostics": diagnostics}})
+    result = review.run_repair_phase(tmp_path, {"_deliver_repairs": True}, tmp_path, tmp_path, B, None,
+                                     "complete", time.monotonic() + 100)
+    assert seen == [diagnostics]
+    assert result["agent_unavailable"]["diagnostics"] == diagnostics
+
+
 def test_daily_summary_separates_intake_local_verification_pr_and_merge(tmp_path):
     pr = {"id": "old", "number": 80, "url": "https://github.com/fixture/repo/pull/80", "head": A, "created": False}
     receipt = {"completed_commits": [A], "repair_tasks": ["queued"], "issues": {"reviewed": [7]},

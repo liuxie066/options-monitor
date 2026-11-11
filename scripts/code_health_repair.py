@@ -55,6 +55,14 @@ class AgentTimeout(TimeoutError):
         self.diagnostics = dict(diagnostics)
 
 
+class AgentNoOutput(RuntimeError):
+    """The model produced no output during a nested unit; further model calls cannot help this run."""
+
+    def __init__(self, message: str, *, diagnostics: dict):
+        super().__init__(message)
+        self.diagnostics = dict(diagnostics)
+
+
 def timeout_diagnostics(exc: BaseException) -> dict:
     diagnostics = getattr(exc, "diagnostics", None)
     return dict(diagnostics) if isinstance(diagnostics, dict) else {}
@@ -359,6 +367,8 @@ def repair_one(root, config, run_dir, deadline, invoke, *, revalidate_issue=None
                     issue_state = json.loads(issue_state_path.read_text())["issues"]
                     task = json.loads(path.read_text())
                     remaining_config(config, deadline)
+                except AgentNoOutput:
+                    raise
                 except Exception as exc:
                     reason = f"issue #{number} revalidation deferred: {exc}"
                     break
@@ -593,6 +603,11 @@ def run_repairs(root, config, run_dir, deadline, invoke, *, revalidate_issue=Non
             result = repair_one(root, config, run_dir, unit_deadline, invoke,
                                 revalidate_issue=revalidate if revalidate_issue is not None else None,
                                 _task_id=task["id"])
+        except AgentNoOutput as exc:
+            diagnostics = timeout_diagnostics(exc)
+            result = {"id": task["id"], "status": "pending", "reason": str(exc),
+                      "failure_kind": "agent_no_output", "diagnostics": diagnostics}
+            agent_unavailable = {"task": task["id"], "reason": str(exc), "diagnostics": diagnostics}
         except (TimeoutError, subprocess.TimeoutExpired) as exc:
             diagnostics = timeout_diagnostics(exc)
             result = {"id": task["id"], "status": "pending", "reason": str(exc),
