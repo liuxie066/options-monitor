@@ -126,6 +126,8 @@ Changelog、commit、push、创建 tag、发布 GitHub Release 或升级生产�
 8. 在基于最新 `origin/main` 的 release 分支上，把 `VERSION`、`CHANGELOG.md` 和 coverage
    manifest 作为唯一的 `chore: release <version>` 提交；
 9. 推送 release 分支，通过 Pull Request 合入受保护的 `main`，并等待必需检查通过。
+   release PR 只能使用 rebase merge 或 merge commit，禁止 squash：GitHub 会把提交标题改写为
+   `chore: release <version> (#PR)`，不满足发布门禁对 release commit 的严格命名。
 
 Delta coverage manifest 不是从 commit message 猜 Release Notes。它先确定上一稳定 tag 和
 当前 `HEAD`，生成完整 commit inventory，并复制已经人工维护的 `Unreleased` 条目。维护者必须：
@@ -186,7 +188,8 @@ TARGET_VERSION="1.6.1"
 发布门禁会双向核对：上一稳定 tag 到审阅 `HEAD` 的每个 commit 都必须有 Release Note 处置和
 design evidence，目标 Changelog 的每条 Release Note 也必须映射到 commit。审阅后最多只能再有一个严格命名为
 `chore: release <version>` 的直接子提交，而且它只能修改 `VERSION`、`CHANGELOG.md` 和对应
-coverage manifest；这可以阻止审阅完成后夹带代码。
+coverage manifest；这可以阻止审阅完成后夹带代码。提交标题必须精确匹配，因此 release PR
+禁止 squash 合并；使用 rebase merge 或 merge commit 保留原始提交标题。
 
 Release Notes 预览：
 
@@ -305,6 +308,12 @@ VERSION="$(cat VERSION)"
 审阅与发布前检查，再从 GitHub Actions 手动运行 `Release from VERSION`。手动入口使用当前
 `main` 的 `VERSION` 和提交 SHA，并以完整模式重新执行 metadata、coverage、测试、归档和发布步骤；
 不得用它跳过失败门禁或从未审阅的提交补发 tag。
+
+如果失败根因是 release PR 已被 squash 合并（release commit 标题带 ` (#PR)` 后缀），按以下
+路径修复：把 manifest 的 `reviewed_head` 指向该 squash 提交并补 `no_release_note` 与 design
+evidence，再用一个严格命名、仅修改 manifest 的 `chore: release <version>` 提交（父提交为
+`reviewed_head`）建立新的发布边界；该修复 PR 同样必须用 rebase merge 或 merge commit 合并，
+之后走手动 `Release from VERSION`。
 
 ### 官方可选插件资产
 
