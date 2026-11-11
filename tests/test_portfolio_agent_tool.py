@@ -362,6 +362,69 @@ def _bridge_facts(account: str, *, end_date: str = "2026-07-16") -> dict:
     }
 
 
+@pytest.mark.parametrize("period", ["mtd", "ytd"])
+@pytest.mark.parametrize("mode", ["full", "unavailable", "timeout", "all_unavailable"])
+def test_public_pnl_combined_declares_http_account_coverage(monkeypatch, period, mode) -> None:
+    import subprocess
+
+    monkeypatch.setenv("PORTFOLIO_SERVICE_URL", "http://127.0.0.1:8765")
+    requests, forbidden_calls = [], []
+
+    def forbidden(*args, **kwargs):
+        forbidden_calls.append((args, kwargs))
+        raise AssertionError("synthetic PnL coverage test must not use real network or subprocesses")
+
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+
+    def urlopen(request, timeout):
+        url = urlsplit(request.full_url)
+        query = parse_qs(url.query)
+        account = query["account"][0]
+        requests.append((request.get_method(), url.hostname, url.path, query, timeout))
+        if mode == "timeout" and account == "sy":
+            raise TimeoutError("synthetic capital facts timeout")
+        if mode == "all_unavailable" or (mode == "unavailable" and account == "sy"):
+            return _Response({"success": False, "status": "unavailable", "reason": "synthetic facts unavailable"})
+        facts = _bridge_facts(account)
+        facts["period"]["kind"] = period
+        facts["amounts"]["period_pnl"] = 50.0
+        facts["amounts"]["ending_assets"] = 1150.0
+        return _Response(facts)
+
+    monkeypatch.setattr(portfolio.urllib.request, "urlopen", urlopen)
+    data, warnings, meta = _tool("portfolio_pnl_bridge").call({
+        "period": period, "as_of_month": "2026-07", "accounts": ["lx", "sy"],
+    })
+    included = ["lx", "sy"] if mode == "full" else [] if mode == "all_unavailable" else ["lx"]
+    assert [(method, host, path, query) for method, host, path, query, _ in requests] == [
+        ("GET", "127.0.0.1", "/api/v1/analysis/capital-facts", {
+            "account": [account], "period": [period], "as_of_month": ["2026-07"],
+        }) for account in ("lx", "sy")
+    ]
+    assert all(timeout == 30.0 for *_, timeout in requests)
+    assert forbidden_calls == [] and warnings == [] and meta == {}
+    assert [row["account"] for row in data["accounts"] if row["status"] != "unavailable"] == included
+    combined = data["combined"]
+    assert combined["status"] == ("partial" if included else "unavailable")
+    if included:
+        ending = next(step for step in combined["steps"] if step["key"] == "ending_assets")
+        assert ending["amount"] == 1150 * len(included) and ending["status"] == "observed"
+        assert combined["option_pnl_evidence"] == {
+            "status": "unavailable", "source": None, "reason": "authoritative_option_pnl_source_unavailable",
+        }
+    else:
+        assert combined["steps"] == []
+    if mode != "full":
+        assert "sy" in data["fallback_text"] and "unavailable" in data["fallback_text"]
+        assert data["accounts"][1]["reason"]
+    assert combined["account_coverage"] == {
+        "status": "complete" if mode == "full" else "partial" if included else "unavailable",
+        "included_accounts": included,
+        "missing_accounts": [account for account in ("lx", "sy") if account not in included],
+    }
+
+
 def test_portfolio_cash_bridge_reports_cash_facts_not_onboarded_without_http(monkeypatch) -> None:
     monkeypatch.setattr(
         portfolio.urllib.request,

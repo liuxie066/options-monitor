@@ -238,10 +238,16 @@ def _combined(
     as_of_month: str,
 ) -> dict[str, Any]:
     available = [row for row in rows if row.get("status") != "unavailable"]
+    account_coverage = {
+        "status": "unavailable" if not available else "partial" if len(available) != len(rows) else "complete",
+        "included_accounts": [row["account"] for row in available],
+        "missing_accounts": [row["account"] for row in rows if row.get("status") == "unavailable"],
+    }
     if not available:
         return {
             "status": "unavailable",
             "reason": "account_bridge_unavailable",
+            "account_coverage": account_coverage,
             "period": {"kind": period, "as_of_month": as_of_month},
             "steps": [],
         }
@@ -253,6 +259,7 @@ def _combined(
         return {
             "status": "unavailable",
             "reason": "account_end_date_mismatch",
+            "account_coverage": account_coverage,
             "period": {"kind": period, "as_of_month": as_of_month},
             "steps": [],
         }
@@ -269,6 +276,7 @@ def _combined(
     return {
         "status": "partial",
         "currency": "CNY",
+        "account_coverage": account_coverage,
         "period": {
             "kind": period,
             "as_of_month": as_of_month,

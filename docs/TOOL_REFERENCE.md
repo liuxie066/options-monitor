@@ -139,11 +139,18 @@ symbol 页不附全账户期间总额。旧服务未返回新字段时，期间�
 - `get_portfolio_context`
 - `portfolio_query`
 - `portfolio_assignment_scenario`
+- `portfolio_pnl_bridge`
 
 账户事实必须通过对应工具取得，保留账户、来源、币种和数据时间；不能用记忆、旧回答或自行推算补齐。
 `portfolio_query` 返回 PM 的记录，不等同于券商实时资金。其 `scope` 是实际 HTTP 查询范围；
 PM v1 部分响应不回传账户，因此 `assessment.scope_binding=request` 不声称独立验证了响应账户。
 响应中出现与请求矛盾的账户时，适配器返回错误，不把其他账户的数据重新标成请求账户。
+
+`portfolio_pnl_bridge.combined.account_coverage` 声明资金事实的账户覆盖：`included_accounts`
+列出资金事实有效的纳入账户，`missing_accounts` 列出资金事实不可用的请求账户；`status`
+分别为 `complete`、`partial` 或 `unavailable`。汇总金额仅覆盖纳入账户，不能把部分账户小计
+当成全部请求账户合计。账户覆盖齐全不代表期权 PnL 分解可用；各账户结束日期不一致时，
+`combined` 仍返回 `account_end_date_mismatch` 且不返回汇总金额。逐账户失败原因和文本披露保留。
 
 普通 PM 查询新增 `coverage` 与 `assessment`。`assessment.status=reported_facts_only`
 只支持引用 `supported_claims` 中的数据源报告事实；`unable` 表示当前账户结论无法判断。
