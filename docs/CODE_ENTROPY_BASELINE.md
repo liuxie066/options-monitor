@@ -7,7 +7,7 @@
 - [Python PEP 8](https://peps.python.org/pep-0008/)：清晰、局部可读；风格建议不自动构成问题。
 - [Python AST](https://docs.python.org/3.12/library/ast.html)：静态结构的解释基础；不导入被扫描业务模块。
 - [ruff F401](https://docs.astral.sh/ruff/rules/unused-import/)、[F841](https://docs.astral.sh/ruff/rules/unused-variable/)、[ARG](https://docs.astral.sh/ruff/rules/#flake8-unused-arguments-arg)：只运行这些固定熵规则，不修改仓库已有 lint 规则。
-- [coverage JSON](https://coverage.readthedocs.io/en/7.6.1/commands/cmd_json.html)：未命中是给定工作负载的事实，不是不可达证明。
+- [coverage JSON](https://coverage.readthedocs.io/en/7.17.2/commands/cmd_json.html)：未命中是给定工作负载的事实，不是不可达证明。
 - 项目 [AGENTS.md](../AGENTS.md)、[LESSONS.md](../LESSONS.md)、[Guardrails](GUARDRAILS.md)：保留 canonical owner、公开合同、动态入口、刻意冻结的投影器和用户已承认的不修项；不为理论边缘情况增设抽象。
 
 以上是规则来源引用，不代表本轮联网复核。版本 2 固定这些来源和下面的本地代理，后续变动通过 Git 审阅。
