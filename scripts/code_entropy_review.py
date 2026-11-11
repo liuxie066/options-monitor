@@ -10,6 +10,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -27,6 +29,8 @@ else:
 DEFAULT_STATE = Path.home() / "Library/Application Support/options-monitor/code-entropy-review"
 BUDGETS = {"daily": 900, "weekly": 5400}
 LABEL = "code-entropy"
+VULTURE_UNUSED = re.compile(
+    r"^(?P<path>.+?):(?P<line>\d+): unused (?P<kind>[a-z]+) '(?P<name>[^']*)' \((?P<confidence>\d+)% confidence\)$")
 
 
 def now():
@@ -62,13 +66,13 @@ def run_lock(state):
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def command(argv, cwd, log, timeout, *, input_text=None):
+def command(argv, cwd, log, timeout, *, input_text=None, env=None):
     if timeout <= 0:
         raise TimeoutError("scan budget exhausted")
     with log.open("w") as stdout, log.with_suffix(".stderr").open("w") as stderr:
         process = subprocess.Popen(argv, cwd=cwd, stdout=stdout, stderr=stderr, start_new_session=True,
                                    stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
-                                   text=True)
+                                   text=True, env=env)
         try:
             process.communicate(input=input_text, timeout=timeout)
             code = process.returncode
@@ -80,18 +84,8 @@ def command(argv, cwd, log, timeout, *, input_text=None):
             "stderr": log.with_suffix(".stderr").name}
 
 
-def coverage_evidence(manifest_path, sha):
-    if not manifest_path:
-        return None
-    manifest = read_json(Path(manifest_path))
-    workload = manifest["command"]
-    if (manifest["main_sha"] != sha or type(manifest["exit_code"]) is not int or manifest["exit_code"] != 0
-            or not isinstance(workload, list) or not workload or not all(isinstance(arg, str) and arg for arg in workload)):
-        raise ValueError("coverage must bind the exact SHA and a successful workload")
-    path = Path(manifest["coverage_json"])
-    if hashlib.sha256(path.read_bytes()).hexdigest() != manifest["coverage_sha256"]:
-        raise ValueError("coverage digest mismatch")
-    evidence = read_json(path)
+def coverage_entries(evidence, source_root=None):
+    """Validate a coverage JSON report and index it by repository-relative path."""
     if evidence.get("meta", {}).get("branch_coverage") is not True:
         raise ValueError("coverage must include branch data")
     result = {}
@@ -105,11 +99,28 @@ def coverage_evidence(manifest_path, sha):
             raise ValueError("coverage branch arcs must be integer pairs")
         file = Path(name)
         if file.is_absolute():
-            file = file.relative_to(manifest["source_root"])
+            if source_root is None:
+                raise ValueError("coverage paths must be relative to the scanned source")
+            file = file.relative_to(source_root)
         if ".." in file.parts:
             raise ValueError("invalid coverage source path")
         result[file.as_posix()] = entry
     return result
+
+
+def coverage_evidence(manifest_path, sha):
+    if not manifest_path:
+        return None
+    manifest = read_json(Path(manifest_path))
+    workload = manifest["command"]
+    if (manifest["main_sha"] != sha or type(manifest["exit_code"]) is not int or manifest["exit_code"] != 0
+            or not isinstance(workload, list) or not workload or not all(isinstance(arg, str) and arg for arg in workload)):
+        raise ValueError("coverage must bind the exact SHA and a successful workload")
+    path = Path(manifest["coverage_json"])
+    if hashlib.sha256(path.read_bytes()).hexdigest() != manifest["coverage_sha256"]:
+        raise ValueError("coverage digest mismatch")
+    source_root = manifest.get("source_root")
+    return coverage_entries(read_json(path), Path(source_root) if source_root else None)
 
 
 def changed_files(git, base, sha, execute):
@@ -195,7 +206,8 @@ def deliver(candidates, state, config, sha, execute):
     return published
 
 
-def automatic_review(source, findings, state, config, output, sha, coverage, execute):
+def automatic_review(source, findings, state, config, output, sha, coverage, execute, evidence=None):
+    evidence = evidence or {}
     options = config.get("auto_review", {})
     if not isinstance(options, dict):
         raise ValueError("auto_review must be an object")
@@ -236,7 +248,9 @@ def automatic_review(source, findings, state, config, output, sha, coverage, exe
         return envelope.get("structured_output")
 
     ready, summary = assessment.assess(source, findings, queue, decisions, ledger, options, invoke,
-                                      sha=sha, coverage=coverage)
+                                      sha=sha, coverage=coverage,
+                                      vulture_unused=evidence.get("vulture"),
+                                      radon_complexity=evidence.get("radon"))
     for key, decision in decisions.items():
         if decision != before.get(key):
             decision["at"] = now()
@@ -253,7 +267,6 @@ def automatic_review(source, findings, state, config, output, sha, coverage, exe
 
 def tool_command(name):
     import importlib.util
-    import shutil
     executable = shutil.which(name)
     if executable:
         return [executable]
@@ -262,37 +275,177 @@ def tool_command(name):
     return None
 
 
+def _radon_blocks(block):
+    yield block
+    for child in [*(block.get("closures") or []), *(block.get("methods") or [])]:
+        yield from _radon_blocks(child)
+
+
 def tool_runs(source, selected, execute):
+    """Probe and run the fixed analysis tools.
+
+    Tools are evidence sources, never the decision itself.  Vulture can only
+    corroborate or veto a dead-code candidate produced by the built-in
+    whole-tree reference index; radon supplies authoritative complexity values
+    when it is available, with the built-in counter as fallback.
+    """
     tools, findings = {}, []
+    evidence = {"vulture": None, "radon": None}
     selected = [path for path in selected if (source / path).is_file() and not (source / path).is_symlink()]
-    for name in ("ruff", "vulture", "coverage", "radon", "jscpd"):
+    for name in ("ruff", "vulture", "radon", "coverage"):
         prefix = tool_command(name)
         if not prefix:
-            tools[name] = {"available": False, "reason": "not installed; no automatic installation"}
+            tools[name] = {"available": False,
+                           "reason": "not installed; install requirements/dev.txt with constraints/dev.txt"}
             continue
         version = execute([*prefix, "--version"])
         if version["exit_code"]:
             raise RuntimeError(f"{name} version probe failed; see raw tool output")
         tools[name] = {"available": True, "version": version["text"].strip(), "command_prefix": prefix}
-        if not selected or name not in {"ruff", "vulture"}:
-            tools[name]["execution"] = "not run; built-in metrics or bound coverage evidence used"
+        if not selected:
+            tools[name]["execution"] = "not run; no scoped files"
             continue
-        options = (["check", "--isolated", "--target-version", "py312", "--select", "F401,F841,ARG", "--output-format", "json"]
-                   if name == "ruff" else ["--min-confidence", "100"])
-        result = execute([*prefix, *options, *selected], cwd=source)
-        tools[name]["result"] = {key: value for key, value in result.items() if key != "text"}
-        if result["exit_code"] not in ({0, 1} if name == "ruff" else {0, 3}):
-            raise RuntimeError(f"{name} failed; see raw tool output")
         if name == "ruff":
+            result = execute([*prefix, "check", "--isolated", "--target-version", "py312",
+                              "--select", "F401,F841,ARG", "--output-format", "json", *selected], cwd=source)
+            tools[name]["result"] = {key: value for key, value in result.items() if key != "text"}
+            if result["exit_code"] not in {0, 1}:
+                raise RuntimeError("ruff failed; see raw tool output")
             for row in json.loads(result["text"]):
                 path = Path(row["filename"]).relative_to(source).as_posix()
                 line = row["location"]["row"]
                 source_line = (source / path).read_text().splitlines()[line - 1].strip()
                 findings.append(scan.candidate(f"ruff-{row['code']}", path, f"{row['code']}:{source_line}", line,
                     json.dumps(row, ensure_ascii=False), tool=f"ruff {tools[name]['version']}"))
+            continue
+        if name == "vulture":
+            result = execute([*prefix, "--min-confidence", "60", *selected], cwd=source)
+            tools[name]["result"] = {key: value for key, value in result.items() if key != "text"}
+            if result["exit_code"] not in {0, 3}:
+                raise RuntimeError("vulture failed; see raw tool output")
+            unused = {}
+            for line in result["text"].splitlines():
+                match = VULTURE_UNUSED.match(line.strip())
+                if not match or match.group("kind") not in {"function", "method"}:
+                    continue
+                unused.setdefault(Path(match.group("path")).as_posix(), set()).add(int(match.group("line")))
+            evidence["vulture"] = {"analyzed": sorted(set(selected)), "unused": unused}
+            tools[name]["execution"] = "corroborates or vetoes zero-reference dead-code candidates at 60% confidence"
+            tools[name]["unused_symbols"] = sum(len(lines) for lines in unused.values())
+            continue
+        if name == "radon":
+            result = execute([*prefix, "cc", "--json", *selected], cwd=source)
+            tools[name]["result"] = {key: value for key, value in result.items() if key != "text"}
+            if result["exit_code"]:
+                raise RuntimeError("radon failed; see raw tool output")
+            measured = {}
+            for path, blocks in json.loads(result["text"]).items():
+                rows = measured.setdefault(Path(path).as_posix(), {})
+                for block in blocks:
+                    for item in _radon_blocks(block):
+                        if (item.get("type") in {"function", "method"}
+                                and type(item.get("lineno")) is int and type(item.get("complexity")) is int):
+                            rows[item["lineno"]] = item["complexity"]
+            evidence["radon"] = measured
+            tools[name]["execution"] = "authoritative cyclomatic complexity when available; built-in counter is fallback"
+            tools[name]["measured_functions"] = sum(len(rows) for rows in measured.values())
+            continue
+        tools[name]["execution"] = "probed; weekly self-measurement decides whether to run the workload"
+    tools["jscpd"] = {"available": False, "adopted": False,
+                      "reason": "Node-only tool; this Python-only repository keeps the versioned entropy-token-v1 duplication metric"}
     tools["builtin"] = {"available": True, "version": scan.VERSION,
-                         "complexity": "entropy-ast-v1", "duplication": "entropy-token-v1"}
-    return tools, findings
+                        "complexity": "entropy-ast-v1 (fallback)", "duplication": "entropy-token-v1"}
+    return tools, findings, evidence
+
+
+def coverage_sources(source):
+    """Source roots coverage must measure; plugin packages live under */src."""
+    roots = [name for name in ("src", "domain", "om_strategy_core", "scripts") if (source / name).is_dir()]
+    roots += sorted(path.relative_to(source).as_posix()
+                    for path in (source / "plugins").glob("*/src") if path.is_dir())
+    return roots
+
+
+def coverage_environment(output, source):
+    environment = {key: value for key, value in os.environ.items()
+                   if key not in {"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV",
+                                  "COVERAGE_FILE", "COVERAGE_PROCESS_START"}}
+    plugin_paths = [str((source / path).resolve()) for path in coverage_sources(source)
+                    if path.startswith("plugins/")]
+    environment.update(PYTHONPATH=os.pathsep.join(plugin_paths), PYTHONDONTWRITEBYTECODE="1",
+                       COVERAGE_FILE=str(output / "coverage.data"),
+                       PIP_DISABLE_PIP_VERSION_CHECK="1")
+    return environment
+
+
+def self_coverage(source, output, execute, *, scratch, time_left):
+    """Run the snapshot's own tests under branch coverage.
+
+    The ambient interpreter is not trusted to match the snapshot's dependency
+    declaration, so a disposable virtual environment is built from the snapshot
+    itself.  Any workload failure degrades to an explicit record; only the outer
+    budget alarm (TimeoutError) may abort the scan.
+    """
+    started = time.monotonic()
+    record = {"source": "self-run", "status": "skipped", "reason": None}
+    if not (source / "tests").is_dir() or not (source / "requirements/dev.txt").is_file():
+        record["reason"] = "snapshot has no tests/ and requirements/dev.txt workload"
+        return None, record
+    sources = coverage_sources(source)
+    if not sources:
+        record["reason"] = "snapshot has no coverage source roots"
+        return None, record
+    try:
+        if time_left() < 600:
+            record["reason"] = "remaining budget is too small for a coverage workload"
+            return None, record
+        venv = Path(scratch) / "coverage-venv"
+        environment = coverage_environment(output, source)
+        result = execute([sys.executable, "-m", "venv", str(venv)], timeout=120, env=environment)
+        record["venv_command"] = {key: value for key, value in result.items() if key != "text"}
+        if result["exit_code"]:
+            record.update(status="failed", reason="could not create the disposable coverage environment")
+            return None, record
+        pip = [str(venv / "bin/python"), "-m", "pip", "install", "--disable-pip-version-check", "-q",
+               "-r", "requirements/dev.txt", "-c", "constraints/dev.txt"]
+        result = execute(pip, cwd=source, timeout=min(600, max(60, time_left() - 420)), env=environment)
+        record["install_command"] = {key: value for key, value in result.items() if key != "text"}
+        if result["exit_code"]:
+            record.update(status="failed", reason="snapshot development requirements could not be installed")
+            return None, record
+        # Building the local plugin packages writes untracked build/ and egg-info
+        # directories into the snapshot; remove them so they never become metrics.
+        for artifact in [*sorted((source / "plugins").glob("*/build")),
+                         *sorted((source / "plugins").glob("*/*.egg-info")),
+                         *sorted((source / "plugins").glob("*/src/*.egg-info"))]:
+            shutil.rmtree(artifact)
+        workload = [str(venv / "bin/python"), "-m", "coverage", "run", "--branch",
+                    f"--source={','.join(sources)}",
+                    "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                    "--basetemp", str(Path(scratch) / "pytest-tmp")]
+        result = execute(workload, cwd=source, timeout=max(60, time_left() - 420), env=environment)
+        record["workload"] = {"command": workload, "exit_code": result["exit_code"],
+                              "output": result.get("output"), "stderr": result.get("stderr")}
+        if result["exit_code"]:
+            record.update(status="failed", reason=f"snapshot test workload exited {result['exit_code']}")
+            return None, record
+        report = output / "coverage-self.json"
+        result = execute([str(venv / "bin/python"), "-m", "coverage", "json", "-o", str(report)],
+                         cwd=source, timeout=min(120, max(30, time_left() - 300)), env=environment)
+        record["json_command"] = {key: value for key, value in result.items() if key != "text"}
+        if result["exit_code"]:
+            record.update(status="failed", reason="coverage JSON generation failed")
+            return None, record
+        entries = coverage_entries(read_json(report))
+        record.update(status="complete", reason=None, files=len(entries),
+                      coverage_sha256=hashlib.sha256(report.read_bytes()).hexdigest(),
+                      elapsed_seconds=round(time.monotonic() - started, 3))
+        return entries, record
+    except TimeoutError:
+        raise
+    except (subprocess.TimeoutExpired, OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError) as error:
+        record.update(status="failed", reason=f"{type(error).__name__}: {error}")
+        return None, record
 
 
 @contextmanager
@@ -332,11 +485,13 @@ def run_scan(state, mode, *, publish=False, coverage_manifest=None, timeout_seco
     record["python_version"] = sys.version.split()[0]
     write_json(output / "progress.json", record)
 
-    def execute(argv, cwd=None, *, input_text=None, timeout=300):
+    def execute(argv, cwd=None, *, input_text=None, timeout=300, env=None):
         log = output / f"{len(record['commands']):03d}.stdout"
         remaining = budget - (time.monotonic() - started)
         options = {"input_text": input_text} if input_text is not None else {}
-        result = command(argv, cwd or state, log, min(remaining, timeout, 300), **options)
+        if env is not None:
+            options["env"] = env
+        result = command(argv, cwd or state, log, min(remaining, timeout), **options)
         record["commands"].append(result)
         write_json(output / "progress.json", record)
         return {**result, "text": log.read_text(errors="replace")}
@@ -369,10 +524,10 @@ def run_scan(state, mode, *, publish=False, coverage_manifest=None, timeout_seco
             source = snapshot(sha, "current", scratch)
             policy = source / "docs/CODE_ENTROPY_BASELINE.md"
             if policy.is_file():
-                import re
                 version = re.search(r"版本[：:]\s*(\d+)", policy.read_text())
-                if not version or int(version.group(1)) != 1:
+                if not version or int(version.group(1)) not in {1, 2}:
                     raise ValueError("main baseline version is unsupported; update the scanner before resuming")
+                record["baseline_version"] = int(version.group(1))
                 baseline = hashlib.sha256(policy.read_bytes()).hexdigest()
                 record["baseline_digest"] = baseline
                 record["baseline_source"] = "main:docs/CODE_ENTROPY_BASELINE.md"
@@ -395,14 +550,36 @@ def run_scan(state, mode, *, publish=False, coverage_manifest=None, timeout_seco
             coverage = coverage_evidence(coverage_manifest, sha)
             if coverage is not None:
                 write_json(output / "coverage-evidence.json", coverage)
-            metrics, findings = scan.scan(source, selected, coverage)
-            tools, tool_findings = tool_runs(source, selected, execute)
+            tools, tool_findings, evidence = tool_runs(source, selected, execute)
+            if coverage is None and mode == "weekly" and tools.get("coverage", {}).get("available") is True:
+                record["stage"] = "coverage-workload"
+                write_json(output / "progress.json", record)
+                coverage, workload = self_coverage(
+                    source, output, execute, scratch=scratch,
+                    time_left=lambda: budget - (time.monotonic() - started))
+                record["coverage_workload"] = workload
+                if coverage is not None:
+                    write_json(output / "coverage-evidence.json", coverage)
+                    tools["coverage"]["execution"] = "self-run branch coverage of the snapshot test suite"
+                else:
+                    tools["coverage"]["execution"] = workload["reason"]
+            elif coverage is not None:
+                tools.setdefault("coverage", {})["execution"] = "external SHA-bound coverage manifest"
+            elif tools.get("coverage", {}).get("available") is True:
+                tools["coverage"]["execution"] = "not run; branch coverage is measured in weekly deep scans"
+            record["stage"] = "static-measurement"
+            write_json(output / "progress.json", record)
+            metrics, findings = scan.scan(source, selected, coverage,
+                                           vulture_unused=evidence.get("vulture"),
+                                           radon_complexity=evidence.get("radon"))
             findings.extend(tool_findings)
             if mode == "daily" and cursor and selected:
                 previous = snapshot(cursor["sha"], "previous", scratch)
-                _, old_findings = scan.scan(previous, selected)
-                _, old_tools = tool_runs(previous, selected, execute)
-                old = {row["key"]: row for row in [*old_findings, *old_tools]}
+                _, old_tool_findings, old_evidence = tool_runs(previous, selected, execute)
+                old_measured = scan.scan(previous, selected,
+                                         vulture_unused=old_evidence.get("vulture"),
+                                         radon_complexity=old_evidence.get("radon"))[1]
+                old = {row["key"]: row for row in [*old_measured, *old_tool_findings]}
                 findings = [row for row in findings if row["key"] not in old or
                             (row["rule"] == "complexity" and row["raw"] != old[row["key"]]["raw"])]
             decisions = read_json(state / "decisions.json", {})
@@ -413,9 +590,20 @@ def run_scan(state, mode, *, publish=False, coverage_manifest=None, timeout_seco
             write_json(output / "candidates.json", findings)
             write_json(output / "muted.json", muted)
             if coverage is None:
-                record["gaps"].append("No SHA-bound branch coverage: dead-code confirmation and untested branches are null.")
+                if mode == "weekly":
+                    reason = (record.get("coverage_workload") or {}).get("reason") or "coverage is not installed"
+                    record["gaps"].append(f"Branch coverage is unavailable for this weekly run: {reason}.")
+                else:
+                    record["gaps"].append("Branch coverage is measured only in weekly deep scans; daily increments leave dead-code confirmation and untested branches null.")
+            if coverage is not None and metrics["untested_branches"] is None:
+                record["gaps"].append("Coverage did not report branch data for every scoped file: untested branches and dead-code confirmation stay null.")
             if coverage is not None and metrics["dead_code_symbols"] is None:
                 record["gaps"].append("Dead-code gates remain unproven (partial coverage, public API or dynamic entry): confirmation is null.")
+            if not tools.get("vulture", {}).get("available"):
+                record["gaps"].append("vulture is not installed: dead-code candidates rely on the built-in reference index alone.")
+            if not tools.get("radon", {}).get("available"):
+                record["gaps"].append("radon is not installed: complexity uses the built-in entropy-ast-v1 counter.")
+            record["gaps"].append("Duplicate ratio uses entropy-token-v1 (a conservative lower bound); jscpd is not adopted for this Python-only repository.")
             record["gaps"].append("Dynamic config consumers are not excluded: confirmed unused config is null.")
             delivery_findings = findings
             if publish:
@@ -423,7 +611,7 @@ def run_scan(state, mode, *, publish=False, coverage_manifest=None, timeout_seco
                 record["auto_review"] = {"status": "running"}
                 write_json(output / "progress.json", record)
                 delivery_findings, record["auto_review"] = automatic_review(
-                    source, findings, state, config, output, sha, coverage, execute)
+                    source, findings, state, config, output, sha, coverage, execute, evidence=evidence)
                 record["auto_review"]["status"] = "complete"
             record["published_issues"] = deliver(delivery_findings, state, config, sha, execute) if publish else []
             ledger = read_json(state / "issues.json", {})

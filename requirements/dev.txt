@@ -2,6 +2,9 @@
 pytest
 pytest-xdist
 ruff
+coverage
+radon
+vulture
 jsonschema>=4.23,<5
 setuptools>=77
 ./plugins/portfolio-management

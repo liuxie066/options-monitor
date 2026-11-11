@@ -1,6 +1,6 @@
 # 代码熵巡检
 
-设计版本2，2026-11-10。自动裁决策略由code_entropy_assessment.POLICY_VERSION版本化，静态测量仍使用版本1实践基线。本文描述独立扫描器的合同；CI、真实扫描和本机调度是否已启用，以各自回执为准。
+设计版本3，2026-11-11。自动裁决策略由code_entropy_assessment.POLICY_VERSION版本化，静态测量使用版本2实践基线。本文描述独立扫描器的合同；CI、真实扫描和本机调度是否已启用，以各自回执为准。
 
 ## 目标与隔离
 
@@ -26,21 +26,26 @@
 | 维度 | 固定工具与口径 |
 |---|---|
 | LOC | Python物理行数；另记非空且非纯注释的行数，后者包含docstring |
-| 零引用候选 | 全仓tracked文本词索引与AST；仅私有顶层函数，同名使用、字符串引用会保守排除 |
+| 零引用候选 | 全仓tracked文本词索引与AST；仅私有顶层函数，同名使用、字符串引用会保守排除。vulture可用时，内置索引与vulture `unused function/method`必须同时判定零引用才进入候选；vulture只能否决，不能单独新增候选 |
 | 死代码确认 | 零引用、无运行时命中、非公开API、非配置/插件入口四条件均明确true |
 | 不可达分支 | 只确认字面`if False` / `while False`的正向分支 |
-| 测试未覆盖分支 | 绑定同SHA的coverage JSON中missing_branches，单列，不冒充不可达 |
-| 复杂度 | `entropy-ast-v1`，函数独立计数；1–5、6–10、11–20、>20分布，严格>10列候选 |
+| 测试未覆盖分支 | 同SHA的coverage分支数据中missing_branches，单列，不冒充不可达 |
+| 复杂度 | `radon 6.0.1` `cc --json`逐函数圈复杂度；radon不报告函数内局部类的方法时逐函数回退`entropy-ast-v1`并计数。1–5、6–10、11–20、>20分布，严格>10列候选 |
 | 重复率 | `entropy-token-v1`，用行首50 token种子匹配并向两侧延长，整段在两文件中均至少跨10行；重叠位置取并集 |
 | 未用配置 | 配置字典键没有其他文本出现时列候选；动态消费者未排除，确认数为null |
 | ruff | 显式`--isolated --target-version py312 --select F401,F841,ARG`；只列候选，不改项目lint规则 |
-| vulture | 可用时运行`--min-confidence 100`，原始输出留档；自身输出不能越过死代码四门禁 |
+| vulture | 可用时运行`--min-confidence 60`，原始输出留档；只作为零引用的第二证据来源，自身输出不能越过死代码四门禁 |
+| radon | 可用时运行`cc --json`，作为复杂度权威测量；缺失时回退内置计数并在gaps说明 |
+| coverage | 优先使用`--coverage-manifest`绑定的外部证据；未提供时仅周扫在快照内自建一次性venv并运行全量测试 |
+| jscpd | 不采用。它是Node工具，本仓为纯Python；重复率继续使用版本化`entropy-token-v1`，两者口径不可直接比较 |
 
-复杂度和重复使用自带、版本化的等价算法；不需要安装radon/jscpd。重复指标是行首窗口能够证明的重复token比例，是保守下界，不能与jscpd语义或不同窗口口径直接比较。忽略注释、排版和docstring，保留名称及其他字符串。
+固定的分析工具版本记录在`requirements/dev.txt`与`constraints/dev.txt`：vulture 2.16、radon 6.0.1、coverage 7.17.2。它们是开发侧依赖，不是产品功能：`requirements/runtime.txt`、`requirements/server.txt`、`constraints/runtime*.txt`和`scripts/runtime_bundle.lock.json`都不包含这三个工具，运行时bundle只安装lock中锁定的产物，用户安装和线上运行都不需要它们，这是有意排除。周扫的coverage工作负载使用快照内一次性venv，运行结束随临时目录清理，不进入运行时安装包。ruff、vulture和radon通过既有解释器的隔离模块模式运行；每轮记录可用性、版本、命令、退出码、stdout/stderr。分析工具缺失时不自动安装，只在gaps说明降级口径，缺证据不填0。
 
-优先查找现有命令；Python工具也可通过既有解释器的隔离模块模式运行。每轮记录可用性、版本、命令、退出码、stdout/stderr。缺失工具不自动安装，缺证据不填0。仓库现有scripts/guardrails_check.py拥有公开面解析，本流程复用其declared_public_names；不复制公开API规则。scripts/generate_dependency_graph.py继续拥有依赖图；新增模块按仓库守卫刷新生成文档。不存在的tools目录不虚构为已复用能力。
+周扫的coverage工作负载不信任环境里的解释器和依赖：它在临时快照内用`python -m venv`建一次性venv，按快照自己的`requirements/dev.txt`/`constraints/dev.txt`安装（包括本地插件包），清理安装产生的`build/`和`egg-info`后，串行运行快照自带的全量测试。pytest的`--basetemp`放在本轮快照scratch内，避免复用或清理其他pytest会话在`/tmp`下的basemp，工作负载结束随scratch一起删除。这样覆盖率严格绑定被扫描的SHA，也不会被宿主venv的漂移污染。代价是周扫增加约一次依赖安装和一次全量测试的时间；因此日扫不跑coverage，只保留增量静态指标。工作负载失败、超时或剩余预算不足时周扫仍完成静态测量，`untested_branches`和死代码确认保持null并写入真实原因。外部`--coverage-manifest`仍优先，且必须绑定同一SHA、成功退出和分支数据。
 
 全仓存在动态取名、注册、星号导入等风险时，不能仅凭函数所在文件没有入口语法就确认非入口；保留未知门禁。coverage只检查函数体命中，排除def声明行；缺少可执行行证据也不能确认零命中。四个过度设计代理为单一显式实现ABC/Protocol、静态单取值布尔开关、单调用点转发包装、单调用点常量实参通用参数。它们始终只作低置信候选，不等同应当删除。
+
+仓库现有scripts/guardrails_check.py拥有公开面解析，本流程复用其declared_public_names；不复制公开API规则。scripts/generate_dependency_graph.py继续拥有依赖图；新增模块按仓库守卫刷新生成文档。不存在的tools目录不虚构为已复用能力。
 
 ## 基线与评分历史
 

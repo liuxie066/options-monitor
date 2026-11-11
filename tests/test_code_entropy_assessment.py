@@ -165,7 +165,7 @@ def test_real_cli_to_issue_and_failure_cursor_retention(tmp_path, monkeypatch, o
     state.mkdir()
     policy = put(tmp_path, "baseline.md", "fixture baseline version 1")
     review.initialize(state, "fixture/repo", str(origin), policy)
-    monkeypatch.setattr(review, "tool_runs", lambda *args: ({}, []))
+    monkeypatch.setattr(review, "tool_runs", lambda *args: ({}, [], {}))
     with review.run_lock(state):
         assert review.run_scan(state, "daily", timeout_seconds=30)["status"] == "complete"
     old_cursor = (state / "daily-cursor.json").read_bytes()

@@ -1,5 +1,8 @@
 -c runtime.txt
+coverage==7.17.2
 pytest==9.0.3
 pytest-xdist==3.8.0
+radon==6.0.1
 ruff==0.15.14
 setuptools==80.9.0
+vulture==2.16

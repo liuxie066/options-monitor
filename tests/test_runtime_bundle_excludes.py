@@ -132,3 +132,35 @@ def test_runtime_bundle_source_keeps_readme_user_docs(tmp_path):
     assert user_docs | RUNTIME_SCRIPTS | {"README.md", "om", "om-agent"} <= files
     assert files.isdisjoint(INTERNAL_DOCS)
     assert {name for name in files if name.startswith("scripts/")} == RUNTIME_SCRIPTS
+
+
+DEV_ONLY_ANALYSIS_TOOLS = {"coverage", "radon", "vulture"}
+
+
+def test_dev_only_entropy_tools_stay_out_of_runtime_inputs():
+    lock = json.loads((ROOT / "scripts/runtime_bundle.lock.json").read_text())
+    installed = {str(name).lower() for name in [*lock["build_dependencies"], *lock["dependencies"]]}
+    assert DEV_ONLY_ANALYSIS_TOOLS.isdisjoint(installed)
+    runtime_inputs = ["requirements.txt", "constraints.txt"]
+    runtime_inputs += [
+        path.relative_to(ROOT).as_posix()
+        for directory in ("requirements", "constraints")
+        for path in sorted((ROOT / directory).glob("*.txt"))
+        if path.name != "dev.txt"
+    ]
+    for relative in runtime_inputs:
+        text = (ROOT / relative).read_text().lower()
+        assert not any(tool in text for tool in DEV_ONLY_ANALYSIS_TOOLS), relative
+    dev_lines = {line.strip().split("==")[0] for line in (ROOT / "requirements/dev.txt").read_text().splitlines()}
+    assert DEV_ONLY_ANALYSIS_TOOLS <= dev_lines
+    assert not any(name.startswith("scripts/code_entropy") for name in builder.SOURCE_FILES)
+    assert "scripts" not in builder.SOURCE_DIRS
+
+
+def test_entropy_launchd_templates_are_not_in_the_install_flow():
+    installer = (ROOT / "scripts/install.sh").read_text()
+    assert "code-entropy" not in installer and "code_entropy" not in installer
+    assert not any("code-entropy" in name or "code_entropy" in name for name in builder.SOURCE_FILES)
+    assert "scripts" not in builder.SOURCE_DIRS
+    assert (ROOT / "scripts/launchd/com.options-monitor.code-entropy.daily.plist").is_file()
+    assert (ROOT / "scripts/launchd/com.options-monitor.code-entropy.weekly.plist").is_file()

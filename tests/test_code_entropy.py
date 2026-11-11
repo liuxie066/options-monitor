@@ -249,7 +249,7 @@ def test_real_git_daily_scope_weekly_cursor_isolation_and_failed_retry(tmp_path,
     state.mkdir()
     baseline = put(tmp_path, "policy.md", "fixture baseline version 1")
     review.initialize(state, "fixture/repo", str(origin), baseline)
-    monkeypatch.setattr(review, "tool_runs", lambda source, selected, execute: ({"builtin": {"available": True}}, []))
+    monkeypatch.setattr(review, "tool_runs", lambda source, selected, execute: ({"builtin": {"available": True}}, [], {}))
     with review.run_lock(state):
         initial = review.run_scan(state, "daily", timeout_seconds=30)
     assert initial["status"] == "complete" and initial["initialized_daily_cursor"]
@@ -397,8 +397,8 @@ def test_missing_optional_tools_are_explicit_and_not_installed(tmp_path, monkeyp
         calls.append(argv)
         raise AssertionError("no package installation or external command is permitted")
 
-    tools, rows = review.tool_runs(tmp_path, [], forbidden)
-    assert not rows and not calls
+    tools, rows, evidence = review.tool_runs(tmp_path, [], forbidden)
+    assert not rows and not calls and evidence == {"vulture": None, "radon": None}
     assert all(not tools[name]["available"] for name in ("ruff", "vulture", "coverage", "radon", "jscpd"))
     assert tools["builtin"]["available"]
 
@@ -472,7 +472,7 @@ def test_main_baseline_change_blocks_daily_cursor_and_requires_supported_version
     state = tmp_path / "code-entropy-review"
     state.mkdir()
     review.initialize(state, "fixture/repo", str(origin), policy)
-    monkeypatch.setattr(review, "tool_runs", lambda source, selected, execute: ({}, []))
+    monkeypatch.setattr(review, "tool_runs", lambda source, selected, execute: ({}, [], {}))
     with review.run_lock(state):
         assert review.run_scan(state, "daily", timeout_seconds=30)["status"] == "complete"
     cursor = (state / "daily-cursor.json").read_bytes()
@@ -487,6 +487,12 @@ def test_main_baseline_change_blocks_daily_cursor_and_requires_supported_version
     assert weekly["baseline_digest"] == hashlib.sha256(policy.read_bytes()).hexdigest()
     assert (state / "daily-cursor.json").read_bytes() == cursor
     policy.write_text("版本：2；新算法\n")
+    git(origin, "add", ".")
+    git(origin, "commit", "-m", "fixture supported baseline version")
+    with review.run_lock(state):
+        supported = review.run_scan(state, "weekly", timeout_seconds=30)
+    assert supported["status"] == "complete" and supported["baseline_version"] == 2
+    policy.write_text("版本：3；未支持的更新算法\n")
     git(origin, "add", ".")
     git(origin, "commit", "-m", "fixture unsupported baseline version")
     with review.run_lock(state):
@@ -527,7 +533,7 @@ def test_publication_failure_preserves_daily_cursor_and_reconciles_pending(tmp_p
     state.mkdir()
     baseline = put(tmp_path, "policy.md", "fixture baseline")
     review.initialize(state, "fixture/repo", str(origin), baseline)
-    monkeypatch.setattr(review, "tool_runs", lambda source, selected, execute: ({}, []))
+    monkeypatch.setattr(review, "tool_runs", lambda source, selected, execute: ({}, [], {}))
     with review.run_lock(state):
         assert review.run_scan(state, "daily", timeout_seconds=30)["status"] == "complete"
     cursor = (state / "daily-cursor.json").read_bytes()
@@ -577,3 +583,186 @@ def test_publication_failure_preserves_daily_cursor_and_reconciles_pending(tmp_p
     assert review.read_json(state / "issues.json")[row["key"]]["status"] == "published"
     assert review.read_json(state / "daily-cursor.json")["sha"] == git(origin, "rev-parse", "HEAD")
     assert sum(argv[:3] == ["gh", "issue", "create"] for argv in calls) == 1
+
+
+def test_vulture_corroboration_vetoes_uncorroborated_dead_candidates(tmp_path):
+    put(tmp_path, "src/a.py", "def _confirmed():\n    return 1\n\ndef _vetoed():\n    return 2\n")
+    coverage = {"src/a.py": {"executed_lines": [1], "missing_lines": [2, 4, 5], "missing_branches": []}}
+    metrics, rows = scan.scan(tmp_path, ["src/a.py"], coverage, vulture_unused={"analyzed": ["src/a.py"], "unused": {"src/a.py": {1}}})
+    dead = [row for row in rows if row["rule"] == "dead-code"]
+    assert [row["identity"] for row in dead] == ["_confirmed"]
+    assert dead[0]["high_confidence"] is True and dead[0]["facts"]["vulture_unused"] is True
+    assert metrics["dead_code_candidates"] == 1
+    assert metrics["dead_code_vulture_rejected"] == 1
+    assert metrics["dead_code_basis"] == "vulture+entropy-ast-v1"
+    assert metrics["dead_code_symbols"] == 1
+
+
+def test_vulture_does_not_veto_paths_it_did_not_analyze(tmp_path):
+    put(tmp_path, "src/a.py", "def _maybe_dead():\n    return 1\n")
+    metrics, rows = scan.scan(tmp_path, ["src/a.py"],
+                              vulture_unused={"analyzed": [], "unused": {}})
+    dead = [row for row in rows if row["rule"] == "dead-code"]
+    assert metrics["dead_code_candidates"] == 1 and metrics["dead_code_vulture_rejected"] == 0
+    assert len(dead) == 1 and "vulture_unused" not in dead[0]["facts"]
+    assert dead[0]["tool"] == "entropy-ast-v1"
+
+
+def test_radon_complexity_is_authoritative_with_per_function_fallback(tmp_path):
+    put(tmp_path, "src/a.py", "def run(flag):\n    if flag:\n        return 1\n    return 2\n")
+    metrics, rows = scan.scan(tmp_path, ["src/a.py"], radon_complexity={"src/a.py": {1: 12}})
+    assert metrics["complexity_gt10"] == 1 and metrics["complexity_basis"] == "radon"
+    assert metrics["complexity_unmatched"] == 0
+    row = next(row for row in rows if row["rule"] == "complexity")
+    assert row["facts"]["complexity"] == 12 and row["tool"] == "radon"
+    metrics, rows = scan.scan(tmp_path, ["src/a.py"], radon_complexity={"src/a.py": {}})
+    assert metrics["complexity_unmatched"] == 1
+    assert metrics["complexity_basis"] == "radon+entropy-ast-v1-fallback"
+    assert metrics["complexity_gt10"] == 0
+
+
+def test_tool_runs_parses_vulture_and_radon_evidence(tmp_path, monkeypatch):
+    put(tmp_path, "src/a.py", "def _dead():\n    return 1\n")
+    seen = []
+
+    def execute(argv, cwd=None, **options):
+        seen.append(argv)
+        name = argv[0]
+        if argv[-1] == "--version":
+            return {"exit_code": 0, "text": f"{name} 9.9"}
+        if "check" in argv:
+            return {"exit_code": 0, "text": "[]"}
+        if "--min-confidence" in argv:
+            return {"exit_code": 3, "text": "src/a.py:1: unused function '_dead' (60% confidence)\n"}
+        return {"exit_code": 0, "text": json.dumps(
+            {"src/a.py": [{"type": "function", "name": "_dead", "lineno": 1, "complexity": 7, "closures": []}]})}
+
+    monkeypatch.setattr(review, "tool_command", lambda name: [f"fake-{name}"])
+    tools, findings, evidence = review.tool_runs(tmp_path, ["src/a.py"], execute)
+    assert evidence["vulture"] == {"analyzed": ["src/a.py"], "unused": {"src/a.py": {1}}}
+    assert evidence["radon"] == {"src/a.py": {1: 7}}
+    assert tools["vulture"]["unused_symbols"] == 1
+    assert tools["radon"]["measured_functions"] == 1
+    assert tools["jscpd"]["adopted"] is False
+    assert tools["coverage"]["available"] is True
+    assert not findings
+    assert any("--min-confidence" in argv for argv in seen)
+
+
+def test_self_coverage_builds_disposable_environment_and_removes_build_artifacts(tmp_path):
+    source = tmp_path / "source"
+    (source / "tests").mkdir(parents=True)
+    put(source, "requirements/dev.txt", "-r runtime.txt\n")
+    put(source, "constraints/dev.txt", "")
+    put(source, "plugins/x/build/junk.py", "")
+    put(source, "plugins/x/src/pkg/__init__.py", "")
+    (source / "plugins/x/src/pkg.egg-info").mkdir()
+    output = tmp_path / "run"
+    output.mkdir()
+    commands = []
+
+    def execute(argv, cwd=None, **options):
+        commands.append(argv)
+        if "json" in argv:
+            (output / "coverage-self.json").write_text(json.dumps({
+                "meta": {"branch_coverage": True},
+                "files": {"src/a.py": {"executed_lines": [1], "missing_lines": [], "missing_branches": []}}}))
+        return {"exit_code": 0, "text": ""}
+
+    entries, record = review.self_coverage(source, output, execute, scratch=tmp_path / "scratch",
+                                           time_left=lambda: 1000)
+    assert record["status"] == "complete" and entries["src/a.py"]["executed_lines"] == [1]
+    assert not (source / "plugins/x/build").exists()
+    assert not (source / "plugins/x/src/pkg.egg-info").exists()
+    assert any("-m" in argv and "pip" in argv and "requirements/dev.txt" in argv for argv in commands)
+    workload = next(argv for argv in commands if "-m" in argv and "pytest" in argv)
+    assert "--basetemp" in workload
+    assert Path(workload[workload.index("--basetemp") + 1]).is_relative_to(tmp_path / "scratch")
+
+
+def test_self_coverage_workload_failure_degrades_with_explicit_reason(tmp_path):
+    source = tmp_path / "source"
+    (source / "tests").mkdir(parents=True)
+    (source / "src").mkdir()
+    put(source, "requirements/dev.txt", "")
+    put(source, "constraints/dev.txt", "")
+    output = tmp_path / "run"
+    output.mkdir()
+
+    def execute(argv, cwd=None, **options):
+        return {"exit_code": 1 if "pytest" in argv else 0, "text": ""}
+
+    entries, record = review.self_coverage(source, output, execute, scratch=tmp_path / "scratch",
+                                           time_left=lambda: 1000)
+    assert entries is None and record["status"] == "failed"
+    assert "exited 1" in record["reason"]
+
+
+def test_self_coverage_skips_a_snapshot_without_its_own_workload(tmp_path):
+    def forbidden(argv, cwd=None, **options):
+        raise AssertionError("no workload should start without tests and requirements")
+
+    entries, record = review.self_coverage(tmp_path, tmp_path, forbidden, scratch=tmp_path,
+                                           time_left=lambda: 1000)
+    assert entries is None and record["status"] == "skipped"
+    assert "workload" in record["reason"]
+
+
+def test_real_weekly_scan_uses_installed_vulture_and_radon(tmp_path):
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    git(origin, "init", "-b", "main")
+    body = "def _unused():\n    return 1\n\n\ndef complex_fn(a):\n"
+    body += "".join(f"    if a == {index}:\n        a += 1\n" for index in range(12))
+    body += "    return a\n"
+    put(origin, "src/example.py", body)
+    git(origin, "add", ".")
+    git(origin, "commit", "-m", "fixture tools")
+    state = tmp_path / "code-entropy-review"
+    state.mkdir()
+    status = git(origin, "status", "--porcelain")
+    assert status == ""
+    baseline = put(tmp_path, "policy.md", "fixture baseline version 1")
+    review.initialize(state, "fixture/repo", str(origin), baseline)
+    with review.run_lock(state):
+        result = review.run_scan(state, "weekly", timeout_seconds=60)
+    assert result["status"] == "complete"
+    assert result["metrics"]["complexity_basis"] == "radon"
+    assert result["metrics"]["complexity_gt10"] == 1
+    assert result["tools"]["vulture"]["available"] is True
+    assert result["tools"]["vulture"]["unused_symbols"] >= 1
+    assert result["metrics"]["dead_code_candidates"] == 1
+    assert not any(gap.startswith(("vulture is not installed", "radon is not installed"))
+                   for gap in result["gaps"])
+
+
+def test_missing_tools_degrade_with_explicit_gaps(tmp_path, monkeypatch):
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    git(origin, "init", "-b", "main")
+    body = "def _unused():\n    return 1\n\n\ndef complex_fn(a):\n"
+    body += "".join(f"    if a == {index}:\n        a += 1\n" for index in range(12))
+    body += "    return a\n"
+    put(origin, "src/example.py", body)
+    git(origin, "add", ".")
+    git(origin, "commit", "-m", "fixture missing tools")
+    state = tmp_path / "code-entropy-review"
+    state.mkdir()
+    baseline = put(tmp_path, "policy.md", "fixture baseline version 1")
+    review.initialize(state, "fixture/repo", str(origin), baseline)
+    monkeypatch.setattr(review, "tool_command", lambda name: None)
+    with review.run_lock(state):
+        result = review.run_scan(state, "weekly", timeout_seconds=60)
+    assert result["status"] == "complete"
+    metrics = result["metrics"]
+    assert metrics["dead_code_basis"] == "entropy-ast-v1"
+    assert metrics["dead_code_vulture_rejected"] is None
+    assert metrics["complexity_basis"] == "entropy-ast-v1"
+    assert metrics["complexity_unmatched"] is None
+    assert metrics["untested_branches"] is None
+    assert result["tools"]["vulture"]["available"] is False
+    assert result["tools"]["radon"]["available"] is False
+    assert result["tools"]["coverage"]["available"] is False
+    assert any(gap.startswith("vulture is not installed") for gap in result["gaps"])
+    assert any(gap.startswith("radon is not installed") for gap in result["gaps"])
+    assert any("coverage is not installed" in gap for gap in result["gaps"])
