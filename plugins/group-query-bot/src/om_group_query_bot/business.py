@@ -193,8 +193,7 @@ def _underlier_quote(row: dict[str, Any], symbol: str) -> dict[str, Any] | None:
         "spot": spot,
         "spot_observed_at_utc": row.get("spot_observed_at_utc"),
         "snapshot_received_at_utc": observed,
-        "last_price_update_time": (row.get("spot_update_time")
-                                   or row.get("last_price_update_time")),
+        "last_price_update_time": row.get("spot_update_time"),
         "market_state": row.get("market_state"),
         "underlier_observation_status": row.get("underlier_observation_status"),
         "underlier_sec_status": row.get("underlier_sec_status"),

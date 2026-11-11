@@ -111,7 +111,7 @@ def test_contract_quote_render_keeps_each_instruments_own_time():
     assert "最新价时间 2026-11-10 16:00:00.000（纽约时间）" in option_line
 
 
-def test_quote_render_labels_non_continuous_states_it_cannot_translate():
+def test_quote_render_labels_non_continuous_market_states():
     from om_group_query_bot.render import render_quotes
 
     def text_for(state):
@@ -123,8 +123,10 @@ def test_quote_render_labels_non_continuous_states_it_cannot_translate():
             "missing_requirements": [],
         })
 
-    assert "市场状态 未知（NONE）" in text_for("NONE")
+    assert "市场状态 未开盘/无交易（NONE）" in text_for("NONE")
     assert "市场状态 按最新价交易（TRADE_AT_LAST）" in text_for("TRADE_AT_LAST")
+    assert "市场状态 午盘结束（AFTERNOON_END）" in text_for("AFTERNOON_END")
+    assert "市场状态 交易竞价（TRADE_AUCTION）" in text_for("TRADE_AUCTION")
 
 
 def test_candidates_render_closed_reference_and_observation_time():

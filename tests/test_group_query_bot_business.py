@@ -650,6 +650,18 @@ def test_scenario_reports_the_closed_market_instead_of_a_generic_reason():
         option_type="put", quote_side="buy", now=NOW) != "market_closed"
 
 
+def test_underlier_quote_without_its_own_time_does_not_borrow_the_option_time():
+    from om_group_query_bot.business import _underlier_quote
+
+    quote = _underlier_quote({
+        "spot": 185.0, "spot_observed_at_utc": NOW.isoformat(),
+        "last_price_update_time": "2026-11-10 18:00:00.000",
+        "underlier_sec_status": "NORMAL",
+    }, "NVDA")
+    assert quote["last_price"] == 185.0
+    assert quote["last_price_update_time"] is None
+
+
 def test_quote_status_folds_an_unavailable_leg_into_the_response(tmp_path, monkeypatch):
     from test_group_query_bot_api import _body, _service
 

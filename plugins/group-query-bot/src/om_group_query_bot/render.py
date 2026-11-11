@@ -23,7 +23,7 @@ MARKET_ZONES = {
 }
 
 MARKET_STATE_LABELS = {
-    "NONE": "未知",
+    "NONE": "未开盘/无交易",
     "MORNING": "早盘",
     "AFTERNOON": "午盘",
     "AFTERNOON_END": "午盘结束",
