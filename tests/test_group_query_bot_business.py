@@ -1004,23 +1004,76 @@ def _empty_scope_bundle(projection_outcome):
     from src.application.opend_symbol_chain_fetching import (
         OptionExpirationDiscoveryResult,
     )
-    from src.application.required_data_planning import RequiredDataFetchPlanBundle
+    from src.application.required_data_planning import (
+        OptionSideFetchPlan,
+        RequiredDataFetchPlanBundle,
+        StrikeWindowPlan,
+    )
 
+    if projection_outcome == "success_empty":
+        discovery_outcome, reason_code, expirations = (
+            "success_empty", "no_expirations", [])
+    else:
+        # A real projection_empty needs a side plan whose DTE filter removed
+        # every discovered expiration (here: one too near, one too far).
+        discovery_outcome, reason_code = "success_rows", None
+        expirations = ["2026-11-20", "2027-03-19"]
+    side_plans = [OptionSideFetchPlan(
+        option_type="put", min_dte=20, max_dte=60, explicit_expirations=[],
+        strike_window=StrikeWindowPlan(
+            min_strike=None, max_strike=None,
+            source="sell_put.no_expirations", buffer_applied=False,
+            buffer_pct=0.0, base_min_strike=None, base_max_strike=None),
+        planning_reason="no eligible expirations; spot not required",
+        spot_reference=185.0)]
     discovery = OptionExpirationDiscoveryResult(
-        outcome=("success_empty" if projection_outcome == "success_empty"
-                 else "success_rows"),
-        reason_code=None,
-        expirations=([] if projection_outcome == "success_empty"
-                     else ["2026-12-18"]),
+        outcome=discovery_outcome,
+        reason_code=reason_code,
+        expirations=expirations,
         observed_at_utc=(NOW - timedelta(seconds=3)).isoformat(),
         completed_at_utc=(NOW - timedelta(seconds=2)).isoformat(),
         request_identity={"symbol": "NVDA", "underlier": "US.NVDA",
                           "source": "opend", "host": "127.0.0.1", "port": 11111,
                           "trading_date": NOW.date().isoformat()})
     return RequiredDataFetchPlanBundle(
-        symbol="NVDA", spot_reference=185.0, side_plans=[], merged_specs=[],
-        underlier_observation=_ready_observation(), expiration_discovery=discovery,
-        projection_outcome=projection_outcome, projected_expirations=[])
+        symbol="NVDA", spot_reference=185.0, side_plans=side_plans,
+        merged_specs=[], underlier_observation=_ready_observation(),
+        expiration_discovery=discovery, projection_outcome=projection_outcome,
+        projected_expirations=[])
+
+
+def _no_feasible_strikes_bundle():
+    from src.application.opend_symbol_chain_fetching import (
+        OptionExpirationDiscoveryResult,
+    )
+    from src.application.required_data_planning import (
+        OptionSideFetchPlan,
+        RequiredDataFetchPlanBundle,
+        StrikeWindowPlan,
+    )
+
+    discovery = OptionExpirationDiscoveryResult(
+        outcome="success_rows", reason_code=None,
+        expirations=["2026-12-18"],
+        observed_at_utc=(NOW - timedelta(seconds=3)).isoformat(),
+        completed_at_utc=(NOW - timedelta(seconds=2)).isoformat(),
+        request_identity={"symbol": "NVDA", "underlier": "US.NVDA",
+                          "source": "opend", "host": "127.0.0.1", "port": 11111,
+                          "trading_date": NOW.date().isoformat()})
+    side_plan = OptionSideFetchPlan(
+        option_type="put", min_dte=20, max_dte=60, explicit_expirations=[],
+        strike_window=StrikeWindowPlan(
+            # The configured floor sits above the spot-clipped ceiling.
+            min_strike=300.0, max_strike=185.0,
+            source="sell_put.no_feasible_strikes", buffer_applied=False,
+            buffer_pct=0.0, base_min_strike=300.0, base_max_strike=185.0),
+        planning_reason="sell_put has no opening strikes at current spot",
+        spot_reference=185.0)
+    return RequiredDataFetchPlanBundle(
+        symbol="NVDA", spot_reference=185.0, side_plans=[side_plan],
+        merged_specs=[], underlier_observation=_ready_observation(),
+        expiration_discovery=discovery, projection_outcome="success_empty",
+        projected_expirations=[])
 
 
 def test_candidate_enumeration_facts_restore_plan_scope_completeness():
@@ -1040,7 +1093,9 @@ def test_candidate_enumeration_facts_restore_plan_scope_completeness():
     merged = merge_required_data_payloads(symbol="US.NVDA", payloads=[child])
     assert "expiration_statuses" not in merged["meta"]
     facts = _candidate_enumeration_meta(
-        merged, {"projected_expirations": ["2026-12-18"],
+        merged, {"expiration_discovery": {
+                     "outcome": "success_rows",
+                     "expirations": ["2026-12-18"]},
                  "expiration_discovery_complete": True})
     assert facts == {"available_expirations": ["2026-12-18"],
                      "expiration_statuses": {"2026-12-18": "fetched"},
@@ -1056,6 +1111,115 @@ def test_candidate_enumeration_facts_restore_plan_scope_completeness():
     assert "enumeration_incomplete" not in result["reason_codes"]
 
 
+def test_cross_midnight_expiration_that_was_never_fetched_stays_incomplete():
+    from om_group_query_bot.business import _candidate_enumeration_meta
+    from src.application.required_data_fetching import (
+        merge_required_data_payloads,
+    )
+
+    observation = _ready_observation().to_dict()
+    child = {
+        "symbol": "NVDA", "underlier_code": "US.NVDA", "spot": 185.0,
+        "expirations": ["2026-12-18"], "rows": [],
+        "meta": {"underlier_observation": observation,
+                 "query_scope_validated": True,
+                 "expiration_statuses": {"2026-12-18": "fetched"}},
+    }
+    merged = merge_required_data_payloads(symbol="US.NVDA", payloads=[child])
+    facts = _candidate_enumeration_meta(
+        merged, {
+            # The plan ran at 23:59 market-local: on its trading date
+            # 2027-01-09 was 61 days out (past max_dte) and was never
+            # projected or fetched.  The evaluator's scan date is one day
+            # later, when 60 days puts it inside the window.
+            "expiration_discovery": {
+                "outcome": "success_rows",
+                "expirations": ["2026-12-18", "2027-01-09"]},
+            "expiration_discovery_complete": True,
+            "projected_expirations": ["2026-12-18"],
+        })
+    assert facts["available_expirations"] == ["2026-12-18", "2027-01-09"]
+    merged["meta"].update(facts)
+    result = evaluate_public_candidates(
+        _prepare({"symbol": "US.NVDA", "strategy": "short_put", "limit": 5}),
+        merged, {}, 0, NOW)
+    assert result["outcome"] == "unable"
+    assert result["coverage"]["status"] != "complete"
+    assert "enumeration_incomplete" in result["reason_codes"]
+
+
+def test_missing_discovery_omits_the_denominator_instead_of_falling_back():
+    from om_group_query_bot.business import _candidate_enumeration_meta
+
+    # Without the discovered chain the adapter cannot attest the denominator;
+    # falling back to the plan projection would silently restore the
+    # cross-midnight false-complete this fix removed.
+    facts = _candidate_enumeration_meta(
+        {"meta": {"requests": [
+            {"expiration_statuses": {"2026-12-18": "fetched"},
+             "query_scope_validated": True}]}},
+        {"projected_expirations": ["2026-12-18"],
+         "expiration_discovery_complete": True})
+    assert "available_expirations" not in facts
+    assert facts["expiration_statuses"] == {"2026-12-18": "fetched"}
+
+
+def test_malformed_chain_expirations_are_not_injected():
+    from om_group_query_bot.business import _candidate_enumeration_meta
+
+    facts = _candidate_enumeration_meta({"meta": {}}, {
+        "expiration_discovery": {
+            "outcome": "success_rows",
+            "expirations": ["2026-12-18", "20261218", "", 5, "2026-12-18"]},
+    })
+    assert facts["available_expirations"] == ["2026-12-18"]
+
+
+def test_full_candidate_scan_restores_enumeration_facts_at_the_call_site(
+        tmp_path, monkeypatch):
+    from test_group_query_bot_api import _body, _service
+
+    service, _recorder = _service(tmp_path)
+    observation = _ready_observation().to_dict()
+    payload = {
+        "symbol": "NVDA", "underlier_code": "US.NVDA", "spot": 185.0,
+        "expirations": ["2026-12-18"],
+        # A row the short-put scope filters out: this pins that the facts are
+        # restored for a real (non-empty) scan payload, not only empty scopes.
+        "rows": [{"contract_symbol": "NVDA261218C200", "option_type": "call",
+                  "expiration": "2026-12-18", "dte": 38, "strike": 200.0}],
+        "meta": {"underlier_observation": observation,
+                 "query_scope_validated": True,
+                 "expiration_statuses": {"2026-12-18": "fetched"}},
+    }
+    plan = _fake_plan({
+        "fetch_plan": {
+            "symbol": "NVDA", "spot_reference": 185.0,
+            "underlier_observation": observation,
+            "expiration_discovery": {"outcome": "success_rows",
+                                     "expirations": ["2026-12-18"]},
+            "expiration_discovery_complete": True,
+            "projected_expirations": ["2026-12-18"],
+        },
+        "expected_fetch_contract": {},
+        "global_required_data_plan": {"plan_id": "p"},
+    })
+    monkeypatch.setattr(service.business, "_fetch",
+                        lambda **kwargs: ([payload], plan))
+    service.business.dependencies = Dependencies(
+        fetch_symbol=service.business.dependencies.fetch_symbol,
+        exchange_rates=lambda settings, now, budget: {})
+    envelope, status = service.handle(
+        "query_candidates",
+        _body({"symbol": "US.NVDA", "strategy": "short_put", "limit": 5}))
+    assert status == 200
+    data = envelope["data"]
+    assert data["coverage"]["status"] == "complete"
+    assert data["coverage"]["enumeration_complete"] is True
+    assert data["outcome"] == "none"
+    assert "enumeration_incomplete" not in data["reason_codes"]
+
+
 def test_conflicting_child_expiration_statuses_keep_enumeration_incomplete():
     from om_group_query_bot.business import _candidate_enumeration_meta
 
@@ -1066,7 +1230,9 @@ def test_conflicting_child_expiration_statuses_keep_enumeration_incomplete():
          "query_scope_validated": True},
     ]}}
     facts = _candidate_enumeration_meta(
-        merged, {"projected_expirations": ["2026-12-18"],
+        merged, {"expiration_discovery": {
+                     "outcome": "success_rows",
+                     "expirations": ["2026-12-18"]},
                  "expiration_discovery_complete": True})
     assert "expiration_statuses" not in facts
     assert facts["available_expirations"] == ["2026-12-18"]
@@ -1097,6 +1263,29 @@ def test_proven_empty_candidate_scope_returns_none(
     assert recorder.calls == []
 
 
+def test_plan_proven_no_feasible_strikes_stays_none(tmp_path, monkeypatch):
+    from test_group_query_bot_api import _body, _service
+    import om_group_query_bot.business as business
+
+    service, recorder = _service(tmp_path)
+    monkeypatch.setattr(business, "build_required_data_fetch_plan",
+                        lambda **kwargs: _no_feasible_strikes_bundle())
+    service.business.dependencies = Dependencies(
+        fetch_symbol=recorder.fetch_symbol,
+        exchange_rates=lambda *args, **kwargs: {"USDCNY": {"rate": 7.1}})
+    envelope, status = service.handle(
+        "query_candidates",
+        _body({"symbol": "US.NVDA", "strategy": "short_put", "limit": 5}))
+    assert status == 200
+    data = envelope["data"]
+    # The core classifier proves this empty answer from the strike window, not
+    # from per-expiration fetch statuses, so it must not degrade to unable.
+    assert data["outcome"] == "none"
+    assert data["coverage"]["status"] == "complete"
+    assert "enumeration_incomplete" not in data["reason_codes"]
+    assert recorder.calls == []
+
+
 def test_empty_scope_with_incomplete_discovery_stays_unable(tmp_path, monkeypatch):
     from dataclasses import replace
     from test_group_query_bot_api import _body, _service
@@ -1118,6 +1307,37 @@ def test_empty_scope_with_incomplete_discovery_stays_unable(tmp_path, monkeypatc
     assert data["outcome"] == "unable"
     assert data["coverage"]["enumeration_complete"] is False
     assert "enumeration_incomplete" in data["reason_codes"]
+
+
+def test_empty_scope_with_an_in_window_chain_stays_unable(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from test_group_query_bot_api import _body, _service
+    import om_group_query_bot.business as business
+
+    service, recorder = _service(tmp_path)
+    bundle = _empty_scope_bundle("success_empty")
+    # The plan answered "empty", but the discovered chain has an in-window
+    # expiration nobody fetched (e.g. a strike-clipped window): none of this
+    # scope's expirations were looked at, so the answer is unable, not none.
+    bundle = replace(
+        bundle,
+        expiration_discovery=replace(
+            bundle.expiration_discovery, outcome="success_rows",
+            reason_code=None, expirations=["2026-12-18"]))
+    monkeypatch.setattr(business, "build_required_data_fetch_plan",
+                        lambda **kwargs: bundle)
+    service.business.dependencies = Dependencies(
+        fetch_symbol=recorder.fetch_symbol,
+        exchange_rates=lambda *args, **kwargs: {"USDCNY": {"rate": 7.1}})
+    envelope, status = service.handle(
+        "query_candidates",
+        _body({"symbol": "US.NVDA", "strategy": "short_put", "limit": 5}))
+    assert status == 200
+    data = envelope["data"]
+    assert data["outcome"] == "unable"
+    assert data["coverage"]["enumeration_complete"] is False
+    assert "enumeration_incomplete" in data["reason_codes"]
+    assert recorder.calls == []
 
 
 def test_failed_candidate_projection_still_fails_closed(tmp_path, monkeypatch):
