@@ -636,7 +636,10 @@ class InboundOperationStore:
             ).fetchone()
         return _row_to_outbox(row)
 
-    def complete_outbox(self, outbox_id: str, *, receipt: dict[str, Any]) -> dict[str, Any] | None:
+    def complete_outbox(
+        self, outbox_id: str, *, claim_attempts: int, receipt: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Settle one claimed generation and its operation receipt atomically."""
         self._ensure_schema()
         now = utc_now_iso()
         delivery_status = "sent" if bool(receipt.get("ok")) else "failed"
@@ -648,7 +651,7 @@ class InboundOperationStore:
             outbox = _row_to_outbox(row)
             if outbox is None:
                 return None
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE inbound_operation_outbox
                 SET status = ?,
@@ -656,6 +659,8 @@ class InboundOperationStore:
                     updated_at = ?,
                     sent_at = CASE WHEN ? = 'sent' THEN ? ELSE sent_at END
                 WHERE outbox_id = ?
+                  AND status = 'sending'
+                  AND attempts = ?
                 """,
                 (
                     delivery_status,
@@ -664,8 +669,11 @@ class InboundOperationStore:
                     delivery_status,
                     now,
                     str(outbox_id),
+                    claim_attempts,
                 ),
             )
+            if cursor.rowcount != 1:
+                return None
             operation_row = conn.execute(
                 "SELECT result_json FROM inbound_pending_operations WHERE operation_id = ? LIMIT 1",
                 (str(outbox["operation_id"]),),
