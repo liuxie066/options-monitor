@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import plistlib
+import shutil
 import subprocess
 import sys
 import sysconfig
@@ -250,6 +251,15 @@ def test_real_git_daily_scope_weekly_cursor_isolation_and_failed_retry(tmp_path,
     state.mkdir()
     baseline = put(tmp_path, "policy.md", "fixture baseline version 1")
     review.initialize(state, "fixture/repo", str(origin), baseline)
+    scratches = []
+    real_space_free = review.space_free_temporary_directory
+
+    def record_scratch():
+        scratch = real_space_free()
+        scratches.append(Path(scratch.name))
+        return scratch
+
+    monkeypatch.setattr(review, "space_free_temporary_directory", record_scratch)
     monkeypatch.setattr(review, "tool_runs", lambda source, selected, execute: ({"builtin": {"available": True}}, [], {}))
     with review.run_lock(state):
         initial = review.run_scan(state, "daily", timeout_seconds=30)
@@ -289,7 +299,7 @@ def test_real_git_daily_scope_weekly_cursor_isolation_and_failed_retry(tmp_path,
     assert failed["status"] == "failed" and failed["metrics"] is None
     assert (state / "daily-cursor.json").read_bytes() == cursor
     assert len((state / "scorecards.jsonl").read_text().splitlines()) == 5
-    assert not list((state / "runs").glob("*/source-*"))
+    assert scratches and not any(path.exists() for path in scratches)
 
 
 def test_coverage_manifest_binds_source_workload_and_file_digest(tmp_path):
@@ -305,6 +315,19 @@ def test_coverage_manifest_binds_source_workload_and_file_digest(tmp_path):
         path.write_text(json.dumps({**manifest, **change}))
         with pytest.raises(ValueError):
             review.coverage_evidence(path, "a" * 40)
+
+
+def test_coverage_entries_relativizes_absolute_workload_paths(tmp_path):
+    entry = {"executed_lines": [1], "missing_lines": [], "missing_branches": []}
+    evidence = {"meta": {"branch_coverage": True}, "files": {
+        str((tmp_path / "src/a.py").resolve()): entry,
+        "plugins/x/src/pkg/b.py": entry}}
+    entries = review.coverage_entries(evidence, source_root=tmp_path)
+    assert set(entries) == {"src/a.py", "plugins/x/src/pkg/b.py"}
+    outside = {"meta": {"branch_coverage": True},
+               "files": {str((tmp_path / "other/b.py").resolve()): entry}}
+    with pytest.raises(ValueError, match="subpath"):
+        review.coverage_entries(outside, source_root=tmp_path / "src")
 
 
 def test_uncovered_branch_is_not_reported_as_unreachable(tmp_path):
@@ -757,6 +780,102 @@ def test_self_coverage_skips_a_snapshot_without_its_own_workload(tmp_path):
     assert "workload" in record["reason"]
 
 
+def test_self_coverage_runs_in_a_git_worktree_of_the_scanned_sha(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    (source / "tests").mkdir(parents=True)
+    put(source, "src/example.py", "value = 1\n")
+    put(source, "requirements/dev.txt", "")
+    put(source, "constraints/dev.txt", "")
+    repository = tmp_path / "mirror.git"
+    repository.mkdir()
+    output = tmp_path / "run"
+    output.mkdir()
+    workload = tmp_path / "scratch" / "coverage-source"
+    commands = []
+    removed = []
+
+    def execute(argv, cwd=None, **options):
+        commands.append((argv, cwd))
+        if "worktree" in argv and "add" in argv:
+            shutil.copytree(source, Path(argv[-2]))
+        if "json" in argv:
+            (output / "coverage-self.json").write_text(json.dumps({
+                "meta": {"branch_coverage": True},
+                "files": {str(workload / "src/example.py"):
+                          {"executed_lines": [1], "missing_lines": [], "missing_branches": []}}}))
+        return {"exit_code": 0, "text": ""}
+
+    monkeypatch.setattr(review, "remove_worktree",
+                        lambda repo, checkout: removed.append((repo, checkout)))
+    entries, record = review.self_coverage(source, output, execute, scratch=tmp_path / "scratch",
+                                           repository=repository, sha="a" * 40,
+                                           time_left=lambda: 1000)
+    assert record["status"] == "complete" and entries["src/example.py"]["executed_lines"] == [1]
+    add = next(argv for argv, _ in commands if "worktree" in argv and "add" in argv)
+    assert add[:4] == ["git", "-C", str(repository), "worktree"]
+    assert add[4:6] == ["add", "--detach"]
+    assert add[-2:] == [str(workload), "a" * 40]
+    assert next(cwd for argv, cwd in commands if "pip" in argv) == workload
+    assert next(cwd for argv, cwd in commands if "pytest" in argv) == workload
+    assert next(cwd for argv, cwd in commands if "combine" in argv) == workload
+    assert next(cwd for argv, cwd in commands if "json" in argv) == workload
+    assert removed == [(repository, workload)]
+
+
+def test_self_coverage_checkout_failure_degrades_with_explicit_reason(tmp_path):
+    source = tmp_path / "source"
+    (source / "tests").mkdir(parents=True)
+    (source / "src").mkdir()
+    put(source, "requirements/dev.txt", "")
+    put(source, "constraints/dev.txt", "")
+    repository = tmp_path / "mirror.git"
+    repository.mkdir()
+    output = tmp_path / "run"
+    output.mkdir()
+    commands = []
+
+    def execute(argv, cwd=None, **options):
+        commands.append(argv)
+        return {"exit_code": 1 if "worktree" in argv and "add" in argv else 0, "text": ""}
+
+    entries, record = review.self_coverage(source, output, execute, scratch=tmp_path / "scratch",
+                                           repository=repository, sha="b" * 40,
+                                           time_left=lambda: 1000)
+    assert entries is None and record["status"] == "failed"
+    assert "checkout" in record["reason"]
+    assert not any("pytest" in argv for argv in commands)
+
+
+def test_remove_worktree_removes_checkout_and_prunes_missing_paths(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-b", "main")
+    put(repo, "src/a.py", "value = 1\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "fixture")
+    checkout = tmp_path / "checkout"
+    git(repo, "worktree", "add", "--detach", str(checkout), "HEAD")
+    review.remove_worktree(repo, checkout)
+    assert not checkout.exists()
+    listed = git(repo, "worktree", "list", "--porcelain")
+    assert listed.count("worktree ") == 1
+    missing = tmp_path / "missing"
+    git(repo, "worktree", "add", "--detach", str(missing), "HEAD")
+    shutil.rmtree(missing)
+    review.remove_worktree(repo, missing)
+    assert git(repo, "worktree", "list", "--porcelain").count("worktree ") == 1
+
+
+def test_space_free_temporary_directory_avoids_spaced_temp_roots(tmp_path, monkeypatch):
+    spaced = tmp_path / "space dir"
+    spaced.mkdir()
+    monkeypatch.setattr(review.tempfile, "gettempdir", lambda: str(spaced))
+    with review.space_free_temporary_directory() as scratch:
+        assert " " not in str(scratch) and Path(scratch).is_dir()
+        assert str(Path(scratch).resolve()) == str(scratch)
+    assert not Path(scratch).exists()
+
+
 def test_real_weekly_scan_uses_installed_vulture_and_radon(tmp_path):
     origin = tmp_path / "origin"
     origin.mkdir()
@@ -783,6 +902,36 @@ def test_real_weekly_scan_uses_installed_vulture_and_radon(tmp_path):
     assert result["metrics"]["dead_code_candidates"] == 1
     assert not any(gap.startswith(("vulture is not installed", "radon is not installed"))
                    for gap in result["gaps"])
+
+
+def test_weekly_self_coverage_uses_space_free_scratch_mirror_and_sha(tmp_path, monkeypatch):
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    git(origin, "init", "-b", "main")
+    put(origin, "src/example.py", "def run(flag):\n    if flag:\n        return 1\n    return 2\n")
+    git(origin, "add", ".")
+    git(origin, "commit", "-m", "fixture self coverage")
+    state = tmp_path / "space dir" / "code-entropy-review"
+    state.mkdir(parents=True)
+    baseline = put(tmp_path, "policy.md", "fixture baseline version 1")
+    review.initialize(state, "fixture/repo", str(origin), baseline)
+    calls = []
+
+    def fake_self_coverage(source, output, execute, *, scratch, time_left, repository=None, sha=None):
+        calls.append({"source": source, "scratch": Path(scratch), "repository": repository, "sha": sha})
+        return None, {"source": "self-run", "status": "failed", "reason": "fixture workload"}
+
+    monkeypatch.setattr(review, "self_coverage", fake_self_coverage)
+    monkeypatch.setattr(review, "tool_runs",
+                        lambda source, selected, execute: ({"coverage": {"available": True}}, [], {}))
+    with review.run_lock(state):
+        result = review.run_scan(state, "weekly", timeout_seconds=60)
+    assert result["status"] == "complete"
+    assert len(calls) == 1
+    call = calls[0]
+    assert " " not in str(call["scratch"]) and not call["scratch"].exists()
+    assert call["repository"] == state / "mirror.git"
+    assert call["sha"] == result["main_sha"]
 
 
 def test_weekly_scan_fills_coverage_metrics_from_external_manifest(tmp_path):
