@@ -793,6 +793,31 @@ def test_agent_no_output_stops_review_without_quarantining_the_commit(tmp_path, 
     assert saved["review_needs_human"] == {}
 
 
+def test_incomplete_unit_keeps_its_verification_gaps_and_continues(tmp_path, monkeypatch):
+    state = {"cursor": A, "last_review": "history"}
+    plan = _unit_plan([B, C])
+    calls = []
+
+    def invoke(cfg, stage, prompt):
+        sha = json.loads((stage / "plan.json").read_text())["commits"][0]["sha"]
+        calls.append(sha)
+        if sha == B:
+            return {**result([], "partial"), "verification_gaps": ["incomplete-unit gap"]}
+        return result([C])
+
+    monkeypatch.setattr(review, "invoke_agent", invoke)
+    monkeypatch.setattr(review.time, "monotonic", lambda: 0)
+    run = _unit_run(tmp_path, "run")
+    receipt = {}
+    review.review_commits(tmp_path, {"timeout_seconds": 1800, "max_units": 10},
+                          run, plan, state, receipt, 1800)
+    assert calls == [B, C]
+    aggregate = json.loads((run / "result.json").read_text())
+    assert "incomplete-unit gap" in aggregate["verification_gaps"]
+    assert receipt["completed_commits"] == [C]
+    assert json.loads((tmp_path / "state.json").read_text())["cursor"] == A
+
+
 def test_concurrent_runs_cannot_share_cursor_lock(tmp_path):
     with run_lock(tmp_path):
         with pytest.raises(RuntimeError, match="another daily"):

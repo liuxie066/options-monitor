@@ -490,6 +490,15 @@ def review_commits(
             write_json(root / "state.json", state)
         return result
 
+    def collected(shard: Path, result: dict) -> None:
+        # Incomplete units still own the findings they did confirm; keep their evidence and
+        # remove their keys from later prompts in this run.
+        for finding in result["confirmed_findings"]:
+            known_keys.add(finding["key"])
+            evidence = (shard / "work" / finding["evidence_log"]).relative_to(run / "work")
+            findings.append({**finding, "evidence_log": evidence.as_posix()})
+        gaps.extend(result["verification_gaps"])
+
     for index, unit in enumerate(plan["commits"], 1):
         sha = unit["sha"]
         shard = run / "work" / "shards" / f"{index:03d}-{sha}"
@@ -554,6 +563,7 @@ def review_commits(
                 write_json(shard / "receipt.json", unit_receipt)
                 if result["outcome"] == "blocked":
                     blocked = True
+                collected(shard, result)
                 checkpoint()
                 continue
             reviewed_now.append(sha)
@@ -586,11 +596,7 @@ def review_commits(
             unit_receipt.update({"status": "failed", "error": f"{type(exc).__name__}: {exc}", "finished_at": now()})
             write_json(shard / "receipt.json", unit_receipt)
             raise
-        for finding in result["confirmed_findings"]:
-            known_keys.add(finding["key"])
-            evidence = (shard / "work" / finding["evidence_log"]).relative_to(run / "work")
-            findings.append({**finding, "evidence_log": evidence.as_posix()})
-        gaps.extend(result["verification_gaps"])
+        collected(shard, result)
         reports.append(f"## 提交 `{sha}`\n\n" + result["report_markdown"]
                        + ("\n\n已关联原问题、未新增 finding：" + ", ".join(duplicates) if duplicates else ""))
         checkpoint()
