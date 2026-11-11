@@ -736,6 +736,48 @@ def test_real_weekly_scan_uses_installed_vulture_and_radon(tmp_path):
                    for gap in result["gaps"])
 
 
+def test_weekly_scan_fills_coverage_metrics_from_external_manifest(tmp_path):
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    git(origin, "init", "-b", "main")
+    put(origin, "src/example.py",
+        "def run(flag):\n    if flag:\n        return 1\n    return 2\n\n\ndef _unused():\n    return 3\n")
+    git(origin, "add", ".")
+    git(origin, "commit", "-m", "fixture coverage")
+    state = tmp_path / "code-entropy-review"
+    state.mkdir()
+    baseline = put(tmp_path, "policy.md", "fixture baseline version 1")
+    review.initialize(state, "fixture/repo", str(origin), baseline)
+    sha = git(origin, "rev-parse", "HEAD")
+    evidence = put(tmp_path, "coverage.json", json.dumps({
+        "meta": {"branch_coverage": True},
+        "files": {"src/example.py": {
+            "executed_lines": [1, 2, 3],
+            "missing_lines": [4, 7, 8],
+            "missing_branches": [[2, 4]],
+        }},
+    }))
+    manifest = put(tmp_path, "manifest.json", json.dumps({
+        "main_sha": sha,
+        "exit_code": 0,
+        "command": ["python", "-m", "pytest"],
+        "coverage_json": str(evidence),
+        "coverage_sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
+    }))
+
+    with review.run_lock(state):
+        result = review.run_scan(state, "weekly", timeout_seconds=60,
+                                 coverage_manifest=str(manifest))
+
+    assert result["status"] == "complete"
+    assert result["metrics"]["untested_branches"] == 1
+    assert result["metrics"]["dead_code_symbols"] == 1
+    assert result["metrics"]["dead_code_candidates"] == 1
+    assert result["tools"]["coverage"]["execution"] == "external SHA-bound coverage manifest"
+    assert not any("not installed" in gap for gap in result["gaps"])
+    assert (state / "runs" / result["run_id"] / "coverage-evidence.json").is_file()
+
+
 def test_missing_tools_degrade_with_explicit_gaps(tmp_path, monkeypatch):
     origin = tmp_path / "origin"
     origin.mkdir()
